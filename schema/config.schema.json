@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ashlr.ai/schema/config.schema.json",
+  "title": "AshlrConfig",
+  "description": "Persisted configuration for ashlr-hub (~/.ashlr/config.json).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "roots",
+    "editor",
+    "staleDays",
+    "categories",
+    "tidyRules",
+    "keepers",
+    "models",
+    "telemetry",
+    "tools"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Config schema version for forward migration."
+    },
+    "roots": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Absolute roots to scan."
+    },
+    "editor": {
+      "type": "string",
+      "enum": ["cursor", "vscode"],
+      "description": "Preferred editor for deep links."
+    },
+    "staleDays": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Days without modification before an item is considered inactive."
+    },
+    "categories": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Map of category name -> absolute folder path."
+    },
+    "tidyRules": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/TidyRule" },
+      "description": "Ordered tidy rules for loose top-level files."
+    },
+    "keepers": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Absolute paths or basenames that must never be moved/tidied."
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lmstudio", "ollama", "providerChain"],
+      "properties": {
+        "lmstudio": { "type": "string" },
+        "ollama": { "type": "string" },
+        "providerChain": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pulse": { "type": "string" }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Map of integration name -> resolved executable path."
+    }
+  },
+  "definitions": {
+    "TidyRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["match", "matchType", "dest"],
+      "properties": {
+        "match": { "type": "string" },
+        "matchType": {
+          "type": "string",
+          "enum": ["glob", "regex", "ext"]
+        },
+        "dest": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    }
+  }
+}

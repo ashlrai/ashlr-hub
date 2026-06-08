@@ -1,0 +1,6 @@
+{
+  "name": "fixture-pkg",
+  "version": "1.0.0",
+  "description": "A fixture package description",
+  "main": "index.js"
+}

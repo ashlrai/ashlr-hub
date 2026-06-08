@@ -1,0 +1,68 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "ashlr",
+  "title": "Ashlr",
+  "description": "Command center for everything on Mason's Desktop — search repos, docs, assets, and manage your workspace.",
+  "icon": "command-icon.png",
+  "author": "masonwyatt",
+  "categories": ["Developer Tools"],
+  "license": "MIT",
+  "preferences": [
+    {
+      "name": "editor",
+      "title": "Default Editor",
+      "description": "Editor to open repos and files in. Shared by all Ashlr commands.",
+      "type": "dropdown",
+      "required": false,
+      "default": "cursor",
+      "data": [
+        { "title": "Cursor", "value": "cursor" },
+        { "title": "VS Code", "value": "vscode" }
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "name": "search-everything",
+      "title": "Search Everything",
+      "subtitle": "Ashlr",
+      "description": "Fuzzy-search every indexed repo, doc, and asset on the Desktop.",
+      "mode": "view"
+    },
+    {
+      "name": "attention-board",
+      "title": "Attention Board",
+      "subtitle": "Ashlr",
+      "description": "Surface active repos with dirty git status, recent activity, and stale items needing attention.",
+      "mode": "view"
+    },
+    {
+      "name": "ceo-dashboard",
+      "title": "CEO Dashboard",
+      "subtitle": "Ashlr",
+      "description": "High-level overview of all projects by category, org, and activity.",
+      "mode": "view"
+    },
+    {
+      "name": "tidy-desktop",
+      "title": "Tidy Desktop",
+      "subtitle": "Ashlr",
+      "description": "Preview and apply tidy rules to organise loose files on the Desktop.",
+      "mode": "view"
+    }
+  ],
+  "scripts": {
+    "build": "ray build -e dist",
+    "dev": "ray develop",
+    "lint": "ray lint"
+  },
+  "dependencies": {
+    "@raycast/api": "^1.70.0",
+    "@raycast/utils": "^1.16.0"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^1.0.8",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

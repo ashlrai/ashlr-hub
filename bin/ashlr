@@ -1,0 +1,8 @@
+#!/usr/bin/env node
+// Thin shim: delegate to the compiled CLI entrypoint.
+// Resolve relative to this file so the symlink in ~/.local/bin works.
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+
+const here = dirname(fileURLToPath(import.meta.url));
+import(resolve(here, '../dist/cli/index.js'));
