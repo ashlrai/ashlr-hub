@@ -10,6 +10,8 @@
  *   open [query]               Open best match in editor; no query → picker.
  *   tidy [--apply] [--json]    Plan (dry-run) or apply tidy moves; --json emits machine output.
  *   config [get|set|path]      Read/write config values.
+ *   doctor                     One-glance health check (config, phantom, providers).
+ *   init [--yes]               Idempotent onboarding; NON-TTY safe with --yes.
  *   help                       Show this help.
  *
  * Exit codes: 0 success, 1 error/not-found, 2 bad usage.
@@ -20,6 +22,7 @@ import { buildIndex, loadIndex, writeIndex } from '../core/index-engine.js';
 import { planTidy, applyTidy } from '../core/tidy.js';
 import { openInEditor } from './open.js';
 import { pick } from './picker.js';
+import { cmdDoctor, cmdInit } from './doctor-init.js';
 import type { AshlrConfig, AshlrIndex, IndexedItem, GitStatus } from '../core/types.js';
 
 // ─── ANSI helpers ──────────────────────────────────────────────────────────────
@@ -136,6 +139,17 @@ function getConfigValue(cfg: AshlrConfig, key: string): unknown {
     val = (val as Record<string, unknown>)[part];
   }
   return val;
+}
+
+/**
+ * True when a config dot-path leaf looks sensitive (token/key/secret/etc).
+ * Used to redact values in `config get`/`config set` output so a manually
+ * stashed credential never lands in terminal scrollback or shell history.
+ */
+const SENSITIVE_KEY_RE = /token|key|secret|password|passwd|auth|credential|api[_-]?key/i;
+function isSensitiveKey(key: string): boolean {
+  const leaf = key.split('.').pop() ?? key;
+  return SENSITIVE_KEY_RE.test(leaf);
 }
 
 /** Set a nested config value by dot-path key (mutates cfg). */
@@ -528,36 +542,92 @@ function cmdConfig(args: string[]): void {
     if (val === undefined) {
       die(`Key "${key}" not found in config.`);
     }
-    console.log(typeof val === 'object' ? JSON.stringify(val, null, 2) : String(val));
+    if (isSensitiveKey(key)) {
+      console.log('<redacted>');
+    } else {
+      console.log(typeof val === 'object' ? JSON.stringify(val, null, 2) : String(val));
+    }
     return;
   }
 
   if (subCmd === 'set') {
-    const key   = args[1];
-    const value = args[2];
-    if (!key || value === undefined) die('Usage: ashlr config set <key> <value>', 2);
-    // Guard: refuse to clobber structured config (arrays / objects) with a
-    // scalar. `config set keepers foo` would otherwise destroy the tidy
-    // protections. Editing these requires hand-editing config.json.
+    const key         = args[1];
+    // --json flag: the token immediately after --json is the JSON value
+    const jsonFlagIdx = args.indexOf('--json');
+    const hasJsonFlag = jsonFlagIdx !== -1;
+    const jsonValue   = hasJsonFlag ? args[jsonFlagIdx + 1] : undefined;
+    // Plain scalar value: args[2] when --json is not present
+    const rawValue    = hasJsonFlag ? undefined : args[2];
+
+    if (!key) die('Usage: ashlr config set <key> <value>', 2);
+
     const topKey = key.split('.')[0];
+    // Keys that must never be overwritten with a coerced scalar string.
     const STRUCTURED_KEYS = new Set([
-      'keepers', 'tidyRules', 'roots', 'categories', 'models', 'telemetry', 'tools',
+      'keepers', 'tidyRules', 'roots', 'categories', 'models', 'telemetry', 'tools', 'phantom',
     ]);
-    const existing = getConfigValue(cfg, key);
-    if (
-      STRUCTURED_KEYS.has(topKey) &&
-      (Array.isArray(existing) || (existing !== null && typeof existing === 'object'))
-    ) {
-      die(
-        `Refusing to overwrite structured key "${key}" with a scalar — this ` +
-        `would corrupt safety-critical config (e.g. tidy keepers).\n` +
-        `Edit ${CONFIG_PATH} directly to change arrays/objects.`,
-        2,
-      );
+    const existing    = getConfigValue(cfg, key);
+    const isStructured =
+      Array.isArray(existing) || (existing !== null && typeof existing === 'object');
+
+    if (STRUCTURED_KEYS.has(topKey) && isStructured) {
+      // Structured path — require --json with a value
+      if (!hasJsonFlag || jsonValue === undefined) {
+        die(
+          `Key "${key}" holds a structured value (array/object) and cannot be ` +
+          `set with a plain scalar.\n` +
+          `Use --json to set it:\n` +
+          `  ashlr config set ${key} --json '${JSON.stringify(existing)}'`,
+          2,
+        );
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(jsonValue);
+      } catch {
+        die(`Invalid JSON for "${key}": ${jsonValue}`, 2);
+      }
+      // Walk to the parent object and set the leaf key
+      const parts = key.split('.');
+      let obj: Record<string, unknown> = cfg as unknown as Record<string, unknown>;
+      for (let i = 0; i < parts.length - 1; i++) {
+        const next = obj[parts[i]];
+        if (next === null || typeof next !== 'object') obj[parts[i]] = {};
+        obj = obj[parts[i]] as Record<string, unknown>;
+      }
+      obj[parts[parts.length - 1]] = parsed;
+      saveConfig(cfg);
+      const shown = isSensitiveKey(key) ? '<redacted>' : JSON.stringify(parsed);
+      console.log(`${green('set')} ${key} = ${shown}`);
+      return;
     }
-    setConfigValue(cfg, key, value);
+
+    // Scalar path: --json is allowed but not required
+    if (hasJsonFlag && jsonValue !== undefined) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(jsonValue);
+      } catch {
+        die(`Invalid JSON for "${key}": ${jsonValue}`, 2);
+      }
+      const parts = key.split('.');
+      let obj: Record<string, unknown> = cfg as unknown as Record<string, unknown>;
+      for (let i = 0; i < parts.length - 1; i++) {
+        const next = obj[parts[i]];
+        if (next === null || typeof next !== 'object') obj[parts[i]] = {};
+        obj = obj[parts[i]] as Record<string, unknown>;
+      }
+      obj[parts[parts.length - 1]] = parsed;
+      saveConfig(cfg);
+      const shown = isSensitiveKey(key) ? '<redacted>' : JSON.stringify(parsed);
+      console.log(`${green('set')} ${key} = ${shown}`);
+      return;
+    }
+    if (rawValue === undefined) die(`Usage: ashlr config set <key> <value>`, 2);
+    setConfigValue(cfg, key, rawValue);
     saveConfig(cfg);
-    console.log(`${green('set')} ${key} = ${value}`);
+    const shown = isSensitiveKey(key) ? '<redacted>' : rawValue;
+    console.log(`${green('set')} ${key} = ${shown}`);
     return;
   }
 
@@ -591,7 +661,10 @@ function cmdHelp(): void {
     ['open [query]',                 'Open the best match in your editor; no query opens an interactive picker.'],
     ['tidy [--apply]',               'Show (or apply) tidy moves for loose Desktop files.'],
     ['config [get <k>|set <k> <v>]', 'Read/write a config value. No args prints a summary.'],
+    ['config set <k> --json <v>',    'Set a structured (array/object) config value as JSON.'],
     ['config path',                  'Print the path to config.json.'],
+    ['doctor',                       'One-glance health check: config, phantom, local model providers.'],
+    ['init [--yes]',                 'Idempotent onboarding: ensure config, detect phantom + models, set editor.'],
     ['help',                         'Show this help.'],
   ];
 
@@ -642,6 +715,14 @@ async function main(): Promise<void> {
 
       case 'config':
         cmdConfig(rest);
+        break;
+
+      case 'doctor':
+        process.exitCode = await cmdDoctor(rest);
+        break;
+
+      case 'init':
+        process.exitCode = await cmdInit(rest);
         break;
 
       case 'help':

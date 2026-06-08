@@ -215,6 +215,93 @@ export function openInFinder(path: string): void;
 
 ---
 
+## M2 — identity & model awareness (NEW)
+
+M2 turns `~/.ashlr/config.json` into the unified source of truth and adds Phantom
+identity + local-model awareness. **Hard rules for every M2 build agent:**
+
+- Zero runtime deps — Node builtins only (`node:child_process`, global `fetch`, `node:fs`, ...).
+- **Probes NEVER throw.** Return a typed result with `up:false` / `error` on any failure.
+- **Phantom is READ-ONLY and NEVER prints secret VALUES** — names/status only.
+- doctor/providers MUST tolerate every endpoint being up OR down without crashing.
+- `init` MUST be NON-TTY safe (no hang when piped / no stdin).
+- Verify `phantom` subcommand flags at runtime via `phantom --help`; degrade gracefully.
+
+### types.ts additions (already in THE CONTRACT)
+
+```ts
+export interface ProviderEndpoint { id: 'lmstudio' | 'ollama' | string; url: string; up: boolean; models: string[]; error?: string }
+export interface ProviderRegistry { providers: ProviderEndpoint[]; activeProvider: string | null; chain: string[] }
+export interface PhantomStatus { installed: boolean; version: string | null; initialized: boolean; secretNames: string[]; error?: string }
+export type DoctorCheckStatus = 'pass' | 'warn' | 'fail';
+export interface DoctorCheck { id: string; label: string; status: DoctorCheckStatus; detail: string; fix?: string }
+export interface DoctorReport { generatedAt: string; checks: DoctorCheck[]; summary: { pass: number; warn: number; fail: number } }
+// AshlrConfig also gains: phantom?: { enabled: boolean }   (models unchanged)
+```
+
+### src/core/providers.ts — local-model/provider registry + failover (to implement)
+
+Responsibility: probe local-model endpoints (LM Studio, Ollama), build a registry, resolve the
+active provider via the configured chain. Pure probes; never throw.
+
+```ts
+export async function probeEndpoint(id: string, url: string): Promise<ProviderEndpoint>;
+// fetch `url` (LM Studio: GET http://localhost:1234/v1/models -> data[].id;
+// Ollama: GET http://localhost:11434/api/tags -> models[].name). On any error/timeout:
+// { id, url, up:false, models:[], error }. On success: up:true with parsed model names.
+
+export async function getProviderRegistry(cfg: AshlrConfig): Promise<ProviderRegistry>;
+// Probe each provider implied by cfg.models (lmstudio/ollama) in cfg.models.providerChain order;
+// chain = cfg.models.providerChain; activeProvider = first probed provider that is up, else null.
+
+export async function resolveActiveProvider(cfg: AshlrConfig): Promise<string | null>;
+// Convenience: id of the first up provider in chain order, or null when none are reachable.
+```
+
+Imports: global `fetch`, `./types.js`.
+
+### src/core/phantom.ts — Phantom secrets identity layer (to implement)
+
+Responsibility: read-only introspection of the `phantom` CLI. NAMES/STATUS ONLY — never values.
+
+```ts
+export function phantomInstalled(): boolean;
+// True if `phantom` binary resolves on PATH (e.g. spawnSync('phantom','--version') or 'which phantom').
+
+export function getPhantomStatus(): PhantomStatus;
+// SYNC. spawn phantom (spawnSync) read-only: version (`phantom --version`),
+// initialized + secret NAMES (`phantom status` / `phantom list`; verify flags via `phantom --help`).
+// NEVER capture or return secret values. On any failure: degrade gracefully with error set.
+```
+
+Imports: `node:child_process` (spawnSync), `./types.js`.
+
+### src/core/doctor.ts — one-glance health check (to implement)
+
+Responsibility: aggregate config, phantom, and provider health into a single DoctorReport.
+
+```ts
+export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport>;
+// Run checks (config present/valid, editor resolvable, phantom status, each provider endpoint,
+// activeProvider resolvable, index freshness). Build DoctorCheck[] with pass/warn/fail + fix hints.
+// generatedAt = new Date().toISOString(); summary = roll-up counts. Never throws.
+```
+
+Imports: `node:fs`, `./types.js`, `./config.js`, `./phantom.js`, `./providers.js`.
+
+### src/cli/index.ts — NEW commands (extend existing dispatch)
+
+Add to the argv dispatch (do not remove existing commands):
+
+| command  | flags    | behavior |
+| -------- | -------- | -------- |
+| `doctor` |          | `runDoctor(loadConfig())` -> print checks + summary; exit non-zero if any `fail`. |
+| `init`   | `--yes`  | idempotent onboarding: ensure config, detect+offer phantom + local models, set editor, `saveConfig`. **NON-TTY safe** — when stdin is not a TTY (or `--yes`), accept defaults and never prompt/hang. |
+
+Imports (added): `../core/doctor.js`, `../core/phantom.js`, `../core/providers.js`.
+
+---
+
 ## Build / run
 
 - `npm run build` → tsc → `dist/`

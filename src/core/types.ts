@@ -46,6 +46,77 @@ export interface AshlrConfig {
   };
   /** Map of integration name -> resolved executable path (entire, aw, claude, ...). */
   tools: Record<string, string>;
+  /** Optional Phantom secrets integration toggle. */
+  phantom?: { enabled: boolean };
+}
+
+// ---------------------------------------------------------------------------
+// M2: identity & model awareness contract
+// ---------------------------------------------------------------------------
+
+/** Result of probing a single local-model/provider endpoint. Never throws. */
+export interface ProviderEndpoint {
+  /** Stable provider id ('lmstudio' | 'ollama' | custom). */
+  id: 'lmstudio' | 'ollama' | string;
+  /** Base/probe URL that was queried. */
+  url: string;
+  /** Whether the endpoint responded successfully. */
+  up: boolean;
+  /** Model ids/names reported by the endpoint (empty when down). */
+  models: string[];
+  /** Probe error message when `up` is false, else absent. */
+  error?: string;
+}
+
+/** Aggregated view of all configured providers + the resolved active one. */
+export interface ProviderRegistry {
+  /** All probed endpoints, in chain order where possible. */
+  providers: ProviderEndpoint[];
+  /** Id of the first up provider in the chain, or null if none are up. */
+  activeProvider: string | null;
+  /** The configured provider preference chain (from cfg.models.providerChain). */
+  chain: string[];
+}
+
+/** Read-only status of the Phantom secrets CLI. NEVER carries secret values. */
+export interface PhantomStatus {
+  /** Whether the `phantom` binary is on PATH. */
+  installed: boolean;
+  /** Reported version string, or null if unknown/unavailable. */
+  version: string | null;
+  /** Whether a Phantom vault/identity is initialized. */
+  initialized: boolean;
+  /** Secret NAMES only (never values). Empty when uninitialized/unavailable. */
+  secretNames: string[];
+  /** Error message when status could not be fully determined, else absent. */
+  error?: string;
+}
+
+/** Outcome of a single doctor health check. */
+export type DoctorCheckStatus = 'pass' | 'warn' | 'fail';
+
+/** A single health check produced by `runDoctor`. */
+export interface DoctorCheck {
+  /** Stable check id (e.g. 'config', 'phantom', 'provider:ollama'). */
+  id: string;
+  /** Human-readable label for the check. */
+  label: string;
+  /** pass | warn | fail. */
+  status: DoctorCheckStatus;
+  /** One-line detail describing the observed state. */
+  detail: string;
+  /** Optional suggested remediation command/hint. */
+  fix?: string;
+}
+
+/** Full one-glance health report from `ashlr doctor`. */
+export interface DoctorReport {
+  /** ISO timestamp the report was generated. */
+  generatedAt: string;
+  /** All checks performed, in display order. */
+  checks: DoctorCheck[];
+  /** Roll-up counts by status. */
+  summary: { pass: number; warn: number; fail: number };
 }
 
 /** What an indexed entry fundamentally is. */
