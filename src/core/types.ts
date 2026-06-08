@@ -197,3 +197,75 @@ export interface TidyPlan {
   /** Paths intentionally not moved, with a reason (keeper, no-match, etc.). */
   skipped: { path: string; reason: string }[];
 }
+
+// ---------------------------------------------------------------------------
+// M3: MCP aggregation gateway + ecosystem tools registry contract
+// ---------------------------------------------------------------------------
+
+/** A single discovered MCP server spec (one entry under an "mcpServers" map). */
+export interface McpServerSpec {
+  /** Unique server name (dedupe key across all discovered configs). */
+  name: string;
+  /** Executable to launch the stdio MCP server. */
+  command: string;
+  /** Arguments passed to `command`. */
+  args: string[];
+  /** Environment overrides for the child process. Values redacted when printed. */
+  env?: Record<string, string>;
+  /** Where this spec was discovered (config path / logical source label). */
+  source: string;
+}
+
+/** All MCP servers discovered on this machine, deduped by name. */
+export interface McpRegistry {
+  /** Discovered server specs in stable order. */
+  servers: McpServerSpec[];
+}
+
+/** One downstream tool surfaced through the gateway, namespaced for routing. */
+export interface AggregatedTool {
+  /** Owning downstream server name. */
+  server: string;
+  /** Original (downstream) tool name. */
+  name: string;
+  /** Gateway-facing name: `<server>__<tool>`. */
+  namespaced: string;
+  /** Tool description as reported by the downstream, if any. */
+  description?: string;
+}
+
+/** Health probe result for a single downstream MCP server. */
+export interface McpServerHealth {
+  /** Server name probed. */
+  name: string;
+  /** Whether the server started and listed its tools successfully. */
+  ok: boolean;
+  /** Number of tools the server exposes (0 when not ok). */
+  toolCount: number;
+  /** Tool names reported by the server (empty when not ok). */
+  tools: string[];
+  /** Failure reason when `ok` is false, else absent. */
+  error?: string;
+}
+
+/** Detection result for a single ecosystem CLI tool. */
+export interface ToolInfo {
+  /** Stable tool id (e.g. 'phantom', 'ashlr-plugin', 'stack'). */
+  id: string;
+  /** Display name for the tool. */
+  name: string;
+  /** Whether the tool was found on PATH. */
+  installed: boolean;
+  /** Reported version string, or null if unknown/not installed. */
+  version: string | null;
+  /** Resolved executable path, or null if not installed. */
+  path: string | null;
+}
+
+/** Roll-up of all detected ecosystem tools. */
+export interface ToolsRegistry {
+  /** All probed tools in display order. */
+  tools: ToolInfo[];
+  /** Count of tools where `installed` is true. */
+  installedCount: number;
+}

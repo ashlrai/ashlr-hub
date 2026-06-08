@@ -30,4 +30,18 @@ export default tseslint.config(
       '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
     },
   },
+  {
+    // Plain-JS Node test fixtures (e.g. the stdio mock MCP server) run under
+    // Node directly and legitimately use Node globals like `process`.
+    files: ['test/**/*.mjs', 'test/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: {
+        process: 'readonly',
+        console: 'readonly',
+        Buffer: 'readonly',
+      },
+    },
+  },
 );

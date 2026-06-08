@@ -381,6 +381,145 @@ M2 turns `~/.ashlr/config.json` into the real unified source of truth and adds t
 
 ---
 
+## M3: MCP aggregation gateway
+
+M3 makes `ashlr` the **single MCP entry point** for any agent. It discovers every
+MCP server already configured on the machine, starts each one as a managed child
+process, and exposes all their tools through a single stdio gateway — tools
+namespaced as `<server>__<tool>` so there are no collisions. Point any agent at
+`ashlr mcp` and it instantly has access to every tool in your stack.
+
+---
+
+### `ashlr mcp`
+
+Run the aggregation gateway on stdio. Discovers all configured MCP servers,
+starts them (8 s timeout per server), and proxies `tools/list` and `tools/call`
+to the correct downstream. Servers that fail to start are skipped with a warning
+to stderr — they never crash the gateway.
+
+```sh
+ashlr mcp
+```
+
+This is the command you register in your agent config (see `ashlr mcp install`).
+
+---
+
+### `ashlr mcp list`
+
+Print the full MCP registry: every discovered server, where it was found, and
+how many tools it exposes. Env values are always redacted to `<set>`.
+
+```sh
+ashlr mcp list
+```
+
+Example output:
+
+```
+MCP registry  (4 servers)
+
+  ashlr              ~/.claude/settings.json      12 tools
+  phantom-secrets    ~/.claude/settings.json       8 tools
+  filesystem         ~/.mcp.json                   6 tools
+  github             ~/.mcp.json                   9 tools
+```
+
+---
+
+### `ashlr mcp doctor`
+
+Health-probe every discovered server: attempts to start it, list its tools, and
+tear it down cleanly. Reports `ok` / `fail` per server with tool count and any
+error message.
+
+```sh
+ashlr mcp doctor
+```
+
+Example output:
+
+```
+MCP server health
+
+  ✓ ashlr              12 tools
+  ✓ phantom-secrets     8 tools
+  ✓ filesystem          6 tools
+  ✗ github              0 tools  — spawn error: ENOENT npx
+```
+
+---
+
+### `ashlr mcp install <target> [--config <path>]`
+
+Idempotently add the `ashlr mcp` gateway to a target agent's `mcpServers`
+config. The file is backed up before any write. If the `ashlr` entry already
+exists, it is left unchanged (no clobber).
+
+Supported targets:
+
+| Target      | Default config path           |
+|-------------|-------------------------------|
+| `claude`    | `~/.claude/settings.json`     |
+| `ashlrcode` | `~/.ashlrcode/settings.json`  |
+
+Pass `--config <path>` to write to an arbitrary file instead of the default.
+
+```sh
+# Register the gateway in Claude Code
+ashlr mcp install claude
+
+# Register in ashlrcode
+ashlr mcp install ashlrcode
+
+# Write to a custom / temp path (useful for CI / testing)
+ashlr mcp install claude --config /tmp/test-settings.json
+```
+
+After install, restart your agent. It will connect to `ashlr mcp` on stdio and
+inherit every tool from every downstream server.
+
+---
+
+### Discovery: where servers are found
+
+`ashlr mcp list` (and the gateway) scan these paths in order, deduping by server
+name (first occurrence wins):
+
+- `~/.claude.json`
+- `~/.claude/settings.json`
+- `~/.mcp.json`
+- `~/.ashlrcode/settings.json`
+- ashlr-workbench agent settings
+
+The ashlr-plugin server (`"ashlr"`) and Phantom (`"phantom-secrets"`) are
+recognized specially and surfaced prominently in `doctor` output.
+
+---
+
+### Ecosystem tools registry
+
+`ashlr status` and `ashlr doctor` now include a tools table showing which
+ecosystem tools are installed and their versions:
+
+```
+Ecosystem tools  (6 / 10 installed)
+
+  phantom          v0.6.0   /usr/local/bin/phantom
+  ashlr-plugin     v1.2.0   ~/.local/bin/ashlr
+  ashlrcode        v0.9.1   ~/.local/bin/ashlrcode
+  stack            —        not installed
+  pulse-agent      v0.4.0   /usr/local/bin/pulse-agent
+  aw               —        not installed
+  morphkit         —        not installed
+  binshield        —        not installed
+  ashlr-md         —        not installed
+  ashlr-hub        v0.3.0   ~/.local/bin/ashlr
+```
+
+---
+
 ## Raycast extension
 
 The Raycast extension reads `~/.ashlr/index.json` directly — it does not re-scan. Run `ashlr index` at least once first.
@@ -433,9 +572,13 @@ ashlr-hub/
 │   │   ├── tidy.ts          # Tidy planner + applier
 │   │   ├── providers.ts     # M2: local-model endpoint probing + registry
 │   │   ├── phantom.ts       # M2: Phantom secrets status (read-only)
-│   │   └── doctor.ts        # M2: one-glance health check aggregator
+│   │   ├── doctor.ts        # M2: one-glance health check aggregator
+│   │   ├── mcp-registry.ts  # M3: discover MCP servers across known config paths
+│   │   ├── mcp-gateway.ts   # M3: stdio aggregation gateway + per-server probe
+│   │   └── tools-registry.ts # M3: detect ecosystem tools + versions via PATH
 │   ├── cli/
-│   │   ├── index.ts     # argv dispatch (index/go/status/ls/open/tidy/config/doctor/init/help)
+│   │   ├── index.ts     # argv dispatch (index/go/status/ls/open/tidy/config/doctor/init/mcp/help)
+│   │   ├── mcp.ts       # M3: `ashlr mcp` subcommand dispatcher
 │   │   ├── open.ts      # Editor / Finder / Terminal launchers
 │   │   └── picker.ts    # fzf (if present) or readline picker
 │   └── raycast/         # Raycast extension (own package.json)
@@ -450,6 +593,7 @@ ashlr-hub/
 ├── dist/                # compiled output (git-ignored)
 ├── CONTRACT.md          # binding interface spec
 ├── CONTRACT-M2.md       # M2 extension to the contract
+├── CONTRACT-M3.md       # M3 extension to the contract (MCP gateway)
 ├── install.sh           # build + symlink installer
 └── package.json
 ```
@@ -487,8 +631,17 @@ Zero runtime dependencies in `core/` and `cli/` — Node builtins only.
 - [x] Phantom secrets integration — read-only, names/status only, never values
 - [x] `phantom` + `models` config fields unified in `~/.ashlr/config.json`
 
+### M3 — MCP aggregation gateway + ecosystem tools registry
+
+- [x] `ashlr mcp` — stdio MCP gateway multiplexing all discovered MCP servers, tools namespaced as `<server>__<tool>`
+- [x] `ashlr mcp list` — registry of all discovered servers + per-server tool counts (env values redacted)
+- [x] `ashlr mcp doctor` — health-probe each downstream server; reports starts + tool count
+- [x] `ashlr mcp install <claude|ashlrcode>` — idempotently register the gateway in a target mcpServers config (backs up file first)
+- [x] Ecosystem tools registry — detect + version-report the full Ashlr tool stack via PATH
+- [x] `ashlr status` + `ashlr doctor` surface ecosystem tool presence and versions
+
 ### Future
 
-- [ ] Phase 3: AI-powered semantic search over the index
-- [ ] Phase 4: Cross-project cost + telemetry dashboard (Pulse integration)
-- [ ] Phase 5: Automated tidy + refactor suggestions
+- [ ] Phase 4: AI-powered semantic search over the index
+- [ ] Phase 5: Cross-project cost + telemetry dashboard (Pulse integration)
+- [ ] Phase 6: Automated tidy + refactor suggestions

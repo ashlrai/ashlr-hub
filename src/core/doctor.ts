@@ -9,7 +9,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import type { AshlrConfig, DoctorCheck, DoctorCheckStatus, DoctorReport } from './types.js';
+import type { AshlrConfig, DoctorCheck, DoctorCheckStatus, DoctorReport, McpRegistry, ToolsRegistry } from './types.js';
 import { CONFIG_PATH, INDEX_PATH, loadConfig } from './config.js';
 import { getPhantomStatus } from './phantom.js';
 import { getProviderRegistry } from './providers.js';
@@ -36,6 +36,37 @@ function runCmd(cmd: string, args: string[]): string | null {
     const result = spawnSync(cmd, args, { encoding: 'utf8', timeout: 5000 });
     if (result.error || result.status !== 0) return null;
     return (result.stdout ?? '').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic import helpers for M3 modules — gracefully no-ops if not built yet
+// ---------------------------------------------------------------------------
+
+/**
+ * Attempt to load discoverMcpServers from mcp-registry.
+ * Returns null if the module is unavailable (not yet built).
+ */
+async function tryDiscoverMcpServers(): Promise<McpRegistry | null> {
+  try {
+    // Dynamic import so doctor.ts compiles and runs even before mcp-registry is built.
+    const mod = await import('./mcp-registry.js') as { discoverMcpServers: () => McpRegistry };
+    return mod.discoverMcpServers();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Attempt to load getToolsRegistry from tools-registry.
+ * Returns null if the module is unavailable (not yet built).
+ */
+async function tryGetToolsRegistry(): Promise<ToolsRegistry | null> {
+  try {
+    const mod = await import('./tools-registry.js') as { getToolsRegistry: () => ToolsRegistry };
+    return mod.getToolsRegistry();
   } catch {
     return null;
   }
@@ -230,12 +261,32 @@ function checkPhantom(): DoctorCheck {
 
 /**
  * Detect whether the ashlr MCP server is registered in any of the known
- * Claude Code config locations:
- *   ~/.claude/settings.json
- *   ~/.mcp.json
- *   ~/.claude.json
+ * Claude Code config locations. Upgraded in M3: also accepts discovery via
+ * discoverMcpServers() so it passes if the "ashlr" server is found in any
+ * known config file (including ~/.ashlrcode/settings.json, ashlr-workbench, etc.).
+ *
+ * The mcpRegistry parameter is the pre-fetched result of discoverMcpServers()
+ * (or null when the module is not available), passed in from runDoctor to avoid
+ * duplicate invocations.
  */
-function checkMcpPlugin(): DoctorCheck {
+function checkMcpPlugin(mcpRegistry: McpRegistry | null): DoctorCheck {
+  // First: check via the M3 mcp-registry if available — covers all known paths
+  // including ~/.ashlrcode/settings.json and ashlr-workbench agent settings.
+  if (mcpRegistry !== null) {
+    const ashlrServer = mcpRegistry.servers.find(
+      (s) => s.name === 'ashlr' || s.name.includes('ashlr'),
+    );
+    if (ashlrServer) {
+      return check(
+        'mcp-plugin',
+        'ashlr MCP plugin registered',
+        'pass',
+        `Found server "${ashlrServer.name}" in ${ashlrServer.source}`,
+      );
+    }
+  }
+
+  // Fallback: manual scan of the canonical three paths (works even without mcp-registry).
   const candidates = [
     join(homedir(), '.claude/settings.json'),
     join(homedir(), '.mcp.json'),
@@ -277,6 +328,86 @@ function checkMcpPlugin(): DoctorCheck {
   );
 }
 
+/**
+ * Check: MCP servers discovered.
+ * id: 'mcp-servers-discovered'
+ * pass if >=1 server found, warn if 0.
+ *
+ * The mcpRegistry parameter is the pre-fetched result of discoverMcpServers()
+ * (or null when the module is not available).
+ */
+function checkMcpServersDiscovered(mcpRegistry: McpRegistry | null): DoctorCheck {
+  if (mcpRegistry === null) {
+    // Module not available (not yet built) — soft warn rather than fail.
+    return check(
+      'mcp-servers-discovered',
+      'MCP servers discovered',
+      'warn',
+      'MCP registry module not available',
+      'configure MCP servers or run ashlr init',
+    );
+  }
+
+  const count = mcpRegistry.servers.length;
+  if (count >= 1) {
+    return check(
+      'mcp-servers-discovered',
+      'MCP servers discovered',
+      'pass',
+      `${count} MCP server${count !== 1 ? 's' : ''} discovered across known configs`,
+    );
+  }
+
+  return check(
+    'mcp-servers-discovered',
+    'MCP servers discovered',
+    'warn',
+    'No MCP servers discovered in known config locations',
+    'configure MCP servers or run ashlr init',
+  );
+}
+
+/**
+ * Check: Ashlr ecosystem tools installed.
+ * id: 'ashlr-tools-installed'
+ * pass with count, warn if <2 tools installed.
+ *
+ * The toolsRegistry parameter is the pre-fetched result of getToolsRegistry()
+ * (or null when the module is not available).
+ */
+function checkAshlrToolsInstalled(toolsRegistry: ToolsRegistry | null): DoctorCheck {
+  if (toolsRegistry === null) {
+    // Module not available (not yet built) — soft warn rather than fail.
+    return check(
+      'ashlr-tools-installed',
+      'Ashlr tools installed',
+      'warn',
+      'Tools registry module not available',
+      'run ashlr init to set up the ecosystem',
+    );
+  }
+
+  const count = toolsRegistry.installedCount;
+  const total = toolsRegistry.tools.length;
+
+  if (count >= 2) {
+    return check(
+      'ashlr-tools-installed',
+      'Ashlr tools installed',
+      'pass',
+      `${count}/${total} ecosystem tool${count !== 1 ? 's' : ''} installed`,
+    );
+  }
+
+  return check(
+    'ashlr-tools-installed',
+    'Ashlr tools installed',
+    'warn',
+    `Only ${count}/${total} ecosystem tool${count !== 1 ? 's' : ''} installed`,
+    'Install ashlr ecosystem tools (phantom, ashlrcode, aw, etc.)',
+  );
+}
+
 // ---------------------------------------------------------------------------
 // runDoctor
 // ---------------------------------------------------------------------------
@@ -284,9 +415,19 @@ function checkMcpPlugin(): DoctorCheck {
 /**
  * Run all health checks and return a DoctorReport.
  * Never throws — each check is isolated and returns a typed result.
+ *
+ * New checks added in M3:
+ *   - 'mcp-servers-discovered': MCP servers discovered via mcp-registry
+ *   - 'ashlr-tools-installed': Ashlr ecosystem tools via tools-registry
  */
 export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
+
+  // --- Pre-fetch M3 registry results (both are async-safe, never throw) ---
+  const [mcpRegistry, toolsRegistry] = await Promise.all([
+    tryDiscoverMcpServers(),
+    tryGetToolsRegistry(),
+  ]);
 
   // --- Synchronous checks ---
   checks.push(checkNodeVersion());
@@ -296,7 +437,12 @@ export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
   checks.push(checkConfig());
   checks.push(checkIndex());
   checks.push(checkPhantom());
-  checks.push(checkMcpPlugin());
+  // Upgraded: also accepts discovery via discoverMcpServers (mcpRegistry)
+  checks.push(checkMcpPlugin(mcpRegistry));
+
+  // --- M3 checks ---
+  checks.push(checkMcpServersDiscovered(mcpRegistry));
+  checks.push(checkAshlrToolsInstalled(toolsRegistry));
 
   // --- Async: provider registry ---
   try {

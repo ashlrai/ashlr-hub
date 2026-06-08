@@ -12,6 +12,7 @@
  *   config [get|set|path]      Read/write config values.
  *   doctor                     One-glance health check (config, phantom, providers).
  *   init [--yes]               Idempotent onboarding; NON-TTY safe with --yes.
+ *   mcp [list|doctor|install]  MCP aggregation gateway and registry management.
  *   help                       Show this help.
  *
  * Exit codes: 0 success, 1 error/not-found, 2 bad usage.
@@ -23,7 +24,60 @@ import { planTidy, applyTidy } from '../core/tidy.js';
 import { openInEditor } from './open.js';
 import { pick } from './picker.js';
 import { cmdDoctor, cmdInit } from './doctor-init.js';
-import type { AshlrConfig, AshlrIndex, IndexedItem, GitStatus } from '../core/types.js';
+import type { AshlrConfig, AshlrIndex, IndexedItem, GitStatus, ToolsRegistry, McpRegistry } from '../core/types.js';
+
+// ─── M3 lazy imports (graceful degradation if modules not yet built) ──────────
+
+type CmdMcpFn = (args: string[]) => Promise<number>;
+type GetToolsRegistryFn = () => ToolsRegistry;
+type DiscoverMcpServersFn = () => McpRegistry;
+
+// Cache slots — undefined = not yet attempted; null = attempted & failed
+let _cmdMcp: CmdMcpFn | null | undefined = undefined;
+let _getToolsRegistry: GetToolsRegistryFn | null | undefined = undefined;
+let _discoverMcpServers: DiscoverMcpServersFn | null | undefined = undefined;
+
+async function loadMcpCmd(): Promise<CmdMcpFn> {
+  if (_cmdMcp === undefined) {
+    try {
+      const mod = await import('./mcp.js') as { cmdMcp: CmdMcpFn };
+      _cmdMcp = mod.cmdMcp;
+    } catch {
+      _cmdMcp = null;
+    }
+  }
+  if (_cmdMcp === null) {
+    return async (_args: string[]) => {
+      console.error(red('error: ') + 'mcp command requires src/cli/mcp.ts (M3 module not yet built).');
+      return 1;
+    };
+  }
+  return _cmdMcp;
+}
+
+async function tryGetToolsRegistry(): Promise<GetToolsRegistryFn | null> {
+  if (_getToolsRegistry === undefined) {
+    try {
+      const mod = await import('../core/tools-registry.js') as { getToolsRegistry: GetToolsRegistryFn };
+      _getToolsRegistry = mod.getToolsRegistry;
+    } catch {
+      _getToolsRegistry = null;
+    }
+  }
+  return _getToolsRegistry ?? null;
+}
+
+async function tryDiscoverMcpServers(): Promise<DiscoverMcpServersFn | null> {
+  if (_discoverMcpServers === undefined) {
+    try {
+      const mod = await import('../core/mcp-registry.js') as { discoverMcpServers: DiscoverMcpServersFn };
+      _discoverMcpServers = mod.discoverMcpServers;
+    } catch {
+      _discoverMcpServers = null;
+    }
+  }
+  return _discoverMcpServers ?? null;
+}
 
 // ─── ANSI helpers ──────────────────────────────────────────────────────────────
 
@@ -284,7 +338,7 @@ function printItemSummary(item: IndexedItem): void {
 
 // ─── Command: status ─────────────────────────────────────────────────────────
 
-function cmdStatus(_args: string[]): void {
+async function cmdStatus(_args: string[]): Promise<void> {
   const cfg = loadConfig();
   const idx = requireIndex(cfg);
 
@@ -368,6 +422,48 @@ function cmdStatus(_args: string[]): void {
     `${gray(`${stale.length} stale`)}`
   );
   console.log('');
+
+  // ── M3 Ecosystem summary (graceful degradation if modules not yet built) ──
+  const [getToolsRegistryFn, discoverMcpServersFn] = await Promise.all([
+    tryGetToolsRegistry(),
+    tryDiscoverMcpServers(),
+  ]);
+
+  const ecosystemParts: string[] = [];
+
+  if (getToolsRegistryFn) {
+    try {
+      const reg = getToolsRegistryFn();
+      const installedNames = reg.tools
+        .filter(t => t.installed)
+        .map(t => t.id)
+        .slice(0, 5); // show up to 5 names; remainder implied by count
+      const moreCount = reg.installedCount - installedNames.length;
+      const nameList = installedNames.join(', ') + (moreCount > 0 ? `, +${moreCount}` : '');
+      ecosystemParts.push(
+        `${bold('Tools:')} ${cyan(`${reg.installedCount}/${reg.tools.length} installed`)}` +
+        (installedNames.length > 0 ? ` ${dim('—')} ${gray(nameList)}` : '')
+      );
+    } catch {
+      // silently skip on error
+    }
+  }
+
+  if (discoverMcpServersFn) {
+    try {
+      const mcpReg = discoverMcpServersFn();
+      ecosystemParts.push(
+        `${bold('MCP servers:')} ${cyan(`${mcpReg.servers.length} discovered`)}`
+      );
+    } catch {
+      // silently skip on error
+    }
+  }
+
+  if (ecosystemParts.length > 0) {
+    console.log(`  ${ecosystemParts.join(`  ${dim('·')}  `)}`);
+    console.log('');
+  }
 }
 
 // ─── Command: ls ─────────────────────────────────────────────────────────────
@@ -656,15 +752,19 @@ function cmdHelp(): void {
   const cmds: [string, string][] = [
     ['index [--refresh]',            'Build or refresh the desktop index; show counts by category.'],
     ['go [query] [--open|--cd]',     'Find a repo or item; open in editor (--open) or print path for cd (--cd).'],
-    ['status',                       'Attention board: dirty, off-sync, and stale repos.'],
+    ['status',                       'Attention board: dirty, off-sync, and stale repos; ecosystem summary.'],
     ['ls [category]',                'List all indexed items, optionally filtered by category.'],
     ['open [query]',                 'Open the best match in your editor; no query opens an interactive picker.'],
     ['tidy [--apply]',               'Show (or apply) tidy moves for loose Desktop files.'],
     ['config [get <k>|set <k> <v>]', 'Read/write a config value. No args prints a summary.'],
     ['config set <k> --json <v>',    'Set a structured (array/object) config value as JSON.'],
     ['config path',                  'Print the path to config.json.'],
-    ['doctor',                       'One-glance health check: config, phantom, local model providers.'],
+    ['doctor',                       'One-glance health check: config, phantom, providers, ecosystem.'],
     ['init [--yes]',                 'Idempotent onboarding: ensure config, detect phantom + models, set editor.'],
+    ['mcp',                          'Run the MCP aggregation gateway on stdio (point any agent here).'],
+    ['mcp list',                     'List discovered MCP servers + per-server tool counts.'],
+    ['mcp doctor',                   'Per-server MCP health: does it start? how many tools?'],
+    ['mcp install <claude|ashlrcode>', 'Add the ashlr gateway to a target mcpServers config (backs up first).'],
     ['help',                         'Show this help.'],
   ];
 
@@ -698,7 +798,7 @@ async function main(): Promise<void> {
         break;
 
       case 'status':
-        cmdStatus(rest);
+        await cmdStatus(rest);
         break;
 
       case 'ls':
@@ -724,6 +824,12 @@ async function main(): Promise<void> {
       case 'init':
         process.exitCode = await cmdInit(rest);
         break;
+
+      case 'mcp': {
+        const cmdMcp = await loadMcpCmd();
+        process.exitCode = await cmdMcp(rest);
+        break;
+      }
 
       case 'help':
       case '--help':
