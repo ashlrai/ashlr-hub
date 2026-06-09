@@ -3,7 +3,7 @@
  *
  * `ashlr run "<goal>" [--budget N] [--max-steps N] [--parallel N]
  *   [--engine builtin|ashlrcode|aw|claude] [--allow-cloud] [--no-tools]
- *   [--resume <id>] [--json] [--no-memory] [--stream|--no-stream]`
+ *   [--resume <id>] [--json] [--no-memory] [--stream|--no-stream] [--no-capture]`
  *
  * Subcommand `ashlr run show <id>` prints a saved run.
  *
@@ -99,6 +99,8 @@ interface ParsedRunArgs {
   stream: boolean;
   /** Enable the optional cheap model verification check after each task (M11). */
   verifyModel: boolean;
+  /** Skip auto-capture of this run to the genome (M16). */
+  noCapture: boolean;
   usageError?: string;
 }
 
@@ -115,10 +117,11 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
         json: false,
         stream: false,
         verifyModel: false,
+        noCapture: false,
         usageError: 'Usage: ashlr run show <id>',
       };
     }
-    return { subcommand: 'show', showId, allowCloud: false, noTools: false, noMemory: false, json: false, stream: false, verifyModel: false };
+    return { subcommand: 'show', showId, allowCloud: false, noTools: false, noMemory: false, json: false, stream: false, verifyModel: false, noCapture: false };
   }
 
   const result: ParsedRunArgs = {
@@ -131,6 +134,8 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
     stream: Boolean(process.stderr.isTTY),
     // Default: heuristic-only verification (no extra model calls). --verify-model enables it.
     verifyModel: false,
+    // Default: genome auto-capture is ON; --no-capture disables it for this run.
+    noCapture: false,
   };
 
   let i = 0;
@@ -190,6 +195,9 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       // Consumed by provider-client.pickModel(); also honors the ASHLR_MODEL env var.
       process.env.ASHLR_MODEL = val;
       i++;
+    } else if (arg === '--no-capture') {
+      result.noCapture = true;
+      i++;
     } else if (arg === '--resume') {
       const val = args[++i];
       if (!val) {
@@ -217,7 +225,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
     result.usageError =
       'Usage: ashlr run "<goal>" [--budget N] [--max-steps N] [--parallel N]\n' +
       '              [--engine builtin|ashlrcode|aw|claude] [--allow-cloud] [--no-tools]\n' +
-      '              [--resume <id>] [--json] [--no-memory] [--stream|--no-stream] [--verify-model]\n' +
+      '              [--resume <id>] [--json] [--no-memory] [--stream|--no-stream] [--verify-model] [--no-capture]\n' +
       '       ashlr run show <id>';
   }
 
@@ -561,6 +569,7 @@ export async function cmdRun(args: string[]): Promise<number> {
     __onStep?: (step: RunStep, tasks: RunTask[]) => void;
     __sink?: StreamSink;
     noMemory?: boolean;
+    noCapture?: boolean;
   };
 
   optsWithHook.__sink = sink;
@@ -578,6 +587,11 @@ export async function cmdRun(args: string[]): Promise<number> {
   // Orchestrator checks: (cfg.genome?.injectOnRun ?? true) && !opts.noMemory
   if (parsed.noMemory) {
     optsWithHook.noMemory = true;
+  }
+
+  // Pass --no-capture so captureFromRun skips genome auto-capture for this run.
+  if (parsed.noCapture) {
+    optsWithHook.noCapture = true;
   }
 
   let state: RunState;
@@ -724,6 +738,7 @@ function printRunHelp(): void {
     ['--json',                  `Emit RunState JSON on stdout; progress goes to stderr.`],
     ['--stream',                `Stream live progress as it happens (default: on when stderr is a TTY).`],
     ['--no-stream',             `Disable live streaming; only print the final summary.`],
+    ['--no-capture',            `Skip auto-capture of this run to the genome (M16 playbook).`],
   ];
 
   const optW = Math.max(...opts.map(([o]) => o.length));
@@ -755,5 +770,6 @@ function printRunHelp(): void {
   console.log(`    ${dim('• Budget is a HARD ceiling — exceeding it aborts cleanly.')}`);
   console.log(`    ${dim('• State persists to ~/.ashlr/runs/<id>.json (never touches repos).')}`);
   console.log(`    ${dim('• --no-memory disables genome context injection for this run.')}`);
+  console.log(`    ${dim('• --no-capture disables genome auto-capture for this run.')}`);
   console.log('');
 }

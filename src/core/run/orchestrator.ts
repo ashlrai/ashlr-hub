@@ -15,6 +15,15 @@
  * Gated on cfg.genome?.injectOnRun (default true) and opts.noMemory (opt-out).
  * Never throws — if recall fails or is empty, the run proceeds unchanged.
  *
+ * M16 addition: playbook injection + auto-capture.
+ *  - Planning injection: when cfg.genome?.playbookOnRun !== false and !noMemory,
+ *    builds a synthesized playbook via genome/playbook.buildPlaybook (dynamic import,
+ *    best-effort) and injects playbookText(...) instead of raw recall. Falls back to
+ *    the existing raw-recall block on any playbook failure.
+ *  - Auto-capture: after final state is persisted, calls captureFromRun (fire-and-
+ *    forget) from genome/capture.ts. Disabled via opts.noCapture or
+ *    cfg.genome?.autoCapture === false. Never throws, never blocks.
+ *
  * M11 additions:
  *  - HARDENED ENGINE DELEGATION: buildEngineCommand + spawnEngine (engines.ts)
  *    replace the guessed ['--goal',goal] spawn. Per-engine adapters produce
@@ -993,18 +1002,54 @@ export async function runGoal(
     }
   }
 
-  // -- M7: Genome recall injection (best-effort, bounded, local-only) ----------
-  // Recall top-k genome hits for the goal and inject as planning context.
+  // -- M16/M7: Genome memory injection (best-effort, bounded, local-only) ------
+  // M16: prefer a synthesized playbook over raw recall when playbookOnRun is on.
+  // Falls back to the existing raw-recall block on any playbook failure.
   // Skipped when: noMemory is set, cfg disables injection, or this is a resume
   // with existing tasks (context was already embedded in those task goals).
   let memoryContext = '';
   const injectOnRun = cfg.genome?.injectOnRun ?? true;
   if (!noMemory && injectOnRun && state.tasks.length === 0) {
-    memoryContext = await buildMemoryBlock(goal, cfg);
-    if (memoryContext.length > 0) {
-      process.stderr.write(
-        `[ashlr run] genome: injecting ${memoryContext.length} chars of memory context\n`,
-      );
+    // Only attempt playbook injection when genome is explicitly configured and
+    // playbookOnRun is not disabled. When cfg.genome is absent there is nothing
+    // to recall, and the playbook module makes local Ollama fetch calls even on
+    // an empty recall — which would interfere with scripted fetch mocks in tests
+    // and add unnecessary latency in unconfigured environments.
+    const playbookOnRun = cfg.genome != null && cfg.genome.playbookOnRun !== false;
+    let playbookInjected = false;
+
+    if (playbookOnRun) {
+      try {
+        // Dynamic import: tolerates the module being absent (pre-M16 build).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const pbMod = await import('../genome/playbook.js') as any;
+        if (
+          typeof pbMod.buildPlaybook === 'function' &&
+          typeof pbMod.playbookText === 'function'
+        ) {
+          const playbook = await pbMod.buildPlaybook(goal, cfg);
+          const pbText: string = pbMod.playbookText(playbook, GENOME_INJECT_CHAR_CAP);
+          if (pbText && pbText.length > 0) {
+            memoryContext = pbText;
+            playbookInjected = true;
+            process.stderr.write(
+              `[ashlr run] genome: injecting ${memoryContext.length} chars of playbook context\n`,
+            );
+          }
+        }
+      } catch {
+        // Playbook module absent or failed — fall through to raw recall below.
+      }
+    }
+
+    if (!playbookInjected) {
+      // M7 fallback: raw recall injection.
+      memoryContext = await buildMemoryBlock(goal, cfg);
+      if (memoryContext.length > 0) {
+        process.stderr.write(
+          `[ashlr run] genome: injecting ${memoryContext.length} chars of memory context\n`,
+        );
+      }
     }
   }
 
@@ -1429,6 +1474,22 @@ export async function runGoal(
       reportToPulse(cfg.telemetry.pulse, state);
     }
 
+    // M16: Auto-capture on abort path (fire-and-forget).
+    const noCaptureAbort = (opts as RunOptions & { noCapture?: boolean }).noCapture === true;
+    if (!noCaptureAbort) {
+      void (async () => {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const capMod = await import('../genome/capture.js') as any;
+          if (typeof capMod.captureFromRun === 'function') {
+            capMod.captureFromRun(state, cfg);
+          }
+        } catch {
+          // Never surface capture errors to the caller.
+        }
+      })();
+    }
+
     return state;
   }
 
@@ -1494,6 +1555,24 @@ export async function runGoal(
   // -- Best-effort Pulse POST --------------------------------------------------
   if (cfg.telemetry.pulse) {
     reportToPulse(cfg.telemetry.pulse, state);
+  }
+
+  // -- M16: Auto-capture (fire-and-forget, never throws, never blocks) ---------
+  // Read noCapture via extended property (same pattern as noMemory above).
+  const noCapture = (opts as RunOptions & { noCapture?: boolean }).noCapture === true;
+  if (!noCapture) {
+    // Wrap in void + try to guarantee fire-and-forget with zero blocking.
+    void (async () => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const capMod = await import('../genome/capture.js') as any;
+        if (typeof capMod.captureFromRun === 'function') {
+          capMod.captureFromRun(state, cfg);
+        }
+      } catch {
+        // Never surface capture errors to the caller.
+      }
+    })();
   }
 
   return state;

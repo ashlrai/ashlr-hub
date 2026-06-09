@@ -552,7 +552,9 @@ export function appendHubEntry(input: LearnInput): GenomeEntry {
   }
 
   // Optionally drop a note into the resolved project's genome dir.
-  if (project) {
+  // Skipped entirely when input.hubOnly is set (M16 auto-capture) so a
+  // completed run/swarm never writes a file into the user's repo working tree.
+  if (project && !input.hubOnly) {
     try {
       maybeWriteProjectNote(project, entry);
     } catch {

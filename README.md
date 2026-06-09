@@ -251,6 +251,98 @@ ashlr recall "embedding model setup"
 
 `ashlr run` is **memory-aware by default** — it injects the top-k `recall(goal)` hits into each sub-agent's prompt (cap via `genome.maxRecall`, disable per-run with `--no-memory`).
 
+#### Compounding memory (M16)
+
+The genome grows richer with every run — automatically. Each completed `ashlr run` or `ashlr swarm` appends a concise structured entry to the genome (goal, approach/outcome summary, project, tags). Over time the genome accumulates institutional knowledge about what has been tried, what worked, and what failed — without any manual effort.
+
+**Auto-capture**
+
+After every run or swarm completes, a structured `GenomeEntry` summarising the work is appended to `~/.ashlr/genome/hub.jsonl` in the background. Capture is:
+
+- **Metadata/summary only** — never raw prompts, completions, tool arguments, or file contents. Hard-capped at ~800 chars per entry.
+- **Dedupe-aware** — near-duplicate entries for the same goal are detected and skipped.
+- **Non-blocking** — fires after the result is returned; never slows a run.
+- **Opt-out per invocation**: pass `--no-capture` to `ashlr run` or `ashlr swarm`, or set `genome.autoCapture: false` in `~/.ashlr/config.json` to disable globally.
+
+```sh
+ashlr run "Audit the MCP registry"               # auto-captures on completion (default)
+ashlr run "Audit the MCP registry" --no-capture  # skip capture for this run
+```
+
+**Teach a note manually**
+
+```sh
+ashlr genome --teach "Always pre-warm Ollama before a long swarm — cold-start adds ~30s"
+ashlr genome --teach "bge-m3 rerank improves recall precision ~20%" --tags ollama,embeddings
+```
+
+High-value notes are tagged `teach` and are immediately searchable via `ashlr recall`.
+
+**Consolidate duplicates**
+
+As the genome grows, near-duplicate entries accumulate. Consolidation merges them into one canonical entry while preserving all provenance:
+
+```sh
+ashlr genome consolidate
+# Writes a timestamped backup of hub.jsonl first (no data loss)
+# Merged entry retains: count, firstSeen, lastSeen, union of all tags, full content
+# Reports: before=142  after=98  merged=44
+```
+
+A timestamped backup of `hub.jsonl` is always written before any mutation. Nothing is silently deleted.
+
+**Playbook: synthesised prior art**
+
+Before planning a run, `ashlr` recalls similar past entries and synthesises a concise "how we approached this before — what worked / what failed / cost" playbook, injected (bounded by char cap) into the agent's planning context. This upgrades M7's raw-recall injection into a structured synthesis.
+
+```sh
+# Inspect the playbook for a goal before running
+ashlr genome playbook "Add a plugin system to ashlr-hub"
+# Prints: relevant past attempts, outcomes, lessons, cost summary
+
+# Playbook injection is on by default during ashlr run / ashlr swarm
+# Disable with --no-memory or set genome.playbookOnRun: false in config
+```
+
+Synthesis uses the **local provider only**. If synthesis fails or the budget is exhausted, it falls back to a concatenated recall summary — never errors, never calls a cloud endpoint.
+
+**Export your genome**
+
+The genome is yours. Export it to a portable format at any time — no lock-in:
+
+```sh
+ashlr genome export ~/genome-backup.json             # JSON array of GenomeEntry objects
+ashlr genome export ~/genome-backup.md --format md   # human-readable Markdown
+```
+
+Export is strictly read-only and never modifies the genome store.
+
+**Privacy**
+
+| Guarantee | Detail |
+|---|---|
+| Metadata/summary only | Capture never reads prompts, completions, tool args, or file contents |
+| Hard-capped entries | Each auto-captured entry is capped at ~800 chars |
+| Local-only | All genome data stays under `~/.ashlr/genome/`; no cloud sync |
+| No data loss | Consolidation is backup-first; `export` is read-only; store is append-only |
+| Opt-out anywhere | `--no-capture` per run; `autoCapture: false` globally; `--no-memory` skips injection |
+
+**Config**
+
+```jsonc
+// ~/.ashlr/config.json (relevant fields)
+{
+  "genome": {
+    "maxRecall": 5,           // top-k recall hits injected into prompts
+    "injectOnRun": true,      // inject genome context into agent runs (M7)
+    "autoCapture": true,      // auto-capture run/swarm summaries on completion (M16)
+    "playbookOnRun": true     // synthesise playbook for planning context (M16)
+  }
+}
+```
+
+---
+
 ### Spec-driven swarms
 
 Author an ambitious end-state spec, then unleash a fleet of local agents against it — all within hard budget and safety guardrails.
@@ -448,7 +540,7 @@ The implementation lives in `src/core/env-bridge.ts` (`buildToolEnv` /
 | Orchestration | `run/provider-client` · `run/budget` · `run/agent-loop` · `run/orchestrator` |
 | Observability | `observability/usage-source` · `observability/rollup` · `observability/budget-alert` |
 | Lifecycle | `lifecycle/templates` · `lifecycle/scaffold` · `lifecycle/ship` |
-| Memory / genome | `genome/store` · `genome/recall` |
+| Memory / genome | `genome/store` · `genome/recall` · `genome/capture` · `genome/consolidate` · `genome/playbook` · `genome/export` |
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full module map and data flow.
 
@@ -461,7 +553,7 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full module map and data flow.
 - **Local models first.** Provider resolution probes LM Studio (`:1234`) and Ollama (`:11434`) and uses the first one up. `ashlr run` will not call a cloud API unless you pass `--allow-cloud` and the key is present — otherwise it errors rather than silently billing you.
 - **Metadata-only telemetry.** `ashlr pulse` reads only usage metadata (token counts, model id, timestamp, project path) from transcripts. Prompts, completions, tool arguments, and file contents are never read, stored, or printed. All rollups stay under `~/.ashlr/`.
 - **Phantom secrets, read-only.** The [`phantom`](https://github.com/nicholasgasior/phantom) integration surfaces only secret *names* and vault status — values are never read, captured, or printed.
-- **Private memory.** The genome lives under `~/.ashlr/genome/` and each repo's `.ashlrcode/genome/`. Embeddings (when used) are computed locally via Ollama; no cloud call is ever made.
+- **Private memory.** The genome lives under `~/.ashlr/genome/` and each repo's `.ashlrcode/genome/`. Embeddings (when used) are computed locally via Ollama; no cloud call is ever made. Auto-capture (M16) records metadata/summary only — never prompts, completions, or file contents. The full genome is always exportable (`ashlr genome export`) in a portable format; no lock-in.
 
 ---
 

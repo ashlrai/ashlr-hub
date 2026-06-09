@@ -8,6 +8,50 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M16: Compounding Genome
+
+### Added
+- **Auto-capture from runs and swarms** (`src/core/genome/capture.ts`):
+  - `captureFromRun(run, cfg)` and `captureFromSwarm(s, cfg)` — fire-and-forget hooks called on run/swarm completion. Append a structured `GenomeEntry` (goal, concise approach/outcome summary, tags for project/status/tool/engine, and result gist) to `~/.ashlr/genome/hub.jsonl` via `appendHubEntry`.
+  - `summarizeForGenome({goal, result, tasks})` — pure, deterministic helper that produces a secret-free, hard-capped (~800 chars) summary suitable for storage. Captures metadata/summary only — never raw prompts, completions, tool arguments, file contents, or secrets.
+  - Opt-out: set `cfg.genome.autoCapture: false` (default `true`) or pass `--no-capture` on `ashlr run` / `ashlr swarm`. Auto-capture is **dedupe-aware** and **never throws or blocks** — it fires in the background after completion.
+- **`ashlr genome consolidate`** (`src/core/genome/consolidate.ts`):
+  - `consolidateGenome(cfg)` — merges near-duplicate entries (same goal/project with high text overlap) into one canonical entry. Preserves full provenance: merged `count`, `firstSeen`/`lastSeen` timestamps, and a union of all tags. Returns a `ConsolidationResult { before, after, merged, backupPath }`.
+  - **Writes a timestamped backup of `hub.jsonl` before any mutation.** Nothing is silently deleted; all content is preserved in the merged entry. Bounded: only touches the hub store.
+- **`ashlr genome playbook "<goal>"`** (`src/core/genome/playbook.ts`):
+  - `buildPlaybook(goal, cfg, opts?)` — recalls similar past entries and synthesises a concise "how we approached this before — what worked / what failed / cost" playbook using the **local provider only**. Falls back to a concatenated recall summary when synthesis is unavailable or over budget. Never throws.
+  - `playbookText(p, maxChars)` — pure, hard-capped serialiser for injecting into agent prompts.
+  - Used by `orchestrator.runGoal`: when `cfg.genome.playbookOnRun !== false` (and `--no-memory` is not set), the M7 raw-recall injection is upgraded to a synthesised playbook injected (bounded by char cap) into the planning context.
+- **`ashlr genome export <file>`** (`src/core/genome/export.ts`):
+  - `exportGenome(cfg, dest, format)` — dumps the full genome to a portable JSON or Markdown file. Read-only, never throws, no lock-in. Returns `{ok, count, path}`.
+  - `format: 'json'` — newline-delimited array of `GenomeEntry` objects.
+  - `format: 'md'` — human-readable Markdown with one section per entry.
+- **New CLI subcommands in `ashlr genome`** (`src/cli/genome.ts`):
+  - `ashlr genome --teach "<note>" [--project p] [--tags a,b]` — append a high-value manual note (tagged `teach`).
+  - `ashlr genome consolidate` — dedupe and merge near-duplicate entries (backup-first).
+  - `ashlr genome export <file> [--format json|md]` — portable export of the full genome.
+  - `ashlr genome playbook "<goal>"` — synthesise and print a playbook for the given goal.
+  - All existing `cmdRecall` / `cmdLearn` / `cmdGenome` (health) commands preserved unchanged.
+- **New types in `src/core/types.ts`** (all existing types preserved):
+  - `GenomeCapture { goal: string; project: string|null; summary: string; tags: string[]; outcome: 'done'|'aborted'|'failed'; source: 'run'|'swarm'|'teach' }`
+  - `Playbook { goal: string; entries: RecallHit[]; synthesis: string }`
+  - `ConsolidationResult { before: number; after: number; merged: number; backupPath: string }`
+  - `cfg.genome.autoCapture?: boolean` (default `true`) and `cfg.genome.playbookOnRun?: boolean` (default `true`).
+
+### Changed
+- `src/core/run/orchestrator.ts`: `runGoal` calls `captureFromRun` on completion and injects `playbookText` into planning context (upgrading M7 raw-recall); honours `--no-capture` flag and `cfg.genome.autoCapture`.
+- `src/core/swarm/runner.ts`: `runSwarm` calls `captureFromSwarm` on completion; honours `--no-capture`.
+- `src/cli/run.ts` and `src/cli/swarm.ts`: `--no-capture` flag added; sets `cfg.genome.autoCapture = false` for that invocation only.
+
+### Guardrails (M16)
+- **Privacy**: auto-capture stores metadata/summary only. Raw prompts, completions, tool call arguments, and file contents are never written to the genome. `summarizeForGenome` is hard-capped at ~800 chars and is deterministic with no I/O.
+- **No data loss**: `consolidateGenome` writes a timestamped backup before any mutation; merged entries retain all key content; the genome is append-only everywhere else; `exportGenome` is strictly read-only.
+- **Local-only**: playbook synthesis uses the local provider only (best-effort); falls back to concatenated recall on failure or budget exhaustion; no cloud calls. Auto-capture fires in the background and never throws.
+- **Non-blocking**: capture is fire-and-forget — it never delays a run result or swarm completion.
+- All 1504 existing tests preserved.
+
+---
+
 ## [Unreleased] — M15: Cost-Optimal Local-First Routing
 
 ### Added

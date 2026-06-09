@@ -2,7 +2,7 @@
  * `ashlr swarm` and `ashlr swarms` CLI commands.
  *
  * `ashlr swarm "<goal>" | <specId> [--budget N] [--parallel N] [--background]
- *   [--resume <id>] [--dry-run] [--allow-cloud] [--project <path>] [--json]`
+ *   [--resume <id>] [--dry-run] [--allow-cloud] [--project <path>] [--json] [--no-capture]`
  *
  * Subcommand `ashlr swarm show <id>` prints a saved swarm.
  *
@@ -101,6 +101,8 @@ interface ParsedSwarmArgs {
   allowCloud: boolean;
   project?: string;
   json: boolean;
+  /** Skip auto-capture of this swarm to the genome (M16). */
+  noCapture: boolean;
   usageError?: string;
 }
 
@@ -115,6 +117,7 @@ function parseSwarmArgs(args: string[]): ParsedSwarmArgs {
         dryRun: false,
         allowCloud: false,
         json: false,
+        noCapture: false,
         usageError: 'Usage: ashlr swarm show <id>',
       };
     }
@@ -125,6 +128,7 @@ function parseSwarmArgs(args: string[]): ParsedSwarmArgs {
       dryRun: false,
       allowCloud: false,
       json: false,
+      noCapture: false,
     };
   }
 
@@ -134,6 +138,7 @@ function parseSwarmArgs(args: string[]): ParsedSwarmArgs {
     dryRun: false,
     allowCloud: false,
     json: false,
+    noCapture: false,
   };
 
   let i = 0;
@@ -167,6 +172,9 @@ function parseSwarmArgs(args: string[]): ParsedSwarmArgs {
       if (!val) { result.usageError = '--resume requires a swarm id'; return result; }
       result.resumeId = val;
       i++;
+    } else if (arg === '--no-capture') {
+      result.noCapture = true;
+      i++;
     } else if (arg === '--project') {
       const val = args[++i];
       if (!val) { result.usageError = '--project requires a path'; return result; }
@@ -191,7 +199,7 @@ function parseSwarmArgs(args: string[]): ParsedSwarmArgs {
     result.usageError =
       'Usage: ashlr swarm "<goal>" | <specId> [--budget N] [--parallel N]\n' +
       '              [--background] [--resume <id>] [--dry-run] [--allow-cloud]\n' +
-      '              [--project <path>] [--json]\n' +
+      '              [--project <path>] [--json] [--no-capture]\n' +
       '       ashlr swarm show <id>';
   }
 
@@ -429,7 +437,7 @@ async function cmdSwarmShow(id: string, jsonMode: boolean): Promise<number> {
 
 /**
  * `ashlr swarm "<goal>" | <specId> [--budget N] [--parallel N] [--background]
- *   [--resume <id>] [--dry-run] [--allow-cloud] [--project <path>] [--json]`
+ *   [--resume <id>] [--dry-run] [--allow-cloud] [--project <path>] [--json] [--no-capture]`
  *
  * Also handles `ashlr swarm show <id>`.
  *
@@ -541,6 +549,11 @@ export async function cmdSwarm(args: string[]): Promise<number> {
     swarmOpts.budget = {};
     if (parsed.budget !== undefined)    swarmOpts.budget.maxTokens  = parsed.budget;
     if (parsed.allowCloud !== undefined) swarmOpts.budget.allowCloud = parsed.allowCloud;
+  }
+
+  // Pass --no-capture so captureFromSwarm skips genome auto-capture for this swarm.
+  if (parsed.noCapture) {
+    (swarmOpts as SwarmOptions & { noCapture?: boolean }).noCapture = true;
   }
 
   // Print launch banner (non-JSON)
@@ -764,6 +777,7 @@ function printSwarmHelp(): void {
     ['--allow-cloud',    'Allow cloud providers for tasks (default: local-first Ollama/LM Studio).'],
     ['--project <path>', 'Absolute path to the target project directory.'],
     ['--json',           'Emit SwarmRun JSON on stdout; progress goes to stderr.'],
+    ['--no-capture',     'Skip auto-capture of this swarm to the genome (M16 playbook).'],
   ];
 
   const optW = Math.max(...opts.map(([o]) => o.length));
@@ -798,5 +812,6 @@ function printSwarmHelp(): void {
   console.log(`    ${dim('• Nested swarms refused (ASHLR_IN_SWARM guard).')}`);
   console.log(`    ${dim('• No outward/destructive actions (push/deploy) by default.')}`);
   console.log(`    ${dim('• All state persists to ~/.ashlr/swarms/<id>.json (resumable).')}`);
+  console.log(`    ${dim('• --no-capture disables genome auto-capture for this swarm.')}`);
   console.log('');
 }

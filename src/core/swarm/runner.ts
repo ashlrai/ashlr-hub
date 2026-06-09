@@ -16,6 +16,11 @@
  *    and inherited by every spawned engine subprocess. That single assignment
  *    is the load-bearing recursion / fork-bomb guard — do not remove it.
  *  - Never throws out of runSwarm; all errors surface in SwarmRun.status.
+ *
+ * M16 addition: auto-capture.
+ *  - On completion (any terminal status), calls captureFromSwarm (fire-and-
+ *    forget) from genome/capture.ts. Disabled via opts.noCapture or
+ *    cfg.genome?.autoCapture === false. Never throws, never blocks.
  */
 
 import * as path from 'node:path';
@@ -469,6 +474,30 @@ function spawnBackgroundWorker(swarmId: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// M16: Auto-capture helper (fire-and-forget, never throws)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fire-and-forget genome capture for a completed swarm.
+ * Dynamically imports genome/capture.js so the module can be absent
+ * during pre-M16 builds without breaking anything.
+ * Never throws, never blocks the caller.
+ */
+function fireCaptureFromSwarm(run: SwarmRun, cfg: AshlrConfig): void {
+  void (async () => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const capMod = await import('../genome/capture.js') as any;
+      if (typeof capMod.captureFromSwarm === 'function') {
+        capMod.captureFromSwarm(run, cfg);
+      }
+    } catch {
+      // Never surface capture errors to the caller.
+    }
+  })();
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -483,11 +512,12 @@ function spawnBackgroundWorker(swarmId: string): void {
  *  - NO OUTWARD ACTION by default.
  *  - Resumable via opts.resumeId.
  *  - --background: re-execs self detached, returns id immediately.
+ *  - M16: calls captureFromSwarm on completion unless opts.noCapture is set.
  */
 export async function runSwarm(
   input: { goal: string; specId?: string },
   cfg: AshlrConfig,
-  opts: SwarmOptions,
+  opts: SwarmOptions & { noCapture?: boolean },
   sink: StreamSink,
 ): Promise<SwarmRun> {
   // -------------------------------------------------------------------------
@@ -638,6 +668,7 @@ export async function runSwarm(
       run.result = `Planning failed: ${err instanceof Error ? err.message : String(err)}`;
       maybePersist(run);
       emitLog(sink, run.result);
+      if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
       return run;
     }
   }
@@ -669,6 +700,7 @@ export async function runSwarm(
           'Swarm aborted: hard total budget exceeded before phase ' + phase;
         persist(run);
         emitLog(sink, run.result);
+        if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
       }
 
@@ -680,6 +712,7 @@ export async function runSwarm(
         run.result = `Swarm aborted: hard total budget exceeded during phase ${phase}`;
         persist(run);
         emitLog(sink, run.result);
+        if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
       }
     }
@@ -689,6 +722,7 @@ export async function runSwarm(
     run.result = `Swarm failed: ${err instanceof Error ? err.message : String(err)}`;
     persist(run);
     emitLog(sink, run.result);
+    if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
     return run;
   }
 
@@ -726,5 +760,9 @@ export async function runSwarm(
   persist(run);
 
   emitLog(sink, `Swarm ${run.id} finished with status: ${run.status}`);
+
+  // M16: Auto-capture on completion (fire-and-forget, never throws).
+  if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
+
   return run;
 }
