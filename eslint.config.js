@@ -44,4 +44,51 @@ export default tseslint.config(
       },
     },
   },
+  {
+    // Node build scripts (e.g. scripts/copy-assets.mjs) run under Node and use
+    // Node globals.
+    files: ['scripts/**/*.mjs', 'scripts/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: {
+        process: 'readonly',
+        console: 'readonly',
+        Buffer: 'readonly',
+      },
+    },
+  },
+  {
+    // The M14 web dashboard SPA (src/core/web/public/*.js) is browser code
+    // shipped as a static asset — it runs in the browser, not Node. Lint it
+    // with browser globals. Empty catch blocks are an intentional best-effort
+    // pattern in the live-update code; unused locals are surfaced as warnings.
+    files: ['src/core/web/public/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: {
+        window: 'readonly',
+        document: 'readonly',
+        location: 'readonly',
+        console: 'readonly',
+        EventSource: 'readonly',
+        fetch: 'readonly',
+        URL: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
+        requestAnimationFrame: 'readonly',
+        navigator: 'readonly',
+      },
+    },
+    rules: {
+      'no-empty': ['error', { allowEmptyCatch: true }],
+      'no-unused-vars': 'warn',
+      // Plain browser JS, not TypeScript — the TS-aware unused-vars rule
+      // (inherited from tseslint.configs.recommended) should not apply here.
+      '@typescript-eslint/no-unused-vars': 'off',
+    },
+  },
 );

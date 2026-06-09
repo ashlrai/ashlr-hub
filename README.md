@@ -273,6 +273,54 @@ ashlr tui --once    # render one frame to stdout and exit (headless / scripting 
 
 **Terminal safety**: alt-screen, cursor visibility, and raw mode are always restored on quit, signal (`SIGINT`/`SIGTERM`), or thrown exception. The terminal is never left corrupted.
 
+#### Web dashboard (`ashlr serve`)
+
+A polished, fully local web dashboard — no CDN, no external fonts or scripts, no network calls. Everything is bundled in the repo and served by a Node `http` server bound to `127.0.0.1`.
+
+```sh
+ashlr serve                     # start on http://127.0.0.1:7777 (default port)
+ashlr serve --port 8080 --open  # custom port; open the browser automatically
+ashlr serve --allow-dispatch    # enable the opt-in POST /api/run endpoint (prints token)
+```
+
+**Pages**
+
+| Page | What it shows |
+|---|---|
+| Overview | Aggregated ecosystem snapshot (git health, tools, 7-day activity) |
+| Runs | Recent agent runs — status, goal, token/cost usage |
+| Swarms | SVG dependency-graph of the swarm DAG (nodes colored by phase/status, edges for deps) + live burndown chart |
+| Pulse | SVG bar charts of cost/token usage by project, day, and model |
+| Genome | Full genome list + instant search box (`/api/genome?q=`) |
+
+All pages live-update via a Server-Sent Events stream (`/api/events`) — no manual refresh needed.
+
+**JSON API** (read-only by default)
+
+| Endpoint | Handler |
+|---|---|
+| `GET /api/snapshot` | `buildSnapshot(cfg)` aggregate |
+| `GET /api/runs` / `/api/run/:id` | `listRuns` / `loadRun` |
+| `GET /api/swarms` / `/api/swarm/:id` | `listSwarms` / `loadSwarm` |
+| `GET /api/pulse[?window=1d\|7d\|30d]` | `buildRollup` (default 7d) |
+| `GET /api/genome[?q=<query>]` | `recall(q, cfg)` or `loadGenome(cfg)` |
+| `GET /api/events` | SSE stream (bounded poll, cleared on disconnect) |
+| `POST /api/run` | **Opt-in only** — requires `--allow-dispatch` + session token header |
+
+**Security posture**
+
+| Guardrail | Behaviour |
+|---|---|
+| Local-only bind | `127.0.0.1` only — never `0.0.0.0`; not reachable from the network |
+| DNS-rebinding protection | Host-header allowlist (`localhost`/`127.0.0.1`/`::1` ± port) checked first — all other hosts → 403 |
+| Read-only by default | No mutating endpoints unless `--allow-dispatch` is explicitly passed |
+| Token-guarded dispatch | Per-session token (printed at start, required in header, constant-time compared) — defeats CSRF/drive-by POSTs |
+| Path-traversal-safe | Static serving resolves under the assets dir; `..`, absolute paths, null bytes, and symlink escapes → 404 |
+| No SSRF | The server makes no outward network calls |
+| No CDN / fully offline | All assets bundled in the repo; works without any internet access |
+| Ephemeral | `Ctrl-C` stops the server cleanly; SSE timers cleared; no leaks |
+| Zero new deps | `http` / `crypto` / `fs` / `path` / `url` builtins only |
+
 #### Raycast extension
 
 The Raycast extension at `src/raycast/` adds two new commands and makes the existing views live:

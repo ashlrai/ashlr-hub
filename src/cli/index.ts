@@ -28,6 +28,7 @@
  *   swarm "<goal>"|<specId>    Decompose a spec into a contracts-first agent swarm and run it.
  *   swarms [--json]            List past swarm runs.
  *   tui [--once]               Interactive terminal dashboard (alias: dash).
+ *   serve [--port N] [--open]  Local web dashboard + JSON API on 127.0.0.1 (default port 7777).
  *   help                       Show this help.
  *
  * Exit codes: 0 success, 1 error/not-found, 2 bad usage.
@@ -226,6 +227,14 @@ const loadTuiCmd = lazyCmd(
   () => import('./tui.js' as unknown as string),
   (m) => m.cmdTui as Cmd,
   'tui command requires src/cli/tui.ts (M13 module not yet built).',
+);
+
+// ─── M14 command loader ────────────────────────────────────────────
+
+const loadServeCmd = lazyCmd(
+  () => import('./serve.js' as unknown as string),
+  (m) => m.cmdServe as Cmd,
+  'serve command requires src/cli/serve.ts (M14 module not yet built).',
 );
 
 // ─── ANSI helpers ──────────────────────────────────────────────────────────────
@@ -960,6 +969,9 @@ function cmdHelp(): void {
     ['swarm show <id>',              'Print a past swarm run in detail.'],
     ['swarms [--json]',              'List past swarm runs (newest first).'],
     ['tui [--once]',                 'Interactive terminal dashboard (alias: dash). --once renders one frame and exits.'],
+    ['serve [--port N]',             'Start local web dashboard + JSON API on 127.0.0.1 (default port 7777).'],
+    ['serve --open',                 'Start dashboard and open browser automatically.'],
+    ['serve --allow-dispatch',       'Enable guarded POST /api/run (prints session token).'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1160,6 +1172,12 @@ async function main(): Promise<void> {
       case 'dash': {
         const cmdTui = await loadTuiCmd();
         process.exitCode = await cmdTui(rest);
+        break;
+      }
+
+      case 'serve': {
+        const cmdServe = await loadServeCmd();
+        process.exitCode = await cmdServe(rest);
         break;
       }
 

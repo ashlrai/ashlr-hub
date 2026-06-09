@@ -8,6 +8,46 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M14: Surfaces II (Local Web Dashboard)
+
+### Added
+- **`ashlr serve [--port N] [--open] [--allow-dispatch]` — local web dashboard** (`src/core/web/server.ts`, `src/core/web/api.ts`, `src/core/web/static.ts`, `src/cli/serve.ts`):
+  - Starts a localhost HTTP server (Node `http` builtin) serving a JSON API and a single-page dashboard (static assets bundled in the repo — **no CDN, fully offline**). Default port 7777; `--open` launches the browser automatically.
+  - **Five dashboard views** (vanilla JS + inline SVG/Canvas, dark theme, brand aesthetic, live via EventSource):
+    - **Overview** — aggregated snapshot of the local ecosystem (git health, tools, 7-day activity).
+    - **Runs** — paginated list of recent agent runs with status, goal, and token/cost usage.
+    - **Swarms** — swarm detail with an **SVG dependency-graph** (nodes per task colored by phase/status, edges for declared dependencies) and a live burndown chart updating in real time via SSE.
+    - **Pulse** — SVG bar charts of cost/token usage by project, day, and model.
+    - **Genome browser** — full genome list with a search box that hits `/api/genome?q=` for instant recall.
+  - **Live updates via SSE** — `GET /api/events` uses Server-Sent Events to push run/swarm state changes (bounded poll interval) so the page live-streams burndown without a reload. Cleared on disconnect and on server close (no timer leaks).
+- **JSON read-only API** (all endpoints metadata-only; no secrets served):
+  - `GET /api/snapshot` — `buildSnapshot(cfg)` aggregate (M13 dashboard snapshot).
+  - `GET /api/runs` / `GET /api/run/:id` — `listRuns` / `loadRun` (404 on unknown id).
+  - `GET /api/swarms` / `GET /api/swarm/:id` — `listSwarms` / `loadSwarm` (404 on unknown id).
+  - `GET /api/pulse[?window=1d|7d|30d]` — `buildRollup` (default 7d).
+  - `GET /api/genome[?q=<query>]` — `recall(q, cfg)` when `q` supplied, else `loadGenome(cfg)`.
+  - `GET /api/events` — SSE stream (see above).
+- **Opt-in dispatch endpoint** (`POST /api/run`) — registered **only** when `--allow-dispatch` is passed. Protected by a per-session token (printed at server start, required in a header, compared constant-time) to defeat CSRF/drive-by POSTs. Body clamped to local-first budget caps; `allowCloud` never set. **Default server has zero mutating endpoints.**
+- **New types** in `src/core/types.ts`: `WebServerOptions`, `WebServerHandle`.
+
+### Security (non-negotiable, documented in CONTRACT-M14.md)
+- **Binds `127.0.0.1` only** — never `0.0.0.0`; not externally reachable.
+- **Host-header allowlist** (`localhost` / `127.0.0.1` / `::1` ± port) enforced as the first pipeline step — all other `Host` values → 403. Defeats DNS-rebinding attacks.
+- **Read-only by default** — no mutating endpoints exist unless `--allow-dispatch` is explicitly passed.
+- **Token-guarded dispatch** — constant-time comparison; token printed once at startup; never in logs or snapshot responses.
+- **Path-traversal-safe static serving** — decode + join under assets dir, resolve, reject `..` / absolute / null-byte / symlink-escape → 404.
+- **No outward/SSRF calls** from the server process.
+- **No CDN / no external fonts or scripts** — all assets bundled in the repo and served locally; fully functional offline.
+- **Ephemeral + clean close** — `Ctrl-C` stops the server; SSE poll timers cleared; no leaks.
+- **Zero new runtime dependencies** (`http` / `crypto` / `fs` / `path` / `url` builtins only).
+
+### Guardrails (M14)
+- All 1314 existing tests preserved.
+- Reuses `core/dashboard.ts buildSnapshot`, `core/run/orchestrator.ts listRuns/loadRun/runGoal`, `core/swarm/store.ts listSwarms/loadSwarm`, `core/observability/rollup.ts buildRollup`, `core/genome/store.ts loadGenome/genomeHealth`, `core/genome/recall.ts recall`, and `cli/ui.ts`.
+- Zero new runtime dependencies in `core/` and `cli/`.
+
+---
+
 ## [Unreleased] — M13: Surfaces I (Interactive TUI + Real-Time Raycast)
 
 ### Added

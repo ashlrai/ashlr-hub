@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="ashlr hub — local-first AI orchestration dashboard" />
+  <title>ashlr hub</title>
+
+  <!--
+    Critical path CSS — only the structural rules needed before styles.css
+    renders (avoids FOUC on the dark background). Everything else lives in
+    styles.css and app.js. NO external fonts, NO CDN — all local.
+  -->
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      /* Brand palette — terminal-refined, dark-first */
+      --bg-base:      #0d0f12;
+      --bg-surface:   #13161b;
+      --bg-elevated:  #1a1e26;
+      --bg-hover:     #1f2430;
+
+      --border:       #222834;
+      --border-focus: #3a4560;
+
+      --text-primary:   #e2e8f5;
+      --text-secondary: #8892a8;
+      --text-muted:     #4e5768;
+      --text-inverse:   #0d0f12;
+
+      /* Accent — cyan-electric, echo of terminal cursor */
+      --accent:         #00d4ff;
+      --accent-dim:     #00a8cc;
+      --accent-glow:    rgba(0, 212, 255, 0.12);
+
+      /* Status semantics */
+      --status-ok:      #22d3a0;
+      --status-warn:    #f5a623;
+      --status-fail:    #f04e4e;
+      --status-pending: #6b7a99;
+      --status-running: #00d4ff;
+
+      /* Phase palette (swarm DAG nodes) */
+      --phase-scaffold:  #7c6aff;
+      --phase-build:     #00d4ff;
+      --phase-integrate: #f5a623;
+      --phase-verify:    #22d3a0;
+      --phase-review:    #f04e4e;
+
+      /* Typography — system mono stack, no external fonts */
+      --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code',
+                   ui-monospace, 'Cascadia Mono', 'Segoe UI Mono',
+                   'Ubuntu Mono', Menlo, Consolas, monospace;
+      --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui,
+                   Helvetica, Arial, sans-serif;
+
+      /* Layout */
+      --nav-height: 52px;
+      --sidebar-w:  220px;
+      --radius-sm:  4px;
+      --radius-md:  8px;
+      --radius-lg:  12px;
+
+      /* Motion */
+      --transition: 140ms ease;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg-base);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      overflow: hidden; /* layout manages scrolling per-region */
+    }
+  </style>
+
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+
+<body>
+
+  <!-- ── Skip navigation (accessibility) ─────────────────────────────────── -->
+  <a href="#main-content" class="skip-link">Skip to content</a>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- TOP NAV                                                                -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <header class="topnav" role="banner">
+    <div class="topnav__brand" aria-label="ashlr hub home">
+      <!-- Inline SVG wordmark / logo mark — no external asset -->
+      <svg class="topnav__logo" width="24" height="24" viewBox="0 0 24 24"
+           fill="none" xmlns="http://www.w3.org/2000/svg"
+           aria-hidden="true" focusable="false">
+        <!-- Hexagon outline (hub icon) -->
+        <polygon points="12,2 21.39,7 21.39,17 12,22 2.61,17 2.61,7"
+                 stroke="currentColor" stroke-width="1.5"
+                 fill="none" stroke-linejoin="round"/>
+        <!-- Inner pulse dot -->
+        <circle cx="12" cy="12" r="2.5" fill="currentColor"/>
+        <!-- Spoke lines -->
+        <line x1="12" y1="9.5" x2="12" y2="7"   stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+        <line x1="12" y1="14.5" x2="12" y2="17" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+        <line x1="9.8"  y1="10.75" x2="7.5"  y2="9.5"  stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+        <line x1="14.2" y1="13.25" x2="16.5" y2="14.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+        <line x1="9.8"  y1="13.25" x2="7.5"  y2="14.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+        <line x1="14.2" y1="10.75" x2="16.5" y2="9.5"  stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+      </svg>
+      <span class="topnav__wordmark">ashlr<span class="topnav__wordmark-hub">hub</span></span>
+    </div>
+
+    <!-- Primary tab navigation -->
+    <nav class="topnav__tabs" role="navigation" aria-label="Dashboard sections">
+      <button class="nav-tab nav-tab--active"
+              role="tab"
+              aria-selected="true"
+              aria-controls="panel-overview"
+              data-view="overview"
+              type="button">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <rect x="1" y="1" width="6" height="6" rx="1.5" fill="currentColor" opacity=".9"/>
+          <rect x="9" y="1" width="6" height="6" rx="1.5" fill="currentColor" opacity=".6"/>
+          <rect x="1" y="9" width="6" height="6" rx="1.5" fill="currentColor" opacity=".6"/>
+          <rect x="9" y="9" width="6" height="6" rx="1.5" fill="currentColor" opacity=".3"/>
+        </svg>
+        Overview
+      </button>
+
+      <button class="nav-tab"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-runs"
+              data-view="runs"
+              type="button">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.5"/>
+          <polyline points="5.5,8 7.5,10 10.5,6"
+                    stroke="currentColor" stroke-width="1.5"
+                    stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Runs
+      </button>
+
+      <button class="nav-tab"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-swarms"
+              data-view="swarms"
+              type="button">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="3"  r="2" fill="currentColor" opacity=".9"/>
+          <circle cx="3" cy="13" r="2" fill="currentColor" opacity=".7"/>
+          <circle cx="13" cy="13" r="2" fill="currentColor" opacity=".7"/>
+          <line x1="8" y1="5" x2="3"  y2="11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          <line x1="8" y1="5" x2="13" y2="11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          <line x1="3" y1="13" x2="13" y2="13" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+        Swarms
+      </button>
+
+      <button class="nav-tab"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-pulse"
+              data-view="pulse"
+              type="button">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <polyline points="1,8 4,8 5.5,3 7,13 8.5,6 10,10 11.5,8 15,8"
+                    stroke="currentColor" stroke-width="1.5"
+                    stroke-linecap="round" stroke-linejoin="round"
+                    fill="none"/>
+        </svg>
+        Pulse
+      </button>
+
+      <button class="nav-tab"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-genome"
+              data-view="genome"
+              type="button">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <!-- DNA helix suggestion -->
+          <path d="M5,1 Q8,4 5,7 Q8,10 5,13 Q8,16 5,15"
+                stroke="currentColor" stroke-width="1.4"
+                stroke-linecap="round" fill="none"/>
+          <path d="M11,1 Q8,4 11,7 Q8,10 11,13 Q8,16 11,15"
+                stroke="currentColor" stroke-width="1.4"
+                stroke-linecap="round" fill="none"/>
+          <line x1="6.5" y1="3.5" x2="9.5" y2="3.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          <line x1="6"   y1="8"   x2="10"  y2="8"   stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          <line x1="6.5" y1="12.5" x2="9.5" y2="12.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+        Genome
+      </button>
+    </nav>
+
+    <!-- Right side: live indicator + connection status -->
+    <div class="topnav__meta" aria-live="polite" aria-atomic="false">
+      <span class="live-badge" id="live-badge" aria-label="Live updates active">
+        <span class="live-badge__dot" aria-hidden="true"></span>
+        <span class="live-badge__label">live</span>
+      </span>
+      <span class="topnav__time" id="topnav-time" aria-label="Last updated"></span>
+    </div>
+  </header>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- MAIN LAYOUT                                                            -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="layout" role="presentation">
+
+    <!-- ── MAIN CONTENT ─────────────────────────────────────────────────── -->
+    <main class="main-content" id="main-content" role="main">
+
+      <!-- ── PANEL: Overview ──────────────────────────────────────────── -->
+      <section class="panel panel--active"
+               id="panel-overview"
+               role="tabpanel"
+               aria-labelledby="tab-overview"
+               tabindex="0">
+
+        <div class="panel__header">
+          <h1 class="panel__title">Overview</h1>
+          <p class="panel__subtitle">Hub at a glance</p>
+        </div>
+
+        <!-- Stat cards row -->
+        <div class="stat-grid" role="list" aria-label="Hub statistics">
+
+          <article class="stat-card" role="listitem" aria-label="Repositories">
+            <header class="stat-card__header">
+              <svg class="stat-card__icon" width="16" height="16" viewBox="0 0 16 16"
+                   fill="none" aria-hidden="true">
+                <rect x="1.5" y="1.5" width="13" height="13" rx="2"
+                      stroke="currentColor" stroke-width="1.4"/>
+                <line x1="1.5" y1="5.5" x2="14.5" y2="5.5"
+                      stroke="currentColor" stroke-width="1.2"/>
+                <circle cx="4.5" cy="3.5" r="0.8" fill="currentColor"/>
+                <circle cx="7"   cy="3.5" r="0.8" fill="currentColor"/>
+              </svg>
+              <span class="stat-card__label">Repos</span>
+            </header>
+            <div class="stat-card__value" id="stat-repos-total"
+                 aria-live="polite">—</div>
+            <div class="stat-card__sub">
+              <span class="stat-card__chip stat-card__chip--warn"
+                    id="stat-repos-dirty" aria-label="dirty repos">— dirty</span>
+              <span class="stat-card__chip stat-card__chip--muted"
+                    id="stat-repos-stale" aria-label="stale repos">— stale</span>
+            </div>
+          </article>
+
+          <article class="stat-card" role="listitem" aria-label="Activity">
+            <header class="stat-card__header">
+              <svg class="stat-card__icon" width="16" height="16" viewBox="0 0 16 16"
+                   fill="none" aria-hidden="true">
+                <polyline points="1,10 4,10 5.5,5 7,13 8.5,7 10,10 12,10"
+                          stroke="currentColor" stroke-width="1.4"
+                          stroke-linecap="round" stroke-linejoin="round"/>
+                <line x1="12" y1="10" x2="15" y2="10"
+                      stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+              </svg>
+              <span class="stat-card__label">Activity <span class="stat-label-dim">7d</span></span>
+            </header>
+            <div class="stat-card__value" id="stat-activity-sessions"
+                 aria-live="polite">—</div>
+            <div class="stat-card__sub">
+              <span class="stat-card__chip stat-card__chip--accent"
+                    id="stat-activity-cost" aria-label="estimated cost">—</span>
+              <span class="stat-card__chip stat-card__chip--muted"
+                    id="stat-activity-tokens" aria-label="tokens">— tok</span>
+            </div>
+          </article>
+
+          <article class="stat-card" role="listitem" aria-label="Tools">
+            <header class="stat-card__header">
+              <svg class="stat-card__icon" width="16" height="16" viewBox="0 0 16 16"
+                   fill="none" aria-hidden="true">
+                <path d="M9,1.5 L14.5,7 L10,11.5 L4.5,6 L9,1.5Z"
+                      stroke="currentColor" stroke-width="1.4"
+                      stroke-linejoin="round" fill="none"/>
+                <line x1="4.5" y1="11.5" x2="1.5" y2="14.5"
+                      stroke="currentColor" stroke-width="2"
+                      stroke-linecap="round"/>
+              </svg>
+              <span class="stat-card__label">Tools</span>
+            </header>
+            <div class="stat-card__value" id="stat-tools"
+                 aria-live="polite">—</div>
+            <div class="stat-card__sub">
+              <span class="stat-card__chip stat-card__chip--ok"
+                    id="stat-tools-installed" aria-label="installed tools">— installed</span>
+            </div>
+          </article>
+
+          <article class="stat-card" role="listitem" aria-label="Genome">
+            <header class="stat-card__header">
+              <svg class="stat-card__icon" width="16" height="16" viewBox="0 0 16 16"
+                   fill="none" aria-hidden="true">
+                <path d="M5,1 Q8,4 5,7 Q8,10 5,13"
+                      stroke="currentColor" stroke-width="1.4"
+                      stroke-linecap="round" fill="none"/>
+                <path d="M11,1 Q8,4 11,7 Q8,10 11,13"
+                      stroke="currentColor" stroke-width="1.4"
+                      stroke-linecap="round" fill="none"/>
+                <line x1="6.5" y1="3.5" x2="9.5" y2="3.5"
+                      stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                <line x1="6" y1="7" x2="10" y2="7"
+                      stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                <line x1="6.5" y1="10.5" x2="9.5" y2="10.5"
+                      stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+              </svg>
+              <span class="stat-card__label">Genome</span>
+            </header>
+            <div class="stat-card__value" id="stat-genome-entries"
+                 aria-live="polite">—</div>
+            <div class="stat-card__sub">
+              <span class="stat-card__chip stat-card__chip--muted"
+                    id="stat-genome-projects" aria-label="projects in genome">— projects</span>
+            </div>
+          </article>
+
+        </div><!-- /.stat-grid -->
+
+        <!-- Recent runs + swarms side-by-side -->
+        <div class="overview-grid">
+
+          <section class="card" aria-labelledby="ov-runs-heading">
+            <header class="card__header">
+              <h2 class="card__title" id="ov-runs-heading">Recent Runs</h2>
+              <button class="card__action" data-goto="runs" type="button"
+                      aria-label="View all runs">All runs</button>
+            </header>
+            <div class="card__body">
+              <ul class="run-list" id="ov-runs-list" aria-live="polite" aria-label="Recent runs">
+                <li class="run-list__empty skeleton-line">Loading…</li>
+              </ul>
+            </div>
+          </section>
+
+          <section class="card" aria-labelledby="ov-swarms-heading">
+            <header class="card__header">
+              <h2 class="card__title" id="ov-swarms-heading">Active Swarms</h2>
+              <button class="card__action" data-goto="swarms" type="button"
+                      aria-label="View all swarms">All swarms</button>
+            </header>
+            <div class="card__body">
+              <ul class="swarm-list" id="ov-swarms-list" aria-live="polite" aria-label="Recent swarms">
+                <li class="swarm-list__empty skeleton-line">Loading…</li>
+              </ul>
+            </div>
+          </section>
+
+        </div><!-- /.overview-grid -->
+
+        <!-- MCP servers strip -->
+        <section class="card card--full" aria-labelledby="ov-mcp-heading">
+          <header class="card__header">
+            <h2 class="card__title" id="ov-mcp-heading">MCP Servers</h2>
+          </header>
+          <div class="card__body">
+            <ul class="mcp-strip" id="ov-mcp-list" aria-live="polite" aria-label="MCP server health">
+              <li class="mcp-strip__empty skeleton-line">Loading…</li>
+            </ul>
+          </div>
+        </section>
+
+      </section><!-- /#panel-overview -->
+
+
+      <!-- ── PANEL: Runs ───────────────────────────────────────────────── -->
+      <section class="panel"
+               id="panel-runs"
+               role="tabpanel"
+               aria-labelledby="tab-runs"
+               tabindex="0"
+               hidden>
+
+        <div class="panel__header">
+          <h1 class="panel__title">Runs</h1>
+          <p class="panel__subtitle">Agent run history and status</p>
+        </div>
+
+        <div class="runs-layout">
+          <!-- Left: run list -->
+          <aside class="runs-sidebar" aria-label="Run list">
+            <ul class="run-index" id="runs-index" aria-live="polite">
+              <li class="run-index__empty skeleton-line">Loading…</li>
+            </ul>
+          </aside>
+
+          <!-- Right: run detail -->
+          <div class="runs-detail" id="runs-detail" aria-live="polite" aria-label="Run detail">
+            <div class="runs-detail__empty">
+              <svg width="48" height="48" viewBox="0 0 48 48" fill="none"
+                   aria-hidden="true" focusable="false">
+                <circle cx="24" cy="24" r="20" stroke="currentColor"
+                        stroke-width="2" opacity=".2"/>
+                <polyline points="16,24 22,30 32,18"
+                          stroke="currentColor" stroke-width="2.5"
+                          stroke-linecap="round" stroke-linejoin="round"
+                          opacity=".3"/>
+              </svg>
+              <p>Select a run to view details</p>
+            </div>
+          </div>
+        </div>
+
+      </section><!-- /#panel-runs -->
+
+
+      <!-- ── PANEL: Swarms ─────────────────────────────────────────────── -->
+      <section class="panel"
+               id="panel-swarms"
+               role="tabpanel"
+               aria-labelledby="tab-swarms"
+               tabindex="0"
+               hidden>
+
+        <div class="panel__header">
+          <h1 class="panel__title">Swarms</h1>
+          <p class="panel__subtitle">Multi-phase agent fleet runs with live DAG</p>
+        </div>
+
+        <div class="swarms-layout">
+
+          <!-- Left: swarm index -->
+          <aside class="swarms-sidebar" aria-label="Swarm list">
+            <ul class="swarm-index" id="swarms-index" aria-live="polite">
+              <li class="swarm-index__empty skeleton-line">Loading…</li>
+            </ul>
+          </aside>
+
+          <!-- Right: swarm detail + DAG -->
+          <div class="swarms-detail" id="swarms-detail" aria-live="polite"
+               aria-label="Swarm detail and dependency graph">
+
+            <!-- Burndown progress bar area -->
+            <div class="swarm-burndown" id="swarm-burndown" hidden>
+              <div class="swarm-burndown__bar-wrap" role="progressbar"
+                   aria-valuemin="0" aria-valuemax="100"
+                   aria-valuenow="0" aria-label="Swarm task completion">
+                <div class="swarm-burndown__bar" id="swarm-burndown-bar"></div>
+              </div>
+              <div class="swarm-burndown__labels">
+                <span id="swarm-burndown-text">0 / 0 tasks</span>
+                <span class="swarm-burndown__phase" id="swarm-burndown-phase"></span>
+              </div>
+            </div>
+
+            <!-- DAG visualization — SVG rendered by app.js -->
+            <div class="dag-wrap" id="dag-wrap" aria-label="Task dependency graph">
+              <svg class="dag-svg" id="dag-svg"
+                   role="img" aria-label="Swarm task dependency graph"
+                   xmlns="http://www.w3.org/2000/svg">
+                <title>Swarm DAG</title>
+                <desc>Visual dependency graph for the selected swarm's tasks</desc>
+                <!-- app.js populates this dynamically -->
+              </svg>
+              <div class="dag-empty" id="dag-empty">
+                <svg width="48" height="48" viewBox="0 0 48 48" fill="none"
+                     aria-hidden="true">
+                  <circle cx="24" cy="10" r="5" stroke="currentColor"
+                          stroke-width="2" opacity=".25"/>
+                  <circle cx="12" cy="38" r="5" stroke="currentColor"
+                          stroke-width="2" opacity=".25"/>
+                  <circle cx="36" cy="38" r="5" stroke="currentColor"
+                          stroke-width="2" opacity=".25"/>
+                  <line x1="24" y1="15" x2="12" y2="33"
+                        stroke="currentColor" stroke-width="1.5" opacity=".2"/>
+                  <line x1="24" y1="15" x2="36" y2="33"
+                        stroke="currentColor" stroke-width="1.5" opacity=".2"/>
+                </svg>
+                <p>Select a swarm to view its DAG</p>
+              </div>
+            </div>
+
+            <!-- Task list (below DAG) -->
+            <div class="swarm-tasks" id="swarm-tasks" aria-label="Swarm task list" hidden>
+              <h3 class="swarm-tasks__heading">Tasks</h3>
+              <ul class="task-list" id="swarm-task-list" aria-live="polite"></ul>
+            </div>
+
+          </div><!-- /.swarms-detail -->
+        </div><!-- /.swarms-layout -->
+
+      </section><!-- /#panel-swarms -->
+
+
+      <!-- ── PANEL: Pulse ──────────────────────────────────────────────── -->
+      <section class="panel"
+               id="panel-pulse"
+               role="tabpanel"
+               aria-labelledby="tab-pulse"
+               tabindex="0"
+               hidden>
+
+        <div class="panel__header panel__header--row">
+          <div>
+            <h1 class="panel__title">Pulse</h1>
+            <p class="panel__subtitle">Token usage and cost analytics</p>
+          </div>
+          <!-- Window picker -->
+          <fieldset class="window-picker" aria-label="Time window">
+            <legend class="sr-only">Time window</legend>
+            <label class="window-btn">
+              <input type="radio" name="pulse-window" value="1d" />
+              <span>1d</span>
+            </label>
+            <label class="window-btn window-btn--active">
+              <input type="radio" name="pulse-window" value="7d" checked />
+              <span>7d</span>
+            </label>
+            <label class="window-btn">
+              <input type="radio" name="pulse-window" value="30d" />
+              <span>30d</span>
+            </label>
+          </fieldset>
+        </div>
+
+        <!-- Totals row -->
+        <div class="pulse-totals" id="pulse-totals" aria-live="polite" aria-label="Pulse totals">
+          <div class="pulse-total">
+            <span class="pulse-total__label">Cost</span>
+            <span class="pulse-total__value" id="pulse-cost">—</span>
+          </div>
+          <div class="pulse-total">
+            <span class="pulse-total__label">Tokens in</span>
+            <span class="pulse-total__value" id="pulse-tokens-in">—</span>
+          </div>
+          <div class="pulse-total">
+            <span class="pulse-total__label">Tokens out</span>
+            <span class="pulse-total__value" id="pulse-tokens-out">—</span>
+          </div>
+          <div class="pulse-total">
+            <span class="pulse-total__label">Sessions</span>
+            <span class="pulse-total__value" id="pulse-sessions">—</span>
+          </div>
+          <div class="pulse-total">
+            <span class="pulse-total__label">Commits</span>
+            <span class="pulse-total__value" id="pulse-commits">—</span>
+          </div>
+          <!-- Budget alert -->
+          <div class="pulse-budget" id="pulse-budget" aria-live="polite"></div>
+        </div>
+
+        <div class="pulse-charts">
+
+          <!-- By-day bar chart (SVG, rendered by app.js) -->
+          <section class="chart-card" aria-labelledby="chart-daily-heading">
+            <header class="chart-card__header">
+              <h2 class="chart-card__title" id="chart-daily-heading">Daily cost</h2>
+              <span class="chart-card__unit" aria-label="Unit: USD">USD</span>
+            </header>
+            <div class="chart-card__body">
+              <svg class="bar-chart" id="chart-daily-svg"
+                   role="img" aria-label="Daily cost bar chart"
+                   xmlns="http://www.w3.org/2000/svg">
+                <title>Daily cost</title>
+              </svg>
+            </div>
+          </section>
+
+          <!-- By-project bar chart -->
+          <section class="chart-card" aria-labelledby="chart-project-heading">
+            <header class="chart-card__header">
+              <h2 class="chart-card__title" id="chart-project-heading">By project</h2>
+              <span class="chart-card__unit" aria-label="Unit: USD">USD</span>
+            </header>
+            <div class="chart-card__body">
+              <svg class="bar-chart" id="chart-project-svg"
+                   role="img" aria-label="Project cost bar chart"
+                   xmlns="http://www.w3.org/2000/svg">
+                <title>By project</title>
+              </svg>
+            </div>
+          </section>
+
+          <!-- By-model bar chart -->
+          <section class="chart-card" aria-labelledby="chart-model-heading">
+            <header class="chart-card__header">
+              <h2 class="chart-card__title" id="chart-model-heading">By model</h2>
+              <span class="chart-card__unit" aria-label="Unit: USD">USD</span>
+            </header>
+            <div class="chart-card__body">
+              <svg class="bar-chart" id="chart-model-svg"
+                   role="img" aria-label="Model cost bar chart"
+                   xmlns="http://www.w3.org/2000/svg">
+                <title>By model</title>
+              </svg>
+            </div>
+          </section>
+
+        </div><!-- /.pulse-charts -->
+
+      </section><!-- /#panel-pulse -->
+
+
+      <!-- ── PANEL: Genome ─────────────────────────────────────────────── -->
+      <section class="panel"
+               id="panel-genome"
+               role="tabpanel"
+               aria-labelledby="tab-genome"
+               tabindex="0"
+               hidden>
+
+        <div class="panel__header panel__header--row">
+          <div>
+            <h1 class="panel__title">Genome</h1>
+            <p class="panel__subtitle">Shared memory — cross-project knowledge base</p>
+          </div>
+          <!-- Live search -->
+          <div class="genome-search" role="search" aria-label="Search genome entries">
+            <label for="genome-search-input" class="sr-only">Search genome</label>
+            <svg class="genome-search__icon" width="14" height="14" viewBox="0 0 16 16"
+                 fill="none" aria-hidden="true">
+              <circle cx="6.5" cy="6.5" r="5" stroke="currentColor" stroke-width="1.5"/>
+              <line x1="10.5" y1="10.5" x2="14.5" y2="14.5"
+                    stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <input type="search"
+                   id="genome-search-input"
+                   class="genome-search__input"
+                   placeholder="Search entries…"
+                   autocomplete="off"
+                   spellcheck="false"
+                   aria-controls="genome-entries-list"
+                   aria-label="Search genome entries" />
+          </div>
+        </div>
+
+        <!-- Genome entries list -->
+        <div class="genome-grid">
+          <ul class="genome-list" id="genome-entries-list"
+              aria-live="polite" aria-label="Genome entries">
+            <li class="genome-list__empty skeleton-line">Loading…</li>
+          </ul>
+        </div>
+
+      </section><!-- /#panel-genome -->
+
+    </main><!-- /#main-content -->
+
+  </div><!-- /.layout -->
+
+  <!-- ── Toast / notification region ───────────────────────────────────── -->
+  <div class="toast-region" id="toast-region"
+       role="status" aria-live="polite" aria-atomic="true"
+       aria-label="Notifications"></div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!-- APP SCRIPT — loaded last, deferred, fully local (no CDN)             -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <script src="/app.js" defer></script>
+
+</body>
+</html>

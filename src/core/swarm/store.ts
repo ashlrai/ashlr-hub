@@ -62,8 +62,18 @@ function ensureDir(dir: string): void {
   }
 }
 
-/** Return the absolute path for a swarm record by id. */
+/**
+ * Return the absolute path for a swarm record by id.
+ *
+ * Validates the id charset (mirrors orchestrator.ts runFilePath) so the store
+ * is self-defending against path traversal / separator injection regardless of
+ * how a caller derived the id (e.g. GET /api/swarm/:id). Allowed: word chars,
+ * dot, hyphen. Anything else throws.
+ */
 function swarmPath(dir: string, id: string): string {
+  if (!/^[\w.-]+$/.test(id)) {
+    throw new Error('Invalid swarm id');
+  }
   return join(dir, `${id}.json`);
 }
 
