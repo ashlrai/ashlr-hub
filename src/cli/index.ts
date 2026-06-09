@@ -17,6 +17,8 @@
  *   run show <id>              Print a past run in detail.
  *   runs [--json]              List past runs.
  *   pulse [--json] [--window]  Local observability dashboard: tokens, cost, activity.
+ *   new <name> [opts]          Scaffold a new project and register it in the index.
+ *   ship [path] [opts]         Run pre-ship gate (lint/test/build/deps) + optional deploy.
  *   help                       Show this help.
  *
  * Exit codes: 0 success, 1 error/not-found, 2 bad usage.
@@ -164,6 +166,50 @@ async function tryBuildRollup(): Promise<BuildRollupFn | null> {
     }
   }
   return _buildRollup ?? null;
+}
+
+// ─── M6 lazy imports (graceful degradation if modules not yet built) ──────────
+
+type CmdNewFn  = (args: string[]) => Promise<number>;
+type CmdShipFn = (args: string[]) => Promise<number>;
+
+let _cmdNew:  CmdNewFn  | null | undefined = undefined;
+let _cmdShip: CmdShipFn | null | undefined = undefined;
+
+async function loadNewCmd(): Promise<CmdNewFn> {
+  if (_cmdNew === undefined) {
+    try {
+      const mod = (await import('./new.js' as unknown as string)) as { cmdNew: CmdNewFn };
+      _cmdNew = mod.cmdNew;
+    } catch {
+      _cmdNew = null;
+    }
+  }
+  if (_cmdNew === null) {
+    return async (_args: string[]) => {
+      console.error(red('error: ') + 'new command requires src/cli/new.ts (M6 module not yet built).');
+      return 1;
+    };
+  }
+  return _cmdNew;
+}
+
+async function loadShipCmd(): Promise<CmdShipFn> {
+  if (_cmdShip === undefined) {
+    try {
+      const mod = (await import('./ship.js' as unknown as string)) as { cmdShip: CmdShipFn };
+      _cmdShip = mod.cmdShip;
+    } catch {
+      _cmdShip = null;
+    }
+  }
+  if (_cmdShip === null) {
+    return async (_args: string[]) => {
+      console.error(red('error: ') + 'ship command requires src/cli/ship.ts (M6 module not yet built).');
+      return 1;
+    };
+  }
+  return _cmdShip;
 }
 
 // ─── ANSI helpers ──────────────────────────────────────────────────────────────
@@ -908,6 +954,16 @@ function cmdHelp(): void {
   console.log(`    ${cyan('ashlr pulse')}           ${dim('# cost/token dashboard (7d)')}`);
   console.log(`    ${cyan('ashlr pulse --window 30d --project ashlr-hub')}`);
   console.log('');
+  console.log('  ' + bold('new / ship examples:'));
+  console.log(`    ${cyan('ashlr new my-app --template next-app')}             ${dim('# scaffold a Next.js starter')}`);
+  console.log(`    ${cyan('ashlr new my-tool --template node-cli --category dev-tools')}`);
+  console.log(`    ${cyan('ashlr new my-mcp --template mcp-server --stack haskell-mcp')}`);
+  console.log(`    ${cyan('ashlr ship')}                                       ${dim('# gate only (dry-run)')}`);
+  console.log(`    ${cyan('ashlr ship --gate')}                                ${dim('# explicit gate-only mode')}`);
+  console.log(`    ${cyan('ashlr ship --deploy vercel')}                       ${dim('# gate + deploy dry-run')}`);
+  console.log(`    ${cyan('ashlr ship --deploy vercel --confirm')}             ${dim('# gate + REAL deploy')}`);
+  console.log(`    ${cyan('ashlr ship --strict --deploy gh --confirm')}        ${dim('# fail fast + deploy to gh')}`);
+  console.log('');
 }
 
 // ─── Top-level dispatch ───────────────────────────────────────────────────────
@@ -976,6 +1032,18 @@ async function main(): Promise<void> {
       case 'pulse': {
         const cmdPulse = await loadPulseCmd();
         process.exitCode = await cmdPulse(rest);
+        break;
+      }
+
+      case 'new': {
+        const cmdNew = await loadNewCmd();
+        process.exitCode = await cmdNew(rest);
+        break;
+      }
+
+      case 'ship': {
+        const cmdShip = await loadShipCmd();
+        process.exitCode = await cmdShip(rest);
         break;
       }
 

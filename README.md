@@ -805,15 +805,21 @@ ashlr-hub/
 │   │   │   ├── budget.ts           # RunUsage accounting + budget enforcement
 │   │   │   ├── agent-loop.ts       # Bounded chat/tool loop per RunTask
 │   │   │   └── orchestrator.ts     # DAG planner, parallel executor, persistence
-│   │   └── observability/   # M5: local-first usage rollups
-│   │       ├── usage-source.ts     # Parse ~/.claude/projects + ~/.ashlr/runs (metadata only)
-│   │       ├── rollup.ts           # buildRollup: aggregate tokens/cost/commits by window
-│   │       └── budget-alert.ts     # evalBudget: cap evaluation + warn/over level
+│   │   ├── observability/   # M5: local-first usage rollups
+│   │   │   ├── usage-source.ts     # Parse ~/.claude/projects + ~/.ashlr/runs (metadata only)
+│   │   │   ├── rollup.ts           # buildRollup: aggregate tokens/cost/commits by window
+│   │   │   └── budget-alert.ts     # evalBudget: cap evaluation + warn/over level
+│   │   └── lifecycle/       # M6: project scaffold + ship gate
+│   │       ├── templates.ts        # TEMPLATES[], getTemplate(), listTemplates()
+│   │       ├── scaffold.ts         # scaffoldProject(), defaultCategory(), targetDir()
+│   │       └── ship.ts             # runShipGate(), deploy()
 │   ├── cli/
-│   │   ├── index.ts     # argv dispatch (index/go/status/ls/open/tidy/config/doctor/init/mcp/run/runs/pulse/help)
+│   │   ├── index.ts     # argv dispatch (index/go/status/ls/open/tidy/config/doctor/init/mcp/run/runs/pulse/new/ship/help)
 │   │   ├── run.ts       # M4: `ashlr run` + `ashlr runs` subcommand handlers
 │   │   ├── pulse.ts     # M5: `ashlr pulse` dashboard
 │   │   ├── mcp.ts       # M3: `ashlr mcp` subcommand dispatcher
+│   │   ├── new.ts       # M6: `ashlr new` scaffold command
+│   │   ├── ship.ts      # M6: `ashlr ship` pre-ship gate + deploy
 │   │   ├── open.ts      # Editor / Finder / Terminal launchers
 │   │   └── picker.ts    # fzf (if present) or readline picker
 │   └── raycast/         # Raycast extension (own package.json)
@@ -831,6 +837,7 @@ ashlr-hub/
 ├── CONTRACT-M3.md       # M3 extension to the contract (MCP gateway)
 ├── CONTRACT-M4.md       # M4 extension to the contract (agent orchestrator)
 ├── CONTRACT-M5.md       # M5 extension to the contract (local-first observability)
+├── CONTRACT-M6.md       # M6 extension to the contract (project lifecycle)
 ├── install.sh           # build + symlink installer
 └── package.json
 ```
@@ -896,6 +903,153 @@ Zero runtime dependencies in `core/` and `cli/` — Node builtins only.
 - [x] Privacy-first — only usage metadata read from `~/.claude/projects/` transcripts (token counts, model, timestamp, project path); message content never touched
 - [x] Raycast "Pulse" view — backed by `ashlr pulse --json`; no extra setup
 - [x] Fully offline — all numbers computed locally from transcripts, `~/.ashlr/runs/`, and git log; Pulse cloud config is optional and informational only
+
+### M6 — project lifecycle (`ashlr new` + `ashlr ship`)
+
+- [x] `ashlr new <name>` — scaffold an ecosystem-wired project at `~/Desktop/github/<category>/<name>`; includes CLAUDE.md preset, `.mcp.json` ashlr-gateway, genome stub, README, package.json, .gitignore, entry point; `git init` by default; registers in the index. Refuses to overwrite an existing directory.
+- [x] Templates: `node-cli`, `mcp-server`, `next-app`, `minimal` — each a complete agentic-engineering starter.
+- [x] `--stack <recipe>` — delegates to `stack` when installed; warns clearly when absent.
+- [x] `--here` — scaffolds into cwd instead of the default Desktop location.
+- [x] `ashlr ship [path]` — pre-ship gate: supply-chain check (binshield if installed, else built-in dep check) + `test`/`lint`/`build` for every npm script present; per-check pass/warn/fail/skip report.
+- [x] `--deploy vercel|stack|gh|morphkit` — DRY-RUN by default; `--confirm` required to actually deploy.
+- [x] `--strict` — exits non-zero when any gate check is `fail`.
+- [x] Runtime tool detection via `which`; morphkit absent prints guidance (`morphkit not installed — see morphkit.dev`).
+
+## M6: `ashlr new` + `ashlr ship` — project lifecycle
+
+M6 wires every new project into the Ashlr ecosystem from birth and gives every existing project a pre-ship gate before code leaves your machine.
+
+---
+
+### `ashlr new <name>`
+
+Scaffold a new ecosystem-wired project at `~/Desktop/github/<category>/<name>`.
+
+```sh
+ashlr new my-tool
+ashlr new my-server --template mcp-server
+ashlr new my-app    --template next-app    --category side-projects
+ashlr new quick     --template minimal     --no-git
+ashlr new proto     --template node-cli    --stack myrecipe
+ashlr new here-pkg  --here                  # scaffold into cwd
+```
+
+Every scaffold includes a complete **agentic-engineering layout**:
+
+| File | Purpose |
+|---|---|
+| `CLAUDE.md` | Pre-configured Claude Code context preset |
+| `.mcp.json` | Wires the `ashlr` MCP gateway into the project |
+| `.ashlrcode/genome/` | Genome stub for ashlrcode sessions |
+| `README.md` | Project readme with name + description |
+| `package.json` | Ready-to-edit manifest |
+| `.gitignore` | Sensible defaults |
+| Entry point | Template-specific starter (e.g. `src/index.ts`, `src/server.ts`) |
+
+After scaffolding, the project is registered in `~/.ashlr/index.json` automatically.
+
+#### Templates
+
+| `--template` | Description |
+|---|---|
+| `minimal` | Bare-bones starter — just the agentic layout + entry point (**default**) |
+| `node-cli` | Node.js CLI with arg parsing, bin field, and build script |
+| `mcp-server` | MCP server stub wired to the ashlr gateway |
+| `next-app` | Next.js app starter with TypeScript and Tailwind |
+
+#### Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--template <t>` | `minimal` | Template to use |
+| `--category <c>` | `side-projects` | Desktop category folder |
+| `--stack <recipe>` | — | Run a `stack` recipe after scaffolding (requires `stack` installed) |
+| `--here` | — | Scaffold into the current working directory instead of the default location |
+| `--no-git` | — | Skip `git init` |
+
+#### Safety
+
+- **Refuses to overwrite** an existing directory — exits non-zero with a clear error.
+- Writes **only** under the target directory; never touches anything outside it.
+
+---
+
+### `ashlr ship [path]`
+
+Run a pre-ship gate on a project, then optionally deploy it.
+
+```sh
+# Gate only — read-only, safe to run any time
+ashlr ship
+ashlr ship ./my-app
+
+# Gate + strict (fail the command on any failing check)
+ashlr ship --strict
+
+# Gate + dry-run deploy preview (default — prints what WOULD run, does nothing)
+ashlr ship --deploy vercel
+ashlr ship --deploy stack
+ashlr ship --deploy gh
+
+# Gate + actual deploy (only with --confirm)
+ashlr ship --deploy vercel --confirm
+ashlr ship --deploy gh     --confirm --strict
+```
+
+#### Gate checks
+
+The gate is **read-only** and runs these checks in order:
+
+| Check | Source | Notes |
+|---|---|---|
+| Supply-chain / dependency sanity | `binshield` if installed; built-in dep check otherwise | Looks for known vulnerable or suspicious packages |
+| `npm test` | `package.json` `scripts.test` | Skipped if script absent |
+| `npm run lint` | `package.json` `scripts.lint` | Skipped if script absent |
+| `npm run build` | `package.json` `scripts.build` | Skipped if script absent |
+
+Each check has one of four statuses: `pass`, `warn`, `fail`, or `skip`. The gate's `passed` flag is `false` when any check is `fail`.
+
+Example output:
+
+```
+ashlr ship  —  /Users/you/Desktop/github/side-projects/my-app
+
+Gate
+  ✓ supply-chain      no issues found (built-in dep check)
+  ✓ test              56 tests passed
+  ✓ lint              0 errors
+  ✓ build             dist/ ready
+
+  4 pass  0 warn  0 fail
+
+Deploy  (DRY-RUN — pass --confirm to actually deploy)
+  would run: vercel --prod
+```
+
+#### Deploy targets
+
+| `--deploy` | Tool required | Behavior when absent |
+|---|---|---|
+| `vercel` | `vercel` CLI | Error — install with `npm i -g vercel` |
+| `stack` | `stack` CLI | Error — install stack |
+| `gh` | `gh` CLI | Error — install GitHub CLI |
+| `morphkit` | `morphkit` CLI | Guidance: `morphkit not installed — see morphkit.dev` |
+
+Tool presence is detected at runtime via `which`. Currently on this machine: `stack`, `vercel`, `gh` are present; `binshield` and `morphkit` are absent.
+
+#### Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--deploy <target>` | — | Deploy target (`vercel` / `stack` / `gh` / `morphkit`) |
+| `--strict` | off | Exit non-zero if any gate check is `fail` |
+| `--confirm` | off | Actually run the deploy (default is dry-run) |
+
+#### Safety defaults
+
+- **Deploy is DRY-RUN by default.** Without `--confirm`, `ashlr ship` prints exactly what would run and exits 0.
+- The gate is **read-only** — it never writes files, pushes to git, creates repos, or makes network calls beyond probing local scripts.
+- `--confirm` is required for any outward-facing action (deploy, publish, push).
 
 ### Future
 

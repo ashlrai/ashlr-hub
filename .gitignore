@@ -5,3 +5,6 @@ dist/
 src/raycast/node_modules/
 *.bak
 *.bak.*
+
+# Stray scaffold output from `ashlr new` (must never land at the repo root)
+/myapp/
