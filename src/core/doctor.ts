@@ -117,6 +117,23 @@ async function tryGetGenomeHealth(
   }
 }
 
+/**
+ * Attempt to load getIdentity from the M18 identity integration module.
+ * Returns null if the module is unavailable (not yet built) or throws.
+ * NAMES/status only — NEVER secret values.
+ */
+async function tryGetIdentity(): Promise<import('./types.js').Identity | null> {
+  try {
+    const specifier = './integrations/identity.js';
+    const mod = await import(/* @vite-ignore */ specifier) as {
+      getIdentity: () => import('./types.js').Identity;
+    };
+    return mod.getIdentity();
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Individual check implementations — each returns a DoctorCheck, never throws
 // ---------------------------------------------------------------------------
@@ -601,6 +618,51 @@ function checkGenomeMemory(
 }
 
 // ---------------------------------------------------------------------------
+// M18: Identity check
+// ---------------------------------------------------------------------------
+
+/**
+ * Check: Phantom cloud identity (M18).
+ * id: 'identity'
+ *
+ * Passes when phantom is logged in; warns (not fails) when phantom is not
+ * logged in or the module is unavailable — identity is opt-in. NAMES/status
+ * only — NEVER secret values. Degrades gracefully.
+ *
+ * @param identity - pre-fetched Identity result (or null when module unavailable)
+ */
+function checkIdentity(
+  identity: import('./types.js').Identity | null,
+): DoctorCheck {
+  // Module not yet built — degrade to pass so doctor never breaks.
+  if (identity === null) {
+    return check(
+      'identity',
+      'Phantom identity',
+      'pass',
+      'Identity module not yet available — skipping',
+    );
+  }
+
+  if (identity.loggedIn) {
+    const parts: string[] = [];
+    if (identity.user)  parts.push(identity.user);
+    if (identity.tier)  parts.push(`tier ${identity.tier}`);
+    if (identity.team)  parts.push(`team ${identity.team}`);
+    const detail = parts.length > 0 ? parts.join(' · ') : 'logged in';
+    return check('identity', 'Phantom identity', 'pass', detail);
+  }
+
+  return check(
+    'identity',
+    'Phantom identity',
+    'warn',
+    'Not logged in to Phantom cloud — identity unavailable',
+    'phantom login  (or phantom cloud login)',
+  );
+}
+
+// ---------------------------------------------------------------------------
 // runDoctor
 // ---------------------------------------------------------------------------
 
@@ -618,11 +680,12 @@ export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
 
   // --- Pre-fetch M3 + M5 + M7 registry results (all async-safe, never throw) ---
-  const [mcpRegistry, toolsRegistry, budgetRollup, genomeHealth] = await Promise.all([
+  const [mcpRegistry, toolsRegistry, budgetRollup, genomeHealth, identity] = await Promise.all([
     tryDiscoverMcpServers(),
     tryGetToolsRegistry(),
     tryBuildBudgetRollup(cfg),
     tryGetGenomeHealth(cfg),
+    tryGetIdentity(),
   ]);
 
   // --- Synchronous checks ---
@@ -645,6 +708,9 @@ export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
 
   // --- M7 checks ---
   checks.push(checkGenomeMemory(genomeHealth));
+
+  // --- M18 checks ---
+  checks.push(checkIdentity(identity));
 
   // --- Async: provider registry ---
   try {

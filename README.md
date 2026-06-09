@@ -567,6 +567,108 @@ All commands are registered in `src/raycast/package.json`. Raycast dispatch is t
 
 ---
 
+## Integrations
+
+M18 wires `ashlr` into the tools agentic engineers live in every day: GitHub, Vercel, your editors, and your Phantom identity. The design principle is consistent throughout: **reads are always safe; mutations are always explicit**.
+
+### Philosophy
+
+| Principle | What it means in practice |
+|---|---|
+| **Read-first** | All status reads (`ashlr gh`, `ashlr vercel`, `ashlr status`) are non-mutating and never throw. They degrade gracefully when a CLI or linked project is absent. |
+| **CLIs own auth** | `gh` owns GitHub auth, `vercel` owns Vercel auth, `phantom` owns secrets. The hub delegates to these CLIs via subprocess — it never handles raw tokens, never reads credential files, and never stores keys. |
+| **Mutations are explicit + gated** | The only mutation added in M18 is `ashlr gh pr create`, which requires an explicit subcommand and a confirm prompt. Every other new command is read-only. |
+| **Opt-in outward actions** | Notifications are completely dormant unless you configure a webhook. No network call is ever made without a webhook present. |
+| **Identity = names/status only** | Phantom identity surfaces your user name, tier, and team — never secret values or vault contents. |
+
+### GitHub (`ashlr gh`)
+
+Read open PRs, issues, and CI status for the current repo. Surfaces a one-liner in `ashlr status` when cwd is a git repo.
+
+```sh
+ashlr gh pr              # list open PRs: number · title · URL · state · author
+ashlr gh issue           # list open issues (same fields)
+ashlr gh ci              # CI/checks status for HEAD: passing | failing | pending | none
+
+# ashlr status (when cwd is a gh repo):
+# GitHub: 3 open PRs · CI passing
+```
+
+**The only mutation — explicit + confirm-gated:**
+
+```sh
+ashlr gh pr create       # prompts for title/body/base, then asks "Create PR? [y/N]"
+                         # never runs automatically; never called by status/doctor/swarm
+```
+
+All reads use `gh pr list`, `gh issue list`, `gh run list` — the `gh` CLI which owns your GitHub auth. The hub passes no tokens.
+
+### Vercel (`ashlr vercel`)
+
+Read recent deployments and the latest preview URL for the linked project. Surfaces a one-liner in `ashlr status` when a project is linked.
+
+```sh
+ashlr vercel ls          # recent deployments: URL · state · created · target
+ashlr vercel logs        # tail logs for the latest deployment
+
+# ashlr status (when a Vercel project is linked):
+# Vercel: ready https://my-app-abc123.vercel.app
+```
+
+Reads delegate to the `vercel` CLI. Deploy stays in `ashlr ship --deploy vercel --confirm` — no new deploy path is introduced here.
+
+### Editor auto-wire (`ashlr wire`)
+
+Wire the ashlr MCP gateway into your editors' MCP configs — backup-first, idempotent, local only.
+
+```sh
+ashlr wire               # auto-detect editors and wire all of them
+ashlr wire claude        # wire Claude Code only (~/.claude/settings.json)
+ashlr wire cursor        # wire Cursor only (~/.cursor/mcp.json)
+ashlr wire codex         # wire Codex only (~/.codex/config.json)
+ashlr wire all           # wire every supported editor
+```
+
+Uses the same M3 install pattern as `ashlr mcp install`: backs up the target config file before writing, deep-merges `mcpServers` (never clobbers existing entries), and is safe to run repeatedly. Writes only to the editor's own config directory — nothing else.
+
+Detected editors: whichever of `~/.claude/`, `~/.cursor/`, `~/.codex/` exist on your machine. After wiring, restart the editor to pick up the new MCP server.
+
+### Phantom identity (`ashlr status` + `ashlr doctor`)
+
+When `phantom` is installed and you are logged in, `ashlr status` shows a one-liner:
+
+```
+You: mason · tier pro · team evero
+```
+
+And `ashlr doctor` includes an identity check. Both degrade gracefully — the line is omitted from status, and the doctor check warns (does not fail) when phantom is absent or logged out.
+
+Identity is read via `phantom cloud status` and `phantom team`. Only names and status are surfaced — vault contents and secret values are never read, parsed, or printed.
+
+### Opt-in notifications (`ashlr notify`)
+
+Post a concise, secret-free completion summary to Slack or Discord after a run or swarm finishes. Feature is completely dormant unless you configure a webhook.
+
+```sh
+ashlr notify test        # send a test ping to verify your webhook is working
+                         # strict no-op (no network call) if no webhook is configured
+```
+
+**Config** (`~/.ashlr/config.json`):
+
+```jsonc
+{
+  "notify": {
+    "slackWebhook": "https://hooks.slack.com/services/...",   // optional
+    "discordWebhook": "https://discord.com/api/webhooks/..."  // optional
+  }
+}
+```
+
+Both fields are optional. Both unset = notifications are completely off. The summary posted contains only run metadata (goal, status, token count, cost estimate) — no prompts, results, file contents, or secret values are ever included.
+
+---
+
 ## Ecosystem cohesion
 
 `ashlr-hub` projects its unified `~/.ashlr/config.json` into the environment of

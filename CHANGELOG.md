@@ -8,6 +8,62 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M18: Deep Integrations
+
+### Added
+- **`ashlr gh` — GitHub read + guarded mutations** (`src/cli/gh.ts`, `src/core/integrations/github.ts`):
+  - `ashlr gh pr` — list open PRs for the current repo (number, title, URL, state, author).
+  - `ashlr gh issue` — list open issues (same fields).
+  - `ashlr gh ci` — latest CI/checks status for HEAD (`passing` / `failing` / `pending` / `none`).
+  - All reads go through the **`gh` CLI** (which owns auth) — no raw tokens are ever handled by the hub.
+  - `ashlr gh pr create` — the only mutation; prints a confirm prompt before any `gh pr create` call; never runs automatically.
+  - `githubStatus(cwd)` — read-only, never throws; degrades gracefully when cwd is not a git repo or `gh` is unavailable.
+- **`ashlr vercel` — Vercel read-only surface** (`src/cli/vercel.ts`, `src/core/integrations/vercel.ts`):
+  - `ashlr vercel ls` — recent deployments (URL, state, createdAt, target) via the **`vercel` CLI**.
+  - `ashlr vercel logs` — tail logs for the latest deployment.
+  - `vercelStatus(cwd)` — read-only, never throws; degrades gracefully when no project is linked.
+  - Deploy actions remain in `ashlr ship --deploy vercel --confirm` (already gated); no new deploy paths added.
+- **`ashlr wire` — editor auto-wire** (`src/cli/wire.ts`, `src/core/integrations/editors.ts`):
+  - `ashlr wire [claude|codex|cursor|all]` — wire the ashlr MCP gateway (and note genome) into each target editor's MCP config. Defaults to all detected editors.
+  - Reuses the M3 `mcp install` pattern: backup-first, deep-merge of `mcpServers`, idempotent, never clobbers, local-only. Accepts `configPath` for temp-safe test operation.
+  - `detectEditors()` — returns the subset of `claude`/`codex`/`cursor` whose config directories are present.
+  - `wireEditor(target, opts)` — returns `{ok, detail}`; the only file writes are to editor config dirs (or `opts.configPath` in tests).
+- **Phantom identity in status + doctor** (`src/core/integrations/identity.ts`):
+  - `getIdentity()` — reads `phantom cloud status` and `phantom team` (via the installed **`phantom` CLI**); surfaces `{loggedIn, user, tier, team}`. Returns names/status only — secret values are never read, printed, or logged. Never throws; degrades to `loggedIn: false` when phantom is absent or logged out.
+  - `ashlr status` gains a "You: `<user>` · tier `<t>` · team `<team>`" identity line (suppressed when not logged in).
+  - `ashlr doctor` gains an identity check that degrades gracefully (warn, not fail) when phantom is not available.
+- **`ashlr notify` — opt-in completion notifications** (`src/cli/notify.ts`, `src/core/integrations/notify.ts`):
+  - `ashlr notify test` — sends a test ping to configured webhooks (Slack and/or Discord). Strict no-op when no webhook is configured — no network call, no error.
+  - `notify(text, cfg)` — posts a concise, secret-free run/swarm completion summary. Returns `false` with zero side-effects when `cfg.notify.slackWebhook` and `cfg.notify.discordWebhook` are both unset. Never posts without an explicitly configured webhook.
+  - Config: `cfg.notify.slackWebhook` and/or `cfg.notify.discordWebhook` in `~/.ashlr/config.json`; both are optional; both unset = feature is completely dormant.
+- **GitHub + Vercel one-liners in `ashlr status`**:
+  - When cwd is a GitHub repo and `gh` is available: `GitHub: N open PRs · CI passing/failing`.
+  - When a Vercel project is linked and `vercel` is available: `Vercel: <latest deploy state> <url>`.
+  - Both lines are omitted when the respective CLI is absent or the repo/project is not linked.
+- **New types in `src/core/types.ts`** (all existing types preserved):
+  - `GithubStatus { isRepo: boolean; openPrs: number; openIssues: number; ci: 'passing'|'failing'|'pending'|'none'; repo: string|null }`
+  - `VercelStatus { linked: boolean; latestState: string|null; url: string|null }`
+  - `Identity { loggedIn: boolean; user: string|null; tier: string|null; team: string|null }`
+  - `NotifyTarget { slackWebhook?: string; discordWebhook?: string }`
+  - `AshlrConfig.notify?: NotifyTarget`
+  - Supporting read-model types: `PrSummary`, `IssueSummary`, `CreatePrOpts`, `CreatePrResult`, `DeploySummary`.
+
+### Changed
+- `ashlr status` output extended with GitHub, Vercel, and identity lines (each omitted when the source is unavailable).
+- `ashlr doctor` extended with an identity check for phantom cloud login (degrades to warn, not fail).
+- Architecture table in `src/core/` updated: new `integrations/` subdirectory (`github.ts`, `vercel.ts`, `editors.ts`, `identity.ts`, `notify.ts`).
+
+### Guardrails (M18)
+- **Read-first, always.** All status/list/identity reads (`githubStatus`, `vercelStatus`, `getIdentity`) are safe, read-only, and never throw. They delegate to the installed CLIs (`gh`, `vercel`, `phantom`) — the hub never handles raw tokens.
+- **Mutations are explicit, confirm-gated, never automatic.** `ashlr gh pr create` requires an explicit subcommand + confirm prompt. Notifications require a configured webhook. Deploy stays in `ashlr ship --confirm`. No other write or outward action is introduced.
+- **Identity = names/status only.** `getIdentity` never reads, stores, or prints secret values. Phantom vault contents are never accessed; only `phantom cloud status` and `phantom team` output is parsed.
+- **Editor-wire is backup-first + idempotent + local.** `wireEditor` never overwrites a config unconditionally; it deep-merges `mcpServers` and backs up the target file before any write. Tests use `configPath` for temp-file safety.
+- **Notify is strictly opt-in.** `notify()` returns `false` immediately with zero network calls when no webhook is configured. No webhook = feature is completely dormant.
+- **No new runtime dependencies.** All new modules use Node builtins and the existing `gh`/`vercel`/`phantom` CLIs already installed on the system.
+- All 1745 existing tests preserved.
+
+---
+
 ## [Unreleased] — M17: Verified Orchestration
 
 ### Added

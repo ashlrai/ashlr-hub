@@ -29,6 +29,11 @@
  *   swarms [--json]            List past swarm runs.
  *   tui [--once]               Interactive terminal dashboard (alias: dash).
  *   serve [--port N] [--open]  Local web dashboard + JSON API on 127.0.0.1 (default port 7777).
+ *   gh <pr|issue|ci>           Read GitHub PRs / issues / CI status (read-only via gh CLI).
+ *   gh pr create               Create a PR (explicit + confirm-gated mutation).
+ *   vercel <ls|logs>           Read Vercel deployments / latest logs (read-only via vercel CLI).
+ *   wire [claude|codex|cursor|all]  Wire ashlr MCP gateway into editor config(s).
+ *   notify test                Send a test ping to the configured webhook (no-op if unconfigured).
  *   help                       Show this help.
  *
  * Exit codes: 0 success, 1 error/not-found, 2 bad usage.
@@ -242,6 +247,80 @@ const loadModelsCmd = lazyCmd(
   (m) => m.cmdModels as Cmd,
   'models command requires src/cli/models.ts (M15 module not yet built).',
 );
+
+// ─── M18 command loaders ───────────────────────────────────────────
+
+const loadGhCmd = lazyCmd(
+  () => import('./gh.js' as unknown as string),
+  (m) => m.cmdGh as Cmd,
+  'gh command requires src/cli/gh.ts (M18 module not yet built).',
+);
+
+const loadVercelCmd = lazyCmd(
+  () => import('./vercel.js' as unknown as string),
+  (m) => m.cmdVercel as Cmd,
+  'vercel command requires src/cli/vercel.ts (M18 module not yet built).',
+);
+
+const loadWireCmd = lazyCmd(
+  () => import('./wire.js' as unknown as string),
+  (m) => m.cmdWire as Cmd,
+  'wire command requires src/cli/wire.ts (M18 module not yet built).',
+);
+
+const loadNotifyCmd = lazyCmd(
+  () => import('./notify.js' as unknown as string),
+  (m) => m.cmdNotify as Cmd,
+  'notify command requires src/cli/notify.ts (M18 module not yet built).',
+);
+
+// ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
+
+import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
+
+type GithubStatusFn = (cwd: string) => GithubStatus;
+type VercelStatusFn = (cwd: string) => VercelStatus;
+type GetIdentityFn  = () => Identity;
+
+let _githubStatus: GithubStatusFn | null | undefined = undefined;
+let _vercelStatus: VercelStatusFn | null | undefined = undefined;
+let _getIdentity:  GetIdentityFn  | null | undefined = undefined;
+
+async function tryGithubStatus(): Promise<GithubStatusFn | null> {
+  if (_githubStatus === undefined) {
+    try {
+      const mod = (await import('../core/integrations/github.js' as unknown as string)) as { githubStatus: GithubStatusFn };
+      _githubStatus = mod.githubStatus;
+    } catch {
+      _githubStatus = null;
+    }
+  }
+  return _githubStatus ?? null;
+}
+
+async function tryVercelStatus(): Promise<VercelStatusFn | null> {
+  if (_vercelStatus === undefined) {
+    try {
+      const mod = (await import('../core/integrations/vercel.js' as unknown as string)) as { vercelStatus: VercelStatusFn };
+      _vercelStatus = mod.vercelStatus;
+    } catch {
+      _vercelStatus = null;
+    }
+  }
+  return _vercelStatus ?? null;
+}
+
+async function tryGetIdentity(): Promise<GetIdentityFn | null> {
+  if (_getIdentity === undefined) {
+    try {
+      const mod = (await import('../core/integrations/identity.js' as unknown as string)) as { getIdentity: GetIdentityFn };
+      _getIdentity = mod.getIdentity;
+    } catch {
+      _getIdentity = null;
+    }
+  }
+  return _getIdentity ?? null;
+}
 
 // ─── ANSI helpers ──────────────────────────────────────────────────────────────
 
@@ -668,6 +747,71 @@ async function cmdStatus(_args: string[]): Promise<void> {
   } catch {
     // silently omit — genome may not be built yet; never break status
   }
+
+  // ── M18 GitHub / Vercel / Identity one-liners (best-effort; never break status) ──
+  // All reads are bounded (reuse installed CLIs; they own auth) and silently
+  // omitted when not applicable (not a gh repo, no vercel link, not logged in).
+  const cwd = process.cwd();
+
+  // GitHub: only surface when cwd is a gh repo
+  try {
+    const ghStatusFn = await tryGithubStatus();
+    if (ghStatusFn) {
+      const gs = ghStatusFn(cwd);
+      if (gs.isRepo) {
+        const ciStr = gs.ci === 'passing'
+          ? green('CI passing')
+          : gs.ci === 'failing'
+            ? red('CI failing')
+            : gs.ci === 'pending'
+              ? yellow('CI pending')
+              : dim('no CI');
+        const repoLabel = gs.repo ? gray(` (${gs.repo})`) : '';
+        console.log(
+          `  ${bold('GitHub:')} ${cyan(`${gs.openPrs} open PR${gs.openPrs !== 1 ? 's' : ''}`)}` +
+          `  ${dim('·')}  ${cyan(`${gs.openIssues} open issue${gs.openIssues !== 1 ? 's' : ''}`)}` +
+          `  ${dim('·')}  ${ciStr}${repoLabel}`
+        );
+        console.log('');
+      }
+    }
+  } catch {
+    // silently omit — never break status
+  }
+
+  // Vercel: only surface when a project is linked
+  try {
+    const vcStatusFn = await tryVercelStatus();
+    if (vcStatusFn) {
+      const vs = vcStatusFn(cwd);
+      if (vs.linked) {
+        const stateStr = vs.latestState
+          ? (vs.latestState === 'READY' ? green(vs.latestState) : yellow(vs.latestState))
+          : dim('unknown');
+        const urlStr = vs.url ? `  ${dim('·')}  ${cyan(vs.url)}` : '';
+        console.log(`  ${bold('Vercel:')} ${stateStr}${urlStr}`);
+        console.log('');
+      }
+    }
+  } catch {
+    // silently omit — never break status
+  }
+
+  // Identity: only surface when phantom is logged in
+  try {
+    const identityFn = await tryGetIdentity();
+    if (identityFn) {
+      const id = identityFn();
+      if (id.loggedIn && id.user) {
+        const tierStr = id.tier ? `  ${dim('·')}  tier ${cyan(id.tier)}` : '';
+        const teamStr = id.team ? `  ${dim('·')}  team ${cyan(id.team)}` : '';
+        console.log(`  ${bold('You:')} ${cyan(id.user)}${tierStr}${teamStr}`);
+        console.log('');
+      }
+    }
+  } catch {
+    // silently omit — never break status
+  }
 }
 
 // ─── Command: ls ─────────────────────────────────────────────────────────────
@@ -981,6 +1125,11 @@ function cmdHelp(): void {
     ['models [--json]',              'List local models (Ollama/LM Studio); marks the active one.'],
     ['models pull <name> [--yes]',   'Explicitly pull an Ollama model (large download; confirm first).'],
     ['models start',                 'Best-effort start a locally-installed Ollama (never downloads).'],
+    ['gh <pr|issue|ci>',             'Read GitHub open PRs, issues, or CI status for the current repo (read-only).'],
+    ['gh pr create',                 'Create a PR via gh CLI — explicit + confirm-gated (the only gh mutation).'],
+    ['vercel <ls|logs>',             'Read recent Vercel deployments or latest build logs (read-only).'],
+    ['wire [claude|codex|cursor|all]', 'Wire ashlr MCP gateway into editor config(s); defaults to detected editors.'],
+    ['notify test',                  'Send a test ping to the configured webhook(s); no-op if none are set.'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1193,6 +1342,30 @@ async function main(): Promise<void> {
       case 'models': {
         const cmdModels = await loadModelsCmd();
         process.exitCode = await cmdModels(rest);
+        break;
+      }
+
+      case 'gh': {
+        const cmdGh = await loadGhCmd();
+        process.exitCode = await cmdGh(rest);
+        break;
+      }
+
+      case 'vercel': {
+        const cmdVercel = await loadVercelCmd();
+        process.exitCode = await cmdVercel(rest);
+        break;
+      }
+
+      case 'wire': {
+        const cmdWire = await loadWireCmd();
+        process.exitCode = await cmdWire(rest);
+        break;
+      }
+
+      case 'notify': {
+        const cmdNotify = await loadNotifyCmd();
+        process.exitCode = await cmdNotify(rest);
         break;
       }
 
