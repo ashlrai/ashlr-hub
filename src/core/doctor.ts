@@ -98,6 +98,25 @@ async function tryBuildBudgetRollup(
   }
 }
 
+
+/**
+ * Attempt to load genomeHealth from the M7 genome store module.
+ * Returns null if the module is unavailable (not yet built) or throws.
+ */
+async function tryGetGenomeHealth(
+  cfg: AshlrConfig,
+): Promise<import('./types.js').GenomeHealth | null> {
+  try {
+    const specifier = './genome/store.js';
+    const mod = await import(/* @vite-ignore */ specifier) as {
+      genomeHealth: (cfg: AshlrConfig) => import('./types.js').GenomeHealth;
+    };
+    return mod.genomeHealth(cfg);
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Individual check implementations — each returns a DoctorCheck, never throws
 // ---------------------------------------------------------------------------
@@ -498,6 +517,48 @@ function checkAshlrToolsInstalled(toolsRegistry: ToolsRegistry | null): DoctorCh
   );
 }
 
+
+/**
+ * Check: Genome memory (M7).
+ * id: 'genome-memory'
+ *
+ * Passes when the aggregated genome has at least one entry; warns when empty
+ * so the user knows to seed it. Never throws.
+ *
+ * @param health - pre-fetched genomeHealth result (or null when module unavailable)
+ */
+function checkGenomeMemory(
+  health: import('./types.js').GenomeHealth | null,
+): DoctorCheck {
+  // Module not yet built — degrade silently to pass so doctor never breaks.
+  if (health === null) {
+    return check(
+      'genome-memory',
+      'Genome memory',
+      'pass',
+      'Genome module not yet available — skipping memory check',
+    );
+  }
+
+  if (health.totalEntries > 0) {
+    const embLabel = health.embeddingsAvailable ? 'embeddings available' : 'keyword-only';
+    return check(
+      'genome-memory',
+      'Genome memory',
+      'pass',
+      `${health.totalEntries} entr${health.totalEntries !== 1 ? 'ies' : 'y'} across ${health.projects} project${health.projects !== 1 ? 's' : ''} (${embLabel})`,
+    );
+  }
+
+  return check(
+    'genome-memory',
+    'Genome memory',
+    'warn',
+    'No genome entries found',
+    'run ashlr learn to seed memory, or ensure .ashlrcode/genome exists',
+  );
+}
+
 // ---------------------------------------------------------------------------
 // runDoctor
 // ---------------------------------------------------------------------------
@@ -509,15 +570,18 @@ function checkAshlrToolsInstalled(toolsRegistry: ToolsRegistry | null): DoctorCh
  * New checks added in M3:
  *   - 'mcp-servers-discovered': MCP servers discovered via mcp-registry
  *   - 'ashlr-tools-installed': Ashlr ecosystem tools via tools-registry
+ * New checks added in M7:
+ *   - 'genome-memory': Genome memory health via genome/store.genomeHealth
  */
 export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
 
-  // --- Pre-fetch M3 + M5 registry results (all async-safe, never throw) ---
-  const [mcpRegistry, toolsRegistry, budgetRollup] = await Promise.all([
+  // --- Pre-fetch M3 + M5 + M7 registry results (all async-safe, never throw) ---
+  const [mcpRegistry, toolsRegistry, budgetRollup, genomeHealth] = await Promise.all([
     tryDiscoverMcpServers(),
     tryGetToolsRegistry(),
     tryBuildBudgetRollup(cfg),
+    tryGetGenomeHealth(cfg),
   ]);
 
   // --- Synchronous checks ---
@@ -537,6 +601,9 @@ export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
 
   // --- M5 checks ---
   checks.push(checkSpendBudget(budgetRollup));
+
+  // --- M7 checks ---
+  checks.push(checkGenomeMemory(genomeHealth));
 
   // --- Async: provider registry ---
   try {

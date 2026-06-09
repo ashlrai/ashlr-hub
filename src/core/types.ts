@@ -54,6 +54,16 @@ export interface AshlrConfig {
   tools: Record<string, string>;
   /** Optional Phantom secrets integration toggle. */
   phantom?: { enabled: boolean };
+  /**
+   * Shared-memory / genome settings (M7). Controls recall limits and whether
+   * the orchestrator injects recall hits into sub-agent prompts.
+   */
+  genome?: {
+    /** Max number of recall hits returned/injected (default 5). */
+    maxRecall: number;
+    /** Whether `ashlr run` injects top-k recall into sub-agent prompts (default true). */
+    injectOnRun: boolean;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +391,8 @@ export interface RunOptions {
   resumeId?: string;
   /** Emit machine-readable JSON instead of human output. */
   json?: boolean;
+  /** Disable genome recall injection into the sub-agent system prompt (M7). */
+  noMemory?: boolean;
 }
 
 /** A single message in a chat exchange with a provider. */
@@ -635,4 +647,69 @@ export interface ShipResult {
   deployRan: boolean;
   /** Human-readable detail of what was (or would be) deployed. */
   deployDetail: string;
+}
+
+// ---------------------------------------------------------------------------
+// M7: shared memory / genome (cross-project, local-first) contract
+// ---------------------------------------------------------------------------
+
+/**
+ * A single unit of shared memory in the aggregated genome. Sourced either
+ * from a per-project `.ashlrcode/genome/` directory ('project') or from the
+ * hub store at ~/.ashlr/genome/hub.jsonl ('hub'). User's own notes/summaries
+ * only — never carries secrets.
+ */
+export interface GenomeEntry {
+  /** Stable identifier (derived from content/source; unique within the aggregate). */
+  id: string;
+  /** Project name this entry belongs to, or null when not project-scoped. */
+  project: string | null;
+  /** Where the entry came from. */
+  source: 'project' | 'hub';
+  /** Short human-readable title/heading for the entry. */
+  title: string;
+  /** Body text of the memory (the actual note/summary). */
+  text: string;
+  /** Free-form tags for filtering/grouping. */
+  tags: string[];
+  /** ISO timestamp the entry was created/learned. */
+  ts: string;
+}
+
+/** A single recall result: a genome entry plus its relevance score + method. */
+export interface RecallHit {
+  /** The matched genome entry. */
+  entry: GenomeEntry;
+  /** Relevance score (higher is more relevant). */
+  score: number;
+  /** How the score was computed. */
+  method: 'keyword' | 'embedding';
+}
+
+/** Status/health roll-up for the aggregated genome (`ashlr genome`). */
+export interface GenomeHealth {
+  /** Total entries across all sources (project + hub). */
+  totalEntries: number;
+  /** Number of distinct projects covered by the genome. */
+  projects: number;
+  /** Number of entries in the hub store (~/.ashlr/genome/hub.jsonl). */
+  hubEntries: number;
+  /** Total size in bytes of the hub store on disk. */
+  sizeBytes: number;
+  /** ISO timestamp of the most recently learned entry, or null if empty. */
+  lastLearnedAt: string | null;
+  /** Whether a local embedding-capable model is available for reranking. */
+  embeddingsAvailable: boolean;
+}
+
+/** Input accepted by `ashlr learn` / `appendHubEntry`. */
+export interface LearnInput {
+  /** Body text of the memory to store (required). */
+  text: string;
+  /** Optional short title/heading (derived from text when omitted). */
+  title?: string;
+  /** Optional project name to scope the entry to. */
+  project?: string;
+  /** Optional tags to attach to the entry. */
+  tags?: string[];
 }

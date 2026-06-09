@@ -19,6 +19,9 @@
  *   pulse [--json] [--window]  Local observability dashboard: tokens, cost, activity.
  *   new <name> [opts]          Scaffold a new project and register it in the index.
  *   ship [path] [opts]         Run pre-ship gate (lint/test/build/deps) + optional deploy.
+ *   recall "<query>"           Search shared genome memory; return top relevant entries.
+ *   learn "<text>" [opts]      Append a note to shared genome memory.
+ *   genome                     Genome status/health: entry count, projects, staleness.
  *   help                       Show this help.
  *
  * Exit codes: 0 success, 1 error/not-found, 2 bad usage.
@@ -210,6 +213,70 @@ async function loadShipCmd(): Promise<CmdShipFn> {
     };
   }
   return _cmdShip;
+}
+
+// ─── M7 lazy imports (graceful degradation if modules not yet built) ──────────
+
+type CmdRecallFn = (args: string[]) => Promise<number>;
+type CmdLearnFn  = (args: string[]) => Promise<number>;
+type CmdGenomeFn = (args: string[]) => Promise<number>;
+
+let _cmdRecall: CmdRecallFn | null | undefined = undefined;
+let _cmdLearn:  CmdLearnFn  | null | undefined = undefined;
+let _cmdGenome: CmdGenomeFn | null | undefined = undefined;
+
+async function loadRecallCmd(): Promise<CmdRecallFn> {
+  if (_cmdRecall === undefined) {
+    try {
+      const mod = (await import('./genome.js' as unknown as string)) as { cmdRecall: CmdRecallFn };
+      _cmdRecall = mod.cmdRecall;
+    } catch {
+      _cmdRecall = null;
+    }
+  }
+  if (_cmdRecall === null) {
+    return async (_args: string[]) => {
+      console.error(red('error: ') + 'recall command requires src/cli/genome.ts (M7 module not yet built).');
+      return 1;
+    };
+  }
+  return _cmdRecall;
+}
+
+async function loadLearnCmd(): Promise<CmdLearnFn> {
+  if (_cmdLearn === undefined) {
+    try {
+      const mod = (await import('./genome.js' as unknown as string)) as { cmdLearn: CmdLearnFn };
+      _cmdLearn = mod.cmdLearn;
+    } catch {
+      _cmdLearn = null;
+    }
+  }
+  if (_cmdLearn === null) {
+    return async (_args: string[]) => {
+      console.error(red('error: ') + 'learn command requires src/cli/genome.ts (M7 module not yet built).');
+      return 1;
+    };
+  }
+  return _cmdLearn;
+}
+
+async function loadGenomeCmd(): Promise<CmdGenomeFn> {
+  if (_cmdGenome === undefined) {
+    try {
+      const mod = (await import('./genome.js' as unknown as string)) as { cmdGenome: CmdGenomeFn };
+      _cmdGenome = mod.cmdGenome;
+    } catch {
+      _cmdGenome = null;
+    }
+  }
+  if (_cmdGenome === null) {
+    return async (_args: string[]) => {
+      console.error(red('error: ') + 'genome command requires src/cli/genome.ts (M7 module not yet built).');
+      return 1;
+    };
+  }
+  return _cmdGenome;
 }
 
 // ─── ANSI helpers ──────────────────────────────────────────────────────────────
@@ -624,6 +691,22 @@ async function cmdStatus(_args: string[]): Promise<void> {
   } catch {
     // silently omit — never break status
   }
+
+  // ── M7 Genome summary (best-effort; silently omitted on error) ────────────
+  try {
+    const genomeMod = await import('../core/genome/store.js' as unknown as string) as {
+      genomeHealth: (cfg: AshlrConfig) => import('../core/types.js').GenomeHealth;
+    };
+    const health = genomeMod.genomeHealth(cfg);
+    console.log(
+      `  ${bold('Memory:')} ${cyan(`${health.totalEntries} genome entries`)} across ` +
+      `${cyan(`${health.projects} project${health.projects !== 1 ? 's' : ''}`)}` +
+      (health.embeddingsAvailable ? `  ${dim('·')}  ${gray('embeddings available')}` : '')
+    );
+    console.log('');
+  } catch {
+    // silently omit — genome may not be built yet; never break status
+  }
 }
 
 // ─── Command: ls ─────────────────────────────────────────────────────────────
@@ -931,6 +1014,9 @@ function cmdHelp(): void {
     ['pulse [--window 1d|7d|30d]',   'Local observability dashboard: tokens, cost, sessions, commits.'],
     ['pulse --json',                 'Machine-readable ActivityRollup (for Raycast Pulse view).'],
     ['pulse --project <name>',       'Restrict pulse rollup to a single project.'],
+    ['recall "<query>"',             'Search shared genome memory; return top relevant entries with scores.'],
+    ['learn "<text>" [opts]',        'Append a note to shared genome memory (local-first, append-only).'],
+    ['genome',                       'Genome status/health: entry count, projects covered, store size.'],
     ['help',                         'Show this help.'],
   ];
 
@@ -944,11 +1030,12 @@ function cmdHelp(): void {
   console.log('');
   console.log('  ' + bold('Flags apply per-command above.'));
   console.log('');
-  console.log('  ' + bold('run flags:') + dim('  --budget N  --max-steps N  --parallel N  --engine builtin|ashlrcode|aw  --allow-cloud  --no-tools  --resume <id>  --json'));
+  console.log('  ' + bold('run flags:') + dim('  --budget N  --max-steps N  --parallel N  --engine builtin|ashlrcode|aw  --allow-cloud  --no-tools  --no-memory  --resume <id>  --json'));
   console.log('');
   console.log('  ' + bold('Examples:'));
   console.log(`    ${cyan('ashlr run "list all open GitHub issues in this repo"')}`);
   console.log(`    ${cyan('ashlr run "summarize recent commits" --budget 8000 --max-steps 5')}`);
+  console.log(`    ${cyan('ashlr run "audit TODOs" --no-memory')}         ${dim('# skip genome injection')}`);
   console.log(`    ${cyan('ashlr run show <id>')}  ${dim('# inspect a past run')}`);
   console.log(`    ${cyan('ashlr runs')}            ${dim('# list all past runs')}`);
   console.log(`    ${cyan('ashlr pulse')}           ${dim('# cost/token dashboard (7d)')}`);
@@ -963,6 +1050,13 @@ function cmdHelp(): void {
   console.log(`    ${cyan('ashlr ship --deploy vercel')}                       ${dim('# gate + deploy dry-run')}`);
   console.log(`    ${cyan('ashlr ship --deploy vercel --confirm')}             ${dim('# gate + REAL deploy')}`);
   console.log(`    ${cyan('ashlr ship --strict --deploy gh --confirm')}        ${dim('# fail fast + deploy to gh')}`);
+  console.log('');
+  console.log('  ' + bold('genome / memory examples:'));
+  console.log(`    ${cyan('ashlr recall "how does the orchestrator work"')}    ${dim('# search genome memory')}`);
+  console.log(`    ${cyan('ashlr learn "M4 orchestrator uses TF-IDF for task ranking"')}`);
+  console.log(`    ${cyan('ashlr learn "prefer bge-m3 for embeddings" --tags embeddings,ollama')}`);
+  console.log(`    ${cyan('ashlr learn "ashlr-hub uses NodeNext ESM" --project ashlr-hub')}`);
+  console.log(`    ${cyan('ashlr genome')}                                     ${dim('# genome health + entry count')}`);
   console.log('');
 }
 
@@ -1018,6 +1112,8 @@ async function main(): Promise<void> {
       }
 
       case 'run': {
+        // --no-memory is passed through to cmdRun as-is; run.ts parses it
+        // into RunOptions.noMemory for the orchestrator's genome injection gate.
         const cmdRun = await loadRunCmd();
         process.exitCode = await cmdRun(rest);
         break;
@@ -1044,6 +1140,24 @@ async function main(): Promise<void> {
       case 'ship': {
         const cmdShip = await loadShipCmd();
         process.exitCode = await cmdShip(rest);
+        break;
+      }
+
+      case 'recall': {
+        const cmdRecall = await loadRecallCmd();
+        process.exitCode = await cmdRecall(rest);
+        break;
+      }
+
+      case 'learn': {
+        const cmdLearn = await loadLearnCmd();
+        process.exitCode = await cmdLearn(rest);
+        break;
+      }
+
+      case 'genome': {
+        const cmdGenome = await loadGenomeCmd();
+        process.exitCode = await cmdGenome(rest);
         break;
       }
 

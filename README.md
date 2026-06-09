@@ -813,13 +813,17 @@ ashlr-hub/
 │   │       ├── templates.ts        # TEMPLATES[], getTemplate(), listTemplates()
 │   │       ├── scaffold.ts         # scaffoldProject(), defaultCategory(), targetDir()
 │   │       └── ship.ts             # runShipGate(), deploy()
+│   │   └── genome/          # M7: shared memory / genome
+│   │       ├── store.ts            # loadGenome(), appendHubEntry(), hubStorePath(), genomeHealth()
+│   │       └── recall.ts           # recall(), keywordScore()
 │   ├── cli/
-│   │   ├── index.ts     # argv dispatch (index/go/status/ls/open/tidy/config/doctor/init/mcp/run/runs/pulse/new/ship/help)
+│   │   ├── index.ts     # argv dispatch (index/go/status/ls/open/tidy/config/doctor/init/mcp/run/runs/pulse/new/ship/recall/learn/genome/help)
 │   │   ├── run.ts       # M4: `ashlr run` + `ashlr runs` subcommand handlers
 │   │   ├── pulse.ts     # M5: `ashlr pulse` dashboard
 │   │   ├── mcp.ts       # M3: `ashlr mcp` subcommand dispatcher
 │   │   ├── new.ts       # M6: `ashlr new` scaffold command
 │   │   ├── ship.ts      # M6: `ashlr ship` pre-ship gate + deploy
+│   │   ├── genome.ts    # M7: `ashlr recall` + `ashlr learn` + `ashlr genome`
 │   │   ├── open.ts      # Editor / Finder / Terminal launchers
 │   │   └── picker.ts    # fzf (if present) or readline picker
 │   └── raycast/         # Raycast extension (own package.json)
@@ -838,6 +842,7 @@ ashlr-hub/
 ├── CONTRACT-M4.md       # M4 extension to the contract (agent orchestrator)
 ├── CONTRACT-M5.md       # M5 extension to the contract (local-first observability)
 ├── CONTRACT-M6.md       # M6 extension to the contract (project lifecycle)
+├── CONTRACT-M7.md       # M7 extension to the contract (shared memory / genome)
 ├── install.sh           # build + symlink installer
 └── package.json
 ```
@@ -914,6 +919,17 @@ Zero runtime dependencies in `core/` and `cli/` — Node builtins only.
 - [x] `--deploy vercel|stack|gh|morphkit` — DRY-RUN by default; `--confirm` required to actually deploy.
 - [x] `--strict` — exits non-zero when any gate check is `fail`.
 - [x] Runtime tool detection via `which`; morphkit absent prints guidance (`morphkit not installed — see morphkit.dev`).
+
+### M7 — shared memory / genome (`ashlr learn` + `ashlr recall` + `ashlr genome`)
+
+- [x] `ashlr learn "<note>"` — append a `GenomeEntry` to `~/.ashlr/genome/hub.jsonl` (append-only JSONL); `--project <name>` optionally drops a new note under that repo's `.ashlrcode/genome/` (never modifies existing files); `--tags a,b` for free-form tagging
+- [x] `ashlr recall "<query>"` — search the aggregated genome (hub + all per-project genomes); ranked by keyword/TF-IDF by default, optionally reranked via local Ollama `/api/embeddings`; fully offline-capable
+- [x] `ashlr genome` — health/status: total entries, projects covered, hub store size, last-learned timestamp, embeddings availability
+- [x] Genome-aware `ashlr run` — orchestrator injects top-k `recall(goal)` hits into sub-agent system prompts; bounded by `cfg.genome.maxRecall` (default 5) + char cap; disabled with `--no-memory`; gated on `cfg.genome.injectOnRun` (default true)
+- [x] `ashlr status` — Memory line via `genomeHealth()` (entry count + last-learned timestamp)
+- [x] `ashlr doctor` — genome check (store reachable, entry count, embedding model availability)
+- [x] Local + private — all memory under `~/.ashlr/genome/` and `<repo>/.ashlrcode/genome/`; never exfiltrated; no cloud call ever made
+- [x] Zero new runtime deps — keyword/TF-IDF path works with Node builtins only; Ollama embedding rerank is best-effort and falls back gracefully
 
 ## M6: `ashlr new` + `ashlr ship` — project lifecycle
 
@@ -1051,7 +1067,163 @@ Tool presence is detected at runtime via `which`. Currently on this machine: `st
 - The gate is **read-only** — it never writes files, pushes to git, creates repos, or makes network calls beyond probing local scripts.
 - `--confirm` is required for any outward-facing action (deploy, publish, push).
 
+## M7: `ashlr learn` + `ashlr recall` + `ashlr genome` — shared memory
+
+M7 adds a **cross-project, local-first shared memory** to the Ashlr ecosystem. Every project genome, every note you teach the hub, and every `ashlr run` now share a single searchable memory store — all stored on your machine, never sent anywhere.
+
+---
+
+### Where memory lives
+
+| Store | Path | Written by |
+|---|---|---|
+| Hub store | `~/.ashlr/genome/hub.jsonl` | `ashlr learn` (append-only JSONL) |
+| Per-project genome | `<repo>/.ashlrcode/genome/` | `ashlr learn --project <name>` (new note file only) |
+
+The hub store aggregates with all per-project genomes at recall time. Both are append-only — existing entries are never modified or deleted.
+
+---
+
+### `ashlr learn "<note>"`
+
+Append a memory entry to the hub store. Optionally scope it to a project and tag it.
+
+```sh
+# Store a general note
+ashlr learn "Ollama bge-m3 is the embedding model to use for local rerank"
+
+# Scope to a project and tag it
+ashlr learn "ashlr-hub uses NodeNext ESM with .js import extensions"   --project ashlr-hub   --tags typescript,build
+
+# Multi-word title (derived automatically from first sentence when omitted)
+ashlr learn "Phantom vault is at ~/.phantom — never commit the key file"   --project ashlr-hub   --tags security,phantom
+```
+
+Each entry is appended as a single JSON line to `~/.ashlr/genome/hub.jsonl`. When `--project` resolves to an indexed repo, a new note file is also dropped under that repo's `.ashlrcode/genome/` directory — existing genome files there are never touched.
+
+---
+
+### `ashlr recall "<query>"`
+
+Search the aggregated genome and return the top relevant entries with source and score.
+
+```sh
+ashlr recall "embedding model setup"
+ashlr recall "typescript build config"
+ashlr recall "phantom secrets"
+```
+
+Example output:
+
+```
+ashlr recall "embedding model"  —  3 hits
+
+  [1]  score: 0.82  (keyword)  hub
+       Ollama bge-m3 is the embedding model to use for local rerank
+       tags: ollama, embeddings  •  2026-06-07
+
+  [2]  score: 0.61  (keyword)  ashlr-hub
+       Local AI stack: bge-m3 at :11434 for embeddings, llama3 for chat
+       tags: local-ai, setup  •  2026-05-31
+
+  [3]  score: 0.44  (keyword)  project: local-ai-stack
+       Embedding model benchmark results — bge-m3 vs nomic-embed-text
+       tags: benchmark  •  2026-05-20
+```
+
+**Ranking** is keyword/TF-IDF by default — fully offline, no model required. When an embedding-capable model (e.g. `bge-m3`) is available in Ollama, recall automatically reranks results via local `/api/embeddings` for better semantic matches. The embedding rerank is best-effort: if Ollama is down or no embedding model is loaded, it silently falls back to keyword scoring. **No cloud call is ever made.**
+
+---
+
+### `ashlr genome`
+
+Health and status report for the aggregated genome.
+
+```sh
+ashlr genome
+```
+
+Example output:
+
+```
+ashlr genome
+
+  Total entries:    47
+  Hub entries:      31
+  Projects covered: 8
+  Store size:       42 KB  (~/.ashlr/genome/hub.jsonl)
+  Last learned:     2026-06-07T14:22:11Z  (1 hour ago)
+  Embeddings:       available  (bge-m3 via ollama)
+```
+
+---
+
+### Genome-aware `ashlr run`
+
+`ashlr run` is **memory-aware by default**. Before dispatching sub-agents, the orchestrator calls `recall(goal, cfg)` and injects the top-k hits into each sub-agent's system prompt. This means runs automatically benefit from prior context without any extra flags.
+
+```sh
+# Normal run — memory injected automatically (if cfg.genome.injectOnRun is true)
+ashlr run "Audit the ashlr-hub MCP registry for duplicate tool names"
+
+# Disable memory injection for this run
+ashlr run "Quick one-off task" --no-memory
+```
+
+Injection is bounded: the number of hits is capped at `cfg.genome.maxRecall` (default 5) and the total injected text has a character cap, so runs stay fast even with a large genome.
+
+Config knobs in `~/.ashlr/config.json`:
+
+```jsonc
+{
+  "genome": {
+    "maxRecall": 5,      // max recall hits injected per run (default: 5)
+    "injectOnRun": true  // set false to disable injection globally (default: true)
+  }
+}
+```
+
+---
+
+### `ashlr status` — Memory line
+
+`ashlr status` surfaces a one-line genome summary:
+
+```
+Memory: 47 entries across 8 projects  (last learned 1h ago)
+```
+
+---
+
+### `ashlr doctor` — genome check
+
+`ashlr doctor` includes a genome health check:
+
+```
+✓ Genome store          47 entries  (~/.ashlr/genome/hub.jsonl, 42 KB)
+✓ Embeddings            bge-m3 available via ollama (rerank enabled)
+```
+
+When the hub store is missing or unreadable, the check warns with a fix hint:
+
+```
+! Genome store          ~/.ashlr/genome/hub.jsonl not found — run ashlr learn to create it
+   fix: ashlr learn "hello world"
+```
+
+---
+
+### Privacy
+
+Genome is entirely local and private:
+
+- All entries are stored only under `~/.ashlr/genome/` and `<repo>/.ashlrcode/genome/`
+- Nothing is ever sent to a cloud API, Pulse endpoint, or any remote
+- Embeddings (when used) are computed locally via Ollama — no network call leaves the machine
+- `ashlr learn` and `ashlr recall` work fully offline via keyword scoring
+
+---
+
 ### Future
 
-- [ ] Semantic search over the index using local embeddings
 - [ ] Automated tidy + refactor suggestions

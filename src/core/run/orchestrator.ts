@@ -8,11 +8,19 @@
  *               final answer, best-effort Pulse POST.
  *  - loadRun / listRuns / saveRun: JSON persistence under ~/.ashlr/runs/.
  *
+ * M7 addition: genome-aware injection. Before planning, runGoal calls
+ * recall(goal, cfg) from src/core/genome/recall.ts (dynamic import, best-effort)
+ * and prepends a bounded "Relevant project memory:" block to the planning system
+ * prompt so the planner starts with relevant cross-project context.
+ * Gated on cfg.genome?.injectOnRun (default true) and opts.noMemory (opt-out).
+ * Never throws — if recall fails or is empty, the run proceeds unchanged.
+ *
  * Safety guardrails (binding):
  *  - Never writes outside ~/.ashlr/runs/ — no repos/Desktop, no git.
  *  - Budget is a HARD ceiling (aborts with partial results preserved).
  *  - Cloud endpoints require explicit allowCloud + key present (delegated to getActiveClient).
  *  - Zero new runtime deps (Node builtins + @modelcontextprotocol/sdk only).
+ *  - Genome recall is local-only (keyword/TF-IDF, optional local Ollama embeddings).
  */
 
 import * as fs from 'node:fs';
@@ -53,6 +61,12 @@ const RUNS_DIR = path.join(os.homedir(), '.ashlr', 'runs');
  * this exact error back to 'pending' so they re-run under the new budget.
  */
 const ABORT_TASK_ERROR = 'Aborted: run budget exceeded';
+
+/**
+ * Maximum characters of genome memory injected into the planning prompt.
+ * Keeps the injection bounded regardless of entry size.
+ */
+const GENOME_INJECT_CHAR_CAP = 1500;
 
 // ---------------------------------------------------------------------------
 // Persistence helpers
@@ -139,6 +153,71 @@ function generateRunId(): string {
   const ts = Date.now();
   const rand = Math.random().toString(36).slice(2, 7);
   return `run-${ts}-${rand}`;
+}
+
+// ---------------------------------------------------------------------------
+// M7: Genome recall injection (best-effort, local-only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Attempt to recall relevant genome entries for the goal and format them as a
+ * bounded context block suitable for prepending to a planning system prompt.
+ *
+ * Rules:
+ *  - Dynamic import of ../genome/recall.js — if the module does not exist yet
+ *    (other M7 agents have not shipped it), returns '' gracefully.
+ *  - Total injected text is capped at GENOME_INJECT_CHAR_CAP characters.
+ *  - Never throws — any error returns '' so the run proceeds unchanged.
+ *  - Local-only: embeddings via local Ollama only, never cloud.
+ */
+async function buildMemoryBlock(goal: string, cfg: AshlrConfig): Promise<string> {
+  try {
+    // Dynamic import: tolerates the module being absent (pre-M7 build).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const recallMod = await import('../genome/recall.js') as any;
+
+    if (typeof recallMod.recall !== 'function') return '';
+
+    const limit = cfg.genome?.maxRecall ?? 3;
+    const hits: Array<{
+      entry: { title: string; text: string; project: string | null };
+      score: number;
+    }> = await recallMod.recall(goal, cfg, { limit });
+
+    if (!Array.isArray(hits) || hits.length === 0) return '';
+
+    const lines: string[] = ['Relevant project memory:'];
+    let charCount = lines[0]!.length + 1;
+
+    for (const hit of hits) {
+      if (!hit?.entry) continue;
+      const project = hit.entry.project ? ` [${hit.entry.project}]` : '';
+      const header = `- ${hit.entry.title ?? 'note'}${project}:`;
+      const body = String(hit.entry.text ?? '').replace(/\s+/g, ' ').trim();
+      const fragment = `${header} ${body}`;
+
+      // Stop if adding this entry would exceed the character cap
+      if (charCount + fragment.length + 1 > GENOME_INJECT_CHAR_CAP) {
+        // Attempt a truncated version (at least 20 chars of body are worth showing)
+        const remaining = GENOME_INJECT_CHAR_CAP - charCount - header.length - 4;
+        if (remaining > 20) {
+          lines.push(`${header} ${body.slice(0, remaining)}…`);
+        }
+        break;
+      }
+
+      lines.push(fragment);
+      charCount += fragment.length + 1;
+    }
+
+    // Only return the block if we actually added at least one entry beyond header
+    if (lines.length <= 1) return '';
+
+    return lines.join('\n');
+  } catch {
+    // Module absent, recall failed, or any other error — proceed without memory
+    return '';
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +317,7 @@ function hasCycle(tasks: RunTask[]): boolean {
 
   const visit = (id: string): boolean => {
     const cur = mark.get(id);
-    if (cur === VISITING) return true; // back-edge → cycle
+    if (cur === VISITING) return true; // back-edge -> cycle
     if (cur === DONE) return false;
     mark.set(id, VISITING);
     const task = byId.get(id);
@@ -260,14 +339,25 @@ function hasCycle(tasks: RunTask[]): boolean {
 /**
  * Planning call: ask the model to decompose `goal` into a RunTask[] DAG.
  * Falls back to a single task whose goal is the original goal on parse failure.
+ *
+ * @param memoryContext Optional genome memory block to prepend to the system prompt.
+ *   When non-empty, injects "Relevant project memory:" context so the planner
+ *   benefits from cross-project knowledge. Kept bounded upstream (GENOME_INJECT_CHAR_CAP).
  */
 export async function planGoal(
   goal: string,
   client: ProviderClient,
   onUsage?: (usage: { tokensIn: number; tokensOut: number }) => void,
+  memoryContext?: string,
 ): Promise<RunTask[]> {
+  // Prepend memory block when present (bounded by caller)
+  const systemContent =
+    memoryContext && memoryContext.length > 0
+      ? `${memoryContext}\n\n${PLANNING_SYSTEM}`
+      : PLANNING_SYSTEM;
+
   const messages: ChatMessage[] = [
-    { role: 'system', content: PLANNING_SYSTEM },
+    { role: 'system', content: systemContent },
     { role: 'user', content: goal },
   ];
 
@@ -425,6 +515,10 @@ function isBinaryInstalled(name: string): boolean {
  * Top-level orchestrator driver. Builds/loads RunState, plans (unless resuming),
  * executes the DAG with parallelism up to opts.parallel, enforces HARD budget,
  * persists after every step, synthesizes final answer, best-effort Pulse POST.
+ *
+ * M7: genome-aware. Before planning, recalls top-k genome hits for the goal
+ * and injects them as context into the planning prompt — bounded, local-only,
+ * best-effort. Disabled via opts.noMemory or cfg.genome?.injectOnRun === false.
  */
 export async function runGoal(
   goal: string,
@@ -449,7 +543,11 @@ export async function runGoal(
         }
       : undefined;
 
-  // ── Engine selection ─────────────────────────────────────────────────────
+  // M7: read noMemory from opts. Not yet typed in RunOptions (avoid editing
+  // types.ts) — read as an extended property, same pattern as __onStep above.
+  const noMemory = (opts as RunOptions & { noMemory?: boolean }).noMemory === true;
+
+  // -- Engine selection --------------------------------------------------------
   const requestedEngine = opts.engine ?? 'builtin';
   let engine = requestedEngine;
   if (engine !== 'builtin') {
@@ -465,7 +563,7 @@ export async function runGoal(
     // We run builtin for all engines (the installed check satisfies the contract).
   }
 
-  // ── Budget / parallel defaults ────────────────────────────────────────────
+  // -- Budget / parallel defaults ----------------------------------------------
   const allowCloud = opts.allowCloud ?? false;
   const budget = {
     maxTokens: opts.budget?.maxTokens ?? DEFAULT_MAX_TOKENS,
@@ -474,10 +572,10 @@ export async function runGoal(
   };
   const parallel = Math.max(1, opts.parallel ?? DEFAULT_PARALLEL);
 
-  // ── Resolve provider client ───────────────────────────────────────────────
+  // -- Resolve provider client -------------------------------------------------
   const client = await getActiveClient(cfg, { allowCloud });
 
-  // ── Load or create RunState ───────────────────────────────────────────────
+  // -- Load or create RunState -------------------------------------------------
   let state: RunState;
 
   if (opts.resumeId) {
@@ -535,7 +633,7 @@ export async function runGoal(
     saveRun(state);
   }
 
-  // ── Tool wiring (optional) ────────────────────────────────────────────────
+  // -- Tool wiring (optional) --------------------------------------------------
   // When opts.tools !== false, attempt to connect to the MCP gateway as a client.
   // On any failure, continue tool-free with a warning.
   let tools: unknown[] | undefined;
@@ -549,7 +647,22 @@ export async function runGoal(
     }
   }
 
-  // ── Plan (unless resuming with existing tasks) ────────────────────────────
+  // -- M7: Genome recall injection (best-effort, bounded, local-only) ----------
+  // Recall top-k genome hits for the goal and inject as planning context.
+  // Skipped when: noMemory is set, cfg disables injection, or this is a resume
+  // with existing tasks (context was already embedded in those task goals).
+  let memoryContext = '';
+  const injectOnRun = cfg.genome?.injectOnRun ?? true;
+  if (!noMemory && injectOnRun && state.tasks.length === 0) {
+    memoryContext = await buildMemoryBlock(goal, cfg);
+    if (memoryContext.length > 0) {
+      process.stderr.write(
+        `[ashlr run] genome: injecting ${memoryContext.length} chars of memory context\n`,
+      );
+    }
+  }
+
+  // -- Plan (unless resuming with existing tasks) ------------------------------
   if (state.tasks.length === 0) {
     const planStep: RunStep = {
       ts: new Date().toISOString(),
@@ -563,10 +676,15 @@ export async function runGoal(
 
     let planTokensIn = 0;
     let planTokensOut = 0;
-    const tasks = await planGoal(goal, client, (u) => {
-      planTokensIn = u.tokensIn;
-      planTokensOut = u.tokensOut;
-    });
+    const tasks = await planGoal(
+      goal,
+      client,
+      (u) => {
+        planTokensIn = u.tokensIn;
+        planTokensOut = u.tokensOut;
+      },
+      memoryContext || undefined,
+    );
     state.tasks = tasks;
 
     // Charge the planning call to the run budget so usage/cost stay accurate.
@@ -589,7 +707,7 @@ export async function runGoal(
     saveRun(state);
   }
 
-  // ── DAG execution loop ────────────────────────────────────────────────────
+  // -- DAG execution loop ------------------------------------------------------
   let aborted = false;
 
   while (!allTerminal(state.tasks) && !aborted) {
@@ -680,7 +798,7 @@ export async function runGoal(
     }
   }
 
-  // ── Abort: mark remaining pending/running tasks as aborted ───────────────
+  // -- Abort: mark remaining pending/running tasks as aborted ------------------
   if (aborted) {
     for (const task of state.tasks) {
       if (task.status === 'pending' || task.status === 'running') {
@@ -700,7 +818,7 @@ export async function runGoal(
     return state;
   }
 
-  // ── Synthesize final answer ───────────────────────────────────────────────
+  // -- Synthesize final answer -------------------------------------------------
   const synthStep: RunStep = {
     ts: new Date().toISOString(),
     taskId: '__synthesize__',
@@ -754,7 +872,7 @@ export async function runGoal(
   state.updatedAt = new Date().toISOString();
   saveRun(state);
 
-  // ── Best-effort Pulse POST ────────────────────────────────────────────────
+  // -- Best-effort Pulse POST --------------------------------------------------
   if (cfg.telemetry.pulse) {
     reportToPulse(cfg.telemetry.pulse, state);
   }

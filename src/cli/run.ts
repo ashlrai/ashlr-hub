@@ -3,7 +3,7 @@
  *
  * `ashlr run "<goal>" [--budget N] [--max-steps N] [--parallel N]
  *   [--engine builtin|ashlrcode|aw] [--allow-cloud] [--no-tools]
- *   [--resume <id>] [--json]`
+ *   [--resume <id>] [--json] [--no-memory]`
  *
  * Subcommand `ashlr run show <id>` prints a saved run.
  *
@@ -106,6 +106,7 @@ interface ParsedRunArgs {
   engine?: string;
   allowCloud: boolean;
   noTools: boolean;
+  noMemory: boolean;
   resumeId?: string;
   json: boolean;
   usageError?: string;
@@ -120,17 +121,19 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
         subcommand: 'run',
         allowCloud: false,
         noTools: false,
+        noMemory: false,
         json: false,
         usageError: 'Usage: ashlr run show <id>',
       };
     }
-    return { subcommand: 'show', showId, allowCloud: false, noTools: false, json: false };
+    return { subcommand: 'show', showId, allowCloud: false, noTools: false, noMemory: false, json: false };
   }
 
   const result: ParsedRunArgs = {
     subcommand: 'run',
     allowCloud: false,
     noTools: false,
+    noMemory: false,
     json: false,
   };
 
@@ -143,6 +146,9 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       i++;
     } else if (arg === '--no-tools') {
       result.noTools = true;
+      i++;
+    } else if (arg === '--no-memory') {
+      result.noMemory = true;
       i++;
     } else if (arg === '--json') {
       result.json = true;
@@ -218,7 +224,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
     result.usageError =
       'Usage: ashlr run "<goal>" [--budget N] [--max-steps N] [--parallel N]\n' +
       '              [--engine builtin|ashlrcode|aw] [--allow-cloud] [--no-tools]\n' +
-      '              [--resume <id>] [--json]\n' +
+      '              [--resume <id>] [--json] [--no-memory]\n' +
       '       ashlr run show <id>';
   }
 
@@ -500,6 +506,9 @@ export async function cmdRun(args: string[]): Promise<number> {
     if (parsed.resumeId) {
       console.log(`  ${dim('Resuming:')} ${parsed.resumeId}`);
     }
+    if (parsed.noMemory) {
+      console.log(`  ${dim('Memory:')} disabled (--no-memory)`);
+    }
     console.log('');
   } else {
     process.stderr.write(`[ashlr run] goal: ${goal}` + (parsed.resumeId ? ` (resuming ${parsed.resumeId})` : '') + '\n');
@@ -553,6 +562,7 @@ export async function cmdRun(args: string[]): Promise<number> {
   // breaking the typed contract (extra properties are stripped at runtime).
   const optsWithHook = opts as RunOptions & {
     __onStep?: (step: RunStep, tasks: RunTask[]) => void;
+    noMemory?: boolean;
   };
 
   optsWithHook.__onStep = (step: RunStep, tasks: RunTask[]) => {
@@ -563,6 +573,12 @@ export async function cmdRun(args: string[]): Promise<number> {
     const taskGoal = taskGoalMap.get(step.taskId) ?? '';
     printStep(step, taskGoal, parsed.json);
   };
+
+  // Pass --no-memory so the orchestrator skips genome injection.
+  // Orchestrator checks: (cfg.genome?.injectOnRun ?? true) && !opts.noMemory
+  if (parsed.noMemory) {
+    optsWithHook.noMemory = true;
+  }
 
   let state: RunState;
   try {
@@ -703,6 +719,7 @@ function printRunHelp(): void {
     ['--model <name>',          `Local model to use (default: smallest/fastest; or set ASHLR_MODEL).`],
     ['--allow-cloud',           `Allow cloud provider if no local is available (requires API key).`],
     ['--no-tools',              `Disable MCP tool loading (faster; for simple goals).`],
+    ['--no-memory',             `Skip genome recall injection into sub-agent prompts.`],
     ['--resume <id>',           `Resume a previously aborted/incomplete run.`],
     ['--json',                  `Emit RunState JSON on stdout; progress goes to stderr.`],
   ];
@@ -721,6 +738,9 @@ function printRunHelp(): void {
   console.log(`    ${gray('# Full run with tight budget')}`)
   console.log(`    ashlr run "Audit for TODOs across dev-tools" --budget 8000 --max-steps 6`);
   console.log('');
+  console.log(`    ${gray('# Run without genome memory injection')}`)
+  console.log(`    ashlr run "One-off task" --no-memory`);
+  console.log('');
   console.log(`    ${gray('# Resume an aborted run')}`)
   console.log(`    ashlr run --resume <id>`);
   console.log('');
@@ -732,5 +752,6 @@ function printRunHelp(): void {
   console.log(`    ${dim('• LOCAL-FIRST: only Ollama / LM Studio by default.')}`);
   console.log(`    ${dim('• Budget is a HARD ceiling — exceeding it aborts cleanly.')}`);
   console.log(`    ${dim('• State persists to ~/.ashlr/runs/<id>.json (never touches repos).')}`);
+  console.log(`    ${dim('• --no-memory disables genome context injection for this run.')}`);
   console.log('');
 }
