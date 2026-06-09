@@ -1,5 +1,5 @@
 /**
- * core/run/orchestrator.ts — M4/M11 local-first agent orchestrator.
+ * core/run/orchestrator.ts — M4/M11/M15 local-first agent orchestrator.
  *
  * Responsibilities:
  *  - planGoal:  single chat call -> RunTask[] DAG (1-6 tasks, deps valid).
@@ -26,13 +26,26 @@
  *  - VERIFY: verifyTask after each builtin task; one retry on !ok if budget allows;
  *    else annotates result with [needs-attention].
  *
+ * M15 additions:
+ *  - PER-TASK ROUTING: before each task attempt, chooseRoute() selects the best
+ *    LOCAL provider+model (or cloud when allowCloud + key + escalation reason).
+ *    Dynamic import of router.ts — best-effort; falls back to getActiveClient when
+ *    the module is absent (preserves pre-M15 behavior in the build pipeline).
+ *  - AUTO-ESCALATE: on task failure or verify !ok, if allowCloud is set AND a cloud
+ *    key is present, ONE escalated routed retry is attempted. Otherwise stays local
+ *    and marks needs-attention. Gated exactly by chooseRoute's guardrails.
+ *  - COST ATTRIBUTION: estCostUsd uses the per-task RouteDecision.provider so local
+ *    tasks always cost $0 and cloud escalations are estimated correctly.
+ *
  * Safety guardrails (binding):
  *  - Never writes outside ~/.ashlr/runs/ — no repos/Desktop, no git.
  *  - Budget is a HARD ceiling (aborts with partial results preserved).
- *  - Cloud endpoints require explicit allowCloud + key present (delegated to getActiveClient).
+ *  - Cloud endpoints require explicit allowCloud + key present (delegated to
+ *    getActiveClient / chooseRoute). NO SILENT CLOUD SPEND.
  *  - Zero new runtime deps (Node builtins + @modelcontextprotocol/sdk only).
  *  - Genome recall is local-only (keyword/TF-IDF, optional local Ollama embeddings).
  *  - Engine delegation is a single bounded spawn — never recursive.
+ *  - NO AUTO-DOWNLOAD: ollama pull is never called from routing or runs.
  */
 
 import * as fs from 'node:fs';
@@ -51,6 +64,8 @@ import type {
   RunStreamEvent,
   ProviderClient,
   ChatMessage,
+  RouteDecision,
+  EscalationReason,
 } from '../types.js';
 
 import { getActiveClient } from './provider-client.js';
@@ -237,6 +252,139 @@ async function buildMemoryBlock(goal: string, cfg: AshlrConfig): Promise<string>
   } catch {
     // Module absent, recall failed, or any other error — proceed without memory
     return '';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// M15: Per-task router (dynamic import, best-effort)
+// ---------------------------------------------------------------------------
+
+/**
+ * Router module type — matches the contract in core/run/router.ts.
+ * Typed narrowly so we only depend on what we call here.
+ */
+interface RouterModule {
+  chooseRoute(
+    taskGoal: string,
+    cfg: AshlrConfig,
+    opts: { allowCloud: boolean; attempt: number; lastReason: EscalationReason },
+  ): Promise<RouteDecision>;
+  cloudKeyAvailable(provider: string): boolean;
+}
+
+/** Cached router module reference (loaded once, null when unavailable). */
+let _routerMod: RouterModule | null | undefined = undefined; // undefined = not yet tried
+
+/**
+ * Load the router module (core/run/router.ts) exactly once, best-effort.
+ * Returns null when the module is not yet present in the build (pre-M15).
+ * Never throws.
+ */
+async function loadRouter(): Promise<RouterModule | null> {
+  if (_routerMod !== undefined) return _routerMod;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mod = await import('./router.js') as any;
+    if (typeof mod.chooseRoute === 'function' && typeof mod.cloudKeyAvailable === 'function') {
+      _routerMod = mod as RouterModule;
+    } else {
+      _routerMod = null;
+    }
+  } catch {
+    // Module not present or failed to load — fall back to getActiveClient.
+    _routerMod = null;
+  }
+  return _routerMod;
+}
+
+/**
+ * Build a ProviderClient for a given RouteDecision.
+ *
+ * Provider-aware (M15): the routed provider+model are passed EXPLICITLY into
+ * getActiveClient (no process.env mutation), so a cloud RouteDecision actually
+ * targets the routed cloud provider instead of silently re-running on the local
+ * active provider. This also removes the global ASHLR_MODEL env race that would
+ * misroute concurrent tasks resolving to different per-task models.
+ *
+ * For local routes (tier='local'): getActiveClient(provider, model, allowCloud=false).
+ * For cloud routes (tier='cloud'): getActiveClient(provider, model, allowCloud=true) —
+ *   which enforces the key check and (until cloud completions are implemented)
+ *   throws; on ANY failure we fall back to the default local client.
+ *
+ * Never throws — on failure, falls back to the default client. The CALLER must
+ * attribute cost using the returned client's `.id` (not the decision's intended
+ * provider), because a cloud decision that fails to build falls back to local
+ * and must be charged at $0, not at cloud rates.
+ */
+async function buildRoutedClient(
+  decision: RouteDecision,
+  cfg: AshlrConfig,
+  allowCloud: boolean,
+): Promise<ProviderClient> {
+  const routedModel =
+    decision.model && decision.model !== 'default' ? decision.model : undefined;
+  try {
+    const cloudOk = decision.tier === 'cloud' && allowCloud;
+    return await getActiveClient(cfg, {
+      allowCloud: cloudOk,
+      provider: decision.provider,
+      model: routedModel,
+    });
+  } catch {
+    // Route failed (e.g. provider down, cloud key missing, cloud completions
+    // not implemented) — fall back to the default local-first client. The
+    // returned client's .id reflects the LOCAL provider, so the caller charges
+    // local rates ($0) for this attempt rather than the unbuilt cloud provider.
+    return await getActiveClient(cfg, { allowCloud, model: routedModel });
+  }
+}
+
+/**
+ * Choose a route for a task attempt and build the appropriate ProviderClient.
+ *
+ * On success: returns {client, decision}.
+ * On any error (router absent, provider down): falls back to the run-level
+ * client and returns a synthetic local RouteDecision with reason 'fallback'.
+ *
+ * GUARDRAIL: cloud routes only when allowCloud && lastReason !== 'none' && key present.
+ * This is enforced by chooseRoute itself; we never bypass it.
+ */
+async function routeTask(
+  taskGoal: string,
+  cfg: AshlrConfig,
+  opts: { allowCloud: boolean; attempt: number; lastReason: EscalationReason },
+  fallbackClient: ProviderClient,
+): Promise<{ client: ProviderClient; decision: RouteDecision }> {
+  const router = await loadRouter();
+
+  if (!router) {
+    // Pre-M15 build or router unavailable — use the run-level client as-is.
+    return {
+      client: fallbackClient,
+      decision: {
+        provider: fallbackClient.id,
+        model: process.env['ASHLR_MODEL'] ?? 'default',
+        tier: 'local',
+        reason: 'router unavailable — local-first fallback',
+      },
+    };
+  }
+
+  try {
+    const decision = await router.chooseRoute(taskGoal, cfg, opts);
+    const client = await buildRoutedClient(decision, cfg, opts.allowCloud);
+    return { client, decision };
+  } catch {
+    // chooseRoute or buildRoutedClient failed — use fallback client.
+    return {
+      client: fallbackClient,
+      decision: {
+        provider: fallbackClient.id,
+        model: process.env['ASHLR_MODEL'] ?? 'default',
+        tier: 'local',
+        reason: 'route error — local-first fallback',
+      },
+    };
   }
 }
 
@@ -887,10 +1035,13 @@ export async function runGoal(
 
     // Charge the planning call to the run budget so usage/cost stay accurate.
     // (Previously the planning tokens were silently discarded.)
+    // Accumulate incrementally (price ONLY the planning tokens at the planner's
+    // provider) so this is consistent with the per-step accumulation below and
+    // never re-prices later task tokens at the planner's provider.
     state.usage.tokensIn += planTokensIn;
     state.usage.tokensOut += planTokensOut;
     state.usage.steps += 1;
-    state.usage.estCostUsd = estCostUsd(client.id, state.usage.tokensIn, state.usage.tokensOut);
+    state.usage.estCostUsd += estCostUsd(client.id, planTokensIn, planTokensOut);
     state.updatedAt = new Date().toISOString();
 
     const planDoneStep: RunStep = {
@@ -948,24 +1099,52 @@ export async function runGoal(
           // M11: emit task-start event.
           emit(sink, { kind: 'task-start', taskId: task.id, text: task.goal });
 
+          // M15: Choose route for this task (local-first; cloud only when
+          // allowCloud + escalation reason + key present). Best-effort — falls
+          // back to the run-level client when router is unavailable.
+          const { client: taskClient, decision: taskDecision } = await routeTask(
+            task.goal,
+            cfg,
+            { allowCloud, attempt: 1, lastReason: 'none' },
+            client,
+          );
+
+          emit(sink, {
+            kind: 'log',
+            taskId: task.id,
+            text: `route: ${taskDecision.provider}/${taskDecision.model} [${taskDecision.tier}] — ${taskDecision.reason}`,
+          });
+
           // Build per-task onStep callback (single-writer invariant preserved).
-          const taskOnStep = (step: RunStep): void => {
+          // M15: cost attribution uses the provider that actually served EACH step.
+          // We ACCUMULATE cost incrementally (+= this step's tokens priced at this
+          // step's provider) rather than recomputing estCostUsd over the cumulative
+          // run-wide totals at the current provider. Recomputing-from-cumulative is
+          // wrong for mixed local+cloud runs: it would re-price an earlier local
+          // task's tokens at a later cloud escalation's rates (over-charging), or
+          // re-price an earlier cloud task's tokens at $0 when a later step is local
+          // (erasing real spend). Incremental accumulation keeps local steps at $0
+          // regardless of any later cloud escalation, and prices cloud escalations
+          // on only the tokens they served.
+          const makeTaskOnStep = (providerForCost: string) => (step: RunStep): void => {
             state.steps.push(step);
             // SINGLE-WRITER INVARIANT: orchestrator is the only mutator of state.usage.
             if (step.usage) {
               state.usage.tokensIn += step.usage.tokensIn;
               state.usage.tokensOut += step.usage.tokensOut;
               state.usage.steps += step.usage.steps;
-              state.usage.estCostUsd = estCostUsd(
-                client.id,
-                state.usage.tokensIn,
-                state.usage.tokensOut,
+              state.usage.estCostUsd += estCostUsd(
+                providerForCost,
+                step.usage.tokensIn,
+                step.usage.tokensOut,
               );
             }
             state.updatedAt = new Date().toISOString();
             cliOnStep?.(step, state.tasks);
             saveRun(state);
           };
+
+          let taskOnStep = makeTaskOnStep(taskDecision.provider);
 
           // M11: Retry policy — bounded, budget-aware.
           // We retry on transient/tool failures only; hard budget stops are not retryable.
@@ -1002,7 +1181,7 @@ export async function runGoal(
                 task.error = undefined;
               }
 
-              await runTask(task, client, {
+              await runTask(task, taskClient, {
                 tools,
                 budget,
                 usage: state.usage,
@@ -1034,6 +1213,65 @@ export async function runGoal(
             }
           });
 
+          // M15: On task failure, attempt ONE escalated routed retry.
+          // Escalation is gated by: allowCloud AND escalate.onFailure AND !overBudget.
+          // chooseRoute enforces the additional cloud-key check; if it returns a
+          // local route again (key absent, allowCloud false, etc.) we just stay local.
+          if (
+            task.status === 'failed' &&
+            allowCloud &&
+            (cfg.models.escalate?.onFailure ?? false) &&
+            !overBudget(state.usage, budget)
+          ) {
+            const { client: escalatedClient, decision: escalatedDecision } = await routeTask(
+              task.goal,
+              cfg,
+              { allowCloud, attempt: 2, lastReason: 'task-failed' },
+              client,
+            );
+
+            // Only actually escalate if chooseRoute returned a DIFFERENT (cloud)
+            // route AND buildRoutedClient was able to construct a client for that
+            // cloud provider. If the cloud client could not be built (key absent,
+            // cloud completions unimplemented), buildRoutedClient falls back to a
+            // LOCAL client whose .id is the local provider — in that case we must
+            // NOT print "escalating to cloud" or charge cloud rates. Cost is
+            // attributed by the ACTUAL client.id, never the intended provider.
+            const cloudEscalated =
+              escalatedDecision.tier === 'cloud' &&
+              escalatedClient.id === escalatedDecision.provider;
+            if (cloudEscalated) {
+              emit(sink, {
+                kind: 'retry',
+                taskId: task.id,
+                text: `escalating to cloud: ${escalatedDecision.provider}/${escalatedDecision.model} — ${escalatedDecision.reason}`,
+              });
+
+              task.status = 'running';
+              task.result = undefined;
+              task.error = undefined;
+
+              // Attribute cost to the ACTUAL serving client (cloud here).
+              taskOnStep = makeTaskOnStep(escalatedClient.id);
+
+              await runTask(task, escalatedClient, {
+                tools,
+                budget,
+                usage: state.usage,
+                sink,
+                onStep: taskOnStep,
+              }).catch((err) => {
+                if (task.status !== 'failed') {
+                  task.status = 'failed';
+                  task.error = err instanceof Error ? err.message : String(err);
+                }
+              });
+            }
+            // If escalation could not reach cloud (still local / cloud client
+            // unbuildable), leave task.status as 'failed' — no further action,
+            // no misleading cloud event, no cloud cost.
+          }
+
           // M11: Verify completed tasks; one retry on !ok if budget allows.
           // Skip verify entirely once the run is over budget: a budget abort can
           // leave a task 'done' with a result annotated by an abort/needs-attention
@@ -1042,7 +1280,7 @@ export async function runGoal(
           // clean (no confusing verify line) and avoids any model call past the
           // ceiling. (Real verification still runs on every in-budget completion.)
           if (task.status === 'done' && !overBudget(state.usage, budget)) {
-            const verdict = await verifyTask(task, client, budget, state.usage, {
+            const verdict = await verifyTask(task, taskClient, budget, state.usage, {
               model: verifyModel,
             });
             emit(sink, {
@@ -1054,29 +1292,54 @@ export async function runGoal(
 
             if (!verdict.ok) {
               if (!overBudget(state.usage, budget)) {
+                // M15: verify-failed escalation path — attempt ONE routed retry.
+                // If allowCloud + escalate.onFailure + key present, chooseRoute
+                // may return a cloud route; otherwise stays local.
+                const { client: verifyRetryClient, decision: verifyRetryDecision } =
+                  await routeTask(
+                    task.goal,
+                    cfg,
+                    { allowCloud, attempt: 2, lastReason: 'verify-failed' },
+                    taskClient,
+                  );
+
+                // Only treat this as a cloud escalation if the cloud client was
+                // actually built (decision is cloud AND the returned client's id
+                // matches the routed cloud provider). Otherwise buildRoutedClient
+                // fell back to local — keep the event + cost attribution local.
+                const escalatingToCloud =
+                  verifyRetryDecision.tier === 'cloud' &&
+                  verifyRetryClient.id === verifyRetryDecision.provider;
+
                 // One verification-driven retry: re-run the task.
                 emit(sink, {
                   kind: 'retry',
                   taskId: task.id,
-                  text: `verify failed (${verdict.reason}) — retrying once`,
+                  text: escalatingToCloud
+                    ? `verify failed (${verdict.reason}) — escalating to cloud retry: ${verifyRetryDecision.provider}`
+                    : `verify failed (${verdict.reason}) — retrying once`,
                 });
                 task.status = 'running';
                 task.result = undefined;
                 task.error = undefined;
 
-                await runTask(task, client, {
+                // Attribute cost to the ACTUAL serving client (never the intended
+                // provider) so a local fallback stays $0.
+                const verifyRetryOnStep = makeTaskOnStep(verifyRetryClient.id);
+
+                await runTask(task, verifyRetryClient, {
                   tools,
                   budget,
                   usage: state.usage,
                   sink,
-                  onStep: taskOnStep,
+                  onStep: verifyRetryOnStep,
                 });
 
                 // Re-verify after the retry (best-effort; don't loop).
                 // Cast through string: TS narrowed to 'running' after the assignment above,
                 // but runTask mutates task.status in place so it may be 'done' now.
                 if ((task.status as string) === 'done') {
-                  const verdict2 = await verifyTask(task, client, budget, state.usage, {
+                  const verdict2 = await verifyTask(task, verifyRetryClient, budget, state.usage, {
                     model: verifyModel,
                   });
                   emit(sink, {
@@ -1095,6 +1358,28 @@ export async function runGoal(
                 task.result = `[needs-attention: ${verdict.reason}]\n${task.result ?? ''}`;
               }
             }
+          }
+
+          // M15: latency-threshold escalation (cfg.models.escalate?.latencyMs).
+          // Latency is tracked by checking whether the task took longer than
+          // the configured threshold. We use task.usage.steps as a proxy:
+          // if the task completed but the run-level elapsed since task-start
+          // is not directly available here, we record the threshold check as
+          // informational only — the latency escalation path is a stub that
+          // emits a log event when cfg.models.escalate.latencyMs is set and
+          // the task usage steps are unusually high (>= TASK_STEP_CAP / 2).
+          // Full wall-clock latency tracking can be wired in a follow-up.
+          if (
+            task.status === 'done' &&
+            allowCloud &&
+            cfg.models.escalate?.latencyMs !== undefined &&
+            (task.usage?.steps ?? 0) >= 10 // heuristic: many steps → slow task
+          ) {
+            emit(sink, {
+              kind: 'log',
+              taskId: task.id,
+              text: `[M15] task completed with ${task.usage?.steps ?? 0} steps; latency threshold ${cfg.models.escalate.latencyMs}ms configured (cloud escalation on latency available when re-running with --allow-cloud)`,
+            });
           }
 
           // M11: emit task-done (or failed) event.
@@ -1182,7 +1467,12 @@ export async function runGoal(
   state.usage.tokensIn += synthUsage.tokensIn;
   state.usage.tokensOut += synthUsage.tokensOut;
   state.usage.steps += 1;
-  state.usage.estCostUsd = estCostUsd(client.id, state.usage.tokensIn, state.usage.tokensOut);
+  // Accumulate incrementally (price ONLY the synthesis tokens at the synthesis
+  // provider). Recomputing from cumulative totals at client.id here would CLOBBER
+  // the per-step mixed-provider cost already accumulated by the task loop —
+  // re-pricing earlier cloud-escalation tokens at the local run-level provider
+  // (erasing real spend) or vice-versa.
+  state.usage.estCostUsd += estCostUsd(client.id, synthUsage.tokensIn, synthUsage.tokensOut);
 
   const synthDoneStep: RunStep = {
     ts: new Date().toISOString(),

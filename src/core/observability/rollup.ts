@@ -80,7 +80,7 @@ function countCommitsSince(repoPath: string, sinceMs: number): number {
  *   'ollama/llama3'              -> 'ollama'
  *   unknown                      -> model id as-is (budget fallback applies)
  */
-function modelToProviderKey(model: string): string {
+export function modelToProviderKey(model: string): string {
   const m = model.toLowerCase();
   if (m.startsWith('claude'))  return 'claude';
   if (m.startsWith('gpt'))     return 'gpt';
@@ -91,6 +91,18 @@ function modelToProviderKey(model: string): string {
   if (m.includes('lmstudio'))  return 'lmstudio';
   // Pass through: estCostUsd will fallback to conservative $3/$15
   return model;
+}
+
+/**
+ * Local (zero-cost) provider keys. A model whose `modelToProviderKey` lands in
+ * this set is served by a LOCAL backend and costs $0. Shared with forecast.ts so
+ * the local/cloud split stays consistent across rollup and savings computation.
+ */
+export const LOCAL_PROVIDER_KEYS: ReadonlySet<string> = new Set(['ollama', 'lmstudio']);
+
+/** True when `model` is served by a local provider (cost $0). */
+export function isLocalProviderModel(model: string): boolean {
+  return LOCAL_PROVIDER_KEYS.has(modelToProviderKey(model));
 }
 
 // ---------------------------------------------------------------------------

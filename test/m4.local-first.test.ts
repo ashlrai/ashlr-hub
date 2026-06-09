@@ -297,6 +297,80 @@ describe('getActiveClient — local provider up', () => {
 });
 
 // ---------------------------------------------------------------------------
+// M15: provider-aware routing — opts.provider / opts.model override the
+// chain's active provider. Locks the escalation invariant: a cloud-provider
+// route actually TARGETS that cloud provider (and is gated by key + the
+// not-yet-implemented cloud guard) instead of silently re-running on the
+// local active provider.
+// ---------------------------------------------------------------------------
+
+describe('getActiveClient — provider-aware (M15 routing)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env['ANTHROPIC_API_KEY'];
+    delete process.env['ASHLR_MODEL'];
+  });
+
+  it('opts.provider forces a cloud provider even when a LOCAL provider is up — does NOT silently stay local', async () => {
+    // Ollama is reachable AND first in the chain. Without provider-awareness,
+    // getActiveClient would return the local ollama client. With opts.provider
+    // pointing at the routed cloud provider, it must target that cloud provider
+    // (and, since cloud completions are unimplemented + key is present, throw)
+    // rather than returning a local client.
+    process.env['ANTHROPIC_API_KEY'] = 'sk-test-anthropic-key';
+    vi.stubGlobal('fetch', ollamaUpFetch());
+    const cfg = makeConfig(['ollama', 'anthropic']);
+
+    let returnedLocal = false;
+    let msg = '';
+    try {
+      const client = await getActiveClient(cfg, {
+        allowCloud: true,
+        provider: 'anthropic',
+      });
+      // If it returned a client at all, it must NOT be the local ollama client.
+      returnedLocal = client.id === 'ollama' || client.id === 'lmstudio';
+    } catch (e) {
+      msg = e instanceof Error ? e.message : String(e);
+    }
+    // Must not have fallen back to a local client.
+    expect(returnedLocal).toBe(false);
+    // The cloud path was actually taken (unimplemented cloud completion error).
+    expect(msg.toLowerCase()).toMatch(/cloud|not yet implement|anthropic/);
+  });
+
+  it('opts.provider for a cloud provider WITHOUT a key throws the key error (never returns local)', async () => {
+    delete process.env['ANTHROPIC_API_KEY'];
+    vi.stubGlobal('fetch', ollamaUpFetch()); // local is up, but we force cloud
+    const cfg = makeConfig(['ollama', 'anthropic']);
+    await expect(
+      getActiveClient(cfg, { allowCloud: true, provider: 'anthropic' }),
+    ).rejects.toThrow();
+  });
+
+  it('opts.model selects the requested local model without mutating process.env', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('11434/api/tags')) {
+        return Promise.resolve(
+          mockResponse({ models: [{ name: 'llama3:8b' }, { name: 'qwen2.5-coder:7b' }] }),
+        );
+      }
+      return Promise.reject(new Error('unexpected'));
+    }) as unknown as typeof fetch);
+    const before = process.env['ASHLR_MODEL'];
+    const cfg = makeConfig(['ollama']);
+    const client = await getActiveClient(cfg, {
+      allowCloud: false,
+      provider: 'ollama',
+      model: 'qwen2.5-coder:7b',
+    });
+    expect(client.id).toBe('ollama');
+    // No global env mutation as a side effect of model selection.
+    expect(process.env['ASHLR_MODEL']).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Ollama client chat() — basic integration via mock fetch
 // ---------------------------------------------------------------------------
 

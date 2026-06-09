@@ -8,6 +8,57 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M15: Cost-Optimal Local-First Routing
+
+### Added
+- **Per-task model routing** (`src/core/run/router.ts`): `chooseRoute(taskGoal, cfg, opts)` picks the best available local model (Ollama / LM Studio) for every task according to `cfg.models.providerChain`. Optional `cfg.models.routing[]` rules match task goals by pattern and override the default model. Returns a `RouteDecision` with `{provider, model, tier, reason}` so the caller always knows exactly what was chosen and why.
+  - **Local-first, hard-enforced**: cloud provider is selected only when `opts.allowCloud === true` AND `opts.lastReason !== 'none'` (an escalation reason is present) AND a cloud API key is actually available (`cloudKeyAvailable(provider)`). Any other combination stays local. No silent cloud spend is ever possible.
+  - `cloudKeyAvailable(provider)`: reads the standard API-key env var for a provider; returns a boolean — never logs or leaks the value.
+  - `wouldBeCloudCost(tokensIn, tokensOut)`: returns a clearly-labeled estimate of what the same token counts would have cost on the default cloud provider, for savings comparison only. Never used as a billing figure.
+- **Auto-escalation on failure/latency** (integrated into `src/core/run/orchestrator.ts`):
+  - When a task result is empty/errored, or `verifyTask` returns `!ok` (M11 verify loop), the orchestrator calls `chooseRoute` with `lastReason: 'task-failed'` / `'verify-failed'` for the retry pass.
+  - When a task exceeds `cfg.models.escalate.latencyMs` (optional), the next attempt is routed with `lastReason: 'latency'`.
+  - **Cloud escalation requires both `--allow-cloud` AND a present key.** Without both, the retry stays local or marks the task `needs-attention`. There is no automatic cloud fallback.
+  - Escalation is a single routed retry — it ties into the existing M11 `withRetry` / `verifyTask` path; the global `RunBudget` ceiling is never lifted.
+- **Cost attribution per provider** (orchestrator + `src/core/observability/rollup.ts`):
+  - Each `RunTask` now records `provider` and `tier` from its `RouteDecision`.
+  - Local tasks (tier `'local'`) contribute `$0.00` actual cost; cloud tasks carry real `estCostUsd`.
+  - `buildRollup` aggregates actual spend by provider and separately computes a "would-have-been-cloud" estimate (via `wouldBeCloudCost`) for every local task — giving a concrete savings figure.
+- **Cost forecasting** (`src/core/observability/forecast.ts`): `buildForecast(window, cfg)` returns a `CostForecast` with:
+  - `spentUsd` — actual cost in the window (local = $0, cloud = real estimate).
+  - `localSavingsUsd` — cloud-equivalent cost for tokens handled locally, clearly labeled as an estimate.
+  - `projectedMonthlyUsd` — simple linear projection from the window rate.
+  - All numbers are **estimates, labeled as such**; no precision is fabricated.
+- **`ashlr pulse` savings + forecast line**: `ashlr pulse` now shows a savings/forecast line beneath its summary output:
+  ```
+  Local savings (est):  $X.XX   |   Cloud would-have-been: $Y.YY   |   Projected 30d: $Z.ZZ
+  ```
+  The line is printed only when at least one local task has run in the window; suppressed on `--json` (the `CostForecast` is merged into the JSON rollup instead).
+- **`ashlr models` — local model management** (`src/cli/models.ts`, `src/core/run/model-manager.ts`):
+  - `ashlr models` — list all local models from Ollama (`/api/tags`) and LM Studio (`/api/models`). Shows name, provider, approximate size label, and whether it is the currently active/default model per config.
+  - `ashlr models pull <name>` — explicit Ollama pull. Prints a size warning and requires interactive confirmation (`y/yes`) before downloading. **Never invoked automatically** during a run, route, or any other command.
+  - `ashlr models start` — best-effort attempt to start a locally installed Ollama daemon when it is installed but not responding. **Never invoked automatically**; bounded to the local Ollama process; never installs or downloads anything.
+  - `ollamaInstalled()`: checks `PATH` for the `ollama` binary — no network call, no side effects.
+- **New types** in `src/core/types.ts` (all existing types preserved):
+  - `ModelTier = 'local' | 'cloud'`
+  - `RouteDecision { provider: string; model: string; tier: ModelTier; reason: string }`
+  - `RoutingRule { match: string; model: string }`
+  - `EscalationReason = 'task-failed' | 'verify-failed' | 'latency' | 'none'`
+  - `LocalModelInfo { provider: 'ollama' | 'lmstudio'; name: string; sizeLabel?: string; active: boolean }`
+  - `CostForecast { window: string; spentUsd: number; localSavingsUsd: number; projectedMonthlyUsd: number }`
+  - `cfg.models.routing?: RoutingRule[]` and `cfg.models.escalate?: { onFailure: boolean; latencyMs?: number }` config fields.
+
+### Guardrails (M15)
+- **Local-first, no silent cloud**: cloud is reachable only via `--allow-cloud` + a present API key + a non-`'none'` escalation reason. The default path is 100% local. Every run and swarm is still bounded by the hard `RunBudget` ceiling.
+- **No auto-download**: `ollama pull` runs only on the explicit `ashlr models pull <name>` command (with a confirmation prompt). It is never called during a run, route, or escalation.
+- **No auto-start**: `ashlr models start` is the only path that attempts to start a local Ollama process. It is never called automatically.
+- **Estimates clearly labeled**: all savings and forecast numbers are estimates; no precision is fabricated; every cost label includes `(est)`.
+- **No secrets logged**: `cloudKeyAvailable` returns a boolean only; key values never appear in logs, run state, or rollup output.
+- **Zero new runtime dependencies**: `router.ts`, `model-manager.ts`, `forecast.ts`, and `cli/models.ts` use only Node builtins and existing hub modules (`provider-client`, `budget`, `rollup`, `ui`).
+- All 1396 existing tests preserved.
+
+---
+
 ## [Unreleased] — M14: Surfaces II (Local Web Dashboard)
 
 ### Added

@@ -76,11 +76,15 @@ function modelSupportsTools(modelName: string): boolean {
  * Pick the best model from a list of available model names.
  * Prefers a coder/capable model, falls back to first available.
  */
-function pickModel(models: string[]): string {
-  if (models.length === 0) return 'default';
-  // 1. Explicit override via ASHLR_MODEL (set by the --model flag or the env). Exact match wins,
-  //    else first substring match, else trust the user's string verbatim.
-  const override = process.env.ASHLR_MODEL?.trim();
+function pickModel(models: string[], explicit?: string): string {
+  if (models.length === 0) return explicit?.trim() || 'default';
+  // 1. Explicit override. An EXPLICIT argument (passed in by a provider-aware
+  //    caller such as the M15 router) takes precedence over the ASHLR_MODEL env
+  //    var; the env var remains supported for the --model flag / global override.
+  //    Passing the model explicitly avoids mutating shared process.env under
+  //    concurrent tasks (no env race). Exact match wins, else first substring
+  //    match, else trust the caller's string verbatim.
+  const override = (explicit?.trim() || process.env.ASHLR_MODEL?.trim()) || undefined;
   if (override) {
     return (
       models.find((m) => m === override) ??
@@ -816,13 +820,27 @@ function buildLmStudioClient(
  *   - Ollama: enabled for models whose names match known tool-capable patterns.
  *   - LM Studio: enabled by default (model capability not reliably detectable
  *     without a live call; degrades gracefully on failure).
+ *
+ * Provider-aware routing (M15):
+ *   - `opts.provider` forces a specific provider id (e.g. the cloud provider a
+ *     RouteDecision escalated to) instead of defaulting to registry.activeProvider.
+ *     This is REQUIRED for cloud escalation to actually target the routed cloud
+ *     provider rather than silently re-running on the local active provider.
+ *     The same local-first guards apply: a cloud provider id still throws unless
+ *     allowCloud AND its key is present (and cloud completions are implemented).
+ *   - `opts.model` forces the model name (threaded into pickModel) without
+ *     mutating the shared process.env.ASHLR_MODEL — avoiding the env race under
+ *     concurrent tasks. ASHLR_MODEL is still honored when opts.model is absent.
  */
 export async function getActiveClient(
   cfg: AshlrConfig,
-  opts: { allowCloud: boolean },
+  opts: { allowCloud: boolean; provider?: string; model?: string },
 ): Promise<ProviderClient> {
   const registry = await getProviderRegistry(cfg);
-  const activeId = registry.activeProvider;
+  // Honor an explicitly-requested provider (router decision) over the chain's
+  // first-up provider. This is what makes a cloud escalation actually route to
+  // the cloud provider instead of falling through to the local active one.
+  const activeId = opts.provider ?? registry.activeProvider;
 
   if (activeId === null) {
     throw new Error(
@@ -868,7 +886,7 @@ export async function getActiveClient(
       );
     }
 
-    const model = pickModel(endpoint.models);
+    const model = pickModel(endpoint.models, opts.model);
     const supportsTools = modelSupportsTools(model);
     const baseUrl = cfg.models.ollama.replace(/\/+$/, '');
 
@@ -885,7 +903,7 @@ export async function getActiveClient(
       );
     }
 
-    const model = pickModel(endpoint.models);
+    const model = pickModel(endpoint.models, opts.model);
     // LM Studio (OpenAI compat) — assume tool support; degrade on error in chat()
     const supportsTools = true;
     const baseUrl = cfg.models.lmstudio.replace(/\/+$/, '');

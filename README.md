@@ -136,6 +136,74 @@ ashlr runs                      # list past runs with cost + status
 
 Budget and step limits are **hard ceilings** — exceeding either aborts immediately, preserves all partial results, and lets you `--resume`. Retries are bounded; the verification step never re-runs a task that would push usage over the budget.
 
+### Cost-optimal routing
+
+`ashlr` is local-first not just by philosophy but by mechanical guarantee: every task is routed to the best available **local** model (Ollama / LM Studio) first. Cloud endpoints are structurally unreachable unless you explicitly opt in.
+
+#### How routing works
+
+For each task in a run or swarm, `chooseRoute` inspects `cfg.models.providerChain`, probes which local providers are live, and selects the best match. Optional `cfg.models.routing[]` rules let you pin specific task patterns to a particular model (e.g., route "summarize" tasks to a lighter model). The result is a `RouteDecision` — `{provider, model, tier, reason}` — logged with every task so you always know exactly what ran where.
+
+#### Cloud: only on explicit failure + explicit flag
+
+If a local task fails (empty/error result), the M11 verify loop marks it `!ok`, or it exceeds an optional latency threshold, the orchestrator can escalate to a cloud provider for **one retry** — but only when:
+
+1. `--allow-cloud` is passed to `ashlr run` or `ashlr swarm`, **and**
+2. The cloud provider API key is actually present in the environment.
+
+Both conditions must be true simultaneously. If either is absent, the retry stays local (or marks the task `needs-attention`). There is **no automatic cloud fallback**, no silent billing, and no "best effort" that secretly calls OpenAI when Ollama is slow.
+
+```sh
+# default — 100% local; escalation stays local if a task fails
+ashlr run "Audit the MCP registry"
+
+# opt-in cloud escalation for failed tasks only (key must be present)
+ashlr run "Audit the MCP registry" --allow-cloud
+```
+
+#### No auto-download, no auto-start
+
+`ashlr` never downloads a model or starts a daemon on your behalf during normal operation. Those actions are opt-in subcommands:
+
+```sh
+ashlr models               # list local models (Ollama + LM Studio) — read-only
+ashlr models pull llama3   # explicit download — prints size warning + requires confirm
+ashlr models start         # best-effort start of an installed-but-idle Ollama daemon
+```
+
+`ashlr models pull` is the only path that runs `ollama pull`. It is never called during a run, route, or escalation, even if no local model is available.
+
+#### Savings + forecast in `ashlr pulse`
+
+Local tasks cost **$0.00**. `ashlr pulse` now shows a savings line that tells you what those tokens would have cost on a cloud provider, and a projected monthly spend based on recent usage:
+
+```
+Local savings (est):  $0.42   |   Cloud would-have-been: $0.47   |   Projected 30d: $0.18
+```
+
+All numbers are clearly marked as estimates. The same data is available machine-readable via `ashlr pulse --json` (the `CostForecast` fields are merged into the rollup output).
+
+#### Config
+
+```jsonc
+// ~/.ashlr/config.json (relevant fields)
+{
+  "models": {
+    "providerChain": ["ollama", "lmstudio"],   // local-first order
+    "routing": [                                // optional per-task overrides
+      { "match": "summarize", "model": "llama3:8b" },
+      { "match": "verify",    "model": "mistral:7b" }
+    ],
+    "escalate": {
+      "onFailure": true,      // escalate to cloud on failure (--allow-cloud still required)
+      "latencyMs": 30000      // also escalate if a task takes longer than 30s
+    }
+  }
+}
+```
+
+---
+
 ### Observe
 
 | Command | What it does |

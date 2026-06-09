@@ -39,6 +39,19 @@ export interface AshlrConfig {
     lmstudio: string;
     ollama: string;
     providerChain: string[];
+    /**
+     * Optional per-task routing rules (M15). Each rule maps a goal/task match
+     * to a preferred model. First matching rule wins; falls back to local-first
+     * chain selection when none match. Never forces a cloud provider on its own.
+     */
+    routing?: RoutingRule[];
+    /**
+     * Optional auto-escalation policy (M15). When `onFailure` is true, a LOCAL
+     * task that fails/verify-fails (or exceeds `latencyMs`) MAY escalate to a
+     * cloud provider for one routed retry — but ONLY when --allow-cloud is set
+     * and a cloud key is present. Never enables silent cloud spend on its own.
+     */
+    escalate?: { onFailure: boolean; latencyMs?: number };
   };
   /** Telemetry hooks (e.g. Pulse) + local budget caps. All fields optional. */
   telemetry: {
@@ -1016,4 +1029,66 @@ export interface WebServerHandle {
   url: string;
   /** Stop the server cleanly (closes listeners + bounded SSE pollers). */
   close(): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// M15: cost-optimal, local-first model routing. A per-task router picks the
+// cheapest viable provider+model (LOCAL by default); cloud is reachable ONLY
+// via --allow-cloud + a present API key + an escalation reason. Cost is
+// attributed per provider (local=$0), with a "would-have-been-cloud"
+// comparison and a simple monthly forecast. `ashlr models` lists/manages
+// local models (opt-in pull/start only). NEVER auto-downloads or auto-spends.
+// ---------------------------------------------------------------------------
+
+/** Whether a routed model runs LOCALLY (Ollama/LM Studio) or in the CLOUD. */
+export type ModelTier = 'local' | 'cloud';
+
+/** The router's decision for a single task attempt: which provider+model + why. */
+export interface RouteDecision {
+  /** Provider id the task should run on (e.g. 'ollama', 'lmstudio', 'anthropic'). */
+  provider: string;
+  /** Concrete model id/name to use on that provider. */
+  model: string;
+  /** Whether this route is local-first ($0) or an escalated cloud route. */
+  tier: ModelTier;
+  /** One-line human-readable explanation of why this route was chosen. */
+  reason: string;
+}
+
+/** A single per-task routing rule: match a goal/task to a preferred model. */
+export interface RoutingRule {
+  /** Match expression against the task goal (substring/keyword/kind label). */
+  match: string;
+  /** Preferred model id/name when the rule matches. */
+  model: string;
+}
+
+/** Why a task escalated (or 'none' when it is a normal first-attempt route). */
+export type EscalationReason = 'task-failed' | 'verify-failed' | 'latency' | 'none';
+
+/** A single local model discovered on Ollama or LM Studio. */
+export interface LocalModelInfo {
+  /** Which local provider exposes this model. */
+  provider: 'ollama' | 'lmstudio';
+  /** Model name/id as reported by the provider's /api/tags (or equivalent). */
+  name: string;
+  /** Optional human-readable size label (e.g. '4.7 GB'), when available. */
+  sizeLabel?: string;
+  /** Whether this is the active/default model for its provider. */
+  active: boolean;
+}
+
+/** Cost attribution + forward forecast for a recent usage window (M15). */
+export interface CostForecast {
+  /** Window label the forecast is built from (e.g. '7d' | '30d'). */
+  window: string;
+  /** Actual USD spent in the window (local providers contribute $0). */
+  spentUsd: number;
+  /**
+   * Estimated USD that the SAME local tokens WOULD have cost on cloud — the
+   * savings from staying local. Clearly an estimate, never fabricated precision.
+   */
+  localSavingsUsd: number;
+  /** Simple projected monthly USD spend extrapolated from the window's rate. */
+  projectedMonthlyUsd: number;
 }

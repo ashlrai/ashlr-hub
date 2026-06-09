@@ -237,6 +237,12 @@ const loadServeCmd = lazyCmd(
   'serve command requires src/cli/serve.ts (M14 module not yet built).',
 );
 
+const loadModelsCmd = lazyCmd(
+  () => import('./models.js' as unknown as string),
+  (m) => m.cmdModels as Cmd,
+  'models command requires src/cli/models.ts (M15 module not yet built).',
+);
+
 // ─── ANSI helpers ──────────────────────────────────────────────────────────────
 
 // index.ts colorizes unconditionally (output is always color-coded regardless
@@ -954,7 +960,7 @@ function cmdHelp(): void {
     ['run show <id>',                'Print a past run in detail.'],
     ['runs [--json]',                'List past runs (newest first).'],
     ['pulse [--window 1d|7d|30d]',   'Local observability dashboard: tokens, cost, sessions, commits.'],
-    ['pulse --json',                 'Machine-readable ActivityRollup (for Raycast Pulse view).'],
+    ['pulse --json',                 'Machine-readable ActivityRollup (+ additive .forecast field; Raycast Pulse view).'],
     ['pulse --project <name>',       'Restrict pulse rollup to a single project.'],
     ['recall "<query>"',             'Search shared genome memory; return top relevant entries with scores.'],
     ['learn "<text>" [opts]',        'Append a note to shared genome memory (local-first, append-only).'],
@@ -972,6 +978,9 @@ function cmdHelp(): void {
     ['serve [--port N]',             'Start local web dashboard + JSON API on 127.0.0.1 (default port 7777).'],
     ['serve --open',                 'Start dashboard and open browser automatically.'],
     ['serve --allow-dispatch',       'Enable guarded POST /api/run (prints session token).'],
+    ['models [--json]',              'List local models (Ollama/LM Studio); marks the active one.'],
+    ['models pull <name> [--yes]',   'Explicitly pull an Ollama model (large download; confirm first).'],
+    ['models start',                 'Best-effort start a locally-installed Ollama (never downloads).'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1178,6 +1187,12 @@ async function main(): Promise<void> {
       case 'serve': {
         const cmdServe = await loadServeCmd();
         process.exitCode = await cmdServe(rest);
+        break;
+      }
+
+      case 'models': {
+        const cmdModels = await loadModelsCmd();
+        process.exitCode = await cmdModels(rest);
         break;
       }
 

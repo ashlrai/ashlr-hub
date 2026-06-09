@@ -14,7 +14,7 @@
  * are built, matching the M3/M4 lazy-import pattern.
  */
 
-import type { ActivityRollup, BudgetAlert } from '../core/types.js';
+import type { ActivityRollup, BudgetAlert, CostForecast } from '../core/types.js';
 import type { AshlrConfig } from '../core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -52,6 +52,22 @@ async function loadBuildRollup(): Promise<BuildRollupFn | null> {
 async function loadConfig(): Promise<AshlrConfig> {
   const mod = await import('../core/config.js') as { loadConfig: () => AshlrConfig };
   return mod.loadConfig();
+}
+
+type BuildForecastFn = (window: '7d' | '30d', cfg: AshlrConfig) => CostForecast;
+
+let _buildForecast: BuildForecastFn | null | undefined = undefined;
+
+async function loadBuildForecast(): Promise<BuildForecastFn | null> {
+  if (_buildForecast === undefined) {
+    try {
+      const mod = await import('../core/observability/forecast.js') as { buildForecast: BuildForecastFn };
+      _buildForecast = mod.buildForecast;
+    } catch {
+      _buildForecast = null;
+    }
+  }
+  return _buildForecast ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +196,16 @@ function renderBudgetLine(budget: BudgetAlert): string {
   return parts.join('  ');
 }
 
+/** Render the M15 cost/savings/forecast line (estimates clearly labeled). */
+function renderForecastLine(fc: CostForecast): string {
+  const spent = `spent ${bold(fmtUsd(fc.spentUsd))} (${fc.window})`;
+  const saved = fc.localSavingsUsd > 0
+    ? `  ${green(`saved ~${fmtUsd(fc.localSavingsUsd)} vs cloud`)}`
+    : `  ${dim('$0 cloud usage')}`;
+  const proj = `  ${dim(`projected ~${fmtUsd(fc.projectedMonthlyUsd)}/mo`)}`;
+  return `${spent}${saved}${proj}  ${dim('[estimates]')}`;
+}
+
 // ---------------------------------------------------------------------------
 // Sparkline / bar chart for daily usage
 // ---------------------------------------------------------------------------
@@ -219,7 +245,7 @@ function renderDayBars(rollup: ActivityRollup): void {
 // Rich dashboard renderer
 // ---------------------------------------------------------------------------
 
-function renderDashboard(rollup: ActivityRollup): void {
+function renderDashboard(rollup: ActivityRollup, forecast?: CostForecast | null): void {
   const { window: win, since, totals, byProject, byModel, budget } = rollup;
 
   // ── Header ────────────────────────────────────────────────────────────────
@@ -238,6 +264,9 @@ function renderDashboard(rollup: ActivityRollup): void {
     `out ${cyan(fmtTokens(totals.tokensOut))}  ` +
     `total ${bold(cyan(fmtTokens(totalTok)))}`);
   console.log(`  ${bold('Cost')}     ${bold(cyan(fmtUsd(totals.estCostUsd)))}`);
+  if (forecast) {
+    console.log(`  ${bold('Savings')}  ${renderForecastLine(forecast)}`);
+  }
   console.log(`  ${bold('Sessions')} ${cyan(String(totals.sessions))}  ` +
     `${bold('Commits')} ${cyan(String(totals.commits))}`);
   console.log('');
@@ -381,8 +410,12 @@ export async function cmdPulse(args: string[]): Promise<number> {
     return 2;
   }
 
-  // Load buildRollup (lazy; degrades if M5 core not yet built)
-  const buildRollup = await loadBuildRollup();
+  // Load buildRollup (lazy; degrades if M5 core not yet built).
+  // Load buildForecast lazily; degrades gracefully if M15 module not yet built.
+  const [buildRollup, buildForecast] = await Promise.all([
+    loadBuildRollup(),
+    loadBuildForecast(),
+  ]);
 
   if (!buildRollup) {
     process.stderr.write(
@@ -415,14 +448,32 @@ export async function cmdPulse(args: string[]): Promise<number> {
     return 1;
   }
 
-  // Machine output
+  // Build forecast (M15; degrades gracefully when module not yet present)
+  const forecastWindow = parsed.window === '1d' ? '7d' : parsed.window;
+  let forecast: CostForecast | null = null;
+  if (buildForecast) {
+    try {
+      forecast = buildForecast(forecastWindow, cfg);
+    } catch {
+      // non-fatal — forecast is best-effort
+      forecast = null;
+    }
+  }
+
+  // Machine output.
+  // BACKWARD-COMPAT (M15): emit the ActivityRollup at the TOP LEVEL (as shipped
+  // through M14) and attach `forecast` as a purely additive field. Existing
+  // consumers — notably the M13 Raycast Pulse extension, which destructures
+  // { totals, byProject, byModel, budget } from the top level — keep working,
+  // while new consumers read the additive `.forecast`.
   if (parsed.json) {
-    process.stdout.write(JSON.stringify(rollup, null, 2) + '\n');
+    const out: ActivityRollup & { forecast: CostForecast | null } = { ...rollup, forecast };
+    process.stdout.write(JSON.stringify(out, null, 2) + '\n');
     return rollup.budget.level === 'over' ? 1 : 0;
   }
 
   // Rich dashboard
-  renderDashboard(rollup);
+  renderDashboard(rollup, forecast);
 
   return rollup.budget.level === 'over' ? 1 : 0;
 }
