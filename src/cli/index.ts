@@ -22,6 +22,7 @@
  *   recall "<query>"           Search shared genome memory; return top relevant entries.
  *   learn "<text>" [opts]      Append a note to shared genome memory.
  *   genome                     Genome status/health: entry count, projects, staleness.
+ *   update [--check] [--json]  Safe self-update: git pull --ff-only + rebuild; --check reports only.
  *   help                       Show this help.
  *
  * Exit codes: 0 success, 1 error/not-found, 2 bad usage.
@@ -277,6 +278,30 @@ async function loadGenomeCmd(): Promise<CmdGenomeFn> {
     };
   }
   return _cmdGenome;
+}
+
+// ─── M9 lazy imports (graceful degradation if module not yet built) ───────────
+
+type CmdUpdateFn = (args: string[]) => Promise<number>;
+
+let _cmdUpdate: CmdUpdateFn | null | undefined = undefined;
+
+async function loadUpdateCmd(): Promise<CmdUpdateFn> {
+  if (_cmdUpdate === undefined) {
+    try {
+      const mod = (await import('./update.js' as unknown as string)) as { cmdUpdate: CmdUpdateFn };
+      _cmdUpdate = mod.cmdUpdate;
+    } catch {
+      _cmdUpdate = null;
+    }
+  }
+  if (_cmdUpdate === null) {
+    return async (_args: string[]) => {
+      console.error(red('error: ') + 'update command requires src/cli/update.ts (M9 module not yet built).');
+      return 1;
+    };
+  }
+  return _cmdUpdate;
 }
 
 // ─── ANSI helpers ──────────────────────────────────────────────────────────────
@@ -1017,6 +1042,7 @@ function cmdHelp(): void {
     ['recall "<query>"',             'Search shared genome memory; return top relevant entries with scores.'],
     ['learn "<text>" [opts]',        'Append a note to shared genome memory (local-first, append-only).'],
     ['genome',                       'Genome status/health: entry count, projects covered, store size.'],
+    ['update [--check] [--json]',    'Safe self-update: git pull --ff-only + rebuild. --check reports only.'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1158,6 +1184,12 @@ async function main(): Promise<void> {
       case 'genome': {
         const cmdGenome = await loadGenomeCmd();
         process.exitCode = await cmdGenome(rest);
+        break;
+      }
+
+      case 'update': {
+        const cmdUpdate = await loadUpdateCmd();
+        process.exitCode = await cmdUpdate(rest);
         break;
       }
 

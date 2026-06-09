@@ -27,6 +27,23 @@ let _mockResponses: Map<string, MockResponse> = new Map();
 // Default fallback (ENOENT = not found).
 let _defaultResponse: MockResponse;
 
+// ---------------------------------------------------------------------------
+// Mock node:fs — controls existsSync for app-path detection (ashlr-md etc.)
+// ---------------------------------------------------------------------------
+
+// Set of paths that existsSync should report as present.
+let _existingPaths: Set<string> = new Set();
+
+vi.mock('node:fs', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...original,
+    existsSync: (p: unknown): boolean => _existingPaths.has(String(p)),
+    // readFileSync is used by ashlrHubVersionFromPackageJson — keep original
+    readFileSync: original.readFileSync,
+  };
+});
+
 function makeResult(
   stdout: string,
   stderr = '',
@@ -97,6 +114,8 @@ function mockAbsent(toolCmd: string): void {
 beforeEach(() => {
   _mockResponses = new Map();
   _defaultResponse = enoent('__default__');
+  // Reset app-path presence — no apps present by default.
+  _existingPaths = new Set();
 });
 
 afterEach(() => {
@@ -339,5 +358,47 @@ describe('getToolsRegistry — ToolInfo shape invariants', () => {
     const reg = getToolsRegistry();
     const count = reg.tools.filter(t => t.installed).length;
     expect(reg.installedCount).toBe(count);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ashlr-md — Tauri desktop app detection (not a CLI binary)
+// ---------------------------------------------------------------------------
+
+describe('getToolsRegistry — ashlr-md app detection', () => {
+  it('ashlr-md is installed:false when no app bundle exists', () => {
+    // _existingPaths is empty (reset in beforeEach)
+    const reg = getToolsRegistry();
+    const t = reg.tools.find(t => t.id === 'ashlr-md');
+    expect(t?.installed).toBe(false);
+    expect(t?.path).toBeNull();
+    expect(t?.version).toBeNull();
+  });
+
+  it('ashlr-md is installed:true when /Applications/Ashlr MD.app exists', () => {
+    _existingPaths.add('/Applications/Ashlr MD.app');
+    const reg = getToolsRegistry();
+    const t = reg.tools.find(t => t.id === 'ashlr-md');
+    expect(t?.installed).toBe(true);
+    expect(t?.path).toBe('/Applications/Ashlr MD.app');
+    // App tools have no CLI version to query
+    expect(t?.version).toBeNull();
+  });
+
+  it('ashlr-md falls back to ~/Applications when system path absent', () => {
+    const userAppPath = `${process.env['HOME'] ?? ''}/Applications/Ashlr MD.app`;
+    _existingPaths.add(userAppPath);
+    const reg = getToolsRegistry();
+    const t = reg.tools.find(t => t.id === 'ashlr-md');
+    expect(t?.installed).toBe(true);
+    expect(t?.path).toBe(userAppPath);
+  });
+
+  it('ashlr-md installed:true increments installedCount', () => {
+    _existingPaths.add('/Applications/Ashlr MD.app');
+    const reg = getToolsRegistry();
+    const count = reg.tools.filter(t => t.installed).length;
+    expect(reg.installedCount).toBe(count);
+    expect(reg.installedCount).toBeGreaterThanOrEqual(1);
   });
 });

@@ -34,6 +34,16 @@ const INDEX_VERSION = 1;
 /** Directory names to never descend into during any walk. */
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.next', '.turbo', 'coverage', '__pycache__']);
 
+/**
+ * Returns true for any Desktop top-level entry whose name starts with "."
+ * (hidden OS artefacts and tool-state dirs: .DS_Store, .vscode, .cursor,
+ * .claude, .ashlrcode, .downloads, .reorg-*, …).  Skipping these prevents
+ * them from inflating the "(uncategorized)" bucket in `ashlr index`.
+ */
+function isDesktopDotfile(name: string): boolean {
+  return name.startsWith('.');
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 /**
@@ -184,6 +194,7 @@ function walkGithubCategory(
   categoryRoot: string,
   cfg: AshlrConfig,
   seenPaths: Set<string>,
+  tryCachedRepo: (absPath: string) => IndexedItem | null = () => null,
 ): IndexedItem[] {
   const items: IndexedItem[] = [];
 
@@ -217,7 +228,7 @@ function walkGithubCategory(
     // ── Check depth-1 repo ──
     if (isRepo(absPath)) {
       seenPaths.add(realPath);
-      const item = buildItem(absPath, cfg, 'repo');
+      const item = tryCachedRepo(absPath) ?? buildItem(absPath, cfg, 'repo');
       if (item) items.push(item);
       continue;
     }
@@ -254,7 +265,7 @@ function walkGithubCategory(
       if (isRepo(nestedPath)) {
         seenPaths.add(nestedReal);
         foundNested = true;
-        const item = buildItem(nestedPath, cfg, 'repo');
+        const item = tryCachedRepo(nestedPath) ?? buildItem(nestedPath, cfg, 'repo');
         if (item) items.push(item);
       }
     }
@@ -290,11 +301,15 @@ function walkDesktopRoot(
   root: string,
   cfg: AshlrConfig,
   seenPaths: Set<string>,
+  tryCachedRepo: (absPath: string) => IndexedItem | null = () => null,
 ): IndexedItem[] {
   const items: IndexedItem[] = [];
 
   for (const dirent of safeReaddir(root)) {
     if (SKIP_DIRS.has(dirent.name)) continue;
+    // Skip dotfiles / hidden entries at the Desktop top-level (.DS_Store,
+    // .vscode, .claude, .ashlrcode, .downloads, .reorg-*, …).
+    if (isDesktopDotfile(dirent.name)) continue;
 
     const absPath = path.join(root, dirent.name);
 
@@ -336,7 +351,9 @@ function walkDesktopRoot(
       seenPaths.add(realPath);
       // Repos found at desktop top-level (unusual but possible).
       const kind: ItemKind = isRepo(absPath) ? 'repo' : kindOf(absPath);
-      const item = buildItem(absPath, cfg, kind);
+      const item =
+        (kind === 'repo' ? tryCachedRepo(absPath) : null) ??
+        buildItem(absPath, cfg, kind);
       if (item) items.push(item);
       continue;
     }
@@ -355,16 +372,75 @@ function walkDesktopRoot(
 // ─── public API ──────────────────────────────────────────────────────────────
 
 /**
- * Build a fresh AshlrIndex by scanning all cfg.roots.
+ * Options for {@link buildIndex}.
+ */
+export interface BuildIndexOptions {
+  /**
+   * When provided, the builder attempts an incremental update: any repo whose
+   * directory mtime has not changed since `previousIndex.generatedAt` is
+   * reused from the previous index instead of being re-stat'd and re-git'd.
+   *
+   * Pass `undefined` (or omit the option) for a full rebuild.  The index
+   * command passes this when `--refresh` is NOT specified and a prior index
+   * already exists.
+   */
+  previousIndex?: AshlrIndex;
+}
+
+/**
+ * Build a fresh (or incrementally updated) AshlrIndex by scanning all cfg.roots.
  *
  * Walk order:
  *  1. Treat each root that ends in `/github/<category>` as a github category root.
  *  2. Treat every remaining root as a "desktop" root (top-level only).
  *  3. Track seenPaths (via realpath) across all roots to avoid double-counting.
+ *
+ * Incremental mode (opts.previousIndex present):
+ *  For repos already in the previous index, compare the directory's current
+ *  mtime against `previousIndex.generatedAt`.  If the mtime is older (i.e.
+ *  the directory has not been touched since the last index was built), reuse
+ *  the prior IndexedItem directly — no stat/readdir/git calls needed.
+ *  Any repo whose mtime is >= generatedAt (or that is new) is rebuilt normally.
  */
-export function buildIndex(cfg: AshlrConfig): AshlrIndex {
+export function buildIndex(cfg: AshlrConfig, opts: BuildIndexOptions = {}): AshlrIndex {
   const seenPaths = new Set<string>();
   const allItems: IndexedItem[] = [];
+
+  // ── Incremental cache ────────────────────────────────────────────────────
+  // Build a path→IndexedItem lookup from the previous index.  Only used when
+  // previousIndex is supplied; otherwise the Map stays empty and every item
+  // is built from scratch (full rebuild).
+  const prevByPath = new Map<string, IndexedItem>();
+  const prevGeneratedMs = opts.previousIndex
+    ? Date.parse(opts.previousIndex.generatedAt)
+    : NaN;
+  if (opts.previousIndex && !Number.isNaN(prevGeneratedMs)) {
+    for (const item of opts.previousIndex.items) {
+      prevByPath.set(item.path, item);
+    }
+  }
+
+  /**
+   * Try to reuse a cached item for `absPath` (repos only).
+   *
+   * Returns the cached IndexedItem when:
+   *   - the previousIndex was provided,
+   *   - the item exists in the cache,
+   *   - the item's kind is 'repo', AND
+   *   - the directory's mtime < prevGeneratedMs  (unchanged since last index).
+   *
+   * Returns null in all other cases, signalling that the item must be rebuilt.
+   */
+  function tryCachedRepo(absPath: string): IndexedItem | null {
+    if (prevByPath.size === 0) return null;
+    const cached = prevByPath.get(absPath);
+    if (!cached || cached.kind !== 'repo') return null;
+    const lstat = safeLstat(absPath);
+    if (!lstat) return null;
+    // mtime < prevGeneratedMs  ⟹  directory unchanged since last build.
+    if (lstat.mtimeMs < prevGeneratedMs) return cached;
+    return null;
+  }
 
   // Partition roots into github-category roots vs desktop roots.
   // A github-category root is any directory whose parent is named "github"
@@ -405,7 +481,7 @@ export function buildIndex(cfg: AshlrConfig): AshlrIndex {
   // before the desktop walk processes symlinks that point into github/.
   for (const root of githubRoots) {
     try {
-      const items = walkGithubCategory(root, cfg, seenPaths);
+      const items = walkGithubCategory(root, cfg, seenPaths, tryCachedRepo);
       allItems.push(...items);
     } catch {
       // One bad root must not crash everything.
@@ -415,7 +491,7 @@ export function buildIndex(cfg: AshlrConfig): AshlrIndex {
   // Walk desktop roots (top-level only).
   for (const root of desktopRoots) {
     try {
-      const items = walkDesktopRoot(root, cfg, seenPaths);
+      const items = walkDesktopRoot(root, cfg, seenPaths, tryCachedRepo);
       allItems.push(...items);
     } catch {
       // One bad root must not crash everything.

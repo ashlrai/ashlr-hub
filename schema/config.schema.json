@@ -25,12 +25,17 @@
     },
     "roots": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Absolute roots to scan."
     },
     "editor": {
       "type": "string",
-      "enum": ["cursor", "vscode"],
+      "enum": [
+        "cursor",
+        "vscode"
+      ],
       "description": "Preferred editor for deep links."
     },
     "staleDays": {
@@ -40,29 +45,45 @@
     },
     "categories": {
       "type": "object",
-      "additionalProperties": { "type": "string" },
+      "additionalProperties": {
+        "type": "string"
+      },
       "description": "Map of category name -> absolute folder path."
     },
     "tidyRules": {
       "type": "array",
-      "items": { "$ref": "#/definitions/TidyRule" },
+      "items": {
+        "$ref": "#/definitions/TidyRule"
+      },
       "description": "Ordered tidy rules for loose top-level files."
     },
     "keepers": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Absolute paths or basenames that must never be moved/tidied."
     },
     "models": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["lmstudio", "ollama", "providerChain"],
+      "required": [
+        "lmstudio",
+        "ollama",
+        "providerChain"
+      ],
       "properties": {
-        "lmstudio": { "type": "string" },
-        "ollama": { "type": "string" },
+        "lmstudio": {
+          "type": "string"
+        },
+        "ollama": {
+          "type": "string"
+        },
         "providerChain": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
@@ -70,28 +91,96 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "pulse": { "type": "string" }
+        "pulse": {
+          "type": "string"
+        },
+        "budgetUsd": {
+          "type": "number",
+          "description": "Optional spend cap in USD for the budget window."
+        },
+        "budgetTokens": {
+          "type": "number",
+          "description": "Optional token cap (in + out) for the budget window."
+        },
+        "budgetWindow": {
+          "type": "string",
+          "enum": [
+            "1d",
+            "7d",
+            "30d"
+          ],
+          "description": "Window the budget caps apply to (default '7d' when caps are set)."
+        }
       }
     },
     "tools": {
       "type": "object",
-      "additionalProperties": { "type": "string" },
+      "additionalProperties": {
+        "type": "string"
+      },
       "description": "Map of integration name -> resolved executable path."
+    },
+    "phantom": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional Phantom secrets integration toggle (M2).",
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "genome": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Shared-memory / genome settings (M7).",
+      "required": [
+        "maxRecall",
+        "injectOnRun"
+      ],
+      "properties": {
+        "maxRecall": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Max number of recall hits returned/injected (default 5)."
+        },
+        "injectOnRun": {
+          "type": "boolean",
+          "description": "Whether `ashlr run` injects top-k recall into sub-agent prompts (default true)."
+        }
+      }
     }
   },
   "definitions": {
     "TidyRule": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["match", "matchType", "dest"],
+      "required": [
+        "match",
+        "matchType",
+        "dest"
+      ],
       "properties": {
-        "match": { "type": "string" },
+        "match": {
+          "type": "string"
+        },
         "matchType": {
           "type": "string",
-          "enum": ["glob", "regex", "ext"]
+          "enum": [
+            "glob",
+            "regex",
+            "ext"
+          ]
         },
-        "dest": { "type": "string" },
-        "description": { "type": "string" }
+        "dest": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
       }
     }
   }

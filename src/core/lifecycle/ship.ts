@@ -514,7 +514,7 @@ export async function runShipGate(
 
 /** Guidance strings for tools that are absent. */
 const ABSENT_GUIDANCE: Record<string, string> = {
-  morphkit: 'morphkit not installed — see morphkit.dev',
+  morphkit: 'morphkit not installed — run: npm i -g morphkit-cli (see morphkit.dev)',
   binshield: 'binshield not installed — see binshield.dev',
 };
 
@@ -527,7 +527,8 @@ function buildDeployCommand(target: string, projectPath: string): string {
     case 'stack':
       return `stack deploy`;
     case 'morphkit':
-      return `morphkit deploy`;
+      // morphkit has no 'deploy' command; 'generate' is the correct pipeline command
+      return `morphkit generate ${JSON.stringify(projectPath)} -o ${JSON.stringify(join(projectPath, 'ios-app'))}`;
     case 'gh':
       // gh pages deploy (common gh-pages pattern)
       return `gh workflow run deploy.yml`;
@@ -601,7 +602,7 @@ export async function deploy(
       break;
     case 'morphkit':
       spawnCmd = 'morphkit';
-      spawnArgs = ['deploy'];
+      spawnArgs = ['generate', absPath, '-o', join(absPath, 'ios-app')];
       break;
     case 'gh':
       spawnCmd = 'gh';

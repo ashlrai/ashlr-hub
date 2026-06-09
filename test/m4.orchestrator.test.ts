@@ -968,3 +968,159 @@ describe('planGoal — three-task DAG shape', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// P0 fix: engine delegation (ashlrcode / aw)
+// ---------------------------------------------------------------------------
+
+describe('runGoal — engine delegation (P0 fix)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    cleanupTestRuns();
+  });
+
+  it('absent engine falls back to builtin and completes (no hang, no throw)', async () => {
+    // Request an engine that is guaranteed not on PATH.
+    const { fetchMock } = scriptedOllama(
+      JSON.stringify([{ id: 'a', goal: 'A', deps: [] }]),
+      { tokIn: 5, tokOut: 3 },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const state = await runGoal('test goal', makeConfig(), {
+      engine: 'ashlrcode-definitely-not-installed-xyz',
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      parallel: 1,
+      tools: false,
+    });
+    createdRunIds.push(state.id);
+
+    // Must terminate with a valid RunState (not throw, not hang).
+    expect(['done', 'failed', 'aborted']).toContain(state.status);
+    expect(state.id).toBeTruthy();
+    // Builtin ran so there should be at least one task.
+    expect(state.tasks.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('absent engine writes a warning to stderr mentioning the engine name', async () => {
+    const stderrChunks: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown, ...rest: unknown[]) => {
+      stderrChunks.push(String(chunk));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (origWrite as any)(chunk, ...rest);
+    });
+
+    const { fetchMock } = scriptedOllama(
+      JSON.stringify([{ id: 'a', goal: 'A', deps: [] }]),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const state = await runGoal('test goal', makeConfig(), {
+      engine: 'no-such-engine-abc123',
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      parallel: 1,
+      tools: false,
+    });
+    createdRunIds.push(state.id);
+
+    const combined = stderrChunks.join('');
+    expect(combined).toContain('no-such-engine-abc123');
+    expect(combined.toLowerCase()).toMatch(/not found|falling back|builtin/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P0 fix: pulse telemetry — errors logged to stderr (not silently swallowed)
+// ---------------------------------------------------------------------------
+
+describe('reportToPulse — honest error logging (P0 fix)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    cleanupTestRuns();
+  });
+
+  it('logs pulse failure to stderr instead of silently swallowing it', async () => {
+    const stderrChunks: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown, ...rest: unknown[]) => {
+      stderrChunks.push(String(chunk));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (origWrite as any)(chunk, ...rest);
+    });
+
+    // Ollama mock for the run itself.
+    const plan = JSON.stringify([{ id: 'a', goal: 'A', deps: [] }]);
+    const { fetchMock } = scriptedOllama(plan, { tokIn: 5, tokOut: 3 });
+
+    // Override fetch: Ollama calls pass through; Pulse endpoint fails.
+    const pulseFail = vi.fn().mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('pulse.example')) {
+        return Promise.reject(new Error('network unreachable'));
+      }
+      return fetchMock(url);
+    });
+    vi.stubGlobal('fetch', pulseFail);
+
+    const cfg: ReturnType<typeof makeConfig> = {
+      ...makeConfig(),
+      telemetry: { pulse: 'http://pulse.example/ingest' },
+    };
+
+    const state = await runGoal('pulse test goal', cfg, {
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      parallel: 1,
+      tools: false,
+    });
+    createdRunIds.push(state.id);
+
+    // Give the fire-and-forget microtask a tick to settle.
+    await new Promise((r) => setTimeout(r, 50));
+
+    const combined = stderrChunks.join('');
+    // The failure must surface in stderr — not be silently swallowed.
+    expect(combined).toMatch(/pulse.*failed|failed.*pulse/i);
+  });
+
+  it('logs non-2xx pulse response to stderr', async () => {
+    const stderrChunks: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown, ...rest: unknown[]) => {
+      stderrChunks.push(String(chunk));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (origWrite as any)(chunk, ...rest);
+    });
+
+    const plan = JSON.stringify([{ id: 'a', goal: 'A', deps: [] }]);
+    const { fetchMock } = scriptedOllama(plan, { tokIn: 5, tokOut: 3 });
+
+    const pulse500 = vi.fn().mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('pulse.example')) {
+        return Promise.resolve({ ok: false, status: 500 });
+      }
+      return fetchMock(url);
+    });
+    vi.stubGlobal('fetch', pulse500);
+
+    const cfg: ReturnType<typeof makeConfig> = {
+      ...makeConfig(),
+      telemetry: { pulse: 'http://pulse.example/ingest' },
+    };
+
+    const state = await runGoal('pulse 500 test', cfg, {
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      parallel: 1,
+      tools: false,
+    });
+    createdRunIds.push(state.id);
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const combined = stderrChunks.join('');
+    expect(combined).toMatch(/pulse.*500|HTTP 500/i);
+  });
+});

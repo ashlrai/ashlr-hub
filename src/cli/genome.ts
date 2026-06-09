@@ -257,9 +257,9 @@ function printRecallHuman(hits: RecallHit[], query: string): void {
 
     out(
       `  ${pad(dim(num), 3)}  ` +
-      `${pad(yellow(scoreStr), scoreW + (IS_TTY ? 9 : 0), 'right')}  ` +
-      `${pad(methodColor, methodW + (IS_TTY ? 9 : 0))}  ` +
-      `${pad(projectStr, projectW + (IS_TTY ? 9 : 0))}  ` +
+      `${pad(yellow(scoreStr), scoreW, 'right')}  ` +
+      `${pad(methodColor, methodW)}  ` +
+      `${pad(projectStr, projectW)}  ` +
       titleStr,
     );
 
@@ -354,7 +354,7 @@ export async function cmdRecall(args: string[]): Promise<number> {
     return 0;
   }
 
-  printRecallHuman(hits, parsed.query);
+  printRecallHuman(hits.filter(h => h.score > 0), parsed.query);
   return 0;
 }
 
@@ -558,7 +558,7 @@ function printGenomeHuman(health: GenomeHealth): void {
     embeddingsAvailable,
   } = health;
 
-  const projectEntries = totalEntries - hubEntries;
+  const projectEntries = Math.max(0, totalEntries - hubEntries);
 
   // Status badge
   const statusBadge = totalEntries === 0

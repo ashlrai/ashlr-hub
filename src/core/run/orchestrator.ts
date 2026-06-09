@@ -26,7 +26,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 
 import type {
   AshlrConfig,
@@ -461,7 +461,13 @@ function allTerminal(tasks: RunTask[]): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * POST a run summary to the configured Pulse endpoint.
+ * POST a best-effort run-summary to the configured Pulse endpoint.
+ *
+ * Format: a single bespoke JSON object summarising the run (NOT OTLP).
+ * This is an opt-in, best-effort side-channel — it is only attempted when
+ * cfg.telemetry.pulse is set. Failures (network, timeout, non-2xx) are logged
+ * to stderr and never thrown to the caller.
+ *
  * Never throws, never blocks the caller.
  */
 function reportToPulse(pulseUrl: string, state: RunState): void {
@@ -477,7 +483,8 @@ function reportToPulse(pulseUrl: string, state: RunState): void {
     updatedAt: state.updatedAt,
   });
 
-  // Fire-and-forget with a short timeout — never awaited, never rethrows
+  // Fire-and-forget with a 5 s timeout — log failures to stderr so the caller
+  // knows the report was not delivered (instead of silently swallowing errors).
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 5_000);
   fetch(pulseUrl, {
@@ -486,8 +493,21 @@ function reportToPulse(pulseUrl: string, state: RunState): void {
     body: payload,
     signal: ctrl.signal,
   })
-    .then(() => clearTimeout(timer))
-    .catch(() => clearTimeout(timer));
+    .then((res) => {
+      clearTimeout(timer);
+      if (!res.ok) {
+        process.stderr.write(
+          `[ashlr run] pulse: best-effort POST to ${pulseUrl} returned HTTP ${res.status}\n`,
+        );
+      }
+    })
+    .catch((err: unknown) => {
+      clearTimeout(timer);
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(
+        `[ashlr run] pulse: best-effort POST to ${pulseUrl} failed — ${msg}\n`,
+      );
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -556,11 +576,59 @@ export async function runGoal(
         `[ashlr run] engine "${engine}" not found on PATH — falling back to builtin\n`,
       );
       engine = 'builtin';
+    } else {
+      // Delegate to the external engine binary (ashlrcode / aw).
+      // Spawn synchronously with an inherited stdio so the binary can render its
+      // own progress output, then capture stdout as the run result.
+      // Bounded by the budget maxSteps wall-clock via the fact that the sub-process
+      // owns its own execution — we do NOT forward the token budget to it (unknown
+      // protocol) but we do honour the caller's intent to use a different engine.
+      process.stderr.write(
+        `[ashlr run] delegating to engine "${engine}" (${goal.slice(0, 60)}…)\n`,
+      );
+      const engineResult = spawnSync(engine, ['--goal', goal], {
+        encoding: 'utf8',
+        maxBuffer: 10 * 1024 * 1024, // 10 MB
+        timeout: 5 * 60 * 1000,      // 5 min hard wall-clock limit
+      });
+
+      const id = generateRunId();
+      const now = new Date().toISOString();
+      const delegatedState: RunState = {
+        id,
+        goal,
+        engine,
+        provider: 'external',
+        createdAt: now,
+        updatedAt: now,
+        budget: {
+          maxTokens: opts.budget?.maxTokens ?? DEFAULT_MAX_TOKENS,
+          maxSteps: opts.budget?.maxSteps ?? DEFAULT_MAX_STEPS,
+          allowCloud: opts.allowCloud ?? false,
+        },
+        usage: newUsage(),
+        tasks: [],
+        steps: [],
+        status: 'running',
+      };
+
+      if (engineResult.error || engineResult.status !== 0) {
+        const errMsg = engineResult.error?.message
+          ?? (engineResult.stderr ? String(engineResult.stderr).trim() : `exit ${engineResult.status ?? 'unknown'}`);
+        process.stderr.write(`[ashlr run] engine "${engine}" failed: ${errMsg}\n`);
+        delegatedState.status = 'failed';
+        delegatedState.result = `Engine "${engine}" failed: ${errMsg}`;
+        delegatedState.updatedAt = new Date().toISOString();
+        saveRun(delegatedState);
+        return delegatedState;
+      }
+
+      delegatedState.status = 'done';
+      delegatedState.result = String(engineResult.stdout ?? '').trim();
+      delegatedState.updatedAt = new Date().toISOString();
+      saveRun(delegatedState);
+      return delegatedState;
     }
-    // Note: even if installed, we still run via builtin for now. Future: delegate
-    // to the binary by spawning it. For M4 the contract says "delegate only if
-    // that binary is installed" but does not mandate external spawning.
-    // We run builtin for all engines (the installed check satisfies the contract).
   }
 
   // -- Budget / parallel defaults ----------------------------------------------

@@ -295,12 +295,18 @@ function renderDeployResult(
   };
 
   if (dryRun) {
-    // DRY-RUN: make it unmistakably obvious
+    // DRY-RUN: make it unmistakably obvious.
+    // core/lifecycle/ship.ts prefixes detail with "DRY RUN: would run: " — strip
+    // it here so "would run:" is not printed twice.
+    const DRY_RUN_PREFIX = 'DRY RUN: would run: ';
+    const cleanDetail = detail.startsWith(DRY_RUN_PREFIX)
+      ? detail.slice(DRY_RUN_PREFIX.length)
+      : detail;
     out(
       `  ${yellow('DRY-RUN')}  ${bold('deploy → ' + target)}  ` +
       `${dim('(pass --confirm to actually run)')}`,
     );
-    out(`  ${dim('would run:')}  ${gray(detail)}`);
+    out(`  ${dim('would run:')}  ${gray(cleanDetail)}`);
     out('');
     out(`  ${dim('No deploy ran. No files pushed. No repos created. No outward action taken.')}`);
   } else if (ran) {

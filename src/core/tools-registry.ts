@@ -7,7 +7,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ToolInfo, ToolsRegistry } from './types.js';
 
@@ -44,6 +44,13 @@ interface ToolSpec {
    * version probe so a system binary of the same name is not falsely reported.
    */
   ambiguous?: boolean;
+  /**
+   * For desktop app tools (e.g. Tauri apps) that install as .app bundles on
+   * macOS and have no CLI binary in PATH. Paths are checked with existsSync in
+   * order; the first existing path is used as the resolved path. When set,
+   * `binaries` is ignored and version is always null (no CLI to query).
+   */
+  appPaths?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +125,23 @@ function extractSemver(raw: string): string | null {
   // Reject obvious error/usage output (no version present) rather than showing it.
   if (/error|unknown|usage|illegal|not found|command/i.test(firstLine)) return null;
   return firstLine.slice(0, 80);
+}
+
+/**
+ * Probe a tool whose presence is determined by a filesystem path (e.g. a macOS
+ * .app bundle) rather than a CLI binary in PATH.
+ * Returns the first existing path from the list, or null if none found.
+ * Never throws.
+ */
+function probeAppPath(appPaths: string[]): string | null {
+  for (const p of appPaths) {
+    try {
+      if (existsSync(p)) return p;
+    } catch {
+      // existsSync can throw on permission errors; treat as not-found
+    }
+  }
+  return null;
 }
 
 /**
@@ -233,11 +257,18 @@ const TOOL_SPECS: ToolSpec[] = [
   },
 
   // ── ashlr-md ─────────────────────────────────────────────────────────────
+  // ashlr-md is a Tauri desktop APP, not a CLI — there is no `ashlr-md` binary
+  // in PATH. Detection uses filesystem presence of the .app bundle on macOS.
+  // Version is always null (no CLI to query); path points to the app bundle.
   {
     id: 'ashlr-md',
     name: 'ashlr-md',
-    binaries: ['ashlr-md'],
-    parseVersion: extractSemver,
+    binaries: [],
+    versionArgs: null,
+    appPaths: [
+      '/Applications/Ashlr MD.app',
+      `${process.env['HOME'] ?? ''}/Applications/Ashlr MD.app`,
+    ],
   },
 ];
 
@@ -250,6 +281,16 @@ const TOOL_SPECS: ToolSpec[] = [
  * Never throws.
  */
 function probeTool(spec: ToolSpec): ToolInfo {
+  // App-type tools (e.g. Tauri desktop apps) are detected by filesystem path,
+  // not by a CLI binary in PATH. Short-circuit before the `which` probe.
+  if (spec.appPaths && spec.appPaths.length > 0) {
+    const appPath = probeAppPath(spec.appPaths);
+    if (appPath) {
+      return { id: spec.id, name: spec.name, installed: true, version: null, path: appPath };
+    }
+    return { id: spec.id, name: spec.name, installed: false, version: null, path: null };
+  }
+
   // 1. Resolve the binary path (first candidate that `which` finds).
   let resolvedPath: string | null = null;
   let resolvedBinary: string | null = null;
@@ -302,10 +343,11 @@ function probeTool(spec: ToolSpec): ToolInfo {
 // ---------------------------------------------------------------------------
 
 /**
- * Detect installed ecosystem tools + versions via PATH (which + --version).
+ * Detect installed ecosystem tools + versions via PATH (which + --version) or
+ * filesystem presence for desktop app tools (e.g. ashlr-md .app bundle).
  * Fast and NEVER throws — a missing tool yields { installed:false, version:null,
  * path:null }. Detects: phantom, ashlr/ashlr-plugin, stack, pulse/pulse-agent,
- * ashlrcode, aw (ashlr-workbench), morphkit, binshield, ashlr-md, ashlr-hub.
+ * ashlrcode, aw (ashlr-workbench), morphkit, binshield, ashlr-md (app), ashlr-hub.
  */
 export function getToolsRegistry(): ToolsRegistry {
   const tools: ToolInfo[] = [];

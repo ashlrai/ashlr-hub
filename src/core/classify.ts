@@ -208,9 +208,17 @@ export function describe(itemPath: string): string | null {
 
       const lines = text.split('\n');
       for (const line of lines) {
+        // Markdown H1: # Title
         const h1Match = line.match(/^#\s+(.+)/);
         if (h1Match && h1Match[1]) {
           const title = h1Match[1].trim();
+          if (title) return cap(title);
+        }
+        // HTML H1: <h1>Title</h1> or <h1>Title (unclosed)
+        const htmlH1Match = line.match(/<h1[^>]*>(.*?)<\/h1>/i)
+          ?? line.match(/<h1[^>]*>([^<]+)/i);
+        if (htmlH1Match && htmlH1Match[1]) {
+          const title = htmlH1Match[1].trim();
           if (title) return cap(title);
         }
       }

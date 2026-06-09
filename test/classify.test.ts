@@ -223,6 +223,39 @@ describe('describe', () => {
     expect(result).toBe('My Fixture Project');
   });
 
+  it('returns the HTML <h1> title when README has no markdown H1', () => {
+    const dir = join(tmp, 'html-h1-readme');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'README.md'), '<h1>Phantom Secrets</h1>\n\nSome body text here.\n');
+    expect(describeItem(dir)).toBe('Phantom Secrets');
+  });
+
+  it('returns the HTML <h1> title with attributes on the tag', () => {
+    const dir = join(tmp, 'html-h1-attrs');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'README.md'), '<h1 align="center">My Tool</h1>\n\nDescription.\n');
+    expect(describeItem(dir)).toBe('My Tool');
+  });
+
+  it('returns null when README has body text but no H1 of any kind (no body-line fallback)', () => {
+    const dir = join(tmp, 'no-h1-any-kind');
+    mkdirSync(dir, { recursive: true });
+    // Simulates prompt-trackr case: README with words like "or" but no H1
+    writeFileSync(join(dir, 'README.md'), 'Install with npm\nor\nyarn add foo\n');
+    expect(describeItem(dir)).toBeNull();
+  });
+
+  it('falls back to package.json description when README has HTML H1 that is empty', () => {
+    const dir = join(tmp, 'empty-html-h1');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'README.md'), '<h1></h1>\n\nSome content.\n');
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({
+      name: 'my-pkg',
+      description: 'fallback description',
+    }));
+    expect(describeItem(dir)).toBe('fallback description');
+  });
+
   it('works against the test/fixtures directory (real package.json fallback)', () => {
     // Remove README from the path being checked — use a sub-tmp dir with only package.json
     const dir = join(tmp, 'pkg-only');
