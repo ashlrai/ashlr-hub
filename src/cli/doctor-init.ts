@@ -22,44 +22,9 @@ import type { AshlrConfig, DoctorCheck, DoctorReport } from '../core/types.js';
 // ANSI helpers (zero deps — inline constants)
 // ---------------------------------------------------------------------------
 
-const IS_TTY = process.stdout.isTTY === true;
+import { pad, makeColors, isTty } from './ui.js';
 
-const C = {
-  reset:   '\x1b[0m',
-  bold:    '\x1b[1m',
-  dim:     '\x1b[2m',
-  red:     '\x1b[31m',
-  green:   '\x1b[32m',
-  yellow:  '\x1b[33m',
-  blue:    '\x1b[34m',
-  cyan:    '\x1b[36m',
-  gray:    '\x1b[90m',
-} as const;
-
-function colorize(code: string, s: string): string {
-  if (!IS_TTY) return s;
-  return `${code}${s}${C.reset}`;
-}
-
-function bold(s: string):    string { return colorize(C.bold,    s); }
-function dim(s: string):     string { return colorize(C.dim,     s); }
-function red(s: string):     string { return colorize(C.red,     s); }
-function green(s: string):   string { return colorize(C.green,   s); }
-function yellow(s: string):  string { return colorize(C.yellow,  s); }
-function cyan(s: string):    string { return colorize(C.cyan,    s); }
-function gray(s: string):    string { return colorize(C.gray,    s); }
-
-/** Strip ANSI escape codes (for measuring display width). */
-function stripAnsi(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1b\[[0-9;]*m/g, '');
-}
-
-/** Left-pad a possibly-ANSI-colored string to a visible width. */
-function pad(s: string, width: number): string {
-  const vis = stripAnsi(s).length;
-  return s + ' '.repeat(Math.max(0, width - vis));
-}
+const { bold, dim, red, green, yellow, cyan, gray } = makeColors(isTty());
 
 // ---------------------------------------------------------------------------
 // Doctor output helpers

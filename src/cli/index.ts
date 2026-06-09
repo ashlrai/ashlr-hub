@@ -34,36 +34,61 @@ import { planTidy, applyTidy } from '../core/tidy.js';
 import { openInEditor } from './open.js';
 import { pick } from './picker.js';
 import { cmdDoctor, cmdInit } from './doctor-init.js';
+import { pad, makeColors } from './ui.js';
 import type { AshlrConfig, AshlrIndex, IndexedItem, GitStatus, ToolsRegistry, McpRegistry } from '../core/types.js';
 
-// ─── M3 lazy imports (graceful degradation if modules not yet built) ──────────
+// ─── Lazy command loaders ───────────────────────────────────────────
+//
+// Each command module is imported on demand so the CLI degrades gracefully when
+// a not-yet-built module is missing. lazyCmd() captures the uniform pattern:
+// cache the resolved export (undefined = not attempted, null = import failed),
+// and on failure return a stub that prints a "module not yet built" error and
+// exits 1. The fallback message format is identical across every command.
 
-type CmdMcpFn = (args: string[]) => Promise<number>;
+type Cmd = (args: string[]) => Promise<number>;
 type GetToolsRegistryFn = () => ToolsRegistry;
 type DiscoverMcpServersFn = () => McpRegistry;
 
+/**
+ * Build a lazy loader for a CLI command export.
+ * @param importer  dynamic import of the command module
+ * @param pick      selects the command function from the loaded module
+ * @param label     human command name + source path for the fallback message
+ *                  (e.g. "mcp command requires src/cli/mcp.ts (M3 module not yet built).")
+ */
+function lazyCmd(
+  importer: () => Promise<unknown>,
+  pick: (mod: Record<string, unknown>) => Cmd,
+  label: string,
+): () => Promise<Cmd> {
+  let cached: Cmd | null | undefined;
+  return async (): Promise<Cmd> => {
+    if (cached === undefined) {
+      try {
+        cached = pick((await importer()) as Record<string, unknown>);
+      } catch {
+        cached = null;
+      }
+    }
+    if (cached === null) {
+      return async (_args: string[]) => {
+        console.error(red('error: ') + label);
+        return 1;
+      };
+    }
+    return cached;
+  };
+}
+
+const loadMcpCmd = lazyCmd(
+  () => import('./mcp.js'),
+  (m) => m.cmdMcp as Cmd,
+  'mcp command requires src/cli/mcp.ts (M3 module not yet built).',
+);
+
 // Cache slots — undefined = not yet attempted; null = attempted & failed
-let _cmdMcp: CmdMcpFn | null | undefined = undefined;
 let _getToolsRegistry: GetToolsRegistryFn | null | undefined = undefined;
 let _discoverMcpServers: DiscoverMcpServersFn | null | undefined = undefined;
-
-async function loadMcpCmd(): Promise<CmdMcpFn> {
-  if (_cmdMcp === undefined) {
-    try {
-      const mod = await import('./mcp.js') as { cmdMcp: CmdMcpFn };
-      _cmdMcp = mod.cmdMcp;
-    } catch {
-      _cmdMcp = null;
-    }
-  }
-  if (_cmdMcp === null) {
-    return async (_args: string[]) => {
-      console.error(red('error: ') + 'mcp command requires src/cli/mcp.ts (M3 module not yet built).');
-      return 1;
-    };
-  }
-  return _cmdMcp;
-}
 
 async function tryGetToolsRegistry(): Promise<GetToolsRegistryFn | null> {
   if (_getToolsRegistry === undefined) {
@@ -89,76 +114,32 @@ async function tryDiscoverMcpServers(): Promise<DiscoverMcpServersFn | null> {
   return _discoverMcpServers ?? null;
 }
 
-// ─── M4 lazy imports (graceful degradation if modules not yet built) ──────────
+// ─── M4 command loaders ────────────────────────────────────────────
 
-type CmdRunFn  = (args: string[]) => Promise<number>;
-type CmdRunsFn = (args: string[]) => Promise<number>;
+const loadRunCmd = lazyCmd(
+  () => import('./run.js' as unknown as string),
+  (m) => m.cmdRun as Cmd,
+  'run command requires src/cli/run.ts (M4 module not yet built).',
+);
 
-let _cmdRun:  CmdRunFn  | null | undefined = undefined;
-let _cmdRuns: CmdRunsFn | null | undefined = undefined;
-
-async function loadRunCmd(): Promise<CmdRunFn> {
-  if (_cmdRun === undefined) {
-    try {
-      const mod = (await import('./run.js' as unknown as string)) as { cmdRun: CmdRunFn };
-      _cmdRun = mod.cmdRun;
-    } catch {
-      _cmdRun = null;
-    }
-  }
-  if (_cmdRun === null) {
-    return async (_args: string[]) => {
-      console.error(red('error: ') + 'run command requires src/cli/run.ts (M4 module not yet built).');
-      return 1;
-    };
-  }
-  return _cmdRun;
-}
-
-async function loadRunsCmd(): Promise<CmdRunsFn> {
-  if (_cmdRuns === undefined) {
-    try {
-      const mod = (await import('./run.js' as unknown as string)) as { cmdRuns: CmdRunsFn };
-      _cmdRuns = mod.cmdRuns;
-    } catch {
-      _cmdRuns = null;
-    }
-  }
-  if (_cmdRuns === null) {
-    return async (_args: string[]) => {
-      console.error(red('error: ') + 'runs command requires src/cli/run.ts (M4 module not yet built).');
-      return 1;
-    };
-  }
-  return _cmdRuns;
-}
+const loadRunsCmd = lazyCmd(
+  () => import('./run.js' as unknown as string),
+  (m) => m.cmdRuns as Cmd,
+  'runs command requires src/cli/run.ts (M4 module not yet built).',
+);
 
 // ─── M5 lazy imports (graceful degradation if modules not yet built) ──────────
 
-type CmdPulseFn = (args: string[]) => Promise<number>;
 import type { ActivityRollup } from '../core/types.js';
 type BuildRollupFn = (window: '1d' | '7d' | '30d', cfg: AshlrConfig, opts?: { project?: string }) => ActivityRollup;
 
-let _cmdPulse: CmdPulseFn | null | undefined = undefined;
 let _buildRollup: BuildRollupFn | null | undefined = undefined;
 
-async function loadPulseCmd(): Promise<CmdPulseFn> {
-  if (_cmdPulse === undefined) {
-    try {
-      const mod = (await import('./pulse.js' as unknown as string)) as { cmdPulse: CmdPulseFn };
-      _cmdPulse = mod.cmdPulse;
-    } catch {
-      _cmdPulse = null;
-    }
-  }
-  if (_cmdPulse === null) {
-    return async (_args: string[]) => {
-      console.error(red('error: ') + 'pulse command requires src/cli/pulse.ts (M5 module not yet built).');
-      return 1;
-    };
-  }
-  return _cmdPulse;
-}
+const loadPulseCmd = lazyCmd(
+  () => import('./pulse.js' as unknown as string),
+  (m) => m.cmdPulse as Cmd,
+  'pulse command requires src/cli/pulse.ts (M5 module not yet built).',
+);
 
 async function tryBuildRollup(): Promise<BuildRollupFn | null> {
   if (_buildRollup === undefined) {
@@ -172,175 +153,53 @@ async function tryBuildRollup(): Promise<BuildRollupFn | null> {
   return _buildRollup ?? null;
 }
 
-// ─── M6 lazy imports (graceful degradation if modules not yet built) ──────────
+// ─── M6 command loaders ────────────────────────────────────────────
 
-type CmdNewFn  = (args: string[]) => Promise<number>;
-type CmdShipFn = (args: string[]) => Promise<number>;
+const loadNewCmd = lazyCmd(
+  () => import('./new.js' as unknown as string),
+  (m) => m.cmdNew as Cmd,
+  'new command requires src/cli/new.ts (M6 module not yet built).',
+);
 
-let _cmdNew:  CmdNewFn  | null | undefined = undefined;
-let _cmdShip: CmdShipFn | null | undefined = undefined;
+const loadShipCmd = lazyCmd(
+  () => import('./ship.js' as unknown as string),
+  (m) => m.cmdShip as Cmd,
+  'ship command requires src/cli/ship.ts (M6 module not yet built).',
+);
 
-async function loadNewCmd(): Promise<CmdNewFn> {
-  if (_cmdNew === undefined) {
-    try {
-      const mod = (await import('./new.js' as unknown as string)) as { cmdNew: CmdNewFn };
-      _cmdNew = mod.cmdNew;
-    } catch {
-      _cmdNew = null;
-    }
-  }
-  if (_cmdNew === null) {
-    return async (_args: string[]) => {
-      console.error(red('error: ') + 'new command requires src/cli/new.ts (M6 module not yet built).');
-      return 1;
-    };
-  }
-  return _cmdNew;
-}
+// ─── M7 command loaders ────────────────────────────────────────────
 
-async function loadShipCmd(): Promise<CmdShipFn> {
-  if (_cmdShip === undefined) {
-    try {
-      const mod = (await import('./ship.js' as unknown as string)) as { cmdShip: CmdShipFn };
-      _cmdShip = mod.cmdShip;
-    } catch {
-      _cmdShip = null;
-    }
-  }
-  if (_cmdShip === null) {
-    return async (_args: string[]) => {
-      console.error(red('error: ') + 'ship command requires src/cli/ship.ts (M6 module not yet built).');
-      return 1;
-    };
-  }
-  return _cmdShip;
-}
+const loadRecallCmd = lazyCmd(
+  () => import('./genome.js' as unknown as string),
+  (m) => m.cmdRecall as Cmd,
+  'recall command requires src/cli/genome.ts (M7 module not yet built).',
+);
 
-// ─── M7 lazy imports (graceful degradation if modules not yet built) ──────────
+const loadLearnCmd = lazyCmd(
+  () => import('./genome.js' as unknown as string),
+  (m) => m.cmdLearn as Cmd,
+  'learn command requires src/cli/genome.ts (M7 module not yet built).',
+);
 
-type CmdRecallFn = (args: string[]) => Promise<number>;
-type CmdLearnFn  = (args: string[]) => Promise<number>;
-type CmdGenomeFn = (args: string[]) => Promise<number>;
+const loadGenomeCmd = lazyCmd(
+  () => import('./genome.js' as unknown as string),
+  (m) => m.cmdGenome as Cmd,
+  'genome command requires src/cli/genome.ts (M7 module not yet built).',
+);
 
-let _cmdRecall: CmdRecallFn | null | undefined = undefined;
-let _cmdLearn:  CmdLearnFn  | null | undefined = undefined;
-let _cmdGenome: CmdGenomeFn | null | undefined = undefined;
+// ─── M9 command loader ───────────────────────────────────────────
 
-async function loadRecallCmd(): Promise<CmdRecallFn> {
-  if (_cmdRecall === undefined) {
-    try {
-      const mod = (await import('./genome.js' as unknown as string)) as { cmdRecall: CmdRecallFn };
-      _cmdRecall = mod.cmdRecall;
-    } catch {
-      _cmdRecall = null;
-    }
-  }
-  if (_cmdRecall === null) {
-    return async (_args: string[]) => {
-      console.error(red('error: ') + 'recall command requires src/cli/genome.ts (M7 module not yet built).');
-      return 1;
-    };
-  }
-  return _cmdRecall;
-}
-
-async function loadLearnCmd(): Promise<CmdLearnFn> {
-  if (_cmdLearn === undefined) {
-    try {
-      const mod = (await import('./genome.js' as unknown as string)) as { cmdLearn: CmdLearnFn };
-      _cmdLearn = mod.cmdLearn;
-    } catch {
-      _cmdLearn = null;
-    }
-  }
-  if (_cmdLearn === null) {
-    return async (_args: string[]) => {
-      console.error(red('error: ') + 'learn command requires src/cli/genome.ts (M7 module not yet built).');
-      return 1;
-    };
-  }
-  return _cmdLearn;
-}
-
-async function loadGenomeCmd(): Promise<CmdGenomeFn> {
-  if (_cmdGenome === undefined) {
-    try {
-      const mod = (await import('./genome.js' as unknown as string)) as { cmdGenome: CmdGenomeFn };
-      _cmdGenome = mod.cmdGenome;
-    } catch {
-      _cmdGenome = null;
-    }
-  }
-  if (_cmdGenome === null) {
-    return async (_args: string[]) => {
-      console.error(red('error: ') + 'genome command requires src/cli/genome.ts (M7 module not yet built).');
-      return 1;
-    };
-  }
-  return _cmdGenome;
-}
-
-// ─── M9 lazy imports (graceful degradation if module not yet built) ───────────
-
-type CmdUpdateFn = (args: string[]) => Promise<number>;
-
-let _cmdUpdate: CmdUpdateFn | null | undefined = undefined;
-
-async function loadUpdateCmd(): Promise<CmdUpdateFn> {
-  if (_cmdUpdate === undefined) {
-    try {
-      const mod = (await import('./update.js' as unknown as string)) as { cmdUpdate: CmdUpdateFn };
-      _cmdUpdate = mod.cmdUpdate;
-    } catch {
-      _cmdUpdate = null;
-    }
-  }
-  if (_cmdUpdate === null) {
-    return async (_args: string[]) => {
-      console.error(red('error: ') + 'update command requires src/cli/update.ts (M9 module not yet built).');
-      return 1;
-    };
-  }
-  return _cmdUpdate;
-}
+const loadUpdateCmd = lazyCmd(
+  () => import('./update.js' as unknown as string),
+  (m) => m.cmdUpdate as Cmd,
+  'update command requires src/cli/update.ts (M9 module not yet built).',
+);
 
 // ─── ANSI helpers ──────────────────────────────────────────────────────────────
 
-const C = {
-  reset:   '\x1b[0m',
-  bold:    '\x1b[1m',
-  dim:     '\x1b[2m',
-  red:     '\x1b[31m',
-  green:   '\x1b[32m',
-  yellow:  '\x1b[33m',
-  blue:    '\x1b[34m',
-  magenta: '\x1b[35m',
-  cyan:    '\x1b[36m',
-  white:   '\x1b[37m',
-  gray:    '\x1b[90m',
-};
-
-function bold(s: string): string    { return `${C.bold}${s}${C.reset}`; }
-function dim(s: string): string     { return `${C.dim}${s}${C.reset}`; }
-function red(s: string): string     { return `${C.red}${s}${C.reset}`; }
-function yellow(s: string): string  { return `${C.yellow}${s}${C.reset}`; }
-function green(s: string): string   { return `${C.green}${s}${C.reset}`; }
-function cyan(s: string): string    { return `${C.cyan}${s}${C.reset}`; }
-function gray(s: string): string    { return `${C.gray}${s}${C.reset}`; }
-function magenta(s: string): string { return `${C.magenta}${s}${C.reset}`; }
-
-/** Strip ANSI escape codes to measure display width. */
-function stripAnsi(s: string): string {
-  // eslint-disable-next-line no-control-regex -- ANSI escape sequences legitimately contain the ESC control char.
-  return s.replace(/\x1b\[[0-9;]*m/g, '');
-}
-
-/** Pad a string (which may contain ANSI codes) to a visible width. */
-function pad(s: string, width: number, align: 'left' | 'right' = 'left'): string {
-  const visible = stripAnsi(s).length;
-  const spaces = Math.max(0, width - visible);
-  return align === 'left' ? s + ' '.repeat(spaces) : ' '.repeat(spaces) + s;
-}
+// index.ts colorizes unconditionally (output is always color-coded regardless
+// of TTY), so we bind the shared colorizers with tty=true.
+const { bold, dim, red, green, yellow, cyan, gray, magenta } = makeColors(true);
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
@@ -448,9 +307,12 @@ function isSensitiveKey(key: string): boolean {
   return SENSITIVE_KEY_RE.test(leaf);
 }
 
-/** Set a nested config value by dot-path key (mutates cfg). */
-function setConfigValue(cfg: AshlrConfig, key: string, rawValue: string): void {
-  assertSafeConfigKey(key);
+/**
+ * Assign `value` to a dot-path leaf in `cfg`, creating intermediate objects as
+ * needed. Caller MUST run assertSafeConfigKey(key) first (prototype-pollution
+ * guard) — setByPath itself does not re-check.
+ */
+function setByPath(cfg: AshlrConfig, key: string, value: unknown): void {
   const parts = key.split('.');
   let obj: Record<string, unknown> = cfg as unknown as Record<string, unknown>;
   for (let i = 0; i < parts.length - 1; i++) {
@@ -461,13 +323,21 @@ function setConfigValue(cfg: AshlrConfig, key: string, rawValue: string): void {
     }
     obj = obj[parts[i]] as Record<string, unknown>;
   }
-  const last = parts[parts.length - 1];
+  obj[parts[parts.length - 1]] = value;
+}
+
+/** Set a nested config value by dot-path key (mutates cfg). */
+function setConfigValue(cfg: AshlrConfig, key: string, rawValue: string): void {
+  assertSafeConfigKey(key);
   // Coerce to number or boolean when applicable
-  if (rawValue === 'true') { obj[last] = true; return; }
-  if (rawValue === 'false') { obj[last] = false; return; }
-  const num = Number(rawValue);
-  if (!isNaN(num) && rawValue.trim() !== '') { obj[last] = num; return; }
-  obj[last] = rawValue;
+  let value: unknown = rawValue;
+  if (rawValue === 'true') value = true;
+  else if (rawValue === 'false') value = false;
+  else {
+    const num = Number(rawValue);
+    if (!isNaN(num) && rawValue.trim() !== '') value = num;
+  }
+  setByPath(cfg, key, value);
 }
 
 // ─── Command: index ───────────────────────────────────────────────────────────
@@ -717,12 +587,11 @@ async function cmdStatus(_args: string[]): Promise<void> {
       const t = rollup.totals;
       const tokK = ((t.tokensIn + t.tokensOut) / 1000).toFixed(1);
       const cost = t.estCostUsd.toFixed(2);
-      const budgetLevel = rollup.budget.level;
-      const budgetSuffix = budgetLevel === 'over'
-        ? `  ${red('● over budget')}`
-        : budgetLevel === 'warn'
-          ? `  ${yellow('● near cap')}`
-          : '';
+      const BUDGET_SUFFIX: Record<string, string> = {
+        over: `  ${red('● over budget')}`,
+        warn: `  ${yellow('● near cap')}`,
+      };
+      const budgetSuffix = BUDGET_SUFFIX[rollup.budget.level] ?? '';
       console.log(
         `  ${bold('Activity (7d):')} ${cyan(`${t.sessions} sessions`)}  ${dim('·')}  ` +
         `${cyan(`${tokK}k tokens`)}  ${dim('·')}  ` +
@@ -972,15 +841,7 @@ function cmdConfig(args: string[]): void {
         die(`Invalid JSON for "${key}": ${jsonValue}`, 2);
       }
       // Walk to the parent object and set the leaf key
-      const parts = key.split('.');
-      let obj: Record<string, unknown> = cfg as unknown as Record<string, unknown>;
-      for (let i = 0; i < parts.length - 1; i++) {
-        const hasOwn = Object.prototype.hasOwnProperty.call(obj, parts[i]);
-        const next = hasOwn ? obj[parts[i]] : undefined;
-        if (!hasOwn || next === null || typeof next !== 'object') obj[parts[i]] = {};
-        obj = obj[parts[i]] as Record<string, unknown>;
-      }
-      obj[parts[parts.length - 1]] = parsed;
+      setByPath(cfg, key, parsed);
       saveConfig(cfg);
       const shown = isSensitiveKey(key) ? '<redacted>' : JSON.stringify(parsed);
       console.log(`${green('set')} ${key} = ${shown}`);
@@ -995,15 +856,7 @@ function cmdConfig(args: string[]): void {
       } catch {
         die(`Invalid JSON for "${key}": ${jsonValue}`, 2);
       }
-      const parts = key.split('.');
-      let obj: Record<string, unknown> = cfg as unknown as Record<string, unknown>;
-      for (let i = 0; i < parts.length - 1; i++) {
-        const hasOwn = Object.prototype.hasOwnProperty.call(obj, parts[i]);
-        const next = hasOwn ? obj[parts[i]] : undefined;
-        if (!hasOwn || next === null || typeof next !== 'object') obj[parts[i]] = {};
-        obj = obj[parts[i]] as Record<string, unknown>;
-      }
-      obj[parts[parts.length - 1]] = parsed;
+      setByPath(cfg, key, parsed);
       saveConfig(cfg);
       const shown = isSensitiveKey(key) ? '<redacted>' : JSON.stringify(parsed);
       console.log(`${green('set')} ${key} = ${shown}`);

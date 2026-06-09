@@ -45,52 +45,18 @@ async function importConfig() {
 // ANSI helpers (non-TTY safe)
 // ---------------------------------------------------------------------------
 
-const IS_TTY = process.stdout.isTTY === true;
-const IS_STDERR_TTY = process.stderr.isTTY === true;
+import { pad, makeColors, isTty, isStderrTty } from './ui.js';
+import { parsePositiveInt } from './args.js';
 
-const C = {
-  reset:   '\x1b[0m',
-  bold:    '\x1b[1m',
-  dim:     '\x1b[2m',
-  red:     '\x1b[31m',
-  green:   '\x1b[32m',
-  yellow:  '\x1b[33m',
-  blue:    '\x1b[34m',
-  cyan:    '\x1b[36m',
-  magenta: '\x1b[35m',
-  gray:    '\x1b[90m',
-} as const;
-
-function colorize(code: string, s: string, tty = IS_TTY): string {
-  if (!tty) return s;
-  return `${code}${s}${C.reset}`;
-}
-
-function bold(s: string):    string { return colorize(C.bold,    s); }
-function dim(s: string):     string { return colorize(C.dim,     s); }
-function red(s: string):     string { return colorize(C.red,     s); }
-function green(s: string):   string { return colorize(C.green,   s); }
-function yellow(s: string):  string { return colorize(C.yellow,  s); }
-function cyan(s: string):    string { return colorize(C.cyan,    s); }
-function gray(s: string):    string { return colorize(C.gray,    s); }
+const { bold, dim, red, green, yellow, cyan, gray } = makeColors(isTty());
 
 // Stderr equivalents (respect stderr TTY)
-function seDim(s: string):    string { return colorize(C.dim,     s, IS_STDERR_TTY); }
-function seCyan(s: string):   string { return colorize(C.cyan,    s, IS_STDERR_TTY); }
-function seGreen(s: string):  string { return colorize(C.green,   s, IS_STDERR_TTY); }
-function seYellow(s: string): string { return colorize(C.yellow,  s, IS_STDERR_TTY); }
-function seGray(s: string):   string { return colorize(C.gray,    s, IS_STDERR_TTY); }
-
-function stripAnsi(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1b\[[0-9;]*m/g, '');
-}
-
-function pad(s: string, width: number, align: 'left' | 'right' = 'left'): string {
-  const vis = stripAnsi(s).length;
-  const spaces = Math.max(0, width - vis);
-  return align === 'left' ? s + ' '.repeat(spaces) : ' '.repeat(spaces) + s;
-}
+const seColors = makeColors(isStderrTty());
+const seDim    = seColors.dim;
+const seCyan   = seColors.cyan;
+const seGreen  = seColors.green;
+const seYellow = seColors.yellow;
+const seGray   = seColors.gray;
 
 // ---------------------------------------------------------------------------
 // Arg parsing
@@ -154,31 +120,19 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       result.json = true;
       i++;
     } else if (arg === '--budget') {
-      const val = args[++i];
-      const n = val !== undefined ? parseInt(val, 10) : NaN;
-      if (isNaN(n) || n <= 0) {
-        result.usageError = `--budget requires a positive integer, got: ${val ?? '(missing)'}`;
-        return result;
-      }
-      result.budget = n;
+      const parsed = parsePositiveInt('budget', args[++i]);
+      if ('error' in parsed) { result.usageError = parsed.error; return result; }
+      result.budget = parsed.n;
       i++;
     } else if (arg === '--max-steps') {
-      const val = args[++i];
-      const n = val !== undefined ? parseInt(val, 10) : NaN;
-      if (isNaN(n) || n <= 0) {
-        result.usageError = `--max-steps requires a positive integer, got: ${val ?? '(missing)'}`;
-        return result;
-      }
-      result.maxSteps = n;
+      const parsed = parsePositiveInt('max-steps', args[++i]);
+      if ('error' in parsed) { result.usageError = parsed.error; return result; }
+      result.maxSteps = parsed.n;
       i++;
     } else if (arg === '--parallel') {
-      const val = args[++i];
-      const n = val !== undefined ? parseInt(val, 10) : NaN;
-      if (isNaN(n) || n <= 0) {
-        result.usageError = `--parallel requires a positive integer, got: ${val ?? '(missing)'}`;
-        return result;
-      }
-      result.parallel = n;
+      const parsed = parsePositiveInt('parallel', args[++i]);
+      if ('error' in parsed) { result.usageError = parsed.error; return result; }
+      result.parallel = parsed.n;
       i++;
     } else if (arg === '--engine') {
       const val = args[++i];
@@ -548,18 +502,9 @@ export async function cmdRun(args: string[]): Promise<number> {
   // Step callback — accumulate tasks map for goal lookup
   const taskGoalMap = new Map<string, string>();
 
-  // We'll patch opts with a step callback after we know the task graph;
-  // for now the orchestrator emits steps through onStep on RunOptions.
-  // Since RunOptions has no onStep field (that's on runTask ctx), we wire
-  // progress via watching the returned RunState — but to get live progress
-  // we need a side-channel. The orchestrator contract exposes saveRun after
-  // each step, so we poll? No — instead, for the CLI we pass a custom
-  // approach: wrap opts with a step printer injected via a symbol property
-  // that orchestrator.ts may optionally call. If the orchestrator doesn't
-  // use it, we just print the final summary. This keeps the contract clean.
-
-  // We add an optional __onStep hook to RunOptions for CLI progress without
-  // breaking the typed contract (extra properties are stripped at runtime).
+  // Wire CLI progress via an optional __onStep side-channel on RunOptions:
+  // the orchestrator calls it per step if present, else we just print the
+  // final summary. Kept off the typed contract (extra props ignored at runtime).
   const optsWithHook = opts as RunOptions & {
     __onStep?: (step: RunStep, tasks: RunTask[]) => void;
     noMemory?: boolean;

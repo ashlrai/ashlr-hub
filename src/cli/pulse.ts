@@ -21,45 +21,9 @@ import type { AshlrConfig } from '../core/types.js';
 // ANSI helpers (non-TTY safe)
 // ---------------------------------------------------------------------------
 
-const IS_TTY = process.stdout.isTTY === true;
+import { C, pad, makeColors, isTty } from './ui.js';
 
-const C = {
-  reset:   '\x1b[0m',
-  bold:    '\x1b[1m',
-  dim:     '\x1b[2m',
-  red:     '\x1b[31m',
-  green:   '\x1b[32m',
-  yellow:  '\x1b[33m',
-  blue:    '\x1b[34m',
-  cyan:    '\x1b[36m',
-  magenta: '\x1b[35m',
-  gray:    '\x1b[90m',
-} as const;
-
-function c(code: string, s: string): string {
-  if (!IS_TTY) return s;
-  return `${code}${s}${C.reset}`;
-}
-
-function bold(s: string):    string { return c(C.bold, s); }
-function dim(s: string):     string { return c(C.dim, s); }
-function red(s: string):     string { return c(C.red, s); }
-function green(s: string):   string { return c(C.green, s); }
-function yellow(s: string):  string { return c(C.yellow, s); }
-function cyan(s: string):    string { return c(C.cyan, s); }
-function gray(s: string):    string { return c(C.gray, s); }
-function magenta(s: string): string { return c(C.magenta, s); }
-
-function stripAnsi(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1b\[[0-9;]*m/g, '');
-}
-
-function pad(s: string, width: number, align: 'left' | 'right' = 'left'): string {
-  const vis = stripAnsi(s).length;
-  const spaces = Math.max(0, width - vis);
-  return align === 'left' ? s + ' '.repeat(spaces) : ' '.repeat(spaces) + s;
-}
+const { bold, dim, red, green, yellow, cyan, gray, magenta } = makeColors(isTty());
 
 // ---------------------------------------------------------------------------
 // Lazy imports
@@ -197,8 +161,10 @@ function fmtDate(iso: string): string {
 
 /** Render a budget alert line with appropriate color. */
 function renderBudgetLine(budget: BudgetAlert): string {
-  const icon = budget.level === 'over' ? '●' : budget.level === 'warn' ? '◐' : '○';
-  const colorFn = budget.level === 'over' ? red : budget.level === 'warn' ? yellow : green;
+  const ICON_BY_LEVEL = { over: '●', warn: '◐', ok: '○' } as const;
+  const COLOR_BY_LEVEL = { over: red, warn: yellow, ok: green } as const;
+  const icon = ICON_BY_LEVEL[budget.level];
+  const colorFn = COLOR_BY_LEVEL[budget.level];
 
   const parts: string[] = [colorFn(`${icon} ${budget.message}`)];
 
@@ -267,13 +233,10 @@ function renderDashboard(rollup: ActivityRollup): void {
 
   // ── Totals summary ────────────────────────────────────────────────────────
   const totalTok = totals.tokensIn + totals.tokensOut;
-  const cacheRatio = totals.tokensIn > 0
-    ? ''   // cache breakdown not in totals; skip
-    : '';
 
   console.log(`  ${bold('Tokens')}   in ${cyan(fmtTokens(totals.tokensIn))}  ` +
     `out ${cyan(fmtTokens(totals.tokensOut))}  ` +
-    `total ${bold(cyan(fmtTokens(totalTok)))}${cacheRatio}`);
+    `total ${bold(cyan(fmtTokens(totalTok)))}`);
   console.log(`  ${bold('Cost')}     ${bold(cyan(fmtUsd(totals.estCostUsd)))}`);
   console.log(`  ${bold('Sessions')} ${cyan(String(totals.sessions))}  ` +
     `${bold('Commits')} ${cyan(String(totals.commits))}`);

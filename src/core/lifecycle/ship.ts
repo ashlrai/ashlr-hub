@@ -89,6 +89,16 @@ function whichSync(tool: string): string | null {
   }
 }
 
+/** First non-empty line of (preferred || fallback) output, or '' when none. */
+function firstNonEmptyLine(preferred: string, fallback: string): string {
+  return (preferred || fallback).split('\n').find((l) => l.trim()) ?? '';
+}
+
+/** Compact error summary: first 5 lines of (preferred || fallback), capped at 300 chars. */
+function summarizeErrOutput(preferred: string, fallback: string): string {
+  return (preferred || fallback).split('\n').slice(0, 5).join(' | ').slice(0, 300);
+}
+
 /** Read and parse package.json in a project directory. Returns null on any failure. */
 function readPackageJson(projectPath: string): Record<string, unknown> | null {
   try {
@@ -267,7 +277,7 @@ function runScriptCheck(
   }
   if (result.exitCode === 0) {
     // Summarize output: first non-empty line or generic success
-    const firstLine = (result.stdout || result.stderr).split('\n').find((l) => l.trim()) ?? '';
+    const firstLine = firstNonEmptyLine(result.stdout, result.stderr);
     const detail = firstLine
       ? `"${scriptName}" passed: ${firstLine.slice(0, 120)}`
       : `"${scriptName}" passed`;
@@ -275,7 +285,7 @@ function runScriptCheck(
   }
 
   // Script failed — capture relevant output
-  const errOutput = (result.stderr || result.stdout).split('\n').slice(0, 5).join(' | ').slice(0, 300);
+  const errOutput = summarizeErrOutput(result.stderr, result.stdout);
   return makeCheck(
     checkId,
     label,
@@ -518,23 +528,40 @@ const ABSENT_GUIDANCE: Record<string, string> = {
   binshield: 'binshield not installed — see binshield.dev',
 };
 
-/** The deploy command to run for each supported target. */
-function buildDeployCommand(target: string, projectPath: string): string {
+/**
+ * Single source of truth for each deploy target's command + argv.
+ * Both the human display string and the spawnSync argv are derived from this,
+ * so they can never drift out of sync.
+ *
+ * `cmd` is the executable; `args` is the spawnSync argv. For unknown targets we
+ * default to `<target> deploy`.
+ */
+function deployInvocation(target: string, projectPath: string): { cmd: string; args: string[] } {
   switch (target) {
     case 'vercel':
       // `vercel` deploys from the project directory; --prod for production
-      return `vercel --cwd ${JSON.stringify(projectPath)}`;
+      return { cmd: 'vercel', args: ['--cwd', projectPath] };
     case 'stack':
-      return `stack deploy`;
+      return { cmd: 'stack', args: ['deploy'] };
     case 'morphkit':
       // morphkit has no 'deploy' command; 'generate' is the correct pipeline command
-      return `morphkit generate ${JSON.stringify(projectPath)} -o ${JSON.stringify(join(projectPath, 'ios-app'))}`;
+      return { cmd: 'morphkit', args: ['generate', projectPath, '-o', join(projectPath, 'ios-app')] };
     case 'gh':
       // gh pages deploy (common gh-pages pattern)
-      return `gh workflow run deploy.yml`;
+      return { cmd: 'gh', args: ['workflow', 'run', 'deploy.yml'] };
     default:
-      return `${target} deploy`;
+      return { cmd: target, args: ['deploy'] };
   }
+}
+
+/**
+ * Render a deploy invocation as a human-readable command string. Absolute-path
+ * args are JSON-quoted (matching the prior buildDeployCommand output); flags and
+ * subcommands are left bare.
+ */
+function formatDeployCommand(inv: { cmd: string; args: string[] }): string {
+  const parts = inv.args.map((a) => (a.startsWith('/') ? JSON.stringify(a) : a));
+  return [inv.cmd, ...parts].join(' ');
 }
 
 /**
@@ -557,25 +584,28 @@ export async function deploy(
 ): Promise<{ ran: boolean; dryRun: boolean; detail: string }> {
   const absPath = resolve(projectPath);
 
+  // Resolve the tool once; reused by the absent-guidance branch and the
+  // not-installed fallback below.
+  const toolPath = whichSync(target);
+
   // Check for absent-with-guidance tools first
   if (Object.prototype.hasOwnProperty.call(ABSENT_GUIDANCE, target)) {
     const known = ABSENT_GUIDANCE[target];
     if (known !== undefined) {
       // Still check if it happens to be installed (e.g. user installed morphkit later)
-      const toolPath = whichSync(target);
       if (toolPath === null) {
         return { ran: false, dryRun: false, detail: known };
       }
     }
   }
 
-  const toolPath = whichSync(target);
   if (toolPath === null) {
     const guidance = ABSENT_GUIDANCE[target] ?? `${target} not installed — install it to use this deploy target`;
     return { ran: false, dryRun: false, detail: guidance };
   }
 
-  const cmd = buildDeployCommand(target, absPath);
+  const invocation = deployInvocation(target, absPath);
+  const cmd = formatDeployCommand(invocation);
 
   // Dry-run: report what would run without executing
   if (!opts.confirm) {
@@ -587,31 +617,8 @@ export async function deploy(
   }
 
   // --- CONFIRM path: actually run the deploy ---
-  // Build the argv array for spawnSync
-  let spawnCmd: string;
-  let spawnArgs: string[];
-
-  switch (target) {
-    case 'vercel':
-      spawnCmd = 'vercel';
-      spawnArgs = ['--cwd', absPath];
-      break;
-    case 'stack':
-      spawnCmd = 'stack';
-      spawnArgs = ['deploy'];
-      break;
-    case 'morphkit':
-      spawnCmd = 'morphkit';
-      spawnArgs = ['generate', absPath, '-o', join(absPath, 'ios-app')];
-      break;
-    case 'gh':
-      spawnCmd = 'gh';
-      spawnArgs = ['workflow', 'run', 'deploy.yml'];
-      break;
-    default:
-      spawnCmd = target;
-      spawnArgs = ['deploy'];
-  }
+  // argv comes from the same table that produced the display string above.
+  const { cmd: spawnCmd, args: spawnArgs } = invocation;
 
   try {
     const result = runSync(spawnCmd, spawnArgs, absPath, DEPLOY_TIMEOUT_MS);
@@ -631,7 +638,7 @@ export async function deploy(
       };
     }
     if (result.exitCode === 0) {
-      const firstLine = (result.stdout || result.stderr).split('\n').find((l) => l.trim()) ?? '';
+      const firstLine = firstNonEmptyLine(result.stdout, result.stderr);
       const detail = firstLine
         ? `Deploy succeeded: ${firstLine.slice(0, 200)}`
         : 'Deploy succeeded';
@@ -639,7 +646,7 @@ export async function deploy(
     }
 
     // Non-zero exit
-    const errOutput = (result.stderr || result.stdout).split('\n').slice(0, 5).join(' | ').slice(0, 300);
+    const errOutput = summarizeErrOutput(result.stderr, result.stdout);
     return {
       ran: false,
       dryRun: false,

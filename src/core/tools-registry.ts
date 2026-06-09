@@ -187,11 +187,8 @@ const TOOL_SPECS: ToolSpec[] = [
     id: 'ashlr-hub',
     name: 'ashlr-hub',
     binaries: ['ashlr'],
-    // `ashlr --version` may work; if not, fall back to package.json in probe fn
-    parseVersion: (raw) => {
-      const v = extractSemver(raw);
-      return v;
-    },
+    // `ashlr --version` may work; if not, probeTool falls back to package.json.
+    // No parseVersion override needed — probeTool defaults to extractSemver.
   },
 
   // ── ashlrcode CLI ─────────────────────────────────────────────────────────

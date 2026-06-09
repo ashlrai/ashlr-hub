@@ -41,31 +41,9 @@ import { createRequire } from 'node:module';
 // ANSI helpers (non-TTY safe)
 // ---------------------------------------------------------------------------
 
-const IS_TTY = process.stdout.isTTY === true;
+import { makeColors, isTty } from './ui.js';
 
-const C = {
-  reset:   '\x1b[0m',
-  bold:    '\x1b[1m',
-  dim:     '\x1b[2m',
-  red:     '\x1b[31m',
-  green:   '\x1b[32m',
-  yellow:  '\x1b[33m',
-  cyan:    '\x1b[36m',
-  gray:    '\x1b[90m',
-} as const;
-
-function colorize(code: string, s: string): string {
-  if (!IS_TTY) return s;
-  return `${code}${s}${C.reset}`;
-}
-
-function bold(s: string):   string { return colorize(C.bold,   s); }
-function dim(s: string):    string { return colorize(C.dim,    s); }
-function red(s: string):    string { return colorize(C.red,    s); }
-function green(s: string):  string { return colorize(C.green,  s); }
-function yellow(s: string): string { return colorize(C.yellow, s); }
-function cyan(s: string):   string { return colorize(C.cyan,   s); }
-function gray(s: string):   string { return colorize(C.gray,   s); }
+const { bold, dim, red, green, yellow, cyan, gray } = makeColors(isTty());
 
 // ---------------------------------------------------------------------------
 // Repo / version helpers

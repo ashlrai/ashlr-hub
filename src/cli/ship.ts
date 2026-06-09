@@ -26,44 +26,9 @@ import type { ShipCheck, ShipGate, ShipResult } from '../core/types.js';
 // ANSI helpers (non-TTY safe)
 // ---------------------------------------------------------------------------
 
-const IS_TTY = process.stdout.isTTY === true;
+import { pad, makeColors, isTty } from './ui.js';
 
-const C = {
-  reset:   '\x1b[0m',
-  bold:    '\x1b[1m',
-  dim:     '\x1b[2m',
-  red:     '\x1b[31m',
-  green:   '\x1b[32m',
-  yellow:  '\x1b[33m',
-  blue:    '\x1b[34m',
-  cyan:    '\x1b[36m',
-  magenta: '\x1b[35m',
-  gray:    '\x1b[90m',
-} as const;
-
-function colorize(code: string, s: string, tty = IS_TTY): string {
-  if (!tty) return s;
-  return `${code}${s}${C.reset}`;
-}
-
-function bold(s: string):    string { return colorize(C.bold,    s); }
-function dim(s: string):     string { return colorize(C.dim,     s); }
-function red(s: string):     string { return colorize(C.red,     s); }
-function green(s: string):   string { return colorize(C.green,   s); }
-function yellow(s: string):  string { return colorize(C.yellow,  s); }
-function cyan(s: string):    string { return colorize(C.cyan,    s); }
-function gray(s: string):    string { return colorize(C.gray,    s); }
-
-function stripAnsi(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1b\[[0-9;]*m/g, '');
-}
-
-function pad(s: string, width: number, align: 'left' | 'right' = 'left'): string {
-  const vis = stripAnsi(s).length;
-  const spaces = Math.max(0, width - vis);
-  return align === 'left' ? s + ' '.repeat(spaces) : ' '.repeat(spaces) + s;
-}
+const { bold, dim, red, green, yellow, cyan, gray } = makeColors(isTty());
 
 // ---------------------------------------------------------------------------
 // Lazy imports — lifecycle modules built by other M6 agents

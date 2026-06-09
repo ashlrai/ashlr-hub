@@ -71,38 +71,10 @@ async function importConfig(): Promise<{
 // ANSI helpers — non-TTY safe (same pattern as run.ts / ship.ts)
 // ---------------------------------------------------------------------------
 
-const IS_TTY = process.stdout.isTTY === true;
+import { pad, makeColors, isTty } from './ui.js';
+import { parsePositiveInt } from './args.js';
 
-const C = {
-  reset:   '\x1b[0m',
-  bold:    '\x1b[1m',
-  dim:     '\x1b[2m',
-  red:     '\x1b[31m',
-  green:   '\x1b[32m',
-  yellow:  '\x1b[33m',
-  cyan:    '\x1b[36m',
-  magenta: '\x1b[35m',
-  gray:    '\x1b[90m',
-} as const;
-
-function colorize(code: string, s: string, tty = IS_TTY): string {
-  if (!tty) return s;
-  return `${code}${s}${C.reset}`;
-}
-
-function bold(s: string):    string { return colorize(C.bold,    s); }
-function dim(s: string):     string { return colorize(C.dim,     s); }
-function red(s: string):     string { return colorize(C.red,     s); }
-function green(s: string):   string { return colorize(C.green,   s); }
-function yellow(s: string):  string { return colorize(C.yellow,  s); }
-function cyan(s: string):    string { return colorize(C.cyan,    s); }
-function gray(s: string):    string { return colorize(C.gray,    s); }
-function magenta(s: string): string { return colorize(C.magenta, s); }
-
-function stripAnsi(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1b\[[0-9;]*m/g, '');
-}
+const { bold, dim, red, green, yellow, cyan, gray, magenta } = makeColors(isTty());
 
 /**
  * Write a line to stdout. Routes through process.stdout.write (not console.log)
@@ -111,12 +83,6 @@ function stripAnsi(s: string): string {
  */
 function out(line = ''): void {
   process.stdout.write(line + '\n');
-}
-
-function pad(s: string, width: number, align: 'left' | 'right' = 'left'): string {
-  const vis    = stripAnsi(s).length;
-  const spaces = Math.max(0, width - vis);
-  return align === 'left' ? s + ' '.repeat(spaces) : ' '.repeat(spaces) + s;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,13 +151,9 @@ function parseRecallArgs(args: string[]): ParsedRecallArgs {
       result.noEmbeddings = true;
       i++;
     } else if (arg === '--limit') {
-      const val = args[++i];
-      const n   = val !== undefined ? parseInt(val, 10) : NaN;
-      if (isNaN(n) || n <= 0) {
-        result.usageError = `--limit requires a positive integer, got: ${val ?? '(missing)'}`;
-        return result;
-      }
-      result.limit = n;
+      const parsed = parsePositiveInt('limit', args[++i]);
+      if ('error' in parsed) { result.usageError = parsed.error; return result; }
+      result.limit = parsed.n;
       i++;
     } else if (!arg.startsWith('--')) {
       if (result.query) {

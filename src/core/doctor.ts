@@ -626,12 +626,14 @@ export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
         const detail = provider.error
           ? `${provider.url} is down — ${provider.error}`
           : `${provider.url} is down`;
-        const fixHint =
-          provider.id === 'lmstudio'
-            ? 'Start LM Studio and enable the local server'
-            : provider.id === 'ollama'
-              ? 'Start Ollama: ollama serve'
-              : `Start the ${provider.id} provider`;
+        let fixHint: string;
+        if (provider.id === 'lmstudio') {
+          fixHint = 'Start LM Studio and enable the local server';
+        } else if (provider.id === 'ollama') {
+          fixHint = 'Start Ollama: ollama serve';
+        } else {
+          fixHint = `Start the ${provider.id} provider`;
+        }
         checks.push(check(id, label, 'warn', detail, fixHint));
       }
     }
