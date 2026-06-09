@@ -268,6 +268,130 @@ ashlr help
 
 ---
 
+## M4: `ashlr run` — local-first agent orchestrator
+
+M4 adds a local-first agent orchestrator. Give it a goal; it decomposes the goal into a task-graph (DAG), runs independent tasks in parallel on your local model, and synthesizes a final answer — all within hard budget and step guardrails.
+
+### Quick start
+
+```sh
+# Run a goal on the active local provider (Ollama / LM Studio)
+ashlr run "Summarize the last 5 commits in ashlr-hub and identify any risky changes"
+
+# Limit token budget and step count
+ashlr run "Audit the MCP registry for duplicate tool names" --budget 8000 --max-steps 10
+
+# Fan out up to 4 tasks in parallel
+ashlr run "Compare llama3 vs qwen2.5 on three reasoning prompts" --parallel 4
+
+# Output machine-readable JSON (suitable for piping / scripting)
+ashlr run "List all Ollama models and their sizes" --json
+```
+
+### How it works
+
+1. **Planning.** One chat call to the local model decomposes the goal into a `RunTask[]` DAG. Each task has a unique id, a sub-goal string, and a `deps[]` list referencing prerequisite task ids. On parse failure, the orchestrator falls back to a single task.
+
+2. **Parallel fan-out.** The executor walks the DAG in waves: any task whose deps are all `done` becomes _ready_. Up to `--parallel N` ready tasks run concurrently (default: 3). Each task runs its own bounded chat/tool loop.
+
+3. **Tool access.** When `--no-tools` is not set, each agent loop connects to the M3 MCP gateway (`ashlr mcp`) as an MCP client and exposes all discovered tools to the model. Disable with `--no-tools` for faster, tool-free runs.
+
+4. **Synthesis.** Once all tasks complete (or the run is aborted), a final chat call synthesizes a unified answer from all task results.
+
+5. **Persistence.** Run state is written to `~/.ashlr/runs/<id>.json` after every step. The run id is printed at the start so you can always resume or inspect it later.
+
+### Engines
+
+| Engine      | Description |
+|-------------|-------------|
+| `builtin`   | Default. Calls the active local provider directly (Ollama or LM Studio). |
+| `ashlrcode` | Delegates to the `ashlrcode` CLI binary if installed; falls back to `builtin`. |
+| `aw`        | Delegates to the `aw` (ashlr-workbench) binary if installed; falls back to `builtin`. |
+
+```sh
+ashlr run "..." --engine aw
+```
+
+### LOCAL-FIRST — cloud is off by default
+
+`ashlr run` refuses to call any cloud endpoint unless you pass `--allow-cloud` and the relevant API key is present. Without `--allow-cloud`, if no local provider is reachable, the command exits with a clear error rather than silently billing a cloud API.
+
+```sh
+# Will error if only Anthropic/OpenAI keys are available and no local provider is up
+ashlr run "..."
+
+# Opt in to cloud (key must be present in env)
+ashlr run "..." --allow-cloud
+```
+
+### Budget and step guardrails
+
+Both limits are HARD ceilings — exceeding either one aborts the run immediately, preserving all partial results in state.
+
+| Flag           | Default | Description |
+|----------------|---------|-------------|
+| `--budget N`   | 32000   | Maximum total tokens (in + out) across all tasks. |
+| `--max-steps N`| 50      | Maximum total steps (model calls + tool calls) across all tasks. |
+| `--parallel N` | 3       | Maximum tasks running concurrently. |
+
+```sh
+ashlr run "..." --budget 16000 --max-steps 20 --parallel 2
+```
+
+When the budget is hit mid-run, the orchestrator sets `status: 'aborted'`, writes the partial state, and exits non-zero. Use `--resume` to continue.
+
+### Resumability
+
+Every run is assigned a short id (e.g. `r_1a2b3c4d`) and persisted to `~/.ashlr/runs/<id>.json`. Completed task results are cached; `--resume` skips them and only re-runs pending or failed tasks.
+
+```sh
+# Resume a previously aborted or interrupted run
+ashlr run "..." --resume r_1a2b3c4d
+
+# List all past runs (newest first)
+ashlr runs
+
+# Inspect a specific run
+ashlr run show r_1a2b3c4d
+
+# Machine-readable list
+ashlr runs --json
+```
+
+### Cost and usage reporting
+
+After every run, `ashlr run` prints a usage summary. Local providers (Ollama, LM Studio) always show $0.00 cost. Cloud providers show an estimated cost when `--allow-cloud` is used.
+
+```
+Run r_1a2b3c4d  done  3 tasks  12 steps
+  tokens in:   4 821
+  tokens out:  1 203
+  total:       6 024
+  est. cost:   $0.00  (ollama — local)
+  elapsed:     14.3 s
+```
+
+If `telemetry.pulse` is set in `~/.ashlr/config.json`, a run summary is POSTed to Pulse in the background after the run completes. This is best-effort: it never blocks the CLI and never throws.
+
+### Full flag reference
+
+```sh
+ashlr run "<goal>"
+  [--budget N]          # max total tokens (default 32000)
+  [--max-steps N]       # max total steps (default 50)
+  [--parallel N]        # max concurrent tasks (default 3)
+  [--engine builtin|ashlrcode|aw]
+  [--allow-cloud]       # permit cloud provider (off by default)
+  [--no-tools]          # disable MCP tool access
+  [--resume <id>]       # continue a prior run from cache
+  [--json]              # emit JSON instead of human output
+
+ashlr run show <id>     # print full RunState for a past run
+ashlr runs [--json]     # list all past runs, newest first
+```
+
+---
+
 ## Config reference — `~/.ashlr/config.json`
 
 Created automatically on first run with sensible defaults. Edit directly or via `ashlr config set`.
@@ -336,6 +460,7 @@ Created automatically on first run with sensible defaults. Edit directly or via 
   },
 
   // Telemetry (optional)
+  // pulse: POST run summaries here after each `ashlr run` (best-effort, non-blocking)
   "telemetry": {
     "pulse": ""
   },
@@ -575,9 +700,15 @@ ashlr-hub/
 │   │   ├── doctor.ts        # M2: one-glance health check aggregator
 │   │   ├── mcp-registry.ts  # M3: discover MCP servers across known config paths
 │   │   ├── mcp-gateway.ts   # M3: stdio aggregation gateway + per-server probe
-│   │   └── tools-registry.ts # M3: detect ecosystem tools + versions via PATH
+│   │   ├── tools-registry.ts # M3: detect ecosystem tools + versions via PATH
+│   │   └── run/             # M4: local-first agent orchestrator
+│   │       ├── provider-client.ts  # ProviderClient over Ollama / LM Studio
+│   │       ├── budget.ts           # RunUsage accounting + budget enforcement
+│   │       ├── agent-loop.ts       # Bounded chat/tool loop per RunTask
+│   │       └── orchestrator.ts     # DAG planner, parallel executor, persistence
 │   ├── cli/
-│   │   ├── index.ts     # argv dispatch (index/go/status/ls/open/tidy/config/doctor/init/mcp/help)
+│   │   ├── index.ts     # argv dispatch (index/go/status/ls/open/tidy/config/doctor/init/mcp/run/runs/help)
+│   │   ├── run.ts       # M4: `ashlr run` + `ashlr runs` subcommand handlers
 │   │   ├── mcp.ts       # M3: `ashlr mcp` subcommand dispatcher
 │   │   ├── open.ts      # Editor / Finder / Terminal launchers
 │   │   └── picker.ts    # fzf (if present) or readline picker
@@ -594,6 +725,7 @@ ashlr-hub/
 ├── CONTRACT.md          # binding interface spec
 ├── CONTRACT-M2.md       # M2 extension to the contract
 ├── CONTRACT-M3.md       # M3 extension to the contract (MCP gateway)
+├── CONTRACT-M4.md       # M4 extension to the contract (agent orchestrator)
 ├── install.sh           # build + symlink installer
 └── package.json
 ```
@@ -640,8 +772,19 @@ Zero runtime dependencies in `core/` and `cli/` — Node builtins only.
 - [x] Ecosystem tools registry — detect + version-report the full Ashlr tool stack via PATH
 - [x] `ashlr status` + `ashlr doctor` surface ecosystem tool presence and versions
 
+### M4 — local-first agent orchestrator
+
+- [x] `ashlr run "<goal>"` — decompose a goal into a task-graph (DAG), run independent tasks in parallel on local models, synthesize a final answer
+- [x] `ashlr runs` — list past runs with id, status, goal, token usage, and estimated cost
+- [x] `ashlr run show <id>` — inspect a completed or aborted run in full
+- [x] ProviderClient — thin chat layer over Ollama (native `/api/chat`) and LM Studio (`/v1/chat/completions`); LOCAL-FIRST by default; `--allow-cloud` opt-in
+- [x] Task-graph executor — respects `deps[]`, fans out independent tasks up to `--parallel N`; HARD budget/step ceiling with clean abort and partial result preservation
+- [x] Resumability — run state persisted to `~/.ashlr/runs/<id>.json` after every step; `--resume <id>` skips completed tasks and continues from cache
+- [x] MCP tool access — agent loop connects to the M3 gateway as an MCP client; `--no-tools` disables
+- [x] Pulse cost reporting — best-effort POST of a run summary to Pulse if `telemetry.pulse` is configured (never blocks)
+
 ### Future
 
-- [ ] Phase 4: AI-powered semantic search over the index
-- [ ] Phase 5: Cross-project cost + telemetry dashboard (Pulse integration)
-- [ ] Phase 6: Automated tidy + refactor suggestions
+- [ ] Semantic search over the index using local embeddings
+- [ ] Cross-project cost + telemetry dashboard (Pulse integration)
+- [ ] Automated tidy + refactor suggestions

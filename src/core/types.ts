@@ -269,3 +269,142 @@ export interface ToolsRegistry {
   /** Count of tools where `installed` is true. */
   installedCount: number;
 }
+
+// ---------------------------------------------------------------------------
+// M4: local-first agent orchestrator (`ashlr run`) contract
+// ---------------------------------------------------------------------------
+
+/** Hard guardrails for a single run. Budget/steps abort the run when exceeded. */
+export interface RunBudget {
+  /** Maximum total tokens (in + out) before the run aborts. */
+  maxTokens: number;
+  /** Maximum number of model/agent steps before the run aborts. */
+  maxSteps: number;
+  /** Whether cloud providers are permitted (default false = local-first refuse). */
+  allowCloud: boolean;
+}
+
+/** Token + step accounting for a task or whole run. */
+export interface RunUsage {
+  /** Prompt/input tokens consumed. */
+  tokensIn: number;
+  /** Completion/output tokens produced. */
+  tokensOut: number;
+  /** Number of steps taken. */
+  steps: number;
+  /** Estimated USD cost (0 for local providers). */
+  estCostUsd: number;
+}
+
+/** Lifecycle state of a single task in the run graph. */
+export type RunTaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+
+/** A single node in the run task-graph (DAG). */
+export interface RunTask {
+  /** Stable task id (unique within the run). */
+  id: string;
+  /** The sub-goal this task must accomplish. */
+  goal: string;
+  /** Ids of tasks that must complete before this one runs. */
+  deps: string[];
+  /** Current lifecycle status. */
+  status: RunTaskStatus;
+  /** Final task result text, present when done. */
+  result?: string;
+  /** Token/step usage attributed to this task. */
+  usage?: RunUsage;
+  /** Failure reason when status is 'failed', else absent. */
+  error?: string;
+}
+
+/** An append-only event recorded during a run for audit/resume. */
+export interface RunStep {
+  /** ISO timestamp the step occurred. */
+  ts: string;
+  /** Id of the task this step belongs to. */
+  taskId: string;
+  /** What kind of step this was. */
+  kind: 'plan' | 'model' | 'tool' | 'synthesize';
+  /** One-line human-readable summary of the step. */
+  summary: string;
+  /** Usage incurred by this step, if any. */
+  usage?: RunUsage;
+}
+
+/** Full persisted state of a run. Lives at ~/.ashlr/runs/<id>.json. */
+export interface RunState {
+  /** Stable run id. */
+  id: string;
+  /** The original top-level goal. */
+  goal: string;
+  /** Engine that executed the run ('builtin' | 'ashlrcode' | 'aw'). */
+  engine: string;
+  /** Active provider id used for the run. */
+  provider: string;
+  /** ISO timestamp the run was created. */
+  createdAt: string;
+  /** ISO timestamp of the last update (written after each step). */
+  updatedAt: string;
+  /** Guardrails in effect for this run. */
+  budget: RunBudget;
+  /** Cumulative usage across the whole run. */
+  usage: RunUsage;
+  /** The task-graph (DAG). */
+  tasks: RunTask[];
+  /** Append-only step log. */
+  steps: RunStep[];
+  /** Current run status. */
+  status: 'running' | 'done' | 'aborted' | 'failed';
+  /** Synthesized final answer, present when done. */
+  result?: string;
+}
+
+/** Options accepted by `runGoal` / the `ashlr run` CLI. */
+export interface RunOptions {
+  /** Partial budget overrides (merged over defaults). */
+  budget?: Partial<RunBudget>;
+  /** Max independent tasks to execute in parallel. */
+  parallel?: number;
+  /** Engine selector ('builtin' | 'ashlrcode' | 'aw'). */
+  engine?: string;
+  /** Whether to load aggregated MCP tools (default true). */
+  tools?: boolean;
+  /** Whether cloud providers are permitted. */
+  allowCloud?: boolean;
+  /** Existing run id to resume from cache. */
+  resumeId?: string;
+  /** Emit machine-readable JSON instead of human output. */
+  json?: boolean;
+}
+
+/** A single message in a chat exchange with a provider. */
+export interface ChatMessage {
+  /** Message author role. */
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  /** Message text content. */
+  content: string;
+  /** Tool-call id this message responds to (for role 'tool'). */
+  toolCallId?: string;
+  /** Tool/function name (for role 'tool'). */
+  name?: string;
+}
+
+/** Result of a single chat completion call. */
+export interface ChatResult {
+  /** Assistant text content (may be empty when only tool calls returned). */
+  content: string;
+  /** Tool calls the model requested, if any. */
+  toolCalls?: { id: string; name: string; arguments: unknown }[];
+  /** Token accounting for this call. */
+  usage: { tokensIn: number; tokensOut: number };
+}
+
+/** Thin chat client over the active local provider (Ollama / LM Studio). */
+export interface ProviderClient {
+  /** Provider id this client targets. */
+  id: string;
+  /** Whether the underlying model/provider supports tool calls. */
+  supportsTools: boolean;
+  /** Send a chat exchange (optionally with tool specs) and get a result. */
+  chat(messages: ChatMessage[], tools?: unknown[]): Promise<ChatResult>;
+}

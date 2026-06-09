@@ -13,6 +13,9 @@
  *   doctor                     One-glance health check (config, phantom, providers).
  *   init [--yes]               Idempotent onboarding; NON-TTY safe with --yes.
  *   mcp [list|doctor|install]  MCP aggregation gateway and registry management.
+ *   run "<goal>" [opts]        Local-first agent orchestrator; decompose & execute a goal.
+ *   run show <id>              Print a past run in detail.
+ *   runs [--json]              List past runs.
  *   help                       Show this help.
  *
  * Exit codes: 0 success, 1 error/not-found, 2 bad usage.
@@ -77,6 +80,50 @@ async function tryDiscoverMcpServers(): Promise<DiscoverMcpServersFn | null> {
     }
   }
   return _discoverMcpServers ?? null;
+}
+
+// ─── M4 lazy imports (graceful degradation if modules not yet built) ──────────
+
+type CmdRunFn  = (args: string[]) => Promise<number>;
+type CmdRunsFn = (args: string[]) => Promise<number>;
+
+let _cmdRun:  CmdRunFn  | null | undefined = undefined;
+let _cmdRuns: CmdRunsFn | null | undefined = undefined;
+
+async function loadRunCmd(): Promise<CmdRunFn> {
+  if (_cmdRun === undefined) {
+    try {
+      const mod = (await import('./run.js' as unknown as string)) as { cmdRun: CmdRunFn };
+      _cmdRun = mod.cmdRun;
+    } catch {
+      _cmdRun = null;
+    }
+  }
+  if (_cmdRun === null) {
+    return async (_args: string[]) => {
+      console.error(red('error: ') + 'run command requires src/cli/run.ts (M4 module not yet built).');
+      return 1;
+    };
+  }
+  return _cmdRun;
+}
+
+async function loadRunsCmd(): Promise<CmdRunsFn> {
+  if (_cmdRuns === undefined) {
+    try {
+      const mod = (await import('./run.js' as unknown as string)) as { cmdRuns: CmdRunsFn };
+      _cmdRuns = mod.cmdRuns;
+    } catch {
+      _cmdRuns = null;
+    }
+  }
+  if (_cmdRuns === null) {
+    return async (_args: string[]) => {
+      console.error(red('error: ') + 'runs command requires src/cli/run.ts (M4 module not yet built).');
+      return 1;
+    };
+  }
+  return _cmdRuns;
 }
 
 // ─── ANSI helpers ──────────────────────────────────────────────────────────────
@@ -765,6 +812,9 @@ function cmdHelp(): void {
     ['mcp list',                     'List discovered MCP servers + per-server tool counts.'],
     ['mcp doctor',                   'Per-server MCP health: does it start? how many tools?'],
     ['mcp install <claude|ashlrcode>', 'Add the ashlr gateway to a target mcpServers config (backs up first).'],
+    ['run "<goal>" [opts]',          'Decompose goal into tasks; execute via local model (Ollama/LM Studio).'],
+    ['run show <id>',                'Print a past run in detail.'],
+    ['runs [--json]',                'List past runs (newest first).'],
     ['help',                         'Show this help.'],
   ];
 
@@ -777,6 +827,14 @@ function cmdHelp(): void {
   console.log('  ' + bold('Config:') + ` ${dim(CONFIG_PATH)}`);
   console.log('');
   console.log('  ' + bold('Flags apply per-command above.'));
+  console.log('');
+  console.log('  ' + bold('run flags:') + dim('  --budget N  --max-steps N  --parallel N  --engine builtin|ashlrcode|aw  --allow-cloud  --no-tools  --resume <id>  --json'));
+  console.log('');
+  console.log('  ' + bold('Examples:'));
+  console.log(`    ${cyan('ashlr run "list all open GitHub issues in this repo"')}`);
+  console.log(`    ${cyan('ashlr run "summarize recent commits" --budget 8000 --max-steps 5')}`);
+  console.log(`    ${cyan('ashlr run show <id>')}  ${dim('# inspect a past run')}`);
+  console.log(`    ${cyan('ashlr runs')}            ${dim('# list all past runs')}`);
   console.log('');
 }
 
@@ -828,6 +886,18 @@ async function main(): Promise<void> {
       case 'mcp': {
         const cmdMcp = await loadMcpCmd();
         process.exitCode = await cmdMcp(rest);
+        break;
+      }
+
+      case 'run': {
+        const cmdRun = await loadRunCmd();
+        process.exitCode = await cmdRun(rest);
+        break;
+      }
+
+      case 'runs': {
+        const cmdRuns = await loadRunsCmd();
+        process.exitCode = await cmdRuns(rest);
         break;
       }
 

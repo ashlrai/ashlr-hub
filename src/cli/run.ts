@@ -1,0 +1,736 @@
+/**
+ * `ashlr run` and `ashlr runs` CLI commands.
+ *
+ * `ashlr run "<goal>" [--budget N] [--max-steps N] [--parallel N]
+ *   [--engine builtin|ashlrcode|aw] [--allow-cloud] [--no-tools]
+ *   [--resume <id>] [--json]`
+ *
+ * Subcommand `ashlr run show <id>` prints a saved run.
+ *
+ * `ashlr runs [--json]` — list past runs.
+ *
+ * Exit codes:
+ *   0  success
+ *   1  run failed / aborted / not-found
+ *   2  bad usage
+ *   3  local-first cloud refusal
+ */
+
+import type { RunOptions, RunState, RunTask, RunStep } from '../core/types.js';
+import {
+  DEFAULT_MAX_TOKENS,
+  DEFAULT_MAX_STEPS,
+  DEFAULT_PARALLEL,
+} from '../core/run/orchestrator.js';
+
+// ---------------------------------------------------------------------------
+// Lazy imports — core/run modules are built by other M4 agents
+// ---------------------------------------------------------------------------
+
+async function importOrchestrator() {
+  return import('../core/run/orchestrator.js') as Promise<{
+    runGoal: (goal: string, cfg: import('../core/types.js').AshlrConfig, opts: RunOptions) => Promise<RunState>;
+    loadRun: (id: string) => RunState | null;
+    listRuns: () => RunState[];
+  }>;
+}
+
+async function importConfig() {
+  return import('../core/config.js') as Promise<{
+    loadConfig: () => import('../core/types.js').AshlrConfig;
+  }>;
+}
+
+// ---------------------------------------------------------------------------
+// ANSI helpers (non-TTY safe)
+// ---------------------------------------------------------------------------
+
+const IS_TTY = process.stdout.isTTY === true;
+const IS_STDERR_TTY = process.stderr.isTTY === true;
+
+const C = {
+  reset:   '\x1b[0m',
+  bold:    '\x1b[1m',
+  dim:     '\x1b[2m',
+  red:     '\x1b[31m',
+  green:   '\x1b[32m',
+  yellow:  '\x1b[33m',
+  blue:    '\x1b[34m',
+  cyan:    '\x1b[36m',
+  magenta: '\x1b[35m',
+  gray:    '\x1b[90m',
+} as const;
+
+function colorize(code: string, s: string, tty = IS_TTY): string {
+  if (!tty) return s;
+  return `${code}${s}${C.reset}`;
+}
+
+function bold(s: string):    string { return colorize(C.bold,    s); }
+function dim(s: string):     string { return colorize(C.dim,     s); }
+function red(s: string):     string { return colorize(C.red,     s); }
+function green(s: string):   string { return colorize(C.green,   s); }
+function yellow(s: string):  string { return colorize(C.yellow,  s); }
+function cyan(s: string):    string { return colorize(C.cyan,    s); }
+function gray(s: string):    string { return colorize(C.gray,    s); }
+
+// Stderr equivalents (respect stderr TTY)
+function seDim(s: string):    string { return colorize(C.dim,     s, IS_STDERR_TTY); }
+function seCyan(s: string):   string { return colorize(C.cyan,    s, IS_STDERR_TTY); }
+function seGreen(s: string):  string { return colorize(C.green,   s, IS_STDERR_TTY); }
+function seYellow(s: string): string { return colorize(C.yellow,  s, IS_STDERR_TTY); }
+function seGray(s: string):   string { return colorize(C.gray,    s, IS_STDERR_TTY); }
+
+function stripAnsi(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+function pad(s: string, width: number, align: 'left' | 'right' = 'left'): string {
+  const vis = stripAnsi(s).length;
+  const spaces = Math.max(0, width - vis);
+  return align === 'left' ? s + ' '.repeat(spaces) : ' '.repeat(spaces) + s;
+}
+
+// ---------------------------------------------------------------------------
+// Arg parsing
+// ---------------------------------------------------------------------------
+
+interface ParsedRunArgs {
+  subcommand: 'run' | 'show';
+  goal?: string;
+  showId?: string;
+  budget?: number;
+  maxSteps?: number;
+  parallel?: number;
+  engine?: string;
+  allowCloud: boolean;
+  noTools: boolean;
+  resumeId?: string;
+  json: boolean;
+  usageError?: string;
+}
+
+function parseRunArgs(args: string[]): ParsedRunArgs {
+  // Handle `run show <id>` subcommand
+  if (args[0] === 'show') {
+    const showId = args[1];
+    if (!showId) {
+      return {
+        subcommand: 'run',
+        allowCloud: false,
+        noTools: false,
+        json: false,
+        usageError: 'Usage: ashlr run show <id>',
+      };
+    }
+    return { subcommand: 'show', showId, allowCloud: false, noTools: false, json: false };
+  }
+
+  const result: ParsedRunArgs = {
+    subcommand: 'run',
+    allowCloud: false,
+    noTools: false,
+    json: false,
+  };
+
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i]!;
+
+    if (arg === '--allow-cloud') {
+      result.allowCloud = true;
+      i++;
+    } else if (arg === '--no-tools') {
+      result.noTools = true;
+      i++;
+    } else if (arg === '--json') {
+      result.json = true;
+      i++;
+    } else if (arg === '--budget') {
+      const val = args[++i];
+      const n = val !== undefined ? parseInt(val, 10) : NaN;
+      if (isNaN(n) || n <= 0) {
+        result.usageError = `--budget requires a positive integer, got: ${val ?? '(missing)'}`;
+        return result;
+      }
+      result.budget = n;
+      i++;
+    } else if (arg === '--max-steps') {
+      const val = args[++i];
+      const n = val !== undefined ? parseInt(val, 10) : NaN;
+      if (isNaN(n) || n <= 0) {
+        result.usageError = `--max-steps requires a positive integer, got: ${val ?? '(missing)'}`;
+        return result;
+      }
+      result.maxSteps = n;
+      i++;
+    } else if (arg === '--parallel') {
+      const val = args[++i];
+      const n = val !== undefined ? parseInt(val, 10) : NaN;
+      if (isNaN(n) || n <= 0) {
+        result.usageError = `--parallel requires a positive integer, got: ${val ?? '(missing)'}`;
+        return result;
+      }
+      result.parallel = n;
+      i++;
+    } else if (arg === '--engine') {
+      const val = args[++i];
+      if (!val || !['builtin', 'ashlrcode', 'aw'].includes(val)) {
+        result.usageError = `--engine requires one of: builtin, ashlrcode, aw; got: ${val ?? '(missing)'}`;
+        return result;
+      }
+      result.engine = val;
+      i++;
+    } else if (arg === '--model') {
+      const val = args[++i];
+      if (!val) {
+        result.usageError = `--model requires a model name (e.g. llama3.2:3b)`;
+        return result;
+      }
+      // Consumed by provider-client.pickModel(); also honors the ASHLR_MODEL env var.
+      process.env.ASHLR_MODEL = val;
+      i++;
+    } else if (arg === '--resume') {
+      const val = args[++i];
+      if (!val) {
+        result.usageError = `--resume requires a run id`;
+        return result;
+      }
+      result.resumeId = val;
+      i++;
+    } else if (!arg.startsWith('--')) {
+      // positional = goal
+      if (result.goal !== undefined) {
+        result.usageError = `unexpected positional argument: ${arg}`;
+        return result;
+      }
+      result.goal = arg;
+      i++;
+    } else {
+      result.usageError = `unknown flag: ${arg}`;
+      return result;
+    }
+  }
+
+  // goal is required unless --resume is set (resume re-uses stored goal)
+  if (!result.goal && !result.resumeId) {
+    result.usageError =
+      'Usage: ashlr run "<goal>" [--budget N] [--max-steps N] [--parallel N]\n' +
+      '              [--engine builtin|ashlrcode|aw] [--allow-cloud] [--no-tools]\n' +
+      '              [--resume <id>] [--json]\n' +
+      '       ashlr run show <id>';
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Step progress printer (goes to stderr when --json so stdout stays clean)
+// ---------------------------------------------------------------------------
+
+/**
+ * Emit a step event line.  When jsonMode is true we write to stderr so stdout
+ * remains a single JSON object at the end.
+ */
+function printStep(step: RunStep, taskGoal: string, jsonMode: boolean): void {
+  const ts = new Date(step.ts).toLocaleTimeString('en-US', { hour12: false });
+  const kindEmoji: Record<string, string> = {
+    plan:       '📋',
+    model:      '🤖',
+    tool:       '🔧',
+    synthesize: '✨',
+  };
+  const icon = kindEmoji[step.kind] ?? '·';
+  const usageStr = step.usage
+    ? seDim(` [${step.usage.tokensIn + step.usage.tokensOut} tok]`)
+    : '';
+  const line =
+    `  ${seGray(ts)} ${icon} ${seCyan(`[${step.taskId}]`)} ${step.summary}${usageStr}` +
+    (taskGoal ? ` ${seGray(`— ${taskGoal.slice(0, 60)}${taskGoal.length > 60 ? '…' : ''}`)}` : '');
+
+  if (jsonMode) {
+    process.stderr.write(line + '\n');
+  } else {
+    process.stdout.write(line + '\n');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Human summary renderer
+// ---------------------------------------------------------------------------
+
+function formatDuration(createdAt: string, updatedAt: string): string {
+  const ms = new Date(updatedAt).getTime() - new Date(createdAt).getTime();
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const mins = Math.floor(ms / 60_000);
+  const secs = Math.floor((ms % 60_000) / 1000);
+  return `${mins}m ${secs}s`;
+}
+
+function statusColor(status: RunState['status'] | RunTask['status']): string {
+  switch (status) {
+    case 'done':    return green(status);
+    case 'running': return cyan(status);
+    case 'aborted': return yellow(status);
+    case 'failed':  return red(status);
+    case 'pending': return gray(status);
+    case 'skipped': return dim(status);
+    default:        return String(status);
+  }
+}
+
+function printRunSummary(state: RunState): void {
+  const { id, goal, engine, provider, status, usage, budget, tasks, result, createdAt, updatedAt } = state;
+
+  const duration = formatDuration(createdAt, updatedAt);
+  const totalTokens = usage.tokensIn + usage.tokensOut;
+
+  console.log('');
+  console.log(bold('  ashlr run') + gray(` — ${id}`));
+  console.log('');
+  console.log(`  ${bold('Goal:')}    ${goal}`);
+  console.log(
+    `  ${bold('Status:')}  ${statusColor(status)}` +
+    (status === 'aborted' ? yellow('  ⚠ budget/step limit reached') : ''),
+  );
+  console.log(`  ${bold('Engine:')}  ${engine}  ${dim('·')}  ${bold('Provider:')} ${cyan(provider)}`);
+  console.log(`  ${bold('Duration:')} ${duration}`);
+  console.log('');
+
+  // ── Tasks table ──────────────────────────────────────────────────────────
+  if (tasks.length > 0) {
+    const idW     = Math.max(4, ...tasks.map(t => t.id.length));
+    const statusW = 8;
+    const tokW    = 7;
+    const goalW   = 44;
+
+    console.log(`  ${bold(pad('Tasks', 0))}`);
+    console.log('');
+    console.log(
+      `  ${bold(pad('ID', idW))}  ${bold(pad('Status', statusW))}  ` +
+      `${bold(pad('Tokens', tokW, 'right'))}  ${bold('Goal')}`,
+    );
+    console.log(
+      `  ${'─'.repeat(idW)}  ${'─'.repeat(statusW)}  ${'─'.repeat(tokW)}  ${'─'.repeat(goalW)}`,
+    );
+
+    for (const t of tasks) {
+      const tok = t.usage ? String(t.usage.tokensIn + t.usage.tokensOut) : '—';
+      const goalTrunc = t.goal.length > goalW ? t.goal.slice(0, goalW - 1) + '…' : t.goal;
+      const errorNote = t.error ? red(` ✗ ${t.error.slice(0, 40)}`) : '';
+      console.log(
+        `  ${pad(dim(t.id), idW)}  ${pad(statusColor(t.status), statusW)}  ` +
+        `${pad(tok, tokW, 'right')}  ${goalTrunc}${errorNote}`,
+      );
+    }
+    console.log('');
+  }
+
+  // ── Result ───────────────────────────────────────────────────────────────
+  if (result) {
+    console.log(`  ${bold('Result:')}`);
+    // Indent result lines for readability
+    const lines = result.split('\n');
+    for (const line of lines) {
+      console.log(`    ${line}`);
+    }
+    console.log('');
+  }
+
+  // ── Usage / cost summary ─────────────────────────────────────────────────
+  const localProvider = /ollama|lmstudio/i.test(provider);
+  const cloudNote = localProvider ? green('local — $0.00') : yellow('cloud provider');
+
+  console.log(`  ${bold('Usage:')}`);
+  console.log(`    Tokens in:   ${usage.tokensIn.toLocaleString()}`);
+  console.log(`    Tokens out:  ${usage.tokensOut.toLocaleString()}`);
+  console.log(`    Total:       ${totalTokens.toLocaleString()} / ${budget.maxTokens.toLocaleString()} max`);
+  console.log(`    Steps:       ${usage.steps} / ${budget.maxSteps} max`);
+  console.log(
+    `    Est. cost:   ${usage.estCostUsd > 0 ? '$' + usage.estCostUsd.toFixed(6) : '$0.00'}  ${dim('·')}  ${cloudNote}`,
+  );
+  console.log(`    Provider:    ${cyan(provider)}`);
+  console.log('');
+
+  // ── Resume hint ──────────────────────────────────────────────────────────
+  if (status === 'aborted' || status === 'failed') {
+    console.log(
+      `  ${yellow('Tip:')} resume this run with ${bold(`ashlr run --resume ${id}`)}`,
+    );
+    console.log('');
+  }
+
+  // ── Show hint ────────────────────────────────────────────────────────────
+  console.log(dim(`  Run ID: ${id}  |  ashlr run show ${id}`));
+  console.log('');
+}
+
+// ---------------------------------------------------------------------------
+// Cloud refusal message
+// ---------------------------------------------------------------------------
+
+const CLOUD_REFUSAL_RE = /local.first|cloud.provider|allow.cloud|no local/i;
+
+function isCloudRefusalError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return CLOUD_REFUSAL_RE.test(err.message);
+}
+
+function printCloudRefusal(err: Error, jsonMode: boolean): void {
+  const msg = [
+    '',
+    `  ${red('Local-first refusal:')} ${err.message}`,
+    '',
+    `  ashlr run only uses LOCAL providers (Ollama / LM Studio) by default.`,
+    `  To allow a cloud provider, pass ${bold('--allow-cloud')} and ensure the API key is set.`,
+    '',
+    `  Example: ashlr run "<goal>" --allow-cloud`,
+    '',
+  ].join('\n');
+
+  if (jsonMode) {
+    process.stderr.write(msg + '\n');
+  } else {
+    process.stdout.write(msg + '\n');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// `run show <id>`
+// ---------------------------------------------------------------------------
+
+async function cmdRunShow(id: string, jsonMode: boolean): Promise<number> {
+  const { loadRun } = await importOrchestrator();
+  const state = loadRun(id);
+
+  if (!state) {
+    const msg = `Run not found: ${id}`;
+    if (jsonMode) {
+      process.stdout.write(JSON.stringify({ error: msg }) + '\n');
+    } else {
+      process.stderr.write(red('error: ') + msg + '\n');
+    }
+    return 1;
+  }
+
+  if (jsonMode) {
+    process.stdout.write(JSON.stringify(state, null, 2) + '\n');
+    return 0;
+  }
+
+  printRunSummary(state);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// `ashlr run` — main
+// ---------------------------------------------------------------------------
+
+/**
+ * `ashlr run "<goal>" [--budget N] [--max-steps N] [--parallel N]
+ *   [--engine builtin|ashlrcode|aw] [--allow-cloud] [--no-tools]
+ *   [--resume <id>] [--json]`
+ *
+ * Also handles `ashlr run show <id>`.
+ */
+export async function cmdRun(args: string[]): Promise<number> {
+  // Help shortcircuit
+  if (args[0] === '--help' || args[0] === '-h' || args[0] === 'help') {
+    printRunHelp();
+    return 0;
+  }
+
+  const parsed = parseRunArgs(args);
+
+  if (parsed.usageError) {
+    process.stderr.write(red('error: ') + parsed.usageError + '\n');
+    return 2;
+  }
+
+  // Subcommand: show
+  if (parsed.subcommand === 'show' && parsed.showId) {
+    return cmdRunShow(parsed.showId, parsed.json);
+  }
+
+  // Build RunOptions
+  const opts: RunOptions = {
+    allowCloud: parsed.allowCloud,
+    tools:      !parsed.noTools,
+    parallel:   parsed.parallel,
+    engine:     parsed.engine,
+    json:       parsed.json,
+    resumeId:   parsed.resumeId,
+  };
+
+  if (parsed.budget !== undefined || parsed.maxSteps !== undefined) {
+    opts.budget = {};
+    if (parsed.budget !== undefined)   opts.budget.maxTokens = parsed.budget;
+    if (parsed.maxSteps !== undefined) opts.budget.maxSteps  = parsed.maxSteps;
+    if (parsed.allowCloud !== undefined) opts.budget.allowCloud = parsed.allowCloud;
+  }
+
+  // Determine goal — either explicit or from resumed run
+  let goal = parsed.goal ?? '';
+
+  // If --resume only (no goal), we need to load stored goal for display
+  if (!goal && parsed.resumeId) {
+    try {
+      const { loadRun } = await importOrchestrator();
+      const prior = loadRun(parsed.resumeId);
+      if (!prior) {
+        process.stderr.write(red('error: ') + `Cannot resume: run not found: ${parsed.resumeId}\n`);
+        return 1;
+      }
+      goal = prior.goal;
+    } catch (err) {
+      process.stderr.write(
+        red('error: ') + `Failed to load run ${parsed.resumeId}: ` +
+        (err instanceof Error ? err.message : String(err)) + '\n',
+      );
+      return 1;
+    }
+  }
+
+  if (!parsed.json) {
+    console.log('');
+    console.log(bold('  ashlr run') + gray(`  — starting`));
+    console.log(`  ${dim('Goal:')} ${goal}`);
+    if (parsed.resumeId) {
+      console.log(`  ${dim('Resuming:')} ${parsed.resumeId}`);
+    }
+    console.log('');
+  } else {
+    process.stderr.write(`[ashlr run] goal: ${goal}` + (parsed.resumeId ? ` (resuming ${parsed.resumeId})` : '') + '\n');
+  }
+
+  // Load config
+  let cfg: import('../core/types.js').AshlrConfig;
+  try {
+    const { loadConfig } = await importConfig();
+    cfg = loadConfig();
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'Failed to load config: ' +
+      (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  // Load orchestrator
+  let runGoal: (
+    goal: string,
+    cfg: import('../core/types.js').AshlrConfig,
+    opts: RunOptions,
+  ) => Promise<RunState>;
+
+  try {
+    const mod = await importOrchestrator();
+    runGoal = mod.runGoal;
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'Failed to load orchestrator (M4 module not yet built): ' +
+      (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  // Step callback — accumulate tasks map for goal lookup
+  const taskGoalMap = new Map<string, string>();
+
+  // We'll patch opts with a step callback after we know the task graph;
+  // for now the orchestrator emits steps through onStep on RunOptions.
+  // Since RunOptions has no onStep field (that's on runTask ctx), we wire
+  // progress via watching the returned RunState — but to get live progress
+  // we need a side-channel. The orchestrator contract exposes saveRun after
+  // each step, so we poll? No — instead, for the CLI we pass a custom
+  // approach: wrap opts with a step printer injected via a symbol property
+  // that orchestrator.ts may optionally call. If the orchestrator doesn't
+  // use it, we just print the final summary. This keeps the contract clean.
+
+  // We add an optional __onStep hook to RunOptions for CLI progress without
+  // breaking the typed contract (extra properties are stripped at runtime).
+  const optsWithHook = opts as RunOptions & {
+    __onStep?: (step: RunStep, tasks: RunTask[]) => void;
+  };
+
+  optsWithHook.__onStep = (step: RunStep, tasks: RunTask[]) => {
+    // Keep task goal map updated
+    for (const t of tasks) {
+      taskGoalMap.set(t.id, t.goal);
+    }
+    const taskGoal = taskGoalMap.get(step.taskId) ?? '';
+    printStep(step, taskGoal, parsed.json);
+  };
+
+  let state: RunState;
+  try {
+    state = await runGoal(goal, cfg, optsWithHook);
+  } catch (err) {
+    if (isCloudRefusalError(err)) {
+      printCloudRefusal(err as Error, parsed.json);
+      return 3;
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(red('error: ') + msg + '\n');
+    return 1;
+  }
+
+  // Output
+  if (parsed.json) {
+    process.stdout.write(JSON.stringify(state, null, 2) + '\n');
+  } else {
+    printRunSummary(state);
+  }
+
+  // Exit code
+  if (state.status === 'done') return 0;
+  if (state.status === 'aborted') return 1;
+  if (state.status === 'failed') return 1;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// `ashlr runs` — list past runs
+// ---------------------------------------------------------------------------
+
+function relativeTime(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  const s  = Math.floor(ms / 1000);
+  const m  = Math.floor(s  / 60);
+  const h  = Math.floor(m  / 60);
+  const d  = Math.floor(h  / 24);
+  if (d > 0)  return `${d}d ago`;
+  if (h > 0)  return `${h}h ago`;
+  if (m > 0)  return `${m}m ago`;
+  return `${s}s ago`;
+}
+
+/**
+ * `ashlr runs [--json]` — list past runs.
+ */
+export async function cmdRuns(args: string[]): Promise<number> {
+  const jsonMode = args.includes('--json');
+
+  let listRuns: () => RunState[];
+  try {
+    const mod = await importOrchestrator();
+    listRuns = mod.listRuns;
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'Failed to load orchestrator (M4 module not yet built): ' +
+      (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  const runs = listRuns();
+
+  if (jsonMode) {
+    process.stdout.write(JSON.stringify(runs, null, 2) + '\n');
+    return 0;
+  }
+
+  if (runs.length === 0) {
+    console.log('');
+    console.log(`  ${dim('No past runs found.')} Start one with ${bold('ashlr run "<goal>"')}.`);
+    console.log('');
+    return 0;
+  }
+
+  const idW     = Math.max(4, ...runs.map(r => r.id.length));
+  const statusW = 8;
+  const tokW    = 8;
+  const timeW   = 8;
+  const goalW   = 48;
+
+  console.log('');
+  console.log(bold('  ashlr runs') + gray(`  — ${runs.length} run(s)`));
+  console.log('');
+  console.log(
+    `  ${bold(pad('ID', idW))}  ${bold(pad('Status', statusW))}  ` +
+    `${bold(pad('Tokens', tokW, 'right'))}  ${bold(pad('When', timeW))}  ${bold('Goal')}`,
+  );
+  console.log(
+    `  ${'─'.repeat(idW)}  ${'─'.repeat(statusW)}  ${'─'.repeat(tokW)}  ${'─'.repeat(timeW)}  ${'─'.repeat(goalW)}`,
+  );
+
+  for (const r of runs) {
+    const totalTokens = r.usage.tokensIn + r.usage.tokensOut;
+    const goalTrunc   = r.goal.length > goalW ? r.goal.slice(0, goalW - 1) + '…' : r.goal;
+    const when        = relativeTime(r.createdAt);
+    const providerStr = /ollama|lmstudio/i.test(r.provider)
+      ? seGreen(r.provider)
+      : seYellow(r.provider);
+    void providerStr; // not shown in list (too wide); shown in `show`
+
+    console.log(
+      `  ${pad(dim(r.id), idW)}  ${pad(statusColor(r.status), statusW)}  ` +
+      `${pad(totalTokens.toLocaleString(), tokW, 'right')}  ${pad(gray(when), timeW)}  ${goalTrunc}`,
+    );
+  }
+
+  console.log('');
+  console.log(dim(`  Use 'ashlr run show <id>' to see details.`));
+  console.log('');
+
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Help
+// ---------------------------------------------------------------------------
+
+function printRunHelp(): void {
+  console.log('');
+  console.log(bold('  ashlr run') + dim(' — local-first agent orchestrator'));
+  console.log('');
+  console.log('  ' + bold('Usage:'));
+  console.log('');
+  console.log(`    ashlr run ${cyan('"<goal>"')} [options]`);
+  console.log(`    ashlr run show ${cyan('<id>')}`);
+  console.log(`    ashlr runs [--json]`);
+  console.log('');
+  console.log('  ' + bold('Options:'));
+  console.log('');
+
+  const opts: [string, string][] = [
+    ['--budget N',              `Max total tokens (in+out) before aborting (default: ${DEFAULT_MAX_TOKENS}).`],
+    ['--max-steps N',           `Max agent steps before aborting (default: ${DEFAULT_MAX_STEPS}).`],
+    ['--parallel N',            `Max independent tasks to run concurrently (default: ${DEFAULT_PARALLEL}).`],
+    ['--engine <e>',            `Execution engine: builtin (default), ashlrcode, or aw.`],
+    ['--model <name>',          `Local model to use (default: smallest/fastest; or set ASHLR_MODEL).`],
+    ['--allow-cloud',           `Allow cloud provider if no local is available (requires API key).`],
+    ['--no-tools',              `Disable MCP tool loading (faster; for simple goals).`],
+    ['--resume <id>',           `Resume a previously aborted/incomplete run.`],
+    ['--json',                  `Emit RunState JSON on stdout; progress goes to stderr.`],
+  ];
+
+  const optW = Math.max(...opts.map(([o]) => o.length));
+  for (const [opt, desc] of opts) {
+    console.log(`    ${cyan(pad(opt, optW))}  ${desc}`);
+  }
+
+  console.log('');
+  console.log('  ' + bold('Examples:'));
+  console.log('');
+  console.log(`    ${gray('# Run a quick goal (local Ollama, no tools)')}`)
+  console.log(`    ashlr run "Summarize the three most active repos" --no-tools`);
+  console.log('');
+  console.log(`    ${gray('# Full run with tight budget')}`)
+  console.log(`    ashlr run "Audit for TODOs across dev-tools" --budget 8000 --max-steps 6`);
+  console.log('');
+  console.log(`    ${gray('# Resume an aborted run')}`)
+  console.log(`    ashlr run --resume <id>`);
+  console.log('');
+  console.log(`    ${gray('# List past runs')}`)
+  console.log(`    ashlr runs`);
+  console.log('');
+  console.log('  ' + bold('Safety:'));
+  console.log('');
+  console.log(`    ${dim('• LOCAL-FIRST: only Ollama / LM Studio by default.')}`);
+  console.log(`    ${dim('• Budget is a HARD ceiling — exceeding it aborts cleanly.')}`);
+  console.log(`    ${dim('• State persists to ~/.ashlr/runs/<id>.json (never touches repos).')}`);
+  console.log('');
+}
