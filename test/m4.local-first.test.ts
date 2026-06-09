@@ -372,6 +372,146 @@ describe('getActiveClient (ollama) — chat function smoke test', () => {
 });
 
 // ---------------------------------------------------------------------------
+// M11 HIGH regression: streaming body read is bounded (idle-timeout watchdog)
+//
+// A provider that returns 200 headers then STALLS mid-stream (never emits a
+// chunk, never closes the body) must NOT hang chatStream indefinitely. The
+// per-read idle watchdog aborts the stalled body, and the catch falls back to
+// non-streaming chat(). These tests drive the watchdog with fake timers so the
+// 60s STREAM_TIMEOUT_MS resolves instantly and deterministically.
+// ---------------------------------------------------------------------------
+
+describe('getActiveClient (ollama) — streaming body read is bounded', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * A reader whose read() returns a promise that never resolves on its own —
+   * it only settles (rejects) when the AbortController fires via abort(). This
+   * models a provider that sends headers then trickles nothing forever.
+   */
+  function stallingStreamFetch(): typeof fetch {
+    return vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (String(url).includes('11434/api/tags')) {
+        return Promise.resolve(mockResponse({ models: [{ name: 'llama3:8b' }] }));
+      }
+      if (String(url).includes('11434/api/chat')) {
+        const body = init?.body ? String(init.body) : '';
+        const isStream = body.includes('"stream":true');
+        if (isStream) {
+          const signal = init?.signal;
+          // Headers arrive (ok response) but the body read never produces data
+          // and never closes — until the request is aborted by the idle watchdog.
+          const reader = {
+            read: () =>
+              new Promise((_resolve, reject) => {
+                if (signal) {
+                  signal.addEventListener('abort', () => {
+                    reject(new Error('aborted'));
+                  });
+                }
+                // Otherwise never settles.
+              }),
+            releaseLock: () => {},
+          };
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            body: { getReader: () => reader },
+          } as unknown as Response);
+        }
+        // Non-streaming fallback chat() — answer normally so the fallback succeeds.
+        return Promise.resolve(mockResponse({
+          message: { role: 'assistant', content: 'fallback content' },
+          prompt_eval_count: 7,
+          eval_count: 3,
+        }));
+      }
+      return Promise.reject(new Error(`unexpected: ${String(url)}`));
+    }) as unknown as typeof fetch;
+  }
+
+  it('chatStream resolves (falls back) instead of hanging when the body stalls', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', stallingStreamFetch());
+
+    const cfg = makeConfig(['ollama']);
+    const client = await getActiveClient(cfg, { allowCloud: false });
+    expect(typeof client.chatStream).toBe('function');
+
+    const deltas: string[] = [];
+    const promise = client.chatStream!(
+      [{ role: 'user', content: 'hello' }],
+      undefined,
+      (t) => deltas.push(t),
+    );
+
+    // Advance past the idle watchdog deadline (STREAM_TIMEOUT_MS=60s). This
+    // fires the abort -> read rejects -> catch -> fallback chat().
+    await vi.advanceTimersByTimeAsync(61_000);
+
+    const result = await promise;
+    // Fallback chat() supplied the content; the stalled stream did not hang.
+    expect(result.content).toBe('fallback content');
+    expect(result.usage.tokensIn).toBeGreaterThan(0);
+    // Fallback emits the content as a single delta.
+    expect(deltas.join('')).toContain('fallback content');
+  });
+
+  it('aborts the stalled request (signal.aborted) at the idle deadline', async () => {
+    vi.useFakeTimers();
+    let capturedSignal: AbortSignal | undefined;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        if (String(url).includes('11434/api/tags')) {
+          return Promise.resolve(mockResponse({ models: [{ name: 'llama3:8b' }] }));
+        }
+        if (String(url).includes('11434/api/chat')) {
+          const body = init?.body ? String(init.body) : '';
+          if (body.includes('"stream":true')) {
+            capturedSignal = init?.signal ?? undefined;
+            const reader = {
+              read: () =>
+                new Promise((_resolve, reject) => {
+                  init?.signal?.addEventListener('abort', () =>
+                    reject(new Error('aborted')),
+                  );
+                }),
+              releaseLock: () => {},
+            };
+            return Promise.resolve({
+              ok: true,
+              status: 200,
+              body: { getReader: () => reader },
+            } as unknown as Response);
+          }
+          return Promise.resolve(mockResponse({
+            message: { role: 'assistant', content: 'fallback' },
+          }));
+        }
+        return Promise.reject(new Error('unexpected'));
+      }) as unknown as typeof fetch,
+    );
+
+    const cfg = makeConfig(['ollama']);
+    const client = await getActiveClient(cfg, { allowCloud: false });
+    const promise = client.chatStream!(
+      [{ role: 'user', content: 'hi' }],
+      undefined,
+      () => {},
+    );
+    await vi.advanceTimersByTimeAsync(61_000);
+    await promise;
+
+    expect(capturedSignal?.aborted).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // estimateTokens — ~4 chars/token heuristic
 // ---------------------------------------------------------------------------
 

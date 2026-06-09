@@ -4,6 +4,11 @@
  * Runs the task against a ProviderClient, handling tool calls when supported,
  * enforcing the hard budget ceiling, and emitting RunStep events per step.
  * Never throws out of runTask — all errors are captured into task.status/error.
+ *
+ * M11: accepts an optional StreamSink in ctx for live progress streaming.
+ * Emits model-delta events via client.chatStream() when available (falls back
+ * to client.chat() with a single delta of the full content). Also emits
+ * tool-call events per tool execution.
  */
 
 import type {
@@ -11,11 +16,14 @@ import type {
   RunStep,
   RunBudget,
   RunUsage,
+  RunStreamEvent,
   ProviderClient,
   ChatMessage,
   ChatResult,
 } from '../types.js';
 import { addUsage, overBudget, newUsage } from './budget.js';
+import { nullSink } from './streaming.js';
+import type { StreamSink } from './streaming.js';
 
 /** Maximum steps per task, regardless of budget (safety backstop). */
 const TASK_STEP_CAP = 20;
@@ -39,6 +47,9 @@ interface ToolSpec {
  * - Accumulates per-step usage into ctx.usage (mutated in place via addUsage).
  * - Emits one RunStep per model call (kind:'model') and per tool execution
  *   batch (kind:'tool') via ctx.onStep.
+ * - M11: emits RunStreamEvents via ctx.sink for live CLI progress:
+ *     model-delta (via chatStream if available, else single onDelta of full content),
+ *     tool-call per tool execution.
  * - HARD STOP: if overBudget(ctx.usage, ctx.budget) at any point, stops the
  *   loop. Sets task.status='failed' (no result) or 'done' (partial result).
  * - On success: task.status='done', task.result=<text>, task.usage=<delta>.
@@ -52,12 +63,26 @@ export async function runTask(
     tools?: unknown[];
     budget: RunBudget;
     usage: RunUsage;
+    /** M11: optional StreamSink for live progress events. Defaults to nullSink. */
+    sink?: StreamSink;
     onStep: (s: RunStep) => void;
   },
 ): Promise<RunTask> {
   // Track per-task usage delta so we can set task.usage at end.
   let taskUsage: RunUsage = newUsage();
   let stepCount = 0;
+
+  // M11: resolve sink — default to nullSink when not provided.
+  const sink: StreamSink = ctx.sink ?? nullSink();
+
+  // Helper: emit a RunStreamEvent. Never throws.
+  function emitStream(event: Omit<RunStreamEvent, 'ts'>): void {
+    try {
+      sink({ ...event, ts: new Date().toISOString() });
+    } catch {
+      // Sinks must never crash the loop.
+    }
+  }
 
   // Helper: accumulate ONLY into the local per-task delta.
   //
@@ -162,10 +187,28 @@ export async function runTask(
 
       stepCount++;
 
-      // Call the model.
+      // M11: Call the model via chatStream when available for live token streaming.
+      // Falls back to client.chat() when chatStream is not implemented.
       let result: ChatResult;
       try {
-        result = await client.chat(messages, toolSpecs);
+        if (typeof client.chatStream === 'function') {
+          // Stream mode: onDelta emits model-delta events for each token chunk.
+          result = await client.chatStream(
+            messages,
+            toolSpecs,
+            (chunk: string) => {
+              if (chunk.length > 0) {
+                emitStream({ kind: 'model-delta', taskId: task.id, text: chunk });
+              }
+            },
+          );
+        } else {
+          // Non-streaming fallback: emit the full content as a single delta.
+          result = await client.chat(messages, toolSpecs);
+          if (result.content.length > 0) {
+            emitStream({ kind: 'model-delta', taskId: task.id, text: result.content });
+          }
+        }
       } catch (err) {
         task.status = 'failed';
         task.error = `Model call failed: ${String(err)}`;
@@ -210,6 +253,14 @@ export async function runTask(
       // Handle tool calls if present.
       if (result.toolCalls && result.toolCalls.length > 0 && useTools) {
         for (const tc of result.toolCalls) {
+          // M11: emit tool-call stream event before execution.
+          emitStream({
+            kind: 'tool-call',
+            taskId: task.id,
+            text: tc.name,
+            data: { name: tc.name, arguments: tc.arguments },
+          });
+
           let toolResultContent: string;
           const executor = toolExecutors.get(tc.name);
 

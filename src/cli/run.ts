@@ -2,8 +2,8 @@
  * `ashlr run` and `ashlr runs` CLI commands.
  *
  * `ashlr run "<goal>" [--budget N] [--max-steps N] [--parallel N]
- *   [--engine builtin|ashlrcode|aw] [--allow-cloud] [--no-tools]
- *   [--resume <id>] [--json] [--no-memory]`
+ *   [--engine builtin|ashlrcode|aw|claude] [--allow-cloud] [--no-tools]
+ *   [--resume <id>] [--json] [--no-memory] [--stream|--no-stream]`
  *
  * Subcommand `ashlr run show <id>` prints a saved run.
  *
@@ -24,7 +24,7 @@ import {
 } from '../core/run/orchestrator.js';
 
 // ---------------------------------------------------------------------------
-// Lazy imports — core/run modules are built by other M4 agents
+// Lazy imports — core/run modules are built by other M4/M11 agents
 // ---------------------------------------------------------------------------
 
 async function importOrchestrator() {
@@ -39,6 +39,26 @@ async function importConfig() {
   return import('../core/config.js') as Promise<{
     loadConfig: () => import('../core/types.js').AshlrConfig;
   }>;
+}
+
+type StreamingMod = {
+  nullSink: () => (e: import('../core/types.js').RunStreamEvent) => void;
+  makeCliSink: (opts: { json: boolean }) => (e: import('../core/types.js').RunStreamEvent) => void;
+};
+
+/**
+ * Lazily import streaming.ts (M11 — written by streaming agent).
+ * Falls back gracefully: if the module isn't present yet, returns stubs
+ * so the CLI can still run without the streaming module landing first.
+ */
+async function importStreaming(): Promise<StreamingMod> {
+  try {
+    return await import('../core/run/streaming.js') as StreamingMod;
+  } catch {
+    // streaming.ts not yet present (other agent hasn't landed it); return stubs
+    const noop = () => (_e: import('../core/types.js').RunStreamEvent) => { /* no-op */ };
+    return { nullSink: noop, makeCliSink: noop };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -75,6 +95,10 @@ interface ParsedRunArgs {
   noMemory: boolean;
   resumeId?: string;
   json: boolean;
+  /** Whether to stream live progress. Defaults to true when stderr is a TTY. */
+  stream: boolean;
+  /** Enable the optional cheap model verification check after each task (M11). */
+  verifyModel: boolean;
   usageError?: string;
 }
 
@@ -89,10 +113,12 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
         noTools: false,
         noMemory: false,
         json: false,
+        stream: false,
+        verifyModel: false,
         usageError: 'Usage: ashlr run show <id>',
       };
     }
-    return { subcommand: 'show', showId, allowCloud: false, noTools: false, noMemory: false, json: false };
+    return { subcommand: 'show', showId, allowCloud: false, noTools: false, noMemory: false, json: false, stream: false, verifyModel: false };
   }
 
   const result: ParsedRunArgs = {
@@ -101,13 +127,23 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
     noTools: false,
     noMemory: false,
     json: false,
+    // Default: stream ON when stderr is a TTY (overridden by --stream/--no-stream)
+    stream: Boolean(process.stderr.isTTY),
+    // Default: heuristic-only verification (no extra model calls). --verify-model enables it.
+    verifyModel: false,
   };
 
   let i = 0;
   while (i < args.length) {
     const arg = args[i]!;
 
-    if (arg === '--allow-cloud') {
+    if (arg === '--stream') {
+      result.stream = true;
+      i++;
+    } else if (arg === '--no-stream') {
+      result.stream = false;
+      i++;
+    } else if (arg === '--allow-cloud') {
       result.allowCloud = true;
       i++;
     } else if (arg === '--no-tools') {
@@ -118,6 +154,9 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       i++;
     } else if (arg === '--json') {
       result.json = true;
+      i++;
+    } else if (arg === '--verify-model') {
+      result.verifyModel = true;
       i++;
     } else if (arg === '--budget') {
       const parsed = parsePositiveInt('budget', args[++i]);
@@ -136,8 +175,8 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       i++;
     } else if (arg === '--engine') {
       const val = args[++i];
-      if (!val || !['builtin', 'ashlrcode', 'aw'].includes(val)) {
-        result.usageError = `--engine requires one of: builtin, ashlrcode, aw; got: ${val ?? '(missing)'}`;
+      if (!val || !['builtin', 'ashlrcode', 'aw', 'claude'].includes(val)) {
+        result.usageError = `--engine requires one of: builtin, ashlrcode, aw, claude; got: ${val ?? '(missing)'}`;
         return result;
       }
       result.engine = val;
@@ -177,8 +216,8 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
   if (!result.goal && !result.resumeId) {
     result.usageError =
       'Usage: ashlr run "<goal>" [--budget N] [--max-steps N] [--parallel N]\n' +
-      '              [--engine builtin|ashlrcode|aw] [--allow-cloud] [--no-tools]\n' +
-      '              [--resume <id>] [--json] [--no-memory]\n' +
+      '              [--engine builtin|ashlrcode|aw|claude] [--allow-cloud] [--no-tools]\n' +
+      '              [--resume <id>] [--json] [--no-memory] [--stream|--no-stream] [--verify-model]\n' +
       '       ashlr run show <id>';
   }
 
@@ -422,6 +461,7 @@ export async function cmdRun(args: string[]): Promise<number> {
     engine:     parsed.engine,
     json:       parsed.json,
     resumeId:   parsed.resumeId,
+    verifyModel: parsed.verifyModel,
   };
 
   if (parsed.budget !== undefined || parsed.maxSteps !== undefined) {
@@ -502,13 +542,28 @@ export async function cmdRun(args: string[]): Promise<number> {
   // Step callback — accumulate tasks map for goal lookup
   const taskGoalMap = new Map<string, string>();
 
+  // M11: build a StreamSink for live progress rendering.
+  // makeCliSink renders to stderr when --json (stdout stays clean JSON);
+  // nullSink is used when --no-stream or non-TTY and flag not explicitly set.
+  // Import is lazy/fault-tolerant — stubs returned when streaming.ts not yet present.
+  type StreamSink = (e: import('../core/types.js').RunStreamEvent) => void;
+  const streaming = await importStreaming();
+  const sink: StreamSink = parsed.stream
+    ? streaming.makeCliSink({ json: parsed.json })
+    : streaming.nullSink();
+
   // Wire CLI progress via an optional __onStep side-channel on RunOptions:
   // the orchestrator calls it per step if present, else we just print the
   // final summary. Kept off the typed contract (extra props ignored at runtime).
+  // M11: also attach the StreamSink as __sink so the orchestrator/agent-loop
+  // can emit RunStreamEvents for live streaming (same escape-hatch pattern).
   const optsWithHook = opts as RunOptions & {
     __onStep?: (step: RunStep, tasks: RunTask[]) => void;
+    __sink?: StreamSink;
     noMemory?: boolean;
   };
+
+  optsWithHook.__sink = sink;
 
   optsWithHook.__onStep = (step: RunStep, tasks: RunTask[]) => {
     // Keep task goal map updated
@@ -660,13 +715,15 @@ function printRunHelp(): void {
     ['--budget N',              `Max total tokens (in+out) before aborting (default: ${DEFAULT_MAX_TOKENS}).`],
     ['--max-steps N',           `Max agent steps before aborting (default: ${DEFAULT_MAX_STEPS}).`],
     ['--parallel N',            `Max independent tasks to run concurrently (default: ${DEFAULT_PARALLEL}).`],
-    ['--engine <e>',            `Execution engine: builtin (default), ashlrcode, or aw.`],
+    ['--engine <e>',            `Execution engine: builtin (default), ashlrcode, aw, or claude.`],
     ['--model <name>',          `Local model to use (default: smallest/fastest; or set ASHLR_MODEL).`],
     ['--allow-cloud',           `Allow cloud provider if no local is available (requires API key).`],
     ['--no-tools',              `Disable MCP tool loading (faster; for simple goals).`],
     ['--no-memory',             `Skip genome recall injection into sub-agent prompts.`],
     ['--resume <id>',           `Resume a previously aborted/incomplete run.`],
     ['--json',                  `Emit RunState JSON on stdout; progress goes to stderr.`],
+    ['--stream',                `Stream live progress as it happens (default: on when stderr is a TTY).`],
+    ['--no-stream',             `Disable live streaming; only print the final summary.`],
   ];
 
   const optW = Math.max(...opts.map(([o]) => o.length));

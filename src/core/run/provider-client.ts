@@ -125,6 +125,66 @@ async function fetchWithTimeout(
   }
 }
 
+/**
+ * Open a streaming connection whose AbortController stays alive AFTER the
+ * response headers arrive, so the caller can keep it as an idle-watchdog
+ * over the body read loop (fetchWithTimeout clears its timer the instant
+ * headers resolve, leaving the body read unbounded — see the streaming loops).
+ *
+ * The connect timer bounds time-to-headers; the returned controller lets the
+ * read loop abort a stalled/trickling body. Caller MUST clear the connect timer
+ * (clearConnectTimer) once headers are in, then arm its own idle watchdog.
+ */
+async function fetchStream(
+  url: string,
+  init: RequestInit,
+  connectTimeoutMs: number,
+): Promise<{ response: Response; controller: AbortController; clearConnectTimer: () => void }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), connectTimeoutMs);
+  let cleared = false;
+  const clearConnectTimer = () => {
+    if (!cleared) {
+      cleared = true;
+      clearTimeout(timer);
+    }
+  };
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    return { response, controller, clearConnectTimer };
+  } catch (err) {
+    clearConnectTimer();
+    throw err;
+  }
+}
+
+/**
+ * Read one chunk from a stream reader under a per-read idle deadline.
+ * If no bytes arrive within idleMs, aborts the underlying request (so the
+ * read rejects) and surfaces a timeout error. This bounds the ONLY otherwise
+ * unbounded wait in M11: a provider that returns 200 headers then stalls
+ * mid-stream (or never sends done). On timeout the caller's catch falls back
+ * to non-streaming chat() (itself FETCH_TIMEOUT-bounded).
+ */
+async function readWithIdleTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  controller: AbortController,
+  idleMs: number,
+): Promise<{ done: boolean; value?: Uint8Array }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const idle = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`stream idle timeout after ${idleMs}ms`));
+    }, idleMs);
+  });
+  try {
+    return await Promise.race([reader.read(), idle]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Ollama chat client
 // ---------------------------------------------------------------------------
@@ -154,6 +214,29 @@ function parseOllamaToolCalls(
   return parsed.length > 0 ? parsed : undefined;
 }
 
+/**
+ * Build Ollama messages array from ChatMessage[].
+ * Reused by both chat() and chatStream().
+ */
+function toOllamaMessages(
+  messages: ChatMessage[],
+): Record<string, unknown>[] {
+  return messages.map((m) => {
+    if (m.role === 'tool') {
+      return {
+        role: 'tool' as const,
+        content: m.content,
+        tool_call_id: m.toolCallId,
+        name: m.name,
+      };
+    }
+    return { role: m.role, content: m.content };
+  });
+}
+
+// Streaming timeout is longer — the first token may take a few seconds.
+const STREAM_TIMEOUT_MS = 60_000; // 60s for streaming requests
+
 function buildOllamaClient(
   baseUrl: string,
   model: string,
@@ -168,17 +251,7 @@ function buildOllamaClient(
     async chat(messages: ChatMessage[], tools?: unknown[]): Promise<ChatResult> {
       // Map ChatMessage roles to Ollama format
       // Ollama uses role: 'system'|'user'|'assistant'|'tool'
-      const ollamaMessages = messages.map((m) => {
-        if (m.role === 'tool') {
-          return {
-            role: 'tool' as const,
-            content: m.content,
-            tool_call_id: m.toolCallId,
-            name: m.name,
-          };
-        }
-        return { role: m.role, content: m.content };
-      });
+      const ollamaMessages = toOllamaMessages(messages);
 
       const body: Record<string, unknown> = {
         model,
@@ -238,6 +311,154 @@ function buildOllamaClient(
         usage: { tokensIn, tokensOut },
       };
     },
+
+    async chatStream(
+      messages: ChatMessage[],
+      tools: unknown[] | undefined,
+      onDelta: (t: string) => void,
+    ): Promise<ChatResult> {
+      // Attempt streaming; fall back to chat() on any error.
+      try {
+        const ollamaMessages = toOllamaMessages(messages);
+
+        const body: Record<string, unknown> = {
+          model,
+          messages: ollamaMessages,
+          stream: true,
+        };
+
+        if (supportsTools && tools && tools.length > 0) {
+          body['tools'] = tools;
+        }
+
+        let response: Response;
+        let streamController: AbortController;
+        try {
+          const opened = await fetchStream(
+            chatUrl,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            },
+            STREAM_TIMEOUT_MS,
+          );
+          response = opened.response;
+          streamController = opened.controller;
+          // Headers are in; stop the connect timer. The read loop below arms its
+          // own per-read idle watchdog via streamController so a stalled body
+          // can't hang indefinitely.
+          opened.clearConnectTimer();
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(`Ollama stream fetch failed: ${msg}`);
+        }
+
+        if (!response.ok) {
+          const errText = await response.text().catch(() => '');
+          throw new Error(`Ollama stream HTTP ${response.status}: ${errText}`);
+        }
+
+        if (!response.body) {
+          throw new Error('Ollama stream response has no body');
+        }
+
+        // Parse NDJSON: each line is a complete JSON object.
+        // Accumulate content, tool_calls from the last message chunk, and usage
+        // from the final done=true line.
+        let accContent = '';
+        let finalMessage: Record<string, unknown> = {};
+        let tokensIn = 0;
+        let tokensOut = 0;
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let lineBuffer = '';
+
+        try {
+          while (true) {
+            const { done, value } = await readWithIdleTimeout(
+              reader,
+              streamController,
+              STREAM_TIMEOUT_MS,
+            );
+            if (done) break;
+
+            lineBuffer += decoder.decode(value, { stream: true });
+
+            // Process all complete lines (delimited by '\n')
+            let nlIdx: number;
+            while ((nlIdx = lineBuffer.indexOf('\n')) !== -1) {
+              const line = lineBuffer.slice(0, nlIdx).trim();
+              lineBuffer = lineBuffer.slice(nlIdx + 1);
+
+              if (!line) continue;
+
+              let chunk: Record<string, unknown>;
+              try {
+                chunk = JSON.parse(line) as Record<string, unknown>;
+              } catch {
+                // Skip malformed lines
+                continue;
+              }
+
+              const chunkMsg = (chunk['message'] ?? {}) as Record<string, unknown>;
+              const delta =
+                typeof chunkMsg['content'] === 'string' ? chunkMsg['content'] : '';
+
+              if (delta) {
+                accContent += delta;
+                onDelta(delta);
+              }
+
+              // The final chunk (done:true) carries usage counters and the
+              // complete message (including any tool_calls).
+              if (chunk['done'] === true) {
+                finalMessage = chunkMsg;
+
+                const promptEval =
+                  typeof chunk['prompt_eval_count'] === 'number'
+                    ? chunk['prompt_eval_count']
+                    : 0;
+                const evalCount =
+                  typeof chunk['eval_count'] === 'number' ? chunk['eval_count'] : 0;
+
+                tokensIn =
+                  promptEval > 0
+                    ? promptEval
+                    : estimateTokens(messages.map((m) => m.content).join(' '));
+                tokensOut = evalCount > 0 ? evalCount : estimateTokens(accContent);
+              }
+            }
+          }
+        } finally {
+          reader.releaseLock();
+        }
+
+        // Estimate usage if we never saw a done line
+        if (tokensIn === 0) {
+          tokensIn = estimateTokens(messages.map((m) => m.content).join(' '));
+        }
+        if (tokensOut === 0) {
+          tokensOut = estimateTokens(accContent);
+        }
+
+        const toolCalls = parseOllamaToolCalls(finalMessage);
+
+        return {
+          content: accContent,
+          toolCalls,
+          usage: { tokensIn, tokensOut },
+        };
+      } catch {
+        // Streaming failed — fall back to non-streaming chat() and emit as one delta.
+        const result = await this.chat(messages, tools);
+        if (result.content) {
+          onDelta(result.content);
+        }
+        return result;
+      }
+    },
   };
 }
 
@@ -277,6 +498,26 @@ function parseOpenAIToolCalls(
   return parsed.length > 0 ? parsed : undefined;
 }
 
+/**
+ * Build OpenAI-compat messages array from ChatMessage[].
+ * Reused by both chat() and chatStream() in the LM Studio client.
+ */
+function toOpenAIMessages(
+  messages: ChatMessage[],
+): Record<string, unknown>[] {
+  return messages.map((m) => {
+    if (m.role === 'tool') {
+      return {
+        role: 'tool' as const,
+        content: m.content,
+        tool_call_id: m.toolCallId ?? '',
+        name: m.name,
+      };
+    }
+    return { role: m.role, content: m.content };
+  });
+}
+
 function buildLmStudioClient(
   baseUrl: string,
   model: string,
@@ -290,17 +531,7 @@ function buildLmStudioClient(
 
     async chat(messages: ChatMessage[], tools?: unknown[]): Promise<ChatResult> {
       // Map ChatMessage roles to OpenAI shape
-      const openaiMessages = messages.map((m) => {
-        if (m.role === 'tool') {
-          return {
-            role: 'tool' as const,
-            content: m.content,
-            tool_call_id: m.toolCallId ?? '',
-            name: m.name,
-          };
-        }
-        return { role: m.role, content: m.content };
-      });
+      const openaiMessages = toOpenAIMessages(messages);
 
       const body: Record<string, unknown> = {
         model,
@@ -365,6 +596,202 @@ function buildLmStudioClient(
         toolCalls,
         usage: { tokensIn, tokensOut },
       };
+    },
+
+    async chatStream(
+      messages: ChatMessage[],
+      tools: unknown[] | undefined,
+      onDelta: (t: string) => void,
+    ): Promise<ChatResult> {
+      // Attempt SSE streaming; fall back to chat() on any error.
+      try {
+        const openaiMessages = toOpenAIMessages(messages);
+
+        const body: Record<string, unknown> = {
+          model,
+          messages: openaiMessages,
+          stream: true,
+        };
+
+        if (supportsTools && tools && tools.length > 0) {
+          body['tools'] = tools;
+          body['tool_choice'] = 'auto';
+        }
+
+        let response: Response;
+        let streamController: AbortController;
+        try {
+          const opened = await fetchStream(
+            chatUrl,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            },
+            STREAM_TIMEOUT_MS,
+          );
+          response = opened.response;
+          streamController = opened.controller;
+          // Headers are in; stop the connect timer. The read loop below arms its
+          // own per-read idle watchdog via streamController so a stalled body
+          // can't hang indefinitely.
+          opened.clearConnectTimer();
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(`LM Studio stream fetch failed: ${msg}`);
+        }
+
+        if (!response.ok) {
+          const errText = await response.text().catch(() => '');
+          throw new Error(`LM Studio stream HTTP ${response.status}: ${errText}`);
+        }
+
+        if (!response.body) {
+          throw new Error('LM Studio stream response has no body');
+        }
+
+        // Parse SSE: lines prefixed with "data: "; "[DONE]" marks end.
+        // Accumulate content deltas; collect tool_call fragments from the last
+        // non-[DONE] chunk; extract usage from the final chunk when present.
+        let accContent = '';
+        // tool_calls may arrive as fragments across SSE chunks; accumulate index-keyed.
+        const toolCallFragments: Record<
+          number,
+          { id: string; name: string; argsStr: string }
+        > = {};
+        let tokensIn = 0;
+        let tokensOut = 0;
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let lineBuffer = '';
+
+        try {
+          while (true) {
+            const { done, value } = await readWithIdleTimeout(
+              reader,
+              streamController,
+              STREAM_TIMEOUT_MS,
+            );
+            if (done) break;
+
+            lineBuffer += decoder.decode(value, { stream: true });
+
+            let nlIdx: number;
+            while ((nlIdx = lineBuffer.indexOf('\n')) !== -1) {
+              const raw = lineBuffer.slice(0, nlIdx).trim();
+              lineBuffer = lineBuffer.slice(nlIdx + 1);
+
+              // SSE lines either start with "data: " or are blank/comment lines.
+              if (!raw.startsWith('data:')) continue;
+
+              const payload = raw.slice(5).trim(); // strip "data:" prefix
+              if (payload === '[DONE]') continue;
+
+              let chunk: Record<string, unknown>;
+              try {
+                chunk = JSON.parse(payload) as Record<string, unknown>;
+              } catch {
+                continue;
+              }
+
+              // Extract usage when present (some providers send on the last chunk).
+              const usageRaw = chunk['usage'] as Record<string, unknown> | undefined;
+              if (usageRaw) {
+                const pt =
+                  typeof usageRaw['prompt_tokens'] === 'number'
+                    ? usageRaw['prompt_tokens']
+                    : 0;
+                const ct =
+                  typeof usageRaw['completion_tokens'] === 'number'
+                    ? usageRaw['completion_tokens']
+                    : 0;
+                if (pt > 0) tokensIn = pt;
+                if (ct > 0) tokensOut = ct;
+              }
+
+              const choices = Array.isArray(chunk['choices']) ? chunk['choices'] : [];
+              const firstChoice = (choices[0] ?? {}) as Record<string, unknown>;
+              const delta = (firstChoice['delta'] ?? {}) as Record<string, unknown>;
+
+              // Accumulate content delta
+              const contentChunk =
+                typeof delta['content'] === 'string' ? delta['content'] : '';
+              if (contentChunk) {
+                accContent += contentChunk;
+                onDelta(contentChunk);
+              }
+
+              // Accumulate tool_call fragments (OpenAI streaming splits them across chunks)
+              if (Array.isArray(delta['tool_calls'])) {
+                for (const tc of delta['tool_calls'] as unknown[]) {
+                  if (typeof tc !== 'object' || tc === null) continue;
+                  const t = tc as Record<string, unknown>;
+                  const idx = typeof t['index'] === 'number' ? t['index'] : 0;
+                  if (!toolCallFragments[idx]) {
+                    toolCallFragments[idx] = { id: '', name: '', argsStr: '' };
+                  }
+                  if (typeof t['id'] === 'string') {
+                    toolCallFragments[idx].id = t['id'];
+                  }
+                  const fn = t['function'] as Record<string, unknown> | undefined;
+                  if (fn) {
+                    if (typeof fn['name'] === 'string') {
+                      toolCallFragments[idx].name += fn['name'];
+                    }
+                    if (typeof fn['arguments'] === 'string') {
+                      toolCallFragments[idx].argsStr += fn['arguments'];
+                    }
+                  }
+                }
+              }
+            }
+          }
+        } finally {
+          reader.releaseLock();
+        }
+
+        // Fill in usage estimates if not reported by the server
+        if (tokensIn === 0) {
+          tokensIn = estimateTokens(messages.map((m) => m.content).join(' '));
+        }
+        if (tokensOut === 0) {
+          tokensOut = estimateTokens(accContent);
+        }
+
+        // Reconstruct tool calls from accumulated fragments
+        const toolCalls =
+          Object.keys(toolCallFragments).length > 0
+            ? Object.entries(toolCallFragments).map(([, frag]) => {
+                let args: unknown = frag.argsStr;
+                if (frag.argsStr) {
+                  try {
+                    args = JSON.parse(frag.argsStr) as unknown;
+                  } catch {
+                    // keep as raw string if parse fails
+                  }
+                }
+                return {
+                  id: frag.id || `call_${Math.random().toString(36).slice(2)}`,
+                  name: frag.name,
+                  arguments: args,
+                };
+              })
+            : undefined;
+
+        return {
+          content: accContent,
+          toolCalls,
+          usage: { tokensIn, tokensOut },
+        };
+      } catch {
+        // Streaming failed — fall back to non-streaming chat() and emit as one delta.
+        const result = await this.chat(messages, tools);
+        if (result.content) {
+          onDelta(result.content);
+        }
+        return result;
+      }
     },
   };
 }

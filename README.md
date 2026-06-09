@@ -116,21 +116,25 @@ ashlr mcp list                  # see all servers + tool counts (env values reda
 
 Give `ashlr run` a goal; it decomposes it into a task-graph (DAG), runs independent tasks in parallel on your local model, and synthesizes a final answer — all within hard budget and step guardrails. **Cloud is off by default** — `ashlr run` refuses to call a cloud endpoint unless you pass `--allow-cloud` and the key is present.
 
+**Watchable, robust runs (M11).** `ashlr run` now streams progress live as it happens: task starts, model token deltas, tool calls, retries, and verification verdicts all appear in real time on stderr. Each task is retried on transient failures with bounded exponential back-off, then verified against a cheap heuristic (and optionally a model check) before the result is accepted — all under the global budget ceiling. Engine delegation to `claude`, `aw`, or `ashlrcode` uses each tool's actual CLI (confirmed at build time); when `phantom` is enabled, subprocess spawns are wrapped via `phantom exec --` so secrets are injected by Phantom rather than the hub.
+
 | Command | What it does |
 |---|---|
 | `ashlr run "<goal>" [flags]` | Plan -> parallel fan-out -> synthesize. Resumable and persisted to `~/.ashlr/runs/`. |
 | `ashlr run show <id>` | Print the full `RunState` for a past run. |
 | `ashlr runs [--json]` | List all past runs, newest first. |
 
-Key flags: `--budget N` (default 32000 tokens) · `--max-steps N` (default 50) · `--parallel N` (default 3) · `--engine builtin\|ashlrcode\|aw` · `--allow-cloud` · `--no-tools` · `--no-memory` · `--resume <id>`.
+Key flags: `--budget N` (default 32000 tokens) · `--max-steps N` (default 50) · `--parallel N` (default 3) · `--engine builtin\|ashlrcode\|aw\|claude` · `--stream` / `--no-stream` (default stream on when stderr is a TTY) · `--allow-cloud` · `--no-tools` · `--no-memory` · `--resume <id>`.
 
 ```sh
 ashlr run "Summarize the last 5 commits in ashlr-hub and flag risky changes"
 ashlr run "Audit the MCP registry for duplicate tool names" --budget 8000 --parallel 4
+ashlr run "Refactor the config module" --engine claude   # delegate to Claude Code
+ashlr run "Generate test stubs" --no-stream --json       # clean JSON stdout, no live stream
 ashlr runs                      # list past runs with cost + status
 ```
 
-Budget and step limits are **hard ceilings** — exceeding either aborts immediately, preserves all partial results, and lets you `--resume`.
+Budget and step limits are **hard ceilings** — exceeding either aborts immediately, preserves all partial results, and lets you `--resume`. Retries are bounded; the verification step never re-runs a task that would push usage over the budget.
 
 ### Observe
 

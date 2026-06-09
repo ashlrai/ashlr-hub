@@ -8,6 +8,63 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M11: Watchable, Robust Runs
+
+### Added
+- **Hardened engine delegation** (`src/core/run/engines.ts`): replaced the guessed
+  `['--goal', goal]` spawn with per-engine adapter functions that emit the real,
+  confirmed CLI argv for each tool. `buildEngineCommand` returns `null` for
+  `builtin` (local loop) or an `EngineCommand` with the exact invocation:
+  - `claude` (Claude Code): `claude -p "<goal>" --model <M> --output-format json`
+    (JSON carry usage + cost automatically).
+  - `aw` (ashlr-workbench): `aw auto "<goal>" --cwd <dir>` plus `--model <M>` when
+    a model is set.
+  - `ashlrcode` (absent on this host): `ac --goal "<goal>"`; absence is detected via
+    `engineInstalled` and routes to the builtin loop with a clear message.
+  `spawnEngine` applies `withToolEnv(cfg)` to every spawn and wraps via
+  `phantom exec --` when `cfg.phantom?.enabled` and `phantom` is on PATH.
+  `phantomWrap` is exported for unit testing the exact argv without real delegation.
+- **Streaming output** (`src/core/run/streaming.ts`): `RunStreamEvent` (with kinds
+  `task-start`, `model-delta`, `tool-call`, `task-done`, `retry`, `verify`, `log`)
+  flows from the agent loop to the CLI in real time. `makeCliSink` renders a live,
+  human-readable stream to **stderr** (keeping stdout clean for `--json`);
+  `nullSink` is a no-op for programmatic consumers. `StreamSink` type exported.
+- **`--stream` / `--no-stream` flags** (`src/cli/run.ts`): streaming defaults on
+  when stderr is a TTY; `--no-stream` suppresses live output. `--json` keeps stdout
+  clean JSON while the event stream goes to stderr. All existing flags preserved.
+- **Retry + verification loop** (`src/core/run/retry.ts`, `src/core/run/verify.ts`):
+  `withRetry` wraps any async fn with bounded exponential back-off
+  (`baseDelayMs × 2^(attempt-1)`, capped at `maxAttempts`; caller supplies
+  `isRetryable`). `verifyTask` checks a completed task result with a cheap
+  heuristic first; if the budget allows, it optionally asks the model for a
+  verdict — but never exceeds the global budget ceiling. `VerifyVerdict` signals
+  `ok`, `reason`, and `method` (`'heuristic'` or `'model'`).
+- **Phantom-exec proxy** (`src/core/run/engines.ts` `phantomWrap`): when
+  `cfg.phantom?.enabled` is true and `phantom` is installed, all engine spawns are
+  wrapped as `phantom exec -- <bin> [...args]` so secrets are injected by Phantom
+  rather than by the hub. Best-effort: absent or disabled Phantom falls back to
+  direct spawn. Secret values are never logged or injected into the env allowlist.
+- New types in `src/core/types.ts`: `RunStreamEvent`, `RetryPolicy`,
+  `VerifyVerdict`, `EngineId`, `EngineCommand`.
+- `ProviderClient` extended with optional `chatStream?(messages, tools, onDelta)`
+  for Ollama (NDJSON `/api/chat stream:true`) and LM Studio (SSE
+  `/v1/chat/completions stream:true`); both fall back to `chat()` when streaming
+  is unavailable. Callers guard with `?.`.
+
+### Changed
+- `src/core/run/orchestrator.ts` updated to consume `StreamSink` and forward
+  events from the agent loop to the CLI sink; engine delegation paths updated to
+  use `buildEngineCommand` / `spawnEngine` from `engines.ts`.
+- `src/cli/run.ts` wires `makeCliSink` (TTY) or `nullSink` (non-TTY / `--no-stream`)
+  and passes it through to the orchestrator.
+
+### Fixed
+- Engine delegation previously passed a guessed argv to spawned sub-agents; the
+  adapter layer now asserts exact argv in unit tests (no real delegated runs during
+  build or CI).
+
+---
+
 ## [Unreleased] — M10: Ecosystem Cohesion
 
 ### Added

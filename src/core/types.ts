@@ -393,6 +393,14 @@ export interface RunOptions {
   json?: boolean;
   /** Disable genome recall injection into the sub-agent system prompt (M7). */
   noMemory?: boolean;
+  /**
+   * Enable the optional cheap MODEL verification check after each builtin task
+   * (M11). Default false → heuristic-only verification (no extra model calls,
+   * preserving deterministic usage accounting). When true, verifyTask may make
+   * one cheap model call per task plus one verify-driven retry, all bounded by
+   * the global budget.
+   */
+  verifyModel?: boolean;
 }
 
 /** A single message in a chat exchange with a provider. */
@@ -425,6 +433,22 @@ export interface ProviderClient {
   supportsTools: boolean;
   /** Send a chat exchange (optionally with tool specs) and get a result. */
   chat(messages: ChatMessage[], tools?: unknown[]): Promise<ChatResult>;
+  /**
+   * Streaming chat (M11): invoke `onDelta(textChunk)` for each incremental
+   * content token, resolving to the SAME ChatResult shape as `chat()`
+   * (final content + toolCalls + usage). Implementations fall back to `chat()`
+   * (emitting the full content via a single `onDelta`) when the provider/model
+   * does not support streaming or streaming errors.
+   *
+   * Optional at the type level so the M11 contract typechecks before the
+   * provider agent implements it; the provider agent makes it concrete on both
+   * the Ollama and LM Studio clients (callers must `?.`-guard until then).
+   */
+  chatStream?(
+    messages: ChatMessage[],
+    tools: unknown[] | undefined,
+    onDelta: (t: string) => void,
+  ): Promise<ChatResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -725,3 +749,59 @@ export interface LearnInput {
  * names, paths, and flags. Never carries secret VALUES (phantom owns secrets).
  */
 export type ToolEnv = Record<string, string>;
+
+// ---------------------------------------------------------------------------
+// M11: watchable, robust agent foundation (streaming + retry + verify +
+// hardened engine delegation + phantom-exec) contract
+// ---------------------------------------------------------------------------
+
+/**
+ * A single live event emitted during a run so the CLI can stream progress to
+ * the user as it happens (model deltas, task lifecycle, tool calls, retries,
+ * verification, free-form logs) instead of only printing at the end.
+ *
+ * METADATA + USER-FACING TEXT ONLY — never carries secret values.
+ */
+export interface RunStreamEvent {
+  /** What kind of event this is. */
+  kind: 'task-start' | 'model-delta' | 'tool-call' | 'task-done' | 'retry' | 'verify' | 'log';
+  /** Id of the task this event belongs to, when applicable. */
+  taskId?: string;
+  /** Human-readable / model-delta text payload, when applicable. */
+  text?: string;
+  /** Structured payload (e.g. tool args, verdict, usage), when applicable. */
+  data?: unknown;
+  /** ISO timestamp the event was emitted. */
+  ts: string;
+}
+
+/** Bounded retry policy for a single task. Caps attempts and backoff base. */
+export interface RetryPolicy {
+  /** Maximum number of attempts (>=1; total tries including the first). */
+  maxAttempts: number;
+  /** Base delay in ms for exponential backoff between attempts. */
+  baseDelayMs: number;
+}
+
+/** Verdict from verifying that a task result plausibly satisfies its goal. */
+export interface VerifyVerdict {
+  /** Whether the result is judged to satisfy the task goal. */
+  ok: boolean;
+  /** One-line human-readable reason for the verdict. */
+  reason: string;
+  /** How the verdict was reached. */
+  method: 'heuristic' | 'model';
+}
+
+/** The set of engines `ashlr run` can delegate to (or run locally). */
+export type EngineId = 'builtin' | 'ashlrcode' | 'aw' | 'claude';
+
+/** A fully-resolved external engine invocation (exact argv + optional cwd). */
+export interface EngineCommand {
+  /** Executable to spawn (e.g. 'claude', 'aw', 'ac', or 'phantom' when wrapped). */
+  bin: string;
+  /** Exact argument vector passed to `bin`. */
+  args: string[];
+  /** Working directory for the spawned process, when set. */
+  cwd?: string;
+}

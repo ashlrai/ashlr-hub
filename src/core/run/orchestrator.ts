@@ -1,5 +1,5 @@
 /**
- * core/run/orchestrator.ts — M4 local-first agent orchestrator.
+ * core/run/orchestrator.ts — M4/M11 local-first agent orchestrator.
  *
  * Responsibilities:
  *  - planGoal:  single chat call -> RunTask[] DAG (1-6 tasks, deps valid).
@@ -15,26 +15,40 @@
  * Gated on cfg.genome?.injectOnRun (default true) and opts.noMemory (opt-out).
  * Never throws — if recall fails or is empty, the run proceeds unchanged.
  *
+ * M11 additions:
+ *  - HARDENED ENGINE DELEGATION: buildEngineCommand + spawnEngine (engines.ts)
+ *    replace the guessed ['--goal',goal] spawn. Per-engine adapters produce
+ *    correct argv; phantom-exec wraps when cfg.phantom?.enabled.
+ *  - STREAMING: StreamSink threaded from CLI (__sink on opts) through runGoal
+ *    → runTask → agent loop. Events: task-start/model-delta/tool-call/task-done/
+ *    retry/verify/log. nullSink used when absent.
+ *  - RETRY: per-task withRetry (bounded, budget-aware) on tool/transient failures.
+ *  - VERIFY: verifyTask after each builtin task; one retry on !ok if budget allows;
+ *    else annotates result with [needs-attention].
+ *
  * Safety guardrails (binding):
  *  - Never writes outside ~/.ashlr/runs/ — no repos/Desktop, no git.
  *  - Budget is a HARD ceiling (aborts with partial results preserved).
  *  - Cloud endpoints require explicit allowCloud + key present (delegated to getActiveClient).
  *  - Zero new runtime deps (Node builtins + @modelcontextprotocol/sdk only).
  *  - Genome recall is local-only (keyword/TF-IDF, optional local Ollama embeddings).
+ *  - Engine delegation is a single bounded spawn — never recursive.
  */
 
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 
 import type {
   AshlrConfig,
+  EngineId,
   RunTask,
   RunTaskStatus,
   RunState,
   RunOptions,
   RunStep,
+  RunStreamEvent,
   ProviderClient,
   ChatMessage,
 } from '../types.js';
@@ -43,6 +57,11 @@ import { getActiveClient } from './provider-client.js';
 import { newUsage, overBudget, estCostUsd } from './budget.js';
 import { runTask } from './agent-loop.js';
 import { withToolEnv } from '../env-bridge.js';
+import { buildEngineCommand, engineInstalled, spawnEngine } from './engines.js';
+import { nullSink } from './streaming.js';
+import type { StreamSink } from './streaming.js';
+import { withRetry } from './retry.js';
+import { verifyTask } from './verify.js';
 
 // ---------------------------------------------------------------------------
 // Constants / defaults
@@ -518,6 +537,7 @@ function reportToPulse(pulseUrl: string, state: RunState): void {
 /**
  * Check if a binary is installed by probing PATH via `which`.
  * Uses the top-level execFileSync import (Node builtin, ESM-safe).
+ * Kept for non-engine-id fallback detection (e.g. arbitrary string engines).
  */
 function isBinaryInstalled(name: string): boolean {
   try {
@@ -527,6 +547,20 @@ function isBinaryInstalled(name: string): boolean {
     return false;
   }
 }
+
+/**
+ * Emit a RunStreamEvent via the sink. Never throws.
+ */
+function emit(sink: StreamSink, event: Omit<RunStreamEvent, 'ts'>): void {
+  try {
+    sink({ ...event, ts: new Date().toISOString() });
+  } catch {
+    // Sinks must never crash the run.
+  }
+}
+
+/** Known engine ids (typed subset). */
+const KNOWN_ENGINE_IDS: ReadonlySet<string> = new Set(['builtin', 'ashlrcode', 'aw', 'claude']);
 
 // ---------------------------------------------------------------------------
 // Main: runGoal
@@ -564,6 +598,17 @@ export async function runGoal(
         }
       : undefined;
 
+  // M11: read __sink (StreamSink) from opts. The CLI attaches it for live progress.
+  // Falls back to nullSink() when absent (non-TTY, tests, --no-stream).
+  const rawSink = (opts as RunOptions & { __sink?: StreamSink }).__sink;
+  const sink: StreamSink = typeof rawSink === 'function' ? rawSink : nullSink();
+
+  // M11: opt-in model verification. Default OFF → the per-task verify step is
+  // heuristic-only, charging NO extra model calls (preserves M4 deterministic
+  // usage accounting). When enabled, verifyTask may make one cheap model call
+  // per task (and one verify-driven retry) under the global budget.
+  const verifyModel = opts.verifyModel === true;
+
   // M7: read noMemory from opts. Not yet typed in RunOptions (avoid editing
   // types.ts) — read as an extended property, same pattern as __onStep above.
   const noMemory = (opts as RunOptions & { noMemory?: boolean }).noMemory === true;
@@ -600,69 +645,101 @@ export async function runGoal(
   const requestedEngine = opts.engine ?? 'builtin';
   let engine = requestedEngine;
   if (engine !== 'builtin') {
-    if (!isBinaryInstalled(engine)) {
+    // Determine if this is a known typed engine id or an arbitrary binary name.
+    const isKnownEngineId = KNOWN_ENGINE_IDS.has(engine);
+    const engineId = isKnownEngineId ? (engine as EngineId) : 'ashlrcode'; // arbitrary → treat as external
+
+    // Check installation: for known ids use engineInstalled(); for arbitrary names use isBinaryInstalled().
+    const installed = isKnownEngineId
+      ? engineInstalled(engineId)
+      : isBinaryInstalled(engine);
+
+    if (!installed) {
       process.stderr.write(
         `[ashlr run] engine "${engine}" not found on PATH — falling back to builtin\n`,
       );
+      emit(sink, { kind: 'log', text: `engine "${engine}" not found — falling back to builtin` });
       engine = 'builtin';
     } else {
-      // Delegate to the external engine binary (ashlrcode / aw).
-      // Spawn synchronously with an inherited stdio so the binary can render its
-      // own progress output, then capture stdout as the run result.
-      // Bounded by the budget maxSteps wall-clock via the fact that the sub-process
-      // owns its own execution — we do NOT forward the token budget to it (unknown
-      // protocol) but we do honour the caller's intent to use a different engine.
-      process.stderr.write(
-        `[ashlr run] delegating to engine "${engine}" (${goal.slice(0, 60)}…)\n`,
-      );
-      const engineResult = spawnSync(engine, ['--goal', goal], {
-        encoding: 'utf8',
-        maxBuffer: 10 * 1024 * 1024, // 10 MB
-        timeout: 5 * 60 * 1000,      // 5 min hard wall-clock limit
-        // M10 env-bridge: project unified config into the delegated engine's
-        // environment so ashlrcode/aw honours the same provider/model/roots
-        // config as the hub — without modifying those tools.
-        env: withToolEnv(cfg),
-      });
+      // Delegate to the external engine via the hardened per-engine adapter.
+      // buildEngineCommand produces the EXACT argv for the real CLI.
+      // spawnEngine applies withToolEnv(cfg) + phantom-exec wrap when enabled.
+      // This is a SINGLE BOUNDED SPAWN — never recursive.
+      const modelEnv = process.env['ASHLR_MODEL'] ?? process.env['AC_MODEL'];
+      const cwd = process.cwd();
 
-      const id = generateRunId();
-      const now = new Date().toISOString();
-      const delegatedState: RunState = {
-        id,
-        goal,
-        engine,
-        provider: 'external',
-        createdAt: now,
-        updatedAt: now,
-        budget: {
-          maxTokens: opts.budget?.maxTokens ?? DEFAULT_MAX_TOKENS,
-          maxSteps: opts.budget?.maxSteps ?? DEFAULT_MAX_STEPS,
-          allowCloud: opts.allowCloud ?? false,
-        },
-        usage: newUsage(),
-        tasks: [],
-        steps: [],
-        status: 'running',
-      };
+      // Build the correct command for known engine ids; for unknown use the
+      // old-style fallback (engine binary not in KNOWN_ENGINE_IDS was already
+      // handled above via isBinaryInstalled, so this branch is only reached
+      // for known ids).
+      const cmd = isKnownEngineId
+        ? buildEngineCommand(engineId, goal, cfg, { cwd, model: modelEnv })
+        : null;
 
-      if (engineResult.error || engineResult.status !== 0) {
-        const errMsg = engineResult.error?.message
-          ?? (engineResult.stderr ? String(engineResult.stderr).trim() : `exit ${engineResult.status ?? 'unknown'}`);
-        process.stderr.write(`[ashlr run] engine "${engine}" failed: ${errMsg}\n`);
-        delegatedState.status = 'failed';
-        delegatedState.result = `Engine "${engine}" failed: ${errMsg}`;
+      if (!cmd) {
+        // buildEngineCommand returned null (builtin) — fall through to builtin path.
+        engine = 'builtin';
+      } else {
+        process.stderr.write(
+          `[ashlr run] delegating to engine "${engine}" (${goal.slice(0, 60)}…)\n`,
+        );
+        emit(sink, { kind: 'log', text: `delegating to engine "${engine}"` });
+
+        const id = generateRunId();
+        const now = new Date().toISOString();
+        const delegatedState: RunState = {
+          id,
+          goal,
+          engine,
+          provider: 'external',
+          createdAt: now,
+          updatedAt: now,
+          budget: {
+            maxTokens: opts.budget?.maxTokens ?? DEFAULT_MAX_TOKENS,
+            maxSteps: opts.budget?.maxSteps ?? DEFAULT_MAX_STEPS,
+            allowCloud: opts.allowCloud ?? false,
+          },
+          usage: newUsage(),
+          tasks: [],
+          steps: [],
+          status: 'running',
+        };
+
+        // spawnEngine: applies withToolEnv(cfg) + phantom-exec when enabled.
+        const engineResult = spawnEngine(cmd, cfg);
+
+        if (!engineResult.ok) {
+          const errMsg = engineResult.error ?? 'unknown error';
+          process.stderr.write(`[ashlr run] engine "${engine}" failed: ${errMsg}\n`);
+          emit(sink, { kind: 'log', text: `engine "${engine}" failed: ${errMsg}` });
+          delegatedState.status = 'failed';
+          delegatedState.result = `Engine "${engine}" failed: ${errMsg}`;
+          delegatedState.updatedAt = new Date().toISOString();
+          saveRun(delegatedState);
+          return delegatedState;
+        }
+
+        // Account for reported usage (e.g. claude --output-format json carries tokens).
+        if (engineResult.usage) {
+          delegatedState.usage.tokensIn = engineResult.usage.tokensIn;
+          delegatedState.usage.tokensOut = engineResult.usage.tokensOut;
+          delegatedState.usage.steps = 1;
+          delegatedState.usage.estCostUsd = estCostUsd(engine, engineResult.usage.tokensIn, engineResult.usage.tokensOut);
+        }
+
+        delegatedState.status = 'done';
+        delegatedState.result = engineResult.output;
         delegatedState.updatedAt = new Date().toISOString();
+        emit(sink, { kind: 'task-done', text: `engine "${engine}" completed` });
         saveRun(delegatedState);
         return delegatedState;
       }
-
-      delegatedState.status = 'done';
-      delegatedState.result = String(engineResult.stdout ?? '').trim();
-      delegatedState.updatedAt = new Date().toISOString();
-      saveRun(delegatedState);
-      return delegatedState;
     }
   }
+
+  // Suppress unused-import warning for withToolEnv (still used by engines.ts indirectly;
+  // kept here for the M10 env-bridge contract — callers outside this file use it too).
+  void withToolEnv;
 
   // -- Budget / parallel defaults ----------------------------------------------
   const allowCloud = opts.allowCloud ?? false;
@@ -848,37 +925,168 @@ export async function runGoal(
     await Promise.all(
       batch.map(async (task) => {
         try {
-          await runTask(task, client, {
-            tools,
-            budget,
-            usage: state.usage,
-            onStep: (step: RunStep) => {
-              state.steps.push(step);
-              // Merge step usage into global usage.
-              //
-              // SINGLE-WRITER INVARIANT: the orchestrator is the only place that
-              // accumulates into state.usage. The agent loop reports per-step
-              // deltas via this callback and does NOT mutate ctx.usage itself.
-              // We mutate state.usage IN PLACE (never rebind) so the object
-              // identity handed to every in-flight runTask as ctx.usage stays
-              // authoritative — the agent loop's hard-ceiling check
-              // overBudget(ctx.usage, ctx.budget) reads the live global total,
-              // which is essential under --parallel > 1.
-              if (step.usage) {
-                state.usage.tokensIn += step.usage.tokensIn;
-                state.usage.tokensOut += step.usage.tokensOut;
-                state.usage.steps += step.usage.steps;
-                state.usage.estCostUsd = estCostUsd(
-                  client.id,
-                  state.usage.tokensIn,
-                  state.usage.tokensOut,
-                );
+          // M11: emit task-start event.
+          emit(sink, { kind: 'task-start', taskId: task.id, text: task.goal });
+
+          // Build per-task onStep callback (single-writer invariant preserved).
+          const taskOnStep = (step: RunStep): void => {
+            state.steps.push(step);
+            // SINGLE-WRITER INVARIANT: orchestrator is the only mutator of state.usage.
+            if (step.usage) {
+              state.usage.tokensIn += step.usage.tokensIn;
+              state.usage.tokensOut += step.usage.tokensOut;
+              state.usage.steps += step.usage.steps;
+              state.usage.estCostUsd = estCostUsd(
+                client.id,
+                state.usage.tokensIn,
+                state.usage.tokensOut,
+              );
+            }
+            state.updatedAt = new Date().toISOString();
+            cliOnStep?.(step, state.tasks);
+            saveRun(state);
+          };
+
+          // M11: Retry policy — bounded, budget-aware.
+          // We retry on transient/tool failures only; hard budget stops are not retryable.
+          const RETRY_POLICY = { maxAttempts: 2, baseDelayMs: 500 };
+
+          const isRetryable = (err: unknown): boolean => {
+            // Don't retry if budget is already exhausted.
+            if (overBudget(state.usage, budget)) return false;
+            // Retry on network/transient errors (not on deterministic task failures).
+            if (err instanceof Error) {
+              const msg = err.message.toLowerCase();
+              return (
+                msg.includes('network') ||
+                msg.includes('timeout') ||
+                msg.includes('econnrefused') ||
+                msg.includes('fetch') ||
+                msg.includes('socket')
+              );
+            }
+            return false;
+          };
+
+          await withRetry(
+            async (attempt) => {
+              if (attempt > 1) {
+                emit(sink, {
+                  kind: 'retry',
+                  taskId: task.id,
+                  text: `attempt ${attempt} of ${RETRY_POLICY.maxAttempts}`,
+                });
+                // Reset task state for re-run on retry.
+                task.status = 'running';
+                task.result = undefined;
+                task.error = undefined;
               }
-              state.updatedAt = new Date().toISOString();
-              cliOnStep?.(step, state.tasks);
-              saveRun(state);
+
+              await runTask(task, client, {
+                tools,
+                budget,
+                usage: state.usage,
+                sink,
+                onStep: taskOnStep,
+              });
+
+              // If runTask set status to failed, surface as a throw so withRetry
+              // can decide whether to retry (only on retryable errors).
+              if (task.status === 'failed') {
+                const errMsg = task.error ?? 'task failed';
+                // Only transient errors get retried; model/parsing errors do not.
+                // We check if the error looks retryable before throwing.
+                if (isRetryable(new Error(errMsg))) {
+                  throw new Error(errMsg);
+                }
+                // Non-retryable failure: don't throw (withRetry would still catch
+                // and re-throw since isRetryable returns false). Fall through.
+              }
             },
+            RETRY_POLICY,
+            isRetryable,
+          ).catch((err) => {
+            // withRetry exhausted all attempts or got a non-retryable error.
+            // task.status is already 'failed' (set by runTask); just ensure error is set.
+            if (task.status !== 'failed') {
+              task.status = 'failed';
+              task.error = err instanceof Error ? err.message : String(err);
+            }
           });
+
+          // M11: Verify completed tasks; one retry on !ok if budget allows.
+          // Skip verify entirely once the run is over budget: a budget abort can
+          // leave a task 'done' with a result annotated by an abort/needs-attention
+          // marker, which the heuristic's error-sentinel check would flag as a
+          // benign false-positive "verify fail". Skipping keeps the abort path
+          // clean (no confusing verify line) and avoids any model call past the
+          // ceiling. (Real verification still runs on every in-budget completion.)
+          if (task.status === 'done' && !overBudget(state.usage, budget)) {
+            const verdict = await verifyTask(task, client, budget, state.usage, {
+              model: verifyModel,
+            });
+            emit(sink, {
+              kind: 'verify',
+              taskId: task.id,
+              text: verdict.reason,
+              data: verdict,
+            });
+
+            if (!verdict.ok) {
+              if (!overBudget(state.usage, budget)) {
+                // One verification-driven retry: re-run the task.
+                emit(sink, {
+                  kind: 'retry',
+                  taskId: task.id,
+                  text: `verify failed (${verdict.reason}) — retrying once`,
+                });
+                task.status = 'running';
+                task.result = undefined;
+                task.error = undefined;
+
+                await runTask(task, client, {
+                  tools,
+                  budget,
+                  usage: state.usage,
+                  sink,
+                  onStep: taskOnStep,
+                });
+
+                // Re-verify after the retry (best-effort; don't loop).
+                // Cast through string: TS narrowed to 'running' after the assignment above,
+                // but runTask mutates task.status in place so it may be 'done' now.
+                if ((task.status as string) === 'done') {
+                  const verdict2 = await verifyTask(task, client, budget, state.usage, {
+                    model: verifyModel,
+                  });
+                  emit(sink, {
+                    kind: 'verify',
+                    taskId: task.id,
+                    text: verdict2.reason,
+                    data: verdict2,
+                  });
+                  if (!verdict2.ok) {
+                    // Still failing: annotate result but keep status 'done'.
+                    task.result = `[needs-attention: ${verdict2.reason}]\n${task.result ?? ''}`;
+                  }
+                }
+              } else {
+                // Budget exhausted: annotate but keep status 'done'.
+                task.result = `[needs-attention: ${verdict.reason}]\n${task.result ?? ''}`;
+              }
+            }
+          }
+
+          // M11: emit task-done (or failed) event.
+          if (task.status === 'done') {
+            emit(sink, { kind: 'task-done', taskId: task.id, text: task.goal });
+          } else {
+            emit(sink, {
+              kind: 'log',
+              taskId: task.id,
+              text: `task ${task.id} ${task.status}: ${task.error ?? ''}`,
+            });
+          }
         } catch (err) {
           // Defensive: runTask should handle its own errors, but catch any leak
           const msg = err instanceof Error ? err.message : String(err);
