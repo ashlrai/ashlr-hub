@@ -72,9 +72,99 @@ async function tryGetToolsRegistry(): Promise<ToolsRegistry | null> {
   }
 }
 
+/**
+ * Attempt to build a rollup via the M5 observability module for the budget
+ * window configured in cfg (default '7d'). Returns null when the module is
+ * not yet built or if any error occurs — caller must degrade gracefully.
+ */
+async function tryBuildBudgetRollup(
+  cfg: AshlrConfig,
+): Promise<import('./types.js').ActivityRollup | null> {
+  try {
+    const win: '1d' | '7d' | '30d' = cfg.telemetry?.budgetWindow ?? '7d';
+    // Defeat static resolution so tsc doesn't error when the M5 module is not
+    // yet built. Same pattern used for the M3 mcp-registry / tools-registry
+    // dynamic imports above. At runtime Node resolves the real .js path.
+    const specifier = './observability/rollup.js';
+    const mod = await import(/* @vite-ignore */ specifier) as {
+      buildRollup: (
+        window: '1d' | '7d' | '30d',
+        cfg: AshlrConfig,
+      ) => import('./types.js').ActivityRollup;
+    };
+    return mod.buildRollup(win, cfg);
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Individual check implementations — each returns a DoctorCheck, never throws
 // ---------------------------------------------------------------------------
+
+/**
+ * Check: Spend budget (M5 observability).
+ * id: 'budget-spend'
+ *
+ * Builds a rollup for the configured budget window (default '7d') and
+ * inspects the BudgetAlert level:
+ *   - 'ok' or no cap configured  → pass
+ *   - 'warn' (>= 80 % of cap)    → warn
+ *   - 'over' (cap exceeded)      → fail
+ *
+ * If the rollup module is not yet available or throws, degrades to pass/skip
+ * so that doctor never hangs or crashes due to missing M5 modules.
+ *
+ * @param rollup - pre-fetched rollup result (or null on unavailability)
+ */
+function checkSpendBudget(
+  rollup: import('./types.js').ActivityRollup | null,
+): DoctorCheck {
+  // Module not available yet or rollup failed — degrade silently to pass.
+  if (rollup === null) {
+    return check(
+      'budget-spend',
+      'Spend budget',
+      'pass',
+      'Observability module not yet available — skipping budget check',
+    );
+  }
+
+  const { budget } = rollup;
+
+  // No cap configured on either dimension → nothing to alert on.
+  if (budget.capUsd === null && budget.capTokens === null) {
+    return check(
+      'budget-spend',
+      'Spend budget',
+      'pass',
+      `No budget cap configured for ${budget.window} window`,
+    );
+  }
+
+  if (budget.level === 'over') {
+    return check(
+      'budget-spend',
+      'Spend budget',
+      'fail',
+      budget.message,
+      'review ashlr pulse; raise cap or reduce spend',
+    );
+  }
+
+  if (budget.level === 'warn') {
+    return check(
+      'budget-spend',
+      'Spend budget',
+      'warn',
+      budget.message,
+      'review ashlr pulse; raise cap or reduce spend',
+    );
+  }
+
+  // level === 'ok'
+  return check('budget-spend', 'Spend budget', 'pass', budget.message);
+}
 
 /** node version >= 18 */
 function checkNodeVersion(): DoctorCheck {
@@ -423,10 +513,11 @@ function checkAshlrToolsInstalled(toolsRegistry: ToolsRegistry | null): DoctorCh
 export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
 
-  // --- Pre-fetch M3 registry results (both are async-safe, never throw) ---
-  const [mcpRegistry, toolsRegistry] = await Promise.all([
+  // --- Pre-fetch M3 + M5 registry results (all async-safe, never throw) ---
+  const [mcpRegistry, toolsRegistry, budgetRollup] = await Promise.all([
     tryDiscoverMcpServers(),
     tryGetToolsRegistry(),
+    tryBuildBudgetRollup(cfg),
   ]);
 
   // --- Synchronous checks ---
@@ -443,6 +534,9 @@ export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
   // --- M3 checks ---
   checks.push(checkMcpServersDiscovered(mcpRegistry));
   checks.push(checkAshlrToolsInstalled(toolsRegistry));
+
+  // --- M5 checks ---
+  checks.push(checkSpendBudget(budgetRollup));
 
   // --- Async: provider registry ---
   try {

@@ -40,9 +40,15 @@ export interface AshlrConfig {
     ollama: string;
     providerChain: string[];
   };
-  /** Telemetry hooks (e.g. Pulse). All fields optional. */
+  /** Telemetry hooks (e.g. Pulse) + local budget caps. All fields optional. */
   telemetry: {
     pulse?: string;
+    /** Optional spend cap (USD) for the budget window; alerts when over/near. */
+    budgetUsd?: number;
+    /** Optional token cap (in + out) for the budget window. */
+    budgetTokens?: number;
+    /** Window the budget caps apply to (default '7d' when caps are set). */
+    budgetWindow?: "1d" | "7d" | "30d";
   };
   /** Map of integration name -> resolved executable path (entire, aw, claude, ...). */
   tools: Record<string, string>;
@@ -407,4 +413,120 @@ export interface ProviderClient {
   supportsTools: boolean;
   /** Send a chat exchange (optionally with tool specs) and get a result. */
   chat(messages: ChatMessage[], tools?: unknown[]): Promise<ChatResult>;
+}
+
+// ---------------------------------------------------------------------------
+// M5: local-first observability (cost / tokens / activity) contract
+// ---------------------------------------------------------------------------
+
+/**
+ * One normalized usage data point. METADATA ONLY — never carries message
+ * content. Sourced from Claude Code transcripts ('claude') or local agent
+ * runs ('run').
+ */
+export interface UsageEvent {
+  /** ISO timestamp of the event. */
+  ts: string;
+  /** Absolute project path this usage belongs to, or null if unknown. */
+  project: string | null;
+  /** Model id that produced the usage. */
+  model: string;
+  /** Where the event came from. */
+  source: "claude" | "run";
+  /** Prompt/input tokens. */
+  tokensIn: number;
+  /** Completion/output tokens. */
+  tokensOut: number;
+  /** Cache-read input tokens (0 when unavailable). */
+  cacheRead: number;
+  /** Cache-creation (write) input tokens (0 when unavailable). */
+  cacheWrite: number;
+}
+
+/** Per-project activity roll-up within a window. */
+export interface ProjectActivity {
+  /** Absolute project path (or label). */
+  project: string;
+  /** Number of distinct sessions attributed to the project. */
+  sessions: number;
+  /** Number of git commits in the window. */
+  commits: number;
+  /** Total input tokens. */
+  tokensIn: number;
+  /** Total output tokens. */
+  tokensOut: number;
+  /** Estimated USD cost. */
+  estCostUsd: number;
+  /** ISO timestamp of the most recent activity, or null. */
+  lastActive: string | null;
+}
+
+/** Per-day usage roll-up within a window. */
+export interface DailyUsage {
+  /** Calendar day (YYYY-MM-DD). */
+  day: string;
+  /** Total input tokens for the day. */
+  tokensIn: number;
+  /** Total output tokens for the day. */
+  tokensOut: number;
+  /** Estimated USD cost for the day. */
+  estCostUsd: number;
+  /** Number of sessions active that day. */
+  sessions: number;
+}
+
+/** Per-model usage roll-up within a window. */
+export interface ModelUsage {
+  /** Model id. */
+  model: string;
+  /** Total input tokens. */
+  tokensIn: number;
+  /** Total output tokens. */
+  tokensOut: number;
+  /** Estimated USD cost. */
+  estCostUsd: number;
+  /** Number of calls attributed to the model. */
+  calls: number;
+}
+
+/** Budget evaluation for a spend/token cap over a window. */
+export interface BudgetAlert {
+  /** ok (under), warn (near cap), or over (exceeded). */
+  level: "ok" | "warn" | "over";
+  /** Window the alert applies to (e.g. '7d'). */
+  window: string;
+  /** USD spent in the window. */
+  spentUsd: number;
+  /** Configured USD cap, or null if none set. */
+  capUsd: number | null;
+  /** Tokens (in + out) spent in the window. */
+  spentTokens: number;
+  /** Configured token cap, or null if none set. */
+  capTokens: number | null;
+  /** Human-readable status message. */
+  message: string;
+}
+
+/** The full observability roll-up for a window. */
+export interface ActivityRollup {
+  /** Window label (e.g. '1d' | '7d' | '30d'). */
+  window: string;
+  /** ISO timestamp marking the start of the window. */
+  since: string;
+  /** Window totals across all projects/models. */
+  totals: {
+    tokensIn: number;
+    tokensOut: number;
+    estCostUsd: number;
+    sessions: number;
+    commits: number;
+  };
+  /** Per-project breakdown, sorted by activity. */
+  byProject: ProjectActivity[];
+  /** Per-day breakdown, ascending by day. */
+  byDay: DailyUsage[];
+  /** Per-model breakdown, sorted by cost/tokens. */
+  byModel: ModelUsage[];
+  /** Budget evaluation for the window. */
+  budget: BudgetAlert;
 }

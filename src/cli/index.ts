@@ -16,6 +16,7 @@
  *   run "<goal>" [opts]        Local-first agent orchestrator; decompose & execute a goal.
  *   run show <id>              Print a past run in detail.
  *   runs [--json]              List past runs.
+ *   pulse [--json] [--window]  Local observability dashboard: tokens, cost, activity.
  *   help                       Show this help.
  *
  * Exit codes: 0 success, 1 error/not-found, 2 bad usage.
@@ -124,6 +125,45 @@ async function loadRunsCmd(): Promise<CmdRunsFn> {
     };
   }
   return _cmdRuns;
+}
+
+// ─── M5 lazy imports (graceful degradation if modules not yet built) ──────────
+
+type CmdPulseFn = (args: string[]) => Promise<number>;
+import type { ActivityRollup } from '../core/types.js';
+type BuildRollupFn = (window: '1d' | '7d' | '30d', cfg: AshlrConfig, opts?: { project?: string }) => ActivityRollup;
+
+let _cmdPulse: CmdPulseFn | null | undefined = undefined;
+let _buildRollup: BuildRollupFn | null | undefined = undefined;
+
+async function loadPulseCmd(): Promise<CmdPulseFn> {
+  if (_cmdPulse === undefined) {
+    try {
+      const mod = (await import('./pulse.js' as unknown as string)) as { cmdPulse: CmdPulseFn };
+      _cmdPulse = mod.cmdPulse;
+    } catch {
+      _cmdPulse = null;
+    }
+  }
+  if (_cmdPulse === null) {
+    return async (_args: string[]) => {
+      console.error(red('error: ') + 'pulse command requires src/cli/pulse.ts (M5 module not yet built).');
+      return 1;
+    };
+  }
+  return _cmdPulse;
+}
+
+async function tryBuildRollup(): Promise<BuildRollupFn | null> {
+  if (_buildRollup === undefined) {
+    try {
+      const mod = (await import('../core/observability/rollup.js' as unknown as string)) as { buildRollup: BuildRollupFn };
+      _buildRollup = mod.buildRollup;
+    } catch {
+      _buildRollup = null;
+    }
+  }
+  return _buildRollup ?? null;
 }
 
 // ─── ANSI helpers ──────────────────────────────────────────────────────────────
@@ -511,6 +551,33 @@ async function cmdStatus(_args: string[]): Promise<void> {
     console.log(`  ${ecosystemParts.join(`  ${dim('·')}  `)}`);
     console.log('');
   }
+
+  // ── M5 Activity summary (best-effort; silently skipped on error) ──────────
+  try {
+    const buildRollupFn = await tryBuildRollup();
+    if (buildRollupFn) {
+      const rollup = buildRollupFn('7d', cfg);
+      const t = rollup.totals;
+      const tokK = ((t.tokensIn + t.tokensOut) / 1000).toFixed(1);
+      const cost = t.estCostUsd.toFixed(2);
+      const budgetLevel = rollup.budget.level;
+      const budgetSuffix = budgetLevel === 'over'
+        ? `  ${red('● over budget')}`
+        : budgetLevel === 'warn'
+          ? `  ${yellow('● near cap')}`
+          : '';
+      console.log(
+        `  ${bold('Activity (7d):')} ${cyan(`${t.sessions} sessions`)}  ${dim('·')}  ` +
+        `${cyan(`${tokK}k tokens`)}  ${dim('·')}  ` +
+        `${cyan(`$${cost}`)}  ${dim('·')}  ` +
+        `${cyan(`${t.commits} commits`)}` +
+        budgetSuffix
+      );
+      console.log('');
+    }
+  } catch {
+    // silently omit — never break status
+  }
 }
 
 // ─── Command: ls ─────────────────────────────────────────────────────────────
@@ -815,6 +882,9 @@ function cmdHelp(): void {
     ['run "<goal>" [opts]',          'Decompose goal into tasks; execute via local model (Ollama/LM Studio).'],
     ['run show <id>',                'Print a past run in detail.'],
     ['runs [--json]',                'List past runs (newest first).'],
+    ['pulse [--window 1d|7d|30d]',   'Local observability dashboard: tokens, cost, sessions, commits.'],
+    ['pulse --json',                 'Machine-readable ActivityRollup (for Raycast Pulse view).'],
+    ['pulse --project <name>',       'Restrict pulse rollup to a single project.'],
     ['help',                         'Show this help.'],
   ];
 
@@ -835,6 +905,8 @@ function cmdHelp(): void {
   console.log(`    ${cyan('ashlr run "summarize recent commits" --budget 8000 --max-steps 5')}`);
   console.log(`    ${cyan('ashlr run show <id>')}  ${dim('# inspect a past run')}`);
   console.log(`    ${cyan('ashlr runs')}            ${dim('# list all past runs')}`);
+  console.log(`    ${cyan('ashlr pulse')}           ${dim('# cost/token dashboard (7d)')}`);
+  console.log(`    ${cyan('ashlr pulse --window 30d --project ashlr-hub')}`);
   console.log('');
 }
 
@@ -898,6 +970,12 @@ async function main(): Promise<void> {
       case 'runs': {
         const cmdRuns = await loadRunsCmd();
         process.exitCode = await cmdRuns(rest);
+        break;
+      }
+
+      case 'pulse': {
+        const cmdPulse = await loadPulseCmd();
+        process.exitCode = await cmdPulse(rest);
         break;
       }
 

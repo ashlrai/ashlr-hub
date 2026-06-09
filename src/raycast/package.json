@@ -49,6 +49,13 @@
       "subtitle": "Ashlr",
       "description": "Preview and apply tidy rules to organise loose files on the Desktop.",
       "mode": "view"
+    },
+    {
+      "name": "pulse",
+      "title": "Pulse",
+      "subtitle": "Ashlr",
+      "description": "Local-first token, cost, and activity dashboard. Runs `ashlr pulse --json` and renders totals, per-project, and per-model breakdowns with budget status.",
+      "mode": "view"
     }
   ],
   "scripts": {

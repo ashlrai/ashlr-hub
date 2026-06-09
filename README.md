@@ -200,6 +200,7 @@ Categories:
 
 Dirty repos:   3
 Stale repos:   8  (> 30 days)
+Activity (7d): 142 k tokens in / 38 k out  $0.84 est.
 ```
 
 ---
@@ -392,6 +393,98 @@ ashlr runs [--json]     # list all past runs, newest first
 
 ---
 
+## M5: `ashlr pulse` — local-first observability
+
+M5 adds a local observability dashboard. All numbers are computed **entirely offline** from data already on your machine — no network call required.
+
+### Privacy
+
+`ashlr pulse` reads **only usage metadata** from Claude Code session transcripts (`~/.claude/projects/**/*.jsonl`): token counts, model id, timestamp, and the project path encoded in the directory name. It **never** reads, stores, or prints message content — no prompts, completions, tool arguments, or file contents. Aggregation results are written only under `~/.ashlr/`.
+
+---
+
+### `ashlr pulse`
+
+Rich local dashboard: window summary, per-project table, top models, cost estimate, and budget status.
+
+```sh
+ashlr pulse                    # 7-day window (default)
+ashlr pulse --window 1d        # last 24 hours
+ashlr pulse --window 30d       # last 30 days
+ashlr pulse --project ashlr-hub  # restrict to one project
+ashlr pulse --json             # machine-readable ActivityRollup JSON
+```
+
+Example output:
+
+```
+ashlr pulse  —  7d window  (since 2026-06-01)
+
+Totals
+  tokens in:    142 312
+  tokens out:    38 044
+  est. cost:      $0.84
+  sessions:          18
+  commits:           34
+
+By project
+  Project                  Sessions  Commits  Tokens in   Cost
+  ashlr-hub                      11       22     98 441  $0.58
+  artist-encyclopedia-factory     5       10     32 104  $0.19
+  ashlrcode                       2        2     11 767  $0.07
+
+Top models
+  claude-sonnet-4-6   120 k in / 33 k out  $0.71   14 calls
+  claude-haiku-4-5     22 k in /  5 k out  $0.13    4 calls
+
+Budget
+  ✓ ok  —  $0.84 / $10.00 spent  (8%)  |  180 k / 500 k tokens  (36%)
+```
+
+The `--json` flag emits a full `ActivityRollup` object (see `src/core/types.ts`) suitable for scripting or the Raycast Pulse view.
+
+---
+
+### `ashlr status` — Activity line
+
+`ashlr status` now includes a compact **Activity (7d)** line drawn from the same local rollup:
+
+```
+Activity (7d): 142 k tokens in / 38 k out  $0.84 est.
+```
+
+---
+
+### Budget alerts
+
+Set optional per-period caps in `~/.ashlr/config.json` under `telemetry`:
+
+| Key              | Type              | Description                                  |
+|------------------|-------------------|----------------------------------------------|
+| `budgetUsd`      | number (USD)      | Max est. spend in the budget window          |
+| `budgetTokens`   | number            | Max total tokens in the budget window        |
+| `budgetWindow`   | `"1d"/"7d"/"30d"` | Rolling window for cap evaluation (def. 7d)  |
+
+When >= 80% of any cap is reached, `ashlr pulse` prints a **warn** banner and `ashlr doctor` surfaces a warning check. When a cap is exceeded, the level escalates to **over**.
+
+```
+Budget
+  ! warn  —  $8.43 / $10.00 spent  (84%)  — approaching USD cap for 7d window
+```
+
+```
+Budget
+  ✗ over  —  $11.20 / $10.00 spent  (112%)  — USD cap exceeded for 7d window
+```
+
+---
+
+### Raycast Pulse view
+
+The Raycast extension includes a **Pulse** command backed by `ashlr pulse --json`. It displays the same window summary and by-project table inside Raycast — no extra setup required beyond having `ashlr` on your PATH.
+
+---
+
 ## Config reference — `~/.ashlr/config.json`
 
 Created automatically on first run with sensible defaults. Edit directly or via `ashlr config set`.
@@ -459,10 +552,16 @@ Created automatically on first run with sensible defaults. Edit directly or via 
     "providerChain": ["lmstudio", "ollama", "anthropic"]
   },
 
-  // Telemetry (optional)
+  // Telemetry / observability (optional)
   // pulse: POST run summaries here after each `ashlr run` (best-effort, non-blocking)
+  // budgetUsd: warn/alert when est. cost in budgetWindow exceeds this amount (USD)
+  // budgetTokens: warn/alert when total tokens in budgetWindow exceeds this count
+  // budgetWindow: rolling window for budget checks — "1d" | "7d" | "30d" (default "7d")
   "telemetry": {
-    "pulse": ""
+    "pulse": "",
+    "budgetUsd": 10,
+    "budgetTokens": 500000,
+    "budgetWindow": "7d"
   },
 
   // Tool paths resolved at init time
@@ -701,14 +800,19 @@ ashlr-hub/
 │   │   ├── mcp-registry.ts  # M3: discover MCP servers across known config paths
 │   │   ├── mcp-gateway.ts   # M3: stdio aggregation gateway + per-server probe
 │   │   ├── tools-registry.ts # M3: detect ecosystem tools + versions via PATH
-│   │   └── run/             # M4: local-first agent orchestrator
-│   │       ├── provider-client.ts  # ProviderClient over Ollama / LM Studio
-│   │       ├── budget.ts           # RunUsage accounting + budget enforcement
-│   │       ├── agent-loop.ts       # Bounded chat/tool loop per RunTask
-│   │       └── orchestrator.ts     # DAG planner, parallel executor, persistence
+│   │   ├── run/             # M4: local-first agent orchestrator
+│   │   │   ├── provider-client.ts  # ProviderClient over Ollama / LM Studio
+│   │   │   ├── budget.ts           # RunUsage accounting + budget enforcement
+│   │   │   ├── agent-loop.ts       # Bounded chat/tool loop per RunTask
+│   │   │   └── orchestrator.ts     # DAG planner, parallel executor, persistence
+│   │   └── observability/   # M5: local-first usage rollups
+│   │       ├── usage-source.ts     # Parse ~/.claude/projects + ~/.ashlr/runs (metadata only)
+│   │       ├── rollup.ts           # buildRollup: aggregate tokens/cost/commits by window
+│   │       └── budget-alert.ts     # evalBudget: cap evaluation + warn/over level
 │   ├── cli/
-│   │   ├── index.ts     # argv dispatch (index/go/status/ls/open/tidy/config/doctor/init/mcp/run/runs/help)
+│   │   ├── index.ts     # argv dispatch (index/go/status/ls/open/tidy/config/doctor/init/mcp/run/runs/pulse/help)
 │   │   ├── run.ts       # M4: `ashlr run` + `ashlr runs` subcommand handlers
+│   │   ├── pulse.ts     # M5: `ashlr pulse` dashboard
 │   │   ├── mcp.ts       # M3: `ashlr mcp` subcommand dispatcher
 │   │   ├── open.ts      # Editor / Finder / Terminal launchers
 │   │   └── picker.ts    # fzf (if present) or readline picker
@@ -726,6 +830,7 @@ ashlr-hub/
 ├── CONTRACT-M2.md       # M2 extension to the contract
 ├── CONTRACT-M3.md       # M3 extension to the contract (MCP gateway)
 ├── CONTRACT-M4.md       # M4 extension to the contract (agent orchestrator)
+├── CONTRACT-M5.md       # M5 extension to the contract (local-first observability)
 ├── install.sh           # build + symlink installer
 └── package.json
 ```
@@ -783,8 +888,16 @@ Zero runtime dependencies in `core/` and `cli/` — Node builtins only.
 - [x] MCP tool access — agent loop connects to the M3 gateway as an MCP client; `--no-tools` disables
 - [x] Pulse cost reporting — best-effort POST of a run summary to Pulse if `telemetry.pulse` is configured (never blocks)
 
+### M5 — local-first observability (`ashlr pulse`)
+
+- [x] `ashlr pulse` — rich local dashboard: window summary, by-project table, top models, cost, budget status; `--json`; `--window 1d|7d|30d`; `--project <name>`
+- [x] `ashlr status` — compact `Activity (7d)` line (tokens in/out + est. cost) from local rollup
+- [x] Budget alerts — `telemetry.budgetUsd` / `budgetTokens` / `budgetWindow` in config; `ashlr pulse` + `ashlr doctor` warn at 80% and alert when exceeded
+- [x] Privacy-first — only usage metadata read from `~/.claude/projects/` transcripts (token counts, model, timestamp, project path); message content never touched
+- [x] Raycast "Pulse" view — backed by `ashlr pulse --json`; no extra setup
+- [x] Fully offline — all numbers computed locally from transcripts, `~/.ashlr/runs/`, and git log; Pulse cloud config is optional and informational only
+
 ### Future
 
 - [ ] Semantic search over the index using local embeddings
-- [ ] Cross-project cost + telemetry dashboard (Pulse integration)
 - [ ] Automated tidy + refactor suggestions
