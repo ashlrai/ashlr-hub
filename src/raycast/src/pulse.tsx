@@ -170,8 +170,10 @@ function budgetTagColor(level: BudgetAlert["level"]): Color {
 // ashlr pulse runner
 // ---------------------------------------------------------------------------
 
+import * as os from "os";
+
 const ASHLR_PATHS = [
-  "/Users/masonwyatt/.local/bin/ashlr",
+  path.join(os.homedir(), ".local", "bin", "ashlr"),
   "/usr/local/bin/ashlr",
   "ashlr",
 ];
@@ -200,7 +202,7 @@ function runPulse(window: Window): Promise<ActivityRollup> {
     let stderr = "";
 
     const child = cp.spawn(bin, args, {
-      env: { ...process.env, PATH: `/Users/masonwyatt/.local/bin:${process.env.PATH ?? ""}` },
+      env: { ...process.env, PATH: `${path.join(os.homedir(), ".local", "bin")}:${process.env.PATH ?? ""}` },
       timeout: 30_000,
     });
 

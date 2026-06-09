@@ -138,7 +138,7 @@ export function claudeProjectsDir(): string;
 /**
  * Decode an encoded Claude project dir name back to an absolute project path.
  * Claude encodes path separators (and leading slash) as dashes, e.g.
- * '-Users-masonwyatt-Desktop-foo' -> '/Users/masonwyatt/Desktop/foo'.
+ * '-Users-you-Desktop-foo' -> '/Users/you/Desktop/foo'.
  */
 export function decodeProjectPath(dirName: string): string;
 ```

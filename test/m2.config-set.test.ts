@@ -121,12 +121,19 @@ function setConfigValue(cfg: AshlrConfig, key: string, rawValue: string): void {
  * Attempt a config set using the CLI guard logic.
  * Returns { ok: true } on success or { ok: false, reason: string } on refusal.
  */
+const DANGEROUS_KEY_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor']);
+
 function attemptSet(
   cfg: AshlrConfig,
   key: string,
   value: string,
   useJson = false,
 ): { ok: boolean; reason?: string } {
+  for (const segment of key.split('.')) {
+    if (DANGEROUS_KEY_SEGMENTS.has(segment)) {
+      return { ok: false, reason: `Illegal config key segment: "${segment}"` };
+    }
+  }
   const topKey = key.split('.')[0];
   const existing = getConfigValue(cfg, key);
 
@@ -425,5 +432,56 @@ describe('config set — edge cases', () => {
     const result = attemptSet(cfg, 'models.lmstudio', '');
     expect(result.ok).toBe(true);
     expect(cfg.models.lmstudio).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Prototype-pollution guard — dangerous key segments are rejected
+// ---------------------------------------------------------------------------
+
+describe('config set — rejects prototype-polluting keys', () => {
+  it('refuses a top-level __proto__ key', () => {
+    const cfg = loadConfig();
+    const result = attemptSet(cfg, '__proto__.polluted', 'x');
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain('__proto__');
+    // Object.prototype must remain unpolluted.
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it('refuses a nested __proto__ segment', () => {
+    const cfg = loadConfig();
+    const result = attemptSet(cfg, 'models.__proto__.polluted', 'x');
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain('__proto__');
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it('refuses a "constructor" segment', () => {
+    const cfg = loadConfig();
+    const result = attemptSet(cfg, 'constructor.prototype.polluted', 'x');
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain('constructor');
+  });
+
+  it('refuses a "prototype" segment', () => {
+    const cfg = loadConfig();
+    const result = attemptSet(cfg, 'editor.prototype', 'x');
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain('prototype');
+  });
+
+  it('refuses __proto__ even with --json', () => {
+    const cfg = loadConfig();
+    const result = attemptSet(cfg, '__proto__.polluted', '"x"', true);
+    expect(result.ok).toBe(false);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it('still allows a legitimate scalar key', () => {
+    const cfg = loadConfig();
+    const result = attemptSet(cfg, 'editor', 'vim');
+    expect(result.ok).toBe(true);
+    expect(cfg.editor).toBe('vim');
   });
 });

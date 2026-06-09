@@ -28,7 +28,7 @@ export function claudeProjectsDir(): string {
  *
  * Claude encodes the absolute path by replacing the leading `/` with a `-`
  * and then replacing every subsequent `/` with `-`. For example:
- *   '-Users-masonwyatt-Desktop-foo' -> '/Users/masonwyatt/Desktop/foo'
+ *   '-Users-you-Desktop-foo' -> '/Users/you/Desktop/foo'
  *
  * This is lossy for path segments that naturally contain `-`, but we do
  * the best-effort reconstruction by:

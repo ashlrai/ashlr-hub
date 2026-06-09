@@ -1,7 +1,26 @@
 {
   "name": "ashlr-hub",
   "version": "0.1.0",
-  "description": "Ashlr command center — indexes the Desktop and exposes it via the `ashlr` CLI and a Raycast extension.",
+  "description": "Local-first command center for agentic engineers.",
+  "license": "MIT",
+  "author": "Mason Wyatt <mason@evero-consulting.com>",
+  "homepage": "https://github.com/ashlrai/ashlr-hub#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ashlrai/ashlr-hub.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ashlrai/ashlr-hub/issues"
+  },
+  "keywords": [
+    "cli",
+    "agentic",
+    "mcp",
+    "local-first",
+    "raycast",
+    "developer-tools",
+    "ai"
+  ],
   "type": "module",
   "bin": {
     "ashlr": "bin/ashlr"

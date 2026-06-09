@@ -409,6 +409,23 @@ function relativeTime(iso: string | null): string {
   return red(`${Math.floor(days / 365)}y ago`);
 }
 
+/**
+ * Config key segments that would let `config set` walk into an object's
+ * prototype chain (prototype pollution). Any dot-path containing one of these
+ * is rejected before we walk/assign, since the result is persisted to
+ * ~/.ashlr/config.json and re-applied via deepMerge on the next load.
+ */
+const DANGEROUS_KEY_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor']);
+
+/** Reject a config dot-path whose any segment is a prototype-polluting prop. */
+function assertSafeConfigKey(key: string): void {
+  for (const segment of key.split('.')) {
+    if (DANGEROUS_KEY_SEGMENTS.has(segment)) {
+      die(`Illegal config key segment: "${segment}"`, 2);
+    }
+  }
+}
+
 /** Get a nested config value by dot-path key. */
 function getConfigValue(cfg: AshlrConfig, key: string): unknown {
   const parts = key.split('.');
@@ -433,11 +450,13 @@ function isSensitiveKey(key: string): boolean {
 
 /** Set a nested config value by dot-path key (mutates cfg). */
 function setConfigValue(cfg: AshlrConfig, key: string, rawValue: string): void {
+  assertSafeConfigKey(key);
   const parts = key.split('.');
   let obj: Record<string, unknown> = cfg as unknown as Record<string, unknown>;
   for (let i = 0; i < parts.length - 1; i++) {
-    const next = obj[parts[i]];
-    if (next === null || typeof next !== 'object') {
+    const hasOwn = Object.prototype.hasOwnProperty.call(obj, parts[i]);
+    const next = hasOwn ? obj[parts[i]] : undefined;
+    if (!hasOwn || next === null || typeof next !== 'object') {
       obj[parts[i]] = {};
     }
     obj = obj[parts[i]] as Record<string, unknown>;
@@ -924,6 +943,7 @@ function cmdConfig(args: string[]): void {
     const rawValue    = hasJsonFlag ? undefined : args[2];
 
     if (!key) die('Usage: ashlr config set <key> <value>', 2);
+    assertSafeConfigKey(key);
 
     const topKey = key.split('.')[0];
     // Keys that must never be overwritten with a coerced scalar string.
@@ -955,8 +975,9 @@ function cmdConfig(args: string[]): void {
       const parts = key.split('.');
       let obj: Record<string, unknown> = cfg as unknown as Record<string, unknown>;
       for (let i = 0; i < parts.length - 1; i++) {
-        const next = obj[parts[i]];
-        if (next === null || typeof next !== 'object') obj[parts[i]] = {};
+        const hasOwn = Object.prototype.hasOwnProperty.call(obj, parts[i]);
+        const next = hasOwn ? obj[parts[i]] : undefined;
+        if (!hasOwn || next === null || typeof next !== 'object') obj[parts[i]] = {};
         obj = obj[parts[i]] as Record<string, unknown>;
       }
       obj[parts[parts.length - 1]] = parsed;
@@ -977,8 +998,9 @@ function cmdConfig(args: string[]): void {
       const parts = key.split('.');
       let obj: Record<string, unknown> = cfg as unknown as Record<string, unknown>;
       for (let i = 0; i < parts.length - 1; i++) {
-        const next = obj[parts[i]];
-        if (next === null || typeof next !== 'object') obj[parts[i]] = {};
+        const hasOwn = Object.prototype.hasOwnProperty.call(obj, parts[i]);
+        const next = hasOwn ? obj[parts[i]] : undefined;
+        if (!hasOwn || next === null || typeof next !== 'object') obj[parts[i]] = {};
         obj = obj[parts[i]] as Record<string, unknown>;
       }
       obj[parts[parts.length - 1]] = parsed;

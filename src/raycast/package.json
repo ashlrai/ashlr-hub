@@ -2,7 +2,7 @@
   "$schema": "https://www.raycast.com/schemas/extension.json",
   "name": "ashlr",
   "title": "Ashlr",
-  "description": "Command center for everything on Mason's Desktop — search repos, docs, assets, and manage your workspace.",
+  "description": "Command center for everything on your Desktop — search repos, docs, assets, and manage your workspace.",
   "icon": "command-icon.png",
   "author": "masonwyatt",
   "categories": ["Developer Tools"],

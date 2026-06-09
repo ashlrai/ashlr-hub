@@ -9,6 +9,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { loadConfig } from './config.js';
 import type { AshlrConfig, ItemKind } from './types.js';
 
@@ -29,7 +30,7 @@ function cfg(): AshlrConfig {
     // loadConfig unavailable / config missing — return a minimal default.
     return {
       version: 1,
-      roots: [path.join(process.env['HOME'] ?? '/Users/masonwyatt', 'Desktop')],
+      roots: [path.join(process.env['HOME'] ?? os.homedir(), 'Desktop')],
       editor: 'cursor',
       staleDays: 30,
       categories: {},
