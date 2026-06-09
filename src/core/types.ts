@@ -387,6 +387,13 @@ export interface RunOptions {
   tools?: boolean;
   /** Whether cloud providers are permitted. */
   allowCloud?: boolean;
+  /**
+   * Absolute working directory the run operates in (e.g. a swarm task's target
+   * project dir). When set, engine delegation uses this as the spawn cwd so the
+   * agent acts WITHIN the intended project, not wherever the parent launched.
+   * Defaults to process.cwd() when unset.
+   */
+  cwd?: string;
   /** Existing run id to resume from cache. */
   resumeId?: string;
   /** Emit machine-readable JSON instead of human output. */
@@ -804,4 +811,125 @@ export interface EngineCommand {
   args: string[];
   /** Working directory for the spawned process, when set. */
   cwd?: string;
+}
+
+// ---------------------------------------------------------------------------
+// M12: contracts-first swarm — end-state specs (`ashlr spec`) + fleet runner
+// (`ashlr swarm`). Specs are first-class versioned artifacts; a swarm
+// decomposes a spec into a contracts-first DAG of phases and runs a bounded
+// fleet of local-first agents through them.
+// ---------------------------------------------------------------------------
+
+/**
+ * A first-class, versioned END-STATE SPEC artifact. The markdown body lives at
+ * <project>/.ashlr/specs/<slug>-v<N>.md with this sidecar metadata alongside
+ * it as <slug>-v<N>.json. Versioning is never destructive: refining produces
+ * a new version (v+1) rather than overwriting.
+ */
+export interface SpecArtifact {
+  /** Stable spec id (slug derived from the goal; shared across versions). */
+  id: string;
+  /** The original authoring goal/prompt for the spec. */
+  goal: string;
+  /** Monotonic version number (1-based; refine produces v+1). */
+  version: number;
+  /** Absolute project path the spec is scoped to, or null when global. */
+  project: string | null;
+  /** Absolute path to the markdown body file for this version. */
+  path: string;
+  /** Lifecycle status of the spec. */
+  status: 'draft' | 'active' | 'archived';
+  /** ISO timestamp the spec (this version) was created. */
+  createdAt: string;
+  /** ISO timestamp the spec was last updated. */
+  updatedAt: string;
+}
+
+/** The ordered phases of a contracts-first swarm. */
+export type SwarmPhaseName = 'scaffold' | 'build' | 'integrate' | 'verify' | 'review';
+
+/** A single planned task within a swarm phase (a unit of agent work). */
+export interface SwarmTaskSpec {
+  /** Stable task id (unique within the swarm). */
+  id: string;
+  /** Which phase this task belongs to. */
+  phase: SwarmPhaseName;
+  /** The sub-goal this task must accomplish. */
+  goal: string;
+  /** Ids of tasks that must complete before this one runs. */
+  deps: string[];
+}
+
+/** Execution state of a single swarm task. */
+export interface SwarmTaskRun {
+  /** Stable task id (matches its SwarmTaskSpec.id). */
+  id: string;
+  /** Which phase this task belongs to. */
+  phase: SwarmPhaseName;
+  /** Current lifecycle status. */
+  status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+  /** Final task result text, present when done. */
+  result?: string;
+  /** Token/step usage attributed to this task. */
+  usage?: RunUsage;
+  /** Failure reason when status is 'failed', else absent. */
+  error?: string;
+}
+
+/** The planned swarm: a decomposition of a goal/spec into phased tasks. */
+export interface SwarmPlan {
+  /** Source spec id this plan derives from, or null when goal-only. */
+  specId: string | null;
+  /** The top-level goal the swarm pursues. */
+  goal: string;
+  /** All planned tasks across phases (caps tasks per phase <= 6). */
+  tasks: SwarmTaskSpec[];
+}
+
+/** Full persisted state of a swarm. Lives at ~/.ashlr/swarms/<id>.json. */
+export interface SwarmRun {
+  /** Stable swarm id. */
+  id: string;
+  /** The original top-level goal. */
+  goal: string;
+  /** Source spec id, or null when goal-only. */
+  specId: string | null;
+  /** Absolute project path the swarm operates in, or null. */
+  project: string | null;
+  /** ISO timestamp the swarm was created. */
+  createdAt: string;
+  /** ISO timestamp of the last update (written after each step). */
+  updatedAt: string;
+  /** HARD total guardrails in effect across the whole swarm. */
+  budget: RunBudget;
+  /** Cumulative usage across all tasks (sum of per-task usage). */
+  usage: RunUsage;
+  /** Bounded concurrency for the parallel BUILD phase. */
+  parallel: number;
+  /** Current swarm status. */
+  status: 'planning' | 'running' | 'done' | 'aborted' | 'failed';
+  /** The planned decomposition. */
+  plan: SwarmPlan;
+  /** Per-task execution state, in plan order. */
+  tasks: SwarmTaskRun[];
+  /** Aggregated final result/summary, present when done. */
+  result?: string;
+}
+
+/** Options accepted by `runSwarm` / the `ashlr swarm` CLI. */
+export interface SwarmOptions {
+  /** Partial budget overrides (merged over defaults) — the HARD total ceiling. */
+  budget?: Partial<RunBudget>;
+  /** Bounded concurrency for the BUILD phase (default 3, max 8). */
+  parallel?: number;
+  /** Launch a detached background worker and return the swarm id immediately. */
+  background?: boolean;
+  /** Existing swarm id to resume from persisted state. */
+  resumeId?: string;
+  /** Plan only — produce the SwarmPlan without executing any task. */
+  dryRun?: boolean;
+  /** Permit cloud providers for tasks (default false = local-first). */
+  allowCloud?: boolean;
+  /** Absolute target project directory the swarm operates in. */
+  project?: string;
 }

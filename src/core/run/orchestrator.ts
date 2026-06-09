@@ -666,7 +666,27 @@ export async function runGoal(
       // spawnEngine applies withToolEnv(cfg) + phantom-exec wrap when enabled.
       // This is a SINGLE BOUNDED SPAWN — never recursive.
       const modelEnv = process.env['ASHLR_MODEL'] ?? process.env['AC_MODEL'];
-      const cwd = process.cwd();
+      // Honor opts.cwd (e.g. a swarm task's target project dir) so the engine
+      // spawns WITHIN the intended project, not wherever the parent launched.
+      // Validate it is an existing directory before use; fall back to cwd.
+      let cwd = process.cwd();
+      if (opts.cwd) {
+        try {
+          if (
+            path.isAbsolute(opts.cwd) &&
+            fs.existsSync(opts.cwd) &&
+            fs.statSync(opts.cwd).isDirectory()
+          ) {
+            cwd = opts.cwd;
+          } else {
+            process.stderr.write(
+              `[ashlr run] opts.cwd "${opts.cwd}" is not an existing absolute directory — using ${cwd}\n`,
+            );
+          }
+        } catch {
+          // stat failed — keep the default cwd
+        }
+      }
 
       // Build the correct command for known engine ids; for unknown use the
       // old-style fallback (engine binary not in KNOWN_ENGINE_IDS was already

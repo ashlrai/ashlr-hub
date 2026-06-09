@@ -23,6 +23,10 @@
  *   learn "<text>" [opts]      Append a note to shared genome memory.
  *   genome                     Genome status/health: entry count, projects, staleness.
  *   update [--check] [--json]  Safe self-update: git pull --ff-only + rebuild; --check reports only.
+ *   spec new "<goal>" [opts]   Author a versioned end-state spec artifact.
+ *   spec list/show/refine      Manage spec artifacts.
+ *   swarm "<goal>"|<specId>    Decompose a spec into a contracts-first agent swarm and run it.
+ *   swarms [--json]            List past swarm runs.
  *   help                       Show this help.
  *
  * Exit codes: 0 success, 1 error/not-found, 2 bad usage.
@@ -193,6 +197,26 @@ const loadUpdateCmd = lazyCmd(
   () => import('./update.js' as unknown as string),
   (m) => m.cmdUpdate as Cmd,
   'update command requires src/cli/update.ts (M9 module not yet built).',
+);
+
+// ─── M12 command loaders ────────────────────────────────────────────
+
+const loadSpecCmd = lazyCmd(
+  () => import('./spec.js' as unknown as string),
+  (m) => m.cmdSpec as Cmd,
+  'spec command requires src/cli/spec.ts (M12 module not yet built).',
+);
+
+const loadSwarmCmd = lazyCmd(
+  () => import('./swarm.js' as unknown as string),
+  (m) => m.cmdSwarm as Cmd,
+  'swarm command requires src/cli/swarm.ts (M12 module not yet built).',
+);
+
+const loadSwarmsCmd = lazyCmd(
+  () => import('./swarm.js' as unknown as string),
+  (m) => m.cmdSwarms as Cmd,
+  'swarms command requires src/cli/swarm.ts (M12 module not yet built).',
 );
 
 // ─── ANSI helpers ──────────────────────────────────────────────────────────────
@@ -918,6 +942,14 @@ function cmdHelp(): void {
     ['learn "<text>" [opts]',        'Append a note to shared genome memory (local-first, append-only).'],
     ['genome',                       'Genome status/health: entry count, projects covered, store size.'],
     ['update [--check] [--json]',    'Safe self-update: git pull --ff-only + rebuild. --check reports only.'],
+    ['spec new "<goal>" [--project]', 'Author a versioned end-state spec artifact (local-first model).'],
+    ['spec list [--project <path>]', 'List all spec artifacts, newest version per spec.'],
+    ['spec show <id>',               'Print a spec artifact in full.'],
+    ['spec refine <id> "<note>"',    'Produce a new version of a spec incorporating the note.'],
+    ['swarm "<goal>" [opts]',        'Decompose goal into a contracts-first DAG; run a fleet of agents.'],
+    ['swarm <specId> [opts]',        'Run a swarm against an existing spec artifact.'],
+    ['swarm show <id>',              'Print a past swarm run in detail.'],
+    ['swarms [--json]',              'List past swarm runs (newest first).'],
     ['help',                         'Show this help.'],
   ];
 
@@ -932,6 +964,7 @@ function cmdHelp(): void {
   console.log('  ' + bold('Flags apply per-command above.'));
   console.log('');
   console.log('  ' + bold('run flags:') + dim('  --budget N  --max-steps N  --parallel N  --engine builtin|ashlrcode|aw  --allow-cloud  --no-tools  --no-memory  --resume <id>  --json'));
+  console.log('  ' + bold('swarm flags:') + dim('  --budget N  --parallel N (default 3, max 8)  --background  --resume <id>  --dry-run  --allow-cloud  --project <path>'));
   console.log('');
   console.log('  ' + bold('Examples:'));
   console.log(`    ${cyan('ashlr run "list all open GitHub issues in this repo"')}`);
@@ -959,12 +992,35 @@ function cmdHelp(): void {
   console.log(`    ${cyan('ashlr learn "ashlr-hub uses NodeNext ESM" --project ashlr-hub')}`);
   console.log(`    ${cyan('ashlr genome')}                                     ${dim('# genome health + entry count')}`);
   console.log('');
+  console.log('  ' + bold('spec / swarm examples:'));
+  console.log(`    ${cyan('ashlr spec new "build a REST API with auth and tests"')}`);
+  console.log(`    ${cyan('ashlr spec new "migrate to ESM" --project ~/my-app')}  ${dim('# project-scoped spec')}`);
+  console.log(`    ${cyan('ashlr spec list')}                                  ${dim('# all specs, newest version each')}`);
+  console.log(`    ${cyan('ashlr spec show spec-abc123')}                      ${dim('# view a spec in full')}`);
+  console.log(`    ${cyan('ashlr spec refine spec-abc123 "add Redis caching pillar"')}`);
+  console.log(`    ${cyan('ashlr swarm "build a REST API with auth" --dry-run')}  ${dim('# plan only, no execution')}`);
+  console.log(`    ${cyan('ashlr swarm spec-abc123 --budget 40000 --parallel 3')}`);
+  console.log(`    ${cyan('ashlr swarm "add Redis caching" --parallel 2 --allow-cloud')}`);
+  console.log(`    ${cyan('ashlr swarm "refactor auth module" --background')}   ${dim('# detached; returns swarm id')}`);
+  console.log(`    ${cyan('ashlr swarms')}                                      ${dim('# list all past swarm runs')}`);
+  console.log(`    ${cyan('ashlr swarm show swarm-xyz789')}                     ${dim('# inspect a past swarm run')}`);
+  console.log('');
 }
 
 // ─── Top-level dispatch ───────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+
+  // ── Internal background-worker entry point ──────────────────────────────
+  // When `cmdSwarm --background` spawns a detached worker it re-invokes the
+  // CLI as: `ashlr --_worker swarm --resume <id> [...]`
+  // Strip the flag and route as if the user typed `ashlr swarm --resume <id>`.
+  const workerFlagIdx = argv.indexOf('--_worker');
+  if (workerFlagIdx !== -1) {
+    argv.splice(workerFlagIdx, 1); // remove --_worker in-place
+  }
+
   const cmd  = argv[0] ?? 'help';
   const rest = argv.slice(1);
 
@@ -1065,6 +1121,28 @@ async function main(): Promise<void> {
       case 'update': {
         const cmdUpdate = await loadUpdateCmd();
         process.exitCode = await cmdUpdate(rest);
+        break;
+      }
+
+      case 'spec': {
+        const cmdSpec = await loadSpecCmd();
+        process.exitCode = await cmdSpec(rest);
+        break;
+      }
+
+      case 'swarm': {
+        // Internal --_worker flag: a detached background process spawned by
+        // cmdSwarm --background re-invokes the CLI with this flag to resume
+        // and drive the swarm without a TTY. Route directly to cmdSwarm which
+        // handles the --resume path (the worker argv is passed through as-is).
+        const cmdSwarm = await loadSwarmCmd();
+        process.exitCode = await cmdSwarm(rest);
+        break;
+      }
+
+      case 'swarms': {
+        const cmdSwarms = await loadSwarmsCmd();
+        process.exitCode = await cmdSwarms(rest);
         break;
       }
 

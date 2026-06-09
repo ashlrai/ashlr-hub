@@ -8,6 +8,33 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M12: Spec-Driven Swarms
+
+### Added
+- **`ashlr spec` — end-state specs as first-class artifacts** (`src/core/spec/spec-store.ts`, `src/cli/spec.ts`):
+  - `ashlr spec new "<goal>" [--project <path>]`: drafts a structured end-state spec with the local model (sections: Context, North Star, Operating Principles, Pillars, Roadmap/phases, Verification). Stored versioned at `<project>/.ashlr/specs/<slug>-v<N>.md` plus a sidecar `.json` (id, goal, version, createdAt, status). Never overwrites an existing version.
+  - `ashlr spec list [--project <path>]`: table of all specs (id, version, status, goal).
+  - `ashlr spec show <id>`: print the full markdown body + metadata.
+  - `ashlr spec refine <id> "<note>"`: produce v+1 incorporating the note. Versioned and append-only — prior versions are always recoverable.
+- **`ashlr swarm` — contracts-first agent-fleet orchestration** (`src/core/swarm/planner.ts`, `src/core/swarm/runner.ts`, `src/core/swarm/store.ts`, `src/cli/swarm.ts`):
+  - `ashlr swarm "<goal>" | <specId> [--budget N] [--parallel N] [--background] [--resume <id>] [--dry-run] [--allow-cloud]`: decomposes a goal or spec into a `SwarmPlan` (phases: SCAFFOLD → BUILD → INTEGRATE → VERIFY → REVIEW) and executes a fleet of agents through it. Each task is an `orchestrator.runGoal` invocation, local-first by default. BUILD phase fans out in parallel (cap `--parallel`, default 3, max 8). Planner caps tasks per phase at 6.
+  - `ashlr swarms [--json]`: list all past swarm runs (id, status, phase, cost).
+  - `ashlr swarm show <id>`: full `SwarmRun` detail including per-task status, usage, and errors.
+- **New types in `src/core/types.ts`**: `SpecArtifact`, `SwarmPhaseName`, `SwarmTaskSpec`, `SwarmTaskRun`, `SwarmPlan`, `SwarmRun`, `SwarmOptions`.
+- **`--dry-run`**: planner runs, all tasks printed, no agents invoked — zero cost, safe to run anywhere.
+- **`--background`**: launch a detached worker process that runs the swarm and writes progress to the swarm record; foreground returns the swarm id immediately. Total budget still bounds all background work.
+
+### Guardrails
+- **Hard total budget**: a single `RunBudget` ceiling spans the entire swarm (all tasks, all phases). Any task that would push usage over the limit is skipped; the swarm aborts cleanly with full partial state preserved.
+- **Bounded concurrency**: `--parallel` (default 3, max 8); planner enforces ≤6 tasks per phase.
+- **Local-first**: tasks run on local models (builtin/Ollama) by default. `--allow-cloud` required for cloud endpoints — no silent billing.
+- **No recursion / no fork bomb**: swarm tasks set `ASHLR_IN_SWARM=1` in subprocess env. `ashlr swarm` refuses to start if that marker is already set, preventing nested swarms.
+- **No outward/destructive actions by default**: tasks operate within the target project dir; push, deploy, repo creation, and destructive `tidy --apply` / `ship --confirm` are blocked unless explicitly opted in.
+- **Resumable**: `SwarmRun` persisted to `~/.ashlr/swarms/<id>.json` after every step; `--resume <id>` restarts from the last completed checkpoint.
+- **Streaming progress** (M11 `StreamSink`): phase start/done, per-task start/done, live burndown counts streamed to stderr in real time.
+
+---
+
 ## [Unreleased] — M11: Watchable, Robust Runs
 
 ### Added

@@ -183,6 +183,59 @@ ashlr recall "embedding model setup"
 
 `ashlr run` is **memory-aware by default** — it injects the top-k `recall(goal)` hits into each sub-agent's prompt (cap via `genome.maxRecall`, disable per-run with `--no-memory`).
 
+### Spec-driven swarms
+
+Author an ambitious end-state spec, then unleash a fleet of local agents against it — all within hard budget and safety guardrails.
+
+**Step 1 — author a spec.**
+
+```sh
+# Draft a structured spec (Context / North Star / Pillars / Roadmap / Verification)
+ashlr spec new "Add a plugin system to ashlr-hub" --project ~/Desktop/github/dev-tools/ashlr-hub
+# → .ashlr/specs/add-a-plugin-system-v1.md  +  .ashlr/specs/add-a-plugin-system-v1.json
+
+ashlr spec list                                   # id · version · status · goal
+ashlr spec show add-a-plugin-system-v1            # full markdown body
+ashlr spec refine add-a-plugin-system-v1 "Add hot-reload support to the plugin lifecycle"
+# → produces v2; v1 is preserved
+```
+
+**Step 2 — run an agent fleet against the spec.**
+
+```sh
+# Dry-run first: see the SwarmPlan (phases + tasks) with zero cost
+ashlr swarm add-a-plugin-system-v1 --dry-run
+
+# Real swarm: SCAFFOLD → BUILD(parallel) → INTEGRATE → VERIFY → REVIEW
+ashlr swarm add-a-plugin-system-v1 --budget 64000 --parallel 3
+
+# Tighter budget, single worker lane, on a temp scratch dir
+ashlr swarm "Add config validation" --budget 16000 --parallel 1 --project /tmp/scratch
+
+# Fire-and-forget: returns the swarm id immediately; work runs in the background
+ashlr swarm add-a-plugin-system-v1 --budget 64000 --background
+# → swarm id: swarm_abc123  (progress written to ~/.ashlr/swarms/swarm_abc123.json)
+
+# Resume after an interruption or budget hit
+ashlr swarm add-a-plugin-system-v1 --resume swarm_abc123 --budget 32000
+
+ashlr swarms                                      # list all runs: id · status · cost
+ashlr swarm show swarm_abc123                     # per-task status, usage, errors
+```
+
+**Safety model — non-negotiable defaults.**
+
+| Guardrail | Behaviour |
+|---|---|
+| Hard total budget | Single `RunBudget` ceiling across all tasks and phases; aborts cleanly when hit. |
+| Bounded concurrency | `--parallel` default 3, max 8; planner caps ≤6 tasks per phase. |
+| Local-first | Runs on builtin/Ollama by default; `--allow-cloud` required for cloud endpoints. |
+| No recursion | Sets `ASHLR_IN_SWARM=1` on subprocess env; refuses to start if already set. |
+| No outward action | Tasks cannot push, deploy, or create repos without an explicit opt-in flag. |
+| Resumable | `SwarmRun` persisted to `~/.ashlr/swarms/<id>.json` after every step. |
+
+---
+
 ### Maintain
 
 | Command | What it does |
