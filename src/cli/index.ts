@@ -274,6 +274,14 @@ const loadNotifyCmd = lazyCmd(
   'notify command requires src/cli/notify.ts (M18 module not yet built).',
 );
 
+// ─── M19 command loader ────────────────────────────────────────────
+
+const loadTelemetryCmd = lazyCmd(
+  () => import('./telemetry.js' as unknown as string),
+  (m) => m.cmdTelemetry as Cmd,
+  'telemetry command requires src/cli/telemetry.ts (M19 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1130,6 +1138,8 @@ function cmdHelp(): void {
     ['vercel <ls|logs>',             'Read recent Vercel deployments or latest build logs (read-only).'],
     ['wire [claude|codex|cursor|all]', 'Wire ashlr MCP gateway into editor config(s); defaults to detected editors.'],
     ['notify test',                  'Send a test ping to the configured webhook(s); no-op if none are set.'],
+    ['telemetry [status]',           'M19: endpoint+PAT configured (bool), sink mode, local JSONL count, governance.'],
+    ['telemetry test',               'Emit a synthetic metadata-only test span; report sink+ok.'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1143,8 +1153,9 @@ function cmdHelp(): void {
   console.log('');
   console.log('  ' + bold('Flags apply per-command above.'));
   console.log('');
-  console.log('  ' + bold('run flags:') + dim('  --budget N  --max-steps N  --parallel N  --engine builtin|ashlrcode|aw  --allow-cloud  --no-tools  --no-memory  --resume <id>  --json'));
-  console.log('  ' + bold('swarm flags:') + dim('  --budget N  --parallel N (default 3, max 8)  --background  --resume <id>  --dry-run  --allow-cloud  --project <path>'));
+  console.log('  ' + bold('run flags:') + dim('  --budget N  --max-steps N  --parallel N  --engine builtin|ashlrcode|aw  --allow-cloud  --no-tools  --no-memory  --resume <id>  --json  --over-budget'));
+  console.log('  ' + bold('swarm flags:') + dim('  --budget N  --parallel N (default 3, max 8)  --background  --resume <id>  --dry-run  --allow-cloud  --project <path>  --over-budget'));
+  console.log('  ' + dim('  --over-budget  Proceed even when spend governance cap is exceeded (required when telemetry.govAction=block)'));
   console.log('');
   console.log('  ' + bold('Examples:'));
   console.log(`    ${cyan('ashlr run "list all open GitHub issues in this repo"')}`);
@@ -1366,6 +1377,12 @@ async function main(): Promise<void> {
       case 'notify': {
         const cmdNotify = await loadNotifyCmd();
         process.exitCode = await cmdNotify(rest);
+        break;
+      }
+
+      case 'telemetry': {
+        const cmdTelemetry = await loadTelemetryCmd();
+        process.exitCode = await cmdTelemetry(rest);
         break;
       }
 

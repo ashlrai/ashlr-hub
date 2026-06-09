@@ -150,6 +150,8 @@ interface ParsedSwarmArgs {
   yes: boolean;
   /** --force flag: allow rollback over a dirty tree. */
   force: boolean;
+  /** Bypass an over-cap spend-governance block (M19). Optional — defaults false. */
+  overBudget?: boolean;
   usageError?: string;
 }
 
@@ -329,6 +331,10 @@ function parseSwarmArgs(args: string[]): ParsedSwarmArgs {
       i++;
     } else if (arg === '--no-capture') {
       result.noCapture = true;
+      i++;
+    } else if (arg === '--over-budget') {
+      // M19 spend-governance escape hatch — proceed even when over the period cap.
+      result.overBudget = true;
       i++;
     } else if (arg === '--project') {
       const val = args[++i];
@@ -1291,6 +1297,11 @@ export async function cmdSwarm(args: string[]): Promise<number> {
   // Pass --no-capture so captureFromSwarm skips genome auto-capture for this swarm.
   if (parsed.noCapture) {
     (swarmOpts as SwarmOptions & { noCapture?: boolean }).noCapture = true;
+  }
+
+  // Pass --over-budget so checkGovernanceSwarm lets an over-cap swarm proceed (M19).
+  if (parsed.overBudget) {
+    (swarmOpts as SwarmOptions & { overBudget?: boolean }).overBudget = true;
   }
 
   // Print launch banner (non-JSON)

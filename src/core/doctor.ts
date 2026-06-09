@@ -100,6 +100,48 @@ async function tryBuildBudgetRollup(
 
 
 /**
+ * Attempt to call evalGovernance from the M19 governance module.
+ * Returns null if the module is unavailable (not yet built) or throws.
+ * NEVER returns PAT values — only the GovernanceStatus metadata shape.
+ */
+async function tryEvalGovernance(
+  cfg: AshlrConfig,
+): Promise<import('./types.js').GovernanceStatus | null> {
+  try {
+    const specifier = './observability/governance.js';
+    const mod = await import(/* @vite-ignore */ specifier) as {
+      evalGovernance: (cfg: AshlrConfig) => import('./types.js').GovernanceStatus;
+    };
+    return mod.evalGovernance(cfg);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Attempt to load patAvailable from the M19 telemetry-sink module and derive
+ * the active sink type. Returns null if the module is unavailable or throws.
+ * Boolean flags ONLY — PAT value is never returned, logged, or stored here.
+ */
+async function tryGetTelemetrySinkInfo(
+  cfg: AshlrConfig,
+): Promise<{ sinkType: 'local' | 'otlp'; endpointConfigured: boolean; patConfigured: boolean } | null> {
+  try {
+    const specifier = './observability/telemetry-sink.js';
+    const mod = await import(/* @vite-ignore */ specifier) as {
+      patAvailable: (cfg: AshlrConfig) => boolean;
+    };
+    const endpointConfigured = Boolean(cfg.telemetry?.pulse);
+    const patConfigured = mod.patAvailable(cfg); // boolean only — never logs/returns the value
+    // OtlpHttpSink is selected only when BOTH endpoint AND PAT are present.
+    const sinkType: 'local' | 'otlp' = endpointConfigured && patConfigured ? 'otlp' : 'local';
+    return { sinkType, endpointConfigured, patConfigured };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Attempt to load genomeHealth from the M7 genome store module.
  * Returns null if the module is unavailable (not yet built) or throws.
  */
@@ -663,6 +705,119 @@ function checkIdentity(
 }
 
 // ---------------------------------------------------------------------------
+// M19: Spend governance check
+// ---------------------------------------------------------------------------
+
+/**
+ * Check: Spend governance (M19).
+ * id: 'spend-governance'
+ *
+ * Evaluates the period spend vs. the configured cap via evalGovernance:
+ *   - ok or no cap  → pass
+ *   - warn (>= 80%) → warn
+ *   - over (> cap)  → fail with fix hint
+ *
+ * Degrades to pass when the governance module is not yet available.
+ * Never throws. NEVER exposes PAT, endpoint URL body, or spend detail beyond
+ * what GovernanceStatus.message already contains (metadata only).
+ *
+ * @param governance - pre-fetched GovernanceStatus result (or null when unavailable)
+ */
+function checkSpendGovernance(
+  governance: import('./types.js').GovernanceStatus | null,
+): DoctorCheck {
+  if (governance === null) {
+    return check(
+      'spend-governance',
+      'Spend governance',
+      'pass',
+      'Governance module not yet available — skipping',
+    );
+  }
+
+  if (governance.capUsd === null) {
+    return check(
+      'spend-governance',
+      'Spend governance',
+      'pass',
+      `No spend cap configured (window: ${governance.window})`,
+    );
+  }
+
+  if (governance.level === 'over') {
+    return check(
+      'spend-governance',
+      'Spend governance',
+      'fail',
+      governance.message,
+      'Review `ashlr pulse`; raise cfg.telemetry.budgetUsd or reduce spend. Pass --over-budget to proceed when govAction is block.',
+    );
+  }
+
+  if (governance.level === 'warn') {
+    return check(
+      'spend-governance',
+      'Spend governance',
+      'warn',
+      governance.message,
+      'Review `ashlr pulse`; consider raising cfg.telemetry.budgetUsd or reducing spend.',
+    );
+  }
+
+  // level === 'ok'
+  return check('spend-governance', 'Spend governance', 'pass', governance.message);
+}
+
+// ---------------------------------------------------------------------------
+// M19: Telemetry sink check
+// ---------------------------------------------------------------------------
+
+/**
+ * Check: Telemetry sink (M19).
+ * id: 'telemetry-sink'
+ *
+ * Reports the active sink type (local vs otlp) and whether an endpoint + PAT
+ * are configured — as booleans only (never values). This is an informational
+ * check (info → 'pass'); it warns if the module is unavailable. Never throws.
+ * PAT value is NEVER logged, returned, or placed in any detail field.
+ *
+ * @param sinkInfo - pre-fetched telemetry sink info (or null when unavailable)
+ */
+function checkTelemetrySink(
+  sinkInfo: { sinkType: 'local' | 'otlp'; endpointConfigured: boolean; patConfigured: boolean } | null,
+): DoctorCheck {
+  if (sinkInfo === null) {
+    return check(
+      'telemetry-sink',
+      'Telemetry sink',
+      'pass',
+      'Telemetry sink module not yet available — default: local',
+    );
+  }
+
+  const { sinkType, endpointConfigured, patConfigured } = sinkInfo;
+  const endpointLabel = endpointConfigured ? 'endpoint: configured' : 'endpoint: not configured';
+  const patLabel = patConfigured ? 'PAT: configured' : 'PAT: not configured';
+
+  if (sinkType === 'otlp') {
+    return check(
+      'telemetry-sink',
+      'Telemetry sink',
+      'pass',
+      `Active sink: otlp (${endpointLabel}, ${patLabel})`,
+    );
+  }
+
+  // Local sink — always passes; note if endpoint/PAT partially set so user
+  // can diagnose why OTLP is not active without revealing any values.
+  const detail = endpointConfigured && !patConfigured
+    ? `Active sink: local (${endpointLabel}, ${patLabel} — set ASHLR_PULSE_TOKEN or add via phantom to activate OTLP)`
+    : `Active sink: local (${endpointLabel}, ${patLabel})`;
+
+  return check('telemetry-sink', 'Telemetry sink', 'pass', detail);
+}
+
+// ---------------------------------------------------------------------------
 // runDoctor
 // ---------------------------------------------------------------------------
 
@@ -679,13 +834,15 @@ function checkIdentity(
 export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
 
-  // --- Pre-fetch M3 + M5 + M7 registry results (all async-safe, never throw) ---
-  const [mcpRegistry, toolsRegistry, budgetRollup, genomeHealth, identity] = await Promise.all([
+  // --- Pre-fetch M3 + M5 + M7 + M19 registry results (all async-safe, never throw) ---
+  const [mcpRegistry, toolsRegistry, budgetRollup, genomeHealth, identity, governance, telemetrySinkInfo] = await Promise.all([
     tryDiscoverMcpServers(),
     tryGetToolsRegistry(),
     tryBuildBudgetRollup(cfg),
     tryGetGenomeHealth(cfg),
     tryGetIdentity(),
+    tryEvalGovernance(cfg),
+    tryGetTelemetrySinkInfo(cfg),
   ]);
 
   // --- Synchronous checks ---
@@ -711,6 +868,10 @@ export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
 
   // --- M18 checks ---
   checks.push(checkIdentity(identity));
+
+  // --- M19 checks ---
+  checks.push(checkSpendGovernance(governance));
+  checks.push(checkTelemetrySink(telemetrySinkInfo));
 
   // --- Async: provider registry ---
   try {

@@ -62,6 +62,14 @@ export interface AshlrConfig {
     budgetTokens?: number;
     /** Window the budget caps apply to (default '7d' when caps are set). */
     budgetWindow?: "1d" | "7d" | "30d";
+    /**
+     * M19 spend governance action when the period spend exceeds the cap.
+     * 'warn' (default): advisory only — print a prominent warning, never block.
+     * 'block': additionally require an explicit --over-budget flag to proceed.
+     * Governance NEVER silently blocks; the per-run hard budget remains the
+     * only hard ceiling.
+     */
+    govAction?: "warn" | "block";
   };
   /** Map of integration name -> resolved executable path (entire, aw, claude, ...). */
   tools: Record<string, string>;
@@ -1349,4 +1357,67 @@ export interface NotifyTarget {
   slackWebhook?: string;
   /** Discord webhook URL. Posts a concise completion summary when set. */
   discordWebhook?: string;
+}
+
+/**
+ * M19: one GenAI span derived from a completed run/swarm task. METADATA ONLY —
+ * carries token counts, cost, ids, status, and timing; NEVER prompts,
+ * completions, tool args, file contents, or secrets. The single normalized
+ * shape that both the OTLP emitter and the local-file sink consume.
+ */
+export interface GenAiSpan {
+  /** Span name (e.g. the operation/task identifier — metadata, not content). */
+  name: string;
+  /** Owning run or swarm id this span belongs to. */
+  runId: string;
+  /** Model id used (maps to gen_ai.request.model). */
+  model: string;
+  /** Provider id used (maps to gen_ai.system). */
+  provider: string;
+  /** Routing tier (e.g. 'local' | 'cloud' or model-tier label). */
+  tier: string;
+  /** Prompt/input tokens (maps to gen_ai.usage.input_tokens). */
+  tokensIn: number;
+  /** Completion/output tokens (maps to gen_ai.usage.output_tokens). */
+  tokensOut: number;
+  /** Estimated USD cost for this span. */
+  estCostUsd: number;
+  /** Terminal status string (e.g. 'done' | 'failed' | 'aborted'). */
+  status: string;
+  /** ISO start timestamp. */
+  startTs: string;
+  /** ISO end timestamp. */
+  endTs: string;
+}
+
+/**
+ * M19: result of emitting spans through a TelemetrySink. Best-effort —
+ * `ok:false` records a failure detail (logged to stderr only) and is NEVER
+ * allowed to block or throw out of a run/swarm.
+ */
+export interface TelemetryEmitResult {
+  /** Which sink handled the emit. */
+  sink: "local" | "otlp";
+  /** Whether the emit succeeded (best-effort; failures never block). */
+  ok: boolean;
+  /** Human-readable detail — NEVER contains the PAT, prompts, or content. */
+  detail: string;
+}
+
+/**
+ * M19: spend-governance verdict for the configured budget window. Advisory by
+ * default ('warn'); 'over' may require --over-budget when cfg.telemetry
+ * govAction is 'block'. Governance NEVER silently blocks a run.
+ */
+export interface GovernanceStatus {
+  /** ok < 80% of cap, warn >= 80% of cap, over > cap. */
+  level: "ok" | "warn" | "over";
+  /** Spend (USD) over the window, from the forecast/rollup. */
+  spentUsd: number;
+  /** Configured spend cap (USD) for the window, or null when none is set. */
+  capUsd: number | null;
+  /** The budget window the verdict applies to (e.g. '7d'). */
+  window: string;
+  /** Human-readable summary — metadata only, never secrets. */
+  message: string;
 }

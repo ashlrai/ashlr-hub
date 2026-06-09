@@ -714,6 +714,82 @@ function spawnBackgroundWorker(swarmId: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// M19: Telemetry emit + governance (best-effort, fire-and-forget, opt-in)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fire-and-forget OTLP/local telemetry emit for a completed swarm.
+ *
+ * Dynamically imports observability/telemetry-sink.ts and observability/otlp.ts
+ * so this file compiles even before those modules exist. Only emits when both
+ * modules are available. All failures are logged to stderr; never thrown to
+ * the caller. Never blocks. METADATA ONLY — spans carry model/token/cost/ids/
+ * status; never prompts, completions, tool args, file contents, or secrets.
+ */
+async function fireEmitSwarm(run: SwarmRun, cfg: AshlrConfig): Promise<void> {
+  await (async () => {
+    try {
+      // Lazy-import the telemetry seam so the swarm core has no hard dependency
+      // on it at module-load time (keeps the emit fully best-effort). Both
+      // modules are real and fully typed.
+      const [sinkMod, otlpMod] = await Promise.all([
+        import('../observability/telemetry-sink.js'),
+        import('../observability/otlp.js'),
+      ]);
+      if (
+        typeof sinkMod.getSink !== 'function' ||
+        typeof otlpMod.spansFromSwarm !== 'function'
+      ) {
+        return;
+      }
+      // allowPhantomProbe:false — never run a blocking spawnSync phantom probe
+      // on the swarm completion path; OtlpHttpSink resolves the PAT async/bounded.
+      const telSink = sinkMod.getSink(cfg, false);
+      const spans = otlpMod.spansFromSwarm(run);
+      const result = await telSink.emit(spans);
+      if (!result.ok) {
+        process.stderr.write(
+          `[ashlr swarm] telemetry: emit failed — ${result.detail ?? 'unknown'}\n`,
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[ashlr swarm] telemetry: best-effort emit failed — ${msg}\n`);
+    }
+  })();
+}
+
+/**
+ * Evaluate spend governance for a swarm run.
+ * Returns a blocking reason string when govAction==='block' AND level==='over'
+ * AND --over-budget was not passed. Prints a prominent advisory for warn/over.
+ * Never throws. Returns null to proceed normally.
+ */
+async function checkGovernanceSwarm(cfg: AshlrConfig, overBudgetFlag: boolean): Promise<string | null> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const govMod = await import('../observability/governance.js') as any;
+    if (typeof govMod.evalGovernance !== 'function') return null;
+    const verdict = govMod.evalGovernance(cfg) as import('../types.js').GovernanceStatus;
+    if (verdict.level === 'over') {
+      process.stderr.write(`\n[ashlr swarm] SPEND GOVERNANCE OVER-CAP: ${verdict.message}\n\n`);
+      if (cfg.telemetry?.govAction === 'block' && !overBudgetFlag) {
+        return (
+          `Swarm blocked by spend governance: ${verdict.message} ` +
+          `Pass --over-budget to proceed.`
+        );
+      }
+    } else if (verdict.level === 'warn') {
+      process.stderr.write(`\n[ashlr swarm] SPEND GOVERNANCE WARNING: ${verdict.message}\n\n`);
+    }
+    return null;
+  } catch {
+    // Governance must never block a swarm on error.
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // M16: Auto-capture helper (fire-and-forget, never throws)
 // ---------------------------------------------------------------------------
 
@@ -814,6 +890,37 @@ export async function runSwarm(
   );
   const budget = buildBudget(opts);
   const project = opts.project ?? null;
+
+  // -------------------------------------------------------------------------
+  // M19: Spend governance check (advisory; block only when govAction==='block').
+  // Read --over-budget as an extended property (same pattern as noCapture).
+  // -------------------------------------------------------------------------
+  {
+    const overBudgetFlag =
+      (opts as SwarmOptions & { overBudget?: boolean }).overBudget === true;
+    const govBlock = await checkGovernanceSwarm(cfg, overBudgetFlag);
+    if (govBlock !== null) {
+      const now = new Date().toISOString();
+      const blockedRun: SwarmRun = {
+        id: makeId(),
+        goal: input.goal,
+        specId: input.specId ?? null,
+        project,
+        createdAt: now,
+        updatedAt: now,
+        budget,
+        usage: newUsage(),
+        parallel,
+        status: 'failed',
+        plan: { specId: input.specId ?? null, goal: input.goal, tasks: [] },
+        tasks: [],
+        result: govBlock,
+      };
+      process.stderr.write(`[ashlr swarm] ${govBlock}\n`);
+      emitLog(sink, govBlock);
+      return blockedRun;
+    }
+  }
 
   // -------------------------------------------------------------------------
   // RESUME: load existing SwarmRun if resumeId provided.
@@ -936,6 +1043,7 @@ export async function runSwarm(
       run.result = `Planning failed: ${err instanceof Error ? err.message : String(err)}`;
       maybePersist(run);
       emitLog(sink, run.result);
+      await fireEmitSwarm(run, cfg);
       if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
       return run;
     }
@@ -980,6 +1088,7 @@ export async function runSwarm(
           'Swarm aborted: hard total budget exceeded before phase ' + phase;
         persist(run);
         emitLog(sink, run.result);
+        await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
       }
@@ -990,6 +1099,7 @@ export async function runSwarm(
         // Swarm already set to 'needs-approval' and persisted by escalate().
         // Stop cleanly — do NOT proceed to the next phase.
         emitLog(sink, `Swarm ${run.id} paused at phase "${phase}" — awaiting human approval.`);
+        await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
       }
@@ -1000,6 +1110,7 @@ export async function runSwarm(
         run.result = `Swarm aborted: hard total budget exceeded during phase ${phase}`;
         persist(run);
         emitLog(sink, run.result);
+        await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
       }
@@ -1010,6 +1121,7 @@ export async function runSwarm(
     run.result = `Swarm failed: ${err instanceof Error ? err.message : String(err)}`;
     persist(run);
     emitLog(sink, run.result);
+    await fireEmitSwarm(run, cfg);
     if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
     return run;
   }
@@ -1048,6 +1160,9 @@ export async function runSwarm(
   persist(run);
 
   emitLog(sink, `Swarm ${run.id} finished with status: ${run.status}`);
+
+  // M19: Emit telemetry (best-effort, opt-in, fire-and-forget).
+  await fireEmitSwarm(run, cfg);
 
   // M16: Auto-capture on completion (fire-and-forget, never throws).
   if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);

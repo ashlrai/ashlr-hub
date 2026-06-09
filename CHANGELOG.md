@@ -8,6 +8,50 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M19: Real Telemetry (OTLP) + Spend Governance
+
+### Added
+- **OTLP/HTTP-JSON trace emitter** (`src/core/observability/otlp.ts`):
+  - `buildGenAiTrace(spans)` — builds a valid OTLP/HTTP-JSON payload (`resourceSpans → scopeSpans → spans`) with GenAI semantic-convention attributes only: `gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, a cost attribute, `ashlr.run.id`, `ashlr.provider`, `ashlr.tier`, span status, and `start/endTimeUnixNano`. **Metadata only — never prompts, completions, tool arguments, file contents, or secrets.**
+  - `spansFromRun(run)` — produces one `GenAiSpan` per executed task from the `RunState` (usage, status, ids, provider, tier, duration). Pure, no I/O.
+  - `spansFromSwarm(s)` — same, from a `SwarmRun`. Pure, no I/O.
+- **TelemetrySink seam** (`src/core/observability/telemetry-sink.ts`) — the documented cloud-ready seam:
+  - `TelemetrySink` interface: `emit(spans: GenAiSpan[]): Promise<TelemetryEmitResult>`.
+  - `LocalFileSink` (default) — appends spans and run summaries as JSONL to `~/.ashlr/telemetry/*.jsonl`; this is what `ashlr pulse` already aggregates locally. Active whenever no OTLP endpoint + PAT are configured.
+  - `OtlpHttpSink` — active only when `cfg.telemetry.pulse` is set **and** a PAT is available. Calls `buildGenAiTrace` → POSTs to the endpoint with `Authorization: Bearer <PAT>` and `Content-Type: application/json`. Bounded timeout, fire-and-forget, never throws or blocks the run. PAT is placed only in the Authorization header — never logged, printed, stored in span attributes, or returned.
+  - `getSink(cfg)` — returns `OtlpHttpSink` iff `cfg.telemetry.pulse && patAvailable(cfg)`, else `LocalFileSink`. **Default is 100% local.**
+  - `patAvailable(cfg)` — returns a `boolean` only; prefers Phantom, falls back to `ASHLR_PULSE_TOKEN` env var; never returns, logs, or exposes the value.
+  - `localTelemetryDir()` — returns `~/.ashlr/telemetry`.
+- **Spend governance** (`src/core/observability/governance.ts`):
+  - `evalGovernance(cfg)` — reuses `buildForecast` / `buildRollup` to compute actual spend vs `cfg.telemetry.budgetUsd` over `cfg.telemetry.budgetWindow`. Returns a `GovernanceStatus`: `ok` (< 80% of cap), `warn` (≥ 80%), or `over` (> cap). `capUsd: null` + `ok` when no cap is configured. Never throws.
+  - `ashlr pulse` shows a governance summary line: `Governance: ok | ⚠ warn (82% of $50.00) | ✗ over ($52.10 of $50.00 / 30d)`.
+  - `ashlr doctor` gains a "Spend governance" check (degrades to warn when no cap is set).
+- **`ashlr telemetry` command** (`src/cli/telemetry.ts`):
+  - `ashlr telemetry status` — prints whether an endpoint is configured (boolean), whether a PAT is available (boolean), the active sink (`local` or `otlp`), and a governance summary. **Never prints the endpoint URL value or PAT value.**
+  - `ashlr telemetry test` — emits a best-effort synthetic metadata-only span via the configured sink and reports the `TelemetryEmitResult` (sink type, ok/fail, non-secret detail). Useful for verifying the pipeline without a real run.
+- **New types in `src/core/types.ts`** (all existing types preserved):
+  - `GenAiSpan { name; runId; model; provider; tier; tokensIn; tokensOut; estCostUsd; status; startTs; endTs }` — metadata only; no prompts, completions, tool args, file contents, or secrets.
+  - `TelemetryEmitResult { sink: 'local' | 'otlp'; ok: boolean; detail: string }` — `detail` never holds a PAT or content.
+  - `GovernanceStatus { level: 'ok' | 'warn' | 'over'; spentUsd: number; capUsd: number | null; window: string; message: string }`.
+  - `cfg.telemetry.govAction?: 'warn' | 'block'` (default `'warn'`); existing `pulse?`, `budgetUsd?`, `budgetTokens?`, `budgetWindow?` fields unchanged.
+
+### Changed
+- **`src/core/run/orchestrator.ts`** — `runGoal` replaces the M9 bespoke `reportToPulse()` with `getSink(cfg).emit(spansFromRun(run))`. Called post-completion, fire-and-forget, never blocks or throws. Governance check (`evalGovernance`) runs before execution: `warn` prints a prominent advisory; `over` + `govAction === 'block'` requires `--over-budget` to proceed (never silently blocks; per-run hard budget remains the only hard ceiling).
+- **`src/core/swarm/runner.ts`** — `runSwarm` replaces any prior pulse reporting with `getSink(cfg).emit(spansFromSwarm(s))`. Same post-completion, opt-in, best-effort semantics. Governance check runs before swarm start.
+- **`ashlr pulse`** — extended with a governance summary line (`ok` / `warn` / `over`) derived from `evalGovernance`.
+- **`ashlr doctor`** — extended with a "Spend governance" check.
+
+### Guardrails (M19)
+- **Opt-in + best-effort**: OTLP emission happens ONLY when `cfg.telemetry.pulse` is set AND a PAT is available. It is fire-and-forget, bounded timeout, NEVER blocks, slows, or throws during a run or swarm. Failures log to stderr only.
+- **Local-first default**: when no endpoint + PAT are configured (the default), the `LocalFileSink` is active and all telemetry stays 100% local under `~/.ashlr/telemetry/`.
+- **Metadata-only**: span attributes and JSONL records contain model, token counts, cost estimate, run/swarm id, provider, tier, status, and duration — never prompt/response text, tool arguments, file contents, or secret values.
+- **PAT safety**: the PAT lives only in the `Authorization` header. It is never logged, printed, put in span attributes, returned by any function, or committed. `patAvailable()` returns a boolean; `ashlr telemetry status` shows boolean flags — never values.
+- **Governance is advisory, not a silent blocker**: `warn` prints a visible message; `over` + `block` requires `--over-budget` (which the user must pass explicitly). The per-run hard `RunBudget` ceiling remains the only hard ceiling and is unchanged.
+- **No new runtime dependencies**: OTLP POST uses Node.js `fetch` builtin (Node 22+). No third-party packages added.
+- All 1899 existing tests preserved.
+
+---
+
 ## [Unreleased] — M18: Deep Integrations
 
 ### Added

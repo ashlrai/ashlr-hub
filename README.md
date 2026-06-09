@@ -711,6 +711,99 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full module map and data flow.
 
 ---
 
+## Telemetry & governance
+
+`ashlr-hub` has a real, production-grade telemetry pipeline — and it is **opt-in, local-first, and metadata-only by design**.
+
+### Local-first default
+
+By default, every run and swarm records a compact JSONL summary to `~/.ashlr/telemetry/`. This is the same data that `ashlr pulse` aggregates. No configuration required; no network calls; 100% local.
+
+### Cloud-ready seam (OTLP)
+
+When you configure a telemetry endpoint and supply a Personal Access Token (PAT), the hub emits proper **OTLP/HTTP-JSON traces** — `resourceSpans → scopeSpans → spans` with [GenAI semantic-convention](https://opentelemetry.io/docs/specs/semconv/gen-ai/) attributes. The two implementations share the `TelemetrySink` interface:
+
+| Sink | When active | Where data goes |
+|---|---|---|
+| `LocalFileSink` | Default — no endpoint/PAT configured | `~/.ashlr/telemetry/*.jsonl` (local only) |
+| `OtlpHttpSink` | `cfg.telemetry.pulse` set **and** PAT available | POSTs to your OTLP traces endpoint |
+
+The switch is automatic: `getSink(cfg)` returns `OtlpHttpSink` only when both are present; otherwise `LocalFileSink`. Switching to OTLP does not change what data is recorded — only where it goes.
+
+### Privacy: metadata only, always
+
+Span attributes and local JSONL records contain **only**:
+
+- Model name, provider, tier
+- Input / output token counts
+- Estimated cost
+- Run or swarm ID
+- Status and duration
+
+**Prompts, completions, tool arguments, file contents, and secret values are never recorded anywhere in the telemetry pipeline.**
+
+### PAT safety
+
+The PAT (Personal Access Token) for OTLP is sourced from [Phantom](https://github.com/nicholasgasior/phantom) (preferred) or the `ASHLR_PULSE_TOKEN` environment variable. It is:
+
+- Placed **only** in the `Authorization: Bearer` header of the OTLP POST request.
+- Never logged, printed, stored in span attributes, returned by any function, or committed.
+- Never hardcoded anywhere in the hub.
+
+`ashlr telemetry status` shows whether an endpoint and PAT are configured as **booleans only** — never the actual values.
+
+### OTLP: opt-in + best-effort
+
+OTLP emission is:
+
+- **Off by default.** No endpoint or network call is made unless you set `cfg.telemetry.pulse` and a PAT is available.
+- **Fire-and-forget.** It runs after a run or swarm completes and is bounded by a timeout. It never blocks, slows, or throws during a run.
+- **Failure-safe.** If the POST fails (network error, bad response), the error is logged to stderr only. The run result is unaffected.
+
+### Spend governance
+
+The M5 budget alert is extended into a period-based governance policy. Given `cfg.telemetry.budgetUsd` and `cfg.telemetry.budgetWindow`, the hub tracks actual spend and surfaces:
+
+| Level | Condition | Where shown |
+|---|---|---|
+| `ok` | < 80% of cap | `ashlr pulse`, `ashlr telemetry status` |
+| `warn` | ≥ 80% of cap | `ashlr pulse` (advisory banner), `ashlr doctor` |
+| `over` | > cap | `ashlr pulse` (prominent warning), `ashlr run`/`ashlr swarm` (advisory before execution) |
+
+**Governance is advisory — it never silently blocks work.** When `level === 'over'`:
+- `ashlr pulse` shows a prominent warning.
+- `ashlr run` / `ashlr swarm` print a prominent advisory before starting.
+- With `cfg.telemetry.govAction: 'block'`, the run requires `--over-budget` to proceed — but you must pass this flag explicitly. There is no silent prevention.
+
+The per-run hard `RunBudget` ceiling remains the only hard ceiling and is unchanged.
+
+### Commands
+
+```sh
+ashlr telemetry status   # endpoint configured: true/false; PAT available: true/false;
+                         # active sink: local|otlp; governance summary
+ashlr telemetry test     # emit a synthetic metadata-only test span; reports ok/fail + detail
+```
+
+### Config
+
+```jsonc
+// ~/.ashlr/config.json (relevant fields)
+{
+  "telemetry": {
+    "pulse": "https://your-otlp-endpoint/v1/traces",  // optional: enables OtlpHttpSink
+    "budgetUsd": 50,        // optional: period spend cap in USD
+    "budgetWindow": "30d",  // optional: window for governance (default 30d)
+    "govAction": "warn"     // optional: "warn" (default) or "block" (requires --over-budget)
+    // budgetTokens: optional token cap (used by M5 budget alert, unchanged)
+  }
+}
+```
+
+PAT: set via `phantom add-secret ASHLR_PULSE_TOKEN` (preferred) or `export ASHLR_PULSE_TOKEN=<pat>`.
+
+---
+
 ## Local-first & private
 
 `ashlr-hub` is built so your machine is the source of truth and nothing leaves it without your say-so:

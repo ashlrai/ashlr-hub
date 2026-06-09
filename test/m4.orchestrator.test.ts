@@ -1035,14 +1035,22 @@ describe('runGoal — engine delegation (P0 fix)', () => {
 // P0 fix: pulse telemetry — errors logged to stderr (not silently swallowed)
 // ---------------------------------------------------------------------------
 
-describe('reportToPulse — honest error logging (P0 fix)', () => {
+describe('telemetry sink (OTLP) — honest error logging (M19; replaces M9 reportToPulse)', () => {
+  // M19: the OTLP sink only activates when BOTH an endpoint (cfg.telemetry.pulse)
+  // AND a PAT are present. Source the PAT from ASHLR_PULSE_TOKEN for these tests;
+  // restore the prior value afterward so other suites are unaffected.
+  const prevPulseToken = process.env['ASHLR_PULSE_TOKEN'];
+
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     cleanupTestRuns();
+    if (prevPulseToken === undefined) delete process.env['ASHLR_PULSE_TOKEN'];
+    else process.env['ASHLR_PULSE_TOKEN'] = prevPulseToken;
   });
 
-  it('logs pulse failure to stderr instead of silently swallowing it', async () => {
+  it('logs telemetry emit failure to stderr instead of silently swallowing it', async () => {
+    process.env['ASHLR_PULSE_TOKEN'] = 'test-pat-not-logged';
     const stderrChunks: string[] = [];
     const origWrite = process.stderr.write.bind(process.stderr);
     vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown, ...rest: unknown[]) => {
@@ -1082,10 +1090,13 @@ describe('reportToPulse — honest error logging (P0 fix)', () => {
 
     const combined = stderrChunks.join('');
     // The failure must surface in stderr — not be silently swallowed.
-    expect(combined).toMatch(/pulse.*failed|failed.*pulse/i);
+    expect(combined).toMatch(/telemetry.*failed|emit failed|otlp/i);
+    // PAT/SECRET SAFETY: the PAT value must NEVER appear in any stderr output.
+    expect(combined).not.toContain('test-pat-not-logged');
   });
 
-  it('logs non-2xx pulse response to stderr', async () => {
+  it('logs non-2xx telemetry response to stderr', async () => {
+    process.env['ASHLR_PULSE_TOKEN'] = 'test-pat-not-logged';
     const stderrChunks: string[] = [];
     const origWrite = process.stderr.write.bind(process.stderr);
     vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown, ...rest: unknown[]) => {
@@ -1122,5 +1133,7 @@ describe('reportToPulse — honest error logging (P0 fix)', () => {
 
     const combined = stderrChunks.join('');
     expect(combined).toMatch(/pulse.*500|HTTP 500/i);
+    // PAT/SECRET SAFETY: the PAT value must NEVER appear in any stderr output.
+    expect(combined).not.toContain('test-pat-not-logged');
   });
 });

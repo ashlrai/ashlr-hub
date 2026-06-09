@@ -634,57 +634,80 @@ function allTerminal(tasks: RunTask[]): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Pulse reporting (best-effort, non-blocking)
+// M19: Telemetry emit + governance (best-effort, fire-and-forget, opt-in)
 // ---------------------------------------------------------------------------
 
 /**
- * POST a best-effort run-summary to the configured Pulse endpoint.
+ * Fire-and-forget OTLP/local telemetry emit for a completed run.
  *
- * Format: a single bespoke JSON object summarising the run (NOT OTLP).
- * This is an opt-in, best-effort side-channel — it is only attempted when
- * cfg.telemetry.pulse is set. Failures (network, timeout, non-2xx) are logged
- * to stderr and never thrown to the caller.
- *
- * Never throws, never blocks the caller.
+ * Dynamically imports core/observability/telemetry-sink.ts and
+ * core/observability/otlp.ts so this file compiles even before those modules
+ * exist in the build. Only emits when both modules are available; all failures
+ * are logged to stderr and never thrown to the caller. Never blocks the run.
+ * METADATA ONLY — spans carry model/token/cost/ids/status; never prompts,
+ * completions, tool args, file contents, or secrets.
  */
-function reportToPulse(pulseUrl: string, state: RunState): void {
-  const payload = JSON.stringify({
-    runId: state.id,
-    goal: state.goal,
-    status: state.status,
-    engine: state.engine,
-    provider: state.provider,
-    tasks: state.tasks.length,
-    usage: state.usage,
-    createdAt: state.createdAt,
-    updatedAt: state.updatedAt,
-  });
-
-  // Fire-and-forget with a 5 s timeout — log failures to stderr so the caller
-  // knows the report was not delivered (instead of silently swallowing errors).
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 5_000);
-  fetch(pulseUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: payload,
-    signal: ctrl.signal,
-  })
-    .then((res) => {
-      clearTimeout(timer);
-      if (!res.ok) {
+async function fireEmitRun(state: RunState, cfg: AshlrConfig): Promise<void> {
+  await (async () => {
+    try {
+      // Lazy-import the telemetry seam so the orchestrator core has no hard
+      // dependency on it at module-load time (keeps the hot path lean and the
+      // emit fully best-effort). Both modules are real and fully typed.
+      const [sinkMod, otlpMod] = await Promise.all([
+        import('../observability/telemetry-sink.js'),
+        import('../observability/otlp.js'),
+      ]);
+      if (
+        typeof sinkMod.getSink !== 'function' ||
+        typeof otlpMod.spansFromRun !== 'function'
+      ) {
+        return;
+      }
+      // allowPhantomProbe:false — never run a blocking spawnSync phantom probe
+      // on the run completion path; OtlpHttpSink resolves the PAT async/bounded.
+      const telSink = sinkMod.getSink(cfg, false);
+      const spans = otlpMod.spansFromRun(state);
+      const result = await telSink.emit(spans);
+      if (!result.ok) {
         process.stderr.write(
-          `[ashlr run] pulse: best-effort POST to ${pulseUrl} returned HTTP ${res.status}\n`,
+          `[ashlr run] telemetry: emit failed — ${result.detail ?? 'unknown'}\n`,
         );
       }
-    })
-    .catch((err: unknown) => {
-      clearTimeout(timer);
+    } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(
-        `[ashlr run] pulse: best-effort POST to ${pulseUrl} failed — ${msg}\n`,
-      );
-    });
+      process.stderr.write(`[ashlr run] telemetry: best-effort emit failed — ${msg}\n`);
+    }
+  })();
+}
+
+/**
+ * Evaluate spend governance and return a blocking reason string when
+ * govAction==='block' AND level==='over' AND --over-budget was not passed.
+ * Prints a prominent advisory when level is 'warn' or 'over'. Never throws.
+ * Returns null to proceed normally.
+ */
+async function checkGovernance(cfg: AshlrConfig, overBudgetFlag: boolean): Promise<string | null> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const govMod = await import('../observability/governance.js') as any;
+    if (typeof govMod.evalGovernance !== 'function') return null;
+    const verdict = govMod.evalGovernance(cfg) as import('../types.js').GovernanceStatus;
+    if (verdict.level === 'over') {
+      process.stderr.write(`\n[ashlr run] SPEND GOVERNANCE OVER-CAP: ${verdict.message}\n\n`);
+      if (cfg.telemetry?.govAction === 'block' && !overBudgetFlag) {
+        return (
+          `Run blocked by spend governance: ${verdict.message} ` +
+          `Pass --over-budget to proceed.`
+        );
+      }
+    } else if (verdict.level === 'warn') {
+      process.stderr.write(`\n[ashlr run] SPEND GOVERNANCE WARNING: ${verdict.message}\n\n`);
+    }
+    return null;
+  } catch {
+    // Governance must never block a run on error.
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -917,6 +940,35 @@ export async function runGoal(
   // Suppress unused-import warning for withToolEnv (still used by engines.ts indirectly;
   // kept here for the M10 env-bridge contract — callers outside this file use it too).
   void withToolEnv;
+
+  // -- M19: Spend governance check (advisory; block only when govAction==='block') --
+  // Read the --over-budget flag the same way noMemory/noCapture are read: as an
+  // extended property on opts (not yet in the typed RunOptions interface).
+  const overBudgetFlag = (opts as RunOptions & { overBudget?: boolean }).overBudget === true;
+  const govBlock = await checkGovernance(cfg, overBudgetFlag);
+  if (govBlock !== null) {
+    const now = new Date().toISOString();
+    const blockState: RunState = {
+      id: generateRunId(),
+      goal,
+      engine: 'builtin',
+      provider: 'none',
+      createdAt: now,
+      updatedAt: now,
+      budget: {
+        maxTokens: opts.budget?.maxTokens ?? DEFAULT_MAX_TOKENS,
+        maxSteps: opts.budget?.maxSteps ?? DEFAULT_MAX_STEPS,
+        allowCloud: opts.allowCloud ?? false,
+      },
+      usage: newUsage(),
+      tasks: [],
+      steps: [],
+      status: 'failed',
+      result: govBlock,
+    };
+    process.stderr.write(`[ashlr run] ${govBlock}\n`);
+    return blockState;
+  }
 
   // -- Budget / parallel defaults ----------------------------------------------
   const allowCloud = opts.allowCloud ?? false;
@@ -1469,10 +1521,9 @@ export async function runGoal(
     state.updatedAt = new Date().toISOString();
     saveRun(state);
 
-    // Report to Pulse (best-effort)
-    if (cfg.telemetry.pulse) {
-      reportToPulse(cfg.telemetry.pulse, state);
-    }
+    // M19: Emit telemetry (best-effort, opt-in). Awaited so the local sink is
+    // flushed before the process exits; bounded + fully caught, never throws.
+    await fireEmitRun(state, cfg);
 
     // M16: Auto-capture on abort path (fire-and-forget).
     const noCaptureAbort = (opts as RunOptions & { noCapture?: boolean }).noCapture === true;
@@ -1552,10 +1603,10 @@ export async function runGoal(
   state.updatedAt = new Date().toISOString();
   saveRun(state);
 
-  // -- Best-effort Pulse POST --------------------------------------------------
-  if (cfg.telemetry.pulse) {
-    reportToPulse(cfg.telemetry.pulse, state);
-  }
+  // -- M19: Emit telemetry (best-effort, opt-in) ------------------------------
+  // Awaited so the local sink is flushed before the process exits; bounded +
+  // fully caught, never throws.
+  await fireEmitRun(state, cfg);
 
   // -- M16: Auto-capture (fire-and-forget, never throws, never blocks) ---------
   // Read noCapture via extended property (same pattern as noMemory above).

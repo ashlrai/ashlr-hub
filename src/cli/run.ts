@@ -101,6 +101,8 @@ interface ParsedRunArgs {
   verifyModel: boolean;
   /** Skip auto-capture of this run to the genome (M16). */
   noCapture: boolean;
+  /** Bypass an over-cap spend-governance block (M19). Optional — defaults false. */
+  overBudget?: boolean;
   usageError?: string;
 }
 
@@ -197,6 +199,10 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       i++;
     } else if (arg === '--no-capture') {
       result.noCapture = true;
+      i++;
+    } else if (arg === '--over-budget') {
+      // M19 spend-governance escape hatch — proceed even when over the period cap.
+      result.overBudget = true;
       i++;
     } else if (arg === '--resume') {
       const val = args[++i];
@@ -570,6 +576,7 @@ export async function cmdRun(args: string[]): Promise<number> {
     __sink?: StreamSink;
     noMemory?: boolean;
     noCapture?: boolean;
+    overBudget?: boolean;
   };
 
   optsWithHook.__sink = sink;
@@ -592,6 +599,11 @@ export async function cmdRun(args: string[]): Promise<number> {
   // Pass --no-capture so captureFromRun skips genome auto-capture for this run.
   if (parsed.noCapture) {
     optsWithHook.noCapture = true;
+  }
+
+  // Pass --over-budget so checkGovernance lets an over-cap run proceed (M19).
+  if (parsed.overBudget) {
+    optsWithHook.overBudget = true;
   }
 
   let state: RunState;

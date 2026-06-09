@@ -14,7 +14,7 @@
  * are built, matching the M3/M4 lazy-import pattern.
  */
 
-import type { ActivityRollup, BudgetAlert, CostForecast } from '../core/types.js';
+import type { ActivityRollup, BudgetAlert, CostForecast, GovernanceStatus } from '../core/types.js';
 import type { AshlrConfig } from '../core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -68,6 +68,22 @@ async function loadBuildForecast(): Promise<BuildForecastFn | null> {
     }
   }
   return _buildForecast ?? null;
+}
+
+type EvalGovernanceFn = (cfg: AshlrConfig) => GovernanceStatus;
+
+let _evalGovernance: EvalGovernanceFn | null | undefined = undefined;
+
+async function loadEvalGovernance(): Promise<EvalGovernanceFn | null> {
+  if (_evalGovernance === undefined) {
+    try {
+      const mod = await import('../core/observability/governance.js') as { evalGovernance: EvalGovernanceFn };
+      _evalGovernance = mod.evalGovernance;
+    } catch {
+      _evalGovernance = null;
+    }
+  }
+  return _evalGovernance ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +212,17 @@ function renderBudgetLine(budget: BudgetAlert): string {
   return parts.join('  ');
 }
 
+/** Render the M19 spend-governance status line. */
+function renderGovernanceLine(gov: GovernanceStatus): string {
+  const ICON = gov.level === 'over' ? '●' : gov.level === 'warn' ? '◐' : '○';
+  const colorFn = gov.level === 'over' ? red : gov.level === 'warn' ? yellow : green;
+  const levelStr = colorFn(`${ICON} ${gov.level.toUpperCase()}`);
+  const detail = gov.capUsd !== null
+    ? gray(`  ($${gov.spentUsd.toFixed(2)} / $${gov.capUsd.toFixed(2)} this ${gov.window})`)
+    : dim('  (no cap configured)');
+  return `${levelStr}${detail}`;
+}
+
 /** Render the M15 cost/savings/forecast line (estimates clearly labeled). */
 function renderForecastLine(fc: CostForecast): string {
   const spent = `spent ${bold(fmtUsd(fc.spentUsd))} (${fc.window})`;
@@ -245,7 +272,7 @@ function renderDayBars(rollup: ActivityRollup): void {
 // Rich dashboard renderer
 // ---------------------------------------------------------------------------
 
-function renderDashboard(rollup: ActivityRollup, forecast?: CostForecast | null): void {
+function renderDashboard(rollup: ActivityRollup, forecast?: CostForecast | null, governance?: GovernanceStatus | null): void {
   const { window: win, since, totals, byProject, byModel, budget } = rollup;
 
   // ── Header ────────────────────────────────────────────────────────────────
@@ -273,6 +300,9 @@ function renderDashboard(rollup: ActivityRollup, forecast?: CostForecast | null)
 
   // ── Budget status ─────────────────────────────────────────────────────────
   console.log(`  ${bold('Budget')}   ${renderBudgetLine(budget)}`);
+  if (governance) {
+    console.log(`  ${bold('Governance')} ${renderGovernanceLine(governance)}`);
+  }
   console.log('');
 
   // ── By-project table ─────────────────────────────────────────────────────
@@ -412,9 +442,11 @@ export async function cmdPulse(args: string[]): Promise<number> {
 
   // Load buildRollup (lazy; degrades if M5 core not yet built).
   // Load buildForecast lazily; degrades gracefully if M15 module not yet built.
-  const [buildRollup, buildForecast] = await Promise.all([
+  // Load evalGovernance lazily; degrades gracefully if M19 module not yet built.
+  const [buildRollup, buildForecast, evalGovernance] = await Promise.all([
     loadBuildRollup(),
     loadBuildForecast(),
+    loadEvalGovernance(),
   ]);
 
   if (!buildRollup) {
@@ -460,20 +492,33 @@ export async function cmdPulse(args: string[]): Promise<number> {
     }
   }
 
+  // Build governance verdict (M19; degrades gracefully when module not yet present)
+  let governance: GovernanceStatus | null = null;
+  if (evalGovernance) {
+    try {
+      governance = evalGovernance(cfg);
+    } catch {
+      // non-fatal — governance is best-effort
+      governance = null;
+    }
+  }
+
   // Machine output.
   // BACKWARD-COMPAT (M15): emit the ActivityRollup at the TOP LEVEL (as shipped
   // through M14) and attach `forecast` as a purely additive field. Existing
   // consumers — notably the M13 Raycast Pulse extension, which destructures
   // { totals, byProject, byModel, budget } from the top level — keep working,
   // while new consumers read the additive `.forecast`.
+  // M19: also attach `governance` as a purely additive field.
   if (parsed.json) {
-    const out: ActivityRollup & { forecast: CostForecast | null } = { ...rollup, forecast };
+    const out: ActivityRollup & { forecast: CostForecast | null; governance: GovernanceStatus | null } =
+      { ...rollup, forecast, governance };
     process.stdout.write(JSON.stringify(out, null, 2) + '\n');
     return rollup.budget.level === 'over' ? 1 : 0;
   }
 
   // Rich dashboard
-  renderDashboard(rollup, forecast);
+  renderDashboard(rollup, forecast, governance);
 
   return rollup.budget.level === 'over' ? 1 : 0;
 }
@@ -516,10 +561,13 @@ function printPulseHelp(): void {
   console.log(`    ${dim('• Only usage metadata is read (tokens, model, timestamp, project path).')}`);
   console.log(`    ${dim('• Message content is never read, stored, or printed.')}`);
   console.log('');
-  console.log('  ' + bold('Budget caps:'));
+  console.log('  ' + bold('Budget caps + spend governance (M19):'));
   console.log('');
   console.log(`    ${dim('Set in config: ashlr config set telemetry.budgetUsd 10.00')}`);
   console.log(`    ${dim('               ashlr config set telemetry.budgetWindow 7d')}`);
+  console.log(`    ${dim('               ashlr config set telemetry.govAction warn   # or block')}`);
+  console.log(`    ${dim('Governance: ok <80% cap, warn >=80%, over >cap.')}`);
+  console.log(`    ${dim('Advisory by default; use --over-budget to proceed when govAction=block.')}`);
   console.log('');
   console.log('  ' + bold('Exit codes:'));
   console.log('');
