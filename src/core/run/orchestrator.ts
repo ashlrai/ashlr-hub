@@ -42,6 +42,7 @@ import type {
 import { getActiveClient } from './provider-client.js';
 import { newUsage, overBudget, estCostUsd } from './budget.js';
 import { runTask } from './agent-loop.js';
+import { withToolEnv } from '../env-bridge.js';
 
 // ---------------------------------------------------------------------------
 // Constants / defaults
@@ -567,6 +568,34 @@ export async function runGoal(
   // types.ts) — read as an extended property, same pattern as __onStep above.
   const noMemory = (opts as RunOptions & { noMemory?: boolean }).noMemory === true;
 
+  // -- Resume short-circuit (M10 fix: must run BEFORE engine delegation) -------
+  // When --resume is requested we must NEVER delegate to an external engine —
+  // the run was already started by whichever engine created it, and resuming
+  // means continuing with the builtin executor against the persisted state.
+  // Previously the engine-delegation block ran first, so
+  // `run --engine ashlrcode --resume <id>` would re-run via ashlrcode instead
+  // of resuming.  Now we handle all resume guards here, before engine selection:
+  //   1. Not found  → throw immediately.
+  //   2. Already complete → return early (no-op).
+  //   3. Incomplete → fall through with opts.resumeId set; engine selection
+  //      below skips delegation because we override engine to 'builtin'.
+  if (opts.resumeId) {
+    const existingForResume = loadRun(opts.resumeId);
+    if (!existingForResume) {
+      throw new Error(`Run "${opts.resumeId}" not found in ${RUNS_DIR}`);
+    }
+    if (existingForResume.status === 'done' && existingForResume.result) {
+      process.stderr.write(
+        `[ashlr run] run ${existingForResume.id} is already complete — nothing to resume\n`,
+      );
+      return existingForResume;
+    }
+    // Incomplete resume: force builtin so engine delegation is skipped.
+    // The full state reload / task-reset happens in the "Load or create
+    // RunState" block further below.
+    opts = { ...opts, engine: 'builtin' };
+  }
+
   // -- Engine selection --------------------------------------------------------
   const requestedEngine = opts.engine ?? 'builtin';
   let engine = requestedEngine;
@@ -590,6 +619,10 @@ export async function runGoal(
         encoding: 'utf8',
         maxBuffer: 10 * 1024 * 1024, // 10 MB
         timeout: 5 * 60 * 1000,      // 5 min hard wall-clock limit
+        // M10 env-bridge: project unified config into the delegated engine's
+        // environment so ashlrcode/aw honours the same provider/model/roots
+        // config as the hub — without modifying those tools.
+        env: withToolEnv(cfg),
       });
 
       const id = generateRunId();

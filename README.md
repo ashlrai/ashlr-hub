@@ -187,6 +187,30 @@ ashlr recall "embedding model setup"
 
 ---
 
+## Ecosystem cohesion
+
+`ashlr-hub` projects its unified `~/.ashlr/config.json` into the environment of
+every tool it spawns — so one config drives the entire suite without modifying any
+of the independently-shipped tools.
+
+When the hub starts a child process (an `ashlrcode` / `aw` agent run, an MCP
+downstream server, or a deploy tool like `vercel` or `stack`), it merges a set of
+non-secret env vars derived from your config into that child's environment before
+exec. Common endpoint vars (`OLLAMA_HOST`, `OLLAMA_BASE_URL`, `LM_STUDIO_URL`,
+`OPENAI_BASE_URL`), provider identity (`ASHLR_LLM_PROVIDER`, `ASHLR_PROVIDER_CHAIN`),
+model name (`ASHLR_MODEL`, `AC_MODEL`), paths (`ASHLR_CONFIG`, `ASHLR_GENOME_DIR`,
+`ASHLR_ROOTS`), and a local-first flag (`ASHLR_LOCAL_FIRST=1`) are all set
+automatically.
+
+**No secret values are ever injected.** API keys are Phantom's responsibility and
+reach child processes only via normal environment inheritance. The bridge maps
+endpoints, model names, paths, and flags — nothing else.
+
+The implementation lives in `src/core/env-bridge.ts` (`buildToolEnv` /
+`withToolEnv`) and is applied at every spawn site in the hub.
+
+---
+
 ## Architecture
 
 `ashlr-hub` is a TypeScript ESM (NodeNext) project. Core logic lives in `src/core/`, the CLI dispatch in `src/cli/`, and the Raycast extension in `src/raycast/` (its own package). `core/` and `cli/` carry **zero runtime dependencies** beyond the MCP SDK.

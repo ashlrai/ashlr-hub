@@ -713,3 +713,15 @@ export interface LearnInput {
   /** Optional tags to attach to the entry. */
   tags?: string[];
 }
+
+// ---------------------------------------------------------------------------
+// M10: config -> env bridge (ecosystem cohesion) contract
+// ---------------------------------------------------------------------------
+
+/**
+ * A flat map of environment-variable name -> value. Used by the env-bridge
+ * (core/env-bridge.ts) to project the unified ~/.ashlr/config.json into the
+ * environment of spawned ecosystem tools. NON-SECRET ONLY — endpoints, model
+ * names, paths, and flags. Never carries secret VALUES (phantom owns secrets).
+ */
+export type ToolEnv = Record<string, string>;

@@ -12,6 +12,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { ShipCheck, ShipGate } from '../types.js';
+import { loadConfig } from '../config.js';
+import { withToolEnv } from '../env-bridge.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -48,6 +50,7 @@ function runSync(
   args: string[],
   cwd: string,
   timeoutMs: number,
+  env?: NodeJS.ProcessEnv,
 ): { stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; error?: string } {
   try {
     const result = spawnSync(cmd, args, {
@@ -55,6 +58,7 @@ function runSync(
       cwd,
       timeout: timeoutMs,
       maxBuffer: 4 * 1024 * 1024, // 4 MB
+      ...(env !== undefined ? { env } : {}),
     });
     const timedOut = result.signal === 'SIGTERM' || (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT';
     return {
@@ -621,7 +625,10 @@ export async function deploy(
   const { cmd: spawnCmd, args: spawnArgs } = invocation;
 
   try {
-    const result = runSync(spawnCmd, spawnArgs, absPath, DEPLOY_TIMEOUT_MS);
+    // Project unified config into the child's env so stack/vercel/gh/morphkit
+    // honor ~/.ashlr/config.json without modification (M10 env bridge).
+    const childEnv = withToolEnv(loadConfig());
+    const result = runSync(spawnCmd, spawnArgs, absPath, DEPLOY_TIMEOUT_MS, childEnv);
 
     if (result.timedOut) {
       return {

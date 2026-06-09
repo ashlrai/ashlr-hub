@@ -477,12 +477,52 @@ function checkMcpServersDiscovered(mcpRegistry: McpRegistry | null): DoctorCheck
 }
 
 /**
+ * Build a compact version-aware summary for installed ecosystem tools.
+ *
+ * Returns a string like:
+ *   "phantom 0.6.0, ashlrcode 1.2.3, aw (no version); 3/10 installed"
+ *
+ * Rules:
+ *  - Only installed tools are listed (installed === true).
+ *  - Version shown when non-null; "(no version)" appended when null.
+ *  - At most MAX_LISTED tool names shown inline; excess collapsed to "+ N more".
+ *  - Trailing summary "X/Y installed" always appended.
+ *  - Never throws.
+ */
+function buildVersionDetail(tools: import('./types.js').ToolInfo[], count: number, total: number): string {
+  // Max tools to list by name before collapsing — keeps the detail line readable.
+  const MAX_LISTED = 6;
+
+  const installed = tools.filter((t) => t.installed);
+  const listed = installed.slice(0, MAX_LISTED);
+  const overflow = installed.length - listed.length;
+
+  const parts = listed.map((t) =>
+    t.version ? `${t.id} ${t.version}` : `${t.id} (no version)`,
+  );
+
+  if (overflow > 0) {
+    parts.push(`+${overflow} more`);
+  }
+
+  const suffix = `${count}/${total} installed`;
+  if (parts.length === 0) {
+    return suffix;
+  }
+  return `${parts.join(', ')}; ${suffix}`;
+}
+
+/**
  * Check: Ashlr ecosystem tools installed.
  * id: 'ashlr-tools-installed'
  * pass with count, warn if <2 tools installed.
  *
  * The toolsRegistry parameter is the pre-fetched result of getToolsRegistry()
  * (or null when the module is not available).
+ *
+ * M10: detail now includes per-tool version strings so `ashlr doctor` surfaces
+ * lightweight version awareness without any network calls.
+ * Example detail: "phantom 0.6.0, ashlrcode 1.2.3, aw (no version); 3/10 installed"
  */
 function checkAshlrToolsInstalled(toolsRegistry: ToolsRegistry | null): DoctorCheck {
   if (toolsRegistry === null) {
@@ -498,13 +538,14 @@ function checkAshlrToolsInstalled(toolsRegistry: ToolsRegistry | null): DoctorCh
 
   const count = toolsRegistry.installedCount;
   const total = toolsRegistry.tools.length;
+  const detail = buildVersionDetail(toolsRegistry.tools, count, total);
 
   if (count >= 2) {
     return check(
       'ashlr-tools-installed',
       'Ashlr tools installed',
       'pass',
-      `${count}/${total} ecosystem tool${count !== 1 ? 's' : ''} installed`,
+      detail,
     );
   }
 
@@ -512,7 +553,7 @@ function checkAshlrToolsInstalled(toolsRegistry: ToolsRegistry | null): DoctorCh
     'ashlr-tools-installed',
     'Ashlr tools installed',
     'warn',
-    `Only ${count}/${total} ecosystem tool${count !== 1 ? 's' : ''} installed`,
+    count === 0 ? `No ecosystem tools installed; ${count}/${total} installed` : detail,
     'Install ashlr ecosystem tools (phantom, ashlrcode, aw, etc.)',
   );
 }

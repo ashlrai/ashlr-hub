@@ -29,6 +29,8 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import type { McpRegistry, McpServerSpec, McpServerHealth } from './types.js';
+import { loadConfig } from './config.js';
+import { withToolEnv } from './env-bridge.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -47,6 +49,19 @@ const NS = '__';
  * defense is isSelfGateway() filtering at startGateway).
  */
 export const GATEWAY_ENV_MARKER = 'ASHLR_MCP_GATEWAY';
+
+// The MCP SDK deliberately spawns downstream servers with a NARROW env allowlist
+// (not the full process.env) so ambient secrets don't leak into third-party servers.
+// We preserve that isolation: downstreams get this safe base + ashlr's non-secret
+// config keys (via withToolEnv) + their own declared spec.env — never the hub's full env.
+const SAFE_CHILD_ENV_KEYS = ['HOME', 'PATH', 'SHELL', 'TERM', 'USER', 'LOGNAME'] as const;
+function safeChildBase(): NodeJS.ProcessEnv {
+  const base: NodeJS.ProcessEnv = {};
+  for (const k of SAFE_CHILD_ENV_KEYS) {
+    if (process.env[k] !== undefined) base[k] = process.env[k];
+  }
+  return base;
+}
 
 /**
  * True when a spec resolves to THIS aggregation gateway — i.e. running it as a
@@ -83,14 +98,21 @@ function timeout<T>(ms: number, label: string): Promise<T> {
  * against a timeout. The caller owns closing the returned client.
  * Throws on failure (caller wraps).
  */
-async function connectDownstream(spec: McpServerSpec, timeoutMs: number): Promise<Client> {
+async function connectDownstream(spec: McpServerSpec, timeoutMs: number, cfg?: ReturnType<typeof loadConfig>): Promise<Client> {
   const transport = new StdioClientTransport({
     command: spec.command,
     args: spec.args,
     // Merge spec env with a self-marker so any downstream that happens to be an
     // ashlr gateway can detect it was launched BY a gateway and refuse to
     // re-aggregate (belt-and-suspenders against the self-spawn fork bomb).
-    env: { ...(spec.env ?? {}), [GATEWAY_ENV_MARKER]: '1' },
+    // M10 env-bridge: project unified config into each downstream child, then
+    // let spec.env override (per-server keys win over hub-wide defaults).
+    // The gateway marker is set last so it can never be clobbered by spec.env.
+    env: {
+      ...(cfg ? withToolEnv(cfg, safeChildBase()) : safeChildBase()),
+      ...(spec.env ?? {}),
+      [GATEWAY_ENV_MARKER]: '1',
+    },
     // Surface child stderr to our stderr for debugging; never pollutes stdio JSON-RPC.
     stderr: 'inherit',
   });
@@ -137,9 +159,13 @@ export async function probeServer(
   spec: McpServerSpec,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
 ): Promise<McpServerHealth> {
+  // M10: load config once so probeServer also bridges env into probed children.
+  // loadConfig() is lightweight (fs read + merge); safe to call per-probe.
+  let cfgForProbe: ReturnType<typeof loadConfig> | undefined;
+  try { cfgForProbe = loadConfig(); } catch { /* non-fatal: fall back to process.env */ }
   let client: Client | null = null;
   try {
-    client = await connectDownstream(spec, timeoutMs);
+    client = await connectDownstream(spec, timeoutMs, cfgForProbe);
 
     const listed = await Promise.race([
       client.listTools({}, { timeout: timeoutMs }),
@@ -195,6 +221,11 @@ export async function startGateway(
   registry: McpRegistry,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
 ): Promise<void> {
+  // M10: load config once for the gateway lifetime so all downstream spawns
+  // inherit the unified config env. Non-fatal if config is unreadable.
+  let gatewayCfg: ReturnType<typeof loadConfig> | undefined;
+  try { gatewayCfg = loadConfig(); } catch { /* non-fatal: fall back to process.env */ }
+
   // ── Self-exclusion: never aggregate ourself (fork-bomb guard) ─────────────
   // `ashlr mcp install` writes a downstream entry pointing back at this gateway.
   // Discovering and spawning it would recurse without bound. Filter it out here
@@ -213,7 +244,7 @@ export async function startGateway(
   // ── Connect every downstream in parallel; skip failures ───────────────────
   const settled = await Promise.allSettled(
     aggregable.map(async (spec): Promise<Downstream> => {
-      const client = await connectDownstream(spec, timeoutMs);
+      const client = await connectDownstream(spec, timeoutMs, gatewayCfg);
       let toolNames = new Set<string>();
       try {
         const listed = await Promise.race([
