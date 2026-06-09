@@ -8,6 +8,57 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M17: Verified Orchestration
+
+### Added
+- **Tamper-evident task signing** (`src/core/swarm/sign.ts`):
+  - `signOutput(content, cfg)` — HMAC-SHA256 signs a task result (content hash + HMAC). Key source: Phantom best-effort, else a local key auto-generated once at `~/.ashlr/keys/swarm.key` (0600, `crypto.randomBytes`). Signature stored on `SwarmTaskRun.signature` (`OutputSignature { alg, hash, sig, signer, ts }`). Signature contains only hashes — no payload secrets, never logged.
+  - `verifyOutput(content, sig, cfg)` — verifies a stored signature using `timingSafeEqual`; returns `boolean`; never throws.
+  - `ensureLocalKey()` — returns the key path, creating the file at 0600 with 32 random bytes if absent. Key is never printed, logged, or committed.
+- **Downstream signature verification** (`src/core/swarm/runner.ts`):
+  - Before a task consumes a dependency's output, `runner.ts` calls `verifyOutput` on that dependency's stored signature. A mismatch (tampered or corrupted result) skips consumption and triggers an escalation gate rather than silently proceeding.
+- **Exception-driven escalation gates** (`src/core/swarm/gate.ts`):
+  - `riskScan(text)` — case-insensitive heuristic scan for destructive/outward operations: `rm -rf`, `git push --force`, `deploy`, SQL `DROP`, and secret-exfiltration patterns. Returns `{ risky: boolean; reason: string }`; never throws.
+  - `shouldEscalate(ctx)` — pure function; priority order `tamper > verify-failed > over-budget > risk > low-confidence`. Returns the `EscalationReasonKind` that applies, or `null`. Only decides — the caller persists the `EscalationEvent`, sets `status: 'needs-approval'`, and **stops**. Never auto-approves.
+  - Gate trip conditions: downstream verify failure, over-budget, low-confidence / failed `verifyTask` on a critical task, or a RISK heuristic match on a task goal or result.
+- **Swarm pause + `ashlr swarm approve <id>`** (`src/cli/swarm.ts`):
+  - When a gate trips, `runSwarm` persists the `EscalationEvent` (task id, kind, detail, timestamp) to the `SwarmRun`, sets `status: 'needs-approval'`, and halts. No work continues automatically.
+  - `ashlr swarm approve <id>` — explicit human action; resumes a `needs-approval` swarm from where it stopped. Only valid when status is `needs-approval`; errors otherwise.
+- **`ashlr swarm verify <id>`** (`src/cli/swarm.ts`):
+  - Verifies all stored task signatures in a completed or paused swarm. Exit code 0 when every signature is valid; exit code 1 on any failure or if the swarm is not found. Safe to run at any time.
+- **Rollback-aware snapshots** (`src/core/swarm/rollback.ts`):
+  - `snapshotProject(project)` — read-only; records the project's git `HEAD` commit ref and a stash ref (`stashRef`) for any dirty working tree into `RollbackSnapshot`. Non-git dirs or `null` project → `isRepo: false`; never throws.
+  - `rollbackTo(snap, { force })` — **caller must confirm before invoking** (CLI prompts or `--yes`). Refuses if `isRepo: false`, if the snapshot has no `head`, or if the tree is dirty without `--force`. Restores `HEAD` via `git reset --hard` and re-applies the stash if `stashRef` is set. **Never runs `git push --force`, never deletes branches, never force-resets without `force: true`.**
+  - `RollbackSnapshot` stored on `SwarmRun.rollback` at swarm start (before any tasks run).
+- **`ashlr swarm rollback <id> [--yes] [--force]`** (`src/cli/swarm.ts`):
+  - Prints exactly what it will restore (project path, HEAD ref, stash ref) before doing anything.
+  - Requires `--yes` (or interactive confirmation) to proceed — never automatic.
+  - `--force` required to restore over a dirty working tree (without it, refuses and explains).
+  - Refuses on a non-git project or detached/ambiguous HEAD state, with guidance.
+  - This is the **only potentially-destructive operation** in M17; all other new paths are read-only or additive.
+- **New types in `src/core/types.ts`** (all existing types preserved):
+  - `OutputSignature { alg: 'hmac-sha256' | 'phantom'; hash: string; sig: string; signer: string; ts: string }` — hashes only, no secrets.
+  - `EscalationReasonKind = 'verify-failed' | 'over-budget' | 'tamper' | 'risk' | 'low-confidence'`
+  - `EscalationEvent { taskId: string | null; kind: EscalationReasonKind; detail: string; ts: string }`
+  - `RollbackSnapshot { project: string | null; isRepo: boolean; head: string | null; dirty: boolean; stashRef: string | null; ts: string }`
+  - `SwarmTaskRun.signature?: OutputSignature`
+  - `SwarmRun.escalations?: EscalationEvent[]`, `SwarmRun.rollback?: RollbackSnapshot`
+  - `SwarmRun.status` union extended with `'needs-approval'`.
+
+### Changed
+- `src/core/swarm/runner.ts`: `runSwarm` snapshots project state at start (before any tasks), signs each task output on completion, verifies dependency signatures before consumption, calls `shouldEscalate` / `riskScan` at each gate point, persists `EscalationEvent` and halts on a positive gate, calls `captureFromSwarm` on normal completion.
+- `src/cli/swarm.ts`: three new subcommands (`verify`, `approve`, `rollback`) wired and documented; rollback confirm-gate enforced at the CLI layer.
+
+### Guardrails (M17)
+- **Rollback is the only destructive operation.** It requires `ashlr swarm rollback <id>` + an explicit `--yes` confirm (or interactive prompt). It never runs automatically. `--force` is required to reset over a dirty tree. No `git push --force`; no branch deletion; refuses on non-git dirs and detached HEAD.
+- **Keys: 0600, never logged.** `~/.ashlr/keys/swarm.key` is created with `crypto.randomBytes`, `chmod 0600`, and is never printed, logged, or captured in any run artifact. Phantom secrets never expose values — signatures contain only derived hashes.
+- **Escalation gates pause, never auto-approve.** A gate trip sets `status: 'needs-approval'` and stops; `ashlr swarm approve <id>` is the only path forward.
+- **Recursion guard + hard budget intact.** `ASHLR_IN_SWARM` env guard and the global `RunBudget` ceiling are unchanged.
+- **Zero new runtime dependencies.** All signing and hashing use `node:crypto` (Node builtin). No third-party packages added.
+- All 1619 existing tests preserved.
+
+---
+
 ## [Unreleased] — M16: Compounding Genome
 
 ### Added

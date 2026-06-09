@@ -877,6 +877,78 @@ export interface SpecArtifact {
   updatedAt: string;
 }
 
+// ---------------------------------------------------------------------------
+// M17: verified + unattended-safe swarms — signing, escalation, rollback.
+// ---------------------------------------------------------------------------
+
+/**
+ * Tamper-evident signature over a swarm task's output.
+ * Contains ONLY hashes — never any payload secret. `hash` is a content digest
+ * of the signed text; `sig` is the keyed signature (HMAC or phantom-derived).
+ * `alg` records how it was produced; 'phantom' uses a phantom-sourced key
+ * best-effort, 'hmac-sha256' uses the local auto-generated key.
+ */
+export interface OutputSignature {
+  /** Signing algorithm / key source. */
+  alg: 'hmac-sha256' | 'phantom';
+  /** Content digest (hex) of the signed text. */
+  hash: string;
+  /** Keyed signature (hex) over the content. NEVER a secret value. */
+  sig: string;
+  /** Opaque signer identity (e.g. 'local' or a phantom key id) — no secrets. */
+  signer: string;
+  /** ISO timestamp the signature was produced. */
+  ts: string;
+}
+
+/** Why a swarm escalation gate tripped. */
+export type EscalationReasonKind =
+  | 'verify-failed'
+  | 'over-budget'
+  | 'tamper'
+  | 'risk'
+  | 'low-confidence';
+
+/**
+ * A single escalation gate trip. The swarm persists this and STOPS
+ * (status 'needs-approval'); only an explicit `ashlr swarm approve <id>` resumes.
+ */
+export interface EscalationEvent {
+  /** Task that triggered the gate, or null for swarm-level (e.g. over-budget). */
+  taskId: string | null;
+  /** Which gate tripped. */
+  kind: EscalationReasonKind;
+  /** Human-readable explanation (no secrets). */
+  detail: string;
+  /** ISO timestamp the gate tripped. */
+  ts: string;
+}
+
+/**
+ * Read-only git snapshot of a project, taken before a swarm operates in it.
+ * Used by the CONFIRM-gated `ashlr swarm rollback <id>`. NEVER carries secrets.
+ */
+export interface RollbackSnapshot {
+  /** Absolute project path, or null when the swarm has no project. */
+  project: string | null;
+  /** Whether `project` is a git repository. */
+  isRepo: boolean;
+  /** Recorded HEAD commit sha, or null when not a repo / unresolved. */
+  head: string | null;
+  /**
+   * Branch name HEAD pointed at when the snapshot was taken, or null when HEAD
+   * was already detached / unresolved. Used so a non-force rollback can return
+   * the repo to the original branch rather than leaving it in detached HEAD.
+   */
+  branch?: string | null;
+  /** Whether the working tree was dirty at snapshot time. */
+  dirty: boolean;
+  /** Ref/name of the stash holding the dirty tree, or null when clean/none. */
+  stashRef: string | null;
+  /** ISO timestamp the snapshot was taken. */
+  ts: string;
+}
+
 /** The ordered phases of a contracts-first swarm. */
 export type SwarmPhaseName = 'scaffold' | 'build' | 'integrate' | 'verify' | 'review';
 
@@ -906,6 +978,18 @@ export interface SwarmTaskRun {
   usage?: RunUsage;
   /** Failure reason when status is 'failed', else absent. */
   error?: string;
+  /**
+   * M17: tamper-evident signature over this task's `result`, computed when the
+   * task completes. Downstream tasks verify this before consuming the output.
+   */
+  signature?: OutputSignature;
+  /**
+   * M17: set true when a human explicitly approved this task past an escalation
+   * gate via `ashlr swarm approve <id>`. The runner SKIPS re-scanning this
+   * task's goal-risk on the resumed run so an approved goal-risk escalation
+   * does not re-trip the same gate and loop forever. Cleared/absent otherwise.
+   */
+  approved?: boolean;
 }
 
 /** The planned swarm: a decomposition of a goal/spec into phased tasks. */
@@ -938,14 +1022,28 @@ export interface SwarmRun {
   usage: RunUsage;
   /** Bounded concurrency for the parallel BUILD phase. */
   parallel: number;
-  /** Current swarm status. */
-  status: 'planning' | 'running' | 'done' | 'aborted' | 'failed';
+  /**
+   * Current swarm status. M17 adds 'needs-approval': the swarm PAUSED at an
+   * escalation gate and STOPPED; an explicit `ashlr swarm approve <id>` resumes it.
+   */
+  status: 'planning' | 'running' | 'done' | 'aborted' | 'failed' | 'needs-approval';
   /** The planned decomposition. */
   plan: SwarmPlan;
   /** Per-task execution state, in plan order. */
   tasks: SwarmTaskRun[];
   /** Aggregated final result/summary, present when done. */
   result?: string;
+  /**
+   * M17: ordered log of escalation gate trips. Each entry records why the swarm
+   * paused (verify-failed, over-budget, tamper, risk, low-confidence). Append-only.
+   */
+  escalations?: EscalationEvent[];
+  /**
+   * M17: read-only git snapshot of the project taken before the swarm operated
+   * in it. Drives the CONFIRM-gated `ashlr swarm rollback <id>`. Absent if the
+   * swarm has no project or the project is not a git repo.
+   */
+  rollback?: RollbackSnapshot;
 }
 
 /** Options accepted by `runSwarm` / the `ashlr swarm` CLI. */
@@ -964,6 +1062,13 @@ export interface SwarmOptions {
   allowCloud?: boolean;
   /** Absolute target project directory the swarm operates in. */
   project?: string;
+  /**
+   * M17: when set alongside resumeId, resumes a swarm paused in 'needs-approval'
+   * — set ONLY by `ashlr swarm approve <id>` (explicit human action). Threads the
+   * approval into the runner so a goal-risk escalation can actually be cleared
+   * (the runner skips re-scanning approved tasks). Never set on a fresh run.
+   */
+  approved?: boolean;
 }
 
 // ---------------------------------------------------------------------------

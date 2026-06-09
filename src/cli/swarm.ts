@@ -4,18 +4,29 @@
  * `ashlr swarm "<goal>" | <specId> [--budget N] [--parallel N] [--background]
  *   [--resume <id>] [--dry-run] [--allow-cloud] [--project <path>] [--json] [--no-capture]`
  *
- * Subcommand `ashlr swarm show <id>` prints a saved swarm.
+ * Subcommands:
+ *   `ashlr swarm show <id>`         — print a saved swarm in detail.
+ *   `ashlr swarm verify <id>`       — verify all task output signatures (M17).
+ *   `ashlr swarm approve <id>`      — explicit human resume of a needs-approval swarm (M17).
+ *   `ashlr swarm rollback <id>`     — restore a project to its pre-swarm git state (M17).
  *
  * `ashlr swarms [--json]` — list persisted swarms.
  *
  * Exit codes:
  *   0  success
- *   1  swarm failed / aborted / not-found
+ *   1  swarm failed / aborted / not-found / verify-fail / rollback-refused
  *   2  bad usage
  *   3  recursion guard (ASHLR_IN_SWARM is set)
  */
 
-import type { SwarmRun, SwarmOptions, SwarmTaskRun } from '../core/types.js';
+import * as readline from 'node:readline';
+import type {
+  SwarmRun,
+  SwarmOptions,
+  SwarmTaskRun,
+  OutputSignature,
+  RollbackSnapshot,
+} from '../core/types.js';
 import { pad, makeColors, isTty, isStderrTty } from './ui.js';
 import { parsePositiveInt } from './args.js';
 
@@ -27,7 +38,7 @@ const { bold, dim, red, green, yellow, cyan, gray } = makeColors(isTty());
 const seCol = makeColors(isStderrTty());
 
 // ---------------------------------------------------------------------------
-// Lazy imports — core/swarm modules built by other M12 agents
+// Lazy imports — core/swarm modules built by other M12/M17 agents
 // ---------------------------------------------------------------------------
 
 async function importConfig() {
@@ -52,6 +63,7 @@ async function importRunner(): Promise<RunnerMod> {
 type StoreMod = {
   loadSwarm: (id: string) => SwarmRun | null;
   listSwarms: () => SwarmRun[];
+  saveSwarm: (s: SwarmRun) => void;
 };
 
 async function importStore(): Promise<StoreMod> {
@@ -84,15 +96,46 @@ async function importStreaming(): Promise<StreamingMod> {
   }
 }
 
+// M17: lazy sign module — gracefully absent when not yet built.
+type SignMod = {
+  verifyOutput: (content: string, sig: OutputSignature, cfg: import('../core/types.js').AshlrConfig) => boolean;
+};
+
+async function importSign(): Promise<SignMod | null> {
+  try {
+    return await import('../core/swarm/sign.js') as SignMod;
+  } catch {
+    return null;
+  }
+}
+
+// M17: lazy rollback module — gracefully absent when not yet built.
+type RollbackMod = {
+  rollbackTo: (
+    snap: RollbackSnapshot,
+    opts: { force: boolean },
+  ) => Promise<{ ok: boolean; detail: string }>;
+};
+
+async function importRollback(): Promise<RollbackMod | null> {
+  try {
+    return await import('../core/swarm/rollback.js') as RollbackMod;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Arg parsing
 // ---------------------------------------------------------------------------
 
 interface ParsedSwarmArgs {
-  subcommand: 'run' | 'show';
+  subcommand: 'run' | 'show' | 'verify' | 'approve' | 'rollback';
   /** Raw positional: either a quoted goal string or a specId. */
   goalOrSpecId?: string;
   showId?: string;
+  /** Id for verify/approve/rollback subcommands. */
+  subId?: string;
   budget?: number;
   parallel?: number;
   background: boolean;
@@ -103,10 +146,116 @@ interface ParsedSwarmArgs {
   json: boolean;
   /** Skip auto-capture of this swarm to the genome (M16). */
   noCapture: boolean;
+  /** --yes flag: skip interactive confirm prompt (rollback). */
+  yes: boolean;
+  /** --force flag: allow rollback over a dirty tree. */
+  force: boolean;
   usageError?: string;
 }
 
 function parseSwarmArgs(args: string[]): ParsedSwarmArgs {
+  // Handle M17 subcommands: verify, approve, rollback
+  if (args[0] === 'verify') {
+    const subId = args[1];
+    if (!subId) {
+      return {
+        subcommand: 'run',
+        background: false,
+        dryRun: false,
+        allowCloud: false,
+        json: false,
+        noCapture: false,
+        yes: false,
+        force: false,
+        usageError: 'Usage: ashlr swarm verify <id>',
+      };
+    }
+    return {
+      subcommand: 'verify',
+      subId,
+      background: false,
+      dryRun: false,
+      allowCloud: false,
+      json: false,
+      noCapture: false,
+      yes: false,
+      force: false,
+    };
+  }
+
+  if (args[0] === 'approve') {
+    const subId = args[1];
+    if (!subId) {
+      return {
+        subcommand: 'run',
+        background: false,
+        dryRun: false,
+        allowCloud: false,
+        json: false,
+        noCapture: false,
+        yes: false,
+        force: false,
+        usageError: 'Usage: ashlr swarm approve <id>',
+      };
+    }
+    return {
+      subcommand: 'approve',
+      subId,
+      background: false,
+      dryRun: false,
+      allowCloud: false,
+      json: false,
+      noCapture: false,
+      yes: false,
+      force: false,
+    };
+  }
+
+  if (args[0] === 'rollback') {
+    const subId = args[1];
+    if (!subId) {
+      return {
+        subcommand: 'run',
+        background: false,
+        dryRun: false,
+        allowCloud: false,
+        json: false,
+        noCapture: false,
+        yes: false,
+        force: false,
+        usageError: 'Usage: ashlr swarm rollback <id> [--yes] [--force]',
+      };
+    }
+    const rest = args.slice(2);
+    const yes   = rest.includes('--yes');
+    const force = rest.includes('--force');
+    const unknown = rest.find(a => a !== '--yes' && a !== '--force');
+    if (unknown) {
+      return {
+        subcommand: 'run',
+        background: false,
+        dryRun: false,
+        allowCloud: false,
+        json: false,
+        noCapture: false,
+        yes: false,
+        force: false,
+        usageError: `unknown flag for rollback: ${unknown}`,
+      };
+    }
+    return {
+      subcommand: 'rollback',
+      subId,
+      background: false,
+      dryRun: false,
+      allowCloud: false,
+      json: false,
+      noCapture: false,
+      yes,
+      force,
+    };
+  }
+
   // Handle `swarm show <id>` subcommand
   if (args[0] === 'show') {
     const showId = args[1];
@@ -118,6 +267,8 @@ function parseSwarmArgs(args: string[]): ParsedSwarmArgs {
         allowCloud: false,
         json: false,
         noCapture: false,
+        yes: false,
+        force: false,
         usageError: 'Usage: ashlr swarm show <id>',
       };
     }
@@ -129,6 +280,8 @@ function parseSwarmArgs(args: string[]): ParsedSwarmArgs {
       allowCloud: false,
       json: false,
       noCapture: false,
+      yes: false,
+      force: false,
     };
   }
 
@@ -139,6 +292,8 @@ function parseSwarmArgs(args: string[]): ParsedSwarmArgs {
     allowCloud: false,
     json: false,
     noCapture: false,
+    yes: false,
+    force: false,
   };
 
   let i = 0;
@@ -200,7 +355,10 @@ function parseSwarmArgs(args: string[]): ParsedSwarmArgs {
       'Usage: ashlr swarm "<goal>" | <specId> [--budget N] [--parallel N]\n' +
       '              [--background] [--resume <id>] [--dry-run] [--allow-cloud]\n' +
       '              [--project <path>] [--json] [--no-capture]\n' +
-      '       ashlr swarm show <id>';
+      '       ashlr swarm show <id>\n' +
+      '       ashlr swarm verify <id>\n' +
+      '       ashlr swarm approve <id>\n' +
+      '       ashlr swarm rollback <id> [--yes] [--force]';
   }
 
   return result;
@@ -224,12 +382,13 @@ function relativeTime(iso: string): string {
 
 function swarmStatusColor(status: SwarmRun['status']): string {
   switch (status) {
-    case 'done':      return green(status);
-    case 'running':   return cyan(status);
-    case 'planning':  return cyan(status);
-    case 'aborted':   return yellow(status);
-    case 'failed':    return red(status);
-    default:          return String(status);
+    case 'done':            return green(status);
+    case 'running':         return cyan(status);
+    case 'planning':        return cyan(status);
+    case 'aborted':         return yellow(status);
+    case 'failed':          return red(status);
+    case 'needs-approval':  return yellow('needs-approval');
+    default:                return String(status);
   }
 }
 
@@ -258,7 +417,11 @@ function formatDuration(createdAt: string, updatedAt: string): string {
 // ---------------------------------------------------------------------------
 
 function printSwarmSummary(swarm: SwarmRun): void {
-  const { id, goal, status, usage, budget, tasks, result, createdAt, updatedAt, parallel, specId, project } = swarm;
+  const {
+    id, goal, status, usage, budget, tasks, result,
+    createdAt, updatedAt, parallel, specId, project,
+    escalations, rollback,
+  } = swarm;
 
   const duration     = formatDuration(createdAt, updatedAt);
   const totalTokens  = usage.tokensIn + usage.tokensOut;
@@ -274,13 +437,41 @@ function printSwarmSummary(swarm: SwarmRun): void {
   if (project)  console.log(`  ${bold('Project:')}   ${dim(project)}`);
   console.log(
     `  ${bold('Status:')}    ${swarmStatusColor(status)}` +
-    (status === 'aborted' ? yellow('  — budget/limit reached') : ''),
+    (status === 'aborted' ? yellow('  — budget/limit reached') : '') +
+    (status === 'needs-approval'
+      ? yellow('  — paused at escalation gate; run: ashlr swarm approve ' + id)
+      : ''),
   );
   console.log(`  ${bold('Parallel:')}  ${parallel}  ${dim('tasks concurrently (BUILD phase)')}`);
   console.log(`  ${bold('Duration:')}  ${duration}`);
   console.log(`  ${bold('Progress:')}  ${doneTasks}/${tasks.length} tasks done` +
     (failedTasks > 0 ? `  ${red(`${failedTasks} failed`)}` : ''));
   console.log('');
+
+  // ── Escalations (M17) ────────────────────────────────────────────────────
+  if (escalations && escalations.length > 0) {
+    console.log(`  ${bold(yellow('Escalations:'))}  ${escalations.length} gate trip(s)`);
+    for (const esc of escalations) {
+      const who = esc.taskId ? dim(`task ${esc.taskId}`) : dim('swarm-level');
+      console.log(`    ${yellow('!')}  ${bold(esc.kind)}  ${who}  ${esc.detail}`);
+      console.log(`       ${dim(esc.ts)}`);
+    }
+    console.log('');
+  }
+
+  // ── Rollback snapshot (M17) ──────────────────────────────────────────────
+  if (rollback) {
+    const snapLabel = rollback.isRepo
+      ? `${dim(rollback.head ?? 'unknown')}${rollback.dirty
+          ? yellow(' (dirty — stash: ' + (rollback.stashRef ?? 'none') + ')')
+          : ''}`
+      : dim('(not a git repo)');
+    console.log(`  ${bold('Rollback:')}  ${snapLabel}`);
+    if (rollback.isRepo) {
+      console.log(`              ${dim('restore with: ashlr swarm rollback ' + id)}`);
+    }
+    console.log('');
+  }
 
   // ── Plan / tasks table ───────────────────────────────────────────────────
   if (tasks.length > 0) {
@@ -293,16 +484,17 @@ function printSwarmSummary(swarm: SwarmRun): void {
       const idW     = Math.max(4, ...phaseTasks.map(t => t.id.length));
       const statusW = 8;
       const tokW    = 7;
-      const goalW   = 44;
+      const sigW    = 4; // sig/----
+      const goalW   = 40;
 
       console.log(`  ${bold(phase.toUpperCase())} ${dim(`(${phaseTasks.length} task${phaseTasks.length !== 1 ? 's' : ''})`)}`);
       console.log('');
       console.log(
         `  ${bold(pad('ID', idW))}  ${bold(pad('Status', statusW))}  ` +
-        `${bold(pad('Tokens', tokW, 'right'))}  ${bold('Goal')}`,
+        `${bold(pad('Tokens', tokW, 'right'))}  ${bold(pad('Sig', sigW))}  ${bold('Goal')}`,
       );
       console.log(
-        `  ${'─'.repeat(idW)}  ${'─'.repeat(statusW)}  ${'─'.repeat(tokW)}  ${'─'.repeat(goalW)}`,
+        `  ${'─'.repeat(idW)}  ${'─'.repeat(statusW)}  ${'─'.repeat(tokW)}  ${'─'.repeat(sigW)}  ${'─'.repeat(goalW)}`,
       );
 
       for (const t of phaseTasks) {
@@ -312,9 +504,11 @@ function printSwarmSummary(swarm: SwarmRun): void {
         const taskGoal = specTask?.goal ?? '';
         const goalTrunc = taskGoal.length > goalW ? taskGoal.slice(0, goalW - 1) + '…' : taskGoal;
         const errorNote = t.error ? red(` ✗ ${t.error.slice(0, 40)}`) : '';
+        // Signature indicator
+        const sigIndicator = t.signature ? dim('sig') : dim('----');
         console.log(
           `  ${pad(dim(t.id), idW)}  ${pad(taskStatusColor(t.status), statusW)}  ` +
-          `${pad(tok, tokW, 'right')}  ${goalTrunc}${errorNote}`,
+          `${pad(tok, tokW, 'right')}  ${pad(sigIndicator, sigW)}  ${goalTrunc}${errorNote}`,
         );
       }
       console.log('');
@@ -342,10 +536,19 @@ function printSwarmSummary(swarm: SwarmRun): void {
   );
   console.log('');
 
-  // ── Resume hint ──────────────────────────────────────────────────────────
+  // ── Resume / approve hint ─────────────────────────────────────────────────
   if (status === 'aborted' || status === 'failed') {
     console.log(
       `  ${yellow('Tip:')} resume this swarm with ${bold(`ashlr swarm --resume ${id}`)}`,
+    );
+    console.log('');
+  }
+  if (status === 'needs-approval') {
+    console.log(
+      `  ${yellow('Action required:')} this swarm is paused at an escalation gate.`,
+    );
+    console.log(
+      `  Review the escalations above, then run ${bold(`ashlr swarm approve ${id}`)} to resume.`,
     );
     console.log('');
   }
@@ -432,6 +635,519 @@ async function cmdSwarmShow(id: string, jsonMode: boolean): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// M17: `swarm verify <id>`
+// ---------------------------------------------------------------------------
+
+/**
+ * Verify all task output signatures in a swarm.
+ *
+ * For each task that has a signature, calls verifyOutput and prints a
+ * per-task PASS/FAIL table.  Exit 0 if all signatures valid, 1 if any
+ * fail or the swarm is not found.
+ */
+async function cmdSwarmVerify(id: string): Promise<number> {
+  // Load store
+  let store: StoreMod;
+  try {
+    store = await importStore();
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'Failed to load swarm store: ' +
+      (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  const swarm = store.loadSwarm(id);
+  if (!swarm) {
+    process.stderr.write(red('error: ') + `Swarm not found: ${id}\n`);
+    return 1;
+  }
+
+  // Load config (needed for verifyOutput key resolution)
+  let cfg: import('../core/types.js').AshlrConfig;
+  try {
+    const { loadConfig } = await importConfig();
+    cfg = loadConfig();
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'Failed to load config: ' +
+      (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  // Load sign module (M17 — may not yet be built)
+  const signMod = await importSign();
+
+  const signedTasks   = swarm.tasks.filter(t => t.signature);
+  const unsignedTasks = swarm.tasks.filter(t => !t.signature && t.status === 'done');
+
+  console.log('');
+  console.log(bold('  ashlr swarm verify') + gray(` — ${id}`));
+  console.log('');
+  console.log(`  ${bold('Goal:')}    ${swarm.goal}`);
+  console.log(`  ${bold('Status:')}  ${swarmStatusColor(swarm.status)}`);
+  console.log(
+    `  ${bold('Tasks:')}   ${swarm.tasks.length} total, ` +
+    `${signedTasks.length} signed, ${unsignedTasks.length} done-but-unsigned`,
+  );
+  console.log('');
+
+  if (swarm.tasks.length === 0) {
+    console.log(`  ${dim('No tasks in this swarm.')}`);
+    console.log('');
+    return 0;
+  }
+
+  if (!signMod) {
+    // M17 sign module not yet built — report all as unverifiable
+    process.stderr.write(
+      yellow('warn: ') +
+      'sign module (core/swarm/sign.ts) not available — cannot verify signatures.\n' +
+      '      All tasks are reported as UNSIGNED.\n',
+    );
+  }
+
+  const idW     = Math.max(6, ...swarm.tasks.map(t => t.id.length));
+  const statusW = 8;
+  const verW    = 6; // PASS  /FAIL  /SKIP  /UNSIGN
+  const algW    = 12;
+
+  console.log(
+    `  ${bold(pad('Task ID', idW))}  ${bold(pad('Status', statusW))}  ` +
+    `${bold(pad('Verify', verW))}  ${bold(pad('Algorithm', algW))}  ${bold('Detail')}`,
+  );
+  console.log(
+    `  ${'─'.repeat(idW)}  ${'─'.repeat(statusW)}  ${'─'.repeat(verW)}  ${'─'.repeat(algW)}  ${'─'.repeat(40)}`,
+  );
+
+  let anyFail = false;
+
+  for (const task of swarm.tasks) {
+    const taskStatus = taskStatusColor(task.status);
+
+    if (!task.signature) {
+      // No signature — not signed (pre-M17 swarm or non-done task)
+      const verLabel = task.status === 'done' ? yellow('UNSIGN') : dim('  N/A ');
+      console.log(
+        `  ${pad(dim(task.id), idW)}  ${pad(taskStatus, statusW)}  ` +
+        `${pad(verLabel, verW)}  ${pad(dim('—'), algW)}  ${dim('no signature recorded')}`,
+      );
+      continue;
+    }
+
+    const sig = task.signature;
+
+    if (!signMod) {
+      // Module unavailable — cannot verify
+      console.log(
+        `  ${pad(dim(task.id), idW)}  ${pad(taskStatus, statusW)}  ` +
+        `${pad(yellow('SKIP  '), verW)}  ${pad(dim(sig.alg), algW)}  ${dim('sign module unavailable')}`,
+      );
+      continue;
+    }
+
+    // verifyOutput requires the result content
+    const content = task.result ?? '';
+    let valid = false;
+    let detail = '';
+    try {
+      valid = signMod.verifyOutput(content, sig, cfg);
+      detail = valid
+        ? `signer: ${sig.signer}  ts: ${sig.ts}`
+        : 'TAMPER DETECTED — signature mismatch';
+    } catch {
+      valid = false;
+      detail = 'verification threw unexpectedly';
+    }
+
+    if (!valid) anyFail = true;
+
+    const verLabel      = valid ? green('PASS  ') : red('FAIL  ');
+    const detailColored = valid ? dim(detail) : red(detail);
+    console.log(
+      `  ${pad(dim(task.id), idW)}  ${pad(taskStatus, statusW)}  ` +
+      `${pad(verLabel, verW)}  ${pad(dim(sig.alg), algW)}  ${detailColored}`,
+    );
+  }
+
+  console.log('');
+
+  if (anyFail) {
+    console.log(`  ${red('Verification FAILED.')}  One or more task signatures do not match.`);
+    console.log(`  ${red('This swarm may have been tampered with after completion.')}`);
+    console.log('');
+    return 1;
+  }
+
+  if (signedTasks.length === 0) {
+    console.log(
+      `  ${yellow('No signatures to verify.')}  This swarm was not signed (pre-M17 or unsigned).`,
+    );
+  } else {
+    console.log(`  ${green('All signatures valid.')}  ${signedTasks.length} task(s) verified.`);
+  }
+  console.log('');
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// M17: `swarm approve <id>`
+// ---------------------------------------------------------------------------
+
+/**
+ * Explicit human approval to resume a needs-approval swarm.
+ *
+ * Only valid when status === 'needs-approval'.  Clears the gate and resumes
+ * runSwarm via the existing --resume path.  No auto-approval exists anywhere.
+ * Exit 0 on successful resume, 1 if not found or not awaiting approval.
+ */
+async function cmdSwarmApprove(id: string): Promise<number> {
+  // Load store
+  let store: StoreMod;
+  try {
+    store = await importStore();
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'Failed to load swarm store: ' +
+      (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  const swarm = store.loadSwarm(id);
+  if (!swarm) {
+    process.stderr.write(red('error: ') + `Swarm not found: ${id}\n`);
+    return 1;
+  }
+
+  if (swarm.status !== 'needs-approval') {
+    // Nothing to approve
+    const hint =
+      swarm.status === 'done'     ? 'This swarm has already completed.' :
+      swarm.status === 'aborted'  ? 'This swarm was aborted (budget). Use --resume to retry.' :
+      swarm.status === 'failed'   ? 'This swarm failed. Use --resume to retry.' :
+      swarm.status === 'running'  ? 'This swarm is currently running.' :
+      swarm.status === 'planning' ? 'This swarm is still planning.' :
+      `Swarm status: ${swarm.status}`;
+    process.stderr.write(
+      yellow('info: ') + `Nothing to approve for swarm ${id}.\n` +
+      `  ${hint}\n`,
+    );
+    return 1;
+  }
+
+  // Print escalation context before resuming
+  console.log('');
+  console.log(bold('  ashlr swarm approve') + gray(` — ${id}`));
+  console.log('');
+  console.log(`  ${bold('Goal:')}    ${swarm.goal}`);
+  if (swarm.project) console.log(`  ${bold('Project:')} ${dim(swarm.project)}`);
+  console.log('');
+
+  if (swarm.escalations && swarm.escalations.length > 0) {
+    const last = swarm.escalations[swarm.escalations.length - 1]!;
+    console.log(`  ${bold(yellow('Escalation that paused this swarm:'))}`);
+    console.log(`    Kind:   ${bold(last.kind)}`);
+    console.log(`    Detail: ${last.detail}`);
+    if (last.taskId) console.log(`    Task:   ${dim(last.taskId)}`);
+    console.log(`    Time:   ${dim(last.ts)}`);
+    console.log('');
+  }
+
+  // Mark every task named by an escalation event as risk-acknowledged BEFORE
+  // resuming. This is the load-bearing fix for the goal-risk approve loop: a
+  // pre-execution goal-risk gate trips before the offending task runs (it stays
+  // 'pending'), so without an explicit per-task approval signal the resumed run
+  // would re-scan the identical static goal text and re-escalate instantly. By
+  // flagging taskRun.approved=true here (and passing approved:true to runSwarm),
+  // the runner SKIPS the goal/result risk re-scan for these specific tasks and
+  // can advance past them. Only the human-approved tasks are exempted.
+  if (swarm.escalations) {
+    for (const ev of swarm.escalations) {
+      if (ev.taskId) {
+        const tr = swarm.tasks.find((t) => t.id === ev.taskId);
+        if (tr) tr.approved = true;
+      }
+    }
+  }
+
+  // Leave status as 'needs-approval' on disk so the runner's needs-approval
+  // block is entered (it is gated on existing.status === 'needs-approval'). The
+  // runner clears the pause to 'running' itself only when opts.approved is set —
+  // this keeps approval an explicit, threaded signal rather than a silent flip.
+  swarm.updatedAt = new Date().toISOString();
+  try {
+    store.saveSwarm(swarm);
+  } catch {
+    // best-effort; runner will re-persist after first step
+  }
+
+  console.log(`  ${cyan('Resuming swarm…')}`);
+  console.log('');
+
+  // Load config
+  let cfg: import('../core/types.js').AshlrConfig;
+  try {
+    const { loadConfig } = await importConfig();
+    cfg = loadConfig();
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'Failed to load config: ' +
+      (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  // Load runner
+  let runner: RunnerMod;
+  try {
+    runner = await importRunner();
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'Failed to load swarm runner: ' +
+      (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  // Build sink
+  const streaming = await importStreaming();
+  const sink = streaming.makeCliSink({ json: false });
+
+  // Resume via existing --resume path
+  const resumedSwarm = await runner.runSwarm(
+    { goal: swarm.goal, specId: swarm.specId ?? undefined },
+    cfg,
+    { resumeId: id, approved: true },
+    sink,
+  );
+
+  printSwarmSummary(resumedSwarm);
+
+  if (resumedSwarm.status === 'done')             return 0;
+  if (resumedSwarm.status === 'aborted')          return 1;
+  if (resumedSwarm.status === 'failed')           return 1;
+  // Still needs-approval (another gate tripped mid-resume)
+  if (resumedSwarm.status === 'needs-approval')   return 1;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// M17: `swarm rollback <id> [--yes] [--force]`
+// ---------------------------------------------------------------------------
+
+/**
+ * Restore a project to its pre-swarm git snapshot.
+ *
+ * GUARDRAILS (top priority — this is the only potentially-destructive op):
+ *  - ALWAYS prints exactly what will be restored before acting.
+ *  - NEVER runs automatically; requires explicit `ashlr swarm rollback <id>`.
+ *  - NEVER proceeds without `--yes` or an interactive "y" confirmation.
+ *  - NEVER force-resets a dirty tree without `--force`.
+ *  - NEVER runs `git push --force`, NEVER deletes branches.
+ *  - Refuses clearly on non-repo, missing snapshot, or ambiguous state.
+ *  - Exit 0 on success, 1 on refusal/failure/not-found.
+ */
+async function cmdSwarmRollback(id: string, yes: boolean, force: boolean): Promise<number> {
+  // Load store
+  let store: StoreMod;
+  try {
+    store = await importStore();
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'Failed to load swarm store: ' +
+      (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  const swarm = store.loadSwarm(id);
+  if (!swarm) {
+    process.stderr.write(red('error: ') + `Swarm not found: ${id}\n`);
+    return 1;
+  }
+
+  const snap = swarm.rollback;
+
+  if (!snap) {
+    process.stderr.write(
+      red('error: ') +
+      `Swarm ${id} has no rollback snapshot.\n` +
+      `  This swarm was either created before M17, had no project dir, ` +
+      `or the project was not a git repo.\n`,
+    );
+    return 1;
+  }
+
+  if (!snap.isRepo) {
+    process.stderr.write(
+      red('error: ') +
+      `Cannot rollback: the project directory is not a git repository.\n` +
+      `  Project: ${snap.project ?? '(none)'}\n` +
+      `  Snapshot taken: ${snap.ts}\n`,
+    );
+    return 1;
+  }
+
+  if (!snap.head) {
+    process.stderr.write(
+      red('error: ') +
+      `Cannot rollback: snapshot has no HEAD commit recorded (detached or empty repo).\n` +
+      `  Snapshot taken: ${snap.ts}\n`,
+    );
+    return 1;
+  }
+
+  // ── Print EXACTLY what will be restored ──────────────────────────────────
+  console.log('');
+  console.log(bold('  ashlr swarm rollback') + gray(` — ${id}`));
+  console.log('');
+  console.log(`  ${bold('Swarm goal:')}       ${swarm.goal}`);
+  console.log(`  ${bold('Project:')}          ${snap.project ?? dim('(none)')}`);
+  console.log(`  ${bold('Snapshot taken:')}   ${snap.ts}`);
+  console.log('');
+  console.log(`  ${bold('Will restore to:')}  HEAD ${bold(snap.head)}`);
+  if (snap.dirty && snap.stashRef) {
+    console.log(
+      `  ${bold('Dirty-tree stash:')} ${snap.stashRef}  ` +
+      yellow('(working tree changes from snapshot time will be re-applied)'),
+    );
+  } else if (snap.dirty && !snap.stashRef) {
+    console.log(
+      `  ${yellow('Note:')} working tree was dirty at snapshot time but no stash ref was recorded.`,
+    );
+    console.log(
+      `         ${dim('The working tree will be reset to HEAD; those changes cannot be restored.')}`,
+    );
+  } else {
+    console.log(`  ${dim('Working tree was clean at snapshot time.')}`);
+  }
+  console.log('');
+  console.log(
+    `  ${red('WARNING:')} This will ${bold('reset')} the working tree in ` +
+    `${snap.project ?? 'the project directory'}.`,
+  );
+  if (force) {
+    console.log(
+      `  ${red('WARNING:')} ${bold('--force')} uses ${bold('git reset --hard')}. In addition to ` +
+      `discarding uncommitted changes, this ${bold('also discards any commits made AFTER the snapshot')} ` +
+      `(${snap.head ? `commits ahead of ${dim(snap.head)}` : 'commits ahead of the snapshot'}).`,
+    );
+    console.log(
+      `  ${dim('Such commits become unreferenced and are recoverable only via `git reflog` until garbage-collected.')}`,
+    );
+  }
+  console.log(
+    `  ${dim('It will NOT push to remote, will NOT delete branches, and will NOT run git push --force.')}`,
+  );
+  console.log('');
+
+  // ── Confirm gate ─────────────────────────────────────────────────────────
+  // If --yes was NOT passed, require interactive confirmation.
+  if (!yes) {
+    const confirmed = await promptConfirm('  Proceed with rollback? [y/N] ');
+    if (!confirmed) {
+      console.log(`  ${yellow('Rollback cancelled.')}`);
+      console.log('');
+      return 1;
+    }
+  } else {
+    console.log(`  ${dim('--yes flag set; skipping confirmation prompt.')}`);
+    console.log('');
+  }
+
+  // ── Load rollback module (M17) ────────────────────────────────────────────
+  const rollbackMod = await importRollback();
+  if (!rollbackMod) {
+    process.stderr.write(
+      red('error: ') +
+      'rollback module (core/swarm/rollback.ts) is not available.\n' +
+      '  It may not have been built yet (M17 agent not complete).\n',
+    );
+    return 1;
+  }
+
+  // ── Execute ───────────────────────────────────────────────────────────────
+  console.log(`  ${cyan('Restoring…')}`);
+  let rollbackResult: { ok: boolean; detail: string };
+  try {
+    rollbackResult = await rollbackMod.rollbackTo(snap, { force });
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'rollbackTo threw unexpectedly: ' +
+      (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  if (!rollbackResult.ok) {
+    process.stderr.write(red('error: ') + `Rollback refused: ${rollbackResult.detail}\n`);
+    // Provide guidance for the two most common refusals
+    if (/dirty/i.test(rollbackResult.detail)) {
+      process.stderr.write(
+        `  ${yellow('Hint:')} the working tree has uncommitted changes.\n` +
+        `  Pass ${bold('--force')} to discard them and restore the snapshot.\n` +
+        `  Example: ashlr swarm rollback ${id} --yes --force\n`,
+      );
+    } else if (/not a (git )?repo/i.test(rollbackResult.detail)) {
+      process.stderr.write(
+        `  ${yellow('Hint:')} the project directory is not a git repository — cannot roll back.\n`,
+      );
+    }
+    console.log('');
+    return 1;
+  }
+
+  console.log(`  ${green('Rollback complete.')}  ${rollbackResult.detail}`);
+  console.log('');
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Interactive confirm helper (readline)
+// ---------------------------------------------------------------------------
+
+/**
+ * Prompt the user for a yes/no answer.  Returns true on "y" / "yes"
+ * (case-insensitive), false on anything else (empty = default N).
+ *
+ * If stdin is not a TTY (piped/redirected), refuses by default and instructs
+ * the caller to use --yes.  Never throws.
+ */
+async function promptConfirm(question: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      // Non-TTY stdin: refuse by default to prevent accidental pipeline triggers.
+      if (!process.stdin.isTTY) {
+        process.stderr.write(
+          yellow('warn: ') +
+          'stdin is not a TTY — defaulting to N (rollback refused).\n' +
+          '  Pass --yes to skip the interactive prompt in non-TTY contexts.\n',
+        );
+        resolve(false);
+        return;
+      }
+
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+        terminal: true,
+      });
+
+      rl.question(question, (answer) => {
+        rl.close();
+        const a = answer.trim().toLowerCase();
+        resolve(a === 'y' || a === 'yes');
+      });
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // `ashlr swarm` — main
 // ---------------------------------------------------------------------------
 
@@ -439,13 +1155,18 @@ async function cmdSwarmShow(id: string, jsonMode: boolean): Promise<number> {
  * `ashlr swarm "<goal>" | <specId> [--budget N] [--parallel N] [--background]
  *   [--resume <id>] [--dry-run] [--allow-cloud] [--project <path>] [--json] [--no-capture]`
  *
- * Also handles `ashlr swarm show <id>`.
+ * Also handles:
+ *   `ashlr swarm show <id>`
+ *   `ashlr swarm verify <id>`
+ *   `ashlr swarm approve <id>`
+ *   `ashlr swarm rollback <id> [--yes] [--force]`
  *
  * GUARDRAILS:
  * - REFUSES to start when ASHLR_IN_SWARM env var is set (recursion guard).
  * - LOCAL-FIRST by default; --allow-cloud opts in to cloud providers.
  * - --dry-run plans only — no agent execution.
  * - --background spawns a detached worker and returns the swarm ID immediately.
+ * - rollback is the ONLY potentially-destructive op; ALWAYS confirm-gated.
  */
 export async function cmdSwarm(args: string[]): Promise<number> {
   // Help shortcircuit
@@ -472,6 +1193,22 @@ export async function cmdSwarm(args: string[]): Promise<number> {
   if (parsed.usageError) {
     process.stderr.write(red('error: ') + parsed.usageError + '\n');
     return 2;
+  }
+
+  // ── M17 subcommands ───────────────────────────────────────────────────────
+  // These are read-only (verify) or explicitly confirm-gated (rollback); the
+  // recursion guard above covers all entry points uniformly.
+
+  if (parsed.subcommand === 'verify' && parsed.subId) {
+    return cmdSwarmVerify(parsed.subId);
+  }
+
+  if (parsed.subcommand === 'approve' && parsed.subId) {
+    return cmdSwarmApprove(parsed.subId);
+  }
+
+  if (parsed.subcommand === 'rollback' && parsed.subId) {
+    return cmdSwarmRollback(parsed.subId, parsed.yes, parsed.force);
   }
 
   // Subcommand: show
@@ -651,9 +1388,11 @@ export async function cmdSwarm(args: string[]): Promise<number> {
   }
 
   // Exit codes
-  if (swarm.status === 'done')    return 0;
-  if (swarm.status === 'aborted') return 1;
-  if (swarm.status === 'failed')  return 1;
+  if (swarm.status === 'done')             return 0;
+  if (swarm.status === 'aborted')          return 1;
+  if (swarm.status === 'failed')           return 1;
+  // M17: needs-approval means the swarm paused at an escalation gate
+  if (swarm.status === 'needs-approval')   return 1;
   return 0;
 }
 
@@ -702,12 +1441,12 @@ export async function cmdSwarms(args: string[]): Promise<number> {
     return 0;
   }
 
-  const idW      = Math.max(4, ...swarms.map(s => s.id.length));
-  const statusW  = 9;
+  const idW       = Math.max(4, ...swarms.map(s => s.id.length));
+  const statusW   = 14; // wider to accommodate 'needs-approval'
   const progressW = 10;
-  const tokW     = 8;
-  const timeW    = 8;
-  const goalW    = 46;
+  const tokW      = 8;
+  const timeW     = 8;
+  const goalW     = 46;
 
   console.log('');
   console.log(bold('  ashlr swarms') + gray(`  — ${swarms.length} swarm(s)`));
@@ -730,7 +1469,6 @@ export async function cmdSwarms(args: string[]): Promise<number> {
     const goalTrunc    = s.goal.length > goalW ? s.goal.slice(0, goalW - 1) + '…' : s.goal;
     const when         = relativeTime(s.createdAt);
 
-    // Dim the id and colorize status/progress
     const isLocal = s.usage.estCostUsd === 0;
     void isLocal; // used implicitly via cloudNote in summary; not shown in list
 
@@ -763,6 +1501,9 @@ function printSwarmHelp(): void {
   console.log(`    ashlr swarm ${cyan('"<goal>"')} [options]`);
   console.log(`    ashlr swarm ${cyan('<specId>')} [options]`);
   console.log(`    ashlr swarm show ${cyan('<id>')}`);
+  console.log(`    ashlr swarm verify ${cyan('<id>')}              ${dim('# M17: verify task output signatures')}`);
+  console.log(`    ashlr swarm approve ${cyan('<id>')}             ${dim('# M17: resume a paused (needs-approval) swarm')}`);
+  console.log(`    ashlr swarm rollback ${cyan('<id>')} [--yes] [--force]  ${dim('# M17: restore pre-swarm git state')}`);
   console.log(`    ashlr swarms [--json]`);
   console.log('');
   console.log('  ' + bold('Options:'));
@@ -786,6 +1527,19 @@ function printSwarmHelp(): void {
   }
 
   console.log('');
+  console.log('  ' + bold('M17 subcommand options:'));
+  console.log('');
+
+  const m17opts: [string, string][] = [
+    ['rollback --yes',   'Skip the interactive confirmation prompt.'],
+    ['rollback --force', 'Allow rollback even when the working tree is dirty (discards changes).'],
+  ];
+  const m17W = Math.max(...m17opts.map(([o]) => o.length));
+  for (const [opt, desc] of m17opts) {
+    console.log(`    ${cyan(pad(opt, m17W))}  ${desc}`);
+  }
+
+  console.log('');
   console.log('  ' + bold('Examples:'));
   console.log('');
   console.log(`    ${gray('# Plan a swarm without executing (safe preview)')}`)
@@ -804,6 +1558,16 @@ function printSwarmHelp(): void {
   console.log(`    ${gray('# List all past swarms')}`)
   console.log(`    ashlr swarms`);
   console.log('');
+  console.log(`    ${gray('# M17: verify task signatures after a completed swarm')}`)
+  console.log(`    ashlr swarm verify swarm-xyz789`);
+  console.log('');
+  console.log(`    ${gray('# M17: resume a swarm paused at an escalation gate')}`)
+  console.log(`    ashlr swarm approve swarm-xyz789`);
+  console.log('');
+  console.log(`    ${gray('# M17: roll back a project to its pre-swarm git state')}`)
+  console.log(`    ashlr swarm rollback swarm-xyz789`);
+  console.log(`    ashlr swarm rollback swarm-xyz789 --yes --force   ${dim('# non-interactive + dirty-ok')}`);
+  console.log('');
   console.log('  ' + bold('Safety:'));
   console.log('');
   console.log(`    ${dim('• LOCAL-FIRST: only Ollama / LM Studio by default.')}`);
@@ -813,5 +1577,8 @@ function printSwarmHelp(): void {
   console.log(`    ${dim('• No outward/destructive actions (push/deploy) by default.')}`);
   console.log(`    ${dim('• All state persists to ~/.ashlr/swarms/<id>.json (resumable).')}`);
   console.log(`    ${dim('• --no-capture disables genome auto-capture for this swarm.')}`);
+  console.log(`    ${dim('• M17: task outputs signed; downstream tasks verify before consuming.')}`);
+  console.log(`    ${dim('• M17: escalation gates PAUSE (needs-approval) — never auto-proceed.')}`);
+  console.log(`    ${dim('• M17: rollback is confirm-gated, never automatic, never force-pushes.')}`);
   console.log('');
 }

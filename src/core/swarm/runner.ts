@@ -1,5 +1,5 @@
 /**
- * core/swarm/runner.ts — M12 swarm runner.
+ * core/swarm/runner.ts — M12 swarm runner, M17 verified + unattended-safe.
  *
  * Executes a contracts-first swarm: scaffold → build (parallel) → integrate →
  * verify → review. Each task delegates to orchestrator.runGoal (local-first).
@@ -21,6 +21,17 @@
  *  - On completion (any terminal status), calls captureFromSwarm (fire-and-
  *    forget) from genome/capture.ts. Disabled via opts.noCapture or
  *    cfg.genome?.autoCapture === false. Never throws, never blocks.
+ *
+ * M17 additions: verified + unattended-safe swarms.
+ *  - snapshotProject: on swarm start, snapshot the project's git state.
+ *  - signOutput: after each task completes (done), sign its result.
+ *  - verifyOutput: before a task consumes a dep's result, verify the dep's sig.
+ *    On mismatch → EscalationEvent{kind:'tamper'} + 'needs-approval' + STOP.
+ *  - shouldEscalate: after each task, risk-scan goal+result; on a hit →
+ *    EscalationEvent + 'needs-approval' + STOP. Over-budget is handled by
+ *    the existing M12 hard-abort path (status='aborted'), not this gate.
+ *  - opts.approved: when resuming a 'needs-approval' swarm, clear the pause.
+ *  - All M17 helpers are best-effort: import failures degrade gracefully.
  */
 
 import * as path from 'node:path';
@@ -36,12 +47,68 @@ import type {
   SwarmPhaseName,
   RunBudget,
   RunUsage,
+  EscalationEvent,
+  EscalationReasonKind,
 } from '../types.js';
 import type { StreamSink } from '../run/streaming.js';
 import { newUsage, addUsage, overBudget } from '../run/budget.js';
 import { planSwarm } from './planner.js';
 import { saveSwarm, loadSwarm } from './store.js';
 import { runGoal } from '../run/orchestrator.js';
+
+// ---------------------------------------------------------------------------
+// M17: lazy-load sign / gate / rollback helpers. Each import is best-effort:
+// if the module hasn't been built yet the feature degrades silently.
+// ---------------------------------------------------------------------------
+
+// Inline type stubs so we can reference without a hard circular dep.
+type SignFn = (content: string, cfg: AshlrConfig) => import('../types.js').OutputSignature;
+type VerifyFn = (
+  content: string,
+  sig: import('../types.js').OutputSignature,
+  cfg: AshlrConfig,
+) => boolean;
+type RiskScanFn = (text: string) => { risky: boolean; reason: string };
+type ShouldEscalateFn = (ctx: {
+  verifyFailed?: boolean;
+  overBudget?: boolean;
+  tamper?: boolean;
+  risk?: boolean;
+  lowConfidence?: boolean;
+}) => EscalationReasonKind | null;
+type SnapshotFn = (project: string | null) => import('../types.js').RollbackSnapshot;
+
+let _signOutput: SignFn | null = null;
+let _verifyOutput: VerifyFn | null = null;
+let _riskScan: RiskScanFn | null = null;
+let _shouldEscalate: ShouldEscalateFn | null = null;
+let _snapshotProject: SnapshotFn | null = null;
+let _m17Loaded = false;
+
+async function loadM17(): Promise<void> {
+  if (_m17Loaded) return;
+  _m17Loaded = true;
+  try {
+    const sign = await import('./sign.js') as { signOutput: SignFn; verifyOutput: VerifyFn };
+    _signOutput = sign.signOutput;
+    _verifyOutput = sign.verifyOutput;
+  } catch {
+    // sign.ts not built yet — signing/verification degrades to no-op
+  }
+  try {
+    const gate = await import('./gate.js') as { riskScan: RiskScanFn; shouldEscalate: ShouldEscalateFn };
+    _riskScan = gate.riskScan;
+    _shouldEscalate = gate.shouldEscalate;
+  } catch {
+    // gate.ts not built yet — escalation degrades to no-op
+  }
+  try {
+    const rb = await import('./rollback.js') as { snapshotProject: SnapshotFn };
+    _snapshotProject = rb.snapshotProject;
+  } catch {
+    // rollback.ts not built yet — snapshot degrades to no-op
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -156,6 +223,35 @@ function emitLog(sink: StreamSink, text: string, data?: unknown): void {
 }
 
 // ---------------------------------------------------------------------------
+// M17 helpers — escalation
+// ---------------------------------------------------------------------------
+
+/**
+ * Push an EscalationEvent onto the SwarmRun, set status='needs-approval',
+ * persist, and emit a log line. The CALLER must stop the swarm after this.
+ * Never throws.
+ */
+function escalate(
+  run: SwarmRun,
+  kind: EscalationReasonKind,
+  taskId: string | null,
+  detail: string,
+  sink: StreamSink,
+): void {
+  const event: EscalationEvent = {
+    taskId,
+    kind,
+    detail,
+    ts: new Date().toISOString(),
+  };
+  if (!run.escalations) run.escalations = [];
+  run.escalations.push(event);
+  run.status = 'needs-approval';
+  persist(run);
+  emitLog(sink, `[M17] Swarm PAUSED (needs-approval): ${kind} — ${detail}`, { taskId, kind });
+}
+
+// ---------------------------------------------------------------------------
 // Swarm initialisation / state helpers
 // ---------------------------------------------------------------------------
 
@@ -208,6 +304,11 @@ function persist(run: SwarmRun): void {
 // Single-task execution
 // ---------------------------------------------------------------------------
 
+/**
+ * Returns 'continue' when the task completed normally (or was skipped/failed
+ * without tripping a gate), 'escalate' when an M17 gate fired and the swarm
+ * must STOP (status already set to 'needs-approval' by escalate()).
+ */
 async function executeTask(
   taskId: string,
   goal: string,
@@ -220,20 +321,20 @@ async function executeTask(
   reserved: { tokens: number; steps: number } = { tokens: 0, steps: 0 },
   /** Number of tasks (including this one) still being launched in this batch. */
   remainingInBatch = 1,
-): Promise<void> {
+): Promise<'continue' | 'escalate'> {
   // Find the SwarmTaskRun slot.
   const taskRun = run.tasks.find((t) => t.id === taskId);
-  if (!taskRun) return;
+  if (!taskRun) return 'continue';
 
   // Skip if already done (resume path).
-  if (taskRun.status === 'done') return;
+  if (taskRun.status === 'done') return 'continue';
 
   // Check hard budget before starting.
   if (overBudget(run.usage, run.budget)) {
     taskRun.status = 'skipped';
     taskRun.error = 'Skipped: swarm budget exceeded before task started';
     persist(run);
-    return;
+    return 'continue';
   }
 
   // Build per-task budget slice. This accounts for BOTH already-spent usage AND
@@ -254,7 +355,87 @@ async function executeTask(
     taskRun.error =
       'Skipped: swarm budget exhausted (no remaining tokens/steps for this task)';
     persist(run);
-    return;
+    return 'continue';
+  }
+
+  // -------------------------------------------------------------------------
+  // M17: verify dependency signatures BEFORE consuming their outputs.
+  // On any tamper/mismatch, escalate and stop — do NOT proceed.
+  // -------------------------------------------------------------------------
+  const taskSpec = run.plan.tasks.find((t) => t.id === taskId);
+  if (taskSpec !== undefined && taskSpec.deps.length > 0 && _verifyOutput !== null) {
+    for (const depId of taskSpec.deps) {
+      const depRun = run.tasks.find((r) => r.id === depId);
+      if (
+        depRun !== undefined &&
+        depRun.status === 'done' &&
+        depRun.result !== undefined
+      ) {
+        // UNSIGNED-DEPENDENCY GATE: if signing is enabled (_signOutput present)
+        // but this done dep carries NO signature, do NOT silently consume it.
+        // An attacker who edits a persisted dep result AND strips its signature
+        // would otherwise defeat tamper detection ("only when a signature happens
+        // to exist"). Treat a missing signature on a signed-swarm dep as tamper.
+        // Skip the gate when this task was explicitly approved by a human.
+        if (
+          depRun.signature === undefined &&
+          _signOutput !== null &&
+          taskRun.approved !== true
+        ) {
+          escalate(
+            run,
+            'tamper',
+            taskId,
+            `Dependency "${depId}" completed without a signature (signing is enabled) — ` +
+              `cannot verify its output; possible tamper or stripped signature.`,
+            sink,
+          );
+          return 'escalate';
+        }
+
+        if (depRun.signature !== undefined) {
+          // verifyOutput never throws (contract); extra guard just in case.
+          let ok = false;
+          try {
+            ok = _verifyOutput(depRun.result, depRun.signature, cfg);
+          } catch {
+            ok = false;
+          }
+          if (!ok) {
+            escalate(
+              run,
+              'tamper',
+              taskId,
+              `Dependency "${depId}" output failed signature verification — possible tamper.`,
+              sink,
+            );
+            return 'escalate';
+          }
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // M17: risk scan on the task GOAL before execution.
+  //
+  // SKIP when this task was explicitly approved by a human (taskRun.approved):
+  // the pre-execution goal-risk gate trips BEFORE the task runs, so without this
+  // skip an approved goal-risk escalation would re-scan the identical static
+  // goal text on resume and re-escalate forever (infinite needs-approval loop).
+  // approved is only set by `ashlr swarm approve <id>` for the escalated task.
+  // -------------------------------------------------------------------------
+  if (_riskScan !== null && _shouldEscalate !== null && taskRun.approved !== true) {
+    let goalRisk = { risky: false, reason: '' };
+    try { goalRisk = _riskScan(goal); } catch { /* never throws by contract */ }
+    if (goalRisk.risky) {
+      let kind: EscalationReasonKind | null = null;
+      try { kind = _shouldEscalate({ risk: true }); } catch { /* pure, never throws */ }
+      if (kind !== null) {
+        escalate(run, kind, taskId, `Risk gate on task goal: ${goalRisk.reason}`, sink);
+        return 'escalate';
+      }
+    }
   }
 
   taskRun.status = 'running';
@@ -315,13 +496,64 @@ async function executeTask(
     { status: taskRun.status, usage: taskRun.usage },
   );
 
+  // -------------------------------------------------------------------------
+  // M17: sign the task output when done (tamper-evidence for downstream tasks).
+  // Best-effort: a signing failure never crashes or blocks the swarm.
+  // -------------------------------------------------------------------------
+  if (taskRun.status === 'done' && taskRun.result !== undefined && _signOutput !== null) {
+    try {
+      taskRun.signature = _signOutput(taskRun.result, cfg);
+    } catch {
+      // best-effort; absent signature means downstream verification skips this dep
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // M17: post-task escalation gates — risk scan on task result.
+  //
+  // NOTE: over-budget is intentionally NOT checked here. The existing M12
+  // hard-budget abort logic (phase-loop pre-phase check + per-task pre-start
+  // check) owns over-budget and surfaces it as status='aborted'. Passing
+  // overBudget:true to shouldEscalate here would race against those checks
+  // and produce status='needs-approval' instead of 'aborted', breaking the
+  // M12 contract and the 1619 tests. The 'over-budget' escalation kind
+  // remains available for callers that opt into it explicitly (e.g. the CLI
+  // approve path), but the runner uses the M12 hard-abort for this condition.
+  // -------------------------------------------------------------------------
+  // SKIP the result risk scan for an explicitly-approved task too: once a human
+  // has approved a task past its gate, re-escalating on the same task's output
+  // would defeat the approval and (on the next approve) loop. approved tasks are
+  // a deliberate, human-acknowledged exception.
+  if (_riskScan !== null && _shouldEscalate !== null && taskRun.approved !== true) {
+    // Risk scan on the result text (could contain outward-op output).
+    let resultRisk = { risky: false, reason: '' };
+    try { resultRisk = _riskScan(taskRun.result ?? ''); } catch { /* never throws */ }
+
+    if (resultRisk.risky) {
+      let kind: EscalationReasonKind | null = null;
+      try { kind = _shouldEscalate({ risk: true }); } catch { kind = null; }
+
+      if (kind !== null) {
+        escalate(run, kind, taskId, `Risk gate on task result: ${resultRisk.reason}`, sink);
+        return 'escalate';
+      }
+    }
+  }
+
   persist(run);
+  return 'continue';
 }
 
 // ---------------------------------------------------------------------------
 // Phase execution
 // ---------------------------------------------------------------------------
 
+/**
+ * Returns:
+ *   true        — phase completed normally
+ *   false       — budget exceeded mid-phase
+ *   'escalate'  — an M17 gate fired; swarm must STOP
+ */
 async function executePhase(
   phase: SwarmPhaseName,
   run: SwarmRun,
@@ -329,7 +561,7 @@ async function executePhase(
   opts: SwarmOptions,
   sink: StreamSink,
   parallelCap: number,
-): Promise<boolean> {
+): Promise<boolean | 'escalate'> {
   const phaseTasks = run.plan.tasks.filter((t) => t.phase === phase);
   if (phaseTasks.length === 0) return true; // nothing to do
 
@@ -359,7 +591,7 @@ async function executePhase(
       // run.usage. The sum of reservations + run.usage never exceeds the hard
       // total, so the batch cannot overshoot the swarm ceiling.
       const reserved = { tokens: 0, steps: 0 };
-      const launches: Promise<void>[] = [];
+      const launches: Promise<'continue' | 'escalate'>[] = [];
       for (let b = 0; b < batch.length; b++) {
         const t = batch[b]!;
         const remainingInBatch = batch.length - b;
@@ -389,7 +621,12 @@ async function executePhase(
           ),
         );
       }
-      await Promise.all(launches);
+      const results = await Promise.all(launches);
+
+      // If any task in the batch triggered an escalation gate, stop the phase.
+      if (results.includes('escalate')) {
+        return 'escalate';
+      }
 
       // Persist burndown after each batch.
       const done = run.tasks.filter(
@@ -427,7 +664,10 @@ async function executePhase(
         continue;
       }
 
-      await executeTask(taskSpec.id, taskSpec.goal, phase, run, cfg, opts, sink);
+      const result = await executeTask(taskSpec.id, taskSpec.goal, phase, run, cfg, opts, sink);
+      if (result === 'escalate') {
+        return 'escalate';
+      }
     }
   }
 
@@ -513,11 +753,15 @@ function fireCaptureFromSwarm(run: SwarmRun, cfg: AshlrConfig): void {
  *  - Resumable via opts.resumeId.
  *  - --background: re-execs self detached, returns id immediately.
  *  - M16: calls captureFromSwarm on completion unless opts.noCapture is set.
+ *  - M17: snapshots project git state, signs task outputs, verifies dep
+ *    signatures before consumption, escalates on gate trips.
+ *    opts.approved: when set alongside opts.resumeId, resumes a swarm that
+ *    is in 'needs-approval' status (set by ashlr swarm approve <id>).
  */
 export async function runSwarm(
   input: { goal: string; specId?: string },
   cfg: AshlrConfig,
-  opts: SwarmOptions & { noCapture?: boolean },
+  opts: SwarmOptions & { noCapture?: boolean; approved?: boolean },
   sink: StreamSink,
 ): Promise<SwarmRun> {
   // -------------------------------------------------------------------------
@@ -557,6 +801,11 @@ export async function runSwarm(
   // invoking `ashlr swarm`.
   // -------------------------------------------------------------------------
   process.env['ASHLR_IN_SWARM'] = '1';
+
+  // -------------------------------------------------------------------------
+  // M17: load sign / gate / rollback helpers (best-effort, never throws).
+  // -------------------------------------------------------------------------
+  await loadM17();
 
   // Clamp parallel concurrency.
   const parallel = Math.min(
@@ -598,6 +847,25 @@ export async function runSwarm(
     if (existing.status === 'done') {
       emitLog(sink, `Swarm ${existing.id} is already complete — nothing to resume.`);
       return existing;
+    }
+
+    // -----------------------------------------------------------------------
+    // M17: 'needs-approval' — only proceed when explicitly approved.
+    // No auto-approval path: if approved flag is absent, return as-is.
+    // -----------------------------------------------------------------------
+    if (existing.status === 'needs-approval') {
+      if (!opts.approved) {
+        emitLog(
+          sink,
+          `Swarm ${existing.id} is paused (needs-approval). ` +
+          `Run \`ashlr swarm approve ${existing.id}\` to resume.`,
+        );
+        return existing;
+      }
+      // Approved: clear the gate, set running, persist, then continue.
+      existing.status = 'running';
+      persist(existing);
+      emitLog(sink, `Swarm ${existing.id} approved — resuming execution.`);
     }
 
     run = existing;
@@ -686,6 +954,18 @@ export async function runSwarm(
   }
 
   // -------------------------------------------------------------------------
+  // M17: snapshot the project git state at swarm start (read-only, never throws).
+  // Only snapshot once — skip if a rollback snapshot already exists (resume path).
+  // -------------------------------------------------------------------------
+  if (_snapshotProject !== null && run.rollback === undefined) {
+    try {
+      run.rollback = _snapshotProject(project);
+    } catch {
+      // best-effort: snapshot failure never blocks the swarm
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // EXECUTE phases in order.
   // -------------------------------------------------------------------------
   run.status = 'running';
@@ -704,9 +984,17 @@ export async function runSwarm(
         return run;
       }
 
-      const phaseOk = await executePhase(phase, run, cfg, opts, sink, parallel);
+      const phaseResult = await executePhase(phase, run, cfg, opts, sink, parallel);
 
-      if (!phaseOk) {
+      if (phaseResult === 'escalate') {
+        // Swarm already set to 'needs-approval' and persisted by escalate().
+        // Stop cleanly — do NOT proceed to the next phase.
+        emitLog(sink, `Swarm ${run.id} paused at phase "${phase}" — awaiting human approval.`);
+        if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
+        return run;
+      }
+
+      if (!phaseResult) {
         // Phase returned false → budget exceeded mid-phase.
         run.status = 'aborted';
         run.result = `Swarm aborted: hard total budget exceeded during phase ${phase}`;

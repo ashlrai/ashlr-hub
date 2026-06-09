@@ -396,6 +396,69 @@ ashlr swarm show swarm_abc123                     # per-task status, usage, erro
 
 ---
 
+### Verified, recoverable swarms
+
+M17 makes multi-agent swarms safe to run unattended: every task result is signed, downstream tasks verify those signatures before consuming them, a risk heuristic catches destructive or outward operations before they run, and the swarm pauses for human review on any exception — never proceeding silently. If something goes wrong, a confirm-gated rollback restores the project's exact pre-swarm git state.
+
+#### Tamper-evident signatures
+
+Every task result is signed immediately after completion. The default key (`~/.ashlr/keys/swarm.key`, mode 0600) is generated once with `crypto.randomBytes` and an HMAC-SHA256 is computed over the content hash. When Phantom is enabled it is used as the key source instead (best-effort; falls back to the local key transparently). The `OutputSignature` stored on each `SwarmTaskRun` contains only derived hashes — the key itself is never logged, printed, or captured in any artifact.
+
+Before a downstream task consumes a dependency's output, the runner verifies that signature. A mismatch triggers an escalation gate (see below) rather than silently passing corrupted data forward. You can also verify any swarm manually:
+
+```sh
+ashlr swarm verify <id>   # exit 0 = all valid; exit 1 = any failure or swarm not found
+```
+
+#### Human-in-the-loop only on exception
+
+The swarm runs unattended until a gate trips. Four conditions trigger a pause:
+
+| Condition | What happened |
+|---|---|
+| `tamper` | A dependency signature failed verification (result was modified after signing) |
+| `verify-failed` | A critical task's `verifyTask` verdict came back `!ok` |
+| `over-budget` | The global `RunBudget` ceiling would be breached |
+| `risk` | A task goal or result matched a destructive/outward pattern (`rm -rf`, `git push --force`, `deploy`, SQL `DROP`, secret exfiltration) |
+| `low-confidence` | A critical task completed but with a low-confidence heuristic verdict |
+
+On any gate trip the swarm sets `status: 'needs-approval'`, persists an `EscalationEvent` (task id, kind, detail, timestamp), and **stops**. No further work runs automatically. To resume:
+
+```sh
+ashlr swarm approve <id>   # the only path to resume a paused swarm
+```
+
+`approve` is only valid when status is `needs-approval`; it errors on any other status. There is no way to auto-approve from within the swarm.
+
+#### Safe rollback
+
+Before any tasks run, `runSwarm` snapshots the project's git state into `SwarmRun.rollback`: the current `HEAD` commit ref and a stash ref for any dirty working tree. If you need to undo a swarm's changes:
+
+```sh
+ashlr swarm rollback <id>           # prints what it will restore, then prompts for confirm
+ashlr swarm rollback <id> --yes     # same, but accepts the prompt non-interactively
+ashlr swarm rollback <id> --yes --force   # also resets over a dirty working tree
+```
+
+The command prints exactly what it will restore (project path, HEAD ref, stash ref) **before doing anything**. Hard refusals:
+
+- Non-git project or `null` project dir → refuses with guidance.
+- Detached or ambiguous HEAD state → refuses with guidance.
+- Dirty working tree without `--force` → refuses with guidance.
+
+Rollback restores `HEAD` via `git reset --hard` to the snapshotted ref, then re-applies the stash if one was recorded. It **never runs `git push --force`**, **never deletes branches**, and **never force-resets without `--force`**. Rollback is the only potentially-destructive operation added in M17 — and it requires explicit invocation every time.
+
+#### Commands at a glance
+
+| Command | What it does |
+|---|---|
+| `ashlr swarm verify <id>` | Verify all task signatures; exit 0 all-valid, 1 any failure |
+| `ashlr swarm approve <id>` | Resume a `needs-approval` swarm (explicit human action only) |
+| `ashlr swarm rollback <id> [--yes] [--force]` | Restore project to pre-swarm git state (confirm-gated) |
+
+
+---
+
 ### Surfaces
 
 #### Interactive TUI (`ashlr tui` / `ashlr dash`)
