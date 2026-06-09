@@ -87,7 +87,12 @@ function relativeTime(iso: string): string {
 // Helpers — run a CLI tool in a directory, fire-and-forget
 // ---------------------------------------------------------------------------
 
-function runInDir(cmd: string, args: string[], cwd: string, hudMsg: string): void {
+function runInDir(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  hudMsg: string,
+): void {
   // Close Raycast first, then launch after a short delay so the window is gone.
   closeMainWindow({ clearRootSearch: false });
   setTimeout(() => {
@@ -128,7 +133,9 @@ function openInTerminal(itemPath: string): void {
     "  activate",
     "end tell",
   ].join("\n");
-  const child = spawn("/usr/bin/osascript", ["-e", script], { stdio: "ignore" });
+  const child = spawn("/usr/bin/osascript", ["-e", script], {
+    stdio: "ignore",
+  });
   child.on("error", () => undefined);
   child.unref();
 }
@@ -276,7 +283,7 @@ function ItemActions({
                 "entire",
                 ["resume", branch],
                 targetPath,
-                `Resumed "${branch}" in ${item.name}`
+                `Resumed "${branch}" in ${item.name}`,
               );
             }}
           />
@@ -293,7 +300,12 @@ function ItemActions({
             icon={Icon.Person}
             shortcut={{ modifiers: ["cmd", "shift"], key: "c" }}
             onAction={() => {
-              runInDir("claude", [], targetPath, `Claude launched in ${item.name}`);
+              runInDir(
+                "claude",
+                [],
+                targetPath,
+                `Claude launched in ${item.name}`,
+              );
             }}
           />
         </ActionPanel.Section>
@@ -421,7 +433,10 @@ export default function SearchEverything() {
           {section.items.map((item) => (
             <List.Item
               key={item.id}
-              icon={{ source: KIND_ICON[item.kind], tintColor: Color.PrimaryText }}
+              icon={{
+                source: KIND_ICON[item.kind],
+                tintColor: Color.PrimaryText,
+              }}
               title={item.name}
               subtitle={item.description ?? undefined}
               keywords={[

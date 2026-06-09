@@ -90,7 +90,8 @@ interface Prefs {
 function loadEditorPref(): "cursor" | "vscode" {
   try {
     const prefs = getPreferenceValues<Prefs>();
-    if (prefs.editor === "vscode" || prefs.editor === "cursor") return prefs.editor;
+    if (prefs.editor === "vscode" || prefs.editor === "cursor")
+      return prefs.editor;
   } catch {
     // preferences unavailable — fall through to config.json
   }
@@ -120,7 +121,7 @@ function matchesAnyCategory(item: IndexedItem, prefixes: string[]): boolean {
  */
 function byCategory(idx: AshlrIndex, prefixes: string[]): IndexedItem[] {
   return idx.items.filter(
-    (item) => item.kind !== "symlink" && matchesAnyCategory(item, prefixes)
+    (item) => item.kind !== "symlink" && matchesAnyCategory(item, prefixes),
   );
 }
 
@@ -152,7 +153,7 @@ function itemSubtitle(item: IndexedItem): string {
 
 /** Accessory tags for an item. */
 function itemAccessories(
-  item: IndexedItem
+  item: IndexedItem,
 ): { text: string; icon?: Icon; tooltip?: string }[] {
   const accessories: { text: string; icon?: Icon; tooltip?: string }[] = [];
 
@@ -194,10 +195,13 @@ function kindIcon(item: IndexedItem): { source: Icon; tintColor?: Color } {
     }
     return { source: Icon.Code, tintColor: Color.Blue };
   }
-  if (item.kind === "doc-folder") return { source: Icon.Folder, tintColor: Color.Purple };
-  if (item.kind === "doc") return { source: Icon.Document, tintColor: Color.SecondaryText };
+  if (item.kind === "doc-folder")
+    return { source: Icon.Folder, tintColor: Color.Purple };
+  if (item.kind === "doc")
+    return { source: Icon.Document, tintColor: Color.SecondaryText };
   if (item.kind === "asset") return { source: Icon.Image };
-  if (item.kind === "symlink") return { source: Icon.Link, tintColor: Color.SecondaryText };
+  if (item.kind === "symlink")
+    return { source: Icon.Link, tintColor: Color.SecondaryText };
   return { source: Icon.Circle };
 }
 
@@ -304,20 +308,13 @@ export default function CeoDashboard() {
 
   // Section 3: Today / Focus — dirty repos + recently modified repos (top 10), deduped
   const dirtyRepos = index.items.filter(
-    (item) =>
-      item.kind === "repo" &&
-      item.git != null &&
-      item.git.dirty > 0
+    (item) => item.kind === "repo" && item.git != null && item.git.dirty > 0,
   );
 
   const dirtyIds = new Set(dirtyRepos.map((r) => r.id));
 
   const recentRepos = [...index.items]
-    .filter(
-      (item) =>
-        item.kind === "repo" &&
-        !dirtyIds.has(item.id)
-    )
+    .filter((item) => item.kind === "repo" && !dirtyIds.has(item.id))
     .sort((a, b) => b.lastModified.localeCompare(a.lastModified))
     .slice(0, 10);
 
@@ -330,10 +327,7 @@ export default function CeoDashboard() {
   const indexAgeLabel = `Index built ${relativeAge(index.generatedAt)} · ${index.items.length} items`;
 
   return (
-    <List
-      navigationTitle="CEO Dashboard"
-      searchBarPlaceholder="Filter items…"
-    >
+    <List navigationTitle="CEO Dashboard" searchBarPlaceholder="Filter items…">
       {/* ── Section 1: Client & Deliverables ──────────────────────────── */}
       <List.Section
         title="Client & Deliverables"

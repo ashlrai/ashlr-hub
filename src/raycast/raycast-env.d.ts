@@ -24,6 +24,12 @@ declare namespace Preferences {
   export type CeoDashboard = ExtensionPreferences & {}
   /** Preferences accessible in the `tidy-desktop` command */
   export type TidyDesktop = ExtensionPreferences & {}
+  /** Preferences accessible in the `pulse` command */
+  export type Pulse = ExtensionPreferences & {}
+  /** Preferences accessible in the `dispatch-run` command */
+  export type DispatchRun = ExtensionPreferences & {}
+  /** Preferences accessible in the `swarms` command */
+  export type Swarms = ExtensionPreferences & {}
 }
 
 declare namespace Arguments {
@@ -35,5 +41,10 @@ declare namespace Arguments {
   export type CeoDashboard = {}
   /** Arguments passed to the `tidy-desktop` command */
   export type TidyDesktop = {}
+  /** Arguments passed to the `pulse` command */
+  export type Pulse = {}
+  /** Arguments passed to the `dispatch-run` command */
+  export type DispatchRun = {}
+  /** Arguments passed to the `swarms` command */
+  export type Swarms = {}
 }
-

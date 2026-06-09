@@ -27,7 +27,13 @@ export interface AshlrConfig {
   tools: Record<string, string>;
 }
 
-export type ItemKind = "repo" | "doc-folder" | "doc" | "asset" | "symlink" | "other";
+export type ItemKind =
+  | "repo"
+  | "doc-folder"
+  | "doc"
+  | "asset"
+  | "symlink"
+  | "other";
 
 export interface GitStatus {
   branch: string;

@@ -236,6 +236,58 @@ ashlr swarm show swarm_abc123                     # per-task status, usage, erro
 
 ---
 
+### Surfaces
+
+#### Interactive TUI (`ashlr tui` / `ashlr dash`)
+
+A live, auto-refreshing terminal dashboard — zero new runtime dependencies, built on Node.js builtins and the ANSI helpers in `src/cli/ui.ts`.
+
+```sh
+ashlr tui           # interactive alt-screen dashboard, auto-refreshes every ~2 s
+ashlr dash          # alias — same thing
+ashlr tui --once    # render one frame to stdout and exit (headless / scripting / tests)
+```
+
+**Tabs**
+
+| Key | Tab | What it shows |
+|---|---|---|
+| `1` | Overview | Repo health (dirty/stale counts), ecosystem tool availability, 7-day activity line |
+| `2` | Runs | Recent agent runs — status, goal, token usage |
+| `3` | Swarms | Live phase/task burndown for active and recent swarms (done/total per phase) |
+| `4` | Pulse | 7-day cost, tokens, and per-project activity from the local observability rollup |
+| `5` | MCP | Discovered MCP server health (name, tool count, ok/fail) |
+
+**Key bindings**
+
+| Key | Action |
+|---|---|
+| `Tab` / `Shift-Tab` | Cycle through tabs |
+| `1` – `5` | Jump directly to a tab |
+| `j` / `k` | Move selection up/down |
+| `r` | Force-refresh data |
+| `Enter` | Show detail for selected item |
+| `q` / `Ctrl-C` | Quit |
+
+**Non-TTY / headless**: when stdout is not a TTY (pipe, redirect, CI), the TUI automatically prints one frame and exits without entering raw mode or alt-screen — same behavior as `--once`.
+
+**Terminal safety**: alt-screen, cursor visibility, and raw mode are always restored on quit, signal (`SIGINT`/`SIGTERM`), or thrown exception. The terminal is never left corrupted.
+
+#### Raycast extension
+
+The Raycast extension at `src/raycast/` adds two new commands and makes the existing views live:
+
+| Command | What it does |
+|---|---|
+| **Dispatch Run** | Form UI (goal, budget, parallel, engine) that invokes `ashlr run --json` and streams output. Bounded and local-first — matches CLI guardrails. |
+| **Swarms** | Lists active and recent swarms with live done/total task counts and per-phase progress. Actions: show detail or open the target project. |
+| **Pulse** _(upgraded)_ | Auto-revalidates on a short interval via `usePromise` — no manual refresh needed. |
+| **Attention** _(upgraded)_ | Same live-revalidation treatment as Pulse. |
+
+All commands are registered in `src/raycast/package.json`. Raycast dispatch is the only outward action from the Surfaces layer; it uses the same bounded, local-first `ashlr run` path as the CLI.
+
+---
+
 ### Maintain
 
 | Command | What it does |

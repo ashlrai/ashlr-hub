@@ -933,3 +933,45 @@ export interface SwarmOptions {
   /** Absolute target project directory the swarm operates in. */
   project?: string;
 }
+
+// ---------------------------------------------------------------------------
+// M13: surfaces I — watchable hub (interactive TUI + real-time Raycast).
+// A bounded, read-only aggregate snapshot drives an auto-refreshing terminal
+// dashboard (`ashlr tui` / `ashlr dash`) and feeds the Raycast views.
+// ---------------------------------------------------------------------------
+
+/**
+ * A single bounded, read-only aggregate of the whole hub at one instant.
+ * Built from index/git, runs, swarms, the observability rollup, MCP health,
+ * the ecosystem tools registry, and genome health. Drives every TUI tab and
+ * the Raycast surfaces. NEVER throws — missing/unavailable sources degrade to
+ * zeroed/empty fields. METADATA ONLY — never carries secret values.
+ */
+export interface DashboardSnapshot {
+  /** ISO timestamp the snapshot was generated. */
+  generatedAt: string;
+  /** Repo roll-up: total indexed repos, dirty working trees, stale/inactive. */
+  repos: { total: number; dirty: number; stale: number };
+  /** Ecosystem tools roll-up: installed vs. total probed. */
+  tools: { installed: number; total: number };
+  /** Activity roll-up over the dashboard window (sessions/tokens/cost/commits). */
+  activity: { sessions: number; tokens: number; estCostUsd: number; commits: number };
+  /** Recent runs (most-recent first), each with status + cumulative tokens. */
+  runs: { id: string; goal: string; status: string; tokens: number }[];
+  /** Active/recent swarms with live task burndown + optional current phase. */
+  swarms: {
+    id: string;
+    goal: string;
+    status: string;
+    tasksDone: number;
+    tasksTotal: number;
+    phase?: string;
+  }[];
+  /** MCP server health: name, reachable/ok, and tool count. */
+  mcp: { name: string; ok: boolean; tools: number }[];
+  /** Genome roll-up: total entries and distinct projects covered. */
+  genome: { entries: number; projects: number };
+}
+
+/** The selectable tabs of the interactive TUI dashboard. */
+export type TuiTab = 'overview' | 'runs' | 'swarms' | 'pulse' | 'mcp';

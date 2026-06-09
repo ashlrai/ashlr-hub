@@ -85,7 +85,10 @@ function fetchTidyPlan(): FetchState {
     result = spawnSync(ASHLR, ["tidy", "--json"], {
       encoding: "utf8",
       timeout: 15_000,
-      env: { ...process.env, PATH: `${join(homedir(), ".local", "bin")}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin` },
+      env: {
+        ...process.env,
+        PATH: `${join(homedir(), ".local", "bin")}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin`,
+      },
     });
   } catch (err) {
     return {
@@ -114,7 +117,8 @@ function fetchTidyPlan(): FetchState {
   if (!raw) {
     return {
       status: "error",
-      message: "ashlr tidy --json produced no output. The CLI may not yet support the --json flag.",
+      message:
+        "ashlr tidy --json produced no output. The CLI may not yet support the --json flag.",
     };
   }
 
@@ -158,7 +162,10 @@ function runApplyTidy(): string | null {
     result = spawnSync(ASHLR, ["tidy", "--apply"], {
       encoding: "utf8",
       timeout: 30_000,
-      env: { ...process.env, PATH: `${join(homedir(), ".local", "bin")}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin` },
+      env: {
+        ...process.env,
+        PATH: `${join(homedir(), ".local", "bin")}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin`,
+      },
     });
   } catch (err) {
     return `Failed to spawn ashlr: ${err instanceof Error ? err.message : String(err)}`;
@@ -208,7 +215,9 @@ export default function TidyDesktop() {
 
   // ── Loading ──────────────────────────────────────────────────────────────
   if (state.status === "loading") {
-    return <List isLoading={true} searchBarPlaceholder="Computing tidy plan…" />;
+    return (
+      <List isLoading={true} searchBarPlaceholder="Computing tidy plan…" />
+    );
   }
 
   // ── Error ────────────────────────────────────────────────────────────────
@@ -259,7 +268,9 @@ export default function TidyDesktop() {
         message: err,
       });
     } else {
-      await showHUD(`Moved ${moveCount} item${moveCount !== 1 ? "s" : ""}. Desktop is tidy.`);
+      await showHUD(
+        `Moved ${moveCount} item${moveCount !== 1 ? "s" : ""}. Desktop is tidy.`,
+      );
       // Reload to show empty/updated plan
       setState({ status: "loading" });
       setReloadKey((k) => k + 1);
@@ -312,7 +323,10 @@ export default function TidyDesktop() {
           {plan.skipped.map((s, idx) => (
             <List.Item
               key={`skip-${s.path}-${idx}`}
-              icon={{ source: Icon.MinusCircle, tintColor: Color.SecondaryText }}
+              icon={{
+                source: Icon.MinusCircle,
+                tintColor: Color.SecondaryText,
+              }}
               title={basename(s.path)}
               subtitle={shortPath(s.path)}
               accessories={[{ text: s.reason, tooltip: s.reason }]}
@@ -335,7 +349,11 @@ interface MoveItemProps {
 
 function MoveItem({ move, onApplyAll }: MoveItemProps) {
   const fromName = basename(move.from);
-  const toDir = basename(move.to.endsWith(fromName) ? move.to.slice(0, move.to.length - fromName.length - 1) : move.to);
+  const toDir = basename(
+    move.to.endsWith(fromName)
+      ? move.to.slice(0, move.to.length - fromName.length - 1)
+      : move.to,
+  );
 
   return (
     <List.Item

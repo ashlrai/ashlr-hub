@@ -6,6 +6,8 @@
  *
  * Reads the pre-built ~/.ashlr/index.json (never re-scans the filesystem) and
  * derives the attention view via attentionItems() in ./lib/index-reader.
+ *
+ * Auto-revalidates every 2 s via useAutoRevalidate (M13).
  */
 import {
   Action,
@@ -24,6 +26,7 @@ import { loadIndex } from "./lib/index";
 import { attentionItems } from "./lib/index-reader";
 import { openInEditor, openInFinder } from "./lib/open";
 import type { AshlrIndex, IndexedItem } from "./lib/types";
+import { useAutoRevalidate } from "./lib/ashlr-runner";
 
 interface Prefs {
   editor?: "cursor" | "vscode";
@@ -87,10 +90,18 @@ export default function AttentionBoard() {
   const [indexState, setIndexState] = useState<IndexState>("loading");
   const editor = getEditor();
 
+  /** Re-reads the index from disk. Safe to call on any tick. */
+  function refresh() {
+    setIndexState(loadIndex());
+  }
+
   useEffect(() => {
-    const id = setTimeout(() => setIndexState(loadIndex()), 0);
+    const id = setTimeout(refresh, 0);
     return () => clearTimeout(id);
   }, []);
+
+  // Auto-revalidate every 2 s — reads the pre-built JSON file, never re-scans (M13)
+  useAutoRevalidate(refresh, 2_000, indexState !== "loading");
 
   if (indexState === "loading") {
     return (

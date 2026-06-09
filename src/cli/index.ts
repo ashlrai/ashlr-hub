@@ -27,6 +27,7 @@
  *   spec list/show/refine      Manage spec artifacts.
  *   swarm "<goal>"|<specId>    Decompose a spec into a contracts-first agent swarm and run it.
  *   swarms [--json]            List past swarm runs.
+ *   tui [--once]               Interactive terminal dashboard (alias: dash).
  *   help                       Show this help.
  *
  * Exit codes: 0 success, 1 error/not-found, 2 bad usage.
@@ -217,6 +218,14 @@ const loadSwarmsCmd = lazyCmd(
   () => import('./swarm.js' as unknown as string),
   (m) => m.cmdSwarms as Cmd,
   'swarms command requires src/cli/swarm.ts (M12 module not yet built).',
+);
+
+// ─── M13 command loader ────────────────────────────────────────────
+
+const loadTuiCmd = lazyCmd(
+  () => import('./tui.js' as unknown as string),
+  (m) => m.cmdTui as Cmd,
+  'tui command requires src/cli/tui.ts (M13 module not yet built).',
 );
 
 // ─── ANSI helpers ──────────────────────────────────────────────────────────────
@@ -950,6 +959,7 @@ function cmdHelp(): void {
     ['swarm <specId> [opts]',        'Run a swarm against an existing spec artifact.'],
     ['swarm show <id>',              'Print a past swarm run in detail.'],
     ['swarms [--json]',              'List past swarm runs (newest first).'],
+    ['tui [--once]',                 'Interactive terminal dashboard (alias: dash). --once renders one frame and exits.'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1143,6 +1153,13 @@ async function main(): Promise<void> {
       case 'swarms': {
         const cmdSwarms = await loadSwarmsCmd();
         process.exitCode = await cmdSwarms(rest);
+        break;
+      }
+
+      case 'tui':
+      case 'dash': {
+        const cmdTui = await loadTuiCmd();
+        process.exitCode = await cmdTui(rest);
         break;
       }
 

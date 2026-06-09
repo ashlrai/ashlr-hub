@@ -8,6 +8,38 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M13: Surfaces I (Interactive TUI + Real-Time Raycast)
+
+### Added
+- **`ashlr tui` / `ashlr dash` — interactive live terminal dashboard** (`src/tui/app.ts`, `src/tui/render.ts`, `src/cli/tui.ts`):
+  - Runs in an alt-screen buffer with raw-mode key handling and automatic resize awareness. Auto-refreshes every ~2 s by re-reading local data sources (bounded, never blocks the event loop).
+  - **Five tabs** (switch with `Tab` / `Shift-Tab` or `1`–`5`):
+    - **Overview** — repo health (dirty/stale counts), ecosystem tool availability, 7-day activity summary.
+    - **Runs** — recent agent runs with live status, goal summary, and token usage.
+    - **Swarms** — live phase/task burndown for active and recent swarms (done/total per phase).
+    - **Pulse** — 7-day cost, tokens, and per-project activity from the local observability rollup.
+    - **MCP** — discovered MCP server health (name, tool count, ok/fail).
+  - **Key bindings**: `Tab` / `Shift-Tab` or `1`–`5` to switch tabs; `j` / `k` to move selection; `r` to force-refresh; `Enter` to show detail; `q` / `Ctrl-C` to quit.
+  - **`--once` flag**: render one frame to stdout and exit — safe for headless use, scripting, and test assertions.
+  - **Non-TTY graceful degradation**: when stdout is not a TTY (pipe, redirect, CI), automatically prints one frame without entering raw mode or alt-screen.
+  - **Terminal safety guarantee**: alt-screen, cursor visibility, and raw mode are **always restored** on quit, signal (`SIGINT`, `SIGTERM`), or thrown exception — the terminal is never left corrupted.
+  - **Zero new runtime dependencies**: built entirely on Node.js builtins and `src/cli/ui.ts` ANSI helpers.
+- **`src/core/dashboard.ts`** — `buildSnapshot(cfg)`: aggregates index/git (dirty/stale), tools-registry, observability rollup, runs (orchestrator), swarm store, MCP registry, and genome health into a single `DashboardSnapshot`. Bounded and fault-tolerant — never throws; any failed data source degrades to zeroed/empty fields.
+- **New types** in `src/core/types.ts`: `DashboardSnapshot`, `TuiTab`.
+- **Raycast extension upgrades** (`src/raycast/`):
+  - **Dispatch Run** command: form UI (goal, budget, parallel, engine flags) that invokes `ashlr run --json` and shows live output. Bounded and local-first, matching CLI guardrails.
+  - **Swarms** command: lists active and recent swarms with live done/total task counts and per-phase progress; action to show full detail or open the target project.
+  - **Auto-revalidation**: existing Pulse and Attention views now use `usePromise`/`useExec` with a short poll interval so they refresh without manual reloads.
+  - All new commands registered in `src/raycast/package.json`.
+
+### Guardrails (M13)
+- TUI is **reads-only** — no destructive or outward actions from any tab.
+- Raycast dispatch is the only outward action; it is bounded (budget ceiling), local-first by default (`--allow-cloud` required for cloud endpoints), and uses the same `ashlr run` path as the CLI.
+- ZERO new runtime dependencies added to CLI/TUI (Node builtins + `src/cli/ui.ts` only); Raycast retains its existing `@raycast/api`.
+- All 1184 existing tests preserved.
+
+---
+
 ## [Unreleased] — M12: Spec-Driven Swarms
 
 ### Added

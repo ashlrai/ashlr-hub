@@ -11,6 +11,7 @@
  *
  * Actions: Refresh, open project in editor/Finder.
  * Loading spinner while the subprocess is running.
+ * Auto-revalidates every 2 s via useAutoRevalidate (M13).
  */
 
 import {
@@ -26,6 +27,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as cp from "child_process";
 import * as path from "path";
+import { useAutoRevalidate } from "./lib/ashlr-runner";
 
 // ---------------------------------------------------------------------------
 // Inline type mirrors — matches src/core/types.ts M5 interfaces exactly.
@@ -144,7 +146,10 @@ function relativeTime(iso: string | null): string {
 // Budget icon + color
 // ---------------------------------------------------------------------------
 
-function budgetIcon(level: BudgetAlert["level"]): { source: Icon; tintColor: Color } {
+function budgetIcon(level: BudgetAlert["level"]): {
+  source: Icon;
+  tintColor: Color;
+} {
   switch (level) {
     case "over":
       return { source: Icon.ExclamationMark, tintColor: Color.Red };
@@ -202,7 +207,10 @@ function runPulse(window: Window): Promise<ActivityRollup> {
     let stderr = "";
 
     const child = cp.spawn(bin, args, {
-      env: { ...process.env, PATH: `${path.join(os.homedir(), ".local", "bin")}:${process.env.PATH ?? ""}` },
+      env: {
+        ...process.env,
+        PATH: `${path.join(os.homedir(), ".local", "bin")}:${process.env.PATH ?? ""}`,
+      },
       timeout: 30_000,
     });
 
@@ -230,10 +238,14 @@ function runPulse(window: Window): Promise<ActivityRollup> {
         }
       }
       if (code !== 0) {
-        reject(new Error(`ashlr pulse exited ${code ?? "?"}. ${stderr.trim()}`));
+        reject(
+          new Error(`ashlr pulse exited ${code ?? "?"}. ${stderr.trim()}`),
+        );
         return;
       }
-      reject(new Error(`Failed to parse ashlr pulse output: ${out.slice(0, 200)}`));
+      reject(
+        new Error(`Failed to parse ashlr pulse output: ${out.slice(0, 200)}`),
+      );
     });
 
     child.on("error", (err) => {
@@ -254,7 +266,8 @@ function ProjectActions({
   projectPath: string;
   editor: "cursor" | "vscode";
 }) {
-  const editorLabel = editor === "cursor" ? "Open in Cursor" : "Open in VS Code";
+  const editorLabel =
+    editor === "cursor" ? "Open in Cursor" : "Open in VS Code";
   const scheme = editor === "cursor" ? "cursor" : "vscode";
   const encoded = encodeURIComponent(projectPath).replace(/%2F/g, "/");
   const editorUrl = `${scheme}://file/${encoded}`;
@@ -297,36 +310,36 @@ export default function Pulse() {
   const editor = getEditor();
   const runningRef = useRef(false);
 
-  const load = useCallback(
-    async (w: Window) => {
-      if (runningRef.current) return;
-      runningRef.current = true;
-      setIsLoading(true);
-      setError(null);
-      try {
-        const data = await runPulse(w);
-        setRollup(data);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        setError(msg);
-        await showToast({
-          style: Toast.Style.Failure,
-          title: "Pulse failed",
-          message: msg,
-        });
-      } finally {
-        setIsLoading(false);
-        runningRef.current = false;
-      }
-    },
-    []
-  );
+  const load = useCallback(async (w: Window) => {
+    if (runningRef.current) return;
+    runningRef.current = true;
+    setIsLoading(true);
+    setError(null);
+    try {
+      const data = await runPulse(w);
+      setRollup(data);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Pulse failed",
+        message: msg,
+      });
+    } finally {
+      setIsLoading(false);
+      runningRef.current = false;
+    }
+  }, []);
 
   // Initial load
   useEffect(() => {
     load(window);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Auto-revalidate every 2 s when not already loading (M13)
+  useAutoRevalidate(() => load(window), 2_000, !isLoading);
 
   // Reload when window changes
   const handleWindowChange = (w: Window) => {
@@ -436,8 +449,8 @@ export default function Pulse() {
             budget.capUsd != null
               ? `Cap: ${fmtCost(budget.capUsd)}`
               : budget.capTokens != null
-              ? `Cap: ${fmtTokens(budget.capTokens)} tokens`
-              : "No cap set"
+                ? `Cap: ${fmtTokens(budget.capTokens)} tokens`
+                : "No cap set"
           }
           accessories={[
             {
@@ -494,7 +507,10 @@ export default function Pulse() {
                   },
                   proj.commits > 0
                     ? {
-                        tag: { value: `${proj.commits}c`, color: Color.SecondaryText },
+                        tag: {
+                          value: `${proj.commits}c`,
+                          color: Color.SecondaryText,
+                        },
                         tooltip: `${proj.commits} commit${proj.commits !== 1 ? "s" : ""}`,
                       }
                     : null,
@@ -502,7 +518,10 @@ export default function Pulse() {
                 ].filter((a): a is NonNullable<typeof a> => a !== null)}
                 actions={
                   <ActionPanel>
-                    <ProjectActions projectPath={proj.project} editor={editor} />
+                    <ProjectActions
+                      projectPath={proj.project}
+                      editor={editor}
+                    />
                     <ActionPanel.Section>{RefreshAction}</ActionPanel.Section>
                   </ActionPanel>
                 }
@@ -526,7 +545,10 @@ export default function Pulse() {
               subtitle={`${fmtTokens(m.tokensIn)} in · ${fmtTokens(m.tokensOut)} out`}
               accessories={[
                 {
-                  tag: { value: `${m.calls} call${m.calls !== 1 ? "s" : ""}`, color: Color.SecondaryText },
+                  tag: {
+                    value: `${m.calls} call${m.calls !== 1 ? "s" : ""}`,
+                    color: Color.SecondaryText,
+                  },
                 },
                 { text: fmtCost(m.estCostUsd) },
               ]}
@@ -542,11 +564,7 @@ export default function Pulse() {
           icon={{ source: Icon.Clock, tintColor: Color.SecondaryText }}
           title={`No activity in the ${windowLabel.toLowerCase()}`}
           description="Run some Claude Code sessions or `ashlr run` tasks, then refresh."
-          actions={
-            <ActionPanel>
-              {RefreshAction}
-            </ActionPanel>
-          }
+          actions={<ActionPanel>{RefreshAction}</ActionPanel>}
         />
       )}
     </List>

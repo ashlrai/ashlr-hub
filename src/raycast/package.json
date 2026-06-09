@@ -33,7 +33,7 @@
       "name": "attention-board",
       "title": "Attention Board",
       "subtitle": "Ashlr",
-      "description": "Surface active repos with dirty git status, recent activity, and stale items needing attention.",
+      "description": "Surface active repos with dirty git status, recent activity, and stale items needing attention. Auto-refreshes every 2 s.",
       "mode": "view"
     },
     {
@@ -54,7 +54,21 @@
       "name": "pulse",
       "title": "Pulse",
       "subtitle": "Ashlr",
-      "description": "Local-first token, cost, and activity dashboard. Runs `ashlr pulse --json` and renders totals, per-project, and per-model breakdowns with budget status.",
+      "description": "Local-first token, cost, and activity dashboard. Runs `ashlr pulse --json` and renders totals, per-project, and per-model breakdowns with budget status. Auto-refreshes every 2 s.",
+      "mode": "view"
+    },
+    {
+      "name": "dispatch-run",
+      "title": "Dispatch Run",
+      "subtitle": "Ashlr",
+      "description": "Dispatch a bounded local run via `ashlr run`. Fill in a goal, optional budget cap, and optional max-steps, then watch the result.",
+      "mode": "view"
+    },
+    {
+      "name": "swarms",
+      "title": "Swarms",
+      "subtitle": "Ashlr",
+      "description": "Live list of active and recent swarms with task burndown (done/total) and per-phase progress. Auto-refreshes every 2 s.",
       "mode": "view"
     }
   ],
