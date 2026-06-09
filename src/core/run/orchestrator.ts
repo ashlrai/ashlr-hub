@@ -86,6 +86,8 @@ import { nullSink } from './streaming.js';
 import type { StreamSink } from './streaming.js';
 import { withRetry } from './retry.js';
 import { verifyTask } from './verify.js';
+import { withHeal, defaultHealPolicy } from './self-heal.js';
+import type { HealEvent } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Constants / defaults
@@ -1278,13 +1280,80 @@ export async function runGoal(
                 task.error = undefined;
               }
 
-              await runTask(task, taskClient, {
-                tools,
-                budget,
-                usage: state.usage,
-                sink,
-                onStep: taskOnStep,
-              });
+              // M20: bounded self-heal for OOM/rate-limit on model calls.
+              // Opt-out: ASHLR_NO_HEAL skips the wrapper entirely.
+              const noHeal = process.env['ASHLR_NO_HEAL'] === '1';
+
+              const runWithHeal = async (healAttempt: number): Promise<void> => {
+                // On heal attempt > 1 with a 'model-downgrade' event the client
+                // was already logged via onHeal; chooseRoute will pick a smaller
+                // model on the next routeTask call if the outer attempt increments,
+                // so we just re-run with the current client here (the heal retry
+                // is bounded by policy.maxRestarts and stays fully local).
+                if (healAttempt > 1) {
+                  // Re-route to a smaller local model for the downgrade attempt.
+                  // Best-effort: fall back to existing taskClient on any error.
+                  try {
+                    const { client: smallerClient } = await routeTask(
+                      task.goal,
+                      cfg,
+                      { allowCloud: false, attempt: healAttempt, lastReason: 'none' },
+                      taskClient,
+                    );
+                    task.status = 'running';
+                    task.result = undefined;
+                    task.error = undefined;
+                    await runTask(task, smallerClient, {
+                      tools,
+                      budget,
+                      usage: state.usage,
+                      sink,
+                      onStep: makeTaskOnStep(smallerClient.id),
+                    });
+                    return;
+                  } catch {
+                    // Fall through to original client below.
+                  }
+                }
+
+                await runTask(task, taskClient, {
+                  tools,
+                  budget,
+                  usage: state.usage,
+                  sink,
+                  onStep: taskOnStep,
+                });
+              };
+
+              if (noHeal) {
+                await runTask(task, taskClient, {
+                  tools,
+                  budget,
+                  usage: state.usage,
+                  sink,
+                  onStep: taskOnStep,
+                });
+              } else {
+                const healPolicy = defaultHealPolicy();
+                await withHeal(
+                  runWithHeal,
+                  healPolicy,
+                  (event: HealEvent) => {
+                    emit(sink, {
+                      kind: 'log',
+                      taskId: task.id,
+                      text: `[self-heal] ${event.kind} attempt ${event.attempt}: ${event.detail}`,
+                    });
+                    process.stderr.write(
+                      `[ashlr run] self-heal(${event.kind}) task ${task.id} attempt ${event.attempt}: ${event.detail}\n`,
+                    );
+                  },
+                  allowCloud,
+                ).catch((healErr: unknown) => {
+                  // withHeal exhausted — re-throw so the outer withRetry sees it.
+                  throw healErr;
+                });
+              }
 
               // If runTask set status to failed, surface as a throw so withRetry
               // can decide whether to retry (only on retryable errors).

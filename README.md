@@ -2,7 +2,7 @@
 
 **The local-first command center for the Ashlr dev-tool ecosystem.**
 
-Your front door to every repo, model, MCP server, and agent on your machine — one fast `ashlr` CLI and a Raycast extension, both reading from a single local index.
+Index every project, run agents on local models, aggregate all your MCP servers, track spend, scaffold and ship, and give your whole stack shared private memory — all from one binary.
 
 [![CI](https://github.com/masonwyatt23/ashlr-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/masonwyatt23/ashlr-hub/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
@@ -10,37 +10,42 @@ Your front door to every repo, model, MCP server, and agent on your machine — 
 
 ---
 
-## What is this?
-
-`ashlr-hub` is the command center for agentic engineers. It indexes your projects, surfaces health at a glance, aggregates every MCP server into one gateway, orchestrates local-first agent runs, tracks usage, scaffolds and ships new projects, and gives the whole ecosystem a shared, private memory — all from one binary.
-
-It is **local-first by design**. The index, config, runs, observability rollups, and memory all live under `~/.ashlr/`. Agent runs default to local models (Ollama / LM Studio) and refuse to touch a cloud endpoint unless you explicitly opt in. Telemetry is metadata-only; secrets are read through Phantom and never captured.
-
-Think of it as the front door to your entire dev-tool stack: type `ashlr go`, jump anywhere; type `ashlr doctor`, see everything; point any agent at `ashlr mcp`, get every tool.
-
----
-
-## Quickstart
+## Getting started in one command
 
 Requires **macOS** and **Node.js 22+** with `~/.local/bin` on your `PATH`.
 
 ```sh
 git clone https://github.com/masonwyatt23/ashlr-hub.git
 cd ashlr-hub
-npm ci
-npm run build
-./install.sh        # symlinks `ashlr` into ~/.local/bin (idempotent)
+npm ci && npm run build
+./install.sh        # symlinks ashlr into ~/.local/bin (idempotent)
+ashlr init          # one-command onboarding: config, models, editors, symlink, genome, doctor
 ```
 
-Then bootstrap and verify:
+`ashlr init` is the M20 capstone: it walks you through every setup step — config, local model detection, editor MCP wiring, symlink, genome dir, Phantom status — then runs `ashlr doctor` as a final gate and prints a `try: ashlr run / ashlr swarm / ashlr tui` next-steps summary. Re-runnable safely at any time; fully idempotent.
+
+```
+$ ashlr init
+  config     ok   ~/.ashlr/config.json present
+  models     detected   ollama: llama3:8b, mistral:7b
+  editors    detected   claude, cursor (run --wire to register MCP gateway)
+  symlink    ok   ashlr -> ~/.local/bin/ashlr
+  genome     ok   ~/.ashlr/genome/ ready
+  phantom    detected   logged in as mason · tier pro · team evero
+  doctor     ok   all checks pass
+
+you're set up — try: ashlr run / ashlr swarm / ashlr tui
+```
+
+**Optional flags:**
 
 ```sh
-ashlr init          # idempotent onboarding: config, model discovery, Phantom
-ashlr doctor        # one-glance health check across the whole stack
-ashlr index         # build the project index at ~/.ashlr/index.json
+ashlr init --wire        # also wire the MCP gateway into every detected editor
+ashlr init --wire --yes  # fully non-interactive (CI-safe)
+ashlr init --json        # emit OnboardResult as JSON
 ```
 
-`./install.sh` builds the TypeScript to `dist/`, symlinks `bin/ashlr` -> `~/.local/bin/ashlr`, and verifies `ashlr help` runs cleanly. It is safe to re-run after every `git pull`.
+`--wire` is the only mutating optional step. It uses the same backup-first, idempotent `wireEditor` path as `ashlr wire`. `ashlr init` **never** auto-downloads models, modifies secrets, or touches shell profiles.
 
 <details>
 <summary>Manual install (no script)</summary>
@@ -55,772 +60,285 @@ ashlr help
 
 ---
 
+## Self-healing
+
+### `ashlr doctor --fix`
+
+Run `ashlr doctor` at any time to see the health of your setup. Add `--fix` and the doctor applies every safe automated remediation it can, then tells you exactly what it fixed and what still needs your attention:
+
+```sh
+ashlr doctor          # health check: runtime, config, index, Phantom, MCP, providers
+ashlr doctor --fix    # apply safe fixes, then report what was fixed vs. manual
+ashlr doctor --fix --json   # emit FixAction[] for scripting
+```
+
+**What `--fix` can repair automatically (all safe, local, non-destructive):**
+
+| Check | Automated fix |
+|---|---|
+| `config` | Create missing `~/.ashlr/config.json` from defaults (create-only; never overwrites) |
+| `index` | Rebuild a stale or missing `~/.ashlr/index.json` (regenerates derived data only) |
+| `local-bin` | Create the `ashlr` → `~/.local/bin` symlink when missing and the source resolves |
+| `genome-memory` | Create `~/.ashlr/genome/` when absent (mkdir-only; never edits entries) |
+| `mcp-plugin` | Register the ashlr MCP gateway in a detected editor config (backup-first + idempotent) |
+
+Everything else — provider keys, PATH, Phantom login — stays in the **needs manual action** column with a one-line guidance hint. `doctor --fix` never auto-downloads models, never modifies secrets, and never touches shell profiles.
+
+### Bounded runtime self-heal
+
+The MCP gateway and model call sites are wrapped in a bounded self-heal loop (`src/core/run/self-heal.ts`). When something goes wrong at runtime, the hub classifies the failure and applies one recovery action before retrying — bounded by a hard `maxRestarts` ceiling:
+
+| Failure | Recovery |
+|---|---|
+| Crashed MCP downstream | Restart, bounded retries → M3 skip-on-failure fallback |
+| Local model OOM / error | Downgrade to a **smaller local** model (never cloud, never more cost) |
+| Cloud rate-limit | Exponential backoff (only when `allowCloud` already set by the caller) |
+
+Self-heal is always bounded (never loops), opt-out (`ASHLR_NO_HEAL=1`), and never escalates cost.
+
+---
+
+## What is this?
+
+`ashlr-hub` is a command center for agentic engineers. It grew from a project navigator (M1) into a complete platform across 20 milestones:
+
+| Capability | Commands |
+|---|---|
+| **Navigate** | `ashlr index` · `ashlr status` · `ashlr go` · `ashlr ls` · `ashlr open` · `ashlr tidy` |
+| **Onboard + diagnose** | `ashlr init` · `ashlr doctor [--fix]` · `ashlr config` |
+| **MCP gateway** | `ashlr mcp` · `ashlr mcp list` · `ashlr mcp doctor` · `ashlr mcp install` |
+| **Orchestrate** | `ashlr run` · `ashlr runs` · `ashlr run show` |
+| **Swarms** | `ashlr swarm` · `ashlr swarms` · `ashlr swarm show/verify/approve/rollback` |
+| **Specs** | `ashlr spec new/list/show/refine` |
+| **Models** | `ashlr models` · `ashlr models pull` · `ashlr models start` |
+| **Observe** | `ashlr pulse` · `ashlr telemetry status/test` |
+| **Lifecycle** | `ashlr new` · `ashlr ship` |
+| **Memory** | `ashlr learn` · `ashlr recall` · `ashlr genome` |
+| **Integrations** | `ashlr gh` · `ashlr vercel` · `ashlr wire` · `ashlr notify` |
+| **Surfaces** | `ashlr tui` · `ashlr serve` · Raycast extension |
+| **Maintain** | `ashlr update` |
+
+It is **local-first by design**. Index, config, runs, rollups, and memory all live under `~/.ashlr/`. Agent runs default to local models and refuse to touch a cloud endpoint unless you explicitly opt in. Telemetry is metadata-only; secrets flow through Phantom, never through the hub.
+
+---
+
 ## Commands
 
-Every command is zero-runtime-dependency (Node builtins plus the MCP SDK). Add `--json` to most commands for machine-readable output.
+Every command is zero-runtime-dependency (Node builtins + MCP SDK). Add `--json` to most commands for machine-readable output.
 
 ### Navigate
 
 | Command | What it does |
 |---|---|
-| `ashlr index [--refresh]` | Scan your project tree and persist `~/.ashlr/index.json`. `--refresh` forces a full rescan. |
-| `ashlr status` | Summary of the index: counts by kind/category, dirty + stale repos, and a 7-day activity line. |
+| `ashlr index [--refresh]` | Scan your project tree and persist `~/.ashlr/index.json`. |
+| `ashlr status` | Index summary: counts by kind/category, dirty + stale repos, 7-day activity line. |
 | `ashlr go [query] [--open\|--cd]` | Fuzzy-jump to a project. `--open` launches your editor; `--cd` prints the path. |
-| `ashlr ls [category]` | List all indexed items, optionally filtered by category. |
-| `ashlr open <query>` | Resolve a name and open it in your configured editor. |
-| `ashlr tidy [--apply]` | Plan (dry-run) or apply moves of loose top-level files per your tidy rules. |
+| `ashlr ls [category]` | List indexed items, optionally filtered. |
+| `ashlr open <query>` | Resolve a name and open in your configured editor. |
+| `ashlr tidy [--apply]` | Plan (dry-run) or apply moves of loose top-level files. |
 
-```sh
-ashlr go artist-encyclopedia --open     # filter, pick, open in Cursor
-ashlr tidy                              # dry-run: show what would move
-ashlr status                            # counts, dirty/stale repos, activity
-```
-
-Shell helper for instant `cd` — add to your `.zshrc`:
+Shell helper for instant `cd` — add to `.zshrc`:
 
 ```sh
 j() { local p; p=$(ashlr go "$1" --cd) && cd "$p"; }
 ```
 
-### Config
+### Onboard + diagnose
 
 | Command | What it does |
 |---|---|
-| `ashlr init [--yes]` | Idempotent onboarding: writes config defaults, detects local models, enables Phantom if present. Non-TTY safe. |
-| `ashlr doctor` | Health check across runtime, config, index, Phantom, MCP plugin, and every provider endpoint. Exits non-zero on failure. |
+| `ashlr init [--wire] [--yes] [--json]` | Complete idempotent onboarding. See [Getting started](#getting-started-in-one-command). |
+| `ashlr doctor [--fix] [--json]` | Health check across runtime, config, index, Phantom, MCP, providers. `--fix` applies safe automated remediations. |
 | `ashlr config [get\|set <k> <v>\|path]` | Read or write `~/.ashlr/config.json`. |
-
-```sh
-ashlr init --yes                # accept all defaults, no prompts (CI-safe)
-ashlr doctor --json             # full DoctorReport as JSON
-ashlr config set editor vscode  # change the editor used for deep links
-```
 
 ### MCP
 
-`ashlr` is the **single MCP entry point** for any agent. It discovers every MCP server already configured on your machine, starts each as a managed child process, and proxies all their tools through one stdio gateway — namespaced `<server>__<tool>` so there are no collisions.
+`ashlr` is the **single MCP entry point** for any agent. It discovers every MCP server already configured on your machine, starts each as a managed child process, and proxies all their tools through one stdio gateway — namespaced `<server>__<tool>` to prevent collisions.
 
 | Command | What it does |
 |---|---|
-| `ashlr mcp` | Run the aggregation gateway on stdio. (This is what you register in your agent.) |
-| `ashlr mcp list` | Print the registry: every discovered server, where it was found, and its tool count. |
-| `ashlr mcp doctor` | Health-probe each downstream server (start -> list tools -> tear down). |
-| `ashlr mcp install <claude\|ashlrcode> [--config <path>]` | Idempotently register the gateway in a target agent's config (backs up the file first). |
+| `ashlr mcp` | Run the aggregation gateway on stdio. (Register this in your agent config.) |
+| `ashlr mcp list` | Every discovered server, its source, and tool count (env values redacted). |
+| `ashlr mcp doctor` | Health-probe each downstream (start → list tools → tear down). |
+| `ashlr mcp install <claude\|ashlrcode>` | Idempotently register the gateway in a target agent config (backup-first). |
 
 ```sh
-ashlr mcp install claude        # register the gateway in Claude Code, then restart it
-ashlr mcp list                  # see all servers + tool counts (env values redacted)
+ashlr mcp install claude    # register in Claude Code, then restart it
+ashlr mcp list              # see all servers + tool counts
 ```
 
 ### Orchestrate
 
-Give `ashlr run` a goal; it decomposes it into a task-graph (DAG), runs independent tasks in parallel on your local model, and synthesizes a final answer — all within hard budget and step guardrails. **Cloud is off by default** — `ashlr run` refuses to call a cloud endpoint unless you pass `--allow-cloud` and the key is present.
+Give `ashlr run` a goal; it decomposes it into a task-graph (DAG), fans out independent tasks in parallel on your local model, and synthesizes a final answer — all within hard budget and step guardrails. Cloud is off by default.
 
-**Watchable, robust runs (M11).** `ashlr run` now streams progress live as it happens: task starts, model token deltas, tool calls, retries, and verification verdicts all appear in real time on stderr. Each task is retried on transient failures with bounded exponential back-off, then verified against a cheap heuristic (and optionally a model check) before the result is accepted — all under the global budget ceiling. Engine delegation to `claude`, `aw`, or `ashlrcode` uses each tool's actual CLI (confirmed at build time); when `phantom` is enabled, subprocess spawns are wrapped via `phantom exec --` so secrets are injected by Phantom rather than the hub.
+Runs stream progress live to stderr (task starts, model deltas, tool calls, retries, verify verdicts). Each task is retried on transient failure with bounded exponential back-off, then verified before the result is accepted.
 
 | Command | What it does |
 |---|---|
-| `ashlr run "<goal>" [flags]` | Plan -> parallel fan-out -> synthesize. Resumable and persisted to `~/.ashlr/runs/`. |
+| `ashlr run "<goal>" [flags]` | Plan → parallel fan-out → synthesize. Resumable; persisted to `~/.ashlr/runs/`. |
 | `ashlr run show <id>` | Print the full `RunState` for a past run. |
 | `ashlr runs [--json]` | List all past runs, newest first. |
 
-Key flags: `--budget N` (default 32000 tokens) · `--max-steps N` (default 50) · `--parallel N` (default 3) · `--engine builtin\|ashlrcode\|aw\|claude` · `--stream` / `--no-stream` (default stream on when stderr is a TTY) · `--allow-cloud` · `--no-tools` · `--no-memory` · `--resume <id>`.
+Key flags: `--budget N` · `--max-steps N` · `--parallel N` · `--engine builtin|ashlrcode|aw|claude` · `--stream / --no-stream` · `--allow-cloud` · `--no-memory` · `--no-capture` · `--resume <id>`.
 
 ```sh
-ashlr run "Summarize the last 5 commits in ashlr-hub and flag risky changes"
-ashlr run "Audit the MCP registry for duplicate tool names" --budget 8000 --parallel 4
-ashlr run "Refactor the config module" --engine claude   # delegate to Claude Code
-ashlr run "Generate test stubs" --no-stream --json       # clean JSON stdout, no live stream
-ashlr runs                      # list past runs with cost + status
+ashlr run "Summarize the last 5 commits and flag risky changes"
+ashlr run "Audit MCP registry for duplicate tool names" --budget 8000 --parallel 4
+ashlr run "Refactor the config module" --engine claude    # delegate to Claude Code
 ```
 
-Budget and step limits are **hard ceilings** — exceeding either aborts immediately, preserves all partial results, and lets you `--resume`. Retries are bounded; the verification step never re-runs a task that would push usage over the budget.
+### Spec-driven swarms
+
+Author an end-state spec, then run a fleet of local agents against it — phases: SCAFFOLD → BUILD → INTEGRATE → VERIFY → REVIEW.
+
+```sh
+ashlr spec new "Add a plugin system" --project ~/my-project   # draft structured spec
+ashlr spec list                                                # id · version · status · goal
+ashlr spec refine <id> "Add hot-reload support"               # produce v2; v1 preserved
+
+ashlr swarm <specId> --dry-run         # see the SwarmPlan (zero cost)
+ashlr swarm <specId> --budget 64000    # run the fleet
+ashlr swarm <specId> --background      # fire-and-forget, returns swarm id immediately
+ashlr swarms                           # list all runs: id · status · cost
+ashlr swarm show <id>                  # per-task status, usage, errors
+```
+
+**Verified, recoverable swarms** (M17): every task result is HMAC-SHA256 signed; downstream tasks verify signatures before consuming them; a risk heuristic catches destructive operations; the swarm pauses on any exception (`status: 'needs-approval'`) rather than proceeding silently; a confirm-gated rollback restores the exact pre-swarm git state.
+
+```sh
+ashlr swarm verify <id>              # verify all task signatures; exit 0 = all valid
+ashlr swarm approve <id>             # resume a paused swarm (explicit human action only)
+ashlr swarm rollback <id> [--yes]    # restore project to pre-swarm git state
+```
 
 ### Cost-optimal routing
 
-`ashlr` is local-first not just by philosophy but by mechanical guarantee: every task is routed to the best available **local** model (Ollama / LM Studio) first. Cloud endpoints are structurally unreachable unless you explicitly opt in.
+Every task is routed to the best available **local** model (Ollama / LM Studio) first. Cloud is structurally unreachable unless you pass `--allow-cloud` and the key is present — both required simultaneously.
 
-#### How routing works
-
-For each task in a run or swarm, `chooseRoute` inspects `cfg.models.providerChain`, probes which local providers are live, and selects the best match. Optional `cfg.models.routing[]` rules let you pin specific task patterns to a particular model (e.g., route "summarize" tasks to a lighter model). The result is a `RouteDecision` — `{provider, model, tier, reason}` — logged with every task so you always know exactly what ran where.
-
-#### Cloud: only on explicit failure + explicit flag
-
-If a local task fails (empty/error result), the M11 verify loop marks it `!ok`, or it exceeds an optional latency threshold, the orchestrator can escalate to a cloud provider for **one retry** — but only when:
-
-1. `--allow-cloud` is passed to `ashlr run` or `ashlr swarm`, **and**
-2. The cloud provider API key is actually present in the environment.
-
-Both conditions must be true simultaneously. If either is absent, the retry stays local (or marks the task `needs-attention`). There is **no automatic cloud fallback**, no silent billing, and no "best effort" that secretly calls OpenAI when Ollama is slow.
+On failure, the verify loop can escalate for one retry — still local unless `--allow-cloud`. There is no automatic cloud fallback, no silent billing.
 
 ```sh
-# default — 100% local; escalation stays local if a task fails
-ashlr run "Audit the MCP registry"
-
-# opt-in cloud escalation for failed tasks only (key must be present)
-ashlr run "Audit the MCP registry" --allow-cloud
+ashlr models                  # list local models (Ollama + LM Studio) — read-only
+ashlr models pull llama3      # explicit download — prints size warning + requires confirm
+ashlr models start            # best-effort start of an installed-but-idle Ollama daemon
 ```
 
-#### No auto-download, no auto-start
-
-`ashlr` never downloads a model or starts a daemon on your behalf during normal operation. Those actions are opt-in subcommands:
-
-```sh
-ashlr models               # list local models (Ollama + LM Studio) — read-only
-ashlr models pull llama3   # explicit download — prints size warning + requires confirm
-ashlr models start         # best-effort start of an installed-but-idle Ollama daemon
-```
-
-`ashlr models pull` is the only path that runs `ollama pull`. It is never called during a run, route, or escalation, even if no local model is available.
-
-#### Savings + forecast in `ashlr pulse`
-
-Local tasks cost **$0.00**. `ashlr pulse` now shows a savings line that tells you what those tokens would have cost on a cloud provider, and a projected monthly spend based on recent usage:
+`ashlr pulse` shows a savings line: what local tokens would have cost in the cloud, and a projected monthly spend:
 
 ```
 Local savings (est):  $0.42   |   Cloud would-have-been: $0.47   |   Projected 30d: $0.18
 ```
 
-All numbers are clearly marked as estimates. The same data is available machine-readable via `ashlr pulse --json` (the `CostForecast` fields are merged into the rollup output).
-
-#### Config
-
-```jsonc
-// ~/.ashlr/config.json (relevant fields)
-{
-  "models": {
-    "providerChain": ["ollama", "lmstudio"],   // local-first order
-    "routing": [                                // optional per-task overrides
-      { "match": "summarize", "model": "llama3:8b" },
-      { "match": "verify",    "model": "mistral:7b" }
-    ],
-    "escalate": {
-      "onFailure": true,      // escalate to cloud on failure (--allow-cloud still required)
-      "latencyMs": 30000      // also escalate if a task takes longer than 30s
-    }
-  }
-}
-```
-
----
-
 ### Observe
 
-| Command | What it does |
-|---|---|
-| `ashlr pulse [--window 1d\|7d\|30d] [--project <name>]` | Local usage dashboard: window summary, by-project table, top models, cost, budget status. |
-
 ```sh
-ashlr pulse                     # 7-day window (default)
-ashlr pulse --window 30d --json # machine-readable ActivityRollup
+ashlr pulse [--window 1d|7d|30d] [--project <name>]   # local usage dashboard (fully offline)
+ashlr telemetry status    # endpoint configured, PAT available, active sink, governance
+ashlr telemetry test      # emit a synthetic test span to verify the pipeline
 ```
 
-`ashlr pulse` is computed **entirely offline** from usage *metadata* in your Claude Code transcripts (token counts, model id, timestamp, project path) — never message content. Set `telemetry.budgetUsd` / `budgetTokens` in config to get warn/over banners at 80%+ of any cap.
+`ashlr pulse` computes entirely offline from usage metadata in your Claude Code transcripts — never message content. Set `telemetry.budgetUsd` in config to get warn/over banners. M19 adds a full OTLP/HTTP-JSON pipeline (opt-in, fire-and-forget, metadata-only) and a period-based spend governance policy.
 
 ### Lifecycle
 
-| Command | What it does |
-|---|---|
-| `ashlr new <name> [--template t] [--category c] [--here]` | Scaffold an ecosystem-wired project (CLAUDE.md, `.mcp.json` gateway, genome stub, entry point) and register it in the index. |
-| `ashlr ship [path] [--deploy t] [--strict] [--confirm]` | Pre-ship gate (supply-chain + test/lint/build), then optional deploy. |
-
-Templates: `minimal` (default) · `node-cli` · `mcp-server` · `next-app`. Deploy targets: `vercel` · `stack` · `gh` · `morphkit`.
-
 ```sh
-ashlr new my-server --template mcp-server
-ashlr ship --deploy vercel              # DRY-RUN by default — prints what would run
-ashlr ship --deploy vercel --confirm    # actually deploy
+ashlr new my-server --template mcp-server   # scaffold ecosystem-wired project
+ashlr ship                                  # pre-ship gate: supply-chain + test/lint/build (dry-run)
+ashlr ship --deploy vercel --confirm        # gate + deploy (--confirm required for outward action)
 ```
 
-`ashlr ship` is **read-only and dry-run by default**. The gate never writes, pushes, or deploys; any outward action requires `--confirm`.
+Templates: `minimal` · `node-cli` · `mcp-server` · `next-app`. Deploy targets: `vercel` · `stack` · `gh` · `morphkit`.
 
 ### Memory
 
-A cross-project, local-first shared memory. Every project genome, every taught note, and every `ashlr run` share one searchable store — all on your machine, never sent anywhere.
+```sh
+ashlr learn "<note>" [--project p] [--tags a,b]   # append to ~/.ashlr/genome/hub.jsonl
+ashlr recall "<query>"                            # keyword/TF-IDF search, optional Ollama rerank
+ashlr genome                                      # health: entry count, projects, store size
+ashlr genome --teach "<note>"                     # manual high-value note (tagged 'teach')
+ashlr genome consolidate                          # merge near-duplicates (backup-first)
+ashlr genome playbook "<goal>"                    # synthesise a playbook from past runs
+ashlr genome export ~/backup.json                 # portable export (JSON or Markdown)
+```
+
+The genome compounds automatically — every completed `ashlr run` and `ashlr swarm` appends a structured entry (metadata/summary only, capped at ~800 chars, never prompts or file contents). Before each run, a synthesised playbook is injected into the agent's planning context. Pass `--no-capture` or `--no-memory` to opt out per invocation.
+
+### Integrations
 
 | Command | What it does |
 |---|---|
-| `ashlr learn "<note>" [--project p] [--tags a,b]` | Append a memory entry to `~/.ashlr/genome/hub.jsonl` (append-only). |
-| `ashlr recall "<query>"` | Search the aggregated genome; ranked by keyword/TF-IDF, optionally reranked via local Ollama embeddings. |
-| `ashlr genome` | Genome health: total entries, projects covered, store size, last-learned, embeddings availability. |
-
-```sh
-ashlr learn "Use bge-m3 for local embedding rerank" --tags ollama,embeddings
-ashlr recall "embedding model setup"
-```
-
-`ashlr run` is **memory-aware by default** — it injects the top-k `recall(goal)` hits into each sub-agent's prompt (cap via `genome.maxRecall`, disable per-run with `--no-memory`).
-
-#### Compounding memory (M16)
-
-The genome grows richer with every run — automatically. Each completed `ashlr run` or `ashlr swarm` appends a concise structured entry to the genome (goal, approach/outcome summary, project, tags). Over time the genome accumulates institutional knowledge about what has been tried, what worked, and what failed — without any manual effort.
-
-**Auto-capture**
-
-After every run or swarm completes, a structured `GenomeEntry` summarising the work is appended to `~/.ashlr/genome/hub.jsonl` in the background. Capture is:
-
-- **Metadata/summary only** — never raw prompts, completions, tool arguments, or file contents. Hard-capped at ~800 chars per entry.
-- **Dedupe-aware** — near-duplicate entries for the same goal are detected and skipped.
-- **Non-blocking** — fires after the result is returned; never slows a run.
-- **Opt-out per invocation**: pass `--no-capture` to `ashlr run` or `ashlr swarm`, or set `genome.autoCapture: false` in `~/.ashlr/config.json` to disable globally.
-
-```sh
-ashlr run "Audit the MCP registry"               # auto-captures on completion (default)
-ashlr run "Audit the MCP registry" --no-capture  # skip capture for this run
-```
-
-**Teach a note manually**
-
-```sh
-ashlr genome --teach "Always pre-warm Ollama before a long swarm — cold-start adds ~30s"
-ashlr genome --teach "bge-m3 rerank improves recall precision ~20%" --tags ollama,embeddings
-```
-
-High-value notes are tagged `teach` and are immediately searchable via `ashlr recall`.
-
-**Consolidate duplicates**
-
-As the genome grows, near-duplicate entries accumulate. Consolidation merges them into one canonical entry while preserving all provenance:
-
-```sh
-ashlr genome consolidate
-# Writes a timestamped backup of hub.jsonl first (no data loss)
-# Merged entry retains: count, firstSeen, lastSeen, union of all tags, full content
-# Reports: before=142  after=98  merged=44
-```
-
-A timestamped backup of `hub.jsonl` is always written before any mutation. Nothing is silently deleted.
-
-**Playbook: synthesised prior art**
-
-Before planning a run, `ashlr` recalls similar past entries and synthesises a concise "how we approached this before — what worked / what failed / cost" playbook, injected (bounded by char cap) into the agent's planning context. This upgrades M7's raw-recall injection into a structured synthesis.
-
-```sh
-# Inspect the playbook for a goal before running
-ashlr genome playbook "Add a plugin system to ashlr-hub"
-# Prints: relevant past attempts, outcomes, lessons, cost summary
-
-# Playbook injection is on by default during ashlr run / ashlr swarm
-# Disable with --no-memory or set genome.playbookOnRun: false in config
-```
-
-Synthesis uses the **local provider only**. If synthesis fails or the budget is exhausted, it falls back to a concatenated recall summary — never errors, never calls a cloud endpoint.
-
-**Export your genome**
-
-The genome is yours. Export it to a portable format at any time — no lock-in:
-
-```sh
-ashlr genome export ~/genome-backup.json             # JSON array of GenomeEntry objects
-ashlr genome export ~/genome-backup.md --format md   # human-readable Markdown
-```
-
-Export is strictly read-only and never modifies the genome store.
-
-**Privacy**
-
-| Guarantee | Detail |
-|---|---|
-| Metadata/summary only | Capture never reads prompts, completions, tool args, or file contents |
-| Hard-capped entries | Each auto-captured entry is capped at ~800 chars |
-| Local-only | All genome data stays under `~/.ashlr/genome/`; no cloud sync |
-| No data loss | Consolidation is backup-first; `export` is read-only; store is append-only |
-| Opt-out anywhere | `--no-capture` per run; `autoCapture: false` globally; `--no-memory` skips injection |
-
-**Config**
-
-```jsonc
-// ~/.ashlr/config.json (relevant fields)
-{
-  "genome": {
-    "maxRecall": 5,           // top-k recall hits injected into prompts
-    "injectOnRun": true,      // inject genome context into agent runs (M7)
-    "autoCapture": true,      // auto-capture run/swarm summaries on completion (M16)
-    "playbookOnRun": true     // synthesise playbook for planning context (M16)
-  }
-}
-```
-
----
-
-### Spec-driven swarms
-
-Author an ambitious end-state spec, then unleash a fleet of local agents against it — all within hard budget and safety guardrails.
-
-**Step 1 — author a spec.**
-
-```sh
-# Draft a structured spec (Context / North Star / Pillars / Roadmap / Verification)
-ashlr spec new "Add a plugin system to ashlr-hub" --project ~/Desktop/github/dev-tools/ashlr-hub
-# → .ashlr/specs/add-a-plugin-system-v1.md  +  .ashlr/specs/add-a-plugin-system-v1.json
-
-ashlr spec list                                   # id · version · status · goal
-ashlr spec show add-a-plugin-system-v1            # full markdown body
-ashlr spec refine add-a-plugin-system-v1 "Add hot-reload support to the plugin lifecycle"
-# → produces v2; v1 is preserved
-```
-
-**Step 2 — run an agent fleet against the spec.**
-
-```sh
-# Dry-run first: see the SwarmPlan (phases + tasks) with zero cost
-ashlr swarm add-a-plugin-system-v1 --dry-run
-
-# Real swarm: SCAFFOLD → BUILD(parallel) → INTEGRATE → VERIFY → REVIEW
-ashlr swarm add-a-plugin-system-v1 --budget 64000 --parallel 3
-
-# Tighter budget, single worker lane, on a temp scratch dir
-ashlr swarm "Add config validation" --budget 16000 --parallel 1 --project /tmp/scratch
-
-# Fire-and-forget: returns the swarm id immediately; work runs in the background
-ashlr swarm add-a-plugin-system-v1 --budget 64000 --background
-# → swarm id: swarm_abc123  (progress written to ~/.ashlr/swarms/swarm_abc123.json)
-
-# Resume after an interruption or budget hit
-ashlr swarm add-a-plugin-system-v1 --resume swarm_abc123 --budget 32000
-
-ashlr swarms                                      # list all runs: id · status · cost
-ashlr swarm show swarm_abc123                     # per-task status, usage, errors
-```
-
-**Safety model — non-negotiable defaults.**
-
-| Guardrail | Behaviour |
-|---|---|
-| Hard total budget | Single `RunBudget` ceiling across all tasks and phases; aborts cleanly when hit. |
-| Bounded concurrency | `--parallel` default 3, max 8; planner caps ≤6 tasks per phase. |
-| Local-first | Runs on builtin/Ollama by default; `--allow-cloud` required for cloud endpoints. |
-| No recursion | Sets `ASHLR_IN_SWARM=1` on subprocess env; refuses to start if already set. |
-| No outward action | Tasks cannot push, deploy, or create repos without an explicit opt-in flag. |
-| Resumable | `SwarmRun` persisted to `~/.ashlr/swarms/<id>.json` after every step. |
-
----
-
-### Verified, recoverable swarms
-
-M17 makes multi-agent swarms safe to run unattended: every task result is signed, downstream tasks verify those signatures before consuming them, a risk heuristic catches destructive or outward operations before they run, and the swarm pauses for human review on any exception — never proceeding silently. If something goes wrong, a confirm-gated rollback restores the project's exact pre-swarm git state.
-
-#### Tamper-evident signatures
-
-Every task result is signed immediately after completion. The default key (`~/.ashlr/keys/swarm.key`, mode 0600) is generated once with `crypto.randomBytes` and an HMAC-SHA256 is computed over the content hash. When Phantom is enabled it is used as the key source instead (best-effort; falls back to the local key transparently). The `OutputSignature` stored on each `SwarmTaskRun` contains only derived hashes — the key itself is never logged, printed, or captured in any artifact.
-
-Before a downstream task consumes a dependency's output, the runner verifies that signature. A mismatch triggers an escalation gate (see below) rather than silently passing corrupted data forward. You can also verify any swarm manually:
-
-```sh
-ashlr swarm verify <id>   # exit 0 = all valid; exit 1 = any failure or swarm not found
-```
-
-#### Human-in-the-loop only on exception
-
-The swarm runs unattended until a gate trips. Four conditions trigger a pause:
-
-| Condition | What happened |
-|---|---|
-| `tamper` | A dependency signature failed verification (result was modified after signing) |
-| `verify-failed` | A critical task's `verifyTask` verdict came back `!ok` |
-| `over-budget` | The global `RunBudget` ceiling would be breached |
-| `risk` | A task goal or result matched a destructive/outward pattern (`rm -rf`, `git push --force`, `deploy`, SQL `DROP`, secret exfiltration) |
-| `low-confidence` | A critical task completed but with a low-confidence heuristic verdict |
-
-On any gate trip the swarm sets `status: 'needs-approval'`, persists an `EscalationEvent` (task id, kind, detail, timestamp), and **stops**. No further work runs automatically. To resume:
-
-```sh
-ashlr swarm approve <id>   # the only path to resume a paused swarm
-```
-
-`approve` is only valid when status is `needs-approval`; it errors on any other status. There is no way to auto-approve from within the swarm.
-
-#### Safe rollback
-
-Before any tasks run, `runSwarm` snapshots the project's git state into `SwarmRun.rollback`: the current `HEAD` commit ref and a stash ref for any dirty working tree. If you need to undo a swarm's changes:
-
-```sh
-ashlr swarm rollback <id>           # prints what it will restore, then prompts for confirm
-ashlr swarm rollback <id> --yes     # same, but accepts the prompt non-interactively
-ashlr swarm rollback <id> --yes --force   # also resets over a dirty working tree
-```
-
-The command prints exactly what it will restore (project path, HEAD ref, stash ref) **before doing anything**. Hard refusals:
-
-- Non-git project or `null` project dir → refuses with guidance.
-- Detached or ambiguous HEAD state → refuses with guidance.
-- Dirty working tree without `--force` → refuses with guidance.
-
-Rollback restores `HEAD` via `git reset --hard` to the snapshotted ref, then re-applies the stash if one was recorded. It **never runs `git push --force`**, **never deletes branches**, and **never force-resets without `--force`**. Rollback is the only potentially-destructive operation added in M17 — and it requires explicit invocation every time.
-
-#### Commands at a glance
-
-| Command | What it does |
-|---|---|
-| `ashlr swarm verify <id>` | Verify all task signatures; exit 0 all-valid, 1 any failure |
-| `ashlr swarm approve <id>` | Resume a `needs-approval` swarm (explicit human action only) |
-| `ashlr swarm rollback <id> [--yes] [--force]` | Restore project to pre-swarm git state (confirm-gated) |
-
-
----
+| `ashlr gh pr / issue / ci` | Read open PRs, issues, CI status for the current repo |
+| `ashlr gh pr create` | The only mutation — confirm-gated, never automatic |
+| `ashlr vercel ls / logs` | Recent deployments and latest logs for the linked project |
+| `ashlr wire [claude\|cursor\|codex\|all]` | Wire the MCP gateway into editor configs (backup-first, idempotent) |
+| `ashlr notify test` | Ping configured Slack/Discord webhook (no-op if none configured) |
+
+All reads are non-mutating and degrade gracefully when a CLI or linked project is absent. `gh` owns GitHub auth, `vercel` owns Vercel auth, `phantom` owns secrets — the hub never handles raw tokens. Phantom identity appears in `ashlr status` and `ashlr doctor` as name/tier/team only; vault contents are never accessed.
 
 ### Surfaces
 
-#### Interactive TUI (`ashlr tui` / `ashlr dash`)
-
-A live, auto-refreshing terminal dashboard — zero new runtime dependencies, built on Node.js builtins and the ANSI helpers in `src/cli/ui.ts`.
-
 ```sh
-ashlr tui           # interactive alt-screen dashboard, auto-refreshes every ~2 s
-ashlr dash          # alias — same thing
-ashlr tui --once    # render one frame to stdout and exit (headless / scripting / tests)
+ashlr tui                # interactive alt-screen dashboard, auto-refreshes every ~2 s
+ashlr tui --once         # render one frame to stdout and exit (headless/CI)
+ashlr serve              # local web dashboard at http://127.0.0.1:7777
+ashlr serve --open       # launch the browser automatically
+ashlr serve --allow-dispatch   # enable opt-in POST /api/run (prints session token)
 ```
 
-**Tabs**
+**TUI tabs**: Overview · Runs · Swarms · Pulse · MCP. Keys: `Tab`/`1–5` switch tabs, `j/k` scroll, `r` refresh, `q` quit. Terminal safety guaranteed — alt-screen/raw mode always restored on quit or exception.
 
-| Key | Tab | What it shows |
-|---|---|---|
-| `1` | Overview | Repo health (dirty/stale counts), ecosystem tool availability, 7-day activity line |
-| `2` | Runs | Recent agent runs — status, goal, token usage |
-| `3` | Swarms | Live phase/task burndown for active and recent swarms (done/total per phase) |
-| `4` | Pulse | 7-day cost, tokens, and per-project activity from the local observability rollup |
-| `5` | MCP | Discovered MCP server health (name, tool count, ok/fail) |
-
-**Key bindings**
-
-| Key | Action |
-|---|---|
-| `Tab` / `Shift-Tab` | Cycle through tabs |
-| `1` – `5` | Jump directly to a tab |
-| `j` / `k` | Move selection up/down |
-| `r` | Force-refresh data |
-| `Enter` | Show detail for selected item |
-| `q` / `Ctrl-C` | Quit |
-
-**Non-TTY / headless**: when stdout is not a TTY (pipe, redirect, CI), the TUI automatically prints one frame and exits without entering raw mode or alt-screen — same behavior as `--once`.
-
-**Terminal safety**: alt-screen, cursor visibility, and raw mode are always restored on quit, signal (`SIGINT`/`SIGTERM`), or thrown exception. The terminal is never left corrupted.
-
-#### Web dashboard (`ashlr serve`)
-
-A polished, fully local web dashboard — no CDN, no external fonts or scripts, no network calls. Everything is bundled in the repo and served by a Node `http` server bound to `127.0.0.1`.
-
-```sh
-ashlr serve                     # start on http://127.0.0.1:7777 (default port)
-ashlr serve --port 8080 --open  # custom port; open the browser automatically
-ashlr serve --allow-dispatch    # enable the opt-in POST /api/run endpoint (prints token)
-```
-
-**Pages**
-
-| Page | What it shows |
-|---|---|
-| Overview | Aggregated ecosystem snapshot (git health, tools, 7-day activity) |
-| Runs | Recent agent runs — status, goal, token/cost usage |
-| Swarms | SVG dependency-graph of the swarm DAG (nodes colored by phase/status, edges for deps) + live burndown chart |
-| Pulse | SVG bar charts of cost/token usage by project, day, and model |
-| Genome | Full genome list + instant search box (`/api/genome?q=`) |
-
-All pages live-update via a Server-Sent Events stream (`/api/events`) — no manual refresh needed.
-
-**JSON API** (read-only by default)
-
-| Endpoint | Handler |
-|---|---|
-| `GET /api/snapshot` | `buildSnapshot(cfg)` aggregate |
-| `GET /api/runs` / `/api/run/:id` | `listRuns` / `loadRun` |
-| `GET /api/swarms` / `/api/swarm/:id` | `listSwarms` / `loadSwarm` |
-| `GET /api/pulse[?window=1d\|7d\|30d]` | `buildRollup` (default 7d) |
-| `GET /api/genome[?q=<query>]` | `recall(q, cfg)` or `loadGenome(cfg)` |
-| `GET /api/events` | SSE stream (bounded poll, cleared on disconnect) |
-| `POST /api/run` | **Opt-in only** — requires `--allow-dispatch` + session token header |
-
-**Security posture**
-
-| Guardrail | Behaviour |
-|---|---|
-| Local-only bind | `127.0.0.1` only — never `0.0.0.0`; not reachable from the network |
-| DNS-rebinding protection | Host-header allowlist (`localhost`/`127.0.0.1`/`::1` ± port) checked first — all other hosts → 403 |
-| Read-only by default | No mutating endpoints unless `--allow-dispatch` is explicitly passed |
-| Token-guarded dispatch | Per-session token (printed at start, required in header, constant-time compared) — defeats CSRF/drive-by POSTs |
-| Path-traversal-safe | Static serving resolves under the assets dir; `..`, absolute paths, null bytes, and symlink escapes → 404 |
-| No SSRF | The server makes no outward network calls |
-| No CDN / fully offline | All assets bundled in the repo; works without any internet access |
-| Ephemeral | `Ctrl-C` stops the server cleanly; SSE timers cleared; no leaks |
-| Zero new deps | `http` / `crypto` / `fs` / `path` / `url` builtins only |
-
-#### Raycast extension
-
-The Raycast extension at `src/raycast/` adds two new commands and makes the existing views live:
-
-| Command | What it does |
-|---|---|
-| **Dispatch Run** | Form UI (goal, budget, parallel, engine) that invokes `ashlr run --json` and streams output. Bounded and local-first — matches CLI guardrails. |
-| **Swarms** | Lists active and recent swarms with live done/total task counts and per-phase progress. Actions: show detail or open the target project. |
-| **Pulse** _(upgraded)_ | Auto-revalidates on a short interval via `usePromise` — no manual refresh needed. |
-| **Attention** _(upgraded)_ | Same live-revalidation treatment as Pulse. |
-
-All commands are registered in `src/raycast/package.json`. Raycast dispatch is the only outward action from the Surfaces layer; it uses the same bounded, local-first `ashlr run` path as the CLI.
-
----
-
-### Maintain
-
-| Command | What it does |
-|---|---|
-| `ashlr update` | Update the installed `ashlr` CLI from its git remote and rebuild. |
-
----
-
-## Integrations
-
-M18 wires `ashlr` into the tools agentic engineers live in every day: GitHub, Vercel, your editors, and your Phantom identity. The design principle is consistent throughout: **reads are always safe; mutations are always explicit**.
-
-### Philosophy
-
-| Principle | What it means in practice |
-|---|---|
-| **Read-first** | All status reads (`ashlr gh`, `ashlr vercel`, `ashlr status`) are non-mutating and never throw. They degrade gracefully when a CLI or linked project is absent. |
-| **CLIs own auth** | `gh` owns GitHub auth, `vercel` owns Vercel auth, `phantom` owns secrets. The hub delegates to these CLIs via subprocess — it never handles raw tokens, never reads credential files, and never stores keys. |
-| **Mutations are explicit + gated** | The only mutation added in M18 is `ashlr gh pr create`, which requires an explicit subcommand and a confirm prompt. Every other new command is read-only. |
-| **Opt-in outward actions** | Notifications are completely dormant unless you configure a webhook. No network call is ever made without a webhook present. |
-| **Identity = names/status only** | Phantom identity surfaces your user name, tier, and team — never secret values or vault contents. |
-
-### GitHub (`ashlr gh`)
-
-Read open PRs, issues, and CI status for the current repo. Surfaces a one-liner in `ashlr status` when cwd is a git repo.
-
-```sh
-ashlr gh pr              # list open PRs: number · title · URL · state · author
-ashlr gh issue           # list open issues (same fields)
-ashlr gh ci              # CI/checks status for HEAD: passing | failing | pending | none
-
-# ashlr status (when cwd is a gh repo):
-# GitHub: 3 open PRs · CI passing
-```
-
-**The only mutation — explicit + confirm-gated:**
-
-```sh
-ashlr gh pr create       # prompts for title/body/base, then asks "Create PR? [y/N]"
-                         # never runs automatically; never called by status/doctor/swarm
-```
-
-All reads use `gh pr list`, `gh issue list`, `gh run list` — the `gh` CLI which owns your GitHub auth. The hub passes no tokens.
-
-### Vercel (`ashlr vercel`)
-
-Read recent deployments and the latest preview URL for the linked project. Surfaces a one-liner in `ashlr status` when a project is linked.
-
-```sh
-ashlr vercel ls          # recent deployments: URL · state · created · target
-ashlr vercel logs        # tail logs for the latest deployment
-
-# ashlr status (when a Vercel project is linked):
-# Vercel: ready https://my-app-abc123.vercel.app
-```
-
-Reads delegate to the `vercel` CLI. Deploy stays in `ashlr ship --deploy vercel --confirm` — no new deploy path is introduced here.
-
-### Editor auto-wire (`ashlr wire`)
-
-Wire the ashlr MCP gateway into your editors' MCP configs — backup-first, idempotent, local only.
-
-```sh
-ashlr wire               # auto-detect editors and wire all of them
-ashlr wire claude        # wire Claude Code only (~/.claude/settings.json)
-ashlr wire cursor        # wire Cursor only (~/.cursor/mcp.json)
-ashlr wire codex         # wire Codex only (~/.codex/config.json)
-ashlr wire all           # wire every supported editor
-```
-
-Uses the same M3 install pattern as `ashlr mcp install`: backs up the target config file before writing, deep-merges `mcpServers` (never clobbers existing entries), and is safe to run repeatedly. Writes only to the editor's own config directory — nothing else.
-
-Detected editors: whichever of `~/.claude/`, `~/.cursor/`, `~/.codex/` exist on your machine. After wiring, restart the editor to pick up the new MCP server.
-
-### Phantom identity (`ashlr status` + `ashlr doctor`)
-
-When `phantom` is installed and you are logged in, `ashlr status` shows a one-liner:
-
-```
-You: mason · tier pro · team evero
-```
-
-And `ashlr doctor` includes an identity check. Both degrade gracefully — the line is omitted from status, and the doctor check warns (does not fail) when phantom is absent or logged out.
-
-Identity is read via `phantom cloud status` and `phantom team`. Only names and status are surfaced — vault contents and secret values are never read, parsed, or printed.
-
-### Opt-in notifications (`ashlr notify`)
-
-Post a concise, secret-free completion summary to Slack or Discord after a run or swarm finishes. Feature is completely dormant unless you configure a webhook.
-
-```sh
-ashlr notify test        # send a test ping to verify your webhook is working
-                         # strict no-op (no network call) if no webhook is configured
-```
-
-**Config** (`~/.ashlr/config.json`):
-
-```jsonc
-{
-  "notify": {
-    "slackWebhook": "https://hooks.slack.com/services/...",   // optional
-    "discordWebhook": "https://discord.com/api/webhooks/..."  // optional
-  }
-}
-```
-
-Both fields are optional. Both unset = notifications are completely off. The summary posted contains only run metadata (goal, status, token count, cost estimate) — no prompts, results, file contents, or secret values are ever included.
-
----
-
-## Ecosystem cohesion
-
-`ashlr-hub` projects its unified `~/.ashlr/config.json` into the environment of
-every tool it spawns — so one config drives the entire suite without modifying any
-of the independently-shipped tools.
-
-When the hub starts a child process (an `ashlrcode` / `aw` agent run, an MCP
-downstream server, or a deploy tool like `vercel` or `stack`), it merges a set of
-non-secret env vars derived from your config into that child's environment before
-exec. Common endpoint vars (`OLLAMA_HOST`, `OLLAMA_BASE_URL`, `LM_STUDIO_URL`,
-`OPENAI_BASE_URL`), provider identity (`ASHLR_LLM_PROVIDER`, `ASHLR_PROVIDER_CHAIN`),
-model name (`ASHLR_MODEL`, `AC_MODEL`), paths (`ASHLR_CONFIG`, `ASHLR_GENOME_DIR`,
-`ASHLR_ROOTS`), and a local-first flag (`ASHLR_LOCAL_FIRST=1`) are all set
-automatically.
-
-**No secret values are ever injected.** API keys are Phantom's responsibility and
-reach child processes only via normal environment inheritance. The bridge maps
-endpoints, model names, paths, and flags — nothing else.
-
-The implementation lives in `src/core/env-bridge.ts` (`buildToolEnv` /
-`withToolEnv`) and is applied at every spawn site in the hub.
+**Web dashboard pages**: Overview · Runs · Swarms (SVG dependency-graph + live burndown) · Pulse (SVG charts) · Genome (instant search). All pages live-update via SSE. Binds `127.0.0.1` only; DNS-rebinding protection; read-only by default; no CDN; fully offline.
 
 ---
 
 ## Architecture
 
-`ashlr-hub` is a TypeScript ESM (NodeNext) project. Core logic lives in `src/core/`, the CLI dispatch in `src/cli/`, and the Raycast extension in `src/raycast/` (its own package). `core/` and `cli/` carry **zero runtime dependencies** beyond the MCP SDK.
+TypeScript ESM (NodeNext). Core logic in `src/core/`, CLI dispatch in `src/cli/`, Raycast extension in `src/raycast/` (own package). `core/` and `cli/` carry zero runtime dependencies beyond the MCP SDK.
 
-| Area | Modules |
+| Area | Key modules |
 |---|---|
 | Index & navigation | `config` · `git` · `classify` · `index-engine` · `tidy` |
-| Identity & models | `providers` · `phantom` · `doctor` |
+| Onboard & diagnose | `onboard` · `doctor` · `doctor-fix` · `providers` · `phantom` |
 | MCP gateway | `mcp-registry` · `mcp-gateway` · `tools-registry` |
-| Orchestration | `run/provider-client` · `run/budget` · `run/agent-loop` · `run/orchestrator` |
-| Observability | `observability/usage-source` · `observability/rollup` · `observability/budget-alert` |
+| Orchestration | `run/provider-client` · `run/budget` · `run/agent-loop` · `run/orchestrator` · `run/router` · `run/self-heal` |
+| Resilience | `run/retry` · `run/verify` · `run/engines` · `run/streaming` |
+| Specs & swarms | `spec/spec-store` · `swarm/planner` · `swarm/runner` · `swarm/store` · `swarm/sign` · `swarm/gate` · `swarm/rollback` |
+| Observability | `observability/usage-source` · `observability/rollup` · `observability/budget-alert` · `observability/forecast` · `observability/otlp` · `observability/telemetry-sink` · `observability/governance` |
 | Lifecycle | `lifecycle/templates` · `lifecycle/scaffold` · `lifecycle/ship` |
 | Memory / genome | `genome/store` · `genome/recall` · `genome/capture` · `genome/consolidate` · `genome/playbook` · `genome/export` |
+| Integrations | `integrations/github` · `integrations/vercel` · `integrations/editors` · `integrations/identity` · `integrations/notify` |
+| Surfaces | `web/server` · `web/api` · `web/static` · `tui/app` · `tui/render` · `dashboard` |
+| Ecosystem | `env-bridge` |
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full module map and data flow.
 
 ---
 
-## Telemetry & governance
+## Telemetry and governance
 
-`ashlr-hub` has a real, production-grade telemetry pipeline — and it is **opt-in, local-first, and metadata-only by design**.
-
-### Local-first default
-
-By default, every run and swarm records a compact JSONL summary to `~/.ashlr/telemetry/`. This is the same data that `ashlr pulse` aggregates. No configuration required; no network calls; 100% local.
-
-### Cloud-ready seam (OTLP)
-
-When you configure a telemetry endpoint and supply a Personal Access Token (PAT), the hub emits proper **OTLP/HTTP-JSON traces** — `resourceSpans → scopeSpans → spans` with [GenAI semantic-convention](https://opentelemetry.io/docs/specs/semconv/gen-ai/) attributes. The two implementations share the `TelemetrySink` interface:
-
-| Sink | When active | Where data goes |
-|---|---|---|
-| `LocalFileSink` | Default — no endpoint/PAT configured | `~/.ashlr/telemetry/*.jsonl` (local only) |
-| `OtlpHttpSink` | `cfg.telemetry.pulse` set **and** PAT available | POSTs to your OTLP traces endpoint |
-
-The switch is automatic: `getSink(cfg)` returns `OtlpHttpSink` only when both are present; otherwise `LocalFileSink`. Switching to OTLP does not change what data is recorded — only where it goes.
-
-### Privacy: metadata only, always
-
-Span attributes and local JSONL records contain **only**:
-
-- Model name, provider, tier
-- Input / output token counts
-- Estimated cost
-- Run or swarm ID
-- Status and duration
-
-**Prompts, completions, tool arguments, file contents, and secret values are never recorded anywhere in the telemetry pipeline.**
-
-### PAT safety
-
-The PAT (Personal Access Token) for OTLP is sourced from [Phantom](https://github.com/nicholasgasior/phantom) (preferred) or the `ASHLR_PULSE_TOKEN` environment variable. It is:
-
-- Placed **only** in the `Authorization: Bearer` header of the OTLP POST request.
-- Never logged, printed, stored in span attributes, returned by any function, or committed.
-- Never hardcoded anywhere in the hub.
-
-`ashlr telemetry status` shows whether an endpoint and PAT are configured as **booleans only** — never the actual values.
-
-### OTLP: opt-in + best-effort
-
-OTLP emission is:
-
-- **Off by default.** No endpoint or network call is made unless you set `cfg.telemetry.pulse` and a PAT is available.
-- **Fire-and-forget.** It runs after a run or swarm completes and is bounded by a timeout. It never blocks, slows, or throws during a run.
-- **Failure-safe.** If the POST fails (network error, bad response), the error is logged to stderr only. The run result is unaffected.
-
-### Spend governance
-
-The M5 budget alert is extended into a period-based governance policy. Given `cfg.telemetry.budgetUsd` and `cfg.telemetry.budgetWindow`, the hub tracks actual spend and surfaces:
-
-| Level | Condition | Where shown |
-|---|---|---|
-| `ok` | < 80% of cap | `ashlr pulse`, `ashlr telemetry status` |
-| `warn` | ≥ 80% of cap | `ashlr pulse` (advisory banner), `ashlr doctor` |
-| `over` | > cap | `ashlr pulse` (prominent warning), `ashlr run`/`ashlr swarm` (advisory before execution) |
-
-**Governance is advisory — it never silently blocks work.** When `level === 'over'`:
-- `ashlr pulse` shows a prominent warning.
-- `ashlr run` / `ashlr swarm` print a prominent advisory before starting.
-- With `cfg.telemetry.govAction: 'block'`, the run requires `--over-budget` to proceed — but you must pass this flag explicitly. There is no silent prevention.
-
-The per-run hard `RunBudget` ceiling remains the only hard ceiling and is unchanged.
-
-### Commands
+Local-first by default: every run records compact JSONL to `~/.ashlr/telemetry/` — no network calls, no configuration required. When you configure an OTLP endpoint and PAT, the hub emits proper OTLP/HTTP-JSON traces with GenAI semantic-convention attributes (metadata only — never prompts, completions, or secrets). Spend governance (`budgetUsd` + `budgetWindow`) surfaces `ok / warn / over` banners in `ashlr pulse`, `ashlr doctor`, and before each run/swarm. Governance is advisory by default; `govAction: 'block'` requires `--over-budget` to proceed (never silently blocks).
 
 ```sh
-ashlr telemetry status   # endpoint configured: true/false; PAT available: true/false;
-                         # active sink: local|otlp; governance summary
-ashlr telemetry test     # emit a synthetic metadata-only test span; reports ok/fail + detail
+ashlr telemetry status   # endpoint configured (bool), PAT available (bool), sink, governance
+ashlr telemetry test     # emit a synthetic test span; reports ok/fail
 ```
-
-### Config
-
-```jsonc
-// ~/.ashlr/config.json (relevant fields)
-{
-  "telemetry": {
-    "pulse": "https://your-otlp-endpoint/v1/traces",  // optional: enables OtlpHttpSink
-    "budgetUsd": 50,        // optional: period spend cap in USD
-    "budgetWindow": "30d",  // optional: window for governance (default 30d)
-    "govAction": "warn"     // optional: "warn" (default) or "block" (requires --over-budget)
-    // budgetTokens: optional token cap (used by M5 budget alert, unchanged)
-  }
-}
-```
-
-PAT: set via `phantom add-secret ASHLR_PULSE_TOKEN` (preferred) or `export ASHLR_PULSE_TOKEN=<pat>`.
 
 ---
 
-## Local-first & private
+## Local-first and private
 
-`ashlr-hub` is built so your machine is the source of truth and nothing leaves it without your say-so:
-
-- **Local models first.** Provider resolution probes LM Studio (`:1234`) and Ollama (`:11434`) and uses the first one up. `ashlr run` will not call a cloud API unless you pass `--allow-cloud` and the key is present — otherwise it errors rather than silently billing you.
-- **Metadata-only telemetry.** `ashlr pulse` reads only usage metadata (token counts, model id, timestamp, project path) from transcripts. Prompts, completions, tool arguments, and file contents are never read, stored, or printed. All rollups stay under `~/.ashlr/`.
-- **Phantom secrets, read-only.** The [`phantom`](https://github.com/nicholasgasior/phantom) integration surfaces only secret *names* and vault status — values are never read, captured, or printed.
-- **Private memory.** The genome lives under `~/.ashlr/genome/` and each repo's `.ashlrcode/genome/`. Embeddings (when used) are computed locally via Ollama; no cloud call is ever made. Auto-capture (M16) records metadata/summary only — never prompts, completions, or file contents. The full genome is always exportable (`ashlr genome export`) in a portable format; no lock-in.
+- **Local models first.** Provider resolution probes LM Studio (`:1234`) and Ollama (`:11434`) first. `ashlr run` refuses to call a cloud endpoint without `--allow-cloud` + a present key.
+- **Metadata-only telemetry.** `ashlr pulse` reads only token counts, model id, timestamp, and project path — never message content. All rollups stay under `~/.ashlr/`.
+- **Phantom owns secrets.** Phantom surfaces secret names and vault status only — values are never read, captured, or printed by the hub. Subprocess spawns are wrapped via `phantom exec --` when enabled so secrets are injected by Phantom, not the hub.
+- **Private memory.** Genome lives under `~/.ashlr/genome/`. Embeddings are computed locally via Ollama. Auto-capture stores metadata/summary only, hard-capped at ~800 chars per entry. Export is always available — no lock-in.
+- **Self-heal never escalates cost.** Model downgrade is always to a smaller local model. Cloud backoff is only applied when cloud is already in use (`allowCloud` set by the caller).
 
 ---
 
 ## Requirements
 
-- **macOS**
-- **Node.js 22+**
-- `~/.local/bin` on your `PATH`
-- Optional: [Ollama](https://ollama.com) or [LM Studio](https://lmstudio.ai) for local agent runs; [`phantom`](https://github.com/nicholasgasior/phantom) for secrets; [Raycast](https://raycast.com) for the extension.
+- **macOS** · **Node.js 22+** · `~/.local/bin` on your `PATH`
+- Optional: [Ollama](https://ollama.com) or [LM Studio](https://lmstudio.ai) for local agent runs; [`phantom`](https://github.com/nicholasgasior/phantom) for secrets management; [Raycast](https://raycast.com) for the extension.
 
 ---
 
@@ -828,8 +346,8 @@ PAT: set via `phantom add-secret ASHLR_PULSE_TOKEN` (preferred) or `export ASHLR
 
 ```sh
 npm run build      # tsc -> dist/
-npm run dev        # tsx — no compile step, fast iteration
-npm test           # vitest
+npm run dev        # tsx watch — no compile step, fast iteration
+npm test           # vitest (2026 tests)
 npm run lint       # eslint
 npm run typecheck  # tsc --noEmit
 ```
@@ -840,7 +358,7 @@ CI runs typecheck, lint, build, and test on Node 22 for every push and PR.
 
 ## Contributing
 
-Contributions are welcome. Please read [CONTRIBUTING.md](./CONTRIBUTING.md) for the workflow, coding conventions, and how to keep the build green (tests, lint, and typecheck must pass).
+Contributions are welcome. Please read [CONTRIBUTING.md](./CONTRIBUTING.md) for workflow, conventions, and how to keep the build green (tests, lint, and typecheck must all pass).
 
 ---
 

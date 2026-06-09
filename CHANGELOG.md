@@ -8,6 +8,59 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M20: One-Command Onboarding + Self-Healing (CAPSTONE)
+
+### Added
+- **`ashlr init` — complete, idempotent, NON-TTY-safe onboarding** (`src/core/onboard.ts`, updated `src/cli/doctor-init.ts`):
+  - A single `ashlr init` (or `ashlr init --wire --yes`) takes a brand-new machine from zero to fully set-up. Re-runnable safely at any time — every step is idempotent.
+  - Seven ordered steps: **config** (ensure `~/.ashlr/config.json` from defaults), **models** (detect Ollama / LM Studio and report — never auto-downloads), **editors** (detect Claude / Cursor / Codex; wire all when `--wire`), **symlink** (ensure `ashlr` → `~/.local/bin`), **genome** (seed empty genome dir), **phantom** (status report only), **doctor** (roll-up as final gate).
+  - `--wire` — the only mutating optional step; wires every detected editor's MCP config (backup-first, idempotent, M18 pattern).
+  - `--yes` (or non-TTY stdin) — accepts all defaults without interactive prompts; fully CI-safe.
+  - `--json` — emits `OnboardResult { steps, ready, nextSteps }` for machine consumption.
+  - Finishes with a crisp `you're set up — try: ashlr run / ashlr swarm / ashlr tui` next-steps summary.
+  - **NEVER** auto-downloads models, modifies secrets, modifies shell profiles, or makes any network/outward call.
+- **`ashlr doctor --fix` — self-healing doctor** (`src/core/doctor-fix.ts`, updated `src/cli/doctor-init.ts`):
+  - Runs `runDoctor`, then applies one safe automated remediation per failing/warn check in the SAFE-FIXABLE set:
+    - **`config`** — creates missing `~/.ashlr/config.json` from `defaultConfig()` + `saveConfig()`. Create-only; never overwrites an existing config.
+    - **`index`** — rebuilds a stale/missing index via `buildIndex` + `writeIndex`. Non-destructive (regenerates derived data only).
+    - **`local-bin`** — creates the `ashlr` → `~/.local/bin` symlink when missing and the source resolves. PATH is left as a `manual` action.
+    - **`genome-memory`** — creates the genome directory when missing (mkdir-only; never seeds or edits entries).
+    - **`mcp-plugin`** — registers the ashlr MCP gateway into a detected editor config via `wireEditor` (backup-first + idempotent, M18 pattern).
+  - Every other failing check → `FixAction { applied:false, manual:true }` with a one-line guidance hint.
+  - `--fix --json` emits `FixAction[]` for scripting; without `--json` prints a split **fixed** / **needs manual action** table.
+  - Exits non-zero only when blocking failures remain after fixes.
+  - **HARD GUARDRAILS**: NEVER deletes/overwrites user data, auto-downloads models, modifies secrets or shell profiles, or makes any outward/network call.
+- **Bounded runtime self-heal** (`src/core/run/self-heal.ts`):
+  - `withHeal<T>(fn, policy, onHeal)` — BOUNDED wrapper around any runtime operation (MCP downstream spawn, model call). Classifies failures and emits `HealEvent` via `onHeal` before a bounded retry:
+    - `kind:'mcp-restart'` — restart a crashed MCP downstream; after `maxRestarts`, falls back to the existing M3 skip-on-failure behavior.
+    - `kind:'model-downgrade'` — on local model OOM/error, downgrade to a SMALLER LOCAL model via `chooseRoute` (only when `policy.allowDowngrade`; NEVER escalates to cloud, NEVER increases cost).
+    - `kind:'rate-backoff'` — exponential backoff on cloud rate-limit (ONLY when `allowCloud` is already set by the caller; never enables cloud on its own).
+  - Reuses `withRetry` from `core/run/retry.ts` for the bounded loop and backoff — no reimplemented backoff logic.
+  - Rethrows the last error on exhaustion or non-recoverable failure. Bounded by construction — `policy.maxRestarts` hard ceiling; no infinite loop.
+  - `defaultHealPolicy()` — conservative default (`maxRestarts: 3, allowDowngrade: true`).
+  - Opt-out: set `ASHLR_NO_HEAL=1` env var to bypass heal wrapping at any call site.
+  - MCP gateway downstream spawn wrapped in `withHeal` (bounded restart → M3 skip-on-failure fallback).
+  - Model call site wrapped in `withHeal` (local OOM → downgrade; cloud rate-limit → backoff — opt-out preserved).
+- **New types in `src/core/types.ts`** (all existing types unchanged):
+  - `FixAction { checkId; label; applied; detail; manual }` — result of one `fixDoctor` remediation attempt.
+  - `OnboardStep { name; status:'ok'|'wired'|'detected'|'skipped'|'manual'; detail }` — one step of `onboard`.
+  - `OnboardResult { steps; ready; nextSteps }` — full onboarding result; `--json` output shape of `ashlr init`.
+  - `HealPolicy { maxRestarts; allowDowngrade }` — governs the self-heal loop; `allowDowngrade` enables local model downgrade only.
+  - `HealEvent { kind:'mcp-restart'|'model-downgrade'|'rate-backoff'; detail; attempt }` — emitted by `withHeal` on each heal action.
+
+### Changed
+- `src/cli/doctor-init.ts` — `cmdInit` drives full onboarding via `onboard(cfg, {wire, yes})`; `cmdDoctor` accepts `--fix` → `fixDoctor` + split fixed/manual report. Existing flags and behavior preserved in all non-`--fix` paths.
+- `src/core/mcp-gateway.ts` — downstream spawn/connect wrapped in `withHeal` (bounded restart, then M3 skip-on-failure). Opt-out via `ASHLR_NO_HEAL`.
+- `src/core/run/router.ts` (model call site) — wrapped in `withHeal` for local OOM downgrade and cloud rate-limit backoff. M15 local-first + escalation gates unchanged.
+
+### Guardrails (M20)
+- **`ashlr init` is idempotent + NON-TTY-safe**: `--wire`/`--yes` gate the optional mutating steps; default is detect + report + safe ensures only.
+- **`doctor --fix` is safe/local/non-destructive**: creates only (never overwrites), no auto-download, no secret access, no shell profile modification, no network calls. Editor-config writes are backup-first + idempotent (M18). Every fix is reversible-ish and logged.
+- **Self-heal is BOUNDED**: hard `maxRestarts` ceiling; no infinite loop. Downgrade is always to a SMALLER LOCAL model; cloud backoff only when `allowCloud` already set by the caller.
+- All 2026 existing tests preserved. No new runtime dependencies. M3/M11/M15/M18 semantics and tests unchanged.
+
+---
+
 ## [Unreleased] — M19: Real Telemetry (OTLP) + Spend Governance
 
 ### Added
@@ -640,3 +693,35 @@ _Commit: `814f3c3`_
   `src/core/types.ts`.
 - Zero runtime dependencies in `core/` and `cli/` (Node builtins only).
 - `install.sh`: idempotent symlink of `bin/ashlr` into `~/.local/bin`.
+
+
+---
+
+## Milestone Roadmap — M1 through M20 (COMPLETE)
+
+The full M1–M20 roadmap is now complete. Every milestone shipped, all 2026 tests green.
+
+| Milestone | Theme | Status |
+|---|---|---|
+| M1 | Foundation — index, navigate, config, Raycast | COMPLETE |
+| M2 | Identity and model awareness — `ashlr doctor`, `ashlr init`, provider probing | COMPLETE |
+| M3 | MCP aggregation gateway — single stdio entry point, namespaced tools | COMPLETE |
+| M4 | Agent orchestrator — `ashlr run`, parallel DAG, budget, local-first | COMPLETE |
+| M5 | Observability — `ashlr pulse`, metadata-only usage rollup, budget alerts | COMPLETE |
+| M6 | Project lifecycle — `ashlr new`, `ashlr ship`, templates, deploy gate | COMPLETE |
+| M7 | Shared memory / genome — `ashlr learn`, `ashlr recall`, cross-project store | COMPLETE |
+| M8 | _(internal polish / test infrastructure)_ | COMPLETE |
+| M9 | Hardening, CI, and polish — self-update, 932-test milestone, P0 fixes | COMPLETE |
+| M10 | Ecosystem cohesion — config→env bridge, unified config projection across all tools | COMPLETE |
+| M11 | Watchable, robust runs — streaming, retry+verify loop, hardened engine delegation | COMPLETE |
+| M12 | Spec-driven swarms — `ashlr spec`, `ashlr swarm`, phase fan-out, resumable | COMPLETE |
+| M13 | Surfaces I — interactive TUI (`ashlr tui`), real-time Raycast extension | COMPLETE |
+| M14 | Surfaces II — local web dashboard (`ashlr serve`), SSE live updates, security posture | COMPLETE |
+| M15 | Cost-optimal local-first routing — per-task model routing, savings forecast, `ashlr models` | COMPLETE |
+| M16 | Compounding genome — auto-capture, consolidation, playbook synthesis, export | COMPLETE |
+| M17 | Verified orchestration — tamper-evident signing, escalation gates, safe rollback | COMPLETE |
+| M18 | Deep integrations — GitHub, Vercel, editor auto-wire, Phantom identity, notifications | COMPLETE |
+| M19 | Real telemetry (OTLP) + spend governance — GenAI semantic conventions, `TelemetrySink`, `ashlr telemetry` | COMPLETE |
+| M20 | One-command onboarding + self-healing — `ashlr init` capstone, `doctor --fix`, bounded runtime heal | COMPLETE |
+
+The command surface is complete. From M1 through M20, `ashlr` grew from a local project navigator into a full agentic engineering platform — local-first, private by construction, and now trivial to adopt and self-healing in production.

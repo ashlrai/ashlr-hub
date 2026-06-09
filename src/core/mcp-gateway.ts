@@ -28,9 +28,10 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 
-import type { McpRegistry, McpServerSpec, McpServerHealth } from './types.js';
+import type { McpRegistry, McpServerSpec, McpServerHealth, HealEvent } from './types.js';
 import { loadConfig } from './config.js';
 import { withToolEnv } from './env-bridge.js';
+import { withHeal, defaultHealPolicy } from './run/self-heal.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -244,7 +245,25 @@ export async function startGateway(
   // ── Connect every downstream in parallel; skip failures ───────────────────
   const settled = await Promise.allSettled(
     aggregable.map(async (spec): Promise<Downstream> => {
-      const client = await connectDownstream(spec, timeoutMs, gatewayCfg);
+      // M20: bounded self-heal — restart a crashed downstream up to maxRestarts
+      // times before falling through to the existing skip-on-failure path.
+      // Opt-out: ASHLR_NO_HEAL env var disables the heal wrapper.
+      const noHeal = process.env['ASHLR_NO_HEAL'] === '1';
+      let client: Client;
+      if (noHeal) {
+        client = await connectDownstream(spec, timeoutMs, gatewayCfg);
+      } else {
+        const healPolicy = defaultHealPolicy();
+        client = await withHeal(
+          (_attempt) => connectDownstream(spec, timeoutMs, gatewayCfg),
+          healPolicy,
+          (event: HealEvent) => {
+            process.stderr.write(
+              `[ashlr mcp] heal(${event.kind}) "${spec.name}" attempt ${event.attempt}: ${event.detail}\n`,
+            );
+          },
+        );
+      }
       let toolNames = new Set<string>();
       try {
         const listed = await Promise.race([
