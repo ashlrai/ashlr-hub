@@ -30,7 +30,7 @@ import type { AshlrConfig, DashboardSnapshot, TuiTab } from '../core/types.js';
 // ---------------------------------------------------------------------------
 
 /** Ordered tab list — used for tab/shift-tab cycling and 1-5 selection. */
-const TAB_ORDER: TuiTab[] = ['overview', 'runs', 'swarms', 'pulse', 'mcp'];
+const TAB_ORDER: TuiTab[] = ['overview', 'runs', 'swarms', 'pulse', 'mcp', 'inbox'];
 
 /** Auto-refresh cadence (ms). */
 const REFRESH_MS = 2000;
@@ -62,6 +62,7 @@ function emptySnapshot(): DashboardSnapshot {
     swarms: [],
     mcp: [],
     genome: { entries: 0, projects: 0 },
+    inbox: { pending: 0 },
   };
 }
 

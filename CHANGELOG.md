@@ -8,6 +8,48 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M23: Approval Inbox (Single Outward Gate)
+
+### Added
+- **Approval Inbox — the single human control plane for all outward actions** (`src/core/inbox/store.ts`, `src/core/inbox/apply.ts`, `src/cli/inbox.ts`):
+  - Every proposed outward action (patch, PR, deploy) is written as a `Proposal` to `~/.ashlr/inbox/<id>.json` before anything happens. Nothing outward occurs until you explicitly approve.
+  - **`ashlr inbox`** — list all pending proposals with counts; shows id, kind, origin, title, and age.
+  - **`ashlr inbox show <id>`** — full proposal detail including unified diff (for patch proposals) and summary.
+  - **`ashlr inbox approve <id> [--yes]`** — the ONLY path that triggers outward action. Confirm-gated interactively (or bypass with `--yes`); marks the proposal `approved` then calls `applyProposal`. Nothing outward runs before this point.
+  - **`ashlr inbox reject <id>`** — marks a proposal `rejected`; discards it. No outward action taken.
+- **Proposal store** (`src/core/inbox/store.ts`) — atomic-write, never throws:
+  - `createProposal(p)` — creates a fresh `Proposal` (status `'pending'`, timestamp, fresh id) and persists to `~/.ashlr/inbox/<id>.json`. **Does not apply anything.**
+  - `listProposals(filter?)` — returns proposals newest-first; filter by status; read-only, never throws.
+  - `loadProposal(id)` — returns a single proposal or `null`.
+  - `setStatus(id, status, result?)` — persistence-only; sets `decidedAt` on approve/reject; **applies nothing**.
+  - `pendingCount()` — count of pending proposals (used by dashboard snapshot and daily-digest).
+- **Apply engine** (`src/core/inbox/apply.ts`) — the single outward funnel, heavily guarded:
+  - `applyProposal(id, { confirmed })` — REFUSES (mutates nothing) unless proposal exists AND `status === 'approved'` AND `confirmed === true`. All three conditions are required simultaneously.
+  - By kind: `'patch'` → applies the diff on a **NEW branch** (`BRANCH_PREFIX`) off HEAD in the target repo — **never touches the user's current branch, index, or working tree**; never force-pushes; never pushes at all (local only). `'pr'` → branch + commit then explicit M18 gated `createPr`. `'deploy'` → gated ship path. `'note'` → no-op record.
+  - Enrollment-checked (`assertMayMutate`) and kill-switch-checked before any mutation. Every apply is audited. Status set to `'applied'` on success or `'failed'` on error.
+  - Never throws — always returns `ApplyResult { ok, status, detail }`.
+- **New types in `src/core/types.ts`** (all existing types unchanged):
+  - `ProposalKind = 'patch' | 'pr' | 'deploy' | 'note'`
+  - `ProposalStatus = 'pending' | 'approved' | 'rejected' | 'applied' | 'failed'`
+  - `Proposal { id; repo; origin: 'backlog'|'swarm'|'manual'; kind; title; summary; diff?; sandboxId?; status; createdAt; decidedAt?; result? }`
+  - `ApplyResult { ok; status; detail }`
+  - `DashboardSnapshot.inbox: { pending: number }` — pending count surfaced to dashboard and daily digest.
+- **Surfaces**:
+  - **TUI** — new Inbox tab (read-only view of pending proposals; approve via `ashlr inbox approve`). Pending count shown in Overview tab.
+  - **Web dashboard** — Inbox section at `/inbox` (read-only list + detail); pending count in the snapshot header.
+  - **Daily digest** — `inbox.pending` included in the dashboard snapshot for digest-ready consumption.
+
+### Guardrails (M23)
+- **PENDING NEVER AUTO-APPLIES.** `applyProposal` runs ONLY when `status === 'approved'` AND triggered by the explicit `inbox approve` command (confirm/`--yes`). Never on `createProposal`, never on list/show, never by any daemon or background process. This is structurally enforced — `applyProposal` checks all three conditions before touching anything.
+- **Single outward funnel.** Every outward mutation in v2 (patch, PR, deploy) passes through `applyProposal`. There is no other path.
+- **Patch on a new branch only.** `'patch'` kind applies to a new `ashlr/`-prefixed branch off HEAD via `git apply`. The user's working tree, current branch, and index are never touched. No `git reset --hard`, no checkout in the source repo, no push, no branch deletion of user branches.
+- **PR via explicit gated path.** `'pr'` kind uses the M18 `createPr` which is itself confirm-gated and explicit — no auto-PR.
+- **Enrollment + kill switch enforced on every apply.** `assertMayMutate` runs before any mutation; kill switch is checked first and cannot be bypassed.
+- **No secrets in proposals.** `Proposal` fields and `~/.ashlr/inbox/` contain only metadata. No token values, env vars, prompt text, or secret names are ever written.
+- No new runtime dependencies. All 2266 existing tests preserved. Typecheck passes clean (`tsc --noEmit`).
+
+---
+
 ## [Unreleased] — M22: Work Discovery (`ashlr backlog`)
 
 ### Added

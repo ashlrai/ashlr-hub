@@ -311,6 +311,14 @@ const loadBacklogCmd = lazyCmd(
   'backlog command requires src/cli/backlog.ts (M22 module not yet built).',
 );
 
+// ─── M23 command loaders ────────────────────────────────────────────
+
+const loadInboxCmd = lazyCmd(
+  () => import('./inbox.js'),
+  (m) => m.cmdInbox as Cmd,
+  'inbox command requires src/cli/inbox.ts (M23 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1183,6 +1191,12 @@ function cmdHelp(): void {
     ['backlog --repo <path>',        'Filter backlog to a specific enrolled repo.'],
     ['backlog --limit <n>',          'Show only the top N items.'],
     ['backlog --json',               'Emit raw JSON backlog.'],
+    ['inbox',                        'Approval inbox: list pending proposals (the outward-action gate).'],
+    ['inbox show <id>',              'Full detail of a proposal incl. diff (read-only).'],
+    ['inbox approve <id>',           'Confirm + apply an approved proposal (the ONLY outward path).'],
+    ['inbox approve <id> --yes',     'Approve without interactive prompt (non-TTY safe).'],
+    ['inbox reject <id>',            'Discard a pending proposal; applies nothing.'],
+    ['inbox --json',                 'Emit raw JSON for inbox list / show / approve result.'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1450,6 +1464,12 @@ async function main(): Promise<void> {
       case 'backlog': {
         const cmdBacklog = await loadBacklogCmd();
         process.exitCode = await cmdBacklog(rest);
+        break;
+      }
+
+      case 'inbox': {
+        const cmdInbox = await loadInboxCmd();
+        process.exitCode = await cmdInbox(rest);
         break;
       }
 

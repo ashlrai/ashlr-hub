@@ -105,6 +105,50 @@ ashlr audit 50       # last 50 entries
 
 ---
 
+## Approval Inbox
+
+The Approval Inbox is the single human control plane through which **every proposed outward action must pass**. The autonomous org (swarms, backlog agents, daemon) creates *proposals*; nothing outward — no PR, no patch applied to a real branch, no deploy — happens until you explicitly approve.
+
+### How proposals flow
+
+```
+autonomous work (swarm / backlog / manual)
+        │
+        ▼
+  createProposal()  →  ~/.ashlr/inbox/<id>.json  (status: pending)
+        │
+        ▼
+  ashlr inbox        — you review the queue
+  ashlr inbox show   — you read the diff
+        │
+        ▼
+  ashlr inbox approve <id>   ← THE ONLY OUTWARD TRIGGER
+        │  (confirm prompt, or --yes)
+        ▼
+  applyProposal()   →  outward action runs
+```
+
+### Commands
+
+```sh
+ashlr inbox                      # list pending proposals (id · kind · origin · title · age)
+ashlr inbox show <id>            # full detail + unified diff
+ashlr inbox approve <id>         # confirm-gated → apply; add --yes to skip prompt
+ashlr inbox reject <id>          # mark rejected; no action taken
+```
+
+### Guarantees
+
+- **No auto-apply, ever.** `applyProposal` runs only when three conditions are simultaneously true: proposal exists, `status === 'approved'`, and `confirmed === true` (set only by `inbox approve`). It is structurally impossible for a proposal to self-apply on creation, list, show, or from a background daemon.
+- **Single outward funnel.** Every outward mutation in v2 — patch, PR, deploy — goes through `applyProposal`. There is no side door.
+- **Patches land on a new branch, never your working tree.** A `'patch'` proposal applies the diff to a fresh `ashlr/`-prefixed branch off HEAD. Your current branch, index, and working tree are untouched. No force-push, no push at all — local branch only.
+- **PR proposals use the same gated M18 `createPr` path** — confirm-gated, explicit, never automatic.
+- **Enrollment + kill switch apply.** `assertMayMutate` is called before any mutation — kill switch or un-enrolled repo refuses immediately and audits the refusal.
+- **No secrets in proposals.** `~/.ashlr/inbox/` contains only metadata (title, summary, diff, kind). No token values, env vars, or prompt text are written.
+- **Read surfaces are read-only.** The TUI Inbox tab and web `/inbox` route show proposals but trigger no action. Approve only via `ashlr inbox approve` or Raycast.
+
+---
+
 ## Work discovery
 
 `ashlr backlog` gives you a prioritized, scored queue of open work across all your enrolled repos — aggregated from six read-only sources and persisted locally.
@@ -207,6 +251,7 @@ Self-heal is always bounded (never loops), opt-out (`ASHLR_NO_HEAL=1`), and neve
 | **Integrations** | `ashlr gh` · `ashlr vercel` · `ashlr wire` · `ashlr notify` |
 | **Surfaces** | `ashlr tui` · `ashlr serve` · Raycast extension |
 | **Work discovery** | `ashlr backlog` · `ashlr backlog refresh` |
+| **Approval Inbox** | `ashlr inbox` · `ashlr inbox show` · `ashlr inbox approve` · `ashlr inbox reject` |
 | **Maintain** | `ashlr update` |
 
 It is **local-first by design**. Index, config, runs, rollups, and memory all live under `~/.ashlr/`. Agent runs default to local models and refuse to touch a cloud endpoint unless you explicitly opt in. Telemetry is metadata-only; secrets flow through Phantom, never through the hub.

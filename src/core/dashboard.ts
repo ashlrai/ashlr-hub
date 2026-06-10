@@ -32,6 +32,7 @@ import { listSwarms } from './swarm/store.js';
 import { discoverMcpServers } from './mcp-registry.js';
 import { loadGenome } from './genome/store.js';
 import type { AshlrConfig, DashboardSnapshot } from './types.js';
+import { pendingCount as inboxPendingCount } from './inbox/store.js';
 
 // ---------------------------------------------------------------------------
 // Caps — keep snapshot fast and memory-bounded
@@ -207,6 +208,17 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
     // Degrade to zeros.
   }
 
+  // ── Inbox roll-up (M23) ──────────────────────────────────────────────────
+  // pendingCount() is bounded, synchronous, never-throws — returns 0 on any
+  // error. We wrap defensively anyway since snapshot must never throw.
+  let inboxPending = 0;
+
+  try {
+    inboxPending = inboxPendingCount();
+  } catch {
+    // Degrade to 0.
+  }
+
   return {
     generatedAt,
     repos: {
@@ -230,6 +242,9 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
     genome: {
       entries: genomeEntries,
       projects: genomeProjects,
+    },
+    inbox: {
+      pending: inboxPending,
     },
   };
 }

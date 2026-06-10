@@ -1129,10 +1129,12 @@ export interface DashboardSnapshot {
   mcp: { name: string; ok: boolean; tools: number }[];
   /** Genome roll-up: total entries and distinct projects covered. */
   genome: { entries: number; projects: number };
+  /** M23: number of proposals awaiting Mason's approval in the inbox gate. */
+  inbox: { pending: number };
 }
 
 /** The selectable tabs of the interactive TUI dashboard. */
-export type TuiTab = 'overview' | 'runs' | 'swarms' | 'pulse' | 'mcp';
+export type TuiTab = 'overview' | 'runs' | 'swarms' | 'pulse' | 'mcp' | 'inbox';
 
 
 // ---------------------------------------------------------------------------
@@ -1641,4 +1643,71 @@ export interface Backlog {
   repos: string[];
   /** All discovered work items, deduped and scored. */
   items: WorkItem[];
+}
+
+/**
+ * M23: what kind of outward action a Proposal represents.
+ *   'patch'  — a unified diff to be applied on a NEW branch in the target repo.
+ *   'pr'     — a branch+commit then a gated `gh pr create` (the M18 createPr).
+ *   'deploy' — the gated ship/deploy path.
+ *   'note'   — a no-op record (decision/observation only; never mutates).
+ */
+export type ProposalKind = 'patch' | 'pr' | 'deploy' | 'note';
+
+/**
+ * M23: lifecycle of a Proposal through the approval inbox gate.
+ *   'pending'  — created, awaiting Mason's explicit decision (NEVER auto-applies).
+ *   'approved' — Mason approved; eligible for applyProposal (still confirm-gated).
+ *   'rejected' — Mason rejected; discarded, never applied.
+ *   'applied'  — the approved outward action was performed successfully.
+ *   'failed'   — apply was attempted (approved+confirmed) but errored.
+ */
+export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'applied' | 'failed';
+
+/**
+ * M23: a single PROPOSED outward action awaiting Mason's approval. The inbox is
+ * the SINGLE human control plane through which EVERY outward mutation (PR, merge,
+ * deploy, patch-applied-to-a-real-branch) must pass. The autonomous org (M24+)
+ * creates these; nothing outward happens until Mason explicitly approves.
+ * Persisted at ~/.ashlr/inbox/<id>.json. METADATA + diff/patch text only —
+ * NEVER carries secret values.
+ */
+export interface Proposal {
+  /** Stable unique id; also the inbox filename stem (~/.ashlr/inbox/<id>.json). */
+  id: string;
+  /** Absolute path of the target repo, or null when not repo-scoped (e.g. note). */
+  repo: string | null;
+  /** Where the proposal came from: the backlog, an autonomous swarm, or manual. */
+  origin: 'backlog' | 'swarm' | 'manual';
+  /** What kind of outward action this represents. */
+  kind: ProposalKind;
+  /** Short human-readable title for inbox lists. */
+  title: string;
+  /** Longer human-readable summary of what + why. */
+  summary: string;
+  /** Optional unified diff (from a sandbox) — the patch a 'patch'/'pr' applies. */
+  diff?: string;
+  /** Optional id of the sandbox the diff was captured from (M21). */
+  sandboxId?: string;
+  /** Current lifecycle status. Created as 'pending'; NEVER auto-advances. */
+  status: ProposalStatus;
+  /** ISO timestamp the proposal was created. */
+  createdAt: string;
+  /** ISO timestamp Mason approved/rejected (set on the decision). */
+  decidedAt?: string;
+  /** Outcome detail recorded by applyProposal (branch name, PR url, error). */
+  result?: string;
+}
+
+/**
+ * M23: outcome of applyProposal — the ONLY outward path. Never thrown; failure
+ * is reported here with status 'failed' and a detail. METADATA ONLY — no secrets.
+ */
+export interface ApplyResult {
+  /** True only when the outward action completed successfully. */
+  ok: boolean;
+  /** The resulting proposal status: 'applied' on success, 'failed' otherwise. */
+  status: ProposalStatus;
+  /** Human-readable detail (branch created, PR url, refusal reason, error). */
+  detail: string;
 }

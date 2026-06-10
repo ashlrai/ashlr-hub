@@ -67,6 +67,7 @@ const TABS: { id: TuiTab; label: string; key: string }[] = [
   { id: 'swarms',   label: 'Swarms',   key: '3' },
   { id: 'pulse',    label: 'Pulse',    key: '4' },
   { id: 'mcp',      label: 'MCP',      key: '5' },
+  { id: 'inbox',    label: 'Inbox',    key: '6' },
 ];
 
 function buildHeader(
@@ -116,6 +117,7 @@ function buildBody(
     case 'swarms':   return bodySwarms(snap, selected, cols, bodyRows, col);
     case 'pulse':    return bodyPulse(snap, cols, bodyRows, col);
     case 'mcp':      return bodyMcp(snap, selected, cols, bodyRows, col);
+    case 'inbox':    return bodyInbox(snap, cols, bodyRows, col);
   }
 }
 
@@ -172,9 +174,19 @@ function bodyOverview(
   const runCount   = snap.runs.length;
   const swarmCount = snap.swarms.length;
   const mcpCount   = snap.mcp.filter(m => m.ok).length;
+  const inboxPend  = snap.inbox?.pending ?? 0;
   add(col.dim(
     `   Runs: ${runCount}   Swarms: ${swarmCount}   MCP servers up: ${mcpCount}/${snap.mcp.length}`,
   ));
+  if (inboxPend > 0) {
+    blank();
+    add(
+      col.bold(col.yellow('  ⚠ Inbox: ')) +
+      col.yellow(String(inboxPend)) +
+      col.yellow(inboxPend === 1 ? ' proposal awaiting approval' : ' proposals awaiting approval') +
+      col.dim('  (use `ashlr inbox approve <id>` to act)'),
+    );
+  }
 
   return padToRows(lines, bodyRows, cols);
 }
@@ -407,12 +419,59 @@ function bodyMcp(
 }
 
 // ---------------------------------------------------------------------------
+// Tab: Inbox (M23 — read-only; approve via `ashlr inbox approve <id>`)
+// ---------------------------------------------------------------------------
+
+function bodyInbox(
+  snap: DashboardSnapshot,
+  cols: number,
+  bodyRows: number,
+  col: ReturnType<typeof makeColors>,
+): string[] {
+  const lines: string[] = [];
+  const add = (s: string) => lines.push(fitLine(s, cols));
+  const blank = () => add('');
+
+  blank();
+  add(col.bold(col.blue(' ◆ Inbox — Pending Approvals')));
+  blank();
+
+  const pending = snap.inbox?.pending ?? 0;
+
+  if (pending === 0) {
+    add(col.dim('   No pending proposals. The inbox is clear.'));
+    blank();
+    add(col.dim('   Tip: use `ashlr inbox` to list all proposals.'));
+    return padToRows(lines, bodyRows, cols);
+  }
+
+  // Pending count summary.
+  add(
+    `   ${col.yellow(String(pending))} ` +
+    col.yellow(pending === 1 ? 'proposal' : 'proposals') +
+    ' awaiting approval.',
+  );
+  blank();
+
+  // Instructions — approval is CLI-only, not from the TUI.
+  add(col.bold('   To act on a proposal:'));
+  add(col.dim('   ashlr inbox              — list pending proposals'));
+  add(col.dim('   ashlr inbox show <id>    — view full diff'));
+  add(col.dim('   ashlr inbox approve <id> — approve and apply'));
+  add(col.dim('   ashlr inbox reject <id>  — reject and discard'));
+  blank();
+  add(col.dim('   Approval is CLI-only. Nothing applies automatically.'));
+
+  return padToRows(lines, bodyRows, cols);
+}
+
+// ---------------------------------------------------------------------------
 // Footer
 // ---------------------------------------------------------------------------
 
 function buildFooter(cols: number, col: ReturnType<typeof makeColors>): string {
   const hints = [
-    '1-5 tabs',
+    '1-6 tabs',
     'j/k move',
     'r refresh',
     'enter detail',

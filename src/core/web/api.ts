@@ -13,6 +13,7 @@
  *   GET /api/swarm/:id         -> loadSwarm(id) | 404
  *   GET /api/pulse?window=7d   -> buildRollup(window, cfg)
  *   GET /api/genome[?q=...]    -> recall(q, cfg) | loadGenome(cfg)
+ *   GET /api/inbox             -> listProposals({status:'pending'}) (read-only; M23)
  *   GET /api/events            -> Server-Sent Events stream
  *
  * Mutating route (ONLY when ctx.allowDispatch === true + token header):
@@ -40,6 +41,7 @@ import { listSwarms, loadSwarm } from '../swarm/store.js';
 import { buildRollup } from '../observability/rollup.js';
 import { loadGenome } from '../genome/store.js';
 import { recall } from '../genome/recall.js';
+import { listProposals } from '../inbox/store.js';
 
 // ---------------------------------------------------------------------------
 // SSE registry — shared across all open SSE connections so server.ts can
@@ -532,6 +534,18 @@ export async function handleApi(
         const entries = loadGenome(cfg);
         sendJson(res, 200, entries);
       }
+      return true;
+    }
+
+    // ── GET /api/inbox ───────────────────────────────────────────────────────
+    // M23: read-only pending-proposals view. No mutation endpoint — approve
+    // stays CLI-only via `ashlr inbox approve`. listProposals never throws.
+    if (path === '/api/inbox' && method === 'GET') {
+      const proposals = listProposals({ status: 'pending' });
+      sendJson(res, 200, {
+        pending: proposals.length,
+        proposals,
+      });
       return true;
     }
 
