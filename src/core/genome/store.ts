@@ -659,6 +659,55 @@ function probeEmbeddingsSync(ollamaBase: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
+ * Return a HUB-ONLY GenomeHealth roll-up read solely from the local hub store
+ * (~/.ashlr/genome/hub.jsonl). UNLIKE genomeHealth(), this does NOT call
+ * loadGenome()/discoverGenomeRepos() and therefore performs NO recursive
+ * portfolio disk scan — it reads only the user's OWN local hub metadata.
+ *
+ * Used by M26 reflect to honour the "no portfolio disk scan" invariant: it
+ * reports hub entry count, hub store size, and last-learned timestamp, and
+ * mirrors those into totalEntries/projects (hub is the only counted source).
+ *
+ * Never throws.
+ */
+export function genomeHubHealth(): GenomeHealth {
+  let hubEntries = 0;
+  let sizeBytes = 0;
+  let lastLearnedAt: string | null = null;
+
+  try {
+    const storePath = hubStorePath();
+    if (fs.existsSync(storePath)) {
+      sizeBytes = fs.statSync(storePath).size;
+      const raw = fs.readFileSync(storePath, 'utf8');
+      for (const line of raw.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const parsed = safeParseJson(trimmed);
+        if (typeof parsed !== 'object' || parsed === null) continue;
+        const ts = (parsed as Record<string, unknown>)['ts'];
+        if (typeof ts !== 'string') continue;
+        hubEntries++;
+        if (!lastLearnedAt || ts > lastLearnedAt) lastLearnedAt = ts;
+      }
+    }
+  } catch {
+    // Best-effort — leave counters at defaults.
+  }
+
+  return {
+    // Hub is the only counted source here (no portfolio walk).
+    totalEntries: hubEntries,
+    projects: 0,
+    hubEntries,
+    sizeBytes,
+    lastLearnedAt,
+    // No network probe on the reflect path — keep it fully local + offline.
+    embeddingsAvailable: false,
+  };
+}
+
+/**
  * Return a GenomeHealth roll-up for the aggregated genome.
  *
  * Collects: total entries, distinct projects, hub entry count, hub store

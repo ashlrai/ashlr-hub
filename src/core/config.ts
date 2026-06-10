@@ -41,6 +41,17 @@ function resolveConfigPath(): string {
   return join(resolveConfigDir(), 'config.json');
 }
 
+/**
+ * Absolute path to the M26 self-improvement / meta-learning home:
+ * `~/.ashlr/learn`. Re-resolved from `homedir()` at call time so tests that
+ * relocate HOME work. This is the ONLY directory `ashlr reflect` writes to for
+ * its reports/snapshots — it NEVER writes CONFIG_PATH / router policy / prompts.
+ * This function does NOT create the directory; the learn store creates it lazily.
+ */
+export function learnDir(): string {
+  return join(resolveConfigDir(), 'learn');
+}
+
 // ---------------------------------------------------------------------------
 // Default tidy rules
 // ---------------------------------------------------------------------------

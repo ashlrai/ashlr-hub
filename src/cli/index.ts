@@ -341,6 +341,14 @@ const loadKnowledgeCmd = lazyCmd(
   'knowledge command requires src/cli/knowledge.ts (M25 module not yet built).',
 );
 
+// ─── M26 command loaders ────────────────────────────────────────────
+
+const loadReflectCmd = lazyCmd(
+  () => import('./reflect.js'),
+  (m) => m.cmdReflect as Cmd,
+  'reflect command requires src/cli/reflect.ts (M26 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1227,6 +1235,9 @@ function cmdHelp(): void {
     ['ask "<question>"',             'Local RAG across the indexed portfolio; cites repo/file:line. --allow-cloud opt-in.'],
     ['knowledge impact <target>',    'Show references + dependents of a file/symbol within and across enrolled repos.'],
     ['knowledge graph',              'Print the portfolio knowledge graph (repos/modules/deps + cross-repo findings).'],
+    ['reflect [--since <Nd>]',       'Score your OWN past runs/swarms locally; report effectiveness/cost deltas (read-only).'],
+    ['reflect playbooks [--persist]', 'Distill repeatable playbooks from past swarms (report-only; --persist writes them to the genome).'],
+    ['reflect propose',              'Emit routing/policy/prompt tuning suggestions as PENDING inbox proposals (never auto-applies).'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1518,6 +1529,12 @@ async function main(): Promise<void> {
       case 'knowledge': {
         const cmdKnowledge = await loadKnowledgeCmd();
         process.exitCode = await cmdKnowledge(rest);
+        break;
+      }
+
+      case 'reflect': {
+        const cmdReflect = await loadReflectCmd();
+        process.exitCode = await cmdReflect(rest);
         break;
       }
 

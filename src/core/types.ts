@@ -1903,3 +1903,159 @@ export interface KnowledgeGraph {
   crossRepo: { kind: string; detail: string; repos: string[] }[];
 }
 
+
+// ---------------------------------------------------------------------------
+// M26: SELF-IMPROVEMENT / META-LEARNING — `ashlr reflect`
+//
+// The reflection loop scores the org's OWN past swarms/runs/usage, distills
+// playbooks, and proposes routing/policy/prompt tuning. SAFE BY CONSTRUCTION:
+//   - READ-ONLY over history (swarms, genome, usage). Writes ONLY under
+//     ~/.ashlr/learn/ (reports, snapshots) and — only on `reflect propose` —
+//     to the M23 Approval Inbox via createProposal() (status pending).
+//   - NEVER mutates config.json / router policy / prompts / any user repo.
+//   - The METRICS engine is DETERMINISTIC and computed WITHOUT any LLM. Only
+//     optional narrative/playbook TEXT may route through getActiveClient
+//     (local-only unless --allow-cloud + a key), mirroring M25 ask.ts.
+//   - BOUNDED: reads at most `maxRuns` recent swarms / a `--since` window.
+// These types carry METADATA ONLY — never secret values, never raw payloads.
+// ---------------------------------------------------------------------------
+
+/**
+ * M26: one clustered failure mode distilled from failed/aborted swarms and
+ * failed tasks. Built deterministically by clustering normalized task.error
+ * strings / failed phase names. No LLM. METADATA ONLY.
+ */
+export interface FailureMode {
+  /** Stable cluster key (normalized error signature or phase name). */
+  key: string;
+  /** Human-readable label for the cluster. */
+  label: string;
+  /** Number of failed tasks/swarms that fell into this cluster. */
+  count: number;
+  /** Which swarm phase(s) this failure most often occurred in. */
+  phases: string[];
+  /** A few representative swarm ids exhibiting this failure (bounded sample). */
+  exampleSwarmIds: string[];
+}
+
+/**
+ * M26: per-goal-category aggregation — the slowest / most-expensive kinds of
+ * work, derived deterministically by bucketing swarm goals into coarse
+ * categories (keyword heuristic). No LLM. METADATA ONLY.
+ */
+export interface GoalCategoryStat {
+  /** Coarse category label (e.g. 'refactor', 'feature', 'bugfix', 'docs', 'other'). */
+  category: string;
+  /** Number of swarms in this category within the window. */
+  swarms: number;
+  /** Mean estimated USD cost per swarm in this category. */
+  avgCostUsd: number;
+  /** Mean total tokens (in+out) per swarm in this category. */
+  avgTokens: number;
+  /** Success rate (done / total) for this category, 0..1. */
+  successRate: number;
+}
+
+/**
+ * M26: week-over-week (snapshot-over-snapshot) deltas vs the previous persisted
+ * ReflectionReport. All deltas are computed deterministically by diffing the
+ * current metrics against the prior snapshot loaded from
+ * ~/.ashlr/learn/reports/. Absent fields => no prior snapshot to compare.
+ */
+export interface ReflectionDelta {
+  /** ISO timestamp of the prior snapshot this delta compares against, or null. */
+  previousAt: string | null;
+  /**
+   * Change in effectiveness, expressed as a signed percentage-point delta of
+   * success rate (e.g. +12 means "12 points more effective"). null when no prior.
+   */
+  effectivenessPct: number | null;
+  /**
+   * Change in average cost per swarm, expressed as a signed percentage
+   * (e.g. -18 means "18% cheaper"). null when no prior.
+   */
+  costPct: number | null;
+  /** Signed percentage-point change in local-vs-cloud share. null when no prior. */
+  localSharePct: number | null;
+  /** One-line human summary of the headline movements (deterministic template). */
+  headline: string;
+}
+
+/**
+ * M26: the deterministic reflection report. Persisted as a snapshot under
+ * ~/.ashlr/learn/reports/<ts>.json and used as the prior for the next run's
+ * week-over-week deltas. Computed entirely WITHOUT an LLM (an optional
+ * narrative field may be added later by playbooks.ts, but is never required).
+ * METADATA ONLY — never carries secret values or raw code/payloads.
+ */
+export interface ReflectionReport {
+  /** ISO timestamp the report was generated. */
+  generatedAt: string;
+  /** ISO lower bound of the analysis window (inclusive). */
+  since: string;
+  /** Window label when derived from --since (e.g. '7d'/'30d'), else null. */
+  window: string | null;
+  /** How many swarms were actually read (bounded by maxRuns/since). */
+  swarmsAnalyzed: number;
+  /** Count of swarms with status 'done'. */
+  swarmsDone: number;
+  /** Count of swarms with status 'failed' or 'aborted'. */
+  swarmsFailed: number;
+  /** Success rate: swarmsDone / swarmsAnalyzed (0..1; 0 when none). */
+  successRate: number;
+  /** Mean estimated USD cost per analyzed swarm. */
+  avgCostUsd: number;
+  /** Mean total tokens (in+out) per analyzed swarm. */
+  avgTokens: number;
+  /** Total estimated USD cost across analyzed swarms. */
+  totalCostUsd: number;
+  /** Share of token usage served by LOCAL providers (0..1) from usage events. */
+  localShare: number;
+  /** Top clustered failure modes, most frequent first (bounded). */
+  topFailures: FailureMode[];
+  /** Slowest / most-expensive goal categories, most-expensive first (bounded). */
+  goalCategories: GoalCategoryStat[];
+  /** Week-over-week deltas vs the prior snapshot (templated, deterministic). */
+  delta: ReflectionDelta;
+  /** Genome health snapshot at report time (entry counts etc.). */
+  genome: GenomeHealth;
+  /**
+   * Optional LLM-assisted narrative summary. ABSENT on the default path
+   * (deterministic-only). Populated ONLY when narrative generation is requested
+   * and a provider is reachable (local unless --allow-cloud + key). When set,
+   * `narrativeLocal` records whether it was produced by a local model.
+   */
+  narrative?: string;
+  /** True when `narrative` was produced by a LOCAL model; absent when no narrative. */
+  narrativeLocal?: boolean;
+}
+
+/**
+ * M26: a single PROPOSAL-ONLY tuning suggestion derived from a ReflectionReport.
+ * These NEVER auto-apply: emitTuningProposals() routes each one to the M23
+ * Approval Inbox as a PENDING proposal (kind 'note' — a no-op record that
+ * mutates nothing), or the report prints them. There is NO code path that writes
+ * config.json / router policy / prompts. METADATA ONLY.
+ */
+export interface TuningProposal {
+  /** Stable suggestion key (e.g. 'routing.local-first-threshold'). */
+  key: string;
+  /** What aspect this suggestion concerns (purely descriptive; never applied). */
+  area: 'routing' | 'policy' | 'prompt' | 'playbook';
+  /** Short human-readable title for the inbox / report. */
+  title: string;
+  /** Longer rationale grounded in the report's deterministic metrics. */
+  rationale: string;
+  /** Confidence in the suggestion (0..1), derived from sample size / effect. */
+  confidence: number;
+}
+
+/** Options accepted by `buildReflection` (the deterministic metrics engine). */
+export interface ReflectionOptions {
+  /** Analyze only swarms created at/after this epoch-ms lower bound. */
+  sinceMs?: number;
+  /** Hard cap on how many recent swarms to read (bounds I/O). */
+  maxRuns?: number;
+  /** Window label to record on the report (purely informational). */
+  window?: string | null;
+}
