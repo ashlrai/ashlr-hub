@@ -303,6 +303,14 @@ const loadEnrollCmd = lazyCmd(
   'enroll command requires src/cli/sandbox.ts (M21 module not yet built).',
 );
 
+// ─── M22 command loaders ────────────────────────────────────────────
+
+const loadBacklogCmd = lazyCmd(
+  () => import('./backlog.js'),
+  (m) => m.cmdBacklog as Cmd,
+  'backlog command requires src/cli/backlog.ts (M22 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1169,6 +1177,12 @@ function cmdHelp(): void {
     ['enroll add <repo>',            'Enroll a repo for autonomous work.'],
     ['enroll remove <repo>',         'Remove a repo from the enrollment registry.'],
     ['enroll kill on|off',           'Toggle the global autonomous kill switch.'],
+    ['backlog',                      'Scored work queue across enrolled repos (issues, TODOs, deps, docs, security).'],
+    ['backlog refresh',              'Re-scan all enrolled repos and rebuild the backlog.'],
+    ['backlog --source <src>',       'Filter backlog by source: issue|todo|test|dep|doc|security.'],
+    ['backlog --repo <path>',        'Filter backlog to a specific enrolled repo.'],
+    ['backlog --limit <n>',          'Show only the top N items.'],
+    ['backlog --json',               'Emit raw JSON backlog.'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1430,6 +1444,12 @@ async function main(): Promise<void> {
       case 'enroll': {
         const cmdEnroll = await loadEnrollCmd();
         process.exitCode = await cmdEnroll(rest);
+        break;
+      }
+
+      case 'backlog': {
+        const cmdBacklog = await loadBacklogCmd();
+        process.exitCode = await cmdBacklog(rest);
         break;
       }
 

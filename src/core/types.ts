@@ -1593,3 +1593,52 @@ export interface Enrollment {
   /** Absolute paths of repos enrolled for autonomous/sandbox mutation. */
   repos: string[];
 }
+
+/**
+ * M22: WORK DISCOVERY — `ashlr backlog`.
+ * A scored, prioritized work queue derived READ-ONLY across ENROLLED repos.
+ */
+
+/** The kind of source a WorkItem was derived from. */
+export type WorkSource = 'issue' | 'todo' | 'test' | 'dep' | 'doc' | 'security';
+
+/**
+ * A single discovered, scored unit of work. Produced by a scanner over a
+ * single enrolled repo. Contains NO secrets. Pure analysis — never implies a
+ * mutation was performed.
+ */
+export interface WorkItem {
+  /** Stable, deterministic id (e.g. `${repo}:${source}:${hash}`). */
+  id: string;
+  /** Absolute path of the enrolled repo this item belongs to. */
+  repo: string;
+  /** Which scanner produced this item. */
+  source: WorkSource;
+  /** Short, human-readable title. */
+  title: string;
+  /** Longer detail / context (no secrets). */
+  detail: string;
+  /** Estimated value of doing the work, 1 (low) .. 5 (high). */
+  value: number;
+  /** Estimated effort to do the work, 1 (low) .. 5 (high). */
+  effort: number;
+  /** Priority score; higher = do first. score = scoreItem(value, effort). */
+  score: number;
+  /** Free-form tags (e.g. ['security','npm-audit']). */
+  tags: string[];
+  /** ISO timestamp this item was generated. */
+  ts: string;
+}
+
+/**
+ * The aggregated, persisted backlog. Written to ~/.ashlr/backlog.json by
+ * buildBacklog(). Covers only ENROLLED repos (DEFAULT EMPTY => empty items).
+ */
+export interface Backlog {
+  /** ISO timestamp the backlog was generated. */
+  generatedAt: string;
+  /** Absolute paths of the repos that were scanned. */
+  repos: string[];
+  /** All discovered work items, deduped and scored. */
+  items: WorkItem[];
+}

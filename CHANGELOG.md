@@ -8,6 +8,41 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M22: Work Discovery (`ashlr backlog`)
+
+### Added
+- **`ashlr backlog` — prioritized, scored work queue across enrolled repos** (`src/cli/backlog.ts`, `src/core/portfolio/backlog.ts`, `src/core/portfolio/scanners.ts`):
+  - Aggregates open work items across all enrolled repos from six read-only sources: GitHub issues, TODO/FIXME/HACK/XXX code comments, CI/test state, outdated/vulnerable deps, docs health, and binshield security findings.
+  - Each item is scored by `value / effort` heuristic (higher = do first) and persisted to `~/.ashlr/backlog.json`.
+  - **`ashlr backlog`** — list the scored queue; flags: `--repo <path>` (single repo), `--source <issue|todo|test|dep|doc|security>` (filter by source), `--limit N` (top N), `--json` (machine-readable).
+  - **`ashlr backlog refresh`** — re-scan all enrolled repos and rebuild the backlog.
+- **Six read-only scanners** (`src/core/portfolio/scanners.ts`) — each returns `WorkItem[]`, bounded, never throws:
+  - `scanIssues` — open GitHub issues via `gh` (M18 `listIssues`); skips repos without a GitHub remote.
+  - `scanTodos` — TODO/FIXME/HACK/XXX comments in source via `rg`/`grep`; skips `node_modules/`, `.git/`, `dist/`; capped per-repo.
+  - `scanTests` — CI state via `gh run list` (latest run); notes test-script presence heuristic; **never runs `npm test` or any project script**.
+  - `scanDeps` — `npm outdated --json` (stale) + `npm audit --json` (vulnerability severity counts); bounded with timeouts; read-only metadata only.
+  - `scanDocs` — heuristic checks: missing/thin README, missing LICENSE, missing CONTRIBUTING, low test-file presence.
+  - `scanSecurity` — `binshield` findings if installed; skipped gracefully when absent.
+- **Backlog engine** (`src/core/portfolio/backlog.ts`):
+  - `buildBacklog(opts?)` — runs all scanners over `listEnrolled()` repos (default) or a provided subset; dedupes by id; sorts descending by score; persists to `~/.ashlr/backlog.json`.
+  - `loadBacklog()` — reads the persisted backlog; returns `null` when absent.
+  - `scoreItem(value, effort)` — pure `value/effort` heuristic, clamped, no side effects.
+  - `backlogPath()` — `~/.ashlr/backlog.json`.
+- **New types in `src/core/types.ts`** (all existing types unchanged):
+  - `WorkSource = 'issue' | 'todo' | 'test' | 'dep' | 'doc' | 'security'`
+  - `WorkItem { id; repo; source; title; detail; value(1-5); effort(1-5); score; tags; ts }` — one scored work item.
+  - `Backlog { generatedAt; repos; items }` — persisted backlog shape.
+
+### Guardrails (M22)
+- **READ-ONLY**: scanners never modify any repo — no writes, no git mutations, no installs, no fixes. All subprocess calls use `execFile` with explicit arg arrays (no shell injection).
+- **ENROLLMENT-SCOPED**: only repos returned by `listEnrolled()` are scanned. Default enrollment is empty → empty backlog. The scanner never walks the disk outside enrolled paths.
+- **Bounded**: all scanners skip `node_modules/`, `.git/`, `dist/`; per-repo caps on file count and output size; `npm outdated`/`npm audit` run with timeouts. No project scripts (`npm test`, `npm run build`, etc.) are ever executed.
+- **Never throws**: every scanner catches all errors and returns `[]`; a failing scanner never aborts the rest of the backlog build.
+- **No secrets**: `WorkItem` fields and `~/.ashlr/backlog.json` contain only metadata (title, detail, score, tags). No token values, env vars, or secret names are written.
+- No new runtime dependencies. All 2202 existing tests preserved. Typecheck passes clean (`tsc --noEmit`).
+
+---
+
 ## [Unreleased] — M21: Safety Foundation (Sandboxed Execution, Audit Trail, Enrollment + Kill Switch)
 
 ### Added

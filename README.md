@@ -105,6 +105,51 @@ ashlr audit 50       # last 50 entries
 
 ---
 
+## Work discovery
+
+`ashlr backlog` gives you a prioritized, scored queue of open work across all your enrolled repos — aggregated from six read-only sources and persisted locally.
+
+### Quick start
+
+```sh
+# Enroll a repo (one-time; enrollment is required before any scan runs)
+ashlr enroll add ~/path/to/my-project
+
+# Build or refresh the backlog
+ashlr backlog refresh
+
+# View the scored queue
+ashlr backlog                         # top items across all enrolled repos
+ashlr backlog --repo ~/my-project     # filter to one repo
+ashlr backlog --source todo           # filter by source
+ashlr backlog --limit 20              # top 20 only
+ashlr backlog --json                  # machine-readable output
+```
+
+### Sources
+
+| Source | What it scans |
+|---|---|
+| `issue` | Open GitHub issues via `gh` |
+| `todo` | TODO / FIXME / HACK / XXX comments in source files |
+| `test` | CI run state (latest `gh run`); presence of a test script |
+| `dep` | Outdated deps (`npm outdated`) + known vulnerabilities (`npm audit`) |
+| `doc` | Missing/thin README, missing LICENSE or CONTRIBUTING, low test presence |
+| `security` | `binshield` findings (skipped gracefully when not installed) |
+
+### Scoring
+
+Each work item carries a `value` (1–5) and `effort` (1–5). Items are ranked by `score = value / effort` — high value, low effort floats to the top. The backlog is persisted to `~/.ashlr/backlog.json` and rebuilt on `ashlr backlog refresh`.
+
+### Guardrails
+
+- **Read-only**: scanners never modify any repo — no writes, no git mutations, no installs, no fixes.
+- **Enrollment-scoped**: only repos you have explicitly enrolled (`ashlr enroll add`) are ever scanned. Default enrollment is empty → empty backlog.
+- **Bounded**: `node_modules/`, `.git/`, and `dist/` are always skipped; per-repo caps on file count and output; subprocesses run with timeouts. No project scripts (`npm test`, `npm run build`, etc.) are ever executed.
+- **No secrets**: backlog items contain only metadata. No token values, env vars, or secret names are written.
+
+---
+
 ## Self-healing
 
 ### `ashlr doctor --fix`
@@ -161,6 +206,7 @@ Self-heal is always bounded (never loops), opt-out (`ASHLR_NO_HEAL=1`), and neve
 | **Memory** | `ashlr learn` · `ashlr recall` · `ashlr genome` |
 | **Integrations** | `ashlr gh` · `ashlr vercel` · `ashlr wire` · `ashlr notify` |
 | **Surfaces** | `ashlr tui` · `ashlr serve` · Raycast extension |
+| **Work discovery** | `ashlr backlog` · `ashlr backlog refresh` |
 | **Maintain** | `ashlr update` |
 
 It is **local-first by design**. Index, config, runs, rollups, and memory all live under `~/.ashlr/`. Agent runs default to local models and refuse to touch a cloud endpoint unless you explicitly opt in. Telemetry is metadata-only; secrets flow through Phantom, never through the hub.
@@ -353,6 +399,7 @@ TypeScript ESM (NodeNext). Core logic in `src/core/`, CLI dispatch in `src/cli/`
 | Memory / genome | `genome/store` · `genome/recall` · `genome/capture` · `genome/consolidate` · `genome/playbook` · `genome/export` |
 | Integrations | `integrations/github` · `integrations/vercel` · `integrations/editors` · `integrations/identity` · `integrations/notify` |
 | Surfaces | `web/server` · `web/api` · `web/static` · `tui/app` · `tui/render` · `dashboard` |
+| Work discovery | `portfolio/scanners` · `portfolio/backlog` |
 | Ecosystem | `env-bridge` |
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full module map and data flow.
