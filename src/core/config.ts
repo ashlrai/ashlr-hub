@@ -76,6 +76,19 @@ export function goalsDir(): string {
   return join(resolveConfigDir(), 'goals');
 }
 
+/**
+ * Absolute path to the M29 portfolio-digest home: `~/.ashlr/digests`.
+ * Re-resolved from `homedir()` at call time so tests that relocate HOME work.
+ * This is the ONLY directory `ashlr digest` writes to (JSON + markdown digest
+ * artifacts for day-over-day trend) — it NEVER writes CONFIG_PATH / router
+ * policy / prompts, and NEVER touches a user repo working tree. This function
+ * does NOT create the directory; the digest store creates it lazily. Single
+ * source of truth for the ~/.ashlr root.
+ */
+export function digestsDir(): string {
+  return join(resolveConfigDir(), 'digests');
+}
+
 // ---------------------------------------------------------------------------
 // Default tidy rules
 // ---------------------------------------------------------------------------

@@ -30,7 +30,7 @@ import type { AshlrConfig, DashboardSnapshot, TuiTab } from '../core/types.js';
 // ---------------------------------------------------------------------------
 
 /** Ordered tab list — used for tab/shift-tab cycling and 1-5 selection. */
-const TAB_ORDER: TuiTab[] = ['overview', 'runs', 'swarms', 'pulse', 'mcp', 'inbox'];
+const TAB_ORDER: TuiTab[] = ['overview', 'runs', 'swarms', 'pulse', 'mcp', 'inbox', 'portfolio'];
 
 /** Auto-refresh cadence (ms). */
 const REFRESH_MS = 2000;
@@ -291,8 +291,8 @@ async function runInteractive(cfg: AshlrConfig): Promise<number> {
       return;
     }
 
-    // Numeric tab selection (1-5).
-    if (key >= '1' && key <= '5') {
+    // Numeric tab selection (1-9, bounded by TAB_ORDER length).
+    if (key >= '1' && key <= '9') {
       const idx = Number(key) - 1;
       if (idx < TAB_ORDER.length) {
         tab = TAB_ORDER[idx]!;

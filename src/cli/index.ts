@@ -365,6 +365,14 @@ const loadGoalsCmd = lazyCmd(
   'goals command requires src/cli/goals.ts (M28 module not yet built).',
 );
 
+// ─── M29 command loaders ────────────────────────────────────────────
+
+const loadDigestCmd = lazyCmd(
+  () => import('./digest.js'),
+  (m) => m.cmdDigest as Cmd,
+  'digest command requires src/cli/digest.ts (M29 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1261,6 +1269,8 @@ function cmdHelp(): void {
     ['goals plan <id>',              'Decompose a goal into ordered milestones + author/link each milestone spec (LOCAL-FIRST; --allow-cloud to use cloud).'],
     ['goals advance <id>',           'Advance the next actionable milestone via a SANDBOXED, proposal-only swarm (ENROLLED repos only; emits a PENDING proposal).'],
     ['goals status [id]',            'Read-only roll-up of goal/milestone progress + linked swarm/proposal state (mutates nothing).'],
+    ['digest',                       'Write an ORG-LEVEL portfolio digest (health, goals, costs, today) to ~/.ashlr/digests/ (LOCAL-FIRST; reads only).'],
+    ['digest --notify',             'Also deliver the digest via a configured Slack/Discord webhook (OPT-IN; no-op when unconfigured).'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1570,6 +1580,12 @@ async function main(): Promise<void> {
       case 'goals': {
         const cmdGoals = await loadGoalsCmd();
         process.exitCode = await cmdGoals(rest);
+        break;
+      }
+
+      case 'digest': {
+        const cmdDigest = await loadDigestCmd();
+        process.exitCode = await cmdDigest(rest);
         break;
       }
 

@@ -10,6 +10,7 @@
  *   #swarms    — SwarmRun list + DAG graph + live burndown
  *   #pulse     — ActivityRollup SVG bar charts
  *   #genome    — GenomeEntry search + list
+ *   #portfolio — PortfolioSummary org-level view (read-only; M29)
  *
  * Live updates via EventSource('/api/events') — patches runs + swarms views.
  */
@@ -20,7 +21,7 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-const VIEWS = ['overview', 'runs', 'swarms', 'pulse', 'genome'];
+const VIEWS = ['overview', 'runs', 'swarms', 'pulse', 'genome', 'portfolio'];
 const DEFAULT_VIEW = 'overview';
 const API_BASE = '';  // same origin
 
@@ -52,6 +53,7 @@ const state = {
   pulse: null,
   genome: [],
   genomeQuery: '',
+  portfolio: null,   // M29: read-only org-level PortfolioSummary | null
   loading: {},   // viewName -> boolean
   error: {},     // viewName -> string | null
   activeView: DEFAULT_VIEW,
@@ -216,6 +218,7 @@ function renderActiveView() {
   else if (view === 'swarms') renderSwarms();
   else if (view === 'pulse') renderPulse();
   else if (view === 'genome') renderGenome();
+  else if (view === 'portfolio') renderPortfolio();
 }
 
 async function loadView(view) {
@@ -224,6 +227,7 @@ async function loadView(view) {
   else if (view === 'swarms') await loadSwarms();
   else if (view === 'pulse') await loadPulse();
   else if (view === 'genome') await loadGenome();
+  else if (view === 'portfolio') await loadPortfolio();
 }
 
 // ---------------------------------------------------------------------------
@@ -1122,6 +1126,162 @@ function genomeCard(entry) {
   }
 
   return card;
+}
+
+// ---------------------------------------------------------------------------
+// Portfolio view (M29) — READ-ONLY org-level summary.
+//
+// Reads GET /api/portfolio (a read-only projection of buildSnapshot().portfolio)
+// and renders health / in-flight goals / top backlog / cost+forecast /
+// effectiveness / today deltas. No mutation controls — there is nothing to
+// approve, apply, or dispatch from this view. Degrades to an empty-state card
+// when the portfolio section is null (older producer / empty enrollment).
+// ---------------------------------------------------------------------------
+
+async function loadPortfolio() {
+  showLoading('portfolio');
+  try {
+    state.portfolio = await apiFetch('/api/portfolio');
+    renderPortfolio();
+  } catch (err) {
+    showError('portfolio', err.message);
+  }
+}
+
+function renderPortfolio() {
+  if (state.activeView !== 'portfolio') return;
+  const main = getMain();
+  if (!main) return;
+  main.innerHTML = '';
+
+  const section = el('section', { cls: 'view-section' });
+  section.appendChild(el('div', { cls: 'view-header' },
+    el('h1', { cls: 'view-title' }, 'Portfolio'),
+    el('span', { cls: 'view-subtitle' }, 'Org-level health, goals, cost — read-only')
+  ));
+
+  const p = state.portfolio;
+  if (!p) {
+    section.appendChild(el('div', { cls: 'empty-state' },
+      el('p', {}, 'No portfolio data yet.'),
+      el('p', { cls: 'hint' }, 'Enroll repos and run `ashlr health` / `ashlr goals` to populate this view.')
+    ));
+    main.appendChild(section);
+    return;
+  }
+
+  // ── Health ────────────────────────────────────────────────────────────
+  const h = p.health || { reposScored: 0, averageScore: 0, averageGrade: 'F', worstRepos: [] };
+  const healthCard = el('div', { cls: 'card' });
+  healthCard.appendChild(el('h2', { cls: 'card-title' }, 'Health'));
+  if (h.reposScored > 0) {
+    healthCard.appendChild(infoGrid([
+      ['Repos scored', h.reposScored],
+      ['Avg score', Math.round(h.averageScore)],
+      ['Avg grade', h.averageGrade],
+    ]));
+    if (Array.isArray(h.worstRepos) && h.worstRepos.length > 0) {
+      const ul = el('ul', { cls: 'portfolio-worst' });
+      for (const w of h.worstRepos) {
+        ul.appendChild(el('li', {},
+          el('span', { cls: 'portfolio-repo', title: w.repo }, (w.repo || '').split('/').filter(Boolean).pop() || w.repo),
+          el('span', { cls: `badge grade-${w.grade}` }, `${w.grade} (${Math.round(w.score)})`)
+        ));
+      }
+      healthCard.appendChild(el('p', { cls: 'hint' }, 'Needs attention:'));
+      healthCard.appendChild(ul);
+    }
+  } else {
+    healthCard.appendChild(el('p', { cls: 'hint' }, 'No enrolled repos scored.'));
+  }
+  section.appendChild(healthCard);
+
+  // ── Goals in flight ─────────────────────────────────────────────────────
+  const goals = Array.isArray(p.goalsInFlight) ? p.goalsInFlight : [];
+  const goalsCard = el('div', { cls: 'card' });
+  goalsCard.appendChild(el('h2', { cls: 'card-title' }, `Goals in flight (${goals.length})`));
+  if (goals.length === 0) {
+    goalsCard.appendChild(el('p', { cls: 'hint' }, 'None active.'));
+  } else {
+    const list = el('div', { cls: 'portfolio-goals' });
+    for (const g of goals) {
+      const pct = Math.round(Math.max(0, Math.min(1, g.fractionDone || 0)) * 100);
+      const row = el('div', { cls: 'portfolio-goal' });
+      row.appendChild(el('div', { cls: 'portfolio-goal__obj', title: g.objective },
+        truncate(g.objective, 70)));
+      row.appendChild(el('div', { cls: 'portfolio-goal__meta' }, `${pct}% · ${g.proposed}/${g.totalMilestones} proposed`));
+      if (g.nextActionable) {
+        row.appendChild(el('div', { cls: 'hint' }, `next: ${truncate(g.nextActionable, 60)}`));
+      }
+      list.appendChild(row);
+    }
+    goalsCard.appendChild(list);
+  }
+  section.appendChild(goalsCard);
+
+  // ── Top backlog ───────────────────────────────────────────────────────
+  const backlog = Array.isArray(p.backlogTop) ? p.backlogTop : [];
+  const backlogCard = el('div', { cls: 'card' });
+  backlogCard.appendChild(el('h2', { cls: 'card-title' }, 'Top backlog'));
+  if (backlog.length === 0) {
+    backlogCard.appendChild(el('p', { cls: 'hint' }, 'Empty.'));
+  } else {
+    const ul = el('ul', { cls: 'portfolio-backlog' });
+    for (const item of backlog) {
+      ul.appendChild(el('li', {},
+        el('span', { cls: 'badge' }, String(Math.round(item.score))),
+        el('span', { cls: 'portfolio-backlog__title', title: item.title }, truncate(item.title, 80))
+      ));
+    }
+    backlogCard.appendChild(ul);
+  }
+  section.appendChild(backlogCard);
+
+  // ── Cost + forecast ─────────────────────────────────────────────────────
+  const c = p.cost || { window: '7d', spentUsd: 0, localSavingsUsd: 0, projectedMonthlyUsd: 0 };
+  const costCard = el('div', { cls: 'card' });
+  costCard.appendChild(el('h2', { cls: 'card-title' }, `Cost (${c.window})`));
+  costCard.appendChild(infoGrid([
+    ['Spent', `$${(c.spentUsd || 0).toFixed(2)}`],
+    ['Saved (local)', `$${(c.localSavingsUsd || 0).toFixed(2)}`],
+    ['Projected / mo', `$${(c.projectedMonthlyUsd || 0).toFixed(2)}`],
+  ]));
+  section.appendChild(costCard);
+
+  // ── Effectiveness ───────────────────────────────────────────────────────
+  if (p.effectiveness) {
+    const eff = el('div', { cls: 'card' });
+    eff.appendChild(el('h2', { cls: 'card-title' }, 'Effectiveness'));
+    eff.appendChild(el('p', {}, p.effectiveness.headline || ''));
+    section.appendChild(eff);
+  }
+
+  // ── Today (day-over-day deltas) ──────────────────────────────────────────
+  const t = p.today || { previousAt: null };
+  const todayCard = el('div', { cls: 'card' });
+  todayCard.appendChild(el('h2', { cls: 'card-title' }, 'Today'));
+  if (t.previousAt === null || t.previousAt === undefined) {
+    todayCard.appendChild(el('p', { cls: 'hint' }, 'No prior digest to compare against yet.'));
+  } else {
+    todayCard.appendChild(infoGrid([
+      ['Pending Δ', fmtDelta(t.pendingProposalsDelta)],
+      ['Dirty Δ', fmtDelta(t.dirtyReposDelta)],
+      ['Spend Δ', fmtDelta(t.spendUsdDelta, '$')],
+      ['Health Δ', fmtDelta(t.healthScoreDelta)],
+      ['Goals Δ', fmtDelta(t.goalsInFlightDelta)],
+    ]));
+  }
+  section.appendChild(todayCard);
+
+  main.appendChild(section);
+}
+
+/** Format a signed delta for the portfolio "today" block. null → em-dash. */
+function fmtDelta(n, prefix = '') {
+  if (n === null || n === undefined || typeof n !== 'number' || !isFinite(n)) return '—';
+  const sign = n > 0 ? '+' : n < 0 ? '-' : '';
+  const mag = prefix === '$' ? Math.abs(n).toFixed(2) : String(Math.abs(n));
+  return `${sign}${prefix}${mag}`;
 }
 
 // ---------------------------------------------------------------------------

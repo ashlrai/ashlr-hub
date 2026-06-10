@@ -7,6 +7,7 @@
  *
  * Read-only routes (always available, no auth):
  *   GET /api/snapshot          -> buildSnapshot(cfg)
+ *   GET /api/portfolio         -> buildSnapshot(cfg).portfolio | null (read-only; M29)
  *   GET /api/runs              -> listRuns()
  *   GET /api/run/:id           -> loadRun(id) | 404
  *   GET /api/swarms            -> listSwarms()
@@ -467,6 +468,18 @@ export async function handleApi(
     if (path === '/api/snapshot' && method === 'GET') {
       const snapshot = await buildSnapshot(cfg);
       sendJson(res, 200, snapshot);
+      return true;
+    }
+
+    // ── GET /api/portfolio ────────────────────────────────────────────────────
+    // M29: read-only org-level portfolio projection. Reuses buildSnapshot (the
+    // same enrollment/index-scoped read as /api/snapshot) and surfaces ONLY the
+    // optional `.portfolio` section, or null when it was not populated (older
+    // producer / empty enrollment). NO mutation endpoint — there is no apply/
+    // approve/dispatch here; aggregation only. Never throws (caught below).
+    if (path === '/api/portfolio' && method === 'GET') {
+      const snapshot = await buildSnapshot(cfg);
+      sendJson(res, 200, snapshot.portfolio ?? null);
       return true;
     }
 

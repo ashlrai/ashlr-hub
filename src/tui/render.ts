@@ -68,6 +68,8 @@ const TABS: { id: TuiTab; label: string; key: string }[] = [
   { id: 'pulse',    label: 'Pulse',    key: '4' },
   { id: 'mcp',      label: 'MCP',      key: '5' },
   { id: 'inbox',    label: 'Inbox',    key: '6' },
+  // M29: read-only org-level portfolio tab.
+  { id: 'portfolio', label: 'Portfolio', key: '7' },
 ];
 
 function buildHeader(
@@ -118,6 +120,8 @@ function buildBody(
     case 'pulse':    return bodyPulse(snap, cols, bodyRows, col);
     case 'mcp':      return bodyMcp(snap, selected, cols, bodyRows, col);
     case 'inbox':    return bodyInbox(snap, cols, bodyRows, col);
+    // M29: read-only org-level portfolio view (health/goals/backlog/cost/today).
+    case 'portfolio': return bodyPortfolio(snap, cols, bodyRows, col);
   }
 }
 
@@ -439,6 +443,136 @@ function bodyMcp(
 // Tab: Inbox (M23 — read-only; approve via `ashlr inbox approve <id>`)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Tab: Portfolio (M29) — READ-ONLY org-level view
+// ---------------------------------------------------------------------------
+
+/**
+ * M29: render the org-level portfolio tab from the OPTIONAL
+ * `snap.portfolio` section. READ-ONLY display only — renders the health
+ * summary (avg + worst repos), in-flight goals, top backlog, cost + forecast,
+ * the effectiveness headline, and the "today" day-over-day delta block. When
+ * `snap.portfolio` is absent (older producer / empty enrollment) it renders a
+ * single "no portfolio data" line. This function performs NO I/O and mutates
+ * nothing.
+ */
+function bodyPortfolio(
+  snap: DashboardSnapshot,
+  cols: number,
+  bodyRows: number,
+  col: ReturnType<typeof makeColors>,
+): string[] {
+  const lines: string[] = [];
+  const add = (s: string) => lines.push(fitLine(s, cols));
+  const blank = () => add('');
+
+  const p = snap.portfolio;
+
+  // Degrade gracefully when no portfolio section was populated (older producer
+  // or empty enrollment with no sources). Read-only: this function performs no
+  // I/O and mutates nothing.
+  if (!p) {
+    blank();
+    add(col.bold(col.blue(' ◆ Portfolio')));
+    blank();
+    add(col.dim('   No portfolio data. Enroll repos and run `ashlr health`'));
+    add(col.dim('   / `ashlr goals` to populate the org-level view.'));
+    return padToRows(lines, bodyRows, cols);
+  }
+
+  blank();
+  add(col.bold(col.blue(' ◆ Portfolio — Org Health')));
+
+  // ── Health (M27 — enrollment-scoped) ────────────────────────────────────
+  const h = p.health;
+  if (h.reposScored > 0) {
+    add(
+      `   Repos scored: ${col.cyan(String(h.reposScored))}` +
+      `   Avg score: ${col.cyan(String(Math.round(h.averageScore)))}` +
+      `   Grade: ${gradeColorize(h.averageGrade, col)(h.averageGrade)}`,
+    );
+    if (h.worstRepos.length > 0) {
+      add(col.dim('   Needs attention:'));
+      for (const w of h.worstRepos) {
+        add(
+          `     ${col.dim(repoLabel(w.repo))}` +
+          `  ${gradeColorize(w.grade, col)(w.grade)}` +
+          ` ${col.dim('(' + Math.round(w.score) + ')')}`,
+        );
+      }
+    }
+  } else {
+    add(col.dim('   No enrolled repos scored.'));
+  }
+  blank();
+
+  // ── In-flight goals (M28) ────────────────────────────────────────────────
+  add(col.bold(col.blue(' ◆ Goals in flight')));
+  if (p.goalsInFlight.length === 0) {
+    add(col.dim('   None active.'));
+  } else {
+    for (const g of p.goalsInFlight) {
+      const pct = Math.round(clamp01(g.fractionDone) * 100);
+      const bar = progressBar(Math.round(clamp01(g.fractionDone) * 10), 10, 12, col);
+      add(
+        `   ${bar} ${col.cyan(String(pct) + '%')}  ` +
+        `${trunc(g.objective, Math.max(8, cols - 28))}`,
+      );
+      if (g.nextActionable) {
+        add(col.dim(`       next: ${trunc(g.nextActionable, Math.max(8, cols - 14))}`));
+      }
+    }
+  }
+  blank();
+
+  // ── Top backlog (M22) ────────────────────────────────────────────────────
+  add(col.bold(col.blue(' ◆ Top backlog')));
+  if (p.backlogTop.length === 0) {
+    add(col.dim('   Empty.'));
+  } else {
+    for (const item of p.backlogTop) {
+      add(
+        `   ${col.dim(String(Math.round(item.score)).padStart(4))}  ` +
+        `${trunc(item.title, Math.max(8, cols - 10))}`,
+      );
+    }
+  }
+  blank();
+
+  // ── Cost + forecast (M19) ────────────────────────────────────────────────
+  add(col.bold(col.blue(' ◆ Cost (' + p.cost.window + ')')));
+  add(
+    `   Spent: ${col.yellow('$' + p.cost.spentUsd.toFixed(2))}` +
+    `   Saved (local): ${col.green('$' + p.cost.localSavingsUsd.toFixed(2))}` +
+    `   Proj./mo: ${col.yellow('$' + p.cost.projectedMonthlyUsd.toFixed(2))}`,
+  );
+
+  // ── Effectiveness (M26) ──────────────────────────────────────────────────
+  if (p.effectiveness) {
+    blank();
+    add(col.bold(col.blue(' ◆ Effectiveness')));
+    add(`   ${col.dim(trunc(p.effectiveness.headline, Math.max(8, cols - 4)))}`);
+  }
+
+  // ── Today (day-over-day deltas; null until a prior digest exists) ────────
+  blank();
+  add(col.bold(col.blue(' ◆ Today')));
+  const t = p.today;
+  if (t.previousAt === null) {
+    add(col.dim('   No prior digest to compare against yet.'));
+  } else {
+    add(
+      `   Pending: ${signedDelta(t.pendingProposalsDelta, col)}` +
+      `   Dirty: ${signedDelta(t.dirtyReposDelta, col)}` +
+      `   Spend: ${signedUsdDelta(t.spendUsdDelta, col)}` +
+      `   Health: ${signedDelta(t.healthScoreDelta, col)}` +
+      `   Goals: ${signedDelta(t.goalsInFlightDelta, col)}`,
+    );
+  }
+
+  return padToRows(lines, bodyRows, cols);
+}
+
 function bodyInbox(
   snap: DashboardSnapshot,
   cols: number,
@@ -488,7 +622,7 @@ function bodyInbox(
 
 function buildFooter(cols: number, col: ReturnType<typeof makeColors>): string {
   const hints = [
-    '1-6 tabs',
+    '1-7 tabs',
     'j/k move',
     'r refresh',
     'enter detail',
@@ -574,6 +708,59 @@ function statusColorize(
     case 'aborted':  return col.red;
     default:         return col.dim;
   }
+}
+
+/**
+ * Color a portfolio health letter grade (M29). A/B green, C yellow, D/F red.
+ * Returns a function so callers can apply it to any label string.
+ */
+function gradeColorize(
+  grade: string,
+  col: ReturnType<typeof makeColors>,
+): (s: string) => string {
+  switch (grade) {
+    case 'A':
+    case 'B': return col.green;
+    case 'C': return col.yellow;
+    case 'D':
+    case 'F': return col.red;
+    default:  return col.dim;
+  }
+}
+
+/** Compact repo label: basename only (read-only display handle). */
+function repoLabel(repo: string): string {
+  const parts = repo.split('/').filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1]! : repo;
+}
+
+/** Clamp a fraction into [0, 1]. */
+function clamp01(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
+}
+
+/**
+ * Render a signed integer-ish delta (M29 "today" block). null → an em-dash;
+ * negative red, positive/zero green. Pure, never throws.
+ */
+function signedDelta(
+  n: number | null,
+  col: ReturnType<typeof makeColors>,
+): string {
+  if (n === null || !Number.isFinite(n)) return col.dim('—');
+  const s = (n > 0 ? '+' : '') + String(n);
+  return n < 0 ? col.red(s) : col.green(s);
+}
+
+/** Render a signed USD delta (M29 "today" block). null → em-dash. */
+function signedUsdDelta(
+  n: number | null,
+  col: ReturnType<typeof makeColors>,
+): string {
+  if (n === null || !Number.isFinite(n)) return col.dim('—');
+  const s = (n > 0 ? '+$' : n < 0 ? '-$' : '$') + Math.abs(n).toFixed(2);
+  return n < 0 ? col.red(s) : col.green(s);
 }
 
 /** Format a large number with k/M suffixes. */

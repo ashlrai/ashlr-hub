@@ -197,6 +197,26 @@
         </svg>
         Genome
       </button>
+
+      <!-- M29: read-only org-level portfolio tab. NOTE: this static nav markup
+           is an INERT fallback — app.js renderShell() clears document.body and
+           rebuilds the nav from its VIEWS array on load, so this button never
+           actually renders. The 'portfolio' view works because it is in VIEWS.
+           Kept only as a no-JS skeleton, consistent with every other panel. -->
+      <button class="nav-tab"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-portfolio"
+              data-view="portfolio"
+              type="button">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <!-- Stacked bars / portfolio suggestion -->
+          <rect x="1.5" y="9"  width="3" height="5.5" rx="0.6" stroke="currentColor" stroke-width="1.2"/>
+          <rect x="6.5" y="5"  width="3" height="9.5" rx="0.6" stroke="currentColor" stroke-width="1.2"/>
+          <rect x="11.5" y="2" width="3" height="12.5" rx="0.6" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+        Portfolio
+      </button>
     </nav>
 
     <!-- Right side: live indicator + connection status -->
@@ -643,6 +663,30 @@
         </div>
 
       </section><!-- /#panel-genome -->
+
+      <!-- ── PANEL: Portfolio (M29) — READ-ONLY ────────────────── -->
+      <!-- INERT FALLBACK: app.js renderShell() replaces document.body with a
+           single dynamic <main id="main">, discarding this static panel. The
+           live portfolio view is rendered by app.js loadView('portfolio'); this
+           markup is an unused no-JS skeleton (as are all sibling #panel-*). -->
+      <section class="panel"
+               id="panel-portfolio"               role="tabpanel"
+               aria-labelledby="tab-portfolio"
+               tabindex="0"
+               hidden>
+
+        <div class="panel__header">
+          <h1 class="panel__title">Portfolio</h1>
+          <p class="panel__subtitle">Org-level health, goals, and cost — read-only</p>
+        </div>
+
+        <!-- Portfolio cards are rendered by app.js renderPortfolio(); this is
+             the static skeleton fallback. NO mutation controls live here. -->
+        <div class="portfolio-grid" id="portfolio-grid" aria-live="polite">
+          <p class="hint">Loading…</p>
+        </div>
+
+      </section><!-- /#panel-portfolio -->
 
     </main><!-- /#main-content -->
 
