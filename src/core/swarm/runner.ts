@@ -123,11 +123,17 @@ type CreateSandboxFn = (sourceRepo: string, opts?: { allowAnyRepo?: boolean }) =
 type SandboxDiffFn   = (sb: Sandbox) => SandboxDiff;
 type RemoveSandboxFn = (sb: Sandbox) => void;
 type AuditFn         = (entry: Omit<import('../types.js').AuditEntry, 'ts'>) => void;
+// M24: lazy proposal sink — when opts.propose is set the captured sandbox diff
+// is recorded as a PENDING inbox proposal (applied LATER only by a human).
+type CreateProposalFn = (
+  p: Omit<import('../types.js').Proposal, 'id' | 'status' | 'createdAt'>,
+) => import('../types.js').Proposal;
 
-let _createSandbox: CreateSandboxFn | null = null;
-let _sandboxDiff:   SandboxDiffFn   | null = null;
-let _removeSandbox: RemoveSandboxFn | null = null;
-let _audit:         AuditFn         | null = null;
+let _createSandbox:  CreateSandboxFn  | null = null;
+let _sandboxDiff:    SandboxDiffFn    | null = null;
+let _removeSandbox:  RemoveSandboxFn  | null = null;
+let _audit:          AuditFn          | null = null;
+let _createProposal: CreateProposalFn | null = null;
 let _m21Loaded = false;
 
 async function loadM21(): Promise<void> {
@@ -155,6 +161,14 @@ async function loadM21(): Promise<void> {
     _audit = au.audit;
   } catch {
     // audit.ts not built yet — audit degrades to no-op
+  }
+  try {
+    // M24: the inbox proposal sink — used ONLY when opts.propose is set.
+    const ibSpec = '../inbox/store.js';
+    const ib = await import(/* @vite-ignore */ ibSpec) as { createProposal: CreateProposalFn };
+    _createProposal = ib.createProposal;
+  } catch {
+    // inbox/store.ts not built yet — propose degrades to no-op
   }
 }
 
@@ -884,6 +898,7 @@ function captureSandboxAndCleanup(
   sb: Sandbox,
   run: SwarmRun,
   sink: StreamSink,
+  propose = false,
 ): void {
   // Capture diff (read-only; never mutates source tree).
   let diff: SandboxDiff | null = null;
@@ -924,6 +939,41 @@ function captureSandboxAndCleanup(
         result: 'ok',
       });
     } catch { /* audit best-effort */ }
+
+    // M24: when the caller (e.g. the daemon) sets opts.propose, record the
+    // captured diff as a PENDING inbox proposal. This is the ONLY way the
+    // daemon's work surfaces. A PENDING proposal is applied LATER only by an
+    // explicit human inbox approve — never automatically, never here.
+    if (propose && _createProposal !== null) {
+      try {
+        _createProposal({
+          repo: sb.sourceRepo,
+          origin: 'swarm',
+          kind: 'patch',
+          title: (run.goal || `swarm ${run.id}`).slice(0, 120),
+          summary: [
+            `Autonomous swarm proposal (swarm=${run.id}, status=${run.status})`,
+            `repo: ${sb.sourceRepo}`,
+            `diff: ${diff.files} file(s), +${diff.insertions} -${diff.deletions}`,
+          ].join('\n'),
+          diff: diff.patch || undefined,
+          sandboxId: sb.id,
+        });
+        emitLog(sink, `[M24] PENDING proposal recorded for swarm ${run.id}`);
+        try {
+          _audit?.({
+            action: 'inbox:proposal-created',
+            repo: sb.sourceRepo,
+            sandboxId: sb.id,
+            summary: `daemon swarm ${run.id} -> PENDING proposal (${diff.files} file(s))`,
+            result: 'ok',
+          });
+        } catch { /* audit best-effort */ }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        emitLog(sink, `[M24] Proposal creation failed: ${msg.slice(0, 120)}`);
+      }
+    }
   }
 
   // Always remove sandbox (worktree + scratch branch). Never touches source tree.
@@ -1050,6 +1100,46 @@ export async function runSwarm(
   // The cwd that tasks should run in. null = use run.project (unchanged behavior).
   let sandboxCwd: string | null = null;
 
+  // M24 STRICT SANDBOX: when the caller demands a mandatory sandbox
+  // (opts.requireSandbox, ALWAYS set by the autonomous daemon), the sandbox is
+  // non-optional. If it cannot be created — worktree module absent, source not a
+  // git repo, HEAD unresolvable, `git worktree add` fails, or a kill-switch race
+  // inside createSandbox — the swarm MUST abort and execute ZERO tasks rather
+  // than silently falling back to run.project (the user's real working tree).
+  const requireSandbox = opts.sandbox === true && opts.requireSandbox === true;
+
+  const abortNoSandbox = (reason: string): SwarmRun => {
+    const ts = new Date().toISOString();
+    const aborted: SwarmRun = {
+      id: makeId(),
+      goal: input.goal,
+      specId: input.specId ?? null,
+      project,
+      createdAt: ts,
+      updatedAt: ts,
+      budget,
+      usage: newUsage(),
+      parallel,
+      status: 'failed',
+      plan: { specId: input.specId ?? null, goal: input.goal, tasks: [] },
+      tasks: [],
+      result:
+        `Refused: a mandatory sandbox could not be created (${reason}). ` +
+        'No tasks were executed; the working tree was NOT touched.',
+    };
+    emitLog(sink, aborted.result ?? '');
+    try {
+      _audit?.({
+        action: 'sandbox:create',
+        repo: project,
+        sandboxId: null,
+        summary: `Mandatory sandbox unavailable — swarm aborted (zero tasks): ${reason.slice(0, 120)}`,
+        result: 'error',
+      });
+    } catch { /* audit is best-effort */ }
+    return aborted;
+  };
+
   if (opts.sandbox === true && project !== null && _createSandbox !== null) {
     try {
       activeSandbox = _createSandbox(project);
@@ -1065,9 +1155,14 @@ export async function runSwarm(
         });
       } catch { /* audit is best-effort */ }
     } catch (err) {
-      // Sandbox creation failed — fall back to non-sandbox mode rather than
-      // crashing the swarm. Log the failure and proceed with source tree.
       const msg = err instanceof Error ? err.message : String(err);
+      // M24: when the sandbox is MANDATORY, a creation failure aborts the run —
+      // NEVER fall back to the user's working tree.
+      if (requireSandbox) {
+        return abortNoSandbox(`createSandbox failed: ${msg}`);
+      }
+      // Legacy (non-strict) behavior: fall back to non-sandbox mode rather than
+      // crashing the swarm. Log the failure and proceed with source tree.
       emitLog(sink, `[M21] Sandbox creation failed (running without sandbox): ${msg}`);
       try {
         _audit?.({
@@ -1081,6 +1176,13 @@ export async function runSwarm(
       activeSandbox = null;
       sandboxCwd = null;
     }
+  } else if (requireSandbox) {
+    // Sandbox demanded but a precondition is missing: no project to sandbox, or
+    // the worktree module is absent. Abort — do NOT run against run.project.
+    if (project === null) {
+      return abortNoSandbox('no project specified for a mandatory sandbox');
+    }
+    return abortNoSandbox('sandbox worktree module unavailable');
   }
 
   // -------------------------------------------------------------------------
@@ -1236,7 +1338,7 @@ export async function runSwarm(
       maybePersist(run);
       emitLog(sink, run.result);
       // M21: clean up sandbox even on planning failure (no diff to capture yet).
-      if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink);
+      if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true);
       await fireEmitSwarm(run, cfg);
       if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
       return run;
@@ -1283,7 +1385,7 @@ export async function runSwarm(
         persist(run);
         emitLog(sink, run.result);
         // M21: capture diff of work done so far, then remove sandbox.
-        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink);
+        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1296,7 +1398,7 @@ export async function runSwarm(
         // Stop cleanly — do NOT proceed to the next phase.
         emitLog(sink, `Swarm ${run.id} paused at phase "${phase}" — awaiting human approval.`);
         // M21: capture diff of partial work, then remove sandbox.
-        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink);
+        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1309,7 +1411,7 @@ export async function runSwarm(
         persist(run);
         emitLog(sink, run.result);
         // M21: capture diff of partial work, then remove sandbox.
-        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink);
+        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1322,7 +1424,7 @@ export async function runSwarm(
     persist(run);
     emitLog(sink, run.result);
     // M21: capture diff of any partial work, then remove sandbox.
-    if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink);
+    if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true);
     await fireEmitSwarm(run, cfg);
     if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
     return run;
@@ -1362,7 +1464,7 @@ export async function runSwarm(
   persist(run);
 
   // M21: capture full sandbox diff proposal, then remove sandbox.
-  if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink);
+  if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true);
 
   emitLog(sink, `Swarm ${run.id} finished with status: ${run.status}`);
 

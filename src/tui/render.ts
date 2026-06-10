@@ -188,6 +188,23 @@ function bodyOverview(
     );
   }
 
+
+  // ── Daemon status (M24) ──────────────────────────────────────────────────
+  // snap.daemon is optional — absent when daemon/state.ts not yet present.
+  if (snap.daemon) {
+    const d = snap.daemon;
+    const statusStr = d.running
+      ? col.green('running')
+      : col.dim('idle');
+    blank();
+    add(col.bold(col.blue(' ◆ Daemon')));
+    add(
+      `   Status: ${statusStr}` +
+      `   Spend today: ${col.yellow('$' + d.todaySpentUsd.toFixed(4))}` +
+      `   Pending proposals: ${d.pendingProposals > 0 ? col.yellow(String(d.pendingProposals)) : col.dim('0')}`,
+    );
+  }
+
   return padToRows(lines, bodyRows, cols);
 }
 

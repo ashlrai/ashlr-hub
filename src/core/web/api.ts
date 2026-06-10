@@ -14,6 +14,7 @@
  *   GET /api/pulse?window=7d   -> buildRollup(window, cfg)
  *   GET /api/genome[?q=...]    -> recall(q, cfg) | loadGenome(cfg)
  *   GET /api/inbox             -> listProposals({status:'pending'}) (read-only; M23)
+ *   GET /api/daemon            -> loadDaemonState() (read-only; M24; no control endpoint)
  *   GET /api/events            -> Server-Sent Events stream
  *
  * Mutating route (ONLY when ctx.allowDispatch === true + token header):
@@ -42,6 +43,8 @@ import { buildRollup } from '../observability/rollup.js';
 import { loadGenome } from '../genome/store.js';
 import { recall } from '../genome/recall.js';
 import { listProposals } from '../inbox/store.js';
+// M24: read-only daemon state endpoint — no control surface; start/stop stays CLI-only.
+import { loadDaemonState } from '../daemon/state.js';
 
 // ---------------------------------------------------------------------------
 // SSE registry — shared across all open SSE connections so server.ts can
@@ -546,6 +549,17 @@ export async function handleApi(
         pending: proposals.length,
         proposals,
       });
+      return true;
+    }
+
+    // ── GET /api/daemon ─────────────────────────────────────────────────────
+    // M24: read-only daemon state. No control endpoint — start/stop is CLI-only.
+    // loadDaemonState() never throws; returns zeroed state when not yet
+    // initialised (daemon/state.ts absent at runtime => caught below and 500'd,
+    // but the import is soft-guarded in state.ts itself).
+    if (path === '/api/daemon' && method === 'GET') {
+      const ds = loadDaemonState();
+      sendJson(res, 200, ds);
       return true;
     }
 

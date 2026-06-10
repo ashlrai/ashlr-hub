@@ -8,6 +8,53 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M24: The Autonomous Daemon (`ashlr daemon`)
+
+### Added
+
+- **`ashlr daemon` — the autonomous operator that makes the org continuous** (`src/core/daemon/state.ts`, `src/core/daemon/loop.ts`, `src/cli/daemon.ts`):
+  - Pulls the highest-value backlog items for enrolled repos and dispatches sandboxed swarms whose output becomes PENDING proposals in the Approval Inbox. **It is proposal-only by construction — it has no path to apply, push, open a PR, or deploy.**
+  - **`ashlr daemon start`** — begin the operator loop; ticks on an interval until stopped, daily budget is exhausted, or the kill switch is set.
+  - **`ashlr daemon start --once`** — run exactly one tick and exit (ideal for cron or manual one-shot use).
+  - **`ashlr daemon start --dry-run`** — plan only: shows which backlog items would be worked this tick; no swarm is dispatched, no proposal is created. Safe to run at any time.
+  - **`ashlr daemon start --budget <usd>`** — override the daily budget cap for this session.
+  - **`ashlr daemon start --interval <ms>`** — override the tick interval.
+  - **`ashlr daemon start --parallel <n>`** — override the per-tick concurrency cap.
+  - **`ashlr daemon stop`** — sets `~/.ashlr/KILL` and clears running state; all in-flight ticks halt at the next kill-switch check.
+  - **`ashlr daemon status`** — running state, PID, last tick time, today's spend vs cap, items processed, pending proposals count.
+
+- **Daemon state** (`src/core/daemon/state.ts`) — atomic, never-throws, day-reset-aware:
+  - `daemonStatePath()` — `~/.ashlr/daemon.json`.
+  - `loadDaemonState()` — returns a fresh zeroed `DaemonState` on missing or corrupt file; never throws.
+  - `saveDaemonState(s)` — atomic write (temp file + rename), `mkdir -p` on first save.
+  - `resetDayIfNeeded(s)` — zeroes `todaySpentUsd` and `itemsProcessed` when `todayDate` has rolled over; preserves all other state.
+
+- **Daemon loop** (`src/core/daemon/loop.ts`) — ordered safety checks before any work is dispatched:
+  - `tick(cfg, { dryRun })` — one operator cycle: kill-switch check → budget-exhausted check → enrolled-repos check → load/refresh backlog → select top-K items under per-tick + daily budget cap → (dry-run: log plan only; else: dispatch `runSwarm` with `opts.sandbox=true` + `opts.propose=true` at bounded concurrency) → record spend + audit + daemon state. Returns a `DaemonTick` summary.
+  - `runDaemon(cfg, { once, dryRun })` — REFUSES (throws) if `ASHLR_IN_DAEMON` or `ASHLR_IN_SWARM` is set (fork-bomb guard); sets `ASHLR_IN_DAEMON=1` on child processes; `once=true` runs one tick; otherwise loops, re-checking kill switch and budget every iteration. No unbounded loop — exits cleanly on exhaustion or stop.
+  - `stopDaemon()` — sets `~/.ashlr/KILL` + clears running state.
+
+- **New types in `src/core/types.ts`** (all existing types unchanged):
+  - `DaemonConfig { dailyBudgetUsd; perTickItems; parallel; intervalMs }` — caps only; grants no authority.
+  - `DaemonTick { ts; itemsConsidered; proposalsCreated; spentUsd; reason }` — one tick summary record.
+  - `DaemonState { running; pid; startedAt; lastTickAt; todayDate; todaySpentUsd; itemsProcessed; ticks }` — persisted daemon state.
+  - `AshlrConfig.daemon?: Partial<DaemonConfig>` — optional per-installation caps override.
+  - `DashboardSnapshot.daemon?: { running; todaySpentUsd; pendingProposals }` — optional; absent = not running.
+
+- **Dashboard surface** (TUI + web) — `DashboardSnapshot.daemon` populated from `loadDaemonState()` + `pendingCount()`; read-only display of running state, today's spend, and pending proposal count.
+
+### Guardrails (M24)
+
+- **PROPOSAL-ONLY (grep-provable)**: the daemon code imports and calls ONLY `createProposal` (via `runSwarm opts.propose`) and `pendingCount` (read-only). It NEVER imports or calls `applyProposal`, `git push`, `gh pr create`, or any deploy/ship path. Every tick's output is a PENDING proposal in the Approval Inbox; applying it requires explicit human `ashlr inbox approve`.
+- **ENROLLMENT-ONLY**: the daemon operates ONLY on `listEnrolled()` repos. Default enrollment is empty — if nothing is enrolled, the daemon idles and does nothing. It never scans or operates on the full 69-repo portfolio.
+- **SANDBOXED**: all swarm work is dispatched with `opts.sandbox=true` (M21 git-worktree sandboxes). The user's working tree, current branch, index, and HEAD are never touched.
+- **BOUNDED**: hard daily budget cap (default modest), per-tick item cap, and concurrency cap enforced on every tick. Budget resets per calendar day via `resetDayIfNeeded`. When exhausted the daemon idles or stops. No unbounded loop.
+- **KILL SWITCH**: `~/.ashlr/KILL` is checked at the top of every tick. `ashlr daemon stop` sets it immediately. Cannot be bypassed.
+- **RE-ENTRANCY GUARD**: `runDaemon` REFUSES to start if `ASHLR_IN_DAEMON=1` or `ASHLR_IN_SWARM=1` is set in the environment. Prevents daemon-inside-daemon and daemon-inside-swarm fork bombs. Respects the existing swarm recursion guard.
+- All 2357 existing tests preserved. Typecheck passes clean (`tsc --noEmit`). No new runtime dependencies.
+
+---
+
 ## [Unreleased] — M23: Approval Inbox (Single Outward Gate)
 
 ### Added

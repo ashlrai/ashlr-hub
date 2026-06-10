@@ -60,6 +60,78 @@ ashlr help
 
 ---
 
+## The autonomous daemon
+
+`ashlr daemon` is the continuous operator for your enrolled repos. Each tick it pulls the highest-value items from the backlog, dispatches sandboxed swarms to work them, and deposits the results as PENDING proposals in the Approval Inbox. Nothing it produces is ever applied automatically — **it can only propose**.
+
+### How it works
+
+```
+enrolled repos  →  backlog (scored work items)
+                        │
+                        ▼
+                 daemon tick (sandboxed swarm per item)
+                        │
+                        ▼
+            ~/.ashlr/inbox/<id>.json   (status: pending)
+                        │
+                        ▼
+            ashlr inbox approve <id>   ← YOU decide
+```
+
+1. On each tick the daemon checks the kill switch and daily budget, then loads the backlog for every enrolled repo.
+2. It selects the top-K items that fit within the per-tick and daily budget caps.
+3. For each item it calls `runSwarm` with `opts.sandbox=true` (isolated git worktree, never your working tree) and `opts.propose=true` (output is a PENDING proposal, never auto-applied).
+4. Tick summary — items considered, proposals created, spend — is recorded to daemon state and the audit trail.
+
+### Commands
+
+```sh
+ashlr daemon start              # begin the operator loop
+ashlr daemon start --once       # one tick then exit
+ashlr daemon start --dry-run    # show what would be worked — no swarms dispatched, no proposals created
+ashlr daemon start --budget 2   # override daily budget cap (USD) for this session
+ashlr daemon stop               # set kill switch + clear running state
+ashlr daemon status             # running?, last tick, today spend vs cap, pending proposals
+```
+
+### The daemon ONLY proposes — you approve
+
+Every piece of work the daemon produces lands as a PENDING proposal in the Approval Inbox. Nothing is applied to your repo, pushed to a remote, or opened as a PR until you run `ashlr inbox approve <id>`. This is structurally enforced — the daemon code has no import or call path to `applyProposal`, `git push`, `gh pr create`, or any deploy path.
+
+```sh
+ashlr inbox          # review what the daemon produced
+ashlr inbox show <id>    # read the diff
+ashlr inbox approve <id> # apply it — only then does anything outward happen
+ashlr inbox reject <id>  # discard
+```
+
+### Enrollment, budget, and kill switch
+
+| Safety layer | What it does |
+|---|---|
+| **Enrollment** | The daemon operates ONLY on repos you have explicitly enrolled (`ashlr enroll add <repo>`). Default is empty — if nothing is enrolled, the daemon does nothing. |
+| **Daily budget cap** | A hard USD ceiling resets each calendar day. When exhausted the daemon idles until tomorrow. Configurable via `daemon.dailyBudgetUsd` in `~/.ashlr/config.json` or `--budget` flag. |
+| **Per-tick cap** | Limits items worked in a single tick (configurable via `daemon.perTickItems`). |
+| **Concurrency cap** | Limits parallel swarms per tick (configurable via `daemon.parallel`). |
+| **Kill switch** | `ashlr daemon stop` (or `ashlr enroll kill on`) sets `~/.ashlr/KILL`. The daemon checks this at the top of every tick and halts immediately. Cannot be bypassed. |
+| **Re-entrancy guard** | The daemon refuses to start if `ASHLR_IN_DAEMON` or `ASHLR_IN_SWARM` is set — no daemon-inside-daemon or daemon-inside-swarm fork bombs. |
+| **Sandboxed execution** | All swarm work runs in isolated `git worktree` sandboxes under `~/.ashlr/sandboxes/`. Your working tree, current branch, index, and HEAD are never touched. |
+
+### Activating on your real repos is your call
+
+The daemon is safe to run in `--dry-run` mode at any time — it produces no swarms and no proposals. Running it for real on enrolled repos is an explicit gate you control:
+
+1. Enroll a repo: `ashlr enroll add <path-to-repo>`
+2. Set a modest daily budget in `~/.ashlr/config.json`: `{ "daemon": { "dailyBudgetUsd": 2 } }`
+3. Do a dry run first: `ashlr daemon start --once --dry-run`
+4. When you are ready: `ashlr daemon start --once`
+5. Review proposals: `ashlr inbox`
+
+The daemon will never touch a repo you have not enrolled, never exceed the budget you set, and never apply anything without your explicit approval.
+
+---
+
 ## Autonomy safety (v2)
 
 All autonomous code work in ashlr-hub v2 is designed around a safety-first principle: **proposal-only by default, with explicit enrollment and a hard kill switch**.

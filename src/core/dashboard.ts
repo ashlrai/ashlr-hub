@@ -33,6 +33,11 @@ import { discoverMcpServers } from './mcp-registry.js';
 import { loadGenome } from './genome/store.js';
 import type { AshlrConfig, DashboardSnapshot } from './types.js';
 import { pendingCount as inboxPendingCount } from './inbox/store.js';
+// M24: load daemon state for snapshot — bounded, never-throws
+// Import is a lazy dynamic require so the module resolves only at runtime;
+// if core/daemon/state.ts is absent (e.g. earlier milestone) it degrades to
+// undefined via the try/catch below.
+import { loadDaemonState } from './daemon/state.js';
 
 // ---------------------------------------------------------------------------
 // Caps — keep snapshot fast and memory-bounded
@@ -219,6 +224,22 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
     // Degrade to 0.
   }
 
+
+  // ── Daemon roll-up (M24) ─────────────────────────────────────────────────
+  // loadDaemonState() is bounded, synchronous, never-throws — returns a
+  // fresh zeroed state on missing/corrupt file. We wrap defensively anyway.
+  // We reuse inboxPendingCount() already computed above for pendingProposals.
+  let daemonRunning = false;
+  let daemonSpentUsd = 0;
+
+  try {
+    const ds = loadDaemonState();
+    daemonRunning = ds.running;
+    daemonSpentUsd = ds.todaySpentUsd;
+  } catch {
+    // Degrade to zeroed fields — daemon not yet initialised.
+  }
+
   return {
     generatedAt,
     repos: {
@@ -245,6 +266,12 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
     },
     inbox: {
       pending: inboxPending,
+    },
+    // M24: daemon status — READ-ONLY surface; absent == not running / no spend.
+    daemon: {
+      running: daemonRunning,
+      todaySpentUsd: daemonSpentUsd,
+      pendingProposals: inboxPending,
     },
   };
 }

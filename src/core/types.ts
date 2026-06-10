@@ -102,6 +102,13 @@ export interface AshlrConfig {
    * Entirely opt-in: a no-op when unset — notify() never posts without one.
    */
   notify?: NotifyTarget;
+  /**
+   * M24: optional autonomous-operator (daemon) tuning. When unset, the daemon
+   * falls back to its hard-coded conservative defaults. This NEVER widens the
+   * daemon's authority — the daemon is proposal-only by construction; these
+   * fields only bound HOW MUCH it may propose (budget/items/parallel/interval).
+   */
+  daemon?: Partial<DaemonConfig>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1090,6 +1097,23 @@ export interface SwarmOptions {
    * OFF, in which case the swarm behaves exactly as it does today.
    */
   sandbox?: boolean;
+  /**
+   * M24: when true (alongside sandbox), the swarm's captured patch is recorded
+   * as a PENDING inbox proposal rather than left as a bare worktree diff. SEAM
+   * ONLY — grants NO outward authority: a PENDING proposal is applied LATER only
+   * by an explicit human `inbox approve`. Defaults to OFF.
+   */
+  propose?: boolean;
+  /**
+   * M24: when true (alongside sandbox), the sandbox is MANDATORY — if the
+   * isolated git-worktree cannot be created (worktree module absent, source is
+   * not a git repo, HEAD unresolvable, `git worktree add` fails, or a kill-switch
+   * race), the swarm ABORTS with status 'failed' and executes ZERO tasks rather
+   * than silently falling back to the user's working tree. The autonomous daemon
+   * ALWAYS sets this so its work can NEVER touch a real repo's working tree.
+   * Defaults to OFF (preserves the legacy non-strict fallback for non-daemon callers).
+   */
+  requireSandbox?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,6 +1155,15 @@ export interface DashboardSnapshot {
   genome: { entries: number; projects: number };
   /** M23: number of proposals awaiting Mason's approval in the inbox gate. */
   inbox: { pending: number };
+  /**
+   * M24: autonomous-operator (daemon) roll-up. `running` reflects daemon state;
+   * `todaySpentUsd` is the operator's spend so far today (resets per day);
+   * `pendingProposals` mirrors inbox.pending for the daemon surface. READ-ONLY
+   * — surfacing daemon status NEVER applies a proposal or mutates a repo.
+   * Optional so existing snapshot producers stay valid until the M24 surface
+   * populates it; absent => treat as not running / no daemon spend.
+   */
+  daemon?: { running: boolean; todaySpentUsd: number; pendingProposals: number };
 }
 
 /** The selectable tabs of the interactive TUI dashboard. */
@@ -1710,4 +1743,76 @@ export interface ApplyResult {
   status: ProposalStatus;
   /** Human-readable detail (branch created, PR url, refusal reason, error). */
   detail: string;
+}
+
+// ---------------------------------------------------------------------------
+// M24: THE DAEMON — the autonomous operator.
+//
+// SAFE BY CONSTRUCTION. The daemon's ONLY output is PENDING proposals in the
+// M23 approval inbox. It NEVER applies/approves a proposal, NEVER pushes, NEVER
+// opens a PR, NEVER deploys, NEVER mutates a user repo working tree. It operates
+// ONLY on listEnrolled() repos (DEFAULT EMPTY => it does nothing), all work runs
+// SANDBOXED (M21 worktrees), and it is BOUNDED by a hard daily budget cap + a
+// per-tick item cap + a concurrency cap, halted instantly by the kill switch.
+// These types carry METADATA ONLY — never secret values.
+// ---------------------------------------------------------------------------
+
+/**
+ * M24: bounding configuration for the autonomous operator. Every field caps HOW
+ * MUCH the daemon may propose — none of them grant any outward authority (the
+ * daemon is proposal-only by construction). Sourced from cfg.daemon (partial),
+ * merged over conservative hard-coded defaults.
+ */
+export interface DaemonConfig {
+  /** HARD daily spend ceiling (USD). When today's spend reaches it, the daemon
+   *  idles/stops. Resets per calendar day. Default modest. */
+  dailyBudgetUsd: number;
+  /** Max number of backlog items processed per tick (per-tick item cap). */
+  perTickItems: number;
+  /** Bounded concurrency: max sandboxed swarms run simultaneously in a tick. */
+  parallel: number;
+  /** Interval between ticks in `daemon start` loop mode (ms). */
+  intervalMs: number;
+}
+
+/**
+ * M24: the record of a single operator cycle (one `tick`). Pure accounting of
+ * what was considered + proposed + spent. Creating a tick NEVER applies anything.
+ */
+export interface DaemonTick {
+  /** ISO timestamp the tick ran. */
+  ts: string;
+  /** How many backlog items were considered (post budget/cap selection). */
+  itemsConsidered: number;
+  /** How many PENDING proposals this tick created in the inbox. */
+  proposalsCreated: number;
+  /** Estimated USD spent during this tick. */
+  spentUsd: number;
+  /** Why the tick did what it did (e.g. 'ok', 'kill-switch', 'budget-exhausted',
+   *  'no-enrolled-repos', 'no-backlog', 'dry-run'). */
+  reason: string;
+}
+
+/**
+ * M24: persisted daemon state at ~/.ashlr/daemon.json. Tracks run/loop status,
+ * today's spend (reset per day), cumulative items processed, and recent ticks.
+ * METADATA ONLY — no secrets, no diffs. Mutating this NEVER mutates a user repo.
+ */
+export interface DaemonState {
+  /** Whether the daemon loop is currently running. */
+  running: boolean;
+  /** OS pid of the running daemon process, or null when not running. */
+  pid: number | null;
+  /** ISO timestamp the current/last run started, or null. */
+  startedAt: string | null;
+  /** ISO timestamp of the most recent tick, or null. */
+  lastTickAt: string | null;
+  /** Calendar day (YYYY-MM-DD) the spend counters apply to; null until first tick. */
+  todayDate: string | null;
+  /** Estimated USD spent so far today; reset when todayDate rolls over. */
+  todaySpentUsd: number;
+  /** Cumulative count of backlog items processed across all ticks. */
+  itemsProcessed: number;
+  /** Bounded history of recent ticks (most-recent last). */
+  ticks: DaemonTick[];
 }

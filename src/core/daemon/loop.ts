@@ -1,0 +1,610 @@
+/**
+ * loop.ts — The M24 daemon operator.
+ *
+ * Exports:
+ *  - tick(cfg, opts): one operator cycle — check guards, load backlog, dispatch
+ *    sandboxed swarms, create PENDING inbox proposals, record spend + state.
+ *  - runDaemon(cfg, opts): loop ticks on an interval (or once); REFUSES when
+ *    nested; marks running state; stops on kill switch / budget exhaustion.
+ *  - stopDaemon(): set kill switch + clear running state.
+ *
+ * NON-NEGOTIABLE GUARDRAILS (enforced here, grep-provable):
+ *  1. PROPOSAL-ONLY: this file has NO outward-action path whatsoever. Its ONLY
+ *     inbox output is a PENDING proposal, produced indirectly by the swarm
+ *     runner when this file passes { propose: true } to runSwarm. A PENDING
+ *     proposal is applied LATER only by an explicit human inbox approve.
+ *     This file imports no apply/push/PR/deploy primitive.
+ *  2. ENROLLMENT-ONLY: operates exclusively on listEnrolled() repos.
+ *     DEFAULT EMPTY => the daemon does NOTHING.
+ *  3. SANDBOXED: every runSwarm call sets opts.sandbox = true so all
+ *     swarm work runs in an isolated git-worktree (M21).
+ *  4. BOUNDED: hard daily USD cap + per-tick item cap + concurrency cap.
+ *     Resets per calendar day. NO unbounded loop — every iteration
+ *     re-checks kill switch + budget.
+ *  5. RE-ENTRANCY: runDaemon REFUSES if ASHLR_IN_DAEMON or ASHLR_IN_SWARM
+ *     is already set (no daemon-inside-daemon / daemon-inside-swarm fork bomb).
+ *     Sets ASHLR_IN_DAEMON=1 on this process so child spawns inherit it.
+ *
+ * No new runtime deps; node builtins only; never throws out of public API.
+ */
+
+import type { AshlrConfig, DaemonConfig, DaemonState, DaemonTick, WorkItem } from '../types.js';
+import { killSwitchOn, setKill, listEnrolled } from '../sandbox/policy.js';
+import { audit } from '../sandbox/audit.js';
+import { buildBacklog } from '../portfolio/backlog.js';
+import { loadDaemonState, saveDaemonState, resetDayIfNeeded } from './state.js';
+import { nullSink } from '../run/streaming.js';
+import { runSwarm } from '../swarm/runner.js';
+import { pendingCount } from '../inbox/store.js';
+
+// ---------------------------------------------------------------------------
+// DaemonConfig defaults (conservative)
+// ---------------------------------------------------------------------------
+
+const DEFAULTS: DaemonConfig = {
+  dailyBudgetUsd: 1.0,    // $1/day hard cap by default
+  perTickItems: 3,         // at most 3 backlog items per tick
+  parallel: 2,             // at most 2 concurrent sandboxed swarms per tick
+  intervalMs: 5 * 60_000, // 5-minute tick interval in loop mode
+};
+
+/**
+ * Merge the hard-coded defaults with any partial overrides in cfg.daemon.
+ * cfg.daemon grants NO authority — it only tunes caps.
+ */
+function resolveCfg(cfg: AshlrConfig): DaemonConfig {
+  const o = cfg.daemon ?? {};
+  return {
+    dailyBudgetUsd: typeof o.dailyBudgetUsd === 'number' && o.dailyBudgetUsd > 0
+      ? o.dailyBudgetUsd
+      : DEFAULTS.dailyBudgetUsd,
+    perTickItems: typeof o.perTickItems === 'number' && o.perTickItems > 0
+      ? Math.floor(o.perTickItems)
+      : DEFAULTS.perTickItems,
+    parallel: typeof o.parallel === 'number' && o.parallel > 0
+      ? Math.min(Math.floor(o.parallel), 8) // hard upper bound at 8
+      : DEFAULTS.parallel,
+    intervalMs: typeof o.intervalMs === 'number' && o.intervalMs > 0
+      ? o.intervalMs
+      : DEFAULTS.intervalMs,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Bounded concurrency helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Run `tasks` with at most `limit` in flight at once.
+ * Returns all settled results in input order.
+ * Never throws — individual task errors are captured in the PromiseSettledResult.
+ */
+async function bounded<T>(
+  tasks: Array<() => Promise<T>>,
+  limit: number,
+): Promise<PromiseSettledResult<T>[]> {
+  const results: PromiseSettledResult<T>[] = new Array(tasks.length);
+  let nextIdx = 0;
+
+  async function worker(): Promise<void> {
+    while (nextIdx < tasks.length) {
+      const idx = nextIdx++;
+      const fn = tasks[idx];
+      if (fn === undefined) break;
+      try {
+        results[idx] = { status: 'fulfilled', value: await fn() };
+      } catch (err) {
+        results[idx] = { status: 'rejected', reason: err };
+      }
+    }
+  }
+
+  const slots = Math.max(1, Math.min(limit, tasks.length));
+  await Promise.all(Array.from({ length: slots }, () => worker()));
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// tick — one operator cycle
+// ---------------------------------------------------------------------------
+
+/**
+ * One operator cycle. In order:
+ *  1. Kill-switch check.
+ *  2. Load + resetDayIfNeeded state; budget exhaustion check.
+ *  3. Enrollment check (DEFAULT EMPTY => do nothing).
+ *  4. Build/load backlog for enrolled repos.
+ *  5. Select top-K items within remaining budget.
+ *  6a. dryRun: describe what WOULD be worked; create NO proposals.
+ *  6b. else: for each selected item (bounded concurrency):
+ *       runSwarm({ sandbox:true, propose:true }) => a PENDING inbox proposal
+ *       is produced by the runner + tally spend.
+ *  7. Persist updated state; return tick record.
+ *
+ * Has NO outward-action path (no apply, no push, no PR, no deploy).
+ * Never throws.
+ */
+export async function tick(
+  cfg: AshlrConfig,
+  opts: { dryRun: boolean },
+): Promise<DaemonTick> {
+  const now = new Date().toISOString();
+  const dcfg = resolveCfg(cfg);
+
+  // Append a tick record to persisted state so every operator cycle (including
+  // no-op reasons like kill-switch / no-enrolled-repos / dry-run) is visible to
+  // `daemon status`, the TUI, and the web dashboard. Never throws.
+  const recordTick = (t: DaemonTick): DaemonTick => {
+    try {
+      let s = loadDaemonState();
+      s = resetDayIfNeeded(s);
+      s.lastTickAt = t.ts;
+      s.ticks = [...s.ticks, t];
+      saveDaemonState(s);
+    } catch {
+      // persistence best-effort — never let observability crash a tick
+    }
+    return t;
+  };
+
+  // -------------------------------------------------------------------------
+  // 1. Kill-switch check.
+  // -------------------------------------------------------------------------
+  if (killSwitchOn()) {
+    audit({
+      action: 'daemon:tick',
+      repo: null,
+      sandboxId: null,
+      summary: 'tick skipped: kill switch is ON',
+      result: 'ok',
+    });
+    return recordTick({
+      ts: now,
+      itemsConsidered: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'kill-switch',
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 2. Load state + daily reset + budget exhaustion check.
+  // -------------------------------------------------------------------------
+  let state = loadDaemonState();
+  state = resetDayIfNeeded(state);
+
+  const remainingBudget = dcfg.dailyBudgetUsd - state.todaySpentUsd;
+  if (remainingBudget <= 0) {
+    saveDaemonState(state);
+    audit({
+      action: 'daemon:tick',
+      repo: null,
+      sandboxId: null,
+      summary: `tick skipped: daily budget exhausted ($${state.todaySpentUsd.toFixed(4)} >= $${dcfg.dailyBudgetUsd})`,
+      result: 'ok',
+    });
+    return recordTick({
+      ts: now,
+      itemsConsidered: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'budget-exhausted',
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 3. Enrollment check — NEVER touch non-enrolled repos.
+  // -------------------------------------------------------------------------
+  const enrolled = listEnrolled();
+  if (enrolled.length === 0) {
+    saveDaemonState(state);
+    audit({
+      action: 'daemon:tick',
+      repo: null,
+      sandboxId: null,
+      summary: 'tick skipped: no repos enrolled (DEFAULT EMPTY)',
+      result: 'ok',
+    });
+    return recordTick({
+      ts: now,
+      itemsConsidered: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'no-enrolled-repos',
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 4. Build / refresh backlog for ENROLLED repos only.
+  // -------------------------------------------------------------------------
+  let backlogItems: WorkItem[] = [];
+  try {
+    const backlog = await buildBacklog({ repos: enrolled });
+    backlogItems = backlog.items;
+  } catch {
+    // buildBacklog never throws by contract; extra guard
+    backlogItems = [];
+  }
+
+  if (backlogItems.length === 0) {
+    saveDaemonState(state);
+    audit({
+      action: 'daemon:tick',
+      repo: null,
+      sandboxId: null,
+      summary: 'tick skipped: backlog is empty for enrolled repos',
+      result: 'ok',
+    });
+    return recordTick({
+      ts: now,
+      itemsConsidered: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'no-backlog',
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 5. Select top-K items within the per-tick cap and remaining budget.
+  //    Items are already sorted highest-score-first by buildBacklog.
+  //    The real controls are: (a) the perTickItems cap, (b) the remaining daily
+  //    USD budget, which bounds how many items can each get a minimal slice, and
+  //    (c) the swarm's own internal token budget (the hard per-item ceiling).
+  //    We cap the selected count by how many MIN_PER_ITEM_USD slices fit in the
+  //    remaining budget, so a near-exhausted budget selects fewer items rather
+  //    than authorizing the full perTickItems against a tiny remaining headroom.
+  // -------------------------------------------------------------------------
+  const MIN_PER_ITEM_USD = 0.01; // floor on a per-item slice for selection math
+  const maxByBudget = Math.max(1, Math.floor(remainingBudget / MIN_PER_ITEM_USD));
+  const selectCount = Math.min(dcfg.perTickItems, maxByBudget, backlogItems.length);
+  const selected: WorkItem[] = backlogItems.slice(0, selectCount);
+
+  // -------------------------------------------------------------------------
+  // 6a. Dry-run mode: report what WOULD be worked; NO swarms, NO proposals.
+  // -------------------------------------------------------------------------
+  if (opts.dryRun) {
+    saveDaemonState(state);
+    audit({
+      action: 'daemon:tick',
+      repo: null,
+      sandboxId: null,
+      summary: `dry-run: would work ${selected.length} item(s): ${selected.map(i => i.title).join(', ')}`,
+      result: 'ok',
+    });
+    return recordTick({
+      ts: now,
+      itemsConsidered: selected.length,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'dry-run',
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 6b. Live mode: for each selected item (bounded concurrency), run a
+  //     sandboxed swarm that records a PENDING inbox proposal.
+  //
+  //     GUARDRAIL: each swarm call uses opts.sandbox=true (M21 worktree) so
+  //     swarm work NEVER touches the user's working tree, plus opts.propose=true
+  //     so the runner records the captured diff as a PENDING inbox proposal.
+  //     This file has NO outward-action primitive of any kind; a PENDING
+  //     proposal is applied LATER only by an explicit human inbox approve.
+  // -------------------------------------------------------------------------
+  // Shared, mutable in-tick spend tally. Read+incremented by each concurrent
+  // task so later dispatches can short-circuit once cumulative realized spend
+  // reaches the remaining daily headroom (the USD daily cap is otherwise only
+  // enforced BETWEEN ticks — this keeps a single tick from overshooting it).
+  let tickSpent = 0;
+
+  // Per-item USD budget slice: divide remaining budget evenly across items.
+  const perItemUsdSlice = remainingBudget / selected.length;
+
+  // Convert USD slice to a rough token count for the swarm budget.
+  // Using a conservative $15/M-output estimate as the binding constraint.
+  // This is best-effort estimation — the daemon's HARD cap is the USD daily budget.
+  const usdPerMTokenOut = 15.0;
+  const perItemMaxTokens = Math.max(
+    1000,
+    Math.floor((perItemUsdSlice / usdPerMTokenOut) * 1_000_000),
+  );
+
+  // Count proposals by the ACTUAL change in the inbox's PENDING count across the
+  // whole batch — NOT by inferring from swarmRun.status==='done'. A swarm that
+  // finished but recorded no proposal (e.g. a strict-sandbox abort, or an empty
+  // diff) must NEVER be mis-counted as a proposal. pendingCount() is read-only.
+  let pendingBefore = 0;
+  try { pendingBefore = pendingCount(); } catch { pendingBefore = 0; }
+
+  // `dispatched` = a swarm was actually invoked for this item (kill switch /
+  // budget short-circuit did NOT skip it). Drives itemsProcessed so `daemon
+  // status` reflects real work, not merely items considered.
+  type ItemOutcome = { item: WorkItem; spentUsd: number; dispatched: boolean };
+
+  const tasks: Array<() => Promise<ItemOutcome>> = selected.map((item) => async (): Promise<ItemOutcome> => {
+    // Re-check kill switch before each item dispatch.
+    if (killSwitchOn()) {
+      return { item, spentUsd: 0, dispatched: false };
+    }
+    // In-tick budget short-circuit: if cumulative realized spend has already
+    // reached the remaining daily headroom, do NOT dispatch further items.
+    if (tickSpent >= remainingBudget) {
+      return { item, spentUsd: 0, dispatched: false };
+    }
+
+    let swarmSpent = 0;
+    let dispatched = false;
+
+    // Snapshot ASHLR_IN_SWARM and restore it after the call. The swarm runner
+    // sets ASHLR_IN_SWARM=1 on THIS (long-lived) process and does not unwind it;
+    // without this restore, the 2nd..Kth runSwarm in a tick — and every tick
+    // after the first in loop mode — would hit the recursion guard and refuse,
+    // silently neutering the daemon. Restoring keeps each dispatch clean while
+    // the runner's own child-spawn inheritance still works during the call.
+    const prevInSwarm = process.env['ASHLR_IN_SWARM'];
+
+    try {
+      const sink = nullSink();
+      dispatched = true;
+      const swarmRun = await runSwarm(
+        { goal: `${item.title}\n\n${item.detail}`.trim() },
+        cfg,
+        {
+          sandbox: true,             // M21: isolated git-worktree — NEVER user's tree
+          requireSandbox: true,      // M24: sandbox is MANDATORY — abort (zero tasks) if it can't be created; NEVER touch the real tree
+          propose: true,             // M24: swarm records its diff as a PENDING inbox proposal
+          project: item.repo,
+          budget: {
+            maxTokens: perItemMaxTokens,
+            maxSteps: 100,
+            allowCloud: false,       // local-first; no cloud spend by default
+          },
+          parallel: 1,              // inner swarm parallelism kept minimal
+          dryRun: false,
+          noCapture: true,           // genome capture not needed for daemon proposals
+        },
+        sink,
+      );
+
+      // Estimate actual spend from swarm usage and add it to the shared tally
+      // so concurrent/subsequent items see the up-to-date headroom.
+      swarmSpent = swarmRun.usage?.estCostUsd ?? 0;
+      tickSpent += swarmSpent;
+
+      audit({
+        action: 'daemon:proposal-created',
+        repo: item.repo,
+        sandboxId: null,
+        summary: `swarm ${swarmRun.id} finished (status=${swarmRun.status}, spent=$${swarmSpent.toFixed(4)}) for "${item.title}"`,
+        result: 'ok',
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      audit({
+        action: 'daemon:swarm-error',
+        repo: item.repo,
+        sandboxId: null,
+        summary: `swarm failed for "${item.title}": ${msg.slice(0, 200)}`,
+        result: 'error',
+      });
+    } finally {
+      // Restore ASHLR_IN_SWARM so the next dispatch / next tick is not refused.
+      if (prevInSwarm === undefined) delete process.env['ASHLR_IN_SWARM'];
+      else process.env['ASHLR_IN_SWARM'] = prevInSwarm;
+    }
+
+    return { item, spentUsd: swarmSpent, dispatched };
+  });
+
+  const outcomes = await bounded(tasks, dcfg.parallel);
+
+  // itemsProcessed counts items whose swarm was actually dispatched (not those
+  // skipped by the kill switch or the in-tick budget short-circuit).
+  let dispatchedCount = 0;
+  for (const outcome of outcomes) {
+    if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
+      dispatchedCount++;
+    }
+  }
+
+  // Proposals actually recorded this tick = the PENDING-count delta (clamped >=0).
+  let proposalsCreated = 0;
+  try { proposalsCreated = Math.max(0, pendingCount() - pendingBefore); } catch { proposalsCreated = 0; }
+
+  // -------------------------------------------------------------------------
+  // 7. Update + persist state with this tick's accounting.
+  // -------------------------------------------------------------------------
+  state = loadDaemonState();               // reload in case of concurrent writes
+  state = resetDayIfNeeded(state);         // re-check day rollover after async work
+  state.todaySpentUsd += tickSpent;
+  state.itemsProcessed += dispatchedCount;
+  state.lastTickAt = now;
+
+  const tickRecord: DaemonTick = {
+    ts: now,
+    itemsConsidered: selected.length,
+    proposalsCreated,
+    spentUsd: tickSpent,
+    reason: 'ok',
+  };
+  state.ticks = [...state.ticks, tickRecord];
+  saveDaemonState(state);
+
+  audit({
+    action: 'daemon:tick',
+    repo: null,
+    sandboxId: null,
+    summary: `tick ok: ${selected.length} item(s) considered, ${proposalsCreated} proposal(s) created, $${tickSpent.toFixed(4)} spent`,
+    result: 'ok',
+  });
+
+  return tickRecord;
+}
+
+// ---------------------------------------------------------------------------
+// runDaemon — the operator loop
+// ---------------------------------------------------------------------------
+
+/**
+ * Start the daemon operator.
+ *
+ * REFUSES (returns unchanged state) if ASHLR_IN_DAEMON or ASHLR_IN_SWARM is
+ * set — prevents daemon-inside-daemon and daemon-inside-swarm fork bombs.
+ *
+ * Sets ASHLR_IN_DAEMON=1 on this process.env so all child spawns inherit it.
+ *
+ * opts.once = true  => run exactly one tick then stop.
+ * opts.once = false => loop: tick → sleep intervalMs → tick → ... until kill
+ *                      switch is set OR daily budget is exhausted.
+ *                      NO unbounded loop — every iteration re-checks both.
+ *
+ * Never throws.
+ */
+export async function runDaemon(
+  cfg: AshlrConfig,
+  opts: { once: boolean; dryRun: boolean },
+): Promise<DaemonState> {
+  // -------------------------------------------------------------------------
+  // RE-ENTRANCY GUARD — must be the very first check.
+  // -------------------------------------------------------------------------
+  if (process.env['ASHLR_IN_DAEMON'] || process.env['ASHLR_IN_SWARM']) {
+    // Refuse silently — do not start; return current state unchanged.
+    return loadDaemonState();
+  }
+
+  // -------------------------------------------------------------------------
+  // Set ASHLR_IN_DAEMON=1 on THIS process so all child engine spawns inherit it.
+  // Snapshot the prior value so it can be restored on exit — without this a
+  // second in-process runDaemon call (programmatic reuse / tests) would hit the
+  // re-entrancy guard above and silently refuse forever.
+  // -------------------------------------------------------------------------
+  const prevInDaemon = process.env['ASHLR_IN_DAEMON'];
+  process.env['ASHLR_IN_DAEMON'] = '1';
+
+  const dcfg = resolveCfg(cfg);
+
+  // -------------------------------------------------------------------------
+  // Mark daemon as running.
+  // -------------------------------------------------------------------------
+  let state = loadDaemonState();
+  state = resetDayIfNeeded(state);
+  state.running = true;
+  state.pid = process.pid;
+  state.startedAt = new Date().toISOString();
+  saveDaemonState(state);
+
+  audit({
+    action: 'daemon:start',
+    repo: null,
+    sandboxId: null,
+    summary: `daemon started: once=${opts.once}, dryRun=${opts.dryRun}, budget=$${dcfg.dailyBudgetUsd}, intervalMs=${dcfg.intervalMs}`,
+    result: 'ok',
+  });
+
+  try {
+    if (opts.once) {
+      // Single-tick mode.
+      await tick(cfg, { dryRun: opts.dryRun });
+    } else {
+      // Loop mode: every iteration re-checks kill switch + budget. NOT unbounded.
+      while (true) {
+        // Kill switch check — halt immediately.
+        if (killSwitchOn()) break;
+
+        // Budget check — halt when daily cap exhausted.
+        const current = loadDaemonState();
+        const recheckCfg = resolveCfg(cfg);
+        if (current.todaySpentUsd >= recheckCfg.dailyBudgetUsd) break;
+
+        // Run one tick.
+        await tick(cfg, { dryRun: opts.dryRun });
+
+        // Dry-run is inherently a one-shot PLAN: it records spentUsd:0 forever,
+        // so the budget break can never fire. Terminate after a single iteration
+        // (matching --once semantics) so a dry-run loop is BOUNDED, not endless.
+        if (opts.dryRun) break;
+
+        // Re-check kill switch + budget after the tick before sleeping.
+        if (killSwitchOn()) break;
+        const afterTick = loadDaemonState();
+        if (afterTick.todaySpentUsd >= recheckCfg.dailyBudgetUsd) break;
+
+        // Sleep between ticks using a bounded interval.
+        await sleep(dcfg.intervalMs);
+
+        // Final kill-switch check after sleep (in case stop() was called while sleeping).
+        if (killSwitchOn()) break;
+      }
+    }
+  } catch {
+    // Unexpected error — swallow; still clean up running state below.
+  }
+
+  // -------------------------------------------------------------------------
+  // Clear running state on exit.
+  // -------------------------------------------------------------------------
+  state = loadDaemonState();
+  state.running = false;
+  state.pid = null;
+  saveDaemonState(state);
+
+  audit({
+    action: 'daemon:stop',
+    repo: null,
+    sandboxId: null,
+    summary: 'daemon stopped',
+    result: 'ok',
+  });
+
+  // Restore ASHLR_IN_DAEMON to its prior value so a fresh runDaemon can run
+  // again in the same process (a CLI process exits anyway; this matters for
+  // programmatic reuse / tests). Child spawns already inherited it during the run.
+  if (prevInDaemon === undefined) delete process.env['ASHLR_IN_DAEMON'];
+  else process.env['ASHLR_IN_DAEMON'] = prevInDaemon;
+
+  return loadDaemonState();
+}
+
+// ---------------------------------------------------------------------------
+// stopDaemon — halt the operator
+// ---------------------------------------------------------------------------
+
+/**
+ * Set the kill switch (M21 ~/.ashlr/KILL) AND mark running=false, pid=null in
+ * persisted state. Idempotent; never throws. A running loop sees the kill
+ * switch on the next iteration and stops cleanly.
+ */
+export function stopDaemon(): void {
+  try {
+    setKill(true);
+  } catch {
+    // setKill is idempotent + never throws by contract; extra guard
+  }
+  try {
+    const state = loadDaemonState();
+    state.running = false;
+    state.pid = null;
+    saveDaemonState(state);
+  } catch {
+    // Persistence failure — swallow; kill switch was already set above
+  }
+  try {
+    audit({
+      action: 'daemon:stop',
+      repo: null,
+      sandboxId: null,
+      summary: 'stopDaemon() called: kill switch set + running=false',
+      result: 'ok',
+    });
+  } catch {
+    // Audit best-effort
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/** Promise-based sleep (bounded; never less than 0ms). */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}

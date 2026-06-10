@@ -319,6 +319,14 @@ const loadInboxCmd = lazyCmd(
   'inbox command requires src/cli/inbox.ts (M23 module not yet built).',
 );
 
+// ─── M24 command loaders ────────────────────────────────────────────
+
+const loadDaemonCmd = lazyCmd(
+  () => import('./daemon.js'),
+  (m) => m.cmdDaemon as Cmd,
+  'daemon command requires src/cli/daemon.ts (M24 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1197,6 +1205,10 @@ function cmdHelp(): void {
     ['inbox approve <id> --yes',     'Approve without interactive prompt (non-TTY safe).'],
     ['inbox reject <id>',            'Discard a pending proposal; applies nothing.'],
     ['inbox --json',                 'Emit raw JSON for inbox list / show / approve result.'],
+    ['daemon start --once',          'Autonomous operator: one tick — propose-only, sandboxed, enrolled repos.'],
+    ['daemon start --once --dry-run','Plan only: which backlog items WOULD be worked (no swarm/proposal).'],
+    ['daemon stop',                  'Halt the daemon: set kill switch + clear running state.'],
+    ['daemon status',                "Daemon roll-up: running?, today's spend vs cap, pending proposals."],
     ['help',                         'Show this help.'],
   ];
 
@@ -1470,6 +1482,12 @@ async function main(): Promise<void> {
       case 'inbox': {
         const cmdInbox = await loadInboxCmd();
         process.exitCode = await cmdInbox(rest);
+        break;
+      }
+
+      case 'daemon': {
+        const cmdDaemon = await loadDaemonCmd();
+        process.exitCode = await cmdDaemon(rest);
         break;
       }
 
