@@ -349,6 +349,14 @@ const loadReflectCmd = lazyCmd(
   'reflect command requires src/cli/reflect.ts (M26 module not yet built).',
 );
 
+// ─── M27 command loaders ────────────────────────────────────────────
+
+const loadHealthCmd = lazyCmd(
+  () => import('./health.js'),
+  (m) => m.cmdHealth as Cmd,
+  'health command requires src/cli/health.ts (M27 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1238,6 +1246,9 @@ function cmdHelp(): void {
     ['reflect [--since <Nd>]',       'Score your OWN past runs/swarms locally; report effectiveness/cost deltas (read-only).'],
     ['reflect playbooks [--persist]', 'Distill repeatable playbooks from past swarms (report-only; --persist writes them to the genome).'],
     ['reflect propose',              'Emit routing/policy/prompt tuning suggestions as PENDING inbox proposals (never auto-applies).'],
+    ['health',                       'Score every ENROLLED repo on quality (tests/docs/deps/security/debt/CI/conventions); ranked, read-only.'],
+    ['health <repo>',                'Per-repo health detail with the per-dimension breakdown + worst offenders (ENROLLED only).'],
+    ['health propose',               'Emit deterministic safe-fix advisories as PENDING inbox proposals (never auto-applies).'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1535,6 +1546,12 @@ async function main(): Promise<void> {
       case 'reflect': {
         const cmdReflect = await loadReflectCmd();
         process.exitCode = await cmdReflect(rest);
+        break;
+      }
+
+      case 'health': {
+        const cmdHealth = await loadHealthCmd();
+        process.exitCode = await cmdHealth(rest);
         break;
       }
 

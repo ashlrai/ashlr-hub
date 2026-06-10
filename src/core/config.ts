@@ -52,6 +52,18 @@ export function learnDir(): string {
   return join(resolveConfigDir(), 'learn');
 }
 
+/**
+ * Absolute path to the M27 quality / health-review home: `~/.ashlr/quality`.
+ * Re-resolved from `homedir()` at call time so tests that relocate HOME work.
+ * This is the ONLY directory `ashlr health` writes to for its HealthReport
+ * snapshots (trend tracking) — it NEVER writes CONFIG_PATH / router policy /
+ * prompts, and NEVER touches a user repo working tree. This function does NOT
+ * create the directory; the quality store creates it lazily.
+ */
+export function qualityDir(): string {
+  return join(resolveConfigDir(), 'quality');
+}
+
 // ---------------------------------------------------------------------------
 // Default tidy rules
 // ---------------------------------------------------------------------------
