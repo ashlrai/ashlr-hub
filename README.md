@@ -60,6 +60,83 @@ ashlr help
 
 ---
 
+## Portfolio intelligence
+
+Ask anything about any enrolled project. The knowledge index, RAG engine, and architecture graph all run **entirely on your machine** — your source code never leaves unless you explicitly pass `--allow-cloud`.
+
+### Quick start
+
+```sh
+# Enroll a repo first (one-time; default enrollment is empty)
+ashlr enroll add ~/path/to/my-project
+
+# Build the knowledge index (reads files; never modifies them)
+ashlr knowledge build
+
+# Ask a question — answer is synthesised locally and every line is cited
+ashlr ask "Where is the authentication middleware and what does it validate?"
+
+# Scope a question to one repo
+ashlr ask "How does error handling work?" --repo ~/path/to/my-project
+
+# See what depends on a file or symbol across all enrolled repos
+ashlr impact src/core/auth/middleware.ts
+
+# Print the cross-repo architecture graph (repos, modules, shared deps)
+ashlr knowledge graph
+```
+
+### How it works
+
+```
+enrolled repos (read-only walk)
+        │
+        ▼
+  chunk + embed (Ollama local / keyword fallback)
+        │
+        ▼
+  ~/.ashlr/knowledge/<repo-hash>/*.jsonl   (chunks + optional vectors)
+        │
+        ▼
+  ashlr ask "<question>"
+        │
+        ▼
+  retrieve top chunks (cosine / TF-IDF)  →  local synthesis  →  cited answer
+```
+
+1. `ashlr knowledge build` walks every enrolled repo, splits source files into line-range chunks, and embeds each chunk with the local Ollama model. When no embedding model is available it falls back to keyword/TF-IDF scoring. Only changed files (by mtime) are re-indexed on subsequent runs.
+2. `ashlr ask` retrieves the highest-scoring chunks, feeds them to the local model, and returns a plain-language answer with source citations (`repo/file:line`).
+3. `ashlr knowledge graph` performs static import/dependency analysis and builds a lightweight graph, surfacing cross-repo findings such as the same outdated or vulnerable dependency appearing in multiple projects.
+4. `ashlr impact` traces references to a file or symbol across all enrolled repos — useful before a refactor or before deleting a shared utility.
+
+### Privacy guarantee — LOCAL-FIRST
+
+**Your source code never leaves your machine by default.** The index, embeddings, retrieval, and synthesis steps all use the local provider (Ollama). Cloud models are structurally unreachable on the default path — `--allow-cloud` must be explicitly passed AND a cloud API key must be present. Passing the flag without a key is a no-op; omitting it with a key is also a no-op. Both are required simultaneously.
+
+| Default path | With `--allow-cloud` + key |
+|---|---|
+| Embeddings: Ollama (local) | Embeddings: Ollama (local, unchanged) |
+| Synthesis: local model | Synthesis: cloud model |
+| Code sent to cloud: **never** | Code sent to cloud: synthesis context only |
+
+### Read-only and enrollment-scoped
+
+- **Read-only**: `knowledge build`, `ask`, `impact`, and `knowledge graph` never modify any enrolled repo. All writes go to `~/.ashlr/knowledge/` only.
+- **Enrollment-scoped**: only repos you have explicitly enrolled (`ashlr enroll add`) are indexed or queried. Default enrollment is empty — empty knowledge, no whole-portfolio disk scan.
+- **Bounded**: `node_modules/`, `.git/`, `dist/`, and binary files are always skipped. File-count and byte caps are enforced per repo.
+- **No secrets in the index**: `.env` and key files are excluded. Secret-shaped tokens (high-entropy strings matching common key patterns) are redacted from chunks before storing, embedding, or citing. No secret values appear in `~/.ashlr/knowledge/` or in `ashlr ask` answers.
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `ashlr knowledge build [--repo <path>]` | Index all enrolled repos (or one). Incremental by mtime. |
+| `ashlr ask "<question>" [--repo] [--allow-cloud]` | Local RAG Q&A with cited sources. Cloud OFF by default. |
+| `ashlr knowledge graph [--repo <path>]` | Cross-repo architecture + dependency map. |
+| `ashlr impact <file\|symbol> [--repo <path>]` | What references or depends on this, across enrolled repos. |
+
+---
+
 ## The autonomous daemon
 
 `ashlr daemon` is the continuous operator for your enrolled repos. Each tick it pulls the highest-value items from the backlog, dispatches sandboxed swarms to work them, and deposits the results as PENDING proposals in the Approval Inbox. Nothing it produces is ever applied automatically — **it can only propose**.
@@ -324,6 +401,7 @@ Self-heal is always bounded (never loops), opt-out (`ASHLR_NO_HEAL=1`), and neve
 | **Surfaces** | `ashlr tui` · `ashlr serve` · Raycast extension |
 | **Work discovery** | `ashlr backlog` · `ashlr backlog refresh` |
 | **Approval Inbox** | `ashlr inbox` · `ashlr inbox show` · `ashlr inbox approve` · `ashlr inbox reject` |
+| **Portfolio intelligence** | `ashlr knowledge build` · `ashlr ask` · `ashlr impact` · `ashlr knowledge graph` |
 | **Maintain** | `ashlr update` |
 
 It is **local-first by design**. Index, config, runs, rollups, and memory all live under `~/.ashlr/`. Agent runs default to local models and refuse to touch a cloud endpoint unless you explicitly opt in. Telemetry is metadata-only; secrets flow through Phantom, never through the hub.
@@ -517,6 +595,7 @@ TypeScript ESM (NodeNext). Core logic in `src/core/`, CLI dispatch in `src/cli/`
 | Integrations | `integrations/github` · `integrations/vercel` · `integrations/editors` · `integrations/identity` · `integrations/notify` |
 | Surfaces | `web/server` · `web/api` · `web/static` · `tui/app` · `tui/render` · `dashboard` |
 | Work discovery | `portfolio/scanners` · `portfolio/backlog` |
+| Portfolio intelligence | `knowledge/index` · `knowledge/ask` · `knowledge/graph` |
 | Ecosystem | `env-bridge` |
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full module map and data flow.

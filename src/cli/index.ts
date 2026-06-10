@@ -327,6 +327,20 @@ const loadDaemonCmd = lazyCmd(
   'daemon command requires src/cli/daemon.ts (M24 module not yet built).',
 );
 
+// ─── M25 command loaders ────────────────────────────────────────────
+
+const loadAskCmd = lazyCmd(
+  () => import('./ask.js'),
+  (m) => m.cmdAsk as Cmd,
+  'ask command requires src/cli/ask.ts (M25 module not yet built).',
+);
+
+const loadKnowledgeCmd = lazyCmd(
+  () => import('./knowledge.js'),
+  (m) => m.cmdKnowledge as Cmd,
+  'knowledge command requires src/cli/knowledge.ts (M25 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1209,6 +1223,10 @@ function cmdHelp(): void {
     ['daemon start --once --dry-run','Plan only: which backlog items WOULD be worked (no swarm/proposal).'],
     ['daemon stop',                  'Halt the daemon: set kill switch + clear running state.'],
     ['daemon status',                "Daemon roll-up: running?, today's spend vs cap, pending proposals."],
+    ['knowledge build',             'Index enrolled repos locally (read-only, secret-scrubbed) for portfolio RAG.'],
+    ['ask "<question>"',             'Local RAG across the indexed portfolio; cites repo/file:line. --allow-cloud opt-in.'],
+    ['knowledge impact <target>',    'Show references + dependents of a file/symbol within and across enrolled repos.'],
+    ['knowledge graph',              'Print the portfolio knowledge graph (repos/modules/deps + cross-repo findings).'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1488,6 +1506,18 @@ async function main(): Promise<void> {
       case 'daemon': {
         const cmdDaemon = await loadDaemonCmd();
         process.exitCode = await cmdDaemon(rest);
+        break;
+      }
+
+      case 'ask': {
+        const cmdAsk = await loadAskCmd();
+        process.exitCode = await cmdAsk(rest);
+        break;
+      }
+
+      case 'knowledge': {
+        const cmdKnowledge = await loadKnowledgeCmd();
+        process.exitCode = await cmdKnowledge(rest);
         break;
       }
 

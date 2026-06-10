@@ -8,6 +8,52 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M25: Portfolio Intelligence (`ashlr knowledge` · `ashlr ask` · `ashlr impact`)
+
+### Added
+
+- **`ashlr knowledge build [--repo <path>]`** — build or incrementally refresh the local semantic knowledge index for all enrolled repos (or a single repo with `--repo`). Walks source files read-only, chunks them, embeds each chunk via local Ollama embeddings (keyword/TF-IDF fallback when no embedding model is available), and stores results to `~/.ashlr/knowledge/<repo-hash>/*.jsonl`. Incremental by mtime — only changed files are re-indexed.
+
+- **`ashlr ask "<question>" [--repo <path>] [--allow-cloud]`** — local RAG Q&A across the indexed portfolio. Retrieves the top relevant chunks via embedding similarity or keyword scoring, synthesises a plain-language answer using the **local** model, and cites every source as `repo/file:line`. `--repo` scopes the search to a single enrolled repo. Cloud is structurally OFF by default — the local provider is used for both retrieval and synthesis; `--allow-cloud` is required to route synthesis to a cloud model AND only takes effect when a key is present.
+
+- **`ashlr knowledge graph [--repo <path>]`** — build and print a lightweight cross-repo knowledge graph. Nodes are repos, modules, and key dependencies; edges are imports, depends-on, and shared-dep relationships. Cross-repo findings (same vulnerable/outdated dependency, duplicated patterns) are surfaced as `crossRepo` entries. Output is JSON-serialisable for downstream tooling.
+
+- **`ashlr impact <file|symbol> [--repo <path>]`** — answer "what depends on this?" across the enrolled portfolio. Returns all references (repo, file, line) and a list of dependent repos/modules. Scoped to enrolled repos only; read-only analysis.
+
+- **Knowledge index engine** (`src/core/knowledge/index.ts`):
+  - `buildKnowledge(opts?)` — default `repos = listEnrolled()` (DEFAULT EMPTY → empty knowledge, no disk scan). Bounded: skips `node_modules/`, `.git/`, `dist/`, and binary files; enforces file-count and byte caps per repo; local embeddings via `getActiveClient()` from `core/genome/recall.ts`; keyword/TF-IDF fallback. Secret-scrubs chunks before storing (skips `.env`/key files; redacts secret-shaped tokens). Writes `~/.ashlr/knowledge/<repo-hash>/*.jsonl`.
+  - `knowledgeDir()` — canonical store path (`~/.ashlr/knowledge/`).
+  - `loadChunks(repo?)` — read stored chunks from disk; scoped to one repo when provided.
+
+- **Ask engine** (`src/core/knowledge/ask.ts`):
+  - `ask(question, { repo?, allowCloud })` — retrieve top chunks (embedding cosine or keyword TF-IDF), call local synthesis via `core/run/provider-client.ts` local provider, return `AskResult { question; answer; sources; method; local }`. `allowCloud` defaults to `false` at every call site; code-to-cloud on the default path is a guardrail violation.
+
+- **Graph + impact engine** (`src/core/knowledge/graph.ts`):
+  - `buildGraph(repos?)` — static import/dependency analysis; returns `KnowledgeGraph { nodes; edges; crossRepo }`. Cross-repo detection surfaces shared vulnerable/outdated deps and duplicated structural patterns.
+  - `impact(target, repos?)` — file or symbol name → `ImpactResult { target; references; dependents }`. Read-only; enrollment-scoped.
+
+- **CLI entry points**:
+  - `src/cli/ask.ts` (`cmdAsk`) — backs `ashlr ask`; `--repo` and `--allow-cloud` flags; cloud OFF by default.
+  - `src/cli/knowledge.ts` (`cmdKnowledge`) — backs `ashlr knowledge build | graph | impact`; delegates to core engines.
+
+- **New types in `src/core/types.ts`** (all existing types unchanged):
+  - `KnowledgeChunk { repo; file; startLine; endLine; text; vector?; summary? }`
+  - `AskHit { chunk: KnowledgeChunk; score: number }`
+  - `AskResult { question; answer; sources: {repo; file; line}[]; method: 'embedding'|'keyword'; local: boolean }`
+  - `ImpactResult { target; references: {repo; file; line}[]; dependents: string[] }`
+  - `KnowledgeGraph { nodes: {id; kind; label}[]; edges: {from; to; kind}[]; crossRepo: {kind; detail; repos}[] }`
+
+### Guardrails (M25)
+
+- **LOCAL-ONLY BY DEFAULT (privacy)**: indexing, ask synthesis, and embeddings all run on the local provider (Ollama via `getActiveClient()`). Repo code and chunks are **never sent to a cloud model** unless `--allow-cloud` is explicitly passed AND a cloud key is present. Both conditions must be true simultaneously. Sending code to cloud on the default path is a contract violation.
+- **READ-ONLY**: `buildKnowledge`, `ask`, `buildGraph`, and `impact` never modify any enrolled repo. All writes are confined to `knowledgeDir()` (`~/.ashlr/knowledge/`). No `git` mutations, no installs, no project-script execution.
+- **ENROLLMENT-SCOPED**: default repos = `listEnrolled()`. Default enrollment is empty — empty knowledge, no whole-portfolio disk scan. Only explicitly enrolled repos are ever indexed or queried.
+- **BOUNDED**: file-count and byte caps per repo; skips `node_modules/`, `.git/`, `dist/`, and binary files; embedding calls subject to the same time/concurrency caps as genome recall.
+- **NO SECRETS**: `.env` and key files are excluded from indexing. Secret-shaped tokens (high-entropy strings matching common key patterns) are redacted from chunks before storing, embedding, or citing. No secret values appear in `~/.ashlr/knowledge/` or in `ask` answers.
+- All 2443 existing tests preserved. Typecheck passes clean (`tsc --noEmit`). No new runtime dependencies. Reuses `core/genome/recall.ts` (embeddings + `getActiveClient`), `core/sandbox/policy.ts` (`listEnrolled`, `isEnrolled`), `core/run/provider-client.ts` (local provider), `core/git.ts`, and `cli/ui.ts`.
+
+---
+
 ## [Unreleased] — M24: The Autonomous Daemon (`ashlr daemon`)
 
 ### Added
