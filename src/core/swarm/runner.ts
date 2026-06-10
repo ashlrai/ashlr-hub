@@ -193,10 +193,28 @@ const PHASE_ORDER: SwarmPhaseName[] = [
 // ID generation
 // ---------------------------------------------------------------------------
 
-function makeId(): string {
+// Monotonic, process-local sequence counter. Date.now() has only millisecond
+// resolution, so two swarms minted in the same ms would otherwise rely solely on
+// the ~24-bit random suffix for uniqueness (birthday-bound collision risk under
+// bursty creation). Mirrors inbox/store.ts generateId(): the zero-padded counter
+// comes BEFORE the random segment so lexicographic id comparison orders by
+// (timestamp, monotonic counter) — a stable most-recent-first tiebreak. Purely
+// additive id-uniqueness hardening: no behavior/signature change, no new dep, no
+// guard touched. Exported as a thin test seam for the H3 stress suite.
+//
+// SINGLE-PROCESS BOUNDARY: `_seq` is module-level and resets to 0 per process, so
+// it guarantees uniqueness only WITHIN one process. Two concurrent daemon
+// processes minting in the same ms rely on the `<ts>`+`<rand>` segments alone
+// (astronomically unlikely, not a hard cross-process guarantee). Cross-process id
+// allocation — like the multi-daemon budget race — is the GATED M30
+// DaemonCoordinator seam, out of H3 scope. See CONTRACT-H3.md MULTI-PROCESS
+// LIMITATION.
+let _seq = 0;
+export function makeId(): string {
   const ts = Date.now().toString(36);
+  const seq = (_seq++).toString(36).padStart(6, '0');
   const rand = Math.random().toString(36).slice(2, 8);
-  return `swarm-${ts}-${rand}`;
+  return `swarm-${ts}-${seq}-${rand}`;
 }
 
 // ---------------------------------------------------------------------------
