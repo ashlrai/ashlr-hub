@@ -64,6 +64,18 @@ export function qualityDir(): string {
   return join(resolveConfigDir(), 'quality');
 }
 
+/**
+ * Absolute path to the M28 goal planning/tracking home: `~/.ashlr/goals`.
+ * Re-resolved from `homedir()` at call time so tests that relocate HOME work.
+ * This is the ONLY directory `ashlr goals` writes its planning/tracking data
+ * to — it NEVER writes CONFIG_PATH / router policy / prompts, and NEVER touches
+ * a user repo working tree. This function does NOT create the directory; the
+ * goals store creates it lazily. Single source of truth for the ~/.ashlr root.
+ */
+export function goalsDir(): string {
+  return join(resolveConfigDir(), 'goals');
+}
+
 // ---------------------------------------------------------------------------
 // Default tidy rules
 // ---------------------------------------------------------------------------

@@ -334,7 +334,7 @@ function buildStubSpec(hint: string): string {
 export async function authorSpec(
   goal: string,
   cfg: AshlrConfig,
-  opts?: { project?: string },
+  opts?: { project?: string; allowCloud?: boolean },
 ): Promise<SpecArtifact> {
   const project = opts?.project ?? null;
   const dir = specsDir(project ?? undefined);
@@ -349,8 +349,13 @@ export async function authorSpec(
     return existing.meta;
   }
 
-  // Determine cloud allowance from config (default local-first)
+  // Cloud allowance: when a caller EXPLICITLY passes opts.allowCloud, that
+  // decision OVERRIDES the chain-derived heuristic — so a caller (e.g. M28
+  // `goals plan` without --allow-cloud) can force local-only even when a cloud
+  // provider (anthropic) sits in the default providerChain. Only fall back to
+  // the chain heuristic when the caller did not express a preference.
   const allowCloud =
+    opts?.allowCloud ??
     (cfg.models?.providerChain ?? []).some((p: string) => !['ollama', 'lmstudio', 'builtin'].includes(p));
 
   const { content } = await callModel(

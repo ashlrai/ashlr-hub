@@ -357,6 +357,14 @@ const loadHealthCmd = lazyCmd(
   'health command requires src/cli/health.ts (M27 module not yet built).',
 );
 
+// ─── M28 command loaders ────────────────────────────────────────────
+
+const loadGoalsCmd = lazyCmd(
+  () => import('./goals.js'),
+  (m) => m.cmdGoals as Cmd,
+  'goals command requires src/cli/goals.ts (M28 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1249,6 +1257,10 @@ function cmdHelp(): void {
     ['health',                       'Score every ENROLLED repo on quality (tests/docs/deps/security/debt/CI/conventions); ranked, read-only.'],
     ['health <repo>',                'Per-repo health detail with the per-dimension breakdown + worst offenders (ENROLLED only).'],
     ['health propose',               'Emit deterministic safe-fix advisories as PENDING inbox proposals (never auto-applies).'],
+    ['goals add <objective>',        'Register a high-level OBJECTIVE (goal); decomposed into ordered milestones (local, no LLM by default).'],
+    ['goals plan <id>',              'Decompose a goal into ordered milestones + author/link each milestone spec (LOCAL-FIRST; --allow-cloud to use cloud).'],
+    ['goals advance <id>',           'Advance the next actionable milestone via a SANDBOXED, proposal-only swarm (ENROLLED repos only; emits a PENDING proposal).'],
+    ['goals status [id]',            'Read-only roll-up of goal/milestone progress + linked swarm/proposal state (mutates nothing).'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1552,6 +1564,12 @@ async function main(): Promise<void> {
       case 'health': {
         const cmdHealth = await loadHealthCmd();
         process.exitCode = await cmdHealth(rest);
+        break;
+      }
+
+      case 'goals': {
+        const cmdGoals = await loadGoalsCmd();
+        process.exitCode = await cmdGoals(rest);
         break;
       }
 
