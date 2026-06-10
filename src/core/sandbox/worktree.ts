@@ -435,3 +435,82 @@ export function listSandboxes(): Sandbox[] {
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// sweepOrphanSandboxes (H2 — crash-recovery, LOCAL-ONLY)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sweep ORPHANED sandboxes on restart (H2 crash-recovery). A swarm creates a
+ * worktree, uses it, then `removeSandbox`es it — all within a single in-memory
+ * `runSwarm` call. The sandbox lifetime is NOT persisted on the SwarmRun (there
+ * is no `sandboxId` field on a SwarmRun; the only `sandboxId` references are
+ * audit-log entries), so a process killed AFTER `git worktree add` but BEFORE
+ * `removeSandbox` leaves a worktree on disk under ~/.ashlr/sandboxes/<id>/ with
+ * no record linking it back to any swarm. Such a leftover would otherwise
+ * accumulate forever.
+ *
+ * LIVENESS CAVEAT (important — read before wiring a caller): a persisted sandbox
+ * is NOT necessarily an orphan. A `runSwarm` keeps its sandbox metadata on disk
+ * for the WHOLE run (createSandbox writes it at start, removeSandbox deletes it
+ * at the end), and the daemon runs several sandboxed swarms CONCURRENTLY, each
+ * with a live on-disk sandbox; a separately-launched `ashlr swarm` in another
+ * process is also possible (the re-entrancy guards are per-process). The Sandbox
+ * record carries no pid/owner/lock — only `createdAt` — so the sweep cannot
+ * positively distinguish a true orphan from an actively-running sandbox. To stay
+ * safe for any future restart wire-up, the sweep accepts an OPTIONAL `staleMs`
+ * guard: when provided, a sandbox whose `createdAt` is younger than `staleMs` is
+ * SKIPPED (assumed possibly-live), so only sandboxes older than a conservative
+ * threshold (e.g. > the max swarm wall-clock) are reclaimed. With NO `staleMs`
+ * (the default, used by the recovery PROOF tests where every sandbox is a
+ * deliberately-dropped orphan) it sweeps every listed sandbox.
+ *
+ * This sweep composes the two EXISTING safe primitives — `listSandboxes()` to
+ * enumerate persisted sandbox metadata, then `removeSandbox()` for each — so it
+ * inherits all of removeSandbox's containment guards verbatim: it only ever runs
+ * `git worktree remove` / `git branch -D` against a path RE-DERIVED to live under
+ * `sandboxesDir()` and a branch RE-DERIVED into the `ashlr/sandbox/<id>` namespace
+ * (a metadata mismatch falls through to LOCAL dir cleanup only — never a git op on
+ * an arbitrary branch/path). It therefore can NEVER touch a user's working tree,
+ * index, HEAD, or any user branch.
+ *
+ * LOCAL-ONLY by construction: it adds NO outward capability (cleanup is purely
+ * inward — it removes only ashlr/sandbox/* worktrees + scratch refs, pushes
+ * nothing, opens no PR, applies no proposal), weakens NO guard (every removal
+ * goes through removeSandbox's full guard set), and changes NO happy-path
+ * behavior (a clean run already removes its own sandbox, so a healthy install
+ * has nothing to sweep). NOTE: this function has NO production caller — it is the
+ * reclaim primitive only; H2 deliberately does NOT auto-run it on startup (the
+ * safest default), so no live worktree is ever force-removed today. Idempotent
+ * and never throws — a removal failure on one id is swallowed so the sweep always
+ * makes maximal progress. Returns the ids it swept so a caller / test can assert
+ * what was reclaimed.
+ *
+ * @param opts.staleMs Optional age guard (ms). Skip any sandbox whose `createdAt`
+ *   is younger than this — a conservative liveness proxy so a concurrently-live
+ *   sandbox is never force-removed. Omit to sweep all listed sandboxes.
+ */
+export function sweepOrphanSandboxes(opts?: { staleMs?: number }): string[] {
+  const staleMs = opts?.staleMs;
+  const now = Date.now();
+  const swept: string[] = [];
+  for (const sb of listSandboxes()) {
+    if (staleMs !== undefined) {
+      const createdMs = Date.parse(sb.createdAt);
+      // Skip not-yet-stale sandboxes (possibly a live owner). An unparseable
+      // createdAt is treated as stale=0 (Number.isNaN) so a corrupt timestamp is
+      // still reclaimable rather than stranded forever.
+      if (!Number.isNaN(createdMs) && now - createdMs < staleMs) {
+        continue;
+      }
+    }
+    try {
+      removeSandbox(sb);
+      swept.push(sb.id);
+    } catch {
+      // removeSandbox is already best-effort/idempotent and should not throw;
+      // guard anyway so one bad entry never aborts the whole restart sweep.
+    }
+  }
+  return swept;
+}
