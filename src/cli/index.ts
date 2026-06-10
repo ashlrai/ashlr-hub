@@ -373,6 +373,14 @@ const loadDigestCmd = lazyCmd(
   'digest command requires src/cli/digest.ts (M29 module not yet built).',
 );
 
+// ─── M30 command loaders ────────────────────────────────────────────
+
+const loadSeamsCmd = lazyCmd(
+  () => import('./seams.js'),
+  (m) => m.cmdSeams as Cmd,
+  'seams command requires src/cli/seams.ts (M30 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1271,6 +1279,8 @@ function cmdHelp(): void {
     ['goals status [id]',            'Read-only roll-up of goal/milestone progress + linked swarm/proposal state (mutates nothing).'],
     ['digest',                       'Write an ORG-LEVEL portfolio digest (health, goals, costs, today) to ~/.ashlr/digests/ (LOCAL-FIRST; reads only).'],
     ['digest --notify',             'Also deliver the digest via a configured Slack/Discord webhook (OPT-IN; no-op when unconfigured).'],
+    ['seams',                        'Cloud-ready seam diagnostic: every v2 store, active=local, cloud=gated (read-only).'],
+    ['seams status',                'Same as `seams`: list seams + active impl; proves local-first + cloud gated on Mason.'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1586,6 +1596,12 @@ async function main(): Promise<void> {
       case 'digest': {
         const cmdDigest = await loadDigestCmd();
         process.exitCode = await cmdDigest(rest);
+        break;
+      }
+
+      case 'seams': {
+        const cmdSeams = await loadSeamsCmd();
+        process.exitCode = await cmdSeams(rest);
         break;
       }
 

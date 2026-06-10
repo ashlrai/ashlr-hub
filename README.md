@@ -60,6 +60,58 @@ ashlr help
 
 ---
 
+## Ashlr v2 — Autonomous Engineering Organization
+
+Across M21–M30, ashlr-hub grew a second pillar on top of the local command center: a **safety-first autonomous engineering organization** that discovers work across your portfolio, drafts it in isolation, and funnels every outward action through a single human gate. It is **proposal-only by default, sandboxed, and enrollment-scoped** — the daemon and swarms can *only propose*; nothing is ever applied to a real repo, branch, or remote without your explicit approval. Default enrollment is **empty**, so out of the box it does nothing until you opt a repo in. M30 closes the pillar with **cloud-ready seams**: every v2 store sits behind a clean interface with a working LOCAL implementation today and a GATED cloud stub for the future — so a team/multi-machine backbone is a drop-in later, never an accidental flip. Cloud/team remains a human gate (explicit opt-in, not implemented); there is no config flag and no code path that activates a cloud backbone. See [`docs/SEAMS.md`](./docs/SEAMS.md).
+
+### The v2 command surface
+
+| Command | What it does |
+|---|---|
+| `ashlr enroll add/remove/list` | Manage the repo enrollment registry. Default is **empty** — nothing is touched until you enroll it. |
+| `ashlr enroll kill on\|off` | Toggle the global hard kill switch (`~/.ashlr/KILL`). Checked first on every mutating call; cannot be bypassed. |
+| `ashlr knowledge build` | Index enrolled repos locally (read-only, secret-scrubbed) for portfolio RAG. |
+| `ashlr ask "<question>"` | Local RAG across the indexed portfolio; cites `repo/file:line`. Cloud OFF unless `--allow-cloud`. |
+| `ashlr knowledge impact <target>` | References + dependents of a file/symbol within and across enrolled repos. |
+| `ashlr knowledge graph` | Print the cross-repo knowledge graph (repos, modules, deps, cross-repo findings). |
+| `ashlr backlog [refresh]` | Scored work queue across enrolled repos (issues, TODOs, tests, deps, docs, security). |
+| `ashlr reflect [--since <Nd>]` | Score your own past runs/swarms locally; report effectiveness/cost deltas (read-only). |
+| `ashlr health [<repo>]` | Score every enrolled repo on quality (tests/docs/deps/security/debt/CI/conventions); ranked, read-only. |
+| `ashlr goals add/plan/advance/status` | Register high-level objectives; decompose into milestones; advance via sandboxed proposal-only swarms. |
+| `ashlr daemon start/stop/status` | Autonomous operator: each tick pulls top backlog items, runs sandboxed swarms, deposits PENDING proposals. |
+| `ashlr inbox [show\|approve\|reject]` | Approval inbox — the single outward-action gate. `approve` is the **only** path that applies anything. |
+| `ashlr digest [--notify]` | Write an org-level portfolio digest (health, goals, costs) to `~/.ashlr/digests/`. Read-only. |
+| `ashlr seams [status\|--json]` | List the v2 cloud-ready seams: active impl (`local`) + cloud availability (`gated`). Read-only. |
+
+`reflect`, `health`, `goals advance`, and any daemon/swarm work emit their suggestions as **PENDING inbox proposals** — they never auto-apply.
+
+### Activation runbook — the human's gate
+
+Out of the box, the autonomous org is **inert**: enrollment is empty, so the daemon, backlog, and health/knowledge scans have nothing to operate on. Turning it on is an explicit three-step gate **you** control:
+
+```sh
+# 1. Enroll the real repos you want worked (one-time; default enrollment is EMPTY).
+ashlr enroll add ~/path/to/my-project
+ashlr enroll list                       # confirm what is in scope
+
+# 2. Run the autonomous operator. Every tick is proposal-only and sandboxed
+#    (isolated git worktree; your tree, branch, index, and HEAD are never touched).
+ashlr daemon start --once --dry-run      # plan only: which items WOULD be worked
+ashlr daemon start --once                # one real tick → deposits PENDING proposals
+ashlr daemon status                      # running?, today's spend vs cap, pending count
+
+# 3. Review and approve. The inbox is the ONLY outward path — nothing is applied
+#    until you explicitly approve a proposal.
+ashlr inbox                              # list pending proposals
+ashlr inbox show <id>                    # full detail incl. diff (read-only)
+ashlr inbox approve <id>                 # confirm + apply (the single outward gate)
+ashlr inbox reject <id>                  # discard; applies nothing
+```
+
+Stop everything instantly with `ashlr daemon stop` (or `ashlr enroll kill on`), which sets the kill switch checked at the top of every mutating call. The daemon will **never** touch a repo you have not enrolled, **never** exceed the budget you set, and **never** apply anything without your approval.
+
+---
+
 ## Portfolio intelligence
 
 Ask anything about any enrolled project. The knowledge index, RAG engine, and architecture graph all run **entirely on your machine** — your source code never leaves unless you explicitly pass `--allow-cloud`.
@@ -383,7 +435,7 @@ Self-heal is always bounded (never loops), opt-out (`ASHLR_NO_HEAL=1`), and neve
 
 ## What is this?
 
-`ashlr-hub` is a command center for agentic engineers. It grew from a project navigator (M1) into a complete platform across 20 milestones:
+`ashlr-hub` is a command center for agentic engineers. It grew from a project navigator (M1) into a complete platform across 30 milestones — a local-first command center (M1–M20) plus a safety-first [autonomous engineering organization](#ashlr-v2--autonomous-engineering-organization) (M21–M30):
 
 | Capability | Commands |
 |---|---|
@@ -399,9 +451,9 @@ Self-heal is always bounded (never loops), opt-out (`ASHLR_NO_HEAL=1`), and neve
 | **Memory** | `ashlr learn` · `ashlr recall` · `ashlr genome` |
 | **Integrations** | `ashlr gh` · `ashlr vercel` · `ashlr wire` · `ashlr notify` |
 | **Surfaces** | `ashlr tui` · `ashlr serve` · Raycast extension |
-| **Work discovery** | `ashlr backlog` · `ashlr backlog refresh` |
-| **Approval Inbox** | `ashlr inbox` · `ashlr inbox show` · `ashlr inbox approve` · `ashlr inbox reject` |
-| **Portfolio intelligence** | `ashlr knowledge build` · `ashlr ask` · `ashlr impact` · `ashlr knowledge graph` |
+| **Autonomy (v2)** | `ashlr enroll` · `ashlr daemon` · `ashlr backlog` · `ashlr inbox` · `ashlr goals` |
+| **Portfolio intelligence (v2)** | `ashlr knowledge build/impact/graph` · `ashlr ask` · `ashlr reflect` · `ashlr health` · `ashlr digest` |
+| **Cloud-ready seams (v2)** | `ashlr seams` |
 | **Maintain** | `ashlr update` |
 
 It is **local-first by design**. Index, config, runs, rollups, and memory all live under `~/.ashlr/`. Agent runs default to local models and refuse to touch a cloud endpoint unless you explicitly opt in. Telemetry is metadata-only; secrets flow through Phantom, never through the hub.

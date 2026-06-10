@@ -8,6 +8,120 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M30: Cloud-Ready Seams v2 + Polish (CAPSTONE)
+
+The Ashlr v2 capstone. Makes the team/multi-machine future a **drop-in** later
+without a rewrite by defining clean **seam interfaces** for every v2 store — and
+shipping **only the LOCAL side** now. Every seam has a working LOCAL impl (a thin
+adapter over the existing module, zero behaviour change) and a GATED cloud stub
+that THROWS a clear gated error if ever selected. **There is no config flag and
+no code path that can activate a functional cloud backbone** — cloud/team is a
+Mason gate (explicit opt-in, not implemented). Local-first, self-hostable,
+nothing public. Generalises the M19 telemetry-sink seam pattern across the v2
+stores without destabilising them.
+
+### Added
+
+- **`ashlr seams` / `ashlr seams status`** — read-only diagnostic that lists every
+  v2 seam, its active implementation (`local`), and its cloud availability
+  (`gated` for the seven v2 seams; `false` for the cited telemetry reference
+  seam). `--json` emits the `SeamRegistry`; `--help` prints usage. Mutates
+  nothing, makes no network connection, and instantiates no seam impl. Backed by
+  `src/cli/seams.ts` (`cmdSeams`), mirroring `src/cli/health.ts`.
+
+- **Seam layer** (`src/core/seams/`): one cohesive module per seam, each exposing
+  the canonical four-part shape — INTERFACE, LOCAL impl (default, delegates 1:1 to
+  the existing module), GATED cloud stub (every method throws before any I/O), and
+  a `selectX(cfg)` selector (returns LOCAL by default; returns the throwing stub
+  ONLY when a cloud endpoint is explicitly configured):
+  - `RunSwarmStore` (`seams/run-swarm.ts`) — wraps `core/swarm/store.ts`
+    (`listSwarms` / `loadSwarm` / `saveSwarm`).
+  - `BacklogSource` (`seams/backlog.ts`) — wraps `core/portfolio/backlog.ts`
+    (`loadBacklog` / `buildBacklog`).
+  - `InboxStore` (`seams/inbox.ts`) — wraps `core/inbox/store.ts`
+    (`listProposals` / `createProposal` / `loadProposal` / `setStatus` /
+    `pendingCount`).
+  - `DaemonCoordinator` (`seams/daemon-coordinator.ts`) — wraps
+    `core/daemon/state.ts` (`loadDaemonState` / `saveDaemonState`); LOCAL is
+    single-machine (lease is a no-op), cloud stub is a GATED multi-machine
+    lease/lock.
+  - `GenomeSync` (`seams/genome.ts`) — wraps `core/genome/store.ts`
+    (`loadGenome` / `appendHubEntry` / `genomeHubHealth`).
+  - `PortfolioSync` (`seams/portfolio.ts`) — wraps `core/quality/store.ts` +
+    `core/dashboard.ts` (health snapshots + portfolio dashboard).
+  - `IdentityProvider` (`seams/identity.ts`) — wraps
+    `core/integrations/identity.ts` (`getIdentity`); LOCAL is the phantom probe,
+    cloud stub is GATED team auth.
+  - `TelemetrySink` (`core/observability/telemetry-sink.ts`, M19) — the CANONICAL
+    reference seam. CITED via the registry, not duplicated. Its opt-in
+    `OtlpHttpSink` is a real local-network sink, not a gated team backbone, so its
+    `cloud` field is `false` (distinct from the seven `gated` v2 seams).
+
+- **Seam types** (`src/core/seams/types.ts`, single-sourced): `SeamId`,
+  `SeamImpl` (`'local' | 'gated'`), `SeamCloud` (`false | 'gated'` — NEVER `true`
+  in M30), `SeamStatus`, `SeamRegistry`, and `SeamsConfig` (OPTIONAL per-seam
+  `{ endpoint? }`). `CLOUD_GATED_MESSAGE` + `cloudGatedError(seam, method)` are the
+  single canonical gated error, centralised so it is identical across seams and
+  trivially assertable.
+
+- **Seam registry** (`src/core/seams/registry.ts`, READ-ONLY): `buildSeamRegistry(cfg)`
+  derives the full registry from the in-memory config + static descriptors —
+  triggers NO I/O, instantiates NO seam impl, never touches disk/network, never
+  throws. `seamsConfig(cfg)` reads the OPTIONAL `seams` block defensively via a cast
+  over an optional property (so `AshlrConfig` is unmodified). `seamEndpoint(cfg, id)`
+  returns the explicitly-configured endpoint for a gated seam, or `null` — a
+  non-null result routes the selector to the GATED stub (which throws) and NEVER
+  enables a functional backbone.
+
+- **Barrel** (`src/core/seams/index.ts`) re-exporting the seam interfaces, selectors,
+  registry, and types.
+
+### Docs
+
+- **`docs/SEAMS.md`** — documents the local-first + cloud-ready seam architecture,
+  the canonical four-part seam pattern, each seam and the existing module it wraps,
+  the Mason gate, the `ashlr seams` diagnostic, and the five hard safety invariants.
+
+- **`README.md`** — adds the full v2 command surface (`ask`, `knowledge`,
+  `reflect`, `health`, `goals`, `digest`, `daemon`, `inbox`, `backlog`, `enroll`,
+  `seams`), a concise **"Ashlr v2 — Autonomous Engineering Organization"** section
+  summarising M21–M30, and a clearly-marked **ACTIVATION RUNBOOK ("the human's
+  gate")**: enroll real repos (`ashlr enroll add <repo>`) → run `ashlr daemon` →
+  review and approve proposals via `ashlr inbox`. Emphasises that default
+  enrollment is EMPTY and everything is proposal-only / sandboxed.
+
+### Polish
+
+- **CI** — `.github/workflows/ci.yml` extended to a Node `["20", "22"]` matrix,
+  keeping typecheck / lint / build / test. Must stay green on both.
+
+### Tests
+
+- **`test/m30.seams.test.ts`** — hermetic invariant tests (in-memory config; never
+  the real `~/.ashlr`, never the real portfolio, never a remote call): every cloud
+  stub method throws `CLOUD_GATED_MESSAGE`; every selector returns the LOCAL impl on
+  the default config; a configured endpoint routes to the throwing stub; the
+  registry reports `allLocal` by default.
+
+### Safety invariants (M30)
+
+- **Interfaces + local only** — no functional cloud/team/remote implementation
+  exists. Each cloud stub throws `cloudGatedError(...)` as the FIRST statement of
+  every method, before any I/O; no `fetch`/http/socket/disk in any seam cloud stub.
+- **No activation path** — selectors return LOCAL by default; a configured endpoint
+  only routes to a throwing stub. There is no value of config that yields a
+  functional cloud backbone, and no way for the autonomous loop/daemon to flip to
+  cloud.
+- **Non-regression** — zero edits to any wrapped store; local adapters delegate 1:1;
+  the seam config is read via a cast over an OPTIONAL property so `AshlrConfig` is
+  unmodified. All prior tests stay green.
+- **Nothing public / self-hostable** — no outward action, no registration/telemetry/
+  phone-home, no public flip. Docs state local-first + self-hostable + cloud-gated.
+- **Bounded + no new deps** — `package.json` unchanged; only intra-repo imports; the
+  registry maps a fixed 8-element descriptor list; read-only diagnostics.
+
+---
+
 ## [Unreleased] — M25: Portfolio Intelligence (`ashlr knowledge` · `ashlr ask` · `ashlr impact`)
 
 ### Added
