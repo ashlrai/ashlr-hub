@@ -60,6 +60,51 @@ ashlr help
 
 ---
 
+## Autonomy safety (v2)
+
+All autonomous code work in ashlr-hub v2 is designed around a safety-first principle: **proposal-only by default, with explicit enrollment and a hard kill switch**.
+
+### How it works
+
+| Primitive | What it does |
+|---|---|
+| **Git-worktree sandbox** | Every autonomous edit runs in an isolated `git worktree` under `~/.ashlr/sandboxes/<id>/` on a scratch branch. Your working tree, checked-out branch, index, and HEAD are never touched. |
+| **Enrollment registry** | Only repos you explicitly enroll can be autonomously mutated. Default is empty — nothing enrolled means nothing can be changed. |
+| **Kill switch** | A global hard stop. When set, all sandbox-mutating operations refuse immediately regardless of enrollment. |
+| **Audit trail** | Every autonomous action (action, repo, sandbox id, summary, result) is appended to `~/.ashlr/audit/<YYYY-MM-DD>.jsonl`. Append-only; no secrets; never deleted. |
+| **Proposal-only posture** | Until M24 wires the daemon, all sandbox output is a diff for your review — nothing is applied to your repo automatically. |
+
+### Commands
+
+```sh
+# Enrollment
+ashlr enroll list                 # show enrolled repos (default: empty)
+ashlr enroll add <path-to-repo>   # enroll a repo for autonomous work
+ashlr enroll remove <path-to-repo>
+
+# Kill switch
+ashlr enroll kill on    # set ~/.ashlr/KILL — all mutating ops refuse immediately
+ashlr enroll kill off   # clear the kill switch
+
+# Sandbox inspection
+ashlr sandbox list             # list active sandboxes
+ashlr sandbox diff <id>        # show what changed inside a sandbox
+ashlr sandbox cleanup <id>     # discard sandbox (worktree + scratch branch removed)
+
+# Audit trail
+ashlr audit          # tail audit log, newest first
+ashlr audit 50       # last 50 entries
+```
+
+### Guarantees
+
+- Sandbox worktrees live **only** under `~/.ashlr/sandboxes/`. The implementation uses `git worktree add` (new scratch branch off HEAD) and `git worktree remove` + `git branch -D` on cleanup — no `git reset --hard`, no checkout in the source repo, no push, no deletion of user branches.
+- Enrollment defaults to empty. A repo that is not enrolled cannot be touched by any autonomous operation; `assertMayMutate` throws before any worktree is created.
+- The kill switch (`~/.ashlr/KILL`) is checked first on every mutating call and cannot be bypassed by enrollment state.
+- Audit entries contain only metadata. No prompt text, no completion content, no secret values are ever written to the audit log.
+
+---
+
 ## Self-healing
 
 ### `ashlr doctor --fix`

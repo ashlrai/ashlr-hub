@@ -49,6 +49,8 @@ import type {
   RunUsage,
   EscalationEvent,
   EscalationReasonKind,
+  Sandbox,
+  SandboxDiff,
 } from '../types.js';
 import type { StreamSink } from '../run/streaming.js';
 import { newUsage, addUsage, overBudget } from '../run/budget.js';
@@ -107,6 +109,52 @@ async function loadM17(): Promise<void> {
     _snapshotProject = rb.snapshotProject;
   } catch {
     // rollback.ts not built yet — snapshot degrades to no-op
+  }
+}
+
+// ---------------------------------------------------------------------------
+// M21: lazy-load sandbox primitives (best-effort; degrade if modules absent).
+// Sandbox mode is a SEAM — default OFF; M24 wires it. When opts.sandbox is
+// true and a project is set, the swarm operates inside an isolated worktree
+// so autonomous edits NEVER touch the user's working tree.
+// ---------------------------------------------------------------------------
+
+type CreateSandboxFn = (sourceRepo: string, opts?: { allowAnyRepo?: boolean }) => Sandbox;
+type SandboxDiffFn   = (sb: Sandbox) => SandboxDiff;
+type RemoveSandboxFn = (sb: Sandbox) => void;
+type AuditFn         = (entry: Omit<import('../types.js').AuditEntry, 'ts'>) => void;
+
+let _createSandbox: CreateSandboxFn | null = null;
+let _sandboxDiff:   SandboxDiffFn   | null = null;
+let _removeSandbox: RemoveSandboxFn | null = null;
+let _audit:         AuditFn         | null = null;
+let _m21Loaded = false;
+
+async function loadM21(): Promise<void> {
+  if (_m21Loaded) return;
+  _m21Loaded = true;
+  try {
+    // Store the specifier in a variable so TypeScript does not attempt static
+    // module resolution on a module that may not exist yet (M21 worktree.ts is
+    // built by a sibling agent). The try/catch degrades gracefully if absent.
+    const wtSpec = '../sandbox/worktree.js';
+    const wt = await import(/* @vite-ignore */ wtSpec) as {
+      createSandbox: CreateSandboxFn;
+      sandboxDiff: SandboxDiffFn;
+      removeSandbox: RemoveSandboxFn;
+    };
+    _createSandbox = wt.createSandbox;
+    _sandboxDiff   = wt.sandboxDiff;
+    _removeSandbox = wt.removeSandbox;
+  } catch {
+    // worktree.ts not built yet — sandbox mode degrades to no-op (default behavior)
+  }
+  try {
+    const auSpec = '../sandbox/audit.js';
+    const au = await import(/* @vite-ignore */ auSpec) as { audit: AuditFn };
+    _audit = au.audit;
+  } catch {
+    // audit.ts not built yet — audit degrades to no-op
   }
 }
 
@@ -321,6 +369,11 @@ async function executeTask(
   reserved: { tokens: number; steps: number } = { tokens: 0, steps: 0 },
   /** Number of tasks (including this one) still being launched in this batch. */
   remainingInBatch = 1,
+  /**
+   * M21 SANDBOX SEAM: when set, tasks run inside the worktree path instead of
+   * run.project. Null (default) = exactly today's behavior (use run.project).
+   */
+  sandboxCwd: string | null = null,
 ): Promise<'continue' | 'escalate'> {
   // Find the SwarmTaskRun slot.
   const taskRun = run.tasks.find((t) => t.id === taskId);
@@ -465,8 +518,9 @@ async function executeTask(
       // has no outward tool executors, so the no-outward property holds even if
       // the model ignores the prompt prefix above.
       engine: 'builtin',
-      // Operate WITHIN the target project dir, not wherever the swarm launched.
-      cwd: run.project ?? undefined,
+      // M21: operate in the sandbox worktree when set; otherwise fall back to
+      // run.project (unchanged behavior when opts.sandbox is falsy).
+      cwd: sandboxCwd ?? run.project ?? undefined,
       // RECURSION/FORK-BOMB GUARD: ASHLR_IN_SWARM=1 is set once on this runner
       // process's env (see runSwarm) and inherited by every spawned engine
       // subprocess. That single assignment is the load-bearing guard; this task
@@ -561,6 +615,8 @@ async function executePhase(
   opts: SwarmOptions,
   sink: StreamSink,
   parallelCap: number,
+  /** M21 SANDBOX SEAM: worktree path to run tasks in. Null = today's behavior. */
+  sandboxCwd: string | null = null,
 ): Promise<boolean | 'escalate'> {
   const phaseTasks = run.plan.tasks.filter((t) => t.phase === phase);
   if (phaseTasks.length === 0) return true; // nothing to do
@@ -618,6 +674,7 @@ async function executePhase(
             sink,
             snapshot,
             remainingInBatch,
+            sandboxCwd,
           ),
         );
       }
@@ -664,7 +721,7 @@ async function executePhase(
         continue;
       }
 
-      const result = await executeTask(taskSpec.id, taskSpec.goal, phase, run, cfg, opts, sink);
+      const result = await executeTask(taskSpec.id, taskSpec.goal, phase, run, cfg, opts, sink, { tokens: 0, steps: 0 }, 1, sandboxCwd);
       if (result === 'escalate') {
         return 'escalate';
       }
@@ -814,6 +871,92 @@ function fireCaptureFromSwarm(run: SwarmRun, cfg: AshlrConfig): void {
 }
 
 // ---------------------------------------------------------------------------
+// M21: sandbox diff-capture + cleanup helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Capture the diff from an active sandbox worktree and remove it.
+ * Appends a `[M21 sandbox proposal]` block to run.result.
+ * Always cleans up (removes worktree + scratch branch) regardless of errors.
+ * Never throws — all errors are logged to sink and audited.
+ */
+function captureSandboxAndCleanup(
+  sb: Sandbox,
+  run: SwarmRun,
+  sink: StreamSink,
+): void {
+  // Capture diff (read-only; never mutates source tree).
+  let diff: SandboxDiff | null = null;
+  if (_sandboxDiff !== null) {
+    try {
+      diff = _sandboxDiff(sb);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      emitLog(sink, `[M21] Sandbox diff capture failed: ${msg}`);
+      try {
+        _audit?.({
+          action: 'sandbox:diff',
+          repo: sb.sourceRepo,
+          sandboxId: sb.id,
+          summary: `Diff capture failed: ${msg.slice(0, 120)}`,
+          result: 'error',
+        });
+      } catch { /* audit best-effort */ }
+    }
+  }
+
+  if (diff !== null) {
+    // Append proposed diff summary to run.result without overwriting it.
+    const proposal = [
+      '',
+      `[M21 sandbox proposal] id=${sb.id}`,
+      `files=${diff.files} insertions=${diff.insertions} deletions=${diff.deletions}`,
+      diff.patch ? diff.patch.slice(0, 4000) : '(empty diff)',
+    ].join('\n');
+    run.result = (run.result ?? '') + proposal;
+    emitLog(sink, `[M21] Sandbox diff captured: ${diff.files} file(s) changed`);
+    try {
+      _audit?.({
+        action: 'sandbox:diff',
+        repo: sb.sourceRepo,
+        sandboxId: sb.id,
+        summary: `files=${diff.files} +${diff.insertions} -${diff.deletions}`,
+        result: 'ok',
+      });
+    } catch { /* audit best-effort */ }
+  }
+
+  // Always remove sandbox (worktree + scratch branch). Never touches source tree.
+  if (_removeSandbox !== null) {
+    try {
+      _removeSandbox(sb);
+      emitLog(sink, `[M21] Sandbox ${sb.id} removed`);
+      try {
+        _audit?.({
+          action: 'sandbox:remove',
+          repo: sb.sourceRepo,
+          sandboxId: sb.id,
+          summary: `Swarm ${run.id} sandbox removed`,
+          result: 'ok',
+        });
+      } catch { /* audit best-effort */ }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      emitLog(sink, `[M21] Sandbox removal failed (manual cleanup may be needed): ${msg}`);
+      try {
+        _audit?.({
+          action: 'sandbox:remove',
+          repo: sb.sourceRepo,
+          sandboxId: sb.id,
+          summary: `Removal failed: ${msg.slice(0, 120)}`,
+          result: 'error',
+        });
+      } catch { /* audit best-effort */ }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -883,6 +1026,11 @@ export async function runSwarm(
   // -------------------------------------------------------------------------
   await loadM17();
 
+  // -------------------------------------------------------------------------
+  // M21: load sandbox primitives (best-effort, never throws).
+  // -------------------------------------------------------------------------
+  await loadM21();
+
   // Clamp parallel concurrency.
   const parallel = Math.min(
     Math.max(1, opts.parallel ?? DEFAULT_PARALLEL),
@@ -890,6 +1038,50 @@ export async function runSwarm(
   );
   const budget = buildBudget(opts);
   const project = opts.project ?? null;
+
+  // -------------------------------------------------------------------------
+  // M21 SANDBOX SEAM: when opts.sandbox is true AND project is set AND the
+  // worktree module loaded, create an isolated git-worktree sandbox so all
+  // task execution operates on the worktree path — NEVER the source working
+  // tree. Default (opts.sandbox falsy or modules absent) = exactly today's
+  // behavior; no worktree is created and sandboxCwd stays null.
+  // -------------------------------------------------------------------------
+  let activeSandbox: Sandbox | null = null;
+  // The cwd that tasks should run in. null = use run.project (unchanged behavior).
+  let sandboxCwd: string | null = null;
+
+  if (opts.sandbox === true && project !== null && _createSandbox !== null) {
+    try {
+      activeSandbox = _createSandbox(project);
+      sandboxCwd = activeSandbox.worktreePath;
+      emitLog(sink, `[M21] Sandbox created: ${activeSandbox.id} at ${sandboxCwd}`);
+      try {
+        _audit?.({
+          action: 'sandbox:create',
+          repo: project,
+          sandboxId: activeSandbox.id,
+          summary: `Sandbox created for goal: ${input.goal.slice(0, 120)}`,
+          result: 'ok',
+        });
+      } catch { /* audit is best-effort */ }
+    } catch (err) {
+      // Sandbox creation failed — fall back to non-sandbox mode rather than
+      // crashing the swarm. Log the failure and proceed with source tree.
+      const msg = err instanceof Error ? err.message : String(err);
+      emitLog(sink, `[M21] Sandbox creation failed (running without sandbox): ${msg}`);
+      try {
+        _audit?.({
+          action: 'sandbox:create',
+          repo: project,
+          sandboxId: null,
+          summary: `Sandbox creation failed: ${msg.slice(0, 120)}`,
+          result: 'error',
+        });
+      } catch { /* audit is best-effort */ }
+      activeSandbox = null;
+      sandboxCwd = null;
+    }
+  }
 
   // -------------------------------------------------------------------------
   // M19: Spend governance check (advisory; block only when govAction==='block').
@@ -1043,6 +1235,8 @@ export async function runSwarm(
       run.result = `Planning failed: ${err instanceof Error ? err.message : String(err)}`;
       maybePersist(run);
       emitLog(sink, run.result);
+      // M21: clean up sandbox even on planning failure (no diff to capture yet).
+      if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink);
       await fireEmitSwarm(run, cfg);
       if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
       return run;
@@ -1088,17 +1282,21 @@ export async function runSwarm(
           'Swarm aborted: hard total budget exceeded before phase ' + phase;
         persist(run);
         emitLog(sink, run.result);
+        // M21: capture diff of work done so far, then remove sandbox.
+        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
       }
 
-      const phaseResult = await executePhase(phase, run, cfg, opts, sink, parallel);
+      const phaseResult = await executePhase(phase, run, cfg, opts, sink, parallel, sandboxCwd);
 
       if (phaseResult === 'escalate') {
         // Swarm already set to 'needs-approval' and persisted by escalate().
         // Stop cleanly — do NOT proceed to the next phase.
         emitLog(sink, `Swarm ${run.id} paused at phase "${phase}" — awaiting human approval.`);
+        // M21: capture diff of partial work, then remove sandbox.
+        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1110,6 +1308,8 @@ export async function runSwarm(
         run.result = `Swarm aborted: hard total budget exceeded during phase ${phase}`;
         persist(run);
         emitLog(sink, run.result);
+        // M21: capture diff of partial work, then remove sandbox.
+        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1121,6 +1321,8 @@ export async function runSwarm(
     run.result = `Swarm failed: ${err instanceof Error ? err.message : String(err)}`;
     persist(run);
     emitLog(sink, run.result);
+    // M21: capture diff of any partial work, then remove sandbox.
+    if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink);
     await fireEmitSwarm(run, cfg);
     if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
     return run;
@@ -1158,6 +1360,9 @@ export async function runSwarm(
   run.result = summaryLines.join('\n');
   run.status = failedTasks.length === run.tasks.length ? 'failed' : 'done';
   persist(run);
+
+  // M21: capture full sandbox diff proposal, then remove sandbox.
+  if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink);
 
   emitLog(sink, `Swarm ${run.id} finished with status: ${run.status}`);
 

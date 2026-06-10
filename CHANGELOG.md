@@ -8,6 +8,49 @@ milestone tags. Dates are the merge dates into `main`.
 
 ---
 
+## [Unreleased] — M21: Safety Foundation (Sandboxed Execution, Audit Trail, Enrollment + Kill Switch)
+
+### Added
+- **Git-worktree sandbox** (`src/core/sandbox/worktree.ts`) — the isolation primitive all future autonomous work runs inside:
+  - `createSandbox(sourceRepo, opts?)` — asserts enrollment + kill-switch gate, then runs `git worktree add -b ashlr/sandbox/<id>` under `~/.ashlr/sandboxes/<id>/` off the current HEAD. The source repo's working tree, index, HEAD, and user branches are **never touched**.
+  - `sandboxDiff(sb)` — returns `SandboxDiff { sandboxId, files, insertions, deletions, patch }` via `git diff` against `baseHead`. Read-only; never mutates.
+  - `removeSandbox(sb)` — `git worktree remove --force` + `git branch -D` on the scratch branch. Idempotent; never touches the source tree. All sandbox paths are forced under `~/.ashlr/sandboxes/`.
+  - `sandboxesDir()` / `listSandboxes()` — path helper + persisted metadata listing; never throws on bad entries.
+- **Append-only audit trail** (`src/core/sandbox/audit.ts`):
+  - `audit(entry)` — sets `ts`, appends one JSONL line to `~/.ashlr/audit/<YYYY-MM-DD>.jsonl`. Never truncates, rewrites, or deletes. Malformed lines are skipped on read; never throws.
+  - `readAudit(limit?)` — returns entries newest-first; `limit` caps count.
+  - `auditDir()` — `~/.ashlr/audit`. **No secrets ever written** — summary is metadata only.
+- **Enrollment registry + kill switch** (`src/core/sandbox/policy.ts`) — the gate every autonomous mutation passes through:
+  - `isEnrolled(repo)` / `enroll(repo)` / `unenroll(repo)` / `listEnrolled()` — registry persisted in `cfg.autonomy` / `~/.ashlr/enrollment.json`. **Default empty — nothing enrolled means nothing autonomous can mutate.**
+  - `killSwitchOn()` / `setKill(on)` — kill switch backed by `~/.ashlr/KILL` file / cfg flag. When set, ALL sandbox-mutating ops refuse regardless of enrollment.
+  - `assertMayMutate(repo, opts?)` — throws (and records `result:'refused'` in audit) if kill switch is on OR repo is not enrolled. The `allowAnyRepo` test hatch never overrides the kill switch.
+- **CLI surface** (`src/cli/sandbox.ts`):
+  - `ashlr sandbox list` — list active sandboxes.
+  - `ashlr sandbox diff <id>` — show the diff accumulated inside a sandbox.
+  - `ashlr sandbox cleanup <id>` — remove a sandbox (worktree + scratch branch).
+  - `ashlr audit [N]` — tail the audit trail, newest-first, optional limit.
+  - `ashlr enroll list` — show enrolled repos.
+  - `ashlr enroll add <repo>` — enroll a repo for autonomous work.
+  - `ashlr enroll remove <repo>` — unenroll a repo.
+  - `ashlr enroll kill on|off` — set or clear the global kill switch.
+- **New types in `src/core/types.ts`** (all existing types unchanged):
+  - `Sandbox { id; sourceRepo; worktreePath; branch; baseHead; createdAt }` — live sandbox descriptor.
+  - `SandboxDiff { sandboxId; files; insertions; deletions; patch }` — diff of a sandbox vs its base HEAD.
+  - `AuditEntry { ts; action; repo; sandboxId; summary; result:'ok'|'refused'|'error' }` — one audit record.
+  - `Enrollment { repos }` — persisted enrollment registry shape.
+  - `SwarmOptions.sandbox?:boolean` — seam for M24 daemon (OFF by default; swarm behavior today is unchanged).
+
+### Guardrails (M21)
+- **Isolation is absolute**: sandbox worktrees live ONLY under `~/.ashlr/sandboxes/`. Create and remove operations are structurally incapable of modifying the source repo's working tree, index, HEAD, or user branches. No `git reset --hard`, no checkout in source repo, no push, no user-branch deletion.
+- **Enrollment default empty**: until you run `ashlr enroll add <repo>`, no real repo can be autonomously mutated — the gate throws before any worktree is created.
+- **Kill switch**: `ashlr enroll kill on` sets `~/.ashlr/KILL`; every `assertMayMutate` call checks it first and refuses (audit `result:'refused'`). Cannot be bypassed by enrollment or the `allowAnyRepo` test hatch.
+- **Audit is append-only**: no secret values, no prompt/completion content — metadata (action, repo, sandbox id, summary, result) only.
+- **No new runtime deps**: node builtins + existing `core/git.ts` / `core/config.ts` / `cli/ui.ts` only.
+- **Swarm seam is inert**: `SwarmOptions.sandbox` field plumbed; M12 swarm runner behaviour unchanged until M24 wires it.
+- All 2110 existing tests preserved. Typecheck passes clean (`tsc --noEmit`).
+
+---
+
 ## [Unreleased] — M20: One-Command Onboarding + Self-Healing (CAPSTONE)
 
 ### Added

@@ -282,6 +282,27 @@ const loadTelemetryCmd = lazyCmd(
   'telemetry command requires src/cli/telemetry.ts (M19 module not yet built).',
 );
 
+
+// ─── M21 command loaders ────────────────────────────────────────────
+
+const loadSandboxCmd = lazyCmd(
+  () => import('./sandbox.js'),
+  (m) => m.cmdSandbox as Cmd,
+  'sandbox command requires src/cli/sandbox.ts (M21 module not yet built).',
+);
+
+const loadAuditCmd = lazyCmd(
+  () => import('./sandbox.js'),
+  (m) => m.cmdAudit as Cmd,
+  'audit command requires src/cli/sandbox.ts (M21 module not yet built).',
+);
+
+const loadEnrollCmd = lazyCmd(
+  () => import('./sandbox.js'),
+  (m) => m.cmdEnroll as Cmd,
+  'enroll command requires src/cli/sandbox.ts (M21 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1140,6 +1161,14 @@ function cmdHelp(): void {
     ['notify test',                  'Send a test ping to the configured webhook(s); no-op if none are set.'],
     ['telemetry [status]',           'M19: endpoint+PAT configured (bool), sink mode, local JSONL count, governance.'],
     ['telemetry test',               'Emit a synthetic metadata-only test span; report sink+ok.'],
+    ['sandbox list',                 'List active git-worktree sandboxes (M21 safety foundation).'],
+    ['sandbox diff <id>',            'Show diff of a sandbox vs its base HEAD.'],
+    ['sandbox cleanup <id>',         'Remove a sandbox worktree and scratch branch.'],
+    ['audit [--limit N] [--json]',   'Tail the append-only audit trail (newest-first).'],
+    ['enroll list',                  'List enrolled repos + kill switch state.'],
+    ['enroll add <repo>',            'Enroll a repo for autonomous work.'],
+    ['enroll remove <repo>',         'Remove a repo from the enrollment registry.'],
+    ['enroll kill on|off',           'Toggle the global autonomous kill switch.'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1383,6 +1412,24 @@ async function main(): Promise<void> {
       case 'telemetry': {
         const cmdTelemetry = await loadTelemetryCmd();
         process.exitCode = await cmdTelemetry(rest);
+        break;
+      }
+
+      case 'sandbox': {
+        const cmdSandbox = await loadSandboxCmd();
+        process.exitCode = await cmdSandbox(rest);
+        break;
+      }
+
+      case 'audit': {
+        const cmdAudit = await loadAuditCmd();
+        process.exitCode = await cmdAudit(rest);
+        break;
+      }
+
+      case 'enroll': {
+        const cmdEnroll = await loadEnrollCmd();
+        process.exitCode = await cmdEnroll(rest);
         break;
       }
 
