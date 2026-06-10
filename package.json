@@ -1,6 +1,7 @@
 {
   "name": "ashlr-hub",
   "version": "0.1.0",
+  "private": true,
   "description": "Local-first command center for agentic engineers.",
   "license": "MIT",
   "author": "Mason Wyatt <mason@evero-consulting.com>",
