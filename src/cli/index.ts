@@ -409,6 +409,17 @@ const loadOnboardCmd = lazyCmd(
   'onboard command requires src/cli/onboard.ts (H7 module not yet built).',
 );
 
+// ─── H8 command loader ──────────────────────────────────────────────
+// `ashlr demo` — a watchable, reproducible run of the FULL autonomous chain on a
+// DISPOSABLE repo in an ISOLATED tmp context; proposal-only; auto-cleans. The
+// ONE new runtime surface in v2.1 (see docs/contracts/CONTRACT-H8.md).
+
+const loadDemoCmd = lazyCmd(
+  () => import('./demo.js'),
+  (m) => m.cmdDemo as Cmd,
+  'demo command requires src/cli/demo.ts (H8 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1270,6 +1281,7 @@ function cmdHelp(): void {
     ['sandbox list',                 'List active git-worktree sandboxes (M21 safety foundation).'],
     ['sandbox diff <id>',            'Show diff of a sandbox vs its base HEAD.'],
     ['sandbox cleanup <id>',         'Remove a sandbox worktree and scratch branch.'],
+    ['sandbox gc',                   'Reclaim STALE orphan sandboxes (crash leftovers); H5 explicit human repair surface for the orphan sweep.'],
     ['audit [N] [--json] [--action <verb>] [--result <r>] [--since <when>]', 'Tail the append-only audit trail (newest-first); filter by action/result/since (read-only).'],
     ['enroll list',                  'List enrolled repos + kill switch state.'],
     ['enroll add <repo>',            'Enroll a repo for autonomous work.'],
@@ -1313,6 +1325,7 @@ function cmdHelp(): void {
     ['preflight [--json]',           'Read-only first-activation readiness check: ready=true|false + blockers/warnings (model/enrollment/kill/daemon/writeable/sandbox/git/phantom); mutates nothing.'],
     ['onboard',                      'Guided first safe activation: preflight → enroll ONE repo → dry-run PLAN → point at `ashlr inbox`. TTY-aware; --yes/non-TTY prints steps. NEVER auto-applies.'],
     ['onboard --rollback <repo>',    'One-command undo of a first activation: unenroll + sweep orphan sandboxes + optional --kill. Inward cleanup only; H6-audited.'],
+    ['demo [--no-cleanup] [--json]', 'Watch the FULL autonomous chain run on a DISPOSABLE tmp repo (isolated tmp ~/.ashlr; proposal-only; auto-cleans). NEVER touches your portfolio or applies anything.'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1652,6 +1665,12 @@ async function main(): Promise<void> {
       case 'onboard': {
         const cmdOnboard = await loadOnboardCmd();
         process.exitCode = await cmdOnboard(rest);
+        break;
+      }
+
+      case 'demo': {
+        const cmdDemo = await loadDemoCmd();
+        process.exitCode = await cmdDemo(rest);
         break;
       }
 

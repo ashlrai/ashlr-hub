@@ -9,7 +9,7 @@
  *   ashlr verify-safety            # human-readable PASS/FAIL report
  *   ashlr verify-safety --json     # machine-readable { ok, checks: [...] }
  *
- * HARD CONTRACT (CONTRACT-H4.md §Verify-Safety) — this command:
+ * HARD CONTRACT (docs/contracts/CONTRACT-H4.md §Verify-Safety) — this command:
  *  - MUTATES NOTHING. It writes no file, creates no sandbox, enrolls nothing,
  *    toggles no kill switch, and creates no proposal. It performs only reads
  *    (source reads) and pure in-memory checks.

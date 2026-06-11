@@ -1,7 +1,7 @@
 /**
  * graph.ts — Knowledge Graph + Impact analysis for enrolled repos.
  *
- * INVARIANTS (CONTRACT-M25):
+ * INVARIANTS (docs/contracts/CONTRACT-M25.md):
  *  1. READ-ONLY: never modifies any enrolled repo; analysis only.
  *  2. ENROLLMENT-SCOPED: default repos = listEnrolled() (DEFAULT EMPTY => empty graph).
  *  3. BOUNDED: caps file walk depth, file count, and skips node_modules/.git/dist/binaries.
@@ -295,7 +295,7 @@ function packageName(imp: string): string {
 // upstream pattern set surfaces as a throw at the graph.ts call site rather than
 // a silent no-op. `ashlr verify-safety` CHECK 4 pins the real `./index.js`
 // parity import (scrubSecrets + SECRET_PATTERNS) — live code, not a vestigial
-// assignment-regex string — see verify-safety.ts CHECK 4 + CONTRACT-H6 §B.1.
+// assignment-regex string — see verify-safety.ts CHECK 4 + docs/contracts/CONTRACT-H6.md §B.1.
 
 /** Parity scrub: delegates to index.ts's exported scrubSecrets over the shared
  *  SECRET_PATTERNS so graph.ts redacts the identical pattern set. The explicit
@@ -413,7 +413,7 @@ export function buildGraph(repos?: string[]): KnowledgeGraph {
     const analyses: RepoAnalysis[] = [];
     for (const repoPath of targetRepos) {
       try {
-        // ENROLLMENT-SCOPED (CONTRACT-M25 invariant 3): only ever walk enrolled
+        // ENROLLMENT-SCOPED (docs/contracts/CONTRACT-M25.md invariant 3): only ever walk enrolled
         // repos — an explicit repos list from the CLI (--repo / positional) is
         // validated here so a non-enrolled directory is never read.
         if (!isEnrolled(repoPath)) continue;
@@ -548,7 +548,7 @@ export function impact(target: string, repos?: string[]): ImpactResult {
 
     for (const repoPath of targetRepos) {
       try {
-        // ENROLLMENT-SCOPED (CONTRACT-M25 invariant 3): never walk a directory
+        // ENROLLMENT-SCOPED (docs/contracts/CONTRACT-M25.md invariant 3): never walk a directory
         // that is not enrolled, even if passed explicitly via --repo.
         if (!isEnrolled(repoPath)) continue;
         if (!fs.existsSync(repoPath)) continue;

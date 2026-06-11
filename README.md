@@ -85,30 +85,91 @@ Across M21–M30, ashlr-hub grew a second pillar on top of the local command cen
 
 `reflect`, `health`, `goals advance`, and any daemon/swarm work emit their suggestions as **PENDING inbox proposals** — they never auto-apply.
 
-### Activation runbook — the human's gate
+### v2.1 "Harden & Prove" — watch, verify, and activate with confidence
 
-Out of the box, the autonomous org is **inert**: enrollment is empty, so the daemon, backlog, and health/knowledge scans have nothing to operate on. Turning it on is an explicit three-step gate **you** control:
+v2.1 adds **no new outward capability**. It makes the existing autonomous org *watchable, self-checking, and documented* so activation is a confident, evidence-backed decision. Every command below is read-only or runs entirely on a disposable throwaway repo.
+
+| Command | What it does |
+|---|---|
+| `ashlr verify-safety [--json]` | Read-only self-check of the hard safety invariants (enrollment, kill-switch, daemon, secret-scrub, cloud-gate). Mutates nothing. (H4) |
+| `ashlr sandbox gc` | Reclaim leftover/orphaned sandbox worktrees (stale only — never a live in-flight one). (H5) |
+| `ashlr audit [N] [--action <verb>] [--result <r>] [--since <when>]` | Tail the append-only audit trail (newest-first); filter by action/result/since. Read-only. (H6) |
+| `ashlr preflight [--json]` | Read-only first-activation readiness check → `ready=true\|false` + blockers/warnings (model, enrollment, kill, daemon, writeable, sandbox, git, phantom). Mutates nothing. (H7) |
+| `ashlr onboard [--rollback <repo>]` | Guided first safe activation: preflight → enroll ONE repo → dry-run PLAN → point at `ashlr inbox`. Never auto-applies; `--rollback` undoes it (unenroll + sweep). (H7) |
+| `ashlr demo [--no-cleanup] [--json]` | **Watchable**, reproducible full-chain run on a **DISPOSABLE** throwaway repo in an isolated tmp context — enroll → backlog → tick → PENDING proposal → inbox review → rollback. Proposal-only; **always auto-cleans**; never touches your real portfolio or `~/.ashlr`. `--no-cleanup` keeps the tmp dir (still tmp) for inspection. (H8) |
+
+See **[`docs/RELIABILITY.md`](./docs/RELIABILITY.md)** for failure modes, recovery, and the honest limits behind each guarantee.
+
+### Activation — the human gate
+
+> **Status: not activated by default.** Enrollment ships **empty** (`{repos:[]}`) — the daemon, backlog, and health/knowledge scans have nothing to operate on, so out of the box **nothing autonomous runs**. Activation is *your* explicit decision; the steps below are the only thing that opts a repo in. Everything is reversible.
+
+#### What you're trusting (proven, not asserted)
+
+Each guarantee below has a permanent regression test. Run `ashlr verify-safety` any time to re-assert the live structural guards (currently 5/5), and `ashlr demo` to *watch* the whole chain run safely on a throwaway repo before you trust it on a real one.
+
+| Guarantee | Proven by |
+|---|---|
+| **Proposal-only** — nothing pushes / merges / opens a PR / deploys / applies without your explicit `inbox approve` | H1 chain harness + H4 proposal-only suite; the daemon imports no outward primitive (grep-guarded) |
+| **Sandboxed** — autonomous code work happens only in isolated git worktrees, never your tree | H1 (working tree byte-identical across the whole chain); H4 sandbox-required + containment |
+| **Enrollment-gated** — only repos you `enroll` are touched; default empty ⇒ nothing runs | H4 enrollment suite; H5 `allowAnyRepo` env-gate (no stray flag can bypass) |
+| **Kill switch always wins** — `ashlr enroll kill on` halts everything immediately | H4 kill-switch suite; checked first / unconditional on every mutating call |
+| **Crash-safe** — restart never double-spends, never strands a proposal, reclaims orphan sandboxes | H2 crash-recovery; H5 orphan-sweep at daemon start |
+| **Budget-bounded** — hard daily $ cap. *Honest caveat:* under `parallel>1`, spend can overshoot by ≤(parallel−1)×per-item (default parallel=2 ≈ 1 extra) before the in-tick stop | H3 budget stress |
+| **Local-first** — code never leaves your machine to a cloud model by default | H4 local-first suite; `verify-safety` cloud-gate check |
+| **Fully audited** — every enroll / unenroll / kill / proposal / apply / daemon action is logged | H6 audit completeness; view with `ashlr audit` |
+
+For the full failure-mode + recovery catalogue and the honest limits, see **[`docs/RELIABILITY.md`](./docs/RELIABILITY.md)**.
+
+#### Do this when ready — start with ONE low-stakes repo
 
 ```sh
-# 1. Enroll the real repos you want worked (one-time; default enrollment is EMPTY).
-ashlr enroll add ~/path/to/my-project
-ashlr enroll list                       # confirm what is in scope
+# 0. Confirm the machine is ready (read-only).
+ashlr preflight                          # ready=true + no blockers? (local model, writeable, kill off, …)
+ashlr verify-safety                      # structural safety guards pass (5/5)
+ashlr demo                               # OPTIONAL: watch the full chain run safely on a DISPOSABLE repo
 
-# 2. Run the autonomous operator. Every tick is proposal-only and sandboxed
-#    (isolated git worktree; your tree, branch, index, and HEAD are never touched).
-ashlr daemon start --once --dry-run      # plan only: which items WOULD be worked
-ashlr daemon start --once                # one real tick → deposits PENDING proposals
-ashlr daemon status                      # running?, today's spend vs cap, pending count
+# 1. Enroll ONE repo — your explicit gate, the ONLY thing that opts a repo in.
+ashlr enroll add ~/path/to/one-repo
+ashlr enroll list                        # confirm exactly that repo (default was EMPTY)
 
-# 3. Review and approve. The inbox is the ONLY outward path — nothing is applied
-#    until you explicitly approve a proposal.
-ashlr inbox                              # list pending proposals
-ashlr inbox show <id>                    # full detail incl. diff (read-only)
-ashlr inbox approve <id>                 # confirm + apply (the single outward gate)
-ashlr inbox reject <id>                  # discard; applies nothing
+# 2. Dry-run first — see what it WOULD do, with zero mutation.
+ashlr daemon start --once --dry-run       # prints the plan; touches nothing
+#   (or the guided walkthrough:)  ashlr onboard
+
+# 3. Let it work — proposal-only, sandboxed, budget-capped.
+ashlr daemon start --once                 # one real tick → deposits PENDING proposals
+ashlr daemon status                       # running?, today's spend vs cap, pending count
+
+# 4. Review EVERY proposed change — nothing applies until YOU approve.
+ashlr inbox                               # list pending proposals
+ashlr inbox show <id>                     # read the full diff (read-only)
+ashlr inbox approve <id>                  # confirm + apply on a NEW branch (never your working tree)
+ashlr inbox reject <id>                   # discard; applies nothing
+
+# 5. Observe.
+ashlr audit                               # the full action trail
+ashlr health                              # per-repo health scores
 ```
 
-Stop everything instantly with `ashlr daemon stop` (or `ashlr enroll kill on`), which sets the kill switch checked at the top of every mutating call. The daemon will **never** touch a repo you have not enrolled, **never** exceed the budget you set, and **never** apply anything without your approval.
+#### Stop / rollback — instant, always available
+
+```sh
+ashlr daemon stop                         # halt now: set kill switch + clear running state
+ashlr enroll kill on                      # same, explicit  (or: touch ~/.ashlr/KILL)
+ashlr enroll remove ~/path/to/one-repo    # un-enroll a repo
+ashlr sandbox gc                          # reclaim any leftover sandbox worktrees
+ashlr onboard --rollback ~/path/to/repo   # one-command undo of a first activation
+```
+
+The daemon will **never** touch a repo you have not enrolled, **never** exceed the budget you set, and **never** apply anything without your approval.
+
+#### Hard limits (be honest with yourself)
+
+- **Single machine, single process.** Multi-daemon / multi-machine is a *gated* cloud seam (M30) — not built. See [`docs/SEAMS.md`](./docs/SEAMS.md).
+- **Local models do the work.** Quality tracks your local model; cloud is opt-in per task (`--allow-cloud`).
+- **Budget overshoot under concurrency is bounded, not zero** (see table above). Keep `daemon.parallel` low (default 2).
+- **A swarm has no hard wall-clock deadline yet** (tracked follow-up). The orphan-sweep uses a conservative 6h staleness so it never reclaims a live worktree.
 
 ---
 
@@ -454,6 +515,7 @@ Self-heal is always bounded (never loops), opt-out (`ASHLR_NO_HEAL=1`), and neve
 | **Autonomy (v2)** | `ashlr enroll` · `ashlr daemon` · `ashlr backlog` · `ashlr inbox` · `ashlr goals` |
 | **Portfolio intelligence (v2)** | `ashlr knowledge build/impact/graph` · `ashlr ask` · `ashlr reflect` · `ashlr health` · `ashlr digest` |
 | **Cloud-ready seams (v2)** | `ashlr seams` |
+| **Harden & prove (v2.1)** | `ashlr verify-safety` · `ashlr sandbox gc` · `ashlr audit` · `ashlr preflight` · `ashlr onboard` · `ashlr demo` |
 | **Maintain** | `ashlr update` |
 
 It is **local-first by design**. Index, config, runs, rollups, and memory all live under `~/.ashlr/`. Agent runs default to local models and refuse to touch a cloud endpoint unless you explicitly opt in. Telemetry is metadata-only; secrets flow through Phantom, never through the hub.

@@ -4,7 +4,7 @@
  * Persists one Goal per file at ~/.ashlr/goals/<id>.json (atomic write-then-
  * rename), mirroring the learn/quality/inbox store pattern.
  *
- * GUARDRAILS (paramount — see CONTRACT-M28.md):
+ * GUARDRAILS (paramount — see docs/contracts/CONTRACT-M28.md):
  *  - PURE PERSISTENCE / READ-MOSTLY: this module NEVER runs a swarm, NEVER
  *    authors a spec, NEVER touches a user repo working tree, NEVER emits an
  *    outward action (no applyProposal, no setStatus(approved), no git push, no

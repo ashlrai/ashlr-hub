@@ -1,6 +1,6 @@
 /**
  * `ashlr sandbox` / `ashlr enroll` — M21 Safety Foundation CLI.
- * (`ashlr audit` moved to src/cli/audit.ts in H6 — see CONTRACT-H6.md §A.3.)
+ * (`ashlr audit` moved to src/cli/audit.ts in H6 — see docs/contracts/CONTRACT-H6.md §A.3.)
  *
  * Commands:
  *   sandbox list                List all active sandboxes.

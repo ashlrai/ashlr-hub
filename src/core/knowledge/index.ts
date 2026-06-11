@@ -125,7 +125,7 @@ export const SECRET_PATTERNS: RegExp[] = [
   // underscores in `sk_live_…` break the base64 char class + the \w boundary
   // of the high-entropy patterns above, so this shape was MISSED before H6
   // (the H4 finding). This grows the array 6 -> 7; verify-safety pins
-  // length >= 6, so it stays GREEN. See CONTRACT-H6 §B.2 + the deliberate H4
+  // length >= 6, so it stays GREEN. See docs/contracts/CONTRACT-H6.md §B.2 + the deliberate H4
   // assertion flip §B.4.
   /\bsk_(live|test)_[A-Za-z0-9_]{16,}\b/g,
 ];
@@ -539,7 +539,7 @@ async function indexFile(
 export async function buildKnowledge(
   opts?: { repos?: string[]; allowCloud?: boolean },
 ): Promise<{ repos: number; chunks: number }> {
-  // ENROLLMENT-SCOPED (CONTRACT-M25 invariant 3): listEnrolled() is already
+  // ENROLLMENT-SCOPED (docs/contracts/CONTRACT-M25.md invariant 3): listEnrolled() is already
   // enrollment-scoped, but an explicit opts.repos list (forwarded from the CLI's
   // --repo / positional args) must be validated against isEnrolled() so a caller
   // can NEVER index an arbitrary, non-enrolled directory. Resolve to absolute

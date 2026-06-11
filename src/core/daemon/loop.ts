@@ -520,7 +520,7 @@ export async function runDaemon(
   // what WOULD be reclaimed (count only, via a guarded staleMs-eligible probe),
   // honoring the strict 'dry-run mutates nothing' expectation that the rest of
   // loop.ts upholds (it creates no proposals / makes no outward changes). A
-  // normal (non-dry) start reclaims for real. Documented in CONTRACT-H5.md.
+  // normal (non-dry) start reclaims for real. Documented in docs/contracts/CONTRACT-H5.md.
   if (opts.dryRun) {
     // Dry-run previews the loop WITHOUT mutating disk: skip the real reclaim and
     // audit only the count that WOULD be reclaimed (a read-only listSandboxes()

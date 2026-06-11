@@ -18,7 +18,7 @@ import { isEnrolled } from '../core/sandbox/policy.js';
 
 /**
  * Resolve user-supplied repo paths to absolute and partition them by enrollment.
- * ENROLLMENT-SCOPED (CONTRACT-M25 invariant 3): only enrolled repos may be
+ * ENROLLMENT-SCOPED (docs/contracts/CONTRACT-M25.md invariant 3): only enrolled repos may be
  * indexed/walked. Non-enrolled paths are rejected at the CLI so the user gets a
  * clear error instead of a silent no-op (the core modules also drop them).
  */

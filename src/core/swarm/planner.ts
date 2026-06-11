@@ -305,7 +305,7 @@ function defaultPlan(goal: string): SwarmPlan {
 /**
  * Decompose a goal (+ optional spec body) into a phased SwarmPlan.
  *
- * CONTRACT (from CONTRACT-M12.md):
+ * CONTRACT (from docs/contracts/CONTRACT-M12.md):
  *   planSwarm(input: { goal: string; specBody?: string }, cfg: AshlrConfig): Promise<SwarmPlan>
  *
  * Guardrails:

@@ -207,7 +207,7 @@ const PHASE_ORDER: SwarmPhaseName[] = [
 // processes minting in the same ms rely on the `<ts>`+`<rand>` segments alone
 // (astronomically unlikely, not a hard cross-process guarantee). Cross-process id
 // allocation — like the multi-daemon budget race — is the GATED M30
-// DaemonCoordinator seam, out of H3 scope. See CONTRACT-H3.md MULTI-PROCESS
+// DaemonCoordinator seam, out of H3 scope. See docs/contracts/CONTRACT-H3.md MULTI-PROCESS
 // LIMITATION.
 let _seq = 0;
 export function makeId(): string {

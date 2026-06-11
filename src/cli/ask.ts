@@ -199,7 +199,7 @@ export async function cmdAsk(args: string[]): Promise<number> {
   const { bold, yellow, red, dim, cyan } = makeColors(tty);
 
   // ── ENROLLMENT-SCOPED: reject a non-enrolled --repo before any retrieval ──
-  // (CONTRACT-M25 invariant 3: ask is enrolled-repos-only.) Resolve to absolute
+  // (docs/contracts/CONTRACT-M25.md invariant 3: ask is enrolled-repos-only.) Resolve to absolute
   // and validate; loadChunks would silently return [] otherwise.
   let scopedRepo: string | undefined = parsed.repo;
   if (parsed.repo !== undefined) {

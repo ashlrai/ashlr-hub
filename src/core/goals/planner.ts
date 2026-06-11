@@ -2,7 +2,7 @@
  * planner.ts — M28: deterministic-by-default decomposition of an OBJECTIVE
  * into ordered MILESTONES, and per-milestone spec authoring.
  *
- * SAFETY / DESIGN (see CONTRACT-M28.md):
+ * SAFETY / DESIGN (see docs/contracts/CONTRACT-M28.md):
  *  - LOCAL-FIRST: decomposeGoal is DETERMINISTIC by default (a heuristic split
  *    — NO LLM, ZERO network). Optional LLM-assisted refinement routes ONLY
  *    through getActiveClient(cfg, { allowCloud }) — local Ollama/LM Studio
