@@ -393,6 +393,22 @@ const loadVerifySafetyCmd = lazyCmd(
   'verify-safety command requires src/cli/verify-safety.ts (H4 module not yet built).',
 );
 
+// ─── H7 command loaders ─────────────────────────────────────────────
+// preflight + onboard, matching the reflect/health/seams/verify-safety/audit
+// loaders — see docs/contracts/CONTRACT-H7.md.
+
+const loadPreflightCmd = lazyCmd(
+  () => import('./preflight.js'),
+  (m) => m.cmdPreflight as Cmd,
+  'preflight command requires src/cli/preflight.ts (H7 module not yet built).',
+);
+
+const loadOnboardCmd = lazyCmd(
+  () => import('./onboard.js'),
+  (m) => m.cmdOnboard as Cmd,
+  'onboard command requires src/cli/onboard.ts (H7 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1294,6 +1310,9 @@ function cmdHelp(): void {
     ['seams',                        'Cloud-ready seam diagnostic: every v2 store, active=local, cloud=gated (read-only).'],
     ['seams status',                'Same as `seams`: list seams + active impl; proves local-first + cloud gated on Mason.'],
     ['verify-safety',                'Read-only self-check of the hard safety invariants (enrollment/kill-switch/daemon/scrub/cloud-gate); mutates nothing.'],
+    ['preflight [--json]',           'Read-only first-activation readiness check: ready=true|false + blockers/warnings (model/enrollment/kill/daemon/writeable/sandbox/git/phantom); mutates nothing.'],
+    ['onboard',                      'Guided first safe activation: preflight → enroll ONE repo → dry-run PLAN → point at `ashlr inbox`. TTY-aware; --yes/non-TTY prints steps. NEVER auto-applies.'],
+    ['onboard --rollback <repo>',    'One-command undo of a first activation: unenroll + sweep orphan sandboxes + optional --kill. Inward cleanup only; H6-audited.'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1621,6 +1640,18 @@ async function main(): Promise<void> {
       case 'verify-safety': {
         const cmdVerifySafety = await loadVerifySafetyCmd();
         process.exitCode = await cmdVerifySafety(rest);
+        break;
+      }
+
+      case 'preflight': {
+        const cmdPreflight = await loadPreflightCmd();
+        process.exitCode = await cmdPreflight(rest);
+        break;
+      }
+
+      case 'onboard': {
+        const cmdOnboard = await loadOnboardCmd();
+        process.exitCode = await cmdOnboard(rest);
         break;
       }
 

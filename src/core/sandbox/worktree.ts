@@ -665,3 +665,63 @@ export function sweepOrphanSandboxes(opts?: { staleMs?: number }): string[] {
   }
   return swept;
 }
+
+// ---------------------------------------------------------------------------
+// sweepRepoSandboxes (H7 — scoped one-command rollback cleanup, LOCAL-ONLY)
+// ---------------------------------------------------------------------------
+
+/**
+ * Reclaim the on-disk sandboxes belonging to ONE specific source repo — the
+ * scoped cleanup behind `ashlr onboard --rollback <repo>` (H7 BUILD ITEM 4).
+ *
+ * WHY a distinct sweep (not sweepOrphanSandboxes): the generic orphan sweep is a
+ * BACKGROUND restart heuristic — it protects a possibly-live owner whose pid is
+ * unreadable by ALSO requiring `createdAt` to be older than `staleMs` (6h). But a
+ * crash-leftover worktree from the VERY activation the user is now explicitly
+ * undoing is, by definition, fresh (< 6h old), so the generic sweep would SKIP it
+ * and the rollback would leave it on disk — contradicting "one-command undo of a
+ * first activation". For an explicit, user-requested cleanup of a NAMED repo that
+ * the user just unenrolled, the age heuristic is unwarranted.
+ *
+ * SAFETY (the real boundary is preserved): this drops ONLY the age guard, never
+ * the LIVE-OWNER guard. It still SKIPS any sandbox whose recorded `ownerPid` is
+ * still alive (ownerAlive()), so a running in-flight swarm's worktree is NEVER
+ * force-removed — even a fresh one. It is SCOPED: only sandboxes whose
+ * `sourceRepo` resolves to `resolve(repo)` are considered, so it never touches a
+ * different repo's sandboxes. Each removal goes through removeSandbox(), so it
+ * inherits the full branch-prefix / path-containment guards verbatim and can
+ * NEVER touch a user's working tree, index, HEAD, or any user branch.
+ *
+ * LOCAL-ONLY by construction: adds NO outward capability (inward cleanup only —
+ * removes only ashlr/sandbox/* worktrees + scratch refs), weakens NO guard.
+ * Idempotent; never throws — a failure on one id is swallowed so the sweep makes
+ * maximal progress. Returns the ids it reclaimed.
+ *
+ * @param repo The source repo whose sandboxes to reclaim (resolved internally).
+ */
+export function sweepRepoSandboxes(repo: string): string[] {
+  const target = resolve(repo);
+  const swept: string[] = [];
+  for (const sb of listSandboxes()) {
+    // SCOPE: only this repo's sandboxes.
+    if (resolve(sb.sourceRepo) !== target) {
+      continue;
+    }
+    // GUARD — POSITIVE liveness (the one guard we KEEP): never reclaim a
+    // worktree whose owning process is still alive, regardless of age. A live
+    // in-flight swarm (any age) is protected; the age guard is intentionally
+    // dropped because this is an explicit user-requested cleanup of a just-
+    // unenrolled repo, not a background restart heuristic.
+    if (ownerAlive(sb)) {
+      continue;
+    }
+    try {
+      removeSandbox(sb);
+      swept.push(sb.id);
+    } catch {
+      // removeSandbox is best-effort/idempotent; guard so one bad entry never
+      // aborts the whole scoped sweep.
+    }
+  }
+  return swept;
+}

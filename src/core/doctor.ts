@@ -13,6 +13,19 @@ import type { AshlrConfig, DoctorCheck, DoctorCheckStatus, DoctorReport, McpRegi
 import { CONFIG_PATH, INDEX_PATH, loadConfig } from './config.js';
 import { getPhantomStatus } from './phantom.js';
 import { getProviderRegistry } from './providers.js';
+// H7 — 5 NEW read-only probes share the SAME read-only readiness facets that
+// `ashlr preflight` uses, from the shared readiness module (single source of
+// truth; no drift). See docs/contracts/CONTRACT-H7.md (BUILD ITEM 2). These
+// helpers MUTATE NOTHING (the lone write is checkAshlrWriteable's self-cleaning
+// sentinel under ~/.ashlr). Imported so doctor + preflight never diverge.
+import {
+  readEnrollmentState,
+  readDaemonHealth,
+  readKillState,
+  checkAshlrWriteable,
+  readSandboxHealth,
+  SANDBOX_ORPHAN_WARN_THRESHOLD,
+} from './readiness.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -818,6 +831,175 @@ function checkTelemetrySink(
 }
 
 // ---------------------------------------------------------------------------
+// H7: 5 NEW read-only probes (enrollment / daemon-state / kill-switch /
+// ~/.ashlr writeable / sandbox health). Each returns a DoctorCheck via the
+// existing check() helper, reads via the shared readiness facets, and MUTATES
+// NOTHING. STUBS — BUILD fills in per docs/contracts/CONTRACT-H7.md (BUILD
+// ITEM 2). Status rules: pass/warn/info, except ~/.ashlr-not-writeable ⇒ fail.
+// ---------------------------------------------------------------------------
+
+/**
+ * Probe: enrollment registry (H7).
+ * id: 'enrollment'
+ *
+ * READ-ONLY via readEnrollmentState() → listEnrolled(). ALWAYS passes — an
+ * empty registry is the legitimate fresh-install default (DEFAULT EMPTY), so 0
+ * enrolled is a pass with a "none yet — run `ashlr onboard`" note rather than a
+ * warning. Mutates nothing. Never throws.
+ */
+function checkEnrollment(): DoctorCheck {
+  try {
+    const { count } = readEnrollmentState();
+    if (count > 0) {
+      return check(
+        'enrollment',
+        'Enrollment registry',
+        'pass',
+        `${count} repo${count !== 1 ? 's' : ''} enrolled`,
+      );
+    }
+    return check(
+      'enrollment',
+      'Enrollment registry',
+      'pass',
+      'No repos enrolled yet — a fresh install is fine',
+      'Run `ashlr onboard` to safely enroll your first repo',
+    );
+  } catch (err) {
+    // readEnrollmentState never throws, but degrade defensively regardless.
+    return check('enrollment', 'Enrollment registry', 'pass', `enrollment unreadable: ${String(err)}`);
+  }
+}
+
+/**
+ * Probe: daemon state (H7).
+ * id: 'daemon-state'
+ *
+ * READ-ONLY via readDaemonHealth() → loadDaemonState() (which applies the H5
+ * reconcileDaemonState self-heal at the load chokepoint). Reports:
+ *  - a live running daemon (running flag + a still-alive pid) as a PASS
+ *    (truthful, expected during autonomy);
+ *  - a stopped daemon as a PASS — this INCLUDES a stale dead-pid `running:true`
+ *    flag, which the H5 reconcile has already flipped to running:false at load,
+ *    so the probe truthfully reports "stopped" rather than a phantom-live daemon.
+ * Never fails — a daemon's run-state is observability, not a blocker. The load's
+ * self-heal is observability-only and is not persisted by this read. Mutates
+ * nothing. Never throws.
+ */
+function checkDaemonState(): DoctorCheck {
+  try {
+    const { running, pid, pidAlive } = readDaemonHealth();
+    if (running && pidAlive) {
+      return check(
+        'daemon-state',
+        'Daemon state',
+        'pass',
+        `Daemon running (pid ${pid ?? '?'})`,
+      );
+    }
+    // running:false OR a running:true flag whose pid the H5 load already
+    // self-healed to a truthful stopped state.
+    return check('daemon-state', 'Daemon state', 'pass', 'Daemon stopped');
+  } catch (err) {
+    return check('daemon-state', 'Daemon state', 'pass', `daemon state unreadable: ${String(err)}`);
+  }
+}
+
+/**
+ * Probe: kill switch (H7).
+ * id: 'kill-switch'
+ *
+ * READ-ONLY via readKillState() → killSwitchOn(). PASS when OFF; WARN when ON
+ * (autonomy is paused — nothing will run, which a user may or may not intend).
+ * Mutates nothing. Never throws.
+ */
+function checkKillSwitch(): DoctorCheck {
+  try {
+    const { on } = readKillState();
+    if (on) {
+      return check(
+        'kill-switch',
+        'Kill switch',
+        'warn',
+        'Kill switch is ON — autonomy paused (nothing will run)',
+        'Clear it when ready: `ashlr kill off` (or remove ~/.ashlr/KILL)',
+      );
+    }
+    return check('kill-switch', 'Kill switch', 'pass', 'Kill switch is OFF');
+  } catch (err) {
+    return check('kill-switch', 'Kill switch', 'pass', `kill state unreadable: ${String(err)}`);
+  }
+}
+
+/**
+ * Probe: ~/.ashlr writeable (H7).
+ * id: 'ashlr-writeable'
+ *
+ * The lone WRITE among the 5 — but it writes then IMMEDIATELY UNLINKS a private,
+ * self-cleaning sentinel under ~/.ashlr (shared with preflight via
+ * checkAshlrWriteable in readiness.ts). PASS when writeable; FAIL when not
+ * (nothing can persist — config/enrollment/daemon state all live under ~/.ashlr).
+ * Touches no repo, no enrollment, no kill, no daemon state; leaves no artifact.
+ * Never throws.
+ */
+function checkAshlrWriteableProbe(): DoctorCheck {
+  try {
+    if (checkAshlrWriteable()) {
+      return check('ashlr-writeable', '~/.ashlr writeable', 'pass', '~/.ashlr is writeable');
+    }
+    return check(
+      'ashlr-writeable',
+      '~/.ashlr writeable',
+      'fail',
+      '~/.ashlr is NOT writeable — nothing can persist',
+      'Fix permissions on ~/.ashlr (chmod u+rwx ~/.ashlr) or free disk space',
+    );
+  } catch (err) {
+    // checkAshlrWriteable never throws, but treat any surprise as a hard fail
+    // (we could not prove ~/.ashlr is writeable).
+    return check(
+      'ashlr-writeable',
+      '~/.ashlr writeable',
+      'fail',
+      `could not verify ~/.ashlr is writeable: ${String(err)}`,
+      'Fix permissions on ~/.ashlr (chmod u+rwx ~/.ashlr) or free disk space',
+    );
+  }
+}
+
+/**
+ * Probe: sandbox health (H7).
+ * id: 'sandbox-health'
+ *
+ * READ-ONLY via readSandboxHealth() → listSandboxes() (counts only — removes
+ * NOTHING). PASS when there are zero/low orphans; WARN when the orphan count
+ * reaches SANDBOX_ORPHAN_WARN_THRESHOLD, with a `ashlr sandbox gc` fix hint.
+ * Mutates nothing. Never throws.
+ */
+function checkSandboxHealth(): DoctorCheck {
+  try {
+    const { total, orphans } = readSandboxHealth();
+    if (orphans >= SANDBOX_ORPHAN_WARN_THRESHOLD) {
+      return check(
+        'sandbox-health',
+        'Sandbox health',
+        'warn',
+        `${orphans} orphan sandbox${orphans !== 1 ? 'es' : ''} of ${total} on disk`,
+        'Reclaim them: `ashlr sandbox gc`',
+      );
+    }
+    return check(
+      'sandbox-health',
+      'Sandbox health',
+      'pass',
+      `${total} sandbox${total !== 1 ? 'es' : ''} on disk (${orphans} orphan${orphans !== 1 ? 's' : ''})`,
+    );
+  } catch (err) {
+    return check('sandbox-health', 'Sandbox health', 'pass', `sandbox health unreadable: ${String(err)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // runDoctor
 // ---------------------------------------------------------------------------
 
@@ -872,6 +1054,16 @@ export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
   // --- M19 checks ---
   checks.push(checkSpendGovernance(governance));
   checks.push(checkTelemetrySink(telemetrySinkInfo));
+
+  // --- H7 checks (5 NEW read-only probes). All read-only; the lone write is
+  // checkAshlrWriteable's self-cleaning sentinel under ~/.ashlr (written then
+  // immediately unlinked). NONE mutates enrollment / kill / daemon / sandbox /
+  // repo state. See docs/contracts/CONTRACT-H7.md §2 (BUILD ITEM 2).
+  checks.push(checkEnrollment());
+  checks.push(checkDaemonState());
+  checks.push(checkKillSwitch());
+  checks.push(checkAshlrWriteableProbe());
+  checks.push(checkSandboxHealth());
 
   // --- Async: provider registry ---
   try {
