@@ -291,10 +291,14 @@ const loadSandboxCmd = lazyCmd(
   'sandbox command requires src/cli/sandbox.ts (M21 module not yet built).',
 );
 
+// H6 (PART A): the `ashlr audit` viewer moved to its own ./audit.ts module
+// (read-only; adds --action/--result/--since filters). Re-pointed here from the
+// old sandbox.ts#cmdAudit, matching the reflect/health/seams/verify-safety
+// loaders — see docs/contracts/CONTRACT-H6.md §A.3.
 const loadAuditCmd = lazyCmd(
-  () => import('./sandbox.js'),
+  () => import('./audit.js'),
   (m) => m.cmdAudit as Cmd,
-  'audit command requires src/cli/sandbox.ts (M21 module not yet built).',
+  'audit command requires src/cli/audit.ts (H6 module not yet built).',
 );
 
 const loadEnrollCmd = lazyCmd(
@@ -1250,7 +1254,7 @@ function cmdHelp(): void {
     ['sandbox list',                 'List active git-worktree sandboxes (M21 safety foundation).'],
     ['sandbox diff <id>',            'Show diff of a sandbox vs its base HEAD.'],
     ['sandbox cleanup <id>',         'Remove a sandbox worktree and scratch branch.'],
-    ['audit [--limit N] [--json]',   'Tail the append-only audit trail (newest-first).'],
+    ['audit [N] [--json] [--action <verb>] [--result <r>] [--since <when>]', 'Tail the append-only audit trail (newest-first); filter by action/result/since (read-only).'],
     ['enroll list',                  'List enrolled repos + kill switch state.'],
     ['enroll add <repo>',            'Enroll a repo for autonomous work.'],
     ['enroll remove <repo>',         'Remove a repo from the enrollment registry.'],

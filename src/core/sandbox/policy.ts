@@ -16,6 +16,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from '
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Enrollment } from '../types.js';
+// H6 (PART A — audit completeness): emit an audit() record inside
+// enroll/unenroll/setKill so EVERY path (CLI cmdEnroll OR any programmatic
+// caller — fixture, daemon, onboard) is captured — see
+// docs/contracts/CONTRACT-H6.md §A.2. audit.ts imports only node builtins + a
+// `type` from ../types.js and does NOT import policy.ts, so this static import
+// creates NO import cycle (re-verified by an H6 [STATIC] test). Metadata only:
+// action verb + repo abs path (a path is NOT a secret) + 'ok'.
+import { audit } from './audit.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call time so tests can relocate HOME)
@@ -102,6 +110,17 @@ export function setKill(on: boolean): void {
       unlinkSync(kp);
     }
   }
+  // H6 (§A.2): audit the kill-switch toggle on EVERY call (idempotent on disk;
+  // we audit the requested intent). repo is null (not repo-scoped); summary is
+  // metadata only. audit() swallows its own errors, so the "never throws"
+  // contract of setKill is preserved.
+  audit({
+    action: on ? 'kill:on' : 'kill:off',
+    repo: null,
+    sandboxId: null,
+    summary: `kill switch ${on ? 'on' : 'off'}`,
+    result: 'ok',
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +148,16 @@ export function enroll(repo: string): void {
     reg.repos.push(abs);
     writeRegistry(reg);
   }
+  // H6 (§A.2): audit AFTER the (idempotent) write so a no-op re-enroll STILL
+  // records the requested intent. The repo abs path is metadata, never a secret;
+  // audit() swallows its own errors so enroll's "never throws" contract holds.
+  audit({
+    action: 'enroll:add',
+    repo: abs,
+    sandboxId: null,
+    summary: `enrolled ${abs}`,
+    result: 'ok',
+  });
 }
 
 /**
@@ -142,6 +171,16 @@ export function unenroll(repo: string): void {
   if (filtered.length !== reg.repos.length) {
     writeRegistry({ repos: filtered });
   }
+  // H6 (§A.2): audit AFTER the (idempotent) write so a no-op unenroll STILL
+  // records the requested intent. Metadata only (abs path is not a secret);
+  // audit() swallows its own errors so unenroll's "never throws" contract holds.
+  audit({
+    action: 'enroll:remove',
+    repo: abs,
+    sandboxId: null,
+    summary: `unenrolled ${abs}`,
+    result: 'ok',
+  });
 }
 
 /**

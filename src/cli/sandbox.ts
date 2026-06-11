@@ -1,13 +1,12 @@
 /**
- * `ashlr sandbox` / `ashlr audit` / `ashlr enroll` — M21 Safety Foundation CLI.
+ * `ashlr sandbox` / `ashlr enroll` — M21 Safety Foundation CLI.
+ * (`ashlr audit` moved to src/cli/audit.ts in H6 — see CONTRACT-H6.md §A.3.)
  *
  * Commands:
  *   sandbox list                List all active sandboxes.
  *   sandbox diff <id>           Show the diff of a sandbox vs its base HEAD.
  *   sandbox cleanup <id>        Remove a sandbox worktree and scratch branch.
  *   sandbox gc                  Reclaim STALE orphan sandboxes (crash leftovers).
- *
- *   audit [--limit N] [--json]  Tail the audit trail (newest-first).
  *
  *   enroll list                 List enrolled repos + kill switch state.
  *   enroll add <repo>           Enroll a repo for autonomous work.
@@ -19,7 +18,7 @@
  */
 
 import { pad, makeColors, isTty } from './ui.js';
-import type { Sandbox, SandboxDiff, AuditEntry } from '../core/types.js';
+import type { Sandbox, SandboxDiff } from '../core/types.js';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers (non-TTY safe)
@@ -84,25 +83,10 @@ async function loadWorktree(): Promise<{
   };
 }
 
-// ---------------------------------------------------------------------------
-// Lazy imports — core/sandbox/audit.ts (M21)
-// ---------------------------------------------------------------------------
-
-type ReadAuditFn = (limit?: number) => AuditEntry[];
-
-let _readAudit: ReadAuditFn | null | undefined = undefined;
-
-async function loadAuditModule(): Promise<ReadAuditFn | null> {
-  if (_readAudit === undefined) {
-    try {
-      const mod = await import('../core/sandbox/audit.js' as unknown as string) as { readAudit: ReadAuditFn };
-      _readAudit = mod.readAudit;
-    } catch {
-      _readAudit = null;
-    }
-  }
-  return _readAudit ?? null;
-}
+// H6 (PART A): the `ashlr audit` viewer + its readAudit() lazy-loader moved to
+// the dedicated src/cli/audit.ts module (read-only; --action/--result/--since
+// filters). The old loadAuditModule/cmdAudit/formatAuditEntry block that lived
+// here was removed — see docs/contracts/CONTRACT-H6.md §A.3.
 
 // ---------------------------------------------------------------------------
 // Lazy imports — core/sandbox/policy.ts (M21)
@@ -302,61 +286,6 @@ export async function cmdSandbox(args: string[]): Promise<number> {
   console.error(red('error: ') + `Unknown sandbox subcommand: ${sub}`);
   console.error(dim('Usage: ashlr sandbox [list | diff <id> | cleanup <id> | gc]'));
   return 2;
-}
-
-// ---------------------------------------------------------------------------
-// cmdAudit — tail audit trail
-// ---------------------------------------------------------------------------
-
-function formatAuditEntry(entry: AuditEntry): string {
-  const resultColor =
-    entry.result === 'ok'      ? green(entry.result)   :
-    entry.result === 'refused' ? yellow(entry.result)  :
-                                 red(entry.result);
-
-  const ts    = dim(entry.ts.replace('T', ' ').replace(/\.\d+Z$/, 'Z'));
-  const action = bold(entry.action);
-  const repo   = entry.repo    ? dim(` repo=${entry.repo}`)          : '';
-  const sbId   = entry.sandboxId ? dim(` sandbox=${entry.sandboxId}`) : '';
-
-  return `${ts}  [${resultColor}]  ${action}  ${entry.summary}${repo}${sbId}`;
-}
-
-export async function cmdAudit(args: string[]): Promise<number> {
-  let limit: number | undefined = undefined;
-  let jsonMode = false;
-
-  for (let i = 0; i < args.length; i++) {
-    if ((args[i] === '--limit' || args[i] === '-n') && args[i + 1]) {
-      const n = parseInt(args[i + 1], 10);
-      if (!isNaN(n) && n > 0) { limit = n; i++; }
-    } else if (args[i] === '--json') {
-      jsonMode = true;
-    } else if (/^\d+$/.test(args[i])) {
-      // Positional numeric arg as limit shorthand: `ashlr audit 20`
-      limit = parseInt(args[i], 10);
-    }
-  }
-
-  const readAudit = await loadAuditModule();
-  if (!readAudit) { moduleNotBuilt('audit'); return 1; }
-
-  const entries = readAudit(limit);
-
-  if (jsonMode) {
-    console.log(JSON.stringify(entries, null, 2));
-    return 0;
-  }
-
-  if (entries.length === 0) {
-    console.log(dim('No audit entries found.'));
-    return 0;
-  }
-
-  for (const entry of entries) {
-    console.log(formatAuditEntry(entry));
-  }
-  return 0;
 }
 
 // ---------------------------------------------------------------------------

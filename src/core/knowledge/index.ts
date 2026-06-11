@@ -121,6 +121,13 @@ export const SECRET_PATTERNS: RegExp[] = [
   /\b[0-9a-f]{32,}\b/gi,
   // Long base64 strings (≥40 chars, not in comments/imports)
   /(?<![/\w])[A-Za-z0-9+/]{40,}={0,2}(?![/\w])/g,
+  // H6 (PART B.2): bare Stripe secret keys (sk_live_… / sk_test_…). The
+  // underscores in `sk_live_…` break the base64 char class + the \w boundary
+  // of the high-entropy patterns above, so this shape was MISSED before H6
+  // (the H4 finding). This grows the array 6 -> 7; verify-safety pins
+  // length >= 6, so it stays GREEN. See CONTRACT-H6 §B.2 + the deliberate H4
+  // assertion flip §B.4.
+  /\bsk_(live|test)_[A-Za-z0-9_]{16,}\b/g,
 ];
 
 /**

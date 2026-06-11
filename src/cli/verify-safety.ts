@@ -331,8 +331,8 @@ function checkScrubPatterns(read: CoreSourceReader): SafetyCheck {
   if (!/function scrubSecrets/.test(indexSrc) || !/SECRET_PATTERNS/.test(indexSrc)) {
     return mk(id, label, false, 'index.ts is missing scrubSecrets / SECRET_PATTERNS');
   }
-  if (!/function scrubSecrets/.test(graphSrc) || !/SECRET_PATTERN/.test(graphSrc)) {
-    return mk(id, label, false, 'graph.ts is missing scrubSecrets / SECRET_PATTERN');
+  if (!/function scrubSecrets/.test(graphSrc) || !/SECRET_PATTERNS/.test(graphSrc)) {
+    return mk(id, label, false, 'graph.ts is missing scrubSecrets / SECRET_PATTERNS');
   }
   // The index high-entropy markers must still be present (drift-guard against
   // an INJECTED/broken source where the real import can't be swapped). This is
@@ -370,9 +370,14 @@ function checkScrubPatterns(read: CoreSourceReader): SafetyCheck {
   if (SECRET_PATTERNS.length < 6) {
     return mk(id, label, false, `index SECRET_PATTERNS shrank to ${SECRET_PATTERNS.length} (<6)`);
   }
-  // graph.ts assignment-style scrub must also redact the overlap (assignment) case.
-  if (!/key\|token\|secret\|password/.test(graphSrc)) {
-    return mk(id, label, false, 'graph.ts assignment-style secret pattern not found');
+  // graph.ts must DELEGATE to index.ts's real scrub via the parity import
+  // (live code, not a vestigial assignment-regex comment): pin the
+  // `from './index.js'` import pulling scrubSecrets + SECRET_PATTERNS, which is
+  // the genuine H6 §B.1 strengthening. A cosmetic comment edit can no longer
+  // trip this; only removing the real delegation will.
+  if (!/from ['"]\.\/index\.js['"]/.test(graphSrc) ||
+      !/scrubSecrets/.test(graphSrc) || !/SECRET_PATTERNS/.test(graphSrc)) {
+    return mk(id, label, false, 'graph.ts no longer imports the index.ts parity scrub');
   }
   return mk(id, label, true);
 }

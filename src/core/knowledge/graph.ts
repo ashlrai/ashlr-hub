@@ -20,6 +20,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { listEnrolled, isEnrolled } from '../sandbox/policy.js';
+import { SECRET_PATTERNS, scrubSecrets as scrubSecretsParity } from './index.js';
 import type { KnowledgeGraph, ImpactResult } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -269,10 +270,45 @@ function packageName(imp: string): string {
 // Secret-scrubbing helper (for display; not stored in graph)
 // ---------------------------------------------------------------------------
 
-const SECRET_PATTERN = /(?:key|token|secret|password|passwd|pwd|api_?key|auth)[^\s]*\s*[:=]\s*\S+/gi;
+// H6 (PART B.1 — scrub PARITY): graph.ts delegates to index.ts's full
+// SECRET_PATTERNS set so the two scrubs are at PARITY. Previously this was the
+// WEAKER scrub (H4 §6.8 FINDING) — ONE assignment-style regex that missed bare
+// JWT / AKIA / base64 / hex blobs. graph.ts imports { SECRET_PATTERNS,
+// scrubSecrets } from './index.js' and uses index's scrubSecrets at the
+// `detail:` emit site, so graph.ts and index.ts redact the SAME shapes
+// (JWT / AKIA / base64 / hex / Stripe sk_live_) — see
+// docs/contracts/CONTRACT-H6.md §B.1. This flips the pinned H4 §6.8 assertions
+// DELIBERATELY (§B.4): they now assert the bare blobs ARE redacted.
+//
+// PARITY DIRECTION (H6 review finding, §B.1): "parity" means graph.ts adopts
+// index.ts's SUPERSET of high-entropy shapes (bare JWT / AKIA / base64 / hex /
+// sk_live_). The OLD graph regex additionally matched bare LOW-entropy
+// assignments like `token=abc123` / `auth=xyz`; index.ts's compound-name +
+// high-entropy patterns intentionally do NOT, so those narrow shapes are
+// dropped in this direction. This is safe because the ONLY string graph.ts
+// scrubs is the structurally-constrained `detail` string
+// `${dep} shared across N repos: basename@version` (dep names + repo@version,
+// never free-form text), so a bare `token=…` literal cannot occur there.
+//
+// SECRET_PATTERNS is LOAD-BEARING here (not decorative): scrubSecrets() asserts
+// the imported parity array is non-empty before delegating, so a wiped/empty
+// upstream pattern set surfaces as a throw at the graph.ts call site rather than
+// a silent no-op. `ashlr verify-safety` CHECK 4 pins the real `./index.js`
+// parity import (scrubSecrets + SECRET_PATTERNS) — live code, not a vestigial
+// assignment-regex string — see verify-safety.ts CHECK 4 + CONTRACT-H6 §B.1.
 
+/** Parity scrub: delegates to index.ts's exported scrubSecrets over the shared
+ *  SECRET_PATTERNS so graph.ts redacts the identical pattern set. The explicit
+ *  SECRET_PATTERNS length guard makes the shared array load-bearing: an empty
+ *  upstream pattern set throws here instead of silently passing raw text. */
 function scrubSecrets(text: string): string {
-  return text.replace(SECRET_PATTERN, '[REDACTED]');
+  // Defense-in-depth: the shared pattern set must be non-empty for parity to
+  // hold. A zero-length array would mean index.ts's scrub silently became a
+  // no-op; refuse to emit an unscrubbed detail string in that case.
+  if (SECRET_PATTERNS.length === 0) {
+    throw new Error('graph.ts scrub parity broken: shared SECRET_PATTERNS is empty');
+  }
+  return scrubSecretsParity(text);
 }
 
 // ---------------------------------------------------------------------------

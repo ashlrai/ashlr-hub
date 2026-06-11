@@ -469,6 +469,12 @@ export function makeFixture(): H1Fixture {
   delete process.env.ASHLR_IN_SWARM;
 
   const tracked: DisposableRepo[] = [];
+  // Once cleanup() restores the REAL HOME, a second cleanup() must be a TRUE
+  // no-op — it must NOT re-run unenroll()/setKill(), which (post-H6, now that
+  // policy.ts emits audit() on every enroll/unenroll/setKill) would WRITE audit
+  // records into the REAL ~/.ashlr. This flag enforces genuine idempotence so a
+  // double-cleanup never leaks state to the real home.
+  let cleaned = false;
 
   // Sanity: homedir() must now resolve to the tmp HOME, otherwise isolation is
   // broken on this platform and the fixture MUST NOT proceed (it would risk the
@@ -503,6 +509,11 @@ export function makeFixture(): H1Fixture {
     },
     setKill: (on) => setKill(on),
     cleanup: () => {
+      // TRUE-IDEMPOTENT guard: after the first cleanup restores the real HOME,
+      // a second call returns immediately WITHOUT touching policy state (a repeat
+      // unenroll()/setKill() would write audit records into the REAL ~/.ashlr).
+      if (cleaned) return;
+      cleaned = true;
       // 1. Unenroll + destroy every tracked repo (best-effort, never throws).
       for (const repo of tracked) {
         try {

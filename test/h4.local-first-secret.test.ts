@@ -50,7 +50,7 @@ vi.mock('../src/core/providers.js', () => ({
 
 // Lazy (post-mock) imports of the REAL surfaces under test.
 import { getActiveClient } from '../src/core/run/provider-client.js';
-import { buildKnowledge, loadChunks } from '../src/core/knowledge/index.js';
+import { buildKnowledge, loadChunks, scrubSecrets } from '../src/core/knowledge/index.js';
 import { readSource, containsToken, importLines, stripComments } from './helpers/h4-static.js';
 import { makeFixture, makeCfg } from './helpers/h1-fixture.js';
 import type { AshlrConfig } from '../src/core/types.js';
@@ -253,13 +253,15 @@ const SECRET_APIKEY_ASSIGN = 'api_key = "abcdefghij0123456789ABCDEFGHIJ"'; // as
 const SECRET_PASSWORD_ASSIGN = 'password = "hunter2hunter2"'; // assignment-style
 // sk-HYPHEN-prefixed token whose ≥40-char base64 BODY is caught by index.ts's
 // base64 pattern (the secret material is redacted; the bare `sk-` prefix leaks).
-// NOTE (FINDING, see 6.6): the Stripe-style `sk_live_<underscores>` shape is NOT
-// redacted by index.ts (underscores break the base64 run + it isn't hex/JWT/AWS)
-// unless it appears in `key = value` assignment form. The test below pins the
-// shape index.ts ACTUALLY redacts and documents the underscore gap rather than
-// asserting a guard that does not exist (CONTRACT-H4 "never weaken to pass").
 const SECRET_SK_BODY = 'abcdefghijklmnopqrstuvwxyz0123456789ABCD'; // 40 base64 chars
 const SECRET_SK = `sk-${SECRET_SK_BODY}`;
+// Stripe-style bare `sk_live_<underscores>` token. STRENGTHENED BY H6 (PART B.2):
+// previously this shape was NOT redacted by index.ts (the underscores break the
+// base64 char-class run and it is not hex/JWT/AWS), so the old H4 note documented
+// the gap rather than asserting a guard that did not exist. H6 added the pattern
+// /\bsk_(live|test)_[A-Za-z0-9_]{16,}\b/g to index.ts's SECRET_PATTERNS, so the
+// bare token is now redacted; 6.6 below asserts it (the deliberate H6 flip).
+const SECRET_SK_LIVE = 'sk_live_51AbCdEfGhIjKlMnOpQrStUvWx0123456789'; // bare Stripe-style
 
 describe('H4 · INV6 SECRET-SCRUB · index.ts scrub + skip-lists', () => {
   let fx: H1Fixture;
@@ -388,6 +390,7 @@ describe('H4 · INV6 SECRET-SCRUB · index.ts scrub + skip-lists', () => {
           `const ${SECRET_APIKEY_ASSIGN};`,
           `const ${SECRET_PASSWORD_ASSIGN};`,
           `const sk = "${SECRET_SK}";`,
+          `const skLive = "${SECRET_SK_LIVE}";`, // [strengthened by H6 §B.2]
           'export const SAFE = "keep-me";',
           '',
         ].join('\n'),
@@ -408,6 +411,7 @@ describe('H4 · INV6 SECRET-SCRUB · index.ts scrub + skip-lists', () => {
       'abcdefghij0123456789ABCDEFGHIJ', // the api_key value
       'hunter2hunter2', // the password value
       SECRET_SK,
+      SECRET_SK_LIVE, // bare Stripe sk_live_ token — now redacted [strengthened by H6 §B.2]
     ]) {
       expect(stored).not.toContain(raw);
     }
@@ -422,17 +426,23 @@ describe('H4 · INV6 SECRET-SCRUB · index ↔ graph parity + FINDING', () => {
   });
 
   /**
-   * Reconstruct graph.ts's REAL scrub regex from source so we exercise the ACTUAL
-   * pattern (not a paraphrase). graph.ts:scrubSecrets is module-private and only
-   * reachable via buildGraph's `detail` string, which is unnatural to seed with a
-   * secret — the [STATIC] technique (CONTRACT-H4 §6.8) is the faithful path.
+   * Exercise graph.ts's REAL scrub. STRENGTHENED BY H6 (PART B.1): graph.ts no
+   * longer carries a private `const SECRET_PATTERN = /…/` regex — its module-
+   * private `scrubSecrets` now DELEGATES to index.ts's exported `scrubSecrets`
+   * over the shared `SECRET_PATTERNS` array, so the two are at PARITY (the H4
+   * §6.8 FINDING is now CLOSED). We faithfully reproduce graph's behavior by
+   * invoking the same shared `scrubSecrets` graph delegates to, and statically
+   * pin that graph.ts actually imports it from index.js so a future divergence
+   * (e.g. graph re-introducing a weaker private regex) is caught.
    */
   function graphScrub(text: string): string {
     const src = readSource('core/knowledge/graph.ts');
-    const m = src.match(/const SECRET_PATTERN\s*=\s*\/([\s\S]*?)\/([a-z]*);/);
-    expect(m).not.toBeNull(); // graph.ts must still define SECRET_PATTERN
-    const re = new RegExp(m![1]!, m![2]!);
-    return text.replace(re, '[REDACTED]');
+    // graph.ts must import the shared scrub from index.js (parity guarantee).
+    expect(src).toMatch(
+      /import\s*\{[^}]*\bSECRET_PATTERNS\b[^}]*\bscrubSecrets\b[^}]*\}\s*from\s*['"]\.\/index\.js['"]/,
+    );
+    // graph's module-private scrubSecrets delegates to the shared parity scrub.
+    return scrubSecrets(text);
   }
 
   // 6.4 — graph.ts scrubs detail via scrubSecrets before emit ([STATIC] presence
@@ -472,17 +482,17 @@ describe('H4 · INV6 SECRET-SCRUB · index ↔ graph parity + FINDING', () => {
     }
   });
 
-  // 6.8 [STATIC][UNTESTED][FINDING] — index.ts vs graph.ts pattern PARITY.
+  // 6.8 [STATIC] — index.ts ↔ graph.ts scrub PARITY (FINDING now CLOSED).
   //
-  // index.ts uses a 6-pattern array (assignment + AWS + JWT + long hex + long
-  // base64). graph.ts uses ONE broad assignment-style regex. They AGREE on the
-  // assignment-style OVERLAP, but DIVERGE on bare high-entropy blobs:
-  //   FINDING: graph.ts does NOT redact a bare JWT / AKIA / base64 / hex value
-  //   that is not in `key=value` form. graph.ts is the WEAKER impl.
-  // This test PINS both behaviors so the gap is visible; the recommended local-
-  // only fix (graph.ts adopting the index pattern array) is a deliberate,
-  // reviewed change — never a silent weakening of either side.
-  it('6.8 [STATIC][FINDING] index covers bare blobs; graph (weaker) only assignment-style', () => {
+  // STRENGTHENED BY H6 (PART B.1): the prior H4 §6.8 FINDING was that graph.ts's
+  // single assignment-style regex MISSED bare JWT / AKIA / base64 / hex blobs,
+  // making it the WEAKER impl. H6 closed that gap — graph.ts now DELEGATES to
+  // index.ts's exported `scrubSecrets` over the shared `SECRET_PATTERNS` array,
+  // so the two redact the IDENTICAL shapes. This test was DELIBERATELY FLIPPED
+  // (CONTRACT-H6 §B.4): the three behavioral assertions below previously pinned
+  // `.toContain` (secret SURVIVES); they now assert `.not.toContain` (secret IS
+  // redacted). This is the intended guard-STRENGTHENING, not a regression.
+  it('6.8 [STATIC] index ↔ graph scrub PARITY (bare blobs redacted by BOTH) [strengthened by H6]', () => {
     const indexSrc = readSource('core/knowledge/index.ts');
     const graphSrc = readSource('core/knowledge/graph.ts');
 
@@ -490,23 +500,27 @@ describe('H4 · INV6 SECRET-SCRUB · index ↔ graph parity + FINDING', () => {
     expect(indexSrc).toContain('function scrubSecrets(');
     expect(graphSrc).toContain('function scrubSecrets(');
 
-    // index.ts demonstrably carries the HIGH-ENTROPY patterns graph lacks.
+    // index.ts demonstrably carries the HIGH-ENTROPY patterns.
     expect(indexSrc).toMatch(/AKIA/); // AWS access key
     expect(indexSrc).toMatch(/eyJ/); // JWT prefix
     expect(indexSrc).toMatch(/\[0-9a-f\]\{32,\}/); // long hex
     expect(indexSrc).toMatch(/\{40,\}/); // long base64
 
-    // FINDING — graph.ts's SINGLE regex is assignment-style only; it does NOT
-    // carry the bare-blob patterns. Assert their ABSENCE so the divergence is
-    // explicit and any future consolidation flips this assertion deliberately.
-    const graphPatternBlock = graphSrc.match(/const SECRET_PATTERN\s*=\s*\/[\s\S]*?\/[a-z]*;/)?.[0] ?? '';
-    expect(graphPatternBlock).not.toContain('AKIA');
-    expect(graphPatternBlock).not.toContain('eyJ');
+    // PARITY (strengthened by H6) — graph.ts no longer keeps a private weaker
+    // regex; it IMPORTS the shared SECRET_PATTERNS + scrubSecrets from index.js
+    // and uses them at the `detail:` emit site. Assert the import + delegation so
+    // a future re-introduction of a divergent private pattern fails this test.
+    expect(graphSrc).toMatch(
+      /import\s*\{[^}]*\bSECRET_PATTERNS\b[^}]*\bscrubSecrets\b[^}]*\}\s*from\s*['"]\.\/index\.js['"]/,
+    );
 
-    // BEHAVIORAL proof of the gap: graph's REAL regex leaves a bare JWT / AKIA /
-    // base64 blob UNREDACTED, where index.ts (exercised in 6.6) redacts them.
-    expect(graphScrub(SECRET_JWT)).toContain(SECRET_JWT); // graph misses bare JWT
-    expect(graphScrub(SECRET_AWS)).toContain(SECRET_AWS); // graph misses bare AKIA
-    expect(graphScrub(SECRET_BASE64)).toContain(SECRET_BASE64); // graph misses bare blob
+    // BEHAVIORAL proof of PARITY: graph's REAL (now-shared) scrub REDACTS a bare
+    // JWT / AKIA / base64 blob — the exact cases it formerly MISSED (this is the
+    // deliberate H6 flip; previously these asserted `.toContain`).
+    expect(graphScrub(SECRET_JWT)).not.toContain(SECRET_JWT); // graph now redacts bare JWT
+    expect(graphScrub(SECRET_AWS)).not.toContain(SECRET_AWS); // graph now redacts bare AKIA
+    expect(graphScrub(SECRET_BASE64)).not.toContain(SECRET_BASE64); // graph now redacts bare blob
+    // …and the redaction marker is present (the shared scrub fired).
+    expect(graphScrub(SECRET_JWT)).toContain('[REDACTED]');
   });
 });
