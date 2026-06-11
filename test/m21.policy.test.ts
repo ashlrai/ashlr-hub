@@ -179,15 +179,38 @@ describe('M21 policy — assertMayMutate throws when kill switch is on', () => {
 // ---------------------------------------------------------------------------
 
 describe('M21 policy — allowAnyRepo hatch', () => {
+  // H5 CHANGE 3 migration: the allowAnyRepo hatch is now effective ONLY when
+  // ASHLR_TEST_ALLOW_ANY_REPO==='1' (mirrors advance.ts). Set it for this block
+  // so the hatch is honored; restore after. The kill-switch and false-hatch
+  // tests below are unaffected (kill wins first; false never opens the hatch).
+  const origAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+  beforeEach(() => {
+    process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+  });
+  afterEach(() => {
+    if (origAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+    else process.env.ASHLR_TEST_ALLOW_ANY_REPO = origAllow;
+  });
+
   it('passes for an unenrolled repo when allowAnyRepo is true and kill switch is off', async () => {
     const p = await policy();
     expect(() => p.assertMayMutate(fakeTmpRepo(), { allowAnyRepo: true })).not.toThrow();
   });
 
+  it('H5: allowAnyRepo is INERT without ASHLR_TEST_ALLOW_ANY_REPO=1 (still refuses unenrolled)', async () => {
+    // Deliberate CHANGE-3 negative: clear the env hatch and prove allowAnyRepo:true
+    // can NO LONGER bypass enrollment — the env-gate is load-bearing.
+    delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+    const p = await policy();
+    expect(() => p.assertMayMutate(fakeTmpRepo(), { allowAnyRepo: true })).toThrow(
+      /not enrolled/,
+    );
+  });
+
   it('allowAnyRepo never overrides the kill switch', async () => {
     const p = await policy();
     p.setKill(true);
-    // Even with allowAnyRepo, kill switch must block
+    // Even with allowAnyRepo (env-gated on), kill switch must block.
     expect(() => p.assertMayMutate(fakeTmpRepo(), { allowAnyRepo: true })).toThrow();
   });
 

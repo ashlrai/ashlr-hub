@@ -500,6 +500,61 @@ export async function runDaemon(
     result: 'ok',
   });
 
+  // -------------------------------------------------------------------------
+  // H5 CHANGE 1 — WIRE THE ORPHAN SWEEP (crash-leftover reclaim).
+  // On daemon start, BEFORE the first tick, reclaim crash-leftover worktrees with
+  // a conservative staleMs GREATER than the max swarm wall-clock (ORPHAN_STALE_MS,
+  // shared from worktree.ts) so a LIVE in-flight worktree younger than staleMs is
+  // NEVER reclaimed — only genuine crash leftovers are swept. Inward cleanup only:
+  // sweepOrphanSandboxes routes every removal through removeSandbox, inheriting its
+  // containment guards verbatim (re-derived safe path + branch; a tampered/out-of-
+  // namespace entry falls through to local-dir cleanup only). It pushes nothing,
+  // opens no PR, applies no proposal — it is purely inward worktree reclaim. The
+  // worktree module is LAZY-imported so the daemon's STATIC outward-primitive
+  // grep-guards stay intact, and the whole thing is wrapped so a sweep failure
+  // NEVER throws out of runDaemon. Audited via the daemon:start surface.
+  //
+  // DRY-RUN = ZERO SIDE EFFECTS: the sweep performs real destructive on-disk git
+  // ops (`git worktree remove --force` / `git branch -D` via removeSandbox), so
+  // in dry-run mode we SKIP the actual reclaim and instead audit a PREVIEW of
+  // what WOULD be reclaimed (count only, via a guarded staleMs-eligible probe),
+  // honoring the strict 'dry-run mutates nothing' expectation that the rest of
+  // loop.ts upholds (it creates no proposals / makes no outward changes). A
+  // normal (non-dry) start reclaims for real. Documented in CONTRACT-H5.md.
+  if (opts.dryRun) {
+    // Dry-run previews the loop WITHOUT mutating disk: skip the real reclaim and
+    // audit only the count that WOULD be reclaimed (a read-only listSandboxes()
+    // count; the actual liveness/age filtering happens for real on a non-dry
+    // start). This keeps `daemon start --dry-run` side-effect-free.
+    try {
+      const wt = await import('../sandbox/worktree.js');
+      const wouldConsider = wt.listSandboxes().length;
+      audit({
+        action: 'daemon:start',
+        repo: null,
+        sandboxId: null,
+        summary: `dry-run: orphan sweep skipped (${wouldConsider} sandbox(es) on disk; none swept)`,
+        result: 'ok',
+      });
+    } catch {
+      // Best-effort: a preview failure must never crash daemon start.
+    }
+  } else {
+    try {
+      const wt = await import('../sandbox/worktree.js');
+      const swept = wt.sweepOrphanSandboxes({ staleMs: wt.ORPHAN_STALE_MS });
+      audit({
+        action: 'daemon:start',
+        repo: null,
+        sandboxId: null,
+        summary: `orphan sweep reclaimed ${swept.length} sandbox(es)${swept.length ? `: ${swept.join(', ')}` : ''}`,
+        result: 'ok',
+      });
+    } catch {
+      // Best-effort: a sweep failure must never crash daemon start.
+    }
+  }
+
   try {
     if (opts.once) {
       // Single-tick mode.

@@ -43,15 +43,24 @@ import type { Sandbox } from '../src/core/types.js';
 
 const origHome = process.env.HOME;
 let tmpHome: string;
+// H5 CHANGE 3 migration: allowAnyRepo is now effective ONLY when
+// ASHLR_TEST_ALLOW_ANY_REPO==='1'. This suite sandboxes unenrolled tmp repos via
+// allowAnyRepo:true, so set the env hatch for the whole file (restored after).
+// The lone test asserting refusal WITHOUT allowAnyRepo is unaffected — it never
+// passes the hatch, so enrollment is required regardless of the env.
+const origAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
 
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m21-wt-'));
   process.env.HOME = tmpHome;
+  process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
 });
 
 afterEach(() => {
   fs.rmSync(tmpHome, { recursive: true, force: true });
   process.env.HOME = origHome;
+  if (origAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+  else process.env.ASHLR_TEST_ALLOW_ANY_REPO = origAllowAnyRepo;
 });
 
 // ---------------------------------------------------------------------------

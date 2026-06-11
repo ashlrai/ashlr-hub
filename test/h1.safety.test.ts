@@ -205,6 +205,10 @@ describe('H1 safety — ENROLLMENT gate', () => {
       // mutates the source WORKING TREE, index, or HEAD — and never an
       // ashlr/proposal/ branch. removeSandbox tears the worktree branch back
       // down, restoring the branch set byte-for-byte.
+      // H5 CHANGE 3: the allowAnyRepo hatch is now env-gated, so set
+      // ASHLR_TEST_ALLOW_ANY_REPO=1 for the success path (restore after).
+      const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
       const sb = createSandbox(repo.dir, { allowAnyRepo: true });
       try {
         const during = treeSnapshot(repo);
@@ -214,6 +218,8 @@ describe('H1 safety — ENROLLMENT gate', () => {
         expect(during.branches.some((b) => b.startsWith('ashlr/proposal/'))).toBe(false);
       } finally {
         removeSandbox(sb);
+        if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
       }
       // After teardown the source repo is byte-identical to the start.
       expectTreeUnchanged(before, treeSnapshot(repo));

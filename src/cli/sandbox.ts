@@ -5,6 +5,7 @@
  *   sandbox list                List all active sandboxes.
  *   sandbox diff <id>           Show the diff of a sandbox vs its base HEAD.
  *   sandbox cleanup <id>        Remove a sandbox worktree and scratch branch.
+ *   sandbox gc                  Reclaim STALE orphan sandboxes (crash leftovers).
  *
  *   audit [--limit N] [--json]  Tail the audit trail (newest-first).
  *
@@ -33,15 +34,23 @@ const { bold, dim, red, green, yellow, cyan, gray } = makeColors(isTty());
 type ListSandboxesFn = () => Sandbox[];
 type SandboxDiffFn   = (sb: Sandbox) => SandboxDiff;
 type RemoveSandboxFn = (sb: Sandbox) => void;
+// H5 CHANGE 1 — explicit human repair surface for the orphan sweep.
+type SweepOrphanSandboxesFn = (opts?: { staleMs?: number }) => string[];
 
 let _listSandboxes: ListSandboxesFn | null | undefined = undefined;
 let _sandboxDiff:   SandboxDiffFn   | null | undefined = undefined;
 let _removeSandbox: RemoveSandboxFn | null | undefined = undefined;
+let _sweepOrphans:  SweepOrphanSandboxesFn | null | undefined = undefined;
+// H5 CHANGE 1 — reuse worktree's single-source-of-truth staleness threshold so
+// `sandbox gc` and the daemon-start sweep can NEVER drift apart.
+let _orphanStaleMs: number | null | undefined = undefined;
 
 async function loadWorktree(): Promise<{
   listSandboxes: ListSandboxesFn;
   sandboxDiff:   SandboxDiffFn;
   removeSandbox: RemoveSandboxFn;
+  sweepOrphanSandboxes: SweepOrphanSandboxesFn;
+  orphanStaleMs: number;
 } | null> {
   if (_listSandboxes === undefined) {
     try {
@@ -49,14 +58,20 @@ async function loadWorktree(): Promise<{
         listSandboxes: ListSandboxesFn;
         sandboxDiff:   SandboxDiffFn;
         removeSandbox: RemoveSandboxFn;
+        sweepOrphanSandboxes: SweepOrphanSandboxesFn;
+        ORPHAN_STALE_MS: number;
       };
       _listSandboxes = mod.listSandboxes;
       _sandboxDiff   = mod.sandboxDiff;
       _removeSandbox = mod.removeSandbox;
+      _sweepOrphans  = mod.sweepOrphanSandboxes;
+      _orphanStaleMs = mod.ORPHAN_STALE_MS;
     } catch {
       _listSandboxes = null;
       _sandboxDiff   = null;
       _removeSandbox = null;
+      _sweepOrphans  = null;
+      _orphanStaleMs = null;
     }
   }
   if (_listSandboxes === null) return null;
@@ -64,6 +79,8 @@ async function loadWorktree(): Promise<{
     listSandboxes: _listSandboxes!,
     sandboxDiff:   _sandboxDiff!,
     removeSandbox: _removeSandbox!,
+    sweepOrphanSandboxes: _sweepOrphans!,
+    orphanStaleMs: _orphanStaleMs!,
   };
 }
 
@@ -255,9 +272,35 @@ export async function cmdSandbox(args: string[]): Promise<number> {
     }
   }
 
+  if (sub === 'gc') {
+    // H5 CHANGE 1 — explicit human repair surface for the orphan sweep.
+    // Sweeps STALE orphan sandboxes (crash leftovers) via the reclaim primitive,
+    // which inherits removeSandbox's containment guards verbatim (a tampered/out-
+    // of-namespace entry is refused git ops and falls through to local-dir cleanup
+    // only). Conservative staleMs (worktree's exported ORPHAN_STALE_MS, > max swarm
+    // wall-clock) so a LIVE in-flight worktree is NEVER reclaimed. Inward cleanup
+    // only; pushes nothing, opens no PR, applies no proposal.
+    const wt = await loadWorktree();
+    if (!wt) { moduleNotBuilt('sandbox gc'); return 1; }
+    try {
+      const swept = wt.sweepOrphanSandboxes({ staleMs: wt.orphanStaleMs });
+      if (swept.length === 0) {
+        console.log(dim('No stale orphan sandboxes to reclaim.'));
+      } else {
+        console.log(green('✓') + ` Reclaimed ${cyan(String(swept.length))} stale orphan sandbox(es).`);
+        for (const id of swept) console.log(`    ${cyan('•')} ${id}`);
+      }
+      return 0;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(red('error: ') + msg);
+      return 1;
+    }
+  }
+
   // Unknown subcommand
   console.error(red('error: ') + `Unknown sandbox subcommand: ${sub}`);
-  console.error(dim('Usage: ashlr sandbox [list | diff <id> | cleanup <id>]'));
+  console.error(dim('Usage: ashlr sandbox [list | diff <id> | cleanup <id> | gc]'));
   return 2;
 }
 

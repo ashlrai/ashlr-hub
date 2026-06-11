@@ -175,7 +175,11 @@ describe('M24 loadDaemonState — never throws; zeroed state on missing/corrupt'
   it('returns a valid DaemonState shape from a well-formed file', () => {
     const s: DaemonState = {
       running: true,
-      pid: 1234,
+      // H5 CHANGE 2: loadDaemonState() now reconciles a phantom-live daemon
+      // (running:true with a DEAD pid) at the load chokepoint. To round-trip a
+      // GENUINELY-running daemon we use the live test-process pid (process.pid),
+      // which the liveness check confirms is alive — so running:true survives.
+      pid: process.pid,
       startedAt: '2026-01-01T00:00:00.000Z',
       lastTickAt: '2026-01-01T01:00:00.000Z',
       todayDate: '2026-01-01',
@@ -186,7 +190,7 @@ describe('M24 loadDaemonState — never throws; zeroed state on missing/corrupt'
     saveDaemonState(s);
     const loaded = loadDaemonState();
     expect(loaded.running).toBe(true);
-    expect(loaded.pid).toBe(1234);
+    expect(loaded.pid).toBe(process.pid);
     expect(loaded.startedAt).toBe('2026-01-01T00:00:00.000Z');
     expect(loaded.todaySpentUsd).toBe(0.05);
     expect(loaded.itemsProcessed).toBe(7);
@@ -227,12 +231,15 @@ describe('M24 saveDaemonState — atomic write + round-trip', () => {
     expect(loaded.ticks).toEqual([]);
   });
 
-  it('round-trips running=true + non-null pid', () => {
-    const s: DaemonState = { ...zeroedState(), running: true, pid: 9999 };
+  it('round-trips running=true + non-null pid (LIVE pid survives reconcile)', () => {
+    // H5 CHANGE 2: loadDaemonState() reconciles a dead-pid running:true to
+    // running:false at load. A genuine running daemon's pid IS alive, so this
+    // round-trip uses the live test-process pid — running:true is preserved.
+    const s: DaemonState = { ...zeroedState(), running: true, pid: process.pid };
     saveDaemonState(s);
     const loaded = loadDaemonState();
     expect(loaded.running).toBe(true);
-    expect(loaded.pid).toBe(9999);
+    expect(loaded.pid).toBe(process.pid);
   });
 
   it('round-trips todaySpentUsd accurately', () => {

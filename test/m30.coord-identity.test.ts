@@ -112,9 +112,13 @@ describe('M30 DaemonCoordinator — LOCAL single-machine', () => {
     expect(initial.ticks).toEqual([]);
 
     // Save then reload — the write lands under the tmp HOME, never real ~/.ashlr.
+    // H5 CHANGE 2: coord.load() routes through loadDaemonState(), which now
+    // reconciles a phantom-live daemon (running:true + DEAD pid) at the load
+    // chokepoint. To round-trip a GENUINELY-running daemon we use the live test
+    // process pid (process.pid) so the liveness check keeps running:true.
     const next = freshDaemonState({
       running: true,
-      pid: 4321,
+      pid: process.pid,
       startedAt: '2026-06-10T00:00:00.000Z',
       itemsProcessed: 7,
       todaySpentUsd: 1.25,
@@ -123,7 +127,7 @@ describe('M30 DaemonCoordinator — LOCAL single-machine', () => {
 
     const reloaded = coord.load();
     expect(reloaded.running).toBe(true);
-    expect(reloaded.pid).toBe(4321);
+    expect(reloaded.pid).toBe(process.pid);
     expect(reloaded.startedAt).toBe('2026-06-10T00:00:00.000Z');
     expect(reloaded.itemsProcessed).toBe(7);
     expect(reloaded.todaySpentUsd).toBe(1.25);

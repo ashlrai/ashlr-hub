@@ -355,6 +355,44 @@ function manualAction(checkId: string, label: string, fix?: string): FixAction {
  * Returns FixAction[] in check display order.
  * Never throws.
  */
+/**
+ * H5 CHANGE 1 — `doctor --fix` orphan-sweep hook. Reclaims STALE crash-leftover
+ * sandbox worktrees (the same primitive the daemon runs at start + `sandbox gc`
+ * exposes). LOCAL + non-destructive: sweepOrphanSandboxes routes every removal
+ * through removeSandbox's containment guards (re-derived safe path + branch; a
+ * tampered/out-of-namespace entry is refused git ops, local-dir cleanup only)
+ * and the conservative ORPHAN_STALE_MS guard means a LIVE in-flight worktree is
+ * NEVER reclaimed — only genuine crash leftovers. Pushes nothing, opens no PR,
+ * applies no proposal. Lazy-imports the build-optional worktree module and never
+ * throws (degrades to a manual note). Returns a synthetic FixAction.
+ */
+async function fixSandboxOrphans(): Promise<FixAction> {
+  const checkId = 'sandbox-orphans';
+  const label = 'Reclaim stale orphan sandboxes';
+  try {
+    const wt = await import('./sandbox/worktree.js');
+    const swept = wt.sweepOrphanSandboxes({ staleMs: wt.ORPHAN_STALE_MS });
+    return {
+      checkId,
+      label,
+      applied: swept.length > 0,
+      manual: false,
+      detail:
+        swept.length === 0
+          ? 'No stale orphan sandboxes to reclaim.'
+          : `Reclaimed ${swept.length} stale orphan sandbox(es): ${swept.join(', ')}`,
+    };
+  } catch (err) {
+    return {
+      checkId,
+      label,
+      applied: false,
+      manual: true,
+      detail: `Could not sweep orphan sandboxes: ${String(err)}. Try: ashlr sandbox gc`,
+    };
+  }
+}
+
 export async function fixDoctor(cfg: AshlrConfig): Promise<FixAction[]> {
   let report;
   try {
@@ -421,6 +459,10 @@ export async function fixDoctor(cfg: AshlrConfig): Promise<FixAction[]> {
 
     actions.push(action);
   }
+
+  // H5 CHANGE 1 — always-run orphan sweep (independent of doctor checks): reclaim
+  // stale crash-leftover sandboxes. Safe + local + non-destructive (see helper).
+  actions.push(await fixSandboxOrphans());
 
   return actions;
 }

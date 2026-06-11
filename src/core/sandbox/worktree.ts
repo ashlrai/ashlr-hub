@@ -46,6 +46,90 @@ const BRANCH_PREFIX = 'ashlr/sandbox/';
 const META_FILE = 'sandbox.json';
 
 // ---------------------------------------------------------------------------
+// H5 — bounded sandbox lifecycle (LOCAL-ONLY resource guards)
+// ---------------------------------------------------------------------------
+
+/**
+ * H5 CHANGE 4 — hard cap on concurrent on-disk sandboxes. Conservative default:
+ * the daemon caps swarm concurrency at 8 (loop.ts) + runner MAX_PARALLEL=8, so
+ * 16 leaves ~2x headroom for concurrent daemon swarms + a manual `ashlr swarm`
+ * + transient overlap, while still bounding unbounded accumulation. createSandbox
+ * sweeps STALE orphans first, then REFUSES (clean audited error) if still over.
+ *
+ * CONFIGURABLE: an operator (or a deterministic test) may override the default
+ * via ASHLR_MAX_SANDBOXES (a positive integer). Resolved at CALL TIME — like the
+ * HOME-sensitive path helpers — so a test can set a small cap without restarting
+ * the process. An absent/blank/invalid/non-positive value falls back to the
+ * conservative default; the override can only ever SET a finite positive bound
+ * (it can never disable the cap), keeping this a strictly LOCAL resource guard.
+ */
+const MAX_SANDBOXES_DEFAULT = 16;
+
+/** Resolve the effective sandbox cap (env override, else conservative default). */
+function maxSandboxes(): number {
+  const raw = process.env.ASHLR_MAX_SANDBOXES;
+  if (raw !== undefined && raw.trim() !== '') {
+    const n = Number.parseInt(raw, 10);
+    // Only a finite, positive integer override takes effect; anything else
+    // (NaN, <=0, non-numeric) falls back to the safe default. The override can
+    // never remove the bound — it can only set a different finite positive one.
+    if (Number.isInteger(n) && n > 0) return n;
+  }
+  return MAX_SANDBOXES_DEFAULT;
+}
+
+/**
+ * H5 CHANGE 1 — orphan-sweep staleness threshold (ms). This is the FALLBACK
+ * liveness proxy used ONLY for a sandbox that carries no usable `ownerPid`
+ * marker (older metadata, or a crash fixture that models a GONE owner). The
+ * PRIMARY liveness signal is the positive `ownerPid` marker (see Sandbox.ownerPid
+ * + ownerAlive() below): a sandbox whose owner pid is still alive is skipped by
+ * the sweep / disk-cap pre-sweep REGARDLESS of age, so a live in-flight worktree
+ * is never reclaimed out from under a running swarm — even a cross-process one.
+ *
+ * Because there is NO hard wall-clock cap on a swarm (the runner bounds a swarm
+ * by step count <= 200 and the token budget only — there is no elapsed-time
+ * deadline), createdAt-age is NOT by itself a sound liveness proxy. So this
+ * threshold is set FAR above any plausible 200-step run (6 hours) as a
+ * belt-and-suspenders bound for the only residual gap: the rare pid-reuse case
+ * where a crashed swarm's recorded pid was recycled by an unrelated live process
+ * (ownerAlive() would then falsely read 'alive', so age must also have elapsed
+ * before we'd ever reclaim). The cost of a too-LARGE value (a stale orphan
+ * lingering a few hours longer) is far cheaper than the cost of a too-SMALL one
+ * (force-removing a live worktree), so we err large. Shared by the daemon-start
+ * sweep wiring (loop.ts) and the disk-cap pre-sweep below.
+ *
+ * CROSS-PROCESS LIVENESS LIMITATION (documented): the only way a live worktree
+ * could still be reclaimed is if BOTH (a) its owner process crashed AND (b) the
+ * OS recycled its exact pid for a new live process AND (c) >6h elapsed — a
+ * vanishingly small window that, even if hit, only reclaims a worktree whose
+ * original owner is provably dead.
+ */
+export const ORPHAN_STALE_MS = 6 * 60 * 60_000;
+
+/**
+ * Positive liveness check for a sandbox's recorded owner process. Returns true
+ * ONLY when `ownerPid` is a positive integer AND `process.kill(ownerPid, 0)`
+ * succeeds (the process exists and is signalable by us) — i.e. a swarm is
+ * provably still running and holding this worktree. Any throw (ESRCH = gone,
+ * EPERM = exists-but-not-ours, EINVAL, etc.) or an absent/invalid pid returns
+ * false, falling back to the conservative createdAt-age staleMs guard. NEVER
+ * throws and NEVER sends a real signal (signal 0 is error-check-only).
+ */
+function ownerAlive(sb: Sandbox): boolean {
+  const pid = sb.ownerPid;
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call time so tests can relocate HOME)
 // ---------------------------------------------------------------------------
 
@@ -127,6 +211,14 @@ function readMeta(id: string): Sandbox | null {
         typeof o['baseHead'] === 'string' &&
         typeof o['createdAt'] === 'string'
       ) {
+        // ownerPid is OPTIONAL (back-compat): only carried through when it is a
+        // positive integer; anything else (absent/malformed/<=0) is dropped so
+        // ownerAlive() falls back to the createdAt-age guard for that sandbox.
+        const rawPid = o['ownerPid'];
+        const ownerPid =
+          typeof rawPid === 'number' && Number.isInteger(rawPid) && rawPid > 0
+            ? rawPid
+            : undefined;
         return {
           id: o['id'],
           sourceRepo: o['sourceRepo'],
@@ -134,6 +226,7 @@ function readMeta(id: string): Sandbox | null {
           branch: o['branch'],
           baseHead: o['baseHead'],
           createdAt: o['createdAt'],
+          ...(ownerPid !== undefined ? { ownerPid } : {}),
         };
       }
     }
@@ -163,6 +256,13 @@ export function createSandbox(
   opts?: { allowAnyRepo?: boolean },
 ): Sandbox {
   // Gate FIRST — kill switch / enrollment. Audit refusals.
+  //
+  // H5 CHANGE 3 (env-gate allowAnyRepo) EDIT SITE — integration applies the real
+  // edit. The env-gate lives in assertMayMutate (policy.ts) as the single source
+  // of truth: `opts.allowAnyRepo` is honored ONLY when ASHLR_TEST_ALLOW_ANY_REPO
+  // ==='1' (mirrors advance.ts:156). createSandbox passes opts straight through,
+  // so it inherits the gate transitively — NO separate env check is needed here.
+  // The kill switch ALWAYS wins (assertMayMutate checks it first, unconditional).
   try {
     assertMayMutate(sourceRepo, opts);
   } catch (err) {
@@ -199,6 +299,35 @@ export function createSandbox(
       result: 'error',
     });
     throw new Error(`could not resolve HEAD in repo: ${sourceRepo}`);
+  }
+
+  // -------------------------------------------------------------------------
+  // H5 CHANGE 4 — DISK/COUNT CAP (LOCAL-ONLY resource guard). When the live
+  // sandbox count is at/over the cap, FIRST sweep crash-leftover orphans (NEVER a
+  // live one — sweepOrphanSandboxes skips any sandbox whose ownerPid is still
+  // alive regardless of age, and falls back to the ORPHAN_STALE_MS age guard only
+  // for ones with no live owner; so a same-process in-flight worktree held by a
+  // concurrent daemon swarm is protected here), then re-count; if STILL at/over
+  // the cap, REFUSE (audit result:'refused' + throw a
+  // clean error) rather than accumulate unboundedly. This removes NOTHING in-use
+  // and opens no outward capability — it only bounds on-disk worktree growth so a
+  // pathological crash/restart loop can never fill the disk. The cap is resolved
+  // at call time (env-overridable; conservative default) — see maxSandboxes().
+  const cap = maxSandboxes();
+  if (listSandboxes().length >= cap) {
+    // Reclaim genuine crash leftovers first (stale-guarded — a live sandbox is
+    // skipped). A healthy install with a transient burst self-heals here.
+    sweepOrphanSandboxes({ staleMs: ORPHAN_STALE_MS });
+    if (listSandboxes().length >= cap) {
+      audit({
+        action: 'sandbox:create',
+        repo: sourceRepo,
+        sandboxId: null,
+        summary: `sandbox cap reached (MAX_SANDBOXES=${cap})`,
+        result: 'refused',
+      });
+      throw new Error(`sandbox cap reached (MAX_SANDBOXES=${cap})`);
+    }
   }
 
   // Generate a unique id; the scratch branch contains it.
@@ -259,6 +388,10 @@ export function createSandbox(
     branch,
     baseHead,
     createdAt: new Date().toISOString(),
+    // H5 — stamp the OWNING process pid as a positive liveness marker so the
+    // orphan sweep / disk-cap pre-sweep never force-remove this worktree while
+    // this process (or any process holding the same pid) is still alive.
+    ownerPid: process.pid,
   };
 
   writeMeta(sb);
@@ -450,20 +583,26 @@ export function listSandboxes(): Sandbox[] {
  * no record linking it back to any swarm. Such a leftover would otherwise
  * accumulate forever.
  *
- * LIVENESS CAVEAT (important — read before wiring a caller): a persisted sandbox
- * is NOT necessarily an orphan. A `runSwarm` keeps its sandbox metadata on disk
- * for the WHOLE run (createSandbox writes it at start, removeSandbox deletes it
- * at the end), and the daemon runs several sandboxed swarms CONCURRENTLY, each
- * with a live on-disk sandbox; a separately-launched `ashlr swarm` in another
- * process is also possible (the re-entrancy guards are per-process). The Sandbox
- * record carries no pid/owner/lock — only `createdAt` — so the sweep cannot
- * positively distinguish a true orphan from an actively-running sandbox. To stay
- * safe for any future restart wire-up, the sweep accepts an OPTIONAL `staleMs`
- * guard: when provided, a sandbox whose `createdAt` is younger than `staleMs` is
- * SKIPPED (assumed possibly-live), so only sandboxes older than a conservative
- * threshold (e.g. > the max swarm wall-clock) are reclaimed. With NO `staleMs`
- * (the default, used by the recovery PROOF tests where every sandbox is a
- * deliberately-dropped orphan) it sweeps every listed sandbox.
+ * LIVENESS (important — read before wiring a caller): a persisted sandbox is NOT
+ * necessarily an orphan. A `runSwarm` keeps its sandbox metadata on disk for the
+ * WHOLE run (createSandbox writes it at start, removeSandbox deletes it at the
+ * end), and the daemon runs several sandboxed swarms CONCURRENTLY, each with a
+ * live on-disk sandbox; a separately-launched `ashlr swarm` in another process is
+ * also possible (the re-entrancy guards are per-process). To NEVER force-remove a
+ * live worktree, the sweep uses TWO guards, in order:
+ *
+ *  1. POSITIVE liveness (primary, age-independent): a sandbox whose recorded
+ *     `ownerPid` is still alive (ownerAlive()) is SKIPPED regardless of age — so
+ *     a long-running swarm (same- OR cross-process) older than any staleMs is
+ *     never reclaimed out from under its owner. This closes the central gap that
+ *     createdAt-age alone could not (there is no wall-clock cap on a swarm).
+ *  2. AGE fallback (secondary): for a sandbox with NO usable ownerPid (older
+ *     metadata, or a crash fixture that models a GONE owner), the OPTIONAL
+ *     `staleMs` guard applies — a sandbox whose `createdAt` is younger than
+ *     `staleMs` is SKIPPED (conservatively assumed possibly-live). With NO
+ *     `staleMs` (the default, used by recovery PROOF tests where every sandbox is
+ *     a deliberately-dropped orphan with a dead/absent owner) it sweeps every
+ *     listed sandbox not protected by guard 1.
  *
  * This sweep composes the two EXISTING safe primitives — `listSandboxes()` to
  * enumerate persisted sandbox metadata, then `removeSandbox()` for each — so it
@@ -479,9 +618,10 @@ export function listSandboxes(): Sandbox[] {
  * nothing, opens no PR, applies no proposal), weakens NO guard (every removal
  * goes through removeSandbox's full guard set), and changes NO happy-path
  * behavior (a clean run already removes its own sandbox, so a healthy install
- * has nothing to sweep). NOTE: this function has NO production caller — it is the
- * reclaim primitive only; H2 deliberately does NOT auto-run it on startup (the
- * safest default), so no live worktree is ever force-removed today. Idempotent
+ * has nothing to sweep). H5 wires this into daemon start (loop.ts, staleMs=
+ * ORPHAN_STALE_MS), the disk-cap pre-sweep above, and `ashlr sandbox gc` — every
+ * caller passes a staleMs and is additionally protected by the age-independent
+ * ownerAlive() guard, so no LIVE worktree is ever force-removed. Idempotent
  * and never throws — a removal failure on one id is swallowed so the sweep always
  * makes maximal progress. Returns the ids it swept so a caller / test can assert
  * what was reclaimed.
@@ -495,11 +635,22 @@ export function sweepOrphanSandboxes(opts?: { staleMs?: number }): string[] {
   const now = Date.now();
   const swept: string[] = [];
   for (const sb of listSandboxes()) {
+    // GUARD 1 — POSITIVE liveness (age-independent): never reclaim a worktree
+    // whose owning process is still alive, even if it is older than staleMs.
+    // This is what makes the sweep safe despite the absence of a swarm
+    // wall-clock cap — a live in-flight worktree (any process, any age) is
+    // protected by its still-alive owner pid.
+    if (ownerAlive(sb)) {
+      continue;
+    }
+    // GUARD 2 — AGE fallback for a sandbox with no usable ownerPid (owner gone
+    // or older metadata).
     if (staleMs !== undefined) {
       const createdMs = Date.parse(sb.createdAt);
-      // Skip not-yet-stale sandboxes (possibly a live owner). An unparseable
-      // createdAt is treated as stale=0 (Number.isNaN) so a corrupt timestamp is
-      // still reclaimable rather than stranded forever.
+      // Skip not-yet-stale sandboxes (possibly a live owner whose pid we could
+      // not read). An unparseable createdAt is treated as stale=0
+      // (Number.isNaN) so a corrupt timestamp is still reclaimable rather than
+      // stranded forever.
       if (!Number.isNaN(createdMs) && now - createdMs < staleMs) {
         continue;
       }

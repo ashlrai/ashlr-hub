@@ -289,11 +289,22 @@ describe('H4 · SANDBOX-REQUIRED · createSandbox refusals', () => {
 
     // The documented hatch — allowAnyRepo:true — succeeds, proving the refusal
     // above was SPECIFICALLY the enrollment gate (still without enrolling).
-    const sb = createSandbox(repo.dir, { allowAnyRepo: true });
-    expect(sb.id).toBeTruthy();
-    expect(sb.branch.startsWith('ashlr/sandbox/')).toBe(true);
-    expect(existsSync(sb.worktreePath)).toBe(true);
-    expect(repo.isEnrolled()).toBe(false); // never enrolled by the hatch
+    // H5 CHANGE 3: the hatch is now ALSO env-gated, so it is honored only with
+    // ASHLR_TEST_ALLOW_ANY_REPO=1 set. Set it for the success assertion (restore
+    // after) — this does NOT weaken 2.6, it proves the hatch (env+opt together)
+    // is the ONLY way past enrollment.
+    const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+    process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+    try {
+      const sb = createSandbox(repo.dir, { allowAnyRepo: true });
+      expect(sb.id).toBeTruthy();
+      expect(sb.branch.startsWith('ashlr/sandbox/')).toBe(true);
+      expect(existsSync(sb.worktreePath)).toBe(true);
+      expect(repo.isEnrolled()).toBe(false); // never enrolled by the hatch
+    } finally {
+      if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
+    }
   });
 });
 
@@ -523,13 +534,20 @@ describe('H4 · KILL-SWITCH · checked before work everywhere', () => {
 
 describe('H4 · KILL-SWITCH · overrides everything (allowAnyRepo can NEVER bypass kill)', () => {
   let fx: H1Fixture;
+  // H5 CHANGE 3: enable the env hatch for this block so allowAnyRepo:true is
+  // FULLY live — proving the kill switch overrides it even at maximum hatch
+  // strength (kill is checked first/unconditional, before the env-gated hatch).
+  const origAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
 
   beforeEach(() => {
     expect.hasAssertions();
+    process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
     fx = makeFixture();
   });
   afterEach(() => {
     fx.cleanup();
+    if (origAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+    else process.env.ASHLR_TEST_ALLOW_ANY_REPO = origAllowAnyRepo;
   });
 
   it('4.6 [UNTESTED] allowAnyRepo:true STILL throws when kill is on (assertMayMutate)', () => {

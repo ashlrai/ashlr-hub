@@ -111,17 +111,27 @@ function worktreeSource(): string {
 let fx: H1Fixture;
 let repo: DisposableRepo;
 
+// H5 CHANGE 3 migration: allowAnyRepo is now effective ONLY when
+// ASHLR_TEST_ALLOW_ANY_REPO==='1'. This containment suite sandboxes unenrolled
+// tmp repos via allowAnyRepo:true to exercise removeSandbox's guards, so set the
+// env hatch for the whole file (restored after). The kill-switch / unenrolled
+// refusal cases below do NOT pass the hatch, so they still refuse regardless.
+const origAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+
 beforeEach(() => {
   // H4 false-green guard: every it() MUST run at least one assertion, so a
   // future empty-stub (TODO body, zero expect) FAILS loudly instead of passing
   // vacuously — exactly the regression this milestone exists to forbid.
   expect.hasAssertions();
+  process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
   fx = makeFixture();
   repo = fx.makeRepo();
 });
 
 afterEach(() => {
   fx.cleanup();
+  if (origAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+  else process.env.ASHLR_TEST_ALLOW_ANY_REPO = origAllowAnyRepo;
 });
 
 // ===========================================================================

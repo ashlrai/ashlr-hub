@@ -107,7 +107,11 @@ export function loadDaemonState(): DaemonState {
           )
         : [],
     };
-    return state;
+    // Self-heal at the load chokepoint: a daemon killed -9 leaves
+    // running:true/pid:<dead> behind; reconcile (read-only liveness) flips it to
+    // a truthful stopped state so status/start/tick never see a phantom-live
+    // daemon. Observability-only — touches NO spend accounting, NO guard.
+    return reconcileDaemonState(state);
   } catch {
     // Corrupt JSON or any other read error — return zeroed state.
     return freshState();
@@ -162,4 +166,58 @@ export function resetDayIfNeeded(s: DaemonState): DaemonState {
     todayDate: today,
     todaySpentUsd: 0,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Stale-daemon reconciliation (H5 — OBSERVABILITY-ONLY liveness check)
+// ---------------------------------------------------------------------------
+
+/**
+ * READ-ONLY liveness reconcile. If `s.running === true` but the recorded `pid`
+ * is NOT alive — `process.kill(pid, 0)` throws `ESRCH` (no such process) — flip
+ * `running` to false and `pid` to null so `daemon status` reports a dead daemon
+ * as stopped. Otherwise return `s` unchanged.
+ *
+ * HONEST BOUND (pid reuse): this reports a dead daemon as live ONLY in the rare
+ * case where the OS recycled the recorded pid for an unrelated live process
+ * (then `process.kill(pid,0)` succeeds and we leave the state unchanged) —
+ * inherent to pid-0 liveness. In every other case it is truthful. It is
+ * conservative-toward-alive (it NEVER force-flips a genuinely running daemon
+ * off), and since it changes no spend/guard the residual false-positive is an
+ * observability nicety only, never a safety issue.
+ *
+ * OBSERVABILITY-ONLY by construction: it touches NO spend accounting
+ * (`todaySpentUsd` / `itemsProcessed` / `ticks` are preserved byte-for-byte),
+ * NO guard (kill switch / enrollment / sandbox are unaffected), and adds NO
+ * capability. It only makes the persisted running/pid pair truthful.
+ *
+ * Liveness rules (conservative — NEVER destroy a real running daemon's state):
+ *  - `running !== true` or `pid` not a number => nothing to reconcile => unchanged.
+ *  - `process.kill(pid, 0)` succeeds => process alive => unchanged.
+ *  - throws `ESRCH` => process is GONE => flip to { running:false, pid:null }.
+ *  - throws `EPERM` (exists but not signalable by us) => process EXISTS => alive
+ *    => unchanged (do NOT flip).
+ *  - any other/unexpected error => treat as alive => unchanged.
+ *
+ * Pure-ish: returns the (possibly new) state; caller persists via
+ * saveDaemonState(). Never throws.
+ */
+export function reconcileDaemonState(s: DaemonState): DaemonState {
+  if (s.running !== true || typeof s.pid !== 'number') {
+    return s;
+  }
+  try {
+    // Signal 0 performs error checking without actually sending a signal.
+    process.kill(s.pid, 0);
+    // No throw => the process exists and is signalable => treat as alive.
+    return s;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code === 'ESRCH') {
+      // No such process — the daemon is dead. Flip to a truthful stopped state.
+      return { ...s, running: false, pid: null };
+    }
+    // EPERM (exists, not ours) or any other error => conservatively alive.
+    return s;
+  }
 }

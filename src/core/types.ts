@@ -1597,6 +1597,17 @@ export interface Sandbox {
   baseHead: string;
   /** ISO timestamp the sandbox was created. */
   createdAt: string;
+  /**
+   * H5 — pid of the process that created this sandbox (a POSITIVE liveness
+   * marker). The orphan sweep / disk-cap pre-sweep SKIP a sandbox whose
+   * `ownerPid` is still alive (process.kill(pid,0) succeeds) regardless of age,
+   * so a LIVE in-flight worktree is NEVER force-removed out from under a running
+   * swarm — even a long-running cross-process one older than ORPHAN_STALE_MS.
+   * Optional for back-compat: older metadata (and crash-simulation fixtures that
+   * model a GONE owner) omit it, in which case the conservative createdAt-age
+   * staleMs guard governs reclaim instead.
+   */
+  ownerPid?: number;
 }
 
 /**

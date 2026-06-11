@@ -42,7 +42,8 @@
  * dep, strict TS, node builtins + the project's own stores only.
  */
 
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import type {
   DaemonState,
@@ -263,7 +264,33 @@ export function daemonStateExists(): boolean {
  * runs.
  */
 export function makeOrphanSandbox(repoDir: string): Sandbox {
-  return createSandbox(repoDir, { allowAnyRepo: true });
+  // H5 CHANGE 3: allowAnyRepo is effective ONLY when ASHLR_TEST_ALLOW_ANY_REPO=1.
+  // This helper deliberately sandboxes an unenrolled TMP repo, so set the env
+  // hatch around the call (restore after) — self-contained so every caller works
+  // unchanged. The kill switch is still NOT bypassed by the hatch.
+  const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+  process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+  try {
+    const sb = createSandbox(repoDir, { allowAnyRepo: true });
+    // H5: createSandbox stamps `ownerPid: process.pid` as a POSITIVE liveness
+    // marker so the orphan sweep never force-removes a LIVE worktree. But this
+    // helper models a CRASHED swarm — its owner process is GONE — so we strip
+    // the ownerPid from the persisted metadata. That makes it a TRUE orphan
+    // (no live owner), reclaimable by the conservative createdAt-age staleMs
+    // guard exactly as the H2/H5 recovery proofs assume. Without this, the
+    // sandbox would carry THIS (live) test process's pid and the sweep would
+    // correctly protect it as live — which is right for production, but the
+    // wrong fixture for a crash-leftover.
+    const metaFile = join(sandboxesDir(), sb.id, 'sandbox.json');
+    const meta = JSON.parse(readFileSync(metaFile, 'utf8')) as Record<string, unknown>;
+    delete meta['ownerPid'];
+    writeFileSync(metaFile, JSON.stringify(meta, null, 2) + '\n', 'utf8');
+    delete (sb as { ownerPid?: number }).ownerPid;
+    return sb;
+  } finally {
+    if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+    else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
+  }
 }
 
 /**

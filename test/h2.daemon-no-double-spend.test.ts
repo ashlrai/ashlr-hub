@@ -442,30 +442,31 @@ describe('H2 daemon-crash — history intact + stale running=true is the documen
     expect(after.itemsProcessed).toBe(3);
   });
 
-  it('GAP: a stale running=true from a crash is NOT reconciled on restart (documented for a local-only fix)', async () => {
+  it('a stale running=true from a crash IS reconciled to false on restart (H5 closed the H2 gap)', async () => {
     // A crash leaves running=true with a stale pid (the clean-exit running=false
-    // write never ran). The restart tick does NOT touch the running flag, so the
-    // current behavior leaves it stale. We ASSERT that current behavior so the
-    // gap is greppable, and FLAG the minimal local-only fix (a read-only
-    // reconcileDaemonState() liveness probe) per CONTRACT-H2.md gap #2.
+    // write never ran). H5 CHANGE 2 wired the read-only reconcileDaemonState()
+    // liveness probe into the loadDaemonState() chokepoint: on read, a recorded
+    // pid that is NOT alive (process.kill(pid, 0) => ESRCH) flips the persisted
+    // running/pid pair to a truthful stopped state, so `daemon status` never
+    // misreports a dead daemon as live.
     //
-    // NOTE: this is an OBSERVABILITY gap (daemon status could show a dead daemon
-    // as live), NOT a double-count gap — the spend accounting above is already
-    // idempotent with NO production change. The fix is status-flag-only: no
-    // outward capability, no weakened guard, no happy-path change.
+    // This UPDATES the former H2 "documented GAP" assertions deliberately: the
+    // contract (CONTRACT-H2.md gap #2, closed by CONTRACT-H5 CHANGE 2) always
+    // intended this fix. It remains OBSERVABILITY-ONLY — the spend accounting
+    // below is unchanged (no double-count), the fix touches no guard and adds no
+    // outward capability.
     const seeded = seedMidTickSpend({ spentUsd: 0.3, running: true });
     expect(seeded.running).toBe(true);
     expect(seeded.pid).toBe(999_999); // a pid that is not this live process
 
     await tick(makeCfg(), { dryRun: false });
 
+    // reloadDaemonState() goes through loadDaemonState() -> reconcileDaemonState():
+    // the dead pid 999_999 (ESRCH) is reconciled to a truthful stopped state.
     const after = reloadDaemonState();
-    // CURRENT (un-reconciled) behavior: the stale running flag survives the
-    // restart. <<< GAP: a reconcileDaemonState() should flip this to false when
-    // process.kill(pid, 0) shows the recorded pid is dead. >>>
-    expect(after.running).toBe(true);
-    expect(after.pid).toBe(999_999);
-    // The spend invariant is unaffected by the stale flag — no double-count.
+    expect(after.running).toBe(false); // RECONCILED: dead daemon no longer reported live
+    expect(after.pid).toBeNull();
+    // The spend invariant is unaffected by the reconcile — no double-count.
     expect(after.todaySpentUsd).toBe(0.3);
   });
 

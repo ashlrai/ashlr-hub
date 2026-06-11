@@ -177,7 +177,18 @@ export function assertMayMutate(
   }
 
   // Enrollment check — bypassed only by the explicit test hatch.
-  if (!opts?.allowAnyRepo && !isEnrolled(repo)) {
+  //
+  // H5 CHANGE 3 (env-gate allowAnyRepo): the `allowAnyRepo` hatch is effective
+  // ONLY when the process ALSO sets ASHLR_TEST_ALLOW_ANY_REPO=1, so a stray
+  // `allowAnyRepo:true` in any PRODUCTION path can NEVER bypass enrollment
+  // (mirrors advance.ts:155-157 EXACTLY). The kill-switch check above STAYS
+  // first and unconditional — it always wins (verify-safety CHECK 2 still
+  // passes). createSandbox passes opts straight through, so it inherits this
+  // gate transitively — single source of truth.
+  const allowAnyRepo =
+    opts?.allowAnyRepo === true &&
+    process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1';
+  if (!allowAnyRepo && !isEnrolled(repo)) {
     throw new Error(`repo not enrolled for autonomous work: ${resolve(repo)}`);
   }
 }
