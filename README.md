@@ -4,7 +4,7 @@
 
 Index every project, run agents on local models, aggregate all your MCP servers, track spend, scaffold and ship, and give your whole stack shared private memory — all from one binary.
 
-[![CI](https://github.com/masonwyatt23/ashlr-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/masonwyatt23/ashlr-hub/actions/workflows/ci.yml)
+[![CI](https://github.com/ashlrai/ashlr-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/ashlr-hub/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org)
 
@@ -15,7 +15,7 @@ Index every project, run agents on local models, aggregate all your MCP servers,
 Requires **macOS** and **Node.js 22+** with `~/.local/bin` on your `PATH`.
 
 ```sh
-git clone https://github.com/masonwyatt23/ashlr-hub.git
+git clone https://github.com/ashlrai/ashlr-hub.git
 cd ashlr-hub
 npm ci && npm run build
 ./install.sh        # symlinks ashlr into ~/.local/bin (idempotent)

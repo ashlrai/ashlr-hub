@@ -3,8 +3,56 @@
 All notable changes to ashlr-hub are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Versions map to internal milestones (M1–M10); no semver yet — the project uses
-milestone tags. Dates are the merge dates into `main`.
+Versions map to milestone series: **2.1.0** = v2.1 "Harden & Prove" (H1–H8),
+**2.0.0** = v2 "Autonomous Engineering Organization" (M21–M30), **1.0.0** = v1
+hub (M1–M20). Entries below detail each milestone; dates are merge dates into `main`.
+
+---
+
+## [2.1.0] — 2026-06-11 — v2.1 "Harden & Prove" (H1–H8)
+
+Takes v2 from *built + unit-tested* to **proven trustworthy**. Eight hardening
+milestones, each a contracts-first agent workflow with a **test-validity**
+adversarial lens (which repeatedly caught false-green stub tests and real bugs).
+Every change is local-first and adds **no new outward capability** — v2.1 only
+proves and hardens what v2 built. Disposable repos in isolated tmp HOMEs
+throughout; the real portfolio was never touched. 40 commits · 3,374 tests.
+
+- **H1 — End-to-end autonomous-chain harness (keystone).** A reusable
+  disposable-repo / tmp-HOME testkit + an integration suite that drives the *real*
+  chain (enroll → daemon tick → sandboxed swarm → pending proposal → approve →
+  `applyProposal`) and proves the working tree stays byte-identical, the proposal
+  is the only sink, and every gate holds. `test/helpers/h1-fixture.ts`.
+- **H2 — Crash recovery & resumability.** Fault-injection: daemon-mid-tick and
+  swarm-mid-run crashes recover with no double-spend, no orphaned sandboxes, no
+  stuck proposals, clean resume, and a clean kill-switch race. Adds
+  `sweepOrphanSandboxes`.
+- **H3 — Concurrency & budget stress.** Proves the in-process caps hold under
+  load; adds a monotonic `makeId` counter. **Honest finding:** under `parallel>1`
+  the per-tick budget is a *bounded overshoot* (≤ (parallel-1)×per-item), not a
+  hard cap — documented, not hidden.
+- **H4 — Safety-invariant regression suite + `ashlr verify-safety`.** Turns all
+  54 enumerated guards across 7 invariants into a permanent always-on suite
+  (closing 12 previously-untested guards) plus a read-only self-check, so no
+  future change can silently weaken a guarantee.
+- **H5 — Sandbox lifecycle & leak hardening.** Wires the orphan sweep into daemon
+  start (+ `ashlr sandbox gc`), adds a read-only daemon-state reconcile, env-gates
+  the `allowAnyRepo` test hatch, and adds a sandbox disk cap. Found + fixed a
+  live-worktree-removal bug.
+- **H6 — Audit & observability completeness.** `enroll` / `unenroll` / `setKill`
+  are now audited at the primitive; adds a read-only `ashlr audit` viewer; brings
+  the two secret-scrub implementations to parity (+ a Stripe-token pattern).
+- **H7 — Guided onboarding & preflight.** `ashlr preflight` (read-only readiness)
+  + 5 new doctor probes, a guided `ashlr onboard` first-activation walkthrough,
+  and one-command `ashlr onboard --rollback`. No new outward capability.
+- **H8 — Reproducible demo + reliability docs + activation runbook.** `ashlr demo`
+  runs the full chain on a disposable repo so you can watch it before trusting it
+  (auto-cleans, never touches your portfolio, never applies); `docs/RELIABILITY.md`;
+  the canonical README activation runbook; and a maintainability cleanup pass.
+
+**Activation remains the operator's explicit gate** — enrollment ships empty and
+nothing autonomous runs until you `ashlr enroll` a repo and approve proposals via
+`ashlr inbox`. See `docs/RELIABILITY.md` and the README *Activation* section.
 
 ---
 
