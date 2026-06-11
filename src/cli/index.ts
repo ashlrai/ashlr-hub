@@ -381,6 +381,14 @@ const loadSeamsCmd = lazyCmd(
   'seams command requires src/cli/seams.ts (M30 module not yet built).',
 );
 
+// ─── H4 command loaders ─────────────────────────────────────────────
+
+const loadVerifySafetyCmd = lazyCmd(
+  () => import('./verify-safety.js'),
+  (m) => m.cmdVerifySafety as Cmd,
+  'verify-safety command requires src/cli/verify-safety.ts (H4 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1281,6 +1289,7 @@ function cmdHelp(): void {
     ['digest --notify',             'Also deliver the digest via a configured Slack/Discord webhook (OPT-IN; no-op when unconfigured).'],
     ['seams',                        'Cloud-ready seam diagnostic: every v2 store, active=local, cloud=gated (read-only).'],
     ['seams status',                'Same as `seams`: list seams + active impl; proves local-first + cloud gated on Mason.'],
+    ['verify-safety',                'Read-only self-check of the hard safety invariants (enrollment/kill-switch/daemon/scrub/cloud-gate); mutates nothing.'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1602,6 +1611,12 @@ async function main(): Promise<void> {
       case 'seams': {
         const cmdSeams = await loadSeamsCmd();
         process.exitCode = await cmdSeams(rest);
+        break;
+      }
+
+      case 'verify-safety': {
+        const cmdVerifySafety = await loadVerifySafetyCmd();
+        process.exitCode = await cmdVerifySafety(rest);
         break;
       }
 

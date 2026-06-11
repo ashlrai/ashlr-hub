@@ -102,8 +102,12 @@ const LOCKFILE_NAMES = new Set([
 /**
  * Patterns for secret-shaped tokens: API keys, JWTs, long hex/base64 strings.
  * Applied to chunk text before storing or embedding.
+ *
+ * EXPORTED (read-only) so the `ashlr verify-safety` self-check (H4) can run the
+ * REAL pattern set against a synthesized secret rather than a drifting private
+ * copy. Treat as a frozen constant — callers must never mutate it.
  */
-const SECRET_PATTERNS: RegExp[] = [
+export const SECRET_PATTERNS: RegExp[] = [
   // Generic "key = <value>" assignments with high-entropy values
   /\b(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|private[_-]?key|client[_-]?secret)\s*[:=]\s*["']?[A-Za-z0-9+/=_-]{20,}["']?/gi,
   // password / passwd / pwd / connection-string / _authToken assignments
@@ -119,8 +123,14 @@ const SECRET_PATTERNS: RegExp[] = [
   /(?<![/\w])[A-Za-z0-9+/]{40,}={0,2}(?![/\w])/g,
 ];
 
-/** Scrub secret-shaped tokens from a chunk of text. Returns sanitized text. */
-function scrubSecrets(text: string): string {
+/**
+ * Scrub secret-shaped tokens from a chunk of text. Returns sanitized text.
+ *
+ * EXPORTED (pure, read-only) so the H4 `ashlr verify-safety` self-check can
+ * invoke the REAL redaction function — not a copy — against a synthesized
+ * secret, so any weakening of the function body (or its pattern set) is caught.
+ */
+export function scrubSecrets(text: string): string {
   let out = text;
   for (const pattern of SECRET_PATTERNS) {
     out = out.replace(pattern, '[REDACTED]');
