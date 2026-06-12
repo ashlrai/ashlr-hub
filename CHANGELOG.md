@@ -9,6 +9,15 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [Unreleased]
+
+- **v3 gate opened — Team Command Center spec.** `docs/SPEC-V3-TEAM.md`: the
+  hand-written end-state spec for the team / multi-machine backbone (one team
+  memory, shared approval inbox with owner-apply routing, coordinated
+  daemons, team visibility) riding api.ashlr.ai under `/hub/v1/*`.
+  Milestones M34–M40, thirteen new team safety invariants, registered as a
+  living ashlr goal. ROADMAP and contracts README updated to point at it.
+
 ## [2.2.0] — 2026-06-12 — v2.2 "Agent-Native Ecosystem" (M31–M33)
 
 Makes ashlr's intelligence first-class INSIDE agent sessions — CLI-first, with

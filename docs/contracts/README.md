@@ -9,5 +9,6 @@ of truth; these capture the intent and the safety reasoning at build time.
 - `CONTRACT-H1.md` … — v2.1 "Harden & Prove" (end-to-end chain harness, crash recovery, concurrency/budget stress, …).
 
 The canonical, binding interface contract lives at the repo root: [`../../CONTRACT.md`](../../CONTRACT.md).
-The roadmap + per-milestone build log lives outside the repo at `~/.ashlr/ROADMAP.md`; the end-state
-specs at `~/.ashlr/docs/`.
+The roadmap + per-milestone build log lives outside the repo at `~/.ashlr/ROADMAP.md`; the v1/v2
+end-state specs at `~/.ashlr/docs/`. From v3 onward the end-state spec is IN-REPO (team-visible
+via git): [`docs/SPEC-V3-TEAM.md`](../SPEC-V3-TEAM.md), covering milestones M34–M40.

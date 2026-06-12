@@ -46,11 +46,18 @@ file states direction; contracts state commitments.
 - **Agent contract v2.** Versioned `--json` schemas surfaced in
   `docs --agent --json`; conformance tests that fail when a shape drifts.
 
-## Gated future (explicitly NOT scheduled)
+## v3 — Team Command Center (gate OPENED 2026-06-12)
 
-- **Team / multi-machine backbone.** The M30 seams stay local + gated. Cloud
-  implementations require Mason's explicit decision; there is no config flag
-  or code path that activates one today (docs/SEAMS.md).
+The team / multi-machine backbone is now specced and scheduled: see
+[`docs/SPEC-V3-TEAM.md`](./SPEC-V3-TEAM.md) — one team memory, one approval
+inbox (approve anywhere, owning machine applies), coordinated daemons, and
+team visibility, riding the existing api.ashlr.ai backend under `/hub/v1/*`.
+Milestones M34–M40, contracts-first, delivered via the registered ashlr goal.
+Everything stays local-first: cloud is sync, not dependency.
+
+## Gated future (explicitly NOT scheduled)
+- **Public SaaS / anything world-readable.** The team backbone is
+  founders-only and self-hostable (`ASHLR_API_URL`).
 - **Plugin marketplace / remote plugin fetch.** Plugins remain files you
   place locally and enable explicitly.
 - **OS-level plugin sandboxing.** Out of scope; the trust model is gating +
