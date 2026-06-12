@@ -332,7 +332,20 @@ async function cmdNewList(jsonMode: boolean): Promise<number> {
     return 1;
   }
 
-  const templates = listTemplates();
+  let templates = listTemplates();
+
+  // M33: append validated plugin templates (best-effort; builtins always list).
+  try {
+    const mod = await importTemplates();
+    const all = await (mod as { getTemplates?: (cfg?: unknown) => Promise<{ id: string; title: string; description: string }[]> }).getTemplates?.();
+    if (all && all.length > templates.length) {
+      const known = new Set(templates.map((t) => t.id));
+      templates = [
+        ...templates,
+        ...all.filter((t) => !known.has(t.id)).map((t) => ({ id: t.id, title: t.title, description: t.description })),
+      ];
+    }
+  } catch { /* plugin templates are additive only */ }
 
   if (jsonMode) {
     process.stdout.write(JSON.stringify(templates, null, 2) + '\n');
@@ -456,8 +469,16 @@ export async function cmdNew(args: string[]): Promise<number> {
     return 1;
   }
 
-  // Validate that the requested template exists
-  const tmpl = getTemplate(parsed.templateId);
+  // Validate that the requested template exists (builtin first; M33 plugin
+  // templates resolved by their prefixed id, e.g. "my-plugin:my-template").
+  let tmpl = getTemplate(parsed.templateId);
+  if (!tmpl && parsed.templateId.includes(':')) {
+    try {
+      const templatesMod = await importTemplates();
+      const all = await (templatesMod as { getTemplates?: () => Promise<import('../core/types.js').ProjectTemplate[]> }).getTemplates?.();
+      tmpl = all?.find((t) => t.id === parsed.templateId) ?? null;
+    } catch { /* fall through to the unknown-template error */ }
+  }
   if (!tmpl) {
     printError(
       `Unknown template: "${parsed.templateId}". ` +

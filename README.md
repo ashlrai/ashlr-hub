@@ -60,6 +60,29 @@ ashlr help
 
 ---
 
+## Plugins (M33) — extend the hub without forking it
+
+Drop a plugin under `~/.ashlr/plugins/<name>/` (a `manifest.json` + an ESM
+entry) to contribute **backlog scanners**, **project templates**, **model
+providers**, or **CLI commands** (`ashlr x <name>`). Plugins are
+**default-off**: discovery reads manifests only, enabling is confirm-gated and
+pins the entry file's sha256, capability declarations are enforced, every
+plugin action is audited, and the kill switch / `ASHLR_NO_PLUGINS=1` shut the
+whole layer off. Typed authoring via `@ashlr/hub/plugin`. Full guide + honest
+trust model: [`docs/PLUGINS.md`](./docs/PLUGINS.md).
+
+```bash
+ashlr plugins list              # discovery — never executes plugin code
+ashlr plugins enable <name>     # confirm + integrity pin
+ashlr x <name> [...]            # run a plugin command
+```
+
+ashlr is also a library: `npm install @ashlr/hub` and import the curated
+surface (`@ashlr/hub`, `./core`, `./types`, `./plugin`). Releasing:
+[`docs/RELEASING.md`](./docs/RELEASING.md).
+
+---
+
 ## Agent-native surface (M31) — use ashlr from inside agent sessions
 
 ashlr's intelligence is reachable from any coding agent (Claude Code, Cursor, …)

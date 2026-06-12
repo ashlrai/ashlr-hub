@@ -40,3 +40,17 @@ jobs:
 
       - name: Test
         run: npm test
+
+      # M33: keep the published exports map honest — pack the tarball, install
+      # it into a clean dir, and exercise the bin + the ./types entry point.
+      - name: Pack smoke (exports map)
+        run: |
+          npm pack
+          SMOKE_DIR=$(mktemp -d)
+          TARBALL="$PWD"/ashlr-hub-*.tgz
+          cd "$SMOKE_DIR"
+          npm init -y > /dev/null
+          npm install $TARBALL > /dev/null
+          ./node_modules/.bin/ashlr help > /dev/null
+          node -e "import('@ashlr/hub/types').then(() => console.log('exports map ok'))"
+          node -e "import('@ashlr/hub/core').then((m) => { if (typeof m.loadConfig !== 'function') throw new Error('core surface broken'); console.log('core surface ok'); })"

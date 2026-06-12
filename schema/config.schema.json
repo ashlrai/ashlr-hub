@@ -152,6 +152,42 @@
           "description": "Whether `ashlr run` injects top-k recall into sub-agent prompts (default true)."
         }
       }
+    },
+    "plugins": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "M33 plugin-system configuration. Default empty — enabled:[] means no plugins load.",
+      "properties": {
+        "enabled": {
+          "type": "array",
+          "description": "Plugin names that are permitted to load.",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,39}$"
+          }
+        },
+        "settings": {
+          "type": "object",
+          "description": "Per-plugin key/value settings.",
+          "patternProperties": {
+            "^[a-z][a-z0-9-]{0,39}$": {
+              "type": "object"
+            }
+          },
+          "additionalProperties": false
+        },
+        "integrity": {
+          "type": "object",
+          "description": "Per-plugin sha256 integrity pins.",
+          "patternProperties": {
+            "^[a-z][a-z0-9-]{0,39}$": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
     }
   },
   "definitions": {

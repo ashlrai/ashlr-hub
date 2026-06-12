@@ -629,6 +629,23 @@ export const TEMPLATES: ProjectTemplate[] = [
   minimalTemplate,
 ];
 
+/**
+ * M33: builtin TEMPLATES + validated templates from enabled plugins.
+ * Best-effort: a broken plugin layer yields the builtins only. Plugin
+ * template ids arrive prefixed `<plugin>:<id>` (wrappers.validateTemplate).
+ */
+export async function getTemplates(cfg?: import('../types.js').AshlrConfig): Promise<ProjectTemplate[]> {
+  let fromPlugins: ProjectTemplate[] = [];
+  try {
+    const { loadConfig } = await import('../config.js');
+    const { getPluginTemplates } = await import('../plugins/registry.js');
+    fromPlugins = await getPluginTemplates(cfg ?? loadConfig());
+  } catch {
+    fromPlugins = [];
+  }
+  return [...TEMPLATES, ...fromPlugins];
+}
+
 export function getTemplate(id: string): ProjectTemplate | null {
   return TEMPLATES.find((t) => t.id === id) ?? null;
 }

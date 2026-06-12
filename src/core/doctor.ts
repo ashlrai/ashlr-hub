@@ -55,6 +55,52 @@ function runCmd(cmd: string, args: string[]): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// M33: plugin-layer probe (read-only; manifests + integrity pins only)
+// ---------------------------------------------------------------------------
+
+async function checkPlugins(cfg: AshlrConfig): Promise<DoctorCheck> {
+  try {
+    const { discoverPlugins } = await import('./plugins/registry.js');
+    const { hashEntry } = await import('./plugins/integrity.js');
+    const { join } = await import('node:path');
+
+    const enabled = cfg.plugins?.enabled ?? [];
+    if (enabled.length === 0) {
+      return check('plugins', 'Plugins', 'pass', 'none enabled (default-off)');
+    }
+
+    const found = discoverPlugins();
+    const problems: string[] = [];
+    for (const name of enabled) {
+      const p = found.find((f) => f.manifest?.name === name);
+      if (!p) {
+        problems.push(`${name}: enabled but missing under ~/.ashlr/plugins/`);
+        continue;
+      }
+      if (!p.ok || !p.manifest) {
+        problems.push(`${name}: invalid manifest (${p.reason ?? 'unknown'})`);
+        continue;
+      }
+      const pin = cfg.plugins?.integrity?.[name];
+      const live = hashEntry(join(p.dir, p.manifest.entry));
+      if (!pin) problems.push(`${name}: no integrity pin — re-run \`ashlr plugins enable ${name}\``);
+      else if (live !== pin) problems.push(`${name}: entry file changed since enable (integrity mismatch)`);
+    }
+
+    if (problems.length > 0) {
+      return check(
+        'plugins', 'Plugins', 'warn',
+        problems.join('; '),
+        'Fix or re-enable the listed plugins (`ashlr plugins enable <name>`), or disable them.',
+      );
+    }
+    return check('plugins', 'Plugins', 'pass', `${enabled.length} enabled, all pins verified`);
+  } catch {
+    return check('plugins', 'Plugins', 'pass', 'plugin layer not built — skipped');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Dynamic import helpers for M3 modules — gracefully no-ops if not built yet
 // ---------------------------------------------------------------------------
 
@@ -1064,6 +1110,9 @@ export async function runDoctor(cfg: AshlrConfig): Promise<DoctorReport> {
   checks.push(checkKillSwitch());
   checks.push(checkAshlrWriteableProbe());
   checks.push(checkSandboxHealth());
+
+  // --- M33: plugin layer (read-only; discovery never executes plugin code) ---
+  checks.push(await checkPlugins(cfg));
 
   // --- Async: provider registry ---
   try {

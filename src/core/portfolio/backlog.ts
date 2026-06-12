@@ -115,12 +115,25 @@ function dedupeItems(items: WorkItem[]): WorkItem[] {
 type Scanner = (repo: string) => Promise<WorkItem[]>;
 
 async function getScanners(): Promise<ReadonlyArray<Scanner>> {
+  let builtin: ReadonlyArray<Scanner> = [];
   try {
     const mod = await import('./scanners.js');
-    return mod.SCANNERS as ReadonlyArray<Scanner>;
+    builtin = mod.SCANNERS as ReadonlyArray<Scanner>;
   } catch {
-    return [];
+    builtin = [];
   }
+  // M33: merge enabled-plugin scanners (already wrapped: bounded, never-throw,
+  // scrubbed, namespaced). Best-effort — a broken plugin layer never blocks
+  // the builtin sweep; with plugins.enabled [] this resolves to [].
+  let fromPlugins: ReadonlyArray<Scanner> = [];
+  try {
+    const { loadConfig } = await import('../config.js');
+    const { getPluginScanners } = await import('../plugins/registry.js');
+    fromPlugins = await getPluginScanners(loadConfig());
+  } catch {
+    fromPlugins = [];
+  }
+  return [...builtin, ...fromPlugins];
 }
 
 /**

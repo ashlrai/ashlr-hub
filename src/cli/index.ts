@@ -405,6 +405,20 @@ const loadCompletionsCmd = lazyCmd(
   'completions command requires src/cli/completions.ts (M31 module not yet built).',
 );
 
+// ─── M33 command loaders ──────────────────────────────────────────────────────────────
+
+const loadPluginsCmd = lazyCmd(
+  () => import('./plugins.js'),
+  (m) => m.cmdPlugins as Cmd,
+  'plugins command requires src/cli/plugins.ts (M33 module not yet built).',
+);
+
+const loadXCmd = lazyCmd(
+  () => import('./plugins.js'),
+  (m) => m.cmdX as Cmd,
+  'x command requires src/cli/plugins.ts (M33 module not yet built).',
+);
+
 // ─── H4 command loaders ─────────────────────────────────────────────
 
 const loadVerifySafetyCmd = lazyCmd(
@@ -1561,6 +1575,18 @@ async function main(): Promise<void> {
       case 'completions': {
         const cmdCompletions = await loadCompletionsCmd();
         process.exitCode = await cmdCompletions(rest);
+        break;
+      }
+
+      case 'plugins': {
+        const cmdPlugins = await loadPluginsCmd();
+        process.exitCode = await cmdPlugins(rest);
+        break;
+      }
+
+      case 'x': {
+        const cmdX = await loadXCmd();
+        process.exitCode = await cmdX(rest);
         break;
       }
 

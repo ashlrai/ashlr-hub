@@ -394,6 +394,12 @@ export function defaultConfig(): AshlrConfig {
     },
     telemetry: {},
     tools: {},
+    // M33: plugin system defaults — DEFAULT EMPTY (enabled:[] = no plugins load).
+    plugins: {
+      enabled: [],
+      settings: {},
+      integrity: {},
+    },
   };
 }
 

@@ -66,6 +66,7 @@ const SOURCE_LABELS: Record<WorkSource, string> = {
   dep:      'dep',
   doc:      'doc',
   security: 'security',
+  plugin:   'plugin', // M33
 };
 
 const SOURCE_COLORS: Record<WorkSource, keyof ReturnType<typeof makeColors>> = {
@@ -75,6 +76,7 @@ const SOURCE_COLORS: Record<WorkSource, keyof ReturnType<typeof makeColors>> = {
   dep:      'magenta',
   doc:      'cyan',
   security: 'red',
+  plugin:   'cyan', // M33
 };
 
 /** Shorten an absolute repo path: replace $HOME with ~, truncate if long. */

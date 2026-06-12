@@ -911,8 +911,47 @@ export async function getActiveClient(
     return buildLmStudioClient(baseUrl, model, supportsTools);
   }
 
+  // ---- M33: plugin-contributed provider ----
+  // Strictly additive: this branch is reachable ONLY when the resolved id
+  // matches an enabled plugin provider — builtin routing above is untouched.
+  // Cloud-tier plugin providers sit behind the SAME local-first gates as
+  // builtin cloud providers (--allow-cloud + declared key env present).
+  try {
+    const { getPluginProviders } = await import('../plugins/registry.js');
+    const pluginProviders = await getPluginProviders(cfg);
+    const spec = pluginProviders.find((p) => p.id === activeId);
+    if (spec) {
+      if (spec.tier === 'cloud') {
+        if (!opts.allowCloud) {
+          throw new Error(
+            `local-first: provider '${activeId}' is a cloud-tier plugin provider. Pass --allow-cloud to use it.`,
+          );
+        }
+        for (const envKey of spec.envKeys ?? []) {
+          const v = process.env[envKey];
+          if (!v || v.trim().length === 0) {
+            throw new Error(
+              `local-first: --allow-cloud passed but ${envKey} is not set for plugin provider '${activeId}'.`,
+            );
+          }
+        }
+      }
+      const client = (await spec.createClient({ model: opts.model })) as ProviderClient;
+      // Runtime shape check — a plugin returning garbage must fail loudly here,
+      // not deep inside the agent loop.
+      if (!client || typeof client.chat !== 'function' || typeof client.id !== 'string') {
+        throw new Error(`plugin provider '${activeId}' returned an invalid client (missing id/chat).`);
+      }
+      return client;
+    }
+  } catch (err) {
+    // A real gate/validation error must surface; only a missing plugin layer
+    // falls through to the unknown-provider error below.
+    if (err instanceof Error && !err.message.includes('Cannot find module')) throw err;
+  }
+
   // ---- Unknown local provider ----
   throw new Error(
-    `local-first: unknown provider '${activeId}'. Only 'ollama' and 'lmstudio' are supported as local providers.`,
+    `local-first: unknown provider '${activeId}'. Only 'ollama', 'lmstudio', and enabled plugin providers are supported.`,
   );
 }

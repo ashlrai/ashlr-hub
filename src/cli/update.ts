@@ -32,7 +32,7 @@
 
 import { spawnSync, execFileSync } from 'node:child_process';
 import { existsSync, readlinkSync, lstatSync } from 'node:fs';
-import { dirname, resolve, join } from 'node:path';
+import { dirname, resolve, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { createRequire } from 'node:module';
@@ -305,17 +305,31 @@ interface UpdateResult {
 interface ParsedUpdateArgs {
   check: boolean;
   json: boolean;
+  /** M33: skip the interactive gate on the npm-channel install. */
+  yes: boolean;
+  /** M33: explicit channel override ('git' | 'npm'); default auto-detect. */
+  channel?: 'git' | 'npm';
   usageError?: string;
 }
 
 function parseUpdateArgs(args: string[]): ParsedUpdateArgs {
-  const result: ParsedUpdateArgs = { check: false, json: false };
+  const result: ParsedUpdateArgs = { check: false, json: false, yes: false };
 
-  for (const arg of args) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
     if (arg === '--check') {
       result.check = true;
     } else if (arg === '--json') {
       result.json = true;
+    } else if (arg === '--yes') {
+      result.yes = true;
+    } else if (arg === '--channel') {
+      const val = args[++i];
+      if (val !== 'git' && val !== 'npm') {
+        result.usageError = `--channel must be git or npm; got: ${val ?? '(missing)'}`;
+        return result;
+      }
+      result.channel = val;
     } else if (arg === '--help' || arg === '-h') {
       // handled upstream
     } else {
@@ -325,6 +339,97 @@ function parseUpdateArgs(args: string[]): ParsedUpdateArgs {
   }
 
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// M33: channel detection + npm channel flow
+// ---------------------------------------------------------------------------
+
+/**
+ * 'npm' when the compiled module runs from inside a node_modules install
+ * (global or local `npm install @ashlr/hub`); 'git' for a repo checkout.
+ * Exported for tests.
+ */
+export function detectChannel(moduleUrl: string = import.meta.url): 'git' | 'npm' {
+  const here = fileURLToPath(moduleUrl);
+  return here.includes(`${sep}node_modules${sep}`) ? 'npm' : 'git';
+}
+
+/**
+ * npm-channel update: check the registry for a newer version (bounded network
+ * call, degrades offline to "unknown"); the actual install runs ONLY with
+ * --yes — otherwise the command to run is printed.
+ */
+async function runNpmChannel(parsed: ParsedUpdateArgs, repoRoot: string): Promise<number> {
+  const jsonMode = parsed.json;
+  const localVersion = readPackageVersion(repoRoot);
+
+  // `npm view` is a network call — explicit, bounded, read-only.
+  let latest: string | null = null;
+  try {
+    const res = spawnSync('npm', ['view', '@ashlr/hub', 'version'], {
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    latest = res.status === 0 ? res.stdout.trim() || null : null;
+  } catch {
+    latest = null;
+  }
+
+  const upToDate = latest !== null && localVersion !== null && latest === localVersion;
+
+  if (jsonMode) {
+    process.stdout.write(
+      JSON.stringify(
+        {
+          channel: 'npm',
+          versionLocal: localVersion,
+          versionLatest: latest,
+          upToDate: latest === null ? null : upToDate,
+          updated: false,
+          message:
+            latest === null
+              ? 'registry unreachable — could not check for updates'
+              : upToDate
+                ? 'up to date'
+                : `update available: ${localVersion ?? '?'} → ${latest}`,
+        },
+        null,
+        2,
+      ) + '\n',
+    );
+  } else {
+    out('', false);
+    out(bold('  ashlr update') + gray('  — npm channel'), false);
+    out(`  installed: ${cyan(localVersion ?? 'unknown')}`, false);
+    out(`  latest:    ${latest === null ? yellow('unknown (registry unreachable)') : cyan(latest)}`, false);
+    out('', false);
+  }
+
+  if (latest === null || upToDate || parsed.check) return 0;
+
+  if (!parsed.yes) {
+    if (!jsonMode) {
+      out(`  Update available. Run: ${cyan('npm install -g @ashlr/hub@latest')}`, false);
+      out(dim('  (or re-run `ashlr update --yes` to install it now)'), false);
+      out('', false);
+    }
+    return 0;
+  }
+
+  const install = spawnSync('npm', ['install', '-g', '@ashlr/hub@latest'], {
+    encoding: 'utf8',
+    stdio: jsonMode ? 'pipe' : 'inherit',
+    timeout: 300_000,
+  });
+  const ok = install.status === 0;
+  if (jsonMode) {
+    process.stdout.write(JSON.stringify({ channel: 'npm', updated: ok, versionLatest: latest }, null, 2) + '\n');
+  } else {
+    out(ok ? green(`  ✓ updated to ${latest}`) : red('  ✗ npm install failed'), false);
+    out('', false);
+  }
+  return ok ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -346,7 +451,7 @@ function printHelp(): void {
   console.log('');
   console.log('  ' + bold('Usage:'));
   console.log('');
-  console.log(`    ashlr update ${cyan('[--check]')} ${cyan('[--json]')}`);
+  console.log(`    ashlr update ${cyan('[--check]')} ${cyan('[--json]')} ${cyan('[--channel git|npm]')} ${cyan('[--yes]')}`);
   console.log('');
   console.log('  ' + bold('Flags:'));
   console.log('');
@@ -390,6 +495,12 @@ export async function cmdUpdate(args: string[]): Promise<number> {
   // ── Detect repo root ───────────────────────────────────────────────────────
 
   const repoRoot = detectRepoRoot();
+
+  // ── M33: channel routing — npm installs update via the registry, not git ──
+  const channel = parsed.channel ?? detectChannel();
+  if (channel === 'npm') {
+    return runNpmChannel(parsed, repoRoot);
+  }
 
   out('', jsonMode);
   out(bold('  ashlr update') + gray(`  —  ${repoRoot}`), jsonMode);

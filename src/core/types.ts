@@ -109,6 +109,23 @@ export interface AshlrConfig {
    * fields only bound HOW MUCH it may propose (budget/items/parallel/interval).
    */
   daemon?: Partial<DaemonConfig>;
+  /**
+   * M33: optional plugin-system configuration. Additive — absent in old configs
+   * and defaults to { enabled: [], settings: {}, integrity: {} } via defaultConfig().
+   * DEFAULT EMPTY: enabled:[] means NO plugins load.
+   */
+  plugins?: {
+    /** Plugin names that are permitted to load (default empty = load nothing). */
+    enabled: string[];
+    /** Per-plugin key/value settings. Key = plugin name, value = arbitrary object. */
+    settings: Record<string, Record<string, unknown>>;
+    /**
+     * Per-plugin integrity pins. Key = plugin name.
+     * Value = "sha256:<64-hex-char>" hash of the plugin's entry file.
+     * A missing pin causes the plugin to be refused at load time.
+     */
+    integrity: Record<string, string>;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1670,7 +1687,7 @@ export interface Enrollment {
  */
 
 /** The kind of source a WorkItem was derived from. */
-export type WorkSource = 'issue' | 'todo' | 'test' | 'dep' | 'doc' | 'security';
+export type WorkSource = 'issue' | 'todo' | 'test' | 'dep' | 'doc' | 'security' | 'plugin'; // M33: 'plugin' added (additive)
 
 /**
  * A single discovered, scored unit of work. Produced by a scanner over a

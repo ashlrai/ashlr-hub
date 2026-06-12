@@ -19,7 +19,7 @@ export const TOP_LEVEL_COMMANDS: string[] = [
   'gh', 'vercel', 'wire', 'notify', 'telemetry', 'sandbox', 'audit',
   'enroll', 'backlog', 'inbox', 'daemon', 'ask', 'knowledge', 'reflect',
   'health', 'goals', 'digest', 'seams', 'verify-safety', 'preflight',
-  'onboard', 'demo', 'orient', 'docs', 'completions', 'help',
+  'onboard', 'demo', 'orient', 'docs', 'completions', 'plugins', 'x', 'help',
 ];
 
 /** Subcommands per top-level command (first-position completion only). */
@@ -46,6 +46,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   goals: ['add', 'plan', 'advance', 'status'],
   seams: ['status'],
   completions: ['zsh', 'bash'],
+  plugins: ['list', 'info', 'enable', 'disable'],
 };
 
 function zshScript(): string {

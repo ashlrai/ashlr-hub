@@ -42,6 +42,21 @@ posture change: reads flow freely, writes stay append-only or proposal-only.
   unattended swarm files a PENDING proposal (`notify.desktop: true`;
   metadata only). `docs/contracts/CONTRACT-M32.md` · 5 new test files.
 
+- **M33 — Ecosystem layer.** Plugins: third parties can contribute backlog
+  scanners, project templates, model providers, and CLI commands from
+  `~/.ashlr/plugins/<name>/` — DEFAULT-OFF (`plugins.enabled: []`),
+  manifest-only discovery (no code executes until enabled), sha256 integrity
+  pinning, capability declarations enforced, kill-switch gated, fully audited,
+  with a least-privilege host API (frozen config projection, never secrets).
+  `ashlr plugins list|info|enable|disable`, `ashlr x <name>`. Distribution:
+  the package is now `@ashlr/hub` (public, npm provenance) with a tag-gated
+  release pipeline (full CI verify → version/changelog gates → publish +
+  GitHub release), a CI pack-smoke step keeping the exports map honest, and
+  `ashlr update` channel awareness (git checkout vs npm install; npm installs
+  only with `--yes`). Public API: curated `@ashlr/hub` / `./core` / `./types`
+  / `./plugin` entry points (`applyProposal` deliberately unexported).
+  `docs/contracts/CONTRACT-M33.md`, `docs/PLUGINS.md`, `docs/RELEASING.md`.
+
 ## [2.1.0] — 2026-06-11 — v2.1 "Harden & Prove" (H1–H8)
 
 Takes v2 from *built + unit-tested* to **proven trustworthy**. Eight hardening

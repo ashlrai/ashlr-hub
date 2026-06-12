@@ -1,8 +1,11 @@
 {
-  "name": "ashlr-hub",
-  "version": "2.1.0",
-  "private": true,
+  "name": "@ashlr/hub",
+  "version": "2.2.0",
   "description": "Local-first command center for agentic engineers.",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "license": "MIT",
   "author": "Mason Wyatt <mason@evero-consulting.com>",
   "homepage": "https://github.com/ashlrai/ashlr-hub#readme",
@@ -29,12 +32,34 @@
   "files": [
     "dist",
     "bin",
-    "schema"
+    "schema",
+    "CHANGELOG.md"
   ],
+  "exports": {
+    ".": {
+      "types": "./dist/api/index.d.ts",
+      "import": "./dist/api/index.js"
+    },
+    "./core": {
+      "types": "./dist/api/core.d.ts",
+      "import": "./dist/api/core.js"
+    },
+    "./types": {
+      "types": "./dist/api/types.d.ts",
+      "import": "./dist/api/types.js"
+    },
+    "./plugin": {
+      "types": "./dist/api/plugin.d.ts",
+      "import": "./dist/api/plugin.js"
+    },
+    "./package.json": "./package.json"
+  },
   "engines": {
     "node": ">=20"
   },
   "scripts": {
+    "prepublishOnly": "npm run typecheck && npm run lint && npm test",
+    "prepack": "npm run build",
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
