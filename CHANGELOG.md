@@ -57,6 +57,14 @@ posture change: reads flow freely, writes stay append-only or proposal-only.
   / `./plugin` entry points (`applyProposal` deliberately unexported).
   `docs/contracts/CONTRACT-M33.md`, `docs/PLUGINS.md`, `docs/RELEASING.md`.
 
+- **DX follow-ups.** `ashlr plugins init <name> [--capability k]` scaffolds a
+  working plugin skeleton (every skeleton integration-proven to load and
+  contribute); agent-contract conformance locks pin the OrientResult /
+  RunEstimate shapes, the 11 native tool names + safety classes, and the
+  AGENT_COMMANDS registry so shape drift fails a named test; public roadmap
+  (`docs/ROADMAP.md`); CI made hermetic (doctor `which ashlr` shim,
+  check-version argv precedence) — the suite is green on clean runners.
+
 ## [2.1.0] — 2026-06-11 — v2.1 "Harden & Prove" (H1–H8)
 
 Takes v2 from *built + unit-tested* to **proven trustworthy**. Eight hardening
