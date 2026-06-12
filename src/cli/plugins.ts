@@ -34,6 +34,7 @@ function printPluginsHelp(): void {
   console.log('');
   console.log(c.bold('  ashlr plugins') + c.dim(' — manage the plugin layer (default-off)'));
   console.log('');
+  console.log(`    ${c.cyan('ashlr plugins init <name> [--capability k]')} ${c.dim('scaffold a working plugin skeleton')}`);
   console.log(`    ${c.cyan('ashlr plugins list [--json]')}        ${c.dim('discover plugins (manifests only — runs NO plugin code)')}`);
   console.log(`    ${c.cyan('ashlr plugins info <name>')}          ${c.dim('manifest detail for one plugin')}`);
   console.log(`    ${c.cyan('ashlr plugins enable <name> [--yes]')} ${c.dim('consent gate: confirm + integrity-pin + enable')}`);
@@ -221,6 +222,155 @@ async function cmdPluginsDisable(name: string | undefined, jsonMode: boolean): P
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// plugins init — scaffold a working plugin skeleton
+// ---------------------------------------------------------------------------
+
+const INIT_CAPABILITIES = ['scanner', 'template', 'provider', 'command'] as const;
+type InitCapability = (typeof INIT_CAPABILITIES)[number];
+
+/** Entry-file skeleton per capability (plain ESM; works without a build step). */
+function initEntrySource(name: string, capability: InitCapability): string {
+  const header =
+    `// ${name} — an ashlr plugin (capability: ${capability}).\n` +
+    `// Typed authoring: npm i -D @ashlr/hub, then import { definePlugin } from '@ashlr/hub/plugin'.\n` +
+    `// Docs + trust model: docs/PLUGINS.md in the ashlr-hub repo.\n\n`;
+  switch (capability) {
+    case 'scanner':
+      return header + `export default {
+  activate(host) {
+    host.log('activated');
+    return {
+      scanners: [{
+        id: 'example',
+        // Return WorkItem-shaped objects. The hub wraps this: 15s timeout,
+        // 100-item cap, value/effort clamped 1..5, score recomputed,
+        // title/detail secret-scrubbed, ids namespaced.
+        async scan(repo) {
+          return [{
+            id: 'demo', repo, source: 'plugin',
+            title: 'Example finding from ${name}',
+            detail: 'Replace scan() with real discovery logic.',
+            value: 3, effort: 2, score: 0, tags: [], ts: new Date().toISOString(),
+          }];
+        },
+      }],
+    };
+  },
+};\n`;
+    case 'template':
+      return header + `export default {
+  activate() {
+    return {
+      templates: [{
+        id: 'starter', // exposed as '${name}:starter' in \`ashlr new --list\`
+        title: 'Example starter',
+        description: 'Scaffolded by the ${name} plugin.',
+        files: ({ name: projectName }) => [
+          { path: 'README.md', content: '# ' + projectName + '\\n' },
+        ],
+      }],
+    };
+  },
+};\n`;
+    case 'provider':
+      return header + `export default {
+  activate() {
+    return {
+      providers: [{
+        id: '${name}-model',
+        tier: 'local', // 'cloud' providers require --allow-cloud + envKeys presence
+        async probe() { return { up: false }; },
+        async createClient({ model }) {
+          return {
+            id: '${name}-model', supportsTools: false,
+            async chat(messages) {
+              return { text: 'not implemented', toolCalls: [], usage: { tokensIn: 0, tokensOut: 0 } };
+            },
+          };
+        },
+      }],
+    };
+  },
+};\n`;
+    case 'command':
+      return header + `export default {
+  activate() {
+    return {
+      commands: [{
+        name: 'hello', // invoked as: ashlr x hello
+        description: 'Example command from ${name}',
+        async run(args, host) {
+          host.log('hello ' + (args[0] ?? 'world'));
+          return 0;
+        },
+      }],
+    };
+  },
+};\n`;
+  }
+}
+
+async function cmdPluginsInit(args: string[], jsonMode: boolean): Promise<number> {
+  const name = args.find((a) => !a.startsWith('--'));
+  const capIdx = args.indexOf('--capability');
+  const capability = (capIdx !== -1 ? args[capIdx + 1] : 'scanner') as InitCapability;
+
+  if (!name) {
+    process.stderr.write('error: usage: ashlr plugins init <name> [--capability scanner|template|provider|command]\n');
+    return 2;
+  }
+  if (!/^[a-z][a-z0-9-]{0,39}$/.test(name)) {
+    process.stderr.write(`error: plugin name must match ^[a-z][a-z0-9-]{0,39}$ — got "${name}"\n`);
+    return 2;
+  }
+  if (!INIT_CAPABILITIES.includes(capability)) {
+    process.stderr.write(`error: --capability must be one of: ${INIT_CAPABILITIES.join(', ')}\n`);
+    return 2;
+  }
+
+  const { homedir } = await import('node:os');
+  const { mkdirSync, writeFileSync, existsSync } = await import('node:fs');
+  const dir = join(homedir(), '.ashlr', 'plugins', name);
+  if (existsSync(join(dir, 'manifest.json'))) {
+    process.stderr.write(`error: ${dir} already has a manifest.json — refusing to overwrite\n`);
+    return 1;
+  }
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'manifest.json'),
+    JSON.stringify(
+      {
+        name,
+        version: '0.1.0',
+        apiVersion: '^1.0.0',
+        description: `An ashlr ${capability} plugin.`,
+        entry: './index.mjs',
+        capabilities: [capability],
+      },
+      null,
+      2,
+    ) + '\n',
+  );
+  writeFileSync(join(dir, 'index.mjs'), initEntrySource(name, capability));
+
+  if (jsonMode) {
+    process.stdout.write(JSON.stringify({ created: true, name, capability, dir }, null, 2) + '\n');
+  } else {
+    console.log('');
+    console.log(c.green(`  ✓ scaffolded ${name}`) + c.dim(` (${capability}) at ${dir}`));
+    console.log('');
+    console.log('  Next steps:');
+    console.log(`    1. Edit ${c.cyan(join(dir, 'index.mjs'))}`);
+    console.log(`    2. ${c.cyan(`ashlr plugins enable ${name}`)}   ${c.dim('(confirm + integrity pin)')}`);
+    if (capability === 'scanner') console.log(`    3. ${c.cyan('ashlr backlog refresh')}        ${c.dim('items appear tagged [plugin]')}`);
+    if (capability === 'command') console.log(`    3. ${c.cyan('ashlr x hello')}`);
+    if (capability === 'template') console.log(`    3. ${c.cyan('ashlr new --list')}             ${c.dim(`shows ${name}:starter`)}`);
+    console.log('');
+  }
+  return 0;
+}
+
 export async function cmdPlugins(args: string[]): Promise<number> {
   const sub = args[0];
   const jsonMode = args.includes('--json');
@@ -232,6 +382,7 @@ export async function cmdPlugins(args: string[]): Promise<number> {
   }
   if (sub === 'list') return cmdPluginsList(jsonMode);
   if (sub === 'info') return cmdPluginsInfo(args[1], jsonMode);
+  if (sub === 'init') return cmdPluginsInit(args.slice(1), jsonMode);
   if (sub === 'enable') return cmdPluginsEnable(args[1], yes, jsonMode);
   if (sub === 'disable') return cmdPluginsDisable(args[1], jsonMode);
 

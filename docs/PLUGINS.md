@@ -41,6 +41,14 @@ API + tamper evidence + auditability*, not containment:
 
 ## Quick start
 
+```bash
+ashlr plugins init my-scanner --capability scanner   # working skeleton, ready to edit
+```
+
+This scaffolds a proven-loadable plugin under `~/.ashlr/plugins/my-scanner/`
+(every skeleton is integration-tested in test/m33.plugin-init.test.ts). Or by
+hand:
+
 ```
 ~/.ashlr/plugins/my-scanner/
 ├── manifest.json

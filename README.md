@@ -12,15 +12,27 @@ Index every project, run agents on local models, aggregate all your MCP servers,
 
 ## Getting started in one command
 
-Requires **macOS** and **Node.js 22+** with `~/.local/bin` on your `PATH`.
+Requires **macOS** and **Node.js 22+**.
+
+```sh
+npm install -g @ashlr/hub   # once published; see docs/RELEASING.md
+ashlr init                  # one-command onboarding: config, models, editors, genome, doctor
+```
+
+<details>
+<summary>From a git checkout (contributors; needs <code>~/.local/bin</code> on PATH)</summary>
 
 ```sh
 git clone https://github.com/ashlrai/ashlr-hub.git
 cd ashlr-hub
 npm ci && npm run build
 ./install.sh        # symlinks ashlr into ~/.local/bin (idempotent)
-ashlr init          # one-command onboarding: config, models, editors, symlink, genome, doctor
+ashlr init
 ```
+
+`ashlr update` is channel-aware: a git checkout updates via `git pull --ff-only`
++ rebuild; an npm install checks the registry and installs only with `--yes`.
+</details>
 
 `ashlr init` is the M20 capstone: it walks you through every setup step — config, local model detection, editor MCP wiring, symlink, genome dir, Phantom status — then runs `ashlr doctor` as a final gate and prints a `try: ashlr run / ashlr swarm / ashlr tui` next-steps summary. Re-runnable safely at any time; fully idempotent.
 

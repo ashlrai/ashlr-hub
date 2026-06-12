@@ -46,7 +46,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   goals: ['add', 'plan', 'advance', 'status'],
   seams: ['status'],
   completions: ['zsh', 'bash'],
-  plugins: ['list', 'info', 'enable', 'disable'],
+  plugins: ['init', 'list', 'info', 'enable', 'disable'],
 };
 
 function zshScript(): string {
