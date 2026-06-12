@@ -14,7 +14,11 @@ import { dirname, join } from 'node:path';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 
-const tag = process.env.GITHUB_REF_NAME ?? process.argv[2] ?? '';
+// Explicit argv wins over the ambient env: GITHUB_REF_NAME is set on EVERY
+// Actions run (it's the branch name on push builds), so an explicitly passed
+// tag (tests, local dry-runs) must take precedence. release.yml passes no
+// argv, so the tag-triggered publish path still reads GITHUB_REF_NAME.
+const tag = process.argv[2] ?? process.env.GITHUB_REF_NAME ?? '';
 if (!tag) {
   console.error('check-version: no tag (set GITHUB_REF_NAME or pass as arg)');
   process.exit(1);
