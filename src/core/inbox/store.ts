@@ -40,8 +40,17 @@ export function inboxDir(): string {
   return join(homedir(), '.ashlr', 'inbox');
 }
 
-/** Absolute path to a specific proposal file. */
+/**
+ * Absolute path to a specific proposal file.
+ * M32 hardening: ids reach this from the web API (GET/POST /api/inbox/:id),
+ * so validate the shape here too — defense in depth against path traversal,
+ * matching runFilePath's guard in core/run/orchestrator.ts. Generated ids
+ * are always [a-z0-9-], so this never rejects a legitimate proposal.
+ */
 function proposalPath(id: string): string {
+  if (!/^[\w.-]+$/.test(id)) {
+    throw new Error(`Invalid proposal id: ${JSON.stringify(id)}`);
+  }
   return join(inboxDir(), `${id}.json`);
 }
 

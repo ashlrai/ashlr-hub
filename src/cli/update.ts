@@ -378,6 +378,16 @@ async function runNpmChannel(parsed: ParsedUpdateArgs, repoRoot: string): Promis
 
   const upToDate = latest !== null && localVersion !== null && latest === localVersion;
 
+  // Flat status message (avoid a nested ternary for the three states).
+  let message: string;
+  if (latest === null) {
+    message = 'registry unreachable — could not check for updates';
+  } else if (upToDate) {
+    message = 'up to date';
+  } else {
+    message = `update available: ${localVersion ?? '?'} → ${latest}`;
+  }
+
   if (jsonMode) {
     process.stdout.write(
       JSON.stringify(
@@ -387,12 +397,7 @@ async function runNpmChannel(parsed: ParsedUpdateArgs, repoRoot: string): Promis
           versionLatest: latest,
           upToDate: latest === null ? null : upToDate,
           updated: false,
-          message:
-            latest === null
-              ? 'registry unreachable — could not check for updates'
-              : upToDate
-                ? 'up to date'
-                : `update available: ${localVersion ?? '?'} → ${latest}`,
+          message,
         },
         null,
         2,

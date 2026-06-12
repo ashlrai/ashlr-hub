@@ -197,6 +197,38 @@ function getQueryParam(url: string, name: string): string | undefined {
 }
 
 /**
+ * Read a single request header value (collapsing the string[] form Node uses
+ * for repeated headers down to its first entry). Returns '' when absent.
+ */
+function headerValue(req: IncomingMessage, name: string): string {
+  const raw = req.headers[name];
+  if (Array.isArray(raw)) return raw[0] ?? '';
+  return raw ?? '';
+}
+
+/**
+ * The shared gate for the two mutating routes (POST /api/run and the web inbox
+ * approve/reject). Enforces, in order:
+ *   1. constant-time x-ashlr-token match  -> 401 on mismatch
+ *   2. Content-Type: application/json     -> 415 otherwise (CSRF defence in
+ *      depth; the token is the real control)
+ * Writes the failure response itself and returns false when the request should
+ * NOT proceed; returns true when both checks pass.
+ */
+function passesMutationGate(req: IncomingMessage, res: ServerResponse, token: string): boolean {
+  if (!safeEqual(headerValue(req, 'x-ashlr-token'), token)) {
+    sendJson(res, 401, { error: 'unauthorized: missing or invalid x-ashlr-token' });
+    return false;
+  }
+  const contentType = headerValue(req, 'content-type');
+  if (!contentType.toLowerCase().trim().startsWith('application/json')) {
+    sendJson(res, 415, { error: 'Content-Type must be application/json' });
+    return false;
+  }
+  return true;
+}
+
+/**
  * Extract the path from the request URL, without query string.
  * Never throws; falls back to '/'.
  */
@@ -371,23 +403,9 @@ async function handleDispatch(
   cfg: AshlrConfig,
   ctx: { token: string },
 ): Promise<void> {
-  // Token check (constant-time).
-  const providedToken = Array.isArray(req.headers['x-ashlr-token'])
-    ? (req.headers['x-ashlr-token'][0] ?? '')
-    : (req.headers['x-ashlr-token'] ?? '');
-
-  if (!safeEqual(providedToken, ctx.token)) {
-    sendJson(res, 401, { error: 'unauthorized: missing or invalid x-ashlr-token' });
-    return;
-  }
-
-  // Content-Type check — require JSON. Blocks simple-request form-POST CSRF
-  // attempts before body parsing (defence in depth; token is the real gate).
-  const contentType = Array.isArray(req.headers['content-type'])
-    ? (req.headers['content-type'][0] ?? '')
-    : (req.headers['content-type'] ?? '');
-  if (!contentType.toLowerCase().trim().startsWith('application/json')) {
-    sendJson(res, 415, { error: 'Content-Type must be application/json' });
+  // Token (constant-time) + JSON Content-Type gate — blocks simple-request
+  // form-POST CSRF before body parsing (the token is the real control).
+  if (!passesMutationGate(req, res, ctx.token)) {
     return;
   }
 
@@ -622,19 +640,8 @@ export async function handleApi(
         return true;
       }
 
-      // Token check (constant-time) — same gate as handleDispatch.
-      const providedToken = Array.isArray(req.headers['x-ashlr-token'])
-        ? (req.headers['x-ashlr-token'][0] ?? '')
-        : (req.headers['x-ashlr-token'] ?? '');
-      if (!safeEqual(providedToken, ctx.token)) {
-        sendJson(res, 401, { error: 'unauthorized: missing or invalid x-ashlr-token' });
-        return true;
-      }
-      const contentType = Array.isArray(req.headers['content-type'])
-        ? (req.headers['content-type'][0] ?? '')
-        : (req.headers['content-type'] ?? '');
-      if (!contentType.toLowerCase().trim().startsWith('application/json')) {
-        sendJson(res, 415, { error: 'Content-Type must be application/json' });
+      // Same token + Content-Type gate as handleDispatch.
+      if (!passesMutationGate(req, res, ctx.token)) {
         return true;
       }
 

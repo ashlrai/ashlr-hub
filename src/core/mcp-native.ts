@@ -474,6 +474,21 @@ function textResult(payload: unknown, isError = false): NativeToolResult {
 }
 
 /**
+ * Audit one native-tool outcome. Every call site shares the same
+ * 'mcp:native-call' action with null repo/sandbox and a `${tool} keys=${keys}`
+ * summary prefix; only the trailing detail + result class vary.
+ */
+function auditNativeCall(summary: string, result: 'ok' | 'refused' | 'error'): void {
+  audit({
+    action: 'mcp:native-call',
+    repo: null,
+    sandboxId: null,
+    summary,
+    result,
+  });
+}
+
+/**
  * Execute a native tool through the full safety pipeline. NEVER throws:
  * unknown tools, invalid args, kill-switch refusals, and handler failures all
  * surface as isError text results. Every outcome is audited.
@@ -487,38 +502,20 @@ export async function callNativeTool(name: string, rawArgs: unknown): Promise<Na
   const argKeys = Object.keys(args).sort().join(',') || '(none)';
 
   if (!tool) {
-    audit({
-      action: 'mcp:native-call',
-      repo: null,
-      sandboxId: null,
-      summary: `${name} keys=${argKeys} — unknown native tool`,
-      result: 'error',
-    });
+    auditNativeCall(`${name} keys=${argKeys} — unknown native tool`, 'error');
     return textResult(`Unknown native tool "${name}".`, true);
   }
 
   // ── Validate ───────────────────────────────────────────────────────────────
   const invalid = validateArgs(tool.inputSchema, args);
   if (invalid) {
-    audit({
-      action: 'mcp:native-call',
-      repo: null,
-      sandboxId: null,
-      summary: `${tool.name} keys=${argKeys} — invalid args: ${invalid}`,
-      result: 'error',
-    });
+    auditNativeCall(`${tool.name} keys=${argKeys} — invalid args: ${invalid}`, 'error');
     return textResult(`Invalid arguments for ${tool.name}: ${invalid}`, true);
   }
 
   // ── Safety gate: KILL refuses all writes (CONTRACT-M31 invariant 2) ───────
   if (tool.safety !== 'read' && killSwitchOn()) {
-    audit({
-      action: 'mcp:native-call',
-      repo: null,
-      sandboxId: null,
-      summary: `${tool.name} keys=${argKeys} — refused: kill switch on`,
-      result: 'refused',
-    });
+    auditNativeCall(`${tool.name} keys=${argKeys} — refused: kill switch on`, 'refused');
     return textResult(
       `${tool.name} refused: the ashlr kill switch is engaged (~/.ashlr/KILL). ` +
       'Read-only tools still work; writes are disabled until `ashlr enroll kill off`.',
@@ -531,13 +528,7 @@ export async function callNativeTool(name: string, rawArgs: unknown): Promise<Na
   try {
     cfg = loadConfig();
   } catch (err) {
-    audit({
-      action: 'mcp:native-call',
-      repo: null,
-      sandboxId: null,
-      summary: `${tool.name} keys=${argKeys} — config load failed`,
-      result: 'error',
-    });
+    auditNativeCall(`${tool.name} keys=${argKeys} — config load failed`, 'error');
     return textResult(
       `${tool.name} failed: could not load ~/.ashlr/config.json (${err instanceof Error ? err.message : String(err)})`,
       true,
@@ -546,23 +537,11 @@ export async function callNativeTool(name: string, rawArgs: unknown): Promise<Na
 
   try {
     const payload = await tool.handler(args, cfg);
-    audit({
-      action: 'mcp:native-call',
-      repo: null,
-      sandboxId: null,
-      summary: `${tool.name} keys=${argKeys} — ok`,
-      result: 'ok',
-    });
+    auditNativeCall(`${tool.name} keys=${argKeys} — ok`, 'ok');
     return textResult(payload);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    audit({
-      action: 'mcp:native-call',
-      repo: null,
-      sandboxId: null,
-      summary: `${tool.name} keys=${argKeys} — error: ${msg}`,
-      result: 'error',
-    });
+    auditNativeCall(`${tool.name} keys=${argKeys} — error: ${msg}`, 'error');
     return textResult(`${tool.name} failed: ${msg}`, true);
   }
 }

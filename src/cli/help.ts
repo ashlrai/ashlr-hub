@@ -393,9 +393,14 @@ function renderEntries(entries: HelpEntry[]): string {
   return entries.map((e) => `    ${c.cyan(pad(e.cmd, w))}  ${e.desc}`).join('\n');
 }
 
+/** All command entries tagged with a given topic (single source of truth). */
+function entriesForTopic(topic: HelpTopic): HelpEntry[] {
+  return HELP_ENTRIES.filter((e) => e.topic === topic);
+}
+
 function renderTopic(topic: HelpTopic): void {
   const c = makeColors(isTty());
-  const entries = HELP_ENTRIES.filter((e) => e.topic === topic);
+  const entries = entriesForTopic(topic);
   console.log('');
   console.log('  ' + c.bold(TOPIC_LABELS[topic]));
   console.log('');
@@ -420,7 +425,7 @@ function renderSummary(): void {
   console.log(c.bold('  ashlr') + c.dim(' — local-first command center for agentic engineers'));
   console.log('');
   for (const topic of TOPICS) {
-    const entries = HELP_ENTRIES.filter((e) => e.topic === topic);
+    const entries = entriesForTopic(topic);
     const headliners = entries.slice(0, 3).map((e) => e.cmd.split(' ')[0]);
     const unique = [...new Set(headliners)].join(', ');
     console.log(`    ${c.cyan(pad(topic, 14))}  ${TOPIC_LABELS[topic]} ${c.dim(`(${unique}, …)`)}`);
@@ -440,7 +445,7 @@ function renderAll(): void {
   for (const topic of TOPICS) {
     console.log('');
     console.log('  ' + c.bold(TOPIC_LABELS[topic]));
-    console.log(renderEntries(HELP_ENTRIES.filter((e) => e.topic === topic)));
+    console.log(renderEntries(entriesForTopic(topic)));
   }
   console.log('');
   for (const [t, lines] of Object.entries(FLAG_LINES)) {

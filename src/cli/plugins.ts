@@ -45,6 +45,12 @@ function printPluginsHelp(): void {
   console.log('');
 }
 
+/** Write a usage error to stderr and return exit code 2 (bad usage). */
+function usageError(usage: string): number {
+  process.stderr.write(`error: usage: ${usage}\n`);
+  return 2;
+}
+
 /** y/N prompt (TTY only; non-TTY refuses unless --yes). */
 function promptConfirm(question: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -107,8 +113,7 @@ async function cmdPluginsList(jsonMode: boolean): Promise<number> {
 
 async function cmdPluginsInfo(name: string | undefined, jsonMode: boolean): Promise<number> {
   if (!name) {
-    process.stderr.write('error: usage: ashlr plugins info <name>\n');
-    return 2;
+    return usageError('ashlr plugins info <name>');
   }
   const { discoverPlugins } = await importRegistry();
   const found = discoverPlugins().find((p) => p.manifest?.name === name || basename(p.dir) === name);
@@ -140,8 +145,7 @@ async function cmdPluginsInfo(name: string | undefined, jsonMode: boolean): Prom
 
 async function cmdPluginsEnable(name: string | undefined, yes: boolean, jsonMode: boolean): Promise<number> {
   if (!name) {
-    process.stderr.write('error: usage: ashlr plugins enable <name> [--yes]\n');
-    return 2;
+    return usageError('ashlr plugins enable <name> [--yes]');
   }
   const { discoverPlugins } = await importRegistry();
   const { hashEntry } = await importIntegrity();
@@ -199,8 +203,7 @@ async function cmdPluginsEnable(name: string | undefined, yes: boolean, jsonMode
 
 async function cmdPluginsDisable(name: string | undefined, jsonMode: boolean): Promise<number> {
   if (!name) {
-    process.stderr.write('error: usage: ashlr plugins disable <name>\n');
-    return 2;
+    return usageError('ashlr plugins disable <name>');
   }
   const cfg = loadConfig();
   const enabled = cfg.plugins?.enabled ?? [];
@@ -317,8 +320,7 @@ async function cmdPluginsInit(args: string[], jsonMode: boolean): Promise<number
   const capability = (capIdx !== -1 ? args[capIdx + 1] : 'scanner') as InitCapability;
 
   if (!name) {
-    process.stderr.write('error: usage: ashlr plugins init <name> [--capability scanner|template|provider|command]\n');
-    return 2;
+    return usageError('ashlr plugins init <name> [--capability scanner|template|provider|command]');
   }
   if (!/^[a-z][a-z0-9-]{0,39}$/.test(name)) {
     process.stderr.write(`error: plugin name must match ^[a-z][a-z0-9-]{0,39}$ — got "${name}"\n`);
