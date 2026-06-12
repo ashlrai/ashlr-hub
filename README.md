@@ -707,7 +707,7 @@ ashlr tui                # interactive alt-screen dashboard, auto-refreshes ever
 ashlr tui --once         # render one frame to stdout and exit (headless/CI)
 ashlr serve              # local web dashboard at http://127.0.0.1:7777
 ashlr serve --open       # launch the browser automatically
-ashlr serve --allow-dispatch   # enable opt-in POST /api/run (prints session token)
+ashlr serve --allow-dispatch   # enable opt-in POST /api/run + web inbox approve/reject (prints session token)
 ```
 
 **TUI tabs**: Overview · Runs · Swarms · Pulse · MCP. Keys: `Tab`/`1–5` switch tabs, `j/k` scroll, `r` refresh, `q` quit. Terminal safety guaranteed — alt-screen/raw mode always restored on quit or exception.

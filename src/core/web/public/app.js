@@ -6,13 +6,16 @@
  *
  * Views (hash-routed):
  *   #overview  — DashboardSnapshot cards
- *   #runs      — RunState table
+ *   #runs      — RunState table + dispatch panel (M32)
  *   #swarms    — SwarmRun list + DAG graph + live burndown
  *   #pulse     — ActivityRollup SVG bar charts
  *   #genome    — GenomeEntry search + list
  *   #portfolio — PortfolioSummary org-level view (read-only; M29)
+ *   #inbox     — Pending proposals list + approve/reject (M32)
+ *   #daemon    — Daemon state card (M32)
  *
- * Live updates via EventSource('/api/events') — patches runs + swarms views.
+ * Live updates via EventSource('/api/events') — patches runs + swarms +
+ * inbox + daemon views.
  */
 
 'use strict';
@@ -21,9 +24,12 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-const VIEWS = ['overview', 'runs', 'swarms', 'pulse', 'genome', 'portfolio'];
+const VIEWS = ['overview', 'runs', 'swarms', 'pulse', 'genome', 'portfolio', 'inbox', 'daemon'];
 const DEFAULT_VIEW = 'overview';
 const API_BASE = '';  // same origin
+
+// sessionStorage key for the session token (never localStorage, never URL).
+const TOKEN_STORAGE_KEY = 'ashlr-token';
 
 // Status -> color map (matches brand palette from styles.css)
 const STATUS_COLOR = {
@@ -54,10 +60,17 @@ const state = {
   genome: [],
   genomeQuery: '',
   portfolio: null,   // M29: read-only org-level PortfolioSummary | null
+  // M32: inbox + daemon
+  inbox: { pending: 0, proposals: [] },
+  inboxDetail: null,        // currently-open Proposal (full, with diff)
+  daemon: null,             // DaemonState | null
+  inboxBadge: 0,            // pending count from SSE, drives nav badge
   loading: {},   // viewName -> boolean
   error: {},     // viewName -> string | null
   activeView: DEFAULT_VIEW,
   eventSource: null,
+  // M32: estimate debounce timer
+  _estimateTimer: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -147,6 +160,76 @@ async function apiFetch(path) {
   return res.json();
 }
 
+// Token-authenticated POST. Returns parsed JSON or throws with message.
+async function apiPost(path, token) {
+  const res = await fetch(API_BASE + path, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-ashlr-token': token,
+    },
+    body: '{}',
+  });
+  const json = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
+  if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+  return json;
+}
+
+// ---------------------------------------------------------------------------
+// Token management (sessionStorage only — never localStorage, never URL)
+// ---------------------------------------------------------------------------
+
+function getToken() {
+  try { return sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? ''; } catch { return ''; }
+}
+
+function setToken(t) {
+  try { sessionStorage.setItem(TOKEN_STORAGE_KEY, t); } catch {}
+}
+
+function clearToken() {
+  try { sessionStorage.removeItem(TOKEN_STORAGE_KEY); } catch {}
+}
+
+// Prompt user for token and store it; returns the entered value (may be empty).
+function promptToken() {
+  const current = getToken();
+  const entered = window.prompt(
+    'Enter the ashlr session token printed by the server at startup.\n' +
+    'It is stored in sessionStorage only (cleared when the tab closes).\n\n' +
+    (current ? 'Current token is set. Leave blank to clear it.' : 'No token is set yet.'),
+    current
+  );
+  if (entered === null) return current; // cancelled
+  const trimmed = entered.trim();
+  if (trimmed) { setToken(trimmed); } else { clearToken(); }
+  updateTokenIndicator();
+  return trimmed;
+}
+
+// Update the subtle token indicator in the nav bar.
+function updateTokenIndicator() {
+  const el_ = document.getElementById('token-indicator');
+  if (!el_) return;
+  const hasToken = Boolean(getToken());
+  el_.title = hasToken ? 'Session token is set (click to change)' : 'No session token — click to enter';
+  el_.classList.toggle('token-indicator--set', hasToken);
+}
+
+// ---------------------------------------------------------------------------
+// HTML escaping (for untrusted diff text rendered in <pre>)
+// ---------------------------------------------------------------------------
+
+function escapeHtml(s) {
+  if (typeof s !== 'string') return '';
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // ---------------------------------------------------------------------------
 // EventSource — live updates
 // ---------------------------------------------------------------------------
@@ -171,12 +254,38 @@ function connectSSE() {
         if (state.activeView === 'overview' && state.snapshot) renderOverview();
       } catch {}
     });
+    // M32: live inbox state — update badge and, if viewing inbox, re-render
+    es.addEventListener('inbox', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        state.inbox = data;
+        state.inboxBadge = data.pending ?? 0;
+        updateInboxBadge();
+        if (state.activeView === 'inbox') renderInbox();
+      } catch {}
+    });
+    // M32: live daemon state
+    es.addEventListener('daemon', (e) => {
+      try {
+        state.daemon = JSON.parse(e.data);
+        if (state.activeView === 'daemon') renderDaemon();
+      } catch {}
+    });
     es.addEventListener('error', () => {
       // Silently tolerate — browser will auto-reconnect or server is stopping
     });
   } catch {
     // EventSource not available or server not yet up — silent
   }
+}
+
+// Update the pending-count badge on the Inbox nav link.
+function updateInboxBadge() {
+  const badge = document.getElementById('inbox-nav-badge');
+  if (!badge) return;
+  const n = state.inboxBadge;
+  badge.textContent = n > 0 ? String(n > 99 ? '99+' : n) : '';
+  badge.hidden = n === 0;
 }
 
 function disconnectSSE() {
@@ -219,6 +328,8 @@ function renderActiveView() {
   else if (view === 'pulse') renderPulse();
   else if (view === 'genome') renderGenome();
   else if (view === 'portfolio') renderPortfolio();
+  else if (view === 'inbox') renderInbox();
+  else if (view === 'daemon') renderDaemon();
 }
 
 async function loadView(view) {
@@ -228,6 +339,8 @@ async function loadView(view) {
   else if (view === 'pulse') await loadPulse();
   else if (view === 'genome') await loadGenome();
   else if (view === 'portfolio') await loadPortfolio();
+  else if (view === 'inbox') await loadInbox();
+  else if (view === 'daemon') await loadDaemon();
 }
 
 // ---------------------------------------------------------------------------
@@ -247,26 +360,76 @@ function setActiveNav(view) {
 function renderShell() {
   document.body.innerHTML = '';
 
+  // Nav icons per view (inline SVG path data)
+  const VIEW_ICONS = {
+    overview:  '<rect x="1" y="1" width="6" height="6" rx="1" fill="currentColor" opacity=".85"/><rect x="9" y="1" width="6" height="6" rx="1" fill="currentColor" opacity=".55"/><rect x="1" y="9" width="6" height="6" rx="1" fill="currentColor" opacity=".55"/><rect x="9" y="9" width="6" height="6" rx="1" fill="currentColor" opacity=".3"/>',
+    runs:      '<circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.5"/><polyline points="5.5,8 7.5,10 10.5,6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+    swarms:    '<circle cx="8" cy="3" r="2" fill="currentColor" opacity=".9"/><circle cx="3" cy="13" r="2" fill="currentColor" opacity=".7"/><circle cx="13" cy="13" r="2" fill="currentColor" opacity=".7"/><line x1="8" y1="5" x2="3" y2="11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="8" y1="5" x2="13" y2="11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="3" y1="13" x2="13" y2="13" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>',
+    pulse:     '<polyline points="1,8 4,8 5.5,3 7,13 8.5,6 10,10 11.5,8 15,8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+    genome:    '<path d="M5,1 Q8,4 5,7 Q8,10 5,13" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" fill="none"/><path d="M11,1 Q8,4 11,7 Q8,10 11,13" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" fill="none"/><line x1="6.5" y1="3.5" x2="9.5" y2="3.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="6" y1="7" x2="10" y2="7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="6.5" y1="10.5" x2="9.5" y2="10.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>',
+    portfolio: '<rect x="1.5" y="9" width="3" height="5.5" rx="0.6" stroke="currentColor" stroke-width="1.2" fill="none"/><rect x="6.5" y="5" width="3" height="9.5" rx="0.6" stroke="currentColor" stroke-width="1.2" fill="none"/><rect x="11.5" y="2" width="3" height="12.5" rx="0.6" stroke="currentColor" stroke-width="1.2" fill="none"/>',
+    inbox:     '<rect x="1.5" y="3" width="13" height="10" rx="1.5" stroke="currentColor" stroke-width="1.4" fill="none"/><polyline points="1.5,5 8,9.5 14.5,5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+    daemon:    '<circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="8" y1="4.5" x2="8" y2="8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><line x1="8" y1="8" x2="11" y2="10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
+  };
+
+  // Build nav links, including inbox badge
+  const navLinks = VIEWS.map((v) => {
+    const iconSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    iconSvg.setAttribute('width', '14');
+    iconSvg.setAttribute('height', '14');
+    iconSvg.setAttribute('viewBox', '0 0 16 16');
+    iconSvg.setAttribute('fill', 'none');
+    iconSvg.setAttribute('aria-hidden', 'true');
+    iconSvg.innerHTML = VIEW_ICONS[v] ?? '';
+
+    const label = document.createTextNode(v.charAt(0).toUpperCase() + v.slice(1));
+    const a = el('a', { cls: 'nav-link', href: `#${v}`, 'data-view': v });
+    a.appendChild(iconSvg);
+    a.appendChild(label);
+
+    // Inbox pending badge
+    if (v === 'inbox') {
+      const badge = el('span', { cls: 'nav-inbox-badge', id: 'inbox-nav-badge', 'aria-label': 'pending proposals' });
+      badge.hidden = true;
+      a.appendChild(badge);
+    }
+    return a;
+  });
+
+  // Token button (gear icon in nav footer)
+  const tokenBtn = el('button', {
+    cls: 'token-btn',
+    id: 'token-indicator',
+    title: 'No session token — click to enter',
+    type: 'button',
+    onClick: () => { promptToken(); },
+  });
+  // gear SVG
+  const gearSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  gearSvg.setAttribute('width', '14'); gearSvg.setAttribute('height', '14');
+  gearSvg.setAttribute('viewBox', '0 0 16 16'); gearSvg.setAttribute('fill', 'none');
+  gearSvg.setAttribute('aria-hidden', 'true');
+  gearSvg.innerHTML = '<circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.22 3.22l1.06 1.06M11.72 11.72l1.06 1.06M12.78 3.22l-1.06 1.06M4.28 11.72l-1.06 1.06" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>';
+  tokenBtn.appendChild(gearSvg);
+  tokenBtn.appendChild(document.createTextNode(' Token'));
+
   // Top nav
   const nav = el('nav', { cls: 'topnav' },
     el('div', { cls: 'nav-brand' },
       el('span', { cls: 'brand-icon' }, '⬡'),
       el('span', { cls: 'brand-name' }, 'ashlr hub')
     ),
-    el('div', { cls: 'nav-links' },
-      ...VIEWS.map((v) => {
-        const a = el('a', { cls: 'nav-link', href: `#${v}`, 'data-view': v }, v);
-        return a;
-      })
-    ),
+    el('div', { cls: 'nav-links' }, ...navLinks),
     el('div', { cls: 'nav-status' },
-      el('span', { cls: 'sse-dot', id: 'sse-dot', title: 'Live stream' })
+      el('span', { cls: 'sse-dot', id: 'sse-dot', title: 'Live stream' }),
+      tokenBtn
     )
   );
 
   const main = el('main', { cls: 'main', id: 'main' });
   document.body.appendChild(nav);
   document.body.appendChild(main);
+  updateTokenIndicator();
 }
 
 function getMain() {
@@ -425,16 +588,146 @@ function renderRuns() {
     el('span', { cls: 'view-subtitle' }, `${state.runs.length} run${state.runs.length !== 1 ? 's' : ''}`)
   ));
 
+  // M32: dispatch panel
+  section.appendChild(buildDispatchPanel());
+
   if (state.runs.length === 0) {
     section.appendChild(el('div', { cls: 'empty-state' },
       el('p', {}, 'No runs recorded yet.'),
-      el('p', { cls: 'hint' }, 'Run `ashlr run "your goal"` to start one.')
+      el('p', { cls: 'hint' }, 'Use the dispatch panel above or run `ashlr run "your goal"` in your terminal.')
     ));
   } else {
     section.appendChild(buildRunsTable(state.runs, true));
   }
 
   main.appendChild(section);
+}
+
+// ---------------------------------------------------------------------------
+// M32: Dispatch panel (inside Runs view)
+// ---------------------------------------------------------------------------
+
+function buildDispatchPanel() {
+  const snap = state.snapshot;
+  const dispatchEnabled = snap ? snap.dispatchEnabled === true : false;
+  const token = getToken();
+  const canDispatch = dispatchEnabled && Boolean(token);
+
+  // Disable reason shown as a note under the button
+  let disabledReason = '';
+  if (!dispatchEnabled) disabledReason = 'Start the server with --allow-dispatch to enable dispatch.';
+  else if (!token) disabledReason = 'Enter your session token (gear icon) to enable dispatch.';
+
+  const panel = el('div', { cls: 'dispatch-panel' });
+  panel.appendChild(el('h2', { cls: 'dispatch-panel__title' }, 'Dispatch a run'));
+
+  // Goal textarea
+  const goalInput = el('textarea', {
+    cls: 'input dispatch-panel__goal',
+    placeholder: 'Goal — what should the agent do?',
+    rows: '2',
+    'aria-label': 'Goal',
+  });
+
+  // Budget input
+  const budgetInput = el('input', {
+    type: 'number',
+    cls: 'input dispatch-panel__budget',
+    placeholder: 'Max tokens (optional)',
+    min: '1000',
+    max: '200000',
+    step: '1000',
+    'aria-label': 'Max tokens budget',
+  });
+
+  // Estimate line
+  const estimateLine = el('div', { cls: 'dispatch-panel__estimate', id: 'dispatch-estimate', 'aria-live': 'polite' });
+
+  // Dispatch button
+  const dispatchBtn = el('button', {
+    cls: 'btn btn-primary dispatch-panel__btn',
+    type: 'button',
+    ...(canDispatch ? {} : { disabled: 'disabled' }),
+  }, 'Dispatch');
+  if (!canDispatch && disabledReason) {
+    dispatchBtn.title = disabledReason;
+  }
+
+  // Result line
+  const resultLine = el('div', { cls: 'dispatch-panel__result', 'aria-live': 'polite' });
+
+  // Debounced estimate fetch on input
+  function scheduleEstimate() {
+    if (state._estimateTimer) clearTimeout(state._estimateTimer);
+    state._estimateTimer = setTimeout(async () => {
+      const goal = goalInput.value.trim();
+      if (!goal) { estimateLine.textContent = ''; return; }
+      estimateLine.textContent = 'Estimating…';
+      try {
+        const params = new URLSearchParams({ kind: 'run', goal });
+        const maxTok = parseInt(budgetInput.value, 10);
+        if (!isNaN(maxTok) && maxTok > 0) params.set('maxTokens', String(maxTok));
+        const est = await apiFetch(`/api/estimate?${params}`);
+        const med = est.tokens?.median ?? '—';
+        const costMed = est.estCostUsd?.median != null ? `$${est.estCostUsd.median.toFixed(4)}` : '—';
+        const conf = est.confidence ?? '—';
+        estimateLine.textContent = `Est: ~${fmtK(med)} tokens · ${costMed} (${conf} confidence, n=${est.sampleSize ?? 0})`;
+      } catch (err) {
+        estimateLine.textContent = `Estimate unavailable: ${err.message}`;
+      }
+    }, 400);
+  }
+
+  goalInput.addEventListener('input', scheduleEstimate);
+  budgetInput.addEventListener('input', scheduleEstimate);
+
+  dispatchBtn.addEventListener('click', async () => {
+    const goal = goalInput.value.trim();
+    if (!goal) { resultLine.textContent = 'Goal is required.'; return; }
+    if (!canDispatch) { resultLine.textContent = disabledReason || 'Dispatch not available.'; return; }
+    dispatchBtn.disabled = true;
+    resultLine.textContent = 'Dispatching…';
+    try {
+      const body = { goal };
+      const maxTok = parseInt(budgetInput.value, 10);
+      if (!isNaN(maxTok) && maxTok > 0) body.maxTokens = maxTok;
+      const res = await fetch('/api/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-ashlr-token': token },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+      resultLine.textContent = `Dispatched: run ${json.id ?? ''} (${json.status ?? 'queued'})`;
+      resultLine.className = 'dispatch-panel__result dispatch-panel__result--ok';
+      goalInput.value = '';
+      estimateLine.textContent = '';
+      // Refresh runs list
+      await loadRuns();
+    } catch (err) {
+      resultLine.textContent = `Error: ${err.message}`;
+      resultLine.className = 'dispatch-panel__result dispatch-panel__result--err';
+    } finally {
+      dispatchBtn.disabled = !canDispatch;
+    }
+  });
+
+  const row = el('div', { cls: 'dispatch-panel__row' });
+  row.appendChild(goalInput);
+  row.appendChild(budgetInput);
+
+  const actions = el('div', { cls: 'dispatch-panel__actions' });
+  actions.appendChild(estimateLine);
+  actions.appendChild(dispatchBtn);
+
+  if (!canDispatch && disabledReason) {
+    actions.appendChild(el('span', { cls: 'dispatch-panel__note' }, disabledReason));
+  }
+
+  panel.appendChild(row);
+  panel.appendChild(actions);
+  panel.appendChild(resultLine);
+  return panel;
 }
 
 function buildRunsTable(runs, full = false) {
@@ -1276,6 +1569,280 @@ function renderPortfolio() {
   main.appendChild(section);
 }
 
+// ---------------------------------------------------------------------------
+// M32: Inbox view
+// ---------------------------------------------------------------------------
+
+async function loadInbox() {
+  showLoading('inbox');
+  try {
+    const data = await apiFetch('/api/inbox');
+    state.inbox = data;
+    state.inboxBadge = data.pending ?? 0;
+    updateInboxBadge();
+    renderInbox();
+  } catch (err) {
+    showError('inbox', err.message);
+  }
+}
+
+function renderInbox() {
+  if (state.activeView !== 'inbox') return;
+  const main = getMain();
+  if (!main) return;
+  main.innerHTML = '';
+
+  const section = el('section', { cls: 'view-section' });
+  section.appendChild(el('div', { cls: 'view-header' },
+    el('h1', { cls: 'view-title' }, 'Inbox'),
+    el('span', { cls: 'view-subtitle' }, `${state.inbox.pending ?? 0} pending`)
+  ));
+
+  const proposals = state.inbox.proposals ?? [];
+
+  if (state.inboxDetail) {
+    // Detail pane
+    section.appendChild(buildInboxDetail(state.inboxDetail));
+    main.appendChild(section);
+    return;
+  }
+
+  if (proposals.length === 0) {
+    section.appendChild(el('div', { cls: 'empty-state' },
+      el('p', {}, 'No pending proposals.'),
+      el('p', { cls: 'hint' }, 'Proposals appear here when the daemon queues work for review.')
+    ));
+  } else {
+    const list = el('div', { cls: 'inbox-list' });
+    for (const p of proposals) {
+      list.appendChild(buildInboxRow(p));
+    }
+    section.appendChild(list);
+  }
+
+  main.appendChild(section);
+}
+
+function buildInboxRow(p) {
+  const row = el('div', { cls: 'inbox-row', style: 'cursor:pointer' });
+  const repoBase = (p.repo ?? '').split('/').filter(Boolean).pop() ?? p.repo ?? '—';
+
+  row.appendChild(el('div', { cls: 'inbox-row__main' },
+    el('span', { cls: 'inbox-row__title', title: p.title }, truncate(p.title ?? '(untitled)', 80)),
+    el('div', { cls: 'inbox-row__meta' },
+      el('span', { cls: 'badge badge-kind' }, p.kind ?? 'proposal'),
+      el('span', { cls: 'inbox-row__repo' }, repoBase),
+      el('span', { cls: 'ts' }, fmtRelative(p.createdAt))
+    )
+  ));
+
+  row.addEventListener('click', async () => {
+    try {
+      const full = await apiFetch(`/api/inbox/${encodeURIComponent(p.id)}`);
+      state.inboxDetail = full;
+      renderInbox();
+    } catch (err) {
+      const main_ = getMain();
+      if (main_) {
+        const errEl = el('div', { cls: 'inline-error' }, `Failed to load proposal: ${err.message}`);
+        main_.appendChild(errEl);
+      }
+    }
+  });
+
+  return row;
+}
+
+function buildInboxDetail(p) {
+  const snap = state.snapshot;
+  const dispatchEnabled = snap ? snap.dispatchEnabled === true : false;
+  const token = getToken();
+  const canAct = dispatchEnabled && Boolean(token);
+
+  let disabledReason = '';
+  if (!dispatchEnabled) disabledReason = 'Start the server with --allow-dispatch to approve or reject.';
+  else if (!token) disabledReason = 'Enter your session token (gear icon) to approve or reject.';
+
+  const detail = el('div', { cls: 'inbox-detail' });
+
+  // Back button
+  detail.appendChild(el('button', {
+    cls: 'btn back-btn',
+    type: 'button',
+    onClick: () => { state.inboxDetail = null; renderInbox(); },
+  }, '← Back'));
+
+  const repoBase = (p.repo ?? '').split('/').filter(Boolean).pop() ?? p.repo ?? '—';
+
+  // Summary card
+  const summary = el('div', { cls: 'inbox-detail__summary card' });
+  summary.appendChild(el('h2', { cls: 'card-title' }, p.title ?? '(untitled)'));
+  summary.appendChild(infoGrid([
+    ['Kind', p.kind ?? '—'],
+    ['Repo', repoBase],
+    ['Origin', p.origin ?? '—'],
+    ['Status', p.status ?? '—'],
+    ['Created', fmtDate(p.createdAt)],
+  ]));
+  detail.appendChild(summary);
+
+  // Diff
+  if (p.diff) {
+    const diffSection = el('div', { cls: 'inbox-detail__diff-wrap' });
+    diffSection.appendChild(el('h3', { cls: 'section-heading' }, 'Diff'));
+    const pre = el('pre', { cls: 'inbox-diff' });
+    pre.innerHTML = escapeHtml(p.diff);
+    diffSection.appendChild(pre);
+    detail.appendChild(diffSection);
+  }
+
+  // Approve / Reject buttons + result
+  const actionsDiv = el('div', { cls: 'inbox-detail__actions' });
+  const resultLine = el('div', { cls: 'inbox-detail__result', 'aria-live': 'polite' });
+
+  const approveBtn = el('button', {
+    cls: 'btn btn-primary',
+    type: 'button',
+    ...(canAct ? {} : { disabled: 'disabled' }),
+    title: canAct ? 'Approve and apply this proposal' : disabledReason,
+  }, 'Approve');
+
+  const rejectBtn = el('button', {
+    cls: 'btn btn-danger',
+    type: 'button',
+    ...(canAct ? {} : { disabled: 'disabled' }),
+    title: canAct ? 'Reject this proposal' : disabledReason,
+  }, 'Reject');
+
+  approveBtn.addEventListener('click', async () => {
+    if (!canAct) return;
+    approveBtn.disabled = true;
+    rejectBtn.disabled = true;
+    resultLine.textContent = 'Approving…';
+    try {
+      const result = await apiPost(`/api/inbox/${encodeURIComponent(p.id)}/approve`, token);
+      resultLine.textContent = result.detail ? `Applied: ${result.detail}` : (result.ok ? 'Approved and applied.' : 'Apply returned ok:false');
+      resultLine.className = 'inbox-detail__result inbox-detail__result--ok';
+    } catch (err) {
+      resultLine.textContent = `Error: ${err.message}`;
+      resultLine.className = 'inbox-detail__result inbox-detail__result--err';
+      approveBtn.disabled = false;
+      rejectBtn.disabled = false;
+    }
+    // Refresh inbox list after action
+    state.inboxDetail = null;
+    await loadInbox();
+  });
+
+  rejectBtn.addEventListener('click', async () => {
+    if (!canAct) return;
+    approveBtn.disabled = true;
+    rejectBtn.disabled = true;
+    resultLine.textContent = 'Rejecting…';
+    try {
+      await apiPost(`/api/inbox/${encodeURIComponent(p.id)}/reject`, token);
+      resultLine.textContent = 'Rejected.';
+      resultLine.className = 'inbox-detail__result inbox-detail__result--ok';
+    } catch (err) {
+      resultLine.textContent = `Error: ${err.message}`;
+      resultLine.className = 'inbox-detail__result inbox-detail__result--err';
+      approveBtn.disabled = false;
+      rejectBtn.disabled = false;
+    }
+    state.inboxDetail = null;
+    await loadInbox();
+  });
+
+  actionsDiv.appendChild(approveBtn);
+  actionsDiv.appendChild(rejectBtn);
+  if (!canAct && disabledReason) {
+    actionsDiv.appendChild(el('span', { cls: 'dispatch-panel__note' }, disabledReason));
+  }
+  detail.appendChild(actionsDiv);
+  detail.appendChild(resultLine);
+
+  return detail;
+}
+
+// ---------------------------------------------------------------------------
+// M32: Daemon view
+// ---------------------------------------------------------------------------
+
+async function loadDaemon() {
+  showLoading('daemon');
+  try {
+    state.daemon = await apiFetch('/api/daemon');
+    renderDaemon();
+  } catch (err) {
+    showError('daemon', err.message);
+  }
+}
+
+function renderDaemon() {
+  if (state.activeView !== 'daemon') return;
+  const main = getMain();
+  if (!main) return;
+  main.innerHTML = '';
+
+  const section = el('section', { cls: 'view-section' });
+  section.appendChild(el('div', { cls: 'view-header' },
+    el('h1', { cls: 'view-title' }, 'Daemon'),
+    el('span', { cls: 'view-subtitle' }, 'Background automation state')
+  ));
+
+  const d = state.daemon;
+  if (!d) {
+    section.appendChild(el('div', { cls: 'empty-state' },
+      el('p', {}, 'Daemon state unavailable.'),
+      el('p', { cls: 'hint' }, 'Start the daemon with `ashlr daemon start`.')
+    ));
+    main.appendChild(section);
+    return;
+  }
+
+  const card = el('div', { cls: 'daemon-card card' });
+
+  // Running indicator
+  const runningDot = el('span', {
+    cls: d.running ? 'daemon-dot daemon-dot--running' : 'daemon-dot',
+    title: d.running ? 'Running' : 'Stopped',
+  });
+  const statusRow = el('div', { cls: 'daemon-card__status' },
+    runningDot,
+    el('span', { cls: d.running ? 'daemon-status--on' : 'daemon-status--off' },
+      d.running ? 'Running' : 'Stopped')
+  );
+  card.appendChild(statusRow);
+
+  // Info grid
+  const pairs = [
+    ['Last tick', d.lastTick ? fmtRelative(d.lastTick) : '—'],
+    ['Today spend', d.todaySpendUsd != null ? `$${d.todaySpendUsd.toFixed(4)}` : '—'],
+    ['Spend cap', d.spendCapUsd != null ? `$${d.spendCapUsd.toFixed(2)}` : '—'],
+    ['Pending proposals', d.pendingProposals ?? state.inboxBadge ?? '—'],
+  ];
+  card.appendChild(infoGrid(pairs));
+
+  // Spend vs cap mini bar
+  if (d.spendCapUsd != null && d.todaySpendUsd != null) {
+    const pct = Math.min(100, (d.todaySpendUsd / d.spendCapUsd) * 100);
+    const level = pct >= 90 ? 'var(--status-failed)' : pct >= 70 ? 'var(--status-aborted)' : 'var(--status-done)';
+    const track = el('div', { cls: 'daemon-spend-track' });
+    track.appendChild(el('div', {
+      cls: 'daemon-spend-fill',
+      style: `width:${pct.toFixed(1)}%;background:${level}`,
+    }));
+    const spendWrap = el('div', { cls: 'daemon-spend-wrap' },
+      el('span', { cls: 'daemon-spend-label' }, `Spend today: ${pct.toFixed(1)}% of cap`),
+      track
+    );
+    card.appendChild(spendWrap);
+  }
+
+  section.appendChild(card);
+  main.appendChild(section);
+}
+
 /** Format a signed delta for the portfolio "today" block. null → em-dash. */
 function fmtDelta(n, prefix = '') {
   if (n === null || n === undefined || typeof n !== 'number' || !isFinite(n)) return '—';
@@ -1333,4 +1900,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Initial view
   onHashChange();
+
+  // M32: initialise token indicator after shell is rendered
+  updateTokenIndicator();
 });

@@ -38,6 +38,8 @@ function partitionEnrolled(repos: string[]): { enrolled: string[]; rejected: str
 type BuildKnowledgeFn = (opts?: {
   repos?: string[];
   allowCloud?: boolean;
+  /** M32: per-repo progress callback (best-effort; wrapped by the core). */
+  onProgress?: (ev: { repo: string; repoIndex: number; repoCount: number; newChunks: number }) => void;
 }) => Promise<{ repos: number; chunks: number }>;
 
 type BuildGraphFn = (repos?: string[]) => import('../core/types.js').KnowledgeGraph;
@@ -257,12 +259,28 @@ async function runBuild(subArgs: string[]): Promise<number> {
     process.stderr.write(dim(`Indexing${scopeNote}…\n`));
   }
 
+  // M32: single-line stderr progress while indexing (TTY only, never in JSON
+  // mode). stdout stays clean; non-TTY/JSON runs are silent as before.
+  const { isStderrTty } = await import('./ui.js');
+  const showProgress = isStderrTty() && !parsed.json;
+  let progressShown = false;
+
   let result: { repos: number; chunks: number };
   try {
     result = await buildKnowledge({
       repos: scopedRepos,
       allowCloud: parsed.allowCloud,
+      onProgress: showProgress
+        ? (ev) => {
+            progressShown = true;
+            const name = ev.repo.split('/').pop() ?? ev.repo;
+            process.stderr.write(
+              `\r\x1b[2Kindexing repo ${ev.repoIndex}/${ev.repoCount} ${name} · +${ev.newChunks} chunks`,
+            );
+          }
+        : undefined,
     });
+    if (progressShown) process.stderr.write('\n');
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(red('error: ') + msg + '\n');

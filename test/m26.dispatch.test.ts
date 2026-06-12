@@ -28,6 +28,13 @@ const indexSrc = fs.readFileSync(
   'utf8',
 );
 
+// M32: the help table moved from cli/index.ts (inline cmdHelp) to cli/help.ts
+// (HELP_ENTRIES). Discoverability assertions now read the help module source.
+const helpSrc = fs.readFileSync(
+  path.join(__dirname, '..', 'src', 'cli', 'help.ts'),
+  'utf8',
+);
+
 describe('reflect — dispatcher wiring (src/cli/index.ts)', () => {
   it('defines a loadReflectCmd lazyCmd loader importing ./reflect.js', () => {
     expect(indexSrc).toMatch(/const\s+loadReflectCmd\s*=\s*lazyCmd\s*\(/);
@@ -46,11 +53,11 @@ describe('reflect — dispatcher wiring (src/cli/index.ts)', () => {
   });
 
   it('advertises all three reflect surfaces in the help listing', () => {
-    // The cmdHelp table must list the base command and both subcommands so the
-    // command is discoverable via `ashlr help`.
-    expect(indexSrc).toMatch(/['"]reflect \[--since <Nd>\]['"]/);
-    expect(indexSrc).toMatch(/['"]reflect playbooks( \[--persist\])?['"]/);
-    expect(indexSrc).toMatch(/['"]reflect propose['"]/);
+    // The help table (HELP_ENTRIES in cli/help.ts since M32) must list the base
+    // command and both subcommands so the command is discoverable via `ashlr help`.
+    expect(helpSrc).toMatch(/['"]reflect \[--since <Nd>\]['"]/);
+    expect(helpSrc).toMatch(/['"]reflect playbooks( \[--persist\])?['"]/);
+    expect(helpSrc).toMatch(/['"]reflect propose['"]/);
   });
 });
 

@@ -1674,6 +1674,319 @@ pre code {
   outline-offset: 2px;
 }
 
+/* ---------------------------------------------------------------------------
+   31. M32 — Token button + indicator (nav header)
+   --------------------------------------------------------------------------- */
+.token-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 3px var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: color var(--duration-fast), border-color var(--duration-fast),
+              background var(--duration-fast);
+  white-space: nowrap;
+}
+
+.token-btn:hover {
+  color: var(--text-secondary);
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+/* When a token is stored, highlight subtly with the accent colour */
+.token-btn.token-indicator--set {
+  color: var(--accent);
+  border-color: var(--border-accent);
+  background: var(--accent-glow);
+}
+
+/* ---------------------------------------------------------------------------
+   32. M32 — Inbox nav badge (pending count pill)
+   --------------------------------------------------------------------------- */
+.nav-inbox-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  margin-left: auto;
+  border-radius: var(--radius-full);
+  background: var(--status-failed);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+/* ---------------------------------------------------------------------------
+   33. M32 — Dispatch panel (inside Runs view)
+   --------------------------------------------------------------------------- */
+.dispatch-panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4) var(--space-5);
+  margin-bottom: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.dispatch-panel__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--space-1);
+}
+
+.dispatch-panel__row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+.dispatch-panel__goal {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  font-family: var(--font-ui);
+}
+
+.dispatch-panel__budget {
+  width: 160px;
+  flex-shrink: 0;
+}
+
+.dispatch-panel__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.dispatch-panel__estimate {
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  flex: 1;
+  min-width: 0;
+}
+
+.dispatch-panel__btn {
+  flex-shrink: 0;
+}
+
+.dispatch-panel__note {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.dispatch-panel__result {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  min-height: 16px;
+  color: var(--text-secondary);
+}
+
+.dispatch-panel__result--ok  { color: var(--status-done); }
+.dispatch-panel__result--err { color: var(--status-failed); }
+
+/* ---------------------------------------------------------------------------
+   34. M32 — Inbox view
+   --------------------------------------------------------------------------- */
+.inbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.inbox-row {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  transition: border-color var(--duration-fast), background var(--duration-fast),
+              box-shadow var(--duration-fast);
+}
+
+.inbox-row:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+  box-shadow: var(--shadow-sm);
+}
+
+.inbox-row__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.inbox-row__title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inbox-row__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.inbox-row__repo {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.badge-kind {
+  background: rgba(167, 139, 250, 0.10);
+  color: var(--status-planning);
+  border: 1px solid rgba(167, 139, 250, 0.22);
+}
+
+/* Inbox detail pane */
+.inbox-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.inbox-detail__summary {
+  padding: var(--space-4) var(--space-5);
+}
+
+.inbox-detail__diff-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* The diff pre — HTML-escaped untrusted content rendered verbatim */
+.inbox-diff {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  overflow-x: auto;
+  white-space: pre;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.inbox-detail__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.inbox-detail__result {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  min-height: 16px;
+  color: var(--text-secondary);
+}
+
+.inbox-detail__result--ok  { color: var(--status-done); }
+.inbox-detail__result--err { color: var(--status-failed); }
+
+/* ---------------------------------------------------------------------------
+   35. M32 — Daemon view
+   --------------------------------------------------------------------------- */
+.daemon-card {
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 520px;
+}
+
+.daemon-card__status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.daemon-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+  background: var(--status-pending);
+  flex-shrink: 0;
+}
+
+.daemon-dot--running {
+  background: var(--status-running);
+  animation: pulse-dot 2s ease-in-out infinite;
+  box-shadow: 0 0 6px rgba(56, 189, 248, 0.5);
+}
+
+.daemon-status--on  { color: var(--status-running); }
+.daemon-status--off { color: var(--text-muted); }
+
+.daemon-spend-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.daemon-spend-label {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
+.daemon-spend-track {
+  height: 6px;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+}
+
+.daemon-spend-fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  transition: width var(--duration-slow) var(--ease-out),
+              background var(--duration-normal);
+}
+
+/* inline error (used for proposal load failure) */
+.inline-error {
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.22);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  color: var(--status-failed);
+  font-family: var(--font-mono);
+}
+
 a {
   color: var(--accent);
   text-decoration: none;

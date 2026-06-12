@@ -1418,6 +1418,11 @@ export interface NotifyTarget {
   slackWebhook?: string;
   /** Discord webhook URL. Posts a concise completion summary when set. */
   discordWebhook?: string;
+  /**
+   * M32: macOS desktop notification on new PENDING proposals (osascript;
+   * metadata only — never the diff). OPT-IN: strict no-op unless true.
+   */
+  desktop?: boolean;
 }
 
 /**
@@ -2712,6 +2717,36 @@ export interface NativeToolDef {
   inputSchema: object;
   /** Safety class enforced by the call pipeline (see NativeToolSafety). */
   safety: NativeToolSafety;
+}
+
+/** M32: a percentile triple used by RunEstimate. */
+export interface PercentileTriple {
+  p25: number;
+  median: number;
+  p75: number;
+}
+
+/**
+ * M32: pre-flight cost estimate for a run/swarm, derived from persisted
+ * history (read-only, never throws — zeroed with confidence 'low' when no
+ * history exists). Produced by core/observability/estimate.ts.
+ */
+export interface RunEstimate {
+  kind: 'run' | 'swarm';
+  goal: string;
+  /** How many history samples informed the estimate. */
+  sampleSize: number;
+  /** low (<3 samples) · medium (<10) · high (≥10). */
+  confidence: 'low' | 'medium' | 'high';
+  tokens: PercentileTriple;
+  steps: PercentileTriple;
+  estCostUsd: PercentileTriple;
+  /** Reference cloud cost of the median token volume (context for local $0). */
+  wouldBeCloudUsd: number;
+  durationMs: PercentileTriple;
+  /** True when the requested budget capped the percentiles. */
+  budgetClamped: boolean;
+  generatedAt: string;
 }
 
 /**

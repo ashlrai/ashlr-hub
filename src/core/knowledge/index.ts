@@ -536,8 +536,22 @@ async function indexFile(
  *  - Bounded: file count, byte, and time caps per repo.
  *  - Never throws.
  */
+/** M32: per-repo progress event emitted by buildKnowledge (best-effort). */
+export interface KnowledgeProgress {
+  repo: string;
+  repoIndex: number;
+  repoCount: number;
+  newChunks: number;
+}
+
 export async function buildKnowledge(
-  opts?: { repos?: string[]; allowCloud?: boolean },
+  opts?: {
+    repos?: string[];
+    allowCloud?: boolean;
+    /** M32: called after each repo finishes indexing. Wrapped — a throwing
+     * callback can never violate buildKnowledge's never-throws contract. */
+    onProgress?: (ev: KnowledgeProgress) => void;
+  },
 ): Promise<{ repos: number; chunks: number }> {
   // ENROLLMENT-SCOPED (docs/contracts/CONTRACT-M25.md invariant 3): listEnrolled() is already
   // enrollment-scoped, but an explicit opts.repos list (forwarded from the CLI's
@@ -563,13 +577,20 @@ export async function buildKnowledge(
   let totalChunks = 0;
   let indexedRepos = 0;
 
-  for (const repoPath of repos) {
+  for (let i = 0; i < repos.length; i++) {
+    const repoPath = repos[i]!;
+    let repoChunks = 0;
     try {
-      const repoChunks = await indexRepo(repoPath, embedModel, ollamaBase);
+      repoChunks = await indexRepo(repoPath, embedModel, ollamaBase);
       totalChunks += repoChunks;
       if (repoChunks >= 0) indexedRepos++;
     } catch {
       // one bad repo never crashes the whole run
+    }
+    try {
+      opts?.onProgress?.({ repo: repoPath, repoIndex: i + 1, repoCount: repos.length, newChunks: repoChunks });
+    } catch {
+      // progress is best-effort — a throwing callback never breaks the build
     }
   }
 

@@ -43,7 +43,7 @@ import { listSwarms, loadSwarm } from '../swarm/store.js';
 import { buildRollup } from '../observability/rollup.js';
 import { loadGenome } from '../genome/store.js';
 import { recall } from '../genome/recall.js';
-import { listProposals } from '../inbox/store.js';
+import { listProposals, loadProposal, setStatus } from '../inbox/store.js';
 // M24: read-only daemon state endpoint — no control surface; start/stop stays CLI-only.
 import { loadDaemonState } from '../daemon/state.js';
 
@@ -288,10 +288,29 @@ function handleSseEvents(req: IncomingMessage, res: ServerResponse): void {
     }
   }
 
-  // Emit one full update (both runs and swarms slices).
+  // Emit one full update (runs, swarms, inbox, daemon slices).
   function emitUpdate(): void {
     sendNamed('runs', sseRunsPayload());
     sendNamed('swarms', sseSwarmsPayload());
+    // M32: live inbox + daemon state for the web command center. Metadata
+    // only — the inbox event carries id/title/kind, never diffs.
+    try {
+      const pending = listProposals({ status: 'pending' });
+      sendNamed('inbox', {
+        pending: pending.length,
+        proposals: pending.slice(0, 20).map((p) => ({
+          id: p.id,
+          title: p.title,
+          kind: p.kind,
+          repo: p.repo,
+          origin: p.origin,
+          createdAt: p.createdAt,
+        })),
+      });
+    } catch { /* inbox slice is best-effort */ }
+    try {
+      sendNamed('daemon', loadDaemonState());
+    } catch { /* daemon slice is best-effort */ }
   }
 
   // Send an initial snapshot immediately.
@@ -467,7 +486,9 @@ export async function handleApi(
     // ── GET /api/snapshot ───────────────────────────────────────────────────
     if (path === '/api/snapshot' && method === 'GET') {
       const snapshot = await buildSnapshot(cfg);
-      sendJson(res, 200, snapshot);
+      // M32: additive field so the frontend can show (not guess) whether the
+      // dispatch/approve surfaces exist on this server instance.
+      sendJson(res, 200, { ...snapshot, dispatchEnabled: ctx.allowDispatch });
       return true;
     }
 
@@ -554,14 +575,91 @@ export async function handleApi(
     }
 
     // ── GET /api/inbox ───────────────────────────────────────────────────────
-    // M23: read-only pending-proposals view. No mutation endpoint — approve
-    // stays CLI-only via `ashlr inbox approve`. listProposals never throws.
+    // M23: read-only pending-proposals view. listProposals never throws.
     if (path === '/api/inbox' && method === 'GET') {
       const proposals = listProposals({ status: 'pending' });
       sendJson(res, 200, {
         pending: proposals.length,
         proposals,
       });
+      return true;
+    }
+
+    // ── GET /api/inbox/:id — full proposal detail incl. diff (read-only; M32).
+    if (path.startsWith('/api/inbox/') && method === 'GET') {
+      const id = path.slice('/api/inbox/'.length);
+      if (!id || id.includes('/')) {
+        sendJson(res, 400, { error: 'proposal id required' });
+        return true;
+      }
+      const proposal = loadProposal(id);
+      if (!proposal) {
+        sendJson(res, 404, { error: `proposal not found: ${id}` });
+        return true;
+      }
+      sendJson(res, 200, proposal);
+      return true;
+    }
+
+    // ── POST /api/inbox/:id/approve|reject (M32) ─────────────────────────
+    // The web approval surface. Gated IDENTICALLY to POST /api/run — the
+    // routes do not exist (404) unless `ashlr serve --allow-dispatch`, and
+    // every request needs the constant-time-compared x-ashlr-token + JSON
+    // Content-Type. Approve mirrors the CLI flow (src/cli/inbox.ts):
+    // setStatus('approved') → applyProposal(id, {confirmed:true}); apply
+    // failure is reported in the ApplyResult (apply.ts owns failed-state).
+    if (path.startsWith('/api/inbox/') && method === 'POST') {
+      if (!ctx.allowDispatch) {
+        sendJson(res, 404, { error: 'not found' });
+        return true;
+      }
+      const sub = path.slice('/api/inbox/'.length); // "<id>/approve" | "<id>/reject"
+      const parts = sub.split('/');
+      const id = parts[0] ?? '';
+      const action = parts[1] ?? '';
+      if (!id || (action !== 'approve' && action !== 'reject') || parts.length > 2) {
+        sendJson(res, 404, { error: `not found: ${method} ${path}` });
+        return true;
+      }
+
+      // Token check (constant-time) — same gate as handleDispatch.
+      const providedToken = Array.isArray(req.headers['x-ashlr-token'])
+        ? (req.headers['x-ashlr-token'][0] ?? '')
+        : (req.headers['x-ashlr-token'] ?? '');
+      if (!safeEqual(providedToken, ctx.token)) {
+        sendJson(res, 401, { error: 'unauthorized: missing or invalid x-ashlr-token' });
+        return true;
+      }
+      const contentType = Array.isArray(req.headers['content-type'])
+        ? (req.headers['content-type'][0] ?? '')
+        : (req.headers['content-type'] ?? '');
+      if (!contentType.toLowerCase().trim().startsWith('application/json')) {
+        sendJson(res, 415, { error: 'Content-Type must be application/json' });
+        return true;
+      }
+
+      const proposal = loadProposal(id);
+      if (!proposal) {
+        sendJson(res, 404, { error: `proposal not found: ${id}` });
+        return true;
+      }
+      if (proposal.status !== 'pending') {
+        sendJson(res, 409, { error: `proposal is ${proposal.status}, not pending` });
+        return true;
+      }
+
+      if (action === 'reject') {
+        setStatus(id, 'rejected');
+        sendJson(res, 200, { ok: true, id, status: 'rejected' });
+        return true;
+      }
+
+      // approve → apply (the ONLY outward path; applyProposal owns its gates:
+      // enrollment, kill switch, confirm — all still enforced inside).
+      setStatus(id, 'approved');
+      const { applyProposal } = await import('../inbox/apply.js');
+      const result = await applyProposal(id, { confirmed: true });
+      sendJson(res, result.ok ? 200 : 500, result);
       return true;
     }
 
@@ -573,6 +671,26 @@ export async function handleApi(
     if (path === '/api/daemon' && method === 'GET') {
       const ds = loadDaemonState();
       sendJson(res, 200, ds);
+      return true;
+    }
+
+    // ── GET /api/estimate ───────────────────────────────────────────────────
+    // M32: read-only pre-flight cost estimate (pure local computation over
+    // persisted history — no token needed; same class as /api/pulse).
+    if (path === '/api/estimate' && method === 'GET') {
+      const kind = getQueryParam(req.url ?? '', 'kind') ?? 'run';
+      const goal = getQueryParam(req.url ?? '', 'goal') ?? '';
+      const rawMax = getQueryParam(req.url ?? '', 'maxTokens');
+      const maxTokens = rawMax !== undefined && /^\d+$/.test(rawMax) ? Number(rawMax) : undefined;
+      if (!goal.trim()) {
+        sendJson(res, 400, { error: 'goal query parameter required' });
+        return true;
+      }
+      const { estimateRun, estimateSwarm } = await import('../observability/estimate.js');
+      const est = kind === 'swarm'
+        ? await estimateSwarm(goal, { maxTokens }, cfg)
+        : await estimateRun(goal, { maxTokens }, cfg);
+      sendJson(res, 200, est);
       return true;
     }
 

@@ -1243,168 +1243,17 @@ function cmdConfig(args: string[]): void {
 
 // ─── Command: help ────────────────────────────────────────────────────────────
 
-function cmdHelp(): void {
-  console.log('');
-  console.log(bold('  ashlr') + dim(' — Desktop command center'));
-  console.log('');
-  console.log('  ' + bold('Commands:'));
-  console.log('');
-
-  const cmds: [string, string][] = [
-    ['index [--refresh]',            'Build or refresh the desktop index; show counts by category.'],
-    ['go [query] [--open|--cd]',     'Find a repo or item; open in editor (--open) or print path for cd (--cd).'],
-    ['status',                       'Attention board: dirty, off-sync, and stale repos; ecosystem summary.'],
-    ['ls [category]',                'List all indexed items, optionally filtered by category.'],
-    ['open [query]',                 'Open the best match in your editor; no query opens an interactive picker.'],
-    ['tidy [--apply]',               'Show (or apply) tidy moves for loose Desktop files.'],
-    ['config [get <k>|set <k> <v>]', 'Read/write a config value. No args prints a summary.'],
-    ['config set <k> --json <v>',    'Set a structured (array/object) config value as JSON.'],
-    ['config path',                  'Print the path to config.json.'],
-    ['doctor',                       'One-glance health check: config, phantom, providers, ecosystem.'],
-    ['init [--yes]',                 'Idempotent onboarding: ensure config, detect phantom + models, set editor.'],
-    ['mcp',                          'Run the MCP aggregation gateway on stdio (point any agent here).'],
-    ['mcp list',                     'List discovered MCP servers + per-server tool counts.'],
-    ['mcp doctor',                   'Per-server MCP health: does it start? how many tools?'],
-    ['mcp install <claude|ashlrcode>', 'Add the ashlr gateway to a target mcpServers config (backs up first).'],
-    ['run "<goal>" [opts]',          'Decompose goal into tasks; execute via local model (Ollama/LM Studio).'],
-    ['run show <id>',                'Print a past run in detail.'],
-    ['runs [--json]',                'List past runs (newest first).'],
-    ['pulse [--window 1d|7d|30d]',   'Local observability dashboard: tokens, cost, sessions, commits.'],
-    ['pulse --json',                 'Machine-readable ActivityRollup (+ additive .forecast field; Raycast Pulse view).'],
-    ['pulse --project <name>',       'Restrict pulse rollup to a single project.'],
-    ['recall "<query>"',             'Search shared genome memory; return top relevant entries with scores.'],
-    ['learn "<text>" [opts]',        'Append a note to shared genome memory (local-first, append-only).'],
-    ['genome',                       'Genome status/health: entry count, projects covered, store size.'],
-    ['update [--check] [--json]',    'Safe self-update: git pull --ff-only + rebuild. --check reports only.'],
-    ['spec new "<goal>" [--project]', 'Author a versioned end-state spec artifact (local-first model).'],
-    ['spec list [--project <path>]', 'List all spec artifacts, newest version per spec.'],
-    ['spec show <id>',               'Print a spec artifact in full.'],
-    ['spec refine <id> "<note>"',    'Produce a new version of a spec incorporating the note.'],
-    ['swarm "<goal>" [opts]',        'Decompose goal into a contracts-first DAG; run a fleet of agents.'],
-    ['swarm <specId> [opts]',        'Run a swarm against an existing spec artifact.'],
-    ['swarm show <id>',              'Print a past swarm run in detail.'],
-    ['swarms [--json]',              'List past swarm runs (newest first).'],
-    ['tui [--once]',                 'Interactive terminal dashboard (alias: dash). --once renders one frame and exits.'],
-    ['serve [--port N]',             'Start local web dashboard + JSON API on 127.0.0.1 (default port 7777).'],
-    ['serve --open',                 'Start dashboard and open browser automatically.'],
-    ['serve --allow-dispatch',       'Enable guarded POST /api/run (prints session token).'],
-    ['models [--json]',              'List local models (Ollama/LM Studio); marks the active one.'],
-    ['models pull <name> [--yes]',   'Explicitly pull an Ollama model (large download; confirm first).'],
-    ['models start',                 'Best-effort start a locally-installed Ollama (never downloads).'],
-    ['gh <pr|issue|ci>',             'Read GitHub open PRs, issues, or CI status for the current repo (read-only).'],
-    ['gh pr create',                 'Create a PR via gh CLI — explicit + confirm-gated (the only gh mutation).'],
-    ['vercel <ls|logs>',             'Read recent Vercel deployments or latest build logs (read-only).'],
-    ['wire [claude|codex|cursor|all]', 'Wire ashlr MCP gateway into editor config(s); defaults to detected editors.'],
-    ['notify test',                  'Send a test ping to the configured webhook(s); no-op if none are set.'],
-    ['telemetry [status]',           'M19: endpoint+PAT configured (bool), sink mode, local JSONL count, governance.'],
-    ['telemetry test',               'Emit a synthetic metadata-only test span; report sink+ok.'],
-    ['sandbox list',                 'List active git-worktree sandboxes (M21 safety foundation).'],
-    ['sandbox diff <id>',            'Show diff of a sandbox vs its base HEAD.'],
-    ['sandbox cleanup <id>',         'Remove a sandbox worktree and scratch branch.'],
-    ['sandbox gc',                   'Reclaim STALE orphan sandboxes (crash leftovers); H5 explicit human repair surface for the orphan sweep.'],
-    ['audit [N] [--json] [--action <verb>] [--result <r>] [--since <when>]', 'Tail the append-only audit trail (newest-first); filter by action/result/since (read-only).'],
-    ['enroll list',                  'List enrolled repos + kill switch state.'],
-    ['enroll add <repo>',            'Enroll a repo for autonomous work.'],
-    ['enroll remove <repo>',         'Remove a repo from the enrollment registry.'],
-    ['enroll kill on|off',           'Toggle the global autonomous kill switch.'],
-    ['backlog',                      'Scored work queue across enrolled repos (issues, TODOs, deps, docs, security).'],
-    ['backlog refresh',              'Re-scan all enrolled repos and rebuild the backlog.'],
-    ['backlog --source <src>',       'Filter backlog by source: issue|todo|test|dep|doc|security.'],
-    ['backlog --repo <path>',        'Filter backlog to a specific enrolled repo.'],
-    ['backlog --limit <n>',          'Show only the top N items.'],
-    ['backlog --json',               'Emit raw JSON backlog.'],
-    ['inbox',                        'Approval inbox: list pending proposals (the outward-action gate).'],
-    ['inbox show <id>',              'Full detail of a proposal incl. diff (read-only).'],
-    ['inbox approve <id>',           'Confirm + apply an approved proposal (the ONLY outward path).'],
-    ['inbox approve <id> --yes',     'Approve without interactive prompt (non-TTY safe).'],
-    ['inbox reject <id>',            'Discard a pending proposal; applies nothing.'],
-    ['inbox --json',                 'Emit raw JSON for inbox list / show / approve result.'],
-    ['daemon start --once',          'Autonomous operator: one tick — propose-only, sandboxed, enrolled repos.'],
-    ['daemon start --once --dry-run','Plan only: which backlog items WOULD be worked (no swarm/proposal).'],
-    ['daemon stop',                  'Halt the daemon: set kill switch + clear running state.'],
-    ['daemon status',                "Daemon roll-up: running?, today's spend vs cap, pending proposals."],
-    ['knowledge build',             'Index enrolled repos locally (read-only, secret-scrubbed) for portfolio RAG.'],
-    ['ask "<question>"',             'Local RAG across the indexed portfolio; cites repo/file:line. --allow-cloud opt-in.'],
-    ['knowledge impact <target>',    'Show references + dependents of a file/symbol within and across enrolled repos.'],
-    ['knowledge graph',              'Print the portfolio knowledge graph (repos/modules/deps + cross-repo findings).'],
-    ['reflect [--since <Nd>]',       'Score your OWN past runs/swarms locally; report effectiveness/cost deltas (read-only).'],
-    ['reflect playbooks [--persist]', 'Distill repeatable playbooks from past swarms (report-only; --persist writes them to the genome).'],
-    ['reflect propose',              'Emit routing/policy/prompt tuning suggestions as PENDING inbox proposals (never auto-applies).'],
-    ['health',                       'Score every ENROLLED repo on quality (tests/docs/deps/security/debt/CI/conventions); ranked, read-only.'],
-    ['health <repo>',                'Per-repo health detail with the per-dimension breakdown + worst offenders (ENROLLED only).'],
-    ['health propose',               'Emit deterministic safe-fix advisories as PENDING inbox proposals (never auto-applies).'],
-    ['goals add <objective>',        'Register a high-level OBJECTIVE (goal); decomposed into ordered milestones (local, no LLM by default).'],
-    ['goals plan <id>',              'Decompose a goal into ordered milestones + author/link each milestone spec (LOCAL-FIRST; --allow-cloud to use cloud).'],
-    ['goals advance <id>',           'Advance the next actionable milestone via a SANDBOXED, proposal-only swarm (ENROLLED repos only; emits a PENDING proposal).'],
-    ['goals status [id]',            'Read-only roll-up of goal/milestone progress + linked swarm/proposal state (mutates nothing).'],
-    ['digest',                       'Write an ORG-LEVEL portfolio digest (health, goals, costs, today) to ~/.ashlr/digests/ (LOCAL-FIRST; reads only).'],
-    ['digest --notify',             'Also deliver the digest via a configured Slack/Discord webhook (OPT-IN; no-op when unconfigured).'],
-    ['seams',                        'Cloud-ready seam diagnostic: every v2 store, active=local, cloud=gated (read-only).'],
-    ['seams status',                'Same as `seams`: list seams + active impl; proves local-first + cloud gated on Mason.'],
-    ['verify-safety',                'Read-only self-check of the hard safety invariants (enrollment/kill-switch/daemon/scrub/cloud-gate); mutates nothing.'],
-    ['preflight [--json]',           'Read-only first-activation readiness check: ready=true|false + blockers/warnings (model/enrollment/kill/daemon/writeable/sandbox/git/phantom); mutates nothing.'],
-    ['onboard',                      'Guided first safe activation: preflight → enroll ONE repo → dry-run PLAN → point at `ashlr inbox`. TTY-aware; --yes/non-TTY prints steps. NEVER auto-applies.'],
-    ['onboard --rollback <repo>',    'One-command undo of a first activation: unenroll + sweep orphan sandboxes + optional --kill. Inward cleanup only; H6-audited.'],
-    ['demo [--no-cleanup] [--json]', 'Watch the FULL autonomous chain run on a DISPOSABLE tmp repo (isolated tmp ~/.ashlr; proposal-only; auto-cleans). NEVER touches your portfolio or applies anything.'],
-    ['orient [--repo <r>] [--json]', 'Session-start context: genome hits, health, backlog, pending proposals, attention (read-only; agent-stable --json).'],
-    ['docs --agent [--json]',        'Agent cheat sheet: the CLI-first contract (commands, safety classes, JSON shapes).'],
-    ['completions zsh|bash',         'Print a shell completion script to stdout.'],
-    ['help',                         'Show this help.'],
-  ];
-
-  const cmdW = Math.max(...cmds.map(([c]) => c.length));
-  for (const [cmd, desc] of cmds) {
-    console.log(`    ${cyan(pad(cmd, cmdW))}  ${desc}`);
+/**
+ * M32: help moved to src/cli/help.ts (topic-grouped, searchable, --all).
+ * This thin wrapper keeps `ashlr help` working even if the module is missing.
+ */
+async function cmdHelp(rest: string[] = []): Promise<void> {
+  try {
+    const mod = await import('./help.js');
+    await mod.cmdHelp(rest);
+  } catch {
+    console.log('ashlr — local-first command center. Run a command or see the README.');
   }
-
-  console.log('');
-  console.log('  ' + bold('Config:') + ` ${dim(CONFIG_PATH)}`);
-  console.log('');
-  console.log('  ' + bold('Flags apply per-command above.'));
-  console.log('');
-  console.log('  ' + bold('run flags:') + dim('  --budget N  --max-steps N  --parallel N  --engine builtin|ashlrcode|aw  --allow-cloud  --no-tools  --no-memory  --resume <id>  --json  --over-budget'));
-  console.log('  ' + bold('swarm flags:') + dim('  --budget N  --parallel N (default 3, max 8)  --background  --resume <id>  --dry-run  --allow-cloud  --project <path>  --over-budget'));
-  console.log('  ' + dim('  --over-budget  Proceed even when spend governance cap is exceeded (required when telemetry.govAction=block)'));
-  console.log('');
-  console.log('  ' + bold('Examples:'));
-  console.log(`    ${cyan('ashlr run "list all open GitHub issues in this repo"')}`);
-  console.log(`    ${cyan('ashlr run "summarize recent commits" --budget 8000 --max-steps 5')}`);
-  console.log(`    ${cyan('ashlr run "audit TODOs" --no-memory')}         ${dim('# skip genome injection')}`);
-  console.log(`    ${cyan('ashlr run show <id>')}  ${dim('# inspect a past run')}`);
-  console.log(`    ${cyan('ashlr runs')}            ${dim('# list all past runs')}`);
-  console.log(`    ${cyan('ashlr pulse')}           ${dim('# cost/token dashboard (7d)')}`);
-  console.log(`    ${cyan('ashlr pulse --window 30d --project ashlr-hub')}`);
-  console.log('');
-  console.log('  ' + bold('new / ship examples:'));
-  console.log(`    ${cyan('ashlr new my-app --template next-app')}             ${dim('# scaffold a Next.js starter')}`);
-  console.log(`    ${cyan('ashlr new my-tool --template node-cli --category dev-tools')}`);
-  console.log(`    ${cyan('ashlr new my-mcp --template mcp-server --stack haskell-mcp')}`);
-  console.log(`    ${cyan('ashlr ship')}                                       ${dim('# gate only (dry-run)')}`);
-  console.log(`    ${cyan('ashlr ship --gate')}                                ${dim('# explicit gate-only mode')}`);
-  console.log(`    ${cyan('ashlr ship --deploy vercel')}                       ${dim('# gate + deploy dry-run')}`);
-  console.log(`    ${cyan('ashlr ship --deploy vercel --confirm')}             ${dim('# gate + REAL deploy')}`);
-  console.log(`    ${cyan('ashlr ship --strict --deploy gh --confirm')}        ${dim('# fail fast + deploy to gh')}`);
-  console.log('');
-  console.log('  ' + bold('genome / memory examples:'));
-  console.log(`    ${cyan('ashlr recall "how does the orchestrator work"')}    ${dim('# search genome memory')}`);
-  console.log(`    ${cyan('ashlr learn "M4 orchestrator uses TF-IDF for task ranking"')}`);
-  console.log(`    ${cyan('ashlr learn "prefer bge-m3 for embeddings" --tags embeddings,ollama')}`);
-  console.log(`    ${cyan('ashlr learn "ashlr-hub uses NodeNext ESM" --project ashlr-hub')}`);
-  console.log(`    ${cyan('ashlr genome')}                                     ${dim('# genome health + entry count')}`);
-  console.log('');
-  console.log('  ' + bold('spec / swarm examples:'));
-  console.log(`    ${cyan('ashlr spec new "build a REST API with auth and tests"')}`);
-  console.log(`    ${cyan('ashlr spec new "migrate to ESM" --project ~/my-app')}  ${dim('# project-scoped spec')}`);
-  console.log(`    ${cyan('ashlr spec list')}                                  ${dim('# all specs, newest version each')}`);
-  console.log(`    ${cyan('ashlr spec show spec-abc123')}                      ${dim('# view a spec in full')}`);
-  console.log(`    ${cyan('ashlr spec refine spec-abc123 "add Redis caching pillar"')}`);
-  console.log(`    ${cyan('ashlr swarm "build a REST API with auth" --dry-run')}  ${dim('# plan only, no execution')}`);
-  console.log(`    ${cyan('ashlr swarm spec-abc123 --budget 40000 --parallel 3')}`);
-  console.log(`    ${cyan('ashlr swarm "add Redis caching" --parallel 2 --allow-cloud')}`);
-  console.log(`    ${cyan('ashlr swarm "refactor auth module" --background')}   ${dim('# detached; returns swarm id')}`);
-  console.log(`    ${cyan('ashlr swarms')}                                      ${dim('# list all past swarm runs')}`);
-  console.log(`    ${cyan('ashlr swarm show swarm-xyz789')}                     ${dim('# inspect a past swarm run')}`);
-  console.log('');
 }
 
 // ─── Top-level dispatch ───────────────────────────────────────────────────────
@@ -1718,7 +1567,7 @@ async function main(): Promise<void> {
       case 'help':
       case '--help':
       case '-h':
-        cmdHelp();
+        await cmdHelp(rest);
         break;
 
       default: {

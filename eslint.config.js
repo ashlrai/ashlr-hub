@@ -81,6 +81,8 @@ export default tseslint.config(
         clearInterval: 'readonly',
         requestAnimationFrame: 'readonly',
         navigator: 'readonly',
+        sessionStorage: 'readonly',
+        URLSearchParams: 'readonly',
       },
     },
     rules: {

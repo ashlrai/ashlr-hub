@@ -964,7 +964,7 @@ function captureSandboxAndCleanup(
     // explicit human inbox approve — never automatically, never here.
     if (propose && _createProposal !== null) {
       try {
-        _createProposal({
+        const created = _createProposal({
           repo: sb.sourceRepo,
           origin: 'swarm',
           kind: 'patch',
@@ -978,6 +978,15 @@ function captureSandboxAndCleanup(
           sandboxId: sb.id,
         });
         emitLog(sink, `[M24] PENDING proposal recorded for swarm ${run.id}`);
+        // M32: unattended path (daemon-dispatched swarm) — fire opt-in desktop/
+        // webhook notification. Fire-and-forget; metadata only; never blocks.
+        void (async () => {
+          try {
+            const { loadConfig } = await import('../config.js');
+            const { notifyNewProposal } = await import('../inbox/notify-proposal.js');
+            await notifyNewProposal(created, loadConfig());
+          } catch { /* notification is best-effort */ }
+        })();
         try {
           _audit?.({
             action: 'inbox:proposal-created',

@@ -30,6 +30,13 @@ const indexSrc = fs.readFileSync(
   'utf8',
 );
 
+// M32: the help table moved from cli/index.ts (inline cmdHelp) to cli/help.ts
+// (HELP_ENTRIES). Discoverability assertions now read the help module source.
+const helpSrc = fs.readFileSync(
+  path.join(__dirname, '..', 'src', 'cli', 'help.ts'),
+  'utf8',
+);
+
 describe('seams — dispatcher wiring (src/cli/index.ts)', () => {
   it('defines a loadSeamsCmd lazyCmd loader importing ./seams.js and picking cmdSeams', () => {
     expect(indexSrc).toMatch(/const\s+loadSeamsCmd\s*=\s*lazyCmd\s*\(/);
@@ -51,8 +58,8 @@ describe('seams — dispatcher wiring (src/cli/index.ts)', () => {
   it('advertises the seams surfaces in the help listing', () => {
     // The cmdHelp table must list the base command and the `status` subcommand
     // so the command is discoverable via `ashlr help`.
-    expect(indexSrc).toMatch(/['"]seams['"]\s*,/);
-    expect(indexSrc).toMatch(/['"]seams status['"]\s*,/);
+    expect(helpSrc).toMatch(/['"]seams['"]\s*,/);
+    expect(helpSrc).toMatch(/['"]seams status['"]\s*,/);
   });
 });
 

@@ -453,7 +453,10 @@ describe('M29 safety — portfolio surface is read-only (no mutation path)', () 
     const appJs = readFileSync(join(REPO_ROOT, 'src/core/web/public/app.js'), 'utf8');
     const idx = appJs.indexOf('function renderPortfolio(');
     expect(idx).toBeGreaterThan(-1);
-    const end = appJs.indexOf('function fmtDelta(', idx);
+    // Bound the scan to renderPortfolio ITSELF (up to the next top-level
+    // function declaration) — M32 added unrelated views between it and
+    // fmtDelta; the invariant is about the portfolio renderer's own body.
+    const end = appJs.indexOf('\nfunction ', idx + 1);
     const block = appJs.slice(idx, end > idx ? end : idx + 4000);
     // The portfolio renderer only reads state.portfolio + builds read-only DOM.
     // It must not POST, fetch a mutation, or bind approve/apply/dispatch actions.

@@ -103,6 +103,8 @@ interface ParsedRunArgs {
   noCapture: boolean;
   /** Bypass an over-cap spend-governance block (M19). Optional — defaults false. */
   overBudget?: boolean;
+  /** M32: print a pre-flight cost estimate and exit without running. */
+  estimate?: boolean;
   usageError?: string;
 }
 
@@ -164,6 +166,9 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       i++;
     } else if (arg === '--verify-model') {
       result.verifyModel = true;
+      i++;
+    } else if (arg === '--estimate') {
+      result.estimate = true;
       i++;
     } else if (arg === '--budget') {
       const parsed = parsePositiveInt('budget', args[++i]);
@@ -465,6 +470,27 @@ export async function cmdRun(args: string[]): Promise<number> {
   // Subcommand: show
   if (parsed.subcommand === 'show' && parsed.showId) {
     return cmdRunShow(parsed.showId, parsed.json);
+  }
+
+  // M32: --estimate — pre-flight cost prediction; prints and exits 0 (no run).
+  if (parsed.estimate) {
+    if (!parsed.goal) {
+      process.stderr.write(red('error: ') + '--estimate requires a goal\n');
+      return 2;
+    }
+    const { loadConfig } = await import('../core/config.js');
+    const { estimateRun, renderEstimate } = await import('../core/observability/estimate.js');
+    const est = await estimateRun(
+      parsed.goal,
+      { maxTokens: parsed.budget, allowCloud: parsed.allowCloud },
+      loadConfig(),
+    );
+    if (parsed.json) {
+      process.stdout.write(JSON.stringify(est, null, 2) + '\n');
+    } else {
+      process.stdout.write(renderEstimate(est) + '\n');
+    }
+    return 0;
   }
 
   // Build RunOptions

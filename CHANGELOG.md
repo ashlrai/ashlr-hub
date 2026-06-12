@@ -28,6 +28,20 @@ posture change: reads flow freely, writes stay append-only or proposal-only.
   `GET /api/orient|health|backlog|impact` web routes.
   `docs/contracts/CONTRACT-M31.md` · 6 new test files.
 
+- **M32 — Living command center.** The web dashboard becomes a real control
+  surface: `#inbox` view with approve/reject (gated identically to dispatch —
+  routes 404 without `--allow-dispatch`, per-session token, applies only via
+  `applyProposal`'s triple gate), `#daemon` view + live nav badge, and a
+  dispatch panel with live cost preview. SSE gains `inbox`/`daemon` named
+  events (metadata only — never diffs). New pre-flight cost estimator:
+  `ashlr run|swarm "<goal>" --estimate` (p25/median/p75 tokens·cost·duration
+  from history, confidence-tiered, budget-clamped; also a footer in swarm
+  `--dry-run` and `GET /api/estimate`). Help reworked into topics:
+  `ashlr help [<topic>] [--search <term>] [--all]`. Knowledge build shows a
+  TTY progress line. Opt-in macOS desktop notification (+ webhook) when an
+  unattended swarm files a PENDING proposal (`notify.desktop: true`;
+  metadata only). `docs/contracts/CONTRACT-M32.md` · 5 new test files.
+
 ## [2.1.0] — 2026-06-11 — v2.1 "Harden & Prove" (H1–H8)
 
 Takes v2 from *built + unit-tested* to **proven trustworthy**. Eight hardening

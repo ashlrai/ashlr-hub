@@ -100,7 +100,10 @@ export const DEFAULT_MAX_STEPS = 40;
 /** Default parallel task execution limit. */
 export const DEFAULT_PARALLEL = 2;
 /** Directory for persisted run state. */
-const RUNS_DIR = path.join(os.homedir(), '.ashlr', 'runs');
+/** Re-resolved at call time so tests can relocate HOME (matches swarmsDir()). */
+function runsDir(): string {
+  return path.join(os.homedir(), '.ashlr', 'runs');
+}
 /**
  * Sentinel error attached to tasks that were force-failed by a budget abort
  * (as opposed to a genuine model failure). On --resume we reset tasks bearing
@@ -123,7 +126,7 @@ const GENOME_INJECT_CHAR_CAP = 1500;
  * Only creates entries under ~/.ashlr/runs — never repos/Desktop.
  */
 function ensureRunsDir(): void {
-  fs.mkdirSync(RUNS_DIR, { recursive: true });
+  fs.mkdirSync(runsDir(), { recursive: true });
 }
 
 /**
@@ -135,7 +138,7 @@ function runFilePath(id: string): string {
   if (!/^[\w.-]+$/.test(id)) {
     throw new Error(`Invalid run id: ${JSON.stringify(id)}`);
   }
-  return path.join(RUNS_DIR, `${id}.json`);
+  return path.join(runsDir(), `${id}.json`);
 }
 
 /**
@@ -157,11 +160,11 @@ export function loadRun(id: string): RunState | null {
 export function listRuns(): RunState[] {
   try {
     ensureRunsDir();
-    const files = fs.readdirSync(RUNS_DIR).filter((f) => f.endsWith('.json'));
+    const files = fs.readdirSync(runsDir()).filter((f) => f.endsWith('.json'));
     const runs: RunState[] = [];
     for (const file of files) {
       try {
-        const raw = fs.readFileSync(path.join(RUNS_DIR, file), 'utf8');
+        const raw = fs.readFileSync(path.join(runsDir(), file), 'utf8');
         const state = JSON.parse(raw) as RunState;
         runs.push(state);
       } catch {
@@ -176,7 +179,7 @@ export function listRuns(): RunState[] {
 
 /**
  * Atomically persist a RunState to ~/.ashlr/runs/<id>.json (write-then-rename).
- * ONLY writes under RUNS_DIR — never touches repos or Desktop.
+ * ONLY writes under runsDir() — never touches repos or Desktop.
  */
 export function saveRun(s: RunState): void {
   ensureRunsDir();
@@ -809,7 +812,7 @@ export async function runGoal(
   if (opts.resumeId) {
     const existingForResume = loadRun(opts.resumeId);
     if (!existingForResume) {
-      throw new Error(`Run "${opts.resumeId}" not found in ${RUNS_DIR}`);
+      throw new Error(`Run "${opts.resumeId}" not found in ${runsDir()}`);
     }
     if (existingForResume.status === 'done' && existingForResume.result) {
       process.stderr.write(
@@ -990,7 +993,7 @@ export async function runGoal(
   if (opts.resumeId) {
     const existing = loadRun(opts.resumeId);
     if (!existing) {
-      throw new Error(`Run "${opts.resumeId}" not found in ${RUNS_DIR}`);
+      throw new Error(`Run "${opts.resumeId}" not found in ${runsDir()}`);
     }
     // Already-complete run: do NOT redo work. Re-running synthesis would
     // double-count usage, append duplicate steps, and re-POST Pulse. Return the

@@ -80,6 +80,18 @@ async function cmdNotifyTest(args: string[]): Promise<number> {
     return 1;
   }
 
+  // M32: opt-in desktop ping (macOS) — fired alongside the webhook test.
+  let desktopSent = false;
+  try {
+    const { desktopNotify, desktopNotifyEnabled } = await import('../core/integrations/desktop-notify.js');
+    if (desktopNotifyEnabled(cfg)) {
+      desktopSent = await desktopNotify('ashlr', 'notify test — desktop notifications are working', cfg);
+      if (!jsonMode && desktopSent) {
+        process.stdout.write('desktop notification sent ✓\n');
+      }
+    }
+  } catch { /* desktop ping is best-effort */ }
+
   // No webhook configured → informative no-op
   const hasSlack   = Boolean(cfg.notify?.slackWebhook);
   const hasDiscord = Boolean(cfg.notify?.discordWebhook);

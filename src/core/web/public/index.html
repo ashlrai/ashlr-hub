@@ -198,26 +198,7 @@
         Genome
       </button>
 
-      <!-- M29: read-only org-level portfolio tab. NOTE: this static nav markup
-           is an INERT fallback — app.js renderShell() clears document.body and
-           rebuilds the nav from its VIEWS array on load, so this button never
-           actually renders. The 'portfolio' view works because it is in VIEWS.
-           Kept only as a no-JS skeleton, consistent with every other panel. -->
-      <button class="nav-tab"
-              role="tab"
-              aria-selected="false"
-              aria-controls="panel-portfolio"
-              data-view="portfolio"
-              type="button">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-          <!-- Stacked bars / portfolio suggestion -->
-          <rect x="1.5" y="9"  width="3" height="5.5" rx="0.6" stroke="currentColor" stroke-width="1.2"/>
-          <rect x="6.5" y="5"  width="3" height="9.5" rx="0.6" stroke="currentColor" stroke-width="1.2"/>
-          <rect x="11.5" y="2" width="3" height="12.5" rx="0.6" stroke="currentColor" stroke-width="1.2"/>
-        </svg>
-        Portfolio
-      </button>
-    </nav>
+undefined
 
     <!-- Right side: live indicator + connection status -->
     <div class="topnav__meta" aria-live="polite" aria-atomic="false">
@@ -688,6 +669,40 @@
 
       </section><!-- /#panel-portfolio -->
 
+
+      <!-- ── PANEL: Inbox (M32) — INERT no-JS skeleton ────────────────── -->
+      <!-- app.js renderInbox() replaces this at runtime -->
+      <section class="panel"
+               id="panel-inbox"
+               role="tabpanel"
+               aria-labelledby="tab-inbox"
+               tabindex="0"
+               hidden>
+        <div class="panel__header">
+          <h1 class="panel__title">Inbox</h1>
+          <p class="panel__subtitle">Pending proposals awaiting review</p>
+        </div>
+        <div class="portfolio-grid" id="inbox-grid" aria-live="polite">
+          <p class="hint">Loading…</p>
+        </div>
+      </section><!-- /#panel-inbox -->
+
+      <!-- ── PANEL: Daemon (M32) — INERT no-JS skeleton ───────────────── -->
+      <!-- app.js renderDaemon() replaces this at runtime -->
+      <section class="panel"
+               id="panel-daemon"
+               role="tabpanel"
+               aria-labelledby="tab-daemon"
+               tabindex="0"
+               hidden>
+        <div class="panel__header">
+          <h1 class="panel__title">Daemon</h1>
+          <p class="panel__subtitle">Background automation state</p>
+        </div>
+        <div id="daemon-grid" aria-live="polite">
+          <p class="hint">Loading…</p>
+        </div>
+      </section><!-- /#panel-daemon -->
     </main><!-- /#main-content -->
 
   </div><!-- /.layout -->

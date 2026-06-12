@@ -152,6 +152,8 @@ interface ParsedSwarmArgs {
   force: boolean;
   /** Bypass an over-cap spend-governance block (M19). Optional — defaults false. */
   overBudget?: boolean;
+  /** M32: print a pre-flight cost estimate and exit without running. */
+  estimate?: boolean;
   usageError?: string;
 }
 
@@ -307,6 +309,9 @@ function parseSwarmArgs(args: string[]): ParsedSwarmArgs {
       i++;
     } else if (arg === '--dry-run') {
       result.dryRun = true;
+      i++;
+    } else if (arg === '--estimate') {
+      result.estimate = true;
       i++;
     } else if (arg === '--allow-cloud') {
       result.allowCloud = true;
@@ -1304,6 +1309,19 @@ export async function cmdSwarm(args: string[]): Promise<number> {
     (swarmOpts as SwarmOptions & { overBudget?: boolean }).overBudget = true;
   }
 
+  // M32: --estimate — pre-flight cost prediction; prints and exits 0 (no swarm).
+  if (parsed.estimate) {
+    const { loadConfig } = await import('../core/config.js');
+    const { estimateSwarm, renderEstimate } = await import('../core/observability/estimate.js');
+    const est = await estimateSwarm(goal, { maxTokens: parsed.budget, allowCloud: parsed.allowCloud }, loadConfig());
+    if (parsed.json) {
+      process.stdout.write(JSON.stringify(est, null, 2) + '\n');
+    } else {
+      process.stdout.write(renderEstimate(est) + '\n');
+    }
+    return 0;
+  }
+
   // Print launch banner (non-JSON)
   if (!parsed.json) {
     console.log('');
@@ -1388,6 +1406,16 @@ export async function cmdSwarm(args: string[]): Promise<number> {
   // ── DRY-RUN output: plan only ────────────────────────────────────────────
   if (parsed.dryRun) {
     printDryRunPlan(swarm.plan, { json: parsed.json });
+    // M32: a dry-run is the natural place to preview cost — append the estimate.
+    if (!parsed.json) {
+      try {
+        const { loadConfig } = await import('../core/config.js');
+        const { estimateSwarm, renderEstimate } = await import('../core/observability/estimate.js');
+        const est = await estimateSwarm(goal, { maxTokens: parsed.budget, allowCloud: parsed.allowCloud }, loadConfig());
+        console.log('');
+        console.log(renderEstimate(est));
+      } catch { /* estimate is best-effort — dry-run output stands alone */ }
+    }
     return 0;
   }
 
