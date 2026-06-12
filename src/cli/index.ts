@@ -385,6 +385,26 @@ const loadSeamsCmd = lazyCmd(
   'seams command requires src/cli/seams.ts (M30 module not yet built).',
 );
 
+// ─── M31 command loaders ──────────────────────────────────────────────────────────────
+
+const loadOrientCmd = lazyCmd(
+  () => import('./orient.js'),
+  (m) => m.cmdOrient as Cmd,
+  'orient command requires src/cli/orient.ts (M31 module not yet built).',
+);
+
+const loadDocsCmd = lazyCmd(
+  () => import('./help.js'),
+  (m) => m.cmdDocs as Cmd,
+  'docs command requires src/cli/help.ts (M31 module not yet built).',
+);
+
+const loadCompletionsCmd = lazyCmd(
+  () => import('./completions.js'),
+  (m) => m.cmdCompletions as Cmd,
+  'completions command requires src/cli/completions.ts (M31 module not yet built).',
+);
+
 // ─── H4 command loaders ─────────────────────────────────────────────
 
 const loadVerifySafetyCmd = lazyCmd(
@@ -1326,6 +1346,9 @@ function cmdHelp(): void {
     ['onboard',                      'Guided first safe activation: preflight → enroll ONE repo → dry-run PLAN → point at `ashlr inbox`. TTY-aware; --yes/non-TTY prints steps. NEVER auto-applies.'],
     ['onboard --rollback <repo>',    'One-command undo of a first activation: unenroll + sweep orphan sandboxes + optional --kill. Inward cleanup only; H6-audited.'],
     ['demo [--no-cleanup] [--json]', 'Watch the FULL autonomous chain run on a DISPOSABLE tmp repo (isolated tmp ~/.ashlr; proposal-only; auto-cleans). NEVER touches your portfolio or applies anything.'],
+    ['orient [--repo <r>] [--json]', 'Session-start context: genome hits, health, backlog, pending proposals, attention (read-only; agent-stable --json).'],
+    ['docs --agent [--json]',        'Agent cheat sheet: the CLI-first contract (commands, safety classes, JSON shapes).'],
+    ['completions zsh|bash',         'Print a shell completion script to stdout.'],
     ['help',                         'Show this help.'],
   ];
 
@@ -1674,16 +1697,41 @@ async function main(): Promise<void> {
         break;
       }
 
+      case 'orient': {
+        const cmdOrient = await loadOrientCmd();
+        process.exitCode = await cmdOrient(rest);
+        break;
+      }
+
+      case 'docs': {
+        const cmdDocs = await loadDocsCmd();
+        process.exitCode = await cmdDocs(rest);
+        break;
+      }
+
+      case 'completions': {
+        const cmdCompletions = await loadCompletionsCmd();
+        process.exitCode = await cmdCompletions(rest);
+        break;
+      }
+
       case 'help':
       case '--help':
       case '-h':
         cmdHelp();
         break;
 
-      default:
+      default: {
         console.error(red(`Unknown command: ${cmd}`));
+        // M31: "did you mean" — best-effort, never blocks the error path.
+        try {
+          const { didYouMean } = await import('./completions.js');
+          const suggestion = didYouMean(cmd);
+          if (suggestion) console.error(`Did you mean ${cyan(`ashlr ${suggestion}`)}?`);
+        } catch { /* suggestion is best-effort */ }
         console.error(dim('Run `ashlr help` for usage.'));
         process.exit(2);
+      }
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

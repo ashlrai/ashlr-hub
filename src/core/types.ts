@@ -1740,8 +1740,13 @@ export interface Proposal {
   id: string;
   /** Absolute path of the target repo, or null when not repo-scoped (e.g. note). */
   repo: string | null;
-  /** Where the proposal came from: the backlog, an autonomous swarm, or manual. */
-  origin: 'backlog' | 'swarm' | 'manual';
+  /**
+   * Where the proposal came from: the backlog, an autonomous swarm, manual
+   * creation, or an agent session via the native MCP tool `ashlr_inbox_propose`
+   * (M31). Agent-originated proposals are created 'pending' like every other —
+   * the origin tag exists so the inbox can display provenance.
+   */
+  origin: 'backlog' | 'swarm' | 'manual' | 'agent';
   /** What kind of outward action this represents. */
   kind: ProposalKind;
   /** Short human-readable title for inbox lists. */
@@ -2678,4 +2683,55 @@ export interface DigestDeliveryResult {
    * path (no --notify) and when no webhook is configured. The ONLY outward path.
    */
   notified: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// M31 — Agent-native surface: orient + native MCP tools
+// ---------------------------------------------------------------------------
+
+/**
+ * M31: safety classification of a native MCP tool. The gate is STRUCTURAL —
+ * `callNativeTool` enforces it before any handler runs:
+ *   'read'     — pure read of local stores; allowed even when the kill switch is on.
+ *   'append'   — append-only write under ~/.ashlr/ (genome hub); REFUSED when KILL.
+ *   'proposal' — creates a PENDING inbox Proposal; REFUSED when KILL. There is
+ *                deliberately NO 'approve'/'apply' class — approval is human-only.
+ */
+export type NativeToolSafety = 'read' | 'append' | 'proposal';
+
+/**
+ * M31: one native tool served by the MCP gateway itself (SDK-free definition;
+ * the gateway is the only adapter). `inputSchema` is plain JSON Schema.
+ */
+export interface NativeToolDef {
+  /** Tool name, `ashlr_<verb>` — single underscore; downstream tools are `<server>__<tool>`. */
+  name: string;
+  /** Human/agent-facing description shown in tools/list. */
+  description: string;
+  /** JSON Schema for the arguments (always `type: 'object'`). */
+  inputSchema: object;
+  /** Safety class enforced by the call pipeline (see NativeToolSafety). */
+  safety: NativeToolSafety;
+}
+
+/**
+ * M31: composite session-start orientation — "what should I know before I
+ * start working here". Every section is BEST-EFFORT (empty on failure); the
+ * builder never throws. READ-ONLY: derived entirely from local stores.
+ */
+export interface OrientResult {
+  /** ISO timestamp the orientation was generated. */
+  generatedAt: string;
+  /** Absolute repo path the orientation is scoped to, or null for portfolio-wide. */
+  repo: string | null;
+  /** Top genome memory hits relevant to the repo/query (bounded). */
+  genomeHits: { title: string; text: string; score: number; project: string | null }[];
+  /** Latest health score for the repo (null when none recorded / not enrolled). */
+  health: { score: number; grade: string; worstDimensions: string[] } | null;
+  /** Top persisted backlog items for the repo (empty when no backlog built). */
+  backlogItems: { id: string; source: string; title: string; score: number }[];
+  /** Number of PENDING inbox proposals awaiting the human. */
+  pendingProposals: number;
+  /** Portfolio attention summary from the index (dirty/stale repo counts). */
+  attention: { dirtyRepos: number; staleRepos: number } | null;
 }

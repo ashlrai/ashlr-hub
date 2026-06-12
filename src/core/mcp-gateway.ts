@@ -32,6 +32,7 @@ import type { McpRegistry, McpServerSpec, McpServerHealth, HealEvent } from './t
 import { loadConfig } from './config.js';
 import { withToolEnv } from './env-bridge.js';
 import { withHeal, defaultHealPolicy } from './run/self-heal.js';
+import { listNativeTools, isNativeTool, callNativeTool } from './mcp-native.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -301,6 +302,13 @@ export async function startGateway(
   for (const d of downstreams) {
     for (const toolName of d.toolNames) {
       const key = `${d.spec.name}${NS}${toolName}`;
+      // M31 reserved-name guard (native wins; see tools/list for the live re-list guard).
+      if (isNativeTool(key)) {
+        process.stderr.write(
+          `[ashlr mcp] WARN downstream "${key}" collides with a native ashlr tool — skipped\n`,
+        );
+        continue;
+      }
       // Guard: a server name containing the NS separator can collide with a
       // different (server, tool) pair, silently shadowing one route. Warn so the
       // ambiguity is visible rather than last-writer-wins.
@@ -321,23 +329,38 @@ export async function startGateway(
     { capabilities: { tools: {} } },
   );
 
-  // tools/list — aggregate every downstream's tools, namespaced.
+  // tools/list — native ashlr tools first, then every downstream's, namespaced.
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const tools: { name: string; description?: string; inputSchema: unknown }[] = [];
+    // M31: native tools are served by the gateway itself (ashlr_<verb> — single
+    // underscore; downstream keys always contain `__`, so collision is
+    // structurally impossible, but the route loop below still guards).
+    for (const t of listNativeTools()) {
+      tools.push({ name: t.name, description: t.description, inputSchema: t.inputSchema });
+    }
     // Re-list live so the gateway reflects the current downstream tool set.
     for (const d of downstreams) {
       try {
         const listed = await d.client.listTools({}, { timeout: timeoutMs });
         for (const t of listed.tools ?? []) {
+          const key = `${d.spec.name}${NS}${t.name}`;
+          // M31 reserved-name guard: a downstream key can never shadow a native
+          // tool (native wins; the collision is reported, not silently dropped).
+          if (isNativeTool(key)) {
+            process.stderr.write(
+              `[ashlr mcp] WARN downstream "${key}" collides with a native ashlr tool — skipped\n`,
+            );
+            continue;
+          }
           tools.push({
-            name: `${d.spec.name}${NS}${t.name}`,
+            name: key,
             description: t.description
               ? `[${d.spec.name}] ${t.description}`
               : `[${d.spec.name}] ${t.name}`,
             inputSchema: t.inputSchema ?? { type: 'object' },
           });
           // Keep the route map fresh for tools/call.
-          routes.set(`${d.spec.name}${NS}${t.name}`, { downstream: d, original: t.name });
+          routes.set(key, { downstream: d, original: t.name });
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -348,14 +371,19 @@ export async function startGateway(
     return { tools } as { tools: { name: string; description?: string; inputSchema: object }[] };
   });
 
-  // tools/call — proxy to the owning downstream by namespaced name.
+  // tools/call — native ashlr tools first, then proxy to the owning downstream.
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const requested = request.params.name;
+    // M31: native tools route BEFORE the downstream map and never throw —
+    // failures come back as isError text results (audited in mcp-native).
+    if (isNativeTool(requested)) {
+      return callNativeTool(requested, request.params.arguments ?? {});
+    }
     const route = routes.get(requested);
     if (!route) {
       throw new Error(
-        `Unknown tool "${requested}". Expected "<server>${NS}<tool>" form. ` +
-        `Run \`ashlr mcp list\` to see available tools.`,
+        `Unknown tool "${requested}". Expected an \`ashlr_*\` native tool or ` +
+        `"<server>${NS}<tool>" form. Run \`ashlr mcp list\` to see available tools.`,
       );
     }
     const result = await route.downstream.client.callTool(
@@ -387,8 +415,8 @@ export async function startGateway(
   await server.connect(transport);
 
   process.stderr.write(
-    `[ashlr mcp] gateway ready — ${routes.size} tool(s) from ` +
-    `${downstreams.length}/${aggregable.length} server(s)\n`,
+    `[ashlr mcp] gateway ready — ${listNativeTools().length} native ashlr tool(s) + ` +
+    `${routes.size} downstream tool(s) from ${downstreams.length}/${aggregable.length} server(s)\n`,
   );
 
   // Resolve when the transport closes (stdin EOF) OR a termination signal

@@ -576,6 +576,48 @@ export async function handleApi(
       return true;
     }
 
+    // ── GET /api/orient ─────────────────────────────────────────────────────
+    // M31: read-only composite session-start context (genome + health +
+    // backlog + inbox + attention). Same no-auth read class as /api/snapshot.
+    if (path === '/api/orient' && method === 'GET') {
+      const { buildOrientation } = await import('../orient.js');
+      const repo = getQueryParam(req.url ?? '', 'repo');
+      const result = await buildOrientation(cfg, repo);
+      sendJson(res, 200, result);
+      return true;
+    }
+
+    // ── GET /api/health ─────────────────────────────────────────────────────
+    // M31: read-only — the latest PERSISTED health report (never re-scans).
+    if (path === '/api/health' && method === 'GET') {
+      const { loadPreviousReport } = await import('../quality/store.js');
+      const report = loadPreviousReport();
+      sendJson(res, 200, report ?? null);
+      return true;
+    }
+
+    // ── GET /api/backlog ────────────────────────────────────────────────────
+    // M31: read-only — the persisted backlog (never triggers a scan).
+    if (path === '/api/backlog' && method === 'GET') {
+      const { loadBacklog } = await import('../portfolio/backlog.js');
+      const backlog = loadBacklog();
+      sendJson(res, 200, backlog ?? null);
+      return true;
+    }
+
+    // ── GET /api/impact ─────────────────────────────────────────────────────
+    // M31: read-only knowledge-graph impact for ?target=<file|symbol>.
+    if (path === '/api/impact' && method === 'GET') {
+      const target = getQueryParam(req.url ?? '', 'target');
+      if (!target || !target.trim()) {
+        sendJson(res, 400, { error: 'target query parameter required' });
+        return true;
+      }
+      const { impact } = await import('../knowledge/graph.js');
+      sendJson(res, 200, impact(target));
+      return true;
+    }
+
     // ── GET /api/events (SSE) ────────────────────────────────────────────────
     if (path === '/api/events' && method === 'GET') {
       handleSseEvents(req, res);

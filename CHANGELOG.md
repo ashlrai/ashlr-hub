@@ -9,6 +9,25 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [2.2.0] — Unreleased — v2.2 "Agent-Native Ecosystem" (M31–M33)
+
+Makes ashlr's intelligence first-class INSIDE agent sessions — CLI-first, with
+the MCP gateway as a second transport over the same capabilities. No safety
+posture change: reads flow freely, writes stay append-only or proposal-only.
+
+- **M31 — Agent-native surface.** The MCP gateway now serves 11 native
+  `ashlr_*` tools (orient/ask/recall/learn/backlog/health/status/impact/
+  pulse/inbox_list/inbox_propose) with structural safety classes
+  (read / append / proposal), kill-switch gating on every write, secret
+  scrubbing + 32KB caps on every result, and full `mcp:native-call` audit
+  coverage. There is deliberately NO approve/apply tool — approval stays
+  human-only via `ashlr inbox`. New `ashlr orient [--repo] [--json]`
+  (composite session-start context), `ashlr docs --agent` (generated agent
+  cheat sheet), `ashlr wire --claude-md` (CLAUDE.md snippet),
+  `ashlr completions zsh|bash`, "did you mean" suggestions, and read-only
+  `GET /api/orient|health|backlog|impact` web routes.
+  `docs/contracts/CONTRACT-M31.md` · 6 new test files.
+
 ## [2.1.0] — 2026-06-11 — v2.1 "Harden & Prove" (H1–H8)
 
 Takes v2 from *built + unit-tested* to **proven trustworthy**. Eight hardening

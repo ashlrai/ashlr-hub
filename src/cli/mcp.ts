@@ -142,6 +142,10 @@ async function cmdMcpList(args: string[]): Promise<number> {
   const registry = discoverMcpServers();
   const toolsReg = getToolsRegistry();
 
+  // M31: native ashlr tools served by the gateway itself (no probe needed).
+  const { nativeToolDefs } = await import('../core/mcp-native.js');
+  const native = nativeToolDefs();
+
   if (jsonMode) {
     // Redact env before serializing
     const safe = registry.servers.map(s => ({
@@ -149,14 +153,37 @@ async function cmdMcpList(args: string[]): Promise<number> {
       args: redactArgs(s.args),
       env: redactEnv(s.env),
     }));
-    process.stdout.write(JSON.stringify({ servers: safe, tools: toolsReg }, null, 2) + '\n');
+    process.stdout.write(
+      JSON.stringify(
+        {
+          servers: safe,
+          tools: toolsReg,
+          native: native.map(t => ({ name: t.name, safety: t.safety })),
+        },
+        null,
+        2,
+      ) + '\n',
+    );
     return 0;
   }
 
   // Human output
   console.log('');
-  console.log(bold('  ashlr mcp list') + gray(`  — ${registry.servers.length} discovered server(s)`));
+  console.log(bold('  ashlr mcp list') + gray(`  — ${registry.servers.length} discovered server(s) + ${native.length} native tool(s)`));
   console.log('');
+
+  // Native (built-in) tools — always available, served by the gateway itself.
+  console.log(bold('  Native (built-in)') + gray('  — served by `ashlr mcp` directly'));
+  console.log('');
+  {
+    const nameW = Math.max(10, ...native.map(t => t.name.length));
+    for (const t of native) {
+      const safetyStr =
+        t.safety === 'read' ? green(t.safety) : t.safety === 'append' ? yellow(t.safety) : magenta(t.safety);
+      console.log(`  ${pad(cyan(t.name), nameW)}  ${pad(safetyStr, 10)}  ${dim(t.description.split('. ')[0] ?? '')}`);
+    }
+    console.log('');
+  }
 
   if (registry.servers.length === 0) {
     console.log('  ' + dim('No MCP servers discovered.'));
@@ -249,6 +276,14 @@ async function cmdMcpDoctor(args: string[]): Promise<number> {
     const health = await probeServer(srv, timeoutMs);
     return health;
   });
+
+  // M31: native tools need no probe — they are in-process and always present.
+  const { nativeToolDefs } = await import('../core/mcp-native.js');
+  const nativeCount = nativeToolDefs().length;
+  if (!jsonMode) {
+    console.log(`  ${bold('native')}  ${green('ok')}      ${cyan(String(nativeCount))} built-in ashlr tool(s) (no probe needed)`);
+    console.log('');
+  }
 
   const results = await Promise.allSettled(probes);
   const healths: McpServerHealth[] = results.map((r, i) => {

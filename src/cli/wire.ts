@@ -101,6 +101,7 @@ function printWireHelp(): void {
     ['[target]',          'Editor to wire: claude, codex, cursor, or all. Defaults to detected editors.'],
     ['--config <path>',   'Override the config path (temp-config-safe for tests).'],
     ['--json',            'Emit results as JSON on stdout.'],
+    ['--claude-md',       'Print a CLAUDE.md snippet teaching agents the CLI-first ashlr usage (read-only).'],
   ];
   const w = Math.max(...opts.map(([o]) => o.length));
   for (const [opt, desc] of opts) {
@@ -137,6 +138,14 @@ export async function cmdWire(args: string[]): Promise<number> {
 
   if (sub === '--help' || sub === '-h' || sub === 'help') {
     printWireHelp();
+    return 0;
+  }
+
+  // M31: `ashlr wire --claude-md` — print a ready-to-paste CLAUDE.md snippet
+  // teaching agents the CLI-first ashlr usage. Read-only; writes nothing.
+  if (args.includes('--claude-md')) {
+    const { claudeMdSnippet } = await import('./help.js');
+    process.stdout.write(claudeMdSnippet());
     return 0;
   }
 

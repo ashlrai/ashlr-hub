@@ -60,6 +60,31 @@ ashlr help
 
 ---
 
+## Agent-native surface (M31) — use ashlr from inside agent sessions
+
+ashlr's intelligence is reachable from any coding agent (Claude Code, Cursor, …)
+two ways — **CLI-first** (stable `--json` shapes, exit-code discipline) or via
+the MCP gateway, which now serves 11 native `ashlr_*` tools alongside every
+aggregated downstream server:
+
+```bash
+ashlr orient --repo <path> --json   # session-start context: memory + health + backlog + inbox
+ashlr docs --agent                  # the full agent cheat sheet (llms.txt-style)
+ashlr wire --claude-md              # ready-to-paste CLAUDE.md snippet
+ashlr wire claude                   # register the MCP gateway (native tools included)
+ashlr completions zsh|bash          # shell completions
+```
+
+Native MCP tools: `ashlr_orient`, `ashlr_ask`, `ashlr_recall`, `ashlr_learn`,
+`ashlr_backlog`, `ashlr_health`, `ashlr_status`, `ashlr_impact`, `ashlr_pulse`,
+`ashlr_inbox_list`, `ashlr_inbox_propose`. Safety is structural: reads are
+always available, writes are append-only (genome hub) or proposal-only (inbox,
+PENDING, human-approved), every call is audited and secret-scrubbed, the kill
+switch gates all writes, and there is **no agent-reachable approve/apply path**
+by design. Contract: [`docs/contracts/CONTRACT-M31.md`](./docs/contracts/CONTRACT-M31.md).
+
+---
+
 ## Ashlr v2 — Autonomous Engineering Organization
 
 Across M21–M30, ashlr-hub grew a second pillar on top of the local command center: a **safety-first autonomous engineering organization** that discovers work across your portfolio, drafts it in isolation, and funnels every outward action through a single human gate. It is **proposal-only by default, sandboxed, and enrollment-scoped** — the daemon and swarms can *only propose*; nothing is ever applied to a real repo, branch, or remote without your explicit approval. Default enrollment is **empty**, so out of the box it does nothing until you opt a repo in. M30 closes the pillar with **cloud-ready seams**: every v2 store sits behind a clean interface with a working LOCAL implementation today and a GATED cloud stub for the future — so a team/multi-machine backbone is a drop-in later, never an accidental flip. Cloud/team remains a human gate (explicit opt-in, not implemented); there is no config flag and no code path that activates a cloud backbone. See [`docs/SEAMS.md`](./docs/SEAMS.md).
