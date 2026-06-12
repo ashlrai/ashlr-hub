@@ -53,9 +53,24 @@ import { runDoctor } from '../src/core/doctor.js';
 
 let tmpHome: string;
 const origHome = process.env.HOME;
+const origPath = process.env.PATH;
 
 function makeTmpHome(): string {
   return mkdtempSync(join(tmpdir(), 'ashlr-doctor-test-'));
+}
+
+/**
+ * Make the "all healthy" scenario HERMETIC: checkAshlrInstalled shells out to
+ * `which ashlr`, which legitimately fails on CI runners (ashlr is not globally
+ * installed there). Install a fake `ashlr` shim in a tmp bin dir prepended to
+ * PATH so the healthy-scenario tests do not depend on the host machine.
+ */
+function installAshlrShim(tmpH: string): void {
+  const binDir = join(tmpH, 'bin');
+  mkdirSync(binDir, { recursive: true });
+  const shim = join(binDir, 'ashlr');
+  writeFileSync(shim, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  process.env.PATH = `${binDir}:${process.env.PATH ?? ''}`;
 }
 
 function makeConfig(tmpH: string): AshlrConfig {
@@ -101,6 +116,7 @@ function makeConfig(tmpH: string): AshlrConfig {
 beforeEach(() => {
   tmpHome = makeTmpHome();
   process.env.HOME = tmpHome;
+  installAshlrShim(tmpHome);
 
   // Reset to healthy defaults before each test.
   _phantomStatus = {
@@ -123,6 +139,7 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(tmpHome, { recursive: true, force: true });
   process.env.HOME = origHome;
+  process.env.PATH = origPath;
 });
 
 // ---------------------------------------------------------------------------
