@@ -5,8 +5,17 @@ explicit human action (pushing a `v*` tag) plus a green full-CI verify job.
 
 ## One-time setup
 
-1. Create an npm automation token with publish rights for the `@ashlr` scope.
-2. Add it as the `NPM_TOKEN` repository secret on GitHub.
+1. Create an npm **granular access token** (npmjs.com → Access Tokens →
+   Generate New Token → Granular) with *Read and write* on the `@ashlr`
+   packages/scope. Granular tokens bypass the per-write OTP requirement —
+   a session/classic token will fail in CI with `EOTP` when the account's
+   2FA mode is "authorization and writes" (which it should stay).
+2. Add it as the `NPM_TOKEN` repository secret on GitHub
+   (`gh secret set NPM_TOKEN`).
+
+> Fallback used for v2.2.0: local `npm publish --access public
+> --provenance=false --otp=<recovery-code>` + `gh release create`. Works, but
+> skips provenance — prefer the granular-token CI path.
 
 ## Release procedure
 
