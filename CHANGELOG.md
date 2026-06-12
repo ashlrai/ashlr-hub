@@ -9,7 +9,7 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [2.2.0] — Unreleased — v2.2 "Agent-Native Ecosystem" (M31–M33)
+## [2.2.0] — 2026-06-12 — v2.2 "Agent-Native Ecosystem" (M31–M33)
 
 Makes ashlr's intelligence first-class INSIDE agent sessions — CLI-first, with
 the MCP gateway as a second transport over the same capabilities. No safety
