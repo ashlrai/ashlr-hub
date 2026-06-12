@@ -60,6 +60,10 @@ ashlr help
 
 ---
 
+Direction and design principles: [`docs/ROADMAP.md`](./docs/ROADMAP.md).
+
+---
+
 ## Plugins (M33) — extend the hub without forking it
 
 Drop a plugin under `~/.ashlr/plugins/<name>/` (a `manifest.json` + an ESM
