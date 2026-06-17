@@ -18,6 +18,24 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   Milestones M34–M40, thirteen new team safety invariants, registered as a
   living ashlr goal. ROADMAP and contracts README updated to point at it.
 
+## [3.0.1] — 2026-06-17 — presentation + polish
+
+A patch release on top of 3.0.0 — no change to the engine, fleet, or safety
+floor; refreshes the public face and hardens the release/test ergonomics.
+
+- **docs:** README reworked as the ecosystem front door — npm badges, an "Ashlr
+  ecosystem" table linking every sibling tool (phantom-secrets, ashlrcode,
+  ashlr-stack, ashlr-plugin, binshield, ashlr-md, ashlr-workbench, ashlr-pulse)
+  with how the hub leverages each, and an accurate v3/v4/v5 capability map (the
+  prior copy still read "30 milestones").
+- **cli:** `ashlr version` / `--version` / `-v` now print the package version
+  (previously "Unknown command").
+- **test/release:** deterministic publish gate — `prepublishOnly` runs the suite
+  with `--no-file-parallelism` (new `test:serial` script); `h1`/`h8` assert the
+  real `~/.ashlr` is byte-identical before/after (the actual isolation guarantee)
+  rather than assuming it is empty; `m32` gets a realistic timeout. The full suite
+  is now deterministically green on a developer machine with the daemon live.
+
 ## [3.0.0] — 2026-06-17 — v3-Weapon · v4-Foundry · v5-Open-Fleet (M41–M60)
 
 A major leap: local models became an engineering weapon, then a fleet of
