@@ -147,6 +147,14 @@ const loadEvalCmd = lazyCmd(
   'eval command requires src/cli/eval.ts (M44 module not yet built).',
 );
 
+// ─── M49 fleet control plane + observability ──────────────────────────────────
+
+const loadFleetCmd = lazyCmd(
+  () => import('./fleet.js' as unknown as string),
+  (m) => m.cmdFleet as Cmd,
+  'fleet command requires src/cli/fleet.ts (M49 module not yet built).',
+);
+
 // ─── M5 lazy imports (graceful degradation if modules not yet built) ──────────
 
 import type { ActivityRollup } from '../core/types.js';
@@ -1507,6 +1515,14 @@ async function main(): Promise<void> {
       case 'daemon': {
         const cmdDaemon = await loadDaemonCmd();
         process.exitCode = await cmdDaemon(rest);
+        break;
+      }
+
+      case 'fleet': {
+        // M49: fleet control plane + observability — read-only `status`,
+        // plus `pause`/`resume` (kill-switch only).
+        const cmdFleet = await loadFleetCmd();
+        process.exitCode = await cmdFleet(rest);
         break;
       }
 

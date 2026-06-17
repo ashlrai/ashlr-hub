@@ -76,6 +76,7 @@ import { audit } from '../sandbox/audit.js';
 import { isRepo, getGitStatus, getRemoteOrg, defaultBranch } from '../git.js';
 import { createPr } from '../integrations/github.js';
 import { scrubSecrets } from '../knowledge/index.js';
+import { verifyProvenance } from '../foundry/provenance.js';
 import {
   detectVerifyCommands,
   runVerifyCommand,
@@ -747,6 +748,17 @@ export async function autoMergeProposal(
     const authority = evaluateMergeAuthority(proposal, cfg);
     if (!authority.authorized) {
       return refuse(`merge authority denied: ${authority.reason}`, repo);
+    }
+
+    // Gate 4.5 (H3 / M47.1): signed provenance. The authority gate above trusts
+    // engineTier/engineModel as read from the on-disk record; a local writer
+    // could forge those fields. Re-verify the HMAC binding {engineModel,
+    // engineTier, diffHash} (signed at producer time by the sandboxed engine
+    // with the host-local key) and FAIL CLOSED on any mismatch — so a forged
+    // record cannot claim frontier merge-authority.
+    const provenance = verifyProvenance(proposal);
+    if (!provenance.ok) {
+      return refuse(`provenance check failed: ${provenance.reason}`, repo);
     }
 
     // ── Gate 5: risk class ≤ maxRisk ────────────────────────────────────────

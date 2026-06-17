@@ -40,6 +40,7 @@ import { newUsage, estCostUsd } from './budget.js';
 import { withToolEnv } from '../env-bridge.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { selectInboxStore } from '../seams/inbox.js';
+import { hashDiff, signProvenance } from '../foundry/provenance.js';
 
 export interface SandboxedEngineResult {
   /** Delegated RunState (status/usage/engineModel/engineTier). */
@@ -234,6 +235,13 @@ export async function runEngineSandboxed(
       try {
         const diff = wt.sandboxDiff(sb);
         if (diff.files > 0 && diff.patch.trim().length > 0) {
+          // M47.1 (H3): scrub ONCE and reuse the same scrubbed string for BOTH
+          // the stored diff and the signed hash — so the merge gate recomputes
+          // an identical hash. Bind {engineModel, tier, diffHash} with an HMAC
+          // so a forged on-disk record cannot claim frontier merge-authority.
+          const scrubbed = scrubSecrets(diff.patch);
+          const diffHash = hashDiff(scrubbed);
+          const provenanceSig = signProvenance(engineModel, tier, diffHash);
           const proposal = selectInboxStore(cfg).create({
             repo: sb.sourceRepo,
             origin: 'agent',
@@ -242,7 +250,9 @@ export async function runEngineSandboxed(
             summary:
               `Sandboxed ${engineModel} run produced ${diff.files} file(s) ` +
               `(+${diff.insertions}/-${diff.deletions}). Review before applying.`,
-            diff: scrubSecrets(diff.patch),
+            diff: scrubbed,
+            diffHash,
+            provenanceSig,
             sandboxId: sb.id,
             engineModel,
             engineTier: tier,

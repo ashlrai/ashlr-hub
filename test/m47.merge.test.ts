@@ -30,6 +30,7 @@ import {
 } from '../src/core/inbox/merge.js';
 import { createProposal, setStatus, loadProposal } from '../src/core/inbox/store.js';
 import { enroll, unenroll, setKill } from '../src/core/sandbox/policy.js';
+import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -373,6 +374,10 @@ describe('M47 verifyProposal', () => {
 
 describe('M47 autoMergeProposal — refusals', () => {
   function persistedFrontierPatch(diff: string): Proposal {
+    // M47.1: a legitimate frontier proposal carries a signed provenance binding
+    // {engineModel, engineTier, diffHash} — sign it so it passes Gate 4.5.
+    const diffHash = hashDiff(diff);
+    const provenanceSig = signProvenance('codex:gpt-5.5', 'frontier', diffHash);
     const p = createProposal({
       repo: tmpRepo,
       origin: 'agent',
@@ -380,6 +385,8 @@ describe('M47 autoMergeProposal — refusals', () => {
       title: 'frontier patch',
       summary: 'auto-merge candidate',
       diff,
+      diffHash,
+      provenanceSig,
       engineModel: 'codex:gpt-5.5',
       engineTier: 'frontier',
     });
@@ -504,13 +511,17 @@ describe('M47 autoMergeProposal — local happy path', () => {
 
     const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
 
+    const newDiff = addFileDiff('docs/new.md', 'fresh doc');
+    const newHash = hashDiff(newDiff);
     const p = createProposal({
       repo: tmpRepo,
       origin: 'agent',
       kind: 'patch',
       title: 'docs update',
       summary: 'add a doc',
-      diff: addFileDiff('docs/new.md', 'fresh doc'),
+      diff: newDiff,
+      diffHash: newHash,
+      provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', newHash),
       engineModel: 'codex:gpt-5.5',
       engineTier: 'frontier',
     });
@@ -539,13 +550,17 @@ describe('M47 autoMergeProposal — local happy path', () => {
     enroll(tmpRepo);
 
     const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
+    const guardedDiff = addFileDiff('docs/guarded.md', 'doc');
+    const guardedHash = hashDiff(guardedDiff);
     const p = createProposal({
       repo: tmpRepo,
       origin: 'agent',
       kind: 'patch',
       title: 'docs update',
       summary: 'add a doc',
-      diff: addFileDiff('docs/guarded.md', 'doc'),
+      diff: guardedDiff,
+      diffHash: guardedHash,
+      provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', guardedHash),
       engineModel: 'codex:gpt-5.5',
       engineTier: 'frontier',
     });
@@ -572,13 +587,17 @@ describe('M47 autoMergeProposal — local happy path', () => {
     enroll(tmpRepo);
 
     const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
+    const detachedDiff = addFileDiff('docs/detached.md', 'doc');
+    const detachedHash = hashDiff(detachedDiff);
     const p = createProposal({
       repo: tmpRepo,
       origin: 'agent',
       kind: 'patch',
       title: 'docs update',
       summary: 'add a doc',
-      diff: addFileDiff('docs/detached.md', 'doc'),
+      diff: detachedDiff,
+      diffHash: detachedHash,
+      provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', detachedHash),
       engineModel: 'codex:gpt-5.5',
       engineTier: 'frontier',
     });

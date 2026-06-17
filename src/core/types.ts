@@ -1889,6 +1889,14 @@ export interface Proposal {
    */
   engineModel?: string;
   engineTier?: EngineTier;
+  /** M47.1: sha256 of the (scrubbed) diff at signing time. */
+  diffHash?: string;
+  /**
+   * M47.1: HMAC over `${engineModel}|${engineTier}|${diffHash}` with the
+   * per-machine provenance key — proves the trust tags were set by the
+   * sandboxed producer (not forged on disk) and are bound to THIS diff.
+   */
+  provenanceSig?: string;
   /** Current lifecycle status. Created as 'pending'; NEVER auto-advances. */
   status: ProposalStatus;
   /** ISO timestamp the proposal was created. */

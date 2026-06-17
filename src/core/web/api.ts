@@ -46,6 +46,8 @@ import { recall } from '../genome/recall.js';
 import { listProposals, loadProposal, setStatus } from '../inbox/store.js';
 // M24: read-only daemon state endpoint — no control surface; start/stop stays CLI-only.
 import { loadDaemonState } from '../daemon/state.js';
+// M49: read-only fleet snapshot endpoint — no control surface; pause/resume stays CLI-only.
+import { buildFleetStatus } from '../fleet/status.js';
 
 // ---------------------------------------------------------------------------
 // SSE registry — shared across all open SSE connections so server.ts can
@@ -678,6 +680,17 @@ export async function handleApi(
     if (path === '/api/daemon' && method === 'GET') {
       const ds = loadDaemonState();
       sendJson(res, 200, ds);
+      return true;
+    }
+
+    // ── GET /api/fleet ───────────────────────────────────────────────────────
+    // M49: read-only fleet snapshot (daemon + per-backend dispatches/quota +
+    // queue + proposals + merges + paused state). NO control surface here —
+    // pause/resume is CLI-only (`ashlr fleet pause|resume`). buildFleetStatus
+    // never throws; same no-auth read class as /api/daemon and /api/pulse.
+    if (path === '/api/fleet' && method === 'GET') {
+      const fleet = await buildFleetStatus(cfg);
+      sendJson(res, 200, fleet);
       return true;
     }
 
