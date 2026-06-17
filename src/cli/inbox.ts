@@ -25,6 +25,80 @@ import { makeColors, pad } from './ui.js';
 import type { Proposal, ProposalStatus } from '../core/types.js';
 
 // ---------------------------------------------------------------------------
+// M70: ashlr-md render seam (lazy — degrades when ashlr-md not installed)
+// ---------------------------------------------------------------------------
+
+type PresentMarkdownFn = (
+  title: string,
+  body: string,
+) => { rendered: boolean; path?: string; detail: string };
+
+let _presentMarkdown: PresentMarkdownFn | null | undefined;
+
+async function loadMarkdownModule(): Promise<PresentMarkdownFn | null> {
+  if (_presentMarkdown === undefined) {
+    try {
+      const mod = await import('../core/integrations/markdown.js') as {
+        presentMarkdown: PresentMarkdownFn;
+      };
+      _presentMarkdown = mod.presentMarkdown;
+    } catch {
+      _presentMarkdown = null;
+    }
+  }
+  return _presentMarkdown ?? null;
+}
+
+/**
+ * Build a clean Markdown document for a proposal.
+ * Pure function — no side effects, safe to unit-test directly.
+ */
+export function buildProposalMarkdown(p: Proposal): string {
+  const lines: string[] = [];
+
+  lines.push(`## Metadata\n`);
+  lines.push(`| Field | Value |`);
+  lines.push(`|-------|-------|`);
+  lines.push(`| **Title** | ${p.title} |`);
+  lines.push(`| **ID** | \`${p.id}\` |`);
+  lines.push(`| **Kind** | ${p.kind} |`);
+  lines.push(`| **Status** | ${p.status} |`);
+  lines.push(`| **Origin** | ${p.origin} |`);
+  if (p.repo) lines.push(`| **Repo** | ${p.repo} |`);
+  const pRec = p as unknown as Record<string, unknown>;
+  if (pRec['engineModel']) {
+    lines.push(`| **Engine** | ${pRec['engineModel'] as string} |`);
+  }
+  if (pRec['engineTier']) {
+    lines.push(`| **Tier** | ${pRec['engineTier'] as string} |`);
+  }
+  lines.push(`| **Created** | ${p.createdAt} |`);
+  if (p.decidedAt) lines.push(`| **Decided** | ${p.decidedAt} |`);
+  if (p.sandboxId) lines.push(`| **Sandbox** | \`${p.sandboxId}\` |`);
+
+  lines.push(``);
+  lines.push(`## Summary\n`);
+  lines.push(p.summary);
+
+  if (p.diff) {
+    lines.push(``);
+    lines.push(`## Diff\n`);
+    lines.push('```diff');
+    lines.push(p.diff);
+    lines.push('```');
+  }
+
+  if (p.status === 'pending') {
+    lines.push(``);
+    lines.push(`## Actions\n`);
+    lines.push(`- Approve: \`ashlr inbox approve ${p.id.slice(0, 12)}\``);
+    lines.push(`- Reject:  \`ashlr inbox reject ${p.id.slice(0, 12)}\``);
+  }
+
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // Lazy loaders — degrade gracefully if inbox modules not yet built
 // ---------------------------------------------------------------------------
 
@@ -297,7 +371,7 @@ async function cmdInboxList(jsonMode: boolean): Promise<number> {
 
   printTable(pending, tty);
   printStatusCounts(all, tty);
-  console.log(col.dim('  Use `ashlr inbox show <id>` for full detail.'));
+  console.log(col.dim('  Use `ashlr inbox show <id>` for full detail.  Add --open to view in ashlr-md.'));
   console.log(col.dim('  Use `ashlr inbox approve <id>` to approve and apply.'));
   console.log(col.dim('  Use `ashlr inbox reject <id>` to discard.'));
   console.log('');
@@ -319,7 +393,7 @@ function buildCounts(proposals: Proposal[]): Record<ProposalStatus, number> {
 // Subcommand: show <id>
 // ---------------------------------------------------------------------------
 
-async function cmdInboxShow(id: string, jsonMode: boolean): Promise<number> {
+async function cmdInboxShow(id: string, jsonMode: boolean, openMd: boolean): Promise<number> {
   const tty = process.stdout.isTTY === true;
   const col = makeColors(tty);
 
@@ -330,11 +404,12 @@ async function cmdInboxShow(id: string, jsonMode: boolean): Promise<number> {
   }
 
   if (!id) {
-    console.error(col.red('error: ') + 'Usage: ashlr inbox show <id>');
+    console.error(col.red('error: ') + 'Usage: ashlr inbox show <id> [--open]');
     return 2;
   }
 
-  const p = _loadProposal(id);
+  // Resolve by prefix (mirrors approve/reject)
+  const p = resolveProposal(id);
   if (!p) {
     console.error(col.red('error: ') + `Proposal not found: ${id}`);
     return 1;
@@ -343,6 +418,21 @@ async function cmdInboxShow(id: string, jsonMode: boolean): Promise<number> {
   if (jsonMode) {
     console.log(JSON.stringify(p, null, 2));
     return 0;
+  }
+
+  // ── M70: open in ashlr-md viewer when --open / --md is set ──────────────
+  if (openMd) {
+    const presentFn = await loadMarkdownModule();
+    if (presentFn) {
+      const mdBody = buildProposalMarkdown(p);
+      const result = presentFn(p.title, mdBody);
+      if (result.rendered && result.path) {
+        console.log(col.cyan('  opened in ashlr-md: ') + result.path);
+        return 0;
+      }
+      // rendered:false → fall through to terminal rendering below
+    }
+    // markdown module unavailable or viewer not installed → terminal fallback
   }
 
   const kindColor = KIND_COLORS[p.kind]    ?? 'cyan';
@@ -725,6 +815,7 @@ export async function cmdInbox(args: string[]): Promise<number> {
   let targetId = '';
   let yes = false;
   let jsonMode = false;
+  let openMd = false;
   const positionals: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -733,9 +824,12 @@ export async function cmdInbox(args: string[]): Promise<number> {
       yes = true;
     } else if (a === '--json') {
       jsonMode = true;
+    } else if (a === '--open' || a === '--md') {
+      // M70: open proposal in ashlr-md viewer (show subcommand only)
+      openMd = true;
     } else if (a?.startsWith('-')) {
       console.error(col.red('error: ') + `Unknown flag: ${a}`);
-      console.error(col.dim('Usage: ashlr inbox [show|approve|reject|automerge] [<id>] [--yes] [--json]'));
+      console.error(col.dim('Usage: ashlr inbox [show|approve|reject|automerge] [<id>] [--yes] [--json] [--open]'));
       return 2;
     } else {
       positionals.push(a);
@@ -758,7 +852,7 @@ export async function cmdInbox(args: string[]): Promise<number> {
     case 'list':
       return cmdInboxList(jsonMode);
     case 'show':
-      return cmdInboxShow(targetId, jsonMode);
+      return cmdInboxShow(targetId, jsonMode, openMd);
     case 'approve':
       return cmdInboxApprove(targetId, yes, jsonMode);
     case 'reject':
@@ -767,7 +861,7 @@ export async function cmdInbox(args: string[]): Promise<number> {
       return cmdInboxAutoMerge(targetId, jsonMode);
     default:
       console.error(col.red('error: ') + `Unknown inbox subcommand: ${subcmd}`);
-      console.error(col.dim('Usage: ashlr inbox [show|approve|reject|automerge] [<id>] [--yes] [--json]'));
+      console.error(col.dim('Usage: ashlr inbox [show|approve|reject|automerge] [<id>] [--yes] [--json] [--open]'));
       return 2;
   }
 }
