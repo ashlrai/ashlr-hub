@@ -101,6 +101,10 @@ interface ParsedRunArgs {
   verifyModel: boolean;
   /** Skip auto-capture of this run to the genome (M16). */
   noCapture: boolean;
+  /** M42: enable the in-process sandboxed engineering tool surface. Optional. */
+  engineer?: boolean;
+  /** M42: additionally enable bash/exec engineering tools (requires --engineer). */
+  allowBash?: boolean;
   /** Bypass an over-cap spend-governance block (M19). Optional — defaults false. */
   overBudget?: boolean;
   /** M32: print a pre-flight cost estimate and exit without running. */
@@ -166,6 +170,12 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       i++;
     } else if (arg === '--verify-model') {
       result.verifyModel = true;
+      i++;
+    } else if (arg === '--engineer') {
+      result.engineer = true;
+      i++;
+    } else if (arg === '--bash') {
+      result.allowBash = true;
       i++;
     } else if (arg === '--estimate') {
       result.estimate = true;
@@ -502,6 +512,8 @@ export async function cmdRun(args: string[]): Promise<number> {
     json:       parsed.json,
     resumeId:   parsed.resumeId,
     verifyModel: parsed.verifyModel,
+    engineer:   parsed.engineer ?? false,
+    allowBash:  parsed.allowBash ?? false,
   };
 
   if (parsed.budget !== undefined || parsed.maxSteps !== undefined) {
@@ -772,6 +784,8 @@ function printRunHelp(): void {
     ['--allow-cloud',           `Allow cloud provider if no local is available (requires API key).`],
     ['--no-tools',              `Disable MCP tool loading (faster; for simple goals).`],
     ['--no-memory',             `Skip genome recall injection into sub-agent prompts.`],
+    ['--engineer',              `Give the local agent sandboxed edit tools (writes → inbox, never the live tree).`],
+    ['--bash',                  `With --engineer, also allow sandboxed bash/test execution.`],
     ['--resume <id>',           `Resume a previously aborted/incomplete run.`],
     ['--json',                  `Emit RunState JSON on stdout; progress goes to stderr.`],
     ['--stream',                `Stream live progress as it happens (default: on when stderr is a TTY).`],

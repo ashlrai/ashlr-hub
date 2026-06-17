@@ -35,7 +35,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-import { join } from 'path';
+import { join, delimiter } from 'path';
 import type { AshlrConfig } from './types.js';
 import { CONFIG_DIR, CONFIG_PATH } from './config.js';
 
@@ -105,7 +105,8 @@ export function buildToolEnv(
   // ── Scan roots (colon-joined) ─────────────────────────────────────────────
   const roots = (cfg.roots ?? []).filter(Boolean);
   if (roots.length > 0) {
-    env['ASHLR_ROOTS'] = roots.join(':');
+    // path.delimiter (':' POSIX, ';' Windows) keeps Windows drive-letter paths intact.
+    env['ASHLR_ROOTS'] = roots.join(delimiter);
   }
 
   return env;

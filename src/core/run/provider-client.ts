@@ -9,6 +9,7 @@
 
 import type { AshlrConfig, ChatMessage, ChatResult, ProviderClient } from '../types.js';
 import { getProviderRegistry } from '../providers.js';
+import { resolveModelProfile, adaptivePromptsEnabled } from './model-profile.js';
 
 // ---------------------------------------------------------------------------
 // Known cloud provider identifiers
@@ -245,11 +246,13 @@ function buildOllamaClient(
   baseUrl: string,
   model: string,
   supportsTools: boolean,
+  temperature?: number,
 ): ProviderClient {
   const chatUrl = baseUrl.replace(/\/+$/, '') + '/api/chat';
 
   return {
     id: 'ollama',
+    model,
     supportsTools,
 
     async chat(messages: ChatMessage[], tools?: unknown[]): Promise<ChatResult> {
@@ -262,6 +265,8 @@ function buildOllamaClient(
         messages: ollamaMessages,
         stream: false,
       };
+
+      if (temperature !== undefined) body['options'] = { temperature };
 
       // Only send tools if supported and tools are provided
       if (supportsTools && tools && tools.length > 0) {
@@ -330,6 +335,8 @@ function buildOllamaClient(
           messages: ollamaMessages,
           stream: true,
         };
+
+        if (temperature !== undefined) body['options'] = { temperature };
 
         if (supportsTools && tools && tools.length > 0) {
           body['tools'] = tools;
@@ -526,11 +533,13 @@ function buildLmStudioClient(
   baseUrl: string,
   model: string,
   supportsTools: boolean,
+  temperature?: number,
 ): ProviderClient {
   const chatUrl = baseUrl.replace(/\/+$/, '') + '/v1/chat/completions';
 
   return {
     id: 'lmstudio',
+    model,
     supportsTools,
 
     async chat(messages: ChatMessage[], tools?: unknown[]): Promise<ChatResult> {
@@ -542,6 +551,8 @@ function buildLmStudioClient(
         messages: openaiMessages,
         stream: false,
       };
+
+      if (temperature !== undefined) body['temperature'] = temperature;
 
       if (supportsTools && tools && tools.length > 0) {
         body['tools'] = tools;
@@ -616,6 +627,8 @@ function buildLmStudioClient(
           messages: openaiMessages,
           stream: true,
         };
+
+        if (temperature !== undefined) body['temperature'] = temperature;
 
         if (supportsTools && tools && tools.length > 0) {
           body['tools'] = tools;
@@ -832,6 +845,16 @@ function buildLmStudioClient(
  *     mutating the shared process.env.ASHLR_MODEL — avoiding the env race under
  *     concurrent tasks. ASHLR_MODEL is still honored when opts.model is absent.
  */
+/**
+ * M41: resolve the sampling temperature for a model from its adaptive profile.
+ * Returns undefined when adaptive prompts are disabled, leaving the provider's
+ * own default temperature in force (byte-identical request to the legacy path).
+ */
+function adaptiveTemperature(cfg: AshlrConfig, model: string): number | undefined {
+  if (!adaptivePromptsEnabled(cfg)) return undefined;
+  return resolveModelProfile(model, cfg.models.profiles).temperature;
+}
+
 export async function getActiveClient(
   cfg: AshlrConfig,
   opts: { allowCloud: boolean; provider?: string; model?: string },
@@ -890,7 +913,7 @@ export async function getActiveClient(
     const supportsTools = modelSupportsTools(model);
     const baseUrl = cfg.models.ollama.replace(/\/+$/, '');
 
-    return buildOllamaClient(baseUrl, model, supportsTools);
+    return buildOllamaClient(baseUrl, model, supportsTools, adaptiveTemperature(cfg, model));
   }
 
   // ---- Local provider: LM Studio ----
@@ -908,7 +931,7 @@ export async function getActiveClient(
     const supportsTools = true;
     const baseUrl = cfg.models.lmstudio.replace(/\/+$/, '');
 
-    return buildLmStudioClient(baseUrl, model, supportsTools);
+    return buildLmStudioClient(baseUrl, model, supportsTools, adaptiveTemperature(cfg, model));
   }
 
   // ---- M33: plugin-contributed provider ----

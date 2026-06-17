@@ -52,6 +52,20 @@ export interface AshlrConfig {
      * and a cloud key is present. Never enables silent cloud spend on its own.
      */
     escalate?: { onFailure: boolean; latencyMs?: number };
+    /**
+     * M41: enable the model-adaptive prompt suite (Fable-5-grade layered
+     * system prompts + per-model profiles for verbosity / step-cap /
+     * temperature). Default OFF — when absent/false the harness uses its
+     * legacy prompts and step cap unchanged. Overridable per-process via the
+     * ASHLR_ADAPTIVE_PROMPTS env var.
+     */
+    adaptivePrompts?: boolean;
+    /**
+     * M41: optional per-profile overrides keyed by profile id
+     * ('coder' | 'general' | 'small' | 'default'). Shallow-merged onto the
+     * built-in ModelProfile. Power-user knob; absent by default.
+     */
+    profiles?: Record<string, Partial<import('./run/model-profile.js').ModelProfile>>;
   };
   /** Telemetry hooks (e.g. Pulse) + local budget caps. All fields optional. */
   telemetry: {
@@ -470,6 +484,22 @@ export interface RunOptions {
    * the global budget.
    */
   verifyModel?: boolean;
+  /**
+   * M42: enable the in-process engineering tool surface — read_file/glob/grep
+   * plus sandboxed write_file/edit_file (and, with allowBash, bash/run_tests).
+   * Default false → the run keeps today's spec-only gateway tools and never
+   * writes. All writes land in a throwaway git worktree; the captured diff is
+   * routed to the approval inbox as a PENDING proposal, never the live tree.
+   */
+  engineer?: boolean;
+  /** M42: additionally enable the bash/run_tests exec tools (requires engineer). */
+  allowBash?: boolean;
+  /**
+   * M43: max verify→repair iterations per task on a failing structured verify
+   * (typecheck/test/lint). Default 2; 0 disables the repair loop. Each iteration
+   * is bounded by the per-task step cap and the global budget.
+   */
+  maxRepairs?: number;
 }
 
 /** A single message in a chat exchange with a provider. */
@@ -498,6 +528,11 @@ export interface ChatResult {
 export interface ProviderClient {
   /** Provider id this client targets. */
   id: string;
+  /**
+   * Resolved model name this client serves (M41). Optional/additive — plugin
+   * providers may omit it. Used to resolve a model-adaptive ModelProfile.
+   */
+  model?: string;
   /** Whether the underlying model/provider supports tool calls. */
   supportsTools: boolean;
   /** Send a chat exchange (optionally with tool specs) and get a result. */
@@ -867,7 +902,7 @@ export interface VerifyVerdict {
   /** One-line human-readable reason for the verdict. */
   reason: string;
   /** How the verdict was reached. */
-  method: 'heuristic' | 'model';
+  method: 'heuristic' | 'model' | 'command';
 }
 
 /** The set of engines `ashlr run` can delegate to (or run locally). */
@@ -2719,7 +2754,13 @@ export interface DigestDeliveryResult {
  *   'proposal' — creates a PENDING inbox Proposal; REFUSED when KILL. There is
  *                deliberately NO 'approve'/'apply' class — approval is human-only.
  */
-export type NativeToolSafety = 'read' | 'append' | 'proposal';
+export type NativeToolSafety = 'read' | 'append' | 'proposal' | 'write' | 'exec';
+// M42 extends the M31 set (additive — the structural gate `safety !== 'read'`
+// already refuses the new classes under KILL):
+//   'write' — mutates a workspace path (sandbox worktree); REFUSED under KILL,
+//             boundary- + enrollment-gated. Opt-in via `ashlr run --engineer`.
+//   'exec'  — runs a subprocess (bash/tests) confined to the sandbox worktree;
+//             REFUSED under KILL; double opt-in via `--engineer --bash`.
 
 /**
  * M31: one native tool served by the MCP gateway itself (SDK-free definition;

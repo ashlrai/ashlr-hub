@@ -139,6 +139,14 @@ const loadRunsCmd = lazyCmd(
   'runs command requires src/cli/run.ts (M4 module not yet built).',
 );
 
+// ─── M44 local-agent eval harness ─────────────────────────────────────────────
+
+const loadEvalCmd = lazyCmd(
+  () => import('./eval.js' as unknown as string),
+  (m) => m.cmdEval as Cmd,
+  'eval command requires src/cli/eval.ts (M44 module not yet built).',
+);
+
 // ─── M5 lazy imports (graceful degradation if modules not yet built) ──────────
 
 import type { ActivityRollup } from '../core/types.js';
@@ -1342,6 +1350,14 @@ async function main(): Promise<void> {
       case 'runs': {
         const cmdRuns = await loadRunsCmd();
         process.exitCode = await cmdRuns(rest);
+        break;
+      }
+
+      case 'eval': {
+        // M44: local-agent eval harness — runs fixtures with adaptive
+        // prompts OFF vs ON and reports steps/done/tokens.
+        const cmdEval = await loadEvalCmd();
+        process.exitCode = await cmdEval(rest);
         break;
       }
 

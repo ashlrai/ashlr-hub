@@ -938,8 +938,10 @@ describe('runGoal — resume edge cases', () => {
     // The cached task was NOT re-executed: no agent-task chat used CACHED_GOAL as
     // its sole user message. (It may appear inside the synthesis prompt, which
     // aggregates done-task goals — so we look only at execution-shaped bodies:
-    // the sub-agent system prompt contains "Ashlr sub-agent".)
-    const agentTaskBodies = chatBodies.filter(b => b.includes('Ashlr sub-agent'));
+    // the sub-agent system prompt contains "sub-agent" (legacy "Ashlr sub-agent"
+    // and the M41 adaptive "Ashlr engineering sub-agent" both match; the
+    // synthesis prompt does not), so this holds regardless of the prompt flag.)
+    const agentTaskBodies = chatBodies.filter(b => b.includes('sub-agent'));
     expect(agentTaskBodies.some(b => b.includes('CACHED_GOAL'))).toBe(false);
     // The pending task's goal SHOULD appear in an executed agent-task body.
     expect(agentTaskBodies.some(b => b.includes('NEXT_GOAL'))).toBe(true);

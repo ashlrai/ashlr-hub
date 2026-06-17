@@ -198,7 +198,7 @@ export function ollamaInstalled(): boolean {
   try {
     // `which` on POSIX; `where` on Windows — use `which` since the target
     // platform is macOS (darwin). execFileSync throws when exit code != 0.
-    execFileSync('which', ['ollama'], { stdio: 'pipe' });
+    execFileSync(process.platform === 'win32' ? 'where' : 'which', ['ollama'], { stdio: 'pipe' });
     return true;
   } catch {
     return false;

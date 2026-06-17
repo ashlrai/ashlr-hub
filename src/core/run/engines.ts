@@ -30,7 +30,7 @@ let _phantomInstalled: boolean | undefined;
 function phantomInstalled(): boolean {
   if (_phantomInstalled === undefined) {
     try {
-      execFileSync('which', ['phantom'], { stdio: 'ignore' });
+      execFileSync(process.platform === 'win32' ? 'where' : 'which', ['phantom'], { stdio: 'ignore' });
       _phantomInstalled = true;
     } catch {
       _phantomInstalled = false;
@@ -62,7 +62,7 @@ export function engineInstalled(engine: EngineId): boolean {
   const candidates = bins[engine] ?? [engine];
   for (const bin of candidates) {
     try {
-      execFileSync('which', [bin], { stdio: 'ignore' });
+      execFileSync(process.platform === 'win32' ? 'where' : 'which', [bin], { stdio: 'ignore' });
       return true;
     } catch {
       // try next
