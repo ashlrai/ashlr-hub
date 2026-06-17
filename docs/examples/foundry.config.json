@@ -1,0 +1,57 @@
+{
+  "foundry": {
+    "allowedBackends": ["builtin", "claude", "codex", "hermes"],
+
+    "models": {
+      "claude": "claude-opus-4-5",
+      "codex": "gpt-5o",
+      "hermes": "hermes-3-llama-3.1-70b"
+    },
+
+    "engines": {
+      "kimi": {
+        "id": "kimi",
+        "kind": "api-model",
+        "tier": "mid",
+        "api": {
+          "envKey": "MOONSHOT_API_KEY",
+          "defaultBaseUrl": "https://api.moonshot.ai/v1",
+          "defaultModel": "kimi-k2-0711-preview",
+          "protocol": "openai"
+        },
+        "capabilities": ["agent", "edit", "architecture"]
+      },
+      "opencode": {
+        "id": "opencode",
+        "kind": "cli-agent",
+        "tier": "local",
+        "bin": "opencode",
+        "bins": ["opencode"],
+        "argv": ["run", "$GOAL", { "optModel": ["--model", "$MODEL"] }],
+        "capabilities": ["agent", "edit"]
+      }
+    },
+
+    "mergeAuthority": [
+      { "engine": "claude", "model": "claude-opus-4-5" },
+      { "engine": "codex",  "model": "gpt-5o" }
+    ],
+
+    "limits": {
+      "claude": { "window": "5h", "max": 50 },
+      "codex":  { "window": "5h", "max": 50 }
+    },
+
+    "confinement": {
+      "*": {
+        "mode": "os",
+        "networkEgress": false,
+        "onUnsupported": "fallback"
+      }
+    },
+
+    "autoMerge": {
+      "enabled": false
+    }
+  }
+}
