@@ -105,6 +105,8 @@ interface ParsedRunArgs {
   engineer?: boolean;
   /** M42: additionally enable bash/exec engineering tools (requires --engineer). */
   allowBash?: boolean;
+  /** M45: run an external --engine (claude|codex) sandboxed (diff → inbox). */
+  sandboxEngine?: boolean;
   /** Bypass an over-cap spend-governance block (M19). Optional — defaults false. */
   overBudget?: boolean;
   /** M32: print a pre-flight cost estimate and exit without running. */
@@ -177,6 +179,9 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
     } else if (arg === '--bash') {
       result.allowBash = true;
       i++;
+    } else if (arg === '--sandbox-engine') {
+      result.sandboxEngine = true;
+      i++;
     } else if (arg === '--estimate') {
       result.estimate = true;
       i++;
@@ -197,8 +202,8 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       i++;
     } else if (arg === '--engine') {
       const val = args[++i];
-      if (!val || !['builtin', 'ashlrcode', 'aw', 'claude'].includes(val)) {
-        result.usageError = `--engine requires one of: builtin, ashlrcode, aw, claude; got: ${val ?? '(missing)'}`;
+      if (!val || !['builtin', 'ashlrcode', 'aw', 'claude', 'codex'].includes(val)) {
+        result.usageError = `--engine requires one of: builtin, ashlrcode, aw, claude, codex; got: ${val ?? '(missing)'}`;
         return result;
       }
       result.engine = val;
@@ -514,6 +519,7 @@ export async function cmdRun(args: string[]): Promise<number> {
     verifyModel: parsed.verifyModel,
     engineer:   parsed.engineer ?? false,
     allowBash:  parsed.allowBash ?? false,
+    sandboxEngine: parsed.sandboxEngine ?? false,
   };
 
   if (parsed.budget !== undefined || parsed.maxSteps !== undefined) {
@@ -779,7 +785,8 @@ function printRunHelp(): void {
     ['--budget N',              `Max total tokens (in+out) before aborting (default: ${DEFAULT_MAX_TOKENS}).`],
     ['--max-steps N',           `Max agent steps before aborting (default: ${DEFAULT_MAX_STEPS}).`],
     ['--parallel N',            `Max independent tasks to run concurrently (default: ${DEFAULT_PARALLEL}).`],
-    ['--engine <e>',            `Execution engine: builtin (default), ashlrcode, aw, or claude.`],
+    ['--engine <e>',            `Execution engine: builtin (default), ashlrcode, aw, claude, or codex.`],
+    ['--sandbox-engine',        `Run an external --engine (claude|codex) in a sandbox; its diff → inbox, never the live tree.`],
     ['--model <name>',          `Local model to use (default: smallest/fastest; or set ASHLR_MODEL).`],
     ['--allow-cloud',           `Allow cloud provider if no local is available (requires API key).`],
     ['--no-tools',              `Disable MCP tool loading (faster; for simple goals).`],

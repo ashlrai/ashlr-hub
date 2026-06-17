@@ -117,6 +117,28 @@ export interface AshlrConfig {
    */
   notify?: NotifyTarget;
   /**
+   * M45: multi-backend engine fleet (v4 Foundry). ENTIRELY OPT-IN — when absent,
+   * behavior is unchanged (builtin only; external engines run raw as today).
+   * When present, external engines run SANDBOXED with diff capture and the fleet
+   * may route work across the allowed backends.
+   */
+  foundry?: {
+    /** Backends the fleet may use. Absent ⇒ ['builtin'] only. */
+    allowedBackends?: EngineId[];
+    /** Per-backend preferred model id (keyed by EngineId). */
+    models?: Partial<Record<EngineId, string>>;
+    /** Run external engines inside a sandbox with diff capture (default true when foundry set). */
+    sandboxExternal?: boolean;
+    /** Hard wall-clock per external run (ms). Default 20 min. */
+    timeoutMs?: number;
+    /**
+     * Allowlist for the (later) merge-authority gate: a proposal may auto-apply
+     * to main only if its {engine,model} matches an entry here. Defined now,
+     * enforced in a later milestone.
+     */
+    mergeAuthority?: Array<{ engine: EngineId; model: string }>;
+  };
+  /**
    * M24: optional autonomous-operator (daemon) tuning. When unset, the daemon
    * falls back to its hard-coded conservative defaults. This NEVER widens the
    * daemon's authority — the daemon is proposal-only by construction; these
@@ -429,10 +451,17 @@ export interface RunState {
   id: string;
   /** The original top-level goal. */
   goal: string;
-  /** Engine that executed the run ('builtin' | 'ashlrcode' | 'aw'). */
+  /** Engine that executed the run ('builtin' | 'ashlrcode' | 'aw' | 'claude' | 'codex'). */
   engine: string;
   /** Active provider id used for the run. */
   provider: string;
+  /**
+   * M45: backend + model that produced this run, for merge-authority gating.
+   * e.g. 'claude:claude-opus-4-8' | 'codex:gpt-5.5' | 'builtin:<local-model>'.
+   */
+  engineModel?: string;
+  /** M45: trust tier of the producing backend ('local' | 'frontier'). */
+  engineTier?: EngineTier;
   /** ISO timestamp the run was created. */
   createdAt: string;
   /** ISO timestamp of the last update (written after each step). */
@@ -500,6 +529,14 @@ export interface RunOptions {
    * is bounded by the per-task step cap and the global budget.
    */
   maxRepairs?: number;
+  /**
+   * M45: when true, an external engine ('claude'|'codex'|…) runs INSIDE a
+   * throwaway sandbox worktree with its diff captured to the inbox, instead of
+   * raw on the live tree. Set by the swarm/daemon for autonomous external runs.
+   */
+  sandboxEngine?: boolean;
+  /** M45: abort (no raw fallback) if a sandbox worktree cannot be created. */
+  requireSandbox?: boolean;
 }
 
 /** A single message in a chat exchange with a provider. */
@@ -906,7 +943,15 @@ export interface VerifyVerdict {
 }
 
 /** The set of engines `ashlr run` can delegate to (or run locally). */
-export type EngineId = 'builtin' | 'ashlrcode' | 'aw' | 'claude';
+export type EngineId = 'builtin' | 'ashlrcode' | 'aw' | 'claude' | 'codex';
+
+/**
+ * M45: trust tier of the backend that produced work. 'frontier' = a
+ * merge-authority model (e.g. Opus 4.8 via Claude Code, GPT-5.5 via Codex);
+ * 'local' = an on-device model. Only 'frontier' work may auto-merge to main
+ * (enforced later via cfg.foundry.mergeAuthority).
+ */
+export type EngineTier = 'local' | 'frontier';
 
 /** A fully-resolved external engine invocation (exact argv + optional cwd). */
 export interface EngineCommand {
@@ -1814,6 +1859,13 @@ export interface Proposal {
   diff?: string;
   /** Optional id of the sandbox the diff was captured from (M21). */
   sandboxId?: string;
+  /**
+   * M45: provenance — backend + model that produced this proposal's diff
+   * (e.g. 'codex:gpt-5.5'). A later merge-authority gate requires
+   * engineTier === 'frontier' before any auto-apply to main.
+   */
+  engineModel?: string;
+  engineTier?: EngineTier;
   /** Current lifecycle status. Created as 'pending'; NEVER auto-advances. */
   status: ProposalStatus;
   /** ISO timestamp the proposal was created. */

@@ -755,7 +755,18 @@ function emit(sink: StreamSink, event: Omit<RunStreamEvent, 'ts'>): void {
 }
 
 /** Known engine ids (typed subset). */
-const KNOWN_ENGINE_IDS: ReadonlySet<string> = new Set(['builtin', 'ashlrcode', 'aw', 'claude']);
+const KNOWN_ENGINE_IDS: ReadonlySet<string> = new Set(['builtin', 'ashlrcode', 'aw', 'claude', 'codex']);
+
+/**
+ * M45: whether an external engine should run SANDBOXED (worktree + diff→inbox)
+ * instead of raw on the live tree. True only when cfg.foundry opts in; default
+ * (absent) keeps the raw delegation path → today's behavior unchanged.
+ */
+function foundryWantsSandbox(cfg: AshlrConfig, engine: EngineId): boolean {
+  if (engine === 'builtin') return false;
+  if (!cfg.foundry) return false;
+  return cfg.foundry.sandboxExternal ?? true;
+}
 
 // ---------------------------------------------------------------------------
 // Main: runGoal
@@ -899,6 +910,29 @@ export async function runGoal(
           `[ashlr run] delegating to engine "${engine}" (${goal.slice(0, 60)}…)\n`,
         );
         emit(sink, { kind: 'log', text: `delegating to engine "${engine}"` });
+
+        // M45: sandboxed-external path — run the agent CLI confined to a throwaway
+        // worktree and capture its diff as a PENDING proposal. Gated by
+        // opts.sandboxEngine or cfg.foundry; when neither is set the raw delegation
+        // below runs unchanged (today's behavior). No raw fallback here: defeating
+        // the sandbox would break the no-outward guarantee for autonomous runs.
+        if (opts.sandboxEngine === true || foundryWantsSandbox(cfg, engineId)) {
+          const { runEngineSandboxed } = await import('./sandboxed-engine.js');
+          const r = await runEngineSandboxed(engineId, goal, cfg, {
+            sourceRepo: cwd,
+            model: modelEnv,
+            budget: opts.budget,
+            propose: true,
+          });
+          emit(sink, {
+            kind: r.state.status === 'done' ? 'task-done' : 'log',
+            text: r.proposalId
+              ? `engine "${engine}" → inbox proposal ${r.proposalId}`
+              : `engine "${engine}" ${r.state.status}`,
+          });
+          saveRun(r.state);
+          return r.state;
+        }
 
         const id = generateRunId();
         const now = new Date().toISOString();

@@ -56,6 +56,7 @@ export function engineInstalled(engine: EngineId): boolean {
   if (engine === 'builtin') return true;
   const bins: Record<string, string[]> = {
     claude: ['claude'],
+    codex: ['codex'],
     aw: ['aw'],
     ashlrcode: ['ac', 'ashlrcode'],
   };
@@ -93,7 +94,7 @@ export function buildEngineCommand(
   engine: EngineId,
   goal: string,
   _cfg: AshlrConfig,
-  opts?: { cwd?: string; model?: string },
+  opts?: { cwd?: string; model?: string; autonomous?: boolean },
 ): EngineCommand | null {
   if (engine === 'builtin') return null;
 
@@ -107,7 +108,26 @@ export function buildEngineCommand(
         // --model must come before --output-format per claude's -p mode
         args.splice(2, 0, '--model', model);
       }
+      if (opts?.autonomous) {
+        // M45: unattended, sandbox-confined edits. acceptEdits auto-applies file
+        // edits without prompting (least-privilege — it will not run bash); --add-dir
+        // scopes tool access to the worktree. Real containment is the throwaway
+        // worktree + severed git push creds (see sandboxed-engine.ts), and claude
+        // authenticates via its own HOME subscription session.
+        args.push('--permission-mode', 'acceptEdits', '--add-dir', cwd);
+      }
       return { bin: 'claude', args, cwd };
+    }
+
+    case 'codex': {
+      // M45: non-interactive `codex exec`. `--sandbox workspace-write` is Codex's
+      // OWN sandbox — it may edit the workspace (the worktree) but has no network
+      // and asks for no approvals; this layers on top of our worktree containment.
+      // -C scopes the working root to the worktree; --json emits JSONL events.
+      const args: string[] = ['exec'];
+      if (model) args.push('--model', model);
+      args.push('--sandbox', 'workspace-write', '--cd', cwd, '--json', goal);
+      return { bin: 'codex', args, cwd };
     }
 
     case 'aw': {
@@ -167,12 +187,13 @@ export function phantomWrap(cmd: EngineCommand, _cfg: AshlrConfig): EngineComman
 export function spawnEngine(
   cmd: EngineCommand,
   cfg: AshlrConfig,
+  opts?: { env?: NodeJS.ProcessEnv; timeoutMs?: number },
 ): { ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string } {
   // CONTRACT: spawnEngine NEVER throws. Any synchronous failure (spawnSync
   // throwing, env-bridge/phantom probe errors, etc.) is reported as
   // { ok:false, error } rather than propagated to the caller.
   try {
-    return spawnEngineInner(cmd, cfg);
+    return spawnEngineInner(cmd, cfg, opts);
   } catch (err) {
     return { ok: false, output: '', error: err instanceof Error ? err.message : String(err) };
   }
@@ -181,6 +202,7 @@ export function spawnEngine(
 function spawnEngineInner(
   cmd: EngineCommand,
   cfg: AshlrConfig,
+  opts?: { env?: NodeJS.ProcessEnv; timeoutMs?: number },
 ): { ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string } {
   // Apply phantom-exec wrap when enabled and installed (best-effort)
   let effective = cmd;
@@ -188,12 +210,14 @@ function spawnEngineInner(
     effective = phantomWrap(cmd, cfg);
   }
 
-  const childEnv = withToolEnv(cfg);
+  // M45: a caller (sandboxed-engine) may pass a hardened, containment env; else
+  // fall back to the allowlist-only env-bridge env (NON-SECRET).
+  const childEnv = opts?.env ?? withToolEnv(cfg);
 
   const result = spawnSync(effective.bin, effective.args, {
     encoding: 'utf8',
     maxBuffer: 10 * 1024 * 1024, // 10 MB
-    timeout: 5 * 60 * 1000,       // 5 min hard wall-clock limit
+    timeout: opts?.timeoutMs ?? 5 * 60 * 1000, // hard wall-clock limit (default 5 min)
     cwd: effective.cwd,
     env: childEnv,
   });
@@ -222,6 +246,28 @@ function spawnEngineInner(
       }
     } catch {
       // Not JSON or unexpected shape — usage stays undefined; caller estimates
+    }
+  }
+
+  // M45: best-effort usage parse for codex --json (JSONL events). The token-count
+  // event shape is not contractually stable across versions, so this is a guarded
+  // scan: find any line carrying input/output token counts. Undefined on miss
+  // (caller estimates). ⚠️ Refine in M46 once the event schema is pinned.
+  if (cmd.bin === 'codex' && !usage) {
+    for (const line of rawOutput.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('{')) continue;
+      try {
+        const ev = JSON.parse(trimmed) as Record<string, unknown>;
+        const u = (ev['usage'] ?? ev['token_usage'] ?? ev) as Record<string, unknown>;
+        const tin = u['input_tokens'] ?? u['prompt_tokens'];
+        const tout = u['output_tokens'] ?? u['completion_tokens'];
+        if (typeof tin === 'number' && typeof tout === 'number') {
+          usage = { tokensIn: tin, tokensOut: tout };
+        }
+      } catch {
+        // skip non-JSON / unexpected line
+      }
     }
   }
 
