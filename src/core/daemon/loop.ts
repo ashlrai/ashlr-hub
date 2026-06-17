@@ -43,6 +43,10 @@ import { runSwarm } from '../swarm/runner.js';
 import { runGoal } from '../run/orchestrator.js';
 import { routeBackend } from '../fleet/router.js';
 import { withinLimit, recordUse } from '../fleet/quota.js';
+import { recommendRoute, recoverWithinBudget } from '../run/learned-router.js';
+import { estimateRun } from '../observability/estimate.js';
+import { buildForecast } from '../observability/forecast.js';
+import { emitTuningProposals } from '../learn/tuning.js';
 import { runAutoMergePass } from '../fleet/automerge-pass.js';
 import { pendingCount } from '../inbox/store.js';
 
@@ -354,6 +358,43 @@ export async function tick(
       backend = 'builtin';
     }
 
+    // M53: learned-router recommend + budget cascade (flag-off: no-op when
+    // cfg.foundry.intelligence is absent). recoverWithinBudget is PURE and
+    // may only return a tier choice or a pause signal — no outward action.
+    // This file imports NO apply/merge/push/deploy primitive.
+    {
+      const intelRaw = (cfg.foundry as Record<string, unknown> | undefined)?.['intelligence'];
+      if (intelRaw !== undefined && intelRaw !== null) {
+        const forecast = buildForecast('7d', cfg);
+        const goal = `${item.title}\n\n${item.detail}`.trim();
+        const est = await estimateRun(goal, { maxTokens: perItemMaxTokens }, cfg);
+        const recommended = await recommendRoute(item, cfg, { estimate: est });
+        // Only override when the recommend result doesn't escalate a local decision.
+        if (routed.tier !== 'local' || recommended.tier === 'local') {
+          backend = recommended.backend;
+        }
+        // Budget cascade: step down tier when near cap.
+        const recovery = recoverWithinBudget(
+          { backend, tier: recommended.tier, reason: recommended.reason },
+          cfg,
+          tickSpent + state.todaySpentUsd,
+          forecast,
+        );
+        if (recovery.action === 'pause') {
+          audit({
+            action: 'daemon:budget-cascade',
+            repo: item.repo,
+            sandboxId: null,
+            summary: `M53 budget cascade: pausing dispatch for "${item.title}" — ${recovery.reason}`,
+            result: 'ok',
+          });
+          return { item, spentUsd: 0, dispatched: false };
+        } else {
+          backend = recovery.decision.backend;
+        }
+      }
+    }
+
     const goal = `${item.title}\n\n${item.detail}`.trim();
     const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
 
@@ -434,6 +475,47 @@ export async function tick(
     } finally {
       if (prevInSwarm === undefined) delete process.env['ASHLR_IN_SWARM'];
       else process.env['ASHLR_IN_SWARM'] = prevInSwarm;
+    }
+
+    // M53: anomaly-hold — if run cost > k×p50, hold the proposal PENDING and
+    // file a TuningProposal. NEVER auto-apply. This block imports NO
+    // apply/merge/push/deploy primitive.
+    if (dispatched && swarmSpent > 0) {
+      const intelRaw2 = (cfg.foundry as Record<string, unknown> | undefined)?.['intelligence'];
+      if (intelRaw2 !== undefined && intelRaw2 !== null) {
+        const intelCfg2 = intelRaw2 as { anomalyK?: number };
+        const anomalyK = typeof intelCfg2.anomalyK === 'number' && intelCfg2.anomalyK > 0
+          ? intelCfg2.anomalyK : 4;
+        const goal2 = `${item.title}\n\n${item.detail}`.trim();
+        const est2 = await estimateRun(goal2, { maxTokens: perItemMaxTokens }, cfg).catch(() => null);
+        const p50 = est2?.estCostUsd.median ?? 0;
+        if (p50 > 0 && swarmSpent > anomalyK * p50) {
+          audit({
+            action: 'daemon:anomaly-hold',
+            repo: item.repo,
+            sandboxId: null,
+            summary:
+              `M53 anomaly hold: "${item.title}" cost $${swarmSpent.toFixed(4)} ` +
+              `> ${anomalyK}×p50 ($${(anomalyK * p50).toFixed(4)}) — proposal stays PENDING`,
+            result: 'ok',
+          });
+          // File a TuningProposal describing the anomaly (proposal-only, never auto-applied).
+          try {
+            emitTuningProposals([{
+              key: `anomaly.cost.${item.id.replace(/[^a-z0-9]/gi, '-').slice(0, 40)}`,
+              area: 'policy',
+              title: `Cost anomaly hold: "${item.title.slice(0, 60)}"`,
+              rationale:
+                `Run cost $${swarmSpent.toFixed(4)} exceeded ${anomalyK}×p50 ` +
+                `($${(anomalyK * p50).toFixed(4)}) for "${item.title}". ` +
+                `Proposal held PENDING for human review.`,
+              confidence: Math.min(0.9, 0.5 + (swarmSpent / (anomalyK * p50) - 1) / 10),
+            }]);
+          } catch {
+            // Emission must never crash the tick.
+          }
+        }
+      }
     }
 
     return { item, spentUsd: swarmSpent, dispatched };

@@ -199,6 +199,36 @@ export async function estimateSwarm(
   return buildEstimate('swarm', goal, samples, opts);
 }
 
+// ---------------------------------------------------------------------------
+// M53 additive extensions — p50 accessor + anomaly ratio helper.
+// These are pure helpers that expose existing estimate data; they do NOT change
+// the behavior of estimateRun/estimateSwarm or any existing export.
+// ---------------------------------------------------------------------------
+
+/**
+ * M53: Extract the p50 (median) estimated cost from a RunEstimate.
+ * Returns 0 when the estimate has no history (sampleSize 0).
+ * PURE, never throws.
+ */
+export function p50CostFromEstimate(estimate: RunEstimate): number {
+  return estimate.estCostUsd.median;
+}
+
+/**
+ * M53: Compute the anomaly ratio: actualCostUsd / p50.
+ * Returns Infinity when p50 is 0 and actualCost > 0 (conservatively treated
+ * as anomalous by callers). Returns 0 when actualCost <= 0. Never throws.
+ */
+export function anomalyRatioFromEstimate(
+  actualCostUsd: number,
+  estimate: RunEstimate,
+): number {
+  if (actualCostUsd <= 0) return 0;
+  const p50 = p50CostFromEstimate(estimate);
+  if (p50 <= 0) return Infinity;
+  return actualCostUsd / p50;
+}
+
 /** Render an estimate as a compact human block (shared by run/swarm CLIs). */
 export function renderEstimate(e: RunEstimate): string {
   const fmtTok = (n: number): string =>
