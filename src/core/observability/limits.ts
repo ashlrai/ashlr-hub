@@ -18,6 +18,7 @@ import type { AshlrConfig } from '../types.js';
 import { collectUsageEvents } from './usage-source.js';
 import { modelToProviderKey } from './rollup.js';
 import { estCostUsd } from '../run/budget.js';
+import { readCodexRateLimits } from './codex-source.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -305,6 +306,42 @@ async function buildProviders(): Promise<ProviderLimitEntry[]> {
       detail:
         'No OPENAI_API_KEY set — subscription plan limits are not API-accessible. ' +
         'Set OPENAI_API_KEY to enable usage API polling.',
+    }));
+  }
+
+
+  // Codex: always surface if rate-limit data is available from local sessions.
+  // readCodexRateLimits() returns real used% / resets_at from the newest session.
+  const codexLimits = readCodexRateLimits();
+  if (codexLimits !== null) {
+    const prim = codexLimits.primary;
+    const sec  = codexLimits.secondary;
+    const plan = codexLimits.planType ?? 'unknown';
+
+    // Build a window label from window_minutes (300 min → '5h', 10080 min → '7d', etc.)
+    function minutesToLabel(mins: number): string {
+      if (mins % (60 * 24 * 7) === 0) return `${mins / (60 * 24 * 7)}w`;
+      if (mins % (60 * 24) === 0)     return `${mins / (60 * 24)}d`;
+      if (mins % 60 === 0)            return `${mins / 60}h`;
+      return `${mins}m`;
+    }
+
+    let detail = `Codex ${plan}`;
+    if (prim) {
+      const winLabel = minutesToLabel(prim.windowMinutes);
+      const resetsAt = new Date(prim.resetsAt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      detail += ` — ${prim.usedPercent}% of ${winLabel} window used, resets ${resetsAt}`;
+    }
+    if (sec) {
+      const winLabel = minutesToLabel(sec.windowMinutes);
+      detail += ` / ${sec.usedPercent}% of ${winLabel}`;
+    }
+
+    entries.push(Promise.resolve({
+      provider: 'codex',
+      kind: 'subscription' as const,
+      detail,
+      ...(prim ? { used: prim.usedPercent, resetAt: new Date(prim.resetsAt * 1000).toISOString() } : {}),
     }));
   }
 

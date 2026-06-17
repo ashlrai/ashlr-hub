@@ -2251,6 +2251,12 @@ a:hover {
 .ctrl-prov-status-name   { font-family: var(--font-mono); font-weight: 700; color: var(--text-primary); min-width: 80px; }
 .ctrl-prov-status-detail { color: var(--text-secondary); flex: 1; min-width: 0; }
 .ctrl-prov-status-used   { font-family: var(--font-mono); color: var(--status-done); font-size: 11px; white-space: nowrap; }
+/* M64: rate-limit bar for subscription providers (Codex used%) */
+.ctrl-prov-rl-wrap      { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-1); width: 100%; }
+.ctrl-prov-rl-bar-track { flex: 1; height: 4px; background: var(--bg-elevated); border-radius: 2px; overflow: hidden; min-width: 60px; max-width: 120px; }
+.ctrl-prov-rl-bar       { height: 100%; border-radius: 2px; transition: width 0.3s ease; }
+.ctrl-prov-rl-pct       { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); white-space: nowrap; min-width: 32px; text-align: right; }
+.ctrl-prov-rl-reset     { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); white-space: nowrap; }
 .ctrl-prov-kind-badge {
   font-size: 10px;
   font-weight: 700;

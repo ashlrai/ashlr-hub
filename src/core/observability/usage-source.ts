@@ -13,6 +13,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import type { UsageEvent } from "../types.js";
+import { collectCodexEvents } from "./codex-source.js";
 
 // ---------------------------------------------------------------------------
 // Public helpers
@@ -367,7 +368,8 @@ export function collectUsageEvents(sinceMs: number): UsageEvent[] {
   try {
     const claude = collectClaudeEvents(sinceMs);
     const runs = collectRunEvents(sinceMs);
-    return [...claude, ...runs];
+    const codex = collectCodexEvents(sinceMs);
+    return [...claude, ...runs, ...codex];
   } catch {
     return []; // belt-and-suspenders: top-level guard
   }
