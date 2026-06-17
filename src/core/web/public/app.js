@@ -2037,6 +2037,9 @@ function renderControl() {
   if (state.activeView !== 'control') return;
   const main = getMain();
   if (!main) return;
+  // Preserve scroll position across the 8s poll re-render (otherwise a watched
+  // dashboard jumps to the top every refresh).
+  const _scrollY = window.scrollY;
   main.innerHTML = '';
 
   const d = state.control;
@@ -2148,6 +2151,47 @@ function renderControl() {
     ));
   }
 
+  // ── M63: rolling-window usage (REAL, from local transcripts) ──────────────
+  const subWindows = Array.isArray(subLimits.windows) ? subLimits.windows : [];
+  if (subWindows.length > 0) {
+    backendsBody.appendChild(el('div', { cls: 'ctrl-limits-heading' }, 'Rolling usage (transcript-sourced)'));
+    // Group by window label so we render 5h then 24h sections
+    for (const windowLabel of ['5h', '24h']) {
+      const rows = subWindows.filter((w) => w.window === windowLabel);
+      if (rows.length === 0) continue;
+      const section = el('div', { cls: 'ctrl-win-section' });
+      section.appendChild(el('div', { cls: 'ctrl-win-label' }, `Last ${windowLabel}`));
+      for (const w of rows) {
+        const tokStr  = typeof w.tokens  === 'number' ? fmtK(w.tokens)              : '—';
+        const costStr = typeof w.costUsd === 'number' ? `$${fmt(w.costUsd, 4)}`     : '—';
+        section.appendChild(el('div', { cls: 'ctrl-win-row' },
+          el('span', { cls: 'ctrl-win-provider' }, w.provider ?? '?'),
+          el('span', { cls: 'ctrl-win-tokens' },   tokStr),
+          el('span', { cls: 'ctrl-win-cost' },     costStr)
+        ));
+      }
+      backendsBody.appendChild(section);
+    }
+  }
+
+  // ── M63: provider subscription/key status ─────────────────────────────────
+  const subProviders = Array.isArray(subLimits.providers) ? subLimits.providers : [];
+  if (subProviders.length > 0) {
+    backendsBody.appendChild(el('div', { cls: 'ctrl-limits-heading' }, 'Provider status'));
+    for (const p of subProviders) {
+      const kindBadge = el('span', {
+        cls: `ctrl-prov-kind-badge ${p.kind === 'api-key' ? 'api-key' : 'subscription'}`
+      }, p.kind === 'api-key' ? 'API key' : 'subscription');
+      const usedStr = typeof p.used === 'number' ? fmtK(p.used) + ' tok' : null;
+      backendsBody.appendChild(el('div', { cls: 'ctrl-prov-status-row' },
+        el('span', { cls: 'ctrl-prov-status-name' }, p.provider ?? '?'),
+        kindBadge,
+        el('span', { cls: 'ctrl-prov-status-detail' }, p.detail ?? ''),
+        usedStr ? el('span', { cls: 'ctrl-prov-status-used' }, usedStr) : null
+      ));
+    }
+  }
+
   if (backends.length === 0 && limits.length === 0) {
     backendsBody.appendChild(el('p', { cls: 'hint' }, 'No backends configured.'));
   }
@@ -2251,6 +2295,7 @@ function renderControl() {
   section.appendChild(logsCard);
 
   main.appendChild(section);
+  if (_scrollY > 0) window.scrollTo(0, _scrollY);
 }
 
 // Small metric block used in the Mission Control hero + usage panel

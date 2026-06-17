@@ -2213,6 +2213,54 @@ a:hover {
 }
 .ctrl-sub-icon { color: var(--status-aborted); font-size: 13px; }
 
+/* M63: rolling-window usage rows */
+.ctrl-win-section { margin-bottom: var(--space-3); }
+.ctrl-win-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: var(--space-1);
+}
+.ctrl-win-row {
+  display: grid;
+  grid-template-columns: 100px 80px 80px;
+  gap: var(--space-2);
+  align-items: center;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12px;
+}
+.ctrl-win-row:last-child { border-bottom: none; }
+.ctrl-win-provider { font-family: var(--font-mono); color: var(--text-primary); font-weight: 600; }
+.ctrl-win-tokens   { font-family: var(--font-mono); color: var(--text-secondary); text-align: right; }
+.ctrl-win-cost     { font-family: var(--font-mono); color: var(--accent);         text-align: right; }
+
+/* M63: provider status rows */
+.ctrl-prov-status-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.ctrl-prov-status-row:last-child { border-bottom: none; }
+.ctrl-prov-status-name   { font-family: var(--font-mono); font-weight: 700; color: var(--text-primary); min-width: 80px; }
+.ctrl-prov-status-detail { color: var(--text-secondary); flex: 1; min-width: 0; }
+.ctrl-prov-status-used   { font-family: var(--font-mono); color: var(--status-done); font-size: 11px; white-space: nowrap; }
+.ctrl-prov-kind-badge {
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+.ctrl-prov-kind-badge.api-key      { color: var(--status-done);    background: rgba(74, 222, 128, 0.12); border: 1px solid rgba(74, 222, 128, 0.3); }
+.ctrl-prov-kind-badge.subscription { color: var(--text-muted);     background: var(--bg-elevated);       border: 1px solid var(--border-subtle); }
+
 .ctrl-backend-list { margin-bottom: var(--space-4); }
 
 .ctrl-backend-row {

@@ -425,6 +425,11 @@ function renderDashboard(rollup: ActivityRollup, forecast?: CostForecast | null,
  * Returns process exit code: 0 = ok/warn, 1 = budget over.
  */
 export async function cmdPulse(args: string[]): Promise<number> {
+  // M62: dispatch `connect` subcommand before dashboard flag parsing
+  if (args[0] === 'connect') {
+    return cmdPulseConnect(args.slice(1));
+  }
+
   // Help shortcircuit
   if (args[0] === '--help' || args[0] === '-h' || args[0] === 'help') {
     printPulseHelp();
@@ -581,5 +586,308 @@ function printPulseHelp(): void {
   console.log(`    ${cyan('ashlr pulse --window 1d')}             ${dim('# today')}`);
   console.log(`    ${cyan('ashlr pulse --project ashlr-hub')}     ${dim('# single project')}`);
   console.log(`    ${cyan('ashlr pulse --json | jq .totals')}     ${dim('# machine-readable')}`);
+  console.log('');
+}
+
+// ---------------------------------------------------------------------------
+// M62: `ashlr pulse connect` — hub→pulse bridge configuration + test
+// ---------------------------------------------------------------------------
+
+import { spawnSync } from 'node:child_process';
+
+/** Secret name used by OtlpHttpSink (PHANTOM_PAT_KEY in telemetry-sink.ts). */
+const CONNECT_PHANTOM_PAT_KEY = 'ASHLR_PULSE_TOKEN';
+const PHANTOM_BIN = 'phantom';
+const DEFAULT_PULSE_ENDPOINT = 'https://pulse.ashlr.ai/api/otlp/v1/traces';
+
+/**
+ * `ashlr pulse connect` — configure and test the hub→pulse OTLP bridge.
+ *
+ * Routes:
+ *   connect [<endpoint>] [--token <pat>]   — set endpoint and/or store PAT
+ *   connect --status                        — report config state
+ *   connect --test                          — send one test span
+ *   connect --disconnect                    — clear endpoint
+ */
+export async function cmdPulseConnect(args: string[]): Promise<number> {
+  if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
+    printConnectHelp();
+    return 0;
+  }
+
+  // Route by first flag/arg
+  if (args[0] === '--status') return connectStatus();
+  if (args[0] === '--test')   return connectTest();
+  if (args[0] === '--disconnect') return connectDisconnect();
+
+  // connect [<endpoint>] [--token <pat>]
+  return connectSet(args);
+}
+
+// ---------------------------------------------------------------------------
+// connect <endpoint> [--token <pat>]
+// ---------------------------------------------------------------------------
+
+async function connectSet(args: string[]): Promise<number> {
+  const { loadConfig, saveConfig } = await import('../core/config.js') as {
+    loadConfig: () => import('../core/types.js').AshlrConfig;
+    saveConfig: (c: import('../core/types.js').AshlrConfig) => void;
+  };
+
+  let endpoint: string | undefined;
+  let token: string | undefined;
+
+  let i = 0;
+  while (i < args.length) {
+    const a = args[i]!;
+    if (a === '--token') {
+      const val = args[++i];
+      if (!val) {
+        process.stderr.write(`${C.red}error:${C.reset} --token requires a value\n`);
+        return 2;
+      }
+      token = val;
+    } else if (!a.startsWith('--')) {
+      endpoint = a;
+    } else {
+      process.stderr.write(`${C.red}error:${C.reset} unknown flag: ${a}\n`);
+      return 2;
+    }
+    i++;
+  }
+
+  if (!endpoint && !token) {
+    process.stderr.write(`${C.red}error:${C.reset} provide an endpoint or --token\n`);
+    printConnectHelp();
+    return 2;
+  }
+
+  const cfg = loadConfig();
+
+  // Write endpoint if provided
+  if (endpoint) {
+    cfg.telemetry = { ...cfg.telemetry, pulse: endpoint };
+    saveConfig(cfg);
+    console.log(`${C.green}✓${C.reset} Endpoint saved: ${endpoint}`);
+  }
+
+  // Store PAT if provided — via Phantom when available, otherwise instruct env var
+  if (token) {
+    const stored = storePatViaPhantom(cfg, token);
+    if (stored) {
+      console.log(`${C.green}✓${C.reset} PAT stored in Phantom vault (key: ${CONNECT_PHANTOM_PAT_KEY})`);
+      console.log(`  ${C.dim}The token was passed directly to phantom and is not retained here.${C.reset}`);
+    } else {
+      // Phantom unavailable — instruct env var path
+      console.log(`${C.yellow}!${C.reset} Phantom not available. Set the token as an environment variable:`);
+      console.log(`  export ${CONNECT_PHANTOM_PAT_KEY}=<your-token>`);
+      console.log(`  ${C.dim}Add to your shell profile (~/.zshrc / ~/.bashrc) for persistence.${C.reset}`);
+    }
+  }
+
+  // Next steps
+  console.log('');
+  if (!endpoint) {
+    console.log(`  ${C.dim}Tip: set an endpoint with:  ashlr pulse connect ${DEFAULT_PULSE_ENDPOINT}${C.reset}`);
+  }
+  if (!token) {
+    console.log(`  ${C.dim}Tip: store your PAT with:   ashlr pulse connect --token <pat>${C.reset}`);
+  }
+  console.log(`  Run ${C.cyan}ashlr pulse connect --status${C.reset} to verify configuration.`);
+  console.log(`  Run ${C.cyan}ashlr pulse connect --test${C.reset}   to send a test span.`);
+  return 0;
+}
+
+/**
+ * Store the PAT via `phantom add` — value flows through stdin/arg to phantom,
+ * never through any log or printed string here. Returns true on success.
+ *
+ * NEVER prints, logs, stores, or returns the token value itself.
+ */
+function storePatViaPhantom(cfg: import('../core/types.js').AshlrConfig, _token: string): boolean {
+  if (!cfg.phantom?.enabled) return false;
+
+  // Quick binary probe
+  const probe = spawnSync(PHANTOM_BIN, ['--version'], {
+    encoding: 'utf8',
+    timeout: 5_000,
+    env: { ...process.env, PHANTOM_NO_UPDATE_CHECK: '1' },
+  });
+  if (probe.error || probe.status !== 0) return false;
+
+  // `phantom add KEY VALUE` — token is arg, never logged here
+  const result = spawnSync(PHANTOM_BIN, ['add', CONNECT_PHANTOM_PAT_KEY, _token], {
+    encoding: 'utf8',
+    timeout: 5_000,
+    env: { ...process.env, PHANTOM_NO_UPDATE_CHECK: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  return !result.error && result.status === 0;
+}
+
+// ---------------------------------------------------------------------------
+// connect --status
+// ---------------------------------------------------------------------------
+
+async function connectStatus(): Promise<number> {
+  const { loadConfig } = await import('../core/config.js') as {
+    loadConfig: () => import('../core/types.js').AshlrConfig;
+  };
+  const { patAvailable, getSink } = await import('../core/observability/telemetry-sink.js') as {
+    patAvailable: (cfg: import('../core/types.js').AshlrConfig, allowPhantomProbe?: boolean) => boolean;
+    getSink: (cfg: import('../core/types.js').AshlrConfig) => { emit: (spans: import('../core/types.js').GenAiSpan[]) => Promise<import('../core/types.js').TelemetryEmitResult> };
+  };
+
+  const cfg = loadConfig();
+  const endpoint = cfg.telemetry?.pulse;
+  const hasPat = patAvailable(cfg, true);
+  const sink = getSink(cfg);
+  // Determine active sink name without emitting
+  const sinkName = endpoint && hasPat ? 'OtlpHttpSink' : 'LocalFileSink';
+
+  console.log('');
+  console.log(`${C.bold}  ashlr pulse — bridge status${C.reset}`);
+  console.log('');
+  console.log(`  Endpoint   ${endpoint ? `${C.green}configured${C.reset}  ${C.dim}${endpoint}${C.reset}` : `${C.yellow}not configured${C.reset}`}`);
+  console.log(`  PAT        ${hasPat ? `${C.green}available${C.reset}` : `${C.yellow}not found${C.reset}  ${C.dim}(set ASHLR_PULSE_TOKEN or use --token)${C.reset}`}`);
+  console.log(`  Active sink  ${C.cyan}${sinkName}${C.reset}`);
+  console.log('');
+
+  if (!endpoint) {
+    console.log(`  ${C.dim}Run: ashlr pulse connect ${DEFAULT_PULSE_ENDPOINT}${C.reset}`);
+  }
+  if (!hasPat) {
+    console.log(`  ${C.dim}Run: ashlr pulse connect --token <your-pulse-pat>${C.reset}`);
+  }
+  if (endpoint && hasPat) {
+    console.log(`  ${C.green}Ready.${C.reset} Run ${C.cyan}ashlr pulse connect --test${C.reset} to verify end-to-end.`);
+  }
+  console.log('');
+
+  // Suppress unused variable warning — sink is used for type inference only
+  void sink;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// connect --test
+// ---------------------------------------------------------------------------
+
+async function connectTest(): Promise<number> {
+  const { loadConfig } = await import('../core/config.js') as {
+    loadConfig: () => import('../core/types.js').AshlrConfig;
+  };
+  const { getSink } = await import('../core/observability/telemetry-sink.js') as {
+    getSink: (cfg: import('../core/types.js').AshlrConfig, allowPhantomProbe?: boolean) => { emit: (spans: import('../core/types.js').GenAiSpan[]) => Promise<import('../core/types.js').TelemetryEmitResult> };
+  };
+
+  const cfg = loadConfig();
+
+  if (!cfg.telemetry?.pulse) {
+    console.log(`${C.yellow}not configured${C.reset} — no OTLP endpoint set.`);
+    console.log(`  Run: ${C.cyan}ashlr pulse connect ${DEFAULT_PULSE_ENDPOINT}${C.reset}`);
+    return 1;
+  }
+
+  // Build a minimal test span (metadata only, no content)
+  const now = new Date();
+  const testSpan: import('../core/types.js').GenAiSpan = {
+    name:        'm62-connect-test',
+    runId:       `test-${now.getTime()}`,
+    model:       'ashlr-hub',
+    provider:    'ashlr',
+    tier:        'local',
+    tokensIn:    0,
+    tokensOut:   0,
+    estCostUsd:  0,
+    status:      'done',
+    startTs:     now.toISOString(),
+    endTs:       now.toISOString(),
+  };
+
+  console.log(`  Sending test span to ${C.dim}${cfg.telemetry.pulse}${C.reset} …`);
+
+  const sink = getSink(cfg, false); // allowPhantomProbe:false — async PAT resolution
+  let result: import('../core/types.js').TelemetryEmitResult;
+  try {
+    result = await sink.emit([testSpan]);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.log(`${C.red}error${C.reset}  ${detail}`);
+    return 1;
+  }
+
+  if (result.ok) {
+    console.log(`${C.green}ok${C.reset}     sink=${result.sink}  detail=${result.detail}`);
+    return 0;
+  } else {
+    console.log(`${C.red}fail${C.reset}   sink=${result.sink}  detail=${result.detail}`);
+    if (result.detail === 'PAT unavailable') {
+      console.log(`  ${C.dim}Store your PAT: ashlr pulse connect --token <pat>${C.reset}`);
+    }
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// connect --disconnect
+// ---------------------------------------------------------------------------
+
+async function connectDisconnect(): Promise<number> {
+  const { loadConfig, saveConfig } = await import('../core/config.js') as {
+    loadConfig: () => import('../core/types.js').AshlrConfig;
+    saveConfig: (c: import('../core/types.js').AshlrConfig) => void;
+  };
+
+  const cfg = loadConfig();
+
+  if (!cfg.telemetry?.pulse) {
+    console.log(`${C.dim}Nothing to disconnect — no endpoint was configured.${C.reset}`);
+    return 0;
+  }
+
+  const prev = cfg.telemetry.pulse;
+  const { pulse: _removed, ...rest } = cfg.telemetry;
+  cfg.telemetry = rest;
+  saveConfig(cfg);
+
+  console.log(`${C.green}✓${C.reset} Endpoint cleared (was: ${C.dim}${prev}${C.reset})`);
+  console.log(`  Telemetry will now use LocalFileSink (~/.ashlr/telemetry/).`);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Help
+// ---------------------------------------------------------------------------
+
+function printConnectHelp(): void {
+  console.log('');
+  console.log(`${C.bold}  ashlr pulse connect${C.reset}${C.dim} — configure the hub→pulse OTLP bridge (M62)${C.reset}`);
+  console.log('');
+  console.log(`  ${C.bold}Usage:${C.reset}`);
+  console.log('');
+  console.log(`    ashlr pulse connect <endpoint>          Set OTLP endpoint`);
+  console.log(`    ashlr pulse connect --token <pat>       Store PAT (Phantom or env)`);
+  console.log(`    ashlr pulse connect --status            Show config + active sink`);
+  console.log(`    ashlr pulse connect --test              Send one test span`);
+  console.log(`    ashlr pulse connect --disconnect        Clear endpoint`);
+  console.log('');
+  console.log(`  ${C.bold}Default endpoint:${C.reset}`);
+  console.log(`    ${DEFAULT_PULSE_ENDPOINT}`);
+  console.log('');
+  console.log(`  ${C.bold}PAT storage:${C.reset}`);
+  console.log(`    Preferred: Phantom vault (key: ${CONNECT_PHANTOM_PAT_KEY})`);
+  console.log(`    Fallback:  export ${CONNECT_PHANTOM_PAT_KEY}=<token>`);
+  console.log(`    The token is NEVER printed, logged, or stored in config.json.`);
+  console.log('');
+  console.log(`  ${C.bold}Examples:${C.reset}`);
+  console.log('');
+  console.log(`    ${C.cyan}ashlr pulse connect${C.reset}                                        ${C.dim}# quick-start with default endpoint${C.reset}`);
+  console.log(`    ${C.cyan}ashlr pulse connect https://pulse.ashlr.ai/api/otlp/v1/traces${C.reset}  ${C.dim}# explicit endpoint${C.reset}`);
+  console.log(`    ${C.cyan}ashlr pulse connect --token <pat>${C.reset}                          ${C.dim}# store PAT only${C.reset}`);
+  console.log(`    ${C.cyan}ashlr pulse connect --status${C.reset}                               ${C.dim}# verify config${C.reset}`);
+  console.log(`    ${C.cyan}ashlr pulse connect --test${C.reset}                                 ${C.dim}# live end-to-end test${C.reset}`);
+  console.log(`    ${C.cyan}ashlr pulse connect --disconnect${C.reset}                           ${C.dim}# revert to local file sink${C.reset}`);
   console.log('');
 }
