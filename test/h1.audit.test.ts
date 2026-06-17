@@ -411,10 +411,9 @@ describe('H1 ISOLATION — the real ~/.ashlr is never touched', () => {
       const realBefore = realExisted
         ? readFileSync(realEnrollmentPath, 'utf8')
         : null;
-      // Sanity: the real portfolio is the empty default the suite must preserve.
-      if (realBefore !== null) {
-        expect(JSON.parse(realBefore)).toEqual({ repos: [] });
-      }
+      // NOTE: we do NOT assume the real portfolio is empty (a dev machine may
+      // have repos enrolled). The guarantee proven below is byte-IDENTITY:
+      // the real enrollment.json is unchanged before/after the chain.
 
       await withTmpHome(async (fx) => {
         const repo = fx.makeRepo();
@@ -435,9 +434,6 @@ describe('H1 ISOLATION — the real ~/.ashlr is never touched', () => {
       expect(existsSync(realEnrollmentPath)).toBe(realExisted);
       if (realBefore !== null) {
         expect(readFileSync(realEnrollmentPath, 'utf8')).toBe(realBefore);
-        expect(JSON.parse(readFileSync(realEnrollmentPath, 'utf8'))).toEqual({
-          repos: [],
-        });
       }
     },
   );

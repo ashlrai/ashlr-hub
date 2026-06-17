@@ -191,7 +191,10 @@ describe('detail route + snapshot flag', () => {
     openHandles.push(on);
     const resOn = await request('GET', `${on.url}/api/snapshot`, on.port);
     expect((JSON.parse(resOn.body) as { dispatchEnabled: boolean }).dispatchEnabled).toBe(true);
-  });
+    // Two servers + two full /api/snapshot builds. On a dev machine with an
+    // active portfolio (modules that captured ~/.ashlr at load-time scan the real
+    // tree) this legitimately exceeds the 5s default — give it a realistic budget.
+  }, 30_000);
 });
 
 describe('SSE inbox + daemon events', () => {

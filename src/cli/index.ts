@@ -1665,6 +1665,15 @@ async function main(): Promise<void> {
         break;
       }
 
+      case 'version':
+      case '--version':
+      case '-v': {
+        const { createRequire } = await import('node:module');
+        const pkg = createRequire(import.meta.url)('../../package.json') as { version: string };
+        console.log(pkg.version);
+        break;
+      }
+
       case 'help':
       case '--help':
       case '-h':

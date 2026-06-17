@@ -132,14 +132,10 @@ afterEach(() => {
 
 describe('h8 demo-safety — `ashlr demo` can never touch the real portfolio', () => {
   // (a) DEMO-DISPOSABLE-ONLY — the real enrollment.json is byte-identical.
-  it('NEVER enrolls or touches the REAL portfolio — real enrollment.json stays byte-identical {repos:[]} across a full demo run', async () => {
+  it('NEVER enrolls or touches the REAL portfolio — real enrollment.json stays byte-identical across a full demo run', async () => {
     const before = snapshotRealEnrollment();
-    // Sanity: the real portfolio is the documented DEFAULT-EMPTY state. (If a
-    // real machine had repos enrolled this still proves byte-identity, but the
-    // contract pins {repos:[]}, so assert it when present.)
-    if (before !== '<<ABSENT>>') {
-      expect(JSON.parse(before)).toEqual({ repos: [] });
-    }
+    // We do NOT assume the real portfolio is empty (a dev machine may have repos
+    // enrolled); the guarantee is byte-IDENTITY before/after, asserted below.
 
     const code = await cmdDemo([]);
     expect(code).toBe(0);
@@ -242,9 +238,6 @@ describe('h8 demo-safety — `ashlr demo` can never touch the real portfolio', (
     expect(process.env.HOME).toBe(homeBefore);
     // The REAL portfolio is byte-identical — the failure path never wrote it.
     expect(snapshotRealEnrollment()).toBe(realBefore);
-    if (realBefore !== '<<ABSENT>>') {
-      expect(JSON.parse(realBefore)).toEqual({ repos: [] });
-    }
     // Nothing is left enrolled in the (now-restored) real portfolio.
     expect(policy.listEnrolled()).toEqual([]);
 
