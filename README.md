@@ -4,6 +4,8 @@
 
 Index every project, run agents on local models, aggregate all your MCP servers, track spend, scaffold and ship, and give your whole stack shared private memory — all from one binary.
 
+[![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
+[![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![CI](https://github.com/ashlrai/ashlr-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/ashlr-hub/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org)
@@ -15,7 +17,7 @@ Index every project, run agents on local models, aggregate all your MCP servers,
 Requires **macOS** and **Node.js 22+**.
 
 ```sh
-npm install -g @ashlr/hub   # once published; see docs/RELEASING.md
+npm install -g @ashlr/hub   # published to npm — https://www.npmjs.com/package/@ashlr/hub
 ashlr init                  # one-command onboarding: config, models, editors, genome, doctor
 ```
 
@@ -73,6 +75,31 @@ ashlr help
 ---
 
 Direction and design principles: [`docs/ROADMAP.md`](./docs/ROADMAP.md).
+
+---
+
+## The Ashlr ecosystem
+
+ashlr-hub is the **front door and local harness** that ties the open-source Ashlr
+dev-tool ecosystem together — one CLI that drives every tool below for both the
+agent and the human operator. Each is great on its own; the hub makes them one
+workflow.
+
+| Tool | What it is | How the hub leverages it |
+|---|---|---|
+| [**phantom-secrets**](https://github.com/ashlrai/phantom-secrets) ⭐11 | Stop AI agents leaking API keys — a local proxy swaps real secrets for `phm_` tokens | Engines run under `phantom exec`; api-model keys resolve from the vault; phantom's MCP tools are aggregated into the hub gateway |
+| [**ashlrcode**](https://github.com/ashlrai/ashlrcode) ⭐5 | Multi-provider AI coding agent CLI (30 tools, autopilot) | A first-class fleet engine (`ac`) the conductor can route work to |
+| [**ashlr-stack**](https://github.com/ashlrai/ashlr-stack) ⭐2 | Control plane for your dev stack — provisions + wires 23 providers | `ashlr stack` (status/recommend/apply, confirm-gated) + an onboarding step |
+| [**ashlr-plugin**](https://github.com/ashlrai/ashlr-plugin) ⭐2 | Token-efficient Read/Grep/Edit for Claude Code ([`@ashlr/core-efficiency`](https://github.com/ashlrai/ashlr-core-efficiency)) | The efficiency layer; its MCP tools aggregate through the hub gateway |
+| [**binshield**](https://github.com/ashlrai/binshield) ⭐2 | Snyk for binaries — decompile + AI + YARA supply-chain scan | The `security` work-scanner backend + the Mission Control security panel |
+| [**ashlr-md**](https://github.com/ashlrai/ashlr-md) ⭐2 | AI-native Markdown app for macOS | Renders proposals & digests beautifully — `ashlr inbox show <id> --open`, `ashlr digest --open` |
+| [**ashlr-workbench**](https://github.com/ashlrai/ashlr-workbench) ⭐2 | Local agent workbench (OpenHands · Goose · Aider · ashlrcode) | The `aw` fleet engine |
+| [**ashlr-pulse**](https://github.com/ashlrai/ashlr-pulse) ⭐1 | Shared mission control for agentic-engineering teams | Opt-in hub→pulse OTLP bridge — `ashlr pulse connect` |
+
+```sh
+ashlr mcp ecosystem --write   # register the installed ecosystem MCP servers into the hub gateway
+ashlr mcp list                # one endpoint: every ecosystem tool + the native ashlr_* tools
+```
 
 ---
 
