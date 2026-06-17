@@ -37,6 +37,126 @@
 import { makeColors, isTty, pad } from './ui.js';
 import type { DigestReport, DigestWindow } from '../core/types.js';
 
+// ---------------------------------------------------------------------------
+// M70: ashlr-md render seam (lazy — degrades when ashlr-md not installed)
+// ---------------------------------------------------------------------------
+
+type PresentMarkdownFn = (
+  title: string,
+  body: string,
+) => { rendered: boolean; path?: string; detail: string };
+
+let _presentMarkdownDigest: PresentMarkdownFn | null | undefined;
+
+async function loadMarkdownModule(): Promise<PresentMarkdownFn | null> {
+  if (_presentMarkdownDigest === undefined) {
+    try {
+      const mod = await import('../core/integrations/markdown.js') as {
+        presentMarkdown: PresentMarkdownFn;
+      };
+      _presentMarkdownDigest = mod.presentMarkdown;
+    } catch {
+      _presentMarkdownDigest = null;
+    }
+  }
+  return _presentMarkdownDigest ?? null;
+}
+
+/**
+ * Build a Markdown body for a DigestReport suitable for ashlr-md.
+ * Pure function — no side effects, safe to unit-test directly.
+ */
+export function buildDigestMarkdown(report: DigestReport): string {
+  const lines: string[] = [];
+  const p = report.portfolio;
+
+  lines.push(`> ${report.date} · window: ${report.window}`);
+  lines.push(``);
+
+  lines.push(`## Headline\n`);
+  lines.push(report.headline || '_No activity to report._');
+  lines.push(``);
+
+  lines.push(`## Overview\n`);
+  lines.push(`| Metric | Value |`);
+  lines.push(`|--------|-------|`);
+  lines.push(`| Repos | ${report.repos.total} total · ${report.repos.dirty} dirty · ${report.repos.stale} stale |`);
+  lines.push(`| Pending proposals | ${report.pendingProposals} |`);
+  lines.push(`| Cost (${p.cost.window}) | $${p.cost.spentUsd.toFixed(4)} · ~$${p.cost.projectedMonthlyUsd.toFixed(2)}/mo |`);
+  lines.push(`| Local savings | $${p.cost.localSavingsUsd.toFixed(4)} |`);
+  if (report.daemon) {
+    lines.push(`| Operator | ${report.daemon.running ? 'running' : 'stopped'} · $${report.daemon.todaySpentUsd.toFixed(4)} today |`);
+  }
+  lines.push(``);
+
+  if (p.health.reposScored > 0) {
+    lines.push(`## Health\n`);
+    lines.push(`Average: **${p.health.averageScore}/100** (${p.health.averageGrade}) across ${p.health.reposScored} repo(s)\n`);
+    if (p.health.worstRepos.length > 0) {
+      lines.push(`| Repo | Score | Grade |`);
+      lines.push(`|------|-------|-------|`);
+      for (const r of p.health.worstRepos) {
+        const label = r.repo ? r.repo.split('/').filter(Boolean).slice(-1)[0] ?? r.repo : '—';
+        lines.push(`| ${label} | ${r.score}/100 | **${r.grade}** |`);
+      }
+    }
+    lines.push(``);
+  }
+
+  if (p.goalsInFlight.length > 0) {
+    lines.push(`## Goals In Flight\n`);
+    for (const g of p.goalsInFlight) {
+      const pct = Math.round(g.fractionDone * 100);
+      const next = g.nextActionable ? ` → _${g.nextActionable}_` : '';
+      lines.push(`- **${pct}%** ${g.objective}${next}`);
+    }
+    lines.push(``);
+  }
+
+  if (p.backlogTop.length > 0) {
+    lines.push(`## Top Backlog\n`);
+    for (const item of p.backlogTop) {
+      const where = item.repo ? ` _(${item.repo.split('/').filter(Boolean).slice(-1)[0] ?? item.repo})_` : '';
+      lines.push(`- [${item.score}] ${item.title}${where}`);
+    }
+    lines.push(``);
+  }
+
+  if (p.effectiveness) {
+    lines.push(`## Effectiveness\n`);
+    lines.push(p.effectiveness.headline);
+    lines.push(``);
+  }
+
+  const t = p.today;
+  if (t.previousAt) {
+    lines.push(`## Day-over-Day (vs ${t.previousAt})\n`);
+    lines.push(`| Metric | Delta |`);
+    lines.push(`|--------|-------|`);
+    const fmt = (n: number | null, d = 0) => {
+      if (n === null) return '—';
+      const v = d > 0 ? Number(n.toFixed(d)) : Math.round(n);
+      if (v > 0) return `▲ +${d > 0 ? v.toFixed(d) : v}`;
+      if (v < 0) return `▼ ${d > 0 ? v.toFixed(d) : v}`;
+      return '· 0';
+    };
+    lines.push(`| Pending proposals | ${fmt(t.pendingProposalsDelta)} |`);
+    lines.push(`| Dirty repos | ${fmt(t.dirtyReposDelta)} |`);
+    lines.push(`| Spend | ${fmt(t.spendUsdDelta, 4)} |`);
+    lines.push(`| Health score | ${fmt(t.healthScoreDelta)} |`);
+    lines.push(`| Goals in flight | ${fmt(t.goalsInFlightDelta)} |`);
+    lines.push(``);
+  }
+
+  if (report.narrative) {
+    lines.push(`## Summary${report.narrativeLocal ? ' _(local model)_' : ''}\n`);
+    lines.push(report.narrative);
+    lines.push(``);
+  }
+
+  return lines.join('\n');
+}
+
 // ─── Lazy imports (graceful degradation if M29 core not yet built) ───────────
 
 type BuildDigestFn = (
@@ -90,6 +210,7 @@ interface ParsedDigestArgs {
   allowCloud: boolean;
   window: DigestWindow;
   help: boolean;
+  open: boolean;
   error: string | undefined;
 }
 
@@ -100,6 +221,7 @@ function parseDigestArgs(args: string[]): ParsedDigestArgs {
   let allowCloud = false;
   let window: DigestWindow = '7d';
   let help = false;
+  let open = false;
   let error: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
@@ -115,6 +237,9 @@ function parseDigestArgs(args: string[]): ParsedDigestArgs {
       narrative = true;
     } else if (a === '--allow-cloud') {
       allowCloud = true;
+    } else if (a === '--open' || a === '--md') {
+      // M70: open the digest in the ashlr-md viewer
+      open = true;
     } else if (a === '--window') {
       const v = args[i + 1];
       if (v === '7d' || v === '30d') {
@@ -133,7 +258,7 @@ function parseDigestArgs(args: string[]): ParsedDigestArgs {
     }
   }
 
-  return { json, notify, narrative, allowCloud, window, help, error };
+  return { json, notify, narrative, allowCloud, window, help, open, error };
 }
 
 // ─── Help ─────────────────────────────────────────────────────────────────────
@@ -147,7 +272,7 @@ function printHelp(): void {
   out(bold('  ashlr digest') + dim(' — org-level daily portfolio digest (read-only; local by default)'));
   out('');
   out('  ' + bold('Usage:'));
-  out(`    ${cyan('ashlr digest')} [--window <7d|30d>] [--json] [--notify] [--narrative] [--allow-cloud]`);
+  out(`    ${cyan('ashlr digest')} [--window <7d|30d>] [--json] [--notify] [--narrative] [--allow-cloud] [--open]`);
   out('');
   out('  ' + bold('Options:'));
   const opts: [string, string][] = [
@@ -156,6 +281,7 @@ function printHelp(): void {
     ['--notify', 'ALSO send the digest via a configured Slack/Discord webhook (OPT-IN; the only outward path).'],
     ['--narrative', 'Attempt an OPTIONAL LLM narrative (local-first). Off by default (deterministic-only).'],
     ['--allow-cloud', 'With --narrative, permit a CLOUD model. Off by default (local-only). No effect without --narrative.'],
+    ['--open', 'Open the digest in the ashlr-md viewer (--md is an alias). Falls back to terminal when ashlr-md is not installed.'],
     ['--help', 'Show this help.'],
   ];
   const w = Math.max(...opts.map(([f]) => f.length));
@@ -368,6 +494,24 @@ export async function cmdDigest(args: string[]): Promise<number> {
   // 3. Output the report itself.
   if (parsed.json) {
     process.stdout.write(JSON.stringify(report) + '\n');
+  } else if (parsed.open) {
+    // M70: open in ashlr-md when --open / --md is set.
+    // Try the viewer first; fall back to terminal if absent or if the write fails.
+    let openedInViewer = false;
+    const presentFn = await loadMarkdownModule();
+    if (presentFn) {
+      const mdBody = buildDigestMarkdown(report);
+      const mdTitle = `ashlr digest — ${report.date} (${report.window})`;
+      const mdResult = presentFn(mdTitle, mdBody);
+      if (mdResult.rendered && mdResult.path) {
+        process.stdout.write(cyan('  opened in ashlr-md: ') + mdResult.path + '\n');
+        openedInViewer = true;
+      }
+    }
+    if (!openedInViewer) {
+      // ashlr-md not installed or write failed — terminal fallback (unchanged)
+      printDigestHuman(report);
+    }
   } else {
     printDigestHuman(report);
   }

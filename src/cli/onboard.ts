@@ -32,6 +32,7 @@ import { loadBacklog, buildBacklog } from '../core/portfolio/backlog.js';
 import { sweepRepoSandboxes } from '../core/sandbox/worktree.js';
 import { makeColors, isTty } from './ui.js';
 import type { AshlrConfig, WorkItem } from '../core/types.js';
+import { stackInstalled, stackStatus, stackProjectConfigured } from '../core/integrations/stack.js';
 
 const { bold, dim, red, green, yellow, cyan } = makeColors(isTty());
 
@@ -245,6 +246,72 @@ function printSteps(repoHint: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// M71: buildStackStep — advisory stack/services section (pure, testable)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the lines for the "Services (stack)" advisory block shown near the end
+ * of `ashlr onboard`. Pure function: returns an array of pre-formatted lines
+ * (already colored). Never throws — best-effort, degrades gracefully.
+ *
+ * CONTRACT (M71):
+ *  - READ-ONLY / ADVISORY: never auto-provisions, never blocks onboarding.
+ *  - When stack is absent: returns a single dim install hint.
+ *  - When stack is present: shows wired services + cyan `stack recommend` /
+ *    `stack add <service>` hints + Phantom auto-wire note.
+ *  - When the repo has a .stack.toml: notes it is configured.
+ *
+ * @param repo  Absolute path to the repo being onboarded (for stackStatus +
+ *              stackProjectConfigured). Defaults to process.cwd().
+ */
+export function buildStackStep(repo?: string): string[] {
+  try {
+    if (!stackInstalled()) {
+      return [
+        dim('  Install `stack` to auto-provision services (OAuth → provider → secrets).'),
+      ];
+    }
+
+    const repoPath = repo ?? process.cwd();
+    const status = stackStatus(repoPath);
+    const configured = stackProjectConfigured(repoPath);
+
+    const lines: string[] = [];
+    lines.push('');
+    lines.push(bold('  Services') + dim('  (stack)'));
+    lines.push('');
+
+    if (!status.ok) {
+      lines.push(`  ${dim('stack reachable but status unavailable')} ${dim(`(${status.detail})`)}`);
+    } else {
+      const svcs = status.services ?? [];
+      if (svcs.length === 0) {
+        lines.push(`  ${dim('no services wired yet')}`);
+        lines.push(`    ${cyan('→')} ${dim('run')} ${cyan('stack recommend')} ${dim('to see what fits this repo')}`);
+        lines.push(`    ${cyan('→')} ${dim('or')} ${cyan('stack add <service>')} ${dim('to provision one directly')}`);
+      } else {
+        lines.push(`  ${green(String(svcs.length))} service(s) wired:`);
+        for (const svc of svcs) {
+          lines.push(`    ${cyan('•')} ${svc}`);
+        }
+        lines.push(`    ${dim('secrets auto-wire via phantom — no manual copy/paste')}`);
+        lines.push(`    ${cyan('→')} ${dim('add more with')} ${cyan('stack add <service>')}`);
+      }
+    }
+
+    if (configured) {
+      lines.push(`  ${dim('•')} ${dim('.stack.toml found — this repo is configured')}`);
+    }
+
+    lines.push('');
+    return lines;
+  } catch {
+    // Never block onboarding — degrade to silent no-op on any unexpected error.
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // cmdOnboard — the dispatcher entry point
 // ---------------------------------------------------------------------------
 
@@ -291,6 +358,10 @@ export async function cmdOnboard(args: string[]): Promise<number> {
   // dry-run on the user's behalf. The human runs the explicit gates.
   if (yesMode) {
     printSteps(repoArg ?? candidate);
+    // M71: advisory stack section — best-effort, never blocks.
+    for (const line of buildStackStep(candidate)) {
+      console.log(line);
+    }
     return 0;
   }
 
@@ -344,6 +415,11 @@ export async function cmdOnboard(args: string[]): Promise<number> {
     `  ${dim('Undo this activation any time:')} ${cyan(`ashlr onboard --rollback ${candidate}`)}${dim(' [--kill]')}`,
   );
   console.log('');
+
+  // ── M71: Advisory stack/services section (best-effort, never blocks) ───────
+  for (const line of buildStackStep(candidate)) {
+    console.log(line);
+  }
 
   return 0;
 }
