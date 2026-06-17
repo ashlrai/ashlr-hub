@@ -492,6 +492,201 @@ async function cmdMcpInstall(args: string[]): Promise<number> {
   return 0;
 }
 
+
+// ---------------------------------------------------------------------------
+// Subcommand: ecosystem
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical ecosystem MCP server definitions.
+ * Each entry declares a well-known tool name, the binary to probe in PATH,
+ * and the stable command + args to launch it as an MCP stdio server.
+ *
+ * Keep this list conservative: only add servers that are verifiably
+ * installable and stable. Absent tools are skipped — never error.
+ */
+interface EcosystemServer {
+  name: string;         // Key used in mcpServers map
+  probe: string;        // Executable to look for in PATH
+  command: string;      // Launch command
+  args: string[];       // Launch args
+  label: string;        // Human display name
+}
+
+const ECOSYSTEM_SERVERS: EcosystemServer[] = [
+  {
+    name: 'phantom-secrets',
+    probe: 'phantom',
+    command: 'phantom',
+    args: ['mcp', 'serve'],
+    label: 'Phantom Secrets (phantom-mcp)',
+  },
+];
+
+/** Resolve a binary's full path from PATH; returns undefined if not found. */
+function resolveInPath(bin: string): string | undefined {
+  // Honour injected PATH (tests) or fall back to process.env.PATH.
+  const pathDirs = (process.env['PATH'] ?? '').split(':').filter(Boolean);
+  for (const dir of pathDirs) {
+    const candidate = join(dir, bin);
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+/** Shape of ~/.ashlr/settings.json for MCP purposes. */
+interface AshlrSettingsShape {
+  mcpServers?: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>;
+  [key: string]: unknown;
+}
+
+/** Path to the hub settings file that the gateway also scans. */
+function ashlrSettingsPath(): string {
+  return join(homedir(), '.ashlr', 'settings.json');
+}
+
+/** Load ~/.ashlr/settings.json; returns {} on absence/parse error. */
+function loadAshlrSettings(settingsPath?: string): AshlrSettingsShape {
+  const p = settingsPath ?? ashlrSettingsPath();
+  if (!existsSync(p)) return {};
+  const raw = readFileSync(p, 'utf8').trim();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as AshlrSettingsShape;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Merge detected ecosystem servers into ~/.ashlr/settings.json.
+ * - Never clobbers unrelated keys.
+ * - Skips servers already present (by name) — idempotent.
+ * - Creates the file + parent dir if absent.
+ * Returns the names of servers actually written (not already present).
+ */
+export function mergeEcosystemServers(
+  detected: Array<{ name: string; command: string; args: string[] }>,
+  settingsPath: string,
+): string[] {
+  const existing = loadAshlrSettings(settingsPath);
+  const existingServers = existing.mcpServers ?? {};
+
+  const added: string[] = [];
+  const mergedServers: AshlrSettingsShape['mcpServers'] = { ...existingServers };
+
+  for (const srv of detected) {
+    if (mergedServers[srv.name]) continue; // already present — skip
+    mergedServers[srv.name] = { command: srv.command, args: srv.args };
+    added.push(srv.name);
+  }
+
+  const merged: AshlrSettingsShape = {
+    ...existing,
+    mcpServers: mergedServers,
+  };
+
+  const dir = dirname(settingsPath);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(settingsPath, JSON.stringify(merged, null, 2) + '\n', 'utf8');
+  return added;
+}
+
+async function cmdMcpEcosystem(args: string[]): Promise<number> {
+  const writeMode = args.includes('--write');
+  const settingsPath = ashlrSettingsPath();
+
+  console.log('');
+  console.log(bold('  ashlr mcp ecosystem') + gray('  — unified MCP surface (M66)'));
+  console.log('');
+
+  // Detect which ecosystem servers are available in PATH.
+  const detected: Array<EcosystemServer & { resolvedBin: string }> = [];
+  const missing: EcosystemServer[] = [];
+
+  for (const srv of ECOSYSTEM_SERVERS) {
+    const resolved = resolveInPath(srv.probe);
+    if (resolved) {
+      detected.push({ ...srv, resolvedBin: resolved });
+    } else {
+      missing.push(srv);
+    }
+  }
+
+  // Load current settings to check registration state.
+  const currentSettings = loadAshlrSettings(settingsPath);
+  const currentServers = currentSettings.mcpServers ?? {};
+
+  // Print detected servers.
+  if (detected.length === 0) {
+    console.log('  ' + dim('No ecosystem MCP servers found in PATH.'));
+  } else {
+    const nameW = Math.max(10, ...detected.map(s => s.label.length));
+    console.log(bold('  Available:'));
+    console.log('');
+    for (const srv of detected) {
+      const isRegistered = Boolean(currentServers[srv.name]);
+      const regStr = isRegistered ? green('registered') : yellow('not registered');
+      const cmdStr = dim([srv.command, ...srv.args].join(' '));
+      console.log(
+        '    ' + cyan(pad(srv.label, nameW)) +
+        '  ' + regStr +
+        '  ' + gray(srv.resolvedBin) +
+        '\n    ' + ' '.repeat(nameW + 4) + cmdStr
+      );
+      console.log('');
+    }
+  }
+
+  // Print absent servers.
+  if (missing.length > 0) {
+    console.log(bold('  Not installed (skipped):'));
+    for (const srv of missing) {
+      console.log('    ' + dim(srv.label) + gray('  — ' + srv.probe + ' not found in PATH'));
+    }
+    console.log('');
+  }
+
+  if (!writeMode) {
+    console.log(
+      dim('  Run ') + cyan('ashlr mcp ecosystem --write') +
+      dim(' to register available servers into ~/.ashlr/settings.json.')
+    );
+    console.log(dim('  The gateway then aggregates them automatically on next start.'));
+    console.log('');
+    return 0;
+  }
+
+  // --write: merge detected servers into ~/.ashlr/settings.json.
+  if (detected.length === 0) {
+    console.log(yellow('  Nothing to register — no ecosystem servers found in PATH.'));
+    console.log('');
+    return 0;
+  }
+
+  const added = mergeEcosystemServers(
+    detected.map(s => ({ name: s.name, command: s.command, args: s.args })),
+    settingsPath,
+  );
+
+  if (added.length === 0) {
+    console.log(green('  ✓ All available servers already registered — no changes.'));
+  } else {
+    console.log(green('  ✓ Registered ' + String(added.length) + ' server(s) into ' + settingsPath));
+    for (const name of added) {
+      console.log('    ' + cyan('+ ' + name));
+    }
+    console.log('');
+    console.log(
+      dim('  Agents pointed at ') + cyan('ashlr mcp') +
+      dim(' now get all registered ecosystem tools automatically.')
+    );
+  }
+  console.log('');
+
+  return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
@@ -509,6 +704,8 @@ function printHelp(): void {
     ['doctor [--json]',                 'Probe each server; exit 1 if required servers (ashlr/phantom) are down.'],
     ['install <claude|ashlrcode>',      'Idempotently add the ashlr gateway to a target config (backs up first).'],
     ['install <target> --config <path>', 'Install to a specific config path (use in tests to avoid real configs).'],
+    ['ecosystem',                        'Detect installed ecosystem MCP servers + show registration status.'],
+    ['ecosystem --write',                'Register detected servers into ~/.ashlr/settings.json (idempotent).'],
   ];
 
   const cmdW = Math.max(...cmds.map(([c]) => c.length));
@@ -576,6 +773,10 @@ export async function cmdMcp(args: string[]): Promise<number> {
 
   if (sub === 'install') {
     return cmdMcpInstall(args.slice(1));
+  }
+
+  if (sub === 'ecosystem') {
+    return cmdMcpEcosystem(args.slice(1));
   }
 
   // Unknown subcommand
