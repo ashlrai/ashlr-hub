@@ -137,6 +137,29 @@ export interface AshlrConfig {
      * enforced in a later milestone.
      */
     mergeAuthority?: Array<{ engine: EngineId; model: string }>;
+    /**
+     * M46: per-backend rate limits for subscription backends (flat-fee, rate-
+     * limited — not token-billed). Keyed by EngineId. `window` is a label like
+     * '1m'|'5m'|'1h'|'1d'; `max` is the max dispatches per rolling window.
+     * Absent ⇒ unlimited. Used by the fleet scheduler (M46/M48).
+     */
+    limits?: Partial<Record<EngineId, { window: string; max: number }>>;
+    /**
+     * M47: tiered-trust auto-merge to main. DEFAULT DISABLED. When enabled, a
+     * proposal may be merged to the default branch ONLY when ALL hold: it is
+     * frontier merge-authority (engineTier 'frontier' + {engine,model} ∈
+     * mergeAuthority), its risk class is ≤ maxRisk, and full verification passes.
+     * Kill-switch and human override always apply; nothing auto-merges by default.
+     */
+    autoMerge?: {
+      enabled: boolean;
+      /** Max risk class permitted to auto-merge (default 'low'). */
+      maxRisk?: 'low' | 'medium' | 'high';
+      /** Also merge/push on the remote (gh pr merge) when applying (default false). */
+      pushToRemote?: boolean;
+      /** Permit auto-merge when NO verification commands are detected (default false = fail-closed). */
+      allowWithoutVerification?: boolean;
+    };
   };
   /**
    * M24: optional autonomous-operator (daemon) tuning. When unset, the daemon

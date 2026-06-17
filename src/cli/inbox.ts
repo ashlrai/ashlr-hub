@@ -33,12 +33,15 @@ type LoadProposalFn   = (id: string) => Proposal | null;
 type SetStatusFn      = (id: string, status: ProposalStatus, result?: string) => void;
 type PendingCountFn   = () => number;
 type ApplyProposalFn  = (id: string, opts: { confirmed: boolean }) => Promise<import('../core/types.js').ApplyResult>;
+type AutoMergeResult  = { ok: boolean; merged: boolean; reason: string; prUrl?: string };
+type AutoMergeFn      = (id: string, cfg: import('../core/types.js').AshlrConfig) => Promise<AutoMergeResult>;
 
 let _listProposals:  ListProposalsFn  | null | undefined;
 let _loadProposal:   LoadProposalFn   | null | undefined;
 let _setStatus:      SetStatusFn      | null | undefined;
 let _pendingCount:   PendingCountFn   | null | undefined;
 let _applyProposal:  ApplyProposalFn  | null | undefined;
+let _autoMerge:      AutoMergeFn      | null | undefined;
 
 async function loadStoreModule(): Promise<boolean> {
   if (_listProposals === undefined) {
@@ -75,6 +78,20 @@ async function loadApplyModule(): Promise<boolean> {
     }
   }
   return _applyProposal !== null;
+}
+
+async function loadMergeModule(): Promise<boolean> {
+  if (_autoMerge === undefined) {
+    try {
+      const mod = await import('../core/inbox/merge.js') as {
+        autoMergeProposal: AutoMergeFn;
+      };
+      _autoMerge = mod.autoMergeProposal;
+    } catch {
+      _autoMerge = null;
+    }
+  }
+  return _autoMerge !== null;
 }
 
 // ---------------------------------------------------------------------------
@@ -577,6 +594,97 @@ async function cmdInboxReject(id: string, jsonMode: boolean): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// Subcommand: automerge <id> (M47 — tiered-trust merge-to-main gate)
+// ---------------------------------------------------------------------------
+
+/**
+ * `ashlr inbox automerge <id>` — attempt an autonomous merge of a frontier
+ * proposal to the default branch. This is a thin shell: every safety gate
+ * (enabled, frontier merge-authority, risk ≤ maxRisk, full verification, kill
+ * switch, enrollment) is enforced inside autoMergeProposal, which NEVER throws
+ * and mutates NOTHING on any refusal. No bypass flag is offered here.
+ */
+async function cmdInboxAutoMerge(id: string, jsonMode: boolean): Promise<number> {
+  const tty = process.stdout.isTTY === true;
+  const col = makeColors(tty);
+
+  if (!id) {
+    console.error(col.red('error: ') + 'Usage: ashlr inbox automerge <id> [--json]');
+    return 2;
+  }
+
+  const storeOk = await loadStoreModule();
+  if (!storeOk || !_loadProposal || !_listProposals) {
+    console.error(col.red('error: ') + 'inbox requires src/core/inbox/store.ts (M23 module not yet built).');
+    return 1;
+  }
+
+  const p = resolveProposal(id);
+  if (!p) {
+    if (jsonMode) {
+      console.log(JSON.stringify({ ok: false, error: `Proposal not found: ${id}` }));
+    } else {
+      console.error(col.red('error: ') + `Proposal not found: ${id}`);
+    }
+    return 1;
+  }
+
+  const mergeOk = await loadMergeModule();
+  if (!mergeOk || !_autoMerge) {
+    const msg = 'inbox/merge.ts not yet built (M47 module unavailable).';
+    if (jsonMode) {
+      console.log(JSON.stringify({ ok: false, error: msg }));
+    } else {
+      console.error(col.red('error: ') + msg);
+    }
+    return 1;
+  }
+
+  // Load the active config so the gate can read cfg.foundry.autoMerge / mergeAuthority.
+  let cfg: import('../core/types.js').AshlrConfig;
+  try {
+    const { loadConfig } = await import('../core/config.js') as {
+      loadConfig: () => import('../core/types.js').AshlrConfig;
+    };
+    cfg = loadConfig();
+  } catch {
+    const msg = 'could not load config (src/core/config.ts).';
+    if (jsonMode) {
+      console.log(JSON.stringify({ ok: false, error: msg }));
+    } else {
+      console.error(col.red('error: ') + msg);
+    }
+    return 1;
+  }
+
+  if (!jsonMode) {
+    process.stdout.write(col.dim('  Evaluating auto-merge gates…') + (tty ? '\r' : '\n'));
+  }
+
+  const result = await _autoMerge(p.id, cfg);
+
+  if (tty && !jsonMode) {
+    process.stdout.write('\x1b[2K\r');
+  }
+
+  if (jsonMode) {
+    console.log(JSON.stringify(result, null, 2));
+    return result.ok ? 0 : 1;
+  }
+
+  if (result.merged) {
+    console.log(col.green('  ✓ Auto-merged: ') + result.reason);
+    if (result.prUrl) console.log(col.dim('    PR: ') + result.prUrl);
+    console.log('');
+    return 0;
+  }
+
+  console.error(col.yellow('  ✗ Not merged: ') + result.reason);
+  console.log('');
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
 // ID resolution — accept full id or an unambiguous prefix
 // ---------------------------------------------------------------------------
 
@@ -627,7 +735,7 @@ export async function cmdInbox(args: string[]): Promise<number> {
       jsonMode = true;
     } else if (a?.startsWith('-')) {
       console.error(col.red('error: ') + `Unknown flag: ${a}`);
-      console.error(col.dim('Usage: ashlr inbox [show|approve|reject] [<id>] [--yes] [--json]'));
+      console.error(col.dim('Usage: ashlr inbox [show|approve|reject|automerge] [<id>] [--yes] [--json]'));
       return 2;
     } else {
       positionals.push(a);
@@ -636,7 +744,7 @@ export async function cmdInbox(args: string[]): Promise<number> {
 
   if (positionals.length > 0) {
     const first = positionals[0];
-    if (first === 'show' || first === 'approve' || first === 'reject') {
+    if (first === 'show' || first === 'approve' || first === 'reject' || first === 'automerge') {
       subcmd    = first;
       targetId  = positionals[1] ?? '';
     } else {
@@ -655,9 +763,11 @@ export async function cmdInbox(args: string[]): Promise<number> {
       return cmdInboxApprove(targetId, yes, jsonMode);
     case 'reject':
       return cmdInboxReject(targetId, jsonMode);
+    case 'automerge':
+      return cmdInboxAutoMerge(targetId, jsonMode);
     default:
       console.error(col.red('error: ') + `Unknown inbox subcommand: ${subcmd}`);
-      console.error(col.dim('Usage: ashlr inbox [show|approve|reject] [<id>] [--yes] [--json]'));
+      console.error(col.dim('Usage: ashlr inbox [show|approve|reject|automerge] [<id>] [--yes] [--json]'));
       return 2;
   }
 }
