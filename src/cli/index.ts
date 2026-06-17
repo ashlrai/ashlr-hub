@@ -155,6 +155,20 @@ const loadFleetCmd = lazyCmd(
   'fleet command requires src/cli/fleet.ts (M49 module not yet built).',
 );
 
+// ─── M55 the conductor: `ashlr goal` + `ashlr loop` ──────────────────────────
+
+const loadGoalCmd = lazyCmd(
+  () => import('./goal.js' as unknown as string),
+  (m) => m.cmdGoal as Cmd,
+  'goal command requires src/cli/goal.ts (M55 module not yet built).',
+);
+
+const loadLoopCmd = lazyCmd(
+  () => import('./loop.js' as unknown as string),
+  (m) => m.cmdLoop as Cmd,
+  'loop command requires src/cli/loop.ts (M55 module not yet built).',
+);
+
 // ─── M5 lazy imports (graceful degradation if modules not yet built) ──────────
 
 import type { ActivityRollup } from '../core/types.js';
@@ -1523,6 +1537,20 @@ async function main(): Promise<void> {
         // plus `pause`/`resume` (kill-switch only).
         const cmdFleet = await loadFleetCmd();
         process.exitCode = await cmdFleet(rest);
+        break;
+      }
+
+      case 'goal': {
+        // M55: the conductor — objective → milestones → sandboxed, proposal-only run.
+        const cmdGoal = await loadGoalCmd();
+        process.exitCode = await cmdGoal(rest);
+        break;
+      }
+
+      case 'loop': {
+        // M55: the conductor — run the proposal-first fleet over the portfolio.
+        const cmdLoop = await loadLoopCmd();
+        process.exitCode = await cmdLoop(rest);
         break;
       }
 
