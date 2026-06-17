@@ -24,8 +24,8 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-const VIEWS = ['overview', 'runs', 'swarms', 'pulse', 'genome', 'portfolio', 'inbox', 'daemon', 'fleet'];
-const DEFAULT_VIEW = 'overview';
+const VIEWS = ['control', 'overview', 'runs', 'swarms', 'pulse', 'genome', 'portfolio', 'inbox', 'daemon', 'fleet'];
+const DEFAULT_VIEW = 'control';
 const API_BASE = '';  // same origin
 
 // sessionStorage key for the session token (never localStorage, never URL).
@@ -65,6 +65,8 @@ const state = {
   inboxDetail: null,        // currently-open Proposal (full, with diff)
   daemon: null,             // DaemonState | null
   fleet: null,              // M49: FleetStatus | null
+  control: null,            // M61: GET /api/control composite view
+  controlInterval: null,    // M61: 4s polling timer
   inboxBadge: 0,            // pending count from SSE, drives nav badge
   loading: {},   // viewName -> boolean
   error: {},     // viewName -> string | null
@@ -270,6 +272,8 @@ function connectSSE() {
       try {
         state.daemon = JSON.parse(e.data);
         if (state.activeView === 'daemon') renderDaemon();
+        // M61: control view picks up daemon events
+        if (state.activeView === 'control') loadControl();
       } catch {}
     });
     es.addEventListener('error', () => {
@@ -323,7 +327,8 @@ async function onHashChange() {
 
 function renderActiveView() {
   const view = state.activeView;
-  if (view === 'overview') renderOverview();
+  if (view === 'control') renderControl();
+  else if (view === 'overview') renderOverview();
   else if (view === 'runs') renderRuns();
   else if (view === 'swarms') renderSwarms();
   else if (view === 'pulse') renderPulse();
@@ -335,7 +340,13 @@ function renderActiveView() {
 }
 
 async function loadView(view) {
-  if (view === 'overview') await loadOverview();
+  // Stop control polling when navigating away
+  if (view !== 'control' && state.controlInterval) {
+    clearInterval(state.controlInterval);
+    state.controlInterval = null;
+  }
+  if (view === 'control') await loadControl();
+  else if (view === 'overview') await loadOverview();
   else if (view === 'runs') await loadRuns();
   else if (view === 'swarms') await loadSwarms();
   else if (view === 'pulse') await loadPulse();
@@ -365,6 +376,7 @@ function renderShell() {
 
   // Nav icons per view (inline SVG path data)
   const VIEW_ICONS = {
+    control:   '<rect x="1" y="1" width="14" height="9" rx="1.5" stroke="currentColor" stroke-width="1.4" fill="none"/><line x1="4" y1="13" x2="12" y2="13" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><line x1="8" y1="10" x2="8" y2="13" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="5" cy="5.5" r="1.3" fill="currentColor" opacity=".9"/><circle cx="8" cy="5.5" r="1.3" fill="currentColor" opacity=".6"/><circle cx="11" cy="5.5" r="1.3" fill="currentColor" opacity=".35"/>',
     overview:  '<rect x="1" y="1" width="6" height="6" rx="1" fill="currentColor" opacity=".85"/><rect x="9" y="1" width="6" height="6" rx="1" fill="currentColor" opacity=".55"/><rect x="1" y="9" width="6" height="6" rx="1" fill="currentColor" opacity=".55"/><rect x="9" y="9" width="6" height="6" rx="1" fill="currentColor" opacity=".3"/>',
     runs:      '<circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.5"/><polyline points="5.5,8 7.5,10 10.5,6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
     swarms:    '<circle cx="8" cy="3" r="2" fill="currentColor" opacity=".9"/><circle cx="3" cy="13" r="2" fill="currentColor" opacity=".7"/><circle cx="13" cy="13" r="2" fill="currentColor" opacity=".7"/><line x1="8" y1="5" x2="3" y2="11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="8" y1="5" x2="13" y2="11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="3" y1="13" x2="13" y2="13" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>',
@@ -385,8 +397,10 @@ function renderShell() {
     iconSvg.setAttribute('aria-hidden', 'true');
     iconSvg.innerHTML = VIEW_ICONS[v] ?? '';
 
-    const label = document.createTextNode(v.charAt(0).toUpperCase() + v.slice(1));
-    const a = el('a', { cls: 'nav-link', href: `#${v}`, 'data-view': v });
+    const VIEW_LABELS = { control: 'Mission Control' };
+    const labelText = VIEW_LABELS[v] ?? (v.charAt(0).toUpperCase() + v.slice(1));
+    const label = document.createTextNode(labelText);
+    const a = el('a', { cls: `nav-link${v === 'control' ? ' nav-link--control' : ''}`, href: `#${v}`, 'data-view': v });
     a.appendChild(iconSvg);
     a.appendChild(label);
 
@@ -1982,6 +1996,269 @@ function updateSseDot(connected) {
   const dot = document.getElementById('sse-dot');
   if (!dot) return;
   dot.classList.toggle('connected', connected);
+}
+
+// ---------------------------------------------------------------------------
+// Mission Control (M61) — /api/control composite live view
+// ---------------------------------------------------------------------------
+
+async function loadControl() {
+  // Guard against overlapping fetches: /api/control aggregates a usage rollup
+  // that can take a beat, and on single-threaded Node a stacked poll would pile
+  // up requests (and freeze the tab waiting). Skip if one is already in flight.
+  if (state.controlLoading) return;
+  state.controlLoading = true;
+  // Don't show skeleton loading flash on poll refreshes — only on first load
+  if (!state.control) showLoading('control');
+  try {
+    state.control = await apiFetch('/api/control');
+    renderControl();
+  } catch (err) {
+    if (!state.control) showError('control', err.message);
+    // On poll failure keep stale data visible — don't replace with error
+  } finally {
+    state.controlLoading = false;
+  }
+
+  // Start polling (8s) if not already running and we're still on this view.
+  if (state.activeView === 'control' && !state.controlInterval) {
+    state.controlInterval = setInterval(() => {
+      if (state.activeView !== 'control') {
+        clearInterval(state.controlInterval);
+        state.controlInterval = null;
+        return;
+      }
+      loadControl();
+    }, 8000);
+  }
+}
+
+function renderControl() {
+  if (state.activeView !== 'control') return;
+  const main = getMain();
+  if (!main) return;
+  main.innerHTML = '';
+
+  const d = state.control;
+  const section = el('section', { cls: 'view-section' });
+
+  section.appendChild(el('div', { cls: 'view-header' },
+    el('h1', { cls: 'view-title' }, 'Mission Control'),
+    el('span', { cls: 'view-subtitle' }, d ? `Updated ${fmtRelative(d.ts)}` : 'Live fleet overview')
+  ));
+
+  if (!d) {
+    section.appendChild(el('div', { cls: 'empty-state' },
+      el('p', {}, 'Control data unavailable.'),
+      el('p', { cls: 'hint' }, 'Ensure the daemon is running and the server serves /api/control.')
+    ));
+    main.appendChild(section);
+    return;
+  }
+
+  // ── 1. Fleet Pulse (hero) ──────────────────────────────────────────────
+  const fleet = d.fleet ?? d.daemon ?? {};
+  const daemon = d.daemon ?? fleet.daemon ?? {};
+  const queue  = d.fleet?.queue ?? fleet.queue ?? {};
+  const props  = d.fleet?.proposals ?? fleet.proposals ?? {};
+  const merges = d.fleet?.merges ?? fleet.merges ?? {};
+  const isRunning = daemon.running ?? false;
+  const isKilled  = d.fleet?.killed ?? false;
+
+  if (isKilled) {
+    section.appendChild(el('div', { cls: 'ctrl-banner ctrl-banner--paused' },
+      el('strong', {}, 'Fleet paused'),
+      el('span', {}, ' — kill switch engaged. Resume with `ashlr fleet resume`.')
+    ));
+  }
+
+  const heroPulse = el('div', { cls: 'ctrl-hero' });
+  const daemonStatusEl = el('div', { cls: 'ctrl-daemon-status' },
+    el('span', { cls: `ctrl-live-dot${isRunning ? ' running' : ''}`, title: isRunning ? 'Running' : 'Stopped' }),
+    el('span', { cls: `ctrl-daemon-label${isRunning ? ' running' : ''}` }, isRunning ? 'Daemon running' : 'Daemon stopped'),
+    daemon.pid ? el('span', { cls: 'ctrl-pid' }, `PID ${daemon.pid}`) : null
+  );
+  heroPulse.appendChild(daemonStatusEl);
+
+  if (daemon.lastTickAt) {
+    heroPulse.appendChild(el('div', { cls: 'ctrl-last-tick' }, `Last tick ${fmtRelative(daemon.lastTickAt)}`));
+  }
+
+  const heroMetrics = el('div', { cls: 'ctrl-hero-metrics' });
+  heroMetrics.appendChild(controlMetric('Spend today', daemon.todaySpentUsd != null ? `$${daemon.todaySpentUsd.toFixed(4)}` : '—', '#fbbf24'));
+  heroMetrics.appendChild(controlMetric('Queue depth', queue.backlogItems ?? '—', '#60a5fa'));
+  heroMetrics.appendChild(controlMetric('Proposals', props.pending ?? 0, '#a78bfa'));
+  heroMetrics.appendChild(controlMetric('Merges (24h)', merges.recent ?? '—', '#4ade80'));
+  heroMetrics.appendChild(controlMetric('Kill switch', isKilled ? 'ENGAGED' : 'off', isKilled ? '#f87171' : '#64748b'));
+  heroPulse.appendChild(heroMetrics);
+  section.appendChild(heroPulse);
+
+  // ── 2. Local models ────────────────────────────────────────────────────
+  const modelsData = d.models ?? {};
+  const providers  = Array.isArray(modelsData.providers) ? modelsData.providers : [];
+  const activeProvider = modelsData.activeProvider ?? '';
+
+  const modelsCard = el('div', { cls: 'ctrl-card card' });
+  modelsCard.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Local Models'),
+    el('span', { cls: 'card-subtitle' }, activeProvider ? `active: ${activeProvider}` : 'no active provider')
+  ));
+  const modelsBody = el('div', { cls: 'card-body' });
+
+  if (providers.length === 0) {
+    modelsBody.appendChild(el('p', { cls: 'hint' }, 'No local model providers detected.'));
+  } else {
+    for (const prov of providers) {
+      const isActive = prov.id === activeProvider;
+      const row = el('div', { cls: `ctrl-provider-row${isActive ? ' active' : ''}` });
+      row.appendChild(el('span', { cls: `ctrl-health-dot ${prov.up ? 'up' : 'down'}`, title: prov.up ? 'Up' : 'Down' }));
+      row.appendChild(el('span', { cls: 'ctrl-provider-name' }, prov.id));
+      if (prov.kind) row.appendChild(el('span', { cls: 'ctrl-provider-kind' }, prov.kind));
+      if (prov.baseUrl) row.appendChild(el('span', { cls: 'ctrl-provider-url' }, prov.baseUrl));
+      if (isActive) row.appendChild(el('span', { cls: 'ctrl-active-badge' }, 'active'));
+      const chips = el('div', { cls: 'ctrl-model-chips' });
+      const models = Array.isArray(prov.models) ? prov.models : [];
+      if (models.length === 0) {
+        chips.appendChild(el('span', { cls: 'ctrl-model-chip muted' }, 'no models'));
+      } else {
+        models.forEach((m) => chips.appendChild(el('span', { cls: 'ctrl-model-chip' }, typeof m === 'string' ? m : (m.id ?? m.name ?? String(m)))));
+      }
+      row.appendChild(chips);
+      modelsBody.appendChild(row);
+    }
+  }
+  modelsCard.appendChild(modelsBody);
+  section.appendChild(modelsCard);
+
+  // ── 3. Backends & limits ───────────────────────────────────────────────
+  const backends  = Array.isArray(d.fleet?.backends) ? d.fleet.backends : [];
+  const limits    = Array.isArray(d.limits) ? d.limits : [];
+  const subLimits = d.subscriptionLimits ?? {};
+
+  const backendsCard = el('div', { cls: 'ctrl-card card' });
+  backendsCard.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Backends & Limits')
+  ));
+  const backendsBody = el('div', { cls: 'card-body' });
+
+  if (subLimits.note) {
+    backendsBody.appendChild(el('div', { cls: 'ctrl-sub-note' },
+      el('span', { cls: 'ctrl-sub-icon' }, '⚠'),
+      el('span', {}, subLimits.note)
+    ));
+  }
+
+  if (backends.length === 0 && limits.length === 0) {
+    backendsBody.appendChild(el('p', { cls: 'hint' }, 'No backends configured.'));
+  }
+
+  if (backends.length > 0) {
+    const bList = el('div', { cls: 'ctrl-backend-list' });
+    for (const b of backends) {
+      bList.appendChild(el('div', { cls: 'ctrl-backend-row' },
+        el('span', { cls: 'ctrl-backend-name' }, b.id ?? b.backend ?? '?'),
+        el('span', { cls: 'ctrl-backend-dispatches' }, `${b.dispatchesRecent ?? 0} dispatch(es) / 24h`),
+        quotaTag(b.quota ?? 'ok')
+      ));
+    }
+    backendsBody.appendChild(bList);
+  }
+
+  if (limits.length > 0) {
+    backendsBody.appendChild(el('div', { cls: 'ctrl-limits-heading' }, 'Rate windows'));
+    for (const lim of limits) {
+      const used = lim.used ?? 0;
+      const max  = lim.max  ?? 1;
+      const pct  = Math.min(100, max > 0 ? Math.round((used / max) * 100) : 0);
+      const standing = lim.standing ?? 'ok';
+      const barColor = standing === 'over' ? 'var(--status-failed)'
+                     : standing === 'warn' ? 'var(--status-aborted)'
+                     : 'var(--accent)';
+      backendsBody.appendChild(el('div', { cls: 'ctrl-limit-row' },
+        el('span', { cls: 'ctrl-limit-backend' }, lim.backend ?? '?'),
+        el('span', { cls: 'ctrl-limit-window' }, lim.window ?? ''),
+        el('div', { cls: 'ctrl-limit-bar-wrap' },
+          el('div', { cls: 'ctrl-limit-bar', style: `width:${pct}%;background:${barColor}` })
+        ),
+        el('span', { cls: 'ctrl-limit-label' }, `${used}/${max === Infinity ? '∞' : max}`),
+        el('span', { cls: `ctrl-standing ${standing}` }, standing)
+      ));
+    }
+  }
+
+  backendsCard.appendChild(backendsBody);
+  section.appendChild(backendsCard);
+
+  // ── 4. Usage (7d) ─────────────────────────────────────────────────────
+  const usage = d.usage ?? {};
+  const byProvider = Array.isArray(usage.byProvider) ? usage.byProvider : [];
+
+  const usageCard = el('div', { cls: 'ctrl-card card' });
+  usageCard.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, `Usage${usage.window ? ` (${usage.window})` : ''}`)
+  ));
+  const usageBody = el('div', { cls: 'card-body' });
+
+  const usageTotals = el('div', { cls: 'ctrl-usage-totals' });
+  usageTotals.appendChild(controlMetric('Total tokens', usage.totalTokens != null ? fmtK(usage.totalTokens) : '—', '#60a5fa'));
+  usageTotals.appendChild(controlMetric('Total cost', usage.totalCostUsd != null ? `$${fmt(usage.totalCostUsd)}` : '—', '#fbbf24'));
+  usageTotals.appendChild(controlMetric('Local savings', usage.localSavingsUsd != null ? `$${fmt(usage.localSavingsUsd)}` : '—', '#4ade80'));
+  usageBody.appendChild(usageTotals);
+
+  if (byProvider.length > 0) {
+    usageBody.appendChild(el('div', { cls: 'ctrl-prov-heading' }, 'By provider'));
+    for (const p of byProvider) {
+      const pct = Math.min(100, Math.round(p.sharePct ?? 0));
+      const isLocal = (p.tier === 'local');
+      usageBody.appendChild(el('div', { cls: 'ctrl-prov-row' },
+        el('span', { cls: `ctrl-prov-label${isLocal ? ' local' : ''}` },
+          `${p.provider ?? '?'}${p.tier ? ` (${p.tier})` : ''}`),
+        el('div', { cls: 'ctrl-prov-bar-wrap' },
+          el('div', { cls: `ctrl-prov-bar${isLocal ? ' local' : ''}`, style: `width:${pct}%` })
+        ),
+        el('span', { cls: 'ctrl-prov-pct' }, `${pct}%`),
+        el('span', { cls: 'ctrl-prov-cost' }, p.costUsd != null ? `$${fmt(p.costUsd)}` : ''),
+        el('span', { cls: 'ctrl-prov-tokens' }, p.tokens != null ? fmtK(p.tokens) : '')
+      ));
+    }
+  }
+  usageCard.appendChild(usageBody);
+  section.appendChild(usageCard);
+
+  // ── 5. Activity log ───────────────────────────────────────────────────
+  const logs = Array.isArray(d.logs) ? [...d.logs].reverse() : [];
+
+  const logsCard = el('div', { cls: 'ctrl-card card' });
+  logsCard.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Activity Log'),
+    el('span', { cls: 'card-subtitle' }, `${logs.length} recent entries`)
+  ));
+  const logsBody = el('div', { cls: 'ctrl-log-body' });
+
+  if (logs.length === 0) {
+    logsBody.appendChild(el('p', { cls: 'hint' }, 'No recent activity.'));
+  } else {
+    for (const entry of logs.slice(0, 50)) {
+      const kind = entry.kind ?? 'info';
+      logsBody.appendChild(el('div', { cls: `ctrl-log-row ctrl-log-row--${kind}` },
+        el('span', { cls: 'ctrl-log-ts' }, entry.ts ? fmtRelative(entry.ts) : '—'),
+        el('span', { cls: `ctrl-log-kind ctrl-log-kind--${kind}` }, kind),
+        el('span', { cls: 'ctrl-log-msg' }, entry.msg ?? '')
+      ));
+    }
+  }
+  logsCard.appendChild(logsBody);
+  section.appendChild(logsCard);
+
+  main.appendChild(section);
+}
+
+// Small metric block used in the Mission Control hero + usage panel
+function controlMetric(label, value, accent) {
+  return el('div', { cls: 'ctrl-metric' },
+    el('div', { cls: 'ctrl-metric-value', style: `color:${accent}` }, String(value)),
+    el('div', { cls: 'ctrl-metric-label' }, label)
+  );
 }
 
 // ---------------------------------------------------------------------------

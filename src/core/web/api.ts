@@ -48,6 +48,8 @@ import { listProposals, loadProposal, setStatus } from '../inbox/store.js';
 import { loadDaemonState } from '../daemon/state.js';
 // M49: read-only fleet snapshot endpoint — no control surface; pause/resume stays CLI-only.
 import { buildFleetStatus } from '../fleet/status.js';
+// M61: Mission Control aggregator.
+import { buildControlSnapshot } from './control.js';
 
 // ---------------------------------------------------------------------------
 // SSE registry — shared across all open SSE connections so server.ts can
@@ -770,6 +772,36 @@ export async function handleApi(
         return true;
       }
       await handleDispatch(req, res, cfg, ctx);
+      return true;
+    }
+
+    // ── GET /api/control ────────────────────────────────────────────────────
+    // M61: unified Mission Control snapshot. No auth — same read class as
+    // /api/fleet and /api/daemon. Never throws; each section degrades independently.
+    if (path === '/api/control' && method === 'GET') {
+      const snapshot = await buildControlSnapshot(cfg);
+      sendJson(res, 200, snapshot);
+      return true;
+    }
+
+    // ── GET /api/models ──────────────────────────────────────────────────────
+    // M61: live local-model provider probe (Ollama/LM Studio). Returns the
+    // `models` section of the control snapshot only.
+    if (path === '/api/models' && method === 'GET') {
+      const snapshot = await buildControlSnapshot(cfg);
+      sendJson(res, 200, snapshot.models);
+      return true;
+    }
+
+    // ── GET /api/logs ────────────────────────────────────────────────────────
+    // M61: most-recent-first daemon tick/merge log. ?tail=N (default 50, cap 200).
+    if (path === '/api/logs' && method === 'GET') {
+      const rawTail = getQueryParam(req.url ?? '', 'tail');
+      const tail = rawTail !== undefined && /^\d+$/.test(rawTail)
+        ? Math.min(Number(rawTail), 200)
+        : 50;
+      const snapshot = await buildControlSnapshot(cfg);
+      sendJson(res, 200, snapshot.logs.slice(0, tail));
       return true;
     }
 
