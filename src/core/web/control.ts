@@ -12,7 +12,7 @@
  *   ControlSnapshot.daemon               — running/pid/lastTickAt/todaySpentUsd
  *   ControlSnapshot.usage                — 7d rollup: totals + byProvider
  *   ControlSnapshot.limits               — per-backend rate-window standing ([] when none)
- *   ControlSnapshot.subscriptionLimits   — honest stub: cloud limits not wired yet
+ *   ControlSnapshot.subscriptionLimits   — rolling-window usage + honest provider notes (M63)
  *   ControlSnapshot.logs                 — most-recent-first, capped 50
  */
 
@@ -22,6 +22,7 @@ import { getProviderRegistry } from '../providers.js';
 import { buildRollup, modelToProviderKey, LOCAL_PROVIDER_KEYS } from '../observability/rollup.js';
 import { loadDaemonState } from '../daemon/state.js';
 import { usesInWindow, evalQuota, windowToMs } from '../fleet/quota.js';
+import { resolveUsageWindows, type UsageWindow, type ProviderLimitEntry } from '../observability/limits.js';
 
 // ---------------------------------------------------------------------------
 // ControlSnapshot type
@@ -72,8 +73,10 @@ export interface ControlLimit {
 }
 
 export interface ControlSubscriptionLimits {
-  connected: false;
+  connected: boolean;
   note: string;
+  windows: UsageWindow[];
+  providers: ProviderLimitEntry[];
 }
 
 export interface ControlLogEntry {
@@ -237,13 +240,23 @@ function buildLimits(cfg: AshlrConfig): ControlLimit[] {
   }
 }
 
-const SUBSCRIPTION_NOTE =
-  'Cloud subscription limits are not wired yet. ' +
-  'To connect: set your provider API key (e.g. ANTHROPIC_API_KEY) in the environment. ' +
-  'Future work: poll the provider billing API and surface quota/spend here.';
-
-function buildSubscriptionLimits(): ControlSubscriptionLimits {
-  return { connected: false, note: SUBSCRIPTION_NOTE };
+async function buildSubscriptionLimits(cfg: AshlrConfig): Promise<ControlSubscriptionLimits> {
+  try {
+    const result = await resolveUsageWindows(cfg);
+    return {
+      connected: result.connected,
+      note: result.note,
+      windows: result.windows,
+      providers: result.providers,
+    };
+  } catch {
+    return {
+      connected: false,
+      note: 'Usage window data unavailable.',
+      windows: [],
+      providers: [],
+    };
+  }
 }
 
 const LOG_CAP = 50;
@@ -312,7 +325,7 @@ export async function buildControlSnapshot(cfg: AshlrConfig): Promise<ControlSna
   const daemon = buildDaemon();
   const usage = buildUsage(cfg);
   const limits = buildLimits(cfg);
-  const subscriptionLimits = buildSubscriptionLimits();
+  const subscriptionLimits = await buildSubscriptionLimits(cfg);
   const logs = buildLogs(LOG_CAP);
 
   return { ts, models, fleet, daemon, usage, limits, subscriptionLimits, logs };

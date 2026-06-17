@@ -13,7 +13,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir, homedir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { AshlrConfig } from '../src/core/types.js';
@@ -179,9 +179,16 @@ describe('buildControlSnapshot — never throws (M61)', () => {
 // ---------------------------------------------------------------------------
 
 describe('subscriptionLimits (M61)', () => {
-  it('connected is always false', async () => {
+  it('exposes honest usage windows + provider status, never a fabricated cap (M63)', async () => {
     const snap = await buildControlSnapshot(baseConfig());
-    expect(snap.subscriptionLimits.connected).toBe(false);
+    const sl = snap.subscriptionLimits;
+    // M63 widened this: `connected` is now a dynamic boolean (true when usage
+    // windows resolve or an API key is present), with windows + providers.
+    expect(typeof sl.connected).toBe('boolean');
+    expect(Array.isArray(sl.windows)).toBe(true);
+    expect(Array.isArray(sl.providers)).toBe(true);
+    // Subscription caps are never fabricated.
+    for (const p of sl.providers) expect(p.limit).toBeUndefined();
   });
 
   it('note is a non-empty string explaining the stub', async () => {
