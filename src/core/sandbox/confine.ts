@@ -26,8 +26,10 @@
  *     5. (allow file-read* (subpath "/usr") (subpath "/lib") ...)
  *        — allow system paths needed for the OS and CLIs to function.
  *     6. (deny network-outbound*) unless networkEgress:true.
- *     7. (allow file-write* (subpath "<worktree>") (subpath "<TMPDIR>"))
- *        — write only inside worktree + tmp.
+ *     7. (allow file-write* (subpath "<worktree>") (subpath "<TMPDIR>")
+ *           (subpath "<home>/.claude") ...)
+ *        — write inside worktree + tmp + vendor config dirs (HOME_CONFIG_SUBDIRS
+ *          + VENDOR_HOME_ENVS values) so confined agents can write session state.
  *
  *   What this DOES NOT protect:
  *     - Reads of /proc, /dev, and similar pseudo-filesystems that have no
@@ -201,11 +203,21 @@ export function buildMacosSbplProfile(
     for (const p of profile.readAllowed) if (p) reallowRead.push(p);
   }
 
-  // Subtrees the agent may WRITE: its worktree, vendor homes (session state), tmp.
+  // Subtrees the agent may WRITE: its worktree, vendor config homes (session
+  // state, logs, auth), and tmp. HOME_CONFIG_SUBDIRS are included so that when
+  // CLAUDE_CONFIG_DIR/CODEX_HOME/etc. are NOT set in the env (the common case —
+  // e.g. claude writes session state to ~/.claude by default), the confined
+  // agent can still write its own config dirs. The VENDOR_HOME_ENVS values cover
+  // the explicit-env-var override case. Other source trees and secrets dirs that
+  // are NOT in HOME_CONFIG_SUBDIRS or VENDOR_HOME_ENVS remain WRITE-denied
+  // (as they are READ-denied); the confinement residual is unchanged.
   const reallowWrite: string[] = [ctx.worktree, tmp, '/tmp', '/private/tmp'];
   for (const key of VENDOR_HOME_ENVS) {
     const val = env[key];
     if (val) reallowWrite.push(val);
+  }
+  if (home) {
+    for (const s of HOME_CONFIG_SUBDIRS) reallowWrite.push(`${home}/${s}`);
   }
 
   const reallowReadClauses = reallowRead.map(sub).join('\n    ');
@@ -221,9 +233,13 @@ export function buildMacosSbplProfile(
   // CLI can actually run — an exhaustive allow-list of dyld/system paths is
   // brittle across macOS versions and aborts the process (SIGABRT) — then DENY
   // all reads/writes under $HOME and re-allow ONLY the worktree, the agent's own
-  // vendor config homes, and caller extras. Network egress is denied unless opted
-  // in. Residual: non-$HOME system paths stay readable (acceptable — no user
-  // repos/secrets live there); full VM isolation remains future work.
+  // vendor config homes (HOME_CONFIG_SUBDIRS + VENDOR_HOME_ENVS), and caller
+  // extras. Vendor config dirs are BOTH read- and write-allowed so an agent can
+  // write session state/logs even when CLAUDE_CONFIG_DIR/CODEX_HOME are unset.
+  // Network egress is denied unless opted in.
+  // Residual: non-$HOME system paths stay readable (acceptable — no user
+  // repos/secrets live there); other $HOME paths (source trees, ~/.ssh, ~/.aws,
+  // etc.) remain denied for BOTH read and write; full VM isolation is future work.
   const lines: string[] = [
     '(version 1)',
     '',
