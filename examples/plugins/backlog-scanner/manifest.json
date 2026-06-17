@@ -1,0 +1,9 @@
+{
+  "name": "backlog-scanner",
+  "version": "0.1.0",
+  "apiVersion": "^1.0.0",
+  "description": "Reference scanner: finds FIXME(owner): ownership-tagged comments and surfaces them as backlog items.",
+  "entry": "./index.js",
+  "capabilities": ["scanner"],
+  "homepage": "https://github.com/ashlr-hub/examples/tree/main/plugins/backlog-scanner"
+}

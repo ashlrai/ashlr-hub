@@ -25,3 +25,7 @@ export type {
   PluginContributions,
   AshlrPlugin,
 } from '../core/plugins/types.js';
+
+// The shapes a scanner/template plugin produces — authors need these to type
+// their contributions without a second import from '@ashlr/hub/types'.
+export type { WorkItem, WorkSource } from '../core/types.js';
