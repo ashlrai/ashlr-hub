@@ -989,7 +989,7 @@ export type EngineId =
  * 'local' = an on-device model. Only 'frontier' work may auto-merge to main
  * (enforced later via cfg.foundry.mergeAuthority).
  */
-export type EngineTier = 'local' | 'frontier';
+export type EngineTier = 'local' | 'mid' | 'frontier';
 
 /** A fully-resolved external engine invocation (exact argv + optional cwd). */
 export interface EngineCommand {

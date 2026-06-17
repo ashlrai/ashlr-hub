@@ -69,7 +69,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
-import type { AshlrConfig, Proposal } from '../types.js';
+import type { AshlrConfig, EngineTier, Proposal } from '../types.js';
 import { loadProposal, setStatus } from './store.js';
 import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
@@ -366,9 +366,17 @@ export function evaluateMergeAuthority(
   cfg: AshlrConfig,
 ): MergeAuthorityVerdict {
   if (proposal.engineTier !== 'frontier') {
+    // M51 tri-tier: authority never leaks upward. 'mid' (strong open models) is
+    // branch-eligible but NEVER merge-authority for main; 'local' is
+    // proposal-only. Only 'frontier' may reach main.
+    const tier = proposal.engineTier ?? 'unset';
+    const note =
+      tier === 'mid'
+        ? " — 'mid' is branch-eligible but never merge-authority for main"
+        : '';
     return {
       authorized: false,
-      reason: `engineTier is '${proposal.engineTier ?? 'unset'}', not 'frontier' — only frontier backends carry merge authority`,
+      reason: `engineTier is '${tier}', not 'frontier' — only frontier backends carry merge authority${note}`,
     };
   }
 
@@ -406,6 +414,21 @@ export function evaluateMergeAuthority(
     authorized: true,
     reason: `frontier backend '${engineModel}' is authorized to merge`,
   };
+}
+
+/**
+ * M51 tri-tier policy seam (PURE). The farthest a fully-verified proposal of a
+ * given tier may auto-apply: `frontier → main`, `mid → branch` (a strong open
+ * model: branch/PR only, never main), everything else → `none` (proposal-only).
+ * Introduces NO new default behavior — it is the single source of truth a
+ * future, default-OFF, gated auto-apply pass consults so authority can never
+ * leak upward.
+ */
+export type MergeTarget = 'main' | 'branch' | 'none';
+export function mergeTargetForTier(tier?: EngineTier): MergeTarget {
+  if (tier === 'frontier') return 'main';
+  if (tier === 'mid') return 'branch';
+  return 'none';
 }
 
 // ===========================================================================

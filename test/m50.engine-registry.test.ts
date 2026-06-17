@@ -61,7 +61,7 @@ describe('M50 registry — engineTierOf parity', () => {
     expect(engineTierOf('builtin')).toBe('local');
     expect(engineTierOf('aw')).toBe('local');
     expect(engineTierOf('ashlrcode')).toBe('local');
-    expect(engineTierOf('hermes')).toBe('local');
+    expect(engineTierOf('hermes')).toBe('mid'); // M51: strong open model → mid
     expect(engineTierOf('opencode')).toBe('local');
   });
 

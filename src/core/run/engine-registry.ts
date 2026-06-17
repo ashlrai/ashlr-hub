@@ -97,11 +97,13 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<EngineId, EngineSpec>> = O
     capabilities: ['agent', 'edit'],
   },
 
-  // M50: Hermes Agent (Nous Research). hermes -z <goal> [-m M] [--yolo when autonomous]
+  // M50/M51: Hermes Agent (Nous Research) — a strong OPEN model. Tier 'mid':
+  // branch-eligible after full verification, but never merge-authority for main.
+  // hermes -z <goal> [-m M] [--yolo when autonomous]
   hermes: {
     id: 'hermes',
     kind: 'cli-agent',
-    tier: 'local',
+    tier: 'mid',
     bin: 'hermes',
     bins: ['hermes'],
     argv: ['-z', '$GOAL', { optModel: ['-m', '$MODEL'] }],
@@ -126,7 +128,7 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<EngineId, EngineSpec>> = O
 // argv compilation — pure + injection-safe
 // ---------------------------------------------------------------------------
 
-const VALID_TIERS: ReadonlySet<string> = new Set<EngineTier>(['local', 'frontier']);
+const VALID_TIERS: ReadonlySet<string> = new Set<EngineTier>(['local', 'mid', 'frontier']);
 const VALID_KINDS: ReadonlySet<string> = new Set(['builtin', 'cli-agent', 'api-model']);
 const ENGINE_ID_RE = /^[a-z][a-z0-9-]{0,39}$/;
 
