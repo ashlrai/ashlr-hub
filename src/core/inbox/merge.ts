@@ -76,6 +76,7 @@ import { audit } from '../sandbox/audit.js';
 import { isRepo, getGitStatus, getRemoteOrg, defaultBranch } from '../git.js';
 import { createPr } from '../integrations/github.js';
 import { scrubSecrets } from '../knowledge/index.js';
+import { isSelfTargetProposal, guardSafetyTests } from '../fleet/self.js';
 import { verifyProvenance } from '../foundry/provenance.js';
 import {
   detectVerifyCommands,
@@ -470,6 +471,19 @@ export async function verifyProposal(
   const diff = proposal.diff ?? '';
   if (!diff.trim()) {
     return { ok: false, ran: [], detail: 'proposal has no diff to verify' };
+  }
+
+  // ── M54: self-improvement may never self-disarm ─────────────────────────────
+  // When a proposal targets ashlr-hub's OWN source, REFUSE before any
+  // verification if its diff would delete or weaken a safety/invariant test.
+  // The guard runs FIRST so a weakening diff never even reaches the verify
+  // worktree. (The full self-eval — suite green flag-off AND flag-on — is
+  // enforced by the gated auto-merge pass via fleet/self.selfEvalParity.)
+  if (isSelfTargetProposal(proposal, cfg)) {
+    const guard = guardSafetyTests(diff);
+    if (guard.weakened) {
+      return { ok: false, ran: [], detail: `self-target guard: ${guard.reason}` };
+    }
   }
 
   // ── H1b: manifest / build / CI guard — REFUSE regardless of ──────────────────

@@ -804,7 +804,58 @@ export async function scanSecurity(repo: string): Promise<WorkItem[]> {
 }
 
 // ---------------------------------------------------------------------------
-// SCANNERS — all six, exported as a ReadonlyArray
+// ---------------------------------------------------------------------------
+// scanSelfImprove — M54: the self-improving fleet's OWN backlog.
+// Self-gated: emits items ONLY for ashlr-hub's own repo (package name
+// '@ashlr/hub'). Surfaces pending/skipped tests as coverage the fleet should
+// RESTORE — it never proposes deleting a test. Bounded; never throws.
+// ---------------------------------------------------------------------------
+
+export async function scanSelfImprove(repo: string): Promise<WorkItem[]> {
+  // Only ashlr-hub's own source produces self-improvement work.
+  try {
+    const pkgPath = join(repo, 'package.json');
+    if (!existsSync(pkgPath)) return [];
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: string };
+    if (pkg.name !== '@ashlr/hub') return [];
+  } catch {
+    return [];
+  }
+
+  const items: WorkItem[] = [];
+  try {
+    const out = await execFileAsync(
+      'rg',
+      ['-n', '--no-heading', '-e', '\\b(it|describe|test)\\.(skip|todo)\\b', '-e', '\\bxit\\b', 'test'],
+      { cwd: repo, timeout: SCAN_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
+    ).catch((e: unknown) => ({ stdout: (e as { stdout?: string })?.stdout ?? '' }));
+    const lines = String(out.stdout ?? '').split('\n').filter(Boolean).slice(0, 50);
+    for (const line of lines) {
+      const m = line.match(/^(.+?):(\d+):/);
+      if (!m) continue;
+      const file = m[1]!;
+      const ln = m[2]!;
+      items.push(
+        makeItem(
+          repo,
+          'self',
+          `skip:${file}:${ln}`,
+          `Restore skipped test in ${basename(file)}:${ln}`,
+          `A pending/skipped test at ${file}:${ln} reduces invariant coverage. ` +
+            `Implement or re-enable it — never delete a safety test.`,
+          3,
+          2,
+          ['self', 'test-gap'],
+        ),
+      );
+    }
+  } catch {
+    // never throw
+  }
+  return items.slice(0, 50);
+}
+
+// SCANNERS — all seven, exported as a ReadonlyArray
 // ---------------------------------------------------------------------------
 
 export const SCANNERS: ReadonlyArray<(repo: string) => Promise<WorkItem[]>> = [
@@ -814,4 +865,5 @@ export const SCANNERS: ReadonlyArray<(repo: string) => Promise<WorkItem[]>> = [
   scanDeps,
   scanDocs,
   scanSecurity,
+  scanSelfImprove, // M54: the fleet's own backlog (self-gated to @ashlr/hub)
 ] as const;
