@@ -82,10 +82,9 @@ export interface FoundryIntelligenceCfg {
 
 /** Resolve intelligence config from cfg, returning defaults when absent. */
 function resolveIntelCfg(cfg: AshlrConfig): FoundryIntelligenceCfg | null {
-  // cfg.foundry.intelligence is not in the canonical types.ts (owned by main
-  // thread); we read it via a safe cast. Returns null when entirely absent so
-  // the flag-off path is clean.
-  const raw = (cfg.foundry as Record<string, unknown> | undefined)?.['intelligence'];
+  // M59: cfg.foundry.intelligence is now a typed field. Returns null when
+  // entirely absent so the flag-off path is clean.
+  const raw = cfg.foundry?.intelligence;
   if (raw === undefined || raw === null) return null;
   if (typeof raw !== 'object' || Array.isArray(raw)) return null;
   return raw as FoundryIntelligenceCfg;

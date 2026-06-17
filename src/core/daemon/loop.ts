@@ -363,7 +363,7 @@ export async function tick(
     // may only return a tier choice or a pause signal — no outward action.
     // This file imports NO apply/merge/push/deploy primitive.
     {
-      const intelRaw = (cfg.foundry as Record<string, unknown> | undefined)?.['intelligence'];
+      const intelRaw = cfg.foundry?.intelligence;
       if (intelRaw !== undefined && intelRaw !== null) {
         const forecast = buildForecast('7d', cfg);
         const goal = `${item.title}\n\n${item.detail}`.trim();
@@ -481,7 +481,7 @@ export async function tick(
     // file a TuningProposal. NEVER auto-apply. This block imports NO
     // apply/merge/push/deploy primitive.
     if (dispatched && swarmSpent > 0) {
-      const intelRaw2 = (cfg.foundry as Record<string, unknown> | undefined)?.['intelligence'];
+      const intelRaw2 = cfg.foundry?.intelligence;
       if (intelRaw2 !== undefined && intelRaw2 !== null) {
         const intelCfg2 = intelRaw2 as { anomalyK?: number };
         const anomalyK = typeof intelCfg2.anomalyK === 'number' && intelCfg2.anomalyK > 0

@@ -162,6 +162,61 @@ async function setKillSwitch(on: boolean): Promise<number> {
 // Main dispatch
 // ---------------------------------------------------------------------------
 
+/**
+ * M59: a conservative starter `cfg.foundry` block. Installed backends +
+ * OS confinement on + auto-merge OFF. No mergeAuthority models are guessed (the
+ * user pins those); no API engines are added (they need keys). Adding more is
+ * config-only — see docs/FOUNDRY-CONFIG.md.
+ */
+function starterFoundry(): NonNullable<AshlrConfig['foundry']> {
+  return {
+    allowedBackends: ['builtin', 'claude', 'codex', 'hermes'],
+    confinement: { '*': { mode: 'os', networkEgress: false, onUnsupported: 'fallback' } },
+    autoMerge: { enabled: false },
+  };
+}
+
+/**
+ * `ashlr fleet init [--write]` — print (default) or merge (--write, only when
+ * absent) a starter cfg.foundry. NEVER overwrites an existing foundry block.
+ */
+async function cmdFleetInit(args: string[]): Promise<number> {
+  const write = args.includes('--write');
+  const { loadConfig, saveConfig, CONFIG_PATH } = await import('../core/config.js');
+  const cfg = loadConfig();
+  const block = { foundry: starterFoundry() };
+
+  if (!write) {
+    console.log('');
+    console.log(dim('  # Starter cfg.foundry — merge into ' + CONFIG_PATH));
+    console.log(dim('  # Full reference: docs/FOUNDRY-CONFIG.md'));
+    console.log(JSON.stringify(block, null, 2));
+    console.log('');
+    console.log(dim('  Re-run `ashlr fleet init --write` to merge it (only when foundry is absent).'));
+    return 0;
+  }
+
+  if (cfg.foundry) {
+    console.error(
+      yellow('note: ') +
+        'cfg.foundry already present in ' +
+        CONFIG_PATH +
+        ' — not overwriting. Edit it by hand (see docs/FOUNDRY-CONFIG.md).',
+    );
+    return 1;
+  }
+
+  cfg.foundry = starterFoundry();
+  saveConfig(cfg);
+  console.log(
+    green('✓ ') +
+      'wrote a starter cfg.foundry to ' +
+      CONFIG_PATH +
+      ' (auto-merge OFF; set provider keys + pass --allow-cloud to use API backends).',
+  );
+  return 0;
+}
+
 export async function cmdFleet(args: string[]): Promise<number> {
   const [sub, ...rest] = args;
 
@@ -173,6 +228,8 @@ export async function cmdFleet(args: string[]): Promise<number> {
   switch (sub) {
     case 'status':
       return cmdFleetStatus(rest.includes('--json'));
+    case 'init':
+      return cmdFleetInit(rest);
     case 'pause':
       return setKillSwitch(true);
     case 'resume':
@@ -191,6 +248,7 @@ function printFleetHelp(): void {
   console.log('  ' + bold('Usage:'));
   console.log('');
   console.log(`    ashlr fleet status [--json]   ${cyan('# read-only fleet snapshot')}`);
+  console.log(`    ashlr fleet init [--write]    ${cyan('# print/merge a starter cfg.foundry')}`);
   console.log(`    ashlr fleet pause             ${cyan('# engage kill switch (pause fleet)')}`);
   console.log(`    ashlr fleet resume            ${cyan('# release kill switch (resume fleet)')}`);
   console.log('');

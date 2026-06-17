@@ -153,6 +153,17 @@ export interface AshlrConfig {
      */
     engines?: Record<string, EngineSpec>;
     /**
+     * M53: fleet-intelligence tuning. Absent ⇒ learned routing / budget recovery
+     * / anomaly holds are OFF (the daemon routes exactly as M46/M48). All actions
+     * stay proposal-only — this only tunes WHICH backend/tier and WHEN to hold.
+     */
+    intelligence?: {
+      /** Anomaly threshold k: a run costing > k × p50 is held + a TuningProposal filed (default 4). */
+      anomalyK?: number;
+      /** Min verified-success rate below which a class is nudged off frontier (0..1, default 0.5). */
+      minFrontierSuccessRate?: number;
+    };
+    /**
      * M47: tiered-trust auto-merge to main. DEFAULT DISABLED. When enabled, a
      * proposal may be merged to the default branch ONLY when ALL hold: it is
      * frontier merge-authority (engineTier 'frontier' + {engine,model} ∈

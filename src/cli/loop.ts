@@ -54,6 +54,15 @@ export async function cmdLoop(args: string[]): Promise<number> {
     // status is best-effort — never block the loop on it.
   }
 
+  // M59: surface the fleet-intelligence + auto-apply posture (honest, cheap).
+  const fo = cfg.foundry;
+  console.log(
+    col.dim(
+      `  intelligence: ${fo?.intelligence ? 'on' : 'off'} · auto-merge(main): ` +
+        `${fo?.autoMerge?.enabled ? 'on' : 'off'} · mid→branch: ` +
+        `${fo?.autoMerge?.midToBranch ? 'on' : 'off'}`,
+    ),
+  );
   console.log(
     col.dim(
       `  ${dryRun ? 'dry-run' : 'live'} · ${once ? 'one tick' : 'continuous (Ctrl-C to stop)'} · ` +
