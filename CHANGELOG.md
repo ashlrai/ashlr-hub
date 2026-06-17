@@ -18,6 +18,52 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   Milestones M34–M40, thirteen new team safety invariants, registered as a
   living ashlr goal. ROADMAP and contracts README updated to point at it.
 
+## [3.0.0] — 2026-06-17 — v3-Weapon · v4-Foundry · v5-Open-Fleet (M41–M60)
+
+A major leap: local models became an engineering weapon, then a fleet of
+backends that builds and maintains the ecosystem autonomously — proposal-only,
+trust-gated, contained. Same safety floor; zero new runtime deps.
+
+### v3-Weapon (M41–M44)
+- Adaptive, model-sized prompts; the sandboxed engineering tool surface
+  (write/edit/bash confined to a worktree, diffs → inbox, never the live tree);
+  the verify→repair loop; and `ashlr eval` proving the local uplift.
+
+### v4-Foundry (M45–M49)
+- `runEngineSandboxed`: run an external agent CLI inside a throwaway git
+  worktree, sever git push, capture ONLY the scrubbed diff as a PENDING
+  proposal, trust-tagged `{engineModel, engineTier}`.
+- Backend router + rate/quota scheduler; the tiered-trust merge-to-`main` gate
+  with HMAC-signed provenance (M47.1); the 24/7 fleet supervisor; the fleet
+  control plane (`ashlr fleet status/pause/resume` + `#fleet` web view).
+
+### v5-Open-Fleet (M50–M60)
+- **M50** declarative engine registry (adding a backend is config-only) + a real
+  OpenAI-compatible API client (Hermes, OpenCode, NVIDIA NIMs, Kimi K2.7 …);
+  existing engines reproduce byte-identical argv.
+- **M51** tri-tier trust (`local | mid | frontier`); authority never leaks
+  upward (`frontier→main`, `mid→branch`, `local→proposal-only`).
+- **M52** OS-level confinement (macOS `sandbox-exec` read-jail + egress gate)
+  closing v4's read-residual.
+- **M53** fleet intelligence — learned routing, budget-breach tier cascade,
+  per-run cost-anomaly holds (all proposal-only).
+- **M54** self-improving fleet — a never-weaken guard (refuses any diff that
+  deletes/weakens a safety test) + a green-flag-off-AND-on self-eval harness.
+- **M55** the conductor — `ashlr goal` + `ashlr loop` + Claude Code `/goal`
+  `/loop`.
+- **M56** `mid→branch` auto-apply (verified mid-tier opens a PR, never `main`),
+  behind a separate default-off `midToBranch` flag.
+- **M57** `cfg.foundry` example + `docs/FOUNDRY-CONFIG.md`.
+- **M58/M60** two reference plugins (scanner + template) seeding the ecosystem.
+- **M59** `ashlr fleet init` (config bootstrap) + typed `cfg.foundry.intelligence`.
+
+### Safety
+Everything can reach `main` — but only a frontier merge-authority model, fully
+verified, with valid HMAC provenance. Auto-merge (main and mid→branch) is
+DEFAULT OFF. Kill-switch (`~/.ashlr/KILL`) halts every backend.
+
+---
+
 ## [2.2.0] — 2026-06-12 — v2.2 "Agent-Native Ecosystem" (M31–M33)
 
 Makes ashlr's intelligence first-class INSIDE agent sessions — CLI-first, with

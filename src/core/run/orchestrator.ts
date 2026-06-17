@@ -85,9 +85,24 @@ import { buildEngineCommand, engineInstalled, spawnEngine } from './engines.js';
 import { nullSink } from './streaming.js';
 import type { StreamSink } from './streaming.js';
 import { withRetry } from './retry.js';
-import { verifyTask } from './verify.js';
+import { verifyTaskStructured } from './verify.js';
 import { withHeal, defaultHealPolicy } from './self-heal.js';
-import type { HealEvent } from '../types.js';
+import type { HealEvent, Sandbox } from '../types.js';
+import { PLANNER_ROLE, SYNTHESIZER_ROLE } from './prompts/roles.js';
+import { systemPromptFor } from './prompts/index.js';
+import { resolveModelProfile, adaptivePromptsEnabled } from './model-profile.js';
+// M42: executable, sandboxed engineering tool surface.
+import {
+  buildEngineerToolSpecs,
+  buildNativeToolSpecsWithFn,
+  type EngineerContext,
+} from '../mcp-native-engineer.js';
+import { listNativeTools } from '../mcp-native.js';
+import { selectInboxStore } from '../seams/inbox.js';
+import { scrubSecrets } from '../knowledge/index.js';
+// NOTE: sandbox/worktree.js is imported DYNAMICALLY inside runGoal (matching the
+// swarm runner) so its absence degrades gracefully at runtime instead of
+// becoming a hard load-time dependency (H4 simulates the module being absent).
 
 // ---------------------------------------------------------------------------
 // Constants / defaults
@@ -406,25 +421,12 @@ async function routeTask(
 // Planning
 // ---------------------------------------------------------------------------
 
-/** Prompt template for decomposing a goal into a task DAG. */
-const PLANNING_SYSTEM = `You are a task planner. Decompose the user's goal into 1-6 subtasks that together accomplish it.
-Respond ONLY with a JSON array. Each element must have:
-  "id": string (unique short slug, e.g. "t1", "t2"),
-  "goal": string (clear sub-goal for this task),
-  "deps": string[] (ids of tasks that must complete before this one; empty for root tasks)
-
-Rules:
-- deps must reference earlier ids only (no cycles).
-- Keep tasks focused and independently executable.
-- Use a minimal number of tasks (don't over-decompose).
-
-Example:
-[
-  {"id":"t1","goal":"Research the topic","deps":[]},
-  {"id":"t2","goal":"Summarize findings","deps":["t1"]}
-]
-
-Return ONLY the JSON array — no prose, no markdown fences.`;
+/**
+ * Prompt template for decomposing a goal into a task DAG.
+ * M41: single-sourced from prompts/roles.PLANNER_ROLE (verbatim) so the legacy
+ * (flag-off) and adaptive (flag-on) paths share identical planner text.
+ */
+const PLANNING_SYSTEM = PLANNER_ROLE;
 
 /**
  * Parse a RunTask[] from model output, tolerating prose wrapped around JSON.
@@ -531,10 +533,18 @@ export async function planGoal(
   client: ProviderClient,
   onUsage?: (usage: { tokensIn: number; tokensOut: number }) => void,
   memoryContext?: string,
+  adaptive?: boolean,
 ): Promise<RunTask[]> {
-  // Prepend memory block when present (bounded by caller)
-  const systemContent =
-    memoryContext && memoryContext.length > 0
+  // M41: adaptive path budgets the memory block via the prompt suite; the legacy
+  // path keeps the original prepend behavior byte-for-byte.
+  const systemContent = adaptive
+    ? systemPromptFor({
+        role: 'planner',
+        useTools: false,
+        profile: resolveModelProfile(client.model),
+        memory: memoryContext,
+      })
+    : memoryContext && memoryContext.length > 0
       ? `${memoryContext}\n\n${PLANNING_SYSTEM}`
       : PLANNING_SYSTEM;
 
@@ -572,8 +582,8 @@ export async function planGoal(
 // Synthesis
 // ---------------------------------------------------------------------------
 
-const SYNTHESIS_SYSTEM = `You are a helpful assistant. The user asked a goal and several subtasks were executed to answer it.
-Combine the results into a single, coherent final answer. Be concise and accurate.`;
+// M41: single-sourced from prompts/roles.SYNTHESIZER_ROLE (verbatim).
+const SYNTHESIS_SYSTEM = SYNTHESIZER_ROLE;
 
 /**
  * Synthesize a final answer from completed task results.
@@ -726,7 +736,7 @@ async function checkGovernance(cfg: AshlrConfig, overBudgetFlag: boolean): Promi
  */
 function isBinaryInstalled(name: string): boolean {
   try {
-    execFileSync('which', [name], { stdio: 'ignore' });
+    execFileSync(process.platform === 'win32' ? 'where' : 'which', [name], { stdio: 'ignore' });
     return true;
   } catch {
     return false;
@@ -745,7 +755,18 @@ function emit(sink: StreamSink, event: Omit<RunStreamEvent, 'ts'>): void {
 }
 
 /** Known engine ids (typed subset). */
-const KNOWN_ENGINE_IDS: ReadonlySet<string> = new Set(['builtin', 'ashlrcode', 'aw', 'claude']);
+const KNOWN_ENGINE_IDS: ReadonlySet<string> = new Set(['builtin', 'ashlrcode', 'aw', 'claude', 'codex']);
+
+/**
+ * M45: whether an external engine should run SANDBOXED (worktree + diff→inbox)
+ * instead of raw on the live tree. True only when cfg.foundry opts in; default
+ * (absent) keeps the raw delegation path → today's behavior unchanged.
+ */
+function foundryWantsSandbox(cfg: AshlrConfig, engine: EngineId): boolean {
+  if (engine === 'builtin') return false;
+  if (!cfg.foundry) return false;
+  return cfg.foundry.sandboxExternal ?? true;
+}
 
 // ---------------------------------------------------------------------------
 // Main: runGoal
@@ -889,6 +910,29 @@ export async function runGoal(
           `[ashlr run] delegating to engine "${engine}" (${goal.slice(0, 60)}…)\n`,
         );
         emit(sink, { kind: 'log', text: `delegating to engine "${engine}"` });
+
+        // M45: sandboxed-external path — run the agent CLI confined to a throwaway
+        // worktree and capture its diff as a PENDING proposal. Gated by
+        // opts.sandboxEngine or cfg.foundry; when neither is set the raw delegation
+        // below runs unchanged (today's behavior). No raw fallback here: defeating
+        // the sandbox would break the no-outward guarantee for autonomous runs.
+        if (opts.sandboxEngine === true || foundryWantsSandbox(cfg, engineId)) {
+          const { runEngineSandboxed } = await import('./sandboxed-engine.js');
+          const r = await runEngineSandboxed(engineId, goal, cfg, {
+            sourceRepo: cwd,
+            model: modelEnv,
+            budget: opts.budget,
+            propose: true,
+          });
+          emit(sink, {
+            kind: r.state.status === 'done' ? 'task-done' : 'log',
+            text: r.proposalId
+              ? `engine "${engine}" → inbox proposal ${r.proposalId}`
+              : `engine "${engine}" ${r.state.status}`,
+          });
+          saveRun(r.state);
+          return r.state;
+        }
 
         const id = generateRunId();
         const now = new Date().toISOString();
@@ -1046,18 +1090,121 @@ export async function runGoal(
   }
 
   // -- Tool wiring (optional) --------------------------------------------------
-  // When opts.tools !== false, attempt to connect to the MCP gateway as a client.
-  // On any failure, continue tool-free with a warning.
+  // Default: spec-only gateway tools (exactly today's behavior). With
+  // opts.engineer, the hub loop gets an EXECUTABLE, sandboxed surface: native
+  // tools (with fn) + downstream specs + engineering tools (read/glob/grep +
+  // sandboxed write/edit, and with allowBash also bash). All writes/exec are
+  // confined to a throwaway git worktree; the captured diff is routed to the
+  // approval inbox at the end — nothing reaches the live tree unapproved.
   let tools: unknown[] | undefined;
+  let activeSandbox: Sandbox | null = null;
+  let sandboxModule: typeof import('../sandbox/worktree.js') | null = null;
+  let engCtx: EngineerContext | undefined;
   if (opts.tools !== false && client.supportsTools) {
-    try {
-      tools = await loadGatewayTools(cfg);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`[ashlr run] tool gateway unavailable (${msg}) — continuing tool-free\n`);
-      tools = undefined;
+    if (opts.engineer === true) {
+      const sourceRepo =
+        opts.cwd && path.isAbsolute(opts.cwd) && fs.existsSync(opts.cwd)
+          ? opts.cwd
+          : process.cwd();
+      try {
+        sandboxModule = await import('../sandbox/worktree.js');
+        activeSandbox = sandboxModule.createSandbox(sourceRepo);
+        engCtx = {
+          workspaceRoot: activeSandbox.worktreePath,
+          sourceRepo,
+          allowWrite: true,
+          allowExec: opts.allowBash === true,
+        };
+        const gateway = await loadGatewayTools(cfg).catch(() => [] as unknown[]);
+        const nativeNames = new Set(listNativeTools().map((t) => t.name));
+        const downstreamOnly = gateway.filter(
+          (t) =>
+            !nativeNames.has(
+              (t as { function?: { name?: string } }).function?.name ?? '',
+            ),
+        );
+        tools = [
+          ...buildNativeToolSpecsWithFn(),
+          ...downstreamOnly,
+          ...buildEngineerToolSpecs(engCtx),
+        ];
+        process.stderr.write(
+          `[ashlr run] --engineer: sandboxed tools active in ${activeSandbox.worktreePath}` +
+            `${engCtx.allowExec ? ' (bash enabled)' : ''}\n`,
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(
+          `[ashlr run] --engineer unavailable (${msg}) — enroll the repo (ashlr enroll) ` +
+            `and clear the kill switch; continuing with read-only gateway tools\n`,
+        );
+        activeSandbox = null;
+        sandboxModule = null;
+        engCtx = undefined;
+        try {
+          tools = await loadGatewayTools(cfg);
+        } catch {
+          tools = undefined;
+        }
+      }
+    } else {
+      try {
+        tools = await loadGatewayTools(cfg);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[ashlr run] tool gateway unavailable (${msg}) — continuing tool-free\n`);
+        tools = undefined;
+      }
     }
   }
+
+  // M42: capture the sandbox diff into the approval inbox + tear down. Idempotent
+  // and best-effort — never throws, called on every runGoal exit path.
+  const finalizeEngineer = (): void => {
+    if (!activeSandbox || !sandboxModule) return;
+    const sb = activeSandbox;
+    const wt = sandboxModule;
+    activeSandbox = null;
+    try {
+      const diff = wt.sandboxDiff(sb);
+      if (diff.files > 0 && diff.patch.trim().length > 0) {
+        try {
+          const proposal = selectInboxStore(cfg).create({
+            repo: sb.sourceRepo,
+            origin: 'agent',
+            kind: 'patch',
+            title: `engineer run: ${goal.slice(0, 80)}`,
+            summary:
+              `Sandboxed --engineer run produced ${diff.files} file(s) ` +
+              `(+${diff.insertions}/-${diff.deletions}). Review before applying.`,
+            diff: scrubSecrets(diff.patch),
+            sandboxId: sb.id,
+          });
+          process.stderr.write(
+            `[ashlr run] engineer diff → inbox proposal ${proposal.id} ` +
+              `(${diff.files} files); review with 'ashlr inbox'\n`,
+          );
+        } catch (err) {
+          process.stderr.write(`[ashlr run] could not file engineer proposal: ${String(err)}\n`);
+        }
+      }
+    } catch {
+      // diff capture best-effort
+    } finally {
+      try {
+        wt.removeSandbox(sb);
+      } catch {
+        // removal is idempotent
+      }
+    }
+  };
+
+  // M42: guarantee sandbox teardown + diff capture on EVERY exit path, including
+  // a throw from planning/synthesis. finalizeEngineer is idempotent and a no-op
+  // when no sandbox is active, so this is safe for non-engineer runs too.
+  try {
+  // M41: resolve once — gates adaptive prompts for planning AND every task.
+  const adaptivePrompts = adaptivePromptsEnabled(cfg);
 
   // -- M16/M7: Genome memory injection (best-effort, bounded, local-only) ------
   // M16: prefer a synthesized playbook over raw recall when playbookOnRun is on.
@@ -1132,6 +1279,7 @@ export async function runGoal(
         planTokensOut = u.tokensOut;
       },
       memoryContext || undefined,
+      adaptivePrompts,
     );
     state.tasks = tasks;
 
@@ -1311,6 +1459,7 @@ export async function runGoal(
                       budget,
                       usage: state.usage,
                       sink,
+                      adaptivePrompts,
                       onStep: makeTaskOnStep(smallerClient.id),
                     });
                     return;
@@ -1324,6 +1473,7 @@ export async function runGoal(
                   budget,
                   usage: state.usage,
                   sink,
+                  adaptivePrompts,
                   onStep: taskOnStep,
                 });
               };
@@ -1334,6 +1484,7 @@ export async function runGoal(
                   budget,
                   usage: state.usage,
                   sink,
+                  adaptivePrompts,
                   onStep: taskOnStep,
                 });
               } else {
@@ -1428,6 +1579,7 @@ export async function runGoal(
                 budget,
                 usage: state.usage,
                 sink,
+                adaptivePrompts,
                 onStep: taskOnStep,
               }).catch((err) => {
                 if (task.status !== 'failed') {
@@ -1441,91 +1593,80 @@ export async function runGoal(
             // no misleading cloud event, no cloud cost.
           }
 
-          // M11: Verify completed tasks; one retry on !ok if budget allows.
-          // Skip verify entirely once the run is over budget: a budget abort can
-          // leave a task 'done' with a result annotated by an abort/needs-attention
-          // marker, which the heuristic's error-sentinel check would flag as a
-          // benign false-positive "verify fail". Skipping keeps the abort path
-          // clean (no confusing verify line) and avoids any model call past the
-          // ceiling. (Real verification still runs on every in-budget completion.)
+          // M11/M43: structured verify + bounded verify→repair loop. Skip once
+          // over budget (a budget abort can annotate a 'done' result the
+          // heuristic would flag as a false-positive fail).
           if (task.status === 'done' && !overBudget(state.usage, budget)) {
-            const verdict = await verifyTask(task, taskClient, budget, state.usage, {
+            const maxRepairs = Math.max(0, opts.maxRepairs ?? (engCtx?.allowExec ? 2 : 1)); // flag-off parity: plain run = 1 retry; engineer runs get up to 2 bounded repairs
+            // Single source for the verify options (avoids drift between the
+            // initial verify and the in-loop re-verify).
+            const verifyOpts = {
               model: verifyModel,
-            });
-            emit(sink, {
-              kind: 'verify',
-              taskId: task.id,
-              text: verdict.reason,
-              data: verdict,
-            });
+              workspaceRoot: engCtx?.workspaceRoot,
+              allowExec: engCtx?.allowExec ?? false,
+              cfg,
+            };
+            let verifyClient = taskClient;
+            let verdict = await verifyTaskStructured(task, verifyClient, budget, state.usage, verifyOpts);
+            emit(sink, { kind: 'verify', taskId: task.id, text: verdict.reason, data: verdict });
 
-            if (!verdict.ok) {
-              if (!overBudget(state.usage, budget)) {
-                // M15: verify-failed escalation path — attempt ONE routed retry.
-                // If allowCloud + escalate.onFailure + key present, chooseRoute
-                // may return a cloud route; otherwise stays local.
-                const { client: verifyRetryClient, decision: verifyRetryDecision } =
-                  await routeTask(
-                    task.goal,
-                    cfg,
-                    { allowCloud, attempt: 2, lastReason: 'verify-failed' },
-                    taskClient,
-                  );
+            let repair = 0;
+            while (!verdict.ok && repair < maxRepairs && !overBudget(state.usage, budget)) {
+              repair++;
+              // M15: verify-failed escalation — may return a cloud route when
+              // allowCloud + escalate.onFailure + key present; otherwise local.
+              const { client: retryClient, decision: retryDecision } = await routeTask(
+                task.goal,
+                cfg,
+                { allowCloud, attempt: repair + 1, lastReason: 'verify-failed' },
+                taskClient,
+              );
+              const escalatingToCloud =
+                retryDecision.tier === 'cloud' && retryClient.id === retryDecision.provider;
+              verifyClient = retryClient;
 
-                // Only treat this as a cloud escalation if the cloud client was
-                // actually built (decision is cloud AND the returned client's id
-                // matches the routed cloud provider). Otherwise buildRoutedClient
-                // fell back to local — keep the event + cost attribution local.
-                const escalatingToCloud =
-                  verifyRetryDecision.tier === 'cloud' &&
-                  verifyRetryClient.id === verifyRetryDecision.provider;
+              emit(sink, {
+                kind: 'retry',
+                taskId: task.id,
+                text: escalatingToCloud
+                  ? `verify failed (${verdict.reason}) — cloud repair ${repair}/${maxRepairs}: ${retryDecision.provider}`
+                  : `verify failed (${verdict.reason}) — repair ${repair}/${maxRepairs}`,
+              });
 
-                // One verification-driven retry: re-run the task.
-                emit(sink, {
-                  kind: 'retry',
-                  taskId: task.id,
-                  text: escalatingToCloud
-                    ? `verify failed (${verdict.reason}) — escalating to cloud retry: ${verifyRetryDecision.provider}`
-                    : `verify failed (${verdict.reason}) — retrying once`,
-                });
-                task.status = 'running';
-                task.result = undefined;
-                task.error = undefined;
+              // Feed the concrete failure back to the same task (shared id keeps
+              // persistence/onStep stable; the canonical goal stays in state).
+              const repairGoal =
+                `${task.goal}\n\n[VERIFY FAILED — repair ${repair}/${maxRepairs}]\n` +
+                (verdict.command ? `Command: ${verdict.command}\n` : '') +
+                (verdict.failure ? `Output:\n${verdict.failure}` : verdict.reason);
+              const repairTask: RunTask = { ...task, goal: repairGoal };
+              task.status = 'running';
+              task.result = undefined;
+              task.error = undefined;
 
-                // Attribute cost to the ACTUAL serving client (never the intended
-                // provider) so a local fallback stays $0.
-                const verifyRetryOnStep = makeTaskOnStep(verifyRetryClient.id);
+              await runTask(repairTask, retryClient, {
+                tools,
+                budget,
+                usage: state.usage,
+                sink,
+                adaptivePrompts,
+                onStep: makeTaskOnStep(retryClient.id),
+              });
+              // Copy the execution outcome back onto the canonical task.
+              task.status = repairTask.status;
+              task.result = repairTask.result;
+              task.error = repairTask.error;
+              task.usage = repairTask.usage;
 
-                await runTask(task, verifyRetryClient, {
-                  tools,
-                  budget,
-                  usage: state.usage,
-                  sink,
-                  onStep: verifyRetryOnStep,
-                });
+              if ((task.status as string) !== 'done') break;
 
-                // Re-verify after the retry (best-effort; don't loop).
-                // Cast through string: TS narrowed to 'running' after the assignment above,
-                // but runTask mutates task.status in place so it may be 'done' now.
-                if ((task.status as string) === 'done') {
-                  const verdict2 = await verifyTask(task, verifyRetryClient, budget, state.usage, {
-                    model: verifyModel,
-                  });
-                  emit(sink, {
-                    kind: 'verify',
-                    taskId: task.id,
-                    text: verdict2.reason,
-                    data: verdict2,
-                  });
-                  if (!verdict2.ok) {
-                    // Still failing: annotate result but keep status 'done'.
-                    task.result = `[needs-attention: ${verdict2.reason}]\n${task.result ?? ''}`;
-                  }
-                }
-              } else {
-                // Budget exhausted: annotate but keep status 'done'.
-                task.result = `[needs-attention: ${verdict.reason}]\n${task.result ?? ''}`;
-              }
+              verdict = await verifyTaskStructured(task, verifyClient, budget, state.usage, verifyOpts);
+              emit(sink, { kind: 'verify', taskId: task.id, text: verdict.reason, data: verdict });
+            }
+
+            if (!verdict.ok && (task.status as string) === 'done') {
+              // Still failing (or budget exhausted): annotate but keep 'done'.
+              task.result = `[needs-attention: ${verdict.reason}]\n${task.result ?? ''}`;
             }
           }
 
@@ -1699,6 +1840,9 @@ export async function runGoal(
   }
 
   return state;
+  } finally {
+    finalizeEngineer();
+  }
 }
 
 // ---------------------------------------------------------------------------

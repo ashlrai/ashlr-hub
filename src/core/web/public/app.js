@@ -24,7 +24,7 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-const VIEWS = ['overview', 'runs', 'swarms', 'pulse', 'genome', 'portfolio', 'inbox', 'daemon'];
+const VIEWS = ['overview', 'runs', 'swarms', 'pulse', 'genome', 'portfolio', 'inbox', 'daemon', 'fleet'];
 const DEFAULT_VIEW = 'overview';
 const API_BASE = '';  // same origin
 
@@ -64,6 +64,7 @@ const state = {
   inbox: { pending: 0, proposals: [] },
   inboxDetail: null,        // currently-open Proposal (full, with diff)
   daemon: null,             // DaemonState | null
+  fleet: null,              // M49: FleetStatus | null
   inboxBadge: 0,            // pending count from SSE, drives nav badge
   loading: {},   // viewName -> boolean
   error: {},     // viewName -> string | null
@@ -330,6 +331,7 @@ function renderActiveView() {
   else if (view === 'portfolio') renderPortfolio();
   else if (view === 'inbox') renderInbox();
   else if (view === 'daemon') renderDaemon();
+  else if (view === 'fleet') renderFleet();
 }
 
 async function loadView(view) {
@@ -341,6 +343,7 @@ async function loadView(view) {
   else if (view === 'portfolio') await loadPortfolio();
   else if (view === 'inbox') await loadInbox();
   else if (view === 'daemon') await loadDaemon();
+  else if (view === 'fleet') await loadFleet();
 }
 
 // ---------------------------------------------------------------------------
@@ -1840,6 +1843,108 @@ function renderDaemon() {
   }
 
   section.appendChild(card);
+  main.appendChild(section);
+}
+
+// ---------------------------------------------------------------------------
+// M49: Fleet view — read-only fleet control plane snapshot
+// ---------------------------------------------------------------------------
+
+async function loadFleet() {
+  showLoading('fleet');
+  try {
+    state.fleet = await apiFetch('/api/fleet');
+    renderFleet();
+  } catch (err) {
+    showError('fleet', err.message);
+  }
+}
+
+function quotaTag(quota) {
+  const map = {
+    ok: 'var(--status-done)',
+    warn: 'var(--status-aborted)',
+    over: 'var(--status-failed)',
+    unlimited: 'var(--text-dim, #888)',
+  };
+  return el('span', {
+    cls: 'fleet-quota',
+    style: `color:${map[quota] || 'inherit'}`,
+    title: `quota: ${quota}`,
+  }, quota);
+}
+
+function renderFleet() {
+  if (state.activeView !== 'fleet') return;
+  const main = getMain();
+  if (!main) return;
+  main.innerHTML = '';
+
+  const section = el('section', { cls: 'view-section' });
+  section.appendChild(el('div', { cls: 'view-header' },
+    el('h1', { cls: 'view-title' }, 'Fleet'),
+    el('span', { cls: 'view-subtitle' }, 'Control plane & observability')
+  ));
+
+  const f = state.fleet;
+  if (!f) {
+    section.appendChild(el('div', { cls: 'empty-state' },
+      el('p', {}, 'Fleet status unavailable.'),
+      el('p', { cls: 'hint' }, 'Try again, or check the daemon with `ashlr fleet status`.')
+    ));
+    main.appendChild(section);
+    return;
+  }
+
+  // Paused / killed banner
+  if (f.killed) {
+    section.appendChild(el('div', { cls: 'fleet-banner fleet-banner--paused' },
+      el('strong', {}, 'Fleet paused'),
+      el('span', {}, ' — the kill switch is engaged. Resume with `ashlr fleet resume`.')
+    ));
+  }
+
+  // Daemon + queue + merges summary card
+  const summary = el('div', { cls: 'fleet-card card' });
+  summary.appendChild(infoGrid([
+    ['Daemon', f.daemon.running ? 'running' : 'stopped'],
+    ['Last tick', f.daemon.lastTickAt ? fmtRelative(f.daemon.lastTickAt) : '—'],
+    ['Spend today', f.daemon.todaySpentUsd != null ? `$${f.daemon.todaySpentUsd.toFixed(4)}` : '—'],
+    ['Backlog queue', f.queue?.backlogItems ?? '—'],
+    ['Merges (24h)', f.merges?.recent ?? '—'],
+  ]));
+  section.appendChild(summary);
+
+  // Backends table
+  const backendsCard = el('div', { cls: 'fleet-card card' });
+  backendsCard.appendChild(el('h2', { cls: 'card-title' }, 'Backends'));
+  const backends = Array.isArray(f.backends) ? f.backends : [];
+  if (backends.length === 0) {
+    backendsCard.appendChild(el('p', { cls: 'hint' }, 'No backends configured.'));
+  } else {
+    const list = el('div', { cls: 'fleet-backends' });
+    for (const b of backends) {
+      const row = el('div', { cls: 'fleet-backend-row' },
+        el('span', { cls: 'fleet-backend-name' }, b.backend),
+        el('span', { cls: 'fleet-backend-dispatches' }, `${b.dispatchesRecent} dispatch(es) / 24h`),
+        quotaTag(b.quota)
+      );
+      list.appendChild(row);
+    }
+    backendsCard.appendChild(list);
+  }
+  section.appendChild(backendsCard);
+
+  // Proposals card
+  const propsCard = el('div', { cls: 'fleet-card card' });
+  propsCard.appendChild(el('h2', { cls: 'card-title' }, 'Proposals'));
+  propsCard.appendChild(infoGrid([
+    ['Pending', f.proposals?.pending ?? 0],
+    ['Frontier pending', f.proposals?.frontierPending ?? 0],
+    ['Applied', f.proposals?.applied ?? 0],
+  ]));
+  section.appendChild(propsCard);
+
   main.appendChild(section);
 }
 

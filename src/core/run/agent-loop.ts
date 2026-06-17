@@ -24,6 +24,8 @@ import type {
 import { addUsage, overBudget, newUsage } from './budget.js';
 import { nullSink } from './streaming.js';
 import type { StreamSink } from './streaming.js';
+import { resolveModelProfile } from './model-profile.js';
+import { assembleSystemPrompt } from './prompts/index.js';
 
 /** Maximum steps per task, regardless of budget (safety backstop). */
 const TASK_STEP_CAP = 20;
@@ -66,6 +68,14 @@ export async function runTask(
     /** M11: optional StreamSink for live progress events. Defaults to nullSink. */
     sink?: StreamSink;
     onStep: (s: RunStep) => void;
+    /**
+     * M41: when true, build the system prompt from the model-adaptive prompt
+     * suite and use the model profile's step cap. Default/false → the legacy
+     * two-sentence prompt + TASK_STEP_CAP (byte-identical to prior behavior).
+     */
+    adaptivePrompts?: boolean;
+    /** M41: optional memory block to inject into the executor prompt. */
+    memory?: string;
   },
 ): Promise<RunTask> {
   // Track per-task usage delta so we can set task.usage at end.
@@ -137,21 +147,29 @@ export async function runTask(
     }
   }
 
+  // M41: model-adaptive system prompt + step cap when enabled; otherwise the
+  // legacy literal and TASK_STEP_CAP (unchanged behavior when the flag is off).
+  const profile = resolveModelProfile(client.model);
+  const useAdaptive = ctx.adaptivePrompts === true;
+  const stepCap = useAdaptive ? profile.stepCap : TASK_STEP_CAP;
+  const systemContent = useAdaptive
+    ? assembleSystemPrompt({
+        role: 'executor',
+        useTools,
+        profile,
+        memory: ctx.memory,
+        charCap: profile.promptCharCap,
+      }).system
+    : 'You are an Ashlr sub-agent. Be concise and focused. ' +
+      'Complete the given task directly. ' +
+      (useTools
+        ? 'You may call tools to gather information; always follow up with a final answer.'
+        : 'Do not request tools — respond with a final textual answer only.');
+
   // Build the initial message list.
   const messages: ChatMessage[] = [
-    {
-      role: 'system',
-      content:
-        'You are an Ashlr sub-agent. Be concise and focused. ' +
-        'Complete the given task directly. ' +
-        (useTools
-          ? 'You may call tools to gather information; always follow up with a final answer.'
-          : 'Do not request tools — respond with a final textual answer only.'),
-    },
-    {
-      role: 'user',
-      content: task.goal,
-    },
+    { role: 'system', content: systemContent },
+    { role: 'user', content: task.goal },
   ];
 
   task.status = 'running';
@@ -173,14 +191,14 @@ export async function runTask(
       }
 
       // Per-task step cap (safety backstop independent of global budget).
-      if (stepCount >= TASK_STEP_CAP) {
+      if (stepCount >= stepCap) {
         const partial = lastAssistantContent(messages);
         if (partial) {
           task.status = 'done';
           task.result = `[step cap reached — partial result]\n${partial}`;
         } else {
           task.status = 'failed';
-          task.error = `Step cap of ${TASK_STEP_CAP} reached without producing a result.`;
+          task.error = `Step cap of ${stepCap} reached without producing a result.`;
         }
         break;
       }

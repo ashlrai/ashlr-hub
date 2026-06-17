@@ -87,6 +87,7 @@ const DIMENSION_ORDER: readonly HealthDimension[] = [
 const SOURCE_TO_DIMENSION: Record<WorkSource, HealthDimension> = {
   issue: 'issuesCi',
   todo: 'codeDebt',
+  self: 'codeDebt', // M54: self-improvement work rolls into the code-debt dimension
   test: 'tests',
   dep: 'deps',
   doc: 'docs',

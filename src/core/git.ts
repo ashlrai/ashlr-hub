@@ -98,6 +98,33 @@ export function getGitStatus(repoPath: string): GitStatus | null {
 }
 
 /**
+ * Resolve the repository's default branch name (the integration target for an
+ * auto-merge). Resolution order:
+ *   1. `git symbolic-ref --short refs/remotes/origin/HEAD` → strip `origin/`.
+ *      This is the remote's authoritative default branch when a remote exists.
+ *   2. `git rev-parse --abbrev-ref HEAD` → the currently checked-out branch.
+ *   3. Final fallback: 'main'.
+ *
+ * Never throws (each git() call already swallows errors with a 5s timeout). A
+ * detached HEAD yields 'HEAD' from step 2, which we treat as unresolved and fall
+ * through to 'main'.
+ */
+export function defaultBranch(repoPath: string): string {
+  const sym = git(repoPath, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+  if (sym) {
+    // e.g. "origin/main" → "main"
+    const slash = sym.indexOf('/');
+    const name = slash >= 0 ? sym.slice(slash + 1) : sym;
+    if (name) return name;
+  }
+
+  const cur = git(repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (cur && cur !== 'HEAD') return cur;
+
+  return 'main';
+}
+
+/**
  * Parses the `origin` remote URL of the repo at `repoPath` and extracts the
  * GitHub org (or user) name. Returns `{ remote, org }` where either may be
  * null when unavailable or not a recognised GitHub URL.

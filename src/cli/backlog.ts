@@ -67,6 +67,7 @@ const SOURCE_LABELS: Record<WorkSource, string> = {
   doc:      'doc',
   security: 'security',
   plugin:   'plugin', // M33
+  self:     'self',   // M54
 };
 
 const SOURCE_COLORS: Record<WorkSource, keyof ReturnType<typeof makeColors>> = {
@@ -75,6 +76,7 @@ const SOURCE_COLORS: Record<WorkSource, keyof ReturnType<typeof makeColors>> = {
   test:     'red',
   dep:      'magenta',
   doc:      'cyan',
+  self:     'green', // M54
   security: 'red',
   plugin:   'cyan', // M33
 };

@@ -20,6 +20,7 @@
 import { spawnSync, execFileSync } from 'node:child_process';
 import type { AshlrConfig, EngineId, EngineCommand } from '../types.js';
 import { withToolEnv } from '../env-bridge.js';
+import { resolveEngineSpec, compileArgv } from './engine-registry.js';
 
 // ---------------------------------------------------------------------------
 // Phantom detection (cached, best-effort)
@@ -30,7 +31,7 @@ let _phantomInstalled: boolean | undefined;
 function phantomInstalled(): boolean {
   if (_phantomInstalled === undefined) {
     try {
-      execFileSync('which', ['phantom'], { stdio: 'ignore' });
+      execFileSync(process.platform === 'win32' ? 'where' : 'which', ['phantom'], { stdio: 'ignore' });
       _phantomInstalled = true;
     } catch {
       _phantomInstalled = false;
@@ -52,17 +53,19 @@ function phantomInstalled(): boolean {
  *
  * Best-effort, never throws.
  */
-export function engineInstalled(engine: EngineId): boolean {
+export function engineInstalled(engine: EngineId, cfg?: AshlrConfig): boolean {
   if (engine === 'builtin') return true;
-  const bins: Record<string, string[]> = {
-    claude: ['claude'],
-    aw: ['aw'],
-    ashlrcode: ['ac', 'ashlrcode'],
-  };
-  const candidates = bins[engine] ?? [engine];
+  const spec = resolveEngineSpec(engine, cfg);
+  // An OpenAI-compatible api-model is "installed" when its key is present (the
+  // local-first gate still applies at completion time); CLI agents probe PATH.
+  if (spec?.kind === 'api-model') {
+    const key = spec.api?.envKey;
+    return key ? Boolean(process.env[key]?.trim()) : false;
+  }
+  const candidates = spec?.bins ?? [spec?.bin ?? engine];
   for (const bin of candidates) {
     try {
-      execFileSync('which', [bin], { stdio: 'ignore' });
+      execFileSync(process.platform === 'win32' ? 'where' : 'which', [bin], { stdio: 'ignore' });
       return true;
     } catch {
       // try next
@@ -92,42 +95,23 @@ export function engineInstalled(engine: EngineId): boolean {
 export function buildEngineCommand(
   engine: EngineId,
   goal: string,
-  _cfg: AshlrConfig,
-  opts?: { cwd?: string; model?: string },
+  cfg: AshlrConfig,
+  opts?: { cwd?: string; model?: string; autonomous?: boolean },
 ): EngineCommand | null {
-  if (engine === 'builtin') return null;
+  // M50: argv is driven by the declarative engine registry (single source of
+  // truth). The builtin engine and api-model engines have no CLI argv → null
+  // (api-models run through the in-process loop + provider client, not a spawn).
+  const spec = resolveEngineSpec(engine, cfg);
+  if (!spec || spec.kind !== 'cli-agent' || !spec.argv) return null;
 
   const cwd = opts?.cwd ?? process.cwd();
-  const model = opts?.model?.trim();
-
-  switch (engine) {
-    case 'claude': {
-      const args: string[] = ['-p', goal, '--output-format', 'json'];
-      if (model) {
-        // --model must come before --output-format per claude's -p mode
-        args.splice(2, 0, '--model', model);
-      }
-      return { bin: 'claude', args, cwd };
-    }
-
-    case 'aw': {
-      const args: string[] = ['auto', goal, '--cwd', cwd];
-      if (model) {
-        args.push('--model', model);
-      }
-      return { bin: 'aw', args, cwd };
-    }
-
-    case 'ashlrcode': {
-      // Real CLI is 'ac' (alias 'ashlrcode'). Arg builder must be correct for
-      // when present; absence routes to builtin per M9/M10.
-      const args: string[] = ['--goal', goal];
-      return { bin: 'ac', args, cwd };
-    }
-
-    default:
-      return null;
-  }
+  const args = compileArgv(
+    spec.argv,
+    { goal, cwd, model: opts?.model, autonomous: opts?.autonomous },
+    spec.autonomousArgv,
+  );
+  const bin = spec.bin ?? spec.bins?.[0] ?? spec.id;
+  return { bin, args, cwd };
 }
 
 // ---------------------------------------------------------------------------
@@ -167,12 +151,23 @@ export function phantomWrap(cmd: EngineCommand, _cfg: AshlrConfig): EngineComman
 export function spawnEngine(
   cmd: EngineCommand,
   cfg: AshlrConfig,
+  opts?: {
+    env?: NodeJS.ProcessEnv;
+    timeoutMs?: number;
+    /**
+     * M52: optional OS-level sandbox launcher. When present, the engine is
+     * spawned as `launcher.bin [...launcher.prefixArgs, cmd.bin, ...cmd.args]`
+     * (the phantomWrap, if any, composes BEFORE the launcher — jail wraps the
+     * whole thing). When absent ⇒ exactly v4 behavior (default-off parity).
+     */
+    launcher?: { bin: string; prefixArgs: string[] };
+  },
 ): { ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string } {
   // CONTRACT: spawnEngine NEVER throws. Any synchronous failure (spawnSync
   // throwing, env-bridge/phantom probe errors, etc.) is reported as
   // { ok:false, error } rather than propagated to the caller.
   try {
-    return spawnEngineInner(cmd, cfg);
+    return spawnEngineInner(cmd, cfg, opts);
   } catch (err) {
     return { ok: false, output: '', error: err instanceof Error ? err.message : String(err) };
   }
@@ -181,19 +176,33 @@ export function spawnEngine(
 function spawnEngineInner(
   cmd: EngineCommand,
   cfg: AshlrConfig,
+  opts?: { env?: NodeJS.ProcessEnv; timeoutMs?: number; launcher?: { bin: string; prefixArgs: string[] } },
 ): { ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string } {
-  // Apply phantom-exec wrap when enabled and installed (best-effort)
+  // Apply phantom-exec wrap when enabled and installed (best-effort).
+  // phantomWrap composes BEFORE the launcher — the OS jail wraps the whole thing.
   let effective = cmd;
   if (cfg.phantom?.enabled && phantomInstalled()) {
     effective = phantomWrap(cmd, cfg);
   }
 
-  const childEnv = withToolEnv(cfg);
+  // M52: apply the OS sandbox launcher when provided. The launcher wraps the
+  // already-phantom-wrapped command so the jail contains the entire chain.
+  // When absent ⇒ exactly v4 behavior (default-off parity guaranteed).
+  let spawnBin = effective.bin;
+  let spawnArgs = effective.args;
+  if (opts?.launcher) {
+    spawnBin = opts.launcher.bin;
+    spawnArgs = [...opts.launcher.prefixArgs, effective.bin, ...effective.args];
+  }
 
-  const result = spawnSync(effective.bin, effective.args, {
+  // M45: a caller (sandboxed-engine) may pass a hardened, containment env; else
+  // fall back to the allowlist-only env-bridge env (NON-SECRET).
+  const childEnv = opts?.env ?? withToolEnv(cfg);
+
+  const result = spawnSync(spawnBin, spawnArgs, {
     encoding: 'utf8',
     maxBuffer: 10 * 1024 * 1024, // 10 MB
-    timeout: 5 * 60 * 1000,       // 5 min hard wall-clock limit
+    timeout: opts?.timeoutMs ?? 5 * 60 * 1000, // hard wall-clock limit (default 5 min)
     cwd: effective.cwd,
     env: childEnv,
   });
@@ -222,6 +231,28 @@ function spawnEngineInner(
       }
     } catch {
       // Not JSON or unexpected shape — usage stays undefined; caller estimates
+    }
+  }
+
+  // M45: best-effort usage parse for codex --json (JSONL events). The token-count
+  // event shape is not contractually stable across versions, so this is a guarded
+  // scan: find any line carrying input/output token counts. Undefined on miss
+  // (caller estimates). ⚠️ Refine in M46 once the event schema is pinned.
+  if (cmd.bin === 'codex' && !usage) {
+    for (const line of rawOutput.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('{')) continue;
+      try {
+        const ev = JSON.parse(trimmed) as Record<string, unknown>;
+        const u = (ev['usage'] ?? ev['token_usage'] ?? ev) as Record<string, unknown>;
+        const tin = u['input_tokens'] ?? u['prompt_tokens'];
+        const tout = u['output_tokens'] ?? u['completion_tokens'];
+        if (typeof tin === 'number' && typeof tout === 'number') {
+          usage = { tokensIn: tin, tokensOut: tout };
+        }
+      } catch {
+        // skip non-JSON / unexpected line
+      }
     }
   }
 

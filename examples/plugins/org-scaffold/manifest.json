@@ -1,0 +1,9 @@
+{
+  "name": "org-scaffold",
+  "version": "0.1.0",
+  "apiVersion": "^1.0.0",
+  "description": "Reference template plugin: contributes a 'service-readme' template that scaffolds a minimal TypeScript service with README, package.json, tsconfig, and a stub entry point.",
+  "entry": "./index.js",
+  "capabilities": ["template"],
+  "homepage": "https://github.com/ashlr-hub/examples/tree/main/plugins/org-scaffold"
+}

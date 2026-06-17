@@ -52,6 +52,20 @@ export interface AshlrConfig {
      * and a cloud key is present. Never enables silent cloud spend on its own.
      */
     escalate?: { onFailure: boolean; latencyMs?: number };
+    /**
+     * M41: enable the model-adaptive prompt suite (Fable-5-grade layered
+     * system prompts + per-model profiles for verbosity / step-cap /
+     * temperature). Default OFF — when absent/false the harness uses its
+     * legacy prompts and step cap unchanged. Overridable per-process via the
+     * ASHLR_ADAPTIVE_PROMPTS env var.
+     */
+    adaptivePrompts?: boolean;
+    /**
+     * M41: optional per-profile overrides keyed by profile id
+     * ('coder' | 'general' | 'small' | 'default'). Shallow-merged onto the
+     * built-in ModelProfile. Power-user knob; absent by default.
+     */
+    profiles?: Record<string, Partial<import('./run/model-profile.js').ModelProfile>>;
   };
   /** Telemetry hooks (e.g. Pulse) + local budget caps. All fields optional. */
   telemetry: {
@@ -102,6 +116,97 @@ export interface AshlrConfig {
    * Entirely opt-in: a no-op when unset — notify() never posts without one.
    */
   notify?: NotifyTarget;
+  /**
+   * M45: multi-backend engine fleet (v4 Foundry). ENTIRELY OPT-IN — when absent,
+   * behavior is unchanged (builtin only; external engines run raw as today).
+   * When present, external engines run SANDBOXED with diff capture and the fleet
+   * may route work across the allowed backends.
+   */
+  foundry?: {
+    /** Backends the fleet may use. Absent ⇒ ['builtin'] only. */
+    allowedBackends?: EngineId[];
+    /** Per-backend preferred model id (keyed by EngineId). */
+    models?: Partial<Record<EngineId, string>>;
+    /** Run external engines inside a sandbox with diff capture (default true when foundry set). */
+    sandboxExternal?: boolean;
+    /** Hard wall-clock per external run (ms). Default 20 min. */
+    timeoutMs?: number;
+    /**
+     * Allowlist for the (later) merge-authority gate: a proposal may auto-apply
+     * to main only if its {engine,model} matches an entry here. Defined now,
+     * enforced in a later milestone.
+     */
+    mergeAuthority?: Array<{ engine: EngineId; model: string }>;
+    /**
+     * M46: per-backend rate limits for subscription backends (flat-fee, rate-
+     * limited — not token-billed). Keyed by EngineId. `window` is a label like
+     * '1m'|'5m'|'1h'|'1d'; `max` is the max dispatches per rolling window.
+     * Absent ⇒ unlimited. Used by the fleet scheduler (M46/M48).
+     */
+    limits?: Partial<Record<EngineId, { window: string; max: number }>>;
+    /**
+     * M50 (v5): declarative engine roster. Each entry overrides a builtin
+     * engine spec or adds a new backend (cli-agent or OpenAI-compatible
+     * api-model), keyed by engine id. Merged over BUILTIN_ENGINE_REGISTRY by
+     * `resolveEngineRegistry`. Absent ⇒ exactly the builtin roster. This is the
+     * config-only path to adding a backend — no code branch.
+     */
+    engines?: Record<string, EngineSpec>;
+    /**
+     * M53: fleet-intelligence tuning. Absent ⇒ learned routing / budget recovery
+     * / anomaly holds are OFF (the daemon routes exactly as M46/M48). All actions
+     * stay proposal-only — this only tunes WHICH backend/tier and WHEN to hold.
+     */
+    intelligence?: {
+      /** Anomaly threshold k: a run costing > k × p50 is held + a TuningProposal filed (default 4). */
+      anomalyK?: number;
+      /** Min verified-success rate below which a class is nudged off frontier (0..1, default 0.5). */
+      minFrontierSuccessRate?: number;
+    };
+    /**
+     * M47: tiered-trust auto-merge to main. DEFAULT DISABLED. When enabled, a
+     * proposal may be merged to the default branch ONLY when ALL hold: it is
+     * frontier merge-authority (engineTier 'frontier' + {engine,model} ∈
+     * mergeAuthority), its risk class is ≤ maxRisk, and full verification passes.
+     * Kill-switch and human override always apply; nothing auto-merges by default.
+     */
+    autoMerge?: {
+      enabled: boolean;
+      /** Max risk class permitted to auto-merge (default 'low'). */
+      maxRisk?: 'low' | 'medium' | 'high';
+      /** Also merge/push on the remote (gh pr merge) when applying (default false). */
+      pushToRemote?: boolean;
+      /**
+       * M56 (v5): permit MID-tier (strong open model) proposals to auto-apply
+       * to a BRANCH / PR — never to `main`. Separate, DEFAULT-OFF sub-flag, so
+       * enabling main auto-merge does not implicitly enable the branch path.
+       */
+      midToBranch?: boolean;
+      /** Permit auto-merge when NO verification commands are detected (default false = fail-closed). */
+      allowWithoutVerification?: boolean;
+    };
+    /**
+     * M52: per-engine OS-level confinement profiles. DEFAULT ABSENT (v4 env-only).
+     * When present, external engine spawns are wrapped with a platform-native
+     * read-jail (macOS sandbox-exec, Linux bwrap) that confines file reads to the
+     * worktree + vendor config homes and optionally blocks network egress.
+     * A `*` key sets a fleet-wide default; per-engine keys override it.
+     * Absent ⇒ exactly v4 behavior (env-only containment, no OS jail).
+     */
+    confinement?: Partial<Record<EngineId | '*', {
+      /** 'off' (v4 env-only, default) | 'os' (wrap spawn in an OS jail). */
+      mode?: 'off' | 'os';
+      /** Extra absolute paths the agent may READ beyond the worktree + vendor homes. */
+      readAllowed?: string[];
+      /** Allow outbound network from the contained process (default false). */
+      networkEgress?: boolean;
+      /**
+       * When mode 'os' but the platform has no jail binary: 'fallback' (env-only,
+       * audited) | 'fail' (terminal). Default 'fallback'.
+       */
+      onUnsupported?: 'fallback' | 'fail';
+    }>>;
+  };
   /**
    * M24: optional autonomous-operator (daemon) tuning. When unset, the daemon
    * falls back to its hard-coded conservative defaults. This NEVER widens the
@@ -415,10 +520,17 @@ export interface RunState {
   id: string;
   /** The original top-level goal. */
   goal: string;
-  /** Engine that executed the run ('builtin' | 'ashlrcode' | 'aw'). */
+  /** Engine that executed the run ('builtin' | 'ashlrcode' | 'aw' | 'claude' | 'codex'). */
   engine: string;
   /** Active provider id used for the run. */
   provider: string;
+  /**
+   * M45: backend + model that produced this run, for merge-authority gating.
+   * e.g. 'claude:claude-opus-4-8' | 'codex:gpt-5.5' | 'builtin:<local-model>'.
+   */
+  engineModel?: string;
+  /** M45: trust tier of the producing backend ('local' | 'frontier'). */
+  engineTier?: EngineTier;
   /** ISO timestamp the run was created. */
   createdAt: string;
   /** ISO timestamp of the last update (written after each step). */
@@ -470,6 +582,30 @@ export interface RunOptions {
    * the global budget.
    */
   verifyModel?: boolean;
+  /**
+   * M42: enable the in-process engineering tool surface — read_file/glob/grep
+   * plus sandboxed write_file/edit_file (and, with allowBash, bash/run_tests).
+   * Default false → the run keeps today's spec-only gateway tools and never
+   * writes. All writes land in a throwaway git worktree; the captured diff is
+   * routed to the approval inbox as a PENDING proposal, never the live tree.
+   */
+  engineer?: boolean;
+  /** M42: additionally enable the bash/run_tests exec tools (requires engineer). */
+  allowBash?: boolean;
+  /**
+   * M43: max verify→repair iterations per task on a failing structured verify
+   * (typecheck/test/lint). Default 2; 0 disables the repair loop. Each iteration
+   * is bounded by the per-task step cap and the global budget.
+   */
+  maxRepairs?: number;
+  /**
+   * M45: when true, an external engine ('claude'|'codex'|…) runs INSIDE a
+   * throwaway sandbox worktree with its diff captured to the inbox, instead of
+   * raw on the live tree. Set by the swarm/daemon for autonomous external runs.
+   */
+  sandboxEngine?: boolean;
+  /** M45: abort (no raw fallback) if a sandbox worktree cannot be created. */
+  requireSandbox?: boolean;
 }
 
 /** A single message in a chat exchange with a provider. */
@@ -498,6 +634,11 @@ export interface ChatResult {
 export interface ProviderClient {
   /** Provider id this client targets. */
   id: string;
+  /**
+   * Resolved model name this client serves (M41). Optional/additive — plugin
+   * providers may omit it. Used to resolve a model-adaptive ModelProfile.
+   */
+  model?: string;
   /** Whether the underlying model/provider supports tool calls. */
   supportsTools: boolean;
   /** Send a chat exchange (optionally with tool specs) and get a result. */
@@ -867,11 +1008,26 @@ export interface VerifyVerdict {
   /** One-line human-readable reason for the verdict. */
   reason: string;
   /** How the verdict was reached. */
-  method: 'heuristic' | 'model';
+  method: 'heuristic' | 'model' | 'command';
 }
 
 /** The set of engines `ashlr run` can delegate to (or run locally). */
-export type EngineId = 'builtin' | 'ashlrcode' | 'aw' | 'claude';
+export type EngineId =
+  | 'builtin'
+  | 'ashlrcode'
+  | 'aw'
+  | 'claude'
+  | 'codex'
+  | 'hermes'
+  | 'opencode';
+
+/**
+ * M45: trust tier of the backend that produced work. 'frontier' = a
+ * merge-authority model (e.g. Opus 4.8 via Claude Code, GPT-5.5 via Codex);
+ * 'local' = an on-device model. Only 'frontier' work may auto-merge to main
+ * (enforced later via cfg.foundry.mergeAuthority).
+ */
+export type EngineTier = 'local' | 'mid' | 'frontier';
 
 /** A fully-resolved external engine invocation (exact argv + optional cwd). */
 export interface EngineCommand {
@@ -881,6 +1037,56 @@ export interface EngineCommand {
   args: string[];
   /** Working directory for the spawned process, when set. */
   cwd?: string;
+}
+
+/**
+ * M50 (v5): the kind of a backend engine.
+ *  - 'builtin'   — the in-process local agent loop (no external CLI).
+ *  - 'cli-agent' — an external agent CLI spawned + contained (claude, codex, …).
+ *  - 'api-model' — an OpenAI-compatible API endpoint driven through the run loop.
+ */
+export type EngineKind = 'builtin' | 'cli-agent' | 'api-model';
+
+/**
+ * M50 (v5): one segment of a declarative argv template. A plain string is a
+ * literal argv element, EXCEPT the exact tokens '$GOAL' | '$CWD' | '$MODEL',
+ * which are substituted (each as a SINGLE argv element — never shell-split, so a
+ * goal containing '$CWD' or ';' is passed verbatim and never expanded). An
+ * `{ optModel }` segment is emitted only when a concrete model is present.
+ */
+export type ArgvSeg = string | { optModel: string[] };
+
+/**
+ * M50 (v5): a declarative backend engine specification. The registry
+ * (`run/engine-registry.ts`) is the single source of truth for how an engine is
+ * invoked, probed, and trust-tiered. Adding a backend is a config-only
+ * `cfg.foundry.engines` entry that reuses this shape — no code branch.
+ */
+export interface EngineSpec {
+  /** Stable engine id (matches an EngineId for builtins; any string for additions). */
+  id: string;
+  /** How this engine is driven. */
+  kind: EngineKind;
+  /** Trust tier; only 'frontier' carries merge-to-main authority. */
+  tier: EngineTier;
+  /** Executable name for a cli-agent (defaults to id when omitted). */
+  bin?: string;
+  /** PATH probe candidates (engineInstalled); defaults to [bin ?? id]. */
+  bins?: string[];
+  /** Base argv template (cli-agent). */
+  argv?: ArgvSeg[];
+  /** Extra argv appended when running unattended/autonomous. */
+  autonomousArgv?: ArgvSeg[];
+  /** OpenAI-compatible API wiring (api-model). */
+  api?: {
+    envKey: string;
+    baseUrlEnv?: string;
+    defaultBaseUrl?: string;
+    defaultModel?: string;
+    protocol: 'openai';
+  };
+  /** Free-form capability tags used by capability-aware routing. */
+  capabilities?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1687,7 +1893,7 @@ export interface Enrollment {
  */
 
 /** The kind of source a WorkItem was derived from. */
-export type WorkSource = 'issue' | 'todo' | 'test' | 'dep' | 'doc' | 'security' | 'plugin'; // M33: 'plugin' added (additive)
+export type WorkSource = 'issue' | 'todo' | 'test' | 'dep' | 'doc' | 'security' | 'plugin' | 'self'; // M33: 'plugin'; M54: 'self' (the fleet's own backlog) — both additive
 
 /**
  * A single discovered, scored unit of work. Produced by a scanner over a
@@ -1779,6 +1985,21 @@ export interface Proposal {
   diff?: string;
   /** Optional id of the sandbox the diff was captured from (M21). */
   sandboxId?: string;
+  /**
+   * M45: provenance — backend + model that produced this proposal's diff
+   * (e.g. 'codex:gpt-5.5'). A later merge-authority gate requires
+   * engineTier === 'frontier' before any auto-apply to main.
+   */
+  engineModel?: string;
+  engineTier?: EngineTier;
+  /** M47.1: sha256 of the (scrubbed) diff at signing time. */
+  diffHash?: string;
+  /**
+   * M47.1: HMAC over `${engineModel}|${engineTier}|${diffHash}` with the
+   * per-machine provenance key — proves the trust tags were set by the
+   * sandboxed producer (not forged on disk) and are bound to THIS diff.
+   */
+  provenanceSig?: string;
   /** Current lifecycle status. Created as 'pending'; NEVER auto-advances. */
   status: ProposalStatus;
   /** ISO timestamp the proposal was created. */
@@ -1848,6 +2069,10 @@ export interface DaemonTick {
   /** Why the tick did what it did (e.g. 'ok', 'kill-switch', 'budget-exhausted',
    *  'no-enrolled-repos', 'no-backlog', 'dry-run'). */
   reason: string;
+  /** M48: per-backend dispatch counts this tick (e.g. {builtin:2, claude:1}). */
+  backends?: Record<string, number>;
+  /** M48: proposals auto-merged this tick via the M47 gate (omitted/0 when disabled). */
+  merged?: number;
 }
 
 /**
@@ -2719,7 +2944,13 @@ export interface DigestDeliveryResult {
  *   'proposal' — creates a PENDING inbox Proposal; REFUSED when KILL. There is
  *                deliberately NO 'approve'/'apply' class — approval is human-only.
  */
-export type NativeToolSafety = 'read' | 'append' | 'proposal';
+export type NativeToolSafety = 'read' | 'append' | 'proposal' | 'write' | 'exec';
+// M42 extends the M31 set (additive — the structural gate `safety !== 'read'`
+// already refuses the new classes under KILL):
+//   'write' — mutates a workspace path (sandbox worktree); REFUSED under KILL,
+//             boundary- + enrollment-gated. Opt-in via `ashlr run --engineer`.
+//   'exec'  — runs a subprocess (bash/tests) confined to the sandbox worktree;
+//             REFUSED under KILL; double opt-in via `--engineer --bash`.
 
 /**
  * M31: one native tool served by the MCP gateway itself (SDK-free definition;

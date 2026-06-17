@@ -31,6 +31,24 @@ file states direction; contracts state commitments.
   agent contract (`orient`, `docs --agent`), the living web command center
   (inbox approvals, cost estimates), plugins, npm distribution
   (`@ashlr/hub`), public programmatic API.
+- **v3-Weapon (M41–M44)** — make local models an engineering weapon: adaptive
+  model-sized prompts, the sandboxed engineering tool surface (write/edit/bash
+  confined to a worktree, diffs → inbox), the verify→repair loop, and `ashlr
+  eval`. See [`docs/SPEC-V3-LOCAL-WEAPON.md`](./SPEC-V3-LOCAL-WEAPON.md).
+- **v4-Foundry (M45–M49)** — the autonomous engineering fleet: multi-backend
+  sandboxed engines (`runEngineSandboxed`, push severed, diff-only,
+  trust-tagged), backend router + rate/quota, the tiered-trust merge-to-`main`
+  gate with HMAC-signed provenance (M47.1), the 24/7 supervisor, and the fleet
+  control plane. See [`docs/SPEC-V4-FOUNDRY.md`](./SPEC-V4-FOUNDRY.md).
+- **v5-Open-Fleet (M50–M55)** — polyglot, self-improving, conducted: a
+  declarative engine registry + a real OpenAI-compatible API client (Hermes,
+  OpenCode, NVIDIA NIMs, Kimi K2.7, … added config-only); a third trust tier
+  (`mid`); OS-level confinement (macOS `sandbox-exec`/Linux seccomp read-jail +
+  egress gate) closing v4's read-residual; learned routing + budget-breach
+  recovery + cost-anomaly holds; the fleet pointed at its OWN source behind a
+  never-weaken guard + self-eval harness; and the `ashlr goal` / `ashlr loop`
+  (+ `/goal`, `/loop`) conductor. See
+  [`docs/SPEC-V5-OPEN-FLEET.md`](./SPEC-V5-OPEN-FLEET.md).
 
 ## Near-term (v2.3 candidates — direction, not commitments)
 

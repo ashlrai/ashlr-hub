@@ -139,6 +139,36 @@ const loadRunsCmd = lazyCmd(
   'runs command requires src/cli/run.ts (M4 module not yet built).',
 );
 
+// ─── M44 local-agent eval harness ─────────────────────────────────────────────
+
+const loadEvalCmd = lazyCmd(
+  () => import('./eval.js' as unknown as string),
+  (m) => m.cmdEval as Cmd,
+  'eval command requires src/cli/eval.ts (M44 module not yet built).',
+);
+
+// ─── M49 fleet control plane + observability ──────────────────────────────────
+
+const loadFleetCmd = lazyCmd(
+  () => import('./fleet.js' as unknown as string),
+  (m) => m.cmdFleet as Cmd,
+  'fleet command requires src/cli/fleet.ts (M49 module not yet built).',
+);
+
+// ─── M55 the conductor: `ashlr goal` + `ashlr loop` ──────────────────────────
+
+const loadGoalCmd = lazyCmd(
+  () => import('./goal.js' as unknown as string),
+  (m) => m.cmdGoal as Cmd,
+  'goal command requires src/cli/goal.ts (M55 module not yet built).',
+);
+
+const loadLoopCmd = lazyCmd(
+  () => import('./loop.js' as unknown as string),
+  (m) => m.cmdLoop as Cmd,
+  'loop command requires src/cli/loop.ts (M55 module not yet built).',
+);
+
 // ─── M5 lazy imports (graceful degradation if modules not yet built) ──────────
 
 import type { ActivityRollup } from '../core/types.js';
@@ -1345,6 +1375,14 @@ async function main(): Promise<void> {
         break;
       }
 
+      case 'eval': {
+        // M44: local-agent eval harness — runs fixtures with adaptive
+        // prompts OFF vs ON and reports steps/done/tokens.
+        const cmdEval = await loadEvalCmd();
+        process.exitCode = await cmdEval(rest);
+        break;
+      }
+
       case 'pulse': {
         const cmdPulse = await loadPulseCmd();
         process.exitCode = await cmdPulse(rest);
@@ -1491,6 +1529,28 @@ async function main(): Promise<void> {
       case 'daemon': {
         const cmdDaemon = await loadDaemonCmd();
         process.exitCode = await cmdDaemon(rest);
+        break;
+      }
+
+      case 'fleet': {
+        // M49: fleet control plane + observability — read-only `status`,
+        // plus `pause`/`resume` (kill-switch only).
+        const cmdFleet = await loadFleetCmd();
+        process.exitCode = await cmdFleet(rest);
+        break;
+      }
+
+      case 'goal': {
+        // M55: the conductor — objective → milestones → sandboxed, proposal-only run.
+        const cmdGoal = await loadGoalCmd();
+        process.exitCode = await cmdGoal(rest);
+        break;
+      }
+
+      case 'loop': {
+        // M55: the conductor — run the proposal-first fleet over the portfolio.
+        const cmdLoop = await loadLoopCmd();
+        process.exitCode = await cmdLoop(rest);
         break;
       }
 

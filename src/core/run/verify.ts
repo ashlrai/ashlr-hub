@@ -18,8 +18,10 @@ import type {
   RunUsage,
   VerifyVerdict,
   ChatMessage,
+  AshlrConfig,
 } from '../types.js';
 import { overBudget, addUsage } from './budget.js';
+import { detectVerifyCommands, runVerifyCommand } from './verify-commands.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -235,4 +237,79 @@ export async function verifyTask(
       method: 'heuristic',
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// M43: Structured verification (typecheck/test/lint) + verdict wrapper
+// ---------------------------------------------------------------------------
+
+/** Tail of a command's output to surface in a failure verdict (~2KB). */
+const FAILURE_TAIL_CHARS = 2 * 1024;
+
+/**
+ * A VerifyVerdict enriched with the command that produced it. When a structured
+ * (command) verification fails, `command` names the failing command and
+ * `failure` carries the tail of its output for the repair loop to feed back.
+ */
+export interface StructuredVerdict extends VerifyVerdict {
+  /** The verify command that produced this verdict (when method === 'command'). */
+  command?: string;
+  /** Tail of the failing command's output (~2KB), for repair feedback. */
+  failure?: string;
+}
+
+/**
+ * Structured verification for a completed task.
+ *
+ * When a workspace is available AND execution is permitted AND detectable
+ * verify commands exist, run them in order (typecheck → test → lint). The FIRST
+ * non-ok command short-circuits to a failure verdict carrying the command + a
+ * tail of its output. When every command passes, return an ok 'command' verdict.
+ *
+ * Otherwise (no workspace, exec not allowed, no cfg, or nothing detected) fall
+ * back to the heuristic/model verifyTask, wrapped to the StructuredVerdict shape.
+ *
+ * Never throws (runVerifyCommand and verifyTask are both non-throwing).
+ */
+export async function verifyTaskStructured(
+  task: RunTask,
+  client: ProviderClient,
+  budget: RunBudget,
+  usage: RunUsage,
+  opts: {
+    model?: boolean;
+    workspaceRoot?: string;
+    allowExec?: boolean;
+    cfg?: AshlrConfig;
+  },
+): Promise<StructuredVerdict> {
+  const { workspaceRoot, allowExec, cfg } = opts;
+
+  if (workspaceRoot && allowExec && cfg) {
+    const commands = detectVerifyCommands(workspaceRoot);
+    if (commands.length > 0) {
+      for (const vc of commands) {
+        const res = runVerifyCommand(vc, workspaceRoot, cfg);
+        if (!res.ok) {
+          return {
+            ok: false,
+            method: 'command',
+            reason: `${vc.kind} failed: ${res.command}`,
+            command: res.command,
+            failure: res.output.slice(-FAILURE_TAIL_CHARS),
+          };
+        }
+      }
+      return {
+        ok: true,
+        method: 'command',
+        reason: `verify commands passed (${commands.length})`,
+      };
+    }
+  }
+
+  // Fall back to the heuristic/model verdict (already StructuredVerdict-shaped:
+  // StructuredVerdict only adds optional fields over VerifyVerdict).
+  const verdict = await verifyTask(task, client, budget, usage, { model: opts.model });
+  return verdict;
 }
