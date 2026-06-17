@@ -29,6 +29,10 @@ const CLOUD_PROVIDER_ENV: Record<string, string> = {
   groq: 'GROQ_API_KEY',
   mistral: 'MISTRAL_API_KEY',
   azure: 'AZURE_OPENAI_API_KEY',
+  nvidia_nim: 'NVIDIA_NIM_API_KEY',
+  moonshot: 'MOONSHOT_API_KEY',
+  kimi: 'MOONSHOT_API_KEY',
+  hermes_api: 'HERMES_API_KEY',
 };
 
 /** Known local (zero-cost) provider ids. */
@@ -126,6 +130,10 @@ function defaultCloudModel(provider: string): string {
     groq: 'llama3-8b-8192',
     mistral: 'mistral-small',
     azure: 'gpt-4o-mini',
+    nvidia_nim: 'meta/llama-3.1-70b-instruct',
+    moonshot: 'kimi-k2-0711-preview',
+    kimi: 'kimi-k2-0711-preview',
+    hermes_api: 'nousresearch/hermes-3-llama-3.1-70b',
   };
   return models[provider.toLowerCase()] ?? provider;
 }

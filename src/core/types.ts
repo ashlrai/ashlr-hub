@@ -145,6 +145,14 @@ export interface AshlrConfig {
      */
     limits?: Partial<Record<EngineId, { window: string; max: number }>>;
     /**
+     * M50 (v5): declarative engine roster. Each entry overrides a builtin
+     * engine spec or adds a new backend (cli-agent or OpenAI-compatible
+     * api-model), keyed by engine id. Merged over BUILTIN_ENGINE_REGISTRY by
+     * `resolveEngineRegistry`. Absent ⇒ exactly the builtin roster. This is the
+     * config-only path to adding a backend — no code branch.
+     */
+    engines?: Record<string, EngineSpec>;
+    /**
      * M47: tiered-trust auto-merge to main. DEFAULT DISABLED. When enabled, a
      * proposal may be merged to the default branch ONLY when ALL hold: it is
      * frontier merge-authority (engineTier 'frontier' + {engine,model} ∈
@@ -966,7 +974,14 @@ export interface VerifyVerdict {
 }
 
 /** The set of engines `ashlr run` can delegate to (or run locally). */
-export type EngineId = 'builtin' | 'ashlrcode' | 'aw' | 'claude' | 'codex';
+export type EngineId =
+  | 'builtin'
+  | 'ashlrcode'
+  | 'aw'
+  | 'claude'
+  | 'codex'
+  | 'hermes'
+  | 'opencode';
 
 /**
  * M45: trust tier of the backend that produced work. 'frontier' = a
@@ -984,6 +999,56 @@ export interface EngineCommand {
   args: string[];
   /** Working directory for the spawned process, when set. */
   cwd?: string;
+}
+
+/**
+ * M50 (v5): the kind of a backend engine.
+ *  - 'builtin'   — the in-process local agent loop (no external CLI).
+ *  - 'cli-agent' — an external agent CLI spawned + contained (claude, codex, …).
+ *  - 'api-model' — an OpenAI-compatible API endpoint driven through the run loop.
+ */
+export type EngineKind = 'builtin' | 'cli-agent' | 'api-model';
+
+/**
+ * M50 (v5): one segment of a declarative argv template. A plain string is a
+ * literal argv element, EXCEPT the exact tokens '$GOAL' | '$CWD' | '$MODEL',
+ * which are substituted (each as a SINGLE argv element — never shell-split, so a
+ * goal containing '$CWD' or ';' is passed verbatim and never expanded). An
+ * `{ optModel }` segment is emitted only when a concrete model is present.
+ */
+export type ArgvSeg = string | { optModel: string[] };
+
+/**
+ * M50 (v5): a declarative backend engine specification. The registry
+ * (`run/engine-registry.ts`) is the single source of truth for how an engine is
+ * invoked, probed, and trust-tiered. Adding a backend is a config-only
+ * `cfg.foundry.engines` entry that reuses this shape — no code branch.
+ */
+export interface EngineSpec {
+  /** Stable engine id (matches an EngineId for builtins; any string for additions). */
+  id: string;
+  /** How this engine is driven. */
+  kind: EngineKind;
+  /** Trust tier; only 'frontier' carries merge-to-main authority. */
+  tier: EngineTier;
+  /** Executable name for a cli-agent (defaults to id when omitted). */
+  bin?: string;
+  /** PATH probe candidates (engineInstalled); defaults to [bin ?? id]. */
+  bins?: string[];
+  /** Base argv template (cli-agent). */
+  argv?: ArgvSeg[];
+  /** Extra argv appended when running unattended/autonomous. */
+  autonomousArgv?: ArgvSeg[];
+  /** OpenAI-compatible API wiring (api-model). */
+  api?: {
+    envKey: string;
+    baseUrlEnv?: string;
+    defaultBaseUrl?: string;
+    defaultModel?: string;
+    protocol: 'openai';
+  };
+  /** Free-form capability tags used by capability-aware routing. */
+  capabilities?: string[];
 }
 
 // ---------------------------------------------------------------------------

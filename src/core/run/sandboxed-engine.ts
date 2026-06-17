@@ -36,6 +36,7 @@ import type {
   Sandbox,
 } from '../types.js';
 import { buildEngineCommand, spawnEngine } from './engines.js';
+import { resolveEngineSpec } from './engine-registry.js';
 import { newUsage, estCostUsd } from './budget.js';
 import { withToolEnv } from '../env-bridge.js';
 import { scrubSecrets } from '../knowledge/index.js';
@@ -70,11 +71,15 @@ const DEFAULT_TIMEOUT_MS = 20 * 60_000;
 /** Credential-shaped env var names that must never reach the agent subprocess. */
 const CRED_ENV_DENY = /(_|^)(TOKEN|SECRET|KEY|PASSWORD|PASSWD|CREDENTIALS?)$/i;
 
-/** Backends whose work is 'frontier' (merge-authority class). */
-const FRONTIER_ENGINES: ReadonlySet<EngineId> = new Set<EngineId>(['claude', 'codex']);
-
-export function engineTierOf(engine: EngineId): EngineTier {
-  return FRONTIER_ENGINES.has(engine) ? 'frontier' : 'local';
+/**
+ * Trust tier of a backend. M50: read from the declarative engine registry (single
+ * source of truth) rather than a hardcoded set — so a config-added backend is
+ * tiered by its declared `tier`. An unknown engine is 'local' (never implicitly
+ * frontier). The builtin registry maps {claude, codex} → 'frontier', all else →
+ * 'local', identical to the pre-M50 FRONTIER_ENGINES behavior.
+ */
+export function engineTierOf(engine: EngineId, cfg?: AshlrConfig): EngineTier {
+  return resolveEngineSpec(engine, cfg)?.tier ?? 'local';
 }
 
 const PRE_PUSH_BLOCK =
@@ -154,7 +159,7 @@ export async function runEngineSandboxed(
 ): Promise<SandboxedEngineResult> {
   const model = opts.model ?? cfg.foundry?.models?.[engine];
   const engineModel = `${engine}:${model ?? 'default'}`;
-  const tier = engineTierOf(engine);
+  const tier = engineTierOf(engine, cfg);
   const id =
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 

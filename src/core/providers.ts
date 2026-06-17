@@ -89,6 +89,10 @@ const CLOUD_PROVIDER_ENV: Record<string, string> = {
   gemini: 'GEMINI_API_KEY',
   cohere: 'COHERE_API_KEY',
   groq: 'GROQ_API_KEY',
+  nvidia_nim: 'NVIDIA_NIM_API_KEY',
+  moonshot: 'MOONSHOT_API_KEY',
+  kimi: 'MOONSHOT_API_KEY',
+  hermes_api: 'HERMES_API_KEY',
 };
 
 /**

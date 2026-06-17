@@ -23,6 +23,10 @@ const CLOUD_PROVIDERS = new Set([
   'groq',
   'mistral',
   'azure',
+  'nvidia_nim',
+  'moonshot',
+  'kimi',
+  'hermes_api',
 ]);
 
 const CLOUD_PROVIDER_ENV: Record<string, string> = {
@@ -33,7 +37,43 @@ const CLOUD_PROVIDER_ENV: Record<string, string> = {
   groq: 'GROQ_API_KEY',
   mistral: 'MISTRAL_API_KEY',
   azure: 'AZURE_OPENAI_API_KEY',
+  nvidia_nim: 'NVIDIA_NIM_API_KEY',
+  moonshot: 'MOONSHOT_API_KEY',
+  kimi: 'MOONSHOT_API_KEY',
+  hermes_api: 'HERMES_API_KEY',
 };
+
+// Base URLs for OpenAI-compatible cloud providers (override via *_BASE_URL env).
+const CLOUD_PROVIDER_BASE_URL: Record<string, string> = {
+  nvidia_nim: 'https://integrate.api.nvidia.com/v1',
+  moonshot: 'https://api.moonshot.ai/v1',
+  kimi: 'https://api.moonshot.ai/v1',
+  hermes_api: 'https://openrouter.ai/api/v1',
+};
+
+// Base-URL override env vars (e.g. NVIDIA_NIM_BASE_URL).
+const CLOUD_PROVIDER_BASE_URL_ENV: Record<string, string> = {
+  nvidia_nim: 'NVIDIA_NIM_BASE_URL',
+  moonshot: 'MOONSHOT_BASE_URL',
+  kimi: 'MOONSHOT_BASE_URL',
+  hermes_api: 'HERMES_API_BASE_URL',
+};
+
+// Default models for OpenAI-compatible cloud providers.
+const CLOUD_PROVIDER_DEFAULT_MODEL: Record<string, string> = {
+  nvidia_nim: 'meta/llama-3.1-70b-instruct',
+  moonshot: 'kimi-k2-0711-preview',
+  kimi: 'kimi-k2-0711-preview',
+  hermes_api: 'nousresearch/hermes-3-llama-3.1-70b',
+};
+
+/** Provider ids that speak the OpenAI /v1/chat/completions protocol. */
+const OPENAI_COMPAT_CLOUD_PROVIDERS = new Set([
+  'nvidia_nim',
+  'moonshot',
+  'kimi',
+  'hermes_api',
+]);
 
 function isCloudProvider(id: string): boolean {
   return CLOUD_PROVIDERS.has(id.toLowerCase());
@@ -529,21 +569,36 @@ function toOpenAIMessages(
   });
 }
 
-function buildLmStudioClient(
+/**
+ * Build an OpenAI-compatible chat client that works with any provider speaking
+ * the /v1/chat/completions protocol (LM Studio, NIM, Moonshot, OpenRouter, …).
+ *
+ * When `apiKey` is non-empty an `Authorization: Bearer <key>` header is added.
+ * When `apiKey` is empty the header is omitted — LM Studio requires no auth.
+ *
+ * Uses only global `fetch` — zero new dependencies.
+ */
+export function buildOpenAICompatibleClient(
   baseUrl: string,
+  apiKey: string,
   model: string,
   supportsTools: boolean,
   temperature?: number,
 ): ProviderClient {
-  const chatUrl = baseUrl.replace(/\/+$/, '') + '/v1/chat/completions';
+  const chatUrl = baseUrl.replace(/\/+$/, '') + '/chat/completions';
+
+  function buildHeaders(): Record<string, string> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+    return headers;
+  }
 
   return {
-    id: 'lmstudio',
+    id: 'openai-compat',
     model,
     supportsTools,
 
     async chat(messages: ChatMessage[], tools?: unknown[]): Promise<ChatResult> {
-      // Map ChatMessage roles to OpenAI shape
       const openaiMessages = toOpenAIMessages(messages);
 
       const body: Record<string, unknown> = {
@@ -563,24 +618,24 @@ function buildLmStudioClient(
       try {
         response = await fetchWithTimeout(chatUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: buildHeaders(),
           body: JSON.stringify(body),
         });
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(`LM Studio fetch failed: ${msg}`);
+        throw new Error(`OpenAI-compat fetch failed (${chatUrl}): ${msg}`);
       }
 
       if (!response.ok) {
         const errText = await response.text().catch(() => '');
-        throw new Error(`LM Studio HTTP ${response.status}: ${errText}`);
+        throw new Error(`OpenAI-compat HTTP ${response.status}: ${errText}`);
       }
 
       let data: unknown;
       try {
         data = (await response.json()) as unknown;
       } catch {
-        throw new Error('LM Studio returned non-JSON response');
+        throw new Error('OpenAI-compat returned non-JSON response');
       }
 
       const d = data as Record<string, unknown>;
@@ -642,36 +697,29 @@ function buildLmStudioClient(
             chatUrl,
             {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: buildHeaders(),
               body: JSON.stringify(body),
             },
             STREAM_TIMEOUT_MS,
           );
           response = opened.response;
           streamController = opened.controller;
-          // Headers are in; stop the connect timer. The read loop below arms its
-          // own per-read idle watchdog via streamController so a stalled body
-          // can't hang indefinitely.
           opened.clearConnectTimer();
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
-          throw new Error(`LM Studio stream fetch failed: ${msg}`);
+          throw new Error(`OpenAI-compat stream fetch failed: ${msg}`);
         }
 
         if (!response.ok) {
           const errText = await response.text().catch(() => '');
-          throw new Error(`LM Studio stream HTTP ${response.status}: ${errText}`);
+          throw new Error(`OpenAI-compat stream HTTP ${response.status}: ${errText}`);
         }
 
         if (!response.body) {
-          throw new Error('LM Studio stream response has no body');
+          throw new Error('OpenAI-compat stream response has no body');
         }
 
-        // Parse SSE: lines prefixed with "data: "; "[DONE]" marks end.
-        // Accumulate content deltas; collect tool_call fragments from the last
-        // non-[DONE] chunk; extract usage from the final chunk when present.
         let accContent = '';
-        // tool_calls may arrive as fragments across SSE chunks; accumulate index-keyed.
         const toolCallFragments: Record<
           number,
           { id: string; name: string; argsStr: string }
@@ -699,10 +747,9 @@ function buildLmStudioClient(
               const raw = lineBuffer.slice(0, nlIdx).trim();
               lineBuffer = lineBuffer.slice(nlIdx + 1);
 
-              // SSE lines either start with "data: " or are blank/comment lines.
               if (!raw.startsWith('data:')) continue;
 
-              const payload = raw.slice(5).trim(); // strip "data:" prefix
+              const payload = raw.slice(5).trim();
               if (payload === '[DONE]') continue;
 
               let chunk: Record<string, unknown>;
@@ -712,17 +759,12 @@ function buildLmStudioClient(
                 continue;
               }
 
-              // Extract usage when present (some providers send on the last chunk).
               const usageRaw = chunk['usage'] as Record<string, unknown> | undefined;
               if (usageRaw) {
                 const pt =
-                  typeof usageRaw['prompt_tokens'] === 'number'
-                    ? usageRaw['prompt_tokens']
-                    : 0;
+                  typeof usageRaw['prompt_tokens'] === 'number' ? usageRaw['prompt_tokens'] : 0;
                 const ct =
-                  typeof usageRaw['completion_tokens'] === 'number'
-                    ? usageRaw['completion_tokens']
-                    : 0;
+                  typeof usageRaw['completion_tokens'] === 'number' ? usageRaw['completion_tokens'] : 0;
                 if (pt > 0) tokensIn = pt;
                 if (ct > 0) tokensOut = ct;
               }
@@ -731,7 +773,6 @@ function buildLmStudioClient(
               const firstChoice = (choices[0] ?? {}) as Record<string, unknown>;
               const delta = (firstChoice['delta'] ?? {}) as Record<string, unknown>;
 
-              // Accumulate content delta
               const contentChunk =
                 typeof delta['content'] === 'string' ? delta['content'] : '';
               if (contentChunk) {
@@ -739,7 +780,6 @@ function buildLmStudioClient(
                 onDelta(contentChunk);
               }
 
-              // Accumulate tool_call fragments (OpenAI streaming splits them across chunks)
               if (Array.isArray(delta['tool_calls'])) {
                 for (const tc of delta['tool_calls'] as unknown[]) {
                   if (typeof tc !== 'object' || tc === null) continue;
@@ -748,17 +788,11 @@ function buildLmStudioClient(
                   if (!toolCallFragments[idx]) {
                     toolCallFragments[idx] = { id: '', name: '', argsStr: '' };
                   }
-                  if (typeof t['id'] === 'string') {
-                    toolCallFragments[idx].id = t['id'];
-                  }
+                  if (typeof t['id'] === 'string') toolCallFragments[idx].id = t['id'];
                   const fn = t['function'] as Record<string, unknown> | undefined;
                   if (fn) {
-                    if (typeof fn['name'] === 'string') {
-                      toolCallFragments[idx].name += fn['name'];
-                    }
-                    if (typeof fn['arguments'] === 'string') {
-                      toolCallFragments[idx].argsStr += fn['arguments'];
-                    }
+                    if (typeof fn['name'] === 'string') toolCallFragments[idx].name += fn['name'];
+                    if (typeof fn['arguments'] === 'string') toolCallFragments[idx].argsStr += fn['arguments'];
                   }
                 }
               }
@@ -768,25 +802,15 @@ function buildLmStudioClient(
           reader.releaseLock();
         }
 
-        // Fill in usage estimates if not reported by the server
-        if (tokensIn === 0) {
-          tokensIn = estimateTokens(messages.map((m) => m.content).join(' '));
-        }
-        if (tokensOut === 0) {
-          tokensOut = estimateTokens(accContent);
-        }
+        if (tokensIn === 0) tokensIn = estimateTokens(messages.map((m) => m.content).join(' '));
+        if (tokensOut === 0) tokensOut = estimateTokens(accContent);
 
-        // Reconstruct tool calls from accumulated fragments
         const toolCalls =
           Object.keys(toolCallFragments).length > 0
             ? Object.entries(toolCallFragments).map(([, frag]) => {
                 let args: unknown = frag.argsStr;
                 if (frag.argsStr) {
-                  try {
-                    args = JSON.parse(frag.argsStr) as unknown;
-                  } catch {
-                    // keep as raw string if parse fails
-                  }
+                  try { args = JSON.parse(frag.argsStr) as unknown; } catch { /* keep string */ }
                 }
                 return {
                   id: frag.id || `call_${Math.random().toString(36).slice(2)}`,
@@ -796,21 +820,32 @@ function buildLmStudioClient(
               })
             : undefined;
 
-        return {
-          content: accContent,
-          toolCalls,
-          usage: { tokensIn, tokensOut },
-        };
+        return { content: accContent, toolCalls, usage: { tokensIn, tokensOut } };
       } catch {
-        // Streaming failed — fall back to non-streaming chat() and emit as one delta.
         const result = await this.chat(messages, tools);
-        if (result.content) {
-          onDelta(result.content);
-        }
+        if (result.content) onDelta(result.content);
         return result;
       }
     },
   };
+}
+
+function buildLmStudioClient(
+  baseUrl: string,
+  model: string,
+  supportsTools: boolean,
+  temperature?: number,
+): ProviderClient {
+  // Delegate to the generic OpenAI-compat client (no auth key for LM Studio).
+  const client = buildOpenAICompatibleClient(
+    baseUrl + '/v1',
+    '',
+    model,
+    supportsTools,
+    temperature,
+  );
+  // Override id to preserve the existing 'lmstudio' identity.
+  return { ...client, id: 'lmstudio' };
 }
 
 // ---------------------------------------------------------------------------
@@ -890,11 +925,28 @@ export async function getActiveClient(
         );
       }
     }
-    // Cloud provider with key — not yet implemented in this client (local-first focus).
-    // Throw a clear informational error rather than silently doing nothing.
+    // Cloud provider with key — route OpenAI-compatible providers through the
+    // generic client. Unknown cloud providers (e.g. anthropic/gemini) still
+    // throw a clear error since they need their own SDK.
+    const id = activeId.toLowerCase();
+    if (OPENAI_COMPAT_CLOUD_PROVIDERS.has(id)) {
+      const envKeyName = CLOUD_PROVIDER_ENV[id] ?? '';
+      const apiKey = (envKeyName ? process.env[envKeyName] : undefined) ?? '';
+      const baseUrlEnvName = CLOUD_PROVIDER_BASE_URL_ENV[id];
+      const baseUrl =
+        (baseUrlEnvName ? process.env[baseUrlEnvName] : undefined)?.replace(/\/+$/, '') ??
+        CLOUD_PROVIDER_BASE_URL[id] ??
+        '';
+      const defaultModel = CLOUD_PROVIDER_DEFAULT_MODEL[id] ?? id;
+      const model = opts.model?.trim() || defaultModel;
+      const supportsTools = true;
+      const client = buildOpenAICompatibleClient(baseUrl, apiKey, model, supportsTools);
+      return { ...client, id };
+    }
+
     throw new Error(
       `local-first: cloud provider '${activeId}' was requested (--allow-cloud) but ` +
-        `this client does not yet implement cloud completions. ` +
+        `this client does not yet implement completions for that provider. ` +
         `Configure Ollama or LM Studio for local inference.`,
     );
   }

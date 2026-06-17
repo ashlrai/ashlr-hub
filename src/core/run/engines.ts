@@ -20,6 +20,7 @@
 import { spawnSync, execFileSync } from 'node:child_process';
 import type { AshlrConfig, EngineId, EngineCommand } from '../types.js';
 import { withToolEnv } from '../env-bridge.js';
+import { resolveEngineSpec, compileArgv } from './engine-registry.js';
 
 // ---------------------------------------------------------------------------
 // Phantom detection (cached, best-effort)
@@ -52,15 +53,16 @@ function phantomInstalled(): boolean {
  *
  * Best-effort, never throws.
  */
-export function engineInstalled(engine: EngineId): boolean {
+export function engineInstalled(engine: EngineId, cfg?: AshlrConfig): boolean {
   if (engine === 'builtin') return true;
-  const bins: Record<string, string[]> = {
-    claude: ['claude'],
-    codex: ['codex'],
-    aw: ['aw'],
-    ashlrcode: ['ac', 'ashlrcode'],
-  };
-  const candidates = bins[engine] ?? [engine];
+  const spec = resolveEngineSpec(engine, cfg);
+  // An OpenAI-compatible api-model is "installed" when its key is present (the
+  // local-first gate still applies at completion time); CLI agents probe PATH.
+  if (spec?.kind === 'api-model') {
+    const key = spec.api?.envKey;
+    return key ? Boolean(process.env[key]?.trim()) : false;
+  }
+  const candidates = spec?.bins ?? [spec?.bin ?? engine];
   for (const bin of candidates) {
     try {
       execFileSync(process.platform === 'win32' ? 'where' : 'which', [bin], { stdio: 'ignore' });
@@ -93,61 +95,23 @@ export function engineInstalled(engine: EngineId): boolean {
 export function buildEngineCommand(
   engine: EngineId,
   goal: string,
-  _cfg: AshlrConfig,
+  cfg: AshlrConfig,
   opts?: { cwd?: string; model?: string; autonomous?: boolean },
 ): EngineCommand | null {
-  if (engine === 'builtin') return null;
+  // M50: argv is driven by the declarative engine registry (single source of
+  // truth). The builtin engine and api-model engines have no CLI argv → null
+  // (api-models run through the in-process loop + provider client, not a spawn).
+  const spec = resolveEngineSpec(engine, cfg);
+  if (!spec || spec.kind !== 'cli-agent' || !spec.argv) return null;
 
   const cwd = opts?.cwd ?? process.cwd();
-  const model = opts?.model?.trim();
-
-  switch (engine) {
-    case 'claude': {
-      const args: string[] = ['-p', goal, '--output-format', 'json'];
-      if (model) {
-        // --model must come before --output-format per claude's -p mode
-        args.splice(2, 0, '--model', model);
-      }
-      if (opts?.autonomous) {
-        // M45: unattended, sandbox-confined edits. acceptEdits auto-applies file
-        // edits without prompting (least-privilege — it will not run bash); --add-dir
-        // scopes tool access to the worktree. Real containment is the throwaway
-        // worktree + severed git push creds (see sandboxed-engine.ts), and claude
-        // authenticates via its own HOME subscription session.
-        args.push('--permission-mode', 'acceptEdits', '--add-dir', cwd);
-      }
-      return { bin: 'claude', args, cwd };
-    }
-
-    case 'codex': {
-      // M45: non-interactive `codex exec`. `--sandbox workspace-write` is Codex's
-      // OWN sandbox — it may edit the workspace (the worktree) but has no network
-      // and asks for no approvals; this layers on top of our worktree containment.
-      // -C scopes the working root to the worktree; --json emits JSONL events.
-      const args: string[] = ['exec'];
-      if (model) args.push('--model', model);
-      args.push('--sandbox', 'workspace-write', '--cd', cwd, '--json', goal);
-      return { bin: 'codex', args, cwd };
-    }
-
-    case 'aw': {
-      const args: string[] = ['auto', goal, '--cwd', cwd];
-      if (model) {
-        args.push('--model', model);
-      }
-      return { bin: 'aw', args, cwd };
-    }
-
-    case 'ashlrcode': {
-      // Real CLI is 'ac' (alias 'ashlrcode'). Arg builder must be correct for
-      // when present; absence routes to builtin per M9/M10.
-      const args: string[] = ['--goal', goal];
-      return { bin: 'ac', args, cwd };
-    }
-
-    default:
-      return null;
-  }
+  const args = compileArgv(
+    spec.argv,
+    { goal, cwd, model: opts?.model, autonomous: opts?.autonomous },
+    spec.autonomousArgv,
+  );
+  const bin = spec.bin ?? spec.bins?.[0] ?? spec.id;
+  return { bin, args, cwd };
 }
 
 // ---------------------------------------------------------------------------
