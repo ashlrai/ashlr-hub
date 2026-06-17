@@ -9,6 +9,7 @@
 
 import type { AshlrConfig, ChatMessage, ChatResult, ProviderClient } from '../types.js';
 import { getProviderRegistry } from '../providers.js';
+import { resolveProviderKey } from '../integrations/secrets.js';
 import { resolveModelProfile, adaptivePromptsEnabled } from './model-profile.js';
 
 // ---------------------------------------------------------------------------
@@ -914,10 +915,11 @@ export async function getActiveClient(
           `Pass --allow-cloud to use it.`,
       );
     }
-    // allowCloud is true — verify the API key is present
+    // allowCloud is true — verify the API key is present. M65: resolve via the
+    // phantom vault first (phantom rewrites .env to worthless tokens), then env.
     const envVar = CLOUD_PROVIDER_ENV[activeId.toLowerCase()];
     if (envVar) {
-      const key = process.env[envVar];
+      const key = resolveProviderKey(envVar, cfg);
       if (!key || key.trim().length === 0) {
         throw new Error(
           `local-first: --allow-cloud passed but ${envVar} is not set. ` +
@@ -931,7 +933,7 @@ export async function getActiveClient(
     const id = activeId.toLowerCase();
     if (OPENAI_COMPAT_CLOUD_PROVIDERS.has(id)) {
       const envKeyName = CLOUD_PROVIDER_ENV[id] ?? '';
-      const apiKey = (envKeyName ? process.env[envKeyName] : undefined) ?? '';
+      const apiKey = (envKeyName ? resolveProviderKey(envKeyName, cfg) : undefined) ?? '';
       const baseUrlEnvName = CLOUD_PROVIDER_BASE_URL_ENV[id];
       const baseUrl =
         (baseUrlEnvName ? process.env[baseUrlEnvName] : undefined)?.replace(/\/+$/, '') ??
