@@ -169,6 +169,13 @@ const loadLoopCmd = lazyCmd(
   'loop command requires src/cli/loop.ts (M55 module not yet built).',
 );
 
+// ─── M73: surface the ecosystem `stack` tool from the hub ──────────────────
+const loadStackCmd = lazyCmd(
+  () => import('./stack.js' as unknown as string),
+  (m) => m.cmdStack as Cmd,
+  'stack command requires src/cli/stack.ts (M73 module not yet built).',
+);
+
 // ─── M5 lazy imports (graceful degradation if modules not yet built) ──────────
 
 import type { ActivityRollup } from '../core/types.js';
@@ -1551,6 +1558,14 @@ async function main(): Promise<void> {
         // M55: the conductor — run the proposal-first fleet over the portfolio.
         const cmdLoop = await loadLoopCmd();
         process.exitCode = await cmdLoop(rest);
+        break;
+      }
+
+      case 'stack': {
+        // M73: surface the ecosystem `stack` tool — read-only status/list/recommend,
+        // confirm-gated add/apply (real provisioning).
+        const cmdStack = await loadStackCmd();
+        process.exitCode = await cmdStack(rest);
         break;
       }
 

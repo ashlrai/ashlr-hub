@@ -5,6 +5,10 @@
  * READ-ONLY / ADVISORY by design: the hub DETECTS stack and reports status so an
  * agent or the operator knows what services are wired — it never auto-provisions
  * (`stack apply` stays a deliberate, user-initiated action). Never throws.
+ *
+ * M73: adds stackRun() — a bounded, never-throw passthrough runner used by the
+ * `ashlr stack` CLI layer. Mutating actions (add/apply) are gated at the CLI
+ * layer BEFORE calling stackRun; the runner itself is intentionally neutral.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -73,5 +77,50 @@ export function stackStatus(repo?: string): StackStatus {
     }
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// M73: stackRun — thin, bounded passthrough runner
+// ---------------------------------------------------------------------------
+
+export interface StackRunResult {
+  /** Whether the process exited 0. */
+  ok: boolean;
+  /** Combined stdout captured (may be empty for streaming calls). */
+  stdout: string;
+  /** Exit code (null when the process couldn't be launched). */
+  code: number | null;
+}
+
+/**
+ * Run `stack <args>` and return {ok, stdout, code}. Never throws. Bounded by
+ * TIMEOUT_MS. Mutating actions (add / apply) MUST be gated by the CLI layer
+ * (cmdStack) BEFORE this is called — this runner is intentionally neutral.
+ *
+ * @param args    Arguments to pass to the `stack` binary (e.g. ['add', 'postgres']).
+ * @param opts.cwd  Optional working directory (default: process.cwd()).
+ */
+export function stackRun(args: string[], opts?: { cwd?: string }): StackRunResult {
+  if (!stackInstalled()) {
+    return { ok: false, stdout: '', code: null };
+  }
+  try {
+    const res = spawnSync(STACK_BIN, args, {
+      cwd: opts?.cwd,
+      encoding: 'utf8',
+      timeout: TIMEOUT_MS,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env },
+    });
+    if (res.error) {
+      return { ok: false, stdout: '', code: null };
+    }
+    const stdout = (res.stdout ?? '').trimEnd();
+    const code = res.status ?? null;
+    return { ok: code === 0, stdout, code };
+  } catch (err) {
+    void err;
+    return { ok: false, stdout: '', code: null };
   }
 }
