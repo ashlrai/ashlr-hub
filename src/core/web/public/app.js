@@ -2174,7 +2174,7 @@ function renderControl() {
     }
   }
 
-  // ── M63: provider subscription/key status ─────────────────────────────────
+  // ── M63/M64: provider subscription/key status ────────────────────────────
   const subProviders = Array.isArray(subLimits.providers) ? subLimits.providers : [];
   if (subProviders.length > 0) {
     backendsBody.appendChild(el('div', { cls: 'ctrl-limits-heading' }, 'Provider status'));
@@ -2182,13 +2182,43 @@ function renderControl() {
       const kindBadge = el('span', {
         cls: `ctrl-prov-kind-badge ${p.kind === 'api-key' ? 'api-key' : 'subscription'}`
       }, p.kind === 'api-key' ? 'API key' : 'subscription');
-      const usedStr = typeof p.used === 'number' ? fmtK(p.used) + ' tok' : null;
-      backendsBody.appendChild(el('div', { cls: 'ctrl-prov-status-row' },
+
+      // M64: for providers with real used% (e.g. Codex), render a usage bar + reset time
+      // p.used is used_percent (0-100) when coming from Codex rate-limits
+      const hasUsedPct = typeof p.used === 'number' && p.used >= 0 && p.used <= 100;
+      const isSubscriptionPct = p.kind === 'subscription' && hasUsedPct;
+
+      const row = el('div', { cls: 'ctrl-prov-status-row' },
         el('span', { cls: 'ctrl-prov-status-name' }, p.provider ?? '?'),
         kindBadge,
         el('span', { cls: 'ctrl-prov-status-detail' }, p.detail ?? ''),
-        usedStr ? el('span', { cls: 'ctrl-prov-status-used' }, usedStr) : null
-      ));
+        // API-key providers show raw token counts; subscription providers with used%
+        // get a percentage badge (not "tok")
+        !isSubscriptionPct && typeof p.used === 'number'
+          ? el('span', { cls: 'ctrl-prov-status-used' }, fmtK(p.used) + ' tok')
+          : null
+      );
+
+      // Rate-limit bar for subscription providers with real used% data (Codex)
+      if (isSubscriptionPct) {
+        const pct = Math.min(100, Math.round(p.used));
+        const barColor = pct >= 90 ? 'var(--status-failed)'
+                       : pct >= 70 ? 'var(--status-aborted)'
+                       : 'var(--accent)';
+        const resetStr = p.resetAt
+          ? new Date(p.resetAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          : null;
+        const barWrap = el('div', { cls: 'ctrl-prov-rl-wrap' },
+          el('div', { cls: 'ctrl-prov-rl-bar-track' },
+            el('div', { cls: 'ctrl-prov-rl-bar', style: `width:${pct}%;background:${barColor}` })
+          ),
+          el('span', { cls: 'ctrl-prov-rl-pct' }, `${pct}%`),
+          resetStr ? el('span', { cls: 'ctrl-prov-rl-reset' }, `resets ${resetStr}`) : null
+        );
+        row.appendChild(barWrap);
+      }
+
+      backendsBody.appendChild(row);
     }
   }
 
