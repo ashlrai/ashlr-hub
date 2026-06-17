@@ -1,8 +1,8 @@
 # ashlr-hub
 
-**The local-first command center for the Ashlr dev-tool ecosystem.**
+**The local-first command center and autonomous engineering fleet for the Ashlr dev-tool ecosystem.**
 
-Index every project, run agents on local models, aggregate all your MCP servers, track spend, scaffold and ship, and give your whole stack shared private memory — all from one binary.
+One binary that indexes every project, runs a polyglot agent fleet against your codebase in sandboxed isolation, aggregates all your MCP servers, tracks real Claude + Codex spend, scaffolds and ships — and funnels every proposed change through a single human approval gate before anything touches a real branch.
 
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
@@ -36,7 +36,7 @@ ashlr init
 + rebuild; an npm install checks the registry and installs only with `--yes`.
 </details>
 
-`ashlr init` is the M20 capstone: it walks you through every setup step — config, local model detection, editor MCP wiring, symlink, genome dir, Phantom status — then runs `ashlr doctor` as a final gate and prints a `try: ashlr run / ashlr swarm / ashlr tui` next-steps summary. Re-runnable safely at any time; fully idempotent.
+`ashlr init` is the one-command onboarding entry point: it walks you through every setup step — config, local model detection, editor MCP wiring, symlink, genome dir, Phantom status — then runs `ashlr doctor` as a final gate and prints a `try: ashlr run / ashlr swarm / ashlr tui` next-steps summary. Re-runnable safely at any time; fully idempotent.
 
 ```
 $ ashlr init
@@ -587,7 +587,7 @@ Self-heal is always bounded (never loops), opt-out (`ASHLR_NO_HEAL=1`), and neve
 
 ## What is this?
 
-`ashlr-hub` is a command center for agentic engineers. It grew from a project navigator (M1) into a complete platform across 30 milestones — a local-first command center (M1–M20) plus a safety-first [autonomous engineering organization](#ashlr-v2--autonomous-engineering-organization) (M21–M30):
+`ashlr-hub` is a command center for agentic engineers, shipped as **v3.0.0** (`@ashlr/hub@3.0.0`). It grew from a project navigator into a complete platform across M1–M73 — a local-first command center (v1, M1–M20) + a safety-first [autonomous engineering organization](#ashlr-v2--autonomous-engineering-organization) (v2, M21–M30) + the Local Weapon that closes the quality gap between local models and the cloud (v3, M41–M44) + the **v4 Foundry** autonomous engineering fleet that builds and maintains the ecosystem in sandboxed isolation (M45–M49) + the **v5 Open Fleet** that adds polyglot backends, OS-level confinement, tri-tier trust, self-improving guards, and the `/goal`+`/loop` conductor (M50–M60). Every generation adds capability without relaxing the safety floor: proposal-only by default, human-gated, kill-switch backed.
 
 | Capability | Commands |
 |---|---|
@@ -608,9 +608,12 @@ Self-heal is always bounded (never loops), opt-out (`ASHLR_NO_HEAL=1`), and neve
 | **Cloud-ready seams (v2)** | `ashlr seams` |
 | **Harden & prove (v2.1)** | `ashlr verify-safety` · `ashlr sandbox gc` · `ashlr audit` · `ashlr preflight` · `ashlr onboard` · `ashlr demo` |
 | **Local Weapon (v3)** | `ashlr run --engineer [--bash]` · `ashlr eval` · adaptive prompts (`models.adaptivePrompts`) |
+| **Autonomous fleet (v4 Foundry)** | `ashlr fleet status/pause/resume` · sandboxed engine runner · tiered-trust merge gate · HMAC-signed provenance · 24/7 fleet supervisor |
+| **Open Fleet (v5)** | `ashlr goal` · `ashlr loop` · declarative engine registry · tri-tier trust (`local`/`mid`/`frontier`) · OS-level confinement (`sandbox-exec`) · budget-breach cascade · self-improving never-weaken guard · `ashlr fleet init` |
+| **Harness integrations** | `ashlr stack` · `ashlr mcp ecosystem` · hub→pulse OTLP bridge (`ashlr pulse connect`) · Phantom MCP aggregation · binshield security panel · ashlr-md proposal rendering |
 | **Maintain** | `ashlr update` |
 
-It is **local-first by design**. Index, config, runs, rollups, and memory all live under `~/.ashlr/`. Agent runs default to local models and refuse to touch a cloud endpoint unless you explicitly opt in. Telemetry is metadata-only; secrets flow through Phantom, never through the hub.
+It is **local-first by design**. Index, config, runs, rollups, and memory all live under `~/.ashlr/`. Agent runs default to local models and refuse to touch a cloud endpoint unless you explicitly opt in. Telemetry is metadata-only; secrets flow through Phantom, never through the hub. The fleet is **proposal-only by default** — auto-merge to `main` and `mid→branch` are both `DEFAULT OFF`; a `~/.ashlr/KILL` file halts every backend instantly.
 
 ---
 
