@@ -580,6 +580,7 @@ Self-heal is always bounded (never loops), opt-out (`ASHLR_NO_HEAL=1`), and neve
 | **Portfolio intelligence (v2)** | `ashlr knowledge build/impact/graph` · `ashlr ask` · `ashlr reflect` · `ashlr health` · `ashlr digest` |
 | **Cloud-ready seams (v2)** | `ashlr seams` |
 | **Harden & prove (v2.1)** | `ashlr verify-safety` · `ashlr sandbox gc` · `ashlr audit` · `ashlr preflight` · `ashlr onboard` · `ashlr demo` |
+| **Local Weapon (v3)** | `ashlr run --engineer [--bash]` · `ashlr eval` · adaptive prompts (`models.adaptivePrompts`) |
 | **Maintain** | `ashlr update` |
 
 It is **local-first by design**. Index, config, runs, rollups, and memory all live under `~/.ashlr/`. Agent runs default to local models and refuse to touch a cloud endpoint unless you explicitly opt in. Telemetry is metadata-only; secrets flow through Phantom, never through the hub.
@@ -643,7 +644,7 @@ Runs stream progress live to stderr (task starts, model deltas, tool calls, retr
 | `ashlr run show <id>` | Print the full `RunState` for a past run. |
 | `ashlr runs [--json]` | List all past runs, newest first. |
 
-Key flags: `--budget N` · `--max-steps N` · `--parallel N` · `--engine builtin|ashlrcode|aw|claude` · `--stream / --no-stream` · `--allow-cloud` · `--no-memory` · `--no-capture` · `--resume <id>`.
+Key flags: `--budget N` · `--max-steps N` · `--parallel N` · `--engine builtin|ashlrcode|aw|claude` · `--engineer [--bash]` (sandboxed engineering tools → inbox; see [Local Weapon](#local-weapon-v3--make-local-models-genuinely-capable)) · `--stream / --no-stream` · `--allow-cloud` · `--no-memory` · `--no-capture` · `--resume <id>`.
 
 ```sh
 ashlr run "Summarize the last 5 commits and flag risky changes"
@@ -692,6 +693,61 @@ ashlr models start            # best-effort start of an installed-but-idle Ollam
 ```
 Local savings (est):  $0.42   |   Cloud would-have-been: $0.47   |   Projected 30d: $0.18
 ```
+
+### Local Weapon (v3) — make local models genuinely capable
+
+v3 is a focused push to close the quality gap between local models (Ollama / LM Studio) and the cloud, without ever leaving your machine. Four shipped pieces — all opt-in, all bounded.
+
+#### Adaptive prompts (M41)
+
+A model-adaptive, layered system-prompt suite. ashlr auto-detects a per-model profile from the model name (size band + coder/general/small) and tunes **prompt verbosity, ReAct step cap, and sampling temperature** to fit the model actually serving the task — a 1.5B chat model and a 32B coder get very different scaffolding. Off by default; opt-in.
+
+```sh
+ashlr config set models.adaptivePrompts true   # config opt-in (default: false)
+ASHLR_ADAPTIVE_PROMPTS=1 ashlr run "<goal>"     # env opt-in (overrides config)
+```
+
+With the flag off the harness uses its legacy prompts and step cap unchanged — the whole suite is additive and gated.
+
+#### Engineering tool surface (M42)
+
+Give the local agent **real, sandboxed engineering tools** — read / glob / grep / write / edit — confined to a throwaway git worktree. The agent never touches your live working tree: the resulting diff is routed to the Approval Inbox as a PENDING proposal, exactly like every other outward action.
+
+```sh
+ashlr run "<goal>" --engineer          # sandboxed read/glob/grep/write/edit → inbox
+ashlr run "<goal>" --engineer --bash   # also allow sandboxed command/test execution
+ashlr inbox                            # review the proposed diff; nothing applies until you approve
+```
+
+Requires the repo to be **enrolled** (`ashlr enroll add <repo>`) and the kill switch off. Off by default.
+
+**Security posture** (structurally enforced):
+
+- **Kill-switch gated** — every mutating tool is REFUSED when `~/.ashlr/KILL` is set; checked first, cannot be bypassed.
+- **Workspace-boundary + enrollment enforced** — writes resolve only inside the sandbox worktree of an enrolled repo; paths outside the boundary are refused.
+- **Secret-scrubbed output** — tool output is secret-scrubbed before it reaches the model or any store.
+- **Diffs to inbox, never the live tree** — `write`/`edit` produce a proposal; approval is human-only via `ashlr inbox approve` (there is no agent-reachable apply path).
+- **Double opt-in for bash** — `--bash` is local code execution and requires `--engineer` **and** `--bash` together; it too is kill-switch gated and confined to the sandbox.
+
+#### Verify→repair loop (M43)
+
+After each task the agent runs the repo's detected typecheck / test / lint commands and feeds any failures back into a bounded repair pass. This generalizes the prior single retry into a loop — bounded by `--max-steps` and the run budget, so it can never spin without limit. Tune the headroom via the run budget flags (`--budget` / `--max-steps`).
+
+#### Eval harness (M44)
+
+Measure the local-model uplift on your own machine. `ashlr eval` runs a fixed fixture set through the agent loop twice per fixture — adaptive prompts **OFF** then **ON** — and reports steps-to-done, done count, and tokens for each.
+
+```sh
+ashlr eval                       # full fixture set, table output
+ashlr eval --limit 3             # only the first 3 fixtures
+ashlr eval --budget 8000 --json  # per-run token budget; machine-readable output
+```
+
+Needs a local model running (Ollama / LM Studio). When none is reachable it **skips gracefully** — prints a hint and exits 0, never an error.
+
+#### Cross-platform
+
+ashlr runs on **macOS, Linux, and Windows**. The engineering tools resolve the platform shell at runtime (e.g. `cmd.exe` on Windows, so `npm.cmd` / `npx.cmd` shims resolve via `PATHEXT`), and the local-model providers (Ollama / LM Studio) are plain HTTP, so no platform-specific runtime is required.
 
 ### Observe
 
@@ -803,7 +859,8 @@ ashlr telemetry test     # emit a synthetic test span; reports ok/fail
 
 ## Requirements
 
-- **macOS** · **Node.js 22+** · `~/.local/bin` on your `PATH`
+- **macOS, Linux, or Windows** · **Node.js 22+** · `~/.local/bin` on your `PATH` (POSIX)
+- The engineering tools (M42) resolve the platform shell at runtime (`cmd.exe` on Windows); the local-model providers are HTTP-based, so no platform-specific runtime is required.
 - Optional: [Ollama](https://ollama.com) or [LM Studio](https://lmstudio.ai) for local agent runs; [`phantom`](https://github.com/nicholasgasior/phantom) for secrets management; [Raycast](https://raycast.com) for the extension.
 
 ---
