@@ -2299,7 +2299,56 @@ function renderControl() {
   usageCard.appendChild(usageBody);
   section.appendChild(usageCard);
 
-  // ── 5. Activity log ───────────────────────────────────────────────────
+  // ── 5. Security (M67) ─────────────────────────────────────────────────
+  const sec = d.security ?? {};
+  const secFindings = Array.isArray(sec.findings) ? sec.findings : [];
+  const secCounts = sec.counts ?? {};
+
+  const secCard = el('div', { cls: 'ctrl-card card' });
+  secCard.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Security'),
+    el('span', { cls: 'card-subtitle' }, sec.available ? `${secFindings.length} finding(s)` : 'no data')
+  ));
+  const secBody = el('div', { cls: 'card-body' });
+
+  if (!sec.available || secFindings.length === 0) {
+    secBody.appendChild(el('p', { cls: 'hint' }, 'No security findings in cached backlog. Run a backlog scan to populate.'));
+  } else {
+    // Severity count badges
+    const countsRow = el('div', { cls: 'ctrl-sec-counts' });
+    if (secCounts.critical > 0) {
+      countsRow.appendChild(el('span', { cls: 'ctrl-sec-badge ctrl-sec-badge--critical' }, `${secCounts.critical} critical`));
+    }
+    if (secCounts.high > 0) {
+      countsRow.appendChild(el('span', { cls: 'ctrl-sec-badge ctrl-sec-badge--high' }, `${secCounts.high} high`));
+    }
+    if (secCounts.medium > 0) {
+      countsRow.appendChild(el('span', { cls: 'ctrl-sec-badge ctrl-sec-badge--medium' }, `${secCounts.medium} medium`));
+    }
+    if (secCounts.low > 0) {
+      countsRow.appendChild(el('span', { cls: 'ctrl-sec-badge ctrl-sec-badge--low' }, `${secCounts.low} low`));
+    }
+    secBody.appendChild(countsRow);
+
+    // Findings list (capped at 20 to keep the panel scannable)
+    const list = el('div', { cls: 'ctrl-sec-list' });
+    for (const f of secFindings.slice(0, 20)) {
+      const sev = f.severity ?? 'low';
+      list.appendChild(el('div', { cls: 'ctrl-sec-row' },
+        el('span', { cls: `ctrl-sec-sev ctrl-sec-sev--${sev}` }, sev),
+        el('span', { cls: 'ctrl-sec-repo' }, f.repo ?? '?'),
+        el('span', { cls: 'ctrl-sec-title' }, f.title ?? '')
+      ));
+    }
+    if (secFindings.length > 20) {
+      list.appendChild(el('p', { cls: 'hint' }, `+${secFindings.length - 20} more — run \`ashlr backlog\` to view all.`));
+    }
+    secBody.appendChild(list);
+  }
+  secCard.appendChild(secBody);
+  section.appendChild(secCard);
+
+  // ── 6. Activity log ───────────────────────────────────────────────────
   const logs = Array.isArray(d.logs) ? [...d.logs].reverse() : [];
 
   const logsCard = el('div', { cls: 'ctrl-card card' });

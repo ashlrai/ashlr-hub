@@ -23,6 +23,7 @@ import { buildRollup, modelToProviderKey, LOCAL_PROVIDER_KEYS } from '../observa
 import { loadDaemonState } from '../daemon/state.js';
 import { usesInWindow, evalQuota, windowToMs } from '../fleet/quota.js';
 import { resolveUsageWindows, type UsageWindow, type ProviderLimitEntry } from '../observability/limits.js';
+import { loadBacklog } from '../portfolio/backlog.js';
 
 // ---------------------------------------------------------------------------
 // ControlSnapshot type
@@ -85,6 +86,36 @@ export interface ControlLogEntry {
   msg: string;
 }
 
+// ---------------------------------------------------------------------------
+// M67: Security section
+// ---------------------------------------------------------------------------
+
+export interface ControlSecurityFinding {
+  /** Basename of the repo the finding came from. */
+  repo: string;
+  title: string;
+  severity: string;
+  /** The WorkItem source — always 'security' for binshield items. */
+  source: string;
+}
+
+export interface ControlSecurityCounts {
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+}
+
+export interface ControlSecurity {
+  /**
+   * True when at least one security WorkItem was found in the cached backlog.
+   * False when the backlog is absent, empty, or has no security-source items.
+   */
+  available: boolean;
+  findings: ControlSecurityFinding[];
+  counts: ControlSecurityCounts;
+}
+
 export interface ControlSnapshot {
   ts: string;
   models: ControlModels;
@@ -94,6 +125,8 @@ export interface ControlSnapshot {
   limits: ControlLimit[];
   subscriptionLimits: ControlSubscriptionLimits;
   logs: ControlLogEntry[];
+  /** M67: supply-chain / binshield security findings from cached backlog. */
+  security: ControlSecurity;
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +332,68 @@ function buildLogs(cap = LOG_CAP): ControlLogEntry[] {
 }
 
 // ---------------------------------------------------------------------------
+// M67: Security builder — reads cached backlog, never re-scans live.
+// ---------------------------------------------------------------------------
+
+/** Safe fallback for the security section. */
+function fallbackSecurity(): ControlSecurity {
+  return {
+    available: false,
+    findings: [],
+    counts: { critical: 0, high: 0, medium: 0, low: 0 },
+  };
+}
+
+/**
+ * Aggregate security WorkItems from the persisted backlog (~/.ashlr/backlog.json).
+ * Reads cached data only — never shells out to binshield live so /api/control
+ * stays fast. Degrades gracefully to available:false when the backlog is absent.
+ * Never throws.
+ */
+export function buildSecurity(): ControlSecurity {
+  try {
+    const backlog = loadBacklog();
+    if (!backlog) return fallbackSecurity();
+
+    const secItems = backlog.items.filter((item) => item.source === 'security');
+    if (secItems.length === 0) return fallbackSecurity();
+
+    const counts: ControlSecurityCounts = { critical: 0, high: 0, medium: 0, low: 0 };
+    const findings: ControlSecurityFinding[] = [];
+
+    for (const item of secItems) {
+      // Severity is the third tag when tags = ['security', 'binshield', <sev>].
+      // Fall back to scanning all tags for a known severity keyword.
+      const tags = Array.isArray(item.tags) ? item.tags : [];
+      const sev =
+        (tags[2] as string | undefined) ??
+        tags.find((t) => ['critical', 'high', 'medium', 'low'].includes(t)) ??
+        'low';
+
+      if (sev === 'critical') counts.critical++;
+      else if (sev === 'high') counts.high++;
+      else if (sev === 'medium') counts.medium++;
+      else counts.low++;
+
+      findings.push({
+        repo: item.repo.split('/').pop() ?? item.repo,
+        title: item.title,
+        severity: sev,
+        source: item.source,
+      });
+    }
+
+    // Sort: critical first, then high, medium, low — same order as backlog display.
+    const SEV_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+    findings.sort((a, b) => (SEV_ORDER[a.severity] ?? 4) - (SEV_ORDER[b.severity] ?? 4));
+
+    return { available: true, findings, counts };
+  } catch {
+    return fallbackSecurity();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
@@ -327,6 +422,7 @@ export async function buildControlSnapshot(cfg: AshlrConfig): Promise<ControlSna
   const limits = buildLimits(cfg);
   const subscriptionLimits = await buildSubscriptionLimits(cfg);
   const logs = buildLogs(LOG_CAP);
+  const security = buildSecurity();
 
-  return { ts, models, fleet, daemon, usage, limits, subscriptionLimits, logs };
+  return { ts, models, fleet, daemon, usage, limits, subscriptionLimits, logs, security };
 }

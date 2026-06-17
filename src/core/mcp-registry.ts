@@ -32,6 +32,8 @@ export function knownConfigPaths(): string[] {
     // ashlr-workbench agent settings (two candidate locations)
     join(home, '.ashlr-workbench', 'settings.json'),
     join(home, '.aw', 'settings.json'),
+    // M66: hub-registered ecosystem servers live here; gateway aggregates them automatically.
+    join(home, '.ashlr', 'settings.json'),
   ];
 }
 

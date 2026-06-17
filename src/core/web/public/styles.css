@@ -2419,3 +2419,57 @@ a:hover {
 .ctrl-log-kind--done    { color: var(--status-done);    background: rgba(52, 211, 153, 0.1); }
 .ctrl-log-kind--debug   { color: var(--text-muted);     background: var(--bg-elevated); }
 .ctrl-log-msg  { color: var(--text-primary); word-break: break-word; }
+
+/* ── M67: Security panel ─────────────────────────────────────────────────── */
+.ctrl-sec-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.ctrl-sec-badge {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: var(--radius-full);
+  padding: 2px 10px;
+}
+.ctrl-sec-badge--critical { color: #fff;               background: var(--status-failed); }
+.ctrl-sec-badge--high     { color: var(--text-inverse); background: var(--status-aborted); }
+.ctrl-sec-badge--medium   { color: var(--text-inverse); background: #facc15; }
+.ctrl-sec-badge--low      { color: var(--text-primary); background: var(--bg-elevated); border: 1px solid var(--border-default); }
+
+.ctrl-sec-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ctrl-sec-row {
+  display: grid;
+  grid-template-columns: 72px 120px 1fr;
+  gap: var(--space-3);
+  align-items: baseline;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+}
+.ctrl-sec-row:hover { background: var(--bg-hover); }
+
+.ctrl-sec-sev {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  text-align: center;
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+}
+.ctrl-sec-sev--critical { color: var(--status-failed);  background: rgba(248, 113, 113, 0.15); }
+.ctrl-sec-sev--high     { color: var(--status-aborted); background: rgba(251, 146, 60, 0.15); }
+.ctrl-sec-sev--medium   { color: #facc15;               background: rgba(250, 204, 21, 0.12); }
+.ctrl-sec-sev--low      { color: var(--text-muted);     background: var(--bg-elevated); }
+
+.ctrl-sec-repo  { color: var(--text-secondary); font-family: var(--font-mono); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ctrl-sec-title { color: var(--text-primary); word-break: break-word; }
