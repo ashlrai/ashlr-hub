@@ -1958,6 +1958,10 @@ export interface DaemonTick {
   /** Why the tick did what it did (e.g. 'ok', 'kill-switch', 'budget-exhausted',
    *  'no-enrolled-repos', 'no-backlog', 'dry-run'). */
   reason: string;
+  /** M48: per-backend dispatch counts this tick (e.g. {builtin:2, claude:1}). */
+  backends?: Record<string, number>;
+  /** M48: proposals auto-merged this tick via the M47 gate (omitted/0 when disabled). */
+  merged?: number;
 }
 
 /**

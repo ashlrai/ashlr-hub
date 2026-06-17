@@ -170,7 +170,7 @@ Core M45 mechanics, already shipped (`src/core/run/sandboxed-engine.ts`):
 | Multi-backend sandboxed engines | Codex + headless-autonomous Claude adapters; `runEngineSandboxed` confines any external CLI, severs push, captures diff-only, trust-tags every run/proposal | **M45 (shipped)** |
 | Backend router + rate/quota scheduler | Capability-tiered routing per backlog item; per-subscription rate windows saturate Claude/Codex within limits, spill volume to local | M46 ✓ |
 | Tiered-trust merge gate | Graduated auto-apply: verified low-risk → branches; `main`/prod requires CI green **and** a frontier merge-authority model | M47 ✓ |
-| Fleet supervisor (24/7) | Continuous multi-backend, multi-repo daemon; swarm per-task routing reusing existing worktrees | M48 |
+| Fleet supervisor (24/7) | Continuous multi-backend, multi-repo daemon; per-item backend routing (M46) + quota fallback, frontier items as whole-item sandboxed runs (M45), opt-in M47 auto-merge pass (default off) | M48 ✓ |
 | Fleet control plane + observability | Live per-backend throughput, queues, merges, per-repo health, per-tier budgets, pause/kill | M49 |
 
 ## 7. Roadmap (M45–M49)
@@ -185,7 +185,7 @@ each shipping standalone value. Effort: S ≈ 1–2d · M ≈ 3–5d · L ≈ 1�
 | **M46** | **Backend router + rate/quota scheduler** — route each backlog item to a backend by class/difficulty (capability-tiered over `cfg.foundry.allowedBackends`); track per-subscription rate windows so the fleet saturates Claude/Codex within limits and spills unbounded volume to local. (Codex `--sandbox workspace-write` is its own additive sandbox; note it as defense-in-depth atop our worktree containment.) | the right work to the right backend, within subscription limits | M | **Shipped** |
 | **M47** | **Tiered-trust merge gate** — graduated auto-apply: low-risk verified classes → branches; **merge-to-`main` / push-to-prod requires full CI/verify green AND a frontier merge-authority model** matching `cfg.foundry.mergeAuthority` (today `[{engine:'claude',model:'<opus-4.8>'},{engine:'codex',model:'<gpt-5.5>'}]`). Extends `inbox/apply.ts`; kill-switch + human override always available. | trust-gated path to `main`, fully verified | M–L | **Shipped** (signed provenance → M47.1) |
 | **M47.1** | **Signed provenance** — HMAC-bind `{engineModel, engineTier, diffHash}` at sandboxed-producer time and re-verify in the merge gate, so a local/in-process writer can't forge frontier merge-authority on a proposal record (review finding H3; today bounded by the default-disabled posture + the agent MCP surface being unable to set those fields). | merge authority can't be spoofed on disk | S–M | Planned |
-| **M48** | **Fleet supervisor (24/7)** — extend the daemon into a continuous multi-backend, multi-repo supervisor; wire swarm per-task backend routing (reusing the swarm's existing worktree via `runEngineSandboxed(existingWorktree)`); keep local saturated + Claude/Codex busy within quota across all enrolled repos. | the fleet runs itself, around the clock, across the portfolio | L | Planned |
+| **M48** | **Fleet supervisor (24/7)** — extend the daemon into a continuous multi-backend, multi-repo supervisor. The daemon `tick()` now routes each backlog item to a backend via `routeBackend` (M46) with a `withinLimit` quota check (a frontier item over quota falls back to local); local items run the builtin swarm, while frontier items (claude/codex) run as ONE sandboxed-external `runGoal` (M45) producing a PENDING proposal. After dispatch, an OPT-IN auto-merge pass (`fleet/automerge-pass.runAutoMergePass`, gated by `cfg.foundry.autoMerge.enabled`, **DEFAULT OFF**) runs the M47 gate over pending frontier proposals. The daemon's own source imports no merge/apply primitive (`daemon-no-primitive` contract holds; the merge pass is a separate module). Keep local saturated + Claude/Codex busy within quota across all enrolled repos. (Swarm per-task routing — the originally-planned nested-worktree variant — proved unnecessary: frontier backends run as whole-item sandboxed runs.) | the fleet runs itself, around the clock, across the portfolio | L | **Shipped** |
 | **M49** | **Fleet control plane + observability** — live dashboard/CLI: per-backend throughput, queue, merges-to-main, per-repo health trends, per-tier budgets/quotas, pause/kill. Extends the web UI. | one glance at the whole fleet; one button to stop it | M | Planned |
 
 ## 8. Hard Gates (the loop STOPS and asks)
@@ -204,7 +204,7 @@ each shipping standalone value. Effort: S ≈ 1–2d · M ≈ 3–5d · L ≈ 1�
 
 ## 9. Safety Invariants (each → a named adversarial test)
 
-The entire v1–v3 set carries forward verbatim. v4 adds nine fleet invariants,
+The entire v1–v3 set carries forward verbatim. v4 adds ten fleet invariants,
 each of which must have a named adversarial test before its milestone closes.
 
 1. **Local-first degradation** — no `cfg.foundry` ⇒ byte-identical builtin /
@@ -238,7 +238,11 @@ each of which must have a named adversarial test before its milestone closes.
 8. **Kill halts every backend** — the kill-switch stops local, Claude, and Codex
    work across all enrolled repos; an in-flight sandboxed run is torn down. →
    `m48.supervisor` kill-all test.
-9. **Zero new runtime deps** — v4 adds no runtime dependency; backends are CLIs
+9. **Daemon is proposal-only by default** — proposal-only by default; the
+   daemon's own source imports no merge/apply primitive; auto-merge is a
+   separate, gated subsystem (M47 gate) that is DEFAULT OFF. → cite
+   `test/h1.daemon-gates.test.ts` (source-scan) + `test/m48.automerge-pass.test.ts`.
+10. **Zero new runtime deps** — v4 adds no runtime dependency; backends are CLIs
    the user already has. → dependency-manifest grep-guard, full suite.
 
 ## 10. Non-Goals (explicit)

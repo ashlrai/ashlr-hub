@@ -9,11 +9,16 @@
  *  - stopDaemon(): set kill switch + clear running state.
  *
  * NON-NEGOTIABLE GUARDRAILS (enforced here, grep-provable):
- *  1. PROPOSAL-ONLY: this file has NO outward-action path whatsoever. Its ONLY
- *     inbox output is a PENDING proposal, produced indirectly by the swarm
- *     runner when this file passes { propose: true } to runSwarm. A PENDING
- *     proposal is applied LATER only by an explicit human inbox approve.
- *     This file imports no apply/push/PR/deploy primitive.
+ *  1. PROPOSAL-FIRST (proposal-only by default): every dispatch produces a
+ *     PENDING inbox proposal (via the swarm runner or a sandboxed engine, with
+ *     { propose: true }) — applied LATER only by explicit human approval. This
+ *     file itself imports NO apply / push / PR-create / deploy primitive (the
+ *     `daemon-no-primitive` contract). M48: an OPT-IN auto-merge pass
+ *     (cfg.foundry.autoMerge.enabled, DEFAULT OFF) is delegated to a SEPARATE
+ *     module (fleet/automerge-pass) and may merge a proposal to main ONLY
+ *     through the M47 tiered-trust gate (frontier merge-authority + risk ≤
+ *     maxRisk + full verify + kill-switch + enrollment). With autoMerge disabled
+ *     the daemon stays strictly proposal-only.
  *  2. ENROLLMENT-ONLY: operates exclusively on listEnrolled() repos.
  *     DEFAULT EMPTY => the daemon does NOTHING.
  *  3. SANDBOXED: every runSwarm call sets opts.sandbox = true so all
@@ -35,6 +40,10 @@ import { buildBacklog } from '../portfolio/backlog.js';
 import { loadDaemonState, saveDaemonState, resetDayIfNeeded } from './state.js';
 import { nullSink } from '../run/streaming.js';
 import { runSwarm } from '../swarm/runner.js';
+import { runGoal } from '../run/orchestrator.js';
+import { routeBackend } from '../fleet/router.js';
+import { withinLimit, recordUse } from '../fleet/quota.js';
+import { runAutoMergePass } from '../fleet/automerge-pass.js';
 import { pendingCount } from '../inbox/store.js';
 
 // ---------------------------------------------------------------------------
@@ -295,6 +304,8 @@ export async function tick(
   // reaches the remaining daily headroom (the USD daily cap is otherwise only
   // enforced BETWEEN ticks — this keeps a single tick from overshooting it).
   let tickSpent = 0;
+  // M48: per-backend dispatch tally for this tick (observability only).
+  const backendDispatch: Record<string, number> = {};
 
   // Per-item USD budget slice: divide remaining budget evenly across items.
   const perItemUsdSlice = remainingBudget / selected.length;
@@ -334,60 +345,93 @@ export async function tick(
     let swarmSpent = 0;
     let dispatched = false;
 
+    // M48: route this item to a backend (M46). Default (no cfg.foundry) →
+    // 'builtin'. A frontier backend over its rolling rate quota falls back to
+    // local so work keeps flowing without exceeding the subscription's limit.
+    const routed = routeBackend(item, cfg);
+    let backend = routed.backend;
+    if (backend !== 'builtin' && !withinLimit(backend, cfg)) {
+      backend = 'builtin';
+    }
+
+    const goal = `${item.title}\n\n${item.detail}`.trim();
+    const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
+
     // Snapshot ASHLR_IN_SWARM and restore it after the call. The swarm runner
     // sets ASHLR_IN_SWARM=1 on THIS (long-lived) process and does not unwind it;
-    // without this restore, the 2nd..Kth runSwarm in a tick — and every tick
-    // after the first in loop mode — would hit the recursion guard and refuse,
-    // silently neutering the daemon. Restoring keeps each dispatch clean while
-    // the runner's own child-spawn inheritance still works during the call.
+    // restoring keeps each subsequent dispatch / tick from hitting the recursion
+    // guard while the runner's own child-spawn inheritance still works mid-call.
     const prevInSwarm = process.env['ASHLR_IN_SWARM'];
 
     try {
       const sink = nullSink();
       dispatched = true;
-      const swarmRun = await runSwarm(
-        { goal: `${item.title}\n\n${item.detail}`.trim() },
-        cfg,
-        {
-          sandbox: true,             // M21: isolated git-worktree — NEVER user's tree
-          requireSandbox: true,      // M24: sandbox is MANDATORY — abort (zero tasks) if it can't be created; NEVER touch the real tree
-          propose: true,             // M24: swarm records its diff as a PENDING inbox proposal
-          project: item.repo,
-          budget: {
-            maxTokens: perItemMaxTokens,
-            maxSteps: 100,
-            allowCloud: false,       // local-first; no cloud spend by default
+      backendDispatch[backend] = (backendDispatch[backend] ?? 0) + 1;
+
+      if (backend === 'builtin') {
+        const swarmRun = await runSwarm(
+          { goal },
+          cfg,
+          {
+            sandbox: true,             // M21: isolated git-worktree — NEVER user's tree
+            requireSandbox: true,      // M24: sandbox MANDATORY — abort if it can't be created
+            propose: true,             // M24: swarm records its diff as a PENDING inbox proposal
+            project: item.repo,
+            budget: itemBudget,
+            parallel: 1,
+            dryRun: false,
+            noCapture: true,
           },
-          parallel: 1,              // inner swarm parallelism kept minimal
-          dryRun: false,
-          noCapture: true,           // genome capture not needed for daemon proposals
-        },
-        sink,
-      );
+          sink,
+        );
 
-      // Estimate actual spend from swarm usage and add it to the shared tally
-      // so concurrent/subsequent items see the up-to-date headroom.
-      swarmSpent = swarmRun.usage?.estCostUsd ?? 0;
-      tickSpent += swarmSpent;
+        swarmSpent = swarmRun.usage?.estCostUsd ?? 0;
+        tickSpent += swarmSpent;
 
-      audit({
-        action: 'daemon:proposal-created',
-        repo: item.repo,
-        sandboxId: null,
-        summary: `swarm ${swarmRun.id} finished (status=${swarmRun.status}, spent=$${swarmSpent.toFixed(4)}) for "${item.title}"`,
-        result: 'ok',
-      });
+        audit({
+          action: 'daemon:proposal-created',
+          repo: item.repo,
+          sandboxId: null,
+          summary: `swarm ${swarmRun.id} finished (status=${swarmRun.status}, spent=$${swarmSpent.toFixed(4)}) for "${item.title}"`,
+          result: 'ok',
+        });
+      } else {
+        // M48: a frontier backend (claude/codex) is itself a full agent — run
+        // the WHOLE item as ONE sandboxed-external run (M45): worktree → agent →
+        // diff → PENDING proposal. No nested swarm. M45 containment (severed git
+        // push, scrubbed diff) + the M47 merge gate still apply downstream.
+        recordUse(backend);
+        const runState = await runGoal(goal, cfg, {
+          engine: backend,
+          sandboxEngine: true,
+          requireSandbox: true,
+          cwd: item.repo,
+          budget: itemBudget,
+          tools: true,
+          noMemory: false,
+        });
+
+        swarmSpent = runState.usage?.estCostUsd ?? 0;
+        tickSpent += swarmSpent;
+
+        audit({
+          action: 'daemon:proposal-created',
+          repo: item.repo,
+          sandboxId: null,
+          summary: `${backend} run ${runState.id} finished (status=${runState.status}, spent=$${swarmSpent.toFixed(4)}) for "${item.title}"`,
+          result: 'ok',
+        });
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       audit({
         action: 'daemon:swarm-error',
         repo: item.repo,
         sandboxId: null,
-        summary: `swarm failed for "${item.title}": ${msg.slice(0, 200)}`,
+        summary: `${backend} dispatch failed for "${item.title}": ${msg.slice(0, 200)}`,
         result: 'error',
       });
     } finally {
-      // Restore ASHLR_IN_SWARM so the next dispatch / next tick is not refused.
       if (prevInSwarm === undefined) delete process.env['ASHLR_IN_SWARM'];
       else process.env['ASHLR_IN_SWARM'] = prevInSwarm;
     }
@@ -410,6 +454,15 @@ export async function tick(
   let proposalsCreated = 0;
   try { proposalsCreated = Math.max(0, pendingCount() - pendingBefore); } catch { proposalsCreated = 0; }
 
+  // M48: OPT-IN auto-merge pass (cfg.foundry.autoMerge.enabled, DEFAULT OFF).
+  // Delegated to fleet/automerge-pass so THIS file imports no merge primitive.
+  // Every merge runs the M47 tiered-trust gate (frontier authority + risk ≤
+  // maxRisk + full verify + kill-switch + enrollment); unauthorized proposals
+  // stay PENDING. With autoMerge disabled this is a no-op — the daemon stays
+  // strictly proposal-only.
+  let merged = 0;
+  try { merged = (await runAutoMergePass(cfg)).merged; } catch { merged = 0; }
+
   // -------------------------------------------------------------------------
   // 7. Update + persist state with this tick's accounting.
   // -------------------------------------------------------------------------
@@ -425,6 +478,8 @@ export async function tick(
     proposalsCreated,
     spentUsd: tickSpent,
     reason: 'ok',
+    ...(Object.keys(backendDispatch).length > 0 ? { backends: backendDispatch } : {}),
+    ...(merged > 0 ? { merged } : {}),
   };
   state.ticks = [...state.ticks, tickRecord];
   saveDaemonState(state);
@@ -433,7 +488,7 @@ export async function tick(
     action: 'daemon:tick',
     repo: null,
     sandboxId: null,
-    summary: `tick ok: ${selected.length} item(s) considered, ${proposalsCreated} proposal(s) created, $${tickSpent.toFixed(4)} spent`,
+    summary: `tick ok: ${selected.length} item(s) considered, ${proposalsCreated} proposal(s) created, ${merged} merged, $${tickSpent.toFixed(4)} spent`,
     result: 'ok',
   });
 
