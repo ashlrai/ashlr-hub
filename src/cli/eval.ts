@@ -19,7 +19,7 @@ import type { RunOptions, RunState, AshlrConfig } from '../core/types.js';
 import { EVAL_FIXTURES, type EvalFixture } from './eval-fixtures.js';
 import { makeColors, isTty, pad } from './ui.js';
 
-const { bold, dim, green, yellow, red, cyan, gray } = makeColors(isTty());
+const { bold, dim, yellow, red, cyan, gray } = makeColors(isTty());
 
 // ---------------------------------------------------------------------------
 // Public, pure data shapes (testable without runGoal)
@@ -365,6 +365,4 @@ function printEvalHelp(): void {
   console.log(`    ${gray('adaptive prompts OFF then ON — and reports steps/done/tokens.')}`);
   console.log(`    ${gray('Needs a local model (Ollama / LM Studio); skips cleanly if none.')}`);
   console.log('');
-  // Reference unused color so lint stays quiet across builds.
-  void green;
 }

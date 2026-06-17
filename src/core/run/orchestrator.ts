@@ -1563,14 +1563,17 @@ export async function runGoal(
           // over budget (a budget abort can annotate a 'done' result the
           // heuristic would flag as a false-positive fail).
           if (task.status === 'done' && !overBudget(state.usage, budget)) {
-            const maxRepairs = Math.max(0, opts.maxRepairs ?? 2);
-            let verifyClient = taskClient;
-            let verdict = await verifyTaskStructured(task, verifyClient, budget, state.usage, {
+            const maxRepairs = Math.max(0, opts.maxRepairs ?? (engCtx?.allowExec ? 2 : 1)); // flag-off parity: plain run = 1 retry; engineer runs get up to 2 bounded repairs
+            // Single source for the verify options (avoids drift between the
+            // initial verify and the in-loop re-verify).
+            const verifyOpts = {
               model: verifyModel,
               workspaceRoot: engCtx?.workspaceRoot,
               allowExec: engCtx?.allowExec ?? false,
               cfg,
-            });
+            };
+            let verifyClient = taskClient;
+            let verdict = await verifyTaskStructured(task, verifyClient, budget, state.usage, verifyOpts);
             emit(sink, { kind: 'verify', taskId: task.id, text: verdict.reason, data: verdict });
 
             let repair = 0;
@@ -1623,12 +1626,7 @@ export async function runGoal(
 
               if ((task.status as string) !== 'done') break;
 
-              verdict = await verifyTaskStructured(task, verifyClient, budget, state.usage, {
-                model: verifyModel,
-                workspaceRoot: engCtx?.workspaceRoot,
-                allowExec: engCtx?.allowExec ?? false,
-                cfg,
-              });
+              verdict = await verifyTaskStructured(task, verifyClient, budget, state.usage, verifyOpts);
               emit(sink, { kind: 'verify', taskId: task.id, text: verdict.reason, data: verdict });
             }
 

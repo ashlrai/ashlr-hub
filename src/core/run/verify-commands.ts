@@ -81,38 +81,41 @@ function runScriptArgv(pm: string, script: string): string[] {
   return [pm, 'run', script];
 }
 
-/** Read & parse package.json scripts; returns {} on any error. */
-function readScripts(root: string): Record<string, string> {
+/** The subset of package.json fields verification detection cares about. */
+interface PackageJson {
+  scripts?: Record<string, unknown>;
+  dependencies?: Record<string, unknown>;
+  devDependencies?: Record<string, unknown>;
+}
+
+/** Read & parse package.json once; returns the parsed object or null on any error. */
+function readPackageJson(root: string): PackageJson | null {
   try {
     const raw = readFileSync(join(root, 'package.json'), 'utf8');
-    const pkg = JSON.parse(raw) as { scripts?: Record<string, unknown> };
-    const scripts = pkg.scripts;
-    if (!scripts || typeof scripts !== 'object') return {};
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(scripts)) {
-      if (typeof v === 'string') out[k] = v;
-    }
-    return out;
+    return JSON.parse(raw) as PackageJson;
   } catch {
-    return {};
+    return null;
   }
 }
 
-/** True when the package.json declares `dep` in deps or devDeps. */
-function hasDep(root: string, dep: string): boolean {
-  try {
-    const raw = readFileSync(join(root, 'package.json'), 'utf8');
-    const pkg = JSON.parse(raw) as {
-      dependencies?: Record<string, unknown>;
-      devDependencies?: Record<string, unknown>;
-    };
-    return (
-      (pkg.dependencies !== undefined && dep in pkg.dependencies) ||
-      (pkg.devDependencies !== undefined && dep in pkg.devDependencies)
-    );
-  } catch {
-    return false;
+/** Extract the string-valued scripts map from a parsed package.json; {} when absent. */
+function scriptsOf(pkg: PackageJson | null): Record<string, string> {
+  const scripts = pkg?.scripts;
+  if (!scripts || typeof scripts !== 'object') return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(scripts)) {
+    if (typeof v === 'string') out[k] = v;
   }
+  return out;
+}
+
+/** True when the parsed package.json declares `dep` in deps or devDeps. */
+function hasDep(pkg: PackageJson | null, dep: string): boolean {
+  if (!pkg) return false;
+  return (
+    (pkg.dependencies !== undefined && dep in pkg.dependencies) ||
+    (pkg.devDependencies !== undefined && dep in pkg.devDependencies)
+  );
 }
 
 /** True when a file matching `<prefix>.<ext>` exists for any common config ext. */
@@ -148,7 +151,8 @@ function hasConfigFile(root: string, prefix: string): boolean {
  */
 export function detectVerifyCommands(workspaceRoot: string): VerifyCommand[] {
   const commands: VerifyCommand[] = [];
-  const scripts = readScripts(workspaceRoot);
+  const pkg = readPackageJson(workspaceRoot);
+  const scripts = scriptsOf(pkg);
   const pm = detectPackageManager(workspaceRoot);
 
   // --- typecheck ---
@@ -161,7 +165,7 @@ export function detectVerifyCommands(workspaceRoot: string): VerifyCommand[] {
   // --- test ---
   if (scripts['test']) {
     commands.push({ kind: 'test', cmd: runScriptArgv(pm, 'test') });
-  } else if (hasDep(workspaceRoot, 'vitest') || hasConfigFile(workspaceRoot, 'vitest.config')) {
+  } else if (hasDep(pkg, 'vitest') || hasConfigFile(workspaceRoot, 'vitest.config')) {
     commands.push({ kind: 'test', cmd: ['npx', 'vitest', 'run'] });
   }
 

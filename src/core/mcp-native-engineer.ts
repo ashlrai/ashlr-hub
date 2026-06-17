@@ -957,21 +957,6 @@ const ENGINEER_TOOLS: EngineerTool[] = [
   },
 ];
 
-/** Diagnostics/docs surface: the engineer tool defs (no handlers). */
-export function engineerToolDefs(): Array<{
-  name: string;
-  description: string;
-  inputSchema: object;
-  safety: NativeToolSafety;
-}> {
-  return ENGINEER_TOOLS.map(({ name, description, inputSchema, safety }) => ({
-    name,
-    description,
-    inputSchema,
-    safety,
-  }));
-}
-
 // ---------------------------------------------------------------------------
 // callEngineerTool — the gated pipeline (mirrors callNativeTool)
 // ---------------------------------------------------------------------------
