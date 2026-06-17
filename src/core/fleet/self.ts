@@ -61,7 +61,7 @@ export function isSelfTargetProposal(proposal: Proposal, _cfg?: AshlrConfig): bo
  * diff that deletes one of these, or nets out assertions from one, is refused.
  */
 const SAFETY_FILE_PATTERNS: readonly RegExp[] = [
-  /^test\/h\d+[.\-].*\.test\.ts$/, // h1..h8 hardening / invariant suites
+  /^test\/h\d+[.-].*\.test\.ts$/, // h1..h8 hardening / invariant suites
   /^test\/m45\.foundry\.test\.ts$/, // sandboxed-engine containment
   /^test\/m47[._].*\.test\.ts$/, // merge gate + provenance
   /^test\/m51\.trust\.test\.ts$/, // tri-tier trust
