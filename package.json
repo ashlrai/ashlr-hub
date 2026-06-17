@@ -58,11 +58,12 @@
     "node": ">=20"
   },
   "scripts": {
-    "prepublishOnly": "npm run typecheck && npm run lint && npm test",
+    "prepublishOnly": "npm run typecheck && npm run lint && npm run test:serial",
     "prepack": "npm run build",
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
+    "test:serial": "vitest run --no-file-parallelism",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },
