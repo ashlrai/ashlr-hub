@@ -127,8 +127,13 @@ describe('H4 · INV5 LOCAL-FIRST · getActiveClient cloud-gate', () => {
     mockGetProviderRegistry.mockResolvedValue(registryWithActive('anthropic'));
     const cfg = makeCfg();
     process.env.ANTHROPIC_API_KEY = 'sk-test-not-a-real-key';
+    // M50: cloud completions are now implemented for OpenAI-compatible providers
+    // (NIM / Moonshot / Hermes); anthropic is NOT OpenAI-compatible, so it STILL
+    // throws (no silent egress) — the message moved from "cloud" to "completions
+    // for that provider". The safety intent is unchanged: an unimplemented cloud
+    // provider must throw even with --allow-cloud + a key present.
     await expect(getActiveClient(cfg, { allowCloud: true, provider: 'anthropic' })).rejects.toThrow(
-      /does not yet implement cloud/i,
+      /does not yet implement completions/i,
     );
   });
 
