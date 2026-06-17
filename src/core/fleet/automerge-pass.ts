@@ -20,10 +20,12 @@ import { autoMergeProposal, type AutoMergeResult } from '../inbox/merge.js';
 import { killSwitchOn } from '../sandbox/policy.js';
 
 export interface AutoMergePassResult {
-  /** Frontier proposals the gate was run against this pass. */
+  /** Proposals the gate was run against this pass (frontier + branch-eligible mid). */
   attempted: number;
-  /** Of those, how many actually merged. */
+  /** Of those, how many actually merged to main (frontier only). */
   merged: number;
+  /** Of those, how many a MID-tier proposal applied to a branch/PR (M56). */
+  branched: number;
   /** Per-proposal gate results (for observability/audit). */
   results: AutoMergeResult[];
 }
@@ -34,7 +36,7 @@ export interface AutoMergePassResult {
  * during the pass. Never throws.
  */
 export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassResult> {
-  const out: AutoMergePassResult = { attempted: 0, merged: 0, results: [] };
+  const out: AutoMergePassResult = { attempted: 0, merged: 0, branched: 0, results: [] };
   if (cfg.foundry?.autoMerge?.enabled !== true) return out;
   if (killSwitchOn()) return out;
 
@@ -47,14 +49,17 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
 
   for (const p of pending) {
     if (killSwitchOn()) break;
-    // Only frontier-tier proposals are merge-eligible; the gate re-verifies
-    // authority/risk/verification, so this is a fast pre-filter, not the gate.
-    if (p.engineTier !== 'frontier') continue;
+    // Frontier proposals are main-merge-eligible; MID proposals are branch/PR-
+    // eligible ONLY when the separate default-off midToBranch flag is on. The
+    // gate re-verifies authority/risk/verification — this is a fast pre-filter.
+    const midEligible = cfg.foundry?.autoMerge?.midToBranch === true && p.engineTier === 'mid';
+    if (p.engineTier !== 'frontier' && !midEligible) continue;
     out.attempted++;
     try {
       const res = await autoMergeProposal(p.id, cfg);
       out.results.push(res);
       if (res.merged) out.merged++;
+      if (res.branched) out.branched++;
     } catch {
       // autoMergeProposal never throws by contract; defensive only.
     }

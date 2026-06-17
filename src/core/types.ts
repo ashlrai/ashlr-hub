@@ -165,6 +165,12 @@ export interface AshlrConfig {
       maxRisk?: 'low' | 'medium' | 'high';
       /** Also merge/push on the remote (gh pr merge) when applying (default false). */
       pushToRemote?: boolean;
+      /**
+       * M56 (v5): permit MID-tier (strong open model) proposals to auto-apply
+       * to a BRANCH / PR — never to `main`. Separate, DEFAULT-OFF sub-flag, so
+       * enabling main auto-merge does not implicitly enable the branch path.
+       */
+      midToBranch?: boolean;
       /** Permit auto-merge when NO verification commands are detected (default false = fail-closed). */
       allowWithoutVerification?: boolean;
     };

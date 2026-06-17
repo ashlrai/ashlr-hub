@@ -432,6 +432,39 @@ export function mergeTargetForTier(tier?: EngineTier): MergeTarget {
   return 'none';
 }
 
+/**
+ * M56: decide whether a MID-tier proposal may auto-apply to a BRANCH (never
+ * main). PURE. Authorized ONLY when ALL hold:
+ *   - cfg.foundry.autoMerge.midToBranch === true (a separate, DEFAULT-OFF flag,
+ *     so enabling main auto-merge does not implicitly enable the branch path); AND
+ *   - mergeTargetForTier(engineTier) === 'branch' (i.e. engineTier === 'mid'); AND
+ *   - engineModel is a concrete, vetted model (present, not ':default').
+ * Grants BRANCH authority only — a mid proposal can never reach main regardless
+ * of cfg.foundry.mergeAuthority contents.
+ */
+export function evaluateBranchAuthority(proposal: Proposal, cfg: AshlrConfig): MergeAuthorityVerdict {
+  if (cfg.foundry?.autoMerge?.midToBranch !== true) {
+    return {
+      authorized: false,
+      reason: 'mid→branch auto-apply is disabled (cfg.foundry.autoMerge.midToBranch !== true)',
+    };
+  }
+  if (mergeTargetForTier(proposal.engineTier) !== 'branch') {
+    return {
+      authorized: false,
+      reason: `engineTier '${proposal.engineTier ?? 'unset'}' is not branch-eligible (only 'mid' is)`,
+    };
+  }
+  const engineModel = proposal.engineModel;
+  if (!engineModel || engineModel.endsWith(':default')) {
+    return {
+      authorized: false,
+      reason: `engineModel '${engineModel ?? 'unset'}' has no concrete model pinned`,
+    };
+  }
+  return { authorized: true, reason: `mid backend '${engineModel}' may auto-apply to a branch (never main)` };
+}
+
 // ===========================================================================
 // 3) defaultBranch — re-exported from git.ts (see contract)
 // ===========================================================================
@@ -603,6 +636,8 @@ export async function verifyProposal(
 export interface AutoMergeResult {
   ok: boolean;
   merged: boolean;
+  /** M56: true when a MID-tier proposal was applied to a BRANCH/PR (not main). */
+  branched?: boolean;
   reason: string;
   prUrl?: string;
 }
@@ -782,7 +817,16 @@ export async function autoMergeProposal(
     }
 
     // ── Gate 4: frontier merge authority ─────────────────────────────────────
-    const authority = evaluateMergeAuthority(proposal, cfg);
+    // M51/M56: frontier → main (evaluateMergeAuthority); mid → branch/PR ONLY
+    // (evaluateBranchAuthority, a separate default-off flag); local → proposal-only.
+    const target = mergeTargetForTier(proposal.engineTier);
+    const toMain = target === 'main';
+    const authority =
+      target === 'main'
+        ? evaluateMergeAuthority(proposal, cfg)
+        : target === 'branch'
+          ? evaluateBranchAuthority(proposal, cfg)
+          : { authorized: false, reason: `engineTier '${proposal.engineTier ?? 'unset'}' is proposal-only (local)` };
     if (!authority.authorized) {
       return refuse(`merge authority denied: ${authority.reason}`, repo);
     }
@@ -825,6 +869,7 @@ export async function autoMergeProposal(
     const hasGithub = getRemoteOrg(repo).org !== null;
 
     let merged = false;
+    let branchApplied = false; // M56: mid-tier applied to a branch/PR (never main)
     let reason = '';
     let prUrl: string | undefined;
 
@@ -873,8 +918,10 @@ export async function autoMergeProposal(
         prUrl = pr.url ?? undefined;
         // Best-effort admin squash-merge. NEVER throw — branch protection /
         // missing perms simply leave the PR open for a human.
-        let mergeNote = 'PR opened';
-        if (prUrl) {
+        // M56: only a frontier (toMain) proposal is ever squash-merged to main.
+        // A mid-tier proposal opens a PR and STOPS — a human merges it.
+        let mergeNote = toMain ? 'PR opened' : 'PR opened for review (mid-tier — never merged to main)';
+        if (toMain && prUrl) {
           try {
             execFileSync('gh', ['pr', 'merge', '--squash', '--admin', prUrl], {
               cwd: repo,
@@ -888,25 +935,36 @@ export async function autoMergeProposal(
           } catch {
             mergeNote = 'PR opened (auto-merge deferred to host gates)';
           }
+        } else if (!toMain && prUrl) {
+          branchApplied = true;
         }
         reason = `${mergeNote}${prUrl ? `: ${prUrl}` : ''}`;
       }
-    } else {
+    } else if (toMain) {
       // LOCAL fallback — conservative; refuses if default branch is checked out.
       const local = mergeLocally(repo, branch, base);
       merged = local.ok;
       reason = local.detail;
+    } else {
+      // M56: mid-tier with no PR host — leave the staged branch for review;
+      // NEVER merge to main locally.
+      branchApplied = true;
+      reason = `staged branch for review (mid-tier — never merged to main): ${branch}`;
     }
 
     // Persist outcome on success only (a non-merge leaves the proposal as-is so
     // it can be retried or hand-merged; the staging branch remains for review).
-    if (merged) {
+    // M56: success is a main-merge OR a mid-tier branch/PR application. Either
+    // marks the proposal 'applied' so the pass does not re-open a PR every tick.
+    const success = merged || branchApplied;
+    if (success) {
       setStatus(id, 'applied', reason);
     }
 
     const result: AutoMergeResult = {
-      ok: merged,
+      ok: success,
       merged,
+      ...(branchApplied ? { branched: true } : {}),
       reason,
       ...(prUrl ? { prUrl } : {}),
     };
@@ -914,8 +972,8 @@ export async function autoMergeProposal(
       action: 'inbox:auto-merge',
       repo,
       sandboxId: id,
-      summary: `proposal ${id} auto-merge ${merged ? 'MERGED' : 'not merged'}: ${reason}`,
-      result: merged ? 'ok' : 'error',
+      summary: `proposal ${id} auto-merge ${merged ? 'MERGED' : branchApplied ? 'BRANCHED (PR)' : 'not merged'}: ${reason}`,
+      result: success ? 'ok' : 'error',
     });
     return result;
   } catch (err) {
