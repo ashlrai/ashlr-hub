@@ -168,6 +168,27 @@ export interface AshlrConfig {
       /** Permit auto-merge when NO verification commands are detected (default false = fail-closed). */
       allowWithoutVerification?: boolean;
     };
+    /**
+     * M52: per-engine OS-level confinement profiles. DEFAULT ABSENT (v4 env-only).
+     * When present, external engine spawns are wrapped with a platform-native
+     * read-jail (macOS sandbox-exec, Linux bwrap) that confines file reads to the
+     * worktree + vendor config homes and optionally blocks network egress.
+     * A `*` key sets a fleet-wide default; per-engine keys override it.
+     * Absent ⇒ exactly v4 behavior (env-only containment, no OS jail).
+     */
+    confinement?: Partial<Record<EngineId | '*', {
+      /** 'off' (v4 env-only, default) | 'os' (wrap spawn in an OS jail). */
+      mode?: 'off' | 'os';
+      /** Extra absolute paths the agent may READ beyond the worktree + vendor homes. */
+      readAllowed?: string[];
+      /** Allow outbound network from the contained process (default false). */
+      networkEgress?: boolean;
+      /**
+       * When mode 'os' but the platform has no jail binary: 'fallback' (env-only,
+       * audited) | 'fail' (terminal). Default 'fallback'.
+       */
+      onUnsupported?: 'fallback' | 'fail';
+    }>>;
   };
   /**
    * M24: optional autonomous-operator (daemon) tuning. When unset, the daemon

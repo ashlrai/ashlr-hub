@@ -118,6 +118,54 @@ export function audit(entry: Omit<AuditEntry, 'ts'>): void {
 }
 
 // ---------------------------------------------------------------------------
+// M52: auditConfinement() — typed confinement audit event
+// ---------------------------------------------------------------------------
+
+/**
+ * Append a `confinement` audit event for a contained engine run.
+ *
+ * Fields:
+ *   engine       — the EngineId being contained.
+ *   mode         — 'off' | 'os' (the resolved profile mode).
+ *   networkEgress — whether outbound network was permitted.
+ *   readAllowed  — extra read-allowed paths (if any).
+ *   platform     — process.platform at the time of the run.
+ *   launched     — true when an OS jail launcher was actually built (false = env-only fallback).
+ *   fallback     — true when launched:false but mode was 'os' (i.e. unsupported platform, fallback).
+ *
+ * Delegates to audit() — append-only, never throws.
+ */
+export function auditConfinement(event: {
+  engine: string;
+  mode: string;
+  networkEgress: boolean;
+  readAllowed?: string[];
+  platform: string;
+  launched: boolean;
+  fallback?: boolean;
+  /** Worktree path (used as `repo`). */
+  worktree: string;
+  /** Sandbox id (or null). */
+  sandboxId: string | null;
+}): void {
+  audit({
+    action: 'confinement.run',
+    repo: event.worktree,
+    sandboxId: event.sandboxId,
+    summary: [
+      `engine=${event.engine}`,
+      `mode=${event.mode}`,
+      `platform=${event.platform}`,
+      `launched=${event.launched}`,
+      `networkEgress=${event.networkEgress}`,
+      event.fallback ? 'fallback=true' : '',
+      event.readAllowed?.length ? `readAllowed=${event.readAllowed.length}` : '',
+    ].filter(Boolean).join(' '),
+    result: 'ok',
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Public: readAudit()
 // ---------------------------------------------------------------------------
 

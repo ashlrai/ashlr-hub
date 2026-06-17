@@ -37,6 +37,8 @@ import type {
 } from '../types.js';
 import { buildEngineCommand, spawnEngine } from './engines.js';
 import { resolveEngineSpec } from './engine-registry.js';
+import { buildSandboxLauncher, confinementProfileFor } from '../sandbox/confine.js';
+import { audit as auditConfinement } from '../sandbox/audit.js';
 import { newUsage, estCostUsd } from './budget.js';
 import { withToolEnv } from '../env-bridge.js';
 import { scrubSecrets } from '../knowledge/index.js';
@@ -215,9 +217,32 @@ export async function runEngineSandboxed(
       return { state: mk({ status: 'failed', result: `no command for engine "${engine}"` }) };
     }
 
+    // M52: compute the OS-level sandbox launcher for this engine.
+    // confinementProfileFor is pure; buildSandboxLauncher may throw when
+    // onUnsupported:'fail' and the platform has no jail binary — that
+    // propagates as a failed run (caught in spawnEngine's never-throw wrapper).
+    // buildContainedEnv, the pre-push hook, and the diff/provenance logic are
+    // all unchanged — the launcher wraps the final spawn only.
+    const confinementProfile = confinementProfileFor(engine, cfg);
+    const launcher = buildSandboxLauncher(confinementProfile, {
+      worktree: sb.worktreePath,
+      home: process.env.HOME ?? process.env.USERPROFILE,
+      env: env,
+    });
+
+    // Emit confinement audit event (append-only, never throws).
+    auditConfinement({
+      action: 'confinement.run',
+      repo: sb.worktreePath,
+      sandboxId: sb.id,
+      summary: `engine=${engine} mode=${confinementProfile.mode ?? 'off'} platform=${process.platform} launched=${launcher !== null} networkEgress=${confinementProfile.networkEgress ?? false}`,
+      result: 'ok',
+    });
+
     const res = spawnEngine(cmd, cfg, {
       env,
       timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      launcher: launcher ?? undefined,
     });
 
     const usage = res.usage

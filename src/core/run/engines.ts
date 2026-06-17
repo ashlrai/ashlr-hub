@@ -151,7 +151,17 @@ export function phantomWrap(cmd: EngineCommand, _cfg: AshlrConfig): EngineComman
 export function spawnEngine(
   cmd: EngineCommand,
   cfg: AshlrConfig,
-  opts?: { env?: NodeJS.ProcessEnv; timeoutMs?: number },
+  opts?: {
+    env?: NodeJS.ProcessEnv;
+    timeoutMs?: number;
+    /**
+     * M52: optional OS-level sandbox launcher. When present, the engine is
+     * spawned as `launcher.bin [...launcher.prefixArgs, cmd.bin, ...cmd.args]`
+     * (the phantomWrap, if any, composes BEFORE the launcher — jail wraps the
+     * whole thing). When absent ⇒ exactly v4 behavior (default-off parity).
+     */
+    launcher?: { bin: string; prefixArgs: string[] };
+  },
 ): { ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string } {
   // CONTRACT: spawnEngine NEVER throws. Any synchronous failure (spawnSync
   // throwing, env-bridge/phantom probe errors, etc.) is reported as
@@ -166,19 +176,30 @@ export function spawnEngine(
 function spawnEngineInner(
   cmd: EngineCommand,
   cfg: AshlrConfig,
-  opts?: { env?: NodeJS.ProcessEnv; timeoutMs?: number },
+  opts?: { env?: NodeJS.ProcessEnv; timeoutMs?: number; launcher?: { bin: string; prefixArgs: string[] } },
 ): { ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string } {
-  // Apply phantom-exec wrap when enabled and installed (best-effort)
+  // Apply phantom-exec wrap when enabled and installed (best-effort).
+  // phantomWrap composes BEFORE the launcher — the OS jail wraps the whole thing.
   let effective = cmd;
   if (cfg.phantom?.enabled && phantomInstalled()) {
     effective = phantomWrap(cmd, cfg);
+  }
+
+  // M52: apply the OS sandbox launcher when provided. The launcher wraps the
+  // already-phantom-wrapped command so the jail contains the entire chain.
+  // When absent ⇒ exactly v4 behavior (default-off parity guaranteed).
+  let spawnBin = effective.bin;
+  let spawnArgs = effective.args;
+  if (opts?.launcher) {
+    spawnBin = opts.launcher.bin;
+    spawnArgs = [...opts.launcher.prefixArgs, effective.bin, ...effective.args];
   }
 
   // M45: a caller (sandboxed-engine) may pass a hardened, containment env; else
   // fall back to the allowlist-only env-bridge env (NON-SECRET).
   const childEnv = opts?.env ?? withToolEnv(cfg);
 
-  const result = spawnSync(effective.bin, effective.args, {
+  const result = spawnSync(spawnBin, spawnArgs, {
     encoding: 'utf8',
     maxBuffer: 10 * 1024 * 1024, // 10 MB
     timeout: opts?.timeoutMs ?? 5 * 60 * 1000, // hard wall-clock limit (default 5 min)
