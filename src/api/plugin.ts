@@ -28,4 +28,4 @@ export type {
 
 // The shapes a scanner/template plugin produces — authors need these to type
 // their contributions without a second import from '@ashlr/hub/types'.
-export type { WorkItem, WorkSource } from '../core/types.js';
+export type { WorkItem, WorkSource, ProjectTemplate, TemplateFile } from '../core/types.js';
