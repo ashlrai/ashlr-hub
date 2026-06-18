@@ -75,6 +75,23 @@ export function phantomInitializedAt(cwd: string): boolean {
  *
  * Best-effort, never throws.
  */
+/**
+ * Resolve a bare engine bin name to its ABSOLUTE path via `which`/`where`, so it
+ * runs under sandbox-exec — whose execvp does NOT resolve PATH like the shell
+ * (a bare name fails: "execvp() of 'claude' failed: No such file or directory").
+ * Returns the input unchanged when it's already a path or can't be resolved.
+ */
+export function resolveBinAbsolute(bin: string): string {
+  if (!bin || bin.includes('/')) return bin;
+  try {
+    const probe = process.platform === 'win32' ? 'where' : 'which';
+    const out = execFileSync(probe, [bin], { encoding: 'utf8' }).trim().split('\n')[0]?.trim();
+    return out && out.length > 0 ? out : bin;
+  } catch {
+    return bin;
+  }
+}
+
 export function engineInstalled(engine: EngineId, cfg?: AshlrConfig): boolean {
   if (engine === 'builtin') return true;
   const spec = resolveEngineSpec(engine, cfg);
@@ -219,11 +236,15 @@ function spawnEngineInner(
   // M52: apply the OS sandbox launcher when provided. The launcher wraps the
   // already-phantom-wrapped command so the jail contains the entire chain.
   // When absent ⇒ exactly v4 behavior (default-off parity guaranteed).
-  let spawnBin = effective.bin;
+  // Resolve the engine bin to an ABSOLUTE path: sandbox-exec's execvp does not
+  // do shell-style PATH resolution, so a bare name ('claude') fails with
+  // "execvp() of 'claude' failed: No such file or directory".
+  const engineBinAbs = resolveBinAbsolute(effective.bin);
+  let spawnBin = engineBinAbs;
   let spawnArgs = effective.args;
   if (opts?.launcher) {
     spawnBin = opts.launcher.bin;
-    spawnArgs = [...opts.launcher.prefixArgs, effective.bin, ...effective.args];
+    spawnArgs = [...opts.launcher.prefixArgs, engineBinAbs, ...effective.args];
   }
 
   // M45: a caller (sandboxed-engine) may pass a hardened, containment env; else
