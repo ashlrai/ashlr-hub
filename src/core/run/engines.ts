@@ -18,6 +18,8 @@
  */
 
 import { spawnSync, execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type { AshlrConfig, EngineId, EngineCommand } from '../types.js';
 import { withToolEnv } from '../env-bridge.js';
 import { resolveEngineSpec, compileArgv } from './engine-registry.js';
@@ -38,6 +40,26 @@ function phantomInstalled(): boolean {
     }
   }
   return _phantomInstalled;
+}
+
+// ---------------------------------------------------------------------------
+// phantomInitializedAt — per-directory check (cheap, never throws)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true when the given directory contains a .phantom.toml file,
+ * meaning phantom exec can run there. Self-authenticating CLI agents (claude,
+ * codex) do NOT need phantom and run in sandbox worktrees that have NO
+ * .phantom.toml — skip wrapping them to avoid the hard-fail from phantom exec.
+ *
+ * Pure fs probe; never throws.
+ */
+export function phantomInitializedAt(cwd: string): boolean {
+  try {
+    return existsSync(join(cwd, '.phantom.toml'));
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,11 +200,20 @@ function spawnEngineInner(
   cfg: AshlrConfig,
   opts?: { env?: NodeJS.ProcessEnv; timeoutMs?: number; launcher?: { bin: string; prefixArgs: string[] } },
 ): { ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string } {
-  // Apply phantom-exec wrap when enabled and installed (best-effort).
+  // Apply phantom-exec wrap when enabled, installed, AND the cwd contains
+  // .phantom.toml. Self-authenticating CLIs (claude, codex) run in sandbox
+  // worktrees that have no .phantom.toml — wrapping them is both unnecessary
+  // and fatal (phantom hard-fails with "No .phantom.toml found"). Skip wrap
+  // gracefully; the agent authenticates via its own ~/.claude / ~/.codex.
   // phantomWrap composes BEFORE the launcher — the OS jail wraps the whole thing.
   let effective = cmd;
-  if (cfg.phantom?.enabled && phantomInstalled()) {
+  const wrapCwd = cmd.cwd ?? process.cwd();
+  if (cfg.phantom?.enabled && phantomInstalled() && phantomInitializedAt(wrapCwd)) {
     effective = phantomWrap(cmd, cfg);
+  } else if (cfg.phantom?.enabled && phantomInstalled() && !phantomInitializedAt(wrapCwd)) {
+    // Audit note: skipping phantom wrap — no .phantom.toml in cwd (engine self-authenticates).
+    process.stderr.write(`[ashlr] phantomWrap skipped for ${cmd.bin}: no .phantom.toml in ${wrapCwd}
+`);
   }
 
   // M52: apply the OS sandbox launcher when provided. The launcher wraps the
