@@ -343,25 +343,19 @@ export async function scanTests(repo: string): Promise<WorkItem[]> {
           'test:ci-failing',
           'CI is failing',
           `GitHub Actions: latest run status is failing for ${status.repo ?? repo}`,
-          4,
+          // Low value: a red CI is an ALERT (surfaced in `ashlr fleet watch` /
+          // Mission Control), NOT fleet-fixable work — the fleet can't patch it
+          // without diagnosing the failure, so it only yields a no-diff note.
+          // Rank it BELOW actionable code (TODOs/skipped tests/deps) so the fleet
+          // spends ticks on items it can actually produce a diff for.
+          2,
           2,
           ['test', 'ci', 'failing'],
         ),
       );
-    } else if (status.isRepo && status.ci === 'pending') {
-      items.push(
-        makeItem(
-          repo,
-          'test',
-          'test:ci-pending',
-          'CI is pending',
-          `GitHub Actions: latest run is still in progress for ${status.repo ?? repo}`,
-          2,
-          1,
-          ['test', 'ci', 'pending'],
-        ),
-      );
     }
+    // NOTE: a 'pending' CI (a run merely in progress) is intentionally NOT a work
+    // item — it's transient status noise, not a problem to act on.
 
     return items;
   } catch {
