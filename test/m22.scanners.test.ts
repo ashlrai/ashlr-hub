@@ -93,6 +93,7 @@ import {
   scanDeps,
   scanDocs,
   scanSecurity,
+  isActionableFix,
 } from '../src/core/portfolio/scanners.js';
 
 // ---------------------------------------------------------------------------
@@ -501,6 +502,177 @@ describe('M22 scanDeps — npm outdated + npm audit JSON', () => {
         }
       }
     });
+  });
+});
+
+// ===========================================================================
+// isActionableFix — pure helper unit tests (M74)
+// ===========================================================================
+
+describe('M74 isActionableFix — npm audit fixAvailable filter', () => {
+  // --- Actionable cases (should return true) ---
+
+  it('returns true when fixAvailable is boolean true', () => {
+    expect(isActionableFix(true)).toBe(true);
+  });
+
+  it('returns true when fixAvailable is an object with isSemVerMajor:false', () => {
+    expect(isActionableFix({ name: 'lodash', version: '4.17.21', isSemVerMajor: false })).toBe(true);
+  });
+
+  it('returns true when fixAvailable object has no isSemVerMajor key', () => {
+    // Treat absent isSemVerMajor as a non-breaking fix
+    expect(isActionableFix({ name: 'lodash', version: '4.17.21' })).toBe(true);
+  });
+
+  // --- Non-actionable cases (should return false) ---
+
+  it('returns false when fixAvailable is boolean false', () => {
+    expect(isActionableFix(false)).toBe(false);
+  });
+
+  it('returns false when fixAvailable is null', () => {
+    expect(isActionableFix(null)).toBe(false);
+  });
+
+  it('returns false when fixAvailable is undefined', () => {
+    expect(isActionableFix(undefined)).toBe(false);
+  });
+
+  it('returns false when fixAvailable is an object with isSemVerMajor:true', () => {
+    expect(isActionableFix({ name: 'esbuild', version: '1.0.0', isSemVerMajor: true })).toBe(false);
+  });
+
+  // --- Edge / malformed inputs ---
+
+  it('returns false for a string value (unexpected shape)', () => {
+    expect(isActionableFix('yes')).toBe(false);
+  });
+
+  it('returns false for a number value (unexpected shape)', () => {
+    expect(isActionableFix(42)).toBe(false);
+  });
+
+  it('returns false for an array (unexpected shape)', () => {
+    expect(isActionableFix([])).toBe(false);
+  });
+});
+
+// ===========================================================================
+// scanDeps — actionable-fix filter integration (M74)
+// ===========================================================================
+
+describe('M74 scanDeps — npm audit fixAvailable filter integration', () => {
+  beforeEach(() => {
+    fs.writeFileSync(
+      path.join(tmpRepo, 'package.json'),
+      JSON.stringify({ name: 'test-pkg', version: '1.0.0', scripts: { test: 'vitest run' } }),
+      'utf8',
+    );
+  });
+
+  /** Build a minimal npm audit v2 JSON payload with the given vulnerabilities. */
+  function buildAuditJson(
+    vulns: Record<string, { severity: string; fixAvailable: unknown }>,
+  ): string {
+    return JSON.stringify({
+      auditReportVersion: 2,
+      vulnerabilities: vulns,
+      metadata: {
+        vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 },
+        dependencies: { prod: 5, dev: 2, optional: 0, peer: 0, peerOptional: 0, total: 7 },
+      },
+    });
+  }
+
+  function stubAudit(auditJson: string): void {
+    let callCount = 0;
+    _execFileImpl = vi.fn((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (err: Error | null, stdout: string, stderr: string) => void;
+      if (typeof cb !== 'function') return;
+      callCount++;
+      if (callCount === 1) {
+        // First call: npm outdated — return empty (no outdated deps)
+        cb(null, '{}', '');
+      } else {
+        // Second call: npm audit — return our fixture
+        cb(null, auditJson, '');
+      }
+    });
+  }
+
+  it('does NOT emit a WorkItem for fixAvailable:false (no fix exists)', async () => {
+    stubAudit(buildAuditJson({
+      'some-pkg': { severity: 'critical', fixAvailable: false },
+    }));
+    const items = await scanDeps(tmpRepo);
+    const vulnItems = items.filter(i => i.tags.includes('vulnerability'));
+    expect(vulnItems).toHaveLength(0);
+  });
+
+  it('does NOT emit a WorkItem for fixAvailable:{isSemVerMajor:true} (breaking-only fix)', async () => {
+    stubAudit(buildAuditJson({
+      'esbuild': { severity: 'critical', fixAvailable: { name: 'esbuild', version: '1.0.0', isSemVerMajor: true } },
+    }));
+    const items = await scanDeps(tmpRepo);
+    const vulnItems = items.filter(i => i.tags.includes('vulnerability'));
+    expect(vulnItems).toHaveLength(0);
+  });
+
+  it('DOES emit a WorkItem for fixAvailable:true (non-breaking patch/minor fix)', async () => {
+    stubAudit(buildAuditJson({
+      'minimist': { severity: 'critical', fixAvailable: true },
+    }));
+    const items = await scanDeps(tmpRepo);
+    const vulnItems = items.filter(i => i.tags.includes('vulnerability'));
+    expect(vulnItems.length).toBeGreaterThan(0);
+    expect(vulnItems.some(i => i.tags.includes('critical'))).toBe(true);
+  });
+
+  it('DOES emit a WorkItem for fixAvailable:{isSemVerMajor:false} (non-breaking fix object)', async () => {
+    stubAudit(buildAuditJson({
+      'lodash': { severity: 'high', fixAvailable: { name: 'lodash', version: '4.17.21', isSemVerMajor: false } },
+    }));
+    const items = await scanDeps(tmpRepo);
+    const vulnItems = items.filter(i => i.tags.includes('vulnerability'));
+    expect(vulnItems.length).toBeGreaterThan(0);
+    expect(vulnItems.some(i => i.tags.includes('high'))).toBe(true);
+  });
+
+  it('mixed: only actionable advisories appear — esbuild suppressed, minimist surfaces', async () => {
+    stubAudit(buildAuditJson({
+      // NOT actionable — breaking major required
+      'esbuild': { severity: 'critical', fixAvailable: { name: 'esbuild', version: '1.0.0', isSemVerMajor: true } },
+      // NOT actionable — no fix at all
+      'semver': { severity: 'high', fixAvailable: false },
+      // ACTIONABLE — non-breaking fix
+      'minimist': { severity: 'moderate', fixAvailable: true },
+    }));
+    const items = await scanDeps(tmpRepo);
+    const vulnItems = items.filter(i => i.tags.includes('vulnerability'));
+    // Only the moderate (minimist) advisory should surface
+    expect(vulnItems.some(i => i.tags.includes('moderate'))).toBe(true);
+    expect(vulnItems.some(i => i.tags.includes('critical'))).toBe(false);
+    expect(vulnItems.some(i => i.tags.includes('high'))).toBe(false);
+  });
+
+  it('never throws on malformed/empty audit JSON', async () => {
+    _execFileImpl = vi.fn((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (err: Error | null, stdout: string, stderr: string) => void;
+      if (typeof cb !== 'function') return;
+      cb(null, '{not valid json}', '');
+    });
+    await expect(scanDeps(tmpRepo)).resolves.toEqual(expect.any(Array));
+  });
+
+  it('returns [] on empty audit output', async () => {
+    _execFileImpl = vi.fn((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (err: Error | null, stdout: string, stderr: string) => void;
+      if (typeof cb !== 'function') return;
+      cb(null, '', '');
+    });
+    const items = await scanDeps(tmpRepo);
+    expect(Array.isArray(items)).toBe(true);
   });
 });
 

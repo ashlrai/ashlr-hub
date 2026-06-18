@@ -434,6 +434,33 @@ async function npmAudit(repo: string): Promise<Record<string, unknown> | null> {
   }
 }
 
+/**
+ * Returns true when an npm audit advisory has a non-breaking fix the operator
+ * can safely apply without a deliberate semver-major migration.
+ *
+ * npm audit v2 `fixAvailable` shape:
+ *   false                        — no fix at all
+ *   true                         — patch/minor fix available (actionable)
+ *   { name, version, isSemVerMajor: boolean }
+ *                                — fix exists but requires a major bump when
+ *                                  isSemVerMajor===true (NOT actionable without
+ *                                  a breaking-change migration decision)
+ *
+ * Exported so it can be unit-tested in isolation.
+ */
+export function isActionableFix(fixAvailable: unknown): boolean {
+  if (fixAvailable === true) return true;
+  if (fixAvailable === false || fixAvailable === null || fixAvailable === undefined) return false;
+  if (typeof fixAvailable === 'object' && !Array.isArray(fixAvailable)) {
+    const fa = fixAvailable as Record<string, unknown>;
+    // isSemVerMajor:true means a breaking major bump is required — not actionable
+    if (fa['isSemVerMajor'] === true) return false;
+    // isSemVerMajor:false (or absent) means a non-breaking fix exists
+    return true;
+  }
+  return false;
+}
+
 export async function scanDeps(repo: string): Promise<WorkItem[]> {
   try {
     const pkgPath = join(repo, 'package.json');
@@ -484,41 +511,26 @@ export async function scanDeps(repo: string): Promise<WorkItem[]> {
     // 2. Vulnerabilities from npm audit
     const audit = await npmAudit(repo);
     if (audit) {
-      // npm audit --json v7+ shape: { vulnerabilities: { ... } } or { metadata: { vulnerabilities: { ... } } }
-      let vulnCounts: Record<string, number> = {};
+      // npm audit --json v7+ shape: { vulnerabilities: { [name]: { severity, fixAvailable, ... } } }
+      // Only count advisories that have an ACTIONABLE non-breaking fix available.
+      // Skip fixAvailable:false (no fix exists) or fixAvailable:{isSemVerMajor:true}
+      // (fix requires a breaking major bump the operator must deliberately choose).
+      // Re-flagging unactionable vulns every daemon tick is pure noise.
+      const vulnCounts: Record<string, number> = {};
 
-      // Try v7+ shape first: audit.metadata.vulnerabilities
-      const metadata = audit['metadata'];
-      if (
-        metadata !== null &&
-        typeof metadata === 'object' &&
-        !Array.isArray(metadata)
-      ) {
-        const meta = metadata as Record<string, unknown>;
-        const v = meta['vulnerabilities'];
-        if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
-          vulnCounts = v as Record<string, number>;
+      const vulns = audit['vulnerabilities'];
+      if (vulns !== null && typeof vulns === 'object' && !Array.isArray(vulns)) {
+        const entries = vulns as Record<string, unknown>;
+        for (const entry of Object.values(entries)) {
+          if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue;
+          const e = entry as Record<string, unknown>;
+          if (!isActionableFix(e['fixAvailable'])) continue;
+          const sev = typeof e['severity'] === 'string' ? e['severity'] : 'unknown';
+          vulnCounts[sev] = (vulnCounts[sev] ?? 0) + 1;
         }
       }
 
-      // Try legacy shape: audit.vulnerabilities (object of vuln entries, count manually)
-      if (Object.keys(vulnCounts).length === 0) {
-        const vulns = audit['vulnerabilities'];
-        if (vulns !== null && typeof vulns === 'object' && !Array.isArray(vulns)) {
-          const entries = vulns as Record<string, unknown>;
-          const severityCount: Record<string, number> = {};
-          for (const entry of Object.values(entries)) {
-            if (entry !== null && typeof entry === 'object') {
-              const e = entry as Record<string, unknown>;
-              const sev = typeof e['severity'] === 'string' ? e['severity'] : 'unknown';
-              severityCount[sev] = (severityCount[sev] ?? 0) + 1;
-            }
-          }
-          vulnCounts = severityCount;
-        }
-      }
-
-      // Emit one WorkItem per non-zero severity
+      // Emit one WorkItem per non-zero severity (actionable-only counts)
       const SEVERITY_ORDER = ['critical', 'high', 'moderate', 'low', 'info'];
       let vulnCount = 0;
       for (const sev of SEVERITY_ORDER) {
