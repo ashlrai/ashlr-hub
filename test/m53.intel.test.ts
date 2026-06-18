@@ -407,23 +407,46 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(allowed.has(rec.backend)).toBe(true);
   });
 
-  it('NEVER escalates a bulk/local item to frontier', async () => {
+  it('routes bulk items via the base routeBackend policy (frontier-first when available)', async () => {
+    // UPDATED for frontier-first policy: routeBackend now sends all items to frontier
+    // when a frontier backend is allowed+installed (builtin produces 0-diff proposals).
+    // recommendRoute (flag-on) defers to routeBackend's base decision for non-nudged items.
+    // The learned router's anti-escalation guard means it will not push items ABOVE
+    // what routeBackend returns — but routeBackend itself now legitimately returns frontier
+    // for bulk sources when frontier is available.
     const cfg = withIntelligence({ allowedBackends: ['builtin', 'claude', 'codex'] });
-    // Bulk sources and low-effort items route to local; the learned router must
-    // not escalate them regardless of priors.
+    const { engineInstalled } = await import('../src/core/run/engines.js');
+    const anyFrontierAvailable = engineInstalled('claude') || engineInstalled('codex');
     for (const source of ['doc', 'dep', 'todo', 'test'] as WorkSource[]) {
       const item = makeItem({ source, effort: 5 });
       const rec = await recommendRoute(item, cfg, { estimate: makeEstimate(0.001) });
-      expect(rec.tier).toBe('local');
-      expect(rec.backend).toBe('builtin');
+      // Backend must always be within allowedBackends.
+      const allowed = new Set(['builtin', 'claude', 'codex']);
+      expect(allowed.has(rec.backend)).toBe(true);
+      if (anyFrontierAvailable) {
+        // Frontier-first policy: bulk items route to frontier when frontier is installed.
+        expect(rec.tier).toBe('frontier');
+        expect(['claude', 'codex']).toContain(rec.backend);
+      } else {
+        expect(rec.tier).toBe('local');
+        expect(rec.backend).toBe('builtin');
+      }
     }
   });
 
-  it('NEVER escalates a low-effort item to frontier', async () => {
+  it('routes low-effort items via the base routeBackend policy (frontier-first when available)', async () => {
+    // UPDATED for frontier-first policy: low-effort items now route to frontier
+    // when frontier is allowed+installed (routeBackend is frontier-first for all items).
     const cfg = withIntelligence({ allowedBackends: ['builtin', 'claude', 'codex'] });
+    const { engineInstalled } = await import('../src/core/run/engines.js');
     const item = makeItem({ source: 'security', effort: 1 }); // low-effort
     const rec = await recommendRoute(item, cfg, { estimate: makeEstimate(0.001) });
-    expect(rec.tier).toBe('local');
+    const anyFrontierAvailable = engineInstalled('claude') || engineInstalled('codex');
+    if (anyFrontierAvailable) {
+      expect(rec.tier).toBe('frontier');
+    } else {
+      expect(rec.tier).toBe('local');
+    }
   });
 
   it('with good priors, a senior item may still route to frontier within allowedBackends', async () => {

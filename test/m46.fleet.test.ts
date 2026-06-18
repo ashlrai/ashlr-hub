@@ -77,19 +77,34 @@ function makeItem(over: Partial<WorkItem> & { source: WorkSource }): WorkItem {
 // ---------------------------------------------------------------------------
 
 describe('routeBackend', () => {
-  it('routes doc/dep/todo/test (bulk) sources to builtin', () => {
+  it('routes doc/dep/todo/test (bulk) sources to a FRONTIER backend when frontier is allowed+installed, else builtin', () => {
+    // NEW POLICY: frontier-first. builtin produces 0-diff proposals; frontier actually edits.
     const cfg = withFoundry({ allowedBackends: ['builtin', 'claude', 'codex'] });
+    const anyFrontierAvailable = engineInstalled('claude') || engineInstalled('codex');
     for (const source of ['doc', 'dep', 'todo', 'test'] as WorkSource[]) {
       const d = routeBackend(makeItem({ source, effort: 5, score: 10 }), cfg);
-      expect(d.backend).toBe('builtin');
-      expect(d.tier).toBe('local');
+      if (anyFrontierAvailable) {
+        expect(['claude', 'codex']).toContain(d.backend);
+        expect(d.tier).toBe('frontier');
+      } else {
+        expect(d.backend).toBe('builtin');
+        expect(d.tier).toBe('local');
+      }
     }
   });
 
-  it('routes low-effort (<=2) non-bulk items to builtin', () => {
+  it('routes low-effort (<=2) non-bulk items to a FRONTIER backend when frontier is allowed+installed, else builtin', () => {
+    // NEW POLICY: frontier-first regardless of effort level.
     const cfg = withFoundry({ allowedBackends: ['builtin', 'claude', 'codex'] });
     const d = routeBackend(makeItem({ source: 'security', effort: 1 }), cfg);
-    expect(d.backend).toBe('builtin');
+    const anyFrontierAvailable = engineInstalled('claude') || engineInstalled('codex');
+    if (anyFrontierAvailable) {
+      expect(['claude', 'codex']).toContain(d.backend);
+      expect(d.tier).toBe('frontier');
+    } else {
+      expect(d.backend).toBe('builtin');
+      expect(d.tier).toBe('local');
+    }
   });
 
   it('routes security/issue/high-effort to a frontier backend when allowed+installed, else builtin', () => {

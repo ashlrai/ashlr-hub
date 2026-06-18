@@ -13,19 +13,21 @@
  *    to 'builtin' (which is always available).
  *  - Pure except for engineInstalled()'s PATH probe (read-only, never throws).
  *
- * ROUTING HEURISTIC (documented):
- *  - LOW-effort / bulk classes — source 'doc'|'dep'|'todo'|'test', OR effort<=2
- *    — go to 'builtin' (local loop, unbounded, $0). No reason to spend a
- *    rate-limited frontier seat on cheap, mechanical work.
- *  - HIGH-difficulty / important classes — source 'security'|'issue', OR
- *    effort>=4, OR a high score — go to a FRONTIER backend (prefer 'claude',
- *    else 'codex') when it is allowed AND installed, else fall back to 'builtin'.
- *  - MEDIUM (everything else) stays on 'builtin' UNLESS a frontier backend is
- *    allowed+installed AND the item is src-touching (a 'test' or 'todo' that
- *    is not low-effort, or any non-bulk source) — then it gets a frontier seat.
+ * ROUTING HEURISTIC (documented) — FRONTIER-FIRST:
+ *  The 'builtin' engine plans work items but does NOT write code: every
+ *  proposal it produces is a 0-diff. Routing everything to 'builtin' means
+ *  frontier coders (claude/codex, which DO edit files) receive zero dispatches.
+ *
+ *  New policy: frontier backends are preferred for ALL items whenever one is
+ *  allowed AND installed.
+ *  - If a FRONTIER backend is available (allowed + installed): route to it.
+ *    The $5/day budget cap is enforced by the daemon quota layer — the router
+ *    does NOT ration frontier seats. With no frontier, 'builtin' is the only
+ *    option even if it produces no diff.
+ *  - If NO frontier is available: fall back to 'builtin'.
  *  - When MULTIPLE frontier backends are allowed+installed, alternate
  *    DETERMINISTICALLY by a stable hash of item.id so 'claude' and 'codex'
- *    share the senior load evenly.
+ *    share the load evenly.
  */
 
 import type { AshlrConfig, EngineId, EngineTier, WorkItem } from '../types.js';
@@ -44,15 +46,6 @@ export interface RouteDecision {
 
 /** Frontier backends in preference order — first allowed+installed wins ties. */
 const FRONTIER_PREFERENCE: readonly EngineId[] = ['claude', 'codex'];
-
-/** Bulk / low-difficulty sources that route to the local builtin loop. */
-const BULK_SOURCES: ReadonlySet<string> = new Set(['doc', 'dep', 'todo', 'test']);
-
-/** High-difficulty / important sources that warrant a frontier seat. */
-const SENIOR_SOURCES: ReadonlySet<string> = new Set(['security', 'issue']);
-
-/** Score at/above which an item is considered "important" (frontier-worthy). */
-const HIGH_SCORE = 7;
 
 /**
  * Stable, deterministic 32-bit FNV-1a hash of a string. Used only to pick which
@@ -113,33 +106,26 @@ function decide(backend: EngineId, reason: string): RouteDecision {
  *
  * PURE + DETERMINISTIC (modulo engineInstalled's read-only PATH probe). Never
  * throws. Honors allowedBackends and PATH availability — see module heuristic.
+ *
+ * FRONTIER-FIRST: routes every item to the best available frontier backend
+ * (claude/codex). Falls back to 'builtin' only when no frontier is
+ * allowed+installed, because builtin produces 0-diff proposals (no code edits).
  */
 export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
-  const source = item.source;
-  const effort = typeof item.effort === 'number' ? item.effort : 3;
-  const score = typeof item.score === 'number' ? item.score : 0;
-
-  // ── LOW-effort / bulk → builtin (local, unbounded, $0) ───────────────────
-  if (BULK_SOURCES.has(source) || effort <= 2) {
-    return decide('builtin', `bulk/low-effort (${source}, effort ${effort}) → local builtin`);
-  }
-
-  // ── HIGH-difficulty / important → frontier when available, else builtin ──
-  const isSenior = SENIOR_SOURCES.has(source) || effort >= 4 || score >= HIGH_SCORE;
-  if (isSenior) {
-    const frontier = pickFrontier(item, cfg);
-    if (frontier) {
-      return decide(frontier, `senior (${source}, effort ${effort}, score ${score}) → frontier ${frontier}`);
-    }
-    return decide('builtin', `senior (${source}) but no frontier allowed+installed → local builtin`);
-  }
-
-  // ── MEDIUM → builtin unless a frontier is available (src-touching) ───────
-  // Anything that reached here is a non-bulk source with effort 3 — treat it as
-  // src-touching and give it a frontier seat when one is allowed+installed.
+  // ── Frontier-first: prefer any allowed+installed frontier backend ──────────
+  // builtin plans but does NOT write code (0-diff proposals). The $5/day quota
+  // cap is enforced by the daemon quota layer, not here.
   const frontier = pickFrontier(item, cfg);
   if (frontier) {
-    return decide(frontier, `medium src-touching (${source}, effort ${effort}) → frontier ${frontier}`);
+    return decide(
+      frontier,
+      `frontier-first: builtin produces no diffs → frontier ${frontier} (source=${item.source}, effort=${typeof item.effort === 'number' ? item.effort : 3})`,
+    );
   }
-  return decide('builtin', `medium (${source}, effort ${effort}) → local builtin`);
+
+  // ── No frontier available → fall back to builtin ──────────────────────────
+  return decide(
+    'builtin',
+    `no frontier allowed+installed → local builtin (source=${item.source})`,
+  );
 }
