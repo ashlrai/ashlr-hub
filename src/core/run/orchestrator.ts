@@ -86,6 +86,7 @@ import { nullSink } from './streaming.js';
 import type { StreamSink } from './streaming.js';
 import { withRetry } from './retry.js';
 import { verifyTaskStructured } from './verify.js';
+import { detectVerifyCommands, runVerifyCommand } from './verify-commands.js';
 import { withHeal, defaultHealPolicy } from './self-heal.js';
 import type { HealEvent, Sandbox } from '../types.js';
 import { PLANNER_ROLE, SYNTHESIZER_ROLE } from './prompts/roles.js';
@@ -823,6 +824,50 @@ function emit(sink: StreamSink, event: Omit<RunStreamEvent, 'ts'>): void {
 /** Known engine ids (typed subset). */
 const KNOWN_ENGINE_IDS: ReadonlySet<string> = new Set(['builtin', 'ashlrcode', 'aw', 'claude', 'codex']);
 
+// ---------------------------------------------------------------------------
+// M78: TITRR — Test→Iterate→Test→Refine→Repeat helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Default maximum TITRR loop attempts (conservative: 1 initial + 1 repair).
+ * Callers may override via opts.titrrMaxAttempts.
+ */
+export const TITRR_MAX_ATTEMPTS = 2;
+
+/** Hard wall-clock per test run inside the TITRR loop (60 s). */
+const TITRR_TEST_TIMEOUT_MS = 60_000;
+
+/** Maximum output characters fed back to the engine as failure context. */
+const TITRR_OUTPUT_CAP = 4_000;
+
+/**
+ * Run the repo's test command (kind='test') in `worktreePath`, bounded by a
+ * hard timeout and output cap. Returns null when no test command is detected
+ * (no-test-command repo → caller skips gracefully).
+ *
+ * Reuses detectVerifyCommands + runVerifyCommand from verify-commands.ts (DRY).
+ * Never throws — all errors surface as { ok:false, output:... }.
+ */
+export function titrrTestRun(
+  worktreePath: string,
+  cfg: AshlrConfig,
+): { ok: boolean; output: string } | null {
+  // Only run the test command — typecheck/lint are out of scope for TITRR.
+  const allCmds = detectVerifyCommands(worktreePath);
+  const testCmd = allCmds.find((c) => c.kind === 'test');
+  if (!testCmd) return null; // no test command → skip gracefully
+
+  const result = runVerifyCommand(testCmd, worktreePath, cfg, {
+    timeoutMs: TITRR_TEST_TIMEOUT_MS,
+  });
+
+  const trimmed = result.output.length > TITRR_OUTPUT_CAP
+    ? result.output.slice(0, TITRR_OUTPUT_CAP) + '\n…[output truncated]'
+    : result.output;
+
+  return { ok: result.ok, output: trimmed };
+}
+
 /**
  * M45: whether an external engine should run SANDBOXED (worktree + diff→inbox)
  * instead of raw on the live tree. True only when cfg.foundry opts in; default
@@ -977,27 +1022,158 @@ export async function runGoal(
         );
         emit(sink, { kind: 'log', text: `delegating to engine "${engine}"` });
 
-        // M45: sandboxed-external path — run the agent CLI confined to a throwaway
+        // M45/M78: sandboxed-external path — run the agent CLI confined to a throwaway
         // worktree and capture its diff as a PENDING proposal. Gated by
         // opts.sandboxEngine or cfg.foundry; when neither is set the raw delegation
         // below runs unchanged (today's behavior). No raw fallback here: defeating
         // the sandbox would break the no-outward guarantee for autonomous runs.
+        //
+        // M78 TITRR: after each engine run, detect and run the repo's test command
+        // inside the sandbox worktree. On failure, re-invoke the engine with the
+        // failing output as context (up to titrrMaxAttempts). The final proposal is
+        // annotated with the TITRR outcome. Degrades gracefully when no test command
+        // is detected (no-test-command repo → behavior identical to pre-M78).
         if (opts.sandboxEngine === true || foundryWantsSandbox(cfg, engineId)) {
           const { runEngineSandboxed } = await import('./sandboxed-engine.js');
-          const r = await runEngineSandboxed(engineId, goal, cfg, {
-            sourceRepo: cwd,
-            model: modelEnv,
-            budget: opts.budget,
-            propose: true,
-          });
+          const titrrMax = Math.max(1, (opts as RunOptions & { titrrMaxAttempts?: number }).titrrMaxAttempts ?? TITRR_MAX_ATTEMPTS);
+
+          // Create one shared sandbox worktree for all TITRR attempts so the engine
+          // accumulates its edits across repairs and we run tests in the same tree.
+          const wtMod = await import('../sandbox/worktree.js');
+          let titrrSandbox: Sandbox | null = null;
+          try {
+            titrrSandbox = wtMod.createSandbox(cwd);
+          } catch {
+            // Sandbox creation failed — fall back to the original single-attempt path.
+          }
+
+          let titrrAttempt = 0;
+          let titrrResult: { ok: boolean; output: string } | null = null;
+          let titrrAnnotation = '';
+          let lastR: Awaited<ReturnType<typeof runEngineSandboxed>> | null = null;
+          let titrrGoal = goal;
+
+          try {
+            while (titrrAttempt < titrrMax) {
+              titrrAttempt++;
+
+              // propose:false on all but the final attempt so only one proposal is filed.
+              const isLastAttempt = titrrAttempt === titrrMax;
+              const r = await runEngineSandboxed(engineId, titrrGoal, cfg, {
+                sourceRepo: cwd,
+                model: modelEnv,
+                budget: opts.budget,
+                propose: isLastAttempt,
+                existingWorktree: titrrSandbox ?? undefined,
+              });
+              lastR = r;
+
+              if (r.state.status !== 'done') {
+                // Engine itself failed — stop loop, surface failure.
+                break;
+              }
+
+              // Run the repo's test command inside the shared sandbox worktree.
+              // titrrTestRun returns null when no test command is detected →
+              // skip the test step entirely and proceed to propose (graceful degrade).
+              const testRoot = titrrSandbox?.worktreePath ?? cwd;
+              emit(sink, {
+                kind: 'log',
+                text: `[TITRR] attempt ${titrrAttempt}/${titrrMax}: running tests in ${testRoot}`,
+              });
+              titrrResult = titrrTestRun(testRoot, cfg);
+
+              if (titrrResult === null) {
+                // No test command detected — annotate and stop early.
+                titrrAnnotation = 'tests: not detected (skipped)';
+                // If we didn't propose yet, do so now.
+                if (!isLastAttempt) {
+                  const propR = await runEngineSandboxed(engineId, titrrGoal, cfg, {
+                    sourceRepo: cwd,
+                    model: modelEnv,
+                    budget: opts.budget,
+                    propose: true,
+                    existingWorktree: titrrSandbox ?? undefined,
+                  });
+                  lastR = propR;
+                }
+                break;
+              }
+
+              if (titrrResult.ok) {
+                titrrAnnotation = `tests: pass (attempt ${titrrAttempt})`;
+                // If we didn't propose yet (tests passed before last attempt), propose now.
+                if (!isLastAttempt) {
+                  const propR = await runEngineSandboxed(engineId, titrrGoal, cfg, {
+                    sourceRepo: cwd,
+                    model: modelEnv,
+                    budget: opts.budget,
+                    propose: true,
+                    existingWorktree: titrrSandbox ?? undefined,
+                  });
+                  lastR = propR;
+                }
+                break;
+              }
+
+              // Tests failed. If this was the last attempt, annotate and exit.
+              if (isLastAttempt) {
+                titrrAnnotation = `tests: still failing after ${titrrAttempt} attempt(s)`;
+                break;
+              }
+
+              // Budget check before re-invoking.
+              const budgetUsed = {
+                tokensIn: lastR.state.usage.tokensIn,
+                tokensOut: lastR.state.usage.tokensOut,
+                steps: lastR.state.usage.steps,
+                estCostUsd: lastR.state.usage.estCostUsd,
+              };
+              if (overBudget(budgetUsed, {
+                maxTokens: opts.budget?.maxTokens ?? DEFAULT_MAX_TOKENS,
+                maxSteps: opts.budget?.maxSteps ?? DEFAULT_MAX_STEPS,
+                allowCloud: opts.allowCloud ?? false,
+              })) {
+                titrrAnnotation = `tests: still failing — budget exceeded after attempt ${titrrAttempt}`;
+                break;
+              }
+
+              // Prepare a repair goal with the failure output as context.
+              const failureSummary = titrrResult.output.slice(0, TITRR_OUTPUT_CAP);
+              titrrGoal =
+                `${goal}\n\n[TITRR repair ${titrrAttempt}/${titrrMax - 1}]\n` +
+                `The change failed these tests:\n${failureSummary}\n` +
+                `Fix the code so all tests pass.`;
+              emit(sink, {
+                kind: 'retry',
+                text: `[TITRR] tests failed — repair attempt ${titrrAttempt + 1}/${titrrMax}`,
+              });
+            }
+          } finally {
+            // Always tear down the shared sandbox (idempotent).
+            if (titrrSandbox) {
+              try { wtMod.removeSandbox(titrrSandbox); } catch { /* idempotent */ }
+              titrrSandbox = null;
+            }
+          }
+
+          const finalR = lastR!;
+
+          // Annotate the RunState result with the TITRR outcome.
+          if (titrrAnnotation) {
+            finalR.state.result = finalR.state.result
+              ? `[TITRR: ${titrrAnnotation}]\n${finalR.state.result}`
+              : `[TITRR: ${titrrAnnotation}]`;
+          }
+
           emit(sink, {
-            kind: r.state.status === 'done' ? 'task-done' : 'log',
-            text: r.proposalId
-              ? `engine "${engine}" → inbox proposal ${r.proposalId}`
-              : `engine "${engine}" ${r.state.status}`,
+            kind: finalR.state.status === 'done' ? 'task-done' : 'log',
+            text: finalR.proposalId
+              ? `engine "${engine}" → inbox proposal ${finalR.proposalId} [${titrrAnnotation || 'titrr'}]`
+              : `engine "${engine}" ${finalR.state.status}`,
           });
-          saveRun(r.state);
-          return r.state;
+          saveRun(finalR.state);
+          return finalR.state;
         }
 
         const id = generateRunId();
