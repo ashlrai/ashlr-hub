@@ -43,7 +43,10 @@ import type {
 export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<EngineId, EngineSpec>> = Object.freeze({
   builtin: { id: 'builtin', kind: 'builtin', tier: 'local' },
 
-  // claude -p <goal> [--model M] --output-format json [--permission-mode acceptEdits --add-dir CWD]
+  // claude -p <goal> [--model M] --output-format json [--dangerously-skip-permissions --add-dir CWD when autonomous]
+  // Uses the Claude Code SUBSCRIPTION (env API keys are stripped by CRED_ENV_DENY).
+  // --dangerously-skip-permissions is SAFE here: we externally confine the run in
+  // sandbox-exec (worktree-only writes) and every result is a PROPOSAL, never applied.
   claude: {
     id: 'claude',
     kind: 'cli-agent',
@@ -51,11 +54,12 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<EngineId, EngineSpec>> = O
     bin: 'claude',
     bins: ['claude'],
     argv: ['-p', '$GOAL', { optModel: ['--model', '$MODEL'] }, '--output-format', 'json'],
-    autonomousArgv: ['--permission-mode', 'acceptEdits', '--add-dir', '$CWD'],
+    autonomousArgv: ['--dangerously-skip-permissions', '--add-dir', '$CWD'],
     capabilities: ['agent', 'edit', 'architecture'],
   },
 
-  // codex exec [--model M] --sandbox workspace-write --cd CWD --json <goal>
+  // codex exec [--model M] --cd CWD --json <goal> [--dangerously-bypass-approvals-and-sandbox when autonomous]
+  // Uses the Codex SUBSCRIPTION (env API keys stripped by CRED_ENV_DENY).
   codex: {
     id: 'codex',
     kind: 'cli-agent',
@@ -65,13 +69,15 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<EngineId, EngineSpec>> = O
     argv: [
       'exec',
       { optModel: ['--model', '$MODEL'] },
-      '--sandbox',
-      'workspace-write',
       '--cd',
       '$CWD',
       '--json',
       '$GOAL',
     ],
+    // yolo when autonomous: skip approvals + codex's own sandbox. SAFE because we
+    // externally confine via sandbox-exec and everything is proposal-only — exactly
+    // the "externally sandboxed environment" this flag is documented for.
+    autonomousArgv: ['--dangerously-bypass-approvals-and-sandbox'],
     capabilities: ['agent', 'edit', 'refactor'],
   },
 

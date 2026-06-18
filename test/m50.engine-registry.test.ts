@@ -87,7 +87,7 @@ describe('M50 registry — buildEngineCommand argv PARITY (byte-identical)', () 
     const cmd = buildEngineCommand('claude', GOAL, cfg, { cwd: CWD, model: MODEL, autonomous: true });
     expect(cmd!.args).toEqual([
       '-p', GOAL, '--model', MODEL, '--output-format', 'json',
-      '--permission-mode', 'acceptEdits', '--add-dir', CWD,
+      '--dangerously-skip-permissions', '--add-dir', CWD,
     ]);
   });
 
@@ -96,12 +96,16 @@ describe('M50 registry — buildEngineCommand argv PARITY (byte-identical)', () 
     expect(cmd!.args).toEqual(['-p', GOAL, '--output-format', 'json']);
   });
 
-  it('codex — exact argv with and without model', () => {
+  it('codex — exact argv with and without model (yolo when autonomous)', () => {
     expect(buildEngineCommand('codex', GOAL, cfg, { cwd: CWD, model: MODEL })!.args).toEqual([
-      'exec', '--model', MODEL, '--sandbox', 'workspace-write', '--cd', CWD, '--json', GOAL,
+      'exec', '--model', MODEL, '--cd', CWD, '--json', GOAL,
     ]);
     expect(buildEngineCommand('codex', GOAL, cfg, { cwd: CWD })!.args).toEqual([
-      'exec', '--sandbox', 'workspace-write', '--cd', CWD, '--json', GOAL,
+      'exec', '--cd', CWD, '--json', GOAL,
+    ]);
+    // autonomous → yolo (skip approvals + codex's own sandbox; we confine externally)
+    expect(buildEngineCommand('codex', GOAL, cfg, { cwd: CWD, autonomous: true })!.args).toEqual([
+      'exec', '--cd', CWD, '--json', GOAL, '--dangerously-bypass-approvals-and-sandbox',
     ]);
   });
 
