@@ -431,36 +431,105 @@ const PLANNING_SYSTEM = PLANNER_ROLE;
 /**
  * Parse a RunTask[] from model output, tolerating prose wrapped around JSON.
  * Returns null if no valid JSON array of tasks is found.
+ *
+ * Tolerances added for local-model output (M76):
+ *   1. Strip markdown code fences (```json…``` / ```…```) before extracting.
+ *   2. Strip trailing commas before `]` / `}` so JSON.parse doesn't choke.
+ *   3. Accept alternate field names per task object:
+ *        id   ← id | name | step | key  (else synthesise t1, t2, …)
+ *        goal ← goal | task | description | title | summary | text
+ *        deps ← deps | dependsOn | dependencies
+ *   4. Numbered/bulleted-list fallback when no JSON array is found:
+ *        lines matching /^\s*(\d+\.|[-*])\s+\S/ → tasks with synthesised ids.
  */
-function parseTaskList(text: string): RunTask[] | null {
-  // Try to find a JSON array in the output (tolerate leading/trailing prose)
-  const match = text.match(/\[[\s\S]*\]/);
-  if (!match) return null;
+export function parseTaskList(text: string): RunTask[] | null {
+  // ── 1. Strip markdown code fences ────────────────────────────────────────
+  // Remove ```json ... ``` or ``` ... ``` wrappers, then trim surrounding prose.
+  const stripped = text
+    .replace(/^```(?:json)?\s*/im, '')
+    .replace(/\s*```\s*$/im, '')
+    .trim();
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(match[0]);
-  } catch {
-    return null;
+  // ── 2. Extract JSON array (greedy first match) ────────────────────────────
+  const match = stripped.match(/\[[\s\S]*\]/);
+
+  if (match) {
+    // Strip trailing commas before ] or } (common local-model mistake)
+    const cleaned = match[0].replace(/,\s*([}\]])/g, '$1');
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      // fall through to list fallback below
+      parsed = null;
+    }
+
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      const result = _buildTasksFromArray(parsed);
+      if (result) return result;
+    }
   }
 
-  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  // ── 4. Numbered / bulleted list fallback ──────────────────────────────────
+  // Accept lines like:  "1. Do the thing"  /  "- Do the thing"  /  "* Do the thing"
+  const listLines = stripped
+    .split('\n')
+    .map((l) => l.match(/^\s*(?:\d+\.|[-*])\s+(.+)/))
+    .filter((m): m is RegExpMatchArray => m !== null && (m[1]?.trim().length ?? 0) > 3)
+    .map((m) => m[1]!.trim());
 
+  if (listLines.length >= 1) {
+    const tasks: RunTask[] = listLines.map((goal, i) => ({
+      id: `t${i + 1}`,
+      goal,
+      deps: [],
+      status: 'pending' as RunTaskStatus,
+    }));
+    return tasks;
+  }
+
+  return null;
+}
+
+/**
+ * Build RunTask[] from a parsed JSON array, accepting alternate field names.
+ * Returns null if the array is structurally invalid (bad fields, dup ids, cycles).
+ */
+function _buildTasksFromArray(parsed: unknown[]): RunTask[] | null {
   const tasks: RunTask[] = [];
   const seenIds = new Set<string>();
 
-  for (const item of parsed) {
+  for (let i = 0; i < parsed.length; i++) {
+    const item = parsed[i];
     if (typeof item !== 'object' || item === null) return null;
     const obj = item as Record<string, unknown>;
 
-    const id = typeof obj['id'] === 'string' ? obj['id'].trim() : null;
-    const goal = typeof obj['goal'] === 'string' ? obj['goal'].trim() : null;
+    // ── 3a. id: id | name | step | key → else synthesise ─────────────────
+    const rawId =
+      obj['id'] ?? obj['name'] ?? obj['step'] ?? obj['key'];
+    const id =
+      typeof rawId === 'string' && rawId.trim().length > 0
+        ? rawId.trim()
+        : `t${i + 1}`;
 
-    if (!id || !goal) return null;
+    // ── 3b. goal: goal | task | description | title | summary | text ──────
+    const rawGoal =
+      obj['goal'] ?? obj['task'] ?? obj['description'] ??
+      obj['title'] ?? obj['summary'] ?? obj['text'];
+    const goal =
+      typeof rawGoal === 'string' ? rawGoal.trim() : null;
+
+    if (!goal) return null;
     if (seenIds.has(id)) return null; // duplicate id
     seenIds.add(id);
 
-    const rawDeps = Array.isArray(obj['deps']) ? obj['deps'] : [];
+    // ── 3c. deps: deps | dependsOn | dependencies ─────────────────────────
+    const rawDeps =
+      Array.isArray(obj['deps'])          ? obj['deps'] :
+      Array.isArray(obj['dependsOn'])     ? obj['dependsOn'] :
+      Array.isArray(obj['dependencies'])  ? obj['dependencies'] :
+      [];
     const deps = rawDeps.filter((d): d is string => typeof d === 'string');
 
     tasks.push({
@@ -471,19 +540,16 @@ function parseTaskList(text: string): RunTask[] | null {
     });
   }
 
-  // Validate deps reference only known ids (no forward deps that are cycles)
+  // Validate deps reference only known ids
   const taskIds = new Set(tasks.map((t) => t.id));
   for (const task of tasks) {
     for (const dep of task.deps) {
       if (!taskIds.has(dep)) return null; // unknown dep
-      if (dep === task.id) return null; // self-dep
+      if (dep === task.id) return null;   // self-dep
     }
   }
 
-  // Reject multi-node cycles (e.g. t1->t2->t1). A cycle is a broken plan: at
-  // runtime it would otherwise be silently swallowed as 'skipped' tasks after
-  // the planning call was already charged. Returning null surfaces it as a
-  // plan-parse failure so planGoal falls back to the single-task plan.
+  // Reject multi-node cycles
   if (hasCycle(tasks)) return null;
 
   return tasks.length > 0 ? tasks : null;
