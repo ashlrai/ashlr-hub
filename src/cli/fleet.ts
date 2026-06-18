@@ -7,6 +7,13 @@
  *       today's spend, per-backend recent dispatches + quota, queue size,
  *       proposal counts (pending / frontier-pending / applied), recent
  *       auto-merges, and the kill-switch (paused) state. Never mutates.
+ *   fleet watch [--json]
+ *       Glanceable one-screen monitoring summary: one-line health header plus
+ *       recent autonomous actions (last 8 from the audit log) and recent daemon
+ *       errors (last 5 non-empty lines of ~/.ashlr/daemon.launchd.err.log).
+ *       --json emits { fleet, recentActions, recentErrors }. READ-ONLY; never
+ *       mutates. Each data source is independently guarded — one failure
+ *       degrades only its own slice.
  *   fleet pause
  *       Engage the global kill switch (setKill(true)) — same effect as
  *       `ashlr daemon stop`'s kill: any running loop halts on its next tick and
@@ -18,7 +25,11 @@
  * sentinel (no repo, no spend, no proposals). `fleet status` is fully read-only.
  */
 
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { AshlrConfig } from '../core/types.js';
+import type { AuditEntry } from '../core/types.js';
 import type { FleetStatus } from '../core/fleet/status.js';
 import { makeColors, isTty } from './ui.js';
 
@@ -130,6 +141,139 @@ async function cmdFleetStatus(jsonMode: boolean): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// Subcommand: watch (READ-ONLY glanceable summary)
+// ---------------------------------------------------------------------------
+
+/**
+ * Return the last `n` non-empty lines of a file. Pure and synchronous — reads
+ * at most `maxBytes` from the end of the file so a huge log never blows memory.
+ * Returns [] when the file is absent or unreadable.
+ *
+ * Exported for unit testing.
+ */
+export function tailErrLog(filePath: string, n: number, maxBytes = 32_768): string[] {
+  try {
+    const raw = readFileSync(filePath);
+    // Only look at the tail slice to bound memory.
+    const slice = raw.length > maxBytes ? raw.subarray(raw.length - maxBytes) : raw;
+    const text = slice.toString('utf8');
+    const lines = text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    return lines.slice(-n);
+  } catch {
+    return [];
+  }
+}
+
+/** Relative-time label: "Xm ago", "Xs ago", "Xh ago", or the raw ISO string. */
+function relTime(iso: string | null): string {
+  if (!iso) return '—';
+  const diffMs = Date.now() - Date.parse(iso);
+  if (isNaN(diffMs) || diffMs < 0) return iso;
+  const s = Math.floor(diffMs / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  return `${h}h ago`;
+}
+
+export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
+  const cfg = await loadCfg();
+
+  // 1. Fleet status (never throws — buildFleetStatus is already guarded).
+  let fleetStatus: FleetStatus | null = null;
+  if (cfg) {
+    try {
+      const { buildFleetStatus } = await import('../core/fleet/status.js');
+      fleetStatus = await buildFleetStatus(cfg);
+    } catch {
+      // degraded — fleetStatus stays null
+    }
+  }
+
+  // 2. Recent audit actions (last 8).
+  let recentActions: AuditEntry[] = [];
+  try {
+    const { readAudit } = await import('../core/sandbox/audit.js' as unknown as string) as {
+      readAudit: (limit?: number) => AuditEntry[];
+    };
+    recentActions = readAudit(8);
+  } catch {
+    recentActions = [];
+  }
+
+  // 3. Recent daemon errors (last 5 non-empty lines of the launchd err log).
+  const errLogPath = join(homedir(), '.ashlr', 'daemon.launchd.err.log');
+  const recentErrors = tailErrLog(errLogPath, 5);
+
+  // ── JSON mode ────────────────────────────────────────────────────────────
+  if (jsonMode) {
+    process.stdout.write(
+      JSON.stringify({ fleet: fleetStatus, recentActions, recentErrors }, null, 2) + '\n',
+    );
+    return 0;
+  }
+
+  // ── Human render ─────────────────────────────────────────────────────────
+  console.log('');
+
+  // One-line health header.
+  const fs = fleetStatus;
+  if (fs) {
+    const state = fs.daemon.running ? (fs.killed ? 'PAUSED' : 'running') : 'idle';
+    const header = [
+      `fleet: ${state}`,
+      `queue ${fs.queue.backlogItems}`,
+      `pending ${fs.proposals.pending}`,
+      `spent today $${fs.daemon.todaySpentUsd.toFixed(2)}`,
+      `last tick ${relTime(fs.daemon.lastTickAt)}`,
+    ].join(' · ');
+    if (fs.killed) {
+      console.log('  ' + yellow(bold(header)));
+    } else if (fs.daemon.running) {
+      console.log('  ' + green(header));
+    } else {
+      console.log('  ' + dim(header));
+    }
+  } else {
+    console.log('  ' + yellow('fleet: config unavailable'));
+  }
+
+  console.log('');
+
+  // Recent actions.
+  console.log('  ' + bold('Recent actions') + dim(' (last 8):'));
+  if (recentActions.length === 0) {
+    console.log('  ' + dim('  none'));
+  } else {
+    for (const e of recentActions) {
+      const ts = dim(e.ts.replace('T', ' ').replace(/\.\d+Z$/, 'Z'));
+      const ok = e.result === 'ok' ? green('ok') : e.result === 'refused' ? yellow('refused') : red('error');
+      const detail = e.summary ? dim('  ' + e.summary.slice(0, 60)) : '';
+      console.log(`    ${ts}  [${ok}]  ${bold(e.action)}${detail}`);
+    }
+  }
+
+  console.log('');
+
+  // Recent daemon errors.
+  console.log('  ' + bold('Recent errors') + dim(' (daemon.launchd.err.log, last 5):'));
+  if (recentErrors.length === 0) {
+    console.log('  ' + dim('  none'));
+  } else {
+    for (const line of recentErrors) {
+      console.log('    ' + red(line.slice(0, 120)));
+    }
+  }
+
+  console.log('');
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // Subcommands: pause / resume (kill-switch only)
 // ---------------------------------------------------------------------------
 
@@ -228,6 +372,8 @@ export async function cmdFleet(args: string[]): Promise<number> {
   switch (sub) {
     case 'status':
       return cmdFleetStatus(rest.includes('--json'));
+    case 'watch':
+      return cmdFleetWatch(rest.includes('--json'));
     case 'init':
       return cmdFleetInit(rest);
     case 'pause':
@@ -248,6 +394,7 @@ function printFleetHelp(): void {
   console.log('  ' + bold('Usage:'));
   console.log('');
   console.log(`    ashlr fleet status [--json]   ${cyan('# read-only fleet snapshot')}`);
+  console.log(`    ashlr fleet watch  [--json]   ${cyan('# glanceable monitoring summary (actions + errors)')}`);
   console.log(`    ashlr fleet init [--write]    ${cyan('# print/merge a starter cfg.foundry')}`);
   console.log(`    ashlr fleet pause             ${cyan('# engage kill switch (pause fleet)')}`);
   console.log(`    ashlr fleet resume            ${cyan('# release kill switch (resume fleet)')}`);
