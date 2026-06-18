@@ -223,7 +223,11 @@ export function buildMacosSbplProfile(
   const reallowReadClauses = reallowRead.map(sub).join('\n    ');
   const reallowWriteClauses = reallowWrite.map(sub).join('\n    ');
   const networkClause = profile.networkEgress
-    ? '(comment "network egress allowed by profile")'
+    // SBPL has NO `(comment ...)` form — emitting it makes sandbox-exec abort
+    // with "unbound variable: comment". Use a `;` line comment instead; when
+    // egress is allowed no rule is needed (the earlier `(allow default)` already
+    // permits network-outbound).
+    ? '; network egress allowed by profile (allow default already permits it)'
     : '(deny network*)';
 
   // THREAT MODEL — the documented v4 residual is that a contained CLI can READ
