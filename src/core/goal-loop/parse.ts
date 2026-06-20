@@ -29,7 +29,7 @@ const CHECKBOX_RE = /^\s*[-*]\s+\[([ xX])\]\s+(.*)$/;
 /** A plain (non-checkbox) bullet: `- text` / `* text`. Captures (text). */
 const BULLET_RE = /^\s*[-*]\s+(?!\[[ xX]\])(.+)$/;
 /** A stable step id at the start of a checkbox label: `M0.1`, `M2.4 …`. */
-const STEP_ID_RE = /^(M\d+(?:\.\d+)+)\b[\s:.)\-]*\s*(.*)$/;
+const STEP_ID_RE = /^(M\d+(?:\.\d+)+)\b[\s:.)-]*\s*(.*)$/;
 /** A `Done when:` verifiable check (case-insensitive). Captures the check text. */
 const DONE_WHEN_RE = /done when:\s*(.*)$/i;
 /** A markdown link inside a list item: `[label](target)`. */
@@ -97,7 +97,7 @@ export function parseRoadmap(dir: string, roadmapFile?: string): RoadmapIndex {
       target = (link[2] as string).trim();
     } else {
       // Fallback: `- M0: some-file.md`
-      const plain = /^[-*]\s+(M\d+)\b[\s:.)\-]*\s*(\S+\.md)\s*$/.exec(line);
+      const plain = /^[-*]\s+(M\d+)\b[\s:.)-]*\s*(\S+\.md)\s*$/.exec(line);
       if (plain) {
         id = plain[1] as string;
         title = id;
