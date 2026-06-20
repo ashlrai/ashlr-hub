@@ -381,6 +381,14 @@ const loadSeamsCmd = lazyCmd(
   'seams command requires src/cli/seams.ts (M30 module not yet built).',
 );
 
+// ─── Goal Loop command loader ───────────────────────────────────────
+
+const loadRoadmapCmd = lazyCmd(
+  () => import('./roadmap.js'),
+  (m) => m.cmdRoadmap as Cmd,
+  'roadmap command requires src/cli/roadmap.ts (Goal Loop module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1602,6 +1610,12 @@ async function main(): Promise<void> {
       case 'seams': {
         const cmdSeams = await loadSeamsCmd();
         process.exitCode = await cmdSeams(rest);
+        break;
+      }
+
+      case 'roadmap': {
+        const cmdRoadmap = await loadRoadmapCmd();
+        process.exitCode = await cmdRoadmap(rest);
         break;
       }
 
