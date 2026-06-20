@@ -185,24 +185,37 @@ function formatBytes(bytes: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// ollamaInstalled
+// whichBin / ollamaInstalled
 // ---------------------------------------------------------------------------
 
 /**
- * Detect whether the `ollama` binary is available on PATH.
+ * Detect whether a binary is resolvable on PATH, cross-platform.
  *
- * Synchronous, no I/O beyond a single `which` call. Returns false on any
- * error (binary not found, PATH issues, etc.). Never throws.
+ * Uses `where` on Windows (`win32`) and `which` on POSIX — these are the
+ * platform-native PATH lookups and both exit non-zero when the binary is
+ * absent. Synchronous, no I/O beyond a single lookup. Returns false on any
+ * error (binary not found, lookup tool missing, PATH issues). Never throws.
  */
-export function ollamaInstalled(): boolean {
+export function whichBin(name: string): boolean {
+  // `where` is the Windows equivalent of POSIX `which`.
+  const finder = process.platform === 'win32' ? 'where' : 'which';
   try {
-    // `which` on POSIX; `where` on Windows — use `which` since the target
-    // platform is macOS (darwin). execFileSync throws when exit code != 0.
-    execFileSync('which', ['ollama'], { stdio: 'pipe' });
+    // execFileSync throws when exit code != 0 (binary not found).
+    execFileSync(finder, [name], { stdio: 'pipe' });
     return true;
   } catch {
     return false;
   }
+}
+
+/**
+ * Detect whether the `ollama` binary is available on PATH.
+ *
+ * Synchronous, no I/O beyond a single PATH lookup. Returns false on any
+ * error (binary not found, PATH issues, etc.). Never throws.
+ */
+export function ollamaInstalled(): boolean {
+  return whichBin('ollama');
 }
 
 // ---------------------------------------------------------------------------
@@ -265,12 +278,13 @@ export async function pullModel(name: string): Promise<{ ok: boolean; detail: st
  *
  * Called ONLY from `ashlr models start` — NEVER from routing or runs.
  *
- * Strategy (macOS-first, matching the target platform):
+ * Strategy (cross-platform):
  *  1. If Ollama is already responding on :11434, return ok immediately.
  *  2. If not installed, return ok:false immediately.
- *  3. Try `open -a Ollama` (macOS app) first — this launches the menu-bar app.
- *  4. Fall back to spawning `ollama serve` detached if the app open fails or
- *     if we're on non-macOS.
+ *  3. On macOS only, try `open -a Ollama` first — this launches the menu-bar
+ *     app, which is how most mac users run it.
+ *  4. Otherwise (and as the mac fallback), spawn `ollama serve` detached. This
+ *     is the primary path on Windows/Linux, where there is no app bundle.
  *  5. Poll :11434 up to START_WAIT_TIMEOUT_MS for the server to come up.
  *  6. Return { ok, detail } — never throws.
  */
@@ -288,11 +302,11 @@ export async function startOllama(): Promise<{ ok: boolean; detail: string }> {
     };
   }
 
-  // 3. Try launching the macOS app bundle first (silent on non-mac).
-  const isMac = process.platform === 'darwin';
+  // 3. On macOS, try launching the app bundle first (the usual way mac users
+  //    run Ollama). Silent + skipped entirely on Windows/Linux.
   let launchAttempted = false;
 
-  if (isMac) {
+  if (process.platform === 'darwin') {
     try {
       await execFileAsync('open', ['-a', 'Ollama'], { timeout: 5_000 });
       launchAttempted = true;
@@ -301,7 +315,8 @@ export async function startOllama(): Promise<{ ok: boolean; detail: string }> {
     }
   }
 
-  // 4. If the app launch didn't work (or non-mac), spawn `ollama serve` detached.
+  // 4. Primary path on Windows/Linux (and mac fallback): spawn `ollama serve`
+  //    detached.
   if (!launchAttempted) {
     try {
       const child = spawn('ollama', ['serve'], {
