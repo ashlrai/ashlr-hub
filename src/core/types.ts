@@ -139,6 +139,34 @@ export interface ProviderRegistry {
   chain: string[];
 }
 
+/**
+ * Outcome of the Local Provider Picker (`ashlr models setup` / `ashlr init`).
+ * Machine-readable so `--json` callers can see exactly what happened.
+ */
+export interface ProviderSetupResult {
+  /**
+   * What the flow did:
+   *  - 'installed' — a runtime was installed
+   *  - 'started'   — an installed-but-stopped runtime was started
+   *  - 'pulled'    — a model was pulled
+   *  - 'detected'  — found live runtime(s), nothing changed
+   *  - 'scanned'   — scan-existing reported live runtime(s)
+   *  - 'skipped'   — user declined / chose manual
+   *  - 'none'      — nothing live and nothing done (non-interactive)
+   */
+  action: 'installed' | 'started' | 'pulled' | 'detected' | 'scanned' | 'skipped' | 'none';
+  /** Runtime id involved (ollama | lmstudio | llamacpp), when applicable. */
+  provider?: string;
+  /** Model name pulled, when applicable. */
+  model?: string;
+  /** Live runtimes observed during the flow. */
+  live: Array<{ id: string; models: string[] }>;
+  /** Whether the flow actually changed system state (install/start/pull ran). */
+  changed: boolean;
+  /** Human-readable one-line summary. */
+  detail: string;
+}
+
 /** Read-only status of the Phantom secrets CLI. NEVER carries secret values. */
 export interface PhantomStatus {
   /** Whether the `phantom` binary is on PATH. */

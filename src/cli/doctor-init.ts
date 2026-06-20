@@ -291,6 +291,21 @@ export async function cmdInit(args: string[]): Promise<number> {
     console.log('');
   }
 
+  // Offer the local-provider picker when interactive and no local model was
+  // found — this is the ONLY interactive prompt in init, fully opt-in. Skipped
+  // under --json / --yes / non-TTY (those keep the detect-only report above).
+  const modelsStep = result.steps.find((s) => s.name === 'models');
+  if (!jsonMode && !yesMode && process.stdin.isTTY && process.stdout.isTTY && modelsStep?.status === 'manual') {
+    try {
+      const { offerLocalProviderSetup } = await import('./provider-picker.js') as {
+        offerLocalProviderSetup: () => Promise<void>;
+      };
+      await offerLocalProviderSetup();
+    } catch {
+      // Picker not available — skip silently; init already reported guidance.
+    }
+  }
+
   return fail > 0 ? 1 : 0;
 }
 

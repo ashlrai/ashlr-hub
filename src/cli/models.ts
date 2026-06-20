@@ -7,10 +7,13 @@
  *   pull <name>      Confirm then pull a model via `ollama pull` (EXPLICIT
  *                    only — large download; honors --yes to skip prompt).
  *   start            Best-effort start a locally-installed Ollama daemon.
+ *   setup            Interactive picker: install a local runtime + starter
+ *                    model (alias: install). Detect-only when non-TTY/--yes.
  *
  * Flags (all subcommands):
  *   --json           Emit machine-readable JSON instead of human output.
- *   --yes            Skip interactive confirmation prompts (pull only).
+ *   --yes            Skip interactive confirmation prompts (pull); detect-only
+ *                    for setup.
  *
  * Returns process exit code: 0 success, 1 error, 2 bad usage.
  *
@@ -91,7 +94,7 @@ async function loadConfig(): Promise<AshlrConfig> {
 // ---------------------------------------------------------------------------
 
 interface ParsedModelsArgs {
-  subcommand: 'list' | 'pull' | 'start';
+  subcommand: 'list' | 'pull' | 'start' | 'setup';
   pullName?: string;
   json: boolean;
   yes: boolean;
@@ -138,8 +141,10 @@ function parseModelsArgs(args: string[]): ParsedModelsArgs {
     result.pullName = name;
   } else if (sub === 'start') {
     result.subcommand = 'start';
+  } else if (sub === 'setup' || sub === 'install') {
+    result.subcommand = 'setup';
   } else {
-    result.usageError = `unknown subcommand: ${sub}. Use list, pull <name>, or start.`;
+    result.usageError = `unknown subcommand: ${sub}. Use list, pull <name>, start, or setup.`;
   }
 
   return result;
@@ -426,6 +431,33 @@ async function cmdModelsStart(
 }
 
 // ---------------------------------------------------------------------------
+// Subcommand: setup (alias install) — interactive local-provider picker
+// ---------------------------------------------------------------------------
+
+async function cmdModelsSetup(opts: { json: boolean; yes: boolean }): Promise<number> {
+  // Lazy import so the picker (and its provider-installer dep) only load when
+  // this subcommand runs — mirrors the model-manager lazy-load pattern.
+  let runProviderPicker: (
+    o: { json: boolean; yes: boolean },
+  ) => Promise<{ code: number }>;
+  try {
+    const mod = await import('./provider-picker.js') as {
+      runProviderPicker: (o: { json: boolean; yes: boolean }) => Promise<{ code: number }>;
+    };
+    runProviderPicker = mod.runProviderPicker;
+  } catch (err) {
+    process.stderr.write(
+      `${C.red}error:${C.reset} models setup requires src/cli/provider-picker.ts: ` +
+        (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  const { code } = await runProviderPicker({ json: opts.json, yes: opts.yes });
+  return code;
+}
+
+// ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
 
@@ -444,6 +476,7 @@ function printModelsHelp(): void {
     ['(none) / list',    'List all local models across Ollama and LM Studio.'],
     ['pull <name>',      'Pull a model by name via `ollama pull` (confirms first; large download).'],
     ['start',            'Best-effort start a locally-installed Ollama daemon.'],
+    ['setup',            'Interactive picker to install a local runtime + starter model (alias: install).'],
   ];
   const subW = Math.max(...subs.map(([s]) => s.length));
   for (const [sub, desc] of subs) {
@@ -477,6 +510,7 @@ function printModelsHelp(): void {
   console.log(`    ${cyan('ashlr models pull llama3.2')}        ${dim('# pull a model (confirms)')}`);
   console.log(`    ${cyan('ashlr models pull llama3.2 --yes')}  ${dim('# pull without prompt (CI)')}`);
   console.log(`    ${cyan('ashlr models start')}                ${dim('# start local Ollama')}`);
+  console.log(`    ${cyan('ashlr models setup')}                ${dim('# pick & install a local runtime')}`);
   console.log('');
   console.log('  ' + bold('Exit codes:'));
   console.log('');
@@ -535,6 +569,9 @@ export async function cmdModels(args: string[]): Promise<number> {
 
     case 'start':
       return cmdModelsStart(mm, parsed.json);
+
+    case 'setup':
+      return cmdModelsSetup({ json: parsed.json, yes: parsed.yes });
 
     default:
       // unreachable; parseModelsArgs covers all cases
