@@ -43,6 +43,7 @@ import { runSwarm } from '../swarm/runner.js';
 import { runGoal } from '../run/orchestrator.js';
 import { routeBackend } from '../fleet/router.js';
 import { withinLimit, recordUse } from '../fleet/quota.js';
+import { subscriptionAllows, isSubscriptionEngine } from '../fleet/subscription-usage.js'; // M80
 import { recommendRoute, recoverWithinBudget } from '../run/learned-router.js';
 import { estimateRun } from '../observability/estimate.js';
 import { buildForecast } from '../observability/forecast.js';
@@ -358,6 +359,27 @@ export async function tick(
       backend = 'builtin';
     }
 
+    // M80: subscription-window throttle — skip this item (not crash) when a
+    // KNOWN subscription window is at or above the cap (default 90%). Reads
+    // cfg.foundry.subscriptionMaxPercent defensively with a fallback default.
+    // allowed:true when usage is unknown (claude) or under the cap.
+    if (isSubscriptionEngine(backend)) {
+      // Read maxPercent from cfg.foundry defensively — no types.ts change.
+      const maxPct: number = (cfg.foundry as Record<string, unknown> | undefined
+        )?.['subscriptionMaxPercent'] as number | undefined ?? 90;
+      const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
+      if (!subCheck.allowed) {
+        audit({
+          action: 'daemon:tick',
+          repo: item.repo,
+          sandboxId: null,
+          summary: `throttled: ${backend} subscription window — ${subCheck.reason}`,
+          result: 'ok',
+        });
+        return { item, spentUsd: 0, dispatched: false };
+      }
+    }
+
     // M53: learned-router recommend + budget cascade (flag-off: no-op when
     // cfg.foundry.intelligence is absent). recoverWithinBudget is PURE and
     // may only return a tier choice or a pause signal — no outward action.
@@ -452,7 +474,13 @@ export async function tick(
           noMemory: false,
         });
 
-        swarmSpent = runState.usage?.estCostUsd ?? 0;
+        // M80: subscription-tier runs are not dollar-billed — count $0 toward
+        // dailyBudgetUsd so they don't exhaust the daily cap. The subscription-
+        // window guard (subscriptionAllows above) governs their pacing instead.
+        // API-model / builtin paths are unaffected (their isSubscriptionEngine is false).
+        swarmSpent = isSubscriptionEngine(backend)
+          ? 0
+          : (runState.usage?.estCostUsd ?? 0);
         tickSpent += swarmSpent;
 
         audit({
