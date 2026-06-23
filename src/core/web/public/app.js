@@ -2299,7 +2299,61 @@ function renderControl() {
   usageCard.appendChild(usageBody);
   section.appendChild(usageCard);
 
-  // ── 5. Security (M67) ─────────────────────────────────────────────────
+  // ── 5. Subscription usage (M82) ───────────────────────────────────────
+  const subUsageEngines = Array.isArray(d.subscriptionUsage) ? d.subscriptionUsage : [];
+
+  const subUsageCard = el('div', { cls: 'ctrl-card card' });
+  subUsageCard.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Subscription Usage'),
+    el('span', { cls: 'card-subtitle' }, 'burn-down per engine')
+  ));
+  const subUsageBody = el('div', { cls: 'card-body' });
+
+  if (subUsageEngines.length === 0) {
+    subUsageBody.appendChild(el('p', { cls: 'hint' }, 'No subscription engine data available.'));
+  } else {
+    for (const eng of subUsageEngines) {
+      const engRow = el('div', { cls: 'ctrl-subusage-engine' });
+      const planLabel = eng.plan ? ` · ${eng.plan}` : '';
+      engRow.appendChild(el('div', { cls: 'ctrl-subusage-engine-name' },
+        el('span', { cls: 'ctrl-subusage-engine-id' }, eng.engine),
+        el('span', { cls: 'ctrl-subusage-plan' }, planLabel)
+      ));
+
+      if (!eng.hasData || !Array.isArray(eng.windows) || eng.windows.length === 0) {
+        engRow.appendChild(el('p', { cls: 'ctrl-subusage-unknown' }, 'No local usage signal — subscription cap not API-exposed.'));
+      } else {
+        const barsWrap = el('div', { cls: 'ctrl-subusage-bars' });
+        for (const win of eng.windows) {
+          const pct = Math.min(100, Math.max(0, Math.round(win.usedPercent ?? 0)));
+          const barColor = pct > 90 ? 'var(--status-failed)'
+                         : pct > 70 ? 'var(--status-aborted)'
+                         : 'var(--status-done)';
+          const resetStr = win.resetsAt
+            ? new Date(win.resetsAt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            : null;
+          const winRow = el('div', { cls: 'ctrl-subusage-win-row' },
+            el('span', { cls: 'ctrl-subusage-win-label' }, win.label ?? '?'),
+            el('div', { cls: 'ctrl-subusage-bar-track' },
+              el('div', { cls: 'ctrl-subusage-bar', style: `width:${pct}%;background:${barColor}` })
+            ),
+            el('span', { cls: 'ctrl-subusage-pct', style: `color:${barColor}` }, `${pct}%`),
+            resetStr
+              ? el('span', { cls: 'ctrl-subusage-reset' }, `resets ${resetStr}`)
+              : el('span', { cls: 'ctrl-subusage-reset muted' }, 'reset unknown')
+          );
+          barsWrap.appendChild(winRow);
+        }
+        engRow.appendChild(barsWrap);
+      }
+      subUsageBody.appendChild(engRow);
+    }
+  }
+
+  subUsageCard.appendChild(subUsageBody);
+  section.appendChild(subUsageCard);
+
+  // ── 7. Security (M67) ─────────────────────────────────────────────────
   const sec = d.security ?? {};
   const secFindings = Array.isArray(sec.findings) ? sec.findings : [];
   const secCounts = sec.counts ?? {};
@@ -2348,7 +2402,7 @@ function renderControl() {
   secCard.appendChild(secBody);
   section.appendChild(secCard);
 
-  // ── 6. Activity log ───────────────────────────────────────────────────
+  // ── 8. Activity log ───────────────────────────────────────────────────
   const logs = Array.isArray(d.logs) ? [...d.logs].reverse() : [];
 
   const logsCard = el('div', { cls: 'ctrl-card card' });

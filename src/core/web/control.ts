@@ -24,6 +24,7 @@ import { loadDaemonState } from '../daemon/state.js';
 import { usesInWindow, evalQuota, windowToMs } from '../fleet/quota.js';
 import { resolveUsageWindows, type UsageWindow, type ProviderLimitEntry } from '../observability/limits.js';
 import { loadBacklog } from '../portfolio/backlog.js';
+import { readCodexRateLimits } from '../observability/codex-source.js';
 
 // ---------------------------------------------------------------------------
 // ControlSnapshot type
@@ -80,6 +81,30 @@ export interface ControlSubscriptionLimits {
   providers: ProviderLimitEntry[];
 }
 
+// ---------------------------------------------------------------------------
+// M82: Subscription usage panel — per-engine burn-down (5h + weekly windows)
+// ---------------------------------------------------------------------------
+
+export interface SubscriptionUsageWindow {
+  /** Human-readable window label: '5h', '1w', etc. */
+  label: string;
+  /** 0–100 usage percentage. */
+  usedPercent: number;
+  /** Unix epoch seconds when this window resets. Absent when unknown. */
+  resetsAt?: number;
+}
+
+export interface SubscriptionEngineUsage {
+  /** Engine identifier, e.g. 'codex', 'claude'. */
+  engine: string;
+  /** Ordered windows (primary first). Empty when no data available. */
+  windows: SubscriptionUsageWindow[];
+  /** Subscription plan label when readable from session data. */
+  plan?: string;
+  /** True when real window data is available; false = best-effort/unknown. */
+  hasData: boolean;
+}
+
 export interface ControlLogEntry {
   ts: string;
   kind: 'tick' | 'merge' | 'info';
@@ -127,6 +152,8 @@ export interface ControlSnapshot {
   logs: ControlLogEntry[];
   /** M67: supply-chain / binshield security findings from cached backlog. */
   security: ControlSecurity;
+  /** M82: per-engine subscription burn-down (5h + weekly windows). */
+  subscriptionUsage: SubscriptionEngineUsage[];
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +421,71 @@ export function buildSecurity(): ControlSecurity {
 }
 
 // ---------------------------------------------------------------------------
+// M82: Subscription usage builder — codex: real 5h+weekly; claude: unknown
+// ---------------------------------------------------------------------------
+
+/** Convert raw windowMinutes to a short readable label. */
+function minutesToWindowLabel(mins: number): string {
+  if (mins % (60 * 24 * 7) === 0) return `${mins / (60 * 24 * 7)}w`;
+  if (mins % (60 * 24) === 0)     return `${mins / (60 * 24)}d`;
+  if (mins % 60 === 0)            return `${mins / 60}h`;
+  return `${mins}m`;
+}
+
+/**
+ * Build per-engine subscription burn-down windows.
+ *
+ * Codex: reads readCodexRateLimits() for real 5h (primary) + weekly
+ *   (secondary) used-percent + resetsAt. Returns hasData:true.
+ * Claude: no local signal — returns hasData:false with empty windows.
+ *
+ * Fast, read-only, never-throws. Degrades to empty array on any error.
+ */
+export function buildSubscriptionUsage(): SubscriptionEngineUsage[] {
+  const result: SubscriptionEngineUsage[] = [];
+
+  // ── Codex ──────────────────────────────────────────────────────────────
+  try {
+    const limits = readCodexRateLimits();
+    if (limits) {
+      const windows: SubscriptionUsageWindow[] = [];
+      if (limits.primary) {
+        windows.push({
+          label: minutesToWindowLabel(limits.primary.windowMinutes),
+          usedPercent: limits.primary.usedPercent,
+          resetsAt: limits.primary.resetsAt,
+        });
+      }
+      if (limits.secondary) {
+        windows.push({
+          label: minutesToWindowLabel(limits.secondary.windowMinutes),
+          usedPercent: limits.secondary.usedPercent,
+          resetsAt: limits.secondary.resetsAt,
+        });
+      }
+      result.push({
+        engine: 'codex',
+        windows,
+        plan: limits.planType,
+        hasData: windows.length > 0,
+      });
+    }
+  } catch {
+    // degrade silently
+  }
+
+  // ── Claude ─────────────────────────────────────────────────────────────
+  // No local signal — subscription caps are not API-exposed for Pro/Max plans.
+  result.push({
+    engine: 'claude',
+    windows: [],
+    hasData: false,
+  });
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
@@ -423,6 +515,7 @@ export async function buildControlSnapshot(cfg: AshlrConfig): Promise<ControlSna
   const subscriptionLimits = await buildSubscriptionLimits(cfg);
   const logs = buildLogs(LOG_CAP);
   const security = buildSecurity();
+  const subscriptionUsage = buildSubscriptionUsage();
 
-  return { ts, models, fleet, daemon, usage, limits, subscriptionLimits, logs, security };
+  return { ts, models, fleet, daemon, usage, limits, subscriptionLimits, logs, security, subscriptionUsage };
 }

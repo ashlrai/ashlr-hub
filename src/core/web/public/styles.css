@@ -2267,6 +2267,85 @@ a:hover {
 .ctrl-prov-kind-badge.api-key      { color: var(--status-done);    background: rgba(74, 222, 128, 0.12); border: 1px solid rgba(74, 222, 128, 0.3); }
 .ctrl-prov-kind-badge.subscription { color: var(--text-muted);     background: var(--bg-elevated);       border: 1px solid var(--border-subtle); }
 
+/* M82: Subscription usage panel — per-engine burn-down bars ──────────────── */
+.ctrl-subusage-engine {
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.ctrl-subusage-engine:last-child { border-bottom: none; }
+
+.ctrl-subusage-engine-name {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.ctrl-subusage-engine-id {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.ctrl-subusage-plan {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ctrl-subusage-bars {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.ctrl-subusage-win-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: 12px;
+}
+.ctrl-subusage-win-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  min-width: 28px;
+}
+.ctrl-subusage-bar-track {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-elevated);
+  border-radius: 3px;
+  overflow: hidden;
+  min-width: 80px;
+  max-width: 200px;
+}
+.ctrl-subusage-bar {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+.ctrl-subusage-pct {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  min-width: 36px;
+  text-align: right;
+}
+.ctrl-subusage-reset {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.ctrl-subusage-reset.muted { color: var(--text-dim, #555); font-style: italic; }
+.ctrl-subusage-unknown {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  margin: 0;
+}
+
 .ctrl-backend-list { margin-bottom: var(--space-4); }
 
 .ctrl-backend-row {
