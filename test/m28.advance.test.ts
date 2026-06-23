@@ -242,6 +242,10 @@ describe('advanceGoal — SANDBOXED + PROPOSAL-ONLY', () => {
     mockListProposals.mockReturnValue([
       makeProposal({
         id: 'prop-XYZ',
+        // advanceGoal correlates on p.repo === resolve(goal.project); resolve
+        // the proposal repo the same way so the match is cross-platform (on
+        // Windows resolve('/tmp/enrolled-repo') => 'C:\\tmp\\enrolled-repo').
+        repo: path.resolve('/tmp/enrolled-repo'),
         summary: 'Autonomous swarm proposal (swarm=swarm-abc, status=done)',
       }),
     ]);

@@ -6,6 +6,18 @@
 
 set -euo pipefail
 
+# ── 0. Platform guard ─────────────────────────────────────────────────────────
+# This installer requires a POSIX shell, symlinks, and ~/.local/bin — macOS or
+# Linux. On native Windows (Git Bash / MSYS), `uname` reports MINGW*/MSYS*/CYGWIN*.
+case "$(uname -s)" in
+  Darwin|Linux) : ;;
+  *)
+    printf "  \033[0;31mfail\033[0m This installer requires macOS or Linux.\n" >&2
+    printf "       On Windows, run it inside WSL2 (a Linux shell).\n" >&2
+    exit 1
+    ;;
+esac
+
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_SRC="$REPO_DIR/bin/ashlr"
 INSTALL_DIR="$HOME/.local/bin"

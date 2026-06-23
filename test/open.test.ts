@@ -1,62 +1,30 @@
 /**
  * Tests for src/cli/open.ts
  *
- * Focus: editor deep links must be properly percent-encoded so paths
+ * Focus: the editor deep-link URL must be properly percent-encoded so paths
  * containing spaces and reserved URI characters (e.g. "Keys & Recovery",
- * "Rent Application.pdf") produce a valid URL rather than a garbled one.
+ * "Rent Application.pdf") produce a valid URL rather than a garbled one — and
+ * it must do so identically on any host OS.
  *
- * We stub child_process.spawn so no real `open` process is launched and we
- * can capture the exact URL argument that openInEditor builds.
+ * We assert the pure `editorDeepLink` builder directly (no spawn, no platform
+ * launcher), so the test is platform-agnostic: a POSIX input yields a POSIX
+ * URL and a Windows input yields a valid Windows URL regardless of where the
+ * test runs.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 
-// Capture the args passed to spawn.
-const spawnCalls: { cmd: string; args: string[] }[] = [];
+import { editorDeepLink } from '../src/cli/open.js';
 
-vi.mock('node:child_process', () => ({
-  spawn: (cmd: string, args: string[]) => {
-    spawnCalls.push({ cmd, args });
-    // Return a minimal fake ChildProcess with unref().
-    return { unref: () => undefined };
-  },
-}));
-
-// Import AFTER the mock is registered.
-import { openInEditor } from '../src/cli/open.js';
-import type { AshlrConfig } from '../src/core/types.js';
-
-function makeConfig(editor: 'cursor' | 'vscode'): AshlrConfig {
-  return {
-    version: 1,
-    roots: [],
-    editor,
-    staleDays: 30,
-    categories: {},
-    tidyRules: [],
-    keepers: [],
-    models: { lmstudio: '', ollama: '', providerChain: [] },
-    telemetry: {},
-    tools: {},
-  };
-}
-
-describe('openInEditor — deep link URL encoding', () => {
-  beforeEach(() => { spawnCalls.length = 0; });
-  afterEach(() => { spawnCalls.length = 0; });
-
+describe('editorDeepLink — deep link URL encoding', () => {
   it('percent-encodes spaces in the path (cursor)', () => {
-    openInEditor('/Users/m/Desktop/Rent Application.pdf', makeConfig('cursor'));
-    expect(spawnCalls).toHaveLength(1);
-    const [url] = spawnCalls[0].args;
+    const url = editorDeepLink('/Users/m/Desktop/Rent Application.pdf', 'cursor');
     expect(url).toBe('cursor://file/Users/m/Desktop/Rent%20Application.pdf');
-    // No raw spaces leaked into the URL.
     expect(url).not.toContain(' ');
   });
 
   it('percent-encodes ampersands and spaces (cursor)', () => {
-    openInEditor('/Users/m/Desktop/Keys & Recovery', makeConfig('cursor'));
-    const [url] = spawnCalls[0].args;
+    const url = editorDeepLink('/Users/m/Desktop/Keys & Recovery', 'cursor');
     expect(url).toBe('cursor://file/Users/m/Desktop/Keys%20%26%20Recovery');
     expect(url).not.toContain(' ');
     // The reserved '&' must be escaped.
@@ -64,16 +32,27 @@ describe('openInEditor — deep link URL encoding', () => {
   });
 
   it('percent-encodes for vscode too and preserves path separators', () => {
-    openInEditor('/Users/m/Desktop/tts agents', makeConfig('vscode'));
-    const [url] = spawnCalls[0].args;
+    const url = editorDeepLink('/Users/m/Desktop/tts agents', 'vscode');
     expect(url).toBe('vscode://file/Users/m/Desktop/tts%20agents');
-    // Slashes between segments must survive encoding.
     expect(url.startsWith('vscode://file/Users/m/Desktop/')).toBe(true);
   });
 
   it('leaves a plain path with no special chars unchanged in shape', () => {
-    openInEditor('/Users/m/Desktop/github/dev-tools/ashlr-hub', makeConfig('cursor'));
-    const [url] = spawnCalls[0].args;
+    const url = editorDeepLink('/Users/m/Desktop/github/dev-tools/ashlr-hub', 'cursor');
     expect(url).toBe('cursor://file/Users/m/Desktop/github/dev-tools/ashlr-hub');
+  });
+
+  it('builds a valid URL from a Windows path: backslashes → slashes, drive colon preserved', () => {
+    const url = editorDeepLink('C:\\Users\\m\\Desktop\\Rent Application.pdf', 'vscode');
+    // Leading slash before the drive, literal "C:", encoded space, no backslashes.
+    expect(url).toBe('vscode://file/C:/Users/m/Desktop/Rent%20Application.pdf');
+    expect(url).not.toContain('\\');
+    expect(url).not.toContain('%5C');
+    expect(url).not.toContain('%3A'); // drive colon must stay literal
+  });
+
+  it('encodes reserved chars in a Windows path segment', () => {
+    const url = editorDeepLink('C:\\Users\\m\\Keys & Recovery', 'cursor');
+    expect(url).toBe('cursor://file/C:/Users/m/Keys%20%26%20Recovery');
   });
 });

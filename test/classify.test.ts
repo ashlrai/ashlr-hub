@@ -17,9 +17,11 @@ import {
   symlinkSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
 import type { AshlrConfig } from '../src/core/types.js';
+import { canSymlink } from './helpers/platform.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -218,7 +220,7 @@ describe('describe', () => {
 
   it('works against the test/fixtures directory (real README.md)', () => {
     // Uses the committed fixture at test/fixtures/README.md
-    const fixturesDir = new URL('./fixtures', import.meta.url).pathname;
+    const fixturesDir = fileURLToPath(new URL('./fixtures', import.meta.url));
     const result = describeItem(fixturesDir);
     expect(result).toBe('My Fixture Project');
   });
@@ -278,7 +280,7 @@ describe('kindOf', () => {
   beforeEach(() => { tmp = makeTmp(); });
   afterEach(() => cleanup(tmp));
 
-  it('returns "symlink" for a symlink (takes priority over everything)', () => {
+  it.skipIf(!canSymlink())('returns "symlink" for a symlink (takes priority over everything)', () => {
     const target = join(tmp, 'target-dir');
     mkdirSync(target, { recursive: true });
     const link = join(tmp, 'my-link');
@@ -286,7 +288,7 @@ describe('kindOf', () => {
     expect(kindOf(link)).toBe('symlink');
   });
 
-  it('returns "symlink" even if the symlink target is a repo', () => {
+  it.skipIf(!canSymlink())('returns "symlink" even if the symlink target is a repo', () => {
     const target = join(tmp, 'target-repo');
     mkdirSync(target, { recursive: true });
     execSync('git init', { cwd: target, stdio: 'pipe' });

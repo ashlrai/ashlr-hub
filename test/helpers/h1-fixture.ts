@@ -270,6 +270,12 @@ export function makeDisposableRepo(opts?: MakeRepoOptions): DisposableRepo {
   git(dir, ['config', 'user.email', 'h1@ashlr.test']);
   git(dir, ['config', 'user.name', 'Ashlr H1 Test']);
   git(dir, ['config', 'commit.gpgsign', 'false']);
+  // Pin LF line endings so the disposable repo is byte-deterministic on every
+  // platform. Without this, git on Windows honors a global core.autocrlf=true and
+  // rewrites LF->CRLF on checkout/read-back, which would make `git apply` of an
+  // LF unified diff land CRLF content and break exact-content assertions.
+  git(dir, ['config', 'core.autocrlf', 'false']);
+  git(dir, ['config', 'core.eol', 'lf']);
 
   for (const [rel, content] of Object.entries(files)) {
     const full = join(dir, rel);

@@ -21,14 +21,13 @@ const pkg = JSON.parse(
 ) as { engines?: { node?: string }; scripts?: Record<string, string> };
 
 describe('M30 CI workflow', () => {
-  it('declares a Node version matrix containing 20 and 22', () => {
+  it('declares a Node version matrix containing 22', () => {
     const match = ciYml.match(/node-version:\s*\[([^\]]*)\]/);
     expect(match, 'expected a node-version matrix array in ci.yml').not.toBeNull();
     const versions = (match as RegExpMatchArray)[1]
       .split(',')
       .map((v) => v.replace(/["'\s]/g, ''))
       .filter(Boolean);
-    expect(versions).toContain('20');
     expect(versions).toContain('22');
   });
 
@@ -49,8 +48,9 @@ describe('M30 CI workflow', () => {
     expect(ciYml).not.toMatch(/vercel|netlify|gh-pages|pages-deploy/i);
   });
 
-  it('allows the lowest matrix Node (20) via package.json engines', () => {
-    // The matrix runs Node 20, so engines must not exclude it.
-    expect(pkg.engines?.node).toBe('>=20');
+  it('requires Node >=22 via package.json engines (matches the CI matrix)', () => {
+    // The matrix runs Node 22, and install.sh hard-requires >=22, so engines
+    // must agree. (Node 20 was dropped — it is unsupported by install.sh.)
+    expect(pkg.engines?.node).toBe('>=22');
   });
 });

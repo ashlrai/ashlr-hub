@@ -12,7 +12,7 @@ Index every project, run agents on local models, aggregate all your MCP servers,
 
 ## Getting started in one command
 
-Requires **macOS** and **Node.js 22+** with `~/.local/bin` on your `PATH`.
+Requires **Node.js 22+**. The one-command flow below targets **macOS/Linux** (needs `~/.local/bin` on your `PATH`); on **Windows**, install natively with `npm ci && npm run build && npm link` (see [Contributing](./CONTRIBUTING.md#setup)).
 
 ```sh
 git clone https://github.com/masonwyatt23/ashlr-hub.git
@@ -677,7 +677,9 @@ ashlr telemetry test     # emit a synthetic test span; reports ok/fail
 
 ## Requirements
 
-- **macOS** · **Node.js 22+** · `~/.local/bin` on your `PATH`
+- **macOS, Linux, or Windows** · **Node.js 22+**
+  - macOS/Linux: `~/.local/bin` on your `PATH` (the `./install.sh` target)
+  - Windows: install natively with `npm ci && npm run build && npm link` (`install.sh` is bash-only)
 - Optional: [Ollama](https://ollama.com) or [LM Studio](https://lmstudio.ai) for local agent runs; [`phantom`](https://github.com/nicholasgasior/phantom) for secrets management; [Raycast](https://raycast.com) for the extension.
 
 ---

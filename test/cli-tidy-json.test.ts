@@ -71,7 +71,11 @@ describe('CLI: ashlr tidy --json', () => {
   it('emits ONLY a parseable TidyPlan on stdout', () => {
     const result = spawnSync('node', [cliEntry, 'tidy', '--json'], {
       encoding: 'utf8',
-      env: { ...process.env, HOME: home, NO_COLOR: '1', FORCE_COLOR: '0' },
+      // HOME redirects the config home on macOS/Linux. The spawned child does NOT
+      // load the test's os.homedir() shim, and on Windows os.homedir() follows
+      // USERPROFILE (not HOME) — so point USERPROFILE at the same tmp home to keep
+      // the child reading the isolated ~/.ashlr cross-platform.
+      env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: '1', FORCE_COLOR: '0' },
     });
 
     expect(result.status).toBe(0);
@@ -93,7 +97,11 @@ describe('CLI: ashlr tidy --json', () => {
   it('does not contain ANSI escape codes in stdout', () => {
     const result = spawnSync('node', [cliEntry, 'tidy', '--json'], {
       encoding: 'utf8',
-      env: { ...process.env, HOME: home, NO_COLOR: '1', FORCE_COLOR: '0' },
+      // HOME redirects the config home on macOS/Linux. The spawned child does NOT
+      // load the test's os.homedir() shim, and on Windows os.homedir() follows
+      // USERPROFILE (not HOME) — so point USERPROFILE at the same tmp home to keep
+      // the child reading the isolated ~/.ashlr cross-platform.
+      env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: '1', FORCE_COLOR: '0' },
     });
     const raw = result.stdout ?? '';
     // No ESC (\x1b) control characters.

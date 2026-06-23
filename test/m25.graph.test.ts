@@ -317,7 +317,7 @@ describe('buildGraph — nodes', () => {
     const repoNodes = graph.nodes.filter(n => n.kind === 'repo');
     expect(repoNodes.length).toBeGreaterThan(0);
     const ids = repoNodes.map(n => n.id);
-    expect(ids.some(id => id === path.resolve(tmpRepo) || id.includes(tmpRepo.split('/').pop() ?? ''))).toBe(true);
+    expect(ids.some(id => id === path.resolve(tmpRepo) || id.includes(path.basename(tmpRepo)))).toBe(true);
   });
 
   it('produces nodes for 2 enrolled repos', async () => {

@@ -11,9 +11,14 @@ conventions, and the contracts-first workflow the project is built on.
 
 - **Node.js >= 22** (`engines.node` is `>=22`; CI and the build assume it)
 - **git** on `PATH`
-- `~/.local/bin` on your `PATH` if you want to install the CLI locally
+- `~/.local/bin` on your `PATH` if you want to install the CLI locally (macOS/Linux)
 - Optional, only exercised by some commands at runtime: `phantom`, `ollama` /
   LM Studio, `gh`, `vercel`, `stack`. None are required to build or test.
+
+The hub builds, tests, and runs natively on **macOS, Linux, and Windows**. The
+suite is platform-agnostic (no symlink/`/`-separator/timezone assumptions leak
+into assertions); CI runs on Linux, and a local pre-push hook (below) is the
+guard for Windows-specific regressions.
 
 The toolchain is intentionally lean: `typescript`, `tsx`, `vitest`, and
 `eslint` / `typescript-eslint` are the only devDependencies.
@@ -32,10 +37,15 @@ gateway). See "Zero-runtime-dep core" below.
 To install the CLI on your machine while developing:
 
 ```sh
+# macOS / Linux
 ./install.sh    # builds dist/, symlinks bin/ashlr -> ~/.local/bin/ashlr, smoke-tests `ashlr help`
+
+# Windows (PowerShell or cmd) — install.sh is bash-only, so use npm link
+npm ci && npm run build && npm link   # puts `ashlr` on PATH via the npm global prefix
 ```
 
-`install.sh` is idempotent — re-run it after pulling changes.
+`install.sh` is idempotent — re-run it after pulling changes. On Windows, re-run
+`npm run build` after pulling (the `npm link` shim points at `dist/`).
 
 ---
 
@@ -55,15 +65,27 @@ installed binary always runs the compiled output. For fast iteration use
 
 ### Definition of green
 
-A change is ready when all four pass:
+A change is ready when all four pass — wrapped in one script:
 
 ```sh
-npm run typecheck && npm run lint && npm test && npm run build
+npm run verify   # typecheck + lint + build + test
 ```
 
-The test suite must stay green and must not shrink (currently 900+ tests across
+The test suite must stay green and must not shrink (3,100+ tests across
 `test/`). Tests are organized by milestone (`m2.*.test.ts`, `m3.*.test.ts`, …)
 plus the M1 core suites (`classify`, `config`, `git`, `tidy`, `open`, etc.).
+
+### Pre-push safeguard
+
+A repo-tracked git hook runs `npm run verify` before every push — the local
+guard that catches Windows-specific regressions (CI is Linux-only). Enable it
+once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+Skip it for a single push with `SKIP_VERIFY=1 git push`.
 
 ---
 

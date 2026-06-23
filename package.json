@@ -31,17 +31,20 @@
     "schema"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "verify": "npm run typecheck && npm run lint && npm run build && npm test",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^2.1.9",
     "eslint": "^9.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.5.0",

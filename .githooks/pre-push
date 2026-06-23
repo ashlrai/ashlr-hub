@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+#
+# Local safeguard: run the full verify pipeline (typecheck + lint + build +
+# test) before every push. Because CI runs on Linux only, this hook is the
+# guard that catches WINDOWS-specific regressions (path separators, os.homedir,
+# `which` vs `where`, CRLF, symlink/permission limits) before they land.
+#
+# Enable once per clone:   git config core.hooksPath .githooks
+# Skip for one push:       SKIP_VERIFY=1 git push
+#
+set -euo pipefail
+
+if [[ "${SKIP_VERIFY:-}" == "1" ]]; then
+  echo "[pre-push] SKIP_VERIFY=1 — skipping verify pipeline."
+  exit 0
+fi
+
+echo "[pre-push] running verify (typecheck + lint + build + test)…"
+npm run verify
+echo "[pre-push] verify passed — pushing."

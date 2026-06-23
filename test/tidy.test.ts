@@ -24,6 +24,7 @@ import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
 import type { AshlrConfig, TidyRule } from '../src/core/types.js';
 import { planTidy, applyTidy } from '../src/core/tidy.js';
+import { canSymlink } from './helpers/platform.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -158,7 +159,7 @@ describe('planTidy — git repos and symlinks protected', () => {
     expect(skipped!.reason).toMatch(/repo/i);
   });
 
-  it('never moves a symlink', () => {
+  it.skipIf(!canSymlink())('never moves a symlink', () => {
     const target = join(tmp, 'target');
     mkdirSync(target, { recursive: true });
     const link = join(tmp, 'my-link');

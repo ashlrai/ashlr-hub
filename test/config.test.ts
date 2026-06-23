@@ -55,12 +55,12 @@ vi.mock('../src/core/config.js', async (importOriginal) => {
       // Temporarily point HOME at the test dir so homedir() resolves correctly
       // inside the real loadConfig implementation.
       const savedHome = process.env.HOME;
-      if (_configDir) process.env.HOME = _configDir.replace(/\/\.ashlr$/, '');
+      if (_configDir) process.env.HOME = _configDir.replace(/[/\\]\.ashlr$/, '');
       try { return real.loadConfig(); } finally { process.env.HOME = savedHome; }
     },
     saveConfig(c: Parameters<typeof real.saveConfig>[0]): void {
       const savedHome = process.env.HOME;
-      if (_configDir) process.env.HOME = _configDir.replace(/\/\.ashlr$/, '');
+      if (_configDir) process.env.HOME = _configDir.replace(/[/\\]\.ashlr$/, '');
       try { real.saveConfig(c); } finally { process.env.HOME = savedHome; }
     },
   };

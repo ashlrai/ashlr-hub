@@ -7,7 +7,7 @@
 
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, delimiter } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { AshlrConfig, DoctorCheck, DoctorCheckStatus, DoctorReport, McpRegistry, ToolsRegistry } from './types.js';
 import { CONFIG_PATH, INDEX_PATH, loadConfig } from './config.js';
@@ -281,8 +281,8 @@ function checkGit(): DoctorCheck {
 
 /** ~/.local/bin on PATH */
 function checkLocalBin(): DoctorCheck {
-  const localBin = join(homedir(), '.local/bin');
-  const pathDirs = (process.env['PATH'] ?? '').split(':');
+  const localBin = join(homedir(), '.local', 'bin');
+  const pathDirs = (process.env['PATH'] ?? '').split(delimiter);
   if (pathDirs.includes(localBin)) {
     return check('local-bin', '~/.local/bin on PATH', 'pass', `${localBin} is on PATH`);
   }
@@ -295,9 +295,11 @@ function checkLocalBin(): DoctorCheck {
   );
 }
 
-/** ashlr binary present (which ashlr) */
+/** ashlr binary present (which/where ashlr) */
 function checkAshlrInstalled(): DoctorCheck {
-  const out = runCmd('which', ['ashlr']);
+  // `which` is Unix-only; Windows uses `where`.
+  const finder = process.platform === 'win32' ? 'where' : 'which';
+  const out = runCmd(finder, ['ashlr']);
   if (out) {
     return check('ashlr', 'ashlr installed', 'pass', out);
   }
