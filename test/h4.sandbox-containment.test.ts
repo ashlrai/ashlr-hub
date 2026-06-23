@@ -49,6 +49,7 @@ import {
   type H1Fixture,
   type DisposableRepo,
 } from './helpers/h1-fixture.js';
+import { canSymlink } from './helpers/platform.js';
 
 const BRANCH_PREFIX = 'ashlr/sandbox/';
 
@@ -421,7 +422,10 @@ describe('H4 · CONTAINMENT · robustness', () => {
     removeSandbox(good);
   });
 
-  it('7.9 [UNTESTED] symlink worktreePath escape is blocked (containment defeats symlink)', () => {
+  // skipIf(!canSymlink): this test builds a REAL symlink to simulate the escape;
+  // Windows without symlink privilege throws EPERM at symlinkSync. The
+  // containment guard it exercises is platform-agnostic and covered by 7.6.
+  it.skipIf(!canSymlink())('7.9 [UNTESTED] symlink worktreePath escape is blocked (containment defeats symlink)', () => {
     const treeBefore = repo.shasumTree();
 
     const sb = createSandbox(repo.dir, { allowAnyRepo: true });

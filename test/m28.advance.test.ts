@@ -121,7 +121,9 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
   const now = new Date().toISOString();
   return {
     id: 'prop-1',
-    repo: '/tmp/enrolled-repo',
+    // advance.ts correlates on resolve(goal.project); resolve the fixture repo
+    // the same way so it matches on Windows (C:\tmp\...) as well as POSIX.
+    repo: path.resolve('/tmp/enrolled-repo'),
     origin: 'swarm',
     kind: 'patch',
     title: 'swarm proposal',

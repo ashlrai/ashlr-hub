@@ -51,7 +51,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, sep } from 'node:path';
+import { join } from 'node:path';
 
 import {
   createSandbox,
@@ -123,12 +123,14 @@ function sandboxWorktreeRegistrations(dir: string): string[] {
     stdio: 'pipe',
     encoding: 'utf8',
   });
-  const sandboxMarker = `${sep}sandboxes${sep}`;
+  // `git worktree list --porcelain` always emits POSIX-style forward slashes,
+  // even on Windows (e.g. `C:/Users/.../sandboxes/<id>/worktree`). Match on '/'
+  // separators rather than path.sep, which would be '\\' on Windows and never hit.
   return out
     .split('\n')
     .filter((l) => l.startsWith('worktree '))
     .map((l) => l.slice('worktree '.length).trim())
-    .filter((p) => p.includes(sandboxMarker) && p.endsWith(`${sep}worktree`));
+    .filter((p) => p.includes('/sandboxes/') && p.endsWith('/worktree'));
 }
 
 /** Short-names of any `ashlr/sandbox/*` scratch branches left in the repo. */

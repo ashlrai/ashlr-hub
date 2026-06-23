@@ -19,6 +19,15 @@ export default defineConfig({
     // to the developer's REAL ~/.ashlr on Windows — and the H1 fixture's
     // relocation guard throws, aborting the test. See test/setup/home.ts.
     setupFiles: ['./test/setup/home.ts'],
+    // Cap worker forks. Many H-suite tests spawn real git/child processes, so at
+    // the default (~one fork per core) the machine oversubscribes and heavy
+    // git-bound tests flake with timeouts — non-deterministically, and only
+    // under load (each passes in isolation; the suite passes serially). A small
+    // fixed cap keeps meaningful parallelism without the oversubscription.
+    pool: 'forks',
+    poolOptions: {
+      forks: { maxForks: 4, minForks: 1 },
+    },
     exclude: [
       '**/node_modules/**',
       '**/dist/**',

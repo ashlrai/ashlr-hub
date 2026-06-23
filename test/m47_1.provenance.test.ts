@@ -66,8 +66,16 @@ describe('M47.1 provenance — sign/verify roundtrip', () => {
     expect(fs.existsSync(keyPath)).toBe(true);
 
     // 0o600 = owner rw only. Mask to the permission bits.
-    const mode = fs.statSync(keyPath).mode & 0o777;
-    expect(mode).toBe(0o600);
+    // Windows/NTFS cannot represent POSIX permission bits — chmod/mode is a
+    // best-effort no-op there and statSync reports 0o666. The source DOES
+    // request mode 0o600 (asserted on POSIX); on win32 we assert the file
+    // merely exists and is readable, since the mode bits are unenforceable.
+    if (process.platform === 'win32') {
+      expect(fs.existsSync(keyPath)).toBe(true);
+    } else {
+      const mode = fs.statSync(keyPath).mode & 0o777;
+      expect(mode).toBe(0o600);
+    }
   });
 
   it('is stable: re-loading returns the same key (signatures persist)', () => {

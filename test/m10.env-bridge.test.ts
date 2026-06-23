@@ -13,7 +13,7 @@
 import { describe, it, expect } from 'vitest';
 import { buildToolEnv, withToolEnv } from '../src/core/env-bridge.js';
 import { CONFIG_PATH, CONFIG_DIR } from '../src/core/config.js';
-import { join } from 'node:path';
+import { join, delimiter } from 'node:path';
 import type { AshlrConfig } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -125,9 +125,11 @@ describe('buildToolEnv — flags + paths', () => {
     expect(buildToolEnv(makeConfig())['ASHLR_GENOME_DIR']).toBe(join(CONFIG_DIR, 'genome'));
   });
 
-  it('colon-joins roots into ASHLR_ROOTS', () => {
+  it('delimiter-joins roots into ASHLR_ROOTS', () => {
+    // env-bridge joins with path.delimiter (':' POSIX, ';' Windows) so drive
+    // letters survive on win32 — assert against the platform delimiter, not ':'.
     expect(buildToolEnv(makeConfig())['ASHLR_ROOTS']).toBe(
-      '/home/u/Desktop/github:/home/u/Desktop',
+      ['/home/u/Desktop/github', '/home/u/Desktop'].join(delimiter),
     );
   });
 

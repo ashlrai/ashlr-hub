@@ -17,6 +17,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as http from 'node:http';
+import * as path from 'node:path';
 import type { AshlrConfig, WebServerOptions } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -228,7 +229,8 @@ describe('startServer — 127.0.0.1 binding', () => {
   it('assetsDir() returns an absolute path', () => {
     const dir = assetsDir();
     expect(typeof dir).toBe('string');
-    expect(dir.startsWith('/')).toBe(true);
+    // Use path.isAbsolute so the assertion holds on Windows (C:\...) too.
+    expect(path.isAbsolute(dir)).toBe(true);
   });
 });
 

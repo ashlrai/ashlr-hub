@@ -18,7 +18,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   mkdtempSync, rmSync, readFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AshlrConfig } from '../src/core/types.js';
 
@@ -45,12 +45,14 @@ vi.mock('../src/core/config.js', async (importOriginal) => {
     defaultConfig: real.defaultConfig,
     loadConfig(): ReturnType<typeof real.loadConfig> {
       const saved = process.env.HOME;
-      if (_configDir) process.env.HOME = _configDir.replace(/\/\.ashlr$/, '');
+      // _configDir is path.join()-built (backslashes on win32); strip the
+      // trailing .ashlr via dirname() rather than a forward-slash-only regex.
+      if (_configDir) process.env.HOME = dirname(_configDir);
       try { return real.loadConfig(); } finally { process.env.HOME = saved; }
     },
     saveConfig(c: Parameters<typeof real.saveConfig>[0]): void {
       const saved = process.env.HOME;
-      if (_configDir) process.env.HOME = _configDir.replace(/\/\.ashlr$/, '');
+      if (_configDir) process.env.HOME = dirname(_configDir);
       try { real.saveConfig(c); } finally { process.env.HOME = saved; }
     },
   };

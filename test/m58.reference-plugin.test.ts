@@ -18,7 +18,8 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join, basename, resolve as resolvePath, sep } from 'node:path';
+import { join, basename, dirname, resolve as resolvePath, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { mkdtempSync, rmSync } from 'node:fs';
 
@@ -33,8 +34,10 @@ import type { PluginHost } from '../src/core/plugins/types.js';
 // ---------------------------------------------------------------------------
 
 /** Absolute path to the reference plugin directory. */
+// fileURLToPath (not URL.pathname) — on Windows .pathname yields "/C:/…" which
+// is not a valid filesystem path; fileURLToPath produces a native path.
 const PLUGIN_DIR = resolvePath(
-  new URL('.', import.meta.url).pathname,
+  fileURLToPath(new URL('.', import.meta.url)),
   '../examples/plugins/backlog-scanner',
 );
 
@@ -78,7 +81,7 @@ function makeTmpRepo(files: Record<string, string>): { dir: string; cleanup(): v
   const dir = mkdtempSync(join(tmpdir(), 'ashlr-m58-repo-'));
   for (const [rel, content] of Object.entries(files)) {
     const full = join(dir, rel);
-    mkdirSync(full.slice(0, full.lastIndexOf('/')), { recursive: true });
+    mkdirSync(dirname(full), { recursive: true });
     writeFileSync(full, content, 'utf8');
   }
   return {

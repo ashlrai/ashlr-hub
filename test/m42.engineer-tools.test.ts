@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { makeFixture, type H1Fixture, type DisposableRepo } from './helpers/h1-fixture.js';
+import { canSymlink } from './helpers/platform.js';
 import {
   type EngineerContext,
   callEngineerTool,
@@ -99,7 +100,10 @@ describe('workspace boundary (resolveInside)', () => {
   // FIX 1 (CRITICAL): a symlinked intermediate directory pointing outside the
   // worktree must not let a not-yet-existing target escape. We canonicalize the
   // nearest existing ancestor (the symlink), so write/read/edit THROUGH it fail.
-  describe('symlinked-parent escape (canonicalize nearest existing ancestor)', () => {
+  // Skip on Windows without symlink privilege — symlinkSync throws EPERM there,
+  // so the boundary-escape scenario cannot be staged (the source guard is still
+  // exercised on POSIX/CI).
+  describe.skipIf(!canSymlink())('symlinked-parent escape (canonicalize nearest existing ancestor)', () => {
     let outsideDir: string;
 
     beforeEach(() => {

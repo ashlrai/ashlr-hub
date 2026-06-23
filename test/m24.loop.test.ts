@@ -40,6 +40,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { DaemonTick, AshlrConfig } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -209,7 +210,7 @@ afterEach(() => {
 
 describe('M24 PROPOSAL-ONLY source-level guardrail — loop.ts has no forbidden paths', () => {
   const loopPath = path.resolve(
-    path.dirname(new URL(import.meta.url).pathname),
+    path.dirname(fileURLToPath(import.meta.url)),
     '../src/core/daemon/loop.ts',
   );
 

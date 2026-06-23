@@ -10,7 +10,7 @@ import type { AshlrConfig, ProviderRegistry, PhantomStatus } from '../src/core/t
 import {
   mkdtempSync, mkdirSync, writeFileSync, rmSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, delimiter } from 'node:path';
 import { tmpdir } from 'node:os';
 
 // ---------------------------------------------------------------------------
@@ -68,9 +68,16 @@ function makeTmpHome(): string {
 function installAshlrShim(tmpH: string): void {
   const binDir = join(tmpH, 'bin');
   mkdirSync(binDir, { recursive: true });
-  const shim = join(binDir, 'ashlr');
-  writeFileSync(shim, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-  process.env.PATH = `${binDir}:${process.env.PATH ?? ''}`;
+  if (process.platform === 'win32') {
+    // `where ashlr` resolves names via PATHEXT, so the shim must be ashlr.cmd
+    // (an extensionless `ashlr` file is invisible to `where`).
+    writeFileSync(join(binDir, 'ashlr.cmd'), '@echo off\r\nexit /b 0\r\n');
+  } else {
+    const shim = join(binDir, 'ashlr');
+    writeFileSync(shim, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  }
+  // Use the platform PATH separator (';' on win32, ':' elsewhere).
+  process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ''}`;
 }
 
 function makeConfig(tmpH: string): AshlrConfig {

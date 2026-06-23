@@ -169,7 +169,12 @@ describe('h7 preflight — READ-ONLY readiness check', () => {
     expect(report.ready).toBe(true);
   });
 
-  it('reports a blocker (ready=false, exit 1) when ~/.ashlr is not writeable', async () => {
+  // Skipped on Windows: this test makes ~/.ashlr non-writeable via chmod(0o500),
+  // but Windows ignores POSIX directory permission bits — the directory stays
+  // writeable, the sentinel write succeeds, and no blocker is produced. The probe
+  // logic (checkAshlrWriteable, a real write+catch) is platform-agnostic and is
+  // covered on macOS/Linux CI where chmod genuinely blocks the write.
+  it.skipIf(process.platform === 'win32')('reports a blocker (ready=false, exit 1) when ~/.ashlr is not writeable', async () => {
     expect.hasAssertions();
     // Force ~/.ashlr to exist but be NON-writeable so the sentinel write fails.
     // (loadConfig() below would otherwise create it; create it ourselves first.)

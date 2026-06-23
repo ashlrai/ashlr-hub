@@ -16,7 +16,7 @@ import {
   mkdtempSync, writeFileSync, mkdirSync, rmSync,
   readFileSync, existsSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 
 // ---------------------------------------------------------------------------
@@ -55,12 +55,15 @@ vi.mock('../src/core/config.js', async (importOriginal) => {
       // Temporarily point HOME at the test dir so homedir() resolves correctly
       // inside the real loadConfig implementation.
       const savedHome = process.env.HOME;
-      if (_configDir) process.env.HOME = _configDir.replace(/\/\.ashlr$/, '');
+      // _configDir is built with path.join() so it uses the platform separator
+      // (backslash on Windows); strip the trailing .ashlr segment via dirname()
+      // rather than a forward-slash regex that never matches on win32.
+      if (_configDir) process.env.HOME = dirname(_configDir);
       try { return real.loadConfig(); } finally { process.env.HOME = savedHome; }
     },
     saveConfig(c: Parameters<typeof real.saveConfig>[0]): void {
       const savedHome = process.env.HOME;
-      if (_configDir) process.env.HOME = _configDir.replace(/\/\.ashlr$/, '');
+      if (_configDir) process.env.HOME = dirname(_configDir);
       try { real.saveConfig(c); } finally { process.env.HOME = savedHome; }
     },
   };

@@ -21,6 +21,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { basename, resolve as resolvePath, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 import { readManifest } from '../src/core/plugins/manifest.js';
@@ -34,8 +35,10 @@ import type { ProjectTemplate } from '../src/core/types.js';
 // ---------------------------------------------------------------------------
 
 /** Absolute path to the org-scaffold reference plugin directory. */
+// fileURLToPath (not URL.pathname) — on Windows .pathname yields "/C:/…" which
+// is not a valid filesystem path; fileURLToPath produces a native path.
 const PLUGIN_DIR = resolvePath(
-  new URL('.', import.meta.url).pathname,
+  fileURLToPath(new URL('.', import.meta.url)),
   '../examples/plugins/org-scaffold',
 );
 
