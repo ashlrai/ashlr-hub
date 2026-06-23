@@ -569,7 +569,9 @@ function walkGlob(root: string, pattern: string): string[] {
         continue;
       }
       if (!entry.isFile()) continue;
-      const rel = relative(root, full);
+      // Normalize to forward slashes so the (forward-slash) glob regex matches
+      // on Windows too, where relative() yields backslash-separated paths.
+      const rel = relative(root, full).split(sep).join('/');
       if (re.test(rel)) results.push(rel);
     }
   }
@@ -710,7 +712,7 @@ async function handleGrep(
       if (!entry.isFile()) continue;
       // Never read secrets material into a grep result — silently skip.
       if (SECRET_FILE_RE.test(entry.name)) continue;
-      const rel = relative(eng.workspaceRoot, full);
+      const rel = relative(eng.workspaceRoot, full).split(sep).join('/');
       if (globRe && !globRe.test(rel)) continue;
       let st;
       try {
