@@ -14,6 +14,11 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
+    // Make os.homedir() follow process.env.HOME on every platform (Windows
+    // ignores $HOME natively). Without this, every HOME-isolated test resolves
+    // to the developer's REAL ~/.ashlr on Windows — and the H1 fixture's
+    // relocation guard throws, aborting the test. See test/setup/home.ts.
+    setupFiles: ['./test/setup/home.ts'],
     exclude: [
       '**/node_modules/**',
       '**/dist/**',
