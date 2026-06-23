@@ -39,6 +39,7 @@
  * Exit codes: 0 success, 1 error/not-found, 2 bad usage.
  */
 
+import { existsSync } from 'node:fs';
 import { loadConfig, saveConfig, CONFIG_PATH } from '../core/config.js';
 import { buildIndex, loadIndex, writeIndex } from '../core/index-engine.js';
 import { planTidy, applyTidy } from '../core/tidy.js';
@@ -730,6 +731,12 @@ function cmdIndex(args: string[]): void {
   const active = repos.filter(i => i.active);
   console.log(`  ${dim(`${repos.length} repos (${active.length} active)`)}`);
   console.log('');
+
+  // No repos found → roots are almost certainly misconfigured. Point the user
+  // at the full setup guidance (printed in detail by `ashlr status`).
+  if (repos.length === 0) {
+    printNoReposHelp(cfg);
+  }
 }
 
 // ─── Command: go ─────────────────────────────────────────────────────────────
@@ -796,11 +803,60 @@ function printItemSummary(item: IndexedItem): void {
 
 // ─── Command: status ─────────────────────────────────────────────────────────
 
+/**
+ * Printed when the index contains zero git repos. The overwhelmingly common
+ * cause is that `roots` doesn't point at where the user's code lives — e.g. a
+ * default config carried over from another machine (the defaults assume
+ * ~/Desktop/github). Rather than a bare "0 repos tracked", show which roots
+ * were scanned, whether each one exists, and the exact commands to fix it.
+ */
+function printNoReposHelp(cfg: AshlrConfig): void {
+  console.log(yellow('  No git repos are being tracked yet.'));
+  console.log('');
+  console.log(`  ashlr scanned these ${bold('roots')} ${dim('— folders expected to CONTAIN your repos:')}`);
+  console.log('');
+  if (cfg.roots.length === 0) {
+    console.log(`    ${red('✗')} ${dim('(no roots configured)')}`);
+  } else {
+    for (const root of cfg.roots) {
+      const exists = existsSync(root);
+      const mark = exists ? yellow('•') : red('✗');
+      const tag  = exists ? gray('exists, no repos found inside') : red('missing');
+      console.log(`    ${mark} ${root}  ${dim('—')} ${tag}`);
+    }
+  }
+  console.log('');
+  console.log(`  ${bold('Fix it')} ${dim('— point ashlr at the folder that holds your repos')}`);
+  console.log(`  ${dim('(repos must be direct children, e.g.')} ${cyan('<root>/my-app/.git')}${dim('):')}`);
+  console.log('');
+  console.log(`    ${cyan('1.')} Set your roots:`);
+  console.log(`       ${dim('Windows PowerShell — note the doubled')} ${bold('""')} ${dim('quotes:')}`);
+  console.log(`       ${cyan('ashlr config set roots --json \'[""C:/Users/you/code""]\'')}`);
+  console.log(`       ${dim('macOS / Linux:')}`);
+  console.log(`       ${cyan('ashlr config set roots --json \'["/Users/you/code"]\'')}`);
+  console.log(`       ${dim('…or edit')} ${cyan(CONFIG_PATH)} ${dim('directly.')}`);
+  console.log('');
+  console.log(`    ${cyan('2.')} Rebuild the index:  ${cyan('ashlr index --refresh')}`);
+  console.log('');
+  console.log(`  ${dim('Then re-run')} ${cyan('ashlr status')}${dim('.')}`);
+  console.log('');
+}
+
 async function cmdStatus(_args: string[]): Promise<void> {
   const cfg = loadConfig();
   const idx = requireIndex(cfg);
 
   const repos = idx.items.filter(i => i.kind === 'repo' && i.git);
+
+  // Zero repos → the index is empty or roots are misconfigured. Show actionable
+  // setup guidance instead of an empty attention board, then stop.
+  if (repos.length === 0) {
+    console.log('');
+    console.log(bold('  ashlr status') + gray(' — 0 repos tracked'));
+    console.log('');
+    printNoReposHelp(cfg);
+    return;
+  }
 
   const dirty   = repos.filter(i => (i.git?.dirty ?? 0) > 0);
   const offSync  = repos.filter(i => !dirty.includes(i) && ((i.git?.ahead ?? 0) > 0 || (i.git?.behind ?? 0) > 0));

@@ -108,12 +108,17 @@ describe('M52 flag-off parity', () => {
     // with a simple echo command and no launcher.
     const { spawnEngine } = await import('../src/core/run/engines.js');
     const cfg = makeConfig();
-    // Use a shell command that's definitely available: echo
+    // Use node itself (process.execPath) as a binary that exists on every
+    // platform — `echo` is a shell builtin on Windows, not a spawnable exe.
     // Build a minimal EngineCommand directly (builtin has no argv → null, so
     // we construct one manually for the test).
-    const cmd = { bin: 'echo', args: ['hello'], cwd: process.cwd() };
+    const cmd = {
+      bin: process.execPath,
+      args: ['-e', "process.stdout.write('hello')"],
+      cwd: process.cwd(),
+    };
     const result = spawnEngine(cmd, cfg);
-    // echo succeeds without any launcher.
+    // the command succeeds without any launcher.
     expect(result.ok).toBe(true);
     expect(result.output).toContain('hello');
   });

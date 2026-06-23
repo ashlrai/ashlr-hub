@@ -189,26 +189,31 @@ export function detectVerifyCommands(workspaceRoot: string): VerifyCommand[] {
  * `spawnSync` does NOT consult PATHEXT, so `spawnSync('npm', …)` fails with
  * ENOENT and the command silently does nothing. Running through the shell
  * (`shell: true`) lets the OS resolve `npm.cmd`/`npx.cmd` etc. via PATHEXT.
- * Our argv arrays are simple, space-free tokens (e.g. ['npm','run','typecheck'],
- * ['npx','tsc','--noEmit']), so shell quoting is a non-issue. `windowsHide`
- * keeps a console window from flashing up. (git/node/tsc are real binaries and
- * resolve fine either way; the shell route is harmless for them.)
  *
- * `platform` is injected (defaults to `process.platform`) purely so this can be
- * unit-tested without switching the host OS.
+ * We only enable the shell for those shim binaries: routing real executables
+ * (node/git/tsc) through cmd.exe would mangle argv that contains spaces, quotes
+ * or `;` (e.g. `node -e 'a(); b()'`), since spawnSync does NOT quote argv array
+ * elements under shell:true. `windowsHide` keeps a console window from flashing.
+ *
+ * `bin` + `platform` are injected so this can be unit-tested without switching
+ * the host OS.
  */
+const WINDOWS_SHIM_BINS = new Set(['npm', 'npx', 'pnpm', 'pnpx', 'yarn', 'bun', 'bunx']);
+
 export function spawnOptionsFor(
   workspaceRoot: string,
   timeout: number,
+  bin?: string,
   platform: NodeJS.Platform = process.platform,
 ): SpawnSyncOptionsWithStringEncoding {
   const isWin = platform === 'win32';
+  const needsShell = isWin && bin !== undefined && WINDOWS_SHIM_BINS.has(bin);
   return {
     cwd: workspaceRoot,
     timeout,
     stdio: 'pipe',
     encoding: 'utf8',
-    shell: isWin, // resolve npm.cmd/npx.cmd etc. via PATHEXT on Windows
+    shell: needsShell, // resolve npm.cmd/npx.cmd etc. via PATHEXT on Windows
     windowsHide: true,
   };
 }
@@ -252,7 +257,7 @@ export function runVerifyCommand(
   }
 
   try {
-    const res = spawnSync(bin, vc.cmd.slice(1), spawnOptionsFor(workspaceRoot, timeout));
+    const res = spawnSync(bin, vc.cmd.slice(1), spawnOptionsFor(workspaceRoot, timeout, bin));
 
     const timedOut = res.error !== undefined && (res.error as NodeJS.ErrnoException).code === 'ETIMEDOUT';
 

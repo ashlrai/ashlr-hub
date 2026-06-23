@@ -127,8 +127,12 @@ export function categoryOf(itemPath: string): string | null {
     //    A repo at /…/github/dev-tools/my-repo has itemPath that starts with
     //    the category dir.
     for (const [name, catDir] of Object.entries(config.categories)) {
-      const normalCat = catDir.endsWith('/') ? catDir : catDir + '/';
-      if (itemPath.startsWith(normalCat) || itemPath === catDir) {
+      // Use path.relative for containment so this works regardless of the
+      // platform path separator. A string `startsWith(catDir + '/')` check
+      // breaks on Windows, where itemPath uses '\\' but the suffix is '/'.
+      if (itemPath === catDir) return name;
+      const rel = path.relative(catDir, itemPath);
+      if (rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)) {
         return name;
       }
     }

@@ -17,7 +17,6 @@ import type {
   RunTask,
   ProviderClient,
   RunBudget,
-  RunUsage,
   ChatMessage,
   ChatResult,
   AshlrConfig,
@@ -215,8 +214,8 @@ describe('runVerifyCommand', () => {
 // ---------------------------------------------------------------------------
 
 describe('spawnOptionsFor', () => {
-  it('uses shell:true on win32 so PATHEXT resolves npm.cmd/npx.cmd shims', () => {
-    const opts = spawnOptionsFor(workdir, 120_000, 'win32');
+  it('uses shell:true on win32 for shim bins so PATHEXT resolves npm.cmd/npx.cmd', () => {
+    const opts = spawnOptionsFor(workdir, 120_000, 'npm', 'win32');
     expect(opts.shell).toBe(true);
     expect(opts.windowsHide).toBe(true);
     expect(opts.cwd).toBe(workdir);
@@ -225,13 +224,20 @@ describe('spawnOptionsFor', () => {
     expect(opts.encoding).toBe('utf8');
   });
 
+  it('uses shell:false on win32 for real binaries (node/git/tsc) to preserve argv', () => {
+    // Real executables must NOT route through cmd.exe — shell:true would mangle
+    // argv containing spaces/quotes/semicolons.
+    expect(spawnOptionsFor(workdir, 120_000, 'node', 'win32').shell).toBe(false);
+    expect(spawnOptionsFor(workdir, 120_000, 'git', 'win32').shell).toBe(false);
+  });
+
   it('uses shell:false on non-win32 platforms', () => {
-    expect(spawnOptionsFor(workdir, 120_000, 'darwin').shell).toBe(false);
-    expect(spawnOptionsFor(workdir, 120_000, 'linux').shell).toBe(false);
+    expect(spawnOptionsFor(workdir, 120_000, 'npm', 'darwin').shell).toBe(false);
+    expect(spawnOptionsFor(workdir, 120_000, 'npm', 'linux').shell).toBe(false);
   });
 
   it('defaults platform to process.platform', () => {
-    const opts = spawnOptionsFor(workdir, 120_000);
+    const opts = spawnOptionsFor(workdir, 120_000, 'npm');
     expect(opts.shell).toBe(process.platform === 'win32');
   });
 });

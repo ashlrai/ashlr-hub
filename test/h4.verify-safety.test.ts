@@ -20,6 +20,7 @@
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -347,7 +348,8 @@ describe('H4 · verify-safety · checks + output shape', () => {
 
 function readRealCore(relFromCore: string): string {
   // src/core/<rel>.ts relative to this test file (test/ → repo root → src/core).
-  const here = new URL('.', import.meta.url).pathname; // test/
+  // fileURLToPath (not URL.pathname) — on Windows .pathname yields "/C:/…".
+  const here = fileURLToPath(new URL('.', import.meta.url)); // test/
   const base = join(here, '..', 'src', 'core', relFromCore);
   for (const ext of ['.ts', '.js']) {
     const p = base + ext;

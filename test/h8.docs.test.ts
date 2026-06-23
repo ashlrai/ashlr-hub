@@ -19,9 +19,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-// Repo root is two levels up from this test file (test/ -> repo root).
-const REPO_ROOT = new URL('..', import.meta.url).pathname;
+// Repo root is two levels up from this test file (test/ -> repo root). Use
+// fileURLToPath, not URL.pathname: on Windows the latter yields '/C:/...' which
+// join() then mangles into a doubled-drive 'C:\C:\...' path.
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const RELIABILITY = join(REPO_ROOT, 'docs', 'RELIABILITY.md');
 const README = join(REPO_ROOT, 'README.md');
 

@@ -114,6 +114,12 @@ describe('ensureLocalKey — creates + reuses local key', () => {
     const { ensureLocalKey } = await getSignModule();
     const p = ensureLocalKey();
     const st = fs.statSync(p);
+    // Windows has no POSIX permission bits — st.mode reflects 0o666 there, so
+    // skip the mode assertion on win32 and only enforce 0o600 on POSIX.
+    if (process.platform === 'win32') {
+      expect(fs.existsSync(p)).toBe(true);
+      return;
+    }
     // On POSIX: mode & 0o777 should be 0o600
     const mode = st.mode & 0o777;
     expect(mode).toBe(0o600);

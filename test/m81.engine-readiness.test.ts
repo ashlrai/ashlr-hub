@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { AshlrConfig } from '../src/core/types.js';
+import type { AshlrConfig, EngineId } from '../src/core/types.js';
 import {
   engineReadiness,
   fleetReadiness,
@@ -252,7 +252,7 @@ describe('api-model engines', () => {
     const overrides: ProbeOverrides = {
       getEnv: () => undefined, // key absent
     };
-    const r = engineReadiness('gpt-4o' as any, cfg, overrides);
+    const r = engineReadiness('gpt-4o' as EngineId, cfg, overrides);
     expect(r.installed).toBe(false);
     expect(r.authed).toBe(false);
     expect(r.ready).toBe(false);
@@ -274,7 +274,7 @@ describe('api-model engines', () => {
     const overrides: ProbeOverrides = {
       getEnv: (k) => k === 'OPENAI_API_KEY' ? 'sk-test-key' : undefined,
     };
-    const r = engineReadiness('gpt-4o' as any, cfg, overrides);
+    const r = engineReadiness('gpt-4o' as EngineId, cfg, overrides);
     expect(r.installed).toBe(true);
     expect(r.authed).toBe(true);
     expect(r.ready).toBe(true);

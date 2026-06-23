@@ -21,8 +21,11 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const REPO_ROOT = new URL('..', import.meta.url).pathname;
+// Use fileURLToPath, not URL.pathname: on Windows the latter yields '/C:/...'
+// which join() then mangles into a doubled-drive 'C:\C:\...' path.
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const src = (rel: string) => join(REPO_ROOT, 'src', rel);
 
 // The files carrying stale bare CONTRACT-*.md refs (H8 prep maintainability

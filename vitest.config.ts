@@ -14,6 +14,20 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
+    // Make os.homedir() follow process.env.HOME on every platform (Windows
+    // ignores $HOME natively). Without this, every HOME-isolated test resolves
+    // to the developer's REAL ~/.ashlr on Windows — and the H1 fixture's
+    // relocation guard throws, aborting the test. See test/setup/home.ts.
+    setupFiles: ['./test/setup/home.ts'],
+    // Cap worker forks. Many H-suite tests spawn real git/child processes, so at
+    // the default (~one fork per core) the machine oversubscribes and heavy
+    // git-bound tests flake with timeouts — non-deterministically, and only
+    // under load (each passes in isolation; the suite passes serially). A small
+    // fixed cap keeps meaningful parallelism without the oversubscription.
+    pool: 'forks',
+    poolOptions: {
+      forks: { maxForks: 4, minForks: 1 },
+    },
     exclude: [
       '**/node_modules/**',
       '**/dist/**',
