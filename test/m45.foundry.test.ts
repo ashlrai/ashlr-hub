@@ -114,8 +114,6 @@ describe('M45 engine argv — codex', () => {
       'exec',
       '--model',
       MODEL,
-      '--sandbox',
-      'workspace-write',
       '--cd',
       CWD,
       '--json',
@@ -128,8 +126,6 @@ describe('M45 engine argv — codex', () => {
     expect(cmd!.args).not.toContain('--model');
     expect(cmd!.args).toEqual([
       'exec',
-      '--sandbox',
-      'workspace-write',
       '--cd',
       CWD,
       '--json',
@@ -151,7 +147,7 @@ describe('M45 engine argv — codex', () => {
 });
 
 describe('M45 engine argv — claude autonomous', () => {
-  it('appends --permission-mode acceptEdits + --add-dir <cwd> when autonomous:true', () => {
+  it('appends --dangerously-skip-permissions + --add-dir <cwd> when autonomous:true', () => {
     const cmd = buildEngineCommand('claude', GOAL, makeConfig(), {
       cwd: CWD,
       model: MODEL,
@@ -164,8 +160,7 @@ describe('M45 engine argv — claude autonomous', () => {
       MODEL,
       '--output-format',
       'json',
-      '--permission-mode',
-      'acceptEdits',
+      '--dangerously-skip-permissions',
       '--add-dir',
       CWD,
     ]);
@@ -181,8 +176,7 @@ describe('M45 engine argv — claude autonomous', () => {
       GOAL,
       '--output-format',
       'json',
-      '--permission-mode',
-      'acceptEdits',
+      '--dangerously-skip-permissions',
       '--add-dir',
       CWD,
     ]);
