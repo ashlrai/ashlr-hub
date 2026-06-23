@@ -361,6 +361,114 @@ async function cmdFleetInit(args: string[]): Promise<number> {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Subcommand: doctor (engine readiness preflight)
+// ---------------------------------------------------------------------------
+
+/**
+ * `ashlr fleet doctor [--json]`
+ *
+ * Probes every engine in cfg.foundry.allowedBackends and renders a one-glance
+ * readiness table: engine · tier · installed · authed · ready · fix.
+ * Color-coded: green = ready, yellow = unknown/warn, red = blocked.
+ * Prints a one-line summary at the bottom ("N/M engines ready; X needs action").
+ * Never throws; degrades gracefully when cfg is absent.
+ */
+async function cmdFleetDoctor(jsonMode: boolean): Promise<number> {
+  const cfg = await loadCfg();
+
+  const { fleetReadiness } = await import('../core/fleet/engine-readiness.js');
+  const results = fleetReadiness(cfg ?? undefined);
+
+  if (jsonMode) {
+    process.stdout.write(JSON.stringify(results, null, 2) + '\n');
+    return 0;
+  }
+
+  const readyCount = results.filter((r) => r.ready).length;
+  const total = results.length;
+
+  console.log('');
+  console.log(bold('  ashlr fleet doctor') + dim(' — engine readiness preflight (M81)'));
+  console.log('');
+
+  // Column widths
+  const engineW = Math.max(8, ...results.map((r) => r.engine.length));
+  const tierW   = Math.max(5, ...results.map((r) => r.tier.length));
+
+  // Header
+  const pad = (s: string, w: number) => s + ' '.repeat(Math.max(0, w - s.length));
+  console.log(
+    '  ' +
+      dim(pad('engine', engineW)) +
+      '  ' +
+      dim(pad('tier', tierW)) +
+      '  ' +
+      dim(pad('inst', 5)) +
+      '  ' +
+      dim(pad('authed', 7)) +
+      '  ' +
+      dim(pad('ready', 5)),
+  );
+  console.log('  ' + dim('-'.repeat(engineW + tierW + 30)));
+
+  for (const r of results) {
+    const instStr  = r.installed ? green('yes') : red('no ');
+    const authedStr =
+      r.authed === true
+        ? green('yes   ')
+        : r.authed === false
+          ? red('no    ')
+          : yellow('?     ');
+    const readyStr = r.ready ? green('yes') : red('no ');
+
+    console.log(
+      '  ' +
+        pad(r.engine, engineW) +
+        '  ' +
+        pad(r.tier, tierW) +
+        '  ' +
+        instStr +
+        '    ' +
+        authedStr +
+        ' ' +
+        readyStr,
+    );
+
+    // Detail line (always shown for non-ready; shown dimmed for ready)
+    if (!r.ready) {
+      console.log('  ' + ' '.repeat(engineW) + '  ' + red('detail: ') + r.detail);
+      if (r.fix) {
+        console.log('  ' + ' '.repeat(engineW) + '  ' + yellow('fix:    ') + r.fix);
+      }
+    } else if (r.detail) {
+      console.log('  ' + ' '.repeat(engineW) + '  ' + dim(r.detail));
+    }
+  }
+
+  console.log('');
+
+  // Summary line
+  const notReadyEngines = results.filter((r) => !r.ready).map((r) => r.engine);
+  if (readyCount === total) {
+    console.log('  ' + green(`${readyCount}/${total} engines ready.`) + dim(' All systems go.'));
+  } else {
+    const needsAction = notReadyEngines.join(', ');
+    console.log(
+      '  ' +
+        yellow(`${readyCount}/${total} engines ready`) +
+        dim(` — `) +
+        red(needsAction) +
+        dim(' need' + (notReadyEngines.length === 1 ? 's' : '') + ' attention.'),
+    );
+  }
+  console.log('');
+
+  // Exit 1 when any engine is definitively not ready (authed:false + installed)
+  const hardBlocked = results.some((r) => !r.ready && r.installed && r.authed === false);
+  return hardBlocked ? 1 : 0;
+}
+
 export async function cmdFleet(args: string[]): Promise<number> {
   const [sub, ...rest] = args;
 
@@ -380,6 +488,8 @@ export async function cmdFleet(args: string[]): Promise<number> {
       return setKillSwitch(true);
     case 'resume':
       return setKillSwitch(false);
+    case 'doctor':
+      return cmdFleetDoctor(rest.includes('--json'));
     default:
       process.stderr.write(red('error: ') + `unknown fleet subcommand: ${sub}\n`);
       printFleetHelp();
@@ -398,5 +508,6 @@ function printFleetHelp(): void {
   console.log(`    ashlr fleet init [--write]    ${cyan('# print/merge a starter cfg.foundry')}`);
   console.log(`    ashlr fleet pause             ${cyan('# engage kill switch (pause fleet)')}`);
   console.log(`    ashlr fleet resume            ${cyan('# release kill switch (resume fleet)')}`);
+  console.log(`    ashlr fleet doctor [--json]   ${cyan('# engine readiness preflight (M81)')}`);
   console.log('');
 }
