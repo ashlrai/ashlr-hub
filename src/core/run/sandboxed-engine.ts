@@ -73,6 +73,11 @@ const DEFAULT_TIMEOUT_MS = 20 * 60_000;
 /** Credential-shaped env var names that must never reach the agent subprocess. */
 const CRED_ENV_DENY = /(_|^)(TOKEN|SECRET|KEY|PASSWORD|PASSWD|CREDENTIALS?)$/i;
 
+/** The agent CLIs' OWN headless auth tokens. These ARE the engine's subscription
+ * credential (e.g. `claude setup-token` exports CLAUDE_CODE_OAUTH_TOKEN) — not a
+ * third-party secret — so they must survive CRED_ENV_DENY and reach the engine. */
+const ENGINE_AUTH_ALLOW = new Set(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN']);
+
 /**
  * Trust tier of a backend. M50: read from the declarative engine registry (single
  * source of truth) rather than a hardcoded set — so a config-added backend is
@@ -118,12 +123,19 @@ export function buildContainedEnv(cfg: AshlrConfig, hooksDir: string): NodeJS.Pr
     if (v) base[k] = v;
   }
 
+  // Preserve the agent CLIs' OWN headless auth tokens (claude's CLAUDE_CODE_OAUTH_TOKEN
+  // etc.) — the engine's subscription credential, which must reach the engine.
+  for (const k of ENGINE_AUTH_ALLOW) {
+    const v = process.env[k];
+    if (v) base[k] = v;
+  }
+
   // Layer ashlr non-secret config (OLLAMA_HOST, provider chain, paths, …).
   const env = withToolEnv(cfg, base);
 
   // Defensive: strip any credential-shaped var that slipped through.
   for (const k of Object.keys(env)) {
-    if (CRED_ENV_DENY.test(k)) delete env[k];
+    if (CRED_ENV_DENY.test(k) && !ENGINE_AUTH_ALLOW.has(k)) delete env[k];
   }
 
   // Sever git's PUSH credential channels (the agent's vendor auth via HOME is untouched).
