@@ -49,7 +49,9 @@ import { estimateRun } from '../observability/estimate.js';
 import { buildForecast } from '../observability/forecast.js';
 import { emitTuningProposals } from '../learn/tuning.js';
 import { runAutoMergePass } from '../fleet/automerge-pass.js';
-import { pendingCount } from '../inbox/store.js';
+import { pendingCount, listProposals } from '../inbox/store.js';
+import { recordOutcome, recentlyDeclined } from '../fleet/worked-ledger.js';
+import { loadConfig } from '../config.js';
 
 // ---------------------------------------------------------------------------
 // DaemonConfig defaults (conservative)
@@ -143,7 +145,13 @@ export async function tick(
   opts: { dryRun: boolean },
 ): Promise<DaemonTick> {
   const now = new Date().toISOString();
-  const dcfg = resolveCfg(cfg);
+  // tick() respects the cfg it is GIVEN — tests and callers inject it directly.
+  // M85 live-reload happens in runDaemon's LOOP (it reloads config from disk
+  // before each tick and passes the fresh cfg in here), so on-disk daemon tuning
+  // (budget/parallel/interval/cooldown) still takes effect without a restart
+  // WITHOUT this function clobbering an explicitly-supplied cfg.
+  const liveCfg = cfg;
+  const dcfg = resolveCfg(liveCfg);
 
   // Append a tick record to persisted state so every operator cycle (including
   // no-op reasons like kill-switch / no-enrolled-repos / dry-run) is visible to
@@ -260,18 +268,100 @@ export async function tick(
 
   // -------------------------------------------------------------------------
   // 5. Select top-K items within the per-tick cap and remaining budget.
-  //    Items are already sorted highest-score-first by buildBacklog.
-  //    The real controls are: (a) the perTickItems cap, (b) the remaining daily
-  //    USD budget, which bounds how many items can each get a minimal slice, and
-  //    (c) the swarm's own internal token budget (the hard per-item ceiling).
-  //    We cap the selected count by how many MIN_PER_ITEM_USD slices fit in the
-  //    remaining budget, so a near-exhausted budget selects fewer items rather
-  //    than authorizing the full perTickItems against a tiny remaining headroom.
+  //
+  //    M85 FAIRNESS: round-robin across repos so every enrolled repo gets a
+  //    turn instead of a single high-scoring repo monopolising every tick.
+  //    Within each repo, items are already sorted highest-score-first by
+  //    buildBacklog, so we always pick the most valuable open item per repo.
+  //    Selection algorithm:
+  //      a. Group items by repo (preserving within-repo score order).
+  //      b. Walk repos in round-robin until selectCount is reached.
+  //      c. Skip any item that is recentlyDeclined (cooldown window) OR already
+  //         has an open PENDING proposal (best-effort match via item.id in the
+  //         proposal title/summary — if no clean match, ledger alone governs).
+  //
+  //    The real budget controls remain: (a) perTickItems cap, (b) remaining
+  //    daily USD budget, (c) the swarm's own internal token budget.
   // -------------------------------------------------------------------------
   const MIN_PER_ITEM_USD = 0.01; // floor on a per-item slice for selection math
   const maxByBudget = Math.max(1, Math.floor(remainingBudget / MIN_PER_ITEM_USD));
   const selectCount = Math.min(dcfg.perTickItems, maxByBudget, backlogItems.length);
-  const selected: WorkItem[] = backlogItems.slice(0, selectCount);
+
+  // M85: read the cooldown window from liveCfg defensively (no types.ts change).
+  const cooldownMs: number =
+    typeof (liveCfg.daemon as Record<string, unknown> | undefined)?.['cooldownMs'] === 'number' &&
+    ((liveCfg.daemon as Record<string, unknown>)['cooldownMs'] as number) > 0
+      ? (liveCfg.daemon as Record<string, unknown>)['cooldownMs'] as number
+      : 6 * 60 * 60 * 1000; // default 6h
+
+  // Build a set of item ids that already have an open PENDING proposal so we
+  // can skip duplicating work. Best-effort: match on item.id appearing in the
+  // proposal title or summary. Never throws.
+  const pendingItemIds = new Set<string>();
+  try {
+    for (const prop of listProposals({ status: 'pending' })) {
+      const haystack = `${prop.title} ${prop.summary}`;
+      // Scan all backlog item ids for a substring match in the proposal text.
+      for (const bi of backlogItems) {
+        if (haystack.includes(bi.id)) {
+          pendingItemIds.add(bi.id);
+        }
+      }
+    }
+  } catch {
+    // Best-effort — never block selection on inbox read failure.
+  }
+
+  // Group backlog items by repo (score-sorted within each group by buildBacklog).
+  const byRepo = new Map<string, WorkItem[]>();
+  for (const item of backlogItems) {
+    let group = byRepo.get(item.repo);
+    if (!group) { group = []; byRepo.set(item.repo, group); }
+    group.push(item);
+  }
+  // Per-repo cursors (index into each repo's item array).
+  const repoCursors = new Map<string, number>();
+  for (const repo of byRepo.keys()) repoCursors.set(repo, 0);
+  const repoOrder = [...byRepo.keys()];
+
+  const selected: WorkItem[] = [];
+  let rri = 0; // round-robin index
+  let scanned = 0; // safety: never loop more than total items
+  const totalItems = backlogItems.length;
+  while (selected.length < selectCount && scanned < totalItems * repoOrder.length + 1) {
+    scanned++;
+    const repo = repoOrder[rri % repoOrder.length];
+    if (repo === undefined) break;
+    rri++;
+    const group = byRepo.get(repo) ?? [];
+    const cursor = repoCursors.get(repo) ?? 0;
+    // Advance cursor past declined/pending items.
+    let advance = cursor;
+    while (advance < group.length) {
+      const candidate = group[advance]!;
+      const skip =
+        recentlyDeclined(candidate.id, cooldownMs) ||
+        pendingItemIds.has(candidate.id);
+      if (!skip) break;
+      advance++;
+    }
+    repoCursors.set(repo, advance);
+    if (advance < group.length) {
+      selected.push(group[advance]!);
+      repoCursors.set(repo, advance + 1);
+    }
+    // Once all repos have been visited in this pass, check if we've exhausted
+    // all of them; if so, stop to avoid an infinite loop on a fully-skipped backlog.
+    if (rri % repoOrder.length === 0) {
+      // Check if any repo still has selectable items.
+      let anyLeft = false;
+      for (const [r, g] of byRepo) {
+        const c = repoCursors.get(r) ?? 0;
+        if (c < g.length) { anyLeft = true; break; }
+      }
+      if (!anyLeft) break;
+    }
+  }
 
   // -------------------------------------------------------------------------
   // 6a. Dry-run mode: report what WOULD be worked; NO swarms, NO proposals.
@@ -353,9 +443,10 @@ export async function tick(
     // M48: route this item to a backend (M46). Default (no cfg.foundry) →
     // 'builtin'. A frontier backend over its rolling rate quota falls back to
     // local so work keeps flowing without exceeding the subscription's limit.
-    const routed = routeBackend(item, cfg);
+    // M85: use liveCfg (reloaded per-tick) for routing + quota checks.
+    const routed = routeBackend(item, liveCfg);
     let backend = routed.backend;
-    if (backend !== 'builtin' && !withinLimit(backend, cfg)) {
+    if (backend !== 'builtin' && !withinLimit(backend, liveCfg)) {
       backend = 'builtin';
     }
 
@@ -364,8 +455,8 @@ export async function tick(
     // cfg.foundry.subscriptionMaxPercent defensively with a fallback default.
     // allowed:true when usage is unknown (claude) or under the cap.
     if (isSubscriptionEngine(backend)) {
-      // Read maxPercent from cfg.foundry defensively — no types.ts change.
-      const maxPct: number = (cfg.foundry as Record<string, unknown> | undefined
+      // Read maxPercent from liveCfg.foundry defensively — no types.ts change.
+      const maxPct: number = (liveCfg.foundry as Record<string, unknown> | undefined
         )?.['subscriptionMaxPercent'] as number | undefined ?? 90;
       const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
       if (!subCheck.allowed) {
@@ -384,13 +475,14 @@ export async function tick(
     // cfg.foundry.intelligence is absent). recoverWithinBudget is PURE and
     // may only return a tier choice or a pause signal — no outward action.
     // This file imports NO apply/merge/push/deploy primitive.
+    // M85: use liveCfg for intelligence config.
     {
-      const intelRaw = cfg.foundry?.intelligence;
+      const intelRaw = liveCfg.foundry?.intelligence;
       if (intelRaw !== undefined && intelRaw !== null) {
-        const forecast = buildForecast('7d', cfg);
+        const forecast = buildForecast('7d', liveCfg);
         const goal = `${item.title}\n\n${item.detail}`.trim();
-        const est = await estimateRun(goal, { maxTokens: perItemMaxTokens }, cfg);
-        const recommended = await recommendRoute(item, cfg, { estimate: est });
+        const est = await estimateRun(goal, { maxTokens: perItemMaxTokens }, liveCfg);
+        const recommended = await recommendRoute(item, liveCfg, { estimate: est });
         // Only override when the recommend result doesn't escalate a local decision.
         if (routed.tier !== 'local' || recommended.tier === 'local') {
           backend = recommended.backend;
@@ -398,7 +490,7 @@ export async function tick(
         // Budget cascade: step down tier when near cap.
         const recovery = recoverWithinBudget(
           { backend, tier: recommended.tier, reason: recommended.reason },
-          cfg,
+          liveCfg,
           tickSpent + state.todaySpentUsd,
           forecast,
         );
@@ -434,7 +526,7 @@ export async function tick(
       if (backend === 'builtin') {
         const swarmRun = await runSwarm(
           { goal },
-          cfg,
+          liveCfg,
           {
             sandbox: true,             // M21: isolated git-worktree — NEVER user's tree
             requireSandbox: true,      // M24: sandbox MANDATORY — abort if it can't be created
@@ -464,7 +556,7 @@ export async function tick(
         // diff → PENDING proposal. No nested swarm. M45 containment (severed git
         // push, scrubbed diff) + the M47 merge gate still apply downstream.
         recordUse(backend);
-        const runState = await runGoal(goal, cfg, {
+        const runState = await runGoal(goal, liveCfg, {
           engine: backend,
           sandboxEngine: true,
           requireSandbox: true,
@@ -509,13 +601,13 @@ export async function tick(
     // file a TuningProposal. NEVER auto-apply. This block imports NO
     // apply/merge/push/deploy primitive.
     if (dispatched && swarmSpent > 0) {
-      const intelRaw2 = cfg.foundry?.intelligence;
+      const intelRaw2 = liveCfg.foundry?.intelligence;
       if (intelRaw2 !== undefined && intelRaw2 !== null) {
         const intelCfg2 = intelRaw2 as { anomalyK?: number };
         const anomalyK = typeof intelCfg2.anomalyK === 'number' && intelCfg2.anomalyK > 0
           ? intelCfg2.anomalyK : 4;
         const goal2 = `${item.title}\n\n${item.detail}`.trim();
-        const est2 = await estimateRun(goal2, { maxTokens: perItemMaxTokens }, cfg).catch(() => null);
+        const est2 = await estimateRun(goal2, { maxTokens: perItemMaxTokens }, liveCfg).catch(() => null);
         const p50 = est2?.estCostUsd.median ?? 0;
         if (p50 > 0 && swarmSpent > anomalyK * p50) {
           audit({
@@ -564,6 +656,36 @@ export async function tick(
   let proposalsCreated = 0;
   try { proposalsCreated = Math.max(0, pendingCount() - pendingBefore); } catch { proposalsCreated = 0; }
 
+  // M85: record outcomes to the worked ledger. A dispatched item that produced a
+  // new PENDING proposal → 'diff'; a dispatched item that produced no new proposal
+  // → 'empty' (the run completed but had nothing to show, e.g. no changes found).
+  // Non-dispatched items (kill-switch / budget skip) are NOT recorded — they were
+  // never run, so they should not trigger a cooldown.
+  // We determine per-item outcome by comparing the per-item proposal delta: we
+  // snapshot pendingBefore per-item is not available at this point, so we use the
+  // aggregate: if proposalsCreated >= dispatchedCount, every dispatched item
+  // produced at least one proposal → 'diff'. Otherwise we mark the ones that
+  // didn't produce a proposal as 'empty'. Since we can't perfectly attribute
+  // proposals to items after the fact, we use a conservative heuristic:
+  // if the TOTAL proposals created >= dispatched items, record all dispatched as
+  // 'diff'; otherwise record all dispatched as 'empty'. This is correct for the
+  // common single-item-per-tick case and conservative for multi-item ticks.
+  // Coupling note: OTHER agents recording outcomes (e.g. apply-gate) should also
+  // call recordOutcome(item.id, 'empty') when they determine a run produced no diff.
+  if (dispatchedCount > 0) {
+    try {
+      const outcomeLabel: 'diff' | 'empty' = proposalsCreated >= dispatchedCount ? 'diff' : 'empty';
+      const ts = new Date().toISOString();
+      for (const outcome of outcomes) {
+        if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
+          recordOutcome(outcome.value.item.id, outcomeLabel, ts);
+        }
+      }
+    } catch {
+      // Ledger recording must never crash the tick.
+    }
+  }
+
   // M48: OPT-IN auto-merge pass (cfg.foundry.autoMerge.enabled, DEFAULT OFF).
   // Delegated to fleet/automerge-pass so THIS file imports no merge primitive.
   // Every merge runs the M47 tiered-trust gate (frontier authority + risk ≤
@@ -571,7 +693,7 @@ export async function tick(
   // stay PENDING. With autoMerge disabled this is a no-op — the daemon stays
   // strictly proposal-only.
   let merged = 0;
-  try { merged = (await runAutoMergePass(cfg)).merged; } catch { merged = 0; }
+  try { merged = (await runAutoMergePass(liveCfg)).merged; } catch { merged = 0; }
 
   // -------------------------------------------------------------------------
   // 7. Update + persist state with this tick's accounting.
@@ -722,21 +844,29 @@ export async function runDaemon(
 
   try {
     if (opts.once) {
-      // Single-tick mode.
-      await tick(cfg, { dryRun: opts.dryRun });
+      // Single-tick mode — reload config so a manual tick picks up disk changes.
+      let liveCfg = cfg;
+      try { liveCfg = { ...cfg, daemon: loadConfig().daemon ?? cfg.daemon }; } catch { liveCfg = cfg; }
+      await tick(liveCfg, { dryRun: opts.dryRun });
     } else {
       // Loop mode: every iteration re-checks kill switch + budget. NOT unbounded.
       while (true) {
         // Kill switch check — halt immediately.
         if (killSwitchOn()) break;
 
+        // M85: reload config from disk each iteration so daemon tuning
+        // (budget/parallel/interval/cooldown) takes effect without a restart.
+        // Never throws — falls back to the caller cfg's daemon section.
+        let liveCfg = cfg;
+        try { liveCfg = { ...cfg, daemon: loadConfig().daemon ?? cfg.daemon }; } catch { liveCfg = cfg; }
+
         // Budget check — halt when daily cap exhausted.
         const current = loadDaemonState();
-        const recheckCfg = resolveCfg(cfg);
+        const recheckCfg = resolveCfg(liveCfg);
         if (current.todaySpentUsd >= recheckCfg.dailyBudgetUsd) break;
 
-        // Run one tick.
-        await tick(cfg, { dryRun: opts.dryRun });
+        // Run one tick with the freshly-reloaded config.
+        await tick(liveCfg, { dryRun: opts.dryRun });
 
         // Dry-run is inherently a one-shot PLAN: it records spentUsd:0 forever,
         // so the budget break can never fire. Terminate after a single iteration
