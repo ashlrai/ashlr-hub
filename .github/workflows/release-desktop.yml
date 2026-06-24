@@ -50,8 +50,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pin Rust toolchain to the minimum version the Cargo.toml declares.
-  RUST_VERSION: "1.77"
+  # Tauri v2's dependency tree requires Cargo's edition2024 (Rust >= 1.85);
+  # use the latest stable toolchain.
+  RUST_VERSION: "stable"
 
 jobs:
   # ── 1. Build installers on each OS ─────────────────────────────────────────
