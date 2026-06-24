@@ -44,12 +44,15 @@ const pubDest = join(distBin, 'public');
 const BUN = process.env.ASHLR_BUN_PATH ??
   (() => {
     // Try the standard Bun install location first, then PATH.
-    const wellKnown = join(process.env.HOME ?? '', '.bun', 'bin', 'bun');
+    const isWin = process.platform === 'win32';
+    const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
+    const wellKnown = join(home, '.bun', 'bin', isWin ? 'bun.exe' : 'bun');
     if (existsSync(wellKnown)) return wellKnown;
     try {
-      return execSync('which bun', { encoding: 'utf8' }).trim();
+      const out = execSync(isWin ? 'where bun' : 'which bun', { encoding: 'utf8' });
+      return out.split(/\r?\n/).map((s) => s.trim()).find(Boolean) ?? (isWin ? 'bun.exe' : null);
     } catch {
-      return null;
+      return isWin ? 'bun.exe' : null;
     }
   })();
 

@@ -3,7 +3,6 @@
   "productName": "Ashlr",
   "version": "0.1.0",
   "identifier": "ai.ashlr.desktop",
-  "homepage": "https://github.com/evero-consulting/ashlr-hub",
 
   "build": {
     "beforeDevCommand": "",
@@ -68,9 +67,6 @@
       },
       "appimage": {
         "bundleMediaFramework": false
-      },
-      "rpm": {
-        "license": "MIT"
       }
     },
     "externalBin": [
