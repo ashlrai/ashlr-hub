@@ -153,6 +153,13 @@ jobs:
       - name: Prepare sidecar for Tauri
         run: node desktop/scripts/prepare-sidecar.mjs
 
+      # ── Generate app icons (PNG/icns/ico) from icon.svg ──────────────────────
+      # cargo tauri build requires the raster icons; we ship only the SVG source,
+      # so generate them here via the Tauri CLI before the build step.
+      - name: Generate app icons
+        working-directory: desktop
+        run: bunx @tauri-apps/cli@^2 icon src-tauri/icons/icon.svg
+
       # ── macOS code-signing setup (skipped if secrets absent) ─────────────────
       # If you don't set APPLE_CERTIFICATE the build produces an unsigned DMG.
       - name: Import Apple signing certificate
