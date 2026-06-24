@@ -2913,6 +2913,12 @@ export interface DigestReport {
   narrative?: string;
   /** True when `narrative` was produced by a LOCAL model; absent when none. */
   narrativeLocal?: boolean;
+  /**
+   * M88: fleet activity digest — per-repo proposal stats + daemon counters.
+   * Absent when no fleet activity has occurred or the store is unavailable
+   * (never-throws, best-effort). Included in --json output.
+   */
+  fleet?: import('./fleet/digest.js').FleetDigest;
 }
 
 /**

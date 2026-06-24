@@ -36,6 +36,7 @@
 
 import { makeColors, isTty, pad } from './ui.js';
 import type { DigestReport, DigestWindow } from '../core/types.js';
+import type { FleetDigest } from '../core/fleet/digest.js';
 
 // ---------------------------------------------------------------------------
 // M70: ashlr-md render seam (lazy — degrades when ashlr-md not installed)
@@ -148,6 +149,28 @@ export function buildDigestMarkdown(report: DigestReport): string {
     lines.push(``);
   }
 
+  if (report.fleet) {
+    const fl = report.fleet;
+    lines.push(`## Fleet Activity\n`);
+    lines.push(`| Metric | Value |`);
+    lines.push(`|--------|-------|`);
+    lines.push(`| Fleet | ${fl.running ? 'running' : 'stopped'} · $${fl.todaySpentUsd.toFixed(4)} today · ${fl.itemsProcessed} items |`);
+    lines.push(`| Proposed (window) | ${fl.totalProposed} |`);
+    lines.push(`| Auto-merged | ${fl.totalAutoMerged} |`);
+    lines.push(`| Pending review | ${fl.totalPending} |`);
+    lines.push(`| Declined | ${fl.totalDeclined} |`);
+    if (fl.repos.length > 0) {
+      lines.push(``);
+      lines.push(`| Repo | Proposed | Merged | Pending | Declined |`);
+      lines.push(`|------|----------|--------|---------|----------|`);
+      for (const r of fl.repos) {
+        const label = r.repo.split('/').filter(Boolean).slice(-1)[0] ?? r.repo;
+        lines.push(`| ${label} | ${r.proposed} | ${r.autoMerged} | ${r.pending} | ${r.declined} |`);
+      }
+    }
+    lines.push(``);
+  }
+
   if (report.narrative) {
     lines.push(`## Summary${report.narrativeLocal ? ' _(local model)_' : ''}\n`);
     lines.push(report.narrative);
@@ -199,6 +222,29 @@ async function importCore(): Promise<DigestCore | null> {
     }
   }
   return _core ?? null;
+}
+
+// ─── Fleet digest builder (lazy, graceful degradation) ───────────────────────
+
+type BuildFleetDigestFn = (
+  window: DigestWindow,
+  opts?: { now?: Date },
+) => Promise<FleetDigest>;
+
+let _buildFleetDigest: BuildFleetDigestFn | null | undefined = undefined;
+
+async function importFleetDigest(): Promise<BuildFleetDigestFn | null> {
+  if (_buildFleetDigest === undefined) {
+    try {
+      const mod = await import('../core/fleet/digest.js') as {
+        buildFleetDigest: BuildFleetDigestFn;
+      };
+      _buildFleetDigest = mod.buildFleetDigest;
+    } catch {
+      _buildFleetDigest = null;
+    }
+  }
+  return _buildFleetDigest ?? null;
 }
 
 // ─── Arg parsing ─────────────────────────────────────────────────────────────
@@ -406,6 +452,37 @@ function printDigestHuman(report: DigestReport): void {
     out('');
   }
 
+  // Fleet activity section (M88).
+  if (report.fleet) {
+    const fl = report.fleet;
+    const status = fl.running ? green('running') : dim('stopped');
+    out('  ' + bold('Fleet') + gray(` — ${status}${fl.lastTickAt ? gray(` · last tick ${fl.lastTickAt.slice(0, 19).replace('T', ' ')}`) : ''}`));
+    const flRows: [string, string][] = [
+      ['Proposed', String(fl.totalProposed)],
+      ['Auto-merged', String(fl.totalAutoMerged)],
+      ['Pending review', String(fl.totalPending)],
+      ['Declined', String(fl.totalDeclined)],
+      ['Today spend', `$${fl.todaySpentUsd.toFixed(4)}`],
+      ['Items processed', String(fl.itemsProcessed)],
+    ];
+    const fw = Math.max(...flRows.map(([k]) => k.length));
+    for (const [k, v] of flRows) out(`    ${cyan(pad(k, fw))}  ${v}`);
+    if (fl.repos.length > 0) {
+      out('');
+      out('  ' + bold('Fleet by repo'));
+      for (const r of fl.repos) {
+        const label = repoLabel(r.repo);
+        const parts: string[] = [];
+        if (r.proposed > 0) parts.push(`${r.proposed} proposed`);
+        if (r.autoMerged > 0) parts.push(green(`${r.autoMerged} merged`));
+        if (r.pending > 0) parts.push(yellow(`${r.pending} pending`));
+        if (r.declined > 0) parts.push(dim(`${r.declined} declined`));
+        out(`    ${cyan(pad(label, 24))}  ${parts.join(' · ')}`);
+      }
+    }
+    out('');
+  }
+
   // Optional narrative (present only when explicitly requested + reachable).
   if (report.narrative) {
     out('  ' + bold('Summary') + (report.narrativeLocal ? gray(' (local model)') : ''));
@@ -478,6 +555,28 @@ export async function cmdDigest(args: string[]): Promise<number> {
   } catch (err) {
     process.stderr.write(red('error: ') + (err instanceof Error ? err.message : String(err)) + '\n');
     return 1;
+  }
+
+  // 1b. Augment with fleet activity (M88). Best-effort — never blocks the digest.
+  const buildFleet = await importFleetDigest();
+  if (buildFleet) {
+    try {
+      const fleet = await buildFleet(parsed.window);
+      // Only attach when there is meaningful fleet data (at least one proposal
+      // or a daemon that has ever ticked) — keeps the report clean for fresh installs.
+      const hasActivity =
+        fleet.totalProposed > 0 ||
+        fleet.totalPending > 0 ||
+        fleet.totalAutoMerged > 0 ||
+        fleet.totalDeclined > 0 ||
+        fleet.itemsProcessed > 0 ||
+        fleet.running;
+      if (hasActivity) {
+        (report as DigestReport & { fleet: typeof fleet }).fleet = fleet;
+      }
+    } catch {
+      // Best-effort — fleet section silently absent on error.
+    }
   }
 
   // 2. Deliver — ALWAYS writes the LOCAL artifact under ~/.ashlr/digests/. The
