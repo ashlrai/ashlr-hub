@@ -1,42 +1,107 @@
 # ashlr-hub
 
-**The local-first command center and autonomous engineering fleet for the Ashlr dev-tool ecosystem.**
+**Autonomous engineering fleet + local-first command center for the Ashlr dev-tool ecosystem.**
 
-One binary that indexes every project, runs a polyglot agent fleet against your codebase in sandboxed isolation, aggregates all your MCP servers, tracks real Claude + Codex spend, scaffolds and ships — and funnels every proposed change through a single human approval gate before anything touches a real branch.
+One binary that runs a polyglot agent fleet against your enrolled repos in sandboxed isolation, proposes real diffs through a human approval gate, streams a web dashboard (Mission Control), and aggregates every MCP server in your stack — without touching a branch until you say so.
 
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![CI](https://github.com/ashlrai/ashlr-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/ashlr-hub/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D22-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org)
 
 ---
 
-## Getting started in one command
+## What is this?
 
-Requires **macOS** and **Node.js 22+**.
+ashlr-hub is two things in one binary:
+
+**Autonomous engineering fleet.** Enroll repos, start the daemon, and it continuously pulls high-value backlog items, dispatches sandboxed agent swarms (Claude, Codex, local models, NIMs), and deposits proposed diffs into an Approval Inbox. Nothing is applied until you explicitly approve it.
+
+**Local unifying harness.** One CLI and web dashboard that indexes every enrolled project, aggregates all your MCP servers into a single gateway, tracks real spend across engines, and provides `ashlr run` / `ashlr swarm` for ad-hoc work.
+
+### Key features
+
+| Feature | What it does |
+|---------|-------------|
+| **Autonomous daemon** | `ashlr daemon start` — continuous operator; proposal-only, sandboxed, enrollment-gated |
+| **Mission Control** | `ashlr serve` — web dashboard at `http://127.0.0.1:7777` with live fleet status, pulse analytics, inbox |
+| **Multi-engine routing** | Claude · Codex · local (Ollama/LM Studio) · NIMs · ashlrcode — per-task backend selection with quota and cost tracking |
+| **Human approval gate** | All proposals land in `ashlr inbox`; nothing is auto-applied; kill switch halts everything instantly |
+| **Pulse analytics** | Rolling activity rollup (1d/7d/30d) — commits, spend, proposals, swarms |
+| **Genome memory** | Structured playbook built from every completed run; injected into future agent context |
+| **Cross-platform desktop app** | Native macOS/Windows/Linux app wrapping Mission Control — see [Download](#download-the-desktop-app) |
+| **Plugin system** | Extend with custom scanners, templates, providers, and CLI commands |
+
+---
+
+## Download the desktop app
+
+The Tauri desktop app wraps Mission Control in a native window, manages the daemon lifecycle, and lives in your system tray. No separate Node.js install required — the ashlr binary is bundled inside.
+
+**Download from GitHub Releases:**
+[https://github.com/ashlrai/ashlr-hub/releases](https://github.com/ashlrai/ashlr-hub/releases)
+
+| Platform | File | Notes |
+|----------|------|-------|
+| macOS | `.dmg` | Double-click to install |
+| Windows | `.msi` / `.exe` | Run the installer |
+| Linux | `.deb` | `sudo dpkg -i ashlr_*.deb` |
+
+Releases are built by `.github/workflows/release-desktop.yml` on every `desktop-v*` tag and are currently unsigned:
+
+- **macOS:** Gatekeeper blocks unsigned apps on first launch. Right-click (or Control-click) the `.app` and choose **Open**, then confirm. This is a one-time step.
+- **Windows:** SmartScreen may show a warning. Click **More info → Run anyway**.
+- **Linux:** No warning; `.deb` installs normally.
+
+**First launch** automatically runs `ashlr setup --yes` — writes config, detects engines, installs the daemon — then opens Mission Control. No terminal needed.
+
+To force re-setup: `rm ~/.ashlr/.desktop-initialized`.
+
+See [`desktop/README.md`](./desktop/README.md) for build-from-source instructions.
+
+---
+
+## Quickstart (CLI)
+
+Requires **Node.js 20+**.
 
 ```sh
 npm install -g @ashlr/hub   # published to npm — https://www.npmjs.com/package/@ashlr/hub
-ashlr init                  # one-command onboarding: config, models, editors, genome, doctor
+ashlr setup                 # guided first-run wizard: config, engines, daemon, repo enrollment
+ashlr serve                 # open Mission Control at http://127.0.0.1:7777
 ```
 
+See [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) for the full zero-to-running walkthrough.
+
 <details>
-<summary>From a git checkout (contributors; needs <code>~/.local/bin</code> on PATH)</summary>
+<summary>From a git checkout (contributors)</summary>
 
 ```sh
 git clone https://github.com/ashlrai/ashlr-hub.git
 cd ashlr-hub
 npm ci && npm run build
 ./install.sh        # symlinks ashlr into ~/.local/bin (idempotent)
-ashlr init
+ashlr setup
 ```
-
-`ashlr update` is channel-aware: a git checkout updates via `git pull --ff-only`
-+ rebuild; an npm install checks the registry and installs only with `--yes`.
 </details>
 
-`ashlr init` is the one-command onboarding entry point: it walks you through every setup step — config, local model detection, editor MCP wiring, symlink, genome dir, Phantom status — then runs `ashlr doctor` as a final gate and prints a `try: ashlr run / ashlr swarm / ashlr tui` next-steps summary. Re-runnable safely at any time; fully idempotent.
+---
+
+## Getting started
+
+Requires **Node.js 20+**. Works on macOS, Linux, and Windows.
+
+```sh
+npm install -g @ashlr/hub
+ashlr init                  # onboarding: config, models, editors, genome, doctor
+```
+
+`ashlr update` is channel-aware: an npm install checks the registry; a git checkout updates via `git pull --ff-only` + rebuild.
+
+`ashlr init` is the original onboarding entry point: it walks through config, local model detection, editor MCP wiring, genome dir, and Phantom status — then runs `ashlr doctor` as a final gate. Re-runnable and fully idempotent.
+
+For the newer guided wizard that also handles daemon installation and repo enrollment, use `ashlr setup` (see [Quickstart](#quickstart-cli) above).
 
 ```
 $ ashlr init
