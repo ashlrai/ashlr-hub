@@ -57,6 +57,8 @@ import { buildFleetActivity } from './control.js';
 // M100: desktop-open actions — reuse CLI launchers (read-only import; no mutation).
 import { openInEditor, openInFinder } from '../../cli/open.js';
 import { listEnrolled } from '../sandbox/policy.js';
+import { listGoals } from '../goals/store.js';
+import { progressOf } from '../goals/advance.js';
 
 // ---------------------------------------------------------------------------
 // SSE registry — shared across all open SSE connections so server.ts can
@@ -918,6 +920,44 @@ export async function handleApi(
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         send500(res, `open failed: ${msg}`);
+      }
+      return true;
+    }
+
+    // ── GET /api/goals ────────────────────────────────────────────────────────
+    // M104: read-only goal list with progress roll-up. listGoals + progressOf
+    // are both read-only and never throw — wrapped defensively anyway so a
+    // corrupt goal file cannot bring down the whole endpoint.
+    if (path === '/api/goals' && method === 'GET') {
+      try {
+        const goals = listGoals();
+        const result = goals.map((g) => {
+          try {
+            const progress = progressOf(g);
+            return {
+              id: g.id,
+              objective: g.objective,
+              status: g.status,
+              milestones: g.milestones.map((m) => ({ title: m.title, status: m.status, order: m.order })),
+              progress: {
+                fractionDone: progress.fractionDone,
+                counts: progress.byStatus,
+                nextActionableId: progress.nextActionableId,
+              },
+            };
+          } catch {
+            return {
+              id: g.id,
+              objective: g.objective,
+              status: g.status,
+              milestones: [],
+              progress: { fractionDone: 0, counts: {}, nextActionableId: null },
+            };
+          }
+        });
+        sendJson(res, 200, result);
+      } catch {
+        sendJson(res, 200, []);
       }
       return true;
     }

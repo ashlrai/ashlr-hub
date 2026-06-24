@@ -24,7 +24,7 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-const VIEWS = ['control', 'fleet-activity', 'overview', 'runs', 'swarms', 'pulse', 'genome', 'portfolio', 'inbox', 'daemon', 'fleet'];
+const VIEWS = ['control', 'fleet-activity', 'goals', 'overview', 'runs', 'swarms', 'pulse', 'genome', 'portfolio', 'inbox', 'daemon', 'fleet'];
 const DEFAULT_VIEW = 'control';
 const API_BASE = '';  // same origin
 
@@ -70,6 +70,7 @@ const state = {
   fleetActivity: null,      // M90: GET /api/fleet-activity
   fleetActivityInterval: null, // M90: polling timer
   fleetActivityLoading: false,
+  goals: null,              // M104: GET /api/goals goal list + progress
   inboxBadge: 0,            // pending count from SSE, drives nav badge
   loading: {},   // viewName -> boolean
   error: {},     // viewName -> string | null
@@ -375,6 +376,7 @@ function renderActiveView() {
   const view = state.activeView;
   if (view === 'control') renderControl();
   if (view === 'fleet-activity') renderFleetActivity();
+  else if (view === 'goals') renderGoals();
   else if (view === 'overview') renderOverview();
   else if (view === 'runs') renderRuns();
   else if (view === 'swarms') renderSwarms();
@@ -399,6 +401,7 @@ async function loadView(view) {
   }
   if (view === 'control') await loadControl();
   else if (view === 'fleet-activity') await loadFleetActivity();
+  else if (view === 'goals') await loadGoals();
   else if (view === 'overview') await loadOverview();
   else if (view === 'runs') await loadRuns();
   else if (view === 'swarms') await loadSwarms();
@@ -438,6 +441,7 @@ function renderShell() {
     portfolio: '<rect x="1.5" y="9" width="3" height="5.5" rx="0.6" stroke="currentColor" stroke-width="1.2" fill="none"/><rect x="6.5" y="5" width="3" height="9.5" rx="0.6" stroke="currentColor" stroke-width="1.2" fill="none"/><rect x="11.5" y="2" width="3" height="12.5" rx="0.6" stroke="currentColor" stroke-width="1.2" fill="none"/>',
     inbox:     '<rect x="1.5" y="3" width="13" height="10" rx="1.5" stroke="currentColor" stroke-width="1.4" fill="none"/><polyline points="1.5,5 8,9.5 14.5,5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
     daemon:    '<circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="8" y1="4.5" x2="8" y2="8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><line x1="8" y1="8" x2="11" y2="10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
+    goals:     '<polyline points="2,4 7,4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><polyline points="2,8 14,8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><polyline points="2,12 11,12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><polyline points="13,10 15,12 13,14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
   };
 
   // Build nav links, including inbox badge
@@ -450,7 +454,7 @@ function renderShell() {
     iconSvg.setAttribute('aria-hidden', 'true');
     iconSvg.innerHTML = VIEW_ICONS[v] ?? '';
 
-    const VIEW_LABELS = { control: 'Mission Control', 'fleet-activity': 'Fleet Activity' };
+    const VIEW_LABELS = { control: 'Mission Control', 'fleet-activity': 'Fleet Activity', goals: 'Goals' };
     const labelText = VIEW_LABELS[v] ?? (v.charAt(0).toUpperCase() + v.slice(1));
     const label = document.createTextNode(labelText);
     const a = el('a', { cls: `nav-link${v === 'control' ? ' nav-link--control' : ''}`, href: `#${v}`, 'data-view': v });
@@ -1643,6 +1647,59 @@ function renderPortfolio() {
 // M32: Inbox view
 // ---------------------------------------------------------------------------
 
+// M104: Desktop-action helpers — generic rendering for proposals that carry
+// an `action` payload (kind==='desktop-action' or any proposal with action).
+// Never special-cases the inbox decision mechanics — reuses the existing path.
+
+/**
+ * Return a one-line summary element for the inbox row, or null when the
+ * proposal has no action payload.
+ */
+function buildDesktopActionSummary(p) {
+  const action = p.action;
+  if (!action && p.kind !== 'desktop-action') return null;
+  const type = action?.type ?? p.kind ?? 'action';
+  const target = action?.target;
+  const label = target
+    ? `🖥 ${type}: ${truncate(String(target), 60)}`
+    : `🖥 ${type}`;
+  return el('div', { cls: 'inbox-row__action-summary' }, label);
+}
+
+/**
+ * Return a detail card element for a desktop-action proposal, or null when
+ * there is no action payload. Shown in the inbox detail pane above the diff.
+ */
+function buildDesktopActionCard(p) {
+  const action = p.action;
+  if (!action && p.kind !== 'desktop-action') return null;
+
+  const card = el('div', { cls: 'inbox-action-card card' });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, '🖥 Desktop Action')
+  ));
+  const body = el('div', { cls: 'card-body' });
+
+  if (action) {
+    const pairs = [];
+    if (action.type)   pairs.push(['Type',   String(action.type)]);
+    if (action.target) pairs.push(['Target', String(action.target)]);
+    // Render any additional params generically
+    const extra = Object.entries(action).filter(([k]) => k !== 'type' && k !== 'target');
+    for (const [k, v] of extra) {
+      pairs.push([k, typeof v === 'object' ? JSON.stringify(v) : String(v)]);
+    }
+    if (pairs.length > 0) {
+      body.appendChild(infoGrid(pairs));
+    }
+  } else {
+    body.appendChild(el('p', { cls: 'hint' }, `Kind: ${p.kind}`));
+  }
+
+  card.appendChild(body);
+  return card;
+}
+
 async function loadInbox() {
   showLoading('inbox');
   try {
@@ -1723,8 +1780,12 @@ function buildInboxRow(p) {
     }, '↗ Open'));
   }
 
+  // M104: desktop-action summary line — shown when proposal carries an action payload
+  const actionSummary = buildDesktopActionSummary(p);
+
   row.appendChild(el('div', { cls: 'inbox-row__main' },
     el('span', { cls: 'inbox-row__title', title: p.title }, truncate(p.title ?? '(untitled)', 80)),
+    actionSummary,
     el('div', { cls: 'inbox-row__meta' }, ...metaChildren)
   ));
 
@@ -1780,6 +1841,10 @@ function buildInboxDetail(p) {
   ];
   summary.appendChild(infoGrid(infoPairs));
   detail.appendChild(summary);
+
+  // M104: desktop-action card — rendered when proposal has kind==='desktop-action' or action payload
+  const actionCard = buildDesktopActionCard(p);
+  if (actionCard) detail.appendChild(actionCard);
 
   // Diff — per-line color rendering (added/removed/meta)
   if (p.diff) {
@@ -2058,6 +2123,155 @@ function renderFleet() {
   ]));
   section.appendChild(propsCard);
 
+  main.appendChild(section);
+}
+
+// ---------------------------------------------------------------------------
+// M104: Goals view — /api/goals goal list + progress dashboard
+// ---------------------------------------------------------------------------
+
+async function loadGoals() {
+  showLoading('goals');
+  try {
+    state.goals = await apiFetch('/api/goals');
+    renderGoals();
+  } catch (err) {
+    showError('goals', err.message);
+  }
+}
+
+// Milestone status -> accent color (dark-theme safe)
+const MILESTONE_COLOR = {
+  done:        '#4ade80',   // green
+  proposed:    '#60a5fa',   // blue
+  'in-progress': '#a78bfa', // purple
+  pending:     '#6b7280',   // gray
+  blocked:     '#f87171',   // red
+  paused:      '#fbbf24',   // amber
+  skipped:     '#374151',   // dark-gray
+};
+
+function goalProgressBar(fractionDone) {
+  const pct = Math.round(Math.min(1, Math.max(0, fractionDone)) * 100);
+  const wrap = el('div', { cls: 'goal-progress-track' });
+  const fill = el('div', {
+    cls: 'goal-progress-fill',
+    style: `width:${pct}%`,
+    title: `${pct}% complete`,
+  });
+  wrap.appendChild(fill);
+  return el('div', { cls: 'goal-progress-wrap' },
+    wrap,
+    el('span', { cls: 'goal-progress-pct' }, `${pct}%`)
+  );
+}
+
+function buildGoalCard(g) {
+  const card = el('div', { cls: 'goal-card card' });
+
+  // Header: objective + status badge
+  card.appendChild(el('div', { cls: 'goal-card__header' },
+    el('span', { cls: 'goal-card__objective', title: g.objective }, truncate(g.objective, 90)),
+    statusBadge(g.status)
+  ));
+
+  // Progress bar
+  card.appendChild(goalProgressBar(g.progress?.fractionDone ?? 0));
+
+  // Milestone breakdown pills
+  const milestones = Array.isArray(g.milestones) ? g.milestones : [];
+  if (milestones.length > 0) {
+    const counts = g.progress?.counts ?? {};
+    const countOrder = ['done', 'proposed', 'in-progress', 'pending', 'blocked', 'paused', 'skipped'];
+    const pills = el('div', { cls: 'goal-milestone-pills' });
+    for (const status of countOrder) {
+      const n = counts[status];
+      if (!n) continue;
+      const color = MILESTONE_COLOR[status] ?? '#9ca3af';
+      pills.appendChild(el('span', {
+        cls: 'goal-milestone-pill',
+        style: `background:${color}22;color:${color};border:1px solid ${color}44`,
+        title: status,
+      }, `${status}: ${n}`));
+    }
+    card.appendChild(pills);
+  }
+
+  // Next actionable milestone highlight
+  const nextId = g.progress?.nextActionableId;
+  if (nextId) {
+    const nextM = milestones.find((m) => m.id === nextId) ??
+      // nextActionableId is the milestone id; milestones here only carry title/status/order
+      // so we fall back to showing the id
+      { title: nextId };
+    card.appendChild(el('div', { cls: 'goal-next-actionable' },
+      el('span', { cls: 'goal-next-label' }, 'Next: '),
+      el('span', { cls: 'goal-next-title' }, truncate(nextM.title ?? nextId, 80))
+    ));
+  }
+
+  // Milestone list (collapsible via details/summary)
+  if (milestones.length > 0) {
+    const details = el('details', { cls: 'goal-milestones-details' });
+    details.appendChild(el('summary', { cls: 'goal-milestones-summary' },
+      `${milestones.length} milestone${milestones.length !== 1 ? 's' : ''}`
+    ));
+    const list = el('ol', { cls: 'goal-milestones-list' });
+    const sorted = [...milestones].sort((a, b) => a.order - b.order);
+    for (const m of sorted) {
+      const color = MILESTONE_COLOR[m.status] ?? '#9ca3af';
+      const isNext = m.id === nextId || m.title === nextId;
+      list.appendChild(el('li', {
+        cls: `goal-milestone-item${isNext ? ' goal-milestone-item--next' : ''}`,
+        style: `border-left:3px solid ${color}`,
+      },
+        el('span', {
+          cls: 'goal-milestone-status-dot',
+          style: `background:${color}`,
+          title: m.status,
+        }),
+        el('span', { cls: 'goal-milestone-title' }, m.title),
+        el('span', {
+          cls: 'goal-milestone-status-badge',
+          style: `color:${color}`,
+        }, m.status)
+      ));
+    }
+    details.appendChild(list);
+    card.appendChild(details);
+  }
+
+  return card;
+}
+
+function renderGoals() {
+  if (state.activeView !== 'goals') return;
+  const main = getMain();
+  if (!main) return;
+  main.innerHTML = '';
+
+  const section = el('section', { cls: 'view-section' });
+  const goals = Array.isArray(state.goals) ? state.goals : [];
+
+  section.appendChild(el('div', { cls: 'view-header' },
+    el('h1', { cls: 'view-title' }, 'Goals'),
+    el('span', { cls: 'view-subtitle' }, `${goals.length} goal${goals.length !== 1 ? 's' : ''}`)
+  ));
+
+  if (goals.length === 0) {
+    section.appendChild(el('div', { cls: 'empty-state' },
+      el('p', {}, 'No goals yet.'),
+      el('p', { cls: 'hint' }, 'Use `ashlr goals add "your goal"` to create one.')
+    ));
+    main.appendChild(section);
+    return;
+  }
+
+  const grid = el('div', { cls: 'goals-grid' });
+  for (const g of goals) {
+    grid.appendChild(buildGoalCard(g));
+  }
+  section.appendChild(grid);
   main.appendChild(section);
 }
 
