@@ -1749,9 +1749,20 @@ async function main(): Promise<void> {
       case 'version':
       case '--version':
       case '-v': {
-        const { createRequire } = await import('node:module');
-        const pkg = createRequire(import.meta.url)('../../package.json') as { version: string };
-        console.log(pkg.version);
+        // ASHLR_VERSION is set by the Bun SEA shim (build-sea.mjs) because
+        // createRequire(import.meta.url) cannot resolve package.json from
+        // inside Bun's virtual FS (/$bunfs/root/…) at runtime.
+        let version = process.env.ASHLR_VERSION;
+        if (!version) {
+          try {
+            const { createRequire } = await import('node:module');
+            const pkg = createRequire(import.meta.url)('../../package.json') as { version: string };
+            version = pkg.version;
+          } catch {
+            version = 'unknown';
+          }
+        }
+        console.log(version);
         break;
       }
 

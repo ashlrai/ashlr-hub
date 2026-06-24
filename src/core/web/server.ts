@@ -39,10 +39,22 @@ function isAllowedHost(host: string | undefined): boolean {
 // Works from both:
 //   src/  (tsx / ts-node dev)  → <repo>/src/core/web/public
 //   dist/ (compiled)           → <repo>/dist/core/web/public
+//   Bun SEA binary             → set ASHLR_WEB_PUBLIC=<path/to/public>
+//
+// ASHLR_WEB_PUBLIC override:
+//   In a Bun-compiled single-file executable, import.meta.url points to the
+//   build-time source path, not a runtime-accessible location.  The binary
+//   launcher (or the Tauri sidecar launch command) sets ASHLR_WEB_PUBLIC to
+//   the sibling `public/` directory extracted/copied next to the binary so
+//   that static assets are resolved correctly at runtime.
 // ---------------------------------------------------------------------------
 
 export function assetsDir(): string {
-  // import.meta.url points to this file (server.ts / server.js after build)
+  // Honor an explicit override — used by the Bun SEA binary and Tauri sidecar.
+  if (process.env.ASHLR_WEB_PUBLIC) {
+    return process.env.ASHLR_WEB_PUBLIC;
+  }
+  // Fallback: import.meta.url points to this file (server.ts / server.js after build)
   const thisFile = fileURLToPath(import.meta.url);
   return join(dirname(thisFile), 'public');
 }
