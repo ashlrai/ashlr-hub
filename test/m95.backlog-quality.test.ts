@@ -109,6 +109,10 @@ function makeRgStub(rgOutput: string): ReturnType<typeof vi.fn> {
   });
 }
 
+function bareItSkip(body = '() => {}'): string {
+  return `it.${'skip'}(${body});`;
+}
+
 // ---------------------------------------------------------------------------
 // Setup / teardown
 // ---------------------------------------------------------------------------
@@ -164,13 +168,13 @@ describe('M95 scanSelfImprove — PROTECTED safety files are excluded', () => {
         absFile,
         [
           "import { it } from 'vitest';",
-          'it.skip(() => { /* protected invariant */ });',
+          bareItSkip('() => { /* protected invariant */ }'),
         ].join('\n'),
         'utf8',
       );
 
       // Stub rg to return the skip line as if it found it
-      const rgLine = `${file}:2:it.skip(() => { /* protected invariant */ });`;
+      const rgLine = `${file}:2:${bareItSkip('() => { /* protected invariant */ }')}`;
       _execFileImpl = makeRgStub(rgLine);
 
       const items = await scanSelfImprove(repo);
@@ -189,11 +193,11 @@ describe('M95 scanSelfImprove — PROTECTED safety files are excluded', () => {
     fs.mkdirSync(path.dirname(absFile), { recursive: true });
     fs.writeFileSync(
       absFile,
-      "it.skip(() => { expect(true).toBe(true); });",
+      bareItSkip('() => { expect(true).toBe(true); }'),
       'utf8',
     );
 
-    _execFileImpl = makeRgStub(`${protectedFile}:1:it.skip(() => { expect(true).toBe(true); });`);
+    _execFileImpl = makeRgStub(`${protectedFile}:1:${bareItSkip('() => { expect(true).toBe(true); }')}`);
 
     const items = await scanSelfImprove(repo);
 
@@ -213,12 +217,12 @@ describe('M95 scanSelfImprove — platform-gated skips are excluded', () => {
       path.join(repo, file),
       [
         "import { it } from 'vitest';",
-        'if (process.platform === "darwin") it.skip(() => {});',
+        `if (process.platform === "darwin") ${bareItSkip()}`,
       ].join('\n'),
       'utf8',
     );
 
-    _execFileImpl = makeRgStub(`${file}:2:if (process.platform === "darwin") it.skip(() => {});`);
+    _execFileImpl = makeRgStub(`${file}:2:if (process.platform === "darwin") ${bareItSkip()}`);
 
     const items = await scanSelfImprove(repo);
     // The darwin-gated skip must not surface
@@ -230,12 +234,12 @@ describe('M95 scanSelfImprove — platform-gated skips are excluded', () => {
     const content = [
       "import { it } from 'vitest';",
       'const skip = process.platform !== "linux";',
-      'it.skip(() => {});',
+      bareItSkip(),
     ].join('\n');
     fs.writeFileSync(path.join(repo, file), content, 'utf8');
 
     // rg reports line 3 as the skip
-    _execFileImpl = makeRgStub(`${file}:3:it.skip(() => {});`);
+    _execFileImpl = makeRgStub(`${file}:3:${bareItSkip()}`);
 
     const items = await scanSelfImprove(repo);
     expect(items.filter((i) => i.detail.includes(file))).toHaveLength(0);
@@ -246,11 +250,11 @@ describe('M95 scanSelfImprove — platform-gated skips are excluded', () => {
     const content = [
       "import { it } from 'vitest';",
       'const skipOnWin = skipIf(process.platform === "win32");',
-      'it.skip(() => {});',
+      bareItSkip(),
     ].join('\n');
     fs.writeFileSync(path.join(repo, file), content, 'utf8');
 
-    _execFileImpl = makeRgStub(`${file}:3:it.skip(() => {});`);
+    _execFileImpl = makeRgStub(`${file}:3:${bareItSkip()}`);
 
     const items = await scanSelfImprove(repo);
     expect(items.filter((i) => i.detail.includes(file))).toHaveLength(0);
@@ -269,13 +273,13 @@ describe('M95 scanSelfImprove — genuine bare skips still surface', () => {
       [
         "import { it } from 'vitest';",
         "describe('suite', () => {",
-        '  it.skip(() => { /* TODO: implement */ });',
+        `  ${bareItSkip('() => { /* TODO: implement */ }')}`,
         '});',
       ].join('\n'),
       'utf8',
     );
 
-    _execFileImpl = makeRgStub(`${file}:3:  it.skip(() => { /* TODO: implement */ });`);
+    _execFileImpl = makeRgStub(`${file}:3:  ${bareItSkip('() => { /* TODO: implement */ }')}`);
 
     const items = await scanSelfImprove(repo);
 
@@ -291,14 +295,14 @@ describe('M95 scanSelfImprove — genuine bare skips still surface', () => {
 
     const absProtected = path.join(repo, protectedFile);
     fs.mkdirSync(path.dirname(absProtected), { recursive: true });
-    fs.writeFileSync(absProtected, 'it.skip(() => {});', 'utf8');
-    fs.writeFileSync(path.join(repo, plainFile), 'it.skip(() => {});', 'utf8');
+    fs.writeFileSync(absProtected, bareItSkip(), 'utf8');
+    fs.writeFileSync(path.join(repo, plainFile), bareItSkip(), 'utf8');
 
     // rg returns both
     _execFileImpl = makeRgStub(
       [
-        `${protectedFile}:1:it.skip(() => {});`,
-        `${plainFile}:1:it.skip(() => {});`,
+        `${protectedFile}:1:${bareItSkip()}`,
+        `${plainFile}:1:${bareItSkip()}`,
       ].join('\n'),
     );
 
@@ -318,8 +322,8 @@ describe('M95 scanSelfImprove — genuine bare skips still surface', () => {
 describe('M95 scanSelfImprove — item details are concrete and scoped', () => {
   it('detail contains the file path so the engine knows what to edit', async () => {
     const file = 'test/concrete.test.ts';
-    fs.writeFileSync(path.join(repo, file), 'it.skip(() => {});', 'utf8');
-    _execFileImpl = makeRgStub(`${file}:1:it.skip(() => {});`);
+    fs.writeFileSync(path.join(repo, file), bareItSkip(), 'utf8');
+    _execFileImpl = makeRgStub(`${file}:1:${bareItSkip()}`);
 
     const items = await scanSelfImprove(repo);
     const item = items.find((i) => i.source === 'self');

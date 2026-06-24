@@ -275,7 +275,8 @@ export async function scanTodos(repo: string): Promise<WorkItem[]> {
     const lines = raw.split('\n').filter(Boolean).slice(0, MAX_TODO_HITS);
 
     // Cluster by file: emit one WorkItem per file (to avoid flooding).
-    const byFile = new Map<string, { count: number; sample: string; tags: string[] }>();
+    // Track the first occurrence line number and the full comment text for each file.
+    const byFile = new Map<string, { count: number; firstLine: string; lineNum: string; sample: string; tags: string[] }>();
 
     for (const line of lines) {
       // rg/grep -n output: "path/to/file:42:...comment..."
@@ -284,6 +285,7 @@ export async function scanTodos(repo: string): Promise<WorkItem[]> {
       const rest = line.slice(colonIdx + 1);
       const colonIdx2 = rest.indexOf(':');
       const filePath = line.slice(0, colonIdx);
+      const lineNum = colonIdx2 >= 0 ? rest.slice(0, colonIdx2) : '';
       const commentText = colonIdx2 >= 0 ? rest.slice(colonIdx2 + 1).trim() : rest.trim();
 
       // Detect which marker type
@@ -300,20 +302,32 @@ export async function scanTodos(repo: string): Promise<WorkItem[]> {
           if (!existing.tags.includes(t)) existing.tags.push(t);
         }
       } else {
-        byFile.set(filePath, { count: 1, sample: commentText.slice(0, 120), tags });
+        byFile.set(filePath, {
+          count: 1,
+          firstLine: line,
+          lineNum,
+          sample: commentText.slice(0, 200),
+          tags,
+        });
       }
     }
 
     const items: WorkItem[] = [];
     for (const [filePath, info] of byFile) {
       const plural = info.count > 1 ? `${info.count} markers` : '1 marker';
+      const lineRef = info.lineNum ? `:${info.lineNum}` : '';
+      // Detail is a concrete, scoped instruction: file + line + the TODO text + action
+      const detail =
+        `File: ${filePath}${lineRef} — "${info.sample.replace(/\n/g, ' ').slice(0, 160)}". ` +
+        `Implement this specific change. Do not touch unrelated code. ` +
+        `If this TODO is already resolved, remove the marker.`;
       items.push(
         makeItem(
           repo,
           'todo',
           `todo:${filePath}`,
-          `${plural} in ${filePath}`,
-          info.sample,
+          `${plural} in ${filePath}${lineRef}`,
+          detail,
           2,
           2,
           ['todo', ...info.tags],
@@ -870,6 +884,34 @@ export async function scanSecurity(repo: string): Promise<WorkItem[]> {
 // ---------------------------------------------------------------------------
 
 /**
+ * True when a line of rg output has the skip/todo/xit token inside a string
+ * literal or template literal — i.e. the token is quoted data, not a real call.
+ *
+ * Strategy: remove all single-quoted, double-quoted, and backtick strings from
+ * the content first, then check whether the skip pattern is still present.
+ * If the pattern disappears after string-stripping, it was inside a string.
+ *
+ * Also flags scanner-test fixture files that contain skip tokens as test data
+ * (files whose basename matches backlog-quality, anti-clog, or scanners).
+ * These files intentionally embed skip-like text for the scanner's own tests.
+ */
+function isSkipInStringOrFixture(content: string, file: string): boolean {
+  // 1. Fixture-file check: scanner test files embed skip tokens as test data
+  const base = file.split('/').pop() ?? '';
+  if (/backlog-quality|anti-clog|scanners/.test(base)) return true;
+
+  // 2. String-literal check: strip all quoted strings then re-test for skip pattern
+  //    We handle: 'single', "double", `template` (no nested escapes needed for this heuristic)
+  const SKIP_RE = /\b(it|describe|test)\.(skip|todo)\b|\bxit\b/;
+  const stripped = content
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+    .replace(/`(?:[^`\\]|\\.)*`/g, '``');
+  // If the skip pattern is gone after stripping strings, it was quoted data
+  return !SKIP_RE.test(stripped);
+}
+
+/**
  * Repo-relative path patterns that identify PROTECTED safety/invariant tests.
  * Must mirror guardSafetyTests SAFETY_FILE_PATTERNS in self.ts exactly.
  * Inlined here to keep scanners.ts self-contained (no circular dep on self.ts).
@@ -947,6 +989,12 @@ export async function scanSelfImprove(repo: string): Promise<WorkItem[]> {
       const file = m[1]!;
       const ln = m[2]!;
       const content = m[3] ?? '';
+
+      // RULE 0 (M99): skip tokens that appear inside string literals or in
+      // scanner fixture files — these are test data for the scanner itself,
+      // not real skipped tests. Checking this before reading the file avoids
+      // unnecessary I/O for false-positive lines.
+      if (isSkipInStringOrFixture(content, file)) continue;
 
       // RULE 1 (M95): skip PROTECTED safety files — the fleet must never try to
       // un-skip safety/invariant tests (they are gated for a reason and any
