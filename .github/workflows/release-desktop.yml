@@ -223,6 +223,15 @@ jobs:
           # ── Windows signing (optional) ────────────────────────────────────
           TAURI_WINDOWS_SIGN_PFX: ${{ env.TAURI_WINDOWS_SIGN_PFX }}
           TAURI_WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          # ── Tauri updater signing (optional) ─────────────────────────────────
+          # When set, tauri-action produces .sig files + latest.json alongside
+          # each installer artifact; when absent the build is unsigned but still
+          # succeeds (no latest.json → update checks fail silently at runtime).
+          # Generate keys with: cargo tauri signer generate
+          # Put the PUBLIC key in desktop/src-tauri/tauri.conf.json plugins.updater.pubkey
+          # Put TAURI_SIGNING_PRIVATE_KEY + TAURI_SIGNING_PRIVATE_KEY_PASSWORD in repo secrets.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: desktop
           # Tag from the push event, or the manual dispatch input.

@@ -24,3 +24,5 @@ tmp/
 .tmp/
 *.local
 dist-bin/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/

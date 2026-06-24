@@ -19,6 +19,7 @@ use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
     ShellExt,
 };
+use tauri_plugin_updater::UpdaterExt;
 
 // ── constants ────────────────────────────────────────────────────────────────
 
@@ -165,6 +166,54 @@ fn run_first_time_setup(app: &tauri::App) {
     }
 }
 
+// ── auto-update ──────────────────────────────────────────────────────────────
+
+/// Fire-and-forget update check on launch.
+///
+/// This function is intentionally best-effort: any error (network offline,
+/// no signing key configured, invalid pubkey placeholder, no new version) is
+/// logged to stderr and silently dropped.  It never blocks the app start or
+/// causes a panic.
+///
+/// When a signed update IS available, the plugin downloads and installs it,
+/// then emits "tauri://update-install" — the app must be restarted by the user
+/// (no forced restart here).
+fn check_for_updates(handle: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let updater = match handle.updater() {
+            Ok(u) => u,
+            Err(e) => {
+                // Likely: no pubkey configured yet (placeholder still in place).
+                eprintln!("[ashlr-desktop] updater not available: {e}");
+                return;
+            }
+        };
+
+        match updater.check().await {
+            Ok(Some(update)) => {
+                eprintln!(
+                    "[ashlr-desktop] update available: {} → downloading…",
+                    update.version
+                );
+                let _ = handle.emit("ashlr-update-available", &update.version);
+                if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
+                    eprintln!("[ashlr-desktop] update install failed: {e}");
+                } else {
+                    eprintln!("[ashlr-desktop] update installed — restart to apply");
+                    let _ = handle.emit("ashlr-update-installed", ());
+                }
+            }
+            Ok(None) => {
+                eprintln!("[ashlr-desktop] already on latest version");
+            }
+            Err(e) => {
+                // Common causes: offline, bad pubkey placeholder, no latest.json yet.
+                eprintln!("[ashlr-desktop] update check skipped: {e}");
+            }
+        }
+    });
+}
+
 // ── app setup ────────────────────────────────────────────────────────────────
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -241,6 +290,10 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── tray icon ─────────────────────────────────────────────────────────────
     build_tray(app)?;
+
+    // ── background update check ───────────────────────────────────────────────
+    // Non-blocking, non-fatal.  See check_for_updates() for details.
+    check_for_updates(app.handle().clone());
 
     Ok(())
 }
@@ -401,6 +454,7 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| setup(app).map_err(|e| e.into()))
         .on_window_event(|window, event| {
             // Hide (don't close) the window when the user presses the X button

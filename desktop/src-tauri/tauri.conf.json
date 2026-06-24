@@ -78,6 +78,14 @@
     "shell": {
       "open": false,
       "sidecar": true
+    },
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/ashlrai/ashlr-hub/releases/latest/download/latest.json"
+      ],
+      "dialog": false,
+      "pubkey": "PLACEHOLDER — replace with the output of `cargo tauri signer generate` (the public key line). See desktop/README.md for instructions. Build succeeds with this placeholder; auto-update is inert until a real key + matching TAURI_SIGNING_PRIVATE_KEY secret are configured."
     }
   }
 }

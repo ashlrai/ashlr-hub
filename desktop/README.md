@@ -134,6 +134,71 @@ Code-signing is optional. Set `APPLE_CERTIFICATE` / `APPLE_ID` / `APPLE_TEAM_ID`
 
 ---
 
+## Auto-update (Tauri updater plugin)
+
+The app checks for updates on every launch via `tauri-plugin-updater`. Updates are downloaded and installed silently in the background; the user is prompted to restart when ready.
+
+### Enabling auto-update (one-time setup)
+
+Auto-update is **inert by default** — the build succeeds without any signing key, but the update check fails silently (no crash, no blocking). To activate it:
+
+**1. Generate a signing key pair**
+
+```sh
+cargo tauri signer generate
+```
+
+This prints two values — save them somewhere safe:
+- **Public key** — a long base64 string starting with `dW50cnVzdGVkIGNvbW1lbnQ6`
+- **Private key** — keep secret, never commit
+
+**2. Put the public key in `tauri.conf.json`**
+
+Open `desktop/src-tauri/tauri.conf.json` and replace the `plugins.updater.pubkey` placeholder with your real public key:
+
+```json
+"plugins": {
+  "updater": {
+    "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6...your-real-key-here..."
+  }
+}
+```
+
+**3. Add secrets to the GitHub repository**
+
+Go to **Settings → Secrets and variables → Actions** and add:
+
+| Secret name | Value |
+|-------------|-------|
+| `TAURI_SIGNING_PRIVATE_KEY` | The private key output from `tauri signer generate` |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The password you entered (or leave empty if none) |
+
+**4. Push a release tag**
+
+```sh
+git tag desktop-v1.0.0
+git push origin desktop-v1.0.0
+```
+
+The CI workflow will now produce `.sig` signature files and a `latest.json` manifest alongside each installer, which the running app uses to detect and verify new releases.
+
+### How it works at runtime
+
+- On launch, the app spawns an async background task that calls the updater endpoint.
+- Endpoint: `https://github.com/ashlrai/ashlr-hub/releases/latest/download/latest.json`
+- If no new version is available, or if the signing key is not yet configured, the check errors silently (logged to stderr only — the app continues normally).
+- When an update is available and verified, it downloads and installs in the background. An `ashlr-update-installed` event is emitted; the user must restart to apply the update.
+
+### Build safety
+
+The updater plugin is **build-safe without a signing key**:
+- Adding `tauri-plugin-updater` to `Cargo.toml` and registering it in `main.rs` compiles cleanly with no secrets.
+- The `pubkey` placeholder in `tauri.conf.json` is a plain string — Tauri's JSON Schema for `plugins.*` uses `additionalProperties: true`, so no schema validation fails.
+- Signature verification only happens at runtime, not at `cargo tauri build` time.
+- When `TAURI_SIGNING_PRIVATE_KEY` is absent from CI, `tauri-action` simply skips producing `.sig` files and `latest.json` — the build still succeeds and produces a fully functional (unsigned) installer.
+
+---
+
 ## Architecture
 
 ```
