@@ -99,7 +99,28 @@ function makeItem(
 
 // ---------------------------------------------------------------------------
 // scanIssues — open GitHub issues via M18 listIssues
+//
+// M95 actionability rules:
+//  - EPIC/META/LARGE issues: titles that signal an epic, umbrella, or
+//    tracking issue (keywords: epic, tracking, umbrella, meta, roadmap,
+//    milestone, initiative, overhaul, refactor, rewrite, support, implement,
+//    add support for) are scoped to a concrete "investigate and implement the
+//    smallest fix" first-step item rather than handed as-is.
+//  - ALL items: summary/detail is a concrete, scoped instruction — not just
+//    a URL. The engine receives file/area guidance and a definition of "done".
 // ---------------------------------------------------------------------------
+
+/** Keywords in an issue title that signal an epic/umbrella/large item. */
+const EPIC_TITLE_RE =
+  /\b(epic|tracking|umbrella|meta|roadmap|milestone|initiative|overhaul|refactor|rewrite|support for|add support|windows support|linux support|implement|port to)\b/i;
+
+/**
+ * True when the issue title looks like an epic/meta/large item that a single
+ * diff cannot address. These are scoped rather than dropped.
+ */
+function isEpicIssue(title: string): boolean {
+  return EPIC_TITLE_RE.test(title);
+}
 
 export async function scanIssues(repo: string): Promise<WorkItem[]> {
   try {
@@ -107,26 +128,49 @@ export async function scanIssues(repo: string): Promise<WorkItem[]> {
     if (!Array.isArray(issues) || issues.length === 0) return [];
 
     const items: WorkItem[] = [];
+    const repoName = basename(repo);
 
     for (const issue of issues) {
-      // Value heuristic: all open issues are worth attention.
-      // We don't have label/age data from the current listIssues shape
-      // (it returns number, title, url, state, author), so use a flat value=3.
-      const value = 3;
-      const effort = 3;
+      const epic = isEpicIssue(issue.title);
 
-      items.push(
-        makeItem(
-          repo,
-          'issue',
-          `issue:${issue.number}`,
-          `Issue #${issue.number}: ${issue.title}`,
-          issue.url,
-          value,
-          effort,
-          ['issue', `#${issue.number}`],
-        ),
-      );
+      if (epic) {
+        // Reframe as a scoped first-step: investigate and implement the
+        // smallest concrete fix. The engine gets a bounded, actionable scope.
+        items.push(
+          makeItem(
+            repo,
+            'issue',
+            `issue:${issue.number}`,
+            `Investigate issue #${issue.number} and implement the smallest concrete fix`,
+            `Issue #${issue.number} in ${repoName} ("${issue.title}") is a large or epic item. ` +
+              `Do NOT attempt to implement it in full. Instead: (1) read the issue at ${issue.url}, ` +
+              `(2) identify the single smallest self-contained sub-problem, ` +
+              `(3) implement only that sub-problem as a focused diff in one or two files. ` +
+              `Stop after the smallest concrete change that adds value. ` +
+              `Leave the broader issue open for future ticks.`,
+            2, // lower value — scoped investigation, not a full fix
+            2,
+            ['issue', `#${issue.number}`, 'scoped', 'epic'],
+          ),
+        );
+      } else {
+        // Concrete, bounded issue: include scoped instruction in detail.
+        items.push(
+          makeItem(
+            repo,
+            'issue',
+            `issue:${issue.number}`,
+            `Fix issue #${issue.number}: ${issue.title}`,
+            `Issue #${issue.number} in ${repoName}: "${issue.title}". ` +
+              `Read the full issue at ${issue.url}, then implement a focused fix ` +
+              `in the relevant file(s). The change should be self-contained and ` +
+              `not touch unrelated code. Confirm the fix resolves the reported behaviour.`,
+            3,
+            2,
+            ['issue', `#${issue.number}`],
+          ),
+        );
+      }
     }
 
     return items;
@@ -815,7 +859,68 @@ export async function scanSecurity(repo: string): Promise<WorkItem[]> {
 // Self-gated: emits items ONLY for ashlr-hub's own repo (package name
 // '@ashlr/hub'). Surfaces pending/skipped tests as coverage the fleet should
 // RESTORE — it never proposes deleting a test. Bounded; never throws.
+//
+// M95 exclusion rules:
+//  1. M87: intentional skip (string reason or annotation) → excluded
+//  2. PROTECTED safety files (matching guardSafetyTests patterns) → excluded.
+//     The fleet must never attempt to un-skip a safety invariant test.
+//  3. Platform-gated skips (file/nearby lines reference process.platform,
+//     skipIf, darwin/win32/linux guards) → excluded. These skips are correct
+//     and engine-declinable; surfacing them produces 0-diff proposals.
 // ---------------------------------------------------------------------------
+
+/**
+ * Repo-relative path patterns that identify PROTECTED safety/invariant tests.
+ * Must mirror guardSafetyTests SAFETY_FILE_PATTERNS in self.ts exactly.
+ * Inlined here to keep scanners.ts self-contained (no circular dep on self.ts).
+ */
+const PROTECTED_SAFETY_PATTERNS: readonly RegExp[] = [
+  /^test\/h\d+[.-].*\.test\.ts$/,   // h1..h8 hardening / invariant suites
+  /^test\/m45\.foundry\.test\.ts$/,  // sandboxed-engine containment
+  /^test\/m47[._].*\.test\.ts$/,     // merge gate + provenance
+  /^test\/m51\.trust\.test\.ts$/,    // tri-tier trust
+  /^test\/m52\..*\.test\.ts$/,       // OS confinement
+  /^test\/m54\..*\.test\.ts$/,       // self-improvement guard itself
+  /daemon-gates/,                    // daemon-no-primitive source grep-guard
+  /proposal-only/,
+  /\.safety\./,
+];
+
+/** True when a repo-relative (or rg-relative) file path is a PROTECTED safety file. */
+function isProtectedSafetyFile(filePath: string): boolean {
+  const p = filePath.replace(/^\.\//, '');
+  return PROTECTED_SAFETY_PATTERNS.some((re) => re.test(p));
+}
+
+/**
+ * True when a skip is platform-gated — i.e. the surrounding code guards it
+ * with a platform check. Heuristic: the skip line itself, or the file content
+ * near that line, references process.platform / skipIf alongside a platform
+ * name, OR a bare platform-name constant used as a skip condition.
+ *
+ * Deliberately does NOT match a platform name that merely appears inside a
+ * string-reason argument (e.g. it.skip('darwin-only', ...)) — those are
+ * already caught by the M87 hasStringReason check and we must not double-fire
+ * here in a way that prevents the string-reason skip from being seen as
+ * intentional (which it already is, correctly excluded by M87).
+ */
+function isPlatformGatedSkip(content: string, prevLine: string, fileLines: string[], lineNum: number): boolean {
+  // Two distinct patterns:
+  //   (a) process.platform reference anywhere in line (definitive platform guard)
+  //   (b) skipIf( — a conditional skip utility
+  const PLATFORM_GUARD_RE = /process\.platform|skipIf\s*\(/;
+  if (PLATFORM_GUARD_RE.test(content)) return true;
+  if (PLATFORM_GUARD_RE.test(prevLine)) return true;
+  // Check a small window around the skip line (up to 4 lines before/after).
+  // Only use the strict guard pattern (not bare OS names) to avoid false positives
+  // on string-reason skips that happen to mention an OS name as human text.
+  const lo = Math.max(0, lineNum - 4);
+  const hi = Math.min(fileLines.length - 1, lineNum + 2);
+  for (let i = lo; i <= hi; i++) {
+    if (PLATFORM_GUARD_RE.test(fileLines[i] ?? '')) return true;
+  }
+  return false;
+}
 
 export async function scanSelfImprove(repo: string): Promise<WorkItem[]> {
   // Only ashlr-hub's own source produces self-improvement work.
@@ -843,27 +948,39 @@ export async function scanSelfImprove(repo: string): Promise<WorkItem[]> {
       const ln = m[2]!;
       const content = m[3] ?? '';
 
-      // M87: intentional-skip detection — do NOT emit for a skip that has an
-      // explicit rationale. A skip is intentional when:
+      // RULE 1 (M95): skip PROTECTED safety files — the fleet must never try to
+      // un-skip safety/invariant tests (they are gated for a reason and any
+      // attempt will be declined by guardSafetyTests before it can be applied).
+      if (isProtectedSafetyFile(file)) continue;
+
+      // RULE 2 (M87): intentional-skip detection — do NOT emit for a skip that
+      // has an explicit rationale:
       //   (a) the first argument is a non-empty string, e.g. it.skip('darwin only', ...)
       //   (b) the line carries a // skip: / // reason: / @skip annotation comment
-      // Only bare skips with no message/reason are flagged as coverage gaps.
       const hasStringReason = /\.(skip|todo)\s*\(\s*['"`]/.test(content);
       const hasAnnotation = /\/\/\s*(skip|reason)\s*:|@skip\b/i.test(content);
       if (hasStringReason || hasAnnotation) continue;
 
-      // Also check for an annotation on the previous line in the file (best-effort).
-      // Read only when the line number is > 1 and the file is accessible.
-      if (Number(ln) > 1) {
+      // Read the surrounding file lines for annotation + platform-gate checks.
+      let fileLines: string[] = [];
+      let prevLine = '';
+      if (Number(ln) > 0) {
         try {
           const filePath = join(repo, file);
           if (existsSync(filePath)) {
-            const fileLines = readFileSync(filePath, 'utf8').split('\n');
-            const prevLine = fileLines[Number(ln) - 2] ?? '';
-            if (/\/\/\s*(skip|reason)\s*:|@skip\b/i.test(prevLine)) continue;
+            fileLines = readFileSync(filePath, 'utf8').split('\n');
+            prevLine = fileLines[Number(ln) - 2] ?? '';
           }
         } catch { /* best-effort — never throws */ }
       }
+
+      // Check prev-line annotation (M87 best-effort).
+      if (/\/\/\s*(skip|reason)\s*:|@skip\b/i.test(prevLine)) continue;
+
+      // RULE 3 (M95): platform-gated skip — do NOT emit. These skips are
+      // intentionally conditioned on the host OS and will always be declined
+      // by frontier engines on environments where the gate doesn't match.
+      if (isPlatformGatedSkip(content, prevLine, fileLines, Number(ln) - 1)) continue;
 
       items.push(
         makeItem(
@@ -871,8 +988,10 @@ export async function scanSelfImprove(repo: string): Promise<WorkItem[]> {
           'self',
           `skip:${file}:${ln}`,
           `Restore skipped test in ${basename(file)}:${ln}`,
-          `A pending/skipped test at ${file}:${ln} reduces invariant coverage. ` +
-            `Implement or re-enable it — never delete a safety test.`,
+          `Bare/unguarded skipped test at ${file}:${ln}. ` +
+            `Implement the missing test body or re-enable the assertion — ` +
+            `the test scaffold exists; only the implementation is missing. ` +
+            `Do NOT delete the test. File: ${file}`,
           3,
           2,
           ['self', 'test-gap'],

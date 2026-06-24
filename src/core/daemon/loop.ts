@@ -480,7 +480,7 @@ export async function tick(
       const intelRaw = liveCfg.foundry?.intelligence;
       if (intelRaw !== undefined && intelRaw !== null) {
         const forecast = buildForecast('7d', liveCfg);
-        const goal = `${item.title}\n\n${item.detail}`.trim();
+        const goal = buildItemGoal(item);
         const est = await estimateRun(goal, { maxTokens: perItemMaxTokens }, liveCfg);
         const recommended = await recommendRoute(item, liveCfg, { estimate: est });
         // Only override when the recommend result doesn't escalate a local decision.
@@ -509,7 +509,7 @@ export async function tick(
       }
     }
 
-    const goal = `${item.title}\n\n${item.detail}`.trim();
+    const goal = buildItemGoal(item);
     const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
 
     // Snapshot ASHLR_IN_SWARM and restore it after the call. The swarm runner
@@ -606,7 +606,7 @@ export async function tick(
         const intelCfg2 = intelRaw2 as { anomalyK?: number };
         const anomalyK = typeof intelCfg2.anomalyK === 'number' && intelCfg2.anomalyK > 0
           ? intelCfg2.anomalyK : 4;
-        const goal2 = `${item.title}\n\n${item.detail}`.trim();
+        const goal2 = buildItemGoal(item);
         const est2 = await estimateRun(goal2, { maxTokens: perItemMaxTokens }, liveCfg).catch(() => null);
         const p50 = est2?.estCostUsd.median ?? 0;
         if (p50 > 0 && swarmSpent > anomalyK * p50) {
@@ -981,4 +981,48 @@ export function stopDaemon(): void {
 /** Promise-based sleep (bounded; never less than 0ms). */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+/**
+ * Build a focused, actionable engine prompt from a WorkItem.
+ *
+ * Framing goals:
+ *  - Lead with the concrete objective so the engine can orient immediately.
+ *  - Add scoped context (repo path, source/tags) so it doesn't guess location.
+ *  - Append a clean no-op escape hatch so frontier models produce a focused diff
+ *    OR cleanly stop — not a forced/garbage edit.
+ *
+ * Pure: never throws, never mutates item.
+ */
+export function buildItemGoal(item: WorkItem): string {
+  const parts: string[] = [];
+
+  // Objective — always present.
+  parts.push(item.title.trim());
+
+  // Detail / context — include when non-empty and not a duplicate of title.
+  const detail = (item.detail ?? '').trim();
+  if (detail && detail !== item.title.trim()) {
+    parts.push(detail);
+  }
+
+  // Repo + source anchoring so the engine knows exactly where to look.
+  const anchor: string[] = [];
+  if (item.repo) anchor.push(`Repo: ${item.repo}`);
+  if (item.source) anchor.push(`Source: ${item.source}`);
+  if (item.tags && item.tags.length > 0) anchor.push(`Tags: ${item.tags.join(', ')}`);
+  if (anchor.length > 0) parts.push(anchor.join(' | '));
+
+  // Behavioral guidance — focused diff OR clean no-op. Keep it tight; the
+  // executor role and TITRR already provide broader context.
+  parts.push(
+    'Make the smallest focused change that fully addresses this. ' +
+    'Match existing conventions. Run/keep tests green. ' +
+    'If on inspection this is NOT actionable as a code change ' +
+    '(e.g. a platform-gated or intentionally-skipped test, an issue requiring ' +
+    'product decisions, or already done), make NO changes and stop — ' +
+    'do not force an edit.',
+  );
+
+  return parts.join('\n\n');
 }
