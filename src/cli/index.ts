@@ -1452,6 +1452,13 @@ async function main(): Promise<void> {
         break;
       }
 
+      case 'pulse-export': {
+        // M89: fleet→pulse OTLP backfill/manual export
+        const cmdPulse = await loadPulseCmd();
+        process.exitCode = await cmdPulse(['export', ...rest]);
+        break;
+      }
+
       case 'new': {
         const cmdNew = await loadNewCmd();
         process.exitCode = await cmdNew(rest);

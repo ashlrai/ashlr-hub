@@ -716,6 +716,15 @@ export async function tick(
   state.ticks = [...state.ticks, tickRecord];
   saveDaemonState(state);
 
+  // M89: best-effort fleet→pulse telemetry export. Runs OUTSIDE the proposal
+  // guarantees — only reads state + POSTs telemetry; never mutates repos.
+  // Only fires when cfg.pulse?.enabled is true. Never throws.
+  if (cfg.pulse?.enabled) {
+    void import('../fleet/pulse-export.js').then(({ exportToPulse }) =>
+      exportToPulse(cfg, { sinceTs: tickRecord.ts }).catch(() => undefined)
+    ).catch(() => undefined);
+  }
+
   audit({
     action: 'daemon:tick',
     repo: null,

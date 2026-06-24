@@ -430,6 +430,11 @@ export async function cmdPulse(args: string[]): Promise<number> {
     return cmdPulseConnect(args.slice(1));
   }
 
+  // M89: dispatch `export` subcommand
+  if (args[0] === 'export') {
+    return cmdPulseExport(args.slice(1));
+  }
+
   // Help shortcircuit
   if (args[0] === '--help' || args[0] === '-h' || args[0] === 'help') {
     printPulseHelp();
@@ -586,6 +591,139 @@ function printPulseHelp(): void {
   console.log(`    ${cyan('ashlr pulse --window 1d')}             ${dim('# today')}`);
   console.log(`    ${cyan('ashlr pulse --project ashlr-hub')}     ${dim('# single project')}`);
   console.log(`    ${cyan('ashlr pulse --json | jq .totals')}     ${dim('# machine-readable')}`);
+  console.log('');
+}
+
+// ---------------------------------------------------------------------------
+// M89: `ashlr pulse export` / `ashlr pulse-export` — fleet→pulse OTLP export
+// ---------------------------------------------------------------------------
+
+/**
+ * `ashlr pulse export [--since <iso>] [--dry-run]`
+ *
+ * Reads fleet state (daemon ticks + inbox proposals) and exports them as
+ * OTLP/JSON spans to ashlr-pulse. Requires:
+ *   - cfg.pulse.enabled = true  (in ~/.ashlr/config.json)
+ *   - ASHLR_PULSE_PAT env var   (PAT; never stored in config)
+ *
+ * --since <iso>   Only include events at or after this ISO timestamp.
+ * --dry-run       Print the OTLP payload on stdout; do NOT POST.
+ */
+async function cmdPulseExport(args: string[]): Promise<number> {
+  if (args[0] === '--help' || args[0] === '-h') {
+    printExportHelp();
+    return 0;
+  }
+
+  let sinceTs: string | undefined;
+  let dryRun = false;
+  let i = 0;
+  while (i < args.length) {
+    const a = args[i]!;
+    if (a === '--since') {
+      const val = args[++i];
+      if (!val) {
+        process.stderr.write(`${C.red}error:${C.reset} --since requires an ISO timestamp\n`);
+        return 2;
+      }
+      if (isNaN(Date.parse(val))) {
+        process.stderr.write(`${C.red}error:${C.reset} --since value is not a valid ISO date: ${val}\n`);
+        return 2;
+      }
+      sinceTs = val;
+    } else if (a === '--dry-run') {
+      dryRun = true;
+    } else {
+      process.stderr.write(`${C.red}error:${C.reset} unknown flag: ${a}\n`);
+      return 2;
+    }
+    i++;
+  }
+
+  // Load config
+  let cfg: AshlrConfig;
+  try {
+    cfg = await loadConfig();
+  } catch (err) {
+    process.stderr.write(
+      `${C.red}error:${C.reset} failed to load config: ` +
+      (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  // Lazy-import exporter
+  let buildFleetSpans: ((sinceTs?: string) => unknown) | null = null;
+  let exportToPulse: ((cfg: AshlrConfig, opts?: { sinceTs?: string; dryRun?: boolean }) => Promise<void>) | null = null;
+  try {
+    const mod = await import('../core/fleet/pulse-export.js') as {
+      buildFleetSpans: (sinceTs?: string) => unknown;
+      exportToPulse: (cfg: AshlrConfig, opts?: { sinceTs?: string; dryRun?: boolean }) => Promise<void>;
+    };
+    buildFleetSpans = mod.buildFleetSpans;
+    exportToPulse = mod.exportToPulse;
+  } catch {
+    process.stderr.write(`${C.red}error:${C.reset} pulse-export requires src/core/fleet/pulse-export.ts (M89 module not yet built).\n`);
+    return 1;
+  }
+
+  if (dryRun) {
+    // Dry-run: print payload without POSTing (no PAT, no cfg.pulse.enabled check)
+    const payload = buildFleetSpans!(sinceTs);
+    process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
+    return 0;
+  }
+
+  if (!cfg.pulse?.enabled) {
+    process.stderr.write(
+      `${C.yellow}warning:${C.reset} cfg.pulse.enabled is not set — nothing exported.\n` +
+      `  Add to ~/.ashlr/config.json: { "pulse": { "enabled": true, "endpoint": "https://pulse.ashlr.ai" } }\n`,
+    );
+    return 0;
+  }
+
+  const pat = process.env['ASHLR_PULSE_PAT'];
+  if (!pat) {
+    process.stderr.write(
+      `${C.yellow}warning:${C.reset} ASHLR_PULSE_PAT is not set — nothing exported.\n` +
+      `  export ASHLR_PULSE_PAT=<your-pat>\n`,
+    );
+    return 0;
+  }
+
+  console.log(`  Exporting fleet spans to ${C.dim}${cfg.pulse.endpoint ?? 'http://localhost:3000'}${C.reset} …`);
+  await exportToPulse!(cfg, { sinceTs });
+  console.log(`${C.green}ok${C.reset}  Fleet spans exported.`);
+  return 0;
+}
+
+function printExportHelp(): void {
+  console.log('');
+  console.log(`${bold('  ashlr pulse export')}${dim(' — fleet→pulse OTLP exporter (M89)')}`);
+  console.log('');
+  console.log(`  ${bold('Usage:')}`);
+  console.log('');
+  console.log(`    ashlr pulse export [--since <iso>] [--dry-run]`);
+  console.log(`    ashlr pulse-export [--since <iso>] [--dry-run]`);
+  console.log('');
+  console.log(`  ${bold('Options:')}`);
+  console.log('');
+  console.log(`    ${cyan('--since <iso>')}   Only include events at or after this ISO timestamp.`);
+  console.log(`    ${cyan('--dry-run')}        Print OTLP payload on stdout; do NOT POST.`);
+  console.log('');
+  console.log(`  ${bold('Config (in ~/.ashlr/config.json):')}`);
+  console.log('');
+  console.log(`    ${dim('{ "pulse": { "enabled": true, "endpoint": "https://pulse.ashlr.ai" } }')}`);
+  console.log('');
+  console.log(`  ${bold('Auth:')}`);
+  console.log('');
+  console.log(`    ${dim('export ASHLR_PULSE_PAT=<your-personal-access-token>')}`);
+  console.log('');
+  console.log(`  ${bold('Examples:')}`);
+  console.log('');
+  console.log(`    ${cyan('ashlr pulse-export --dry-run')}                  ${dim('# preview payload')}`);
+  console.log(`    ${cyan('ashlr pulse-export --since 2026-06-01T00:00:00Z')}  ${dim('# backfill')}`);
+  console.log(`    ${cyan('ashlr pulse-export')}                            ${dim('# export all history')}`);
   console.log('');
 }
 

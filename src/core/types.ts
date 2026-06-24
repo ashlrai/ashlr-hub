@@ -231,6 +231,18 @@ export interface AshlrConfig {
      */
     integrity: Record<string, string>;
   };
+  /**
+   * M89: Fleet→Pulse OTLP exporter. When enabled, the daemon emits fleet
+   * activity (ticks + proposals) as OTLP/JSON spans to ashlr-pulse after
+   * each tick. Auth via ASHLR_PULSE_PAT env var (never stored in config).
+   * DEFAULT DISABLED — no telemetry is sent without explicit opt-in.
+   */
+  pulse?: {
+    /** Enable fleet→pulse OTLP export (default false). */
+    enabled?: boolean;
+    /** OTLP endpoint base URL (default 'http://localhost:3000'). */
+    endpoint?: string;
+  };
 }
 
 // ---------------------------------------------------------------------------
