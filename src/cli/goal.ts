@@ -9,9 +9,9 @@
  * proposal-only + enrollment + kill-switch gates all live in core advanceGoal.
  *
  * --direct mode (M84): skip milestone decomposition entirely. Runs the verbatim
- * objective as a SINGLE sandboxed, proposal-only runSwarm call — the same
- * confinement/cred-strip/diff-capture/proposal-filing path as `goals advance`,
- * without the Design→Implement→Test→Document wrapper. Requires --project.
+ * objective as a SINGLE sandboxed, proposal-only frontier-engine run — the
+ * SAME path the daemon uses for non-builtin backends (runGoal -> sandboxEngine ->
+ * runEngineSandboxed -> worktree diff -> PENDING inbox proposal). Requires --project.
  *
  * SAFETY: this module imports no outward-mutation primitive — it never applies
  * proposals, opens pull requests, pushes a remote, or deploys. It only sequences
@@ -20,7 +20,7 @@
 
 import { resolve } from 'node:path';
 import { makeColors } from './ui.js';
-import type { AshlrConfig, RunBudget, SwarmRun } from '../core/types.js';
+import type { AshlrConfig, RunBudget, WorkItem } from '../core/types.js';
 
 interface ParsedGoalArgs {
   objective: string;
@@ -58,11 +58,12 @@ const USAGE =
   '  the polyglot backend roster by capability + trust tier.\n' +
   '\n' +
   '  --direct  Skip milestone decomposition. Run the objective verbatim as a\n' +
-  '            SINGLE sandboxed proposal-only engine run. Requires --project.\n' +
+  '            SINGLE sandboxed proposal-only frontier-engine run (same path as\n' +
+  '            the daemon\'s non-builtin dispatch). Requires --project.\n' +
   '            Ideal for concrete tasks that need no Design→Implement→Test split.';
 
 // ---------------------------------------------------------------------------
-// --direct path: one sandboxed proposal-only runSwarm call, verbatim objective.
+// --direct path: one sandboxed proposal-only frontier-engine run, verbatim.
 // ---------------------------------------------------------------------------
 
 /** Hard per-direct-run budget — same defaults as advanceGoal's DEFAULT_ADVANCE_BUDGET. */
@@ -80,50 +81,54 @@ async function runDirect(
 ): Promise<number> {
   const repo = resolve(project);
 
-  // Lazy-import the same sandboxed runner path used by advanceGoal internally.
-  // We reuse runSwarm + listProposals directly — no goal/milestone record needed
-  // for a single verbatim run.
-  let runSwarm: (
-    input: { goal: string; specId?: string },
+  // Lazy-import the same frontier sandboxed path the daemon uses for non-builtin
+  // backends (loop.ts:467): runGoal(..., { engine, sandboxEngine:true,
+  // requireSandbox:true, cwd, budget, tools:true, noMemory:false }).
+  // runGoal -> runEngineSandboxed -> worktree diff -> PENDING inbox proposal.
+  // The proposal is correlated post-run via listProposals (origin:'agent', repo).
+  let runGoal: (
+    goal: string,
     cfg: AshlrConfig,
     opts: {
-      sandbox: boolean;
+      engine: string;
+      sandboxEngine: boolean;
       requireSandbox: boolean;
-      propose: boolean;
+      cwd: string;
       budget: RunBudget;
-      allowCloud: boolean;
-      project: string;
+      tools: boolean;
+      noMemory: boolean;
     },
-    sink: (e: unknown) => void,
-  ) => Promise<SwarmRun>;
-  let listProposals: (opts: { status: string }) => Array<{
+  ) => Promise<{ id: string; status: string }>;
+  let routeBackend: (item: WorkItem, cfg: AshlrConfig) => { backend: string };
+  let listProposals: (filter: { status: string }) => Array<{
     id: string;
     origin: string;
     repo: string | null;
-    summary: string;
   }>;
   let loadConfig: () => AshlrConfig;
   let assertMayMutate: (repo: string) => void;
 
   try {
-    const [runner, inbox, config, policy] = await Promise.all([
-      import('../core/swarm/runner.js'),
+    const [orchestrator, router, inbox, config, policy] = await Promise.all([
+      import('../core/run/orchestrator.js'),
+      import('../core/fleet/router.js'),
       import('../core/inbox/store.js'),
       import('../core/config.js'),
       import('../core/sandbox/policy.js'),
     ]);
-    runSwarm = runner.runSwarm as typeof runSwarm;
+    runGoal = orchestrator.runGoal as typeof runGoal;
+    routeBackend = router.routeBackend as typeof routeBackend;
     listProposals = inbox.listProposals as typeof listProposals;
     loadConfig = config.loadConfig as typeof loadConfig;
     assertMayMutate = policy.assertMayMutate as typeof assertMayMutate;
   } catch {
     process.stderr.write(
-      col.red('error: ') + 'direct mode requires the M28 core (src/core/swarm/runner.js).\n',
+      col.red('error: ') + 'direct mode requires the M45 core (src/core/run/orchestrator.js).\n',
     );
     return 1;
   }
 
-  // ENROLLMENT-SCOPED: enforce before any swarm starts (mirrors advanceGoal).
+  // ENROLLMENT-SCOPED: enforce before any engine starts (mirrors advanceGoal).
   try {
     assertMayMutate(repo);
   } catch (err) {
@@ -135,39 +140,59 @@ async function runDirect(
   const cfg = loadConfig();
   const budget: RunBudget = { ...DIRECT_BUDGET, allowCloud };
 
-  let run: SwarmRun;
+  // Route to the best available frontier backend (same heuristic as the daemon).
+  // routeBackend returns 'codex' or 'claude' when one is allowed+installed;
+  // falls back to 'builtin' when neither is available.
+  const syntheticItem: WorkItem = {
+    id: `direct-${Date.now().toString(36)}`,
+    repo,
+    title: objective.slice(0, 80),
+    detail: objective,
+    source: 'self',
+    value: 3,
+    effort: 3,
+    score: 0,
+    tags: [],
+    ts: new Date().toISOString(),
+  };
+  const { backend } = routeBackend(syntheticItem, cfg);
+
+  // Snapshot PENDING count before the run so we can detect newly-filed proposals.
+  let pendingBefore: Array<{ id: string; origin: string; repo: string | null }> = [];
   try {
-    // SANDBOXED + PROPOSAL-ONLY — these three flags are NON-NEGOTIABLE (same
-    // invariant as advanceGoal; confinement/cred-strip/diff-capture all apply).
-    run = await runSwarm(
-      { goal: objective },
-      cfg,
-      {
-        sandbox: true,
-        requireSandbox: true,
-        propose: true,
-        budget,
-        allowCloud,
-        project: repo,
-      },
-      () => {},
-    );
+    pendingBefore = listProposals({ status: 'pending' });
+  } catch {
+    pendingBefore = [];
+  }
+
+  let runState: { id: string; status: string };
+  try {
+    // SANDBOXED + PROPOSAL-ONLY — same invariant as the daemon's frontier dispatch.
+    // sandboxEngine:true routes through runEngineSandboxed (worktree -> agent ->
+    // diff -> PENDING proposal). requireSandbox:true aborts if sandbox creation
+    // fails rather than falling back to an unsandboxed run.
+    runState = await runGoal(objective, cfg, {
+      engine: backend,
+      sandboxEngine: true,
+      requireSandbox: true,
+      cwd: repo,
+      budget,
+      tools: true,
+      noMemory: false,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(col.red('error: ') + msg + '\n');
     return 1;
   }
 
-  // Correlate the PENDING proposal the swarm emitted — mirrors findProposalForSwarm
-  // in advance.ts (read-only; we do NOT create or apply it).
+  // Correlate the PENDING proposal filed by runEngineSandboxed — origin:'agent',
+  // repo matches our target. Filter to proposals that didn't exist before the run.
   let proposalId: string | null = null;
   try {
+    const beforeIds = new Set(pendingBefore.map((p) => p.id));
     const candidates = listProposals({ status: 'pending' }).filter(
-      (p) =>
-        p.origin === 'swarm' &&
-        (p.repo === repo || p.repo === null) &&
-        typeof p.summary === 'string' &&
-        p.summary.includes(`swarm=${run.id}`),
+      (p) => !beforeIds.has(p.id) && p.origin === 'agent' && p.repo === repo,
     );
     proposalId = candidates[0]?.id ?? null;
   } catch {
@@ -176,7 +201,7 @@ async function runDirect(
 
   if (proposalId) {
     console.log('');
-    console.log(col.green('  ✓ ') + col.bold('proposal filed') + col.dim(` (swarm ${run.id}, ${run.status})`));
+    console.log(col.green('  ✓ ') + col.bold('proposal filed') + col.dim(` (${backend} run ${runState.id}, ${runState.status})`));
     console.log('');
     console.log('  A ' + col.bold('PENDING') + ' inbox proposal was produced — nothing was applied.');
     console.log(`  proposal: ${col.cyan(proposalId)}`);
@@ -186,9 +211,9 @@ async function runDirect(
   } else {
     process.stderr.write(
       col.yellow('! ') +
-        `direct run completed (swarm ${run.id}, status ${run.status}) but produced no PENDING proposal.\n`,
+        `direct run completed (${backend} run ${runState.id}, status ${runState.status}) but produced no PENDING proposal.\n`,
     );
-    process.stderr.write(col.dim('  Inspect `ashlr swarm` for details.\n'));
+    process.stderr.write(col.dim('  Inspect `ashlr inbox` or check the engine output for details.\n'));
     return 1;
   }
 }
@@ -218,7 +243,7 @@ export async function cmdGoal(args: string[]): Promise<number> {
     }
 
     console.log('');
-    console.log(col.bold('  ashlr goal --direct') + col.dim(' — objective → single sandboxed run → proposal'));
+    console.log(col.bold('  ashlr goal --direct') + col.dim(' — objective → single sandboxed frontier run → proposal'));
     console.log('  ' + col.cyan(parsed.objective));
     console.log('');
 

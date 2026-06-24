@@ -2,34 +2,40 @@
  * M84 — `ashlr goal --direct` mode.
  *
  * Asserts that --direct:
- *  1. Skips milestone planning entirely and invokes runSwarm exactly once with
- *     the verbatim objective + the project repo.
- *  2. Passes sandbox:true + requireSandbox:true + propose:true on every call
- *     (same safety invariant as advanceGoal).
- *  3. Requires --project; errors clearly (exit 2) when absent.
+ *  1. Skips milestone planning entirely and invokes runGoal exactly once with
+ *     the verbatim objective + sandboxEngine:true + requireSandbox:true (the
+ *     same frontier sandboxed path the daemon uses for non-builtin backends).
+ *  2. Requires --project; errors clearly (exit 2) when absent.
+ *  3. Correlates the proposal via listProposals (origin:'agent', repo, newly-
+ *     filed) — the same pattern as findProposalForSwarm in advance.ts.
  *  4. Leaves the default (no --direct) path unchanged — it still creates a goal,
  *     plans milestones, and advances via cmdGoals.
  *
- * Everything outward (runSwarm, assertMayMutate, inbox, config, cmdGoals,
- * listGoals store) is MOCKED — no real ~/.ashlr, no real swarm ever runs.
+ * Everything outward (runGoal, routeBackend, assertMayMutate, inbox, config,
+ * cmdGoals, listGoals store) is MOCKED — no real ~/.ashlr, no real engine runs.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { AshlrConfig, SwarmRun } from '../src/core/types.js';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import type { AshlrConfig } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
 // Mocks — declared BEFORE the module-under-test is imported.
 // ---------------------------------------------------------------------------
 
-const mockRunSwarm = vi.fn();
+const mockRunGoal = vi.fn();
+const mockRouteBackend = vi.fn();
 const mockAssertMayMutate = vi.fn();
 const mockListProposals = vi.fn();
 const mockLoadConfig = vi.fn();
 const mockCmdGoals = vi.fn();
 const mockListGoals = vi.fn();
 
-vi.mock('../src/core/swarm/runner.js', () => ({
-  runSwarm: (...args: unknown[]) => mockRunSwarm(...args),
+vi.mock('../src/core/run/orchestrator.js', () => ({
+  runGoal: (...args: unknown[]) => mockRunGoal(...args),
+}));
+
+vi.mock('../src/core/fleet/router.js', () => ({
+  routeBackend: (...args: unknown[]) => mockRouteBackend(...args),
 }));
 
 vi.mock('../src/core/sandbox/policy.js', () => ({
@@ -76,33 +82,12 @@ function makeCfg(): AshlrConfig {
   return { version: 1 } as AshlrConfig;
 }
 
-function makeSwarmRun(overrides: Partial<SwarmRun> = {}): SwarmRun {
-  const now = new Date().toISOString();
-  return {
-    id: 'swarm-direct-1',
-    goal: 'create docs/FOO.md with one line',
-    specId: null,
-    project: '/tmp/enrolled-repo',
-    createdAt: now,
-    updatedAt: now,
-    budget: { maxTokens: 200_000, maxSteps: 40, allowCloud: false },
-    usage: { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
-    parallel: 1,
-    status: 'done',
-    plan: { tasks: [] } as unknown as SwarmRun['plan'],
-    tasks: [],
-    ...overrides,
-  };
+function makeRunState(id = 'run-direct-1') {
+  return { id, status: 'done' };
 }
 
-function makeProposal(swarmId = 'swarm-direct-1') {
-  return {
-    id: 'prop-direct-1',
-    origin: 'swarm',
-    repo: '/tmp/enrolled-repo',
-    summary: `Autonomous swarm proposal (swarm=${swarmId}, status=done)`,
-    status: 'pending',
-  };
+function makeProposal(id = 'prop-direct-1', repo = '/tmp/enrolled-repo') {
+  return { id, origin: 'agent', repo, status: 'pending' };
 }
 
 // Suppress console.log noise in tests.
@@ -114,7 +99,8 @@ beforeEach(() => {
   console.error = vi.fn();
   process.stderr.write = vi.fn() as typeof process.stderr.write;
 
-  mockRunSwarm.mockReset();
+  mockRunGoal.mockReset();
+  mockRouteBackend.mockReset();
   mockAssertMayMutate.mockReset();
   mockListProposals.mockReset();
   mockLoadConfig.mockReset();
@@ -124,7 +110,13 @@ beforeEach(() => {
   // Sensible defaults.
   mockAssertMayMutate.mockImplementation(() => { /* enrolled, allowed */ });
   mockLoadConfig.mockReturnValue(makeCfg());
-  mockListProposals.mockReturnValue([]);
+  mockRouteBackend.mockReturnValue({ backend: 'codex', tier: 'frontier', reason: 'frontier-first' });
+  mockRunGoal.mockResolvedValue(makeRunState());
+  // First call (pendingBefore snapshot) returns []; second call (post-run) returns [proposal].
+  mockListProposals
+    .mockReturnValueOnce([])
+    .mockReturnValue([makeProposal()]);
+
   // Default-path: cmdGoals always succeeds; listGoals returns a goal so the
   // conductor can resolve it after creation.
   mockCmdGoals.mockResolvedValue(0);
@@ -142,7 +134,6 @@ beforeEach(() => {
 });
 
 // Restore after suite.
-import { afterAll } from 'vitest';
 afterAll(() => {
   console.log = originalLog;
   console.error = originalError;
@@ -153,11 +144,8 @@ afterAll(() => {
 // --direct: single run, verbatim objective.
 // ---------------------------------------------------------------------------
 
-describe('cmdGoal --direct — invokes runSwarm once with the verbatim objective', () => {
-  it('calls runSwarm exactly once with sandbox:true + requireSandbox:true + propose:true', async () => {
-    mockRunSwarm.mockResolvedValue(makeSwarmRun());
-    mockListProposals.mockReturnValue([makeProposal()]);
-
+describe('cmdGoal --direct — invokes runGoal once with the verbatim objective', () => {
+  it('calls runGoal exactly once with sandboxEngine:true + requireSandbox:true', async () => {
     const rc = await cmdGoal([
       'create docs/FOO.md with one line',
       '--project', '/tmp/enrolled-repo',
@@ -165,45 +153,34 @@ describe('cmdGoal --direct — invokes runSwarm once with the verbatim objective
     ]);
 
     expect(rc).toBe(0);
-    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
 
-    const opts = mockRunSwarm.mock.calls[0]![2] as Record<string, unknown>;
-    expect(opts.sandbox).toBe(true);
+    const opts = mockRunGoal.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts.sandboxEngine).toBe(true);
     expect(opts.requireSandbox).toBe(true);
-    expect(opts.propose).toBe(true);
   });
 
   it('passes the verbatim objective as the goal string (not a decomposed milestone title)', async () => {
-    mockRunSwarm.mockResolvedValue(makeSwarmRun());
-    mockListProposals.mockReturnValue([makeProposal()]);
-
     const objective = 'create docs/FOO.md with one line';
     await cmdGoal([objective, '--project', '/tmp/enrolled-repo', '--direct']);
 
-    const input = mockRunSwarm.mock.calls[0]![0] as { goal: string };
-    expect(input.goal).toBe(objective);
+    const goalArg = mockRunGoal.mock.calls[0]![0] as string;
+    expect(goalArg).toBe(objective);
   });
 
-  it('resolves the project path and passes it as the swarm project', async () => {
-    mockRunSwarm.mockResolvedValue(makeSwarmRun());
-    mockListProposals.mockReturnValue([makeProposal()]);
-
+  it('resolves the project path and passes it as cwd', async () => {
     await cmdGoal([
       'create docs/FOO.md with one line',
       '--project', '/tmp/enrolled-repo',
       '--direct',
     ]);
 
-    const opts = mockRunSwarm.mock.calls[0]![2] as Record<string, unknown>;
-    // resolve('/tmp/enrolled-repo') === '/tmp/enrolled-repo' on POSIX.
-    expect(typeof opts.project).toBe('string');
-    expect((opts.project as string).endsWith('enrolled-repo')).toBe(true);
+    const opts = mockRunGoal.mock.calls[0]![2] as Record<string, unknown>;
+    expect(typeof opts.cwd).toBe('string');
+    expect((opts.cwd as string).endsWith('enrolled-repo')).toBe(true);
   });
 
   it('skips milestone planning — cmdGoals is never called', async () => {
-    mockRunSwarm.mockResolvedValue(makeSwarmRun());
-    mockListProposals.mockReturnValue([makeProposal()]);
-
     await cmdGoal([
       'create docs/FOO.md with one line',
       '--project', '/tmp/enrolled-repo',
@@ -213,10 +190,21 @@ describe('cmdGoal --direct — invokes runSwarm once with the verbatim objective
     expect(mockCmdGoals).not.toHaveBeenCalled();
   });
 
-  it('honors --allow-cloud: propagates it to runSwarm budget + opts', async () => {
-    mockRunSwarm.mockResolvedValue(makeSwarmRun());
-    mockListProposals.mockReturnValue([makeProposal()]);
+  it('routes via routeBackend and passes the chosen backend as engine', async () => {
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'frontier-first' });
+    mockListProposals.mockReturnValueOnce([]).mockReturnValue([makeProposal()]);
 
+    await cmdGoal([
+      'create docs/FOO.md with one line',
+      '--project', '/tmp/enrolled-repo',
+      '--direct',
+    ]);
+
+    const opts = mockRunGoal.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts.engine).toBe('claude');
+  });
+
+  it('honors --allow-cloud: propagates it to the runGoal budget', async () => {
     await cmdGoal([
       'create docs/FOO.md with one line',
       '--project', '/tmp/enrolled-repo',
@@ -224,16 +212,14 @@ describe('cmdGoal --direct — invokes runSwarm once with the verbatim objective
       '--allow-cloud',
     ]);
 
-    const opts = mockRunSwarm.mock.calls[0]![2] as Record<string, unknown>;
-    expect(opts.allowCloud).toBe(true);
+    const opts = mockRunGoal.mock.calls[0]![2] as Record<string, unknown>;
     const budget = opts.budget as { allowCloud: boolean };
     expect(budget.allowCloud).toBe(true);
   });
 
-  it('returns exit 0 and surfaces the proposal id when a PENDING proposal is found', async () => {
-    mockRunSwarm.mockResolvedValue(makeSwarmRun({ id: 'swarm-x' }));
-    mockListProposals.mockReturnValue([makeProposal('swarm-x')]);
-
+  it('returns exit 0 when a new PENDING agent proposal is found after the run', async () => {
+    // beforeEach default: first listProposals call returns [] (pendingBefore snapshot),
+    // second call returns [makeProposal()] (post-run) — a new agent proposal for the repo.
     const rc = await cmdGoal([
       'create docs/FOO.md with one line',
       '--project', '/tmp/enrolled-repo',
@@ -243,8 +229,8 @@ describe('cmdGoal --direct — invokes runSwarm once with the verbatim objective
     expect(rc).toBe(0);
   });
 
-  it('returns exit 1 when no PENDING proposal is produced', async () => {
-    mockRunSwarm.mockResolvedValue(makeSwarmRun({ status: 'failed' }));
+  it('returns exit 1 when no new PENDING proposal is found (engine produced no diff)', async () => {
+    // Both calls return the same empty list — no new proposals.
     mockListProposals.mockReturnValue([]);
 
     const rc = await cmdGoal([
@@ -256,11 +242,10 @@ describe('cmdGoal --direct — invokes runSwarm once with the verbatim objective
     expect(rc).toBe(1);
   });
 
-  it('checks assertMayMutate BEFORE runSwarm (enrollment gate is respected)', async () => {
+  it('checks assertMayMutate BEFORE runGoal (enrollment gate is respected)', async () => {
     const order: string[] = [];
     mockAssertMayMutate.mockImplementation(() => { order.push('gate'); });
-    mockRunSwarm.mockImplementation(async () => { order.push('swarm'); return makeSwarmRun(); });
-    mockListProposals.mockReturnValue([makeProposal()]);
+    mockRunGoal.mockImplementation(async () => { order.push('run'); return makeRunState(); });
 
     await cmdGoal([
       'create docs/FOO.md with one line',
@@ -268,7 +253,7 @@ describe('cmdGoal --direct — invokes runSwarm once with the verbatim objective
       '--direct',
     ]);
 
-    expect(order).toEqual(['gate', 'swarm']);
+    expect(order).toEqual(['gate', 'run']);
   });
 
   it('returns exit 1 when assertMayMutate throws (non-enrolled repo)', async () => {
@@ -283,7 +268,7 @@ describe('cmdGoal --direct — invokes runSwarm once with the verbatim objective
     ]);
 
     expect(rc).toBe(1);
-    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(mockRunGoal).not.toHaveBeenCalled();
   });
 });
 
@@ -296,7 +281,7 @@ describe('cmdGoal --direct — requires --project', () => {
     const rc = await cmdGoal(['create docs/FOO.md with one line', '--direct']);
 
     expect(rc).toBe(2);
-    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(mockRunGoal).not.toHaveBeenCalled();
   });
 
   it('error message mentions --project', async () => {
@@ -313,14 +298,14 @@ describe('cmdGoal --direct — requires --project', () => {
 // ---------------------------------------------------------------------------
 
 describe('cmdGoal default (no --direct) — milestone planning still runs', () => {
-  it('calls cmdGoals for add + plan + advance (no runSwarm directly)', async () => {
+  it('calls cmdGoals for add + plan + advance (no runGoal directly)', async () => {
     const rc = await cmdGoal(['build something', '--project', '/tmp/enrolled-repo']);
 
     expect(rc).toBe(0);
     // cmdGoals is called at least 3 times: add, plan, advance.
     expect(mockCmdGoals).toHaveBeenCalledTimes(3);
-    // runSwarm is NEVER called directly from cmdGoal on the default path.
-    expect(mockRunSwarm).not.toHaveBeenCalled();
+    // runGoal is NEVER called directly from cmdGoal on the default path.
+    expect(mockRunGoal).not.toHaveBeenCalled();
   });
 
   it('calls cmdGoals("add", ...) first', async () => {
@@ -352,13 +337,13 @@ describe('cmdGoal default (no --direct) — milestone planning still runs', () =
 describe('cmdGoal early-return paths (regression)', () => {
   it('returns 2 when no objective given', async () => {
     expect(await cmdGoal([])).toBe(2);
-    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(mockRunGoal).not.toHaveBeenCalled();
     expect(mockCmdGoals).not.toHaveBeenCalled();
   });
 
   it('returns 0 for --help', async () => {
     expect(await cmdGoal(['--help'])).toBe(0);
-    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(mockRunGoal).not.toHaveBeenCalled();
     expect(mockCmdGoals).not.toHaveBeenCalled();
   });
 });
@@ -392,14 +377,19 @@ describe('goal.ts source-level safety guard (M84)', () => {
     });
   }
 
-  it('every runSwarm( call in goal.ts sets sandbox:true AND requireSandbox:true AND propose:true', () => {
-    const calls = GOAL_SRC.match(/runSwarm\s*\(([\s\S]*?)\)\s*;/g) ?? [];
-    const realCalls = calls.filter((c) => /sandbox/.test(c));
+  it('every runGoal( call in goal.ts uses sandboxEngine:true AND requireSandbox:true', () => {
+    const calls = GOAL_SRC.match(/runGoal\s*\(([\s\S]*?)\}\s*\)/g) ?? [];
+    const realCalls = calls.filter((c) => /sandboxEngine/.test(c));
     expect(realCalls.length).toBeGreaterThanOrEqual(1);
     for (const call of realCalls) {
-      expect(call).toMatch(/sandbox:\s*true/);
+      expect(call).toMatch(/sandboxEngine:\s*true/);
       expect(call).toMatch(/requireSandbox:\s*true/);
-      expect(call).toMatch(/propose:\s*true/);
     }
+  });
+
+  it('goal.ts does not call runSwarm directly', () => {
+    // runSwarm is the builtin path that hard-forces engine:'builtin' and
+    // produces 0-diff proposals. --direct must NOT use it.
+    expect(GOAL_SRC).not.toMatch(/\brunSwarm\s*\(/);
   });
 });
