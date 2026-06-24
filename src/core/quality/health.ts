@@ -93,6 +93,7 @@ const SOURCE_TO_DIMENSION: Record<WorkSource, HealthDimension> = {
   doc: 'docs',
   security: 'security',
   plugin: 'codeDebt', // M33: plugin items map to codeDebt dimension (best-fit)
+  lint: 'codeDebt',  // M101: lint errors roll into code-debt
 };
 
 /**

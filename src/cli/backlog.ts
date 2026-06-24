@@ -7,7 +7,7 @@
  *
  * Flags:
  *   --repo <path>        Filter items to a specific enrolled repo.
- *   --source <source>    Filter by WorkSource (issue|todo|test|dep|doc|security).
+ *   --source <source>    Filter by WorkSource (issue|todo|test|dep|doc|security|lint).
  *   --limit <n>          Cap the number of rows shown.
  *   --json               Emit raw JSON (the full filtered Backlog object).
  *
@@ -68,6 +68,7 @@ const SOURCE_LABELS: Record<WorkSource, string> = {
   security: 'security',
   plugin:   'plugin', // M33
   self:     'self',   // M54
+  lint:     'lint',   // M101
 };
 
 const SOURCE_COLORS: Record<WorkSource, keyof ReturnType<typeof makeColors>> = {
@@ -79,6 +80,7 @@ const SOURCE_COLORS: Record<WorkSource, keyof ReturnType<typeof makeColors>> = {
   self:     'green', // M54
   security: 'red',
   plugin:   'cyan', // M33
+  lint:     'yellow', // M101
 };
 
 /** Shorten an absolute repo path: replace $HOME with ~, truncate if long. */

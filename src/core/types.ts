@@ -1905,7 +1905,7 @@ export interface Enrollment {
  */
 
 /** The kind of source a WorkItem was derived from. */
-export type WorkSource = 'issue' | 'todo' | 'test' | 'dep' | 'doc' | 'security' | 'plugin' | 'self'; // M33: 'plugin'; M54: 'self' (the fleet's own backlog) — both additive
+export type WorkSource = 'issue' | 'todo' | 'test' | 'dep' | 'doc' | 'security' | 'plugin' | 'self' | 'lint'; // M33: 'plugin'; M54: 'self' (the fleet's own backlog); M101: 'lint' (cached lint report) — all additive
 
 /**
  * A single discovered, scored unit of work. Produced by a scanner over a

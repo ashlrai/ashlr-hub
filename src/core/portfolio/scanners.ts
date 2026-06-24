@@ -1052,7 +1052,157 @@ export async function scanSelfImprove(repo: string): Promise<WorkItem[]> {
   return items.slice(0, 50);
 }
 
-// SCANNERS — all seven, exported as a ReadonlyArray
+// ---------------------------------------------------------------------------
+// scanLint — M101: surface auto-fixable lint errors from a CACHED report.
+//
+// Bounding strategy (CRITICAL — must never block a tick):
+//   1. CACHE-FIRST: only reads a pre-existing cached lint report file; NEVER
+//      runs a live lint command on every scan.
+//   2. GATE: bails immediately when no lint script exists in package.json.
+//   3. CAP: emits at most MAX_LINT_ITEMS items per scan.
+//
+// Supported cache file names (checked in order, repo root):
+//   .lint-cache.json  |  .eslintcache.json  |  lint-results.json  |  eslint-report.json
+//
+// Expected format: ESLint JSON reporter output —
+//   Array<{ filePath, messages: Array<{ ruleId, severity, message, line, column, fix? }> }>
+//   Only severity-2 (error) messages with a `fix` property OR a well-known
+//   auto-fixable rule are surfaced (avoids deep-semantic errors a fleet engine
+//   cannot reliably patch).
+//
+// Item framing: "Fix the <rule> lint error at <file>:<line>: <message>"
+// — single-concern; an engine can run `eslint --fix <file>` or patch one line.
+// ---------------------------------------------------------------------------
+
+const MAX_LINT_ITEMS = 5;
+
+/** Cached lint report file names tried in order (repo root). */
+const LINT_CACHE_NAMES = [
+  '.lint-cache.json',
+  '.eslintcache.json',
+  'lint-results.json',
+  'eslint-report.json',
+];
+
+/** Shape of one message entry in an ESLint JSON report. */
+interface LintMessage {
+  ruleId?: string | null;
+  severity?: number;
+  message?: string;
+  line?: number;
+  column?: number;
+  fix?: unknown;
+}
+
+/** Shape of one file entry in an ESLint JSON report. */
+interface LintFileResult {
+  filePath?: string;
+  messages?: LintMessage[];
+}
+
+/** Parse a cached ESLint JSON report. Returns file-result array or null. */
+function parseLintCache(cachePath: string): LintFileResult[] | null {
+  try {
+    if (!existsSync(cachePath)) return null;
+    const raw = readFileSync(cachePath, 'utf8');
+    if (!raw || raw.trim() === '') return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    return parsed as LintFileResult[];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Well-known ESLint rules that eslint --fix handles automatically.
+ * Used as a fallback when `fix` metadata is absent from the cached report.
+ */
+const FIXABLE_RULE_RE =
+  /^(no-unused-vars|prefer-const|eqeqeq|semi|quotes|comma-dangle|no-trailing-spaces|eol-last|no-extra-semi|no-multiple-empty-lines|space-before-blocks|keyword-spacing|arrow-spacing|@typescript-eslint\/no-unused-vars|@typescript-eslint\/prefer-const|import\/order|unused-imports\/no-unused-imports)$/;
+
+export async function scanLint(repo: string): Promise<WorkItem[]> {
+  try {
+    // GATE: require a lint script in package.json — no lint script → skip.
+    const pkgPath = join(repo, 'package.json');
+    if (!existsSync(pkgPath)) return [];
+    try {
+      const raw = readFileSync(pkgPath, 'utf8');
+      const pkg = JSON.parse(raw) as Record<string, unknown>;
+      const scripts = pkg['scripts'];
+      if (
+        scripts === null ||
+        typeof scripts !== 'object' ||
+        Array.isArray(scripts)
+      ) return [];
+      const s = scripts as Record<string, unknown>;
+      if (typeof s['lint'] !== 'string' || s['lint'].trim() === '') return [];
+    } catch {
+      return [];
+    }
+
+    // CACHE-FIRST: look for a pre-existing lint report — do NOT run lint live.
+    let results: LintFileResult[] | null = null;
+    for (const name of LINT_CACHE_NAMES) {
+      results = parseLintCache(join(repo, name));
+      if (results !== null) break;
+    }
+    if (results === null) return []; // no cached report → nothing to surface
+
+    // Extract fixable errors (severity 2 only) up to MAX_LINT_ITEMS.
+    const items: WorkItem[] = [];
+    for (const fileResult of results) {
+      if (items.length >= MAX_LINT_ITEMS) break;
+      if (!fileResult || typeof fileResult !== 'object') continue;
+      const filePath = typeof fileResult.filePath === 'string' ? fileResult.filePath : '';
+      if (!filePath) continue;
+
+      // Repo-relative display path
+      const displayPath = filePath.startsWith(repo)
+        ? filePath.slice(repo.length).replace(/^\//, '')
+        : filePath;
+
+      const messages = Array.isArray(fileResult.messages) ? fileResult.messages : [];
+      for (const msg of messages) {
+        if (items.length >= MAX_LINT_ITEMS) break;
+        if (!msg || typeof msg !== 'object') continue;
+        if (msg.severity !== 2) continue; // errors only
+
+        const rule = typeof msg.ruleId === 'string' && msg.ruleId ? msg.ruleId : 'lint-error';
+        const text = typeof msg.message === 'string' ? msg.message.slice(0, 160) : 'lint error';
+        const line = typeof msg.line === 'number' ? msg.line : 0;
+        const col = typeof msg.column === 'number' ? msg.column : 0;
+        const lineRef = line > 0 ? `:${line}${col > 0 ? `:${col}` : ''}` : '';
+
+        // Only surface when the error has auto-fix metadata OR matches a known fixable rule
+        const isFixable = (msg.fix !== undefined && msg.fix !== null) || FIXABLE_RULE_RE.test(rule);
+        if (!isFixable) continue;
+
+        items.push(
+          makeItem(
+            repo,
+            'lint',
+            `lint:${displayPath}:${line}:${rule}`,
+            `Fix the ${rule} lint error at ${displayPath}${lineRef}`,
+            `Lint error in ${displayPath}${lineRef}: [${rule}] ${text}. ` +
+              `Run \`eslint --fix ${displayPath}\` or manually remove the ${rule} violation ` +
+              `at line ${line > 0 ? String(line) : '(see file)'}. ` +
+              `Do not touch unrelated code.`,
+            2,
+            1,
+            ['lint', rule, 'auto-fixable'],
+          ),
+        );
+      }
+    }
+
+    return items;
+  } catch {
+    return [];
+  }
+}
+
+// SCANNERS — all eight, exported as a ReadonlyArray
 // ---------------------------------------------------------------------------
 
 export const SCANNERS: ReadonlyArray<(repo: string) => Promise<WorkItem[]>> = [
@@ -1063,4 +1213,5 @@ export const SCANNERS: ReadonlyArray<(repo: string) => Promise<WorkItem[]>> = [
   scanDocs,
   scanSecurity,
   scanSelfImprove, // M54: the fleet's own backlog (self-gated to @ashlr/hub)
+  scanLint,        // M101: cached-report lint errors → concrete auto-fixable items
 ] as const;
