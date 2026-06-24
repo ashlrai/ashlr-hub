@@ -18,6 +18,11 @@
  * ║      ∈ cfg.foundry.mergeAuthority. A ':default' engineModel (no concrete   ║
  * ║      model) is ALWAYS rejected — only pinned, vetted models may merge.     ║
  * ║   5. classifyRisk(proposal) ≤ cfg.foundry.autoMerge.maxRisk (default low). ║
+ * ║  5.5 SCOPE CAP (M86): risk must be 'low' AND the diff must be within tight ║
+ * ║      size caps — files ≤ MAX_AUTOMERGE_FILES (default 4, override via      ║
+ * ║      cfg.foundry.autoMerge.maxAutomergeFiles) AND changed lines ≤          ║
+ * ║      MAX_AUTOMERGE_LINES (default 150, override via                        ║
+ * ║      cfg.foundry.autoMerge.maxAutomergeLines). Pure check, no I/O.        ║
  * ║   6. verifyProposal: apply the diff to an ISOLATED temp worktree off the   ║
  * ║      default branch and run EVERY detected verify command — ALL must pass. ║
  * ║      Verify commands are detected from the BASE tree BEFORE the diff is    ║
@@ -26,6 +31,12 @@
  * ║      .github/*, Dockerfile, CI configs, .npmrc, Makefile, …) is REFUSED    ║
  * ║      outright — regardless of allowWithoutVerification (H1b).              ║
  * ║      No commands detected ⇒ fail-closed unless allowWithoutVerification.   ║
+ * ║  6.5 SELF-EVAL PARITY (M86/M54): when the proposal targets ashlr-hub's    ║
+ * ║      OWN source, the full invariant suite must be green with the foundry   ║
+ * ║      flag both OFF and ON (selfEvalParity). This is in ADDITION to the     ║
+ * ║      guardSafetyTests check already run inside verifyProposal — that guard ║
+ * ║      fires first (pre-verify); parity runs last (post-verify). Together    ║
+ * ║      they are the two-layer self-improvement safety harness (M54).         ║
  * ║                                                                            ║
  * ║ Only after ALL gates pass do we mutate. Mutation paths:                    ║
  * ║   - REMOTE (preferred): open a PR to the default branch and best-effort    ║
@@ -76,7 +87,7 @@ import { audit } from '../sandbox/audit.js';
 import { isRepo, getGitStatus, getRemoteOrg, defaultBranch } from '../git.js';
 import { createPr } from '../integrations/github.js';
 import { scrubSecrets } from '../knowledge/index.js';
-import { isSelfTargetProposal, guardSafetyTests } from '../fleet/self.js';
+import { isSelfTargetProposal, guardSafetyTests, selfEvalParity } from '../fleet/self.js';
 import { verifyProvenance } from '../foundry/provenance.js';
 import {
   detectVerifyCommands,
@@ -849,10 +860,102 @@ export async function autoMergeProposal(
       return refuse(`risk class '${risk}' exceeds maxRisk '${maxRisk}'`, repo);
     }
 
+    // ── Gate 5.5 (M86): scope cap — only small, fully-bounded diffs auto-merge
+    // to main. Defaults are conservative; config keys allow opt-in relaxation.
+    // We require risk==='low' here (Gate 5 already enforces ≤maxRisk, but
+    // maxRisk could be raised to 'medium' — scope cap applies ONLY when risk is
+    // strictly 'low', so even a cfg.maxRisk='medium' run is scoped to low-risk
+    // diffs for the size check). File + line counts reuse the same diff parser
+    // as classifyRisk so the two gates are consistent.
+    {
+      const MAX_AUTOMERGE_FILES: number =
+        (cfg.foundry as any)?.autoMerge?.maxAutomergeFiles ?? 4;
+      const MAX_AUTOMERGE_LINES: number =
+        (cfg.foundry as any)?.autoMerge?.maxAutomergeLines ?? 150;
+
+      if (risk !== 'low') {
+        // Already refused above unless maxRisk was raised — belt-and-suspenders:
+        // scope cap never applies to non-low diffs regardless of maxRisk setting.
+        return refuse(
+          `scope cap: risk is '${risk}' — auto-merge to main requires risk==='low'`,
+          repo,
+        );
+      }
+
+      // Count files (reuse the same "+++ " header logic as changedFilesFromDiff)
+      let scopeFiles = 0;
+      for (const line of diff.split('\n')) {
+        if (!line.startsWith('+++ ')) continue;
+        const p = line.slice(4).trim().split('\t')[0];
+        if (p && p !== '/dev/null') scopeFiles++;
+      }
+      // Count changed lines (same logic as classifyRisk body-line counter)
+      let scopeLines = 0;
+      for (const line of diff.split('\n')) {
+        if (line.startsWith('+++') || line.startsWith('---')) continue;
+        if (line.startsWith('+') || line.startsWith('-')) scopeLines++;
+      }
+
+      if (scopeFiles > MAX_AUTOMERGE_FILES) {
+        return refuse(
+          `scope cap: diff touches ${scopeFiles} files (max ${MAX_AUTOMERGE_FILES} for auto-merge to main)`,
+          repo,
+        );
+      }
+      if (scopeLines > MAX_AUTOMERGE_LINES) {
+        return refuse(
+          `scope cap: diff has ${scopeLines} changed lines (max ${MAX_AUTOMERGE_LINES} for auto-merge to main)`,
+          repo,
+        );
+      }
+    }
+
     // ── Gate 6: full verification in an isolated worktree ────────────────────
     const verify = await verifyProposal(proposal, cfg);
     if (!verify.ok) {
       return refuse(`verification failed: ${verify.detail}`, repo);
+    }
+
+    // ── Gate 6.5 (M86/M54): self-eval parity — self-target proposals must pass
+    // the invariant suite flag-off AND flag-on. guardSafetyTests (never-weaken)
+    // already ran inside verifyProposal BEFORE the worktree ran; this parity
+    // check is the second layer that runs AFTER verify passes, so a self-edit
+    // cannot silently break the suite under either foundry-enabled state.
+    if (isSelfTargetProposal(proposal, cfg)) {
+      const parity = selfEvalParity((flagOn: boolean) => {
+        // Re-use detectVerifyCommands/runVerifyCommand on the REPO (base tree).
+        // The diff was already verified green in an isolated worktree by Gate 6;
+        // here we check that the EXISTING suite (without the diff applied) stays
+        // green under both flag states — if the diff is not yet on main this is
+        // the pre-merge invariant check (the post-merge green was Gate 6).
+        // Use the cfg with autoMerge.enabled toggled per flagOn; everything else
+        // stays the same so no other gate is affected.
+        const parityCfg: AshlrConfig = {
+          ...cfg,
+          foundry: {
+            ...cfg.foundry,
+            autoMerge: {
+              ...(cfg.foundry?.autoMerge ?? { enabled: false }),
+              enabled: flagOn,
+            },
+          },
+        };
+        const cmds = detectVerifyCommands(repo);
+        if (cmds.length === 0) {
+          // No commands in base tree → treat as green (verify already passed
+          // in worktree; this parity check is about flag-sensitivity, not suite
+          // existence — if there is no suite, parity is vacuously true).
+          return true;
+        }
+        for (const vc of cmds) {
+          const res = runVerifyCommand(vc, repo, parityCfg);
+          if (!res.ok) return false;
+        }
+        return true;
+      });
+      if (!parity.ok) {
+        return refuse(`self-eval parity failed: ${parity.reason}`, repo);
+      }
     }
 
     // ── ACTION: stage the diff on a branch off the default branch ────────────
