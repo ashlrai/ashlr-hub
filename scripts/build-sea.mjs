@@ -114,10 +114,13 @@ console.log(`[build-sea] Compiling → ${outBin} …`);
 const result = spawnSync(
   BUN,
   ['build', '--compile', entry, '--outfile', outBin],
-  { cwd: repoRoot, stdio: 'inherit' },
+  { cwd: repoRoot, encoding: 'utf8' },
 );
+if (result.stdout) process.stdout.write(result.stdout);
 if (result.status !== 0) {
-  console.error('[build-sea] bun build --compile failed.');
+  console.error(`[build-sea] bun build --compile failed (exit ${result.status}).`);
+  if (result.stderr) console.error('[build-sea] bun stderr:\n' + result.stderr);
+  if (result.error) console.error('[build-sea] spawn error:', result.error);
   process.exit(result.status ?? 1);
 }
 

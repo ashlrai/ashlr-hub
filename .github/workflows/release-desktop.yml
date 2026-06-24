@@ -160,6 +160,11 @@ jobs:
         working-directory: desktop
         run: bunx @tauri-apps/cli@^2 icon src-tauri/icons/icon.svg
 
+      # ── Install desktop deps so `npm run tauri build` resolves @tauri-apps/cli ─
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: bun install
+
       # ── macOS code-signing setup (skipped if secrets absent) ─────────────────
       # If you don't set APPLE_CERTIFICATE the build produces an unsigned DMG.
       - name: Import Apple signing certificate
