@@ -230,6 +230,10 @@ function describeApplyAction(p: Proposal): string {
       return `run the gated ship/deploy path for ${shortRepo(p.repo)}`;
     case 'note':
       return 'record a note (no-op, no repo mutation)';
+    case 'desktop-action':
+      return `open ${p.action?.target ?? shortRepo(p.repo)} in your ${p.action?.type?.replace('open-', '') ?? 'desktop'} (local, no repo mutation)`;
+    case 'browser-action':
+      return 'run a gated browser action (Phase 2b — not yet implemented)';
   }
 }
 

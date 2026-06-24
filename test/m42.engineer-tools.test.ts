@@ -557,9 +557,9 @@ describe('buildEngineerToolSpecs', () => {
 });
 
 describe('buildNativeToolSpecsWithFn', () => {
-  it('returns 11 specs each with a callable fn', () => {
+  it('returns 12 specs each with a callable fn', () => {
     const specs = buildNativeToolSpecsWithFn();
-    expect(specs).toHaveLength(11);
+    expect(specs).toHaveLength(12);
     for (const s of specs) {
       expect(typeof s.fn).toBe('function');
       expect(s.type).toBe('function');

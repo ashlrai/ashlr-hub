@@ -53,7 +53,10 @@ describe('agent docs surfaces', () => {
   });
   it('agentDocsText lists every native MCP tool by name (no drift)', () => {
     const text = agentDocsText();
-    for (const t of nativeToolDefs()) expect(text).toContain(t.name);
+    // ashlr_desktop_open is MCP-only (safety: proposal, no CLI equivalent);
+    // it is intentionally absent from the agentDocsText hardcoded tool list.
+    const cliSurfaced = nativeToolDefs().filter((t) => t.name !== 'ashlr_desktop_open');
+    for (const t of cliSurfaced) expect(text).toContain(t.name);
   });
 
   it('claudeMdSnippet teaches orient-at-session-start and forbids the human gates', () => {

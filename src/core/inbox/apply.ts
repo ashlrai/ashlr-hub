@@ -24,14 +24,15 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve, isAbsolute } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { ApplyResult } from '../types.js';
 import { loadProposal, setStatus } from './store.js';
-import { assertMayMutate } from '../sandbox/policy.js';
+import { assertMayMutate, listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
 import { isRepo } from '../git.js';
 import { createPr } from '../integrations/github.js';
+import { openInEditor, openInFinder, openInTerminal } from '../../cli/open.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -432,6 +433,80 @@ export async function applyProposal(
             detail: `deploy failed: ${err instanceof Error ? err.message : String(err)}`,
           };
         }
+        break;
+      }
+
+      case 'desktop-action': {
+        // ── Phase 2 gated desktop actions ─────────────────────────────────
+        // Requires: approved + confirmed + assertMayMutate (done above) +
+        // action payload present + action.target resolves within an enrolled repo.
+        const action = proposal.action;
+        if (!action) {
+          result = { ok: false, detail: 'desktop-action proposal missing action payload' };
+          break;
+        }
+
+        // Vocabulary guard — only the three safe, reversible action types.
+        const allowed = ['open-editor', 'open-finder', 'open-terminal'] as const;
+        if (!allowed.includes(action.type as (typeof allowed)[number])) {
+          result = {
+            ok: false,
+            detail: `desktop-action type '${action.type}' is not in the allowed vocabulary (open-editor | open-finder | open-terminal)`,
+          };
+          break;
+        }
+
+        // Target path must be absolute and must resolve within an enrolled repo.
+        const target = action.target;
+        if (!isAbsolute(target)) {
+          result = { ok: false, detail: `desktop-action target must be an absolute path; got: ${target}` };
+          break;
+        }
+
+        const normalTarget = resolve(target);
+        const enrolled = listEnrolled();
+        const withinEnrolled = enrolled.some((r) => {
+          const normalRepo = resolve(r);
+          return normalTarget === normalRepo || normalTarget.startsWith(normalRepo + '/');
+        });
+        if (!withinEnrolled) {
+          result = {
+            ok: false,
+            detail: `desktop-action target '${target}' does not resolve within any enrolled repo — refusing`,
+          };
+          break;
+        }
+
+        // Execute the UI action (fire-and-forget; open.ts never throws).
+        try {
+          if (action.type === 'open-editor') {
+            // openInEditor needs a cfg object; load a minimal one.
+            // We import loadConfig lazily to avoid coupling the apply path to
+            // config.ts module-load-time HOME capture in tests.
+            const { loadConfig } = await import('../config.js');
+            openInEditor(target, loadConfig());
+          } else if (action.type === 'open-finder') {
+            openInFinder(target);
+          } else {
+            openInTerminal(target);
+          }
+          result = { ok: true, detail: `desktop-action '${action.type}' dispatched for: ${target}` };
+        } catch (err) {
+          result = {
+            ok: false,
+            detail: `desktop-action dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+        break;
+      }
+
+      case 'browser-action': {
+        // TODO Phase 2b: Claude-in-Chrome via gateway
+        // Browser MCP is not reachable from the apply path; refuse cleanly.
+        result = {
+          ok: false,
+          detail: 'browser-action is not yet implemented (Phase 2b — Claude-in-Chrome via gateway)',
+        };
         break;
       }
 

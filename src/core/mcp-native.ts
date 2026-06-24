@@ -369,6 +369,85 @@ const TOOLS: NativeToolImpl[] = [
       };
     },
   },
+
+  // ── M103: Desktop-action proposal tool ─────────────────────────────────
+  {
+    name: 'ashlr_desktop_open',
+    description:
+      'Propose a desktop UI action (open a path in editor / Finder / terminal). ' +
+      'Creates a PENDING desktop-action proposal — NEVER executes directly. ' +
+      'The action runs only after the user explicitly approves via `ashlr inbox`. ' +
+      'Requires the repo to be enrolled and the kill switch to be off.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: {
+          type: 'string',
+          description: 'Absolute path of an enrolled repo. Required — target must reside within it.',
+        },
+        action_type: {
+          type: 'string',
+          enum: ['open-editor', 'open-finder', 'open-terminal'],
+          description: 'Which UI launcher to invoke.',
+        },
+        target: {
+          type: 'string',
+          description: 'Absolute path to open (must be within the enrolled repo).',
+        },
+        title: {
+          type: 'string',
+          description: 'Short title for the inbox list.',
+        },
+        summary: {
+          type: 'string',
+          description: 'Why this desktop action is being proposed (no secrets).',
+        },
+      },
+      required: ['repo', 'action_type', 'target', 'title', 'summary'],
+    },
+    safety: 'proposal',
+    handler: async (args, cfg) => {
+      // Vocabulary guard (belt-and-suspenders — JSON Schema enum already checked).
+      const actionType = String(args['action_type']);
+      const allowed = ['open-editor', 'open-finder', 'open-terminal'];
+      if (!allowed.includes(actionType)) {
+        return {
+          error: `invalid action_type "${actionType}" — must be one of: ${allowed.join(' | ')}`,
+        };
+      }
+
+      const repo = typeof args['repo'] === 'string' ? args['repo'] : null;
+      const target = typeof args['target'] === 'string' ? args['target'] : '';
+
+      // Enrollment check — refuse without creating a proposal.
+      const { isEnrolled } = await import('./sandbox/policy.js');
+      if (!repo || !isEnrolled(repo)) {
+        return {
+          error: `repo '${repo ?? '(none)'}' is not enrolled — enroll it first with \`ashlr enroll add <path>\``,
+        };
+      }
+
+      // Create a PENDING proposal — NEVER execute here.
+      const proposal = selectInboxStore(cfg).create({
+        repo,
+        origin: 'agent',
+        kind: 'desktop-action',
+        title: String(args['title']),
+        summary: String(args['summary']),
+        action: {
+          type: actionType as 'open-editor' | 'open-finder' | 'open-terminal',
+          target,
+        },
+      });
+
+      return {
+        created: true,
+        id: proposal.id,
+        status: 'pending',
+        note: 'Pending human approval — approve via `ashlr inbox` (CLI). The action will NOT execute until you approve it.',
+      };
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------

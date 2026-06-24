@@ -1950,12 +1950,14 @@ export interface Backlog {
 
 /**
  * M23: what kind of outward action a Proposal represents.
- *   'patch'  — a unified diff to be applied on a NEW branch in the target repo.
- *   'pr'     — a branch+commit then a gated `gh pr create` (the M18 createPr).
- *   'deploy' — the gated ship/deploy path.
- *   'note'   — a no-op record (decision/observation only; never mutates).
+ *   'patch'          — a unified diff to be applied on a NEW branch in the target repo.
+ *   'pr'             — a branch+commit then a gated `gh pr create` (the M18 createPr).
+ *   'deploy'         — the gated ship/deploy path.
+ *   'note'           — a no-op record (decision/observation only; never mutates).
+ *   'desktop-action' — open a path in the user's editor/finder/terminal (Phase 2).
+ *   'browser-action' — future Claude-in-Chrome gateway action (Phase 2b, not yet active).
  */
-export type ProposalKind = 'patch' | 'pr' | 'deploy' | 'note';
+export type ProposalKind = 'patch' | 'pr' | 'deploy' | 'note' | 'desktop-action' | 'browser-action';
 
 /**
  * M23: lifecycle of a Proposal through the approval inbox gate.
@@ -2020,6 +2022,24 @@ export interface Proposal {
   decidedAt?: string;
   /** Outcome detail recorded by applyProposal (branch name, PR url, error). */
   result?: string;
+  /**
+   * M103: payload for 'desktop-action' proposals. Carries the specific UI
+   * action to perform when the proposal is approved+applied.
+   *
+   * Vocabulary is intentionally narrow — safe, reversible, no arbitrary exec:
+   *   'open-editor'   — open `target` in the configured editor.
+   *   'open-finder'   — reveal `target` in Finder / Explorer.
+   *   'open-terminal' — open a terminal at `target`.
+   *
+   * `target` must be an absolute path within an enrolled repo (enforced at
+   * apply time). `params` is reserved for future sub-options (e.g. line number).
+   * NEVER present on other proposal kinds.
+   */
+  action?: {
+    type: 'open-editor' | 'open-finder' | 'open-terminal';
+    target: string;
+    params?: Record<string, unknown>;
+  };
 }
 
 /**
