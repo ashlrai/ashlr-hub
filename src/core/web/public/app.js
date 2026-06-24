@@ -24,7 +24,7 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-const VIEWS = ['control', 'overview', 'runs', 'swarms', 'pulse', 'genome', 'portfolio', 'inbox', 'daemon', 'fleet'];
+const VIEWS = ['control', 'fleet-activity', 'overview', 'runs', 'swarms', 'pulse', 'genome', 'portfolio', 'inbox', 'daemon', 'fleet'];
 const DEFAULT_VIEW = 'control';
 const API_BASE = '';  // same origin
 
@@ -67,6 +67,9 @@ const state = {
   fleet: null,              // M49: FleetStatus | null
   control: null,            // M61: GET /api/control composite view
   controlInterval: null,    // M61: 4s polling timer
+  fleetActivity: null,      // M90: GET /api/fleet-activity
+  fleetActivityInterval: null, // M90: polling timer
+  fleetActivityLoading: false,
   inboxBadge: 0,            // pending count from SSE, drives nav badge
   loading: {},   // viewName -> boolean
   error: {},     // viewName -> string | null
@@ -276,6 +279,16 @@ function connectSSE() {
         if (state.activeView === 'control') loadControl();
       } catch {}
     });
+    // M90: fleet-activity liveness ping — update tick indicator + refresh if on view
+    es.addEventListener('fleet-activity-ping', (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (state.fleetActivity) {
+          state.fleetActivity._ping = data;
+        }
+        if (state.activeView === 'fleet-activity') renderFleetActivity();
+      } catch {}
+    });
     es.addEventListener('error', () => {
       // Silently tolerate — browser will auto-reconnect or server is stopping
     });
@@ -328,6 +341,7 @@ async function onHashChange() {
 function renderActiveView() {
   const view = state.activeView;
   if (view === 'control') renderControl();
+  if (view === 'fleet-activity') renderFleetActivity();
   else if (view === 'overview') renderOverview();
   else if (view === 'runs') renderRuns();
   else if (view === 'swarms') renderSwarms();
@@ -345,7 +359,13 @@ async function loadView(view) {
     clearInterval(state.controlInterval);
     state.controlInterval = null;
   }
+  // Stop fleet-activity polling when navigating away
+  if (view !== 'fleet-activity' && state.fleetActivityInterval) {
+    clearInterval(state.fleetActivityInterval);
+    state.fleetActivityInterval = null;
+  }
   if (view === 'control') await loadControl();
+  else if (view === 'fleet-activity') await loadFleetActivity();
   else if (view === 'overview') await loadOverview();
   else if (view === 'runs') await loadRuns();
   else if (view === 'swarms') await loadSwarms();
@@ -397,7 +417,7 @@ function renderShell() {
     iconSvg.setAttribute('aria-hidden', 'true');
     iconSvg.innerHTML = VIEW_ICONS[v] ?? '';
 
-    const VIEW_LABELS = { control: 'Mission Control' };
+    const VIEW_LABELS = { control: 'Mission Control', 'fleet-activity': 'Fleet Activity' };
     const labelText = VIEW_LABELS[v] ?? (v.charAt(0).toUpperCase() + v.slice(1));
     const label = document.createTextNode(labelText);
     const a = el('a', { cls: `nav-link${v === 'control' ? ' nav-link--control' : ''}`, href: `#${v}`, 'data-view': v });
@@ -2437,6 +2457,257 @@ function controlMetric(label, value, accent) {
     el('div', { cls: 'ctrl-metric-value', style: `color:${accent}` }, String(value)),
     el('div', { cls: 'ctrl-metric-label' }, label)
   );
+}
+
+// ---------------------------------------------------------------------------
+// Fleet Activity (M90) — /api/fleet-activity live panel
+// ---------------------------------------------------------------------------
+
+async function loadFleetActivity() {
+  if (state.fleetActivityLoading) return;
+  state.fleetActivityLoading = true;
+  if (!state.fleetActivity) showLoading('fleet-activity');
+  try {
+    state.fleetActivity = await apiFetch('/api/fleet-activity');
+    renderFleetActivity();
+  } catch (err) {
+    if (!state.fleetActivity) showError('fleet-activity', err.message);
+  } finally {
+    state.fleetActivityLoading = false;
+  }
+
+  if (state.activeView === 'fleet-activity' && !state.fleetActivityInterval) {
+    state.fleetActivityInterval = setInterval(() => {
+      if (state.activeView !== 'fleet-activity') {
+        clearInterval(state.fleetActivityInterval);
+        state.fleetActivityInterval = null;
+        return;
+      }
+      loadFleetActivity();
+    }, 8000);
+  }
+}
+
+function renderFleetActivity() {
+  if (state.activeView !== 'fleet-activity') return;
+  const main = getMain();
+  if (!main) return;
+  const _scrollY = window.scrollY;
+  main.innerHTML = '';
+
+  const d = state.fleetActivity;
+  const section = el('section', { cls: 'view-section' });
+
+  section.appendChild(el('div', { cls: 'view-header' },
+    el('h1', { cls: 'view-title' }, 'Fleet Activity'),
+    el('span', { cls: 'view-subtitle' }, d ? `Updated ${fmtRelative(d.ts)}` : 'Live fleet monitoring')
+  ));
+
+  if (!d) {
+    section.appendChild(el('div', { cls: 'empty-state' },
+      el('p', {}, 'Fleet activity unavailable.'),
+      el('p', { cls: 'hint' }, 'Ensure the daemon is running.')
+    ));
+    main.appendChild(section);
+    window.scrollTo(0, _scrollY);
+    return;
+  }
+
+  // ── 1. Repo activity table ──────────────────────────────────────────────
+  const reposCard = el('div', { cls: 'fa-card card' });
+  reposCard.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Repo Activity (7d)'),
+    el('span', { cls: 'card-subtitle' },
+      `${d.totalProposed} proposed · ${d.totalAutoMerged} merged · ${d.totalPending} pending · ${d.totalDeclined} declined`
+    )
+  ));
+
+  const repos = Array.isArray(d.repos) ? d.repos : [];
+  if (repos.length === 0) {
+    reposCard.appendChild(el('p', { cls: 'hint fa-card-body' }, 'No repo activity in the last 7 days.'));
+  } else {
+    const wrap = el('div', { cls: 'table-wrap fa-card-body' });
+    const tbl = el('table');
+    tbl.appendChild(el('thead', {},
+      el('tr', {},
+        el('th', {}, 'Repo'),
+        el('th', {}, 'Proposed'),
+        el('th', {}, 'Merged'),
+        el('th', {}, 'Pending'),
+        el('th', {}, 'Declined'),
+      )
+    ));
+    const tbody = el('tbody');
+    for (const r of repos) {
+      const repoName = (r.repo ?? '(unscoped)').split('/').pop() || r.repo;
+      tbody.appendChild(el('tr', {},
+        el('td', { title: r.repo }, repoName),
+        el('td', {}, String(r.proposed ?? 0)),
+        el('td', { cls: r.autoMerged > 0 ? 'fa-cell-green' : '' }, String(r.autoMerged ?? 0)),
+        el('td', { cls: r.pending > 0 ? 'fa-cell-pending' : '' }, String(r.pending ?? 0)),
+        el('td', { cls: r.declined > 0 ? 'fa-cell-red' : '' }, String(r.declined ?? 0)),
+      ));
+    }
+    tbl.appendChild(tbody);
+    wrap.appendChild(tbl);
+    reposCard.appendChild(wrap);
+  }
+  section.appendChild(reposCard);
+
+  // ── 2. Engine readiness badges ─────────────────────────────────────────
+  const readinessCard = el('div', { cls: 'fa-card card' });
+  readinessCard.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Engine Readiness'),
+    el('span', { cls: 'card-subtitle' }, 'Installed · Authenticated · Ready')
+  ));
+  const readinessBody = el('div', { cls: 'fa-readiness-body fa-card-body' });
+  const engines = Array.isArray(d.engineReadiness) ? d.engineReadiness : [];
+  if (engines.length === 0) {
+    readinessBody.appendChild(el('p', { cls: 'hint' }, 'No engines configured.'));
+  } else {
+    for (const eng of engines) {
+      const ready = eng.ready;
+      const authed = eng.authed;
+      const rowCls = `fa-engine-row${ready ? ' fa-engine-ready' : ' fa-engine-notready'}`;
+      const statusCls = `fa-engine-dot${ready ? ' ready' : authed === 'unknown' ? ' warn' : ' fail'}`;
+      const row = el('div', { cls: rowCls },
+        el('span', { cls: statusCls, title: ready ? 'Ready' : eng.fix ?? eng.detail }),
+        el('span', { cls: 'fa-engine-id' }, eng.engine),
+        el('span', { cls: 'fa-engine-tier badge' }, eng.tier ?? ''),
+        el('span', { cls: 'fa-engine-detail' }, eng.detail ?? '')
+      );
+      if (!ready && eng.fix) {
+        row.appendChild(el('span', { cls: 'fa-engine-fix' }, `Fix: ${eng.fix}`));
+      }
+      readinessBody.appendChild(row);
+    }
+  }
+  readinessCard.appendChild(readinessBody);
+  section.appendChild(readinessCard);
+
+  // ── 3. Subscription burn-down bars ─────────────────────────────────────
+  const subUsageEngines = Array.isArray(d.subscriptionUsage) ? d.subscriptionUsage : [];
+  const subCard = el('div', { cls: 'fa-card card' });
+  subCard.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Subscription Burn-down'),
+    el('span', { cls: 'card-subtitle' }, 'Per-engine window usage')
+  ));
+  const subBody = el('div', { cls: 'fa-card-body' });
+  for (const eng of subUsageEngines) {
+    const planLabel = eng.plan ? ` (${eng.plan})` : '';
+    const engRow = el('div', { cls: 'ctrl-subusage-engine' });
+    engRow.appendChild(el('div', { cls: 'ctrl-subusage-engine-name' },
+      el('span', { cls: 'ctrl-subusage-engine-id' }, eng.engine),
+      el('span', { cls: 'ctrl-subusage-plan' }, planLabel)
+    ));
+    if (!eng.hasData || !Array.isArray(eng.windows) || eng.windows.length === 0) {
+      engRow.appendChild(el('p', { cls: 'ctrl-subusage-unknown' }, 'No local usage signal.'));
+    } else {
+      const barsWrap = el('div', { cls: 'ctrl-subusage-bars' });
+      for (const win of eng.windows) {
+        const pct = Math.min(100, Math.max(0, Math.round(win.usedPercent ?? 0)));
+        const barColor = pct >= 90 ? 'var(--status-failed)' : pct >= 70 ? 'var(--status-aborted)' : 'var(--status-done)';
+        const resetStr = win.resetsAt
+          ? new Date(win.resetsAt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          : null;
+        barsWrap.appendChild(el('div', { cls: 'ctrl-subusage-win-row' },
+          el('span', { cls: 'ctrl-subusage-win-label' }, win.label ?? '?'),
+          el('div', { cls: 'ctrl-subusage-bar-track' },
+            el('div', { cls: 'ctrl-subusage-bar', style: `width:${pct}%;background:${barColor}` })
+          ),
+          el('span', { cls: 'ctrl-subusage-pct', style: `color:${barColor}` }, `${pct}%`),
+          resetStr
+            ? el('span', { cls: 'ctrl-subusage-reset' }, `resets ${resetStr}`)
+            : el('span', { cls: 'ctrl-subusage-reset muted' }, 'reset unknown')
+        ));
+      }
+      engRow.appendChild(barsWrap);
+    }
+    subBody.appendChild(engRow);
+  }
+  if (subUsageEngines.length === 0) {
+    subBody.appendChild(el('p', { cls: 'hint' }, 'No subscription engines detected.'));
+  }
+  subCard.appendChild(subBody);
+  section.appendChild(subCard);
+
+  // ── 4. Recent auto-merge feed ──────────────────────────────────────────
+  const mergesCard = el('div', { cls: 'fa-card card' });
+  mergesCard.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Auto-Merge Feed'),
+    el('span', { cls: 'card-subtitle' }, `${(d.recentMerges ?? []).length} recent events`)
+  ));
+  const mergesBody = el('div', { cls: 'fa-feed fa-card-body' });
+  const merges = Array.isArray(d.recentMerges) ? d.recentMerges : [];
+  if (merges.length === 0) {
+    mergesBody.appendChild(el('p', { cls: 'hint' }, 'No auto-merge events recorded.'));
+  } else {
+    for (const m of merges) {
+      const repoName = m.repo ? m.repo.split('/').pop() || m.repo : '?';
+      mergesBody.appendChild(el('div', { cls: 'fa-feed-row' },
+        el('span', { cls: 'fa-feed-dot' }),
+        el('span', { cls: 'fa-feed-time' }, fmtRelative(m.ts)),
+        el('span', { cls: 'fa-feed-repo' }, repoName),
+        el('span', { cls: 'fa-feed-engine badge' }, m.engine ?? 'fleet'),
+        m.proposalId ? el('span', { cls: 'fa-feed-pid' }, m.proposalId.slice(0, 8)) : null
+      ));
+    }
+  }
+  mergesCard.appendChild(mergesBody);
+  section.appendChild(mergesCard);
+
+  // ── 5. Cooldown count + Live tick stream ───────────────────────────────
+  const statsRow = el('div', { cls: 'fa-stats-row' });
+
+  const coolCard = el('div', { cls: 'fa-card card fa-stat-mini' });
+  coolCard.appendChild(el('div', { cls: 'fa-stat-val' }, String(d.cooldownCount ?? 0)));
+  coolCard.appendChild(el('div', { cls: 'fa-stat-lbl' }, 'On cooldown'));
+  statsRow.appendChild(coolCard);
+
+  const pendCard = el('div', { cls: 'fa-card card fa-stat-mini' });
+  pendCard.appendChild(el('div', { cls: 'fa-stat-val' }, String(d.totalPending ?? 0)));
+  pendCard.appendChild(el('div', { cls: 'fa-stat-lbl' }, 'Pending proposals'));
+  statsRow.appendChild(pendCard);
+
+  const mergedCard = el('div', { cls: 'fa-card card fa-stat-mini' });
+  mergedCard.appendChild(el('div', { cls: 'fa-stat-val fa-stat-green' }, String(d.totalAutoMerged ?? 0)));
+  mergedCard.appendChild(el('div', { cls: 'fa-stat-lbl' }, 'Auto-merged (7d)'));
+  statsRow.appendChild(mergedCard);
+
+  section.appendChild(statsRow);
+
+  // ── 6. Live tick stream ────────────────────────────────────────────────
+  const ticksCard = el('div', { cls: 'fa-card card' });
+  ticksCard.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Daemon Tick Stream'),
+    el('span', { cls: 'card-subtitle' }, 'Newest first')
+  ));
+  const ticksBody = el('div', { cls: 'fa-ticks fa-card-body' });
+  const ticks = Array.isArray(d.recentTicks) ? d.recentTicks : [];
+  if (ticks.length === 0) {
+    ticksBody.appendChild(el('p', { cls: 'hint' }, 'No daemon ticks yet — is the daemon running?'));
+  } else {
+    for (const t of ticks) {
+      const backendsStr = t.backends && Object.keys(t.backends).length > 0
+        ? Object.entries(t.backends).map(([k, v]) => `${k}:${v}`).join(' ')
+        : '';
+      const hasMerge = t.merged > 0;
+      const tickCls = `fa-tick-row${hasMerge ? ' fa-tick-merged' : ''}`;
+      ticksBody.appendChild(el('div', { cls: tickCls },
+        el('span', { cls: 'fa-tick-dot' }),
+        el('span', { cls: 'fa-tick-time' }, fmtRelative(t.ts)),
+        el('span', { cls: 'fa-tick-reason' }, t.reason ?? 'ok'),
+        backendsStr ? el('span', { cls: 'fa-tick-backends' }, backendsStr) : null,
+        t.spentUsd > 0 ? el('span', { cls: 'fa-tick-spend' }, `$${t.spentUsd.toFixed(4)}`) : null,
+        hasMerge ? el('span', { cls: 'fa-tick-merge-badge' }, `+${t.merged} merged`) : null
+      ));
+    }
+  }
+  ticksCard.appendChild(ticksBody);
+  section.appendChild(ticksCard);
+
+  main.appendChild(section);
+  window.scrollTo(0, _scrollY);
 }
 
 // ---------------------------------------------------------------------------

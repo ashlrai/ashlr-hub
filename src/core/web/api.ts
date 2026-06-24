@@ -50,6 +50,8 @@ import { loadDaemonState } from '../daemon/state.js';
 import { buildFleetStatus } from '../fleet/status.js';
 // M61: Mission Control aggregator.
 import { buildControlSnapshot } from './control.js';
+// M90: Fleet-Activity panel.
+import { buildFleetActivity } from './control.js';
 
 // ---------------------------------------------------------------------------
 // SSE registry — shared across all open SSE connections so server.ts can
@@ -347,6 +349,18 @@ function handleSseEvents(req: IncomingMessage, res: ServerResponse): void {
     try {
       sendNamed('daemon', loadDaemonState());
     } catch { /* daemon slice is best-effort */ }
+    // M90: fleet-activity liveness pulse — carry daemon tick count so the
+    // Fleet Activity tab can update its "last tick" indicator in real-time
+    // without a full /api/fleet-activity poll.
+    try {
+      const ds = loadDaemonState();
+      const ticks = Array.isArray(ds.ticks) ? ds.ticks : [];
+      sendNamed('fleet-activity-ping', {
+        running: ds.running,
+        lastTickAt: ds.lastTickAt,
+        tickCount: ticks.length,
+      });
+    } catch { /* fleet-activity ping is best-effort */ }
   }
 
   // Send an initial snapshot immediately.
@@ -781,6 +795,16 @@ export async function handleApi(
     if (path === '/api/control' && method === 'GET') {
       const snapshot = await buildControlSnapshot(cfg);
       sendJson(res, 200, snapshot);
+      return true;
+    }
+
+    // ── GET /api/fleet-activity ──────────────────────────────────────────────
+    // M90: Fleet Activity panel — per-repo digest, recent merges, engine
+    // readiness (throttled 10s), subscription burn-down, cooldown count, recent
+    // ticks. No auth — same read class as /api/control.
+    if (path === '/api/fleet-activity' && method === 'GET') {
+      const activity = await buildFleetActivity(cfg);
+      sendJson(res, 200, activity);
       return true;
     }
 

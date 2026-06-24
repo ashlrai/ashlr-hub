@@ -25,6 +25,10 @@ import { usesInWindow, evalQuota, windowToMs } from '../fleet/quota.js';
 import { resolveUsageWindows, type UsageWindow, type ProviderLimitEntry } from '../observability/limits.js';
 import { loadBacklog } from '../portfolio/backlog.js';
 import { readCodexRateLimits } from '../observability/codex-source.js';
+import { buildFleetDigest, type FleetRepoRow } from '../fleet/digest.js';
+import { loadWorkedLedger } from '../fleet/worked-ledger.js';
+import { fleetReadiness, type EngineReadiness } from '../fleet/engine-readiness.js';
+import { readAudit } from '../sandbox/audit.js';
 
 // ---------------------------------------------------------------------------
 // ControlSnapshot type
@@ -483,6 +487,165 @@ export function buildSubscriptionUsage(): SubscriptionEngineUsage[] {
   });
 
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// M90: Fleet-Activity aggregator
+// ---------------------------------------------------------------------------
+
+/** A single recent auto-merge event surfaced in the fleet-activity feed. */
+export interface FleetMergeEvent {
+  repo: string | null;
+  proposalId: string | null;
+  ts: string;
+  engine: string | null;
+}
+
+/** A recent daemon tick (last N, newest-first). */
+export interface FleetTickEntry {
+  ts: string;
+  reason: string | null;
+  backends: Record<string, number>;
+  spentUsd: number;
+  merged: number;
+}
+
+/** Full fleet-activity payload. */
+export interface FleetActivitySnapshot {
+  ts: string;
+  /** Per-repo proposal/merge counts (7d window). */
+  repos: FleetRepoRow[];
+  totalProposed: number;
+  totalAutoMerged: number;
+  totalPending: number;
+  totalDeclined: number;
+  /** Recent auto-merge audit events (newest-first, capped 20). */
+  recentMerges: FleetMergeEvent[];
+  /** Per-engine readiness (throttled to ~10s). */
+  engineReadiness: EngineReadiness[];
+  /** Per-engine subscription burn-down (reused from buildSubscriptionUsage). */
+  subscriptionUsage: SubscriptionEngineUsage[];
+  /** Number of items currently in the worked-ledger cooldown window. */
+  cooldownCount: number;
+  /** Last N daemon ticks (newest-first, capped 20). */
+  recentTicks: FleetTickEntry[];
+}
+
+// Throttle cache for fleetReadiness — 2s probes are expensive; cache for 10s.
+let _readinessCache: { result: EngineReadiness[]; at: number } | null = null;
+const READINESS_TTL_MS = 10_000;
+
+function cachedFleetReadiness(cfg?: AshlrConfig): EngineReadiness[] {
+  const now = Date.now();
+  if (_readinessCache && now - _readinessCache.at < READINESS_TTL_MS) {
+    return _readinessCache.result;
+  }
+  try {
+    const result = fleetReadiness(cfg);
+    _readinessCache = { result, at: now };
+    return result;
+  } catch {
+    return _readinessCache?.result ?? [];
+  }
+}
+
+/** Reset the readiness throttle cache (for tests). */
+export function resetReadinessCache(): void {
+  _readinessCache = null;
+}
+
+/**
+ * Aggregate fleet-activity data from multiple sources. Each section degrades
+ * independently. Never throws.
+ */
+export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivitySnapshot> {
+  const ts = new Date().toISOString();
+
+  // Per-repo digest (7d window)
+  let digest = await buildFleetDigest('7d').catch(() => ({
+    running: false,
+    lastTickAt: null,
+    todaySpentUsd: 0,
+    itemsProcessed: 0,
+    repos: [] as FleetRepoRow[],
+    totalProposed: 0,
+    totalAutoMerged: 0,
+    totalPending: 0,
+    totalDeclined: 0,
+  }));
+
+  // Recent auto-merge events from audit (action starts with 'merge.')
+  let recentMerges: FleetMergeEvent[] = [];
+  try {
+    const auditEntries = readAudit(200);
+    recentMerges = auditEntries
+      .filter((e) => e.action.startsWith('merge.'))
+      .slice(0, 20)
+      .map((e) => {
+        // summary format: "proposalId=<id> engine=<eng> ..."
+        const propMatch = /proposalId=([^\s]+)/.exec(e.summary);
+        const engMatch  = /engine=([^\s]+)/.exec(e.summary);
+        return {
+          repo: e.repo,
+          proposalId: propMatch?.[1] ?? null,
+          ts: e.ts,
+          engine: engMatch?.[1] ?? null,
+        };
+      });
+  } catch {
+    // degrade silently
+  }
+
+  // Engine readiness (throttled)
+  const engineReadinessResult = cachedFleetReadiness(cfg);
+
+  // Subscription burn-down (reuse existing builder)
+  const subscriptionUsage = buildSubscriptionUsage();
+
+  // Worked-ledger cooldown count
+  let cooldownCount = 0;
+  try {
+    const ledger = loadWorkedLedger();
+    const now = Date.now();
+    const COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6h
+    cooldownCount = ledger.events.filter((e) => {
+      if (e.outcome !== 'empty') return false;
+      const ms = Date.parse(e.ts);
+      return !Number.isNaN(ms) && now - ms < COOLDOWN_MS;
+    }).length;
+  } catch {
+    // degrade silently
+  }
+
+  // Recent daemon ticks (newest-first, capped 20)
+  let recentTicks: FleetTickEntry[] = [];
+  try {
+    const ds = loadDaemonState();
+    const ticks = Array.isArray(ds.ticks) ? ds.ticks : [];
+    recentTicks = [...ticks].reverse().slice(0, 20).map((t) => ({
+      ts: t.ts,
+      reason: t.reason ?? null,
+      backends: t.backends ?? {},
+      spentUsd: typeof t.spentUsd === 'number' ? t.spentUsd : 0,
+      merged: typeof t.merged === 'number' ? t.merged : 0,
+    }));
+  } catch {
+    // degrade silently
+  }
+
+  return {
+    ts,
+    repos: digest.repos,
+    totalProposed: digest.totalProposed,
+    totalAutoMerged: digest.totalAutoMerged,
+    totalPending: digest.totalPending,
+    totalDeclined: digest.totalDeclined,
+    recentMerges,
+    engineReadiness: engineReadinessResult,
+    subscriptionUsage,
+    cooldownCount,
+    recentTicks,
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -2552,3 +2552,90 @@ a:hover {
 
 .ctrl-sec-repo  { color: var(--text-secondary); font-family: var(--font-mono); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ctrl-sec-title { color: var(--text-primary); word-break: break-word; }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   M90: Fleet Activity panel
+   ───────────────────────────────────────────────────────────────────────── */
+
+.fa-card { margin-bottom: 16px; }
+.fa-card-body { padding: 12px 16px; }
+
+/* Repo table cell coloring */
+.fa-cell-green  { color: var(--status-done); font-weight: 600; }
+.fa-cell-red    { color: var(--status-failed); font-weight: 600; }
+.fa-cell-pending { color: var(--status-pending); }
+
+/* Engine readiness */
+.fa-readiness-body { display: flex; flex-direction: column; gap: 8px; }
+.fa-engine-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  flex-wrap: wrap;
+}
+.fa-engine-row:hover { background: var(--bg-hover); }
+.fa-engine-ready   { border-left: 3px solid var(--status-done); }
+.fa-engine-notready { border-left: 3px solid var(--status-failed); }
+
+.fa-engine-dot {
+  width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; margin-top: 3px;
+}
+.fa-engine-dot.ready   { background: var(--status-done); }
+.fa-engine-dot.warn    { background: var(--status-aborted); }
+.fa-engine-dot.fail    { background: var(--status-failed); }
+
+.fa-engine-id     { font-weight: 600; font-family: var(--font-mono); color: var(--text-primary); white-space: nowrap; }
+.fa-engine-tier   { font-size: 10.5px; padding: 1px 6px; }
+.fa-engine-detail { color: var(--text-secondary); font-size: 12px; flex: 1; min-width: 0; }
+.fa-engine-fix    { color: var(--status-aborted); font-size: 11.5px; font-style: italic; width: 100%; padding-left: 20px; }
+
+/* Auto-merge feed */
+.fa-feed { display: flex; flex-direction: column; gap: 4px; }
+.fa-feed-row {
+  display: flex; align-items: center; gap: 10px; padding: 6px 4px;
+  border-radius: var(--radius-sm); font-size: 12.5px;
+}
+.fa-feed-row:hover { background: var(--bg-hover); }
+.fa-feed-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  background: var(--status-done);
+}
+.fa-feed-time   { color: var(--text-muted); white-space: nowrap; }
+.fa-feed-repo   { color: var(--text-primary); font-family: var(--font-mono); font-size: 12px; }
+.fa-feed-engine { font-size: 10.5px; padding: 1px 5px; }
+.fa-feed-pid    { color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
+
+/* Stats row */
+.fa-stats-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+.fa-stat-mini {
+  flex: 1; min-width: 120px; padding: 14px 16px; text-align: center;
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+}
+.fa-stat-val      { font-size: 28px; font-weight: 700; color: var(--text-primary); line-height: 1; }
+.fa-stat-val.fa-stat-green { color: var(--status-done); }
+.fa-stat-lbl      { font-size: 12px; color: var(--text-secondary); }
+
+/* Tick stream */
+.fa-ticks { display: flex; flex-direction: column; gap: 3px; max-height: 340px; overflow-y: auto; }
+.fa-tick-row {
+  display: flex; align-items: center; gap: 10px; padding: 5px 4px;
+  border-radius: var(--radius-sm); font-size: 12px;
+}
+.fa-tick-row:hover { background: var(--bg-hover); }
+.fa-tick-merged   { background: rgba(52, 211, 153, 0.06); }
+.fa-tick-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  background: var(--text-muted);
+}
+.fa-tick-merged .fa-tick-dot { background: var(--status-done); }
+.fa-tick-time     { color: var(--text-muted); white-space: nowrap; font-size: 11.5px; }
+.fa-tick-reason   { color: var(--text-secondary); }
+.fa-tick-backends { color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
+.fa-tick-spend    { color: var(--status-aborted); font-size: 11.5px; }
+.fa-tick-merge-badge {
+  font-size: 10.5px; font-weight: 600; padding: 1px 6px; border-radius: 3px;
+  background: rgba(52, 211, 153, 0.15); color: var(--status-done);
+}
