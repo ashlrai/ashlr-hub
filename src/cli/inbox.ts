@@ -230,10 +230,15 @@ function describeApplyAction(p: Proposal): string {
       return `run the gated ship/deploy path for ${shortRepo(p.repo)}`;
     case 'note':
       return 'record a note (no-op, no repo mutation)';
-    case 'desktop-action':
-      return `open ${p.action?.target ?? shortRepo(p.repo)} in your ${p.action?.type?.replace('open-', '') ?? 'desktop'} (local, no repo mutation)`;
-    case 'browser-action':
-      return 'run a gated browser action (Phase 2b — not yet implemented)';
+    case 'desktop-action': {
+      const da = p.action?.type !== 'browser-task' ? p.action : undefined;
+      return `open ${da?.target ?? shortRepo(p.repo)} in your ${da?.type?.replace('open-', '') ?? 'desktop'} (local, no repo mutation)`;
+    }
+    case 'browser-action': {
+      const ba = p.action?.type === 'browser-task' ? p.action : undefined;
+      const urlPart = ba?.url ? ` at ${ba.url}` : '';
+      return `run a gated browser task${urlPart} via Claude-in-Chrome MCP (requires approval)`;
+    }
   }
 }
 

@@ -53,9 +53,12 @@ describe('agent docs surfaces', () => {
   });
   it('agentDocsText lists every native MCP tool by name (no drift)', () => {
     const text = agentDocsText();
-    // ashlr_desktop_open is MCP-only (safety: proposal, no CLI equivalent);
-    // it is intentionally absent from the agentDocsText hardcoded tool list.
-    const cliSurfaced = nativeToolDefs().filter((t) => t.name !== 'ashlr_desktop_open');
+    // ashlr_desktop_open and ashlr_browser_task are MCP-only (safety: proposal,
+    // no CLI equivalent); they are intentionally absent from the agentDocsText
+    // hardcoded tool list.
+    const cliSurfaced = nativeToolDefs().filter(
+      (t) => t.name !== 'ashlr_desktop_open' && t.name !== 'ashlr_browser_task',
+    );
     for (const t of cliSurfaced) expect(text).toContain(t.name);
   });
 

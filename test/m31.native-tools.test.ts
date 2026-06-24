@@ -55,12 +55,13 @@ function resultText(r: { content: { type: 'text'; text: string }[] }): string {
 // ---------------------------------------------------------------------------
 
 describe('native tool registry', () => {
-  it('exposes exactly the 12 contracted tools', () => {
+  it('exposes exactly the 13 contracted tools', () => {
     const names = nativeToolDefs().map((t) => t.name).sort();
     expect(names).toEqual(
       [
         'ashlr_ask',
         'ashlr_backlog',
+        'ashlr_browser_task',
         'ashlr_desktop_open',
         'ashlr_health',
         'ashlr_impact',

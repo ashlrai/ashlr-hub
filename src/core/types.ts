@@ -2031,13 +2031,25 @@ export interface Proposal {
    *   'open-finder'   — reveal `target` in Finder / Explorer.
    *   'open-terminal' — open a terminal at `target`.
    *
-   * `target` must be an absolute path within an enrolled repo (enforced at
-   * apply time). `params` is reserved for future sub-options (e.g. line number).
+   * M105: 'browser-task' — navigate to `url` and execute `instructions` via
+   *   the Claude-in-Chrome MCP server reachable through the gateway. Requires a
+   *   configured + reachable browser MCP server; refuses cleanly (ok:false,
+   *   no crash) when none is available (headless / daemon contexts).
+   *
+   * `target` must be an absolute path within an enrolled repo for desktop-action
+   * kinds (enforced at apply time). `params` is reserved for future sub-options.
    * NEVER present on other proposal kinds.
    */
   action?: {
     type: 'open-editor' | 'open-finder' | 'open-terminal';
     target: string;
+    params?: Record<string, unknown>;
+  } | {
+    type: 'browser-task';
+    /** Optional URL to navigate to before running instructions. */
+    url?: string;
+    /** Natural-language instructions describing what to do in the browser. */
+    instructions: string;
     params?: Record<string, unknown>;
   };
 }

@@ -313,7 +313,10 @@ describe('applyProposal — desktop-action gate chain', () => {
     expect(latestApplyAudit()?.result).toBe('ok');
   });
 
-  it('A14 browser-action ALWAYS refuses — Phase 2b not implemented', async () => {
+  it('A14 browser-action with no action payload refuses — missing action payload (Phase 2b now implemented)', async () => {
+    // Phase 2b is implemented. A browser-action with NO action field hits the
+    // payload-validation gate ("missing action payload"), not the old stub
+    // ("not yet implemented"). Graceful-degrade (no MCP reachable) is in m105.
     repo.enroll();
     const p = createProposal({
       repo: repo.dir,
@@ -321,12 +324,14 @@ describe('applyProposal — desktop-action gate chain', () => {
       kind: 'browser-action',
       title: 'Browser thing',
       summary: 'Phase 2b',
+      // action deliberately omitted — triggers payload gate
     });
     const { setStatus } = await import('../src/core/inbox/store.js');
     setStatus(p.id, 'approved');
     const result = await applyProposal(p.id, { confirmed: true });
     expect(result.ok).toBe(false);
-    expect(result.detail).toMatch(/browser-action.*not yet implemented|Phase 2b/i);
+    expect(result.detail).toMatch(/missing action/i);
+    expect(result.detail).not.toMatch(/not yet implemented|Phase 2b/i);
     expect(result.status).toBe('failed');
     expect(latestApplyAudit()?.result).toBe('error');
   });

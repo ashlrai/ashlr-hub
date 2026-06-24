@@ -35,6 +35,133 @@ import { withHeal, defaultHealPolicy } from './run/self-heal.js';
 import { listNativeTools, isNativeTool, callNativeTool } from './mcp-native.js';
 
 // ---------------------------------------------------------------------------
+// M105: Browser MCP probe + tool-call helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Server name keywords that identify a Claude-in-Chrome / browser MCP server.
+ * Matching is case-insensitive substring check against the spec.name.
+ */
+const BROWSER_SERVER_KEYWORDS = ['claude-in-chrome', 'chrome', 'browser'] as const;
+
+/**
+ * Tools that a compatible browser MCP server must expose (at least one must
+ * be present for us to consider it reachable and usable).
+ */
+const BROWSER_REQUIRED_TOOLS = ['navigate', 'read_page', 'computer'] as const;
+
+/**
+ * Result of a browser-MCP reachability probe.
+ * Exposed so apply.ts can call the gateway without importing the SDK.
+ */
+export interface BrowserProbeResult {
+  reachable: boolean;
+  serverName: string | null;
+  /** Tools actually found on the server (subset we care about). */
+  availableTools: string[];
+  error?: string;
+}
+
+/**
+ * Probe the configured MCP registry for a reachable Claude-in-Chrome (or
+ * compatible) browser automation server.
+ *
+ * NEVER throws. Returns { reachable:false } on any failure so apply.ts can
+ * degrade gracefully without crashing.
+ *
+ * @param registry   The discovered MCP servers to search.
+ * @param timeoutMs  Per-probe startup/list timeout (default 8s).
+ */
+export async function probeBrowserMcp(
+  registry: McpRegistry,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<BrowserProbeResult> {
+  // Find candidate specs by keyword matching on spec.name (case-insensitive).
+  const candidates = registry.servers.filter((spec) => {
+    const lower = spec.name.toLowerCase();
+    return BROWSER_SERVER_KEYWORDS.some((kw) => lower.includes(kw));
+  });
+
+  if (candidates.length === 0) {
+    return {
+      reachable: false,
+      serverName: null,
+      availableTools: [],
+      error: 'no browser MCP server configured (no spec name matches claude-in-chrome / chrome / browser)',
+    };
+  }
+
+  // Try each candidate in order; first reachable one wins.
+  for (const spec of candidates) {
+    const health = await probeServer(spec, timeoutMs);
+    if (!health.ok) continue;
+
+    // Check that at least one required browser tool is present.
+    const found = BROWSER_REQUIRED_TOOLS.filter((t) => health.tools.includes(t));
+    if (found.length === 0) continue;
+
+    return {
+      reachable: true,
+      serverName: spec.name,
+      availableTools: health.tools,
+    };
+  }
+
+  return {
+    reachable: false,
+    serverName: null,
+    availableTools: [],
+    error: `browser MCP server(s) found (${candidates.map((s) => s.name).join(', ')}) but none reachable or missing required tools`,
+  };
+}
+
+/**
+ * Call a tool on a browser MCP server (already known-reachable via
+ * probeBrowserMcp). Opens a fresh connection, calls the tool, closes it.
+ *
+ * NEVER throws — any failure is returned as { ok:false, detail }.
+ * The caller (apply.ts) is responsible for auditing the result.
+ *
+ * @param spec      The server spec to connect to.
+ * @param toolName  The tool to call (e.g. 'navigate', 'read_page').
+ * @param args      Arguments to pass to the tool.
+ * @param timeoutMs Per-call timeout (default 8s).
+ */
+export async function callBrowserTool(
+  spec: McpServerSpec,
+  toolName: string,
+  args: Record<string, unknown>,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<{ ok: boolean; detail: string; result?: unknown }> {
+  let client: Client | null = null;
+  let cfgForCall: ReturnType<typeof loadConfig> | undefined;
+  try { cfgForCall = loadConfig(); } catch { /* non-fatal */ }
+  try {
+    client = await connectDownstream(spec, timeoutMs, cfgForCall);
+    const result = await Promise.race([
+      client.callTool({ name: toolName, arguments: args }, undefined, { timeout: timeoutMs }),
+      timeout<unknown>(timeoutMs, `callTool(${spec.name}/${toolName})`),
+    ]);
+    return { ok: true, detail: `${spec.name}/${toolName} succeeded`, result };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, detail: `${spec.name}/${toolName} failed: ${msg}` };
+  } finally {
+    if (client) {
+      try { await client.close(); } catch { /* ignore */ }
+    }
+  }
+}
+
+/**
+ * Look up a browser MCP server spec by name in the registry.
+ * Returns null when not found.
+ */
+export function findBrowserSpec(registry: McpRegistry, serverName: string): McpServerSpec | null {
+  return registry.servers.find((s) => s.name === serverName) ?? null;
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 

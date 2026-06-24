@@ -81,13 +81,14 @@ describe('RunEstimate shape lock', () => {
 });
 
 describe('native MCP tool surface lock', () => {
-  it('the 12 tool names and their safety classes are pinned', () => {
+  it('the 13 tool names and their safety classes are pinned', () => {
     const surface = nativeToolDefs()
       .map((t) => `${t.name}:${t.safety}`)
       .sort();
     expect(surface).toEqual([
       'ashlr_ask:read',
       'ashlr_backlog:read',
+      'ashlr_browser_task:proposal',
       'ashlr_desktop_open:proposal',
       'ashlr_health:read',
       'ashlr_impact:read',

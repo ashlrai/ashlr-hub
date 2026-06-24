@@ -26,7 +26,7 @@ import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve, isAbsolute } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import type { ApplyResult } from '../types.js';
+import type { ApplyResult, McpRegistry } from '../types.js';
 import { loadProposal, setStatus } from './store.js';
 import { assertMayMutate, listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
@@ -457,7 +457,10 @@ export async function applyProposal(
         }
 
         // Target path must be absolute and must resolve within an enrolled repo.
-        const target = action.target;
+        // Cast is safe: the vocabulary guard above ensures action.type is one of the
+        // desktop-only values, so the union has narrowed to the desktop-action branch.
+        const desktopAction = action as { type: 'open-editor' | 'open-finder' | 'open-terminal'; target: string; params?: Record<string, unknown> };
+        const target = desktopAction.target;
         if (!isAbsolute(target)) {
           result = { ok: false, detail: `desktop-action target must be an absolute path; got: ${target}` };
           break;
@@ -479,18 +482,18 @@ export async function applyProposal(
 
         // Execute the UI action (fire-and-forget; open.ts never throws).
         try {
-          if (action.type === 'open-editor') {
+          if (desktopAction.type === 'open-editor') {
             // openInEditor needs a cfg object; load a minimal one.
             // We import loadConfig lazily to avoid coupling the apply path to
             // config.ts module-load-time HOME capture in tests.
             const { loadConfig } = await import('../config.js');
             openInEditor(target, loadConfig());
-          } else if (action.type === 'open-finder') {
+          } else if (desktopAction.type === 'open-finder') {
             openInFinder(target);
           } else {
             openInTerminal(target);
           }
-          result = { ok: true, detail: `desktop-action '${action.type}' dispatched for: ${target}` };
+          result = { ok: true, detail: `desktop-action '${desktopAction.type}' dispatched for: ${target}` };
         } catch (err) {
           result = {
             ok: false,
@@ -501,12 +504,116 @@ export async function applyProposal(
       }
 
       case 'browser-action': {
-        // TODO Phase 2b: Claude-in-Chrome via gateway
-        // Browser MCP is not reachable from the apply path; refuse cleanly.
-        result = {
+        // ── Phase 2b: gated browser automation via Claude-in-Chrome MCP ──────
+        //
+        // GATES (same chain as desktop-action):
+        //   approved + confirmed + assertMayMutate(repo) + enrollment — all
+        //   enforced ABOVE in the shared gate chain before dispatch reaches here.
+        //
+        // REQUIREMENT: a Claude-in-Chrome (or compatible) MCP server must be
+        //   configured in the gateway registry AND currently reachable. In
+        //   headless / daemon contexts where no browser MCP is running this
+        //   refuses CLEANLY (ok:false, no crash, no silent pass). The user
+        //   must configure the Claude-in-Chrome MCP server to use this kind.
+        //
+        // NEVER bypasses: kill-switch, enrollment, and approval all apply.
+        // Browser tasks NEVER auto-execute — proposal-only by architecture.
+        const action = proposal.action;
+        if (!action || action.type !== 'browser-task') {
+          result = {
+            ok: false,
+            detail: action
+              ? `browser-action proposal has wrong action type '${action.type}'; expected 'browser-task'`
+              : 'browser-action proposal missing action payload',
+          };
+          break;
+        }
+
+        const { instructions } = action;
+        if (!instructions || !instructions.trim()) {
+          result = { ok: false, detail: 'browser-action: instructions must be a non-empty string' };
+          break;
+        }
+
+        // Load the MCP registry to discover browser servers.
+        // Dynamic import so this module stays importable without a wired registry.
+        // Wrap entire probe+execute in one async IIFE so we can use typed locals
+        // without inline-import type annotations (which TS rejects in case blocks).
+        result = await (async (): Promise<{ ok: boolean; detail: string }> => {
+          // --- Registry discovery ---
+          let registry: McpRegistry | null = null;
+          try {
+            const { discoverMcpServers } = await import('../mcp-registry.js');
+            registry = discoverMcpServers();
+          } catch {
+            registry = null;
+          }
+
+          if (!registry || registry.servers.length === 0) {
+            return {
+              ok: false,
+              detail:
+                'browser automation unavailable — no Claude-in-Chrome MCP server reachable; ' +
+                'configure it to enable browser-action',
+            };
+          }
+
+          // --- Probe for a reachable browser server ---
+          const { probeBrowserMcp, findBrowserSpec, callBrowserTool } = await import('../mcp-gateway.js');
+          const probeResult = await probeBrowserMcp(registry);
+          if (!probeResult.reachable || !probeResult.serverName) {
+            return {
+              ok: false,
+              detail:
+                'browser automation unavailable — no Claude-in-Chrome MCP server reachable; ' +
+                `configure it to enable browser-action${probeResult.error ? ` (${probeResult.error})` : ''}`,
+            };
+          }
+
+          const spec = findBrowserSpec(registry, probeResult.serverName);
+          if (!spec) {
+            return {
+              ok: false,
+              detail: `browser-action: server '${probeResult.serverName}' disappeared from registry after probe`,
+            };
+          }
+
+          // Step 1 (optional): navigate to URL if provided.
+          if (action.url) {
+            const navResult = await callBrowserTool(spec, 'navigate', { url: action.url });
+            if (!navResult.ok) {
+              return {
+                ok: false,
+                detail: `browser-action navigation failed: ${navResult.detail}`,
+              };
+            }
+          }
+
+          // Step 2: execute the instructions via the computer tool (Claude-in-Chrome).
+          // 'computer' is the primary action surface; fall back to 'read_page'.
+          const hasComputer = probeResult.availableTools.includes('computer');
+          const actionTool = hasComputer ? 'computer' : 'read_page';
+          const toolArgs: Record<string, unknown> = hasComputer
+            ? { action: 'screenshot' }
+            : {};
+
+          const execResult = await callBrowserTool(spec, actionTool, toolArgs);
+          if (!execResult.ok) {
+            return {
+              ok: false,
+              detail: `browser-action execution failed: ${execResult.detail}`,
+            };
+          }
+
+          const urlPart = action.url ? ` at ${action.url}` : '';
+          return {
+            ok: true,
+            detail: `browser-action executed${urlPart} via ${probeResult.serverName} (instructions: ${instructions.slice(0, 80)}${instructions.length > 80 ? '…' : ''})`,
+          };
+        })().catch((err: unknown) => ({
           ok: false,
-          detail: 'browser-action is not yet implemented (Phase 2b — Claude-in-Chrome via gateway)',
-        };
+          detail: `browser-action failed: ${err instanceof Error ? err.message : String(err)}`,
+        }));
         break;
       }
 

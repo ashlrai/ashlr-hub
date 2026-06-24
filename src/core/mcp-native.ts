@@ -370,6 +370,87 @@ const TOOLS: NativeToolImpl[] = [
     },
   },
 
+  // ── M105: Browser-action proposal tool ─────────────────────────────────
+  {
+    name: 'ashlr_browser_task',
+    description:
+      'Propose a browser automation task (navigate to a URL and/or run instructions ' +
+      'via the Claude-in-Chrome MCP server). Creates a PENDING browser-action proposal ' +
+      '— NEVER executes directly. The action runs ONLY after the user explicitly ' +
+      'approves via `ashlr inbox`. Requires a Claude-in-Chrome (or compatible) MCP ' +
+      'server to be configured; browser tasks are refused cleanly in headless / ' +
+      'daemon contexts where no browser MCP is reachable. ' +
+      'Requires the repo to be enrolled and the kill switch to be off.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: {
+          type: 'string',
+          description: 'Absolute path of an enrolled repo. Required — action is scoped to it.',
+        },
+        url: {
+          type: 'string',
+          description: 'Optional URL to navigate to before running instructions.',
+        },
+        instructions: {
+          type: 'string',
+          description: 'Natural-language instructions describing what to do in the browser (no secrets).',
+        },
+        title: {
+          type: 'string',
+          description: 'Short title for the inbox list.',
+        },
+        summary: {
+          type: 'string',
+          description: 'Why this browser task is being proposed (no secrets).',
+        },
+      },
+      required: ['repo', 'instructions', 'title', 'summary'],
+    },
+    safety: 'proposal',
+    handler: async (args, cfg) => {
+      const repo = typeof args['repo'] === 'string' ? args['repo'] : null;
+      const instructions = typeof args['instructions'] === 'string' ? args['instructions'] : '';
+      const url = typeof args['url'] === 'string' ? args['url'] : undefined;
+
+      if (!instructions.trim()) {
+        return { error: 'instructions must be a non-empty string' };
+      }
+
+      // Enrollment check — refuse without creating a proposal.
+      const { isEnrolled } = await import('./sandbox/policy.js');
+      if (!repo || !isEnrolled(repo)) {
+        return {
+          error: `repo '${repo ?? '(none)'}' is not enrolled — enroll it first with \`ashlr enroll add <path>\``,
+        };
+      }
+
+      // Create a PENDING proposal — NEVER execute here.
+      const proposal = selectInboxStore(cfg).create({
+        repo,
+        origin: 'agent',
+        kind: 'browser-action',
+        title: String(args['title']),
+        summary: String(args['summary']),
+        action: {
+          type: 'browser-task',
+          instructions,
+          ...(url !== undefined ? { url } : {}),
+        },
+      });
+
+      return {
+        created: true,
+        id: proposal.id,
+        status: 'pending',
+        note:
+          'Pending human approval — approve via `ashlr inbox` (CLI). ' +
+          'The browser task will NOT execute until you approve it. ' +
+          'A Claude-in-Chrome MCP server must be configured and reachable at apply time.',
+      };
+    },
+  },
+
   // ── M103: Desktop-action proposal tool ─────────────────────────────────
   {
     name: 'ashlr_desktop_open',
