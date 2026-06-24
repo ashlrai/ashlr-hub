@@ -2109,6 +2109,12 @@ export interface DaemonState {
   itemsProcessed: number;
   /** Bounded history of recent ticks (most-recent last). */
   ticks: DaemonTick[];
+  /**
+   * M91: ISO timestamp of the last SUCCESSFUL fleet→pulse export.
+   * Used as sinceTs watermark so each tick only re-sends new events.
+   * Absent until the first successful POST. Never set on failure.
+   */
+  lastPulseExportAt?: string;
 }
 
 

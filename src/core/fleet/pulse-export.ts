@@ -275,22 +275,24 @@ export interface PulseExportCfg {
 /**
  * Build fleet spans (since sinceTs) and POST to ashlr-pulse.
  *
- * - No-op (returns early) when cfg.pulse?.enabled is falsy.
- * - No-op (logs a hint) when ASHLR_PULSE_PAT env var is absent.
+ * - No-op (returns false) when cfg.pulse?.enabled is falsy.
+ * - No-op (returns false, logs a hint) when ASHLR_PULSE_PAT env var is absent.
+ * - Returns true on a 2xx response (advance the watermark).
+ * - Returns false on any error or non-2xx (leave watermark unchanged so events retry).
  * - NEVER throws.
  * - NEVER logs the PAT value.
  */
 export async function exportToPulse(
   cfg: PulseExportCfg,
   opts?: { sinceTs?: string; dryRun?: boolean },
-): Promise<void> {
+): Promise<boolean> {
   try {
-    if (!cfg.pulse?.enabled) return;
+    if (!cfg.pulse?.enabled) return false;
 
     const pat = process.env['ASHLR_PULSE_PAT'];
     if (!pat) {
       console.log('[ashlr-fleet] pulse export: ASHLR_PULSE_PAT not set — skipping (set it to enable fleet→pulse telemetry)');
-      return;
+      return false;
     }
 
     const endpoint = (cfg.pulse?.endpoint ?? 'http://localhost:3000').replace(/\/$/, '');
@@ -300,11 +302,11 @@ export async function exportToPulse(
 
     if (opts?.dryRun) {
       process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
-      return;
+      return false; // dry-run never counts as a successful export
     }
 
     // POST — best-effort; never throws
-    await fetch(url, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -313,8 +315,90 @@ export async function exportToPulse(
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(10_000),
     });
+    // 2xx → success; advance watermark in caller
+    return res.ok;
   } catch {
     // Network errors, unreachable endpoint, etc. — swallow silently.
     // The fleet daemon must never crash due to telemetry.
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// postProbeSpan — send a single connectivity probe span (pulse-test)
+// ---------------------------------------------------------------------------
+
+/**
+ * POST a single tiny probe span to cfg.pulse.endpoint to verify connectivity
+ * and PAT validity.
+ *
+ * Returns a structured result rather than throwing. Used by `ashlr pulse-test`.
+ */
+export async function postProbeSpan(cfg: PulseExportCfg): Promise<{
+  ok: boolean;
+  status: number | null;
+  label: string;   // human-readable one-liner
+  exitCode: number; // 0=ok, 1=error, 2=unconfigured
+}> {
+  if (!cfg.pulse?.enabled) {
+    return { ok: false, status: null, label: '⚠ not configured (set cfg.pulse.enabled + ASHLR_PULSE_PAT)', exitCode: 2 };
+  }
+
+  const pat = process.env['ASHLR_PULSE_PAT'];
+  if (!pat) {
+    return { ok: false, status: null, label: '⚠ not configured (set cfg.pulse.enabled + ASHLR_PULSE_PAT)', exitCode: 2 };
+  }
+
+  const endpoint = (cfg.pulse?.endpoint ?? 'http://localhost:3000').replace(/\/$/, '');
+  const url = `${endpoint}/api/otlp/v1/traces`;
+
+  // Build a minimal probe span (deterministic spanId so pulse can dedup it)
+  const probeId = 'probe:ashlr-fleet:connectivity';
+  const lo = fnv1a32(probeId);
+  const hi = fnv1a32(`hi:${probeId}`);
+  const spanId = lo.toString(16).padStart(8, '0') + hi.toString(16).padStart(8, '0');
+  const traceId = fnv1a32(`trace:${spanId}`).toString(16).padStart(8, '0').repeat(4);
+  const nowNano = String(Date.now() * 1_000_000);
+
+  const probePayload: OtlpPayload = {
+    resourceSpans: [{
+      scopeSpans: [{
+        spans: [{
+          traceId,
+          spanId,
+          name: 'fleet.probe',
+          startTimeUnixNano: nowNano,
+          endTimeUnixNano: nowNano,
+          attributes: [
+            { key: 'ashlr.source',      value: { stringValue: 'ashlr-fleet' } },
+            { key: 'ashlr.fleet.event', value: { stringValue: 'probe' } },
+            { key: 'ashlr.probe',       value: { stringValue: 'connectivity-test' } },
+          ],
+        }],
+      }],
+    }],
+  };
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${pat}`,
+      },
+      body: JSON.stringify(probePayload),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (res.ok) {
+      return { ok: true, status: res.status, label: `✓ connected (HTTP ${res.status})`, exitCode: 0 };
+    }
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, status: res.status, label: `✗ ${res.status} — PAT rejected (check ASHLR_PULSE_PAT)`, exitCode: 1 };
+    }
+    return { ok: false, status: res.status, label: `✗ HTTP ${res.status} — ${res.statusText || 'error'}`, exitCode: 1 };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return { ok: false, status: null, label: `✗ endpoint unreachable (${url}): ${detail}`, exitCode: 1 };
   }
 }

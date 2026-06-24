@@ -435,6 +435,11 @@ export async function cmdPulse(args: string[]): Promise<number> {
     return cmdPulseExport(args.slice(1));
   }
 
+  // M91: dispatch `test` subcommand (also reachable via `ashlr pulse-test`)
+  if (args[0] === 'test') {
+    return cmdPulseTest();
+  }
+
   // Help shortcircuit
   if (args[0] === '--help' || args[0] === '-h' || args[0] === 'help') {
     printPulseHelp();
@@ -654,11 +659,11 @@ async function cmdPulseExport(args: string[]): Promise<number> {
 
   // Lazy-import exporter
   let buildFleetSpans: ((sinceTs?: string) => unknown) | null = null;
-  let exportToPulse: ((cfg: AshlrConfig, opts?: { sinceTs?: string; dryRun?: boolean }) => Promise<void>) | null = null;
+  let exportToPulse: ((cfg: AshlrConfig, opts?: { sinceTs?: string; dryRun?: boolean }) => Promise<boolean>) | null = null;
   try {
     const mod = await import('../core/fleet/pulse-export.js') as {
       buildFleetSpans: (sinceTs?: string) => unknown;
-      exportToPulse: (cfg: AshlrConfig, opts?: { sinceTs?: string; dryRun?: boolean }) => Promise<void>;
+      exportToPulse: (cfg: AshlrConfig, opts?: { sinceTs?: string; dryRun?: boolean }) => Promise<boolean>;
     };
     buildFleetSpans = mod.buildFleetSpans;
     exportToPulse = mod.exportToPulse;
@@ -725,6 +730,49 @@ function printExportHelp(): void {
   console.log(`    ${cyan('ashlr pulse-export --since 2026-06-01T00:00:00Z')}  ${dim('# backfill')}`);
   console.log(`    ${cyan('ashlr pulse-export')}                            ${dim('# export all history')}`);
   console.log('');
+}
+
+// ---------------------------------------------------------------------------
+// M91: `ashlr pulse-test` / `ashlr pulse test` — connectivity + auth check
+// ---------------------------------------------------------------------------
+
+/**
+ * `ashlr pulse-test`
+ *
+ * POSTs a single probe span to cfg.pulse.endpoint with the PAT and reports:
+ *   ✓ connected (HTTP 200)
+ *   ✗ 401 — PAT rejected (check ASHLR_PULSE_PAT)
+ *   ✗ endpoint unreachable (<url>)
+ *   ⚠ not configured (set cfg.pulse.enabled + ASHLR_PULSE_PAT)
+ *
+ * Exit codes: 0=ok, 1=error, 2=unconfigured.
+ */
+export async function cmdPulseTest(): Promise<number> {
+  let cfg: AshlrConfig;
+  try {
+    cfg = await loadConfig();
+  } catch (err) {
+    process.stderr.write(
+      `${C.red}error:${C.reset} failed to load config: ` +
+      (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  let postProbeSpan: ((cfg: AshlrConfig) => Promise<{ ok: boolean; status: number | null; label: string; exitCode: number }>) | null = null;
+  try {
+    const mod = await import('../core/fleet/pulse-export.js') as {
+      postProbeSpan: (cfg: AshlrConfig) => Promise<{ ok: boolean; status: number | null; label: string; exitCode: number }>;
+    };
+    postProbeSpan = mod.postProbeSpan;
+  } catch {
+    process.stderr.write(`${C.red}error:${C.reset} pulse-export module unavailable (M89/M91 not built).\n`);
+    return 1;
+  }
+
+  const result = await postProbeSpan!(cfg);
+  console.log(result.label);
+  return result.exitCode;
 }
 
 // ---------------------------------------------------------------------------

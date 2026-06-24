@@ -190,6 +190,12 @@ const loadPulseCmd = lazyCmd(
   'pulse command requires src/cli/pulse.ts (M5 module not yet built).',
 );
 
+const loadPulseTestCmd = lazyCmd(
+  () => import('./pulse.js' as unknown as string),
+  (m) => ((_args: string[]) => (m.cmdPulseTest as () => Promise<number>)()) as Cmd,
+  'pulse-test command requires src/cli/pulse.ts (M91 module not yet built).',
+);
+
 async function tryBuildRollup(): Promise<BuildRollupFn | null> {
   if (_buildRollup === undefined) {
     try {
@@ -1456,6 +1462,13 @@ async function main(): Promise<void> {
         // M89: fleet→pulse OTLP backfill/manual export
         const cmdPulse = await loadPulseCmd();
         process.exitCode = await cmdPulse(['export', ...rest]);
+        break;
+      }
+
+      case 'pulse-test': {
+        // M91: fleet→pulse connectivity + auth probe
+        const cmdPulseTest = await loadPulseTestCmd();
+        process.exitCode = await cmdPulseTest(rest);
         break;
       }
 

@@ -716,13 +716,28 @@ export async function tick(
   state.ticks = [...state.ticks, tickRecord];
   saveDaemonState(state);
 
-  // M89: best-effort fleet→pulse telemetry export. Runs OUTSIDE the proposal
+  // M89/M91: best-effort fleet→pulse telemetry export. Runs OUTSIDE the proposal
   // guarantees — only reads state + POSTs telemetry; never mutates repos.
-  // Only fires when cfg.pulse?.enabled is true. Never throws.
+  // M91 incremental: pass lastPulseExportAt as sinceTs so only NEW events are
+  // sent each tick. On a 2xx response, advance the watermark and persist it;
+  // on failure leave the watermark unchanged so events retry next tick.
+  // Never throws.
   if (cfg.pulse?.enabled) {
-    void import('../fleet/pulse-export.js').then(({ exportToPulse }) =>
-      exportToPulse(cfg, { sinceTs: tickRecord.ts }).catch(() => undefined)
-    ).catch(() => undefined);
+    void import('../fleet/pulse-export.js').then(async ({ exportToPulse }) => {
+      try {
+        const currentState = loadDaemonState();
+        const sinceTs = currentState.lastPulseExportAt;
+        const ok = await exportToPulse(cfg, { sinceTs });
+        if (ok) {
+          // Advance watermark to the tick timestamp on success.
+          const stateToUpdate = loadDaemonState();
+          stateToUpdate.lastPulseExportAt = tickRecord.ts;
+          saveDaemonState(stateToUpdate);
+        }
+      } catch {
+        // Best-effort — telemetry must never crash the daemon.
+      }
+    }).catch(() => undefined);
   }
 
   audit({
