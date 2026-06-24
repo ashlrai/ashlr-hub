@@ -44,7 +44,7 @@ import { assertMayMutate } from '../sandbox/policy.js';
 import { runSwarm } from '../swarm/runner.js';
 import { loadSwarm } from '../swarm/store.js';
 import { loadProposal, listProposals } from '../inbox/store.js';
-import { loadGoal, updateMilestoneStatus } from './store.js';
+import { loadGoal, updateMilestoneStatus, resumeMilestone } from './store.js';
 
 // ---------------------------------------------------------------------------
 // HARD per-advance budget — a goal advance is ALWAYS bounded.
@@ -295,6 +295,120 @@ export function progressOf(goal: Goal): GoalProgress {
     done,
     fractionDone,
     nextActionableId: nextActionableMilestone(goal)?.id ?? null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// advanceGoalCycle — bounded iterate-to-done wrapper.
+// ---------------------------------------------------------------------------
+
+/**
+ * Result of a single conductor cycle on a goal's next actionable milestone.
+ */
+export interface AdvanceCycleResult {
+  /** All swarm runs attempted in this cycle (1 on first attempt; up to maxRetries+1). */
+  runs: SwarmRun[];
+  /** True when the goal itself reached 'done' after this cycle. */
+  goalDone: boolean;
+  /** True when the advanced milestone reached a terminal state (proposed/done/skipped). */
+  milestoneDone: boolean;
+  /** Number of proposals filed during this cycle. */
+  proposalsFiled: number;
+}
+
+/**
+ * Advance a goal's next actionable milestone with bounded retry on 'blocked'.
+ *
+ * Calls `advanceGoal` once. If the milestone ends up 'blocked' (swarm failed /
+ * aborted / no proposal produced), resets it via `resumeMilestone` and retries
+ * up to `opts.maxRetries` times (default 1). This gives the conductor an
+ * iterate-to-done loop WITHOUT adding an unbounded retry mechanism.
+ *
+ * A goal is considered 'done' when `progressOf(reloadedGoal).fractionDone === 1`
+ * (all non-skipped milestones are in a terminal state). This check is done
+ * READ-ONLY by reloading the goal after each advance.
+ *
+ * SAFETY: all safety invariants of `advanceGoal` are fully preserved — this
+ * function only calls `advanceGoal` (never bypasses the sandbox/propose/budget
+ * gates) and `resumeMilestone` (a pure store mutation that resets status to
+ * 'pending'). The retry cap is enforced strictly.
+ *
+ * @param sink optional StreamSink threaded to each `advanceGoal` call.
+ */
+export async function advanceGoalCycle(
+  goalId: string,
+  cfg: AshlrConfig,
+  opts?: AdvanceOptions & { maxRetries?: number },
+  sink?: (e: unknown) => void,
+): Promise<AdvanceCycleResult> {
+  const maxRetries = Math.max(0, Math.min(opts?.maxRetries ?? 1, 3)); // hard cap at 3
+  const runs: SwarmRun[] = [];
+  let proposalsFiled = 0;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    let run: SwarmRun;
+    try {
+      run = await advanceGoal(goalId, cfg, opts, sink);
+    } catch (err) {
+      // advanceGoal threw (no actionable milestone, enrollment error, kill switch).
+      // Do NOT retry — surface the error.
+      throw err;
+    }
+    runs.push(run);
+
+    // Reload goal to check post-advance milestone status.
+    const goal = loadGoal(goalId);
+    if (!goal) throw new Error(`goal disappeared after advance: ${goalId}`);
+
+    // Count proposals filed (swarms that produced a PENDING proposal).
+    const advanced = goal.milestones.find(
+      (m) => m.swarmId === run.id || (m.proposalId !== null && m.status === 'proposed'),
+    );
+    if (advanced?.status === 'proposed') proposalsFiled += 1;
+
+    // Check if this milestone is in a terminal success state (proposed/done/skipped).
+    const milestoneDone =
+      advanced?.status === 'proposed' ||
+      advanced?.status === 'done' ||
+      advanced?.status === 'skipped';
+
+    if (milestoneDone) {
+      // A goal is done when: the store rolled it to 'done' (every non-skipped
+      // milestone is 'done'), OR progressOf reports fractionDone === 1 (all
+      // non-skipped milestones are in a done/proposed terminal state).
+      const progress = progressOf(goal);
+      const goalDone =
+        goal.status === 'done' ||
+        (progress.fractionDone >= 1 && progress.total > 0);
+      return {
+        runs,
+        goalDone,
+        milestoneDone: true,
+        proposalsFiled,
+      };
+    }
+
+    // Milestone ended up 'blocked' — retry if we have remaining attempts.
+    if (attempt < maxRetries && advanced?.status === 'blocked') {
+      // Reset the milestone to 'pending' so advanceGoal can pick it up again.
+      resumeMilestone(goalId, advanced.id);
+      // Small pause between retries (no sleep in tests — sink signals retry).
+      // We intentionally do NOT sleep here; the conductor's cycle interval
+      // provides natural pacing for repeated daemon ticks.
+    }
+  }
+
+  // Exhausted retries — report what we have.
+  const goal = loadGoal(goalId);
+  const progress = goal ? progressOf(goal) : null;
+  const goalDone =
+    goal?.status === 'done' ||
+    (progress ? progress.fractionDone >= 1 && progress.total > 0 : false);
+  return {
+    runs,
+    goalDone,
+    milestoneDone: false,
+    proposalsFiled,
   };
 }
 

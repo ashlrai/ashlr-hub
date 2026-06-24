@@ -19,12 +19,14 @@ import { createHash } from 'node:crypto';
 import type {
   AshlrConfig,
   DecomposeOptions,
+  EngineId,
   Goal,
   Milestone,
   SpecArtifact,
 } from '../types.js';
 import { authorSpec } from '../spec/spec-store.js';
 import { getActiveClient } from '../run/provider-client.js';
+import { engineInstalled } from '../run/engines.js';
 
 /**
  * FIXED stable epoch for decomposed-but-not-yet-persisted milestones. Using a
@@ -77,11 +79,89 @@ const STANDARD_PHASES: { title: string; detail: string }[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Frontier engine detection (local CLIs — no cloud key required)
+// ---------------------------------------------------------------------------
+
+/** Frontier engine ids in preference order (mirrors router.ts FRONTIER_PREFERENCE). */
+const FRONTIER_PREFERENCE: readonly EngineId[] = ['claude', 'codex'];
+
+/**
+ * Return the first frontier engine that is BOTH in allowedBackends AND installed
+ * on PATH. Returns null when none qualify. Pure + read-only (engineInstalled
+ * probes PATH once per call). Never throws.
+ */
+export function pickFrontierEngine(cfg: AshlrConfig): EngineId | null {
+  const allowed = new Set<EngineId>(cfg.foundry?.allowedBackends ?? ['builtin']);
+  for (const e of FRONTIER_PREFERENCE) {
+    if (allowed.has(e) && engineInstalled(e)) return e;
+  }
+  return null;
+}
+
+/**
+ * Decompose an objective into milestone parts using a FRONTIER engine CLI
+ * (claude/codex) when one is allowed+installed. Returns a JSON-parsed array
+ * of {title, detail} parts on success, or throws on any failure so the caller
+ * can fall back to the deterministic split.
+ *
+ * Uses a minimal runGoal call (maxSteps:3, sandbox:false — planning only,
+ * no code edits, no proposals). Parses the finalAnswer with a sane fallback
+ * JSON extractor.
+ *
+ * NEVER runs a swarm against a real repo. NEVER proposes. ZERO disk writes
+ * beyond normal run state (~/.ashlr/runs/<id>.json).
+ */
+async function decomposeWithFrontier(
+  objective: string,
+  cfg: AshlrConfig,
+  cap: number,
+): Promise<{ title: string; detail: string }[]> {
+  // Lazy import to avoid loading the heavy orchestrator at module-load time.
+  const { runGoal } = await import('../run/orchestrator.js');
+  const prompt =
+    `Decompose this software objective into an ordered list of ${cap} milestones.\n` +
+    `Return STRICT JSON only — an array of {"title": string, "detail": string} objects.\n` +
+    `No prose, no code fences, no commentary. Exactly ${cap} items or fewer.\n\n` +
+    `Objective: ${objective}`;
+
+  const run = await runGoal(prompt, cfg, {
+    budget: { maxTokens: 8_000, maxSteps: 3 },
+    allowCloud: false,
+    noMemory: true,
+    tools: false,
+  });
+
+  const answer = run.result ?? '';
+  if (!answer.trim()) throw new Error('frontier returned empty answer');
+
+  const parsed: unknown = JSON.parse(stripFences(answer));
+  if (!Array.isArray(parsed)) throw new Error('frontier did not return an array');
+
+  const parts = parsed
+    .filter(
+      (x): x is { title: string; detail?: string } =>
+        typeof x === 'object' &&
+        x !== null &&
+        typeof (x as { title?: unknown }).title === 'string' &&
+        String((x as { title: string }).title).trim().length > 0,
+    )
+    .map((x) => ({ title: String(x.title).trim(), detail: String(x.detail ?? '').trim() }));
+
+  if (parts.length < 2) throw new Error(`frontier produced only ${parts.length} milestone(s)`);
+  return parts;
+}
+
+// ---------------------------------------------------------------------------
 // decomposeGoal
 // ---------------------------------------------------------------------------
 
 /**
  * Decompose a high-level `objective` into an ordered list of Milestones.
+ *
+ * FRONTIER-FIRST (when a frontier engine is allowed+installed): routes the
+ * decomposition to the best available frontier CLI (claude/codex) via runGoal —
+ * these engines produce well-structured, actionable plans. Falls back to the
+ * deterministic local split on any engine error or garbled output.
  *
  * DEFAULT (local, deterministic): split the objective into a bounded sequence
  * of ordered milestones using a pure heuristic (numbered-list / "then" /
@@ -91,7 +171,8 @@ const STANDARD_PHASES: { title: string; detail: string }[] = [
  * OPTIONAL (opts.allowCloud): refine the deterministic split's titles/details
  * via getActiveClient(cfg, { allowCloud }) — local-first; cloud only with a
  * configured key. Refinement NEVER increases the count beyond the cap and
- * falls back to the deterministic split on any model error.
+ * falls back to the deterministic split on any model error. This path is NOT
+ * taken when a frontier engine already handled decomposition.
  *
  * Returns plain Milestone[] (status 'pending', specId/swarmId/proposalId null,
  * order assigned 0..n). Does NOT persist — the caller (store.addMilestone /
@@ -111,9 +192,30 @@ export async function decomposeGoal(
 
   const deterministic = deterministicSplit(objective, cap);
   let parts = deterministic;
+  let usedFrontier = false;
 
-  // OPTIONAL local-first refinement. Default path NEVER reaches here.
-  if (opts?.allowCloud) {
+  // ── FRONTIER-FIRST: use the best available frontier CLI when installed ──────
+  // Local frontier CLIs (claude/codex) produce far better structured plans than
+  // the weak local qwen model. No --allow-cloud flag needed — they are local CLIs.
+  // Garbled / empty plans fall back to the deterministic split.
+  const frontier = pickFrontierEngine(cfg);
+  if (frontier) {
+    try {
+      const frontierParts = await decomposeWithFrontier(objective, cfg, cap);
+      // COUNT-GUARD: reject plans that wildly exceed the cap (the frontier may
+      // over-decompose). Trim to cap but keep if >= 2 items.
+      if (frontierParts.length >= 2 && frontierParts.length <= HARD_MAX_MILESTONES) {
+        parts = frontierParts.slice(0, cap);
+        usedFrontier = true;
+      }
+    } catch {
+      // Any engine error or parse failure => keep the deterministic split.
+      parts = deterministic;
+    }
+  }
+
+  // ── OPTIONAL local-first refinement (only when frontier didn't already plan) ─
+  if (!usedFrontier && opts?.allowCloud) {
     try {
       const refined = await refineWithModel(objective, deterministic, cfg, true);
       // COUNT-PRESERVING: a refinement that changes the milestone count is
