@@ -7,7 +7,9 @@
  *
  * SUPPORTED PLATFORMS:
  *   macOS (darwin)  — sandbox-exec(1) with a custom SBPL profile.
- *   Linux           — bwrap (bubblewrap) when on PATH; else null.
+ *   Linux           — bwrap (bubblewrap) when on PATH; firejail secondary fallback.
+ *                     Neither present → fallback per onUnsupported + honest audit.
+ *   win32           — no first-class OS sandbox; always falls back per onUnsupported.
  *   Other           — null (env-only v4 behavior).
  *
  * THREAT MODEL (macOS sandbox-exec):
@@ -55,9 +57,9 @@
  *   (subpath "...") SBPL string literal.
  */
 
-import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { realpathSync, existsSync } from 'node:fs';
+import { buildLinuxLauncher } from './confine-linux.js';
 
 /**
  * Resolve a path to its canonical realpath. macOS `sandbox-exec` resolves
@@ -278,71 +280,6 @@ export function buildMacosSbplProfile(
 }
 
 // ---------------------------------------------------------------------------
-// Linux bwrap launcher builder
-// ---------------------------------------------------------------------------
-
-/** Check whether a binary is on PATH. Returns the binary name or null. */
-function findBinary(name: string): string | null {
-  try {
-    execFileSync('which', [name], { stdio: 'ignore', timeout: 3_000 });
-    return name;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Build a Linux bwrap (bubblewrap) launcher for the contained engine.
- *
- * Strategy: bind the root filesystem read-only, bind the worktree read-write,
- * and optionally unshare the network namespace.
- */
-function buildBwrapLauncher(
-  profile: ConfinementProfile,
-  ctx: ConfinementCtx,
-): SandboxLauncher | null {
-  const bwrap = findBinary('bwrap');
-  if (!bwrap) return null;
-
-  const env = ctx.env ?? process.env;
-  const tmp = env.TMPDIR ?? tmpdir();
-
-  const args: string[] = [
-    // Bind root read-only (gives access to system paths).
-    '--ro-bind', '/', '/',
-    // Bind worktree read-write (agent's workspace).
-    '--bind', ctx.worktree, ctx.worktree,
-    // Bind TMPDIR read-write.
-    '--bind', tmp, tmp,
-    // New temp filesystem.
-    '--tmpfs', '/tmp',
-    // Proc/dev for process functionality.
-    '--proc', '/proc',
-    '--dev', '/dev',
-    // Die with parent.
-    '--die-with-parent',
-  ];
-
-  if (!profile.networkEgress) {
-    args.push('--unshare-net');
-  }
-
-  // Extra read-allowed paths: bind them read-only.
-  if (profile.readAllowed) {
-    for (const p of profile.readAllowed) {
-      if (p) {
-        args.push('--ro-bind', p, p);
-      }
-    }
-  }
-
-  // Separator: everything after '--' is the command to run.
-  args.push('--');
-
-  return { bin: bwrap, prefixArgs: args };
-}
-
-// ---------------------------------------------------------------------------
 // Primary public API
 // ---------------------------------------------------------------------------
 
@@ -353,8 +290,14 @@ function buildBwrapLauncher(
  * `null` when confinement is off or not supported on this platform.
  *
  * This function is PURE on the happy path (macOS profile string is built from
- * inputs only). The only side-effect is the bwrap PATH probe on Linux and the
- * audit call on fallback/unsupported.
+ * inputs only). The only side-effects are the bwrap/firejail PATH probes on
+ * Linux and the audit call on fallback/unsupported.
+ *
+ * Platform dispatch (never downgrades silently — audit always records reality):
+ *   darwin  → sandbox-exec(1) with generated SBPL profile (unchanged from M52)
+ *   linux   → bwrap (preferred) or firejail (secondary); if neither: fallback
+ *   win32   → no first-class OS sandbox — fallback with honest report
+ *   other   → fallback with honest report
  *
  * Invariant: when `profile.mode === 'off'` (or undefined), always returns null
  * with no side effects — byte-identical v4 behavior.
@@ -372,6 +315,7 @@ export function buildSandboxLauncher(
   const onUnsupported = profile.onUnsupported ?? 'fallback';
 
   if (platform === 'darwin') {
+    // UNCHANGED from M52 — sandbox-exec with SBPL profile.
     const sbplProfile = buildMacosSbplProfile(profile, ctx);
     return {
       bin: 'sandbox-exec',
@@ -380,12 +324,16 @@ export function buildSandboxLauncher(
   }
 
   if (platform === 'linux') {
-    const launcher = buildBwrapLauncher(profile, ctx);
-    if (launcher) return launcher;
-    // bwrap absent — fall through to unsupported handling.
+    const result = buildLinuxLauncher(profile, ctx);
+    if (result) return result.launcher;
+    // bwrap and firejail both absent — fall through to fallback handling.
   }
 
-  // Platform unsupported or bwrap absent.
+  // win32: no first-class OS confinement. We do NOT claim confinement Windows
+  // cannot provide. Falls through to _handleUnsupported which emits an honest
+  // audit and returns null — worktree + cred-strip + proposal-only still hold.
+  //
+  // Other platforms: same treatment.
   return _handleUnsupported(profile, ctx, onUnsupported, platform);
 }
 
@@ -397,22 +345,31 @@ function _handleUnsupported(
 ): SandboxLauncher | null {
   const reason =
     platform === 'linux'
-      ? 'bwrap not found on PATH'
-      : `unsupported platform: ${platform}`;
+      ? 'no OS sandbox available (bwrap and firejail not found on PATH)'
+      : platform === 'win32'
+        ? 'no OS sandbox available on win32 (no first-class confinement equivalent)'
+        : `no OS sandbox available on unsupported platform: ${platform}`;
 
   if (onUnsupported === 'fail') {
     throw new ConfinementUnsupportedError(
       `M52 confinement required but unavailable: ${reason}. ` +
-        `Set onUnsupported:'fallback' to allow env-only v4 behavior.`,
+        `Set onUnsupported:'fallback' to allow worktree + cred-strip + proposal-only behavior.`,
     );
   }
 
-  // 'fallback': audit the downgrade and return null (env-only v4).
+  // 'fallback': emit an HONEST audit that names exactly what guarantees remain.
+  // INVARIANT: we must never claim stronger confinement than the platform delivers.
+  // The worktree isolation, credential stripping (buildContainedEnv), and the
+  // proposal-only diff gate still hold — these are platform-independent layers.
+  // What is NOT present: an OS-level file-read jail or network-egress gate.
   audit({
     action: 'confinement.fallback',
     repo: ctx.worktree,
     sandboxId: null,
-    summary: `OS confinement not available (${reason}); running with env-only containment (v4 behavior).`,
+    summary:
+      `${reason}; ` +
+      `no OS sandbox active — relying on worktree isolation + cred-strip + proposal-only. ` +
+      `File-read jail and network-egress gate are NOT enforced on this platform.`,
     result: 'ok',
   });
 
