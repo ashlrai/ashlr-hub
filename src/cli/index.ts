@@ -46,6 +46,7 @@ import { planTidy, applyTidy } from '../core/tidy.js';
 import { openInEditor } from './open.js';
 import { pick } from './picker.js';
 import { cmdDoctor, cmdInit } from './doctor-init.js';
+import { cmdSetup } from './setup.js';
 import { pad, makeColors } from './ui.js';
 import type { AshlrConfig, AshlrIndex, IndexedItem, GitStatus, ToolsRegistry, McpRegistry } from '../core/types.js';
 
@@ -1422,6 +1423,10 @@ async function main(): Promise<void> {
 
       case 'init':
         process.exitCode = await cmdInit(rest);
+        break;
+
+      case 'setup':
+        process.exitCode = await cmdSetup(rest);
         break;
 
       case 'mcp': {

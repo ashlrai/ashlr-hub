@@ -22,6 +22,9 @@ import { listLocalModels, ollamaInstalled } from './run/model-manager.js';
 import { detectEditors, wireEditor } from './integrations/editors.js';
 import { getPhantomStatus } from './phantom.js';
 import { runDoctor } from './doctor.js';
+import { serviceStatus, install } from './daemon/service.js';
+import { fleetReadiness } from './fleet/engine-readiness.js';
+import { listEnrolled, enroll } from './sandbox/policy.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -219,6 +222,141 @@ async function stepPhantom(): Promise<OnboardStep> {
 }
 
 /**
+ * Step 6b: install the OS daemon service (idempotent — skip if already installed).
+ * Never throws; falls back to 'manual' on any error.
+ */
+export async function stepDaemonService(): Promise<OnboardStep> {
+  try {
+    const status = serviceStatus();
+    if (status.installed) {
+      const detail = status.running
+        ? `daemon service installed and running (${status.platformSpec})`
+        : `daemon service installed but not running — start with: ashlr daemon start`;
+      return step('daemon-service', 'ok', detail);
+    }
+    // Not installed — attempt install now.
+    await install();
+    return step('daemon-service', 'ok', `daemon service installed (${serviceStatus().platformSpec})`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return step(
+      'daemon-service',
+      'manual',
+      `Could not install daemon service: ${msg}. Run: ashlr daemon install`,
+    );
+  }
+}
+
+/**
+ * Step 6c: report fleet engine readiness — guidance only, never enters tokens.
+ * Each engine's fix string tells the user exactly what to do.
+ */
+export async function stepEngines(cfg: AshlrConfig): Promise<OnboardStep> {
+  try {
+    const results = fleetReadiness(cfg);
+    const total = results.length;
+    const ready = results.filter((r) => r.ready).length;
+
+    const notReadyFixes = results
+      .filter((r) => !r.ready && r.fix)
+      .map((r) => `${r.engine}: ${r.fix}`)
+      .join('; ');
+
+    if (ready === total) {
+      const names = results.map((r) => r.engine).join(', ');
+      return step('engines', 'ok', `${ready}/${total} engines ready (${names})`);
+    }
+
+    const names = results.map((r) => `${r.engine}:${r.ready ? '✓' : '✗'}`).join(' ');
+    const detail = `${ready}/${total} engines ready — ${names}${notReadyFixes ? '. Fix: ' + notReadyFixes : ''}`;
+    return step('engines', 'detected', detail);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return step('engines', 'manual', `Engine readiness probe failed: ${msg}`);
+  }
+}
+
+/**
+ * Step 6d: discover git repos under cfg.roots and enroll any not yet enrolled.
+ * Idempotent — enroll() is a no-op for already-enrolled repos.
+ * Never auto-enroll when there are no roots (safe default).
+ */
+export async function stepEnroll(cfg: AshlrConfig, opts: { yes: boolean }): Promise<OnboardStep> {
+  try {
+    const already = listEnrolled();
+    const roots: string[] = Array.isArray(cfg.roots) ? cfg.roots : [];
+
+    if (roots.length === 0) {
+      return step(
+        'enroll',
+        'skipped',
+        `No roots configured — run: ashlr config set roots <path> to add repos`,
+      );
+    }
+
+    // Discover git repos directly under each root (depth 1, non-recursive to keep it fast).
+    const { existsSync, readdirSync } = await import('node:fs');
+    const { join: pathJoin } = await import('node:path');
+
+    const discovered: string[] = [];
+    for (const root of roots) {
+      if (!existsSync(root)) continue;
+      let entries: string[] = [];
+      try {
+        entries = readdirSync(root, { withFileTypes: true })
+          .filter((d) => d.isDirectory())
+          .map((d) => pathJoin(root, d.name));
+      } catch {
+        continue;
+      }
+      for (const dir of entries) {
+        if (existsSync(pathJoin(dir, '.git'))) {
+          discovered.push(dir);
+        }
+      }
+    }
+
+    if (discovered.length === 0) {
+      return step(
+        'enroll',
+        'skipped',
+        `No git repos found under roots (${roots.join(', ')}) — add repos or adjust roots`,
+      );
+    }
+
+    // Only enroll when --yes (non-interactive / desktop app headless).
+    if (!opts.yes) {
+      const alreadyCount = discovered.filter((d) => already.includes(d)).length;
+      const newCount = discovered.length - alreadyCount;
+      return step(
+        'enroll',
+        'detected',
+        `Found ${discovered.length} repo(s) (${alreadyCount} already enrolled, ${newCount} new). ` +
+          `Re-run with --yes to enroll all, or: ashlr enroll <path>`,
+      );
+    }
+
+    // --yes: enroll all discovered repos (idempotent).
+    let enrolled = 0;
+    for (const repo of discovered) {
+      if (!already.includes(repo)) {
+        enroll(repo);
+        enrolled++;
+      }
+    }
+    const total = listEnrolled().length;
+    return step(
+      'enroll',
+      'ok',
+      `${enrolled} repo(s) newly enrolled, ${total} total enrolled`,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return step('enroll', 'manual', `Enrollment probe failed: ${msg}. Run: ashlr enroll <path>`);
+  }
+}
+
+/**
  * Doctor checks that genuinely block the hub from running. A `fail` on one of
  * these means setup is NOT ready.
  *
@@ -345,4 +483,49 @@ export async function onboard(
   nextSteps.push('try: ashlr run / ashlr swarm / ashlr tui');
 
   return { steps, ready, nextSteps };
+}
+
+// ---------------------------------------------------------------------------
+// Extended setup — superset used by `ashlr setup`
+// ---------------------------------------------------------------------------
+
+/**
+ * Run the full setup wizard: all onboard steps PLUS daemon-service, engines,
+ * and enroll. Used by `ashlr setup`; `ashlr init` continues to run only the
+ * original 7 steps so existing behavior is untouched.
+ *
+ * Same guarantees as onboard(): never throws, never hangs, never enters creds.
+ */
+export async function setupWizard(
+  cfg: AshlrConfig,
+  opts: { wire: boolean; yes: boolean },
+): Promise<OnboardResult> {
+  const base = await onboard(cfg, opts);
+
+  // Run the three new steps sequentially after the base onboard.
+  const daemonStep = await stepDaemonService();
+  const enginesStep = await stepEngines(cfg);
+  const enrollStep = await stepEnroll(cfg, opts);
+
+  const steps = [...base.steps, daemonStep, enginesStep, enrollStep];
+
+  // Augment nextSteps with wizard-specific guidance (before the final CTA).
+  const nextSteps = base.nextSteps.filter((s) => !s.startsWith('try:'));
+
+  if (daemonStep.status === 'manual') {
+    nextSteps.push('Install daemon service: ashlr daemon install');
+  }
+  if (enginesStep.status !== 'ok') {
+    nextSteps.push('Authenticate engines — see fix hints above (never stored by setup)');
+  }
+  if (enrollStep.status === 'detected') {
+    nextSteps.push('Enroll repos: ashlr setup --yes  (or: ashlr enroll <path>)');
+  }
+  if (enrollStep.status === 'manual') {
+    nextSteps.push('Enroll a repo manually: ashlr enroll <path>');
+  }
+
+  nextSteps.push('try: ashlr run / ashlr swarm / ashlr tui');
+
+  return { steps, ready: base.ready, nextSteps };
 }
