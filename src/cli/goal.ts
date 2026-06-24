@@ -8,18 +8,26 @@
  * (add → plan → advance); it adds NO new dispatch or mutation path. The
  * proposal-only + enrollment + kill-switch gates all live in core advanceGoal.
  *
+ * --direct mode (M84): skip milestone decomposition entirely. Runs the verbatim
+ * objective as a SINGLE sandboxed, proposal-only runSwarm call — the same
+ * confinement/cred-strip/diff-capture/proposal-filing path as `goals advance`,
+ * without the Design→Implement→Test→Document wrapper. Requires --project.
+ *
  * SAFETY: this module imports no outward-mutation primitive — it never applies
  * proposals, opens pull requests, pushes a remote, or deploys. It only sequences
  * the already-gated goals flow.
  */
 
+import { resolve } from 'node:path';
 import { makeColors } from './ui.js';
+import type { AshlrConfig, RunBudget, SwarmRun } from '../core/types.js';
 
 interface ParsedGoalArgs {
   objective: string;
   project?: string;
   allowCloud: boolean;
   planOnly: boolean;
+  direct: boolean;
   help: boolean;
 }
 
@@ -28,24 +36,166 @@ function parseArgs(args: string[]): ParsedGoalArgs {
   let project: string | undefined;
   let allowCloud = false;
   let planOnly = false;
+  let direct = false;
   let help = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === '--project' || a === '-p') project = args[++i];
     else if (a === '--allow-cloud') allowCloud = true;
     else if (a === '--plan-only') planOnly = true;
+    else if (a === '--direct') direct = true;
     else if (a === '--help' || a === '-h') help = true;
     else if (!a.startsWith('-')) positional.push(a);
   }
-  return { objective: positional.join(' ').trim(), project, allowCloud, planOnly, help };
+  return { objective: positional.join(' ').trim(), project, allowCloud, planOnly, direct, help };
 }
 
 const USAGE =
-  'Usage: ashlr goal "<objective>" [--project <repo>] [--allow-cloud] [--plan-only]\n' +
+  'Usage: ashlr goal "<objective>" [--project <repo>] [--allow-cloud] [--plan-only] [--direct]\n' +
   '\n' +
   '  Create a goal, plan it into milestones, and advance the next one as a\n' +
   '  sandboxed, PROPOSAL-ONLY run (review it via `ashlr inbox`). Routed across\n' +
-  '  the polyglot backend roster by capability + trust tier.';
+  '  the polyglot backend roster by capability + trust tier.\n' +
+  '\n' +
+  '  --direct  Skip milestone decomposition. Run the objective verbatim as a\n' +
+  '            SINGLE sandboxed proposal-only engine run. Requires --project.\n' +
+  '            Ideal for concrete tasks that need no Design→Implement→Test split.';
+
+// ---------------------------------------------------------------------------
+// --direct path: one sandboxed proposal-only runSwarm call, verbatim objective.
+// ---------------------------------------------------------------------------
+
+/** Hard per-direct-run budget — same defaults as advanceGoal's DEFAULT_ADVANCE_BUDGET. */
+const DIRECT_BUDGET: RunBudget = {
+  maxTokens: 200_000,
+  maxSteps: 40,
+  allowCloud: false,
+};
+
+async function runDirect(
+  objective: string,
+  project: string,
+  allowCloud: boolean,
+  col: ReturnType<typeof makeColors>,
+): Promise<number> {
+  const repo = resolve(project);
+
+  // Lazy-import the same sandboxed runner path used by advanceGoal internally.
+  // We reuse runSwarm + listProposals directly — no goal/milestone record needed
+  // for a single verbatim run.
+  let runSwarm: (
+    input: { goal: string; specId?: string },
+    cfg: AshlrConfig,
+    opts: {
+      sandbox: boolean;
+      requireSandbox: boolean;
+      propose: boolean;
+      budget: RunBudget;
+      allowCloud: boolean;
+      project: string;
+    },
+    sink: (e: unknown) => void,
+  ) => Promise<SwarmRun>;
+  let listProposals: (opts: { status: string }) => Array<{
+    id: string;
+    origin: string;
+    repo: string | null;
+    summary: string;
+  }>;
+  let loadConfig: () => AshlrConfig;
+  let assertMayMutate: (repo: string) => void;
+
+  try {
+    const [runner, inbox, config, policy] = await Promise.all([
+      import('../core/swarm/runner.js'),
+      import('../core/inbox/store.js'),
+      import('../core/config.js'),
+      import('../core/sandbox/policy.js'),
+    ]);
+    runSwarm = runner.runSwarm as typeof runSwarm;
+    listProposals = inbox.listProposals as typeof listProposals;
+    loadConfig = config.loadConfig as typeof loadConfig;
+    assertMayMutate = policy.assertMayMutate as typeof assertMayMutate;
+  } catch {
+    process.stderr.write(
+      col.red('error: ') + 'direct mode requires the M28 core (src/core/swarm/runner.js).\n',
+    );
+    return 1;
+  }
+
+  // ENROLLMENT-SCOPED: enforce before any swarm starts (mirrors advanceGoal).
+  try {
+    assertMayMutate(repo);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(col.red('error: ') + msg + '\n');
+    return 1;
+  }
+
+  const cfg = loadConfig();
+  const budget: RunBudget = { ...DIRECT_BUDGET, allowCloud };
+
+  let run: SwarmRun;
+  try {
+    // SANDBOXED + PROPOSAL-ONLY — these three flags are NON-NEGOTIABLE (same
+    // invariant as advanceGoal; confinement/cred-strip/diff-capture all apply).
+    run = await runSwarm(
+      { goal: objective },
+      cfg,
+      {
+        sandbox: true,
+        requireSandbox: true,
+        propose: true,
+        budget,
+        allowCloud,
+        project: repo,
+      },
+      () => {},
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(col.red('error: ') + msg + '\n');
+    return 1;
+  }
+
+  // Correlate the PENDING proposal the swarm emitted — mirrors findProposalForSwarm
+  // in advance.ts (read-only; we do NOT create or apply it).
+  let proposalId: string | null = null;
+  try {
+    const candidates = listProposals({ status: 'pending' }).filter(
+      (p) =>
+        p.origin === 'swarm' &&
+        (p.repo === repo || p.repo === null) &&
+        typeof p.summary === 'string' &&
+        p.summary.includes(`swarm=${run.id}`),
+    );
+    proposalId = candidates[0]?.id ?? null;
+  } catch {
+    /* best-effort read */
+  }
+
+  if (proposalId) {
+    console.log('');
+    console.log(col.green('  ✓ ') + col.bold('proposal filed') + col.dim(` (swarm ${run.id}, ${run.status})`));
+    console.log('');
+    console.log('  A ' + col.bold('PENDING') + ' inbox proposal was produced — nothing was applied.');
+    console.log(`  proposal: ${col.cyan(proposalId)}`);
+    console.log('');
+    console.log(col.dim('  review with `ashlr inbox`. No real working tree was mutated, pushed, or deployed.'));
+    return 0;
+  } else {
+    process.stderr.write(
+      col.yellow('! ') +
+        `direct run completed (swarm ${run.id}, status ${run.status}) but produced no PENDING proposal.\n`,
+    );
+    process.stderr.write(col.dim('  Inspect `ashlr swarm` for details.\n'));
+    return 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main export
+// ---------------------------------------------------------------------------
 
 export async function cmdGoal(args: string[]): Promise<number> {
   const tty = process.stdout.isTTY === true;
@@ -55,6 +205,24 @@ export async function cmdGoal(args: string[]): Promise<number> {
   if (parsed.help || !parsed.objective) {
     console.log(parsed.help ? USAGE : col.red('error: ') + 'an objective is required\n\n' + USAGE);
     return parsed.help ? 0 : 2;
+  }
+
+  // --direct: single sandboxed run, verbatim objective, no milestone planning.
+  if (parsed.direct) {
+    if (!parsed.project) {
+      process.stderr.write(
+        col.red('error: ') + '--direct requires --project <enrolled-repo>\n' +
+          '         (the objective runs directly against the repo; no planning context is created).\n',
+      );
+      return 2;
+    }
+
+    console.log('');
+    console.log(col.bold('  ashlr goal --direct') + col.dim(' — objective → single sandboxed run → proposal'));
+    console.log('  ' + col.cyan(parsed.objective));
+    console.log('');
+
+    return runDirect(parsed.objective, parsed.project, parsed.allowCloud, col);
   }
 
   // Reuse the proven, gated `ashlr goals` flow. cmdGoals routes advance through
