@@ -1,0 +1,22 @@
+{
+  "name": "ashlr-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tauri desktop wrapper for Ashlr Mission Control",
+  "scripts": {
+    "dev": "cargo tauri dev",
+    "build": "cargo tauri build",
+    "build:debug": "cargo tauri build --debug",
+    "icons": "cargo tauri icon assets/icon.svg",
+    "prepare-sidecar": "node scripts/prepare-sidecar.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "comments": {
+    "note": "npm/node is optional — the Tauri CLI can be invoked via `cargo tauri` instead. Both paths work; this package.json exists so IDEs that expect one don't complain."
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ashlr",
+  "version": "0.1.0",
+  "identifier": "ai.ashlr.desktop",
+
+  "build": {
+    "beforeDevCommand": "",
+    "devUrl": "http://127.0.0.1:7777",
+    "beforeBuildCommand": "",
+    "frontendDist": "../dist-placeholder"
+  },
+
+  "app": {
+    "windows": [
+      {
+        "title": "Ashlr Mission Control",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "url": "http://127.0.0.1:7777",
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' http://127.0.0.1:7777; connect-src http://127.0.0.1:7777 ws://127.0.0.1:7777; script-src 'self' 'unsafe-inline' http://127.0.0.1:7777; style-src 'self' 'unsafe-inline' http://127.0.0.1:7777; img-src 'self' data: http://127.0.0.1:7777; font-src 'self' http://127.0.0.1:7777"
+    },
+    "trayIcon": {
+      "iconPath": "icons/tray-icon.png",
+      "iconAsTemplate": true,
+      "tooltip": "Ashlr"
+    }
+  },
+
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": null,
+      "entitlements": null
+    },
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    },
+    "linux": {
+      "deb": {
+        "depends": []
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
+    "externalBin": [
+      "binaries/ashlr"
+    ]
+  },
+
+  "plugins": {
+    "shell": {
+      "open": false,
+      "sidecar": true
+    }
+  }
+}
