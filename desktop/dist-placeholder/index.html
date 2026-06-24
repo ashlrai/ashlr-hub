@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ashlr</title>
+    <style>
+      html, body {
+        margin: 0; height: 100%;
+        background: #111318; color: #e6e6ea;
+        font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        display: flex; align-items: center; justify-content: center;
+      }
+      .wrap { text-align: center; }
+      .mark { width: 56px; height: 56px; margin: 0 auto 18px; border-radius: 14px;
+        background: linear-gradient(160deg, #7C6FFF, #5A4FD4 55%, #3A3780);
+        box-shadow: 0 8px 28px rgba(124,111,255,.35); }
+      .t { font-weight: 600; letter-spacing: .2px; }
+      .s { color: #8b8b96; font-size: 13px; margin-top: 6px; }
+    </style>
+  </head>
+  <body>
+    <!--
+      The Ashlr desktop app loads Mission Control from the local sidecar
+      (http://127.0.0.1:7777) once the daemon is healthy — see src-tauri/src/main.rs.
+      This placeholder is the initial splash shown while the sidecar starts and
+      satisfies Tauri's bundler requirement for a frontendDist directory.
+    -->
+    <div class="wrap">
+      <div class="mark"></div>
+      <div class="t">Starting Ashlr…</div>
+      <div class="s">Bringing up Mission Control</div>
+    </div>
+  </body>
+</html>
