@@ -26,6 +26,7 @@
 
 import { makeColors } from './ui.js';
 import type { AshlrConfig, DaemonConfig, DaemonState } from '../core/types.js';
+import type { ServiceInstallOptions, ServiceStatusResult } from '../core/daemon/service.js';
 
 // ---------------------------------------------------------------------------
 // Lazy loaders — degrade gracefully if a core module is not yet built.
@@ -392,8 +393,146 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
 // Public entry point
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Lazy loader — service manager (M93)
+// ---------------------------------------------------------------------------
+
+async function importServiceManager(): Promise<{
+  install: (opts: ServiceInstallOptions) => Promise<void>;
+  uninstall: (opts: ServiceInstallOptions) => Promise<void>;
+  serviceStatus: (opts: ServiceInstallOptions) => ServiceStatusResult;
+} | null> {
+  try {
+    const mod = await import('../core/daemon/service.js');
+    return { install: mod.install, uninstall: mod.uninstall, serviceStatus: mod.serviceStatus };
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: install
+// ---------------------------------------------------------------------------
+
+async function cmdDaemonInstall(args: string[]): Promise<number> {
+  const tty = process.stdout.isTTY === true;
+  const col = makeColors(tty);
+
+  const autostart = !args.includes('--no-autostart');
+
+  const svcMod = await importServiceManager();
+  if (!svcMod) {
+    console.error(col.red('error: ') + 'daemon service manager not available (M93 module not built).');
+    return 1;
+  }
+
+  // Pull budget/interval/parallel from config for the service args
+  const loadConfig = await importConfig();
+  const opts: ServiceInstallOptions = { autostart };
+  if (loadConfig) {
+    try {
+      const cfg = loadConfig();
+      if (cfg.daemon?.dailyBudgetUsd !== undefined) opts.budget = cfg.daemon.dailyBudgetUsd;
+      if (cfg.daemon?.intervalMs !== undefined) opts.intervalMs = cfg.daemon.intervalMs;
+      if (cfg.daemon?.parallel !== undefined) opts.parallel = cfg.daemon.parallel;
+    } catch {
+      // proceed with defaults
+    }
+  }
+
+  try {
+    await svcMod.install(opts);
+  } catch (e) {
+    console.error(col.red('error: ') + 'Service installation failed: ' + (e instanceof Error ? e.message : String(e)));
+    return 1;
+  }
+
+  const status = svcMod.serviceStatus(opts);
+  console.log('');
+  console.log(col.green('  ✓ daemon service installed') + col.dim(` [${status.platformSpec}]`));
+  if (status.serviceFilePath) {
+    console.log(col.dim(`  service file: ${status.serviceFilePath}`));
+  }
+  if (autostart) {
+    console.log(col.dim('  auto-start on login: enabled'));
+  }
+  console.log(col.dim('  Use `ashlr daemon service-status` to verify the OS service state.'));
+  console.log('');
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: uninstall
+// ---------------------------------------------------------------------------
+
+async function cmdDaemonUninstall(args: string[]): Promise<number> {
+  const tty = process.stdout.isTTY === true;
+  const col = makeColors(tty);
+  void args; // no flags currently
+
+  const svcMod = await importServiceManager();
+  if (!svcMod) {
+    console.error(col.red('error: ') + 'daemon service manager not available (M93 module not built).');
+    return 1;
+  }
+
+  try {
+    await svcMod.uninstall({});
+  } catch (e) {
+    console.error(col.red('error: ') + 'Service uninstall failed: ' + (e instanceof Error ? e.message : String(e)));
+    return 1;
+  }
+
+  console.log('');
+  console.log(col.green('  ✓ daemon service uninstalled') + col.dim(' — service file removed and unregistered.'));
+  console.log('');
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: service-status
+// ---------------------------------------------------------------------------
+
+async function cmdDaemonServiceStatus(args: string[]): Promise<number> {
+  const tty = process.stdout.isTTY === true;
+  const col = makeColors(tty);
+  const jsonMode = args.includes('--json');
+
+  const svcMod = await importServiceManager();
+  if (!svcMod) {
+    console.error(col.red('error: ') + 'daemon service manager not available (M93 module not built).');
+    return 1;
+  }
+
+  const status = svcMod.serviceStatus({});
+
+  if (jsonMode) {
+    console.log(JSON.stringify(status, null, 2));
+    return 0;
+  }
+
+  console.log('');
+  console.log(col.bold('  ashlr daemon service-status'));
+  console.log('');
+  console.log('  ' + col.bold('platform:   ') + col.dim(status.platformSpec));
+  console.log('  ' + col.bold('installed:  ') + (status.installed ? col.green('yes') : col.dim('no')));
+  console.log('  ' + col.bold('running:    ') + (status.running ? col.green('yes') : col.dim('no')));
+  if (status.serviceFilePath) {
+    console.log('  ' + col.bold('file:       ') + col.dim(status.serviceFilePath));
+  }
+  if (status.errorLog) {
+    console.log('  ' + col.bold('error:      ') + col.red(status.errorLog));
+  }
+  console.log('');
+  if (!status.installed) {
+    console.log(col.dim('  Run `ashlr daemon install` to register as an OS service.'));
+    console.log('');
+  }
+  return 0;
+}
+
 /**
- * `ashlr daemon [start|stop|status] [flags]`
+ * `ashlr daemon [start|stop|status|install|uninstall|service-status] [flags]`
  *
  * Returns a process exit code (0 = success, non-zero = error/usage).
  */
@@ -411,11 +550,17 @@ export async function cmdDaemon(args: string[]): Promise<number> {
       return cmdDaemonStop();
     case 'status':
       return cmdDaemonStatus(rest.includes('--json'));
+    case 'install':
+      return cmdDaemonInstall(rest);
+    case 'uninstall':
+      return cmdDaemonUninstall(rest);
+    case 'service-status':
+      return cmdDaemonServiceStatus(rest);
     default:
       console.error(col.red('error: ') + `Unknown daemon subcommand: ${sub}`);
       console.error(
         col.dim(
-          'Usage: ashlr daemon [start|stop|status] [--once] [--dry-run] [--budget <usd>] [--interval <ms>] [--parallel <n>] [--json]',
+          'Usage: ashlr daemon [start|stop|status|install|uninstall|service-status]',
         ),
       );
       return 2;
