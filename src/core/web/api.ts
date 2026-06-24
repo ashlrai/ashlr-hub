@@ -18,8 +18,9 @@
  *   GET /api/daemon            -> loadDaemonState() (read-only; M24; no control endpoint)
  *   GET /api/events            -> Server-Sent Events stream
  *
- * Mutating route (ONLY when ctx.allowDispatch === true + token header):
+ * Mutating routes (ONLY when ctx.allowDispatch === true + token header):
  *   POST /api/run              -> runGoal (budget-capped, local-first)
+ *   POST /api/open             -> openInEditor/openInFinder for an enrolled repo path (M100)
  *
  * SECURITY:
  *  - Never throws (500 on internal error).
@@ -35,6 +36,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual, randomBytes } from 'node:crypto';
+import { resolve as resolvePath } from 'node:path';
 
 import type { AshlrConfig } from '../types.js';
 import { buildSnapshot } from '../dashboard.js';
@@ -52,6 +54,9 @@ import { buildFleetStatus } from '../fleet/status.js';
 import { buildControlSnapshot } from './control.js';
 // M90: Fleet-Activity panel.
 import { buildFleetActivity } from './control.js';
+// M100: desktop-open actions — reuse CLI launchers (read-only import; no mutation).
+import { openInEditor, openInFinder } from '../../cli/open.js';
+import { listEnrolled } from '../sandbox/policy.js';
 
 // ---------------------------------------------------------------------------
 // SSE registry — shared across all open SSE connections so server.ts can
@@ -826,6 +831,94 @@ export async function handleApi(
         : 50;
       const snapshot = await buildControlSnapshot(cfg);
       sendJson(res, 200, snapshot.logs.slice(0, tail));
+      return true;
+    }
+
+    // ── POST /api/open ────────────────────────────────────────────────────────
+    // M100: open a repo or file on the local desktop (editor / Finder).
+    //
+    // Security model:
+    //  - Route does not exist (404) unless allowDispatch is true.
+    //  - Requires x-ashlr-token + Content-Type: application/json (same gate as
+    //    approve/reject inbox routes).
+    //  - Body: { repo: string, file?: string, action: 'editor' | 'finder' }
+    //  - `repo` MUST exactly match one of listEnrolled() (absolute, resolved).
+    //    Unknown or non-enrolled paths → 403 (not arbitrary open).
+    //  - If `file` is provided, resolve(repo, file) must be WITHIN the repo
+    //    (path-traversal check). Opens the file; otherwise opens the repo dir.
+    //  - Only 'editor' and 'finder' actions are accepted — no shell exec.
+    //  - Never opens paths from untrusted input outside enrolled repos.
+    if (path === '/api/open' && method === 'POST') {
+      if (!ctx.allowDispatch) {
+        sendJson(res, 404, { error: 'not found' });
+        return true;
+      }
+
+      if (!passesMutationGate(req, res, ctx.token)) {
+        return true;
+      }
+
+      let body: unknown;
+      try {
+        const raw = await readBody(req);
+        body = JSON.parse(raw);
+      } catch {
+        sendJson(res, 400, { error: 'invalid JSON body' });
+        return true;
+      }
+
+      if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+        sendJson(res, 400, { error: 'body must be a JSON object' });
+        return true;
+      }
+
+      const obj = body as Record<string, unknown>;
+      const rawRepo = typeof obj['repo'] === 'string' ? obj['repo'].trim() : '';
+      const rawFile = typeof obj['file'] === 'string' ? obj['file'].trim() : '';
+      const action = typeof obj['action'] === 'string' ? obj['action'] : 'editor';
+
+      if (!rawRepo) {
+        sendJson(res, 400, { error: '"repo" (string) is required' });
+        return true;
+      }
+
+      if (action !== 'editor' && action !== 'finder') {
+        sendJson(res, 400, { error: '"action" must be "editor" or "finder"' });
+        return true;
+      }
+
+      // Resolve the requested repo path and verify it is enrolled.
+      const resolvedRepo = resolvePath(rawRepo);
+      const enrolled = listEnrolled();
+      if (!enrolled.includes(resolvedRepo)) {
+        sendJson(res, 403, { error: 'path not in an enrolled repo' });
+        return true;
+      }
+
+      // If a file path was provided, ensure it resolves WITHIN the repo root.
+      let targetPath = resolvedRepo;
+      if (rawFile) {
+        const resolvedFile = resolvePath(resolvedRepo, rawFile);
+        // Path-traversal guard: the resolved file must be under the repo root.
+        const repoWithSep = resolvedRepo.endsWith('/') ? resolvedRepo : resolvedRepo + '/';
+        if (resolvedFile !== resolvedRepo && !resolvedFile.startsWith(repoWithSep)) {
+          sendJson(res, 403, { error: 'file path escapes the repo root' });
+          return true;
+        }
+        targetPath = resolvedFile;
+      }
+
+      try {
+        if (action === 'finder') {
+          openInFinder(targetPath);
+        } else {
+          openInEditor(targetPath, cfg);
+        }
+        sendJson(res, 200, { ok: true, action, path: targetPath });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        send500(res, `open failed: ${msg}`);
+      }
       return true;
     }
 

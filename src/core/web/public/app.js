@@ -181,6 +181,39 @@ async function apiPost(path, token) {
   return json;
 }
 
+// Show a brief toast notification. Uses #toast-region if present (see index.html).
+function showToast(msg) {
+  try {
+    const region = document.getElementById('toast-region') ?? document.body;
+    const t = el('div', { cls: 'toast', 'aria-live': 'polite' }, msg);
+    region.appendChild(t);
+    setTimeout(() => { try { region.removeChild(t); } catch {} }, 3500);
+  } catch {}
+}
+
+// Open an enrolled repo (or file within one) on the local desktop.
+// action: 'editor' | 'finder'. Requires a session token.
+async function apiOpenRepo(repo, action) {
+  const token = getToken();
+  if (!token) {
+    showToast('No session token — click the gear icon to set it.');
+    return;
+  }
+  try {
+    const res = await fetch(API_BASE + '/api/open', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-ashlr-token': token },
+      body: JSON.stringify({ repo, action }),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      showToast(`Open failed: ${j.error ?? res.status}`);
+    }
+  } catch (err) {
+    showToast(`Open failed: ${err.message}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Token management (sessionStorage only — never localStorage, never URL)
 // ---------------------------------------------------------------------------
@@ -1651,8 +1684,19 @@ function renderInbox() {
     ));
   } else {
     const list = el('div', { cls: 'inbox-list' });
+    // Group by repo for scannability; unscoped proposals go last.
+    const groups = new Map();
     for (const p of proposals) {
-      list.appendChild(buildInboxRow(p));
+      const key = p.repo ?? '(unscoped)';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(p);
+    }
+    for (const [repo, group] of groups) {
+      const repoLabel = repo === '(unscoped)' ? '(unscoped)' : (repo.split('/').pop() || repo);
+      list.appendChild(el('div', { cls: 'inbox-group-header' }, repoLabel));
+      for (const p of group) {
+        list.appendChild(buildInboxRow(p));
+      }
     }
     section.appendChild(list);
   }
@@ -1664,13 +1708,24 @@ function buildInboxRow(p) {
   const row = el('div', { cls: 'inbox-row', style: 'cursor:pointer' });
   const repoBase = (p.repo ?? '').split('/').filter(Boolean).pop() ?? p.repo ?? '—';
 
+  const metaChildren = [
+    el('span', { cls: 'badge badge-kind' }, p.kind ?? 'proposal'),
+    el('span', { cls: 'inbox-row__repo' }, repoBase),
+    el('span', { cls: 'ts' }, fmtRelative(p.createdAt)),
+  ];
+  // Show open-in-editor button when a session token is present.
+  if (getToken() && p.repo) {
+    metaChildren.push(el('button', {
+      cls: 'open-repo-btn',
+      type: 'button',
+      title: `Open ${p.repo} in editor`,
+      onClick: (e) => { e.stopPropagation(); apiOpenRepo(p.repo, 'editor'); },
+    }, '↗ Open'));
+  }
+
   row.appendChild(el('div', { cls: 'inbox-row__main' },
     el('span', { cls: 'inbox-row__title', title: p.title }, truncate(p.title ?? '(untitled)', 80)),
-    el('div', { cls: 'inbox-row__meta' },
-      el('span', { cls: 'badge badge-kind' }, p.kind ?? 'proposal'),
-      el('span', { cls: 'inbox-row__repo' }, repoBase),
-      el('span', { cls: 'ts' }, fmtRelative(p.createdAt))
-    )
+    el('div', { cls: 'inbox-row__meta' }, ...metaChildren)
   ));
 
   row.addEventListener('click', async () => {
@@ -1714,28 +1769,52 @@ function buildInboxDetail(p) {
   // Summary card
   const summary = el('div', { cls: 'inbox-detail__summary card' });
   summary.appendChild(el('h2', { cls: 'card-title' }, p.title ?? '(untitled)'));
-  summary.appendChild(infoGrid([
-    ['Kind', p.kind ?? '—'],
-    ['Repo', repoBase],
-    ['Origin', p.origin ?? '—'],
-    ['Status', p.status ?? '—'],
+  const infoPairs = [
+    ['Kind',    p.kind ?? '—'],
+    ['Repo',    p.repo ?? '—'],
+    ['Engine',  p.engine ?? '—'],
+    ['Risk',    p.riskLevel ?? '—'],
+    ['Origin',  p.origin ?? '—'],
+    ['Status',  p.status ?? '—'],
     ['Created', fmtDate(p.createdAt)],
-  ]));
+  ];
+  summary.appendChild(infoGrid(infoPairs));
   detail.appendChild(summary);
 
-  // Diff
+  // Diff — per-line color rendering (added/removed/meta)
   if (p.diff) {
     const diffSection = el('div', { cls: 'inbox-detail__diff-wrap' });
     diffSection.appendChild(el('h3', { cls: 'section-heading' }, 'Diff'));
     const pre = el('pre', { cls: 'inbox-diff' });
-    pre.innerHTML = escapeHtml(p.diff);
+    for (const line of p.diff.split('\n')) {
+      const lineCls =
+        (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@'))
+          ? 'diff-line--meta'
+          : line.startsWith('+') ? 'diff-line--added'
+          : line.startsWith('-') ? 'diff-line--removed'
+          : '';
+      const span = document.createElement('span');
+      if (lineCls) span.className = lineCls;
+      span.textContent = line + '\n';
+      pre.appendChild(span);
+    }
     diffSection.appendChild(pre);
     detail.appendChild(diffSection);
   }
 
-  // Approve / Reject buttons + result
+  // Approve / Reject buttons + open + result
   const actionsDiv = el('div', { cls: 'inbox-detail__actions' });
   const resultLine = el('div', { cls: 'inbox-detail__result', 'aria-live': 'polite' });
+
+  // "Open in editor" — available whenever a token is set, independent of dispatchEnabled.
+  if (getToken() && p.repo) {
+    actionsDiv.appendChild(el('button', {
+      cls: 'btn open-repo-btn',
+      type: 'button',
+      title: `Open ${p.repo} in editor`,
+      onClick: () => apiOpenRepo(p.repo, 'editor'),
+    }, '↗ Open in editor'));
+  }
 
   const approveBtn = el('button', {
     cls: 'btn btn-primary',
@@ -2528,6 +2607,7 @@ function renderFleetActivity() {
   } else {
     const wrap = el('div', { cls: 'table-wrap fa-card-body' });
     const tbl = el('table');
+    const hasToken = Boolean(getToken());
     tbl.appendChild(el('thead', {},
       el('tr', {},
         el('th', {}, 'Repo'),
@@ -2535,17 +2615,29 @@ function renderFleetActivity() {
         el('th', {}, 'Merged'),
         el('th', {}, 'Pending'),
         el('th', {}, 'Declined'),
+        hasToken ? el('th', {}) : null,
       )
     ));
     const tbody = el('tbody');
     for (const r of repos) {
       const repoName = (r.repo ?? '(unscoped)').split('/').pop() || r.repo;
+      const openCell = (hasToken && r.repo)
+        ? el('td', {},
+            el('button', {
+              cls: 'open-repo-btn',
+              type: 'button',
+              title: `Open ${r.repo} in editor`,
+              onClick: () => apiOpenRepo(r.repo, 'editor'),
+            }, '↗')
+          )
+        : el('td', {});
       tbody.appendChild(el('tr', {},
         el('td', { title: r.repo }, repoName),
         el('td', {}, String(r.proposed ?? 0)),
         el('td', { cls: r.autoMerged > 0 ? 'fa-cell-green' : '' }, String(r.autoMerged ?? 0)),
         el('td', { cls: r.pending > 0 ? 'fa-cell-pending' : '' }, String(r.pending ?? 0)),
         el('td', { cls: r.declined > 0 ? 'fa-cell-red' : '' }, String(r.declined ?? 0)),
+        openCell,
       ));
     }
     tbl.appendChild(tbody);

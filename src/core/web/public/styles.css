@@ -1911,6 +1911,45 @@ pre code {
 .inbox-detail__result--ok  { color: var(--status-done); }
 .inbox-detail__result--err { color: var(--status-failed); }
 
+/* ── M100: diff line colouring ──────────────────────────────────────────── */
+.diff-line--added   { color: var(--status-ok);   background: rgba(34,211,160,0.07); display: block; }
+.diff-line--removed { color: var(--status-fail);  background: rgba(240,78,78,0.07);  display: block; }
+.diff-line--meta    { color: var(--text-muted);   display: block; }
+
+/* Open-in-editor inline action button */
+.open-repo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  background: var(--bg-elevated);
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  line-height: 1.6;
+  transition: background var(--transition), border-color var(--transition);
+}
+.open-repo-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-dim);
+}
+
+/* Inbox repo-group header (grouped pending list) */
+.inbox-group-header {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 12px 0 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
 /* ---------------------------------------------------------------------------
    35. M32 — Daemon view
    --------------------------------------------------------------------------- */
