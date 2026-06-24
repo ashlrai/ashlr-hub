@@ -12,6 +12,9 @@
     "core:app:allow-app-hide",
     "core:app:allow-app-show",
     "shell:allow-execute",
-    "shell:allow-open"
+    "shell:allow-open",
+    "shell:allow-spawn",
+    "core:event:allow-listen",
+    "core:event:allow-emit"
   ]
 }

@@ -85,17 +85,43 @@ desktop/
 └── package.json             # Optional npm wrapper around cargo tauri commands
 ```
 
+### First-Run Setup
+
+On the **very first launch** (detected by the absence of
+`~/.ashlr/.desktop-initialized`), the app automatically runs:
+
+```
+ashlr setup --yes
+```
+
+via the sidecar before starting `ashlr serve`.  This performs headless
+first-run configuration: writing config, enrolling engines, and installing the
+daemon.
+
+Behaviour:
+- The webview receives an `ashlr-setup-started` event (show a "Setting
+  up..." banner if desired).
+- stdout/stderr are logged as `[ashlr-setup]` lines in the terminal.
+- On completion (exit code 0 or non-zero) the marker is written and an
+  `ashlr-setup-done` event is emitted with the exit code.
+- **If setup errors**, the app continues to the dashboard anyway — setup
+  failure is never fatal.  The marker is still written so the next launch
+  skips this entirely.
+- To force re-run: `rm ~/.ashlr/.desktop-initialized`.
+
 ### Sidecar Lifecycle
 
 1. `main()` sets up Tauri then calls `setup()`.
-2. `setup()` calls `app.shell().sidecar("ashlr").args(["serve"]).spawn()`.
+2. `setup()` checks `~/.ashlr/.desktop-initialized`.  If absent, runs
+   `ashlr setup --yes` asynchronously (first-run path above).
+3. `setup()` calls `app.shell().sidecar("ashlr").args(["serve"]).spawn()`.
    Tauri resolves `binaries/ashlr-<host-triple>` automatically.
-3. A background thread calls `wait_for_server()` which polls `127.0.0.1:7777`
+4. A background thread calls `wait_for_server()` which polls `127.0.0.1:7777`
    via TCP every 250 ms for up to 30 s.
-4. Once the port accepts a connection, the main `WebviewWindow` is shown.
-5. The `CommandChild` handle is stored in managed state.
-6. On **Quit** (tray menu) the child is `.kill()`-ed before `app.exit(0)`.
-7. The X/close button on the window calls `api.prevent_close()` + `win.hide()`
+5. Once the port accepts a connection, the main `WebviewWindow` is shown.
+6. The `CommandChild` handle is stored in managed state.
+7. On **Quit** (tray menu) the child is `.kill()`-ed before `app.exit(0)`.
+8. The X/close button on the window calls `api.prevent_close()` + `win.hide()`
    so the app keeps running in the tray — the only way to fully quit is via
    the tray menu.
 
@@ -127,44 +153,64 @@ desktop/
 
 ## Open Items (required for a shippable build)
 
-### 1. Bundled Runtime — CRITICAL
+### 1. Bundled Runtime — SHIPPED
 
-**Problem:** The existing `bin/ashlr` is a Node.js shebang script.  Shipping
-it as the sidecar would require Node.js to be installed on the end-user's
-machine, defeating the purpose of the desktop app.
+**Solution:** Bun `--compile` SEA via `npm run build:binary` (see `scripts/build-sea.mjs`).
 
-**Decision needed:** Bun SEA (preferred) or Node.js SEA.
-
-#### Option A — Bun `--compile` (recommended)
 ```bash
-bun build --compile --outfile binaries/ashlr-raw src/cli/index.ts
+# From the repo root:
+npm run build:binary
+# Produces:
+#   dist-bin/ashlr        — self-contained native binary (~10–15 MB)
+#   dist-bin/public/      — SPA assets (index.html, app.js, styles.css)
 ```
-Produces a single ~10 MB native binary per platform.  Bun embeds its own
-JS/TS runtime.  No Node required at runtime.
 
-Requires:
-- Confirming `src/cli/index.ts` is the correct entry point for the CLI.
-- Cross-compilation: run on each target OS in CI (or use Bun's upcoming
-  cross-compile flag once stable).
+**How it works:**
+- `scripts/build-sea.mjs` runs `npm run build` (tsc + copy-assets), then writes
+  a thin shim entry (`dist-bin/_entry.js`) that sets `ASHLR_WEB_PUBLIC` to the
+  sibling `public/` dir via Bun's `import.meta.dir` before importing the CLI.
+- Bun compiles the shim + all dependencies into a single native binary.
+- `ASHLR_WEB_PUBLIC` override was added to `assetsDir()` in `src/core/web/server.ts`
+  (fully backward-compatible: env wins, else existing `import.meta.url` logic).
+- `desktop/scripts/prepare-sidecar.mjs` copies both `dist-bin/ashlr` and
+  `dist-bin/public/` into `src-tauri/binaries/`.
 
-#### Option B — Node.js SEA (Node 21+)
-See `sea-config.json` approach in https://nodejs.org/api/single-executable-applications.html.
-Heavier (~30 MB) and more steps.
+**Sidecar prep:**
+```bash
+cd desktop
+node scripts/prepare-sidecar.mjs
+# Copies: dist-bin/ashlr → src-tauri/binaries/ashlr-<triple>
+#         dist-bin/public/ → src-tauri/binaries/ashlr-public-<triple>/
+```
 
-**TODO:** Wire chosen approach into GitHub Actions (`.github/workflows/release.yml`).
+**TODO:** Wire into GitHub Actions (`.github/workflows/release.yml`) — matrix
+build per target OS, then `prepare-sidecar.mjs --target <triple>`.
 
 ### 2. App Icons
 
-All files in `src-tauri/icons/` are placeholders.  See
-`src-tauri/icons/PLACEHOLDER.md` for exact size/format requirements.
+A branded SVG source is at `src-tauri/icons/icon.svg` (three stacked bars
+motif on a dark charcoal background — Ashlr's "fleet" mark, violet/indigo
+palette).
 
-Quick start: design a source SVG, then:
+Generate all required sizes with one command:
 ```bash
-cargo tauri icon path/to/icon.svg
+# From repo root or desktop/:
+cd desktop/src-tauri/icons
+./generate-icons.sh
+# Equivalent to: cd desktop/src-tauri && cargo tauri icon icons/icon.svg
 ```
 
-The tray icon (`tray-icon.png`, 22×22 px, monochrome) must be added manually
-after running `cargo tauri icon`.
+This produces:
+- `32x32.png`, `128x128.png`, `128x128@2x.png` — Linux / Windows
+- `icon.icns` — macOS bundle icon
+- `icon.ico` — Windows installer icon
+- `tray-icon.png` — copied from 32x32 (replace with a monochrome
+  template variant for proper macOS dark-mode tray appearance)
+
+Requires: `cargo install tauri-cli --version "^2"` (Tauri CLI 2.x).
+
+The tray icon path (`icons/tray-icon.png`) is referenced in both
+`tauri.conf.json` (app.trayIcon) and `src/main.rs` (runtime load).
 
 ### 3. Code Signing & Notarization
 

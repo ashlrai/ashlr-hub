@@ -48,6 +48,30 @@ fn wait_for_server() -> bool {
     false
 }
 
+/// Return `~/.ashlr/.desktop-initialized` — the first-run marker path.
+fn desktop_initialized_marker() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".ashlr")
+        .join(".desktop-initialized")
+}
+
+/// Returns `true` if this is the very first launch (marker absent).
+fn is_first_run() -> bool {
+    !desktop_initialized_marker().exists()
+}
+
+/// Write the first-run marker so subsequent launches skip setup.
+fn mark_initialized() {
+    let marker = desktop_initialized_marker();
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&marker, b"");
+}
+
 /// Return the path to `~/.ashlr/KILL`.
 fn kill_switch_path() -> PathBuf {
     let home = std::env::var("HOME")
@@ -76,10 +100,83 @@ fn toggle_kill_switch() -> bool {
     }
 }
 
+// ── first-run setup ──────────────────────────────────────────────────────────
+
+/// Run `ashlr setup --yes` via the sidecar (non-blocking, fire-and-forget).
+///
+/// On completion (success or error) the marker is written so the next launch
+/// skips this entirely.  If setup fails the app continues normally — the user
+/// will land on the dashboard and can run setup manually.
+fn run_first_time_setup(app: &tauri::App<impl Runtime>) {
+    eprintln!("[ashlr-desktop] First launch detected — running `ashlr setup --yes`");
+
+    let handle: AppHandle<_> = app.handle().clone();
+    let _ = handle.emit("ashlr-setup-started", ());
+
+    match app
+        .shell()
+        .sidecar("ashlr")
+        .expect("ashlr sidecar not configured")
+        .args(["setup", "--yes"])
+        .spawn()
+    {
+        Ok((mut rx, _child)) => {
+            tauri::async_runtime::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        CommandEvent::Stdout(line) => {
+                            eprintln!("[ashlr-setup] {}", String::from_utf8_lossy(&line));
+                        }
+                        CommandEvent::Stderr(line) => {
+                            eprintln!("[ashlr-setup] ERR {}", String::from_utf8_lossy(&line));
+                        }
+                        CommandEvent::Terminated(status) => {
+                            if status.code == Some(0) {
+                                eprintln!("[ashlr-desktop] setup completed successfully");
+                            } else {
+                                eprintln!(
+                                    "[ashlr-desktop] setup exited with code {:?} — continuing anyway",
+                                    status.code
+                                );
+                            }
+                            // Always mark initialized — never retry on every launch.
+                            mark_initialized();
+                            let _ = handle.emit("ashlr-setup-done", status.code);
+                            break;
+                        }
+                        CommandEvent::Error(e) => {
+                            eprintln!("[ashlr-desktop] setup spawn error: {e}");
+                            mark_initialized();
+                            let _ = handle.emit("ashlr-setup-done", -1_i32);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+        Err(e) => {
+            // Sidecar could not be launched (e.g. binary missing in dev).
+            // Log, mark, and continue — the app is still usable.
+            eprintln!("[ashlr-desktop] could not spawn setup sidecar: {e} — skipping first-run setup");
+            mark_initialized();
+            let _ = handle.emit("ashlr-setup-done", -1_i32);
+        }
+    }
+}
+
 // ── app setup ────────────────────────────────────────────────────────────────
 
 fn setup<R: Runtime>(app: &mut tauri::App<R>) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
+
+    // ── first-run: run `ashlr setup --yes` once if the marker is absent ──────
+    //
+    // Runs before `ashlr serve` so config/engines are in place before the
+    // server starts.  Idempotent — skipped entirely if the marker exists.
+    if is_first_run() {
+        run_first_time_setup(app);
+    }
 
     // ── spawn `ashlr serve` as a sidecar ─────────────────────────────────────
     let (mut rx, child) = app

@@ -1,0 +1,236 @@
+# release-desktop.yml — tag-triggered desktop installer builds (Tauri v2).
+#
+# Trigger: pushing a tag `desktop-v<X.Y.Z>`, or manual workflow_dispatch.
+#
+# Per-OS matrix:
+#   macos-latest      → .dmg  (arm64 native; universal via --target universal-apple-darwin)
+#   windows-latest    → .msi + NSIS .exe
+#   ubuntu-latest     → .AppImage  (+ .deb)
+#
+# Sidecar pipeline (required before `cargo tauri build`):
+#   1. `bun run build`          — builds the @ashlr/hub npm package
+#   2. `node scripts/build-sea.mjs`          — compiles the Bun SEA binary to dist-bin/
+#   3. `node desktop/scripts/prepare-sidecar.mjs` — copies it into src-tauri/binaries/<triple>
+#
+# ── Code-signing secrets (ALL OPTIONAL for unsigned dev builds) ──────────────
+#
+#   macOS signing + notarization (Tauri docs: https://tauri.app/distribute/sign/macos/)
+#     APPLE_CERTIFICATE            — base64-encoded .p12 certificate
+#     APPLE_CERTIFICATE_PASSWORD   — password for the .p12
+#     APPLE_SIGNING_IDENTITY       — e.g. "Developer ID Application: Acme Corp (TEAMID)"
+#     APPLE_ID                     — Apple ID email for notarytool
+#     APPLE_PASSWORD               — App-specific password for notarytool
+#     APPLE_TEAM_ID                — 10-char Apple Developer team ID
+#
+#   Windows Authenticode signing (Tauri docs: https://tauri.app/distribute/sign/windows/)
+#     WINDOWS_CERTIFICATE          — base64-encoded .pfx certificate
+#     WINDOWS_CERTIFICATE_PASSWORD — password for the .pfx
+#
+#   If none of these are set, Tauri builds and packages unsigned binaries —
+#   perfectly functional for dev / internal distribution.
+#
+# ── Required repo permission ─────────────────────────────────────────────────
+#   contents: write  (to create the GitHub release and upload assets)
+
+name: Release Desktop
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. desktop-v0.1.0). Used only for naming."
+        required: false
+        default: "desktop-v0.0.0-dev"
+
+concurrency:
+  group: release-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pin Rust toolchain to the minimum version the Cargo.toml declares.
+  RUST_VERSION: "1.77"
+
+jobs:
+  # ── 1. Build installers on each OS ─────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS — arm64 native; set MACOS_UNIVERSAL=true below to build universal
+          - os: macos-latest
+            rust_targets: "aarch64-apple-darwin x86_64-apple-darwin"
+            tauri_args: "--target universal-apple-darwin"
+            artifact_label: macos
+
+          # Windows — MSVC target (default on windows-latest)
+          - os: windows-latest
+            rust_targets: ""
+            tauri_args: ""
+            artifact_label: windows
+
+          # Linux — AppImage (default) + .deb
+          - os: ubuntu-latest
+            rust_targets: ""
+            tauri_args: ""
+            artifact_label: linux
+
+    permissions:
+      contents: write   # upload release assets
+      id-token: write   # for future provenance / attestation
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Linux system deps for WebKit / AppImage ──────────────────────────
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            patchelf \
+            file
+
+      # ── Bun ─────────────────────────────────────────────────────────────────
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # ── Node (needed by prepare-sidecar.mjs which uses plain node APIs) ────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # ── Rust ─────────────────────────────────────────────────────────────────
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.rust_targets }}
+
+      # Cargo cache — key on Cargo.lock so hits are maximally useful.
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            desktop/src-tauri/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # ── Install npm dependencies (root workspace) ────────────────────────────
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
+
+      # ── Build the @ashlr/hub package ────────────────────────────────────────
+      - name: Build @ashlr/hub
+        run: bun run build
+
+      # ── Build the Bun SEA sidecar binary ────────────────────────────────────
+      - name: Build SEA sidecar (dist-bin/ashlr-<triple>)
+        run: node scripts/build-sea.mjs
+
+      # ── Stage sidecar into src-tauri/binaries/ ──────────────────────────────
+      - name: Prepare sidecar for Tauri
+        run: node desktop/scripts/prepare-sidecar.mjs
+
+      # ── macOS code-signing setup (skipped if secrets absent) ─────────────────
+      # If you don't set APPLE_CERTIFICATE the build produces an unsigned DMG.
+      - name: Import Apple signing certificate
+        if: matrix.os == 'macos-latest' && env.APPLE_CERTIFICATE != ''
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security import certificate.p12 -k build.keychain \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          rm -f certificate.p12
+
+      # ── Windows code-signing setup (skipped if secrets absent) ───────────────
+      # If you don't set WINDOWS_CERTIFICATE the build produces an unsigned installer.
+      - name: Import Windows signing certificate
+        if: matrix.os == 'windows-latest' && env.WINDOWS_CERTIFICATE != ''
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: pwsh
+        run: |
+          $bytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+          [IO.File]::WriteAllBytes("certificate.pfx", $bytes)
+          # Tauri picks up TAURI_SIGNING_PRIVATE_KEY / pfx path via env; see below.
+          echo "TAURI_WINDOWS_SIGN_PFX=$PWD\certificate.pfx" >> $env:GITHUB_ENV
+
+      # ── Build with tauri-apps/tauri-action ───────────────────────────────────
+      # tauri-action handles: cargo install tauri-cli, `cargo tauri build`, and
+      # uploading the produced bundles directly to a GitHub release.
+      # The `tagName` / `releaseName` inputs are only used if the action is asked
+      # to CREATE the release; here we use `releaseId` via a separate job, so
+      # the action only uploads. For simplicity we let it create the release too:
+      # it is idempotent on re-runs of the same tag.
+      - name: Build and upload desktop installers
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # ── macOS signing/notarization (all optional) ─────────────────────
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # ── Windows signing (optional) ────────────────────────────────────
+          TAURI_WINDOWS_SIGN_PFX: ${{ env.TAURI_WINDOWS_SIGN_PFX }}
+          TAURI_WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        with:
+          projectPath: desktop
+          # Tag from the push event, or the manual dispatch input.
+          tagName: ${{ github.ref_name || inputs.tag }}
+          releaseName: "Ashlr Desktop ${{ github.ref_name || inputs.tag }}"
+          releaseBody: |
+            ## Ashlr Desktop ${{ github.ref_name || inputs.tag }}
+
+            ### Downloads
+            | Platform | File | Notes |
+            |----------|------|-------|
+            | macOS | `.dmg` | Universal (arm64 + x86_64) |
+            | Windows | `.msi` / `.exe` | NSIS installer |
+            | Linux | `.AppImage` `.deb` | |
+
+            > **Unsigned builds** will show a system warning on macOS / Windows
+            > until code-signing secrets are configured in the repository.
+          releaseDraft: true
+          prerelease: false
+          # Pass per-OS Tauri build flags (e.g. --target universal-apple-darwin on macOS)
+          args: ${{ matrix.tauri_args }}
+
+      # ── Cleanup macOS keychain ────────────────────────────────────────────────
+      - name: Remove temporary keychain
+        if: matrix.os == 'macos-latest' && always()
+        run: security delete-keychain build.keychain 2>/dev/null || true

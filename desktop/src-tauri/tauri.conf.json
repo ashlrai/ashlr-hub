@@ -3,6 +3,7 @@
   "productName": "Ashlr",
   "version": "0.1.0",
   "identifier": "ai.ashlr.desktop",
+  "homepage": "https://github.com/evero-consulting/ashlr-hub",
 
   "build": {
     "beforeDevCommand": "",
@@ -46,6 +47,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "shortDescription": "Autonomous engineering fleet manager",
+    "longDescription": "Ashlr is a local-first autonomous engineering platform. This desktop app wraps the Ashlr web UI in a native window, manages the daemon lifecycle, and surfaces a system tray icon for quick access.",
+    "copyright": "Copyright © 2024 Mason Wyatt / Evero Consulting",
+    "category": "DeveloperTool",
     "macOS": {
       "minimumSystemVersion": "10.15",
       "signingIdentity": null,
@@ -58,10 +63,14 @@
     },
     "linux": {
       "deb": {
-        "depends": []
+        "depends": [],
+        "section": "devel"
       },
       "appimage": {
         "bundleMediaFramework": false
+      },
+      "rpm": {
+        "license": "MIT"
       }
     },
     "externalBin": [
