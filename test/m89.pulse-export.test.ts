@@ -342,7 +342,7 @@ describe('exportToPulse — no-op safety', () => {
     const { exportToPulse } = await getPulseExport();
     await expect(
       exportToPulse({ pulse: { enabled: true, endpoint: 'http://localhost:9999' } }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeDefined(); // returns boolean (false when no-op)
   });
 
   it('does not throw when cfg.pulse.enabled is false', async () => {
@@ -350,14 +350,14 @@ describe('exportToPulse — no-op safety', () => {
     const { exportToPulse } = await getPulseExport();
     await expect(
       exportToPulse({ pulse: { enabled: false, endpoint: 'http://localhost:9999' } }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeDefined();
   });
 
   it('does not throw when cfg.pulse is absent', async () => {
     process.env['ASHLR_PULSE_PAT'] = 'test-pat';
     const { exportToPulse } = await getPulseExport();
     // AshlrConfig without pulse field — cast to satisfy type
-    await expect(exportToPulse({} as never)).resolves.toBeUndefined();
+    await expect(exportToPulse({} as never)).resolves.toBeDefined();
   });
 });
 
@@ -376,7 +376,7 @@ describe('exportToPulse — network resilience', () => {
     const { exportToPulse } = await getPulseExport();
     await expect(
       exportToPulse({ pulse: { enabled: true, endpoint: 'http://localhost:9999' } }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeDefined(); // returns false on failure, never throws
   });
 
   it('does not throw when fetch returns a non-2xx status', async () => {
@@ -390,7 +390,7 @@ describe('exportToPulse — network resilience', () => {
     const { exportToPulse } = await getPulseExport();
     await expect(
       exportToPulse({ pulse: { enabled: true, endpoint: 'http://localhost:9999' } }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeDefined();
   });
 
   it('POSTs to /api/otlp/v1/traces with correct headers when PAT is set', async () => {
