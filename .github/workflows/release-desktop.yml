@@ -216,15 +216,10 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # ── macOS signing/notarization (all optional) ─────────────────────
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          # Ad-hoc sign ("-") when no Developer ID cert is configured, so unsigned
-          # dev .dmg builds succeed (no keychain import). Real identity when set.
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # macOS signing env is intentionally OMITTED → unsigned dev .dmg.
+          # Passing an org-level/empty APPLE_CERTIFICATE here makes tauri-action
+          # attempt a keychain import that fails. To ship a signed+notarized
+          # build, re-add the APPLE_* env (from secrets) per the header docs.
           # ── Windows signing (optional) ────────────────────────────────────
           TAURI_WINDOWS_SIGN_PFX: ${{ env.TAURI_WINDOWS_SIGN_PFX }}
           TAURI_WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
