@@ -376,22 +376,9 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
                 "[ashlr-desktop] kill switch {}",
                 if active { "ENABLED" } else { "DISABLED" }
             );
-            // Update the menu item label to reflect the new state.
-            // Tauri v2: retrieve the menu item and set its text.
-            if let Some(tray) = app.tray_by_id("main-tray") {
-                if let Some(menu) = tray.menu() {
-                    if let Some(item) = menu.get("kill_switch") {
-                        if let Some(mi) = item.as_menuitem() {
-                            let new_label = if active {
-                                "Kill Switch: ON  (click to disable)"
-                            } else {
-                                "Kill Switch: OFF (click to enable)"
-                            };
-                            let _ = mi.set_text(new_label);
-                        }
-                    }
-                }
-            }
+            // (Tauri v2's TrayIcon exposes no menu() getter to relabel an item
+            // live; the kill-switch state is logged above and reflected in the
+            // dashboard. Live relabeling would require rebuilding + set_menu.)
         }
 
         "quit" => {

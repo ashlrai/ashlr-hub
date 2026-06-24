@@ -30,7 +30,7 @@
       "csp": "default-src 'self' http://127.0.0.1:7777; connect-src http://127.0.0.1:7777 ws://127.0.0.1:7777; script-src 'self' 'unsafe-inline' http://127.0.0.1:7777; style-src 'self' 'unsafe-inline' http://127.0.0.1:7777; img-src 'self' data: http://127.0.0.1:7777; font-src 'self' http://127.0.0.1:7777"
     },
     "trayIcon": {
-      "iconPath": "icons/tray-icon.png",
+      "iconPath": "icons/32x32.png",
       "iconAsTemplate": true,
       "tooltip": "Ashlr"
     }
