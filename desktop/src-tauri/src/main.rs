@@ -11,9 +11,9 @@ use std::{
 
 use tauri::{
     image::Image,
-    menu::{Menu, MenuItem, MenuItemBuilder, PredefinedMenuItem},
+    menu::{Menu, MenuItemBuilder, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Listener, Manager, Runtime,
+    AppHandle, Emitter, Manager,
 };
 use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
@@ -107,10 +107,10 @@ fn toggle_kill_switch() -> bool {
 /// On completion (success or error) the marker is written so the next launch
 /// skips this entirely.  If setup fails the app continues normally — the user
 /// will land on the dashboard and can run setup manually.
-fn run_first_time_setup(app: &tauri::App<impl Runtime>) {
+fn run_first_time_setup(app: &tauri::App) {
     eprintln!("[ashlr-desktop] First launch detected — running `ashlr setup --yes`");
 
-    let handle: AppHandle<_> = app.handle().clone();
+    let handle: AppHandle = app.handle().clone();
     let _ = handle.emit("ashlr-setup-started", ());
 
     match app
@@ -167,7 +167,7 @@ fn run_first_time_setup(app: &tauri::App<impl Runtime>) {
 
 // ── app setup ────────────────────────────────────────────────────────────────
 
-fn setup<R: Runtime>(app: &mut tauri::App<R>) -> Result<(), Box<dyn std::error::Error>> {
+fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
 
     // ── first-run: run `ashlr setup --yes` once if the marker is absent ──────
@@ -245,7 +245,7 @@ fn setup<R: Runtime>(app: &mut tauri::App<R>) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-fn build_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::error::Error>> {
+fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle();
 
     // Menu items
@@ -277,33 +277,26 @@ fn build_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::error:
         ],
     )?;
 
-    // Load tray icon from the bundled PNG.
-    let icon = Image::from_path(
-        handle
-            .path()
-            .resource_dir()
-            .unwrap_or_default()
-            .join("icons/tray-icon.png"),
-    )
-    // Fall back to the app icon if the tray-specific icon is missing during dev.
-    .or_else(|_| {
+    // Prefer the app's default window icon (always present, no path resolution
+    // issues on Windows).  Fall back to loading icons/32x32.png explicitly if
+    // the default icon is unavailable for any reason.
+    let icon = if let Some(ico) = app.default_window_icon() {
+        ico.clone()
+    } else {
         Image::from_path(
             handle
                 .path()
                 .resource_dir()
                 .unwrap_or_default()
                 .join("icons/32x32.png"),
-        )
-    })?;
+        )?
+    };
 
     TrayIconBuilder::with_id("main-tray")
         .tooltip("Ashlr")
         .icon(icon)
         .menu(&menu)
-        .on_menu_event({
-            let handle = handle.clone();
-            move |app, event| handle_menu_event(app, event.id().as_ref())
-        })
+        .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))
         .on_tray_icon_event(|tray, event| {
             // Left-click on macOS/Windows toggles the window.
             if let TrayIconEvent::Click {
