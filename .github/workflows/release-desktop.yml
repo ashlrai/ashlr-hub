@@ -81,9 +81,10 @@ jobs:
             artifact_label: windows
 
           # Linux — AppImage (default) + .deb
+          # Linux — .deb only (the AppImage linuxdeploy tooling is flaky on CI).
           - os: ubuntu-latest
             rust_targets: ""
-            tauri_args: ""
+            tauri_args: "--bundles deb"
             artifact_label: linux
 
     permissions:
@@ -218,7 +219,9 @@ jobs:
           # ── macOS signing/notarization (all optional) ─────────────────────
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # Ad-hoc sign ("-") when no Developer ID cert is configured, so unsigned
+          # dev .dmg builds succeed (no keychain import). Real identity when set.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
