@@ -53,6 +53,8 @@ env:
   # Tauri v2's dependency tree requires Cargo's edition2024 (Rust >= 1.85);
   # use the latest stable toolchain.
   RUST_VERSION: "stable"
+  # Let linuxdeploy/appimagetool run without FUSE on the CI runner.
+  APPIMAGE_EXTRACT_AND_RUN: "1"
 
 jobs:
   # ── 1. Build installers on each OS ─────────────────────────────────────────
@@ -65,9 +67,11 @@ jobs:
       matrix:
         include:
           # macOS — arm64 native; set MACOS_UNIVERSAL=true below to build universal
+          # macOS — arm64 native (Apple Silicon). Universal needs a dual-arch
+          # sidecar; we ship the host-arch Bun SEA, so build native arm64.
           - os: macos-latest
-            rust_targets: "aarch64-apple-darwin x86_64-apple-darwin"
-            tauri_args: "--target universal-apple-darwin"
+            rust_targets: ""
+            tauri_args: ""
             artifact_label: macos
 
           # Windows — MSVC target (default on windows-latest)
