@@ -837,10 +837,34 @@ export async function scanSelfImprove(repo: string): Promise<WorkItem[]> {
     ).catch((e: unknown) => ({ stdout: (e as { stdout?: string })?.stdout ?? '' }));
     const lines = String(out.stdout ?? '').split('\n').filter(Boolean).slice(0, 50);
     for (const line of lines) {
-      const m = line.match(/^(.+?):(\d+):/);
+      const m = line.match(/^(.+?):(\d+):(.*)/);
       if (!m) continue;
       const file = m[1]!;
       const ln = m[2]!;
+      const content = m[3] ?? '';
+
+      // M87: intentional-skip detection — do NOT emit for a skip that has an
+      // explicit rationale. A skip is intentional when:
+      //   (a) the first argument is a non-empty string, e.g. it.skip('darwin only', ...)
+      //   (b) the line carries a // skip: / // reason: / @skip annotation comment
+      // Only bare skips with no message/reason are flagged as coverage gaps.
+      const hasStringReason = /\.(skip|todo)\s*\(\s*['"`]/.test(content);
+      const hasAnnotation = /\/\/\s*(skip|reason)\s*:|@skip\b/i.test(content);
+      if (hasStringReason || hasAnnotation) continue;
+
+      // Also check for an annotation on the previous line in the file (best-effort).
+      // Read only when the line number is > 1 and the file is accessible.
+      if (Number(ln) > 1) {
+        try {
+          const filePath = join(repo, file);
+          if (existsSync(filePath)) {
+            const fileLines = readFileSync(filePath, 'utf8').split('\n');
+            const prevLine = fileLines[Number(ln) - 2] ?? '';
+            if (/\/\/\s*(skip|reason)\s*:|@skip\b/i.test(prevLine)) continue;
+          }
+        } catch { /* best-effort — never throws */ }
+      }
+
       items.push(
         makeItem(
           repo,

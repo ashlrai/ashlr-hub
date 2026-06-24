@@ -962,8 +962,13 @@ function captureSandboxAndCleanup(
     // captured diff as a PENDING inbox proposal. This is the ONLY way the
     // daemon's work surfaces. A PENDING proposal is applied LATER only by an
     // explicit human inbox approve — never automatically, never here.
+    // M87: skip empty proposals — a 0-diff run produces no actionable patch.
+    // The proposal-only gate line below is canonical (the H4 safety grep checks
+    // for it), so the empty-skip is a NESTED guard, not inlined into the condition.
     if (propose && _createProposal !== null) {
-      try {
+      if (diff.files === 0 || diff.patch.trim().length === 0) {
+        emitLog(sink, `[M87] swarm ${run.id} produced no diff — no proposal filed`);
+      } else try {
         const created = _createProposal({
           repo: sb.sourceRepo,
           origin: 'swarm',
