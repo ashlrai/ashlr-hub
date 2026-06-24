@@ -275,3 +275,103 @@ export async function resolveActiveProvider(cfg: AshlrConfig): Promise<string | 
   const registry = await getProviderRegistry(cfg);
   return registry.activeProvider;
 }
+
+// ---------------------------------------------------------------------------
+// M92: api-model engine probing
+// ---------------------------------------------------------------------------
+
+/**
+ * Readiness result for a single api-model engine.
+ * - `keyPresent`  — the env var named by `api.envKey` is non-empty.
+ * - `reachable`   — a GET /v1/models to `baseUrl` returned HTTP 200 within 2s.
+ *                   Always false when `keyPresent` is false (skip the probe).
+ * - `models`      — model ids returned by /v1/models (empty on any failure).
+ * - `error`       — human-readable failure detail (absent on success).
+ */
+export interface ApiModelReadiness {
+  engineId: string;
+  keyPresent: boolean;
+  reachable: boolean;
+  models: string[];
+  error?: string;
+}
+
+/**
+ * Probe a single api-model engine spec for readiness.
+ *
+ * - Checks env var presence (never reads the value into a log).
+ * - If the key is present, probes GET <baseUrl>/v1/models with a 2s timeout
+ *   and an Authorization: Bearer <key> header (required by most NIM/cloud APIs).
+ * - Never throws.
+ */
+export async function probeApiModelEngine(
+  engineId: string,
+  api: {
+    envKey: string;
+    baseUrlEnv?: string;
+    defaultBaseUrl?: string;
+  },
+): Promise<ApiModelReadiness> {
+  const keyVal = process.env[api.envKey];
+  const keyPresent = typeof keyVal === 'string' && keyVal.trim().length > 0;
+
+  if (!keyPresent) {
+    return { engineId, keyPresent: false, reachable: false, models: [] };
+  }
+
+  // Resolve base URL: env override > defaultBaseUrl > skip probe
+  const baseUrlEnvVal = api.baseUrlEnv ? process.env[api.baseUrlEnv] : undefined;
+  const baseUrl = (baseUrlEnvVal ?? api.defaultBaseUrl ?? '').replace(/\/+$/, '');
+
+  if (!baseUrl) {
+    // Key is present but no base URL to probe — treat as reachable (key-only check)
+    return { engineId, keyPresent: true, reachable: true, models: [] };
+  }
+
+  const probeUrl = baseUrl.endsWith('/v1/models') ? baseUrl : `${baseUrl}/v1/models`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2000);
+
+  try {
+    const response = await fetch(probeUrl, {
+      method: 'GET',
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${keyVal!.trim()}`,
+      },
+    });
+
+    if (!response.ok) {
+      return {
+        engineId,
+        keyPresent: true,
+        reachable: false,
+        models: [],
+        error: `HTTP ${response.status} ${response.statusText}`,
+      };
+    }
+
+    let body: unknown;
+    try {
+      body = (await response.json()) as unknown;
+    } catch {
+      return { engineId, keyPresent: true, reachable: false, models: [], error: 'non-JSON response from /v1/models' };
+    }
+
+    // Parse OpenAI-shape { data: [{ id: string }] }
+    const models = parseLmStudioModels(body);
+    return { engineId, keyPresent: true, reachable: true, models };
+  } catch (err: unknown) {
+    const msg =
+      err instanceof Error
+        ? err.name === 'AbortError'
+          ? 'Probe timed out after 2s'
+          : err.message
+        : String(err);
+    return { engineId, keyPresent: true, reachable: false, models: [], error: msg };
+  } finally {
+    clearTimeout(timer);
+  }
+}

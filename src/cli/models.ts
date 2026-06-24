@@ -23,6 +23,9 @@
 import { createInterface } from 'node:readline';
 import type { AshlrConfig, LocalModelInfo } from '../core/types.js';
 import { C, pad, makeColors, isTty } from './ui.js';
+import { BUILTIN_ENGINE_REGISTRY } from '../core/run/engine-registry.js';
+import { probeApiModelEngine } from '../core/providers.js';
+import type { ApiModelReadiness } from '../core/providers.js';
 
 const { bold, dim, green, yellow, cyan, gray } = makeColors(isTty());
 
@@ -201,13 +204,21 @@ async function cmdModelsList(
     return 1;
   }
 
+  // Probe api-model engines from the builtin registry (nim, kimi, openai-compat)
+  const apiEngines = Object.values(BUILTIN_ENGINE_REGISTRY).filter(
+    (e) => e.kind === 'api-model' && e.api,
+  );
+  const apiReadiness: ApiModelReadiness[] = await Promise.all(
+    apiEngines.map((e) => probeApiModelEngine(e.id, e.api!)),
+  );
+
   if (json) {
-    process.stdout.write(JSON.stringify(models, null, 2) + '\n');
+    process.stdout.write(JSON.stringify({ local: models, apiEngines: apiReadiness }, null, 2) + '\n');
     return 0;
   }
 
   console.log('');
-  console.log(bold('  ashlr models') + gray(' — local models (Ollama + LM Studio)'));
+  console.log(bold('  ashlr models') + gray(' — local models (Ollama + LM Studio) + API engines'));
   console.log('');
 
   if (models.length === 0) {
@@ -275,6 +286,63 @@ async function cmdModelsList(
     `${dim('Start Ollama:')} ${cyan('ashlr models start')}`,
   );
   console.log('');
+
+  // ---------------------------------------------------------------------------
+  // API engines section (nim, kimi, openai-compat)
+  // ---------------------------------------------------------------------------
+  if (apiReadiness.length > 0) {
+    console.log(bold('  API engines') + gray(' — OpenAI-compatible cloud backends (opt-in)'));
+    console.log('');
+
+    const idW    = Math.max(12, ...apiReadiness.map((r) => r.engineId.length));
+    const statusW = 12;
+    const modelW = 36;
+
+    console.log(
+      `  ${bold(pad('', 2))}` +
+      `${bold(pad('Engine', idW))}  ` +
+      `${bold(pad('Status', statusW))}  ` +
+      `${bold(pad('Default model', modelW))}`,
+    );
+    console.log(
+      `  ${'─'.repeat(2)}` +
+      `${'─'.repeat(idW)}  ` +
+      `${'─'.repeat(statusW)}  ` +
+      `${'─'.repeat(modelW)}`,
+    );
+
+    for (const r of apiReadiness) {
+      const spec = BUILTIN_ENGINE_REGISTRY[r.engineId];
+      const defaultModel = spec?.api?.defaultModel ?? '—';
+      let statusStr: string;
+      if (!r.keyPresent) {
+        statusStr = yellow(pad('no key', statusW));
+      } else if (r.reachable) {
+        statusStr = green(pad('ready', statusW));
+      } else {
+        statusStr = yellow(pad('key, unreachable', statusW));
+      }
+      const marker = r.keyPresent && r.reachable ? green('●') : dim('○');
+      console.log(
+        `  ${marker} ` +
+        `${pad(r.engineId, idW)}  ` +
+        `${statusStr}  ` +
+        `${dim(pad(defaultModel, modelW))}`,
+      );
+      if (r.error) {
+        console.log(`    ${dim(r.error)}`);
+      }
+    }
+
+    console.log('');
+    console.log(
+      `  ${dim('Enable an API engine:')} add its id to ${cyan('foundry.allowedBackends')} in ${cyan('~/.ashlr/config.json')}`,
+    );
+    console.log(
+      `  ${dim('Set key via phantom:')} ${cyan('phantom add NVIDIA_NIM_API_KEY')}`,
+    );
+    console.log('');
+  }
 
   return 0;
 }

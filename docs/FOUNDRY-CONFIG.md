@@ -260,11 +260,41 @@ are confident in the verification harness. Additional guards:
 
 ## Adding a Backend (Config-Only Walkthrough)
 
-No source edits needed. Example: adding NVIDIA NIM as a mid-tier api-model.
+No source edits needed. The three curated api-model engines (`nim`, `kimi`,
+`openai-compat`) are **already in the builtin registry** — they just need to be
+opted into via `allowedBackends` and have their API key set.
 
-1. Set your API key via phantom: `phantom add NVIDIA_NIM_API_KEY`
+---
 
-2. Add the engine entry to `~/.ashlr/config.json`:
+### Enabling NVIDIA NIMs
+
+NVIDIA NIM exposes an OpenAI-compatible API at `https://integrate.api.nvidia.com/v1`.
+It supports any model on [build.nvidia.com](https://build.nvidia.com).
+
+**Step 1 — Set your API key via phantom (never put keys in config.json):**
+
+```sh
+phantom add NVIDIA_NIM_API_KEY
+```
+
+**Step 2 — Add `nim` to `allowedBackends` in `~/.ashlr/config.json`:**
+
+```json
+{
+  "foundry": {
+    "allowedBackends": ["builtin", "claude", "codex", "nim"],
+    "models": {
+      "nim": "meta/llama-3.1-70b-instruct"
+    }
+  }
+}
+```
+
+`nim` is already registered in the builtin engine roster as an `api-model` (tier
+`mid`) pointing at `https://integrate.api.nvidia.com/v1`. No `engines` block
+needed unless you want to override the base URL or default model.
+
+**Optional — override the base URL or model:**
 
 ```json
 {
@@ -277,22 +307,89 @@ No source edits needed. Example: adding NVIDIA NIM as a mid-tier api-model.
         "tier": "mid",
         "api": {
           "envKey": "NVIDIA_NIM_API_KEY",
+          "baseUrlEnv": "NVIDIA_NIM_BASE_URL",
           "defaultBaseUrl": "https://integrate.api.nvidia.com/v1",
-          "defaultModel": "meta/llama-3.1-70b-instruct",
+          "defaultModel": "meta/llama-3.1-405b-instruct",
           "protocol": "openai"
         },
-        "capabilities": ["agent", "edit"]
+        "capabilities": ["agent", "edit", "tools"]
       }
     }
   }
 }
 ```
 
-3. Run with `--allow-cloud` since NIM is a cloud provider:
-   `ashlr run --allow-cloud "harden the inbox apply path"`
+Or set a custom endpoint at runtime: `NVIDIA_NIM_BASE_URL=https://my-nim.internal/v1`
 
-The engine is picked up by `resolveEngineRegistry`, routed by the fleet scheduler,
-contained by the confinement profile, and its proposals land in the inbox exactly
-like any other backend. It can never reach `main` (tier `"mid"`) unless you
-explicitly promote it to `"frontier"` and add it to `mergeAuthority` — and even
-then only if `autoMerge.enabled` is `true`.
+**Step 3 — Run with `--allow-cloud`:**
+
+```sh
+ashlr run --allow-cloud "harden the inbox apply path"
+```
+
+`ashlr models` will show NIM with its readiness status (key present? reachable?).
+
+**Trust tier:** `nim` is `mid` — branch-eligible after verification, never
+merge-authority for `main`. It cannot reach `main` regardless of `mergeAuthority`
+unless you explicitly promote it to `frontier` and add it to `mergeAuthority`
+(requires a code-reviewed change to the builtin registry).
+
+---
+
+### Enabling Moonshot/Kimi
+
+```sh
+phantom add MOONSHOT_API_KEY
+```
+
+```json
+{
+  "foundry": {
+    "allowedBackends": ["builtin", "claude", "kimi"],
+    "models": {
+      "kimi": "kimi-k2-0711-preview"
+    }
+  }
+}
+```
+
+Base URL: `https://api.moonshot.ai/v1`. Override via `MOONSHOT_BASE_URL`.
+
+---
+
+### Enabling a Generic OpenAI-Compatible Endpoint
+
+Covers vLLM, Together AI, Fireworks, Anyscale, local `openai-compat` servers, etc.
+
+```sh
+phantom add OPENAI_COMPAT_API_KEY
+```
+
+```json
+{
+  "foundry": {
+    "allowedBackends": ["builtin", "openai-compat"],
+    "models": {
+      "openai-compat": "my-model-name"
+    }
+  }
+}
+```
+
+Set the base URL: `OPENAI_COMPAT_BASE_URL=https://my-vllm.example.com/v1`
+
+The `openai-compat` engine defaults to `http://localhost:8000/v1` (common vLLM
+default). Any server that speaks `/v1/chat/completions` works.
+
+---
+
+### API Engine Environment Variables
+
+| Engine id      | Key env var               | Base URL env var          | Default base URL                      |
+|----------------|---------------------------|---------------------------|---------------------------------------|
+| `nim`          | `NVIDIA_NIM_API_KEY`      | `NVIDIA_NIM_BASE_URL`     | `https://integrate.api.nvidia.com/v1` |
+| `kimi`         | `MOONSHOT_API_KEY`        | `MOONSHOT_BASE_URL`       | `https://api.moonshot.ai/v1`          |
+| `openai-compat`| `OPENAI_COMPAT_API_KEY`   | `OPENAI_COMPAT_BASE_URL`  | `http://localhost:8000/v1`            |
+
+All three require `--allow-cloud` at runtime (cloud-provider gate). Secrets are
+managed by phantom — never put raw keys in `config.json`.

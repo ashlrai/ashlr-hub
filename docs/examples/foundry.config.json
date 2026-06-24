@@ -9,12 +9,26 @@
     },
 
     "engines": {
+      "nim": {
+        "id": "nim",
+        "kind": "api-model",
+        "tier": "mid",
+        "api": {
+          "envKey": "NVIDIA_NIM_API_KEY",
+          "baseUrlEnv": "NVIDIA_NIM_BASE_URL",
+          "defaultBaseUrl": "https://integrate.api.nvidia.com/v1",
+          "defaultModel": "meta/llama-3.1-70b-instruct",
+          "protocol": "openai"
+        },
+        "capabilities": ["agent", "edit", "tools"]
+      },
       "kimi": {
         "id": "kimi",
         "kind": "api-model",
         "tier": "mid",
         "api": {
           "envKey": "MOONSHOT_API_KEY",
+          "baseUrlEnv": "MOONSHOT_BASE_URL",
           "defaultBaseUrl": "https://api.moonshot.ai/v1",
           "defaultModel": "kimi-k2-0711-preview",
           "protocol": "openai"

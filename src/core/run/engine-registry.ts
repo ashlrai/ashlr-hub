@@ -24,14 +24,14 @@
 import type {
   AshlrConfig,
   ArgvSeg,
-  EngineId,
   EngineSpec,
   EngineTier,
 } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Built-in roster — encodes the five v1–v4 engines (parity-locked) plus the two
-// v5 CLI agents. New API models / agents are added via cfg.foundry.engines.
+// v5 CLI agents plus three curated api-model entries (nim/kimi/openai-compat).
+// New API models / agents are added via cfg.foundry.engines.
 // ---------------------------------------------------------------------------
 
 /**
@@ -39,8 +39,17 @@ import type {
  * engines reproduce their pre-M50 argv byte-for-byte; `hermes` and `opencode`
  * are new v5 CLI agents (tier 'local' in M50 — M51's tri-tier promotes the strong
  * open models to 'mid'; nothing new is granted frontier/main authority here).
+ *
+ * M92 additions — three curated api-model entries that resolve via
+ * resolveEngineRegistry but are NOT in the default allowedBackends (opt-in only).
+ * Flag-off/default behavior is identical: they are available but inactive until
+ * explicitly added to cfg.foundry.allowedBackends.
+ *
+ *   nim          — NVIDIA NIM cloud API (OpenAI-compat), tier mid
+ *   kimi         — Moonshot/Kimi cloud API (OpenAI-compat), tier mid
+ *   openai-compat — generic OpenAI-compatible endpoint, tier mid
  */
-export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<EngineId, EngineSpec>> = Object.freeze({
+export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Object.freeze({
   builtin: { id: 'builtin', kind: 'builtin', tier: 'local' },
 
   // claude -p <goal> [--model M] --output-format json [--dangerously-skip-permissions --add-dir CWD when autonomous]
@@ -126,6 +135,67 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<EngineId, EngineSpec>> = O
     bin: 'opencode',
     bins: ['opencode'],
     argv: ['run', '$GOAL', { optModel: ['--model', '$MODEL'] }],
+    capabilities: ['agent', 'edit'],
+  },
+
+  // ---------------------------------------------------------------------------
+  // M92: curated api-model entries — BUILTIN but NOT in default allowedBackends.
+  // Opt-in only: add the id to cfg.foundry.allowedBackends to activate.
+  // All three are tier 'mid' — branch-eligible, never merge-authority for main.
+  // Driven via buildOpenAICompatibleClient (provider-client.ts); no CLI argv.
+  // ---------------------------------------------------------------------------
+
+  // NVIDIA NIM — OpenAI-compatible cloud inference for NVIDIA-hosted open models.
+  // Default model: meta/llama-3.1-70b-instruct (strong open model, mid tier).
+  // Env: NVIDIA_NIM_API_KEY (set via: phantom add NVIDIA_NIM_API_KEY)
+  // Base URL override: NVIDIA_NIM_BASE_URL
+  nim: {
+    id: 'nim',
+    kind: 'api-model',
+    tier: 'mid',
+    api: {
+      envKey: 'NVIDIA_NIM_API_KEY',
+      baseUrlEnv: 'NVIDIA_NIM_BASE_URL',
+      defaultBaseUrl: 'https://integrate.api.nvidia.com/v1',
+      defaultModel: 'meta/llama-3.1-70b-instruct',
+      protocol: 'openai' as const,
+    },
+    capabilities: ['agent', 'edit', 'tools'],
+  },
+
+  // Moonshot/Kimi — OpenAI-compatible cloud inference (Moonshot AI).
+  // Default model: kimi-k2-0711-preview (strong reasoning + long-context).
+  // Env: MOONSHOT_API_KEY (set via: phantom add MOONSHOT_API_KEY)
+  // Base URL override: MOONSHOT_BASE_URL
+  kimi: {
+    id: 'kimi',
+    kind: 'api-model',
+    tier: 'mid',
+    api: {
+      envKey: 'MOONSHOT_API_KEY',
+      baseUrlEnv: 'MOONSHOT_BASE_URL',
+      defaultBaseUrl: 'https://api.moonshot.ai/v1',
+      defaultModel: 'kimi-k2-0711-preview',
+      protocol: 'openai' as const,
+    },
+    capabilities: ['agent', 'edit', 'architecture'],
+  },
+
+  // Generic OpenAI-compatible endpoint — bring-your-own base URL and key.
+  // Covers any provider that speaks /v1/chat/completions (vLLM, Together AI,
+  // Fireworks, Anyscale, local OpenAI-compat servers, etc.).
+  // Env: OPENAI_COMPAT_API_KEY  Base URL: OPENAI_COMPAT_BASE_URL
+  'openai-compat': {
+    id: 'openai-compat',
+    kind: 'api-model',
+    tier: 'mid',
+    api: {
+      envKey: 'OPENAI_COMPAT_API_KEY',
+      baseUrlEnv: 'OPENAI_COMPAT_BASE_URL',
+      defaultBaseUrl: 'http://localhost:8000/v1',
+      defaultModel: 'default',
+      protocol: 'openai' as const,
+    },
     capabilities: ['agent', 'edit'],
   },
 });
