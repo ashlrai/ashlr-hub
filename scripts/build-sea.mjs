@@ -37,7 +37,7 @@ const repoRoot = resolve(join(here, '..'));
 const distBin = join(repoRoot, 'dist-bin');
 const distWeb = join(repoRoot, 'dist', 'core', 'web', 'public');
 const entry   = join(distBin, '_entry.js');
-const outBin  = join(distBin, 'ashlr');
+const outBin  = join(distBin, process.platform === 'win32' ? 'ashlr.exe' : 'ashlr');
 const pubDest = join(distBin, 'public');
 
 // ── locate bun ───────────────────────────────────────────────────────────────

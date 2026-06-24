@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Background: deep charcoal pill -->
+  <rect x="0" y="0" width="512" height="512" rx="112" ry="112" fill="#111318"/>
+
+  <!-- Primary mark: three stacked horizontal bars — the "fleet" motif -->
+  <!-- Each bar is a rounded rect; they narrow subtly top→bottom for depth -->
+
+  <!-- Top bar — full width accent, electric violet -->
+  <rect x="96" y="150" width="320" height="52" rx="26" fill="#7C6FFF"/>
+
+  <!-- Middle bar — slightly inset, bright indigo -->
+  <rect x="116" y="230" width="280" height="52" rx="26" fill="#5A4FD4"/>
+
+  <!-- Bottom bar — most inset, muted slate -->
+  <rect x="136" y="310" width="240" height="52" rx="26" fill="#3A3780"/>
+
+  <!-- Small right-aligned "dot" on the top bar — the activity indicator -->
+  <circle cx="382" cy="176" r="18" fill="#A89CFF"/>
+</svg>
