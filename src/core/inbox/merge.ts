@@ -868,10 +868,20 @@ export async function autoMergeProposal(
     // diffs for the size check). File + line counts reuse the same diff parser
     // as classifyRisk so the two gates are consistent.
     {
+      // Clamp to a positive integer ≥ 1 so a zero, negative, or non-numeric
+      // config value cannot disable the scope cap (a SAFETY gate).  Any value
+      // < 1 would make the cap impossible to satisfy (every diff has ≥ 1
+      // file/line), so we floor at 1 instead of silently disabling it.
+      const rawFiles = (cfg.foundry as any)?.autoMerge?.maxAutomergeFiles;
       const MAX_AUTOMERGE_FILES: number =
-        (cfg.foundry as any)?.autoMerge?.maxAutomergeFiles ?? 4;
+        typeof rawFiles === 'number' && rawFiles >= 1
+          ? Math.floor(rawFiles)
+          : 4;
+      const rawLines = (cfg.foundry as any)?.autoMerge?.maxAutomergeLines;
       const MAX_AUTOMERGE_LINES: number =
-        (cfg.foundry as any)?.autoMerge?.maxAutomergeLines ?? 150;
+        typeof rawLines === 'number' && rawLines >= 1
+          ? Math.floor(rawLines)
+          : 150;
 
       if (risk !== 'low') {
         // Already refused above unless maxRisk was raised — belt-and-suspenders:

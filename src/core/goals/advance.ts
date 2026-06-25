@@ -220,23 +220,25 @@ export async function advanceGoal(
 /**
  * READ-ONLY correlation: find the PENDING proposal the swarm produced. The
  * runner's propose path stamps the proposal summary with `swarm=<run.id>`, so
- * we match on that (and the repo). Returns the proposal id or null. Never
- * mutates — pure read of the inbox.
+ * we match on that (and the repo). Returns the proposal id or null when the
+ * swarm genuinely produced no proposal. Rethrows on unexpected errors (e.g.
+ * corrupt inbox) so the caller can surface them rather than silently orphaning
+ * a real proposal and leaving the milestone stuck.
  */
 function findProposalForSwarm(swarmId: string, repo: string): string | null {
-  try {
-    const candidates = listProposals({ status: 'pending' }).filter(
-      (p) =>
-        p.origin === 'swarm' &&
-        (p.repo === repo || p.repo === null) &&
-        typeof p.summary === 'string' &&
-        p.summary.includes(`swarm=${swarmId}`),
-    );
-    // listProposals is most-recent first; take the freshest match.
-    return candidates[0]?.id ?? null;
-  } catch {
-    return null;
-  }
+  // Let listProposals throw propagate — the caller (advanceGoal) catches it and
+  // sets the milestone to 'blocked' before re-throwing, which is the correct
+  // handling for a corrupt-inbox scenario.  Only swallow a "not found" result
+  // (which surfaces as returning null from the filter, not as a throw).
+  const candidates = listProposals({ status: 'pending' }).filter(
+    (p) =>
+      p.origin === 'swarm' &&
+      (p.repo === repo || p.repo === null) &&
+      typeof p.summary === 'string' &&
+      p.summary.includes(`swarm=${swarmId}`),
+  );
+  // listProposals is most-recent first; take the freshest match.
+  return candidates[0]?.id ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -364,13 +366,39 @@ export async function advanceGoalCycle(
     const advanced = goal.milestones.find(
       (m) => m.swarmId === run.id || (m.proposalId !== null && m.status === 'proposed'),
     );
-    if (advanced?.status === 'proposed') proposalsFiled += 1;
+
+    // If we cannot correlate the run to any milestone, the store update in
+    // advanceGoal may have used a different matching key; fall back to the
+    // milestone that was 'in-progress' before the run (most recently set).
+    // If still not found, surface the ambiguity: log it and treat as 'blocked'
+    // so the milestone is never left silently stuck in-progress forever.
+    if (!advanced) {
+      // Find any milestone still stuck 'in-progress' — that's the one advanceGoal
+      // just ran.  Set it to 'blocked' for human attention.
+      const stuckInProgress = goal.milestones.find((m) => m.status === 'in-progress');
+      if (stuckInProgress) {
+        updateMilestoneStatus(goalId, stuckInProgress.id, 'blocked', { swarmId: run.id });
+      }
+      // Do not retry on a correlation failure — return a clear non-stuck result.
+      const progress = progressOf(goal);
+      const goalDone =
+        goal.status === 'done' ||
+        (progress.fractionDone >= 1 && progress.total > 0);
+      return {
+        runs,
+        goalDone,
+        milestoneDone: false,
+        proposalsFiled,
+      };
+    }
+
+    if (advanced.status === 'proposed') proposalsFiled += 1;
 
     // Check if this milestone is in a terminal success state (proposed/done/skipped).
     const milestoneDone =
-      advanced?.status === 'proposed' ||
-      advanced?.status === 'done' ||
-      advanced?.status === 'skipped';
+      advanced.status === 'proposed' ||
+      advanced.status === 'done' ||
+      advanced.status === 'skipped';
 
     if (milestoneDone) {
       // A goal is done when: the store rolled it to 'done' (every non-skipped
@@ -389,7 +417,7 @@ export async function advanceGoalCycle(
     }
 
     // Milestone ended up 'blocked' — retry if we have remaining attempts.
-    if (attempt < maxRetries && advanced?.status === 'blocked') {
+    if (attempt < maxRetries && advanced.status === 'blocked') {
       // Reset the milestone to 'pending' so advanceGoal can pick it up again.
       resumeMilestone(goalId, advanced.id);
       // Small pause between retries (no sleep in tests — sink signals retry).

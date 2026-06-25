@@ -301,9 +301,15 @@ export async function tick(
   try {
     for (const prop of listProposals({ status: 'pending' })) {
       const haystack = `${prop.title} ${prop.summary}`;
-      // Scan all backlog item ids for a substring match in the proposal text.
+      // Match item.id as an exact token (surrounded by non-word chars or
+      // start/end of string) to avoid substring false-positives where a short
+      // id like "fix-1" would incorrectly match "fix-10" or "fix-100".
       for (const bi of backlogItems) {
-        if (haystack.includes(bi.id)) {
+        // Escape any regex metacharacters in the id, then require word-boundary
+        // equivalents (non-word char or string edge) on both sides.
+        const escaped = bi.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`);
+        if (re.test(haystack)) {
           pendingItemIds.add(bi.id);
         }
       }
@@ -325,35 +331,38 @@ export async function tick(
   const repoOrder = [...byRepo.keys()];
 
   const selected: WorkItem[] = [];
-  let rri = 0; // round-robin index
-  let scanned = 0; // safety: never loop more than total items
-  const totalItems = backlogItems.length;
-  while (selected.length < selectCount && scanned < totalItems * repoOrder.length + 1) {
-    scanned++;
-    const repo = repoOrder[rri % repoOrder.length];
-    if (repo === undefined) break;
-    rri++;
-    const group = byRepo.get(repo) ?? [];
-    const cursor = repoCursors.get(repo) ?? 0;
-    // Advance cursor past declined/pending items.
-    let advance = cursor;
-    while (advance < group.length) {
-      const candidate = group[advance]!;
-      const skip =
-        recentlyDeclined(candidate.id, cooldownMs) ||
-        pendingItemIds.has(candidate.id);
-      if (!skip) break;
-      advance++;
-    }
-    repoCursors.set(repo, advance);
-    if (advance < group.length) {
-      selected.push(group[advance]!);
-      repoCursors.set(repo, advance + 1);
-    }
-    // Once all repos have been visited in this pass, check if we've exhausted
-    // all of them; if so, stop to avoid an infinite loop on a fully-skipped backlog.
-    if (rri % repoOrder.length === 0) {
-      // Check if any repo still has selectable items.
+  // Guard: if no repos were grouped (shouldn't happen given backlogItems > 0,
+  // but belt-and-suspenders) skip the loop entirely.
+  if (repoOrder.length > 0) {
+    let rri = 0; // round-robin index
+    let scanned = 0; // safety: never loop more than total items
+    const totalItems = backlogItems.length;
+    while (selected.length < selectCount && scanned < totalItems * repoOrder.length + 1) {
+      scanned++;
+      const repo = repoOrder[rri % repoOrder.length];
+      if (repo === undefined) break;
+      rri++;
+      const group = byRepo.get(repo) ?? [];
+      const cursor = repoCursors.get(repo) ?? 0;
+      // Advance cursor past declined/pending items.
+      let advance = cursor;
+      while (advance < group.length) {
+        const candidate = group[advance]!;
+        const skip =
+          recentlyDeclined(candidate.id, cooldownMs) ||
+          pendingItemIds.has(candidate.id);
+        if (!skip) break;
+        advance++;
+      }
+      repoCursors.set(repo, advance);
+      if (advance < group.length) {
+        selected.push(group[advance]!);
+        repoCursors.set(repo, advance + 1);
+      }
+      // Check on EVERY iteration whether any repo still has selectable items;
+      // stop as soon as none do to avoid spinning through a fully-skipped backlog.
+      // (Previously only checked at modulo-repoOrder.length boundaries, which
+      // could miss exhaustion mid-pass and spin needlessly.)
       let anyLeft = false;
       for (const [r, g] of byRepo) {
         const c = repoCursors.get(r) ?? 0;
@@ -456,8 +465,13 @@ export async function tick(
     // allowed:true when usage is unknown (claude) or under the cap.
     if (isSubscriptionEngine(backend)) {
       // Read maxPercent from liveCfg.foundry defensively — no types.ts change.
-      const maxPct: number = (liveCfg.foundry as Record<string, unknown> | undefined
-        )?.['subscriptionMaxPercent'] as number | undefined ?? 90;
+      // Clamp to [1,100]: a negative or zero value would disable the throttle
+      // (anything is "under 0%"), and >100 could never fire (nothing is ">100%").
+      const rawPct = (liveCfg.foundry as Record<string, unknown> | undefined
+        )?.['subscriptionMaxPercent'];
+      const maxPct: number = typeof rawPct === 'number'
+        ? Math.min(100, Math.max(1, rawPct))
+        : 90;
       const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
       if (!subCheck.allowed) {
         audit({
@@ -722,17 +736,23 @@ export async function tick(
   // sent each tick. On a 2xx response, advance the watermark and persist it;
   // on failure leave the watermark unchanged so events retry next tick.
   // Never throws.
+  // M89/M91 pulse export: sinceTs is captured synchronously from the state we
+  // just saved so the async export reads a stable, already-persisted watermark.
+  // The watermark advance is done via a narrow read-modify-write that re-loads
+  // the LATEST state immediately before writing, touching ONLY lastPulseExportAt,
+  // so it cannot clobber a concurrent tick's todaySpentUsd / itemsProcessed /
+  // ticks accounting.
   if (cfg.pulse?.enabled) {
+    const sinceTs = state.lastPulseExportAt; // captured from the state we already saved
     void import('../fleet/pulse-export.js').then(async ({ exportToPulse }) => {
       try {
-        const currentState = loadDaemonState();
-        const sinceTs = currentState.lastPulseExportAt;
         const ok = await exportToPulse(cfg, { sinceTs });
         if (ok) {
-          // Advance watermark to the tick timestamp on success.
-          const stateToUpdate = loadDaemonState();
-          stateToUpdate.lastPulseExportAt = tickRecord.ts;
-          saveDaemonState(stateToUpdate);
+          // Narrow read-modify-write: reload freshest state, touch ONLY the
+          // watermark, then save — never clobbers concurrent tick accounting.
+          const fresh = loadDaemonState();
+          fresh.lastPulseExportAt = tickRecord.ts;
+          saveDaemonState(fresh);
         }
       } catch {
         // Best-effort — telemetry must never crash the daemon.
