@@ -550,6 +550,153 @@ function parseOpenAIToolCalls(
   return parsed.length > 0 ? parsed : undefined;
 }
 
+// ---------------------------------------------------------------------------
+// Content-embedded tool-call parser (M118)
+// ---------------------------------------------------------------------------
+// Some local coder models (qwen2.5-coder:32b, deepseek-coder, etc.) emit tool
+// calls as JSON inside message.content rather than in the structured tool_calls
+// field.  Ollama's chat-template for these models doesn't map the output to
+// tool_calls, so finish_reason is 'stop' (not 'tool_calls') and the agent-loop
+// (which reads result.toolCalls) never executes them.
+//
+// This parser is a FALLBACK — invoked ONLY when:
+//   a) the parsed response has NO structured tool_calls (native path wins), AND
+//   b) tools were provided in the request (toolNames set non-empty), AND
+//   c) message.content is non-empty.
+//
+// Accepted content shapes (name MUST match a known tool — prose != tool call):
+//   1. Bare JSON object:         {"name":"read_file","arguments":{...}}
+//   2. String-encoded arguments: {"name":"...","arguments":"{...}"}
+//   3. Array of the above:       [{...},{...}]
+//   4. JSON fenced block:        ```json\n{...}\n``` or ```\n{...}\n```
+//   5. Prose + any of the above  (leading/trailing text tolerated)
+//
+// When it fires, it returns the cleaned content (JSON stripped) so the
+// caller can suppress raw JSON from user-visible text output.
+//
+// NATIVE-PATH SAFETY: only reached when parseOpenAIToolCalls returned undefined
+// (i.e., message.tool_calls was absent or empty). Models that already return
+// structured tool_calls are completely unaffected.
+
+interface ParsedContentCall {
+  id: string;
+  name: string;
+  arguments: unknown;
+}
+
+interface ContentParseResult {
+  toolCalls: ParsedContentCall[];
+  /** Content with matched JSON stripped; empty string when fully consumed. */
+  cleanedContent: string;
+}
+
+export function parseContentToolCalls(
+  content: string,
+  toolNames: Set<string>,
+): ContentParseResult | undefined {
+  if (!content || toolNames.size === 0) return undefined;
+
+  const text = content.trim();
+
+  // Build candidate JSON strings in priority order:
+  //   1. Contents of a ```json ... ``` or ``` ... ``` fence.
+  //   2. Full trimmed content (bare JSON).
+  //   3. First balanced {...} or [...] block extracted from the text.
+  const candidates: Array<{ json: string; fenced: boolean }> = [];
+
+  const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+  if (fenceMatch?.[1]) candidates.push({ json: fenceMatch[1].trim(), fenced: true });
+
+  candidates.push({ json: text, fenced: false });
+
+  const firstBracket = text.search(/[{[]/);
+  if (firstBracket !== -1) {
+    const opener = text[firstBracket];
+    const closer = opener === '{' ? '}' : ']';
+    let depth = 0;
+    let end = -1;
+    for (let i = firstBracket; i < text.length; i++) {
+      if (text[i] === opener) depth++;
+      else if (text[i] === closer) {
+        depth--;
+        if (depth === 0) { end = i; break; }
+      }
+    }
+    if (end !== -1) {
+      const extracted = text.slice(firstBracket, end + 1);
+      if (!candidates.some((c) => c.json === extracted)) {
+        candidates.push({ json: extracted, fenced: false });
+      }
+    }
+  }
+
+  for (const { json: candidate, fenced } of candidates) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+
+    // Normalise to array.
+    const items: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
+
+    const calls: ParsedContentCall[] = [];
+    let allMatched = true;
+    for (const item of items) {
+      if (typeof item !== 'object' || item === null) { allMatched = false; break; }
+      const obj = item as Record<string, unknown>;
+      const name = typeof obj['name'] === 'string' ? obj['name'] : undefined;
+      // Reject if name missing or not in the provided tool set — prevents plain
+      // prose JSON from being misread as a tool call.
+      if (!name || !toolNames.has(name)) { allMatched = false; break; }
+
+      // arguments may be an object OR a JSON string.
+      let args: unknown = obj['arguments'] ?? obj['parameters'] ?? {};
+      if (typeof args === 'string') {
+        try { args = JSON.parse(args) as unknown; } catch { /* keep as string */ }
+      }
+
+      calls.push({
+        id: `call_content_${calls.length}_${name.slice(0, 8)}`,
+        name,
+        arguments: args,
+      });
+    }
+
+    if (!allMatched || calls.length === 0) continue;
+
+    // Strip the matched JSON from content so it doesn't appear as final text.
+    let cleanedContent: string;
+    if (fenced && fenceMatch) {
+      cleanedContent = text.replace(/```(?:json)?\s*\n?[\s\S]*?\n?```/, '').trim();
+    } else {
+      cleanedContent = text.replace(candidate, '').trim();
+    }
+    return { toolCalls: calls, cleanedContent };
+  }
+
+  return undefined;
+}
+
+/**
+ * Build a Set of known tool names from an OpenAI-format or ToolSpec tools array.
+ * Used by parseContentToolCalls to reject false positives.
+ *   OpenAI format: [{type:'function', function:{name:'...'}}]
+ *   ToolSpec format: [{name:'...'}]
+ */
+export function toolNamesFromSpecs(tools: unknown[]): Set<string> {
+  const names = new Set<string>();
+  for (const t of tools) {
+    if (typeof t !== 'object' || t === null) continue;
+    const spec = t as Record<string, unknown>;
+    const fn = spec['function'] as Record<string, unknown> | undefined;
+    if (fn && typeof fn['name'] === 'string') { names.add(fn['name']); continue; }
+    if (typeof spec['name'] === 'string') names.add(spec['name']);
+  }
+  return names;
+}
+
 /**
  * Build OpenAI-compat messages array from ChatMessage[].
  * Reused by both chat() and chatStream() in the LM Studio client.
@@ -660,10 +807,19 @@ export function buildOpenAICompatibleClient(
       const tokensOut =
         completionTokens > 0 ? completionTokens : estimateTokens(content);
 
-      const toolCalls = parseOpenAIToolCalls(message);
+      // M118: content-embedded fallback — only fires when no structured tool_calls.
+      let toolCalls = parseOpenAIToolCalls(message);
+      let finalContent = content;
+      if (!toolCalls && tools && tools.length > 0 && content) {
+        const contentResult = parseContentToolCalls(content, toolNamesFromSpecs(tools));
+        if (contentResult) {
+          toolCalls = contentResult.toolCalls;
+          finalContent = contentResult.cleanedContent;
+        }
+      }
 
       return {
-        content,
+        content: finalContent,
         toolCalls,
         usage: { tokensIn, tokensOut },
       };
@@ -806,7 +962,7 @@ export function buildOpenAICompatibleClient(
         if (tokensIn === 0) tokensIn = estimateTokens(messages.map((m) => m.content).join(' '));
         if (tokensOut === 0) tokensOut = estimateTokens(accContent);
 
-        const toolCalls =
+        let toolCalls =
           Object.keys(toolCallFragments).length > 0
             ? Object.entries(toolCallFragments).map(([, frag]) => {
                 let args: unknown = frag.argsStr;
@@ -821,7 +977,18 @@ export function buildOpenAICompatibleClient(
               })
             : undefined;
 
-        return { content: accContent, toolCalls, usage: { tokensIn, tokensOut } };
+        // M118: content-embedded fallback for streaming — only fires when no
+        // structured tool_calls fragments were accumulated from the stream.
+        let streamContent = accContent;
+        if (!toolCalls && tools && tools.length > 0 && accContent) {
+          const contentResult = parseContentToolCalls(accContent, toolNamesFromSpecs(tools));
+          if (contentResult) {
+            toolCalls = contentResult.toolCalls;
+            streamContent = contentResult.cleanedContent;
+          }
+        }
+
+        return { content: streamContent, toolCalls, usage: { tokensIn, tokensOut } };
       } catch {
         const result = await this.chat(messages, tools);
         if (result.content) onDelta(result.content);
