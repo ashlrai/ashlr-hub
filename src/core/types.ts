@@ -2155,6 +2155,43 @@ export interface DaemonConfig {
   parallel: number;
   /** Interval between ticks in `daemon start` loop mode (ms). */
   intervalMs: number;
+  /**
+   * M116: daemon execution mode.
+   * 'batch'      — (default) process one fixed batch per interval, then sleep
+   *                intervalMs. Byte-identical to pre-M116 behavior.
+   * 'continuous' — keep dispatching back-to-back: as soon as a worker slot frees,
+   *                claim + dispatch the next item. Only backs off (idleBackoffMs)
+   *                when the backlog is empty. Bound by budget + kill-switch + pool caps.
+   */
+  mode?: 'batch' | 'continuous';
+  /**
+   * M116: absolute ceiling on in-flight dispatches for continuous mode (ignored
+   * in batch mode, which uses `parallel`). Defaults to concurrency.total when
+   * set, or 8 otherwise. Raise to saturate a powerful machine.
+   */
+  maxConcurrent?: number;
+  /**
+   * M116: per-tier concurrency budgets for the tiered worker pool. All fields
+   * optional; absent tiers fall back to sensible defaults. Effective in BOTH
+   * batch and continuous modes — in batch mode these cap `parallel` per tier.
+   *
+   * 'local' tier  — engines whose EngineTier is 'local' (on-device models).
+   *                 GPU/RAM bound; keep low (default 2).
+   * 'cloud' tier  — engines whose EngineTier is 'frontier' or 'mid' (subscription
+   *                 cloud agents). I/O bound; can run many concurrently (default 6).
+   * 'total'       — hard cap across all tiers (default 8, raised from the old
+   *                 hard-coded 8). maxConcurrent takes precedence over this.
+   */
+  concurrency?: {
+    local?: number;
+    cloud?: number;
+    total?: number;
+  };
+  /**
+   * M116: how long (ms) the continuous loop backs off when the backlog is empty
+   * before re-checking. Default 5 000 ms. Only used in continuous mode.
+   */
+  idleBackoffMs?: number;
 }
 
 /**

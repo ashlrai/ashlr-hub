@@ -43,6 +43,7 @@ import { runSwarm } from '../swarm/runner.js';
 import { runGoal } from '../run/orchestrator.js';
 import { routeBackend } from '../fleet/router.js';
 import { withinLimit, recordUse } from '../fleet/quota.js';
+import { engineTierOf } from '../run/sandboxed-engine.js';
 import { subscriptionAllows, isSubscriptionEngine } from '../fleet/subscription-usage.js'; // M80
 import { recommendRoute, recoverWithinBudget } from '../run/learned-router.js';
 import { estimateRun } from '../observability/estimate.js';
@@ -72,6 +73,19 @@ const DEFAULTS: DaemonConfig = {
  */
 function resolveCfg(cfg: AshlrConfig): DaemonConfig {
   const o = cfg.daemon ?? {};
+  // M116: tiered concurrency caps — defaults chosen for M5 Max (18 cores, 137GB RAM):
+  // local=2 (GPU/RAM bound), cloud=6 (I/O bound), total=8. Configurable upward.
+  const concLocal = typeof o.concurrency?.local === 'number' && o.concurrency.local > 0
+    ? Math.floor(o.concurrency.local) : 2;
+  const concCloud = typeof o.concurrency?.cloud === 'number' && o.concurrency.cloud > 0
+    ? Math.floor(o.concurrency.cloud) : 6;
+  const concTotal = typeof o.concurrency?.total === 'number' && o.concurrency.total > 0
+    ? Math.floor(o.concurrency.total) : 8;
+  // maxConcurrent: explicit override > concurrency.total > 8
+  const maxConcurrent = typeof o.maxConcurrent === 'number' && o.maxConcurrent > 0
+    ? Math.floor(o.maxConcurrent)
+    : (typeof o.concurrency?.total === 'number' && o.concurrency.total > 0
+        ? Math.floor(o.concurrency.total) : 8);
   return {
     dailyBudgetUsd: typeof o.dailyBudgetUsd === 'number' && o.dailyBudgetUsd > 0
       ? o.dailyBudgetUsd
@@ -80,22 +94,80 @@ function resolveCfg(cfg: AshlrConfig): DaemonConfig {
       ? Math.floor(o.perTickItems)
       : DEFAULTS.perTickItems,
     parallel: typeof o.parallel === 'number' && o.parallel > 0
-      ? Math.min(Math.floor(o.parallel), 8) // hard upper bound at 8
+      ? Math.min(Math.floor(o.parallel), 8) // hard upper bound at 8 (batch mode)
       : DEFAULTS.parallel,
     intervalMs: typeof o.intervalMs === 'number' && o.intervalMs > 0
       ? o.intervalMs
       : DEFAULTS.intervalMs,
+    // M116: new fields — undefined/absent ⇒ undefined in returned config (backward-compat)
+    mode: o.mode === 'continuous' ? 'continuous' : o.mode === 'batch' ? 'batch' : undefined,
+    maxConcurrent,
+    concurrency: { local: concLocal, cloud: concCloud, total: concTotal },
+    idleBackoffMs: typeof o.idleBackoffMs === 'number' && o.idleBackoffMs > 0
+      ? o.idleBackoffMs : 5_000,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Bounded concurrency helper
+// Bounded concurrency helpers
 // ---------------------------------------------------------------------------
 
 /**
- * Run `tasks` with at most `limit` in flight at once.
- * Returns all settled results in input order.
- * Never throws — individual task errors are captured in the PromiseSettledResult.
+ * M116: map an EngineTier to the two-bucket pool tier used for concurrency accounting.
+ * 'frontier' and 'mid' are I/O-bound subscription engines → 'cloud' bucket.
+ * 'local' (on-device models) is GPU/RAM-bound → 'local' bucket.
+ */
+function poolTierOf(engineTier: import('../types.js').EngineTier): 'local' | 'cloud' {
+  return engineTier === 'local' ? 'local' : 'cloud';
+}
+
+/**
+ * M116: TieredPool — a mutable concurrency gate that enforces per-tier AND total
+ * in-flight caps. Used by both batch (to add per-tier awareness) and continuous
+ * (to gate refills).
+ *
+ * All methods are synchronous; callers await the task themselves. The pool only
+ * counts slots — it does NOT run tasks. Usage:
+ *   if (pool.canStart(tier)) { pool.start(tier); try { await task(); } finally { pool.finish(tier); } }
+ */
+class TieredPool {
+  private readonly _localCap: number;
+  private readonly _cloudCap: number;
+  private readonly _totalCap: number;
+  private _localInFlight = 0;
+  private _cloudInFlight = 0;
+
+  constructor(opts: { local: number; cloud: number; total: number }) {
+    this._localCap = Math.max(1, opts.local);
+    this._cloudCap = Math.max(1, opts.cloud);
+    this._totalCap = Math.max(1, opts.total);
+  }
+
+  get totalInFlight(): number { return this._localInFlight + this._cloudInFlight; }
+  get localInFlight(): number { return this._localInFlight; }
+  get cloudInFlight(): number { return this._cloudInFlight; }
+
+  canStart(tier: 'local' | 'cloud'): boolean {
+    if (this.totalInFlight >= this._totalCap) return false;
+    if (tier === 'local') return this._localInFlight < this._localCap;
+    return this._cloudInFlight < this._cloudCap;
+  }
+
+  start(tier: 'local' | 'cloud'): void {
+    if (tier === 'local') this._localInFlight++;
+    else this._cloudInFlight++;
+  }
+
+  finish(tier: 'local' | 'cloud'): void {
+    if (tier === 'local') this._localInFlight = Math.max(0, this._localInFlight - 1);
+    else this._cloudInFlight = Math.max(0, this._cloudInFlight - 1);
+  }
+}
+
+/**
+ * Pre-M116 bounded worker-pool: run `tasks` with at most `limit` concurrent.
+ * Used for BATCH mode (default) to preserve byte-identical dispatch + budget
+ * short-circuit semantics (H3 budget-overshoot bound = (parallel-1)×cost).
  */
 async function bounded<T>(
   tasks: Array<() => Promise<T>>,
@@ -120,6 +192,61 @@ async function bounded<T>(
   const slots = Math.max(1, Math.min(limit, tasks.length));
   await Promise.all(Array.from({ length: slots }, () => worker()));
   return results;
+}
+
+/**
+ * M116: run `tasks` with tiered concurrency caps.
+ * Each task carries a pre-determined tier ('local' | 'cloud').
+ * Returns all settled results in input order. Never throws.
+ *
+ * Algorithm: maintain a set of pending task indices. Each time a task
+ * completes, immediately try to start more tasks (up to pool caps). A
+ * Promise resolves only after ALL tasks have completed. No shared mutable
+ * wake/resolve — each completion schedules the next batch synchronously
+ * via the microtask queue, avoiding any lost-wake races.
+ */
+async function tieredBounded<T>(
+  tasks: Array<{ tier: 'local' | 'cloud'; run: () => Promise<T> }>,
+  pool: TieredPool,
+): Promise<PromiseSettledResult<T>[]> {
+  if (tasks.length === 0) return [];
+
+  const results: PromiseSettledResult<T>[] = new Array(tasks.length);
+  let nextIdx = 0;      // index of next task not yet started
+  let completed = 0;    // count of tasks that have fully settled
+
+  return new Promise<PromiseSettledResult<T>[]>((resolve) => {
+    // Attempt to start as many tasks as the pool currently allows.
+    function drain(): void {
+      while (nextIdx < tasks.length) {
+        const idx = nextIdx;
+        const task = tasks[idx];
+        if (task === undefined) break;
+        if (!pool.canStart(task.tier)) break; // pool full for this tier or total
+        nextIdx++;
+        pool.start(task.tier);
+        const tier = task.tier;
+        task.run().then(
+          (value) => {
+            results[idx] = { status: 'fulfilled', value };
+            pool.finish(tier);
+            completed++;
+            if (completed === tasks.length) resolve(results);
+            else drain(); // slot freed — try to start more
+          },
+          (reason) => {
+            results[idx] = { status: 'rejected', reason };
+            pool.finish(tier);
+            completed++;
+            if (completed === tasks.length) resolve(results);
+            else drain();
+          },
+        );
+      }
+    }
+
+    drain(); // initial fill
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -450,7 +577,38 @@ export async function tick(
   // status` reflects real work, not merely items considered.
   type ItemOutcome = { item: WorkItem; spentUsd: number; dispatched: boolean };
 
-  const tasks: Array<() => Promise<ItemOutcome>> = workedSet.map((item) => async (): Promise<ItemOutcome> => {
+  // M116: build TieredPool from resolved config.
+  // In batch mode (default), cap each tier at parallel to preserve identical behavior.
+  // In continuous mode (or when concurrency is configured), use the per-tier caps.
+  const isContinuousMode = dcfg.mode === 'continuous';
+  const tierPool = new TieredPool(
+    isContinuousMode || dcfg.concurrency !== undefined
+      ? {
+          local: dcfg.concurrency?.local ?? 2,
+          cloud: dcfg.concurrency?.cloud ?? 6,
+          total: dcfg.maxConcurrent ?? dcfg.concurrency?.total ?? 8,
+        }
+      : {
+          // Batch mode default: mirror old bounded(tasks, dcfg.parallel) — all tiers share parallel
+          local: dcfg.parallel,
+          cloud: dcfg.parallel,
+          total: dcfg.parallel,
+        },
+  );
+
+  // Determine each item's pool tier BEFORE building the task array so the
+  // tieredBounded dispatcher knows which slot to request.
+  const itemTiers: Array<'local' | 'cloud'> = workedSet.map((item) => {
+    const routed = routeBackend(item, liveCfg);
+    let backend = routed.backend;
+    if (backend !== 'builtin' && !withinLimit(backend, liveCfg)) backend = 'builtin';
+    const engineTier = engineTierOf(backend, liveCfg);
+    return poolTierOf(engineTier);
+  });
+
+  const tasks: Array<{ tier: 'local' | 'cloud'; run: () => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => ({
+    tier: itemTiers[_taskIdx] ?? 'local',
+    run: async (): Promise<ItemOutcome> => {
     // Re-check kill switch before each item dispatch.
     if (killSwitchOn()) {
       return { item, spentUsd: 0, dispatched: false };
@@ -668,9 +826,21 @@ export async function tick(
     }
 
     return { item, spentUsd: swarmSpent, dispatched };
-  });
+    }, // end run:
+  }));  // end tasks.map
 
-  const outcomes = await bounded(tasks, dcfg.parallel);
+  // Batch mode (default — no continuous mode, no explicit concurrency config):
+  // use the exact pre-M116 bounded worker-pool so dispatch + the in-tick budget
+  // short-circuit are byte-identical (preserves the H3 overshoot bound). The
+  // tiered pool only engages for continuous mode or explicit daemon.concurrency.
+  // Detect batch mode from the RAW user config — resolveCfg ALWAYS populates
+  // dcfg.concurrency with defaults, so checking dcfg would never be batch.
+  const explicitConcurrency =
+    liveCfg.daemon?.concurrency !== undefined || liveCfg.daemon?.maxConcurrent !== undefined;
+  const useBatchPool = !isContinuousMode && !explicitConcurrency;
+  const outcomes = useBatchPool
+    ? await bounded(tasks.map((t) => t.run), dcfg.parallel)
+    : await tieredBounded(tasks, tierPool);
 
   // itemsProcessed counts items whose swarm was actually dispatched (not those
   // skipped by the kill switch or the in-tick budget short-circuit).
@@ -821,7 +991,7 @@ export async function tick(
  */
 export async function runDaemon(
   cfg: AshlrConfig,
-  opts: { once: boolean; dryRun: boolean },
+  opts: { once: boolean; dryRun: boolean; maxCycles?: number },
 ): Promise<DaemonState> {
   // -------------------------------------------------------------------------
   // RE-ENTRANCY GUARD — must be the very first check.
@@ -922,40 +1092,91 @@ export async function runDaemon(
       try { liveCfg = { ...cfg, daemon: loadConfig().daemon ?? cfg.daemon }; } catch { liveCfg = cfg; }
       await tick(liveCfg, { dryRun: opts.dryRun });
     } else {
-      // Loop mode: every iteration re-checks kill switch + budget. NOT unbounded.
-      while (true) {
-        // Kill switch check — halt immediately.
-        if (killSwitchOn()) break;
+      // M116: choose loop strategy based on mode.
+      // Continuous mode: keep dispatching back-to-back with only a short idle
+      // backoff when the backlog is empty. Batch mode: existing behavior unchanged.
+      const isContinuous = dcfg.mode === 'continuous';
 
-        // M85: reload config from disk each iteration so daemon tuning
-        // (budget/parallel/interval/cooldown) takes effect without a restart.
-        // Never throws — falls back to the caller cfg's daemon section.
-        let liveCfg = cfg;
-        try { liveCfg = { ...cfg, daemon: loadConfig().daemon ?? cfg.daemon }; } catch { liveCfg = cfg; }
+      if (isContinuous) {
+        // -----------------------------------------------------------------------
+        // M116 CONTINUOUS MODE — saturate the machine.
+        // Loop: reload cfg → tick → if backlog empty sleep idleBackoffMs → repeat.
+        // Every iteration re-checks kill-switch + budget (same guarantees as batch).
+        // NO fixed intervalMs sleep between non-empty ticks — the pool caps keep
+        // concurrency safe; we only back off when work runs dry.
+        // -----------------------------------------------------------------------
+        // maxCycles bounds the loop for testability/safety; production omits it
+        // (Infinity) so the daemon runs until kill-switch or budget exhaustion.
+        let cyclesLeft = opts.maxCycles ?? Infinity;
+        while (true) {
+          if (cyclesLeft-- <= 0) break;
+          if (killSwitchOn()) break;
 
-        // Budget check — halt when daily cap exhausted.
-        const current = loadDaemonState();
-        const recheckCfg = resolveCfg(liveCfg);
-        if (current.todaySpentUsd >= recheckCfg.dailyBudgetUsd) break;
+          let liveCfg = cfg;
+          try { liveCfg = { ...cfg, daemon: loadConfig().daemon ?? cfg.daemon }; } catch { liveCfg = cfg; }
 
-        // Run one tick with the freshly-reloaded config.
-        await tick(liveCfg, { dryRun: opts.dryRun });
+          const current = loadDaemonState();
+          const recheckCfg = resolveCfg(liveCfg);
+          if (current.todaySpentUsd >= recheckCfg.dailyBudgetUsd) break;
 
-        // Dry-run is inherently a one-shot PLAN: it records spentUsd:0 forever,
-        // so the budget break can never fire. Terminate after a single iteration
-        // (matching --once semantics) so a dry-run loop is BOUNDED, not endless.
-        if (opts.dryRun) break;
+          const tickResult = await tick(liveCfg, { dryRun: opts.dryRun });
 
-        // Re-check kill switch + budget after the tick before sleeping.
-        if (killSwitchOn()) break;
-        const afterTick = loadDaemonState();
-        if (afterTick.todaySpentUsd >= recheckCfg.dailyBudgetUsd) break;
+          if (opts.dryRun) break;
 
-        // Sleep between ticks using a bounded interval.
-        await sleep(dcfg.intervalMs);
+          if (killSwitchOn()) break;
+          const afterTick = loadDaemonState();
+          const recheck2 = resolveCfg(liveCfg);
+          if (afterTick.todaySpentUsd >= recheck2.dailyBudgetUsd) break;
 
-        // Final kill-switch check after sleep (in case stop() was called while sleeping).
-        if (killSwitchOn()) break;
+          // Back off only when the backlog was empty (no work dispatched this tick).
+          if (tickResult.itemsConsidered === 0 ||
+              tickResult.reason === 'no-backlog' ||
+              tickResult.reason === 'no-enrolled-repos') {
+            const idleMs = recheck2.idleBackoffMs ?? 5_000;
+            await sleep(idleMs);
+          }
+          // Non-empty tick: immediately loop back — no sleep.
+
+          if (killSwitchOn()) break;
+        }
+      } else {
+        // -----------------------------------------------------------------------
+        // BATCH MODE (default) — original behavior, byte-identical.
+        // -----------------------------------------------------------------------
+        while (true) {
+          // Kill switch check — halt immediately.
+          if (killSwitchOn()) break;
+
+          // M85: reload config from disk each iteration so daemon tuning
+          // (budget/parallel/interval/cooldown) takes effect without a restart.
+          // Never throws — falls back to the caller cfg's daemon section.
+          let liveCfg = cfg;
+          try { liveCfg = { ...cfg, daemon: loadConfig().daemon ?? cfg.daemon }; } catch { liveCfg = cfg; }
+
+          // Budget check — halt when daily cap exhausted.
+          const current = loadDaemonState();
+          const recheckCfg = resolveCfg(liveCfg);
+          if (current.todaySpentUsd >= recheckCfg.dailyBudgetUsd) break;
+
+          // Run one tick with the freshly-reloaded config.
+          await tick(liveCfg, { dryRun: opts.dryRun });
+
+          // Dry-run is inherently a one-shot PLAN: it records spentUsd:0 forever,
+          // so the budget break can never fire. Terminate after a single iteration
+          // (matching --once semantics) so a dry-run loop is BOUNDED, not endless.
+          if (opts.dryRun) break;
+
+          // Re-check kill switch + budget after the tick before sleeping.
+          if (killSwitchOn()) break;
+          const afterTick = loadDaemonState();
+          if (afterTick.todaySpentUsd >= recheckCfg.dailyBudgetUsd) break;
+
+          // Sleep between ticks using a bounded interval.
+          await sleep(dcfg.intervalMs);
+
+          // Final kill-switch check after sleep (in case stop() was called while sleeping).
+          if (killSwitchOn()) break;
+        }
       }
     }
   } catch {
