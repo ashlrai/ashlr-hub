@@ -1,5 +1,5 @@
 /**
- * router.ts — M46: capability-tiered backend router for the autonomous fleet.
+ * router.ts — M46 + M115: capability-tiered backend router for the autonomous fleet.
  *
  * Maps a discovered WorkItem to the backend (EngineId) that should attempt it,
  * honoring cfg.foundry.allowedBackends and PATH availability. The policy is a
@@ -11,23 +11,38 @@
  *  - NEVER returns a backend not in allowedBackends (default ['builtin']).
  *  - NEVER returns an external backend that fails engineInstalled() — falls back
  *    to 'builtin' (which is always available).
- *  - Pure except for engineInstalled()'s PATH probe (read-only, never throws).
+ *  - Pure except for engineInstalled()'s PATH/URL probe (read-only, never throws).
+ *  - local-coder (mid-tier) NEVER gains main-merge authority — only frontier
+ *    backends (claude/codex) carry engineTier === 'frontier' which is the gate
+ *    requirement for auto-merge to main.
  *
- * ROUTING HEURISTIC (documented) — FRONTIER-FIRST:
- *  The 'builtin' engine plans work items but does NOT write code: every
- *  proposal it produces is a 0-diff. Routing everything to 'builtin' means
- *  frontier coders (claude/codex, which DO edit files) receive zero dispatches.
+ * ROUTING HEURISTIC (M115) — LOCAL-FIRST BULK, FRONTIER FOR HARD/ESCALATION:
  *
- *  New policy: frontier backends are preferred for ALL items whenever one is
- *  allowed AND installed.
- *  - If a FRONTIER backend is available (allowed + installed): route to it.
- *    The $5/day budget cap is enforced by the daemon quota layer — the router
- *    does NOT ration frontier seats. With no frontier, 'builtin' is the only
- *    option even if it produces no diff.
- *  - If NO frontier is available: fall back to 'builtin'.
- *  - When MULTIPLE frontier backends are allowed+installed, alternate
- *    DETERMINISTICALLY by a stable hash of item.id so 'claude' and 'codex'
- *    share the load evenly.
+ *  The 'builtin' engine plans work items but does NOT write code (0-diff).
+ *  M115 introduces 'local-coder' (Ollama/qwen2.5:72b) as a free, unlimited
+ *  mid-tier coding engine that runs the agent-loop with write tools in a
+ *  sandboxed worktree, capturing real diffs like claude/codex do.
+ *
+ *  Three-tier policy (in evaluation order):
+ *
+ *  1. FRONTIER for hard/high-value items: when a frontier backend (claude/codex)
+ *     is allowed+installed AND the item has effort ≥ FRONTIER_EFFORT_THRESHOLD
+ *     OR score ≥ FRONTIER_SCORE_THRESHOLD, route to frontier. Frontier retains
+ *     sole merge-to-main authority.
+ *
+ *  2. LOCAL-MID for bulk items: when a mid-tier backend (local-coder, nim, kimi,
+ *     hermes …) is allowed+installed AND the item is below the frontier thresholds,
+ *     route to the local-mid engine. This makes Ollama the FREE workhorse for the
+ *     bulk of items.
+ *
+ *  3. FALLBACK FRONTIER for any item when no mid backend is available but a frontier
+ *     is (preserves pre-M115 behavior when local-coder is absent/not allowed).
+ *
+ *  4. BUILTIN as last resort when no external backend qualifies.
+ *
+ *  Escalation: when a local-mid diff fails verify in the daemon, the daemon
+ *  re-queues the item with source='escalation'; source==='escalation' forces
+ *  frontier routing regardless of effort/score.
  */
 
 import type { AshlrConfig, EngineId, EngineTier, WorkItem } from '../types.js';
@@ -38,7 +53,7 @@ import { engineTierOf } from '../run/sandboxed-engine.js';
 export interface RouteDecision {
   /** Backend chosen to attempt the item. Always allowed + (if external) installed. */
   backend: EngineId;
-  /** Tier of the chosen backend ('local' | 'frontier'). */
+  /** Tier of the chosen backend ('local' | 'mid' | 'frontier'). */
   tier: EngineTier;
   /** Short human-readable rationale. */
   reason: string;
@@ -48,8 +63,32 @@ export interface RouteDecision {
 const FRONTIER_PREFERENCE: readonly EngineId[] = ['claude', 'codex'];
 
 /**
- * Stable, deterministic 32-bit FNV-1a hash of a string. Used only to pick which
- * frontier backend handles an item — NOT a security primitive.
+ * M115: Mid-tier backends in preference order. Typed as string[] because
+ * 'local-coder'/'nim'/'kimi' are config-registered engines not yet in the
+ * EngineId union (types.ts is owned by another agent). The Set/filter in
+ * allowedSet/availableFrom accept EngineId via string coercion — all valid at
+ * runtime; the tier is determined by engineTierOf which reads the registry.
+ */
+const MID_PREFERENCE: readonly string[] = ['local-coder', 'nim', 'kimi', 'hermes'];
+
+/**
+ * M115: Effort threshold above which frontier is preferred over local-mid.
+ * Items with effort >= this value are considered "hard" and routed to frontier
+ * (when available). Default: 4 (on a 1–5 scale, 4–5 are senior/complex tasks).
+ */
+const FRONTIER_EFFORT_THRESHOLD = 4;
+
+/**
+ * M115: Score threshold above which frontier is preferred over local-mid.
+ * Items with score >= this value are routed to frontier when available.
+ * Default: 8 (on a 1–10 scale, high-priority items warrant frontier attention).
+ */
+const FRONTIER_SCORE_THRESHOLD = 8;
+
+/**
+ * Stable, deterministic 32-bit FNV-1a hash of a string. Used to pick which
+ * backend handles an item when multiple of the same tier are available —
+ * NOT a security primitive.
  */
 function stableHash(s: string): number {
   let h = 0x811c9dc5;
@@ -73,27 +112,39 @@ function allowedSet(cfg: AshlrConfig): ReadonlySet<EngineId> {
 }
 
 /**
- * The frontier backends that are BOTH allowed and installed, in preference
- * order. Empty when none qualify (caller then falls back to 'builtin').
+ * Filter a preference list to backends that are BOTH allowed and installed.
+ * Preserves the preference order. Returns empty when none qualify.
+ * Accepts `readonly string[]` so MID_PREFERENCE (which includes config-only
+ * engine ids not yet in the EngineId union) can be passed without a cast.
  */
-function availableFrontiers(cfg: AshlrConfig): EngineId[] {
+function availableFrom(preference: readonly string[], cfg: AshlrConfig): EngineId[] {
   const allowed = allowedSet(cfg);
-  return FRONTIER_PREFERENCE.filter(
-    (e) => allowed.has(e) && engineInstalled(e),
-  );
+  return preference.filter(
+    (e) => allowed.has(e as EngineId) && engineInstalled(e as EngineId, cfg),
+  ) as EngineId[];
 }
 
 /**
- * Pick a frontier backend deterministically. With one candidate, returns it;
- * with multiple, alternates by a stable hash of item.id so the senior load is
- * split predictably (no clock, no randomness). Returns null when none qualify.
+ * Pick one backend deterministically from a list. With one candidate returns
+ * it directly; with multiple alternates by stable hash of item.id (no clock,
+ * no randomness). Returns null when the list is empty.
  */
-function pickFrontier(item: WorkItem, cfg: AshlrConfig): EngineId | null {
-  const frontiers = availableFrontiers(cfg);
-  if (frontiers.length === 0) return null;
-  if (frontiers.length === 1) return frontiers[0]!;
-  const idx = stableHash(item.id) % frontiers.length;
-  return frontiers[idx]!;
+function pickFrom(candidates: EngineId[], item: WorkItem): EngineId | null {
+  if (candidates.length === 0) return null;
+  if (candidates.length === 1) return candidates[0]!;
+  return candidates[stableHash(item.id) % candidates.length]!;
+}
+
+/**
+ * True when the item should be escalated to frontier regardless of tier.
+ * Escalation sources ('escalation') are always sent to frontier.
+ * High-effort or high-score items are also frontier-eligible.
+ */
+function isFrontierItem(item: WorkItem): boolean {
+  if ((item.source as string) === 'escalation') return true;
+  const effort = typeof item.effort === 'number' ? item.effort : 3;
+  const score = typeof item.score === 'number' ? item.score : 3;
+  return effort >= FRONTIER_EFFORT_THRESHOLD || score >= FRONTIER_SCORE_THRESHOLD;
 }
 
 /** Build a decision for a concrete backend, deriving its tier. */
@@ -104,28 +155,56 @@ function decide(backend: EngineId, reason: string): RouteDecision {
 /**
  * Route a WorkItem to the backend that should attempt it.
  *
- * PURE + DETERMINISTIC (modulo engineInstalled's read-only PATH probe). Never
- * throws. Honors allowedBackends and PATH availability — see module heuristic.
+ * PURE + DETERMINISTIC (modulo engineInstalled's read-only PATH/URL probe).
+ * Never throws. Honors allowedBackends and availability — see module heuristic.
  *
- * FRONTIER-FIRST: routes every item to the best available frontier backend
- * (claude/codex). Falls back to 'builtin' only when no frontier is
- * allowed+installed, because builtin produces 0-diff proposals (no code edits).
+ * M115 three-tier policy:
+ *  1. Hard/high-value items → frontier (claude/codex) when available.
+ *  2. Bulk items → local-mid (local-coder/Ollama first, then nim/kimi/hermes).
+ *  3. No mid available but frontier is → frontier (pre-M115 fallback behavior).
+ *  4. Neither → builtin (0-diff, better than nothing).
  */
 export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
-  // ── Frontier-first: prefer any allowed+installed frontier backend ──────────
-  // builtin plans but does NOT write code (0-diff proposals). The $5/day quota
-  // cap is enforced by the daemon quota layer, not here.
-  const frontier = pickFrontier(item, cfg);
-  if (frontier) {
+  const frontiers = availableFrom(FRONTIER_PREFERENCE, cfg);
+  const mids = availableFrom(MID_PREFERENCE, cfg);
+
+  // ── 1. Frontier for hard/escalation items ─────────────────────────────────
+  if (isFrontierItem(item) && frontiers.length > 0) {
+    const chosen = pickFrom(frontiers, item)!;
+    const effort = typeof item.effort === 'number' ? item.effort : 3;
+    const score = typeof item.score === 'number' ? item.score : 3;
     return decide(
-      frontier,
-      `frontier-first: builtin produces no diffs → frontier ${frontier} (source=${item.source}, effort=${typeof item.effort === 'number' ? item.effort : 3})`,
+      chosen,
+      `frontier: hard/escalation item (source=${item.source}, effort=${effort}, score=${score}) → ${chosen}`,
     );
   }
 
-  // ── No frontier available → fall back to builtin ──────────────────────────
+  // ── 2. Local-mid for bulk items ────────────────────────────────────────────
+  // Free + unlimited; local-coder (Ollama) is preferred. Frontier reserves its
+  // capacity for high-value items and escalation re-tries.
+  if (mids.length > 0) {
+    const chosen = pickFrom(mids, item)!;
+    const effort = typeof item.effort === 'number' ? item.effort : 3;
+    return decide(
+      chosen,
+      `local-mid bulk: ${chosen} (source=${item.source}, effort=${effort}) — frontier reserved for hard items`,
+    );
+  }
+
+  // ── 3. Fallback: any frontier when no mid backend is available ─────────────
+  // Preserves pre-M115 behavior: frontier gets all items when local-coder is
+  // absent or not in allowedBackends.
+  if (frontiers.length > 0) {
+    const chosen = pickFrom(frontiers, item)!;
+    return decide(
+      chosen,
+      `frontier-fallback: no mid backend allowed+installed → ${chosen} (source=${item.source})`,
+    );
+  }
+
+  // ── 4. Last resort: builtin (0-diff, plans only) ──────────────────────────
   return decide(
     'builtin',
-    `no frontier allowed+installed → local builtin (source=${item.source})`,
+    `no external backend allowed+installed → builtin (source=${item.source})`,
   );
 }

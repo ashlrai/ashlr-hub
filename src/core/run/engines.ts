@@ -95,11 +95,32 @@ export function resolveBinAbsolute(bin: string): string {
 export function engineInstalled(engine: EngineId, cfg?: AshlrConfig): boolean {
   if (engine === 'builtin') return true;
   const spec = resolveEngineSpec(engine, cfg);
-  // An OpenAI-compatible api-model is "installed" when its key is present (the
-  // local-first gate still applies at completion time); CLI agents probe PATH.
+  // An OpenAI-compatible api-model is "installed" when:
+  //   - envKey is non-empty: the key env var is present (cloud API — key required).
+  //   - envKey is empty/absent: probe the endpoint URL synchronously (local engines
+  //     like Ollama require no key; "installed" = the server is reachable).
+  //     Uses the baseUrlEnv override when set, else the spec's defaultBaseUrl.
+  //     A 200 from /v1/models (or any non-connection-refused response) = installed.
+  //     This is a SYNC probe (spawnSync curl) to keep engineInstalled synchronous
+  //     and pure-ish; failures / missing curl fall back to false (safe default).
   if (spec?.kind === 'api-model') {
     const key = spec.api?.envKey;
-    return key ? Boolean(process.env[key]?.trim()) : false;
+    if (key) return Boolean(process.env[key]?.trim());
+    // No key → local endpoint probe (e.g. Ollama at http://localhost:11434/v1).
+    const baseUrlEnv = spec.api?.baseUrlEnv;
+    const baseUrl = (baseUrlEnv && process.env[baseUrlEnv]?.trim()) ||
+      spec.api?.defaultBaseUrl ||
+      'http://localhost:11434/v1';
+    try {
+      const r = spawnSync(
+        'curl',
+        ['-sf', '--max-time', '1', `${baseUrl}/models`],
+        { encoding: 'utf8', timeout: 2000 },
+      );
+      return r.status === 0;
+    } catch {
+      return false;
+    }
   }
   const candidates = spec?.bins ?? [spec?.bin ?? engine];
   for (const bin of candidates) {

@@ -198,6 +198,42 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
     },
     capabilities: ['agent', 'edit'],
   },
+
+  // ---------------------------------------------------------------------------
+  // M115: local-coder — Ollama as a first-class, FREE, unlimited fleet coding
+  // engine. Runs qwen2.5:72b (strong instruct model with native tool_calls) via
+  // the OpenAI-compat path at http://localhost:11434/v1.
+  //
+  // Tier 'mid': branch-eligible after verification, NEVER merge-authority for
+  // main (frontier gate enforces this — local-coder cannot satisfy the
+  // engineTier === 'frontier' main-merge requirement).
+  //
+  // No envKey: Ollama is local/free — "installed" is determined by probing the
+  // endpoint at http://localhost:11434/v1/models (engineInstalled in engines.ts
+  // returns true when the probe succeeds; false when Ollama is not running).
+  //
+  // Default model: qwen2.5:72b-instruct-q4_K_M (best available on this machine).
+  // Upgrade path: `ollama pull qwen2.5-coder:32b` for a dedicated coder model —
+  // then set cfg.foundry.models['local-coder'] = 'qwen2.5-coder:32b'.
+  //
+  // BUILTIN but NOT in default allowedBackends — activated by adding 'local-coder'
+  // to cfg.foundry.allowedBackends (or the machine-local defaultConfig override).
+  // ---------------------------------------------------------------------------
+  'local-coder': {
+    id: 'local-coder',
+    kind: 'api-model',
+    tier: 'mid',
+    api: {
+      // No envKey: Ollama requires no API key. engineInstalled probes the
+      // endpoint URL instead (envKey absent → URL-probe path in engines.ts).
+      envKey: '',
+      baseUrlEnv: 'OLLAMA_BASE_URL',
+      defaultBaseUrl: 'http://localhost:11434/v1',
+      defaultModel: 'qwen2.5:72b-instruct-q4_K_M',
+      protocol: 'openai' as const,
+    },
+    capabilities: ['agent', 'edit', 'tools'],
+  },
 });
 
 // ---------------------------------------------------------------------------

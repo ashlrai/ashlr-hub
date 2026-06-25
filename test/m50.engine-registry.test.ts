@@ -38,7 +38,7 @@ function makeConfig(over: Partial<AshlrConfig> = {}): AshlrConfig {
   } as AshlrConfig;
 }
 
-const KNOWN_ENGINES: EngineId[] = ['builtin', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'opencode', 'nim', 'kimi', 'openai-compat'];
+const KNOWN_ENGINES: EngineId[] = ['builtin', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'opencode', 'nim', 'kimi', 'openai-compat', 'local-coder'];
 
 describe('M50 registry — coverage', () => {
   it('every known EngineId has a builtin registry entry', () => {

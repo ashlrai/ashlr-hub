@@ -411,6 +411,22 @@ export function defaultConfig(): AshlrConfig {
     //   fleet: { sharedQueue: { mode: 'filesystem', path: '/path/to/shared/folder' } }
     // machineId defaults to os.hostname() when not explicitly set.
     // fleet: { sharedQueue: { mode: 'off' } },
+
+    // M115: local-coder (Ollama) fleet engine — FREE, unlimited, mid-tier.
+    // Activate on any machine running Ollama by adding to ~/.ashlr/config.json:
+    //
+    //   "foundry": {
+    //     "allowedBackends": ["builtin", "local-coder", "claude"],
+    //     "models": { "local-coder": "qwen2.5:72b-instruct-q4_K_M" }
+    //   }
+    //
+    // Upgrade coding quality: `ollama pull qwen2.5-coder:32b` then set:
+    //   "models": { "local-coder": "qwen2.5-coder:32b" }
+    //
+    // The router (M115) automatically prefers local-coder for bulk items and
+    // reserves frontier (claude/codex) for hard items (effort≥4 or score≥8)
+    // and escalation re-tries. local-coder is mid-tier: branch-eligible but
+    // NEVER granted merge-to-main authority (frontier-only gate).
   };
 }
 
