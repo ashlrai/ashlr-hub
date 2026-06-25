@@ -34,6 +34,53 @@ const MAX_OUTDATED_ITEMS = 50;
 const MAX_VULN_ITEMS = 20;
 
 // ---------------------------------------------------------------------------
+// Shared ignore predicate — non-actionable / generated / vendored files
+// ---------------------------------------------------------------------------
+
+/**
+ * Directory names that are NEVER actionable (generated, vendored, tooling).
+ * Used as a fast segment-check on file paths from rg/grep output.
+ */
+const IGNORE_DIRS: ReadonlySet<string> = new Set([
+  'node_modules',
+  'dist',
+  'build',
+  'out',
+  'coverage',
+  '.next',
+  'target',
+  '.vscode',
+  '.git',
+  'vendor',
+  '.turbo',
+]);
+
+/**
+ * File name patterns that identify non-actionable generated/lock/minified files.
+ * A TODO inside any of these is not a real work item.
+ */
+const IGNORE_FILE_RE =
+  /(?:^|[\/])(bun\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|composer\.lock|Gemfile\.lock)$|\.min\.[cm]?[jt]sx?$|\.min\.css$|\.generated\.[^.]+$|\.map$/i;
+
+/**
+ * Returns true when the given file path (rg/grep output style, relative or
+ * absolute) should be IGNORED by all file-walking scanners.
+ *
+ * Rules:
+ *  1. Any path segment matching IGNORE_DIRS (e.g. node_modules, dist, .git).
+ *  2. Any file name matching IGNORE_FILE_RE (lockfiles, *.min.js, *.map, etc.).
+ */
+export function isIgnoredPath(filePath: string): boolean {
+  // Normalise separators so we can reliably split on '/'
+  const normalised = filePath.replace(/\\/g, '/');
+  const segments = normalised.split('/');
+  for (const seg of segments) {
+    if (seg && IGNORE_DIRS.has(seg)) return true;
+  }
+  return IGNORE_FILE_RE.test(normalised);
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -200,6 +247,17 @@ async function rgOrGrep(repo: string): Promise<string | null> {
         '--glob', '!.git',
         '--glob', '!dist',
         '--glob', '!build',
+        '--glob', '!out',
+        '--glob', '!coverage',
+        '--glob', '!.next',
+        '--glob', '!target',
+        '--glob', '!.vscode',
+        '--glob', '!vendor',
+        '--glob', '!.turbo',
+        '--glob', '!*.lock',
+        '--glob', '!*.min.js',
+        '--glob', '!*.min.css',
+        '--glob', '!*.map',
         '--max-count', String(MAX_TODO_HITS),
         '-e', 'TODO|FIXME|HACK|XXX',
         '.',
@@ -294,6 +352,9 @@ export async function scanTodos(repo: string): Promise<WorkItem[]> {
       if (/FIXME/i.test(commentText)) tags.push('fixme');
       if (/HACK/i.test(commentText)) tags.push('hack');
       if (/XXX/i.test(commentText)) tags.push('xxx');
+
+      // Skip TODOs in generated, vendored, or lock files
+      if (isIgnoredPath(filePath)) continue;
 
       const existing = byFile.get(filePath);
       if (existing) {

@@ -101,7 +101,7 @@ export async function runConductor(
   };
 
   // All dependencies loaded lazily so vi.mock() intercepts them in tests.
-  const { killSwitchOn } = await import('../sandbox/policy.js');
+  const { killSwitchOn, listEnrolled } = await import('../sandbox/policy.js');
   const { listGoals } = await import('./store.js');
   const { nextActionableMilestone, advanceGoalCycle, progressOf } = await import('./advance.js');
 
@@ -131,6 +131,28 @@ export async function runConductor(
     if (killSwitchOn()) {
       summary.killSwitchTripped = true;
       break;
+    }
+
+    // Skip goals whose project is null/missing OR whose project path is not
+    // in the enrolled list. These goals can NEVER advance (no real repo to
+    // mutate) and failing on every cycle wastes fleet capacity.
+    // allowAnyRepo bypasses the enrollment check (matches assertMayMutate).
+    if (!opts.allowAnyRepo) {
+      if (!goal.project) {
+        process.stderr.write(
+          `[conductor] goal ${goal.id} skipped — no project set (needs-attention)
+`,
+        );
+        continue;
+      }
+      const enrolledPaths = listEnrolled();
+      if (enrolledPaths.length > 0 && !enrolledPaths.includes(goal.project)) {
+        process.stderr.write(
+          `[conductor] goal ${goal.id} skipped — project "${goal.project}" is not enrolled (needs-attention)
+`,
+        );
+        continue;
+      }
     }
 
     // Find the next actionable milestone (sequencing guard: skips gated goals).
