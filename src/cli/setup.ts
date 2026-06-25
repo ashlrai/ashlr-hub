@@ -6,10 +6,12 @@
  *   enroll (discover repos) → final readiness summary.
  *
  * Flags:
- *   --yes    Accept defaults / non-interactive (auto-enroll, skip confirmations).
- *            Implied when stdin is not a TTY. Used by the Tauri desktop app.
- *   --wire   Wire detected editors (backup-first, idempotent).
- *   --json   Emit OnboardResult as JSON on stdout.
+ *   --yes        Accept defaults / non-interactive (auto-enroll, skip confirmations).
+ *                Implied when stdin is not a TTY. Used by the Tauri desktop app.
+ *   --wire       Wire detected editors (backup-first, idempotent).
+ *   --json       Emit OnboardResult as JSON on stdout.
+ *   --user <n>   Set the user display name (cfg.user.name). Attributed in fleet pulse.
+ *   --user-id <id> Set the user stable id — email recommended (cfg.user.id).
  *
  * SAFETY:
  *   - Never auto-enters credentials. Engine auth = guidance strings only.
@@ -100,11 +102,18 @@ export async function cmdSetup(args: string[]): Promise<number> {
   const wireMode  = args.includes('--wire');
   const yesMode   = args.includes('--yes') || !process.stdin.isTTY;
 
+  // --user "<name>" and --user-id <id> — team identity flags (M110).
+  // Both are optional; either or both may be supplied; non-interactive safe.
+  const userFlagIdx = args.findIndex((a) => a === '--user');
+  const userName    = userFlagIdx !== -1 ? args[userFlagIdx + 1] : undefined;
+  const userIdFlagIdx = args.findIndex((a) => a === '--user-id');
+  const userId      = userIdFlagIdx !== -1 ? args[userIdFlagIdx + 1] : undefined;
+
   const cfg = loadConfig();
 
   let result: OnboardResult;
   try {
-    result = await setupWizard(cfg, { wire: wireMode, yes: yesMode });
+    result = await setupWizard(cfg, { wire: wireMode, yes: yesMode, userName, userId });
   } catch (err) {
     // setupWizard is guaranteed never-throw, but be defensive.
     const msg = err instanceof Error ? err.message : String(err);
@@ -121,7 +130,10 @@ export async function cmdSetup(args: string[]): Promise<number> {
 
   // ── Human-readable output ──────────────────────────────────────────────────
   console.log('');
-  console.log(bold('  ashlr setup') + dim('  — first-run fleet wizard'));
+  // Resolve the identity that will be displayed — prefer flag value over cfg.
+  const displayIdentity = userName ?? userId ?? loadConfig().user?.id ?? loadConfig().user?.name;
+  const identityLine = displayIdentity ? dim(`  running as ${displayIdentity}`) : '';
+  console.log(bold('  ashlr setup') + dim('  — first-run fleet wizard') + (identityLine ? '\n' + identityLine : ''));
   console.log('');
 
   for (const s of result.steps) {

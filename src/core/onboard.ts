@@ -12,7 +12,7 @@
  */
 
 import { existsSync, mkdirSync, symlinkSync, readlinkSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, userInfo } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -356,6 +356,158 @@ export async function stepEnroll(cfg: AshlrConfig, opts: { yes: boolean }): Prom
   }
 }
 
+
+/**
+ * Step M110: ensure cfg.user identity is set.
+ *
+ * Resolution order (first wins):
+ *   1. Explicit opts.userName / opts.userId (from --user / --user-id flags).
+ *   2. Existing cfg.user (already configured — leave it alone).
+ *   3. Derive a default: try `git config user.name` / `git config user.email`,
+ *      then fall back to OS username from userInfo().
+ *
+ * Persists via saveConfig when the identity was absent/changed.
+ * Guidance-only: never enters a PAT or any other credential.
+ * NON-TTY safe: never prompts, never hangs.
+ */
+export async function stepUser(
+  cfg: AshlrConfig,
+  opts: { userName?: string; userId?: string },
+): Promise<{ userStep: OnboardStep; cfg: AshlrConfig }> {
+  try {
+    // 1. Explicit flags take priority.
+    if (opts.userName || opts.userId) {
+      const updated: AshlrConfig = {
+        ...cfg,
+        user: {
+          ...(cfg.user ?? {}),
+          ...(opts.userId   ? { id:   opts.userId   } : {}),
+          ...(opts.userName ? { name: opts.userName } : {}),
+        },
+      };
+      saveConfig(updated);
+      const display = opts.userId ?? opts.userName ?? '';
+      return {
+        userStep: step('user', 'ok', `Identity set: ${display}`),
+        cfg: updated,
+      };
+    }
+
+    // 2. Already configured — keep as-is.
+    if (cfg.user?.id || cfg.user?.name) {
+      const display = cfg.user.id ?? cfg.user.name ?? '';
+      return {
+        userStep: step('user', 'ok', `Identity already set: ${display}`),
+        cfg,
+      };
+    }
+
+    // 3. Derive a default (non-TTY safe — no prompts).
+    let derivedName: string | undefined;
+    let derivedId: string | undefined;
+
+    try {
+      const { execFileSync } = await import('node:child_process');
+      const gitName = execFileSync('git', ['config', 'user.name'], { encoding: 'utf8' }).trim();
+      if (gitName) derivedName = gitName;
+    } catch { /* git not available or not configured — ignore */ }
+
+    try {
+      const { execFileSync } = await import('node:child_process');
+      const gitEmail = execFileSync('git', ['config', 'user.email'], { encoding: 'utf8' }).trim();
+      if (gitEmail) derivedId = gitEmail;
+    } catch { /* ignore */ }
+
+    // Final fallback: OS username.
+    if (!derivedName) {
+      try {
+        derivedName = userInfo().username;
+      } catch { /* ignore */ }
+    }
+
+    if (derivedName || derivedId) {
+      const updated: AshlrConfig = {
+        ...cfg,
+        user: {
+          ...(derivedId   ? { id:   derivedId   } : {}),
+          ...(derivedName ? { name: derivedName } : {}),
+        },
+      };
+      saveConfig(updated);
+      const display = derivedId ?? derivedName ?? '';
+      return {
+        userStep: step('user', 'ok', `Identity derived and set: ${display}`),
+        cfg: updated,
+      };
+    }
+
+    // Nothing derivable — surface guidance without blocking.
+    return {
+      userStep: step(
+        'user',
+        'detected',
+        'No user identity configured. Set with: ashlr setup --user "Your Name" --user-id you@example.com',
+      ),
+      cfg,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      userStep: step(
+        'user',
+        'manual',
+        `Could not determine user identity: ${msg}. Run: ashlr setup --user "Your Name"`,
+      ),
+      cfg,
+    };
+  }
+}
+
+/**
+ * Step M110: report pulse connection status — guidance only, never enters a PAT.
+ *
+ * Surfaces:
+ *   - Whether cfg.pulse is enabled/configured.
+ *   - Whether ASHLR_PULSE_PAT is present in the environment.
+ *   - The teammate onboarding action: set ASHLR_PULSE_PAT=<token> so their
+ *     fleet activity exports to the shared pulse attributed to them.
+ *
+ * This step is ALWAYS guidance-only: it never reads, writes, or stores a token.
+ */
+export async function stepPulse(cfg: AshlrConfig): Promise<OnboardStep> {
+  try {
+    const pulseEnabled = cfg.pulse?.enabled === true;
+    const pulseEndpoint = cfg.pulse?.endpoint ?? 'http://localhost:3000';
+    const patPresent = Boolean(process.env['ASHLR_PULSE_PAT']);
+
+    if (!pulseEnabled) {
+      return step(
+        'pulse',
+        'skipped',
+        'Pulse export disabled. To enable: set cfg.pulse.enabled=true + export ASHLR_PULSE_PAT=<token>',
+      );
+    }
+
+    if (!patPresent) {
+      return step(
+        'pulse',
+        'detected',
+        `Pulse enabled (${pulseEndpoint}) but ASHLR_PULSE_PAT not set. ` +
+          'Add to your shell profile: export ASHLR_PULSE_PAT=<your-token>  (never stored in config)',
+      );
+    }
+
+    return step(
+      'pulse',
+      'ok',
+      `Pulse export active \u2192 ${pulseEndpoint} (ASHLR_PULSE_PAT set). Fleet activity will be attributed to your identity.`,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return step('pulse', 'manual', `Pulse status check failed: ${msg}`);
+  }
+}
+
 /**
  * Doctor checks that genuinely block the hub from running. A `fail` on one of
  * these means setup is NOT ready.
@@ -498,20 +650,30 @@ export async function onboard(
  */
 export async function setupWizard(
   cfg: AshlrConfig,
-  opts: { wire: boolean; yes: boolean },
+  opts: { wire: boolean; yes: boolean; userName?: string; userId?: string },
 ): Promise<OnboardResult> {
   const base = await onboard(cfg, opts);
 
-  // Run the three new steps sequentially after the base onboard.
-  const daemonStep = await stepDaemonService();
-  const enginesStep = await stepEngines(cfg);
-  const enrollStep = await stepEnroll(cfg, opts);
+  // M110: resolve user identity first — updated cfg flows into subsequent steps.
+  const { userStep, cfg: cfgWithUser } = await stepUser(cfg, {
+    userName: opts.userName,
+    userId: opts.userId,
+  });
 
-  const steps = [...base.steps, daemonStep, enginesStep, enrollStep];
+  // Run the wizard-specific steps sequentially after the base onboard.
+  const daemonStep = await stepDaemonService();
+  const enginesStep = await stepEngines(cfgWithUser);
+  const enrollStep = await stepEnroll(cfgWithUser, opts);
+  const pulseStep = await stepPulse(cfgWithUser);
+
+  const steps = [...base.steps, userStep, daemonStep, enginesStep, enrollStep, pulseStep];
 
   // Augment nextSteps with wizard-specific guidance (before the final CTA).
   const nextSteps = base.nextSteps.filter((s) => !s.startsWith('try:'));
 
+  if (userStep.status === 'detected') {
+    nextSteps.push('Set your identity: ashlr setup --user "Your Name" --user-id you@example.com');
+  }
   if (daemonStep.status === 'manual') {
     nextSteps.push('Install daemon service: ashlr daemon install');
   }
@@ -523,6 +685,11 @@ export async function setupWizard(
   }
   if (enrollStep.status === 'manual') {
     nextSteps.push('Enroll a repo manually: ashlr enroll <path>');
+  }
+  if (pulseStep.status === 'detected') {
+    nextSteps.push(
+      'Connect to shared pulse: export ASHLR_PULSE_PAT=<your-token>  (get token from Mason)',
+    );
   }
 
   nextSteps.push('try: ashlr run / ashlr swarm / ashlr tui');
