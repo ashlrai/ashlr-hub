@@ -318,10 +318,17 @@ const TOOLS: NativeToolImpl[] = [
         summary: p.summary,
         status: p.status,
         createdAt: p.createdAt,
-        diff:
-          p.diff && p.diff.length > MAX_DIFF_CHARS
-            ? p.diff.slice(0, MAX_DIFF_CHARS) + TRUNCATION_MARK
-            : p.diff,
+        // M107 (P0): scrub secrets from the diff before returning it over
+        // the MCP surface. The stored proposal may have been created via the
+        // swarm/builtin path before M107 — scrub defensively on read so
+        // no previously-stored secret leaks via ashlr_inbox_list.
+        diff: (() => {
+          const raw = p.diff ?? '';
+          const scrubbed = scrubSecrets(raw);
+          return scrubbed.length > MAX_DIFF_CHARS
+            ? scrubbed.slice(0, MAX_DIFF_CHARS) + TRUNCATION_MARK
+            : scrubbed || undefined;
+        })(),
       }));
     },
   },

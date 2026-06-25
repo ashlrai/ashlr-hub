@@ -57,6 +57,7 @@ import { newUsage, addUsage, overBudget } from '../run/budget.js';
 import { planSwarm } from './planner.js';
 import { saveSwarm, loadSwarm } from './store.js';
 import { runGoal } from '../run/orchestrator.js';
+import { scrubSecrets } from '../knowledge/index.js';
 
 // ---------------------------------------------------------------------------
 // M17: lazy-load sign / gate / rollback helpers. Each import is best-effort:
@@ -969,6 +970,10 @@ function captureSandboxAndCleanup(
       if (diff.files === 0 || diff.patch.trim().length === 0) {
         emitLog(sink, `[M87] swarm ${run.id} produced no diff — no proposal filed`);
       } else try {
+        // M107 (P0): scrub secrets from the diff BEFORE storing. Mirrors the
+        // sandboxed-engine path (M47.1) — an agent-hardcoded token in a patch
+        // must not persist to the inbox or surface via ashlr_inbox_list.
+        const scrubbedPatch = diff.patch ? scrubSecrets(diff.patch) : undefined;
         const created = _createProposal({
           repo: sb.sourceRepo,
           origin: 'swarm',
@@ -979,7 +984,7 @@ function captureSandboxAndCleanup(
             `repo: ${sb.sourceRepo}`,
             `diff: ${diff.files} file(s), +${diff.insertions} -${diff.deletions}`,
           ].join('\n'),
-          diff: diff.patch || undefined,
+          diff: scrubbedPatch,
           sandboxId: sb.id,
         });
         emitLog(sink, `[M24] PENDING proposal recorded for swarm ${run.id}`);

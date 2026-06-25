@@ -22,7 +22,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, unlinkSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve, isAbsolute } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -466,11 +466,17 @@ export async function applyProposal(
           break;
         }
 
-        const normalTarget = resolve(target);
+        // M107 (P0): TOCTOU — resolve() follows no symlinks, enabling a
+        // symlink-swap escape. Use realpathSync on BOTH the target and each
+        // enrolled repo root so the check is always against the real inode.
+        // Falls back to the lexical resolved path when realpathSync fails
+        // (e.g. the target does not yet exist) so existing behaviour is
+        // unchanged for paths that are already canonical.
+        const realTarget = (() => { try { return realpathSync(target); } catch { return resolve(target); } })();
         const enrolled = listEnrolled();
         const withinEnrolled = enrolled.some((r) => {
-          const normalRepo = resolve(r);
-          return normalTarget === normalRepo || normalTarget.startsWith(normalRepo + '/');
+          const realRepo = (() => { try { return realpathSync(r); } catch { return resolve(r); } })();
+          return realTarget === realRepo || realTarget.startsWith(realRepo + '/');
         });
         if (!withinEnrolled) {
           result = {

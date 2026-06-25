@@ -40,6 +40,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -81,11 +82,25 @@ export function loadOrCreateKey(): Buffer {
   const keyPath = provenanceKeyPath();
   try {
     if (existsSync(keyPath)) {
+      // M107 (P1): refuse to use a key that is group- or world-readable.
+      // An attacker who can read the key can forge frontier provenance
+      // signatures — the merge gate becomes worthless. 0o077 masks any
+      // group-read/write/exec or other-read/write/exec bit.
+      const st = statSync(keyPath);
+      if ((st.mode & 0o077) !== 0) {
+        throw new Error(
+          `provenance key at ${keyPath} has unsafe permissions (mode ${'0o' + (st.mode & 0o777).toString(8)}); ` +
+          'expected 0600 — run: chmod 600 ' + keyPath,
+        );
+      }
       const buf = readFileSync(keyPath);
       if (buf.length > 0) return buf;
       // A truncated/empty key file is unusable — regenerate below.
     }
-  } catch {
+  } catch (err) {
+    // Re-throw the permissions error — using a readable key would silently
+    // undermine the merge gate. All other I/O errors fall through to create.
+    if (err instanceof Error && err.message.startsWith('provenance key at')) throw err;
     // fall through to create / ephemeral
   }
 

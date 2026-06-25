@@ -70,8 +70,14 @@ export interface RunEngineSandboxedOptions {
 /** Default hard wall-clock for an autonomous external run (20 min). */
 const DEFAULT_TIMEOUT_MS = 20 * 60_000;
 
-/** Credential-shaped env var names that must never reach the agent subprocess. */
-const CRED_ENV_DENY = /(_|^)(TOKEN|SECRET|KEY|PASSWORD|PASSWD|CREDENTIALS?)$/i;
+/** Credential-shaped env var names that must never reach the agent subprocess.
+ * M107 (P2): broadened to cover PAT, API-key, OAuth, and generic credentials
+ * variants that the original regex missed (e.g. GITHUB_PAT, X_API_KEY,
+ * MY_OAUTH_TOKEN, DB_CREDS). ENGINE_AUTH_ALLOW still exempts the engine CLIs'
+ * own subscription tokens so CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_AUTH_TOKEN survive.
+ */
+const CRED_ENV_DENY =
+  /(_|^)(TOKEN|SECRET|KEY|PAT|PASSWORD|PASSWD|CREDENTIALS?|API[_-]?KEY|OAUTH[_-]?TOKEN|CREDS?)$/i;
 
 /** The agent CLIs' OWN headless auth tokens. These ARE the engine's subscription
  * credential (e.g. `claude setup-token` exports CLAUDE_CODE_OAUTH_TOKEN) — not a
