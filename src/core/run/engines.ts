@@ -18,6 +18,8 @@
  */
 
 import { spawnSync, execFileSync } from 'node:child_process';
+import * as http from 'node:http';
+import * as https from 'node:https';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AshlrConfig, EngineId, EngineCommand } from '../types.js';
@@ -107,17 +109,33 @@ export function engineInstalled(engine: EngineId, cfg?: AshlrConfig): boolean {
     const key = spec.api?.envKey;
     if (key) return Boolean(process.env[key]?.trim());
     // No key → local endpoint probe (e.g. Ollama at http://localhost:11434/v1).
+    // Uses Node's built-in http/https — no curl dependency, works inside any
+    // confined subprocess that inherits the Node runtime (M117).
     const baseUrlEnv = spec.api?.baseUrlEnv;
     const baseUrl = (baseUrlEnv && process.env[baseUrlEnv]?.trim()) ||
       spec.api?.defaultBaseUrl ||
       'http://localhost:11434/v1';
     try {
-      const r = spawnSync(
-        'curl',
-        ['-sf', '--max-time', '1', `${baseUrl}/models`],
-        { encoding: 'utf8', timeout: 2000 },
+      const url = new URL(`${baseUrl.replace(/\/+$/, '')}/models`);
+      const transport = url.protocol === 'https:' ? https : http;
+      let reachable = false;
+      // Synchronous-style probe via a shared-nothing child process that exits
+      // with code 0 on any HTTP response (connection refused → code 1).
+      // We avoid a full async refactor of engineInstalled by using spawnSync
+      // with a Node one-liner that uses the built-in http module (no curl).
+      const probe = spawnSync(
+        process.execPath,
+        [
+          '-e',
+          `const h=require('${url.protocol === 'https:' ? 'https' : 'http'}');` +
+          `const r=h.get('${url.toString()}',{timeout:1500},(res)=>{process.exit(0)});` +
+          `r.on('error',()=>process.exit(1));r.on('timeout',()=>{r.destroy();process.exit(1)});`,
+        ],
+        { timeout: 2500 },
       );
-      return r.status === 0;
+      reachable = probe.status === 0;
+      void transport; // suppress unused-import lint
+      return reachable;
     } catch {
       return false;
     }

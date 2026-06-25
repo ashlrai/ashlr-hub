@@ -33,10 +33,18 @@ import type {
   EngineTier,
   RunBudget,
   RunState,
+  RunTask,
+  RunUsage,
   Sandbox,
 } from '../types.js';
 import { buildEngineCommand, spawnEngine } from './engines.js';
 import { resolveEngineSpec } from './engine-registry.js';
+import { buildOpenAICompatibleClient } from './provider-client.js';
+import { runTask } from './agent-loop.js';
+import {
+  buildEngineerToolSpecs,
+  type EngineerContext,
+} from '../mcp-native-engineer.js';
 import { buildSandboxLauncher, confinementProfileFor } from '../sandbox/confine.js';
 import { audit as auditConfinement } from '../sandbox/audit.js';
 import { newUsage, estCostUsd } from './budget.js';
@@ -322,6 +330,204 @@ export async function runEngineSandboxed(
     if (createdHere) {
       try {
         wt.removeSandbox(sb);
+      } catch {
+        // removal is idempotent
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// M117: runApiModelSandboxed — in-process api-model dispatch
+// ---------------------------------------------------------------------------
+
+/**
+ * Run an api-model engine (e.g. local-coder / Ollama) IN-PROCESS inside a
+ * sandbox worktree, capturing the resulting diff as a PENDING inbox proposal.
+ *
+ * Unlike runEngineSandboxed (which spawns a CLI subprocess), this function:
+ *   1. Builds a ProviderClient for the engine's api config (openai-compat →
+ *      Ollama at http://localhost:11434/v1, or whatever baseUrl is configured).
+ *   2. Gives the agent-loop engineer write-tools (read_file / write_file /
+ *      edit_file / bash) scoped to the sandbox worktree so every edit lands
+ *      ONLY in the throwaway branch.
+ *   3. Captures the worktree diff and files it as a PENDING proposal — identical
+ *      provenance/scrub/sign path as runEngineSandboxed.
+ *
+ * Security model: identical to runEngineSandboxed for filesystem containment
+ * (edits go into the worktree only). Network is NOT OS-jailed (the in-process
+ * agent makes fetch calls directly) — the same residual as cli-agent sandbox,
+ * and intentional: Ollama runs at localhost:11434 which must be reachable.
+ */
+export async function runApiModelSandboxed(
+  engine: EngineId,
+  goal: string,
+  cfg: AshlrConfig,
+  opts: RunEngineSandboxedOptions,
+): Promise<SandboxedEngineResult> {
+  const spec = resolveEngineSpec(engine, cfg);
+  if (!spec || spec.kind !== 'api-model' || !spec.api) {
+    return {
+      state: {
+        id: `run-${Date.now().toString(36)}`,
+        goal,
+        engine,
+        provider: 'none',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        budget: { maxTokens: 0, maxSteps: 0, allowCloud: false },
+        usage: newUsage(),
+        tasks: [],
+        steps: [],
+        status: 'failed',
+        result: `engine "${engine}" is not an api-model — cannot run in-process`,
+      },
+    };
+  }
+
+  const modelFromCfg = opts.model ?? cfg.foundry?.models?.[engine] ?? spec.api.defaultModel ?? '';
+  const model = modelFromCfg || (spec.api.defaultModel ?? '');
+  const engineModel = `${engine}:${model || 'default'}`;
+  const tier = engineTierOf(engine, cfg);
+  const id = opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const mk = (over: Partial<RunState>): RunState => ({
+    id,
+    goal,
+    engine,
+    provider: spec.api!.protocol ?? 'openai-compat',
+    engineModel,
+    engineTier: tier,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    budget: {
+      maxTokens: opts.budget?.maxTokens ?? 50_000,
+      maxSteps: opts.budget?.maxSteps ?? 40,
+      allowCloud: opts.budget?.allowCloud ?? false,
+    },
+    usage: newUsage(),
+    tasks: [],
+    steps: [],
+    status: 'running',
+    ...over,
+  });
+
+  const wt = await import('../sandbox/worktree.js');
+
+  // Acquire sandbox worktree (reuse caller's when provided).
+  let sb: Sandbox;
+  let createdHere = false;
+  if (opts.existingWorktree) {
+    sb = opts.existingWorktree;
+  } else {
+    try {
+      sb = wt.createSandbox(opts.sourceRepo);
+      createdHere = true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { state: mk({ status: 'failed', result: `sandbox unavailable: ${msg}` }) };
+    }
+  }
+
+  let proposalId: string | undefined;
+
+  try {
+    // Build baseUrl — honour env override, then spec default, then Ollama fallback.
+    const baseUrlEnv = spec.api.baseUrlEnv;
+    const baseUrl = (baseUrlEnv && process.env[baseUrlEnv]?.trim()) ||
+      spec.api.defaultBaseUrl ||
+      'http://localhost:11434/v1';
+    const apiKey = (spec.api.envKey && process.env[spec.api.envKey]?.trim()) || '';
+
+    // qwen2.5:72b confirms tool_calls — treat all local-coder models as tool-capable.
+    const supportsTools = true;
+
+    const client = buildOpenAICompatibleClient(baseUrl, apiKey, model, supportsTools);
+
+    // Engineer tools scoped to the sandbox worktree — write/exec enabled so the
+    // model can make real file edits inside the throwaway branch.
+    const engCtx: EngineerContext = {
+      workspaceRoot: sb.worktreePath,
+      sourceRepo: sb.sourceRepo,
+      allowWrite: true,
+      allowExec: false, // exec disabled: keep blast radius minimal for local model
+    };
+    const tools = buildEngineerToolSpecs(engCtx);
+
+    const budget = {
+      maxTokens: opts.budget?.maxTokens ?? 50_000,
+      maxSteps: opts.budget?.maxSteps ?? 40,
+      allowCloud: false,
+    };
+    const usage: RunUsage = newUsage();
+
+    const task: RunTask = {
+      id: 't1',
+      goal,
+      deps: [],
+      status: 'pending',
+    };
+
+    await runTask(task, client, {
+      tools,
+      budget,
+      usage,
+      onStep: () => { /* steps are not persisted for sandboxed api-model runs */ },
+    });
+
+    const finalUsage: RunUsage = {
+      ...usage,
+      estCostUsd: estCostUsd(engine, usage.tokensIn, usage.tokensOut),
+    };
+
+    if (task.status === 'failed') {
+      return {
+        state: mk({
+          status: 'failed',
+          result: task.error ?? 'api-model run failed',
+          usage: finalUsage,
+        }),
+      };
+    }
+
+    // Capture worktree diff and file as PENDING proposal.
+    if (opts.propose !== false) {
+      try {
+        const diff = wt.sandboxDiff(sb);
+        if (diff.files > 0 && diff.patch.trim().length > 0) {
+          const scrubbed = scrubSecrets(diff.patch);
+          const diffHash = hashDiff(scrubbed);
+          const provenanceSig = signProvenance(engineModel, tier, diffHash);
+          const proposal = selectInboxStore(cfg).create({
+            repo: sb.sourceRepo,
+            origin: 'agent',
+            kind: 'patch',
+            title: `${engine} run: ${goal.slice(0, 80)}`,
+            summary:
+              `In-process ${engineModel} run produced ${diff.files} file(s) ` +
+              `(+${diff.insertions}/-${diff.deletions}). Review before applying.`,
+            diff: scrubbed,
+            diffHash,
+            provenanceSig,
+            sandboxId: sb.id,
+            engineModel,
+            engineTier: tier,
+          });
+          proposalId = proposal.id;
+        }
+      } catch {
+        // diff/proposal capture is best-effort
+      }
+    }
+
+    return {
+      state: mk({ status: 'done', result: task.result ?? '', usage: finalUsage }),
+      proposalId,
+    };
+  } finally {
+    if (createdHere) {
+      try {
+        wt.removeSandbox(sb!);
       } catch {
         // removal is idempotent
       }

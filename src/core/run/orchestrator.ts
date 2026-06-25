@@ -82,6 +82,7 @@ import { newUsage, overBudget, estCostUsd } from './budget.js';
 import { runTask } from './agent-loop.js';
 import { withToolEnv } from '../env-bridge.js';
 import { buildEngineCommand, engineInstalled, spawnEngine } from './engines.js';
+import { resolveEngineSpec } from './engine-registry.js';
 import { nullSink } from './streaming.js';
 import type { StreamSink } from './streaming.js';
 import { withRetry } from './retry.js';
@@ -822,7 +823,7 @@ function emit(sink: StreamSink, event: Omit<RunStreamEvent, 'ts'>): void {
 }
 
 /** Known engine ids (typed subset). */
-const KNOWN_ENGINE_IDS: ReadonlySet<string> = new Set(['builtin', 'ashlrcode', 'aw', 'claude', 'codex']);
+const KNOWN_ENGINE_IDS: ReadonlySet<string> = new Set(['builtin', 'ashlrcode', 'aw', 'claude', 'codex', 'local-coder']);
 
 // ---------------------------------------------------------------------------
 // M78: TITRR — Test→Iterate→Test→Refine→Repeat helpers
@@ -1014,8 +1015,98 @@ export async function runGoal(
         : null;
 
       if (!cmd) {
-        // buildEngineCommand returned null (builtin) — fall through to builtin path.
-        engine = 'builtin';
+        // M117: api-model engines have no CLI argv (buildEngineCommand returns null
+        // for kind==='api-model'). Run them IN-PROCESS via the agent-loop +
+        // buildOpenAICompatibleClient, confined to a sandbox worktree, capturing
+        // the resulting diff as a PENDING proposal — identical containment to
+        // cli-agent sandbox, but no subprocess spawn. This is the ONLY path that
+        // produces real diffs from local models (Ollama/local-coder).
+        //
+        // Requires: (a) foundryWantsSandbox or opts.sandboxEngine — same gate as
+        // cli-agent sandbox; (b) the engine spec has kind==='api-model' with a
+        // valid api config. Falls through to builtin if either precondition fails.
+        const spec = isKnownEngineId ? resolveEngineSpec(engineId, cfg) : null;
+        if (
+          spec?.kind === 'api-model' &&
+          spec.api &&
+          (opts.sandboxEngine === true || foundryWantsSandbox(cfg, engineId))
+        ) {
+          process.stderr.write(
+            `[ashlr run] api-model engine "${engine}" — in-process sandboxed run (${goal.slice(0, 60)}…)\n`,
+          );
+          emit(sink, { kind: 'log', text: `api-model engine "${engine}" — in-process sandboxed run` });
+
+          const { runApiModelSandboxed } = await import('./sandboxed-engine.js');
+          const titrrMax = Math.max(1, (opts as RunOptions & { titrrMaxAttempts?: number }).titrrMaxAttempts ?? TITRR_MAX_ATTEMPTS);
+
+          const wtMod = await import('../sandbox/worktree.js');
+          let titrrSandbox: Sandbox | null = null;
+          try {
+            titrrSandbox = wtMod.createSandbox(cwd);
+          } catch {
+            // sandbox creation failed — fall through to builtin
+          }
+
+          if (titrrSandbox) {
+            let titrrAttempt = 0;
+            let lastApiR: Awaited<ReturnType<typeof runApiModelSandboxed>> | null = null;
+            let apiGoal = goal;
+
+            try {
+              while (titrrAttempt < titrrMax) {
+                titrrAttempt++;
+                const isLastAttempt = titrrAttempt === titrrMax;
+                const apiR = await runApiModelSandboxed(engineId, apiGoal, cfg, {
+                  sourceRepo: cwd,
+                  model: modelEnv,
+                  budget: opts.budget,
+                  propose: isLastAttempt,
+                  existingWorktree: titrrSandbox,
+                });
+                lastApiR = apiR;
+
+                if (apiR.state.status !== 'done') break;
+
+                const titrrResult = titrrTestRun(titrrSandbox.worktreePath, cfg);
+                if (!titrrResult || titrrResult.ok) {
+                  if (!isLastAttempt) {
+                    const propR = await runApiModelSandboxed(engineId, apiGoal, cfg, {
+                      sourceRepo: cwd,
+                      model: modelEnv,
+                      budget: opts.budget,
+                      propose: true,
+                      existingWorktree: titrrSandbox,
+                    });
+                    lastApiR = propR;
+                  }
+                  break;
+                }
+
+                if (isLastAttempt) break;
+                apiGoal = `${goal}\n\n[REPAIR] Tests failed:\n${titrrResult.output.slice(0, 2000)}`;
+              }
+            } finally {
+              try { wtMod.removeSandbox(titrrSandbox); } catch { /* best-effort */ }
+            }
+
+            if (lastApiR) {
+              emit(sink, {
+                kind: 'log',
+                text: lastApiR.proposalId
+                  ? `api-model engine "${engine}" → inbox proposal ${lastApiR.proposalId}`
+                  : `api-model engine "${engine}" → no diff produced`,
+              });
+              return lastApiR.state;
+            }
+          }
+
+          // sandbox creation failed or no result — fall through to builtin
+          engine = 'builtin';
+        } else {
+          // buildEngineCommand returned null for a non-api-model engine (builtin) —
+          // fall through to builtin path.
+          engine = 'builtin';
+        }
       } else {
         process.stderr.write(
           `[ashlr run] delegating to engine "${engine}" (${goal.slice(0, 60)}…)\n`,
