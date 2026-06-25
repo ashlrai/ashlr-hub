@@ -50,8 +50,10 @@ import { buildForecast } from '../observability/forecast.js';
 import { emitTuningProposals } from '../learn/tuning.js';
 import { runAutoMergePass } from '../fleet/automerge-pass.js';
 import { pendingCount, listProposals } from '../inbox/store.js';
-import { recordOutcome, recentlyDeclined } from '../fleet/worked-ledger.js';
+// worked-ledger is used transitively via LocalWorkQueueCoordinator (selectWorkQueueCoordinator).
+import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
 import { loadConfig } from '../config.js';
+import { hostname as osHostname } from 'node:os';
 
 // ---------------------------------------------------------------------------
 // DaemonConfig defaults (conservative)
@@ -294,6 +296,15 @@ export async function tick(
       ? (liveCfg.daemon as Record<string, unknown>)['cooldownMs'] as number
       : 6 * 60 * 60 * 1000; // default 6h
 
+  // M113: coordinator seam — once per tick. Local (default) = today's behavior;
+  // Shared = multi-machine atomic claim (cfg.fleet.sharedQueue.mode==='filesystem').
+  const coordinator = selectWorkQueueCoordinator(liveCfg);
+  const machineId: string =
+    (liveCfg.fleet as Record<string, unknown> | undefined)?.['sharedQueue'] &&
+    typeof ((liveCfg.fleet as Record<string, unknown>)['sharedQueue'] as Record<string, unknown>)?.['machineId'] === 'string'
+      ? ((liveCfg.fleet as Record<string, unknown>)['sharedQueue'] as Record<string, unknown>)['machineId'] as string
+      : osHostname();
+
   // Build a set of item ids that already have an open PENDING proposal so we
   // can skip duplicating work. Best-effort: match on item.id appearing in the
   // proposal title or summary. Never throws.
@@ -349,7 +360,7 @@ export async function tick(
       while (advance < group.length) {
         const candidate = group[advance]!;
         const skip =
-          recentlyDeclined(candidate.id, cooldownMs) ||
+          coordinator.shouldSkip(candidate.id, cooldownMs) ||
           pendingItemIds.has(candidate.id);
         if (!skip) break;
         advance++;
@@ -372,6 +383,10 @@ export async function tick(
     }
   }
 
+  // M113: claimItems — Local returns top-selectCount (identical to today's raw
+  // slice); Shared atomically claims items so two machines get disjoint work.
+  const workedSet = coordinator.claimItems(selected, selectCount, machineId);
+
   // -------------------------------------------------------------------------
   // 6a. Dry-run mode: report what WOULD be worked; NO swarms, NO proposals.
   // -------------------------------------------------------------------------
@@ -381,12 +396,12 @@ export async function tick(
       action: 'daemon:tick',
       repo: null,
       sandboxId: null,
-      summary: `dry-run: would work ${selected.length} item(s): ${selected.map(i => i.title).join(', ')}`,
+      summary: `dry-run: would work ${workedSet.length} item(s): ${workedSet.map(i => i.title).join(', ')}`,
       result: 'ok',
     });
     return recordTick({
       ts: now,
-      itemsConsidered: selected.length,
+      itemsConsidered: workedSet.length,
       proposalsCreated: 0,
       spentUsd: 0,
       reason: 'dry-run',
@@ -412,7 +427,7 @@ export async function tick(
   const backendDispatch: Record<string, number> = {};
 
   // Per-item USD budget slice: divide remaining budget evenly across items.
-  const perItemUsdSlice = remainingBudget / selected.length;
+  const perItemUsdSlice = remainingBudget / Math.max(1, workedSet.length);
 
   // Convert USD slice to a rough token count for the swarm budget.
   // Using a conservative $15/M-output estimate as the binding constraint.
@@ -435,7 +450,7 @@ export async function tick(
   // status` reflects real work, not merely items considered.
   type ItemOutcome = { item: WorkItem; spentUsd: number; dispatched: boolean };
 
-  const tasks: Array<() => Promise<ItemOutcome>> = selected.map((item) => async (): Promise<ItemOutcome> => {
+  const tasks: Array<() => Promise<ItemOutcome>> = workedSet.map((item) => async (): Promise<ItemOutcome> => {
     // Re-check kill switch before each item dispatch.
     if (killSwitchOn()) {
       return { item, spentUsd: 0, dispatched: false };
@@ -689,15 +704,29 @@ export async function tick(
   if (dispatchedCount > 0) {
     try {
       const outcomeLabel: 'diff' | 'empty' = proposalsCreated >= dispatchedCount ? 'diff' : 'empty';
-      const ts = new Date().toISOString();
       for (const outcome of outcomes) {
         if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
-          recordOutcome(outcome.value.item.id, outcomeLabel, ts);
+          // M113: route through coordinator (Local → worked-ledger; Shared → global store).
+          coordinator.recordOutcome(outcome.value.item.id, outcomeLabel, machineId);
         }
       }
     } catch {
       // Ledger recording must never crash the tick.
     }
+  }
+
+  // M113: release any claimed-but-not-dispatched items so they're free for
+  // the next machine or tick (no-op for LocalWorkQueueCoordinator).
+  try {
+    const dispatchedIds = new Set(
+      outcomes
+        .filter((o): o is PromiseFulfilledResult<ItemOutcome> => o.status === 'fulfilled' && o.value.dispatched)
+        .map(o => o.value.item.id),
+    );
+    const unworkedIds = workedSet.map(i => i.id).filter(id => !dispatchedIds.has(id));
+    if (unworkedIds.length > 0) coordinator.release(unworkedIds, machineId);
+  } catch {
+    // Release must never crash the tick.
   }
 
   // M48: OPT-IN auto-merge pass (cfg.foundry.autoMerge.enabled, DEFAULT OFF).
