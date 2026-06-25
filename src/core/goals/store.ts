@@ -28,7 +28,7 @@ import {
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import type { Goal, GoalStatus, Milestone, MilestoneStatus } from '../types.js';
+import type { AshlrConfig, Goal, GoalStatus, Milestone, MilestoneStatus } from '../types.js';
 import { goalsDir } from '../config.js';
 
 // Re-export so existing importers of `goalsDir` from the store keep working;
@@ -167,14 +167,19 @@ function sortMilestones(goal: Goal): void {
  * ENROLLED absolute repo path — enrollment is enforced by the CLI/advance
  * path, NOT here; this is pure persistence.
  *
+ * M109: stamps `owner` from cfg.user?.id ?? cfg.user?.name when cfg is
+ * provided (undefined otherwise — backward-compatible).
+ *
  * NEVER runs a swarm, authors a spec, or emits an outward action. Best-effort
  * persistence (returns the in-memory Goal even if the write fails).
  */
 export function createGoal(
   objective: string,
-  opts?: { project?: string | null; now?: string },
+  opts?: { project?: string | null; now?: string; cfg?: Pick<AshlrConfig, 'user'> },
 ): Goal {
   const now = nowIso(opts?.now);
+  // M109: stamp owner from cfg.user when not already provided.
+  const owner = opts?.cfg?.user?.id ?? opts?.cfg?.user?.name;
   const goal: Goal = {
     id: generateGoalId(objective),
     objective,
@@ -183,6 +188,7 @@ export function createGoal(
     milestones: [],
     createdAt: now,
     updatedAt: now,
+    ...(owner !== undefined ? { owner } : {}),
   };
   saveGoal(goal, { now });
   return goal;

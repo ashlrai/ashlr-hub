@@ -243,6 +243,28 @@ export interface AshlrConfig {
     /** OTLP endpoint base URL (default 'http://localhost:3000'). */
     endpoint?: string;
   };
+  /**
+   * M109: Local user identity — who owns this machine's fleet work.
+   *
+   * Set per machine; the cofounder sets theirs on their machine. Fleet activity
+   * (proposals + goals created here) is stamped with this identity and carried
+   * in OTLP spans as `ashlr.fleet.owner` → ashlr-pulse peer-share views group
+   * by owner so Mason and his cofounder each see "whose fleet work is whose".
+   *
+   * Optional and backward-compatible: absent → owner stamps are undefined,
+   * pulse attributes are omitted, and all existing behavior is unchanged.
+   *
+   * Example (Mason's machine):
+   *   "user": { "id": "mason@evero-consulting.com", "name": "Mason" }
+   * Example (cofounder's machine):
+   *   "user": { "id": "cofounder@evero-consulting.com", "name": "Alex" }
+   */
+  user?: {
+    /** Stable identifier — email recommended (matches pulse peer_share user_id). */
+    id?: string;
+    /** Display name shown in pulse team views. */
+    name?: string;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1980,6 +2002,12 @@ export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'applied' | '
 export interface Proposal {
   /** Stable unique id; also the inbox filename stem (~/.ashlr/inbox/<id>.json). */
   id: string;
+  /**
+   * M109: The user identity that created this proposal (cfg.user?.id ?? cfg.user?.name).
+   * Undefined when cfg.user is absent → no behavior change; backward-compatible.
+   * Carried in OTLP spans as `ashlr.fleet.owner` for pulse team attribution.
+   */
+  owner?: string;
   /** Absolute path of the target repo, or null when not repo-scoped (e.g. note). */
   repo: string | null;
   /**
@@ -2655,6 +2683,12 @@ export interface Milestone {
 export interface Goal {
   /** Stable unique id; also the file stem (~/.ashlr/goals/<id>.json). */
   id: string;
+  /**
+   * M109: The user identity that created this goal (cfg.user?.id ?? cfg.user?.name).
+   * Undefined when cfg.user is absent → no behavior change; backward-compatible.
+   * Carried in OTLP spans as `ashlr.fleet.owner` for pulse team attribution.
+   */
+  owner?: string;
   /** The high-level objective text the goal was created from. */
   objective: string;
   /**

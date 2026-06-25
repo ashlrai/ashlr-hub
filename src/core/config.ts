@@ -400,6 +400,11 @@ export function defaultConfig(): AshlrConfig {
       settings: {},
       integrity: {},
     },
+    // M109: user identity — absent by default (opt-in per machine).
+    // Set cfg.user.id to your email and cfg.user.name to your display name;
+    // the cofounder sets theirs on their machine. Fleet work created on this
+    // machine is then stamped with this owner and attributed in pulse team views.
+    // user: { id: 'you@example.com', name: 'Your Name' },
   };
 }
 

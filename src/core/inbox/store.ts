@@ -24,7 +24,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { Proposal, ProposalStatus } from '../types.js';
+import type { AshlrConfig, Proposal, ProposalStatus } from '../types.js';
 import { audit } from '../sandbox/audit.js';
 
 // ---------------------------------------------------------------------------
@@ -129,6 +129,7 @@ function isValidProposal(parsed: unknown): parsed is Proposal {
  *  - `id`        — fresh unique slug (stable, filename-safe)
  *  - `status`    — 'pending'
  *  - `createdAt` — current ISO timestamp
+ *  - `owner`     — cfg.user?.id ?? cfg.user?.name (M109; undefined when cfg absent)
  *
  * NEVER applies or mutates any repo.
  * Never throws — on persistence failure the in-memory proposal is still
@@ -136,9 +137,13 @@ function isValidProposal(parsed: unknown): parsed is Proposal {
  */
 export function createProposal(
   p: Omit<Proposal, 'id' | 'status' | 'createdAt'>,
+  cfg?: Pick<AshlrConfig, 'user'>,
 ): Proposal {
+  // M109: stamp owner from cfg.user when not already set by the caller.
+  const owner = p.owner ?? cfg?.user?.id ?? cfg?.user?.name;
   const proposal: Proposal = {
     ...p,
+    ...(owner !== undefined ? { owner } : {}),
     id: generateId(),
     status: 'pending',
     createdAt: new Date().toISOString(),

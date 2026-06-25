@@ -14,6 +14,17 @@
  * FNV-1a hash so re-exports produce identical spanIds — ashlr-pulse dedups
  * on (user_id, span_id).
  *
+ * M109: Team attribution — `ashlr.fleet.owner`
+ *   Each span carries an optional `ashlr.fleet.owner` attribute set to the
+ *   proposal/goal owner (proposal.owner) or the configured user identity
+ *   (cfg.user?.id ?? cfg.user?.name). This is the hook into pulse's existing
+ *   peer-share / team views: set cfg.user per machine, the cofounder sets
+ *   theirs on their machine, and pulse groups fleet activity by owner so both
+ *   teammates see "whose fleet work is whose" in the team view.
+ *
+ *   When owner is absent (unconfigured machine), the attribute is simply
+ *   omitted — the existing OTLP contract is unchanged (additive only).
+ *
  * Safety:
  *   - NEVER throws; all errors are caught + logged.
  *   - PAT is read from env only; NEVER hardcoded, printed, or logged.
@@ -133,9 +144,13 @@ function engineSystem(engineModel: string | undefined): string {
  *
  * @param sinceTs  ISO timestamp: only include events at or after this time.
  *                 When omitted, all available history is included.
+ * @param owner    M109: optional fleet owner identity (cfg.user?.id ?? cfg.user?.name).
+ *                 When set, each span gains an `ashlr.fleet.owner` attribute so
+ *                 ashlr-pulse can attribute fleet activity to this teammate.
+ *                 When absent, the attribute is omitted (backward-compatible).
  * @returns        OTLP/JSON payload object (not stringified).
  */
-export function buildFleetSpans(sinceTs?: string): OtlpPayload {
+export function buildFleetSpans(sinceTs?: string, owner?: string): OtlpPayload {
   const sinceCutoff = sinceTs ? Date.parse(sinceTs) : 0;
 
   const spans: OtlpSpan[] = [];
@@ -175,6 +190,8 @@ export function buildFleetSpans(sinceTs?: string): OtlpPayload {
           str('ashlr.fleet.outcome', tick.reason),
           str('ashlr.fleet.cost_usd', tick.spentUsd.toFixed(6)),
           str('ashlr.fleet.ref_id', refId),
+          // M109: fleet owner attribution — present only when configured.
+          ...(owner ? [str('ashlr.fleet.owner', owner)] : []),
         ],
       });
 
@@ -198,6 +215,8 @@ export function buildFleetSpans(sinceTs?: string): OtlpPayload {
             str('ashlr.fleet.outcome', 'applied'),
             str('ashlr.fleet.cost_usd', '0'),
             str('ashlr.fleet.ref_id', `${refId}:merge`),
+            // M109: fleet owner attribution — present only when configured.
+            ...(owner ? [str('ashlr.fleet.owner', owner)] : []),
           ],
         });
       }
@@ -229,6 +248,8 @@ export function buildFleetSpans(sinceTs?: string): OtlpPayload {
       const startNano = toNano(p.createdAt);
       const endNano = p.decidedAt ? toNano(p.decidedAt) : startNano;
 
+      // M109: use proposal's own owner stamp first, fall back to configured owner.
+      const propOwner = p.owner ?? owner;
       spans.push({
         traceId,
         spanId,
@@ -245,6 +266,8 @@ export function buildFleetSpans(sinceTs?: string): OtlpPayload {
           str('ashlr.fleet.outcome', outcome),
           str('ashlr.fleet.cost_usd', '0'),
           str('ashlr.fleet.ref_id', p.id),
+          // M109: fleet owner attribution — present only when set.
+          ...(propOwner ? [str('ashlr.fleet.owner', propOwner)] : []),
         ],
       });
     }
@@ -269,6 +292,11 @@ export interface PulseExportCfg {
   pulse?: {
     enabled?: boolean;
     endpoint?: string;
+  };
+  /** M109: local user identity — carried as `ashlr.fleet.owner` in spans. */
+  user?: {
+    id?: string;
+    name?: string;
   };
 }
 
@@ -298,9 +326,12 @@ export async function exportToPulse(
     const endpoint = (cfg.pulse?.endpoint ?? 'http://localhost:3000').replace(/\/$/, '');
     const url = `${endpoint}/api/otlp/v1/traces`;
 
-    const payload = buildFleetSpans(opts?.sinceTs);
+    // M109: resolve the configured owner for fleet attribution.
+    const cfgOwner = cfg.user?.id ?? cfg.user?.name;
+    const payload = buildFleetSpans(opts?.sinceTs, cfgOwner);
 
     if (opts?.dryRun) {
+      // cfgOwner already applied via buildFleetSpans above.
       process.stdout.write(JSON.stringify(payload, null, 2) + '\n');
       return false; // dry-run never counts as a successful export
     }
