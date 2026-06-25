@@ -41,6 +41,17 @@ export interface ServiceInstallOptions {
   homeDir?: string;
   /** Override process.platform for generation (useful in tests). */
   platform?: Platform;
+  /**
+   * Wrap the daemon process with `caffeinate -i -s` on macOS so the job keeps
+   * running while the lid is closed and the machine is idle (prevents both idle
+   * sleep and system sleep while on AC power).
+   *
+   * Default: false.  Set to true for `ashlr worker` installs.
+   *
+   * Linux / Windows: documented caveat only — caffeinate is macOS-specific.
+   * On battery, macOS may still sleep regardless of this flag.
+   */
+  keepAwake?: boolean;
 }
 
 export interface ServiceStatusResult {
@@ -97,10 +108,11 @@ export function generateServiceDefinition(opts: ServiceInstallOptions = {}): Ser
   const budget = opts.budget ?? 5;
   const intervalMs = opts.intervalMs ?? 1_800_000;
   const parallel = opts.parallel ?? 1;
+  const keepAwake = opts.keepAwake ?? false;
 
   switch (platform) {
     case 'darwin':
-      return buildLaunchdDefinition({ nodePath, binPath, home, configDir, budget, intervalMs, parallel });
+      return buildLaunchdDefinition({ nodePath, binPath, home, configDir, budget, intervalMs, parallel, keepAwake });
     case 'linux':
       return buildSystemdDefinition({ nodePath, binPath, home, configDir, budget, intervalMs, parallel });
     case 'win32':
@@ -122,6 +134,8 @@ interface BuildOpts {
   budget: number;
   intervalMs: number;
   parallel: number;
+  /** Wrap ProgramArguments with caffeinate -i -s (macOS only). */
+  keepAwake?: boolean;
 }
 
 function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
@@ -140,6 +154,23 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
     '/sbin',
   ].join(':');
 
+  // When keepAwake is set, prepend `caffeinate -i -s --` so launchd keeps the
+  // daemon alive through idle + system sleep while on AC power (lid-closed use).
+  // caffeinate's `-i` flag prevents idle sleep; `-s` prevents system sleep on AC.
+  // On battery, macOS may still sleep — the user must keep the Mac plugged in.
+  const programArgs = o.keepAwake
+    ? [
+        '\t\t<string>caffeinate</string>',
+        '\t\t<string>-i</string>',
+        '\t\t<string>-s</string>',
+        `\t\t<string>${o.nodePath}</string>`,
+        `\t\t<string>${o.binPath}</string>`,
+      ]
+    : [
+        `\t\t<string>${o.nodePath}</string>`,
+        `\t\t<string>${o.binPath}</string>`,
+      ];
+
   const content = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -150,8 +181,7 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
 \t<string>Background</string>
 \t<key>ProgramArguments</key>
 \t<array>
-\t\t<string>${o.nodePath}</string>
-\t\t<string>${o.binPath}</string>
+${programArgs.join('\n')}
 \t\t<string>daemon</string>
 \t\t<string>start</string>
 \t\t<string>--budget</string>

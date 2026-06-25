@@ -499,6 +499,16 @@ const loadDemoCmd = lazyCmd(
   'demo command requires src/cli/demo.ts (H8 module not yet built).',
 );
 
+// ─── M112 command loader ────────────────────────────────────────────
+// `ashlr worker setup` / `ashlr worker status`
+// One-command spare-Mac provisioning with caffeinate keep-awake daemon.
+
+const loadWorkerCmd = lazyCmd(
+  () => import('./worker.js'),
+  (m) => m.cmdWorker as Cmd,
+  'worker command requires src/cli/worker.ts (M112 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1617,6 +1627,13 @@ async function main(): Promise<void> {
       case 'daemon': {
         const cmdDaemon = await loadDaemonCmd();
         process.exitCode = await cmdDaemon(rest);
+        break;
+      }
+
+      case 'worker': {
+        // M112: one-command spare-Mac worker provisioning (keepAwake daemon + identity)
+        const cmdWorker = await loadWorkerCmd();
+        process.exitCode = await cmdWorker(rest);
         break;
       }
 
