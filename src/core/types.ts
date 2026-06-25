@@ -265,6 +265,38 @@ export interface AshlrConfig {
     /** Display name shown in pulse team views. */
     name?: string;
   };
+  /**
+   * M111: Multi-machine fleet work-queue coordination. DEFAULT ABSENT (off) —
+   * single-machine behavior is unchanged when this block is missing.
+   *
+   * When `mode` is 'filesystem' and `path` points to a shared folder (iCloud,
+   * Dropbox, NFS, etc.), multiple Macs running ashlr will atomically claim
+   * disjoint work items — no machine duplicates another's work.
+   */
+  fleet?: {
+    sharedQueue?: {
+      /**
+       * 'off'        — single-machine mode (default, no shared file).
+       * 'filesystem' — multi-machine via a JSON file on a shared path.
+       */
+      mode: 'off' | 'filesystem';
+      /**
+       * Absolute path to the shared folder where ashlr-fleet-queue.json is
+       * stored. Required when mode is 'filesystem'. Ignored when mode is 'off'.
+       */
+      path?: string;
+      /**
+       * Stable identifier for this machine in the shared queue.
+       * Defaults to os.hostname(). Override when two machines share a hostname.
+       */
+      machineId?: string;
+      /**
+       * How long (ms) a claimed item is leased to this machine before another
+       * machine may reclaim it (failover). Default 300_000 (5 min).
+       */
+      leaseMs?: number;
+    };
+  };
 }
 
 // ---------------------------------------------------------------------------

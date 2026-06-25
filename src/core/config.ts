@@ -405,6 +405,12 @@ export function defaultConfig(): AshlrConfig {
     // the cofounder sets theirs on their machine. Fleet work created on this
     // machine is then stamped with this owner and attributed in pulse team views.
     // user: { id: 'you@example.com', name: 'Your Name' },
+
+    // M111: multi-machine work-queue coordination — absent by default (single-machine).
+    // To enable shared queue on a network/cloud folder, set e.g.:
+    //   fleet: { sharedQueue: { mode: 'filesystem', path: '/path/to/shared/folder' } }
+    // machineId defaults to os.hostname() when not explicitly set.
+    // fleet: { sharedQueue: { mode: 'off' } },
   };
 }
 
