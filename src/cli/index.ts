@@ -171,6 +171,14 @@ const loadLoopCmd = lazyCmd(
   'loop command requires src/cli/loop.ts (M55 module not yet built).',
 );
 
+// ─── M120 fleet manager / CEO agent ──────────────────────────────────────────
+
+const loadManagerCmd = lazyCmd(
+  () => import('./manager.js' as unknown as string),
+  (m) => m.cmdManager as Cmd,
+  'manager command requires src/cli/manager.ts (M120 module not yet built).',
+);
+
 // ─── M73: surface the ecosystem `stack` tool from the hub ──────────────────
 const loadStackCmd = lazyCmd(
   () => import('./stack.js' as unknown as string),
@@ -1642,6 +1650,14 @@ async function main(): Promise<void> {
         // plus `pause`/`resume` (kill-switch only).
         const cmdFleet = await loadFleetCmd();
         process.exitCode = await cmdFleet(rest);
+        break;
+      }
+
+      case 'manager': {
+        // M120: fleet CEO / oversight agent — frontier-model judge + scorecard.
+        // Shadow mode by default: records judgements, never merges.
+        const cmdManager = await loadManagerCmd();
+        process.exitCode = await cmdManager(rest);
         break;
       }
 
