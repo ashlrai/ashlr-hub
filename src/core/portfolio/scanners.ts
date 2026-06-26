@@ -20,6 +20,7 @@ import { createHash } from 'node:crypto';
 
 import type { WorkItem, WorkSource } from '../types.js';
 import { listIssues, githubStatus } from '../integrations/github.js';
+import { isTrivialItem } from './value-filter.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -382,18 +383,26 @@ export async function scanTodos(repo: string): Promise<WorkItem[]> {
         `File: ${filePath}${lineRef} — "${info.sample.replace(/\n/g, ' ').slice(0, 160)}". ` +
         `Implement this specific change. Do not touch unrelated code. ` +
         `If this TODO is already resolved, remove the marker.`;
-      items.push(
-        makeItem(
-          repo,
-          'todo',
-          `todo:${filePath}`,
-          `${plural} in ${filePath}${lineRef}`,
-          detail,
-          2,
-          2,
-          ['todo', ...info.tags],
-        ),
+
+      // M124: assign value=1 to items flagged as trivial by isTrivialItem so
+      // the buildBacklog min-value gate drops them without needing a second pass.
+      // Substantive TODOs (with a real description) retain value=2.
+      const candidate = makeItem(
+        repo,
+        'todo',
+        `todo:${filePath}`,
+        `${plural} in ${filePath}${lineRef}`,
+        detail,
+        2,
+        2,
+        ['todo', ...info.tags],
       );
+      const { trivial } = isTrivialItem(candidate);
+      if (trivial) {
+        items.push({ ...candidate, value: 1, score: candidate.score / 2 });
+      } else {
+        items.push(candidate);
+      }
     }
 
     return items;

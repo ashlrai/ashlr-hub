@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import type { Backlog, WorkItem } from '../types.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
+import { isTrivialItem } from './value-filter.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -145,10 +146,22 @@ async function getScanners(): Promise<ReadonlyArray<Scanner>> {
  *   run in parallel (each scanner is individually bounded + never throws).
  * - Never throws: any scanner error yields [] (enforced by scanner contract).
  */
-export async function buildBacklog(opts?: { repos?: string[] }): Promise<Backlog> {
+export async function buildBacklog(opts?: { repos?: string[]; minItemValue?: number }): Promise<Backlog> {
   const repos: string[] = opts?.repos ?? listEnrolled();
   const scanners = await getScanners();
   const now = new Date().toISOString();
+
+  // Resolve min-value threshold: explicit opt > config > default (2).
+  let minValue = opts?.minItemValue;
+  if (minValue === undefined) {
+    try {
+      const { loadConfig } = await import('../config.js');
+      const cfg = loadConfig();
+      minValue = cfg.foundry?.minItemValue ?? 2;
+    } catch {
+      minValue = 2;
+    }
+  }
 
   const allItems: WorkItem[] = [];
 
@@ -177,10 +190,28 @@ export async function buildBacklog(opts?: { repos?: string[] }): Promise<Backlog
   }));
   deduped.sort((a, b) => b.score - a.score);
 
+  // M124: value-filter gate — drop trivial / low-value items before persisting.
+  // Two-stage: (1) drop items below minItemValue threshold, (2) drop items that
+  // isTrivialItem flags as unlikely to yield a valuable diff. Both gates apply.
+  const passed: WorkItem[] = [];
+  const filtered: WorkItem[] = [];
+  for (const item of deduped) {
+    if (item.value < minValue) {
+      filtered.push(item);
+      continue;
+    }
+    const { trivial } = isTrivialItem(item);
+    if (trivial) {
+      filtered.push(item);
+      continue;
+    }
+    passed.push(item);
+  }
+
   const backlog: Backlog = {
     generatedAt: now,
     repos,
-    items: deduped,
+    items: passed,
   };
 
   // Persist; never throw on persistence failure.
@@ -191,11 +222,12 @@ export async function buildBacklog(opts?: { repos?: string[] }): Promise<Backlog
   }
 
   // Audit record (metadata only; never secrets).
+  const filteredMsg = filtered.length > 0 ? `; ${filtered.length} trivial/low-value item(s) filtered (minItemValue=${minValue})` : '';
   audit({
     action: 'backlog:refresh',
     repo: null,
     sandboxId: null,
-    summary: `backlog refreshed: ${repos.length} repo(s), ${deduped.length} item(s)`,
+    summary: `backlog refreshed: ${repos.length} repo(s), ${passed.length} item(s)${filteredMsg}`,
     result: 'ok',
   });
 

@@ -412,6 +412,12 @@ export function defaultConfig(): AshlrConfig {
     // machineId defaults to os.hostname() when not explicitly set.
     // fleet: { sharedQueue: { mode: 'off' } },
 
+    // M124: value filter gate — drop items below this value threshold before
+    // the fleet selects work. Default 2 drops value-1 trivia. Configurable:
+    //
+    //   "foundry": { "minItemValue": 3 }   ← raise the bar further
+    //   "foundry": { "minItemValue": 1 }   ← disable (allow all values)
+    //
     // M115: local-coder (Ollama) fleet engine — FREE, unlimited, mid-tier.
     // Activate on any machine running Ollama by adding to ~/.ashlr/config.json:
     //
