@@ -153,6 +153,26 @@ export interface AshlrConfig {
      */
     engines?: Record<string, EngineSpec>;
     /**
+     * M124: backlog value filter. Items with value < minItemValue are dropped
+     * before the daemon selects work. Default 2 (drops value-1 trivia).
+     * Set to 1 to disable the gate; set to 3+ to raise the bar further.
+     */
+    minItemValue?: number;
+    /**
+     * M128: intelligent model-granular routing policy.
+     *  'balanced' (DEFAULT) — free-local for bulk, reserve strong models for
+     *                          hard tasks, cheap-cloud for medium. Roughly
+     *                          equivalent to pre-M128 tier behavior + model
+     *                          granularity.
+     *  'cost'     — default to free-local + cheapest model that meets the
+     *               difficulty bar; escalate to cloud only when local is
+     *               unavailable or task is hard.
+     *  'quality'  — best model for every task regardless of cost; frontier
+     *               models for all non-trivial work.
+     * Absent ⇒ 'balanced'.
+     */
+    routingPolicy?: 'balanced' | 'cost' | 'quality';
+    /**
      * M53: fleet-intelligence tuning. Absent ⇒ learned routing / budget recovery
      * / anomaly holds are OFF (the daemon routes exactly as M46/M48). All actions
      * stay proposal-only — this only tunes WHICH backend/tier and WHEN to hold.
