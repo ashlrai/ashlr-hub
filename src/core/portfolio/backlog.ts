@@ -12,10 +12,11 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { Backlog, WorkItem } from '../types.js';
+import type { Backlog, Proposal, WorkItem } from '../types.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
 import { isTrivialItem } from './value-filter.js';
+import { computeOutcomePriors, scoreAdjustment } from '../fleet/feedback.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -146,18 +147,28 @@ async function getScanners(): Promise<ReadonlyArray<Scanner>> {
  *   run in parallel (each scanner is individually bounded + never throws).
  * - Never throws: any scanner error yields [] (enforced by scanner contract).
  */
-export async function buildBacklog(opts?: { repos?: string[]; minItemValue?: number }): Promise<Backlog> {
+export async function buildBacklog(opts?: {
+  repos?: string[];
+  minItemValue?: number;
+  /** M125: injectable listProposals for feedback-loop tests. */
+  listProposals?: () => Proposal[];
+}): Promise<Backlog> {
   const repos: string[] = opts?.repos ?? listEnrolled();
   const scanners = await getScanners();
   const now = new Date().toISOString();
 
   // Resolve min-value threshold: explicit opt > config > default (2).
   let minValue = opts?.minItemValue;
+  // M125: resolve feedbackEnabled from config (default true).
+  let feedbackEnabled = true;
   if (minValue === undefined) {
     try {
       const { loadConfig } = await import('../config.js');
       const cfg = loadConfig();
       minValue = cfg.foundry?.minItemValue ?? 2;
+      // cfg.foundry.feedbackEnabled: absent → true (opt-out by setting false).
+      const rawFeedback = (cfg.foundry as Record<string, unknown> | undefined)?.['feedbackEnabled'];
+      if (rawFeedback === false) feedbackEnabled = false;
     } catch {
       minValue = 2;
     }
@@ -208,10 +219,32 @@ export async function buildBacklog(opts?: { repos?: string[]; minItemValue?: num
     passed.push(item);
   }
 
+  // M125: feedback-loop re-ranking — apply outcome priors to adjust item scores.
+  // Gate: feedbackEnabled (default true; set cfg.foundry.feedbackEnabled=false to skip).
+  // When enabled, items from historically-productive sources are up-ranked; noisy/
+  // empty sources are down-ranked. Floor ≥ 0.5 keeps exploration alive.
+  // Flag-off: no adjustment, byte-identical order to pre-M125.
+  let finalItems = passed;
+  if (feedbackEnabled) {
+    try {
+      const priors = await computeOutcomePriors({ listProposals: opts?.listProposals });
+      const adjusted = passed.map((item) => {
+        const multiplier = scoreAdjustment(item, priors);
+        return multiplier === 1.0 ? item : { ...item, score: item.score * multiplier };
+      });
+      adjusted.sort((a, b) => b.score - a.score);
+      finalItems = adjusted;
+    } catch {
+      // Feedback failure must never disrupt backlog delivery — fall through to
+      // the original passed array (flag-off equivalent).
+      finalItems = passed;
+    }
+  }
+
   const backlog: Backlog = {
     generatedAt: now,
     repos,
-    items: passed,
+    items: finalItems,
   };
 
   // Persist; never throw on persistence failure.
@@ -227,7 +260,7 @@ export async function buildBacklog(opts?: { repos?: string[]; minItemValue?: num
     action: 'backlog:refresh',
     repo: null,
     sandboxId: null,
-    summary: `backlog refreshed: ${repos.length} repo(s), ${passed.length} item(s)${filteredMsg}`,
+    summary: `backlog refreshed: ${repos.length} repo(s), ${finalItems.length} item(s)${filteredMsg}`,
     result: 'ok',
   });
 
