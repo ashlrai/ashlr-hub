@@ -399,16 +399,19 @@ export async function runStrategist(
     const state = await gatherFleetState(project);
 
     // ── Resolve frontier client ─────────────────────────────────────────────
+    // M121.1: strategize with a STRONG model — getActiveClient otherwise picks
+    // the smallest local model (phi4-mini), too weak for vision/strategy.
+    const visionModel = ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) || 'qwen2.5:72b-instruct-q4_K_M';
     let complete: ((system: string, user: string) => Promise<string>) | null = null;
     try {
       const { getActiveClient } = await import('../run/provider-client.js');
-      const raw = await getActiveClient(cfg, { allowCloud: true }) as MinimalClient;
+      const raw = await getActiveClient(cfg, { allowCloud: true, model: visionModel }) as MinimalClient;
       complete = wrapClient(raw);
     } catch {
       // No cloud client — try local.
       try {
         const { getActiveClient } = await import('../run/provider-client.js');
-        const raw = await getActiveClient(cfg, { allowCloud: false }) as MinimalClient;
+        const raw = await getActiveClient(cfg, { allowCloud: false, model: visionModel }) as MinimalClient;
         complete = wrapClient(raw);
       } catch { /* unavailable */ }
     }
