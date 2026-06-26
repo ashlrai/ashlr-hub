@@ -604,6 +604,8 @@ export async function cmdFleet(args: string[]): Promise<number> {
       return cmdFleetDoctor(rest.includes('--json'));
     case 'scorecard':
       return cmdFleetScorecard(rest);
+    case 'oversight':
+      return cmdFleetOversight(rest);
     default:
       process.stderr.write(red('error: ') + `unknown fleet subcommand: ${sub}\n`);
       printFleetHelp();
@@ -625,5 +627,93 @@ function printFleetHelp(): void {
   console.log(`    ashlr fleet doctor [--json]   ${cyan('# engine readiness preflight (M81)')}`);
   console.log(`    ashlr fleet scorecard [--window 7d|30d|all] [--by-engine] [--by-repo] [--json]`);
   console.log(`                          ${cyan('# productivity + quality scorecard (M119)')}`);
+  console.log(`    ashlr fleet oversight [--json]    ${cyan('# CEO scorecard: quality + manager + vision + goals (M122)')}`);
   console.log('');
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: oversight (M122 — CEO scorecard)
+// ---------------------------------------------------------------------------
+
+/**
+ * `ashlr fleet oversight [--json]`
+ *
+ * Builds and prints the CEO oversight snapshot: quality scorecard, manager
+ * verdict summary, vision progress, and goals. Pushes to pulse if configured.
+ * READ-ONLY. Never throws.
+ */
+async function cmdFleetOversight(args: string[]): Promise<number> {
+  const jsonMode = args.includes('--json');
+  const cfg = await loadCfg();
+
+  let snapshot: import('../core/fleet/oversight-export.js').OversightSnapshot;
+  try {
+    const { buildOversightSnapshot, exportOversight } = await import('../core/fleet/oversight-export.js');
+    snapshot = buildOversightSnapshot(cfg ?? {});
+
+    if (!jsonMode) {
+      // Push to pulse if configured (best-effort, fire-and-forget)
+      void exportOversight(cfg ?? {}).catch(() => { /* swallow */ });
+    }
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'failed to build oversight snapshot: ' +
+        (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  if (jsonMode) {
+    process.stdout.write(JSON.stringify(snapshot, null, 2) + '\n');
+    return 0;
+  }
+
+  const pct = (n: number) => `${n.toFixed(1)}%`;
+
+  console.log('');
+  console.log(bold('  ashlr fleet oversight') + dim(' — CEO scorecard (M122)'));
+  console.log('');
+
+  // Scorecard
+  const sc = snapshot.scorecard;
+  console.log('  ' + bold('Productivity'));
+  console.log(`    proposals:    ${sc.proposalsCreated}  merged: ${sc.merged}  pending: ${sc.pending}`);
+  console.log('  ' + bold('Quality'));
+  const acceptColor = sc.acceptRate >= 0.5 ? green : sc.acceptRate >= 0.25 ? yellow : red;
+  console.log(`    accept rate:  ${acceptColor(pct(sc.acceptRate * 100))}  trivial: ${pct(sc.trivialRatio * 100)}  empty-diff: ${pct(sc.emptyRate * 100)}`);
+  console.log('');
+
+  // Manager
+  if (snapshot.manager) {
+    const m = snapshot.manager;
+    console.log('  ' + bold('Manager verdict') + dim(` (as of ${m.generatedAt.slice(0, 10)})`));
+    console.log(
+      `    ship: ${green(String(m.shipped))}  review: ${yellow(String(m.review))}` +
+      `  noise: ${String(m.noise)}  harmful: ${m.harmful > 0 ? red(String(m.harmful)) : String(m.harmful)}`,
+    );
+    if (m.recommendations.length > 0) {
+      console.log('    recommendations:');
+      for (const r of m.recommendations) {
+        console.log('      · ' + dim(r));
+      }
+    }
+    console.log('');
+  }
+
+  // Vision
+  if (snapshot.vision) {
+    const v = snapshot.vision;
+    console.log('  ' + bold('Vision'));
+    console.log(`    ${cyan(v.northStar)}`);
+    console.log(`    ambition: ${v.ambitionLevel}  progress: ${pct(v.progressPct)}`);
+    console.log('');
+  }
+
+  // Goals
+  const g = snapshot.goals;
+  console.log('  ' + bold('Goals'));
+  console.log(`    active: ${g.active}  done: ${g.done}  progress: ${pct(g.progressPct)}`);
+  console.log('');
+
+  return 0;
 }
