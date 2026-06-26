@@ -972,7 +972,6 @@ export async function handleApi(
       const { buildFleetDigest } = await import('../fleet/digest.js');
       const { computeQualityMetrics } = await import('../fleet/quality-metrics.js');
       const { buildOversightSnapshot } = await import('../fleet/oversight-export.js');
-      const { readDecisions } = await import('../fleet/decisions-ledger.js');
 
       // daemon + digest (parallel)
       let daemonSection: unknown = null;
@@ -1007,21 +1006,10 @@ export async function handleApi(
         oversightSection = buildOversightSnapshot(cfg as { pulse?: { enabled?: boolean; endpoint?: string } });
       } catch { /* degrade gracefully */ }
 
-      let routingSection: unknown[] = [];
+      let routingSection: { recent: unknown[]; modelSplit: Record<string, number> } = { recent: [], modelSplit: {} };
       try {
-        const all = readDecisions({ limit: 100 });
-        routingSection = all
-          .filter((d) => typeof d.engine === 'string' && typeof d.model === 'string')
-          .slice(0, 20)
-          .map((d) => ({
-            ts: d.ts,
-            proposalId: d.proposalId,
-            action: d.action,
-            engine: d.engine,
-            model: d.model,
-            reason: d.reason,
-            verdict: d.verdict,
-          }));
+        const { deriveRoutingData } = await import('../mcp-native.js');
+        routingSection = deriveRoutingData(50);
       } catch { /* degrade gracefully */ }
 
       sendJson(res, 200, {

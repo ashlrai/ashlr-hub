@@ -40,6 +40,7 @@ import { buildFleetDigest } from './fleet/digest.js';
 import { computeQualityMetrics } from './fleet/quality-metrics.js';
 import { buildOversightSnapshot, type OversightSnapshot } from './fleet/oversight-export.js';
 import { readDecisions } from './fleet/decisions-ledger.js';
+import { listProposals } from './inbox/store.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -53,6 +54,91 @@ const MAX_DIFF_CHARS = 4 * 1024;
 
 /** Marker inserted where output was truncated. */
 const TRUNCATION_MARK = '\n…[ashlr: output truncated]…\n';
+
+// ---------------------------------------------------------------------------
+// Routing data derivation (M131)
+// ---------------------------------------------------------------------------
+
+export interface RoutingRow {
+  ts: string;
+  repo: string;
+  task: string;
+  engine: string;
+  model: string;
+  reason?: string;
+}
+
+export interface RoutingData {
+  recent: RoutingRow[];
+  modelSplit: Record<string, number>;
+}
+
+/**
+ * Derive real routing history from proposal records (engineModel is always
+ * populated by M127) and merge any routing-tagged decisions-ledger entries
+ * that carry a reason field. Sorted newest-first, bounded to `limit`.
+ * Never throws — returns empty data on any failure.
+ */
+export function deriveRoutingData(limit = 50): RoutingData {
+  const rows: RoutingRow[] = [];
+
+  // 1. Source from proposals — each proposal carries engineModel (e.g. "codex:gpt-5.5")
+  try {
+    const proposals = listProposals();
+    for (const p of proposals) {
+      const em = p.engineModel;
+      if (!em || typeof em !== 'string') continue;
+      const colonIdx = em.indexOf(':');
+      const engine = colonIdx >= 0 ? em.slice(0, colonIdx) : em;
+      const model = colonIdx >= 0 ? em.slice(colonIdx + 1) : '';
+      if (!engine) continue;
+      rows.push({
+        ts: p.createdAt ?? '',
+        repo: p.repo ?? '',
+        task: (p.title ?? '').slice(0, 120),
+        engine,
+        model,
+      });
+    }
+  } catch { /* degrade gracefully */ }
+
+  // 2. Merge routing-tagged decisions-ledger entries (carry a reason when present).
+  //    These are sparse — only add entries whose ts is NOT already covered by proposals.
+  const proposalTs = new Set(rows.map((r) => r.ts));
+  try {
+    const decisions = readDecisions({ limit: 200 });
+    for (const d of decisions) {
+      if (typeof d.engine !== 'string') continue;
+      if (proposalTs.has(d.ts)) continue; // already covered
+      // Normalize engine the same way as proposals: split "engine:model" if combined.
+      const ci = d.engine.indexOf(':');
+      const dEngine = ci >= 0 ? d.engine.slice(0, ci) : d.engine;
+      const dModel = ci >= 0 ? d.engine.slice(ci + 1) : (typeof d.model === 'string' ? d.model : '');
+      if (!dEngine) continue;
+      rows.push({
+        ts: d.ts,
+        repo: '',
+        task: '',
+        engine: dEngine,
+        model: dModel,
+        reason: typeof d.reason === 'string' ? d.reason : undefined,
+      });
+    }
+  } catch { /* degrade gracefully */ }
+
+  // 3. Sort newest-first, bound to limit.
+  rows.sort((a, b) => b.ts.localeCompare(a.ts));
+  const recent = rows.slice(0, limit);
+
+  // 4. Compute modelSplit: count proposals per "engine:model" key.
+  const modelSplit: Record<string, number> = {};
+  for (const r of rows) {
+    const key = r.model ? `${r.engine}:${r.model}` : r.engine;
+    modelSplit[key] = (modelSplit[key] ?? 0) + 1;
+  }
+
+  return { recent, modelSplit };
+}
 
 // ---------------------------------------------------------------------------
 // Tool definitions
@@ -544,37 +630,24 @@ const TOOLS: NativeToolImpl[] = [
     name: 'ashlr_routing',
     description:
       'Recent routing decisions: which engine:model handled which task and the reason. ' +
-      'Reads the decisions ledger for entries that carry engine + model metadata. ' +
-      'Best-effort — returns [] when no routing decisions have been logged yet ' +
-      '(routing logging is added by a sibling agent). Read-only.',
+      'Derives history from proposal engineModel fields (always populated by M127) and ' +
+      'merges any routing-tagged decisions-ledger entries that carry a reason. ' +
+      'Returns { recent: RoutingRow[], modelSplit: Record<string,number> }. ' +
+      'Best-effort — recent is [] when no proposals exist yet. Read-only.',
     inputSchema: {
       type: 'object',
       properties: {
         limit: {
           type: 'number',
-          description: 'Max entries to return, 1–100 (default 20).',
+          description: 'Max entries to return in recent[], 1–100 (default 50).',
         },
       },
     },
     safety: 'read',
     handler: async (args, _cfg) => {
-      const rawLimit = typeof args['limit'] === 'number' ? args['limit'] : 20;
+      const rawLimit = typeof args['limit'] === 'number' ? args['limit'] : 50;
       const limit = Math.max(1, Math.min(100, Math.floor(rawLimit)));
-      // Filter decision entries that carry both engine and model — those are routing decisions.
-      const all = readDecisions({ limit: limit * 5 }); // over-fetch so filter yields enough
-      const routing = all
-        .filter((d) => typeof d.engine === 'string' && typeof d.model === 'string')
-        .slice(0, limit)
-        .map((d) => ({
-          ts: d.ts,
-          proposalId: d.proposalId,
-          action: d.action,
-          engine: d.engine,
-          model: d.model,
-          reason: d.reason,
-          verdict: d.verdict,
-        }));
-      return routing;
+      return deriveRoutingData(limit);
     },
   },
 
