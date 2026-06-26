@@ -103,6 +103,34 @@ export function engineTierOf(engine: EngineId, cfg?: AshlrConfig): EngineTier {
   return resolveEngineSpec(engine, cfg)?.tier ?? 'local';
 }
 
+/**
+ * M127 — resolve a concrete model string for `engine`.
+ *
+ * Priority:
+ *   1. cfg.foundry?.models?.[engine]   (operator-configured concrete model)
+ *   2. capturedModel                    (model the run actually used, e.g. from
+ *                                        opts.model when the caller captured it)
+ *   3. process.env.ASHLR_MODEL          (runtime override)
+ *   4. 'default'                        (genuinely unknown — still REJECTED by
+ *                                        evaluateMergeAuthority, by design)
+ *
+ * The merge-authority gate still rejects ':default'. This helper CAPTURES the
+ * real model so frontier proposals built with a configured/captured model can
+ * actually pass the gate.
+ */
+export function resolveConcreteModel(
+  engine: EngineId,
+  cfg: AshlrConfig,
+  capturedModel?: string,
+): string {
+  return (
+    cfg.foundry?.models?.[engine] ||
+    capturedModel ||
+    process.env.ASHLR_MODEL ||
+    'default'
+  );
+}
+
 const PRE_PUSH_BLOCK =
   '#!/bin/sh\n' +
   '# ashlr M45: pushes are forbidden from a sandboxed-engine worktree.\n' +
@@ -186,7 +214,7 @@ export async function runEngineSandboxed(
   opts: RunEngineSandboxedOptions,
 ): Promise<SandboxedEngineResult> {
   const model = opts.model ?? cfg.foundry?.models?.[engine];
-  const engineModel = `${engine}:${model ?? 'default'}`;
+  const engineModel = `${engine}:${resolveConcreteModel(engine, cfg, model)}`;
   const tier = engineTierOf(engine, cfg);
   const id =
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -387,7 +415,7 @@ export async function runApiModelSandboxed(
 
   const modelFromCfg = opts.model ?? cfg.foundry?.models?.[engine] ?? spec.api.defaultModel ?? '';
   const model = modelFromCfg || (spec.api.defaultModel ?? '');
-  const engineModel = `${engine}:${model || 'default'}`;
+  const engineModel = `${engine}:${resolveConcreteModel(engine, cfg, model || undefined)}`;
   const tier = engineTierOf(engine, cfg);
   const id = opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
