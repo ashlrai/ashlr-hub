@@ -23,9 +23,13 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { AshlrConfig, Proposal, ProposalStatus } from '../types.js';
 import { audit } from '../sandbox/audit.js';
+import { emitFleetEvent } from '../integrations/pulse-sync.js';
+import type { FleetEvent } from '../integrations/pulse-exporter.js';
+// M119: decisions ledger hook — additive, never-throws, no behavior change.
+import { recordDecision } from '../fleet/decisions-ledger.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call-time so tests can relocate HOME)
@@ -119,6 +123,86 @@ function isValidProposal(parsed: unknown): parsed is Proposal {
 }
 
 // ---------------------------------------------------------------------------
+// Pulse Map telemetry (Phase: proposal-lifecycle spans) — ADDITIVE, no-op
+// unless the fleet→pulse round-trip is opted in (PULSE_URL + PAT). This is
+// pure TELEMETRY: it never changes proposal semantics and never weakens the
+// proposal-only / kill-switch guarantees — it only mirrors lifecycle MOTION
+// (created / merged / declined) into the cloud Map so the graph reflects
+// proposals advancing, not just ticks. METADATA ONLY: we emit the repo
+// basename + the lifecycle outcome — NEVER the diff, title body, or any file
+// contents. Every call is wrapped so a Pulse outage can NEVER affect the
+// proposal flow (best-effort, fire-and-forget, swallow-then-log).
+// ---------------------------------------------------------------------------
+
+/**
+ * Map a proposal lifecycle transition to the fleet event the cloud ingest
+ * understands:
+ *   - creation                     → 'proposal'  (a proposal now exists)
+ *   - approved / applied (merged)  → 'merge'      (it moved toward landing)
+ *   - rejected (declined)          → 'decline'    (it was turned down)
+ * Any other transition (e.g. a 'pending' reset or an apply 'failed' outcome)
+ * is surfaced as a generic 'proposal' span so the motion is still visible.
+ * Returns the FleetEvent kind; the raw status is carried as the outcome.
+ */
+function lifecycleEvent(status: ProposalStatus): FleetEvent {
+  if (status === 'approved' || status === 'applied') return 'merge';
+  if (status === 'rejected') return 'decline';
+  return 'proposal';
+}
+
+/**
+ * Best-effort, NON-THROWING fleet-span emit for a proposal lifecycle moment.
+ *
+ * - Gated entirely by emitFleetEvent → pulseSyncEnabled: a complete NO-OP
+ *   (no network, no fetch) unless BOTH a Pulse endpoint (PULSE_URL / cfg.pulse)
+ *   AND a PAT are configured. When unconfigured this returns immediately.
+ * - Fire-and-forget: the returned promise is detached with a .catch() so the
+ *   proposal call path never awaits the network and a Pulse outage / rejection
+ *   can never propagate into the proposal flow.
+ * - METADATA ONLY: refId = proposal id; repo = basename of the repo path;
+ *   outcome = the lifecycle status/origin. NEVER the diff or any file content.
+ *
+ * `owner` is threaded through cfg.user so the cloud can attribute the span to a
+ * teammate (carried as ashlr.fleet.owner) — matching the createProposal owner
+ * stamping. No cfg ⇒ env-driven opt-in still applies.
+ */
+function emitProposalSpan(
+  event: FleetEvent,
+  proposal: Pick<Proposal, 'id' | 'repo' | 'owner'>,
+  outcome: string,
+  cfg?: Pick<AshlrConfig, 'user'>,
+): void {
+  try {
+    // repo is an absolute path on a Proposal; ship only the basename as a
+    // metadata hint (the cloud resolves nodes by name). Never a full path's
+    // parent dirs — keep it to the bare repo name.
+    const repo = proposal.repo ? basename(proposal.repo) : null;
+    // Build the minimal AshlrConfig surface emitFleetEvent needs. pulseSyncEnabled
+    // reads cfg.pulse + env; exporterConfig reads cfg.user. We never have the
+    // full config here, so rely on env-based opt-in (PULSE_URL) + carry owner.
+    const fleetCfg = {
+      ...(cfg?.user ? { user: cfg.user } : {}),
+    } as AshlrConfig;
+
+    // emitFleetEvent is itself gated + no-throw, but we still detach + swallow:
+    // store.ts must NEVER throw and must NEVER block on the network.
+    void Promise.resolve(
+      emitFleetEvent(fleetCfg, {
+        event,
+        refId: proposal.id,
+        outcome,
+        repo,
+      }),
+    ).catch(() => {
+      // Pulse outage / rejection — telemetry is best-effort; proposal flow is
+      // unaffected. Swallow (emitFleetEvent already logs at its boundary).
+    });
+  } catch {
+    // Constructing the span input must never break a proposal lifecycle call.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -162,6 +246,10 @@ export function createProposal(
     summary: `proposal created: [${proposal.kind}] ${proposal.title} (id=${proposal.id})`,
     result: 'ok',
   });
+
+  // Pulse Map: a proposal now exists. Outcome = its origin so the cloud can
+  // distinguish backlog / swarm / manual / agent provenance. Best-effort.
+  emitProposalSpan('proposal', proposal, proposal.origin, cfg);
 
   return proposal;
 }
@@ -247,11 +335,16 @@ export function loadProposal(id: string): Proposal | null {
  * - NEVER applies anything — pure persistence change only.
  * - Audits the decision.
  * - Never throws.
+ *
+ * M119 ADDITIVE: optional `reason` param — when supplied, persisted as
+ * `decisionReason` on the proposal and emitted to the decisions ledger.
+ * When absent → no behavior change whatsoever.
  */
 export function setStatus(
   id: string,
   status: ProposalStatus,
   result?: string,
+  reason?: string,
 ): void {
   try {
     const existing = loadProposal(id);
@@ -262,6 +355,8 @@ export function setStatus(
       ...existing,
       status,
       ...(result !== undefined ? { result } : {}),
+      // M119: persist decisionReason when provided (additive, backward-compatible).
+      ...(reason !== undefined ? { decisionReason: reason } : {}),
       ...(decidedStatuses.includes(status)
         ? { decidedAt: new Date().toISOString() }
         : {}),
@@ -280,6 +375,44 @@ export function setStatus(
       summary: `proposal ${status}: [${updated.kind}] ${updated.title} (id=${id})${result ? ` — ${result}` : ''}`,
       result: 'ok',
     });
+
+    // M119: emit a decisions-ledger entry for every status transition that
+    // represents a decision (merged/rejected) or a lifecycle action.
+    // Best-effort: recordDecision never throws; no behavior change when absent.
+    try {
+      const ledgerAction =
+        status === 'applied' || status === 'approved'
+          ? 'merged'
+          : status === 'rejected'
+            ? 'rejected'
+            : 'judged';
+      // Derive the engine id from the model string (segment before ':').
+      const engineModel = updated.engineModel;
+      const engineId = engineModel ? engineModel.split(':')[0] : undefined;
+      recordDecision({
+        ts: new Date().toISOString(),
+        proposalId: id,
+        action: ledgerAction,
+        ...(engineId ? { engine: engineId } : {}),
+        ...(engineModel ? { model: engineModel } : {}),
+        verdict: status,
+        ...(reason !== undefined ? { reason } : {}),
+      });
+    } catch {
+      // Ledger is best-effort — never disrupts the proposal flow.
+    }
+
+    // Pulse Map: mirror the lifecycle transition. approved/applied → 'merge',
+    // rejected → 'decline', any other → 'proposal'. The raw status is the
+    // outcome. This ONLY reports motion — setStatus has already (and only)
+    // changed the persisted status; no apply / merge / kill-switch behavior is
+    // touched here. Owner is carried from the persisted proposal.
+    emitProposalSpan(
+      lifecycleEvent(status),
+      updated,
+      status,
+      updated.owner ? { user: { id: updated.owner } } : undefined,
+    );
   } catch {
     // Never throws.
   }

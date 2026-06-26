@@ -469,6 +469,118 @@ async function cmdFleetDoctor(jsonMode: boolean): Promise<number> {
   return hardBlocked ? 1 : 0;
 }
 
+// ---------------------------------------------------------------------------
+// Subcommand: scorecard (M119 — quality metrics)
+// ---------------------------------------------------------------------------
+
+/**
+ * `ashlr fleet scorecard [--window 7d|30d|all] [--by-engine] [--by-repo] [--json]`
+ *
+ * Prints a productivity + quality scorecard derived from proposals + the
+ * decisions ledger. READ-ONLY; never mutates. Never throws.
+ */
+async function cmdFleetScorecard(args: string[]): Promise<number> {
+  const jsonMode = args.includes('--json');
+  const byEngine = args.includes('--by-engine');
+  const byRepo = args.includes('--by-repo');
+
+  // --window <value>
+  let window: '7d' | '30d' | 'all' = '7d';
+  const wIdx = args.indexOf('--window');
+  if (wIdx !== -1 && args[wIdx + 1]) {
+    const wVal = args[wIdx + 1];
+    if (wVal === '7d' || wVal === '30d' || wVal === 'all') {
+      window = wVal;
+    } else {
+      process.stderr.write(
+        red('error: ') + `--window must be 7d, 30d, or all (got ${wVal})\n`,
+      );
+      return 1;
+    }
+  }
+
+  let metrics: import('../core/types.js').QualityMetrics;
+  try {
+    const { computeQualityMetrics } = await import('../core/fleet/quality-metrics.js');
+    metrics = computeQualityMetrics(window);
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'failed to compute quality metrics: ' +
+        (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  if (jsonMode) {
+    process.stdout.write(JSON.stringify(metrics, null, 2) + '\n');
+    return 0;
+  }
+
+  // ── Human-readable scorecard ──────────────────────────────────────────────
+  const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
+
+  console.log('');
+  console.log(bold('  ashlr fleet scorecard') + dim(` — quality metrics (window: ${window})`));
+  console.log('');
+
+  // Productivity
+  console.log('  ' + bold('Productivity'));
+  console.log(`    proposals created:  ${metrics.proposalsCreated}`);
+  console.log(`    merged:             ${metrics.merged}`);
+  console.log(`    rejected:           ${metrics.rejected}`);
+  console.log(`    pending:            ${metrics.pending}`);
+  console.log(`    with diff:          ${metrics.withDiff}`);
+  console.log('');
+
+  // Quality rates
+  console.log('  ' + bold('Quality'));
+  const acceptColor = metrics.acceptRate >= 0.5 ? green : metrics.acceptRate >= 0.25 ? yellow : red;
+  console.log(`    accept rate:        ${acceptColor(pct(metrics.acceptRate))}`);
+  console.log(`    reject rate:        ${pct(metrics.rejectRate)}`);
+  if (metrics.verifyPassRate > 0 || metrics.proposalsCreated > 0) {
+    console.log(`    verify pass rate:   ${pct(metrics.verifyPassRate)}`);
+  }
+  console.log(`    trivial ratio:      ${pct(metrics.trivialRatio)}`);
+  console.log(`    empty-diff rate:    ${pct(metrics.emptyRate)}`);
+  console.log(`    avg diff lines:     ${metrics.avgDiffLines.toFixed(1)}`);
+  console.log('');
+
+  // Per-engine breakdown
+  if (byEngine && Object.keys(metrics.byEngine).length > 0) {
+    console.log('  ' + bold('By engine'));
+    const engineW = Math.max(8, ...Object.keys(metrics.byEngine).map((k) => k.length));
+    for (const [eng, eq] of Object.entries(metrics.byEngine)) {
+      const pad = (s: string, w: number) => s + ' '.repeat(Math.max(0, w - s.length));
+      console.log(
+        `    ${pad(eng, engineW)}  created=${eq.created}  merged=${eq.merged}` +
+        `  accept=${pct(eq.acceptRate)}  trivial=${pct(eq.trivialRatio)}`,
+      );
+    }
+    console.log('');
+  }
+
+  // Per-repo breakdown
+  if (byRepo && Object.keys(metrics.byRepo).length > 0) {
+    console.log('  ' + bold('By repo'));
+    const sorted = Object.entries(metrics.byRepo).sort(([, a], [, b]) => b - a);
+    for (const [repo, count] of sorted) {
+      console.log(`    ${count.toString().padStart(4)}  ${dim(repo)}`);
+    }
+    console.log('');
+  }
+
+  // Trend
+  if (metrics.trend && metrics.trend.length > 0) {
+    console.log('  ' + bold('Weekly trend'));
+    for (const t of metrics.trend) {
+      console.log(`    ${t.period}  merged=${t.merged}  accept=${pct(t.acceptRate)}`);
+    }
+    console.log('');
+  }
+
+  return 0;
+}
+
 export async function cmdFleet(args: string[]): Promise<number> {
   const [sub, ...rest] = args;
 
@@ -490,6 +602,8 @@ export async function cmdFleet(args: string[]): Promise<number> {
       return setKillSwitch(false);
     case 'doctor':
       return cmdFleetDoctor(rest.includes('--json'));
+    case 'scorecard':
+      return cmdFleetScorecard(rest);
     default:
       process.stderr.write(red('error: ') + `unknown fleet subcommand: ${sub}\n`);
       printFleetHelp();
@@ -509,5 +623,7 @@ function printFleetHelp(): void {
   console.log(`    ashlr fleet pause             ${cyan('# engage kill switch (pause fleet)')}`);
   console.log(`    ashlr fleet resume            ${cyan('# release kill switch (resume fleet)')}`);
   console.log(`    ashlr fleet doctor [--json]   ${cyan('# engine readiness preflight (M81)')}`);
+  console.log(`    ashlr fleet scorecard [--window 7d|30d|all] [--by-engine] [--by-repo] [--json]`);
+  console.log(`                          ${cyan('# productivity + quality scorecard (M119)')}`);
   console.log('');
 }

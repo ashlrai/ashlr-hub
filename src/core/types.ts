@@ -2083,6 +2083,19 @@ export interface Proposal {
   /** Outcome detail recorded by applyProposal (branch name, PR url, error). */
   result?: string;
   /**
+   * M119: Result of the verification step run against this proposal's diff.
+   * Optional — not all proposals are verified before decision.
+   */
+  verifyResult?: { passed: boolean; failed?: string[] };
+  /**
+   * M119: Human or manager-agent reason recorded at decide time.
+   */
+  decisionReason?: string;
+  /**
+   * M119: Risk classification for the change (set by manager or trust gate).
+   */
+  riskClass?: 'low' | 'medium' | 'high';
+  /**
    * M103: payload for 'desktop-action' proposals. Carries the specific UI
    * action to perform when the proposal is approved+applied.
    *
@@ -3161,6 +3174,85 @@ export interface RunEstimate {
  * start working here". Every section is BEST-EFFORT (empty on failure); the
  * builder never throws. READ-ONLY: derived entirely from local stores.
  */
+// ---------------------------------------------------------------------------
+// M119: Fleet oversight — decisions ledger + quality metrics
+// ---------------------------------------------------------------------------
+
+/** M119: additive fields on Proposal for oversight tracking. */
+// These are declared as module augmentation via declaration merging below;
+// the actual fields are added directly to the Proposal interface above.
+// Defined here as standalone interfaces so manager.ts can import them cleanly.
+
+/**
+ * M119: One entry in the append-only decisions ledger
+ * (~/.ashlr/decisions/YYYY-MM-DD.jsonl).
+ */
+export interface DecisionEntry {
+  /** ISO timestamp. */
+  ts: string;
+  /** The proposal this event belongs to. */
+  proposalId: string;
+  /** Lifecycle action. */
+  action: 'proposed' | 'verified' | 'judged' | 'merged' | 'rejected' | 'escalated';
+  /** Engine id (e.g. 'codex', 'claude'). */
+  engine?: string;
+  /** Engine model string (e.g. 'codex:gpt-5.5'). */
+  model?: string;
+  /** Human-readable verdict (e.g. 'approved', 'rejected'). */
+  verdict?: string;
+  /** Human-readable reason for the decision. */
+  reason?: string;
+  /** Optional extra detail (secret-scrubbed before persisting). */
+  detail?: string;
+}
+
+/** M119: Per-engine quality breakdown. */
+export interface EngineQuality {
+  created: number;
+  merged: number;
+  rejected: number;
+  /** merged / created */
+  acceptRate: number;
+  /** Average changed lines across proposals with a diff. */
+  avgDiffLines: number;
+  /** Share of proposals that are trivial (≤6 diff lines or trivial title). */
+  trivialRatio: number;
+}
+
+/** M119: Aggregate quality metrics over a time window. */
+export interface QualityMetrics {
+  /** The window this snapshot covers ('7d' | '30d' | 'all'). */
+  window: string;
+  /** Total proposals created in the window. */
+  proposalsCreated: number;
+  /** Proposals merged (approved + applied). */
+  merged: number;
+  /** Proposals rejected (rejected + failed). */
+  rejected: number;
+  /** Proposals still pending (live count, not window-filtered). */
+  pending: number;
+  /** Proposals that carried a non-empty diff. */
+  withDiff: number;
+  /** Share of proposals without a diff (empty-patch rate). */
+  emptyRate: number;
+  /** Share of proposals that are trivially small (≤6 diff lines or doc-only title). */
+  trivialRatio: number;
+  /** (approved + applied) / created */
+  acceptRate: number;
+  /** (rejected + failed) / created */
+  rejectRate: number;
+  /** verifyResult.passed / proposals with verifyResult present */
+  verifyPassRate: number;
+  /** Average diff lines across proposals that have a diff. */
+  avgDiffLines: number;
+  /** Per-engine breakdown keyed by engineModel (or '(unknown)'). */
+  byEngine: Record<string, EngineQuality>;
+  /** Per-repo proposal count in the window keyed by repo path. */
+  byRepo: Record<string, number>;
+  /** Optional multi-period trend (weekly buckets from decisions ledger). */
+  trend?: { period: string; acceptRate: number; merged: number }[];
+}
+
 export interface OrientResult {
   /** ISO timestamp the orientation was generated. */
   generatedAt: string;
