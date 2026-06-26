@@ -12,6 +12,53 @@
 import type { WorkItem } from '../types.js';
 
 // ---------------------------------------------------------------------------
+// Non-code path detection (M133)
+// ---------------------------------------------------------------------------
+
+/**
+ * File-path segments / patterns that identify non-code / low-value files where
+ * TODO/FIXME markers are almost never actionable code work.
+ *
+ * NOTE: this is DISTINCT from M108's isIgnoredPath (generated/lockfiles that
+ * are not scanned at all). These files ARE scanned, but markers inside them
+ * are down-valued to trivial so the min-value gate drops them.
+ *
+ * Matches any path whose:
+ *  - extension is .md / .txt / .rst / .adoc
+ *  - basename starts with CHANGELOG
+ *  - any path segment is docs/, examples/, fixtures/
+ *  - basename matches *.test.* or *.spec.*
+ *  - any path segment is test/ or tests/ or __tests__/
+ */
+export const NON_CODE_PATH_RE =
+  /(?:^|\/)(?:CHANGELOG[^/]*|docs\/|examples\/|fixtures\/|test\/|tests\/|__tests__\/)|\.(?:md|txt|rst|adoc)$|\.(?:test|spec)\.[^/]+$/i;
+
+/**
+ * Returns true when a raw file path string is a non-code/low-value path.
+ * Used directly by scanners.ts to down-value markers before building WorkItems.
+ */
+export function isNonCodePath(filePath: string): boolean {
+  return NON_CODE_PATH_RE.test(filePath.replace(/\\/g, '/'));
+}
+
+/**
+ * Returns true when the file path referenced in a marker item is a non-code
+ * path (docs, changelog, tests, plain-text files). Markers in these paths
+ * are low-value by definition.
+ *
+ * Applies to items whose title matches "N marker(s) in <path>" — extracts
+ * the file path from the title and tests it.
+ */
+export function isNonCodeMarkerItem(item: WorkItem): boolean {
+  if (!BARE_MARKER_TITLE_RE.test(item.title)) return false;
+  // Extract the file path portion: everything after "N marker(s) in "
+  const match = item.title.match(/^\d+ markers? in ([^\s:]+)/i);
+  if (!match) return false;
+  const filePath = match[1]!;
+  return NON_CODE_PATH_RE.test(filePath);
+}
+
+// ---------------------------------------------------------------------------
 // Patterns — each pattern is narrow and well-motivated.
 // ---------------------------------------------------------------------------
 
@@ -120,6 +167,15 @@ export function isTrivialItem(item: WorkItem): TrivialResult {
   if (BREAKING_DEP_RE.test(fullText)) {
     return { trivial: false };
   }
+
+  // M133: Markers in non-code/low-value files (docs, CHANGELOG, tests, .md, .txt,
+  // examples, fixtures) are trivial regardless of their quoted text. Check this
+  // BEFORE the bare-marker text gate so a "substantive" description in CHANGELOG.md
+  // is still dropped — markers in these files are editorial noise, not code work.
+  if (isNonCodeMarkerItem(item)) {
+    return { trivial: true, reason: 'non-code-marker: TODO/FIXME in docs/changelog/test/txt file is not actionable code work' };
+  }
+
   // Bare TODO marker -> trivial EVEN IF it references a file:line (a marker's
   // location is not "actionable specifics"). MUST run before the file:line allowlist.
   if (BARE_MARKER_TITLE_RE.test(item.title)) {

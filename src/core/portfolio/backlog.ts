@@ -19,6 +19,32 @@ import { isTrivialItem } from './value-filter.js';
 import { computeOutcomePriors, scoreAdjustment } from '../fleet/feedback.js';
 
 // ---------------------------------------------------------------------------
+// M133: normalized title for dedup matching
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a title for dedup comparison. Lower-cases, strips punctuation,
+ * collapses whitespace. Used to detect duplicate items / pending proposals
+ * without exact-string matching (avoids false positives from minor wording
+ * differences while still catching the same item filed N times).
+ *
+ * Strategy: lowercase → strip leading issue/PR prefixes → strip non-word chars
+ * → collapse spaces → truncate to 120 chars.
+ * "Issue #42: fix null pointer" and "Fix null pointer" will NOT match (the
+ * issue number makes them distinct). "1 marker in src/foo.ts:17" filed twice
+ * WILL match (same id and same normalized title).
+ */
+function normalizeTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/^(issue|pr|bug|feat|fix|chore|refactor|todo|fixme|hack|xxx)\s*[#:]?\s*/i, '')
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+}
+
+// ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
 
@@ -96,11 +122,14 @@ function persistBacklog(backlog: Backlog): void {
 // ---------------------------------------------------------------------------
 
 function dedupeItems(items: WorkItem[]): WorkItem[] {
-  const seen = new Set<string>();
+  const seenId = new Set<string>();
+  const seenTitle = new Set<string>();
   const out: WorkItem[] = [];
   for (const item of items) {
-    if (!seen.has(item.id)) {
-      seen.add(item.id);
+    const normTitle = normalizeTitle(item.title);
+    if (!seenId.has(item.id) && !seenTitle.has(normTitle)) {
+      seenId.add(item.id);
+      seenTitle.add(normTitle);
       out.push(item);
     }
   }
@@ -152,6 +181,13 @@ export async function buildBacklog(opts?: {
   minItemValue?: number;
   /** M125: injectable listProposals for feedback-loop tests. */
   listProposals?: () => Proposal[];
+  /**
+   * M133: injectable pending-proposals reader for dedup tests.
+   * When provided, replaces the default listProposals({status:'pending'}) call
+   * that drops items already represented by an open pending proposal.
+   * Separate from the M125 listProposals to keep feedback-loop tests isolated.
+   */
+  listPendingProposals?: () => Proposal[];
 }): Promise<Backlog> {
   const repos: string[] = opts?.repos ?? listEnrolled();
   const scanners = await getScanners();
@@ -219,16 +255,75 @@ export async function buildBacklog(opts?: {
     passed.push(item);
   }
 
+  // M133: Dedup vs open pending proposals — drop any item that already has an
+  // open (pending) proposal so the same item cannot be re-filed N times while
+  // one is still awaiting review.
+  //
+  // Matching strategy (robust, not naive substring):
+  //   1. Match by item.id against proposal.workItemId (when set).
+  //   2. Match by normalized title — strips punctuation/prefixes/case so minor
+  //      wording differences don't cause false negatives, but the normalization
+  //      is narrow enough that different items (different file paths, different
+  //      issue numbers) still resolve to distinct tokens.
+  //
+  // False-positive avoidance: we do NOT match on raw title substring (that
+  // would drop "Fix auth.ts:88" because "auth" appears in "Fix auth flow in
+  // docs/auth.md"). The normalized-title approach requires the CORE noun phrase
+  // to match, not just a shared substring.
+  let passedAfterPendingDedup = passed;
+  let pendingDedupCount = 0;
+  try {
+    const pendingProposals: Proposal[] = opts?.listPendingProposals
+      ? opts.listPendingProposals()
+      : await (async () => {
+          try {
+            const { listProposals: lp } = await import('../inbox/store.js');
+            return lp({ status: 'pending' });
+          } catch {
+            return [] as Proposal[];
+          }
+        })();
+
+    if (pendingProposals.length > 0) {
+      // Build lookup sets for both matching strategies.
+      const pendingIds = new Set<string>();
+      const pendingNormTitles = new Set<string>();
+      for (const p of pendingProposals) {
+        // workItemId: optional field that directly links a proposal to its item
+        const pRec = p as unknown as Record<string, unknown>;
+        if (typeof pRec['workItemId'] === 'string') {
+          pendingIds.add(pRec['workItemId']);
+        }
+        pendingNormTitles.add(normalizeTitle(p.title));
+      }
+
+      passedAfterPendingDedup = passed.filter((item) => {
+        if (pendingIds.has(item.id)) {
+          pendingDedupCount++;
+          return false;
+        }
+        if (pendingNormTitles.has(normalizeTitle(item.title))) {
+          pendingDedupCount++;
+          return false;
+        }
+        return true;
+      });
+    }
+  } catch {
+    // Pending-dedup failure must never block backlog delivery.
+    passedAfterPendingDedup = passed;
+  }
+
   // M125: feedback-loop re-ranking — apply outcome priors to adjust item scores.
   // Gate: feedbackEnabled (default true; set cfg.foundry.feedbackEnabled=false to skip).
   // When enabled, items from historically-productive sources are up-ranked; noisy/
   // empty sources are down-ranked. Floor ≥ 0.5 keeps exploration alive.
   // Flag-off: no adjustment, byte-identical order to pre-M125.
-  let finalItems = passed;
+  let finalItems = passedAfterPendingDedup;
   if (feedbackEnabled) {
     try {
       const priors = await computeOutcomePriors({ listProposals: opts?.listProposals });
-      const adjusted = passed.map((item) => {
+      const adjusted = passedAfterPendingDedup.map((item) => {
         const multiplier = scoreAdjustment(item, priors);
         return multiplier === 1.0 ? item : { ...item, score: item.score * multiplier };
       });
@@ -256,11 +351,12 @@ export async function buildBacklog(opts?: {
 
   // Audit record (metadata only; never secrets).
   const filteredMsg = filtered.length > 0 ? `; ${filtered.length} trivial/low-value item(s) filtered (minItemValue=${minValue})` : '';
+  const dedupMsg = pendingDedupCount > 0 ? `; ${pendingDedupCount} item(s) deduplicated vs open pending proposals` : '';
   audit({
     action: 'backlog:refresh',
     repo: null,
     sandboxId: null,
-    summary: `backlog refreshed: ${repos.length} repo(s), ${finalItems.length} item(s)${filteredMsg}`,
+    summary: `backlog refreshed: ${repos.length} repo(s), ${finalItems.length} item(s)${filteredMsg}${dedupMsg}`,
     result: 'ok',
   });
 

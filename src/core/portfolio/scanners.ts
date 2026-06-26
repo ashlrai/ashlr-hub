@@ -20,7 +20,7 @@ import { createHash } from 'node:crypto';
 
 import type { WorkItem, WorkSource } from '../types.js';
 import { listIssues, githubStatus } from '../integrations/github.js';
-import { isTrivialItem } from './value-filter.js';
+import { isTrivialItem, isNonCodePath } from './value-filter.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -356,6 +356,11 @@ export async function scanTodos(repo: string): Promise<WorkItem[]> {
 
       // Skip TODOs in generated, vendored, or lock files
       if (isIgnoredPath(filePath)) continue;
+      // M133: Skip TODOs in non-code files (docs, CHANGELOG, test files, .md, etc.)
+      // These are down-valued to trivial at the item level; skip them here too so
+      // they never accumulate into a byFile cluster that would emit a value=1 item
+      // consuming a backlog slot.
+      if (isNonCodePath(filePath)) continue;
 
       const existing = byFile.get(filePath);
       if (existing) {
