@@ -26,6 +26,7 @@ import type { AshlrConfig } from '../types.js';
 import { loadSpec, applyEvolution } from './spec.js';
 import type { EndStateSpec } from './spec.js';
 import { computeQualityMetrics } from '../fleet/quality-metrics.js';
+import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -181,6 +182,79 @@ You must respond ONLY with valid JSON in exactly this shape (no prose, no markdo
 proposedEvolution may omit any key that should remain unchanged.
 proposedGoals should be 2–5 concrete, actionable goals an engineering agent can execute.
 questionsForMason should surface genuine strategic forks — not implementation details.`;
+
+
+// ---------------------------------------------------------------------------
+// resolveStrategistClient — pick the best available model for vision briefings
+// ---------------------------------------------------------------------------
+
+const CLAUDE_DEFAULT_STRATEGIST_MODEL = 'claude-sonnet-4-5';
+
+/**
+ * Build a `complete(system, user)` function using the Claude Code CLI.
+ * Mirrors buildClaudeCliComplete in manager.ts — duplicated minimally per
+ * file-ownership rules (no shared util that touches both files).
+ */
+function buildClaudeCliCompleteStrategist(
+  cfg: AshlrConfig,
+  model: string,
+): (system: string, user: string) => Promise<string> {
+  return async (system: string, user: string): Promise<string> => {
+    try {
+      const combined = `${system}\n\n${user}`;
+      const cmd = buildEngineCommand('claude', combined, cfg, { model });
+      if (!cmd) return '';
+      const result = spawnEngine(cmd, cfg, { timeoutMs: 300_000 });
+      if (!result.ok || !result.output) return '';
+      try {
+        const parsed = JSON.parse(result.output) as Record<string, unknown>;
+        const text = parsed['result'];
+        return typeof text === 'string' ? text : result.output;
+      } catch {
+        return result.output;
+      }
+    } catch {
+      return '';
+    }
+  };
+}
+
+/**
+ * Resolve the best available client for strategic briefings.
+ *
+ * Priority (controlled by cfg.foundry.managerJudgeEngine):
+ *   1. 'auto' / 'claude' + claude allowed+installed → Claude CLI
+ *   2. 'local' or claude unavailable → ollamaDirectComplete with the 72b model
+ *
+ * Returns { complete, judgeEngine }. Never throws.
+ */
+function resolveStrategistClient(
+  cfg: AshlrConfig,
+  ollamaBaseUrl: string,
+  visionModel: string,
+): { complete: (system: string, user: string) => Promise<string>; judgeEngine: string } {
+  const foundry = cfg.foundry as Record<string, unknown> | undefined;
+  const managerJudgeEngine = (foundry?.['managerJudgeEngine'] as string | undefined) ?? 'auto';
+  const allowedBackends: string[] = (foundry?.['allowedBackends'] as string[] | undefined) ?? ['builtin'];
+
+  const wantClaude = managerJudgeEngine === 'auto' || managerJudgeEngine === 'claude';
+  const claudeAllowed = allowedBackends.includes('claude');
+
+  if (wantClaude && claudeAllowed && engineInstalled('claude', cfg)) {
+    const isClaudeModel = visionModel.startsWith('claude') || visionModel.includes('claude');
+    const claudeModel = isClaudeModel ? visionModel : CLAUDE_DEFAULT_STRATEGIST_MODEL;
+    return {
+      complete: buildClaudeCliCompleteStrategist(cfg, claudeModel),
+      judgeEngine: claudeModel,
+    };
+  }
+
+  return {
+    complete: (system: string, user: string) =>
+      ollamaDirectComplete(ollamaBaseUrl, visionModel, system, user, 2048, 0.3),
+    judgeEngine: visionModel,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // State gathering
@@ -458,33 +532,32 @@ export async function runStrategist(
     const state = await gatherFleetState(project);
 
     // ── Resolve frontier client ─────────────────────────────────────────────
-    // M121.1: strategize with a STRONG model — getActiveClient otherwise picks
-    // the smallest local model (phi4-mini), too weak for vision/strategy.
+    // M130: priority order — Claude CLI (subscription, no API key) → local 72b.
+    // Controlled by cfg.foundry.managerJudgeEngine ('auto'|'claude'|'local').
     const visionModel = ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) || 'qwen2.5:72b-instruct-q4_K_M';
     const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
-    const baseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
-    const directComplete = (system: string, user: string) =>
-      ollamaDirectComplete(baseUrl, visionModel, system, user, 2048, 0.3);
-    // Prefer a client from getActiveClient (test mocks + a real cloud key use this),
-    // but its LOCAL fallback is unreliable (smallest model / broken client without
-    // throwing). So wrap it: try the primary; if it throws or yields nothing usable,
-    // fall through to DIRECT Ollama with the strong model (3-min timeout — full
-    // briefings exceed buildOpenAICompatibleClient's 30s).
-    let primary: ((system: string, user: string) => Promise<string>) | null = null;
+    const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
+
+    // Try getActiveClient first (honours test mocks and a live cloud key).
+    let complete: ((system: string, user: string) => Promise<string>) | null = null;
+    let strategistJudgeEngine = visionModel;
     try {
       const { getActiveClient } = await import('../run/provider-client.js');
       const raw = await getActiveClient(cfg, { allowCloud: true, model: visionModel }) as MinimalClient;
-      primary = wrapClient(raw);
-    } catch { primary = null; }
-    const complete: ((system: string, user: string) => Promise<string>) =
-      async (system: string, user: string): Promise<string> => {
-        if (primary) {
-          try { const r = await primary(system, user); if (r && r.trim()) return r; } catch { /* fall through */ }
-        }
-        return directComplete(system, user);
-      };
+      const wrapped = wrapClient(raw);
+      if (wrapped) {
+        complete = wrapped;
+        strategistJudgeEngine = (raw as { model?: string }).model ?? 'cloud';
+      }
+    } catch { /* fall through to resolver */ }
 
-    if (!complete) return fallback();
+    if (!complete) {
+      const resolved = resolveStrategistClient(cfg, ollamaBaseUrl, visionModel);
+      complete = resolved.complete;
+      strategistJudgeEngine = resolved.judgeEngine;
+    }
+
+    void strategistJudgeEngine; // available for future briefing metadata
 
     // ── Prompt ──────────────────────────────────────────────────────────────
     const userPrompt = buildStatePrompt(state, spec);

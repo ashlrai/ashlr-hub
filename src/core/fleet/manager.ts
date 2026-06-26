@@ -20,6 +20,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import type { AshlrConfig, Proposal, QualityMetrics } from '../types.js';
 import { recordDecision } from './decisions-ledger.js';
 import { computeQualityMetrics } from './quality-metrics.js';
+import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
 
 // ---------------------------------------------------------------------------
 // Public types (defined here — not in types.ts per file ownership rules)
@@ -410,6 +411,97 @@ async function ollamaDirectComplete(
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// resolveJudgeClient — pick the best available judge
+// ---------------------------------------------------------------------------
+
+/**
+ * Default model for the Claude CLI judge when cfg.foundry.managerJudgeModel
+ * does not specify an explicit claude model.
+ */
+const CLAUDE_DEFAULT_JUDGE_MODEL = 'claude-sonnet-4-5';
+
+/**
+ * Build a `complete(system, user)` function that uses the Claude Code CLI
+ * (`claude -p "<combined prompt>" --model <M> --output-format json`).
+ *
+ * Combines system + user into a single -p argument (the Claude CLI `-p` flag
+ * takes one prompt; we embed the system persona as a prefix so the judge
+ * persona is preserved). Parses the `.result` text out of the JSON output.
+ *
+ * Never-throws: any spawn/parse failure returns an empty string so the caller
+ * falls through to the parse-failure → 'review' path.
+ */
+function buildClaudeCliComplete(
+  cfg: AshlrConfig,
+  model: string,
+): (system: string, user: string) => Promise<string> {
+  return async (system: string, user: string): Promise<string> => {
+    try {
+      const combined = `${system}\n\n${user}`;
+      const cmd = buildEngineCommand('claude', combined, cfg, { model });
+      if (!cmd) return '';
+      const result = spawnEngine(cmd, cfg, { timeoutMs: 300_000 }); // 5 min for frontier
+      if (!result.ok || !result.output) return '';
+      // claude --output-format json → { result: "<text>", ... }
+      try {
+        const parsed = JSON.parse(result.output) as Record<string, unknown>;
+        const text = parsed['result'];
+        return typeof text === 'string' ? text : result.output;
+      } catch {
+        // Not JSON-wrapped (older claude versions) — return raw output.
+        return result.output;
+      }
+    } catch {
+      return '';
+    }
+  };
+}
+
+/**
+ * Resolve the best available judge client for the manager.
+ *
+ * Priority order (controlled by cfg.foundry.managerJudgeEngine):
+ *   1. 'auto' or 'claude' (default): Claude CLI if allowed + installed → most decisive
+ *   2. 'local' or claude unavailable: ollamaDirectComplete with the 72b model
+ *
+ * Returns { complete, judgeEngine } — judgeEngine is the model id string to
+ * record in the report. Never throws.
+ */
+function resolveJudgeClient(
+  cfg: AshlrConfig,
+  ollamaBaseUrl: string,
+  judgeModel: string,
+): { complete: (system: string, user: string) => Promise<string>; judgeEngine: string } {
+  const foundry = cfg.foundry as Record<string, unknown> | undefined;
+  const managerJudgeEngine = (foundry?.['managerJudgeEngine'] as string | undefined) ?? 'auto';
+  const allowedBackends: string[] = (foundry?.['allowedBackends'] as string[] | undefined) ?? ['builtin'];
+
+  const wantClaude = managerJudgeEngine === 'auto' || managerJudgeEngine === 'claude';
+  const claudeAllowed = allowedBackends.includes('claude');
+
+  if (wantClaude && claudeAllowed && engineInstalled('claude', cfg)) {
+    // Use cfg.foundry.managerJudgeModel if it looks like a claude model,
+    // otherwise fall back to the sonnet default.
+    const isClaudeModel = judgeModel.startsWith('claude') || judgeModel.includes('claude');
+    const claudeModel = isClaudeModel ? judgeModel : CLAUDE_DEFAULT_JUDGE_MODEL;
+    return {
+      complete: buildClaudeCliComplete(cfg, claudeModel),
+      judgeEngine: claudeModel,
+    };
+  }
+
+  // Local-72b path (unchanged from original)
+  const localBaseUrl = ollamaBaseUrl;
+  const localModel = judgeModel;
+  return {
+    complete: (system: string, user: string) =>
+      ollamaDirectComplete(localBaseUrl, localModel, system, user, 512, 0),
+    judgeEngine: localModel,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Report output helpers
 // ---------------------------------------------------------------------------
@@ -543,51 +635,38 @@ export async function runManager(
 
   try {
     // ── Resolve the frontier judge client ──────────────────────────────────
-    let rawClient: MinimalProviderClient | null = null;
+    // ── Resolve the frontier judge client ──────────────────────────────────
+    // M130 priority order (controlled by cfg.foundry.managerJudgeEngine):
+    //   1. getActiveClient — honours test mocks + a live cloud/provider key.
+    //   2. resolveJudgeClient — Claude CLI (subscription, no API key) → local 72b.
+    const judgeModel = ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) || 'qwen2.5:72b-instruct-q4_K_M';
+    const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
+    const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
 
+    let judgeClient: { complete: (system: string, user: string) => Promise<string> } | null = null;
+
+    // Step 1: try getActiveClient (cloud provider / test mock).
     try {
       const { getActiveClient } = await import('../run/provider-client.js');
-      // M120.1: judge with a STRONG model — getActiveClient otherwise picks the
-      // smallest local model (e.g. phi4-mini), a weak judge that defaults every
-      // verdict to 'review'. Force the strong 72b for local (configurable).
-      const judgeModel = ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) || 'qwen2.5:72b-instruct-q4_K_M';
-      // Prefer cloud (frontier) judge; fall back to the strong local model.
-      try {
-        rawClient = await getActiveClient(cfg, { allowCloud: true, model: judgeModel }) as MinimalProviderClient;
-        judgeEngine = (rawClient as { model?: string }).model ?? 'cloud';
-      } catch {
-        // No cloud available — try local via getActiveClient.
-        try {
-          rawClient = await getActiveClient(cfg, { allowCloud: false, model: judgeModel }) as MinimalProviderClient;
-          judgeEngine = (rawClient as { model?: string }).model ?? 'local';
-        } catch {
-          // getActiveClient failed (sparse config / missing URL). Use the proven
-          // direct OpenAI-compat path against Ollama — same path local-coder uses.
-          try {
-            const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
-            const baseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
-            // Use direct client with 3-min timeout — buildOpenAICompatibleClient
-            // uses a hard 30s FETCH_TIMEOUT_MS which 72b models exceed for judge calls.
-            const directBaseUrl = baseUrl;
-            const directModel = judgeModel;
-            rawClient = {
-              model: directModel,
-              complete: (system: string, user: string) =>
-                ollamaDirectComplete(directBaseUrl, directModel, system, user, 512, 0),
-            } as MinimalProviderClient;
-            judgeEngine = judgeModel;
-          } catch {
-            rawClient = null;
-            judgeEngine = 'unavailable';
-          }
-        }
+      const rawClient = await getActiveClient(cfg, { allowCloud: true, model: judgeModel }) as MinimalProviderClient;
+      const wrapped = wrapClient(rawClient);
+      if (wrapped) {
+        judgeClient = wrapped;
+        judgeEngine = wrapped.model ?? 'cloud';
       }
-    } catch {
-      rawClient = null;
-      judgeEngine = 'unavailable';
-    }
+    } catch { /* fall through to resolveJudgeClient */ }
 
-    const judgeClient = rawClient ? wrapClient(rawClient) : null;
+    // Step 2: resolveJudgeClient — Claude CLI (if allowed+installed) → local 72b.
+    if (!judgeClient) {
+      try {
+        const resolved = resolveJudgeClient(cfg, ollamaBaseUrl, judgeModel);
+        judgeClient = resolved;
+        judgeEngine = resolved.judgeEngine;
+      } catch {
+        judgeEngine = 'unavailable';
+        judgeClient = null;
+      }
+    }
 
     // ── Load pending proposals ─────────────────────────────────────────────
     let proposals: Proposal[] = [];
