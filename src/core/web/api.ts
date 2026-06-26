@@ -962,6 +962,78 @@ export async function handleApi(
       return true;
     }
 
+    // ── GET /api/fleet-state ────────────────────────────────────────────────
+    // M129: agent-readable combined fleet surface — daemon status + quality
+    // scorecard + full oversight snapshot + recent routing decisions.
+    // Read-only; same no-auth class as /api/daemon and /api/fleet.
+    // Never throws; each section degrades independently.
+    if (path === '/api/fleet-state' && method === 'GET') {
+      const { loadDaemonState } = await import('../daemon/state.js');
+      const { buildFleetDigest } = await import('../fleet/digest.js');
+      const { computeQualityMetrics } = await import('../fleet/quality-metrics.js');
+      const { buildOversightSnapshot } = await import('../fleet/oversight-export.js');
+      const { readDecisions } = await import('../fleet/decisions-ledger.js');
+
+      // daemon + digest (parallel)
+      let daemonSection: unknown = null;
+      try {
+        const ds = loadDaemonState();
+        const digest = await buildFleetDigest('7d');
+        daemonSection = {
+          running: ds.running,
+          pid: ds.pid,
+          startedAt: ds.startedAt,
+          lastTickAt: ds.lastTickAt,
+          todaySpentUsd: ds.todaySpentUsd,
+          itemsProcessed: ds.itemsProcessed,
+          recentTicks: Array.isArray(ds.ticks) ? ds.ticks.slice(-20) : [],
+          pendingProposals: digest.totalPending,
+          digest: {
+            totalProposed: digest.totalProposed,
+            totalAutoMerged: digest.totalAutoMerged,
+            totalDeclined: digest.totalDeclined,
+            repos: digest.repos.slice(0, 10),
+          },
+        };
+      } catch { /* degrade gracefully */ }
+
+      let scorecardSection: unknown = null;
+      try {
+        scorecardSection = computeQualityMetrics('7d');
+      } catch { /* degrade gracefully */ }
+
+      let oversightSection: unknown = null;
+      try {
+        oversightSection = buildOversightSnapshot(cfg as { pulse?: { enabled?: boolean; endpoint?: string } });
+      } catch { /* degrade gracefully */ }
+
+      let routingSection: unknown[] = [];
+      try {
+        const all = readDecisions({ limit: 100 });
+        routingSection = all
+          .filter((d) => typeof d.engine === 'string' && typeof d.model === 'string')
+          .slice(0, 20)
+          .map((d) => ({
+            ts: d.ts,
+            proposalId: d.proposalId,
+            action: d.action,
+            engine: d.engine,
+            model: d.model,
+            reason: d.reason,
+            verdict: d.verdict,
+          }));
+      } catch { /* degrade gracefully */ }
+
+      sendJson(res, 200, {
+        generatedAt: new Date().toISOString(),
+        daemon: daemonSection,
+        scorecard: scorecardSection,
+        oversight: oversightSection,
+        routing: routingSection,
+      });
+      return true;
+    }
+
     // ── Method not allowed on known /api/ routes ─────────────────────────────
     // If path starts with /api/ but matched none of the above, it's either
     // a wrong method or an unknown sub-path. Return 404.

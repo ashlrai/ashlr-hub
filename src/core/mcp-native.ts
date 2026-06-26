@@ -35,6 +35,11 @@ import { buildRollup } from './observability/rollup.js';
 import { buildSnapshot } from './dashboard.js';
 import { buildOrientation } from './orient.js';
 import { selectGenomeSync, selectInboxStore, selectBacklogSource } from './seams/index.js';
+import { loadDaemonState } from './daemon/state.js';
+import { buildFleetDigest } from './fleet/digest.js';
+import { computeQualityMetrics } from './fleet/quality-metrics.js';
+import { buildOversightSnapshot, type OversightSnapshot } from './fleet/oversight-export.js';
+import { readDecisions } from './fleet/decisions-ledger.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -455,6 +460,121 @@ const TOOLS: NativeToolImpl[] = [
           'The browser task will NOT execute until you approve it. ' +
           'A Claude-in-Chrome MCP server must be configured and reachable at apply time.',
       };
+    },
+  },
+
+  // ── M129: Fleet-state read tools ───────────────────────────────────────
+
+  {
+    name: 'ashlr_fleet_status',
+    description:
+      'Live fleet status: daemon running/pid, last tick, today\'s spend vs budget, ' +
+      'items processed, recent tick history (concurrency + per-backend dispatch counts), ' +
+      'and pending-proposal count. Combines daemon state + fleet digest. Read-only.',
+    inputSchema: { type: 'object', properties: {} },
+    safety: 'read',
+    handler: async (_args, _cfg) => {
+      // loadDaemonState and buildFleetDigest both never throw.
+      const ds = loadDaemonState();
+      const digest = await buildFleetDigest('7d');
+      // Bound ticks to last 20 for output size.
+      const recentTicks = Array.isArray(ds.ticks) ? ds.ticks.slice(-20) : [];
+      return {
+        running: ds.running,
+        pid: ds.pid,
+        startedAt: ds.startedAt,
+        lastTickAt: ds.lastTickAt,
+        todaySpentUsd: ds.todaySpentUsd,
+        itemsProcessed: ds.itemsProcessed,
+        recentTicks,
+        pendingProposals: digest.totalPending,
+        digest: {
+          totalProposed: digest.totalProposed,
+          totalAutoMerged: digest.totalAutoMerged,
+          totalDeclined: digest.totalDeclined,
+          repos: digest.repos.slice(0, 10),
+        },
+      };
+    },
+  },
+
+  {
+    name: 'ashlr_scorecard',
+    description:
+      'Quality metrics scorecard for the autonomous fleet: proposals created, merged, ' +
+      'rejected, accept/reject rates, verify pass rate, avg diff size, per-engine and ' +
+      'per-repo breakdowns, and trend data. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        window: {
+          type: 'string',
+          enum: ['7d', '30d', 'all'],
+          description: "Time window for metrics (default '7d').",
+        },
+      },
+    },
+    safety: 'read',
+    handler: async (args, _cfg) => {
+      const w = args['window'];
+      const window = w === '7d' || w === '30d' || w === 'all' ? w : '7d';
+      return computeQualityMetrics(window);
+    },
+  },
+
+  {
+    name: 'ashlr_oversight',
+    description:
+      'Full fleet oversight snapshot: quality scorecard (30d), latest Manager-agent ' +
+      'verdict summary (shipped/review/noise/harmful + recommendations), current vision ' +
+      '(north-star, end-state, ambition level, progress %), and goals progress summary ' +
+      '(active/done/progressPct). Read-only.',
+    inputSchema: { type: 'object', properties: {} },
+    safety: 'read',
+    handler: async (_args, cfg) => {
+      // buildOversightSnapshot accepts PulseExportCfg; AshlrConfig is structurally
+      // compatible (both have optional pulse?: { enabled?, endpoint? }).
+      // The cfg arg is currently void'd inside the function but passed for future scoping.
+      const snap: OversightSnapshot = buildOversightSnapshot(cfg as { pulse?: { enabled?: boolean; endpoint?: string } });
+      return snap;
+    },
+  },
+
+  {
+    name: 'ashlr_routing',
+    description:
+      'Recent routing decisions: which engine:model handled which task and the reason. ' +
+      'Reads the decisions ledger for entries that carry engine + model metadata. ' +
+      'Best-effort — returns [] when no routing decisions have been logged yet ' +
+      '(routing logging is added by a sibling agent). Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'number',
+          description: 'Max entries to return, 1–100 (default 20).',
+        },
+      },
+    },
+    safety: 'read',
+    handler: async (args, _cfg) => {
+      const rawLimit = typeof args['limit'] === 'number' ? args['limit'] : 20;
+      const limit = Math.max(1, Math.min(100, Math.floor(rawLimit)));
+      // Filter decision entries that carry both engine and model — those are routing decisions.
+      const all = readDecisions({ limit: limit * 5 }); // over-fetch so filter yields enough
+      const routing = all
+        .filter((d) => typeof d.engine === 'string' && typeof d.model === 'string')
+        .slice(0, limit)
+        .map((d) => ({
+          ts: d.ts,
+          proposalId: d.proposalId,
+          action: d.action,
+          engine: d.engine,
+          model: d.model,
+          reason: d.reason,
+          verdict: d.verdict,
+        }));
+      return routing;
     },
   },
 

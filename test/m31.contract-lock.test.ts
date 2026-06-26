@@ -81,7 +81,7 @@ describe('RunEstimate shape lock', () => {
 });
 
 describe('native MCP tool surface lock', () => {
-  it('the 13 tool names and their safety classes are pinned', () => {
+  it('the 17 tool names and their safety classes are pinned', () => {
     const surface = nativeToolDefs()
       .map((t) => `${t.name}:${t.safety}`)
       .sort();
@@ -90,14 +90,18 @@ describe('native MCP tool surface lock', () => {
       'ashlr_backlog:read',
       'ashlr_browser_task:proposal',
       'ashlr_desktop_open:proposal',
+      'ashlr_fleet_status:read',
       'ashlr_health:read',
       'ashlr_impact:read',
       'ashlr_inbox_list:read',
       'ashlr_inbox_propose:proposal',
       'ashlr_learn:append',
       'ashlr_orient:read',
+      'ashlr_oversight:read',
       'ashlr_pulse:read',
       'ashlr_recall:read',
+      'ashlr_routing:read',
+      'ashlr_scorecard:read',
       'ashlr_status:read',
     ]);
   });
