@@ -123,7 +123,11 @@ import type { AshlrConfig } from '../src/core/types.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-const mockCfg: AshlrConfig = { provider: 'anthropic' } as unknown as AshlrConfig;
+// Dead Ollama URL: the strategist's direct-Ollama fallback (used only when the
+// mocked getActiveClient client fails/yields nothing) fails FAST here instead of
+// hitting the real running 72b and timing the test out. Tests that want success
+// mock the client's complete() to return a valid briefing (primary path).
+const mockCfg: AshlrConfig = { provider: 'anthropic', models: { ollama: 'http://127.0.0.1:9' } } as unknown as AshlrConfig;
 
 function makeMockBriefingJson(overrides: Partial<{
   currentState: string;

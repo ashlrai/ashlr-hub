@@ -113,33 +113,27 @@ function truncateDiff(diff: string | undefined): string {
 // LLM prompt + parse
 // ---------------------------------------------------------------------------
 
-const JUDGE_SYSTEM = `You are the fleet manager for an autonomous coding assistant.
-Your job: evaluate whether a code proposal is worth shipping, needs review, is noise, or is harmful.
+const JUDGE_SYSTEM = `You are a code-proposal judge for an autonomous engineering fleet.
+Evaluate the proposal and respond with ONLY this JSON object — no prose, no markdown, no explanation before or after:
+{"value":3,"correctness":3,"scope":3,"alignment":3,"verdict":"review","rationale":"one sentence"}
 
-Respond ONLY with valid JSON (no prose, no markdown fences):
-{
-  "verdict": "ship" | "review" | "noise" | "harmful",
-  "value": <1-5>,
-  "correctness": <1-5>,
-  "scope": <1-5>,
-  "alignment": <1-5>,
-  "rationale": "<one sentence>"
-}
+Field definitions:
+  value       1-5  how much does this improve the codebase? (1=trivial, 5=critical)
+  correctness 1-5  how confident are you the change is correct? (1=suspicious, 5=clearly correct)
+  scope       1-5  blast radius (1=single line, 5=touches many files / risky)
+  alignment   1-5  does this match the repo purpose or stated north-star? (5=directly advances it, 1=unrelated)
+  verdict     one of: ship | review | noise | harmful
+              ship=value≥4 AND correctness≥4 AND no obvious risk
+              review=uncertain or needs human look
+              noise=trivial/no diff/spam
+              harmful=dangerous/destructive/security risk
+              When in doubt choose review. Never choose noise or harmful speculatively.
+  rationale   one sentence explaining your verdict
 
-Scoring guide:
-  value       — how much does this improve the codebase? (1=trivial, 5=critical)
-  correctness — how confident are you the change is correct? (1=suspicious, 5=clearly correct)
-  scope       — blast radius (1=single line, 5=touches many files / risky)
-  alignment   — does this match the repo's NORTH-STAR VISION (see context below, else evident purpose).
-                Score 5 if the change directly advances a stated priority; 1 if unrelated or counterproductive.
+Example output (copy this exact shape, substitute your values):
+{"value":4,"correctness":5,"scope":1,"alignment":4,"verdict":"ship","rationale":"Small null-check prevents crash with no blast radius."}`;
 
-verdict guide:
-  ship    — value≥4, correctness≥4, no obvious risk
-  review  — uncertain; needs human inspection
-  noise   — trivial, no diff, or clearly low-value
-  harmful — dangerous, destructive, or security-risk
-
-When in doubt, use "review". Never use "noise" or "harmful" speculatively.`;
+const JUDGE_RETRY_SUFFIX = `\n\nYour previous response could not be parsed as JSON. Respond with ONLY the JSON object and nothing else. Example: {"value":3,"correctness":3,"scope":3,"alignment":3,"verdict":"review","rationale":"needs inspection"}`;
 
 /**
  * Load the EndStateSpec for a proposal's repo (best-effort — never throws).
@@ -196,19 +190,45 @@ function extractJson(raw: string): Record<string, unknown> | null {
     } catch { /* fall through */ }
   }
 
-  // Find the first {...} block.
-  const braceMatch = raw.match(/\{[\s\S]*\}/);
-  if (braceMatch) {
+  // Find the LAST {...} block (models sometimes emit preamble JSON then the real one).
+  const allBraceMatches = [...raw.matchAll(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*/g)];
+  for (let i = allBraceMatches.length - 1; i >= 0; i--) {
     try {
-      const parsed = JSON.parse(braceMatch[0]);
+      const parsed = JSON.parse(allBraceMatches[i]![0]);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
     } catch { /* fall through */ }
+  }
+
+  // Greedy: find the outermost balanced {...} block.
+  const start = raw.indexOf('{');
+  if (start !== -1) {
+    let depth = 0;
+    let end = -1;
+    for (let i = start; i < raw.length; i++) {
+      if (raw[i] === '{') depth++;
+      else if (raw[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+    }
+    if (end !== -1) {
+      try {
+        const parsed = JSON.parse(raw.slice(start, end + 1));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+      } catch { /* fall through */ }
+    }
   }
 
   return null;
 }
 
 const VALID_VERDICTS = new Set(['ship', 'review', 'noise', 'harmful']);
+
+/** Normalise synonym verdicts a local model might emit. */
+function normaliseVerdict(raw: string): ManagerVerdict['verdict'] {
+  const v = raw.toLowerCase().trim();
+  if (v === 'ship' || v === 'approve' || v === 'approved' || v === 'merge' || v === 'lgtm') return 'ship';
+  if (v === 'noise' || v === 'trivial' || v === 'skip' || v === 'ignore') return 'noise';
+  if (v === 'harmful' || v === 'dangerous' || v === 'reject' || v === 'rejected' || v === 'block') return 'harmful';
+  return 'review';
+}
 
 function clamp(n: unknown, lo: number, hi: number): number {
   const num = typeof n === 'number' ? n : Number(n);
@@ -246,13 +266,21 @@ export async function judgeProposal(
     return fallback();
   }
 
-  const obj = extractJson(raw);
+  let obj = extractJson(raw);
+  // ONE-SHOT RETRY: if parse failed, re-prompt the model asking for JSON only.
+  if (!obj) {
+    try {
+      const retryPrompt = buildJudgePrompt(proposal, specCtx) + JUDGE_RETRY_SUFFIX;
+      const raw2 = await client.complete(JUDGE_SYSTEM, retryPrompt);
+      obj = extractJson(raw2);
+    } catch { /* retry failed — fall through to fallback */ }
+  }
   if (!obj) return fallback();
 
   const rawVerdict = typeof obj['verdict'] === 'string' ? obj['verdict'] : '';
-  const verdict = VALID_VERDICTS.has(rawVerdict)
+  const verdict: ManagerVerdict['verdict'] = VALID_VERDICTS.has(rawVerdict)
     ? (rawVerdict as ManagerVerdict['verdict'])
-    : 'review';
+    : normaliseVerdict(rawVerdict);
 
   const value = clamp(obj['value'], 1, 5);
   const correctness = clamp(obj['correctness'], 1, 5);
@@ -341,6 +369,45 @@ function wrapClient(
   }
 
   return null;
+}
+
+/**
+ * Direct Ollama chat completion with a long timeout (3 min) for slow 72b models.
+ * Bypasses provider-client.ts's 30s FETCH_TIMEOUT_MS.
+ */
+async function ollamaDirectComplete(
+  baseUrl: string,
+  model: string,
+  system: string,
+  user: string,
+  maxTokens: number,
+  temperature: number,
+): Promise<string> {
+  const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 180_000); // 3 min
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+        stream: false,
+        temperature,
+        max_tokens: maxTokens,
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    return data.choices?.[0]?.message?.content ?? '';
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -489,13 +556,30 @@ export async function runManager(
         rawClient = await getActiveClient(cfg, { allowCloud: true, model: judgeModel }) as MinimalProviderClient;
         judgeEngine = (rawClient as { model?: string }).model ?? 'cloud';
       } catch {
-        // No cloud available — try local.
+        // No cloud available — try local via getActiveClient.
         try {
           rawClient = await getActiveClient(cfg, { allowCloud: false, model: judgeModel }) as MinimalProviderClient;
           judgeEngine = (rawClient as { model?: string }).model ?? 'local';
         } catch {
-          rawClient = null;
-          judgeEngine = 'unavailable';
+          // getActiveClient failed (sparse config / missing URL). Use the proven
+          // direct OpenAI-compat path against Ollama — same path local-coder uses.
+          try {
+            const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
+            const baseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
+            // Use direct client with 3-min timeout — buildOpenAICompatibleClient
+            // uses a hard 30s FETCH_TIMEOUT_MS which 72b models exceed for judge calls.
+            const directBaseUrl = baseUrl;
+            const directModel = judgeModel;
+            rawClient = {
+              model: directModel,
+              complete: (system: string, user: string) =>
+                ollamaDirectComplete(directBaseUrl, directModel, system, user, 512, 0),
+            } as MinimalProviderClient;
+            judgeEngine = judgeModel;
+          } catch {
+            rawClient = null;
+            judgeEngine = 'unavailable';
+          }
         }
       }
     } catch {

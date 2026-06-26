@@ -104,6 +104,47 @@ export function loadLatestBriefing(project?: string | null): StrategicBriefing |
 // System persona
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Direct Ollama call with long timeout (mirrors manager.ts — DO NOT import from there)
+// ---------------------------------------------------------------------------
+
+async function ollamaDirectComplete(
+  baseUrl: string,
+  model: string,
+  system: string,
+  user: string,
+  maxTokens: number,
+  temperature: number,
+): Promise<string> {
+  const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 180_000); // 3 min
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+        stream: false,
+        temperature,
+        max_tokens: maxTokens,
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    return data.choices?.[0]?.message?.content ?? '';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const STRATEGIST_RETRY_SUFFIX = `\n\nYour previous response could not be parsed as JSON. Respond with ONLY the JSON object matching the schema above and nothing else — no prose, no markdown.`;
+
 const STRATEGIST_SYSTEM = `You are the visionary founder and chief strategy officer of an autonomous software-engineering company.
 
 Your job is NOT to rubber-stamp progress — it is to raise the bar. You think in first principles. You look at where the system is, where it could be, and identify the single most important bottleneck between here and the end-state vision. As each bottleneck is solved, you immediately identify the next one.
@@ -234,12 +275,30 @@ function extractJson(raw: string): Record<string, unknown> | null {
     } catch { /* fall through */ }
   }
 
-  const braceMatch = raw.match(/\{[\s\S]*\}/);
-  if (braceMatch) {
+  // Find the LAST {...} block (models sometimes emit preamble JSON then the real one).
+  const allBraceMatches = [...raw.matchAll(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*/g)];
+  for (let i = allBraceMatches.length - 1; i >= 0; i--) {
     try {
-      const parsed = JSON.parse(braceMatch[0]);
+      const parsed = JSON.parse(allBraceMatches[i]![0]);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
     } catch { /* fall through */ }
+  }
+
+  // Greedy: find the outermost balanced {...} block.
+  const start = raw.indexOf('{');
+  if (start !== -1) {
+    let depth = 0;
+    let end = -1;
+    for (let i = start; i < raw.length; i++) {
+      if (raw[i] === '{') depth++;
+      else if (raw[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+    }
+    if (end !== -1) {
+      try {
+        const parsed = JSON.parse(raw.slice(start, end + 1));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+      } catch { /* fall through */ }
+    }
   }
 
   return null;
@@ -402,19 +461,28 @@ export async function runStrategist(
     // M121.1: strategize with a STRONG model — getActiveClient otherwise picks
     // the smallest local model (phi4-mini), too weak for vision/strategy.
     const visionModel = ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) || 'qwen2.5:72b-instruct-q4_K_M';
-    let complete: ((system: string, user: string) => Promise<string>) | null = null;
+    const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
+    const baseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
+    const directComplete = (system: string, user: string) =>
+      ollamaDirectComplete(baseUrl, visionModel, system, user, 2048, 0.3);
+    // Prefer a client from getActiveClient (test mocks + a real cloud key use this),
+    // but its LOCAL fallback is unreliable (smallest model / broken client without
+    // throwing). So wrap it: try the primary; if it throws or yields nothing usable,
+    // fall through to DIRECT Ollama with the strong model (3-min timeout — full
+    // briefings exceed buildOpenAICompatibleClient's 30s).
+    let primary: ((system: string, user: string) => Promise<string>) | null = null;
     try {
       const { getActiveClient } = await import('../run/provider-client.js');
       const raw = await getActiveClient(cfg, { allowCloud: true, model: visionModel }) as MinimalClient;
-      complete = wrapClient(raw);
-    } catch {
-      // No cloud client — try local.
-      try {
-        const { getActiveClient } = await import('../run/provider-client.js');
-        const raw = await getActiveClient(cfg, { allowCloud: false, model: visionModel }) as MinimalClient;
-        complete = wrapClient(raw);
-      } catch { /* unavailable */ }
-    }
+      primary = wrapClient(raw);
+    } catch { primary = null; }
+    const complete: ((system: string, user: string) => Promise<string>) =
+      async (system: string, user: string): Promise<string> => {
+        if (primary) {
+          try { const r = await primary(system, user); if (r && r.trim()) return r; } catch { /* fall through */ }
+        }
+        return directComplete(system, user);
+      };
 
     if (!complete) return fallback();
 
@@ -427,8 +495,15 @@ export async function runStrategist(
       return fallback();
     }
 
-    // ── Parse ───────────────────────────────────────────────────────────────
-    const obj = extractJson(raw);
+    // ── Parse (with one-shot retry on failure) ───────────────────────────────
+    let obj = extractJson(raw);
+    if (!obj) {
+      try {
+        const retryPrompt = userPrompt + STRATEGIST_RETRY_SUFFIX;
+        const raw2 = await complete(STRATEGIST_SYSTEM, retryPrompt);
+        obj = extractJson(raw2);
+      } catch { /* retry failed — fall through */ }
+    }
     const briefing = obj
       ? parseBriefingFromJson(obj, project, generatedAt)
       : fallback();

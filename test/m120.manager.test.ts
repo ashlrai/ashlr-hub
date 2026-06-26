@@ -67,6 +67,9 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
 // Mock getActiveClient — returns a deterministic judge
 vi.mock('../src/core/run/provider-client.js', () => ({
   getActiveClient: vi.fn(),
+  // Manager falls back to this for a local judge; throw in tests so the
+  // "no client available" path is clean (no live Ollama during unit tests).
+  buildOpenAICompatibleClient: vi.fn(() => { throw new Error('no local client (test)'); }),
 }));
 
 // Mock classifyRisk so we can control it per-test
@@ -556,7 +559,8 @@ describe('m120 runManager — shadow mode', () => {
     mockProposals.push(makeProposal());
 
     const { runManager } = await import('../src/core/fleet/manager.js');
-    await expect(runManager({} as never)).resolves.toBeDefined();
+    // Dead Ollama URL so the direct-Ollama fallback fails fast (no real 72b call / timeout).
+    await expect(runManager({ models: { ollama: 'http://127.0.0.1:9' } } as never)).resolves.toBeDefined();
   });
 
   it('defaults all proposals to review when no client available', async () => {
@@ -567,7 +571,7 @@ describe('m120 runManager — shadow mode', () => {
     mockProposals.push(makeProposal({ id: 'prop-no-client-2' }));
 
     const { runManager } = await import('../src/core/fleet/manager.js');
-    const report = await runManager({} as never);
+    const report = await runManager({ models: { ollama: 'http://127.0.0.1:9' } } as never);
 
     // With no client, verdicts default to 'review' — never noise/harmful
     for (const v of report.verdicts) {

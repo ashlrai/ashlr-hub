@@ -196,10 +196,14 @@ export async function probeEndpoint(id: string, url: string): Promise<ProviderEn
 export async function getProviderRegistry(cfg: AshlrConfig): Promise<ProviderRegistry> {
   const chain = cfg.models.providerChain;
 
-  // Probe the two known local endpoints in parallel
+  // Probe the two known local endpoints in parallel.
+  // Guard: if a provider URL is absent from the config, skip probing rather
+  // than passing undefined to probeEndpoint (which calls base.replace() and
+  // would throw "Cannot read properties of undefined (reading 'replace')").
+  const skipped = (id: string): ProviderEndpoint => ({ id, url: '', up: false, models: [], error: 'not configured' });
   const [lmResult, ollamaResult] = await Promise.all([
-    probeEndpoint('lmstudio', cfg.models.lmstudio),
-    probeEndpoint('ollama', cfg.models.ollama),
+    cfg.models.lmstudio ? probeEndpoint('lmstudio', cfg.models.lmstudio) : Promise.resolve(skipped('lmstudio')),
+    cfg.models.ollama   ? probeEndpoint('ollama',   cfg.models.ollama)   : Promise.resolve(skipped('ollama')),
   ]);
 
   // Build a lookup map for the probed local endpoints
