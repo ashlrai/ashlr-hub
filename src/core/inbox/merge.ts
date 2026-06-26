@@ -37,6 +37,18 @@
  * ║      guardSafetyTests check already run inside verifyProposal — that guard ║
  * ║      fires first (pre-verify); parity runs last (post-verify). Together    ║
  * ║      they are the two-layer self-improvement safety harness (M54).         ║
+ * ║   7. MANAGER QUALITY GATE (M126): after ALL mechanical gates pass, require ║
+ * ║      a Manager 'ship' verdict (judgeProposal) before auto-merging. The     ║
+ * ║      verdict is resolved by reading the most recent 'judged' entry for     ║
+ * ║      this proposalId from the decisions ledger; if absent or stale (>1h),  ║
+ * ║      judge inline (one model call). Only verdict==='ship' AND              ║
+ * ║      wouldMerge===true may proceed. 'review'/'noise'/'harmful' leave the   ║
+ * ║      proposal PENDING (never auto-reject here). Fail-closed: if the judge  ║
+ * ║      is unavailable, leave pending — NEVER merge without a verdict.        ║
+ * ║  7.5 SELF-TARGET ESCALATION (M126): when isSelfTargetProposal is true,     ║
+ * ║      DO NOT auto-merge even on 'ship' — leave PENDING for Mason unless     ║
+ * ║      cfg.foundry.autoMerge.allowSelfMerge === true (default false). The    ║
+ * ║      M54 guards (Gate 6.5) remain regardless of this flag.                 ║
  * ║                                                                            ║
  * ║ Only after ALL gates pass do we mutate. Mutation paths:                    ║
  * ║   - REMOTE (preferred): open a PR to the default branch and best-effort    ║
@@ -89,6 +101,8 @@ import { createPr } from '../integrations/github.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { isSelfTargetProposal, guardSafetyTests, selfEvalParity } from '../fleet/self.js';
 import { verifyProvenance } from '../foundry/provenance.js';
+import { judgeProposal } from '../fleet/manager.js';
+import { readDecisions, recordDecision } from '../fleet/decisions-ledger.js';
 import {
   detectVerifyCommands,
   runVerifyCommand,
@@ -966,6 +980,182 @@ export async function autoMergeProposal(
       if (!parity.ok) {
         return refuse(`self-eval parity failed: ${parity.reason}`, repo);
       }
+    }
+
+    // ── Gate 7 (M126): Manager quality gate ─────────────────────────────────
+    // Engaged ONLY when cfg.foundry.autoMerge.managerGate === true (DEFAULT OFF).
+    // Only reached when every mechanical gate passed (risk/scope/suite/provenance
+    // all green). Require a Manager 'ship' verdict before auto-merging. Resolves
+    // from the decisions ledger (cached) or judges inline (one model call).
+    // FAIL CLOSED: any path that cannot confirm 'ship' leaves proposal PENDING.
+    // When managerGate is false/absent, this block is a no-op — byte-identical
+    // to pre-M126 behavior (Gate 7 never engaged, existing tests unaffected).
+    const managerGateEnabled =
+      ((cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge'] as Record<string, unknown> | undefined)?.[
+        'managerGate'
+      ] === true;
+    if (managerGateEnabled) {
+      // Resolve cached verdict: the most recent 'judged' entry for this proposal
+      // within the last hour. A stale or absent entry triggers an inline judge call.
+      const STALE_MS = 60 * 60 * 1000; // 1 hour
+      const sinceMs = Date.now() - STALE_MS;
+      const priorEntries = readDecisions({ proposalId: id, sinceMs, limit: 10 });
+      const cachedEntry = priorEntries.find((e) => e.action === 'judged' && e.verdict);
+
+      let managerVerdict: { verdict: string; wouldMerge: boolean; rationale: string } | null = null;
+
+      if (cachedEntry?.verdict) {
+        // Use cached entry from the ledger — no model call needed.
+        managerVerdict = {
+          verdict: cachedEntry.verdict,
+          wouldMerge: cachedEntry.verdict === 'ship' && cachedEntry.detail === 'would-merge',
+          rationale: cachedEntry.reason ?? 'cached verdict',
+        };
+      } else {
+        // No fresh cached verdict — judge inline.
+        // Resolve the judge client (same pattern as runManager; fail closed if unavailable).
+        let judgeClient: { complete: (system: string, user: string) => Promise<string> } | null = null;
+        try {
+          const { getActiveClient } = await import('../run/provider-client.js');
+          const judgeModel =
+            ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) ??
+            'qwen2.5:72b-instruct-q4_K_M';
+          let rawClient: unknown = null;
+          try {
+            rawClient = await getActiveClient(cfg, { allowCloud: true, model: judgeModel });
+          } catch {
+            try {
+              rawClient = await getActiveClient(cfg, { allowCloud: false, model: judgeModel });
+            } catch {
+              rawClient = null;
+            }
+          }
+          if (rawClient && typeof (rawClient as Record<string, unknown>)['complete'] === 'function') {
+            judgeClient = rawClient as { complete: (s: string, u: string) => Promise<string> };
+          } else if (rawClient && typeof (rawClient as Record<string, unknown>)['chat'] === 'function') {
+            const chat = (rawClient as { chat: (msgs: Array<{role:string;content:string}>) => Promise<{content:string}> }).chat.bind(rawClient);
+            judgeClient = {
+              complete: async (system: string, user: string) => {
+                const resp = await chat([{ role: 'system', content: system }, { role: 'user', content: user }]);
+                return resp.content;
+              },
+            };
+          }
+        } catch {
+          judgeClient = null;
+        }
+
+        if (!judgeClient) {
+          // Judge unavailable — FAIL CLOSED: do not merge, leave pending.
+          audit({
+            action: 'inbox:auto-merge',
+            repo,
+            sandboxId: id,
+            summary: `Gate 7: manager judge unavailable — fail closed, leaving PENDING`,
+            result: 'refused',
+          });
+          recordDecision({
+            ts: new Date().toISOString(),
+            proposalId: id,
+            action: 'escalated',
+            reason: 'manager judge unavailable — gate 7 fail closed',
+          });
+          return refuse('manager quality gate: judge unavailable — fail closed (leaving pending for human review)', repo);
+        }
+
+        try {
+          const verdict = await judgeProposal(proposal, cfg, judgeClient);
+          recordDecision({
+            ts: new Date().toISOString(),
+            proposalId: id,
+            action: 'judged',
+            engine: 'gate7-inline',
+            model: 'gate7-inline',
+            verdict: verdict.verdict,
+            reason: verdict.rationale,
+            detail: verdict.wouldMerge ? 'would-merge' : '',
+          });
+          managerVerdict = {
+            verdict: verdict.verdict,
+            wouldMerge: verdict.wouldMerge,
+            rationale: verdict.rationale,
+          };
+        } catch {
+          // judgeProposal threw unexpectedly — FAIL CLOSED.
+          audit({
+            action: 'inbox:auto-merge',
+            repo,
+            sandboxId: id,
+            summary: `Gate 7: judge threw — fail closed`,
+            result: 'refused',
+          });
+          return refuse('manager quality gate: judge error — fail closed (leaving pending for human review)', repo);
+        }
+      }
+
+      // Only 'ship' + wouldMerge proceeds; everything else leaves pending.
+      if (managerVerdict.verdict !== 'ship' || !managerVerdict.wouldMerge) {
+        const gateReason =
+          managerVerdict.verdict === 'ship' && !managerVerdict.wouldMerge
+            ? `manager gate: verdict='ship' but wouldMerge=false — ${managerVerdict.rationale}`
+            : `manager gate: verdict='${managerVerdict.verdict}' — ${managerVerdict.rationale}`;
+        audit({
+          action: 'inbox:auto-merge',
+          repo,
+          sandboxId: id,
+          summary: `Gate 7 held: ${gateReason}`,
+          result: 'refused',
+        });
+        recordDecision({
+          ts: new Date().toISOString(),
+          proposalId: id,
+          action: 'escalated',
+          reason: gateReason,
+          detail: 'gate-held',
+        });
+        return refuse(gateReason, repo);
+      }
+
+      // ── Gate 7.5 (M126): self-target escalation ───────────────────────────
+      // The fleet modifying its own code is the one thing that always escalates
+      // to a human, even when the Manager says 'ship'. Requires explicit opt-in
+      // via cfg.foundry.autoMerge.allowSelfMerge (default false → always escalate).
+      // The M54 self-eval parity guards (Gate 6.5) already ran; this is an
+      // additional policy gate on top of them.
+      if (isSelfTargetProposal(proposal, cfg)) {
+        const allowSelfMerge =
+          ((cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge'] as Record<string, unknown> | undefined)?.[
+            'allowSelfMerge'
+          ] === true;
+        if (!allowSelfMerge) {
+          audit({
+            action: 'inbox:auto-merge',
+            repo,
+            sandboxId: id,
+            summary: `Gate 7.5: self-target escalation — leaving PENDING for human (allowSelfMerge=false)`,
+            result: 'refused',
+          });
+          recordDecision({
+            ts: new Date().toISOString(),
+            proposalId: id,
+            action: 'escalated',
+            reason: 'self-target: auto-merge of own code requires allowSelfMerge=true',
+            detail: 'gate-held',
+          });
+          return refuse(
+            'manager gate: self-target proposal escalated to human review (allowSelfMerge=false)',
+            repo,
+          );
+        }
+      }
+
+      // Gate 7 passed — record the merge decision.
+      recordDecision({
+        ts: new Date().toISOString(),
+        proposalId: id,
+        action: 'merged',
+        reason: `gate 7 passed: verdict=${managerVerdict.verdict}, ${managerVerdict.rationale}`,
+      });
     }
 
     // ── ACTION: stage the diff on a branch off the default branch ────────────
