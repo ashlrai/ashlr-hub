@@ -130,7 +130,8 @@ Scoring guide:
   value       — how much does this improve the codebase? (1=trivial, 5=critical)
   correctness — how confident are you the change is correct? (1=suspicious, 5=clearly correct)
   scope       — blast radius (1=single line, 5=touches many files / risky)
-  alignment   — does this match the repo's evident purpose? (1=unrelated, 5=perfectly aligned)
+  alignment   — does this match the repo's NORTH-STAR VISION (see context below, else evident purpose).
+                Score 5 if the change directly advances a stated priority; 1 if unrelated or counterproductive.
 
 verdict guide:
   ship    — value≥4, correctness≥4, no obvious risk
@@ -140,14 +141,40 @@ verdict guide:
 
 When in doubt, use "review". Never use "noise" or "harmful" speculatively.`;
 
-function buildJudgePrompt(proposal: Proposal): string {
+/**
+ * Load the EndStateSpec for a proposal's repo (best-effort — never throws).
+ * Returns null when no spec is found or the vision module is unavailable.
+ */
+async function loadSpecForProposal(repo: string | undefined): Promise<{ northStar: string; priorities: string } | null> {
+  if (!repo) return null;
+  try {
+    const { loadSpec } = await import('../vision/spec.js');
+    // Try repo-derived id first, then global ecosystem spec.
+    const repoId = repo.replace(/[^a-z0-9._-]/gi, '-').toLowerCase();
+    const spec = loadSpec(repoId) ?? loadSpec('ecosystem');
+    if (!spec) return null;
+    const priorities = spec.priorities
+      .slice()
+      .sort((a, b) => a.rank - b.rank)
+      .slice(0, 3)
+      .map((p) => `  ${p.rank}. ${p.title}`)
+      .join('\n');
+    return { northStar: spec.northStar, priorities };
+  } catch {
+    return null;
+  }
+}
+
+function buildJudgePrompt(proposal: Proposal, specCtx?: { northStar: string; priorities: string } | null): string {
+  const visionSection = specCtx
+    ? `\nNorth-Star Vision: ${specCtx.northStar}\nTop Priorities:\n${specCtx.priorities}\n`
+    : '';
   return `Proposal to judge:
 
 Title: ${proposal.title}
 Summary: ${proposal.summary}
 Kind: ${proposal.kind}
-Engine: ${proposal.engineModel ?? 'unknown'}
-
+Engine: ${proposal.engineModel ?? 'unknown'}${visionSection}
 Diff:
 ${truncateDiff(proposal.diff)}`;
 }
@@ -209,9 +236,12 @@ export async function judgeProposal(
     wouldMerge: false,
   });
 
+  // Load vision spec context for this proposal's repo (best-effort; null = no spec).
+  const specCtx = await loadSpecForProposal(proposal.repo ?? undefined);
+
   let raw: string;
   try {
-    raw = await client.complete(JUDGE_SYSTEM, buildJudgePrompt(proposal));
+    raw = await client.complete(JUDGE_SYSTEM, buildJudgePrompt(proposal, specCtx));
   } catch {
     return fallback();
   }
@@ -450,14 +480,18 @@ export async function runManager(
 
     try {
       const { getActiveClient } = await import('../run/provider-client.js');
-      // Prefer cloud (frontier) judge; fall back to local if unavailable.
+      // M120.1: judge with a STRONG model — getActiveClient otherwise picks the
+      // smallest local model (e.g. phi4-mini), a weak judge that defaults every
+      // verdict to 'review'. Force the strong 72b for local (configurable).
+      const judgeModel = ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) || 'qwen2.5:72b-instruct-q4_K_M';
+      // Prefer cloud (frontier) judge; fall back to the strong local model.
       try {
-        rawClient = await getActiveClient(cfg, { allowCloud: true }) as MinimalProviderClient;
+        rawClient = await getActiveClient(cfg, { allowCloud: true, model: judgeModel }) as MinimalProviderClient;
         judgeEngine = (rawClient as { model?: string }).model ?? 'cloud';
       } catch {
         // No cloud available — try local.
         try {
-          rawClient = await getActiveClient(cfg, { allowCloud: false }) as MinimalProviderClient;
+          rawClient = await getActiveClient(cfg, { allowCloud: false, model: judgeModel }) as MinimalProviderClient;
           judgeEngine = (rawClient as { model?: string }).model ?? 'local';
         } catch {
           rawClient = null;

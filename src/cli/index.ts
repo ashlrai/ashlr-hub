@@ -179,6 +179,13 @@ const loadManagerCmd = lazyCmd(
   'manager command requires src/cli/manager.ts (M120 module not yet built).',
 );
 
+// ─── M121: vision / strategist — north-star spec + Elon agent ────────────────
+const loadVisionCmd = lazyCmd(
+  () => import('./vision.js' as unknown as string),
+  (m) => m.cmdVision as Cmd,
+  'vision command requires src/cli/vision.ts (M121 module not yet built).',
+);
+
 // ─── M73: surface the ecosystem `stack` tool from the hub ──────────────────
 const loadStackCmd = lazyCmd(
   () => import('./stack.js' as unknown as string),
@@ -1658,6 +1665,14 @@ async function main(): Promise<void> {
         // Shadow mode by default: records judgements, never merges.
         const cmdManager = await loadManagerCmd();
         process.exitCode = await cmdManager(rest);
+        break;
+      }
+
+      case 'vision': {
+        // M121: vision / strategist — north-star spec + Elon agent.
+        // Mason's touchpoint: show/review/approve/set on the EndStateSpec.
+        const cmdVision = await loadVisionCmd();
+        process.exitCode = await cmdVision(rest);
         break;
       }
 
