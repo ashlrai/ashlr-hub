@@ -532,29 +532,35 @@ export async function runStrategist(
     const state = await gatherFleetState(project);
 
     // ── Resolve frontier client ─────────────────────────────────────────────
-    // M130: priority order — Claude CLI (subscription, no API key) → local 72b.
-    // Controlled by cfg.foundry.managerJudgeEngine ('auto'|'claude'|'local').
+    // M135: Claude CLI FIRST when managerJudgeEngine='auto'/'claude' + claude allowed+installed.
+    // Mirrors the manager.ts fix — getActiveClient was always returning a client (local 72b
+    // fallback), preventing the Claude CLI path from ever being reached.
     const visionModel = ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) || 'qwen2.5:72b-instruct-q4_K_M';
     const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
     const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
 
-    // Try getActiveClient first (honours test mocks and a live cloud key).
+    // Step 1: resolveStrategistClient — Claude CLI when allowed+installed, else local-72b.
     let complete: ((system: string, user: string) => Promise<string>) | null = null;
     let strategistJudgeEngine = visionModel;
-    try {
-      const { getActiveClient } = await import('../run/provider-client.js');
-      const raw = await getActiveClient(cfg, { allowCloud: true, model: visionModel }) as MinimalClient;
-      const wrapped = wrapClient(raw);
-      if (wrapped) {
-        complete = wrapped;
-        strategistJudgeEngine = (raw as { model?: string }).model ?? 'cloud';
-      }
-    } catch { /* fall through to resolver */ }
-
-    if (!complete) {
+    {
       const resolved = resolveStrategistClient(cfg, ollamaBaseUrl, visionModel);
       complete = resolved.complete;
       strategistJudgeEngine = resolved.judgeEngine;
+    }
+
+    // Step 2: if resolved to local (not claude), try getActiveClient — handles test mocks
+    // (m121 mocks getActiveClient to return a deterministic client) and cloud API keys.
+    const resolvedIsClaude = strategistJudgeEngine.startsWith('claude') || strategistJudgeEngine.includes('claude');
+    if (!resolvedIsClaude) {
+      try {
+        const { getActiveClient } = await import('../run/provider-client.js');
+        const raw = await getActiveClient(cfg, { allowCloud: true, model: visionModel }) as MinimalClient;
+        const wrapped = wrapClient(raw);
+        if (wrapped) {
+          complete = wrapped;
+          strategistJudgeEngine = (raw as { model?: string }).model ?? 'cloud';
+        }
+      } catch { /* keep resolveStrategistClient result */ }
     }
 
     void strategistJudgeEngine; // available for future briefing metadata

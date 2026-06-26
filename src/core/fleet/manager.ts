@@ -635,37 +635,53 @@ export async function runManager(
 
   try {
     // ── Resolve the frontier judge client ──────────────────────────────────
-    // ── Resolve the frontier judge client ──────────────────────────────────
-    // M130 priority order (controlled by cfg.foundry.managerJudgeEngine):
-    //   1. getActiveClient — honours test mocks + a live cloud/provider key.
-    //   2. resolveJudgeClient — Claude CLI (subscription, no API key) → local 72b.
+    // M135 priority order (controlled by cfg.foundry.managerJudgeEngine):
+    //   1. resolveJudgeClient — Claude CLI (subscription) FIRST when managerJudgeEngine
+    //      is 'auto'/'claude' AND claude is in allowedBackends AND engineInstalled('claude').
+    //      Falls to local-72b when claude unavailable or managerJudgeEngine='local'.
+    //   2. getActiveClient — cloud provider key / test mocks (used only when Step 1 yields
+    //      nothing, i.e. resolveJudgeClient returned the local path AND the local fetch fails,
+    //      OR when engineInstalled returns false in the test environment which means the mock
+    //      in m120/m121 tests controls the path via getActiveClient).
+    //
+    // Rationale for reversal: getActiveClient ALWAYS returns a client in production (via its
+    // ollamaDirectComplete fallback), so putting it first meant Claude CLI was NEVER reached.
     const judgeModel = ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) || 'qwen2.5:72b-instruct-q4_K_M';
     const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
     const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
 
     let judgeClient: { complete: (system: string, user: string) => Promise<string> } | null = null;
 
-    // Step 1: try getActiveClient (cloud provider / test mock).
+    // Step 1: resolveJudgeClient — Claude CLI when allowed+installed, else local-72b.
+    // engineInstalled('claude') is the gating check: real binary must exist on PATH.
+    // Tests that mock engineInstalled (m130) control which path fires.
+    // Tests that don't mock engineInstalled (m120/m121) get false in CI (no real claude),
+    // so they naturally fall through to Step 2 (getActiveClient mock).
     try {
-      const { getActiveClient } = await import('../run/provider-client.js');
-      const rawClient = await getActiveClient(cfg, { allowCloud: true, model: judgeModel }) as MinimalProviderClient;
-      const wrapped = wrapClient(rawClient);
-      if (wrapped) {
-        judgeClient = wrapped;
-        judgeEngine = wrapped.model ?? 'cloud';
-      }
-    } catch { /* fall through to resolveJudgeClient */ }
+      const resolved = resolveJudgeClient(cfg, ollamaBaseUrl, judgeModel);
+      judgeClient = resolved;
+      judgeEngine = resolved.judgeEngine;
+    } catch {
+      judgeEngine = 'unavailable';
+      judgeClient = null;
+    }
 
-    // Step 2: resolveJudgeClient — Claude CLI (if allowed+installed) → local 72b.
-    if (!judgeClient) {
+    // Step 2: if resolveJudgeClient chose the local-72b path (judgeEngine = localModel,
+    // not a claude model), try getActiveClient as an additional fallback — this handles
+    // test mocks (m120/m121 mock getActiveClient to return a deterministic client) and
+    // cloud API keys when available.  We only override if getActiveClient succeeds AND
+    // the current resolved engine is NOT a claude model (don't override a working claude path).
+    const resolvedIsClaude = judgeEngine.startsWith('claude') || judgeEngine.includes('claude');
+    if (!resolvedIsClaude) {
       try {
-        const resolved = resolveJudgeClient(cfg, ollamaBaseUrl, judgeModel);
-        judgeClient = resolved;
-        judgeEngine = resolved.judgeEngine;
-      } catch {
-        judgeEngine = 'unavailable';
-        judgeClient = null;
-      }
+        const { getActiveClient } = await import('../run/provider-client.js');
+        const rawClient = await getActiveClient(cfg, { allowCloud: true, model: judgeModel }) as MinimalProviderClient;
+        const wrapped = wrapClient(rawClient);
+        if (wrapped) {
+          judgeClient = wrapped;
+          judgeEngine = wrapped.model ?? 'cloud';
+        }
+      } catch { /* fall through — keep the resolveJudgeClient result */ }
     }
 
     // ── Load pending proposals ─────────────────────────────────────────────
