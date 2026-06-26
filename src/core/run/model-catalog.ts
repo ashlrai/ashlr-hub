@@ -100,13 +100,17 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
   },
 
   // ── Local — qwen2.5:72b (general large) ───────────────────────────────
+  // M132: 'coder' capability removed. qwen2.5-coder:32b is the verified
+  // coding specialist (M118 content-parse path confirmed working 2026-06-26).
+  // 72b handles general / long-context / fallback; coder:32b owns all
+  // pickModel({capability:'coder'}) calls on local-coder.
   {
     id: 'local-coder:qwen2.5:72b',
     engine: 'local-coder' as EngineId,
     tier: 'large',
     costPerMTokIn: 0,
     costPerMTokOut: 0,
-    capabilities: ['general', 'coder', 'long-context'],
+    capabilities: ['general', 'long-context'],
     minEffort: 2,
   },
 
@@ -128,7 +132,7 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
     tier: 'mid',
     costPerMTokIn: 0,
     costPerMTokOut: 0,
-    capabilities: ['reasoning', 'coder'],
+    capabilities: ['reasoning'],
     minEffort: 2,
   },
 
