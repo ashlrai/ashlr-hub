@@ -38,6 +38,13 @@ export interface ModelProfile {
   toolFormat: ToolFormat;
   /** Optional one-liner appended to the tool layer (e.g. JSON-block hint). */
   toolFormatHint?: string;
+  /**
+   * Per-profile engineering discipline injected by agent-loop as a final
+   * system-prompt block when adaptivePrompts is enabled. Pushes model-specific
+   * behaviors (e.g. complete diffs for coder models). Optional — absent means
+   * no extra block.
+   */
+  roleHint?: string;
   /** Per-task ReAct step ceiling (overrides agent-loop TASK_STEP_CAP). */
   stepCap: number;
   /** Suggested sampling temperature (lower = more disciplined). */
@@ -93,26 +100,56 @@ const SMALL: ModelProfile = {
   contextTokens: 4096,
 };
 
-/** Capable general chat models (≈4–14B). Balanced defaults. */
+/**
+ * Capable general chat models (≈4–72B, e.g. qwen2.5:72b).
+ *
+ * Native tool calls. Adequate step budget to handle multi-file tasks. The
+ * roleHint pushes completeness — these large models tend to draft partial
+ * changes and self-truncate without explicit guidance.
+ */
 const GENERAL: ModelProfile = {
   id: 'general',
   verbosity: 'standard',
   toolFormat: 'native',
-  stepCap: 20,
+  roleHint:
+    'Engineering completeness for this task:\n' +
+    '- Read the file before editing it.\n' +
+    '- Write COMPLETE changes — no "// ... rest unchanged ..." truncations.\n' +
+    '- Scope edits to this task only; do not touch unrelated code.\n' +
+    '- Verify the change was applied correctly before reporting done.',
+  stepCap: 24,
   temperature: 0.3,
   promptCharCap: 2200,
-  contextTokens: 8192,
+  contextTokens: 32768,
 };
 
-/** Coder-specialized or large (≥20B) models: full discipline, more headroom. */
+/**
+ * Coder-specialized or large (≥20B) models (e.g. qwen2.5-coder:32b).
+ *
+ * Goal: complete, applyable diffs — not partial stubs. stepCap raised so the
+ * model can finish the full read→edit→write→verify loop. Low temperature for
+ * disciplined, deterministic edits. Context budget reflects the 32k window
+ * these models typically carry.
+ */
 const CODER: ModelProfile = {
   id: 'coder',
   verbosity: 'rich',
   toolFormat: 'native',
-  stepCap: 28,
+  roleHint:
+    'Diff-quality contract for this task:\n' +
+    '- READ the file in full before editing it — never modify a file you have not read.\n' +
+    '- Make COMPLETE changes: produce the entire updated function/block/file, not a ' +
+    'truncated fragment or a stub with "// ... existing code ..." placeholders.\n' +
+    '- Keep the change SCOPED: edit only what the task requires; do not refactor or ' +
+    'rename unrelated symbols.\n' +
+    '- After writing, verify by reading back the changed region and confirming the ' +
+    'edit landed correctly — do not declare done on assumption.\n' +
+    '- If the task requires a new file, write the complete file content in one call.\n' +
+    '- Prefer small, atomic writes over large batch rewrites where the task allows.',
+  stepCap: 32,
   temperature: 0.2,
   promptCharCap: 3200,
-  contextTokens: 16384,
+  contextTokens: 32768,
 };
 
 /** Fallback when the model name is unknown — behaves like GENERAL. */

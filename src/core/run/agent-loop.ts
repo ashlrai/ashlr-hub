@@ -152,19 +152,38 @@ export async function runTask(
   const profile = resolveModelProfile(client.model);
   const useAdaptive = ctx.adaptivePrompts === true;
   const stepCap = useAdaptive ? profile.stepCap : TASK_STEP_CAP;
-  const systemContent = useAdaptive
-    ? assembleSystemPrompt({
-        role: 'executor',
-        useTools,
-        profile,
-        memory: ctx.memory,
-        charCap: profile.promptCharCap,
-      }).system
-    : 'You are an Ashlr sub-agent. Be concise and focused. ' +
+
+  let systemContent: string;
+  if (useAdaptive) {
+    // Assemble the verbosity-tiered prompt layers for this profile.
+    let assembled = assembleSystemPrompt({
+      role: 'executor',
+      useTools,
+      profile,
+      memory: ctx.memory,
+      charCap: profile.promptCharCap,
+    }).system;
+
+    // M134: append per-profile roleHint (diff-quality / completeness contract)
+    // as a final block so it lands last and overrides any weaker guidance above.
+    // Only appended when the roleHint fits within the char budget.
+    if (profile.roleHint) {
+      const separator = '\n\n';
+      const candidate = assembled + separator + profile.roleHint;
+      if (candidate.length <= profile.promptCharCap) {
+        assembled = candidate;
+      }
+    }
+    systemContent = assembled;
+  } else {
+    // Flag-OFF: byte-identical to prior behavior.
+    systemContent =
+      'You are an Ashlr sub-agent. Be concise and focused. ' +
       'Complete the given task directly. ' +
       (useTools
         ? 'You may call tools to gather information; always follow up with a final answer.'
         : 'Do not request tools — respond with a final textual answer only.');
+  }
 
   // Build the initial message list.
   const messages: ChatMessage[] = [
