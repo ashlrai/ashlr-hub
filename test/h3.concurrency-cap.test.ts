@@ -53,6 +53,16 @@ vi.mock('../src/core/swarm/planner.js', () => ({
   planSwarm: (...args: unknown[]) => mockPlanSwarm(...args),
 }));
 
+// buildBacklog MOCKED so the tick-level flood tests get a deterministic large
+// backlog regardless of which scanners are enabled (M136 made scanTodos
+// default-OFF, breaking the SEEDED_ITEMS assumption). The concurrency-cap tests
+// are about the bounded() pool, not scanner behavior — mocking the backlog keeps
+// them focused on the cap under test.
+const mockBuildBacklog = vi.fn();
+vi.mock('../src/core/portfolio/backlog.js', () => ({
+  buildBacklog: (...args: unknown[]) => mockBuildBacklog(...args),
+}));
+
 import { tick } from '../src/core/daemon/loop.js';
 import { makeFixture, makeCfg, todoSeedFiles, todoScannerAvailable } from './helpers/h1-fixture.js';
 import {
@@ -91,6 +101,28 @@ beforeEach(() => {
   mockRunSwarm.mockReset();
   mockRunGoal.mockReset();
   mockPlanSwarm.mockReset();
+  mockBuildBacklog.mockReset();
+  // M136: scanTodos is default-OFF in the SCANNERS array, so a real buildBacklog
+  // call returns far fewer than SEEDED_ITEMS items — not enough to flood the pool.
+  // Return a synthetic backlog of SEEDED_ITEMS work items so tick() has enough
+  // candidates (>> any concurrency cap) for the flood to be a real bound test.
+  const now = new Date().toISOString();
+  mockBuildBacklog.mockResolvedValue({
+    generatedAt: now,
+    repos: [repo.dir],
+    items: Array.from({ length: SEEDED_ITEMS }, (_, i) => ({
+      id: `${repo.dir}:todo:h3-flood-${i}`,
+      repo: repo.dir,
+      source: 'todo' as const,
+      title: `1 marker in src/todo-${i}.ts:2`,
+      detail: `File: src/todo-${i}.ts:2 — "implement f${i}". Implement this specific change.`,
+      value: 2,
+      effort: 2,
+      score: 3,
+      tags: ['todo'],
+      ts: now,
+    })),
+  });
 });
 
 afterEach(() => {
