@@ -26,6 +26,7 @@ import { runCommsCycle } from '../core/comms/dispatch.js';
 import { registerCommsHandlers } from '../core/comms/handlers.js';
 import { buildOversightSnapshot } from '../core/fleet/oversight-export.js';
 import { runStrategist, loadLatestBriefing } from '../core/vision/strategist.js';
+import { judgeHealth } from '../core/fleet/judge-calibration.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -211,6 +212,48 @@ async function cmdDigest(): Promise<number> {
 
     if (snap.vision) {
       lines.push(`Vision progress: ${snap.vision.progressPct}%.`);
+    }
+
+    // M148: append judge-calibration health line — traces-only, no degradation pass.
+    // Never throws (judgeHealth is already never-throw; we guard the await anyway).
+    try {
+      const jh = await judgeHealth(cfg);
+      let judgeLine: string;
+      if (jh.sampleSize === 0) {
+        // Insufficient traces: show calibrating status with count from flags msg.
+        const traceMatch = jh.flags[0]?.match(/found (\d+)/);
+        const n = traceMatch ? traceMatch[1] : '0';
+        judgeLine = `Judge: calibrating (${n} traces)`;
+      } else {
+        // Enough traces — format compact line.
+        const kappaStr = jh.kappaVsOutcome !== null
+          ? `κ=${jh.kappaVsOutcome.toFixed(2)} vs outcomes`
+          : 'κ=n/a';
+        const firstDc = jh.darkCurrent[0];
+        const shipBiasPct = firstDc
+          ? `ship-bias ${((firstDc.verdictDistribution['ship'] ?? 0) * 100).toFixed(0)}%`
+          : null;
+        const parts = [kappaStr, shipBiasPct, `${jh.sampleSize} traces`].filter(Boolean);
+        judgeLine = `Judge: ${parts.join(', ')}`;
+        // Append any flags as short warnings (deduplicated to first flag only for SMS length).
+        if (jh.flags.length > 0) {
+          const flagStr = jh.flags
+            .map((f) => {
+              if (f.includes('low-kappa') || f.includes('< 0.20') || f.includes('< 0.40')) return '⚠ low-kappa';
+              if (f.includes('rubber-stamp')) return '⚠ ship-bias';
+              if (f.includes('over-filtering')) return '⚠ noise-bias';
+              if (f.includes('insufficient outcome')) return '⚠ few-outcomes';
+              return '⚠ ' + f.slice(0, 30);
+            })
+            .filter((v, i, arr) => arr.indexOf(v) === i) // deduplicate
+            .slice(0, 2) // cap at 2 flags for SMS length
+            .join(' ');
+          judgeLine += ` ${flagStr}`;
+        }
+      }
+      lines.push(judgeLine);
+    } catch {
+      // judgeHealth failure must never break the digest — silently skip.
     }
 
     const text = lines.join(' ');
