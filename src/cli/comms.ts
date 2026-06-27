@@ -1,21 +1,26 @@
 /**
- * M137: `ashlr comms` — iMessage bidirectional channel CLI.
+ * M137/M147: `ashlr comms` — bidirectional channel CLI.
+ *
+ * Supports two transports selected by cfg.comms.channel:
+ *   'imessage'  (default) — macOS iMessage via osascript + chat.db
+ *   'telegram'            — Telegram Bot API (replaces broken iMessage-to-self)
  *
  * Subcommands:
- *   status                  Config + pending/outstanding + watermark state.
- *   send-test               Post + send a test 'report' to verify the channel.
- *   cycle                   Run one runCommsCycle (send pending + poll replies).
- *   ask "<text>" -o "a" -o "b"   Post a test question with numbered options.
+ *   status                           Config + pending/outstanding + watermark.
+ *   send-test                        Post + send a test 'report' to verify the channel.
+ *   cycle                            Run one runCommsCycle (send pending + poll replies).
+ *   ask "<text>" -o "a" -o "b"       Post a test question with numbered options.
+ *   digest                           Build oversight snapshot + send summary.
+ *   ask-vision                       Run strategist + post elon-vision question.
+ *   ask-merges                       Post ship proposals for approval + run cycle.
+ *   setup-telegram                   Print Telegram setup steps + discover chat id.
  *
  * Exit codes: 0 success, 1 error, 2 bad usage.
- *
- * macOS permissions required (show in `status`):
- *   - Automation → Messages  (osascript tell application "Messages")
- *   - Full Disk Access        (read ~/Library/Messages/chat.db)
  */
 
 import { loadConfig } from '../core/config.js';
 import { commsEnabled } from '../core/integrations/imessage.js';
+import { telegramEnabled } from '../core/integrations/telegram.js';
 import { listRequests, outstanding, postRequest } from '../core/comms/requests.js';
 import { runCommsCycle } from '../core/comms/dispatch.js';
 import { registerCommsHandlers } from '../core/comms/handlers.js';
@@ -68,23 +73,42 @@ function parseArgs(args: string[]): { sub: string; text: string; options: string
 // Subcommand implementations
 // ---------------------------------------------------------------------------
 
+/** True when any configured channel is ready (iMessage or Telegram). */
+function channelEnabled(cfg: Parameters<typeof commsEnabled>[0]): boolean {
+  return commsEnabled(cfg) || telegramEnabled(cfg);
+}
+
 async function cmdStatus(): Promise<number> {
   const cfg = await loadConfig();
-  const enabled = commsEnabled(cfg);
+  const channel = cfg.comms?.channel ?? 'imessage';
+  const isTelegram = telegramEnabled(cfg);
+  const isIMessage = commsEnabled(cfg);
+  const enabled = isTelegram || isIMessage;
 
   console.log('comms channel:');
+  console.log(`  transport: ${channel}`);
   console.log(`  enabled:   ${enabled}`);
-  console.log(`  handle:    ${cfg.comms?.imessageHandle ?? '(unset)'}`);
-  console.log(`  service:   ${cfg.comms?.service ?? 'iMessage'}`);
+
+  if (channel === 'telegram' || isTelegram) {
+    console.log(`  chat_id:   ${cfg.comms?.telegram?.chatId ?? '(unset)'}`);
+    console.log(`  bot_token: ${cfg.comms?.telegram?.botToken ? '(set)' : process.env['TELEGRAM_BOT_TOKEN'] ? '(set via env)' : '(unset)'}`);
+  } else {
+    console.log(`  handle:    ${cfg.comms?.imessageHandle ?? '(unset)'}`);
+    console.log(`  service:   ${cfg.comms?.service ?? 'iMessage'}`);
+  }
   console.log(`  platform:  ${process.platform}`);
   console.log('');
 
   if (!enabled) {
-    console.log('Channel disabled. Set cfg.comms.enabled=true and cfg.comms.imessageHandle in ~/.ashlr/config.json.');
-    console.log('');
-    console.log('macOS permissions needed:');
-    console.log('  • System Settings → Privacy & Security → Automation → Terminal → Messages (to send)');
-    console.log('  • System Settings → Privacy & Security → Full Disk Access → Terminal (to read chat.db)');
+    if (channel === 'telegram') {
+      console.log('Telegram channel not configured. Run `ashlr comms setup-telegram` for setup steps.');
+    } else {
+      console.log('Channel disabled. Set cfg.comms.enabled=true and cfg.comms.imessageHandle in ~/.ashlr/config.json.');
+      console.log('');
+      console.log('macOS permissions needed:');
+      console.log('  • System Settings → Privacy & Security → Automation → Terminal → Messages (to send)');
+      console.log('  • System Settings → Privacy & Security → Full Disk Access → Terminal (to read chat.db)');
+    }
     return 0;
   }
 
@@ -98,27 +122,32 @@ async function cmdStatus(): Promise<number> {
   if (out) {
     console.log(`  awaiting reply: [${out.id.slice(0, 8)}] "${out.text.slice(0, 60)}"`);
   }
-  console.log(`watermark:            ${watermarkMs > 0 ? new Date(watermarkMs).toISOString() : '(none)'}`);
-  console.log('');
-  console.log('macOS permissions needed:');
-  console.log('  • Automation → Messages  (send via osascript)');
-  console.log('  • Full Disk Access        (read ~/Library/Messages/chat.db)');
+
+  if (!isTelegram) {
+    console.log(`watermark:            ${watermarkMs > 0 ? new Date(watermarkMs).toISOString() : '(none)'}`);
+    console.log('');
+    console.log('macOS permissions needed:');
+    console.log('  • Automation → Messages  (send via osascript)');
+    console.log('  • Full Disk Access        (read ~/Library/Messages/chat.db)');
+  }
 
   return 0;
 }
 
 async function cmdSendTest(): Promise<number> {
   const cfg = await loadConfig();
+  const isTelegram = telegramEnabled(cfg);
 
-  if (!commsEnabled(cfg)) {
-    console.error('comms disabled — set cfg.comms.enabled=true and cfg.comms.imessageHandle');
+  if (!channelEnabled(cfg)) {
+    console.error('comms disabled — configure cfg.comms (imessage or telegram) in ~/.ashlr/config.json');
     return 1;
   }
 
+  const channel = isTelegram ? 'Telegram' : 'iMessage';
   const id = postRequest({
     kind: 'test',
     type: 'report',
-    text: `[ashlr test] iMessage channel OK — ${new Date().toISOString()}`,
+    text: `[ashlr test] ${channel} channel OK — ${new Date().toISOString()}`,
     options: [],
     meta: { source: 'send-test' },
   });
@@ -128,10 +157,10 @@ async function cmdSendTest(): Promise<number> {
   console.log(`cycle: sent=${result.sent} resolved=${result.resolved}`);
 
   if (result.sent > 0) {
-    console.log('Test message sent. Check your iMessage on the handle configured in cfg.comms.imessageHandle.');
+    console.log(`Test message sent via ${channel}.`);
     return 0;
   } else {
-    console.error('Send failed — check macOS Automation permissions for Messages.');
+    console.error(`Send failed — check channel configuration (${channel}).`);
     return 1;
   }
 }
@@ -152,8 +181,8 @@ async function cmdCycle(): Promise<number> {
 async function cmdDigest(): Promise<number> {
   const cfg = await loadConfig();
 
-  if (!commsEnabled(cfg)) {
-    console.error('comms disabled — set cfg.comms.enabled=true and cfg.comms.imessageHandle');
+  if (!channelEnabled(cfg)) {
+    console.error('comms disabled — configure cfg.comms (imessage or telegram) in ~/.ashlr/config.json');
     return 1;
   }
 
@@ -204,7 +233,7 @@ async function cmdDigest(): Promise<number> {
       console.log('Digest sent.');
       return 0;
     } else {
-      console.error('Send failed — check macOS Automation permissions or outstanding request blocking.');
+      console.error('Send failed — check channel configuration or an outstanding request may be blocking.');
       return 1;
     }
   } catch (err) {
@@ -220,8 +249,8 @@ async function cmdDigest(): Promise<number> {
 async function cmdAskVision(): Promise<number> {
   const cfg = await loadConfig();
 
-  if (!commsEnabled(cfg)) {
-    console.error('comms disabled — set cfg.comms.enabled=true and cfg.comms.imessageHandle');
+  if (!channelEnabled(cfg)) {
+    console.error('comms disabled — configure cfg.comms (imessage or telegram) in ~/.ashlr/config.json');
     return 1;
   }
 
@@ -262,10 +291,13 @@ async function cmdAskVision(): Promise<number> {
     console.log(`cycle: sent=${result.sent} resolved=${result.resolved}`);
 
     if (result.sent > 0) {
-      console.log(`Vision question sent to ${cfg.comms?.imessageHandle}. Reply 1/2/3.`);
+      const dest = telegramEnabled(cfg)
+        ? `Telegram (chat ${cfg.comms?.telegram?.chatId ?? '?'})`
+        : cfg.comms?.imessageHandle ?? '?';
+      console.log(`Vision question sent to ${dest}. Reply 1/2/3 (or tap a button on Telegram).`);
       return 0;
     } else {
-      console.error('Send failed — check permissions or an existing outstanding question may be blocking.');
+      console.error('Send failed — check channel config or an existing outstanding question may be blocking.');
       return 1;
     }
   } catch (err) {
@@ -286,8 +318,8 @@ async function cmdAsk(text: string, options: string[]): Promise<number> {
 
   const cfg = await loadConfig();
 
-  if (!commsEnabled(cfg)) {
-    console.error('comms disabled — set cfg.comms.enabled=true and cfg.comms.imessageHandle');
+  if (!channelEnabled(cfg)) {
+    console.error('comms disabled — configure cfg.comms (imessage or telegram) in ~/.ashlr/config.json');
     return 1;
   }
 
@@ -304,10 +336,13 @@ async function cmdAsk(text: string, options: string[]): Promise<number> {
   console.log(`cycle: sent=${result.sent} resolved=${result.resolved}`);
 
   if (result.sent > 0) {
-    console.log(`Question sent to ${cfg.comms?.imessageHandle}. Reply with a number to answer.`);
+    const dest = telegramEnabled(cfg)
+      ? `Telegram (chat ${cfg.comms?.telegram?.chatId ?? '?'})`
+      : cfg.comms?.imessageHandle ?? '?';
+    console.log(`Question sent to ${dest}. Reply with a number (or tap a button) to answer.`);
     return 0;
   } else {
-    console.error('Send failed — check permissions or an existing outstanding question may be blocking.');
+    console.error('Send failed — check channel config or an existing outstanding question may be blocking.');
     return 1;
   }
 }
@@ -334,10 +369,134 @@ export async function cmdComms(args: string[]): Promise<number> {
       return cmdAskVision();
     case 'ask-merges':
       return cmdAskMerges();
+    case 'setup-telegram':
+      return cmdSetupTelegram();
     default:
       console.error(`unknown subcommand: ${sub}`);
-      console.error('usage: ashlr comms <status|send-test|cycle|ask|digest|ask-vision|ask-merges>');
+      console.error('usage: ashlr comms <status|send-test|cycle|ask|digest|ask-vision|ask-merges|setup-telegram>');
       return 2;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// M147: setup-telegram — print setup steps + discover chat id
+// ---------------------------------------------------------------------------
+
+async function cmdSetupTelegram(): Promise<number> {
+  console.log('');
+  console.log('Telegram Bot setup for ashlr comms');
+  console.log('────────────────────────────────────────────────────────────────');
+  console.log('');
+  console.log('Step 1 — Create a bot via @BotFather');
+  console.log('  1. Open Telegram and search for @BotFather');
+  console.log('  2. Send: /newbot');
+  console.log('  3. Follow prompts to name your bot (e.g. "ashlr-comms")');
+  console.log('  4. Copy the API token (looks like: 123456789:ABCDefgh...)');
+  console.log('');
+  console.log('Step 2 — Add the token to your ashlr config');
+  console.log('  In ~/.ashlr/config.json, add:');
+  console.log('  {');
+  console.log('    "comms": {');
+  console.log('      "enabled": true,');
+  console.log('      "channel": "telegram",');
+  console.log('      "telegram": {');
+  console.log('        "botToken": "<YOUR_BOT_TOKEN>",');
+  console.log('        "chatId": ""');
+  console.log('      }');
+  console.log('    }');
+  console.log('  }');
+  console.log('  (Or set TELEGRAM_BOT_TOKEN env var instead of botToken in config)');
+  console.log('');
+  console.log('Step 3 — Discover your chat id');
+  console.log('  1. Send any message to your bot in Telegram (e.g. "hello")');
+  console.log('  2. Run `ashlr comms setup-telegram` again — it will print your chat id');
+  console.log('  3. Paste the chat id into cfg.comms.telegram.chatId');
+  console.log('');
+
+  // If a token is set, call getUpdates to discover the chat id
+  const cfg = await loadConfig();
+  const token = cfg.comms?.telegram?.botToken ?? process.env['TELEGRAM_BOT_TOKEN'];
+
+  if (!token) {
+    console.log('No bot token configured yet — complete Step 1 and 2 first.');
+    return 0;
+  }
+
+  console.log('Bot token detected. Calling getUpdates to discover chat id...');
+
+  try {
+    // Import https dynamically (mirrors telegram.ts pattern; allows test mocks)
+    const { request } = await import('node:https');
+    const url = `https://api.telegram.org/bot${token}/getUpdates`;
+    const body = JSON.stringify({ timeout: 0, limit: 10 });
+
+    const data = await new Promise<unknown>((resolve) => {
+      const parsed = new URL(url);
+      const options = {
+        hostname: parsed.hostname,
+        port: 443,
+        path: parsed.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+        timeout: 10_000,
+      };
+      const req = request(options, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
+          catch { resolve(null); }
+        });
+        res.on('error', () => resolve(null));
+      });
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => { req.destroy(); resolve(null); });
+      req.write(body);
+      req.end();
+    });
+
+    if (!data || typeof data !== 'object' || (data as Record<string, unknown>)['ok'] !== true) {
+      // Scrub token from any error message
+      const errDesc = String((data as Record<string, unknown>)?.['description'] ?? 'unknown error')
+        .split(token).join('[REDACTED]');
+      console.error(`getUpdates failed: ${errDesc}`);
+      console.error('Check that your bot token is correct.');
+      return 1;
+    }
+
+    const updates = (data as Record<string, unknown>)['result'];
+    if (!Array.isArray(updates) || updates.length === 0) {
+      console.log('No updates yet — send any message to your bot in Telegram, then re-run this command.');
+      return 0;
+    }
+
+    const chatIds = new Set<string>();
+    for (const upd of updates) {
+      if (typeof upd !== 'object' || upd === null) continue;
+      const u = upd as Record<string, unknown>;
+      const chat = (u['message'] as Record<string, unknown> | undefined)?.['chat'] as Record<string, unknown> | undefined;
+      if (chat?.['id']) chatIds.add(String(chat['id']));
+    }
+
+    if (chatIds.size === 0) {
+      console.log('Found updates but no chat ids could be extracted. Try sending another message to your bot.');
+      return 0;
+    }
+
+    console.log('');
+    console.log('Discovered chat id(s):');
+    for (const id of chatIds) {
+      console.log(`  ${id}`);
+    }
+    console.log('');
+    console.log('Paste the correct chat id into cfg.comms.telegram.chatId in ~/.ashlr/config.json.');
+    return 0;
+  } catch {
+    console.error('Failed to call getUpdates — check your network connection.');
+    return 1;
   }
 }
 
@@ -348,8 +507,8 @@ export async function cmdComms(args: string[]): Promise<number> {
 async function cmdAskMerges(): Promise<number> {
   const cfg = await loadConfig();
 
-  if (!commsEnabled(cfg)) {
-    console.error('comms disabled — set cfg.comms.enabled=true and cfg.comms.imessageHandle');
+  if (!channelEnabled(cfg)) {
+    console.error('comms disabled — configure cfg.comms (imessage or telegram) in ~/.ashlr/config.json');
     return 1;
   }
 

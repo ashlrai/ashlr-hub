@@ -340,15 +340,34 @@ export interface AshlrConfig {
    * Only numeric replies (1-N) resolve requests — no free-form command execution.
    */
   comms?: {
-    /** Enable the iMessage channel. Default false. */
+    /** Enable the comms channel. Default false. */
     enabled?: boolean;
+    /**
+     * Transport selection. Default 'imessage' (legacy).
+     * Set to 'telegram' to use the Telegram Bot API instead.
+     */
+    channel?: 'imessage' | 'telegram';
     /**
      * Mason's iMessage address — phone number ("+15555550100") or Apple ID
      * email. Set in ~/.ashlr/config.json. NEVER commit this value.
+     * Only used when channel === 'imessage' (or channel is unset).
      */
     imessageHandle?: string;
     /** iMessage service name. Default 'iMessage'. */
     service?: 'iMessage';
+    /**
+     * Telegram Bot API configuration. Only used when channel === 'telegram'.
+     * botToken — from @BotFather. Can also be set via TELEGRAM_BOT_TOKEN env.
+     *            NEVER commit this value.
+     * chatId   — numeric chat id to send to / accept messages from.
+     *            Run `ashlr comms setup-telegram` to discover it.
+     */
+    telegram?: {
+      /** Bot API token from @BotFather. NEVER commit. */
+      botToken?: string;
+      /** Numeric chat id. Run `ashlr comms setup-telegram` to find it. */
+      chatId?: string;
+    };
   };
 }
 

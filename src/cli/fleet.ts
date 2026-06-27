@@ -608,6 +608,8 @@ export async function cmdFleet(args: string[]): Promise<number> {
       return cmdFleetOversight(rest);
     case 'judge-traces':
       return cmdFleetJudgeTraces(rest);
+    case 'judge-health':
+      return cmdFleetJudgeHealth(rest);
     default:
       process.stderr.write(red('error: ') + `unknown fleet subcommand: ${sub}\n`);
       printFleetHelp();
@@ -632,6 +634,8 @@ function printFleetHelp(): void {
   console.log(`    ashlr fleet oversight [--json]    ${cyan('# CEO scorecard: quality + manager + vision + goals (M122)')}`);
   console.log(`    ashlr fleet judge-traces [--limit N] [--outcome-only] [--json]`);
   console.log(`                          ` + cyan('# list/inspect judge traces + outcome-link rate (M141)'));
+  console.log(`    ashlr fleet judge-health [--degradation] [--json]`);
+  console.log(`                          ` + cyan('# judge calibration: kappa + dark-current + degradation (M145)'));
   console.log('');
 }
 
@@ -839,6 +843,111 @@ async function cmdFleetJudgeTraces(args: string[]): Promise<number> {
   console.log('');
   if (traces.length === limit) {
     console.log('  ' + dim(`(showing ${limit} traces — use --limit N for more)`));
+    console.log('');
+  }
+
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: judge-health (M145 — judge calibration + self-health)
+// ---------------------------------------------------------------------------
+
+/**
+ * `ashlr fleet judge-health [--degradation] [--json]`
+ *
+ * Prints a judge calibration health report:
+ *   - Cohen's kappa between judge verdict-intent and realized outcome
+ *   - Dark-current baseline (verdict distribution + mean scores per engine)
+ *   - Optional degradation-harness recovery rate (--degradation)
+ *   - Plain-language flag warnings
+ *
+ * READ-ONLY (the degradation harness re-runs judgeProposal on corrupted diffs
+ * but never persists anything). Never throws.
+ */
+async function cmdFleetJudgeHealth(args: string[]): Promise<number> {
+  const jsonMode = args.includes('--json');
+  const runDegradation = args.includes('--degradation');
+  const cfg = await loadCfg();
+
+  let report: import('../core/fleet/judge-calibration.js').JudgeHealthReport;
+  try {
+    const { judgeHealth } = await import('../core/fleet/judge-calibration.js');
+    report = await judgeHealth(cfg ?? ({} as import('../core/types.js').AshlrConfig), {
+      runDegradation,
+    });
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'failed to compute judge health: ' +
+        (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  if (jsonMode) {
+    process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+    return 0;
+  }
+
+  // ── Human render ────────────────────────────────────────────────────────
+  console.log('');
+  console.log(bold('  ashlr fleet judge-health') + dim(' — judge calibration + self-health (M145)'));
+  console.log('');
+
+  console.log(`  ${bold('Sample size:')} ${report.sampleSize} traces`);
+  console.log('');
+
+  // Kappa
+  if (report.kappaVsOutcome !== null) {
+    const kv = report.kappaVsOutcome;
+    const kappaColor = kv >= 0.6 ? green : kv >= 0.4 ? yellow : red;
+    console.log(`  ${bold('Cohen\'s kappa vs outcome:')} ${kappaColor(kv.toFixed(3))}`);
+    console.log(`  ${dim('  (1.0 = perfect agreement, ~0 = chance, < 0 = systematic disagreement)')}`);
+  } else {
+    console.log(`  ${bold('Cohen\'s kappa:')} ${dim('N/A (insufficient outcome-linked traces)')}`);
+  }
+  console.log('');
+
+  // Dark current
+  if (report.darkCurrent.length > 0) {
+    console.log(`  ${bold('Dark current (judge baseline bias):')}`);
+    for (const dc of report.darkCurrent) {
+      console.log(`    engine: ${cyan(dc.judgeEngine)}  traces: ${dc.traceCount}`);
+      const verdictStr = Object.entries(dc.verdictDistribution)
+        .map(([v, r]) => `${v}:${(r * 100).toFixed(0)}%`)
+        .join('  ');
+      console.log(`      verdict dist:  ${verdictStr}`);
+      const ms = dc.meanScores;
+      console.log(
+        `      mean scores:   v=${ms.value.toFixed(2)}  c=${ms.correctness.toFixed(2)}` +
+        `  s=${ms.scope.toFixed(2)}  a=${ms.alignment.toFixed(2)}`,
+      );
+    }
+    console.log('');
+  }
+
+  // Degradation harness
+  if (runDegradation) {
+    if (report.degradationRecoveryRate !== null) {
+      const rr = report.degradationRecoveryRate;
+      const rrColor = rr >= 0.7 ? green : rr >= 0.5 ? yellow : red;
+      console.log(`  ${bold('Degradation harness recovery rate:')} ${rrColor((rr * 100).toFixed(0) + '%')}`);
+      console.log(`  ${dim('  (% of corrupted-diff trials where judge scored materially lower / escalated verdict)')}`);
+    } else {
+      console.log(`  ${bold('Degradation harness:')} ${dim('not run or insufficient merged traces')}`);
+    }
+    console.log('');
+  }
+
+  // Flags
+  if (report.flags.length > 0) {
+    console.log(`  ${bold('Warnings:')}`);
+    for (const flag of report.flags) {
+      console.log(`    ${yellow('!')} ${flag}`);
+    }
+    console.log('');
+  } else {
+    console.log(`  ${green('No warnings — judge calibration looks healthy.')}`);
     console.log('');
   }
 

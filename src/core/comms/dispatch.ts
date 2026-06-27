@@ -21,6 +21,12 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { sendIMessage } from '../integrations/imessage.js';
 import {
+  sendTelegramMessage,
+  pollTelegramUpdates,
+  answerCallbackQuery,
+  telegramEnabled,
+} from '../integrations/telegram.js';
+import {
   listRequests,
   markSent,
   outstanding,
@@ -133,6 +139,9 @@ export interface CycleResult {
 export async function runCommsCycle(cfg: AshlrConfig): Promise<CycleResult> {
   const result: CycleResult = { sent: 0, resolved: 0 };
 
+  // Select transport based on cfg.comms.channel
+  const isTelegram = telegramEnabled(cfg);
+
   try {
     const state = loadState();
     const now = Date.now();
@@ -146,9 +155,25 @@ export async function runCommsCycle(cfg: AshlrConfig): Promise<CycleResult> {
       const pending = listRequests({ status: 'pending' });
       if (pending.length > 0) {
         const next = pending[0]!;
-        const text = formatMessage(next);
-        const { ok } = await sendIMessage(text, cfg);
-        if (ok) {
+
+        let sendOk = false;
+
+        if (isTelegram) {
+          // Telegram: send with inline keyboard buttons when the request has options
+          const tgOpts =
+            next.options.length > 0
+              ? { buttons: next.options, requestId: next.id }
+              : undefined;
+          const { ok } = await sendTelegramMessage(next.text, tgOpts, cfg);
+          sendOk = ok;
+        } else {
+          // iMessage: format text with numbered options
+          const text = formatMessage(next);
+          const { ok } = await sendIMessage(text, cfg);
+          sendOk = ok;
+        }
+
+        if (sendOk) {
           markSent(next.id);
           state.lastSentMs = now;
           result.sent++;
@@ -165,41 +190,95 @@ export async function runCommsCycle(cfg: AshlrConfig): Promise<CycleResult> {
 
     // ── 2. Poll inbound replies ───────────────────────────────────────────────
 
-    // Lazy import to allow mocking in tests
-    const { pollInboundReplies } = await import('../integrations/imessage.js');
-    const inbound = await pollInboundReplies(state.watermarkMs, cfg);
-    let newWatermark = state.watermarkMs;
+    if (isTelegram) {
+      // ── Telegram path ─────────────────────────────────────────────────────
+      const { updates } = await pollTelegramUpdates(cfg);
 
-    for (const msg of inbound) {
-      if (msg.ts > newWatermark) newWatermark = msg.ts;
+      for (const event of updates) {
+        const out = outstanding();
+        if (!out) continue;
 
-      // Only attempt resolution if there's an outstanding question/approval
-      const out = outstanding();
-      if (!out) continue;
+        if (event.kind === 'callback') {
+          // Button tap: resolve directly by requestId + optionIndex (no numeric parsing)
+          if (
+            event.requestId === out.id &&
+            typeof event.optionIndex === 'number' &&
+            event.optionIndex >= 0 &&
+            event.optionIndex < out.options.length
+          ) {
+            resolveRequest(out.id, event.optionIndex);
 
-      // Parse leading integer from the reply text (1-based)
-      const match = /^\s*(\d+)\b/.exec(msg.text);
-      if (!match) continue; // non-numeric — safe start: ignore
+            // Ack the button tap so Telegram removes the spinner
+            if (event.callbackQueryId) {
+              await answerCallbackQuery(event.callbackQueryId, cfg);
+            }
 
-      const num = parseInt(match[1]!, 10);
-      if (num < 1 || num > out.options.length) continue; // out-of-range
+            const { listRequests: lr } = await import('./requests.js');
+            const resolved = lr({ status: 'answered' }).find((r) => r.id === out.id);
+            if (resolved) {
+              await invokeHandler(resolved);
+            }
+            result.resolved++;
+          }
+        } else if (event.kind === 'text' && event.text) {
+          // Text fallback: still accept leading numeric reply (e.g. "1", "2 approve")
+          const match = /^\s*(\d+)\b/.exec(event.text);
+          if (!match) continue;
 
-      const answerIndex = num - 1; // convert to 0-based
-      resolveRequest(out.id, answerIndex);
+          const num = parseInt(match[1]!, 10);
+          if (num < 1 || num > out.options.length) continue;
 
-      // Re-load to get the full resolved record for the handler
-      const { listRequests: lr } = await import('./requests.js');
-      const resolved = lr({ status: 'answered' }).find((r) => r.id === out.id);
-      if (resolved) {
-        await invokeHandler(resolved);
+          const answerIndex = num - 1;
+          resolveRequest(out.id, answerIndex);
+
+          const { listRequests: lr } = await import('./requests.js');
+          const resolved = lr({ status: 'answered' }).find((r) => r.id === out.id);
+          if (resolved) {
+            await invokeHandler(resolved);
+          }
+          result.resolved++;
+        }
       }
 
-      result.resolved++;
+      // Telegram uses its own offset file — no watermarkMs needed
+      saveState({ ...state });
+    } else {
+      // ── iMessage path ─────────────────────────────────────────────────────
+      // Lazy import to allow mocking in tests
+      const { pollInboundReplies } = await import('../integrations/imessage.js');
+      const inbound = await pollInboundReplies(state.watermarkMs, cfg);
+      let newWatermark = state.watermarkMs;
+
+      for (const msg of inbound) {
+        if (msg.ts > newWatermark) newWatermark = msg.ts;
+
+        // Only attempt resolution if there's an outstanding question/approval
+        const out = outstanding();
+        if (!out) continue;
+
+        // Parse leading integer from the reply text (1-based)
+        const match = /^\s*(\d+)\b/.exec(msg.text);
+        if (!match) continue; // non-numeric — safe start: ignore
+
+        const num = parseInt(match[1]!, 10);
+        if (num < 1 || num > out.options.length) continue; // out-of-range
+
+        const answerIndex = num - 1; // convert to 0-based
+        resolveRequest(out.id, answerIndex);
+
+        // Re-load to get the full resolved record for the handler
+        const { listRequests: lr } = await import('./requests.js');
+        const resolved = lr({ status: 'answered' }).find((r) => r.id === out.id);
+        if (resolved) {
+          await invokeHandler(resolved);
+        }
+
+        result.resolved++;
+      }
+
+      // ── 3. Advance watermark ─────────────────────────────────────────────
+      saveState({ ...state, watermarkMs: newWatermark });
     }
-
-    // ── 3. Advance watermark ─────────────────────────────────────────────────
-
-    saveState({ ...state, watermarkMs: newWatermark });
   } catch {
     // top-level safety net — runCommsCycle NEVER throws
   }

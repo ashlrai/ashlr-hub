@@ -96,9 +96,16 @@ export function sendIMessage(text: string, cfg: AshlrConfig): Promise<{ ok: bool
   const safeHandle = escapeAppleScript(handle);
   const safeService = escapeAppleScript(service);
 
+  // Use `1st service whose service type = iMessage` instead of `of service "iMessage"` by name.
+  // The by-name form errors -1728 on macOS 13+ when the service name doesn't match exactly.
+  // When a custom service name is configured (non-default), fall back to the by-name form.
+  const useTypeSelector = service === 'iMessage';
+  const serviceClause = useTypeSelector
+    ? 'of (1st service whose service type = iMessage)'
+    : `of service "${safeService}"`;
   const script =
     `tell application "Messages" to send "${safeText}" to buddy "${safeHandle}" ` +
-    `of service "${safeService}"`;
+    serviceClause;
 
   return new Promise<{ ok: boolean }>((resolve) => {
     try {
