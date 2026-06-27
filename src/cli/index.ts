@@ -524,6 +524,14 @@ const loadWorkerCmd = lazyCmd(
   'worker command requires src/cli/worker.ts (M112 module not yet built).',
 );
 
+// ─── M137 command loader ────────────────────────────────────────────
+
+const loadCommsCmd = lazyCmd(
+  () => import('./comms.js'),
+  (m) => m.cmdComms as Cmd,
+  'comms command requires src/cli/comms.ts (M137 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1791,6 +1799,12 @@ async function main(): Promise<void> {
       case 'x': {
         const cmdX = await loadXCmd();
         process.exitCode = await cmdX(rest);
+        break;
+      }
+
+      case 'comms': {
+        const cmdComms = await loadCommsCmd();
+        process.exitCode = await cmdComms(rest);
         break;
       }
 

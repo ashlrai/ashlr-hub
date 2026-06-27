@@ -325,6 +325,31 @@ export interface AshlrConfig {
       leaseMs?: number;
     };
   };
+
+  /**
+   * M137: iMessage bidirectional channel. DEFAULT DISABLED — no messages are
+   * sent or read unless enabled:true AND imessageHandle is set.
+   *
+   * macOS-only (darwin). No-op on other platforms.
+   *
+   * Required macOS permissions:
+   *   - Automation → Messages  (osascript tell application "Messages" to send)
+   *   - Full Disk Access        (read ~/Library/Messages/chat.db for replies)
+   *
+   * SECURITY: handle lives in ~/.ashlr/config.json, NEVER committed to source.
+   * Only numeric replies (1-N) resolve requests — no free-form command execution.
+   */
+  comms?: {
+    /** Enable the iMessage channel. Default false. */
+    enabled?: boolean;
+    /**
+     * Mason's iMessage address — phone number ("+15555550100") or Apple ID
+     * email. Set in ~/.ashlr/config.json. NEVER commit this value.
+     */
+    imessageHandle?: string;
+    /** iMessage service name. Default 'iMessage'. */
+    service?: 'iMessage';
+  };
 }
 
 // ---------------------------------------------------------------------------
