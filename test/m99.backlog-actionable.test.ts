@@ -292,7 +292,7 @@ describe('M99 Rule A — scanTodos detail includes file path, line number, and T
     // Stub rg to return a real rg-n line with line number
     _execFileImpl = makeRgStub(`${file}:1:// TODO: add error handling for the null case`);
 
-    const items = await scanTodos(repo);
+    const items = await scanTodos(repo, { foundry: { scanTodos: true } }); // M136: opt in
     expect(items.length).toBeGreaterThanOrEqual(1);
     const item = items.find((i) => i.source === 'todo');
     expect(item).toBeDefined();
@@ -304,7 +304,7 @@ describe('M99 Rule A — scanTodos detail includes file path, line number, and T
     const file = 'src/core/backlog.ts';
     _execFileImpl = makeRgStub(`${file}:42:// FIXME: this crashes when queue is empty`);
 
-    const items = await scanTodos(repo);
+    const items = await scanTodos(repo, { foundry: { scanTodos: true } }); // M136: opt in
     expect(items.length).toBeGreaterThanOrEqual(1);
     const item = items[0]!;
     // Detail must reference the line number
@@ -318,7 +318,7 @@ describe('M99 Rule A — scanTodos detail includes file path, line number, and T
     const todoText = 'TODO: implement retry with exponential backoff';
     _execFileImpl = makeRgStub(`${file}:17:// ${todoText}`);
 
-    const items = await scanTodos(repo);
+    const items = await scanTodos(repo, { foundry: { scanTodos: true } }); // M136: opt in
     expect(items.length).toBeGreaterThanOrEqual(1);
     const item = items[0]!;
     // Detail must quote the TODO text so the engine knows what to implement
@@ -329,7 +329,7 @@ describe('M99 Rule A — scanTodos detail includes file path, line number, and T
     const file = 'src/util.ts';
     _execFileImpl = makeRgStub(`${file}:5:// TODO: validate input`);
 
-    const items = await scanTodos(repo);
+    const items = await scanTodos(repo, { foundry: { scanTodos: true } }); // M136: opt in
     expect(items.length).toBeGreaterThanOrEqual(1);
     const item = items[0]!;
     // Must include an action directive — not just passive description

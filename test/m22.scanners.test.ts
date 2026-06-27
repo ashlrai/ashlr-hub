@@ -203,18 +203,21 @@ afterEach(() => {
 
 describe('M22 scanTodos — planted TODO/FIXME/HACK/XXX comments', () => {
   it('finds a TODO comment in a source file', async () => {
-    fs.writeFileSync(path.join(tmpRepo, 'main.ts'), '// TODO: fix this later\nconst x = 1;\n', 'utf8');
+    // M136: scanTodos is default-off; opt in via cfg. Use src/ path so the
+    // first-party source check passes (rg returns relative paths in production).
+    fs.mkdirSync(path.join(tmpRepo, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(tmpRepo, 'src', 'main.ts'), '// TODO: fix this later\nconst x = 1;\n', 'utf8');
 
     // scanTodos uses rg or grep — stub rg to return the planted line
     _execFileImpl = vi.fn((...args: unknown[]) => {
       const cb = args[args.length - 1] as (err: Error | null, stdout: string, stderr: string) => void;
       if (typeof cb !== 'function') return;
-      // Return a grep-style match: filename:lineno:text
-      cb(null, `${path.join(tmpRepo, 'main.ts')}:1:// TODO: fix this later\n`, '');
+      // Return a grep-style match: filename:lineno:text (relative, as rg does with cwd)
+      cb(null, `src/main.ts:1:// TODO: fix this later\n`, '');
     });
 
     const before = snapshotDir(tmpRepo);
-    const items = await scanTodos(tmpRepo);
+    const items = await scanTodos(tmpRepo, { foundry: { scanTodos: true } });
     assertUnchanged(tmpRepo, before);
 
     expect(items.length).toBeGreaterThan(0);
@@ -223,8 +226,10 @@ describe('M22 scanTodos — planted TODO/FIXME/HACK/XXX comments', () => {
   });
 
   it('finds FIXME, HACK, and XXX keywords', async () => {
+    // M136: opt in + use src/ path for first-party source check.
+    fs.mkdirSync(path.join(tmpRepo, 'src'), { recursive: true });
     fs.writeFileSync(
-      path.join(tmpRepo, 'app.ts'),
+      path.join(tmpRepo, 'src', 'app.ts'),
       '// FIXME: broken path\n// HACK: workaround\n// XXX: revisit\n',
       'utf8',
     );
@@ -233,15 +238,15 @@ describe('M22 scanTodos — planted TODO/FIXME/HACK/XXX comments', () => {
       const cb = args[args.length - 1] as (err: Error | null, stdout: string, stderr: string) => void;
       if (typeof cb !== 'function') return;
       const out = [
-        `${path.join(tmpRepo, 'app.ts')}:1:// FIXME: broken path`,
-        `${path.join(tmpRepo, 'app.ts')}:2:// HACK: workaround`,
-        `${path.join(tmpRepo, 'app.ts')}:3:// XXX: revisit`,
+        `src/app.ts:1:// FIXME: broken path`,
+        `src/app.ts:2:// HACK: workaround`,
+        `src/app.ts:3:// XXX: revisit`,
       ].join('\n') + '\n';
       cb(null, out, '');
     });
 
     const before = snapshotDir(tmpRepo);
-    const items = await scanTodos(tmpRepo);
+    const items = await scanTodos(tmpRepo, { foundry: { scanTodos: true } });
     assertUnchanged(tmpRepo, before);
 
     expect(items.length).toBeGreaterThanOrEqual(1);

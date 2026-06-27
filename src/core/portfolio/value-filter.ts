@@ -29,9 +29,15 @@ import type { WorkItem } from '../types.js';
  *  - any path segment is docs/, examples/, fixtures/
  *  - basename matches *.test.* or *.spec.*
  *  - any path segment is test/ or tests/ or __tests__/
+ *
+ * M136: also matches vendored/third-party/benchmark/reference directories so
+ * any marker that slips through isIgnoredPath is still down-valued to trivial:
+ *  - bench/, benchmark/, benchmarks/, refs/, third_party/, third-party/
+ *  - vendor/, vendors/, migrations/, pandas/, __pycache__/, .venv/
+ *  - any segment matching *-lib/ or *_lib/ (python-lib, pandas-lib, etc.)
  */
 export const NON_CODE_PATH_RE =
-  /(?:^|\/)(?:CHANGELOG[^/]*|docs\/|examples\/|fixtures\/|test\/|tests\/|__tests__\/)|\.(?:md|txt|rst|adoc)$|\.(?:test|spec)\.[^/]+$/i;
+  /(?:^|\/)(?:CHANGELOG[^/]*|docs\/|examples\/|fixtures\/|test\/|tests\/|__tests__\/|bench\/|benchmarks?\/|refs\/|third[_-]party\/|vendors?\/|migrations\/|pandas\/|__pycache__\/|\.venv\/)|\.(?:md|txt|rst|adoc)$|\.(?:test|spec)\.[^/]+$|(?:^|\/)[a-z0-9_-]+-lib\//i;
 
 /**
  * Returns true when a raw file path string is a non-code/low-value path.

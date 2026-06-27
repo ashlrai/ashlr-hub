@@ -363,30 +363,33 @@ describe('M124 — scanTodos: trivial TODO markers get value=1', () => {
   });
 
   it('emits value=1 for a bare "TODO: handle other cases"', async () => {
+    // M136: scanTodos is default-off; pass cfg to opt in.
     const rgOutput = 'src/parser.ts:42:// TODO: handle other cases\n';
     _execFileImpl = makeRgStub(rgOutput);
 
-    const items = await scanTodos(tmpDir);
+    const items = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
     const item = items.find((i) => i.title.includes('src/parser.ts'));
     expect(item).toBeDefined();
     expect(item!.value).toBe(1);
   });
 
   it('emits value=1 for a bare "FIXME: cleanup"', async () => {
+    // M136: scanTodos is default-off; pass cfg to opt in.
     const rgOutput = 'src/utils.ts:10:// FIXME: cleanup\n';
     _execFileImpl = makeRgStub(rgOutput);
 
-    const items = await scanTodos(tmpDir);
+    const items = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
     const item = items.find((i) => i.title.includes('src/utils.ts'));
     expect(item).toBeDefined();
     expect(item!.value).toBe(1);
   });
 
   it('keeps value=2 for a substantive TODO (actionable description)', async () => {
+    // M136: scanTodos is default-off; pass cfg to opt in.
     const rgOutput = 'src/auth.ts:88:// TODO: implement refresh-token rotation with expiry check\n';
     _execFileImpl = makeRgStub(rgOutput);
 
-    const items = await scanTodos(tmpDir);
+    const items = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
     const item = items.find((i) => i.title.includes('src/auth.ts'));
     expect(item).toBeDefined();
     expect(item!.value).toBe(2);
@@ -420,12 +423,16 @@ describe('M124 — buildBacklog: value-filter gate', () => {
   });
 
   it('keeps a substantive value=2 item when minItemValue=2', async () => {
+    // M136: scanTodos is default-off in the SCANNERS array used by buildBacklog.
+    // Test the value-gate at the scanTodos level directly (opt-in via cfg).
     const rgOutput = 'src/auth.ts:88:// TODO: implement refresh-token rotation with expiry check\n';
     _execFileImpl = makeRgStub(rgOutput);
 
-    const backlog = await buildBacklog({ repos: [tmpDir], minItemValue: 2 });
-    const authItem = backlog.items.find((i) => i.title.includes('src/auth.ts'));
+    const items = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
+    const authItem = items.find((i) => i.title.includes('src/auth.ts'));
+    // Substantive TODO must pass through with value=2 (not downgraded)
     expect(authItem).toBeDefined();
+    expect(authItem!.value).toBe(2);
   });
 
   it('reports filtered count in audit summary when items are dropped', async () => {

@@ -159,6 +159,14 @@ export interface AshlrConfig {
      */
     minItemValue?: number;
     /**
+     * M136: TODO/FIXME marker scanner toggle. DEFAULT false — the fleet works
+     * substantive sources (issues, lint, security, deps, self-improve, hygiene)
+     * instead of drowning in bare marker noise. Set true to re-enable the
+     * scanner; even when true, vendored/third-party directories and
+     * non-first-party source paths are never scanned.
+     */
+    scanTodos?: boolean;
+    /**
      * M128: intelligent model-granular routing policy.
      *  'balanced' (DEFAULT) — free-local for bulk, reserve strong models for
      *                          hard tasks, cheap-cloud for medium. Roughly

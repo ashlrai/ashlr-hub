@@ -354,16 +354,18 @@ describe('M108 — scanTodos: filters out TODOs in non-actionable files', () => 
   });
 
   it('STILL surfaces a real TODO in src/foo.ts', async () => {
+    // M136: scanTodos is default-off; pass cfg to opt in.
     const rgOutput = 'src/foo.ts:17:// TODO: implement retry logic\n';
     _execFileImpl = makeRgStub(rgOutput);
 
-    const items = await scanTodos(tmpDir);
+    const items = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
     expect(items.length).toBeGreaterThanOrEqual(1);
     const fooItem = items.find((i) => i.title.includes('src/foo.ts'));
     expect(fooItem).toBeDefined();
   });
 
   it('surfaces src TODO but suppresses lock-file TODO in the same rg output', async () => {
+    // M136: scanTodos is default-off; pass cfg to opt in.
     const rgOutput = [
       'src/foo.ts:17:// TODO: implement retry logic',
       'bun.lock:365:# TODO: regenerate lockfile',
@@ -372,7 +374,7 @@ describe('M108 — scanTodos: filters out TODOs in non-actionable files', () => 
     ].join('\n') + '\n';
     _execFileImpl = makeRgStub(rgOutput);
 
-    const items = await scanTodos(tmpDir);
+    const items = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
     // Only src/foo.ts should survive
     expect(items.length).toBe(1);
     expect(items[0]!.title).toMatch(/src\/foo\.ts/);

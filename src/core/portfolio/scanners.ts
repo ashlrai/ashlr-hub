@@ -18,7 +18,7 @@ import { existsSync, statSync, readFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 
-import type { WorkItem, WorkSource } from '../types.js';
+import type { WorkItem, WorkSource, AshlrConfig } from '../types.js';
 import { listIssues, githubStatus } from '../integrations/github.js';
 import { isTrivialItem, isNonCodePath } from './value-filter.js';
 
@@ -41,6 +41,10 @@ const MAX_VULN_ITEMS = 20;
 /**
  * Directory names that are NEVER actionable (generated, vendored, tooling).
  * Used as a fast segment-check on file paths from rg/grep output.
+ *
+ * M136: extended with vendored/third-party/benchmark/reference directories.
+ * These are not first-party source — scanning them for TODO markers produces
+ * only noise (85%+ of all fleet proposals were coming from these paths).
  */
 const IGNORE_DIRS: ReadonlySet<string> = new Set([
   'node_modules',
@@ -54,14 +58,40 @@ const IGNORE_DIRS: ReadonlySet<string> = new Set([
   '.git',
   'vendor',
   '.turbo',
+  // M136: vendored / third-party / benchmark / reference dirs
+  'bench',
+  'benchmark',
+  'benchmarks',
+  'refs',
+  'third_party',
+  'third-party',
+  'vendor',
+  'vendors',
+  'examples',
+  'fixtures',
+  '__pycache__',
+  '.venv',
+  'site-packages',
+  'migrations',
+  'pandas',
 ]);
 
 /**
  * File name patterns that identify non-actionable generated/lock/minified files.
  * A TODO inside any of these is not a real work item.
+ *
+ * M136: also matches vendored-language-library path suffixes (e.g. *-lib/,
+ * python-lib/, site-packages/) that appear as directory segments.
  */
 const IGNORE_FILE_RE =
   /(?:^|[\/])(bun\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|composer\.lock|Gemfile\.lock)$|\.min\.[cm]?[jt]sx?$|\.min\.css$|\.generated\.[^.]+$|\.map$/i;
+
+/**
+ * M136: Path pattern for vendored language-library directories that appear as
+ * path segments but are not caught by exact IGNORE_DIRS set membership.
+ * Matches:  *-lib/  *_lib/  python-lib/  any-lib/  site-packages/
+ */
+const IGNORE_VENDORED_PATH_RE = /(?:^|\/)(?:[a-z0-9_-]+-lib|site-packages)\//i;
 
 /**
  * Returns true when the given file path (rg/grep output style, relative or
@@ -78,7 +108,10 @@ export function isIgnoredPath(filePath: string): boolean {
   for (const seg of segments) {
     if (seg && IGNORE_DIRS.has(seg)) return true;
   }
-  return IGNORE_FILE_RE.test(normalised);
+  if (IGNORE_FILE_RE.test(normalised)) return true;
+  // M136: vendored language-library paths (e.g. python-lib/, *-lib/, site-packages/)
+  if (IGNORE_VENDORED_PATH_RE.test(normalised)) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +261,40 @@ export async function scanIssues(repo: string): Promise<WorkItem[]> {
 }
 
 // ---------------------------------------------------------------------------
+// M136: First-party source path predicate
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true when the given file path is under a recognised first-party
+ * source directory: src/, lib/, app/, or packages/<name>/src/.
+ *
+ * Only used by scanTodos (when enabled) to ensure markers in config files,
+ * root scripts, tooling, and other non-product code are never emitted.
+ */
+export function isFirstPartySourcePath(filePath: string): boolean {
+  const normalised = filePath.replace(/\\/g, '/').replace(/^\.\//, '');
+  // Fast path: relative path starting with a first-party root.
+  if (
+    normalised.startsWith('src/') ||
+    normalised.startsWith('lib/') ||
+    normalised.startsWith('app/') ||
+    /^packages\/[^/]+\/src\//.test(normalised)
+  ) {
+    return true;
+  }
+  // Absolute paths (e.g. from tests or rg with full paths): check for a
+  // first-party segment anywhere in the path. This handles the case where
+  // rg is invoked with an absolute cwd and returns absolute paths.
+  // We look for /src/, /lib/, /app/, or /packages/<name>/src/ as segments.
+  return (
+    /\/src\//.test(normalised) ||
+    /\/lib\//.test(normalised) ||
+    /\/app\//.test(normalised) ||
+    /\/packages\/[^/]+\/src\//.test(normalised)
+  );
+}
+
+// ---------------------------------------------------------------------------
 // scanTodos — TODO/FIXME/HACK/XXX comments via rg/grep
 // ---------------------------------------------------------------------------
 
@@ -254,7 +321,22 @@ async function rgOrGrep(repo: string): Promise<string | null> {
         '--glob', '!target',
         '--glob', '!.vscode',
         '--glob', '!vendor',
+        '--glob', '!vendors',
         '--glob', '!.turbo',
+        // M136: vendored/third-party/benchmark/reference dirs
+        '--glob', '!bench',
+        '--glob', '!benchmark',
+        '--glob', '!benchmarks',
+        '--glob', '!refs',
+        '--glob', '!third_party',
+        '--glob', '!third-party',
+        '--glob', '!examples',
+        '--glob', '!fixtures',
+        '--glob', '!__pycache__',
+        '--glob', '!.venv',
+        '--glob', '!migrations',
+        '--glob', '!pandas',
+        '--glob', '!*-lib',
         '--glob', '!*.lock',
         '--glob', '!*.min.js',
         '--glob', '!*.min.css',
@@ -326,7 +408,18 @@ async function rgOrGrep(repo: string): Promise<string | null> {
   }
 }
 
-export async function scanTodos(repo: string): Promise<WorkItem[]> {
+/**
+ * M136: scanTodos is DEFAULT OFF. Pass cfg with cfg.foundry.scanTodos = true
+ * to enable. When disabled the fleet works substantive sources (issues, lint,
+ * security, deps, self-improve, hygiene) instead of bare-marker noise.
+ *
+ * The SCANNERS array binds (repo) => scanTodos(repo, undefined) which means
+ * cfg defaults to undefined → disabled. Callers that opt in pass cfg explicitly.
+ */
+export async function scanTodos(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>): Promise<WorkItem[]> {
+  // M136: gate — disabled by default; only run when explicitly opted in.
+  if (!cfg?.foundry?.scanTodos) return [];
+
   try {
     const raw = await rgOrGrep(repo);
     if (!raw || raw.trim() === '') return [];
@@ -361,6 +454,11 @@ export async function scanTodos(repo: string): Promise<WorkItem[]> {
       // they never accumulate into a byFile cluster that would emit a value=1 item
       // consuming a backlog slot.
       if (isNonCodePath(filePath)) continue;
+      // M136: Only emit TODOs from first-party source directories.
+      // Paths that don't begin with src/, lib/, app/, or packages/*/src are not
+      // first-party source — they may be scripts, config, root files, or other
+      // non-product code that produces noise without actionable diffs.
+      if (!isFirstPartySourcePath(filePath)) continue;
 
       const existing = byFile.get(filePath);
       if (existing) {

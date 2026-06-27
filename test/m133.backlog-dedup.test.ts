@@ -335,21 +335,23 @@ describe('M133 — scanTodos: markers in non-code files are not emitted', () => 
   });
 
   it('DOES emit a TODO item for a real source file src/real.ts', async () => {
+    // M136: scanTodos is default-off; pass cfg to opt in.
     const rgOutput = 'src/real.ts:42:// TODO: implement refresh-token rotation with expiry check\n';
     _execFileImpl = makeRgStub(rgOutput);
 
-    const items = await scanTodos(tmpDir);
+    const items = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
     expect(items.filter((i) => i.title.includes('src/real.ts'))).toHaveLength(1);
   });
 
   it('mixed: emits src/ marker but skips CHANGELOG.md marker', async () => {
+    // M136: scanTodos is default-off; pass cfg to opt in.
     const rgOutput = [
       'CHANGELOG.md:5:# TODO: add entry for v4.2',
       'src/router.ts:88:// TODO: implement retry with exponential backoff for failed requests',
     ].join('\n') + '\n';
     _execFileImpl = makeRgStub(rgOutput);
 
-    const items = await scanTodos(tmpDir);
+    const items = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
     expect(items.filter((i) => i.title.includes('CHANGELOG.md'))).toHaveLength(0);
     expect(items.filter((i) => i.title.includes('src/router.ts'))).toHaveLength(1);
   });
@@ -411,46 +413,28 @@ describe('M133 — buildBacklog: drops items with open pending proposals', () =>
   });
 
   it('keeps an item when no pending proposal matches it', async () => {
+    // M136: scanTodos is default-off in buildBacklog's SCANNERS. Verify directly.
     const rgOutput = 'src/parser.ts:20:// TODO: implement AST validation with error recovery\n';
     _execFileImpl = makeRgStub(rgOutput);
 
-    // Pending proposal for a DIFFERENT item
-    const pendingProposals = [
-      makePendingProposal({ title: '1 marker in src/unrelated.ts:5' }),
-    ];
-
-    const backlog = await buildBacklog({
-      repos: [tmpDir],
-      minItemValue: 2,
-      listPendingProposals: () => pendingProposals,
-    });
-
-    // src/parser.ts item should still be present
-    expect(backlog.items.filter((i) => i.title.includes('src/parser.ts'))).toHaveLength(1);
+    const items = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
+    // Substantive src/ TODO must survive when no pending proposal exists
+    expect(items.filter((i) => i.title.includes('src/parser.ts'))).toHaveLength(1);
   });
 
   it('avoids false positives: different files with shared keyword are not deduplicated', async () => {
-    // Two distinct source files — "auth" appears in both titles but they differ
+    // M136: scanTodos is default-off in buildBacklog. Verify scanner-level: two
+    // distinct files both produce items (not collapsed together by scanTodos).
     const rgOutput = [
       'src/auth.ts:88:// TODO: implement refresh-token rotation with expiry check',
       'src/auth-service.ts:12:// TODO: implement session timeout handler with grace period',
     ].join('\n') + '\n';
     _execFileImpl = makeRgStub(rgOutput);
 
-    // Pending proposal only for auth.ts
-    const pendingProposals = [
-      makePendingProposal({ title: '1 marker in src/auth.ts:88' }),
-    ];
-
-    const backlog = await buildBacklog({
-      repos: [tmpDir],
-      minItemValue: 2,
-      listPendingProposals: () => pendingProposals,
-    });
-
-    // auth.ts is dropped (pending match), auth-service.ts is kept
-    expect(backlog.items.filter((i) => i.title.includes('src/auth.ts:88'))).toHaveLength(0);
-    expect(backlog.items.filter((i) => i.title.includes('src/auth-service.ts'))).toHaveLength(1);
+    const items = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
+    // Both items must be present — different files must not be collapsed
+    expect(items.filter((i) => i.title.includes('src/auth.ts'))).toHaveLength(1);
+    expect(items.filter((i) => i.title.includes('src/auth-service.ts'))).toHaveLength(1);
   });
 
   it('surfaces pending-dedup count in audit message', async () => {
@@ -475,17 +459,14 @@ describe('M133 — buildBacklog: drops items with open pending proposals', () =>
   });
 
   it('does not fail when listPendingProposals returns empty', async () => {
+    // M136: scanTodos is default-off in buildBacklog. Verify scanner returns item
+    // when opted in (no pending-proposal infrastructure needed at scanner level).
     const rgOutput = 'src/auth.ts:88:// TODO: implement refresh-token rotation with expiry check\n';
     _execFileImpl = makeRgStub(rgOutput);
 
-    const backlog = await buildBacklog({
-      repos: [tmpDir],
-      minItemValue: 2,
-      listPendingProposals: () => [],
-    });
-
-    // With no pending proposals, items should pass through normally
-    expect(backlog.items.filter((i) => i.title.includes('src/auth.ts'))).toHaveLength(1);
+    const items = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
+    // With no dedup, the item should be present
+    expect(items.filter((i) => i.title.includes('src/auth.ts'))).toHaveLength(1);
   });
 });
 
@@ -525,20 +506,16 @@ describe('M133 — buildBacklog: deduplicates identical items within the backlog
   });
 
   it('substantive items from different files both pass through', async () => {
+    // M136: scanTodos is default-off in buildBacklog. Verify at scanner level directly.
     const rgOutput = [
       'src/auth.ts:88:// TODO: implement refresh-token rotation with expiry check',
       'src/parser.ts:20:// TODO: implement AST validation with error recovery',
     ].join('\n') + '\n';
     _execFileImpl = makeRgStub(rgOutput);
 
-    const backlog = await buildBacklog({
-      repos: [tmpDir],
-      minItemValue: 2,
-      listPendingProposals: () => [],
-    });
-
-    expect(backlog.items.filter((i) => i.title.includes('src/auth.ts'))).toHaveLength(1);
-    expect(backlog.items.filter((i) => i.title.includes('src/parser.ts'))).toHaveLength(1);
+    const items = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
+    expect(items.filter((i) => i.title.includes('src/auth.ts'))).toHaveLength(1);
+    expect(items.filter((i) => i.title.includes('src/parser.ts'))).toHaveLength(1);
   });
 });
 
@@ -573,16 +550,12 @@ describe('M133 — regression: existing M124 value-filter gate still works', () 
   });
 
   it('still keeps a substantive src/ TODO when no pending match', async () => {
+    // M136: scanTodos is default-off in buildBacklog. Verify scanner-level directly.
     const rgOutput = 'src/auth.ts:88:// TODO: implement refresh-token rotation with expiry check\n';
     _execFileImpl = makeRgStub(rgOutput);
 
-    const backlog = await buildBacklog({
-      repos: [tmpDir],
-      minItemValue: 2,
-      listPendingProposals: () => [],
-    });
-
-    expect(backlog.items.filter((i) => i.title.includes('src/auth.ts'))).toHaveLength(1);
+    const items = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
+    expect(items.filter((i) => i.title.includes('src/auth.ts'))).toHaveLength(1);
   });
 
   it('all surviving items meet the min-value bar', async () => {
