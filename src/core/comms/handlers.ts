@@ -1,5 +1,5 @@
 /**
- * M138: Comms resolution handlers — registers handlers for each comms kind.
+ * M138/M139: Comms resolution handlers — registers handlers for each comms kind.
  *
  * Call registerCommsHandlers(cfg) once before running a comms cycle so that
  * resolved requests are routed to the correct action:
@@ -9,9 +9,10 @@
  *     index 1 (Hold)                   → no-op, recorded via resolution
  *     index 2 (Show full briefing)     → sendIMessage(full briefing text, cfg)
  *
- *   'manager-approval' — stub for autonomous-merge gate (not yet active).
- *     index 0 (Approve) → note approval (no-op until merge pipeline is wired)
- *     index 1 (Reject)  → note rejection (no-op until merge pipeline is wired)
+ *   'manager-approval' — M139: text-based merge approval path.
+ *     index 0 (Approve & merge) → setStatus approved + autoMergeProposal (existing gates)
+ *     index 1 (Reject)          → setStatus rejected + text confirmation
+ *     index 2 (Show diff)       → sendIMessage scrubbed diff + re-post the question
  *
  * Never throws — all handlers are wrapped best-effort.
  */
@@ -80,23 +81,99 @@ async function handleElonVision(req: CommsRequest, cfg: AshlrConfig): Promise<vo
 }
 
 // ---------------------------------------------------------------------------
-// Internal: manager-approval handler stub
+// Internal: manager-approval handler (M139)
 // ---------------------------------------------------------------------------
 
-// Stub — autonomous-merge is not yet active. Wire real status mutations here
-// when the merge pipeline is live (search for 'manager-approval' to locate call
-// sites in the manager layer).
-async function handleManagerApproval(req: CommsRequest, _cfg: AshlrConfig): Promise<void> {
+/** Max characters to send for a diff preview via iMessage. */
+const MAX_DIFF_SMS = 1500;
+
+/** Scrub common secret patterns from text before sending via iMessage. */
+function scrubDiffSecrets(text: string): string {
+  return text
+    .replace(/\b(sk-[A-Za-z0-9]{20,})\b/g, '[REDACTED]')
+    .replace(/\b(ghp_[A-Za-z0-9]{20,})\b/g, '[REDACTED]')
+    .replace(/\b(ASHLR_[A-Z_]+=\S+)/g, '[REDACTED]')
+    .replace(/(password|secret|token|api[-_]?key)\s*[:=]\s*\S+/gi, '$1=[REDACTED]');
+}
+
+async function handleManagerApproval(req: CommsRequest, cfg: AshlrConfig): Promise<void> {
   const idx = req.answerIndex;
   if (typeof idx !== 'number') return;
 
+  const proposalId = req.meta?.proposalId;
+  if (typeof proposalId !== 'string' || !proposalId) return;
+
   if (idx === 0) {
-    // Approve — record approval intent (pipeline not yet active)
+    // Approve & merge — flip to approved, then run the existing gate chain.
+    // Mason's text reply is the human gate ON TOP of the automated gates —
+    // autoMergeProposal still runs every gate; we NEVER bypass one.
+    try {
+      const { setStatus, loadProposal } = await import('../inbox/store.js');
+      const proposal = loadProposal(proposalId);
+      if (!proposal) return; // already gone — no-op
+
+      setStatus(proposalId, 'approved', 'mason:imessage');
+
+      const { autoMergeProposal } = await import('../inbox/merge.js');
+      const result = await autoMergeProposal(proposalId, cfg);
+
+      if (result.merged) {
+        await sendIMessage(`✅ Merged "${proposal.title}"`, cfg);
+      } else {
+        const reason = result.reason ?? 'unknown reason';
+        await sendIMessage(
+          `Approved but merge gate blocked: ${reason} — needs manual merge`,
+          cfg,
+        );
+      }
+    } catch {
+      // Best-effort — handler errors must never crash the cycle.
+    }
     return;
   }
 
   if (idx === 1) {
-    // Reject — record rejection intent (pipeline not yet active)
+    // Reject.
+    try {
+      const { setStatus, loadProposal } = await import('../inbox/store.js');
+      const proposal = loadProposal(proposalId);
+      if (!proposal) return;
+      setStatus(proposalId, 'rejected', 'mason:imessage');
+      await sendIMessage(`Rejected "${proposal.title}"`, cfg);
+    } catch {
+      // Best-effort.
+    }
+    return;
+  }
+
+  if (idx === 2) {
+    // Show diff — send scrubbed truncated diff, then re-post the same question.
+    try {
+      const { loadProposal } = await import('../inbox/store.js');
+      const proposal = loadProposal(proposalId);
+      if (!proposal) return;
+
+      const rawDiff = proposal.diff ?? '(no diff available)';
+      const scrubbed = scrubDiffSecrets(rawDiff);
+      const truncated =
+        scrubbed.length > MAX_DIFF_SMS
+          ? scrubbed.slice(0, MAX_DIFF_SMS) + '\n…[truncated]'
+          : scrubbed;
+
+      await sendIMessage(`Diff for "${proposal.title}":\n${truncated}`, cfg);
+
+      // Re-post the approval question so Mason can still decide.
+      const { postRequest } = await import('./requests.js');
+      postRequest({
+        kind: 'manager-approval',
+        type: 'approval',
+        text: req.text,
+        options: req.options,
+        meta: req.meta,
+      });
+    } catch {
+      // Best-effort.
+    }
     return;
   }
 }
@@ -106,7 +183,7 @@ async function handleManagerApproval(req: CommsRequest, _cfg: AshlrConfig): Prom
 // ---------------------------------------------------------------------------
 
 /**
- * Register all M138 resolution handlers. Must be called before runCommsCycle()
+ * Register all M138/M139 resolution handlers. Must be called before runCommsCycle()
  * so that resolved requests fire the correct action. Idempotent (re-registration
  * overwrites the prior handler — safe to call on every cycle entrypoint).
  *

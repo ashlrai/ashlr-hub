@@ -332,9 +332,39 @@ export async function cmdComms(args: string[]): Promise<number> {
       return cmdDigest();
     case 'ask-vision':
       return cmdAskVision();
+    case 'ask-merges':
+      return cmdAskMerges();
     default:
       console.error(`unknown subcommand: ${sub}`);
-      console.error('usage: ashlr comms <status|send-test|cycle|ask|digest|ask-vision>');
+      console.error('usage: ashlr comms <status|send-test|cycle|ask|digest|ask-vision|ask-merges>');
       return 2;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// M139: ask-merges — post ship proposals for approval + run comms cycle
+// ---------------------------------------------------------------------------
+
+async function cmdAskMerges(): Promise<number> {
+  const cfg = await loadConfig();
+
+  if (!commsEnabled(cfg)) {
+    console.error('comms disabled — set cfg.comms.enabled=true and cfg.comms.imessageHandle');
+    return 1;
+  }
+
+  try {
+    const { postShipProposalsForApproval } = await import('../core/comms/merge-requests.js');
+    const { posted } = await postShipProposalsForApproval(cfg);
+    console.log(`ask-merges: posted ${posted} approval request(s)`);
+
+    registerCommsHandlers(cfg);
+    const result = await runCommsCycle(cfg);
+    console.log(`cycle: sent=${result.sent} resolved=${result.resolved}`);
+
+    return 0;
+  } catch (err) {
+    console.error('ask-merges failed:', err instanceof Error ? err.message : String(err));
+    return 1;
   }
 }
