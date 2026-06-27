@@ -143,13 +143,16 @@ function dedupeItems(items: WorkItem[]): WorkItem[] {
 // Deferred import of SCANNERS to avoid a circular-dependency risk and to keep
 // this module importable even before scanners.ts exists (e.g. in tests that
 // only exercise backlogPath/scoreItem/loadBacklog).
-type Scanner = (repo: string) => Promise<WorkItem[]>;
+import type { AshlrConfig } from '../types.js';
+type Scanner = (repo: string, cfg?: Pick<AshlrConfig, 'foundry'>) => Promise<WorkItem[]>;
 
 async function getScanners(): Promise<ReadonlyArray<Scanner>> {
   let builtin: ReadonlyArray<Scanner> = [];
   try {
     const mod = await import('./scanners.js');
-    builtin = mod.SCANNERS as ReadonlyArray<Scanner>;
+    // SCANNERS type in scanners.ts is ReadonlyArray<(repo, cfg?) => ...>, which
+    // matches Scanner here. The cast silences the readonly widening mismatch.
+    builtin = mod.SCANNERS as unknown as ReadonlyArray<Scanner>;
   } catch {
     builtin = [];
   }
@@ -188,26 +191,35 @@ export async function buildBacklog(opts?: {
    * Separate from the M125 listProposals to keep feedback-loop tests isolated.
    */
   listPendingProposals?: () => Proposal[];
+  /** Override the loaded config (tests / programmatic scanner-flag control, e.g. scanTodos). */
+  cfg?: Pick<AshlrConfig, "foundry">;
 }): Promise<Backlog> {
   const repos: string[] = opts?.repos ?? listEnrolled();
   const scanners = await getScanners();
   const now = new Date().toISOString();
+
+  // Load cfg ONCE — used for minItemValue, feedbackEnabled, and scanner flags
+  // (e.g. cfg.foundry.scanTodos). Must be loaded before the scanner loop so
+  // it can be threaded through to each scanner call.
+  let cfg: Pick<AshlrConfig, 'foundry'> | undefined = opts?.cfg;
+  if (!cfg) {
+    try {
+      const { loadConfig } = await import('../config.js');
+      cfg = loadConfig();
+    } catch {
+      cfg = undefined;
+    }
+  }
 
   // Resolve min-value threshold: explicit opt > config > default (2).
   let minValue = opts?.minItemValue;
   // M125: resolve feedbackEnabled from config (default true).
   let feedbackEnabled = true;
   if (minValue === undefined) {
-    try {
-      const { loadConfig } = await import('../config.js');
-      const cfg = loadConfig();
-      minValue = cfg.foundry?.minItemValue ?? 2;
-      // cfg.foundry.feedbackEnabled: absent → true (opt-out by setting false).
-      const rawFeedback = (cfg.foundry as Record<string, unknown> | undefined)?.['feedbackEnabled'];
-      if (rawFeedback === false) feedbackEnabled = false;
-    } catch {
-      minValue = 2;
-    }
+    minValue = cfg?.foundry?.minItemValue ?? 2;
+    // cfg.foundry.feedbackEnabled: absent → true (opt-out by setting false).
+    const rawFeedback = (cfg?.foundry as Record<string, unknown> | undefined)?.['feedbackEnabled'];
+    if (rawFeedback === false) feedbackEnabled = false;
   }
 
   const allItems: WorkItem[] = [];
@@ -215,10 +227,12 @@ export async function buildBacklog(opts?: {
   // Repos scanned sequentially to avoid thundering-herd on gh/npm APIs.
   for (const repo of repos) {
     // Scanners within each repo run in parallel; each is bounded + never throws.
+    // cfg is threaded so scanners that consult flags (e.g. scanTodos checks
+    // cfg.foundry.scanTodos) receive the live config rather than undefined.
     const perScannerResults = await Promise.all(
       scanners.map(async (scanner) => {
         try {
-          return await scanner(repo);
+          return await scanner(repo, cfg);
         } catch {
           // Belt-and-suspenders: scanners must not throw, but we catch anyway.
           return [] as WorkItem[];

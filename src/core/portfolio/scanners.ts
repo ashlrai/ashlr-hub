@@ -1378,7 +1378,7 @@ export async function scanLint(repo: string): Promise<WorkItem[]> {
 // SCANNERS — all eight, exported as a ReadonlyArray
 // ---------------------------------------------------------------------------
 
-export const SCANNERS: ReadonlyArray<(repo: string) => Promise<WorkItem[]>> = [
+export const SCANNERS: ReadonlyArray<(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>) => Promise<WorkItem[]>> = [
   scanIssues,
   scanTodos,
   scanTests,

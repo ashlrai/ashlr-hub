@@ -132,7 +132,7 @@ describe('H1 full chain — enroll -> tick -> sandbox -> proposal -> approve -> 
     await withTmpHome(async (fx) => {
       const repo = setupEnrolledRepo(fx);
 
-      const backlog = await buildBacklog({ repos: [repo.dir] });
+      const backlog = await buildBacklog({ repos: [repo.dir], cfg: { foundry: { scanTodos: true } } });
 
       if (todoScannerAvailable()) {
         const todoItems = backlog.items.filter((i) => i.source === 'todo');
