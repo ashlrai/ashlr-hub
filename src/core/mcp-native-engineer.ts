@@ -64,6 +64,8 @@ import {
 import { assertMayMutate, killSwitchOn } from './sandbox/policy.js';
 import { audit } from './sandbox/audit.js';
 import { withToolEnv } from './env-bridge.js';
+import { applyEdit } from './run/diff.js';
+import { detectVerifyCommands, runVerifyCommand } from './run/verify-commands.js';
 
 // ---------------------------------------------------------------------------
 // Constants — bounds keep a tool reply from blowing agent context.
@@ -772,10 +774,10 @@ async function handleWriteFile(
   };
 }
 
-/** edit_file — exact-match string replace (Claude Code edit semantics). */
+/** edit_file — fuzzy-ladder string replace (M140: exact→whitespace→elision→fuzzy). */
 async function handleEditFile(
   args: Record<string, unknown>,
-  _cfg: AshlrConfig,
+  cfg: AshlrConfig,
   eng: EngineerContext,
 ): Promise<unknown> {
   const p = typeof args['path'] === 'string' ? args['path'] : '';
@@ -793,35 +795,85 @@ async function handleEditFile(
   const abs = resolveInside(eng.workspaceRoot, p);
   const original = readFileSync(abs, 'utf8');
 
-  // Count exact occurrences.
-  let count = 0;
-  let idx = original.indexOf(oldString);
-  while (idx !== -1) {
-    count++;
-    idx = original.indexOf(oldString, idx + oldString.length);
+  // replaceAll: use exact multi-occurrence path (unchanged behaviour).
+  if (replaceAll) {
+    let count = 0;
+    let idx = original.indexOf(oldString);
+    while (idx !== -1) { count++; idx = original.indexOf(oldString, idx + oldString.length); }
+    if (count === 0) {
+      throw new Error(`edit_file: old_string not found in "${p}" (0 matches)`);
+    }
+    const updated = original.split(oldString).join(newString);
+    writeFileSync(abs, updated, 'utf8');
+    return { edited: true, path: relative(eng.workspaceRoot, abs) || basename(abs), replacements: count, rung: 'exact' };
   }
 
-  if (count === 0) {
-    throw new Error(`edit_file: old_string not found in "${p}" (0 matches)`);
+  // Strict precision guard (edit_file contract): >1 exact occurrences without
+  // replace_all is ambiguous — error rather than silently editing one (M140.1).
+  {
+    let exactCount = 0;
+    let i = original.indexOf(oldString);
+    while (i !== -1) { exactCount++; i = original.indexOf(oldString, i + oldString.length); }
+    if (exactCount > 1) {
+      throw new Error(`edit_file: old_string is ambiguous in "${p}" (${exactCount} matches); pass replace_all or add more context`);
+    }
   }
-  if (count > 1 && !replaceAll) {
+
+  // Single-replacement path: run the fuzzy ladder (M140).
+  const result = applyEdit(original, oldString, newString);
+
+  if (!result.ok) {
+    // Structured failure: give the model the closest matching window so it can
+    // self-correct without re-reading the whole file.
     throw new Error(
-      `edit_file: old_string is ambiguous in "${p}" (${count} matches); ` +
-      'pass replace_all:true or provide a more specific old_string',
+      `edit_file: old_string not found in "${p}" (0 matches) after exact/whitespace/elision/fuzzy attempts.\n` +
+      (result.hint ?? 'No close match found.')
     );
   }
 
-  const updated = replaceAll
-    ? original.split(oldString).join(newString)
-    : original.replace(oldString, newString);
+  // Ambiguity check for non-exact rungs: if exact count > 1 we would have
+  // caught it above; for fuzzy rungs a unique window was found.
+  writeFileSync(abs, result.updated!, 'utf8');
 
-  writeFileSync(abs, updated, 'utf8');
+  // M140: lint/typecheck-on-edit — fast syntax check after write.
+  // Reject a syntactically broken edit BEFORE spending a test run.
+  const lintResult = runLintOnEdit(abs, eng.workspaceRoot, cfg);
+  if (lintResult !== null && !lintResult.ok) {
+    // Roll back the broken write.
+    writeFileSync(abs, original, 'utf8');
+    throw new Error(
+      `edit_file: edit rejected — typecheck failed after applying to "${p}".\n` +
+      `Fix the syntax error first:\n${lintResult.output.slice(0, 2000)}`
+    );
+  }
 
   return {
     edited: true,
     path: relative(eng.workspaceRoot, abs) || basename(abs),
-    replacements: replaceAll ? count : 1,
+    replacements: 1,
+    rung: result.rung,
   };
+}
+
+/**
+ * M140: Run a fast typecheck (kind='typecheck') on the workspace after an edit.
+ * Returns null when no typecheck command is available (graceful degrade).
+ * Returns { ok, output } otherwise. Never throws.
+ */
+function runLintOnEdit(
+  _editedFile: string,
+  workspaceRoot: string,
+  cfg: AshlrConfig,
+): { ok: boolean; output: string } | null {
+  try {
+    const cmds = detectVerifyCommands(workspaceRoot);
+    const typecheck = cmds.find((c) => c.kind === 'typecheck');
+    if (!typecheck) return null;
+    const r = runVerifyCommand(typecheck, workspaceRoot, cfg, { timeoutMs: 30_000 });
+    return { ok: r.ok, output: r.output };
+  } catch {
+    return null; // graceful degrade — never fail an edit on a lint tool error
+  }
 }
 
 /** bash — execute a command inside the workspace (gated + deny-listed). */

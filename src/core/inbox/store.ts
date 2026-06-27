@@ -30,6 +30,7 @@ import { emitFleetEvent } from '../integrations/pulse-sync.js';
 import type { FleetEvent } from '../integrations/pulse-exporter.js';
 // M119: decisions ledger hook — additive, never-throws, no behavior change.
 import { recordDecision } from '../fleet/decisions-ledger.js';
+import { linkOutcome } from '../fleet/judge-trace.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call-time so tests can relocate HOME)
@@ -401,6 +402,13 @@ export function setStatus(
     } catch {
       // Ledger is best-effort — never disrupts the proposal flow.
     }
+
+    // M141: link the proposal's terminal outcome back to its judge trace —
+    // the credit-assignment signal for judge calibration + distillation. Best-effort.
+    try {
+      if (status === 'applied' || status === 'approved') linkOutcome(id, 'merged');
+      else if (status === 'rejected') linkOutcome(id, 'rejected');
+    } catch { /* never disrupts the proposal flow */ }
 
     // Pulse Map: mirror the lifecycle transition. approved/applied → 'merge',
     // rejected → 'decline', any other → 'proposal'. The raw status is the

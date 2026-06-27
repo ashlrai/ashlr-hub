@@ -245,6 +245,12 @@ async function evalFixture(
 // ---------------------------------------------------------------------------
 
 export async function cmdEval(args: string[]): Promise<number> {
+  // M143: dispatch swe-bench subcommand to its own handler.
+  if (args[0] === 'swe-bench') {
+    const { cmdSweBench } = await import('./eval-swe-bench.js');
+    return cmdSweBench(args.slice(1));
+  }
+
   if (args[0] === '--help' || args[0] === '-h' || args[0] === 'help') {
     printEvalHelp();
     return 0;

@@ -1067,7 +1067,10 @@ export async function runGoal(
 
                 if (apiR.state.status !== 'done') break;
 
-                const titrrResult = titrrTestRun(titrrSandbox.worktreePath, cfg);
+                // M140: realTestLoop flag (default true). When false, skip test execution
+                // and treat as if no test command was found (propose immediately).
+                const realTestLoop = (cfg.foundry as any)?.realTestLoop ?? true;
+                const titrrResult = realTestLoop ? titrrTestRun(titrrSandbox.worktreePath, cfg) : null;
                 if (!titrrResult || titrrResult.ok) {
                   if (!isLastAttempt) {
                     const propR = await runApiModelSandboxed(engineId, apiGoal, cfg, {
@@ -1167,12 +1170,17 @@ export async function runGoal(
               // Run the repo's test command inside the shared sandbox worktree.
               // titrrTestRun returns null when no test command is detected →
               // skip the test step entirely and proceed to propose (graceful degrade).
+              // M140: realTestLoop flag (default true). When false, behave as if no
+              // test command was found — skip test execution entirely (reversible flag).
+              const realTestLoop = (cfg.foundry as any)?.realTestLoop ?? true;
               const testRoot = titrrSandbox?.worktreePath ?? cwd;
-              emit(sink, {
-                kind: 'log',
-                text: `[TITRR] attempt ${titrrAttempt}/${titrrMax}: running tests in ${testRoot}`,
-              });
-              titrrResult = titrrTestRun(testRoot, cfg);
+              if (realTestLoop) {
+                emit(sink, {
+                  kind: 'log',
+                  text: `[TITRR] attempt ${titrrAttempt}/${titrrMax}: running tests in ${testRoot}`,
+                });
+              }
+              titrrResult = realTestLoop ? titrrTestRun(testRoot, cfg) : null;
 
               if (titrrResult === null) {
                 // No test command detected — annotate and stop early.

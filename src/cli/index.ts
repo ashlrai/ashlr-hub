@@ -532,6 +532,14 @@ const loadCommsCmd = lazyCmd(
   'comms command requires src/cli/comms.ts (M137 module not yet built).',
 );
 
+// ─── M142 command loader ────────────────────────────────────────────
+
+const loadBestOfNCmd = lazyCmd(
+  () => import('./best-of-n.js'),
+  (m) => m.cmdBestOfN as Cmd,
+  'best-of-n command requires src/cli/best-of-n.ts (M142 module not yet built).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1805,6 +1813,12 @@ async function main(): Promise<void> {
       case 'comms': {
         const cmdComms = await loadCommsCmd();
         process.exitCode = await cmdComms(rest);
+        break;
+      }
+
+      case 'best-of-n': {
+        const cmdBestOfN = await loadBestOfNCmd();
+        process.exitCode = await cmdBestOfN(rest);
         break;
       }
 

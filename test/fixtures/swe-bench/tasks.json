@@ -1,0 +1,16 @@
+[
+  {
+    "id": "fix-add-off-by-one",
+    "problemStatement": "The add() function in src/math.js returns the wrong result. Fix it so add(2, 3) returns 5.",
+    "repoPath": "__fixture__",
+    "goldTestCommand": "node test.js",
+    "failToPassTests": ["test_add_basic"]
+  },
+  {
+    "id": "fix-greet-missing-name",
+    "problemStatement": "The greet() function in src/greet.js always says 'Hello, World!' regardless of the name argument. Fix it to say 'Hello, <name>!'.",
+    "repoPath": "__fixture__",
+    "goldTestCommand": "node test.js",
+    "failToPassTests": ["test_greet_name"]
+  }
+]

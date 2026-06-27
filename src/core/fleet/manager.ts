@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import type { AshlrConfig, Proposal, QualityMetrics } from '../types.js';
 import { recordDecision } from './decisions-ledger.js';
+import { recordJudgeTrace } from './judge-trace.js';
 import { computeQualityMetrics } from './quality-metrics.js';
 import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
 
@@ -115,10 +116,24 @@ function truncateDiff(diff: string | undefined): string {
 // ---------------------------------------------------------------------------
 
 const JUDGE_SYSTEM = `You are a code-proposal judge for an autonomous engineering fleet.
-Evaluate the proposal and respond with ONLY this JSON object — no prose, no markdown, no explanation before or after:
+Evaluate the proposal using structured chain-of-thought reasoning, then emit the final verdict JSON.
+
+## Required output format
+
+First, write your step-by-step assessment using this exact structure:
+<reasoning>
+VALUE: [1-5] — [one sentence: how much does this improve the codebase?]
+CORRECTNESS: [1-5] — [one sentence: how confident are you the change is correct?]
+SCOPE: [1-5] — [one sentence: blast radius — how many files/systems touched?]
+ALIGNMENT: [1-5] — [one sentence: does this match the repo purpose or north-star?]
+VERDICT: [ship|review|noise|harmful] — [one sentence: why this verdict?]
+RATIONALE: [one sentence summary for the rationale field]
+</reasoning>
+
+Then, on a NEW line immediately after </reasoning>, emit ONLY this JSON — no other text after it:
 {"value":3,"correctness":3,"scope":3,"alignment":3,"verdict":"review","rationale":"one sentence"}
 
-Field definitions:
+## Field definitions
   value       1-5  how much does this improve the codebase? (1=trivial, 5=critical)
   correctness 1-5  how confident are you the change is correct? (1=suspicious, 5=clearly correct)
   scope       1-5  blast radius (1=single line, 5=touches many files / risky)
@@ -131,9 +146,16 @@ Field definitions:
               When in doubt choose review. Never choose noise or harmful speculatively.
   rationale   one sentence explaining your verdict
 
-Example output (copy this exact shape, substitute your values):
+## Example output
+<reasoning>
+VALUE: 4 — Fixes a null-check that prevents a crash in production.
+CORRECTNESS: 5 — The guard is correctly placed and the logic is sound.
+SCOPE: 1 — Single line change in one file, no blast radius.
+ALIGNMENT: 4 — Directly improves reliability, aligned with north-star.
+VERDICT: ship — High value, high correctness, minimal scope.
+RATIONALE: Small null-check prevents crash with no blast radius.
+</reasoning>
 {"value":4,"correctness":5,"scope":1,"alignment":4,"verdict":"ship","rationale":"Small null-check prevents crash with no blast radius."}`;
-
 const JUDGE_RETRY_SUFFIX = `\n\nYour previous response could not be parsed as JSON. Respond with ONLY the JSON object and nothing else. Example: {"value":3,"correctness":3,"scope":3,"alignment":3,"verdict":"review","rationale":"needs inspection"}`;
 
 /**
@@ -175,6 +197,28 @@ ${truncateDiff(proposal.diff)}`;
 }
 
 /** Attempt to extract JSON from a potentially prose-wrapped LLM response. */
+
+/**
+ * Extract the chain-of-thought reasoning block that precedes the verdict JSON.
+ * Looks for text inside <reasoning>...</reasoning> tags; falls back to any
+ * prose that appears before the first "{" in the response.
+ * Returns empty string when no reasoning is found.
+ */
+function extractFullReasoning(raw: string): string {
+  // Primary: <reasoning>...</reasoning> block
+  const tagMatch = raw.match(/<reasoning>([\s\S]*?)<\/reasoning>/i);
+  if (tagMatch?.[1]) return tagMatch[1].trim();
+
+  // Fallback: prose before the first JSON brace
+  const braceIdx = raw.indexOf('{');
+  if (braceIdx > 0) {
+    const prose = raw.slice(0, braceIdx).trim();
+    if (prose.length > 0) return prose;
+  }
+
+  return '';
+}
+
 function extractJson(raw: string): Record<string, unknown> | null {
   // Try direct parse first.
   try {
@@ -261,8 +305,10 @@ export async function judgeProposal(
   const specCtx = await loadSpecForProposal(proposal.repo ?? undefined);
 
   let raw: string;
+  let fullReasoning = '';
   try {
     raw = await client.complete(JUDGE_SYSTEM, buildJudgePrompt(proposal, specCtx));
+    fullReasoning = extractFullReasoning(raw);
   } catch {
     return fallback();
   }
@@ -306,6 +352,17 @@ export async function judgeProposal(
       wouldMerge = false;
     }
   }
+
+
+  // M141: Record full judge trace for calibration / distillation.
+  recordJudgeTrace({
+    proposalId: proposal.id,
+    judgeEngine: (client as { model?: string }).model ?? 'unknown',
+    verdict,
+    scores: { value, correctness, scope, alignment },
+    fullReasoning,
+    promptContext: `${proposal.title} | ${proposal.kind} | engine:${proposal.engineModel ?? 'unknown'}${specCtx ? ' | vision:true' : ''}`,
+  });
 
   return { proposalId: proposal.id, verdict, value, correctness, scope, alignment, rationale, wouldMerge };
 }

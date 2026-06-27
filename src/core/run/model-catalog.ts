@@ -22,7 +22,7 @@ export type ModelCapability =
   | 'general'       // broad competence
   | 'coder'         // code generation, refactoring, lint fixes
   | 'reasoning'     // chain-of-thought, architecture, security analysis
-  | 'long-context'; // ≥100k token context window
+  | 'long-context'; // >=100k token context window
 
 // ---------------------------------------------------------------------------
 // Catalog entry
@@ -35,9 +35,9 @@ export interface ModelEntry {
   engine: EngineId;
   /**
    * Broad tier used to align model selection with engine tier.
-   *  'small'   — ≤7B or dedicated fast/cheap cloud tier (haiku, gpt-mini)
-   *  'mid'     — 8–40B or cloud mid-tier (sonnet, gpt-4o)
-   *  'large'   — 70B+ or cloud frontier (opus, gpt-5.5, deepseek-r1:32b w/ long CoT)
+   *  'small'   -- <=7B or dedicated fast/cheap cloud tier (haiku, gpt-mini)
+   *  'mid'     -- 8-40B or cloud mid-tier (sonnet, gpt-4o)
+   *  'large'   -- 70B+ or cloud frontier (opus, gpt-5.5, deepseek-r1:32b w/ long CoT)
    */
   tier: 'small' | 'mid' | 'large';
   /** USD per million input tokens (0 for local/free). */
@@ -47,9 +47,9 @@ export interface ModelEntry {
   /** What this model is good at. */
   capabilities: ModelCapability[];
   /**
-   * Minimum effort level (1–5) this model is suited for.
+   * Minimum effort level (1-5) this model is suited for.
    * Models with minEffort > 1 are skipped for trivial tasks.
-   * Models with minEffort ≤ 1 handle everything.
+   * Models with minEffort <= 1 handle everything.
    */
   minEffort: 1 | 2 | 3 | 4 | 5;
 }
@@ -59,7 +59,7 @@ export interface ModelEntry {
 // ---------------------------------------------------------------------------
 
 export const KNOWN_MODELS: readonly ModelEntry[] = [
-  // ── Claude (subscription / token-billed via API) ───────────────────────
+  // -- Claude (subscription / token-billed via API) -------------------------
   {
     id: 'claude:opus',
     engine: 'claude',
@@ -88,7 +88,7 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
     minEffort: 1,
   },
 
-  // ── Codex / OpenAI ────────────────────────────────────────────────────
+  // -- Codex / OpenAI -------------------------------------------------------
   {
     id: 'codex:gpt-5.5',
     engine: 'codex',
@@ -99,7 +99,7 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
     minEffort: 2,
   },
 
-  // ── Local — qwen2.5:72b (general large) ───────────────────────────────
+  // -- Local -- qwen2.5:72b (general large) ---------------------------------
   // M132: 'coder' capability removed. qwen2.5-coder:32b is the verified
   // coding specialist (M118 content-parse path confirmed working 2026-06-26).
   // 72b handles general / long-context / fallback; coder:32b owns all
@@ -114,7 +114,7 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
     minEffort: 2,
   },
 
-  // ── Local — qwen2.5-coder:32b (coder specialist) ──────────────────────
+  // -- Local -- qwen2.5-coder:32b (coder specialist) -----------------------
   {
     id: 'local-coder:qwen2.5-coder:32b',
     engine: 'local-coder' as EngineId,
@@ -125,7 +125,7 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
     minEffort: 1,
   },
 
-  // ── Local — deepseek-r1:32b (reasoning / architecture) ────────────────
+  // -- Local -- deepseek-r1:32b (reasoning / architecture) -----------------
   {
     id: 'local-coder:deepseek-r1:32b',
     engine: 'local-coder' as EngineId,
@@ -136,7 +136,7 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
     minEffort: 2,
   },
 
-  // ── Local — small (catch-all tiny model for trivial tasks) ────────────
+  // -- Local -- small (catch-all tiny model for trivial tasks) --------------
   {
     id: 'local-coder:small',
     engine: 'local-coder' as EngineId,
@@ -147,7 +147,7 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
     minEffort: 1,
   },
 
-  // ── NVIDIA NIM — llama-3.1-70b ────────────────────────────────────────
+  // -- NVIDIA NIM -- llama-3.1-70b -----------------------------------------
   {
     id: 'nim:meta/llama-3.1-70b-instruct',
     engine: 'nim' as EngineId,
@@ -158,7 +158,7 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
     minEffort: 2,
   },
 
-  // ── NVIDIA NIM — llama-3.1-8b (fast/cheap NIM) ────────────────────────
+  // -- NVIDIA NIM -- llama-3.1-8b (fast/cheap NIM) -------------------------
   {
     id: 'nim:meta/llama-3.1-8b-instruct',
     engine: 'nim' as EngineId,
@@ -167,6 +167,58 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
     costPerMTokOut: 0.05,
     capabilities: ['fast', 'general'],
     minEffort: 1,
+  },
+
+  // =========================================================================
+  // M144: 2026 local-model upgrade — llama-server engine
+  // =========================================================================
+  //
+  // llama-server (llama.cpp) with EAGLE-3 speculative decoding + continuous
+  // batching + prefix-cache delivers ~1.5-2.5x throughput vs single-slot Ollama
+  // on Apple Silicon at zero quality cost.
+  //
+  // Engine id: 'llama-server' (api-model, OpenAI-compat at localhost:8080/v1)
+  // Default base URL: http://localhost:8080/v1 (override: cfg.models.llamaServer.baseUrl)
+  //
+  // -- llama-server: qwen3-coder-next (2026 flagship local coder) -----------
+  // qwen3-coder-next: 80B-A3B MoE (active 3B), q4 quant ~52 GB — fits 128 GB Mac.
+  // Supersedes qwen2.5-coder:32b as the best local coding model (2026).
+  // Context window: 128k. Capabilities: coder + long-context.
+  {
+    id: 'llama-server:qwen3-coder-next',
+    engine: 'llama-server' as EngineId,
+    tier: 'large',
+    costPerMTokIn: 0,
+    costPerMTokOut: 0,
+    capabilities: ['coder', 'long-context'],
+    minEffort: 1,
+  },
+
+  // -- llama-server: qwen3-coder-30b-a3b (lighter MoE coder) ---------------
+  // ~18 GB q4 — fits 24 GB GPU or 32 GB Mac. Good coder at lower memory cost.
+  // Context window: 128k. Capabilities: coder.
+  {
+    id: 'llama-server:qwen3-coder-30b-a3b',
+    engine: 'llama-server' as EngineId,
+    tier: 'mid',
+    costPerMTokIn: 0,
+    costPerMTokOut: 0,
+    capabilities: ['coder'],
+    minEffort: 1,
+  },
+
+  // -- llama-server: deepseek-r1-distill-70b (reasoning / judge base) ------
+  // Distilled 70B dense model. Strong chain-of-thought + architecture analysis.
+  // Context window: 128k. Capabilities: reasoning + long-context.
+  // Use as local judge or hard-problem fallback when cloud reasoning is unavailable.
+  {
+    id: 'llama-server:deepseek-r1-distill-70b',
+    engine: 'llama-server' as EngineId,
+    tier: 'large',
+    costPerMTokIn: 0,
+    costPerMTokOut: 0,
+    capabilities: ['reasoning', 'long-context'],
+    minEffort: 2,
   },
 ];
 

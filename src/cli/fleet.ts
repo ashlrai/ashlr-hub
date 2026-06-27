@@ -606,6 +606,8 @@ export async function cmdFleet(args: string[]): Promise<number> {
       return cmdFleetScorecard(rest);
     case 'oversight':
       return cmdFleetOversight(rest);
+    case 'judge-traces':
+      return cmdFleetJudgeTraces(rest);
     default:
       process.stderr.write(red('error: ') + `unknown fleet subcommand: ${sub}\n`);
       printFleetHelp();
@@ -628,6 +630,8 @@ function printFleetHelp(): void {
   console.log(`    ashlr fleet scorecard [--window 7d|30d|all] [--by-engine] [--by-repo] [--json]`);
   console.log(`                          ${cyan('# productivity + quality scorecard (M119)')}`);
   console.log(`    ashlr fleet oversight [--json]    ${cyan('# CEO scorecard: quality + manager + vision + goals (M122)')}`);
+  console.log(`    ashlr fleet judge-traces [--limit N] [--outcome-only] [--json]`);
+  console.log(`                          ` + cyan('# list/inspect judge traces + outcome-link rate (M141)'));
   console.log('');
 }
 
@@ -714,6 +718,129 @@ async function cmdFleetOversight(args: string[]): Promise<number> {
   console.log('  ' + bold('Goals'));
   console.log(`    active: ${g.active}  done: ${g.done}  progress: ${pct(g.progressPct)}`);
   console.log('');
+
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: judge-traces (M141 — judge trace inspector)
+// ---------------------------------------------------------------------------
+
+/**
+ * `ashlr fleet judge-traces [--limit N] [--proposal <id>] [--outcome-only] [--json]`
+ *
+ * Lists judge traces from ~/.ashlr/judge-traces/ with outcome-link rate stats.
+ * READ-ONLY. Never throws.
+ */
+async function cmdFleetJudgeTraces(args: string[]): Promise<number> {
+  const jsonMode = args.includes('--json');
+  const outcomeOnly = args.includes('--outcome-only');
+
+  let limit = 20;
+  const limitIdx = args.indexOf('--limit');
+  if (limitIdx !== -1 && args[limitIdx + 1]) {
+    const parsed = parseInt(args[limitIdx + 1]!, 10);
+    if (!isNaN(parsed) && parsed > 0) limit = parsed;
+  }
+
+  let proposalId: string | undefined;
+  const pidIdx = args.indexOf('--proposal');
+  if (pidIdx !== -1 && args[pidIdx + 1]) {
+    proposalId = args[pidIdx + 1];
+  }
+
+  let traces: import('../core/fleet/judge-trace.js').JudgeTrace[];
+  let stats: Awaited<ReturnType<typeof import('../core/fleet/judge-trace.js').outcomeStats>>;
+  try {
+    const { readJudgeTraces, outcomeStats } = await import('../core/fleet/judge-trace.js');
+    traces = readJudgeTraces({ limit, proposalId, outcomeOnly });
+    stats = outcomeStats();
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'failed to read judge traces: ' +
+        (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  if (jsonMode) {
+    process.stdout.write(JSON.stringify({ traces, stats }, null, 2) + '\n');
+    return 0;
+  }
+
+  console.log('');
+  console.log(bold('  ashlr fleet judge-traces') + dim(' — judge CoT trace store (M141)'));
+  console.log('');
+
+  // Stats summary
+  const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
+  const linkRate = stats.outcomeRate;
+  const linkColor = linkRate >= 0.5 ? green : linkRate >= 0.2 ? yellow : red;
+  console.log(`  ${bold('Traces:')} ${stats.total} total  ${bold('Outcome-linked:')} ${stats.withOutcome} (${linkColor(pct(linkRate))})`);
+
+  if (Object.keys(stats.byVerdict).length > 0) {
+    const parts = Object.entries(stats.byVerdict)
+      .map(([v, s]) => `${v}:${s.total}`)
+      .join('  ');
+    console.log(`  ${dim('by verdict:')} ${parts}`);
+  }
+  if (Object.keys(stats.byOutcome).length > 0) {
+    const parts = Object.entries(stats.byOutcome)
+      .map(([o, n]) => `${o}:${n}`)
+      .join('  ');
+    console.log(`  ${dim('by outcome:')} ${parts}`);
+  }
+  console.log('');
+
+  if (traces.length === 0) {
+    console.log('  ' + dim('No traces found.'));
+    console.log('');
+    return 0;
+  }
+
+  // Trace table
+  const vW = 8;
+  console.log(
+    '  ' + dim('ts'.padEnd(24)) +
+    dim('proposal'.padEnd(26)) +
+    dim('verdict'.padEnd(vW)) +
+    dim('v/c/s/a'.padEnd(10)) +
+    dim('outcome'.padEnd(10)) +
+    dim('reasoning'),
+  );
+  console.log('  ' + dim('-'.repeat(100)));
+
+  for (const t of traces) {
+    const ts = t.ts.replace('T', ' ').replace(/\.\d+Z$/, 'Z');
+    const pid = t.proposalId.length > 24 ? t.proposalId.slice(0, 23) + '…' : t.proposalId.padEnd(24);
+    const verdictStr =
+      t.verdict === 'ship' ? green(t.verdict.padEnd(vW)) :
+      t.verdict === 'noise' ? dim(t.verdict.padEnd(vW)) :
+      t.verdict === 'harmful' ? red(t.verdict.padEnd(vW)) :
+      yellow(t.verdict.padEnd(vW));
+    const scores = `${t.scores.value}/${t.scores.correctness}/${t.scores.scope}/${t.scores.alignment}`.padEnd(10);
+    const outcomeStr = t.outcome
+      ? (t.outcome === 'merged' ? green(t.outcome) : t.outcome === 'reverted' ? red(t.outcome) : dim(t.outcome)).padEnd(10)
+      : dim('—'.padEnd(10));
+    const reasoningSnippet = t.fullReasoning
+      ? dim(t.fullReasoning.replace(/\n/g, ' ').slice(0, 40) + (t.fullReasoning.length > 40 ? '…' : ''))
+      : dim('(none)');
+
+    console.log(
+      '  ' + dim(ts.padEnd(24)) +
+      pid.padEnd(26) +
+      verdictStr +
+      scores +
+      outcomeStr +
+      reasoningSnippet,
+    );
+  }
+
+  console.log('');
+  if (traces.length === limit) {
+    console.log('  ' + dim(`(showing ${limit} traces — use --limit N for more)`));
+    console.log('');
+  }
 
   return 0;
 }

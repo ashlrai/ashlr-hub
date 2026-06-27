@@ -65,6 +65,76 @@ export function phantomInitializedAt(cwd: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// llama-server adapter (M144)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the llama.cpp llama-server base URL.
+ *
+ * Priority order (loose cfg read — no types.ts edit):
+ *   1. cfg.models.llamaServer?.baseUrl  (operator config override)
+ *   2. LLAMA_SERVER_BASE_URL env var
+ *   3. http://localhost:8080/v1          (llama-server OpenAI-compat default)
+ *
+ * Recommended launch command for Apple Silicon (EAGLE-3 speculative decoding,
+ * continuous batching, prefix-cache, 4 parallel slots):
+ *
+ *   llama-server \
+ *     -m <qwen3-coder-next-q4.gguf> \
+ *     -np 4 \
+ *     -cb \
+ *     --cache-prompt \
+ *     --slot-prompt-similarity 0.1 \
+ *     --spec-type draft-eagle3 \
+ *     --model-draft <small-draft.gguf>
+ *
+ * This gives ~1.5–2.5x throughput over single-slot Ollama at zero quality cost
+ * on Apple Silicon. qwen3-coder-next (80B-A3B, q4, ~52 GB) fits a 128 GB Mac.
+ * Default draft model: any sub-4B GGUF (e.g. qwen2.5-coder-1.5b-instruct-q8).
+ */
+export function buildLlamaServerBaseUrl(cfg?: AshlrConfig): string {
+  const cfgModels = (cfg as unknown as Record<string, unknown>)?.['models'] as
+    | Record<string, unknown>
+    | undefined;
+  const cfgLlamaServer = cfgModels?.['llamaServer'] as
+    | { baseUrl?: string }
+    | undefined;
+  return (
+    cfgLlamaServer?.baseUrl?.trim() ||
+    process.env['LLAMA_SERVER_BASE_URL']?.trim() ||
+    'http://localhost:8080/v1'
+  );
+}
+
+/**
+ * Synthesise an inline EngineSpec for llama-server.
+ *
+ * llama-server speaks the same OpenAI-compatible /v1/chat/completions protocol
+ * as Ollama — so it reuses the runApiModelSandboxed path in sandboxed-engine.ts
+ * unchanged. No envKey (local, no API key needed); probe via GET /v1/models like
+ * Ollama. Not registered in engine-registry.ts (file-ownership bounds for M144).
+ */
+function buildLlamaServerSpec(cfg?: AshlrConfig): {
+  id: string; kind: 'api-model'; tier: 'mid';
+  api: { envKey: string; baseUrlEnv: string; defaultBaseUrl: string; defaultModel: string; protocol: 'openai' };
+  capabilities: string[];
+} {
+  return {
+    id: 'llama-server',
+    kind: 'api-model',
+    tier: 'mid',
+    api: {
+      envKey: '',
+      baseUrlEnv: 'LLAMA_SERVER_BASE_URL',
+      defaultBaseUrl: buildLlamaServerBaseUrl(cfg),
+      defaultModel: 'qwen3-coder-next',
+      protocol: 'openai',
+    },
+    capabilities: ['agent', 'edit', 'tools'],
+  };
+}
+
+// ---------------------------------------------------------------------------
 // engineInstalled
 // ---------------------------------------------------------------------------
 
@@ -74,6 +144,7 @@ export function phantomInitializedAt(cwd: string): boolean {
  * - 'claude'  => checks for 'claude' binary.
  * - 'aw'      => checks for 'aw' binary.
  * - 'ashlrcode' => checks for 'ac' (primary alias) or 'ashlrcode'.
+ * - 'llama-server' => probes http://localhost:8080/v1/models (M144).
  *
  * Best-effort, never throws.
  */
@@ -96,19 +167,25 @@ export function resolveBinAbsolute(bin: string): string {
 
 export function engineInstalled(engine: EngineId, cfg?: AshlrConfig): boolean {
   if (engine === 'builtin') return true;
-  const spec = resolveEngineSpec(engine, cfg);
+  // M144: llama-server is not in the built-in engine registry (engine-registry.ts
+  // is outside file-ownership for M144). Synthesise its spec inline so the
+  // api-model probe path (Node http GET /v1/models) applies correctly.
+  const spec = engine === ('llama-server' as EngineId)
+    ? buildLlamaServerSpec(cfg)
+    : resolveEngineSpec(engine, cfg);
   // An OpenAI-compatible api-model is "installed" when:
   //   - envKey is non-empty: the key env var is present (cloud API — key required).
   //   - envKey is empty/absent: probe the endpoint URL synchronously (local engines
   //     like Ollama require no key; "installed" = the server is reachable).
   //     Uses the baseUrlEnv override when set, else the spec's defaultBaseUrl.
   //     A 200 from /v1/models (or any non-connection-refused response) = installed.
-  //     This is a SYNC probe (spawnSync curl) to keep engineInstalled synchronous
-  //     and pure-ish; failures / missing curl fall back to false (safe default).
+  //     This is a SYNC probe (spawnSync node) to keep engineInstalled synchronous
+  //     and pure-ish; failures fall back to false (safe default).
   if (spec?.kind === 'api-model') {
     const key = spec.api?.envKey;
     if (key) return Boolean(process.env[key]?.trim());
-    // No key → local endpoint probe (e.g. Ollama at http://localhost:11434/v1).
+    // No key -> local endpoint probe (e.g. Ollama at http://localhost:11434/v1,
+    // or llama-server at http://localhost:8080/v1).
     // Uses Node's built-in http/https — no curl dependency, works inside any
     // confined subprocess that inherits the Node runtime (M117).
     const baseUrlEnv = spec.api?.baseUrlEnv;
@@ -120,7 +197,7 @@ export function engineInstalled(engine: EngineId, cfg?: AshlrConfig): boolean {
       const transport = url.protocol === 'https:' ? https : http;
       let reachable = false;
       // Synchronous-style probe via a shared-nothing child process that exits
-      // with code 0 on any HTTP response (connection refused → code 1).
+      // with code 0 on any HTTP response (connection refused -> code 1).
       // We avoid a full async refactor of engineInstalled by using spawnSync
       // with a Node one-liner that uses the built-in http module (no curl).
       const probe = spawnSync(
@@ -169,6 +246,7 @@ export function engineInstalled(engine: EngineId, cfg?: AshlrConfig): boolean {
  *   claude:     bin='claude', args=['-p', G, '--model', M, '--output-format', 'json']
  *   aw:         bin='aw',     args=['auto', G, '--cwd', D] [+ '--model', M when given]
  *   ashlrcode:  bin='ac',     args=['--goal', G]
+ *   llama-server: null (api-model -- no CLI argv, runs via runApiModelSandboxed)
  */
 export function buildEngineCommand(
   engine: EngineId,
@@ -177,8 +255,10 @@ export function buildEngineCommand(
   opts?: { cwd?: string; model?: string; autonomous?: boolean },
 ): EngineCommand | null {
   // M50: argv is driven by the declarative engine registry (single source of
-  // truth). The builtin engine and api-model engines have no CLI argv → null
+  // truth). The builtin engine and api-model engines have no CLI argv -> null
   // (api-models run through the in-process loop + provider client, not a spawn).
+  // M144: llama-server is api-model -- always returns null (no CLI argv).
+  if (engine === ('llama-server' as EngineId)) return null;
   const spec = resolveEngineSpec(engine, cfg);
   if (!spec || spec.kind !== 'cli-agent' || !spec.argv) return null;
 
@@ -224,7 +304,7 @@ export function phantomWrap(cmd: EngineCommand, _cfg: AshlrConfig): EngineComman
  * - Never throws; failures reported as { ok: false, error }.
  *
  * GUARDRAIL: MUST NOT be called against a real delegated agent during
- * build/integrate/verify — unit tests assert argv builders only.
+ * build/integrate/verify -- unit tests assert argv builders only.
  */
 export function spawnEngine(
   cmd: EngineCommand,
@@ -235,8 +315,8 @@ export function spawnEngine(
     /**
      * M52: optional OS-level sandbox launcher. When present, the engine is
      * spawned as `launcher.bin [...launcher.prefixArgs, cmd.bin, ...cmd.args]`
-     * (the phantomWrap, if any, composes BEFORE the launcher — jail wraps the
-     * whole thing). When absent ⇒ exactly v4 behavior (default-off parity).
+     * (the phantomWrap, if any, composes BEFORE the launcher -- jail wraps the
+     * whole thing). When absent => exactly v4 behavior (default-off parity).
      */
     launcher?: { bin: string; prefixArgs: string[] };
   },
@@ -258,23 +338,22 @@ function spawnEngineInner(
 ): { ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string } {
   // Apply phantom-exec wrap when enabled, installed, AND the cwd contains
   // .phantom.toml. Self-authenticating CLIs (claude, codex) run in sandbox
-  // worktrees that have no .phantom.toml — wrapping them is both unnecessary
+  // worktrees that have no .phantom.toml -- wrapping them is both unnecessary
   // and fatal (phantom hard-fails with "No .phantom.toml found"). Skip wrap
   // gracefully; the agent authenticates via its own ~/.claude / ~/.codex.
-  // phantomWrap composes BEFORE the launcher — the OS jail wraps the whole thing.
+  // phantomWrap composes BEFORE the launcher -- the OS jail wraps the whole thing.
   let effective = cmd;
   const wrapCwd = cmd.cwd ?? process.cwd();
   if (cfg.phantom?.enabled && phantomInstalled() && phantomInitializedAt(wrapCwd)) {
     effective = phantomWrap(cmd, cfg);
   } else if (cfg.phantom?.enabled && phantomInstalled() && !phantomInitializedAt(wrapCwd)) {
-    // Audit note: skipping phantom wrap — no .phantom.toml in cwd (engine self-authenticates).
-    process.stderr.write(`[ashlr] phantomWrap skipped for ${cmd.bin}: no .phantom.toml in ${wrapCwd}
-`);
+    // Audit note: skipping phantom wrap -- no .phantom.toml in cwd (engine self-authenticates).
+    process.stderr.write(`[ashlr] phantomWrap skipped for ${cmd.bin}: no .phantom.toml in ${wrapCwd}\n`);
   }
 
   // M52: apply the OS sandbox launcher when provided. The launcher wraps the
   // already-phantom-wrapped command so the jail contains the entire chain.
-  // When absent ⇒ exactly v4 behavior (default-off parity guaranteed).
+  // When absent => exactly v4 behavior (default-off parity guaranteed).
   // Resolve the engine bin to an ABSOLUTE path: sandbox-exec's execvp does not
   // do shell-style PATH resolution, so a bare name ('claude') fails with
   // "execvp() of 'claude' failed: No such file or directory".
@@ -321,14 +400,14 @@ function spawnEngineInner(
         };
       }
     } catch {
-      // Not JSON or unexpected shape — usage stays undefined; caller estimates
+      // Not JSON or unexpected shape -- usage stays undefined; caller estimates
     }
   }
 
   // M45: best-effort usage parse for codex --json (JSONL events). The token-count
   // event shape is not contractually stable across versions, so this is a guarded
   // scan: find any line carrying input/output token counts. Undefined on miss
-  // (caller estimates). ⚠️ Refine in M46 once the event schema is pinned.
+  // (caller estimates). Refine in M46 once the event schema is pinned.
   if (cmd.bin === 'codex' && !usage) {
     for (const line of rawOutput.split('\n')) {
       const trimmed = line.trim();
