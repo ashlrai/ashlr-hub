@@ -1,985 +1,402 @@
 # ashlr-hub
 
-**Autonomous engineering fleet + local-first command center for the Ashlr dev-tool ecosystem.**
-
-One binary that runs a polyglot agent fleet against your enrolled repos in sandboxed isolation, proposes real diffs through a human approval gate, streams a web dashboard (Mission Control), and aggregates every MCP server in your stack — without touching a branch until you say so.
+**An autonomous engineering fleet that builds, maintains, and improves your repos — proposal-only, sandboxed, and gated by model-trust tier.**
 
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![CI](https://github.com/ashlrai/ashlr-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/ashlr-hub/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D20-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%3E%3D22-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org)
 
 ---
 
 ## What is this?
 
-ashlr-hub is two things in one binary:
+ashlr-hub is a single Node binary that runs an autonomous agent fleet against your enrolled repositories.
 
-**Autonomous engineering fleet.** Enroll repos, start the daemon, and it continuously pulls high-value backlog items, dispatches sandboxed agent swarms (Claude, Codex, local models, NIMs), and deposits proposed diffs into an Approval Inbox. Nothing is applied until you explicitly approve it.
+The fleet scans your backlog, dispatches sandboxed agent swarms across multiple backends (local Ollama/LM Studio, Claude Code, Codex, any OpenAI-compatible API), and deposits proposed diffs into an **Approval Inbox**. Nothing touches a branch until you explicitly approve it. The kill-switch is a single file.
 
-**Local unifying harness.** One CLI and web dashboard that indexes every enrolled project, aggregates all your MCP servers into a single gateway, tracks real spend across engines, and provides `ashlr run` / `ashlr swarm` for ad-hoc work.
-
-### Key features
-
-| Feature | What it does |
-|---------|-------------|
-| **Autonomous daemon** | `ashlr daemon start` — continuous operator; proposal-only, sandboxed, enrollment-gated |
-| **Mission Control** | `ashlr serve` — web dashboard at `http://127.0.0.1:7777` with live fleet status, pulse analytics, inbox |
-| **Multi-engine routing** | Claude · Codex · local (Ollama/LM Studio) · NIMs · ashlrcode — per-task backend selection with quota and cost tracking |
-| **Human approval gate** | All proposals land in `ashlr inbox`; nothing is auto-applied; kill switch halts everything instantly |
-| **Pulse analytics** | Rolling activity rollup (1d/7d/30d) — commits, spend, proposals, swarms |
-| **Genome memory** | Structured playbook built from every completed run; injected into future agent context |
-| **Cross-platform desktop app** | Native macOS/Windows/Linux app wrapping Mission Control — see [Download](#download-the-desktop-app) |
-| **Plugin system** | Extend with custom scanners, templates, providers, and CLI commands |
+It is also a local unifying harness: one CLI and web dashboard that indexes your enrolled projects, aggregates all your MCP servers into a single gateway, tracks real spend, and provides `ashlr run` / `ashlr swarm` for ad-hoc work.
 
 ---
 
-## Download the desktop app
+## What makes it different
 
-The Tauri desktop app wraps Mission Control in a native window, manages the daemon lifecycle, and lives in your system tray. No separate Node.js install required — the ashlr binary is bundled inside.
+Most AI coding tools are request-response: you ask, the model answers. ashlr-hub runs a **continuous autonomous loop**:
 
-**Download from GitHub Releases:**
-[https://github.com/ashlrai/ashlr-hub/releases](https://github.com/ashlrai/ashlr-hub/releases)
-
-| Platform | File | Notes |
-|----------|------|-------|
-| macOS | `.dmg` | Double-click to install |
-| Windows | `.msi` / `.exe` | Run the installer |
-| Linux | `.deb` | `sudo dpkg -i ashlr_*.deb` |
-
-Releases are built by `.github/workflows/release-desktop.yml` on every `desktop-v*` tag and are currently unsigned:
-
-- **macOS:** Gatekeeper blocks unsigned apps on first launch. Right-click (or Control-click) the `.app` and choose **Open**, then confirm. This is a one-time step.
-- **Windows:** SmartScreen may show a warning. Click **More info → Run anyway**.
-- **Linux:** No warning; `.deb` installs normally.
-
-**First launch** automatically runs `ashlr setup --yes` — writes config, detects engines, installs the daemon — then opens Mission Control. No terminal needed.
-
-To force re-setup: `rm ~/.ashlr/.desktop-initialized`.
-
-See [`desktop/README.md`](./desktop/README.md) for build-from-source instructions.
-
----
-
-## Quickstart (CLI)
-
-Requires **Node.js 20+**.
-
-```sh
-npm install -g @ashlr/hub   # published to npm — https://www.npmjs.com/package/@ashlr/hub
-ashlr setup                 # guided first-run wizard: config, engines, daemon, repo enrollment
-ashlr serve                 # open Mission Control at http://127.0.0.1:7777
+```
+End-State Spec (your vision)
+  → Elon Strategist (decomposes spec into strategic goals)
+    → Goals + milestone planner (concrete ordered work)
+      → Fleet supervisor (24/7 dispatch to enrolled repos)
+        → Backend router (routes each item to the right engine by tier)
+          → Sandboxed swarm (throwaway worktree, push severed, diff-only capture)
+            → Manager judge (frontier model scores every proposal)
+              → Tiered-trust merge gate (local→proposal-only; mid→branch; frontier→main)
+                → Approval Inbox (human gate — nothing auto-applies by default)
+                  → Comms channel (Telegram/iMessage for approve-by-text)
+                    → Scorecard feedback (outcomes feed learned routing)
 ```
 
-See [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) for the full zero-to-running walkthrough.
+**What this unlocks:**
 
-<details>
-<summary>From a git checkout (contributors)</summary>
+- The fleet works your backlog while you sleep.
+- You review proposals with `ashlr inbox`, not a chat window.
+- High-confidence work (verified, frontier-authored) can optionally reach `main` without a manual approve — but only after CI passes and HMAC-signed provenance checks out. This is off by default.
+- Adding a new backend (a NIM, a local Qwen, a different API) is one config entry, no code change.
 
-```sh
-git clone https://github.com/ashlrai/ashlr-hub.git
-cd ashlr-hub
-npm ci && npm run build
-./install.sh        # symlinks ashlr into ~/.local/bin (idempotent)
-ashlr setup
-```
-</details>
+**Key properties:**
+
+- **Proposal-only floor.** The daemon can never apply, push, or deploy anything. The only path to a real branch is `ashlr inbox approve`.
+- **Tiered-trust merge gate.** Local-model proposals stay proposals. Frontier models (Claude Opus, Codex GPT) can earn a gated path to `main` — only after CI is green and provenance is HMAC-verified. Default off.
+- **Sandboxed by construction.** Every external agent CLI runs in a throwaway git worktree with push credentials severed. Only the scrubbed diff escapes.
+- **OS-level confinement.** Optionally wraps each run with `sandbox-exec` (macOS) or `bwrap`/`firejail` (Linux) — read-jailed to the worktree, network egress blocked.
+- **Kill-switch.** `touch ~/.ashlr/KILL` — all mutating operations refuse immediately, across every backend and repo.
+- **Zero runtime dependencies.** The entire `core/` and `cli/` tree runs on Node builtins + `@modelcontextprotocol/sdk`. Backends are CLIs or APIs you already have.
+- **Self-improving.** The fleet can target its own source, but a self-authored diff is ineligible to merge unless the full invariant suite passes flag-off and flag-on, and any diff that weakens a safety test is refused by construction.
 
 ---
 
-## Getting started
+## Quickstart
 
-Requires **Node.js 20+**. Works on macOS, Linux, and Windows.
+### Requirements
+
+- Node.js 22+
+- Git
+- At least one backend: Ollama running locally, `claude` CLI, `codex` CLI, or an `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
+
+### Install
 
 ```sh
 npm install -g @ashlr/hub
-ashlr init                  # onboarding: config, models, editors, genome, doctor
+ashlr --version
 ```
 
-`ashlr update` is channel-aware: an npm install checks the registry; a git checkout updates via `git pull --ff-only` + rebuild.
-
-`ashlr init` is the original onboarding entry point: it walks through config, local model detection, editor MCP wiring, genome dir, and Phantom status — then runs `ashlr doctor` as a final gate. Re-runnable and fully idempotent.
-
-For the newer guided wizard that also handles daemon installation and repo enrollment, use `ashlr setup` (see [Quickstart](#quickstart-cli) above).
-
-```
-$ ashlr init
-  config     ok   ~/.ashlr/config.json present
-  models     detected   ollama: llama3:8b, mistral:7b
-  editors    detected   claude, cursor (run --wire to register MCP gateway)
-  symlink    ok   ashlr -> ~/.local/bin/ashlr
-  genome     ok   ~/.ashlr/genome/ ready
-  phantom    detected   logged in as mason · tier pro · team evero
-  doctor     ok   all checks pass
-
-you're set up — try: ashlr run / ashlr swarm / ashlr tui
-```
-
-**Optional flags:**
+Or from source:
 
 ```sh
-ashlr init --wire        # also wire the MCP gateway into every detected editor
-ashlr init --wire --yes  # fully non-interactive (CI-safe)
-ashlr init --json        # emit OnboardResult as JSON
+git clone https://github.com/ashlrai/ashlr-hub
+cd ashlr-hub
+./install.sh   # builds dist/, symlinks bin/ashlr → ~/.local/bin/ashlr
 ```
 
-`--wire` is the only mutating optional step. It uses the same backup-first, idempotent `wireEditor` path as `ashlr wire`. `ashlr init` **never** auto-downloads models, modifies secrets, or touches shell profiles.
+`install.sh` requires Node 22+ and is idempotent — safe to re-run after pulling updates.
 
-<details>
-<summary>Manual install (no script)</summary>
+### 1. Run the setup wizard
 
 ```sh
-npm run build
-chmod +x bin/ashlr
-ln -sf "$(pwd)/bin/ashlr" ~/.local/bin/ashlr
-ashlr help
+ashlr setup
 ```
-</details>
 
----
+Detects local model servers, editors, Phantom Secrets, installs the daemon as an OS service (launchd/systemd), and auto-discovers repos to enroll. Idempotent.
 
-Direction and design principles: [`docs/ROADMAP.md`](./docs/ROADMAP.md).
+### 2. Enroll a repo
 
----
-
-## The Ashlr ecosystem
-
-ashlr-hub is the **front door and local harness** that ties the open-source Ashlr
-dev-tool ecosystem together — one CLI that drives every tool below for both the
-agent and the human operator. Each is great on its own; the hub makes them one
-workflow.
-
-| Tool | What it is | How the hub leverages it |
-|---|---|---|
-| [**phantom-secrets**](https://github.com/ashlrai/phantom-secrets) ⭐11 | Stop AI agents leaking API keys — a local proxy swaps real secrets for `phm_` tokens | Engines run under `phantom exec`; api-model keys resolve from the vault; phantom's MCP tools are aggregated into the hub gateway |
-| [**ashlrcode**](https://github.com/ashlrai/ashlrcode) ⭐5 | Multi-provider AI coding agent CLI (30 tools, autopilot) | A first-class fleet engine (`ac`) the conductor can route work to |
-| [**ashlr-stack**](https://github.com/ashlrai/ashlr-stack) ⭐2 | Control plane for your dev stack — provisions + wires 23 providers | `ashlr stack` (status/recommend/apply, confirm-gated) + an onboarding step |
-| [**ashlr-plugin**](https://github.com/ashlrai/ashlr-plugin) ⭐2 | Token-efficient Read/Grep/Edit for Claude Code ([`@ashlr/core-efficiency`](https://github.com/ashlrai/ashlr-core-efficiency)) | The efficiency layer; its MCP tools aggregate through the hub gateway |
-| [**binshield**](https://github.com/ashlrai/binshield) ⭐2 | Snyk for binaries — decompile + AI + YARA supply-chain scan | The `security` work-scanner backend + the Mission Control security panel |
-| [**ashlr-md**](https://github.com/ashlrai/ashlr-md) ⭐2 | AI-native Markdown app for macOS | Renders proposals & digests beautifully — `ashlr inbox show <id> --open`, `ashlr digest --open` |
-| [**ashlr-workbench**](https://github.com/ashlrai/ashlr-workbench) ⭐2 | Local agent workbench (OpenHands · Goose · Aider · ashlrcode) | The `aw` fleet engine |
-| [**ashlr-pulse**](https://github.com/ashlrai/ashlr-pulse) ⭐1 | Shared mission control for agentic-engineering teams | Opt-in hub→pulse OTLP bridge — `ashlr pulse connect` |
+The fleet only works repos you have explicitly enrolled. Nothing is scanned until you add one.
 
 ```sh
-ashlr mcp ecosystem --write   # register the installed ecosystem MCP servers into the hub gateway
-ashlr mcp list                # one endpoint: every ecosystem tool + the native ashlr_* tools
-```
-
----
-
-## Plugins (M33) — extend the hub without forking it
-
-Drop a plugin under `~/.ashlr/plugins/<name>/` (a `manifest.json` + an ESM
-entry) to contribute **backlog scanners**, **project templates**, **model
-providers**, or **CLI commands** (`ashlr x <name>`). Plugins are
-**default-off**: discovery reads manifests only, enabling is confirm-gated and
-pins the entry file's sha256, capability declarations are enforced, every
-plugin action is audited, and the kill switch / `ASHLR_NO_PLUGINS=1` shut the
-whole layer off. Typed authoring via `@ashlr/hub/plugin`. Full guide + honest
-trust model: [`docs/PLUGINS.md`](./docs/PLUGINS.md).
-
-```bash
-ashlr plugins list              # discovery — never executes plugin code
-ashlr plugins enable <name>     # confirm + integrity pin
-ashlr x <name> [...]            # run a plugin command
-```
-
-ashlr is also a library: `npm install @ashlr/hub` and import the curated
-surface (`@ashlr/hub`, `./core`, `./types`, `./plugin`). Releasing:
-[`docs/RELEASING.md`](./docs/RELEASING.md).
-
----
-
-## Agent-native surface (M31) — use ashlr from inside agent sessions
-
-ashlr's intelligence is reachable from any coding agent (Claude Code, Cursor, …)
-two ways — **CLI-first** (stable `--json` shapes, exit-code discipline) or via
-the MCP gateway, which now serves 11 native `ashlr_*` tools alongside every
-aggregated downstream server:
-
-```bash
-ashlr orient --repo <path> --json   # session-start context: memory + health + backlog + inbox
-ashlr docs --agent                  # the full agent cheat sheet (llms.txt-style)
-ashlr wire --claude-md              # ready-to-paste CLAUDE.md snippet
-ashlr wire claude                   # register the MCP gateway (native tools included)
-ashlr completions zsh|bash          # shell completions
-```
-
-Native MCP tools: `ashlr_orient`, `ashlr_ask`, `ashlr_recall`, `ashlr_learn`,
-`ashlr_backlog`, `ashlr_health`, `ashlr_status`, `ashlr_impact`, `ashlr_pulse`,
-`ashlr_inbox_list`, `ashlr_inbox_propose`. Safety is structural: reads are
-always available, writes are append-only (genome hub) or proposal-only (inbox,
-PENDING, human-approved), every call is audited and secret-scrubbed, the kill
-switch gates all writes, and there is **no agent-reachable approve/apply path**
-by design. Contract: [`docs/contracts/CONTRACT-M31.md`](./docs/contracts/CONTRACT-M31.md).
-
----
-
-## Ashlr v2 — Autonomous Engineering Organization
-
-Across M21–M30, ashlr-hub grew a second pillar on top of the local command center: a **safety-first autonomous engineering organization** that discovers work across your portfolio, drafts it in isolation, and funnels every outward action through a single human gate. It is **proposal-only by default, sandboxed, and enrollment-scoped** — the daemon and swarms can *only propose*; nothing is ever applied to a real repo, branch, or remote without your explicit approval. Default enrollment is **empty**, so out of the box it does nothing until you opt a repo in. M30 closes the pillar with **cloud-ready seams**: every v2 store sits behind a clean interface with a working LOCAL implementation today and a GATED cloud stub for the future — so a team/multi-machine backbone is a drop-in later, never an accidental flip. Cloud/team remains a human gate (explicit opt-in, not implemented); there is no config flag and no code path that activates a cloud backbone. See [`docs/SEAMS.md`](./docs/SEAMS.md).
-
-### The v2 command surface
-
-| Command | What it does |
-|---|---|
-| `ashlr enroll add/remove/list` | Manage the repo enrollment registry. Default is **empty** — nothing is touched until you enroll it. |
-| `ashlr enroll kill on\|off` | Toggle the global hard kill switch (`~/.ashlr/KILL`). Checked first on every mutating call; cannot be bypassed. |
-| `ashlr knowledge build` | Index enrolled repos locally (read-only, secret-scrubbed) for portfolio RAG. |
-| `ashlr ask "<question>"` | Local RAG across the indexed portfolio; cites `repo/file:line`. Cloud OFF unless `--allow-cloud`. |
-| `ashlr knowledge impact <target>` | References + dependents of a file/symbol within and across enrolled repos. |
-| `ashlr knowledge graph` | Print the cross-repo knowledge graph (repos, modules, deps, cross-repo findings). |
-| `ashlr backlog [refresh]` | Scored work queue across enrolled repos (issues, TODOs, tests, deps, docs, security). |
-| `ashlr reflect [--since <Nd>]` | Score your own past runs/swarms locally; report effectiveness/cost deltas (read-only). |
-| `ashlr health [<repo>]` | Score every enrolled repo on quality (tests/docs/deps/security/debt/CI/conventions); ranked, read-only. |
-| `ashlr goals add/plan/advance/status` | Register high-level objectives; decompose into milestones; advance via sandboxed proposal-only swarms. |
-| `ashlr daemon start/stop/status` | Autonomous operator: each tick pulls top backlog items, runs sandboxed swarms, deposits PENDING proposals. |
-| `ashlr inbox [show\|approve\|reject]` | Approval inbox — the single outward-action gate. `approve` is the **only** path that applies anything. |
-| `ashlr digest [--notify]` | Write an org-level portfolio digest (health, goals, costs) to `~/.ashlr/digests/`. Read-only. |
-| `ashlr seams [status\|--json]` | List the v2 cloud-ready seams: active impl (`local`) + cloud availability (`gated`). Read-only. |
-
-`reflect`, `health`, `goals advance`, and any daemon/swarm work emit their suggestions as **PENDING inbox proposals** — they never auto-apply.
-
-### v2.1 "Harden & Prove" — watch, verify, and activate with confidence
-
-v2.1 adds **no new outward capability**. It makes the existing autonomous org *watchable, self-checking, and documented* so activation is a confident, evidence-backed decision. Every command below is read-only or runs entirely on a disposable throwaway repo.
-
-| Command | What it does |
-|---|---|
-| `ashlr verify-safety [--json]` | Read-only self-check of the hard safety invariants (enrollment, kill-switch, daemon, secret-scrub, cloud-gate). Mutates nothing. (H4) |
-| `ashlr sandbox gc` | Reclaim leftover/orphaned sandbox worktrees (stale only — never a live in-flight one). (H5) |
-| `ashlr audit [N] [--action <verb>] [--result <r>] [--since <when>]` | Tail the append-only audit trail (newest-first); filter by action/result/since. Read-only. (H6) |
-| `ashlr preflight [--json]` | Read-only first-activation readiness check → `ready=true\|false` + blockers/warnings (model, enrollment, kill, daemon, writeable, sandbox, git, phantom). Mutates nothing. (H7) |
-| `ashlr onboard [--rollback <repo>]` | Guided first safe activation: preflight → enroll ONE repo → dry-run PLAN → point at `ashlr inbox`. Never auto-applies; `--rollback` undoes it (unenroll + sweep). (H7) |
-| `ashlr demo [--no-cleanup] [--json]` | **Watchable**, reproducible full-chain run on a **DISPOSABLE** throwaway repo in an isolated tmp context — enroll → backlog → tick → PENDING proposal → inbox review → rollback. Proposal-only; **always auto-cleans**; never touches your real portfolio or `~/.ashlr`. `--no-cleanup` keeps the tmp dir (still tmp) for inspection. (H8) |
-
-See **[`docs/RELIABILITY.md`](./docs/RELIABILITY.md)** for failure modes, recovery, and the honest limits behind each guarantee.
-
-### Activation — the human gate
-
-> **Status: not activated by default.** Enrollment ships **empty** (`{repos:[]}`) — the daemon, backlog, and health/knowledge scans have nothing to operate on, so out of the box **nothing autonomous runs**. Activation is *your* explicit decision; the steps below are the only thing that opts a repo in. Everything is reversible.
-
-#### What you're trusting (proven, not asserted)
-
-Each guarantee below has a permanent regression test. Run `ashlr verify-safety` any time to re-assert the live structural guards (currently 5/5), and `ashlr demo` to *watch* the whole chain run safely on a throwaway repo before you trust it on a real one.
-
-| Guarantee | Proven by |
-|---|---|
-| **Proposal-only** — nothing pushes / merges / opens a PR / deploys / applies without your explicit `inbox approve` | H1 chain harness + H4 proposal-only suite; the daemon imports no outward primitive (grep-guarded) |
-| **Sandboxed** — autonomous code work happens only in isolated git worktrees, never your tree | H1 (working tree byte-identical across the whole chain); H4 sandbox-required + containment |
-| **Enrollment-gated** — only repos you `enroll` are touched; default empty ⇒ nothing runs | H4 enrollment suite; H5 `allowAnyRepo` env-gate (no stray flag can bypass) |
-| **Kill switch always wins** — `ashlr enroll kill on` halts everything immediately | H4 kill-switch suite; checked first / unconditional on every mutating call |
-| **Crash-safe** — restart never double-spends, never strands a proposal, reclaims orphan sandboxes | H2 crash-recovery; H5 orphan-sweep at daemon start |
-| **Budget-bounded** — hard daily $ cap. *Honest caveat:* under `parallel>1`, spend can overshoot by ≤(parallel−1)×per-item (default parallel=2 ≈ 1 extra) before the in-tick stop | H3 budget stress |
-| **Local-first** — code never leaves your machine to a cloud model by default | H4 local-first suite; `verify-safety` cloud-gate check |
-| **Fully audited** — every enroll / unenroll / kill / proposal / apply / daemon action is logged | H6 audit completeness; view with `ashlr audit` |
-
-For the full failure-mode + recovery catalogue and the honest limits, see **[`docs/RELIABILITY.md`](./docs/RELIABILITY.md)**.
-
-#### Do this when ready — start with ONE low-stakes repo
-
-```sh
-# 0. Confirm the machine is ready (read-only).
-ashlr preflight                          # ready=true + no blockers? (local model, writeable, kill off, …)
-ashlr verify-safety                      # structural safety guards pass (5/5)
-ashlr demo                               # OPTIONAL: watch the full chain run safely on a DISPOSABLE repo
-
-# 1. Enroll ONE repo — your explicit gate, the ONLY thing that opts a repo in.
-ashlr enroll add ~/path/to/one-repo
-ashlr enroll list                        # confirm exactly that repo (default was EMPTY)
-
-# 2. Dry-run first — see what it WOULD do, with zero mutation.
-ashlr daemon start --once --dry-run       # prints the plan; touches nothing
-#   (or the guided walkthrough:)  ashlr onboard
-
-# 3. Let it work — proposal-only, sandboxed, budget-capped.
-ashlr daemon start --once                 # one real tick → deposits PENDING proposals
-ashlr daemon status                       # running?, today's spend vs cap, pending count
-
-# 4. Review EVERY proposed change — nothing applies until YOU approve.
-ashlr inbox                               # list pending proposals
-ashlr inbox show <id>                     # read the full diff (read-only)
-ashlr inbox approve <id>                  # confirm + apply on a NEW branch (never your working tree)
-ashlr inbox reject <id>                   # discard; applies nothing
-
-# 5. Observe.
-ashlr audit                               # the full action trail
-ashlr health                              # per-repo health scores
-```
-
-#### Stop / rollback — instant, always available
-
-```sh
-ashlr daemon stop                         # halt now: set kill switch + clear running state
-ashlr enroll kill on                      # same, explicit  (or: touch ~/.ashlr/KILL)
-ashlr enroll remove ~/path/to/one-repo    # un-enroll a repo
-ashlr sandbox gc                          # reclaim any leftover sandbox worktrees
-ashlr onboard --rollback ~/path/to/repo   # one-command undo of a first activation
-```
-
-The daemon will **never** touch a repo you have not enrolled, **never** exceed the budget you set, and **never** apply anything without your approval.
-
-#### Hard limits (be honest with yourself)
-
-- **Single machine, single process.** Multi-daemon / multi-machine is a *gated* cloud seam (M30) — not built. See [`docs/SEAMS.md`](./docs/SEAMS.md).
-- **Local models do the work.** Quality tracks your local model; cloud is opt-in per task (`--allow-cloud`).
-- **Budget overshoot under concurrency is bounded, not zero** (see table above). Keep `daemon.parallel` low (default 2).
-- **A swarm has no hard wall-clock deadline yet** (tracked follow-up). The orphan-sweep uses a conservative 6h staleness so it never reclaims a live worktree.
-
----
-
-## Portfolio intelligence
-
-Ask anything about any enrolled project. The knowledge index, RAG engine, and architecture graph all run **entirely on your machine** — your source code never leaves unless you explicitly pass `--allow-cloud`.
-
-### Quick start
-
-```sh
-# Enroll a repo first (one-time; default enrollment is empty)
 ashlr enroll add ~/path/to/my-project
-
-# Build the knowledge index (reads files; never modifies them)
-ashlr knowledge build
-
-# Ask a question — answer is synthesised locally and every line is cited
-ashlr ask "Where is the authentication middleware and what does it validate?"
-
-# Scope a question to one repo
-ashlr ask "How does error handling work?" --repo ~/path/to/my-project
-
-# See what depends on a file or symbol across all enrolled repos
-ashlr impact src/core/auth/middleware.ts
-
-# Print the cross-repo architecture graph (repos, modules, shared deps)
-ashlr knowledge graph
+ashlr enroll list   # confirm enrollment
 ```
 
-### How it works
+### 3. Dry run — see what would happen, spend nothing
 
-```
-enrolled repos (read-only walk)
-        │
-        ▼
-  chunk + embed (Ollama local / keyword fallback)
-        │
-        ▼
-  ~/.ashlr/knowledge/<repo-hash>/*.jsonl   (chunks + optional vectors)
-        │
-        ▼
-  ashlr ask "<question>"
-        │
-        ▼
-  retrieve top chunks (cosine / TF-IDF)  →  local synthesis  →  cited answer
+```sh
+ashlr daemon start --once --dry-run
 ```
 
-1. `ashlr knowledge build` walks every enrolled repo, splits source files into line-range chunks, and embeds each chunk with the local Ollama model. When no embedding model is available it falls back to keyword/TF-IDF scoring. Only changed files (by mtime) are re-indexed on subsequent runs.
-2. `ashlr ask` retrieves the highest-scoring chunks, feeds them to the local model, and returns a plain-language answer with source citations (`repo/file:line`).
-3. `ashlr knowledge graph` performs static import/dependency analysis and builds a lightweight graph, surfacing cross-repo findings such as the same outdated or vulnerable dependency appearing in multiple projects.
-4. `ashlr impact` traces references to a file or symbol across all enrolled repos — useful before a refactor or before deleting a shared utility.
+Prints what the fleet would work on. Creates no proposals, spends $0.
 
-### Privacy guarantee — LOCAL-FIRST
+### 4. Run one real tick
 
-**Your source code never leaves your machine by default.** The index, embeddings, retrieval, and synthesis steps all use the local provider (Ollama). Cloud models are structurally unreachable on the default path — `--allow-cloud` must be explicitly passed AND a cloud API key must be present. Passing the flag without a key is a no-op; omitting it with a key is also a no-op. Both are required simultaneously.
+```sh
+ashlr daemon start --once
+```
 
-| Default path | With `--allow-cloud` + key |
-|---|---|
-| Embeddings: Ollama (local) | Embeddings: Ollama (local, unchanged) |
-| Synthesis: local model | Synthesis: cloud model |
-| Code sent to cloud: **never** | Code sent to cloud: synthesis context only |
+The fleet scans the backlog, dispatches sandboxed work, and deposits proposals into the inbox.
 
-### Read-only and enrollment-scoped
+### 5. Review proposals
 
-- **Read-only**: `knowledge build`, `ask`, `impact`, and `knowledge graph` never modify any enrolled repo. All writes go to `~/.ashlr/knowledge/` only.
-- **Enrollment-scoped**: only repos you have explicitly enrolled (`ashlr enroll add`) are indexed or queried. Default enrollment is empty — empty knowledge, no whole-portfolio disk scan.
-- **Bounded**: `node_modules/`, `.git/`, `dist/`, and binary files are always skipped. File-count and byte caps are enforced per repo.
-- **No secrets in the index**: `.env` and key files are excluded. Secret-shaped tokens (high-entropy strings matching common key patterns) are redacted from chunks before storing, embedding, or citing. No secret values appear in `~/.ashlr/knowledge/` or in `ashlr ask` answers.
+```sh
+ashlr inbox                # list pending proposals
+ashlr inbox show <id>      # inspect diff + metadata
+ashlr inbox approve <id>   # apply to branch — confirm-gated, never silent
+```
 
-### Commands
+That is the full loop. Nothing touched your branch until step 5.
+
+### Open Mission Control (optional)
+
+```sh
+ashlr serve           # web dashboard at http://127.0.0.1:7777 (localhost only)
+ashlr serve --open    # also opens the browser
+```
+
+The dashboard shows fleet status, all runs and swarms, the inbox, rolling spend analytics, and shared memory.
+
+---
+
+## The autonomous loop
+
+Once repos are enrolled, the higher-level entry point is the goal conductor:
+
+```sh
+ashlr loop               # one tick — advances active goals, then backlog fallback
+ashlr loop --watch       # continuous (Ctrl-C to stop)
+ashlr loop --dry-run     # show what would advance, no proposals
+```
+
+Set a strategic objective and the fleet plans + executes milestones:
+
+```sh
+ashlr goal "harden the inbox apply path"
+ashlr goals list                         # track progress
+ashlr goals advance                      # execute the next milestone
+```
+
+The strategist and vision commands let you define the high-level direction:
+
+```sh
+ashlr vision show       # current end-state spec
+ashlr vision review     # run the Elon strategist → strategic briefing
+ashlr vision approve    # adopt the briefing → evolve spec + create goals
+```
+
+---
+
+## Kill switch
+
+```sh
+touch ~/.ashlr/KILL        # halt all autonomous activity immediately
+rm ~/.ashlr/KILL            # resume
+
+ashlr fleet pause           # same via CLI
+ashlr fleet resume
+ashlr enroll kill on/off    # same via enroll subcommand
+```
+
+The kill-switch is checked before every mutating operation in every backend and repo.
+
+---
+
+## Backends and model tiers
+
+| Tier | Examples | What it can reach |
+|------|----------|-------------------|
+| `local` | Ollama, LM Studio | Proposals only (always) |
+| `mid` | Kimi K2, Hermes, NIM-hosted 70B | Branch/PR (opt-in, `autoMerge.midToBranch`) |
+| `frontier` | Claude Opus, Codex GPT | `main` — only with CI green + signed provenance + `mergeAuthority` config (default off) |
+
+Adding a backend is one entry in `cfg.foundry.engines` — no code change. The backend router uses learned routing (verified-outcome priors + cost estimates) to dispatch each backlog item to the appropriate tier.
+
+---
+
+## Sandboxed execution
+
+Every external agent (Claude Code CLI, Codex, any engine) runs inside a throwaway git worktree:
+
+- `cwd` is the worktree, not your live tree.
+- Git push credentials are severed: env-stripped of `*_TOKEN|SECRET|KEY|PASSWORD|CREDENTIALS`, `GIT_TERMINAL_PROMPT=0`, `SSH_AUTH_SOCK` deleted, `GIT_ASKPASS` emptied, a hard-fail `pre-push` hook injected via `GIT_CONFIG_*` (no shared-config mutation).
+- The agent's own subscription auth (`HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`) is preserved so it can function.
+- Only the scrubbed diff is captured. The agent's own commits die with the sandbox.
+
+On macOS, `cfg.foundry.confinement` wraps the spawn in `sandbox-exec` (read-jailed to worktree + vendor homes, network egress denied). Linux uses `bwrap` or `firejail`. Unsupported platforms fall back to env-only isolation by default; `onUnsupported: 'fail'` makes that a terminal error instead.
+
+Every run and proposal carries HMAC-signed `{engineModel, engineTier}` provenance (M47.1). The merge gate re-verifies the HMAC before any merge-to-main; a forged or tampered record is refused.
+
+---
+
+## Manager judge
+
+```sh
+ashlr manager                    # score pending proposals — shadow mode (never merges)
+ashlr manager --window 30d       # wider quality window
+ashlr manager --apply-rejects    # also reject noise/harmful proposals
+```
+
+The Manager runs a frontier model over pending proposals and produces a quality scorecard (value / correctness / scope / alignment, plus win/concern/recommendation narrative). Shadow mode by default — it records verdicts to `~/.ashlr/manager/<ts>.json` but never merges or rejects anything unless you pass `--apply-rejects`.
+
+---
+
+## Best-of-N (M142)
+
+```sh
+ashlr best-of-n --repo <path> --title "fix the timeout logic" -n 5
+```
+
+Generates N candidate diffs for a backlog item, scores each with the Manager judge as a rubric-supervised critic, prefers candidates that pass the repo's own test suite, and files the winner as the proposal. Configured via `cfg.foundry.bestOfN`.
+
+---
+
+## Comms channel
+
+```sh
+ashlr comms status
+ashlr comms send-test           # verify the channel is wired
+ashlr comms cycle               # send pending + poll replies
+ashlr comms digest              # build oversight snapshot + send summary
+ashlr comms ask-merges          # post pending ship proposals for approve-by-text
+```
+
+Supports **Telegram** (recommended) and macOS iMessage. Configure in `cfg.comms`. The comms layer sits on top of all automated gates — replying to approve in Telegram resolves the human gate; it does not bypass verification or provenance.
+
+---
+
+## Fleet observability
+
+```sh
+ashlr fleet status         # per-backend throughput, queue, proposals, quota, kill state
+ashlr fleet watch          # glanceable monitoring + recent autonomous actions
+ashlr pulse                # rolling activity + spend analytics (1d/7d/30d)
+ashlr audit                # append-only confinement + action audit log
+```
+
+---
+
+## Command reference
 
 | Command | What it does |
-|---|---|
-| `ashlr knowledge build [--repo <path>]` | Index all enrolled repos (or one). Incremental by mtime. |
-| `ashlr ask "<question>" [--repo] [--allow-cloud]` | Local RAG Q&A with cited sources. Cloud OFF by default. |
-| `ashlr knowledge graph [--repo <path>]` | Cross-repo architecture + dependency map. |
-| `ashlr impact <file\|symbol> [--repo <path>]` | What references or depends on this, across enrolled repos. |
+|---------|-------------|
+| `ashlr setup` | Guided first-activation wizard (idempotent) |
+| `ashlr onboard <repo>` | Enroll one repo with walkthrough + dry run |
+| `ashlr enroll add/remove/list` | Manage enrolled repos |
+| `ashlr enroll kill on/off` | Engage/clear the kill-switch |
+| `ashlr daemon start/stop/status` | Autonomous operator (proposal-only) |
+| `ashlr loop [--watch] [--dry-run]` | Goal-aware conductor — one tick or continuous |
+| `ashlr goal "<objective>"` | Set a strategic goal; plan + dispatch milestones |
+| `ashlr goals list/show/plan/advance` | Manage goals + milestones |
+| `ashlr vision show/review/approve` | End-state spec + strategic briefing |
+| `ashlr inbox [show/approve/reject]` | Review and act on proposals |
+| `ashlr swarm "<goal>"` | Multi-agent sandboxed swarm (ad-hoc) |
+| `ashlr run "<goal>"` | Single agent run (ad-hoc) |
+| `ashlr fleet status/watch/pause/resume` | Fleet control plane |
+| `ashlr manager` | Proposal quality scorecard (frontier judge, shadow mode) |
+| `ashlr best-of-n` | Best-of-N candidate generation + critic selection |
+| `ashlr comms status/cycle/digest` | Bidirectional Telegram/iMessage channel |
+| `ashlr backlog` | View the scored work queue |
+| `ashlr spec import/show` | Manage spec artifacts |
+| `ashlr genome recall/learn` | Shared memory + knowledge recall |
+| `ashlr serve [--open]` | Web dashboard (Mission Control) at 127.0.0.1:7777 |
+| `ashlr pulse` | Rolling activity + spend analytics |
+| `ashlr eval` | Local agent eval harness (adaptive-prompts A/B) |
+| `ashlr verify-safety` | Run the safety invariant suite |
+| `ashlr doctor` | One-glance health check |
+| `ashlr models` | List + manage model backends |
+| `ashlr mcp list/doctor/install` | MCP server aggregation gateway |
+| `ashlr sandbox` | Sandbox management |
+| `ashlr audit` | Append-only audit log |
+| `ashlr update` | Safe self-update |
+| `ashlr tui` | Interactive TUI dashboard |
+| `ashlr help` | Full command reference |
 
 ---
 
-## The autonomous daemon
+## Safety model
 
-`ashlr daemon` is the continuous operator for your enrolled repos. Each tick it pulls the highest-value items from the backlog, dispatches sandboxed swarms to work them, and deposits the results as PENDING proposals in the Approval Inbox. Nothing it produces is ever applied automatically — **it can only propose**.
+Every safety property below is proven by a named adversarial test. These invariants are never weakened — the fleet itself is blocked from doing so (M54).
 
-### How it works
+1. **Proposal-only floor.** The daemon's source imports no merge/apply primitive. Auto-merge is a separate gated subsystem, default off. Proven by source-scan grep-guard + `test/h1.daemon-gates.test.ts`.
+2. **Enrollment gate.** Only explicitly enrolled repos receive autonomous work. Proven by `test/h6.*`.
+3. **Kill-switch halts everything.** `~/.ashlr/KILL` stops every backend and repo, including in-flight sandboxed runs. Proven by `test/m48.*` kill-all test.
+4. **Sandboxed-with-diff-capture only.** External engines run only through `runEngineSandboxed`. No raw-external path in the autonomous loop. Sandbox-creation failure is terminal, never a silent fallback. Proven by `test/m45.*`.
+5. **Git push is blocked.** The pre-push hook + credential strip make every push from the worktree fail. Proven by `test/m45.*` pre-push test.
+6. **Only the diff is consumed.** The loop ingests only the captured, scrubbed diff. The agent's own commits die with the sandbox. Proven by `test/m45.*` diff-only test.
+7. **Immutable signed provenance.** Every run and proposal carries write-once `{engineModel, engineTier}`, HMAC-signed at produce time. The merge gate re-verifies the HMAC before any merge-to-main. Proven by `test/m47.*` and `test/m47-1.*`.
+8. **Merge-to-main requires frontier + verification.** CI/verify green AND matching `cfg.foundry.mergeAuthority` entry required. Local/mid authors refused regardless. Proven by `test/m47.*` trust-and-verify test.
+9. **Self-improvement cannot self-disarm.** A self-target diff must pass the invariant suite flag-off and flag-on. Any diff weakening a safety test is refused. Proven by `test/m54.*`.
+10. **Zero new runtime dependencies.** Backends are CLIs or APIs the user already has. Proven by dependency-manifest grep-guard.
 
-```
-enrolled repos  →  backlog (scored work items)
-                        │
-                        ▼
-                 daemon tick (sandboxed swarm per item)
-                        │
-                        ▼
-            ~/.ashlr/inbox/<id>.json   (status: pending)
-                        │
-                        ▼
-            ashlr inbox approve <id>   ← YOU decide
-```
-
-1. On each tick the daemon checks the kill switch and daily budget, then loads the backlog for every enrolled repo.
-2. It selects the top-K items that fit within the per-tick and daily budget caps.
-3. For each item it calls `runSwarm` with `opts.sandbox=true` (isolated git worktree, never your working tree) and `opts.propose=true` (output is a PENDING proposal, never auto-applied).
-4. Tick summary — items considered, proposals created, spend — is recorded to daemon state and the audit trail.
-
-### Commands
-
-```sh
-ashlr daemon start              # begin the operator loop
-ashlr daemon start --once       # one tick then exit
-ashlr daemon start --dry-run    # show what would be worked — no swarms dispatched, no proposals created
-ashlr daemon start --budget 2   # override daily budget cap (USD) for this session
-ashlr daemon stop               # set kill switch + clear running state
-ashlr daemon status             # running?, last tick, today spend vs cap, pending proposals
-```
-
-### The daemon ONLY proposes — you approve
-
-Every piece of work the daemon produces lands as a PENDING proposal in the Approval Inbox. Nothing is applied to your repo, pushed to a remote, or opened as a PR until you run `ashlr inbox approve <id>`. This is structurally enforced — the daemon code has no import or call path to `applyProposal`, `git push`, `gh pr create`, or any deploy path.
-
-```sh
-ashlr inbox          # review what the daemon produced
-ashlr inbox show <id>    # read the diff
-ashlr inbox approve <id> # apply it — only then does anything outward happen
-ashlr inbox reject <id>  # discard
-```
-
-### Enrollment, budget, and kill switch
-
-| Safety layer | What it does |
-|---|---|
-| **Enrollment** | The daemon operates ONLY on repos you have explicitly enrolled (`ashlr enroll add <repo>`). Default is empty — if nothing is enrolled, the daemon does nothing. |
-| **Daily budget cap** | A hard USD ceiling resets each calendar day. When exhausted the daemon idles until tomorrow. Configurable via `daemon.dailyBudgetUsd` in `~/.ashlr/config.json` or `--budget` flag. |
-| **Per-tick cap** | Limits items worked in a single tick (configurable via `daemon.perTickItems`). |
-| **Concurrency cap** | Limits parallel swarms per tick (configurable via `daemon.parallel`). |
-| **Kill switch** | `ashlr daemon stop` (or `ashlr enroll kill on`) sets `~/.ashlr/KILL`. The daemon checks this at the top of every tick and halts immediately. Cannot be bypassed. |
-| **Re-entrancy guard** | The daemon refuses to start if `ASHLR_IN_DAEMON` or `ASHLR_IN_SWARM` is set — no daemon-inside-daemon or daemon-inside-swarm fork bombs. |
-| **Sandboxed execution** | All swarm work runs in isolated `git worktree` sandboxes under `~/.ashlr/sandboxes/`. Your working tree, current branch, index, and HEAD are never touched. |
-
-### Activating on your real repos is your call
-
-The daemon is safe to run in `--dry-run` mode at any time — it produces no swarms and no proposals. Running it for real on enrolled repos is an explicit gate you control:
-
-1. Enroll a repo: `ashlr enroll add <path-to-repo>`
-2. Set a modest daily budget in `~/.ashlr/config.json`: `{ "daemon": { "dailyBudgetUsd": 2 } }`
-3. Do a dry run first: `ashlr daemon start --once --dry-run`
-4. When you are ready: `ashlr daemon start --once`
-5. Review proposals: `ashlr inbox`
-
-The daemon will never touch a repo you have not enrolled, never exceed the budget you set, and never apply anything without your explicit approval.
+Full invariant set: [`docs/SPEC-V4-FOUNDRY.md`](docs/SPEC-V4-FOUNDRY.md) §9 and [`docs/SPEC-V5-OPEN-FLEET.md`](docs/SPEC-V5-OPEN-FLEET.md) §9.
 
 ---
 
-## Autonomy safety (v2)
+## The `~/.ashlr/` home layout
 
-All autonomous code work in ashlr-hub v2 is designed around a safety-first principle: **proposal-only by default, with explicit enrollment and a hard kill switch**.
-
-### How it works
-
-| Primitive | What it does |
-|---|---|
-| **Git-worktree sandbox** | Every autonomous edit runs in an isolated `git worktree` under `~/.ashlr/sandboxes/<id>/` on a scratch branch. Your working tree, checked-out branch, index, and HEAD are never touched. |
-| **Enrollment registry** | Only repos you explicitly enroll can be autonomously mutated. Default is empty — nothing enrolled means nothing can be changed. |
-| **Kill switch** | A global hard stop. When set, all sandbox-mutating operations refuse immediately regardless of enrollment. |
-| **Audit trail** | Every autonomous action (action, repo, sandbox id, summary, result) is appended to `~/.ashlr/audit/<YYYY-MM-DD>.jsonl`. Append-only; no secrets; never deleted. |
-| **Proposal-only posture** | Until M24 wires the daemon, all sandbox output is a diff for your review — nothing is applied to your repo automatically. |
-
-### Commands
-
-```sh
-# Enrollment
-ashlr enroll list                 # show enrolled repos (default: empty)
-ashlr enroll add <path-to-repo>   # enroll a repo for autonomous work
-ashlr enroll remove <path-to-repo>
-
-# Kill switch
-ashlr enroll kill on    # set ~/.ashlr/KILL — all mutating ops refuse immediately
-ashlr enroll kill off   # clear the kill switch
-
-# Sandbox inspection
-ashlr sandbox list             # list active sandboxes
-ashlr sandbox diff <id>        # show what changed inside a sandbox
-ashlr sandbox cleanup <id>     # discard sandbox (worktree + scratch branch removed)
-
-# Audit trail
-ashlr audit          # tail audit log, newest first
-ashlr audit 50       # last 50 entries
+```
+~/.ashlr/
+├── config.json          # AshlrConfig — roots, models, foundry, daemon, comms, …
+├── index.json           # Scanned desktop index
+├── KILL                 # Kill-switch — present = fleet halted
+├── runs/                # RunState per agent run (atomic, resumable)
+├── swarms/              # SwarmState per multi-agent swarm
+├── inbox/               # Pending/approved/rejected proposals (append-only lifecycle)
+├── goals/               # Goal + milestone state
+├── genome/
+│   └── hub.jsonl        # Append-only hub memory store
+├── foundry/
+│   └── provenance.key   # HMAC signing key (0600, per-machine, never transmitted)
+├── audit/               # Append-only confinement + action audit log
+└── manager/             # Manager judge scorecards
 ```
 
-### Guarantees
-
-- Sandbox worktrees live **only** under `~/.ashlr/sandboxes/`. The implementation uses `git worktree add` (new scratch branch off HEAD) and `git worktree remove` + `git branch -D` on cleanup — no `git reset --hard`, no checkout in the source repo, no push, no deletion of user branches.
-- Enrollment defaults to empty. A repo that is not enrolled cannot be touched by any autonomous operation; `assertMayMutate` throws before any worktree is created.
-- The kill switch (`~/.ashlr/KILL`) is checked first on every mutating call and cannot be bypassed by enrollment state.
-- Audit entries contain only metadata. No prompt text, no completion content, no secret values are ever written to the audit log.
+Per-repo memory lives in `<repo>/.ashlrcode/genome/`. The CLI is the sole writer of `~/.ashlr/`.
 
 ---
 
-## Approval Inbox
+## Configuration
 
-The Approval Inbox is the single human control plane through which **every proposed outward action must pass**. The autonomous org (swarms, backlog agents, daemon) creates *proposals*; nothing outward — no PR, no patch applied to a real branch, no deploy — happens until you explicitly approve.
+The config is validated against [`schema/config.schema.json`](schema/config.schema.json). Key sections:
 
-### How proposals flow
-
+```jsonc
+{
+  "roots": ["~/Desktop/github"],
+  "daemon": {
+    "enrolledRepos": ["/absolute/path/to/repo"],
+    "intervalMs": 600000,
+    "dailyBudgetUsd": 10,
+    "parallel": 3
+  },
+  "foundry": {
+    // absent = proposal-only behavior, byte-identical to pre-foundry
+    "intelligence": true,          // learned routing (M53)
+    "autoMerge": {
+      "enabled": false,            // DEFAULT OFF — fleet never auto-merges to main
+      "midToBranch": false         // mid-tier proposals to branch (opt-in)
+    },
+    "mergeAuthority": [
+      { "engine": "claude", "model": "claude-opus-4-5" }
+    ],
+    "confinement": {               // OS-level jail per-engine or fleet-wide
+      "*": { "mode": "os", "onUnsupported": "fallback" }
+    },
+    "bestOfN": 3                   // N candidates for best-of-N critic selection
+  },
+  "comms": {
+    "channel": "telegram",
+    "telegram": { "botToken": "...", "chatId": "..." }
+  }
+}
 ```
-autonomous work (swarm / backlog / manual)
-        │
-        ▼
-  createProposal()  →  ~/.ashlr/inbox/<id>.json  (status: pending)
-        │
-        ▼
-  ashlr inbox        — you review the queue
-  ashlr inbox show   — you read the diff
-        │
-        ▼
-  ashlr inbox approve <id>   ← THE ONLY OUTWARD TRIGGER
-        │  (confirm prompt, or --yes)
-        ▼
-  applyProposal()   →  outward action runs
-```
 
-### Commands
-
-```sh
-ashlr inbox                      # list pending proposals (id · kind · origin · title · age)
-ashlr inbox show <id>            # full detail + unified diff
-ashlr inbox approve <id>         # confirm-gated → apply; add --yes to skip prompt
-ashlr inbox reject <id>          # mark rejected; no action taken
-```
-
-### Guarantees
-
-- **No auto-apply, ever.** `applyProposal` runs only when three conditions are simultaneously true: proposal exists, `status === 'approved'`, and `confirmed === true` (set only by `inbox approve`). It is structurally impossible for a proposal to self-apply on creation, list, show, or from a background daemon.
-- **Single outward funnel.** Every outward mutation in v2 — patch, PR, deploy — goes through `applyProposal`. There is no side door.
-- **Patches land on a new branch, never your working tree.** A `'patch'` proposal applies the diff to a fresh `ashlr/`-prefixed branch off HEAD. Your current branch, index, and working tree are untouched. No force-push, no push at all — local branch only.
-- **PR proposals use the same gated M18 `createPr` path** — confirm-gated, explicit, never automatic.
-- **Enrollment + kill switch apply.** `assertMayMutate` is called before any mutation — kill switch or un-enrolled repo refuses immediately and audits the refusal.
-- **No secrets in proposals.** `~/.ashlr/inbox/` contains only metadata (title, summary, diff, kind). No token values, env vars, or prompt text are written.
-- **Read surfaces are read-only.** The TUI Inbox tab and web `/inbox` route show proposals but trigger no action. Approve only via `ashlr inbox approve` or Raycast.
+See [`docs/FOUNDRY-CONFIG.md`](docs/FOUNDRY-CONFIG.md) for the full foundry reference and [`docs/examples/foundry.config.json`](docs/examples/foundry.config.json) for an annotated example.
 
 ---
 
-## Work discovery
-
-`ashlr backlog` gives you a prioritized, scored queue of open work across all your enrolled repos — aggregated from six read-only sources and persisted locally.
-
-### Quick start
-
-```sh
-# Enroll a repo (one-time; enrollment is required before any scan runs)
-ashlr enroll add ~/path/to/my-project
-
-# Build or refresh the backlog
-ashlr backlog refresh
-
-# View the scored queue
-ashlr backlog                         # top items across all enrolled repos
-ashlr backlog --repo ~/my-project     # filter to one repo
-ashlr backlog --source todo           # filter by source
-ashlr backlog --limit 20              # top 20 only
-ashlr backlog --json                  # machine-readable output
-```
-
-### Sources
-
-| Source | What it scans |
-|---|---|
-| `issue` | Open GitHub issues via `gh` |
-| `todo` | TODO / FIXME / HACK / XXX comments in source files |
-| `test` | CI run state (latest `gh run`); presence of a test script |
-| `dep` | Outdated deps (`npm outdated`) + known vulnerabilities (`npm audit`) |
-| `doc` | Missing/thin README, missing LICENSE or CONTRIBUTING, low test presence |
-| `security` | `binshield` findings (skipped gracefully when not installed) |
-
-### Scoring
-
-Each work item carries a `value` (1–5) and `effort` (1–5). Items are ranked by `score = value / effort` — high value, low effort floats to the top. The backlog is persisted to `~/.ashlr/backlog.json` and rebuilt on `ashlr backlog refresh`.
-
-### Guardrails
-
-- **Read-only**: scanners never modify any repo — no writes, no git mutations, no installs, no fixes.
-- **Enrollment-scoped**: only repos you have explicitly enrolled (`ashlr enroll add`) are ever scanned. Default enrollment is empty → empty backlog.
-- **Bounded**: `node_modules/`, `.git/`, and `dist/` are always skipped; per-repo caps on file count and output; subprocesses run with timeouts. No project scripts (`npm test`, `npm run build`, etc.) are ever executed.
-- **No secrets**: backlog items contain only metadata. No token values, env vars, or secret names are written.
-
----
-
-## Self-healing
-
-### `ashlr doctor --fix`
-
-Run `ashlr doctor` at any time to see the health of your setup. Add `--fix` and the doctor applies every safe automated remediation it can, then tells you exactly what it fixed and what still needs your attention:
-
-```sh
-ashlr doctor          # health check: runtime, config, index, Phantom, MCP, providers
-ashlr doctor --fix    # apply safe fixes, then report what was fixed vs. manual
-ashlr doctor --fix --json   # emit FixAction[] for scripting
-```
-
-**What `--fix` can repair automatically (all safe, local, non-destructive):**
-
-| Check | Automated fix |
-|---|---|
-| `config` | Create missing `~/.ashlr/config.json` from defaults (create-only; never overwrites) |
-| `index` | Rebuild a stale or missing `~/.ashlr/index.json` (regenerates derived data only) |
-| `local-bin` | Create the `ashlr` → `~/.local/bin` symlink when missing and the source resolves |
-| `genome-memory` | Create `~/.ashlr/genome/` when absent (mkdir-only; never edits entries) |
-| `mcp-plugin` | Register the ashlr MCP gateway in a detected editor config (backup-first + idempotent) |
-
-Everything else — provider keys, PATH, Phantom login — stays in the **needs manual action** column with a one-line guidance hint. `doctor --fix` never auto-downloads models, never modifies secrets, and never touches shell profiles.
-
-### Bounded runtime self-heal
-
-The MCP gateway and model call sites are wrapped in a bounded self-heal loop (`src/core/run/self-heal.ts`). When something goes wrong at runtime, the hub classifies the failure and applies one recovery action before retrying — bounded by a hard `maxRestarts` ceiling:
-
-| Failure | Recovery |
-|---|---|
-| Crashed MCP downstream | Restart, bounded retries → M3 skip-on-failure fallback |
-| Local model OOM / error | Downgrade to a **smaller local** model (never cloud, never more cost) |
-| Cloud rate-limit | Exponential backoff (only when `allowCloud` already set by the caller) |
-
-Self-heal is always bounded (never loops), opt-out (`ASHLR_NO_HEAL=1`), and never escalates cost.
-
----
-
-## What is this?
-
-`ashlr-hub` is a command center for agentic engineers, shipped as **v3.0.0** (`@ashlr/hub@3.0.0`). It grew from a project navigator into a complete platform across M1–M73 — a local-first command center (v1, M1–M20) + a safety-first [autonomous engineering organization](#ashlr-v2--autonomous-engineering-organization) (v2, M21–M30) + the Local Weapon that closes the quality gap between local models and the cloud (v3, M41–M44) + the **v4 Foundry** autonomous engineering fleet that builds and maintains the ecosystem in sandboxed isolation (M45–M49) + the **v5 Open Fleet** that adds polyglot backends, OS-level confinement, tri-tier trust, self-improving guards, and the `/goal`+`/loop` conductor (M50–M60). Every generation adds capability without relaxing the safety floor: proposal-only by default, human-gated, kill-switch backed.
-
-| Capability | Commands |
-|---|---|
-| **Navigate** | `ashlr index` · `ashlr status` · `ashlr go` · `ashlr ls` · `ashlr open` · `ashlr tidy` |
-| **Onboard + diagnose** | `ashlr init` · `ashlr doctor [--fix]` · `ashlr config` |
-| **MCP gateway** | `ashlr mcp` · `ashlr mcp list` · `ashlr mcp doctor` · `ashlr mcp install` |
-| **Orchestrate** | `ashlr run` · `ashlr runs` · `ashlr run show` |
-| **Swarms** | `ashlr swarm` · `ashlr swarms` · `ashlr swarm show/verify/approve/rollback` |
-| **Specs** | `ashlr spec new/list/show/refine` |
-| **Models** | `ashlr models` · `ashlr models pull` · `ashlr models start` |
-| **Observe** | `ashlr pulse` · `ashlr telemetry status/test` |
-| **Lifecycle** | `ashlr new` · `ashlr ship` |
-| **Memory** | `ashlr learn` · `ashlr recall` · `ashlr genome` |
-| **Integrations** | `ashlr gh` · `ashlr vercel` · `ashlr wire` · `ashlr notify` |
-| **Surfaces** | `ashlr tui` · `ashlr serve` · Raycast extension |
-| **Autonomy (v2)** | `ashlr enroll` · `ashlr daemon` · `ashlr backlog` · `ashlr inbox` · `ashlr goals` |
-| **Portfolio intelligence (v2)** | `ashlr knowledge build/impact/graph` · `ashlr ask` · `ashlr reflect` · `ashlr health` · `ashlr digest` |
-| **Cloud-ready seams (v2)** | `ashlr seams` |
-| **Harden & prove (v2.1)** | `ashlr verify-safety` · `ashlr sandbox gc` · `ashlr audit` · `ashlr preflight` · `ashlr onboard` · `ashlr demo` |
-| **Local Weapon (v3)** | `ashlr run --engineer [--bash]` · `ashlr eval` · adaptive prompts (`models.adaptivePrompts`) |
-| **Autonomous fleet (v4 Foundry)** | `ashlr fleet status/pause/resume` · sandboxed engine runner · tiered-trust merge gate · HMAC-signed provenance · 24/7 fleet supervisor |
-| **Open Fleet (v5)** | `ashlr goal` · `ashlr loop` · declarative engine registry · tri-tier trust (`local`/`mid`/`frontier`) · OS-level confinement (`sandbox-exec`) · budget-breach cascade · self-improving never-weaken guard · `ashlr fleet init` |
-| **Harness integrations** | `ashlr stack` · `ashlr mcp ecosystem` · hub→pulse OTLP bridge (`ashlr pulse connect`) · Phantom MCP aggregation · binshield security panel · ashlr-md proposal rendering |
-| **Maintain** | `ashlr update` |
-
-It is **local-first by design**. Index, config, runs, rollups, and memory all live under `~/.ashlr/`. Agent runs default to local models and refuse to touch a cloud endpoint unless you explicitly opt in. Telemetry is metadata-only; secrets flow through Phantom, never through the hub. The fleet is **proposal-only by default** — auto-merge to `main` and `mid→branch` are both `DEFAULT OFF`; a `~/.ashlr/KILL` file halts every backend instantly.
-
----
-
-## Commands
-
-Every command is zero-runtime-dependency (Node builtins + MCP SDK). Add `--json` to most commands for machine-readable output.
-
-### Navigate
-
-| Command | What it does |
-|---|---|
-| `ashlr index [--refresh]` | Scan your project tree and persist `~/.ashlr/index.json`. |
-| `ashlr status` | Index summary: counts by kind/category, dirty + stale repos, 7-day activity line. |
-| `ashlr go [query] [--open\|--cd]` | Fuzzy-jump to a project. `--open` launches your editor; `--cd` prints the path. |
-| `ashlr ls [category]` | List indexed items, optionally filtered. |
-| `ashlr open <query>` | Resolve a name and open in your configured editor. |
-| `ashlr tidy [--apply]` | Plan (dry-run) or apply moves of loose top-level files. |
-
-Shell helper for instant `cd` — add to `.zshrc`:
-
-```sh
-j() { local p; p=$(ashlr go "$1" --cd) && cd "$p"; }
-```
-
-### Onboard + diagnose
-
-| Command | What it does |
-|---|---|
-| `ashlr init [--wire] [--yes] [--json]` | Complete idempotent onboarding. See [Getting started](#getting-started-in-one-command). |
-| `ashlr doctor [--fix] [--json]` | Health check across runtime, config, index, Phantom, MCP, providers. `--fix` applies safe automated remediations. |
-| `ashlr config [get\|set <k> <v>\|path]` | Read or write `~/.ashlr/config.json`. |
-
-### MCP
-
-`ashlr` is the **single MCP entry point** for any agent. It discovers every MCP server already configured on your machine, starts each as a managed child process, and proxies all their tools through one stdio gateway — namespaced `<server>__<tool>` to prevent collisions.
-
-| Command | What it does |
-|---|---|
-| `ashlr mcp` | Run the aggregation gateway on stdio. (Register this in your agent config.) |
-| `ashlr mcp list` | Every discovered server, its source, and tool count (env values redacted). |
-| `ashlr mcp doctor` | Health-probe each downstream (start → list tools → tear down). |
-| `ashlr mcp install <claude\|ashlrcode>` | Idempotently register the gateway in a target agent config (backup-first). |
-
-```sh
-ashlr mcp install claude    # register in Claude Code, then restart it
-ashlr mcp list              # see all servers + tool counts
-```
-
-### Orchestrate
-
-Give `ashlr run` a goal; it decomposes it into a task-graph (DAG), fans out independent tasks in parallel on your local model, and synthesizes a final answer — all within hard budget and step guardrails. Cloud is off by default.
-
-Runs stream progress live to stderr (task starts, model deltas, tool calls, retries, verify verdicts). Each task is retried on transient failure with bounded exponential back-off, then verified before the result is accepted.
-
-| Command | What it does |
-|---|---|
-| `ashlr run "<goal>" [flags]` | Plan → parallel fan-out → synthesize. Resumable; persisted to `~/.ashlr/runs/`. |
-| `ashlr run show <id>` | Print the full `RunState` for a past run. |
-| `ashlr runs [--json]` | List all past runs, newest first. |
-
-Key flags: `--budget N` · `--max-steps N` · `--parallel N` · `--engine builtin|ashlrcode|aw|claude` · `--engineer [--bash]` (sandboxed engineering tools → inbox; see [Local Weapon](#local-weapon-v3--make-local-models-genuinely-capable)) · `--stream / --no-stream` · `--allow-cloud` · `--no-memory` · `--no-capture` · `--resume <id>`.
-
-```sh
-ashlr run "Summarize the last 5 commits and flag risky changes"
-ashlr run "Audit MCP registry for duplicate tool names" --budget 8000 --parallel 4
-ashlr run "Refactor the config module" --engine claude    # delegate to Claude Code
-```
-
-### Spec-driven swarms
-
-Author an end-state spec, then run a fleet of local agents against it — phases: SCAFFOLD → BUILD → INTEGRATE → VERIFY → REVIEW.
-
-```sh
-ashlr spec new "Add a plugin system" --project ~/my-project   # draft structured spec
-ashlr spec list                                                # id · version · status · goal
-ashlr spec refine <id> "Add hot-reload support"               # produce v2; v1 preserved
-
-ashlr swarm <specId> --dry-run         # see the SwarmPlan (zero cost)
-ashlr swarm <specId> --budget 64000    # run the fleet
-ashlr swarm <specId> --background      # fire-and-forget, returns swarm id immediately
-ashlr swarms                           # list all runs: id · status · cost
-ashlr swarm show <id>                  # per-task status, usage, errors
-```
-
-**Verified, recoverable swarms** (M17): every task result is HMAC-SHA256 signed; downstream tasks verify signatures before consuming them; a risk heuristic catches destructive operations; the swarm pauses on any exception (`status: 'needs-approval'`) rather than proceeding silently; a confirm-gated rollback restores the exact pre-swarm git state.
-
-```sh
-ashlr swarm verify <id>              # verify all task signatures; exit 0 = all valid
-ashlr swarm approve <id>             # resume a paused swarm (explicit human action only)
-ashlr swarm rollback <id> [--yes]    # restore project to pre-swarm git state
-```
-
-### Cost-optimal routing
-
-Every task is routed to the best available **local** model (Ollama / LM Studio) first. Cloud is structurally unreachable unless you pass `--allow-cloud` and the key is present — both required simultaneously.
-
-On failure, the verify loop can escalate for one retry — still local unless `--allow-cloud`. There is no automatic cloud fallback, no silent billing.
-
-```sh
-ashlr models                  # list local models (Ollama + LM Studio) — read-only
-ashlr models pull llama3      # explicit download — prints size warning + requires confirm
-ashlr models start            # best-effort start of an installed-but-idle Ollama daemon
-```
-
-`ashlr pulse` shows a savings line: what local tokens would have cost in the cloud, and a projected monthly spend:
-
-```
-Local savings (est):  $0.42   |   Cloud would-have-been: $0.47   |   Projected 30d: $0.18
-```
-
-### Local Weapon (v3) — make local models genuinely capable
-
-v3 is a focused push to close the quality gap between local models (Ollama / LM Studio) and the cloud, without ever leaving your machine. Four shipped pieces — all opt-in, all bounded.
-
-#### Adaptive prompts (M41)
-
-A model-adaptive, layered system-prompt suite. ashlr auto-detects a per-model profile from the model name (size band + coder/general/small) and tunes **prompt verbosity, ReAct step cap, and sampling temperature** to fit the model actually serving the task — a 1.5B chat model and a 32B coder get very different scaffolding. Off by default; opt-in.
-
-```sh
-ashlr config set models.adaptivePrompts true   # config opt-in (default: false)
-ASHLR_ADAPTIVE_PROMPTS=1 ashlr run "<goal>"     # env opt-in (overrides config)
-```
-
-With the flag off the harness uses its legacy prompts and step cap unchanged — the whole suite is additive and gated.
-
-#### Engineering tool surface (M42)
-
-Give the local agent **real, sandboxed engineering tools** — read / glob / grep / write / edit — confined to a throwaway git worktree. The agent never touches your live working tree: the resulting diff is routed to the Approval Inbox as a PENDING proposal, exactly like every other outward action.
-
-```sh
-ashlr run "<goal>" --engineer          # sandboxed read/glob/grep/write/edit → inbox
-ashlr run "<goal>" --engineer --bash   # also allow sandboxed command/test execution
-ashlr inbox                            # review the proposed diff; nothing applies until you approve
-```
-
-Requires the repo to be **enrolled** (`ashlr enroll add <repo>`) and the kill switch off. Off by default.
-
-**Security posture** (structurally enforced):
-
-- **Kill-switch gated** — every mutating tool is REFUSED when `~/.ashlr/KILL` is set; checked first, cannot be bypassed.
-- **Workspace-boundary + enrollment enforced** — writes resolve only inside the sandbox worktree of an enrolled repo; paths outside the boundary are refused.
-- **Secret-scrubbed output** — tool output is secret-scrubbed before it reaches the model or any store.
-- **Diffs to inbox, never the live tree** — `write`/`edit` produce a proposal; approval is human-only via `ashlr inbox approve` (there is no agent-reachable apply path).
-- **Double opt-in for bash** — `--bash` is local code execution and requires `--engineer` **and** `--bash` together; it too is kill-switch gated and confined to the sandbox.
-
-#### Verify→repair loop (M43)
-
-After each task the agent runs the repo's detected typecheck / test / lint commands and feeds any failures back into a bounded repair pass. This generalizes the prior single retry into a loop — bounded by `--max-steps` and the run budget, so it can never spin without limit. Tune the headroom via the run budget flags (`--budget` / `--max-steps`).
-
-#### Eval harness (M44)
-
-Measure the local-model uplift on your own machine. `ashlr eval` runs a fixed fixture set through the agent loop twice per fixture — adaptive prompts **OFF** then **ON** — and reports steps-to-done, done count, and tokens for each.
-
-```sh
-ashlr eval                       # full fixture set, table output
-ashlr eval --limit 3             # only the first 3 fixtures
-ashlr eval --budget 8000 --json  # per-run token budget; machine-readable output
-```
-
-Needs a local model running (Ollama / LM Studio). When none is reachable it **skips gracefully** — prints a hint and exits 0, never an error.
-
-#### Cross-platform
-
-ashlr runs on **macOS, Linux, and Windows**. The engineering tools resolve the platform shell at runtime (e.g. `cmd.exe` on Windows, so `npm.cmd` / `npx.cmd` shims resolve via `PATHEXT`), and the local-model providers (Ollama / LM Studio) are plain HTTP, so no platform-specific runtime is required.
-
-### Observe
-
-```sh
-ashlr pulse [--window 1d|7d|30d] [--project <name>]   # local usage dashboard (fully offline)
-ashlr telemetry status    # endpoint configured, PAT available, active sink, governance
-ashlr telemetry test      # emit a synthetic test span to verify the pipeline
-```
-
-`ashlr pulse` computes entirely offline from usage metadata in your Claude Code transcripts — never message content. Set `telemetry.budgetUsd` in config to get warn/over banners. M19 adds a full OTLP/HTTP-JSON pipeline (opt-in, fire-and-forget, metadata-only) and a period-based spend governance policy.
-
-### Lifecycle
-
-```sh
-ashlr new my-server --template mcp-server   # scaffold ecosystem-wired project
-ashlr ship                                  # pre-ship gate: supply-chain + test/lint/build (dry-run)
-ashlr ship --deploy vercel --confirm        # gate + deploy (--confirm required for outward action)
-```
-
-Templates: `minimal` · `node-cli` · `mcp-server` · `next-app`. Deploy targets: `vercel` · `stack` · `gh` · `morphkit`.
-
-### Memory
-
-```sh
-ashlr learn "<note>" [--project p] [--tags a,b]   # append to ~/.ashlr/genome/hub.jsonl
-ashlr recall "<query>"                            # keyword/TF-IDF search, optional Ollama rerank
-ashlr genome                                      # health: entry count, projects, store size
-ashlr genome --teach "<note>"                     # manual high-value note (tagged 'teach')
-ashlr genome consolidate                          # merge near-duplicates (backup-first)
-ashlr genome playbook "<goal>"                    # synthesise a playbook from past runs
-ashlr genome export ~/backup.json                 # portable export (JSON or Markdown)
-```
-
-The genome compounds automatically — every completed `ashlr run` and `ashlr swarm` appends a structured entry (metadata/summary only, capped at ~800 chars, never prompts or file contents). Before each run, a synthesised playbook is injected into the agent's planning context. Pass `--no-capture` or `--no-memory` to opt out per invocation.
-
-### Integrations
-
-| Command | What it does |
-|---|---|
-| `ashlr gh pr / issue / ci` | Read open PRs, issues, CI status for the current repo |
-| `ashlr gh pr create` | The only mutation — confirm-gated, never automatic |
-| `ashlr vercel ls / logs` | Recent deployments and latest logs for the linked project |
-| `ashlr wire [claude\|cursor\|codex\|all]` | Wire the MCP gateway into editor configs (backup-first, idempotent) |
-| `ashlr notify test` | Ping configured Slack/Discord webhook (no-op if none configured) |
-
-All reads are non-mutating and degrade gracefully when a CLI or linked project is absent. `gh` owns GitHub auth, `vercel` owns Vercel auth, `phantom` owns secrets — the hub never handles raw tokens. Phantom identity appears in `ashlr status` and `ashlr doctor` as name/tier/team only; vault contents are never accessed.
-
-### Surfaces
-
-```sh
-ashlr tui                # interactive alt-screen dashboard, auto-refreshes every ~2 s
-ashlr tui --once         # render one frame to stdout and exit (headless/CI)
-ashlr serve              # local web dashboard at http://127.0.0.1:7777
-ashlr serve --open       # launch the browser automatically
-ashlr serve --allow-dispatch   # enable opt-in POST /api/run + web inbox approve/reject (prints session token)
-```
-
-**TUI tabs**: Overview · Runs · Swarms · Pulse · MCP. Keys: `Tab`/`1–5` switch tabs, `j/k` scroll, `r` refresh, `q` quit. Terminal safety guaranteed — alt-screen/raw mode always restored on quit or exception.
-
-**Web dashboard pages**: Overview · Runs · Swarms (SVG dependency-graph + live burndown) · Pulse (SVG charts) · Genome (instant search). All pages live-update via SSE. Binds `127.0.0.1` only; DNS-rebinding protection; read-only by default; no CDN; fully offline.
-
----
-
-## Architecture
-
-TypeScript ESM (NodeNext). Core logic in `src/core/`, CLI dispatch in `src/cli/`, Raycast extension in `src/raycast/` (own package). `core/` and `cli/` carry zero runtime dependencies beyond the MCP SDK.
-
-| Area | Key modules |
-|---|---|
-| Index & navigation | `config` · `git` · `classify` · `index-engine` · `tidy` |
-| Onboard & diagnose | `onboard` · `doctor` · `doctor-fix` · `providers` · `phantom` |
-| MCP gateway | `mcp-registry` · `mcp-gateway` · `tools-registry` |
-| Orchestration | `run/provider-client` · `run/budget` · `run/agent-loop` · `run/orchestrator` · `run/router` · `run/self-heal` |
-| Resilience | `run/retry` · `run/verify` · `run/engines` · `run/streaming` |
-| Specs & swarms | `spec/spec-store` · `swarm/planner` · `swarm/runner` · `swarm/store` · `swarm/sign` · `swarm/gate` · `swarm/rollback` |
-| Observability | `observability/usage-source` · `observability/rollup` · `observability/budget-alert` · `observability/forecast` · `observability/otlp` · `observability/telemetry-sink` · `observability/governance` |
-| Lifecycle | `lifecycle/templates` · `lifecycle/scaffold` · `lifecycle/ship` |
-| Memory / genome | `genome/store` · `genome/recall` · `genome/capture` · `genome/consolidate` · `genome/playbook` · `genome/export` |
-| Integrations | `integrations/github` · `integrations/vercel` · `integrations/editors` · `integrations/identity` · `integrations/notify` |
-| Surfaces | `web/server` · `web/api` · `web/static` · `tui/app` · `tui/render` · `dashboard` |
-| Work discovery | `portfolio/scanners` · `portfolio/backlog` |
-| Portfolio intelligence | `knowledge/index` · `knowledge/ask` · `knowledge/graph` |
-| Ecosystem | `env-bridge` |
-
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full module map and data flow.
-
----
-
-## Telemetry and governance
-
-Local-first by default: every run records compact JSONL to `~/.ashlr/telemetry/` — no network calls, no configuration required. When you configure an OTLP endpoint and PAT, the hub emits proper OTLP/HTTP-JSON traces with GenAI semantic-convention attributes (metadata only — never prompts, completions, or secrets). Spend governance (`budgetUsd` + `budgetWindow`) surfaces `ok / warn / over` banners in `ashlr pulse`, `ashlr doctor`, and before each run/swarm. Governance is advisory by default; `govAction: 'block'` requires `--over-budget` to proceed (never silently blocks).
-
-```sh
-ashlr telemetry status   # endpoint configured (bool), PAT available (bool), sink, governance
-ashlr telemetry test     # emit a synthetic test span; reports ok/fail
-```
-
----
-
-## Local-first and private
-
-- **Local models first.** Provider resolution probes LM Studio (`:1234`) and Ollama (`:11434`) first. `ashlr run` refuses to call a cloud endpoint without `--allow-cloud` + a present key.
-- **Metadata-only telemetry.** `ashlr pulse` reads only token counts, model id, timestamp, and project path — never message content. All rollups stay under `~/.ashlr/`.
-- **Phantom owns secrets.** Phantom surfaces secret names and vault status only — values are never read, captured, or printed by the hub. Subprocess spawns are wrapped via `phantom exec --` when enabled so secrets are injected by Phantom, not the hub.
-- **Private memory.** Genome lives under `~/.ashlr/genome/`. Embeddings are computed locally via Ollama. Auto-capture stores metadata/summary only, hard-capped at ~800 chars per entry. Export is always available — no lock-in.
-- **Self-heal never escalates cost.** Model downgrade is always to a smaller local model. Cloud backoff is only applied when cloud is already in use (`allowCloud` set by the caller).
-
----
-
-## Requirements
-
-- **macOS, Linux, or Windows** · **Node.js 22+** · `~/.local/bin` on your `PATH` (POSIX)
-- The engineering tools (M42) resolve the platform shell at runtime (`cmd.exe` on Windows); the local-model providers are HTTP-based, so no platform-specific runtime is required.
-- Optional: [Ollama](https://ollama.com) or [LM Studio](https://lmstudio.ai) for local agent runs; [`phantom`](https://github.com/nicholasgasior/phantom) for secrets management; [Raycast](https://raycast.com) for the extension.
-
----
-
-## Development
-
-```sh
-npm run build      # tsc -> dist/
-npm run dev        # tsx watch — no compile step, fast iteration
-npm test           # vitest (2026 tests)
-npm run lint       # eslint
-npm run typecheck  # tsc --noEmit
-```
-
-CI runs typecheck, lint, build, and test on Node 22 for every push and PR.
+## Version history
+
+| Series | Theme | Status |
+|--------|-------|--------|
+| **v1** (M1–M20) | Local command center — Desktop index, MCP gateway, agent orchestrator, genome | Shipped |
+| **v2** (M21–M30) | Autonomous org — sandboxed swarms, Approval Inbox, enrollment, kill-switch | Shipped |
+| **v2.1** (H1–H8) | Harden and prove — adversarial test suite, safety invariants proven by tests | Shipped |
+| **v2.2** (M31–M33) | Agent-native — plugin system, Raycast, update channel | Shipped |
+| **v3** (M34–M44) | Team + Local Weapon — multi-machine inbox, adaptive prompts, verify→repair, eval | Shipped |
+| **v4** (M45–M49) | Foundry — multi-backend engines, backend router, tiered-trust merge gate, HMAC provenance, fleet supervisor | Shipped |
+| **v5** (M50–M55) | Open Fleet — declarative engine registry, tri-tier trust, OS confinement, fleet intelligence, self-improving fleet, goal/loop conductor | Shipped |
+| **v6** (M140+) | Verification-First — honest test-iterate loop, judge CoT traces, best-of-N critic, internal SWE-bench harness | In progress |
+
+Current npm release: **3.0.1**.
 
 ---
 
 ## Contributing
 
-Contributions are welcome. Please read [CONTRIBUTING.md](./CONTRIBUTING.md) for workflow, conventions, and how to keep the build green (tests, lint, and typecheck must all pass).
+See [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, test conventions, and the safety invariants contributors must never weaken.
 
----
+## Architecture
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map, the autonomous loop, engine tiers, safety gates, and the self-improvement layer.
 
 ## License
 
-[MIT](./LICENSE) © Mason Wyatt ([@masonwyatt23](https://github.com/masonwyatt23) · [ashlr.ai](https://ashlr.ai))
+MIT — see [LICENSE](LICENSE).
