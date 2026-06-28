@@ -15,6 +15,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AshlrConfig, WorkItem } from '../types.js';
 import { resolveFrontierJudgeClient } from '../fleet/manager.js';
+import { ecosystemSummary } from '../ecosystem/map.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -156,15 +157,22 @@ Output format (JSON array, exactly):
   }
 ]`;
 
-function buildUserPrompt(repo: string, repoState: string, direction: string, n: number): string {
+function buildUserPrompt(repo: string, repoState: string, direction: string, n: number, ecoSummary?: string): string {
+  const ecosystemSection = ecoSummary
+    ? `
+=== ECOSYSTEM CONTEXT ===
+${ecoSummary}
+
+Composing across the ecosystem creates the best ideas. Look for A×B improvements: e.g. features that wire this tool to phantom/pulse/binshield/ashlrcode/stack/core-efficiency. Reference specific repos from the ecosystem map above.
+`
+    : '';
   return `Tool: ${repo}
 
 Current state:
 ${repoState}
 
 Direction / north star:
-${direction}
-
+${direction}${ecosystemSection}
 Generate exactly ${n} BOLD, SPECIFIC, BUILDABLE improvements. Remember: NET-NEW capabilities only. No maintenance. No deps/lint/docs.`;
 }
 
@@ -262,11 +270,16 @@ export async function inventWorkItems(
     }
 
     const system = SYSTEM_PROMPT;
+    // M184: inject ecosystem summary so invented items can reference + compose
+    // the 13-repo platform — the CLI proved compositional ideas are best when
+    // the direction already mentions tools; now make it automatic.
+    const ecoCtx = ecosystemSummary();
     const user = buildUserPrompt(
       repo,
       scrubSecrets(repoState),
       scrubSecrets(direction),
       n,
+      ecoCtx || undefined,
     );
 
     let raw: string;

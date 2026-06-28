@@ -48,6 +48,7 @@ import { addDelta, curate, renderPlaybook } from './playbook.js';
 import { computeQualityMetrics } from '../fleet/quality-metrics.js';
 import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
 import { computeNorthStar, northStarSummary } from './north-star.js';
+import { ecosystemSummary } from '../ecosystem/map.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -484,6 +485,17 @@ ${state.activeGoalTitles.map((t, i) => `  ${i + 1}. ${t}`).join('\n')}`
     perToolSection = toolLines.join('\n');
   }
 
+  // M184: inject ecosystem summary so the strategist reasons compositionally
+  // across the 13-repo platform — prefer A×B compositions over isolated per-tool features.
+  const ecosystemCtxRaw = ecosystemSummary();
+  const ecosystemCtxSection = ecosystemCtxRaw
+    ? `
+${ecosystemCtxRaw}
+
+=== COMPOSITION DIRECTIVE ===
+You have the full ecosystem map above. When proposing goals, recommendedDirection, and toolRoadmap entries, PREFER COMPOSITIONAL MOVES over isolated per-tool features. The highest-leverage ideas are A×B: e.g. phantom→fleet-auth, binshield→merge-gate, pulse→fleet-telemetry, ashlrcode→executor-backend, core-efficiency→fleet-token-cost. Reference specific repos from the map in your proposals.`
+    : '';
+
   return `${northStarCtx}
 
 === FLEET METRICS (30-day window) ===
@@ -495,7 +507,7 @@ Trivial ratio: ${(m.trivialRatio * 100).toFixed(1)}%
 Avg diff lines: ${m.avgDiffLines.toFixed(0)}
 Completed goals: ${state.completedGoalCount}
 Repo health: ${state.repoHealthSummary}
-${goalFocusSection}${richCtxSection}${perToolSection}
+${goalFocusSection}${richCtxSection}${perToolSection}${ecosystemCtxSection}
 
 === VISION SPEC (v${spec.version}) ===
 North star: ${spec.northStar}
