@@ -36,7 +36,10 @@
 **ALL 4 MAPS COMPLETE (2026-06-28).** ~60 opportunities across 13 repos. Highest-value safe picks for upcoming waves: binshield path-traversal (security), stack timeout guards (reliability), phantom init-UX, ashlrcode smarter-surgical, + ashlr-hub test-coverage gaps (daemon/loop, orchestrator).
 
 ## Wave tally
-- **Wave 1 (in flight):** M197 observability · M198 digest debt · M199 orchestrator tests · M200 multi-backend merge tests (all ashlr-hub, build-verified, commit-green).
+- **Wave 1 ✅ SHIPPED (ashlr-hub):** M197 observability (20 silent catches→logging) · M198 digest debt · M199 orchestrator tests (was 0) · M200 multibackend merge tests. Commits f539ced/6a8e063.
+- **Wave 2 ✅ MOSTLY SHIPPED:** binshield path-traversal SECURITY hardening (committed in binshield, 41/41, real RCE-vector closed) · BUG-2 evaluateVerificationGate EDV-cfg + landed latent pulse-exporter/dep-parser landmine + health.ts WorkSource fix (ashlr-hub 13f37e6 — recovered a red master from a partial commit) · m201 daemon tests (32/33, last test settling) · stack timeouts + phantom init-UX AUTO-REVERTED (builds didn't pass — safety bound worked; deferred).
+- **Wave 3 (in flight, cross-repo commit-local):** ashlrcode smarter-surgical (intent-aware scope + file-count guard) · core-efficiency genome robustness tests · webfetch ProviderReport errorKind · morphkit validateSemanticModel fail-fast.
+- LESSON: commit the FULL related file-set (partial BUG-2 commit → red master, recovered).
 - (next waves appended here as they ship)
 
 ## Loop guardrails
