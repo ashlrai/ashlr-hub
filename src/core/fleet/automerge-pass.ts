@@ -35,6 +35,10 @@ import { autoMergeProposal, type AutoMergeResult } from '../inbox/merge.js';
 import { killSwitchOn } from '../sandbox/policy.js';
 import { readDecisions } from './decisions-ledger.js';
 import { judgeProposal, resolveFrontierJudgeClient, type ManagerVerdict } from './manager.js';
+// M193: additive gate-modules (flag-gated, default OFF, only tighten)
+import { redTeamProposal } from './red-team.js';
+import { analyzeBlastRadius } from '../run/blast-radius.js';
+import { checkSpecContract } from '../run/spec-contract.js';
 
 export interface AutoMergePassResult {
   /** Proposals the gate was run against this pass (frontier + branch-eligible mid). */
@@ -49,6 +53,12 @@ export interface AutoMergePassResult {
   judged: number;
   /** M172: how many proposals were skipped by the judge-per-pass cap. */
   judgeCapped: number;
+  /**
+   * M193: proposals that passed the ship-verdict gate but were blocked by an
+   * additive check (red-team / blast-radius / spec-contract). Per-skip detail
+   * recorded here for observability.
+   */
+  skipped: Array<{ proposalId: string; check: string; reason: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +118,7 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     results: [],
     judged: 0,
     judgeCapped: 0,
+    skipped: [],
   };
   if (cfg.foundry?.autoMerge?.enabled !== true) return out;
   if (killSwitchOn()) return out;
@@ -195,6 +206,89 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     // ── End M172 ──────────────────────────────────────────────────────────
 
     out.attempted++;
+
+    // ── M193: additive gate-checks (flag-gated, default OFF, only tighten) ──
+    // Each check runs only when its feature flag is enabled. A check that
+    // throws is treated as passed (fail-open) — the module's own never-throws
+    // contract governs the actual verdict, but a caught exception must not
+    // block a merge the core gate approved. When a check FAILS (explicit
+    // result), the proposal is skipped (stays pending) and the reason is
+    // recorded. These checks NEVER cause a merge that wouldn't happen otherwise.
+
+    // M191 — Red-team critic
+    if ((foundry as Record<string, unknown> | undefined)?.['redTeam'] === true) {
+      let shouldSkip = false;
+      try {
+        const rt = await redTeamProposal(p, cfg);
+        if (rt.verdict === 'broken') {
+          shouldSkip = true;
+          out.skipped.push({ proposalId: p.id, check: 'red-team', reason: rt.detail });
+        }
+      } catch {
+        // fail-open: a thrown exception does not block the merge
+      }
+      if (shouldSkip) continue;
+    }
+
+    // M188 — Blast-radius
+    if ((foundry as Record<string, unknown> | undefined)?.['blastRadius'] === true) {
+      let shouldSkip = false;
+      try {
+        const changedFiles = p.diff
+          ? p.diff
+              .split('\n')
+              .filter((l: string) => l.startsWith('+++ '))
+              .map((l: string) => l.slice(4).replace(/^[ab]\//, '').trim())
+              .filter((f: string) => f && f !== '/dev/null')
+          : [];
+        const br = await analyzeBlastRadius(
+          { repo: p.repo ?? '', changedFiles },
+          cfg as unknown as import('../run/blast-radius.js').BlastRadiusConfig,
+        );
+        if (br.risk === 'high') {
+          shouldSkip = true;
+          out.skipped.push({ proposalId: p.id, check: 'blast-radius', reason: br.detail });
+        }
+      } catch {
+        // fail-open
+      }
+      if (shouldSkip) continue;
+    }
+
+    // M190 — Spec-contract
+    if ((foundry as Record<string, unknown> | undefined)?.['specContract'] === true) {
+      const specId = (p as unknown as Record<string, unknown>)['specId'];
+      if (specId && typeof specId === 'string') {
+        let shouldSkip = false;
+        try {
+          // Lazily load the spec body so this path costs nothing when no spec is present.
+          let specInput: import('../run/spec-contract.js').SpecInput = null;
+          try {
+            const { loadSpec } = await import('../spec/spec-store.js');
+            const loaded = loadSpec(specId, p.repo ?? undefined);
+            if (loaded) specInput = { meta: loaded.meta, body: loaded.body };
+          } catch {
+            // Spec load failed — treat as "no spec" (check is a no-op when spec is absent)
+            specInput = null;
+          }
+          if (specInput !== null) {
+            const sc = await checkSpecContract(
+              { spec: specInput, repoDir: p.repo ?? undefined, diff: p.diff },
+              cfg,
+            );
+            if (!sc.satisfied) {
+              shouldSkip = true;
+              out.skipped.push({ proposalId: p.id, check: 'spec-contract', reason: sc.detail.reason ?? 'spec contract unsatisfied' });
+            }
+          }
+        } catch {
+          // fail-open
+        }
+        if (shouldSkip) continue;
+      }
+    }
+    // ── End M193 ──────────────────────────────────────────────────────────
+
     try {
       const res = await autoMergeProposal(p.id, cfg);
       out.results.push(res);

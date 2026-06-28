@@ -52,6 +52,10 @@ import { emitTuningProposals } from '../learn/tuning.js';
 import { runAutoMergePass } from '../fleet/automerge-pass.js';
 import { runBestOfN } from '../run/best-of-n.js';
 import { runSelfHealCycle } from '../fleet/self-heal.js';
+import { runViaAshlrcode } from '../run/ashlrcode-engine.js'; // M185
+import { runInventCycle } from '../generative/invent-cycle.js'; // M186
+import { runCounterfactualReplay } from '../fleet/counterfactual.js'; // M187
+import { detectRegression, bisectAndRevert } from '../fleet/regression-sentinel.js'; // M189
 import { pendingCount, listProposals } from '../inbox/store.js';
 // worked-ledger is used transitively via LocalWorkQueueCoordinator (selectWorkQueueCoordinator).
 import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
@@ -559,6 +563,33 @@ export async function tick(
     // Best-effort — self-heal must never crash the tick.
   }
 
+  // M186: Generative invent cycle — synthesise new work items from enrolled repos.
+  // Flag-gated: cfg.foundry.generative === true → ON; absent/false → skipped (default OFF).
+  // Never throws; never blocks or breaks the tick on any error.
+  if ((liveCfg.foundry as any)?.generative === true) {
+    try { await runInventCycle(liveCfg); } catch { /* best-effort */ }
+  }
+
+  // M187: Counterfactual replay — low-cadence judge calibration.
+  // Flag-gated: cfg.foundry.counterfactual === true AND sparse tick cadence (every 20 ticks).
+  // Never throws; never blocks or breaks the tick on any error.
+  if (
+    (liveCfg.foundry as any)?.counterfactual === true &&
+    state.ticks.length % 20 === 0
+  ) {
+    try { await runCounterfactualReplay(liveCfg); } catch { /* best-effort */ }
+  }
+
+  // M189: Regression sentinel — detect regressions introduced by auto-merge and bisect/revert.
+  // Flag-gated: cfg.foundry.regressionSentinel === true → ON; absent/false → skipped (default OFF).
+  // Never throws; never blocks or breaks the tick on any error.
+  if ((liveCfg.foundry as any)?.regressionSentinel === true) {
+    try {
+      const r = await detectRegression(liveCfg);
+      if (r.regressed) await bisectAndRevert(liveCfg);
+    } catch { /* best-effort */ }
+  }
+
   // Shared, mutable in-tick spend tally. Read+incremented by each concurrent
   // task so later dispatches can short-circuit once cumulative realized spend
   // reaches the remaining daily headroom (the USD daily cap is otherwise only
@@ -757,6 +788,27 @@ export async function tick(
         // diff → PENDING proposal. No nested swarm. M45 containment (severed git
         // push, scrubbed diff) + the M47 merge gate still apply downstream.
         recordUse(backend);
+
+        // M185: ashlrcode executor — when flag ON and backend is a LOCAL tier,
+        // delegate the item to the `ac` agent instead of the raw runGoal path.
+        // Flag-off (ashlrcodeExecutor absent/false) → falls through to runGoal,
+        // byte-identical to pre-M185 behavior.
+        if (
+          (liveCfg.foundry as Record<string, unknown>)?.['ashlrcodeExecutor'] === true &&
+          poolTierOf(engineTierOf(backend)) === 'local'
+        ) {
+          const acResult = await runViaAshlrcode(item, item.repo, liveCfg);
+          swarmSpent = 0; // ac does not bill separately; cost accounted by engine
+          tickSpent += swarmSpent;
+          audit({
+            action: 'daemon:proposal-created',
+            repo: item.repo,
+            sandboxId: null,
+            summary: `ashlrcode executor: ${acResult.ok ? 'ok' : `failed: ${acResult.error}`} for "${item.title}"`,
+            result: acResult.ok ? 'ok' : 'error',
+          });
+          return { item, spentUsd: swarmSpent, dispatched: true };
+        }
 
         // M170: best-of-N dispatch — when cfg.foundry.bestOfN > 1, generate N
         // candidates and let the critic pick the winner. Flag-off: bestOfN absent
