@@ -102,6 +102,8 @@ import {
 import { listNativeTools } from '../mcp-native.js';
 import { selectInboxStore } from '../seams/inbox.js';
 import { scrubSecrets } from '../knowledge/index.js';
+// M171: headless browser verification for web repos.
+import { isWebApp, verifyInBrowser } from './browser-verify.js';
 // NOTE: sandbox/worktree.js is imported DYNAMICALLY inside runGoal (matching the
 // swarm runner) so its absence degrades gracefully at runtime instead of
 // becoming a hard load-time dependency (H4 simulates the module being absent).
@@ -837,6 +839,43 @@ export const TITRR_MAX_ATTEMPTS = 2;
 
 /** Hard wall-clock per test run inside the TITRR loop (60 s). */
 const TITRR_TEST_TIMEOUT_MS = 60_000;
+
+// ---------------------------------------------------------------------------
+// M171: browser-verify fold helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Fold a BrowserVerifyResult into a task result string.
+ *
+ * Rules (exported for unit testing):
+ *   skipped          → null (caller leaves task.result unchanged)
+ *   renderOk=false
+ *     OR errors > 0  → "[browser-verify: FAIL — <summary>]\n<existing>"
+ *   clean pass       → "<existing>\n[browser-verify: PASS — <evidence>]"
+ *
+ * Pure function — never throws, never touches I/O.
+ */
+export function foldBrowserVerify(
+  existing: string | undefined,
+  bv: import('./browser-verify.js').BrowserVerifyResult,
+): string | null {
+  if (bv.skipped) return null;
+
+  if (!bv.renderOk || bv.consoleErrors.length > 0) {
+    const errSummary = bv.consoleErrors.length > 0
+      ? `console errors: ${bv.consoleErrors.slice(0, 5).join('; ')}`
+      : 'render failed';
+    return `[browser-verify: FAIL — ${errSummary}]\n${existing ?? ''}`;
+  }
+
+  // Clean pass.
+  const evidence = [
+    bv.detail,
+    bv.screenshotPath ? `screenshot: ${bv.screenshotPath}` : '',
+    `console errors: ${bv.consoleErrors.length}`,
+  ].filter(Boolean).join(' | ');
+  return `${existing ?? ''}\n[browser-verify: PASS — ${evidence}]`.trimStart();
+}
 
 /** Maximum output characters fed back to the engine as failure context. */
 const TITRR_OUTPUT_CAP = 4_000;
@@ -2008,6 +2047,47 @@ export async function runGoal(
             if (!verdict.ok && (task.status as string) === 'done') {
               // Still failing (or budget exhausted): annotate but keep 'done'.
               task.result = `[needs-attention: ${verdict.reason}]\n${task.result ?? ''}`;
+            }
+
+            // M171: headless browser verification — fold render+console-error
+            // evidence into the verify outcome for web repos.
+            // repoRoot: the source repo on disk (not the sandbox worktree). The
+            // engineer sandbox's sourceRepo is opts.cwd when set and valid, else cwd.
+            const repoRoot: string =
+              opts.cwd && path.isAbsolute(opts.cwd) && fs.existsSync(opts.cwd)
+                ? opts.cwd
+                : process.cwd();
+            //
+            // Guard: only when cfg.foundry?.browserVerify === true AND the repo
+            // looks like a web app. When the flag is off (default) or the repo
+            // is not a web app this block is completely skipped — byte-identical
+            // to pre-M171 behaviour.
+            //
+            // Outcomes:
+            //   skipped (no driver / not-web) → NEUTRAL; verdict unchanged.
+            //   renderOk===false OR consoleErrors>0 → mark task needs-attention.
+            //   clean pass → append screenshot + console-error evidence to result
+            //                so the judge sees the proof.
+            if (
+              (cfg.foundry as { browserVerify?: boolean } | undefined)?.browserVerify === true &&
+              isWebApp(repoRoot)
+            ) {
+              const bvResult = await verifyInBrowser(repoRoot, cfg);
+              const folded = foldBrowserVerify(task.result, bvResult);
+
+              if (folded !== null) {
+                // Non-neutral outcome — update task.result and emit a log event.
+                const isFail = !bvResult.renderOk || bvResult.consoleErrors.length > 0;
+                task.result = folded;
+                emit(sink, {
+                  kind: 'log',
+                  taskId: task.id,
+                  text: isFail
+                    ? `[M171] browser verify FAIL — ${bvResult.consoleErrors.length > 0 ? `${bvResult.consoleErrors.length} console error(s)` : 'render failed'}`
+                    : `[M171] browser verify PASS — ${bvResult.detail}`,
+                });
+              }
+              // skipped (folded===null) → neutral; no annotation, no emit.
             }
           }
 
