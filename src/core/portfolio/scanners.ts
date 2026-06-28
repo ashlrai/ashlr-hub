@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto';
 import type { WorkItem, WorkSource, AshlrConfig } from '../types.js';
 import { listIssues, githubStatus } from '../integrations/github.js';
 import { isTrivialItem, isNonCodePath } from './value-filter.js';
+import { listGoals } from '../goals/store.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -686,7 +687,14 @@ export function isActionableFix(fixAvailable: unknown): boolean {
   return false;
 }
 
-export async function scanDeps(repo: string): Promise<WorkItem[]> {
+/**
+ * M160: scanDeps is DEFAULT OFF. Pass cfg with cfg.foundry.scanDeps = true to
+ * enable. When disabled the fleet skips dep-bump/hygiene work and focuses on
+ * substantive sources (issues, security, tests, goals). Mirrors M136 scanTodos.
+ */
+export async function scanDeps(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>): Promise<WorkItem[]> {
+  // M160: gate — disabled by default; only run when explicitly opted in.
+  if (!cfg?.foundry?.scanDeps) return [];
   try {
     const pkgPath = join(repo, 'package.json');
     if (!existsSync(pkgPath)) return [];
@@ -832,7 +840,14 @@ function fileSizeBytes(dir: string, names: string[]): number {
   return 0;
 }
 
-export async function scanDocs(repo: string): Promise<WorkItem[]> {
+/**
+ * M160: scanDocs (repo-hygiene: missing README/LICENSE/CONTRIBUTING) is DEFAULT
+ * OFF. Pass cfg with cfg.foundry.scanHygiene = true to enable. These items are
+ * trivial volume that judges rate "review", never "ship". Mirrors M136/M160.
+ */
+export async function scanDocs(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>): Promise<WorkItem[]> {
+  // M160: gate — disabled by default; only run when explicitly opted in.
+  if (!cfg?.foundry?.scanHygiene) return [];
   try {
     const items: WorkItem[] = [];
 
@@ -1313,7 +1328,13 @@ function parseLintCache(cachePath: string): LintFileResult[] | null {
 const FIXABLE_RULE_RE =
   /^(no-unused-vars|prefer-const|eqeqeq|semi|quotes|comma-dangle|no-trailing-spaces|eol-last|no-extra-semi|no-multiple-empty-lines|space-before-blocks|keyword-spacing|arrow-spacing|@typescript-eslint\/no-unused-vars|@typescript-eslint\/prefer-const|import\/order|unused-imports\/no-unused-imports)$/;
 
-export async function scanLint(repo: string): Promise<WorkItem[]> {
+/**
+ * M160: scanLint is DEFAULT OFF. Pass cfg with cfg.foundry.scanLint = true to
+ * enable. Mirrors M136 scanTodos / M160 scanDeps.
+ */
+export async function scanLint(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>): Promise<WorkItem[]> {
+  // M160: gate — disabled by default; only run when explicitly opted in.
+  if (!cfg?.foundry?.scanLint) return [];
   try {
     // GATE: require a lint script in package.json — no lint script → skip.
     const pkgPath = join(repo, 'package.json');
@@ -1394,16 +1415,76 @@ export async function scanLint(repo: string): Promise<WorkItem[]> {
   }
 }
 
-// SCANNERS — all eight, exported as a ReadonlyArray
+// ---------------------------------------------------------------------------
+// scanGoals — M160: emit work items for the next concrete step of each active goal.
+//
+// Reads active goals from the goals store (~/.ashlr/goals/). For each active
+// goal with a pending milestone, emits one WorkItem (source:'goal') scoped to
+// that milestone's next concrete step. HIGH baseline value (4) — these are
+// user-declared priorities.
+//
+// Tolerates no goals (returns []). Never throws. DEFAULT ON (no flag needed —
+// goal-derived work is substantive by definition; the user chose these goals).
+// ---------------------------------------------------------------------------
+
+export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'>): Promise<WorkItem[]> {
+  try {
+    // Load active goals from the goals store. listGoals never throws.
+    const active = listGoals({ status: 'active' });
+    if (active.length === 0) return [];
+
+    const items: WorkItem[] = [];
+    for (const goal of active) {
+      // Find the next actionable milestone: first pending or in-progress milestone
+      // in order (sortMilestones has already sorted by `order` ascending).
+      const next = goal.milestones.find(
+        (m) => m.status === 'pending' || m.status === 'in-progress',
+      );
+      if (!next) continue;
+
+      // Scope the work item to the milestone's concrete detail when available,
+      // or fall back to the milestone title with the goal objective as context.
+      const detail =
+        next.detail && next.detail.trim().length > 0
+          ? `Goal: "${goal.objective}". Next milestone (${next.id}): ${next.detail.trim()}. ` +
+            `Implement this milestone as a focused diff. Do not tackle the whole goal at once. ` +
+            `Repo: ${basename(repo)}.`
+          : `Goal: "${goal.objective}". Next milestone (${next.id}): "${next.title}". ` +
+            `Implement this milestone concretely in ${basename(repo)}. Do not tackle the whole goal. ` +
+            `Stop after the smallest focused change that advances this milestone.`;
+
+      items.push(
+        makeItem(
+          repo,
+          'goal',
+          `goal:${goal.id}:${next.id}`,
+          `Advance goal "${goal.objective}" — ${next.title}`,
+          detail,
+          4, // high baseline value: user-declared priority
+          2,
+          ['goal', goal.id, next.id],
+        ),
+      );
+    }
+    return items;
+  } catch {
+    return [];
+  }
+}
+
+// SCANNERS — all nine, exported as a ReadonlyArray
 // ---------------------------------------------------------------------------
 
 export const SCANNERS: ReadonlyArray<(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>) => Promise<WorkItem[]>> = [
-  scanIssues,
-  scanTodos,
-  scanTests,
-  scanDeps,
-  scanDocs,
-  scanSecurity,
+  // HIGH-VALUE sources (default ON): substantive work the fleet can ship.
+  scanIssues,      // real GitHub issues — user-requested work
+  scanSecurity,    // binshield findings — actionable security fixes
+  scanTests,       // failing CI / missing test script
   scanSelfImprove, // M54: the fleet's own backlog (self-gated to @ashlr/hub)
-  scanLint,        // M101: cached-report lint errors → concrete auto-fixable items
+  scanGoals,       // M160: active goal next-step items (user-declared priorities)
+  // LOW-VALUE sources (default OFF via cfg flags): noise / rarely ship.
+  scanTodos,       // M136: off by default (cfg.foundry.scanTodos)
+  scanDeps,        // M160: off by default (cfg.foundry.scanDeps)
+  scanLint,        // M160: off by default (cfg.foundry.scanLint)
+  scanDocs,        // M160: off by default (cfg.foundry.scanHygiene)
 ] as const;

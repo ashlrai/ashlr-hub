@@ -167,6 +167,33 @@ export interface AshlrConfig {
      */
     scanTodos?: boolean;
     /**
+     * M160: dependency-bump scanner toggle. DEFAULT false — dep-bumps are low-
+     * value volume work (the judge correctly rates them "review", not "ship").
+     * Set true to re-enable; even when true, major-version bumps are skipped
+     * (M159 invariant). Mirrors the M136 scanTodos pattern.
+     */
+    scanDeps?: boolean;
+    /**
+     * M160: lint-error scanner toggle. DEFAULT false — cached-lint-report items
+     * rarely produce shippable diffs from the fleet. Set true to surface fixable
+     * lint errors from a pre-existing cached report file.
+     */
+    scanLint?: boolean;
+    /**
+     * M160: repo-hygiene (missing README/LICENSE/CONTRIBUTING) scanner toggle.
+     * DEFAULT false — hygiene items (scanDocs) are trivial volume that a judge
+     * rates "review". Set true to surface missing-doc items.
+     */
+    scanHygiene?: boolean;
+    /**
+     * M158: destructive-diff pre-judge guard. DEFAULT true (safety guard — on by
+     * default; set false to disable). When true, proposals whose diff matches a
+     * clearly-destructive pattern (wholesale file gutting, package.json dep
+     * destruction, JSON key collision, critical file deletion) are auto-rejected
+     * at intake before reaching the pending queue or frontier judge.
+     */
+    diffSafety?: boolean;
+    /**
      * M128: intelligent model-granular routing policy.
      *  'balanced' (DEFAULT) — free-local for bulk, reserve strong models for
      *                          hard tasks, cheap-cloud for medium. Roughly
@@ -2049,8 +2076,7 @@ export interface Enrollment {
  */
 
 /** The kind of source a WorkItem was derived from. */
-export type WorkSource = 'issue' | 'todo' | 'test' | 'dep' | 'doc' | 'security' | 'plugin' | 'self' | 'lint'; // M33: 'plugin'; M54: 'self' (the fleet's own backlog); M101: 'lint' (cached lint report) — all additive
-
+export type WorkSource = 'issue' | 'todo' | 'test' | 'dep' | 'doc' | 'security' | 'plugin' | 'self' | 'lint' | 'goal' | 'hygiene'; // M33: 'plugin'; M54: 'self' (the fleet's own backlog); M101: 'lint' (cached lint report); M160/M161: 'goal' (active goal next-step), 'hygiene' (low-value hygiene) — all additive
 /**
  * A single discovered, scored unit of work. Produced by a scanner over a
  * single enrolled repo. Contains NO secrets. Pure analysis — never implies a

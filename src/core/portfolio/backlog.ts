@@ -72,6 +72,43 @@ export function scoreItem(value: number, effort: number): number {
 }
 
 // ---------------------------------------------------------------------------
+// M161: Source-tier weighting
+// ---------------------------------------------------------------------------
+
+/**
+ * Source priority tiers. Higher tier = more substantive work.
+ *
+ * Tier 3 (highest) — goal, issue: directive goals and tracked bugs drive real
+ *   feature/fix work; the fleet should always prefer these.
+ * Tier 2 (high)    — security, test: security vulnerabilities and failing tests
+ *   are urgent and produce concrete diffs.
+ * Tier 1 (normal)  — self, plugin, doc: useful but not fleet-critical.
+ * Tier 0 (low)     — dep, lint, hygiene, todo: often noisy / low yield; should
+ *   rank below substantive work when both are present.
+ *
+ * Multipliers are chosen so that a tier-3 item with value=2 outranks a tier-0
+ * item with value=5 (2 * 1.8 = 3.6 > 5/5 * 0.6 = 0.6, even at effort=1).
+ */
+const SOURCE_TIER_MULTIPLIER: Record<string, number> = {
+  goal:     1.8,
+  issue:    1.8,
+  security: 1.4,
+  test:     1.4,
+  self:     1.0,
+  plugin:   1.0,
+  doc:      1.0,
+  todo:     0.6,
+  dep:      0.6,
+  lint:     0.6,
+  hygiene:  0.6,
+};
+
+/** Returns the source-tier multiplier for an item's source. Unknown sources → 1.0. */
+export function sourceTierMultiplier(source: string): number {
+  return SOURCE_TIER_MULTIPLIER[source] ?? 1.0;
+}
+
+// ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------
 
@@ -250,9 +287,12 @@ export async function buildBacklog(opts?: {
   }
 
   // Dedupe by id, recompute score, sort descending.
+  // M161: score = raw value/effort score × source-tier multiplier so substantive
+  // sources (goal, issue, security, test) naturally outrank dep/lint/hygiene
+  // even when raw scores are similar.
   const deduped = dedupeItems(allItems).map((item) => ({
     ...item,
-    score: scoreItem(item.value, item.effort),
+    score: scoreItem(item.value, item.effort) * sourceTierMultiplier(item.source),
   }));
   deduped.sort((a, b) => b.score - a.score);
 
@@ -272,6 +312,24 @@ export async function buildBacklog(opts?: {
       continue;
     }
     passed.push(item);
+  }
+
+  // M161: No-starvation guard — if ALL items were filtered by isTrivialItem (not
+  // by the value gate) AND no substantive items exist, restore the trivial-flagged
+  // items so the fleet always has something to do. This only activates when the
+  // only available work is low-tier; it does NOT override the minItemValue gate.
+  //
+  // Condition: passed is empty but deduped is non-empty (items exist but all were
+  // trivial-flagged). In this case we restore the trivial-flagged items that
+  // still met the minValue threshold so the fleet can still make progress.
+  if (passed.length === 0 && deduped.length > 0) {
+    const valueGateOnly = deduped.filter((item) => item.value >= minValue);
+    passed.push(...valueGateOnly);
+    // Remove the restored items from filtered to avoid double-counting in audit.
+    const restoredIds = new Set(valueGateOnly.map((i) => i.id));
+    for (let i = filtered.length - 1; i >= 0; i--) {
+      if (restoredIds.has(filtered[i]!.id)) filtered.splice(i, 1);
+    }
   }
 
   // M133: Dedup vs open pending proposals — drop any item that already has an
