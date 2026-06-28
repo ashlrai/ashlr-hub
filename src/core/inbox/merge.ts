@@ -1,5 +1,5 @@
 /**
- * core/inbox/merge.ts — M47: tiered-trust merge-to-main gate.
+ * core/inbox/merge.ts — M47/M153: tiered-trust + verification-strength merge gate.
  *
  * ╔══════════════════════════════════════════════════════════════════════════╗
  * ║ SECURITY MODEL — autonomous merge to the DEFAULT BRANCH (main).            ║
@@ -14,9 +14,18 @@
  * ║   2. proposal exists, kind ∈ {patch,pr}, non-empty diff.                   ║
  * ║   3. kill switch OFF + assertMayMutate(repo) (enrollment). On refusal we   ║
  * ║      DO NOT burn proposal state — it stays approvable/pending.             ║
- * ║   4. evaluateMergeAuthority: engineTier === 'frontier' AND {engine,model}  ║
- * ║      ∈ cfg.foundry.mergeAuthority. A ':default' engineModel (no concrete   ║
- * ║      model) is ALWAYS rejected — only pinned, vetted models may merge.     ║
+ * ║   4. MERGE AUTHORITY — two modes selected by trustBasis (DEFAULT 'tier'):  ║
+ * ║      'tier' (M51): engineTier === 'frontier' AND {engine,model} ∈           ║
+ * ║        mergeAuthority. Byte-identical to pre-M153 when absent/'tier'.       ║
+ * ║      'verification' (M153): STRONGER 5-criterion bar that REPLACES the     ║
+ * ║        tier check. ANY producer tier clears if ALL hold:                    ║
+ * ║        (a) most-recent 'judged' decision verdict='ship' AND judge engine   ║
+ * ║            is a frontier (claude-*) model — NEVER the local 72b fallback   ║
+ * ║            (self-confirmation trap is explicitly blocked);                  ║
+ * ║        (b) proposal.verifyResult.passed === true (full suite green);        ║
+ * ║        (c) risk ≤ maxRisk AND files/lines within scope caps;               ║
+ * ║        (d) edvConfirmationWeight confirmed === true (independent signal);   ║
+ * ║        (e) valid signed HMAC provenance.                                    ║
  * ║   5. classifyRisk(proposal) ≤ cfg.foundry.autoMerge.maxRisk (default low). ║
  * ║  5.5 SCOPE CAP (M86): risk must be 'low' AND the diff must be within tight ║
  * ║      size caps — files ≤ MAX_AUTOMERGE_FILES (default 4, override via      ║
@@ -103,6 +112,7 @@ import { isSelfTargetProposal, guardSafetyTests, selfEvalParity } from '../fleet
 import { verifyProvenance } from '../foundry/provenance.js';
 import { judgeProposal } from '../fleet/manager.js';
 import { readDecisions, recordDecision } from '../fleet/decisions-ledger.js';
+import { edvConfirmationWeight } from '../portfolio/edv-verify.js';
 import {
   detectVerifyCommands,
   runVerifyCommand,
@@ -499,6 +509,186 @@ export function evaluateBranchAuthority(proposal: Proposal, cfg: AshlrConfig): M
 export { defaultBranch };
 
 // ===========================================================================
+// 3b) evaluateVerificationGate — M153 VERIFICATION-STRENGTH trust basis
+// ===========================================================================
+
+/**
+ * M153: Verification-gate result. Mirrors MergeAuthorityVerdict so the two
+ * trust bases are interchangeable at the Gate 4 call site.
+ */
+export interface VerificationGateVerdict {
+  authorized: boolean;
+  reason: string;
+}
+
+/**
+ * M153: helper — is a judge engine string a frontier (claude-*) model?
+ *
+ * The frontier-judge requirement is NON-NEGOTIABLE in verification mode:
+ * the PRODUCER may be local but the JUDGE must be a Claude frontier model.
+ * This prevents self-confirmation (local 72b judging its own output).
+ *
+ * A model string is frontier-judge when it starts with 'claude' (case-
+ * insensitive) OR contains 'claude'. This matches the convention used
+ * throughout manager.ts (resolveJudgeClient / runManager).
+ */
+export function isFrontierJudge(judgeEngine: string | undefined): boolean {
+  if (!judgeEngine || judgeEngine === 'unknown' || judgeEngine === 'local') return false;
+  const lc = judgeEngine.toLowerCase();
+  return lc.startsWith('claude') || lc.includes('claude');
+}
+
+/**
+ * M153: evaluate the VERIFICATION-STRENGTH gate.
+ *
+ * Called ONLY when cfg.foundry.autoMerge.trustBasis === 'verification'.
+ * Replaces the frontier-tier/mergeAuthority check (M51 Gate 4) with a
+ * STRONGER 5-criterion bar. ALL must hold, or the gate refuses.
+ *
+ * Criteria (all required):
+ *
+ *   1. FRONTIER JUDGE 'ship': the most recent 'judged' decision for this
+ *      proposal must have verdict === 'ship' AND the judgeEngine recorded in
+ *      DecisionEntry.engine must be a frontier (claude-*) model. If the judge
+ *      was local/72b or no 'judged' entry exists → REFUSE. The producer may be
+ *      any tier; the JUDGE must be frontier. Non-negotiable anti-self-confirm.
+ *
+ *   2. SUITE GREEN: proposal.verifyResult.passed === true — the full test suite
+ *      ran and passed (set by verifyProposal Gate 6). Gate 6 is a prerequisite
+ *      so this criterion is a belt-and-suspenders re-check here at Gate 4.
+ *      If verifyResult is absent or passed===false → REFUSE.
+ *
+ *   3. RISK ≤ maxRisk AND SCOPE CAP: risk === 'low' AND files ≤
+ *      maxAutomergeFiles AND lines ≤ maxAutomergeLines. These are also enforced
+ *      by Gates 5/5.5 later; we enforce them here too so verification mode
+ *      cannot be tricked by re-ordering or gate removal.
+ *
+ *   4. EDV INDEPENDENT CONFIRMATION: edvConfirmationWeight(proposal, decisions)
+ *      .confirmed === true (full weight 1.0). 'unverified' (0.3) does NOT
+ *      satisfy the bar — an explicit independent signal is required.
+ *
+ *   5. VALID SIGNED PROVENANCE: verifyProvenance(proposal).ok === true.
+ *      (Also enforced by Gate 4.5; re-checked here so criteria are self-
+ *      contained and ordering cannot be exploited.)
+ *
+ * NEVER throws. PURE (no I/O beyond the provided decisions array).
+ */
+export function evaluateVerificationGate(
+  proposal: Proposal,
+  cfg: AshlrConfig,
+  decisionsForProposal: Array<{ action: string; verdict?: string; engine?: string; model?: string }>,
+): VerificationGateVerdict {
+  const refuse = (reason: string): VerificationGateVerdict => ({ authorized: false, reason });
+
+  // ── Criterion 1: frontier judge 'ship' ────────────────────────────────────
+  // Find the most recent 'judged' entry with a 'ship' verdict.
+  const shipEntry = [...decisionsForProposal]
+    .reverse()
+    .find((d) => d.action === 'judged' && d.verdict === 'ship');
+
+  if (!shipEntry) {
+    return refuse(
+      "verification gate: no 'judged' decision with verdict='ship' found for this proposal — a frontier judge must explicitly ship it",
+    );
+  }
+
+  // The judge engine is stored in DecisionEntry.engine (and .model — same value).
+  // runManager records the real model string; Gate 7 inline now records it too (M153 fix).
+  const judgeEngine = shipEntry.engine ?? shipEntry.model;
+  if (!isFrontierJudge(judgeEngine)) {
+    return refuse(
+      `verification gate: judge '${judgeEngine ?? 'unknown'}' is not a frontier (claude-*) model — ` +
+        `local/72b judges cannot provide independent confirmation (self-confirmation trap)`,
+    );
+  }
+
+  // ── Criterion 2: suite green ──────────────────────────────────────────────
+  // verifyResult.passed is set by verifyProposal (Gate 6). In verification mode
+  // this is a hard prerequisite even before Gate 6 runs in autoMergeProposal,
+  // because a pre-verified proposal (run outside the merge path) may already
+  // carry this field. If absent, refuse — the suite must have been run.
+  if (proposal.verifyResult?.passed !== true) {
+    return refuse(
+      `verification gate: proposal.verifyResult.passed is ${
+        proposal.verifyResult === undefined ? 'absent' : 'false'
+      } — the full test suite must pass`,
+    );
+  }
+
+  // ── Criterion 3: risk ≤ maxRisk AND scope cap ─────────────────────────────
+  // Re-checked here (belt-and-suspenders; Gates 5/5.5 also enforce these).
+  // classifyRisk is declared later in the file but hoisting is fine for functions.
+  const risk = classifyRisk(proposal);
+  const maxRisk: RiskClass = (cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge']
+    ? ((cfg.foundry as Record<string, unknown>)['autoMerge'] as Record<string, unknown>)?.['maxRisk'] as RiskClass ?? 'low'
+    : 'low';
+
+  if (RISK_ORDER[risk] > RISK_ORDER[maxRisk]) {
+    return refuse(
+      `verification gate: risk class '${risk}' exceeds maxRisk '${maxRisk}'`,
+    );
+  }
+
+  const diff = proposal.diff ?? '';
+  const rawFiles = (cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge']
+    ? ((cfg.foundry as Record<string, unknown>)['autoMerge'] as Record<string, unknown>)?.['maxAutomergeFiles'] as number
+    : undefined;
+  const MAX_FILES: number = typeof rawFiles === 'number' && rawFiles >= 1 ? Math.floor(rawFiles) : 4;
+  const rawLines = (cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge']
+    ? ((cfg.foundry as Record<string, unknown>)['autoMerge'] as Record<string, unknown>)?.['maxAutomergeLines'] as number
+    : undefined;
+  const MAX_LINES: number = typeof rawLines === 'number' && rawLines >= 1 ? Math.floor(rawLines) : 150;
+
+  let scopeFiles = 0;
+  for (const line of diff.split('\n')) {
+    if (!line.startsWith('+++ ')) continue;
+    const p = line.slice(4).trim().split('\t')[0];
+    if (p && p !== '/dev/null') scopeFiles++;
+  }
+  let scopeLines = 0;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+++') || line.startsWith('---')) continue;
+    if (line.startsWith('+') || line.startsWith('-')) scopeLines++;
+  }
+
+  if (scopeFiles > MAX_FILES) {
+    return refuse(
+      `verification gate: scope cap — diff touches ${scopeFiles} files (max ${MAX_FILES})`,
+    );
+  }
+  if (scopeLines > MAX_LINES) {
+    return refuse(
+      `verification gate: scope cap — diff has ${scopeLines} changed lines (max ${MAX_LINES})`,
+    );
+  }
+
+  // ── Criterion 4: EDV independent confirmation ─────────────────────────────
+  const edvResult = edvConfirmationWeight(
+    proposal,
+    decisionsForProposal as Array<{ action: 'proposed' | 'verified' | 'judged' | 'merged' | 'rejected' | 'escalated'; ts: string; proposalId: string; engine?: string; model?: string; verdict?: string; reason?: string; detail?: string }>,
+  );
+  if (!edvResult.confirmed) {
+    return refuse(
+      `verification gate: EDV independent confirmation absent (source='${edvResult.source}', weight=${edvResult.weight}) — a confirmed independent signal is required`,
+    );
+  }
+
+  // ── Criterion 5: valid signed provenance ──────────────────────────────────
+  const provenance = verifyProvenance(proposal);
+  if (!provenance.ok) {
+    return refuse(
+      `verification gate: provenance check failed — ${provenance.reason}`,
+    );
+  }
+
+  // All 5 criteria met.
+  return {
+    authorized: true,
+    reason: `verification gate cleared: frontier judge='${judgeEngine}' ship'd; suite green; risk=${risk}≤${maxRisk}; scope ok (${scopeFiles}f/${scopeLines}l); EDV confirmed; provenance valid`,
+  };
+}
+
+// ===========================================================================
 // 4) verifyProposal — apply diff to an isolated worktree + run verify commands
 // ===========================================================================
 
@@ -841,17 +1031,46 @@ export async function autoMergeProposal(
       return refuse(err instanceof Error ? err.message : String(err), repo);
     }
 
-    // ── Gate 4: frontier merge authority ─────────────────────────────────────
-    // M51/M56: frontier → main (evaluateMergeAuthority); mid → branch/PR ONLY
-    // (evaluateBranchAuthority, a separate default-off flag); local → proposal-only.
-    const target = mergeTargetForTier(proposal.engineTier);
-    const toMain = target === 'main';
-    const authority =
-      target === 'main'
-        ? evaluateMergeAuthority(proposal, cfg)
-        : target === 'branch'
-          ? evaluateBranchAuthority(proposal, cfg)
-          : { authorized: false, reason: `engineTier '${proposal.engineTier ?? 'unset'}' is proposal-only (local)` };
+    // ── Gate 4: merge authority ───────────────────────────────────────────────
+    // M153: two trust bases, selected by cfg.foundry.autoMerge.trustBasis.
+    //
+    //   'tier' (DEFAULT, absent ⇒ 'tier'): M51/M56 — engineTier must be
+    //   'frontier' AND {engine,model} ∈ mergeAuthority (byte-identical to
+    //   pre-M153 behavior). mid → branch/PR only; local → proposal-only.
+    //
+    //   'verification': M153 — REPLACE the tier check with the full
+    //   5-criterion verification bar (evaluateVerificationGate). ANY producer
+    //   tier may proceed; the bar IS the authority. The merge target is always
+    //   'main' in this mode (the verification bar is stronger than tier-gating).
+    //
+    // M54 never-weaken + allowSelfMerge guard unchanged in both modes.
+    const trustBasis = (cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge']
+      ? (((cfg.foundry as Record<string, unknown>)['autoMerge'] as Record<string, unknown>)?.['trustBasis'] as string | undefined) ?? 'tier'
+      : 'tier';
+
+    let toMain: boolean;
+    let authority: { authorized: boolean; reason: string };
+
+    if (trustBasis === 'verification') {
+      // Verification mode: load decisions for this proposal now (needed by
+      // evaluateVerificationGate criterion 1 + 4). The full ledger read is
+      // cheap; no limit so we see ALL prior judged/verified entries.
+      const allDecisions = readDecisions({ proposalId: id });
+      authority = evaluateVerificationGate(proposal, cfg, allDecisions);
+      // In verification mode the merge always targets main (the bar is the gate).
+      toMain = true;
+    } else {
+      // 'tier' mode (default): M51/M56 — byte-identical to pre-M153.
+      const target = mergeTargetForTier(proposal.engineTier);
+      toMain = target === 'main';
+      authority =
+        target === 'main'
+          ? evaluateMergeAuthority(proposal, cfg)
+          : target === 'branch'
+            ? evaluateBranchAuthority(proposal, cfg)
+            : { authorized: false, reason: `engineTier '${proposal.engineTier ?? 'unset'}' is proposal-only (local)` };
+    }
+
     if (!authority.authorized) {
       return refuse(`merge authority denied: ${authority.reason}`, repo);
     }
@@ -862,6 +1081,9 @@ export async function autoMergeProposal(
     // engineTier, diffHash} (signed at producer time by the sandboxed engine
     // with the host-local key) and FAIL CLOSED on any mismatch — so a forged
     // record cannot claim frontier merge-authority.
+    // NOTE: in 'verification' mode evaluateVerificationGate already checked
+    // provenance (criterion 5), but we re-run here so Gate 4.5 always fires
+    // regardless of trustBasis — belt-and-suspenders, no double-cost.
     const provenance = verifyProvenance(proposal);
     if (!provenance.ok) {
       return refuse(`provenance check failed: ${provenance.reason}`, repo);
@@ -1014,7 +1236,10 @@ export async function autoMergeProposal(
       } else {
         // No fresh cached verdict — judge inline.
         // Resolve the judge client (same pattern as runManager; fail closed if unavailable).
+        // M153: capture the actual judge engine string so it can be recorded in
+        // the decisions ledger and later read by evaluateVerificationGate criterion 1.
         let judgeClient: { complete: (system: string, user: string) => Promise<string> } | null = null;
+        let inlineJudgeEngine = 'gate7-inline'; // updated to real model string below
         try {
           const { getActiveClient } = await import('../run/provider-client.js');
           const judgeModel =
@@ -1032,6 +1257,14 @@ export async function autoMergeProposal(
           }
           if (rawClient && typeof (rawClient as Record<string, unknown>)['complete'] === 'function') {
             judgeClient = rawClient as { complete: (s: string, u: string) => Promise<string> };
+            // Capture the model string from the client if available (set by provider-client).
+            const clientModel = (rawClient as Record<string, unknown>)['model'];
+            if (typeof clientModel === 'string' && clientModel) {
+              inlineJudgeEngine = clientModel;
+            } else {
+              // Fall back to the configured model string — better than 'gate7-inline'.
+              inlineJudgeEngine = judgeModel;
+            }
           } else if (rawClient && typeof (rawClient as Record<string, unknown>)['chat'] === 'function') {
             const chat = (rawClient as { chat: (msgs: Array<{role:string;content:string}>) => Promise<{content:string}> }).chat.bind(rawClient);
             judgeClient = {
@@ -1040,6 +1273,8 @@ export async function autoMergeProposal(
                 return resp.content;
               },
             };
+            const clientModel = (rawClient as Record<string, unknown>)['model'];
+            inlineJudgeEngine = typeof clientModel === 'string' && clientModel ? clientModel : judgeModel;
           }
         } catch {
           judgeClient = null;
@@ -1065,12 +1300,14 @@ export async function autoMergeProposal(
 
         try {
           const verdict = await judgeProposal(proposal, cfg, judgeClient);
+          // M153: record inlineJudgeEngine (the real model string) so that
+          // evaluateVerificationGate criterion 1 can verify the judge was frontier.
           recordDecision({
             ts: new Date().toISOString(),
             proposalId: id,
             action: 'judged',
-            engine: 'gate7-inline',
-            model: 'gate7-inline',
+            engine: inlineJudgeEngine,
+            model: inlineJudgeEngine,
             verdict: verdict.verdict,
             reason: verdict.rationale,
             detail: verdict.wouldMerge ? 'would-merge' : '',

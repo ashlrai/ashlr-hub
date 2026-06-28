@@ -10,7 +10,7 @@
  *     index 2 (Show full briefing)     → sendIMessage(full briefing text, cfg)
  *
  *   'manager-approval' — M139: text-based merge approval path.
- *     index 0 (Approve & merge) → setStatus approved + autoMergeProposal (existing gates)
+ *     index 0 (Approve & merge) → setStatus approved + applyProposal (human-authorized path)
  *     index 1 (Reject)          → setStatus rejected + text confirmation
  *     index 2 (Show diff)       → sendIMessage scrubbed diff + re-post the question
  *
@@ -101,25 +101,26 @@ async function handleManagerApproval(req: CommsRequest, cfg: AshlrConfig): Promi
   if (typeof proposalId !== 'string' || !proposalId) return;
 
   if (idx === 0) {
-    // Approve & merge — flip to approved, then run the existing gate chain.
-    // Mason's text reply is the human gate ON TOP of the automated gates —
-    // autoMergeProposal still runs every gate; we NEVER bypass one.
+    // Approve & merge — a Telegram/iMessage tap from the authenticated owner
+    // IS a human approval. Use applyProposal (the human-authorized path), NOT
+    // autoMergeProposal (which is the autonomous frontier-only path). This lets
+    // local and mid-tier work merge when Mason explicitly approves via text.
     try {
       const { setStatus, loadProposal } = await import('../inbox/store.js');
       const proposal = loadProposal(proposalId);
       if (!proposal) return; // already gone — no-op
 
-      setStatus(proposalId, 'approved', 'mason:imessage');
+      setStatus(proposalId, 'approved', 'mason:telegram');
 
-      const { autoMergeProposal } = await import('../inbox/merge.js');
-      const result = await autoMergeProposal(proposalId, cfg);
+      const { applyProposal } = await import('../inbox/apply.js');
+      const result = await applyProposal(proposalId, { confirmed: true });
 
-      if (result.merged) {
+      if (result.ok) {
         await sendIMessage(`✅ Merged "${proposal.title}"`, cfg);
       } else {
-        const reason = result.reason ?? 'unknown reason';
+        const reason = scrubSecrets(result.detail ?? 'unknown reason');
         await sendIMessage(
-          `Approved but merge gate blocked: ${reason} — needs manual merge`,
+          `Approved but apply failed: ${reason} — needs manual review`,
           cfg,
         );
       }

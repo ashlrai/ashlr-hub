@@ -197,9 +197,27 @@ export interface AshlrConfig {
      * frontier merge-authority (engineTier 'frontier' + {engine,model} ∈
      * mergeAuthority), its risk class is ≤ maxRisk, and full verification passes.
      * Kill-switch and human override always apply; nothing auto-merges by default.
+     *
+     * M153: trustBasis selects the authority model for Gate 4:
+     *   'tier' (DEFAULT, absent ⇒ 'tier') — M51 behavior: proposal.engineTier
+     *     MUST be 'frontier' AND {engine,model} ∈ mergeAuthority. Byte-identical
+     *     to pre-M153 when absent or set to 'tier'.
+     *   'verification' — replaces the frontier-tier requirement with a STRONGER
+     *     5-criterion bar (frontier judge 'ship', full suite green, risk/scope
+     *     caps, EDV independent confirmation, valid signed provenance). ANY
+     *     producer tier (including local qwen3-coder) may merge when the full
+     *     bar clears. The JUDGE must be frontier (claude-*); the PRODUCER may
+     *     be local. Self-confirmation (local judge) is NEVER allowed in this mode.
+     *     The tier/mergeAuthority check is REPLACED (not bypassed) by this bar.
+     *     M54 never-weaken + self-target guard + allowSelfMerge parity unchanged.
      */
     autoMerge?: {
       enabled: boolean;
+      /**
+       * M153: trust basis for Gate 4 (default 'tier' = M51 behavior unchanged).
+       * See comment above for full semantics.
+       */
+      trustBasis?: 'tier' | 'verification';
       /** Max risk class permitted to auto-merge (default 'low'). */
       maxRisk?: 'low' | 'medium' | 'high';
       /** Also merge/push on the remote (gh pr merge) when applying (default false). */

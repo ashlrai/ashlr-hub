@@ -1,5 +1,5 @@
 /**
- * M139 — iMessage "approve merges by text" path.
+ * M139 — iMessage/Telegram "approve merges by text" path.
  *
  * Modules under test:
  *   src/core/comms/merge-requests.ts  — postShipProposalsForApproval
@@ -9,12 +9,17 @@
  * All external I/O is mocked:
  *   - sendIMessage          → vi.fn()
  *   - runManager            → vi.fn() (returns deterministic ManagerReport)
- *   - autoMergeProposal     → vi.fn() (the real gate chain, mocked at its boundary)
+ *   - applyProposal         → vi.fn() (the human-authorized path, mocked at boundary)
  *   - runCommsCycle         → vi.fn()
  *   - loadConfig            → vi.fn()
  *   - inbox/store           → real (tmp HOME isolation via process.env.HOME)
  *
- * Test counts (15):
+ * Architecture invariant: index 0 (human tap) uses applyProposal (human path),
+ * NOT autoMergeProposal (autonomous frontier-only path). A Telegram/iMessage tap
+ * from the authenticated owner IS a human approval — the human IS the authority,
+ * so it merges work of ANY tier (local/mid/frontier).
+ *
+ * Test counts (16):
  *   postShipProposalsForApproval:
  *    1. posts one request for the highest-value ship verdict with a pending proposal
  *    2. skips non-pending proposals (already merged/rejected)
@@ -22,17 +27,18 @@
  *    4. posts nothing when no ship verdicts
  *    5. posts nothing when an outstanding manager-approval already exists
  *   handleManagerApproval:
- *    6. index 0 (Approve): calls setStatus approved + the gated autoMergeProposal
- *    7. index 0 merge succeeds → sendIMessage "✅ Merged"
- *    8. index 0 gate blocks → sendIMessage "Approved but merge gate blocked: <reason>"
+ *    6. index 0 (Approve): calls setStatus approved + applyProposal (human-authorized path)
+ *    7. index 0 apply succeeds → sendIMessage "✅ Merged"
+ *    8. index 0 apply fails → sendIMessage "Approved but apply failed: <reason>"
  *    9. index 1 (Reject): setStatus rejected + sendIMessage "Rejected"
  *   10. index 2 (Show diff): sendIMessage scrubbed diff + re-posts approval question
  *   11. index 2 scrubs secrets from diff text
  *   12. index 2 truncates long diffs to MAX_DIFF_SMS chars
  *   13. index 0 with missing proposal → no-op, no throw
- *   14. handler never throws even when autoMergeProposal rejects
+ *   14. handler never throws even when applyProposal rejects
+ *   15. index 0 with a LOCAL-tier proposal → applyProposal called (no tier gate)
  *   cmdComms ask-merges:
- *   15. ask-merges calls postShipProposalsForApproval + runCommsCycle, returns 0
+ *   16. ask-merges calls postShipProposalsForApproval + runCommsCycle, returns 0
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -47,13 +53,13 @@ import { join } from 'node:path';
 const {
   mockSendIMessage,
   mockRunManager,
-  mockAutoMergeProposal,
+  mockApplyProposal,
   mockRunCommsCycle,
   mockLoadConfig,
 } = vi.hoisted(() => ({
   mockSendIMessage: vi.fn().mockResolvedValue({ ok: true }),
   mockRunManager: vi.fn(),
-  mockAutoMergeProposal: vi.fn(),
+  mockApplyProposal: vi.fn(),
   mockRunCommsCycle: vi.fn().mockResolvedValue({ sent: 1, resolved: 0 }),
   mockLoadConfig: vi.fn(),
 }));
@@ -106,9 +112,9 @@ vi.mock('../src/core/fleet/manager.js', async (importOriginal) => {
   return { ...actual, runManager: mockRunManager };
 });
 
-vi.mock('../src/core/inbox/merge.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/core/inbox/merge.js')>();
-  return { ...actual, autoMergeProposal: mockAutoMergeProposal };
+vi.mock('../src/core/inbox/apply.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/apply.js')>();
+  return { ...actual, applyProposal: mockApplyProposal };
 });
 
 vi.mock('../src/core/comms/dispatch.js', async (importOriginal) => {
@@ -226,7 +232,7 @@ beforeEach(() => {
 
   mockSendIMessage.mockClear();
   mockRunManager.mockClear();
-  mockAutoMergeProposal.mockClear();
+  mockApplyProposal.mockClear();
   mockRunCommsCycle.mockResolvedValue({ sent: 1, resolved: 0 });
   mockLoadConfig.mockResolvedValue(cfgEnabled());
 });
@@ -348,22 +354,22 @@ describe('handleManagerApproval', () => {
     }
   }
 
-  it('[6] index 0 (Approve): calls setStatus approved + the gated autoMergeProposal', async () => {
-    const p = makePendingProposal('Gated proposal');
-    mockAutoMergeProposal.mockResolvedValue({ ok: true, merged: true, reason: 'ok' });
+  it('[6] index 0 (Approve): calls setStatus approved + applyProposal (human-authorized path)', async () => {
+    const p = makePendingProposal('Human-approved proposal');
+    mockApplyProposal.mockResolvedValue({ ok: true, status: 'applied', detail: 'patch applied' });
 
     await invokeApprovalHandler(cfgEnabled(), 0, { proposalId: p.id });
 
-    // setStatus called — proposal is now approved
+    // setStatus called — proposal is now approved (set before applyProposal)
     const loaded = loadProposal(p.id);
     expect(loaded?.status).toBe('approved');
-    // autoMergeProposal called with the correct id — this is the real gate fn, not a bypass
-    expect(mockAutoMergeProposal).toHaveBeenCalledWith(p.id, expect.anything());
+    // applyProposal called with confirmed:true — human-authorized path, no tier gate
+    expect(mockApplyProposal).toHaveBeenCalledWith(p.id, { confirmed: true });
   });
 
-  it('[7] index 0 merge succeeds → sendIMessage "✅ Merged"', async () => {
+  it('[7] index 0 apply succeeds → sendIMessage "✅ Merged"', async () => {
     const p = makePendingProposal('Ships fine');
-    mockAutoMergeProposal.mockResolvedValue({ ok: true, merged: true, reason: 'ok' });
+    mockApplyProposal.mockResolvedValue({ ok: true, status: 'applied', detail: 'patch applied' });
 
     await invokeApprovalHandler(cfgEnabled(), 0, { proposalId: p.id });
 
@@ -373,23 +379,23 @@ describe('handleManagerApproval', () => {
     expect(text).toContain('Ships fine');
   });
 
-  it('[8] index 0 gate blocks → sendIMessage "Approved but merge gate blocked"', async () => {
-    const p = makePendingProposal('Gate blocked');
-    mockAutoMergeProposal.mockResolvedValue({
+  it('[8] index 0 apply fails → sendIMessage "Approved but apply failed: <reason>"', async () => {
+    const p = makePendingProposal('Apply failed');
+    mockApplyProposal.mockResolvedValue({
       ok: false,
-      merged: false,
-      reason: 'scope cap exceeded — 6 files > 4',
+      status: 'failed',
+      detail: 'git apply failed: patch does not apply',
     });
 
     await invokeApprovalHandler(cfgEnabled(), 0, { proposalId: p.id });
 
-    // Status was set to approved (human gate done), but merge gate blocked
+    // Status was set to approved (human gate done before apply)
     expect(loadProposal(p.id)?.status).toBe('approved');
     expect(mockSendIMessage).toHaveBeenCalledOnce();
     const [text] = mockSendIMessage.mock.calls[0] as [string, unknown];
-    expect(text).toContain('Approved but merge gate blocked');
-    expect(text).toContain('scope cap exceeded');
-    expect(text).toContain('needs manual merge');
+    expect(text).toContain('Approved but apply failed');
+    expect(text).toContain('patch does not apply');
+    expect(text).toContain('needs manual review');
   });
 
   it('[9] index 1 (Reject): setStatus rejected + sendIMessage "Rejected"', async () => {
@@ -461,17 +467,42 @@ describe('handleManagerApproval', () => {
     await expect(
       invokeApprovalHandler(cfgEnabled(), 0, { proposalId: 'does-not-exist-m139' }),
     ).resolves.not.toThrow();
-    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(mockApplyProposal).not.toHaveBeenCalled();
     expect(mockSendIMessage).not.toHaveBeenCalled();
   });
 
-  it('[14] handler never throws even when autoMergeProposal rejects', async () => {
+  it('[14] handler never throws even when applyProposal rejects', async () => {
     const p = makePendingProposal('Crash test');
-    mockAutoMergeProposal.mockRejectedValue(new Error('unexpected crash'));
+    mockApplyProposal.mockRejectedValue(new Error('unexpected crash'));
 
     await expect(
       invokeApprovalHandler(cfgEnabled(), 0, { proposalId: p.id }),
     ).resolves.not.toThrow();
+  });
+
+  it('[15] LOCAL-tier proposal is mergeable via human approve (no tier gate in applyProposal)', async () => {
+    // Create a proposal without any tier/trust field — this is "local" tier.
+    // The human tap must route to applyProposal, which has no tier gate.
+    const p = createProposal({
+      repo: '/fake/repo',
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Local tier work',
+      summary: 'Small local change',
+      diff: `diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n`,
+    });
+    // applyProposal succeeds — local tier, no frontier gate
+    mockApplyProposal.mockResolvedValue({ ok: true, status: 'applied', detail: 'patch applied on branch ashlr/proposal/...' });
+
+    await invokeApprovalHandler(cfgEnabled(), 0, { proposalId: p.id });
+
+    // applyProposal was called (not blocked by any tier check)
+    expect(mockApplyProposal).toHaveBeenCalledWith(p.id, { confirmed: true });
+    // Success message sent
+    expect(mockSendIMessage).toHaveBeenCalledOnce();
+    const [text] = mockSendIMessage.mock.calls[0] as [string, unknown];
+    expect(text).toContain('✅ Merged');
+    expect(text).toContain('Local tier work');
   });
 });
 
@@ -480,7 +511,7 @@ describe('handleManagerApproval', () => {
 // ===========================================================================
 
 describe('cmdComms ask-merges', () => {
-  it('[15] ask-merges posts ship proposals and runs cycle, returns 0', async () => {
+  it('[16] ask-merges posts ship proposals and runs cycle, returns 0', async () => {
     const p = makePendingProposal('CLI ship');
     mockRunManager.mockResolvedValue(makeReport([makeVerdict(p.id, 'ship', 4)]));
     mockRunCommsCycle.mockResolvedValue({ sent: 1, resolved: 0 });
