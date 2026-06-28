@@ -6,7 +6,7 @@
  *   base URL  https://integrate.api.nvidia.com/v1   (verified live 2026-06)
  *   endpoint  POST /v1/chat/completions
  *   auth      Authorization: Bearer <NVIDIA_NIM_API_KEY>
- *   model id  moonshotai/kimi-k2-instruct            (verified live on the NIM
+ *   model id  moonshotai/kimi-k2.6            (verified live on the NIM
  *                                                      model catalog 2026-06)
  *
  * What this suite locks (mirrors the codex backend's tests, fully hermetic —
@@ -38,7 +38,7 @@ import { routeTask } from '../src/core/run/router.js';
 // ---------------------------------------------------------------------------
 
 const NIM_BASE_URL = 'https://integrate.api.nvidia.com/v1';
-const NIM_KIMI_MODEL = 'moonshotai/kimi-k2-instruct';
+const NIM_KIMI_MODEL = 'moonshotai/kimi-k2.6';
 const NIM_KEY_ENV = 'NVIDIA_NIM_API_KEY';
 // A fake, obviously-not-real key. We assert it is used over the wire but NEVER
 // surfaced in any logged/returned value.

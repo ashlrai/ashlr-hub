@@ -27,7 +27,7 @@ const CLOUD_PROVIDERS = new Set([
   'nvidia_nim',
   // M195: NVIDIA NIM running Kimi K2 (frontier-class coding ammo). Distinct id
   // from 'nvidia_nim' so it can default to the Kimi model id while reusing the
-  // SAME NVIDIA_NIM_API_KEY + base URL (NIM serves moonshotai/kimi-k2-instruct).
+  // SAME NVIDIA_NIM_API_KEY + base URL (NIM serves moonshotai/kimi-k2.6).
   'nvidia_nim_kimi',
   'moonshot',
   'kimi',
@@ -73,7 +73,7 @@ const CLOUD_PROVIDER_BASE_URL_ENV: Record<string, string> = {
 const CLOUD_PROVIDER_DEFAULT_MODEL: Record<string, string> = {
   nvidia_nim: 'meta/llama-3.1-70b-instruct',
   // M195: Kimi K2 instruct — verified live on the NIM model catalog 2026-06.
-  nvidia_nim_kimi: 'moonshotai/kimi-k2-instruct',
+  nvidia_nim_kimi: 'moonshotai/kimi-k2.6',
   moonshot: 'kimi-k2-0711-preview',
   kimi: 'kimi-k2-0711-preview',
   hermes_api: 'nousresearch/hermes-3-llama-3.1-70b',

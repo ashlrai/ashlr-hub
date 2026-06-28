@@ -175,7 +175,7 @@ export interface AshlrConfig {
        */
       baseUrl?: string;
       /**
-       * Model id to run. Default 'moonshotai/kimi-k2-instruct' (Kimi K2 — strong
+       * Model id to run. Default 'moonshotai/kimi-k2.6' (Kimi K2 — strong
        * coding/agentic frontier-class open model, verified live on the NIM
        * catalog 2026-06). Any NIM-hosted OpenAI-compat model id is accepted.
        */

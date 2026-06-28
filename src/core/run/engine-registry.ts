@@ -152,8 +152,8 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
   //
   // M195: this builtin entry stays tier 'mid' (M50 invariant: no builtin entry
   // is frontier except claude/codex). To run NIM as FRONTIER-class ammo (e.g.
-  // Kimi K2 — moonshotai/kimi-k2-instruct), set cfg.foundry.nim = { tier:
-  // 'frontier', model: 'moonshotai/kimi-k2-instruct' }. applyNimConfig() (below)
+  // Kimi K2 — moonshotai/kimi-k2.6), set cfg.foundry.nim = { tier:
+  // 'frontier', model: 'moonshotai/kimi-k2.6' }. applyNimConfig() (below)
   // folds that into the resolved 'nim' spec — so engineTierOf('nim', cfg) returns
   // 'frontier' and the routers add it to the frontier rotation, WITHOUT mutating
   // the builtin roster. Absent cfg.foundry.nim ⇒ this exact mid-tier spec.
