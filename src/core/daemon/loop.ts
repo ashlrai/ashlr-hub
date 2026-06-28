@@ -50,6 +50,8 @@ import { estimateRun } from '../observability/estimate.js';
 import { buildForecast } from '../observability/forecast.js';
 import { emitTuningProposals } from '../learn/tuning.js';
 import { runAutoMergePass } from '../fleet/automerge-pass.js';
+import { runBestOfN } from '../run/best-of-n.js';
+import { runSelfHealCycle } from '../fleet/self-heal.js';
 import { pendingCount, listProposals } from '../inbox/store.js';
 // worked-ledger is used transitively via LocalWorkQueueCoordinator (selectWorkQueueCoordinator).
 import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
@@ -545,6 +547,18 @@ export async function tick(
   //     This file has NO outward-action primitive of any kind; a PENDING
   //     proposal is applied LATER only by an explicit human inbox approve.
   // -------------------------------------------------------------------------
+
+  // M170: Self-heal cadence — detect broken repos and queue HIGH-PRIORITY heal
+  // WorkItems for the next backlog selection. Flag-gated: default ON (fix-forward
+  // posture). Never throws; never blocks or breaks the tick on any error.
+  // Runs at the START of a LIVE tick (NOT dry-run — dry-run returned above).
+  // cfg.foundry?.selfHeal === false → skipped entirely (flag-off = no-op).
+  try {
+    await runSelfHealCycle(liveCfg);
+  } catch {
+    // Best-effort — self-heal must never crash the tick.
+  }
+
   // Shared, mutable in-tick spend tally. Read+incremented by each concurrent
   // task so later dispatches can short-circuit once cumulative realized spend
   // reaches the remaining daily headroom (the USD daily cap is otherwise only
@@ -743,15 +757,50 @@ export async function tick(
         // diff → PENDING proposal. No nested swarm. M45 containment (severed git
         // push, scrubbed diff) + the M47 merge gate still apply downstream.
         recordUse(backend);
-        const runState = await runGoal(goal, liveCfg, {
-          engine: backend,
-          sandboxEngine: true,
-          requireSandbox: true,
-          cwd: item.repo,
-          budget: itemBudget,
-          tools: true,
-          noMemory: false,
-        });
+
+        // M170: best-of-N dispatch — when cfg.foundry.bestOfN > 1, generate N
+        // candidates and let the critic pick the winner. Flag-off: bestOfN absent
+        // or 1 → single runGoal call, byte-identical to pre-M170 behavior.
+        const bestOfN: number =
+          typeof (liveCfg.foundry as Record<string, unknown> | undefined)?.['bestOfN'] === 'number' &&
+          ((liveCfg.foundry as Record<string, unknown>)['bestOfN'] as number) > 1
+            ? Math.floor((liveCfg.foundry as Record<string, unknown>)['bestOfN'] as number)
+            : 1;
+
+        let runState: Awaited<ReturnType<typeof runGoal>>;
+        if (bestOfN > 1) {
+          // Route through runBestOfN; use its winner's underlying runState.
+          // runBestOfN never throws; if all candidates fail, winner is undefined
+          // and we fall through to a zero-cost no-proposal outcome.
+          const bonResult = await runBestOfN(item, liveCfg, { n: bestOfN });
+          if (!bonResult.winner) {
+            // All candidates were empty/failing — count as dispatched but $0.
+            swarmSpent = 0;
+            tickSpent += swarmSpent;
+            audit({
+              action: 'daemon:proposal-created',
+              repo: item.repo,
+              sandboxId: null,
+              summary: `best-of-${bestOfN}: all candidates empty for "${item.title}" — no proposal`,
+              result: 'ok',
+            });
+            return { item, spentUsd: 0, dispatched: true };
+          }
+          // Winner's underlying run state lives in the candidate's state field.
+          // Cast to the shape runGoal returns (id, status, usage).
+          runState = (bonResult.winner as unknown as { state: Awaited<ReturnType<typeof runGoal>> }).state
+            ?? { id: bonResult.winner.proposalId ?? `bon-${Date.now()}`, status: 'done' as const, usage: undefined };
+        } else {
+          runState = await runGoal(goal, liveCfg, {
+            engine: backend,
+            sandboxEngine: true,
+            requireSandbox: true,
+            cwd: item.repo,
+            budget: itemBudget,
+            tools: true,
+            noMemory: false,
+          });
+        }
 
         // M80: subscription-tier runs are not dollar-billed — count $0 toward
         // dailyBudgetUsd so they don't exhaust the daily cap. The subscription-
