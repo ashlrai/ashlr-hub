@@ -75,6 +75,10 @@ export interface RunViaAshlrcodeOptions {
   timeoutMs?: number;
   /** `ac`'s own internal max milestone iterations. Default 200 (ac's default). */
   maxIterations?: number;
+  /** Surgical mode (`ac --surgical`): minimal change, no scaffolding/new files.
+   *  DEFAULT TRUE — fleet work should be precise; ac over-scaffolds without it.
+   *  Pass false only for genuine build-out/invent items that should scaffold. */
+  surgical?: boolean;
 }
 
 export interface RunViaAshlrcodeResult {
@@ -171,6 +175,10 @@ export async function runViaAshlrcode(
     // buildEngineCommand here because the registry's ashlrcode argv is the
     // legacy `ac --goal <goal>` shape; the autonomous/test-loop path needs the
     // explicit headless flag set, so we construct the EngineCommand directly.
+    // Surgical by default (minimal change, no scaffolding) — fleet work is
+    // precise; ac over-builds without it. Caller passes surgical:false for
+    // genuine build-out/invent items.
+    const surgical = opts?.surgical !== false;
     const args: string[] = [
       '--autonomous',
       '--goal',
@@ -180,6 +188,7 @@ export async function runViaAshlrcode(
       '--timeout',
       String(acTimeoutSec),
       '--dangerously-skip-permissions',
+      ...(surgical ? ['--surgical'] : []),
     ];
     const cmd: EngineCommand = { bin: 'ac', args, cwd: repoDir };
 
