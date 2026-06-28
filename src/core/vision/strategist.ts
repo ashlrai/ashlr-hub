@@ -28,7 +28,7 @@
 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { AshlrConfig } from '../types.js';
 import { loadSpec, applyEvolution } from './spec.js';
 import type { EndStateSpec } from './spec.js';
@@ -89,7 +89,6 @@ function writeBriefing(briefing: StrategicBriefing): void {
 /** Load the most recent briefing, or null. Never throws. */
 export function loadLatestBriefing(project?: string | null): StrategicBriefing | null {
   try {
-    const { readdirSync, readFileSync } = require('node:fs');
     const dir = briefingsDir();
     if (!existsSync(dir)) return null;
     const files = readdirSync(dir)
