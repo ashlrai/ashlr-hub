@@ -20,6 +20,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import type { AshlrConfig, Proposal, QualityMetrics } from '../types.js';
 import { recordDecision } from './decisions-ledger.js';
 import { recordJudgeTrace } from './judge-trace.js';
+import { hashDiff, signJudgeAttestation } from '../foundry/provenance.js';
 import { computeQualityMetrics } from './quality-metrics.js';
 import { renderPlaybook } from '../vision/playbook.js';
 import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
@@ -782,6 +783,28 @@ export async function runManager(
 
       verdicts.push(verdict);
 
+      // M157: For frontier 'ship' verdicts, HMAC-sign the attestation tuple so
+      // evaluateVerificationGate can verify it cryptographically. A forged
+      // ledger entry cannot pass without the host-local provenance key.
+      // Only sign when the judge is a frontier (claude-*) model AND verdict is 'ship'.
+      let judgeAttestation: string | undefined;
+      const isFrontierJudgeModel = judgeEngine.startsWith('claude') || judgeEngine.includes('claude');
+      if (verdict.verdict === 'ship' && isFrontierJudgeModel) {
+        try {
+          const diffHash = hashDiff(proposal.diff ?? '');
+          judgeAttestation = signJudgeAttestation({
+            proposalId: proposal.id,
+            judgeEngine,
+            verdict: 'ship',
+            diffHash,
+          });
+        } catch {
+          // Best-effort — a signing failure means no attestation; the gate will
+          // refuse (fail-closed) rather than accept an unsigned 'ship'.
+          judgeAttestation = undefined;
+        }
+      }
+
       // Record in decisions ledger (always, shadow or not).
       recordDecision({
         ts: new Date().toISOString(),
@@ -792,6 +815,7 @@ export async function runManager(
         verdict: verdict.verdict,
         reason: verdict.rationale,
         detail: verdict.wouldMerge ? 'would-merge' : '',
+        ...(judgeAttestation !== undefined ? { judgeAttestation } : {}),
       });
 
       // applyRejects: only reject noise/harmful (never ship/review).

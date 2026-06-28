@@ -70,8 +70,21 @@ describe('M56 — executor keeps merge-to-main frontier-only (structural source 
   const merge = readFileSync(resolve(HERE, '../src/core/inbox/merge.ts'), 'utf8');
 
   it('autoMergeProposal branches on mergeTargetForTier', () => {
+    // M153 added a trustBasis branch: in 'tier' mode (the default, unchanged
+    // from pre-M153) the executor still calls mergeTargetForTier and derives
+    // toMain from it.  In 'verification' mode toMain is hardcoded true — a
+    // separate, additive path that does NOT weaken the tier mapping.
+    //
+    // Safety invariant (MUST remain true):
+    //   In 'tier' mode: frontier→main / mid→branch / local→refused.
+    //   The 'verification' path is an addition, NOT a weakening of that mapping.
+    //
+    // We assert both the trustBasis dispatch AND the unchanged tier path.
+    expect(merge).toMatch(/trustBasis === 'verification'/);
+    // In the tier (else) branch, mergeTargetForTier still drives the decision:
     expect(merge).toMatch(/const target = mergeTargetForTier\(proposal\.engineTier\)/);
-    expect(merge).toMatch(/const toMain = target === 'main'/);
+    // toMain is now a let assigned inside the else block (not a const at top-level):
+    expect(merge).toMatch(/toMain = target === 'main'/);
   });
 
   it('the squash-merge to main is guarded by toMain', () => {

@@ -3294,6 +3294,14 @@ export interface DecisionEntry {
   reason?: string;
   /** Optional extra detail (secret-scrubbed before persisting). */
   detail?: string;
+  /**
+   * M157: HMAC-signed judge attestation for frontier 'ship' verdicts.
+   * Produced by signJudgeAttestation in provenance.ts; verified by
+   * evaluateVerificationGate criterion 1 to prevent forged ledger entries.
+   * Only present when action==='judged' AND verdict==='ship' AND the judge is
+   * a frontier (claude-*) model.
+   */
+  judgeAttestation?: string;
 }
 
 /** M119: Per-engine quality breakdown. */

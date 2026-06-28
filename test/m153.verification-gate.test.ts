@@ -110,7 +110,7 @@ import {
 } from '../src/core/inbox/merge.js';
 import { createProposal, setStatus, loadProposal } from '../src/core/inbox/store.js';
 import { enroll, setKill } from '../src/core/sandbox/policy.js';
-import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
+import { hashDiff, signProvenance, signJudgeAttestation } from '../src/core/foundry/provenance.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { DecisionEntry } from '../src/core/types.js';
 
@@ -241,8 +241,22 @@ function verifyCfg(over: Record<string, unknown> = {}): AshlrConfig {
   } as unknown as AshlrConfig;
 }
 
-/** A 'judged' DecisionEntry with a frontier (claude) judge engine. */
-function frontierShipDecision(proposalId: string): DecisionEntry {
+/** A 'judged' DecisionEntry with a frontier (claude) judge engine.
+ *
+ * M157: includes a valid HMAC-signed judgeAttestation so criterion 1 of
+ * evaluateVerificationGate can verify it cryptographically. The diff parameter
+ * must match the proposal's actual diff — the attestation binds the diffHash.
+ * When omitted, defaults to docsDiff() which matches goodProposal().
+ */
+function frontierShipDecision(proposalId: string, diff?: string): DecisionEntry {
+  const d = diff ?? docsDiff();
+  const diffHash = hashDiff(d);
+  const judgeAttestation = signJudgeAttestation({
+    proposalId,
+    judgeEngine: 'claude-opus-4-5',
+    verdict: 'ship',
+    diffHash,
+  });
   return {
     ts: new Date().toISOString(),
     proposalId,
@@ -252,6 +266,7 @@ function frontierShipDecision(proposalId: string): DecisionEntry {
     verdict: 'ship',
     reason: 'frontier judge ship',
     detail: 'would-merge',
+    judgeAttestation,
   };
 }
 
@@ -352,9 +367,9 @@ describe('M153 evaluateVerificationGate — pure, all 5 criteria', () => {
 
   function goodDiff(): string { return docsDiff(); }
 
-  function fullDecisions(proposalId: string): DecisionEntry[] {
+  function fullDecisions(proposalId: string, diff?: string): DecisionEntry[] {
     return [
-      frontierShipDecision(proposalId),
+      frontierShipDecision(proposalId, diff),
       verifiedDecision(proposalId),
     ];
   }
@@ -457,7 +472,7 @@ describe('M153 evaluateVerificationGate — pure, all 5 criteria', () => {
       diffHash,
       provenanceSig: sig,
     };
-    const r = evaluateVerificationGate(p, cfg, fullDecisions(p.id));
+    const r = evaluateVerificationGate(p, cfg, fullDecisions(p.id, riskyDiff));
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/verification gate:.*risk/);
   });
@@ -472,7 +487,7 @@ describe('M153 evaluateVerificationGate — pure, all 5 criteria', () => {
       provenanceSig: sig,
       verifyResult: { passed: true },
     };
-    const r = evaluateVerificationGate(p, cfg, fullDecisions(p.id));
+    const r = evaluateVerificationGate(p, cfg, fullDecisions(p.id, bigDiff));
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/scope cap/);
     expect(r.reason).toMatch(/files/);
@@ -488,7 +503,7 @@ describe('M153 evaluateVerificationGate — pure, all 5 criteria', () => {
       provenanceSig: sig,
       verifyResult: { passed: true },
     };
-    const r = evaluateVerificationGate(p, cfg, fullDecisions(p.id));
+    const r = evaluateVerificationGate(p, cfg, fullDecisions(p.id, bigDiff));
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/scope cap/);
     expect(r.reason).toMatch(/lines/);
@@ -642,9 +657,9 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
       engineModel: 'local:qwen3-coder',
       verifyResult: { passed: true },
     });
-    // Provide frontier ship + EDV verified decisions
+    // Provide frontier ship + EDV verified decisions — pass diff so attestation binds it.
     mockReadDecisions.mockReturnValue([
-      frontierShipDecision(p.id),
+      frontierShipDecision(p.id, diff),
       verifiedDecision(p.id),
     ]);
     return p;
@@ -713,12 +728,13 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
     initRepo(tmpRepo, 'main');
     enroll(tmpRepo);
 
-    const p = makePatch(docsDiff('docs/a4.md'), {
+    const a4diff = docsDiff('docs/a4.md');
+    const p = makePatch(a4diff, {
       engineTier: 'local',
       verifyResult: { passed: false, failed: ['vitest'] },
     });
     mockReadDecisions.mockReturnValue([
-      frontierShipDecision(p.id),
+      frontierShipDecision(p.id, a4diff),
       verifiedDecision(p.id),
     ]);
 
@@ -770,7 +786,7 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
     setStatus(p.id, 'pending');
     const loaded = loadProposal(p.id)!;
     mockReadDecisions.mockReturnValue([
-      frontierShipDecision(loaded.id),
+      frontierShipDecision(loaded.id, riskyDiff),
       verifiedDecision(loaded.id),
     ]);
 
@@ -806,7 +822,7 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
     setStatus(p.id, 'pending');
     const loaded = loadProposal(p.id)!;
     mockReadDecisions.mockReturnValue([
-      frontierShipDecision(loaded.id),
+      frontierShipDecision(loaded.id, diff),
       verifiedDecision(loaded.id),
     ]);
 
@@ -842,7 +858,7 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
     setStatus(p.id, 'pending');
     const loaded = loadProposal(p.id)!;
     mockReadDecisions.mockReturnValue([
-      frontierShipDecision(loaded.id),
+      frontierShipDecision(loaded.id, diff),
       // Negative verifier entry
       { ...verifiedDecision(loaded.id), verdict: 'rejected' },
     ]);
@@ -875,7 +891,7 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
     setStatus(p.id, 'pending');
     const loaded = loadProposal(p.id)!;
     mockReadDecisions.mockReturnValue([
-      frontierShipDecision(loaded.id),
+      frontierShipDecision(loaded.id, diff),
       verifiedDecision(loaded.id),
     ]);
 
@@ -900,7 +916,7 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
       verifyResult: { passed: true },
     });
     mockReadDecisions.mockReturnValue([
-      frontierShipDecision(p.id),
+      frontierShipDecision(p.id, diff),
       verifiedDecision(p.id),
     ]);
     const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
@@ -973,7 +989,7 @@ describe('M153 status invariants', () => {
       verifyResult: { passed: true },
     });
     mockReadDecisions.mockReturnValue([
-      frontierShipDecision(p.id),
+      frontierShipDecision(p.id, diff),
       verifiedDecision(p.id),
     ]);
 

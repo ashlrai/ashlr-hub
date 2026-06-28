@@ -47,6 +47,7 @@ End-State Spec (your vision)
 
 **Key properties:**
 
+- **Preflight-first activation.** `ashlr preflight` verifies daemon readiness, backend connectivity, and key configuration before you enroll any repos. Run it once before your first enroll.
 - **Proposal-only floor.** The daemon can never apply, push, or deploy anything. The only path to a real branch is `ashlr inbox approve`.
 - **Tiered-trust merge gate.** Local-model proposals stay proposals. Frontier models (Claude Opus, Codex GPT) can earn a gated path to `main` — only after CI is green and provenance is HMAC-verified. Default off.
 - **Sandboxed by construction.** Every external agent CLI runs in a throwaway git worktree with push credentials severed. Only the scrubbed diff escapes.
@@ -90,6 +91,14 @@ ashlr setup
 
 Detects local model servers, editors, Phantom Secrets, installs the daemon as an OS service (launchd/systemd), and auto-discovers repos to enroll. Idempotent.
 
+### 1a. Preflight check (optional but recommended)
+
+```sh
+ashlr preflight
+```
+
+Verifies daemon readiness, backend connectivity, and key configuration before you enroll any repos. Safe to skip — setup covers the same ground — but useful as a standalone health check after config changes.
+
 ### 2. Enroll a repo
 
 The fleet only works repos you have explicitly enrolled. Nothing is scanned until you add one.
@@ -121,9 +130,10 @@ The fleet scans the backlog, dispatches sandboxed work, and deposits proposals i
 ashlr inbox                # list pending proposals
 ashlr inbox show <id>      # inspect diff + metadata
 ashlr inbox approve <id>   # apply to branch — confirm-gated, never silent
+ashlr rollback <id>        # undo an approved proposal's branch changes
 ```
 
-That is the full loop. Nothing touched your branch until step 5.
+That is the full loop. Nothing touched your branch until step 5. The Approval Inbox is the **human gate** — every applied change passes through it.
 
 ### Open Mission Control (optional)
 
@@ -283,7 +293,11 @@ ashlr audit                # append-only confinement + action audit log
 | `ashlr doctor` | One-glance health check |
 | `ashlr models` | List + manage model backends |
 | `ashlr mcp list/doctor/install` | MCP server aggregation gateway |
+| `ashlr preflight` | Pre-activation health check — verifies daemon, backends, and keys before first enroll |
 | `ashlr sandbox` | Sandbox management |
+| `ashlr sandbox gc` | Garbage-collect stale worktrees (safe, read-jailed, no live state touched) |
+| `ashlr demo` | Run a disposable demo repo through one full fleet tick — auto-cleaning sandbox, $0 spend, no side-effects |
+| `ashlr rollback <id>` | Revert an approved proposal's branch changes (idempotent, leaves inbox record intact) |
 | `ashlr audit` | Append-only audit log |
 | `ashlr update` | Safe self-update |
 | `ashlr tui` | Interactive TUI dashboard |

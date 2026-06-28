@@ -1,11 +1,13 @@
 /**
- * M30 POLISH — CI matrix guard.
+ * M30 POLISH — CI workflow guard.
  *
  * Parses .github/workflows/ci.yml (line-based; no YAML dependency, no new deps)
- * and asserts the Node version matrix covers both 20 and 22 across the
- * typecheck / lint / build / test steps, that npm caching is enabled, and that
- * NOTHING public is wired in (no deploy/publish/release step) — per the M30
- * "nothing public / self-hostable" invariant. Read-only; touches no real config.
+ * and asserts the CI runs on Node 22 (the hard minimum — install.sh hard-fails
+ * below 22, so a 20+22 matrix would silently lie), runs the required
+ * typecheck / lint / build / test steps with hermetic isolation, that npm
+ * caching is enabled, and that NOTHING public is wired in (no deploy/publish/
+ * release step) — per the M30 "nothing public / self-hostable" invariant.
+ * Read-only; touches no real config.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -21,22 +23,22 @@ const pkg = JSON.parse(
 ) as { engines?: { node?: string }; scripts?: Record<string, string> };
 
 describe('M30 CI workflow', () => {
-  it('declares a Node version matrix containing 20 and 22', () => {
-    const match = ciYml.match(/node-version:\s*\[([^\]]*)\]/);
-    expect(match, 'expected a node-version matrix array in ci.yml').not.toBeNull();
-    const versions = (match as RegExpMatchArray)[1]
-      .split(',')
-      .map((v) => v.replace(/["'\s]/g, ''))
-      .filter(Boolean);
-    expect(versions).toContain('20');
-    expect(versions).toContain('22');
+  it('runs on Node 22 only (install.sh hard-fails below 22; no 20+22 matrix)', () => {
+    // The CI uses a single node-version: "22" (not a matrix array).
+    // A Node-20 entry would be wrong — install.sh rejects it at runtime.
+    expect(ciYml).toMatch(/node-version:\s*["']?22["']?/);
+    // Confirm Node 20 is NOT in the workflow as a version entry.
+    expect(ciYml).not.toMatch(/node-version:\s*["']?20["']?/);
   });
 
-  it('keeps the typecheck / lint / build / test steps', () => {
+  it('keeps the typecheck / lint / build / test steps (hermetic invocation)', () => {
     expect(ciYml).toContain('npm run typecheck');
     expect(ciYml).toContain('npm run lint');
     expect(ciYml).toContain('npm run build');
-    expect(ciYml).toContain('npm test');
+    // The hermetic test invocation isolates from the developer's ~/.ashlr/ state.
+    // HOME=$(mktemp -d) is required so CI tests never read real local config.
+    expect(ciYml).toMatch(/HOME=\$\(mktemp -d\).*vitest run/);
+    expect(ciYml).toContain('--no-file-parallelism');
   });
 
   it('enables npm caching for fast installs', () => {
@@ -49,8 +51,10 @@ describe('M30 CI workflow', () => {
     expect(ciYml).not.toMatch(/vercel|netlify|gh-pages|pages-deploy/i);
   });
 
-  it('allows the lowest matrix Node (20) via package.json engines', () => {
-    // The matrix runs Node 20, so engines must not exclude it.
+  it('package.json engines field declares the npm-compatible floor', () => {
+    // engines.node reflects the npm-publish compatibility floor (>=20).
+    // CI enforces a stricter runtime minimum (Node 22) via install.sh.
+    // These are intentionally different: npm does not run install.sh.
     expect(pkg.engines?.node).toBe('>=20');
   });
 });

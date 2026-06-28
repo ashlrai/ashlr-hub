@@ -109,7 +109,7 @@ import { isRepo, getGitStatus, getRemoteOrg, defaultBranch } from '../git.js';
 import { createPr } from '../integrations/github.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { isSelfTargetProposal, guardSafetyTests, selfEvalParity } from '../fleet/self.js';
-import { verifyProvenance } from '../foundry/provenance.js';
+import { verifyProvenance, verifyJudgeAttestation, hashDiff } from '../foundry/provenance.js';
 import { judgeProposal } from '../fleet/manager.js';
 import { readDecisions, recordDecision } from '../fleet/decisions-ledger.js';
 import { edvConfirmationWeight } from '../portfolio/edv-verify.js';
@@ -576,12 +576,21 @@ export function isFrontierJudge(judgeEngine: string | undefined): boolean {
 export function evaluateVerificationGate(
   proposal: Proposal,
   cfg: AshlrConfig,
-  decisionsForProposal: Array<{ action: string; verdict?: string; engine?: string; model?: string }>,
+  decisionsForProposal: Array<{ action: string; verdict?: string; engine?: string; model?: string; judgeAttestation?: string }>,
 ): VerificationGateVerdict {
   const refuse = (reason: string): VerificationGateVerdict => ({ authorized: false, reason });
 
-  // ── Criterion 1: frontier judge 'ship' ────────────────────────────────────
-  // Find the most recent 'judged' entry with a 'ship' verdict.
+  // ── Criterion 1: HMAC-signed frontier judge 'ship' attestation ────────────
+  // M157: Replace unsigned-ledger scan with cryptographic verification.
+  // A forged ledger entry claiming "judged claude ship" without a valid
+  // HMAC-signed attestation will FAIL here — the core security fix.
+  //
+  // Steps:
+  //   (a) Find the most recent 'judged' entry with verdict='ship'.
+  //   (b) Verify the judge engine is a frontier (claude-*) model.
+  //   (c) Verify the HMAC attestation — recomputed from (proposalId, judgeEngine,
+  //       verdict, diffHash-of-CURRENT-diff). A stale attestation for a different
+  //       proposalId, a changed diff, or no attestation at all → REFUSE.
   const shipEntry = [...decisionsForProposal]
     .reverse()
     .find((d) => d.action === 'judged' && d.verdict === 'ship');
@@ -599,6 +608,22 @@ export function evaluateVerificationGate(
     return refuse(
       `verification gate: judge '${judgeEngine ?? 'unknown'}' is not a frontier (claude-*) model — ` +
         `local/72b judges cannot provide independent confirmation (self-confirmation trap)`,
+    );
+  }
+
+  // Verify the HMAC attestation. diffHash is recomputed from the CURRENT proposal
+  // diff so a stale attestation for a tampered diff also fails.
+  const currentDiffHash = hashDiff(proposal.diff ?? '');
+  const attestationResult = verifyJudgeAttestation(shipEntry.judgeAttestation, {
+    proposalId: proposal.id,
+    judgeEngine: judgeEngine ?? '',
+    verdict: 'ship',
+    diffHash: currentDiffHash,
+  });
+  if (!attestationResult.ok) {
+    return refuse(
+      `verification gate: judge attestation invalid — ${attestationResult.reason ?? 'unknown'}; ` +
+        `a forged ledger entry without a valid HMAC-signed attestation cannot pass criterion 1`,
     );
   }
 
@@ -681,10 +706,10 @@ export function evaluateVerificationGate(
     );
   }
 
-  // All 5 criteria met.
+  // All 5 criteria met — including HMAC-verified judge attestation (M157).
   return {
     authorized: true,
-    reason: `verification gate cleared: frontier judge='${judgeEngine}' ship'd; suite green; risk=${risk}≤${maxRisk}; scope ok (${scopeFiles}f/${scopeLines}l); EDV confirmed; provenance valid`,
+    reason: `verification gate cleared: frontier judge='${judgeEngine}' ship'd (HMAC attested); suite green; risk=${risk}≤${maxRisk}; scope ok (${scopeFiles}f/${scopeLines}l); EDV confirmed; provenance valid`,
   };
 }
 
@@ -1300,6 +1325,18 @@ export async function autoMergeProposal(
 
         try {
           const verdict = await judgeProposal(proposal, cfg, judgeClient);
+          // M157: sign an attestation when the inline judge is frontier and ships.
+          // This mirrors the runManager path so evaluateVerificationGate criterion 1
+          // can verify the HMAC regardless of which path produced the ledger entry.
+          let inlineAttestation: string | undefined;
+          const inlineIsFrontier = inlineJudgeEngine.startsWith('claude') || inlineJudgeEngine.includes('claude');
+          if (verdict.verdict === 'ship' && inlineIsFrontier) {
+            try {
+              const { signJudgeAttestation: signAtt, hashDiff: hd } = await import('../foundry/provenance.js');
+              const dh = hd(proposal.diff ?? '');
+              inlineAttestation = signAtt({ proposalId: id, judgeEngine: inlineJudgeEngine, verdict: 'ship', diffHash: dh });
+            } catch { inlineAttestation = undefined; }
+          }
           // M153: record inlineJudgeEngine (the real model string) so that
           // evaluateVerificationGate criterion 1 can verify the judge was frontier.
           recordDecision({
@@ -1311,6 +1348,7 @@ export async function autoMergeProposal(
             verdict: verdict.verdict,
             reason: verdict.rationale,
             detail: verdict.wouldMerge ? 'would-merge' : '',
+            ...(inlineAttestation !== undefined ? { judgeAttestation: inlineAttestation } : {}),
           });
           managerVerdict = {
             verdict: verdict.verdict,

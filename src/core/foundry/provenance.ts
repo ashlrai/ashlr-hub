@@ -148,6 +148,83 @@ export function signProvenance(
 }
 
 // ---------------------------------------------------------------------------
+// Judge attestation — M157: tamper-proof 'ship' verdict binding
+// ---------------------------------------------------------------------------
+
+/**
+ * HMAC-SHA256 over `${proposalId}|${judgeEngine}|${verdict}|${diffHash}` as hex.
+ *
+ * Binds the judge identity, the verdict, the proposal id, AND the diff hash into
+ * one MAC so that:
+ *   - A forged ledger entry without the key cannot mint a valid attestation.
+ *   - A stolen attestation cannot be replayed for a different proposalId or diff.
+ *   - A stale attestation from a different judging run is rejected if any tuple
+ *     member changed.
+ *
+ * Only called for verdict='ship' from a frontier (claude-*) judge.
+ * Never throws.
+ */
+export function signJudgeAttestation(params: {
+  proposalId: string;
+  judgeEngine: string;
+  verdict: string;
+  diffHash: string;
+}): string {
+  const key = loadOrCreateKey();
+  const payload = `${params.proposalId}|${params.judgeEngine}|${params.verdict}|${params.diffHash}`;
+  return createHmac('sha256', key).update(payload, 'utf8').digest('hex');
+}
+
+export interface JudgeAttestationVerdict {
+  ok: boolean;
+  reason?: string;
+}
+
+/**
+ * Verify a judge attestation produced by `signJudgeAttestation`.
+ * FAIL-CLOSED — any missing field, HMAC mismatch, or unexpected error → ok:false.
+ *
+ * Never throws.
+ */
+export function verifyJudgeAttestation(
+  attestation: string | undefined,
+  params: {
+    proposalId: string;
+    judgeEngine: string;
+    verdict: string;
+    diffHash: string;
+  },
+): JudgeAttestationVerdict {
+  try {
+    if (!attestation) {
+      return { ok: false, reason: 'missing judge attestation' };
+    }
+    if (!params.proposalId) {
+      return { ok: false, reason: 'missing proposalId' };
+    }
+    if (!params.judgeEngine) {
+      return { ok: false, reason: 'missing judgeEngine' };
+    }
+    if (!params.verdict) {
+      return { ok: false, reason: 'missing verdict' };
+    }
+    if (!params.diffHash) {
+      return { ok: false, reason: 'missing diffHash' };
+    }
+    const expected = signJudgeAttestation(params);
+    if (!constantTimeEqual(expected, attestation)) {
+      return { ok: false, reason: 'judge attestation HMAC mismatch — forged or stale attestation' };
+    }
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `judge attestation verify error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Verification (fail-closed)
 // ---------------------------------------------------------------------------
 
