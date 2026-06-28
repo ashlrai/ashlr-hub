@@ -224,10 +224,73 @@ function capabilityForSource(source: string): ModelCapability | null {
       return 'coder';
     case 'security':
     case 'issue':
+    case 'goal':
       return 'reasoning';
+    case 'feature':
+      return 'coder';
     default:
       return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// M164: Substantive-source detection
+// ---------------------------------------------------------------------------
+
+/**
+ * M164: Sources that are inherently high-value / substantive and should be
+ * routed to frontier under the 'quality' policy (or as a default override when
+ * the source is substantive regardless of policy).
+ *
+ * 'feature' is included for forward-compatibility (not yet in WorkSource type
+ * but expected soon).
+ */
+const SUBSTANTIVE_SOURCES = new Set([
+  'issue',
+  'goal',
+  'security',
+  'feature',
+]);
+
+/**
+ * M164: Returns true when the item is "substantive" — i.e. should be routed to
+ * a frontier model when quality policy is active or when the source alone
+ * qualifies for frontier routing.
+ *
+ * An item is substantive when ANY of the following hold:
+ *  - source ∈ SUBSTANTIVE_SOURCES
+ *  - effort >= FRONTIER_EFFORT_THRESHOLD (hard)
+ *  - score >= FRONTIER_SCORE_THRESHOLD (hard)
+ *  - localizedScope.fileCount > 5 OR localizedScope.symbolCount > 20
+ */
+function isSubstantiveItem(item: WorkItem): boolean {
+  if (SUBSTANTIVE_SOURCES.has(item.source as string)) return true;
+  if (isHardItem(item)) return true;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const scope = (item as any).localizedScope as
+    | { fileCount?: number; symbolCount?: number }
+    | undefined;
+  if ((scope?.fileCount ?? 0) > 5 || (scope?.symbolCount ?? 0) > 20) return true;
+  return false;
+}
+
+/**
+ * M164: Pick the preferred frontier engine for a substantive item.
+ *
+ * Strategy:
+ *  - source ∈ {issue, goal, security} → reasoning-heavy → prefer claude:opus
+ *  - source ∈ {feature, todo, lint, self} → implementation-heavy → prefer codex:gpt-5.5
+ *  - effort >= FRONTIER_EFFORT_THRESHOLD with cap=coder → prefer codex
+ *  - otherwise → prefer claude:opus (safer for unknown types)
+ */
+function preferredFrontierEngine(item: WorkItem): 'claude' | 'codex' {
+  const src = item.source as string;
+  if (src === 'issue' || src === 'goal' || src === 'security') return 'claude';
+  if (src === 'feature' || src === 'self' || src === 'todo' || src === 'lint') return 'codex';
+  // High-effort items with coder cap → codex; else claude
+  const cap = capabilityForSource(src);
+  if (cap === 'coder') return 'codex';
+  return 'claude';
 }
 
 /**
@@ -340,6 +403,69 @@ export function routeTask(
     };
 
     // ── Strategy ─────────────────────────────────────────────────────────
+
+    // M164: QUALITY-POLICY SUBSTANTIVE FAST-PATH
+    // When routingPolicy === 'quality' AND the item is substantive (high-value
+    // source, high effort/score, or large localizedScope), route immediately to
+    // the appropriate frontier engine with a descriptive reason.
+    //
+    // This runs before all other routing logic so that substantive items never
+    // fall through to medium/balanced paths on quality policy.
+    //
+    // IMPORTANT: we use effort=5 when picking the frontier model so that the
+    // effort cap never filters out the strongest model (e.g. claude:opus has
+    // minEffort=3; a medium-effort substantive item must still get opus).
+    const substantive = isSubstantiveItem(item);
+    if (preferQuality && substantive) {
+      const frontierEngine = preferredFrontierEngine(item);
+      const altEngine: 'claude' | 'codex' = frontierEngine === 'claude' ? 'codex' : 'claude';
+      const cap164 = capabilityForSource(item.source as string);
+      const reasonPrefix = `substantive ${item.source} (effort ${effort}, score ${score}) → quality policy`;
+
+      // tryEngineFrontier: like tryEngine but uses effort=5 so minEffort caps
+      // never filter out the flagship model (opus / gpt-5.5).
+      const tryFrontier = (
+        engine: EngineId,
+        capability: ModelCapability | null,
+        reason: string,
+      ): TaskRouteDecision | null => {
+        if (!available(engine)) return null;
+        const cfgModel = cfg.foundry?.models?.[engine] ?? null;
+        if (cfgModel) {
+          const entry =
+            KNOWN_MODELS.find((m) => m.engine === engine && m.id.endsWith(':' + cfgModel)) ?? null;
+          return { engine, model: cfgModel, catalogEntry: entry, reason: `${reason} (cfg override → ${cfgModel})` };
+        }
+        // Use effort=5 to bypass minEffort filtering — we always want the strongest model.
+        const entry = pickForEngine(engine, capability, false, 5);
+        if (!entry) return { engine, model: null, catalogEntry: null, reason };
+        return { engine, model: modelTagFrom(entry.id), catalogEntry: entry, reason };
+      };
+
+      // Primary frontier engine
+      const primary = tryFrontier(
+        frontierEngine,
+        cap164,
+        `${reasonPrefix} → ${frontierEngine}-${frontierEngine === 'claude' ? 'opus (reasoning/architecture)' : 'gpt-5.5 (implementation)'}`,
+      );
+      if (primary) return primary;
+
+      // Alternate frontier engine (quota/subscription fallback)
+      const alt = tryFrontier(
+        altEngine,
+        cap164,
+        `${reasonPrefix} → ${altEngine} (primary frontier rate-limited, fallback)`,
+      );
+      if (alt) return alt;
+
+      // Both frontiers unavailable (quota exhausted) → fall to local with warning
+      const localFallback = tryEngine(
+        'local-coder' as EngineId,
+        cap164,
+        `${reasonPrefix} → local-coder (both frontiers quota-exhausted, cascade fallback)`,
+      );
+      if (localFallback) return localFallback;
+    }
 
     // 0. ESCALATION is always hard regardless of effort/score — check before trivial
     const isEscalation = (item.source as string) === 'escalation';

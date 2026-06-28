@@ -186,6 +186,30 @@ export interface AshlrConfig {
      */
     scanHygiene?: boolean;
     /**
+     * M167: headless browser verification of web-app renders after a diff.
+     * DEFAULT false (opt-in — doubles verify time for UI repos). When true,
+     * `verifyInBrowser` starts the dev server, navigates a headless browser,
+     * and captures renderOk + console errors as additional evidence for the
+     * judge. Degrades gracefully when no headless browser driver is present.
+     * Zero runtime deps — shells out to playwright (if installed) or system
+     * Chrome/Chromium; never blocks when neither is available.
+     */
+    browserVerify?: boolean;
+    /**
+     * M168: opt-in phantom-secret injection for fleet VERIFICATION/integration
+     * tasks (e.g. integration tests, deploy checks, browser verify against a
+     * real backend). DEFAULT false — no phantom calls unless explicitly enabled.
+     *
+     * When true, withPhantomSecrets() may inject the requested secret keys as
+     * env vars into a sandboxed child process for the duration of a verification
+     * run. Secret VALUES are EPHEMERAL: never logged, never returned, never
+     * written to proposals/diffs/genome. See core/integrations/phantom.ts for
+     * the invariant contract.
+     *
+     * Requires `phantom` CLI to be installed; degrades gracefully when absent.
+     */
+    usePhantom?: boolean;
+    /**
      * M158: destructive-diff pre-judge guard. DEFAULT true (safety guard — on by
      * default; set false to disable). When true, proposals whose diff matches a
      * clearly-destructive pattern (wholesale file gutting, package.json dep
@@ -207,6 +231,32 @@ export interface AshlrConfig {
      * Absent ⇒ 'balanced'.
      */
     routingPolicy?: 'balanced' | 'cost' | 'quality';
+    /**
+     * M166: model-racing + distillation dataset. DEFAULT DISABLED (doubles
+     * inference cost per raced task — opt-in only for a sampled subset).
+     *
+     * When enabled, raceTask() runs the SAME work item through both the local
+     * engine (qwen3-coder / any api-model) AND a frontier engine (claude/codex),
+     * scores each via the frontier judge, determines the winner, and persists
+     * the race record to ~/.ashlr/racing/<date>.jsonl — a distillation dataset
+     * where the frontier diff is the teacher target for local model improvement.
+     *
+     * Use racingStats() to observe how far local lags frontier and track closure.
+     */
+    modelRacing?: {
+      /** Enable model racing. Default false. */
+      enabled: boolean;
+      /**
+       * Local engine to race. Defaults to 'local-coder'.
+       * Must be an api-model engine (OpenAI-compatible / Ollama).
+       */
+      localEngine?: string;
+      /**
+       * Frontier engine to race against. Defaults to 'claude'.
+       * Should be a frontier-tier engine in cfg.foundry.allowedBackends.
+       */
+      frontierEngine?: string;
+    };
     /**
      * M53: fleet-intelligence tuning. Absent ⇒ learned routing / budget recovery
      * / anomaly holds are OFF (the daemon routes exactly as M46/M48). All actions

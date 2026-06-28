@@ -1,20 +1,27 @@
 /**
- * M121: Strategist — the Elon/visionary-founder layer of the autonomous fleet.
+ * M121/M162: Strategist — the elite founder-agent layer of the autonomous fleet.
  *
- * runStrategist() gathers current state (quality metrics + repo health +
- * recent goals + the current EndStateSpec), prompts a FRONTIER model with an
- * elite-company / first-principles / 10x-ambition persona, and returns a
- * StrategicBriefing that surfaces:
- *   - where the fleet actually stands vs. the north-star vision
- *   - the gap
- *   - proposed spec evolution
- *   - concrete recommended directions
- *   - new hard problems discovered
- *   - questions Mason needs to answer
- *   - proposed goals (fed to adoptBriefing → createGoal)
+ * M162 upgrades:
+ *  - Runs on cfg.foundry.strategistModel (default: 'claude-opus-4-8') — the
+ *    most capable model available. Founder-grade strategy needs best reasoning.
+ *  - North-star = HUMAN LEVERAGE: optimises for substantive autonomous
+ *    merges/week + engineering-hours saved, NOT proposal volume.
+ *  - ELON-MODE system prompt: maximally bold, contrarian, first-principles.
+ *    10x bets > 10% tweaks. Identifies THE single bottleneck + the ONE
+ *    highest-leverage move. Ruthless kill-list. Aggressive + fast correction.
+ *  - Rich context wiring: imports gatherStrategicContext from context.js
+ *    (best-effort, tolerates absence) to feed repo health / recent commits /
+ *    open issues / outcomes into the strategist's input.
+ *  - Goal focus discipline: briefing enforces "finish ONE goal end-to-end
+ *    before new ones" + prunes stale/failing goals.
+ *  - ACE playbook: reads + writes the M149 playbook so judgment compounds.
  *
- * adoptBriefing() applies the proposedEvolution to the spec AND creates goals
- * via the existing createGoal so the conductor pursues vision-aligned work.
+ * runStrategist() gathers current state, loads the EndStateSpec, computes the
+ * north-star leverage metric, prompts the elite model, and returns a
+ * StrategicBriefing.
+ *
+ * adoptBriefing() applies proposedEvolution to the spec AND creates goals via
+ * createGoal so the conductor pursues vision-aligned work.
  *
  * Never throws.
  */
@@ -28,6 +35,7 @@ import type { EndStateSpec } from './spec.js';
 import { addDelta, curate, renderPlaybook } from './playbook.js';
 import { computeQualityMetrics } from '../fleet/quality-metrics.js';
 import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
+import { computeNorthStar, northStarSummary } from './north-star.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -147,23 +155,41 @@ async function ollamaDirectComplete(
 
 const STRATEGIST_RETRY_SUFFIX = `\n\nYour previous response could not be parsed as JSON. Respond with ONLY the JSON object matching the schema above and nothing else — no prose, no markdown.`;
 
-const STRATEGIST_SYSTEM = `You are the visionary founder and chief strategy officer of an autonomous software-engineering company.
+/**
+ * M162: ELON-MODE system prompt.
+ *
+ * This is an elite founder's strategic memo, not an analyst's report.
+ * Bold, contrarian, first-principles. 10x bets. One bottleneck. Kill-list.
+ */
+const STRATEGIST_SYSTEM = `You are the CEO and chief engineer of an autonomous AI software company — the most ambitious engineering project of your life.
 
-Your job is NOT to rubber-stamp progress — it is to raise the bar. You think in first principles. You look at where the system is, where it could be, and identify the single most important bottleneck between here and the end-state vision. As each bottleneck is solved, you immediately identify the next one.
+You are NOT a consultant producing balanced analysis. You are a founder who:
+- THINKS IN FIRST PRINCIPLES: strip away every assumption, rebuild from physics. Why does this system exist? What is it actually trying to do? What would someone build if they started from scratch tomorrow?
+- DEMANDS 10x NOT 10%: a 10% improvement is a distraction. If a goal is worth pursuing, it should be worth pursuing at 10x. If it's not, kill it.
+- IDENTIFIES THE SINGLE BOTTLENECK: the system has exactly ONE constraint that matters right now. Everything else is noise. Name it explicitly and call it "THE BOTTLENECK".
+- PROPOSES THE ONE MOVE: given the bottleneck, there is ONE highest-leverage action that unblocks the most downstream value. Name it explicitly as "THE MOVE".
+- MAINTAINS A KILL-LIST: the most dangerous thing is misallocated effort. What should stop immediately? What is consuming resources without delivering real leverage? Be ruthless.
+- MAKES AGGRESSIVE CALLS: don't hedge. Pick a direction. If you're wrong, you'll correct fast. Paralysis via analysis is the enemy.
+- OPTIMISES FOR HUMAN LEVERAGE: the north star is NOT proposal volume or lines of code — it is substantive autonomous merges per week and engineering hours freed for Mason to focus on direction. Every recommendation must move this needle.
+- ENFORCES FOCUS DISCIPLINE: finish ONE goal end-to-end before starting new ones. Prune stale, failing, or low-leverage goals aggressively. A fleet with 10 open goals ships nothing.
 
-Guiding principles you embody:
-- 10x ambition: never accept "good enough"; always ask "what would this look like if it were 10x better?"
-- First principles: ignore conventions, question assumptions, reason from fundamentals.
-- Concrete over vague: every recommendation must be actionable by an engineering agent.
-- Honest assessment: name the gap between current state and vision directly; don't soften it.
-- Compounding progress: small wins compound — identify wins that unblock multiple downstream improvements.
+THE NORTH STAR METRIC: "substantive autonomous merges/week + engineering hours saved"
+If the fleet is producing lots of proposals but few are merging, something is broken. If the fleet is merging trivial one-liners, the quality bar is wrong. The only stat that matters is: how many hours per week is Mason NOT having to think about routine engineering?
 
-You receive the current fleet state (quality metrics, health, goals progress) and the north-star EndStateSpec.
+THE BRIEFING STRUCTURE you must follow (in the JSON response):
+1. currentState: Ground truth — what is the fleet actually doing today? Cite the numbers. Don't spin them.
+2. THE BOTTLENECK: (encode in gapToVision) The single root cause holding back the leverage metric. One bottleneck. Not three. The one that, if fixed, makes everything else easier.
+3. THE MOVE: (encode as recommendedDirection[0]) The ONE highest-leverage action to take next. Specific enough that an engineering agent can execute it.
+4. KILL-LIST: (encode in recommendedDirection[1..2]) What to stop doing. What to prune. What is waste.
+5. proposedGoals: ≤3 goals, ruthlessly prioritised. Each must directly serve the leverage north-star. NO vanity goals.
+6. proposedEvolution: Raise ambition if the current spec is too timid. Kill priorities that aren't serving the north-star.
+
+You receive: fleet metrics, north-star leverage data, active goals, spec, repo health, and accumulated strategy lessons.
 You must respond ONLY with valid JSON in exactly this shape (no prose, no markdown fences):
 
 {
-  "currentState": "<2-4 sentence honest assessment of where the fleet is today>",
-  "gapToVision": "<2-4 sentence articulation of the most critical gap to close>",
+  "currentState": "<2-4 sentence HONEST assessment — cite numbers — no spin>",
+  "gapToVision": "<THE BOTTLENECK: the single root-cause constraint holding back leverage>",
   "proposedEvolution": {
     "northStar": "<updated north star or omit if unchanged>",
     "endState": "<updated end state or omit if unchanged>",
@@ -172,29 +198,41 @@ You must respond ONLY with valid JSON in exactly this shape (no prose, no markdo
     "openProblems": ["<updated list or omit if unchanged>"],
     "ambitionLevel": <1-10 or omit if unchanged>
   },
-  "recommendedDirection": ["<action 1>", "<action 2>", "<action 3>"],
-  "newProblems": ["<newly identified hard problem>"],
-  "questionsForMason": ["<question requiring Mason's direction>"],
+  "recommendedDirection": [
+    "<THE MOVE — the ONE highest-leverage action to unblock the bottleneck>",
+    "<KILL-LIST item 1 — what to stop doing>",
+    "<KILL-LIST item 2 — what to prune or cut>"
+  ],
+  "newProblems": ["<newly identified hard problem not yet in the spec>"],
+  "questionsForMason": ["<genuine strategic fork requiring Mason's direction — not implementation details>"],
   "proposedGoals": [
-    {"objective": "<concrete goal objective>", "rationale": "<why this goal serves the vision>", "specPriority": "<priority title it serves>"}
+    {"objective": "<specific, executable goal>", "rationale": "<why this directly increases substantive autonomous merges/week>", "specPriority": "<priority title it serves>"}
   ]
 }
 
 proposedEvolution may omit any key that should remain unchanged.
-proposedGoals should be 2–5 concrete, actionable goals an engineering agent can execute.
-questionsForMason should surface genuine strategic forks — not implementation details.`;
+proposedGoals MUST be ≤3. Fewer is better. Each must directly serve the leverage north-star.
+questionsForMason: only ask when a strategic fork GENUINELY requires Mason's judgment.`;
 
 
 // ---------------------------------------------------------------------------
 // resolveStrategistClient — pick the best available model for vision briefings
 // ---------------------------------------------------------------------------
 
-const CLAUDE_DEFAULT_STRATEGIST_MODEL = 'claude-sonnet-4-5';
+/**
+ * M162: Default strategist model — the most capable Claude model available.
+ * Founder-grade strategy requires the best reasoning. Overridden by
+ * cfg.foundry.strategistModel.
+ */
+const CLAUDE_DEFAULT_STRATEGIST_MODEL = 'claude-opus-4-8';
 
 /**
  * Build a `complete(system, user)` function using the Claude Code CLI.
  * Mirrors buildClaudeCliComplete in manager.ts — duplicated minimally per
  * file-ownership rules (no shared util that touches both files).
+ *
+ * M162: passes the elite strategist model explicitly via --model so Opus 4.8
+ * (or cfg.foundry.strategistModel) is always used, not the CLI default.
  */
 function buildClaudeCliCompleteStrategist(
   cfg: AshlrConfig,
@@ -223,37 +261,44 @@ function buildClaudeCliCompleteStrategist(
 /**
  * Resolve the best available client for strategic briefings.
  *
- * Priority (controlled by cfg.foundry.managerJudgeEngine):
- *   1. 'auto' / 'claude' + claude allowed+installed → Claude CLI
- *   2. 'local' or claude unavailable → ollamaDirectComplete with the 72b model
+ * M162: model priority — cfg.foundry.strategistModel → CLAUDE_DEFAULT_STRATEGIST_MODEL
+ * ('claude-opus-4-8'). Founder-grade strategy always uses the elite model.
+ *
+ * Engine priority (controlled by cfg.foundry.managerJudgeEngine):
+ *   1. 'auto' / 'claude' + claude allowed+installed → Claude CLI (with elite model)
+ *   2. 'local' or claude unavailable → ollamaDirectComplete with the local model
  *
  * Returns { complete, judgeEngine }. Never throws.
  */
 function resolveStrategistClient(
   cfg: AshlrConfig,
   ollamaBaseUrl: string,
-  visionModel: string,
+  localFallbackModel: string,
 ): { complete: (system: string, user: string) => Promise<string>; judgeEngine: string } {
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
   const managerJudgeEngine = (foundry?.['managerJudgeEngine'] as string | undefined) ?? 'auto';
   const allowedBackends: string[] = (foundry?.['allowedBackends'] as string[] | undefined) ?? ['builtin'];
 
+  // M162: read strategistModel from cfg — override the default elite model.
+  const configuredModel = (foundry?.['strategistModel'] as string | undefined);
+  const eliteModel = configuredModel ?? CLAUDE_DEFAULT_STRATEGIST_MODEL;
+
   const wantClaude = managerJudgeEngine === 'auto' || managerJudgeEngine === 'claude';
   const claudeAllowed = allowedBackends.includes('claude');
 
   if (wantClaude && claudeAllowed && engineInstalled('claude', cfg)) {
-    const isClaudeModel = visionModel.startsWith('claude') || visionModel.includes('claude');
-    const claudeModel = isClaudeModel ? visionModel : CLAUDE_DEFAULT_STRATEGIST_MODEL;
+    // Always use the elite model for strategic briefings — ignore whether
+    // eliteModel starts with 'claude'; the explicit --model flag is always set.
     return {
-      complete: buildClaudeCliCompleteStrategist(cfg, claudeModel),
-      judgeEngine: claudeModel,
+      complete: buildClaudeCliCompleteStrategist(cfg, eliteModel),
+      judgeEngine: eliteModel,
     };
   }
 
   return {
     complete: (system: string, user: string) =>
-      ollamaDirectComplete(ollamaBaseUrl, visionModel, system, user, 2048, 0.3),
-    judgeEngine: visionModel,
+      ollamaDirectComplete(ollamaBaseUrl, localFallbackModel, system, user, 2048, 0.3),
+    judgeEngine: localFallbackModel,
   };
 }
 
@@ -266,19 +311,29 @@ interface FleetState {
   activeGoalCount: number;
   completedGoalCount: number;
   repoHealthSummary: string;
+  /** M162: active goal titles for focus-discipline enforcement. */
+  activeGoalTitles?: string[];
+  /** M162: rich context from gatherStrategicContext (best-effort). */
+  richContext?: string;
 }
 
-async function gatherFleetState(project?: string | null): Promise<FleetState> {
+async function gatherFleetState(cfg: AshlrConfig, project?: string | null): Promise<FleetState> {
   const metrics = computeQualityMetrics('30d', project ? { repo: project } : undefined);
 
   let activeGoalCount = 0;
   let completedGoalCount = 0;
+  let activeGoalTitles: string[] = [];
   try {
     const { listGoals } = await import('../goals/store.js');
     const active = listGoals({ status: 'active' });
     const done = listGoals({ status: 'done' });
     activeGoalCount = active.length;
     completedGoalCount = done.length;
+    // M162: capture goal titles for focus-discipline section in briefing.
+    activeGoalTitles = (active as Array<{ objective?: string }>)
+      .map((g) => g.objective ?? '')
+      .filter(Boolean)
+      .slice(0, 10);
   } catch { /* best-effort */ }
 
   let repoHealthSummary = 'Health data unavailable.';
@@ -293,22 +348,60 @@ async function gatherFleetState(project?: string | null): Promise<FleetState> {
     repoHealthSummary = `${repoCount} repos scored; avg health ${avgScore}/100.`;
   } catch { /* best-effort */ }
 
-  return { metrics, activeGoalCount, completedGoalCount, repoHealthSummary };
+  // M162: best-effort rich context from gatherStrategicContext (sibling module).
+  // Returns StrategicContext { narrative, repos, outcomes, fleet } — we inject
+  // the narrative string into the briefing prompt. Tolerates module absence.
+  let richContext: string | undefined;
+  try {
+    const contextMod = await import('./context.js') as {
+      gatherStrategicContext?: (cfg?: Partial<AshlrConfig>) => Promise<{ narrative: string }>;
+    };
+    if (typeof contextMod.gatherStrategicContext === 'function') {
+      const ctx = await contextMod.gatherStrategicContext(cfg);
+      richContext = ctx.narrative;
+    }
+  } catch { /* context module absent or errored — degrade gracefully */ }
+
+  return { metrics, activeGoalCount, completedGoalCount, repoHealthSummary, activeGoalTitles, richContext };
 }
 
-function buildStatePrompt(state: FleetState, spec: EndStateSpec, playbookContext?: string): string {
+function buildStatePrompt(
+  state: FleetState,
+  spec: EndStateSpec,
+  northStarCtx: string,
+  playbookContext?: string,
+): string {
   const m = state.metrics;
-  return `=== CURRENT FLEET STATE (30-day window) ===
+
+  // M162: goal-focus discipline section — surfaces open goals so the strategist
+  // can enforce "finish ONE goal before new ones" and prune stale/failing goals.
+  const goalFocusSection = state.activeGoalTitles && state.activeGoalTitles.length > 0
+    ? `\n=== ACTIVE GOALS (${state.activeGoalTitles.length} open — focus discipline applies) ===
+RULE: Finish ONE goal end-to-end before proposing new ones.
+RULE: Prune goals that are stale, low-leverage, or failing.
+Current open goals:
+${state.activeGoalTitles.map((t, i) => `  ${i + 1}. ${t}`).join('\n')}`
+    : '\n=== ACTIVE GOALS ===\nNo active goals — the fleet has a clean slate.';
+
+  // M162: rich context from gatherStrategicContext (best-effort).
+  const richCtxSection = state.richContext
+    ? `\n=== RICH REPO CONTEXT ===\n${state.richContext}`
+    : '';
+
+  return `${northStarCtx}
+
+=== FLEET METRICS (30-day window) ===
 Proposals created: ${m.proposalsCreated}
 Merged: ${m.merged} | Rejected: ${m.rejected} | Pending: ${m.pending}
 Accept rate: ${(m.acceptRate * 100).toFixed(1)}%
 Empty-diff rate: ${(m.emptyRate * 100).toFixed(1)}%
 Trivial ratio: ${(m.trivialRatio * 100).toFixed(1)}%
 Avg diff lines: ${m.avgDiffLines.toFixed(0)}
-Active goals: ${state.activeGoalCount} | Completed goals: ${state.completedGoalCount}
+Completed goals: ${state.completedGoalCount}
 Repo health: ${state.repoHealthSummary}
+${goalFocusSection}${richCtxSection}
 
-=== NORTH-STAR SPEC (v${spec.version}) ===
+=== VISION SPEC (v${spec.version}) ===
 North star: ${spec.northStar}
 
 End state: ${spec.endState}
@@ -329,7 +422,7 @@ Ambition level: ${spec.ambitionLevel}/10
 Last updated: ${spec.updatedAt} (by ${spec.updatedBy})
 
 === YOUR TASK ===
-Assess the gap between current state and the north-star vision. Raise the ambition. Identify the single most critical bottleneck to close next. Propose concrete goals the engineering fleet can execute immediately.${playbookContext ? `\n\n${playbookContext}` : ''}`;
+Identify THE BOTTLENECK. Name THE MOVE. Build the KILL-LIST. Propose ≤3 goals that directly increase substantive autonomous merges/week. Raise ambition if the spec is too timid. Enforce focus discipline on the active goals list above.${playbookContext ? `\n\n${playbookContext}` : ''}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -529,22 +622,28 @@ export async function runStrategist(
     const spec = loadSpec(specId) ?? loadSpec('ecosystem');
     if (!spec) return fallback();
 
-    // ── Gather state ────────────────────────────────────────────────────────
-    const state = await gatherFleetState(project);
+    // ── Gather state + north-star metric ────────────────────────────────────
+    const state = await gatherFleetState(cfg, project);
+
+    // M162: compute the leverage north-star metric — always best-effort.
+    const northStarMetric = computeNorthStar(cfg);
+    const northStarCtx = northStarSummary(northStarMetric);
 
     // ── Resolve frontier client ─────────────────────────────────────────────
+    // M162: strategistModel from cfg.foundry.strategistModel → elite Opus 4.8.
     // M135: Claude CLI FIRST when managerJudgeEngine='auto'/'claude' + claude allowed+installed.
-    // Mirrors the manager.ts fix — getActiveClient was always returning a client (local 72b
-    // fallback), preventing the Claude CLI path from ever being reached.
-    const visionModel = ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) || 'qwen2.5:72b-instruct-q4_K_M';
+    const foundryRaw = cfg.foundry as Record<string, unknown> | undefined;
+    // localFallbackModel: used only when Claude CLI is unavailable.
+    const localFallbackModel = (foundryRaw?.['managerJudgeModel'] as string | undefined) || 'qwen2.5:72b-instruct-q4_K_M';
+    const visionModel = localFallbackModel; // kept for getActiveClient fallback path
     const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
     const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
 
-    // Step 1: resolveStrategistClient — Claude CLI when allowed+installed, else local-72b.
+    // Step 1: resolveStrategistClient — Claude CLI (elite model) when allowed+installed, else local.
     let complete: ((system: string, user: string) => Promise<string>) | null = null;
-    let strategistJudgeEngine = visionModel;
+    let strategistJudgeEngine = localFallbackModel;
     {
-      const resolved = resolveStrategistClient(cfg, ollamaBaseUrl, visionModel);
+      const resolved = resolveStrategistClient(cfg, ollamaBaseUrl, localFallbackModel);
       complete = resolved.complete;
       strategistJudgeEngine = resolved.judgeEngine;
     }
@@ -569,7 +668,7 @@ export async function runStrategist(
     // ── Prompt ──────────────────────────────────────────────────────────────
     const acePlaybook = (cfg.foundry as Record<string, unknown> | undefined)?.['acePlaybook'] === true;
     const playbookCtx = acePlaybook ? renderPlaybook('strategy', 400) : undefined;
-    const userPrompt = buildStatePrompt(state, spec, playbookCtx);
+    const userPrompt = buildStatePrompt(state, spec, northStarCtx, playbookCtx);
     let raw: string;
     try {
       raw = await complete(STRATEGIST_SYSTEM, userPrompt);
