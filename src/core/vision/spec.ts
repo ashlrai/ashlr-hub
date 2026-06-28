@@ -32,6 +32,30 @@ export interface SpecHistoryEntry {
   ts: string;
 }
 
+/**
+ * M179: Per-tool roadmap entry — the strategist's directional bet for one
+ * enrolled repo in the ashlr ecosystem.
+ */
+export interface ToolRoadmapEntry {
+  /** Repo/tool name (basename of the enrolled repo dir, e.g. 'ashlr-pulse'). */
+  repo: string;
+  /**
+   * Ambition level 1–10 for this specific tool.
+   * Distinct from the ecosystem-level ambitionLevel.
+   */
+  ambitionLevel: number;
+  /**
+   * The one-sentence vision for what would make this tool genuinely great —
+   * first-principles, 10x thinking, not incremental tweaks.
+   */
+  vision: string;
+  /**
+   * The next concrete milestone to pursue for this tool.
+   * Specific enough that an engineering agent can execute it.
+   */
+  nextMilestone: string;
+}
+
 export interface EndStateSpec {
   id: string;
   /** Repository/project name, or null for the global ecosystem spec. */
@@ -51,6 +75,12 @@ export interface EndStateSpec {
    * 1 = maintenance-mode; 10 = category-defining moonshot.
    */
   ambitionLevel: number;
+  /**
+   * M179: Per-tool roadmap — one entry per enrolled ecosystem repo.
+   * Set by the strategist during ecosystem-manager briefings.
+   * Optional for backward compatibility with existing persisted specs.
+   */
+  toolRoadmap?: ToolRoadmapEntry[];
   version: number;
   updatedAt: string;
   /** Who last updated: Mason directly ('mason') or the Strategist agent ('strategist'). */

@@ -26,6 +26,7 @@ import {
   answerCallbackQuery,
   telegramEnabled,
 } from '../integrations/telegram.js';
+import { handleStrategicMessage } from './elon-dialogue.js';
 import {
   listRequests,
   markSent,
@@ -207,12 +208,11 @@ export async function runCommsCycle(cfg: AshlrConfig): Promise<CycleResult> {
       const { updates } = await pollTelegramUpdates(cfg);
 
       for (const event of updates) {
-        const out = outstanding();
-        if (!out) continue;
-
         if (event.kind === 'callback') {
           // Button tap: resolve directly by requestId + optionIndex (no numeric parsing)
+          const out = outstanding();
           if (
+            out &&
             event.requestId === out.id &&
             typeof event.optionIndex === 'number' &&
             event.optionIndex >= 0 &&
@@ -229,18 +229,33 @@ export async function runCommsCycle(cfg: AshlrConfig): Promise<CycleResult> {
             result.resolved++;
           }
         } else if (event.kind === 'text' && event.text) {
-          // Text fallback: still accept leading numeric reply (e.g. "1", "2 approve")
-          const match = /^\s*(\d+)\b/.exec(event.text);
-          if (!match) continue;
+          const out = outstanding();
+          // Text — check if it's a numbered reply to an outstanding request first.
+          const numMatch = out ? /^\s*(\d+)\b/.exec(event.text) : null;
+          const num = numMatch ? parseInt(numMatch[1]!, 10) : NaN;
+          const isNumericReply =
+            out !== undefined &&
+            numMatch !== null &&
+            num >= 1 &&
+            num <= out.options.length;
 
-          const num = parseInt(match[1]!, 10);
-          if (num < 1 || num > out.options.length) continue;
-
-          const answerIndex = num - 1;
-          resolveRequest(out.id, answerIndex);
-
-          await reloadAndInvoke(out.id);
-          result.resolved++;
+          if (isNumericReply && out) {
+            // Numbered reply — resolve the outstanding request as before
+            const answerIndex = num - 1;
+            resolveRequest(out.id, answerIndex);
+            await reloadAndInvoke(out.id);
+            result.resolved++;
+          } else {
+            // M180: free-form text → strategic dialogue with the Elon agent (Opus).
+            // Auth: telegram.ts already dropped messages from foreign chatIds before
+            // this point. This path is Mason-only by construction.
+            // SAFETY: handleStrategicMessage only sets goals/vision — it cannot
+            // trigger merge/push/destructive ops (those remain gated by execution floor).
+            const reply = await handleStrategicMessage(event.text, cfg);
+            if (reply) {
+              await sendTelegramMessage(reply, undefined, cfg);
+            }
+          }
         }
       }
 

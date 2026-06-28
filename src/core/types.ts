@@ -309,6 +309,19 @@ export interface AshlrConfig {
       allowWithoutVerification?: boolean;
     };
     /**
+     * M181: generative engine — "rip mode". DEFAULT false (opt-in).
+     *
+     * When true, the fleet is available as a generative work source: a frontier
+     * model invents bold, net-new features (source:'invent') rather than only
+     * scanning for maintenance tasks. The daemon auto-wiring is flag-gated here;
+     * the `ashlr invent` CLI always works regardless of this flag.
+     *
+     * CREATION ONLY: generated items are net-new capabilities, UX leaps, and bold
+     * features. Dependency bumps, lint, doc-comments, and TODO restoration are
+     * explicitly forbidden by the generative prompt.
+     */
+    generative?: boolean;
+    /**
      * M52: per-engine OS-level confinement profiles. DEFAULT ABSENT (v4 env-only).
      * When present, external engine spawns are wrapped with a platform-native
      * read-jail (macOS sandbox-exec, Linux bwrap) that confines file reads to the
@@ -2136,7 +2149,7 @@ export interface Enrollment {
  */
 
 /** The kind of source a WorkItem was derived from. */
-export type WorkSource = 'issue' | 'todo' | 'test' | 'dep' | 'doc' | 'security' | 'plugin' | 'self' | 'lint' | 'goal' | 'hygiene'; // M33: 'plugin'; M54: 'self' (the fleet's own backlog); M101: 'lint' (cached lint report); M160/M161: 'goal' (active goal next-step), 'hygiene' (low-value hygiene) — all additive
+export type WorkSource = 'issue' | 'todo' | 'test' | 'dep' | 'doc' | 'security' | 'plugin' | 'self' | 'lint' | 'goal' | 'hygiene' | 'invent'; // M33: 'plugin'; M54: 'self' (the fleet's own backlog); M101: 'lint' (cached lint report); M160/M161: 'goal' (active goal next-step), 'hygiene' (low-value hygiene) — all additive; M181: 'invent' (generative engine — bold net-new features)
 /**
  * A single discovered, scored unit of work. Produced by a scanner over a
  * single enrolled repo. Contains NO secrets. Pure analysis — never implies a

@@ -66,9 +66,12 @@ const SOURCE_LABELS: Record<WorkSource, string> = {
   dep:      'dep',
   doc:      'doc',
   security: 'security',
-  plugin:   'plugin', // M33
+    plugin: 'plugin', // M33
   self:     'self',   // M54
   lint:     'lint',   // M101
+  goal:     'goal',   // M161
+  hygiene:  'hygiene', // M161
+  invent:   'invent', // M181
 };
 
 const SOURCE_COLORS: Record<WorkSource, keyof ReturnType<typeof makeColors>> = {
@@ -81,6 +84,9 @@ const SOURCE_COLORS: Record<WorkSource, keyof ReturnType<typeof makeColors>> = {
   security: 'red',
   plugin:   'cyan', // M33
   lint:     'yellow', // M101
+  goal:     'green',  // M161
+  hygiene:  'magenta', // M161
+  invent:   'cyan',    // M181
 };
 
 /** Shorten an absolute repo path: replace $HOME with ~, truncate if long. */

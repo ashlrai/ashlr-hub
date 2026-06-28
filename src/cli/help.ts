@@ -103,6 +103,12 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
     safety: 'human-gate',
     jsonShape: 'ApplyResult',
   },
+  {
+    usage: 'ashlr invent [<repo>] [--n N] [--direction <text>] [--emit] [--json]',
+    description: 'Generative engine: invent bold, net-new features for a repo using a frontier model. --emit files them into the backlog.',
+    safety: 'read',
+    jsonShape: 'WorkItem[]',
+  },
 ];
 
 /** Render the cheat sheet as plain text (llms.txt-style; no ANSI). */

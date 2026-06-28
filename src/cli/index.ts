@@ -540,6 +540,14 @@ const loadBestOfNCmd = lazyCmd(
   'best-of-n command requires src/cli/best-of-n.ts (M142 module not yet built).',
 );
 
+// ─── M181 command loaders ─────────────────────────────────────────────────────
+
+const loadInventCmd = lazyCmd(
+  () => import('./invent.js'),
+  (m) => m.cmdInvent as Cmd,
+  'invent command requires src/cli/invent.ts (M181 generative engine).',
+);
+
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
 
 import type { GithubStatus, VercelStatus, Identity } from '../core/types.js';
@@ -1819,6 +1827,13 @@ async function main(): Promise<void> {
       case 'best-of-n': {
         const cmdBestOfN = await loadBestOfNCmd();
         process.exitCode = await cmdBestOfN(rest);
+        break;
+      }
+
+      case 'invent': {
+        // M181: generative engine — invent bold, net-new features for a repo.
+        const cmdInvent = await loadInventCmd();
+        process.exitCode = await cmdInvent(rest);
         break;
       }
 
