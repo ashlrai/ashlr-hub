@@ -17,7 +17,7 @@ import { notify } from '../integrations/notify.js';
 export async function notifyNewProposal(proposal: Proposal, cfg: AshlrConfig): Promise<void> {
   const line = `[${proposal.kind}] ${proposal.title} — review: ashlr inbox show ${proposal.id}`;
   await Promise.all([
-    desktopNotify('ashlr: new proposal', line, cfg).catch(() => false),
-    notify(`ashlr: new pending proposal ${line}`, cfg).catch(() => false),
+    desktopNotify('ashlr: new proposal', line, cfg).catch((err) => { console.warn('[ashlr] notifyNewProposal: desktopNotify failed:', (err as Error)?.message ?? err); return false; }),
+    notify(`ashlr: new pending proposal ${line}`, cfg).catch((err) => { console.warn('[ashlr] notifyNewProposal: webhook notify failed:', (err as Error)?.message ?? err); return false; }),
   ]);
 }

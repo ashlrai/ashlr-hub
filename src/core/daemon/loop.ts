@@ -298,8 +298,9 @@ export async function tick(
       s.lastTickAt = t.ts;
       s.ticks = [...s.ticks, t];
       saveDaemonState(s);
-    } catch {
+    } catch (err) {
       // persistence best-effort — never let observability crash a tick
+      console.warn('[ashlr] daemon:recordTick persistence failed:', (err as Error)?.message ?? err);
     }
     return t;
   };
@@ -378,8 +379,9 @@ export async function tick(
   try {
     const backlog = await buildBacklog({ repos: enrolled });
     backlogItems = backlog.items;
-  } catch {
+  } catch (err) {
     // buildBacklog never throws by contract; extra guard
+    console.warn('[ashlr] daemon:tick buildBacklog guard caught:', (err as Error)?.message ?? err);
     backlogItems = [];
   }
 
@@ -458,8 +460,9 @@ export async function tick(
         }
       }
     }
-  } catch {
+  } catch (err) {
     // Best-effort — never block selection on inbox read failure.
+    console.warn('[ashlr] daemon:tick inbox pendingItemIds read failed:', (err as Error)?.message ?? err);
   }
 
   // Group backlog items by repo (score-sorted within each group by buildBacklog).
@@ -559,15 +562,16 @@ export async function tick(
   // cfg.foundry?.selfHeal === false → skipped entirely (flag-off = no-op).
   try {
     await runSelfHealCycle(liveCfg);
-  } catch {
+  } catch (err) {
     // Best-effort — self-heal must never crash the tick.
+    console.warn('[ashlr] daemon:tick runSelfHealCycle failed:', (err as Error)?.message ?? err);
   }
 
   // M186: Generative invent cycle — synthesise new work items from enrolled repos.
   // Flag-gated: cfg.foundry.generative === true → ON; absent/false → skipped (default OFF).
   // Never throws; never blocks or breaks the tick on any error.
   if ((liveCfg.foundry as any)?.generative === true) {
-    try { await runInventCycle(liveCfg); } catch { /* best-effort */ }
+    try { await runInventCycle(liveCfg); } catch (err) { console.warn('[ashlr] daemon:tick runInventCycle failed:', (err as Error)?.message ?? err); }
   }
 
   // M187: Counterfactual replay — low-cadence judge calibration.
@@ -577,7 +581,7 @@ export async function tick(
     (liveCfg.foundry as any)?.counterfactual === true &&
     state.ticks.length % 20 === 0
   ) {
-    try { await runCounterfactualReplay(liveCfg); } catch { /* best-effort */ }
+    try { await runCounterfactualReplay(liveCfg); } catch (err) { console.warn('[ashlr] daemon:tick runCounterfactualReplay failed:', (err as Error)?.message ?? err); }
   }
 
   // M189: Regression sentinel — detect regressions introduced by auto-merge and bisect/revert.
@@ -587,7 +591,7 @@ export async function tick(
     try {
       const r = await detectRegression(liveCfg);
       if (r.regressed) await bisectAndRevert(liveCfg);
-    } catch { /* best-effort */ }
+    } catch (err) { console.warn('[ashlr] daemon:tick regressionSentinel failed:', (err as Error)?.message ?? err); }
   }
 
   // Shared, mutable in-tick spend tally. Read+incremented by each concurrent
@@ -895,7 +899,7 @@ export async function tick(
         const anomalyK = typeof intelCfg2.anomalyK === 'number' && intelCfg2.anomalyK > 0
           ? intelCfg2.anomalyK : 4;
         const goal2 = buildItemGoal(item);
-        const est2 = await estimateRun(goal2, { maxTokens: perItemMaxTokens }, liveCfg).catch(() => null);
+        const est2 = await estimateRun(goal2, { maxTokens: perItemMaxTokens }, liveCfg).catch((err) => { console.warn('[ashlr] daemon:tick estimateRun failed:', (err as Error)?.message ?? err); return null; });
         const p50 = est2?.estCostUsd.median ?? 0;
         if (p50 > 0 && swarmSpent > anomalyK * p50) {
           audit({
@@ -919,8 +923,9 @@ export async function tick(
                 `Proposal held PENDING for human review.`,
               confidence: Math.min(0.9, 0.5 + (swarmSpent / (anomalyK * p50) - 1) / 10),
             }]);
-          } catch {
+          } catch (err) {
             // Emission must never crash the tick.
+            console.warn('[ashlr] daemon:tick emitTuningProposals failed:', (err as Error)?.message ?? err);
           }
         }
       }
@@ -954,7 +959,7 @@ export async function tick(
 
   // Proposals actually recorded this tick = the PENDING-count delta (clamped >=0).
   let proposalsCreated = 0;
-  try { proposalsCreated = Math.max(0, pendingCount() - pendingBefore); } catch { proposalsCreated = 0; }
+  try { proposalsCreated = Math.max(0, pendingCount() - pendingBefore); } catch (err) { console.warn('[ashlr] daemon:tick proposalDelta count failed:', (err as Error)?.message ?? err); proposalsCreated = 0; }
 
   // M85: record outcomes to the worked ledger. A dispatched item that produced a
   // new PENDING proposal → 'diff'; a dispatched item that produced no new proposal
@@ -981,8 +986,9 @@ export async function tick(
           coordinator.recordOutcome(outcome.value.item.id, outcomeLabel, machineId);
         }
       }
-    } catch {
+    } catch (err) {
       // Ledger recording must never crash the tick.
+      console.warn('[ashlr] daemon:tick ledger recordOutcome failed:', (err as Error)?.message ?? err);
     }
   }
 
@@ -996,8 +1002,9 @@ export async function tick(
     );
     const unworkedIds = workedSet.map(i => i.id).filter(id => !dispatchedIds.has(id));
     if (unworkedIds.length > 0) coordinator.release(unworkedIds, machineId);
-  } catch {
+  } catch (err) {
     // Release must never crash the tick.
+    console.warn('[ashlr] daemon:tick coordinator release failed:', (err as Error)?.message ?? err);
   }
 
   // M48: OPT-IN auto-merge pass (cfg.foundry.autoMerge.enabled, DEFAULT OFF).
@@ -1007,7 +1014,7 @@ export async function tick(
   // stay PENDING. With autoMerge disabled this is a no-op — the daemon stays
   // strictly proposal-only.
   let merged = 0;
-  try { merged = (await runAutoMergePass(liveCfg)).merged; } catch { merged = 0; }
+  try { merged = (await runAutoMergePass(liveCfg)).merged; } catch (err) { console.warn('[ashlr] daemon:tick runAutoMergePass failed:', (err as Error)?.message ?? err); merged = 0; }
 
   // -------------------------------------------------------------------------
   // 7. Update + persist state with this tick's accounting.
@@ -1054,10 +1061,11 @@ export async function tick(
           fresh.lastPulseExportAt = tickRecord.ts;
           saveDaemonState(fresh);
         }
-      } catch {
+      } catch (err) {
         // Best-effort — telemetry must never crash the daemon.
+        console.warn('[ashlr] daemon:tick pulse export failed:', (err as Error)?.message ?? err);
       }
-    }).catch(() => undefined);
+    }).catch((err) => { console.warn('[ashlr] daemon:tick pulse-export lazy-import failed:', (err as Error)?.message ?? err); return undefined; });
   }
 
   // ── Phase H: fleet→pulse ROUND-TRIP (cloud orchestrates, local executes). ──
@@ -1079,10 +1087,11 @@ export async function tick(
   void import('../integrations/pulse-sync.js').then(async ({ runPulseSync }) => {
     try {
       await runPulseSync(cfg, { tickTs: tickRecord.ts });
-    } catch {
+    } catch (err) {
       // Best-effort — the round-trip must never crash the daemon.
+      console.warn('[ashlr] daemon:tick pulse-sync failed:', (err as Error)?.message ?? err);
     }
-  }).catch(() => undefined);
+  }).catch((err) => { console.warn('[ashlr] daemon:tick pulse-sync lazy-import failed:', (err as Error)?.message ?? err); return undefined; });
 
   audit({
     action: 'daemon:tick',

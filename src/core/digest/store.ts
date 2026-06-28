@@ -25,7 +25,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { join } from 'node:path';
 
 import { digestsDir } from '../config.js';
-import type { DigestReport } from '../types.js';
+import type { DigestReport, DigestWindow, PortfolioSummary, PortfolioTodayDelta } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Caps
@@ -33,6 +33,38 @@ import type { DigestReport } from '../types.js';
 
 /** Max digest snapshots listDigests will read (bounds I/O). */
 const MAX_DIGESTS = 200;
+
+// ---------------------------------------------------------------------------
+// Empty / zeroed defaults — single source of truth (M198 consolidation)
+// ---------------------------------------------------------------------------
+
+/** A null-filled "today" delta block (no prior digest to compare against). */
+export function emptyTodayDelta(): PortfolioTodayDelta {
+  return {
+    previousAt: null,
+    pendingProposalsDelta: null,
+    dirtyReposDelta: null,
+    spendUsdDelta: null,
+    healthScoreDelta: null,
+    goalsInFlightDelta: null,
+  };
+}
+
+/**
+ * A zeroed PortfolioSummary — the canonical empty value shared by
+ * build.ts (degradation) and dashboard.ts (initial value). Exported so
+ * callers import one copy rather than each maintaining their own.
+ */
+export function emptyPortfolio(window: DigestWindow): PortfolioSummary {
+  return {
+    health: { reposScored: 0, averageScore: 0, averageGrade: 'F', worstRepos: [] },
+    goalsInFlight: [],
+    backlogTop: [],
+    cost: { window, spentUsd: 0, localSavingsUsd: 0, projectedMonthlyUsd: 0 },
+    effectiveness: null,
+    today: emptyTodayDelta(),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call time so tests can relocate HOME)
@@ -49,12 +81,19 @@ export function digestsDirPath(): string {
 
 /** Ensure a directory exists, silently creating it if needed. Best-effort. */
 function ensureDir(dir: string): void {
-  // TODO(M29): mkdir recursive inside try/catch; a subsequent write fails
-  // gracefully in its own try/catch if this no-ops.
+  // Recursive mkdir so intermediate dirs are created in one shot. EEXIST is
+  // benign (dir was created concurrently or existsSync raced); any other OS
+  // error (EACCES, ENOTDIR, …) is logged once so it surfaces in diagnostics
+  // without ever throwing to the caller. A subsequent write will fail in its
+  // own try/catch and degrade to null, satisfying the never-throws contract.
   try {
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  } catch {
-    // Best-effort.
+    mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'EEXIST') {
+      // Real failure — surface it without throwing.
+      console.error(`[ashlr:digest] ensureDir failed for ${dir}: ${String(err)}`);
+    }
   }
 }
 

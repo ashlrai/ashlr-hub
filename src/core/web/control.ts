@@ -562,17 +562,20 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
   const ts = new Date().toISOString();
 
   // Per-repo digest (7d window)
-  let digest = await buildFleetDigest('7d').catch(() => ({
-    running: false,
-    lastTickAt: null,
-    todaySpentUsd: 0,
-    itemsProcessed: 0,
-    repos: [] as FleetRepoRow[],
-    totalProposed: 0,
-    totalAutoMerged: 0,
-    totalPending: 0,
-    totalDeclined: 0,
-  }));
+  let digest = await buildFleetDigest('7d').catch((err) => {
+    console.warn('[ashlr] control:buildFleetActivity buildFleetDigest failed:', (err as Error)?.message ?? err);
+    return {
+      running: false,
+      lastTickAt: null,
+      todaySpentUsd: 0,
+      itemsProcessed: 0,
+      repos: [] as FleetRepoRow[],
+      totalProposed: 0,
+      totalAutoMerged: 0,
+      totalPending: 0,
+      totalDeclined: 0,
+    };
+  });
 
   // Recent auto-merge events from audit (action starts with 'merge.')
   let recentMerges: FleetMergeEvent[] = [];
@@ -661,15 +664,18 @@ export async function buildControlSnapshot(cfg: AshlrConfig): Promise<ControlSna
 
   const [models, fleet] = await Promise.all([
     buildModels(cfg),
-    buildFleetStatus(cfg).catch((): FleetStatus => ({
-      generatedAt: ts,
-      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
-      backends: [],
-      queue: { backlogItems: 0 },
-      proposals: { pending: 0, frontierPending: 0, applied: 0 },
-      merges: { recent: 0 },
-      killed: false,
-    })),
+    buildFleetStatus(cfg).catch((err): FleetStatus => {
+      console.warn('[ashlr] control:buildControlSnapshot buildFleetStatus failed:', (err as Error)?.message ?? err);
+      return {
+        generatedAt: ts,
+        daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+        backends: [],
+        queue: { backlogItems: 0 },
+        proposals: { pending: 0, frontierPending: 0, applied: 0 },
+        merges: { recent: 0 },
+        killed: false,
+      };
+    }),
   ]);
 
   const daemon = buildDaemon();

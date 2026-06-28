@@ -30,7 +30,7 @@
 
 import { buildSnapshot } from '../dashboard.js';
 import { getActiveClient } from '../run/provider-client.js';
-import { loadPreviousDigest } from './store.js';
+import { emptyPortfolio, emptyTodayDelta, loadPreviousDigest } from './store.js';
 import type {
   AshlrConfig,
   DigestOptions,
@@ -46,36 +46,6 @@ import type {
 
 /** Default cost/forecast window when none is supplied. */
 const DEFAULT_WINDOW: DigestWindow = '7d';
-
-// ---------------------------------------------------------------------------
-// Empty / zeroed defaults (never-throws degradation targets)
-// ---------------------------------------------------------------------------
-
-/** A zeroed portfolio section used when the snapshot lacks one. */
-function emptyPortfolio(window: DigestWindow): PortfolioSummary {
-  // TODO(M29): single source of the empty PortfolioSummary; reused by both
-  // buildDigest (degradation) and core/dashboard.ts (initial value).
-  return {
-    health: { reposScored: 0, averageScore: 0, averageGrade: 'F', worstRepos: [] },
-    goalsInFlight: [],
-    backlogTop: [],
-    cost: { window, spentUsd: 0, localSavingsUsd: 0, projectedMonthlyUsd: 0 },
-    effectiveness: null,
-    today: emptyTodayDelta(),
-  };
-}
-
-/** A null-filled "today" delta block (no prior digest to compare against). */
-function emptyTodayDelta(): PortfolioTodayDelta {
-  return {
-    previousAt: null,
-    pendingProposalsDelta: null,
-    dirtyReposDelta: null,
-    spendUsdDelta: null,
-    healthScoreDelta: null,
-    goalsInFlightDelta: null,
-  };
-}
 
 // ---------------------------------------------------------------------------
 // buildDigest
