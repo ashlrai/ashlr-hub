@@ -540,6 +540,363 @@ export function routeTask(
 }
 
 // ---------------------------------------------------------------------------
+// M155: Cheap-first cascade — decision types, shouldEscalate, escalationRate
+// ---------------------------------------------------------------------------
+
+/**
+ * Tier ordering for escalation purposes.
+ * 'local' < 'mid' < 'frontier' — each step up is one escalation hop.
+ */
+const ESCALATION_TIER_ORDER: readonly string[] = ['local', 'mid', 'frontier'];
+
+/**
+ * Which tier a TaskRouteDecision's engine belongs to for cascade purposes.
+ * Mirrors engineTierOf without importing sandboxed-engine.ts.
+ */
+function engineTierLabel(engine: EngineId): 'local' | 'mid' | 'frontier' {
+  if (engine === 'builtin') return 'local';
+  if ((engine as string) === 'local-coder' || (engine as string) === 'nim') return 'mid';
+  return 'frontier';
+}
+
+/**
+ * The result of a cascade-first routing decision.
+ * Extends TaskRouteDecision with cascade metadata so the orchestrator
+ * knows whether this is attempt-1 (cheap-first) or a re-dispatch.
+ */
+export interface CascadeDecision extends TaskRouteDecision {
+  /**
+   * Attempt number: 1 = cheap-first, 2+ = escalated.
+   * Always 1 when cascade is OFF (flag-off path).
+   */
+  attempt: number;
+  /**
+   * True when this decision was forced to the cheapest capable tier
+   * (cascade ON and difficulty is low/mid) rather than the normally
+   * selected tier.
+   */
+  cheapFirst: boolean;
+  /**
+   * The tier label for this decision ('local'|'mid'|'frontier').
+   * Derived from `engine` for quick comparisons without re-importing engine maps.
+   */
+  tierLabel: 'local' | 'mid' | 'frontier';
+}
+
+/**
+ * The result of shouldEscalate: whether the orchestrator should re-dispatch
+ * this task at a higher tier and why.
+ *
+ * WHERE THE ORCHESTRATOR SHOULD CALL THIS:
+ *   After each cheap-first attempt completes, before marking a task done:
+ *
+ *   ```ts
+ *   const firstDecision = routeTask(item, cfg, ctx);  // attempt 1
+ *   const taskResult = await runEngine(firstDecision, item);
+ *   const esc = shouldEscalate(taskResult, firstDecision);
+ *   if (esc.escalate) {
+ *     const escalatedDecision = routeTask(item, cfg, ctx, esc.toTier, 2);
+ *     const finalResult = await runEngine(escalatedDecision, item);
+ *   }
+ *   ```
+ *
+ * Record each decision (escalated or not) in the run ledger so
+ * `escalationRate()` can track the metric.
+ */
+export interface EscalationSignal {
+  /** True when the orchestrator should re-dispatch at a higher tier. */
+  escalate: boolean;
+  /**
+   * The tier to escalate to when escalate=true.
+   * Null when escalate=false or already at frontier.
+   */
+  toTier: 'mid' | 'frontier' | null;
+  /** Human-readable reason for the escalation (or non-escalation) decision. */
+  reason: string;
+}
+
+/**
+ * The minimal shape of a task result needed to decide whether to escalate.
+ * Deliberately kept narrow — the orchestrator fills this from its run record.
+ */
+export interface TaskResult {
+  /** Whether the run produced a non-empty diff. */
+  hasDiff: boolean;
+  /** Whether automated tests passed (null = not run / unknown). */
+  testsPassed: boolean | null;
+  /**
+   * Optional judge verdict ('ok' | 'noise' | 'harmful' | 'uncertain').
+   * When absent, verdict check is skipped.
+   */
+  judgeVerdict?: 'ok' | 'noise' | 'harmful' | 'uncertain';
+  /** Whether the diff/patch applied cleanly (null = not checked). */
+  applySucceeded: boolean | null;
+}
+
+/**
+ * M155: Decide whether a cheap-first attempt should be escalated to the next
+ * tier based on OBJECTIVE failure signals only (never pure confidence).
+ *
+ * Escalation triggers (any one is sufficient):
+ *  - Tests failed:  testsPassed === false
+ *  - Empty diff:    hasDiff === false
+ *  - Apply failed:  applySucceeded === false
+ *  - Judge noise/harmful: judgeVerdict === 'noise' | 'harmful'
+ *
+ * Escalation is CAPPED at frontier (max 2 hops: local→mid→frontier).
+ * A task already at frontier is never escalated further.
+ *
+ * @param result    The objective result of the cheap-first attempt.
+ * @param decision  The CascadeDecision that produced this result (used for tier cap).
+ */
+export function shouldEscalate(result: TaskResult, decision: CascadeDecision): EscalationSignal {
+  const currentTierIdx = ESCALATION_TIER_ORDER.indexOf(decision.tierLabel);
+  const atFrontier = decision.tierLabel === 'frontier';
+
+  // ── Cap check: already at frontier → never escalate ───────────────────────
+  if (atFrontier || currentTierIdx < 0) {
+    return {
+      escalate: false,
+      toTier: null,
+      reason: `already at frontier tier (${decision.engine}) — no further escalation`,
+    };
+  }
+
+  // ── Hop cap: max 2 hops (attempt 1→2, 2→3); attempt 3+ at frontier ─────────
+  // attempt is 1-based; max hops = 2 means we allow attempt 1 and 2 as cheap,
+  // and the final escalation target is attempt 3 = frontier (capped at index 2).
+  const maxAttempts = 3; // attempt 1 (local), 2 (mid), 3 (frontier)
+  if (decision.attempt >= maxAttempts) {
+    return {
+      escalate: false,
+      toTier: null,
+      reason: `escalation cap reached (attempt ${decision.attempt} >= ${maxAttempts}) — no further escalation`,
+    };
+  }
+
+  // ── Evaluate objective failure signals ─────────────────────────────────────
+  const failures: string[] = [];
+
+  if (result.testsPassed === false) {
+    failures.push('tests-failed');
+  }
+  if (!result.hasDiff) {
+    failures.push('empty-diff');
+  }
+  if (result.applySucceeded === false) {
+    failures.push('apply-failed');
+  }
+  if (result.judgeVerdict === 'noise' || result.judgeVerdict === 'harmful') {
+    failures.push(`judge-${result.judgeVerdict}`);
+  }
+
+  if (failures.length === 0) {
+    // Clean pass — no escalation needed.
+    return {
+      escalate: false,
+      toTier: null,
+      reason: `cheap attempt passed all checks (no escalation signals)`,
+    };
+  }
+
+  // ── Determine target tier: one hop up from current ─────────────────────────
+  const nextTierIdx = Math.min(currentTierIdx + 1, ESCALATION_TIER_ORDER.length - 1);
+  const nextTier = ESCALATION_TIER_ORDER[nextTierIdx] as 'local' | 'mid' | 'frontier';
+
+  // If stepping up would leave us at the same tier (shouldn't happen, but guard),
+  // or the next tier is the same, cap at frontier.
+  const toTier: 'mid' | 'frontier' = nextTier === 'local' ? 'mid' : nextTier;
+
+  return {
+    escalate: true,
+    toTier,
+    reason: `escalating ${decision.tierLabel}→${toTier}: signals=[${failures.join(',')}] on attempt ${decision.attempt}`,
+  };
+}
+
+/**
+ * A single entry in the cascade run ledger (persisted by the orchestrator).
+ * Minimal — only what escalationRate() needs to compute the metric.
+ */
+export interface CascadeRunEntry {
+  /** The task id. */
+  taskId: string;
+  /** The attempt number (1 = cheap-first, 2+ = escalated). */
+  attempt: number;
+  /** True when this attempt was followed by an escalation. */
+  escalated: boolean;
+  /** ISO timestamp (for future windowing). */
+  ts: string;
+}
+
+/**
+ * M155: Compute the escalation rate from a run ledger slice.
+ *
+ * Returns the fraction of first attempts (attempt===1) that were escalated.
+ * Expects 7–10% in a well-tuned fleet; >15% suggests the cheap-first tier is
+ * underfit for the task mix; <5% suggests over-escalation is rare but
+ * cheap-first may not be selecting the cheapest tier correctly.
+ *
+ * @param entries  The cascade run ledger (read-only; typically from decisions-ledger.ts).
+ * @returns        { rate, firstAttempts, escalatedCount } — rate is 0 when no data.
+ */
+export function escalationRate(entries: readonly CascadeRunEntry[]): {
+  rate: number;
+  firstAttempts: number;
+  escalatedCount: number;
+} {
+  const firstAttempts = entries.filter((e) => e.attempt === 1);
+  const escalatedCount = firstAttempts.filter((e) => e.escalated).length;
+  const rate = firstAttempts.length === 0 ? 0 : escalatedCount / firstAttempts.length;
+  return { rate, firstAttempts: firstAttempts.length, escalatedCount };
+}
+
+// ---------------------------------------------------------------------------
+// M155: Cascade-aware routeTask wrapper
+// ---------------------------------------------------------------------------
+
+/**
+ * Cheap-first difficulty threshold: items with effort <= this value are
+ * considered low/mid difficulty and get the cheap-first treatment when
+ * cascade is ON. Hard items (effort > threshold OR isHardItem()) bypass
+ * cheap-first and route to the normally-selected tier.
+ */
+const CASCADE_CHEAP_EFFORT_THRESHOLD = 3;
+
+/**
+ * M155 cascade-aware routeTask.
+ *
+ * When cfg.foundry.cascade === true:
+ *   - Attempt 1 for low/mid-difficulty tasks routes to the cheapest capable
+ *     tier (local if available; else mid). Hard items are unaffected.
+ *   - Attempt 2+ (escalation re-dispatch) respects `forceTier` to route to
+ *     the tier determined by shouldEscalate().
+ *   - Wraps the base routeTask result in a CascadeDecision.
+ *
+ * When cfg.foundry.cascade is absent/false:
+ *   - Delegates byte-identically to the base routeTask, with attempt=1 and
+ *     cheapFirst=false always (flag-off parity).
+ *
+ * Optional M154 localized-scope signal: if `item` has a
+ * `(item as any).localizedScope` with `fileCount` and/or `symbolCount`, the
+ * cheap-first decision uses those as an additional difficulty input — a large
+ * localized scope (fileCount > 5 or symbolCount > 20) nudges toward skipping
+ * the cheap-first step.
+ *
+ * @param item       The work item to route.
+ * @param cfg        Full AshlrConfig.
+ * @param ctx        RoutingContext (available engines).
+ * @param forceTier  When set, override the tier to this (used for escalation re-dispatch).
+ * @param attempt    Attempt number (1-based; default 1).
+ */
+export function routeTaskCascade(
+  item: WorkItem,
+  cfg: AshlrConfig,
+  ctx: RoutingContext,
+  forceTier?: 'local' | 'mid' | 'frontier',
+  attempt = 1,
+): CascadeDecision {
+  // ── Flag gate ──────────────────────────────────────────────────────────────
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cascadeEnabled = (cfg.foundry as any)?.cascade === true;
+
+  if (!cascadeEnabled) {
+    // FLAG-OFF: delegate byte-identically to the base routeTask.
+    const base = routeTask(item, cfg, ctx);
+    return {
+      ...base,
+      attempt: 1,
+      cheapFirst: false,
+      tierLabel: engineTierLabel(base.engine),
+    };
+  }
+
+  // ── Escalation re-dispatch: honor forceTier ────────────────────────────────
+  if (forceTier !== undefined) {
+    // Build a context filtered to only engines at the requested tier.
+    const tierEngines: Record<string, EngineId[]> = {
+      local: ['builtin' as EngineId],
+      mid: ['local-coder' as EngineId, 'nim' as EngineId],
+      frontier: ['claude' as EngineId, 'codex' as EngineId],
+    };
+    const preferredEngines = tierEngines[forceTier] ?? [];
+    // Narrow context to requested tier engines still in availableEngines.
+    const filteredEngines = preferredEngines.filter((e) => ctx.availableEngines.includes(e));
+    const escalatedCtx: RoutingContext = {
+      availableEngines:
+        filteredEngines.length > 0
+          ? [...filteredEngines, ...(ctx.availableEngines.filter((e) => !preferredEngines.includes(e)))]
+          : ctx.availableEngines,
+    };
+    const base = routeTask(item, cfg, escalatedCtx);
+    return {
+      ...base,
+      attempt,
+      cheapFirst: false,
+      tierLabel: engineTierLabel(base.engine),
+    };
+  }
+
+  // ── Cheap-first decision ───────────────────────────────────────────────────
+  const effort = typeof item.effort === 'number' ? item.effort : 3;
+  const hard = isHardItem(item);
+
+  // M154 localized-scope signal (tolerate absence).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const localizedScope = (item as any).localizedScope as
+    | { fileCount?: number; symbolCount?: number }
+    | undefined;
+  const largeScope =
+    (localizedScope?.fileCount ?? 0) > 5 || (localizedScope?.symbolCount ?? 0) > 20;
+
+  // Hard items or large-scope items bypass cheap-first → normal routing.
+  if (hard || largeScope) {
+    const base = routeTask(item, cfg, ctx);
+    return {
+      ...base,
+      attempt,
+      cheapFirst: false,
+      tierLabel: engineTierLabel(base.engine),
+    };
+  }
+
+  // Low/mid difficulty: prefer the cheapest capable tier (local → mid).
+  const cheapCtx: RoutingContext = {
+    // Put local engines first to bias routeTask's "available" ordering toward free local.
+    availableEngines: [
+      ...ctx.availableEngines.filter(
+        (e) => engineTierLabel(e) === 'local' || engineTierLabel(e) === 'mid',
+      ),
+      ...ctx.availableEngines.filter((e) => engineTierLabel(e) === 'frontier'),
+    ],
+  };
+
+  // Use 'cost' policy to steer routeTask toward free local; wrap over the item's
+  // own policy so quality-policy items still get cheap-first on low effort.
+  // We achieve this by temporarily projecting a cost-preferring config slice.
+  const cheapCfg: AshlrConfig = {
+    ...cfg,
+    foundry: {
+      ...cfg.foundry,
+      // Bias toward cost/local for cheap-first attempt; cap effort signal at threshold
+      // so routeTask's hard-item fast-path doesn't fire.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      routingPolicy: effort <= CASCADE_CHEAP_EFFORT_THRESHOLD ? 'cost' : (cfg.foundry as any)?.routingPolicy ?? 'balanced',
+    } as AshlrConfig['foundry'],
+  };
+
+  const base = routeTask(item, cheapCfg, cheapCtx);
+  const tierLabel = engineTierLabel(base.engine);
+
+  return {
+    ...base,
+    attempt,
+    cheapFirst: tierLabel !== 'frontier', // cheapFirst only when we actually landed below frontier
+    tierLabel,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // M15: chooseRoute (unchanged, preserved exactly)
 // ---------------------------------------------------------------------------
 

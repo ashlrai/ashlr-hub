@@ -33,6 +33,22 @@ import { routeBackend, type RouteDecision } from '../fleet/router.js';
 import type { CostForecast } from '../types.js';
 
 // ---------------------------------------------------------------------------
+// M155: Re-export cascade routing API from router.ts for discoverability.
+// The orchestrator may import from either module.
+// ---------------------------------------------------------------------------
+export type {
+  CascadeDecision,
+  CascadeRunEntry,
+  EscalationSignal,
+  TaskResult,
+} from './router.js';
+export {
+  shouldEscalate,
+  escalationRate,
+  routeTaskCascade,
+} from './router.js';
+
+// ---------------------------------------------------------------------------
 // Local type definitions (avoid importing merge.ts)
 // ---------------------------------------------------------------------------
 
