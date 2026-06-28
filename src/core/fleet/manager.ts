@@ -569,6 +569,38 @@ function resolveJudgeClient(
 }
 
 // ---------------------------------------------------------------------------
+// M176: Public frontier-judge resolver (used by automerge-pass.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the best available frontier judge client using the M135 priority
+ * order (Claude CLI first when allowed+installed, else local-72b via ollama).
+ *
+ * This is the SAME resolver used by runManager — exported so that
+ * runAutoMergePass can use the identical path instead of the broken
+ * getActiveClient-only path that returns hasComplete=false when
+ * cfg.models.providerChain is ["ollama"].
+ *
+ * Returns { complete, model } in the shape judgeProposal expects, or null
+ * when even the local fallback cannot be constructed (never throws).
+ */
+export function resolveFrontierJudgeClient(
+  cfg: AshlrConfig,
+): { complete: (system: string, user: string) => Promise<string>; model: string } | null {
+  try {
+    const judgeModel =
+      ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) ||
+      'qwen2.5:72b-instruct-q4_K_M';
+    const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
+    const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
+    const resolved = resolveJudgeClient(cfg, ollamaBaseUrl, judgeModel);
+    return { complete: resolved.complete, model: resolved.judgeEngine };
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Report output helpers
 // ---------------------------------------------------------------------------
 

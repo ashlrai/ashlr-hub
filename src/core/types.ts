@@ -463,6 +463,16 @@ export interface AshlrConfig {
       /** Numeric chat id. Run `ashlr comms setup-telegram` to find it. */
       chatId?: string;
     };
+    /**
+     * M177: how often the `cycle` subcommand (driven by the 3-min poller) will
+     * automatically send a fleet digest. Default 6 hours.
+     */
+    digestIntervalHours?: number;
+    /**
+     * M177: how often the `cycle` subcommand will automatically post the
+     * Elon strategic question (ask-vision). Default 24 hours.
+     */
+    askVisionIntervalHours?: number;
   };
 }
 

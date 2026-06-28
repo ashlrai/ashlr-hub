@@ -88,8 +88,10 @@ vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
 }));
 
 const mockJudgeProposal = vi.fn();
+const mockResolveFrontierJudgeClient = vi.fn();
 vi.mock('../src/core/fleet/manager.js', () => ({
   judgeProposal: (...args: unknown[]) => mockJudgeProposal(...args),
+  resolveFrontierJudgeClient: (...args: unknown[]) => mockResolveFrontierJudgeClient(...args),
 }));
 
 const mockGetActiveClient = vi.fn();
@@ -122,6 +124,12 @@ beforeEach(() => {
   mockReadDecisions.mockReturnValue([]);
   mockAutoMergeProposal.mockResolvedValue({ ok: true, merged: true, branched: false });
   mockGetActiveClient.mockResolvedValue({
+    model: 'claude-opus-4-8',
+    complete: async () =>
+      '{"verdict":"ship","value":5,"correctness":5,"scope":1,"alignment":5,"rationale":"ship"}',
+  });
+  // M176: resolveFrontierJudgeClient default — returns a working frontier client.
+  mockResolveFrontierJudgeClient.mockReturnValue({
     model: 'claude-opus-4-8',
     complete: async () =>
       '{"verdict":"ship","value":5,"correctness":5,"scope":1,"alignment":5,"rationale":"ship"}',
@@ -263,7 +271,8 @@ describe('M175 verification-mode eligibility — any tier is judged', () => {
   it('[V6] local proposal, verification mode, no judge client → fail-closed, NOT attempted', async () => {
     const p = makeProp('v6', 'local');
     mockListProposals.mockReturnValue([p]);
-    mockGetActiveClient.mockRejectedValue(new Error('no provider'));
+    // M176: resolveFrontierJudgeClient (not getActiveClient) controls availability.
+    mockResolveFrontierJudgeClient.mockReturnValue(null);
 
     const r = await runAutoMergePass(verifyCfg());
 

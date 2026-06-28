@@ -26,7 +26,7 @@
  *  [N1]  judgeProposal throws → swallowed, pass continues, never-throws
  *  [N2]  autoMergeProposal throws → swallowed (existing contract)
  *  [N3]  listProposals throws → returns zeros (existing contract)
- *  [N4]  judge client unavailable (getActiveClient rejects) → fail-closed, no merge
+ *  [N4]  judge client unavailable (resolveFrontierJudgeClient returns null) → fail-closed, no merge
  *
  *  Flag invariants
  *  [F1]  autoMerge.enabled=false → returns zeros, judge never called
@@ -41,7 +41,7 @@
  *  - judgeProposal MOCKED — no real LLM calls.
  *  - autoMergeProposal MOCKED — no real git operations.
  *  - readDecisions MOCKED — full ledger control.
- *  - getActiveClient MOCKED — controls judge client availability.
+ *  - resolveFrontierJudgeClient MOCKED (from manager.js) — controls judge client availability (M176).
  *  - listProposals MOCKED — controls pending proposal list.
  *  - killSwitchOn MOCKED.
  */
@@ -77,8 +77,10 @@ vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
 }));
 
 const mockJudgeProposal = vi.fn();
+const mockResolveFrontierJudgeClient = vi.fn();
 vi.mock('../src/core/fleet/manager.js', () => ({
   judgeProposal: (...args: unknown[]) => mockJudgeProposal(...args),
+  resolveFrontierJudgeClient: (...args: unknown[]) => mockResolveFrontierJudgeClient(...args),
 }));
 
 const mockGetActiveClient = vi.fn();
@@ -113,6 +115,11 @@ beforeEach(() => {
   mockAutoMergeProposal.mockResolvedValue({ ok: true, merged: true, branched: false });
   mockGetActiveClient.mockResolvedValue({
     model: 'claude-opus-4-5',
+    complete: async () => '{"verdict":"ship","value":5,"correctness":5,"scope":1,"alignment":5,"rationale":"great"}',
+  });
+  // Default: resolveFrontierJudgeClient returns a working judge client (M176)
+  mockResolveFrontierJudgeClient.mockReturnValue({
+    model: 'claude-opus-4-8',
     complete: async () => '{"verdict":"ship","value":5,"correctness":5,"scope":1,"alignment":5,"rationale":"great"}',
   });
   mockJudgeProposal.mockResolvedValue({
@@ -389,12 +396,14 @@ describe('M172 never-throws', () => {
     expect(r.judged).toBe(0);
   });
 
-  it('[N4] judge client unavailable (getActiveClient rejects) → fail-closed, no merge', async () => {
+  it('[N4] judge client unavailable (resolveFrontierJudgeClient returns null) → fail-closed, no merge', async () => {
     const p = makeProp('n4');
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([]); // unjudged
 
-    mockGetActiveClient.mockRejectedValue(new Error('no provider'));
+    // M176: automerge-pass now uses resolveFrontierJudgeClient (M135 path), not getActiveClient.
+    // Simulate the frontier judge being unavailable by returning null.
+    mockResolveFrontierJudgeClient.mockReturnValue(null);
 
     const r = await runAutoMergePass(enabledCfg());
 

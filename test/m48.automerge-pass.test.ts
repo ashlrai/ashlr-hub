@@ -56,8 +56,10 @@ vi.mock('../src/core/inbox/store.js', () => ({
 // judgeProposal returns 'ship' by default so all frontier proposals still
 // proceed to autoMergeProposal (preserving the existing test expectations).
 const mockJudgeProposal = vi.fn();
+const mockResolveFrontierJudgeClient = vi.fn();
 vi.mock('../src/core/fleet/manager.js', () => ({
   judgeProposal: (...args: unknown[]) => mockJudgeProposal(...args),
+  resolveFrontierJudgeClient: (...args: unknown[]) => mockResolveFrontierJudgeClient(...args),
 }));
 
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
@@ -127,6 +129,11 @@ beforeEach(() => {
     value: 5, correctness: 5, scope: 1, alignment: 5,
     rationale: 'mock ship — m48 compat',
     wouldMerge: true,
+  });
+  // M176: resolveFrontierJudgeClient default — returns a working frontier client.
+  mockResolveFrontierJudgeClient.mockReturnValue({
+    model: 'claude-opus-4-8',
+    complete: async () => '{"verdict":"ship","value":5,"correctness":5,"scope":1,"alignment":5,"rationale":"mock"}',
   });
 
   // Ensure kill switch off for the standard path (fresh HOME = off anyway).

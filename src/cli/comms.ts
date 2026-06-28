@@ -27,7 +27,7 @@ import { registerCommsHandlers } from '../core/comms/handlers.js';
 import { buildOversightSnapshot } from '../core/fleet/oversight-export.js';
 import { runStrategist, loadLatestBriefing } from '../core/vision/strategist.js';
 import { judgeHealth } from '../core/fleet/judge-calibration.js';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -48,6 +48,149 @@ function loadWatermark(): number {
   } catch {
     return 0;
   }
+}
+
+// ---------------------------------------------------------------------------
+// M177: per-run cadence tracking (atomic, never-throws)
+// ---------------------------------------------------------------------------
+
+function cadencePath(name: 'last-digest' | 'last-askvision'): string {
+  return join(homedir(), '.ashlr', 'comms', `${name}.json`);
+}
+
+function readLastSent(name: 'last-digest' | 'last-askvision'): number {
+  try {
+    const p = cadencePath(name);
+    if (!existsSync(p)) return 0;
+    const raw = readFileSync(p, 'utf8');
+    const parsed = JSON.parse(raw) as { sentAt?: number };
+    return typeof parsed.sentAt === 'number' ? parsed.sentAt : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeLastSent(name: 'last-digest' | 'last-askvision', nowMs: number): void {
+  try {
+    const p = cadencePath(name);
+    mkdirSync(join(homedir(), '.ashlr', 'comms'), { recursive: true });
+    writeFileSync(p, JSON.stringify({ sentAt: nowMs }), 'utf8');
+  } catch {
+    // never-throws — a write failure must not break the poll cycle
+  }
+}
+
+function isDue(name: 'last-digest' | 'last-askvision', intervalHours: number): boolean {
+  const lastMs = readLastSent(name);
+  if (lastMs === 0) return true;
+  return Date.now() - lastMs >= intervalHours * 60 * 60 * 1000;
+}
+
+// ---------------------------------------------------------------------------
+// M177: sendDigest / sendAskVision — callable helpers (no enabled guard,
+//       no top-level try/catch — callers handle that)
+// ---------------------------------------------------------------------------
+
+async function sendDigest(cfg: Awaited<ReturnType<typeof loadConfig>>): Promise<void> {
+  const snap = buildOversightSnapshot(cfg);
+  const m = snap.scorecard;
+
+  const lines: string[] = [];
+  lines.push(`Fleet 24h: ${m.proposalsCreated} proposals, ${(m.acceptRate * 100).toFixed(0)}% accept, trivial ${(m.trivialRatio * 100).toFixed(0)}%.`);
+
+  if (snap.goals.active > 0 || snap.goals.done > 0) {
+    lines.push(`Goals: ${snap.goals.active} active, ${snap.goals.done} done (${snap.goals.progressPct}% complete).`);
+  }
+
+  if (snap.manager) {
+    lines.push(`Judge: ${snap.manager.shipped} ship, ${snap.manager.review} review, ${snap.manager.noise} noise.`);
+  }
+
+  const topConcern = snap.manager?.recommendations?.[0]
+    ?? (m.trivialRatio > 0.5 ? 'High trivial ratio — proposal quality may be low.'
+      : m.emptyRate > 0.3 ? 'High empty-diff rate — engine may be stalling.'
+        : 'Fleet operating normally.');
+  lines.push(`Top concern: ${topConcern}`);
+
+  if (snap.vision) {
+    lines.push(`Vision progress: ${snap.vision.progressPct}%.`);
+  }
+
+  try {
+    const jh = await judgeHealth(cfg);
+    let judgeLine: string;
+    if (jh.sampleSize === 0) {
+      const traceMatch = jh.flags[0]?.match(/found (\d+)/);
+      const n = traceMatch ? traceMatch[1] : '0';
+      judgeLine = `Judge: calibrating (${n} traces)`;
+    } else {
+      const kappaStr = jh.kappaVsOutcome !== null
+        ? `κ=${jh.kappaVsOutcome.toFixed(2)} vs outcomes`
+        : 'κ=n/a';
+      const firstDc = jh.darkCurrent[0];
+      const shipBiasPct = firstDc
+        ? `ship-bias ${((firstDc.verdictDistribution['ship'] ?? 0) * 100).toFixed(0)}%`
+        : null;
+      const parts = [kappaStr, shipBiasPct, `${jh.sampleSize} traces`].filter(Boolean);
+      judgeLine = `Judge: ${parts.join(', ')}`;
+      if (jh.flags.length > 0) {
+        const flagStr = jh.flags
+          .map((f) => {
+            if (f.includes('low-kappa') || f.includes('< 0.20') || f.includes('< 0.40')) return '⚠ low-kappa';
+            if (f.includes('rubber-stamp')) return '⚠ ship-bias';
+            if (f.includes('over-filtering')) return '⚠ noise-bias';
+            if (f.includes('insufficient outcome')) return '⚠ few-outcomes';
+            return '⚠ ' + f.slice(0, 30);
+          })
+          .filter((v, i, arr) => arr.indexOf(v) === i)
+          .slice(0, 2)
+          .join(' ');
+        judgeLine += ` ${flagStr}`;
+      }
+    }
+    lines.push(judgeLine);
+  } catch {
+    // judgeHealth failure must never break the digest — silently skip.
+  }
+
+  const text = lines.join(' ');
+
+  postRequest({
+    kind: 'fleet-digest',
+    type: 'report',
+    text,
+    options: [],
+    meta: { source: 'digest', generatedAt: snap.generatedAt },
+  });
+}
+
+async function sendAskVision(cfg: Awaited<ReturnType<typeof loadConfig>>): Promise<void> {
+  let briefing = loadLatestBriefing();
+  if (!briefing) {
+    briefing = await runStrategist(cfg);
+  }
+
+  const topDirection = briefing.recommendedDirection[0] ?? 'no specific direction proposed';
+  const questionLines: string[] = [
+    `State: ${briefing.currentState}`,
+    `Gap: ${briefing.gapToVision}`,
+    `Top direction: ${topDirection}`,
+  ];
+  if (briefing.questionsForMason.length > 0) {
+    questionLines.push(`Open question: ${briefing.questionsForMason[0]}`);
+  }
+  const text = questionLines.join(' | ');
+
+  postRequest({
+    kind: 'elon-vision',
+    type: 'question',
+    text,
+    options: ['Approve & create goals', 'Hold', 'Show full briefing'],
+    meta: {
+      source: 'ask-vision',
+      briefingGeneratedAt: briefing.generatedAt,
+    },
+  });
 }
 
 function parseArgs(args: string[]): { sub: string; text: string; options: string[] } {
@@ -168,6 +311,33 @@ async function cmdSendTest(): Promise<number> {
 
 async function cmdCycle(): Promise<number> {
   const cfg = await loadConfig();
+
+  // M177: throttled cadence — drive digest + ask-vision from the working poller.
+  if (channelEnabled(cfg)) {
+    const digestIntervalHours = cfg.comms?.digestIntervalHours ?? 6;
+    const askVisionIntervalHours = cfg.comms?.askVisionIntervalHours ?? 24;
+
+    if (isDue('last-digest', digestIntervalHours)) {
+      try {
+        await sendDigest(cfg);
+        writeLastSent('last-digest', Date.now());
+        console.log('cycle: digest queued');
+      } catch {
+        // never-throws — digest failure must not break the poll cycle
+      }
+    }
+
+    if (isDue('last-askvision', askVisionIntervalHours)) {
+      try {
+        await sendAskVision(cfg);
+        writeLastSent('last-askvision', Date.now());
+        console.log('cycle: ask-vision queued');
+      } catch {
+        // never-throws — ask-vision failure must not break the poll cycle
+      }
+    }
+  }
+
   // Register M138 resolution handlers before the cycle polls/resolves.
   registerCommsHandlers(cfg);
   const result = await runCommsCycle(cfg);
@@ -188,85 +358,11 @@ async function cmdDigest(): Promise<number> {
   }
 
   try {
-    const snap = buildOversightSnapshot(cfg);
-    const m = snap.scorecard;
-
-    // Build a terse SMS-sized fleet summary — no secrets, no long text.
-    const lines: string[] = [];
-    lines.push(`Fleet 24h: ${m.proposalsCreated} proposals, ${(m.acceptRate * 100).toFixed(0)}% accept, trivial ${(m.trivialRatio * 100).toFixed(0)}%.`);
-
-    if (snap.goals.active > 0 || snap.goals.done > 0) {
-      lines.push(`Goals: ${snap.goals.active} active, ${snap.goals.done} done (${snap.goals.progressPct}% complete).`);
-    }
-
-    if (snap.manager) {
-      lines.push(`Judge: ${snap.manager.shipped} ship, ${snap.manager.review} review, ${snap.manager.noise} noise.`);
-    }
-
-    // Top concern: first manager recommendation, or a derived signal.
-    const topConcern = snap.manager?.recommendations?.[0]
-      ?? (m.trivialRatio > 0.5 ? 'High trivial ratio — proposal quality may be low.'
-        : m.emptyRate > 0.3 ? 'High empty-diff rate — engine may be stalling.'
-          : 'Fleet operating normally.');
-    lines.push(`Top concern: ${topConcern}`);
-
-    if (snap.vision) {
-      lines.push(`Vision progress: ${snap.vision.progressPct}%.`);
-    }
-
-    // M148: append judge-calibration health line — traces-only, no degradation pass.
-    // Never throws (judgeHealth is already never-throw; we guard the await anyway).
-    try {
-      const jh = await judgeHealth(cfg);
-      let judgeLine: string;
-      if (jh.sampleSize === 0) {
-        // Insufficient traces: show calibrating status with count from flags msg.
-        const traceMatch = jh.flags[0]?.match(/found (\d+)/);
-        const n = traceMatch ? traceMatch[1] : '0';
-        judgeLine = `Judge: calibrating (${n} traces)`;
-      } else {
-        // Enough traces — format compact line.
-        const kappaStr = jh.kappaVsOutcome !== null
-          ? `κ=${jh.kappaVsOutcome.toFixed(2)} vs outcomes`
-          : 'κ=n/a';
-        const firstDc = jh.darkCurrent[0];
-        const shipBiasPct = firstDc
-          ? `ship-bias ${((firstDc.verdictDistribution['ship'] ?? 0) * 100).toFixed(0)}%`
-          : null;
-        const parts = [kappaStr, shipBiasPct, `${jh.sampleSize} traces`].filter(Boolean);
-        judgeLine = `Judge: ${parts.join(', ')}`;
-        // Append any flags as short warnings (deduplicated to first flag only for SMS length).
-        if (jh.flags.length > 0) {
-          const flagStr = jh.flags
-            .map((f) => {
-              if (f.includes('low-kappa') || f.includes('< 0.20') || f.includes('< 0.40')) return '⚠ low-kappa';
-              if (f.includes('rubber-stamp')) return '⚠ ship-bias';
-              if (f.includes('over-filtering')) return '⚠ noise-bias';
-              if (f.includes('insufficient outcome')) return '⚠ few-outcomes';
-              return '⚠ ' + f.slice(0, 30);
-            })
-            .filter((v, i, arr) => arr.indexOf(v) === i) // deduplicate
-            .slice(0, 2) // cap at 2 flags for SMS length
-            .join(' ');
-          judgeLine += ` ${flagStr}`;
-        }
-      }
-      lines.push(judgeLine);
-    } catch {
-      // judgeHealth failure must never break the digest — silently skip.
-    }
-
-    const text = lines.join(' ');
+    await sendDigest(cfg);
 
     // Post as a report (no reply needed), then run one cycle to send it.
-    const id = postRequest({
-      kind: 'fleet-digest',
-      type: 'report',
-      text,
-      options: [],
-      meta: { source: 'digest', generatedAt: snap.generatedAt },
-    });
-
+    const pending = listRequests({ kind: 'fleet-digest', status: 'pending' });
+    const id = pending[pending.length - 1]?.id ?? '(unknown)';
     console.log(`posted digest report: ${id}`);
     registerCommsHandlers(cfg);
     const result = await runCommsCycle(cfg);
@@ -297,37 +393,15 @@ async function cmdAskVision(): Promise<number> {
     return 1;
   }
 
+  if (!loadLatestBriefing()) {
+    console.log('No cached briefing — running strategist (this may take a moment)...');
+  }
+
   try {
-    // Use the latest cached briefing if available; otherwise run the strategist.
-    let briefing = loadLatestBriefing();
-    if (!briefing) {
-      console.log('No cached briefing — running strategist (this may take a moment)...');
-      briefing = await runStrategist(cfg);
-    }
+    await sendAskVision(cfg);
 
-    // Build a terse question text: state + gap + top direction.
-    const topDirection = briefing.recommendedDirection[0] ?? 'no specific direction proposed';
-    const questionLines: string[] = [
-      `State: ${briefing.currentState}`,
-      `Gap: ${briefing.gapToVision}`,
-      `Top direction: ${topDirection}`,
-    ];
-    if (briefing.questionsForMason.length > 0) {
-      questionLines.push(`Open question: ${briefing.questionsForMason[0]}`);
-    }
-    const text = questionLines.join(' | ');
-
-    const id = postRequest({
-      kind: 'elon-vision',
-      type: 'question',
-      text,
-      options: ['Approve & create goals', 'Hold', 'Show full briefing'],
-      meta: {
-        source: 'ask-vision',
-        briefingGeneratedAt: briefing.generatedAt,
-      },
-    });
-
+    const pending = listRequests({ kind: 'elon-vision', status: 'pending' });
+    const id = pending[pending.length - 1]?.id ?? '(unknown)';
     console.log(`posted vision question: ${id}`);
     registerCommsHandlers(cfg);
     const result = await runCommsCycle(cfg);

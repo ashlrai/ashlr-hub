@@ -34,7 +34,7 @@ import { listProposals } from '../inbox/store.js';
 import { autoMergeProposal, type AutoMergeResult } from '../inbox/merge.js';
 import { killSwitchOn } from '../sandbox/policy.js';
 import { readDecisions } from './decisions-ledger.js';
-import { judgeProposal, type ManagerVerdict } from './manager.js';
+import { judgeProposal, resolveFrontierJudgeClient, type ManagerVerdict } from './manager.js';
 
 export interface AutoMergePassResult {
   /** Proposals the gate was run against this pass (frontier + branch-eligible mid). */
@@ -77,34 +77,6 @@ function hasRecentShipVerdict(proposalId: string): boolean {
     );
   } catch {
     return false;
-  }
-}
-
-/**
- * Resolve a minimal judge client from cfg, mirroring the Step 2 path in
- * manager.ts (getActiveClient + wrapClient). Returns null when unavailable.
- *
- * Never throws.
- */
-async function resolveJudgeClientForPass(
-  cfg: AshlrConfig,
-): Promise<{ complete: (system: string, user: string) => Promise<string>; model: string } | null> {
-  try {
-    const { getActiveClient } = await import('../run/provider-client.js');
-    const foundry = cfg.foundry as Record<string, unknown> | undefined;
-    const judgeModel =
-      (foundry?.['managerJudgeModel'] as string | undefined) ||
-      'qwen2.5:72b-instruct-q4_K_M';
-    const rawClient = await getActiveClient(cfg, { allowCloud: true, model: judgeModel }) as {
-      complete?: (s: string, u: string) => Promise<string>;
-      model?: string;
-    };
-    if (typeof rawClient?.complete === 'function') {
-      return { complete: rawClient.complete.bind(rawClient), model: rawClient.model ?? 'unknown' };
-    }
-    return null;
-  } catch {
-    return null;
   }
 }
 
@@ -157,7 +129,7 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
   // Lazily resolve judge client once per pass (avoid re-calling getActiveClient
   // for every proposal). null = judge unavailable → fail-closed (proposals stay unjudged).
   let judgeClient: { complete: (system: string, user: string) => Promise<string>; model: string } | null | undefined =
-    undefined; // undefined = not yet resolved
+    undefined; // undefined = not yet resolved; null = unavailable (fail-closed)
 
   for (const p of pending) {
     if (killSwitchOn()) break;
@@ -197,7 +169,7 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
 
       // Lazily resolve the judge client.
       if (judgeClient === undefined) {
-        judgeClient = await resolveJudgeClientForPass(cfg);
+        judgeClient = resolveFrontierJudgeClient(cfg);
       }
 
       if (judgeClient !== null) {
