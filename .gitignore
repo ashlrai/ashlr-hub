@@ -27,3 +27,8 @@ dist-bin/
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
 undefined/
+
+# Fleet runtime artifacts
+.ashlr/
+*.launchd.err.log
+*.launchd.out.log
