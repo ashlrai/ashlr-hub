@@ -9,7 +9,7 @@
 - [ ] `npm run typecheck` clean
 - [ ] `npm run lint` clean
 - [ ] `npm run build` succeeds
-- [ ] `npm test` green (no decrease in test count; new behavior has tests)
+- [ ] Hermetic test suite green: `HOME=$(mktemp -d) npx vitest run --no-file-parallelism` (no decrease in test count; new behavior has tests)
 - [ ] `ashlr verify-safety` still passes (5/5) if any safety-relevant code changed
 
 ## Safety checklist (for anything touching the autonomous path)
@@ -19,6 +19,11 @@
 - [ ] Enrollment / kill-switch / budget guards unchanged or strengthened (never weakened)
 - [ ] No code-to-cloud by default; secrets never logged
 - [ ] If a guard's behavior changed, the change is intentional and the regression test was updated deliberately
+- [ ] **Behavior changes are flag-gated** — new behavior is off by default; `--flag-off` parity verified (see CONTRIBUTING.md invariants)
+
+## Dependency / zero-dep invariant
+
+- [ ] No new runtime dependencies added to `dependencies` in `package.json` (the zero-runtime-dep core invariant; see CONTRIBUTING.md)
 
 ## Notes
 

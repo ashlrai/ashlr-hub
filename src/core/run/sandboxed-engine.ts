@@ -27,6 +27,10 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+// M154: repo-map + localization pre-pass (flag-gated, zero-dep)
+import { buildRepoMap, renderRepoMap } from './repo-map.js';
+import { localize, renderLocalization } from './localize.js';
+
 import type {
   AshlrConfig,
   EngineId,
@@ -77,6 +81,51 @@ export interface RunEngineSandboxedOptions {
 
 /** Default hard wall-clock for an autonomous external run (20 min). */
 const DEFAULT_TIMEOUT_MS = 20 * 60_000;
+
+// ---------------------------------------------------------------------------
+// M154: repo-map + localization context prefix (flag-gated)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a repo-map + localization context prefix for the given goal/repo.
+ * Returns '' (empty string) when either flag is OFF — byte-identical to
+ * the pre-M154 behaviour for all flag-off callers.
+ *
+ * Never throws.
+ */
+function buildM154ContextPrefix(
+  goal: string,
+  sourceRepo: string,
+  cfg: AshlrConfig,
+  hintedFiles?: string[],
+): string {
+  try {
+    const repoMapOn = (cfg.foundry as Record<string, unknown> | undefined)?.['repoMap'] === true;
+    const localizeOn = (cfg.foundry as Record<string, unknown> | undefined)?.['localization'] === true;
+    if (!repoMapOn && !localizeOn) return '';
+
+    const parts: string[] = [];
+
+    if (repoMapOn) {
+      const map = buildRepoMap(sourceRepo);
+      const rendered = renderRepoMap(map);
+      if (rendered) parts.push(rendered);
+
+      if (localizeOn) {
+        const loc = localize(
+          { title: goal, files: hintedFiles },
+          map,
+        );
+        const rendered2 = renderLocalization(loc);
+        if (rendered2) parts.push(rendered2);
+      }
+    }
+
+    return parts.length > 0 ? parts.join('\n\n') + '\n\n' : '';
+  } catch {
+    return '';
+  }
+}
 
 /** Credential-shaped env var names that must never reach the agent subprocess.
  * M107 (P2): broadened to cover PAT, API-key, OAuth, and generic credentials
@@ -261,8 +310,13 @@ export async function runEngineSandboxed(
   const env = buildContainedEnv(cfg, hooksDir);
   let proposalId: string | undefined;
 
+  // M154: prepend repo-map + localization context to goal when flags are ON.
+  // Flag-OFF → contextPrefix is '' → goalWithContext === goal (byte-identical).
+  const contextPrefix = buildM154ContextPrefix(goal, opts.sourceRepo, cfg);
+  const goalWithContext = contextPrefix ? contextPrefix + goal : goal;
+
   try {
-    const cmd = buildEngineCommand(engine, goal, cfg, {
+    const cmd = buildEngineCommand(engine, goalWithContext, cfg, {
       cwd: sb.worktreePath,
       model,
       autonomous: true,
@@ -489,9 +543,14 @@ export async function runApiModelSandboxed(
     };
     const usage: RunUsage = newUsage();
 
+    // M154: prepend repo-map + localization context to goal when flags are ON.
+    // Flag-OFF → contextPrefix2 is '' → task.goal === goal (byte-identical).
+    const contextPrefix2 = buildM154ContextPrefix(goal, opts.sourceRepo, cfg);
+    const goalWithContext2 = contextPrefix2 ? contextPrefix2 + goal : goal;
+
     const task: RunTask = {
       id: 't1',
-      goal,
+      goal: goalWithContext2,
       deps: [],
       status: 'pending',
     };

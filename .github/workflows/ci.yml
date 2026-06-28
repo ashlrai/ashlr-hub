@@ -8,22 +8,18 @@ on:
 
 jobs:
   ci:
-    name: CI (Node ${{ matrix.node-version }})
+    # Node 22 is the hard minimum — install.sh and CONTRIBUTING.md both enforce it.
+    name: CI (Node 22)
     runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: ["20", "22"]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Node.js ${{ matrix.node-version }}
+      - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: "22"
           cache: "npm"
 
       - name: Install dependencies
@@ -38,8 +34,11 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Test
-        run: npm test
+      - name: Test (hermetic)
+        # HOME=$(mktemp -d) isolates tests from the developer's real ~/.ashlr/ state.
+        # --no-file-parallelism is required for tests that share home-dir fixtures.
+        # This is the canonical CI invocation documented in CONTRIBUTING.md.
+        run: HOME=$(mktemp -d) npx vitest run --no-file-parallelism
 
       # M33: keep the published exports map honest — pack the tarball, install
       # it into a clean dir, and exercise the bin + the ./types entry point.

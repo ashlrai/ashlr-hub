@@ -30,11 +30,30 @@ What actually happened. Include any error output.
 <paste output here>
 ```
 
+## Fleet / autonomous loop context
+
+If the bug involves the autonomous operator, please fill in:
+
+- **Kill-switch state** (`ashlr enroll list` — is the kill switch on?): 
+- **Engine / model in use** (from `ashlr doctor` or `~/.ashlr/config.json`): 
+- **Relevant log entries** (tail of `~/.ashlr/audit/` or `~/.ashlr/logs/`):
+
+```
+<paste relevant log lines here>
+```
+
+- **`ashlr doctor` output**:
+
+```
+<paste ashlr doctor output here>
+```
+
 ## Environment
 
-- ashlr-hub version: <output of `ashlr --version`>
-- Node.js version: <output of `node --version`>
-- OS: <e.g. macOS 15.5, Ubuntu 24.04>
+- ashlr-hub version: <!-- output of `ashlr --version` -->
+- Node.js version: <!-- output of `node --version` -->
+- OS: <!-- e.g. macOS 15.5, Ubuntu 24.04 -->
+- Install method: <!-- install.sh / npm install -g @ashlr/hub / source -->
 
 ## Additional context
 
