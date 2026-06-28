@@ -688,9 +688,12 @@ export function evaluateVerificationGate(
   }
 
   // ── Criterion 4: EDV independent confirmation ─────────────────────────────
+  // cfg is forwarded so operator-configured thresholds (cfg.foundry.edvUnverifiedWeight)
+  // are honoured. BUG-2 fix: previously cfg was not passed, silently ignoring config.
   const edvResult = edvConfirmationWeight(
     proposal,
     decisionsForProposal as Array<{ action: 'proposed' | 'verified' | 'judged' | 'merged' | 'rejected' | 'escalated'; ts: string; proposalId: string; engine?: string; model?: string; verdict?: string; reason?: string; detail?: string }>,
+    cfg,
   );
   if (!edvResult.confirmed) {
     return refuse(
