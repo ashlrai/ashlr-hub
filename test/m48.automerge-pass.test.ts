@@ -52,6 +52,26 @@ vi.mock('../src/core/inbox/store.js', () => ({
   listProposals: (...args: unknown[]) => mockListProposals(...args),
 }));
 
+// M172: mock the judge chain so these pre-M172 tests remain hermetic.
+// judgeProposal returns 'ship' by default so all frontier proposals still
+// proceed to autoMergeProposal (preserving the existing test expectations).
+const mockJudgeProposal = vi.fn();
+vi.mock('../src/core/fleet/manager.js', () => ({
+  judgeProposal: (...args: unknown[]) => mockJudgeProposal(...args),
+}));
+
+vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
+  readDecisions: vi.fn(() => []),
+  recordDecision: vi.fn(),
+}));
+
+vi.mock('../src/core/run/provider-client.js', () => ({
+  getActiveClient: vi.fn(async () => ({
+    model: 'claude-opus-4-5',
+    complete: async () => '{"verdict":"ship","value":5,"correctness":5,"scope":1,"alignment":5,"rationale":"mock"}',
+  })),
+}));
+
 // ---------------------------------------------------------------------------
 // Lazy imports — after mocks + HOME isolation
 // ---------------------------------------------------------------------------
@@ -92,12 +112,21 @@ beforeEach(() => {
 
   mockAutoMergeProposal.mockReset();
   mockListProposals.mockReset();
+  mockJudgeProposal.mockReset();
   mergeResults = {};
   pendingProposals = [];
 
   mockListProposals.mockImplementation(() => pendingProposals);
   mockAutoMergeProposal.mockImplementation(async (id: string) => {
     return mergeResults[id] ?? { ok: false, merged: false, reason: 'default-not-merged' };
+  });
+  // M172: default judge verdict is 'ship' so frontier proposals reach autoMergeProposal.
+  mockJudgeProposal.mockResolvedValue({
+    proposalId: 'any',
+    verdict: 'ship',
+    value: 5, correctness: 5, scope: 1, alignment: 5,
+    rationale: 'mock ship — m48 compat',
+    wouldMerge: true,
   });
 
   // Ensure kill switch off for the standard path (fresh HOME = off anyway).
