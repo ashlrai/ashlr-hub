@@ -707,26 +707,45 @@ export async function scanDeps(repo: string): Promise<WorkItem[]> {
         const latest = typeof dep['latest'] === 'string' ? dep['latest'] : '?';
         const type = typeof dep['type'] === 'string' ? dep['type'] : 'dependency';
 
-        // Assess major version jump
-            const currentMajorStr = current.split('.')[0];
-    const latestMajorStr = latest.split('.')[0];
-    const currentMajor = currentMajorStr !== undefined ? parseInt(currentMajorStr, 10) : NaN;
-    const latestMajor = latestMajorStr !== undefined ? parseInt(latestMajorStr, 10) : NaN;
-    const isMajorBump = !isNaN(currentMajor) && !isNaN(latestMajor) && latestMajor > currentMajor;
+        // Classify the bump: patch, minor, or major.
+        const currentMajorStr = current.split('.')[0];
+        const latestMajorStr = latest.split('.')[0];
+        const currentMinorStr = current.split('.')[1];
+        const latestMinorStr = latest.split('.')[1];
+        const currentMajor = currentMajorStr !== undefined ? parseInt(currentMajorStr, 10) : NaN;
+        const latestMajor = latestMajorStr !== undefined ? parseInt(latestMajorStr, 10) : NaN;
+        const currentMinor = currentMinorStr !== undefined ? parseInt(currentMinorStr, 10) : NaN;
+        const latestMinor = latestMinorStr !== undefined ? parseInt(latestMinorStr, 10) : NaN;
+        const isMajorBump =
+          !isNaN(currentMajor) && !isNaN(latestMajor) && latestMajor > currentMajor;
+        const isMinorBump =
+          !isMajorBump &&
+          !isNaN(currentMinor) &&
+          !isNaN(latestMinor) &&
+          latestMinor > currentMinor;
+        // patchLabel: patch | minor | major — used in title and tags for precision.
+        const bumpLabel = isMajorBump ? 'major' : isMinorBump ? 'minor' : 'patch';
 
-        const value = isMajorBump ? 3 : 2;
-        const effort = isMajorBump ? 3 : 2;
+        // M159: SKIP major-version bumps — high breakage risk, require deliberate
+        // human migration decisions. Emit minor/patch only.
+        if (isMajorBump) continue;
+
+        // M159: exact package + from→to version in title so the engine knows
+        // this is a one-line change in package.json, not an open-ended update.
+        const targetVersion = wanted !== '?' && wanted !== current ? wanted : latest;
+        const value = 2;
+        const effort = 1;
 
         items.push(
           makeItem(
             repo,
             'dep',
             `dep:outdated:${pkg}`,
-            `Outdated: ${pkg} (${current} → ${latest})`,
-            `current: ${current}, wanted: ${wanted}, latest: ${latest}, type: ${type}`,
+            `bump ${pkg} ${current} → ${targetVersion} in package.json (${bumpLabel})`,
+            `Update ${pkg} from ${current} to ${targetVersion} (${bumpLabel}). wanted: ${wanted}, latest: ${latest}, type: ${type}. Edit only the version string for this package.`,
             value,
             effort,
-            ['dep', 'outdated', isMajorBump ? 'major' : 'minor', type],
+            ['dep', 'outdated', bumpLabel, type],
           ),
         );
         count++;
