@@ -131,6 +131,9 @@ export function agentDocsText(): string {
   lines.push('ashlr_status, ashlr_impact, ashlr_pulse, ashlr_inbox_list,');
   lines.push('ashlr_inbox_propose. Fleet-state read tools (M129): ashlr_fleet_status,');
   lines.push('ashlr_scorecard, ashlr_oversight, ashlr_routing.');
+  lines.push('Elite fleet-state read tools (M169): ashlr_north_star (north-star metric,');
+  lines.push('7d window), ashlr_self_heal (self-heal queue summary), ashlr_racing');
+  lines.push('(model-racing distillation stats), ashlr_comms (comms channel status).');
   lines.push('There is NO approve/apply tool by design.');
   lines.push('');
   return lines.join('\n');
