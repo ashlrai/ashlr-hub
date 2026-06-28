@@ -42,6 +42,11 @@ import { buildOversightSnapshot, type OversightSnapshot } from './fleet/oversigh
 import { readDecisions } from './fleet/decisions-ledger.js';
 import { listProposals } from './inbox/store.js';
 
+// M169: best-effort imports for new elite-state tools
+// Each is wrapped in a lazy async import inside the handler so module-level
+// import failures never crash mcp-native at load time.
+// (Types only — runtime imports done lazily in handlers below.)
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -648,6 +653,175 @@ const TOOLS: NativeToolImpl[] = [
       const rawLimit = typeof args['limit'] === 'number' ? args['limit'] : 50;
       const limit = Math.max(1, Math.min(100, Math.floor(rawLimit)));
       return deriveRoutingData(limit);
+    },
+  },
+
+  // ── M169: Elite fleet state ────────────────────────────────────────────
+
+  {
+    name: 'ashlr_north_star',
+    description:
+      'Human-leverage north-star metric for the autonomous fleet (7d window): ' +
+      'substantive merges, estimated engineering hours saved, leverage score (0–100), ' +
+      'and week-over-week trend. Read-only.',
+    inputSchema: { type: 'object', properties: {} },
+    safety: 'read',
+    handler: async (_args, cfg) => {
+      try {
+        const { computeNorthStar, northStarSummary } = await import('./vision/north-star.js');
+        const metric = computeNorthStar(cfg);
+        return {
+          substantiveMerges7d: metric.substantiveMerges7d,
+          engHoursSaved7d: metric.engHoursSaved7d,
+          leverageScore: metric.leverageScore,
+          trend: metric.trend,
+          computedAt: metric.computedAt,
+          summary: northStarSummary(metric),
+          raw: metric.raw,
+        };
+      } catch {
+        return {
+          substantiveMerges7d: 0,
+          engHoursSaved7d: 0,
+          leverageScore: 0,
+          trend: 'flat',
+          computedAt: new Date().toISOString(),
+          summary: '=== NORTH-STAR: HUMAN LEVERAGE ===\nMetric unavailable.',
+          raw: null,
+          _unavailable: true,
+        };
+      }
+    },
+  },
+
+  {
+    name: 'ashlr_self_heal',
+    description:
+      'Read-only self-heal queue summary: how many repos are being monitored, ' +
+      'which are currently broken, and the queued high-priority heal work items. ' +
+      'Never triggers a heal cycle — purely observational. Read-only.',
+    inputSchema: { type: 'object', properties: {} },
+    safety: 'read',
+    handler: async (_args, cfg) => {
+      try {
+        const { homedir } = await import('node:os');
+        const { join } = await import('node:path');
+        const { existsSync, readFileSync } = await import('node:fs');
+        const { listEnrolled } = await import('./sandbox/policy.js');
+
+        const qPath = join(homedir(), '.ashlr', 'self-heal-queue.json');
+        let queue: unknown[] = [];
+        if (existsSync(qPath)) {
+          try {
+            const raw = JSON.parse(readFileSync(qPath, 'utf8'));
+            queue = Array.isArray(raw) ? raw : [];
+          } catch {
+            queue = [];
+          }
+        }
+
+        const enrolled = (() => { try { return listEnrolled(); } catch { return []; } })();
+        const selfHealEnabled = ((cfg as unknown) as { foundry?: Record<string, unknown> })
+          .foundry?.selfHeal !== false;
+
+        return {
+          enabled: selfHealEnabled,
+          enrolledRepos: enrolled.length,
+          queuedHealItems: queue.length,
+          healQueue: (queue as Array<Record<string, unknown>>).slice(0, 10).map((item) => ({
+            id: item['id'],
+            repo: item['repo'],
+            title: item['title'],
+            tags: item['tags'],
+            score: item['score'],
+            ts: item['ts'],
+          })),
+        };
+      } catch {
+        return {
+          enabled: false,
+          enrolledRepos: 0,
+          queuedHealItems: 0,
+          healQueue: [],
+          _unavailable: true,
+        };
+      }
+    },
+  },
+
+  {
+    name: 'ashlr_racing',
+    description:
+      'Model-racing distillation stats: total races persisted, frontier-engine win rate, ' +
+      'average score delta (frontier − local), and local win count. ' +
+      'Reads from ~/.ashlr/racing/. Read-only.',
+    inputSchema: { type: 'object', properties: {} },
+    safety: 'read',
+    handler: async (_args, _cfg) => {
+      try {
+        const { racingStats } = await import('./fleet/model-racing.js');
+        const stats = racingStats();
+        return {
+          races: stats.races,
+          frontierWinRate: stats.frontierWinRate,
+          avgScoreDelta: stats.avgScoreDelta,
+          localWins: stats.localWins,
+        };
+      } catch {
+        return {
+          races: 0,
+          frontierWinRate: 0,
+          avgScoreDelta: 0,
+          localWins: 0,
+          _unavailable: true,
+        };
+      }
+    },
+  },
+
+  {
+    name: 'ashlr_comms',
+    description:
+      'Comms channel status: whether the channel is enabled, which transport is ' +
+      'configured (imessage/telegram/none), and pending/outstanding request counts. ' +
+      'Secret-safe — the bot token and handle are NEVER included in the output. Read-only.',
+    inputSchema: { type: 'object', properties: {} },
+    safety: 'read',
+    handler: async (_args, cfg) => {
+      try {
+        const { listRequests, outstanding } = await import('./comms/requests.js');
+
+        const comms = ((cfg as unknown) as { comms?: { enabled?: boolean; channel?: string } }).comms;
+        const enabled = comms?.enabled === true;
+        // channel derived from config — never expose token/handle/credentials
+        const channel = comms?.channel ?? 'none';
+
+        const pending = (() => {
+          try { return listRequests({ status: 'pending' }).length; } catch { return 0; }
+        })();
+        const outstandingReq = (() => {
+          try { return outstanding(); } catch { return undefined; }
+        })();
+
+        return {
+          enabled,
+          channel,
+          pendingRequests: pending,
+          hasOutstanding: outstandingReq !== undefined,
+          outstandingKind: outstandingReq?.kind ?? null,
+          outstandingType: outstandingReq?.type ?? null,
+        };
+      } catch {
+        return {
+          enabled: false,
+          channel: 'none',
+          pendingRequests: 0,
+          hasOutstanding: false,
+          outstandingKind: null,
+          outstandingType: null,
+          _unavailable: true,
+        };
+      }
     },
   },
 

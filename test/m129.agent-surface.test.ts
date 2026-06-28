@@ -7,7 +7,7 @@
  *  2. Each tool's handler returns the expected top-level shape from empty stores.
  *  3. None of the tools throw on empty/missing data.
  *  4. GET /api/fleet-state returns the combined JSON envelope.
- *  5. Contract count: total native tools is now 17.
+ *  5. Contract count: total native tools is now 21.
  *
  * Hermetic: every test runs under an isolated tmp HOME (h1-fixture); no real
  * ~/.ashlr is ever touched, no network, no downstream MCP servers.
@@ -51,8 +51,8 @@ function resultJson(r: { content: { type: 'text'; text: string }[] }): unknown {
 // ---------------------------------------------------------------------------
 
 describe('M129 native tool registration', () => {
-  it('total native tool count is now 17', () => {
-    expect(nativeToolDefs()).toHaveLength(17);
+  it('total native tool count is now 21', () => {
+    expect(nativeToolDefs()).toHaveLength(21);
   });
 
   const newTools = ['ashlr_fleet_status', 'ashlr_scorecard', 'ashlr_oversight', 'ashlr_routing'];
