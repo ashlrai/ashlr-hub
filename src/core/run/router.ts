@@ -298,7 +298,10 @@ function preferredFrontierEngine(item: WorkItem): 'claude' | 'codex' {
  * Never throws.
  */
 function engineAvailable(engine: EngineId, cfg: AshlrConfig, ctx: RoutingContext): boolean {
-  if (!ctx.availableEngines.includes(engine)) return false;
+  // When ctx.availableEngines is absent (e.g. ctx={}), treat all engines as
+  // available — a missing list is a permissive default, not a block-all.
+  const avail = ctx.availableEngines ?? null;
+  if (avail !== null && !avail.includes(engine)) return false;
   try {
     if (!withinLimit(engine, cfg)) return false;
     const sub = subscriptionAllows(engine, { cfg });
