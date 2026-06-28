@@ -130,8 +130,10 @@ The fleet scans the backlog, dispatches sandboxed work, and deposits proposals i
 ashlr inbox                # list pending proposals
 ashlr inbox show <id>      # inspect diff + metadata
 ashlr inbox approve <id>   # apply to branch — confirm-gated, never silent
-ashlr rollback <id>        # undo an approved proposal's branch changes
+ashlr inbox reject <id>    # discard a pending proposal; applies nothing
 ```
+
+Applied changes always land on a dedicated branch — never your working tree directly — so undoing one is ordinary git. Swarm-applied work has a first-class undo: `ashlr swarm rollback <id>` restores the repo to its pre-swarm git state (confirm-gated, never force-push).
 
 That is the full loop. Nothing touched your branch until step 5. The Approval Inbox is the **human gate** — every applied change passes through it.
 
@@ -170,6 +172,13 @@ The strategist and vision commands let you define the high-level direction:
 ashlr vision show       # current end-state spec
 ashlr vision review     # run the Elon strategist → strategic briefing
 ashlr vision approve    # adopt the briefing → evolve spec + create goals
+```
+
+The fleet doesn't only fix rot — it can invent. The generative engine proposes bold, net-new features for a repo:
+
+```sh
+ashlr invent <repo>            # print invented feature ideas (frontier model)
+ashlr invent <repo> --emit     # file the best ideas into the scored backlog
 ```
 
 ---
@@ -284,6 +293,8 @@ ashlr audit                # append-only confinement + action audit log
 | `ashlr best-of-n` | Best-of-N candidate generation + critic selection |
 | `ashlr comms status/cycle/digest` | Bidirectional Telegram/iMessage channel |
 | `ashlr backlog` | View the scored work queue |
+| `ashlr invent [repo] [--emit]` | Generative engine — invent net-new features; `--emit` files them to the backlog |
+| `ashlr digest [--notify]` | Org-level portfolio digest (health, goals, costs) → `~/.ashlr/digests/`, read-only |
 | `ashlr spec import/show` | Manage spec artifacts |
 | `ashlr genome recall/learn` | Shared memory + knowledge recall |
 | `ashlr serve [--open]` | Web dashboard (Mission Control) at 127.0.0.1:7777 |
@@ -297,7 +308,7 @@ ashlr audit                # append-only confinement + action audit log
 | `ashlr sandbox` | Sandbox management |
 | `ashlr sandbox gc` | Garbage-collect stale worktrees (safe, read-jailed, no live state touched) |
 | `ashlr demo` | Run a disposable demo repo through one full fleet tick — auto-cleaning sandbox, $0 spend, no side-effects |
-| `ashlr rollback <id>` | Revert an approved proposal's branch changes (idempotent, leaves inbox record intact) |
+| `ashlr swarm rollback <id>` | Restore a repo to its pre-swarm git state (confirm-gated, never force-push) |
 | `ashlr audit` | Append-only audit log |
 | `ashlr update` | Safe self-update |
 | `ashlr tui` | Interactive TUI dashboard |
@@ -402,6 +413,23 @@ See [`docs/FOUNDRY-CONFIG.md`](docs/FOUNDRY-CONFIG.md) for the full foundry refe
 Current npm release: **3.0.1**.
 
 ---
+
+## The Ashlr ecosystem
+
+ashlr-hub is the orchestrator at the center of a 13-repo platform. The other repos are **composable capabilities** — the fleet can compose them to fix its own weaknesses and to build products: token-efficiency (`ashlr-plugin`, `@ashlr/core-efficiency`), executors (`ashlrcode`, `ashlr-workbench`), security and trust (`phantom-secrets`, `binshield`), infra and data (`stack`, `webfetch`), and observability and content (`ashlr-pulse`, `ashlr-md`, `morphkit`, `prompt-trackr`).
+
+See [`docs/ECOSYSTEM-MAP.md`](docs/ECOSYSTEM-MAP.md) for the full capability map and the composition bets — how the hub uses its own ecosystem as building blocks.
+
+## Documentation
+
+| Doc | What it covers |
+|-----|----------------|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, the autonomous loop, engine tiers, safety gates, the `~/.ashlr/` layout |
+| [`docs/ECOSYSTEM-MAP.md`](docs/ECOSYSTEM-MAP.md) | The 13-repo platform and composition bets |
+| [`docs/QUICKSTART.md`](docs/QUICKSTART.md) | Step-by-step first activation |
+| [`docs/FOUNDRY-CONFIG.md`](docs/FOUNDRY-CONFIG.md) | Full `cfg.foundry` reference — engines, tiers, confinement, auto-merge |
+| [`docs/RELIABILITY.md`](docs/RELIABILITY.md) | Fault-tolerance and degradation guarantees |
+| [`docs/SPEC-V4-FOUNDRY.md`](docs/SPEC-V4-FOUNDRY.md) · [`docs/SPEC-V5-OPEN-FLEET.md`](docs/SPEC-V5-OPEN-FLEET.md) · [`docs/SPEC-V6-VERIFICATION.md`](docs/SPEC-V6-VERIFICATION.md) | The design specs behind each version series (incl. the full safety-invariant set) |
 
 ## Contributing
 
