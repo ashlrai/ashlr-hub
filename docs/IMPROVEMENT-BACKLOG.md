@@ -26,6 +26,14 @@
 - **ashlr-md**: component test harness; export E2E; MCP bridge event-flow tests.
 - **webfetch**: ProviderReport errorKind enum; pHash {hash,algorithm,confidence}; metadata confidence calibration; rate-limiter observability.
 - **ashlr-core-efficiency**: genome fitness robustness tests; manifest atomic-write safety; embeddings cache validation; compression tier-ordering integration test.
+- **phantom-secrets** (Rust): `phantom init --empty` + auto-init-on-first-add (the UX gap hit this session); `phantom import-env --stdin/--clipboard`; body-scope allowlist via .phantom.toml; auto-rotation warning; response-scrub visibility.
+- **binshield** (HIGH-VALUE SECURITY): path-traversal hardening in tarball/zip extraction (RCE vector — validate realpath within extractDir / strip-components); Rizin graceful fallback; dynamic threat-pattern versioning; PyPI dependency extraction; job retry + circuit breaker.
+- **stack** (Bun): provision timeout/cancellation guards (can hang indefinitely — critical reliability); complete healthcheck() across all 41 providers; multi-provider orchestration groups; provision-opts validation; provider codegen.
+- **ashlr-plugin** (4244 tests, sound): snipBytes factory (8-12% token lift); recordSaving consolidation; genome-format wrapper; handler base class. (Session-critical — provides live ashlr__ tools; do cautiously / defer.)
+- **ashlrcode** (`ac`): deepen ac-wave hook wiring; file-tools shared util; smarter surgical mode (intent-aware scope + file-count guard); extract @ashlr/buddy; simplify KAIROS/autopilot.
+- **ashlr-workbench** (0 tests): shared scripts/lib/config.sh (kill 19+ hardcoded refs); integration test suite; atomic config-sync; LM-Studio probe backoff; MCP runtime validation.
+
+**ALL 4 MAPS COMPLETE (2026-06-28).** ~60 opportunities across 13 repos. Highest-value safe picks for upcoming waves: binshield path-traversal (security), stack timeout guards (reliability), phantom init-UX, ashlrcode smarter-surgical, + ashlr-hub test-coverage gaps (daemon/loop, orchestrator).
 
 ## Wave tally
 - **Wave 1 (in flight):** M197 observability · M198 digest debt · M199 orchestrator tests · M200 multi-backend merge tests (all ashlr-hub, build-verified, commit-green).
