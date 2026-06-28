@@ -30,7 +30,7 @@
  * pre-M151). The helper is exported for tests; it never throws.
  */
 
-import type { DecisionEntry, Proposal } from '../types.js';
+import type { AshlrConfig, DecisionEntry, Proposal } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -85,11 +85,27 @@ export interface EdvConfirmationResult {
  *   5. none of the above  → unverified (no signal either way)
  *
  * Never throws.
+ *
+ * @param cfg — optional operator config. When present, `cfg.foundry?.edvUnverifiedWeight`
+ *   overrides EDV_UNVERIFIED_WEIGHT for the unverified/negative-signal paths so the
+ *   operator can tighten (lower) or relax (raise, but never above 1.0) the weight
+ *   without changing the module constant. Absent/undefined → module default (back-compat).
  */
 export function edvConfirmationWeight(
   proposal: Proposal,
   decisionsForProposal: DecisionEntry[],
+  cfg?: AshlrConfig,
 ): EdvConfirmationResult {
+  // Resolve the unverified weight: honour operator override when it is a finite
+  // number in (0, 1). Values outside that range (≤0 or ≥1) fall back to the
+  // module default so a misconfiguration cannot accidentally confirm-all (≥1)
+  // or zero-out signal (≤0).
+  const rawOverride = (cfg?.foundry as Record<string, unknown> | undefined)?.['edvUnverifiedWeight'];
+  const unverifiedWeight =
+    typeof rawOverride === 'number' && rawOverride > 0 && rawOverride < 1
+      ? rawOverride
+      : EDV_UNVERIFIED_WEIGHT;
+
   try {
     // ── Signal 1 & 2: objective test/verify result on the proposal itself ─────
     if (proposal.verifyResult !== undefined) {
@@ -97,7 +113,7 @@ export function edvConfirmationWeight(
         return { confirmed: true, source: 'testPass', weight: 1.0 };
       }
       // verifyResult present but failed — explicit negative signal.
-      return { confirmed: false, source: 'testPass', weight: EDV_UNVERIFIED_WEIGHT };
+      return { confirmed: false, source: 'testPass', weight: unverifiedWeight };
     }
 
     // ── Signal 3 & 4: separate verifier entry in the decisions ledger ─────────
@@ -109,16 +125,16 @@ export function edvConfirmationWeight(
         (d) => d.verdict !== undefined && NEGATIVE_VERDICTS.has(d.verdict.toLowerCase()),
       );
       if (anyNegative) {
-        return { confirmed: false, source: 'verifierVerdict', weight: EDV_UNVERIFIED_WEIGHT };
+        return { confirmed: false, source: 'verifierVerdict', weight: unverifiedWeight };
       }
       // At least one verifier entry with a non-negative (or absent) verdict.
       return { confirmed: true, source: 'verifierVerdict', weight: 1.0 };
     }
 
     // ── Signal 5: no independent signal ───────────────────────────────────────
-    return { confirmed: false, source: 'none', weight: EDV_UNVERIFIED_WEIGHT };
+    return { confirmed: false, source: 'none', weight: unverifiedWeight };
   } catch {
     // Defensive: never throw, treat errors as unverified.
-    return { confirmed: false, source: 'none', weight: EDV_UNVERIFIED_WEIGHT };
+    return { confirmed: false, source: 'none', weight: unverifiedWeight };
   }
 }

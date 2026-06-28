@@ -92,8 +92,11 @@ const SOURCE_TO_DIMENSION: Record<WorkSource, HealthDimension> = {
   dep: 'deps',
   doc: 'docs',
   security: 'security',
-  plugin: 'codeDebt', // M33: plugin items map to codeDebt dimension (best-fit)
-  lint: 'codeDebt',  // M101: lint errors roll into code-debt
+  plugin:  'codeDebt', // M33: plugin items map to codeDebt dimension (best-fit)
+  lint:    'codeDebt', // M101: lint errors roll into code-debt
+  goal:    'issuesCi', // M161: goal items map to issuesCi (directive work)
+  hygiene: 'codeDebt', // M161: hygiene items map to codeDebt dimension
+  invent:  'codeDebt', // M181: invented items map to codeDebt (net-new capability work)
 };
 
 /**

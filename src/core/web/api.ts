@@ -962,6 +962,19 @@ export async function handleApi(
       return true;
     }
 
+    // ── GET /api/usage ───────────────────────────────────────────────────────
+    // M194: per-engine frontier usage (calls/tokens/cost/window-state).
+    // Read-only; same no-auth class as /api/daemon and /api/fleet.
+    // Never throws; degrades to empty engines array on any source failure.
+    if (path === '/api/usage' && method === 'GET') {
+      const { getFrontierUsage } = await import('../usage/frontier-usage.js') as {
+        getFrontierUsage: (cfg: AshlrConfig) => Promise<unknown>;
+      };
+      const usage = await getFrontierUsage(cfg);
+      sendJson(res, 200, usage);
+      return true;
+    }
+
     // ── GET /api/fleet-state ────────────────────────────────────────────────
     // M129: agent-readable combined fleet surface — daemon status + quality
     // scorecard + full oversight snapshot + recent routing decisions.

@@ -1009,3 +1009,133 @@ describe('M200 [C] M193 additive gates with nim proposals', () => {
     expect(r.merged).toBe(0);
   });
 });
+
+// ===========================================================================
+// PILLAR D — BUG-2 regression: edvConfirmationWeight cfg threading
+//
+// Asserts that evaluateVerificationGate criterion 4 forwards cfg to
+// edvConfirmationWeight so operator-configured EDV thresholds are honoured.
+// These are pure-function tests using the REAL evaluateVerificationGate (not
+// the vi.fn() shim registered at module mock level) imported via a dynamic
+// import of the real source file, exactly like the h-series tests do.
+// ===========================================================================
+
+// Import the real (unmocked) edvConfirmationWeight directly so we can test
+// cfg threading in isolation as well.
+import { edvConfirmationWeight, EDV_UNVERIFIED_WEIGHT } from '../src/core/portfolio/edv-verify.js';
+
+describe('M200 [D] BUG-2 regression — edvConfirmationWeight honours cfg.foundry.edvUnverifiedWeight', () => {
+  const baseProposal: Proposal = {
+    id: 'd-prop',
+    repo: '/tmp/m200-d',
+    origin: 'agent',
+    kind: 'patch',
+    title: 'BUG-2 test prop',
+    summary: 'cfg threading',
+    diff: `--- a/src/x.ts\n+++ b/src/x.ts\n+// fix\n`,
+    diffHash: 'bug2-hash',
+    engineModel: 'claude-opus-4-8',
+    engineTier: 'frontier',
+    status: 'pending',
+    createdAt: new Date().toISOString(),
+  } as unknown as Proposal;
+
+  // ── D.1: baseline — no cfg → module default weight ──────────────────────
+  it('[D-1] no cfg → unverified uses EDV_UNVERIFIED_WEIGHT (0.3) module default', () => {
+    const result = edvConfirmationWeight(baseProposal, []);
+    expect(result.confirmed).toBe(false);
+    expect(result.source).toBe('none');
+    expect(result.weight).toBe(EDV_UNVERIFIED_WEIGHT);
+    expect(result.weight).toBe(0.3);
+  });
+
+  // ── D.2: cfg without edvUnverifiedWeight → still default ────────────────
+  it('[D-2] cfg present but no edvUnverifiedWeight field → still uses module default 0.3', () => {
+    const cfg = { foundry: { autoMerge: { enabled: true } } } as unknown as AshlrConfig;
+    const result = edvConfirmationWeight(baseProposal, [], cfg);
+    expect(result.weight).toBe(EDV_UNVERIFIED_WEIGHT);
+  });
+
+  // ── D.3: cfg with valid edvUnverifiedWeight override ────────────────────
+  it('[D-3] cfg.foundry.edvUnverifiedWeight=0.1 → unverified weight is 0.1 (operator tightened)', () => {
+    const cfg = {
+      foundry: { edvUnverifiedWeight: 0.1 },
+    } as unknown as AshlrConfig;
+    const result = edvConfirmationWeight(baseProposal, [], cfg);
+    expect(result.confirmed).toBe(false);
+    expect(result.weight).toBe(0.1);
+  });
+
+  it('[D-3b] cfg.foundry.edvUnverifiedWeight=0.5 → unverified weight is 0.5 (operator relaxed)', () => {
+    const cfg = {
+      foundry: { edvUnverifiedWeight: 0.5 },
+    } as unknown as AshlrConfig;
+    const result = edvConfirmationWeight(baseProposal, [], cfg);
+    expect(result.weight).toBe(0.5);
+  });
+
+  // ── D.4: out-of-range overrides fall back to module default (safety) ────
+  it('[D-4a] edvUnverifiedWeight=0 (invalid ≤0) → falls back to module default 0.3', () => {
+    const cfg = { foundry: { edvUnverifiedWeight: 0 } } as unknown as AshlrConfig;
+    const result = edvConfirmationWeight(baseProposal, [], cfg);
+    expect(result.weight).toBe(EDV_UNVERIFIED_WEIGHT);
+  });
+
+  it('[D-4b] edvUnverifiedWeight=1.0 (invalid ≥1) → falls back to module default 0.3', () => {
+    const cfg = { foundry: { edvUnverifiedWeight: 1.0 } } as unknown as AshlrConfig;
+    const result = edvConfirmationWeight(baseProposal, [], cfg);
+    expect(result.weight).toBe(EDV_UNVERIFIED_WEIGHT);
+  });
+
+  it('[D-4c] edvUnverifiedWeight=1.5 (invalid >1) → falls back to module default 0.3', () => {
+    const cfg = { foundry: { edvUnverifiedWeight: 1.5 } } as unknown as AshlrConfig;
+    const result = edvConfirmationWeight(baseProposal, [], cfg);
+    expect(result.weight).toBe(EDV_UNVERIFIED_WEIGHT);
+  });
+
+  it('[D-4d] edvUnverifiedWeight="high" (wrong type) → falls back to module default 0.3', () => {
+    const cfg = { foundry: { edvUnverifiedWeight: 'high' } } as unknown as AshlrConfig;
+    const result = edvConfirmationWeight(baseProposal, [], cfg);
+    expect(result.weight).toBe(EDV_UNVERIFIED_WEIGHT);
+  });
+
+  // ── D.5: confirmed path always returns weight=1.0 regardless of cfg ─────
+  it('[D-5] confirmed path (verifyResult.passed=true) → weight always 1.0, cfg override ignored', () => {
+    const p = { ...baseProposal, verifyResult: { passed: true, detail: 'ok' } } as unknown as Proposal;
+    const cfg = { foundry: { edvUnverifiedWeight: 0.1 } } as unknown as AshlrConfig;
+    const result = edvConfirmationWeight(p, [], cfg);
+    expect(result.confirmed).toBe(true);
+    expect(result.weight).toBe(1.0);
+  });
+
+  // ── D.6: failed verifyResult uses cfg override for unverified weight ─────
+  it('[D-6] verifyResult.passed=false + cfg override 0.1 → weight is 0.1 (not default 0.3)', () => {
+    const p = { ...baseProposal, verifyResult: { passed: false, detail: 'fail' } } as unknown as Proposal;
+    const cfg = { foundry: { edvUnverifiedWeight: 0.1 } } as unknown as AshlrConfig;
+    const result = edvConfirmationWeight(p, [], cfg);
+    expect(result.confirmed).toBe(false);
+    expect(result.source).toBe('testPass');
+    expect(result.weight).toBe(0.1);
+  });
+
+  // ── D.7: negative verifierVerdict uses cfg override ─────────────────────
+  it('[D-7] negative verifierVerdict + cfg override 0.15 → weight is 0.15', () => {
+    const decisions = [
+      { action: 'verified' as const, verdict: 'rejected', ts: new Date().toISOString(), proposalId: 'd-prop' },
+    ];
+    const cfg = { foundry: { edvUnverifiedWeight: 0.15 } } as unknown as AshlrConfig;
+    const result = edvConfirmationWeight(baseProposal, decisions, cfg);
+    expect(result.confirmed).toBe(false);
+    expect(result.source).toBe('verifierVerdict');
+    expect(result.weight).toBe(0.15);
+  });
+
+  // ── D.8: no-signal path uses cfg override ───────────────────────────────
+  it('[D-8] no-signal (empty decisions, no verifyResult) + cfg override 0.2 → weight is 0.2', () => {
+    const cfg = { foundry: { edvUnverifiedWeight: 0.2 } } as unknown as AshlrConfig;
+    const result = edvConfirmationWeight(baseProposal, [], cfg);
+    expect(result.confirmed).toBe(false);
+    expect(result.source).toBe('none');
+    expect(result.weight).toBe(0.2);
+  });
+});
