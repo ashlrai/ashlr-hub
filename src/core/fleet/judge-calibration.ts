@@ -39,7 +39,7 @@ import type { ManagerVerdict } from './manager.js';
 /** Minimum traces needed before producing meaningful statistics. */
 const MIN_TRACES = 5;
 
-/** Score improvement required to count a corruption as "caught". */
+/** Score *drop* required to count a corruption as caught. */
 const SCORE_DROP_THRESHOLD = 1.0;
 
 /** Cap on how many merged traces to run through the harness per call. */
@@ -317,7 +317,13 @@ function corruptDiff(diff: string): string {
   }
 }
 
-/** Average score across value/correctness/scope/alignment. */
+/**
+ * Average score across value/correctness/scope/alignment.
+ * NOTE: scope is NOT inverted here. This is intentional — avgScore is used
+ * only for a relative corrupted-vs-original delta (isCaught), so both sides
+ * are computed the same way and the sign still reflects quality degradation.
+ * Contrast with best-of-n's scoreVerdict(), which inverts scope for absolute ranking.
+ */
 function avgScore(v: ManagerVerdict): number {
   return (v.value + v.correctness + v.scope + v.alignment) / 4;
 }
@@ -516,7 +522,7 @@ export async function runDegradationHarness(
  *   noise    → 'reject'
  *   harmful  → 'reject'
  */
-function verdictToIntent(verdict: string): string {
+export function verdictToIntent(verdict: string): string {
   if (verdict === 'ship') return 'merge';
   if (verdict === 'review') return 'review';
   return 'reject';
@@ -528,7 +534,7 @@ function verdictToIntent(verdict: string): string {
  *   reverted → 'review'
  *   rejected → 'reject'
  */
-function outcomeToIntent(outcome: string): string {
+export function outcomeToIntent(outcome: string): string {
   if (outcome === 'merged') return 'merge';
   if (outcome === 'reverted') return 'review';
   return 'reject';

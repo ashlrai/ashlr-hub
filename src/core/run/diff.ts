@@ -187,28 +187,36 @@ function tryElision(
   if (first.length === 0 && last.length === 0) return null;
 
   // Find start: scan for first segment.
+  // MED-3: if the first anchor matches more than once, the elision region is
+  // ambiguous — fall through to the fuzzy rung instead of silently picking
+  // the wrong region.
   let startIdx = -1;
   if (first.length === 0) {
     startIdx = 0;
   } else {
+    let matchCount = 0;
     for (let i = 0; i <= fileLines.length - first.length; i++) {
-      if (fileLines.slice(i, i + first.length).every((l, j) => l.trimEnd() === first[j].trimEnd())) {
-        startIdx = i;
-        break;
+      if (fileLines.slice(i, i + first.length).every((l, j) => l.trimEnd() === first[j]!.trimEnd())) {
+        if (matchCount === 0) startIdx = i;
+        matchCount++;
+        if (matchCount > 1) return null; // ambiguous anchor — not ok
       }
     }
   }
   if (startIdx === -1) return null;
 
   // Find end: scan for last segment after startIdx.
+  // MED-3: same ambiguity check for the last anchor.
   let endIdx = startIdx + first.length;
   if (last.length === 0) {
     endIdx = fileLines.length;
   } else {
+    let matchCount = 0;
     for (let i = startIdx + first.length; i <= fileLines.length - last.length; i++) {
-      if (fileLines.slice(i, i + last.length).every((l, j) => l.trimEnd() === last[j].trimEnd())) {
-        endIdx = i + last.length;
-        break;
+      if (fileLines.slice(i, i + last.length).every((l, j) => l.trimEnd() === last[j]!.trimEnd())) {
+        if (matchCount === 0) endIdx = i + last.length;
+        matchCount++;
+        if (matchCount > 1) return null; // ambiguous anchor — not ok
       }
     }
   }

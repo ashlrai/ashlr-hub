@@ -307,7 +307,8 @@ export async function pollTelegramUpdates(cfg: AshlrConfig): Promise<PollResult>
         if (colonIdx < 0) continue; // malformed — skip
         const reqId = data.slice(0, colonIdx);
         const idxRaw = parseInt(data.slice(colonIdx + 1), 10);
-        if (!isFinite(idxRaw)) continue;
+        // MED-1: reject non-finite AND negative option indices at parse time.
+        if (!isFinite(idxRaw) || idxRaw < 0) continue;
 
         events.push({
           kind: 'callback',

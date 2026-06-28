@@ -128,6 +128,67 @@ describe('M140 diff — rung (c): elision ("..." spans)', () => {
   });
 });
 
+describe('M140 diff — rung (c): elision ambiguous anchor falls through (MED-3)', () => {
+  it('falls through to fuzzy/failed when first anchor matches more than once', () => {
+    // File has a repeated anchor line — "}" appears twice, making it ambiguous.
+    const original = [
+      'function a() {',
+      '  return 1;',
+      '}',
+      'function b() {',
+      '  return 2;',
+      '}',
+    ].join('\n');
+
+    // old_string starts with "}" (matches both closing braces) + ellipsis + last line
+    const oldString = '}\n...\n}';
+    const newString = '  // replaced\n}';
+
+    const r = applyEdit(original, oldString, newString);
+    // Elision rung must NOT succeed (ambiguous first anchor).
+    expect(r.rung).not.toBe('elision');
+  });
+
+  it('falls through to fuzzy/failed when last anchor matches more than once', () => {
+    // First anchor is unique; last anchor "}" appears twice after the start.
+    const original = [
+      'function start() {',
+      '  init();',
+      '}',
+      'function end() {',
+      '  cleanup();',
+      '}',
+    ].join('\n');
+
+    // first anchor: unique "function start() {" → startIdx=0
+    // last anchor: "}" → appears at line 2 AND line 5 (both in scan range) → ambiguous
+    const oldString = 'function start() {\n...\n}';
+    const newString = 'function start() {\n  init();\n  extra();\n}';
+
+    const r = applyEdit(original, oldString, newString);
+    // Last anchor "}" is ambiguous — elision must NOT succeed.
+    expect(r.rung).not.toBe('elision');
+  });
+
+  it('succeeds with elision when both anchors are unambiguous', () => {
+    const original = [
+      'function setup() {',
+      '  const a = 1;',
+      '  const b = 2;',
+      '  return [a, b];',
+      '}',
+    ].join('\n');
+
+    const oldString = 'function setup() {\n...\n  return [a, b];\n}';
+    const newString = 'function setup() {\n  const a = 1;\n  const b = 99;\n  return [a, b];\n}';
+
+    const r = applyEdit(original, oldString, newString);
+    expect(r.ok).toBe(true);
+    expect(r.rung).toBe('elision');
+    expect(r.updated).toContain('const b = 99;');
+  });
+});
+
 describe('M140 diff — rung (d): fuzzy SequenceMatcher-style', () => {
   it(`accepts a block at ≥${FUZZY_THRESHOLD * 100}% similarity that exact-match rejects`, () => {
     // File has the block with minor edits compared to what the model sends.

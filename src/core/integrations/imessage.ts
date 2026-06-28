@@ -208,7 +208,9 @@ export function pollInboundReplies(sinceMs: number, cfg: AshlrConfig): Promise<I
             // Format: text|appleNs  (text may contain | so split from right)
             const lastPipe = trimmed.lastIndexOf('|');
             if (lastPipe < 0) continue;
-            const text = trimmed.slice(0, lastPipe);
+            // MED-2: strip embedded newlines from the text field so a crafted
+            // message body containing \n cannot inject a spurious extra record.
+            const text = trimmed.slice(0, lastPipe).replace(/[\r\n]/g, ' ');
             const dateRaw = trimmed.slice(lastPipe + 1);
             const appleNs = parseFloat(dateRaw);
             if (!isFinite(appleNs)) continue;

@@ -155,15 +155,18 @@ export async function runBestOfN(
   }
 
   // ── 4. Choose engine ────────────────────────────────────────────────────
-  // Prefer the first api-model (free local) in allowedBackends; fall back to
-  // 'local-coder' as a sensible default. If runSandboxed is unavailable we
-  // can't generate candidates — they will all error below.
+  // Engine selection priority:
+  //   1. Use 'local-coder' if it appears in cfg.foundry.allowedBackends.
+  //   2. Otherwise use the first allowed backend (whatever the operator configured).
+  //   3. If allowedBackends is empty, default to 'local-coder'.
+  // If runSandboxed is unavailable we can't generate candidates — they will all error below.
   const engine = (() => {
     const allowed = cfg.foundry?.allowedBackends ?? [];
-    // Prefer api-model entries (free local compute)
-    for (const id of allowed) {
-      if ((id as string) === 'local-coder') return id;
+    // Prefer 'local-coder' if explicitly allowed
+    if (allowed.includes('local-coder' as import('../types.js').EngineId)) {
+      return 'local-coder' as import('../types.js').EngineId;
     }
+    // Fall back to the first configured backend, or 'local-coder' as last resort
     return allowed[0] ?? ('local-coder' as import('../types.js').EngineId);
   })();
 
@@ -253,7 +256,9 @@ export async function runBestOfN(
   // Among non-empty candidates, prefer those that passed tests, then highest score.
   const eligible = scored.filter(c => c.proposalId != null && !c.error);
   eligible.sort((a, b) => {
-    // Passing > non-passing
+    // Passing > non-passing.
+    // NOTE: testsPassed !== false intentionally treats undefined (tests not attempted /
+    // not available) as non-blocking — it is not a failure; only explicit false is penalised.
     const aPass = a.testsPassed !== false ? 1 : 0;
     const bPass = b.testsPassed !== false ? 1 : 0;
     if (bPass !== aPass) return bPass - aPass;

@@ -106,6 +106,18 @@ async function invokeHandler(req: CommsRequest): Promise<void> {
   }
 }
 
+/**
+ * Re-load the answered request by id and invoke its resolution handler.
+ * Extracted from the three identical inline blocks in the Telegram/iMessage paths.
+ */
+async function reloadAndInvoke(id: string): Promise<void> {
+  const { listRequests: lr } = await import('./requests.js');
+  const resolved = lr({ status: 'answered' }).find((r) => r.id === id);
+  if (resolved) {
+    await invokeHandler(resolved);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Message formatting
 // ---------------------------------------------------------------------------
@@ -213,11 +225,7 @@ export async function runCommsCycle(cfg: AshlrConfig): Promise<CycleResult> {
               await answerCallbackQuery(event.callbackQueryId, cfg);
             }
 
-            const { listRequests: lr } = await import('./requests.js');
-            const resolved = lr({ status: 'answered' }).find((r) => r.id === out.id);
-            if (resolved) {
-              await invokeHandler(resolved);
-            }
+            await reloadAndInvoke(out.id);
             result.resolved++;
           }
         } else if (event.kind === 'text' && event.text) {
@@ -231,11 +239,7 @@ export async function runCommsCycle(cfg: AshlrConfig): Promise<CycleResult> {
           const answerIndex = num - 1;
           resolveRequest(out.id, answerIndex);
 
-          const { listRequests: lr } = await import('./requests.js');
-          const resolved = lr({ status: 'answered' }).find((r) => r.id === out.id);
-          if (resolved) {
-            await invokeHandler(resolved);
-          }
+          await reloadAndInvoke(out.id);
           result.resolved++;
         }
       }
@@ -266,13 +270,7 @@ export async function runCommsCycle(cfg: AshlrConfig): Promise<CycleResult> {
         const answerIndex = num - 1; // convert to 0-based
         resolveRequest(out.id, answerIndex);
 
-        // Re-load to get the full resolved record for the handler
-        const { listRequests: lr } = await import('./requests.js');
-        const resolved = lr({ status: 'answered' }).find((r) => r.id === out.id);
-        if (resolved) {
-          await invokeHandler(resolved);
-        }
-
+        await reloadAndInvoke(out.id);
         result.resolved++;
       }
 

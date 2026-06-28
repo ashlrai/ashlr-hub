@@ -246,16 +246,11 @@ export function curate(
       }))
       .sort((a, b) => b.score - a.score);
 
-    const toKeep = scored.slice(0, cap).map((s) => s.entry.id);
-    const keepSet = new Set(toKeep);
-
     // Among entries beyond the cap: retire those that are stale + low-hit.
     for (const { entry } of scored.slice(cap)) {
       const ageMs = now - new Date(entry.lastUsedAt).getTime();
       if (ageMs > staleMs && entry.hits < minHits) {
         retiredIds.add(entry.id);
-      } else {
-        keepSet.add(entry.id);
       }
     }
 
@@ -274,8 +269,6 @@ export function curate(
         changed = true;
       }
     }
-
-    void keepSet; // keepSet informs retiredIds selection above; not needed further
 
     if (changed) writeEntries(entries);
   } catch { /* best-effort — never throws */ }

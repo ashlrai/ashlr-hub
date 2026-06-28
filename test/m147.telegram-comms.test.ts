@@ -484,6 +484,50 @@ describe('pollTelegramUpdates', () => {
     const result = await pollTelegramUpdates(cfgTelegram());
     expect(result.updates).toHaveLength(0);
   });
+
+  // MED-1: negative optionIndex must be rejected at parse time.
+  it('MED-1: skips callback_query with negative optionIndex', async () => {
+    _mockHttpResponse = {
+      ok: true,
+      result: [
+        {
+          update_id: 401,
+          callback_query: {
+            id: 'cbq-neg',
+            data: 'req-abc:-1', // negative index
+            message: { message_id: 1, chat: { id: Number(CHAT_ID), type: 'private' } },
+          },
+        },
+      ],
+    };
+    const result = await pollTelegramUpdates(cfgTelegram());
+    expect(result.updates).toHaveLength(0);
+  });
+
+  it('MED-1: skips callback_query with deeply negative optionIndex', async () => {
+    _mockHttpResponse = {
+      ok: true,
+      result: [
+        {
+          update_id: 402,
+          callback_query: {
+            id: 'cbq-neg2',
+            data: 'req-xyz:-999',
+            message: { message_id: 1, chat: { id: Number(CHAT_ID), type: 'private' } },
+          },
+        },
+      ],
+    };
+    const result = await pollTelegramUpdates(cfgTelegram());
+    expect(result.updates).toHaveLength(0);
+  });
+
+  it('MED-1: accepts callback_query with optionIndex=0 (boundary)', async () => {
+    _mockHttpResponse = makeCallbackUpdate(403, 'req-ok:0');
+    const result = await pollTelegramUpdates(cfgTelegram());
+    expect(result.updates).toHaveLength(1);
+    expect(result.updates[0]?.optionIndex).toBe(0);
+  });
 });
 
 // ===========================================================================

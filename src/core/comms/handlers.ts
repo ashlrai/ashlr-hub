@@ -22,6 +22,7 @@ import { registerResolutionHandler } from './dispatch.js';
 import type { CommsRequest } from './requests.js';
 import { sendIMessage } from '../integrations/imessage.js';
 import { loadLatestBriefing, adoptBriefing } from '../vision/strategist.js';
+import { scrubSecrets } from '../util/scrub.js';
 
 // ---------------------------------------------------------------------------
 // Internal: elon-vision handler
@@ -87,14 +88,10 @@ async function handleElonVision(req: CommsRequest, cfg: AshlrConfig): Promise<vo
 /** Max characters to send for a diff preview via iMessage. */
 const MAX_DIFF_SMS = 1500;
 
-/** Scrub common secret patterns from text before sending via iMessage. */
-function scrubDiffSecrets(text: string): string {
-  return text
-    .replace(/\b(sk-[A-Za-z0-9]{20,})\b/g, '[REDACTED]')
-    .replace(/\b(ghp_[A-Za-z0-9]{20,})\b/g, '[REDACTED]')
-    .replace(/\b(ASHLR_[A-Z_]+=\S+)/g, '[REDACTED]')
-    .replace(/(password|secret|token|api[-_]?key)\s*[:=]\s*\S+/gi, '$1=[REDACTED]');
-}
+// scrubDiffSecrets replaced by shared scrubSecrets from src/core/util/scrub.ts.
+// That function covers all 8 secret-pattern categories (sk-, GitHub tokens,
+// Bearer, generic key=value, Slack, AWS, JWT, hex-64) — a strict superset of
+// what scrubDiffSecrets previously caught.
 
 async function handleManagerApproval(req: CommsRequest, cfg: AshlrConfig): Promise<void> {
   const idx = req.answerIndex;
@@ -154,7 +151,7 @@ async function handleManagerApproval(req: CommsRequest, cfg: AshlrConfig): Promi
       if (!proposal) return;
 
       const rawDiff = proposal.diff ?? '(no diff available)';
-      const scrubbed = scrubDiffSecrets(rawDiff);
+      const scrubbed = scrubSecrets(rawDiff);
       const truncated =
         scrubbed.length > MAX_DIFF_SMS
           ? scrubbed.slice(0, MAX_DIFF_SMS) + '\n…[truncated]'

@@ -24,7 +24,59 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+
+// ---------------------------------------------------------------------------
+// Security helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Shell metacharacters and directory-traversal patterns that must never appear
+ * in a goldTestCommand.  Note: `../` (traversal) is rejected; `./` (same-dir
+ * relative path, e.g. `go test ./...`) is permitted.
+ */
+const SHELL_META_RE = /[;|&$`><\n]|\$\(|\.\.\//;
+
+/**
+ * Safe test-runner allowlist.  We match the command prefix against known
+ * harmless test runners so arbitrary binaries cannot be executed.
+ *
+ * `node` is included to support test fixtures that run a JS test script
+ * directly (e.g. `node test.js`) — a common SWE-bench / harness pattern.
+ */
+const SAFE_TEST_RUNNER_RE =
+  /^(python\s+-m\s+pytest|pytest|npm\s+test|npm\s+run\s+test|yarn\s+test|cargo\s+test|go\s+test|vitest|jest|node)(\s|$)/;
+
+/**
+ * Return true when `cmd` is a safe, well-formed test command.
+ * Rejects: shell metacharacters, directory traversal (`../`), and any command
+ * that does not start with a recognised test runner.
+ *
+ * Note: `./` (relative paths without traversal) is allowed in test arguments
+ * (e.g. `go test ./...`). Only `../` constitutes traversal.
+ */
+export function isSafeTestCommand(cmd: string): boolean {
+  if (SHELL_META_RE.test(cmd)) return false;
+  if (!SAFE_TEST_RUNNER_RE.test(cmd.trim())) return false;
+  return true;
+}
+
+/**
+ * Scan the header lines of a unified diff for `--- a/…`, `+++ b/…`, and
+ * `diff --git` path segments. Returns true when all paths are relative and
+ * contain no `../` traversal.
+ */
+export function isDiffSafe(diff: string): boolean {
+  // Match path segments in diff header lines.
+  const headerRe = /^(?:---|\+\+\+|diff --git)\s+(?:a\/|b\/)?(\S+)/gm;
+  let m: RegExpExecArray | null;
+  while ((m = headerRe.exec(diff)) !== null) {
+    const p = m[1] ?? '';
+    // Reject absolute paths or traversal.
+    if (path.isAbsolute(p) || p.includes('../')) return false;
+  }
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Public data shapes
@@ -122,19 +174,33 @@ export type EngineRunner = (
  *
  * Exposed for testing.
  */
-export function applyDiff(diff: string, repoPath: string): boolean {
+export function applyDiff(diff: string, repoPath: string): boolean | 'traversal-rejected' {
   if (!diff.trim()) return true; // empty diff = no changes = already passing or skipped
+
+  // HIGH-2: reject patches with absolute paths or directory traversal.
+  if (!isDiffSafe(diff)) return 'traversal-rejected';
+
   // Write the diff to a temp file — avoids stdin-pipe issues on macOS BSD patch.
   const tmpPatch = path.join(repoPath, '.ashlr-bench.patch');
   try {
     fs.writeFileSync(tmpPatch, diff, 'utf8');
     // Ensure there is a git repo so `git apply` has a context.
     try {
-      execSync('git init -q', { cwd: repoPath, stdio: 'pipe', timeout: 10_000 });
+      execFileSync('git', ['init', '-q'], { cwd: repoPath, stdio: 'pipe', timeout: 10_000 });
     } catch {
       // already a repo or init failed — git apply may still work
     }
-    execSync(`git apply --whitespace=nowarn "${tmpPatch}"`, {
+    // Dry-run check first: reject without applying if git apply --check fails.
+    try {
+      execFileSync('git', ['apply', '--check', '--whitespace=nowarn', tmpPatch], {
+        cwd: repoPath,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 15_000,
+      });
+    } catch {
+      return false;
+    }
+    execFileSync('git', ['apply', '--whitespace=nowarn', tmpPatch], {
       cwd: repoPath,
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 30_000,
@@ -150,13 +216,30 @@ export function applyDiff(diff: string, repoPath: string): boolean {
 /**
  * Run the gold test command in the given directory. Returns { ok, output }.
  * Times out after 120 s to prevent CI hangs.
+ *
+ * HIGH-1: Validates `goldTestCommand` against an allowlist of known-safe test
+ * runners and rejects any command containing shell metacharacters.  On
+ * rejection, returns { ok: false, output: 'unsafe test command rejected' }
+ * without executing anything.
  */
 export function runTests(
   goldTestCommand: string,
   repoPath: string,
 ): { ok: boolean; output: string } {
+  // HIGH-1: validate before execution.
+  if (!isSafeTestCommand(goldTestCommand)) {
+    return { ok: false, output: 'unsafe test command rejected' };
+  }
+
+  // Split into argv so we can use execFileSync (no shell interpolation).
+  // Simple whitespace split is safe here because isSafeTestCommand already
+  // excluded metacharacters, quotes, and traversal sequences.
+  const parts = goldTestCommand.trim().split(/\s+/);
+  const bin = parts[0]!;
+  const args = parts.slice(1);
+
   try {
-    const out = execSync(goldTestCommand, {
+    const out = execFileSync(bin, args, {
       cwd: repoPath,
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 120_000,
@@ -217,12 +300,17 @@ export async function runBenchmark(
 
       if (!error) {
         const applied = applyDiff(diff, workDir);
-        if (!applied) {
+        if (applied === 'traversal-rejected') {
+          error = 'patch path traversal rejected';
+        } else if (!applied) {
           error = 'patch application failed';
         } else {
-          const result = runTests(task.goldTestCommand, workDir);
-          resolved = result.ok;
-          testOutput = result.output;
+          const testResult = runTests(task.goldTestCommand, workDir);
+          resolved = testResult.ok;
+          testOutput = testResult.output;
+          if (testResult.output === 'unsafe test command rejected') {
+            error = 'unsafe test command rejected';
+          }
         }
       }
 
@@ -381,9 +469,18 @@ export function loadSweBenchDataset(jsonlPath: string, repoBasePath?: string): B
       const id = rec.instance_id ?? rec.id ?? 'unknown';
       const problemStatement = rec.problem_statement ?? rec.text ?? '';
       const repoName = rec.repo ?? id.split('__')[0] ?? id;
-      const repoPath =
+      const rawRepoPath =
         rec.repo_path ??
         (repoBasePath ? path.join(repoBasePath, repoName.replace('/', '__')) : '');
+      // LOW-2: validate repo_path is absolute and, when repoBasePath is set,
+      // resolves under repoBasePath.  Skip tasks with unsafe paths.
+      if (rawRepoPath && !path.isAbsolute(rawRepoPath)) continue;
+      if (rawRepoPath && repoBasePath) {
+        const resolved = path.resolve(rawRepoPath);
+        const base = path.resolve(repoBasePath);
+        if (!resolved.startsWith(base + path.sep) && resolved !== base) continue;
+      }
+      const repoPath = rawRepoPath;
       const goldTestCommand = rec.test_cmd ?? rec.test_command ?? 'echo no-test';
       let failToPassRaw = rec.FAIL_TO_PASS ?? [];
       const failToPassTests: string[] =

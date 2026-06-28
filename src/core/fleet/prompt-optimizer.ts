@@ -29,7 +29,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import type { JudgeTrace } from './judge-trace.js';
-import { cohenKappa } from './judge-calibration.js';
+import { cohenKappa, verdictToIntent, outcomeToIntent } from './judge-calibration.js';
 import type { RaterPair } from './judge-calibration.js';
 
 // ---------------------------------------------------------------------------
@@ -119,22 +119,6 @@ export interface OptimizePromptResult {
    * Null when the write failed (best-effort only).
    */
   outputFile: string | null;
-}
-
-// ---------------------------------------------------------------------------
-// Verdict / outcome mapping (mirrors judge-calibration.ts helpers, localised)
-// ---------------------------------------------------------------------------
-
-function verdictToIntent(verdict: string): string {
-  if (verdict === 'ship') return 'merge';
-  if (verdict === 'review') return 'review';
-  return 'reject';
-}
-
-function outcomeToIntent(outcome: string): string {
-  if (outcome === 'merged') return 'merge';
-  if (outcome === 'reverted') return 'review';
-  return 'reject';
 }
 
 // ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ import {
   readFileSync,
   writeFileSync,
 } from 'node:fs';
+import { scrubSecrets } from '../util/scrub.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -82,29 +83,14 @@ function todayDateString(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Secret scrubbing (mirror decisions-ledger.ts)
+// Secret scrubbing — delegates to shared scrubSecrets (src/core/util/scrub.ts)
 // ---------------------------------------------------------------------------
-
-function stripSecrets(s: string): string {
-  return s
-    .replace(/\b(Bearer|Token|Authorization)\s+[A-Za-z0-9\-._~+/]+=*/gi, '$1 [REDACTED]')
-    .replace(
-      /\b(api[_-]?key|secret|token|password|passwd|auth|credential)[=:\s]+[^\s,;'"]{8,}/gi,
-      '$1=[REDACTED]',
-    )
-    .replace(/\bsk-[A-Za-z0-9_-]{16,}/g, '[REDACTED]')
-    .replace(/\bgh[poursa]_[A-Za-z0-9]{16,}/g, '[REDACTED]')
-    .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}/gi, '[REDACTED]')
-    .replace(/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED]')
-    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[REDACTED]')
-    .replace(/\b[0-9a-fA-F]{64,}\b/g, '[REDACTED]');
-}
 
 function scrubTrace(trace: JudgeTrace): JudgeTrace {
   return {
     ...trace,
-    fullReasoning: stripSecrets(trace.fullReasoning),
-    promptContext: stripSecrets(trace.promptContext),
+    fullReasoning: scrubSecrets(trace.fullReasoning),
+    promptContext: scrubSecrets(trace.promptContext),
   };
 }
 

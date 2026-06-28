@@ -169,6 +169,77 @@ describe('m141 judge-trace — round-trip', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Scrub asymmetry fix (#6) — shared scrubSecrets covers all 8 pattern families
+// ---------------------------------------------------------------------------
+
+describe('scrubSecrets (shared util) — comprehensive redaction', () => {
+  it('scrubs sk- API keys', async () => {
+    const { scrubSecrets } = await import('../src/core/util/scrub.js');
+    expect(scrubSecrets('key=sk-abcdefghijklmnopqrstuvwxyz123456')).toContain('[REDACTED]');
+    expect(scrubSecrets('key=sk-abcdefghijklmnopqrstuvwxyz123456')).not.toContain('sk-abc');
+  });
+
+  it('scrubs ghp_ GitHub tokens', async () => {
+    const { scrubSecrets } = await import('../src/core/util/scrub.js');
+    const text = 'token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef';
+    expect(scrubSecrets(text)).not.toContain('ghp_');
+    expect(scrubSecrets(text)).toContain('[REDACTED]');
+  });
+
+  it('scrubs Bearer tokens', async () => {
+    const { scrubSecrets } = await import('../src/core/util/scrub.js');
+    const text = 'Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.payload.sig';
+    const out = scrubSecrets(text);
+    expect(out).not.toContain('eyJ');
+    expect(out).toContain('[REDACTED]');
+  });
+
+  it('scrubs password= patterns', async () => {
+    const { scrubSecrets } = await import('../src/core/util/scrub.js');
+    const text = 'DB_URL=postgres://user:password=supersecretval@host/db';
+    const out = scrubSecrets(text);
+    expect(out).not.toContain('supersecretval');
+  });
+
+  it('scrubs AWS AKIA keys', async () => {
+    const { scrubSecrets } = await import('../src/core/util/scrub.js');
+    const text = 'aws_access_key_id=AKIAIOSFODNN7EXAMPLE';
+    const out = scrubSecrets(text);
+    expect(out).not.toContain('AKIAIOSFODNN7EXAMPLE');
+    expect(out).toContain('[REDACTED]');
+  });
+
+  it('scrubs hex-64 strings', async () => {
+    const { scrubSecrets } = await import('../src/core/util/scrub.js');
+    const hex64 = 'a'.repeat(64);
+    expect(scrubSecrets(`key=${hex64}`)).not.toContain(hex64);
+  });
+
+  it('never throws', async () => {
+    const { scrubSecrets } = await import('../src/core/util/scrub.js');
+    expect(() => scrubSecrets('')).not.toThrow();
+    expect(() => scrubSecrets('normal text without secrets')).not.toThrow();
+  });
+
+  it('handlers.ts uses scrubSecrets (not the old weak scrubDiffSecrets)', async () => {
+    // Verify at source level that handlers.ts imports from util/scrub and
+    // does NOT contain the old local scrubDiffSecrets definition.
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    const src = readFileSync(
+      resolve(import.meta.dirname ?? '', '../src/core/comms/handlers.ts'),
+      'utf8',
+    );
+    // Must import from util/scrub
+    expect(src).toContain("from '../util/scrub.js'");
+    // Must not define the old weak function
+    expect(src).not.toContain('function scrubDiffSecrets');
+    // Must call scrubSecrets
+    expect(src).toContain('scrubSecrets(');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 2. Secret scrubbing
 // ---------------------------------------------------------------------------
 
