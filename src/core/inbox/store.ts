@@ -31,6 +31,8 @@ import type { FleetEvent } from '../integrations/pulse-exporter.js';
 // M119: decisions ledger hook — additive, never-throws, no behavior change.
 import { recordDecision } from '../fleet/decisions-ledger.js';
 import { linkOutcome } from '../fleet/judge-trace.js';
+// M158: destructive-diff pre-judge guard — additive, DEFAULT ON, never-throws.
+import { isDestructiveDiff } from '../run/diff-safety.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call-time so tests can relocate HOME)
@@ -222,16 +224,37 @@ function emitProposalSpan(
  */
 export function createProposal(
   p: Omit<Proposal, 'id' | 'status' | 'createdAt'>,
-  cfg?: Pick<AshlrConfig, 'user'>,
+  cfg?: Pick<AshlrConfig, 'user' | 'foundry'>,
 ): Proposal {
   // M109: stamp owner from cfg.user when not already set by the caller.
   const owner = p.owner ?? cfg?.user?.id ?? cfg?.user?.name;
+
+  // M158: destructive-diff guard — default ON (cfg.foundry?.diffSafety !== false).
+  // Applied before status is set so a destructive proposal never enters 'pending'.
+  const diffSafetyEnabled = cfg?.foundry?.diffSafety !== false;
+  let initialStatus: Proposal['status'] = 'pending';
+  let diffSafetyRejectionReason: string | undefined;
+  if (diffSafetyEnabled && p.diff) {
+    try {
+      const guard = isDestructiveDiff(p.diff);
+      if (guard.destructive) {
+        initialStatus = 'rejected';
+        diffSafetyRejectionReason = `destructive diff auto-rejected: ${guard.reason ?? 'destructive pattern detected'}`;
+      }
+    } catch {
+      // Guard is best-effort — never disrupts proposal creation.
+    }
+  }
+
   const proposal: Proposal = {
     ...p,
     ...(owner !== undefined ? { owner } : {}),
     id: generateId(),
-    status: 'pending',
+    status: initialStatus,
     createdAt: new Date().toISOString(),
+    ...(diffSafetyRejectionReason !== undefined
+      ? { decisionReason: diffSafetyRejectionReason, decidedAt: new Date().toISOString() }
+      : {}),
   };
 
   try {
@@ -241,16 +264,39 @@ export function createProposal(
   }
 
   audit({
-    action: 'inbox:proposal-created',
+    action: initialStatus === 'rejected' ? 'inbox:proposal-rejected' : 'inbox:proposal-created',
     repo: proposal.repo ?? null,
     sandboxId: proposal.sandboxId ?? null,
-    summary: `proposal created: [${proposal.kind}] ${proposal.title} (id=${proposal.id})`,
+    summary:
+      initialStatus === 'rejected'
+        ? `proposal auto-rejected (diff-safety): [${proposal.kind}] ${proposal.title} (id=${proposal.id}) — ${diffSafetyRejectionReason}`
+        : `proposal created: [${proposal.kind}] ${proposal.title} (id=${proposal.id})`,
     result: 'ok',
   });
 
+  // M158: emit decisions-ledger entry for auto-rejected proposals.
+  if (initialStatus === 'rejected' && diffSafetyRejectionReason !== undefined) {
+    try {
+      recordDecision({
+        ts: new Date().toISOString(),
+        proposalId: proposal.id,
+        action: 'rejected',
+        verdict: 'rejected',
+        reason: diffSafetyRejectionReason,
+      });
+    } catch {
+      // Ledger is best-effort.
+    }
+  }
+
   // Pulse Map: a proposal now exists. Outcome = its origin so the cloud can
   // distinguish backlog / swarm / manual / agent provenance. Best-effort.
-  emitProposalSpan('proposal', proposal, proposal.origin, cfg);
+  emitProposalSpan(
+    initialStatus === 'rejected' ? 'decline' : 'proposal',
+    proposal,
+    initialStatus === 'rejected' ? 'rejected' : proposal.origin,
+    cfg,
+  );
 
   return proposal;
 }
