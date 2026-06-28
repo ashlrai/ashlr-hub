@@ -444,6 +444,141 @@ describe('M172 flag invariants', () => {
 });
 
 // ===========================================================================
+// [M175 extension] Verification-mode pre-filter in M172 test file
+// These confirm that within the M172 judge-then-merge loop, the trust-basis-
+// aware pre-filter correctly widens eligibility in verification mode while
+// tier mode stays frontier-only (byte-identical to pre-M175 M51 behaviour).
+// ===========================================================================
+
+describe('M172+M175 trust-basis-aware pre-filter', () => {
+  it('[T1] verification mode: LOCAL proposal IS judged (not skipped by pre-filter)', async () => {
+    const p = makeProp('t1-local', 'local');
+    mockListProposals.mockReturnValue([p]);
+    mockReadDecisions.mockReturnValue([]);
+
+    mockJudgeProposal.mockResolvedValueOnce({
+      proposalId: 't1-local', verdict: 'ship', value: 5, correctness: 5,
+      scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
+    } satisfies ManagerVerdict);
+
+    const cfg = {
+      foundry: {
+        autoMerge: { enabled: true, trustBasis: 'verification' },
+      },
+    } as unknown as AshlrConfig;
+
+    const r = await runAutoMergePass(cfg);
+
+    // Judge MUST have been called — local proposal was not skipped by pre-filter.
+    expect(mockJudgeProposal).toHaveBeenCalledOnce();
+    expect(r.judged).toBe(1);
+    // autoMergeProposal also called (judge shipped → proceed to gate).
+    expect(mockAutoMergeProposal).toHaveBeenCalledWith('t1-local', expect.anything());
+    expect(r.attempted).toBe(1);
+  });
+
+  it('[T2] verification mode: MID proposal IS judged (not skipped by pre-filter)', async () => {
+    const p = makeProp('t2-mid', 'mid');
+    mockListProposals.mockReturnValue([p]);
+    mockReadDecisions.mockReturnValue([]);
+
+    mockJudgeProposal.mockResolvedValueOnce({
+      proposalId: 't2-mid', verdict: 'ship', value: 5, correctness: 5,
+      scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
+    } satisfies ManagerVerdict);
+
+    const cfg = {
+      foundry: {
+        autoMerge: { enabled: true, trustBasis: 'verification' },
+      },
+    } as unknown as AshlrConfig;
+
+    const r = await runAutoMergePass(cfg);
+
+    expect(mockJudgeProposal).toHaveBeenCalledOnce();
+    expect(r.judged).toBe(1);
+    expect(mockAutoMergeProposal).toHaveBeenCalledWith('t2-mid', expect.anything());
+    expect(r.attempted).toBe(1);
+  });
+
+  it('[T3] tier mode (default/absent): LOCAL proposal is still SKIPPED by pre-filter (M51 intact)', async () => {
+    const p = makeProp('t3-local', 'local');
+    mockListProposals.mockReturnValue([p]);
+
+    // enabledCfg() has no trustBasis → defaults to tier mode
+    const r = await runAutoMergePass(enabledCfg());
+
+    // Pre-filter must skip the local proposal before the judge is called.
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(r.judged).toBe(0);
+    expect(r.attempted).toBe(0);
+  });
+
+  it('[T4] tier mode (explicit trustBasis=tier): LOCAL proposal is SKIPPED (M51 intact)', async () => {
+    const p = makeProp('t4-local', 'local');
+    mockListProposals.mockReturnValue([p]);
+
+    const cfg = {
+      foundry: {
+        autoMerge: { enabled: true, trustBasis: 'tier' },
+      },
+    } as unknown as AshlrConfig;
+
+    const r = await runAutoMergePass(cfg);
+
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(r.judged).toBe(0);
+    expect(r.attempted).toBe(0);
+  });
+
+  it('[T5] verification mode: local proposal judged NON-ship → autoMergeProposal NOT called', async () => {
+    const p = makeProp('t5-local', 'local');
+    mockListProposals.mockReturnValue([p]);
+    mockReadDecisions.mockReturnValue([]);
+
+    mockJudgeProposal.mockResolvedValueOnce({
+      proposalId: 't5-local', verdict: 'review', value: 3, correctness: 3,
+      scope: 3, alignment: 3, rationale: 'needs review', wouldMerge: false,
+    } satisfies ManagerVerdict);
+
+    const cfg = {
+      foundry: {
+        autoMerge: { enabled: true, trustBasis: 'verification' },
+      },
+    } as unknown as AshlrConfig;
+
+    const r = await runAutoMergePass(cfg);
+
+    // Judge WAS called (proposal not skipped)
+    expect(mockJudgeProposal).toHaveBeenCalledOnce();
+    expect(r.judged).toBe(1);
+    // But judge returned 'review' → autoMergeProposal must NOT be called
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(r.attempted).toBe(0);
+  });
+
+  it('[T6] tier mode: FRONTIER proposal still judged+merged (M51 happy path unaffected)', async () => {
+    const p = makeProp('t6-frontier', 'frontier');
+    mockListProposals.mockReturnValue([p]);
+    mockReadDecisions.mockReturnValue([]);
+
+    mockJudgeProposal.mockResolvedValueOnce({
+      proposalId: 't6-frontier', verdict: 'ship', value: 5, correctness: 5,
+      scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
+    } satisfies ManagerVerdict);
+
+    const r = await runAutoMergePass(enabledCfg());
+
+    expect(mockJudgeProposal).toHaveBeenCalledOnce();
+    expect(mockAutoMergeProposal).toHaveBeenCalledWith('t6-frontier', expect.anything());
+    expect(r.judged).toBe(1);
+    expect(r.attempted).toBe(1);
+  });
+});
+
+// ===========================================================================
 // [O1–O2] Output counters
 // ===========================================================================
 

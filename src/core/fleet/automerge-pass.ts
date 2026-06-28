@@ -161,11 +161,30 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
 
   for (const p of pending) {
     if (killSwitchOn()) break;
-    // Frontier proposals are main-merge-eligible; MID proposals are branch/PR-
-    // eligible ONLY when the separate default-off midToBranch flag is on. The
-    // gate re-verifies authority/risk/verification — this is a fast pre-filter.
-    const midEligible = cfg.foundry?.autoMerge?.midToBranch === true && p.engineTier === 'mid';
-    if (p.engineTier !== 'frontier' && !midEligible) continue;
+    // Pre-filter: decide whether this proposal is eligible to be judged/merged
+    // this pass. The decision is trust-basis-aware (M175).
+    //
+    // trustBasis='verification' (M153/M175): ANY tier may be judged. The full
+    // verification gate (frontier-judge-ship + verifyResult + risk + scope +
+    // EDV + signed attestation) enforces the safety bar — the GATE is the
+    // trust, not the producer's tier.  We do NOT skip local/mid proposals here;
+    // autoMergeProposal will refuse them if any criterion is unmet.
+    //
+    // trustBasis='tier' or absent (default / M51): frontier proposals are
+    // main-merge-eligible; mid proposals are branch/PR-eligible ONLY when the
+    // separate default-off midToBranch flag is on; local/undefined are skipped.
+    // This path is BYTE-IDENTICAL to pre-M175 behaviour — M51 is untouched.
+    const trustBasis = (cfg.foundry as Record<string, unknown> | undefined)
+      ?.['autoMerge'] as Record<string, unknown> | undefined;
+    const isVerificationMode =
+      (trustBasis?.['trustBasis'] as string | undefined) === 'verification';
+
+    if (!isVerificationMode) {
+      // Tier-mode pre-filter (M51 — unchanged).
+      const midEligible = cfg.foundry?.autoMerge?.midToBranch === true && p.engineTier === 'mid';
+      if (p.engineTier !== 'frontier' && !midEligible) continue;
+    }
+    // In verification mode: no tier pre-filter — fall through to judge-then-merge.
 
     // ── M172: judge-then-merge ─────────────────────────────────────────────
     // Skip judging if there is already a recent ship verdict + attestation.
