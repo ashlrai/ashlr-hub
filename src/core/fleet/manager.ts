@@ -21,6 +21,7 @@ import type { AshlrConfig, Proposal, QualityMetrics } from '../types.js';
 import { recordDecision } from './decisions-ledger.js';
 import { recordJudgeTrace } from './judge-trace.js';
 import { computeQualityMetrics } from './quality-metrics.js';
+import { renderPlaybook } from '../vision/playbook.js';
 import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
 
 // ---------------------------------------------------------------------------
@@ -287,7 +288,7 @@ function clamp(n: unknown, lo: number, hi: number): number {
  */
 export async function judgeProposal(
   proposal: Proposal,
-  _cfg: AshlrConfig,
+  cfg: AshlrConfig,
   client: { complete: (system: string, user: string) => Promise<string> },
 ): Promise<ManagerVerdict> {
   const fallback = (): ManagerVerdict => ({
@@ -304,10 +305,17 @@ export async function judgeProposal(
   // Load vision spec context for this proposal's repo (best-effort; null = no spec).
   const specCtx = await loadSpecForProposal(proposal.repo ?? undefined);
 
+  // M149: ACE Playbook — inject accumulated judge lessons into the rubric when flag on.
+  const acePlaybook = (cfg.foundry as Record<string, unknown> | undefined)?.['acePlaybook'] === true;
+  const judgePlaybookCtx = acePlaybook ? renderPlaybook('judge', 300) : '';
+  const effectiveJudgeSystem = judgePlaybookCtx
+    ? `${JUDGE_SYSTEM}\n\n${judgePlaybookCtx}`
+    : JUDGE_SYSTEM;
+
   let raw: string;
   let fullReasoning = '';
   try {
-    raw = await client.complete(JUDGE_SYSTEM, buildJudgePrompt(proposal, specCtx));
+    raw = await client.complete(effectiveJudgeSystem, buildJudgePrompt(proposal, specCtx));
     fullReasoning = extractFullReasoning(raw);
   } catch {
     return fallback();
@@ -318,7 +326,7 @@ export async function judgeProposal(
   if (!obj) {
     try {
       const retryPrompt = buildJudgePrompt(proposal, specCtx) + JUDGE_RETRY_SUFFIX;
-      const raw2 = await client.complete(JUDGE_SYSTEM, retryPrompt);
+      const raw2 = await client.complete(effectiveJudgeSystem, retryPrompt);
       obj = extractJson(raw2);
     } catch { /* retry failed — fall through to fallback */ }
   }

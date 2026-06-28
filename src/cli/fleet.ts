@@ -610,6 +610,8 @@ export async function cmdFleet(args: string[]): Promise<number> {
       return cmdFleetJudgeTraces(rest);
     case 'judge-health':
       return cmdFleetJudgeHealth(rest);
+    case 'optimize-prompt':
+      return cmdFleetOptimizePrompt(rest);
     default:
       process.stderr.write(red('error: ') + `unknown fleet subcommand: ${sub}\n`);
       printFleetHelp();
@@ -636,6 +638,8 @@ function printFleetHelp(): void {
   console.log(`                          ` + cyan('# list/inspect judge traces + outcome-link rate (M141)'));
   console.log(`    ashlr fleet judge-health [--degradation] [--json]`);
   console.log(`                          ` + cyan('# judge calibration: kappa + dark-current + degradation (M145)'));
+  console.log(`    ashlr fleet optimize-prompt --target judge|strategist [--rounds N] [--dry-run]`);
+  console.log(`                          ` + cyan('# GEPA offline prompt optimizer — outputs candidate to ~/.ashlr/optimizer/ (M150)'));
   console.log('');
 }
 
@@ -950,6 +954,171 @@ async function cmdFleetJudgeHealth(args: string[]): Promise<number> {
     console.log(`  ${green('No warnings — judge calibration looks healthy.')}`);
     console.log('');
   }
+
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: optimize-prompt (M150 — GEPA offline prompt optimizer)
+// ---------------------------------------------------------------------------
+
+/**
+ * `ashlr fleet optimize-prompt --target judge|strategist [--rounds N] [--dry-run]`
+ *
+ * Runs the offline GEPA prompt optimizer against held-out judge traces.
+ * Prints base→best score + the candidate prompt to STDOUT and writes a
+ * review file to ~/.ashlr/optimizer/<ts>-<target>.json.
+ *
+ * SAFE: never writes to manager.ts or strategist.ts. Human-in-the-loop only.
+ * The --dry-run flag skips the LLM reflection calls and scores only the base prompt.
+ *
+ * Never throws.
+ */
+async function cmdFleetOptimizePrompt(args: string[]): Promise<number> {
+  const jsonMode = args.includes('--json');
+  const dryRun = args.includes('--dry-run');
+
+  // --target judge|strategist
+  let target: 'judge' | 'strategist' = 'judge';
+  const tIdx = args.indexOf('--target');
+  if (tIdx !== -1 && args[tIdx + 1]) {
+    const tVal = args[tIdx + 1];
+    if (tVal === 'judge' || tVal === 'strategist') {
+      target = tVal;
+    } else {
+      process.stderr.write(
+        red('error: ') + `--target must be judge or strategist (got ${tVal})\n`,
+      );
+      return 1;
+    }
+  }
+
+  // --rounds N
+  let rounds = 3;
+  const rIdx = args.indexOf('--rounds');
+  if (rIdx !== -1 && args[rIdx + 1]) {
+    const parsed = parseInt(args[rIdx + 1]!, 10);
+    if (!isNaN(parsed) && parsed > 0) rounds = parsed;
+  }
+
+  console.log('');
+  console.log(bold('  ashlr fleet optimize-prompt') + dim(` — GEPA offline prompt optimizer (M150)`));
+  console.log('');
+  console.log(`  target: ${cyan(target)}  rounds: ${rounds}${dryRun ? '  ' + yellow('[dry-run]') : ''}`);
+  console.log('');
+
+  const cfg = await loadCfg();
+
+  // Load held-out traces
+  let traces: import('../core/fleet/judge-trace.js').JudgeTrace[] = [];
+  try {
+    const { readJudgeTraces } = await import('../core/fleet/judge-trace.js');
+    traces = readJudgeTraces({ outcomeOnly: false });
+  } catch {
+    traces = [];
+  }
+
+  console.log(`  Loaded ${traces.length} judge trace(s) for evaluation.`);
+
+  // Build metric (kappa vs outcomes)
+  const { buildJudgeKappaMetric, optimizePrompt } = await import('../core/fleet/prompt-optimizer.js');
+  const metric = buildJudgeKappaMetric(traces);
+  const baseScore = (() => { try { return metric(''); } catch { return 0; } })();
+
+  console.log(`  Base score (kappa vs outcomes): ${baseScore.toFixed(4)}`);
+
+  if (dryRun) {
+    console.log('');
+    console.log(dim('  [dry-run] skipping LLM reflection calls — no LLM spend.'));
+    console.log(dim(`  Review file would be written to ~/.ashlr/optimizer/ on a real run.`));
+    console.log('');
+    return 0;
+  }
+
+  // Build LLM client (mirrors judge-health's client resolution)
+  let llmClient: { complete: (system: string, user: string) => Promise<string> } | null = null;
+  try {
+    const { getActiveClient } = await import('../core/run/provider-client.js');
+    const raw = await getActiveClient(cfg ?? ({} as import('../core/types.js').AshlrConfig), {
+      allowCloud: true,
+    }) as { complete?: (system: string, user: string) => Promise<string> };
+    if (typeof raw.complete === 'function') {
+      llmClient = { complete: raw.complete.bind(raw) };
+    }
+  } catch {
+    llmClient = null;
+  }
+
+  if (!llmClient) {
+    process.stderr.write(
+      red('error: ') + 'no LLM client available — configure a provider (Anthropic API key or Ollama) to run the optimizer.\n',
+    );
+    return 1;
+  }
+
+  // Base prompt: optimizer accepts any text as starting point.
+  // In practice, copy the JUDGE_SYSTEM / STRATEGIST_SYSTEM constant here or pass via stdin.
+  // For the CLI we use a placeholder that prints instructions when no export exists.
+  const basePrompt = `[${target} base prompt — paste the current ${target === 'judge' ? 'JUDGE_SYSTEM' : 'STRATEGIST_SYSTEM'} constant here before running, or use the programmatic API]`;
+
+  console.log(`  Running ${rounds} GEPA round(s) for target: ${target}...`);
+  console.log('');
+
+  let result: import('../core/fleet/prompt-optimizer.js').OptimizePromptResult;
+  try {
+    result = await optimizePrompt(
+      { basePrompt, metric, rounds, candidatesPerRound: 3, target },
+      cfg ?? {},
+      llmClient,
+      traces,
+    );
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'optimizer failed: ' +
+        (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
+
+  if (jsonMode) {
+    process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+    return 0;
+  }
+
+  // Human render
+  const improvementColor = result.improvement > 0 ? green : result.improvement < 0 ? red : dim;
+  console.log(`  ${bold('Base score:')}  ${result.baseScore.toFixed(4)}`);
+  console.log(`  ${bold('Best score:')}  ${result.bestScore.toFixed(4)}  ${improvementColor(`(${result.improvement >= 0 ? '+' : ''}${result.improvement.toFixed(4)} improvement)`)}`);
+  console.log('');
+
+  // Lineage summary
+  if (result.lineage.length > 0) {
+    console.log(`  ${bold('Round summary:')}`);
+    for (const entry of result.lineage) {
+      const delta = entry.selectedScore - entry.score;
+      const deltaStr = delta >= 0 ? green(`+${delta.toFixed(4)}`) : red(delta.toFixed(4));
+      console.log(
+        `    round ${entry.round}  score ${entry.score.toFixed(4)} → ${entry.selectedScore.toFixed(4)}  ${deltaStr}  candidates: ${entry.candidates.length}`,
+      );
+    }
+    console.log('');
+  }
+
+  // Best prompt snippet
+  console.log(`  ${bold('Best candidate prompt')} ${dim('(first 400 chars):')}`);
+  const snippet = result.bestPrompt.slice(0, 400) + (result.bestPrompt.length > 400 ? '\n  ...' : '');
+  for (const line of snippet.split('\n')) {
+    console.log('  ' + dim(line));
+  }
+  console.log('');
+
+  if (result.outputFile) {
+    console.log(`  ${green('Review file written:')} ${result.outputFile}`);
+    console.log(dim('  To apply: copy "bestPrompt" from the review file into manager.ts / strategist.ts by hand.'));
+  } else {
+    console.log(yellow('  Warning: could not write review file to ~/.ashlr/optimizer/.'));
+  }
+  console.log('');
 
   return 0;
 }

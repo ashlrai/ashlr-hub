@@ -17,11 +17,23 @@
  *   - NO side effects, NO imports of apply/merge/push primitives.
  *   - Flag-off: scoreAdjustment returns 1.0 when priors are empty.
  *   - `listProposals` is injectable for tests; falls back to inbox/store at runtime.
+ *
+ * M151: EDV (Execute-Distill-Verify) independent-confirmation gate.
+ *   - Flag: cfg.foundry.edvVerify (default false = current behavior).
+ *   - When ON: merged/accepted outcomes require an independent confirmation
+ *     (proposal.verifyResult.passed OR a separate 'verified' decision entry)
+ *     before counting at full weight. Unconfirmed accepts contribute
+ *     EDV_UNVERIFIED_WEIGHT (0.3) to mergedWeightedSum rather than 1.0.
+ *   - SourceStats gains an optional `mergedWeightedSum` field (absent when EDV
+ *     is OFF, so flag-off acceptRate is byte-identical to pre-M151).
+ *   - acceptRate in EDV mode uses mergedWeightedSum in place of merged:
+ *       (mergedWeightedSum + shipCount) / created
  */
 
 import type { Proposal, WorkItem, WorkSource } from '../types.js';
 import { readDecisions } from './decisions-ledger.js';
 import { loadWorkedLedger } from './worked-ledger.js';
+import { edvConfirmationWeight } from '../portfolio/edv-verify.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -73,6 +85,14 @@ export interface SourceStats {
   emptyRate: number;
   /** noiseCount / judged  (0 when judged === 0). */
   noiseRate: number;
+  /**
+   * M151 EDV: fractional sum of independently-confirmed merged accepts.
+   * Present ONLY when computeOutcomePriors was called with edvVerify=true.
+   * Each accept contributes its EDV weight (1.0 if confirmed, 0.3 if not).
+   * When present, acceptRate is derived from this value instead of `merged`.
+   * Absent (undefined) when EDV is OFF — ensures flag-off byte-identity.
+   */
+  mergedWeightedSum?: number;
 }
 
 /**
@@ -106,6 +126,16 @@ export interface ComputeOutcomePriorsOpts {
    * inbox/store is loaded lazily via a best-effort dynamic import.
    */
   listProposals?: () => Proposal[];
+  /**
+   * M151: Enable EDV (Execute-Distill-Verify) independent-confirmation gate.
+   * When true, merged/accepted outcomes are weighted by whether an independent
+   * confirmation exists (proposal.verifyResult.passed or a separate 'verified'
+   * decision). Unconfirmed accepts contribute EDV_UNVERIFIED_WEIGHT (0.3)
+   * rather than 1.0 to the mergedWeightedSum accumulator.
+   *
+   * Default: false (flag-off = byte-identical pre-M151 behavior).
+   */
+  edvVerify?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -131,10 +161,13 @@ function emptyStats(): SourceStats {
 
 function recomputeRates(s: SourceStats): SourceStats {
   const runs = s.diffCount + s.emptyCount;
+  // M151: when mergedWeightedSum is present (EDV ON), acceptRate uses the
+  // fractional weighted sum rather than the integer merged count.
+  const effectiveMerged = s.mergedWeightedSum !== undefined ? s.mergedWeightedSum : s.merged;
   return {
     ...s,
     shipRate: s.judged > 0 ? s.shipCount / s.judged : 0,
-    acceptRate: s.created > 0 ? (s.merged + s.shipCount) / s.created : 0,
+    acceptRate: s.created > 0 ? (effectiveMerged + s.shipCount) / s.created : 0,
     emptyRate: runs > 0 ? s.emptyCount / runs : 0,
     noiseRate: s.judged > 0 ? s.noiseCount / s.judged : 0,
   };
@@ -168,6 +201,9 @@ function touch(map: StatsMap, source: string): SourceStats {
  *   3. worked-ledger — WorkedEvent.itemId encodes `${repo}:${source}:${rest}`.
  *      Provides diff/empty run counts per (source, repo).
  *
+ * M151: when opts.edvVerify=true, positive reinforcement from merged/accepted
+ * outcomes is weighted by an independent confirmation signal. See module doc.
+ *
  * Never throws. Returns empty priors on any error.
  */
 export async function computeOutcomePriors(
@@ -176,11 +212,12 @@ export async function computeOutcomePriors(
   try {
     const windowMs = opts?.windowMs;
     const sinceMs = windowMs !== undefined ? Date.now() - windowMs : undefined;
+    const edvVerify = opts?.edvVerify === true;
 
     // ── 1. Load decisions ─────────────────────────────────────────────────────
     const decisions = readDecisions({ sinceMs });
 
-    // ── 2. Resolve proposals (proposalId → {source, repo}) ────────────────────
+    // ── 2. Resolve proposals (proposalId → {source, repo, proposal}) ──────────
     let proposals: Proposal[] = [];
     if (typeof opts?.listProposals === 'function') {
       try {
@@ -198,16 +235,34 @@ export async function computeOutcomePriors(
       }
     }
 
-    // Build proposalId → {source, repo} lookup.
-    const proposalMeta = new Map<string, { source: string; repo: string | null }>();
+    // Build proposalId → {source, repo, proposal} lookup.
+    const proposalMeta = new Map<string, { source: string; repo: string | null; proposal: Proposal }>();
     for (const p of proposals) {
       proposalMeta.set(p.id, {
         source: proposalSourceOf(p),
         repo: p.repo,
+        proposal: p,
       });
     }
 
-    // ── 3. Load worked-ledger ─────────────────────────────────────────────────
+    // ── 3. M151 EDV: group decisions by proposalId for per-proposal lookup ────
+    // Only built when edvVerify=true; skipped entirely in flag-off mode.
+    const decisionsByProposal = edvVerify
+      ? (() => {
+          const m = new Map<string, typeof decisions>();
+          for (const d of decisions) {
+            let arr = m.get(d.proposalId);
+            if (arr === undefined) {
+              arr = [];
+              m.set(d.proposalId, arr);
+            }
+            arr.push(d);
+          }
+          return m;
+        })()
+      : null;
+
+    // ── 4. Load worked-ledger ─────────────────────────────────────────────────
     const worked = loadWorkedLedger();
 
     // ── Accumulators ──────────────────────────────────────────────────────────
@@ -259,8 +314,29 @@ export async function computeOutcomePriors(
       }
 
       if (action === 'merged' || verdict === 'approved' || verdict === 'applied') {
-        gStats(source).merged++;
-        if (repo) rStats(repo, source).merged++;
+        if (edvVerify && meta !== undefined && decisionsByProposal !== null) {
+          // M151: compute independent-confirmation weight for this accept.
+          // decisionsForProposal is ALL decisions for the proposal (includes
+          // 'verified' entries from a separate verifier, if any).
+          const decisionsForProposal = decisionsByProposal.get(d.proposalId) ?? [];
+          const { weight } = edvConfirmationWeight(meta.proposal, decisionsForProposal);
+
+          // Integer merged count (unchanged — used by raw stats consumers).
+          gStats(source).merged++;
+          if (repo) rStats(repo, source).merged++;
+
+          // Weighted accumulator: initialise to 0 on first EDV hit, then add.
+          const gs = gStats(source);
+          gs.mergedWeightedSum = (gs.mergedWeightedSum ?? 0) + weight;
+          if (repo) {
+            const rs = rStats(repo, source);
+            rs.mergedWeightedSum = (rs.mergedWeightedSum ?? 0) + weight;
+          }
+        } else {
+          // Flag-off: exactly the pre-M151 path.
+          gStats(source).merged++;
+          if (repo) rStats(repo, source).merged++;
+        }
       }
 
       if (action === 'rejected' || verdict === 'rejected') {
@@ -343,6 +419,11 @@ export async function computeOutcomePriors(
  *   if effectiveSamples < MIN_SAMPLES → return 1.0 (no adjustment)
  *
  * Lookup: byRepo[item.repo][item.source] → global[item.source] → 1.0
+ *
+ * M151: acceptRate is pre-adjusted by EDV weighting in computeOutcomePriors
+ * (via mergedWeightedSum). scoreAdjustment itself is unchanged — it reads
+ * stats.acceptRate which already reflects the EDV-adjusted value when EDV
+ * is ON. Flag-off: stats.acceptRate is identical to pre-M151 (no mergedWeightedSum).
  *
  * Never throws.
  */

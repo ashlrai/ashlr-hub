@@ -25,6 +25,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import type { AshlrConfig } from '../types.js';
 import { loadSpec, applyEvolution } from './spec.js';
 import type { EndStateSpec } from './spec.js';
+import { addDelta, curate, renderPlaybook } from './playbook.js';
 import { computeQualityMetrics } from '../fleet/quality-metrics.js';
 import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
 
@@ -295,7 +296,7 @@ async function gatherFleetState(project?: string | null): Promise<FleetState> {
   return { metrics, activeGoalCount, completedGoalCount, repoHealthSummary };
 }
 
-function buildStatePrompt(state: FleetState, spec: EndStateSpec): string {
+function buildStatePrompt(state: FleetState, spec: EndStateSpec, playbookContext?: string): string {
   const m = state.metrics;
   return `=== CURRENT FLEET STATE (30-day window) ===
 Proposals created: ${m.proposalsCreated}
@@ -328,7 +329,7 @@ Ambition level: ${spec.ambitionLevel}/10
 Last updated: ${spec.updatedAt} (by ${spec.updatedBy})
 
 === YOUR TASK ===
-Assess the gap between current state and the north-star vision. Raise the ambition. Identify the single most critical bottleneck to close next. Propose concrete goals the engineering fleet can execute immediately.`;
+Assess the gap between current state and the north-star vision. Raise the ambition. Identify the single most critical bottleneck to close next. Propose concrete goals the engineering fleet can execute immediately.${playbookContext ? `\n\n${playbookContext}` : ''}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -566,7 +567,9 @@ export async function runStrategist(
     void strategistJudgeEngine; // available for future briefing metadata
 
     // ── Prompt ──────────────────────────────────────────────────────────────
-    const userPrompt = buildStatePrompt(state, spec);
+    const acePlaybook = (cfg.foundry as Record<string, unknown> | undefined)?.['acePlaybook'] === true;
+    const playbookCtx = acePlaybook ? renderPlaybook('strategy', 400) : undefined;
+    const userPrompt = buildStatePrompt(state, spec, playbookCtx);
     let raw: string;
     try {
       raw = await complete(STRATEGIST_SYSTEM, userPrompt);
@@ -619,6 +622,7 @@ export async function adoptBriefing(
 
   try {
     // ── 1. Evolve the spec ─────────────────────────────────────────────────
+    const acePlaybook = (cfg.foundry as Record<string, unknown> | undefined)?.['acePlaybook'] === true;
     const hasEvolution = Object.keys(briefing.proposedEvolution).length > 0;
     if (hasEvolution) {
       applyEvolution(
@@ -627,6 +631,17 @@ export async function adoptBriefing(
         by,
         `Strategist briefing from ${briefing.generatedAt}: ${briefing.recommendedDirection[0] ?? 'vision update'}`,
       );
+    }
+
+    // ── 1b. ACE Playbook: append deltas (no collapse) ──────────────────
+    if (acePlaybook) {
+      for (const direction of briefing.recommendedDirection) {
+        if (direction.trim()) addDelta('strategy', direction);
+      }
+      for (const problem of briefing.newProblems) {
+        if (problem.trim()) addDelta('strategy', `Hard problem: ${problem}`);
+      }
+      curate('strategy');
     }
 
     // ── 2. Create goals from proposedGoals ────────────────────────────────

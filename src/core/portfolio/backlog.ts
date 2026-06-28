@@ -215,11 +215,16 @@ export async function buildBacklog(opts?: {
   let minValue = opts?.minItemValue;
   // M125: resolve feedbackEnabled from config (default true).
   let feedbackEnabled = true;
+  // M151: EDV independent-confirmation gate (default false = opt-in via cfg.foundry.edvVerify).
+  let edvVerify = false;
   if (minValue === undefined) {
     minValue = cfg?.foundry?.minItemValue ?? 2;
     // cfg.foundry.feedbackEnabled: absent → true (opt-out by setting false).
     const rawFeedback = (cfg?.foundry as Record<string, unknown> | undefined)?.['feedbackEnabled'];
     if (rawFeedback === false) feedbackEnabled = false;
+    // M151: cfg.foundry.edvVerify: absent → false (opt-in).
+    const rawEdv = (cfg?.foundry as Record<string, unknown> | undefined)?.['edvVerify'];
+    if (rawEdv === true) edvVerify = true;
   }
 
   const allItems: WorkItem[] = [];
@@ -336,7 +341,7 @@ export async function buildBacklog(opts?: {
   let finalItems = passedAfterPendingDedup;
   if (feedbackEnabled) {
     try {
-      const priors = await computeOutcomePriors({ listProposals: opts?.listProposals });
+      const priors = await computeOutcomePriors({ listProposals: opts?.listProposals, edvVerify });
       const adjusted = passedAfterPendingDedup.map((item) => {
         const multiplier = scoreAdjustment(item, priors);
         return multiplier === 1.0 ? item : { ...item, score: item.score * multiplier };
