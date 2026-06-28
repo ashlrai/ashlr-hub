@@ -10,7 +10,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import type { AshlrConfig, WorkItem, Backlog } from '../core/types.js';
 import { inventWorkItems } from '../core/generative/invent.js';
 
@@ -212,7 +212,31 @@ export async function cmdInvent(args: string[]): Promise<number> {
   }
 
   const repoArg = positional[0];
-  const repo = repoArg ? resolve(repoArg) : process.cwd();
+  let repo: string;
+
+  if (!repoArg) {
+    // Default: CWD repo
+    repo = process.cwd();
+  } else if (repoArg.includes('/') || repoArg.startsWith('.')) {
+    // Path argument (absolute, relative, or ./foo) — resolve as-is
+    repo = resolve(repoArg);
+  } else {
+    // Bare repo NAME — resolve against enrolled repos by matching basename.
+    // Falls back to cwd-relative resolve (old behaviour) when no enrolled match.
+    try {
+      const { listEnrolled } = await import('../core/sandbox/policy.js');
+      const enrolled = listEnrolled();
+      const match = enrolled.find((r) => basename(r) === repoArg);
+      repo = match ?? resolve(repoArg);
+      if (!match && enrolled.length > 0) {
+        console.error(
+          `[invent] no enrolled repo named "${repoArg}" — enrolled: ${enrolled.map((r) => basename(r)).join(', ')}. Trying as path.`,
+        );
+      }
+    } catch {
+      repo = resolve(repoArg);
+    }
+  }
 
   if (!existsSync(repo)) {
     console.error(`error: repo not found: ${repo}`);

@@ -13,6 +13,7 @@
 
 import type { AshlrConfig, WorkItem, Proposal } from '../types.js';
 import type { ManagerVerdict } from '../fleet/manager.js';
+import type { TasteScore } from '../fleet/taste-critic.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -31,6 +32,11 @@ export interface CandidateResult {
   score: number;
   /** Whether the real test loop passed (undefined = not attempted / not available). */
   testsPassed?: boolean;
+  /**
+   * M183: TASTE critic result (only present when cfg.foundry.tasteCritic=true).
+   * Scores vision-alignment, ambition/impact, and design taste (1–5 each).
+   */
+  taste?: TasteScore;
   /** Error from the sandbox run or judge, if any. */
   error?: string;
 }
@@ -154,6 +160,20 @@ export async function runBestOfN(
     // M140 not yet available — skip real test filter
   }
 
+  // ── 3b. Resolve taste critic (M183 — flag-gated) ───────────────────────
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tasteCriticEnabled = !!(cfg.foundry as any)?.tasteCritic;
+  type ScoreTasteFn = typeof import('../fleet/taste-critic.js').scoreTaste;
+  let scoreTaste: ScoreTasteFn | undefined;
+  if (tasteCriticEnabled) {
+    try {
+      const mod = await import('../fleet/taste-critic.js');
+      scoreTaste = mod.scoreTaste;
+    } catch {
+      // taste-critic unavailable — degrade gracefully (no taste scores)
+    }
+  }
+
   // ── 4. Choose engine ────────────────────────────────────────────────────
   // Engine selection priority:
   //   1. Use 'local-coder' if it appears in cfg.foundry.allowedBackends.
@@ -248,7 +268,22 @@ export async function runBestOfN(
         }
       }
 
-      return { ...c, verdict, score, testsPassed };
+      // M183: taste scoring (flag-gated; only when tasteCritic enabled)
+      let taste: TasteScore | undefined;
+      if (scoreTaste && c.proposalId) {
+        try {
+          const proposal = syntheticProposal(item, c.diff, c.index);
+          taste = await scoreTaste(
+            proposal,
+            { repo: sourceRepo },
+            cfg,
+          );
+        } catch {
+          // taste score failure is non-fatal — candidate is still eligible
+        }
+      }
+
+      return { ...c, verdict, score, testsPassed, taste };
     }),
   );
 
@@ -262,6 +297,15 @@ export async function runBestOfN(
     const aPass = a.testsPassed !== false ? 1 : 0;
     const bPass = b.testsPassed !== false ? 1 : 0;
     if (bPass !== aPass) return bPass - aPass;
+
+    // M183: when tasteCritic is enabled, prefer highest taste overall score.
+    // Tie-break with existing correctness critic score (unchanged path when flag off).
+    if (tasteCriticEnabled) {
+      const aTaste = a.taste?.overall ?? 0;
+      const bTaste = b.taste?.overall ?? 0;
+      if (bTaste !== aTaste) return bTaste - aTaste;
+    }
+
     return b.score - a.score;
   });
 

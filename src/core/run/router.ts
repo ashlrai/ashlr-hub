@@ -245,11 +245,12 @@ function capabilityForSource(source: string): ModelCapability | null {
  * 'feature' is included for forward-compatibility (not yet in WorkSource type
  * but expected soon).
  */
-const SUBSTANTIVE_SOURCES = new Set([
+export const SUBSTANTIVE_SOURCES = new Set([
   'issue',
   'goal',
   'security',
   'feature',
+  'invent',
 ]);
 
 /**
@@ -263,7 +264,7 @@ const SUBSTANTIVE_SOURCES = new Set([
  *  - score >= FRONTIER_SCORE_THRESHOLD (hard)
  *  - localizedScope.fileCount > 5 OR localizedScope.symbolCount > 20
  */
-function isSubstantiveItem(item: WorkItem): boolean {
+export function isSubstantiveItem(item: WorkItem): boolean {
   if (SUBSTANTIVE_SOURCES.has(item.source as string)) return true;
   if (isHardItem(item)) return true;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

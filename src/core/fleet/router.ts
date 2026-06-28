@@ -58,7 +58,7 @@
 import type { AshlrConfig, EngineId, EngineTier, WorkItem } from '../types.js';
 import { engineInstalled } from '../run/engines.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
-import { routeTask, type RoutingContext } from '../run/router.js';
+import { routeTask, isSubstantiveItem, SUBSTANTIVE_SOURCES, type RoutingContext } from '../run/router.js';
 
 /** The outcome of routing a WorkItem to a backend + model. */
 export interface RouteDecision {
@@ -190,6 +190,10 @@ function buildRoutingContext(
  *
  * M115 three-tier policy:
  *  1. Hard/high-value items → frontier (claude/codex) when available.
+ *     M182 (quality policy only): ALSO routes substantive items (source ∈
+ *     SUBSTANTIVE_SOURCES: goal/issue/security/feature/invent) to frontier.
+ *     Under cost/absent policy the substantive widening is NOT applied —
+ *     behavior is byte-identical to pre-M182 for non-quality policies.
  *  2. Bulk items → local-mid (local-coder/Ollama first, then nim/kimi/hermes).
  *  3. No mid available but frontier is → frontier (pre-M115 fallback behavior).
  *  4. Neither → builtin (0-diff, better than nothing).
@@ -199,12 +203,22 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
   const mids = availableFrom(MID_PREFERENCE, cfg);
   const ctx = buildRoutingContext(frontiers, mids);
 
-  // ── 1. Frontier for hard/escalation items ─────────────────────────────────
-  if (isFrontierItem(item) && frontiers.length > 0) {
+  // ── 1. Frontier for hard/escalation items (+ substantive under quality policy) ─
+  //
+  // M182: under routingPolicy='quality', substantive sources (goal/issue/security/
+  // feature/invent) are also routed to frontier — these are the items Mason wants
+  // frontier AI to handle end-to-end. Under cost/absent policy the extra condition
+  // is NOT evaluated (byte-identical parity with pre-M182 for those policies).
+  const qualityPolicy = cfg.foundry?.routingPolicy === 'quality';
+  const isFrontierCandidate = isFrontierItem(item) || (qualityPolicy && isSubstantiveItem(item));
+  if (isFrontierCandidate && frontiers.length > 0) {
     const chosen = pickFrom(frontiers, item)!;
     const effort = typeof item.effort === 'number' ? item.effort : 3;
     const score = typeof item.score === 'number' ? item.score : 3;
-    const baseReason = `frontier: hard/escalation item (source=${item.source}, effort=${effort}, score=${score}) → ${chosen}`;
+    const substantiveReason = qualityPolicy && !isFrontierItem(item) && SUBSTANTIVE_SOURCES.has(item.source as string)
+      ? `frontier: quality policy substantive item (source=${item.source}) → ${chosen}`
+      : `frontier: hard/escalation item (source=${item.source}, effort=${effort}, score=${score}) → ${chosen}`;
+    const baseReason = substantiveReason;
 
     // M128: enrich with model selection
     const taskRoute = routeTask(item, cfg, { ...ctx, availableEngines: [chosen, ...ctx.availableEngines] });

@@ -14,12 +14,12 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AshlrConfig, WorkItem } from '../types.js';
+import { resolveFrontierJudgeClient } from '../fleet/manager.js';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const CLAUDE_DEFAULT_STRATEGIST_MODEL = 'claude-opus-4-8';
 const DEFAULT_N = 6;
 const DEDUP_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -121,76 +121,16 @@ function recordInvented(ledger: InventedLedger, repo: string, title: string): vo
 
 // ---------------------------------------------------------------------------
 // Frontier client resolution
-// Mirrors the strategist.ts M162 pattern: access foundry fields via cast to
-// Record<string, unknown> since they're not declared on the TS interface.
+// Delegates to resolveFrontierJudgeClient from manager.ts — the PROVEN path
+// that returns a working Opus client (model=claude-opus-4-8, hasComplete=true).
 // ---------------------------------------------------------------------------
 
 type CompleteFn = (system: string, user: string) => Promise<string>;
 
-async function buildInventComplete(cfg: AshlrConfig): Promise<CompleteFn | null> {
-  const foundryRaw = cfg.foundry as Record<string, unknown> | undefined;
-  const model =
-    (foundryRaw?.['strategistModel'] as string | undefined) ??
-    CLAUDE_DEFAULT_STRATEGIST_MODEL;
-  const managerJudgeEngine =
-    (foundryRaw?.['managerJudgeEngine'] as string | undefined) ?? 'auto';
-  const localFallbackModel =
-    (foundryRaw?.['managerJudgeModel'] as string | undefined) ?? 'qwen2.5:72b-instruct-q4_K_M';
-
-  // Try Claude CLI (mirrors buildClaudeCliCompleteStrategist in strategist.ts)
-  try {
-    const { engineInstalled, spawnEngine } = await import('../run/engines.js');
-    const wantClaude = managerJudgeEngine === 'auto' || managerJudgeEngine === 'claude';
-    const allowedBackends = (foundryRaw?.['allowedBackends'] as string[] | undefined) ?? ['builtin'];
-    const claudeAllowed = allowedBackends.includes('claude') || allowedBackends.includes('builtin');
-    const claudeInstalled = engineInstalled('claude');
-
-    if (wantClaude && claudeAllowed && claudeInstalled) {
-      // Use a minimal EngineCommand directly (spawnEngine accepts EngineCommand)
-      const { spawnSync } = await import('node:child_process');
-      return async (system: string, user: string): Promise<string> => {
-        const prompt = `${system}\n\n${user}`;
-        const result = spawnSync('claude', ['--model', model, '--print', '--no-cache'], {
-          input: prompt,
-          encoding: 'utf8',
-          timeout: 120_000,
-          maxBuffer: 8 * 1024 * 1024,
-        });
-        if (result.error || result.status !== 0) {
-          throw new Error(result.stderr ?? 'claude CLI failed');
-        }
-        return result.stdout ?? '';
-      };
-    }
-    // Suppress unused import warning — spawnEngine may be used later
-    void spawnEngine;
-  } catch { /* fall through to Ollama */ }
-
-  // Ollama fallback
-  try {
-    const ollamaBaseUrl = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined
-      ?? 'http://127.0.0.1:11434';
-    return async (system: string, user: string): Promise<string> => {
-      const resp = await fetch(`${ollamaBaseUrl}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: localFallbackModel,
-          messages: [
-            { role: 'system', content: system },
-            { role: 'user', content: user },
-          ],
-          stream: false,
-        }),
-        signal: AbortSignal.timeout(90_000),
-      });
-      if (!resp.ok) throw new Error(`Ollama ${resp.status}`);
-      const data = (await resp.json()) as { message?: { content?: string } };
-      return data?.message?.content ?? '';
-    };
-  } catch { /* no client available */ }
-
-  return null;
+function buildInventComplete(cfg: AshlrConfig): CompleteFn | null {
+  const client = resolveFrontierJudgeClient(cfg);
+  if (!client) return null;
+  return client.complete;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +175,7 @@ Generate exactly ${n} BOLD, SPECIFIC, BUILDABLE improvements. Remember: NET-NEW 
 interface RawInventedItem {
   title?: unknown;
   rationale?: unknown;
+  why?: unknown;       // Opus sometimes returns "why" instead of "rationale"
   boldness?: unknown;
   sketch?: unknown;
 }
@@ -314,8 +255,11 @@ export async function inventWorkItems(
   const n = opts.n ?? DEFAULT_N;
 
   try {
-    const complete = opts._testComplete ?? (await buildInventComplete(cfg));
-    if (!complete) return [];
+    const complete = opts._testComplete ?? buildInventComplete(cfg);
+    if (!complete) {
+      console.error('[invent] no frontier client available — check claude CLI or Ollama');
+      return [];
+    }
 
     const system = SYSTEM_PROMPT;
     const user = buildUserPrompt(
@@ -334,6 +278,7 @@ export async function inventWorkItems(
 
     raw = scrubSecrets(raw);
     const rawItems = extractJsonArray(raw);
+    console.error(`[invent] parsed ${rawItems.length} raw item(s) from model response`);
 
     const ledger: InventedLedger = opts.skipDedup ? { entries: [] } : loadLedger();
     const now = new Date().toISOString();
@@ -342,7 +287,10 @@ export async function inventWorkItems(
 
     for (const ri of rawItems) {
       const title = typeof ri.title === 'string' ? ri.title.trim() : '';
-      const rationale = typeof ri.rationale === 'string' ? ri.rationale.trim() : '';
+      // Accept "why" as a synonym for "rationale" (Opus sometimes uses either)
+      const rationale = typeof ri.rationale === 'string'
+        ? ri.rationale.trim()
+        : typeof ri.why === 'string' ? ri.why.trim() : '';
       const boldness = typeof ri.boldness === 'string' ? ri.boldness.trim() : '';
       const sketch = typeof ri.sketch === 'string' ? ri.sketch.trim() : '';
 
@@ -398,6 +346,13 @@ export async function inventWorkItems(
         `[invent] deduped ${deduped.length} recently-invented item(s): ${deduped.join(', ')}`,
       );
     }
+
+    const dropped = rawItems.length - items.length - deduped.length;
+    console.error(
+      `[invent] accepted ${items.length} item(s)` +
+      (dropped > 0 ? `, dropped ${dropped} maintenance item(s)` : '') +
+      (deduped.length > 0 ? `, deduped ${deduped.length}` : ''),
+    );
 
     if (!opts.skipDedup) {
       saveLedger(ledger);

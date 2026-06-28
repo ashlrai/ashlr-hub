@@ -218,6 +218,16 @@ export interface AshlrConfig {
      */
     diffSafety?: boolean;
     /**
+     * M183: frontier TASTE critic for best-of-N SELECTION. DEFAULT false (off).
+     * When true, best-of-N calls scoreTaste() (Opus) on each test-passing
+     * candidate and selects the highest-taste overall score rather than the
+     * first that compiles. Tie-broken by the existing correctness critic score.
+     * Does NOT add any merge gate — taste only influences selection + curation
+     * (the safety floor in automerge-pass.ts is unchanged). Flag off → selection
+     * is byte-identical to pre-M183.
+     */
+    tasteCritic?: boolean;
+    /**
      * M128: intelligent model-granular routing policy.
      *  'balanced' (DEFAULT) — free-local for bulk, reserve strong models for
      *                          hard tasks, cheap-cloud for medium. Roughly
@@ -2284,6 +2294,21 @@ export interface Proposal {
    * M119: Risk classification for the change (set by manager or trust gate).
    */
   riskClass?: 'low' | 'medium' | 'high';
+  /**
+   * M183: Frontier TASTE critic scores (optional — only present when
+   * cfg.foundry.tasteCritic is enabled and best-of-N selection ran).
+   * Carries the three taste axes + overall + verdict from scoreTaste().
+   * Used by the digest + Telegram curation to surface 'gold' proposals and
+   * deprioritize 'mediocre' ones. Does NOT affect the safety merge gate.
+   */
+  taste?: {
+    alignment: number;
+    ambition: number;
+    design: number;
+    overall: number;
+    verdict: 'gold' | 'solid' | 'mediocre';
+    rationale: string;
+  };
   /**
    * M103: payload for 'desktop-action' proposals. Carries the specific UI
    * action to perform when the proposal is approved+applied.
