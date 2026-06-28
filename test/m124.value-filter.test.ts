@@ -488,7 +488,7 @@ describe('M124 — buildBacklog: value-filter gate', () => {
     try {
       // Return a substantive TODO for any rg call
       _execFileImpl = makeRgStub('src/auth.ts:88:// TODO: implement refresh-token rotation with expiry check\n');
-      const backlog = await buildBacklog({ repos: [tmpDir, tmpDir2], minItemValue: 2 });
+      const backlog = await buildBacklog({ repos: [tmpDir, tmpDir2], minItemValue: 2, cfg: { foundry: { scanTodos: true } } });
       // Both repos should contribute passing items
       expect(backlog.repos).toEqual([tmpDir, tmpDir2]);
       expect(backlog.items.length).toBeGreaterThanOrEqual(2);

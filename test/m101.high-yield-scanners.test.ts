@@ -214,7 +214,7 @@ describe('M101 scanLint — concrete items from cached ESLint report', () => {
     fs.writeFileSync(path.join(repo, '.lint-cache.json'), report, 'utf8');
 
     const before = snapshotDir(repo);
-    const items = await scanLint(repo);
+    const items = await scanLint(repo, { foundry: { scanLint: true } });
     assertUnchanged(repo, before);
 
     expect(items.length).toBeGreaterThanOrEqual(1);
@@ -238,7 +238,7 @@ describe('M101 scanLint — concrete items from cached ESLint report', () => {
     ]);
     fs.writeFileSync(path.join(repo, '.lint-cache.json'), report, 'utf8');
 
-    const items = await scanLint(repo);
+    const items = await scanLint(repo, { foundry: { scanLint: true } });
     expect(items).toHaveLength(1);
     const item = items[0]!;
     // Title must match the concrete framing pattern
@@ -252,7 +252,7 @@ describe('M101 scanLint — concrete items from cached ESLint report', () => {
     const execSpy = vi.fn();
     _execFileImpl = execSpy;
 
-    const items = await scanLint(repo);
+    const items = await scanLint(repo, { foundry: { scanLint: true } });
     expect(items).toEqual([]);
     expect(execSpy).not.toHaveBeenCalled();
   });
@@ -260,7 +260,7 @@ describe('M101 scanLint — concrete items from cached ESLint report', () => {
   it('A4: returns [] when lint script exists but no cached report file is present', async () => {
     writePkgWithLint();
     // No .lint-cache.json or any other cache file written
-    const items = await scanLint(repo);
+    const items = await scanLint(repo, { foundry: { scanLint: true } });
     expect(items).toEqual([]);
   });
 
@@ -277,7 +277,7 @@ describe('M101 scanLint — concrete items from cached ESLint report', () => {
     ]);
     fs.writeFileSync(path.join(repo, '.lint-cache.json'), report, 'utf8');
 
-    const items = await scanLint(repo);
+    const items = await scanLint(repo, { foundry: { scanLint: true } });
     // Only the error (severity 2) surfaces
     expect(items).toHaveLength(1);
     expect(items[0]!.title).toContain('prefer-const');
@@ -297,7 +297,7 @@ describe('M101 scanLint — concrete items from cached ESLint report', () => {
     ]);
     fs.writeFileSync(path.join(repo, '.lint-cache.json'), report, 'utf8');
 
-    const items = await scanLint(repo);
+    const items = await scanLint(repo, { foundry: { scanLint: true } });
     expect(items).toEqual([]);
   });
 
@@ -312,25 +312,25 @@ describe('M101 scanLint — concrete items from cached ESLint report', () => {
     }));
     fs.writeFileSync(path.join(repo, '.lint-cache.json'), buildLintReport(entries), 'utf8');
 
-    const items = await scanLint(repo);
+    const items = await scanLint(repo, { foundry: { scanLint: true } });
     expect(items.length).toBeLessThanOrEqual(5);
   });
 
   it('A8: never throws on malformed cache JSON', async () => {
     writePkgWithLint();
     fs.writeFileSync(path.join(repo, '.lint-cache.json'), '{not valid json}', 'utf8');
-    await expect(scanLint(repo)).resolves.toEqual([]);
+    await expect(scanLint(repo, { foundry: { scanLint: true } })).resolves.toEqual([]);
   });
 
   it('A8b: never throws on empty cache file', async () => {
     writePkgWithLint();
     fs.writeFileSync(path.join(repo, '.lint-cache.json'), '', 'utf8');
-    await expect(scanLint(repo)).resolves.toEqual([]);
+    await expect(scanLint(repo, { foundry: { scanLint: true } })).resolves.toEqual([]);
   });
 
   it('A8c: never throws when package.json is absent', async () => {
     // No package.json at all
-    await expect(scanLint(repo)).resolves.toEqual([]);
+    await expect(scanLint(repo, { foundry: { scanLint: true } })).resolves.toEqual([]);
   });
 
   it('A9: WorkItem has valid shape (source=lint, value/effort in range, required fields)', async () => {
@@ -345,7 +345,7 @@ describe('M101 scanLint — concrete items from cached ESLint report', () => {
     ]);
     fs.writeFileSync(path.join(repo, '.lint-cache.json'), report, 'utf8');
 
-    const items = await scanLint(repo);
+    const items = await scanLint(repo, { foundry: { scanLint: true } });
     expect(items).toHaveLength(1);
     const item = items[0]!;
 
@@ -382,7 +382,7 @@ describe('M101 scanLint — concrete items from cached ESLint report', () => {
     fs.writeFileSync(path.join(repo, '.lint-cache.json'), report, 'utf8');
 
     const before = snapshotDir(repo);
-    await scanLint(repo);
+    await scanLint(repo, { foundry: { scanLint: true } });
     assertUnchanged(repo, before);
   });
 
@@ -398,7 +398,7 @@ describe('M101 scanLint — concrete items from cached ESLint report', () => {
     ]);
     fs.writeFileSync(path.join(repo, '.eslintcache.json'), report, 'utf8');
 
-    const items = await scanLint(repo);
+    const items = await scanLint(repo, { foundry: { scanLint: true } });
     expect(items.length).toBeGreaterThanOrEqual(1);
     expect(items[0]!.source).toBe('lint');
   });
@@ -415,7 +415,7 @@ describe('M101 scanLint — concrete items from cached ESLint report', () => {
     ]);
     fs.writeFileSync(path.join(repo, 'lint-results.json'), report, 'utf8');
 
-    const items = await scanLint(repo);
+    const items = await scanLint(repo, { foundry: { scanLint: true } });
     expect(items.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -431,7 +431,7 @@ describe('M101 scanLint — concrete items from cached ESLint report', () => {
     ]);
     fs.writeFileSync(path.join(repo, 'eslint-report.json'), report, 'utf8');
 
-    const items = await scanLint(repo);
+    const items = await scanLint(repo, { foundry: { scanLint: true } });
     expect(items.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -458,7 +458,7 @@ describe('M101 scanLint — concrete items from cached ESLint report', () => {
     fs.writeFileSync(path.join(repo, '.lint-cache.json'), primary, 'utf8');
     fs.writeFileSync(path.join(repo, 'lint-results.json'), secondary, 'utf8');
 
-    const items = await scanLint(repo);
+    const items = await scanLint(repo, { foundry: { scanLint: true } });
     // Items must come from the primary (.lint-cache.json), not the secondary
     expect(items.every(i => i.title.includes('semi') || i.title.includes('pri.ts'))).toBe(true);
     expect(items.every(i => !i.title.includes('eqeqeq'))).toBe(true);
@@ -475,7 +475,7 @@ describe('M101 scanLint — bounded: no subprocess is ever called', () => {
     const spy = vi.fn();
     _execFileImpl = spy;
 
-    await scanLint(repo);
+    await scanLint(repo, { foundry: { scanLint: true } });
     expect(spy).not.toHaveBeenCalled();
   });
 
@@ -484,7 +484,7 @@ describe('M101 scanLint — bounded: no subprocess is ever called', () => {
     const spy = vi.fn();
     _execFileImpl = spy;
 
-    await scanLint(repo);
+    await scanLint(repo, { foundry: { scanLint: true } });
     expect(spy).not.toHaveBeenCalled();
   });
 
@@ -503,13 +503,13 @@ describe('M101 scanLint — bounded: no subprocess is ever called', () => {
     const spy = vi.fn();
     _execFileImpl = spy;
 
-    await scanLint(repo);
+    await scanLint(repo, { foundry: { scanLint: true } });
     expect(spy).not.toHaveBeenCalled();
   });
 
   it('B4: never throws even if fs operations throw unexpectedly', async () => {
     // Repo path does not exist — scanLint must return [] gracefully
-    await expect(scanLint('/nonexistent/path/m101/repo')).resolves.toEqual([]);
+    await expect(scanLint('/nonexistent/path/m101/repo', { foundry: { scanLint: true } })).resolves.toEqual([]);
   });
 });
 

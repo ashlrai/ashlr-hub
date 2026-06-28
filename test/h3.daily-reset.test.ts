@@ -52,6 +52,15 @@ vi.mock('../src/core/swarm/runner.js', () => ({
   runSwarm: (...args: unknown[]) => mockRunSwarm(...args),
 }));
 
+// buildBacklog MOCKED so tick() has discoverable work regardless of which
+// scanners are enabled (M160 made scanDeps/scanLint/scanHygiene DEFAULT-OFF).
+// The daily-reset tests are about the reset / accounting logic, not scanners —
+// mocking the backlog keeps them focused on the reset invariants under test.
+const mockBuildBacklog = vi.fn();
+vi.mock('../src/core/portfolio/backlog.js', () => ({
+  buildBacklog: (...args: unknown[]) => mockBuildBacklog(...args),
+}));
+
 import type { DaemonState } from '../src/core/types.js';
 import { tick } from '../src/core/daemon/loop.js';
 import {
@@ -80,6 +89,31 @@ beforeEach(() => {
   repo = fx.makeRepo({ files: todoSeedFiles(3) });
   repo.enroll();
   mockRunSwarm.mockReset();
+  mockBuildBacklog.mockReset();
+  // M160: scanDeps/scanLint/scanHygiene are DEFAULT-OFF, so a real buildBacklog
+  // call returns ~nothing. Use mockImplementation so items carry the correct
+  // repo path at call time (passed in as opts.repos[0] by tick()). The daily-reset
+  // tests are about reset / accounting logic, not scanner behavior.
+  mockBuildBacklog.mockImplementation(async (opts?: { repos?: string[] }) => {
+    const repoDir = (opts?.repos ?? [])[0] ?? repo.dir;
+    const now = new Date().toISOString();
+    return {
+      generatedAt: now,
+      repos: opts?.repos ?? [],
+      items: Array.from({ length: 4 }, (_, i) => ({
+        id: `${repoDir}:h3-reset-${i}`,
+        repo: repoDir,
+        source: 'todo' as const,
+        title: `1 marker in src/todo-${i}.ts:2`,
+        detail: `File: src/todo-${i}.ts:2 — "implement f${i}".`,
+        value: 3,
+        effort: 2,
+        score: 1.5,
+        tags: ['todo'],
+        ts: now,
+      })),
+    };
+  });
 });
 
 afterEach(() => {

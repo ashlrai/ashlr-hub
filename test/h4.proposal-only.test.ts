@@ -26,6 +26,18 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // ---------------------------------------------------------------------------
+// buildBacklog MOCKED so tick() has discoverable work regardless of which
+// scanners are enabled (M160 made scanDeps/scanLint/scanHygiene DEFAULT-OFF).
+// The proposal-only tests that call tick(dryRun) need at least one backlog item
+// so the loop returns 'dry-run' (not 'no-backlog'). Tests that DO NOT call tick
+// are unaffected — the mock value is only consumed when tick() is called.
+// ---------------------------------------------------------------------------
+const mockBuildBacklog = vi.fn();
+vi.mock('../src/core/portfolio/backlog.js', () => ({
+  buildBacklog: (...args: unknown[]) => mockBuildBacklog(...args),
+}));
+
+// ---------------------------------------------------------------------------
 // node:child_process mock — keep git (execFileSync) REAL, stub gh (spawnSync).
 // vi.mock is hoisted; importOriginal preserves every other export so applyPatch's
 // real git worktree/apply/commit path runs, while createPr's `gh pr create`
@@ -90,6 +102,30 @@ beforeEach(() => {
   fx = makeFixture();
   // Default: any `gh` spawn fails — no real gh, no network.
   _spawnSyncImpl = () => spawnGhFail();
+  mockBuildBacklog.mockReset();
+  // M160: scanDeps/scanLint/scanHygiene are DEFAULT-OFF. Provide a dynamic mock
+  // so tick() always has at least one backlog item (returns 'dry-run' not
+  // 'no-backlog'). Items are keyed to the enrolled repo (opts.repos[0]).
+  mockBuildBacklog.mockImplementation(async (opts?: { repos?: string[] }) => {
+    const repoDir = (opts?.repos ?? [])[0] ?? '';
+    const now = new Date().toISOString();
+    return {
+      generatedAt: now,
+      repos: opts?.repos ?? [],
+      items: Array.from({ length: 3 }, (_, i) => ({
+        id: `${repoDir}:h4-item-${i}`,
+        repo: repoDir,
+        source: 'todo' as const,
+        title: `1 marker in src/todo-${i}.ts:2`,
+        detail: `File: src/todo-${i}.ts:2 — "implement f${i}".`,
+        value: 3,
+        effort: 2,
+        score: 1.5,
+        tags: ['todo'],
+        ts: now,
+      })),
+    };
+  });
 });
 
 afterEach(() => {

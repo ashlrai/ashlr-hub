@@ -44,6 +44,15 @@ vi.mock('../src/core/swarm/runner.js', () => ({
   runSwarm: (...args: unknown[]) => mockRunSwarm(...args),
 }));
 
+// buildBacklog MOCKED so tick() has discoverable work regardless of which
+// scanners are enabled (M160 made scanDeps/scanLint/scanHygiene DEFAULT-OFF).
+// The safety tests assert on per-tick item cap bounding — mocking the backlog
+// provides the items without depending on scanner availability.
+const mockBuildBacklog = vi.fn();
+vi.mock('../src/core/portfolio/backlog.js', () => ({
+  buildBacklog: (...args: unknown[]) => mockBuildBacklog(...args),
+}));
+
 // ---------------------------------------------------------------------------
 // Imports AFTER the mock so the daemon binds to the mocked runSwarm. All resolve
 // ~/.ashlr paths via homedir() at CALL time, so HOME relocation isolates state.
@@ -74,7 +83,33 @@ let fx: H1Fixture;
 
 beforeEach(() => {
   mockRunSwarm.mockReset();
+  mockBuildBacklog.mockReset();
   fx = makeFixture();
+  // M160: scanDeps/scanLint/scanHygiene are DEFAULT-OFF. Provide a dynamic mock
+  // keyed to the enrolled repo (opts.repos[0]) so tests that reach buildBacklog
+  // always have discoverable work. Tests that gate before buildBacklog (kill /
+  // enrollment / budget / confirm-status) never call this and are unaffected.
+  // 8 items covers the largest perTickItems used here (2) with plenty to spare.
+  mockBuildBacklog.mockImplementation(async (opts?: { repos?: string[] }) => {
+    const repoDir = (opts?.repos ?? [])[0] ?? '';
+    const now = new Date().toISOString();
+    return {
+      generatedAt: now,
+      repos: opts?.repos ?? [],
+      items: Array.from({ length: 8 }, (_, i) => ({
+        id: `${repoDir}:h1-safety-${i}`,
+        repo: repoDir,
+        source: 'todo' as const,
+        title: `1 marker in src/todo-${i}.ts:2`,
+        detail: `File: src/todo-${i}.ts:2 — "implement f${i}".`,
+        value: 3,
+        effort: 2,
+        score: 1.5,
+        tags: ['todo'],
+        ts: now,
+      })),
+    };
+  });
 });
 
 afterEach(() => {

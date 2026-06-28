@@ -71,6 +71,17 @@ vi.mock('../src/core/swarm/runner.js', () => ({
   runSwarm: (...args: unknown[]) => mockRunSwarm(...args),
 }));
 
+// buildBacklog MOCKED so tick() has discoverable work regardless of which
+// scanners are enabled (M160 made scanDeps/scanLint/scanHygiene DEFAULT-OFF).
+// Tests that assert on itemsConsidered / swarm dispatch need items in the
+// backlog; tests that gate before buildBacklog (kill/enrollment/budget) never
+// call it and are unaffected. mockImplementation threads opts.repos[0] into
+// items so tick()'s byRepo grouping routes them to the enrolled repo.
+const mockBuildBacklog = vi.fn();
+vi.mock('../src/core/portfolio/backlog.js', () => ({
+  buildBacklog: (...args: unknown[]) => mockBuildBacklog(...args),
+}));
+
 // ---------------------------------------------------------------------------
 // Lazy imports — AFTER the mock so the daemon binds to the mocked runSwarm.
 // All of these resolve ~/.ashlr paths via homedir() at CALL time, so the
@@ -101,7 +112,33 @@ let fx: H1Fixture;
 
 beforeEach(() => {
   mockRunSwarm.mockReset();
+  mockBuildBacklog.mockReset();
   fx = makeFixture();
+  // M160: scanDeps/scanLint/scanHygiene are DEFAULT-OFF. Provide a dynamic mock
+  // so each test always has discoverable work proportional to what it seeds.
+  // Items are keyed to the enrolled repo (opts.repos[0]) so tick()'s byRepo
+  // grouping routes them correctly. Seeding 8 items covers the largest
+  // perTickItems (6) used in this suite with headroom to spare.
+  mockBuildBacklog.mockImplementation(async (opts?: { repos?: string[] }) => {
+    const repoDir = (opts?.repos ?? [])[0] ?? '';
+    const now = new Date().toISOString();
+    return {
+      generatedAt: now,
+      repos: opts?.repos ?? [],
+      items: Array.from({ length: 8 }, (_, i) => ({
+        id: `${repoDir}:h1-gates-${i}`,
+        repo: repoDir,
+        source: 'todo' as const,
+        title: `1 marker in src/todo-${i}.ts:2`,
+        detail: `File: src/todo-${i}.ts:2 — "implement f${i}".`,
+        value: 3,
+        effort: 2,
+        score: 1.5,
+        tags: ['todo'],
+        ts: now,
+      })),
+    };
+  });
 });
 
 afterEach(() => {
@@ -203,7 +240,7 @@ describe('H1 daemon-gates — ENROLLMENT: empty enrollment makes the tick a no-o
 
   it('returns reason "no-enrolled-repos" and creates 0 proposals', async () => {
     const before = pendingCount();
-    const result: DaemonTick = await tick(makeCfg(), { dryRun: false });
+    const result: DaemonTick = await tick(makeCfg({ foundry: { scanHygiene: true } }), { dryRun: false });
 
     expect(result.reason).toBe('no-enrolled-repos');
     expect(result.proposalsCreated).toBe(0);
@@ -213,12 +250,12 @@ describe('H1 daemon-gates — ENROLLMENT: empty enrollment makes the tick a no-o
   });
 
   it('does NOT dispatch any swarm when nothing is enrolled', async () => {
-    await tick(makeCfg(), { dryRun: false });
+    await tick(makeCfg({ foundry: { scanHygiene: true } }), { dryRun: false });
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
   it('records the no-op tick to daemon state (operator visibility) with a valid ISO ts', async () => {
-    const result = await tick(makeCfg(), { dryRun: false });
+    const result = await tick(makeCfg({ foundry: { scanHygiene: true } }), { dryRun: false });
 
     expect(new Date(result.ts).toISOString()).toBe(result.ts);
 
@@ -229,7 +266,7 @@ describe('H1 daemon-gates — ENROLLMENT: empty enrollment makes the tick a no-o
   });
 
   it('even a dry-run on an empty enrollment is a no-op (no swarm, 0 proposals)', async () => {
-    const result = await tick(makeCfg(), { dryRun: true });
+    const result = await tick(makeCfg({ foundry: { scanHygiene: true } }), { dryRun: true });
     expect(result.reason).toBe('no-enrolled-repos');
     expect(result.proposalsCreated).toBe(0);
     expect(mockRunSwarm).not.toHaveBeenCalled();
@@ -244,7 +281,7 @@ describe('H1 daemon-gates — KILL: the kill switch halts the tick immediately',
   it('returns reason "kill-switch" and dispatches no swarm when kill is ON', async () => {
     fx.setKill(true);
     const before = pendingCount();
-    const result = await tick(makeCfg(), { dryRun: false });
+    const result = await tick(makeCfg({ foundry: { scanHygiene: true } }), { dryRun: false });
 
     expect(result.reason).toBe('kill-switch');
     expect(result.proposalsCreated).toBe(0);
@@ -258,7 +295,7 @@ describe('H1 daemon-gates — KILL: the kill switch halts the tick immediately',
     expect(repo.isEnrolled()).toBe(true);
 
     fx.setKill(true);
-    const result = await tick(makeCfg(), { dryRun: false });
+    const result = await tick(makeCfg({ foundry: { scanHygiene: true } }), { dryRun: false });
 
     expect(result.reason).toBe('kill-switch');
     expect(result.proposalsCreated).toBe(0);
@@ -271,7 +308,7 @@ describe('H1 daemon-gates — KILL: the kill switch halts the tick immediately',
     expect(listEnrolled()).toEqual([]);
     fx.setKill(true);
 
-    const result = await tick(makeCfg(), { dryRun: false });
+    const result = await tick(makeCfg({ foundry: { scanHygiene: true } }), { dryRun: false });
     expect(result.reason).toBe('kill-switch');
   });
 
@@ -282,7 +319,7 @@ describe('H1 daemon-gates — KILL: the kill switch halts the tick immediately',
     repo.enroll();
     fx.setKill(true);
 
-    const result = await tick(makeCfg(), { dryRun: true });
+    const result = await tick(makeCfg({ foundry: { scanHygiene: true } }), { dryRun: true });
     expect(result.reason).toBe('kill-switch');
     expect(result.itemsConsidered).toBe(0);
     expect(mockRunSwarm).not.toHaveBeenCalled();
@@ -302,7 +339,7 @@ describe('H1 daemon-gates — REAL-TREE-UNCHANGED: a tick never mutates the enro
     // Deliberately NOT enrolled — the tick must touch nothing regardless.
     const before = treeSnapshot(repo);
 
-    await tick(makeCfg(), { dryRun: false });
+    await tick(makeCfg({ foundry: { scanHygiene: true } }), { dryRun: false });
 
     expectTreeUnchanged(before, treeSnapshot(repo));
   });
@@ -318,7 +355,7 @@ describe('H1 daemon-gates — REAL-TREE-UNCHANGED: a tick never mutates the enro
 
     // dryRun => the REAL daemon reports what it WOULD do but dispatches no swarm
     // and creates no proposals: the source tree must stay byte-identical.
-    const result = await tick(makeCfg(), { dryRun: true });
+    const result = await tick(makeCfg({ foundry: { scanHygiene: true } }), { dryRun: true });
 
     expect(result.reason).toBe('dry-run');
     expect(result.proposalsCreated).toBe(0);
@@ -334,7 +371,7 @@ describe('H1 daemon-gates — REAL-TREE-UNCHANGED: a tick never mutates the enro
     fx.setKill(true);
 
     const before = treeSnapshot(repo);
-    const result = await tick(makeCfg(), { dryRun: false });
+    const result = await tick(makeCfg({ foundry: { scanHygiene: true } }), { dryRun: false });
 
     expect(result.reason).toBe('kill-switch');
     expectTreeUnchanged(before, treeSnapshot(repo));
@@ -348,7 +385,7 @@ describe('H1 daemon-gates — REAL-TREE-UNCHANGED: a tick never mutates the enro
     seedSpend(1.0); // == the default cfg cap of 1.0 => exhausted
 
     const before = treeSnapshot(repo);
-    const result = await tick(makeCfg({ daemon: { dailyBudgetUsd: 1.0, perTickItems: 3, parallel: 2, intervalMs: 100 } }), { dryRun: false });
+    const result = await tick(makeCfg({ daemon: { dailyBudgetUsd: 1.0, perTickItems: 3, parallel: 2, intervalMs: 100 }, foundry: { scanHygiene: true } }), { dryRun: false });
 
     expect(result.reason).toBe('budget-exhausted');
     expectTreeUnchanged(before, treeSnapshot(repo));
@@ -365,7 +402,7 @@ describe('H1 daemon-gates — REAL-TREE-UNCHANGED: a tick never mutates the enro
     mockRunSwarm.mockImplementation(makeConcurrencyTrackingSwarm(repo.dir, conc));
 
     const before = treeSnapshot(repo);
-    const result = await tick(makeCfg(), { dryRun: false });
+    const result = await tick(makeCfg({ foundry: { scanHygiene: true } }), { dryRun: false });
 
     // A swarm ran (mocked) and recorded a PENDING proposal — the sole sink.
     expect(mockRunSwarm).toHaveBeenCalled();
@@ -409,7 +446,7 @@ describe('H1 daemon-gates — REAL-TREE-UNCHANGED: a tick never mutates the enro
 
 describe('H1 daemon-gates — BUDGET: a tick that would exceed the daily cap does not start work', () => {
   const cfgCap1 = (): AshlrConfig =>
-    makeCfg({ daemon: { dailyBudgetUsd: 1.0, perTickItems: 3, parallel: 2, intervalMs: 100 } });
+    makeCfg({ daemon: { dailyBudgetUsd: 1.0, perTickItems: 3, parallel: 2, intervalMs: 100 }, foundry: { scanHygiene: true } });
 
   it('returns "budget-exhausted" when todaySpentUsd EQUALS the daily cap', async () => {
     // Real discoverable work exists, but the budget gate fires first.
@@ -495,7 +532,7 @@ describe('H1 daemon-gates — CONCURRENCY + per-tick item cap', () => {
     mockRunSwarm.mockImplementation(makeConcurrencyTrackingSwarm(repo.dir, { current: 0, max: 0 }));
 
     const result = await tick(
-      makeCfg({ daemon: { dailyBudgetUsd: 1.0, perTickItems, parallel: 2, intervalMs: 100 } }),
+      makeCfg({ daemon: { dailyBudgetUsd: 1.0, perTickItems, parallel: 2, intervalMs: 100 }, foundry: { scanHygiene: true } }),
       { dryRun: false },
     );
 
@@ -518,7 +555,7 @@ describe('H1 daemon-gates — CONCURRENCY + per-tick item cap', () => {
 
     const perTickItems = 3;
     const result = await tick(
-      makeCfg({ daemon: { dailyBudgetUsd: 1.0, perTickItems, parallel: 2, intervalMs: 100 } }),
+      makeCfg({ daemon: { dailyBudgetUsd: 1.0, perTickItems, parallel: 2, intervalMs: 100 }, foundry: { scanHygiene: true } }),
       { dryRun: true },
     );
 
@@ -541,7 +578,7 @@ describe('H1 daemon-gates — CONCURRENCY + per-tick item cap', () => {
     mockRunSwarm.mockImplementation(makeConcurrencyTrackingSwarm(repo.dir, conc));
 
     const result = await tick(
-      makeCfg({ daemon: { dailyBudgetUsd: 1.0, perTickItems, parallel, intervalMs: 100 } }),
+      makeCfg({ daemon: { dailyBudgetUsd: 1.0, perTickItems, parallel, intervalMs: 100 }, foundry: { scanHygiene: true } }),
       { dryRun: false },
     );
 

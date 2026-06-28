@@ -82,6 +82,16 @@ vi.mock('../src/core/swarm/runner.js', () => ({
   runSwarm: (...args: unknown[]) => mockRunSwarm(...args),
 }));
 
+// buildBacklog MOCKED so tick() has discoverable work regardless of which
+// scanners are enabled (M160 made scanDeps/scanLint/scanHygiene DEFAULT-OFF).
+// The no-double-spend tests are about crash-recovery / spend accounting —
+// mocking the backlog keeps them focused on the invariants under test without
+// depending on which scanners happen to be enabled.
+const mockBuildBacklog = vi.fn();
+vi.mock('../src/core/portfolio/backlog.js', () => ({
+  buildBacklog: (...args: unknown[]) => mockBuildBacklog(...args),
+}));
+
 // ---------------------------------------------------------------------------
 // Lazy imports — AFTER the mock so the daemon binds to the mocked runSwarm. All
 // of these resolve ~/.ashlr paths via homedir() at CALL time, so the fixture's
@@ -123,7 +133,37 @@ beforeEach(() => {
   // of passing vacuously — the headline risk this milestone exists to disprove.
   expect.hasAssertions();
   mockRunSwarm.mockReset();
+  mockBuildBacklog.mockReset();
   fx = makeFixture();
+  // M160: scanDeps/scanLint/scanHygiene are DEFAULT-OFF, so a real buildBacklog
+  // call returns ~nothing. Seed a synthetic backlog so tick() always has
+  // discoverable work for the spend-accounting invariants under test.
+  //
+  // Use mockImplementation (not mockResolvedValue) so the items carry the
+  // correct repo path at call time — `opts.repos[0]` is the enrolled repo that
+  // tick() passes in, which is only known after fx.makeRepo()+enroll() in each
+  // test. Tests that never reach buildBacklog (budget-exhausted / kill-switch /
+  // no-enrolled-repos gates) never call this mock, so it is inert for them.
+  mockBuildBacklog.mockImplementation(async (opts?: { repos?: string[] }) => {
+    const repoDir = (opts?.repos ?? [])[0] ?? '';
+    const now = new Date().toISOString();
+    return {
+      generatedAt: now,
+      repos: opts?.repos ?? [],
+      items: Array.from({ length: 4 }, (_, i) => ({
+        id: `${repoDir}:h2-item-${i}`,
+        repo: repoDir,
+        source: 'todo' as const,
+        title: `1 marker in src/todo-${i}.ts:2`,
+        detail: `File: src/todo-${i}.ts:2 — "implement f${i}".`,
+        value: 3,
+        effort: 2,
+        score: 1.5,
+        tags: ['todo'],
+        ts: now,
+      })),
+    };
+  });
 });
 
 afterEach(() => {

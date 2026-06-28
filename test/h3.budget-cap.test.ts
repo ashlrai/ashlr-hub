@@ -30,6 +30,16 @@ vi.mock('../src/core/swarm/runner.js', () => ({
   runSwarm: (...args: unknown[]) => mockRunSwarm(...args),
 }));
 
+// buildBacklog MOCKED so tick() has discoverable work regardless of which
+// scanners are enabled (M160 made scanDeps/scanLint/scanHygiene DEFAULT-OFF,
+// so a real buildBacklog call over these repos returns ~nothing). The budget-cap
+// tests are about the accounting / short-circuit logic, not scanner behavior —
+// mocking the backlog keeps them focused on the caps under test.
+const mockBuildBacklog = vi.fn();
+vi.mock('../src/core/portfolio/backlog.js', () => ({
+  buildBacklog: (...args: unknown[]) => mockBuildBacklog(...args),
+}));
+
 // Lazy imports after the mock is registered.
 import { tick } from '../src/core/daemon/loop.js';
 import { loadDaemonState, saveDaemonState } from '../src/core/daemon/state.js';
@@ -38,6 +48,11 @@ import { seedMidTickSpend, today } from './helpers/h2-faults.js';
 import { makeSpendingSwarmStub } from './helpers/h3-stress.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import type { H1Fixture, DisposableRepo } from './helpers/h1-fixture.js';
+
+// Number of synthetic work items — more than any perTickItems cap used in this
+// suite (max is 5) so the per-tick cap, not the item count, is always the
+// binding constraint under test.
+const SEEDED_ITEMS = 8;
 
 let fx: H1Fixture;
 let repo: DisposableRepo;
@@ -54,6 +69,28 @@ beforeEach(() => {
   repo = fx.makeRepo({ files: todoSeedFiles(8) });
   repo.enroll();
   mockRunSwarm.mockReset();
+  mockBuildBacklog.mockReset();
+  // M160: scanDeps/scanLint/scanHygiene are DEFAULT-OFF, so a real buildBacklog
+  // call returns ~nothing. Seed a synthetic backlog so tick() always has
+  // SEEDED_ITEMS (>> any perTickItems cap) of discoverable work, keeping the
+  // budget/selection/concurrency controls under test rather than the scanners.
+  const now = new Date().toISOString();
+  mockBuildBacklog.mockResolvedValue({
+    generatedAt: now,
+    repos: [repo.dir],
+    items: Array.from({ length: SEEDED_ITEMS }, (_, i) => ({
+      id: `${repo.dir}:todo:h3-budget-${i}`,
+      repo: repo.dir,
+      source: 'todo' as const,
+      title: `1 marker in src/todo-${i}.ts:2`,
+      detail: `File: src/todo-${i}.ts:2 — "implement f${i}".`,
+      value: 3,
+      effort: 2,
+      score: 1.5,
+      tags: ['todo'],
+      ts: now,
+    })),
+  });
 });
 
 afterEach(() => {
