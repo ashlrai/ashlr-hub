@@ -75,8 +75,17 @@ export interface RouteDecision {
   reason: string;
 }
 
-/** Frontier backends in preference order — first allowed+installed wins ties. */
-const FRONTIER_PREFERENCE: readonly EngineId[] = ['claude', 'codex'];
+/**
+ * Frontier backends in preference order — first allowed+installed wins ties.
+ *
+ * M195: 'nim' is appended LAST so that when NIM is config-promoted to frontier
+ * (cfg.foundry.nim.tier='frontier' — running Kimi K2 as frontier ammo), it joins
+ * the frontier rotation behind claude/codex. The actual frontier gate is the
+ * resolved tier check in availableFrontier() (engineTierOf === 'frontier'), so a
+ * 'nim' that is NOT promoted (default mid) is silently excluded here and still
+ * routed via MID_PREFERENCE — byte-identical to pre-M195 for unpromoted NIM.
+ */
+const FRONTIER_PREFERENCE: readonly string[] = ['claude', 'codex', 'nim'];
 
 /**
  * M115: Mid-tier backends in preference order. Typed as string[] because
@@ -141,6 +150,31 @@ function availableFrom(preference: readonly string[], cfg: AshlrConfig): EngineI
 }
 
 /**
+ * M195: frontier candidates = FRONTIER_PREFERENCE entries that are allowed,
+ * installed, AND resolve to tier 'frontier'. The resolved-tier gate is what lets
+ * 'nim' join the frontier rotation ONLY when promoted via cfg.foundry.nim.tier=
+ * 'frontier' (engineTierOf reads the merged registry incl. the nim override).
+ * An unpromoted (default mid) 'nim' is excluded here and handled by the mid path.
+ * For claude/codex this is identical to the pre-M195 list (both are frontier).
+ */
+function availableFrontier(cfg: AshlrConfig): EngineId[] {
+  return availableFrom(FRONTIER_PREFERENCE, cfg).filter(
+    (e) => engineTierOf(e, cfg) === 'frontier',
+  );
+}
+
+/**
+ * M195: mid candidates = MID_PREFERENCE entries that are allowed + installed,
+ * EXCLUDING any that resolved to frontier (e.g. a frontier-promoted 'nim' must
+ * not be double-counted as a mid backend — it belongs to the frontier rotation).
+ */
+function availableMid(cfg: AshlrConfig): EngineId[] {
+  return availableFrom(MID_PREFERENCE, cfg).filter(
+    (e) => engineTierOf(e, cfg) !== 'frontier',
+  );
+}
+
+/**
  * Pick one backend deterministically from a list. With one candidate returns
  * it directly; with multiple alternates by stable hash of item.id (no clock,
  * no randomness). Returns null when the list is empty.
@@ -163,9 +197,14 @@ function isFrontierItem(item: WorkItem): boolean {
   return effort >= FRONTIER_EFFORT_THRESHOLD || score >= FRONTIER_SCORE_THRESHOLD;
 }
 
-/** Build a decision for a concrete backend, deriving its tier. */
-function decide(backend: EngineId, reason: string): Omit<RouteDecision, 'model'> {
-  return { backend, tier: engineTierOf(backend), reason };
+/**
+ * Build a decision for a concrete backend, deriving its tier.
+ * M195: thread cfg so a config-promoted backend (e.g. cfg.foundry.nim.tier=
+ * 'frontier') reports its RESOLVED tier — not the static builtin tier. Without
+ * a cfg the resolved tier equals the builtin tier (byte-identical to pre-M195).
+ */
+function decide(backend: EngineId, reason: string, cfg?: AshlrConfig): Omit<RouteDecision, 'model'> {
+  return { backend, tier: engineTierOf(backend, cfg), reason };
 }
 
 /**
@@ -199,8 +238,8 @@ function buildRoutingContext(
  *  4. Neither → builtin (0-diff, better than nothing).
  */
 export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
-  const frontiers = availableFrom(FRONTIER_PREFERENCE, cfg);
-  const mids = availableFrom(MID_PREFERENCE, cfg);
+  const frontiers = availableFrontier(cfg);
+  const mids = availableMid(cfg);
   const ctx = buildRoutingContext(frontiers, mids);
 
   // ── 1. Frontier for hard/escalation items (+ substantive under quality policy) ─
@@ -229,7 +268,7 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
     const modelSuffix = modelTag ? ` [model:${modelTag}]` : '';
 
     return {
-      ...decide(chosen, `${engineReason}${modelSuffix}`),
+      ...decide(chosen, `${engineReason}${modelSuffix}`, cfg),
       model: modelTag,
     };
   }
@@ -248,7 +287,7 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
     const modelSuffix = modelTag ? ` [model:${modelTag}]` : '';
 
     return {
-      ...decide(chosen, `${baseReason}${modelSuffix}`),
+      ...decide(chosen, `${baseReason}${modelSuffix}`, cfg),
       model: modelTag,
     };
   }
@@ -266,14 +305,14 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
     const modelSuffix = modelTag ? ` [model:${modelTag}]` : '';
 
     return {
-      ...decide(chosen, `${baseReason}${modelSuffix}`),
+      ...decide(chosen, `${baseReason}${modelSuffix}`, cfg),
       model: modelTag,
     };
   }
 
   // ── 4. Last resort: builtin (0-diff, plans only) ──────────────────────────
   return {
-    ...decide('builtin', `no external backend allowed+installed → builtin (source=${item.source})`),
+    ...decide('builtin', `no external backend allowed+installed → builtin (source=${item.source})`, cfg),
     model: null,
   };
 }

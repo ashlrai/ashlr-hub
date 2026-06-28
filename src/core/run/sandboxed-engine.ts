@@ -56,6 +56,9 @@ import { withToolEnv } from '../env-bridge.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { selectInboxStore } from '../seams/inbox.js';
 import { hashDiff, signProvenance } from '../foundry/provenance.js';
+// M195: resolve api-model keys (e.g. NVIDIA_NIM_API_KEY) via the engine-auth
+// mechanism — phantom vault first, then process.env. Never logs the value.
+import { resolveProviderKey } from '../integrations/secrets.js';
 
 export interface SandboxedEngineResult {
   /** Delegated RunState (status/usage/engineModel/engineTier). */
@@ -138,7 +141,16 @@ const CRED_ENV_DENY =
 
 /** The agent CLIs' OWN headless auth tokens. These ARE the engine's subscription
  * credential (e.g. `claude setup-token` exports CLAUDE_CODE_OAUTH_TOKEN) — not a
- * third-party secret — so they must survive CRED_ENV_DENY and reach the engine. */
+ * third-party secret — so they must survive CRED_ENV_DENY and reach the engine.
+ *
+ * M195 (NVIDIA NIM / Kimi K2): NVIDIA_NIM_API_KEY is DELIBERATELY NOT listed here.
+ * NIM is an api-model engine driven IN-PROCESS by runApiModelSandboxed (below) —
+ * it never spawns a CLI subprocess, so its bearer key must never be exported into
+ * a subprocess env. The key is resolved in-process at dispatch time via the
+ * engine-auth mechanism resolveProviderKey() (phantom vault → process.env), used
+ * over the wire as an `Authorization: Bearer` header by buildOpenAICompatibleClient
+ * and never logged. CRED_ENV_DENY correctly STRIPS NVIDIA_NIM_API_KEY from every
+ * spawned cli-agent subprocess — that is the intended containment, not a gap. */
 const ENGINE_AUTH_ALLOW = new Set(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN']);
 
 /**
@@ -519,7 +531,10 @@ export async function runApiModelSandboxed(
     const baseUrl = (baseUrlEnv && process.env[baseUrlEnv]?.trim()) ||
       spec.api.defaultBaseUrl ||
       'http://localhost:11434/v1';
-    const apiKey = (spec.api.envKey && process.env[spec.api.envKey]?.trim()) || '';
+    // M195: source the bearer key via the engine-auth mechanism (phantom vault
+    // first, then process.env) so NVIDIA_NIM_API_KEY etc. work whether stored in
+    // the phantom vault or the raw env. The VALUE is never logged or returned.
+    const apiKey = (spec.api.envKey && resolveProviderKey(spec.api.envKey, cfg)?.trim()) || '';
 
     // qwen2.5:72b confirms tool_calls — treat all local-coder models as tool-capable.
     const supportsTools = true;

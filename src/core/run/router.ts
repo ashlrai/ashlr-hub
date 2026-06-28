@@ -30,6 +30,9 @@ import {
 import { withinLimit } from '../fleet/quota.js';
 import { subscriptionAllows } from '../fleet/subscription-usage.js';
 import type { EngineId } from '../types.js';
+// M195: read RESOLVED engine tier (honors cfg.foundry.nim frontier promotion).
+// Imported from the registry (not sandboxed-engine.ts) to avoid an import cycle.
+import { resolveEngineSpec } from './engine-registry.js';
 
 // ---------------------------------------------------------------------------
 // Cloud provider env-key map — detection only, values are NEVER read/logged.
@@ -531,6 +534,15 @@ export function routeTask(
       const codexHard = tryEngine('codex', null, `${hardLabel} → codex (hard)`);
       if (codexHard) return codexHard;
 
+      // M195: NIM as frontier ammo (e.g. Kimi K2) — only when 'nim' is
+      // config-promoted to frontier (cfg.foundry.nim.tier='frontier'). Gated on
+      // the RESOLVED tier so a default-mid nim is NOT pulled into the frontier
+      // hard-path (it is still routed via the mid/bulk paths below, unchanged).
+      if (resolveEngineSpec('nim' as EngineId, cfg)?.tier === 'frontier') {
+        const nimHard = tryEngine('nim' as EngineId, null, `${hardLabel} → nim (frontier ammo, e.g. Kimi K2)`);
+        if (nimHard) return nimHard;
+      }
+
       // Frontier unavailable — fall to local 72b
       const local72b = tryEngine(
         'local-coder' as EngineId,
@@ -681,9 +693,19 @@ const ESCALATION_TIER_ORDER: readonly string[] = ['local', 'mid', 'frontier'];
 
 /**
  * Which tier a TaskRouteDecision's engine belongs to for cascade purposes.
- * Mirrors engineTierOf without importing sandboxed-engine.ts.
+ *
+ * M195: cfg-aware. When a cfg is supplied it reads the RESOLVED tier from the
+ * engine registry (engineTierOf), so a config-promoted 'nim' (cfg.foundry.nim
+ * .tier='frontier', running Kimi K2) is correctly treated as frontier in the
+ * cascade. Without a cfg it falls back to the static pre-M195 mapping
+ * (builtin/local-coder/nim → local/mid, else frontier) for byte-identical
+ * behaviour on the legacy callers that don't thread a cfg.
  */
-function engineTierLabel(engine: EngineId): 'local' | 'mid' | 'frontier' {
+function engineTierLabel(engine: EngineId, cfg?: AshlrConfig): 'local' | 'mid' | 'frontier' {
+  if (cfg) {
+    const tier = resolveEngineSpec(engine, cfg)?.tier;
+    if (tier === 'frontier' || tier === 'mid' || tier === 'local') return tier;
+  }
   if (engine === 'builtin') return 'local';
   if ((engine as string) === 'local-coder' || (engine as string) === 'nim') return 'mid';
   return 'frontier';
@@ -937,17 +959,21 @@ export function routeTaskCascade(
       ...base,
       attempt: 1,
       cheapFirst: false,
-      tierLabel: engineTierLabel(base.engine),
+      tierLabel: engineTierLabel(base.engine, cfg),
     };
   }
 
   // ── Escalation re-dispatch: honor forceTier ────────────────────────────────
   if (forceTier !== undefined) {
     // Build a context filtered to only engines at the requested tier.
+    // M195: 'nim' appears under BOTH mid and frontier — its EFFECTIVE tier is
+    // resolved per-cfg by engineTierLabel/routeTask, so listing it here only
+    // makes it a CANDIDATE for that tier; a non-frontier-promoted nim won't be
+    // selected as frontier (its resolved tier stays 'mid').
     const tierEngines: Record<string, EngineId[]> = {
       local: ['builtin' as EngineId],
       mid: ['local-coder' as EngineId, 'nim' as EngineId],
-      frontier: ['claude' as EngineId, 'codex' as EngineId],
+      frontier: ['claude' as EngineId, 'codex' as EngineId, 'nim' as EngineId],
     };
     const preferredEngines = tierEngines[forceTier] ?? [];
     // Narrow context to requested tier engines still in availableEngines.
@@ -963,7 +989,7 @@ export function routeTaskCascade(
       ...base,
       attempt,
       cheapFirst: false,
-      tierLabel: engineTierLabel(base.engine),
+      tierLabel: engineTierLabel(base.engine, cfg),
     };
   }
 
@@ -986,7 +1012,7 @@ export function routeTaskCascade(
       ...base,
       attempt,
       cheapFirst: false,
-      tierLabel: engineTierLabel(base.engine),
+      tierLabel: engineTierLabel(base.engine, cfg),
     };
   }
 
@@ -995,9 +1021,9 @@ export function routeTaskCascade(
     // Put local engines first to bias routeTask's "available" ordering toward free local.
     availableEngines: [
       ...ctx.availableEngines.filter(
-        (e) => engineTierLabel(e) === 'local' || engineTierLabel(e) === 'mid',
+        (e) => engineTierLabel(e, cfg) === 'local' || engineTierLabel(e, cfg) === 'mid',
       ),
-      ...ctx.availableEngines.filter((e) => engineTierLabel(e) === 'frontier'),
+      ...ctx.availableEngines.filter((e) => engineTierLabel(e, cfg) === 'frontier'),
     ],
   };
 
@@ -1016,7 +1042,7 @@ export function routeTaskCascade(
   };
 
   const base = routeTask(item, cheapCfg, cheapCtx);
-  const tierLabel = engineTierLabel(base.engine);
+  const tierLabel = engineTierLabel(base.engine, cfg);
 
   return {
     ...base,

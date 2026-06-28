@@ -25,6 +25,10 @@ const CLOUD_PROVIDERS = new Set([
   'mistral',
   'azure',
   'nvidia_nim',
+  // M195: NVIDIA NIM running Kimi K2 (frontier-class coding ammo). Distinct id
+  // from 'nvidia_nim' so it can default to the Kimi model id while reusing the
+  // SAME NVIDIA_NIM_API_KEY + base URL (NIM serves moonshotai/kimi-k2-instruct).
+  'nvidia_nim_kimi',
   'moonshot',
   'kimi',
   'hermes_api',
@@ -39,6 +43,8 @@ const CLOUD_PROVIDER_ENV: Record<string, string> = {
   mistral: 'MISTRAL_API_KEY',
   azure: 'AZURE_OPENAI_API_KEY',
   nvidia_nim: 'NVIDIA_NIM_API_KEY',
+  // M195: NIM-hosted Kimi K2 reuses the same NVIDIA NIM bearer key.
+  nvidia_nim_kimi: 'NVIDIA_NIM_API_KEY',
   moonshot: 'MOONSHOT_API_KEY',
   kimi: 'MOONSHOT_API_KEY',
   hermes_api: 'HERMES_API_KEY',
@@ -47,6 +53,8 @@ const CLOUD_PROVIDER_ENV: Record<string, string> = {
 // Base URLs for OpenAI-compatible cloud providers (override via *_BASE_URL env).
 const CLOUD_PROVIDER_BASE_URL: Record<string, string> = {
   nvidia_nim: 'https://integrate.api.nvidia.com/v1',
+  // M195: NIM base URL — verified live 2026-06 (POST /v1/chat/completions).
+  nvidia_nim_kimi: 'https://integrate.api.nvidia.com/v1',
   moonshot: 'https://api.moonshot.ai/v1',
   kimi: 'https://api.moonshot.ai/v1',
   hermes_api: 'https://openrouter.ai/api/v1',
@@ -55,6 +63,7 @@ const CLOUD_PROVIDER_BASE_URL: Record<string, string> = {
 // Base-URL override env vars (e.g. NVIDIA_NIM_BASE_URL).
 const CLOUD_PROVIDER_BASE_URL_ENV: Record<string, string> = {
   nvidia_nim: 'NVIDIA_NIM_BASE_URL',
+  nvidia_nim_kimi: 'NVIDIA_NIM_BASE_URL',
   moonshot: 'MOONSHOT_BASE_URL',
   kimi: 'MOONSHOT_BASE_URL',
   hermes_api: 'HERMES_API_BASE_URL',
@@ -63,6 +72,8 @@ const CLOUD_PROVIDER_BASE_URL_ENV: Record<string, string> = {
 // Default models for OpenAI-compatible cloud providers.
 const CLOUD_PROVIDER_DEFAULT_MODEL: Record<string, string> = {
   nvidia_nim: 'meta/llama-3.1-70b-instruct',
+  // M195: Kimi K2 instruct — verified live on the NIM model catalog 2026-06.
+  nvidia_nim_kimi: 'moonshotai/kimi-k2-instruct',
   moonshot: 'kimi-k2-0711-preview',
   kimi: 'kimi-k2-0711-preview',
   hermes_api: 'nousresearch/hermes-3-llama-3.1-70b',
@@ -71,6 +82,7 @@ const CLOUD_PROVIDER_DEFAULT_MODEL: Record<string, string> = {
 /** Provider ids that speak the OpenAI /v1/chat/completions protocol. */
 const OPENAI_COMPAT_CLOUD_PROVIDERS = new Set([
   'nvidia_nim',
+  'nvidia_nim_kimi',
   'moonshot',
   'kimi',
   'hermes_api',

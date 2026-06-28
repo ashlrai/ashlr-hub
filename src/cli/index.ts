@@ -294,6 +294,14 @@ const loadTuiCmd = lazyCmd(
   'tui command requires src/cli/tui.ts (M13 module not yet built).',
 );
 
+// ─── M194 frontier-usage command loader ──────────────────────────────────────
+
+const loadUsageCmd = lazyCmd(
+  () => import('./usage.js' as unknown as string),
+  (m) => m.cmdUsage as Cmd,
+  'usage command requires src/cli/usage.ts (M194 module not yet built).',
+);
+
 // ─── M14 command loader ────────────────────────────────────────────
 
 const loadServeCmd = lazyCmd(
@@ -1834,6 +1842,13 @@ async function main(): Promise<void> {
         // M181: generative engine — invent bold, net-new features for a repo.
         const cmdInvent = await loadInventCmd();
         process.exitCode = await cmdInvent(rest);
+        break;
+      }
+
+      case 'usage': {
+        // M194: frontier usage table — per-engine calls/tokens/cost + window state.
+        const cmdUsage = await loadUsageCmd();
+        process.exitCode = await cmdUsage(rest);
         break;
       }
 

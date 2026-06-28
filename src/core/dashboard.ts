@@ -64,6 +64,8 @@ import { pendingCount as inboxPendingCount } from './inbox/store.js';
 // if core/daemon/state.ts is absent (e.g. earlier milestone) it degrades to
 // undefined via the try/catch below.
 import { loadDaemonState } from './daemon/state.js';
+import { getFrontierUsageSync } from './usage/frontier-usage.js';
+import type { FrontierUsage } from './usage/frontier-usage.js';
 
 // ---------------------------------------------------------------------------
 // Caps — keep snapshot fast and memory-bounded
@@ -443,6 +445,18 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
     // Degrade to zeroed fields — daemon not yet initialised.
   }
 
+  // ── M194 frontier usage roll-up ──────────────────────────────────────────
+  // getFrontierUsageSync reads the quota ledger + codex session files +
+  // observability rollup — all bounded, synchronous, never-throws. Wrapped
+  // defensively so a broken usage source cannot affect the base snapshot.
+  let frontierUsage: FrontierUsage | undefined;
+  try {
+    frontierUsage = getFrontierUsageSync(cfg);
+  } catch {
+    // Leave undefined — absent => "not populated".
+    frontierUsage = undefined;
+  }
+
   // ── M29 portfolio roll-up (OPTIONAL org view) ────────────────────────────
   // Runs after all base sections. READ-ONLY aggregation, enrollment-scoped,
   // never-throws — buildPortfolio wraps every sub-source and degrades to its
@@ -493,5 +507,8 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
     // could not be built, so existing producers/tests (which never set it)
     // stay valid and `portfolio === undefined` reads as "not populated".
     ...(portfolio !== undefined ? { portfolio } : {}),
+    // M194: OPTIONAL frontier usage section — omitted when not populated so
+    // pre-M194 tests (which never set it) stay valid.
+    ...(frontierUsage !== undefined ? { frontierUsage } : {}),
   };
 }

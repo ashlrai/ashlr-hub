@@ -149,6 +149,14 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
   // Default model: meta/llama-3.1-70b-instruct (strong open model, mid tier).
   // Env: NVIDIA_NIM_API_KEY (set via: phantom add NVIDIA_NIM_API_KEY)
   // Base URL override: NVIDIA_NIM_BASE_URL
+  //
+  // M195: this builtin entry stays tier 'mid' (M50 invariant: no builtin entry
+  // is frontier except claude/codex). To run NIM as FRONTIER-class ammo (e.g.
+  // Kimi K2 — moonshotai/kimi-k2-instruct), set cfg.foundry.nim = { tier:
+  // 'frontier', model: 'moonshotai/kimi-k2-instruct' }. applyNimConfig() (below)
+  // folds that into the resolved 'nim' spec — so engineTierOf('nim', cfg) returns
+  // 'frontier' and the routers add it to the frontier rotation, WITHOUT mutating
+  // the builtin roster. Absent cfg.foundry.nim ⇒ this exact mid-tier spec.
   nim: {
     id: 'nim',
     kind: 'api-model',
@@ -299,9 +307,50 @@ function isValidSpec(spec: unknown): spec is EngineSpec {
 }
 
 /**
+ * M195: fold a `cfg.foundry.nim` block into the resolved 'nim' EngineSpec.
+ *
+ * This is the high-level, typed activation surface for the NVIDIA NIM backend
+ * (running Kimi K2 as frontier-tier ammo). It is purely a CONVENIENCE over
+ * `cfg.foundry.engines.nim`: it lets Mason promote NIM to frontier and point it
+ * at the Kimi model with a small `nim: { tier, model, baseUrl }` block instead
+ * of hand-writing a full EngineSpec.
+ *
+ * Precedence: an explicit `cfg.foundry.engines.nim` ALWAYS wins (it has already
+ * been merged into `spec` before this runs) — we only fill from cfg.foundry.nim.
+ * The API KEY is never read here; only its env-var NAME flows through.
+ *
+ * Returns a new spec (never mutates the builtin). Absent cfg.foundry.nim ⇒ the
+ * input spec is returned unchanged (byte-identical to pre-M195).
+ */
+function applyNimConfig(spec: EngineSpec, cfg?: AshlrConfig): EngineSpec {
+  const nim = cfg?.foundry?.nim;
+  if (!nim || typeof nim !== 'object' || spec.kind !== 'api-model' || !spec.api) {
+    return spec;
+  }
+  const tier = VALID_TIERS.has(nim.tier as string) ? (nim.tier as EngineTier) : spec.tier;
+  return {
+    ...spec,
+    tier,
+    api: {
+      ...spec.api,
+      envKey: (typeof nim.apiKeyEnv === 'string' && nim.apiKeyEnv) || spec.api.envKey,
+      defaultBaseUrl:
+        (typeof nim.baseUrl === 'string' && nim.baseUrl) || spec.api.defaultBaseUrl,
+      defaultModel:
+        (typeof nim.model === 'string' && nim.model) || spec.api.defaultModel,
+    },
+  };
+}
+
+/**
  * Resolve the effective engine roster: the built-in registry with any
  * `cfg.foundry.engines` entries merged over it. Malformed added entries are
  * dropped (never fatal, never defaulted to frontier). Returns a fresh object.
+ *
+ * M195: after the `cfg.foundry.engines` merge, the high-level `cfg.foundry.nim`
+ * block (if present) is folded into the resolved 'nim' spec via applyNimConfig —
+ * letting NIM be promoted to frontier (Kimi K2 ammo) without touching the
+ * builtin roster. `cfg.foundry.engines.nim` still wins (already merged above).
  */
 export function resolveEngineRegistry(cfg?: AshlrConfig): Record<string, EngineSpec> {
   const merged: Record<string, EngineSpec> = { ...BUILTIN_ENGINE_REGISTRY };
@@ -312,6 +361,11 @@ export function resolveEngineRegistry(cfg?: AshlrConfig): Record<string, EngineS
       const candidate = { ...(spec as EngineSpec), id: (spec as EngineSpec)?.id ?? key };
       if (isValidSpec(candidate)) merged[key] = candidate;
     }
+  }
+  // M195: high-level cfg.foundry.nim convenience override (frontier promotion +
+  // Kimi model id). No-op when cfg.foundry.nim is absent.
+  if (merged['nim']) {
+    merged['nim'] = applyNimConfig(merged['nim'], cfg);
   }
   return merged;
 }

@@ -153,6 +153,47 @@ export interface AshlrConfig {
      */
     engines?: Record<string, EngineSpec>;
     /**
+     * M195: NVIDIA NIM backend config (OpenAI-compatible cloud inference).
+     *
+     * Lets the 'nim' engine run a frontier-class open model — e.g. Kimi K2
+     * (strong at coding) — as additional frontier-tier ammo. ENTIRELY OPT-IN:
+     * the 'nim' engine is only active when ALL of the following hold:
+     *   1. 'nim' is listed in cfg.foundry.allowedBackends, AND
+     *   2. this `nim` block (or the equivalent NVIDIA_NIM_* env vars) is present, AND
+     *   3. the API key resolves (NVIDIA_NIM_API_KEY via phantom vault or env).
+     * Absent ⇒ zero effect; the fleet behaves exactly as before.
+     *
+     * The API key is NEVER stored here and NEVER logged — only the env var NAME
+     * holding it is referenced. The key is resolved at dispatch time from the
+     * phantom vault (preferred) or process.env, exactly like other cloud engines.
+     */
+    nim?: {
+      /**
+       * OpenAI-compatible base URL. Default 'https://integrate.api.nvidia.com/v1'.
+       * Verified live (2026-06): NIM exposes POST /v1/chat/completions at
+       * https://integrate.api.nvidia.com. Override env: NVIDIA_NIM_BASE_URL.
+       */
+      baseUrl?: string;
+      /**
+       * Model id to run. Default 'moonshotai/kimi-k2-instruct' (Kimi K2 — strong
+       * coding/agentic frontier-class open model, verified live on the NIM
+       * catalog 2026-06). Any NIM-hosted OpenAI-compat model id is accepted.
+       */
+      model?: string;
+      /**
+       * Env var NAME holding the bearer API key. Default 'NVIDIA_NIM_API_KEY'.
+       * The VALUE is never read into config or logs — only resolved at dispatch.
+       */
+      apiKeyEnv?: string;
+      /**
+       * Trust tier for routing. Default 'frontier' so NIM/Kimi-K2 is usable as
+       * frontier-tier ammo (branch-eligible AND merge-authority-eligible like
+       * claude/codex). Set 'mid' to keep it branch-only (no main-merge authority).
+       * This is the single switch that promotes 'nim' into the frontier rotation.
+       */
+      tier?: EngineTier;
+    };
+    /**
      * M124: backlog value filter. Items with value < minItemValue are dropped
      * before the daemon selects work. Default 2 (drops value-1 trivia).
      * Set to 1 to disable the gate; set to 3+ to raise the bar further.
@@ -1664,6 +1705,12 @@ export interface DashboardSnapshot {
    * enrollment-scoped sections empty with NO portfolio disk scan.
    */
   portfolio?: PortfolioSummary;
+  /**
+   * M194: OPTIONAL per-engine frontier usage roll-up (calls, tokens, cost,
+   * window state). Absent on pre-M194 producers/tests (so they stay valid);
+   * populated by buildSnapshot via getFrontierUsageSync. READ-ONLY.
+   */
+  frontierUsage?: import('./usage/frontier-usage.js').FrontierUsage;
 }
 
 /**
