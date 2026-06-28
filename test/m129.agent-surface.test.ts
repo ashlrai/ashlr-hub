@@ -179,11 +179,12 @@ describe('ashlr_oversight', () => {
 // ---------------------------------------------------------------------------
 
 describe('ashlr_routing', () => {
-  it('returns an array (empty ok) on empty decisions ledger', async () => {
+  it('returns { recent, modelSplit } (empty ok) on empty decisions ledger', async () => {
     const r = await callNativeTool('ashlr_routing', {});
     expect(r.isError).toBeUndefined();
-    const payload = resultJson(r);
-    expect(Array.isArray(payload)).toBe(true);
+    const payload = resultJson(r) as { recent: unknown[]; modelSplit: Record<string, number> };
+    expect(Array.isArray(payload.recent)).toBe(true);
+    expect(typeof payload.modelSplit).toBe('object');
   });
 
   it('never throws on missing decisions dir', async () => {
@@ -194,8 +195,8 @@ describe('ashlr_routing', () => {
   it('respects limit argument', async () => {
     const r = await callNativeTool('ashlr_routing', { limit: 5 });
     expect(r.isError).toBeUndefined();
-    const payload = resultJson(r) as unknown[];
-    expect(payload.length).toBeLessThanOrEqual(5);
+    const payload = resultJson(r) as { recent: unknown[]; modelSplit: Record<string, number> };
+    expect(payload.recent.length).toBeLessThanOrEqual(5);
   });
 
   it('rejects non-number limit', async () => {
@@ -257,12 +258,14 @@ describe('GET /api/fleet-state', () => {
     expect('routing' in payload).toBe(true);
   });
 
-  it('routing section is an array', async () => {
+  it('routing section has recent array and modelSplit object', async () => {
     const cfg = makeCfg();
     const { res, body } = makeRes();
     await handleApi(makeReq(), res, cfg, { token: 'test', allowDispatch: false });
     const payload = body() as Record<string, unknown>;
-    expect(Array.isArray(payload['routing'])).toBe(true);
+    const routing = payload['routing'] as { recent: unknown[]; modelSplit: Record<string, number> };
+    expect(Array.isArray(routing.recent)).toBe(true);
+    expect(typeof routing.modelSplit).toBe('object');
   });
 
   it('does not require auth token (read-only endpoint)', async () => {

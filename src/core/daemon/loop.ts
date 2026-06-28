@@ -959,6 +959,30 @@ export async function tick(
     }).catch(() => undefined);
   }
 
+  // ── Phase H: fleet→pulse ROUND-TRIP (cloud orchestrates, local executes). ──
+  // On each live tick: emit a 'tick' heartbeat span, then POLL the cloud's
+  // fleet_command queue (read-scoped PAT), CLAIM + APPLY each pending command
+  // LOCALLY (assign_goal→createGoal / approve|reject_proposal→inbox setStatus /
+  // enroll_repo→enrollment), PATCH the metadata-only outcome back, and ship
+  // enrolled-repo dependency edges as `deps` spans.
+  //
+  // FULLY GATED + NO-THROW: pulse-sync is a complete no-op unless BOTH a Pulse
+  // endpoint (PULSE_URL / cfg.pulse.endpoint) AND a PAT (PULSE_FLEET_PAT /
+  // ASHLR_PULSE_*) are configured. It performs NO outward git action of its own
+  // — assign_goal only PLANS, approve_proposal only flips a proposal's STATUS
+  // (the diff is NOT applied here), enroll_repo only adds to the registry — so
+  // the daemon's enrollment / kill-switch / proposal-only floor is unweakened.
+  // LAZY-imported (keeps loop.ts's static outward-primitive grep-guards intact)
+  // and fire-and-forget so a Pulse outage never blocks or breaks the tick.
+  // DRY-RUN never reaches here (it returns earlier), so this only runs live.
+  void import('../integrations/pulse-sync.js').then(async ({ runPulseSync }) => {
+    try {
+      await runPulseSync(cfg, { tickTs: tickRecord.ts });
+    } catch {
+      // Best-effort — the round-trip must never crash the daemon.
+    }
+  }).catch(() => undefined);
+
   audit({
     action: 'daemon:tick',
     repo: null,
@@ -1282,6 +1306,7 @@ export function buildItemGoal(item: WorkItem): string {
   if (item.source) anchor.push(`Source: ${item.source}`);
   if (item.tags && item.tags.length > 0) anchor.push(`Tags: ${item.tags.join(', ')}`);
   if (anchor.length > 0) parts.push(anchor.join(' | '));
+
 
   // Behavioral guidance — focused diff OR clean no-op. Keep it tight; the
   // executor role and TITRR already provide broader context.
