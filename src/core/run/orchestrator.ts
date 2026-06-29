@@ -1415,13 +1415,17 @@ export async function runGoal(
   // strategist model SELECTS it — otherwise the planner/synthesis calls hit local
   // Ollama, time out, and fall back to degraded plans (blocking goal advancement).
   // Flag-off (no allowCloud) keeps the prior default client byte-identical.
-  const strategistModel = (cfg.foundry as Record<string, unknown> | undefined)?.[
-    'strategistModel'
-  ] as string | undefined;
+  // M226c: claude-opus-4-8 is NOT a reachable chat client (no Anthropic API key —
+  // the claude engine is a CLI spawn, not a chat provider; getActiveClient sends
+  // unknown models to Ollama → HTTP 404 → degraded local fallback plans). The
+  // reachable FRONTIER chat provider is NVIDIA NIM-hosted Kimi K2
+  // (nvidia_nim_kimi: NVIDIA_NIM_API_KEY, OpenAI-compatible, defaults to
+  // moonshotai/kimi-k2.6). Route planner+synthesis there under allowCloud so goal
+  // milestones are frontier-planned. Flag-off (no allowCloud) keeps the local default.
   const client = await getActiveClient(
     cfg,
-    allowCloud && strategistModel
-      ? { allowCloud, model: strategistModel }
+    allowCloud
+      ? { allowCloud, provider: 'nvidia_nim_kimi' }
       : { allowCloud },
   );
 
