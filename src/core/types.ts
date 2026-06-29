@@ -227,6 +227,15 @@ export interface AshlrConfig {
      */
     scanHygiene?: boolean;
     /**
+     * M222: goal→milestones auto-planning. DEFAULT true (on). When true,
+     * scanGoals lazily calls the FRONTIER strategist to decompose active goals
+     * that have zero milestones into 3-6 concrete, independently-shippable
+     * milestones before emitting work items. Each expansion runs once per goal
+     * per daemon tick (in-process cache). Set false to restore pre-M222
+     * behavior: goals without milestones are silently skipped (emit nothing).
+     */
+    goalPlanning?: boolean;
+    /**
      * M167: headless browser verification of web-app renders after a diff.
      * DEFAULT false (opt-in — doubles verify time for UI repos). When true,
      * `verifyInBrowser` starts the dev server, navigates a headless browser,

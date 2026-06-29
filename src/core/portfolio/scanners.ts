@@ -22,6 +22,7 @@ import type { WorkItem, WorkSource, AshlrConfig } from '../types.js';
 import { listIssues, githubStatus } from '../integrations/github.js';
 import { isTrivialItem, isNonCodePath } from './value-filter.js';
 import { listGoals } from '../goals/store.js';
+import { expandGoalToMilestones } from '../strategy/goal-planner.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1434,7 +1435,14 @@ export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'
     if (active.length === 0) return [];
 
     const items: WorkItem[] = [];
-    for (const goal of active) {
+    for (let goal of active) {
+      // M222: lazily expand goals with zero milestones via the frontier
+      // strategist (flag-gated: cfg.foundry?.goalPlanning !== false).
+      // expandGoalToMilestones never throws; it is a no-op when flag-off.
+      if (goal.milestones.length === 0 && _cfg) {
+        goal = await expandGoalToMilestones(goal, _cfg, repo);
+      }
+
       // Find the next actionable milestone: first pending or in-progress milestone
       // in order (sortMilestones has already sorted by `order` ascending).
       const next = goal.milestones.find(
