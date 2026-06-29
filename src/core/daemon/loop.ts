@@ -615,6 +615,8 @@ export async function tick(
         await bisectAndRevert(liveCfg);
         // M212: fire-and-forget anomaly notification — additive, never throws.
         void notifyFleetEvent('anomaly', { detail: 'Regression detected — bisect/revert triggered' }, liveCfg);
+        // M241: fire-and-forget fleet event-bus emit — additive, never throws, no control-flow change.
+        void import('../fleet/event-bus.js').then(({ emit }) => emit('regression:detected', { signal: r.signal, repo: process.cwd() }, liveCfg)).catch(() => {});
       }
     } catch (err) { console.warn('[ashlr] daemon:tick regressionSentinel failed:', (err as Error)?.message ?? err); }
   }

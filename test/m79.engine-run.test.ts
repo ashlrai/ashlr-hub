@@ -134,11 +134,11 @@ describe('spawnEngine — phantomWrap gate (behavior-based)', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('no .phantom.toml → spawnEngine runs engine directly (error is NOT about phantom)', () => {
+  it('no .phantom.toml → spawnEngine runs engine directly (error is NOT about phantom)', async () => {
     // nonexistent-engine-xyz will fail with ENOENT, not with phantom's init error.
     const cmd: EngineCommand = { bin: 'nonexistent-engine-xyz-m79', args: ['--goal', 'hi'], cwd: tmpDir };
     const cfg = makeConfig({ phantom: { enabled: true } } as AshlrConfig);
-    const result = spawnEngine(cmd, cfg);
+    const result = await spawnEngine(cmd, cfg);
     // Must fail (binary absent) but NOT with phantom's "No .phantom.toml found" message
     expect(result.ok).toBe(false);
     expect(result.error).toBeDefined();
@@ -146,13 +146,13 @@ describe('spawnEngine — phantomWrap gate (behavior-based)', () => {
     expect(result.error).not.toMatch(/Run phantom init/i);
   });
 
-  it('.phantom.toml present → spawnEngine wraps via phantom (error IS from phantom)', () => {
+  it('.phantom.toml present → spawnEngine wraps via phantom (error IS from phantom)', async () => {
     withPhantomToml(tmpDir);
     // inner engine doesnt exist; phantom will launch and try to exec it
     // but phantom itself must be invoked (the outer binary is phantom)
     const cmd: EngineCommand = { bin: 'nonexistent-engine-xyz-m79', args: ['--goal', 'hi'], cwd: tmpDir };
     const cfg = makeConfig({ phantom: { enabled: true } } as AshlrConfig);
-    const result = spawnEngine(cmd, cfg);
+    const result = await spawnEngine(cmd, cfg);
     // phantom runs but the inner binary is absent; result is still a failure
     // The key assertion: no "phantom.toml" error (phantom found the toml and ran)
     expect(result.ok).toBe(false);
@@ -165,26 +165,27 @@ describe('spawnEngine — phantomWrap gate (behavior-based)', () => {
     expect(result.error).not.toMatch(/No \.phantom\.toml found/);
   });
 
-  it('phantom.enabled false → no wrap even with .phantom.toml (engine runs directly)', () => {
+  it('phantom.enabled false → no wrap even with .phantom.toml (engine runs directly)', async () => {
     withPhantomToml(tmpDir);
     const cmd: EngineCommand = { bin: 'nonexistent-engine-xyz-m79', args: ['--goal', 'hi'], cwd: tmpDir };
     const cfg = makeConfig({ phantom: { enabled: false } } as AshlrConfig);
-    const result = spawnEngine(cmd, cfg);
+    const result = await spawnEngine(cmd, cfg);
     expect(result.ok).toBe(false);
     // not wrapped, so error is ENOENT for the engine binary directly
     expect(result.error).toBeDefined();
     expect(result.error).not.toMatch(/No \.phantom\.toml found/);
   });
 
-  it('spawnEngine never throws regardless of .phantom.toml presence or phantom.enabled', () => {
+  it('spawnEngine never throws regardless of .phantom.toml presence or phantom.enabled', async () => {
     // no .phantom.toml, phantom enabled
     const cmd1: EngineCommand = { bin: 'nonexistent-m79', args: [], cwd: tmpDir };
-    expect(() => spawnEngine(cmd1, makeConfig({ phantom: { enabled: true } } as AshlrConfig))).not.toThrow();
+    // Must not throw synchronously or reject the Promise.
+    await expect(spawnEngine(cmd1, makeConfig({ phantom: { enabled: true } } as AshlrConfig))).resolves.toMatchObject({ ok: false });
     // .phantom.toml present, phantom enabled
     withPhantomToml(tmpDir);
-    expect(() => spawnEngine(cmd1, makeConfig({ phantom: { enabled: true } } as AshlrConfig))).not.toThrow();
+    await expect(spawnEngine(cmd1, makeConfig({ phantom: { enabled: true } } as AshlrConfig))).resolves.toMatchObject({ ok: false });
     // phantom disabled
-    expect(() => spawnEngine(cmd1, makeConfig({ phantom: { enabled: false } } as AshlrConfig))).not.toThrow();
+    await expect(spawnEngine(cmd1, makeConfig({ phantom: { enabled: false } } as AshlrConfig))).resolves.toMatchObject({ ok: false });
   });
 });
 

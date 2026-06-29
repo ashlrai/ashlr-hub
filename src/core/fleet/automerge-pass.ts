@@ -316,6 +316,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
         notifyFleetEvent('merge', { repo: p.repo ?? undefined, title: p.title, engine: p.engineTier }, cfg).catch(() => {});
         // M214: fire-and-forget merge emit to Pulse OTLP — additive, never throws, no control-flow change.
         void emitMerge(cfg, p.id, p.repo, p.engineTier).catch(() => {});
+        // M241: fire-and-forget fleet event-bus emit — additive, never throws, no control-flow change.
+        void import('./event-bus.js').then(({ emit }) => emit('merge:shipped', { proposalId: p.id, title: p.title, repo: p.repo ?? undefined, engineTier: p.engineTier }, cfg)).catch(() => {});
       }
       if (res.branched) out.branched++;
     } catch {
