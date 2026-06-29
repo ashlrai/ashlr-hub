@@ -212,6 +212,19 @@ export function buildContainedEnv(cfg: AshlrConfig, hooksDir: string): NodeJS.Pr
   if (process.env.TERM) base.TERM = process.env.TERM;
   if (process.env.TMPDIR) base.TMPDIR = process.env.TMPDIR;
 
+  // M230: USER + LOGNAME are required for macOS Keychain access. The Security
+  // framework uses the OS username to locate the login keychain
+  // (~/Library/Keychains/login.keychain-db). Without them, `claude` fails with
+  // "Not logged in · Please run /login" even with HOME set and ~/.claude present,
+  // because the Keychain lookup for "Claude Code-credentials" silently fails.
+  //
+  // USER and LOGNAME are IDENTITY vars — the OS username — NOT credentials.
+  // Passing them does NOT weaken any security boundary: no secret value is
+  // transmitted, git-push remains severed (GIT_TERMINAL_PROMPT=0 + pre-push hook
+  // + no SSH_AUTH_SOCK remain in force), and the worktree containment is unchanged.
+  if (process.env.USER) base.USER = process.env.USER;
+  if (process.env.LOGNAME) base.LOGNAME = process.env.LOGNAME;
+
   if (process.platform === 'win32') {
     if (realHome) base.USERPROFILE = realHome;
     for (const k of ['SystemRoot', 'windir', 'PATHEXT', 'COMSPEC', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA']) {
