@@ -1326,6 +1326,7 @@ export type EngineId =
   | 'claude'
   | 'codex'
   | 'hermes'
+  | 'nim'
   | 'opencode';
 
 /**

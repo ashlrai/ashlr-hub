@@ -85,7 +85,7 @@ export interface RouteDecision {
  * 'nim' that is NOT promoted (default mid) is silently excluded here and still
  * routed via MID_PREFERENCE — byte-identical to pre-M195 for unpromoted NIM.
  */
-const FRONTIER_PREFERENCE: readonly string[] = ['claude', 'codex', 'nim'];
+const FRONTIER_PREFERENCE: readonly EngineId[] = ['claude', 'codex', 'nim'];
 
 /**
  * M115: Mid-tier backends in preference order. Typed as string[] because
