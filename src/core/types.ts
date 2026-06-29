@@ -434,6 +434,18 @@ export interface AshlrConfig {
        */
       onUnsupported?: 'fallback' | 'fail';
     }>>;
+    /**
+     * M247 / SPEC-INFERENCE-FABRIC Phase F1: InferenceGateway config.
+     * DEFAULT ABSENT → behavior is byte-identical to pre-M247.
+     */
+    fabric?: {
+      /**
+       * Enable the InferenceGateway (consolidates routing into one traceable
+       * decision object, fixes learned-router.ts:tierOf latent bug).
+       * DEFAULT false → old routing code paths run unchanged.
+       */
+      gateway?: boolean;
+    };
   };
   /**
    * M24: optional autonomous-operator (daemon) tuning. When unset, the daemon

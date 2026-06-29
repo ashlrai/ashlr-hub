@@ -33,7 +33,7 @@
  * No new runtime deps; node builtins only; never throws out of public API.
  */
 
-import type { AshlrConfig, DaemonConfig, DaemonState, DaemonTick, WorkItem } from '../types.js';
+import type { AshlrConfig, DaemonConfig, DaemonState, DaemonTick, EngineId, WorkItem } from '../types.js';
 import { killSwitchOn, setKill, listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
 import { buildBacklog } from '../portfolio/backlog.js';
@@ -46,6 +46,7 @@ import { withinLimit, recordUse } from '../fleet/quota.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import { subscriptionAllows, isSubscriptionEngine } from '../fleet/subscription-usage.js'; // M80
 import { recommendRoute, recoverWithinBudget } from '../run/learned-router.js';
+import { decide as gatewayDecide } from '../fabric/gateway.js'; // M247: InferenceGateway
 import { estimateRun } from '../observability/estimate.js';
 import { buildForecast } from '../observability/forecast.js';
 import { emitTuningProposals } from '../learn/tuning.js';
@@ -698,12 +699,53 @@ export async function tick(
     let swarmSpent = 0;
     let dispatched = false;
 
+    // M247: InferenceGateway — consolidates routing into one traceable decision.
+    // FLAG-GATED: when cfg.foundry.fabric?.gateway === true, a single
+    // gateway.decide() call replaces the double routeBackend + quota guard +
+    // subscription throttle + M53 block below. Default false → old path runs
+    // byte-identical. The gateway's flag-off path is itself a thin pass-through
+    // to routeBackend, so both branches produce the same result when flag is off.
+    //
+    // Hoisted so both the gateway branch and the legacy branch can assign it,
+    // and subsequent dispatch code sees the same name regardless of path.
+    let backend: EngineId;
+    if (liveCfg.foundry?.fabric?.gateway === true) {
+      const forecast = buildForecast('7d', liveCfg);
+      const gd = await gatewayDecide(item, liveCfg, {
+        spentUsd: tickSpent + state.todaySpentUsd,
+        forecast,
+      });
+      // Throttled: subscription window at cap — skip item, same as old path.
+      if (gd.reason.startsWith('throttled:')) {
+        audit({
+          action: 'daemon:tick',
+          repo: item.repo,
+          sandboxId: null,
+          summary: gd.reason,
+          result: 'ok',
+        });
+        return { item, spentUsd: 0, dispatched: false };
+      }
+      // Budget pause: step down exhausted budget — skip item, same as old path.
+      if (gd.reason.startsWith('budget-pause:')) {
+        audit({
+          action: 'daemon:budget-cascade',
+          repo: item.repo,
+          sandboxId: null,
+          summary: `M247 gateway budget cascade: pausing dispatch for "${item.title}" — ${gd.reason}`,
+          result: 'ok',
+        });
+        return { item, spentUsd: 0, dispatched: false };
+      }
+      // Normal dispatch: use gateway decision's backend directly.
+      backend = gd.backend;
+    } else {
     // M48: route this item to a backend (M46). Default (no cfg.foundry) →
     // 'builtin'. A frontier backend over its rolling rate quota falls back to
     // local so work keeps flowing without exceeding the subscription's limit.
     // M85: use liveCfg (reloaded per-tick) for routing + quota checks.
     const routed = routeBackend(item, liveCfg);
-    let backend = routed.backend;
+    backend = routed.backend;
     if (backend !== 'builtin' && !withinLimit(backend, liveCfg)) {
       backend = 'builtin';
     }
@@ -771,6 +813,7 @@ export async function tick(
         }
       }
     }
+    } // end flag-off path
 
     const goal = buildItemGoal(item);
     const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };

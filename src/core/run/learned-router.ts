@@ -32,6 +32,7 @@ import type { AshlrConfig, EngineId, EngineTier, RunEstimate, WorkItem } from '.
 import { routeBackend, type RouteDecision } from '../fleet/router.js';
 import type { CostForecast } from '../types.js';
 import { readDecisions } from '../fleet/decisions-ledger.js';
+import { engineTierOf as _engineTierOf } from './sandboxed-engine.js';
 
 // ---------------------------------------------------------------------------
 // M155: Re-export cascade routing API from router.ts for discoverability.
@@ -115,34 +116,46 @@ function allowedBackends(cfg: AshlrConfig): Set<EngineId> {
 }
 
 /**
- * Map a backend EngineId to its EngineTier. Mirrors engineTierOf semantics
- * from sandboxed-engine.ts without importing it here (to avoid a chain that
- * could pull in merge.ts). The set of frontier engines is stable and small.
+ * Map a backend EngineId to its EngineTier via the declarative engine registry.
+ *
+ * M247 fix: the previous implementation hard-coded any non-builtin engine as
+ * 'frontier', which meant M53's backendForTier('mid', ...) could never return
+ * a mid backend (local-coder/nim/kimi/hermes all resolved to 'frontier' here,
+ * making the mid pool appear empty). This caused M53's cost-saving nudge to
+ * silently fall through to 'builtin' instead of a mid backend.
+ *
+ * Fix: delegate to _engineTierOf (sandboxed-engine.ts) which reads the merged
+ * engine registry including any cfg.foundry.engines overrides. The registry
+ * maps {claude, codex} → 'frontier', {local-coder, kimi, hermes, nim} → 'mid'
+ * (or 'frontier' when nim.tier='frontier'), builtin → 'local'.
+ *
+ * cfg is optional for backward-compatibility with call sites that pass only
+ * the engine id. Without cfg the builtin registry is used (same as before for
+ * claude/codex; correctly returns 'mid' for local-coder/kimi/hermes/nim).
  */
-function tierOf(backend: EngineId): EngineTier {
-  // Any non-builtin backend is considered 'frontier' by default (the M46
-  // engineTierOf logic). With the M53 learned router, we don't yet have
-  // 'mid' backends in the registry (that's M51), so this mirrors M46's
-  // two-level world while leaving room for 'mid' in the cascade logic.
-  if (backend === 'builtin') return 'local';
-  return 'frontier';
+function tierOf(backend: EngineId, cfg?: AshlrConfig): EngineTier {
+  return _engineTierOf(backend, cfg);
 }
 
 /**
  * Find the best backend within the allowed set that matches the given tier.
  * Returns null when no allowed backend has that tier.
+ *
+ * M247: accepts optional cfg so tierOf can consult the engine registry (fixes
+ * the mid-backend resolution bug — see tierOf comment above).
  */
 function backendForTier(
   tier: EngineTier,
   allowed: Set<EngineId>,
   preferredOrder: readonly EngineId[],
+  cfg?: AshlrConfig,
 ): EngineId | null {
   for (const e of preferredOrder) {
-    if (allowed.has(e) && tierOf(e) === tier) return e;
+    if (allowed.has(e) && tierOf(e, cfg) === tier) return e;
   }
   // Fallback: scan the full allowed set.
   for (const e of allowed) {
-    if (tierOf(e) === tier) return e;
+    if (tierOf(e, cfg) === tier) return e;
   }
   return null;
 }
@@ -294,7 +307,7 @@ export async function recommendRoute(
 
   if (poorPrior) {
     // Try to find a mid-tier backend first, then fall back to local.
-    const midBackend = backendForTier('mid', allowed, FRONTIER_PREFERENCE);
+    const midBackend = backendForTier('mid', allowed, FRONTIER_PREFERENCE, cfg);
     if (midBackend !== null) {
       return {
         backend: midBackend,
@@ -328,7 +341,7 @@ export async function recommendRoute(
     const dailyBudget = cfg.daemon?.dailyBudgetUsd ?? 1.0;
     const costThreshold = dailyBudget * 0.1;
     if (estimate.estCostUsd.median > costThreshold && base.tier === 'frontier') {
-      const midBackend = backendForTier('mid', allowed, FRONTIER_PREFERENCE);
+      const midBackend = backendForTier('mid', allowed, FRONTIER_PREFERENCE, cfg);
       if (midBackend !== null) {
         return {
           backend: midBackend,
@@ -465,12 +478,12 @@ export function recoverWithinBudget(
   }
 
   // Find a backend at the target tier within allowed set.
-  const cascadedBackend = backendForTier(targetTier, allowed, FRONTIER_PREFERENCE);
+  const cascadedBackend = backendForTier(targetTier, allowed, FRONTIER_PREFERENCE, cfg);
   if (cascadedBackend === null) {
     // Target tier has no allowed backend — try next tier.
     for (let i = targetTierIdx + 1; i < TIER_CASCADE.length; i++) {
       const fallbackTier = TIER_CASCADE[i] as EngineTier;
-      const fb = backendForTier(fallbackTier, allowed, FRONTIER_PREFERENCE);
+      const fb = backendForTier(fallbackTier, allowed, FRONTIER_PREFERENCE, cfg);
       if (fb !== null) {
         return {
           action: 'cascade',
