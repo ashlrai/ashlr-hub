@@ -294,6 +294,14 @@ const loadTuiCmd = lazyCmd(
   'tui command requires src/cli/tui.ts (M13 module not yet built).',
 );
 
+// ─── M253 resources command loader ───────────────────────────────────────────
+
+const loadResourcesCmd = lazyCmd(
+  () => import('./resources.js' as unknown as string),
+  (m) => m.cmdResources as Cmd,
+  'resources command requires src/cli/resources.ts (M253 module not yet built).',
+);
+
 // ─── M194 frontier-usage command loader ──────────────────────────────────────
 
 const loadUsageCmd = lazyCmd(
@@ -1157,6 +1165,20 @@ async function cmdStatus(_args: string[]): Promise<void> {
   } catch {
     // silently omit — never break status
   }
+
+  // ── M253 Resource Control Plane summary (best-effort; never break status) ──
+  try {
+    const resourcesMod = await import('./resources.js' as unknown as string) as {
+      resourceStatusLine: (cfg: unknown) => Promise<string | null>;
+    };
+    const line = await resourcesMod.resourceStatusLine(cfg);
+    if (line) {
+      console.log(`  ${line}`);
+      console.log('');
+    }
+  } catch {
+    // silently omit — resource sensing never breaks the status command
+  }
 }
 
 // ─── Command: ls ─────────────────────────────────────────────────────────────
@@ -1858,6 +1880,13 @@ async function main(): Promise<void> {
         // M181: generative engine — invent bold, net-new features for a repo.
         const cmdInvent = await loadInventCmd();
         process.exitCode = await cmdInvent(rest);
+        break;
+      }
+
+      case 'resources': {
+        // M253: Resource Control Plane god-view — per-backend availability/used%/cap/resets.
+        const cmdResources = await loadResourcesCmd();
+        process.exitCode = await cmdResources(rest);
         break;
       }
 

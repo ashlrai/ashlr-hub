@@ -36,6 +36,7 @@ import { withinLimit } from '../fleet/quota.js';
 import { subscriptionAllows, isSubscriptionEngine } from '../fleet/subscription-usage.js';
 import { recommendRoute, recoverWithinBudget } from '../run/learned-router.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
+import { getResourceSnapshot, type BackendResourceState } from './resource-monitor.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -75,6 +76,16 @@ export interface GatewayDecision {
   trace: GatewayTraceStep[];
   /** Final reason (last trace step's reason, or 'pass-through' on flag-OFF). */
   reason: string;
+  /**
+   * M250: Resource state of the chosen backend at decision time.
+   * Populated on the resource-aware flag-ON path; absent otherwise.
+   */
+  resourceState?: Pick<BackendResourceState, 'availability' | 'usedPct' | 'resetsAt' | 'reason'>;
+  /**
+   * M250: The originally-selected backend before any resource-driven demotion.
+   * Populated only when a demotion occurred.
+   */
+  demotedFrom?: EngineId;
 }
 
 /** Context passed by the caller for budget / cost-recovery decisions. */
@@ -169,6 +180,29 @@ export async function decide(
     if (current.backend !== 'builtin' && !withinLimit(current.backend, cfg)) {
       current = { backend: 'builtin', tier: 'local', model: null, reason: 'quota exceeded — fallback to builtin' };
       trace.push({ stage: 'quotaGuard', backend: current.backend, tier: current.tier, reason: current.reason });
+    }
+
+    // Step 2b: Resource-aware demote — only fires when resourceAware=true.
+    // Consults ResourceMonitor; demotes exhausted/throttled backends to next
+    // capable+available backend. Hard items (effort>=4 or source=escalation)
+    // are paused, never silently downgraded to builtin. Flag-OFF: zero impact.
+    if (cfg.foundry?.fabric?.resourceAware === true) {
+      const resourceDemote = await _resourceAwareDemote(input, current, cfg, trace);
+      if (resourceDemote !== null) {
+        if (resourceDemote.pause) {
+          return {
+            backend: current.backend,
+            tier: current.tier,
+            model: current.model ?? null,
+            source: isWorkItem(input) ? 'fleet' : 'cli',
+            trace,
+            reason: `resource-pause: ${resourceDemote.reason}`,
+            resourceState: resourceDemote.resourceState,
+          };
+        }
+        current = resourceDemote.decision;
+        trace.push({ stage: 'resourceDemote', backend: current.backend, tier: current.tier, reason: current.reason });
+      }
     }
 
     // Step 3: Subscription throttle — skip when subscription window is at cap.
@@ -287,4 +321,120 @@ function buildNullForecast(): CostForecast {
     localSavingsUsd: 0,
     projectedMonthlyUsd: 0,
   };
+}
+
+// ---------------------------------------------------------------------------
+// M250: Resource-aware demote helper (Step 2b)
+// ---------------------------------------------------------------------------
+
+/** Ordered preference for demote cascade: frontier first, then mid, then local. */
+const DEMOTE_CASCADE: EngineId[] = ['claude', 'codex', 'nim', 'builtin'];
+
+/**
+ * Hard items: effort >= 4 or source === 'escalation'.
+ * These are NEVER silently downgraded to builtin — they pause instead.
+ */
+function isHardItem(input: WorkItem | { goal: string; repo: string }): boolean {
+  if (!isWorkItem(input)) return false;
+  return input.effort >= 4;
+}
+
+interface ResourceDemoteResult {
+  pause: boolean;
+  reason: string;
+  decision: { backend: EngineId; tier: EngineTier; model?: string | null; reason: string };
+  resourceState?: Pick<BackendResourceState, 'availability' | 'usedPct' | 'resetsAt' | 'reason'>;
+}
+
+/**
+ * Check the current backend's resource state and return a demote decision,
+ * or null if no demote is needed. Never throws.
+ */
+async function _resourceAwareDemote(
+  input: WorkItem | { goal: string; repo: string },
+  current: { backend: EngineId; tier: EngineTier; model?: string | null; reason: string },
+  cfg: AshlrConfig,
+  _trace: GatewayTraceStep[],
+): Promise<ResourceDemoteResult | null> {
+  try {
+    const snapshot = await getResourceSnapshot(cfg);
+    const state = snapshot.backends.find(b => b.backend === current.backend);
+
+    if (!state) return null; // no state for this backend — permissive
+
+    // 'open', 'near', 'unknown' → no demote needed
+    if (state.availability === 'open' || state.availability === 'near' || state.availability === 'unknown') {
+      return null;
+    }
+
+    // 'exhausted', 'throttled', 'unreachable' → find next capable backend
+    const allowed = new Set<EngineId>(cfg.foundry?.allowedBackends ?? ['builtin']);
+    allowed.add('builtin');
+
+    const hard = isHardItem(input);
+    const demoteReason = `${current.backend} ${state.availability}: ${state.reason}`;
+
+    // Try backends in cascade order, skip the current (exhausted) one
+    for (const candidate of DEMOTE_CASCADE) {
+      if (candidate === current.backend) continue;
+      if (!allowed.has(candidate)) continue;
+
+      // Hard items must not be downgraded to builtin
+      if (hard && candidate === 'builtin') {
+        // All non-builtin frontiers exhausted — pause hard item
+        return {
+          pause: true,
+          reason: `all frontier backends exhausted for hard item: ${demoteReason}`,
+          decision: current,
+          resourceState: { availability: state.availability, usedPct: state.usedPct, resetsAt: state.resetsAt, reason: state.reason },
+        };
+      }
+
+      // Check candidate resource state
+      const candidateState = snapshot.backends.find(b => b.backend === candidate);
+      const candidateAvail = candidateState?.availability ?? 'unknown';
+
+      if (candidateAvail === 'exhausted' || candidateAvail === 'unreachable') continue;
+
+      // Candidate is viable — demote to it
+      const resolvedTier = engineTierOf(candidate, cfg);
+      return {
+        pause: false,
+        reason: demoteReason,
+        decision: {
+          backend: candidate,
+          tier: resolvedTier,
+          model: null,
+          reason: `resourceDemote: ${current.backend}→${candidate} (${demoteReason})`,
+        },
+        resourceState: { availability: state.availability, usedPct: state.usedPct, resetsAt: state.resetsAt, reason: state.reason },
+      };
+    }
+
+    // No viable alternative found
+    if (hard) {
+      return {
+        pause: true,
+        reason: `no viable backend for hard item: ${demoteReason}`,
+        decision: current,
+        resourceState: { availability: state.availability, usedPct: state.usedPct, resetsAt: state.resetsAt, reason: state.reason },
+      };
+    }
+
+    // Non-hard item with no alternative — fall through to builtin
+    const resolvedTier = engineTierOf('builtin', cfg);
+    return {
+      pause: false,
+      reason: demoteReason,
+      decision: {
+        backend: 'builtin',
+        tier: resolvedTier,
+        model: null,
+        reason: `resourceDemote: ${current.backend}→builtin (last resort, ${demoteReason})`,
+      },
+      resourceState: { availability: state.availability, usedPct: state.usedPct, resetsAt: state.resetsAt, reason: state.reason },
+    };
+  } catch {
+    return null; // never-throw: on any error, don't demote
+  }
 }

@@ -468,6 +468,55 @@ export interface AshlrConfig {
        * DEFAULT false → live cache path is not implemented in M249.
        */
       cache?: boolean;
+      /**
+       * M250 Resource Control Plane: enable resource-aware backend demoting in the
+       * gateway. When true, the gateway senses per-backend headroom and demotes
+       * exhausted/throttled backends to the next available alternative.
+       * DEFAULT false → byte-identical to pre-M250. Requires fabric.gateway=true.
+       */
+      resourceAware?: boolean;
+    };
+    /**
+     * M250 Resource Control Plane: per-backend weekly message/token caps.
+     * Used by the ResourceMonitor to determine when to demote a backend.
+     *
+     * Example:
+     *   "limits": { "claude": { "weeklyMessageCap": 2000, "window": "7d" } }
+     *
+     * NOTE: This extends the existing limits field (which tracks rolling dispatch
+     * counts for rate-limiting) with subscription-window awareness. The two
+     * concerns are separate: `limits.claude.max` is the fleet dispatch rate;
+     * `claudeResource.weeklyMessageCap` is the subscription cap signal.
+     */
+    claudeResource?: {
+      /**
+       * Estimated weekly message cap for the Claude subscription plan.
+       * Mason sets this to his plan's limit (e.g. 2000 for Pro, 5000 for Max).
+       * The ResourceMonitor sums stats-cache.json messageCount over 7d and
+       * compares to this value. CONSERVATIVE: counts human + fleet combined.
+       */
+      weeklyMessageCap?: number;
+      /** Window label for the cap (default '7d'). */
+      window?: string;
+      /**
+       * Protect this percent of the weekly cap for human sessions.
+       * Fleet backs off when usage >= protectPct (default 85).
+       * Example: 85 means fleet stops routing to claude at 85% used,
+       * preserving 15% headroom for interactive sessions.
+       */
+      protectPct?: number;
+    };
+    /**
+     * M250 Resource Control Plane: local/Ollama concurrency config.
+     */
+    local?: {
+      /**
+       * Maximum concurrent Ollama requests (default 1).
+       * Matches the OLLAMA_NUM_PARALLEL env var default.
+       */
+      maxConcurrent?: number;
+      /** Ollama base URL (default 'http://localhost:11434'). */
+      baseUrl?: string;
     };
   };
   /**
