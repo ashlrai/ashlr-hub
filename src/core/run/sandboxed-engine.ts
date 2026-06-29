@@ -82,8 +82,17 @@ export interface RunEngineSandboxedOptions {
   runId?: string;
 }
 
-/** Default hard wall-clock for an autonomous external run (20 min). */
-const DEFAULT_TIMEOUT_MS = 20 * 60_000;
+/**
+ * Default hard wall-clock for an autonomous external run (10 min).
+ * M233: lowered from 20 min — bounds the run while still allowing real agent
+ * work; env/config-override (cfg.foundry.timeoutMs) still wins.
+ */
+// Generous backstop ONLY — real frontier agents (Claude Code/Codex) legitimately
+// work for long periods on substantial features, so we do NOT impose an aggressive
+// wall-clock kill. This 2h cap is a runaway-cost safety net; the proper termination
+// is STALL-based (no-progress detection, M234) + async dispatch so a long run never
+// blocks the loop. cfg.foundry.timeoutMs overrides. Partial work is captured (M233).
+const DEFAULT_TIMEOUT_MS = 2 * 60 * 60_000;
 
 // ---------------------------------------------------------------------------
 // M154: repo-map + localization context prefix (flag-gated)
@@ -388,8 +397,43 @@ export async function runEngineSandboxed(
       : newUsage();
 
     if (!res.ok) {
+      // M233: even on timeout/non-zero exit, attempt to capture a partial diff.
+      // If the agent did real work before the cap, save it as a PENDING proposal
+      // marked isPartial:true so the judge/reviewer knows it may be incomplete.
+      // A truly-empty diff (agent made no edits) is not filed — no-op run stays blocked.
+      if (opts.propose !== false) {
+        try {
+          const diff = wt.sandboxDiff(sb);
+          if (diff.files > 0 && diff.patch.trim().length > 0) {
+            const scrubbed = scrubSecrets(diff.patch);
+            const diffHash = hashDiff(scrubbed);
+            const provenanceSig = signProvenance(engineModel, tier, diffHash);
+            const proposal = selectInboxStore(cfg).create({
+              repo: sb.sourceRepo,
+              origin: 'agent',
+              kind: 'patch',
+              title: `[partial] ${engine} run: ${goal.slice(0, 78)}`,
+              summary:
+                `Partial ${engineModel} run (timed-out / non-zero exit) produced ` +
+                `${diff.files} file(s) (+${diff.insertions}/-${diff.deletions}). ` +
+                `Engine error: ${res.error ?? 'unknown'}. Review before applying.`,
+              diff: scrubbed,
+              diffHash,
+              provenanceSig,
+              sandboxId: sb.id,
+              engineModel,
+              engineTier: tier,
+              isPartial: true,
+            });
+            proposalId = proposal.id;
+          }
+        } catch {
+          // diff/proposal capture is best-effort — never fail the run on it.
+        }
+      }
       return {
         state: mk({ status: 'failed', result: `engine "${engine}" failed: ${res.error ?? 'unknown error'}`, usage }),
+        proposalId,
       };
     }
 

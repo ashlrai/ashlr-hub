@@ -2438,6 +2438,13 @@ export interface Proposal {
     rationale: string;
   };
   /**
+   * M233: set to true when the diff was captured after a timeout or non-zero
+   * exit — the agent did real work before the cap but the run didn't finish
+   * cleanly. The judge/merge gate still applies in full; this flag lets the
+   * reviewer know the diff is potentially incomplete.
+   */
+  isPartial?: boolean;
+  /**
    * M103: payload for 'desktop-action' proposals. Carries the specific UI
    * action to perform when the proposal is approved+applied.
    *
