@@ -371,6 +371,15 @@ export interface AshlrConfig {
      * Endpoint: cfg.comms.pulseOtlpUrl → PULSE_OTLP_URL env → cfg.pulse.endpoint.
      */
     pulseEmit?: boolean;
+    /**
+     * M243: skill-library write-back (positive complement to M235 anti-playbooks).
+     * DEFAULT true (on). When true, successfully applied+merged 'ship' proposals
+     * have their workflow recipe distilled and written to the genome hub as a
+     * reusable skill (AWM/Voyager: abstracted workflow, NOT raw diff verbatim).
+     * Future agent runs receive positive grounding: proven patterns for proven
+     * task classes. Set false for exact pre-M243 behavior (byte-identical no-op).
+     */
+    skillLibrary?: boolean;
     autoMerge?: {
       enabled: boolean;
       /**

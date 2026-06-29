@@ -45,6 +45,8 @@ import { notifyFleetEvent } from '../comms/events.js';
 import { emitMerge, emitJudgeVerdict } from '../integrations/fleet-pulse-emit.js';
 // M235: recursive self-improvement write-back (fire-and-forget, gated cfg.foundry.selfImprove, default ON)
 import { learnFromRejection } from './self-improve.js';
+// M243: skill-library write-back (fire-and-forget, gated cfg.foundry.skillLibrary, default ON)
+import { learnFromApplied } from './skill-library.js';
 
 export interface AutoMergePassResult {
   /** Proposals the gate was run against this pass (frontier + branch-eligible mid). */
@@ -318,6 +320,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
         void emitMerge(cfg, p.id, p.repo, p.engineTier).catch(() => {});
         // M241: fire-and-forget fleet event-bus emit — additive, never throws, no control-flow change.
         void import('./event-bus.js').then(({ emit }) => emit('merge:shipped', { proposalId: p.id, title: p.title, repo: p.repo ?? undefined, engineTier: p.engineTier }, cfg)).catch(() => {});
+        // M243: fire-and-forget skill-library write-back — additive, never throws, no control-flow change.
+        void learnFromApplied(p, cfg);
       }
       if (res.branched) out.branched++;
     } catch {
