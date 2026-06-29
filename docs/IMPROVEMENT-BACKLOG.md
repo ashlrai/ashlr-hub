@@ -60,6 +60,7 @@
   - M236 ✅IN-FLIGHT elite execution: streaming spawn + STALL-based termination (idle/loop/no-diff) replacing wall-clock kill; agents run as long as productive. [execution research, cited Claude-SDK/OpenHands/Devin]
   - QUEUED (after M235/M236, sequenced — all touch daemon/engine core): completion-contract sentinel per engine run (openclaw #1, complements M236) · directory-discovered HOOK event-bus (proposal:filed/regression:detected→push follow-up work, openclaw #3) · router-learns-from-verdict (worked-ledger ship-rate→route selection, openclaw #4 + M235) · key-prefix-only secret logging + treat invented items as untrusted input (openclaw #5 security) · async dispatch + session-resume + file-checkpoint-rewind (execution research P0/P1).
   - PRINCIPLE: borrow ergonomics, NEVER loosen the fail-closed gates (openclaw was a security liability via its open skills).
+- **12H RUN — WAVE 1 (ecosystem buildout Workflow, ~37 commits across 11 repos, PUSHED):** phantom secret-rotation/expiry · binshield dependency-confusion/typosquat detection · ashlrcode agent-intent-tracing · stack healthcheck-coverage · morphkit multi-stage semantic-validation · webfetch cache-inspection/query-replay · core-efficiency empirical-fitness · prompt-trackr batch-scoring/structured-export · pulse materialized-daily-aggregates · ashlr-md hunk-parser/applyHunk · workbench multi-backend-LLM-router. + ashlr-hub: M236 streaming+stall execution (2eddcba), M235 self-improvement. (morphkit push pending package.json conflict.)
 - (next waves appended here as they ship)
 
 ## Loop guardrails
