@@ -40,6 +40,7 @@ import {
   readClaudeUsage,
   DEFAULT_5H_MESSAGE_CAP_PRO,
 } from './claude-usage.js';
+import { fetchClaudeUsageApi } from './usage-api.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -333,6 +334,69 @@ async function senseClaudeState(rcfg: ResourceCfgShape): Promise<BackendResource
   const protectPct = rcfg.protectPct ?? 85;
   const windowLabel = rcfg.claude?.window ?? '7d';
   const windowMs = 7 * 24 * 60 * 60 * 1000; // always 7d for now
+
+  // -------------------------------------------------------------------------
+  // M254 OAUTH USAGE API PATH (authoritative — try first).
+  //
+  // Fetches five_hour + seven_day utilization from the internal Claude Code
+  // OAuth endpoint. 60-second cache; never-throws; returns null on any error
+  // or when CLAUDE_CODE_OAUTH_TOKEN / CLAUDE_BRIDGE_OAUTH_TOKEN are absent.
+  //
+  // When available: availability is classified using max(fiveHourPct, weeklyPct)
+  // vs protectPct thresholds. The reason string cites both windows. This is the
+  // most authoritative signal — reflects Mason's actual subscription headroom,
+  // not just the fleet's transcript files.
+  //
+  // When null: falls through to the M253 transcript method (fully intact).
+  // -------------------------------------------------------------------------
+  try {
+    const apiUsage = await fetchClaudeUsageApi();
+    if (apiUsage !== null) {
+      const combinedPct = Math.max(apiUsage.fiveHourPct, apiUsage.weeklyPct);
+      const clampedPct  = Math.max(0, Math.min(combinedPct, 200));
+
+      let availability: BackendAvailability;
+      let reason: string;
+
+      const sourceNote = `(5h: ${apiUsage.fiveHourPct}%, weekly: ${apiUsage.weeklyPct}%; source=oauth-usage-api)`;
+
+      if (clampedPct >= 100) {
+        availability = 'exhausted';
+        reason = `claude limit reached: ${clampedPct}% ${sourceNote}`;
+      } else if (clampedPct >= protectPct) {
+        availability = 'throttled';
+        reason = `claude at ${clampedPct}% (protectPct=${protectPct}%) — preserving headroom ${sourceNote}`;
+      } else if (clampedPct >= 75) {
+        availability = 'near';
+        reason = `claude at ${clampedPct}% — nearing limit ${sourceNote}`;
+      } else {
+        availability = 'open';
+        reason = `claude at ${clampedPct}% — within limit ${sourceNote}`;
+      }
+
+      // resetsAt: use the higher (further out) of the two reset times, so we
+      // don't prematurely claim the window has reset.
+      const resetsAt = Math.max(apiUsage.fiveHourResetAt, apiUsage.weeklyResetAt);
+
+      return {
+        backend: 'claude',
+        availability,
+        usedPct: clampedPct,
+        cap: 100,
+        capUnit: null,    // utilization is already a percentage — no raw cap unit
+        capWindow: '7d',  // primary display: weekly (most conservative window)
+        resetsAt,
+        costPerMTokenOut: 0,
+        p50LatencyMs: null,
+        snapshotAt: now,
+        reason,
+        backoffUntilMs: null,
+      };
+    }
+    // apiUsage === null → fall through to transcript/ledger path (source='transcript-fallback')
+  } catch {
+    // Belt-and-suspenders: fetchClaudeUsageApi() never throws, but guard anyway
+  }
 
   // -------------------------------------------------------------------------
   // M253 TRANSCRIPT PATH (ccusage): real subscription usage from JSONL files.

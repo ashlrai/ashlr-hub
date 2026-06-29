@@ -228,7 +228,10 @@ describe('M250 ResourceMonitor — Claude stats-cache 7d sum', () => {
     expect(state.availability).toBe('open');
   });
 
-  it('returns unknown when no weeklyMessageCap configured', async () => {
+  it('uses transcript sensing (not unknown) when no weeklyMessageCap configured', async () => {
+    // M253: with no weeklyMessageCap, transcript sensing (5h window, default Pro cap)
+    // is the primary path — it never returns 'unknown'. (Supersedes the old M250
+    // stats-cache-only behavior where no cap meant unknown.)
     writeStatsCache([{ daysAgo: 0, messageCount: 500 }]);
 
     vi.doMock('../src/core/observability/codex-source.js', () => ({
@@ -239,9 +242,8 @@ describe('M250 ResourceMonitor — Claude stats-cache 7d sum', () => {
     const cfg = withFoundry({ allowedBackends: ['claude'] as EngineId[] });
 
     const state = await getBackendResourceState('claude', cfg);
-    expect(state.availability).toBe('unknown');
-    expect(state.usedPct).toBeNull();
-    expect(state.cap).toBeNull();
+    expect(state.availability).not.toBe('unknown');
+    expect(['open', 'near', 'throttled', 'exhausted']).toContain(state.availability);
   });
 
   it('returns open (0%) gracefully when stats-cache.json is missing', async () => {
