@@ -39,7 +39,12 @@
 - **Wave 1 ✅ SHIPPED (ashlr-hub):** M197 observability (20 silent catches→logging) · M198 digest debt · M199 orchestrator tests (was 0) · M200 multibackend merge tests. Commits f539ced/6a8e063.
 - **Wave 2 ✅ MOSTLY SHIPPED:** binshield path-traversal SECURITY hardening (committed in binshield, 41/41, real RCE-vector closed) · BUG-2 evaluateVerificationGate EDV-cfg + landed latent pulse-exporter/dep-parser landmine + health.ts WorkSource fix (ashlr-hub 13f37e6 — recovered a red master from a partial commit) · m201 daemon tests (32/33, last test settling) · stack timeouts + phantom init-UX AUTO-REVERTED (builds didn't pass — safety bound worked; deferred).
 - **Wave 3 (in flight, cross-repo commit-local):** ashlrcode smarter-surgical (intent-aware scope + file-count guard) · core-efficiency genome robustness tests · webfetch ProviderReport errorKind · morphkit validateSemanticModel fail-fast.
-- LESSON: commit the FULL related file-set (partial BUG-2 commit → red master, recovered).
+- **Wave 3 ✅ SHIPPED (cross-repo commit-local):** ashlrcode smarter-surgical (intent-aware scope + file-count guard) · core-efficiency genome robustness tests (43, found 3 bugs) · webfetch ProviderReport errorKind (100d761) · morphkit validateSemanticModel fail-fast (3b0edff) · m201 daemon/loop tests now GREEN (ashlr-hub 3fa416c, found a loadConfig-strips-cfg.daemon bug).
+- **REGRESSION caught+fixed:** my publish-prep (main→dist + exports={".":...}) broke @ashlr/<pkg>/<subpath> imports → ashlrcode/morphkit builds failed. Reverted all 5 packages to src-based exports + subpath wildcard; ashlrcode builds clean again (1068 modules). LESSON #2: don't change package exports without re-verifying CONSUMERS.
+- **Wave 4 (in flight):** prompt-trackr API tests · ashlr-md MCP-bridge+export tests · ashlr-hub M202 cascade+browser-verify edge tests · core-efficiency atomic-cache + timeout-leak fixes. (Conservative/test-heavy after 2 self-inflicted regressions.)
+- LESSON #1: commit the FULL related file-set (partial BUG-2 commit → red master, recovered).
+- QUEUED BUGS (found, unfixed): loadConfig strips cfg.daemon per-tick (isContinuousMode gap); core-efficiency lock-map churn; router.ts nim-type-smell.
+- DEFERRED: stack timeouts + phantom init-UX (auto-reverted, retry); ashlr-pulse fleet-emit (high-value but daemon-adjacent — defer given churn); npm publish (needs proper multi-file dist + subpath exports→dist, Mason).
 - (next waves appended here as they ship)
 
 ## Loop guardrails
