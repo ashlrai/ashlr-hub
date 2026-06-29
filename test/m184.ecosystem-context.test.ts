@@ -241,6 +241,9 @@ describe('M184 — loadEcosystemMap (real impl)', () => {
       loadEcosystemMap: vi.fn(() => null),
       ecosystemSummary: vi.fn(() => ''),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
     const mapMod = await import('../src/core/ecosystem/map.js');
     expect(mapMod.loadEcosystemMap()).toBeNull();
@@ -259,6 +262,9 @@ describe('M184 — ecosystemSummary (real impl)', () => {
       loadEcosystemMap: vi.fn(() => null),
       ecosystemSummary: vi.fn(() => ''),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
     const mapMod = await import('../src/core/ecosystem/map.js');
     expect(mapMod.ecosystemSummary()).toBe('');
@@ -340,6 +346,9 @@ describe('M184 — ecosystemSummary (real impl)', () => {
         loadEcosystemMap: vi.fn(() => minimal),
         ecosystemSummary: vi.fn(() => summary),
         _resetEcosystemMapCache: vi.fn(),
+        northStarDocSummary: vi.fn(() => ''),
+        _resetNorthStarDocCache: vi.fn(),
+        loadNorthStarDoc: vi.fn(() => null),
       };
     });
     const mapMod = await import('../src/core/ecosystem/map.js');
@@ -370,6 +379,9 @@ describe('M184 — strategist prompt ecosystem injection', () => {
       loadEcosystemMap: vi.fn(() => MOCK_ECOSYSTEM_MAP),
       ecosystemSummary: vi.fn(() => REALISTIC_ECO_SUMMARY),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
 
     const capturedUsers: string[] = [];
@@ -392,6 +404,9 @@ describe('M184 — strategist prompt ecosystem injection', () => {
       loadEcosystemMap: vi.fn(() => MOCK_ECOSYSTEM_MAP),
       ecosystemSummary: vi.fn(() => REALISTIC_ECO_SUMMARY),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
 
     const capturedUsers: string[] = [];
@@ -411,6 +426,9 @@ describe('M184 — strategist prompt ecosystem injection', () => {
       loadEcosystemMap: vi.fn(() => MOCK_ECOSYSTEM_MAP),
       ecosystemSummary: vi.fn(() => REALISTIC_ECO_SUMMARY),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
 
     const capturedUsers: string[] = [];
@@ -431,6 +449,9 @@ describe('M184 — strategist prompt ecosystem injection', () => {
       loadEcosystemMap: vi.fn(() => MOCK_ECOSYSTEM_MAP),
       ecosystemSummary: vi.fn(() => REALISTIC_ECO_SUMMARY),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
 
     const capturedUsers: string[] = [];
@@ -452,6 +473,9 @@ describe('M184 — strategist prompt ecosystem injection', () => {
       loadEcosystemMap: vi.fn(() => MOCK_ECOSYSTEM_MAP),
       ecosystemSummary: vi.fn(() => REALISTIC_ECO_SUMMARY),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
 
     mockComplete.mockResolvedValueOnce(makeBriefingJson());
@@ -475,6 +499,9 @@ describe('M184 — invent prompt ecosystem injection', () => {
       loadEcosystemMap: vi.fn(() => MOCK_ECOSYSTEM_MAP),
       ecosystemSummary: vi.fn(() => REALISTIC_ECO_SUMMARY),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
 
     const capturedUsers: string[] = [];
@@ -509,6 +536,9 @@ describe('M184 — invent prompt ecosystem injection', () => {
       loadEcosystemMap: vi.fn(() => MOCK_ECOSYSTEM_MAP),
       ecosystemSummary: vi.fn(() => '=== ECOSYSTEM MAP ===\ntools listed here'),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
 
     const capturedUsers: string[] = [];
@@ -534,6 +564,9 @@ describe('M184 — invent prompt ecosystem injection', () => {
       loadEcosystemMap: vi.fn(() => MOCK_ECOSYSTEM_MAP),
       ecosystemSummary: vi.fn(() => REALISTIC_ECO_SUMMARY),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
 
     const testComplete = async (_sys: string, _user: string): Promise<string> => {
@@ -570,6 +603,9 @@ describe('M184 — map absent -> no injection, no throw', () => {
       loadEcosystemMap: vi.fn(() => null),
       ecosystemSummary: vi.fn(() => ''),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
 
     mockComplete.mockResolvedValueOnce(makeBriefingJson());
@@ -587,6 +623,9 @@ describe('M184 — map absent -> no injection, no throw', () => {
       loadEcosystemMap: vi.fn(() => null),
       ecosystemSummary: vi.fn(() => ''),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
 
     const capturedUsers: string[] = [];
@@ -607,6 +646,9 @@ describe('M184 — map absent -> no injection, no throw', () => {
       loadEcosystemMap: vi.fn(() => null),
       ecosystemSummary: vi.fn(() => ''),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
 
     const capturedUsers: string[] = [];
@@ -627,6 +669,9 @@ describe('M184 — map absent -> no injection, no throw', () => {
       loadEcosystemMap: vi.fn(() => null),
       ecosystemSummary: vi.fn(() => ''),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
 
     const testComplete = async (_sys: string, _user: string): Promise<string> => {
@@ -656,6 +701,9 @@ describe('M184 — map absent -> no injection, no throw', () => {
       loadEcosystemMap: vi.fn(() => null),
       ecosystemSummary: vi.fn(() => ''),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
 
     const capturedUsers: string[] = [];
@@ -679,6 +727,9 @@ describe('M184 — map absent -> no injection, no throw', () => {
       loadEcosystemMap: vi.fn(() => null),
       ecosystemSummary: vi.fn(() => ''),
       _resetEcosystemMapCache: vi.fn(),
+      northStarDocSummary: vi.fn(() => ''),
+      _resetNorthStarDocCache: vi.fn(),
+      loadNorthStarDoc: vi.fn(() => null),
     }));
 
     mockComplete.mockResolvedValue(makeBriefingJson());

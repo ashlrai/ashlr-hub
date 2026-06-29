@@ -43,6 +43,8 @@ import { checkSpecContract } from '../run/spec-contract.js';
 import { notifyFleetEvent } from '../comms/events.js';
 // M214: fleet→pulse OTLP emit (fire-and-forget, flag-gated cfg.foundry.pulseEmit, default OFF)
 import { emitMerge, emitJudgeVerdict } from '../integrations/fleet-pulse-emit.js';
+// M235: recursive self-improvement write-back (fire-and-forget, gated cfg.foundry.selfImprove, default ON)
+import { learnFromRejection } from './self-improve.js';
 
 export interface AutoMergePassResult {
   /** Proposals the gate was run against this pass (frontier + branch-eligible mid). */
@@ -202,6 +204,16 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
         // Only proposals that the judge ships proceed to the merge gate.
         // 'review', 'noise', 'harmful' → leave pending (no autoMergeProposal call).
         if (!verdict || verdict.verdict !== 'ship') {
+          // M235: fire-and-forget self-improvement write-back — additive, never throws, no control-flow change.
+          try {
+            learnFromRejection(
+              p.id,
+              p.title ?? '',
+              verdict?.verdict ?? 'review',
+              (verdict as unknown as Record<string, unknown>)?.['rationale'] as string ?? '',
+              cfg,
+            );
+          } catch { /* learnFromRejection never throws; defensive */ }
           continue;
         }
       } else {
