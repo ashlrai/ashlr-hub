@@ -251,6 +251,52 @@ export async function runCommsCycle(cfg: AshlrConfig): Promise<CycleResult> {
             continue;
           }
 
+          // M215: "snapshot" / "dashboard" command — reply with fleet snapshot.
+          // Auth: messages from foreign chatIds are already dropped by telegram.ts.
+          // SAFETY: buildFleetSnapshot is read-only; no merge/push/apply.
+          const snapshotRe = /^\s*(snapshot|dashboard|status\s+full)\s*$/i;
+          if (snapshotRe.test(event.text)) {
+            try {
+              const { buildFleetSnapshot } = await import('./events.js');
+              const snapshot = await buildFleetSnapshot(cfg);
+              await sendTelegramMessage(snapshot, undefined, cfg);
+            } catch {
+              // best-effort — never crash the cycle
+            }
+            continue;
+          }
+
+          // M215: "revert:<proposalId>:<repo>" callback from merge inline button.
+          // Creates a SIGNED REVERT PROPOSAL via regression-sentinel. Never applies.
+          const revertRe = /^\s*revert:([^:]+):(.*)$/i;
+          const revertMatch = revertRe.exec(event.text);
+          if (revertMatch) {
+            const proposalId = revertMatch[1] as string;
+            const repo = revertMatch[2] as string;
+            if (proposalId && proposalId.trim()) {
+              try {
+                const { buildRevertProposal } = await import('./events.js');
+                const proposal = await buildRevertProposal(proposalId.trim(), repo?.trim() || process.cwd(), cfg);
+                if (proposal) {
+                  await sendTelegramMessage(
+                    `Revert proposal created (pending, not applied): "${proposal.title}" — review at http://localhost:4317/proposals/${proposal.id}`,
+                    undefined,
+                    cfg,
+                  );
+                } else {
+                  await sendTelegramMessage(
+                    `Could not create revert proposal for "${proposalId}" — see dashboard for details`,
+                    undefined,
+                    cfg,
+                  );
+                }
+              } catch {
+                // best-effort
+              }
+            }
+            continue;
+          }
+
           // Text — check if it's a numbered reply to an outstanding request first.
           const numMatch = out ? /^\s*(\d+)\b/.exec(event.text) : null;
           const num = numMatch ? parseInt(numMatch[1]!, 10) : NaN;

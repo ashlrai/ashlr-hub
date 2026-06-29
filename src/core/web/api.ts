@@ -285,7 +285,7 @@ function sseSwarmsPayload(): unknown {
 }
 
 /**
- * Handle GET /api/events: stream run/swarm updates as Server-Sent Events.
+ * Handle GET /api/events: stream run/swarm/snapshot updates as Server-Sent Events (M213).
  *
  * On each poll tick, re-reads listRuns() + listSwarms() and emits NAMED SSE
  * events — `event: runs` and `event: swarms` — each carrying its own JSON
@@ -301,7 +301,12 @@ function sseSwarmsPayload(): unknown {
  * Concurrent connections are capped (SSE_MAX_CONNECTIONS) to bound timer/
  * socket growth; excess connections get a 503.
  */
-function handleSseEvents(req: IncomingMessage, res: ServerResponse): void {
+function handleSseEvents(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cfg: AshlrConfig,
+  allowDispatch: boolean,
+): void {
   // Cap concurrent SSE connections to bound timer/socket growth.
   if (_sseCleanups.size >= SSE_MAX_CONNECTIONS) {
     sendJson(res, 503, { error: 'too many live connections' });
@@ -334,7 +339,7 @@ function handleSseEvents(req: IncomingMessage, res: ServerResponse): void {
   }
 
   // Emit one full update (runs, swarms, inbox, daemon slices).
-  function emitUpdate(): void {
+  async function emitUpdate(): Promise<void> {
     sendNamed('runs', sseRunsPayload());
     sendNamed('swarms', sseSwarmsPayload());
     // M32: live inbox + daemon state for the web command center. Metadata
@@ -368,6 +373,11 @@ function handleSseEvents(req: IncomingMessage, res: ServerResponse): void {
         tickCount: ticks.length,
       });
     } catch { /* fleet-activity ping is best-effort */ }
+    // M213: dashboard snapshot push — lets fleet-dashboard update without polling.
+    try {
+      const snap = await buildSnapshot(cfg);
+      sendNamed('snapshot', { ...snap, dispatchEnabled: allowDispatch });
+    } catch { /* snapshot is best-effort */ }
   }
 
   // Send an initial snapshot immediately.
@@ -781,7 +791,7 @@ export async function handleApi(
 
     // ── GET /api/events (SSE) ────────────────────────────────────────────────
     if (path === '/api/events' && method === 'GET') {
-      handleSseEvents(req, res);
+      handleSseEvents(req, res, cfg, ctx.allowDispatch);
       return true;
     }
 

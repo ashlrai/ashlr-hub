@@ -1100,6 +1100,16 @@ export async function tick(
     }
   }).catch((err) => { console.warn('[ashlr] daemon:tick pulse-sync lazy-import failed:', (err as Error)?.message ?? err); return undefined; });
 
+  // M214: fire-and-forget tick-cost emit to Pulse OTLP — additive, never throws, no control-flow change.
+  // Lazy-imported (mirrors the pulse-sync pattern) so loop.ts's static grep-guards stay intact.
+  void import('../integrations/fleet-pulse-emit.js').then(async ({ emitTickCost }) => {
+    try {
+      await emitTickCost(cfg, tickRecord.ts, tickRecord.spentUsd, tickRecord.proposalsCreated, merged);
+    } catch {
+      // Best-effort — telemetry must never crash the daemon.
+    }
+  }).catch(() => { /* lazy-import best-effort */ });
+
   audit({
     action: 'daemon:tick',
     repo: null,

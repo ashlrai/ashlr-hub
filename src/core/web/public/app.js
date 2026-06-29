@@ -285,7 +285,22 @@ function connectSSE() {
     state.eventSource = es;
 
     es.addEventListener('snapshot', (e) => {
-      try { state.snapshot = JSON.parse(e.data); renderActiveView(); } catch {}
+      try {
+        const data = JSON.parse(e.data);
+        // M213: snapshot SSE push — update both overview state and fleet-dashboard state.
+        state.snapshot = data;
+        state.fleetDashboard = data;
+        if (state.activeView === 'fleet-dashboard') {
+          renderFleetDashboard();
+        } else if (state.activeView === 'overview') {
+          renderActiveView();
+        }
+        // SSE is live — suppress the polling fallback interval to avoid redundant fetches.
+        if (state.fleetDashboardInterval) {
+          clearInterval(state.fleetDashboardInterval);
+          state.fleetDashboardInterval = null;
+        }
+      } catch {}
     });
     es.addEventListener('runs', (e) => {
       try { state.runs = JSON.parse(e.data); if (state.activeView === 'runs') renderRuns(); } catch {}
@@ -328,7 +343,19 @@ function connectSSE() {
       } catch {}
     });
     es.addEventListener('error', () => {
-      // Silently tolerate — browser will auto-reconnect or server is stopping
+      // M213: SSE dropped — restart polling fallback so fleet-dashboard stays fresh.
+      updateSseDot(false);
+      if (state.activeView === 'fleet-dashboard' && !state.fleetDashboardInterval) {
+        const settings = fdLoadSettings();
+        state.fleetDashboardInterval = setInterval(() => {
+          if (state.activeView !== 'fleet-dashboard') {
+            clearInterval(state.fleetDashboardInterval);
+            state.fleetDashboardInterval = null;
+            return;
+          }
+          loadFleetDashboard();
+        }, settings.refreshSecs * 1000);
+      }
     });
   } catch {
     // EventSource not available or server not yet up — silent

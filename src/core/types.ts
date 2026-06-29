@@ -339,6 +339,13 @@ export interface AshlrConfig {
      *     The tier/mergeAuthority check is REPLACED (not bypassed) by this bar.
      *     M54 never-weaken + self-target guard + allowSelfMerge parity unchanged.
      */
+    /**
+     * M214: emit GenAI-OTel spans for fleet events (proposal, merge, judge
+     * verdict, tick cost) to the Pulse OTLP ingest so Pulse becomes a live
+     * fleet dashboard. DEFAULT false (additive, flag-gated, fire-and-forget).
+     * Endpoint: cfg.comms.pulseOtlpUrl → PULSE_OTLP_URL env → cfg.pulse.endpoint.
+     */
+    pulseEmit?: boolean;
     autoMerge?: {
       enabled: boolean;
       /**
@@ -543,6 +550,13 @@ export interface AshlrConfig {
      * Only fires when channel === 'telegram' and Telegram is configured.
      */
     proactive?: boolean;
+    /**
+     * M214: OTLP endpoint for fleet-pulse emit (GenAI-OTel spans).
+     * Takes precedence over PULSE_OTLP_URL env and cfg.pulse.endpoint.
+     * Example: 'https://pulse.example.com' (no trailing slash).
+     * Only used when cfg.foundry.pulseEmit === true.
+     */
+    pulseOtlpUrl?: string;
   };
 }
 

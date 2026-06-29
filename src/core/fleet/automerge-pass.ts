@@ -41,6 +41,8 @@ import { analyzeBlastRadius } from '../run/blast-radius.js';
 import { checkSpecContract } from '../run/spec-contract.js';
 // M212: proactive notifications (fire-and-forget, never throws, never alters control flow)
 import { notifyFleetEvent } from '../comms/events.js';
+// M214: fleet→pulse OTLP emit (fire-and-forget, flag-gated cfg.foundry.pulseEmit, default OFF)
+import { emitMerge, emitJudgeVerdict } from '../integrations/fleet-pulse-emit.js';
 
 export interface AutoMergePassResult {
   /** Proposals the gate was run against this pass (frontier + branch-eligible mid). */
@@ -194,6 +196,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
           verdict = null;
         }
         out.judged++;
+        // M214: fire-and-forget judge-verdict emit — additive, never throws, no control-flow change.
+        void emitJudgeVerdict(cfg, p.id, verdict?.verdict ?? 'null', p.repo, p.engineTier).catch(() => {});
 
         // Only proposals that the judge ships proceed to the merge gate.
         // 'review', 'noise', 'harmful' → leave pending (no autoMergeProposal call).
@@ -298,6 +302,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
         out.merged++;
         // M212: fire-and-forget merge notification — additive, never throws, no control-flow change.
         notifyFleetEvent('merge', { repo: p.repo ?? undefined, title: p.title, engine: p.engineTier }, cfg).catch(() => {});
+        // M214: fire-and-forget merge emit to Pulse OTLP — additive, never throws, no control-flow change.
+        void emitMerge(cfg, p.id, p.repo, p.engineTier).catch(() => {});
       }
       if (res.branched) out.branched++;
     } catch {

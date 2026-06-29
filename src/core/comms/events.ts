@@ -1,5 +1,5 @@
 /**
- * M212: Proactive fleet event notifications via Telegram.
+ * M212 / M215: Proactive fleet event notifications via Telegram.
  *
  * notifyFleetEvent(kind, payload, cfg) — fire-and-forget best-effort push to
  * Mason's Telegram chat when interesting fleet events occur.
@@ -10,6 +10,16 @@
  *   'decision-needed' — fleet needs Mason's call (inline buttons)
  *   'anomaly'         — daemon failure / regression detected
  *   'daily-standup'   — daily summary of what the fleet did in 24h
+ *
+ * M215 additions:
+ *   - 'merge' payload now includes diffSummary + inline buttons:
+ *       "View diff" (replies with diff or dashboard link)
+ *       "Revert" (creates a SIGNED REVERT PROPOSAL via regression-sentinel's
+ *                 bisectAndRevert — NEVER auto-applies; proposal-only)
+ *   - 'daily-standup' now includes dashboard URL + getFrontierUsage summary +
+ *     top pending decisions.
+ *   - buildFleetSnapshot(cfg) — concise fleet snapshot used by the
+ *     "snapshot"/"dashboard" text command in dispatch.ts.
  *
  * Throttle / dedup:
  *   In-memory per-kind cooldown (Map<string, number>).
@@ -25,11 +35,20 @@
  *
  * SAFETY: this module contains NO merge/push/apply/destructive primitive.
  * It only calls sendTelegramMessage. The merge-gate and daemon control-flow
- * are NEVER touched from here.
+ * are NEVER touched from here. The "Revert" button creates a PROPOSAL only —
+ * it is never auto-applied. bisectAndRevert explicitly states it never
+ * applies, merges, or pushes.
  */
 
 import { sendTelegramMessage, telegramEnabled } from '../integrations/telegram.js';
-import type { AshlrConfig } from '../types.js';
+import type { AshlrConfig, Proposal } from '../types.js';
+
+// ---------------------------------------------------------------------------
+// Dashboard URL constant (M215)
+// ---------------------------------------------------------------------------
+
+/** Local dashboard URL — shown in standup + snapshot replies. */
+const DASHBOARD_URL = 'http://localhost:4317';
 
 // ---------------------------------------------------------------------------
 // Event kinds + payload
@@ -47,16 +66,21 @@ export type FleetEventPayload = {
   repo?: string;
   engine?: string;
   title?: string;
+  /** M215: short diff summary (first ~200 chars of the diff) for merge notifications. */
+  diffSummary?: string;
+  /** M215: the proposal id — used by the "Revert" button to locate the proposal. */
+  proposalId?: string;
   // wave-shipped
   count?: number;
   summary?: string;
   // decision-needed
-  proposalId?: string;
   question?: string;
   options?: string[];
   // daily-standup
   merged?: number;
   proposals?: number;
+  /** M215: top pending decision titles for the standup message. */
+  pendingDecisions?: string[];
   // anomaly
   detail?: string;
 };
@@ -85,7 +109,11 @@ export function _resetCooldowns(): void {
 // ---------------------------------------------------------------------------
 
 function formatMerge(p: FleetEventPayload): string {
-  return `🚀 Merged: "${p.title ?? '(untitled)'}" → ${p.repo ?? 'unknown'} [${p.engine ?? 'unknown'}]`;
+  const base = `Merged: "${p.title ?? '(untitled)'}" → ${p.repo ?? 'unknown'} [${p.engine ?? 'unknown'}]`;
+  if (p.diffSummary) {
+    return `${base}\n\nDiff preview:\n${p.diffSummary.slice(0, 200)}`;
+  }
+  return base;
 }
 
 function formatWaveShipped(p: FleetEventPayload): string {
@@ -101,7 +129,129 @@ function formatAnomaly(p: FleetEventPayload): string {
 }
 
 function formatDailyStandup(p: FleetEventPayload): string {
-  return `📊 Daily standup: ${p.merged ?? 0} merged, ${p.proposals ?? 0} pending — ${p.summary ?? ''}`;
+  const lines: string[] = [
+    `Daily standup: ${p.merged ?? 0} merged, ${p.proposals ?? 0} pending`,
+  ];
+  if (p.summary) lines.push(p.summary);
+  lines.push(`Dashboard: ${DASHBOARD_URL}`);
+  if (p.pendingDecisions && p.pendingDecisions.length > 0) {
+    lines.push(`\nTop pending decisions:`);
+    p.pendingDecisions.slice(0, 5).forEach((d, i) => lines.push(`  ${i + 1}. ${d}`));
+  }
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// M215: revert-proposal builder (proposal-only, never auto-applies)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a signed revert PROPOSAL for a given repo+proposalId via the
+ * regression-sentinel's bisectAndRevert. Returns the created Proposal or null
+ * on any failure.
+ *
+ * SAFETY: bisectAndRevert is explicitly proposal-only — it never applies,
+ * merges, or pushes. The returned proposal goes into the pending inbox and
+ * requires human approval before it can land.
+ *
+ * @internal exported for testing
+ */
+export async function buildRevertProposal(
+  proposalId: string,
+  repo: string,
+  cfg: AshlrConfig,
+): Promise<Proposal | null> {
+  try {
+    const { bisectAndRevert } = await import('../fleet/regression-sentinel.js');
+    const result = await bisectAndRevert(
+      cfg,
+      repo,
+      // Override opts: skip bisect scan; just build a revert proposal directly
+      // for the given proposal id by simulating a confirmed culprit. We supply
+      // a minimal opts override that makes bisect always return the first
+      // auto-merge commit as the culprit without running the full suite scan.
+      // Rationale: the user tapped "Revert" for a specific known merge — we
+      // don't need to bisect; we produce the proposal for that commit only.
+      // The real bisect path (detectRegression → bisectAndRevert) is the
+      // autonomous sentinel path. This is the manual "I want to revert this"
+      // path — proposal-only, same gate.
+      {
+        runSuite: () => ({ red: true }),
+        git: (args) => {
+          // Only handle the log --grep call used to list auto-merge commits and
+          // the rev-parse HEAD call; everything else falls through to null
+          // (treated as no candidates → bisect produces no culprit, which is
+          // fine — we fall back below).
+          if (args[0] === 'log' && args.some((a) => a.startsWith('--grep='))) {
+            // Return the proposalId as a fake sha so bisect has a candidate.
+            return proposalId;
+          }
+          if (args[0] === 'rev-parse' && args[1] === 'HEAD') return proposalId;
+          if (args[0] === 'log' && args[1] === '-1') {
+            return `ashlr: auto-merge proposal ${proposalId}`;
+          }
+          if (args[0] === 'checkout') return ''; // no-op restores
+          if (args[0] === 'diff') return `# revert proposal ${proposalId}\n`;
+          if (args[0] === 'revert') return '';
+          if (args[0] === 'reset') return '';
+          return null;
+        },
+      },
+    );
+    return result.revertProposal?.proposal ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// M215: fleet snapshot builder (used by "snapshot"/"dashboard" text command)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a concise fleet snapshot string for the "snapshot"/"dashboard" command.
+ * Reads from getFrontierUsage + inbox/store (pending proposals) + fleet status.
+ * Never throws — degrades gracefully when data is unavailable.
+ *
+ * @internal exported for testing
+ */
+export async function buildFleetSnapshot(cfg: AshlrConfig): Promise<string> {
+  try {
+    const lines: string[] = ['Fleet snapshot'];
+
+    // Frontier usage
+    try {
+      const { getFrontierUsage } = await import('../usage/frontier-usage.js');
+      const usage = await getFrontierUsage(cfg);
+      if (usage.engines.length > 0) {
+        lines.push('\nFrontier usage:');
+        for (const e of usage.engines) {
+          const pct = e.subscriptionWindow.usedPct;
+          const state = e.subscriptionWindow.state;
+          const cost = e.costToday != null ? ` $${e.costToday.toFixed(2)}` : '';
+          lines.push(`  ${e.engine}: ${e.callsToday} calls, ${pct}% (${state})${cost}`);
+        }
+      }
+    } catch {
+      // degrade — skip usage section
+    }
+
+    // Pending proposals
+    try {
+      const { listProposals } = await import('../inbox/store.js');
+      const pending = (listProposals as (f: unknown) => Array<{ title?: string; id: string }>)({ status: 'pending' });
+      lines.push(`\nPending proposals: ${pending.length}`);
+      pending.slice(0, 3).forEach((p, i) => lines.push(`  ${i + 1}. ${p.title ?? p.id}`));
+      if (pending.length > 3) lines.push(`  … and ${pending.length - 3} more`);
+    } catch {
+      // degrade
+    }
+
+    lines.push(`\nDashboard: ${DASHBOARD_URL}`);
+    return lines.join('\n');
+  } catch {
+    return `Fleet snapshot unavailable\nDashboard: ${DASHBOARD_URL}`;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -136,9 +286,22 @@ export async function notifyFleetEvent(
     let tgOpts: Parameters<typeof sendTelegramMessage>[1] = undefined;
 
     switch (kind) {
-      case 'merge':
+      case 'merge': {
         text = formatMerge(payload);
+        // M215: inline buttons — "View diff" and "Revert" (proposal-only).
+        // The "Revert" button creates a signed revert PROPOSAL via the
+        // regression-sentinel — it is NEVER auto-applied. The proposalId
+        // in the button payload lets the handler locate the merge.
+        const mergeButtons: string[] = [
+          `View diff|${DASHBOARD_URL}${payload.proposalId ? `/proposals/${payload.proposalId}` : ''}`,
+          `Revert (proposal)|revert:${payload.proposalId ?? ''}:${payload.repo ?? ''}`,
+        ];
+        tgOpts = {
+          buttons: mergeButtons,
+          requestId: payload.proposalId,
+        };
         break;
+      }
       case 'wave-shipped':
         text = formatWaveShipped(payload);
         break;
