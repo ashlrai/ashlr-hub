@@ -191,11 +191,15 @@ describe('buildEngineScores — sample floor', () => {
     expect(s!.samples).toBeLessThan(LEARNED_ROUTING_MIN_SAMPLES);
   });
 
-  it(`score reflects actual ratio when sample count >= ${LEARNED_ROUTING_MIN_SAMPLES}`, () => {
+  it(`score reflects actual ratio when sample count > ${LEARNED_ROUTING_MIN_SAMPLES}`, () => {
+    // Use a fixed nowMs == the entries' ts so recency-decay is exactly 1.0 (no
+    // boundary flakiness): exactly-MIN raw samples would dip just under the
+    // weighted floor with even a few ms of decay. Pin time + go above the floor.
+    const fixedNow = 1_700_000_000_000;
     writeDecisions([
-      ...judgedEntries(LEARNED_ROUTING_MIN_SAMPLES, 'claude', 'opus', 'issue', 'ship'),
+      ...judgedEntries(LEARNED_ROUTING_MIN_SAMPLES + 2, 'claude', 'opus', 'issue', 'ship', fixedNow),
     ]);
-    const scores = buildEngineScores('issue');
+    const scores = buildEngineScores('issue', fixedNow);
     const s = scores.get('claude:opus');
     expect(s).toBeDefined();
     expect(s!.score).toBeGreaterThan(0.5); // all ships → score > neutral
