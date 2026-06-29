@@ -50,6 +50,8 @@
 - RUN SUMMARY (so far): ~18 improvements shipped across the ecosystem (binshield SECURITY fix, 2 critical ashlr-hub test-coverage gaps closed [orchestrator M199 + daemon M201], robustness fixes, ac smarter-surgical, structured federation errors, bug-finds-and-fixes). 2 self-inflicted regressions (red master, exports) — both caught + fully recovered. Several agent auto-reverts (bound working). Master green throughout (after recovery).
 - **Wave 5:** router nim-type fix (79fe5fb) + binshield Rizin fallback (1e820d5) SHIPPED; webfetch rate-limiter + stack healthcheck landing.
 - **Wave 6 (in flight):** phantom init-UX retry · ashlrcode file-tools refactor · ashlr-pulse test harness · prompt-trackr scoring tests · ashlr-md MCP tests · ashlr-hub loadConfig cfg.daemon fix (careful).
+- **Wave 6 ✅:** pulse privacy-floor tests (30, found 2 bugs) · ashlrcode file-tools refactor (~80 LOC) · prompt-trackr scoring tests (63) · phantom init-UX --empty/auto-init (b0b5dd5 — fixed the friction hit this session) · loadConfig daemon-fix.
+- **DASHBOARD + TELEGRAM ✅ SHIPPED+LIVE (e4bc53d):** M210 glanceable customizable dashboard (frontier-limits centerpiece) · M211 ashlr dashboard + launchd serve persistence (localhost:4317, live) + SwiftBar menu-bar glance · M212 proactive Telegram (merge/ship/decision/anomaly/standup, throttled, flag-gated) + quick-actions + soft-pause. comms.proactive=ON, serve persistent.
 - (next waves appended here as they ship)
 
 ## Loop guardrails
