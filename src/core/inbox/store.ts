@@ -33,6 +33,11 @@ import { recordDecision } from '../fleet/decisions-ledger.js';
 import { linkOutcome } from '../fleet/judge-trace.js';
 // M158: destructive-diff pre-judge guard — additive, DEFAULT ON, never-throws.
 import { isDestructiveDiff } from '../run/diff-safety.js';
+// M228: goal-milestone outcome wiring — additive, best-effort, never-throws.
+// Imported here (not goals/advance.ts) because inbox/store does NOT import from
+// goals/* anywhere, so this import creates no cycle. goals/advance.ts imports
+// inbox/store.ts (one direction only).
+import { listGoals, updateMilestoneStatus as _updateMilestoneStatus } from '../goals/store.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call-time so tests can relocate HOME)
@@ -202,6 +207,52 @@ function emitProposalSpan(
     });
   } catch {
     // Constructing the span input must never break a proposal lifecycle call.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// M228: Goal-milestone outcome linker — additive, best-effort, never-throws.
+// ---------------------------------------------------------------------------
+
+/**
+ * When a proposal resolves (applied → done; rejected → pending/blocked),
+ * find the goal milestone that holds this proposalId and update its status
+ * to reflect the terminal outcome.
+ *
+ * - 'applied'  → milestone 'done'   (the work landed)
+ * - 'rejected' → milestone 'pending' if it previously had no swarmId hint of
+ *                a hard failure; otherwise 'blocked' so a human must steer it.
+ *                NOTE: a milestone with proposalId set is currently 'proposed'
+ *                (normal path) or 'blocked' (needs-approval branch). In both
+ *                cases on reject we reset to 'pending' for retry — the conductor
+ *                can re-advance it on the next cycle.  A caller that wants to
+ *                permanently block can call updateMilestoneStatus directly.
+ *
+ * Best-effort: any error is swallowed so a Pulse outage / corrupt goal file
+ * NEVER disrupts the proposal lifecycle flow.
+ */
+function linkMilestoneOutcome(proposalId: string, outcome: 'applied' | 'rejected'): void {
+  try {
+    const goals = listGoals();
+    for (const goal of goals) {
+      const milestone = goal.milestones.find((m) => m.proposalId === proposalId);
+      if (!milestone) continue;
+
+      const newStatus =
+        outcome === 'applied'
+          ? ('done' as const)
+          : ('pending' as const); // reset to pending for retry on rejection
+
+      try {
+        _updateMilestoneStatus(goal.id, milestone.id, newStatus);
+      } catch {
+        // best-effort — never disrupts the caller
+      }
+      // Only one goal can own a given proposalId — stop after first match.
+      break;
+    }
+  } catch {
+    // Never disrupts the proposal flow.
   }
 }
 
@@ -455,6 +506,11 @@ export function setStatus(
       if (status === 'applied' || status === 'approved') linkOutcome(id, 'merged');
       else if (status === 'rejected') linkOutcome(id, 'rejected');
     } catch { /* never disrupts the proposal flow */ }
+
+    // M228: update any goal milestone linked to this proposal so milestones
+    // actually progress when their proposal is applied/rejected. Best-effort.
+    if (status === 'applied') linkMilestoneOutcome(id, 'applied');
+    else if (status === 'rejected') linkMilestoneOutcome(id, 'rejected');
 
     // Pulse Map: mirror the lifecycle transition. approved/applied → 'merge',
     // rejected → 'decline', any other → 'proposal'. The raw status is the
