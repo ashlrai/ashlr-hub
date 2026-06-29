@@ -167,7 +167,11 @@ function pickModel(models: string[], explicit?: string): string {
 // Fetch with timeout
 // ---------------------------------------------------------------------------
 
-const FETCH_TIMEOUT_MS = 30_000; // 30s for chat completions
+// M226d: 120s — frontier chat (NIM-hosted Kimi K2) planning/synthesis on a
+// complex milestone routinely exceeds 30s; the old ceiling aborted legit cloud
+// calls → degraded local fallback plans. Local calls still return fast, so the
+// higher ceiling only lets slow frontier calls finish (env override below).
+const FETCH_TIMEOUT_MS = Number(process.env.ASHLR_FETCH_TIMEOUT_MS) || 120_000;
 
 async function fetchWithTimeout(
   url: string,
