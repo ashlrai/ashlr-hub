@@ -3064,7 +3064,7 @@ function renderFleetActivity() {
 const FD_SETTINGS_KEY = 'ashlr-fleet-dashboard-settings';
 
 const FD_DEFAULT_SETTINGS = {
-  panels: { status: true, running: true, usage: true, activity: true },
+  panels: { status: true, running: true, usage: true, activity: true, production: true },
   refreshSecs: 15,
   theme: 'dark',
 };
@@ -3347,6 +3347,123 @@ function fdRenderActivityPanel(snap) {
   return body;
 }
 
+// ── M224: Production panel ──────────────────────────────────────────────────
+
+function fdRenderProductionPanel(snap) {
+  const prod = snap.production;
+  const body = el('div', { cls: 'fd-panel__body' });
+
+  if (!prod) {
+    body.appendChild(el('p', { cls: 'hint' }, 'Production data unavailable.'));
+    return body;
+  }
+
+  // ── Scorecard row: proposals + judge verdicts ─────────────────────────────
+  const scorecard = el('div', { cls: 'fd-prod-scorecard' });
+
+  // Proposals 24h block
+  const p24 = prod.proposals24h;
+  const propBlock = el('div', { cls: 'fd-prod-block' });
+  propBlock.appendChild(el('div', { cls: 'fd-prod-block__title' }, 'Proposals (24h)'));
+  const propCounts = el('div', { cls: 'fd-prod-counts' });
+  const addPropCount = (n, lbl, cls) => {
+    propCounts.appendChild(el('div', { cls: 'fd-prod-count' },
+      el('span', { cls: `fd-prod-count__num ${cls}` }, String(n)),
+      el('span', { cls: 'fd-prod-count__lbl' }, lbl)
+    ));
+  };
+  addPropCount(p24.applied, 'applied', 'fd-prod-count__num--ok');
+  addPropCount(p24.pending, 'pending', p24.pending > 0 ? 'fd-prod-count__num--warn' : '');
+  addPropCount(p24.rejected, 'rejected', p24.rejected > 0 ? 'fd-prod-count__num--fail' : '');
+  propBlock.appendChild(propCounts);
+  scorecard.appendChild(propBlock);
+
+  // Judge verdicts 24h block
+  const jv = prod.judgeVerdicts24h;
+  const judgeBlock = el('div', { cls: 'fd-prod-block' });
+  judgeBlock.appendChild(el('div', { cls: 'fd-prod-block__title' }, 'Judge verdicts (24h)'));
+  const judgeCounts = el('div', { cls: 'fd-prod-counts' });
+  const addJudgeCount = (n, lbl, cls) => {
+    judgeCounts.appendChild(el('div', { cls: 'fd-prod-count' },
+      el('span', { cls: `fd-prod-count__num ${cls}` }, String(n)),
+      el('span', { cls: 'fd-prod-count__lbl' }, lbl)
+    ));
+  };
+  addJudgeCount(jv.ship,    'ship',    'fd-prod-count__num--ok');
+  addJudgeCount(jv.review,  'review',  jv.review > 0  ? 'fd-prod-count__num--warn' : '');
+  addJudgeCount(jv.noise,   'noise',   'fd-prod-count__num--muted');
+  addJudgeCount(jv.harmful, 'harmful', jv.harmful > 0 ? 'fd-prod-count__num--fail' : '');
+  judgeBlock.appendChild(judgeCounts);
+  scorecard.appendChild(judgeBlock);
+
+  body.appendChild(scorecard);
+
+  // ── Auto-merges today ─────────────────────────────────────────────────────
+  const merges = prod.autoMergesToday;
+  const mergeRow = el('div', { cls: 'fd-prod-merges' });
+  const mergeCount = el('span', { cls: merges.count > 0 ? 'fd-prod-merge-count fd-prod-merge-count--active' : 'fd-prod-merge-count' },
+    String(merges.count));
+  mergeRow.appendChild(mergeCount);
+  mergeRow.appendChild(el('span', { cls: 'fd-prod-merge-label' }, ' auto-merges today'));
+  body.appendChild(mergeRow);
+
+  if (merges.titles.length > 0) {
+    const mergeList = el('ul', { cls: 'fd-prod-merge-list' });
+    for (const title of merges.titles) {
+      mergeList.appendChild(el('li', { cls: 'fd-prod-merge-item' }, title));
+    }
+    body.appendChild(mergeList);
+  }
+
+  // ── Active goals ─────────────────────────────────────────────────────────
+  if (prod.activeGoals.length > 0) {
+    body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Active goals'));
+    const goalList = el('ul', { cls: 'fd-prod-goal-list' });
+    for (const g of prod.activeGoals) {
+      const pct = g.totalMilestones > 0
+        ? Math.round((g.doneMilestones / g.totalMilestones) * 100)
+        : 0;
+      const msLabel = `${g.doneMilestones}/${g.totalMilestones} milestones`;
+      const row = el('li', { cls: 'fd-prod-goal-row' });
+      const trackWrap = el('div', { cls: 'fd-prod-goal-track-wrap' });
+      trackWrap.appendChild(el('div', { cls: 'fd-prod-goal-track' },
+        el('div', { cls: 'fd-prod-goal-fill', style: `width:${pct}%` })
+      ));
+      row.appendChild(el('div', { cls: 'fd-prod-goal-header' },
+        el('span', { cls: 'fd-prod-goal-title', title: g.objective }, g.objective),
+        el('span', { cls: 'fd-prod-goal-ms' }, msLabel)
+      ));
+      row.appendChild(trackWrap);
+      goalList.appendChild(row);
+    }
+    body.appendChild(goalList);
+  } else {
+    body.appendChild(el('p', { cls: 'hint', style: 'margin-top:8px' }, 'No active goals.'));
+  }
+
+  // ── Ships-per-day trend sparkline ─────────────────────────────────────────
+  if (prod.shipsPerDayTrend.length > 0) {
+    body.appendChild(el('div', { cls: 'fd-prod-section-title', style: 'margin-top:12px' }, 'Ships / day (7d)'));
+    const maxCount = Math.max(...prod.shipsPerDayTrend.map(d => d.count), 1);
+    const spark = el('div', { cls: 'fd-prod-spark', role: 'img', 'aria-label': 'Ships per day sparkline' });
+    for (const day of prod.shipsPerDayTrend) {
+      const pct = Math.round((day.count / maxCount) * 100);
+      const bar = el('div', { cls: 'fd-prod-spark-col', title: `${day.date}: ${day.count} ships` });
+      bar.appendChild(el('div', {
+        cls: day.count > 0 ? 'fd-prod-spark-bar fd-prod-spark-bar--active' : 'fd-prod-spark-bar',
+        style: `height:${Math.max(pct, day.count > 0 ? 6 : 2)}%`,
+      }));
+      bar.appendChild(el('div', { cls: 'fd-prod-spark-label' },
+        day.date.slice(5) // MM-DD
+      ));
+      spark.appendChild(bar);
+    }
+    body.appendChild(spark);
+  }
+
+  return body;
+}
+
 // ── Settings modal ──────────────────────────────────────────────────────────
 
 function fdOpenSettings() {
@@ -3366,7 +3483,7 @@ function fdOpenSettings() {
   // Panel visibility
   const panelSection = el('div', { cls: 'fd-modal__section' });
   panelSection.appendChild(el('div', { cls: 'fd-modal__section-label' }, 'Panels'));
-  const PANEL_LABELS = { status: 'Fleet Status', running: "What's Running", usage: 'Frontier Usage/Limits', activity: 'Recent Activity' };
+  const PANEL_LABELS = { status: 'Fleet Status', running: "What's Running", usage: 'Frontier Usage/Limits', activity: 'Recent Activity', production: 'Production' };
   for (const [key, label] of Object.entries(PANEL_LABELS)) {
     const cb = el('input', { type: 'checkbox' });
     cb.checked = draftSettings.panels[key] !== false;
@@ -3488,10 +3605,11 @@ function renderFleetDashboard() {
 
   // Count hidden panels for the hint
   const panelDefs = [
-    { key: 'status',   title: 'Fleet Status',         render: () => fdRenderStatusPanel(snap) },
-    { key: 'running',  title: "What's Running",        render: () => fdRenderRunningPanel(snap) },
-    { key: 'usage',    title: 'Frontier Usage/Limits', render: () => fdRenderUsagePanel(snap) },
-    { key: 'activity', title: 'Recent Activity',       render: () => fdRenderActivityPanel(snap) },
+    { key: 'status',     title: 'Fleet Status',         render: () => fdRenderStatusPanel(snap) },
+    { key: 'running',    title: "What's Running",        render: () => fdRenderRunningPanel(snap) },
+    { key: 'usage',      title: 'Frontier Usage/Limits', render: () => fdRenderUsagePanel(snap) },
+    { key: 'activity',   title: 'Recent Activity',       render: () => fdRenderActivityPanel(snap) },
+    { key: 'production', title: 'Production',            render: () => fdRenderProductionPanel(snap) },
   ];
 
   const hiddenCount = panelDefs.filter(p => settings.panels[p.key] === false).length;

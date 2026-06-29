@@ -2960,6 +2960,183 @@ a:hover {
 .fd-activity-cost   { font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
 .fd-activity-time   { font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
 
+/* M224: Production panel */
+.fd-prod-scorecard {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.fd-prod-block {
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm, 4px);
+  padding: 10px 12px;
+}
+.fd-prod-block__title {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+.fd-prod-counts {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.fd-prod-count {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 34px;
+}
+.fd-prod-count__num {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+.fd-prod-count__num--ok   { color: var(--status-ok, #22d3a0); }
+.fd-prod-count__num--warn { color: var(--status-warn, #f5a623); }
+.fd-prod-count__num--fail { color: var(--status-fail, #f04e4e); }
+.fd-prod-count__num--muted { color: var(--text-muted); }
+.fd-prod-count__lbl {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  text-align: center;
+}
+
+/* Auto-merges row */
+.fd-prod-merges {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.fd-prod-merge-count {
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+.fd-prod-merge-count--active { color: var(--status-ok, #22d3a0); }
+.fd-prod-merge-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.fd-prod-merge-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.fd-prod-merge-item {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  padding: 3px 8px;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm, 4px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Section title dividers */
+.fd-prod-section-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin: 10px 0 6px;
+}
+
+/* Active goals list */
+.fd-prod-goal-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.fd-prod-goal-row { display: flex; flex-direction: column; gap: 4px; }
+.fd-prod-goal-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.fd-prod-goal-title {
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.fd-prod-goal-ms {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.fd-prod-goal-track-wrap { width: 100%; }
+.fd-prod-goal-track {
+  height: 5px;
+  background: var(--bg-elevated);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.fd-prod-goal-fill {
+  height: 100%;
+  background: var(--accent, #00d4ff);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+  min-width: 2px;
+}
+
+/* Ships-per-day sparkline */
+.fd-prod-spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 56px;
+  padding-bottom: 18px; /* room for labels */
+  position: relative;
+}
+.fd-prod-spark-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  height: 100%;
+  gap: 2px;
+}
+.fd-prod-spark-bar {
+  width: 100%;
+  border-radius: 2px 2px 0 0;
+  background: var(--border);
+  min-height: 2px;
+  transition: height 0.3s ease;
+}
+.fd-prod-spark-bar--active { background: var(--accent, #00d4ff); }
+.fd-prod-spark-label {
+  font-size: 9px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  text-align: center;
+  position: absolute;
+  bottom: 0;
+}
+
 /* Settings gear button in panel header */
 .fd-settings-btn {
   display: flex; align-items: center; gap: 5px;

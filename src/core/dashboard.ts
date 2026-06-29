@@ -66,6 +66,7 @@ import { pendingCount as inboxPendingCount } from './inbox/store.js';
 import { loadDaemonState } from './daemon/state.js';
 import { getFrontierUsageSync } from './usage/frontier-usage.js';
 import type { FrontierUsage } from './usage/frontier-usage.js';
+import type { ProductionSummary } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Caps — keep snapshot fast and memory-bounded
@@ -252,6 +253,129 @@ async function buildPortfolio(cfg: AshlrConfig): Promise<PortfolioSummary> {
   }
 
   return portfolio;
+}
+
+// ---------------------------------------------------------------------------
+// M224: buildProduction — READ-ONLY production scorecard
+// ---------------------------------------------------------------------------
+
+/** 24-hour window in ms. */
+const PRODUCTION_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Max auto-merge titles to surface (keeps the panel compact). */
+const MAX_MERGE_TITLES = 5;
+
+/** Max active goals to surface in the production panel. */
+const MAX_ACTIVE_GOALS = 6;
+
+/** Number of days in the ships-per-day trend sparkline. */
+const TREND_DAYS = 7;
+
+/**
+ * Build the OPTIONAL production scorecard. All sources are READ-ONLY,
+ * bounded, and lazily-imported (so pre-M224 tests that mock only the base
+ * sources never crash). NEVER throws — any failure degrades to zeros/empty.
+ */
+async function buildProduction(generatedAt: string): Promise<ProductionSummary> {
+  const now = Date.now();
+  const since24h = now - PRODUCTION_WINDOW_MS;
+  const todayDate = new Date().toISOString().slice(0, 10);
+
+  const summary: ProductionSummary = {
+    generatedAt,
+    proposals24h: { pending: 0, applied: 0, rejected: 0, total: 0 },
+    judgeVerdicts24h: { ship: 0, review: 0, noise: 0, harmful: 0, total: 0 },
+    autoMergesToday: { count: 0, titles: [] },
+    activeGoals: [],
+    shipsPerDayTrend: [],
+  };
+
+  // ── Proposal counts over 24h + auto-merges today ─────────────────────────
+  try {
+    const { listProposals } = await import('./inbox/store.js');
+    const all = listProposals();
+    const recent = all.filter((p) => Date.parse(p.createdAt) >= since24h);
+    for (const p of recent) {
+      summary.proposals24h.total++;
+      if (p.status === 'pending') summary.proposals24h.pending++;
+      else if (p.status === 'applied') summary.proposals24h.applied++;
+      else if (p.status === 'rejected') summary.proposals24h.rejected++;
+    }
+    // Auto-merges today: proposals whose createdAt is today + status 'applied'
+    const mergedToday = all.filter(
+      (p) => p.status === 'applied' && p.createdAt.slice(0, 10) === todayDate,
+    );
+    summary.autoMergesToday.count = mergedToday.length;
+    summary.autoMergesToday.titles = mergedToday
+      .slice(0, MAX_MERGE_TITLES)
+      .map((p) => p.title);
+  } catch {
+    // Degrade to zeros.
+  }
+
+  // ── Judge verdict counts over 24h ────────────────────────────────────────
+  try {
+    const { readJudgeTraces } = await import('./fleet/judge-trace.js');
+    const traces = readJudgeTraces({ sinceMs: since24h });
+    for (const t of traces) {
+      summary.judgeVerdicts24h.total++;
+      if (t.verdict === 'ship') summary.judgeVerdicts24h.ship++;
+      else if (t.verdict === 'review') summary.judgeVerdicts24h.review++;
+      else if (t.verdict === 'noise') summary.judgeVerdicts24h.noise++;
+      else if (t.verdict === 'harmful') summary.judgeVerdicts24h.harmful++;
+    }
+  } catch {
+    // Degrade to zeros.
+  }
+
+  // ── Active goals + milestone counts ──────────────────────────────────────
+  try {
+    const { listGoals } = await import('./goals/store.js');
+    const { progressOf } = await import('./goals/advance.js');
+    const active = listGoals({ status: 'active' });
+    const goalRows: ProductionSummary['activeGoals'] = [];
+    for (const goal of active.slice(0, MAX_ACTIVE_GOALS)) {
+      const prog = progressOf(goal);
+      goalRows.push({
+        goalId: goal.id,
+        objective: goal.objective,
+        totalMilestones: prog.total,
+        doneMilestones: prog.done,
+      });
+    }
+    summary.activeGoals = goalRows;
+  } catch {
+    // Degrade to empty.
+  }
+
+  // ── Ships-per-day trend (7 days, applied proposals by calendar date) ──────
+  try {
+    const { listProposals } = await import('./inbox/store.js');
+    const allProposals = listProposals();
+    const trendMs = TREND_DAYS * 24 * 60 * 60 * 1000;
+    const trendSince = now - trendMs;
+    const countByDate = new Map<string, number>();
+    // Pre-fill all 7 days so missing days render as 0
+    for (let i = TREND_DAYS - 1; i >= 0; i--) {
+      const d = new Date(now - i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      countByDate.set(d, 0);
+    }
+    for (const p of allProposals) {
+      if (p.status !== 'applied') continue;
+      const createdMs = Date.parse(p.createdAt);
+      if (isNaN(createdMs) || createdMs < trendSince) continue;
+      const d = p.createdAt.slice(0, 10);
+      if (countByDate.has(d)) countByDate.set(d, (countByDate.get(d) ?? 0) + 1);
+    }
+    summary.shipsPerDayTrend = Array.from(countByDate.entries()).map(([date, count]) => ({
+      date,
+      count,
+    }));
+  } catch {
+    // Degrade to empty.
+  }
+
+  return summary;
 }
 
 // ---------------------------------------------------------------------------
@@ -470,6 +594,17 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
     portfolio = undefined;
   }
 
+  // ── M224 production scorecard (OPTIONAL) ─────────────────────────────────
+  // READ-ONLY: inbox proposals + judge traces + goals. All sub-sources are
+  // lazily imported and individually try/catch'd inside buildProduction.
+  // Absent on pre-M224 producers/tests so they stay valid.
+  let production: ProductionSummary | undefined;
+  try {
+    production = await buildProduction(generatedAt);
+  } catch {
+    production = undefined;
+  }
+
   return {
     generatedAt,
     repos: {
@@ -510,5 +645,8 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
     // M194: OPTIONAL frontier usage section — omitted when not populated so
     // pre-M194 tests (which never set it) stay valid.
     ...(frontierUsage !== undefined ? { frontierUsage } : {}),
+    // M224: OPTIONAL production scorecard — omitted when not populated so
+    // pre-M224 tests (which never set it) stay valid.
+    ...(production !== undefined ? { production } : {}),
   };
 }

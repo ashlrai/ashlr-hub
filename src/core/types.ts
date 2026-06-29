@@ -1741,6 +1741,57 @@ export interface DashboardSnapshot {
    * populated by buildSnapshot via getFrontierUsageSync. READ-ONLY.
    */
   frontierUsage?: import('./usage/frontier-usage.js').FrontierUsage;
+  /**
+   * M224: OPTIONAL production scorecard — "is the fleet actually producing?"
+   * Proposals by status over 24h, judge verdict breakdown, auto-merges today,
+   * active goal summaries, and ships-per-day trend. Absent on pre-M224
+   * producers/tests (so they stay valid); populated by buildSnapshot via
+   * buildProduction(). READ-ONLY.
+   */
+  production?: ProductionSummary;
+}
+
+/**
+ * M224: glanceable production scorecard embedded in DashboardSnapshot.
+ * All counts are over the last 24h unless noted. READ-ONLY — built from the
+ * inbox store, judge-trace store, and goals store. NEVER carries secrets.
+ */
+export interface ProductionSummary {
+  /** ISO timestamp this summary was built (same as DashboardSnapshot.generatedAt). */
+  generatedAt: string;
+  /** Proposal counts over the last 24h (only proposals whose createdAt is within window). */
+  proposals24h: {
+    pending: number;
+    applied: number;
+    rejected: number;
+    total: number;
+  };
+  /** Judge verdict counts over the last 24h (from judge-trace JSONL). */
+  judgeVerdicts24h: {
+    ship: number;
+    review: number;
+    noise: number;
+    harmful: number;
+    total: number;
+  };
+  /** Auto-merges today: proposals that reached status 'applied' today. */
+  autoMergesToday: {
+    count: number;
+    /** Titles of the most-recent merged proposals (cap 5). */
+    titles: string[];
+  };
+  /** Active goals with their milestone progress (so you can see planner expansion). */
+  activeGoals: {
+    goalId: string;
+    objective: string;
+    totalMilestones: number;
+    doneMilestones: number;
+  }[];
+  /**
+   * Ships-per-day trend: count of 'applied' proposals for each of the last 7
+   * calendar days, oldest-first. Empty when no data. Length <= 7.
+   */
+  shipsPerDayTrend: { date: string; count: number }[];
 }
 
 /**
