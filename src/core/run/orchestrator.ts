@@ -1761,12 +1761,36 @@ export async function runGoal(
           // M15: Choose route for this task (local-first; cloud only when
           // allowCloud + escalation reason + key present). Best-effort — falls
           // back to the run-level client when router is unavailable.
-          const { client: taskClient, decision: taskDecision } = await routeTask(
-            task.goal,
-            cfg,
-            { allowCloud, attempt: 1, lastReason: 'none' },
-            client,
-          );
+          //
+          // M227: when allowCloud is true, bypass routeTask's escalation-reason
+          // gate (which requires lastReason !== 'none' to pick a cloud route) and
+          // build the frontier client directly — same provider selection as the
+          // planner/synthesis client above (nvidia_nim_kimi, NVIDIA_NIM_API_KEY,
+          // moonshotai/kimi-k2.6). routeTask with lastReason:'none' always returns
+          // local because chooseRoute requires an escalation signal; this means
+          // every per-task execution was hitting local-coder even when the user
+          // explicitly opted in with allowCloud. Flag-off (no allowCloud) keeps
+          // the prior routeTask path byte-identical — no change to local behavior.
+          // Safety: engine:'builtin' is still forced in runner.ts; this only
+          // affects which CHAT CLIENT is used inside the builtin agent loop.
+          let taskClient: ProviderClient;
+          let taskDecision: RouteDecision;
+          if (allowCloud) {
+            taskClient = await getActiveClient(cfg, { allowCloud: true, provider: 'nvidia_nim_kimi' });
+            taskDecision = {
+              provider: 'nvidia_nim_kimi',
+              model: process.env['NVIDIA_NIM_MODEL'] ?? 'moonshotai/kimi-k2.6',
+              tier: 'cloud',
+              reason: 'allowCloud: frontier task execution (M227)',
+            };
+          } else {
+            ({ client: taskClient, decision: taskDecision } = await routeTask(
+              task.goal,
+              cfg,
+              { allowCloud: false, attempt: 1, lastReason: 'none' },
+              client,
+            ));
+          }
 
           emit(sink, {
             kind: 'log',
