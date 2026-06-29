@@ -3464,6 +3464,110 @@ function fdRenderProductionPanel(snap) {
   return body;
 }
 
+// ── M242: Intelligence panel ────────────────────────────────────────────────
+
+function fdRenderIntelligencePanel(snap) {
+  const intel = snap.intelligence;
+  const body = el('div', { cls: 'fd-panel__body' });
+
+  if (!intel) {
+    body.appendChild(el('p', { cls: 'hint' }, 'Intelligence data unavailable.'));
+    return body;
+  }
+
+  // ── Per-engine scorecards ─────────────────────────────────────────────────
+  if (intel.engineScorecards && intel.engineScorecards.length > 0) {
+    body.appendChild(el('div', { cls: 'fd-intel-section-title' }, 'Engine scorecards (24h)'));
+    const table = el('div', { cls: 'fd-intel-engine-table' });
+    // Header
+    const hdr = el('div', { cls: 'fd-intel-engine-row fd-intel-engine-row--header' });
+    for (const col of ['Engine', 'Ship', 'Review', 'Noise', 'Harmful', 'Rate']) {
+      hdr.appendChild(el('span', { cls: 'fd-intel-engine-cell' }, col));
+    }
+    table.appendChild(hdr);
+    for (const sc of intel.engineScorecards) {
+      const ratePct = (sc.shipRate * 100).toFixed(0) + '%';
+      const rateClass = sc.shipRate >= 0.7 ? 'fd-intel-rate--good'
+                      : sc.shipRate >= 0.4 ? 'fd-intel-rate--ok'
+                      : 'fd-intel-rate--warn';
+      const row = el('div', { cls: 'fd-intel-engine-row' });
+      row.appendChild(el('span', { cls: 'fd-intel-engine-cell fd-intel-engine-name' }, sc.engine));
+      row.appendChild(el('span', { cls: 'fd-intel-engine-cell fd-intel-count--ok' }, String(sc.ship)));
+      row.appendChild(el('span', { cls: 'fd-intel-engine-cell fd-intel-count--warn' }, String(sc.review)));
+      row.appendChild(el('span', { cls: 'fd-intel-engine-cell fd-intel-count--muted' }, String(sc.noise)));
+      row.appendChild(el('span', { cls: 'fd-intel-engine-cell fd-intel-count--fail' }, String(sc.harmful)));
+      row.appendChild(el('span', { cls: `fd-intel-engine-cell fd-intel-rate ${rateClass}` }, ratePct));
+      table.appendChild(row);
+    }
+    body.appendChild(table);
+  }
+
+  // ── M240: Learned routing scores ─────────────────────────────────────────
+  if (intel.routingScores && intel.routingScores.length > 0) {
+    body.appendChild(el('div', { cls: 'fd-intel-section-title', style: 'margin-top:14px' }, 'Learned routing (M240)'));
+    const routeList = el('ul', { cls: 'fd-intel-route-list' });
+    for (const rs of intel.routingScores.slice(0, 10)) {
+      const trendColor = rs.trend === 'promoted' ? 'var(--status-done)'
+                       : rs.trend === 'demoted'  ? 'var(--status-failed)'
+                       : 'var(--text-muted)';
+      const trendSymbol = rs.trend === 'promoted' ? '▲' : rs.trend === 'demoted' ? '▼' : '—';
+      const scorePct = (rs.score * 100).toFixed(0) + '%';
+      const modelPart = rs.model ? `:${rs.model}` : '';
+      const label = `${rs.engine}${modelPart} / ${rs.taskClass}`;
+      const row = el('li', { cls: 'fd-intel-route-row' },
+        el('span', { cls: 'fd-intel-route-engine', title: label }, label),
+        el('span', { cls: 'fd-intel-route-score' }, scorePct),
+        el('span', { cls: 'fd-intel-route-trend', style: `color:${trendColor}` }, trendSymbol),
+        rs.samples > 0
+          ? el('span', { cls: 'fd-intel-route-samples' }, `${rs.samples.toFixed(1)}s`)
+          : null
+      );
+      routeList.appendChild(row);
+    }
+    body.appendChild(routeList);
+  } else {
+    body.appendChild(el('p', { cls: 'hint', style: 'margin-top:8px' },
+      'No routing data yet. Scores appear after 5+ judged decisions per engine.'));
+  }
+
+  // ── M235: Anti-playbook lessons ───────────────────────────────────────────
+  body.appendChild(el('div', { cls: 'fd-intel-section-title', style: 'margin-top:14px' }, 'Anti-playbooks (M235)'));
+  if (intel.antiPlaybooks && intel.antiPlaybooks.length > 0) {
+    const apList = el('ul', { cls: 'fd-intel-ap-list' });
+    for (const ap of intel.antiPlaybooks) {
+      const item = el('li', { cls: 'fd-intel-ap-item' });
+      item.appendChild(el('div', { cls: 'fd-intel-ap-title' }, ap.title));
+      item.appendChild(el('div', { cls: 'fd-intel-ap-snippet' }, ap.snippet));
+      item.appendChild(el('div', { cls: 'fd-intel-ap-ts' }, fmtRelative(ap.ts)));
+      apList.appendChild(item);
+    }
+    body.appendChild(apList);
+  } else {
+    body.appendChild(el('p', { cls: 'hint' },
+      'No anti-playbooks yet. Lessons appear when the judge rejects proposals.'));
+  }
+
+  // ── M241: Recent fleet events ─────────────────────────────────────────────
+  if (intel.recentEvents && intel.recentEvents.length > 0) {
+    body.appendChild(el('div', { cls: 'fd-intel-section-title', style: 'margin-top:14px' }, 'Fleet events (M241)'));
+    const evList = el('ul', { cls: 'fd-intel-ev-list' });
+    for (const ev of intel.recentEvents.slice(0, 10)) {
+      const kindColor = ev.kind.startsWith('regression') ? 'var(--status-failed)'
+                      : ev.kind.startsWith('merge')      ? 'var(--status-done)'
+                      : ev.kind.startsWith('goal')       ? 'var(--accent)'
+                      : 'var(--text-muted)';
+      evList.appendChild(el('li', { cls: 'fd-intel-ev-row' },
+        el('span', { cls: 'fd-intel-ev-kind', style: `color:${kindColor}` }, ev.kind),
+        el('span', { cls: 'fd-intel-ev-detail', title: ev.detail }, ev.detail || '—'),
+        el('span', { cls: 'fd-intel-ev-ts' }, fmtRelative(ev.ts))
+      ));
+    }
+    body.appendChild(evList);
+  }
+
+  return body;
+}
+
 // ── Settings modal ──────────────────────────────────────────────────────────
 
 function fdOpenSettings() {
@@ -3483,7 +3587,7 @@ function fdOpenSettings() {
   // Panel visibility
   const panelSection = el('div', { cls: 'fd-modal__section' });
   panelSection.appendChild(el('div', { cls: 'fd-modal__section-label' }, 'Panels'));
-  const PANEL_LABELS = { status: 'Fleet Status', running: "What's Running", usage: 'Frontier Usage/Limits', activity: 'Recent Activity', production: 'Production' };
+  const PANEL_LABELS = { status: 'Fleet Status', running: "What's Running", usage: 'Frontier Usage/Limits', activity: 'Recent Activity', production: 'Production', intelligence: 'Fleet Intelligence' };
   for (const [key, label] of Object.entries(PANEL_LABELS)) {
     const cb = el('input', { type: 'checkbox' });
     cb.checked = draftSettings.panels[key] !== false;
@@ -3605,11 +3709,12 @@ function renderFleetDashboard() {
 
   // Count hidden panels for the hint
   const panelDefs = [
-    { key: 'status',     title: 'Fleet Status',         render: () => fdRenderStatusPanel(snap) },
-    { key: 'running',    title: "What's Running",        render: () => fdRenderRunningPanel(snap) },
-    { key: 'usage',      title: 'Frontier Usage/Limits', render: () => fdRenderUsagePanel(snap) },
-    { key: 'activity',   title: 'Recent Activity',       render: () => fdRenderActivityPanel(snap) },
-    { key: 'production', title: 'Production',            render: () => fdRenderProductionPanel(snap) },
+    { key: 'status',       title: 'Fleet Status',         render: () => fdRenderStatusPanel(snap) },
+    { key: 'running',      title: "What's Running",        render: () => fdRenderRunningPanel(snap) },
+    { key: 'usage',        title: 'Frontier Usage/Limits', render: () => fdRenderUsagePanel(snap) },
+    { key: 'activity',     title: 'Recent Activity',       render: () => fdRenderActivityPanel(snap) },
+    { key: 'production',   title: 'Production',            render: () => fdRenderProductionPanel(snap) },
+    { key: 'intelligence', title: 'Fleet Intelligence',    render: () => fdRenderIntelligencePanel(snap) },
   ];
 
   const hiddenCount = panelDefs.filter(p => settings.panels[p.key] === false).length;

@@ -1771,6 +1771,13 @@ export interface DashboardSnapshot {
    * buildProduction(). READ-ONLY.
    */
   production?: ProductionSummary;
+  /**
+   * M242: OPTIONAL fleet intelligence panel — learned routing scores (M240),
+   * anti-playbook lessons (M235), per-engine scorecards, and recent event-bus
+   * activity (M241). Absent on pre-M242 producers/tests (so they stay valid);
+   * populated by buildSnapshot via buildIntelligence(). READ-ONLY.
+   */
+  intelligence?: IntelligenceSummary;
 }
 
 /**
@@ -1814,6 +1821,68 @@ export interface ProductionSummary {
    * calendar days, oldest-first. Empty when no data. Length <= 7.
    */
   shipsPerDayTrend: { date: string; count: number }[];
+}
+
+/**
+ * M242: Fleet intelligence summary — shows the fleet learning about itself.
+ * All fields are READ-ONLY aggregations from the decisions ledger, genome hub,
+ * and worked ledger. Never carries secrets. Absent on pre-M242 snapshots.
+ */
+export interface IntelligenceSummary {
+  /** ISO timestamp this summary was built. */
+  generatedAt: string;
+  /**
+   * M240: Per-(engine, model, taskClass) learned routing scores.
+   * Each entry shows the historical ship-rate and sample count for one
+   * engine+model combination across all task classes seen in the ledger.
+   */
+  routingScores: {
+    /** Composite key: `<engine>:<model>` or `<engine>` when model is absent. */
+    key: string;
+    engine: string;
+    model: string | null;
+    taskClass: string;
+    /** Ship-rate in [0,1]. 0.5 = neutral / cold-start. */
+    score: number;
+    /** Recency-weighted sample count. */
+    samples: number;
+    /** Human-readable trend: 'promoted' | 'demoted' | 'neutral'. */
+    trend: 'promoted' | 'demoted' | 'neutral';
+  }[];
+  /**
+   * M235: Recent anti-playbook lessons written from judge rejections.
+   * Each entry is a genome hub entry tagged 'm235:anti-playbook'.
+   */
+  antiPlaybooks: {
+    id: string;
+    title: string;
+    /** First 200 chars of the lesson text. */
+    snippet: string;
+    ts: string;
+  }[];
+  /**
+   * Per-engine scorecard derived from decisions ledger (24h window).
+   * Aggregates ship/review/noise/harmful counts and ship-rate per engine.
+   */
+  engineScorecards: {
+    engine: string;
+    ship: number;
+    review: number;
+    noise: number;
+    harmful: number;
+    total: number;
+    /** Ship-rate = ship / total. 0 when total === 0. */
+    shipRate: number;
+  }[];
+  /**
+   * M241: Recent fleet lifecycle events (last 20, newest-first).
+   * Sourced from the decisions ledger 'event-bus' action entries.
+   */
+  recentEvents: {
+    kind: string;
+    detail: string;
+    ts: string;
+  }[];
 }
 
 /**

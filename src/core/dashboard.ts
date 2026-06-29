@@ -66,7 +66,7 @@ import { pendingCount as inboxPendingCount } from './inbox/store.js';
 import { loadDaemonState } from './daemon/state.js';
 import { getFrontierUsageSync } from './usage/frontier-usage.js';
 import type { FrontierUsage } from './usage/frontier-usage.js';
-import type { ProductionSummary } from './types.js';
+import type { ProductionSummary, IntelligenceSummary } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Caps — keep snapshot fast and memory-bounded
@@ -379,6 +379,142 @@ async function buildProduction(generatedAt: string): Promise<ProductionSummary> 
 }
 
 // ---------------------------------------------------------------------------
+// M242: buildIntelligence — READ-ONLY fleet intelligence aggregation
+// ---------------------------------------------------------------------------
+
+/** Max anti-playbook lessons to surface (newest first). */
+const MAX_ANTI_PLAYBOOKS = 5;
+
+/** Max routing score rows to surface. */
+const MAX_ROUTING_SCORES = 20;
+
+/** Max recent event-bus entries to surface. */
+const MAX_RECENT_EVENTS = 20;
+
+/** Task classes to build routing scores for (covers the common cases). */
+const SCORE_TASK_CLASSES = ['issue', 'todo', 'lint', 'test', 'ci', 'dep', '*'];
+
+/**
+ * Build the OPTIONAL fleet intelligence section.
+ * Sources: decisions ledger (M119/M240), genome hub (M235), worked ledger.
+ * ALL READ-ONLY. NEVER throws — any failure degrades to empty arrays.
+ * Lazily imported so pre-M242 tests that mock only base sources stay valid.
+ */
+async function buildIntelligence(generatedAt: string): Promise<IntelligenceSummary> {
+  const summary: IntelligenceSummary = {
+    generatedAt,
+    routingScores: [],
+    antiPlaybooks: [],
+    engineScorecards: [],
+    recentEvents: [],
+  };
+
+  // ── M240: Learned routing scores ──────────────────────────────────────────
+  try {
+    const { buildEngineScores } = await import('./run/learned-router.js');
+    const seen = new Set<string>();
+    const rows: IntelligenceSummary['routingScores'] = [];
+    for (const taskClass of SCORE_TASK_CLASSES) {
+      const scoreMap = buildEngineScores(taskClass);
+      for (const s of scoreMap.values()) {
+        const rowKey = `${s.key}::${taskClass}`;
+        if (seen.has(rowKey)) continue;
+        seen.add(rowKey);
+        rows.push({
+          key: s.key,
+          engine: s.engine,
+          model: s.model,
+          taskClass,
+          score: s.score,
+          samples: s.samples,
+          trend: s.score > 0.55 ? 'promoted' : s.score < 0.45 ? 'demoted' : 'neutral',
+        });
+      }
+    }
+    // Sort: promoted first, then by score desc
+    rows.sort((a, b) => b.score - a.score);
+    summary.routingScores = rows.slice(0, MAX_ROUTING_SCORES);
+  } catch {
+    // Degrade to empty.
+  }
+
+  // ── M235: Anti-playbook lessons from genome hub ───────────────────────────
+  try {
+    // loadGenome accepts any AshlrConfig-shaped object; we pass a stub so
+    // buildIntelligence has no dependency on the caller's live config.
+    const { loadGenome } = await import('./genome/store.js');
+    const stubCfg = { version: 1, roots: [], editor: 'cursor', staleDays: 30, categories: {}, tidyRules: [], keepers: [], models: { lmstudio: '', ollama: '', providerChain: [] as string[] }, telemetry: {}, tools: {} } as import('./types.js').AshlrConfig;
+    const entries = loadGenome(stubCfg);
+    const antiPlaybookEntries = entries
+      .filter((e) => Array.isArray(e.tags) && e.tags.includes('m235:anti-playbook'))
+      .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))
+      .slice(0, MAX_ANTI_PLAYBOOKS);
+    summary.antiPlaybooks = antiPlaybookEntries.map((e) => ({
+      id: e.id,
+      title: e.title,
+      snippet: (e.text ?? '').slice(0, 200),
+      ts: e.ts,
+    }));
+  } catch {
+    // Degrade to empty.
+  }
+
+  // ── Per-engine scorecards from decisions ledger (24h) ────────────────────
+  try {
+    const { readDecisions } = await import('./fleet/decisions-ledger.js');
+    const since24h = Date.now() - 24 * 60 * 60 * 1000;
+    const decisions = readDecisions({ sinceMs: since24h });
+    const acc = new Map<string, { ship: number; review: number; noise: number; harmful: number }>();
+    for (const d of decisions) {
+      if (d.action !== 'judged') continue;
+      const eng = (d.engine as string | undefined) ?? 'unknown';
+      if (!acc.has(eng)) acc.set(eng, { ship: 0, review: 0, noise: 0, harmful: 0 });
+      const slot = acc.get(eng)!;
+      const v = (d.verdict ?? '').toLowerCase();
+      if (v === 'ship' || v === 'applied' || v === 'approved') slot.ship++;
+      else if (v === 'review') slot.review++;
+      else if (v === 'noise' || v === 'trivial') slot.noise++;
+      else if (v === 'harmful' || v === 'decline' || v === 'rejected') slot.harmful++;
+    }
+    summary.engineScorecards = Array.from(acc.entries()).map(([engine, counts]) => {
+      const total = counts.ship + counts.review + counts.noise + counts.harmful;
+      return { engine, ...counts, total, shipRate: total > 0 ? counts.ship / total : 0 };
+    }).sort((a, b) => b.shipRate - a.shipRate);
+  } catch {
+    // Degrade to empty.
+  }
+
+  // ── M241: Recent fleet events inferred from decisions ledger ─────────────
+  // The event-bus (M241) fires in-memory handlers; lifecycle milestones are
+  // captured as merged/rejected/escalated decisions. We surface those as
+  // glanceable events: 'merge:shipped', 'regression:detected', 'goal:done'.
+  try {
+    const { readDecisions } = await import('./fleet/decisions-ledger.js');
+    const since72h = Date.now() - 72 * 60 * 60 * 1000;
+    const decisions = readDecisions({ sinceMs: since72h, limit: 200 });
+    // Map lifecycle actions to event-bus kind labels.
+    const EVENT_ACTIONS = new Set(['merged', 'rejected', 'escalated']);
+    const actionToKind: Record<string, string> = {
+      merged:    'merge:shipped',
+      rejected:  'judge:rejected',
+      escalated: 'regression:detected',
+    };
+    const eventEntries = decisions
+      .filter((d) => EVENT_ACTIONS.has(d.action))
+      .slice(0, MAX_RECENT_EVENTS);
+    summary.recentEvents = eventEntries.map((d) => ({
+      kind: actionToKind[d.action] ?? d.action,
+      detail: d.reason ?? d.detail ?? '',
+      ts: d.ts,
+    }));
+  } catch {
+    // Degrade to empty.
+  }
+
+  return summary;
+}
+
+// ---------------------------------------------------------------------------
 // buildSnapshot
 // ---------------------------------------------------------------------------
 
@@ -605,6 +741,17 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
     production = undefined;
   }
 
+  // ── M242 fleet intelligence (OPTIONAL) ───────────────────────────────────
+  // READ-ONLY: decisions ledger (M240 routing scores, M241 events, engine
+  // scorecards) + genome hub (M235 anti-playbooks). Lazily imported.
+  // Absent on pre-M242 producers/tests so they stay valid.
+  let intelligence: IntelligenceSummary | undefined;
+  try {
+    intelligence = await buildIntelligence(generatedAt);
+  } catch {
+    intelligence = undefined;
+  }
+
   return {
     generatedAt,
     repos: {
@@ -648,5 +795,8 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
     // M224: OPTIONAL production scorecard — omitted when not populated so
     // pre-M224 tests (which never set it) stay valid.
     ...(production !== undefined ? { production } : {}),
+    // M242: OPTIONAL fleet intelligence — omitted when not populated so
+    // pre-M242 tests (which never set it) stay valid.
+    ...(intelligence !== undefined ? { intelligence } : {}),
   };
 }

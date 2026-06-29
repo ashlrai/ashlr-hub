@@ -3137,6 +3137,137 @@ a:hover {
   bottom: 0;
 }
 
+/* ── M242: Fleet Intelligence panel ─────────────────────────────────────── */
+
+.fd-intel-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+/* Engine scorecard table */
+.fd-intel-engine-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+.fd-intel-engine-row {
+  display: grid;
+  grid-template-columns: 1fr repeat(5, 44px);
+  gap: 4px;
+  align-items: center;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm, 4px);
+}
+.fd-intel-engine-row--header {
+  background: var(--bg-elevated);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.fd-intel-engine-row:not(.fd-intel-engine-row--header):hover {
+  background: var(--bg-hover);
+}
+.fd-intel-engine-cell { text-align: right; }
+.fd-intel-engine-name { text-align: left; color: var(--text-primary); font-weight: 500; }
+.fd-intel-count--ok     { color: var(--status-done,   #34d399); }
+.fd-intel-count--warn   { color: var(--status-aborted, #fb923c); }
+.fd-intel-count--muted  { color: var(--text-muted); }
+.fd-intel-count--fail   { color: var(--status-failed, #f87171); }
+.fd-intel-rate          { font-weight: 600; }
+.fd-intel-rate--good    { color: var(--status-done,   #34d399); }
+.fd-intel-rate--ok      { color: var(--status-running, #38bdf8); }
+.fd-intel-rate--warn    { color: var(--status-failed,  #f87171); }
+
+/* Learned routing list */
+.fd-intel-route-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.fd-intel-route-row {
+  display: grid;
+  grid-template-columns: 1fr 40px 18px 36px;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+  padding: 3px 6px;
+  border-radius: var(--radius-sm, 4px);
+}
+.fd-intel-route-row:hover { background: var(--bg-hover); }
+.fd-intel-route-engine {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.fd-intel-route-score { text-align: right; font-weight: 600; color: var(--text-secondary); }
+.fd-intel-route-trend { text-align: center; font-size: 10px; }
+.fd-intel-route-samples { text-align: right; font-size: 10px; color: var(--text-muted); }
+
+/* Anti-playbook list */
+.fd-intel-ap-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.fd-intel-ap-item {
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+  border-left: 3px solid var(--status-failed, #f87171);
+  border-radius: 0 var(--radius-sm, 4px) var(--radius-sm, 4px) 0;
+  font-size: 12px;
+}
+.fd-intel-ap-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 3px;
+  font-size: 12px;
+}
+.fd-intel-ap-snippet {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  margin-bottom: 4px;
+}
+.fd-intel-ap-ts { font-size: 10px; color: var(--text-muted); }
+
+/* Fleet events list */
+.fd-intel-ev-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.fd-intel-ev-row {
+  display: grid;
+  grid-template-columns: 160px 1fr 60px;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  padding: 3px 6px;
+  border-radius: var(--radius-sm, 4px);
+}
+.fd-intel-ev-row:hover { background: var(--bg-hover); }
+.fd-intel-ev-kind   { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fd-intel-ev-detail { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fd-intel-ev-ts     { text-align: right; color: var(--text-muted); white-space: nowrap; }
+
 /* Settings gear button in panel header */
 .fd-settings-btn {
   display: flex; align-items: center; gap: 5px;
