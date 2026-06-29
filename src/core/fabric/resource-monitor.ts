@@ -1,5 +1,5 @@
 /**
- * resource-monitor.ts — M250 Resource Control Plane.
+ * resource-monitor.ts — M250/M253 Resource Control Plane.
  *
  * Senses per-backend resource headroom and returns a snapshot that the
  * gateway (M252) uses to demote exhausted backends before dispatch.
@@ -8,9 +8,14 @@
  *  - Never throws. Every sensing path is wrapped in try/catch and degrades
  *    to availability:'unknown' which the gateway treats as permissive.
  *  - No network calls except the Ollama localhost health check (2s timeout).
- *  - Claude sensing reads ~/.claude/stats-cache.json (message count, 7d sum).
- *    This is a CONSERVATIVE OVER-ESTIMATE — counts human + fleet messages
- *    combined. Acceptable as a demotion signal; not a billing metric.
+ *  - Claude sensing (M253): sums the FLEET's own claude token spend
+ *    (tokensIn+tokensOut) or costUsd from the decisions-ledger over a rolling
+ *    window (default 7d) vs a configured budget. This reflects what the fleet
+ *    has consumed — NOT Mason's interactive usage, which is not programmatically
+ *    obtainable (stats-cache.json is dead/stale on most machines). The label
+ *    clearly says "fleet 7d claude spend vs budget". ~/.claude/stats-cache.json
+ *    is used ONLY as a weak fallback when its lastComputedDate is within the
+ *    window AND the new ledger-based budget fields are absent.
  *  - Codex sensing delegates entirely to readCodexRateLimits() — real data.
  *  - NIM sensing is reactive-only: reads the in-memory backoff store.
  *  - Local/Ollama sensing: GET /api/ps with 2s timeout.
@@ -30,6 +35,11 @@ import * as path from 'path';
 import * as http from 'http';
 import type { EngineId } from '../types.js';
 import { readCodexRateLimits } from '../observability/codex-source.js';
+import { readDecisions } from '../fleet/decisions-ledger.js';
+import {
+  readClaudeUsage,
+  DEFAULT_5H_MESSAGE_CAP_PRO,
+} from './claude-usage.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -118,8 +128,40 @@ const CACHE_TTL_MS = 30_000; // 30 seconds
 // ---------------------------------------------------------------------------
 
 interface ClaudeResourceCfg {
+  /**
+   * M253 TRANSCRIPT (ccusage): 5-hour message cap for Claude Code subscription.
+   * When set, transcript-based sensing uses this as the 5h window cap.
+   * Defaults to DEFAULT_5H_MESSAGE_CAP_PRO (900) when absent.
+   * Set to your plan's limit: ~900 (Pro), ~4500 (Max5), ~9000 (Max20).
+   */
+  fiveHourMessageCap?: number;
+  /**
+   * M253 TRANSCRIPT (ccusage): 7-day message cap.
+   * Optional secondary window. When absent, only 5h sensing is used for
+   * availability classification (7d is reported but not used for thresholds).
+   */
   weeklyMessageCap?: number;
+  /**
+   * M253 TRANSCRIPT (ccusage): 5-hour token cap override.
+   * When set, tokens are used instead of message count for availability.
+   * Not typically set — message count is the correct subscription metric.
+   */
+  fiveHourTokenCap?: number;
+  /**
+   * M253: fleet claude token budget over the window. When set, sensing uses
+   * the decisions-ledger token sum (tokensIn+tokensOut) vs this cap.
+   * Represents the fleet's own consumption — NOT interactive usage.
+   */
+  weeklyTokenBudget?: number;
+  /**
+   * M253: fleet claude cost budget (USD) over the window. When both
+   * weeklyTokenBudget and weeklyCostBudgetUsd are set, tokens take precedence.
+   */
+  weeklyCostBudgetUsd?: number;
+  /** Rolling window label. Default: '7d'. */
   window?: string;
+  /** protectPct on the claude sub-config (M251). */
+  protectPct?: number;
 }
 
 interface ResourceCfgShape {
@@ -142,10 +184,20 @@ function extractResourceCfg(cfg: unknown): ResourceCfgShape {
     const claudeLimitsLegacy = (f['limits'] as Record<string, unknown> | undefined)?.['claude'] as Record<string, unknown> | undefined;
     const claudeCfg: ClaudeResourceCfg | undefined = claudeResource
       ? {
+          fiveHourMessageCap: typeof claudeResource['fiveHourMessageCap'] === 'number'
+            ? (claudeResource['fiveHourMessageCap'] as number) : undefined,
+          fiveHourTokenCap: typeof claudeResource['fiveHourTokenCap'] === 'number'
+            ? (claudeResource['fiveHourTokenCap'] as number) : undefined,
+          weeklyTokenBudget: typeof claudeResource['weeklyTokenBudget'] === 'number'
+            ? (claudeResource['weeklyTokenBudget'] as number) : undefined,
+          weeklyCostBudgetUsd: typeof claudeResource['weeklyCostBudgetUsd'] === 'number'
+            ? (claudeResource['weeklyCostBudgetUsd'] as number) : undefined,
           weeklyMessageCap: typeof claudeResource['weeklyMessageCap'] === 'number'
             ? (claudeResource['weeklyMessageCap'] as number) : undefined,
           window: typeof claudeResource['window'] === 'string'
             ? (claudeResource['window'] as string) : undefined,
+          protectPct: typeof claudeResource['protectPct'] === 'number'
+            ? (claudeResource['protectPct'] as number) : undefined,
         }
       : claudeLimitsLegacy
         ? {
@@ -156,10 +208,8 @@ function extractResourceCfg(cfg: unknown): ResourceCfgShape {
           }
         : undefined;
 
-    // protectPct comes from claudeResource.protectPct (M251).
-    const protectPct = claudeResource && typeof claudeResource['protectPct'] === 'number'
-      ? (claudeResource['protectPct'] as number)
-      : undefined;
+    // protectPct: prefer claudeResource.protectPct (M251/M253), already in claudeCfg.
+    const protectPct = claudeCfg?.protectPct;
 
     return {
       claude: claudeCfg,
@@ -176,35 +226,85 @@ function extractResourceCfg(cfg: unknown): ResourceCfgShape {
 // Per-backend sensing
 // ---------------------------------------------------------------------------
 
-/** Sum messageCount from ~/.claude/stats-cache.json over a rolling 7-day window. */
-function sumClaudeMessages7d(): number {
+/**
+ * M253: Sum the fleet's own claude token spend from the decisions-ledger over
+ * a rolling window. Returns { tokens, costUsd, entryCount }.
+ *
+ * Only counts entries where engine starts with 'claude' (case-insensitive).
+ * Entries missing tokensIn/tokensOut/costUsd are treated as 0 (pre-M246).
+ * Never throws.
+ */
+function sumFleetClaudeSpend(windowMs: number): { tokens: number; costUsd: number; entryCount: number } {
+  try {
+    const sinceMs = Date.now() - windowMs;
+    const entries = readDecisions({ sinceMs });
+    let tokens = 0;
+    let costUsd = 0;
+    let entryCount = 0;
+    for (const e of entries) {
+      const eng = (e.engine ?? '').toLowerCase();
+      if (!eng.startsWith('claude')) continue;
+      entryCount++;
+      tokens += (e.tokensIn ?? 0) + (e.tokensOut ?? 0);
+      costUsd += e.costUsd ?? 0;
+    }
+    return { tokens, costUsd, entryCount };
+  } catch {
+    return { tokens: 0, costUsd: 0, entryCount: 0 };
+  }
+}
+
+/**
+ * M253 staleness guard: return the stats-cache message sum ONLY when
+ * lastComputedDate is within the window. Returns:
+ *   - a number (>=0) when the file is present and fresh
+ *   - null ONLY when the file exists but lastComputedDate is stale
+ *   - 0 when the file is missing entirely (preserves M250 behavior: missing = 0)
+ *
+ * This is a WEAK FALLBACK for the legacy weeklyMessageCap path. When the
+ * primary transcript/ledger-based fields are configured, this is never called.
+ */
+function tryStatsCacheFallback(windowMs: number): number | null {
   try {
     const cachePath = path.join(os.homedir(), '.claude', 'stats-cache.json');
-    const raw = fs.readFileSync(cachePath, 'utf8');
+    let raw: string;
+    try {
+      raw = fs.readFileSync(cachePath, 'utf8');
+    } catch {
+      return 0; // file missing → treat as 0 used (M250 original behavior)
+    }
     const data = JSON.parse(raw) as unknown;
     if (typeof data !== 'object' || data === null) return 0;
-    const activity = (data as Record<string, unknown>)['dailyActivity'];
+    const d = data as Record<string, unknown>;
+
+    // Staleness guard: lastComputedDate must be within the window.
+    const lastComputed = d['lastComputedDate'];
+    if (typeof lastComputed === 'string') {
+      const lastMs = new Date(lastComputed).getTime();
+      if (isNaN(lastMs) || Date.now() - lastMs > windowMs) {
+        return null; // stale — signal ambiguity to caller
+      }
+    }
+
+    const activity = d['dailyActivity'];
     if (!Array.isArray(activity)) return 0;
 
-    const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const sinceMs = Date.now() - windowMs;
     let total = 0;
-
     for (const entry of activity) {
       if (typeof entry !== 'object' || entry === null) continue;
       const e = entry as Record<string, unknown>;
-      // date field is typically 'YYYY-MM-DD'
       const dateStr = e['date'];
       if (typeof dateStr === 'string') {
         const ts = new Date(dateStr).getTime();
-        if (isNaN(ts) || ts < sevenDaysAgo) continue;
+        if (isNaN(ts) || ts < sinceMs) continue;
       }
       const count = e['messageCount'];
       if (typeof count === 'number') total += count;
     }
-
     return total;
   } catch {
-    return 0;
+    return 0; // parse error → treat as 0 (safe fallback)
   }
 }
 
@@ -230,59 +330,255 @@ async function senseClaudeState(rcfg: ResourceCfgShape): Promise<BackendResource
     };
   }
 
-  const weeklyMessageCap = rcfg.claude?.weeklyMessageCap ?? null;
   const protectPct = rcfg.protectPct ?? 85;
+  const windowLabel = rcfg.claude?.window ?? '7d';
+  const windowMs = 7 * 24 * 60 * 60 * 1000; // always 7d for now
 
-  if (weeklyMessageCap === null) {
-    // No cap configured — cannot sense
+  // -------------------------------------------------------------------------
+  // M253 TRANSCRIPT PATH (ccusage): real subscription usage from JSONL files.
+  //
+  // This is the PRIMARY path for sensing actual Claude subscription headroom.
+  // It walks ~/.claude/projects/**/*.jsonl and sums message.usage token counts
+  // over a 5-hour rolling window (the subscription rate-limit window) and a
+  // 7-day window. No config required — defaults to Pro limits (~900 msgs/5h).
+  //
+  // Activated when: NOT in fleet-ledger mode (no weeklyTokenBudget/costBudget
+  // configured) AND there is no explicit opt-out (weeklyTokenBudget=0 is
+  // treated as "fleet-ledger mode with zero budget", not opt-out; to opt out
+  // set claudeResource.transcriptSensing: false — not yet implemented, TBD).
+  //
+  // The 5h window is the primary availability signal (matches the subscription
+  // rate-limit window). 7d is reported but not used for threshold decisions.
+  // -------------------------------------------------------------------------
+  const weeklyTokenBudget = rcfg.claude?.weeklyTokenBudget ?? null;
+  const weeklyCostBudgetUsd = rcfg.claude?.weeklyCostBudgetUsd ?? null;
+
+  // Only use transcript sensing when:
+  //   (a) fleet-ledger mode is NOT configured (no weeklyTokenBudget/costBudget), AND
+  //   (b) legacy stats-cache path is NOT configured (no weeklyMessageCap alone).
+  //
+  // Backward-compat rule: if only weeklyMessageCap is set (the M250 legacy config),
+  // defer to the stats-cache path below so existing tests/configs are unaffected.
+  // Transcript sensing activates when either fiveHourMessageCap or fiveHourTokenCap
+  // is explicitly set, OR when no cap at all is configured (zero-config default).
+  const hasLegacyMessageCapOnly =
+    (rcfg.claude?.weeklyMessageCap ?? null) !== null &&
+    (rcfg.claude?.fiveHourMessageCap ?? null) === null &&
+    (rcfg.claude?.fiveHourTokenCap ?? null) === null;
+
+  const useTranscriptSensing =
+    weeklyTokenBudget === null &&
+    weeklyCostBudgetUsd === null &&
+    !hasLegacyMessageCapOnly;
+
+  if (useTranscriptSensing) {
+    try {
+      const usage = readClaudeUsage();
+
+      // Determine the cap: prefer explicit config, else default to Pro limits.
+      // fiveHourTokenCap overrides message-count sensing when set.
+      const fiveHourTokenCap = rcfg.claude?.fiveHourTokenCap ?? null;
+      const fiveHourMessageCap = rcfg.claude?.fiveHourMessageCap ?? DEFAULT_5H_MESSAGE_CAP_PRO;
+
+      let usedPct: number;
+      let capVal: number;
+      let capUnit: BackendResourceState['capUnit'];
+      let usedLabel: string;
+      let capLabel: string;
+
+      if (fiveHourTokenCap !== null) {
+        // Token-based 5h sensing
+        usedPct = Math.round((usage.tokens5h / fiveHourTokenCap) * 100);
+        capVal = fiveHourTokenCap;
+        capUnit = 'tokens';
+        usedLabel = `${usage.tokens5h.toLocaleString()} tokens`;
+        capLabel = `${fiveHourTokenCap.toLocaleString()} tokens`;
+      } else {
+        // Message-count-based 5h sensing (default — matches subscription metric)
+        usedPct = Math.round((usage.messages5h / fiveHourMessageCap) * 100);
+        capVal = fiveHourMessageCap;
+        capUnit = 'messages';
+        usedLabel = `${usage.messages5h} messages`;
+        capLabel = `${fiveHourMessageCap} messages`;
+      }
+
+      usedPct = Math.max(0, Math.min(usedPct, 200)); // clamp to sensible range
+
+      const source5h = `(5h: ${usedLabel}/${capLabel}; 7d: ${usage.messages7d} msgs; ${usage.filesScanned} session files scanned)`;
+
+      let availability: BackendAvailability;
+      let reason: string;
+
+      if (usedPct >= 100) {
+        availability = 'exhausted';
+        reason = `claude 5h limit reached: ${usedPct}% ${source5h}`;
+      } else if (usedPct >= protectPct) {
+        availability = 'throttled';
+        reason = `claude at ${usedPct}% of 5h cap (protectPct=${protectPct}%) — preserving headroom ${source5h}`;
+      } else if (usedPct >= 75) {
+        availability = 'near';
+        reason = `claude at ${usedPct}% of 5h cap — nearing limit ${source5h}`;
+      } else {
+        availability = 'open';
+        reason = `claude at ${usedPct}% of 5h cap — within limit ${source5h}`;
+      }
+
+      return {
+        backend: 'claude',
+        availability,
+        usedPct,
+        cap: capVal,
+        capUnit,
+        capWindow: '5h',
+        resetsAt: null, // rolling window — no fixed reset time
+        costPerMTokenOut: 0,
+        p50LatencyMs: null,
+        snapshotAt: now,
+        reason,
+        backoffUntilMs: null,
+      };
+    } catch {
+      // Transcript sensing failed — fall through to legacy paths
+    }
+  }
+
+  if (weeklyTokenBudget !== null || weeklyCostBudgetUsd !== null) {
+    const spend = sumFleetClaudeSpend(windowMs);
+
+    let usedPct: number;
+    let usedLabel: string;
+    let capLabel: string;
+    let capVal: number;
+    let capUnit: BackendResourceState['capUnit'];
+
+    if (weeklyTokenBudget !== null) {
+      usedPct = Math.round((spend.tokens / weeklyTokenBudget) * 100);
+      usedLabel = `${spend.tokens.toLocaleString()} tokens`;
+      capLabel = `${weeklyTokenBudget.toLocaleString()} tokens`;
+      capVal = weeklyTokenBudget;
+      capUnit = 'tokens';
+    } else {
+      // cost-based
+      usedPct = Math.round((spend.costUsd / weeklyCostBudgetUsd!) * 100);
+      usedLabel = `$${spend.costUsd.toFixed(4)}`;
+      capLabel = `$${weeklyCostBudgetUsd!.toFixed(2)}`;
+      capVal = weeklyCostBudgetUsd!;
+      capUnit = 'tokens'; // closest available unit type
+    }
+
+    // Clamp to 0 (ledger entries may have no M246 fields yet → 0% is honest)
+    usedPct = Math.max(0, usedPct);
+
+    let availability: BackendAvailability;
+    let reason: string;
+    const honestSuffix = `(fleet ${windowLabel} claude spend vs budget — does NOT include interactive usage)`;
+
+    if (usedPct >= 100) {
+      availability = 'exhausted';
+      reason = `fleet claude budget exhausted: ${usedLabel}/${capLabel} ${windowLabel} ${honestSuffix}`;
+    } else if (usedPct >= protectPct) {
+      availability = 'throttled';
+      reason = `fleet claude at ${usedPct}% of ${windowLabel} budget (protectPct=${protectPct}%) — preserving headroom ${honestSuffix}`;
+    } else if (usedPct >= 75) {
+      availability = 'near';
+      reason = `fleet claude at ${usedPct}% of ${windowLabel} budget — nearing limit ${honestSuffix}`;
+    } else {
+      availability = 'open';
+      reason = `fleet claude at ${usedPct}% of ${windowLabel} budget — within limit ${honestSuffix}`;
+    }
+
     return {
       backend: 'claude',
-      availability: 'unknown',
-      usedPct: null,
-      cap: null,
-      capUnit: null,
-      capWindow: null,
+      availability,
+      usedPct,
+      cap: capVal,
+      capUnit,
+      capWindow: windowLabel,
       resetsAt: null,
       costPerMTokenOut: 0,
       p50LatencyMs: null,
       snapshotAt: now,
-      reason: 'no weeklyMessageCap configured — cannot sense; treating as open',
+      reason,
       backoffUntilMs: null,
     };
   }
 
-  const used = sumClaudeMessages7d();
-  const usedPct = Math.round((used / weeklyMessageCap) * 100);
+  // -------------------------------------------------------------------------
+  // M250 LEGACY FALLBACK: weeklyMessageCap + stats-cache.json
+  // Only used when stats-cache is fresh (not stale) AND weeklyMessageCap is set.
+  // -------------------------------------------------------------------------
+  const weeklyMessageCap = rcfg.claude?.weeklyMessageCap ?? null;
 
-  let availability: BackendAvailability;
-  let reason: string;
+  if (weeklyMessageCap !== null) {
+    const used = tryStatsCacheFallback(windowMs);
+    if (used === null) {
+      // Stats-cache file present but stale — data is unreliable
+      return {
+        backend: 'claude',
+        availability: 'unknown',
+        usedPct: null,
+        cap: weeklyMessageCap,
+        capUnit: 'messages',
+        capWindow: windowLabel,
+        resetsAt: null,
+        costPerMTokenOut: 0,
+        p50LatencyMs: null,
+        snapshotAt: now,
+        reason: `claude: stats-cache.json is stale — cannot trust message count; treating as open. Migrate to claudeResource.fiveHourMessageCap for reliable transcript-based sensing.`,
+        backoffUntilMs: null,
+      };
+    }
+    // used === 0 when file is missing (M250 original: missing → 0 used → open)
 
-  if (usedPct >= 100) {
-    availability = 'exhausted';
-    reason = `claude weekly message cap reached: ${used}/${weeklyMessageCap} messages (7d)`;
-  } else if (usedPct >= protectPct) {
-    availability = 'throttled';
-    reason = `claude at ${usedPct}% of weekly cap (protectPct=${protectPct}%) — preserving headroom for human sessions`;
-  } else if (usedPct >= 75) {
-    availability = 'near';
-    reason = `claude at ${usedPct}% of weekly cap (7d) — nearing limit`;
-  } else {
-    availability = 'open';
-    reason = `claude at ${usedPct}% of weekly cap (7d) — within limit`;
+    const usedPct = Math.round((used / weeklyMessageCap) * 100);
+    let availability: BackendAvailability;
+    let reason: string;
+
+    if (usedPct >= 100) {
+      availability = 'exhausted';
+      reason = `claude weekly message cap reached: ${used}/${weeklyMessageCap} messages (7d) [stats-cache fallback — includes interactive usage]`;
+    } else if (usedPct >= protectPct) {
+      availability = 'throttled';
+      reason = `claude at ${usedPct}% of weekly cap (protectPct=${protectPct}%) — preserving headroom [stats-cache fallback]`;
+    } else if (usedPct >= 75) {
+      availability = 'near';
+      reason = `claude at ${usedPct}% of weekly cap (7d) — nearing limit [stats-cache fallback]`;
+    } else {
+      availability = 'open';
+      reason = `claude at ${usedPct}% of weekly cap (7d) — within limit [stats-cache fallback]`;
+    }
+
+    return {
+      backend: 'claude',
+      availability,
+      usedPct,
+      cap: weeklyMessageCap,
+      capUnit: 'messages',
+      capWindow: windowLabel,
+      resetsAt: null,
+      costPerMTokenOut: 0,
+      p50LatencyMs: null,
+      snapshotAt: now,
+      reason,
+      backoffUntilMs: null,
+    };
   }
 
+  // -------------------------------------------------------------------------
+  // No budget configured at all — cannot sense
+  // -------------------------------------------------------------------------
   return {
     backend: 'claude',
-    availability,
-    usedPct,
-    cap: weeklyMessageCap,
-    capUnit: 'messages',
-    capWindow: rcfg.claude?.window ?? '7d',
-    resetsAt: null, // Claude doesn't expose reset time
+    availability: 'unknown',
+    usedPct: null,
+    cap: null,
+    capUnit: null,
+    capWindow: null,
+    resetsAt: null,
     costPerMTokenOut: 0,
     p50LatencyMs: null,
     snapshotAt: now,
-    reason,
+    reason: 'no claude budget configured (set claudeResource.weeklyTokenBudget or weeklyCostBudgetUsd) — treating as open',
     backoffUntilMs: null,
   };
 }
