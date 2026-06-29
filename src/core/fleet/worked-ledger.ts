@@ -24,7 +24,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
+import type { WorkItem } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -36,8 +37,24 @@ const MAX_EVENTS = 2000;
 /** Default cooldown window: 6 hours in milliseconds. */
 export const DEFAULT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
-/** The outcome of a single item run. */
-export type WorkedOutcome = 'diff' | 'empty';
+/**
+ * The outcome of a single item run or judge verdict.
+ *
+ * - 'diff'            — run produced a real diff (work done).
+ * - 'empty'           — run produced no diff (nothing to do right now).
+ * - 'judged-review'   — judge returned 'review' (needs human inspection).
+ * - 'judged-noise'    — judge returned 'noise' (trivial / not worth it).
+ * - 'judged-decline'  — judge returned 'harmful' or 'decline' (rejected).
+ *
+ * Any judged-* outcome suppresses the item for the cooldown window the same
+ * way 'empty' does, preventing the "CI is failing" re-clog loop.
+ */
+export type WorkedOutcome =
+  | 'diff'
+  | 'empty'
+  | 'judged-review'
+  | 'judged-noise'
+  | 'judged-decline';
 
 /** A single recorded item outcome. */
 export interface WorkedEvent {
@@ -103,8 +120,13 @@ export function loadWorkedLedger(): WorkedLedger {
             typeof (e as Record<string, unknown>)['itemId'] === 'string' &&
             typeof (e as Record<string, unknown>)['outcome'] === 'string' &&
             typeof (e as Record<string, unknown>)['ts'] === 'string' &&
-            ((e as Record<string, unknown>)['outcome'] === 'diff' ||
-              (e as Record<string, unknown>)['outcome'] === 'empty'),
+            (
+              (e as Record<string, unknown>)['outcome'] === 'diff' ||
+              (e as Record<string, unknown>)['outcome'] === 'empty' ||
+              (e as Record<string, unknown>)['outcome'] === 'judged-review' ||
+              (e as Record<string, unknown>)['outcome'] === 'judged-noise' ||
+              (e as Record<string, unknown>)['outcome'] === 'judged-decline'
+            ),
         )
       : [];
     return { events };
@@ -175,7 +197,8 @@ export function recordOutcome(
  *
  * - Returns false (not declined) when the item has no recorded outcome.
  * - Returns false when the last outcome was 'diff' (real work was done).
- * - Returns false when the last 'empty' outcome is older than cooldownMs.
+ * - Returns false when the last suppressible outcome is older than cooldownMs.
+ * - Suppressible outcomes: 'empty', 'judged-review', 'judged-noise', 'judged-decline'.
  * - `now` is injectable for deterministic tests (defaults to Date.now()).
  * - NEVER throws.
  */
@@ -195,7 +218,15 @@ export function recentlyDeclined(
       }
     }
     if (!lastEvent) return false;
-    if (lastEvent.outcome !== 'empty') return false;
+    // Only suppress when the last outcome is a "decline-class" outcome.
+    // 'diff' means real work was done — do NOT suppress.
+    const suppressible: WorkedOutcome[] = [
+      'empty',
+      'judged-review',
+      'judged-noise',
+      'judged-decline',
+    ];
+    if (!suppressible.includes(lastEvent.outcome)) return false;
     const eventMs = Date.parse(lastEvent.ts);
     if (Number.isNaN(eventMs)) return false;
     const nowMs = now ?? Date.now();
@@ -204,4 +235,162 @@ export function recentlyDeclined(
     // Never throws — fail open (not declined).
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// M220: Judge-verdict feedback — recordVerdict + sweepJudgedProposals
+// ---------------------------------------------------------------------------
+
+/**
+ * Map a raw judge verdict string to a WorkedOutcome decline class.
+ * Returns undefined when the verdict should NOT suppress the item
+ * (e.g. 'ship' — real work passed the judge).
+ */
+export function verdictToOutcome(
+  verdict: string,
+): 'judged-review' | 'judged-noise' | 'judged-decline' | undefined {
+  switch (verdict.toLowerCase()) {
+    case 'review': return 'judged-review';
+    case 'noise':
+    case 'trivial':
+    case 'skip':
+    case 'ignore': return 'judged-noise';
+    case 'harmful':
+    case 'dangerous':
+    case 'reject':
+    case 'rejected':
+    case 'block':
+    case 'decline': return 'judged-decline';
+    default: return undefined; // 'ship' or unknown → do not suppress
+  }
+}
+
+/**
+ * Record a judge verdict for `itemId`. Convenience wrapper over recordOutcome.
+ *
+ * - verdict='ship'    → ignored (ship is positive; item should stay selectable)
+ * - verdict='review'  → records 'judged-review'
+ * - verdict='noise'   → records 'judged-noise'
+ * - verdict='harmful' → records 'judged-decline'
+ * - Never throws.
+ *
+ * @param itemId  - The WorkItem id the proposal was generated from.
+ * @param verdict - The raw verdict string from ManagerVerdict.verdict.
+ * @param ts      - Optional ISO timestamp; defaults to now. Injectable for tests.
+ */
+export function recordVerdict(itemId: string, verdict: string, ts?: string): void {
+  try {
+    const outcome = verdictToOutcome(verdict);
+    if (outcome === undefined) return; // 'ship' or unknown — do not suppress
+    recordOutcome(itemId, outcome, ts);
+  } catch {
+    // Never throws.
+  }
+}
+
+/**
+ * Build a STABLE signature for an item used to match it across scanner ticks.
+ *
+ * The scanner generates item IDs as `repoBasename:source:sha1(discriminator)`
+ * (see scanners.ts makeId). If the discriminator changes between ticks (e.g.
+ * a CI scanner that includes a timestamp), the ledger would never match.
+ *
+ * To guard against ID drift we ALSO key on `repo + normalised title`, which is
+ * invariant across ticks for the same real issue. sweepJudgedProposals tries
+ * the item.id first (exact), then falls back to the stable signature.
+ *
+ * Normalisation: lowercase, collapse whitespace, strip punctuation.
+ */
+export function stableItemSig(repo: string, title: string): string {
+  const repoName = basename(repo);
+  const normTitle = title.toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+  return `${repoName}::${normTitle}`;
+}
+
+/**
+ * M220: Sweep judged proposals back into the worked ledger.
+ *
+ * Called once per tick (BEFORE selection) to feed judge verdicts back so items
+ * whose proposals were judged 'review', 'noise', or 'harmful'/'decline' are
+ * suppressed for the cooldown window and not re-proposed every tick.
+ *
+ * Matching strategy (ID-stability):
+ *  1. For each proposal in `judgedProposals`, scan `backlogItems` for a match.
+ *  2. Primary key: item.id appears as a token in `prop.title + ' ' + prop.summary`
+ *     (same regex logic as pendingItemIds in loop.ts — exact word boundary).
+ *  3. Fallback key: stableItemSig(item.repo, item.title) matches
+ *     stableItemSig(prop.repo ?? '', prop.title) — handles fresh scanner IDs.
+ *  4. Only the FIRST match is recorded to avoid double-counting.
+ *
+ * A proposal is "judged-decline-class" when its status is 'rejected' (the
+ * manager sets status='rejected' for noise/harmful when applyRejects=true).
+ * The `decisionReason` carries the raw verdict when available.
+ *
+ * @param judgedProposals - Proposals to sweep (caller filters by status).
+ * @param backlogItems    - Current tick's full backlog.
+ * @param ts              - Optional ISO timestamp; defaults to now. Injectable for tests.
+ * @returns               - Number of items that had a verdict recorded.
+ */
+export function sweepJudgedProposals(
+  judgedProposals: ReadonlyArray<{
+    id: string;
+    title: string;
+    summary: string;
+    repo: string | null;
+    status: string;
+    decisionReason?: string;
+  }>,
+  backlogItems: ReadonlyArray<WorkItem>,
+  ts?: string,
+): number {
+  let recorded = 0;
+  try {
+    // Build stable-sig index of backlog items for O(n) fallback lookup.
+    const sigIndex = new Map<string, WorkItem>();
+    for (const item of backlogItems) {
+      const sig = stableItemSig(item.repo, item.title);
+      if (!sigIndex.has(sig)) sigIndex.set(sig, item);
+    }
+
+    for (const prop of judgedProposals) {
+      // Determine the verdict outcome from the proposal.
+      // For rejected proposals: decisionReason may carry the raw verdict.
+      // When absent, treat as 'judged-decline' (the manager only rejects noise/harmful).
+      let outcome: WorkedOutcome;
+      if (prop.status === 'rejected') {
+        const rawVerdict = prop.decisionReason ?? 'harmful';
+        outcome = verdictToOutcome(rawVerdict) ?? 'judged-decline';
+      } else {
+        // Non-rejected proposals are not a decline signal — skip.
+        continue;
+      }
+
+      const haystack = `${prop.title} ${prop.summary}`;
+
+      // Try primary match: item.id as exact token in the proposal text.
+      let matched: WorkItem | undefined;
+      for (const item of backlogItems) {
+        const escaped = item.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`);
+        if (re.test(haystack)) {
+          matched = item;
+          break;
+        }
+      }
+
+      // Fallback: stable-sig match (repo + normalised title).
+      if (!matched) {
+        const propSig = stableItemSig(prop.repo ?? '', prop.title);
+        matched = sigIndex.get(propSig);
+      }
+
+      if (!matched) continue;
+
+      recordOutcome(matched.id, outcome, ts);
+      recorded++;
+    }
+  } catch {
+    // Never throws.
+  }
+  return recorded;
 }

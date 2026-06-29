@@ -61,6 +61,9 @@ import { notifyFleetEvent } from '../comms/events.js';
 import { pendingCount, listProposals } from '../inbox/store.js';
 // worked-ledger is used transitively via LocalWorkQueueCoordinator (selectWorkQueueCoordinator).
 import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
+// M220: verdict-feedback sweep — feed judge rejections back to the ledger so
+// re-clogging items (e.g. "CI is failing") are suppressed for the cooldown window.
+import { sweepJudgedProposals } from '../fleet/worked-ledger.js';
 import { loadConfig } from '../config.js';
 import { hostname as osHostname } from 'node:os';
 
@@ -432,6 +435,22 @@ export async function tick(
     ((liveCfg.daemon as Record<string, unknown>)['cooldownMs'] as number) > 0
       ? (liveCfg.daemon as Record<string, unknown>)['cooldownMs'] as number
       : 6 * 60 * 60 * 1000; // default 6h
+
+  // M220: verdict-feedback sweep — feed judge rejections back to the worked ledger
+  // BEFORE selection so items whose proposals were judged review/noise/harmful are
+  // suppressed this tick. Gated: cfg.foundry?.antiClog !== false (DEFAULT ON).
+  // Flag-off (antiClog:false) = skip the sweep = exact pre-M220 behavior.
+  if ((liveCfg.foundry as Record<string, unknown> | undefined)?.['antiClog'] !== false) {
+    try {
+      const rejected = listProposals({ status: 'rejected' });
+      if (rejected.length > 0) {
+        sweepJudgedProposals(rejected, backlogItems);
+      }
+    } catch (err) {
+      // Best-effort — sweep must never crash selection.
+      console.warn('[ashlr] daemon:tick sweepJudgedProposals failed:', (err as Error)?.message ?? err);
+    }
+  }
 
   // M113: coordinator seam — once per tick. Local (default) = today's behavior;
   // Shared = multi-machine atomic claim (cfg.fleet.sharedQueue.mode==='filesystem').
