@@ -45,6 +45,9 @@
 - LESSON #1: commit the FULL related file-set (partial BUG-2 commit → red master, recovered).
 - QUEUED BUGS (found, unfixed): loadConfig strips cfg.daemon per-tick (isContinuousMode gap); core-efficiency lock-map churn; router.ts nim-type-smell.
 - DEFERRED: stack timeouts + phantom init-UX (auto-reverted, retry); ashlr-pulse fleet-emit (high-value but daemon-adjacent — defer given churn); npm publish (needs proper multi-file dist + subpath exports→dist, Mason).
+- **Wave 4 ✅ (mixed):** core-efficiency atomic-cache + timeout-leak fixes (9bdc997, fixed the 3 wave-3-found bugs) · ashlr-hub M202 cascade+browser-verify edge tests (b5d67a4, 44) · morphkit/binshield build-recovery (cli-common file-subpath exports fix). prompt-trackr + ashlr-md test agents AUTO-REVERTED (test-harness setup issues — bound worked, deferred).
+- **Wave 5 (in flight):** router nim-type-smell fix (ashlr-hub) · binshield Rizin graceful-fallback · webfetch rate-limiter observability · stack healthcheck() completion. (Additive/low-risk.)
+- RUN SUMMARY (so far): ~18 improvements shipped across the ecosystem (binshield SECURITY fix, 2 critical ashlr-hub test-coverage gaps closed [orchestrator M199 + daemon M201], robustness fixes, ac smarter-surgical, structured federation errors, bug-finds-and-fixes). 2 self-inflicted regressions (red master, exports) — both caught + fully recovered. Several agent auto-reverts (bound working). Master green throughout (after recovery).
 - (next waves appended here as they ship)
 
 ## Loop guardrails
