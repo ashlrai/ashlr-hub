@@ -52,6 +52,7 @@
 - **Wave 6 (in flight):** phantom init-UX retry · ashlrcode file-tools refactor · ashlr-pulse test harness · prompt-trackr scoring tests · ashlr-md MCP tests · ashlr-hub loadConfig cfg.daemon fix (careful).
 - **Wave 6 ✅:** pulse privacy-floor tests (30, found 2 bugs) · ashlrcode file-tools refactor (~80 LOC) · prompt-trackr scoring tests (63) · phantom init-UX --empty/auto-init (b0b5dd5 — fixed the friction hit this session) · loadConfig daemon-fix.
 - **DASHBOARD + TELEGRAM ✅ SHIPPED+LIVE (e4bc53d):** M210 glanceable customizable dashboard (frontier-limits centerpiece) · M211 ashlr dashboard + launchd serve persistence (localhost:4317, live) + SwiftBar menu-bar glance · M212 proactive Telegram (merge/ship/decision/anomaly/standup, throttled, flag-gated) + quick-actions + soft-pause. comms.proactive=ON, serve persistent.
+- **Dashboard/Telegram v2 ✅ (ddece21):** M213 dashboard real-time SSE (push, polling fallback) · M214 fleet→Pulse OTLP emit (Pulse = live fleet view; flag pulseEmit default-off) · M215 richer Telegram (view-diff/revert-proposal buttons, standup w/ dashboard+frontier-usage, snapshot cmd). All live; serve+daemon reloaded.
 - (next waves appended here as they ship)
 
 ## Loop guardrails
