@@ -24,7 +24,7 @@
  */
 
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -58,6 +58,11 @@ import { withToolEnv } from '../env-bridge.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { selectInboxStore } from '../seams/inbox.js';
 import { hashDiff, signProvenance } from '../foundry/provenance.js';
+// M249: RunCache shadow mode — key construction + store (import lazy so flag-off path
+// incurs zero module load cost; the dynamic import is cached by Node after first call).
+import { buildCacheKeyInput, buildCacheKey } from '../fabric/cache/key.js';
+import { lookup as cacheLookup, write as cacheWrite } from '../fabric/cache/store.js';
+import type { CacheEntry } from '../fabric/cache/store.js';
 // M195: resolve api-model keys (e.g. NVIDIA_NIM_API_KEY) via the engine-auth
 // mechanism — phantom vault first, then process.env. Never logs the value.
 import { resolveProviderKey } from '../integrations/secrets.js';
@@ -443,6 +448,40 @@ export async function runEngineSandboxed(
       return { state: mk({ status: 'failed', result: `no command for engine "${engine}"` }) };
     }
 
+    // M249: RunCache SHADOW MODE — compute the key and log would-hit/would-miss.
+    // SAFETY INVARIANT: this block NEVER short-circuits the spawn. It is purely
+    // observational. The spawn always proceeds regardless of hit/miss.
+    // Flag-off (default): the entire block is skipped → byte-identical behavior.
+    let _shadowCacheKey: string | undefined;
+    try {
+      const fabricCfg = (cfg.foundry as Record<string, unknown> | undefined)?.['fabric'] as
+        Record<string, unknown> | undefined;
+      if (fabricCfg?.['cacheShadow'] === true) {
+        const _keyInput = buildCacheKeyInput(engine, engineModel, tier, goalWithContext, opts.sourceRepo, cfg);
+        _shadowCacheKey = buildCacheKey(_keyInput);
+        const _hit = cacheLookup(cfg, _shadowCacheKey, opts.sourceRepo);
+        // Log to decisions ledger (best-effort, fire-and-forget, never throws).
+        try {
+          const { recordDecision } = await import('../fleet/decisions-ledger.js');
+          recordDecision({
+            ts: new Date().toISOString(),
+            proposalId: `shadow-${id}`,
+            action: 'proposed',
+            engine,
+            model: engineModel,
+            detail: JSON.stringify({
+              event: 'fabric.shadow',
+              cacheKey: _shadowCacheKey,
+              wouldHit: _hit !== null,
+              repoTreeSha: _keyInput.repoTreeSha,
+              dirtyHash: _keyInput.dirtyHash,
+            }),
+          });
+        } catch { /* telemetry is best-effort */ }
+        // NEVER short-circuit here — always fall through to spawn below.
+      }
+    } catch { /* shadow hook is best-effort — never affects run */ }
+
     // M52: compute the OS-level sandbox launcher for this engine.
     // confinementProfileFor is pure; buildSandboxLauncher may throw when
     // onUnsupported:'fail' and the platform has no jail binary — that
@@ -580,6 +619,37 @@ export async function runEngineSandboxed(
           } catch {
             // telemetry is best-effort — never fails the run
           }
+          // M249: RunCache shadow write — record the (key → outcome) entry for
+          // measurement. Fire-and-forget, never throws, never changes run behavior.
+          // Flag-off (default cacheShadow === false) → cacheWrite is a no-op.
+          try {
+            if (_shadowCacheKey) {
+              const _entry: CacheEntry = {
+                key: _shadowCacheKey,
+                patch: scrubbed,
+                provenanceSig,
+                engineModel,
+                tier,
+                diffHash,
+                repoTreeSha: (() => {
+                  try {
+                    return execSync('git rev-parse HEAD:', {
+                      cwd: opts.sourceRepo,
+                      encoding: 'utf8',
+                      stdio: ['pipe', 'pipe', 'pipe'],
+                    }).trim();
+                  } catch { return 'unknown'; }
+                })(),
+                verdictAtWrite: 'unknown',
+                shipOutcomes: { ship: 0, reject: 0 },
+                createdAt: new Date().toISOString(),
+                lastHit: new Date().toISOString(),
+                hits: 0,
+                schemaVersion: 1,
+              };
+              cacheWrite(cfg, _entry, opts.sourceRepo);
+            }
+          } catch { /* shadow write is best-effort */ }
         }
       } catch {
         // diff/proposal capture is best-effort — never fail the run on it.

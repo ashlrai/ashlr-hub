@@ -456,6 +456,18 @@ export interface AshlrConfig {
        * DEFAULT false → old routing code paths run unchanged.
        */
       gateway?: boolean;
+      /**
+       * M249: RunCache shadow mode — compute cache keys and log would-hit/would-miss
+       * to the decisions ledger. NEVER short-circuits a spawn or serves a cached diff.
+       * Pure measurement phase. DEFAULT false → byte-identical to pre-M249.
+       */
+      cacheShadow?: boolean;
+      /**
+       * M250 (NOT YET IMPLEMENTED): Live cache short-circuit. Requires Mason's explicit
+       * sign-off after the 72h shadow-mode measurement gate passes.
+       * DEFAULT false → live cache path is not implemented in M249.
+       */
+      cache?: boolean;
     };
   };
   /**
