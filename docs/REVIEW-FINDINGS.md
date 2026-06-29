@@ -66,3 +66,27 @@ ashlr-workbench: plaintext LLM key in mounted `settings.json`; Ollama per-model 
 - The rest are clean, well-specified fixes a follow-up pass (or the fleet itself, once these patterns become anti-playbooks) can close.
 
 *This is the honest quality picture: a genuinely productive night (real features across 10 products) with a real bug tail that volume-plus-green-gate did not catch. The review pass is now part of the loop.*
+
+---
+
+## Fixes applied (automated fix pass, build-verified per repo)
+
+| Repo | Findings fixed | Status | Commit |
+|------|----------------|--------|--------|
+| binshield | use-after-delete (PyPI wheel path) | ✅ pushed | `0270d65` |
+| stack | `compliant[]` populated | ✅ pushed | `276b570` |
+| webfetch | auth-free `complete` flag (+ test corrected) | ✅ pushed | `5236af1` |
+| ashlr-core-efficiency | tier-5 in ROI dashboards (still excluded from active recs) | ✅ pushed | `c9d1c9f` |
+| prompt-trackr | **all 3 security bugs** (IDOR + unauth + team-authz) — 2960/2960 | ✅ pushed | `5fda012` |
+| ashlr-pulse | **critical UUID-crash** + webhook-secret + distinct-counts | ✅ pushed | `44c7293` |
+| ashlr-md | OT op-log persistence | ✅ pushed | `1a55c49` |
+| phantom-secrets | **critical TOCTOU** + audit data-loss + GCP 400 (cargo: 438 pass) | ⚠️ local, **push BLOCKED** | `88ef3e5` |
+| ashlr-workbench | EXIT-trap overwrite | ⏳ re-running | — |
+
+**All critical + all security findings are fixed**; 7 repos pushed green, phantom fix-ready locally, workbench finishing.
+
+## ⚠️ Needs Mason's decision / attention
+
+1. **phantom-secrets push blocked by GitHub secret-scanning.** A **Stripe TEST key** committed earlier in the night (`crates/phantom-proxy/tests/e2e_proxy_integration_test.rs:773`, commit `55472f9`) trips push protection and blocks the whole branch — including the ready TOCTOU/audit fix `88ef3e5`. The fix agent correctly refused to rewrite history or unblock the secret. **Action:** allow it via the GitHub unblock URL (it's a test key) or scrub the key from `55472f9`, then the branch (incl. the security fixes) pushes. I did **not** touch it — unblocking a secret is your call.
+2. **Dirty working trees across several tool repos.** Buildout agents left substantial *uncommitted* WIP (e.g. stack: ~401 lines in `provision-schema.ts` + ~13 files; core-efficiency: untracked `wal.ts`; pulse: untracked route files). Fix agents scoped to only fixed files, so that WIP is unpushed. **Worth a review-and-commit (or discard) pass.**
+3. **Pre-existing full-repo build breakage in a few repos.** Targeted tests pass everywhere, but the *whole-repo* build/typecheck currently fails in pulse (a Next route illegally exporting a helper), prompt-trackr (pre-existing TS errors + a missing `benchmark-baseline.json`), and core-efficiency (~91 typecheck errors in untracked files) — all from the night's buildout, none from the fixes. **Core lesson: the per-change green-gate did not enforce whole-repo build health**, so some repos accumulated commits that pass their own tests while the full build is red. Recommend a "make each repo's full build green" pass before any release.
