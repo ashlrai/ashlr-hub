@@ -1482,10 +1482,21 @@ export async function runGoal(
   let engCtx: EngineerContext | undefined;
   if (opts.tools !== false && client.supportsTools) {
     if (opts.engineer === true) {
-      const sourceRepo =
-        opts.cwd && path.isAbsolute(opts.cwd) && fs.existsSync(opts.cwd)
-          ? opts.cwd
-          : process.cwd();
+      // M226: opts.cwd can arrive as a FILE path when a milestone names a file
+      // (e.g. "src/core/goals/store.ts"). git worktree/-C requires a DIRECTORY,
+      // so fall back to its dirname rather than crashing with "Not a directory".
+      const sourceRepo = (() => {
+        if (opts.cwd && path.isAbsolute(opts.cwd) && fs.existsSync(opts.cwd)) {
+          try {
+            return fs.statSync(opts.cwd).isDirectory()
+              ? opts.cwd
+              : path.dirname(opts.cwd);
+          } catch {
+            return process.cwd();
+          }
+        }
+        return process.cwd();
+      })();
       try {
         sandboxModule = await import('../sandbox/worktree.js');
         activeSandbox = sandboxModule.createSandbox(sourceRepo);
