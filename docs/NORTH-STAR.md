@@ -12,8 +12,20 @@ operates a whole ecosystem of best-in-class developer tools — using frontier A
 Telegram) as its vision — **improving its own ability to improve**, on a platform
 where every tool it builds also makes it stronger.
 
+This is **not a demo**. It is real production infrastructure: the goal is to make
+Mason's computer the **best autonomous 24/7 engineering machine ever built for a
+startup (Ashlr.ai)** — a genuine force of nature that (1) builds + operates the
+open-source ecosystem, (2) relentlessly improves *itself*, and (3) is **pointable
+at Ashlr.ai's real work** — client delivery, internal tools, and the company's own
+products — shipping faster and at higher margin than any traditional team. ashlr-hub
+makes itself incredible *and* makes the company incredible. The ecosystem repos are
+the proving ground; the company's leverage is the payoff. Success = Ashlr.ai ships
+more, better, cheaper because this machine runs day and night.
+
 The scarce resource is not intelligence (the frontier models are already enough).
-It is the **harness that lets that intelligence compound safely**. We build the harness.
+It is the **harness that lets that intelligence compound safely** — sensing its own
+compute (the god-view), running every backend at once within their limits, and
+self-directing toward the highest-leverage work. We build the harness.
 
 ## Three pillars (in order of ambition)
 
