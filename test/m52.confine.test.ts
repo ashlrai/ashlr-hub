@@ -117,7 +117,7 @@ describe('M52 flag-off parity', () => {
       args: ['-e', "process.stdout.write('hello')"],
       cwd: process.cwd(),
     };
-    const result = spawnEngine(cmd, cfg);
+    const result = await spawnEngine(cmd, cfg);
     // the command succeeds without any launcher.
     expect(result.ok).toBe(true);
     expect(result.output).toContain('hello');

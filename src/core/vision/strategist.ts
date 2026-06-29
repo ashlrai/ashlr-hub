@@ -287,7 +287,7 @@ function buildClaudeCliCompleteStrategist(
       const combined = `${system}\n\n${user}`;
       const cmd = buildEngineCommand('claude', combined, cfg, { model });
       if (!cmd) return '';
-      const result = spawnEngine(cmd, cfg, { timeoutMs: 300_000 });
+      const result = await spawnEngine(cmd, cfg, { timeoutMs: 300_000 });
       if (!result.ok || !result.output) return '';
       try {
         const parsed = JSON.parse(result.output) as Record<string, unknown>;

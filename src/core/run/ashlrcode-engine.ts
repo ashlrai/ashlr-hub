@@ -194,7 +194,7 @@ export async function runViaAshlrcode(
 
     // Spawn via the same helper sandboxed-engine.ts uses (never throws; applies
     // the env-bridge allowlist; honours cmd.cwd → ac runs against repoDir).
-    const res = spawnEngine(cmd, cfg, { timeoutMs });
+    const res = await spawnEngine(cmd, cfg, { timeoutMs });
 
     if (!res.ok) {
       return { ok: false, summary: res.output || undefined, error: res.error ?? 'ac run failed' };

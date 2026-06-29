@@ -1335,7 +1335,8 @@ export async function runGoal(
         };
 
         // spawnEngine: applies withToolEnv(cfg) + phantom-exec when enabled.
-        const engineResult = spawnEngine(cmd, cfg);
+        // M236: now async (streaming spawn + stall monitor).
+        const engineResult = await spawnEngine(cmd, cfg);
 
         if (!engineResult.ok) {
           const errMsg = engineResult.error ?? 'unknown error';

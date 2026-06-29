@@ -17,7 +17,7 @@
  *   - withToolEnv is allowlist-only (no secrets in env).
  */
 
-import { spawnSync, execFileSync } from 'node:child_process';
+import { spawnSync, execFileSync, spawn } from 'node:child_process';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import { existsSync } from 'node:fs';
@@ -25,6 +25,32 @@ import { join } from 'node:path';
 import type { AshlrConfig, EngineId, EngineCommand } from '../types.js';
 import { withToolEnv } from '../env-bridge.js';
 import { resolveEngineSpec, compileArgv } from './engine-registry.js';
+import { attachStallMonitor } from './run-monitor.js';
+import type { TerminationReason } from './run-monitor.js';
+
+// ---------------------------------------------------------------------------
+// RunEvent — normalised event emitted by a streaming engine subprocess
+// ---------------------------------------------------------------------------
+
+/**
+ * A single event produced by a streaming engine subprocess.
+ * Normalised from both `claude --output-format stream-json` (JSONL) and
+ * `codex` line-based JSONL output so the stall monitor can work engine-agnostic.
+ */
+export interface RunEvent {
+  /** Event kind. */
+  kind: 'text' | 'tool_call' | 'file_touched' | 'usage' | 'raw';
+  /** ISO timestamp this event was created (Date.now()). */
+  ts: number;
+  /** Tool name when kind === 'tool_call'. */
+  toolName?: string;
+  /** Normalised absolute path when kind === 'file_touched'. */
+  fileTouched?: string;
+  /** Human-readable text fragment (model delta or status message). */
+  text?: string;
+  /** Raw line that produced this event (for debugging). */
+  rawLine?: string;
+}
 
 // ---------------------------------------------------------------------------
 // Phantom detection (cached, best-effort)
@@ -297,16 +323,25 @@ export function phantomWrap(cmd: EngineCommand, _cfg: AshlrConfig): EngineComman
 /**
  * Spawn a resolved EngineCommand and capture its result.
  *
+ * M236: converted from spawnSync + wall-clock kill to async streaming spawn +
+ * stall-based termination. Frontier agents (Claude/Codex) run as long as they
+ * are PRODUCTIVE — termination is driven by the stall monitor (run-monitor.ts)
+ * rather than a fixed wall-clock. The 2h backstop in timeoutMs is a runaway-
+ * cost safety net only.
+ *
  * - Applies withToolEnv(cfg) (M10 env-bridge; allowlist, NON-SECRET only).
  * - Wraps via phantomWrap when cfg.phantom?.enabled AND phantom is installed.
- * - Captures stdout as `output`.
- * - For claude with --output-format json: parses usage/cost from stdout JSON.
+ * - Captures stdout as `output`; normalises lines to RunEvents.
+ * - For claude: parses usage from the final stream-json summary event.
  * - Never throws; failures reported as { ok: false, error }.
  *
  * GUARDRAIL: MUST NOT be called against a real delegated agent during
  * build/integrate/verify -- unit tests assert argv builders only.
+ *
+ * RETURN CONTRACT (preserved from pre-M236 for m233/m45/m52 compatibility):
+ *   { ok: boolean; output: string; usage?: { tokensIn, tokensOut }; error?: string }
  */
-export function spawnEngine(
+export async function spawnEngine(
   cmd: EngineCommand,
   cfg: AshlrConfig,
   opts?: {
@@ -319,23 +354,137 @@ export function spawnEngine(
      * whole thing). When absent => exactly v4 behavior (default-off parity).
      */
     launcher?: { bin: string; prefixArgs: string[] };
+    /**
+     * M236: callback invoked for each normalised RunEvent from the child
+     * process stdout/stderr. Used by run-monitor.ts for stall detection.
+     * When absent, events are collected internally only (no stall monitoring).
+     */
+    onEvent?: (ev: RunEvent) => void;
+    /** M236 test hook: grace period (ms) between SIGINT and SIGKILL in stall-stop. */
+    _stallGraceMs?: number;
   },
-): { ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string } {
-  // CONTRACT: spawnEngine NEVER throws. Any synchronous failure (spawnSync
-  // throwing, env-bridge/phantom probe errors, etc.) is reported as
-  // { ok:false, error } rather than propagated to the caller.
+): Promise<{ ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string; terminationReason?: TerminationReason }> {
+  // CONTRACT: spawnEngine NEVER throws. Any failure is reported as { ok:false, error }.
   try {
-    return spawnEngineInner(cmd, cfg, opts);
+    return await spawnEngineInner(cmd, cfg, opts);
   } catch (err) {
     return { ok: false, output: '', error: err instanceof Error ? err.message : String(err) };
   }
 }
 
-function spawnEngineInner(
+// ---------------------------------------------------------------------------
+// RunEvent normalisation helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalise a stdout/stderr line from a streaming engine subprocess to a RunEvent.
+ * Handles `claude --output-format stream-json` JSONL and codex JSONL.
+ * Lines that don't parse as JSON become kind:'raw' events.
+ */
+function normaliseEngineOutputLine(line: string, engineBin: string, ts: number): RunEvent {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('{')) {
+    return { kind: 'raw', ts, text: trimmed, rawLine: line };
+  }
+  try {
+    const ev = JSON.parse(trimmed) as Record<string, unknown>;
+
+    // claude stream-json: tool_use events carry name + input
+    if (engineBin === 'claude') {
+      // tool_use block start: { type: 'content_block_start', content_block: { type: 'tool_use', name: ... } }
+      const cb = ev['content_block'] as Record<string, unknown> | undefined;
+      if (ev['type'] === 'content_block_start' && cb?.['type'] === 'tool_use') {
+        return { kind: 'tool_call', ts, toolName: String(cb['name'] ?? ''), rawLine: line };
+      }
+      // text delta: { type: 'content_block_delta', delta: { type: 'text_delta', text: '...' } }
+      const delta = ev['delta'] as Record<string, unknown> | undefined;
+      if (ev['type'] === 'content_block_delta' && delta?.['type'] === 'text_delta') {
+        return { kind: 'text', ts, text: String(delta['text'] ?? ''), rawLine: line };
+      }
+      // result summary: { type: 'result', ... } with usage
+      if (ev['type'] === 'result') {
+        const u = ev['usage'] as Record<string, unknown> | undefined;
+        if (u && typeof u['input_tokens'] === 'number') {
+          return {
+            kind: 'usage', ts,
+            text: `tokensIn=${u['input_tokens']} tokensOut=${u['output_tokens'] ?? 0}`,
+            rawLine: line,
+          };
+        }
+      }
+    }
+
+    // codex JSONL: tool_call events
+    if (engineBin === 'codex') {
+      if (ev['type'] === 'function_call' || ev['type'] === 'tool_call') {
+        return { kind: 'tool_call', ts, toolName: String(ev['name'] ?? ev['function'] ?? ''), rawLine: line };
+      }
+    }
+
+    // Generic usage line (any engine): any line with input_tokens + output_tokens
+    const u = (ev['usage'] ?? ev['token_usage']) as Record<string, unknown> | undefined;
+    if (u && typeof u['input_tokens'] === 'number') {
+      return {
+        kind: 'usage', ts,
+        text: `tokensIn=${u['input_tokens']} tokensOut=${u['output_tokens'] ?? 0}`,
+        rawLine: line,
+      };
+    }
+
+    return { kind: 'raw', ts, text: trimmed, rawLine: line };
+  } catch {
+    return { kind: 'raw', ts, text: trimmed, rawLine: line };
+  }
+}
+
+/**
+ * Parse usage from the accumulated stdout lines (final pass after run completes).
+ * For claude stream-json: reads the 'result' summary event.
+ * For codex JSONL: scans for any usage line.
+ * Returns undefined when no usage line found.
+ */
+function parseUsageFromLines(
+  lines: string[],
+  engineBin: string,
+): { tokensIn: number; tokensOut: number } | undefined {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = (lines[i] ?? '').trim();
+    if (!trimmed.startsWith('{')) continue;
+    try {
+      const ev = JSON.parse(trimmed) as Record<string, unknown>;
+      // claude stream-json: final result event
+      if (engineBin === 'claude' && ev['type'] === 'result') {
+        const u = ev['usage'] as Record<string, unknown> | undefined;
+        if (u && typeof u['input_tokens'] === 'number' && typeof u['output_tokens'] === 'number') {
+          return { tokensIn: u['input_tokens'] as number, tokensOut: u['output_tokens'] as number };
+        }
+      }
+      // generic / codex
+      const u = (ev['usage'] ?? ev['token_usage'] ?? ev) as Record<string, unknown>;
+      const tin = u['input_tokens'] ?? u['prompt_tokens'];
+      const tout = u['output_tokens'] ?? u['completion_tokens'];
+      if (typeof tin === 'number' && typeof tout === 'number') {
+        return { tokensIn: tin, tokensOut: tout };
+      }
+    } catch {
+      // skip
+    }
+  }
+  return undefined;
+}
+
+async function spawnEngineInner(
   cmd: EngineCommand,
   cfg: AshlrConfig,
-  opts?: { env?: NodeJS.ProcessEnv; timeoutMs?: number; launcher?: { bin: string; prefixArgs: string[] } },
-): { ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string } {
+  opts?: {
+    env?: NodeJS.ProcessEnv;
+    timeoutMs?: number;
+    launcher?: { bin: string; prefixArgs: string[] };
+    onEvent?: (ev: RunEvent) => void;
+    /** Grace period between SIGINT and SIGKILL during stall-stop (ms). Tests inject small values. */
+    _stallGraceMs?: number;
+  },
+): Promise<{ ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string; terminationReason?: TerminationReason }> {
   // Apply phantom-exec wrap when enabled, installed, AND the cwd contains
   // .phantom.toml. Self-authenticating CLIs (claude, codex) run in sandbox
   // worktrees that have no .phantom.toml -- wrapping them is both unnecessary
@@ -369,62 +518,118 @@ function spawnEngineInner(
   // fall back to the allowlist-only env-bridge env (NON-SECRET).
   const childEnv = opts?.env ?? withToolEnv(cfg);
 
-  const result = spawnSync(spawnBin, spawnArgs, {
-    encoding: 'utf8',
-    maxBuffer: 10 * 1024 * 1024, // 10 MB
-    timeout: opts?.timeoutMs ?? 5 * 60 * 1000, // hard wall-clock limit (default 5 min)
-    cwd: effective.cwd,
-    env: childEnv,
+  // M236: streaming spawn — read stdout/stderr line-by-line, emit RunEvents.
+  // The backstop timeoutMs is the outer runaway-cost safety net (default 2h).
+  // Stall detection (idle / loop / no-diff) terminates early via SIGINT → grace → SIGKILL.
+  return new Promise((resolve) => {
+    const stdoutLines: string[] = [];
+    const stderrLines: string[] = [];
+    const callerOnEvent = opts?.onEvent;
+    let terminationReason: TerminationReason | undefined;
+    let settled = false;
+
+    function settle(
+      result: { ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string; terminationReason?: TerminationReason },
+    ): void {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    }
+
+    const child = spawn(spawnBin, spawnArgs, {
+      cwd: effective.cwd,
+      env: childEnv,
+      // pipe stdout + stderr for line reading; stdin closed (no input).
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    // ---------------------------------------------------------------------------
+    // M236: Stall monitor — graceful-stop ladder owned here (we have child ref).
+    // SIGINT → grace → SIGKILL. Grace period is short for tests, 15s in prod.
+    // ---------------------------------------------------------------------------
+    const stallGraceMs = opts?._stallGraceMs ?? 15_000;
+    const monitor = attachStallMonitor(cfg, (reason) => {
+      terminationReason = reason;
+      // Graceful stop: SIGINT first, then SIGKILL after grace period.
+      try { if (!child.killed) child.kill('SIGINT'); } catch { /* already dead */ }
+      const killTimer = setTimeout(() => {
+        try { if (!child.killed) child.kill('SIGKILL'); } catch { /* already dead */ }
+      }, stallGraceMs);
+      if (killTimer.unref) killTimer.unref();
+    });
+
+    // Backstop kill timer (runaway-cost safety net — fires only after timeoutMs).
+    const backstopMs = opts?.timeoutMs ?? 5 * 60 * 1000;
+    const backstopTimer = setTimeout(() => {
+      terminationReason = 'backstop-timeout';
+      monitor.detach();
+      try { if (!child.killed) child.kill('SIGKILL'); } catch { /* already dead */ }
+    }, backstopMs);
+    if (backstopTimer.unref) backstopTimer.unref();
+
+    // ---------------------------------------------------------------------------
+    // Line reader — stdout
+    // ---------------------------------------------------------------------------
+    let stdoutBuf = '';
+    child.stdout!.on('data', (chunk: Buffer) => {
+      stdoutBuf += chunk.toString('utf8');
+      let nl: number;
+      while ((nl = stdoutBuf.indexOf('\n')) !== -1) {
+        const line = stdoutBuf.slice(0, nl);
+        stdoutBuf = stdoutBuf.slice(nl + 1);
+        stdoutLines.push(line);
+        const ev = normaliseEngineOutputLine(line, cmd.bin, Date.now());
+        monitor.onEvent(ev);
+        if (callerOnEvent) callerOnEvent(ev);
+      }
+    });
+
+    // ---------------------------------------------------------------------------
+    // Line reader — stderr (collected for error messages; not fed to monitor)
+    // ---------------------------------------------------------------------------
+    let stderrBuf = '';
+    child.stderr!.on('data', (chunk: Buffer) => {
+      stderrBuf += chunk.toString('utf8');
+      let nl: number;
+      while ((nl = stderrBuf.indexOf('\n')) !== -1) {
+        const line = stderrBuf.slice(0, nl);
+        stderrBuf = stderrBuf.slice(nl + 1);
+        stderrLines.push(line);
+      }
+    });
+
+    child.on('error', (err: Error) => {
+      clearTimeout(backstopTimer);
+      monitor.detach();
+      settle({ ok: false, output: '', error: err.message, terminationReason });
+    });
+
+    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+      clearTimeout(backstopTimer);
+      monitor.detach();
+
+      // Flush any remaining partial line buffers.
+      if (stdoutBuf.trim()) {
+        stdoutLines.push(stdoutBuf);
+        const ev = normaliseEngineOutputLine(stdoutBuf, cmd.bin, Date.now());
+        if (callerOnEvent) callerOnEvent(ev);
+      }
+      if (stderrBuf.trim()) stderrLines.push(stderrBuf);
+
+      const exitedClean = code === 0 && signal === null;
+
+      if (!exitedClean) {
+        const errMsg =
+          signal
+            ? `killed by signal ${signal}`
+            : (stderrLines.join('\n').trim() || `exit ${code ?? 'unknown'}`);
+        settle({ ok: false, output: '', error: errMsg, terminationReason });
+        return;
+      }
+
+      const rawOutput = stdoutLines.join('\n').trim();
+      const usage = parseUsageFromLines(stdoutLines, cmd.bin);
+      settle({ ok: true, output: rawOutput, usage });
+    });
   });
-
-  if (result.error || result.status !== 0) {
-    const errMsg =
-      result.error?.message ??
-      (result.stderr ? String(result.stderr).trim() : `exit ${result.status ?? 'unknown'}`);
-    return { ok: false, output: '', error: errMsg };
-  }
-
-  const rawOutput = String(result.stdout ?? '').trim();
-
-  // Attempt to parse usage from claude --output-format json output
-  let usage: { tokensIn: number; tokensOut: number } | undefined;
-  if (cmd.bin === 'claude') {
-    try {
-      const parsed = JSON.parse(rawOutput) as Record<string, unknown>;
-      // Claude JSON output shape: { cost_usd, usage: { input_tokens, output_tokens }, result, ... }
-      const u = parsed['usage'] as Record<string, unknown> | undefined;
-      if (u && typeof u['input_tokens'] === 'number' && typeof u['output_tokens'] === 'number') {
-        usage = {
-          tokensIn: u['input_tokens'] as number,
-          tokensOut: u['output_tokens'] as number,
-        };
-      }
-    } catch {
-      // Not JSON or unexpected shape -- usage stays undefined; caller estimates
-    }
-  }
-
-  // M45: best-effort usage parse for codex --json (JSONL events). The token-count
-  // event shape is not contractually stable across versions, so this is a guarded
-  // scan: find any line carrying input/output token counts. Undefined on miss
-  // (caller estimates). Refine in M46 once the event schema is pinned.
-  if (cmd.bin === 'codex' && !usage) {
-    for (const line of rawOutput.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('{')) continue;
-      try {
-        const ev = JSON.parse(trimmed) as Record<string, unknown>;
-        const u = (ev['usage'] ?? ev['token_usage'] ?? ev) as Record<string, unknown>;
-        const tin = u['input_tokens'] ?? u['prompt_tokens'];
-        const tout = u['output_tokens'] ?? u['completion_tokens'];
-        if (typeof tin === 'number' && typeof tout === 'number') {
-          usage = { tokensIn: tin, tokensOut: tout };
-        }
-      } catch {
-        // skip non-JSON / unexpected line
-      }
-    }
-  }
-
-  return { ok: true, output: rawOutput, usage };
 }

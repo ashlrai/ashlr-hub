@@ -42,6 +42,7 @@ import type {
   Sandbox,
 } from '../types.js';
 import { buildEngineCommand, spawnEngine } from './engines.js';
+import type { TerminationReason } from './run-monitor.js';
 import { resolveEngineSpec } from './engine-registry.js';
 import { buildOpenAICompatibleClient } from './provider-client.js';
 import { runTask } from './agent-loop.js';
@@ -381,11 +382,17 @@ export async function runEngineSandboxed(
       result: 'ok',
     });
 
-    const res = spawnEngine(cmd, cfg, {
+    // M236: spawnEngine is now async + streaming. The stall monitor is wired
+    // inside spawnEngineInner (engines.ts) and terminates the child on stall
+    // conditions (idle / loop / no-diff). terminationReason surfaces here via
+    // the return value and is recorded on the RunState.
+    const res = await spawnEngine(cmd, cfg, {
       env,
       timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       launcher: launcher ?? undefined,
     });
+
+    const terminationReason: TerminationReason | undefined = res.terminationReason;
 
     const usage = res.usage
       ? {
@@ -432,7 +439,7 @@ export async function runEngineSandboxed(
         }
       }
       return {
-        state: mk({ status: 'failed', result: `engine "${engine}" failed: ${res.error ?? 'unknown error'}`, usage }),
+        state: mk({ status: 'failed', result: `engine "${engine}" failed: ${res.error ?? 'unknown error'}`, usage, terminationReason }),
         proposalId,
       };
     }

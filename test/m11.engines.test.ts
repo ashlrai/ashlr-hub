@@ -19,6 +19,59 @@ import type { AshlrConfig, EngineCommand } from '../src/core/types.js';
 // We mock child_process so no real engine is ever spawned.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Fake child process factory for mocking spawn() (M236: streaming spawn).
+// Returns an object shaped like ChildProcess with EventEmitter-like on().
+// The caller can configure stdout data + exit code via the returned control.
+// ---------------------------------------------------------------------------
+
+import { EventEmitter } from 'node:events';
+
+interface FakeChildControl {
+  child: ReturnType<typeof makeFakeChild>;
+  /** Emit stdout data then close the child with the given code/signal. */
+  resolve(code: number | null, signal: NodeJS.Signals | null, stdoutData?: string, stderrData?: string): void;
+  /** Emit a spawn error then close. */
+  reject(err: Error): void;
+}
+
+function makeFakeChild() {
+  const stdout = new EventEmitter() as NodeJS.EventEmitter & { resume?: () => void };
+  const stderr = new EventEmitter() as NodeJS.EventEmitter & { resume?: () => void };
+  const child = new EventEmitter() as NodeJS.EventEmitter & {
+    stdout: typeof stdout;
+    stderr: typeof stderr;
+    killed: boolean;
+    kill: (sig?: string) => void;
+    pid: number;
+  };
+  child.stdout = stdout;
+  child.stderr = stderr;
+  child.killed = false;
+  child.kill = (_sig?: string) => { child.killed = true; };
+  child.pid = 12345;
+  return child;
+}
+
+function makeFakeSpawnControl(): FakeChildControl {
+  const child = makeFakeChild();
+  const control: FakeChildControl = {
+    child,
+    resolve(code, signal, stdoutData = '', stderrData = '') {
+      if (stdoutData) child.stdout.emit('data', Buffer.from(stdoutData));
+      if (stderrData) child.stderr.emit('data', Buffer.from(stderrData));
+      child.emit('close', code, signal);
+    },
+    reject(err) {
+      child.emit('error', err);
+    },
+  };
+  return control;
+}
+
+// The spawn mock returns a fake child; tests control when/how it closes.
+let _spawnControl: FakeChildControl | null = null;
+
 vi.mock('node:child_process', () => ({
   spawnSync: vi.fn(() => ({
     status: 0,
@@ -27,7 +80,16 @@ vi.mock('node:child_process', () => ({
     error: undefined,
   })),
   execFileSync: vi.fn(() => Buffer.from('/usr/local/bin/claude')),
+  spawn: vi.fn(() => {
+    _spawnControl = makeFakeSpawnControl();
+    return _spawnControl.child;
+  }),
 }));
+
+function getSpawnControl(): FakeChildControl {
+  if (!_spawnControl) throw new Error('spawn not yet called');
+  return _spawnControl;
+}
 
 // Import after mocking so the module picks up the mock.
 const { buildEngineCommand, phantomWrap, spawnEngine, engineInstalled } =
@@ -286,99 +348,73 @@ describe('phantomWrap', () => {
 });
 
 // ---------------------------------------------------------------------------
-// spawnEngine — never throws, mocked child_process
+// spawnEngine — never throws, mocked child_process (M236: streaming spawn)
 // ---------------------------------------------------------------------------
 
 describe('spawnEngine — never throws on failure', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetAllMocks();
+    _spawnControl = null;
+    // Re-install the default spawn mock after resetAllMocks().
+    const { spawn } = await import('node:child_process');
+    vi.mocked(spawn).mockImplementation(() => {
+      _spawnControl = makeFakeSpawnControl();
+      return _spawnControl.child as ReturnType<typeof spawn>;
+    });
   });
 
   it('returns { ok: true } on zero-exit with output', async () => {
-    const { spawnSync } = await import('node:child_process');
-    vi.mocked(spawnSync).mockReturnValueOnce({
-      status: 0,
-      stdout: Buffer.from('hello output'),
-      stderr: Buffer.from(''),
-      error: undefined,
-      pid: 1,
-      signal: null,
-      output: [],
-    });
     const cmd: EngineCommand = { bin: 'claude', args: ['-p', GOAL] };
-    const result = spawnEngine(cmd, makeConfig());
+    const p = spawnEngine(cmd, makeConfig());
+    // Emit stdout then close cleanly.
+    getSpawnControl().resolve(0, null, 'hello output\n');
+    const result = await p;
     expect(result.ok).toBe(true);
     expect(result.output).toContain('hello output');
   });
 
   it('returns { ok: false } on non-zero exit — does not throw', async () => {
-    const { spawnSync } = await import('node:child_process');
-    vi.mocked(spawnSync).mockReturnValueOnce({
-      status: 1,
-      stdout: Buffer.from(''),
-      stderr: Buffer.from('command failed'),
-      error: undefined,
-      pid: 1,
-      signal: null,
-      output: [],
-    });
     const cmd: EngineCommand = { bin: 'aw', args: ['auto', GOAL, '--cwd', CWD] };
-    const result = spawnEngine(cmd, makeConfig());
+    const p = spawnEngine(cmd, makeConfig());
+    getSpawnControl().resolve(1, null, '', 'command failed\n');
+    const result = await p;
     expect(result.ok).toBe(false);
     expect(result.error).toBeDefined();
   });
 
-  it('returns { ok: false } when spawnSync itself errors — does not throw', async () => {
-    const { spawnSync } = await import('node:child_process');
-    vi.mocked(spawnSync).mockReturnValueOnce({
-      status: null,
-      stdout: Buffer.from(''),
-      stderr: Buffer.from(''),
-      error: new Error('ENOENT: binary not found'),
-      pid: 0,
-      signal: null,
-      output: [],
-    });
+  it('returns { ok: false } when spawn emits an error — does not throw', async () => {
     const cmd: EngineCommand = { bin: 'nonexistent-tool', args: [] };
-    const result = spawnEngine(cmd, makeConfig());
+    const p = spawnEngine(cmd, makeConfig());
+    getSpawnControl().reject(new Error('ENOENT: binary not found'));
+    const result = await p;
     expect(result.ok).toBe(false);
     expect(typeof result.error).toBe('string');
   });
 
-  it('never throws — catches all exceptions internally', async () => {
-    const { spawnSync } = vi.mocked(
-      await import('node:child_process'),
-    );
-    spawnSync.mockImplementationOnce(() => {
-      throw new Error('catastrophic failure');
-    });
+  it('never throws — returned Promise resolves even on spawn error', async () => {
     const cmd: EngineCommand = { bin: 'aw', args: ['auto', GOAL] };
-    expect(() => spawnEngine(cmd, makeConfig())).not.toThrow();
-    const result = spawnEngine(cmd, makeConfig());
-    // The second call uses the default mock (ok path) — just ensure no throw
+    // Must not throw synchronously.
+    let p: ReturnType<typeof spawnEngine> | undefined;
+    expect(() => { p = spawnEngine(cmd, makeConfig()); }).not.toThrow();
+    // Resolve it cleanly so the Promise settles.
+    getSpawnControl().resolve(0, null, 'ok\n');
+    const result = await p!;
     expect(typeof result).toBe('object');
   });
 
-  it('parses usage from claude json output when present', async () => {
-    const { spawnSync } = await import('node:child_process');
-    const claudeJson = JSON.stringify({
-      result: 'Hello!',
+  it('parses usage from claude stream-json result event', async () => {
+    // M236: usage comes from the final 'result' JSONL event in stream-json output.
+    const claudeResultLine = JSON.stringify({
+      type: 'result',
       usage: { input_tokens: 42, output_tokens: 17 },
-    });
-    vi.mocked(spawnSync).mockReturnValueOnce({
-      status: 0,
-      stdout: Buffer.from(claudeJson),
-      stderr: Buffer.from(''),
-      error: undefined,
-      pid: 1,
-      signal: null,
-      output: [],
     });
     const cmd: EngineCommand = {
       bin: 'claude',
-      args: ['-p', GOAL, '--output-format', 'json'],
+      args: ['-p', GOAL, '--output-format', 'stream-json'],
     };
-    const result = spawnEngine(cmd, makeConfig());
+    const p = spawnEngine(cmd, makeConfig());
+    getSpawnControl().resolve(0, null, claudeResultLine + '\n');
+    const result = await p;
     expect(result.ok).toBe(true);
     if (result.usage) {
       expect(result.usage.tokensIn).toBe(42);
@@ -388,38 +424,21 @@ describe('spawnEngine — never throws on failure', () => {
   });
 
   it('uses withToolEnv (allowlist) — no secret-shaped keys in child env', async () => {
-    const { spawnSync } = await import('node:child_process');
-    vi.mocked(spawnSync).mockImplementationOnce((bin, args, opts) => {
-      // Inspect the env the caller passed to us
-      const env = opts?.env ?? {};
-      const secretKeys = Object.keys(env as Record<string, string>).filter((k) =>
-        SECRET_KEY_RE.test(k),
-      );
-      // Store result for assertion
-      (globalThis as Record<string, unknown>).__spawnEngineEnvTest = secretKeys;
-      return {
-        status: 0,
-        stdout: Buffer.from('ok'),
-        stderr: Buffer.from(''),
-        error: undefined,
-        pid: 1,
-        signal: null,
-        output: [],
-      };
+    const { spawn } = await import('node:child_process');
+    let capturedEnv: Record<string, string> | undefined;
+    vi.mocked(spawn).mockImplementationOnce((_bin, _args, opts) => {
+      capturedEnv = (opts?.env ?? {}) as Record<string, string>;
+      _spawnControl = makeFakeSpawnControl();
+      return _spawnControl.child as ReturnType<typeof spawn>;
     });
     const cmd: EngineCommand = { bin: 'aw', args: ['auto', GOAL, '--cwd', CWD] };
-    spawnEngine(cmd, makeConfig());
-    const secretKeys = (globalThis as Record<string, unknown>).__spawnEngineEnvTest as
-      | string[]
-      | undefined;
-    // If the env was inspected, there must be no secret-shaped keys WE added.
-    // (The base process.env may contain pre-existing keys, which is allowed.)
-    // The bridge only adds ASHLR_* + OLLAMA_* + LM_STUDIO_* + OPENAI_BASE_URL —
-    // none of those match SECRET_KEY_RE.
-    if (secretKeys !== undefined) {
-      // Filter out any keys that were already in process.env (inherited)
+    const p = spawnEngine(cmd, makeConfig());
+    getSpawnControl().resolve(0, null, 'ok\n');
+    await p;
+    if (capturedEnv !== undefined) {
       const processEnvKeys = new Set(Object.keys(process.env));
-      const addedSecretKeys = secretKeys.filter((k) => !processEnvKeys.has(k));
+      const addedSecretKeys = Object.keys(capturedEnv)
+        .filter((k) => SECRET_KEY_RE.test(k) && !processEnvKeys.has(k));
       expect(addedSecretKeys).toEqual([]);
     }
   });

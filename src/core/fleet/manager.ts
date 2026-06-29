@@ -508,7 +508,7 @@ function buildClaudeCliComplete(
       const combined = `${system}\n\n${user}`;
       const cmd = buildEngineCommand('claude', combined, cfg, { model });
       if (!cmd) return '';
-      const result = spawnEngine(cmd, cfg, { timeoutMs: 300_000 }); // 5 min for frontier
+      const result = await spawnEngine(cmd, cfg, { timeoutMs: 300_000 }); // 5 min for frontier
       if (!result.ok || !result.output) return '';
       // claude --output-format json → { result: "<text>", ... }
       try {

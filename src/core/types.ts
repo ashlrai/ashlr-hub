@@ -883,6 +883,12 @@ export interface RunState {
   status: 'running' | 'done' | 'aborted' | 'failed';
   /** Synthesized final answer, present when done. */
   result?: string;
+  /**
+   * M236: why a stall-terminated run was stopped.
+   * Set only when the run was terminated by the stall monitor (run-monitor.ts).
+   * Undefined for clean exits, normal timeouts, or non-sandboxed runs.
+   */
+  terminationReason?: 'idle-stall' | 'loop-stall' | 'no-diff-stall' | 'backstop-timeout' | 'clean-exit' | 'error-exit';
 }
 
 /** Options accepted by `runGoal` / the `ashlr run` CLI. */

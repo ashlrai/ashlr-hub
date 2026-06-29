@@ -57,7 +57,7 @@ async function buildComplete(
           const combined = `${system}\n\n${user}`;
           const cmd = buildEngineCommand('claude', combined, cfg, { model: eliteModel });
           if (!cmd) return '';
-          const result = spawnEngine(cmd, cfg, { timeoutMs: 120_000 });
+          const result = await spawnEngine(cmd, cfg, { timeoutMs: 120_000 });
           if (!result.ok || !result.output) return '';
           try {
             const parsed = JSON.parse(result.output) as Record<string, unknown>;
