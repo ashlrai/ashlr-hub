@@ -90,22 +90,45 @@ export function overBudget(usage: RunUsage, budget: RunBudget): boolean {
 }
 
 /**
+ * M246: Cache token pricing multipliers relative to base input price.
+ *
+ * These match the Anthropic prompt-cache pricing tiers:
+ *   - 5-minute write:  1.25× base input price
+ *   - 1-hour write:    2.0×  base input price
+ *   - cache read:      0.1×  base input price
+ *
+ * Additive params with defaults — existing callers (zero cache tokens) are
+ * unaffected: estCostUsd('claude', 1000, 500) behaves identically to before.
+ */
+export const CACHE_WRITE_5M_MULT  = 1.25;  // 5-min TTL cache write
+export const CACHE_WRITE_1H_MULT  = 2.0;   // 1-hour TTL cache write
+export const CACHE_READ_MULT      = 0.1;   // cache read (served from cache)
+
+/**
  * Estimated USD cost for a single model call.
  *
  * - Local providers (ollama, lmstudio) → always 0.
  * - Cloud providers → looked up from the static price table by matching
  *   the provider id (case-insensitive prefix match against known keys).
  *   Falls back to a conservative $3/$15 per-M-token estimate when unknown.
+ * - M246: optional cache token params (default 0) add tiered cache pricing
+ *   on top of the base cost. Existing callers with no cache args are unaffected.
  *
- * @param provider  Provider id string (e.g. 'ollama', 'anthropic', 'openai').
- * @param tokensIn  Number of prompt/input tokens.
- * @param tokensOut Number of completion/output tokens.
+ * @param provider       Provider id string (e.g. 'ollama', 'anthropic', 'openai').
+ * @param tokensIn       Number of prompt/input tokens (non-cached).
+ * @param tokensOut      Number of completion/output tokens.
+ * @param cacheRead      M246: Cache-read tokens (0 by default).
+ * @param cacheWrite5m   M246: 5-min TTL cache-write tokens (0 by default).
+ * @param cacheWrite1h   M246: 1-hour TTL cache-write tokens (0 by default).
  * @returns Estimated USD cost as a number (0 for local).
  */
 export function estCostUsd(
   provider: string,
   tokensIn: number,
   tokensOut: number,
+  cacheRead = 0,
+  cacheWrite5m = 0,
+  cacheWrite1h = 0,
 ): number {
   const key = provider.toLowerCase();
 
@@ -124,7 +147,11 @@ export function estCostUsd(
     }
   }
 
-  const costIn = (tokensIn / 1_000_000) * priceIn;
-  const costOut = (tokensOut / 1_000_000) * priceOut;
-  return costIn + costOut;
+  const costIn       = (tokensIn      / 1_000_000) * priceIn;
+  const costOut      = (tokensOut     / 1_000_000) * priceOut;
+  // M246: tiered cache pricing — multiplied against base input price
+  const costCacheRead    = (cacheRead    / 1_000_000) * priceIn * CACHE_READ_MULT;
+  const costCacheWrite5m = (cacheWrite5m / 1_000_000) * priceIn * CACHE_WRITE_5M_MULT;
+  const costCacheWrite1h = (cacheWrite1h / 1_000_000) * priceIn * CACHE_WRITE_1H_MULT;
+  return costIn + costOut + costCacheRead + costCacheWrite5m + costCacheWrite1h;
 }

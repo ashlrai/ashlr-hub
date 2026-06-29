@@ -190,6 +190,8 @@ export function buildRollup(
     tokensOut: number;
     estCostUsd: number;
     sessions: Set<string>;
+    cacheRead: number;
+    cacheWrite: number;
   }>();
 
   // model id -> ModelUsage accumulator
@@ -198,6 +200,8 @@ export function buildRollup(
     tokensOut: number;
     estCostUsd: number;
     calls: number;
+    cacheRead: number;
+    cacheWrite: number;
   }>();
 
   // Grand totals
@@ -239,24 +243,28 @@ export function buildRollup(
 
     // ── Per-day ────────────────────────────────────────────────────────────
     if (!dayMap.has(day)) {
-      dayMap.set(day, { tokensIn: 0, tokensOut: 0, estCostUsd: 0, sessions: new Set() });
+      dayMap.set(day, { tokensIn: 0, tokensOut: 0, estCostUsd: 0, sessions: new Set(), cacheRead: 0, cacheWrite: 0 });
     }
     const du = dayMap.get(day)!;
     du.tokensIn  += ev.tokensIn;
     du.tokensOut += ev.tokensOut;
     du.estCostUsd += cost;
     du.sessions.add(sessionKey);
+    du.cacheRead  += ev.cacheRead;
+    du.cacheWrite += ev.cacheWrite;
 
     // ── Per-model ──────────────────────────────────────────────────────────
     const modelKey = ev.model || 'unknown';
     if (!modelMap.has(modelKey)) {
-      modelMap.set(modelKey, { tokensIn: 0, tokensOut: 0, estCostUsd: 0, calls: 0 });
+      modelMap.set(modelKey, { tokensIn: 0, tokensOut: 0, estCostUsd: 0, calls: 0, cacheRead: 0, cacheWrite: 0 });
     }
     const mu = modelMap.get(modelKey)!;
     mu.tokensIn  += ev.tokensIn;
     mu.tokensOut += ev.tokensOut;
     mu.estCostUsd += cost;
     mu.calls++;
+    mu.cacheRead  += ev.cacheRead;
+    mu.cacheWrite += ev.cacheWrite;
   }
 
   // ── Git commit counts (single pass) ──────────────────────────────────────
@@ -324,12 +332,18 @@ export function buildRollup(
   // ── Freeze byDay (ascending) ──────────────────────────────────────────────
   const byDay: DailyUsage[] = [];
   for (const [day, du] of dayMap.entries()) {
+    const dayCacheHitRate = (du.tokensIn + du.cacheRead) > 0
+      ? du.cacheRead / (du.tokensIn + du.cacheRead)
+      : 0;
     byDay.push({
       day,
       tokensIn: du.tokensIn,
       tokensOut: du.tokensOut,
       estCostUsd: du.estCostUsd,
       sessions: du.sessions.size,
+      cacheRead: du.cacheRead,
+      cacheWrite: du.cacheWrite,
+      cacheHitRate: dayCacheHitRate,
     });
   }
   byDay.sort((a, b) => a.day.localeCompare(b.day));
@@ -337,12 +351,18 @@ export function buildRollup(
   // ── Freeze byModel (desc by cost) ────────────────────────────────────────
   const byModel: ModelUsage[] = [];
   for (const [model, mu] of modelMap.entries()) {
+    const modelCacheHitRate = (mu.tokensIn + mu.cacheRead) > 0
+      ? mu.cacheRead / (mu.tokensIn + mu.cacheRead)
+      : 0;
     byModel.push({
       model,
       tokensIn: mu.tokensIn,
       tokensOut: mu.tokensOut,
       estCostUsd: mu.estCostUsd,
       calls: mu.calls,
+      cacheRead: mu.cacheRead,
+      cacheWrite: mu.cacheWrite,
+      cacheHitRate: modelCacheHitRate,
     });
   }
   byModel.sort((a, b) =>

@@ -511,6 +511,42 @@ async function buildIntelligence(generatedAt: string): Promise<IntelligenceSumma
     // Degrade to empty.
   }
 
+  // ── M246: cacheHitRate + tokensByTier from decisions ledger (24h) ─────────
+  try {
+    const { readDecisions } = await import('./fleet/decisions-ledger.js');
+    const since24h = Date.now() - 24 * 60 * 60 * 1000;
+    const decisions = readDecisions({ sinceMs: since24h });
+
+    let totalCacheRead = 0;
+    let totalTokensIn  = 0;
+    const tierTokens = { frontier: 0, mid: 0, local: 0 };
+
+    for (const d of decisions) {
+      const tIn  = typeof d.tokensIn  === 'number' ? d.tokensIn  : 0;
+      const tOut = typeof d.tokensOut === 'number' ? d.tokensOut : 0;
+      // cacheHit flag: count tokensIn toward cacheRead bucket for rate calc
+      if (d.cacheHit === true) totalCacheRead += tIn;
+      totalTokensIn += tIn;
+
+      // tokensByTier: infer tier from engine name
+      const eng = (d.engine ?? '').toLowerCase();
+      const tier: 'frontier' | 'mid' | 'local' =
+        eng === 'claude' || eng === 'codex' || eng === 'gpt' || eng === 'gemini'
+          ? 'frontier'
+          : eng === 'nim' || eng === 'kimi' || eng === 'mistral' || eng === 'cohere'
+            ? 'mid'
+            : 'local';
+      tierTokens[tier] += tIn + tOut;
+    }
+
+    summary.cacheHitRate = (totalTokensIn + totalCacheRead) > 0
+      ? totalCacheRead / (totalTokensIn + totalCacheRead)
+      : 0;
+    summary.tokensByTier = { ...tierTokens };
+  } catch {
+    // Degrade: leave cacheHitRate and tokensByTier absent.
+  }
+
   return summary;
 }
 

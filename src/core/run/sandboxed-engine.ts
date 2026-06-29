@@ -386,20 +386,27 @@ export async function runEngineSandboxed(
     // inside spawnEngineInner (engines.ts) and terminates the child on stall
     // conditions (idle / loop / no-diff). terminationReason surfaces here via
     // the return value and is recorded on the RunState.
+    // M246: capture wall-clock duration for durationMs telemetry.
+    const _spawnStart = Date.now();
     const res = await spawnEngine(cmd, cfg, {
       env,
       timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       launcher: launcher ?? undefined,
     });
+    const _spawnDurationMs = Date.now() - _spawnStart;
 
     const terminationReason: TerminationReason | undefined = res.terminationReason;
 
-    const usage = res.usage
+    const _resUsage = res.usage;
+    const _computedCost = _resUsage
+      ? estCostUsd(engine, _resUsage.tokensIn, _resUsage.tokensOut)
+      : 0;
+    const usage = _resUsage
       ? {
-          tokensIn: res.usage.tokensIn,
-          tokensOut: res.usage.tokensOut,
+          tokensIn: _resUsage.tokensIn,
+          tokensOut: _resUsage.tokensOut,
           steps: 1,
-          estCostUsd: estCostUsd(engine, res.usage.tokensIn, res.usage.tokensOut),
+          estCostUsd: _computedCost,
         }
       : newUsage();
 
@@ -472,6 +479,24 @@ export async function runEngineSandboxed(
             engineTier: tier,
           });
           proposalId = proposal.id;
+          // M246: record telemetry fields on the decision entry (additive, never-throws).
+          try {
+            const { recordDecision } = await import('../fleet/decisions-ledger.js');
+            recordDecision({
+              ts: new Date().toISOString(),
+              proposalId: proposal.id,
+              action: 'proposed',
+              engine,
+              model: engineModel,
+              costUsd: _computedCost,
+              tokensIn: _resUsage?.tokensIn,
+              tokensOut: _resUsage?.tokensOut,
+              durationMs: _spawnDurationMs,
+              cacheHit: _resUsage ? (_resUsage.tokensIn === 0 && _computedCost === 0) : false,
+            });
+          } catch {
+            // telemetry is best-effort — never fails the run
+          }
         }
       } catch {
         // diff/proposal capture is best-effort — never fail the run on it.

@@ -1086,6 +1086,12 @@ export interface DailyUsage {
   estCostUsd: number;
   /** Number of sessions active that day. */
   sessions: number;
+  /** M246: Cache-read tokens for the day (0 when unavailable). */
+  cacheRead?: number;
+  /** M246: Cache-creation (write) tokens for the day (0 when unavailable). */
+  cacheWrite?: number;
+  /** M246: Cache hit rate = cacheRead / (tokensIn + cacheRead). 0 on div-by-zero. */
+  cacheHitRate?: number;
 }
 
 /** Per-model usage roll-up within a window. */
@@ -1100,6 +1106,12 @@ export interface ModelUsage {
   estCostUsd: number;
   /** Number of calls attributed to the model. */
   calls: number;
+  /** M246: Cache-read tokens (0 when unavailable). */
+  cacheRead?: number;
+  /** M246: Cache-creation (write) tokens (0 when unavailable). */
+  cacheWrite?: number;
+  /** M246: Cache hit rate = cacheRead / (tokensIn + cacheRead). 0 on div-by-zero. */
+  cacheHitRate?: number;
 }
 
 /** Budget evaluation for a spend/token cap over a window. */
@@ -1892,6 +1904,20 @@ export interface IntelligenceSummary {
     detail: string;
     ts: string;
   }[];
+  /**
+   * M246: Cache hit rate across all decisions in the current window.
+   * cacheRead / (tokensIn + cacheRead). 0 when unavailable or div-by-zero.
+   */
+  cacheHitRate?: number;
+  /**
+   * M246: Token consumption bucketed by engine tier.
+   * Aggregated from the decisions ledger costUsd/tokensIn/tokensOut fields.
+   */
+  tokensByTier?: {
+    frontier: number;
+    mid: number;
+    local: number;
+  };
 }
 
 /**
@@ -3661,6 +3687,20 @@ export interface DecisionEntry {
    * a frontier (claude-*) model.
    */
   judgeAttestation?: string;
+  /**
+   * M246: Telemetry truth — optional measurement fields added at the emit site.
+   * All absent on pre-M246 ledger entries; callers must treat as optional.
+   */
+  /** Estimated USD cost of the engine call that produced this decision. */
+  costUsd?: number;
+  /** Input tokens consumed. */
+  tokensIn?: number;
+  /** Output tokens produced. */
+  tokensOut?: number;
+  /** Wall-clock duration of the engine spawn in milliseconds. */
+  durationMs?: number;
+  /** Whether the response was served from the provider's prompt cache. */
+  cacheHit?: boolean;
 }
 
 /** M119: Per-engine quality breakdown. */

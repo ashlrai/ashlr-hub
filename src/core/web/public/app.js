@@ -3565,6 +3565,36 @@ function fdRenderIntelligencePanel(snap) {
     body.appendChild(evList);
   }
 
+  // ── M246: Telemetry truth — cache hit rate + tokens by tier ──────────────
+  if (typeof intel.cacheHitRate === 'number' || intel.tokensByTier) {
+    body.appendChild(el('div', { cls: 'fd-intel-section-title', style: 'margin-top:14px' }, 'Telemetry (M246)'));
+    const telRow = el('div', { cls: 'fd-intel-telemetry-row' });
+    if (typeof intel.cacheHitRate === 'number') {
+      const ratePct = (intel.cacheHitRate * 100).toFixed(1) + '%';
+      const rateClass = intel.cacheHitRate >= 0.5 ? 'fd-intel-rate--good'
+                      : intel.cacheHitRate >= 0.2 ? 'fd-intel-rate--ok'
+                      : 'fd-intel-rate--warn';
+      telRow.appendChild(el('span', { cls: 'fd-intel-telemetry-item' },
+        'Cache hit rate: ',
+        el('span', { cls: rateClass }, ratePct)
+      ));
+    }
+    if (intel.tokensByTier) {
+      const t = intel.tokensByTier;
+      const total = (t.frontier || 0) + (t.mid || 0) + (t.local || 0);
+      const fmt = (n) => total > 0 ? ((n / total) * 100).toFixed(0) + '%' : '—';
+      telRow.appendChild(el('span', { cls: 'fd-intel-telemetry-item', style: 'margin-left:16px' },
+        'Tokens by tier: ',
+        el('span', { cls: 'fd-intel-count--fail' }, 'frontier ' + fmt(t.frontier || 0)),
+        el('span', {}, ' / '),
+        el('span', { cls: 'fd-intel-count--warn' }, 'mid ' + fmt(t.mid || 0)),
+        el('span', {}, ' / '),
+        el('span', { cls: 'fd-intel-count--ok' }, 'local ' + fmt(t.local || 0))
+      ));
+    }
+    body.appendChild(telRow);
+  }
+
   return body;
 }
 
