@@ -24,8 +24,8 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-const VIEWS = ['control', 'fleet-activity', 'goals', 'overview', 'runs', 'swarms', 'pulse', 'genome', 'portfolio', 'inbox', 'daemon', 'fleet'];
-const DEFAULT_VIEW = 'control';
+const VIEWS = ['fleet-dashboard', 'control', 'fleet-activity', 'goals', 'overview', 'runs', 'swarms', 'pulse', 'genome', 'portfolio', 'inbox', 'daemon', 'fleet'];
+const DEFAULT_VIEW = 'fleet-dashboard';
 const API_BASE = '';  // same origin
 
 // sessionStorage key for the session token (never localStorage, never URL).
@@ -71,6 +71,10 @@ const state = {
   fleetActivityInterval: null, // M90: polling timer
   fleetActivityLoading: false,
   goals: null,              // M104: GET /api/goals goal list + progress
+  // M210: Fleet Dashboard
+  fleetDashboard: null,             // latest DashboardSnapshot
+  fleetDashboardInterval: null,     // auto-refresh timer
+  fleetDashboardSettings: null,     // persisted settings (loaded lazily)
   inboxBadge: 0,            // pending count from SSE, drives nav badge
   loading: {},   // viewName -> boolean
   error: {},     // viewName -> string | null
@@ -374,7 +378,8 @@ async function onHashChange() {
 
 function renderActiveView() {
   const view = state.activeView;
-  if (view === 'control') renderControl();
+  if (view === 'fleet-dashboard') renderFleetDashboard();
+  else if (view === 'control') renderControl();
   if (view === 'fleet-activity') renderFleetActivity();
   else if (view === 'goals') renderGoals();
   else if (view === 'overview') renderOverview();
@@ -399,7 +404,13 @@ async function loadView(view) {
     clearInterval(state.fleetActivityInterval);
     state.fleetActivityInterval = null;
   }
-  if (view === 'control') await loadControl();
+  // Stop fleet-dashboard polling when navigating away (M210)
+  if (view !== 'fleet-dashboard' && state.fleetDashboardInterval) {
+    clearInterval(state.fleetDashboardInterval);
+    state.fleetDashboardInterval = null;
+  }
+  if (view === 'fleet-dashboard') await loadFleetDashboard();
+  else if (view === 'control') await loadControl();
   else if (view === 'fleet-activity') await loadFleetActivity();
   else if (view === 'goals') await loadGoals();
   else if (view === 'overview') await loadOverview();
@@ -432,6 +443,7 @@ function renderShell() {
 
   // Nav icons per view (inline SVG path data)
   const VIEW_ICONS = {
+    'fleet-dashboard': '<rect x="1" y="1" width="6" height="6" rx="1.2" stroke="currentColor" stroke-width="1.3" fill="none"/><rect x="9" y="1" width="6" height="6" rx="1.2" stroke="currentColor" stroke-width="1.3" fill="none"/><rect x="1" y="9" width="14" height="6" rx="1.2" stroke="currentColor" stroke-width="1.3" fill="none"/><line x1="4" y1="12" x2="12" y2="12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>',
     control:   '<rect x="1" y="1" width="14" height="9" rx="1.5" stroke="currentColor" stroke-width="1.4" fill="none"/><line x1="4" y1="13" x2="12" y2="13" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><line x1="8" y1="10" x2="8" y2="13" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="5" cy="5.5" r="1.3" fill="currentColor" opacity=".9"/><circle cx="8" cy="5.5" r="1.3" fill="currentColor" opacity=".6"/><circle cx="11" cy="5.5" r="1.3" fill="currentColor" opacity=".35"/>',
     overview:  '<rect x="1" y="1" width="6" height="6" rx="1" fill="currentColor" opacity=".85"/><rect x="9" y="1" width="6" height="6" rx="1" fill="currentColor" opacity=".55"/><rect x="1" y="9" width="6" height="6" rx="1" fill="currentColor" opacity=".55"/><rect x="9" y="9" width="6" height="6" rx="1" fill="currentColor" opacity=".3"/>',
     runs:      '<circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.5"/><polyline points="5.5,8 7.5,10 10.5,6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
@@ -454,7 +466,7 @@ function renderShell() {
     iconSvg.setAttribute('aria-hidden', 'true');
     iconSvg.innerHTML = VIEW_ICONS[v] ?? '';
 
-    const VIEW_LABELS = { control: 'Mission Control', 'fleet-activity': 'Fleet Activity', goals: 'Goals' };
+    const VIEW_LABELS = { 'fleet-dashboard': 'Fleet Dashboard', control: 'Mission Control', 'fleet-activity': 'Fleet Activity', goals: 'Goals' };
     const labelText = VIEW_LABELS[v] ?? (v.charAt(0).toUpperCase() + v.slice(1));
     const label = document.createTextNode(labelText);
     const a = el('a', { cls: `nav-link${v === 'control' ? ' nav-link--control' : ''}`, href: `#${v}`, 'data-view': v });
@@ -3012,6 +3024,475 @@ function renderFleetActivity() {
   ticksCard.appendChild(ticksBody);
   section.appendChild(ticksCard);
 
+  main.appendChild(section);
+  window.scrollTo(0, _scrollY);
+}
+
+// ---------------------------------------------------------------------------
+// M210: Fleet Dashboard — glanceable + customizable 4-panel view
+// ---------------------------------------------------------------------------
+
+// ── Settings helpers ────────────────────────────────────────────────────────
+
+const FD_SETTINGS_KEY = 'ashlr-fleet-dashboard-settings';
+
+const FD_DEFAULT_SETTINGS = {
+  panels: { status: true, running: true, usage: true, activity: true },
+  refreshSecs: 15,
+  theme: 'dark',
+};
+
+function fdLoadSettings() {
+  if (state.fleetDashboardSettings) return state.fleetDashboardSettings;
+  try {
+    const raw = localStorage.getItem(FD_SETTINGS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      // Merge with defaults so new keys always exist
+      state.fleetDashboardSettings = {
+        panels: Object.assign({}, FD_DEFAULT_SETTINGS.panels, parsed.panels ?? {}),
+        refreshSecs: typeof parsed.refreshSecs === 'number' ? parsed.refreshSecs : FD_DEFAULT_SETTINGS.refreshSecs,
+        theme: parsed.theme === 'light' ? 'light' : 'dark',
+      };
+    } else {
+      state.fleetDashboardSettings = JSON.parse(JSON.stringify(FD_DEFAULT_SETTINGS));
+    }
+  } catch {
+    state.fleetDashboardSettings = JSON.parse(JSON.stringify(FD_DEFAULT_SETTINGS));
+  }
+  return state.fleetDashboardSettings;
+}
+
+function fdSaveSettings(s) {
+  state.fleetDashboardSettings = s;
+  try { localStorage.setItem(FD_SETTINGS_KEY, JSON.stringify(s)); } catch { /* ignore */ }
+}
+
+function fdApplyTheme(theme) {
+  if (theme === 'light') {
+    document.body.classList.add('theme-light');
+  } else {
+    document.body.classList.remove('theme-light');
+  }
+}
+
+// ── Data loader ─────────────────────────────────────────────────────────────
+
+let _fdLoading = false;
+
+async function loadFleetDashboard() {
+  if (_fdLoading) return;
+  _fdLoading = true;
+
+  // Don't show skeleton flash on poll refreshes
+  if (!state.fleetDashboard) showLoading('fleet-dashboard');
+  try {
+    state.fleetDashboard = await apiFetch('/api/snapshot');
+    renderFleetDashboard();
+  } catch (err) {
+    if (!state.fleetDashboard) showError('fleet-dashboard', err.message);
+  } finally {
+    _fdLoading = false;
+  }
+
+  // Start auto-refresh interval if not already running
+  const settings = fdLoadSettings();
+  fdApplyTheme(settings.theme);
+  if (state.activeView === 'fleet-dashboard' && !state.fleetDashboardInterval) {
+    state.fleetDashboardInterval = setInterval(() => {
+      if (state.activeView !== 'fleet-dashboard') {
+        clearInterval(state.fleetDashboardInterval);
+        state.fleetDashboardInterval = null;
+        return;
+      }
+      loadFleetDashboard();
+    }, settings.refreshSecs * 1000);
+  }
+}
+
+// ── Panel renderers ─────────────────────────────────────────────────────────
+
+function fdRenderStatusPanel(snap) {
+  const daemon = snap.daemon ?? {};
+  const isRunning = daemon.running === true;
+  const isKilled = snap.fleet?.killed ?? snap.control?.fleet?.killed ?? false;
+
+  const body = el('div', { cls: 'fd-panel__body' });
+
+  // Big running indicator
+  const dot = el('span', { cls: isRunning ? 'fd-daemon-dot fd-daemon-dot--running' : 'fd-daemon-dot' });
+  const label = el('span', {
+    cls: isRunning ? 'fd-daemon-label fd-daemon-label--running' : 'fd-daemon-label fd-daemon-label--stopped',
+  }, isRunning ? 'Daemon running' : 'Daemon stopped');
+  body.appendChild(el('div', { cls: 'fd-status-row' }, dot, label));
+
+  // Meta grid
+  const lastTick = daemon.lastTickAt ? fmtRelative(daemon.lastTickAt) : '—';
+  const spend = daemon.todaySpentUsd != null ? `$${daemon.todaySpentUsd.toFixed(4)}` : '—';
+  const pendingCount = daemon.pendingProposals ?? snap.inbox?.pending ?? 0;
+
+  const grid = el('div', { cls: 'fd-meta-grid' });
+
+  const mkMeta = (key, val, cls) => {
+    const item = el('div', { cls: 'fd-meta-item' },
+      el('div', { cls: 'fd-meta-key' }, key),
+      el('div', { cls: cls ? `fd-meta-val ${cls}` : 'fd-meta-val' }, val)
+    );
+    return item;
+  };
+
+  grid.appendChild(mkMeta('Last tick', lastTick));
+  grid.appendChild(mkMeta('Spend today', spend));
+  grid.appendChild(mkMeta('Pending proposals', String(pendingCount),
+    pendingCount > 0 ? 'fd-meta-val--warn' : null));
+  grid.appendChild(mkMeta('Items processed', String(daemon.itemsProcessed ?? 0)));
+  body.appendChild(grid);
+
+  // Kill-switch banner
+  if (isKilled) {
+    body.appendChild(el('div', { cls: 'fd-kill-banner' },
+      '⚠ Kill switch engaged — fleet paused. Resume with `ashlr fleet resume`.'
+    ));
+  }
+
+  return body;
+}
+
+function fdRenderRunningPanel(snap) {
+  const daemon = snap.daemon ?? {};
+  const inbox = snap.inbox ?? {};
+  const pendingCount = daemon.pendingProposals ?? inbox.pending ?? 0;
+  const recentRuns = Array.isArray(snap.runs) ? snap.runs.slice(0, 5) : [];
+  const itemsProcessed = daemon.itemsProcessed ?? 0;
+
+  const body = el('div', { cls: 'fd-panel__body' });
+
+  // Count blocks
+  const counts = el('div', { cls: 'fd-running-count' });
+  const addCount = (num, lbl, cls) => {
+    counts.appendChild(el('div', { cls: 'fd-count-block' },
+      el('div', { cls: `fd-count-num ${cls}` }, String(num)),
+      el('div', { cls: 'fd-count-lbl' }, lbl)
+    ));
+  };
+  addCount(itemsProcessed, 'items this run', 'fd-count-num--neutral');
+  addCount(pendingCount, 'pending proposals', pendingCount > 0 ? 'fd-count-num--warn' : 'fd-count-num--ok');
+  addCount(recentRuns.filter(r => r.status === 'running').length, 'runs active', 'fd-count-num--neutral');
+  body.appendChild(counts);
+
+  // Recent runs list
+  if (recentRuns.length === 0) {
+    body.appendChild(el('p', { cls: 'hint' }, 'No recent runs.'));
+    return body;
+  }
+
+  const list = el('ul', { cls: 'fd-proposals-list' });
+  for (const r of recentRuns) {
+    const statusColor = r.status === 'done' ? 'var(--status-ok)' :
+                        r.status === 'running' ? 'var(--accent)' :
+                        r.status === 'failed' ? 'var(--status-fail)' : 'var(--text-muted)';
+    const row = el('li', { cls: 'fd-proposal-row' },
+      el('span', { cls: 'fd-proposal-title', title: r.goal }, r.goal ?? '—'),
+      el('span', { cls: 'fd-proposal-kind', style: `color:${statusColor}` }, r.status ?? '—')
+    );
+    list.appendChild(row);
+  }
+  body.appendChild(list);
+  return body;
+}
+
+function fdRenderUsagePanel(snap) {
+  const fu = snap.frontierUsage;
+  const body = el('div', { cls: 'fd-panel__body' });
+
+  if (!fu || !Array.isArray(fu.engines) || fu.engines.length === 0) {
+    body.appendChild(el('p', { cls: 'hint' },
+      'No frontier usage data. Configure engines in foundry.allowedBackends.'));
+    return body;
+  }
+
+  for (const eng of fu.engines) {
+    const win = eng.subscriptionWindow ?? { state: 'unknown', usedPct: 0 };
+    const pct = Math.min(100, Math.max(0, win.usedPct ?? 0));
+    const stateKey = win.state ?? 'unknown';
+
+    const engRow = el('div', { cls: 'fd-usage-engine' });
+
+    // Header: name + state badge
+    const badge = el('span', { cls: `fd-usage-engine-state fd-usage-engine-state--${stateKey}` }, stateKey);
+    engRow.appendChild(el('div', { cls: 'fd-usage-engine-header' },
+      el('span', { cls: 'fd-usage-engine-name' }, eng.engine),
+      badge
+    ));
+
+    // Progress bar
+    const track = el('div', { cls: 'fd-usage-bar-track' });
+    const fill = el('div', {
+      cls: `fd-usage-bar-fill fd-usage-bar-fill--${stateKey}`,
+      style: `width:${pct.toFixed(1)}%`,
+      role: 'progressbar',
+      'aria-valuenow': String(Math.round(pct)),
+      'aria-valuemin': '0',
+      'aria-valuemax': '100',
+      'aria-label': `${eng.engine} usage ${Math.round(pct)}%`,
+    });
+    track.appendChild(fill);
+    engRow.appendChild(track);
+
+    // Meta row: calls / tokens / cost / window / reset
+    const meta = el('div', { cls: 'fd-usage-engine-meta' });
+
+    const addMeta = (label, value) => {
+      meta.appendChild(el('span', { cls: 'fd-usage-meta-item' },
+        el('strong', {}, value), ` ${label}`
+      ));
+    };
+
+    // calls today with limit if configured
+    if (eng.limit != null) {
+      addMeta('calls', `${eng.callsToday}/${eng.limit}`);
+      if (eng.remainingEstimate != null) {
+        addMeta('remaining', `~${eng.remainingEstimate}`);
+      }
+    } else {
+      addMeta('calls', String(eng.callsToday));
+    }
+
+    if (eng.tokensToday != null) {
+      addMeta('tokens', fmtK(eng.tokensToday));
+    }
+    if (eng.costToday != null) {
+      addMeta('cost', `$${eng.costToday.toFixed(4)}`);
+    }
+
+    // Window reset
+    if (win.resetsAt) {
+      const resetsIn = Math.max(0, win.resetsAt * 1000 - Date.now());
+      const hoursLeft = (resetsIn / 3_600_000).toFixed(1);
+      const resetSpan = el('span', { cls: 'fd-usage-meta-item' });
+      const inner = el('span', { cls: hoursLeft < 2 ? 'fd-reset-soon' : '' },
+        `resets in ${hoursLeft}h`);
+      resetSpan.appendChild(inner);
+      meta.appendChild(resetSpan);
+    } else if (win.windowLabel) {
+      addMeta('window', win.windowLabel);
+    }
+
+    engRow.appendChild(meta);
+    body.appendChild(engRow);
+  }
+
+  return body;
+}
+
+function fdRenderActivityPanel(snap) {
+  const recentRuns = Array.isArray(snap.runs) ? snap.runs.slice(0, 8) : [];
+  const body = el('div', { cls: 'fd-panel__body' });
+
+  // Activity summary line
+  const act = snap.activity ?? {};
+  if (act.commits || act.sessions) {
+    body.appendChild(el('div', { cls: 'fd-stat-label', style: 'margin-bottom:10px' },
+      `7d: ${act.sessions ?? 0} sessions · ${act.commits ?? 0} commits · $${(act.estCostUsd ?? 0).toFixed(4)}`
+    ));
+  }
+
+  if (recentRuns.length === 0) {
+    body.appendChild(el('p', { cls: 'hint' }, 'No recent activity.'));
+    return body;
+  }
+
+  const list = el('ul', { cls: 'fd-activity-list' });
+  for (const r of recentRuns) {
+    const statusColor = r.status === 'done' ? 'var(--status-ok)' :
+                        r.status === 'running' ? 'var(--accent)' :
+                        r.status === 'failed' ? 'var(--status-fail)' :
+                        r.status === 'aborted' ? 'var(--status-warn)' : 'var(--text-muted)';
+    const row = el('li', { cls: 'fd-activity-row' },
+      el('span', { cls: 'fd-activity-dot', style: `background:${statusColor}` }),
+      el('span', { cls: 'fd-activity-goal', title: r.goal }, r.goal ?? '—'),
+      el('span', { cls: 'fd-activity-status', style: `color:${statusColor}` }, r.status ?? '—'),
+      r.tokens ? el('span', { cls: 'fd-activity-cost' }, fmtK(r.tokens) + ' tok') : null
+    );
+    list.appendChild(row);
+  }
+  body.appendChild(list);
+  return body;
+}
+
+// ── Settings modal ──────────────────────────────────────────────────────────
+
+function fdOpenSettings() {
+  const settings = fdLoadSettings();
+  const draftSettings = {
+    panels: Object.assign({}, settings.panels),
+    refreshSecs: settings.refreshSecs,
+    theme: settings.theme,
+  };
+
+  const overlay = el('div', { cls: 'fd-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Fleet Dashboard settings' });
+  const modal = el('div', { cls: 'fd-modal' });
+
+  // Title
+  modal.appendChild(el('div', { cls: 'fd-modal__title' }, 'Fleet Dashboard Settings'));
+
+  // Panel visibility
+  const panelSection = el('div', { cls: 'fd-modal__section' });
+  panelSection.appendChild(el('div', { cls: 'fd-modal__section-label' }, 'Panels'));
+  const PANEL_LABELS = { status: 'Fleet Status', running: "What's Running", usage: 'Frontier Usage/Limits', activity: 'Recent Activity' };
+  for (const [key, label] of Object.entries(PANEL_LABELS)) {
+    const cb = el('input', { type: 'checkbox' });
+    cb.checked = draftSettings.panels[key] !== false;
+    cb.addEventListener('change', () => { draftSettings.panels[key] = cb.checked; });
+    panelSection.appendChild(el('label', { cls: 'fd-modal__check-row' }, cb, label));
+  }
+  modal.appendChild(panelSection);
+
+  // Refresh interval
+  const refreshSection = el('div', { cls: 'fd-modal__section' });
+  refreshSection.appendChild(el('div', { cls: 'fd-modal__section-label' }, 'Auto-refresh'));
+  const refreshGroup = el('div', { cls: 'fd-modal__radio-group' });
+  for (const secs of [10, 15, 30, 60]) {
+    const btn = el('button', {
+      cls: draftSettings.refreshSecs === secs ? 'fd-modal__radio-btn fd-modal__radio-btn--active' : 'fd-modal__radio-btn',
+      type: 'button',
+    }, `${secs}s`);
+    btn.addEventListener('click', () => {
+      draftSettings.refreshSecs = secs;
+      refreshGroup.querySelectorAll('.fd-modal__radio-btn').forEach(b => b.classList.remove('fd-modal__radio-btn--active'));
+      btn.classList.add('fd-modal__radio-btn--active');
+    });
+    refreshGroup.appendChild(btn);
+  }
+  refreshSection.appendChild(refreshGroup);
+  modal.appendChild(refreshSection);
+
+  // Theme
+  const themeSection = el('div', { cls: 'fd-modal__section' });
+  themeSection.appendChild(el('div', { cls: 'fd-modal__section-label' }, 'Theme'));
+  const themeGroup = el('div', { cls: 'fd-modal__radio-group' });
+  for (const t of ['dark', 'light']) {
+    const btn = el('button', {
+      cls: draftSettings.theme === t ? 'fd-modal__radio-btn fd-modal__radio-btn--active' : 'fd-modal__radio-btn',
+      type: 'button',
+    }, t.charAt(0).toUpperCase() + t.slice(1));
+    btn.addEventListener('click', () => {
+      draftSettings.theme = t;
+      themeGroup.querySelectorAll('.fd-modal__radio-btn').forEach(b => b.classList.remove('fd-modal__radio-btn--active'));
+      btn.classList.add('fd-modal__radio-btn--active');
+    });
+    themeGroup.appendChild(btn);
+  }
+  themeSection.appendChild(themeGroup);
+  modal.appendChild(themeSection);
+
+  // Footer buttons
+  const cancelBtn = el('button', { cls: 'fd-modal__btn', type: 'button' }, 'Cancel');
+  cancelBtn.addEventListener('click', () => overlay.remove());
+
+  const saveBtn = el('button', { cls: 'fd-modal__btn fd-modal__btn--primary', type: 'button' }, 'Save');
+  saveBtn.addEventListener('click', () => {
+    fdSaveSettings(draftSettings);
+    fdApplyTheme(draftSettings.theme);
+    overlay.remove();
+    // Restart interval with new refresh period
+    if (state.fleetDashboardInterval) {
+      clearInterval(state.fleetDashboardInterval);
+      state.fleetDashboardInterval = null;
+    }
+    renderFleetDashboard();
+    // Trigger new interval via a reload
+    loadFleetDashboard();
+  });
+
+  modal.appendChild(el('div', { cls: 'fd-modal__footer' }, cancelBtn, saveBtn));
+  overlay.appendChild(modal);
+
+  // Close on overlay click (outside modal)
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+  // Close on Escape
+  const onKey = (e) => { if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', onKey); } };
+  document.addEventListener('keydown', onKey);
+
+  document.body.appendChild(overlay);
+  saveBtn.focus();
+}
+
+// ── Main render ─────────────────────────────────────────────────────────────
+
+function renderFleetDashboard() {
+  if (state.activeView !== 'fleet-dashboard') return;
+  const main = getMain();
+  if (!main) return;
+  const _scrollY = window.scrollY;
+  main.innerHTML = '';
+
+  const settings = fdLoadSettings();
+  fdApplyTheme(settings.theme);
+
+  const snap = state.fleetDashboard;
+  const section = el('section', { cls: 'view-section' });
+
+  // Header row with title, last-updated, and settings button
+  const settingsBtn = el('button', { cls: 'fd-settings-btn', type: 'button', 'aria-label': 'Dashboard settings' });
+  settingsBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.22 3.22l1.06 1.06M11.72 11.72l1.06 1.06M12.78 3.22l-1.06 1.06M4.28 11.72l-1.06 1.06" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg> Settings';
+  settingsBtn.addEventListener('click', fdOpenSettings);
+
+  const lastUpdated = snap ? `Updated ${fmtRelative(snap.generatedAt)}` : 'Loading…';
+  section.appendChild(el('div', { cls: 'fd-header-row' },
+    el('div', {},
+      el('span', { cls: 'fd-header-title' }, 'Fleet Dashboard'),
+      el('span', { cls: 'fd-header-meta', style: 'margin-left:12px' }, lastUpdated)
+    ),
+    el('div', { cls: 'fd-header-right' },
+      el('span', { cls: 'fd-hidden-hint', id: 'fd-hidden-hint', style: 'display:none' }, ''),
+      settingsBtn
+    )
+  ));
+
+  if (!snap) {
+    section.appendChild(el('div', { cls: 'empty-state' },
+      el('p', {}, 'Loading fleet data…')
+    ));
+    main.appendChild(section);
+    return;
+  }
+
+  // Count hidden panels for the hint
+  const panelDefs = [
+    { key: 'status',   title: 'Fleet Status',         render: () => fdRenderStatusPanel(snap) },
+    { key: 'running',  title: "What's Running",        render: () => fdRenderRunningPanel(snap) },
+    { key: 'usage',    title: 'Frontier Usage/Limits', render: () => fdRenderUsagePanel(snap) },
+    { key: 'activity', title: 'Recent Activity',       render: () => fdRenderActivityPanel(snap) },
+  ];
+
+  const hiddenCount = panelDefs.filter(p => settings.panels[p.key] === false).length;
+  const hintEl = section.querySelector('#fd-hidden-hint');
+  if (hintEl) {
+    if (hiddenCount > 0) {
+      hintEl.textContent = `${hiddenCount} panel${hiddenCount > 1 ? 's' : ''} hidden`;
+      hintEl.style.display = '';
+    } else {
+      hintEl.style.display = 'none';
+    }
+  }
+
+  const grid = el('div', { cls: 'fleet-dashboard-grid', role: 'region', 'aria-label': 'Fleet panels' });
+
+  for (const pd of panelDefs) {
+    const isVisible = settings.panels[pd.key] !== false;
+    const panel = el('div', { cls: isVisible ? 'fd-panel' : 'fd-panel fd-panel--hidden', 'aria-label': pd.title });
+    if (isVisible) {
+      panel.appendChild(el('div', { cls: 'fd-panel__header' },
+        el('span', { cls: 'fd-panel__title' }, pd.title)
+      ));
+      panel.appendChild(pd.render());
+    }
+    grid.appendChild(panel);
+  }
+
+  section.appendChild(grid);
   main.appendChild(section);
   window.scrollTo(0, _scrollY);
 }

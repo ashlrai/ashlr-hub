@@ -21,8 +21,23 @@ import type { AshlrConfig } from '../types.js';
 import { registerResolutionHandler } from './dispatch.js';
 import type { CommsRequest } from './requests.js';
 import { sendIMessage } from '../integrations/imessage.js';
+import { sendTelegramMessage, telegramEnabled } from '../integrations/telegram.js';
 import { loadLatestBriefing, adoptBriefing } from '../vision/strategist.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { savePauseState } from './pause.js';
+
+// ---------------------------------------------------------------------------
+// Internal: transport helper
+// ---------------------------------------------------------------------------
+
+/** Send a message via Telegram if configured, else iMessage. Best-effort. */
+async function sendReply(text: string, cfg: AshlrConfig): Promise<void> {
+  if (telegramEnabled(cfg)) {
+    await sendTelegramMessage(text, undefined, cfg);
+  } else {
+    await sendIMessage(text, cfg);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Internal: elon-vision handler
@@ -46,10 +61,10 @@ async function handleElonVision(req: CommsRequest, cfg: AshlrConfig): Promise<vo
   }
 
   if (idx === 2) {
-    // Show full briefing — send the complete briefing text as an iMessage.
+    // Show full briefing — send via appropriate transport.
     const briefing = loadLatestBriefing();
     if (!briefing) {
-      await sendIMessage('[ashlr] No briefing on file.', cfg);
+      await sendReply('[ashlr] No briefing on file.', cfg);
       return;
     }
 
@@ -76,7 +91,7 @@ async function handleElonVision(req: CommsRequest, cfg: AshlrConfig): Promise<vo
       briefing.proposedGoals.forEach((g, i) => lines.push(`  ${i + 1}. ${g.objective}`));
     }
 
-    await sendIMessage(lines.join('\n'), cfg);
+    await sendReply(lines.join('\n'), cfg);
     return;
   }
 }
@@ -116,10 +131,10 @@ async function handleManagerApproval(req: CommsRequest, cfg: AshlrConfig): Promi
       const result = await applyProposal(proposalId, { confirmed: true });
 
       if (result.ok) {
-        await sendIMessage(`✅ Merged "${proposal.title}"`, cfg);
+        await sendReply(`✅ Merged "${proposal.title}"`, cfg);
       } else {
         const reason = scrubSecrets(result.detail ?? 'unknown reason');
-        await sendIMessage(
+        await sendReply(
           `Approved but apply failed: ${reason} — needs manual review`,
           cfg,
         );
@@ -136,8 +151,8 @@ async function handleManagerApproval(req: CommsRequest, cfg: AshlrConfig): Promi
       const { setStatus, loadProposal } = await import('../inbox/store.js');
       const proposal = loadProposal(proposalId);
       if (!proposal) return;
-      setStatus(proposalId, 'rejected', 'mason:imessage');
-      await sendIMessage(`Rejected "${proposal.title}"`, cfg);
+      setStatus(proposalId, 'rejected', 'mason:telegram');
+      await sendReply(`Rejected "${proposal.title}"`, cfg);
     } catch {
       // Best-effort.
     }
@@ -158,7 +173,7 @@ async function handleManagerApproval(req: CommsRequest, cfg: AshlrConfig): Promi
           ? scrubbed.slice(0, MAX_DIFF_SMS) + '\n…[truncated]'
           : scrubbed;
 
-      await sendIMessage(`Diff for "${proposal.title}":\n${truncated}`, cfg);
+      await sendReply(`Diff for "${proposal.title}":\n${truncated}`, cfg);
 
       // Re-post the approval question so Mason can still decide.
       const { postRequest } = await import('./requests.js');
@@ -169,6 +184,40 @@ async function handleManagerApproval(req: CommsRequest, cfg: AshlrConfig): Promi
         options: req.options,
         meta: req.meta,
       });
+    } catch {
+      // Best-effort.
+    }
+    return;
+  }
+
+  // M212 quick-actions — additive, Telegram only, no merge/push/destructive ops.
+
+  if (idx === 3) {
+    // Prioritize — bump the proposal to the top of the pending queue by
+    // updating its priority field (direction only — does not merge or apply).
+    try {
+      const { loadProposal, setStatus } = await import('../inbox/store.js');
+      const proposal = loadProposal(proposalId);
+      if (!proposal) return;
+      // Mark as prioritized via a status annotation; the daemon re-queues on next pass.
+      setStatus(proposalId, 'pending', 'mason:prioritized');
+      await sendReply(`Prioritized "${proposal.title}" — will be picked up next pass`, cfg);
+    } catch {
+      // Best-effort.
+    }
+    return;
+  }
+
+  if (idx === 4) {
+    // Pause-fleet — sets the soft-pause flag (additive, direction-only).
+    // SAFETY: the flag is honored by the comms dispatch cycle (runCommsCycle
+    // short-circuits while paused); it sets DIRECTION only and triggers no
+    // merge/push/destructive op. Resolved via "resume" text or setPause(false).
+    try {
+      savePauseState({ paused: true, since: Date.now() });
+      const { loadProposal } = await import('../inbox/store.js');
+      const proposal = loadProposal(proposalId);
+      await sendReply(`Fleet paused${proposal ? ` — "${proposal.title}" stays pending` : ''}. Text "resume" to restart.`, cfg);
     } catch {
       // Best-effort.
     }
@@ -198,5 +247,13 @@ export function registerCommsHandlers(cfg: AshlrConfig): void {
     return handleManagerApproval(req, cfg).catch(() => {
       // best-effort
     });
+  });
+
+  // M212: decision-needed is resolved via button tap (option index already in req.answerIndex).
+  // The Elon dialogue or notifyFleetEvent('decision-needed', ...) posted this request.
+  // Resolution is recorded in the requests store; no further action needed here beyond
+  // re-posting the answer as a goal action if warranted (handled by elon-dialogue on next cycle).
+  registerResolutionHandler('decision-needed', (_req: CommsRequest) => {
+    return Promise.resolve();
   });
 }

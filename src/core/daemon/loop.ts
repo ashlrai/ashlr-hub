@@ -49,13 +49,15 @@ import { recommendRoute, recoverWithinBudget } from '../run/learned-router.js';
 import { estimateRun } from '../observability/estimate.js';
 import { buildForecast } from '../observability/forecast.js';
 import { emitTuningProposals } from '../learn/tuning.js';
-import { runAutoMergePass } from '../fleet/automerge-pass.js';
+import { runAutoMergePass, type AutoMergePassResult } from '../fleet/automerge-pass.js';
 import { runBestOfN } from '../run/best-of-n.js';
 import { runSelfHealCycle } from '../fleet/self-heal.js';
 import { runViaAshlrcode } from '../run/ashlrcode-engine.js'; // M185
 import { runInventCycle } from '../generative/invent-cycle.js'; // M186
 import { runCounterfactualReplay } from '../fleet/counterfactual.js'; // M187
 import { detectRegression, bisectAndRevert } from '../fleet/regression-sentinel.js'; // M189
+// M212: proactive notifications (fire-and-forget, never throws, never alters control flow)
+import { notifyFleetEvent } from '../comms/events.js';
 import { pendingCount, listProposals } from '../inbox/store.js';
 // worked-ledger is used transitively via LocalWorkQueueCoordinator (selectWorkQueueCoordinator).
 import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
@@ -590,7 +592,11 @@ export async function tick(
   if ((liveCfg.foundry as any)?.regressionSentinel === true) {
     try {
       const r = await detectRegression(liveCfg);
-      if (r.regressed) await bisectAndRevert(liveCfg);
+      if (r.regressed) {
+        await bisectAndRevert(liveCfg);
+        // M212: fire-and-forget anomaly notification — additive, never throws.
+        void notifyFleetEvent('anomaly', { detail: 'Regression detected — bisect/revert triggered' }, liveCfg);
+      }
     } catch (err) { console.warn('[ashlr] daemon:tick regressionSentinel failed:', (err as Error)?.message ?? err); }
   }
 
@@ -1014,7 +1020,8 @@ export async function tick(
   // stay PENDING. With autoMerge disabled this is a no-op — the daemon stays
   // strictly proposal-only.
   let merged = 0;
-  try { merged = (await runAutoMergePass(liveCfg)).merged; } catch (err) { console.warn('[ashlr] daemon:tick runAutoMergePass failed:', (err as Error)?.message ?? err); merged = 0; }
+  let autoMergePassResult: AutoMergePassResult | null = null;
+  try { autoMergePassResult = await runAutoMergePass(liveCfg); merged = autoMergePassResult?.merged ?? 0; } catch (err) { console.warn('[ashlr] daemon:tick runAutoMergePass failed:', (err as Error)?.message ?? err); merged = 0; }
 
   // -------------------------------------------------------------------------
   // 7. Update + persist state with this tick's accounting.

@@ -39,6 +39,8 @@ import { judgeProposal, resolveFrontierJudgeClient, type ManagerVerdict } from '
 import { redTeamProposal } from './red-team.js';
 import { analyzeBlastRadius } from '../run/blast-radius.js';
 import { checkSpecContract } from '../run/spec-contract.js';
+// M212: proactive notifications (fire-and-forget, never throws, never alters control flow)
+import { notifyFleetEvent } from '../comms/events.js';
 
 export interface AutoMergePassResult {
   /** Proposals the gate was run against this pass (frontier + branch-eligible mid). */
@@ -292,7 +294,11 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     try {
       const res = await autoMergeProposal(p.id, cfg);
       out.results.push(res);
-      if (res.merged) out.merged++;
+      if (res.merged) {
+        out.merged++;
+        // M212: fire-and-forget merge notification — additive, never throws, no control-flow change.
+        notifyFleetEvent('merge', { repo: p.repo ?? undefined, title: p.title, engine: p.engineTier }, cfg).catch(() => {});
+      }
       if (res.branched) out.branched++;
     } catch {
       // autoMergeProposal never throws by contract; defensive only.

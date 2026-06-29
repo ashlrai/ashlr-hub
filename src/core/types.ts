@@ -537,6 +537,12 @@ export interface AshlrConfig {
      * Elon strategic question (ask-vision). Default 24 hours.
      */
     askVisionIntervalHours?: number;
+    /**
+     * M212: enable proactive fleet event notifications (merge shipped,
+     * anomaly, decision-needed, daily standup). Default false.
+     * Only fires when channel === 'telegram' and Telegram is configured.
+     */
+    proactive?: boolean;
   };
 }
 

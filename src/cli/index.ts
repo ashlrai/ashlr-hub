@@ -302,6 +302,14 @@ const loadUsageCmd = lazyCmd(
   'usage command requires src/cli/usage.ts (M194 module not yet built).',
 );
 
+// ─── M211 dashboard command loader ──────────────────────────────────────────
+
+const loadDashboardCmd = lazyCmd(
+  () => import('./dashboard.js' as unknown as string),
+  (m) => m.cmdDashboard as Cmd,
+  'dashboard command requires src/cli/dashboard.ts (M211 module not yet built).',
+);
+
 // ─── M14 command loader ────────────────────────────────────────────
 
 const loadServeCmd = lazyCmd(
@@ -1596,6 +1604,14 @@ async function main(): Promise<void> {
       case 'dash': {
         const cmdTui = await loadTuiCmd();
         process.exitCode = await cmdTui(rest);
+        break;
+      }
+
+      case 'dashboard': {
+        // M211: persistent fleet dashboard — installs launchd LaunchAgent +
+        // opens browser. `--stop` / `--status` subcommands also supported.
+        const cmdDashboard = await loadDashboardCmd();
+        process.exitCode = await cmdDashboard(rest);
         break;
       }
 

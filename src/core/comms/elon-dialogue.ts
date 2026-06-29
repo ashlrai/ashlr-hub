@@ -25,6 +25,7 @@
 import type { AshlrConfig } from '../types.js';
 import { loadLatestBriefing } from '../vision/strategist.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { loadPauseState, savePauseState } from './pause.js';
 
 // ---------------------------------------------------------------------------
 // Internal: resolve the Opus complete function (mirrors resolveStrategistClient
@@ -144,7 +145,10 @@ Respond with a JSON object in exactly this shape:
   }
 }
 
-action.type MUST be one of: "create_goal", "update_goal_priority", "none".
+action.type MUST be one of: "create_goal", "update_goal_priority", "pause_fleet", "resume_fleet", "fleet_status", "none".
+- "pause_fleet": Mason asks to pause/stop the fleet ("pause", "stop work", "hold", etc.)
+- "resume_fleet": Mason asks to resume the fleet ("resume", "unpause", "start again", etc.)
+- "fleet_status": Mason asks about fleet state ("status", "what's running", "what are you doing", etc.)
 When no goal action is warranted, set action.type = "none".
 Respond ONLY with valid JSON. No prose, no markdown fences.`;
 
@@ -190,7 +194,7 @@ async function buildContext(_cfg: AshlrConfig): Promise<string> {
 // ---------------------------------------------------------------------------
 
 interface DialogueAction {
-  type: 'create_goal' | 'update_goal_priority' | 'none';
+  type: 'create_goal' | 'update_goal_priority' | 'pause_fleet' | 'resume_fleet' | 'fleet_status' | 'none';
   objective?: string;
   rationale?: string;
   goalId?: string;
@@ -228,6 +232,48 @@ async function executeAction(action: DialogueAction, cfg: AshlrConfig): Promise<
     }
   }
 
+  // M212: soft-pause — sets a flag file the daemon checks; no control-flow change here.
+  // SAFETY: this is a direction flag only. Execution gating happens in the daemon tick.
+  if (action.type === 'pause_fleet') {
+    try {
+      savePauseState({ paused: true, since: Date.now() });
+      return 'Fleet paused';
+    } catch {
+      return null;
+    }
+  }
+
+  if (action.type === 'resume_fleet') {
+    try {
+      savePauseState({ paused: false });
+      return 'Fleet resumed';
+    } catch {
+      return null;
+    }
+  }
+
+  if (action.type === 'fleet_status') {
+    try {
+      const parts: string[] = [];
+      // Pause state
+      const ps = loadPauseState();
+      parts.push(ps.paused ? 'Fleet: PAUSED' : 'Fleet: RUNNING');
+      // Active goals
+      const { listGoals } = await import('../goals/store.js');
+      const active = listGoals({ status: 'active' });
+      parts.push(`Active goals: ${active.length}`);
+      // Pending proposals
+      try {
+        const { listProposals } = await import('../inbox/store.js');
+        const pending = listProposals({ status: 'pending' });
+        parts.push(`Pending proposals: ${pending.length}`);
+      } catch { /* best-effort */ }
+      return parts.join('\n');
+    } catch {
+      return null;
+    }
+  }
+
   return null;
 }
 
@@ -247,11 +293,69 @@ async function executeAction(action: DialogueAction, cfg: AshlrConfig): Promise<
  *
  * Never throws.
  */
+// ---------------------------------------------------------------------------
+// Fleet snapshot (status fast-path)
+// ---------------------------------------------------------------------------
+
+async function buildFleetSnapshot(cfg: AshlrConfig): Promise<string> {
+  try {
+    const lines: string[] = ['Fleet status:'];
+
+    // Kill switch
+    try {
+      const { killSwitchOn } = await import('../sandbox/policy.js');
+      lines.push(`• Kill switch: ${killSwitchOn() ? 'ON' : 'OFF'}`);
+    } catch {
+      lines.push('• Kill switch: unknown');
+    }
+
+    // Soft pause
+    let paused = false;
+    try {
+      const { isPaused } = await import('./pause.js');
+      paused = isPaused();
+    } catch { /* ignore */ }
+    lines.push(`• Soft pause: ${paused ? 'ON' : 'OFF'}`);
+
+    // Pending proposals
+    try {
+      const { listProposals } = await import('../inbox/store.js');
+      const pending = listProposals({ status: 'pending' });
+      lines.push(`• Pending proposals: ${pending.length}`);
+    } catch {
+      lines.push('• Pending proposals: unknown');
+    }
+
+    // Active goals
+    try {
+      const { listGoals } = await import('../goals/store.js');
+      const active = listGoals({ status: 'active' });
+      lines.push(`• Active goals: ${active.length}`);
+      for (const g of active.slice(0, 10)) {
+        lines.push(`  - ${g.id}: ${g.objective}`);
+      }
+    } catch {
+      lines.push('• Active goals: unknown');
+    }
+
+    void cfg; // cfg reserved for future use (e.g. remote fleet query)
+    return lines.join('\n');
+  } catch {
+    return 'Fleet status unavailable.';
+  }
+}
+
 export async function handleStrategicMessage(
   text: string,
   cfg: AshlrConfig,
 ): Promise<string> {
   try {
+    // Fast-path: status query → skip LLM, return live fleet snapshot
+    const statusRe = /^\s*(status|what'?s\s+running|fleet\s+status)\s*\??$/i;
+    if (statusRe.test(text)) {
+      return scrubSecrets(await buildFleetSnapshot(cfg));
+    }
+
     const context = await buildContext(cfg);
     const userPrompt = `ECOSYSTEM CONTEXT:\n${context}\n\nMASON'S MESSAGE:\n${text}`;
 

@@ -155,6 +155,10 @@ export async function runCommsCycle(cfg: AshlrConfig): Promise<CycleResult> {
   // Select transport based on cfg.comms.channel
   const isTelegram = telegramEnabled(cfg);
 
+  // M212: soft-pause — skip the send/poll cycle when paused (but don't throw)
+  const { isPaused } = await import('./pause.js');
+  if (isPaused()) return result;
+
   try {
     const state = loadState();
     const now = Date.now();
@@ -230,6 +234,23 @@ export async function runCommsCycle(cfg: AshlrConfig): Promise<CycleResult> {
           }
         } else if (event.kind === 'text' && event.text) {
           const out = outstanding();
+
+          // M212: pause/resume commands
+          const pauseRe = /^\s*pause(\s+fleet)?\s*$/i;
+          const resumeRe = /^\s*resume(\s+fleet)?\s*$/i;
+          if (pauseRe.test(event.text)) {
+            const { setPause } = await import('./pause.js');
+            setPause(true);
+            await sendTelegramMessage('⏸ Fleet paused. Send "resume" to restart.', undefined, cfg);
+            continue;
+          }
+          if (resumeRe.test(event.text)) {
+            const { setPause } = await import('./pause.js');
+            setPause(false);
+            await sendTelegramMessage('▶️ Fleet resumed.', undefined, cfg);
+            continue;
+          }
+
           // Text — check if it's a numbered reply to an outstanding request first.
           const numMatch = out ? /^\s*(\d+)\b/.exec(event.text) : null;
           const num = numMatch ? parseInt(numMatch[1]!, 10) : NaN;
