@@ -33,6 +33,9 @@ import type { EngineId } from '../types.js';
 // M195: read RESOLVED engine tier (honors cfg.foundry.nim frontier promotion).
 // Imported from the registry (not sandboxed-engine.ts) to avoid an import cycle.
 import { resolveEngineSpec } from './engine-registry.js';
+// M240: learned-bias tie-breaker — reorders engine candidates by historical ship-rate.
+// Import is synchronous (no async); cold-start (empty ledger) = no-op.
+import { buildEngineScores, sortEnginesByScore, type EngineScoreMap } from './learned-router.js';
 
 // ---------------------------------------------------------------------------
 // Cloud provider env-key map — detection only, values are NEVER read/logged.
@@ -372,6 +375,17 @@ export function routeTask(
     const preferCheap = policy === 'cost';
     const preferQuality = policy === 'quality';
 
+    // ── M240: Learned-bias score map ──────────────────────────────────────
+    // Build once per routeTask call. When cfg.foundry.learnedRouting === false
+    // (flag-off) we use an empty map so engineScoreFor always returns 0.5
+    // (neutral) and every downstream sort is a no-op — byte-identical routing.
+    // Default (absent) = true (on).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const learnedRoutingEnabled = (cfg.foundry as any)?.learnedRouting !== false;
+    const learnedScores: EngineScoreMap = learnedRoutingEnabled
+      ? buildEngineScores(item.source)
+      : new Map();
+
     // ── Helpers ──────────────────────────────────────────────────────────
 
     const available = (e: EngineId) => engineAvailable(e, cfg, ctx);
@@ -407,6 +421,27 @@ export function routeTask(
         catalogEntry: entry,
         reason: overrideReason,
       };
+    };
+
+    /**
+     * M240: Try a list of engines in learned-bias order (highest ship-rate
+     * for this taskClass first). Hard constraints (availability, capability,
+     * tier, quota) are unchanged — we only reorder the attempt sequence.
+     * The first engine that `tryEngine` accepts wins, exactly as before.
+     * When learnedRouting is off, `learnedScores` is empty so the sort is
+     * a no-op and the original order is preserved byte-identically.
+     */
+    const tryEnginesOrdered = (
+      engines: readonly EngineId[],
+      capability: ModelCapability | null,
+      reasonPrefix: string,
+    ): TaskRouteDecision | null => {
+      const ordered = sortEnginesByScore(engines, learnedScores, null);
+      for (const engine of ordered) {
+        const result = tryEngine(engine, capability, `${reasonPrefix} → ${engine}`);
+        if (result) return result;
+      }
+      return null;
     };
 
     // ── Strategy ─────────────────────────────────────────────────────────
@@ -509,17 +544,25 @@ export function routeTask(
       const hardLabel = `hard task (effort ${effort}, score ${score}, source=${item.source})`;
 
       // Hard coding → codex:gpt-5.5 preferred; else claude:opus
+      // M240: sort by learned ship-rate (tie-breaker only — hard constraint preserved)
       if (cap === 'coder' || item.source === 'todo' || item.source === 'lint' || item.source === 'self') {
-        const codex = tryEngine('codex', 'coder', `${hardLabel} → codex:gpt-5.5 (coding)`);
-        if (codex) return codex;
-        const opus = tryEngine('claude', 'reasoning', `${hardLabel} → claude:opus (fallback, coding)`);
-        if (opus) return opus;
+        const codingFrontier = tryEnginesOrdered(
+          ['codex', 'claude'] as EngineId[],
+          'coder',
+          `${hardLabel} (coding)`,
+        );
+        if (codingFrontier) return codingFrontier;
       }
 
       // Hard reasoning / security / architecture → opus or deepseek-r1
+      // M240: sort frontier reasoning engines by learned ship-rate
       if (cap === 'reasoning' || item.source === 'security' || item.source === 'issue') {
-        const opus = tryEngine('claude', 'reasoning', `${hardLabel} → claude:opus (reasoning)`);
-        if (opus) return opus;
+        const reasoningFrontier = tryEnginesOrdered(
+          ['claude', 'codex'] as EngineId[],
+          'reasoning',
+          `${hardLabel} (reasoning)`,
+        );
+        if (reasoningFrontier) return reasoningFrontier;
         const deepseek = tryEngine(
           'local-coder' as EngineId,
           'reasoning',
@@ -528,11 +571,14 @@ export function routeTask(
         if (deepseek) return deepseek;
       }
 
-      // Any hard item: try frontier in order
-      const claudeHard = tryEngine('claude', null, `${hardLabel} → claude (hard)`);
-      if (claudeHard) return claudeHard;
-      const codexHard = tryEngine('codex', null, `${hardLabel} → codex (hard)`);
-      if (codexHard) return codexHard;
+      // Any hard item: try frontier engines in learned-bias order
+      // M240: static order ['claude','codex'] reordered by ship-rate for this taskClass
+      const hardFrontier = tryEnginesOrdered(
+        ['claude', 'codex'] as EngineId[],
+        null,
+        `${hardLabel} (hard frontier)`,
+      );
+      if (hardFrontier) return hardFrontier;
 
       // M195: NIM as frontier ammo (e.g. Kimi K2) — only when 'nim' is
       // config-promoted to frontier (cfg.foundry.nim.tier='frontier'). Gated on
@@ -634,10 +680,13 @@ export function routeTask(
         if (local) return local;
       } else {
         // quality: pick strongest available
-        const claude = tryEngine('claude', cap, `${medLabel} → claude (quality policy)`);
-        if (claude) return claude;
-        const codex = tryEngine('codex', cap, `${medLabel} → codex (quality policy)`);
-        if (codex) return codex;
+        // M240: sort frontier candidates by learned ship-rate for this taskClass
+        const qualityFrontier = tryEnginesOrdered(
+          ['claude', 'codex'] as EngineId[],
+          cap,
+          `${medLabel} (quality policy)`,
+        );
+        if (qualityFrontier) return qualityFrontier;
         const local = tryEngine('local-coder' as EngineId, cap, `${medLabel} → local (quality policy)`);
         if (local) return local;
       }
@@ -656,11 +705,13 @@ export function routeTask(
       const nim = tryEngine('nim' as EngineId, null, `${bulkLabel} → nim fallback`);
       if (nim) return nim;
 
-      const frontier = tryEngine('claude', null, `${bulkLabel} → claude fallback (no local)`);
-      if (frontier) return frontier;
-
-      const codex = tryEngine('codex', null, `${bulkLabel} → codex fallback`);
-      if (codex) return codex;
+      // M240: sort frontier fallbacks by learned ship-rate
+      const bulkFrontier = tryEnginesOrdered(
+        ['claude', 'codex'] as EngineId[],
+        null,
+        `${bulkLabel} (frontier fallback, no local)`,
+      );
+      if (bulkFrontier) return bulkFrontier;
     }
 
     // 5. Last resort: builtin

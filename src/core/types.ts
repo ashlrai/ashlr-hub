@@ -292,6 +292,22 @@ export interface AshlrConfig {
      */
     routingPolicy?: 'balanced' | 'cost' | 'quality';
     /**
+     * M240: learned-routing — bias engine/model selection using historical
+     * judge outcomes from the decisions ledger.
+     *
+     * When true (DEFAULT), routeTask computes a per-(engine, model, taskClass)
+     * ship-rate from the decisions ledger and uses it as a tie-breaker: engines
+     * with a higher ship-rate for the current task's source-class are tried
+     * first. Requires a minimum sample floor (≥5 judged events per key) before
+     * any bias is applied — cold-start falls back to static policy unchanged.
+     * The bias is a tie-breaker only: hard constraints (capability, tier, quota,
+     * allowedBackends, budget) are NEVER bypassed.
+     *
+     * Set false for exact pre-M240 behavior (byte-identical static routing).
+     * Absent ⇒ true (on by default).
+     */
+    learnedRouting?: boolean;
+    /**
      * M166: model-racing + distillation dataset. DEFAULT DISABLED (doubles
      * inference cost per raced task — opt-in only for a sampled subset).
      *

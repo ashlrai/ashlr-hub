@@ -31,6 +31,7 @@
 import type { AshlrConfig, EngineId, EngineTier, RunEstimate, WorkItem } from '../types.js';
 import { routeBackend, type RouteDecision } from '../fleet/router.js';
 import type { CostForecast } from '../types.js';
+import { readDecisions } from '../fleet/decisions-ledger.js';
 
 // ---------------------------------------------------------------------------
 // M155: Re-export cascade routing API from router.ts for discoverability.
@@ -497,4 +498,214 @@ export function recoverWithinBudget(
     reason:
       `budget cascade: ${currentTier}→${targetTier} (${(usedFraction * 100).toFixed(0)}% of $${dailyBudget.toFixed(2)} used)`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// M240: Learned-bias engine scoring from decisions ledger
+// ---------------------------------------------------------------------------
+
+/**
+ * M240: The minimum number of judged decisions per (engine, model, taskClass)
+ * key required before any bias is applied. Below this threshold the score is
+ * returned as 0.5 (neutral) so cold-start falls back to static policy unchanged.
+ */
+export const LEARNED_ROUTING_MIN_SAMPLES = 5;
+
+/**
+ * M240: Recency half-life in milliseconds. Verdicts older than this are
+ * down-weighted exponentially. Default: 7 days.
+ */
+export const LEARNED_ROUTING_HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * M240: Positive verdict labels — a 'judged' entry with one of these verdicts
+ * counts as a "ship" (positive outcome) for the engine.
+ */
+const SHIP_VERDICTS = new Set(['ship', 'applied', 'approved']);
+
+/**
+ * M240: Negative verdict labels — a 'judged' entry with one of these verdicts
+ * counts as a "reject" (negative outcome).
+ */
+const REJECT_VERDICTS = new Set(['noise', 'review', 'harmful', 'decline', 'rejected']);
+
+/**
+ * M240: A single (engine, model, taskClass) score derived from historical judge
+ * outcomes. `score` is in [0, 1]: higher = more "ship" outcomes. `samples` is
+ * the total recency-weighted sample count (may be fractional).
+ */
+export interface EngineScore {
+  /** Composite engine key: `<engine>:<model>` (e.g. 'claude:opus'). */
+  key: string;
+  /** Engine id (e.g. 'claude'). */
+  engine: EngineId;
+  /** Model tag (e.g. 'opus'), or null when the entry has no model. */
+  model: string | null;
+  /**
+   * Learned ship-rate for this key over the given taskClass.
+   * Value is in [0, 1]; 0.5 means no data / cold-start (neutral).
+   * Higher values bias toward this engine/model; lower values bias away.
+   */
+  score: number;
+  /**
+   * Recency-weighted sample count. When < LEARNED_ROUTING_MIN_SAMPLES the
+   * score is 0.5 (neutral) regardless of raw ship/reject counts.
+   */
+  samples: number;
+}
+
+/**
+ * M240: All engine scores for a given taskClass, keyed by `<engine>:<model>`.
+ * Built once per routeTask call and passed into `engineScoreFor`.
+ */
+export type EngineScoreMap = Map<string, EngineScore>;
+
+/**
+ * M240: Build a score map for a given `taskClass` from the decisions ledger.
+ *
+ * Algorithm:
+ *  1. Read recent 'judged' decisions (sinceMs = now - 90 days max).
+ *  2. For each entry, extract engine + model + verdict + ts.
+ *  3. Derive taskClass from the proposalId prefix (`repoBasename:source:...`).
+ *  4. Apply recency weight: w = 2^(-(age_ms / HALF_LIFE_MS)).
+ *  5. Accumulate weighted ship/reject counts per (engine:model, taskClass) key.
+ *  6. ship_rate = weightedShip / (weightedShip + weightedReject); neutral 0.5
+ *     when totalWeight < LEARNED_ROUTING_MIN_SAMPLES.
+ *
+ * PURE: reads ledger files but never mutates them. Never throws.
+ * Cold-start (empty ledger or no matching entries) → returns an empty map
+ * (all calls to `engineScoreFor` return 0.5).
+ *
+ * @param taskClass   The WorkItem.source string (e.g. 'issue', 'todo', 'lint').
+ * @param nowMs       Injectable clock for deterministic tests (default Date.now()).
+ * @param sinceMs     Optional lower bound; default = now - 90 days.
+ */
+export function buildEngineScores(
+  taskClass: string,
+  nowMs?: number,
+  sinceMs?: number,
+): EngineScoreMap {
+  const map: EngineScoreMap = new Map();
+  try {
+    const now = nowMs ?? Date.now();
+    const windowMs = sinceMs ?? now - 90 * 24 * 60 * 60 * 1000;
+
+    const entries = readDecisions({ sinceMs: windowMs });
+
+    // Accumulators: key → { ship: number, reject: number } (recency-weighted)
+    const acc = new Map<string, { engine: EngineId; model: string | null; ship: number; reject: number }>();
+
+    for (const entry of entries) {
+      if (entry.action !== 'judged') continue;
+      if (!entry.engine) continue;
+
+      const verdict = entry.verdict ?? '';
+      const isShip = SHIP_VERDICTS.has(verdict);
+      const isReject = REJECT_VERDICTS.has(verdict);
+      if (!isShip && !isReject) continue;
+
+      // Derive taskClass from proposalId: format is `repoBasename:source:sha1`
+      // Fall back to '*' when the proposalId doesn't match the pattern.
+      const pid = entry.proposalId ?? '';
+      const parts = pid.split(':');
+      const entryTaskClass = parts.length >= 2 ? (parts[1] ?? '*') : '*';
+
+      // Only count entries that match the requested taskClass (or wildcard).
+      if (entryTaskClass !== taskClass && entryTaskClass !== '*') continue;
+
+      const engine = entry.engine as EngineId;
+      const model = entry.model ?? null;
+      const key = model ? `${engine}:${model}` : engine;
+
+      // Recency weight: exponential decay
+      const ageMs = now - Date.parse(entry.ts);
+      const weight = Math.pow(2, -(Math.max(0, ageMs) / LEARNED_ROUTING_HALF_LIFE_MS));
+
+      let slot = acc.get(key);
+      if (!slot) {
+        slot = { engine, model, ship: 0, reject: 0 };
+        acc.set(key, slot);
+      }
+      if (isShip) slot.ship += weight;
+      else slot.reject += weight;
+    }
+
+    // Convert accumulators to EngineScore
+    for (const [key, { engine, model, ship, reject }] of acc) {
+      const total = ship + reject;
+      const score = total >= LEARNED_ROUTING_MIN_SAMPLES
+        ? ship / total
+        : 0.5; // neutral — not enough data
+      map.set(key, { key, engine, model, score, samples: total });
+    }
+  } catch {
+    // Never throw — cold-start fallback is an empty map.
+  }
+  return map;
+}
+
+/**
+ * M240: Look up the learned score for a given (engine, model) pair against a
+ * pre-built EngineScoreMap. Returns 0.5 (neutral) when:
+ *  - The map is empty (cold-start / learnedRouting disabled).
+ *  - The key is not present (no history for this engine+model+taskClass).
+ *  - The sample count is below LEARNED_ROUTING_MIN_SAMPLES.
+ *
+ * A score > 0.5 biases toward this engine (more ships than rejects).
+ * A score < 0.5 biases away (more rejects than ships).
+ *
+ * @param scores   The map from buildEngineScores().
+ * @param engine   The engine id to look up.
+ * @param model    The model tag (e.g. 'opus'); or null to look up engine-only.
+ */
+export function engineScoreFor(
+  scores: EngineScoreMap,
+  engine: EngineId,
+  model: string | null,
+): number {
+  if (scores.size === 0) return 0.5;
+  // Try exact (engine:model) key first, then engine-only fallback.
+  const exactKey = model ? `${engine}:${model}` : String(engine);
+  const exact = scores.get(exactKey);
+  if (exact !== undefined) return exact.score;
+  // Engine-only fallback: aggregate all models for this engine
+  let totalShip = 0;
+  let totalReject = 0;
+  let found = false;
+  for (const s of scores.values()) {
+    if (s.engine !== engine) continue;
+    found = true;
+    // Recover raw ship/reject from score × samples
+    totalShip += s.score * s.samples;
+    totalReject += (1 - s.score) * s.samples;
+  }
+  if (!found) return 0.5;
+  const total = totalShip + totalReject;
+  if (total < LEARNED_ROUTING_MIN_SAMPLES) return 0.5;
+  return totalShip / total;
+}
+
+/**
+ * M240: Sort a list of engine ids by their learned score for the given task,
+ * highest score first. Engines with score < 0.5 are placed after those with
+ * score ≥ 0.5 (neutral or better). Ties are stable (original order preserved).
+ *
+ * This is used by routeTask to reorder the tryEngine candidate list before
+ * attempting each engine — the engine with the best history is tried first.
+ * Hard constraints (capability/tier/quota/allowedBackends) are unchanged.
+ *
+ * @param engines  Ordered list of engine ids (existing static policy order).
+ * @param scores   Score map from buildEngineScores().
+ * @param model    Optional model hint for exact-key lookup (may be null).
+ */
+export function sortEnginesByScore(
+  engines: readonly EngineId[],
+  scores: EngineScoreMap,
+  model: string | null = null,
+): EngineId[] {
+  if (scores.size === 0) return [...engines];
+  // Stable sort: engines with higher score come first.
+  const withScores = engines.map((e) => ({ e, s: engineScoreFor(scores, e, model) }));
+  withScores.sort((a, b) => b.s - a.s);
+  return withScores.map((x) => x.e);
 }
