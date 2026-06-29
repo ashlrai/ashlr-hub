@@ -620,7 +620,14 @@ async function handleGlob(
   if (pattern === '') throw new Error('glob: "pattern" is required');
 
   const cwdArg = typeof args['cwd'] === 'string' && args['cwd'] !== '' ? args['cwd'] : '.';
-  const base = resolveInside(eng.workspaceRoot, cwdArg);
+  const resolvedCwd = resolveInside(eng.workspaceRoot, cwdArg);
+  // M225 FIX: walkGlob requires a directory. Normalise a file path to its parent.
+  let base = resolvedCwd;
+  try {
+    if (existsSync(resolvedCwd) && statSync(resolvedCwd).isFile()) {
+      base = dirname(resolvedCwd);
+    }
+  } catch { /* stat failure — keep base as-is */ }
 
   const matches = walkGlob(base, pattern);
   return {
@@ -642,7 +649,17 @@ async function handleGrep(
   if (pattern === '') throw new Error('grep: "pattern" is required');
 
   const pathArg = typeof args['path'] === 'string' && args['path'] !== '' ? args['path'] : '.';
-  const base = resolveInside(eng.workspaceRoot, pathArg);
+  const resolvedPath = resolveInside(eng.workspaceRoot, pathArg);
+  // M225 FIX: git -C and the JS walk both require a directory. When the model
+  // passes a FILE path (e.g. "src/core/goals/store.ts"), resolveInside returns
+  // the file's absolute path — which git rejects with "Not a directory". Normalise
+  // to the containing directory so grep still searches the right subtree.
+  let base = resolvedPath;
+  try {
+    if (existsSync(resolvedPath) && statSync(resolvedPath).isFile()) {
+      base = dirname(resolvedPath);
+    }
+  } catch { /* stat failure — keep base as-is, git/walk will surface the error */ }
   const globFilter = typeof args['glob'] === 'string' ? args['glob'] : undefined;
 
   // --- git grep (preferred; arg arrays, NO shell) ---
