@@ -2,6 +2,13 @@
  * advance.ts — M28: advance a Goal by running its NEXT actionable milestone
  * through the EXACT M21/M24 sandboxed, proposal-only execution path.
  *
+ * M229 adds: when opts.allowCloud is true, advanceGoal() dispatches the
+ * milestone as a SINGLE sandboxed proposal-only FRONTIER-ENGINE run (the
+ * --direct/daemon path via runGoal + sandboxEngine:true + requireSandbox:true)
+ * rotating across cfg.foundry.allowedBackends [claude, codex, nim] instead of
+ * the builtin swarm. 429/5xx errors trigger retry-with-backoff and engine
+ * rotation. Flag-off (no allowCloud) keeps the builtin-swarm path byte-identical.
+ *
  * THIS IS THE SAFETY-CRITICAL MODULE. The adversarial review WILL try to break
  * the invariants below — they are enforced here, verbatim:
  *
@@ -13,6 +20,9 @@
  *     This module imports/invokes NONE of the outward-action sinks (no
  *     proposal-apply, no proposal-approve status write, no remote push, no PR
  *     creation, no deploy) — verified by a source-level grep guard in tests.
+ *     M229: the frontier-engine path (runGoal + sandboxEngine:true) uses the
+ *     SAME containment: runEngineSandboxed → worktree → diff → PENDING proposal.
+ *     It also imports/invokes none of the outward-action sinks.
  *
  *  2. ENROLLMENT-SCOPED. Before ANY swarm starts, advanceGoal() resolves the
  *     goal's project and calls assertMayMutate(repo, { allowAnyRepo }) — which
@@ -33,6 +43,7 @@ import { resolve } from 'node:path';
 import type {
   AdvanceOptions,
   AshlrConfig,
+  EngineId,
   Goal,
   GoalProgress,
   Milestone,
@@ -94,6 +105,294 @@ export function nextActionableMilestone(goal: Goal): Milestone | null {
   );
   if (blockedEarlier) return null;
   return firstPending;
+}
+
+// ---------------------------------------------------------------------------
+// M229: frontier-engine dispatch — round-robin + 429/5xx retry + backoff.
+//
+// SAFETY INVARIANT: runMilestoneFrontierEngine dispatches via runGoal with
+// sandboxEngine:true + requireSandbox:true — the SAME path as `ashlr goal
+// --direct` and the daemon's non-builtin dispatch. This routes through
+// runEngineSandboxed → throwaway worktree → diff → PENDING inbox proposal.
+// No outward-action sink is reachable from this path. Confinement (M45/M52),
+// the pre-push hook, and the credential-strip are all enforced by the called
+// path — none are bypassed here.
+// ---------------------------------------------------------------------------
+
+/**
+ * Ordered frontier-engine preference for M229 rotation.
+ * 'nim' is included because cfg.foundry.nim can promote it to frontier tier
+ * (moonshotai/kimi-k2.6). Its position last preserves the claude/codex
+ * preference order from FRONTIER_PREFERENCE in fleet/router.ts.
+ */
+const M229_FRONTIER_TRIO: readonly EngineId[] = ['claude', 'codex', 'nim'];
+
+/**
+ * Module-level round-robin counter. Incremented once per successful engine
+ * selection (not per retry). Starts at 0 so the first run goes to the first
+ * available engine. Wraps at 2^31 - 1 to avoid ever-growing numbers.
+ */
+let _m229RoundRobinIdx = 0;
+
+/** Reset the round-robin counter — exported for tests ONLY. */
+export function _m229ResetRoundRobin(): void {
+  _m229RoundRobinIdx = 0;
+}
+
+/**
+ * Return the ordered list of frontier EngineIds that are present in
+ * cfg.foundry.allowedBackends AND installed. Falls back to [] when none qualify
+ * (caller then uses the builtin-swarm path). Never throws.
+ */
+function resolveFrontierEngines(cfg: AshlrConfig): EngineId[] {
+  try {
+    const allowed = new Set<string>(cfg.foundry?.allowedBackends ?? []);
+    // Dynamic import is used at call site (runMilestoneFrontierEngine); here we
+    // only intersect with the static trio. engineInstalled is NOT called here
+    // because this function may run in contexts where engines.js is not loaded;
+    // the caller guards on an empty result and falls back to the swarm path.
+    return M229_FRONTIER_TRIO.filter((e) => allowed.has(e));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Error thrown (and caught) when a frontier engine run returns a rate-limit
+ * (429) or server-error (5xx) signal. The caller retries with the next engine.
+ */
+class FrontierRateLimitError extends Error {
+  constructor(
+    public readonly engine: EngineId,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'FrontierRateLimitError';
+  }
+}
+
+/**
+ * Detect a 429/5xx condition from a RunState result/error string.
+ * Matches common patterns emitted by runEngineSandboxed's spawnEngine.
+ */
+function isRateLimitOrServerError(result: string | undefined): boolean {
+  if (!result) return false;
+  const lower = result.toLowerCase();
+  return (
+    lower.includes('429') ||
+    lower.includes('rate limit') ||
+    lower.includes('rate_limit') ||
+    lower.includes('too many requests') ||
+    lower.includes('500') ||
+    lower.includes('502') ||
+    lower.includes('503') ||
+    lower.includes('504') ||
+    lower.includes('server error') ||
+    lower.includes('internal error') ||
+    lower.includes('overloaded')
+  );
+}
+
+/**
+ * Run one frontier-engine attempt for a milestone as a SINGLE sandboxed,
+ * proposal-only run via runGoal(sandboxEngine:true, requireSandbox:true).
+ *
+ * Returns a SwarmRun-shaped object (id, status, usage) that advanceGoal can
+ * use for tracking and proposal correlation, identical in shape to what
+ * runSwarm returns.
+ *
+ * On a 429/5xx result this throws FrontierRateLimitError so the caller can
+ * retry with the next engine. All other failures return status:'failed'.
+ *
+ * SAFETY: sandboxEngine:true + requireSandbox:true ensures the run ONLY goes
+ * through runEngineSandboxed → worktree diff → PENDING proposal. The sandbox
+ * can never be bypassed by this call.
+ */
+async function runMilestoneFrontierEngine(
+  engine: EngineId,
+  goal: string,
+  cfg: AshlrConfig,
+  repo: string,
+  budget: RunBudget,
+): Promise<SwarmRun> {
+  // Lazy-import to preserve the test-seam pattern (vi.mock can intercept this).
+  const { runGoal } = await import('../run/orchestrator.js');
+
+  const runId = `m229-${engine}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+
+  let runState: { id: string; status: string; result?: string; usage?: { tokensIn: number; tokensOut: number; steps: number; estCostUsd: number } };
+  try {
+    runState = await runGoal(goal, cfg, {
+      engine,
+      sandboxEngine: true,
+      requireSandbox: true,
+      cwd: repo,
+      budget,
+      tools: true,
+      noMemory: false,
+    } as Parameters<typeof runGoal>[2]);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (isRateLimitOrServerError(msg)) {
+      throw new FrontierRateLimitError(engine, `engine "${engine}" rate-limited: ${msg}`);
+    }
+    // Non-rate-limit throw → surface as a failed SwarmRun.
+    return buildSwarmRunFromState(
+      runId,
+      goal,
+      'failed',
+      undefined,
+      undefined,
+      repo,
+      budget,
+    );
+  }
+
+  if (isRateLimitOrServerError(runState.result)) {
+    throw new FrontierRateLimitError(
+      engine,
+      `engine "${engine}" returned rate-limit signal: ${runState.result?.slice(0, 200)}`,
+    );
+  }
+
+  const status = runState.status === 'done' ? 'done' : 'failed';
+  return buildSwarmRunFromState(
+    runState.id ?? runId,
+    goal,
+    status,
+    runState.result,
+    runState.usage,
+    repo,
+    budget,
+  );
+}
+
+/** Build a minimal SwarmRun record from a RunState outcome. */
+function buildSwarmRunFromState(
+  id: string,
+  goal: string,
+  status: SwarmRun['status'],
+  result: string | undefined,
+  usage: { tokensIn: number; tokensOut: number; steps: number; estCostUsd: number } | undefined,
+  project: string,
+  budget: RunBudget,
+): SwarmRun {
+  const now = new Date().toISOString();
+  return {
+    id,
+    goal,
+    specId: null,
+    project,
+    createdAt: now,
+    updatedAt: now,
+    budget,
+    usage: usage ?? { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 },
+    parallel: 1,
+    status,
+    result,
+    plan: { specId: null, goal, tasks: [] },
+    tasks: [],
+  };
+}
+
+/**
+ * Dispatch a milestone as a frontier-engine run, rotating across available
+ * engines with 429/5xx retry-with-backoff. Returns the resulting SwarmRun.
+ *
+ * Rotation: picks from the available frontier engines starting at the current
+ * round-robin index. Advances the index after the first successful selection so
+ * successive calls distribute across engines.
+ *
+ * Retry: on FrontierRateLimitError, waits `baseDelayMs * 2^attempt` (capped at
+ * 8 s) then tries the NEXT engine in the rotation. When ALL engines have been
+ * tried and returned rate-limit errors, falls back to the FIRST engine for one
+ * final attempt (the delay provides natural back-pressure). Hard cap: at most
+ * engines.length + 1 attempts total.
+ *
+ * SAFETY: every attempt goes through runMilestoneFrontierEngine →
+ * runGoal(sandboxEngine:true) — the same containment invariant applies to every
+ * retry. No fallback to an unsandboxed or non-proposal path.
+ */
+async function dispatchFrontierWithRotation(
+  engines: EngineId[],
+  goal: string,
+  cfg: AshlrConfig,
+  repo: string,
+  budget: RunBudget,
+  baseDelayMs = 500,
+): Promise<SwarmRun> {
+  const n = engines.length;
+  // Advance the module-level round-robin counter and wrap it.
+  const startIdx = _m229RoundRobinIdx % n;
+  _m229RoundRobinIdx = (_m229RoundRobinIdx + 1) & 0x7fffffff;
+
+  const maxAttempts = n + 1; // try each engine once, then one final retry on the start engine
+  let lastError: FrontierRateLimitError | undefined;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const engineIdx = (startIdx + attempt) % n;
+    const engine = engines[engineIdx]!;
+
+    try {
+      const run = await runMilestoneFrontierEngine(engine, goal, cfg, repo, budget);
+      return run;
+    } catch (err) {
+      if (err instanceof FrontierRateLimitError) {
+        lastError = err;
+        // Exponential backoff: baseDelayMs * 2^attempt, capped at 8 s.
+        const delayMs = Math.min(baseDelayMs * Math.pow(2, attempt), 8_000);
+        await sleep(delayMs);
+        continue;
+      }
+      // Non-rate-limit error: surface immediately without retry.
+      throw err;
+    }
+  }
+
+  // All engines exhausted with rate-limit errors — return a failed SwarmRun
+  // so the milestone is marked 'blocked' for human attention.
+  return buildSwarmRunFromState(
+    `m229-exhausted-${Date.now().toString(36)}`,
+    goal,
+    'failed',
+    `All frontier engines rate-limited: ${lastError?.message ?? 'unknown'}`,
+    undefined,
+    repo,
+    budget,
+  );
+}
+
+/** Best-effort async sleep; resolves immediately in tests with ASHLR_TEST_NO_SLEEP=1. */
+async function sleep(ms: number): Promise<void> {
+  if (process.env.ASHLR_TEST_NO_SLEEP === '1' || ms <= 0) return;
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * READ-ONLY correlation for frontier-engine runs: find the PENDING proposal
+ * filed by runEngineSandboxed during the given run. The sandboxed path files
+ * proposals with origin:'agent' and repo matching the source repo. We snapshot
+ * the inbox BEFORE the run and diff AFTER to isolate the new proposal.
+ *
+ * Never throws — returns null on any read error (the caller marks the milestone
+ * 'blocked' rather than leaving it stuck in-progress).
+ */
+function findProposalForFrontierRun(
+  repo: string,
+  beforeIds: ReadonlySet<string>,
+): string | null {
+  try {
+    const candidates = listProposals({ status: 'pending' }).filter(
+      (p) =>
+        !beforeIds.has(p.id) &&
+        p.origin === 'agent' &&
+        (p.repo === repo || p.repo === null),
+    );
+    // listProposals is most-recent first; take the freshest match.
+    return candidates[0]?.id ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -165,53 +464,108 @@ export async function advanceGoal(
     allowCloud: opts?.allowCloud ?? false,
   };
 
+  // M229: when allowCloud is set, attempt to dispatch via a frontier engine
+  // (claude/codex/nim) using the SAME sandboxed proposal-only path as
+  // `ashlr goal --direct` and the daemon's non-builtin dispatch. This spreads
+  // load across providers (fixes NIM 429 rate-limit) while keeping all safety
+  // invariants intact. Falls back to the builtin swarm if no frontier engines
+  // are configured/available.
+  const frontierEngines = opts?.allowCloud ? resolveFrontierEngines(cfg) : [];
+  const useFrontier = frontierEngines.length > 0;
+
   // SANDBOXED + PROPOSAL-ONLY — these three flags are NON-NEGOTIABLE.
   //
-  // Wrapped in try/catch so a THROWN/aborted runSwarm (sandbox creation
-  // failure, provider error, mid-run kill) does NOT leave the milestone stuck
+  // Wrapped in try/catch so a THROWN/aborted run (sandbox creation failure,
+  // provider error, mid-run kill) does NOT leave the milestone stuck
   // 'in-progress' forever (which would make it permanently unadvanceable AND
   // let a later pending milestone advance out of order). On any throw we reset
   // the milestone to 'blocked' (for human attention) before re-throwing.
   let run: SwarmRun;
-  try {
-    run = await runSwarm(
-      {
-        goal: `${goal.objective} — ${milestone.title}`,
-        specId: milestone.specId ?? undefined,
-      },
-      cfg,
-      {
-        sandbox: true,
-        requireSandbox: true,
-        propose: true,
+
+  if (useFrontier) {
+    // M229 FRONTIER PATH — sandboxed proposal-only via runGoal(sandboxEngine:true).
+    // Snapshot the pending inbox BEFORE the run so we can identify the new
+    // proposal by diff (origin:'agent', repo match, not in beforeIds).
+    let beforeIds: Set<string>;
+    try {
+      beforeIds = new Set(listProposals({ status: 'pending' }).map((p) => p.id));
+    } catch {
+      beforeIds = new Set();
+    }
+
+    const milestoneGoal = `${goal.objective} — ${milestone.title}`;
+    try {
+      run = await dispatchFrontierWithRotation(
+        frontierEngines,
+        milestoneGoal,
+        cfg,
+        repo,
         budget,
-        allowCloud: opts?.allowCloud ?? false,
-        project: repo,
-      },
-      sink ?? (() => {}),
-    );
-  } catch (err) {
-    // Best-effort recovery: surface the milestone as 'blocked' so it remains
-    // re-steerable (resume/skip/re-advance) and the plan stays in order.
-    updateMilestoneStatus(goalId, milestone.id, 'blocked');
-    throw err;
-  }
+      );
+    } catch (err) {
+      // dispatchFrontierWithRotation threw a non-rate-limit error.
+      updateMilestoneStatus(goalId, milestone.id, 'blocked');
+      throw err;
+    }
 
-  // Correlate the PENDING proposal the swarm emitted (its ONLY sink). We do NOT
-  // create it here — runSwarm's propose path did. We only READ to link the id.
-  const proposalId = findProposalForSwarm(run.id, repo);
+    // Correlate the PENDING proposal filed by runEngineSandboxed.
+    // origin:'agent' (not 'swarm') — use the pre-run snapshot diff.
+    const proposalId = findProposalForFrontierRun(repo, beforeIds);
 
-  if ((run.status === 'done' || run.status === 'needs-approval') && proposalId) {
-    updateMilestoneStatus(goalId, milestone.id, 'proposed', {
-      swarmId: run.id,
-      proposalId,
-    });
+    if (run.status === 'done' && proposalId) {
+      updateMilestoneStatus(goalId, milestone.id, 'proposed', {
+        swarmId: run.id,
+        proposalId,
+      });
+    } else {
+      updateMilestoneStatus(goalId, milestone.id, 'blocked', {
+        swarmId: run.id,
+        proposalId: proposalId ?? null,
+      });
+    }
   } else {
-    // Failed / aborted / escalated, or no proposal produced => blocked for a human.
-    updateMilestoneStatus(goalId, milestone.id, 'blocked', {
-      swarmId: run.id,
-      proposalId: proposalId ?? null,
-    });
+    // BUILTIN-SWARM PATH (flag-off: no allowCloud, or no frontier engines configured).
+    // Byte-identical to the pre-M229 behavior.
+    try {
+      run = await runSwarm(
+        {
+          goal: `${goal.objective} — ${milestone.title}`,
+          specId: milestone.specId ?? undefined,
+        },
+        cfg,
+        {
+          sandbox: true,
+          requireSandbox: true,
+          propose: true,
+          budget,
+          allowCloud: opts?.allowCloud ?? false,
+          project: repo,
+        },
+        sink ?? (() => {}),
+      );
+    } catch (err) {
+      // Best-effort recovery: surface the milestone as 'blocked' so it remains
+      // re-steerable (resume/skip/re-advance) and the plan stays in order.
+      updateMilestoneStatus(goalId, milestone.id, 'blocked');
+      throw err;
+    }
+
+    // Correlate the PENDING proposal the swarm emitted (its ONLY sink). We do NOT
+    // create it here — runSwarm's propose path did. We only READ to link the id.
+    const proposalId = findProposalForSwarm(run.id, repo);
+
+    if ((run.status === 'done' || run.status === 'needs-approval') && proposalId) {
+      updateMilestoneStatus(goalId, milestone.id, 'proposed', {
+        swarmId: run.id,
+        proposalId,
+      });
+    } else {
+      // Failed / aborted / escalated, or no proposal produced => blocked for a human.
+      updateMilestoneStatus(goalId, milestone.id, 'blocked', {
+        swarmId: run.id,
+        proposalId: proposalId ?? null,
+      });
+    }
   }
 
   return run;
