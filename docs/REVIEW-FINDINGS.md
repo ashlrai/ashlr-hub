@@ -85,6 +85,8 @@ ashlr-workbench: plaintext LLM key in mounted `settings.json`; Ollama per-model 
 
 **All critical + all security findings are fixed**; **8 repos pushed green**, phantom fix-ready locally but push-blocked (secret-scanning — see below).
 
+**MEDIUM/LOW cleanup pass also landed** (6 repos pushed, build-verified, tests updated to match corrected behavior): binshield (SSRF 0.x/8 + CGNAT 100.64/10 + `scan_submitted`→`api_request`, `606a7dc`); webfetch (metaQuality 0.4 + redirect-target, `656d37f`); core-efficiency (bidirectional-substring match, `ba9d852`); stack (cycle-path dedup + Stripe scope name, `5a2462a`); ashlr-pulse (flat-trend→pass + zero-mean trend guard); ashlr-md (memory newest-first). Remaining MEDIUM/LOW are on phantom's blocked branch (rotation drift, atomic jsonl write, pubkey-trust) or were left as lower-value (binshield install-scripts, core-eff process-global counter / UCB NaN, ashlr-md `ct_eq` comment, workbench settings-key / ollama-subshell) — documented above for a follow-up.
+
 ## ⚠️ Needs Mason's decision / attention
 
 1. **phantom-secrets push blocked by GitHub secret-scanning.** A **Stripe TEST key** committed earlier in the night (`crates/phantom-proxy/tests/e2e_proxy_integration_test.rs:773`, commit `55472f9`) trips push protection and blocks the whole branch — including the ready TOCTOU/audit fix `88ef3e5`. The fix agent correctly refused to rewrite history or unblock the secret. **Action:** allow it via the GitHub unblock URL (it's a test key) or scrub the key from `55472f9`, then the branch (incl. the security fixes) pushes. I did **not** touch it — unblocking a secret is your call.
