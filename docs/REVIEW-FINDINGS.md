@@ -81,9 +81,9 @@ ashlr-workbench: plaintext LLM key in mounted `settings.json`; Ollama per-model 
 | ashlr-pulse | **critical UUID-crash** + webhook-secret + distinct-counts | ✅ pushed | `44c7293` |
 | ashlr-md | OT op-log persistence | ✅ pushed | `1a55c49` |
 | phantom-secrets | **critical TOCTOU** + audit data-loss + GCP 400 (cargo: 438 pass) | ⚠️ local, **push BLOCKED** | `88ef3e5` |
-| ashlr-workbench | EXIT-trap overwrite | ⏳ re-running | — |
+| ashlr-workbench | EXIT-trap overwrite (3 scripts) — bash -n clean, 74/75 bats | ✅ pushed | `729bbb7` |
 
-**All critical + all security findings are fixed**; 7 repos pushed green, phantom fix-ready locally, workbench finishing.
+**All critical + all security findings are fixed**; **8 repos pushed green**, phantom fix-ready locally but push-blocked (secret-scanning — see below).
 
 ## ⚠️ Needs Mason's decision / attention
 
