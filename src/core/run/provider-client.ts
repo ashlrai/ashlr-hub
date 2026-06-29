@@ -171,7 +171,7 @@ function pickModel(models: string[], explicit?: string): string {
 // complex milestone routinely exceeds 30s; the old ceiling aborted legit cloud
 // calls → degraded local fallback plans. Local calls still return fast, so the
 // higher ceiling only lets slow frontier calls finish (env override below).
-const FETCH_TIMEOUT_MS = Number(process.env.ASHLR_FETCH_TIMEOUT_MS) || 120_000;
+const FETCH_TIMEOUT_MS = Number(process.env.ASHLR_FETCH_TIMEOUT_MS) || 300_000;
 
 async function fetchWithTimeout(
   url: string,
