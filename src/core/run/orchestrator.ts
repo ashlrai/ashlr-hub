@@ -1409,7 +1409,21 @@ export async function runGoal(
   const parallel = Math.max(1, opts.parallel ?? DEFAULT_PARALLEL);
 
   // -- Resolve provider client -------------------------------------------------
-  const client = await getActiveClient(cfg, { allowCloud });
+  // M226b: when cloud is allowed, plan + synthesise with the FRONTIER strategist
+  // (cfg.foundry.strategistModel, e.g. claude-opus-4-8) instead of the default
+  // local client. getActiveClient only PERMITS cloud via allowCloud; passing the
+  // strategist model SELECTS it — otherwise the planner/synthesis calls hit local
+  // Ollama, time out, and fall back to degraded plans (blocking goal advancement).
+  // Flag-off (no allowCloud) keeps the prior default client byte-identical.
+  const strategistModel = (cfg.foundry as Record<string, unknown> | undefined)?.[
+    'strategistModel'
+  ] as string | undefined;
+  const client = await getActiveClient(
+    cfg,
+    allowCloud && strategistModel
+      ? { allowCloud, model: strategistModel }
+      : { allowCloud },
+  );
 
   // -- Load or create RunState -------------------------------------------------
   let state: RunState;
