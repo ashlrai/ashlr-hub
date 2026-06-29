@@ -48,6 +48,8 @@
 - **Wave 4 ✅ (mixed):** core-efficiency atomic-cache + timeout-leak fixes (9bdc997, fixed the 3 wave-3-found bugs) · ashlr-hub M202 cascade+browser-verify edge tests (b5d67a4, 44) · morphkit/binshield build-recovery (cli-common file-subpath exports fix). prompt-trackr + ashlr-md test agents AUTO-REVERTED (test-harness setup issues — bound worked, deferred).
 - **Wave 5 (in flight):** router nim-type-smell fix (ashlr-hub) · binshield Rizin graceful-fallback · webfetch rate-limiter observability · stack healthcheck() completion. (Additive/low-risk.)
 - RUN SUMMARY (so far): ~18 improvements shipped across the ecosystem (binshield SECURITY fix, 2 critical ashlr-hub test-coverage gaps closed [orchestrator M199 + daemon M201], robustness fixes, ac smarter-surgical, structured federation errors, bug-finds-and-fixes). 2 self-inflicted regressions (red master, exports) — both caught + fully recovered. Several agent auto-reverts (bound working). Master green throughout (after recovery).
+- **Wave 5:** router nim-type fix (79fe5fb) + binshield Rizin fallback (1e820d5) SHIPPED; webfetch rate-limiter + stack healthcheck landing.
+- **Wave 6 (in flight):** phantom init-UX retry · ashlrcode file-tools refactor · ashlr-pulse test harness · prompt-trackr scoring tests · ashlr-md MCP tests · ashlr-hub loadConfig cfg.daemon fix (careful).
 - (next waves appended here as they ship)
 
 ## Loop guardrails
