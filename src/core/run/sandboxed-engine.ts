@@ -23,7 +23,8 @@
  * Default builtin-only behavior is unaffected.
  */
 
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -278,6 +279,68 @@ export function buildContainedEnv(cfg: AshlrConfig, hooksDir: string): NodeJS.Pr
   return env;
 }
 
+// ---------------------------------------------------------------------------
+// M248: ashlr-plugin MCP config injection
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the ashlr binary path (used as the MCP server command).
+ * Returns the absolute path when found on PATH, or null when absent.
+ * Pure, best-effort — never throws.
+ */
+function resolveAshlrBin(): string | null {
+  try {
+    const probe = process.platform === 'win32' ? 'where' : 'which';
+    const out = execFileSync(probe, ['ashlr'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      .trim()
+      .split('\n')[0]
+      ?.trim();
+    return out && out.length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write a minimal `.mcp.json` into the worktree so the fleet's claude instance
+ * always has ashlr__ MCP tools regardless of the user's global settings.
+ *
+ * GUARD: only writes when `ashlr` is on PATH — CI/CD environments without the
+ * plugin are completely unaffected (returns null → caller skips --mcp-config).
+ *
+ * Returns the path to the written file, or null when the plugin is absent.
+ * Never throws — any failure is silently suppressed so it never breaks dispatch.
+ */
+export function writeMcpConfigIfAvailable(worktreePath: string): string | null {
+  try {
+    const ashlrBin = resolveAshlrBin();
+    if (!ashlrBin) return null;
+
+    const mcpConfigPath = join(worktreePath, '.mcp.json');
+    // Only write if the worktree path exists (sanity check).
+    if (!existsSync(worktreePath)) return null;
+
+    const mcpConfig = {
+      mcpServers: {
+        ashlr: {
+          command: ashlrBin,
+          args: ['mcp'],
+          env: {
+            ASHLR_MCP_HOST: 'ashlr-fleet-engine',
+            ASHLR_HOOK_MODE: 'redirect',
+            ASHLR_SESSION_LOG: '0',
+          },
+        },
+      },
+    };
+    writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
+    return mcpConfigPath;
+  } catch {
+    // Best-effort: never fail the run if MCP config can't be written.
+    return null;
+  }
+}
+
 /** Create a temp hooks dir containing a pre-push blocker. Returns its path. */
 function installPrePushBlocker(): string {
   const hooksDir = mkdtempSync(join(tmpdir(), 'ashlr-hooks-'));
@@ -343,7 +406,20 @@ export async function runEngineSandboxed(
 
   const hooksDir = installPrePushBlocker();
   const env = buildContainedEnv(cfg, hooksDir);
+
+  // M248: inject CLAUDE_SESSION_ID so fleet savings land under nameable
+  // ashlr-fleet-* keys in ~/.ashlr/stats.json — visible in ashlr__savings.
+  env.CLAUDE_SESSION_ID = `ashlr-fleet-${id}`;
+
   let proposalId: string | undefined;
+
+  // M248: write .mcp.json to worktree (guarded: only when ashlr is on PATH).
+  // fleetMcp defaults to true (on) — set cfg.foundry.fleetMcp = false to opt out.
+  const fleetMcpEnabled = (cfg.foundry as Record<string, unknown> | undefined)?.['fleetMcp'] !== false;
+  let mcpConfigPath: string | null = null;
+  if (fleetMcpEnabled) {
+    mcpConfigPath = writeMcpConfigIfAvailable(sb.worktreePath);
+  }
 
   // M154: prepend repo-map + localization context to goal when flags are ON.
   // Flag-OFF → contextPrefix is '' → goalWithContext === goal (byte-identical).
@@ -351,11 +427,18 @@ export async function runEngineSandboxed(
   const goalWithContext = contextPrefix ? contextPrefix + goal : goal;
 
   try {
-    const cmd = buildEngineCommand(engine, goalWithContext, cfg, {
+    let cmd = buildEngineCommand(engine, goalWithContext, cfg, {
       cwd: sb.worktreePath,
       model,
       autonomous: true,
     });
+
+    // M248: inject --mcp-config into the claude argv when .mcp.json was written.
+    // Codex does not support --mcp-config (no equivalent flag) — skip silently.
+    // Any other cli-agent: skip (safe no-op fallback).
+    if (cmd && mcpConfigPath && engine === 'claude') {
+      cmd = { ...cmd, args: [...cmd.args, '--mcp-config', mcpConfigPath] };
+    }
     if (!cmd) {
       return { state: mk({ status: 'failed', result: `no command for engine "${engine}"` }) };
     }

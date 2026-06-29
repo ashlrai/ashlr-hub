@@ -194,6 +194,17 @@ export interface AshlrConfig {
       tier?: EngineTier;
     };
     /**
+     * M248: guarantee fleet sandboxed engines inherit ashlr-plugin MCP tools.
+     * When true (DEFAULT), writes a minimal `.mcp.json` into the ephemeral
+     * worktree before spawning and adds `--mcp-config <path>` to the claude
+     * argv so ashlr__ compression tools are always available to fleet engines.
+     * Guarded by `which ashlr` — if the plugin binary is absent (e.g. CI),
+     * this flag has zero effect and the run proceeds exactly as before.
+     * Set false to disable for debugging or environments where the plugin
+     * conflicts. Absent ⇒ true (on).
+     */
+    fleetMcp?: boolean;
+    /**
      * M124: backlog value filter. Items with value < minItemValue are dropped
      * before the daemon selects work. Default 2 (drops value-1 trivia).
      * Set to 1 to disable the gate; set to 3+ to raise the bar further.
