@@ -22,6 +22,22 @@ import type { AshlrConfig, Goal } from '../types.js';
 import { loadGoal, saveGoal } from '../goals/store.js';
 
 // ---------------------------------------------------------------------------
+// Observability — M223: structured log so daemon log shows planner activity.
+// Mirrors the M197 logging pattern used by manager.ts / automerge-pass.ts.
+// ---------------------------------------------------------------------------
+
+function plannerLog(level: 'info' | 'warn', msg: string, extra?: Record<string, unknown>): void {
+  const line = extra
+    ? `[ashlr] goal-planner:${level} ${msg} ${JSON.stringify(extra)}`
+    : `[ashlr] goal-planner:${level} ${msg}`;
+  if (level === 'warn') {
+    console.warn(line);
+  } else {
+    console.log(line);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // In-process expansion cache — prevents repeated LLM calls within one tick.
 // ---------------------------------------------------------------------------
 
@@ -141,21 +157,31 @@ export async function expandGoalToMilestones(
 ): Promise<Goal> {
   // Guard 1: flag-off → no-op (byte-identical to current behavior)
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
-  if (foundry?.['goalPlanning'] === false) return goal;
+  if (foundry?.['goalPlanning'] === false) {
+    plannerLog('info', 'skip: goalPlanning flag is off', { goalId: goal.id });
+    return goal;
+  }
 
   // Guard 2: goal must have zero milestones (don't re-plan a partial plan)
   if (goal.milestones.length > 0) return goal;
 
   // Guard 3: in-process cache — run once per goal per tick
-  if (_expanded.has(goal.id)) return goal;
+  if (_expanded.has(goal.id)) {
+    plannerLog('info', 'skip: already expanded this tick', { goalId: goal.id });
+    return goal;
+  }
   _expanded.add(goal.id);
 
   try {
     // Resolve the frontier strategist client (same resolver as manager.ts).
     // Dynamic import avoids a circular dep: manager.ts → scanners.ts → here.
+    plannerLog('info', 'expanding goal to milestones', { goalId: goal.id, objective: goal.objective.slice(0, 80) });
     const { resolveFrontierJudgeClient } = await import('../fleet/manager.js');
     const client = resolveFrontierJudgeClient(cfg as AshlrConfig);
-    if (!client) return goal; // no client available → leave goal unchanged
+    if (!client) {
+      plannerLog('warn', 'skip: no frontier client resolved', { goalId: goal.id });
+      return goal; // no client available → leave goal unchanged
+    }
 
     const backlog = readBacklog(repoRoot);
 
@@ -191,6 +217,11 @@ export async function expandGoalToMilestones(
 
     if (parsed.length < 3) {
       // Response was unparseable — leave goal unchanged
+      plannerLog('warn', 'expansion failed: could not parse ≥3 milestones from strategist response', {
+        goalId: goal.id,
+        rawSnippet: raw.slice(0, 200),
+        parsedCount: parsed.length,
+      });
       return goal;
     }
 
@@ -219,9 +250,18 @@ export async function expandGoalToMilestones(
     // Re-roll status: has milestones → 'active'
     fresh.status = 'active';
     saveGoal(fresh, { now });
+    plannerLog('info', 'goal expanded', {
+      goalId: fresh.id,
+      milestonesProduced: fresh.milestones.length,
+      titles: fresh.milestones.map((m) => m.title),
+    });
     return fresh;
-  } catch {
+  } catch (err) {
     // Strategist failure → goal unchanged, never rethrow
+    plannerLog('warn', 'expansion threw — goal unchanged', {
+      goalId: goal.id,
+      error: (err as Error)?.message ?? String(err),
+    });
     return goal;
   }
 }

@@ -1431,14 +1431,23 @@ export async function scanLint(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>)
 export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'>): Promise<WorkItem[]> {
   try {
     // Load active goals from the goals store. listGoals never throws.
+    // M223: also include 'planning' goals (zero milestones) so expandGoalToMilestones
+    // can fire on them — createGoal sets status:'planning' until milestones exist.
     const active = listGoals({ status: 'active' });
-    if (active.length === 0) return [];
+    const planning = listGoals({ status: 'planning' });
+    // Deduplicate by id: a goal in both lists (e.g. a mock that returns the same
+    // set for every status filter) must only be processed once.
+    const seenIds = new Set<string>(active.map((g) => g.id));
+    const allGoals = [...active, ...planning.filter((g) => !seenIds.has(g.id))];
+    if (allGoals.length === 0) return [];
 
     const items: WorkItem[] = [];
-    for (let goal of active) {
-      // M222: lazily expand goals with zero milestones via the frontier
+    for (let goal of allGoals) {
+      // M222/M223: lazily expand goals with zero milestones via the frontier
       // strategist (flag-gated: cfg.foundry?.goalPlanning !== false).
       // expandGoalToMilestones never throws; it is a no-op when flag-off.
+      // M223: planning-status goals (zero milestones) are now included above so
+      // this branch fires for newly-created goals that haven't been expanded yet.
       if (goal.milestones.length === 0 && _cfg) {
         goal = await expandGoalToMilestones(goal, _cfg, repo);
       }
