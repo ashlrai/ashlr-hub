@@ -97,6 +97,110 @@ export function _resetEcosystemMapCache(): void {
 }
 
 // ---------------------------------------------------------------------------
+// M231: North-Star doc loader — reads docs/NORTH-STAR.md and distils a
+// token-bounded summary of the 3 pillars + grand directives for prompt injection.
+// ---------------------------------------------------------------------------
+
+let _northStarCache: string | null | undefined; // undefined=unloaded; null=absent
+
+function northStarDocPath(): string | null {
+  try {
+    const repoRoot = findRepoRoot(_thisDir) ?? process.cwd();
+    const candidate = join(repoRoot, 'docs', 'NORTH-STAR.md');
+    return existsSync(candidate) ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Load docs/NORTH-STAR.md from the repo root.
+ * Returns the file contents as a string, or null if absent/unreadable.
+ * Caches the result for the lifetime of the process. Never throws.
+ */
+export function loadNorthStarDoc(): string | null {
+  if (_northStarCache !== undefined) return _northStarCache;
+  try {
+    const p = northStarDocPath();
+    if (!p) { _northStarCache = null; return null; }
+    _northStarCache = readFileSync(p, 'utf8');
+    return _northStarCache;
+  } catch {
+    _northStarCache = null;
+    return null;
+  }
+}
+
+/** Reset the north-star cache. Only needed in tests. */
+export function _resetNorthStarDocCache(): void {
+  _northStarCache = undefined;
+}
+
+/**
+ * Return a concise, token-bounded distillation of docs/NORTH-STAR.md for
+ * prompt injection. Extracts the 3 pillars + grand measurement + substantive
+ * value directive. Always ≤ maxChars (default ~1200 chars / ~300 tokens).
+ * Returns '' when the doc is absent. Never throws.
+ *
+ * Format:
+ *   === NORTH-STAR: GRAND VISION ===
+ *   Vision: <one-liner>
+ *   Pillars: 1. Recursive self-improvement … 2. Ecosystem product factory … 3. Composition flywheel
+ *   Measure grand not vanity: products shipped+adopted, capabilities invented, compounding velocity.
+ *   Goals must be: substantive (value≥4), bound to a concrete enrolled repo, decomposable into shippable milestones.
+ */
+export function northStarDocSummary(maxChars = 1200): string {
+  try {
+    const raw = loadNorthStarDoc();
+    if (!raw) return '';
+
+    const lines = raw.split('\n');
+
+    // Extract vision one-liner (first non-empty line after "## Vision")
+    let vision = '';
+    let inVision = false;
+    // Extract pillar lines (lines starting with "1." / "2." / "3." under "## Three pillars")
+    const pillars: string[] = [];
+    let inPillars = false;
+    // Extract near-term bets (bullet lines under "## Near-term ambitious bets")
+    const bets: string[] = [];
+    let inBets = false;
+
+    for (const line of lines) {
+      const t = line.trim();
+      if (/^##\s+Vision/i.test(t)) { inVision = true; inPillars = false; inBets = false; continue; }
+      if (/^##\s+Three pillars/i.test(t)) { inPillars = true; inVision = false; inBets = false; continue; }
+      if (/^##\s+Near-term ambitious bets/i.test(t)) { inBets = true; inPillars = false; inVision = false; continue; }
+      if (/^##\s/.test(t)) { inVision = false; inPillars = false; inBets = false; continue; }
+
+      if (inVision && !vision && t.length > 10) vision = t;
+      if (inPillars && /^\d+\.\s+\*\*/.test(t)) pillars.push(t.replace(/\*\*/g, '').replace(/\(.*?\)/g, '').trim());
+      if (inBets && /^-\s+/.test(t) && bets.length < 4) bets.push(t.replace(/^-\s+/, '').trim());
+    }
+
+    const parts: string[] = ['=== NORTH-STAR: GRAND VISION ==='];
+    if (vision) parts.push(`Vision: ${vision.replace(/\*\*/g, '').slice(0, 220)}`);
+    if (pillars.length > 0) {
+      parts.push('Three pillars (in priority order):');
+      pillars.forEach((p, i) => parts.push(`  ${i + 1}. ${p.slice(0, 160)}`));
+    }
+    parts.push('');
+    parts.push('Measure GRAND not vanity: products shipped+adopted, net-new capabilities invented, compounding velocity (merges/week UP, cost/merge DOWN), safety never weakened.');
+    parts.push('');
+    parts.push('Every goal/idea MUST be: substantive (value≥4 — real capability or product, NOT docs/version-bumps/lint), bound to a concrete enrolled repo, decomposable into shippable milestones.');
+    if (bets.length > 0) {
+      parts.push('');
+      parts.push('Ambitious bets (examples of the right altitude):');
+      bets.forEach((b) => parts.push(`  - ${b.slice(0, 140)}`));
+    }
+
+    return parts.join('\n').slice(0, maxChars);
+  } catch {
+    return '';
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Summary extractor
 // ---------------------------------------------------------------------------
 

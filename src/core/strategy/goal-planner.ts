@@ -20,6 +20,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AshlrConfig, Goal } from '../types.js';
 import { loadGoal, saveGoal } from '../goals/store.js';
+import { northStarDocSummary } from '../ecosystem/map.js';
 
 // ---------------------------------------------------------------------------
 // Observability — M223: structured log so daemon log shows planner activity.
@@ -185,9 +186,18 @@ export async function expandGoalToMilestones(
 
     const backlog = readBacklog(repoRoot);
 
+    // M231: inject NORTH-STAR grand vision so milestones are aligned to the
+    // 3 pillars (recursive self-improvement, ecosystem product factory, composition
+    // flywheel) and substantive (value≥4, bound to a repo, not docs/version-bumps).
+    const northStarSection = northStarDocSummary();
+
     const systemPrompt = [
       'You are an expert engineering strategist for an autonomous coding fleet.',
       'Your task is to decompose a high-level objective into 3-6 concrete, independently-shippable milestones.',
+      '',
+      northStarSection
+        ? `GRAND VISION GROUNDING — orient milestones toward these pillars:\n${northStarSection}`
+        : '',
       '',
       'RULES (non-negotiable):',
       '1. Each milestone must be a REAL code change: a new capability, a bug fix, a performance improvement, a test harness, or a refactor.',
@@ -195,7 +205,8 @@ export async function expandGoalToMilestones(
       '3. Each milestone must be scoped to a single focused diff that a junior engineer could ship in 1-4 hours.',
       '4. Each milestone must be independently shippable — it does not require another milestone to land first.',
       '5. Be concrete: name the specific module, function, interface, or behavior being changed.',
-      '6. Output ONLY a numbered list (1. Title — detail). No prose before or after.',
+      '6. Each milestone must be substantive (value≥4): a real capability, real fix, or real product improvement — NOT docs/linting/version bumps.',
+      '7. Output ONLY a numbered list (1. Title — detail). No prose before or after.',
       '',
       backlog
         ? `OPPORTUNITY MENU (grounded in the repo\'s known improvement backlog — prefer items from this list when they match the objective):\n${backlog}`

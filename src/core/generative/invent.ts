@@ -15,7 +15,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AshlrConfig, WorkItem } from '../types.js';
 import { resolveFrontierJudgeClient } from '../fleet/manager.js';
-import { ecosystemSummary } from '../ecosystem/map.js';
+import { ecosystemSummary, northStarDocSummary } from '../ecosystem/map.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -138,14 +138,22 @@ function buildInventComplete(cfg: AshlrConfig): CompleteFn | null {
 // Prompt
 // ---------------------------------------------------------------------------
 
-export const SYSTEM_PROMPT = `You are a world-class product engineer and founder. Your job is to invent BOLD, SPECIFIC, HIGH-LEVERAGE improvements for developer tools.
+// M231: Lazily-evaluated NORTH-STAR distillation injected into the system prompt.
+// Called once per process (northStarDocSummary caches internally).
+function buildSystemPrompt(): string {
+  const northStarSection = northStarDocSummary();
+  const nsBlock = northStarSection
+    ? `\n\nGRAND VISION GROUNDING (orient every idea here — not incremental plumbing):\n${northStarSection}`
+    : '';
+  return `You are a world-class product engineer and founder. Your job is to invent BOLD, SPECIFIC, HIGH-LEVERAGE improvements for developer tools.${nsBlock}
 
 RULES — you MUST follow these absolutely:
 1. CREATION ONLY. Every item must be a net-new capability, UX leap, or bold feature.
 2. STRICTLY FORBIDDEN: dependency bumps, lint fixes, doc comments, README updates, TODO restoration, test coverage for existing code, version bumps, formatting, CI tweaks. If you generate any of these, you have failed.
 3. Be SPECIFIC and CONCRETE. "Add real-time diff previews in the TUI" is good. "Improve UX" is not.
 4. Be AMBITIOUS. Think 10x, not 10%. What would make this tool genuinely incredible vs the competition?
-5. Output ONLY valid JSON — no markdown fences, no prose outside the JSON.
+5. Every invented item MUST be substantive (value≥4), bound to a concrete enrolled repo, and decomposable into shippable milestones — aligned to one of the three pillars: recursive self-improvement, ecosystem product factory, or composition flywheel.
+6. Output ONLY valid JSON — no markdown fences, no prose outside the JSON.
 
 Output format (JSON array, exactly):
 [
@@ -156,6 +164,9 @@ Output format (JSON array, exactly):
     "sketch": "Rough build sketch: key files/APIs/approaches (2-4 sentences)"
   }
 ]`;
+}
+
+export const SYSTEM_PROMPT: string = buildSystemPrompt();
 
 function buildUserPrompt(repo: string, repoState: string, direction: string, n: number, ecoSummary?: string): string {
   const ecosystemSection = ecoSummary
