@@ -20,7 +20,7 @@
  *  Bounds
  *  [B1]  judgePerPass=2, 4 unjudged → judges 2, caps 2 (judgeCapped=2)
  *  [B2]  already-judged proposals don't consume the per-pass cap
- *  [B3]  default judgePerPass=5 (unset in cfg)
+ *  [B3]  default judgePerPass=8 (unset in cfg; raised from 5 in M259)
  *
  *  Never-throws
  *  [N1]  judgeProposal throws → swallowed, pass continues, never-throws
@@ -327,8 +327,9 @@ describe('M172 bounds — judgePerPass cap', () => {
     expect(r.attempted).toBe(3); // p1 (cached) + p2 (ship) + p3 (ship)
   });
 
-  it('[B3] default judgePerPass=5 when not set in cfg', async () => {
-    const proposals = Array.from({ length: 6 }, (_, i) => makeProp(`b3-${i}`));
+  it('[B3] default judgePerPass=8 when not set in cfg', async () => {
+    // M259 raised the default judgePerPass from 5 → 8 to drain the queue faster.
+    const proposals = Array.from({ length: 9 }, (_, i) => makeProp(`b3-${i}`));
     mockListProposals.mockReturnValue(proposals);
     mockReadDecisions.mockReturnValue([]);
 
@@ -337,12 +338,12 @@ describe('M172 bounds — judgePerPass cap', () => {
       scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
     } satisfies ManagerVerdict);
 
-    // No judgePerPass in cfg → default 5
+    // No judgePerPass in cfg → default 8
     const r = await runAutoMergePass(enabledCfg()); // no judgePerPass set
 
-    expect(mockJudgeProposal).toHaveBeenCalledTimes(5);
-    expect(r.judged).toBe(5);
-    expect(r.judgeCapped).toBe(1); // 6th proposal capped
+    expect(mockJudgeProposal).toHaveBeenCalledTimes(8);
+    expect(r.judged).toBe(8);
+    expect(r.judgeCapped).toBe(1); // 9th proposal capped
   });
 });
 
