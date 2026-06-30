@@ -854,13 +854,18 @@ export async function verifyProposal(
     // Typecheck is NOT delta-aware — it must be clean in the patched tree.
     const baselineResults = new Map<string, { ok: boolean; ids: Set<string> }>();
     for (const vc of commands) {
-      if (vc.kind === 'test') {
+      // M281: test commands → delta-aware (named-id set diff).
+      // M293: lint is ALSO delta-aware — the repo carries large pre-existing lint
+      // debt (hundreds of errors) that is NOT a correctness signal; a clean, typed,
+      // tested change must not be blocked by lint debt it did not introduce. Baseline
+      // lint and tolerate pre-existing failures (block only a clean→failing regression).
+      if (vc.kind === 'test' || vc.kind === 'lint') {
         const baseRes = runVerifyCommand(vc, tmpDir, cfg);
         if (!baseRes.timedOut) {
           const key = Array.isArray(vc.cmd) ? vc.cmd.join(' ') : vc.kind;
           baselineResults.set(key, {
             ok: baseRes.ok,
-            ids: parseFailedTestIds(baseRes.output ?? ''),
+            ids: vc.kind === 'test' ? parseFailedTestIds(baseRes.output ?? '') : new Set<string>(),
           });
         }
         // If baseline times out, we leave no entry — falls back to original fail behaviour.
@@ -920,6 +925,24 @@ export async function verifyProposal(
               // Baseline also failed (pre-existing) — tolerate
               continue;
             }
+          }
+          // No baseline (timed out) — fall through to original fail behaviour
+        }
+        // M293: lint is delta-aware — tolerate pre-existing lint debt, block only a
+        // clean→failing regression caused by this change.
+        if (vc.kind === 'lint') {
+          const cmdKey = Array.isArray(vc.cmd) ? vc.cmd.join(' ') : vc.kind;
+          const baseline = baselineResults.get(cmdKey);
+          if (baseline !== undefined) {
+            if (baseline.ok) {
+              return {
+                ok: false,
+                ran,
+                detail: `verify 'lint' failed — change introduced lint errors (lint was clean before)`,
+              };
+            }
+            // Lint already failing on base (pre-existing debt) — tolerate and continue.
+            continue;
           }
           // No baseline (timed out) — fall through to original fail behaviour
         }
