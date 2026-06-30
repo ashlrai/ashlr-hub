@@ -173,12 +173,16 @@ describe('M47 classifyRisk', () => {
     expect(classifyRisk(p)).toBe('low');
   });
 
-  it('source *.ts change → high (multiple files)', () => {
+  it('source *.ts change → medium (multiple ordinary source files)', () => {
+    // M295: ordinary multi-file source changes are MEDIUM (not HIGH). Genuinely
+    // dangerous changes (security/build/shell surfaces, or LARGE diffs) still
+    // classify HIGH above this point; the merge gate's real protection is
+    // judge-ship + verify + attestation, not a file-count heuristic.
     const diff =
       addFileDiff('src/a.ts', 'export const a = 1') +
       addFileDiff('src/b.ts', 'export const b = 2');
     const p = makeProposal({ diff });
-    expect(classifyRisk(p)).toBe('high');
+    expect(classifyRisk(p)).toBe('medium');
   });
 
   it('single small *.ts change → medium', () => {

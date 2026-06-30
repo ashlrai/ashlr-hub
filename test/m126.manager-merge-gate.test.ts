@@ -630,10 +630,10 @@ describe('M126 existing gates preserved — Gate 7 never reached', () => {
       docsDiff('src/a.ts'),
       docsDiff('src/b.ts'),
     ].join('\n').replace(/\+\+\+ b\/docs\//g, '+++ b/src/').replace(/--- \/dev\/null/g, '--- /dev/null');
-    // Build a proper high-risk diff: two source files
+    // M295: a genuinely high-risk diff — a security/auth surface (isSecuritySensitive
+    // → unconditionally HIGH). (Ordinary multi-file source is now MEDIUM.)
     const highDiff =
-      `diff --git a/src/a.ts b/src/a.ts\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+export const a = 1\n\n` +
-      `diff --git a/src/b.ts b/src/b.ts\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/src/b.ts\n@@ -0,0 +1 @@\n+export const b = 2\n\n`;
+      `diff --git a/src/core/auth/session.ts b/src/core/auth/session.ts\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/src/core/auth/session.ts\n@@ -0,0 +1 @@\n+export const token = 1\n\n`;
     expect(classifyRisk({ diff: highDiff } as Proposal)).toBe('high');
 
     const diffHash = hashDiff(highDiff);

@@ -378,15 +378,18 @@ export function classifyRisk(proposal: Proposal): RiskClass {
   );
   if (allLowTrust) return 'low';
 
-  // ── HIGH: any non-trivial source change ────────────────────────────────────
-  // A single small source file is allowed at MEDIUM; more than one source file,
-  // or a sizeable single-file change, escalates to HIGH.
+  // ── MEDIUM: ordinary source changes ─────────────────────────────────────────
+  // M295: ordinary source changes are MEDIUM, not HIGH. The genuinely-dangerous
+  // cases already returned 'high' ABOVE this point: security/secret/auth/sandbox
+  // surfaces, build/CI/dependency-manifest files, shell scripts, and LARGE diffs
+  // (>10 files or >400 changed lines). What remains here is normal application
+  // source — a multi-file feature/fix — whose real protection for autonomous
+  // merge is the judge-ship verdict + verify (typecheck + tests-delta + lint-delta)
+  // + frontier-authority + HMAC attestation, NOT a crude file-count heuristic.
+  // Classifying every 2-file change as HIGH made maxRisk:'low' block essentially
+  // all real work. (maxRisk default raised to 'medium' to match.)
   if (sourceFiles.length > 0) {
-    const SMALL_SRC_LINES = 40;
-    if (sourceFiles.length === 1 && changedLines <= SMALL_SRC_LINES) {
-      return 'medium';
-    }
-    return 'high';
+    return 'medium';
   }
 
   // ── At this point there are NO source files and the diff is not purely
