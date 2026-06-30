@@ -118,6 +118,7 @@ import {
   runVerifyCommand,
   type VerifyCommand,
 } from '../run/verify-commands.js';
+import { parseFailedTestIds } from '../run/completeness-gate.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -822,6 +823,24 @@ export async function verifyProposal(
       };
     }
 
+    // M281: For test commands, record the BASELINE result BEFORE applying
+    // the patch (worktree is still on the clean default-branch HEAD at this point).
+    // Typecheck is NOT delta-aware — it must be clean in the patched tree.
+    const baselineResults = new Map<string, { ok: boolean; ids: Set<string> }>();
+    for (const vc of commands) {
+      if (vc.kind === 'test') {
+        const baseRes = runVerifyCommand(vc, tmpDir, cfg);
+        if (!baseRes.timedOut) {
+          const key = Array.isArray(vc.cmd) ? vc.cmd.join(' ') : vc.kind;
+          baselineResults.set(key, {
+            ok: baseRes.ok,
+            ids: parseFailedTestIds(baseRes.output ?? ''),
+          });
+        }
+        // If baseline times out, we leave no entry — falls back to original fail behaviour.
+      }
+    }
+
     // Apply the diff to the worktree ONLY AFTER capturing the base-derived
     // command list, then run those (immutable) commands against the patched tree.
     patchFile = writeTmpFile(diff);
@@ -838,7 +857,46 @@ export async function verifyProposal(
     for (const vc of commands) {
       ran.push(vc);
       const res = runVerifyCommand(vc, tmpDir, cfg);
+
       if (!res.ok) {
+        // M281: for test commands, only block if NEW failures were introduced.
+        if (vc.kind === 'test') {
+          const cmdKey = Array.isArray(vc.cmd) ? vc.cmd.join(' ') : vc.kind;
+          const baseline = baselineResults.get(cmdKey);
+          if (baseline !== undefined) {
+            const afterIds = parseFailedTestIds(res.output ?? '');
+            if (afterIds.size > 0 || baseline.ids.size > 0) {
+              // Named IDs available — use set-difference
+              const newFailures = new Set<string>();
+              for (const id of afterIds) {
+                if (!baseline.ids.has(id)) newFailures.add(id);
+              }
+              if (newFailures.size === 0) {
+                // All failures are pre-existing — tolerate and continue
+                continue;
+              }
+              const listed = [...newFailures].slice(0, 5).join('; ');
+              return {
+                ok: false,
+                ran,
+                detail: `verify 'test' failed — ${newFailures.size} new failure(s) introduced: ${listed}`,
+              };
+            } else {
+              // No parseable IDs — fall back to ok-flag delta
+              if (baseline.ok) {
+                // Baseline was passing; change broke it — new regression → block
+                return {
+                  ok: false,
+                  ran,
+                  detail: `verify 'test' failed — regression detected (suite was passing before change)`,
+                };
+              }
+              // Baseline also failed (pre-existing) — tolerate
+              continue;
+            }
+          }
+          // No baseline (timed out) — fall through to original fail behaviour
+        }
         return {
           ok: false,
           ran,

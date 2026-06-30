@@ -285,12 +285,51 @@ describe('M47 verifyProposal', () => {
     expect(res.ran.some((c) => c.kind === 'test')).toBe(true);
   });
 
-  it('failing test script → not ok', async () => {
+  it('pre-existing failing test script (baseline fails) → ok:true (M281 delta-aware: no new failure introduced)', async () => {
+    // M281: baseline already fails (exit 1 exists before the diff). The diff
+    // adds docs/y.md — it did NOT introduce the failure. Delta logic: both
+    // baseline and after fail with no parseable IDs → treat as pre-existing →
+    // tolerate → ok:true. This is the core M281 scenario (prevents false-blocking
+    // on environmental/pre-existing failures while still blocking new regressions).
     initRepo(tmpRepo);
     writePackageJson(tmpRepo, 'exit 1');
     const p = makeProposal({ diff: addFileDiff('docs/y.md', 'doc') });
     const res = await verifyProposal(p, cfgWith());
+    expect(res.ok).toBe(true);
+  });
+
+  it('regression detected: baseline passes, after fails → ok:false (M281 regression protection intact)', async () => {
+    // M281: baseline passes (exit 0 committed), then we write a package.json
+    // with exit 1 as a committed change to the worktree before the diff is applied.
+    // We simulate this by: commit exit 0, then in the worktree (after baseline),
+    // the diff itself rewrites the test script. But H1b blocks package.json diffs,
+    // so we use a two-phase approach: commit a different test-runner file.
+    //
+    // Simpler approach: use a test script that reads a sentinel file —
+    // commit the sentinel as present (exit 0), diff deletes it (exit 1).
+    // Since H1b doesn't block non-manifest files, this is valid.
+    initRepo(tmpRepo);
+    // Write a sentinel and a test script that checks it
+    const sentinelPath = path.join(tmpRepo, 'sentinel.txt');
+    const helperPath = path.join(tmpRepo, 'check-sentinel.sh');
+    fs.writeFileSync(sentinelPath, 'ok', 'utf8');
+    fs.writeFileSync(helperPath, '#!/bin/sh\ntest -f sentinel.txt', 'utf8');
+    fs.chmodSync(helperPath, 0o755);
+    git(tmpRepo, ['add', 'sentinel.txt', 'check-sentinel.sh']);
+    git(tmpRepo, ['commit', '-m', 'add sentinel']);
+    writePackageJson(tmpRepo, './check-sentinel.sh');
+
+    // Compute a real diff by staging sentinel removal and using git diff
+    git(tmpRepo, ['rm', 'sentinel.txt']);
+    const removeSentinelDiff = git(tmpRepo, ['diff', '--cached']);
+    // Unstage so the worktree remains clean for verifyProposal to create its own worktree
+    git(tmpRepo, ['reset', 'HEAD', 'sentinel.txt']);
+    git(tmpRepo, ['checkout', '--', 'sentinel.txt']);
+
+    const p = makeProposal({ diff: removeSentinelDiff });
+    const res = await verifyProposal(p, cfgWith());
     expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/regression detected|test.*failed/i);
   });
 
   it('no verify commands + allowWithoutVerification false → ok:false (fail-closed)', async () => {

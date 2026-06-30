@@ -4,7 +4,7 @@
  * Proves that:
  *  - A run with passing typecheck + test files a proposal (gate passes).
  *  - A run that fails typecheck does NOT file a proposal.
- *  - A run that fails tests does NOT file a proposal.
+ *  - A run that fails tests (with no stash / fallback path) does NOT file a proposal.
  *  - A partial/timed-out run is always blocked.
  *  - A diff with package.json but no lockfile update is blocked.
  *  - A diff with package.json AND lockfile update passes.
@@ -16,6 +16,10 @@
  *  - Runner: package.json without lockfile → no swarm proposal (M275 sync check).
  *
  * All subprocess invocations are mocked — no real processes spawned.
+ *
+ * Note (M281): test-check is now delta-aware. The "blocks when tests fail" test
+ * uses the stash-noop path (simulating a worktree with no stashable changes)
+ * which falls back to the direct-run path — still blocks on failure there.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -38,6 +42,15 @@ vi.mock('node:fs', async (importOriginal) => {
   return {
     ...actual,
     existsSync: vi.fn(actual.existsSync),
+  };
+});
+
+// Mock node:child_process spawnSync for git stash push/pop (M281 delta logic).
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawnSync: vi.fn(actual.spawnSync),
   };
 });
 
@@ -86,11 +99,28 @@ async function getGate() {
 async function getMocks() {
   const vc = await import('../src/core/run/verify-commands.js');
   const fs = await import('node:fs');
+  const cp = await import('node:child_process');
   return {
     detectVerifyCommands: vi.mocked(vc.detectVerifyCommands),
     runVerifyCommand: vi.mocked(vc.runVerifyCommand),
     existsSync: vi.mocked(fs.existsSync),
+    spawnSync: vi.mocked(cp.spawnSync),
   };
+}
+
+/** Fake spawnSync return for "nothing to stash" — triggers direct-run fallback in delta logic. */
+function stashNoop(): ReturnType<typeof import('node:child_process').spawnSync> {
+  return { stdout: 'No local changes to stash', stderr: '', status: 0, error: undefined, pid: 1, output: [], signal: null } as ReturnType<typeof import('node:child_process').spawnSync>;
+}
+
+/** Fake spawnSync return for successful stash push. */
+function stashSuccess(): ReturnType<typeof import('node:child_process').spawnSync> {
+  return { stdout: 'Saved working directory', stderr: '', status: 0, error: undefined, pid: 1, output: [], signal: null } as ReturnType<typeof import('node:child_process').spawnSync>;
+}
+
+/** Fake spawnSync return for successful stash pop. */
+function stashPopOk(): ReturnType<typeof import('node:child_process').spawnSync> {
+  return { stdout: 'Dropped stash', stderr: '', status: 0, error: undefined, pid: 1, output: [], signal: null } as ReturnType<typeof import('node:child_process').spawnSync>;
 }
 
 // ---------------------------------------------------------------------------
@@ -104,13 +134,19 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
 
   it('passes when typecheck + test both pass', async () => {
     const { runCompletenessGate } = await getGate();
-    const { detectVerifyCommands, runVerifyCommand, existsSync } = await getMocks();
+    const { detectVerifyCommands, runVerifyCommand, existsSync, spawnSync } = await getMocks();
 
     existsSync.mockReturnValue(false); // no lockfile in repo
     detectVerifyCommands.mockReturnValue([TYPECHECK_CMD, TEST_CMD]);
+    runVerifyCommand.mockReturnValueOnce(okResult(TYPECHECK_CMD)); // typecheck
+
+    // Delta logic: stash succeeds, baseline passes, after passes
+    spawnSync
+      .mockReturnValueOnce(stashSuccess()) // stash push
+      .mockReturnValueOnce(stashPopOk()); // stash pop
     runVerifyCommand
-      .mockReturnValueOnce(okResult(TYPECHECK_CMD))
-      .mockReturnValueOnce(okResult(TEST_CMD));
+      .mockReturnValueOnce(okResult(TEST_CMD)) // baseline run
+      .mockReturnValueOnce(okResult(TEST_CMD)); // after run
 
     const result = await runCompletenessGate({
       worktreePath: FAKE_WORKTREE,
@@ -121,7 +157,8 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
 
     expect(result.pass).toBe(true);
     expect(result.reason).toBeUndefined();
-    expect(runVerifyCommand).toHaveBeenCalledTimes(2);
+    // typecheck + baseline-test + after-test = 3 calls
+    expect(runVerifyCommand).toHaveBeenCalledTimes(3);
   });
 
   it('blocks when typecheck fails', async () => {
@@ -145,15 +182,17 @@ describe('M275 · COMPLETENESS-GATE — runCompletenessGate()', () => {
     expect(runVerifyCommand).toHaveBeenCalledTimes(1);
   });
 
-  it('blocks when tests fail', async () => {
+  it('blocks when tests fail (stash-noop fallback path — direct run fails)', async () => {
     const { runCompletenessGate } = await getGate();
-    const { detectVerifyCommands, runVerifyCommand, existsSync } = await getMocks();
+    const { detectVerifyCommands, runVerifyCommand, existsSync, spawnSync } = await getMocks();
 
     existsSync.mockReturnValue(false);
     detectVerifyCommands.mockReturnValue([TYPECHECK_CMD, TEST_CMD]);
-    runVerifyCommand
-      .mockReturnValueOnce(okResult(TYPECHECK_CMD))
-      .mockReturnValueOnce(failResult(TEST_CMD, 'FAIL src/core/run/foo.test.ts — 2 failed'));
+    runVerifyCommand.mockReturnValueOnce(okResult(TYPECHECK_CMD));
+
+    // Stash reports nothing to stash → fallback to direct run
+    spawnSync.mockReturnValueOnce(stashNoop());
+    runVerifyCommand.mockReturnValueOnce(failResult(TEST_CMD, 'FAIL src/core/run/foo.test.ts — 2 failed'));
 
     const result = await runCompletenessGate({
       worktreePath: FAKE_WORKTREE,

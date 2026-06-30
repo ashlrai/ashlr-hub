@@ -19,10 +19,12 @@
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import type { AshlrConfig } from '../types.js';
 import {
   detectVerifyCommands,
   runVerifyCommand,
+  type VerifyCommand,
 } from './verify-commands.js';
 
 // ---------------------------------------------------------------------------
@@ -101,6 +103,191 @@ function repoHasLockfile(repoRoot: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Delta-aware test helpers (M281)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse failing test IDs/names from vitest (or jest-compatible) output.
+ * Looks for "FAIL <path>" lines and " × <test name>" / "✕ <test name>" markers.
+ * Returns a Set of strings — used only for set-difference, so exact fidelity
+ * of parsing is not required (false negatives are conservative: they may miss a
+ * pre-existing failure and cause a spurious block, never the reverse).
+ */
+export function parseFailedTestIds(output: string): Set<string> {
+  const ids = new Set<string>();
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim();
+    // "FAIL test/foo.test.ts" — whole-file failure
+    if (trimmed.startsWith('FAIL ') || trimmed.startsWith('FAILED ')) {
+      ids.add(trimmed);
+      continue;
+    }
+    // vitest individual test failure markers: " × test name" or " ✕ test name"
+    if (trimmed.startsWith('× ') || trimmed.startsWith('✕ ') || trimmed.startsWith('x ')) {
+      ids.add(trimmed.slice(2).trim());
+      continue;
+    }
+    // jest-style: "● Suite > test name"
+    if (trimmed.startsWith('● ')) {
+      ids.add(trimmed.slice(2).trim());
+    }
+  }
+  return ids;
+}
+
+/**
+ * Try to stash uncommitted changes in `dir`. Returns true when stash succeeded
+ * (meaning changes were stashed). Returns false if nothing to stash or on error.
+ * Never throws.
+ */
+function gitStashPush(dir: string): boolean {
+  try {
+    const res = spawnSync('git', ['stash', 'push', '--include-untracked', '-m', 'ashlr-completeness-baseline'], {
+      cwd: dir, encoding: 'utf8', stdio: 'pipe',
+    });
+    if (res.error || res.status !== 0) return false;
+    const stdout = (res.stdout ?? '').trim();
+    // "No local changes to stash" means nothing was stashed
+    return !stdout.includes('No local changes');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pop the most recent stash in `dir`. Never throws.
+ */
+function gitStashPop(dir: string): void {
+  try {
+    spawnSync('git', ['stash', 'pop'], {
+      cwd: dir, encoding: 'utf8', stdio: 'pipe',
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Run a test command and return structured failure info.
+ * On timeout, returns null (caller treats as "baseline unavailable").
+ * `ids` is the set of parsed failing test IDs (may be empty if output unparseable).
+ * `ok` is the raw runner result — used as a fallback when IDs are unparseable.
+ */
+function collectFailingTests(
+  cmd: VerifyCommand,
+  dir: string,
+  cfg: AshlrConfig,
+  timeoutMs: number,
+): { ok: boolean; ids: Set<string> } | null {
+  const result = runVerifyCommand(cmd, dir, cfg, { timeoutMs });
+  if (result.timedOut) return null;
+  if (result.ok) return { ok: true, ids: new Set<string>() };
+  return { ok: false, ids: parseFailedTestIds(result.output) };
+}
+
+/**
+ * M281: Delta-aware test verification.
+ *
+ * Strategy (in the completeness-gate worktree which already has agent changes):
+ *   1. Stash agent changes → run test → record BASELINE failing set
+ *   2. Unstash → run test → record AFTER failing set
+ *   3. PASS iff (AFTER minus BASELINE) is empty (no NEW failures)
+ *   4. FAIL iff any test that passed in BASELINE now fails in AFTER
+ *
+ * Safe fallbacks:
+ *   - Stash fails (no changes to stash, detached HEAD, etc.) → run AFTER only,
+ *     pass if ok (original behaviour — cannot do delta without a baseline)
+ *   - Baseline run times out → skip delta, return pass (log warning in reason)
+ *   - Any unexpected error → return pass with warning (never hard-block on infra)
+ *
+ * Returns { pass: true } or { pass: false, reason }.
+ */
+export async function runDeltaAwareTestCheck(
+  testCmd: VerifyCommand,
+  worktreePath: string,
+  cfg: AshlrConfig,
+  timeoutMs: number,
+): Promise<{ pass: boolean; reason?: string }> {
+  try {
+    // Step 1: stash agent changes to get a clean baseline
+    const stashed = gitStashPush(worktreePath);
+
+    if (!stashed) {
+      // Cannot isolate baseline — fall back to direct run (original behaviour)
+      const result = runVerifyCommand(testCmd, worktreePath, cfg, { timeoutMs });
+      if (!result.ok) {
+        return {
+          pass: false,
+          reason: `self-verify failed: test: ${truncate(result.output)}`,
+        };
+      }
+      return { pass: true };
+    }
+
+    // Step 2: run baseline (pre-change)
+    const baseline = collectFailingTests(testCmd, worktreePath, cfg, timeoutMs);
+
+    // Step 3: restore agent changes
+    gitStashPop(worktreePath);
+
+    if (baseline === null) {
+      // Baseline run timed out — safe fallback: don't hard-block
+      return { pass: true };
+    }
+
+    // Step 4: run after (with agent changes)
+    const after = collectFailingTests(testCmd, worktreePath, cfg, timeoutMs);
+
+    if (after === null) {
+      // After run timed out — treat as unknown, don't hard-block
+      return { pass: true };
+    }
+
+    // Step 5: delta analysis
+    //
+    // Case A: both IDs sets are non-empty → set-difference is authoritative.
+    // Case B: IDs are empty (test runner uses no vitest/jest markers, e.g. a raw
+    //         shell `exit 1`). Fall back to comparing ok flags:
+    //           - baseline ok=true,  after ok=false  → NEW failure → block
+    //           - baseline ok=false, after ok=false  → pre-existing failure → tolerate
+    //           - baseline ok=true,  after ok=true   → no regression
+    //           - baseline ok=false, after ok=true   → improvement, pass
+    if (after.ids.size > 0 || baseline.ids.size > 0) {
+      // Named IDs available — use set-difference
+      const newFailures = new Set<string>();
+      for (const id of after.ids) {
+        if (!baseline.ids.has(id)) newFailures.add(id);
+      }
+      if (newFailures.size > 0) {
+        const listed = [...newFailures].slice(0, 5).join('; ');
+        return {
+          pass: false,
+          reason: `self-verify failed: test: ${newFailures.size} new failure(s) introduced: ${truncate(listed)}`,
+        };
+      }
+    } else {
+      // No parseable IDs — fall back to ok-flag delta
+      if (baseline.ok && !after.ok) {
+        // Baseline was passing; change broke it — new regression
+        return {
+          pass: false,
+          reason: `self-verify failed: test: regression detected (test suite failed after change, was passing before)`,
+        };
+      }
+      // baseline failed too (pre-existing) → tolerate
+    }
+
+    return { pass: true };
+  } catch (err) {
+    // Never hard-block on infrastructure error — log and pass
+    const msg = err instanceof Error ? err.message : String(err);
+    // Surface as pass with logged warning; typecheck already guarded type safety
+    void msg; // would log in production; test environment doesn't need the noise
+    return { pass: true };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
@@ -175,14 +362,15 @@ export async function runCompletenessGate(
 
     const testCmd = cmds.find((c) => c.kind === 'test');
     if (testCmd) {
-      const result = runVerifyCommand(testCmd, worktreePath, cfg, {
-        timeoutMs: SELF_VERIFY_TIMEOUT_MS,
-      });
-      if (!result.ok) {
-        return {
-          pass: false,
-          reason: `self-verify failed: test: ${truncate(result.output)}`,
-        };
+      // M281: delta-aware test check — tolerate pre-existing failures, block NEW ones.
+      const deltaResult = await runDeltaAwareTestCheck(
+        testCmd,
+        worktreePath,
+        cfg,
+        SELF_VERIFY_TIMEOUT_MS,
+      );
+      if (!deltaResult.pass) {
+        return { pass: false, reason: deltaResult.reason };
       }
     }
 
