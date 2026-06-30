@@ -81,9 +81,11 @@ describe('M127 resolveConcreteModel', () => {
     expect(resolveConcreteModel('codex', cfg, 'captured-model')).toBe('captured-model');
   });
 
-  it("returns 'default' when nothing is configured (priority 4)", () => {
+  it('M260: returns registry defaultModel (gpt-5.5) for codex when nothing else is configured (priority 4)', () => {
+    // Pre-M260 this returned 'default'; M260 adds spec.defaultModel as priority 4
+    // so codex now resolves to its registry canonical model instead of 'default'.
     const cfg = makeCfg();
-    expect(resolveConcreteModel('codex', cfg)).toBe('default');
+    expect(resolveConcreteModel('codex', cfg)).toBe('gpt-5.5');
   });
 
   it('works for claude engine as well', () => {
@@ -91,10 +93,11 @@ describe('M127 resolveConcreteModel', () => {
     expect(resolveConcreteModel('claude', cfg)).toBe('claude-opus-4-5');
   });
 
-  it('different engines do not share configured models', () => {
+  it('M260: different engines do not share configured models; unconfigured engine uses registry defaultModel', () => {
     const cfg = makeCfg({ codex: 'gpt-5.5' });
-    // claude is not in models — should fall to 'default'
-    expect(resolveConcreteModel('claude', cfg)).toBe('default');
+    // claude has no cfg.foundry.models entry, no capturedModel, no ASHLR_MODEL —
+    // M260: falls to spec.defaultModel from the registry ('claude-opus-4-8').
+    expect(resolveConcreteModel('claude', cfg)).toBe('claude-opus-4-8');
   });
 });
 
@@ -120,7 +123,9 @@ describe('M127 evaluateMergeAuthority — concrete model authorizes', () => {
     expect(v.reason).toMatch(/authorized/i);
   });
 
-  it("unconfigured engine still produces ':default' and is REJECTED", () => {
+  it('M260: unconfigured codex resolves to registry defaultModel (gpt-5.5) and is AUTHORIZED when in mergeAuthority', () => {
+    // Pre-M260: resolveConcreteModel('codex', cfg) → 'default' → rejected.
+    // Post-M260: resolveConcreteModel('codex', cfg) → 'gpt-5.5' (spec.defaultModel) → authorized.
     const cfg = {
       foundry: {
         mergeAuthority: [{ engine: 'codex', model: 'gpt-5.5' }],
@@ -128,12 +133,12 @@ describe('M127 evaluateMergeAuthority — concrete model authorizes', () => {
     } as unknown as AshlrConfig;
 
     const engineModel = `codex:${resolveConcreteModel('codex', cfg)}`;
-    expect(engineModel).toBe('codex:default');
+    expect(engineModel).toBe('codex:gpt-5.5');
 
     const p = makeProposal({ engineTier: 'frontier', engineModel });
     const v = evaluateMergeAuthority(p, cfg);
-    expect(v.authorized).toBe(false);
-    expect(v.reason).toMatch(/default/i);
+    expect(v.authorized).toBe(true);
+    expect(v.reason).toMatch(/authorized/i);
   });
 
   it('captured model enables authorization when cfg.models is absent', () => {

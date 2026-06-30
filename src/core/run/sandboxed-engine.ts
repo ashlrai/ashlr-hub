@@ -181,29 +181,41 @@ export function engineTierOf(engine: EngineId, cfg?: AshlrConfig): EngineTier {
 }
 
 /**
- * M127 — resolve a concrete model string for `engine`.
+ * M127/M260 — resolve a concrete model string for `engine`.
  *
  * Priority:
  *   1. cfg.foundry?.models?.[engine]   (operator-configured concrete model)
  *   2. capturedModel                    (model the run actually used, e.g. from
  *                                        opts.model when the caller captured it)
  *   3. process.env.ASHLR_MODEL          (runtime override)
- *   4. 'default'                        (genuinely unknown — still REJECTED by
+ *   4. spec.defaultModel                (M260: registry canonical default for this
+ *                                        engine — resolves cli-agent entries like
+ *                                        claude/codex that have no api.defaultModel.
+ *                                        Makes `codex:default` → `codex:gpt-5.5` so
+ *                                        frontier proposals can pass evaluateMergeAuthority
+ *                                        even when no explicit model was configured.)
+ *   5. spec.api?.defaultModel           (api-model registry default — e.g. local-coder)
+ *   6. 'default'                        (genuinely unknown — still REJECTED by
  *                                        evaluateMergeAuthority, by design)
  *
- * The merge-authority gate still rejects ':default'. This helper CAPTURES the
- * real model so frontier proposals built with a configured/captured model can
- * actually pass the gate.
+ * The merge-authority gate still rejects ':default'. Priorities 4–5 ensure that
+ * frontier cli-agent engines (claude, codex) resolve to their authorised concrete
+ * model rather than falling through to ':default' when opts.model is absent.
+ * Non-frontier engines (local-coder, nim, etc.) are unaffected — their tier
+ * check in evaluateMergeAuthority refuses them regardless of the model string.
  */
 export function resolveConcreteModel(
   engine: EngineId,
   cfg: AshlrConfig,
   capturedModel?: string,
 ): string {
+  const spec = resolveEngineSpec(engine, cfg);
   return (
     cfg.foundry?.models?.[engine] ||
     capturedModel ||
     process.env.ASHLR_MODEL ||
+    spec?.defaultModel ||
+    spec?.api?.defaultModel ||
     'default'
   );
 }

@@ -65,6 +65,10 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
     argv: ['-p', '$GOAL', { optModel: ['--model', '$MODEL'] }, '--output-format', 'json'],
     autonomousArgv: ['--dangerously-skip-permissions', '--add-dir', '$CWD'],
     capabilities: ['agent', 'edit', 'architecture'],
+    // M260: canonical concrete model for merge-authority resolution.
+    // Must match an entry in cfg.foundry.mergeAuthority (e.g. {engine:'claude',model:'claude-opus-4-8'}).
+    // Update here when the authorised Claude model changes.
+    defaultModel: 'claude-opus-4-8',
   },
 
   // codex exec [--model M] --cd CWD --json <goal> [--dangerously-bypass-approvals-and-sandbox when autonomous]
@@ -88,6 +92,10 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
     // the "externally sandboxed environment" this flag is documented for.
     autonomousArgv: ['--dangerously-bypass-approvals-and-sandbox'],
     capabilities: ['agent', 'edit', 'refactor'],
+    // M260: canonical concrete model for merge-authority resolution.
+    // Must match an entry in cfg.foundry.mergeAuthority (e.g. {engine:'codex',model:'gpt-5.5'}).
+    // Update here when the authorised Codex model changes.
+    defaultModel: 'gpt-5.5',
   },
 
   // aw auto <goal> --cwd CWD [--model M]

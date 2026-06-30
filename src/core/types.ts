@@ -1600,6 +1600,13 @@ export interface EngineSpec {
   };
   /** Free-form capability tags used by capability-aware routing. */
   capabilities?: string[];
+  /**
+   * M260: canonical default model for this engine, used when no
+   * cfg.foundry.models[engine], no opts.model, and no ASHLR_MODEL env.
+   * Primarily for cli-agent entries (claude, codex) whose concrete model
+   * cannot be read from an api.defaultModel sub-field.
+   */
+  defaultModel?: string;
 }
 
 // ---------------------------------------------------------------------------
