@@ -428,6 +428,13 @@ export interface AshlrConfig {
      * additive (only adds a reject path; NEVER weakens the merge gate).
      */
     proposalTtlDays?: number;
+    /**
+     * M280: simple-conductor mode. DEFAULT false (off). When true, `ashlr loop`
+     * uses the flat-task dispatch loop (runSimpleConductor) instead of the
+     * goal-conductor. Tasks are read from ~/.ashlr/tasks.json. Flag off ⇒
+     * byte-identical old behavior (runConductor).
+     */
+    simpleConductor?: boolean;
     autoMerge?: {
       enabled: boolean;
       /**

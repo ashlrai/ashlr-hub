@@ -105,6 +105,34 @@ export async function cmdLoop(args: string[]): Promise<number> {
     // Goal listing is best-effort.
   }
 
+  // M280: simple-conductor gate. When cfg.foundry.simpleConductor === true,
+  // use the flat task-dispatch loop (reads ~/.ashlr/tasks.json, dispatches via
+  // runEngineSandboxed, runs runAutoMergePass). Flag off ⇒ byte-identical old
+  // path (runConductor). Default is OFF — old path is preserved until proven.
+  if (cfg.foundry?.simpleConductor === true) {
+    const { runSimpleConductor } = await import('../core/simple-conductor.js');
+    const sc = await runSimpleConductor(cfg, { once, dryRun, allowCloud });
+
+    console.log('');
+    if (sc.killSwitchTripped) {
+      console.log(col.yellow('  kill-switch on — no work dispatched (rm ~/.ashlr/KILL to resume)'));
+    } else if (dryRun) {
+      console.log(col.dim(`  dry-run · ${sc.tasksAttempted} task(s) would dispatch`));
+    } else {
+      const parts: string[] = [];
+      if (sc.tasksAttempted) parts.push(`${sc.tasksAttempted} dispatched`);
+      if (sc.proposalsFiled) parts.push(`${sc.proposalsFiled} proposal(s) filed`);
+      if (sc.merged) parts.push(`${sc.merged} merged`);
+      if (sc.errors.length) parts.push(`${sc.errors.length} error(s)`);
+      console.log(
+        parts.length
+          ? col.green('  ✓ ') + col.dim(parts.join(' · ') + ' — review proposals in `ashlr inbox`.')
+          : col.dim('  nothing to dispatch this cycle (tasks done or all in-flight).'),
+      );
+    }
+    return 0;
+  }
+
   // Run the goal-aware conductor. Goals are advanced first; backlog daemon is
   // the fallback when no active goals exist. The conductor respects the
   // kill-switch + daily budget and dispatches only sandboxed, proposal-only work.
