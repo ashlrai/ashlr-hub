@@ -14,8 +14,11 @@
  *   2  bad usage
  */
 
+import { basename } from 'node:path';
 import { makeColors, isTty } from './ui.js';
 import { loadConfig } from '../core/config.js';
+import { editorDeepLink } from './open.js';
+import type { AshlrConfig } from '../core/types.js';
 
 const { bold, dim, red, green, yellow, cyan } = makeColors(isTty());
 
@@ -39,7 +42,15 @@ function printNotifyHelp(): void {
   console.log('');
   console.log('  ' + bold('Subcommands:'));
   console.log('');
-  console.log(`    ${cyan('test [--json]')}  Send a test ping to configured webhook(s).`);
+  console.log(`    ${cyan('test [--json]')}     Send a test ping to configured webhook(s).`);
+  console.log(`    ${cyan('session [opts]')}    Notify on a Claude Code Stop/Notification hook.`);
+  console.log('');
+  console.log('  ' + bold('session options:'));
+  console.log('');
+  console.log(`    ${dim('--event <stop|notification>   what happened (default: stop)')}`);
+  console.log(`    ${dim('--cwd <path>                  project dir (default: payload cwd / cwd)')}`);
+  console.log(`    ${dim('--message <text>              body for the notification event')}`);
+  console.log(`    ${dim('--editor <vscode|cursor>      editor the toast click opens (default: cfg.editor)')}`);
   console.log('');
   console.log('  ' + bold('How to configure:'));
   console.log('');
@@ -177,6 +188,190 @@ async function cmdNotifyTest(args: string[]): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// Subcommand: notify session  (called by the Claude Code Stop/Notification hook)
+// ---------------------------------------------------------------------------
+
+/** Read a `--flag value` pair from args; returns undefined when absent/dangling. */
+function readFlag(args: string[], name: string): string | undefined {
+  const i = args.indexOf(name);
+  if (i >= 0 && i + 1 < args.length && !args[i + 1]!.startsWith('--')) {
+    return args[i + 1];
+  }
+  return undefined;
+}
+
+/** Parse a stdin string as a JSON object, or null on any failure. */
+function parseJsonObject(s: string): Record<string, unknown> | null {
+  try {
+    const o = JSON.parse(s) as unknown;
+    return o && typeof o === 'object' && !Array.isArray(o)
+      ? (o as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read a hook JSON payload from stdin. Claude Code pipes a JSON context (with
+ * `cwd`, `message`, …) to hook commands.
+ *
+ * Reads with a BOUNDED async read that ALWAYS settles — resolving on stream
+ * `end` (the normal hook case: Claude writes the JSON then closes stdin) or
+ * after a short safety timeout, whichever is first. A synchronous fd-0 read was
+ * tried and rejected: it BLOCKS FOREVER when stdin is an open pipe with no EOF
+ * (some hook runners leave it open), which would hang the hook and stall Claude
+ * after every turn. Only reads when stdin is not a TTY; interactive use returns
+ * null immediately. Returns null on any error / non-object / timeout-with-no-data.
+ */
+function readStdinPayload(): Promise<Record<string, unknown> | null> {
+  if (process.stdin.isTTY) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let buf = '';
+    let settled = false;
+    const finish = (v: Record<string, unknown> | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        process.stdin.removeAllListeners('data');
+        process.stdin.removeAllListeners('end');
+        process.stdin.removeAllListeners('error');
+        process.stdin.pause();
+      } catch {
+        /* ignore */
+      }
+      resolve(v);
+    };
+    // Safety net: never wait more than this for a payload that never EOFs.
+    const timer = setTimeout(() => finish(parseJsonObject(buf)), 800);
+    try {
+      process.stdin.setEncoding('utf8');
+      process.stdin.on('data', (c: string) => {
+        buf += c;
+        if (buf.length > 65_536) finish(parseJsonObject(buf));
+      });
+      process.stdin.on('end', () => finish(parseJsonObject(buf)));
+      process.stdin.on('error', () => finish(null));
+      process.stdin.resume();
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+/**
+ * `ashlr notify session` — raise a desktop notification (and post to any
+ * configured webhook) when a Claude Code session finishes or needs input.
+ *
+ * Designed to be invoked from the Claude Code Stop / Notification hooks:
+ *   ashlr notify session --event stop --editor vscode
+ *
+ * Flags (all optional):
+ *   --event <stop|notification>  what happened (default: stop)
+ *   --cwd <path>                 project dir (default: hook payload cwd / process.cwd())
+ *   --message <text>             body override for the notification event
+ *   --editor <vscode|cursor>     editor to deep-link the click to (default: cfg.editor)
+ *   --json                       emit a machine-readable result
+ *
+ * Best-effort by contract: ALWAYS returns 0 so a notification failure never
+ * fails the hook (and never blocks Claude). Desktop toast is opt-in via
+ * cfg.notify.desktop; webhook post is opt-in via cfg.notify.{slack,discord}Webhook.
+ */
+async function cmdNotifySession(args: string[]): Promise<number> {
+  const jsonMode = args.includes('--json');
+  const wasPiped = !process.stdin.isTTY;
+
+  const rawEvent = readFlag(args, '--event') ?? 'stop';
+  const event = rawEvent === 'notification' ? 'notification' : 'stop';
+  const cwdFlag = readFlag(args, '--cwd');
+  const msgFlag = readFlag(args, '--message');
+  const editorFlag = readFlag(args, '--editor');
+
+  const payload = await readStdinPayload();
+  const cwd =
+    cwdFlag ||
+    (typeof payload?.['cwd'] === 'string' ? (payload['cwd'] as string) : '') ||
+    process.cwd();
+  const message =
+    msgFlag ||
+    (typeof payload?.['message'] === 'string' ? (payload['message'] as string) : '');
+
+  const project = basename(cwd) || 'Claude Code';
+
+  const title =
+    event === 'notification'
+      ? `Claude needs input — ${project}`
+      : `Claude finished — ${project}`;
+  const body =
+    event === 'notification'
+      ? message || 'Waiting for your response'
+      : 'Ready for your next instruction';
+
+  // Config — degrade gracefully if it cannot be loaded.
+  let cfg: AshlrConfig | null = null;
+  try {
+    cfg = loadConfig();
+  } catch {
+    cfg = null;
+  }
+
+  // Deep link the click back to the project's editor window. Prefer the
+  // explicit --editor flag (the hook pins this to 'vscode' where Claude runs),
+  // else fall back to the configured editor.
+  let launchUri: string | undefined;
+  if (cfg) {
+    const editor: AshlrConfig['editor'] =
+      editorFlag === 'vscode' || editorFlag === 'cursor' ? editorFlag : cfg.editor;
+    try {
+      launchUri = editorDeepLink(cwd, editor);
+    } catch {
+      launchUri = undefined;
+    }
+  }
+
+  // Desktop toast (opt-in via cfg.notify.desktop).
+  let desktopSent = false;
+  if (cfg) {
+    try {
+      const { desktopNotify } = await import('../core/integrations/desktop-notify.js');
+      desktopSent = await desktopNotify(title, body, cfg, {
+        launchUri,
+        openLabel: `Open ${project}`,
+      });
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  // Webhook post (opt-in; strict no-op when no webhook configured).
+  let webhookSent = false;
+  if (cfg) {
+    try {
+      const mod = await importNotify();
+      webhookSent = await mod.notify(`${title} — ${body}`, cfg);
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  if (jsonMode) {
+    process.stdout.write(
+      JSON.stringify({ event, project, desktopSent, webhookSent }, null, 2) + '\n',
+    );
+  } else if (!wasPiped) {
+    // Interactive run — print a one-liner. In hook context (piped) stay silent.
+    console.log(
+      dim(
+        `notify session: ${event} · ${project} · desktop=${desktopSent} webhook=${webhookSent}`,
+      ),
+    );
+  }
+
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // cmdNotify — main entry point
 // ---------------------------------------------------------------------------
 
@@ -194,6 +389,10 @@ export async function cmdNotify(args: string[]): Promise<number> {
 
   if (sub === 'test') {
     return cmdNotifyTest(args.slice(1));
+  }
+
+  if (sub === 'session') {
+    return cmdNotifySession(args.slice(1));
   }
 
   process.stderr.write(red('error: ') + `unknown notify subcommand: ${bold(sub)}\n`);
