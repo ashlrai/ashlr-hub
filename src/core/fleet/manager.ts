@@ -108,7 +108,7 @@ function countDiffFiles(diff: string | undefined): number {
 /** Truncate diff to ~6KB for the judge prompt. */
 function truncateDiff(diff: string | undefined): string {
   if (!diff) return '(no diff)';
-  const MAX = 6144;
+  const MAX = 30000; // M300e: raised from 6144 — codex judged correctness=3 because the diff was truncated; show more so it can fully assess
   if (diff.length <= MAX) return diff;
   const head = diff.slice(0, MAX);
   return head + '\n... [diff truncated]';
