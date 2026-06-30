@@ -215,13 +215,15 @@ describe('win32 — PowerShell toast', () => {
     });
   });
 
-  it('escapes single-quotes (PS double them: \' → \'\')', async () => {
+  it('escapes single-quotes via XML entity so no raw quote can break the PS literal', async () => {
     await withPlatform('win32', async () => {
       await desktopNotify("it's here", "don't break", cfgOn());
       const script = _calls[0]!.args.join(' ');
-      // Each ' in title/body must be doubled inside PS single-quoted strings
-      expect(script).toContain("it''s here");
-      expect(script).toContain("don''t break");
+      // Title/body are XML-escaped (' → &apos;) before being injected into the
+      // single-quoted toast-XML PS literal, so no raw single quote survives to
+      // break out of the string.
+      expect(script).toContain('it&apos;s here');
+      expect(script).toContain('don&apos;t break');
     });
   });
 
@@ -234,20 +236,21 @@ describe('win32 — PowerShell toast', () => {
     });
   });
 
-  it('prevents injection: $ and backticks are inside single-quoted PS strings (not expanded)', async () => {
+  it('prevents injection: $ and backticks sit inside the single-quoted PS literal (not expanded)', async () => {
     await withPlatform('win32', async () => {
       await desktopNotify('$env:USERNAME', '`whoami`', cfgOn());
       const script = _calls[0]!.args.join(' ');
-      // The values appear literally — they are inside '' so PS doesn't expand them
-      expect(script).toContain("'$env:USERNAME'");
-      expect(script).toContain("'`whoami`'");
+      // The values appear literally inside the single-quoted toast-XML literal,
+      // so PowerShell never expands them.
+      expect(script).toContain('$env:USERNAME');
+      expect(script).toContain('`whoami`');
     });
   });
 
-  it('passes 2s timeout option', async () => {
+  it('passes 8s timeout option (WinRT assembly load + toast cold-start headroom)', async () => {
     await withPlatform('win32', async () => {
       await desktopNotify('t', 'b', cfgOn());
-      expect(_calls[0]!.opts).toMatchObject({ timeout: 2000 });
+      expect(_calls[0]!.opts).toMatchObject({ timeout: 8000 });
     });
   });
 
