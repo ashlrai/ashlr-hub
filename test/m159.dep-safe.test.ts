@@ -6,7 +6,8 @@
  *       "bump <pkg> <from> → <to> in package.json (patch|minor)"
  *   - Skips major-version bumps entirely (no WorkItem, no 'major' tag)
  *   - Tags patch bumps with 'patch', minor bumps with 'minor'
- *   - Outdated dep WorkItems have effort === 1
+ *   - Outdated dep WorkItems have effort === 3
+ *   - Outdated dep WorkItems require scanDependencyBumps plus lockfile/tests
  *   - Prefers wanted version over latest when wanted differs from current
  *
  * SAFETY GUARDRAILS (mirrors m22.scanners.test.ts):
@@ -184,6 +185,11 @@ beforeEach(() => {
     JSON.stringify({ name: 'test-pkg', version: '1.0.0', scripts: { test: 'vitest run' } }),
     'utf8',
   );
+  fs.writeFileSync(
+    path.join(tmpRepo, 'package-lock.json'),
+    JSON.stringify({ name: 'test-pkg', version: '1.0.0', lockfileVersion: 3, packages: {} }),
+    'utf8',
+  );
 });
 
 afterEach(() => {
@@ -198,13 +204,46 @@ afterEach(() => {
 // ===========================================================================
 
 describe('M159-A scanDeps — exact title format for patch and minor bumps', () => {
+  it('does not emit outdated bumps when scanDependencyBumps is not enabled', async () => {
+    stubOutdated(JSON.stringify({
+      lodash: outdatedEntry({ current: '4.17.20', wanted: '4.17.21', latest: '4.17.21' }),
+    }));
+
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    expect(items.filter(i => i.tags.includes('outdated'))).toHaveLength(0);
+  });
+
+  it('does not emit outdated bumps without an npm lockfile', async () => {
+    fs.rmSync(path.join(tmpRepo, 'package-lock.json'), { force: true });
+    stubOutdated(JSON.stringify({
+      lodash: outdatedEntry({ current: '4.17.20', wanted: '4.17.21', latest: '4.17.21' }),
+    }));
+
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
+    expect(items.filter(i => i.tags.includes('outdated'))).toHaveLength(0);
+  });
+
+  it('does not emit outdated bumps without a test script', async () => {
+    fs.writeFileSync(
+      path.join(tmpRepo, 'package.json'),
+      JSON.stringify({ name: 'test-pkg', version: '1.0.0', scripts: {} }),
+      'utf8',
+    );
+    stubOutdated(JSON.stringify({
+      lodash: outdatedEntry({ current: '4.17.20', wanted: '4.17.21', latest: '4.17.21' }),
+    }));
+
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
+    expect(items.filter(i => i.tags.includes('outdated'))).toHaveLength(0);
+  });
+
   it('patch bump title is "bump lodash 4.17.20 -> 4.17.21 in package.json (patch)"', async () => {
     stubOutdated(JSON.stringify({
       lodash: outdatedEntry({ current: '4.17.20', wanted: '4.17.21', latest: '4.17.21' }),
     }));
 
     const before = snapshotDir(tmpRepo);
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     assertUnchanged(tmpRepo, before);
 
     const item = items.find(i => i.title.includes('lodash'));
@@ -218,7 +257,7 @@ describe('M159-A scanDeps — exact title format for patch and minor bumps', () 
     }));
 
     const before = snapshotDir(tmpRepo);
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     assertUnchanged(tmpRepo, before);
 
     const item = items.find(i => i.title.includes('express'));
@@ -233,7 +272,7 @@ describe('M159-A scanDeps — exact title format for patch and minor bumps', () 
       lodash: outdatedEntry({ current: '4.17.20', wanted: '4.17.21', latest: '4.18.0' }),
     }));
 
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     const item = items.find(i => i.title.includes('lodash'));
     expect(item).toBeDefined();
     expect(item!.title).toContain('4.17.21');
@@ -246,7 +285,7 @@ describe('M159-A scanDeps — exact title format for patch and minor bumps', () 
       express: outdatedEntry({ current: '4.17.0', wanted: '4.18.2', latest: '4.18.2' }),
     }));
 
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     const lodashItem = items.find(i => i.title.includes('lodash'));
     const expressItem = items.find(i => i.title.includes('express'));
 
@@ -268,7 +307,7 @@ describe('M159-B scanDeps — major-version bumps are skipped entirely', () => {
     }));
 
     const before = snapshotDir(tmpRepo);
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     assertUnchanged(tmpRepo, before);
 
     expect(items.filter(i => i.title.includes('webpack') || i.id.includes('webpack'))).toHaveLength(0);
@@ -280,7 +319,7 @@ describe('M159-B scanDeps — major-version bumps are skipped entirely', () => {
       react: outdatedEntry({ current: '17.0.2', wanted: '17.0.2', latest: '18.3.1' }),
     }));
 
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     for (const item of items) {
       expect(item.tags, `item "${item.title}" must not carry 'major' tag`).not.toContain('major');
     }
@@ -292,7 +331,7 @@ describe('M159-B scanDeps — major-version bumps are skipped entirely', () => {
       axios: outdatedEntry({ current: '1.5.0', wanted: '1.6.8', latest: '1.6.8' }),
     }));
 
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
 
     expect(items.some(i => i.title.includes('webpack'))).toBe(false);
 
@@ -308,7 +347,7 @@ describe('M159-B scanDeps — major-version bumps are skipped entirely', () => {
       typescript: outdatedEntry({ current: '4.0.0', wanted: '4.0.0', latest: '5.0.0' }),
     }));
 
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     expect(items.filter(i => i.tags.includes('outdated'))).toHaveLength(0);
   });
 });
@@ -323,7 +362,7 @@ describe('M159-C scanDeps — tags match bump classification', () => {
       lodash: outdatedEntry({ current: '4.17.20', wanted: '4.17.21', latest: '4.17.21' }),
     }));
 
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     const item = items.find(i => i.title.includes('lodash'));
     expect(item).toBeDefined();
     expect(item!.tags).toContain('patch');
@@ -336,7 +375,7 @@ describe('M159-C scanDeps — tags match bump classification', () => {
       express: outdatedEntry({ current: '4.17.0', wanted: '4.18.2', latest: '4.18.2' }),
     }));
 
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     const item = items.find(i => i.title.includes('express'));
     expect(item).toBeDefined();
     expect(item!.tags).toContain('minor');
@@ -350,7 +389,7 @@ describe('M159-C scanDeps — tags match bump classification', () => {
       express: outdatedEntry({ current: '4.17.0', wanted: '4.18.2', latest: '4.18.2' }),
     }));
 
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     const outdatedItems = items.filter(i => i.tags.includes('outdated'));
     expect(outdatedItems.length).toBeGreaterThan(0);
     for (const item of outdatedItems) {
@@ -365,7 +404,7 @@ describe('M159-C scanDeps — tags match bump classification', () => {
       express: outdatedEntry({ current: '4.17.0', wanted: '4.18.2', latest: '4.18.2' }),
     }));
 
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     for (const item of items) {
       expect(item.tags, `item "${item.title}" must not carry 'major' tag`).not.toContain('major');
     }
@@ -373,44 +412,44 @@ describe('M159-C scanDeps — tags match bump classification', () => {
 });
 
 // ===========================================================================
-// D: effort === 1 for all outdated dep WorkItems
+// D: effort === 3 for all outdated dep WorkItems
 // ===========================================================================
 
-describe('M159-D scanDeps — outdated dep WorkItems have effort === 1', () => {
-  it('patch bump item has effort === 1', async () => {
+describe('M159-D scanDeps — outdated dep WorkItems have effort === 3', () => {
+  it('patch bump item has effort === 3', async () => {
     stubOutdated(JSON.stringify({
       lodash: outdatedEntry({ current: '4.17.20', wanted: '4.17.21', latest: '4.17.21' }),
     }));
 
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     const item = items.find(i => i.title.includes('lodash'));
     expect(item).toBeDefined();
-    expect(item!.effort).toBe(1);
+    expect(item!.effort).toBe(3);
   });
 
-  it('minor bump item has effort === 1', async () => {
+  it('minor bump item has effort === 3', async () => {
     stubOutdated(JSON.stringify({
       express: outdatedEntry({ current: '4.17.0', wanted: '4.18.2', latest: '4.18.2' }),
     }));
 
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     const item = items.find(i => i.title.includes('express'));
     expect(item).toBeDefined();
-    expect(item!.effort).toBe(1);
+    expect(item!.effort).toBe(3);
   });
 
-  it('all outdated items have effort === 1 (multi-package invariant)', async () => {
+  it('all outdated items have effort === 3 (multi-package invariant)', async () => {
     stubOutdated(JSON.stringify({
       lodash: outdatedEntry({ current: '4.17.20', wanted: '4.17.21', latest: '4.17.21' }),
       express: outdatedEntry({ current: '4.17.0', wanted: '4.18.2', latest: '4.18.2' }),
       axios: outdatedEntry({ current: '1.5.0', wanted: '1.6.8', latest: '1.6.8' }),
     }));
 
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     const outdatedItems = items.filter(i => i.tags.includes('outdated'));
     expect(outdatedItems.length).toBeGreaterThan(0);
     for (const item of outdatedItems) {
-      expect(item.effort, `effort must be 1 for "${item.title}"`).toBe(1);
+      expect(item.effort, `effort must be 3 for "${item.title}"`).toBe(3);
     }
   });
 
@@ -420,7 +459,7 @@ describe('M159-D scanDeps — outdated dep WorkItems have effort === 1', () => {
     }));
 
     const before = snapshotDir(tmpRepo);
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     assertUnchanged(tmpRepo, before);
 
     const outdatedItems = items.filter(i => i.tags.includes('outdated'));
@@ -433,7 +472,7 @@ describe('M159-D scanDeps — outdated dep WorkItems have effort === 1', () => {
       expect(item.source).toBe('dep');
       expect(typeof item.title).toBe('string');
       expect(typeof item.detail).toBe('string');
-      expect(item.effort).toBe(1);
+      expect(item.effort).toBe(3);
       expect(item.value).toBeGreaterThanOrEqual(1);
       expect(item.score).toBeGreaterThan(0);
       expect(Array.isArray(item.tags)).toBe(true);
@@ -454,7 +493,7 @@ describe('M159 scanDeps — repo files are READ-ONLY', () => {
     }));
 
     const before = snapshotDir(tmpRepo);
-    await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     assertUnchanged(tmpRepo, before);
   });
 
@@ -464,7 +503,7 @@ describe('M159 scanDeps — repo files are READ-ONLY', () => {
     }));
 
     const before = snapshotDir(tmpRepo);
-    await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     assertUnchanged(tmpRepo, before);
   });
 });

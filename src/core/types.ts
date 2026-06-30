@@ -132,6 +132,14 @@ export interface AshlrConfig {
     /** Hard wall-clock per external run (ms). Default 20 min. */
     timeoutMs?: number;
     /**
+     * M275: completeness + self-verify gate. DEFAULT true (on). When true, a
+     * sandboxed engine run's diff must pass typecheck + (if cheap) tests in the
+     * sandbox worktree before being filed as a proposal. Partial/timed-out runs
+     * and dep-changes without lockfile updates are also suppressed. Set false
+     * for pre-M275 byte-identical behavior (gate entirely skipped).
+     */
+    completenessGate?: boolean;
+    /**
      * Allowlist for the (later) merge-authority gate: a proposal may auto-apply
      * to main only if its {engine,model} matches an entry here. Defined now,
      * enforced in a later milestone.
@@ -220,11 +228,19 @@ export interface AshlrConfig {
     scanTodos?: boolean;
     /**
      * M160: dependency-bump scanner toggle. DEFAULT false — dep-bumps are low-
-     * value volume work (the judge correctly rates them "review", not "ship").
-     * Set true to re-enable; even when true, major-version bumps are skipped
-     * (M159 invariant). Mirrors the M136 scanTodos pattern.
+     * value volume work. Set true to re-enable npm-audit vulnerability scanning.
+     * Mechanical outdated-package bumps remain separately gated by
+     * scanDependencyBumps and are still skipped unless the repo has a lockfile
+     * and test script. Major-version bumps are always skipped (M159 invariant).
+     * Mirrors the M136 scanTodos pattern.
      */
     scanDeps?: boolean;
+    /**
+     * M271: mechanical npm-outdated package bump scanner toggle. DEFAULT false.
+     * Requires scanDeps=true as well. This keeps unjustified package.json-only
+     * maintenance out of the frontier/judge loop unless explicitly requested.
+     */
+    scanDependencyBumps?: boolean;
     /**
      * M160: lint-error scanner toggle. DEFAULT false — cached-lint-report items
      * rarely produce shippable diffs from the fleet. Set true to surface fixable

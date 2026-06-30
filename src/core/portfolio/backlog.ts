@@ -103,6 +103,8 @@ const SOURCE_TIER_MULTIPLIER: Record<string, number> = {
   hygiene:  0.6,
 };
 
+const LOW_VALUE_MAINTENANCE_SOURCES = new Set(['dep', 'lint', 'hygiene', 'todo']);
+
 /** Returns the source-tier multiplier for an item's source. Unknown sources → 1.0. */
 export function sourceTierMultiplier(source: string): number {
   return SOURCE_TIER_MULTIPLIER[source] ?? 1.0;
@@ -314,16 +316,17 @@ export async function buildBacklog(opts?: {
     passed.push(item);
   }
 
-  // M161: No-starvation guard — if ALL items were filtered by isTrivialItem (not
-  // by the value gate) AND no substantive items exist, restore the trivial-flagged
-  // items so the fleet always has something to do. This only activates when the
-  // only available work is low-tier; it does NOT override the minItemValue gate.
+  // M161/M271: No-starvation guard — if ALL items were filtered by isTrivialItem
+  // (not by the value gate) AND no substantive items exist, restore only
+  // non-maintenance trivial-flagged items. Mechanical maintenance sources are not
+  // worth frontier/judge cycles when the judge consistently rejects them.
   //
-  // Condition: passed is empty but deduped is non-empty (items exist but all were
-  // trivial-flagged). In this case we restore the trivial-flagged items that
-  // still met the minValue threshold so the fleet can still make progress.
+  // Condition: passed is empty but deduped is non-empty. In this case we restore
+  // non-maintenance trivial-flagged items that still met the minValue threshold.
   if (passed.length === 0 && deduped.length > 0) {
-    const valueGateOnly = deduped.filter((item) => item.value >= minValue);
+    const valueGateOnly = deduped.filter(
+      (item) => item.value >= minValue && !LOW_VALUE_MAINTENANCE_SOURCES.has(item.source),
+    );
     passed.push(...valueGateOnly);
     // Remove the restored items from filtered to avoid double-counting in audit.
     const restoredIds = new Set(valueGateOnly.map((i) => i.id));

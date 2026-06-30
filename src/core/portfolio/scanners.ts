@@ -688,10 +688,32 @@ export function isActionableFix(fixAvailable: unknown): boolean {
   return false;
 }
 
+function hasNpmLockfile(repo: string): boolean {
+  return (
+    existsSync(join(repo, 'package-lock.json')) ||
+    existsSync(join(repo, 'npm-shrinkwrap.json'))
+  );
+}
+
+function hasPackageTestScript(repo: string): boolean {
+  try {
+    const raw = readFileSync(join(repo, 'package.json'), 'utf8');
+    const pkg = JSON.parse(raw) as Record<string, unknown>;
+    const scripts = pkg['scripts'];
+    if (scripts === null || typeof scripts !== 'object' || Array.isArray(scripts)) return false;
+    const test = (scripts as Record<string, unknown>)['test'];
+    return typeof test === 'string' && test.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * M160: scanDeps is DEFAULT OFF. Pass cfg with cfg.foundry.scanDeps = true to
- * enable. When disabled the fleet skips dep-bump/hygiene work and focuses on
- * substantive sources (issues, security, tests, goals). Mirrors M136 scanTodos.
+ * M160/M271: scanDeps is DEFAULT OFF. Pass cfg with cfg.foundry.scanDeps = true
+ * to enable npm-audit vulnerability scanning. Mechanical npm-outdated package
+ * bumps require cfg.foundry.scanDependencyBumps=true as a second opt-in, plus a
+ * lockfile and test script, so package.json-only churn does not consume frontier
+ * engines and judge cycles.
  */
 export async function scanDeps(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>): Promise<WorkItem[]> {
   // M160: gate — disabled by default; only run when explicitly opted in.
@@ -704,7 +726,11 @@ export async function scanDeps(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>)
     let count = 0;
 
     // 1. Outdated deps
-    const outdated = await npmOutdated(repo);
+    const allowDependencyBumps =
+      cfg.foundry.scanDependencyBumps === true &&
+      hasNpmLockfile(repo) &&
+      hasPackageTestScript(repo);
+    const outdated = allowDependencyBumps ? await npmOutdated(repo) : null;
     if (outdated) {
       for (const [pkg, info] of Object.entries(outdated)) {
         if (count >= MAX_OUTDATED_ITEMS) break;
@@ -743,7 +769,7 @@ export async function scanDeps(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>)
         // this is a one-line change in package.json, not an open-ended update.
         const targetVersion = wanted !== '?' && wanted !== current ? wanted : latest;
         const value = 2;
-        const effort = 1;
+        const effort = 3;
 
         items.push(
           makeItem(
@@ -751,7 +777,7 @@ export async function scanDeps(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>)
             'dep',
             `dep:outdated:${pkg}`,
             `bump ${pkg} ${current} → ${targetVersion} in package.json (${bumpLabel})`,
-            `Update ${pkg} from ${current} to ${targetVersion} (${bumpLabel}). wanted: ${wanted}, latest: ${latest}, type: ${type}. Edit only the version string for this package.`,
+            `Update ${pkg} from ${current} to ${targetVersion} (${bumpLabel}). wanted: ${wanted}, latest: ${latest}, type: ${type}. Update the lockfile in the same proposal and run the configured test script before filing.`,
             value,
             effort,
             ['dep', 'outdated', bumpLabel, type],

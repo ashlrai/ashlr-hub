@@ -7,8 +7,8 @@
  *     similar raw scores), goal + issue rank ABOVE dep + hygiene in the final
  *     backlog.items order.
  *
- *  2. NO-STARVATION: when ONLY dep/hygiene/lint items exist (no substantive
- *     work), they still surface — the fleet is never left with an empty queue.
+ *  2. NO-STARVATION: when only low-tier items exist, the backlog remains valid;
+ *     trivial maintenance sources are not restored just to keep the queue busy.
  *
  *  3. VALUE-FILTER PARITY: the existing minItemValue gate and isTrivialItem gate
  *     still operate correctly alongside the tier multiplier — low-value trivial
@@ -288,7 +288,7 @@ describe('M161 — buildBacklog: end-to-end source-tier ordering', () => {
 // Suite 4: No-starvation guard
 // ============================================================================
 
-describe('M161 — no-starvation: low-tier items surface when no substantive work exists', () => {
+describe('M161 — no-starvation: empty low-tier queues stay valid', () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -301,7 +301,7 @@ describe('M161 — no-starvation: low-tier items surface when no substantive wor
     vi.clearAllMocks();
   });
 
-  it('a repo with only hygiene-level scanners still produces items (no starvation)', async () => {
+  it('a repo with only low-tier scanners still returns a valid backlog', async () => {
     // A bare repo with package.json but no src/ content will produce hygiene
     // items (missing README, test-script, etc.) from the built-in scanners.
     // Even if those are "low-tier", they must surface when nothing else exists.
@@ -310,9 +310,8 @@ describe('M161 — no-starvation: low-tier items surface when no substantive wor
       minItemValue: 1, // lower floor so even value=1 hygiene items can surface
       listPendingProposals: () => [],
     });
-    // The no-starvation guard ensures at least some items surface when the repo
-    // has no substantive work. We can't assert a specific count (depends on
-    // scanner output), but we can assert it doesn't crash and repos is populated.
+    // Trivial maintenance items may be suppressed; the invariant is that the
+    // backlog remains well-formed and does not crash.
     expect(backlog.repos).toEqual([tmpDir]);
     expect(Array.isArray(backlog.items)).toBe(true);
   });

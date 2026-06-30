@@ -399,6 +399,11 @@ describe('M22 scanDeps — npm outdated + npm audit JSON', () => {
       JSON.stringify({ name: 'test-pkg', version: '1.0.0', scripts: { test: 'vitest run' } }),
       'utf8',
     );
+    fs.writeFileSync(
+      path.join(tmpRepo, 'package-lock.json'),
+      JSON.stringify({ name: 'test-pkg', version: '1.0.0', lockfileVersion: 3, packages: {} }),
+      'utf8',
+    );
   });
 
   it('parses npm outdated JSON and returns dep WorkItems', async () => {
@@ -417,7 +422,7 @@ describe('M22 scanDeps — npm outdated + npm audit JSON', () => {
     });
 
     const before = snapshotDir(tmpRepo);
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     assertUnchanged(tmpRepo, before);
 
     expect(items.length).toBeGreaterThan(0);
@@ -434,7 +439,7 @@ describe('M22 scanDeps — npm outdated + npm audit JSON', () => {
     });
 
     const before = snapshotDir(tmpRepo);
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     assertUnchanged(tmpRepo, before);
 
     // Should not throw; items may or may not include audit findings depending
@@ -451,7 +456,7 @@ describe('M22 scanDeps — npm outdated + npm audit JSON', () => {
     _execFileImpl = execFileError();
 
     const before = snapshotDir(tmpRepo);
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     assertUnchanged(tmpRepo, before);
 
     expect(items).toEqual([]);
@@ -465,7 +470,7 @@ describe('M22 scanDeps — npm outdated + npm audit JSON', () => {
     });
 
     const before = snapshotDir(tmpRepo);
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     assertUnchanged(tmpRepo, before);
 
     expect(Array.isArray(items)).toBe(true);
@@ -480,7 +485,7 @@ describe('M22 scanDeps — npm outdated + npm audit JSON', () => {
     });
 
     const before = snapshotDir(tmpRepo);
-    await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     assertUnchanged(tmpRepo, before);
   });
 
@@ -574,6 +579,11 @@ describe('M74 scanDeps — npm audit fixAvailable filter integration', () => {
       JSON.stringify({ name: 'test-pkg', version: '1.0.0', scripts: { test: 'vitest run' } }),
       'utf8',
     );
+    fs.writeFileSync(
+      path.join(tmpRepo, 'package-lock.json'),
+      JSON.stringify({ name: 'test-pkg', version: '1.0.0', lockfileVersion: 3, packages: {} }),
+      'utf8',
+    );
   });
 
   /** Build a minimal npm audit v2 JSON payload with the given vulnerabilities. */
@@ -610,7 +620,7 @@ describe('M74 scanDeps — npm audit fixAvailable filter integration', () => {
     stubAudit(buildAuditJson({
       'some-pkg': { severity: 'critical', fixAvailable: false },
     }));
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     const vulnItems = items.filter(i => i.tags.includes('vulnerability'));
     expect(vulnItems).toHaveLength(0);
   });
@@ -619,7 +629,7 @@ describe('M74 scanDeps — npm audit fixAvailable filter integration', () => {
     stubAudit(buildAuditJson({
       'esbuild': { severity: 'critical', fixAvailable: { name: 'esbuild', version: '1.0.0', isSemVerMajor: true } },
     }));
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     const vulnItems = items.filter(i => i.tags.includes('vulnerability'));
     expect(vulnItems).toHaveLength(0);
   });
@@ -628,7 +638,7 @@ describe('M74 scanDeps — npm audit fixAvailable filter integration', () => {
     stubAudit(buildAuditJson({
       'minimist': { severity: 'critical', fixAvailable: true },
     }));
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     const vulnItems = items.filter(i => i.tags.includes('vulnerability'));
     expect(vulnItems.length).toBeGreaterThan(0);
     expect(vulnItems.some(i => i.tags.includes('critical'))).toBe(true);
@@ -638,7 +648,7 @@ describe('M74 scanDeps — npm audit fixAvailable filter integration', () => {
     stubAudit(buildAuditJson({
       'lodash': { severity: 'high', fixAvailable: { name: 'lodash', version: '4.17.21', isSemVerMajor: false } },
     }));
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     const vulnItems = items.filter(i => i.tags.includes('vulnerability'));
     expect(vulnItems.length).toBeGreaterThan(0);
     expect(vulnItems.some(i => i.tags.includes('high'))).toBe(true);
@@ -653,7 +663,7 @@ describe('M74 scanDeps — npm audit fixAvailable filter integration', () => {
       // ACTIONABLE — non-breaking fix
       'minimist': { severity: 'moderate', fixAvailable: true },
     }));
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     const vulnItems = items.filter(i => i.tags.includes('vulnerability'));
     // Only the moderate (minimist) advisory should surface
     expect(vulnItems.some(i => i.tags.includes('moderate'))).toBe(true);
@@ -676,7 +686,7 @@ describe('M74 scanDeps — npm audit fixAvailable filter integration', () => {
       if (typeof cb !== 'function') return;
       cb(null, '', '');
     });
-    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true } });
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
     expect(Array.isArray(items)).toBe(true);
   });
 });
