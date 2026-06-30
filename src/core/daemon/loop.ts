@@ -47,6 +47,8 @@ import { engineTierOf } from '../run/sandboxed-engine.js';
 import { subscriptionAllows, isSubscriptionEngine } from '../fleet/subscription-usage.js'; // M80
 import { recommendRoute, recoverWithinBudget } from '../run/learned-router.js';
 import { decide as gatewayDecide } from '../fabric/gateway.js'; // M247: InferenceGateway
+import { planConcurrentDispatch, runConcurrentDispatch } from '../fabric/concurrent-dispatch.js'; // M255
+import { getResourceSnapshot } from '../fabric/resource-monitor.js'; // M255
 import { estimateRun } from '../observability/estimate.js';
 import { buildForecast } from '../observability/forecast.js';
 import { emitTuningProposals } from '../learn/tuning.js';
@@ -1005,18 +1007,103 @@ export async function tick(
     }, // end run:
   }));  // end tasks.map
 
-  // Batch mode (default — no continuous mode, no explicit concurrency config):
-  // use the exact pre-M116 bounded worker-pool so dispatch + the in-tick budget
-  // short-circuit are byte-identical (preserves the H3 overshoot bound). The
-  // tiered pool only engages for continuous mode or explicit daemon.concurrency.
-  // Detect batch mode from the RAW user config — resolveCfg ALWAYS populates
-  // dcfg.concurrency with defaults, so checking dcfg would never be batch.
-  const explicitConcurrency =
-    liveCfg.daemon?.concurrency !== undefined || liveCfg.daemon?.maxConcurrent !== undefined;
-  const useBatchPool = !isContinuousMode && !explicitConcurrency;
-  const outcomes = useBatchPool
-    ? await bounded(tasks.map((t) => t.run), dcfg.parallel)
-    : await tieredBounded(tasks, tierPool);
+  // M255: Concurrent Multi-Backend Dispatcher — flag-gated.
+  // When fabric.concurrentDispatch === true, replace the serial per-item loop
+  // with planConcurrentDispatch + runConcurrentDispatch across ALL backends with
+  // headroom in PARALLEL. Each backend is bounded to its slot cap from the
+  // resource monitor. Results are converted to the same PromiseSettledResult<ItemOutcome>[]
+  // shape as the existing paths so all downstream accounting (dispatchedCount,
+  // proposalDelta, ledger recording) is byte-identical.
+  //
+  // FLAG-OFF (default): falls through to the existing batch/tieredBounded paths —
+  // byte-identical to pre-M255 behavior.
+  const useConcurrentDispatch = liveCfg.foundry?.fabric?.concurrentDispatch === true;
+
+  let outcomes: PromiseSettledResult<ItemOutcome>[];
+
+  if (useConcurrentDispatch) {
+    // Re-sense headroom before planning (cached 30s; no extra cost in practice).
+    const concurrentSnap = await getResourceSnapshot(liveCfg).catch(() => ({
+      generatedAt: new Date().toISOString(),
+      backends: [{ backend: 'builtin' as const, availability: 'open' as const, usedPct: null, cap: null, capUnit: null, capWindow: null, resetsAt: null, costPerMTokenOut: 0, p50LatencyMs: null, snapshotAt: new Date().toISOString(), reason: 'snapshot-failed', backoffUntilMs: null }],
+    }));
+
+    const maxSlotsPerBackend: number =
+      typeof (liveCfg.foundry?.fabric as Record<string, unknown> | undefined)?.['maxSlotsPerBackend'] === 'number'
+        ? Math.max(1, (liveCfg.foundry!.fabric as Record<string, unknown>)['maxSlotsPerBackend'] as number)
+        : 3;
+
+    const concurrentCfg = { maxSlotsPerBackend };
+
+    // planConcurrentDispatch: pure, uses gateway routing hints for suitability.
+    // Build routing hints in parallel via gateway.decide, then call the pure planner.
+    const routeHints = new Map<string, EngineId>();
+    if (liveCfg.foundry?.fabric?.gateway === true) {
+      const gds = await Promise.allSettled(
+        workedSet.map((item) => gatewayDecide(item, liveCfg, { spentUsd: tickSpent + state.todaySpentUsd }))
+      );
+      for (let i = 0; i < workedSet.length; i++) {
+        const d = gds[i];
+        if (d?.status === 'fulfilled') routeHints.set(workedSet[i]!.id, d.value.backend);
+      }
+    }
+    const concurrentPlan = planConcurrentDispatch(
+      workedSet,
+      concurrentSnap,
+      concurrentCfg,
+      (item) => routeHints.get(item.id) ?? 'builtin',
+    );
+
+    // runConcurrentDispatch: executes plan with full cross-backend parallelism.
+    const concurrentResults = await runConcurrentDispatch(
+      concurrentPlan,
+      async (item, _backend): Promise<unknown> => {
+        // Each dispatched item flows through the FULL task run function.
+        // Find the pre-built task for this item (same gate logic: kill-switch,
+        // budget short-circuit, gateway/serial routing, sandbox, judge, etc.).
+        // We look up by item.id to reuse the existing tasks[] entries which
+        // already capture tickSpent/state/liveCfg via closure.
+        const taskEntry = tasks.find((_t, idx) => workedSet[idx]?.id === item.id);
+        if (taskEntry) return taskEntry.run();
+        // Fallback: build a minimal no-op outcome (item not in tasks — shouldn't happen).
+        return { item, spentUsd: 0, dispatched: false } satisfies ItemOutcome;
+      },
+      killSwitchOn,
+      concurrentCfg,
+    );
+
+    // Convert DispatchResult[] → PromiseSettledResult<ItemOutcome>[] for downstream.
+    outcomes = concurrentResults.map((r): PromiseSettledResult<ItemOutcome> => {
+      if (r.settled?.status === 'rejected') {
+        return { status: 'rejected', reason: r.settled.reason };
+      }
+      const inner = r.settled?.status === 'fulfilled'
+        ? (r.settled.value as ItemOutcome | undefined)
+        : undefined;
+      return {
+        status: 'fulfilled',
+        value: inner ?? { item: r.item, spentUsd: 0, dispatched: r.attempted },
+      };
+    });
+
+    // Add unassigned items as non-dispatched fulfilled outcomes.
+    for (const item of concurrentPlan.unassigned) {
+      outcomes.push({ status: 'fulfilled', value: { item, spentUsd: 0, dispatched: false } });
+    }
+  } else {
+    // Batch mode (default — no continuous mode, no explicit concurrency config):
+    // use the exact pre-M116 bounded worker-pool so dispatch + the in-tick budget
+    // short-circuit are byte-identical (preserves the H3 overshoot bound). The
+    // tiered pool only engages for continuous mode or explicit daemon.concurrency.
+    // Detect batch mode from the RAW user config — resolveCfg ALWAYS populates
+    // dcfg.concurrency with defaults, so checking dcfg would never be batch.
+    const explicitConcurrency =
+      liveCfg.daemon?.concurrency !== undefined || liveCfg.daemon?.maxConcurrent !== undefined;
+    const useBatchPool = !isContinuousMode && !explicitConcurrency;
+    outcomes = useBatchPool
+      ? await bounded(tasks.map((t) => t.run), dcfg.parallel)
+      : await tieredBounded(tasks, tierPool);
+  }
 
   // itemsProcessed counts items whose swarm was actually dispatched (not those
   // skipped by the kill switch or the in-tick budget short-circuit).

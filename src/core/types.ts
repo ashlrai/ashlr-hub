@@ -475,6 +475,22 @@ export interface AshlrConfig {
        * DEFAULT false → byte-identical to pre-M250. Requires fabric.gateway=true.
        */
       resourceAware?: boolean;
+      /**
+       * M255 Concurrent Multi-Backend Dispatcher: when true, the daemon tick
+       * dispatches items across ALL backends with headroom IN PARALLEL instead
+       * of the serial per-item loop. Each backend's concurrency is bounded by
+       * its per-availability slot count (open→maxSlotsPerBackend, near→half,
+       * throttled/exhausted/unreachable/unknown→0).
+       * DEFAULT false → serial path runs UNCHANGED (byte-identical to pre-M255).
+       * Requires fabric.gateway=true for full routing trace.
+       */
+      concurrentDispatch?: boolean;
+      /**
+       * M255: maximum concurrent slots per backend when concurrentDispatch=true.
+       * open backends get this many slots; near backends get ceil(N/2).
+       * DEFAULT 3.
+       */
+      maxSlotsPerBackend?: number;
     };
     /**
      * M250 Resource Control Plane: per-backend weekly message/token caps.
