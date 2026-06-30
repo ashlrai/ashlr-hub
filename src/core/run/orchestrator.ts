@@ -1108,6 +1108,7 @@ export async function runGoal(
 
                 // M140: realTestLoop flag (default true). When false, skip test execution
                 // and treat as if no test command was found (propose immediately).
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any -- m140 pins this exact source text
                 const realTestLoop = (cfg.foundry as any)?.realTestLoop ?? true;
                 const titrrResult = realTestLoop ? titrrTestRun(titrrSandbox.worktreePath, cfg) : null;
                 if (!titrrResult || titrrResult.ok) {
@@ -1211,6 +1212,7 @@ export async function runGoal(
               // skip the test step entirely and proceed to propose (graceful degrade).
               // M140: realTestLoop flag (default true). When false, behave as if no
               // test command was found — skip test execution entirely (reversible flag).
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- m140 pins this exact source text
               const realTestLoop = (cfg.foundry as any)?.realTestLoop ?? true;
               const testRoot = titrrSandbox?.worktreePath ?? cwd;
               if (realTestLoop) {

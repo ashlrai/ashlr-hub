@@ -482,7 +482,7 @@ export function loadSweBenchDataset(jsonlPath: string, repoBasePath?: string): B
       }
       const repoPath = rawRepoPath;
       const goldTestCommand = rec.test_cmd ?? rec.test_command ?? 'echo no-test';
-      let failToPassRaw = rec.FAIL_TO_PASS ?? [];
+      const failToPassRaw = rec.FAIL_TO_PASS ?? [];
       const failToPassTests: string[] =
         typeof failToPassRaw === 'string'
           ? (JSON.parse(failToPassRaw) as string[])

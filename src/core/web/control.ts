@@ -562,7 +562,7 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
   const ts = new Date().toISOString();
 
   // Per-repo digest (7d window)
-  let digest = await buildFleetDigest('7d').catch((err) => {
+  const digest = await buildFleetDigest('7d').catch((err) => {
     console.warn('[ashlr] control:buildFleetActivity buildFleetDigest failed:', (err as Error)?.message ?? err);
     return {
       running: false,

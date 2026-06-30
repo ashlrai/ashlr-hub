@@ -85,6 +85,7 @@ function formatLatency(state: BackendResourceState): string {
 
 function pad(s: string, n: number): string {
   // Strip ANSI codes for length calculation
+  // eslint-disable-next-line no-control-regex -- ESC (\x1b) is the ANSI CSI introducer
   const stripped = s.replace(/\x1b\[[0-9;]*m/g, '');
   const padLen = Math.max(0, n - stripped.length);
   return s + ' '.repeat(padLen);

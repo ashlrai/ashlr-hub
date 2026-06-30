@@ -1306,12 +1306,14 @@ export async function autoMergeProposal(
       // config value cannot disable the scope cap (a SAFETY gate).  Any value
       // < 1 would make the cap impossible to satisfy (every diff has ≥ 1
       // file/line), so we floor at 1 instead of silently disabling it.
-      const rawFiles = (cfg.foundry as any)?.autoMerge?.maxAutomergeFiles;
+      const autoMergeCfg = (cfg.foundry as { autoMerge?: Record<string, unknown> } | undefined)
+        ?.autoMerge;
+      const rawFiles = autoMergeCfg?.maxAutomergeFiles;
       const MAX_AUTOMERGE_FILES: number =
         typeof rawFiles === 'number' && rawFiles >= 1
           ? Math.floor(rawFiles)
           : 4;
-      const rawLines = (cfg.foundry as any)?.autoMerge?.maxAutomergeLines;
+      const rawLines = autoMergeCfg?.maxAutomergeLines;
       const MAX_AUTOMERGE_LINES: number =
         typeof rawLines === 'number' && rawLines >= 1
           ? Math.floor(rawLines)
@@ -1325,7 +1327,7 @@ export async function autoMergeProposal(
       // (security/build/shell surfaces + large diffs) is still refused. The real
       // protection remains: judge-ship + verify(typecheck/tests-delta/lint-delta)
       // + frontier-authority + HMAC attestation + the file/line scope cap.
-      const scopeMaxRisk = ((cfg.foundry as any)?.autoMerge?.maxRisk ?? 'low') as RiskClass;
+      const scopeMaxRisk = (autoMergeCfg?.maxRisk ?? 'low') as RiskClass;
       if (RISK_ORDER[risk] > RISK_ORDER[scopeMaxRisk]) {
         return refuse(
           `scope cap: risk '${risk}' exceeds maxRisk '${scopeMaxRisk}'`,
@@ -1425,7 +1427,7 @@ export async function autoMergeProposal(
         // we fall back to detectVerifyCommands so the gate is never a no-op.
         // Read the package.json scripts inline (readPackageJson/scriptsOf are
         // internal to verify-commands.ts and not exported).
-        let scriptsForParity: Record<string, string> = {};
+        const scriptsForParity: Record<string, string> = {};
         try {
           const raw = readFileSync(join(repo, 'package.json'), 'utf8');
           const pkg = JSON.parse(raw) as { scripts?: Record<string, unknown> };

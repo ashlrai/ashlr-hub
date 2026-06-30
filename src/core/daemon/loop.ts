@@ -594,7 +594,7 @@ export async function tick(
   // M186: Generative invent cycle — synthesise new work items from enrolled repos.
   // Flag-gated: cfg.foundry.generative === true → ON; absent/false → skipped (default OFF).
   // Never throws; never blocks or breaks the tick on any error.
-  if ((liveCfg.foundry as any)?.generative === true) {
+  if ((liveCfg.foundry as Record<string, unknown>)?.generative === true) {
     try { await runInventCycle(liveCfg); } catch (err) { console.warn('[ashlr] daemon:tick runInventCycle failed:', (err as Error)?.message ?? err); }
   }
 
@@ -602,7 +602,7 @@ export async function tick(
   // Flag-gated: cfg.foundry.counterfactual === true AND sparse tick cadence (every 20 ticks).
   // Never throws; never blocks or breaks the tick on any error.
   if (
-    (liveCfg.foundry as any)?.counterfactual === true &&
+    (liveCfg.foundry as Record<string, unknown>)?.counterfactual === true &&
     state.ticks.length % 20 === 0
   ) {
     try { await runCounterfactualReplay(liveCfg); } catch (err) { console.warn('[ashlr] daemon:tick runCounterfactualReplay failed:', (err as Error)?.message ?? err); }
@@ -611,7 +611,7 @@ export async function tick(
   // M189: Regression sentinel — detect regressions introduced by auto-merge and bisect/revert.
   // Flag-gated: cfg.foundry.regressionSentinel === true → ON; absent/false → skipped (default OFF).
   // Never throws; never blocks or breaks the tick on any error.
-  if ((liveCfg.foundry as any)?.regressionSentinel === true) {
+  if ((liveCfg.foundry as Record<string, unknown>)?.regressionSentinel === true) {
     try {
       const r = await detectRegression(liveCfg);
       if (r.regressed) {

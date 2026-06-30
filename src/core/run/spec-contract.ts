@@ -212,7 +212,7 @@ function classify(text: string, index: number): Assertion {
   // 1. Explicit path/file existence: a `path/like/this.ext` or "file X exists".
   //    Recognize a token containing a slash or a dotted filename.
   const pathTok =
-    t.match(/`([^`]*[\/.][^`]+)`/)?.[1] ??
+    t.match(/`([^`]*[/.][^`]+)`/)?.[1] ??
     t.match(/\b([\w./-]+\/[\w./-]+|[\w-]+\.[A-Za-z][\w]{0,6})\b/)?.[1];
   if (
     pathTok &&

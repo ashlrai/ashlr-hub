@@ -86,7 +86,7 @@ const IGNORE_DIRS: ReadonlySet<string> = new Set([
  * python-lib/, site-packages/) that appear as directory segments.
  */
 const IGNORE_FILE_RE =
-  /(?:^|[\/])(bun\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|composer\.lock|Gemfile\.lock)$|\.min\.[cm]?[jt]sx?$|\.min\.css$|\.generated\.[^.]+$|\.map$/i;
+  /(?:^|[/])(bun\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|composer\.lock|Gemfile\.lock)$|\.min\.[cm]?[jt]sx?$|\.min\.css$|\.generated\.[^.]+$|\.map$/i;
 
 /**
  * M136: Path pattern for vendored language-library directories that appear as

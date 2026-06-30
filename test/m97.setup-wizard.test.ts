@@ -442,7 +442,7 @@ describe('engine-auth step — guidance only invariant', () => {
     // fix guidance is surfaced (guidance text, not a token)
     expect(s.detail).toContain('claude:');
     // NEVER writes a token
-    expect(s.detail).not.toMatch(/^[A-Za-z0-9_\-]{20,}$/);
+    expect(s.detail).not.toMatch(/^[A-Za-z0-9_-]{20,}$/);
   });
 
   it('stepEngines never calls install() or enroll()', async () => {

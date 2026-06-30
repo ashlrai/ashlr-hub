@@ -70,6 +70,7 @@ function usageBar(usedPct: number, width = 12): string {
 
 function pad(s: string, len: number): string {
   // Strip ANSI escape codes for width calculation.
+  // eslint-disable-next-line no-control-regex -- ESC (\x1b) is the ANSI CSI introducer
   const plain = s.replace(/\x1b\[[0-9;]*m/g, '');
   return s + ' '.repeat(Math.max(0, len - plain.length));
 }
