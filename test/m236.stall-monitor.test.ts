@@ -182,7 +182,9 @@ describe('M236 loop-stall', () => {
 // ---------------------------------------------------------------------------
 
 describe('M236 no-diff-stall', () => {
-  it('20 text events with no file_touched triggers no-diff-stall', () => {
+  it('80 text events with no file_touched triggers no-diff-stall', () => {
+    // M291: NO_DIFF_MIN_EVENTS raised 20→80 (substantial frontier tasks read
+    // many files before their first edit; 20 false-killed them).
     vi.useRealTimers();
 
     const stallCalls: string[] = [];
@@ -192,7 +194,7 @@ describe('M236 no-diff-stall', () => {
       60_000,
     );
 
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 80; i++) {
       monitor.onEvent(textEvent(`token ${i}`));
     }
 

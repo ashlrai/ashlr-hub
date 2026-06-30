@@ -37,8 +37,18 @@ const DEFAULT_STALL_IDLE_MS = 3 * 60_000;
 /** How many consecutive identical (tool+args) events constitute a loop. */
 const LOOP_STALL_WINDOW = 6;
 
-/** Minimum events before no-diff-stall can trigger (avoids false positives). */
-const NO_DIFF_MIN_EVENTS = 20;
+/** Minimum events before no-diff-stall can trigger (avoids false positives).
+ * M291: raised 20→80. Substantial frontier tasks legitimately READ many files
+ * (20-40 tool calls) before their first edit; the old 20 killed them mid-read
+ * ('no-diff-stall' before any edit registered). 80 still catches a genuinely
+ * spinning agent (many calls, zero edits) but gives real work room to orient. */
+const NO_DIFF_MIN_EVENTS = 80;
+
+/** M291: tool names that indicate a file MUTATION (so the no-diff-stall detector
+ * recognises an editing agent as productive). Claude/Codex edit tool-calls are
+ * normalised to kind 'tool_call' (not 'file_touched'), so without this the
+ * monitor never counted edits → false no-diff-stall kills on working agents. */
+const EDIT_TOOL_RE = /(write|edit|create|str_replace|multi_?edit|apply_?patch|insert|notebook)/i;
 
 // ---------------------------------------------------------------------------
 // TerminationReason
@@ -158,6 +168,13 @@ export function attachStallMonitor(
 
     // Track file mutations from file_touched events.
     if (ev.kind === 'file_touched') fileTouchedCount++;
+
+    // M291: count edit-like tool calls as file mutations so an editing agent is
+    // recognised as productive (claude/codex edit tool-calls arrive as 'tool_call',
+    // never 'file_touched', so the no-diff-stall detector otherwise never sees edits).
+    if (ev.kind === 'tool_call' && ev.toolName && EDIT_TOOL_RE.test(ev.toolName)) {
+      fileTouchedCount++;
+    }
 
     // Loop-stall detection: hash (toolName + normalised text) for tool_call events.
     if (ev.kind === 'tool_call' && ev.toolName) {
