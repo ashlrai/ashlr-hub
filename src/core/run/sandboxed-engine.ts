@@ -61,6 +61,8 @@ import { hashDiff, signProvenance } from '../foundry/provenance.js';
 // M249: RunCache shadow mode — key construction + store (import lazy so flag-off path
 // incurs zero module load cost; the dynamic import is cached by Node after first call).
 import { buildCacheKeyInput, buildCacheKey } from '../fabric/cache/key.js';
+// M275: completeness + self-verify gate (additive, flag-off byte-identical).
+import { runCompletenessGate } from './completeness-gate.js';
 import { lookup as cacheLookup, write as cacheWrite } from '../fabric/cache/store.js';
 import type { CacheEntry } from '../fabric/cache/store.js';
 // M195: resolve api-model keys (e.g. NVIDIA_NIM_API_KEY) via the engine-auth
@@ -563,24 +565,59 @@ export async function runEngineSandboxed(
             const scrubbed = scrubSecrets(diff.patch);
             const diffHash = hashDiff(scrubbed);
             const provenanceSig = signProvenance(engineModel, tier, diffHash);
-            const proposal = selectInboxStore(cfg).create({
-              repo: sb.sourceRepo,
-              origin: 'agent',
-              kind: 'patch',
-              title: `[partial] ${engine} run: ${goal.slice(0, 78)}`,
-              summary:
-                `Partial ${engineModel} run (timed-out / non-zero exit) produced ` +
-                `${diff.files} file(s) (+${diff.insertions}/-${diff.deletions}). ` +
-                `Engine error: ${res.error ?? 'unknown'}. Review before applying.`,
-              diff: scrubbed,
-              diffHash,
-              provenanceSig,
-              sandboxId: sb.id,
-              engineModel,
-              engineTier: tier,
-              isPartial: true,
-            });
-            proposalId = proposal.id;
+            // M275: completeness gate — partial runs are always blocked by default.
+            // Flag-off (completenessGate === false) → skip gate, preserve pre-M275 behavior.
+            if (cfg.foundry?.completenessGate !== false) {
+              const _gateResult = await runCompletenessGate({
+                worktreePath: sb.worktreePath,
+                diff,
+                goal,
+                cfg,
+                isPartial: true,
+              });
+              if (!_gateResult.pass) {
+                console.log(`[M275] completeness gate blocked partial proposal: ${_gateResult.reason}`);
+                // Partial run with blocked gate — do not file as proposal.
+              } else {
+                const proposal = selectInboxStore(cfg).create({
+                  repo: sb.sourceRepo,
+                  origin: 'agent',
+                  kind: 'patch',
+                  title: `[partial] ${engine} run: ${goal.slice(0, 78)}`,
+                  summary:
+                    `Partial ${engineModel} run (timed-out / non-zero exit) produced ` +
+                    `${diff.files} file(s) (+${diff.insertions}/-${diff.deletions}). ` +
+                    `Engine error: ${res.error ?? 'unknown'}. Review before applying.`,
+                  diff: scrubbed,
+                  diffHash,
+                  provenanceSig,
+                  sandboxId: sb.id,
+                  engineModel,
+                  engineTier: tier,
+                  isPartial: true,
+                });
+                proposalId = proposal.id;
+              }
+            } else {
+              const proposal = selectInboxStore(cfg).create({
+                repo: sb.sourceRepo,
+                origin: 'agent',
+                kind: 'patch',
+                title: `[partial] ${engine} run: ${goal.slice(0, 78)}`,
+                summary:
+                  `Partial ${engineModel} run (timed-out / non-zero exit) produced ` +
+                  `${diff.files} file(s) (+${diff.insertions}/-${diff.deletions}). ` +
+                  `Engine error: ${res.error ?? 'unknown'}. Review before applying.`,
+                diff: scrubbed,
+                diffHash,
+                provenanceSig,
+                sandboxId: sb.id,
+                engineModel,
+                engineTier: tier,
+                isPartial: true,
+              });
+              proposalId = proposal.id;
+            }
           }
         } catch {
           // diff/proposal capture is best-effort — never fail the run on it.
@@ -604,6 +641,22 @@ export async function runEngineSandboxed(
           const scrubbed = scrubSecrets(diff.patch);
           const diffHash = hashDiff(scrubbed);
           const provenanceSig = signProvenance(engineModel, tier, diffHash);
+          // M275: completeness + self-verify gate. Runs typecheck/test in the
+          // sandbox worktree before filing. Flag-off → byte-identical to pre-M275.
+          let _m275ShouldFile = true;
+          if (cfg.foundry?.completenessGate !== false) {
+            const _gateResult = await runCompletenessGate({
+              worktreePath: sb.worktreePath,
+              diff,
+              goal,
+              cfg,
+            });
+            if (!_gateResult.pass) {
+              console.log(`[M275] completeness gate blocked proposal: ${_gateResult.reason}`);
+              _m275ShouldFile = false;
+            }
+          }
+          if (_m275ShouldFile) {
           const proposal = selectInboxStore(cfg).create({
             repo: sb.sourceRepo,
             origin: 'agent',
@@ -669,6 +722,7 @@ export async function runEngineSandboxed(
               cacheWrite(cfg, _entry, opts.sourceRepo);
             }
           } catch { /* shadow write is best-effort */ }
+          } // end if (_m275ShouldFile)
         }
       } catch {
         // diff/proposal capture is best-effort — never fail the run on it.

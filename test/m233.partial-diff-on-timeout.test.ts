@@ -113,7 +113,9 @@ describe('M233 partial-diff capture on timeout', () => {
           },
         );
 
-        const result = await runEngineSandboxed('claude', 'Add confidence scoring core', makeConfig(), {
+        // M275: partial-diff-on-timeout capture is tested with completenessGate OFF
+        // (flag-off preserves the pre-M275 behavior of filing partial proposals).
+        const result = await runEngineSandboxed('claude', 'Add confidence scoring core', makeConfig({ foundry: { completenessGate: false } }), {
           sourceRepo: repo.dir,
           propose: true,
         });

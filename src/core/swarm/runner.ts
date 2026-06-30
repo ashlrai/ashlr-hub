@@ -35,6 +35,7 @@
  */
 
 import * as path from 'node:path';
+import { existsSync } from 'node:fs';
 import * as child_process from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -918,6 +919,7 @@ function captureSandboxAndCleanup(
   run: SwarmRun,
   sink: StreamSink,
   propose = false,
+  cfg?: import('../types.js').AshlrConfig,
 ): void {
   // Capture diff (read-only; never mutates source tree).
   let diff: SandboxDiff | null = null;
@@ -974,6 +976,23 @@ function captureSandboxAndCleanup(
         // sandboxed-engine path (M47.1) — an agent-hardcoded token in a patch
         // must not persist to the inbox or surface via ashlr_inbox_list.
         const scrubbedPatch = diff.patch ? scrubSecrets(diff.patch) : undefined;
+
+        // M275 (sync): lockfile integrity check. Self-verify (typecheck/test)
+        // runs only in the async sandboxed-engine path; here we validate that a
+        // package.json change includes a lockfile update. Flag-off → skip.
+        // NOTE: we do NOT import completeness-gate.ts here to keep runner.ts sync.
+        if (cfg?.foundry?.completenessGate !== false) {
+          const _lockfiles = ['pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'package-lock.json'];
+          const _patch = diff.patch ?? '';
+          const _hasPkgJson = _patch.includes('package.json');
+          const _patchHasLockfile = _lockfiles.some((lf) => _patch.includes(lf));
+          const _repoHasLockfile = _lockfiles.some((lf) => existsSync(path.join(sb.sourceRepo, lf)));
+          if (_hasPkgJson && _repoHasLockfile && !_patchHasLockfile) {
+            emitLog(sink, `[M275] completeness gate blocked swarm proposal: dependency change (package.json) lacks corresponding lockfile update`);
+            return; // do not file — captureSandboxAndCleanup is void
+          }
+        }
+
         const created = _createProposal({
           repo: sb.sourceRepo,
           origin: 'swarm',
@@ -1375,7 +1394,7 @@ export async function runSwarm(
       maybePersist(run);
       emitLog(sink, run.result);
       // M21: clean up sandbox even on planning failure (no diff to capture yet).
-      if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true);
+      if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg);
       await fireEmitSwarm(run, cfg);
       if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
       return run;
@@ -1422,7 +1441,7 @@ export async function runSwarm(
         persist(run);
         emitLog(sink, run.result);
         // M21: capture diff of work done so far, then remove sandbox.
-        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true);
+        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1435,7 +1454,7 @@ export async function runSwarm(
         // Stop cleanly — do NOT proceed to the next phase.
         emitLog(sink, `Swarm ${run.id} paused at phase "${phase}" — awaiting human approval.`);
         // M21: capture diff of partial work, then remove sandbox.
-        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true);
+        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1448,7 +1467,7 @@ export async function runSwarm(
         persist(run);
         emitLog(sink, run.result);
         // M21: capture diff of partial work, then remove sandbox.
-        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true);
+        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1461,7 +1480,7 @@ export async function runSwarm(
     persist(run);
     emitLog(sink, run.result);
     // M21: capture diff of any partial work, then remove sandbox.
-    if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true);
+    if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg);
     await fireEmitSwarm(run, cfg);
     if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
     return run;
@@ -1501,7 +1520,7 @@ export async function runSwarm(
   persist(run);
 
   // M21: capture full sandbox diff proposal, then remove sandbox.
-  if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true);
+  if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg);
 
   emitLog(sink, `Swarm ${run.id} finished with status: ${run.status}`);
 
