@@ -243,8 +243,24 @@ function extractJson(raw: string): Record<string, unknown> | null {
     } catch { /* fall through */ }
   }
 
-  // Find the LAST {...} block (models sometimes emit preamble JSON then the real one).
+  // Find the {...} block that is the VERDICT (M300c). Models — especially the
+  // codex CLI — emit OTHER JSON objects (event/telemetry envelopes) AFTER the
+  // verdict, so the naive "last {...}" grabbed a non-verdict object whose missing
+  // value/correctness fields clamped to 1. Prefer the LAST {...} that actually
+  // contains a verdict key ("verdict"/"value"/"correctness"); fall back to the
+  // last parseable object only if none has those keys.
   const allBraceMatches = [...raw.matchAll(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*/g)];
+  for (let i = allBraceMatches.length - 1; i >= 0; i--) {
+    try {
+      const parsed = JSON.parse(allBraceMatches[i]![0]);
+      if (
+        parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
+        ('verdict' in parsed || 'value' in parsed || 'correctness' in parsed)
+      ) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch { /* keep scanning */ }
+  }
   for (let i = allBraceMatches.length - 1; i >= 0; i--) {
     try {
       const parsed = JSON.parse(allBraceMatches[i]![0]);
