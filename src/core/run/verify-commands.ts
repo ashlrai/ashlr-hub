@@ -22,7 +22,7 @@
 import { spawnSync } from 'node:child_process';
 import type { SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { AshlrConfig } from '../types.js';
 import { renderToolText } from '../mcp-native.js';
 import { audit } from '../sandbox/audit.js';
@@ -208,6 +208,26 @@ export function spawnOptionsFor(
 ): SpawnSyncOptionsWithStringEncoding {
   const isWin = platform === 'win32';
   const needsShell = isWin && bin !== undefined && WINDOWS_SHIM_BINS.has(bin);
+
+  // M286 — inject the workspace-local node_modules/.bin into PATH so that
+  // commands like `npm run typecheck` (which resolves to `tsc --noEmit`) and
+  // `npx tsc` can find the local tsc/vitest binaries even when the workspace
+  // is a git worktree that has a SYMLINKED node_modules pointing to the source
+  // repo's real install. Without this, spawnSync inherits the parent PATH which
+  // may not include the local .bin, causing "tsc: command not found".
+  //
+  // Rules:
+  //  - Only prepend when the .bin dir actually exists (no-op for repos without
+  //    a local install — the command will fail gracefully as before).
+  //  - Use resolve() to normalise the path (handles symlinks transparently).
+  //  - Never set env to undefined — always carry the full parent environment so
+  //    NODE_PATH, HOME, etc. are inherited.
+  const localBin = resolve(workspaceRoot, 'node_modules', '.bin');
+  const parentPath = process.env.PATH ?? '';
+  const env: NodeJS.ProcessEnv = existsSync(localBin)
+    ? { ...process.env, PATH: `${localBin}${isWin ? ';' : ':'}${parentPath}` }
+    : { ...process.env };
+
   return {
     cwd: workspaceRoot,
     timeout,
@@ -215,6 +235,7 @@ export function spawnOptionsFor(
     encoding: 'utf8',
     shell: needsShell, // resolve npm.cmd/npx.cmd etc. via PATHEXT on Windows
     windowsHide: true,
+    env,
   };
 }
 

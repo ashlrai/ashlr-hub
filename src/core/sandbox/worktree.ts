@@ -28,6 +28,8 @@ import {
   readFileSync,
   writeFileSync,
   rmSync,
+  symlinkSync,
+  appendFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
@@ -176,6 +178,77 @@ function gitTry(cwd: string, args: string[]): string | null {
     return gitRun(cwd, args);
   } catch {
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// M286: node_modules symlink for worktree verify environment
+// ---------------------------------------------------------------------------
+
+/**
+ * Symlink the source repo's node_modules into the worktree so that verify
+ * commands (typecheck/test) can resolve the local toolchain (tsc, vitest, etc.)
+ * without a separate install.
+ *
+ * Rules (SAFETY — never throws, never mutates source repo):
+ *  - Only attempted when sourceRepo/node_modules exists (real install present).
+ *  - Only attempted when worktreePath/node_modules does NOT already exist (no
+ *    clobber; a future install in the worktree would pre-empt the symlink).
+ *  - node_modules is gitignored — the symlink is never staged or captured in
+ *    the proposal diff (M283 layer 1 would need to exclude it, but gitignore
+ *    handles it; layer 2 is not needed for an ignored path).
+ *  - Any failure (EPERM, EXDEV, etc.) is swallowed — the worktree creation
+ *    succeeds regardless; verify commands will fail gracefully if they still
+ *    can't find the toolchain (safe fallback).
+ */
+function symlinkNodeModules(sourceRepo: string, worktreePath: string): void {
+  try {
+    const src = join(sourceRepo, 'node_modules');
+    const dst = join(worktreePath, 'node_modules');
+    if (!existsSync(src)) return; // source has no install — nothing to link
+    if (existsSync(dst)) return;  // already present — don't clobber
+    symlinkSync(src, dst, 'dir');
+
+    // Register node_modules in the worktree's .git/info/exclude so that
+    // `git add -A` (called by sandboxDiff) never stages the symlink. Without
+    // this, git treats the symlink as a new tracked entry (mode 120000) and it
+    // appears in the proposal diff — which is wrong and confusing for reviewers.
+    //
+    // The worktree's gitdir is NOT the source repo's .git — it has its own
+    // .git FILE (a gitfile) pointing at the worktree's entry under the source
+    // repo's .git/worktrees/<id>/. The info/exclude for a worktree lives at
+    // <worktreePath>/.git (which is a FILE, not a dir, for a worktree) and
+    // git resolves info/exclude via the gitdir. We resolve it by reading the
+    // .git file to find the actual gitdir, then appending to info/exclude there.
+    // Best-effort: any failure is silently suppressed (sandboxDiff layer 2 is
+    // an independent fallback via SANDBOX_INFRA_FILES).
+    try {
+      // The worktree's .git is a FILE containing "gitdir: <path>"
+      const gitFile = join(worktreePath, '.git');
+      if (!existsSync(gitFile)) return;
+      const raw = readFileSync(gitFile, 'utf8').trim();
+      const prefix = 'gitdir: ';
+      if (!raw.startsWith(prefix)) return;
+      const gitdir = raw.slice(prefix.length).trim();
+      // gitdir is absolute or relative to the worktree
+      const absGitdir = gitdir.startsWith('/') ? gitdir : join(worktreePath, gitdir);
+      const excludeDir = join(absGitdir, 'info');
+      const excludeFile = join(excludeDir, 'exclude');
+      if (!existsSync(excludeDir)) mkdirSync(excludeDir, { recursive: true });
+      // Append only if node_modules isn't already excluded there
+      const existing = existsSync(excludeFile) ? readFileSync(excludeFile, 'utf8') : '';
+      if (!existing.includes('node_modules')) {
+        appendFileSync(excludeFile, '\n# M286: fleet-symlinked node_modules — never stage\nnode_modules\n', 'utf8');
+      }
+    } catch {
+      // info/exclude registration is best-effort; a failure here does NOT
+      // break the worktree — sandboxDiff's layer-2 pathspec exclusion handles it.
+    }
+  } catch {
+    // Graceful fallback: symlink failure (cross-device, permissions, etc.)
+    // must never crash the sandbox creation. Verify may still fail if the
+    // toolchain is absent, but that is a deterministic, audited failure — not
+    // an infrastructure crash.
   }
 }
 
@@ -381,6 +454,11 @@ export function createSandbox(
     throw err instanceof Error ? err : new Error(String(err));
   }
 
+  // M286 — symlink source node_modules into the worktree so verify commands
+  // (npm run typecheck, npm run test) can resolve the local toolchain without
+  // a separate install. Graceful: never throws; never mutates source repo.
+  symlinkNodeModules(sourceRepo, worktreePath);
+
   const sb: Sandbox = {
     id,
     sourceRepo,
@@ -436,7 +514,7 @@ export function createSandbox(
 // it is allowed through. This check is implemented by passing the pathspec only
 // when the file is untracked (not in baseHead).
 // ---------------------------------------------------------------------------
-const SANDBOX_INFRA_FILES = ['.mcp.json'] as const;
+const SANDBOX_INFRA_FILES = ['.mcp.json', 'node_modules'] as const;
 
 /**
  * Capture the git diff of the sandbox worktree vs its base HEAD. Read-only —
