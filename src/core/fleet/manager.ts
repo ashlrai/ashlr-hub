@@ -353,17 +353,31 @@ export async function judgeProposal(
       obj = extractJson(raw2);
     } catch { /* retry failed — fall through to fallback */ }
   }
+  // M300d: parse scores/verdict from the structured <reasoning> prose
+  // (VALUE: N / CORRECTNESS: N / ... / VERDICT: x) as a robust fallback. Some
+  // engines (notably the codex CLI) reliably emit that reasoning block but NOT a
+  // strict trailing {"value":..} JSON, so extractJson found a non-verdict object
+  // and every field clamped to 1 (a parse artifact, not a real judgment). We use
+  // a reasoning-derived score whenever the JSON omitted that field.
+  const rprose = fullReasoning || raw;
+  const rNum = (label: string): number | undefined => {
+    const m = rprose.match(new RegExp(label + '\\s*[:=]\\s*(\\d)', 'i'));
+    return m ? Number(m[1]) : undefined;
+  };
+  const rVerdictM = rprose.match(/VERDICT\s*[:=]\s*([a-z]+)/i);
+
   if (!obj) return fallback();
 
-  const rawVerdict = typeof obj['verdict'] === 'string' ? obj['verdict'] : '';
+  const rawVerdict =
+    typeof obj['verdict'] === 'string' ? obj['verdict'] : (rVerdictM?.[1] ?? '');
   const verdict: ManagerVerdict['verdict'] = VALID_VERDICTS.has(rawVerdict)
     ? (rawVerdict as ManagerVerdict['verdict'])
     : normaliseVerdict(rawVerdict);
 
-  const value = clamp(obj['value'], 1, 5);
-  const correctness = clamp(obj['correctness'], 1, 5);
-  const scope = clamp(obj['scope'], 1, 5);
-  const alignment = clamp(obj['alignment'], 1, 5);
+  const value = clamp(obj['value'] ?? rNum('VALUE'), 1, 5);
+  const correctness = clamp(obj['correctness'] ?? rNum('CORRECTNESS'), 1, 5);
+  const scope = clamp(obj['scope'] ?? rNum('SCOPE'), 1, 5);
+  const alignment = clamp(obj['alignment'] ?? rNum('ALIGNMENT'), 1, 5);
   const rationale =
     typeof obj['rationale'] === 'string' && obj['rationale'].length > 0
       ? obj['rationale'].slice(0, 200)
