@@ -141,11 +141,16 @@ Then, on a NEW line immediately after </reasoning>, emit ONLY this JSON — no o
   scope       1-5  blast radius (1=single line, 5=touches many files / risky)
   alignment   1-5  does this match the repo purpose or stated north-star? (5=directly advances it, 1=unrelated)
   verdict     one of: ship | review | noise | harmful
-              ship=value≥4 AND correctness≥4 AND no obvious risk
-              review=uncertain or needs human look
+              ship=value≥3 AND correctness≥4 AND no obvious risk
+                   (a USEFUL, correct, well-tested change SHIPS — it need NOT be
+                    critical/value-5. The autonomous fleet's job is a steady stream
+                    of good, correct improvements, so value=3 "useful" work with
+                    high correctness is shippable. Correctness is the hard bar.)
+              review=correctness≤3 (NOT confident the change is correct) OR
+                     value≤2 (trivial / not worth merging) OR genuinely needs a human look
               noise=trivial/no diff/spam
               harmful=dangerous/destructive/security risk
-              When in doubt choose review. Never choose noise or harmful speculatively.
+              When uncertain about CORRECTNESS choose review. Never choose noise or harmful speculatively.
   rationale   one sentence explaining your verdict
 
 ## Example output
