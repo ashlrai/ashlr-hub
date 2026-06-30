@@ -187,6 +187,12 @@ describe('m130 — judge uses Claude CLI when available', () => {
 
 describe('m130 — judge falls back to local 72b when claude unavailable', () => {
   it('uses ollamaDirectComplete (fetch) when engineInstalled returns false', async () => {
+    // M282: reset module registry so manager.js is re-imported with fresh static
+    // bindings. Without this, the prior test cached manager.js with the real
+    // engineInstalled binding (returns true because claude is installed on this
+    // machine). vi.doMock cannot override an already-bound static import — only
+    // a full registry reset + re-import picks up the new mock.
+    vi.resetModules();
     vi.doMock('../src/core/run/engines.js', () => ({
       engineInstalled: mockEngineInstalledFalse(),
       buildEngineCommand: vi.fn(),

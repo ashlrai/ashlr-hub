@@ -89,6 +89,20 @@ describe('getProviderRegistry with sparse config', () => {
 
 describe('runManager direct-Ollama fallback', () => {
   it('uses buildOpenAICompatibleClient when getActiveClient throws', async () => {
+    // M282: reset the module registry so manager.js is re-imported with fresh
+    // static bindings for engineInstalled. Without this, a prior import in the
+    // same file (or a parallel test) caches manager.js with the real
+    // engineInstalled — which returns true on this machine (claude CLI installed)
+    // — causing resolveJudgeClient to pick the Claude path instead of local-72b.
+    vi.resetModules();
+    // Force engineInstalled to return false → resolveJudgeClient uses local-72b
+    vi.doMock('../src/core/run/engines.js', async (importOriginal) => {
+      const orig = await importOriginal<typeof import('../src/core/run/engines.js')>();
+      return {
+        ...orig,
+        engineInstalled: vi.fn().mockReturnValue(false),
+      };
+    });
     // Mock getActiveClient to always throw (simulates broken config / no cloud key)
     vi.doMock('../src/core/run/provider-client.js', async (importOriginal) => {
       const orig = await importOriginal<typeof import('../src/core/run/provider-client.js')>();
@@ -148,6 +162,7 @@ describe('runManager direct-Ollama fallback', () => {
     expect(report.verdicts).toHaveLength(1);
     expect(report.verdicts[0]!.rationale).not.toBe('no judge available — defaulting to review');
 
+    vi.doUnmock('../src/core/run/engines.js');
     vi.doUnmock('../src/core/run/provider-client.js');
     vi.doUnmock('../src/core/inbox/store.js');
     vi.doUnmock('../src/core/fleet/decisions-ledger.js');

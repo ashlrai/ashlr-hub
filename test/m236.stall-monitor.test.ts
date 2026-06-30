@@ -39,6 +39,10 @@ function makeConfig(over: Partial<AshlrConfig> = {}): AshlrConfig {
     models: { providerChain: [] },
     telemetry: {},
     tools: {},
+    // M282: disable M275 completeness gate so partial proposals are not blocked
+    // in determinism tests — these tests verify terminationReason recording, not
+    // proposal completeness. Gate is an orthogonal concern tested elsewhere.
+    foundry: { completenessGate: false },
     ...over,
   } as AshlrConfig;
 }

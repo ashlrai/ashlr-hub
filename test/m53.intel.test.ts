@@ -21,10 +21,34 @@
  *     delegates identically to routeBackend (same backend, tier, and no nudge).
  */
 
-import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+
+// ---------------------------------------------------------------------------
+// HOME isolation — M282 determinism fix
+// The learned-router reads ~/.ashlr/decisions/ via decisions-ledger.ts, which
+// calls homedir() (mocked by test/setup/home.ts to follow process.env.HOME).
+// Without HOME isolation, real production routing-score history in the
+// developer's ~/.ashlr/decisions/ directory can bias engineInstalled-dependent
+// tests (e.g. learned scores penalise claude → routes to 'local' instead of
+// expected 'frontier'). Reset HOME to a fresh tmp dir for each test.
+// ---------------------------------------------------------------------------
+
+const origHome = process.env['HOME'];
+let tmpHome: string;
+
+beforeEach(() => {
+  tmpHome = mkdtempSync(tmpdir() + '/ashlr-m53-');
+  process.env['HOME'] = tmpHome;
+});
+
+afterEach(() => {
+  process.env['HOME'] = origHome;
+  rmSync(tmpHome, { recursive: true, force: true });
+});
 
 import type {
   AshlrConfig,

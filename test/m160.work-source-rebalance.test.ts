@@ -231,7 +231,12 @@ describe('M160 — scanDeps: default-off behaviour', () => {
         cb(null, '{}', '');
       }
     });
-    const items = await scanDeps(tmpDir, makeCfg({ scanDeps: true }));
+    // M282: scanDeps requires BOTH scanDeps:true AND scanDependencyBumps:true
+    // to emit outdated-package items. scanDependencyBumps is the second gate
+    // (requires lockfile + test script) that guards mechanical bump churn.
+    // The test also needs a lockfile so hasNpmLockfile() doesn't short-circuit.
+    fs.writeFileSync(path.join(tmpDir, 'package-lock.json'), '{"lockfileVersion":3,"packages":{}}', 'utf8');
+    const items = await scanDeps(tmpDir, makeCfg({ scanDeps: true, scanDependencyBumps: true }));
     expect(items.length).toBeGreaterThan(0);
     expect(items.some((i) => i.title.includes('lodash'))).toBe(true);
   });

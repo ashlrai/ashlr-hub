@@ -68,6 +68,7 @@ let tmpHome: string;
 
 const {
   mockCreateGoal,
+  mockListGoals,
   mockRecordOutcome,
   mockNotifyFleetEvent,
   mockRunInventCycle,
@@ -76,6 +77,12 @@ const {
   mockGitPush,
 } = vi.hoisted(() => ({
   mockCreateGoal: vi.fn().mockReturnValue({ id: 'goal-integration-1', objective: 'fix', status: 'planning' }),
+  // M282: must be in vi.hoisted() so vi.clearAllMocks() in beforeEach does NOT
+  // destroy its implementation. _handleRegressionDetected calls listGoals() for
+  // the M258 dedupe check — if it returns undefined (post-clearAllMocks inline
+  // mock) then .some() throws and the handler silently swallows the error,
+  // meaning createGoal is never reached. Hoisted ref survives clearAllMocks.
+  mockListGoals: vi.fn().mockReturnValue([]),
   mockRecordOutcome: vi.fn(),
   mockNotifyFleetEvent: vi.fn().mockResolvedValue(undefined),
   mockRunInventCycle: vi.fn().mockResolvedValue(undefined),
@@ -87,7 +94,7 @@ const {
 
 vi.mock('../src/core/goals/store.js', () => ({
   createGoal: mockCreateGoal,
-  listGoals: vi.fn().mockReturnValue([]),
+  listGoals: mockListGoals,
   loadGoal: vi.fn().mockReturnValue(null),
   saveGoal: vi.fn(),
   goalsDir: () => path.join(process.env['HOME'] ?? os.tmpdir(), '.ashlr', 'goals'),
@@ -248,14 +255,23 @@ function makeProposal(
 
 /**
  * Flush async event-bus handler tails.
- * Uses real timers via vi.runAllTimersAsync() when fake timers are active
- * (vi.useFakeTimers intercepts setTimeout so a bare new Promise(setTimeout)
- * would hang forever). Two microtask ticks are sufficient because the built-in
- * handlers await exactly one dynamic import before calling the mocked function.
+ *
+ * M282 determinism fix: _handleRegressionDetected is async and chains multiple
+ * awaits (dynamic import → listGoals → createGoal). vi.runAllTimersAsync() alone
+ * only advances fake setTimeout/setInterval; it does NOT drain chained microtasks
+ * that come from dynamic import(). We need several microtask-yield rounds BEFORE
+ * advancing timers so in-flight promises can fully settle.
+ * Pattern mirrors the proven m241 flush, adapted for fake-timer context.
  */
 async function flush(): Promise<void> {
+  // Drain in-flight microtasks (dynamic import chains, Promise.resolve chains)
   await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  // Advance fake timers so any queued setTimeout callbacks fire
   await vi.runAllTimersAsync();
+  // One final microtask yield so timer-callback continuations settle
+  await Promise.resolve();
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +288,8 @@ beforeEach(() => {
   // Reset all mocks
   vi.clearAllMocks();
   mockCreateGoal.mockReturnValue({ id: 'goal-integration-1', objective: 'fix', status: 'planning' });
+  // M282: restore listGoals after clearAllMocks so dedupe check returns [] (not undefined)
+  mockListGoals.mockReturnValue([]);
   mockNotifyFleetEvent.mockResolvedValue(undefined);
   mockRunInventCycle.mockResolvedValue(undefined);
 
