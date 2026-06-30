@@ -435,6 +435,22 @@ export interface AshlrConfig {
      * byte-identical old behavior (runConductor).
      */
     simpleConductor?: boolean;
+    /**
+     * M300: Resource-aware dispatch. DEFAULT true (on). When true, the simple-
+     * conductor checks the resource snapshot before dispatching each task; if the
+     * task's engine is exhausted/unreachable it routes to the best available
+     * alternative from engineFallbackOrder. Set false for pre-M300 behaviour
+     * (always dispatch with task.engine as-is — byte-identical).
+     */
+    resourceAwareDispatch?: boolean;
+    /**
+     * M300: Fallback engine preference order when the primary engine is
+     * exhausted. Default: ['codex','kimi','nim','local-coder']. The conductor
+     * tries each in order and picks the first whose availability is not
+     * 'exhausted' or 'unreachable'. If all are exhausted, the original engine
+     * is used as a last resort (fleet degrades but never freezes).
+     */
+    engineFallbackOrder?: string[];
     autoMerge?: {
       enabled: boolean;
       /**

@@ -564,7 +564,15 @@ export interface VerificationGateVerdict {
 export function isFrontierJudge(judgeEngine: string | undefined): boolean {
   if (!judgeEngine || judgeEngine === 'unknown' || judgeEngine === 'local') return false;
   const lc = judgeEngine.toLowerCase();
-  return lc.startsWith('claude') || lc.includes('claude');
+  // claude-* (existing — primary frontier judge)
+  if (lc.startsWith('claude') || lc.includes('claude')) return true;
+  // M300: Codex/OpenAI frontier models — gpt-5.x and codex-* are genuine frontier
+  // models already listed in cfg.foundry.mergeAuthority as {engine:'codex',model:'gpt-5.5'}.
+  // Accepting them here lets a Codex judge produce a valid ship attestation; the
+  // HMAC gate + mergeAuthority list + full scoring gate are ALL unchanged.
+  // gpt-4* is intentionally excluded (gpt-4-mini etc. are not frontier-tier judges).
+  if (lc.startsWith('gpt-5') || lc.startsWith('codex-') || lc === 'codex') return true;
+  return false;
 }
 
 /**

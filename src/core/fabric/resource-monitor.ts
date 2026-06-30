@@ -112,6 +112,25 @@ export function clearBackoff(backend: EngineId): void {
   _snapshotCache = null;
 }
 
+/**
+ * M300: Synchronously peek at the CACHED availability for a backend.
+ * Returns the cached availability string when a fresh (<30s) snapshot is
+ * available, otherwise returns null (no I/O, never throws).
+ *
+ * Used by resolveJudgeClient (sync) to avoid awaiting a new snapshot on
+ * every judge resolution. If the cache is stale, the caller should treat the
+ * backend as available (permissive default).
+ */
+export function peekBackendAvailability(backend: EngineId): BackendAvailability | null {
+  try {
+    if (!_snapshotCache || _snapshotCache.expiresAt <= Date.now()) return null;
+    const state = _snapshotCache.snapshot.backends.find((b) => b.backend === backend);
+    return state?.availability ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Cache
 // ---------------------------------------------------------------------------

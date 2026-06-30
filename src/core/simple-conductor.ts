@@ -144,8 +144,57 @@ export async function runSimpleConductor(
 
   // 4. Dispatch ready tasks (bounded by maxTasksPerCycle).
   const { assertMayMutate } = await import('./sandbox/policy.js');
-  const { runEngineSandboxed } = await import('./run/sandboxed-engine.js');
+  const { runEngineSandboxed, runApiModelSandboxed } = await import('./run/sandboxed-engine.js');
   const { runAutoMergePass } = await import('./fleet/automerge-pass.js');
+  const { resolveEngineSpec } = await import('./run/engine-registry.js');
+  const { getResourceSnapshot } = await import('./fabric/resource-monitor.js');
+
+  // M300: pre-fetch resource snapshot once per tick (cached 30s, never throws).
+  let resourceSnap: Awaited<ReturnType<typeof getResourceSnapshot>> | null = null;
+  try {
+    resourceSnap = await getResourceSnapshot(cfg);
+  } catch {
+    // never throws per contract, but guard anyway — null = treat all as available
+  }
+
+  /**
+   * M300: Resolve effective engine, rerouting away from exhausted backends.
+   * Flag-gated: cfg.foundry.resourceAwareDispatch !== false (default ON).
+   * Never throws.
+   */
+  function resolveEffectiveEngine(requestedEngine: EngineId): EngineId {
+    try {
+      const resourceAware = (cfg.foundry as Record<string, unknown> | undefined)?.['resourceAwareDispatch'] !== false;
+      if (!resourceAware || !resourceSnap) return requestedEngine;
+
+      const getAvailability = (engine: string): string => {
+        const state = resourceSnap!.backends.find((b) => b.backend === engine);
+        return state?.availability ?? 'unknown';
+      };
+
+      const avail = getAvailability(requestedEngine);
+      if (avail !== 'exhausted' && avail !== 'unreachable') return requestedEngine;
+
+      // Primary engine is exhausted — try fallback order.
+      const fallbackOrder = ((cfg.foundry as Record<string, unknown> | undefined)?.['engineFallbackOrder'] as string[] | undefined)
+        ?? ['codex', 'kimi', 'nim', 'local-coder'];
+
+      for (const candidate of fallbackOrder) {
+        if (candidate === requestedEngine) continue;
+        const candidateAvail = getAvailability(candidate);
+        if (candidateAvail !== 'exhausted' && candidateAvail !== 'unreachable') {
+          console.log(`[simple-conductor] reroute: ${requestedEngine} ${avail} → ${candidate} (availability: ${candidateAvail})`);
+          return candidate as EngineId;
+        }
+      }
+
+      // All fallbacks exhausted — use original engine as last resort (degrades, never freezes).
+      console.log(`[simple-conductor] reroute: all fallbacks exhausted, using original engine ${requestedEngine}`);
+      return requestedEngine;
+    } catch {
+      return requestedEngine;
+    }
+  }
 
   // Re-read the mutable tasks array so we can write back updates.
   const mutableTasks = readTasks();
@@ -181,7 +230,8 @@ export async function runSimpleConductor(
 
     // Dispatch via the proven sandboxed-engine primitive.
     try {
-      const engineId: EngineId = (task.engine ?? 'claude') as EngineId;
+      // M300: resolve effective engine — reroutes away from exhausted backends.
+      const engineId: EngineId = resolveEffectiveEngine((task.engine ?? 'claude') as EngineId);
       // M298: append a standing full-suite directive so the agent cannot finish
       // without running the complete test suite + typecheck and confirming zero
       // NEW failures. This closed a regression window where the agent ran only
@@ -192,7 +242,13 @@ export async function runSimpleConductor(
         '(pre-existing failures that were already failing before your change are exempt). ' +
         'Do NOT mark the task complete or file a proposal until both commands pass cleanly.';
       const instruction = task.instruction + fullSuiteDirective;
-      const sandboxResult = await runEngineSandboxed(engineId, instruction, cfg, {
+
+      // M300: route to the correct runner — cli-agents (claude/codex) via runEngineSandboxed,
+      // api-models (nim/kimi/local-coder) via runApiModelSandboxed.
+      const engineSpec = resolveEngineSpec(engineId, cfg);
+      const isApiModel = engineSpec?.kind === 'api-model';
+
+      const sandboxOpts = {
         sourceRepo: task.repo,
         budget: {
           // M287: raised from 50k/40 — substantial high-value work (new file +
@@ -204,7 +260,10 @@ export async function runSimpleConductor(
           allowCloud: opts.allowCloud,
         },
         propose: true,
-      });
+      };
+      const sandboxResult = isApiModel
+        ? await runApiModelSandboxed(engineId, instruction, cfg, sandboxOpts)
+        : await runEngineSandboxed(engineId, instruction, cfg, sandboxOpts);
 
       // M287: mark done ONLY when a proposal was actually filed. A dispatch that
       // produced no proposal (empty/incomplete diff, blocked by verify) is NOT

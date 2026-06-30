@@ -24,6 +24,7 @@ import { hashDiff, signJudgeAttestation } from '../foundry/provenance.js';
 import { computeQualityMetrics } from './quality-metrics.js';
 import { renderPlaybook } from '../vision/playbook.js';
 import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
+import { peekBackendAvailability } from '../fabric/resource-monitor.js';
 
 // ---------------------------------------------------------------------------
 // Public types (defined here — not in types.ts per file ownership rules)
@@ -531,13 +532,44 @@ function buildClaudeCliComplete(
 }
 
 /**
+ * Build a `complete(system, user)` function that uses the Codex CLI
+ * (`codex exec [--model M] --cd CWD --json "<combined prompt>"`).
+ *
+ * Mirrors buildClaudeCliComplete. The Codex CLI `exec` subcommand takes a
+ * JSON-wrapped goal via --json; output is plain text (the agent's response).
+ *
+ * Never-throws: any spawn/parse failure returns an empty string so the caller
+ * falls through to the parse-failure → 'review' path.
+ */
+function buildCodexCliComplete(
+  cfg: AshlrConfig,
+  model: string,
+): (system: string, user: string) => Promise<string> {
+  return async (system: string, user: string): Promise<string> => {
+    try {
+      const combined = `${system}\n\n${user}`;
+      const cmd = buildEngineCommand('codex', combined, cfg, { model });
+      if (!cmd) return '';
+      const result = await spawnEngine(cmd, cfg, { timeoutMs: 300_000 }); // 5 min for frontier
+      if (!result.ok || !result.output) return '';
+      // codex output is plain text — return as-is
+      return result.output;
+    } catch {
+      return '';
+    }
+  };
+}
+
+/**
  * Resolve the best available judge client for the manager.
  *
  * Priority order (controlled by cfg.foundry.managerJudgeEngine):
- *   1. 'auto' or 'claude' (default): Claude CLI if installed → most decisive.
+ *   1. 'auto' or 'claude' (default): Claude CLI if installed AND not exhausted.
  *      allowedBackends does NOT gate the judge (oversight role, not execution).
  *      Use cfg.foundry.judgeAllowedBackends to explicitly restrict judge backends.
- *   2. 'local' or claude unavailable: ollamaDirectComplete with the 72b model
+ *   2. M300 'codex' or claude exhausted: Codex CLI if installed.
+ *      managerJudgeEngine='codex' forces codex; 'auto' + claude exhausted falls here.
+ *   3. 'local' or all frontier unavailable: ollamaDirectComplete with the 72b model
  *
  * Returns { complete, judgeEngine } — judgeEngine is the model id string to
  * record in the report. Never throws.
@@ -567,8 +599,23 @@ function resolveJudgeClient(
     : true; // default: claude is always allowed as judge when installed
 
   const wantClaude = managerJudgeEngine === 'auto' || managerJudgeEngine === 'claude';
+  const wantCodex = managerJudgeEngine === 'codex';
 
-  if (wantClaude && claudeAllowedForJudge && engineInstalled('claude', cfg)) {
+  // M300: resource-aware judge — check if claude is exhausted so we can fall to codex.
+  // peekBackendAvailability reads the in-memory snapshot cache synchronously (no I/O,
+  // never throws). Returns null when no fresh cache → permissive (try claude first).
+  let claudeExhausted = false;
+  try {
+    const claudeAvail = peekBackendAvailability('claude');
+    if (claudeAvail === 'exhausted' || claudeAvail === 'unreachable') {
+      claudeExhausted = true;
+    }
+  } catch {
+    // never throws — treat as available
+  }
+
+  // Step 1: Claude CLI (primary frontier judge).
+  if (wantClaude && claudeAllowedForJudge && !claudeExhausted && engineInstalled('claude', cfg)) {
     // Use cfg.foundry.managerJudgeModel if it looks like a claude model,
     // otherwise fall back to the sonnet default.
     const isClaudeModel = judgeModel.startsWith('claude') || judgeModel.includes('claude');
@@ -579,7 +626,21 @@ function resolveJudgeClient(
     };
   }
 
-  // Local-72b path (unchanged from original)
+  // Step 2: M300 Codex CLI judge — explicit 'codex' setting OR auto + claude exhausted.
+  // codex is a genuine frontier model (gpt-5.5); its judge attestations pass isFrontierJudge.
+  const useCodex = wantCodex || (wantClaude && claudeExhausted);
+  if (useCodex && engineInstalled('codex', cfg)) {
+    // Use managerJudgeModel if it looks like a codex/gpt model, else the registry default.
+    const isCodexModel = judgeModel.startsWith('gpt-') || judgeModel.startsWith('codex-') || judgeModel === 'gpt-5.5';
+    const codexDefaultModel = 'gpt-5.5';
+    const codexModel = isCodexModel ? judgeModel : codexDefaultModel;
+    return {
+      complete: buildCodexCliComplete(cfg, codexModel),
+      judgeEngine: codexModel,
+    };
+  }
+
+  // Step 3: Local-72b path (unchanged from original)
   const localBaseUrl = ollamaBaseUrl;
   const localModel = judgeModel;
   return {
@@ -846,7 +907,10 @@ export async function runManager(
       // ledger entry cannot pass without the host-local provenance key.
       // Only sign when the judge is a frontier (claude-*) model AND verdict is 'ship'.
       let judgeAttestation: string | undefined;
-      const isFrontierJudgeModel = judgeEngine.startsWith('claude') || judgeEngine.includes('claude');
+      // M300: accept codex/gpt-5.5 frontier models in addition to claude-* (mirrors isFrontierJudge in merge.ts)
+      const isFrontierJudgeModel =
+        judgeEngine.startsWith('claude') || judgeEngine.includes('claude') ||
+        judgeEngine.startsWith('gpt-5') || judgeEngine.startsWith('codex-') || judgeEngine === 'codex';
       if (verdict.verdict === 'ship' && isFrontierJudgeModel) {
         try {
           const diffHash = hashDiff(proposal.diff ?? '');
