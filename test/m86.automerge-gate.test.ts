@@ -220,10 +220,8 @@ describe('M86 REFUSE — risk level', () => {
   it('[3] risk high → refuse', async () => {
     initRepo(tmpRepo);
     enroll(tmpRepo);
-    // Two source files → high risk
-    const diff =
-      addFileDiff('src/a.ts', 'export const a = 1;') +
-      addFileDiff('src/b.ts', 'export const b = 2;');
+    // M295: a security/auth surface → HIGH (ordinary multi-file source is now MEDIUM).
+    const diff = addFileDiff('src/core/auth/session.ts', 'export const token = 1;');
     expect(classifyRisk({ diff } as any)).toBe('high');
     const p = frontierPatch(diff);
     const r = await autoMergeProposal(p.id, frontierCfg());
