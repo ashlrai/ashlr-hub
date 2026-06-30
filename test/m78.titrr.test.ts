@@ -124,6 +124,9 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
 
     vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
       runEngineSandboxed: engineMockFn,
+      // M300 routes api-model engines through runApiModelSandboxed; alias it to
+      // the same mock so the module's exports are complete regardless of path.
+      runApiModelSandboxed: engineMockFn,
       // stub other named exports so imports don't break
       engineTierOf: vi.fn(() => 'frontier'),
       buildContainedEnv: vi.fn(() => ({})),

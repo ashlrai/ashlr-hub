@@ -317,6 +317,12 @@ describe('M298 Part 3 — simple-conductor full-suite directive', () => {
         capturedInstructions.push(instruction);
         return Promise.resolve({ proposalId: 'p-test-1' });
       }),
+      // M300 routes api-model engines through runApiModelSandboxed; mirror the
+      // capture so the instruction assertion holds regardless of dispatch path.
+      runApiModelSandboxed: vi.fn((_engine: unknown, instruction: string) => {
+        capturedInstructions.push(instruction);
+        return Promise.resolve({ proposalId: 'p-test-1' });
+      }),
       engineTierOf: vi.fn(() => 'mid'),
     }));
     vi.doMock('../src/core/inbox/store.js', () => ({
