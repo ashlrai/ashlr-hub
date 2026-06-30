@@ -51,6 +51,28 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
 const mockRunEngineSandboxed = vi.fn();
 vi.mock('../src/core/run/sandboxed-engine.js', () => ({
   runEngineSandboxed: (...args: unknown[]) => mockRunEngineSandboxed(...args),
+  // M300: runApiModelSandboxed added to conductor — mock so the import doesn't crash.
+  runApiModelSandboxed: vi.fn(async () => ({ proposalId: undefined })),
+}));
+
+// M300: engine-registry (resolveEngineSpec) — default: cli-agent kind so
+// all existing m280 tasks still go through runEngineSandboxed.
+vi.mock('../src/core/run/engine-registry.js', () => ({
+  resolveEngineSpec: vi.fn(() => ({ id: 'claude', kind: 'cli-agent', tier: 'frontier' })),
+  resolveEngineRegistry: vi.fn(() => ({})),
+}));
+
+// M300: resource-monitor — default: all backends open (no reroute).
+vi.mock('../src/core/fabric/resource-monitor.js', () => ({
+  getResourceSnapshot: vi.fn(async () => ({
+    generatedAt: new Date().toISOString(),
+    backends: [
+      { backend: 'claude', availability: 'open', usedPct: null, cap: null, capUnit: null, capWindow: null, resetsAt: null, costPerMTokenOut: 0, p50LatencyMs: null, snapshotAt: new Date().toISOString(), reason: 'open', backoffUntilMs: null },
+    ],
+  })),
+  peekBackendAvailability: vi.fn(() => null),
+  recordBackoff: vi.fn(),
+  clearBackoff: vi.fn(),
 }));
 
 // runAutoMergePass
@@ -213,7 +235,11 @@ describe('M280 — dispatches and marks done', () => {
     expect(mockRunEngineSandboxed).toHaveBeenCalledOnce();
     const [engine, instruction, , opts] = mockRunEngineSandboxed.mock.calls[0];
     expect(engine).toBe('claude');
-    expect(instruction).toBe('fix the bug');
+    // M298: instruction is the original task instruction + full-suite directive appended.
+    expect(instruction).toContain('fix the bug');
+    expect(instruction).toContain('BEFORE FINISHING');
+    expect(instruction).toContain('npm test');
+    expect(instruction).toContain('npx tsc --noEmit');
     expect(opts.sourceRepo).toBe('/tmp/repo-a');
     expect(opts.propose).toBe(true);
     expect(opts.budget.maxTokens).toBe(150_000); // M287: raised for substantial work
