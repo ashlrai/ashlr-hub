@@ -556,6 +556,14 @@ const loadCommsCmd = lazyCmd(
   'comms command requires src/cli/comms.ts (M137 module not yet built).',
 );
 
+// ─── M257 director command loader ────────────────────────────────────────────
+
+const loadDirectorCmd = lazyCmd(
+  () => import('./director.js'),
+  (m) => m.cmdDirector as Cmd,
+  'director command requires src/cli/director.ts (M257 module not yet built).',
+);
+
 // ─── M142 command loader ────────────────────────────────────────────
 
 const loadBestOfNCmd = lazyCmd(
@@ -1867,6 +1875,13 @@ async function main(): Promise<void> {
       case 'comms': {
         const cmdComms = await loadCommsCmd();
         process.exitCode = await cmdComms(rest);
+        break;
+      }
+
+      case 'director': {
+        // M257: Elon Director — strategic reasoning cycle (read+reason+communicate).
+        const cmdDirector = await loadDirectorCmd();
+        process.exitCode = await cmdDirector(rest);
         break;
       }
 

@@ -1261,6 +1261,37 @@ export async function tick(
     }
   }).catch(() => { /* lazy-import best-effort */ });
 
+  // ── M257 Director cycle — gated, additive, fire-and-forget ─────────────────
+  // Runs at most once every 15 minutes (tracked in process memory; dormant when
+  // cfg.comms.director is absent/false — byte-identical to absent).
+  // SAFETY: director is READ-ONLY god-view access in M257. No goal mutations,
+  // no merge/push/apply, no bypass of any safety gate.
+  void (() => {
+    try {
+      const directorEnabled =
+        (cfg.comms as Record<string, unknown> | undefined)?.['director'] === true;
+      if (!directorEnabled) return;
+
+      const DIRECTOR_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+      const now = Date.now();
+      const proc = process as unknown as Record<string, unknown>;
+      const last = proc['__ashlrDirectorLastRunMs'];
+      const lastMs = typeof last === 'number' ? last : 0;
+      if (now - lastMs < DIRECTOR_INTERVAL_MS) return;
+      proc['__ashlrDirectorLastRunMs'] = now;
+
+      void import('../comms/director.js').then(async ({ runDirectorCycle }) => {
+        try {
+          await runDirectorCycle(cfg);
+        } catch {
+          // Fire-and-forget — director must never crash the daemon.
+        }
+      }).catch(() => { /* lazy-import best-effort */ });
+    } catch {
+      // Gate check must never crash the daemon.
+    }
+  })();
+
   audit({
     action: 'daemon:tick',
     repo: null,
