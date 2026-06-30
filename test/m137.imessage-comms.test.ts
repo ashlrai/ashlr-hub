@@ -629,7 +629,7 @@ describe('runCommsCycle', () => {
     await withPlatform('darwin', async () => {
       const cfg = cfgEnabled(HANDLE);
       // First call is osascript (send), second would be sqlite3 (poll)
-      let callCount = 0;
+      const callCount = 0;
       _calls = [];
       _injectErr = null;
 

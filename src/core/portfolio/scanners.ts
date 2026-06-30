@@ -14,7 +14,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, statSync, readFileSync } from 'node:fs';
+import { existsSync, statSync, readFileSync, readdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -86,7 +86,7 @@ const IGNORE_DIRS: ReadonlySet<string> = new Set([
  * python-lib/, site-packages/) that appear as directory segments.
  */
 const IGNORE_FILE_RE =
-  /(?:^|[\/])(bun\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|composer\.lock|Gemfile\.lock)$|\.min\.[cm]?[jt]sx?$|\.min\.css$|\.generated\.[^.]+$|\.map$/i;
+  /(?:^|[/])(bun\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|composer\.lock|Gemfile\.lock)$|\.min\.[cm]?[jt]sx?$|\.min\.css$|\.generated\.[^.]+$|\.map$/i;
 
 /**
  * M136: Path pattern for vendored language-library directories that appear as
@@ -1211,12 +1211,51 @@ export async function scanSelfImprove(repo: string): Promise<WorkItem[]> {
 
   const items: WorkItem[] = [];
   try {
-    const out = await execFileAsync(
-      'rg',
-      ['-n', '--no-heading', '-e', '\\b(it|describe|test)\\.(skip|todo)\\b', '-e', '\\bxit\\b', 'test'],
-      { cwd: repo, timeout: SCAN_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
-    ).catch((e: unknown) => ({ stdout: (e as { stdout?: string })?.stdout ?? '' }));
-    const lines = String(out.stdout ?? '').split('\n').filter(Boolean).slice(0, 50);
+    // Discover skip/todo/xit markers under test/ via a Node fs walk — no external
+    // binary dependency (rg/grep), so discovery works identically on Linux, macOS,
+    // and Windows and in hermetic CI (previously this used `rg` only and silently
+    // yielded nothing wherever ripgrep was absent). Emits the same
+    // `path:line:content` lines the ripgrep call produced: repo-relative path,
+    // forward slashes, 1-based line numbers.
+    const MARKER_RE = /\b(it|describe|test)\.(skip|todo)\b|\bxit\b/;
+    const found: string[] = [];
+    const walkTests = (dir: string): void => {
+      if (found.length >= 50) return;
+      let entries: string[];
+      try {
+        entries = readdirSync(dir);
+      } catch {
+        return; // dir missing / unreadable → nothing to scan
+      }
+      for (const name of entries) {
+        if (found.length >= 50) return;
+        if (name === 'node_modules' || name === '.git') continue;
+        const abs = join(dir, name);
+        let st;
+        try {
+          st = statSync(abs);
+        } catch {
+          continue;
+        }
+        if (st.isDirectory()) {
+          walkTests(abs);
+          continue;
+        }
+        let body: string;
+        try {
+          body = readFileSync(abs, 'utf8');
+        } catch {
+          continue; // unreadable / binary → skip
+        }
+        const rel = abs.slice(repo.length + 1).split('\\').join('/');
+        const fileLines = body.split('\n');
+        for (let i = 0; i < fileLines.length && found.length < 50; i++) {
+          if (MARKER_RE.test(fileLines[i]!)) found.push(`${rel}:${i + 1}:${fileLines[i]}`);
+        }
+      }
+    };
+    walkTests(join(repo, 'test'));
+    const lines = found.filter(Boolean).slice(0, 50);
     for (const line of lines) {
       const m = line.match(/^(.+?):(\d+):(.*)/);
       if (!m) continue;

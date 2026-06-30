@@ -209,7 +209,7 @@ export async function expandGoalToMilestones(
       '7. Output ONLY a numbered list (1. Title — detail). No prose before or after.',
       '',
       backlog
-        ? `OPPORTUNITY MENU (grounded in the repo\'s known improvement backlog — prefer items from this list when they match the objective):\n${backlog}`
+        ? `OPPORTUNITY MENU (grounded in the repo's known improvement backlog — prefer items from this list when they match the objective):\n${backlog}`
         : '',
     ]
       .filter(Boolean)

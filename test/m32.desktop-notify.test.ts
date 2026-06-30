@@ -71,7 +71,9 @@ describe('desktopNotify gating', () => {
 
   it('desktopNotifyEnabled reflects config + platform', () => {
     expect(desktopNotifyEnabled(makeCfg())).toBe(false);
-    expect(desktopNotifyEnabled(cfgWithDesktop(true))).toBe(onDarwin);
+    // M94: desktop notifications are supported on darwin, win32, and linux.
+    const supported = ['darwin', 'win32', 'linux'].includes(process.platform);
+    expect(desktopNotifyEnabled(cfgWithDesktop(true))).toBe(supported);
   });
 
   it.runIf(onDarwin)('fires osascript when enabled on darwin', async () => {

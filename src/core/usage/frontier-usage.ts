@@ -144,6 +144,7 @@ function windowToMs(window: string): number {
  */
 function readQuotaCalls(engine: EngineId, windowMs: number): number {
   try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- lazy sync require avoids a load-time cycle
     const { usesInWindow } = require('../fleet/quota.js') as {
       usesInWindow: (backend: EngineId, windowMs: number, now?: number) => number;
     };
@@ -163,6 +164,7 @@ function readSubscriptionWindow(engine: EngineId, cfg: AshlrConfig): {
   resetsAt?: number;
 } | null {
   try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- lazy sync require avoids a load-time cycle
     const { subscriptionUsage } = require('../fleet/subscription-usage.js') as {
       subscriptionUsage: (engine: EngineId, opts?: { cfg?: unknown }) => {
         usedPercent: number;
@@ -194,6 +196,7 @@ function readRollupTotals(
   cfg: AshlrConfig,
 ): { tokensToday: number; costToday: number } {
   try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- lazy sync require avoids a load-time cycle
     const { buildRollup } = require('../observability/rollup.js') as {
       buildRollup: (
         window: '1d' | '7d' | '30d',

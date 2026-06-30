@@ -124,6 +124,9 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
 
     vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
       runEngineSandboxed: engineMockFn,
+      // M300 routes api-model engines through runApiModelSandboxed; alias it to
+      // the same mock so the module's exports are complete regardless of path.
+      runApiModelSandboxed: engineMockFn,
       // stub other named exports so imports don't break
       engineTierOf: vi.fn(() => 'frontier'),
       buildContainedEnv: vi.fn(() => ({})),
@@ -146,6 +149,28 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
       spawnOptionsFor: vi.fn(),
     }));
 
+    // Stub the provider-resolution layer so runGoal's run-level getActiveClient()
+    // does not perform a real local-provider reachability probe. Without this,
+    // hermetic CI (no Ollama/LM Studio) throws "local-first: no provider is
+    // reachable" before the TITRR loop under test ever runs. The sandbox engine
+    // is mocked, so this client is never used to chat — only client.id is read.
+    vi.doMock('../src/core/run/provider-client.js', () => ({
+      getActiveClient: vi.fn(async () => ({
+        id: 'ollama',
+        chat: vi.fn(async () => ({ content: '', usage: { tokensIn: 0, tokensOut: 0 } })),
+      })),
+    }));
+
+    // Force the requested engine "installed" so runGoal enters the mocked
+    // runEngineSandboxed/TITRR path. Without this, engineInstalled('claude')
+    // shells `which claude`; on a host without the CLI (Linux CI) it returns
+    // false and the orchestrator falls back to 'builtin', never reaching the
+    // TITRR loop under test (it then reports "No tasks completed successfully").
+    vi.doMock('../src/core/run/engines.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/core/run/engines.js')>();
+      return { ...actual, engineInstalled: vi.fn(() => true) };
+    });
+
     // Reset module registry so next import() picks up the doMock stubs.
     vi.resetModules();
 
@@ -159,6 +184,8 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     vi.doUnmock('../src/core/run/sandboxed-engine.js');
     vi.doUnmock('../src/sandbox/worktree.js');
     vi.doUnmock('../src/core/run/verify-commands.js');
+    vi.doUnmock('../src/core/run/provider-client.js');
+    vi.doUnmock('../src/core/run/engines.js');
     vi.resetModules();
   });
 

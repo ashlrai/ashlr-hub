@@ -529,6 +529,17 @@ describe('M252 Gateway — resource-aware demote', () => {
       }),
     }));
 
+    // Hermetic routing: the claude/codex CLIs aren't on PATH in CI, so
+    // routeBackend would fall through to 'builtin' (which then senses Ollama
+    // unreachable and demotes). Force the frontiers "installed" so an OPEN
+    // frontier is the routed base — exactly the scenario this test exercises.
+    vi.doMock('../src/core/run/engines.js', async () => ({
+      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
+        '../src/core/run/engines.js',
+      )),
+      engineInstalled: () => true,
+    }));
+
     const { decide } = await import('../src/core/fabric/gateway.js');
     const cfg = withFoundry({
       allowedBackends: ['builtin', 'claude', 'codex'] as EngineId[],

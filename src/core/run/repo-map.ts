@@ -34,7 +34,7 @@ const IGNORE_DIRS: ReadonlySet<string> = new Set([
 ]);
 
 const IGNORE_FILE_RE =
-  /(?:^|[\/])(bun\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|composer\.lock|Gemfile\.lock)$|\.min\.[cm]?[jt]sx?$|\.min\.css$|\.generated\.[^.]+$|\.map$/i;
+  /(?:^|[/])(bun\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|composer\.lock|Gemfile\.lock)$|\.min\.[cm]?[jt]sx?$|\.min\.css$|\.generated\.[^.]+$|\.map$/i;
 
 const IGNORE_VENDORED_PATH_RE = /(?:^|\/)(?:[a-z0-9_-]+-lib|site-packages)\//i;
 

@@ -725,14 +725,9 @@ export async function advanceGoalCycle(
   let proposalsFiled = 0;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    let run: SwarmRun;
-    try {
-      run = await advanceGoal(goalId, cfg, opts, sink);
-    } catch (err) {
-      // advanceGoal threw (no actionable milestone, enrollment error, kill switch).
-      // Do NOT retry — surface the error.
-      throw err;
-    }
+    // advanceGoal throws on no actionable milestone, enrollment error, or kill
+    // switch. Let it propagate — do NOT retry on a thrown error.
+    const run: SwarmRun = await advanceGoal(goalId, cfg, opts, sink);
     runs.push(run);
 
     // Reload goal to check post-advance milestone status.
