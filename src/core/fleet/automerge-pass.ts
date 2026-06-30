@@ -33,8 +33,12 @@ import type { AshlrConfig, Proposal } from '../types.js';
 import { listProposals, setStatus, updateProposalField } from '../inbox/store.js';
 import { autoMergeProposal, type AutoMergeResult } from '../inbox/merge.js';
 import { killSwitchOn } from '../sandbox/policy.js';
-import { readDecisions } from './decisions-ledger.js';
+import { readDecisions, recordDecision } from './decisions-ledger.js';
 import { judgeProposal, resolveFrontierJudgeClient, type ManagerVerdict } from './manager.js';
+// M294: sign + record the attested 'judged'/ship ledger entry that the merge gate
+// (hasRecentShipVerdict / evaluateVerificationGate) requires. Previously the
+// automerge-pass judged 'ship' but never wrote this entry → every merge refused.
+import { hashDiff, signJudgeAttestation } from '../foundry/provenance.js';
 // M193: additive gate-modules (flag-gated, default OFF, only tighten)
 import { redTeamProposal } from './red-team.js';
 import { analyzeBlastRadius } from '../run/blast-radius.js';
@@ -346,6 +350,45 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
           }
         } catch {
           // Best-effort — reset failure never blocks the merge path.
+        }
+
+        // M294: record the attested 'judged'/ship ledger entry that the merge gate
+        // (hasRecentShipVerdict / evaluateVerificationGate criterion 1) requires.
+        // The automerge-pass previously judged 'ship' but NEVER wrote this entry —
+        // so autoMergeProposal always refused with "no 'judged' decision with
+        // verdict='ship' found", meaning NO proposal could ever auto-merge. Mirrors
+        // runManager's signing/recording (manager.ts). judgeClient is non-null here.
+        try {
+          const judgeEngine = judgeClient.model;
+          let judgeAttestation: string | undefined;
+          const isFrontierJudgeModel = judgeEngine.startsWith('claude') || judgeEngine.includes('claude');
+          if (isFrontierJudgeModel) {
+            try {
+              const diffHash = hashDiff(p.diff ?? '');
+              judgeAttestation = signJudgeAttestation({
+                proposalId: p.id,
+                judgeEngine,
+                verdict: 'ship',
+                diffHash,
+              });
+            } catch {
+              // Signing failure → no attestation → gate fails-closed (refuses), never a bad merge.
+              judgeAttestation = undefined;
+            }
+          }
+          recordDecision({
+            ts: new Date().toISOString(),
+            proposalId: p.id,
+            action: 'judged',
+            engine: judgeEngine,
+            model: judgeEngine,
+            verdict: 'ship',
+            reason: verdict.rationale ?? '',
+            detail: verdict.wouldMerge ? 'would-merge' : '',
+            ...(judgeAttestation !== undefined ? { judgeAttestation } : {}),
+          });
+        } catch {
+          // Best-effort — a record failure means the gate fails-closed (no merge), never a bad merge.
         }
       } else {
         // No judge available → fail-closed: skip this proposal for merging.
