@@ -23,7 +23,7 @@
  * Default builtin-only behavior is unaffected.
  */
 
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, appendFileSync, readFileSync } from 'node:fs';
 import { execFileSync, execSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -334,6 +334,18 @@ function resolveAshlrBin(): string | null {
  * GUARD: only writes when `ashlr` is on PATH — CI/CD environments without the
  * plugin are completely unaffected (returns null → caller skips --mcp-config).
  *
+ * M283 PRE-EXISTING GUARD: if `.mcp.json` already exists in the worktree before
+ * the fleet writes it, we skip writing entirely and return null. This means the
+ * agent can legitimately edit a pre-existing `.mcp.json` (it is NOT fleet-written)
+ * and that edit will appear in the proposal diff as expected.
+ *
+ * M283 DIFF EXCLUSION: after writing, registers `.mcp.json` in the worktree's
+ * `.git/info/exclude` file so `git add -A` never stages the fleet-written file.
+ * This guarantees the fleet-infra file NEVER leaks into any proposal diff, which
+ * previously caused the judge to return 'review' instead of 'ship' (M283).
+ * Best-effort — a failure in exclude registration is silently suppressed; the
+ * sandboxDiff pathspec filter (worktree.ts) is an independent belt-and-suspenders.
+ *
  * Returns the path to the written file, or null when the plugin is absent.
  * Never throws — any failure is silently suppressed so it never breaks dispatch.
  */
@@ -345,6 +357,11 @@ export function writeMcpConfigIfAvailable(worktreePath: string): string | null {
     const mcpConfigPath = join(worktreePath, '.mcp.json');
     // Only write if the worktree path exists (sanity check).
     if (!existsSync(worktreePath)) return null;
+
+    // M283: if .mcp.json already exists (the target repo has its own), skip
+    // writing — the agent may legitimately edit it, and we must not clobber it
+    // or add an exclude entry that would suppress that legitimate edit.
+    if (existsSync(mcpConfigPath)) return null;
 
     const mcpConfig = {
       mcpServers: {
@@ -360,6 +377,39 @@ export function writeMcpConfigIfAvailable(worktreePath: string): string | null {
       },
     };
     writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
+
+    // M283: register .mcp.json in the worktree's git exclude file so `git add -A`
+    // never stages the fleet-written infra file. The worktree's gitdir is found via
+    // `git rev-parse --git-dir` run inside the worktree — for a linked worktree this
+    // resolves to the per-worktree gitdir (e.g. <source>/.git/worktrees/<id>), NOT
+    // the main .git directory, so this never affects the source repo's exclude.
+    // Best-effort: failure is silently suppressed — sandboxDiff's pathspec filter
+    // is an independent second layer.
+    try {
+      const gitdirRaw = execFileSync('git', ['rev-parse', '--git-dir'], {
+        cwd: worktreePath,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 5_000,
+      }).trim();
+      if (gitdirRaw) {
+        // gitdir may be relative (e.g. ".git") or absolute (worktree gitdir).
+        const gitdir = gitdirRaw.startsWith('/') ? gitdirRaw : join(worktreePath, gitdirRaw);
+        const infoDir = join(gitdir, 'info');
+        const excludePath = join(infoDir, 'exclude');
+        mkdirSync(infoDir, { recursive: true });
+        // Only append if not already excluded (idempotent).
+        const existing = existsSync(excludePath)
+          ? readFileSync(excludePath, 'utf8')
+          : '';
+        if (!existing.split('\n').some((l) => l.trim() === '.mcp.json')) {
+          appendFileSync(excludePath, '\n# ashlr M283: fleet-infra file — excluded from proposal diff\n.mcp.json\n', 'utf8');
+        }
+      }
+    } catch {
+      // Exclude registration is best-effort — never fails the run.
+    }
+
     return mcpConfigPath;
   } catch {
     // Best-effort: never fail the run if MCP config can't be written.

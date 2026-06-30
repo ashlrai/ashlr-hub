@@ -411,10 +411,40 @@ export function createSandbox(
 // sandboxDiff
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// M283: sandbox-infra files written by the fleet that must never appear in a
+// proposal diff. These files are injected by ashlr for agent tool access and
+// are meaningless to the judge/reviewer. Each entry is an exact filename
+// relative to the worktree root (no glob, no path prefix).
+//
+// Why two layers?
+//   Layer 1 (writeMcpConfigIfAvailable): registers each file in the worktree's
+//     `.git/info/exclude` BEFORE the agent runs, so `git add -A` never stages it.
+//   Layer 2 (here): pass `:(exclude)<file>` pathspecs to `git diff --staged` so
+//     even if layer 1 failed (e.g. gitdir not writable) the file is still absent
+//     from the captured patch and numstat. Belt-and-suspenders: either layer alone
+//     is sufficient; both together make the guarantee unconditional.
+//
+// IMPORTANT: these exclusions apply ONLY to fleet-written files (ones that did not
+// exist in the source repo before the run). A repo that already has its own
+// `.mcp.json` will not have had writeMcpConfigIfAvailable write/exclude it
+// (the pre-existing guard in that function returns null before writing), so the
+// agent's edits to it will still appear in the diff via normal staging. The
+// pathspec `:(exclude).mcp.json` in layer 2 would suppress that legitimate edit —
+// therefore layer 2 also checks whether the file appeared in the base commit; if
+// it did NOT exist at baseHead it is suppressed (fleet-written), if it DID exist
+// it is allowed through. This check is implemented by passing the pathspec only
+// when the file is untracked (not in baseHead).
+// ---------------------------------------------------------------------------
+const SANDBOX_INFRA_FILES = ['.mcp.json'] as const;
+
 /**
  * Capture the git diff of the sandbox worktree vs its base HEAD. Read-only —
  * never mutates the worktree or the source repo. Counts come from --numstat;
  * the unified patch from a plain `git diff <baseHead>` inside the worktree.
+ *
+ * M283: fleet-written sandbox-infra files (SANDBOX_INFRA_FILES) are excluded
+ * from the diff. See the constant above for the two-layer exclusion strategy.
  */
 export function sandboxDiff(sb: Sandbox): SandboxDiff {
   const cwd = sb.worktreePath;
@@ -430,9 +460,31 @@ export function sandboxDiff(sb: Sandbox): SandboxDiff {
   // `add -A` records adds/mods/deletes; we then diff the index vs baseHead.
   gitTry(cwd, ['add', '-A']);
 
+  // M283 LAYER 2: build :(exclude) pathspecs for fleet-infra files that were NOT
+  // present in the base commit. If the file existed at baseHead (the agent has a
+  // legitimate edit), we allow it through; only fleet-written (new) files are
+  // suppressed. `git cat-file -e <baseHead>:<file>` exits 0 iff the blob exists.
+  const infraExcludeSpecs: string[] = [];
+  for (const infraFile of SANDBOX_INFRA_FILES) {
+    try {
+      execFileSync('git', ['cat-file', '-e', `${sb.baseHead}:${infraFile}`], {
+        cwd,
+        stdio: 'ignore',
+        timeout: 5_000,
+      });
+      // Exit 0 → file exists at baseHead → agent may legitimately edit it → do NOT exclude.
+    } catch {
+      // Non-zero exit → file did NOT exist at baseHead → fleet-written → exclude from diff.
+      infraExcludeSpecs.push(`:(exclude)${infraFile}`);
+    }
+  }
+
   // numstat: one line per file "<ins>\t<del>\t<path>" (binary => "-\t-\t..").
   // `--staged` diffs the index (now including new files) against baseHead.
-  const numstat = gitTry(cwd, ['diff', '--staged', '--numstat', sb.baseHead]) ?? '';
+  // M283: append :(exclude) pathspecs after '--' to suppress fleet-infra files.
+  const numstatArgs = ['diff', '--staged', '--numstat', sb.baseHead];
+  if (infraExcludeSpecs.length > 0) numstatArgs.push('--', ...infraExcludeSpecs);
+  const numstat = gitTry(cwd, numstatArgs) ?? '';
   let files = 0;
   let insertions = 0;
   let deletions = 0;
@@ -449,7 +501,10 @@ export function sandboxDiff(sb: Sandbox): SandboxDiff {
   }
 
   // Full unified patch — staged vs baseHead so new files are included.
-  const patch = gitTry(cwd, ['diff', '--staged', sb.baseHead]) ?? '';
+  // M283: append :(exclude) pathspecs after '--' to suppress fleet-infra files.
+  const patchArgs = ['diff', '--staged', sb.baseHead];
+  if (infraExcludeSpecs.length > 0) patchArgs.push('--', ...infraExcludeSpecs);
+  const patch = gitTry(cwd, patchArgs) ?? '';
 
   return {
     sandboxId: sb.id,
