@@ -1531,6 +1531,7 @@ export type EngineId =
   | 'claude'
   | 'codex'
   | 'hermes'
+  | 'kimi'
   | 'nim'
   | 'opencode';
 

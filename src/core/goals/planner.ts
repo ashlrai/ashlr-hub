@@ -115,12 +115,27 @@ async function decomposeWithFrontier(
   objective: string,
   cfg: AshlrConfig,
   cap: number,
-): Promise<{ title: string; detail: string }[]> {
+): Promise<{ title: string; detail: string; effort?: number; scope?: string }[]> {
   // Lazy import to avoid loading the heavy orchestrator at module-load time.
   const { runGoal } = await import('../run/orchestrator.js');
+
+  // M270: ambition directive — milestones must be substantive engineering challenges,
+  // not config tweaks or doc updates. Also request effort/scope fields so the
+  // milestone carries its own ambition signal for downstream routing.
+  const ambitionDirective =
+    `AMBITION STANDARD: Each milestone must represent a non-trivial engineering challenge — ` +
+    `architecturally significant, genuinely novel, or measurably expanding fleet capability. ` +
+    `Incremental changes (config tweaks, doc updates, lint fixes, version bumps) are NOT valid milestones. ` +
+    `Each milestone should require a skilled engineer 4–16 hours of focused work. ` +
+    `Prefer milestones that compose multiple system capabilities.\n\n`;
+
   const prompt =
+    ambitionDirective +
     `Decompose this software objective into an ordered list of ${cap} milestones.\n` +
-    `Return STRICT JSON only — an array of {"title": string, "detail": string} objects.\n` +
+    `Return STRICT JSON only — an array of objects with shape:\n` +
+    `{"title": string, "detail": string, "effort": 1|2|3|4|5, "scope": "trivial"|"incremental"|"substantive"|"architectural"}\n` +
+    `effort: 1=hours, 2=half-day, 3=full-day, 4=multi-day, 5=week+. ` +
+    `scope: architectural/substantive milestones only — filter out trivial/incremental ones.\n` +
     `No prose, no code fences, no commentary. Exactly ${cap} items or fewer.\n\n` +
     `Objective: ${objective}`;
 
@@ -139,13 +154,23 @@ async function decomposeWithFrontier(
 
   const parts = parsed
     .filter(
-      (x): x is { title: string; detail?: string } =>
+      (x): x is { title: string; detail?: string; effort?: number; scope?: string } =>
         typeof x === 'object' &&
         x !== null &&
         typeof (x as { title?: unknown }).title === 'string' &&
         String((x as { title: string }).title).trim().length > 0,
     )
-    .map((x) => ({ title: String(x.title).trim(), detail: String(x.detail ?? '').trim() }));
+    .filter((x) => {
+      // M270: filter out trivial milestones (config tweaks, doc updates, etc.)
+      const scope = (x as { scope?: string }).scope;
+      return scope !== 'trivial';
+    })
+    .map((x) => ({
+      title: String(x.title).trim(),
+      detail: String(x.detail ?? '').trim(),
+      effort: typeof x.effort === 'number' ? x.effort : undefined,
+      scope: typeof x.scope === 'string' ? x.scope : undefined,
+    }));
 
   if (parts.length < 2) throw new Error(`frontier produced only ${parts.length} milestone(s)`);
   return parts;

@@ -351,6 +351,42 @@ function applyNimConfig(spec: EngineSpec, cfg?: AshlrConfig): EngineSpec {
 }
 
 /**
+ * M270: fold a `cfg.foundry.kimi` block into the resolved 'kimi' EngineSpec.
+ *
+ * Parallel to applyNimConfig — lets Kimi be promoted to frontier WORK-ASSIGNMENT
+ * tier via `cfg.foundry.kimi = { tier: 'frontier' }` without touching the builtin
+ * roster.
+ *
+ * SAFETY INVARIANT: this promotes the ROUTING tier only (work assignment).
+ * Merge authority is SEPARATELY gated by evaluateMergeAuthority in inbox/merge.ts,
+ * which requires proposal.engineModel ∈ cfg.foundry.mergeAuthority. Kimi is NOT
+ * in that list by default, so a frontier-promoted Kimi will have its proposals
+ * branch-eligible (not main-merge-eligible) until explicitly added to
+ * cfg.foundry.mergeAuthority with a human trust decision.
+ *
+ * Absent cfg.foundry.kimi ⇒ input spec returned unchanged (byte-identical to pre-M270).
+ */
+export function applyKimiConfig(spec: EngineSpec, cfg?: AshlrConfig): EngineSpec {
+  const kimi = (cfg?.foundry as Record<string, unknown> | undefined)?.['kimi'] as
+    | { tier?: string; model?: string; apiKeyEnv?: string }
+    | undefined;
+  if (!kimi || typeof kimi !== 'object' || spec.kind !== 'api-model' || !spec.api) {
+    return spec;
+  }
+  const tier = VALID_TIERS.has(kimi.tier as string) ? (kimi.tier as EngineTier) : spec.tier;
+  return {
+    ...spec,
+    tier,
+    api: {
+      ...spec.api,
+      envKey: (typeof kimi.apiKeyEnv === 'string' && kimi.apiKeyEnv) || spec.api.envKey,
+      defaultModel:
+        (typeof kimi.model === 'string' && kimi.model) || spec.api.defaultModel,
+    },
+  };
+}
+
+/**
  * Resolve the effective engine roster: the built-in registry with any
  * `cfg.foundry.engines` entries merged over it. Malformed added entries are
  * dropped (never fatal, never defaulted to frontier). Returns a fresh object.
@@ -374,6 +410,12 @@ export function resolveEngineRegistry(cfg?: AshlrConfig): Record<string, EngineS
   // Kimi model id). No-op when cfg.foundry.nim is absent.
   if (merged['nim']) {
     merged['nim'] = applyNimConfig(merged['nim'], cfg);
+  }
+  // M270: high-level cfg.foundry.kimi convenience override (frontier work-assignment
+  // promotion). No-op when cfg.foundry.kimi is absent. WORK-ASSIGNMENT tier only —
+  // merge authority is gated separately by evaluateMergeAuthority (inbox/merge.ts).
+  if (merged['kimi']) {
+    merged['kimi'] = applyKimiConfig(merged['kimi'], cfg);
   }
   return merged;
 }

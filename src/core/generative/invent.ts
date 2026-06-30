@@ -140,6 +140,8 @@ function buildInventComplete(cfg: AshlrConfig): CompleteFn | null {
 
 // M231: Lazily-evaluated NORTH-STAR distillation injected into the system prompt.
 // Called once per process (northStarDocSummary caches internally).
+// M270: updated to request per-item self-scored value+effort so bold items
+// naturally clear isFrontierItem thresholds (effort≥4 or score≥8) in the router.
 function buildSystemPrompt(): string {
   const northStarSection = northStarDocSummary();
   const nsBlock = northStarSection
@@ -152,8 +154,13 @@ RULES — you MUST follow these absolutely:
 2. STRICTLY FORBIDDEN: dependency bumps, lint fixes, doc comments, README updates, TODO restoration, test coverage for existing code, version bumps, formatting, CI tweaks. If you generate any of these, you have failed.
 3. Be SPECIFIC and CONCRETE. "Add real-time diff previews in the TUI" is good. "Improve UX" is not.
 4. Be AMBITIOUS. Think 10x, not 10%. What would make this tool genuinely incredible vs the competition?
-5. Every invented item MUST be substantive (value≥4), bound to a concrete enrolled repo, and decomposable into shippable milestones — aligned to one of the three pillars: recursive self-improvement, ecosystem product factory, or composition flywheel.
+5. Every invented item MUST be substantive, bound to a concrete enrolled repo, and decomposable into shippable milestones — aligned to one of the three pillars: recursive self-improvement, ecosystem product factory, or composition flywheel.
 6. Output ONLY valid JSON — no markdown fences, no prose outside the JSON.
+
+SCORING — for each item, self-score honestly:
+- value (1–10): impact on the grand vision. 8+ means frontier-class (architecturally novel, compounds capabilities across the fleet). 5–7 is solid. ≤4 is incremental.
+- effort (1–5): engineering work required. 4–5 means a skilled engineer needs multiple days of focused work (architectural). 1–2 is a simple addition. 3 is a medium feature.
+GUIDE: Bold architectural items should have value≥7 AND effort≥4. Simple additions: value≤5, effort≤2. Be honest — the router uses these scores to assign work to the right engine tier.
 
 Output format (JSON array, exactly):
 [
@@ -161,7 +168,9 @@ Output format (JSON array, exactly):
     "title": "Short imperative title (≤10 words)",
     "rationale": "Why this is high-leverage and what capability gap it closes (2-3 sentences)",
     "boldness": "What makes this ambitious / non-obvious",
-    "sketch": "Rough build sketch: key files/APIs/approaches (2-4 sentences)"
+    "sketch": "Rough build sketch: key files/APIs/approaches (2-4 sentences)",
+    "value": 8,
+    "effort": 4
   }
 ]`;
 }
@@ -197,6 +206,9 @@ interface RawInventedItem {
   why?: unknown;       // Opus sometimes returns "why" instead of "rationale"
   boldness?: unknown;
   sketch?: unknown;
+  // M270: model-reported self-scores. When present, used instead of flat defaults.
+  value?: unknown;
+  effort?: unknown;
 }
 
 // Phrases that indicate a maintenance item slipped through the prompt filter.
@@ -341,8 +353,14 @@ export async function inventWorkItems(
           .join('\n'),
       );
 
-      const value = 4;
-      const effort = 3;
+      // M270: use model-reported self-scores when present; fall back to defaults.
+      // Clamped to valid ranges: value 1–10, effort 1–5.
+      // Bold items (value≥8, effort≥4) naturally clear isFrontierItem thresholds
+      // (effort≥4 or score≥8) so they route to frontier engines automatically.
+      const rawValue = typeof ri.value === 'number' ? ri.value : 4;
+      const rawEffort = typeof ri.effort === 'number' ? ri.effort : 3;
+      const value = Math.max(1, Math.min(10, Math.round(rawValue)));
+      const effort = Math.max(1, Math.min(5, Math.round(rawEffort)));
       const score = Math.round((value * 2) / effort * 10) / 10;
 
       const workItem: WorkItem = {

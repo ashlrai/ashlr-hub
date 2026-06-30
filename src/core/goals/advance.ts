@@ -56,6 +56,8 @@ import { runSwarm } from '../swarm/runner.js';
 import { loadSwarm } from '../swarm/store.js';
 import { loadProposal, listProposals } from '../inbox/store.js';
 import { loadGoal, updateMilestoneStatus, resumeMilestone } from './store.js';
+// M270: dynamic frontier trio reads the resolved registry so kimi joins when configured.
+import { engineTierOf } from '../run/sandboxed-engine.js';
 
 // ---------------------------------------------------------------------------
 // HARD per-advance budget — a goal advance is ALWAYS bounded.
@@ -120,12 +122,29 @@ export function nextActionableMilestone(goal: Goal): Milestone | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Ordered frontier-engine preference for M229 rotation.
- * 'nim' is included because cfg.foundry.nim can promote it to frontier tier
- * (moonshotai/kimi-k2.6). Its position last preserves the claude/codex
- * preference order from FRONTIER_PREFERENCE in fleet/router.ts.
+ * M270: dynamic frontier trio — ordered candidates for the M229 rotation.
+ * Replaces the static ['claude','codex','nim'] array with a registry-aware function
+ * so that any engine promoted to tier:'frontier' via config (e.g. kimi, nim) is
+ * automatically included. This is WORK-ASSIGNMENT tier only; merge authority is
+ * a separate gate in inbox/merge.ts and is NOT affected by this function.
+ *
+ * Candidate order: claude > codex > kimi > nim preserves the trust/capability
+ * preference while allowing both kimi and nim to join when promoted.
  */
-const M229_FRONTIER_TRIO: readonly EngineId[] = ['claude', 'codex', 'nim'];
+const M270_FRONTIER_CANDIDATES: readonly EngineId[] = ['claude', 'codex', 'kimi', 'nim'];
+
+/**
+ * Return the ordered list of EngineIds that are currently 'frontier' tier
+ * according to the resolved engine registry (reads cfg). Called per-advance so
+ * config changes take effect on the next advance tick without a restart.
+ *
+ * SAFETY: this is WORK-ASSIGNMENT only. The merge gate (evaluateMergeAuthority)
+ * checks mergeAuthority config independently — an engine promoted here does NOT
+ * gain merge authority.
+ */
+function resolveFrontierTrio(cfg: AshlrConfig): EngineId[] {
+  return M270_FRONTIER_CANDIDATES.filter((e) => engineTierOf(e, cfg) === 'frontier');
+}
 
 /**
  * Module-level round-robin counter. Incremented once per successful engine
@@ -143,15 +162,19 @@ export function _m229ResetRoundRobin(): void {
  * Return the ordered list of frontier EngineIds that are present in
  * cfg.foundry.allowedBackends AND installed. Falls back to [] when none qualify
  * (caller then uses the builtin-swarm path). Never throws.
+ *
+ * M270: uses resolveFrontierTrio(cfg) instead of the static M229_FRONTIER_TRIO,
+ * so kimi/nim join the rotation when promoted to tier:'frontier' via config.
+ * WORK-ASSIGNMENT only — merge authority is not changed by this function.
  */
 function resolveFrontierEngines(cfg: AshlrConfig): EngineId[] {
   try {
     const allowed = new Set<string>(cfg.foundry?.allowedBackends ?? []);
-    // Dynamic import is used at call site (runMilestoneFrontierEngine); here we
-    // only intersect with the static trio. engineInstalled is NOT called here
-    // because this function may run in contexts where engines.js is not loaded;
-    // the caller guards on an empty result and falls back to the swarm path.
-    return M229_FRONTIER_TRIO.filter((e) => allowed.has(e));
+    // M270: dynamic trio based on resolved engine registry tier.
+    // engineInstalled is NOT called here because this function may run in contexts
+    // where engines.js is not loaded; the caller guards on an empty result and
+    // falls back to the swarm path.
+    return resolveFrontierTrio(cfg).filter((e) => allowed.has(e));
   } catch {
     return [];
   }
