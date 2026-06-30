@@ -196,7 +196,14 @@ export function attachStallMonitor(
     }
 
     // No-diff-stall detection: many events, zero file writes.
-    if (totalEvents >= NO_DIFF_MIN_EVENTS && fileTouchedCount === 0) {
+    // M300b: codex emits MANY noise events (skill-load + MCP-auth errors from its
+    // global ~/.codex config) BEFORE its first edit — 80 false-killed it. Make the
+    // threshold config-driven + default much higher so verbose agents reach their
+    // first edit. (idle-stall + the 2h wall-clock remain the real backstops.)
+    const noDiffMin =
+      ((cfg.foundry as Record<string, unknown> | undefined)?.['noDiffMinEvents'] as number | undefined) ??
+      (NO_DIFF_MIN_EVENTS * 5); // 80 → 400
+    if (totalEvents >= noDiffMin && fileTouchedCount === 0) {
       triggerStall('no-diff-stall');
     }
   }
