@@ -590,6 +590,28 @@ export async function runEngineSandboxed(
 
     const terminationReason: TerminationReason | undefined = res.terminationReason;
 
+    // M288: DISPATCH OBSERVABILITY — persist the agent's stdout + outcome to a
+    // durable per-run log (survives sandbox cleanup) so empty-diff dispatches are
+    // debuggable. Previously res.output was discarded (only kept transiently as the
+    // RunState.result), making it impossible to see WHY an agent produced no edits.
+    // Best-effort, never-throws, additive — does not affect run behavior.
+    try {
+      const _logDir = join(process.env.HOME ?? process.env.USERPROFILE ?? tmpdir(), '.ashlr', 'agent-logs');
+      mkdirSync(_logDir, { recursive: true });
+      writeFileSync(
+        join(_logDir, `${id}.log`),
+        `=== ${engine} (${engineModel}) sandbox=${sb.id} worktree=${sb.worktreePath} ===\n` +
+          `ok=${res.ok} terminationReason=${terminationReason ?? '-'} durationMs=${_spawnDurationMs}\n` +
+          `error=${res.error ?? '-'}\n` +
+          `tokensIn=${res.usage?.tokensIn ?? '?'} tokensOut=${res.usage?.tokensOut ?? '?'}\n` +
+          `cmd=${cmd.bin} ${cmd.args.join(' ').slice(0, 400)}\n` +
+          `--- agent output (truncated 40k) ---\n${String(res.output ?? '').slice(0, 40_000)}\n`,
+        'utf8',
+      );
+    } catch {
+      // observability is best-effort — never affects the run
+    }
+
     const _resUsage = res.usage;
     const _computedCost = _resUsage
       ? estCostUsd(engine, _resUsage.tokensIn, _resUsage.tokensOut)
