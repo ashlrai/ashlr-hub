@@ -348,7 +348,33 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
           // Best-effort — reset failure never blocks the merge path.
         }
       } else {
-        // No judge available → fail-closed: skip this proposal entirely.
+        // No judge available → fail-closed: skip this proposal for merging.
+        // M273: when no judge client is available AND the proposal has already
+        // been seen as non-ship at least once (judgeNonShipCount>=1), apply the
+        // same M271-style cheap drain so the proposal doesn't idle forever.
+        // SAFETY: never accrues stuckPassCount for fresh (never-judged) proposals
+        // — only proposals that have already received ≥1 non-ship verdict.
+        // NEVER archives or merges a proposal that might receive a ship verdict
+        // if a judge becomes available — the stuckPassCount path is additive-only.
+        try {
+          const priorNonShip = (p as unknown as Record<string, unknown>)['judgeNonShipCount'] as number | undefined;
+          if (typeof priorNonShip === 'number' && priorNonShip >= 1) {
+            const newStuck = ((p as unknown as Record<string, unknown>)['stuckPassCount'] as number ?? 0) + 1;
+            if (newStuck >= autoArchiveAfterRejects) {
+              setStatus(
+                p.id,
+                'rejected',
+                undefined,
+                `M273 drained: judge unavailable, persistently non-ship (stuck ${newStuck} pass(es), judgeNonShipCount=${priorNonShip})`,
+              );
+              out.autoArchived++;
+            } else {
+              updateProposalField(p.id, { stuckPassCount: newStuck });
+            }
+          }
+        } catch {
+          // Best-effort — drain failure never disrupts the pass.
+        }
         continue;
       }
     }
