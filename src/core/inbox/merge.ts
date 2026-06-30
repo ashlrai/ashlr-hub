@@ -96,7 +96,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, unlinkSync, symlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -166,6 +166,25 @@ function writeTmpFile(content: string): string {
   const body = content.endsWith('\n') ? content : content + '\n';
   writeFileSync(p, body, 'utf8');
   return p;
+}
+
+/**
+ * M293: symlink the source repo's node_modules into an isolated verify/merge
+ * worktree so verify commands (npm run typecheck / tsc / vitest) resolve their
+ * binaries. Without it, `npm run typecheck` exits 127 ("command not found") in
+ * the bare worktree → verifyProposal fails → no proposal could ever merge.
+ * (Same fix M286 applied to the sandboxed-engine worktree; verifyProposal + the
+ * merge worktrees create their OWN worktrees which also need the toolchain.)
+ * Best-effort, never-throws.
+ */
+function linkNodeModules(repo: string, worktreeDir: string): void {
+  try {
+    const src = join(repo, 'node_modules');
+    const dst = join(worktreeDir, 'node_modules');
+    if (existsSync(src) && !existsSync(dst)) symlinkSync(src, dst, 'dir');
+  } catch {
+    // best-effort — verify still attempted; absence just risks exit-127 which is handled
+  }
 }
 
 // ===========================================================================
@@ -799,6 +818,7 @@ export async function verifyProposal(
   // Create the isolated worktree on a scratch branch off the default-branch head.
   try {
     gitRun(repo, ['worktree', 'add', '-b', tmpBranch, tmpDir, baseHead]);
+    linkNodeModules(repo, tmpDir);
   } catch (err) {
     gitTry(repo, ['worktree', 'prune']);
     return {
@@ -969,6 +989,7 @@ function buildMergeBranch(
   const tmpDir = join(homedir(), '.ashlr', 'tmp', `mwt-${randomBytes(6).toString('hex')}`);
   try {
     gitRun(repo, ['worktree', 'add', '-b', branch, tmpDir, baseHead]);
+    linkNodeModules(repo, tmpDir);
   } catch (err) {
     gitTry(repo, ['worktree', 'prune']);
     return {
@@ -1048,6 +1069,7 @@ function mergeLocally(
   // advances in the shared object store.
   try {
     gitRun(repo, ['worktree', 'add', tmpDir, base]);
+    linkNodeModules(repo, tmpDir);
   } catch (err) {
     gitTry(repo, ['worktree', 'prune']);
     return {
