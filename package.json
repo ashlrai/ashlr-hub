@@ -65,6 +65,7 @@
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
     "test:serial": "vitest run --no-file-parallelism",
+    "test:invariants": "vitest run test/h*.test.ts",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },

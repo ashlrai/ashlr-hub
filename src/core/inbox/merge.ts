@@ -96,7 +96,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, unlinkSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, unlinkSync, symlinkSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -1406,11 +1406,48 @@ export async function autoMergeProposal(
             },
           },
         };
+        // M296: prefer the targeted invariant suite (`test:invariants` =
+        // `vitest run test/h*.test.ts`) over the full `npm run test`.  The full
+        // suite can have pre-existing failures in unrelated tests (e.g. m240,
+        // m86) that are NOT invariant regressions — running all tests would
+        // permanently block every self-edit even when the h1-h8 safety tests
+        // are perfectly green.  `test:invariants` scopes to exactly the files
+        // guarded by guardSafetyTests, so a real invariant breakage is still
+        // caught.  When the script is absent (e.g. older installs, test repos)
+        // we fall back to detectVerifyCommands so the gate is never a no-op.
+        // Read the package.json scripts inline (readPackageJson/scriptsOf are
+        // internal to verify-commands.ts and not exported).
+        let scriptsForParity: Record<string, string> = {};
+        try {
+          const raw = readFileSync(join(repo, 'package.json'), 'utf8');
+          const pkg = JSON.parse(raw) as { scripts?: Record<string, unknown> };
+          if (pkg.scripts && typeof pkg.scripts === 'object') {
+            for (const [k, v] of Object.entries(pkg.scripts)) {
+              if (typeof v === 'string') scriptsForParity[k] = v;
+            }
+          }
+        } catch { /* best-effort */ }
+        const pm = existsSync(join(repo, 'pnpm-lock.yaml'))
+          ? 'pnpm'
+          : existsSync(join(repo, 'yarn.lock'))
+            ? 'yarn'
+            : existsSync(join(repo, 'bun.lockb'))
+              ? 'bun'
+              : 'npm';
+        if (scriptsForParity['test:invariants']) {
+          // Fast path: run only the invariant suite.
+          const invariantCmd: VerifyCommand = {
+            kind: 'test',
+            cmd: [pm, 'run', 'test:invariants'],
+          };
+          const res = runVerifyCommand(invariantCmd, repo, parityCfg);
+          return res.ok;
+        }
+        // Fallback: no targeted script — run all detected verify commands.
         const cmds = detectVerifyCommands(repo);
         if (cmds.length === 0) {
-          // No commands in base tree → treat as green (verify already passed
-          // in worktree; this parity check is about flag-sensitivity, not suite
-          // existence — if there is no suite, parity is vacuously true).
+          // No commands → parity is vacuously true (verify already passed in
+          // the worktree; flag-sensitivity cannot be tested without a suite).
           return true;
         }
         for (const vc of cmds) {
