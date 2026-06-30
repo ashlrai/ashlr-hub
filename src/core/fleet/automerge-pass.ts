@@ -30,7 +30,7 @@
  */
 
 import type { AshlrConfig, Proposal } from '../types.js';
-import { listProposals } from '../inbox/store.js';
+import { listProposals, setStatus, updateProposalField } from '../inbox/store.js';
 import { autoMergeProposal, type AutoMergeResult } from '../inbox/merge.js';
 import { killSwitchOn } from '../sandbox/policy.js';
 import { readDecisions } from './decisions-ledger.js';
@@ -67,6 +67,16 @@ export interface AutoMergePassResult {
    * recorded here for observability.
    */
   skipped: Array<{ proposalId: string; check: string; reason: string }>;
+  /**
+   * M259: proposals auto-archived this pass (K non-ship verdicts reached).
+   * These proposals are now 'rejected' and will not be re-judged.
+   */
+  autoArchived: number;
+  /**
+   * M259: proposals TTL-rejected this pass (older than proposalTtlDays).
+   * These proposals are now 'rejected' and will not be re-judged.
+   */
+  ttlRejected: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +137,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     judged: 0,
     judgeCapped: 0,
     skipped: [],
+    autoArchived: 0,
+    ttlRejected: 0,
   };
   if (cfg.foundry?.autoMerge?.enabled !== true) return out;
   if (killSwitchOn()) return out;
@@ -138,12 +150,59 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     return out;
   }
 
-  // M172: resolve judge per-pass cap from config (default 5).
+  // M259: resolve drain config from foundry (all additive — only add reject paths).
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
+
+  // judgePerPass: default 8 (raised from 5 to drain backlog faster — M259).
   const judgePerPass =
     typeof foundry?.['judgePerPass'] === 'number' && foundry['judgePerPass'] > 0
       ? (foundry['judgePerPass'] as number)
-      : 5;
+      : 8;
+
+  // autoArchiveAfterRejects: default 3 — archive after K non-ship verdicts.
+  const autoArchiveAfterRejects =
+    typeof foundry?.['autoArchiveAfterRejects'] === 'number' && (foundry['autoArchiveAfterRejects'] as number) > 0
+      ? (foundry['autoArchiveAfterRejects'] as number)
+      : 3;
+
+  // proposalTtlDays: default 7 — auto-reject proposals older than N days.
+  const proposalTtlDays =
+    typeof foundry?.['proposalTtlDays'] === 'number'
+      ? (foundry['proposalTtlDays'] as number)
+      : 7;
+
+  // M259: TTL pre-pass — reject stale proposals before spending any judge calls.
+  // Belt-and-suspenders: runs independently of the judge loop.
+  // SAFETY: only adds 'rejected' status — NEVER merges anything.
+  if (proposalTtlDays > 0) {
+    const ttlCutoffMs = Date.now() - proposalTtlDays * 24 * 60 * 60 * 1000;
+    for (const p of pending) {
+      try {
+        const createdMs = new Date(p.createdAt).getTime();
+        if (Number.isFinite(createdMs) && createdMs < ttlCutoffMs) {
+          setStatus(
+            p.id,
+            'rejected',
+            undefined,
+            `auto-rejected: proposal older than ${proposalTtlDays} days (TTL)`,
+          );
+          out.ttlRejected++;
+        }
+      } catch {
+        // Best-effort — TTL reject never disrupts the pass.
+      }
+    }
+    // Re-fetch pending after TTL culling so the judge loop skips stale proposals.
+    if (out.ttlRejected > 0) {
+      try {
+        pending = listProposals({ status: 'pending' });
+      } catch {
+        // If re-fetch fails, continue with the original list; TTL-rejected ones
+        // will simply be skipped (their status is 'rejected', not 'pending' —
+        // they'll pass the hasRecentShipVerdict check and be skipped by setStatus).
+      }
+    }
+  }
 
   // Lazily resolve judge client once per pass (avoid re-calling getActiveClient
   // for every proposal). null = judge unavailable → fail-closed (proposals stay unjudged).
@@ -204,7 +263,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
         void emitJudgeVerdict(cfg, p.id, verdict?.verdict ?? 'null', p.repo, p.engineTier).catch(() => {});
 
         // Only proposals that the judge ships proceed to the merge gate.
-        // 'review', 'noise', 'harmful' → leave pending (no autoMergeProposal call).
+        // 'review', 'noise', 'harmful' → auto-archive after K non-ship verdicts (M259).
+        // SAFETY: this ONLY adds a reject path — it can NEVER cause a merge.
         if (!verdict || verdict.verdict !== 'ship') {
           // M235: fire-and-forget self-improvement write-back — additive, never throws, no control-flow change.
           try {
@@ -216,7 +276,39 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
               cfg,
             );
           } catch { /* learnFromRejection never throws; defensive */ }
+
+          // M259: track non-ship count + auto-archive when threshold reached.
+          // NEVER archive a proposal that received a 'ship' verdict (those proceed above).
+          try {
+            const newCount = ((p as unknown as Record<string, unknown>)['judgeNonShipCount'] as number ?? 0) + 1;
+            if (newCount >= autoArchiveAfterRejects) {
+              // Auto-archive: mark as rejected so it is no longer re-judged.
+              // Status change only — never hard-deletes. Strictly safer: the
+              // merge gate (autoMergeProposal) is never reached for this proposal.
+              setStatus(
+                p.id,
+                'rejected',
+                undefined,
+                `auto-archived: judge returned non-ship verdict ${newCount} time(s) (threshold: ${autoArchiveAfterRejects})`,
+              );
+              out.autoArchived++;
+            } else {
+              // Below threshold: persist the updated count so next tick picks up.
+              updateProposalField(p.id, { judgeNonShipCount: newCount });
+            }
+          } catch {
+            // Auto-archive is best-effort — never disrupts the pass.
+          }
           continue;
+        }
+        // Reset judgeNonShipCount on a ship verdict (belt-and-suspenders).
+        try {
+          const existingCount = (p as unknown as Record<string, unknown>)['judgeNonShipCount'] as number | undefined;
+          if (existingCount !== undefined && existingCount > 0) {
+            updateProposalField(p.id, { judgeNonShipCount: 0 });
+          }
+        } catch {
+          // Best-effort — reset failure never blocks the merge path.
         }
       } else {
         // No judge available → fail-closed: skip this proposal entirely.

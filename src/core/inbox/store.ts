@@ -297,6 +297,43 @@ export function createProposal(
     }
   }
 
+  // M259: diffHash dedup — if an identical diff is already pending, skip filing.
+  // This prevents the 10x duplicate flood (same fix re-proposed every tick).
+  // Only skips when the incoming proposal has a diffHash AND a pending proposal
+  // with the same diffHash already exists. Safe: never rejects distinct diffs.
+  // No-op when diffHash is absent (no dedup check).
+  if (initialStatus === 'pending' && p.diffHash) {
+    try {
+      const existingPending = listProposals({ status: 'pending' });
+      const duplicate = existingPending.find(
+        (ep) => ep.diffHash === p.diffHash,
+      );
+      if (duplicate) {
+        // Return a synthetic rejected record (never persisted) so the caller
+        // gets a valid Proposal shape without cluttering the inbox.
+        // The real proposal (duplicate.id) is still live — we just skip the new one.
+        audit({
+          action: 'inbox:proposal-rejected',
+          repo: (p.repo as string | null) ?? null,
+          sandboxId: (p.sandboxId as string | undefined) ?? null,
+          summary: `proposal skipped (diffHash dedup): [${p.kind}] ${p.title} — duplicate of ${duplicate.id}`,
+          result: 'ok',
+        });
+        return {
+          ...p,
+          ...(owner !== undefined ? { owner } : {}),
+          id: duplicate.id, // caller receives the existing proposal's id
+          status: 'rejected' as const,
+          createdAt: new Date().toISOString(),
+          decisionReason: `diffHash dedup: duplicate of ${duplicate.id}`,
+          decidedAt: new Date().toISOString(),
+        };
+      }
+    } catch {
+      // Dedup is best-effort — never disrupts proposal creation.
+    }
+  }
+
   const proposal: Proposal = {
     ...p,
     ...(owner !== undefined ? { owner } : {}),
@@ -523,6 +560,32 @@ export function setStatus(
       status,
       updated.owner ? { user: { id: updated.owner } } : undefined,
     );
+  } catch {
+    // Never throws.
+  }
+}
+
+/**
+ * M259: Patch a single field on an existing proposal (atomic read-modify-write).
+ *
+ * Used by runAutoMergePass to increment judgeNonShipCount without touching any
+ * other field. Pure persistence — NEVER changes status, NEVER applies anything.
+ * No-op when the proposal does not exist or cannot be read.
+ * Never throws.
+ */
+export function updateProposalField(
+  id: string,
+  patch: Partial<Pick<Proposal, 'judgeNonShipCount'>>,
+): void {
+  try {
+    const existing = loadProposal(id);
+    if (existing === null) return;
+    const updated: Proposal = { ...existing, ...patch };
+    try {
+      persistProposal(updated);
+    } catch {
+      // Persistence failure — swallow; best-effort.
+    }
   } catch {
     // Never throws.
   }

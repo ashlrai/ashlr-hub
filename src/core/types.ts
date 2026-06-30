@@ -391,6 +391,27 @@ export interface AshlrConfig {
      * task classes. Set false for exact pre-M243 behavior (byte-identical no-op).
      */
     skillLibrary?: boolean;
+    /**
+     * M259: max frontier-judge calls per runAutoMergePass tick (default 8).
+     * Proposals that exceed the cap are skipped and retried on the next tick.
+     * Raise this to drain a backlog faster; lower it to protect inference budget.
+     */
+    judgePerPass?: number;
+    /**
+     * M259: auto-archive proposals that accumulate K consecutive non-ship
+     * judge verdicts (review/harmful/noise). Default 3. A proposal that reaches
+     * this threshold is marked 'rejected' with reason 'auto-archived' — it is
+     * no longer re-judged and no longer counts as pending. Strictly additive
+     * (only adds a reject path; NEVER weakens the merge gate).
+     */
+    autoArchiveAfterRejects?: number;
+    /**
+     * M259: TTL for pending proposals (days). A pending proposal older than
+     * this many days is auto-rejected as stale. Default 7. Belt-and-suspenders
+     * complement to autoArchiveAfterRejects. Set 0 to disable TTL. Strictly
+     * additive (only adds a reject path; NEVER weakens the merge gate).
+     */
+    proposalTtlDays?: number;
     autoMerge?: {
       enabled: boolean;
       /**
@@ -2675,6 +2696,15 @@ export interface Proposal {
     verdict: 'gold' | 'solid' | 'mediocre';
     rationale: string;
   };
+  /**
+   * M259: count of consecutive non-ship judge verdicts (review/noise/harmful)
+   * for this proposal. Incremented by runAutoMergePass each time the judge
+   * returns a non-ship verdict. When this reaches cfg.foundry.autoArchiveAfterRejects
+   * (default 3) the proposal is auto-rejected with reason 'auto-archived'.
+   * Reset to 0 on a ship verdict (which proceeds to the merge gate as normal).
+   * Optional — absent means 0; never present on proposals created before M259.
+   */
+  judgeNonShipCount?: number;
   /**
    * M233: set to true when the diff was captured after a timeout or non-zero
    * exit — the agent did real work before the cap but the run didn't finish
