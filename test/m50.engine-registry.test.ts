@@ -38,7 +38,7 @@ function makeConfig(over: Partial<AshlrConfig> = {}): AshlrConfig {
   } as AshlrConfig;
 }
 
-const KNOWN_ENGINES: EngineId[] = ['builtin', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'opencode', 'nim', 'kimi', 'openai-compat', 'local-coder'];
+const KNOWN_ENGINES: EngineId[] = ['builtin', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'opencode', 'nim', 'kimi', 'openai-compat', 'local-coder', 'grok'];
 
 describe('M50 registry — coverage', () => {
   it('every known EngineId has a builtin registry entry', () => {
@@ -77,23 +77,23 @@ describe('M50 registry — buildEngineCommand argv PARITY (byte-identical)', () 
     expect(buildEngineCommand('builtin', GOAL, cfg, { cwd: CWD })).toBeNull();
   });
 
-  it('claude — exact argv with model, no autonomous', () => {
+  it('claude — exact argv with model, no autonomous (M298: stream-json + --verbose)', () => {
     const cmd = buildEngineCommand('claude', GOAL, cfg, { cwd: CWD, model: MODEL });
     expect(cmd!.bin).toBe('claude');
-    expect(cmd!.args).toEqual(['-p', GOAL, '--model', MODEL, '--output-format', 'json']);
+    expect(cmd!.args).toEqual(['-p', GOAL, '--model', MODEL, '--output-format', 'stream-json', '--verbose']);
   });
 
   it('claude — autonomous appends permission-mode + add-dir', () => {
     const cmd = buildEngineCommand('claude', GOAL, cfg, { cwd: CWD, model: MODEL, autonomous: true });
     expect(cmd!.args).toEqual([
-      '-p', GOAL, '--model', MODEL, '--output-format', 'json',
+      '-p', GOAL, '--model', MODEL, '--output-format', 'stream-json', '--verbose',
       '--dangerously-skip-permissions', '--add-dir', CWD,
     ]);
   });
 
   it('claude — no model omits --model', () => {
     const cmd = buildEngineCommand('claude', GOAL, cfg, { cwd: CWD });
-    expect(cmd!.args).toEqual(['-p', GOAL, '--output-format', 'json']);
+    expect(cmd!.args).toEqual(['-p', GOAL, '--output-format', 'stream-json', '--verbose']);
   });
 
   it('codex — exact argv with and without model (yolo when autonomous)', () => {

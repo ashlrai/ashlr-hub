@@ -52,17 +52,26 @@ import type {
 export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Object.freeze({
   builtin: { id: 'builtin', kind: 'builtin', tier: 'local' },
 
-  // claude -p <goal> [--model M] --output-format json [--dangerously-skip-permissions --add-dir CWD when autonomous]
+  // claude -p <goal> [--model M] --output-format stream-json --verbose [--dangerously-skip-permissions --add-dir CWD when autonomous]
   // Uses the Claude Code SUBSCRIPTION (env API keys are stripped by CRED_ENV_DENY).
   // --dangerously-skip-permissions is SAFE here: we externally confine the run in
   // sandbox-exec (worktree-only writes) and every result is a PROPOSAL, never applied.
+  //
+  // M298: switched from --output-format json (single final blob) to
+  // --output-format stream-json --verbose so the stall monitor (run-monitor.ts)
+  // receives real RunEvents (content_block_start, content_block_delta, result)
+  // line-by-line while the agent runs, enabling event-driven stall detection
+  // instead of a blunt 30-min idle window. --verbose is required by claude CLI
+  // when -p (print mode) + stream-json are combined. engines.ts normalizeRunEvent
+  // and parseUsageFromLines already handle stream-json JSONL (the 'result' event
+  // carries usage; content_block_start/delta carry tool_call/text events).
   claude: {
     id: 'claude',
     kind: 'cli-agent',
     tier: 'frontier',
     bin: 'claude',
     bins: ['claude'],
-    argv: ['-p', '$GOAL', { optModel: ['--model', '$MODEL'] }, '--output-format', 'json'],
+    argv: ['-p', '$GOAL', { optModel: ['--model', '$MODEL'] }, '--output-format', 'stream-json', '--verbose'],
     autonomousArgv: ['--dangerously-skip-permissions', '--add-dir', '$CWD'],
     capabilities: ['agent', 'edit', 'architecture'],
     // M260: canonical concrete model for merge-authority resolution.
@@ -250,6 +259,39 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
     },
     capabilities: ['agent', 'edit', 'tools'],
   },
+
+  // ---------------------------------------------------------------------------
+  // M298: xAI Grok — OpenAI-compatible cloud inference (xAI).
+  // Default model: grok-4 (xAI flagship; strong coding + reasoning).
+  // Env: XAI_API_KEY (primary) or GROK_API_KEY (alias).
+  // Base URL override: XAI_BASE_URL
+  //
+  // Tier 'mid' by default — branch-eligible after full verification, but
+  // NEVER merge-authority for main (grok is NOT in cfg.foundry.mergeAuthority
+  // by default; frontier WORK-tier ≠ merge authority — M270 invariant).
+  //
+  // To promote grok to frontier WORK-ASSIGNMENT (route it like claude/codex)
+  // without granting merge authority, set:
+  //   cfg.foundry.grok = { tier: 'frontier' }
+  // applyGrokConfig() (below) folds that into the resolved spec — exactly
+  // parallel to applyKimiConfig/applyNimConfig. The builtin entry stays 'mid'.
+  //
+  // BUILTIN but NOT in default allowedBackends — activated by adding 'grok'
+  // to cfg.foundry.allowedBackends.
+  // ---------------------------------------------------------------------------
+  grok: {
+    id: 'grok',
+    kind: 'api-model',
+    tier: 'mid',
+    api: {
+      envKey: 'XAI_API_KEY',
+      baseUrlEnv: 'XAI_BASE_URL',
+      defaultBaseUrl: 'https://api.x.ai/v1',
+      defaultModel: 'grok-4',
+      protocol: 'openai' as const,
+    },
+    capabilities: ['agent', 'edit', 'architecture'],
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -387,6 +429,42 @@ export function applyKimiConfig(spec: EngineSpec, cfg?: AshlrConfig): EngineSpec
 }
 
 /**
+ * M298: fold a `cfg.foundry.grok` block into the resolved 'grok' EngineSpec.
+ *
+ * Parallel to applyKimiConfig — lets Grok be promoted to frontier WORK-ASSIGNMENT
+ * tier via `cfg.foundry.grok = { tier: 'frontier' }` without touching the builtin
+ * roster.
+ *
+ * SAFETY INVARIANT: this promotes the ROUTING tier only (work assignment).
+ * Merge authority is SEPARATELY gated by evaluateMergeAuthority in inbox/merge.ts,
+ * which requires proposal.engineModel ∈ cfg.foundry.mergeAuthority. Grok is NOT
+ * in that list by default, so a frontier-promoted Grok will have its proposals
+ * branch-eligible (not main-merge-eligible) until explicitly added to
+ * cfg.foundry.mergeAuthority with a human trust decision.
+ *
+ * Absent cfg.foundry.grok ⇒ input spec returned unchanged (byte-identical to pre-M298).
+ */
+export function applyGrokConfig(spec: EngineSpec, cfg?: AshlrConfig): EngineSpec {
+  const grok = (cfg?.foundry as Record<string, unknown> | undefined)?.['grok'] as
+    | { tier?: string; model?: string; apiKeyEnv?: string }
+    | undefined;
+  if (!grok || typeof grok !== 'object' || spec.kind !== 'api-model' || !spec.api) {
+    return spec;
+  }
+  const tier = VALID_TIERS.has(grok.tier as string) ? (grok.tier as EngineTier) : spec.tier;
+  return {
+    ...spec,
+    tier,
+    api: {
+      ...spec.api,
+      envKey: (typeof grok.apiKeyEnv === 'string' && grok.apiKeyEnv) || spec.api.envKey,
+      defaultModel:
+        (typeof grok.model === 'string' && grok.model) || spec.api.defaultModel,
+    },
+  };
+}
+
+/**
  * Resolve the effective engine roster: the built-in registry with any
  * `cfg.foundry.engines` entries merged over it. Malformed added entries are
  * dropped (never fatal, never defaulted to frontier). Returns a fresh object.
@@ -416,6 +494,13 @@ export function resolveEngineRegistry(cfg?: AshlrConfig): Record<string, EngineS
   // merge authority is gated separately by evaluateMergeAuthority (inbox/merge.ts).
   if (merged['kimi']) {
     merged['kimi'] = applyKimiConfig(merged['kimi'], cfg);
+  }
+  // M298: high-level cfg.foundry.grok convenience override (frontier work-assignment
+  // promotion). No-op when cfg.foundry.grok is absent. WORK-ASSIGNMENT tier only —
+  // merge authority is gated separately by evaluateMergeAuthority (inbox/merge.ts).
+  // SAFETY: grok is NOT in cfg.foundry.mergeAuthority by default.
+  if (merged['grok']) {
+    merged['grok'] = applyGrokConfig(merged['grok'], cfg);
   }
   return merged;
 }

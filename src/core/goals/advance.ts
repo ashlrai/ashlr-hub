@@ -131,7 +131,7 @@ export function nextActionableMilestone(goal: Goal): Milestone | null {
  * Candidate order: claude > codex > kimi > nim preserves the trust/capability
  * preference while allowing both kimi and nim to join when promoted.
  */
-const M270_FRONTIER_CANDIDATES: readonly EngineId[] = ['claude', 'codex', 'kimi', 'nim'];
+const M270_FRONTIER_CANDIDATES: readonly EngineId[] = ['claude', 'codex', 'kimi', 'nim', 'grok']; // M298: grok joins when promoted to tier:'frontier' via cfg.foundry.grok
 
 /**
  * Return the ordered list of EngineIds that are currently 'frontier' tier

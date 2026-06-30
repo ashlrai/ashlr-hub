@@ -1556,7 +1556,8 @@ export type EngineId =
   | 'hermes'
   | 'kimi'
   | 'nim'
-  | 'opencode';
+  | 'opencode'
+  | 'grok'; // M298: xAI Grok — OpenAI-compatible, tier mid (promotable to frontier via cfg.foundry.grok)
 
 /**
  * M45: trust tier of the backend that produced work. 'frontier' = a

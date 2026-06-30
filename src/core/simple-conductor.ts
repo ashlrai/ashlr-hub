@@ -182,7 +182,17 @@ export async function runSimpleConductor(
     // Dispatch via the proven sandboxed-engine primitive.
     try {
       const engineId: EngineId = (task.engine ?? 'claude') as EngineId;
-      const sandboxResult = await runEngineSandboxed(engineId, task.instruction, cfg, {
+      // M298: append a standing full-suite directive so the agent cannot finish
+      // without running the complete test suite + typecheck and confirming zero
+      // NEW failures. This closed a regression window where the agent ran only
+      // related tests and missed failures in adjacent modules (doctor regression).
+      const fullSuiteDirective =
+        '\n\n---\nBEFORE FINISHING: run the FULL test suite (`npm test` or `npx vitest run`) ' +
+        'AND typecheck (`npx tsc --noEmit`). Confirm there are ZERO new failures ' +
+        '(pre-existing failures that were already failing before your change are exempt). ' +
+        'Do NOT mark the task complete or file a proposal until both commands pass cleanly.';
+      const instruction = task.instruction + fullSuiteDirective;
+      const sandboxResult = await runEngineSandboxed(engineId, instruction, cfg, {
         sourceRepo: task.repo,
         budget: {
           // M287: raised from 50k/40 — substantial high-value work (new file +
