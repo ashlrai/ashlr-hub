@@ -491,6 +491,18 @@ export interface AshlrConfig {
        * DEFAULT 3.
        */
       maxSlotsPerBackend?: number;
+      /**
+       * M256 Workhorse Dispatch: when true (alongside concurrentDispatch=true),
+       * bulk items are spread evenly across WORKHORSE_BACKENDS (local-coder,
+       * codex, nim) that have headroom, rather than always routing to whichever
+       * single backend the gateway prefers. Makes codex a co-equal parallel
+       * workhorse for bulk volume instead of sitting at 0 dispatches.
+       *
+       * Safety: 0-slot governor still holds; codex retains frontier tier for
+       * trust/merge decisions; only the bulk-spread routeItem is changed.
+       * DEFAULT false → byte-identical to pre-M256. Requires concurrentDispatch=true.
+       */
+      workhorseDispatch?: boolean;
     };
     /**
      * M250 Resource Control Plane: per-backend weekly message/token caps.

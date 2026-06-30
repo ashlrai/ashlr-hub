@@ -1,5 +1,5 @@
 /**
- * src/core/fabric/concurrent-dispatch.ts — M255 Concurrent Multi-Backend Dispatcher
+ * src/core/fabric/concurrent-dispatch.ts — M255/M256 Concurrent Multi-Backend Dispatcher
  *
  * Provides pure planning + async execution primitives for running the work queue
  * across ALL backends with headroom simultaneously, rather than one at a time.
@@ -29,6 +29,10 @@
  *   buildGatewayDispatchPlan(items, snapshot, cfg, dispatchCfg)
  *     Async production entry point: calls gateway.decide per item to build the
  *     routing hint map, then delegates to planConcurrentDispatch.
+ *     When cfg.foundry.fabric.workhorseDispatch=true (M256), bulk items are
+ *     spread evenly across WORKHORSE_BACKENDS (local-coder, codex, nim) that
+ *     have headroom, making codex a co-equal parallel workhorse instead of
+ *     frontier-only overflow. Flag-off = today's gateway-preference behavior.
  *     Never throws.
  *
  * Safety invariants:
@@ -46,6 +50,23 @@
 import type { EngineId, WorkItem, AshlrConfig } from '../types.js';
 import type { BackendAvailability, ResourceSnapshot } from './resource-monitor.js';
 import { decide as gatewayDecide } from './gateway.js';
+
+// ---------------------------------------------------------------------------
+// M256: Workhorse backend set
+// ---------------------------------------------------------------------------
+
+/**
+ * M256: The backends that carry bulk parallel load when workhorseDispatch=true.
+ * Codex is included as a co-equal workhorse alongside local-coder and nim —
+ * it is a capable, authed, subscription-based engine that should receive a
+ * fair share of bulk dispatch rather than sitting idle.
+ *
+ * NOTE: This set is ONLY used for the bulk-spread routeItem inside
+ * buildGatewayDispatchPlan (concurrentDispatch + workhorseDispatch path).
+ * It does NOT change frontier trust, merge authority, or the 0-slot governor.
+ * Codex retains full frontier tier for trust/merge decisions.
+ */
+const WORKHORSE_BACKENDS: readonly EngineId[] = ['local-coder', 'codex', 'nim'] as readonly EngineId[];
 
 // ---------------------------------------------------------------------------
 // Types
@@ -401,6 +422,16 @@ export async function buildGatewayDispatchPlan(
       }
     }
 
+    // M256: workhorse-dispatch path — spread bulk items evenly across
+    // WORKHORSE_BACKENDS (local-coder, codex, nim) that have headroom,
+    // rather than always preferring the single backend the gateway returned.
+    // Gated: only active when BOTH concurrentDispatch=true AND workhorseDispatch=true.
+    // Flag-off (workhorseDispatch !== true) → gateway-preference routeItem (unchanged).
+    if (cfg.foundry?.fabric?.workhorseDispatch === true) {
+      const routeItem = buildWorkhorseSpreader(snapshot, dispatchCfg);
+      return planConcurrentDispatch(items, snapshot, dispatchCfg, routeItem);
+    }
+
     const routeItem = (item: WorkItem): EngineId =>
       routeHints.get(item.id) ?? 'builtin';
 
@@ -415,4 +446,55 @@ export async function buildGatewayDispatchPlan(
       slotsMap,
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// M256: buildWorkhorseSpreader — round-robin routeItem across workhorse backends
+// ---------------------------------------------------------------------------
+
+/**
+ * M256: Build a stateful round-robin routeItem function that distributes items
+ * across WORKHORSE_BACKENDS that have available slots in the current snapshot.
+ *
+ * Only backends that are BOTH in WORKHORSE_BACKENDS AND have > 0 slots in
+ * the snapshot participate. If no workhorse backends have slots, falls back
+ * to 'builtin' (same behavior as the flag-off path when all backends are full).
+ *
+ * The spreader is stateful (round-robin cursor) but deterministic within a
+ * single planning call — items cycle through active workhorses in order.
+ *
+ * Safety: the 0-slot governor in planConcurrentDispatch still holds.
+ * Even if this spreader picks a backend that just ran out of slots,
+ * planConcurrentDispatch will fall back to round-robin across eligible backends.
+ */
+function buildWorkhorseSpreader(
+  snapshot: ResourceSnapshot,
+  cfg: ConcurrentDispatchCfg,
+): (item: WorkItem) => EngineId {
+  const maxSlots = Math.max(1, cfg.maxSlotsPerBackend ?? 3);
+
+  // Build a slot budget map from the snapshot (same logic as planConcurrentDispatch).
+  const snapshotSlots = new Map<EngineId, number>();
+  for (const state of snapshot.backends) {
+    snapshotSlots.set(state.backend, slotsForAvailability(state.availability, maxSlots));
+  }
+
+  // Active workhorses = WORKHORSE_BACKENDS that have > 0 slots.
+  const activeWorkhorses: EngineId[] = WORKHORSE_BACKENDS.filter(
+    (b) => (snapshotSlots.get(b) ?? 0) > 0,
+  );
+
+  // If no workhorses have slots, fall back to builtin.
+  if (activeWorkhorses.length === 0) {
+    return () => 'builtin';
+  }
+
+  // Round-robin cursor (shared state across calls within this planning run).
+  let cursor = 0;
+
+  return (_item: WorkItem): EngineId => {
+    const chosen = activeWorkhorses[cursor % activeWorkhorses.length]!;
+    cursor++;
+    return chosen;
+  };
 }
