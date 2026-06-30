@@ -158,7 +158,13 @@ function writeTmpFile(content: string): string {
   const dir = join(homedir(), '.ashlr', 'tmp');
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const p = join(dir, `merge-${randomBytes(6).toString('hex')}.diff`);
-  writeFileSync(p, content, 'utf8');
+  // M292: `git apply` rejects a patch whose final line lacks a trailing newline
+  // ("corrupt patch at line N"). Captured sandbox diffs frequently end without
+  // one, which made EVERY verify/merge git-apply fail → no proposal could ever
+  // merge. Ensure a trailing newline on the apply temp file (does NOT touch the
+  // stored proposal.diff or its provenance hash — only this throwaway apply file).
+  const body = content.endsWith('\n') ? content : content + '\n';
+  writeFileSync(p, body, 'utf8');
   return p;
 }
 
