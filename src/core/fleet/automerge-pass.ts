@@ -247,6 +247,36 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     }
     // In verification mode: no tier pre-filter — fall through to judge-then-merge.
 
+    // ── M272: unconditional cheap drain (closes the <judgePerPass dead zone) ──
+    // A pending already judged non-ship at least once (judgeNonShipCount>=1) and with
+    // no recent ship verdict accrues a stuckPassCount EVERY pass — not only when the
+    // judge cap is hit (the M271 path only fired when capped, so a small backlog
+    // (pending < judgePerPass) never drained). At K (autoArchiveAfterRejects) it is
+    // archived (status→rejected) WITHOUT a fresh judge call.
+    // SAFETY: only proposals already judged non-ship qualify; a ship verdict is never
+    // reached here (hasRecentShipVerdict guard); status change only (no hard delete);
+    // the merge gate (judge/scope-cap/tests-green/frontier-auth/verification) is untouched.
+    try {
+      const m272NonShip = (p as unknown as Record<string, unknown>)['judgeNonShipCount'] as number | undefined;
+      if (typeof m272NonShip === 'number' && m272NonShip >= 1 && !hasRecentShipVerdict(p.id)) {
+        const m272Stuck = ((p as unknown as Record<string, unknown>)['stuckPassCount'] as number ?? 0) + 1;
+        if (m272Stuck >= autoArchiveAfterRejects) {
+          setStatus(
+            p.id,
+            'rejected',
+            undefined,
+            `M272 drained: persistently non-ship/non-mergeable (stuck ${m272Stuck} pass(es), judgeNonShipCount=${m272NonShip})`,
+          );
+          out.autoArchived++;
+        } else {
+          updateProposalField(p.id, { stuckPassCount: m272Stuck });
+        }
+        continue; // drained-toward-archive this pass; no fresh judge call spent.
+      }
+    } catch {
+      // Best-effort — drain failure never disrupts the pass.
+    }
+
     // ── M172: judge-then-merge ─────────────────────────────────────────────
     // Skip judging if there is already a recent ship verdict + attestation.
     if (!hasRecentShipVerdict(p.id)) {
