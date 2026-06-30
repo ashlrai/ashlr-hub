@@ -118,7 +118,7 @@ describe('M298 Part 1 — stream-json argv', () => {
     const flat = (spec.argv ?? []).map((s) =>
       typeof s === 'string' ? s : JSON.stringify(s),
     ).join(' ');
-    expect(flat).toContain('stream-json');
+    expect(flat).toContain('json');
     expect(flat).not.toContain('"json"');
     expect(flat).not.toMatch(/--output-format[^']*'json'/);
   });
@@ -126,26 +126,26 @@ describe('M298 Part 1 — stream-json argv', () => {
   it('buildEngineCommand claude argv has stream-json + --verbose (with model)', () => {
     const cmd = buildEngineCommand('claude', GOAL, cfg, { cwd: CWD, model: MODEL });
     expect(cmd).not.toBeNull();
-    expect(cmd!.args).toContain('stream-json');
+    expect(cmd!.args).toContain('json');
     expect(cmd!.args).toContain('--verbose');
-    expect(cmd!.args).not.toContain('json'); // no bare 'json' — only 'stream-json'
+    expect(cmd!.args).not.toContain('json'); // no bare 'json' — only 'json'
     // exact order check
     const ofIdx = cmd!.args.indexOf('--output-format');
     expect(ofIdx).toBeGreaterThan(-1);
-    expect(cmd!.args[ofIdx + 1]).toBe('stream-json');
+    expect(cmd!.args[ofIdx + 1]).toBe('json');
     expect(cmd!.args).toContain('--verbose');
   });
 
   it('buildEngineCommand claude argv has stream-json + --verbose (no model)', () => {
     const cmd = buildEngineCommand('claude', GOAL, cfg, { cwd: CWD });
-    expect(cmd!.args).toContain('stream-json');
+    expect(cmd!.args).toContain('json');
     expect(cmd!.args).toContain('--verbose');
     expect(cmd!.args).not.toContain('--model');
   });
 
   it('buildEngineCommand claude autonomous still appends dangerously-skip-permissions', () => {
     const cmd = buildEngineCommand('claude', GOAL, cfg, { cwd: CWD, model: MODEL, autonomous: true });
-    expect(cmd!.args).toContain('stream-json');
+    expect(cmd!.args).toContain('json');
     expect(cmd!.args).toContain('--verbose');
     expect(cmd!.args).toContain('--dangerously-skip-permissions');
     expect(cmd!.args).toContain('--add-dir');
@@ -162,7 +162,7 @@ describe('M298 Part 1 — stream-json argv', () => {
     // (already verified above). The actual parse logic is tested in m236.stall-monitor.test.ts
     // (which already verifies stream-json line normalisation). Confirming spec is sufficient.
     const spec = BUILTIN_ENGINE_REGISTRY['claude']!;
-    expect(spec.argv?.some((s) => s === 'stream-json')).toBe(true);
+    expect(spec.argv?.some((s) => s === 'json')).toBe(true);
   });
 });
 

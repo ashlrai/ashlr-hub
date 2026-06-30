@@ -71,7 +71,12 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
     tier: 'frontier',
     bin: 'claude',
     bins: ['claude'],
-    argv: ['-p', '$GOAL', { optModel: ['--model', '$MODEL'] }, '--output-format', 'stream-json', '--verbose'],
+    // M298b: REVERTED to --output-format json. stream-json regressed the dispatch:
+    // claude in `-p --output-format stream-json --verbose` returned ok=true in ~77s
+    // WITHOUT executing the task (no diff, no proposal), vs 240-470s of real work in
+    // json mode. Reliable dispatch >> stall-monitor progress visibility. (Stall
+    // monitoring keeps working via the M291 idle/no-diff fixes.)
+    argv: ['-p', '$GOAL', { optModel: ['--model', '$MODEL'] }, '--output-format', 'json'],
     autonomousArgv: ['--dangerously-skip-permissions', '--add-dir', '$CWD'],
     capabilities: ['agent', 'edit', 'architecture'],
     // M260: canonical concrete model for merge-authority resolution.

@@ -80,20 +80,20 @@ describe('M50 registry — buildEngineCommand argv PARITY (byte-identical)', () 
   it('claude — exact argv with model, no autonomous (M298: stream-json + --verbose)', () => {
     const cmd = buildEngineCommand('claude', GOAL, cfg, { cwd: CWD, model: MODEL });
     expect(cmd!.bin).toBe('claude');
-    expect(cmd!.args).toEqual(['-p', GOAL, '--model', MODEL, '--output-format', 'stream-json', '--verbose']);
+    expect(cmd!.args).toEqual(['-p', GOAL, '--model', MODEL, '--output-format', 'json']);
   });
 
   it('claude — autonomous appends permission-mode + add-dir', () => {
     const cmd = buildEngineCommand('claude', GOAL, cfg, { cwd: CWD, model: MODEL, autonomous: true });
     expect(cmd!.args).toEqual([
-      '-p', GOAL, '--model', MODEL, '--output-format', 'stream-json', '--verbose',
+      '-p', GOAL, '--model', MODEL, '--output-format', 'json',
       '--dangerously-skip-permissions', '--add-dir', CWD,
     ]);
   });
 
   it('claude — no model omits --model', () => {
     const cmd = buildEngineCommand('claude', GOAL, cfg, { cwd: CWD });
-    expect(cmd!.args).toEqual(['-p', GOAL, '--output-format', 'stream-json', '--verbose']);
+    expect(cmd!.args).toEqual(['-p', GOAL, '--output-format', 'json']);
   });
 
   it('codex — exact argv with and without model (yolo when autonomous)', () => {
