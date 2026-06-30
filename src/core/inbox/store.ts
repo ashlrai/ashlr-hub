@@ -575,7 +575,7 @@ export function setStatus(
  */
 export function updateProposalField(
   id: string,
-  patch: Partial<Pick<Proposal, 'judgeNonShipCount'>>,
+  patch: Partial<Pick<Proposal, 'judgeNonShipCount' | 'verifyResult'>>,
 ): void {
   try {
     const existing = loadProposal(id);

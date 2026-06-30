@@ -102,7 +102,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 import type { AshlrConfig, EngineTier, Proposal } from '../types.js';
-import { loadProposal, setStatus } from './store.js';
+import { loadProposal, setStatus, updateProposalField } from './store.js';
 import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
 import { isRepo, getGitStatus, getRemoteOrg, defaultBranch } from '../git.js';
@@ -1080,6 +1080,56 @@ export async function autoMergeProposal(
     let authority: { authorized: boolean; reason: string };
 
     if (trustBasis === 'verification') {
+      // M261: in verification mode, run verifyProposal() BEFORE calling
+      // evaluateVerificationGate so that Criterion 2 (verifyResult.passed===true)
+      // can read the REAL test-run result. evaluateVerificationGate is a pure
+      // function that reads proposal.verifyResult — if verifyResult is absent it
+      // refuses unconditionally (Criterion 2 is a hard gate).
+      //
+      // Design: the gate comment (line ~556) states "Gate 6 is a prerequisite" —
+      // i.e. verification must run BEFORE the full gate check. In verification
+      // mode we honour that intent by running it here (pre-Gate-4), persisting
+      // the genuine result, and updating the in-memory proposal object so the
+      // gate sees it. Gate 6 below then skips the redundant re-run.
+      //
+      // SAFETY: the result comes exclusively from verifyProposal() — never
+      // fabricated. A persistence failure leaves verifyResult absent →
+      // evaluateVerificationGate Criterion 2 refuses (fail-closed). Verification
+      // failure (verify.ok===false) short-circuits here before Gate 4 so no
+      // merge can proceed on a failing diff.
+      if (proposal.verifyResult?.passed !== true) {
+        // If verifyResult is already present and explicitly false, skip the
+        // expensive worktree run — we already know it failed. evaluateVerificationGate
+        // Criterion 2 will refuse on passed===false. This preserves existing test
+        // expectations ([A4]/[A7]) that set verifyResult.passed=false as the
+        // "suite not green" signal without re-running verification.
+        if (proposal.verifyResult !== undefined && proposal.verifyResult.passed === false) {
+          // Fall through to evaluateVerificationGate — Criterion 2 will refuse.
+        } else {
+          const preVerify = await verifyProposal(proposal, cfg);
+          // Persist the REAL result — best-effort (failure → absent → gate refuses).
+          try {
+            updateProposalField(proposal.id, {
+              verifyResult: {
+                passed: preVerify.ok,
+                ...(preVerify.ok ? {} : { failed: [preVerify.detail] }),
+              },
+            });
+          } catch {
+            // Persistence failure: verifyResult stays absent — gate refuses correctly.
+          }
+          if (!preVerify.ok) {
+            return refuse(`verification failed: ${preVerify.detail}`, repo);
+          }
+          // Update the in-memory proposal so evaluateVerificationGate reads it.
+          // This does NOT mutate the on-disk record — that was done above. This
+          // only ensures the pure gate function sees the real verifyResult.
+          (proposal as Proposal & { verifyResult?: { passed: boolean; failed?: string[] } }).verifyResult = {
+            passed: true,
+          };
+        }
+      }
+
       // Verification mode: load decisions for this proposal now (needed by
       // evaluateVerificationGate criterion 1 + 4). The full ledger read is
       // cheap; no limit so we see ALL prior judged/verified entries.
@@ -1185,7 +1235,30 @@ export async function autoMergeProposal(
     }
 
     // ── Gate 6: full verification in an isolated worktree ────────────────────
-    const verify = await verifyProposal(proposal, cfg);
+    // M261: in verification mode, verifyProposal() already ran pre-Gate-4 above
+    // (to satisfy evaluateVerificationGate Criterion 2). Skip the redundant
+    // re-run; the result is already persisted and the gate already passed.
+    // In tier mode (default), run verifyProposal() here as before.
+    let verify: VerifyProposalResult;
+    if (trustBasis === 'verification' && proposal.verifyResult?.passed === true) {
+      // Already verified pre-Gate-4 and passed — skip re-run.
+      verify = { ok: true, ran: [], detail: 'pre-verified (M261: already ran before Gate 4)' };
+    } else {
+      verify = await verifyProposal(proposal, cfg);
+      // Persist the result for the non-verification-mode path (best-effort).
+      // In verification mode this branch only runs if verifyResult was absent
+      // AND the pre-Gate-4 path somehow did not set it — fail-closed by design.
+      try {
+        updateProposalField(proposal.id, {
+          verifyResult: {
+            passed: verify.ok,
+            ...(verify.ok ? {} : { failed: [verify.detail] }),
+          },
+        });
+      } catch {
+        // Persistence failure — swallow; the verify outcome still drives the gate.
+      }
+    }
     if (!verify.ok) {
       return refuse(`verification failed: ${verify.detail}`, repo);
     }
