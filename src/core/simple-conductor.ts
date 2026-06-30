@@ -51,6 +51,8 @@ export interface TaskSpec {
   proposalId?: string;
   /** Error message if last dispatch attempt failed. */
   lastError?: string;
+  /** M287: count of dispatch attempts that produced no proposal (retry guard). */
+  attempts?: number;
 }
 
 /** Result returned by runSimpleConductor. */
@@ -183,22 +185,40 @@ export async function runSimpleConductor(
       const sandboxResult = await runEngineSandboxed(engineId, task.instruction, cfg, {
         sourceRepo: task.repo,
         budget: {
-          maxTokens: 50_000,
-          maxSteps: 40,
+          // M287: raised from 50k/40 — substantial high-value work (new file +
+          // wiring + test + iterate-to-green) exhausted the old budget on
+          // attempt 1 ("budget exceeded after attempt 1"), leaving no room to
+          // finish. Bigger budget lets the agent complete + verify substantial tasks.
+          maxTokens: 150_000,
+          maxSteps: 100,
           allowCloud: opts.allowCloud,
         },
         propose: true,
       });
 
-      // Mark task done + record proposalId.
+      // M287: mark done ONLY when a proposal was actually filed. A dispatch that
+      // produced no proposal (empty/incomplete diff, blocked by verify) is NOT
+      // success — record the attempt + retry next tick, giving up after 3 tries
+      // to avoid looping forever on an unworkable task.
       const idx = mutableTasks.findIndex((t) => t.id === task.id);
       if (idx !== -1) {
-        mutableTasks[idx] = {
-          ...mutableTasks[idx],
-          done: true,
-          dispatchedAt: new Date().toISOString(),
-          proposalId: sandboxResult.proposalId,
-        };
+        if (sandboxResult.proposalId) {
+          mutableTasks[idx] = {
+            ...mutableTasks[idx],
+            done: true,
+            dispatchedAt: new Date().toISOString(),
+            proposalId: sandboxResult.proposalId,
+          };
+        } else {
+          const attempts = ((mutableTasks[idx].attempts ?? 0) + 1);
+          mutableTasks[idx] = {
+            ...mutableTasks[idx],
+            dispatchedAt: new Date().toISOString(),
+            lastError: 'no proposal filed (incomplete diff or blocked by verify/completeness)',
+            attempts,
+            done: attempts >= 3,
+          };
+        }
       }
       writeTasks(mutableTasks);
 

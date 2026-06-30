@@ -216,8 +216,8 @@ describe('M280 — dispatches and marks done', () => {
     expect(instruction).toBe('fix the bug');
     expect(opts.sourceRepo).toBe('/tmp/repo-a');
     expect(opts.propose).toBe(true);
-    expect(opts.budget.maxTokens).toBe(50_000);
-    expect(opts.budget.maxSteps).toBe(40);
+    expect(opts.budget.maxTokens).toBe(150_000); // M287: raised for substantial work
+    expect(opts.budget.maxSteps).toBe(100);
 
     // tasks.json written back with done:true + proposalId
     const written = readTasks();
