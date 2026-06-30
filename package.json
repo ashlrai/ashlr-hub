@@ -67,7 +67,9 @@
     "test:serial": "vitest run --no-file-parallelism",
     "test:invariants": "vitest run test/h*.test.ts",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "debt": "node scripts/debt-tracker.mjs",
+    "debt:trend": "node scripts/debt-tracker.mjs --trend"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
