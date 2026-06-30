@@ -1309,11 +1309,18 @@ export async function autoMergeProposal(
           ? Math.floor(rawLines)
           : 150;
 
-      if (risk !== 'low') {
-        // Already refused above unless maxRisk was raised — belt-and-suspenders:
-        // scope cap never applies to non-low diffs regardless of maxRisk setting.
+      // M295: respect cfg.foundry.autoMerge.maxRisk instead of hardcoding 'low'.
+      // Previously this required risk==='low' for the size-based main merge even
+      // when maxRisk was raised — so NO ordinary source change (all 'medium' now)
+      // could ever auto-merge to main, defeating the autonomous fleet's purpose.
+      // Now the size cap (files/lines below) applies up to maxRisk; HIGH-risk
+      // (security/build/shell surfaces + large diffs) is still refused. The real
+      // protection remains: judge-ship + verify(typecheck/tests-delta/lint-delta)
+      // + frontier-authority + HMAC attestation + the file/line scope cap.
+      const scopeMaxRisk = ((cfg.foundry as any)?.autoMerge?.maxRisk ?? 'low') as RiskClass;
+      if (RISK_ORDER[risk] > RISK_ORDER[scopeMaxRisk]) {
         return refuse(
-          `scope cap: risk is '${risk}' — auto-merge to main requires risk==='low'`,
+          `scope cap: risk '${risk}' exceeds maxRisk '${scopeMaxRisk}'`,
           repo,
         );
       }
