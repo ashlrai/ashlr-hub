@@ -66,6 +66,13 @@ import type { CacheEntry } from '../fabric/cache/store.js';
 // M195: resolve api-model keys (e.g. NVIDIA_NIM_API_KEY) via the engine-auth
 // mechanism — phantom vault first, then process.env. Never logs the value.
 import { resolveProviderKey } from '../integrations/secrets.js';
+// M264: elite context injection for local api-model engines (local-coder, local-agent).
+// Frontier engines (claude, codex) are never modified. Flag-off → no-op.
+import {
+  buildLocalContextBundle,
+  renderLocalContextBundle,
+  isLocalContextEnabled,
+} from './local-context.js';
 
 export interface SandboxedEngineResult {
   /** Delegated RunState (status/usage/engineModel/engineTier). */
@@ -824,11 +831,26 @@ export async function runApiModelSandboxed(
       status: 'pending',
     };
 
+    // M264: build elite context bundle for local engines (flag-gated, never-throws).
+    // Frontier engines are excluded by isLocalContextEnabled. Flag-off → systemPrefix
+    // is undefined → runTask system prompt is byte-identical to pre-M264.
+    let m264SystemPrefix: string | undefined;
+    if (isLocalContextEnabled(engine, cfg)) {
+      try {
+        const bundle = await buildLocalContextBundle(goal, sb.worktreePath, cfg);
+        const rendered = renderLocalContextBundle(bundle);
+        if (rendered.length > 0) m264SystemPrefix = rendered;
+      } catch {
+        // Context injection is best-effort — never fails the run.
+      }
+    }
+
     await runTask(task, client, {
       tools,
       budget,
       usage,
       onStep: () => { /* steps are not persisted for sandboxed api-model runs */ },
+      systemPrefix: m264SystemPrefix,
     });
 
     const finalUsage: RunUsage = {

@@ -76,6 +76,14 @@ export async function runTask(
     adaptivePrompts?: boolean;
     /** M41: optional memory block to inject into the executor prompt. */
     memory?: string;
+    /**
+     * M264: optional context prefix prepended to the system prompt.
+     * Used by local-context.ts to inject NORTH-STAR + ecosystem map +
+     * genome recall + repo tree for local api-model engines (local-coder,
+     * local-agent). When absent (default) the system prompt is byte-identical
+     * to pre-M264 behavior. Never affects frontier engines.
+     */
+    systemPrefix?: string;
   },
 ): Promise<RunTask> {
   // Track per-task usage delta so we can set task.usage at end.
@@ -183,6 +191,12 @@ export async function runTask(
       (useTools
         ? 'You may call tools to gather information; always follow up with a final answer.'
         : 'Do not request tools — respond with a final textual answer only.');
+  }
+
+  // M264: prepend local-context bundle when provided.
+  // When systemPrefix is absent (default) this is a no-op — systemContent unchanged.
+  if (ctx.systemPrefix && ctx.systemPrefix.length > 0) {
+    systemContent = ctx.systemPrefix + '\n\n' + systemContent;
   }
 
   // Build the initial message list.
