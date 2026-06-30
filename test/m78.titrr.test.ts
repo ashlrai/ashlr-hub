@@ -146,6 +146,18 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
       spawnOptionsFor: vi.fn(),
     }));
 
+    // Stub the provider-resolution layer so runGoal's run-level getActiveClient()
+    // does not perform a real local-provider reachability probe. Without this,
+    // hermetic CI (no Ollama/LM Studio) throws "local-first: no provider is
+    // reachable" before the TITRR loop under test ever runs. The sandbox engine
+    // is mocked, so this client is never used to chat — only client.id is read.
+    vi.doMock('../src/core/run/provider-client.js', () => ({
+      getActiveClient: vi.fn(async () => ({
+        id: 'ollama',
+        chat: vi.fn(async () => ({ content: '', usage: { tokensIn: 0, tokensOut: 0 } })),
+      })),
+    }));
+
     // Reset module registry so next import() picks up the doMock stubs.
     vi.resetModules();
 
@@ -159,6 +171,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     vi.doUnmock('../src/core/run/sandboxed-engine.js');
     vi.doUnmock('../src/sandbox/worktree.js');
     vi.doUnmock('../src/core/run/verify-commands.js');
+    vi.doUnmock('../src/core/run/provider-client.js');
     vi.resetModules();
   });
 
