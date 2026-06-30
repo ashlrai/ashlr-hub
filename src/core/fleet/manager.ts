@@ -529,7 +529,9 @@ function buildClaudeCliComplete(
  * Resolve the best available judge client for the manager.
  *
  * Priority order (controlled by cfg.foundry.managerJudgeEngine):
- *   1. 'auto' or 'claude' (default): Claude CLI if allowed + installed → most decisive
+ *   1. 'auto' or 'claude' (default): Claude CLI if installed → most decisive.
+ *      allowedBackends does NOT gate the judge (oversight role, not execution).
+ *      Use cfg.foundry.judgeAllowedBackends to explicitly restrict judge backends.
  *   2. 'local' or claude unavailable: ollamaDirectComplete with the 72b model
  *
  * Returns { complete, judgeEngine } — judgeEngine is the model id string to
@@ -542,12 +544,26 @@ function resolveJudgeClient(
 ): { complete: (system: string, user: string) => Promise<string>; judgeEngine: string } {
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
   const managerJudgeEngine = (foundry?.['managerJudgeEngine'] as string | undefined) ?? 'auto';
-  const allowedBackends: string[] = (foundry?.['allowedBackends'] as string[] | undefined) ?? ['builtin'];
+
+  // M274: The judge is an OVERSIGHT role, not a proposal-execution backend.
+  // cfg.foundry.allowedBackends restricts which engines may EXECUTE proposals
+  // (run diffs, spawn agents). It must NOT gate the judge — doing so caused the
+  // default ['builtin'] allowedBackends to silently exclude the Claude CLI judge,
+  // leaving only Ollama whose engine string fails isFrontierJudge() in the merge
+  // gate, so proposals could never receive a signed 'ship' attestation and the
+  // fleet drained but never merged. Fix: use cfg.foundry.judgeAllowedBackends
+  // when present (operator explicit control); otherwise allow claude for the
+  // judge role regardless of allowedBackends (execution restriction ≠ oversight).
+  const rawJudgeBackends = foundry?.['judgeAllowedBackends'] as string[] | undefined;
+  // judgeAllowedBackends explicitly set → use it exclusively for judge gating.
+  // Not set → allow claude for judging (allowedBackends is irrelevant here).
+  const claudeAllowedForJudge = rawJudgeBackends
+    ? rawJudgeBackends.includes('claude')
+    : true; // default: claude is always allowed as judge when installed
 
   const wantClaude = managerJudgeEngine === 'auto' || managerJudgeEngine === 'claude';
-  const claudeAllowed = allowedBackends.includes('claude');
 
-  if (wantClaude && claudeAllowed && engineInstalled('claude', cfg)) {
+  if (wantClaude && claudeAllowedForJudge && engineInstalled('claude', cfg)) {
     // Use cfg.foundry.managerJudgeModel if it looks like a claude model,
     // otherwise fall back to the sonnet default.
     const isClaudeModel = judgeModel.startsWith('claude') || judgeModel.includes('claude');
@@ -573,8 +589,13 @@ function resolveJudgeClient(
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the best available frontier judge client using the M135 priority
- * order (Claude CLI first when allowed+installed, else local-72b via ollama).
+ * Resolve the best available frontier judge client using the M135/M274 priority
+ * order (Claude CLI first when installed, else local-72b via ollama).
+ *
+ * M274: allowedBackends no longer gates the judge. The judge is an oversight
+ * role; allowedBackends restricts execution backends. Use judgeAllowedBackends
+ * to explicitly restrict judge backends. This fix ensures Claude CLI is reached
+ * when installed even when allowedBackends=['builtin'] (the default).
  *
  * This is the SAME resolver used by runManager — exported so that
  * runAutoMergePass can use the identical path instead of the broken

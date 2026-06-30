@@ -64,6 +64,19 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
   };
 });
 
+// M274: mock engineInstalled so the claude-CLI judge path is NOT taken in these
+// tests (they rely on getActiveClient mocks). engineInstalled returning false
+// forces resolveJudgeClient to fall through to the getActiveClient/ollama path
+// — preserving the original test intent. This mock is additive-only: it does
+// not change test assertions, only ensures the mocked getActiveClient is used.
+vi.mock('../src/core/run/engines.js', () => ({
+  engineInstalled: () => false,
+  buildEngineCommand: () => null,
+  spawnEngine: async () => ({ ok: false, output: '', error: 'mocked' }),
+  resolveBinAbsolute: (bin: string) => bin,
+  phantomInitializedAt: () => false,
+}));
+
 // Mock getActiveClient — returns a deterministic judge
 vi.mock('../src/core/run/provider-client.js', () => ({
   getActiveClient: vi.fn(),
