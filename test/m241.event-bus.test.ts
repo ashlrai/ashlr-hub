@@ -30,6 +30,7 @@ import { join } from 'node:path';
 
 const {
   mockCreateGoal,
+  mockListGoals,
   mockRecordOutcome,
   mockNotifyFleetEvent,
   mockRunInventCycle,
@@ -39,6 +40,7 @@ const {
   mockGitPush,
 } = vi.hoisted(() => ({
   mockCreateGoal: vi.fn().mockReturnValue({ id: 'goal-fix-1', objective: 'fix', status: 'planning' }),
+  mockListGoals: vi.fn().mockReturnValue([]),
   mockRecordOutcome: vi.fn(),
   mockNotifyFleetEvent: vi.fn().mockResolvedValue(undefined),
   mockRunInventCycle: vi.fn().mockResolvedValue(undefined),
@@ -50,7 +52,7 @@ const {
 
 vi.mock('../src/core/goals/store.js', () => ({
   createGoal: mockCreateGoal,
-  listGoals: vi.fn().mockReturnValue([]),
+  listGoals: mockListGoals,
   loadGoal: vi.fn().mockReturnValue(null),
   saveGoal: vi.fn(),
   goalsDir: () => join(process.env['HOME'] ?? tmpdir(), '.ashlr', 'goals'),
@@ -95,6 +97,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   // Restore default resolved values after clearAllMocks
   mockCreateGoal.mockReturnValue({ id: 'goal-fix-1', objective: 'fix', status: 'planning' });
+  mockListGoals.mockReturnValue([]); // M258: dedupe check — empty list = no duplicates
   mockNotifyFleetEvent.mockResolvedValue(undefined);
   mockRunInventCycle.mockResolvedValue(undefined);
 });

@@ -175,9 +175,23 @@ export function _handlerCounts(): Record<string, number> {
 // ---------------------------------------------------------------------------
 
 /**
+ * Returns true when a path looks like an ephemeral ashlr sandbox worktree.
+ * Sandbox paths follow the pattern ~/.ashlr/sandboxes/<id>/worktree.
+ * A goal pointing at such a path is meaningless once the sandbox is torn down.
+ */
+function _isSandboxPath(p: string): boolean {
+  return p.includes('/.ashlr/sandboxes/');
+}
+
+/**
  * When a regression is detected, create a new Goal (proposal-only path) to
  * fix it.  The goal goes through the normal planning + approval flow and is
  * NEVER auto-applied.
+ *
+ * M258: sandbox-path guard — if payload.repo is a transient sandbox worktree
+ * path (contains /.ashlr/sandboxes/), the goal is skipped entirely.  Sandbox
+ * paths are ephemeral; a goal pointing at one is garbage after teardown.
+ * Dedupe: skips if an identical-objective goal already exists.
  *
  * Flag-gated: runs only when cfg.foundry.eventBus !== false (inherits the
  * bus gate) AND the handler is registered (see registerBuiltInHandlers).
@@ -191,11 +205,37 @@ async function _handleRegressionDetected(
   cfg: AshlrConfig,
 ): Promise<void> {
   try {
-    const { createGoal } = await import('../goals/store.js');
+    // M258: translate-or-skip for sandbox worktree paths.
+    // When payload.repo is a transient sandbox path the goal would point at a
+    // dead directory after the sandbox is torn down, polluting the goal-planner
+    // with self-referential "path not present" noise.  We have no canonical
+    // source-repo mapping at this layer, so we skip entirely — a real-repo
+    // regression fired from process.cwd() of the live workspace will still
+    // enqueue normally.
+    const canonicalRepo: string | null =
+      payload.repo != null && !_isSandboxPath(payload.repo)
+        ? payload.repo
+        : null;
+
+    if (payload.repo != null && canonicalRepo === null) {
+      // Sandbox path detected and no canonical fallback — skip goal creation.
+      return;
+    }
+
     const objective =
-      `Fix regression${payload.repo ? ` in ${payload.repo}` : ''}` +
+      `Fix regression${canonicalRepo ? ` in ${canonicalRepo}` : ''}` +
       (payload.signal ? `: ${payload.signal.slice(0, 120)}` : '');
-    createGoal(objective, { project: payload.repo ?? null, cfg });
+
+    // M258: guard — never create a goal whose text contains a sandbox path.
+    if (_isSandboxPath(objective)) return;
+
+    // M258: dedupe — skip if an identical-objective goal already exists to
+    // prevent pile-up when the sentinel fires repeatedly before a fix lands.
+    const { createGoal, listGoals } = await import('../goals/store.js');
+    const existing = listGoals();
+    if (existing.some((g) => g.objective === objective)) return;
+
+    createGoal(objective, { project: canonicalRepo, cfg });
   } catch {
     // Best-effort — never throw from a handler.
   }
