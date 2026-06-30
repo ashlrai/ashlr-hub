@@ -287,7 +287,16 @@ describe('M229 — round-robin engine rotation', () => {
     const repo = tmpDir;
     _m229ResetRoundRobin();
 
-    const cfg = makeConfig(['claude', 'codex', 'nim']);
+    // M270: nim must be promoted to frontier for it to be in the dynamic trio.
+    // Without promotion nim stays 'mid'. This test covers the nim-as-frontier path
+    // (cfg.foundry.nim.tier = 'frontier') — the same config required to run Kimi K2 via NIM.
+    const cfg: AshlrConfig = {
+      ...makeConfig(['claude', 'codex', 'nim']),
+      foundry: {
+        allowedBackends: ['claude', 'codex', 'nim'] as any,
+        nim: { tier: 'frontier' as any },
+      },
+    };
     vi.mocked(listProposals).mockReturnValue([]);
     vi.mocked(runGoal as any).mockResolvedValue(makeRunState('run-x', 'done'));
 
@@ -300,7 +309,7 @@ describe('M229 — round-robin engine rotation', () => {
       enginesUsed.push((lastCall[2] as any).engine as string);
     }
 
-    // All three calls should spread across the trio
+    // All three calls should spread across the trio (claude, codex, nim-promoted)
     expect(new Set(enginesUsed).size).toBe(3);
     expect(new Set(enginesUsed)).toEqual(new Set(['claude', 'codex', 'nim']));
   });
