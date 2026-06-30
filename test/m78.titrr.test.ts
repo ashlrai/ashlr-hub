@@ -161,6 +161,16 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
       })),
     }));
 
+    // Force the requested engine "installed" so runGoal enters the mocked
+    // runEngineSandboxed/TITRR path. Without this, engineInstalled('claude')
+    // shells `which claude`; on a host without the CLI (Linux CI) it returns
+    // false and the orchestrator falls back to 'builtin', never reaching the
+    // TITRR loop under test (it then reports "No tasks completed successfully").
+    vi.doMock('../src/core/run/engines.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/core/run/engines.js')>();
+      return { ...actual, engineInstalled: vi.fn(() => true) };
+    });
+
     // Reset module registry so next import() picks up the doMock stubs.
     vi.resetModules();
 
@@ -175,6 +185,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     vi.doUnmock('../src/sandbox/worktree.js');
     vi.doUnmock('../src/core/run/verify-commands.js');
     vi.doUnmock('../src/core/run/provider-client.js');
+    vi.doUnmock('../src/core/run/engines.js');
     vi.resetModules();
   });
 
