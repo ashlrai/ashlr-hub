@@ -171,6 +171,17 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       ? (foundry['proposalTtlDays'] as number)
       : 7;
 
+  // M263: sort oldest-first before the judge loop so the stalest proposals
+  // drain first and are never perpetually starved by a most-recent-first queue.
+  // listProposals returns most-recent-first (for UI); the drain loop needs the
+  // inverse so the oldest pending entry is always the first to be judged/counted.
+  // SAFETY: sort is in-place on the local array only — no store mutation.
+  pending.sort((a, b) => {
+    if (a.createdAt < b.createdAt) return -1;
+    if (a.createdAt > b.createdAt) return 1;
+    return 0;
+  });
+
   // M259: TTL pre-pass — reject stale proposals before spending any judge calls.
   // Belt-and-suspenders: runs independently of the judge loop.
   // SAFETY: only adds 'rejected' status — NEVER merges anything.
