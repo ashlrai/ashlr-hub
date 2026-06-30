@@ -291,6 +291,18 @@ export function buildContainedEnv(cfg: AshlrConfig, hooksDir: string): NodeJS.Pr
     if (CRED_ENV_DENY.test(k) && !ENGINE_AUTH_ALLOW.has(k)) delete env[k];
   }
 
+  // M289: the ashlr plugin installs global PreToolUse hooks (HOME→~/.claude) that,
+  // in the default 'redirect' mode, intercept/redirect (and for some tools BLOCK)
+  // the agent's NATIVE Read/Grep/Edit/Bash in favor of ashlr__ MCP equivalents.
+  // The fleet's NESTED claude agent inherits these hooks — and the redirect failed
+  // in the sandbox context, BLOCKING its native Read calls → permission_denials →
+  // aborted_streaming → ZERO edits → empty diffs → 0 proposals (root cause of the
+  // substantial-task failure, found via M288 observability). Set 'nudge' so the
+  // hooks DON'T block the nested agent's native tools — it must be able to WORK
+  // (the token-saving redirect is irrelevant for a one-shot autonomous run). The
+  // agent still has the ashlr__ MCP tools available (M248) and may use them.
+  env.ASHLR_HOOK_MODE = 'nudge';
+
   // Sever git's PUSH credential channels (the agent's vendor auth via HOME is untouched).
   env.GIT_TERMINAL_PROMPT = '0';
   env.GIT_ASKPASS = '';
