@@ -253,6 +253,32 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       // Check per-pass cap before spending a frontier judge call.
       if (out.judged >= judgePerPass) {
         out.judgeCapped++;
+        // M271: CHEAP DRAIN PATH — proposals already seen as non-ship (judgeNonShipCount>=1)
+        // but capped out of judging this pass accumulate a stuckPassCount WITHOUT spending
+        // a fresh judge call. When stuckPassCount reaches autoArchiveAfterRejects they are
+        // archived (status→rejected). This drains the queue over K cheap passes.
+        // SAFETY: NEVER archives a proposal that might receive a ship verdict next pass —
+        // only proposals that have already been judged non-ship at least once qualify.
+        // NEVER hard-deletes (status change only). NEVER weakens the merge gate.
+        try {
+          const priorNonShip = (p as unknown as Record<string, unknown>)['judgeNonShipCount'] as number | undefined;
+          if (typeof priorNonShip === 'number' && priorNonShip >= 1) {
+            const newStuck = ((p as unknown as Record<string, unknown>)['stuckPassCount'] as number ?? 0) + 1;
+            if (newStuck >= autoArchiveAfterRejects) {
+              setStatus(
+                p.id,
+                'rejected',
+                undefined,
+                `M271 drained: persistently non-ship/non-mergeable (stuck ${newStuck} pass(es), judgeNonShipCount=${priorNonShip})`,
+              );
+              out.autoArchived++;
+            } else {
+              updateProposalField(p.id, { stuckPassCount: newStuck });
+            }
+          }
+        } catch {
+          // Best-effort — drain failure never disrupts the pass.
+        }
         continue; // Skip: backlog will be processed in subsequent pass ticks.
       }
 

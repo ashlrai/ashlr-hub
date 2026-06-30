@@ -2714,6 +2714,14 @@ export interface Proposal {
    */
   judgeNonShipCount?: number;
   /**
+   * M271: passes in which this proposal was seen as non-ship-and-still-pending
+   * (cheap drain counter — incremented WITHOUT a fresh judge call when the
+   * proposal is capped out of judging this pass and already has judgeNonShipCount>=1).
+   * When stuckPassCount reaches cfg.foundry.autoArchiveAfterRejects the proposal
+   * is archived (status→rejected). Never present on proposals created before M271.
+   */
+  stuckPassCount?: number;
+  /**
    * M233: set to true when the diff was captured after a timeout or non-zero
    * exit — the agent did real work before the cap but the run didn't finish
    * cleanly. The judge/merge gate still applies in full; this flag lets the
