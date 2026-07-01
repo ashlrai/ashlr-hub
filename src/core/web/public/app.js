@@ -2152,6 +2152,31 @@ function sharedQueueMetric(shared) {
   return `${shared.activeClaims ?? 0} active / ${shared.reclaimableClaims ?? 0} reclaimable${suffix}`;
 }
 
+function autonomyEvidenceMetric(autonomy) {
+  if (!autonomy || !autonomy.evidencePacks) return '0 packs';
+  return `${autonomy.evidencePacks} packs / ${autonomy.allowed ?? 0} allowed / ${autonomy.denied ?? 0} denied`;
+}
+
+function autonomyRecentRows(autonomy) {
+  const rows = [];
+  const recent = Array.isArray(autonomy?.recent) ? autonomy.recent : [];
+  for (const item of recent.slice(0, 5)) {
+    const verdict = item.allowed === true ? 'allowed' : item.allowed === false ? 'denied' : 'unknown';
+    rows.push(el('div', { cls: 'fleet-backend-row' },
+      el('span', { cls: 'fleet-backend-name', title: item.proposalId ?? '' }, item.tier ?? 'T?'),
+      el('span', { cls: 'fleet-backend-dispatches' },
+        `${item.action ?? 'unclassified'} · ${item.riskClass ?? '?'} · ${item.changedFiles ?? 0}f/${item.changedLines ?? 0}l`
+      ),
+      el('span', {
+        cls: 'fleet-quota',
+        style: `color:${item.allowed === false ? '#f87171' : item.allowed === true ? '#4ade80' : '#94a3b8'}`,
+        title: item.reason ?? verdict,
+      }, verdict)
+    ));
+  }
+  return rows;
+}
+
 function renderFleet() {
   if (state.activeView !== 'fleet') return;
   const main = getMain();
@@ -2195,6 +2220,7 @@ function renderFleet() {
     ['Spend today', f.daemon.todaySpentUsd != null ? `$${f.daemon.todaySpentUsd.toFixed(4)}` : '—'],
     ['Backlog queue', f.queue?.backlogItems ?? '—'],
     ['Merges (24h)', f.merges?.recent ?? '—'],
+    ['Autonomy evidence', autonomyEvidenceMetric(f.autonomy)],
   ];
   if (sharedQueue) {
     summaryRows.push(['Shared queue', sharedQueueMetric(sharedQueue)]);
@@ -2233,6 +2259,26 @@ function renderFleet() {
     ['Applied', f.proposals?.applied ?? 0],
   ]));
   section.appendChild(propsCard);
+
+  // Autonomy evidence card
+  const autonomyCard = el('div', { cls: 'fleet-card card' });
+  const autonomy = f.autonomy ?? null;
+  autonomyCard.appendChild(el('h2', { cls: 'card-title' }, 'Autonomy Evidence'));
+  autonomyCard.appendChild(infoGrid([
+    ['Evidence packs', autonomy?.evidencePacks ?? 0],
+    ['Allowed', autonomy?.allowed ?? 0],
+    ['Denied', autonomy?.denied ?? 0],
+    ['Latest', autonomy?.latestAt ? fmtRelative(autonomy.latestAt) : '—'],
+  ]));
+  const evidenceRows = autonomyRecentRows(autonomy);
+  if (evidenceRows.length > 0) {
+    const list = el('div', { cls: 'fleet-backends' });
+    for (const row of evidenceRows) list.appendChild(row);
+    autonomyCard.appendChild(list);
+  } else {
+    autonomyCard.appendChild(el('p', { cls: 'hint' }, 'No autonomy evidence packs yet.'));
+  }
+  section.appendChild(autonomyCard);
 
   main.appendChild(section);
 }
@@ -2488,6 +2534,7 @@ function renderControl() {
   const queue  = d.fleet?.queue ?? fleet.queue ?? {};
   const props  = d.fleet?.proposals ?? fleet.proposals ?? {};
   const merges = d.fleet?.merges ?? fleet.merges ?? {};
+  const autonomy = d.fleet?.autonomy ?? fleet.autonomy ?? null;
   const isRunning = daemon.running ?? false;
   const isKilled  = d.fleet?.killed ?? false;
 
@@ -2529,6 +2576,7 @@ function renderControl() {
   }
   heroMetrics.appendChild(controlMetric('Proposals', props.pending ?? 0, '#a78bfa'));
   heroMetrics.appendChild(controlMetric('Merges (24h)', merges.recent ?? '—', '#4ade80'));
+  heroMetrics.appendChild(controlMetric('Evidence', autonomy?.evidencePacks ?? 0, autonomy?.denied > 0 ? '#f87171' : '#38bdf8'));
   heroMetrics.appendChild(controlMetric('Kill switch', isKilled ? 'ENGAGED' : 'off', isKilled ? '#f87171' : '#64748b'));
   heroPulse.appendChild(heroMetrics);
   section.appendChild(heroPulse);
@@ -3229,6 +3277,7 @@ function fdRenderStatusPanel(snap) {
   const isRunning = daemon.running === true;
   const isKilled = snap.fleet?.killed ?? snap.control?.fleet?.killed ?? false;
   const sharedQueue = snap.fleet?.queue?.shared ?? snap.control?.fleet?.queue?.shared ?? null;
+  const autonomy = snap.fleet?.autonomy ?? snap.control?.fleet?.autonomy ?? null;
 
   const body = el('div', { cls: 'fd-panel__body' });
 
@@ -3263,6 +3312,11 @@ function fdRenderStatusPanel(snap) {
     grid.appendChild(mkMeta('Shared queue', sharedQueueMetric(sharedQueue),
       !sharedQueue.readable || sharedQueue.reclaimableClaims > 0 || sharedQueue.lock?.stale ? 'fd-meta-val--warn' : null));
     grid.appendChild(mkMeta('Owned leases', String(sharedQueue.ownedClaims ?? 0)));
+  }
+  if (autonomy) {
+    grid.appendChild(mkMeta('Evidence packs', String(autonomy.evidencePacks ?? 0),
+      autonomy.denied > 0 ? 'fd-meta-val--warn' : null));
+    grid.appendChild(mkMeta('Autonomy latest', autonomy.latestAt ? fmtRelative(autonomy.latestAt) : '—'));
   }
   body.appendChild(grid);
 

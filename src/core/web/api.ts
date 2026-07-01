@@ -15,6 +15,7 @@
  *   GET /api/pulse?window=7d   -> buildRollup(window, cfg)
  *   GET /api/genome[?q=...]    -> recall(q, cfg) | loadGenome(cfg)
  *   GET /api/inbox             -> listProposals({status:'pending'}) (read-only; M23)
+ *   GET /api/autonomy/evidence -> list autonomy evidence packs (metadata only)
  *   GET /api/daemon            -> loadDaemonState() (read-only; M24; no control endpoint)
  *   GET /api/events            -> Server-Sent Events stream
  *
@@ -625,6 +626,37 @@ export async function handleApi(
         const entries = loadGenome(cfg);
         sendJson(res, 200, entries);
       }
+      return true;
+    }
+
+    // ── GET /api/autonomy/evidence[/:id] ────────────────────────────────────
+    // Read-only, metadata-only autonomy evidence. Evidence packs intentionally
+    // do not contain raw diffs or command output; this endpoint mirrors that.
+    if (path === '/api/autonomy/evidence' && method === 'GET') {
+      const rawLimit = Number(getQueryParam(req.url ?? '', 'limit') ?? '20');
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(100, Math.floor(rawLimit)) : 20;
+      const { listAutonomyEvidencePacks } = await import('../autonomy/evidence-pack.js');
+      const packs = listAutonomyEvidencePacks(limit);
+      sendJson(res, 200, {
+        total: packs.length,
+        evidence: packs,
+      });
+      return true;
+    }
+
+    if (path.startsWith('/api/autonomy/evidence/') && method === 'GET') {
+      const id = path.slice('/api/autonomy/evidence/'.length);
+      if (!id || id.includes('/') || !/^[\w.-]+$/.test(id)) {
+        sendJson(res, 400, { error: 'valid evidence proposal id required' });
+        return true;
+      }
+      const { readAutonomyEvidencePack } = await import('../autonomy/evidence-pack.js');
+      const pack = readAutonomyEvidencePack(id);
+      if (!pack) {
+        sendJson(res, 404, { error: `evidence pack not found: ${id}` });
+        return true;
+      }
+      sendJson(res, 200, pack);
       return true;
     }
 

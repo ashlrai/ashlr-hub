@@ -5,7 +5,7 @@
  * scattered observations into one auditable artifact.
  */
 
-import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -170,5 +170,68 @@ export function persistAutonomyEvidencePack(pack: AutonomyEvidencePack): boolean
     return true;
   } catch {
     return false;
+  }
+}
+
+function isAutonomyEvidencePack(value: unknown): value is AutonomyEvidencePack {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  const proposal = v['proposal'];
+  const diff = v['diff'];
+  const gates = v['gates'];
+  const verification = v['verification'];
+  return (
+    v['version'] === 1 &&
+    typeof v['generatedAt'] === 'string' &&
+    proposal !== null &&
+    typeof proposal === 'object' &&
+    !Array.isArray(proposal) &&
+    typeof (proposal as Record<string, unknown>)['id'] === 'string' &&
+    diff !== null &&
+    typeof diff === 'object' &&
+    !Array.isArray(diff) &&
+    gates !== null &&
+    typeof gates === 'object' &&
+    !Array.isArray(gates) &&
+    verification !== null &&
+    typeof verification === 'object' &&
+    !Array.isArray(verification)
+  );
+}
+
+export function readAutonomyEvidencePack(proposalId: string): AutonomyEvidencePack | null {
+  try {
+    const raw = readFileSync(evidencePath(proposalId), 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    return isAutonomyEvidencePack(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function listAutonomyEvidencePacks(limit = 50): AutonomyEvidencePack[] {
+  try {
+    const dir = evidenceDir();
+    if (!existsSync(dir)) return [];
+    const files = readdirSync(dir)
+      .filter((f) => f.endsWith('.json') && !f.includes('.tmp-'))
+      .sort()
+      .reverse();
+    const packs: AutonomyEvidencePack[] = [];
+    const cap = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 50;
+    const scanCap = Math.max(cap * 4, 200);
+    for (const file of files.slice(0, scanCap)) {
+      try {
+        const raw = readFileSync(join(dir, file), 'utf8');
+        const parsed: unknown = JSON.parse(raw);
+        if (isAutonomyEvidencePack(parsed)) packs.push(parsed);
+      } catch {
+        // Skip corrupt evidence files. The caller surfaces aggregate counts only.
+      }
+    }
+    packs.sort((a, b) => Date.parse(b.generatedAt) - Date.parse(a.generatedAt));
+    return packs.slice(0, cap);
+  } catch {
+    return [];
   }
 }

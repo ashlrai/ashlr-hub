@@ -40,8 +40,9 @@
  *  [V10] EDV not confirmed (no verifyResult, no verifier entry) → refused (criterion 4)
  *  [V11] EDV verifier entry with negative verdict → refused (criterion 4)
  *  [V12] provenance sig missing/invalid → refused (criterion 5)
- *  [V13] 'judged' verdict='review' (not 'ship') → refused (criterion 1)
- *  [V14] multiple 'judged' entries — most recent is the one checked
+ *  [V13] newest 'judged' verdict='review' (not 'ship') → refused (criterion 1)
+ *  [V14] multiple 'judged' entries — newest by timestamp is checked
+ *  [V15] newer non-ship overrides older signed ship
  *
  *  autoMergeProposal — trustBasis='tier' (default)
  *  [T1]  absent trustBasis + frontier producer → merges (M51 byte-identical)
@@ -447,9 +448,9 @@ describe('M153 evaluateVerificationGate — pure, all 5 criteria', () => {
     expect(r.reason).toMatch(/verifyResult.*false/);
   });
 
-  it('[V7] suite green but diff classified high-risk → refused (criterion 3)', () => {
-    // A diff touching TWO source .ts files → classifyRisk returns 'high'
-    // (sourceFiles.length > 1 → high, per classifyRisk implementation)
+  it('[V7] suite green but diff exceeds maxRisk → refused (criterion 3)', () => {
+    // M295: ordinary source diffs classify as medium, which still exceeds this
+    // test's maxRisk='low'. Dangerous surfaces still classify high elsewhere.
     const riskyDiff = [
       'diff --git a/src/a.ts b/src/a.ts',
       '--- a/src/a.ts',
@@ -558,7 +559,7 @@ describe('M153 evaluateVerificationGate — pure, all 5 criteria', () => {
     expect(r.reason).toMatch(/provenance/i);
   });
 
-  it("[V13] judged verdict='review' (not 'ship') → refused (criterion 1)", () => {
+  it("[V13] newest judged verdict='review' (not 'ship') → refused (criterion 1)", () => {
     const p = goodProposal('p13');
     const decisions: DecisionEntry[] = [
       { ...frontierShipDecision('p13'), verdict: 'review' },
@@ -566,10 +567,10 @@ describe('M153 evaluateVerificationGate — pure, all 5 criteria', () => {
     ];
     const r = evaluateVerificationGate(p, cfg, decisions);
     expect(r.authorized).toBe(false);
-    expect(r.reason).toMatch(/no 'judged' decision with verdict='ship'/);
+    expect(r.reason).toMatch(/most recent judged decision verdict='review'/);
   });
 
-  it('[V14] multiple judged entries — most recent ship by frontier judge wins', () => {
+  it('[V14] multiple judged entries — newest ship by timestamp wins', () => {
     const p = goodProposal('p14');
     // Older entry: local judge, ship
     const olderLocal: DecisionEntry = {
@@ -581,10 +582,28 @@ describe('M153 evaluateVerificationGate — pure, all 5 criteria', () => {
       ...frontierShipDecision('p14'),
       ts: new Date().toISOString(),
     };
-    // evaluateVerificationGate reverses the array and takes the first match
-    // Array order: [older, newer] → reversed: [newer, older] → finds newerFrontier
+    // Intentionally pass oldest-first to prove the gate sorts by timestamp and
+    // does not depend on caller/readDecisions array order.
     const r = evaluateVerificationGate(p, cfg, [olderLocal, newerFrontier, verifiedDecision('p14')]);
     expect(r.authorized).toBe(true);
+  });
+
+  it('[V15] newer non-ship judged decision overrides an older signed ship', () => {
+    const p = goodProposal('p15');
+    const olderShip: DecisionEntry = {
+      ...frontierShipDecision('p15'),
+      ts: '2026-01-01T00:00:00.000Z',
+    };
+    const newerReview: DecisionEntry = {
+      ...frontierShipDecision('p15'),
+      ts: '2026-02-01T00:00:00.000Z',
+      verdict: 'review',
+      reason: 'newer judge found an issue',
+      detail: 'would-not-merge',
+    };
+    const r = evaluateVerificationGate(p, cfg, [olderShip, verifiedDecision('p15'), newerReview]);
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/newer non-ship verdict overrides any older ship/i);
   });
 });
 

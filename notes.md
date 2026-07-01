@@ -51,6 +51,9 @@
 - Autonomy evidence pass: added `src/core/autonomy/evidence-pack.ts` and `src/core/autonomy/policy.ts` so autonomous actions produce a metadata-only evidence pack and a structured policy verdict (`T0` escalate through `T5` deploy). The evidence pack stores proposal/producer/risk/scope/verification/gate metadata and intentionally does not persist raw diffs or command output.
 - Auto-merge policy integration: `autoMergeProposal` now adds a pre-mutation Gate 8 after all existing mechanical checks pass and before branch/merge mutation. It persists `~/.ashlr/evidence/<proposalId>.json`, evaluates the policy verdict, fails closed if evidence persistence fails, and refuses self-target autonomous merges unless `cfg.foundry.autoMerge.allowSelfMerge=true`.
 - Agent audit cautions: do not make persisted evidence authoritative for gates because local JSON is mutable; continue recomputing risk/provenance/verification from source inputs. Future follow-up should normalize decisions ordering before claiming "latest" judge entry and can expose evidence packs in Mission Control.
+- Evidence visibility pass: added bounded read/list helpers for autonomy evidence packs, `FleetStatus.autonomy`, CLI rendering, Mission Control/Fleet/Fleet Dashboard metrics, and read-only `/api/autonomy/evidence` list/detail routes. Responses remain metadata-only and omit raw diffs.
+- Verification trust fix: `evaluateVerificationGate` now sorts judged decisions by timestamp and requires the newest judged decision to be `ship`; a newer `review`/non-ship verdict blocks older signed ship attestations.
+- Agent next lanes: thread `workItemId`/`runId` into proposals for causal outcome records, add guard-health UX for fail-closed state/evidence blocks, and add read-only `ashlr ecosystem doctor --json --root --deep`.
 
 ## Verification Log
 - `ASHLR_TEST_CI_TIMEOUT_MS=120000 npm run test:ci -- test/m30.ci.test.ts test/m33.release-meta.test.ts test/m262.visibility.test.ts test/m297.retry-transient-abort.test.ts`: passed, 63 tests.
@@ -76,3 +79,5 @@
 - Spend fail-closed full CI: `npm run test:ci` passed, 396 files and 8,357 passed tests with 7 skipped.
 - Autonomy evidence focused pass: `npm test -- test/m301.autonomy-policy.test.ts test/m47.merge.test.ts test/m153.verification-gate.test.ts test/m48.automerge-pass.test.ts` passed, 4 files and 93 tests.
 - Autonomy evidence final local gates: `npm run typecheck`, `npm run lint`, `npm run build`, and `git diff --check` passed. Lint remains at the existing 118-warning baseline with 0 errors.
+- Evidence visibility focused pass: `npm test -- test/m301.autonomy-policy.test.ts test/m49.fleet-status.test.ts test/m14.api.test.ts test/m153.verification-gate.test.ts` passed, 4 files and 94 tests.
+- Evidence visibility final local gates: `npm run typecheck`, `npm run lint`, `npm run build`, and `git diff --check` passed. Lint remains at the existing 118-warning baseline with 0 errors.

@@ -17,6 +17,7 @@
 import { hostname } from 'node:os';
 import type { AshlrConfig, EngineId } from '../types.js';
 import type { SharedQueueHealth } from './shared-store.js';
+import type { AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
 
 /** A single backend's recent activity + quota standing. */
 export interface FleetBackendStatus {
@@ -33,6 +34,30 @@ export interface FleetSharedQueueStatus extends SharedQueueHealth {
   enabled: boolean;
   mode: 'filesystem';
   machineId: string;
+}
+
+export interface FleetAutonomyEvidenceSummary {
+  proposalId: string;
+  generatedAt: string;
+  title: string;
+  tier: string | null;
+  action: string | null;
+  allowed: boolean | null;
+  target: AutonomyEvidencePack['target'];
+  riskClass: AutonomyEvidencePack['riskClass'];
+  verificationPassed: boolean;
+  changedFiles: number;
+  changedLines: number;
+  reason: string | null;
+}
+
+export interface FleetAutonomyStatus {
+  evidencePacks: number;
+  latestAt: string | null;
+  allowed: number;
+  denied: number;
+  byTier: Record<string, number>;
+  recent: FleetAutonomyEvidenceSummary[];
 }
 
 /** One whole-fleet read-only snapshot. */
@@ -57,6 +82,7 @@ export interface FleetStatus {
   merges: {
     recent: number;
   };
+  autonomy?: FleetAutonomyStatus;
   /** True when the global kill switch is engaged (fleet paused). */
   killed: boolean;
 }
@@ -179,6 +205,22 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     killed = false;
   }
 
+  // ── autonomy evidence packs ──────────────────────────────────────────────
+  let autonomy: FleetAutonomyStatus = {
+    evidencePacks: 0,
+    latestAt: null,
+    allowed: 0,
+    denied: 0,
+    byTier: {},
+    recent: [],
+  };
+  try {
+    const { listAutonomyEvidencePacks } = await import('../autonomy/evidence-pack.js');
+    autonomy = buildAutonomyStatus(listAutonomyEvidencePacks(200));
+  } catch {
+    // leave fallback
+  }
+
   return {
     generatedAt,
     daemon,
@@ -189,7 +231,47 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     },
     proposals: { pending, frontierPending, applied },
     merges: { recent: mergesRecent },
+    autonomy,
     killed,
+  };
+}
+
+function buildAutonomyStatus(packs: AutonomyEvidencePack[]): FleetAutonomyStatus {
+  const byTier: Record<string, number> = {};
+  let allowed = 0;
+  let denied = 0;
+  let latestAt: string | null = null;
+
+  for (const pack of packs) {
+    if (latestAt === null || Date.parse(pack.generatedAt) > Date.parse(latestAt)) {
+      latestAt = pack.generatedAt;
+    }
+    const tier = pack.policy?.tier ?? 'unknown';
+    byTier[tier] = (byTier[tier] ?? 0) + 1;
+    if (pack.policy?.allowed === true) allowed++;
+    else if (pack.policy?.allowed === false) denied++;
+  }
+
+  return {
+    evidencePacks: packs.length,
+    latestAt,
+    allowed,
+    denied,
+    byTier,
+    recent: packs.slice(0, 8).map((pack) => ({
+      proposalId: pack.proposal.id,
+      generatedAt: pack.generatedAt,
+      title: pack.proposal.title,
+      tier: pack.policy?.tier ?? null,
+      action: pack.policy?.action ?? null,
+      allowed: pack.policy?.allowed ?? null,
+      target: pack.target,
+      riskClass: pack.riskClass,
+      verificationPassed: pack.verification.passed,
+      changedFiles: pack.diff.files.length,
+      changedLines: pack.diff.changedLines,
+      reason: pack.policy?.reason ?? null,
+    })),
   };
 }
 

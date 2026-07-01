@@ -91,6 +91,24 @@ export function formatFleetStatus(s: FleetStatus): string {
 
   // Merges
   lines.push(`Merges:    ${s.merges.recent} auto-merge(s) in last 24h`);
+  lines.push('');
+
+  // Autonomy evidence
+  const autonomy = s.autonomy;
+  lines.push('Autonomy evidence:');
+  if (!autonomy || autonomy.evidencePacks === 0) {
+    lines.push('  no evidence packs yet');
+  } else {
+    const tiers = Object.entries(autonomy.byTier)
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([tier, count]) => `${tier}:${count}`)
+      .join(', ');
+    lines.push(`  packs:     ${autonomy.evidencePacks}`);
+    lines.push(`  allowed:   ${autonomy.allowed}`);
+    lines.push(`  denied:    ${autonomy.denied}`);
+    lines.push(`  latest:    ${autonomy.latestAt ?? '—'}`);
+    lines.push(`  tiers:     ${tiers || '—'}`);
+  }
 
   return lines.join('\n');
 }
@@ -263,6 +281,7 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
         ? `shared ${fs.queue.shared.activeClaims}/${fs.queue.shared.reclaimableClaims}`
         : null,
       `pending ${fs.proposals.pending}`,
+      fs.autonomy ? `evidence ${fs.autonomy.evidencePacks}` : null,
       `spent today $${fs.daemon.todaySpentUsd.toFixed(2)}`,
       `last tick ${relTime(fs.daemon.lastTickAt)}`,
     ].filter(Boolean).join(' · ');

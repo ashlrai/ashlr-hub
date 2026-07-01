@@ -20,6 +20,9 @@ import { formatFleetStatus } from '../src/cli/fleet.js';
 import { recordUse } from '../src/core/fleet/quota.js';
 import { setKill } from '../src/core/sandbox/policy.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
+import { buildAutonomyEvidencePack, persistAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
+import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
+import type { Proposal } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -42,6 +45,45 @@ function baseConfig(): AshlrConfig {
 
 function withFoundry(foundry: NonNullable<AshlrConfig['foundry']>): AshlrConfig {
   return { ...baseConfig(), foundry };
+}
+
+function makeEvidencePack(id: string, generatedAt: string) {
+  const proposal: Proposal = {
+    id,
+    repo: '/tmp/repo',
+    origin: 'agent',
+    kind: 'patch',
+    title: `Proposal ${id}`,
+    summary: 'summary',
+    diff: [
+      'diff --git a/docs/fleet.md b/docs/fleet.md',
+      '--- /dev/null',
+      '+++ b/docs/fleet.md',
+      '@@ -0,0 +1 @@',
+      '+fleet',
+      '',
+    ].join('\n'),
+    diffHash: `sha256:${id}`,
+    engineModel: 'codex:gpt-5.5',
+    engineTier: 'frontier',
+    status: 'pending',
+    createdAt: generatedAt,
+  };
+  const pack = buildAutonomyEvidencePack({
+    proposal,
+    target: 'main',
+    trustBasis: 'tier',
+    remotePreferred: true,
+    riskClass: 'low',
+    authority: { ok: true, detail: 'authority ok' },
+    provenance: { ok: true, detail: 'provenance ok' },
+    verification: { passed: true, detail: 'verify ok', commandKinds: ['test'] },
+    risk: { ok: true, detail: 'risk ok' },
+    scope: { ok: true, detail: 'scope ok' },
+  });
+  pack.generatedAt = generatedAt;
+  pack.policy = evaluateAutonomyPolicy(pack, baseConfig());
+  return pack;
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +146,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.proposals.frontierPending).toBe(0);
     expect(s.proposals.applied).toBe(0);
     expect(s.merges.recent).toBe(0);
+    expect(s.autonomy).toMatchObject({
+      evidencePacks: 0,
+      latestAt: null,
+      allowed: 0,
+      denied: 0,
+    });
   });
 
   it('reflects allowedBackends — defaults to [builtin] when no foundry', async () => {
@@ -197,6 +245,28 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       { machineId: 'machine-B', active: 1, expired: 0 },
     ]);
   });
+
+  it('includes autonomy evidence summary when packs exist', async () => {
+    expect(persistAutonomyEvidencePack(makeEvidencePack('prop-old', '2026-07-01T00:00:00.000Z'))).toBe(true);
+    expect(persistAutonomyEvidencePack(makeEvidencePack('prop-new', '2026-07-02T00:00:00.000Z'))).toBe(true);
+
+    const s = await buildFleetStatus(baseConfig());
+    expect(s.autonomy).toMatchObject({
+      evidencePacks: 2,
+      latestAt: '2026-07-02T00:00:00.000Z',
+      allowed: 2,
+      denied: 0,
+    });
+    expect(s.autonomy?.byTier).toMatchObject({ T4: 2 });
+    expect(s.autonomy?.recent[0]).toMatchObject({
+      proposalId: 'prop-new',
+      tier: 'T4',
+      action: 'merge-main',
+      allowed: true,
+      changedFiles: 1,
+      changedLines: 1,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -239,6 +309,14 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       },
       proposals: { pending: 3, frontierPending: 1, applied: 5 },
       merges: { recent: 2 },
+      autonomy: {
+        evidencePacks: 3,
+        latestAt: '2026-06-17T00:01:00.000Z',
+        allowed: 2,
+        denied: 1,
+        byTier: { T4: 2, T0: 1 },
+        recent: [],
+      },
       killed: true,
     });
 
@@ -257,6 +335,10 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('frontier pending:  1');
     expect(out).toContain('applied:           5');
     expect(out).toContain('2 auto-merge(s)');
+    expect(out).toContain('Autonomy evidence:');
+    expect(out).toContain('packs:     3');
+    expect(out).toContain('denied:    1');
+    expect(out).toContain('T4:2');
   });
 
   it('omits the paused banner when not killed', () => {

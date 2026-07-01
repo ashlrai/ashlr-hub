@@ -13,8 +13,11 @@ import * as path from 'node:path';
 
 import {
   buildAutonomyEvidencePack,
+  evidenceDir,
   evidencePath,
+  listAutonomyEvidencePacks,
   persistAutonomyEvidencePack,
+  readAutonomyEvidencePack,
 } from '../src/core/autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
@@ -83,6 +86,13 @@ function goodPack(over: Partial<Parameters<typeof buildAutonomyEvidencePack>[0]>
     scope: { ok: true, detail: '1 file, 1 line within caps' },
     ...over,
   });
+}
+
+function packFor(id: string, generatedAt: string) {
+  const pack = goodPack({ proposal: proposal({ id }) });
+  pack.generatedAt = generatedAt;
+  pack.policy = evaluateAutonomyPolicy(pack, cfg());
+  return pack;
 }
 
 beforeEach(() => {
@@ -157,5 +167,25 @@ describe('M301 autonomy evidence pack persistence', () => {
     expect(raw).toContain('"merge-main"');
     expect(raw).not.toContain('diff --git');
     expect(raw).not.toContain('+evidence');
+  });
+
+  it('reads a single evidence pack by proposal id', () => {
+    const pack = packFor('prop-read', '2026-07-01T00:00:00.000Z');
+    expect(persistAutonomyEvidencePack(pack)).toBe(true);
+
+    const read = readAutonomyEvidencePack('prop-read');
+    expect(read?.proposal.id).toBe('prop-read');
+    expect(read?.policy?.action).toBe('merge-main');
+  });
+
+  it('lists newest-first, caps results, and skips malformed JSON', () => {
+    expect(persistAutonomyEvidencePack(packFor('prop-old', '2026-07-01T00:00:00.000Z'))).toBe(true);
+    expect(persistAutonomyEvidencePack(packFor('prop-new', '2026-07-02T00:00:00.000Z'))).toBe(true);
+    fs.mkdirSync(evidenceDir(), { recursive: true });
+    fs.writeFileSync(path.join(evidenceDir(), 'broken.json'), '{ nope', 'utf8');
+
+    const packs = listAutonomyEvidencePacks(1);
+    expect(packs).toHaveLength(1);
+    expect(packs[0]?.proposal.id).toBe('prop-new');
   });
 });

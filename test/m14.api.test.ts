@@ -26,7 +26,12 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as http from 'node:http';
-import type { AshlrConfig, WebServerOptions } from '../src/core/types.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import type { AshlrConfig, Proposal, WebServerOptions } from '../src/core/types.js';
+import { buildAutonomyEvidencePack, persistAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
+import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -234,14 +239,61 @@ function post(url: string, port: number, headers: Record<string, string> = {}, b
   }, body);
 }
 
+function seedEvidencePack(id: string, generatedAt = '2026-07-01T00:00:00.000Z'): void {
+  const proposal: Proposal = {
+    id,
+    repo: '/tmp/repo',
+    origin: 'agent',
+    kind: 'patch',
+    title: `Evidence ${id}`,
+    summary: 'evidence api fixture',
+    diff: [
+      'diff --git a/docs/api.md b/docs/api.md',
+      '--- /dev/null',
+      '+++ b/docs/api.md',
+      '@@ -0,0 +1 @@',
+      '+api',
+      '',
+    ].join('\n'),
+    diffHash: `sha256:${id}`,
+    engineModel: 'codex:gpt-5.5',
+    engineTier: 'frontier',
+    status: 'pending',
+    createdAt: generatedAt,
+  };
+  const pack = buildAutonomyEvidencePack({
+    proposal,
+    target: 'main',
+    trustBasis: 'tier',
+    remotePreferred: true,
+    riskClass: 'low',
+    authority: { ok: true, detail: 'authority ok' },
+    provenance: { ok: true, detail: 'provenance ok' },
+    verification: { passed: true, detail: 'verify ok', commandKinds: ['test'] },
+    risk: { ok: true, detail: 'risk ok' },
+    scope: { ok: true, detail: 'scope ok' },
+  });
+  pack.generatedAt = generatedAt;
+  pack.policy = evaluateAutonomyPolicy(pack, makeConfig());
+  expect(persistAutonomyEvidencePack(pack)).toBe(true);
+}
+
 // ---------------------------------------------------------------------------
 // Track open handles
 // ---------------------------------------------------------------------------
 
 let openHandles: Array<{ close(): Promise<void> }> = [];
+let tmpHome: string;
+let prevHome: string | undefined;
+let prevUserProfile: string | undefined;
 
 beforeEach(() => {
   openHandles = [];
+  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m14-home-'));
+  prevHome = process.env.HOME;
+  prevUserProfile = process.env.USERPROFILE;
+  process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
 });
 
 afterEach(async () => {
@@ -249,6 +301,11 @@ afterEach(async () => {
     try { await h.close(); } catch { /* ignore */ }
   }
   openHandles = [];
+  if (prevHome === undefined) delete process.env.HOME;
+  else process.env.HOME = prevHome;
+  if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = prevUserProfile;
+  fs.rmSync(tmpHome, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -500,6 +557,56 @@ describe('GET /api/genome', () => {
     const res = await get(`${h.url}/api/genome?q=foo`, h.port);
     const body = JSON.parse(res.body);
     expect(Array.isArray(body)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/autonomy/evidence
+// ---------------------------------------------------------------------------
+
+describe('GET /api/autonomy/evidence', () => {
+  it('lists autonomy evidence packs newest-first and capped', async () => {
+    seedEvidencePack('prop-old', '2026-07-01T00:00:00.000Z');
+    seedEvidencePack('prop-new', '2026-07-02T00:00:00.000Z');
+    const h = await startServer(makeConfig(), makeOpts());
+    openHandles.push(h);
+
+    const res = await get(`${h.url}/api/autonomy/evidence?limit=1`, h.port);
+    expect(res.statusCode).toBe(200);
+    expect(String(res.headers['content-type'])).toContain('application/json');
+    const body = JSON.parse(res.body);
+    expect(body.total).toBe(1);
+    expect(body.evidence[0].proposal.id).toBe('prop-new');
+    expect(res.body).not.toContain('diff --git');
+    expect(res.body).not.toContain('+api');
+  });
+
+  it('returns one evidence pack by proposal id', async () => {
+    seedEvidencePack('prop-detail');
+    const h = await startServer(makeConfig(), makeOpts());
+    openHandles.push(h);
+
+    const res = await get(`${h.url}/api/autonomy/evidence/prop-detail`, h.port);
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.proposal.id).toBe('prop-detail');
+    expect(body.policy.action).toBe('merge-main');
+  });
+
+  it('rejects invalid evidence ids', async () => {
+    const h = await startServer(makeConfig(), makeOpts());
+    openHandles.push(h);
+
+    const res = await get(`${h.url}/api/autonomy/evidence/bad%2Fid`, h.port);
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('returns 404 for missing evidence pack', async () => {
+    const h = await startServer(makeConfig(), makeOpts());
+    openHandles.push(h);
+
+    const res = await get(`${h.url}/api/autonomy/evidence/not-found`, h.port);
+    expect(res.statusCode).toBe(404);
   });
 });
 

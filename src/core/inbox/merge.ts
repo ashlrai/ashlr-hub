@@ -619,7 +619,7 @@ export function isFrontierJudge(judgeEngine: string | undefined): boolean {
 export function evaluateVerificationGate(
   proposal: Proposal,
   cfg: AshlrConfig,
-  decisionsForProposal: Array<{ action: string; verdict?: string; engine?: string; model?: string; judgeAttestation?: string }>,
+  decisionsForProposal: Array<{ action: string; ts?: string; verdict?: string; engine?: string; model?: string; judgeAttestation?: string }>,
 ): VerificationGateVerdict {
   const refuse = (reason: string): VerificationGateVerdict => ({ authorized: false, reason });
 
@@ -629,18 +629,36 @@ export function evaluateVerificationGate(
   // HMAC-signed attestation will FAIL here — the core security fix.
   //
   // Steps:
-  //   (a) Find the most recent 'judged' entry with verdict='ship'.
-  //   (b) Verify the judge engine is a frontier (claude-*) model.
-  //   (c) Verify the HMAC attestation — recomputed from (proposalId, judgeEngine,
+  //   (a) Find the most recent 'judged' entry, sorted by ts when available.
+  //   (b) Require verdict='ship' on that newest judged entry.
+  //   (c) Verify the judge engine is a frontier (claude-*) model.
+  //   (d) Verify the HMAC attestation — recomputed from (proposalId, judgeEngine,
   //       verdict, diffHash-of-CURRENT-diff). A stale attestation for a different
   //       proposalId, a changed diff, or no attestation at all → REFUSE.
-  const shipEntry = [...decisionsForProposal]
-    .reverse()
-    .find((d) => d.action === 'judged' && d.verdict === 'ship');
+  const judgedEntries = decisionsForProposal
+    .map((d, index) => ({ d, index }))
+    .filter(({ d }) => d.action === 'judged')
+    .sort((a, b) => {
+      const aMs = typeof a.d.ts === 'string' ? Date.parse(a.d.ts) : NaN;
+      const bMs = typeof b.d.ts === 'string' ? Date.parse(b.d.ts) : NaN;
+      const aValid = Number.isFinite(aMs);
+      const bValid = Number.isFinite(bMs);
+      if (aValid && bValid && aMs !== bMs) return bMs - aMs;
+      if (aValid && !bValid) return -1;
+      if (!aValid && bValid) return 1;
+      return a.index - b.index;
+    });
 
+  const shipEntry = judgedEntries[0]?.d;
   if (!shipEntry) {
     return refuse(
-      "verification gate: no 'judged' decision with verdict='ship' found for this proposal — a frontier judge must explicitly ship it",
+      "verification gate: no 'judged' decision found for this proposal — a frontier judge must explicitly ship it",
+    );
+  }
+  if (shipEntry.verdict !== 'ship') {
+    return refuse(
+      `verification gate: most recent judged decision verdict='${shipEntry.verdict ?? 'unknown'}', not 'ship' — ` +
+        `a newer non-ship verdict overrides any older ship attestation`,
     );
   }
 
