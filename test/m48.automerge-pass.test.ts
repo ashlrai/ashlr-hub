@@ -43,6 +43,7 @@ const mockAutoMergeProposal = vi.fn();
 let mergeResults: Record<string, AutoMergeResult> = {};
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
+  evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
   isFrontierJudge: (judgeEngine: string | undefined) => {
     const lc = (judgeEngine ?? '').toLowerCase();
     return lc.startsWith('claude') || lc.includes('claude') || lc.startsWith('gpt-5') || lc.startsWith('codex-') || lc === 'codex';

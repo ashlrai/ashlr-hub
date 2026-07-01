@@ -43,6 +43,9 @@ export interface OutcomeRecordProposal {
 export interface OutcomeRecordDecision {
   ts: string;
   action: DecisionEntry['action'];
+  workItemId?: string;
+  workSource?: DecisionEntry['workSource'];
+  runId?: string;
   verdict?: string;
   reason?: string;
   engine?: string;
@@ -166,6 +169,9 @@ function decisionSnapshot(decision: DecisionEntry): OutcomeRecordDecision {
   return {
     ts: decision.ts,
     action: decision.action,
+    ...(decision.workItemId ? { workItemId: decision.workItemId } : {}),
+    ...(decision.workSource ? { workSource: decision.workSource } : {}),
+    ...(decision.runId ? { runId: decision.runId } : {}),
     ...(decision.verdict ? { verdict: decision.verdict } : {}),
     ...(decision.reason ? { reason: decision.reason } : {}),
     ...(decision.engine ? { engine: decision.engine } : {}),

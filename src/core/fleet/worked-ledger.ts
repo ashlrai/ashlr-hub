@@ -315,12 +315,13 @@ export function stableItemSig(repo: string, title: string): string {
  * suppressed for the cooldown window and not re-proposed every tick.
  *
  * Matching strategy (ID-stability):
- *  1. For each proposal in `judgedProposals`, scan `backlogItems` for a match.
- *  2. Primary key: item.id appears as a token in `prop.title + ' ' + prop.summary`
+ *  1. Prefer proposal.workItemId when present; it is the causal source item.
+ *  2. Otherwise scan `backlogItems` for a match.
+ *  3. Primary key: item.id appears as a token in `prop.title + ' ' + prop.summary`
  *     (same regex logic as pendingItemIds in loop.ts — exact word boundary).
- *  3. Fallback key: stableItemSig(item.repo, item.title) matches
+ *  4. Fallback key: stableItemSig(item.repo, item.title) matches
  *     stableItemSig(prop.repo ?? '', prop.title) — handles fresh scanner IDs.
- *  4. Only the FIRST match is recorded to avoid double-counting.
+ *  5. Only the FIRST match is recorded to avoid double-counting.
  *
  * A proposal is "judged-decline-class" when its status is 'rejected' (the
  * manager sets status='rejected' for noise/harmful when applyRejects=true).
@@ -339,6 +340,7 @@ export function sweepJudgedProposals(
     repo: string | null;
     status: string;
     decisionReason?: string;
+    workItemId?: string;
   }>,
   backlogItems: ReadonlyArray<WorkItem>,
   ts?: string,
@@ -365,9 +367,14 @@ export function sweepJudgedProposals(
         continue;
       }
 
-      const haystack = `${prop.title} ${prop.summary}`;
+      if (prop.workItemId) {
+        recordOutcome(prop.workItemId, outcome, ts);
+        recorded++;
+        continue;
+      }
 
       // Try primary match: item.id as exact token in the proposal text.
+      const haystack = `${prop.title} ${prop.summary}`;
       let matched: WorkItem | undefined;
       for (const item of backlogItems) {
         const escaped = item.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

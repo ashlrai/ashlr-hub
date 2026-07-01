@@ -31,6 +31,7 @@ import { join } from 'node:path';
 import type { AshlrConfig } from '../core/types.js';
 import type { AuditEntry } from '../core/types.js';
 import type { FleetStatus } from '../core/fleet/status.js';
+import type { ResourceStrategyReport } from '../core/autonomy/resource-strategy.js';
 import { makeColors, isTty } from './ui.js';
 
 const { bold, dim, green, red, yellow, cyan } = makeColors(isTty());
@@ -130,6 +131,50 @@ export function formatFleetStatus(s: FleetStatus): string {
   return lines.join('\n');
 }
 
+export function formatResourceStrategyReport(report: ResourceStrategyReport): string {
+  const lines: string[] = [];
+  lines.push('Autonomous direction');
+  lines.push(`  mode:        ${report.mode}`);
+  lines.push(`  confidence:  ${report.confidence}`);
+  lines.push('');
+
+  lines.push('Reasons:');
+  if (report.reasons.length === 0) {
+    lines.push('  (none)');
+  } else {
+    for (const reason of report.reasons) lines.push(`  - ${reason}`);
+  }
+  lines.push('');
+
+  lines.push('Recommended actions:');
+  if (report.recommendedActions.length === 0) {
+    lines.push('  (none)');
+  } else {
+    for (const action of report.recommendedActions) lines.push(`  - ${action}`);
+  }
+  lines.push('');
+
+  lines.push('Signals:');
+  lines.push(`  guards:      ${report.guardHealth.blocked ? `${report.guardHealth.blocks.length} block(s)` : 'ok'}`);
+  lines.push(`  resources:   ${report.resources.posture} (${report.resources.constrained} constrained, ${report.resources.depleted} depleted)`);
+  lines.push(`  backlog:     ${report.fleet.backlogItems}`);
+  lines.push(`  proposals:   ${report.fleet.pendingProposals} pending (${report.fleet.frontierPending} frontier)`);
+  lines.push(`  outcomes:    ${report.outcomes.records} record(s), ${report.outcomes.readyEvidence} ready, ${report.outcomes.verificationFailures} failed verification`);
+  lines.push(`  ecosystem:   ${report.ecosystem.posture} (${report.ecosystem.summary.fail} fail, ${report.ecosystem.summary.warn} warn)`);
+  lines.push(`  budget:      daemon ${report.budgets.daemonBudgetLevel} $${report.budgets.daemonSpentTodayUsd.toFixed(4)} spent today`);
+
+  if (report.resources.backends.length > 0) {
+    lines.push('');
+    lines.push('Resource backends:');
+    for (const backend of report.resources.backends.slice(0, 8)) {
+      const pct = backend.usedPct === null ? '' : ` used=${backend.usedPct}%`;
+      lines.push(`  ${backend.backend}: ${backend.availability} quota=${backend.quota}${pct}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
 function formatSharedQueueSummary(shared: NonNullable<FleetStatus['queue']['shared']>): string {
   const state = shared.readable ? 'ok' : 'unreadable';
   const parts = [
@@ -205,6 +250,38 @@ async function cmdFleetStatus(jsonMode: boolean): Promise<number> {
   }
   console.log('');
   return 0;
+}
+
+async function cmdFleetDirection(args: string[]): Promise<number> {
+  const jsonMode = args.includes('--json');
+  const cfg = await loadCfg();
+  if (!cfg) {
+    process.stderr.write(red('error: ') + 'failed to load config.\n');
+    return 1;
+  }
+
+  try {
+    const { buildResourceStrategyReport } = await import('../core/autonomy/resource-strategy.js');
+    const report = await buildResourceStrategyReport(cfg);
+    if (jsonMode) {
+      process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+      return 0;
+    }
+    console.log('');
+    console.log(bold('  ashlr fleet direction') + dim(' - read-only autonomy recommendation'));
+    console.log('');
+    for (const line of formatResourceStrategyReport(report).split('\n')) {
+      console.log('  ' + line);
+    }
+    console.log('');
+    return 0;
+  } catch (err) {
+    process.stderr.write(
+      red('error: ') + 'failed to build autonomous direction report: ' +
+        (err instanceof Error ? err.message : String(err)) + '\n',
+    );
+    return 1;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -665,6 +742,8 @@ export async function cmdFleet(args: string[]): Promise<number> {
       return cmdFleetStatus(rest.includes('--json'));
     case 'watch':
       return cmdFleetWatch(rest.includes('--json'));
+    case 'direction':
+      return cmdFleetDirection(rest);
     case 'init':
       return cmdFleetInit(rest);
     case 'pause':
@@ -698,6 +777,7 @@ function printFleetHelp(): void {
   console.log('');
   console.log(`    ashlr fleet status [--json]   ${cyan('# read-only fleet snapshot')}`);
   console.log(`    ashlr fleet watch  [--json]   ${cyan('# glanceable monitoring summary (actions + errors)')}`);
+  console.log(`    ashlr fleet direction [--json] ${cyan('# read-only autonomous direction report')}`);
   console.log(`    ashlr fleet init [--write]    ${cyan('# print/merge a starter cfg.foundry')}`);
   console.log(`    ashlr fleet pause             ${cyan('# engage kill switch (pause fleet)')}`);
   console.log(`    ashlr fleet resume            ${cyan('# release kill switch (resume fleet)')}`);

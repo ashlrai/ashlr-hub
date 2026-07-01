@@ -57,6 +57,7 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
 const mockAutoMergeProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
+  evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
 }));
 
 // Judge mock — controllable per-proposal verdict.

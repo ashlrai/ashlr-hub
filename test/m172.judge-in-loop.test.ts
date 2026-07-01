@@ -56,13 +56,26 @@ import * as path from 'node:path';
 // ---------------------------------------------------------------------------
 
 const mockAutoMergeProposal = vi.fn();
+const mockVerifyProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
+  evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
+  verifyProposal: (...args: unknown[]) => mockVerifyProposal(...args),
+  verifyResultFromProposalResult: (result: { ok: boolean; ran: unknown[]; detail: string }) => ({
+    passed: result.ok,
+    ...(result.ok ? {} : { failed: [result.detail] }),
+    detail: result.detail,
+    ran: result.ran,
+    verifiedAt: '2026-01-01T00:00:00.000Z',
+    source: 'auto-merge-preflight',
+  }),
 }));
 
 const mockListProposals = vi.fn();
 vi.mock('../src/core/inbox/store.js', () => ({
   listProposals: (...args: unknown[]) => mockListProposals(...args),
+  setStatus: vi.fn(),
+  updateProposalField: vi.fn(),
 }));
 
 const mockKillSwitchOn = vi.fn(() => false);
@@ -113,6 +126,7 @@ beforeEach(() => {
   mockListProposals.mockReturnValue([]);
   mockReadDecisions.mockReturnValue([]);
   mockAutoMergeProposal.mockResolvedValue({ ok: true, merged: true, branched: false });
+  mockVerifyProposal.mockResolvedValue({ ok: true, ran: [], detail: 'mock verified' });
   mockGetActiveClient.mockResolvedValue({
     model: 'claude-opus-4-5',
     complete: async () => '{"verdict":"ship","value":5,"correctness":5,"scope":1,"alignment":5,"rationale":"great"}',

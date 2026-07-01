@@ -28,6 +28,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Verify, commit, and push next usefulness batch
 - [x] Follow-up: Add autonomy evidence packs and policy verdicts
 - [x] Follow-up: Expose autonomy evidence and harden judge ordering
+- [x] Follow-up: Add causal proposal IDs, guard health, outcome records, and ecosystem doctor
+- [x] Follow-up: Make outcome feedback item-accurate
+- [x] Follow-up: Add cheap auto-merge readiness preflight
+- [x] Follow-up: Add verify-before-judge and reusable verification metadata
+- [x] Follow-up: Add resource-aware autonomous direction loop
 
 ## Key Questions
 1. What prevents Ashlr Hub from acting as a reliable always-on engineering fleet today?
@@ -35,6 +40,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 3. What should be built into Mission Control so the system feels operationally useful every day?
 4. What risks would make 24/7 autonomy dangerous, expensive, noisy, or untrustworthy?
 5. What can be improved immediately in this repo without destabilizing the pushed baseline?
+6. How can Ashlr continuously choose the highest-value safe work without Mason as the bottleneck?
+7. How can Ashlr spend scarce judge/frontier/model resources only after cheap facts say a candidate is mergeable?
 
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
@@ -47,6 +54,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Next local critical path is shared queue health in Mission Control because a multi-machine autonomous fleet needs visible lease, reclaim, and owner distribution signals.
 - Current autonomy critical path is making auto-merge evidence explicit and durable so higher-quality agents can merge by default without forcing Mason to reconstruct safety from logs.
 - Evidence visibility should ride on `FleetStatus` so API, CLI, Mission Control, and Fleet Dashboard all share one read-only autonomy signal.
+- Next autonomy control path is to turn causal proposal IDs and outcome records into active policy: item-accurate learning, cheap readiness checks before judge calls, bounded verification before review, and resource-aware mission choice.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -70,6 +78,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current autonomy pass adds `~/.ashlr/evidence/<proposalId>.json` evidence packs, a pure `AutonomyPolicyVerdict` ladder, and a pre-mutation Gate 8 in `autoMergeProposal` that fails closed if the evidence pack cannot be persisted or the policy denies the requested action.
 - Current visibility pass adds evidence pack read/list helpers, surfaces autonomy evidence in `FleetStatus`, CLI status/watch, `/api/fleet`, `/api/control`, `/api/snapshot`, Mission Control, Fleet, Fleet Dashboard, and read-only `/api/autonomy/evidence` endpoints.
 - Current trust fix makes the newest judged decision authoritative in the verification gate, so a newer non-ship verdict overrides any older signed `ship`.
+- Current autonomy learning foundation pass added `workItemId`, `workSource`, and `runId` on proposals across daemon/swarm/best-of-N/sandboxed runs; guard-health diagnosis in daemon/fleet status; read-only outcome records; and read-only ecosystem doctor.
+- Current autonomy control pass makes outcome feedback item-accurate, skips permanent auto-merge blockers before judge calls, verifies before spending judge calls in verification mode, and adds a read-only resource-aware direction report.
 
 ## Status
-**Current evidence visibility pass verified** - Evidence visibility and newest-judge ordering are implemented; focused tests, typecheck, lint, build, and diff check pass. Preparing commit and push.
+**Current autonomy control push verified** - Focused tests, invariants, typecheck, lint, build, audit, and diff check pass. Preparing commit and push.

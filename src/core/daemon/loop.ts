@@ -742,6 +742,12 @@ export async function tick(
   // diff) must NEVER be mis-counted as a proposal. pendingCount() is read-only.
   let pendingBefore = 0;
   try { pendingBefore = pendingCount(); } catch { pendingBefore = 0; }
+  let pendingBeforeIds = new Set<string>();
+  try {
+    pendingBeforeIds = new Set(listProposals({ status: 'pending' }).map((p) => p.id));
+  } catch {
+    pendingBeforeIds = new Set<string>();
+  }
 
   // `dispatched` = a swarm was actually invoked for this item (kill switch /
   // budget short-circuit did NOT skip it). Drives itemsProcessed so `daemon
@@ -1258,27 +1264,33 @@ export async function tick(
   let proposalsCreated = 0;
   try { proposalsCreated = Math.max(0, pendingCount() - pendingBefore); } catch (err) { console.warn('[ashlr] daemon:tick proposalDelta count failed:', (err as Error)?.message ?? err); proposalsCreated = 0; }
 
-  // M85: record outcomes to the worked ledger. A dispatched item that produced a
-  // new PENDING proposal → 'diff'; a dispatched item that produced no new proposal
-  // → 'empty' (the run completed but had nothing to show, e.g. no changes found).
-  // Non-dispatched items (kill-switch / budget skip) are NOT recorded — they were
-  // never run, so they should not trigger a cooldown.
-  // We determine per-item outcome by comparing the per-item proposal delta: we
-  // snapshot pendingBefore per-item is not available at this point, so we use the
-  // aggregate: if proposalsCreated >= dispatchedCount, every dispatched item
-  // produced at least one proposal → 'diff'. Otherwise we mark the ones that
-  // didn't produce a proposal as 'empty'. Since we can't perfectly attribute
-  // proposals to items after the fact, we use a conservative heuristic:
-  // if the TOTAL proposals created >= dispatched items, record all dispatched as
-  // 'diff'; otherwise record all dispatched as 'empty'. This is correct for the
-  // common single-item-per-tick case and conservative for multi-item ticks.
-  // Coupling note: OTHER agents recording outcomes (e.g. apply-gate) should also
-  // call recordOutcome(item.id, 'empty') when they determine a run produced no diff.
+  // M85/M305: record item-accurate outcomes to the worked ledger. New proposals
+  // carry workItemId, so a multi-item tick can tell which dispatched item filed
+  // a patch instead of relying on the old aggregate pending-count heuristic.
+  // Non-dispatched items (kill-switch / budget skip) are NOT recorded — they
+  // were never run, so they should not trigger a cooldown.
   if (dispatchedCount > 0) {
     try {
-      const outcomeLabel: 'diff' | 'empty' = proposalsCreated >= dispatchedCount ? 'diff' : 'empty';
+      const proposalItemIds = new Set<string>();
+      try {
+        for (const proposal of listProposals({ status: 'pending' })) {
+          if (pendingBeforeIds.has(proposal.id)) continue;
+          if (proposal.workItemId) proposalItemIds.add(proposal.workItemId);
+        }
+      } catch {
+        // Fallback preserves the old conservative behavior if the inbox cannot
+        // be read after dispatch.
+        if (proposalsCreated >= dispatchedCount) {
+          for (const outcome of outcomes) {
+            if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
+              proposalItemIds.add(outcome.value.item.id);
+            }
+          }
+        }
+      }
       for (const outcome of outcomes) {
         if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
+          const outcomeLabel: 'diff' | 'empty' = proposalItemIds.has(outcome.value.item.id) ? 'diff' : 'empty';
           // M113: route through coordinator (Local → worked-ledger; Shared → global store).
           coordinator.recordOutcome(outcome.value.item.id, outcomeLabel, machineId);
         }

@@ -258,10 +258,14 @@ async function _handleMergeShipped(
   cfg: AshlrConfig,
 ): Promise<void> {
   try {
-    // Record to worked-ledger so the item is cooled down after a real merge.
+    // Record to worked-ledger so the originating item is cooled down after a
+    // real merge. New proposals carry workItemId; old records fall back to
+    // proposalId for backward-compatible continuity.
     if (payload.proposalId) {
       const { recordOutcome } = await import('./worked-ledger.js');
-      recordOutcome(payload.proposalId, 'diff');
+      const { loadProposal } = await import('../inbox/store.js');
+      const proposal = loadProposal(payload.proposalId);
+      recordOutcome(proposal?.workItemId ?? payload.proposalId, 'diff');
     }
   } catch {
     // Best-effort.

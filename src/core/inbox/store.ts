@@ -368,6 +368,9 @@ export function createProposal(
       recordDecision({
         ts: new Date().toISOString(),
         proposalId: proposal.id,
+        ...(proposal.workItemId ? { workItemId: proposal.workItemId } : {}),
+        ...(proposal.workSource ? { workSource: proposal.workSource } : {}),
+        ...(proposal.runId ? { runId: proposal.runId } : {}),
         action: 'rejected',
         verdict: 'rejected',
         reason: diffSafetyRejectionReason,
@@ -527,6 +530,9 @@ export function setStatus(
       recordDecision({
         ts: new Date().toISOString(),
         proposalId: id,
+        ...(updated.workItemId ? { workItemId: updated.workItemId } : {}),
+        ...(updated.workSource ? { workSource: updated.workSource } : {}),
+        ...(updated.runId ? { runId: updated.runId } : {}),
         action: ledgerAction,
         ...(engineId ? { engine: engineId } : {}),
         ...(engineModel ? { model: engineModel } : {}),

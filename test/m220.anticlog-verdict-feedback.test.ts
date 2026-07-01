@@ -353,6 +353,46 @@ describe('M220 sweepJudgedProposals — pure unit', () => {
     expect(event?.outcome).toBe('judged-noise');
   });
 
+  it('prefers proposal.workItemId over title/summary matching', () => {
+    const right = makeItem('right-item', tmpRepo, { title: 'Right item' });
+    const wrong = makeItem('wrong-item', tmpRepo, { title: 'Wrong item' });
+
+    const proposals = [{
+      id: 'prop-causal',
+      title: 'Fix wrong-item',
+      summary: 'Mentions wrong-item in text, but causal id says otherwise',
+      repo: tmpRepo,
+      status: 'rejected',
+      decisionReason: 'noise',
+      workItemId: right.id,
+    }];
+
+    const count = sweepJudgedProposals(proposals, [wrong, right]);
+    expect(count).toBe(1);
+
+    const l = loadWorkedLedger();
+    expect(l.events.find(e => e.itemId === right.id)?.outcome).toBe('judged-noise');
+    expect(l.events.find(e => e.itemId === wrong.id)).toBeUndefined();
+  });
+
+  it('records proposal.workItemId even when the item is absent from the current backlog', () => {
+    const proposals = [{
+      id: 'prop-causal-absent',
+      title: 'No current backlog match',
+      summary: '',
+      repo: tmpRepo,
+      status: 'rejected',
+      decisionReason: 'harmful',
+      workItemId: 'absent-but-causal-item',
+    }];
+
+    const count = sweepJudgedProposals(proposals, []);
+    expect(count).toBe(1);
+
+    const l = loadWorkedLedger();
+    expect(l.events.find(e => e.itemId === 'absent-but-causal-item')?.outcome).toBe('judged-decline');
+  });
+
   it('records judged-decline for rejected proposal without decisionReason (defaults to harmful)', () => {
     const item = makeItem('item-no-reason', tmpRepo, { title: 'Refactor X' });
 

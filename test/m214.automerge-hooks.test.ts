@@ -52,6 +52,7 @@ vi.mock('../src/core/integrations/fleet-pulse-emit.js', () => ({
 const mockAutoMergeProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
+  evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
 }));
 
 const mockListProposals = vi.fn();

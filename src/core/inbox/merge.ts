@@ -101,7 +101,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
-import type { AshlrConfig, EngineTier, Proposal } from '../types.js';
+import type { AshlrConfig, EngineTier, Proposal, ProposalVerifyResult } from '../types.js';
 import { loadProposal, setStatus, updateProposalField } from './store.js';
 import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
@@ -536,6 +536,110 @@ export function evaluateBranchAuthority(proposal: Proposal, cfg: AshlrConfig): M
 }
 
 // ===========================================================================
+// 2b) Auto-merge readiness preflight (PURE, cheap, no ledger/worktree/model I/O)
+// ===========================================================================
+
+export interface AutoMergeReadinessPreflightResult {
+  /**
+   * true means "do not block the judge call on cheap static grounds".
+   * It does NOT mean the proposal will merge; autoMergeProposal remains the
+   * source of truth for every merge gate.
+   */
+  ready: boolean;
+  /** Present when ready=false. Mirrors the downstream gate reason where possible. */
+  reason?: string;
+  /** All current blockers are static/permanent until the proposal record changes. */
+  permanent?: boolean;
+  /** Non-blocking notes for observability; callers may surface them. */
+  advisories: string[];
+}
+
+/**
+ * Cheap preflight for runAutoMergePass before it spends a frontier judge call.
+ *
+ * This deliberately reuses the pure gate helpers below instead of re-encoding
+ * policy. It only blocks on facts that are already present on the proposal
+ * record and cannot be fixed by a fresh judge verdict: missing merge inputs,
+ * known failed verification, impossible tier/branch authority in tier mode,
+ * invalid provenance, and risk above the configured cap.
+ *
+ * It does NOT inspect decisions-ledger state, run verify commands, check repo
+ * enrollment, or duplicate the full scope/EDV/attestation gates.
+ */
+export function evaluateAutoMergeReadinessPreflight(
+  proposal: Proposal,
+  cfg: AshlrConfig,
+): AutoMergeReadinessPreflightResult {
+  const ready = (advisories: string[] = []): AutoMergeReadinessPreflightResult => ({
+    ready: true,
+    advisories,
+  });
+  const block = (reason: string, advisories: string[] = []): AutoMergeReadinessPreflightResult => ({
+    ready: false,
+    reason,
+    permanent: true,
+    advisories,
+  });
+
+  try {
+    if (proposal.kind !== 'patch' && proposal.kind !== 'pr') {
+      return block(`proposal kind '${proposal.kind}' is not mergeable (need patch|pr)`);
+    }
+
+    const diff = proposal.diff ?? '';
+    if (!diff.trim()) return block('proposal has no diff to merge');
+    if (!proposal.repo) return block('proposal has no repo');
+
+    if (proposal.verifyResult?.passed === false) {
+      const failed = proposal.verifyResult.failed?.filter(Boolean).join('; ');
+      return block(
+        `known verification failure: proposal.verifyResult.passed is false${
+          failed ? ` (${failed})` : ''
+        }`,
+      );
+    }
+
+    const trustBasis = (cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge']
+      ? (((cfg.foundry as Record<string, unknown>)['autoMerge'] as Record<string, unknown>)?.['trustBasis'] as string | undefined) ?? 'tier'
+      : 'tier';
+
+    const advisories: string[] = [];
+    if (trustBasis === 'verification' && proposal.verifyResult === undefined) {
+      advisories.push('verification result absent; autoMergeProposal may run verify before the full gate');
+    }
+
+    if (trustBasis !== 'verification') {
+      const target = mergeTargetForTier(proposal.engineTier);
+      const authority =
+        target === 'main'
+          ? evaluateMergeAuthority(proposal, cfg)
+          : target === 'branch'
+            ? evaluateBranchAuthority(proposal, cfg)
+            : { authorized: false, reason: `engineTier '${proposal.engineTier ?? 'unset'}' is proposal-only (local)` };
+
+      if (!authority.authorized) {
+        return block(`merge authority denied: ${authority.reason}`, advisories);
+      }
+    }
+
+    const provenance = verifyProvenance(proposal);
+    if (!provenance.ok) {
+      return block(`provenance check failed: ${provenance.reason}`, advisories);
+    }
+
+    const maxRisk: RiskClass = ((cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge'] as Record<string, unknown> | undefined)?.['maxRisk'] as RiskClass ?? 'low';
+    const risk = classifyRisk(proposal);
+    if (RISK_ORDER[risk] > RISK_ORDER[maxRisk]) {
+      return block(`risk class '${risk}' exceeds maxRisk '${maxRisk}'`, advisories);
+    }
+
+    return ready(advisories);
+  } catch (err) {
+    return block(`readiness preflight error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+// ===========================================================================
 // 3) defaultBranch — re-exported from git.ts (see contract)
 // ===========================================================================
 
@@ -785,6 +889,21 @@ export interface VerifyProposalResult {
   ok: boolean;
   ran: VerifyCommand[];
   detail: string;
+}
+
+export function verifyResultFromProposalResult(
+  result: VerifyProposalResult,
+  source: ProposalVerifyResult['source'] = 'auto-merge',
+  verifiedAt = new Date().toISOString(),
+): ProposalVerifyResult {
+  return {
+    passed: result.ok,
+    ...(result.ok ? {} : { failed: [result.detail] }),
+    detail: result.detail,
+    ran: [...result.ran],
+    verifiedAt,
+    source,
+  };
 }
 
 /**
@@ -1254,10 +1373,7 @@ export async function autoMergeProposal(
           // Persist the REAL result — best-effort (failure → absent → gate refuses).
           try {
             updateProposalField(proposal.id, {
-              verifyResult: {
-                passed: preVerify.ok,
-                ...(preVerify.ok ? {} : { failed: [preVerify.detail] }),
-              },
+              verifyResult: verifyResultFromProposalResult(preVerify, 'auto-merge'),
             });
           } catch {
             // Persistence failure: verifyResult stays absent — gate refuses correctly.
@@ -1268,9 +1384,7 @@ export async function autoMergeProposal(
           // Update the in-memory proposal so evaluateVerificationGate reads it.
           // This does NOT mutate the on-disk record — that was done above. This
           // only ensures the pure gate function sees the real verifyResult.
-          (proposal as Proposal & { verifyResult?: { passed: boolean; failed?: string[] } }).verifyResult = {
-            passed: true,
-          };
+          proposal.verifyResult = verifyResultFromProposalResult(preVerify, 'auto-merge');
         }
       }
 
@@ -1412,10 +1526,7 @@ export async function autoMergeProposal(
       // AND the pre-Gate-4 path somehow did not set it — fail-closed by design.
       try {
         updateProposalField(proposal.id, {
-          verifyResult: {
-            passed: verify.ok,
-            ...(verify.ok ? {} : { failed: [verify.detail] }),
-          },
+          verifyResult: verifyResultFromProposalResult(verify, 'auto-merge'),
         });
       } catch {
         // Persistence failure — swallow; the verify outcome still drives the gate.

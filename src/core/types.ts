@@ -2687,6 +2687,15 @@ export type ProposalKind = 'patch' | 'pr' | 'deploy' | 'note' | 'desktop-action'
  */
 export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'applied' | 'failed';
 
+export interface ProposalVerifyResult {
+  passed: boolean;
+  failed?: string[];
+  detail?: string;
+  ran?: Array<{ kind: 'typecheck' | 'test' | 'lint'; cmd: string[] }>;
+  verifiedAt?: string;
+  source?: 'auto-merge' | 'auto-merge-preflight' | 'manual' | string;
+}
+
 /**
  * M23: a single PROPOSED outward action awaiting Mason's approval. The inbox is
  * the SINGLE human control plane through which EVERY outward mutation (PR, merge,
@@ -2753,10 +2762,10 @@ export interface Proposal {
   /** Outcome detail recorded by applyProposal (branch name, PR url, error). */
   result?: string;
   /**
-   * M119: Result of the verification step run against this proposal's diff.
+   * M119/M307: Result of the verification step run against this proposal's diff.
    * Optional — not all proposals are verified before decision.
    */
-  verifyResult?: { passed: boolean; failed?: string[] };
+  verifyResult?: ProposalVerifyResult;
   /**
    * M119: Human or manager-agent reason recorded at decide time.
    */
@@ -3901,6 +3910,12 @@ export interface DecisionEntry {
   ts: string;
   /** The proposal this event belongs to. */
   proposalId: string;
+  /** Optional originating backlog/work item id for item-accurate learning. */
+  workItemId?: string;
+  /** Optional originating backlog scanner/source. */
+  workSource?: WorkSource;
+  /** Optional run/swarm id that produced the proposal. */
+  runId?: string;
   /** Lifecycle action. */
   action: 'proposed' | 'verified' | 'judged' | 'merged' | 'rejected' | 'escalated';
   /** Engine id (e.g. 'codex', 'claude'). */

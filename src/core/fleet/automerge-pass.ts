@@ -31,7 +31,14 @@
 
 import type { AshlrConfig, Proposal } from '../types.js';
 import { listProposals, setStatus, updateProposalField } from '../inbox/store.js';
-import { autoMergeProposal, isFrontierJudge, type AutoMergeResult } from '../inbox/merge.js';
+import {
+  autoMergeProposal,
+  evaluateAutoMergeReadinessPreflight,
+  isFrontierJudge,
+  verifyProposal,
+  verifyResultFromProposalResult,
+  type AutoMergeResult,
+} from '../inbox/merge.js';
 import { killSwitchOn } from '../sandbox/policy.js';
 import { readDecisions, recordDecision } from './decisions-ledger.js';
 import { judgeProposal, resolveFrontierJudgeClient, type ManagerVerdict } from './manager.js';
@@ -163,6 +170,14 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       ? (foundry['judgePerPass'] as number)
       : 8;
 
+  const autoMergeCfg = foundry?.['autoMerge'] as Record<string, unknown> | undefined;
+  const verifyBeforeJudgePerPass =
+    typeof autoMergeCfg?.['verifyBeforeJudgePerPass'] === 'number' &&
+    (autoMergeCfg['verifyBeforeJudgePerPass'] as number) >= 0
+      ? Math.floor(autoMergeCfg['verifyBeforeJudgePerPass'] as number)
+      : judgePerPass;
+  let verifyBeforeJudgeUsed = 0;
+
   // autoArchiveAfterRejects: default 3 — archive after K non-ship verdicts.
   const autoArchiveAfterRejects =
     typeof foundry?.['autoArchiveAfterRejects'] === 'number' && (foundry['autoArchiveAfterRejects'] as number) > 0
@@ -251,9 +266,61 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     }
     // In verification mode: no tier pre-filter — fall through to judge-then-merge.
 
+    // Cheap static readiness gate before spending a frontier judge call.
+    // autoMergeProposal remains authoritative; this only avoids judging records
+    // that already fail immutable, pure, no-I/O merge prerequisites.
+    const readiness = evaluateAutoMergeReadinessPreflight(p, cfg);
+    if (!readiness.ready) {
+      const advisorySuffix =
+        readiness.advisories.length > 0
+          ? `; advisories: ${readiness.advisories.join('; ')}`
+          : '';
+      const reason = `readiness preflight: ${readiness.reason ?? 'not ready'}${advisorySuffix}`;
+      out.results.push({ ok: false, merged: false, branched: false, reason });
+      out.skipped.push({ proposalId: p.id, check: 'readiness-preflight', reason });
+      continue;
+    }
+
     // ── M172: judge-then-merge ─────────────────────────────────────────────
     // Skip judging if there is already a recent ship verdict + attestation.
     if (!hasRecentShipVerdict(p.id)) {
+      if (isVerificationMode) {
+        if (p.verifyResult?.passed === false) {
+          const failed = p.verifyResult.failed?.filter(Boolean).join('; ');
+          const reason = `verify-before-judge: known failed verification${
+            failed ? `: ${failed}` : ''
+          }`;
+          out.results.push({ ok: false, merged: false, branched: false, reason });
+          out.skipped.push({ proposalId: p.id, check: 'verify-before-judge', reason });
+          continue;
+        }
+
+        if (p.verifyResult?.passed !== true) {
+          if (verifyBeforeJudgeUsed >= verifyBeforeJudgePerPass) {
+            const reason = `verify-before-judge: cap reached (${verifyBeforeJudgePerPass}/pass)`;
+            out.skipped.push({ proposalId: p.id, check: 'verify-before-judge-cap', reason });
+            continue;
+          }
+          verifyBeforeJudgeUsed++;
+
+          const verify = await verifyProposal(p, cfg);
+          const verifyResult = verifyResultFromProposalResult(verify, 'auto-merge-preflight');
+          try {
+            updateProposalField(p.id, { verifyResult });
+          } catch {
+            // Best-effort evidence write. The merge gate still re-checks/fails closed.
+          }
+          p.verifyResult = verifyResult;
+
+          if (!verify.ok) {
+            const reason = `verify-before-judge: verification failed: ${verify.detail}`;
+            out.results.push({ ok: false, merged: false, branched: false, reason });
+            out.skipped.push({ proposalId: p.id, check: 'verify-before-judge', reason });
+            continue;
+          }
+        }
+      }
+
       // Check per-pass cap before spending a frontier judge call.
       if (out.judged >= judgePerPass) {
         out.judgeCapped++;

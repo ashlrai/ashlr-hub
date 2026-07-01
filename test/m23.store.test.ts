@@ -51,6 +51,7 @@ import {
   setStatus,
   pendingCount,
 } from '../src/core/inbox/store.js';
+import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
 import type { Proposal } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -165,6 +166,28 @@ describe('M23 createProposal — persistence + initial state', () => {
   it('does NOT set decidedAt on creation (pending)', () => {
     const p = createProposal(makeInput());
     expect(p.decidedAt).toBeUndefined();
+  });
+
+  it('records causal fields on lifecycle decision entries', () => {
+    const p = createProposal(makeInput({
+      workItemId: 'repo:todo:causal-lifecycle',
+      workSource: 'todo',
+      runId: 'run-causal-lifecycle',
+      engineModel: 'codex:gpt-5.5',
+    }));
+
+    setStatus(p.id, 'approved', 'causal approval');
+
+    const decisions = readDecisions({ proposalId: p.id, limit: 5 });
+    const merged = decisions.find((d) => d.action === 'merged');
+    expect(merged).toMatchObject({
+      proposalId: p.id,
+      workItemId: 'repo:todo:causal-lifecycle',
+      workSource: 'todo',
+      runId: 'run-causal-lifecycle',
+      model: 'codex:gpt-5.5',
+      verdict: 'approved',
+    });
   });
 
   it('does NOT apply anything — repo is unchanged', () => {

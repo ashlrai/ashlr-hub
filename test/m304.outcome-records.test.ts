@@ -129,6 +129,9 @@ describe('m302 listOutcomeRecords', () => {
             action: 'merged',
             engine: 'codex',
             model: 'codex:gpt-5.5',
+            workItemId: 'repo:todo:prop-new',
+            workSource: 'todo',
+            runId: 'run-prop-new',
           }),
         ],
         readJudgeTraces: () => [
@@ -153,7 +156,13 @@ describe('m302 listOutcomeRecords', () => {
       diffHash: 'sha256:test',
     });
     expect(records[0]?.decisions).toEqual([
-      expect.objectContaining({ action: 'merged', model: 'codex:gpt-5.5' }),
+      expect.objectContaining({
+        action: 'merged',
+        model: 'codex:gpt-5.5',
+        workItemId: 'repo:todo:prop-new',
+        workSource: 'todo',
+        runId: 'run-prop-new',
+      }),
     ]);
     expect(records[0]?.judgeTraces).toEqual([
       expect.objectContaining({ verdict: 'ship', outcome: 'merged' }),

@@ -179,6 +179,7 @@ import {
   createProposal,
   pendingCount,
 } from '../src/core/inbox/store.js';
+import { loadWorkedLedger } from '../src/core/fleet/worked-ledger.js';
 import {
   makeFixture,
   makeCfg,
@@ -582,7 +583,7 @@ describe('M201 — Group C: per-item dispatch accounting', () => {
   });
 
   it('C2: proposalsCreated equals the pendingCount delta, not the swarm dispatch count', async () => {
-    const { repo } = enrollWithItems(2);
+    const { repo, items } = enrollWithItems(2);
     const before = pendingCount();
     // Only the first swarm creates a proposal; the second returns done with no proposal.
     let call = 0;
@@ -595,6 +596,9 @@ describe('M201 — Group C: per-item dispatch accounting', () => {
           title: 'C2 proposal',
           summary: 'C2',
           diff: 'diff --git a/x.ts b/x.ts\n',
+          workItemId: items[0]!.id,
+          workSource: items[0]!.source,
+          runId: 'm201-run-first',
         });
       }
       return { id: 'mock', status: 'done', goal: '', result: '', usage: { totalTokens: 10, estCostUsd: 0.001, steps: 1 } };
@@ -606,6 +610,9 @@ describe('M201 — Group C: per-item dispatch accounting', () => {
     expect(result.proposalsCreated).toBe(1); // only 1 new pending proposal
     expect(mockRunSwarm).toHaveBeenCalledTimes(2);
     expect(pendingCount()).toBe(before + 1);
+    const ledger = loadWorkedLedger();
+    expect(ledger.events.find((e) => e.itemId === items[0]!.id)?.outcome).toBe('diff');
+    expect(ledger.events.find((e) => e.itemId === items[1]!.id)?.outcome).toBe('empty');
   });
 
   it('C3: swarm that returns done but creates no proposal is NOT counted in proposalsCreated', async () => {

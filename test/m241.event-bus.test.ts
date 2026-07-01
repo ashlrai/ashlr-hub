@@ -32,6 +32,7 @@ const {
   mockCreateGoal,
   mockListGoals,
   mockRecordOutcome,
+  mockLoadProposal,
   mockNotifyFleetEvent,
   mockRunInventCycle,
   // Destructive primitives — must NEVER be called from any handler
@@ -42,6 +43,7 @@ const {
   mockCreateGoal: vi.fn().mockReturnValue({ id: 'goal-fix-1', objective: 'fix', status: 'planning' }),
   mockListGoals: vi.fn().mockReturnValue([]),
   mockRecordOutcome: vi.fn(),
+  mockLoadProposal: vi.fn().mockReturnValue(null),
   mockNotifyFleetEvent: vi.fn().mockResolvedValue(undefined),
   mockRunInventCycle: vi.fn().mockResolvedValue(undefined),
   // destructive — must remain uncalled
@@ -61,6 +63,10 @@ vi.mock('../src/core/goals/store.js', () => ({
 vi.mock('../src/core/fleet/worked-ledger.js', () => ({
   recordOutcome: mockRecordOutcome,
   listWorkedItems: vi.fn().mockReturnValue([]),
+}));
+
+vi.mock('../src/core/inbox/store.js', () => ({
+  loadProposal: mockLoadProposal,
 }));
 
 vi.mock('../src/core/comms/events.js', () => ({
@@ -99,6 +105,7 @@ beforeEach(() => {
   mockCreateGoal.mockReturnValue({ id: 'goal-fix-1', objective: 'fix', status: 'planning' });
   mockListGoals.mockReturnValue([]); // M258: dedupe check — empty list = no duplicates
   mockNotifyFleetEvent.mockResolvedValue(undefined);
+  mockLoadProposal.mockReturnValue(null);
   mockRunInventCycle.mockResolvedValue(undefined);
 });
 
@@ -386,17 +393,33 @@ describe('5. SAFETY: handlers only enqueue/notify — no merge/push/apply', () =
     expect(mockGitPush).not.toHaveBeenCalled();           // no push
   });
 
-  it('merge:shipped: records outcome + notifies — does not re-merge or apply', async () => {
+  it('merge:shipped: records causal workItemId + notifies — does not re-merge or apply', async () => {
+    mockLoadProposal.mockReturnValue({
+      id: 'p-shipped',
+      workItemId: 'item-shipped',
+      workSource: 'todo',
+      runId: 'run-shipped',
+    });
+
     emit('merge:shipped', { proposalId: 'p-shipped', repo: '/r', title: 'fix', engineTier: 'frontier' }, cfgOn());
     await flush();
 
     // Allowed: record outcome + notify (fire-and-forget, proposal-only path)
-    expect(mockRecordOutcome).toHaveBeenCalledWith('p-shipped', 'diff');
+    expect(mockRecordOutcome).toHaveBeenCalledWith('item-shipped', 'diff');
     expect(mockNotifyFleetEvent).toHaveBeenCalled();
     // Forbidden: no second merge loop, no apply, no push
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
     expect(mockApplyDiff).not.toHaveBeenCalled();
     expect(mockGitPush).not.toHaveBeenCalled();
+  });
+
+  it('merge:shipped: falls back to proposalId for legacy proposals', async () => {
+    mockLoadProposal.mockReturnValue(null);
+
+    emit('merge:shipped', { proposalId: 'p-legacy', repo: '/r' }, cfgOn());
+    await flush();
+
+    expect(mockRecordOutcome).toHaveBeenCalledWith('p-legacy', 'diff');
   });
 
   it('goal:done: generative OFF => no invent-cycle, no destructive calls', async () => {
