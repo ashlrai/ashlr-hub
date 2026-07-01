@@ -37,6 +37,14 @@ vi.mock('../src/core/integrations/notify.js', () => ({
 // Mock buildFleetDigest + buildFleetStatus for control.ts tests.
 const mockBuildFleetDigest = vi.fn();
 const mockBuildFleetStatus = vi.fn();
+let mockAuditEntries: Array<{
+  ts: string;
+  action: string;
+  repo: string | null;
+  sandboxId: string | null;
+  summary: string;
+  result: 'ok' | 'refused' | 'error';
+}> = [];
 
 vi.mock('../src/core/fleet/digest.js', () => ({
   buildFleetDigest: (...args: unknown[]) => mockBuildFleetDigest(...args),
@@ -44,6 +52,10 @@ vi.mock('../src/core/fleet/digest.js', () => ({
 
 vi.mock('../src/core/fleet/status.js', () => ({
   buildFleetStatus: (...args: unknown[]) => mockBuildFleetStatus(...args),
+}));
+
+vi.mock('../src/core/sandbox/audit.js', () => ({
+  readAudit: () => mockAuditEntries,
 }));
 
 // Mock runAutoMergePass — used in loop.ts tick().
@@ -114,6 +126,7 @@ describe('M197 observability — notify-proposal.ts', () => {
 
   beforeEach(() => {
     warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockAuditEntries = [];
   });
 
   afterEach(() => {
@@ -171,6 +184,7 @@ describe('M197 observability — control.ts buildFleetActivity', () => {
 
   beforeEach(() => {
     warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockAuditEntries = [];
   });
 
   afterEach(() => {
@@ -212,6 +226,48 @@ describe('M197 observability — control.ts buildFleetActivity', () => {
       typeof c[0] === 'string' && c[0].includes('buildFleetDigest'),
     );
     expect(digestWarns).toHaveLength(0);
+  });
+
+  it('surfaces successful inbox:auto-merge audit events in recentMerges', async () => {
+    mockBuildFleetDigest.mockResolvedValueOnce({
+      running: false,
+      lastTickAt: null,
+      todaySpentUsd: 0,
+      itemsProcessed: 0,
+      repos: [],
+      totalProposed: 0,
+      totalAutoMerged: 1,
+      totalPending: 0,
+      totalDeclined: 0,
+    });
+    mockAuditEntries = [
+      {
+        ts: '2026-07-01T00:00:00.000Z',
+        action: 'inbox:auto-merge',
+        repo: '/tmp/repo',
+        sandboxId: 'prop-123',
+        summary: 'proposal prop-123 auto-merge MERGED: merged to master',
+        result: 'ok',
+      },
+      {
+        ts: '2026-07-01T00:01:00.000Z',
+        action: 'inbox:auto-merge',
+        repo: '/tmp/repo',
+        sandboxId: 'prop-err',
+        summary: 'proposal prop-err auto-merge not merged: failed gate',
+        result: 'error',
+      },
+    ];
+
+    const result = await buildFleetActivity(minimalCfg());
+
+    expect(result.recentMerges).toHaveLength(1);
+    expect(result.recentMerges[0]).toMatchObject({
+      repo: '/tmp/repo',
+      proposalId: 'prop-123',
+      ts: '2026-07-01T00:00:00.000Z',
+      engine: null,
+    });
   });
 });
 

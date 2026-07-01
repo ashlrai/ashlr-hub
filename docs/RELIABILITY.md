@@ -68,6 +68,12 @@ proven recovery path and a single command (where manual repair is needed).
   `MAX_PARALLEL` cap (≤ 8, default `parallel = 2`) hold under a flood of
   concurrent backlog items — no unbounded fan-out. *(H3 concurrency stress.)*
 
+- **Same-machine daemon singleton.** `ashlr daemon start` takes an exclusive
+  `~/.ashlr/daemon.lock` before marking itself running. A second process refuses
+  before ticking; stale locks are reclaimed only when the recorded owner pid is
+  gone. Lock release is token-checked so an old process cannot delete a newer
+  owner's lock. *(M24 / M201 singleton tests.)*
+
 - **Halt everything now (kill switch).** `ashlr daemon stop` (sets the kill
   switch + clears the running flag), `ashlr enroll kill on`, or
   `touch ~/.ashlr/KILL`. The kill switch is checked first and halts the chain
@@ -80,10 +86,10 @@ proven recovery path and a single command (where manual repair is needed).
 These are real boundaries of the current design. They are documented, tracked,
 and **not** papered over.
 
-- **Single machine, single process.** Multi-daemon / multi-machine is a *gated*
-  cloud seam (M30) — **NOT built**. Two concurrent daemons on the same `~/.ashlr`
-  could race the budget accounting and the per-process id counters; the
-  in-process caps are proven, the multi-process case is out of scope.
+- **Multi-machine coordination is still shared-queue scoped.** The local daemon
+  is singleton-protected on one machine, but cross-machine fleets still rely on
+  the shared queue leases and the M30 seam. Lease renewal and forced backend
+  assignment remain tracked follow-ups for long-running frontier work.
 
 - **Budget overshoot is bounded, not zero.** Under `parallel > 1`, spend can
   overshoot the remaining daily cap by up to `(parallel - 1) × per-item` before

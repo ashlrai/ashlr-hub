@@ -17,9 +17,11 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
+import { homedir, hostname as osHostname } from 'node:os';
 import { join } from 'node:path';
 import type { DaemonState } from '../types.js';
 
@@ -29,6 +31,9 @@ import type { DaemonState } from '../types.js';
 
 /** Maximum number of tick history entries kept in daemon.json. */
 const MAX_TICKS = 100;
+
+/** Conservative stale-lock window used only after the recorded pid is gone. */
+const DEFAULT_LOCK_STALE_MS = 10 * 60_000;
 
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call time so tests can relocate HOME)
@@ -42,6 +47,29 @@ function ashlrDir(): string {
 export function daemonStatePath(): string {
   return join(ashlrDir(), 'daemon.json');
 }
+
+/** Absolute path to the daemon singleton lock file. */
+export function daemonLockPath(): string {
+  return join(ashlrDir(), 'daemon.lock');
+}
+
+export interface DaemonLockOwner {
+  pid: number;
+  token: string;
+  hostname: string;
+  acquiredAt: string;
+  heartbeatAt: string;
+}
+
+export interface DaemonLock {
+  path: string;
+  token: string;
+  pid: number;
+}
+
+export type AcquireDaemonLockResult =
+  | { acquired: true; lock: DaemonLock; owner: DaemonLockOwner; replacedStale: boolean }
+  | { acquired: false; path: string; owner: DaemonLockOwner | null; reason: 'busy' | 'io-error' };
 
 // ---------------------------------------------------------------------------
 // Zeroed default state
@@ -106,6 +134,8 @@ export function loadDaemonState(): DaemonState {
               typeof (t as Record<string, unknown>)['ts'] === 'string',
           )
         : [],
+      lastPulseExportAt:
+        typeof obj['lastPulseExportAt'] === 'string' ? obj['lastPulseExportAt'] : undefined,
     };
     // Self-heal at the load chokepoint: a daemon killed -9 leaves
     // running:true/pid:<dead> behind; reconcile (read-only liveness) flips it to
@@ -127,6 +157,7 @@ export function loadDaemonState(): DaemonState {
  * (POSIX-atomic). Creates ~/.ashlr if needed. Never throws.
  */
 export function saveDaemonState(s: DaemonState): void {
+  let tmp: string | null = null;
   try {
     const dir = ashlrDir();
     if (!existsSync(dir)) {
@@ -138,11 +169,173 @@ export function saveDaemonState(s: DaemonState): void {
       ticks: s.ticks.slice(-MAX_TICKS),
     };
     const dest = daemonStatePath();
-    const tmp = dest + '.tmp';
+    tmp = `${dest}.${process.pid}.${randomUUID()}.tmp`;
     writeFileSync(tmp, JSON.stringify(bounded, null, 2) + '\n', 'utf8');
     renameSync(tmp, dest);
   } catch {
     // Persistence failure must not crash the daemon — swallow silently.
+    if (tmp) {
+      try {
+        if (existsSync(tmp)) unlinkSync(tmp);
+      } catch {
+        // Best-effort cleanup only.
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Daemon singleton lock (cross-process, same machine)
+// ---------------------------------------------------------------------------
+
+function makeLockOwner(token: string, nowIso: string): DaemonLockOwner {
+  return {
+    pid: process.pid,
+    token,
+    hostname: osHostname(),
+    acquiredAt: nowIso,
+    heartbeatAt: nowIso,
+  };
+}
+
+function parseLockOwner(raw: string): DaemonLockOwner | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return null;
+    }
+    const obj = parsed as Record<string, unknown>;
+    if (
+      typeof obj['pid'] !== 'number' ||
+      typeof obj['token'] !== 'string' ||
+      typeof obj['hostname'] !== 'string' ||
+      typeof obj['acquiredAt'] !== 'string' ||
+      typeof obj['heartbeatAt'] !== 'string'
+    ) {
+      return null;
+    }
+    return {
+      pid: obj['pid'],
+      token: obj['token'],
+      hostname: obj['hostname'],
+      acquiredAt: obj['acquiredAt'],
+      heartbeatAt: obj['heartbeatAt'],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readDaemonLockOwner(): DaemonLockOwner | null {
+  try {
+    return parseLockOwner(readFileSync(daemonLockPath(), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function pidExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    return code !== 'ESRCH';
+  }
+}
+
+function lockIsSafelyStale(owner: DaemonLockOwner | null, staleMs: number): boolean {
+  if (!owner || !Number.isFinite(owner.pid) || owner.pid <= 0) return true;
+  if (pidExists(owner.pid)) return false;
+  const heartbeatMs = Date.parse(owner.heartbeatAt || owner.acquiredAt);
+  if (!Number.isFinite(heartbeatMs)) return true;
+  return Date.now() - heartbeatMs >= staleMs;
+}
+
+function writeNewLock(path: string, owner: DaemonLockOwner): void {
+  writeFileSync(path, JSON.stringify(owner, null, 2) + '\n', {
+    encoding: 'utf8',
+    flag: 'wx',
+  });
+}
+
+/**
+ * Acquire the same-machine daemon singleton lock.
+ *
+ * Uses an O_EXCL create so independent `ashlr daemon start` processes cannot
+ * both enter the operator loop. A dead-owner lock is reclaimed only after the
+ * recorded pid is gone and the heartbeat is older than `staleMs`; a live pid is
+ * always treated as busy, even with an old heartbeat, to fail closed.
+ */
+export function acquireDaemonLock(opts?: { staleMs?: number }): AcquireDaemonLockResult {
+  const path = daemonLockPath();
+  const dir = ashlrDir();
+  const staleMs = Math.max(0, opts?.staleMs ?? DEFAULT_LOCK_STALE_MS);
+  const token = randomUUID();
+  const owner = makeLockOwner(token, new Date().toISOString());
+
+  try {
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeNewLock(path, owner);
+    return { acquired: true, lock: { path, token, pid: process.pid }, owner, replacedStale: false };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code !== 'EEXIST') {
+      return { acquired: false, path, owner: null, reason: 'io-error' };
+    }
+  }
+
+  const existing = readDaemonLockOwner();
+  if (!lockIsSafelyStale(existing, staleMs)) {
+    return { acquired: false, path, owner: existing, reason: 'busy' };
+  }
+
+  try {
+    unlinkSync(path);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code !== 'ENOENT') {
+      return { acquired: false, path, owner: existing, reason: 'busy' };
+    }
+  }
+
+  try {
+    writeNewLock(path, owner);
+    return { acquired: true, lock: { path, token, pid: process.pid }, owner, replacedStale: true };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    return { acquired: false, path, owner: readDaemonLockOwner(), reason: code === 'EEXIST' ? 'busy' : 'io-error' };
+  }
+}
+
+/** Update the heartbeat for the current lock owner; returns false if ownership was lost. */
+export function heartbeatDaemonLock(lock: DaemonLock): boolean {
+  const current = readDaemonLockOwner();
+  if (!current || current.pid !== lock.pid || current.token !== lock.token) {
+    return false;
+  }
+  const next: DaemonLockOwner = { ...current, heartbeatAt: new Date().toISOString() };
+  try {
+    const tmp = `${lock.path}.${lock.token}.tmp`;
+    writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', 'utf8');
+    renameSync(tmp, lock.path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Release the daemon lock only if this process still owns the same token. */
+export function releaseDaemonLock(lock: DaemonLock): boolean {
+  const current = readDaemonLockOwner();
+  if (!current || current.pid !== lock.pid || current.token !== lock.token) {
+    return false;
+  }
+  try {
+    unlinkSync(lock.path);
+    return true;
+  } catch {
+    return false;
   }
 }
 

@@ -37,7 +37,14 @@ import type { AshlrConfig, DaemonConfig, DaemonState, DaemonTick, EngineId, Work
 import { killSwitchOn, setKill, listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
 import { buildBacklog } from '../portfolio/backlog.js';
-import { loadDaemonState, saveDaemonState, resetDayIfNeeded } from './state.js';
+import {
+  acquireDaemonLock,
+  heartbeatDaemonLock,
+  loadDaemonState,
+  releaseDaemonLock,
+  resetDayIfNeeded,
+  saveDaemonState,
+} from './state.js';
 import { nullSink } from '../run/streaming.js';
 import { runSwarm } from '../swarm/runner.js';
 import { runGoal } from '../run/orchestrator.js';
@@ -1334,6 +1341,32 @@ export async function runDaemon(
     return loadDaemonState();
   }
 
+  const lockAttempt = acquireDaemonLock();
+  if (!lockAttempt.acquired) {
+    audit({
+      action: 'daemon:start',
+      repo: null,
+      sandboxId: null,
+      summary: `daemon start refused: singleton lock busy${lockAttempt.owner ? ` (pid ${lockAttempt.owner.pid})` : ''}`,
+      result: 'refused',
+    });
+    return loadDaemonState();
+  }
+  const daemonLock = lockAttempt.lock;
+
+  let state = loadDaemonState();
+  if (state.running === true && typeof state.pid === 'number' && state.pid !== process.pid) {
+    releaseDaemonLock(daemonLock);
+    audit({
+      action: 'daemon:start',
+      repo: null,
+      sandboxId: null,
+      summary: `daemon start refused: existing live daemon state pid ${state.pid}`,
+      result: 'refused',
+    });
+    return state;
+  }
+
   // -------------------------------------------------------------------------
   // Set ASHLR_IN_DAEMON=1 on THIS process so all child engine spawns inherit it.
   // Snapshot the prior value so it can be restored on exit — without this a
@@ -1348,12 +1381,12 @@ export async function runDaemon(
   // -------------------------------------------------------------------------
   // Mark daemon as running.
   // -------------------------------------------------------------------------
-  let state = loadDaemonState();
   state = resetDayIfNeeded(state);
   state.running = true;
   state.pid = process.pid;
   state.startedAt = new Date().toISOString();
   saveDaemonState(state);
+  heartbeatDaemonLock(daemonLock);
 
   audit({
     action: 'daemon:start',
@@ -1423,7 +1456,9 @@ export async function runDaemon(
       // Single-tick mode — reload config so a manual tick picks up disk changes.
       let liveCfg = cfg;
       try { liveCfg = { ...cfg, daemon: loadConfig().daemon ?? cfg.daemon }; } catch { liveCfg = cfg; }
-      await tick(liveCfg, { dryRun: opts.dryRun });
+      if (heartbeatDaemonLock(daemonLock)) {
+        await tick(liveCfg, { dryRun: opts.dryRun });
+      }
     } else {
       // M116: choose loop strategy based on mode.
       // Continuous mode: keep dispatching back-to-back with only a short idle
@@ -1442,6 +1477,7 @@ export async function runDaemon(
         // (Infinity) so the daemon runs until kill-switch or budget exhaustion.
         let cyclesLeft = opts.maxCycles ?? Infinity;
         while (true) {
+          if (!heartbeatDaemonLock(daemonLock)) break;
           if (cyclesLeft-- <= 0) break;
           if (killSwitchOn()) break;
 
@@ -1477,6 +1513,7 @@ export async function runDaemon(
         // BATCH MODE (default) — original behavior, byte-identical.
         // -----------------------------------------------------------------------
         while (true) {
+          if (!heartbeatDaemonLock(daemonLock)) break;
           // Kill switch check — halt immediately.
           if (killSwitchOn()) break;
 
@@ -1506,6 +1543,7 @@ export async function runDaemon(
 
           // Sleep between ticks using a bounded interval.
           await sleep(dcfg.intervalMs);
+          if (!heartbeatDaemonLock(daemonLock)) break;
 
           // Final kill-switch check after sleep (in case stop() was called while sleeping).
           if (killSwitchOn()) break;
@@ -1519,10 +1557,13 @@ export async function runDaemon(
   // -------------------------------------------------------------------------
   // Clear running state on exit.
   // -------------------------------------------------------------------------
+  const stillOwnsLock = heartbeatDaemonLock(daemonLock);
   state = loadDaemonState();
-  state.running = false;
-  state.pid = null;
-  saveDaemonState(state);
+  if (stillOwnsLock && state.pid === process.pid) {
+    state.running = false;
+    state.pid = null;
+    saveDaemonState(state);
+  }
 
   audit({
     action: 'daemon:stop',
@@ -1537,6 +1578,8 @@ export async function runDaemon(
   // programmatic reuse / tests). Child spawns already inherited it during the run.
   if (prevInDaemon === undefined) delete process.env['ASHLR_IN_DAEMON'];
   else process.env['ASHLR_IN_DAEMON'] = prevInDaemon;
+
+  releaseDaemonLock(daemonLock);
 
   return loadDaemonState();
 }

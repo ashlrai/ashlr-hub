@@ -31,7 +31,7 @@
 
 import type { AshlrConfig, Proposal } from '../types.js';
 import { listProposals, setStatus, updateProposalField } from '../inbox/store.js';
-import { autoMergeProposal, type AutoMergeResult } from '../inbox/merge.js';
+import { autoMergeProposal, isFrontierJudge, type AutoMergeResult } from '../inbox/merge.js';
 import { killSwitchOn } from '../sandbox/policy.js';
 import { readDecisions, recordDecision } from './decisions-ledger.js';
 import { judgeProposal, resolveFrontierJudgeClient, type ManagerVerdict } from './manager.js';
@@ -361,8 +361,7 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
         try {
           const judgeEngine = judgeClient.model;
           let judgeAttestation: string | undefined;
-          const isFrontierJudgeModel = judgeEngine.startsWith('claude') || judgeEngine.includes('claude');
-          if (isFrontierJudgeModel) {
+          if (isFrontierJudge(judgeEngine)) {
             try {
               const diffHash = hashDiff(p.diff ?? '');
               judgeAttestation = signJudgeAttestation({

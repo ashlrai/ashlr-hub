@@ -577,16 +577,18 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
     };
   });
 
-  // Recent auto-merge events from audit (action starts with 'merge.')
+  // Recent auto-merge events from audit.
   let recentMerges: FleetMergeEvent[] = [];
   try {
     const auditEntries = readAudit(200);
     recentMerges = auditEntries
-      .filter((e) => e.action.startsWith('merge.'))
+      .filter((e) => e.action.startsWith('merge.') || (e.action === 'inbox:auto-merge' && e.result === 'ok'))
       .slice(0, 20)
       .map((e) => {
-        // summary format: "proposalId=<id> engine=<eng> ..."
-        const propMatch = /proposalId=([^\s]+)/.exec(e.summary);
+        // Supported summary formats:
+        // - "proposalId=<id> engine=<eng> ..."
+        // - "proposal <id> auto-merge MERGED: ..."
+        const propMatch = /proposalId=([^\s]+)/.exec(e.summary) ?? /proposal\s+([^\s]+)\s+auto-merge/.exec(e.summary);
         const engMatch  = /engine=([^\s]+)/.exec(e.summary);
         return {
           repo: e.repo,

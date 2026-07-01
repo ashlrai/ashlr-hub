@@ -45,8 +45,12 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 import {
+  acquireDaemonLock,
+  daemonLockPath,
   daemonStatePath,
+  heartbeatDaemonLock,
   loadDaemonState,
+  releaseDaemonLock,
   saveDaemonState,
   resetDayIfNeeded,
 } from '../src/core/daemon/state.js';
@@ -280,6 +284,87 @@ describe('M24 saveDaemonState — atomic write + round-trip', () => {
     saveDaemonState({ ...zeroedState(), itemsProcessed: 3 });
     const raw = fs.readFileSync(daemonStatePath(), 'utf8');
     expect(() => JSON.parse(raw)).not.toThrow();
+  });
+
+  it('round-trips lastPulseExportAt watermark', () => {
+    saveDaemonState({ ...zeroedState(), lastPulseExportAt: '2026-06-30T12:00:00.000Z' });
+    expect(loadDaemonState().lastPulseExportAt).toBe('2026-06-30T12:00:00.000Z');
+  });
+});
+
+// ===========================================================================
+// daemon singleton lock — cross-process guard primitive
+// ===========================================================================
+
+describe('M24 daemon singleton lock', () => {
+  it('acquires a lock and blocks a second live owner', () => {
+    const first = acquireDaemonLock();
+    expect(first.acquired).toBe(true);
+    if (!first.acquired) return;
+
+    const second = acquireDaemonLock();
+    expect(second.acquired).toBe(false);
+    if (!second.acquired) {
+      expect(second.reason).toBe('busy');
+      expect(second.owner?.pid).toBe(process.pid);
+    }
+
+    expect(releaseDaemonLock(first.lock)).toBe(true);
+  });
+
+  it('release allows a later acquire', () => {
+    const first = acquireDaemonLock();
+    expect(first.acquired).toBe(true);
+    if (!first.acquired) return;
+    expect(releaseDaemonLock(first.lock)).toBe(true);
+
+    const second = acquireDaemonLock();
+    expect(second.acquired).toBe(true);
+    if (second.acquired) {
+      expect(releaseDaemonLock(second.lock)).toBe(true);
+    }
+  });
+
+  it('does not release a newer owner with a stale token', () => {
+    const first = acquireDaemonLock();
+    expect(first.acquired).toBe(true);
+    if (!first.acquired) return;
+    const staleHandle = { ...first.lock, token: 'not-the-owner-token' };
+    expect(releaseDaemonLock(staleHandle)).toBe(false);
+    expect(releaseDaemonLock(first.lock)).toBe(true);
+  });
+
+  it('heartbeats only the current owner token', () => {
+    const first = acquireDaemonLock();
+    expect(first.acquired).toBe(true);
+    if (!first.acquired) return;
+
+    expect(heartbeatDaemonLock(first.lock)).toBe(true);
+    expect(heartbeatDaemonLock({ ...first.lock, token: 'wrong-token' })).toBe(false);
+    expect(releaseDaemonLock(first.lock)).toBe(true);
+  });
+
+  it('steals a stale lock whose owner pid is dead', () => {
+    const p = daemonLockPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(
+      p,
+      JSON.stringify({
+        pid: 2 ** 22,
+        token: 'dead-owner',
+        hostname: 'test-host',
+        acquiredAt: '2026-01-01T00:00:00.000Z',
+        heartbeatAt: '2026-01-01T00:00:00.000Z',
+      }) + '\n',
+      'utf8',
+    );
+
+    const acquired = acquireDaemonLock({ staleMs: 0 });
+    expect(acquired.acquired).toBe(true);
+    if (acquired.acquired) {
+      expect(acquired.replacedStale).toBe(true);
+      expect(releaseDaemonLock(acquired.lock)).toBe(true);
+    }
   });
 });
 

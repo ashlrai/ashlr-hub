@@ -168,7 +168,12 @@ vi.mock('../src/core/config.js', () => ({
 // ---------------------------------------------------------------------------
 
 import { tick, runDaemon, buildItemGoal } from '../src/core/daemon/loop.js';
-import { loadDaemonState, saveDaemonState } from '../src/core/daemon/state.js';
+import {
+  acquireDaemonLock,
+  loadDaemonState,
+  releaseDaemonLock,
+  saveDaemonState,
+} from '../src/core/daemon/state.js';
 import {
   createProposal,
   pendingCount,
@@ -843,6 +848,27 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     expect(typeof state.running).toBe('boolean');
 
     delete process.env['ASHLR_IN_SWARM'];
+  });
+
+  it('E5b: runDaemon singleton lock refuses a second process before ticking', async () => {
+    const held = acquireDaemonLock();
+    expect(held.acquired).toBe(true);
+    if (!held.acquired) return;
+
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 1),
+    });
+
+    const cfg = cfgBuiltin({ perTickItems: 1 });
+    const state = await runDaemon(cfg, { once: true, dryRun: true });
+
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(state.running).toBe(false);
+    expect(releaseDaemonLock(held.lock)).toBe(true);
   });
 
   it('E6: runDaemon dry-run loop terminates after one tick (dry-run = bounded)', async () => {

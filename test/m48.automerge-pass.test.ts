@@ -43,6 +43,10 @@ const mockAutoMergeProposal = vi.fn();
 let mergeResults: Record<string, AutoMergeResult> = {};
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
+  isFrontierJudge: (judgeEngine: string | undefined) => {
+    const lc = (judgeEngine ?? '').toLowerCase();
+    return lc.startsWith('claude') || lc.includes('claude') || lc.startsWith('gpt-5') || lc.startsWith('codex-') || lc === 'codex';
+  },
 }));
 
 // listProposals — returns a controllable proposal set via a mutable holder.
@@ -62,9 +66,11 @@ vi.mock('../src/core/fleet/manager.js', () => ({
   resolveFrontierJudgeClient: (...args: unknown[]) => mockResolveFrontierJudgeClient(...args),
 }));
 
+const mockReadDecisions = vi.fn(() => []);
+const mockRecordDecision = vi.fn();
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
-  readDecisions: vi.fn(() => []),
-  recordDecision: vi.fn(),
+  readDecisions: (...args: unknown[]) => mockReadDecisions(...args),
+  recordDecision: (...args: unknown[]) => mockRecordDecision(...args),
 }));
 
 vi.mock('../src/core/run/provider-client.js', () => ({
@@ -115,9 +121,12 @@ beforeEach(() => {
   mockAutoMergeProposal.mockReset();
   mockListProposals.mockReset();
   mockJudgeProposal.mockReset();
+  mockReadDecisions.mockReset();
+  mockRecordDecision.mockReset();
   mergeResults = {};
   pendingProposals = [];
 
+  mockReadDecisions.mockReturnValue([]);
   mockListProposals.mockImplementation(() => pendingProposals);
   mockAutoMergeProposal.mockImplementation(async (id: string) => {
     return mergeResults[id] ?? { ok: false, merged: false, reason: 'default-not-merged' };
@@ -240,6 +249,28 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
     pendingProposals = [makeProposal('frontier-1', { engineTier: 'frontier' })];
     await runAutoMergePass(enabledCfg());
     expect(mockListProposals).toHaveBeenCalledWith({ status: 'pending' });
+  });
+
+  it('records a signed attestation for GPT-5/Codex frontier judges', async () => {
+    pendingProposals = [makeProposal('frontier-gpt', { engineTier: 'frontier' })];
+    mockResolveFrontierJudgeClient.mockReturnValue({
+      model: 'gpt-5.5',
+      complete: async () => '{"verdict":"ship","value":5,"correctness":5,"scope":1,"alignment":5,"rationale":"mock"}',
+    });
+
+    await runAutoMergePass(enabledCfg());
+
+    const judgedCall = mockRecordDecision.mock.calls.find((c) => c[0]?.action === 'judged');
+    expect(judgedCall).toBeDefined();
+    expect(judgedCall?.[0]).toMatchObject({
+      proposalId: 'frontier-gpt',
+      action: 'judged',
+      engine: 'gpt-5.5',
+      model: 'gpt-5.5',
+      verdict: 'ship',
+    });
+    expect(typeof judgedCall?.[0]?.judgeAttestation).toBe('string');
+    expect(judgedCall?.[0]?.judgeAttestation).toHaveLength(64);
   });
 
   it('returns {attempted:0,merged:0} when there are no frontier proposals', async () => {

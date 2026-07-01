@@ -250,6 +250,12 @@ afterEach(() => {
 // ===========================================================================
 
 describe('M126 Gate 7 — ship verdict merges', () => {
+  it('inline judge attestation uses the shared frontier predicate', () => {
+    const source = fs.readFileSync(path.join(process.cwd(), 'src/core/inbox/merge.ts'), 'utf8');
+    expect(source).toContain('isFrontierJudge(inlineJudgeEngine)');
+    expect(source).not.toContain("inlineJudgeEngine.startsWith('claude')");
+  });
+
   it('[1] inline judge returns ship+wouldMerge=true → merges', async () => {
     initRepo(tmpRepo, 'main');
     attachOrigin(tmpRepo, 'main');

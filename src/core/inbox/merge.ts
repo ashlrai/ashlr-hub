@@ -1571,8 +1571,7 @@ export async function autoMergeProposal(
           // This mirrors the runManager path so evaluateVerificationGate criterion 1
           // can verify the HMAC regardless of which path produced the ledger entry.
           let inlineAttestation: string | undefined;
-          const inlineIsFrontier = inlineJudgeEngine.startsWith('claude') || inlineJudgeEngine.includes('claude');
-          if (verdict.verdict === 'ship' && inlineIsFrontier) {
+          if (verdict.verdict === 'ship' && isFrontierJudge(inlineJudgeEngine)) {
             try {
               const { signJudgeAttestation: signAtt, hashDiff: hd } = await import('../foundry/provenance.js');
               const dh = hd(proposal.diff ?? '');
