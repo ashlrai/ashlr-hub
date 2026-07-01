@@ -29,17 +29,22 @@ import * as path from 'node:path';
 // ---------------------------------------------------------------------------
 
 let origHome: string | undefined;
+let origAshlrHome: string | undefined;
 let tmpHome: string;
 
 beforeEach(() => {
   origHome = process.env['HOME'];
+  origAshlrHome = process.env['ASHLR_HOME'];
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'm240-test-'));
   process.env['HOME'] = tmpHome;
+  process.env['ASHLR_HOME'] = path.join(tmpHome, '.ashlr');
 });
 
 afterEach(() => {
   if (origHome !== undefined) process.env['HOME'] = origHome;
   else delete process.env['HOME'];
+  if (origAshlrHome !== undefined) process.env['ASHLR_HOME'] = origAshlrHome;
+  else delete process.env['ASHLR_HOME'];
   fs.rmSync(tmpHome, { recursive: true, force: true });
 });
 
@@ -86,6 +91,7 @@ import {
   sortEnginesByScore,
   LEARNED_ROUTING_MIN_SAMPLES,
   LEARNED_ROUTING_HALF_LIFE_MS,
+  type EngineScoreMap,
 } from '../src/core/run/learned-router.js';
 import { routeTask, type RoutingContext } from '../src/core/run/router.js';
 import type { AshlrConfig, WorkItem } from '../src/core/types.js';
@@ -273,15 +279,12 @@ describe('sortEnginesByScore', () => {
   });
 
   it('is stable for equal scores (preserves original order)', () => {
-    // Both engines have exactly LEARNED_ROUTING_MIN_SAMPLES ship verdicts → scores equal
-    writeDecisions([
-      ...judgedEntries(LEARNED_ROUTING_MIN_SAMPLES, 'claude', 'opus', 'issue', 'ship'),
-      ...judgedEntries(LEARNED_ROUTING_MIN_SAMPLES, 'codex', 'gpt-5.5', 'issue', 'ship'),
+    const scores: EngineScoreMap = new Map([
+      ['claude', { key: 'claude', engine: 'claude', model: null, score: 0.8, samples: LEARNED_ROUTING_MIN_SAMPLES }],
+      ['codex', { key: 'codex', engine: 'codex', model: null, score: 0.8, samples: LEARNED_ROUTING_MIN_SAMPLES }],
     ]);
-    const scores = buildEngineScores('issue');
     const original = ['claude', 'codex'] as any;
     const ordered = sortEnginesByScore(original, scores, null);
-    // Both have same score (all ships, same N) — original order preserved
     expect(ordered).toEqual(['claude', 'codex']);
   });
 });

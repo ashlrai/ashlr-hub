@@ -98,6 +98,11 @@ describe('M111 LocalWorkQueueCoordinator', () => {
     expect(() => coord.release(['a', 'b'], 'machine-1')).not.toThrow();
   });
 
+  it('renew is a no-op — does not throw', () => {
+    const coord = new LocalWorkQueueCoordinator();
+    expect(coord.renew(['a', 'b'], 'machine-1')).toEqual([]);
+  });
+
   it('recordOutcome writes to local ledger and shouldSkip picks it up', () => {
     const coord = new LocalWorkQueueCoordinator();
     // Override HOME to tmpDir so the local ledger stays isolated.
@@ -160,6 +165,71 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
     coord.claimItems([makeItem('r1')], 1, 'machine-A');
     coord.release(['r1'], 'machine-A');
     expect(store.readSnapshot().claims['r1']).toBeUndefined();
+  });
+
+  it('renew extends an active claim owned by the same machine', () => {
+    const store = makeStore(tmpDir, 10_000);
+    const coord = makeSharedCoordinator(store, 'machine-A', 10_000);
+    coord.claimItems([makeItem('renew-owned')], 1, 'machine-A');
+
+    const queuePath = path.join(tmpDir, 'ashlr-fleet-queue.json');
+    const snap = JSON.parse(fs.readFileSync(queuePath, 'utf8')) as { claims: Record<string, { machineId: string; leaseUntil: number }> };
+    snap.claims['renew-owned']!.leaseUntil = Date.now() + 100;
+    fs.writeFileSync(queuePath, JSON.stringify(snap, null, 2));
+
+    expect(coord.renew(['renew-owned'], 'machine-A')).toEqual(['renew-owned']);
+    const renewed = store.readSnapshot().claims['renew-owned'];
+    expect(renewed?.machineId).toBe('machine-A');
+    expect(renewed?.leaseUntil ?? 0).toBeGreaterThan(Date.now() + 5_000);
+  });
+
+  it('renew ignores claims owned by another machine', () => {
+    const store = makeStore(tmpDir, 10_000);
+    const coordA = makeSharedCoordinator(store, 'machine-A', 10_000);
+    const coordB = makeSharedCoordinator(store, 'machine-B', 10_000);
+    coordA.claimItems([makeItem('renew-other')], 1, 'machine-A');
+    const before = store.readSnapshot().claims['renew-other']!.leaseUntil;
+
+    expect(coordB.renew(['renew-other'], 'machine-B')).toEqual([]);
+    const after = store.readSnapshot().claims['renew-other']!;
+    expect(after.machineId).toBe('machine-A');
+    expect(after.leaseUntil).toBe(before);
+  });
+
+  it('renew extends a late same-machine claim before another machine reclaims it', () => {
+    const store = makeStore(tmpDir, 10_000);
+    const coordA = makeSharedCoordinator(store, 'machine-A', 10_000);
+    const coordB = makeSharedCoordinator(store, 'machine-B', 10_000);
+    const item = makeItem('renew-late');
+    coordA.claimItems([item], 1, 'machine-A');
+
+    const queuePath = path.join(tmpDir, 'ashlr-fleet-queue.json');
+    const snap = JSON.parse(fs.readFileSync(queuePath, 'utf8')) as { claims: Record<string, { machineId: string; leaseUntil: number }> };
+    snap.claims['renew-late']!.leaseUntil = Date.now() - 100;
+    fs.writeFileSync(queuePath, JSON.stringify(snap, null, 2));
+
+    expect(coordA.renew(['renew-late'], 'machine-A')).toEqual(['renew-late']);
+    expect(coordB.claimItems([item], 1, 'machine-B')).toEqual([]);
+    const renewed = store.readSnapshot().claims['renew-late']!;
+    expect(renewed.machineId).toBe('machine-A');
+    expect(renewed.leaseUntil).toBeGreaterThan(Date.now() + 5_000);
+  });
+
+  it('renew cannot steal back a claim after another machine reclaims it', () => {
+    const store = makeStore(tmpDir, 10_000);
+    const coordA = makeSharedCoordinator(store, 'machine-A', 10_000);
+    const coordB = makeSharedCoordinator(store, 'machine-B', 10_000);
+    const item = makeItem('renew-reclaimed');
+    coordA.claimItems([item], 1, 'machine-A');
+
+    const queuePath = path.join(tmpDir, 'ashlr-fleet-queue.json');
+    const snap = JSON.parse(fs.readFileSync(queuePath, 'utf8')) as { claims: Record<string, { machineId: string; leaseUntil: number }> };
+    snap.claims['renew-reclaimed']!.leaseUntil = Date.now() - 100;
+    fs.writeFileSync(queuePath, JSON.stringify(snap, null, 2));
+
+    expect(coordB.claimItems([item], 1, 'machine-B').map((i) => i.id)).toEqual(['renew-reclaimed']);
+    expect(coordA.renew(['renew-reclaimed'], 'machine-A')).toEqual([]);
+    expect(store.readSnapshot().claims['renew-reclaimed']!.machineId).toBe('machine-B');
   });
 
   it('recordOutcome writes to global worked ledger + releases claim', () => {
@@ -315,7 +385,6 @@ describe('M111 SharedWorkQueueCoordinator — global cooldown crosses machines',
   it('global cooldown expires — item becomes eligible again', () => {
     const store = makeStore(tmpDir);
     const coordA = makeSharedCoordinator(store, 'machine-A');
-    const coordB = makeSharedCoordinator(store, 'machine-B');
 
     const item = makeItem('expired-global');
     coordA.claimItems([item], 1, 'machine-A');
@@ -351,6 +420,13 @@ describe('M111 SharedStore — degraded / unwritable path', () => {
     const store = new SharedStore('/nonexistent-root-path/ashlr-fleet/shared');
     const coord = new SharedWorkQueueCoordinator(store, 'machine-X', 5000);
     expect(() => coord.recordOutcome('x', 'empty', 'machine-X')).not.toThrow();
+  });
+
+  it('renew returns [] and never throws on bad path', () => {
+    const store = new SharedStore('/nonexistent-root-path/ashlr-fleet/shared');
+    const coord = new SharedWorkQueueCoordinator(store, 'machine-X', 5000);
+    expect(() => coord.renew(['x'], 'machine-X')).not.toThrow();
+    expect(coord.renew(['x'], 'machine-X')).toEqual([]);
   });
 
   it('shouldSkip returns false (fail-open) on bad path', () => {

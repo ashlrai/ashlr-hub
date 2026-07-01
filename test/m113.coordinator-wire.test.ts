@@ -339,6 +339,41 @@ describe('tick() with no sharedQueue (Local path)', () => {
 // ---------------------------------------------------------------------------
 
 describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
+  it('tick() dry-run releases shared queue claims before returning', async () => {
+    const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-dry-'));
+    try {
+      const cfg = makeCfg({
+        daemon: { dailyBudgetUsd: 10, perTickItems: 2, parallel: 2, intervalMs: 100 },
+        fleet: {
+          sharedQueue: {
+            mode: 'filesystem',
+            path: sharedDir,
+            machineId: 'A',
+            leaseMs: 30_000,
+          },
+        },
+      });
+      mockLoadConfig.mockReturnValue(cfg);
+      backlogItems = [
+        makeItem('dry-1', tmpRepo, { score: 3 }),
+        makeItem('dry-2', tmpRepo, { score: 2 }),
+      ];
+      mockBuildBacklog.mockImplementation(async () => ({
+        generatedAt: new Date().toISOString(),
+        repos: [tmpRepo],
+        items: backlogItems,
+      }));
+
+      enroll(tmpRepo);
+      const result = await tick(cfg, { dryRun: true });
+
+      expect(result.reason).toBe('dry-run');
+      expect(new SharedStore(sharedDir, 30_000).readSnapshot().claims).toEqual({});
+    } finally {
+      fs.rmSync(sharedDir, { recursive: true, force: true });
+    }
+  });
+
   it('machines A and B claim disjoint items from the same backlog', () => {
     const sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m113-shared-'));
     try {

@@ -23,16 +23,20 @@ import type { Proposal } from '../src/core/types.js';
 // ---------------------------------------------------------------------------
 
 const origHome = process.env.HOME;
+const origAshlrHome = process.env.ASHLR_HOME;
 let tmpHome: string;
 
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m120-home-'));
   process.env.HOME = tmpHome;
+  process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
 });
 
 afterEach(() => {
   fs.rmSync(tmpHome, { recursive: true, force: true });
   process.env.HOME = origHome;
+  if (origAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = origAshlrHome;
   vi.restoreAllMocks();
 });
 

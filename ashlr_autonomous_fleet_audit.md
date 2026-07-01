@@ -26,6 +26,14 @@ loop bounded, observable, restartable, and reviewable from Mission Control.
   `inbox:auto-merge` audit events in Mission Control's recent merge feed.
 - Fixed GPT-5/Codex frontier judge signing by reusing the shared
   `isFrontierJudge` predicate in both daemon auto-merge and inline merge paths.
+- Hardened shared queue dispatch by renewing same-machine leases during long
+  runs, releasing shared claims during dry-runs, and giving shared queue writes
+  unique temp files.
+- Hardened concurrent dispatch so resource-control backend assignments are the
+  backends that actually run, with explicit skip handling for throttled,
+  resource-pause, and budget-pause decisions.
+- Hardened CI isolation around `ASHLR_HOME`, drifting fixed-date tests,
+  learned-routing fixtures, and intentional Claude engine auth passthrough.
 - Captured multi-agent audit findings into this report and `notes.md`.
 
 ## Top Gaps
@@ -33,11 +41,12 @@ loop bounded, observable, restartable, and reviewable from Mission Control.
 1. **Spend persistence fail-closed:** `saveDaemonState()` swallows write failures,
    so stale spend can permit overspend. State writes should report failure and
    dispatch should pause until repaired.
-2. **Queue lease renewal:** shared queue claims default to five minutes while
-   productive frontier runs can last much longer. Renew leases during dispatch.
-3. **Concurrent backend assignment enforcement:** resource slots plan a backend,
-   but the task closure can reroute internally. The assigned backend must become
-   the actual backend.
+2. **Queue lease renewal follow-through:** lease renewal is now implemented.
+   Next improvement is surfacing renewal health and reclaim metrics in Mission
+   Control.
+3. **Concurrent backend assignment enforcement:** implemented for daemon
+   execution. Next improvement is making backend assignment decisions visible in
+   operator-facing timelines.
 4. **Mission Control command surface:** telemetry is strong; control workflows
    need first-class start/stop/pause/resume, setup remediation, inbox lanes, and
    activation checklist.
@@ -50,8 +59,8 @@ loop bounded, observable, restartable, and reviewable from Mission Control.
 ## Ranked Next Actions
 
 1. Make spend/state persistence fail closed after dispatch-cost commits.
-2. Add shared queue lease renewal and immediate dry-run claim release.
-3. Force concurrent-dispatch backend assignments through actual execution.
+2. Surface shared queue lease renewal/reclaim metrics in Mission Control.
+3. Add first-class backend assignment/reason traces to Mission Control timelines.
 4. Split tests into fast hermetic and slow integration lanes, then use `test:ci`
    as the bounded default for CI/publish.
 5. Rebuild Inbox into a ranked review cockpit: ship now, needs review, risky,

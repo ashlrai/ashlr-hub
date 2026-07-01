@@ -8,10 +8,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Phase 2: Parallel multi-agent ecosystem audit
 - [x] Phase 3: Synthesize an ambitious product/architecture roadmap
 - [x] Phase 4: Execute high-leverage improvements now
-- [ ] Phase 5: Verify, commit, push, and leave resumable next steps
+- [x] Phase 5: Verify, commit, push, and leave resumable next steps
 - [x] Follow-up: Implement same-machine daemon singleton lock
 - [x] Follow-up: Fix Mission Control auto-merge visibility and GPT-5/Codex judge attestation signing
-- [ ] Follow-up: Final verification and push singleton hardening
+- [x] Follow-up: Final verification and push singleton hardening
+- [x] Follow-up: Add shared queue lease renewal and dry-run claim release
+- [x] Follow-up: Verify and push next functionality hardening batch
 
 ## Key Questions
 1. What prevents Ashlr Hub from acting as a reliable always-on engineering fleet today?
@@ -39,6 +41,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - `resource-pause:` decisions need daemon-level skip handling beside `throttled:` and `budget-pause:`.
 - Codex/GPT-5 judge attestation should use one shared frontier-judge predicate in auto-merge and inline merge paths.
 - Mission Control's auto-merge feed should include `inbox:auto-merge` audit events, not only `merge.*` actions.
+- Current pass agents: shared queue renewal, concurrent dispatch assignment, Mission Control pause/resume, and Vite/Vitest dependency migration are running in parallel.
+- Current pass landed shared queue lease renewal, dry-run claim release, concurrent-dispatch backend assignment enforcement, `resource-pause:` skip handling, and CI isolation hardening for leaked `ASHLR_HOME`/date/auth assumptions.
 
 ## Status
-**Currently in Phase 5** - Verifying daemon singleton hardening and preparing a pushed commit.
+**Current batch complete** - Verified locally and ready to push. Highest-leverage next lanes are spend/state fail-closed writes, Mission Control pause/resume controls, and a focused Vitest/Vite dependency migration.

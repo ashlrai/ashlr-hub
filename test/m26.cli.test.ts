@@ -26,10 +26,15 @@ import * as path from 'node:path';
 // ---------------------------------------------------------------------------
 
 const origHome = process.env['HOME'];
+const origAshlrHome = process.env['ASHLR_HOME'];
 let tmpHome: string;
 
 function ashlrDir(...p: string[]): string {
   return path.join(tmpHome, '.ashlr', ...p);
+}
+
+function daysAgoIso(days: number): string {
+  return new Date(Date.now() - days * 86_400_000).toISOString();
 }
 
 /** Seed one swarm JSON file into ~/.ashlr/swarms/. */
@@ -106,6 +111,7 @@ async function importCmd(): Promise<void> {
 beforeEach(async () => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m26-cli-home-'));
   process.env['HOME'] = tmpHome;
+  process.env['ASHLR_HOME'] = ashlrDir();
   fs.mkdirSync(ashlrDir(), { recursive: true });
   await importCmd();
   // Default: block EVERY network connection. The default report path must never
@@ -115,6 +121,8 @@ beforeEach(async () => {
 
 afterEach(() => {
   process.env['HOME'] = origHome;
+  if (origAshlrHome === undefined) delete process.env['ASHLR_HOME'];
+  else process.env['ASHLR_HOME'] = origAshlrHome;
   delete process.env['ANTHROPIC_API_KEY'];
   delete process.env['OPENAI_API_KEY'];
   fs.rmSync(tmpHome, { recursive: true, force: true });
@@ -128,8 +136,8 @@ afterEach(() => {
 
 describe('reflect — default report', () => {
   it('prints a report from seeded swarms (exit 0)', async () => {
-    seedSwarm({ id: 's1', goal: 'add user login feature', status: 'done', createdAt: '2026-06-01T00:00:00.000Z', estCostUsd: 0 });
-    seedSwarm({ id: 's2', goal: 'fix crash on startup', status: 'failed', createdAt: '2026-06-02T00:00:00.000Z', failedError: 'TypeError: cannot read x' });
+    seedSwarm({ id: 's1', goal: 'add user login feature', status: 'done', createdAt: daysAgoIso(2), estCostUsd: 0 });
+    seedSwarm({ id: 's2', goal: 'fix crash on startup', status: 'failed', createdAt: daysAgoIso(1), failedError: 'TypeError: cannot read x' });
 
     const { code, out } = await captureStdout(() => cmdReflect([]));
 
@@ -142,7 +150,7 @@ describe('reflect — default report', () => {
   });
 
   it('--json emits a ReflectionReport with the documented shape', async () => {
-    seedSwarm({ id: 's1', goal: 'implement export feature', status: 'done', createdAt: '2026-06-01T00:00:00.000Z' });
+    seedSwarm({ id: 's1', goal: 'implement export feature', status: 'done', createdAt: daysAgoIso(1) });
 
     const { code, out } = await captureStdout(() => cmdReflect(['--json']));
     expect(code).toBe(0);
@@ -299,8 +307,8 @@ describe('reflect — BOUNDED reads', () => {
 describe('reflect — week-over-week deltas', () => {
   it('first run has no prior; second run computes a delta vs the first', async () => {
     // First run: 50% success.
-    seedSwarm({ id: 's1', goal: 'add feature', status: 'done', createdAt: '2026-06-01T00:00:00.000Z' });
-    seedSwarm({ id: 's2', goal: 'fix bug', status: 'failed', createdAt: '2026-06-02T00:00:00.000Z', failedError: 'boom' });
+    seedSwarm({ id: 's1', goal: 'add feature', status: 'done', createdAt: daysAgoIso(2) });
+    seedSwarm({ id: 's2', goal: 'fix bug', status: 'failed', createdAt: daysAgoIso(1), failedError: 'boom' });
 
     const first = await captureStdout(() => cmdReflect(['--json']));
     const r1 = JSON.parse(first.out.trim());
@@ -311,7 +319,7 @@ describe('reflect — week-over-week deltas', () => {
     await new Promise((res) => setTimeout(res, 5));
 
     // Second run: now 100% success (mark s2 done).
-    seedSwarm({ id: 's2', goal: 'fix bug', status: 'done', createdAt: '2026-06-02T00:00:00.000Z' });
+    seedSwarm({ id: 's2', goal: 'fix bug', status: 'done', createdAt: daysAgoIso(1) });
 
     const second = await captureStdout(() => cmdReflect(['--json']));
     const r2 = JSON.parse(second.out.trim());

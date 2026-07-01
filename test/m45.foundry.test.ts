@@ -69,7 +69,8 @@ const MODEL = 'gpt-5-codex';
 const CWD = '/home/u/project';
 
 /** Credential-shaped env key pattern that must NEVER reach the contained env. */
-const CRED_KEY_RE = /_(TOKEN|SECRET|KEY|PASSWORD)$/i;
+const CRED_KEY_RE = /(_|^)(TOKEN|SECRET|KEY|PAT|PASSWORD|PASSWD|CREDENTIALS?|API[_-]?KEY|OAUTH[_-]?TOKEN|CREDS?)$/i;
+const ENGINE_AUTH_ALLOW = new Set(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN']);
 
 // Track tmp dirs created at the file level so afterEach can sweep them.
 const tmpDirs: string[] = [];
@@ -258,7 +259,9 @@ describe('M45 buildContainedEnv', () => {
     expect(env.FAKE_API_KEY).toBeUndefined();
     expect(env.GH_TOKEN).toBeUndefined();
 
-    const leaked = Object.keys(env).filter((k) => CRED_KEY_RE.test(k));
+    const leaked = Object.keys(env).filter(
+      (k) => CRED_KEY_RE.test(k) && !ENGINE_AUTH_ALLOW.has(k),
+    );
     expect(leaked).toEqual([]);
   });
 

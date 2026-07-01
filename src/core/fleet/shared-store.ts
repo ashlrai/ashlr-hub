@@ -30,6 +30,7 @@ import {
   statSync,
   constants,
 } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { WorkedOutcome, WorkedEvent } from './worked-ledger.js';
 
@@ -184,6 +185,7 @@ export class SharedStore {
    * Bounds worked events to MAX_WORKED.
    */
   private writeQueue(q: SharedFleetQueue): void {
+    let tmp: string | null = null;
     try {
       if (!this.ensureDir()) return;
       const bounded: SharedFleetQueue = {
@@ -191,11 +193,18 @@ export class SharedStore {
         worked: q.worked.slice(-MAX_WORKED),
       };
       const dest = this.queuePath();
-      const tmp = dest + '.tmp';
+      tmp = `${dest}.${process.pid}.${randomUUID()}.tmp`;
       writeFileSync(tmp, JSON.stringify(bounded, null, 2) + '\n', 'utf8');
       renameSync(tmp, dest);
     } catch {
       // Persistence failure must not crash the fleet.
+      if (tmp) {
+        try {
+          if (existsSync(tmp)) unlinkSync(tmp);
+        } catch {
+          // Best-effort cleanup only.
+        }
+      }
     }
   }
 
@@ -299,6 +308,27 @@ export class SharedStore {
       }
       return { queue: q, result: undefined };
     }, undefined);
+  }
+
+  /**
+   * Renew active claims held by `machineId` on the given itemIds.
+   * Returns the ids whose leases were extended. Missing, expired, or non-owned
+   * claims are ignored so another machine's reclaimed work is never stolen back.
+   */
+  renewItems(itemIds: string[], machineId: string): string[] {
+    if (!this.ensureDir()) return [];
+    return this.withLock((q) => {
+      const now = Date.now();
+      const renewed: string[] = [];
+      for (const id of itemIds) {
+        const claim = q.claims[id];
+        if (claim?.machineId === machineId) {
+          claim.leaseUntil = now + this.leaseMs;
+          renewed.push(id);
+        }
+      }
+      return { queue: q, result: renewed };
+    }, []);
   }
 
   /**

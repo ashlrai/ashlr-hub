@@ -46,6 +46,7 @@ export const WORK_QUEUE_COORDINATOR_SEAM = {
  * `claimItems`:    Given a scored candidate list, return up to `count` items
  *                  this machine should process (atomically claimed in multi-
  *                  machine mode; top-K pass-through in single-machine mode).
+ * `renew`:         Extend leases for in-flight shared claims during long runs.
  * `release`:       Release uncompleted claims (e.g. on clean shutdown).
  * `recordOutcome`: Write the work result + release the claim.
  * `shouldSkip`:    Returns true when the item should be skipped due to a recent
@@ -53,6 +54,7 @@ export const WORK_QUEUE_COORDINATOR_SEAM = {
  */
 export interface WorkQueueCoordinator {
   claimItems(candidates: WorkItem[], count: number, machineId: string): WorkItem[];
+  renew(itemIds: string[], machineId: string): string[];
   release(itemIds: string[], machineId: string): void;
   recordOutcome(itemId: string, outcome: WorkedOutcome, machineId: string): void;
   shouldSkip(itemId: string, cooldownMs: number): boolean;
@@ -80,6 +82,11 @@ export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
 
   release(_itemIds: string[], _machineId: string): void {
     // Single machine — no cross-machine claim to release.
+  }
+
+  renew(_itemIds: string[], _machineId: string): string[] {
+    // Single machine — no cross-machine lease to renew.
+    return [];
   }
 
   recordOutcome(itemId: string, outcome: WorkedOutcome, _machineId: string): void {
@@ -135,6 +142,10 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
 
   release(itemIds: string[], machineId: string): void {
     this.store.releaseItems(itemIds, machineId);
+  }
+
+  renew(itemIds: string[], machineId: string): string[] {
+    return this.store.renewItems(itemIds, machineId);
   }
 
   recordOutcome(itemId: string, outcome: WorkedOutcome, machineId: string): void {

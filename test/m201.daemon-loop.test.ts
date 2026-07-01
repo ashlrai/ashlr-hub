@@ -61,6 +61,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
 import type { AshlrConfig } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -977,5 +978,26 @@ describe('M201 — Group F: buildItemGoal purity', () => {
     expect(() => buildItemGoal(minimal)).not.toThrow();
     const goal = buildItemGoal(minimal);
     expect(goal).toContain('Minimal item');
+  });
+});
+
+// ===========================================================================
+// Group G — Concurrent dispatch routing wire guards
+// ===========================================================================
+
+describe('M201 — Group G: concurrent dispatch routing wire guards', () => {
+  it('G1: concurrent dispatch passes assigned backend and gateway reason into task runner', () => {
+    const source = fs.readFileSync(new URL('../src/core/daemon/loop.ts', import.meta.url), 'utf8');
+
+    expect(source).toContain('const routeReasons = new Map<string, string>();');
+    expect(source).toContain('routeReasons.set(workedSet[i]!.id, d.value.reason);');
+    expect(source).toContain('return taskEntry.run(_backend, routeReasons.get(item.id));');
+  });
+
+  it('G2: assigned gateway resource-pause decisions skip instead of dispatching', () => {
+    const source = fs.readFileSync(new URL('../src/core/daemon/loop.ts', import.meta.url), 'utf8');
+
+    expect(source).toContain("assignedReason?.startsWith('resource-pause:')");
+    expect(source).toContain("gd.reason.startsWith('resource-pause:')");
   });
 });

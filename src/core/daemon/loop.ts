@@ -470,6 +470,12 @@ export async function tick(
     typeof ((liveCfg.fleet as Record<string, unknown>)['sharedQueue'] as Record<string, unknown>)?.['machineId'] === 'string'
       ? ((liveCfg.fleet as Record<string, unknown>)['sharedQueue'] as Record<string, unknown>)['machineId'] as string
       : osHostname();
+  const sharedQueueLeaseMs: number =
+    (liveCfg.fleet as Record<string, unknown> | undefined)?.['sharedQueue'] &&
+    typeof ((liveCfg.fleet as Record<string, unknown>)['sharedQueue'] as Record<string, unknown>)?.['leaseMs'] === 'number' &&
+    (((liveCfg.fleet as Record<string, unknown>)['sharedQueue'] as Record<string, unknown>)['leaseMs'] as number) > 0
+      ? Math.floor(((liveCfg.fleet as Record<string, unknown>)['sharedQueue'] as Record<string, unknown>)['leaseMs'] as number)
+      : 5 * 60 * 1000;
 
   // Build a set of item ids that already have an open PENDING proposal so we
   // can skip duplicating work. Best-effort: match on item.id appearing in the
@@ -558,6 +564,12 @@ export async function tick(
   // 6a. Dry-run mode: report what WOULD be worked; NO swarms, NO proposals.
   // -------------------------------------------------------------------------
   if (opts.dryRun) {
+    try {
+      const claimedIds = workedSet.map((i) => i.id);
+      if (claimedIds.length > 0) coordinator.release(claimedIds, machineId);
+    } catch (err) {
+      console.warn('[ashlr] daemon:tick dry-run coordinator release failed:', (err as Error)?.message ?? err);
+    }
     saveDaemonState(state);
     audit({
       action: 'daemon:tick',
@@ -574,6 +586,31 @@ export async function tick(
       reason: 'dry-run',
     });
   }
+
+  const workedSetIds = workedSet.map((i) => i.id);
+  let leaseRenewInterval: ReturnType<typeof setInterval> | null = null;
+  const renewClaimLeases = (): void => {
+    if (workedSetIds.length === 0) return;
+    try {
+      coordinator.renew(workedSetIds, machineId);
+    } catch (err) {
+      console.warn('[ashlr] daemon:tick coordinator renew failed:', (err as Error)?.message ?? err);
+    }
+  };
+  const startLeaseRenewer = (): void => {
+    if (workedSetIds.length === 0) return;
+    renewClaimLeases();
+    const intervalMs = Math.max(1, Math.min(60_000, Math.floor(sharedQueueLeaseMs / 3)));
+    leaseRenewInterval = setInterval(renewClaimLeases, intervalMs);
+    (leaseRenewInterval as { unref?: () => void }).unref?.();
+  };
+  const stopLeaseRenewer = (): void => {
+    if (leaseRenewInterval) {
+      clearInterval(leaseRenewInterval);
+      leaseRenewInterval = null;
+    }
+  };
+  startLeaseRenewer();
 
   // -------------------------------------------------------------------------
   // 6b. Live mode: for each selected item (bounded concurrency), run a
@@ -692,140 +729,172 @@ export async function tick(
     return poolTierOf(engineTier);
   });
 
-  const tasks: Array<{ tier: 'local' | 'cloud'; run: () => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => ({
+  const tasks: Array<{ tier: 'local' | 'cloud'; run: (assignedBackend?: EngineId, assignedReason?: string) => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => ({
     tier: itemTiers[_taskIdx] ?? 'local',
-    run: async (): Promise<ItemOutcome> => {
-    // Re-check kill switch before each item dispatch.
-    if (killSwitchOn()) {
-      return { item, spentUsd: 0, dispatched: false };
-    }
-    // In-tick budget short-circuit: if cumulative realized spend has already
-    // reached the remaining daily headroom, do NOT dispatch further items.
-    if (tickSpent >= remainingBudget) {
-      return { item, spentUsd: 0, dispatched: false };
-    }
-
-    let swarmSpent = 0;
-    let dispatched = false;
-
-    // M247: InferenceGateway — consolidates routing into one traceable decision.
-    // FLAG-GATED: when cfg.foundry.fabric?.gateway === true, a single
-    // gateway.decide() call replaces the double routeBackend + quota guard +
-    // subscription throttle + M53 block below. Default false → old path runs
-    // byte-identical. The gateway's flag-off path is itself a thin pass-through
-    // to routeBackend, so both branches produce the same result when flag is off.
-    //
-    // Hoisted so both the gateway branch and the legacy branch can assign it,
-    // and subsequent dispatch code sees the same name regardless of path.
-    let backend: EngineId;
-    if (liveCfg.foundry?.fabric?.gateway === true) {
-      const forecast = buildForecast('7d', liveCfg);
-      const gd = await gatewayDecide(item, liveCfg, {
-        spentUsd: tickSpent + state.todaySpentUsd,
-        forecast,
-      });
-      // Throttled: subscription window at cap — skip item, same as old path.
-      if (gd.reason.startsWith('throttled:')) {
-        audit({
-          action: 'daemon:tick',
-          repo: item.repo,
-          sandboxId: null,
-          summary: gd.reason,
-          result: 'ok',
-        });
+    run: async (assignedBackend?: EngineId, assignedReason?: string): Promise<ItemOutcome> => {
+      // Re-check kill switch before each item dispatch.
+      if (killSwitchOn()) {
         return { item, spentUsd: 0, dispatched: false };
       }
-      // Budget pause: step down exhausted budget — skip item, same as old path.
-      if (gd.reason.startsWith('budget-pause:')) {
-        audit({
-          action: 'daemon:budget-cascade',
-          repo: item.repo,
-          sandboxId: null,
-          summary: `M247 gateway budget cascade: pausing dispatch for "${item.title}" — ${gd.reason}`,
-          result: 'ok',
-        });
+      // In-tick budget short-circuit: if cumulative realized spend has already
+      // reached the remaining daily headroom, do NOT dispatch further items.
+      if (tickSpent >= remainingBudget) {
         return { item, spentUsd: 0, dispatched: false };
       }
-      // Normal dispatch: use gateway decision's backend directly.
-      backend = gd.backend;
-    } else {
-    // M48: route this item to a backend (M46). Default (no cfg.foundry) →
-    // 'builtin'. A frontier backend over its rolling rate quota falls back to
-    // local so work keeps flowing without exceeding the subscription's limit.
-    // M85: use liveCfg (reloaded per-tick) for routing + quota checks.
-    const routed = routeBackend(item, liveCfg);
-    backend = routed.backend;
-    if (backend !== 'builtin' && !withinLimit(backend, liveCfg)) {
-      backend = 'builtin';
-    }
 
-    // M80: subscription-window throttle — skip this item (not crash) when a
-    // KNOWN subscription window is at or above the cap (default 90%). Reads
-    // cfg.foundry.subscriptionMaxPercent defensively with a fallback default.
-    // allowed:true when usage is unknown (claude) or under the cap.
-    if (isSubscriptionEngine(backend)) {
-      // Read maxPercent from liveCfg.foundry defensively — no types.ts change.
-      // Clamp to [1,100]: a negative or zero value would disable the throttle
-      // (anything is "under 0%"), and >100 could never fire (nothing is ">100%").
-      const rawPct = (liveCfg.foundry as Record<string, unknown> | undefined
-        )?.['subscriptionMaxPercent'];
-      const maxPct: number = typeof rawPct === 'number'
-        ? Math.min(100, Math.max(1, rawPct))
-        : 90;
-      const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
-      if (!subCheck.allowed) {
-        audit({
-          action: 'daemon:tick',
-          repo: item.repo,
-          sandboxId: null,
-          summary: `throttled: ${backend} subscription window — ${subCheck.reason}`,
-          result: 'ok',
-        });
-        return { item, spentUsd: 0, dispatched: false };
-      }
-    }
+      let swarmSpent = 0;
+      let dispatched = false;
 
-    // M53: learned-router recommend + budget cascade (flag-off: no-op when
-    // cfg.foundry.intelligence is absent). recoverWithinBudget is PURE and
-    // may only return a tier choice or a pause signal — no outward action.
-    // This file imports NO apply/merge/push/deploy primitive.
-    // M85: use liveCfg for intelligence config.
-    {
-      const intelRaw = liveCfg.foundry?.intelligence;
-      if (intelRaw !== undefined && intelRaw !== null) {
-        const forecast = buildForecast('7d', liveCfg);
-        const goal = buildItemGoal(item);
-        const est = await estimateRun(goal, { maxTokens: perItemMaxTokens }, liveCfg);
-        const recommended = await recommendRoute(item, liveCfg, { estimate: est });
-        // Only override when the recommend result doesn't escalate a local decision.
-        if (routed.tier !== 'local' || recommended.tier === 'local') {
-          backend = recommended.backend;
+      // M247: InferenceGateway — consolidates routing into one traceable decision.
+      // FLAG-GATED: when cfg.foundry.fabric?.gateway === true, a single
+      // gateway.decide() call replaces the double routeBackend + quota guard +
+      // subscription throttle + M53 block below. Default false → old path runs
+      // byte-identical. The gateway's flag-off path is itself a thin pass-through
+      // to routeBackend, so both branches produce the same result when flag is off.
+      //
+      // Hoisted so both the gateway branch and the legacy branch can assign it,
+      // and subsequent dispatch code sees the same name regardless of path.
+      let backend: EngineId;
+      if (assignedBackend !== undefined) {
+        if (assignedReason?.startsWith('throttled:') || assignedReason?.startsWith('resource-pause:')) {
+          audit({
+            action: 'daemon:tick',
+            repo: item.repo,
+            sandboxId: null,
+            summary: assignedReason,
+            result: 'ok',
+          });
+          return { item, spentUsd: 0, dispatched: false };
         }
-        // Budget cascade: step down tier when near cap.
-        const recovery = recoverWithinBudget(
-          { backend, tier: recommended.tier, reason: recommended.reason },
-          liveCfg,
-          tickSpent + state.todaySpentUsd,
-          forecast,
-        );
-        if (recovery.action === 'pause') {
+        if (assignedReason?.startsWith('budget-pause:')) {
           audit({
             action: 'daemon:budget-cascade',
             repo: item.repo,
             sandboxId: null,
-            summary: `M53 budget cascade: pausing dispatch for "${item.title}" — ${recovery.reason}`,
+            summary: `M255 concurrent dispatch: pausing "${item.title}" — ${assignedReason}`,
             result: 'ok',
           });
           return { item, spentUsd: 0, dispatched: false };
-        } else {
-          backend = recovery.decision.backend;
         }
-      }
-    }
-    } // end flag-off path
+        backend = assignedBackend;
+      } else if (liveCfg.foundry?.fabric?.gateway === true) {
+        const forecast = buildForecast('7d', liveCfg);
+        const gd = await gatewayDecide(item, liveCfg, {
+          spentUsd: tickSpent + state.todaySpentUsd,
+          forecast,
+        });
+        // Throttled: subscription window at cap — skip item, same as old path.
+        if (gd.reason.startsWith('throttled:')) {
+          audit({
+            action: 'daemon:tick',
+            repo: item.repo,
+            sandboxId: null,
+            summary: gd.reason,
+            result: 'ok',
+          });
+          return { item, spentUsd: 0, dispatched: false };
+        }
+        // Budget pause: step down exhausted budget — skip item, same as old path.
+        if (gd.reason.startsWith('budget-pause:')) {
+          audit({
+            action: 'daemon:budget-cascade',
+            repo: item.repo,
+            sandboxId: null,
+            summary: `M247 gateway budget cascade: pausing dispatch for "${item.title}" — ${gd.reason}`,
+            result: 'ok',
+          });
+          return { item, spentUsd: 0, dispatched: false };
+        }
+        if (gd.reason.startsWith('resource-pause:')) {
+          audit({
+            action: 'daemon:tick',
+            repo: item.repo,
+            sandboxId: null,
+            summary: gd.reason,
+            result: 'ok',
+          });
+          return { item, spentUsd: 0, dispatched: false };
+        }
+        // Normal dispatch: use gateway decision's backend directly.
+        backend = gd.backend;
+      } else {
+        // M48: route this item to a backend (M46). Default (no cfg.foundry) →
+        // 'builtin'. A frontier backend over its rolling rate quota falls back to
+        // local so work keeps flowing without exceeding the subscription's limit.
+        // M85: use liveCfg (reloaded per-tick) for routing + quota checks.
+        const routed = routeBackend(item, liveCfg);
+        backend = routed.backend;
+        if (backend !== 'builtin' && !withinLimit(backend, liveCfg)) {
+          backend = 'builtin';
+        }
 
-    const goal = buildItemGoal(item);
-    const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
+        // M80: subscription-window throttle — skip this item (not crash) when a
+        // KNOWN subscription window is at or above the cap (default 90%). Reads
+        // cfg.foundry.subscriptionMaxPercent defensively with a fallback default.
+        // allowed:true when usage is unknown (claude) or under the cap.
+        if (isSubscriptionEngine(backend)) {
+          // Read maxPercent from liveCfg.foundry defensively — no types.ts change.
+          // Clamp to [1,100]: a negative or zero value would disable the throttle
+          // (anything is "under 0%"), and >100 could never fire (nothing is ">100%").
+          const rawPct = (liveCfg.foundry as Record<string, unknown> | undefined
+            )?.['subscriptionMaxPercent'];
+          const maxPct: number = typeof rawPct === 'number'
+            ? Math.min(100, Math.max(1, rawPct))
+            : 90;
+          const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
+          if (!subCheck.allowed) {
+            audit({
+              action: 'daemon:tick',
+              repo: item.repo,
+              sandboxId: null,
+              summary: `throttled: ${backend} subscription window — ${subCheck.reason}`,
+              result: 'ok',
+            });
+            return { item, spentUsd: 0, dispatched: false };
+          }
+        }
+
+        // M53: learned-router recommend + budget cascade (flag-off: no-op when
+        // cfg.foundry.intelligence is absent). recoverWithinBudget is PURE and
+        // may only return a tier choice or a pause signal — no outward action.
+        // This file imports NO apply/merge/push/deploy primitive.
+        // M85: use liveCfg for intelligence config.
+        {
+          const intelRaw = liveCfg.foundry?.intelligence;
+          if (intelRaw !== undefined && intelRaw !== null) {
+            const forecast = buildForecast('7d', liveCfg);
+            const goal = buildItemGoal(item);
+            const est = await estimateRun(goal, { maxTokens: perItemMaxTokens }, liveCfg);
+            const recommended = await recommendRoute(item, liveCfg, { estimate: est });
+            // Only override when the recommend result doesn't escalate a local decision.
+            if (routed.tier !== 'local' || recommended.tier === 'local') {
+              backend = recommended.backend;
+            }
+            // Budget cascade: step down tier when near cap.
+            const recovery = recoverWithinBudget(
+              { backend, tier: recommended.tier, reason: recommended.reason },
+              liveCfg,
+              tickSpent + state.todaySpentUsd,
+              forecast,
+            );
+            if (recovery.action === 'pause') {
+              audit({
+                action: 'daemon:budget-cascade',
+                repo: item.repo,
+                sandboxId: null,
+                summary: `M53 budget cascade: pausing dispatch for "${item.title}" — ${recovery.reason}`,
+                result: 'ok',
+              });
+              return { item, spentUsd: 0, dispatched: false };
+            } else {
+              backend = recovery.decision.backend;
+            }
+          }
+        }
+      } // end flag-off path
+
+      const goal = buildItemGoal(item);
+      const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
 
     // Snapshot ASHLR_IN_SWARM and restore it after the call. The swarm runner
     // sets ASHLR_IN_SWARM=1 on THIS (long-lived) process and does not unwind it;
@@ -1028,6 +1097,7 @@ export async function tick(
 
   let outcomes: PromiseSettledResult<ItemOutcome>[];
 
+  try {
   if (useConcurrentDispatch) {
     // Re-sense headroom before planning (cached 30s; no extra cost in practice).
     const concurrentSnap = await getResourceSnapshot(liveCfg).catch(() => ({
@@ -1045,13 +1115,17 @@ export async function tick(
     // planConcurrentDispatch: pure, uses gateway routing hints for suitability.
     // Build routing hints in parallel via gateway.decide, then call the pure planner.
     const routeHints = new Map<string, EngineId>();
+    const routeReasons = new Map<string, string>();
     if (liveCfg.foundry?.fabric?.gateway === true) {
       const gds = await Promise.allSettled(
         workedSet.map((item) => gatewayDecide(item, liveCfg, { spentUsd: tickSpent + state.todaySpentUsd }))
       );
       for (let i = 0; i < workedSet.length; i++) {
         const d = gds[i];
-        if (d?.status === 'fulfilled') routeHints.set(workedSet[i]!.id, d.value.backend);
+        if (d?.status === 'fulfilled') {
+          routeHints.set(workedSet[i]!.id, d.value.backend);
+          routeReasons.set(workedSet[i]!.id, d.value.reason);
+        }
       }
     }
     const concurrentPlan = planConcurrentDispatch(
@@ -1071,7 +1145,7 @@ export async function tick(
         // We look up by item.id to reuse the existing tasks[] entries which
         // already capture tickSpent/state/liveCfg via closure.
         const taskEntry = tasks.find((_t, idx) => workedSet[idx]?.id === item.id);
-        if (taskEntry) return taskEntry.run();
+        if (taskEntry) return taskEntry.run(_backend, routeReasons.get(item.id));
         // Fallback: build a minimal no-op outcome (item not in tasks — shouldn't happen).
         return { item, spentUsd: 0, dispatched: false } satisfies ItemOutcome;
       },
@@ -1110,6 +1184,9 @@ export async function tick(
     outcomes = useBatchPool
       ? await bounded(tasks.map((t) => t.run), dcfg.parallel)
       : await tieredBounded(tasks, tierPool);
+  }
+  } finally {
+    stopLeaseRenewer();
   }
 
   // itemsProcessed counts items whose swarm was actually dispatched (not those

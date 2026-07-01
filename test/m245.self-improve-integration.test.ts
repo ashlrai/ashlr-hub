@@ -58,6 +58,7 @@ import { LEARNED_ROUTING_MIN_SAMPLES } from '../src/core/run/learned-router.js';
 // ---------------------------------------------------------------------------
 
 const origHome = process.env['HOME'];
+const origAshlrHome = process.env['ASHLR_HOME'];
 let tmpHome: string;
 
 // ---------------------------------------------------------------------------
@@ -281,6 +282,7 @@ async function flush(): Promise<void> {
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m245-'));
   process.env['HOME'] = tmpHome;
+  process.env['ASHLR_HOME'] = path.join(tmpHome, '.ashlr');
 
   vi.useFakeTimers();
   vi.setSystemTime(FIXED_MS);
@@ -301,6 +303,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   process.env['HOME'] = origHome;
+  if (origAshlrHome === undefined) delete process.env['ASHLR_HOME'];
+  else process.env['ASHLR_HOME'] = origAshlrHome;
   fs.rmSync(tmpHome, { recursive: true, force: true });
   vi.restoreAllMocks();
 });

@@ -36,6 +36,9 @@
 - UX audit: Mission Control has strong telemetry but weak control surfaces. Inbox detail was reading `riskLevel` while proposals expose `riskClass`; patched to show risk, verification, and taste.
 - Ecosystem audit: Hub overlaps with `@ashlr/config`, `@ashlr/cli-common`, `@ashlr/cost`, `@ashlr/mcp-kit`, `@ashlr/core-efficiency`, `ashlrcode`, `ashlr-plugin`, `phantom-secrets`, and `ashlr-pulse`. Next strategic lane is shared package adoption behind thin adapters.
 - Security/dependency state: GitHub Dependabot alerts are Vite advisories through Vitest 2.x. `npm audit` recommends forced Vitest 4 upgrade; defer to focused migration.
+- Shared queue hardening: long daemon dispatches now renew shared queue leases for the current machine, dry-runs release shared claims before returning, and atomic shared queue writes use unique temp files.
+- Concurrent dispatch hardening: assigned resource-control backends now flow into actual execution instead of being rerouted inside the task closure; `throttled:`, `resource-pause:`, and `budget-pause:` decisions skip cleanly with audit coverage.
+- CI isolation hardening: stale failures came from leaked `ASHLR_HOME`, fixed-date reflect seeds, learned-routing test contamination, and a stale secret-leak expectation around intentionally passed engine auth. The affected tests now isolate `ASHLR_HOME`, use relative dates, construct stable score fixtures, and allowlist engine auth passthrough only where intended.
 
 ## Verification Log
 - `ASHLR_TEST_CI_TIMEOUT_MS=120000 npm run test:ci -- test/m30.ci.test.ts test/m33.release-meta.test.ts test/m262.visibility.test.ts test/m297.retry-transient-abort.test.ts`: passed, 63 tests.
@@ -47,3 +50,6 @@
 - Follow-up singleton pass: `npm run typecheck`, `npm run build`, `npm run lint`, and `ASHLR_TEST_CI_TIMEOUT_MS=120000 npm run test:ci -- test/m24.state.test.ts test/m201.daemon-loop.test.ts` all passed.
 - Follow-up auto-merge pass: `npm test -- test/m197.observability.test.ts` and `npm test -- test/m48.automerge-pass.test.ts test/m126.manager-merge-gate.test.ts` passed.
 - Final combined pass: `npm run typecheck`, `npm run build`, `npm run lint`, and `ASHLR_TEST_CI_TIMEOUT_MS=180000 npm run test:ci -- test/m24.state.test.ts test/m201.daemon-loop.test.ts test/m197.observability.test.ts test/m48.automerge-pass.test.ts test/m126.manager-merge-gate.test.ts` passed, 134 tests.
+- Shared queue/concurrency pass: `npm test -- test/m111.work-queue.test.ts test/m113.coordinator-wire.test.ts test/m255.concurrent-dispatch.test.ts test/m201.daemon-loop.test.ts test/m116.worker-pool.test.ts` passed, 122 tests.
+- Targeted CI hardening pass: `npm run test:ci -- test/m119.quality-metrics.test.ts test/m120.manager.test.ts test/m240.learned-routing.test.ts test/m245.self-improve-integration.test.ts test/m26.cli.test.ts test/m45.foundry.test.ts test/m230.claude-auth-passthrough.test.ts` passed, 139 tests.
+- Current full verification: `npm run typecheck`, `npm run lint`, `npm run build`, and full `npm run test:ci` passed. Full CI result: 395 test files, 8,345 passed tests, 7 skipped.
