@@ -34,6 +34,12 @@ loop bounded, observable, restartable, and reviewable from Mission Control.
   resource-pause, and budget-pause decisions.
 - Hardened CI isolation around `ASHLR_HOME`, drifting fixed-date tests,
   learned-routing fixtures, and intentional Claude engine auth passthrough.
+- Added token-gated fleet pause/resume APIs and wired Mission Control, Fleet, and
+  Fleet Dashboard controls to the existing kill switch.
+- Cleared the Vite/esbuild dependency advisory chain with a conservative
+  Vitest 3.2.6 migration plus a Vite 6.4.3 override.
+- Added a plugin-registry import fallback for Vitest 3's module runner so
+  external temporary `.mjs` plugin entries continue to load in tests.
 - Captured multi-agent audit findings into this report and `notes.md`.
 
 ## Top Gaps
@@ -47,14 +53,15 @@ loop bounded, observable, restartable, and reviewable from Mission Control.
 3. **Concurrent backend assignment enforcement:** implemented for daemon
    execution. Next improvement is making backend assignment decisions visible in
    operator-facing timelines.
-4. **Mission Control command surface:** telemetry is strong; control workflows
-   need first-class start/stop/pause/resume, setup remediation, inbox lanes, and
-   activation checklist.
+4. **Mission Control command surface:** pause/resume is now live; remaining
+   control workflows need first-class start/stop, setup remediation, inbox lanes,
+   and activation checklist.
 5. **Shared package adoption:** Hub duplicates config, CLI helpers, cost math,
    MCP envelope logic, and efficiency primitives already present in local Ashlr
    packages.
-6. **Dependency alerts:** Vite advisories currently flow through Vitest 2.x; the
-   fix is a major Vitest upgrade and should be handled as a focused migration.
+6. **Dependency migration follow-through:** current `npm audit` is clean after a
+   conservative Vitest 3/Vite 6 migration. Future Vitest 4 cleanup should first
+   remove the remaining Vitest 3 deprecation warnings.
 
 ## Ranked Next Actions
 
@@ -69,4 +76,5 @@ loop bounded, observable, restartable, and reviewable from Mission Control.
    `@ashlr/cli-common`, `@ashlr/mcp-kit`.
 7. Add `ashlr ecosystem doctor`: package versions, dirty branches, installed CLIs,
    Phantom/Pulse/Plugin/Stack/Webfetch/`ac` visibility.
-8. Run a focused Vitest 4 / Vite 8 migration branch to clear Dependabot alerts.
+8. Remove Vitest 3 deprecation warnings, then consider a focused Vitest 4 /
+   Vite 8 migration branch when the ecosystem is ready.

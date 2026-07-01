@@ -21,6 +21,8 @@
  * Mutating routes (ONLY when ctx.allowDispatch === true + token header):
  *   POST /api/run              -> runGoal (budget-capped, local-first)
  *   POST /api/open             -> openInEditor/openInFinder for an enrolled repo path (M100)
+ *   POST /api/fleet/pause      -> engage the fleet kill switch
+ *   POST /api/fleet/resume     -> clear the fleet kill switch
  *
  * SECURITY:
  *  - Never throws (500 on internal error).
@@ -46,9 +48,8 @@ import { buildRollup } from '../observability/rollup.js';
 import { loadGenome } from '../genome/store.js';
 import { recall } from '../genome/recall.js';
 import { listProposals, loadProposal, setStatus } from '../inbox/store.js';
-// M24: read-only daemon state endpoint — no control surface; start/stop stays CLI-only.
+// M24: read-only daemon state endpoint.
 import { loadDaemonState } from '../daemon/state.js';
-// M49: read-only fleet snapshot endpoint — no control surface; pause/resume stays CLI-only.
 import { buildFleetStatus } from '../fleet/status.js';
 // M61: Mission Control aggregator.
 import { buildControlSnapshot } from './control.js';
@@ -56,7 +57,7 @@ import { buildControlSnapshot } from './control.js';
 import { buildFleetActivity } from './control.js';
 // M100: desktop-open actions — reuse CLI launchers (read-only import; no mutation).
 import { openInEditor, openInFinder } from '../../cli/open.js';
-import { listEnrolled } from '../sandbox/policy.js';
+import { listEnrolled, setKill } from '../sandbox/policy.js';
 import { listGoals } from '../goals/store.js';
 import { progressOf } from '../goals/advance.js';
 
@@ -716,11 +717,34 @@ export async function handleApi(
       return true;
     }
 
+    // ── POST /api/fleet/pause|resume ─────────────────────────────────────────
+    // Local operator controls: hidden unless the server was explicitly started
+    // with --allow-dispatch, then guarded by the same token + JSON gate as the
+    // other mutation routes.
+    if ((path === '/api/fleet/pause' || path === '/api/fleet/resume') && method === 'POST') {
+      if (!ctx.allowDispatch) {
+        sendJson(res, 404, { error: 'not found' });
+        return true;
+      }
+      if (!passesMutationGate(req, res, ctx.token)) {
+        return true;
+      }
+
+      const paused = path.endsWith('/pause');
+      setKill(paused);
+      const fleet = await buildFleetStatus(cfg);
+      sendJson(res, 200, {
+        ok: true,
+        action: paused ? 'pause' : 'resume',
+        fleet,
+      });
+      return true;
+    }
+
     // ── GET /api/fleet ───────────────────────────────────────────────────────
-    // M49: read-only fleet snapshot (daemon + per-backend dispatches/quota +
-    // queue + proposals + merges + paused state). NO control surface here —
-    // pause/resume is CLI-only (`ashlr fleet pause|resume`). buildFleetStatus
-    // never throws; same no-auth read class as /api/daemon and /api/pulse.
+    // M49: fleet snapshot (daemon + per-backend dispatches/quota + queue +
+    // proposals + merges + paused state). buildFleetStatus never throws; same
+    // no-auth read class as /api/daemon and /api/pulse.
     if (path === '/api/fleet' && method === 'GET') {
       const fleet = await buildFleetStatus(cfg);
       sendJson(res, 200, fleet);

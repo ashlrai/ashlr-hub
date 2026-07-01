@@ -186,6 +186,47 @@ async function apiPost(path, token) {
   return json;
 }
 
+async function toggleFleetPaused(targetPaused) {
+  const token = getToken();
+  if (!token) {
+    showToast('No session token — click the gear icon to set it.');
+    return;
+  }
+  try {
+    const action = targetPaused ? 'pause' : 'resume';
+    const result = await apiPost(`/api/fleet/${action}`, token);
+    if (result.fleet) {
+      state.fleet = result.fleet;
+      if (state.control) state.control.fleet = result.fleet;
+      if (state.fleetDashboard) state.fleetDashboard.fleet = result.fleet;
+    }
+    showToast(targetPaused ? 'Fleet paused.' : 'Fleet resumed.');
+    if (state.activeView === 'fleet') {
+      renderFleet();
+      await loadFleet();
+    } else if (state.activeView === 'control') {
+      renderControl();
+      await loadControl();
+    } else if (state.activeView === 'fleet-dashboard') {
+      renderFleetDashboard();
+      await loadFleetDashboard();
+    }
+  } catch (err) {
+    showToast(`Fleet control failed: ${err.message}`);
+  }
+}
+
+function fleetPauseResumeButton(isPaused, size = '') {
+  const targetPaused = !isPaused;
+  const btn = el('button', {
+    cls: `btn ${targetPaused ? 'btn-danger' : 'btn-secondary'}${size ? ` ${size}` : ''}`,
+    type: 'button',
+    title: targetPaused ? 'Engage kill switch' : 'Clear kill switch',
+  }, targetPaused ? 'Pause fleet' : 'Resume fleet');
+  btn.addEventListener('click', () => { void toggleFleetPaused(targetPaused); });
+  return btn;
+}
+
 // Show a brief toast notification. Uses #toast-region if present (see index.html).
 function showToast(msg) {
   try {
@@ -2111,12 +2152,15 @@ function renderFleet() {
   main.innerHTML = '';
 
   const section = el('section', { cls: 'view-section' });
+  const f = state.fleet;
   section.appendChild(el('div', { cls: 'view-header' },
-    el('h1', { cls: 'view-title' }, 'Fleet'),
-    el('span', { cls: 'view-subtitle' }, 'Control plane & observability')
+    el('div', {},
+      el('h1', { cls: 'view-title' }, 'Fleet'),
+      el('span', { cls: 'view-subtitle' }, 'Control plane & observability')
+    ),
+    f ? fleetPauseResumeButton(f.killed, 'btn-sm') : null
   ));
 
-  const f = state.fleet;
   if (!f) {
     section.appendChild(el('div', { cls: 'empty-state' },
       el('p', {}, 'Fleet status unavailable.'),
@@ -2130,7 +2174,8 @@ function renderFleet() {
   if (f.killed) {
     section.appendChild(el('div', { cls: 'fleet-banner fleet-banner--paused' },
       el('strong', {}, 'Fleet paused'),
-      el('span', {}, ' — the kill switch is engaged. Resume with `ashlr fleet resume`.')
+      el('span', {}, ' — the kill switch is engaged.'),
+      fleetPauseResumeButton(true, 'btn-sm')
     ));
   }
 
@@ -2410,12 +2455,11 @@ function renderControl() {
   const d = state.control;
   const section = el('section', { cls: 'view-section' });
 
-  section.appendChild(el('div', { cls: 'view-header' },
-    el('h1', { cls: 'view-title' }, 'Mission Control'),
-    el('span', { cls: 'view-subtitle' }, d ? `Updated ${fmtRelative(d.ts)}` : 'Live fleet overview')
-  ));
-
   if (!d) {
+    section.appendChild(el('div', { cls: 'view-header' },
+      el('h1', { cls: 'view-title' }, 'Mission Control'),
+      el('span', { cls: 'view-subtitle' }, 'Live fleet overview')
+    ));
     section.appendChild(el('div', { cls: 'empty-state' },
       el('p', {}, 'Control data unavailable.'),
       el('p', { cls: 'hint' }, 'Ensure the daemon is running and the server serves /api/control.')
@@ -2433,10 +2477,19 @@ function renderControl() {
   const isRunning = daemon.running ?? false;
   const isKilled  = d.fleet?.killed ?? false;
 
+  section.appendChild(el('div', { cls: 'view-header' },
+    el('div', {},
+      el('h1', { cls: 'view-title' }, 'Mission Control'),
+      el('span', { cls: 'view-subtitle' }, `Updated ${fmtRelative(d.ts)}`)
+    ),
+    fleetPauseResumeButton(isKilled, 'btn-sm')
+  ));
+
   if (isKilled) {
     section.appendChild(el('div', { cls: 'ctrl-banner ctrl-banner--paused' },
       el('strong', {}, 'Fleet paused'),
-      el('span', {}, ' — kill switch engaged. Resume with `ashlr fleet resume`.')
+      el('span', {}, ' — kill switch engaged.'),
+      fleetPauseResumeButton(true, 'btn-sm')
     ));
   }
 
@@ -3191,7 +3244,8 @@ function fdRenderStatusPanel(snap) {
   // Kill-switch banner
   if (isKilled) {
     body.appendChild(el('div', { cls: 'fd-kill-banner' },
-      '⚠ Kill switch engaged — fleet paused. Resume with `ashlr fleet resume`.'
+      'Kill switch engaged — fleet paused.',
+      fleetPauseResumeButton(true, 'btn-sm')
     ));
   }
 
@@ -3853,6 +3907,7 @@ function renderFleetDashboard() {
 
   const snap = state.fleetDashboard;
   const section = el('section', { cls: 'view-section' });
+  const isKilled = snap?.fleet?.killed ?? snap?.control?.fleet?.killed ?? false;
 
   // Header row with title, last-updated, and settings button
   const settingsBtn = el('button', { cls: 'fd-settings-btn', type: 'button', 'aria-label': 'Dashboard settings' });
@@ -3867,6 +3922,7 @@ function renderFleetDashboard() {
     ),
     el('div', { cls: 'fd-header-right' },
       el('span', { cls: 'fd-hidden-hint', id: 'fd-hidden-hint', style: 'display:none' }, ''),
+      snap ? fleetPauseResumeButton(isKilled, 'btn-sm') : null,
       settingsBtn
     )
   ));

@@ -19,7 +19,7 @@
  * ZERO RUNTIME DEPS: only Node builtins + local imports.
  */
 
-import { readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -341,7 +341,14 @@ export async function loadEnabledPlugins(cfg: AshlrConfig): Promise<LoadedPlugin
     // Gate 6: dynamic import
     let pluginModule: unknown;
     try {
-      pluginModule = await import(pathToFileURL(entryPath).href);
+      try {
+        pluginModule = await import(/* @vite-ignore */ pathToFileURL(entryPath).href);
+      } catch (err) {
+        if (!existsSync(entryPath)) throw err;
+        const source = readFileSync(entryPath, 'utf8');
+        const dataUrl = `data:text/javascript;base64,${Buffer.from(source, 'utf8').toString('base64')}`;
+        pluginModule = await import(/* @vite-ignore */ dataUrl);
+      }
     } catch (err) {
       audit({
         action: 'plugin:load',

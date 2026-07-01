@@ -14,6 +14,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Final verification and push singleton hardening
 - [x] Follow-up: Add shared queue lease renewal and dry-run claim release
 - [x] Follow-up: Verify and push next functionality hardening batch
+- [x] Follow-up: Add Mission Control pause/resume controls
+- [ ] Follow-up: Audit spend persistence fail-closed path
+- [x] Follow-up: Evaluate dependency security migration path
+- [x] Follow-up: Verify, commit, and push next usefulness batch
 
 ## Key Questions
 1. What prevents Ashlr Hub from acting as a reliable always-on engineering fleet today?
@@ -29,7 +33,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Bound the CI/publish test gate with a hermetic wrapper instead of letting leaked handles freeze autonomous delivery indefinitely.
 - Land small operational patches now: service restart delay and inbox review fields.
 - Land daemon singleton hardening now: exclusive lock, heartbeat, stale dead-owner takeover, token-checked release, and state temp-file collision reduction.
-- Defer major Vitest 2 -> 4 / Vite 8 dependency migration to a separate focused branch because it is a major test-runner upgrade.
+- Clear Vite/esbuild advisories with a conservative Vitest 3 + Vite 6 override migration instead of jumping straight to Vitest 4 / Vite 8.
+- Next local critical path is Mission Control pause/resume because it turns existing fleet state into an operator action without touching daemon execution semantics.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -41,8 +46,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - `resource-pause:` decisions need daemon-level skip handling beside `throttled:` and `budget-pause:`.
 - Codex/GPT-5 judge attestation should use one shared frontier-judge predicate in auto-merge and inline merge paths.
 - Mission Control's auto-merge feed should include `inbox:auto-merge` audit events, not only `merge.*` actions.
-- Current pass agents: shared queue renewal, concurrent dispatch assignment, Mission Control pause/resume, and Vite/Vitest dependency migration are running in parallel.
 - Current pass landed shared queue lease renewal, dry-run claim release, concurrent-dispatch backend assignment enforcement, `resource-pause:` skip handling, and CI isolation hardening for leaked `ASHLR_HOME`/date/auth assumptions.
+- Current usefulness batch landed Mission Control/Fleet/Fleet Dashboard pause-resume controls, token-gated pause/resume APIs, a conservative Vitest 3/Vite 6 security migration, and a plugin-registry import fallback for Vitest 3's module runner.
+- Current pass agents identified next lanes: spend persistence fail-closed dispatch guards, queue lease/reclaim metrics, backend assignment traces, and an `ashlr ecosystem doctor` inventory command.
 
 ## Status
-**Current batch complete** - Verified locally and ready to push. Highest-leverage next lanes are spend/state fail-closed writes, Mission Control pause/resume controls, and a focused Vitest/Vite dependency migration.
+**Current usefulness batch complete** - Full CI passed on Vitest 3. Next highest-leverage implementation lane is spend/state persistence fail-closed behavior, followed by queue health metrics and backend assignment traces in Mission Control.
