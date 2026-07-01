@@ -25,6 +25,7 @@ coverage/
 scratch/
 tmp/
 .tmp/
+.m262-wip/
 *.local
 dist-bin/
 desktop/src-tauri/target/

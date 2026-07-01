@@ -53,6 +53,7 @@ import {
 } from '../mcp-native-engineer.js';
 import { buildSandboxLauncher, confinementProfileFor } from '../sandbox/confine.js';
 import { audit as auditConfinement } from '../sandbox/audit.js';
+import { killSwitchOn } from '../sandbox/policy.js';
 import { newUsage, estCostUsd } from './budget.js';
 import { withToolEnv } from '../env-bridge.js';
 import { scrubSecrets } from '../knowledge/index.js';
@@ -98,6 +99,14 @@ export interface RunEngineSandboxedOptions {
   runId?: string;
 }
 
+type SpawnEngineResult = {
+  ok: boolean;
+  output: string;
+  usage?: { tokensIn: number; tokensOut: number };
+  error?: string;
+  terminationReason?: TerminationReason;
+};
+
 /**
  * Default hard wall-clock for an autonomous external run (10 min).
  * M233: lowered from 20 min — bounds the run while still allowing real agent
@@ -109,6 +118,29 @@ export interface RunEngineSandboxedOptions {
 // is STALL-based (no-progress detection, M234) + async dispatch so a long run never
 // blocks the loop. cfg.foundry.timeoutMs overrides. Partial work is captured (M233).
 const DEFAULT_TIMEOUT_MS = 2 * 60 * 60_000;
+
+const TRANSIENT_ABORT_RE =
+  /\b(aborted_streaming|error_during_execution|stream aborted|network error|econnreset|socket hang up|fetch failed|etimedout)\b/i;
+
+export function isTransientAbort(res: SpawnEngineResult, hasDiff: boolean): boolean {
+  if (res.ok) return false;
+  if (hasDiff) return false;
+  if (
+    res.terminationReason === 'idle-stall' ||
+    res.terminationReason === 'loop-stall' ||
+    res.terminationReason === 'no-diff-stall' ||
+    res.terminationReason === 'backstop-timeout'
+  ) {
+    return false;
+  }
+  return TRANSIENT_ABORT_RE.test(`${res.error ?? ''}\n${res.output ?? ''}`);
+}
+
+function dispatchMaxAttempts(cfg: AshlrConfig): number {
+  const raw = (cfg.foundry as { dispatchRetries?: number } | undefined)?.dispatchRetries;
+  const retries = Number.isFinite(raw) ? Math.max(0, Math.floor(raw as number)) : 2;
+  return 1 + Math.min(retries, 5);
+}
 
 // ---------------------------------------------------------------------------
 // M154: repo-map + localization context prefix (flag-gated)
@@ -475,6 +507,10 @@ export async function runEngineSandboxed(
     ...over,
   });
 
+  if (killSwitchOn() || (cfg.foundry as { killSwitch?: boolean } | undefined)?.killSwitch === true) {
+    return { state: mk({ status: 'failed', result: 'autonomy kill-switch is ON' }) };
+  }
+
   const wt = await import('../sandbox/worktree.js');
 
   // Acquire a worktree (reuse the caller's when provided).
@@ -484,7 +520,9 @@ export async function runEngineSandboxed(
     sb = opts.existingWorktree;
   } else {
     try {
-      sb = wt.createSandbox(opts.sourceRepo);
+      sb = wt.createSandbox(opts.sourceRepo, {
+        allowAnyRepo: process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1',
+      });
       createdHere = true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -592,13 +630,36 @@ export async function runEngineSandboxed(
     // conditions (idle / loop / no-diff). terminationReason surfaces here via
     // the return value and is recorded on the RunState.
     // M246: capture wall-clock duration for durationMs telemetry.
-    const _spawnStart = Date.now();
-    const res = await spawnEngine(cmd, cfg, {
-      env,
-      timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      launcher: launcher ?? undefined,
-    });
-    const _spawnDurationMs = Date.now() - _spawnStart;
+    // M297: retry only empty-diff transient aborts. Partial work, stall
+    // terminations, and non-transient failures fall through to the existing
+    // capture/proposal path.
+    const maxAttempts = dispatchMaxAttempts(cfg);
+    let res: SpawnEngineResult = { ok: false, output: '', error: 'engine did not run' };
+    let _spawnDurationMs = 0;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const _spawnStart = Date.now();
+      res = await spawnEngine(cmd, cfg, {
+        env,
+        timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        launcher: launcher ?? undefined,
+      });
+      _spawnDurationMs += Date.now() - _spawnStart;
+
+      if (res.ok) break;
+
+      let hasDiff = false;
+      try {
+        const diff = wt.sandboxDiff(sb);
+        hasDiff = diff.files > 0 && diff.patch.trim().length > 0;
+      } catch {
+        hasDiff = false;
+      }
+
+      if (attempt < maxAttempts && isTransientAbort(res, hasDiff)) {
+        continue;
+      }
+      break;
+    }
 
     const terminationReason: TerminationReason | undefined = res.terminationReason;
 
@@ -914,7 +975,9 @@ export async function runApiModelSandboxed(
     sb = opts.existingWorktree;
   } else {
     try {
-      sb = wt.createSandbox(opts.sourceRepo);
+      sb = wt.createSandbox(opts.sourceRepo, {
+        allowAnyRepo: process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1',
+      });
       createdHere = true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

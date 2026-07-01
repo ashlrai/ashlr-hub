@@ -167,7 +167,7 @@ export interface AshlrConfig {
      * (strong at coding) — as additional frontier-tier ammo. ENTIRELY OPT-IN:
      * the 'nim' engine is only active when ALL of the following hold:
      *   1. 'nim' is listed in cfg.foundry.allowedBackends, AND
-     *   2. this `nim` block (or the equivalent NVIDIA_NIM_* env vars) is present, AND
+     *   2. this `nim` block supplies promotion/model overrides when needed, AND
      *   3. the API key resolves (NVIDIA_NIM_API_KEY via phantom vault or env).
      * Absent ⇒ zero effect; the fleet behaves exactly as before.
      *
@@ -443,6 +443,17 @@ export interface AshlrConfig {
      * (always dispatch with task.engine as-is — byte-identical).
      */
     resourceAwareDispatch?: boolean;
+    /**
+     * M297: bounded retry count for transient external-agent aborts.
+     * DEFAULT 2 means one initial attempt plus two retries. Only empty-diff
+     * transient aborts are retried; stall/timeouts and partial work are not.
+     */
+    dispatchRetries?: number;
+    /**
+     * Test/operator kill flag for sandboxed dispatch. This is only more
+     * restrictive than the global ~/.ashlr/KILL switch and never bypasses it.
+     */
+    killSwitch?: boolean;
     /**
      * M300: Fallback engine preference order when the primary engine is
      * exhausted. Default: ['codex','kimi','nim','local-coder']. The conductor
@@ -1980,6 +1991,11 @@ export interface DashboardSnapshot {
    * populated by buildSnapshot via buildIntelligence(). READ-ONLY.
    */
   intelligence?: IntelligenceSummary;
+  /**
+   * M262: OPTIONAL real-time visibility god-view for dashboard and comms.
+   * READ-ONLY; every subsection degrades independently.
+   */
+  visibility?: import('./web/visibility.js').VisibilitySnapshot;
 }
 
 /**

@@ -51,10 +51,8 @@ describe('M30 CI workflow', () => {
     expect(ciYml).not.toMatch(/vercel|netlify|gh-pages|pages-deploy/i);
   });
 
-  it('package.json engines field declares the npm-compatible floor', () => {
-    // engines.node reflects the npm-publish compatibility floor (>=20).
-    // CI enforces a stricter runtime minimum (Node 22) via install.sh.
-    // These are intentionally different: npm does not run install.sh.
-    expect(pkg.engines?.node).toBe('>=20');
+  it('package.json engines field declares the supported Node floor', () => {
+    // Keep npm metadata aligned with install.sh, CI, and release workflows.
+    expect(pkg.engines?.node).toBe('>=22');
   });
 });

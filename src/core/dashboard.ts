@@ -788,6 +788,18 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
     intelligence = undefined;
   }
 
+  // ── M262 real-time visibility (OPTIONAL) ─────────────────────────────────
+  // READ-ONLY: resource posture, fleet activity, cost/savings, and director
+  // state. Lazily imported so older snapshot tests and static module graphs
+  // stay insulated; the builder itself degrades every subsection.
+  let visibility: DashboardSnapshot['visibility'] | undefined;
+  try {
+    const { buildVisibilitySnapshot } = await import('./web/visibility.js');
+    visibility = await buildVisibilitySnapshot(cfg);
+  } catch {
+    visibility = undefined;
+  }
+
   return {
     generatedAt,
     repos: {
@@ -834,5 +846,8 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
     // M242: OPTIONAL fleet intelligence — omitted when not populated so
     // pre-M242 tests (which never set it) stay valid.
     ...(intelligence !== undefined ? { intelligence } : {}),
+    // M262: OPTIONAL real-time visibility god-view — omitted only if the
+    // visibility builder itself could not be loaded.
+    ...(visibility !== undefined ? { visibility } : {}),
   };
 }

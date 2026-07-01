@@ -20,17 +20,17 @@
  *   Strategy: (allow default) keeps the process functional (dynamic linker,
  *   frameworks, sockets for IPC, etc.). We then layer targeted denials:
  *
- *     1. (deny file-read*) — blocks all file reads by default.
- *     2. (allow file-read* (subpath "<worktree>"))   — re-allow the worktree.
+ *     1. (deny file-read* (subpath "<$HOME>")) — blocks user-data reads.
+ *     2. (allow file-read* (subpath "<worktree>")) — re-allow the worktree.
  *     3. (allow file-read* (subpath "<$HOME/.claude>")) etc. — re-allow each
  *        vendor config home the agent needs for its own auth (read-only).
  *     4. (allow file-read* (subpath "<readAllowed[i]>")) — caller extras.
- *     5. (allow file-read* (subpath "/usr") (subpath "/lib") ...)
- *        — allow system paths needed for the OS and CLIs to function.
- *     6. (deny network-outbound*) unless networkEgress:true.
- *     7. (allow file-write* (subpath "<worktree>") (subpath "<TMPDIR>")
+ *     5. (deny network-outbound*) unless networkEgress:true.
+ *     6. (allow file-write* (subpath "<TMPDIR>")) before the HOME write deny.
+ *     7. (deny file-write* (subpath "<$HOME>")).
+ *     8. (allow file-write* (subpath "<worktree>")
  *           (subpath "<home>/.claude") ...)
- *        — write inside worktree + tmp + vendor config dirs (HOME_CONFIG_SUBDIRS
+ *        — write inside worktree + vendor config dirs (HOME_CONFIG_SUBDIRS
  *          + VENDOR_HOME_ENVS values) so confined agents can write session state.
  *
  *   What this DOES NOT protect:
@@ -205,15 +205,21 @@ export function buildMacosSbplProfile(
     for (const p of profile.readAllowed) if (p) reallowRead.push(p);
   }
 
-  // Subtrees the agent may WRITE: its worktree, vendor config homes (session
-  // state, logs, auth), and tmp. HOME_CONFIG_SUBDIRS are included so that when
+  // Subtrees the agent may WRITE outside the HOME deny. Keep these before the
+  // HOME write deny so a fake HOME under TMPDIR does not inherit broad temp
+  // write access after the deny.
+  const broadWrite: string[] = [tmp, '/tmp', '/private/tmp'];
+
+  // Subtrees the agent may WRITE after the HOME deny: its worktree and vendor
+  // config homes (session state, logs, auth). HOME_CONFIG_SUBDIRS are included
+  // so that when
   // CLAUDE_CONFIG_DIR/CODEX_HOME/etc. are NOT set in the env (the common case —
   // e.g. claude writes session state to ~/.claude by default), the confined
   // agent can still write its own config dirs. The VENDOR_HOME_ENVS values cover
   // the explicit-env-var override case. Other source trees and secrets dirs that
   // are NOT in HOME_CONFIG_SUBDIRS or VENDOR_HOME_ENVS remain WRITE-denied
   // (as they are READ-denied); the confinement residual is unchanged.
-  const reallowWrite: string[] = [ctx.worktree, tmp, '/tmp', '/private/tmp'];
+  const reallowWrite: string[] = [ctx.worktree];
   for (const key of VENDOR_HOME_ENVS) {
     const val = env[key];
     if (val) reallowWrite.push(val);
@@ -223,6 +229,7 @@ export function buildMacosSbplProfile(
   }
 
   const reallowReadClauses = reallowRead.map(sub).join('\n    ');
+  const broadWriteClauses = broadWrite.map(sub).join('\n    ');
   const reallowWriteClauses = reallowWrite.map(sub).join('\n    ');
   const networkClause = profile.networkEgress
     // SBPL has NO `(comment ...)` form — emitting it makes sandbox-exec abort
@@ -265,7 +272,12 @@ export function buildMacosSbplProfile(
       `    ${reallowReadClauses}`,
       ')',
       '',
-      '; Restrict writes under HOME to the worktree + vendor homes (+ tmp).',
+      '; Allow broad temp writes before the HOME-specific deny below.',
+      '(allow file-write*',
+      `    ${broadWriteClauses}`,
+      ')',
+      '',
+      '; Restrict writes under HOME to the worktree + vendor homes.',
       `(deny file-write* ${sub(home)})`,
       '(allow file-write*',
       `    ${reallowWriteClauses}`,

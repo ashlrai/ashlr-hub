@@ -55,7 +55,7 @@
     "./package.json": "./package.json"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "prepublishOnly": "npm run typecheck && npm run lint && npm run test:serial",
@@ -65,7 +65,7 @@
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
     "test:serial": "vitest run --no-file-parallelism",
-    "test:invariants": "vitest run test/h*.test.ts",
+    "test:invariants": "vitest run test/h*.test.ts --no-file-parallelism",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },

@@ -3064,7 +3064,7 @@ function renderFleetActivity() {
 const FD_SETTINGS_KEY = 'ashlr-fleet-dashboard-settings';
 
 const FD_DEFAULT_SETTINGS = {
-  panels: { status: true, running: true, usage: true, activity: true, production: true },
+  panels: { status: true, running: true, usage: true, activity: true, production: true, intelligence: true, visibility: true },
   refreshSecs: 15,
   theme: 'dark',
 };
@@ -3598,6 +3598,135 @@ function fdRenderIntelligencePanel(snap) {
   return body;
 }
 
+// ── M262: Visibility panel ─────────────────────────────────────────────────
+
+function fdAvailabilityState(availability) {
+  if (availability === 'open') return 'active';
+  if (availability === 'near' || availability === 'throttled') return 'near';
+  if (availability === 'exhausted') return 'exhausted';
+  return 'unknown';
+}
+
+function fdFmtFuture(iso) {
+  if (!iso) return null;
+  try {
+    const ms = new Date(iso).getTime() - Date.now();
+    if (!Number.isFinite(ms)) return null;
+    if (ms <= 0) return 'reset due';
+    const mins = Math.round(ms / 60_000);
+    if (mins < 60) return `${mins}m`;
+    const hrs = Math.round((mins / 60) * 10) / 10;
+    return `${hrs}h`;
+  } catch {
+    return null;
+  }
+}
+
+function fdRenderVisibilityPanel(snap) {
+  const vis = snap.visibility;
+  const body = el('div', { cls: 'fd-panel__body' });
+
+  if (!vis) {
+    body.appendChild(el('p', { cls: 'hint' }, 'Visibility data unavailable.'));
+    return body;
+  }
+
+  const activity = vis.fleetActivity ?? {};
+  const savings = vis.costSavings ?? {};
+
+  const scorecard = el('div', { cls: 'fd-prod-scorecard' });
+  const activityBlock = el('div', { cls: 'fd-prod-block' });
+  activityBlock.appendChild(el('div', { cls: 'fd-prod-block__title' }, 'Activity (24h)'));
+  const activityCounts = el('div', { cls: 'fd-prod-counts' });
+  const addActivityCount = (n, lbl, cls) => {
+    activityCounts.appendChild(el('div', { cls: 'fd-prod-count' },
+      el('span', { cls: `fd-prod-count__num ${cls}` }, String(n ?? 0)),
+      el('span', { cls: 'fd-prod-count__lbl' }, lbl)
+    ));
+  };
+  addActivityCount(activity.totalDispatches, 'dispatches', 'fd-prod-count__num--muted');
+  addActivityCount(activity.mergedToday, 'merged', 'fd-prod-count__num--ok');
+  addActivityCount(activity.proposalsPending, 'pending', activity.proposalsPending > 0 ? 'fd-prod-count__num--warn' : '');
+  addActivityCount(activity.queueBacklog, 'queued', activity.queueBacklog > 0 ? 'fd-prod-count__num--warn' : '');
+  activityBlock.appendChild(activityCounts);
+  scorecard.appendChild(activityBlock);
+
+  const savingsBlock = el('div', { cls: 'fd-prod-block' });
+  savingsBlock.appendChild(el('div', { cls: 'fd-prod-block__title' }, 'Cost & Savings'));
+  const savingsCounts = el('div', { cls: 'fd-prod-counts' });
+  const addSavingsCount = (value, lbl, cls) => {
+    savingsCounts.appendChild(el('div', { cls: 'fd-prod-count' },
+      el('span', { cls: `fd-prod-count__num ${cls}` }, value),
+      el('span', { cls: 'fd-prod-count__lbl' }, lbl)
+    ));
+  };
+  addSavingsCount(`$${fmt(savings.todaySpendUsd ?? 0, 2)}`, 'today', 'fd-prod-count__num--warn');
+  addSavingsCount(`$${fmt(savings.routingSavedUsd ?? 0, 2)}`, 'routed', 'fd-prod-count__num--ok');
+  addSavingsCount(`${Math.round((savings.cacheHitRate ?? 0) * 100)}%`, 'cache', 'fd-prod-count__num--muted');
+  savingsBlock.appendChild(savingsCounts);
+  scorecard.appendChild(savingsBlock);
+  body.appendChild(scorecard);
+
+  const resourceGrid = Array.isArray(vis.resourceGrid) ? vis.resourceGrid : [];
+  body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Resources'));
+  if (resourceGrid.length === 0) {
+    body.appendChild(el('p', { cls: 'hint' }, 'No resource data yet.'));
+  } else {
+    for (const backend of resourceGrid.slice(0, 6)) {
+      const stateKey = fdAvailabilityState(backend.availability);
+      const pct = typeof backend.usedPct === 'number'
+        ? Math.min(100, Math.max(0, backend.usedPct))
+        : null;
+      const row = el('div', { cls: 'fd-usage-engine' });
+      row.appendChild(el('div', { cls: 'fd-usage-engine-header' },
+        el('span', { cls: 'fd-usage-engine-name' }, backend.backend ?? 'unknown'),
+        el('span', { cls: `fd-usage-engine-state fd-usage-engine-state--${stateKey}` }, backend.availability ?? 'unknown')
+      ));
+      const track = el('div', { cls: 'fd-usage-bar-track' });
+      track.appendChild(el('div', {
+        cls: `fd-usage-bar-fill fd-usage-bar-fill--${stateKey}`,
+        style: `width:${pct == null ? 2 : pct.toFixed(1)}%`,
+        role: 'progressbar',
+        'aria-valuenow': pct == null ? '0' : String(Math.round(pct)),
+        'aria-valuemin': '0',
+        'aria-valuemax': '100',
+        'aria-label': `${backend.backend ?? 'backend'} availability ${backend.availability ?? 'unknown'}`,
+      }));
+      row.appendChild(track);
+
+      const meta = el('div', { cls: 'fd-usage-engine-meta' });
+      const addMeta = (label, value) => {
+        if (value == null || value === '') return;
+        meta.appendChild(el('span', { cls: 'fd-usage-meta-item' },
+          el('strong', {}, String(value)), ` ${label}`
+        ));
+      };
+      addMeta('used', pct == null ? '?%' : `${Math.round(pct)}%`);
+      addMeta('latency', backend.p50LatencyMs != null ? `${backend.p50LatencyMs}ms` : null);
+      addMeta('cost/M', backend.costPerMTokenOut > 0 ? `$${backend.costPerMTokenOut}` : '$0');
+      addMeta('resets', fdFmtFuture(backend.resetsAt));
+      row.appendChild(meta);
+      body.appendChild(row);
+    }
+  }
+
+  const director = vis.director ?? {};
+  body.appendChild(el('div', { cls: 'fd-prod-section-title', style: 'margin-top:12px' }, 'Director'));
+  const directorGrid = el('div', { cls: 'fd-meta-grid' });
+  const mkMeta = (key, val, cls) => el('div', { cls: 'fd-meta-item' },
+    el('div', { cls: 'fd-meta-key' }, key),
+    el('div', { cls: cls ? `fd-meta-val ${cls}` : 'fd-meta-val' }, val ?? '—')
+  );
+  const escalationCls = (director.escalationCount ?? 0) > 0 ? 'fd-meta-val--warn' : 'fd-meta-val--ok';
+  directorGrid.appendChild(mkMeta('Posture', director.resourcePosture ?? 'unknown'));
+  directorGrid.appendChild(mkMeta('Escalations', String(director.escalationCount ?? 0), escalationCls));
+  directorGrid.appendChild(mkMeta('Focus', director.topGoalObjective ?? '—'));
+  directorGrid.appendChild(mkMeta('Last run', director.lastRunAt ? fmtRelative(director.lastRunAt) : '—'));
+  body.appendChild(directorGrid);
+
+  return body;
+}
+
 // ── Settings modal ──────────────────────────────────────────────────────────
 
 function fdOpenSettings() {
@@ -3617,7 +3746,7 @@ function fdOpenSettings() {
   // Panel visibility
   const panelSection = el('div', { cls: 'fd-modal__section' });
   panelSection.appendChild(el('div', { cls: 'fd-modal__section-label' }, 'Panels'));
-  const PANEL_LABELS = { status: 'Fleet Status', running: "What's Running", usage: 'Frontier Usage/Limits', activity: 'Recent Activity', production: 'Production', intelligence: 'Fleet Intelligence' };
+  const PANEL_LABELS = { status: 'Fleet Status', running: "What's Running", usage: 'Frontier Usage/Limits', activity: 'Recent Activity', production: 'Production', intelligence: 'Fleet Intelligence', visibility: 'Visibility' };
   for (const [key, label] of Object.entries(PANEL_LABELS)) {
     const cb = el('input', { type: 'checkbox' });
     cb.checked = draftSettings.panels[key] !== false;
@@ -3745,6 +3874,7 @@ function renderFleetDashboard() {
     { key: 'activity',     title: 'Recent Activity',       render: () => fdRenderActivityPanel(snap) },
     { key: 'production',   title: 'Production',            render: () => fdRenderProductionPanel(snap) },
     { key: 'intelligence', title: 'Fleet Intelligence',    render: () => fdRenderIntelligencePanel(snap) },
+    { key: 'visibility',   title: 'Visibility',            render: () => fdRenderVisibilityPanel(snap) },
   ];
 
   const hiddenCount = panelDefs.filter(p => settings.panels[p.key] === false).length;

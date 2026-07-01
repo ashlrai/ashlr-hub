@@ -7,7 +7,17 @@ import tseslint from 'typescript-eslint';
 export default tseslint.config(
   // Global ignores must be in their own config object with no other keys.
   {
-    ignores: ['dist/**', 'node_modules/**', 'src/raycast/**'],
+    ignores: [
+      '.ashlr/**',
+      '.m262-wip/**',
+      'desktop/src-tauri/gen/**',
+      'desktop/src-tauri/target/**',
+      'dist/**',
+      'dist-bin/**',
+      'node_modules/**',
+      'src/raycast/**',
+      'undefined/**',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

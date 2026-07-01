@@ -27,7 +27,7 @@ import type { DecisionEntry } from '../types.js';
 
 /** Absolute path to the decisions directory: ~/.ashlr/decisions. */
 export function decisionsDir(): string {
-  return join(homedir(), '.ashlr', 'decisions');
+  return join(process.env.ASHLR_HOME ?? join(homedir(), '.ashlr'), 'decisions');
 }
 
 /** Current date as YYYY-MM-DD (UTC) for the daily file name. */

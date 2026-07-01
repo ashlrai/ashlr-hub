@@ -7,17 +7,16 @@
  *
  * Tests:
  *   1. Pure: profile string contains .claude (and worktree) in a write-allow clause.
- *   2. macOS-gated real proof: sandbox-exec allows writing inside ~/.claude but
- *      denies writing directly under HOME (outside the vendor dirs).
+ *   2. macOS-gated hermetic proof: sandbox-exec allows writing inside ~/.claude
+ *      but denies writing directly under HOME, even when HOME lives under TMPDIR.
  *   3. Flag-off parity: mode:off → buildSandboxLauncher returns null (quick assert).
  */
 
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { realpathSync } from 'node:fs';
 
 import {
   buildMacosSbplProfile,
@@ -32,12 +31,12 @@ function mkTmp(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
-function resolveReal(p: string): string {
-  try {
-    return existsSync(p) ? realpathSync(p) : p;
-  } catch {
-    return p;
-  }
+function homeWriteAllowSection(profile: string): string {
+  const denyWriteIdx = profile.indexOf('(deny file-write*');
+  expect(denyWriteIdx).toBeGreaterThan(-1);
+  const writeAllowIdx = profile.indexOf('(allow file-write*', denyWriteIdx);
+  expect(writeAllowIdx).toBeGreaterThan(denyWriteIdx);
+  return profile.slice(writeAllowIdx);
 }
 
 // ---------------------------------------------------------------------------
@@ -58,11 +57,7 @@ describe('M52 write-allow — pure profile string assertions', () => {
     expect(profile).toContain('(deny file-write*');
 
     // ... followed by an (allow file-write* ...) that includes .claude.
-    // Locate the allow file-write* block.
-    const writeAllowIdx = profile.indexOf('(allow file-write*');
-    expect(writeAllowIdx).toBeGreaterThan(-1);
-
-    const writeAllowSection = profile.slice(writeAllowIdx);
+    const writeAllowSection = homeWriteAllowSection(profile);
 
     // .claude must appear as a subpath in the write-allow section.
     expect(writeAllowSection).toContain(`(subpath "${home}/.claude")`);
@@ -78,8 +73,7 @@ describe('M52 write-allow — pure profile string assertions', () => {
       { worktree: '/tmp/wt', home, env: { TMPDIR: '/tmp' } },
     );
 
-    const writeAllowIdx = profile.indexOf('(allow file-write*');
-    const writeAllowSection = profile.slice(writeAllowIdx);
+    const writeAllowSection = homeWriteAllowSection(profile);
 
     // A sampling of HOME_CONFIG_SUBDIRS should appear.
     expect(writeAllowSection).toContain(`(subpath "${home}/.config")`);
@@ -99,9 +93,25 @@ describe('M52 write-allow — pure profile string assertions', () => {
       },
     );
 
-    const writeAllowIdx = profile.indexOf('(allow file-write*');
-    const writeAllowSection = profile.slice(writeAllowIdx);
+    const writeAllowSection = homeWriteAllowSection(profile);
     expect(writeAllowSection).toContain(`(subpath "${customClaudeDir}")`);
+  });
+
+  it('broad TMPDIR write allow is emitted before the HOME write deny', () => {
+    const home = '/Users/testuser';
+    const profile = buildMacosSbplProfile(
+      { mode: 'os', networkEgress: false },
+      { worktree: '/tmp/wt', home, env: { TMPDIR: '/tmp' } },
+    );
+
+    const tempWriteIdx = profile.indexOf('; Allow broad temp writes');
+    const denyWriteIdx = profile.indexOf('(deny file-write*');
+    expect(tempWriteIdx).toBeGreaterThan(-1);
+    expect(denyWriteIdx).toBeGreaterThan(tempWriteIdx);
+
+    const writeAllowSection = homeWriteAllowSection(profile);
+    expect(writeAllowSection).not.toContain('(subpath "/tmp")');
+    expect(writeAllowSection).not.toContain('(subpath "/private/tmp")');
   });
 
   it('read-allow section still contains .claude (regression: must not have regressed read)', () => {
@@ -126,41 +136,37 @@ describe('M52 write-allow — pure profile string assertions', () => {
 const darwinOnly = process.platform === 'darwin' ? describe : describe.skip;
 
 darwinOnly('M52 macOS write-allow proof (sandbox-exec) — DARWIN ONLY', () => {
-  it('write inside ~/.claude SUCCEEDS; write directly under HOME FAILS', () => {
-    // Strategy: use the real HOME as the confinement `home` so that
-    // (deny file-write* (subpath "$HOME")) fires at the correct resolved path.
+  it('write inside ~/.claude SUCCEEDS; write directly under fake HOME in TMPDIR FAILS', () => {
+    // Strategy: use a disposable HOME under TMPDIR. This proves broad temp
+    // writes do not override the later HOME deny.
     //
-    // Allowed-write probe: inside ~/.claude — covered by HOME_CONFIG_SUBDIRS.
-    // ~/.claude is created if absent, and the probe file is removed in finally.
+    // Allowed-write probe: inside fake ~/.claude — covered by HOME_CONFIG_SUBDIRS.
     // We do NOT pass CLAUDE_CONFIG_DIR so the test exercises the HOME_CONFIG_SUBDIRS
     // code path specifically (the case when env vars are unset).
     //
-    // Denied-write probe: a uniquely-named file directly under HOME (not inside
-    // any vendor config subdir), identical to m52.confine.test.ts's read-denial
-    // pattern — must exit non-zero because HOME is denied and this path is not
-    // re-allowed.
-
-    const realHome = resolveReal(process.env.HOME!);
+    // Denied-write probe: a uniquely-named file directly under fake HOME (not
+    // inside any vendor config subdir) — must exit non-zero because HOME is
+    // denied and this path is not re-allowed.
+    const fakeHome = mkTmp('ashlr-m52-wa-home-');
     const worktree = mkTmp('ashlr-m52-wa-wt-');
 
-    // Create ~/.claude if it doesn't exist so the probe path is valid.
-    const dotClaude = join(realHome, '.claude');
+    const dotClaude = join(fakeHome, '.claude');
     mkdirSync(dotClaude, { recursive: true });
 
     const tag = Date.now().toString(36);
     // Allowed: inside ~/.claude (covered by HOME_CONFIG_SUBDIRS write-allow).
     const allowedProbe = join(dotClaude, `.ashlr-m52-write-probe-${tag}`);
     // Denied: directly under HOME — not in any vendor config subdir.
-    const deniedProbe = join(realHome, `.ashlr-m52-denied-probe-${tag}.txt`);
+    const deniedProbe = join(fakeHome, `.ashlr-m52-denied-probe-${tag}.txt`);
 
     try {
       const profile = buildMacosSbplProfile(
         { mode: 'os', networkEgress: false },
         {
           worktree,
-          home: realHome,
+          home: fakeHome,
           // No CLAUDE_CONFIG_DIR — forces the HOME_CONFIG_SUBDIRS path.
-          env: { TMPDIR: tmpdir(), HOME: realHome },
+          env: { TMPDIR: tmpdir(), HOME: fakeHome },
         },
       );
 
@@ -182,6 +188,7 @@ darwinOnly('M52 macOS write-allow proof (sandbox-exec) — DARWIN ONLY', () => {
     } finally {
       try { rmSync(allowedProbe, { force: true }); } catch { /* idempotent */ }
       try { rmSync(deniedProbe, { force: true }); } catch { /* idempotent */ }
+      try { rmSync(fakeHome, { recursive: true, force: true }); } catch { /* idempotent */ }
       try { rmSync(worktree, { recursive: true, force: true }); } catch { /* idempotent */ }
     }
   });

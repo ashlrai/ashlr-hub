@@ -1,6 +1,6 @@
 # Quickstart — zero to running fleet in 5 steps
 
-Requires **Node.js 20+**. Works on macOS, Linux, and Windows.
+Requires **Node.js 22+**. Works on macOS, Linux, and Windows.
 
 ---
 
@@ -80,7 +80,7 @@ ashlr enroll remove ~/path/to/my-project
 | Codex (OpenAI) | `export OPENAI_API_KEY=sk-...` |
 | Local (Ollama) | Start Ollama (`ollama serve`) — no key needed |
 | Local (LM Studio) | Start LM Studio server on default port — no key needed |
-| NIMs | Set `NVIDIA_API_KEY` |
+| NIMs | `export NVIDIA_NIM_API_KEY=...` (or use Phantom: `phantom add NVIDIA_NIM_API_KEY`) |
 
 Check engine readiness at any time:
 

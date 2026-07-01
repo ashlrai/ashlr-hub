@@ -619,11 +619,12 @@ async function spawnEngineInner(
       const exitedClean = code === 0 && signal === null;
 
       if (!exitedClean) {
+        const rawOutput = stdoutLines.join('\n').trim();
         const errMsg =
           signal
             ? `killed by signal ${signal}`
             : (stderrLines.join('\n').trim() || `exit ${code ?? 'unknown'}`);
-        settle({ ok: false, output: '', error: errMsg, terminationReason });
+        settle({ ok: false, output: rawOutput, error: errMsg, terminationReason });
         return;
       }
 
