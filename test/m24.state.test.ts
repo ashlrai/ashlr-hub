@@ -47,11 +47,17 @@ afterEach(() => {
 import {
   acquireDaemonLock,
   daemonLockPath,
+  daemonSpendGuardPath,
   daemonStatePath,
+  armDaemonSpendGuard,
+  clearDaemonSpendGuard,
   heartbeatDaemonLock,
   loadDaemonState,
+  loadDaemonStateStrict,
+  readDaemonSpendGuard,
   releaseDaemonLock,
   saveDaemonState,
+  saveDaemonStateResult,
   resetDayIfNeeded,
 } from '../src/core/daemon/state.js';
 
@@ -203,6 +209,45 @@ describe('M24 loadDaemonState — never throws; zeroed state on missing/corrupt'
   });
 });
 
+describe('M24 loadDaemonStateStrict — fail-closed ledger reads', () => {
+  it('treats a missing daemon.json as a fresh valid state', () => {
+    const result = loadDaemonStateStrict();
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.fresh).toBe(true);
+      expect(result.state.todaySpentUsd).toBe(0);
+    }
+  });
+
+  it('reports malformed JSON while the legacy loader remains forgiving', () => {
+    const p = daemonStatePath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, 'NOT VALID JSON {{{', 'utf8');
+
+    const strict = loadDaemonStateStrict();
+    expect(strict.ok).toBe(false);
+    if (!strict.ok) expect(strict.reason).toBe('malformed');
+
+    const forgiving = loadDaemonState();
+    expect(forgiving.todaySpentUsd).toBe(0);
+    expect(forgiving.ticks).toEqual([]);
+  });
+
+  it('reports missing critical ledger fields as malformed while the legacy loader coerces them', () => {
+    const p = daemonStatePath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify({ running: false, ticks: [] }), 'utf8');
+
+    const strict = loadDaemonStateStrict();
+    expect(strict.ok).toBe(false);
+    if (!strict.ok) expect(strict.reason).toBe('malformed');
+
+    const forgiving = loadDaemonState();
+    expect(forgiving.todaySpentUsd).toBe(0);
+    expect(forgiving.itemsProcessed).toBe(0);
+  });
+});
+
 // ===========================================================================
 // saveDaemonState — atomic write + round-trip
 // ===========================================================================
@@ -289,6 +334,58 @@ describe('M24 saveDaemonState — atomic write + round-trip', () => {
   it('round-trips lastPulseExportAt watermark', () => {
     saveDaemonState({ ...zeroedState(), lastPulseExportAt: '2026-06-30T12:00:00.000Z' });
     expect(loadDaemonState().lastPulseExportAt).toBe('2026-06-30T12:00:00.000Z');
+  });
+
+  it('saveDaemonStateResult reports failures while saveDaemonState stays no-throw', () => {
+    fs.writeFileSync(path.join(tmpHome, '.ashlr'), 'not a directory', 'utf8');
+
+    const result = saveDaemonStateResult(zeroedState());
+
+    expect(result.ok).toBe(false);
+    expect(() => saveDaemonState(zeroedState())).not.toThrow();
+  });
+});
+
+describe('M24 daemon spend guard — durable dispatch accounting sentinel', () => {
+  it('reports no guard when the guard file is absent', () => {
+    const result = readDaemonSpendGuard();
+    expect(result.exists).toBe(false);
+    expect(result.path).toBe(daemonSpendGuardPath());
+  });
+
+  it('arms, reads, and clears a spend guard with token protection', () => {
+    const armed = armDaemonSpendGuard(['item-a', 'item-b']);
+    expect(armed.ok).toBe(true);
+    if (!armed.ok) return;
+
+    const read = readDaemonSpendGuard();
+    expect(read.exists).toBe(true);
+    if (read.exists) {
+      expect(read.malformed).toBe(false);
+      expect(read.guard?.itemIds).toEqual(['item-a', 'item-b']);
+    }
+
+    const wrongClear = clearDaemonSpendGuard('wrong-token');
+    expect(wrongClear.ok).toBe(false);
+    expect(readDaemonSpendGuard().exists).toBe(true);
+
+    const cleared = clearDaemonSpendGuard(armed.guard.token);
+    expect(cleared.ok).toBe(true);
+    expect(readDaemonSpendGuard().exists).toBe(false);
+  });
+
+  it('treats a malformed spend guard as present', () => {
+    const p = daemonSpendGuardPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, 'not json', 'utf8');
+
+    const read = readDaemonSpendGuard();
+
+    expect(read.exists).toBe(true);
+    if (read.exists) {
+      expect(read.malformed).toBe(true);
+      expect(read.guard).toBeNull();
+    }
   });
 });
 

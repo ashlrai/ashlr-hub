@@ -40,34 +40,39 @@ loop bounded, observable, restartable, and reviewable from Mission Control.
   Vitest 3.2.6 migration plus a Vite 6.4.3 override.
 - Added a plugin-registry import fallback for Vitest 3's module runner so
   external temporary `.mjs` plugin entries continue to load in tests.
+- Hardened spend persistence fail-closed behavior with strict daemon state reads,
+  result-returning state saves, a durable spend-commit guard, and daemon loop
+  refusal when the spend ledger is malformed, unwritable, or has unresolved
+  accounting.
 - Captured multi-agent audit findings into this report and `notes.md`.
 
 ## Top Gaps
 
-1. **Spend persistence fail-closed:** `saveDaemonState()` swallows write failures,
-   so stale spend can permit overspend. State writes should report failure and
-   dispatch should pause until repaired.
-2. **Queue lease renewal follow-through:** lease renewal is now implemented.
+1. **Queue lease renewal follow-through:** lease renewal is now implemented.
    Next improvement is surfacing renewal health and reclaim metrics in Mission
    Control.
-3. **Concurrent backend assignment enforcement:** implemented for daemon
+2. **Concurrent backend assignment enforcement:** implemented for daemon
    execution. Next improvement is making backend assignment decisions visible in
    operator-facing timelines.
-4. **Mission Control command surface:** pause/resume is now live; remaining
+3. **Mission Control command surface:** pause/resume is now live; remaining
    control workflows need first-class start/stop, setup remediation, inbox lanes,
    and activation checklist.
-5. **Shared package adoption:** Hub duplicates config, CLI helpers, cost math,
+4. **Shared package adoption:** Hub duplicates config, CLI helpers, cost math,
    MCP envelope logic, and efficiency primitives already present in local Ashlr
    packages.
-6. **Dependency migration follow-through:** current `npm audit` is clean after a
+5. **Dependency migration follow-through:** current `npm audit` is clean after a
    conservative Vitest 3/Vite 6 migration. Future Vitest 4 cleanup should first
    remove the remaining Vitest 3 deprecation warnings.
+6. **State repair UX:** fail-closed spend guards are now protective, but operators
+   need a clear doctor/remediation path to inspect and intentionally clear or
+   repair blocked ledger state.
 
 ## Ranked Next Actions
 
-1. Make spend/state persistence fail closed after dispatch-cost commits.
-2. Surface shared queue lease renewal/reclaim metrics in Mission Control.
-3. Add first-class backend assignment/reason traces to Mission Control timelines.
+1. Surface shared queue lease renewal/reclaim metrics in Mission Control.
+2. Add first-class backend assignment/reason traces to Mission Control timelines.
+3. Add state repair/doctor UX for malformed daemon ledgers and unresolved spend
+   guards.
 4. Split tests into fast hermetic and slow integration lanes, then use `test:ci`
    as the bounded default for CI/publish.
 5. Rebuild Inbox into a ranked review cockpit: ship now, needs review, risky,

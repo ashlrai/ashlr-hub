@@ -15,7 +15,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Add shared queue lease renewal and dry-run claim release
 - [x] Follow-up: Verify and push next functionality hardening batch
 - [x] Follow-up: Add Mission Control pause/resume controls
-- [ ] Follow-up: Audit spend persistence fail-closed path
+- [x] Follow-up: Implement spend persistence fail-closed path
+- [x] Follow-up: Explore queue health metrics for Mission Control
+- [x] Follow-up: Explore backend assignment traces for Mission Control
+- [x] Follow-up: Explore ecosystem doctor implementation scope
+- [x] Follow-up: Verify, commit, and push spend persistence batch
 - [x] Follow-up: Evaluate dependency security migration path
 - [x] Follow-up: Verify, commit, and push next usefulness batch
 
@@ -34,7 +38,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Land small operational patches now: service restart delay and inbox review fields.
 - Land daemon singleton hardening now: exclusive lock, heartbeat, stale dead-owner takeover, token-checked release, and state temp-file collision reduction.
 - Clear Vite/esbuild advisories with a conservative Vitest 3 + Vite 6 override migration instead of jumping straight to Vitest 4 / Vite 8.
-- Next local critical path is Mission Control pause/resume because it turns existing fleet state into an operator action without touching daemon execution semantics.
+- Next local critical path is spend/state persistence fail-closed behavior because a 24/7 autonomous fleet must refuse dispatch when its spend ledger is malformed or cannot be durably updated.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -49,6 +53,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current pass landed shared queue lease renewal, dry-run claim release, concurrent-dispatch backend assignment enforcement, `resource-pause:` skip handling, and CI isolation hardening for leaked `ASHLR_HOME`/date/auth assumptions.
 - Current usefulness batch landed Mission Control/Fleet/Fleet Dashboard pause-resume controls, token-gated pause/resume APIs, a conservative Vitest 3/Vite 6 security migration, and a plugin-registry import fallback for Vitest 3's module runner.
 - Current pass agents identified next lanes: spend persistence fail-closed dispatch guards, queue lease/reclaim metrics, backend assignment traces, and an `ashlr ecosystem doctor` inventory command.
+- Current pass landed strict daemon state reads, result-returning daemon state saves, a durable spend-commit guard, and daemon/run-loop fail-closed behavior for malformed/unwritable spend state.
+- Current pass agents refined next lanes: additive `FleetStatus.queue.shared` health, persisted daemon backend assignment traces, and a read-only `ashlr ecosystem doctor --json --root --deep`.
 
 ## Status
-**Current usefulness batch complete** - Full CI passed on Vitest 3. Next highest-leverage implementation lane is spend/state persistence fail-closed behavior, followed by queue health metrics and backend assignment traces in Mission Control.
+**Current spend persistence batch complete** - Spend/state persistence now fails closed before dispatch and after spend commits. Typecheck, lint, build, audit, invariants, targeted daemon suites, and full CI passed.

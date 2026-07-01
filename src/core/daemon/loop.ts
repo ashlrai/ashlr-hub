@@ -39,11 +39,16 @@ import { audit } from '../sandbox/audit.js';
 import { buildBacklog } from '../portfolio/backlog.js';
 import {
   acquireDaemonLock,
+  armDaemonSpendGuard,
+  clearDaemonSpendGuard,
   heartbeatDaemonLock,
   loadDaemonState,
+  loadDaemonStateStrict,
+  readDaemonSpendGuard,
   releaseDaemonLock,
   resetDayIfNeeded,
   saveDaemonState,
+  saveDaemonStateResult,
 } from './state.js';
 import { nullSink } from '../run/streaming.js';
 import { runSwarm } from '../swarm/runner.js';
@@ -308,16 +313,34 @@ export async function tick(
   // `daemon status`, the TUI, and the web dashboard. Never throws.
   const recordTick = (t: DaemonTick): DaemonTick => {
     try {
-      let s = loadDaemonState();
+      const loaded = loadDaemonStateStrict();
+      if (!loaded.ok) return t;
+      let s = loaded.state;
       s = resetDayIfNeeded(s);
       s.lastTickAt = t.ts;
       s.ticks = [...s.ticks, t];
-      saveDaemonState(s);
+      saveDaemonStateResult(s);
     } catch (err) {
       // persistence best-effort — never let observability crash a tick
       console.warn('[ashlr] daemon:recordTick persistence failed:', (err as Error)?.message ?? err);
     }
     return t;
+  };
+  const persistenceRefusal = (summary: string, result: 'refused' | 'error' = 'refused'): DaemonTick => {
+    audit({
+      action: 'daemon:persistence-failed',
+      repo: null,
+      sandboxId: null,
+      summary,
+      result,
+    });
+    return recordTick({
+      ts: now,
+      itemsConsidered: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'state-persistence-failed',
+    });
   };
 
   // -------------------------------------------------------------------------
@@ -343,8 +366,24 @@ export async function tick(
   // -------------------------------------------------------------------------
   // 2. Load state + daily reset + budget exhaustion check.
   // -------------------------------------------------------------------------
-  let state = loadDaemonState();
+  const loadedState = loadDaemonStateStrict();
+  if (!loadedState.ok) {
+    return persistenceRefusal(`tick refused: daemon state ${loadedState.reason} (${loadedState.error})`);
+  }
+  const existingSpendGuard = readDaemonSpendGuard();
+  if (existingSpendGuard.exists) {
+    return persistenceRefusal(
+      existingSpendGuard.guard
+        ? `tick refused: unresolved spend guard from ${existingSpendGuard.guard.armedAt} (${existingSpendGuard.guard.itemIds.length} item(s))`
+        : `tick refused: malformed or unreadable spend guard at ${existingSpendGuard.path}`,
+    );
+  }
+  let state = loadedState.state;
   state = resetDayIfNeeded(state);
+  const initialSave = saveDaemonStateResult(state);
+  if (!initialSave.ok) {
+    return persistenceRefusal(`tick refused: failed to persist daemon state before dispatch (${initialSave.error})`, 'error');
+  }
 
   const remainingBudget = dcfg.dailyBudgetUsd - state.todaySpentUsd;
   if (remainingBudget <= 0) {
@@ -588,6 +627,15 @@ export async function tick(
   }
 
   const workedSetIds = workedSet.map((i) => i.id);
+  const spendGuard = armDaemonSpendGuard(workedSetIds);
+  if (!spendGuard.ok) {
+    try {
+      if (workedSetIds.length > 0) coordinator.release(workedSetIds, machineId);
+    } catch (err) {
+      console.warn('[ashlr] daemon:tick coordinator release after spend-guard failure failed:', (err as Error)?.message ?? err);
+    }
+    return persistenceRefusal(`tick refused: failed to arm spend guard (${spendGuard.error})`);
+  }
   let leaseRenewInterval: ReturnType<typeof setInterval> | null = null;
   const renewClaimLeases = (): void => {
     if (workedSetIds.length === 0) return;
@@ -1261,7 +1309,27 @@ export async function tick(
   // -------------------------------------------------------------------------
   // 7. Update + persist state with this tick's accounting.
   // -------------------------------------------------------------------------
-  state = loadDaemonState();               // reload in case of concurrent writes
+  const finalLoadedState = loadDaemonStateStrict(); // reload in case of concurrent writes
+  if (!finalLoadedState.ok) {
+    const failedTick: DaemonTick = {
+      ts: now,
+      itemsConsidered: selected.length,
+      proposalsCreated,
+      spentUsd: tickSpent,
+      reason: 'state-persistence-failed',
+      ...(Object.keys(backendDispatch).length > 0 ? { backends: backendDispatch } : {}),
+      ...(merged > 0 ? { merged } : {}),
+    };
+    audit({
+      action: 'daemon:persistence-failed',
+      repo: null,
+      sandboxId: null,
+      summary: `tick completed but spend accounting refused: daemon state ${finalLoadedState.reason} (${finalLoadedState.error}); spend guard remains armed`,
+      result: 'error',
+    });
+    return failedTick;
+  }
+  state = finalLoadedState.state;
   state = resetDayIfNeeded(state);         // re-check day rollover after async work
   state.todaySpentUsd += tickSpent;
   state.itemsProcessed += dispatchedCount;
@@ -1277,7 +1345,28 @@ export async function tick(
     ...(merged > 0 ? { merged } : {}),
   };
   state.ticks = [...state.ticks, tickRecord];
-  saveDaemonState(state);
+  const saveResult = saveDaemonStateResult(state);
+  if (!saveResult.ok) {
+    audit({
+      action: 'daemon:persistence-failed',
+      repo: null,
+      sandboxId: null,
+      summary: `tick completed but spend accounting save failed (${saveResult.error}); spend guard remains armed`,
+      result: 'error',
+    });
+    return { ...tickRecord, reason: 'state-persistence-failed' };
+  }
+  const clearGuardResult = clearDaemonSpendGuard(spendGuard.guard.token);
+  if (!clearGuardResult.ok) {
+    audit({
+      action: 'daemon:persistence-failed',
+      repo: null,
+      sandboxId: null,
+      summary: `tick completed but spend guard clear failed (${clearGuardResult.error}); future ticks will refuse`,
+      result: 'error',
+    });
+    return { ...tickRecord, reason: 'state-persistence-failed' };
+  }
 
   // M89/M91: best-effort fleet→pulse telemetry export. Runs OUTSIDE the proposal
   // guarantees — only reads state + POSTs telemetry; never mutates repos.
@@ -1431,7 +1520,19 @@ export async function runDaemon(
   }
   const daemonLock = lockAttempt.lock;
 
-  let state = loadDaemonState();
+  const startLoadedState = loadDaemonStateStrict();
+  if (!startLoadedState.ok) {
+    releaseDaemonLock(daemonLock);
+    audit({
+      action: 'daemon:persistence-failed',
+      repo: null,
+      sandboxId: null,
+      summary: `daemon start refused: daemon state ${startLoadedState.reason} (${startLoadedState.error})`,
+      result: 'refused',
+    });
+    return loadDaemonState();
+  }
+  let state = startLoadedState.state;
   if (state.running === true && typeof state.pid === 'number' && state.pid !== process.pid) {
     releaseDaemonLock(daemonLock);
     audit({
@@ -1462,7 +1563,20 @@ export async function runDaemon(
   state.running = true;
   state.pid = process.pid;
   state.startedAt = new Date().toISOString();
-  saveDaemonState(state);
+  const startSave = saveDaemonStateResult(state);
+  if (!startSave.ok) {
+    releaseDaemonLock(daemonLock);
+    if (prevInDaemon === undefined) delete process.env['ASHLR_IN_DAEMON'];
+    else process.env['ASHLR_IN_DAEMON'] = prevInDaemon;
+    audit({
+      action: 'daemon:persistence-failed',
+      repo: null,
+      sandboxId: null,
+      summary: `daemon start refused: failed to persist running state (${startSave.error})`,
+      result: 'refused',
+    });
+    return loadDaemonState();
+  }
   heartbeatDaemonLock(daemonLock);
 
   audit({
@@ -1561,7 +1675,18 @@ export async function runDaemon(
           let liveCfg = cfg;
           try { liveCfg = { ...cfg, daemon: loadConfig().daemon ?? cfg.daemon }; } catch { liveCfg = cfg; }
 
-          const current = loadDaemonState();
+          const currentLoaded = loadDaemonStateStrict();
+          if (!currentLoaded.ok) {
+            audit({
+              action: 'daemon:persistence-failed',
+              repo: null,
+              sandboxId: null,
+              summary: `daemon loop stopped: daemon state ${currentLoaded.reason} (${currentLoaded.error})`,
+              result: 'refused',
+            });
+            break;
+          }
+          const current = currentLoaded.state;
           const recheckCfg = resolveCfg(liveCfg);
           if (current.todaySpentUsd >= recheckCfg.dailyBudgetUsd) break;
 
@@ -1570,7 +1695,18 @@ export async function runDaemon(
           if (opts.dryRun) break;
 
           if (killSwitchOn()) break;
-          const afterTick = loadDaemonState();
+          const afterTickLoaded = loadDaemonStateStrict();
+          if (!afterTickLoaded.ok) {
+            audit({
+              action: 'daemon:persistence-failed',
+              repo: null,
+              sandboxId: null,
+              summary: `daemon loop stopped after tick: daemon state ${afterTickLoaded.reason} (${afterTickLoaded.error})`,
+              result: 'refused',
+            });
+            break;
+          }
+          const afterTick = afterTickLoaded.state;
           const recheck2 = resolveCfg(liveCfg);
           if (afterTick.todaySpentUsd >= recheck2.dailyBudgetUsd) break;
 
@@ -1601,7 +1737,18 @@ export async function runDaemon(
           try { liveCfg = { ...cfg, daemon: loadConfig().daemon ?? cfg.daemon }; } catch { liveCfg = cfg; }
 
           // Budget check — halt when daily cap exhausted.
-          const current = loadDaemonState();
+          const currentLoaded = loadDaemonStateStrict();
+          if (!currentLoaded.ok) {
+            audit({
+              action: 'daemon:persistence-failed',
+              repo: null,
+              sandboxId: null,
+              summary: `daemon loop stopped: daemon state ${currentLoaded.reason} (${currentLoaded.error})`,
+              result: 'refused',
+            });
+            break;
+          }
+          const current = currentLoaded.state;
           const recheckCfg = resolveCfg(liveCfg);
           if (current.todaySpentUsd >= recheckCfg.dailyBudgetUsd) break;
 
@@ -1615,7 +1762,18 @@ export async function runDaemon(
 
           // Re-check kill switch + budget after the tick before sleeping.
           if (killSwitchOn()) break;
-          const afterTick = loadDaemonState();
+          const afterTickLoaded = loadDaemonStateStrict();
+          if (!afterTickLoaded.ok) {
+            audit({
+              action: 'daemon:persistence-failed',
+              repo: null,
+              sandboxId: null,
+              summary: `daemon loop stopped after tick: daemon state ${afterTickLoaded.reason} (${afterTickLoaded.error})`,
+              result: 'refused',
+            });
+            break;
+          }
+          const afterTick = afterTickLoaded.state;
           if (afterTick.todaySpentUsd >= recheckCfg.dailyBudgetUsd) break;
 
           // Sleep between ticks using a bounded interval.
@@ -1635,11 +1793,29 @@ export async function runDaemon(
   // Clear running state on exit.
   // -------------------------------------------------------------------------
   const stillOwnsLock = heartbeatDaemonLock(daemonLock);
-  state = loadDaemonState();
-  if (stillOwnsLock && state.pid === process.pid) {
+  const stopLoadedState = loadDaemonStateStrict();
+  state = stopLoadedState.ok ? stopLoadedState.state : loadDaemonState();
+  if (stillOwnsLock && stopLoadedState.ok && state.pid === process.pid) {
     state.running = false;
     state.pid = null;
-    saveDaemonState(state);
+    const stopSave = saveDaemonStateResult(state);
+    if (!stopSave.ok) {
+      audit({
+        action: 'daemon:persistence-failed',
+        repo: null,
+        sandboxId: null,
+        summary: `daemon stop could not persist stopped state (${stopSave.error})`,
+        result: 'error',
+      });
+    }
+  } else if (stillOwnsLock && !stopLoadedState.ok) {
+    audit({
+      action: 'daemon:persistence-failed',
+      repo: null,
+      sandboxId: null,
+      summary: `daemon stop skipped state update: daemon state ${stopLoadedState.reason} (${stopLoadedState.error})`,
+      result: 'error',
+    });
   }
 
   audit({

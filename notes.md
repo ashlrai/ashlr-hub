@@ -43,6 +43,11 @@
 - Dependency security patch: upgraded from Vitest 2 to Vitest 3.2.6 and pinned Vite to 6.4.3 through `overrides`, clearing the Vite/esbuild advisory chain while avoiding the larger Vitest 4/Vite 8 migration.
 - Plugin compatibility patch: Vitest 3's module runner can fail to import temporary external `.mjs` plugin entries from macOS `/var` paths, so the plugin registry now falls back to importing a base64 data URL for an existing entry file.
 - Agent next lanes: spend persistence should fail closed on malformed or unwritable state; shared queue lease/reclaim health should be visible in Mission Control; daemon dispatches should expose backend assignment/reason traces; and the ecosystem needs a read-only `ashlr ecosystem doctor` inventory command.
+- Spend persistence fail-closed patch: daemon state now has strict read/result-save APIs beside the forgiving dashboard APIs. `tick()` refuses before backlog/dispatch when `daemon.json` is malformed, when a spend guard is present, or when the normalized state cannot be saved before spend-capable work. Live ticks arm `daemon.spend-guard.json` before dispatch and only clear it after final spend accounting is strictly saved.
+- Daemon loop hardening: `runDaemon()` now refuses start on strict state load/save failure, continuous/batch loop budget checks stop on strict load failure, and stop-state persistence audits failures instead of silently masking them.
+- Queue health agent plan: add an additive `FleetStatus.queue.shared` object with active/expired/reclaimable leases, claims by machine, oldest expired age, next lease expiry, worked/cooldown/usage counts, and lock health; render in `/api/fleet`, `/api/control`, CLI fleet status, Mission Control, and Fleet Dashboard.
+- Backend trace agent plan: gateway decisions already include reason/trace, but concurrent dispatch and daemon ticks collapse them to aggregates. Add `DaemonTick.dispatches` with item id/title/repo, assigned backend, reason, trace, and attempted/dispatched status; surface in Mission Control logs and Fleet Activity.
+- Ecosystem doctor agent plan: add read-only `ashlr ecosystem doctor --json --root --deep` as an inventory command with synthetic sibling-repo tests, using existing `DoctorReport`/tool registry/dependency parser patterns without reusing write-capable doctor checks.
 
 ## Verification Log
 - `ASHLR_TEST_CI_TIMEOUT_MS=120000 npm run test:ci -- test/m30.ci.test.ts test/m33.release-meta.test.ts test/m262.visibility.test.ts test/m297.retry-transient-abort.test.ts`: passed, 63 tests.
@@ -61,3 +66,8 @@
 - Plugin migration guard: `npm test -- test/m33.plugin-registry.test.ts test/m33.plugin-wiring.test.ts test/m33.plugin-wrappers.test.ts test/m33.plugin-manifest.test.ts` passed, 84 tests.
 - Dependency verification: `npm audit` passed with 0 vulnerabilities; `npm ls vitest vite vite-node esbuild --all` resolved to `vitest@3.2.6`, `vite-node@3.2.4`, `vite@6.4.3`, and patched `esbuild`.
 - Current full verification: `npm run typecheck`, `npm run lint`, `npm run build`, `npm run test:invariants`, and full `npm run test:ci` passed. Full CI result: 396 test files, 8,348 passed tests, 7 skipped.
+- Spend fail-closed focused pass: `npm test -- test/m24.state.test.ts test/h3.budget-cap.test.ts` passed, 60 tests.
+- Spend fail-closed daemon pass: `npm test -- test/m24.loop.test.ts test/m201.daemon-loop.test.ts test/h1.daemon-gates.test.ts test/h2.kill-race-abort.test.ts` passed, 111 tests.
+- Spend fail-closed final gate: `npm run typecheck`, `npm run build`, `npm audit`, `git diff --check`, and `npm run lint` passed. Lint remains at the existing 118-warning baseline with 0 errors.
+- Spend fail-closed invariants: `npm run test:invariants` passed, 41 files and 411 tests.
+- Spend fail-closed full CI: `npm run test:ci` passed, 396 files and 8,357 passed tests with 7 skipped.

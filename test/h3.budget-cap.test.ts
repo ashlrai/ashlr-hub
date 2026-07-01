@@ -23,6 +23,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 // runSwarm is MOCKED before the daemon loop imports it (M24 convention).
 const mockRunSwarm = vi.fn();
@@ -42,7 +44,8 @@ vi.mock('../src/core/portfolio/backlog.js', () => ({
 
 // Lazy imports after the mock is registered.
 import { tick } from '../src/core/daemon/loop.js';
-import { loadDaemonState, saveDaemonState } from '../src/core/daemon/state.js';
+import { armDaemonSpendGuard, daemonStatePath, loadDaemonState, saveDaemonState } from '../src/core/daemon/state.js';
+import { readAudit } from '../src/core/sandbox/audit.js';
 import { makeFixture, makeCfg, todoSeedFiles } from './helpers/h1-fixture.js';
 import { seedMidTickSpend, today } from './helpers/h2-faults.js';
 import { makeSpendingSwarmStub } from './helpers/h3-stress.js';
@@ -273,6 +276,43 @@ describe('H3 BUDGET-CAP-HOLDS — tick never overspends the daily cap under load
     expect(result.reason).toBe('budget-exhausted');
     expect(mockRunSwarm).not.toHaveBeenCalled();
     expect(loadDaemonState().todaySpentUsd).toBe(over);
+  });
+
+  it('fails closed before dispatch when daemon state is malformed', async () => {
+    const cfg = cfgCaps({ dailyBudgetUsd: 1, perTickItems: 3, parallel: 1 });
+    mockRunSwarm.mockImplementation(
+      makeSpendingSwarmStub({ costUsd: 0.05, repo: repo.dir, propose: true }),
+    );
+    const p = daemonStatePath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, 'NOT VALID JSON {{{', 'utf8');
+
+    const result = await tick(cfg, { dryRun: false });
+
+    expect(result.reason).toBe('state-persistence-failed');
+    expect(result.itemsConsidered).toBe(0);
+    expect(result.spentUsd).toBe(0);
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(readAudit().some((e) => e.action === 'daemon:persistence-failed' && e.result === 'refused')).toBe(true);
+  });
+
+  it('fails closed before dispatch when an unresolved spend guard exists', async () => {
+    const cfg = cfgCaps({ dailyBudgetUsd: 1, perTickItems: 3, parallel: 1 });
+    mockRunSwarm.mockImplementation(
+      makeSpendingSwarmStub({ costUsd: 0.05, repo: repo.dir, propose: true }),
+    );
+    const armed = armDaemonSpendGuard(['previous-item']);
+    expect(armed.ok).toBe(true);
+
+    const result = await tick(cfg, { dryRun: false });
+
+    expect(result.reason).toBe('state-persistence-failed');
+    expect(result.itemsConsidered).toBe(0);
+    expect(result.spentUsd).toBe(0);
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(readAudit().some((e) => e.action === 'daemon:persistence-failed' && e.summary.includes('unresolved spend guard'))).toBe(true);
   });
 
   it('shrinks selectCount as remaining budget shrinks (never authorizes a full perTickItems slice against tiny headroom)', async () => {

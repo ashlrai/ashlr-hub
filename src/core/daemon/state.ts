@@ -48,6 +48,11 @@ export function daemonStatePath(): string {
   return join(ashlrDir(), 'daemon.json');
 }
 
+/** Absolute path to the daemon spend-commit guard file. */
+export function daemonSpendGuardPath(): string {
+  return join(ashlrDir(), 'daemon.spend-guard.json');
+}
+
 /** Absolute path to the daemon singleton lock file. */
 export function daemonLockPath(): string {
   return join(ashlrDir(), 'daemon.lock');
@@ -71,6 +76,34 @@ export type AcquireDaemonLockResult =
   | { acquired: true; lock: DaemonLock; owner: DaemonLockOwner; replacedStale: boolean }
   | { acquired: false; path: string; owner: DaemonLockOwner | null; reason: 'busy' | 'io-error' };
 
+export type LoadDaemonStateStrictResult =
+  | { ok: true; state: DaemonState; fresh: boolean }
+  | { ok: false; path: string; reason: 'malformed' | 'unreadable'; error: string };
+
+export type SaveDaemonStateResult =
+  | { ok: true; path: string }
+  | { ok: false; path: string; error: string };
+
+export interface DaemonSpendGuard {
+  token: string;
+  pid: number;
+  hostname: string;
+  armedAt: string;
+  itemIds: string[];
+}
+
+export type ReadDaemonSpendGuardResult =
+  | { exists: false; path: string }
+  | { exists: true; path: string; guard: DaemonSpendGuard | null; malformed: boolean; error?: string };
+
+export type ArmDaemonSpendGuardResult =
+  | { ok: true; path: string; guard: DaemonSpendGuard }
+  | { ok: false; path: string; error: string };
+
+export type ClearDaemonSpendGuardResult =
+  | { ok: true; path: string; cleared: boolean }
+  | { ok: false; path: string; error: string };
+
 // ---------------------------------------------------------------------------
 // Zeroed default state
 // ---------------------------------------------------------------------------
@@ -88,6 +121,62 @@ function freshState(): DaemonState {
   };
 }
 
+function parseDaemonState(raw: string, opts?: { strict?: boolean }): DaemonState | null {
+  const parsed = JSON.parse(raw) as unknown;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (opts?.strict === true) {
+    const pid = obj['pid'];
+    if (
+      typeof obj['running'] !== 'boolean' ||
+      !(typeof pid === 'number' || pid === null) ||
+      !(typeof obj['startedAt'] === 'string' || obj['startedAt'] === null) ||
+      !(typeof obj['lastTickAt'] === 'string' || obj['lastTickAt'] === null) ||
+      !(typeof obj['todayDate'] === 'string' || obj['todayDate'] === null) ||
+      typeof obj['todaySpentUsd'] !== 'number' ||
+      !Number.isFinite(obj['todaySpentUsd']) ||
+      typeof obj['itemsProcessed'] !== 'number' ||
+      !Number.isFinite(obj['itemsProcessed']) ||
+      !Array.isArray(obj['ticks'])
+    ) {
+      return null;
+    }
+  }
+  const state: DaemonState = {
+    running: typeof obj['running'] === 'boolean' ? obj['running'] : false,
+    pid:
+      typeof obj['pid'] === 'number'
+      ? obj['pid']
+      : obj['pid'] === null
+        ? null
+        : null,
+    startedAt:
+      typeof obj['startedAt'] === 'string' ? obj['startedAt'] : null,
+    lastTickAt:
+      typeof obj['lastTickAt'] === 'string' ? obj['lastTickAt'] : null,
+    todayDate:
+      typeof obj['todayDate'] === 'string' ? obj['todayDate'] : null,
+    todaySpentUsd:
+      typeof obj['todaySpentUsd'] === 'number' ? obj['todaySpentUsd'] : 0,
+    itemsProcessed:
+      typeof obj['itemsProcessed'] === 'number' ? obj['itemsProcessed'] : 0,
+    ticks: Array.isArray(obj['ticks'])
+      ? (obj['ticks'] as unknown[]).filter(
+          (t): t is DaemonState['ticks'][number] =>
+            typeof t === 'object' &&
+            t !== null &&
+            !Array.isArray(t) &&
+            typeof (t as Record<string, unknown>)['ts'] === 'string',
+        )
+      : [],
+    lastPulseExportAt:
+      typeof obj['lastPulseExportAt'] === 'string' ? obj['lastPulseExportAt'] : undefined,
+  };
+  return reconcileDaemonState(state);
+}
+
 // ---------------------------------------------------------------------------
 // Load
 // ---------------------------------------------------------------------------
@@ -101,50 +190,34 @@ export function loadDaemonState(): DaemonState {
   if (!existsSync(p)) return freshState();
   try {
     const raw = readFileSync(p, 'utf8');
-    const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      return freshState();
-    }
-    const obj = parsed as Record<string, unknown>;
-    // Validate and coerce each field with a safe fallback.
-    const state: DaemonState = {
-      running: typeof obj['running'] === 'boolean' ? obj['running'] : false,
-      pid:
-        typeof obj['pid'] === 'number'
-          ? obj['pid']
-          : obj['pid'] === null
-            ? null
-            : null,
-      startedAt:
-        typeof obj['startedAt'] === 'string' ? obj['startedAt'] : null,
-      lastTickAt:
-        typeof obj['lastTickAt'] === 'string' ? obj['lastTickAt'] : null,
-      todayDate:
-        typeof obj['todayDate'] === 'string' ? obj['todayDate'] : null,
-      todaySpentUsd:
-        typeof obj['todaySpentUsd'] === 'number' ? obj['todaySpentUsd'] : 0,
-      itemsProcessed:
-        typeof obj['itemsProcessed'] === 'number' ? obj['itemsProcessed'] : 0,
-      ticks: Array.isArray(obj['ticks'])
-        ? (obj['ticks'] as unknown[]).filter(
-            (t): t is DaemonState['ticks'][number] =>
-              typeof t === 'object' &&
-              t !== null &&
-              !Array.isArray(t) &&
-              typeof (t as Record<string, unknown>)['ts'] === 'string',
-          )
-        : [],
-      lastPulseExportAt:
-        typeof obj['lastPulseExportAt'] === 'string' ? obj['lastPulseExportAt'] : undefined,
-    };
-    // Self-heal at the load chokepoint: a daemon killed -9 leaves
-    // running:true/pid:<dead> behind; reconcile (read-only liveness) flips it to
-    // a truthful stopped state so status/start/tick never see a phantom-live
-    // daemon. Observability-only — touches NO spend accounting, NO guard.
-    return reconcileDaemonState(state);
+    return parseDaemonState(raw) ?? freshState();
   } catch {
     // Corrupt JSON or any other read error — return zeroed state.
     return freshState();
+  }
+}
+
+/**
+ * Strictly read daemonStatePath(). Missing state is a valid fresh state; malformed
+ * or unreadable state is returned as an error so spend-sensitive callers can
+ * fail closed instead of treating a broken ledger as zero spend.
+ */
+export function loadDaemonStateStrict(): LoadDaemonStateStrictResult {
+  const p = daemonStatePath();
+  if (!existsSync(p)) return { ok: true, state: freshState(), fresh: true };
+  try {
+    const raw = readFileSync(p, 'utf8');
+    const state = parseDaemonState(raw, { strict: true });
+    if (!state) {
+      return { ok: false, path: p, reason: 'malformed', error: 'daemon state is not a JSON object' };
+    }
+    return { ok: true, state, fresh: false };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const reason = msg.includes('JSON') || msg.includes('Unexpected') || msg.includes('position')
+      ? 'malformed'
+      : 'unreadable';
+    return { ok: false, path: p, reason, error: msg };
   }
 }
 
@@ -157,7 +230,13 @@ export function loadDaemonState(): DaemonState {
  * (POSIX-atomic). Creates ~/.ashlr if needed. Never throws.
  */
 export function saveDaemonState(s: DaemonState): void {
+  saveDaemonStateResult(s);
+}
+
+/** Like saveDaemonState(), but reports persistence failures to fail-closed callers. */
+export function saveDaemonStateResult(s: DaemonState): SaveDaemonStateResult {
   let tmp: string | null = null;
+  const dest = daemonStatePath();
   try {
     const dir = ashlrDir();
     if (!existsSync(dir)) {
@@ -168,11 +247,11 @@ export function saveDaemonState(s: DaemonState): void {
       ...s,
       ticks: s.ticks.slice(-MAX_TICKS),
     };
-    const dest = daemonStatePath();
     tmp = `${dest}.${process.pid}.${randomUUID()}.tmp`;
     writeFileSync(tmp, JSON.stringify(bounded, null, 2) + '\n', 'utf8');
     renameSync(tmp, dest);
-  } catch {
+    return { ok: true, path: dest };
+  } catch (err) {
     // Persistence failure must not crash the daemon — swallow silently.
     if (tmp) {
       try {
@@ -181,6 +260,84 @@ export function saveDaemonState(s: DaemonState): void {
         // Best-effort cleanup only.
       }
     }
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, path: dest, error: msg };
+  }
+}
+
+function parseSpendGuard(raw: string): DaemonSpendGuard | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+    const obj = parsed as Record<string, unknown>;
+    if (
+      typeof obj['token'] !== 'string' ||
+      typeof obj['pid'] !== 'number' ||
+      typeof obj['hostname'] !== 'string' ||
+      typeof obj['armedAt'] !== 'string' ||
+      !Array.isArray(obj['itemIds']) ||
+      !obj['itemIds'].every((id) => typeof id === 'string')
+    ) {
+      return null;
+    }
+    return {
+      token: obj['token'],
+      pid: obj['pid'],
+      hostname: obj['hostname'],
+      armedAt: obj['armedAt'],
+      itemIds: obj['itemIds'] as string[],
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function readDaemonSpendGuard(): ReadDaemonSpendGuardResult {
+  const p = daemonSpendGuardPath();
+  if (!existsSync(p)) return { exists: false, path: p };
+  try {
+    const raw = readFileSync(p, 'utf8');
+    const guard = parseSpendGuard(raw);
+    return { exists: true, path: p, guard, malformed: guard === null };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { exists: true, path: p, guard: null, malformed: true, error: msg };
+  }
+}
+
+export function armDaemonSpendGuard(itemIds: string[]): ArmDaemonSpendGuardResult {
+  const p = daemonSpendGuardPath();
+  try {
+    const dir = ashlrDir();
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const guard: DaemonSpendGuard = {
+      token: randomUUID(),
+      pid: process.pid,
+      hostname: osHostname(),
+      armedAt: new Date().toISOString(),
+      itemIds,
+    };
+    writeFileSync(p, JSON.stringify(guard, null, 2) + '\n', { encoding: 'utf8', flag: 'wx' });
+    return { ok: true, path: p, guard };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, path: p, error: msg };
+  }
+}
+
+export function clearDaemonSpendGuard(token: string): ClearDaemonSpendGuardResult {
+  const p = daemonSpendGuardPath();
+  const current = readDaemonSpendGuard();
+  if (!current.exists) return { ok: true, path: p, cleared: false };
+  if (!current.guard || current.guard.token !== token) {
+    return { ok: false, path: p, error: 'spend guard token mismatch or malformed guard' };
+  }
+  try {
+    unlinkSync(p);
+    return { ok: true, path: p, cleared: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, path: p, error: msg };
   }
 }
 
