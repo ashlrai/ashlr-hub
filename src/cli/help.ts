@@ -304,6 +304,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'daemon stop',                  desc: 'Halt the daemon: set kill switch + clear running state.', topic: 'autonomy' },
   { cmd: 'daemon status',                desc: "Daemon roll-up: running?, today's spend vs cap, pending proposals.", topic: 'autonomy' },
   { cmd: 'fleet status [--json]',        desc: 'Read-only fleet snapshot: daemon, per-backend dispatches+quota, queue, proposals, merges, paused state.', topic: 'autonomy' },
+  { cmd: 'fleet direction [--json]',     desc: 'Read-only autonomous direction report: mode, resource posture, guard blocks, and next actions.', topic: 'autonomy' },
   { cmd: 'fleet pause',                  desc: 'Pause the fleet: engage the global kill switch (idempotent).', topic: 'autonomy' },
   { cmd: 'fleet resume',                 desc: 'Resume the fleet: release the global kill switch (idempotent).', topic: 'autonomy' },
   { cmd: 'goals add <objective>',        desc: 'Register a high-level OBJECTIVE (goal); decomposed into ordered milestones (local, no LLM by default).', topic: 'autonomy' },
@@ -386,6 +387,7 @@ const TOPIC_EXAMPLES: Partial<Record<HelpTopic, string[]>> = {
   autonomy: [
     'ashlr enroll add ~/code/my-repo && ashlr backlog refresh',
     'ashlr daemon start --once --dry-run                  # plan only',
+    'ashlr fleet direction --json                         # resource-aware mode recommendation',
     'ashlr inbox && ashlr inbox approve <id>',
   ],
 };

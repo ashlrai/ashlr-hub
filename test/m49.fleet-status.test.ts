@@ -152,6 +152,25 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       allowed: 0,
       denied: 0,
     });
+    expect(s.autonomyDirection).toMatchObject({
+      confidence: expect.any(String),
+      resources: {
+        posture: expect.any(String),
+        constrained: expect.any(Number),
+        depleted: expect.any(Number),
+      },
+      guardHealth: {
+        blocked: expect.any(Boolean),
+        blocks: expect.any(Number),
+      },
+      budgets: {
+        daemonBudgetLevel: expect.any(String),
+        daemonSpentTodayUsd: 0,
+      },
+    });
+    expect(['pause', 'local-only', 'verify-only', 'backlog-build', 'auto-merge-ready']).toContain(
+      s.autonomyDirection?.mode,
+    );
   });
 
   it('reflects allowedBackends — defaults to [builtin] when no foundry', async () => {
@@ -317,6 +336,16 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         byTier: { T4: 2, T0: 1 },
         recent: [],
       },
+      autonomyDirection: {
+        generatedAt: '2026-06-17T00:02:00.000Z',
+        mode: 'local-only',
+        confidence: 'medium',
+        reasons: ['cloud/frontier resources are constrained while local capacity is available'],
+        recommendedActions: ['prefer local or builtin engines for new work'],
+        resources: { posture: 'constrained', constrained: 1, depleted: 0 },
+        guardHealth: { blocked: false, blocks: 0 },
+        budgets: { daemonBudgetLevel: 'near', daemonSpentTodayUsd: 1.2345 },
+      },
       killed: true,
     });
 
@@ -339,6 +368,11 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('packs:     3');
     expect(out).toContain('denied:    1');
     expect(out).toContain('T4:2');
+    expect(out).toContain('Autonomy direction:');
+    expect(out).toContain('mode:       local-only');
+    expect(out).toContain('confidence: medium');
+    expect(out).toContain('resources:  constrained (1 constrained, 0 depleted)');
+    expect(out).toContain('budget:     near');
   });
 
   it('omits the paused banner when not killed', () => {
@@ -353,5 +387,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     });
     expect(out).not.toContain('[PAUSED');
     expect(out).toContain('(none)');
+    expect(out).toContain('Autonomy direction:');
+    expect(out).toContain('unavailable');
   });
 });

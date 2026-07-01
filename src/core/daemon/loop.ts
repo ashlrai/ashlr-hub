@@ -342,6 +342,15 @@ export async function tick(
       reason: 'state-persistence-failed',
     });
   };
+  const runAutoMergeMaintenancePass = async (): Promise<AutoMergePassResult | null> => {
+    if (opts.dryRun) return null;
+    try {
+      return await runAutoMergePass(liveCfg);
+    } catch (err) {
+      console.warn('[ashlr] daemon:tick runAutoMergePass failed:', (err as Error)?.message ?? err);
+      return null;
+    }
+  };
 
   // -------------------------------------------------------------------------
   // 1. Kill-switch check.
@@ -440,12 +449,16 @@ export async function tick(
   }
 
   if (backlogItems.length === 0) {
+    const autoMergePassResult = await runAutoMergeMaintenancePass();
+    const merged = autoMergePassResult?.merged ?? 0;
     saveDaemonState(state);
     audit({
       action: 'daemon:tick',
       repo: null,
       sandboxId: null,
-      summary: 'tick skipped: backlog is empty for enrolled repos',
+      summary: `tick skipped: backlog is empty for enrolled repos${
+        merged > 0 ? `; auto-merged ${merged} proposal(s)` : ''
+      }`,
       result: 'ok',
     });
     return recordTick({
@@ -454,6 +467,7 @@ export async function tick(
       proposalsCreated: 0,
       spentUsd: 0,
       reason: 'no-backlog',
+      ...(merged > 0 ? { merged } : {}),
     });
   }
 
@@ -1324,7 +1338,8 @@ export async function tick(
   // strictly proposal-only.
   let merged = 0;
   let autoMergePassResult: AutoMergePassResult | null = null;
-  try { autoMergePassResult = await runAutoMergePass(liveCfg); merged = autoMergePassResult?.merged ?? 0; } catch (err) { console.warn('[ashlr] daemon:tick runAutoMergePass failed:', (err as Error)?.message ?? err); merged = 0; }
+  autoMergePassResult = await runAutoMergeMaintenancePass();
+  merged = autoMergePassResult?.merged ?? 0;
 
   // -------------------------------------------------------------------------
   // 7. Update + persist state with this tick's accounting.

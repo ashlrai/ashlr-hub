@@ -85,5 +85,9 @@
     "@raycast/eslint-config": "^1.0.8",
     "@types/node": "^22.0.0",
     "typescript": "^5.5.0"
+  },
+  "overrides": {
+    "esbuild": "0.28.1",
+    "minimatch": "10.2.5"
   }
 }

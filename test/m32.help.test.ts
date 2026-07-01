@@ -63,6 +63,13 @@ describe('cmdHelp routing', () => {
     expect(text).not.toContain('enroll add');
   });
 
+  it('help autonomy advertises resource-aware direction', async () => {
+    expect(await cmdHelp(['autonomy'])).toBe(0);
+    const text = output();
+    expect(text).toContain('fleet direction [--json]');
+    expect(text).toContain('resource-aware mode recommendation');
+  });
+
   it('help --all → every command', async () => {
     expect(await cmdHelp(['--all'])).toBe(0);
     const text = output();

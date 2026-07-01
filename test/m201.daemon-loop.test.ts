@@ -140,8 +140,9 @@ vi.mock('../src/core/run/sandboxed-engine.js', () => ({
   engineTierOf: (...args: unknown[]) => mockEngineTierOf(...args),
 }));
 
+const mockRunAutoMergePass = vi.fn();
 vi.mock('../src/core/fleet/automerge-pass.js', () => ({
-  runAutoMergePass: async () => ({ merged: 0 }),
+  runAutoMergePass: (...args: unknown[]) => mockRunAutoMergePass(...args),
 }));
 
 vi.mock('../src/core/run/learned-router.js', () => ({
@@ -206,6 +207,7 @@ beforeEach(() => {
   mockBisectAndRevert.mockReset();
   mockRouteBackend.mockReset();
   mockEngineTierOf.mockReset();
+  mockRunAutoMergePass.mockReset();
 
   fx = makeFixture();
 
@@ -236,6 +238,7 @@ beforeEach(() => {
   mockRunInventCycle.mockResolvedValue({ invented: 0, items: [] });
   mockRunCounterfactualReplay.mockResolvedValue({ replayed: 0, proposals: [] });
   mockRunViaAshlrcode.mockResolvedValue({ ok: true });
+  mockRunAutoMergePass.mockResolvedValue({ merged: 0 });
   // Default: builtin backend (route to runSwarm path).
   mockRouteBackend.mockReturnValue({ backend: 'builtin', tier: 'local', reason: 'mock' });
   // Default: local engine tier.
@@ -338,6 +341,60 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.reason).toBe('no-backlog');
     expect(result.proposalsCreated).toBe(0);
     expect(result.itemsConsidered).toBe(0);
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1b: empty backlog still runs auto-merge maintenance when enabled', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [],
+    });
+    mockRunAutoMergePass.mockResolvedValue({ merged: 2 });
+
+    const result = await tick(
+      { ...cfgBuiltin(), foundry: { autoMerge: { enabled: true } } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('no-backlog');
+    expect(result.merged).toBe(2);
+    expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1c: empty backlog dry-run does not run auto-merge maintenance', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [],
+    });
+
+    const result = await tick(
+      { ...cfgBuiltin(), foundry: { autoMerge: { enabled: true } } } as AshlrConfig,
+      { dryRun: true },
+    );
+
+    expect(result.reason).toBe('no-backlog');
+    expect(mockRunAutoMergePass).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1d: budget exhaustion blocks auto-merge maintenance', async () => {
+    seedSpend(1.0);
+
+    const result = await tick(
+      { ...cfgBuiltin({ dailyBudgetUsd: 1.0 }), foundry: { autoMerge: { enabled: true } } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('budget-exhausted');
+    expect(mockRunAutoMergePass).not.toHaveBeenCalled();
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 

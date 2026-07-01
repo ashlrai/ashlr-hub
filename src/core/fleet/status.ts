@@ -18,7 +18,9 @@ import { hostname } from 'node:os';
 import type { AshlrConfig, EngineId } from '../types.js';
 import type { SharedQueueHealth } from './shared-store.js';
 import type { AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
+import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
 import type { GuardHealthDiagnosis } from '../daemon/guard-health.js';
+import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 
 /** A single backend's recent activity + quota standing. */
 export interface FleetBackendStatus {
@@ -61,6 +63,20 @@ export interface FleetAutonomyStatus {
   recent: FleetAutonomyEvidenceSummary[];
 }
 
+export interface FleetAutonomyDirectionSummary {
+  generatedAt: string;
+  mode: ResourceStrategyReport['mode'];
+  confidence: ResourceStrategyReport['confidence'];
+  reasons: string[];
+  recommendedActions: string[];
+  resources: Pick<ResourceStrategyReport['resources'], 'posture' | 'constrained' | 'depleted'>;
+  guardHealth: {
+    blocked: boolean;
+    blocks: number;
+  };
+  budgets: Pick<ResourceStrategyReport['budgets'], 'daemonBudgetLevel' | 'daemonSpentTodayUsd'>;
+}
+
 /** One whole-fleet read-only snapshot. */
 export interface FleetStatus {
   /** ISO timestamp this snapshot was generated. */
@@ -84,6 +100,8 @@ export interface FleetStatus {
     recent: number;
   };
   autonomy?: FleetAutonomyStatus;
+  /** Read-only resource-aware autonomous operating recommendation. */
+  autonomyDirection?: FleetAutonomyDirectionSummary;
   /** Read-only diagnosis of guard state that can block autonomous work. */
   guardHealth?: GuardHealthDiagnosis;
   /** True when the global kill switch is engaged (fleet paused). */
@@ -233,7 +251,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     // leave fallback
   }
 
-  return {
+  const status: FleetStatus = {
     generatedAt,
     daemon,
     backends,
@@ -246,6 +264,63 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     autonomy,
     ...(guardHealth !== undefined ? { guardHealth } : {}),
     killed,
+  };
+
+  try {
+    const { buildResourceStrategyReport } = await import('../autonomy/resource-strategy.js');
+    const report = await buildResourceStrategyReport(cfg, {
+      maxOutcomes: 3,
+      maxChecks: 3,
+      deps: {
+        buildFleetStatus: async () => status,
+        runEcosystemDoctor: async (opts) => lightweightEcosystemReport(opts?.now, opts?.root),
+        ...(guardHealth !== undefined ? { diagnoseGuardHealth: () => guardHealth } : {}),
+      },
+    });
+    status.autonomyDirection = buildAutonomyDirectionSummary(report);
+  } catch {
+    // Optional advisory surface only. Fleet status remains available if any
+    // strategy signal source is unavailable.
+  }
+
+  return status;
+}
+
+function lightweightEcosystemReport(now: Date | undefined, root: string | undefined): EcosystemDoctorReport {
+  return {
+    generatedAt: (now ?? new Date()).toISOString(),
+    root: root ?? process.cwd(),
+    summary: { pass: 0, warn: 1, fail: 0, total: 1, repos: 0 },
+    checks: [{
+      id: 'ecosystem-doctor',
+      label: 'Ecosystem doctor',
+      status: 'warn',
+      detail: 'skipped in fleet status summary; run `ashlr fleet direction` for full report',
+    }],
+    repos: [],
+  };
+}
+
+function buildAutonomyDirectionSummary(report: ResourceStrategyReport): FleetAutonomyDirectionSummary {
+  return {
+    generatedAt: report.generatedAt,
+    mode: report.mode,
+    confidence: report.confidence,
+    reasons: report.reasons.slice(0, 3),
+    recommendedActions: report.recommendedActions.slice(0, 3),
+    resources: {
+      posture: report.resources.posture,
+      constrained: report.resources.constrained,
+      depleted: report.resources.depleted,
+    },
+    guardHealth: {
+      blocked: report.guardHealth.blocked,
+      blocks: report.guardHealth.blocks.length,
+    },
+    budgets: {
+      daemonBudgetLevel: report.budgets.daemonBudgetLevel,
+      daemonSpentTodayUsd: report.budgets.daemonSpentTodayUsd,
+    },
   };
 }
 

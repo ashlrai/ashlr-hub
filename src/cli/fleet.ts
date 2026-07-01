@@ -127,6 +127,29 @@ export function formatFleetStatus(s: FleetStatus): string {
     lines.push(`  latest:    ${autonomy.latestAt ?? '—'}`);
     lines.push(`  tiers:     ${tiers || '—'}`);
   }
+  lines.push('');
+
+  // Autonomy direction
+  const direction = s.autonomyDirection;
+  lines.push('Autonomy direction:');
+  if (!direction) {
+    lines.push('  unavailable');
+  } else {
+    lines.push(`  mode:       ${direction.mode}`);
+    lines.push(`  confidence: ${direction.confidence}`);
+    lines.push(
+      `  resources:  ${direction.resources.posture} ` +
+        `(${direction.resources.constrained} constrained, ${direction.resources.depleted} depleted)`,
+    );
+    lines.push(`  guards:     ${direction.guardHealth.blocked ? `${direction.guardHealth.blocks} block(s)` : 'ok'}`);
+    lines.push(`  budget:     ${direction.budgets.daemonBudgetLevel}`);
+    if (direction.reasons.length > 0) {
+      lines.push(`  reason:     ${direction.reasons[0]}`);
+    }
+    if (direction.recommendedActions.length > 0) {
+      lines.push(`  next:       ${direction.recommendedActions[0]}`);
+    }
+  }
 
   return lines.join('\n');
 }

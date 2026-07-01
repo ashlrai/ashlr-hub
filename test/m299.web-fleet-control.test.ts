@@ -130,7 +130,13 @@ describe('POST /api/fleet/pause|resume', () => {
 
     const fleetPaused = await request('GET', `${h.url}/api/fleet`, h.port);
     expect(fleetPaused.statusCode).toBe(200);
-    expect((JSON.parse(fleetPaused.body) as { killed: boolean }).killed).toBe(true);
+    const pausedFleet = JSON.parse(fleetPaused.body) as {
+      killed: boolean;
+      autonomyDirection?: { mode?: unknown; resources?: unknown };
+    };
+    expect(pausedFleet.killed).toBe(true);
+    expect(typeof pausedFleet.autonomyDirection?.mode).toBe('string');
+    expect(typeof pausedFleet.autonomyDirection?.resources).toBe('object');
 
     const resumed = await request(
       'POST',
@@ -145,6 +151,11 @@ describe('POST /api/fleet/pause|resume', () => {
 
     const fleetResumed = await request('GET', `${h.url}/api/fleet`, h.port);
     expect(fleetResumed.statusCode).toBe(200);
-    expect((JSON.parse(fleetResumed.body) as { killed: boolean }).killed).toBe(false);
+    const resumedFleet = JSON.parse(fleetResumed.body) as {
+      killed: boolean;
+      autonomyDirection?: { mode?: unknown };
+    };
+    expect(resumedFleet.killed).toBe(false);
+    expect(typeof resumedFleet.autonomyDirection?.mode).toBe('string');
   });
 });
