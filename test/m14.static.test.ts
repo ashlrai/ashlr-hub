@@ -23,6 +23,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as http from 'node:http';
+import { execFileSync } from 'node:child_process';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 // ---------------------------------------------------------------------------
@@ -374,6 +375,23 @@ describe('serveStatic — integration via real HTTP server', () => {
       expect(res.body).not.toContain('SUPER_SECRET_VALUE');
       expect(res.body).not.toContain('root:');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Real bundled dashboard assets
+// ---------------------------------------------------------------------------
+
+describe('bundled dashboard assets — smoke', () => {
+  it('keeps the real app.js syntactically valid and wired from index.html', () => {
+    const publicDir = path.resolve(process.cwd(), 'src/core/web/public');
+    execFileSync(process.execPath, ['--check', path.join(publicDir, 'app.js')], { stdio: 'pipe' });
+
+    const index = fs.readFileSync(path.join(publicDir, 'index.html'), 'utf8');
+    const styles = fs.readFileSync(path.join(publicDir, 'styles.css'), 'utf8');
+    expect(index).toContain('/app.js');
+    expect(index).toContain('/styles.css');
+    expect(styles).toContain('.ctrl-direction-copy');
   });
 });
 

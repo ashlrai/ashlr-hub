@@ -239,6 +239,9 @@ describe('buildFleetActivity — recent ticks', () => {
       backends: { builtin: 1 },
       spentUsd: 0.001,
       merged: i === 29 ? 1 : 0, // newest tick has merged=1
+      directionMode: i === 29 ? 'verify-only' : 'backlog-build',
+      directionReason: i === 29 ? 'pending proposals need verification' : 'healthy resources',
+      autoMerge: i === 29 ? { attempted: 3, judged: 2, merged: 1 } : undefined,
     }));
     writeFileSync(
       join(ashlrDir, 'daemon.json'),
@@ -253,12 +256,18 @@ describe('buildFleetActivity — recent ticks', () => {
     expect(snap.recentTicks.length).toBe(20); // capped at 20
     // newest-first: first entry should be the tick at index 0
     expect(snap.recentTicks[0]!.merged).toBe(1);
+    expect(snap.recentTicks[0]!.directionMode).toBe('verify-only');
+    expect(snap.recentTicks[0]!.directionReason).toBe('pending proposals need verification');
+    expect(snap.recentTicks[0]!.autoMerge).toEqual({ attempted: 3, judged: 2, merged: 1 });
     // Each tick has required shape
     for (const t of snap.recentTicks) {
       expect(typeof t.ts).toBe('string');
       expect(typeof t.spentUsd).toBe('number');
       expect(typeof t.merged).toBe('number');
       expect(typeof t.backends).toBe('object');
+      expect(t.directionMode === null || typeof t.directionMode === 'string').toBe(true);
+      expect(t.directionReason === null || typeof t.directionReason === 'string').toBe(true);
+      expect(t.autoMerge === null || typeof t.autoMerge === 'object').toBe(true);
     }
   });
 });

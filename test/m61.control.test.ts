@@ -117,14 +117,25 @@ describe('buildControlSnapshot — full shape (M61)', () => {
     expect(snap.fleet).toHaveProperty('proposals');
     expect(snap.fleet).toHaveProperty('merges');
     expect(snap.fleet).toHaveProperty('killed');
+    expect(snap.fleet.autonomyDirection).toMatchObject({
+      mode: expect.any(String),
+      confidence: expect.any(String),
+      resources: expect.any(Object),
+      guardHealth: expect.any(Object),
+      budgets: expect.any(Object),
+    });
   });
 
-  it('daemon section has running/pid/lastTickAt/todaySpentUsd', async () => {
+  it('daemon section has running/pid/lastTickAt/todaySpentUsd and active direction fields', async () => {
     const snap = await buildControlSnapshot(baseConfig());
     expect(typeof snap.daemon.running).toBe('boolean');
     expect(snap.daemon.pid === null || typeof snap.daemon.pid === 'number').toBe(true);
     expect(snap.daemon.lastTickAt === null || typeof snap.daemon.lastTickAt === 'string').toBe(true);
     expect(typeof snap.daemon.todaySpentUsd).toBe('number');
+    expect(snap.daemon.activeDirectionMode === null || typeof snap.daemon.activeDirectionMode === 'string').toBe(true);
+    expect(snap.daemon.activeDirectionAt === null || typeof snap.daemon.activeDirectionAt === 'string').toBe(true);
+    expect(snap.daemon.activeDirectionReason === null || typeof snap.daemon.activeDirectionReason === 'string').toBe(true);
+    expect(typeof snap.daemon.autonomyControlLoop).toBe('boolean');
   });
 
   it('usage section has required keys and window=7d', async () => {
@@ -338,6 +349,49 @@ describe('logs section (M61)', () => {
     for (const entry of snap.logs) {
       expect(Date.parse(entry.ts)).not.toBeNaN();
     }
+  });
+
+  it('exposes the most recent applied autonomy direction from daemon ticks', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    mkdirSync(ashlrDir, { recursive: true });
+    writeFileSync(join(ashlrDir, 'daemon.json'), JSON.stringify({
+      running: true,
+      pid: 123,
+      startedAt: '2026-06-17T00:00:00.000Z',
+      lastTickAt: '2026-06-17T00:03:00.000Z',
+      todayDate: '2026-06-17',
+      todaySpentUsd: 0.05,
+      itemsProcessed: 2,
+      ticks: [
+        {
+          ts: '2026-06-17T00:01:00.000Z',
+          itemsConsidered: 1,
+          proposalsCreated: 1,
+          spentUsd: 0.02,
+          reason: 'ok',
+          directionMode: 'backlog-build',
+          directionReason: 'healthy resources',
+        },
+        {
+          ts: '2026-06-17T00:03:00.000Z',
+          itemsConsidered: 0,
+          proposalsCreated: 0,
+          spentUsd: 0,
+          reason: 'verify-only',
+          directionMode: 'verify-only',
+          directionReason: 'pending proposals need verification',
+          autoMerge: { attempted: 3, judged: 2, merged: 0 },
+        },
+      ],
+    }, null, 2));
+
+    const snap = await buildControlSnapshot(withFoundry({ autonomyControlLoop: true }));
+    expect(snap.daemon.activeDirectionMode).toBe('verify-only');
+    expect(snap.daemon.activeDirectionAt).toBe('2026-06-17T00:03:00.000Z');
+    expect(snap.daemon.activeDirectionReason).toBe('pending proposals need verification');
+    expect(snap.daemon.autonomyControlLoop).toBe(true);
+    expect(snap.logs[0]?.msg).toContain('direction=verify-only');
+    expect(snap.logs[0]?.msg).toContain('maintenance=attempted:3,judged:2,merged:0');
   });
 
   it('logs are capped at 50 by default', async () => {

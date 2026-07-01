@@ -4,7 +4,7 @@
 - Hub repo: `/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub`
 - Branch: `master`
 - Remote: `https://github.com/ashlrai/ashlr-hub.git`
-- Latest pushed commit before this follow-up: `4b14f6e feat: surface shared queue health`
+- Latest pushed commit before this follow-up: `2f42610 feat: Execute autonomy direction loop`
 - Working tree at start of this push: clean and synced to `origin/master`
 - Entire: not set up; no checkpoint found for `master`
 
@@ -63,6 +63,9 @@
 - Nested Raycast security follow-up: `src/raycast` audit previously reported vulnerable `esbuild` and `minimatch` through Raycast dev tooling. Added nested package overrides for `esbuild@0.28.1` and `minimatch@10.2.5`; `npm install` in `src/raycast`, `npm audit --audit-level=moderate`, and `npm run build` now pass. `npm run lint` remains blocked by pre-existing Raycast packaging/config issues: Raycast author `masonwyatt` returns 404 and Raycast's ESLint invocation reports all `src/**` files ignored.
 - Executable autonomy direction follow-up: added a pure `resourceStrategyToDaemonPlan()` mapper and opt-in `foundry.autonomyControlLoop`. When enabled, daemon ticks turn `pause` into no-dispatch, `verify-only`/`auto-merge-ready` into auto-merge maintenance without new backlog generation, `local-only` into local/builtin-constrained dispatch, and `backlog-build` into normal operation. Tick records now carry `directionMode` when the loop is active.
 - Raycast lint repair follow-up: added `src/raycast/eslint.config.js`, split nested `npm run lint` to direct ESLint/Prettier, and kept `npm run lint:raycast` for publish validation. Local lint now passes. `lint:raycast` still fails only because Raycast's API returns 404 for `author: "masonwyatt"`; a valid Raycast account handle is required to unblock publish validation.
+- Autonomy control hardening follow-up: daemon direction planning now injects a cheap fleet snapshot, lightweight ecosystem doctor report, cached guard health, and empty outcome records so each tick avoids the expensive default `buildFleetStatus`, ecosystem doctor, and outcome-record joins while the full `ashlr fleet direction` command remains deep.
+- Local-only routing follow-up: `local-coder` is now a first-class `EngineId` and is preserved by `foundry.autonomyControlLoop` local-only constraints, so constrained resource posture still uses the free Ollama coding backend before falling back to `builtin`.
+- Direction observability follow-up: daemon ticks now persist `directionReason` and compact `autoMerge` maintenance counts (`attempted`, `judged`, `merged`). `/api/control` exposes the last applied direction mode/timestamp/reason, Mission Control shows active vs recommended direction, and Fleet Activity recent ticks carry the same metadata.
 
 ## Verification Log
 - `ASHLR_TEST_CI_TIMEOUT_MS=120000 npm run test:ci -- test/m30.ci.test.ts test/m33.release-meta.test.ts test/m262.visibility.test.ts test/m297.retry-transient-abort.test.ts`: passed, 63 tests.
@@ -99,3 +102,5 @@
 - Direction/status/idle-maintenance final gates: root `npm run typecheck`, `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check` passed. Lint remains at the existing 118-warning baseline with 0 errors.
 - Executable autonomy/Raycast local lint focused pass: `npm test -- test/m306.resource-strategy.test.ts test/m201.daemon-loop.test.ts` passed, 2 files and 50 tests.
 - Executable autonomy/Raycast local lint final gates: root `npm run typecheck`, `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check` passed. Root lint remains at the existing 118-warning baseline with 0 errors. In `src/raycast`, `npm run lint`, `npm run build`, and `npm audit --audit-level=moderate` passed. `npm run lint:raycast` failed only on external Raycast author validation for `masonwyatt` (404).
+- Autonomy control hardening focused pass: `node --check src/core/web/public/app.js` passed; `npm test -- test/m201.daemon-loop.test.ts test/m61.control.test.ts test/m90.fleet-dashboard.test.ts test/m14.static.test.ts` passed, 4 files and 113 tests.
+- Autonomy control hardening final gates: `npm run typecheck`, `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check` passed. Root lint remains at the existing 118-warning baseline with 0 errors.

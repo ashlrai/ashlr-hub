@@ -2157,6 +2157,29 @@ function autonomyEvidenceMetric(autonomy) {
   return `${autonomy.evidencePacks} packs / ${autonomy.allowed ?? 0} allowed / ${autonomy.denied ?? 0} denied`;
 }
 
+function formatDirectionMode(mode) {
+  const labels = {
+    pause: 'Pause',
+    'local-only': 'Local Only',
+    'verify-only': 'Verify Only',
+    'backlog-build': 'Backlog Build',
+    'auto-merge-ready': 'Auto-Merge Ready',
+    unknown: 'Unknown',
+  };
+  return labels[mode] ?? String(mode ?? 'Unknown');
+}
+
+function directionAccent(mode) {
+  const colors = {
+    pause: '#f87171',
+    'verify-only': '#fbbf24',
+    'auto-merge-ready': '#4ade80',
+    'local-only': '#38bdf8',
+    'backlog-build': '#a78bfa',
+  };
+  return colors[mode] ?? '#94a3b8';
+}
+
 function autonomyRecentRows(autonomy) {
   const rows = [];
   const recent = Array.isArray(autonomy?.recent) ? autonomy.recent : [];
@@ -2535,6 +2558,8 @@ function renderControl() {
   const props  = d.fleet?.proposals ?? fleet.proposals ?? {};
   const merges = d.fleet?.merges ?? fleet.merges ?? {};
   const autonomy = d.fleet?.autonomy ?? fleet.autonomy ?? null;
+  const direction = d.fleet?.autonomyDirection ?? fleet.autonomyDirection ?? null;
+  const activeDirectionMode = daemon.activeDirectionMode ?? null;
   const isRunning = daemon.running ?? false;
   const isKilled  = d.fleet?.killed ?? false;
 
@@ -2577,9 +2602,42 @@ function renderControl() {
   heroMetrics.appendChild(controlMetric('Proposals', props.pending ?? 0, '#a78bfa'));
   heroMetrics.appendChild(controlMetric('Merges (24h)', merges.recent ?? '—', '#4ade80'));
   heroMetrics.appendChild(controlMetric('Evidence', autonomy?.evidencePacks ?? 0, autonomy?.denied > 0 ? '#f87171' : '#38bdf8'));
+  heroMetrics.appendChild(controlMetric('Active Mode', formatDirectionMode(activeDirectionMode ?? direction?.mode ?? 'unknown'), directionAccent(activeDirectionMode ?? direction?.mode)));
   heroMetrics.appendChild(controlMetric('Kill switch', isKilled ? 'ENGAGED' : 'off', isKilled ? '#f87171' : '#64748b'));
   heroPulse.appendChild(heroMetrics);
   section.appendChild(heroPulse);
+
+  if (direction) {
+    const directionCard = el('div', { cls: 'ctrl-card card' });
+    directionCard.appendChild(el('div', { cls: 'card-header' },
+      el('span', { cls: 'card-title' }, 'Autonomy Direction'),
+      el('span', { cls: 'card-subtitle' }, `${formatDirectionMode(direction.mode)} · ${direction.confidence ?? 'unknown'} confidence`)
+    ));
+    const directionBody = el('div', { cls: 'card-body' });
+    directionBody.appendChild(infoGrid([
+      ['Active', formatDirectionMode(activeDirectionMode ?? 'unknown')],
+      ['Recommended', formatDirectionMode(direction.mode)],
+      ['Last applied', daemon.activeDirectionAt ? fmtRelative(daemon.activeDirectionAt) : 'never'],
+      ['Control loop', daemon.autonomyControlLoop ? 'enabled' : 'advisory'],
+      ['Resources', direction.resources?.posture ?? 'unknown'],
+      ['Constrained', direction.resources?.constrained ?? 0],
+      ['Depleted', direction.resources?.depleted ?? 0],
+      ['Guards', direction.guardHealth?.blocked ? `${direction.guardHealth.blocks ?? 0} blocking` : 'clear'],
+      ['Budget', direction.budgets?.daemonBudgetLevel ?? 'unknown'],
+    ]));
+    const rawReason = daemon.activeDirectionReason ?? (Array.isArray(direction.reasons) ? direction.reasons[0] : null);
+    const rawAction = Array.isArray(direction.recommendedActions) ? direction.recommendedActions[0] : null;
+    const reason = typeof rawReason === 'string' ? rawReason : null;
+    const action = typeof rawAction === 'string' ? rawAction : null;
+    if (reason || action) {
+      directionBody.appendChild(el('div', { cls: 'ctrl-direction-copy' },
+        reason ? el('p', {}, reason) : null,
+        action ? el('p', { cls: 'hint' }, action) : null
+      ));
+    }
+    directionCard.appendChild(directionBody);
+    section.appendChild(directionCard);
+  }
 
   // ── 2. Local models ────────────────────────────────────────────────────
   const modelsData = d.models ?? {};

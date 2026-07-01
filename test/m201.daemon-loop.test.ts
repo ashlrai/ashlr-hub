@@ -419,9 +419,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
-  it('A1e: autonomy control pause skips backlog and dispatch', async () => {
-    const repo = fx.makeRepo();
-    repo.enroll();
+  it('A1e: autonomy control pause builds strategy snapshot and skips dispatch', async () => {
+    enrollWithItems(1);
     mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'pause', reasons: ['mock guard block'] });
 
     const result = await tick(
@@ -431,16 +430,29 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
     expect(result.reason).toBe('pause');
     expect(result.directionMode).toBe('pause');
-    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(1);
+    const strategyOpts = mockBuildResourceStrategyReport.mock.calls[0]?.[1] as {
+      deps?: {
+        buildFleetStatus?: () => Promise<{ queue?: { backlogItems?: number } }>;
+        runEcosystemDoctor?: (opts?: { root?: string; now?: Date }) => Promise<{ summary?: { total?: number } }>;
+        listOutcomeRecords?: () => unknown[];
+      };
+    };
+    await expect(strategyOpts.deps?.buildFleetStatus?.()).resolves.toMatchObject({
+      queue: { backlogItems: 1 },
+    });
+    await expect(strategyOpts.deps?.runEcosystemDoctor?.()).resolves.toMatchObject({
+      summary: { total: 1 },
+    });
+    expect(strategyOpts.deps?.listOutcomeRecords?.()).toEqual([]);
     expect(mockRunAutoMergePass).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
-  it('A1f: autonomy control verify-only runs merge maintenance and skips new backlog', async () => {
-    const repo = fx.makeRepo();
-    repo.enroll();
+  it('A1f: autonomy control verify-only builds strategy snapshot and runs merge maintenance only', async () => {
+    enrollWithItems(1);
     mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'verify-only', reasons: ['pending proposals need verification'] });
-    mockRunAutoMergePass.mockResolvedValue({ merged: 1 });
+    mockRunAutoMergePass.mockResolvedValue({ attempted: 3, judged: 2, merged: 1 });
 
     const result = await tick(
       { ...cfgBuiltin(), foundry: { autonomyControlLoop: true, autoMerge: { enabled: true } } } as AshlrConfig,
@@ -449,9 +461,11 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
     expect(result.reason).toBe('verify-only');
     expect(result.directionMode).toBe('verify-only');
+    expect(result.directionReason).toBe('pending proposals need verification');
     expect(result.merged).toBe(1);
+    expect(result.autoMerge).toEqual({ attempted: 3, judged: 2, merged: 1 });
     expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
-    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
@@ -476,6 +490,32 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.backends).toEqual({ builtin: 1 });
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
     expect(mockRunGoal).not.toHaveBeenCalled();
+  });
+
+  it('A1h: autonomy control local-only preserves local-coder dispatch', async () => {
+    enrollWithItems(1);
+    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'local-only', reasons: ['frontier budget constrained'] });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock local-coder' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: {
+          autonomyControlLoop: true,
+          allowedBackends: ['claude', 'local-coder', 'builtin'],
+        },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.directionMode).toBe('local-only');
+    expect(result.directionReason).toBe('frontier budget constrained');
+    expect(result.backends).toEqual({ 'local-coder': 1 });
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ engine: 'local-coder' });
+    expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
   it('A2: buildBacklog throws → tick swallows and returns no-backlog', async () => {

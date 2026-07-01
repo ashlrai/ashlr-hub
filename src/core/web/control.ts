@@ -16,7 +16,7 @@
  *   ControlSnapshot.logs                 — most-recent-first, capped 50
  */
 
-import type { AshlrConfig } from '../types.js';
+import type { AshlrConfig, DaemonTick } from '../types.js';
 import { buildFleetStatus, type FleetStatus } from '../fleet/status.js';
 import { getProviderRegistry } from '../providers.js';
 import { buildRollup, modelToProviderKey, LOCAL_PROVIDER_KEYS } from '../observability/rollup.js';
@@ -52,6 +52,10 @@ export interface ControlDaemon {
   pid: number | null;
   lastTickAt: string | null;
   todaySpentUsd: number;
+  activeDirectionMode: DaemonTick['directionMode'] | null;
+  activeDirectionAt: string | null;
+  activeDirectionReason: string | null;
+  autonomyControlLoop: boolean;
 }
 
 export interface ControlUsageByProvider {
@@ -188,17 +192,32 @@ async function buildModels(cfg: AshlrConfig): Promise<ControlModels> {
 
 /** Safe fallback for the daemon section. */
 function fallbackDaemon(): ControlDaemon {
-  return { running: false, pid: null, lastTickAt: null, todaySpentUsd: 0 };
+  return {
+    running: false,
+    pid: null,
+    lastTickAt: null,
+    todaySpentUsd: 0,
+    activeDirectionMode: null,
+    activeDirectionAt: null,
+    activeDirectionReason: null,
+    autonomyControlLoop: false,
+  };
 }
 
-function buildDaemon(): ControlDaemon {
+function buildDaemon(cfg: AshlrConfig): ControlDaemon {
   try {
     const ds = loadDaemonState();
+    const ticks = Array.isArray(ds.ticks) ? ds.ticks : [];
+    const activeDirectionTick = [...ticks].reverse().find((tick) => tick.directionMode);
     return {
       running: ds.running === true,
       pid: typeof ds.pid === 'number' ? ds.pid : null,
       lastTickAt: ds.lastTickAt ?? null,
       todaySpentUsd: typeof ds.todaySpentUsd === 'number' ? ds.todaySpentUsd : 0,
+      activeDirectionMode: activeDirectionTick?.directionMode ?? null,
+      activeDirectionAt: activeDirectionTick?.ts ?? null,
+      activeDirectionReason: activeDirectionTick?.directionReason ?? null,
+      autonomyControlLoop: (cfg.foundry as Record<string, unknown> | undefined)?.['autonomyControlLoop'] === true,
     };
   } catch {
     return fallbackDaemon();
@@ -350,10 +369,16 @@ function buildLogs(cap = LOG_CAP): ControlLogEntry[] {
       const spendStr = typeof tick.spentUsd === 'number'
         ? ` spend=$${tick.spentUsd.toFixed(4)}`
         : '';
+      const directionStr = tick.directionMode
+        ? ` direction=${tick.directionMode}${tick.directionReason ? ` (${tick.directionReason})` : ''}`
+        : '';
+      const autoMergeStr = tick.autoMerge
+        ? ` maintenance=attempted:${tick.autoMerge.attempted},judged:${tick.autoMerge.judged},merged:${tick.autoMerge.merged}`
+        : '';
       entries.push({
         ts: tick.ts,
         kind: 'tick',
-        msg: `tick reason=${tick.reason ?? 'ok'}${backendStr}${spendStr}`,
+        msg: `tick reason=${tick.reason ?? 'ok'}${directionStr}${backendStr}${spendStr}${autoMergeStr}`,
       });
     }
     return entries;
@@ -508,6 +533,9 @@ export interface FleetTickEntry {
   backends: Record<string, number>;
   spentUsd: number;
   merged: number;
+  directionMode: DaemonTick['directionMode'] | null;
+  directionReason: string | null;
+  autoMerge: DaemonTick['autoMerge'] | null;
 }
 
 /** Full fleet-activity payload. */
@@ -633,6 +661,9 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
       backends: t.backends ?? {},
       spentUsd: typeof t.spentUsd === 'number' ? t.spentUsd : 0,
       merged: typeof t.merged === 'number' ? t.merged : 0,
+      directionMode: t.directionMode ?? null,
+      directionReason: t.directionReason ?? null,
+      autoMerge: t.autoMerge ?? null,
     }));
   } catch {
     // degrade silently
@@ -680,7 +711,7 @@ export async function buildControlSnapshot(cfg: AshlrConfig): Promise<ControlSna
     }),
   ]);
 
-  const daemon = buildDaemon();
+  const daemon = buildDaemon(cfg);
   const usage = buildUsage(cfg);
   const limits = buildLimits(cfg);
   const subscriptionLimits = await buildSubscriptionLimits(cfg);

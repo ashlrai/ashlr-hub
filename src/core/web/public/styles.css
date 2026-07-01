@@ -2149,6 +2149,20 @@ a:hover {
   margin-bottom: var(--space-5);
 }
 
+.ctrl-direction-copy {
+  margin-top: var(--space-4);
+  display: grid;
+  gap: var(--space-2);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.ctrl-direction-copy p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 /* ── Banners ─────────────────────────────────────────────────────────────── */
 .ctrl-banner {
   padding: var(--space-3) var(--space-4);

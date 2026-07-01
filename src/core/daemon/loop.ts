@@ -34,6 +34,8 @@
  */
 
 import type { AshlrConfig, DaemonConfig, DaemonState, DaemonTick, EngineId, WorkItem } from '../types.js';
+import type { FleetStatus } from '../fleet/status.js';
+import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import { killSwitchOn, setKill, listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
 import { buildBacklog } from '../portfolio/backlog.js';
@@ -99,7 +101,7 @@ const DEFAULTS: DaemonConfig = {
   intervalMs: 5 * 60_000, // 5-minute tick interval in loop mode
 };
 
-const LOCAL_ONLY_BACKENDS = new Set<EngineId>(['builtin', 'ashlrcode', 'aw']);
+const LOCAL_ONLY_BACKENDS = new Set<EngineId>(['builtin', 'local-coder', 'ashlrcode', 'aw']);
 
 function autonomyControlEnabled(cfg: AshlrConfig): boolean {
   return (cfg.foundry as Record<string, unknown> | undefined)?.['autonomyControlLoop'] === true;
@@ -123,6 +125,103 @@ function constrainToLocalBackends(cfg: AshlrConfig): AshlrConfig {
 
 function enforceLocalBackend(backend: EngineId, plan: ResourceStrategyDaemonPlan | null): EngineId {
   return plan?.forceLocalOnly === true && !LOCAL_ONLY_BACKENDS.has(backend) ? 'builtin' : backend;
+}
+
+function lightweightEcosystemReport(now: Date | undefined, root: string | undefined): EcosystemDoctorReport {
+  return {
+    generatedAt: (now ?? new Date()).toISOString(),
+    root: root ?? process.cwd(),
+    summary: { pass: 0, warn: 1, fail: 0, total: 1, repos: 0 },
+    checks: [{
+      id: 'ecosystem-doctor',
+      label: 'Ecosystem doctor',
+      status: 'warn',
+      detail: 'skipped during daemon autonomy control tick; run `ashlr fleet direction` for full report',
+    }],
+    repos: [],
+  };
+}
+
+function buildTickFleetStatus(
+  cfg: AshlrConfig,
+  state: DaemonState,
+  backlogItems: number,
+  guardHealth: FleetStatus['guardHealth'],
+): FleetStatus {
+  let pending = 0;
+  let frontierPending = 0;
+  let applied = 0;
+  try {
+    for (const proposal of listProposals()) {
+      if (proposal.status === 'pending') {
+        pending++;
+        if (proposal.engineTier === 'frontier') frontierPending++;
+      } else if (proposal.status === 'applied') {
+        applied++;
+      }
+    }
+  } catch {
+    pending = 0;
+    frontierPending = 0;
+    applied = 0;
+  }
+
+  const recentTicks = Array.isArray(state.ticks) ? state.ticks : [];
+  const recentCutoff = Date.now() - 24 * 60 * 60 * 1000;
+  let recentMerges = 0;
+  for (const tickRecord of recentTicks) {
+    if (typeof tickRecord.merged !== 'number' || tickRecord.merged <= 0) continue;
+    const tickMs = Date.parse(tickRecord.ts);
+    if (Number.isNaN(tickMs) || tickMs >= recentCutoff) recentMerges += tickRecord.merged;
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    daemon: {
+      running: state.running === true,
+      lastTickAt: state.lastTickAt ?? null,
+      todaySpentUsd: typeof state.todaySpentUsd === 'number' ? state.todaySpentUsd : 0,
+    },
+    backends: (cfg.foundry?.allowedBackends ?? ['builtin']).map((backend) => ({
+      backend,
+      dispatchesRecent: 0,
+      quota: 'unlimited',
+    })),
+    queue: { backlogItems },
+    proposals: { pending, frontierPending, applied },
+    merges: { recent: recentMerges },
+    ...(guardHealth !== undefined ? { guardHealth } : {}),
+    killed: false,
+  };
+}
+
+async function buildDaemonStrategyPlan(
+  cfg: AshlrConfig,
+  state: DaemonState,
+  backlogItems: number,
+): Promise<ResourceStrategyDaemonPlan> {
+  const { diagnoseGuardHealth } = await import('./guard-health.js');
+  const guardHealth = diagnoseGuardHealth();
+  const report = await buildResourceStrategyReport(cfg, {
+    maxOutcomes: 6,
+    maxChecks: 1,
+    deps: {
+      buildFleetStatus: async () => buildTickFleetStatus(cfg, state, backlogItems, guardHealth),
+      runEcosystemDoctor: async (opts) => lightweightEcosystemReport(opts?.now, opts?.root),
+      diagnoseGuardHealth: () => guardHealth,
+      listOutcomeRecords: () => [],
+    },
+  });
+  return resourceStrategyToDaemonPlan(report);
+}
+
+function autoMergeTickSummary(result: AutoMergePassResult | null): DaemonTick['autoMerge'] | undefined {
+  if (!result) return undefined;
+  const attempted = typeof result.attempted === 'number' ? result.attempted : 0;
+  const judged = typeof result.judged === 'number' ? result.judged : 0;
+  const merged = typeof result.merged === 'number' ? result.merged : 0;
+  if (attempted <= 0 && judged <= 0 && merged <= 0) return undefined;
+  return { attempted, judged, merged };
 }
 
 /**
@@ -470,10 +569,22 @@ export async function tick(
     });
   }
 
+  // -------------------------------------------------------------------------
+  // 4. Build / refresh backlog for ENROLLED repos only.
+  // -------------------------------------------------------------------------
+  let backlogItems: WorkItem[] = [];
+  try {
+    const backlog = await buildBacklog({ repos: enrolled });
+    backlogItems = backlog.items;
+  } catch (err) {
+    // buildBacklog never throws by contract; extra guard
+    console.warn('[ashlr] daemon:tick buildBacklog guard caught:', (err as Error)?.message ?? err);
+    backlogItems = [];
+  }
+
   if (autonomyControlEnabled(liveCfg)) {
     try {
-      const report = await buildResourceStrategyReport(liveCfg);
-      directionPlan = resourceStrategyToDaemonPlan(report);
+      directionPlan = await buildDaemonStrategyPlan(liveCfg, state, backlogItems.length);
       directionMode = directionPlan.mode;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -493,6 +604,7 @@ export async function tick(
       const autoMergePassResult = directionPlan.runAutoMergeMaintenance
         ? await runAutoMergeMaintenancePass()
         : null;
+      const autoMerge = autoMergeTickSummary(autoMergePassResult);
       const merged = autoMergePassResult?.merged ?? 0;
       saveDaemonState(state);
       audit({
@@ -511,26 +623,16 @@ export async function tick(
         spentUsd: 0,
         reason: directionPlan.mode,
         directionMode,
+        directionReason: directionPlan.reason,
+        ...(autoMerge ? { autoMerge } : {}),
         ...(merged > 0 ? { merged } : {}),
       });
     }
   }
 
-  // -------------------------------------------------------------------------
-  // 4. Build / refresh backlog for ENROLLED repos only.
-  // -------------------------------------------------------------------------
-  let backlogItems: WorkItem[] = [];
-  try {
-    const backlog = await buildBacklog({ repos: enrolled });
-    backlogItems = backlog.items;
-  } catch (err) {
-    // buildBacklog never throws by contract; extra guard
-    console.warn('[ashlr] daemon:tick buildBacklog guard caught:', (err as Error)?.message ?? err);
-    backlogItems = [];
-  }
-
   if (backlogItems.length === 0) {
     const autoMergePassResult = await runAutoMergeMaintenancePass();
+    const autoMerge = autoMergeTickSummary(autoMergePassResult);
     const merged = autoMergePassResult?.merged ?? 0;
     saveDaemonState(state);
     audit({
@@ -549,6 +651,8 @@ export async function tick(
       spentUsd: 0,
       reason: 'no-backlog',
       ...(directionMode ? { directionMode } : {}),
+      ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
+      ...(autoMerge ? { autoMerge } : {}),
       ...(merged > 0 ? { merged } : {}),
     });
   }
@@ -1423,6 +1527,7 @@ export async function tick(
   let merged = 0;
   let autoMergePassResult: AutoMergePassResult | null = null;
   autoMergePassResult = await runAutoMergeMaintenancePass();
+  const autoMerge = autoMergeTickSummary(autoMergePassResult);
   merged = autoMergePassResult?.merged ?? 0;
 
   // -------------------------------------------------------------------------
@@ -1438,6 +1543,8 @@ export async function tick(
       reason: 'state-persistence-failed',
       ...(Object.keys(backendDispatch).length > 0 ? { backends: backendDispatch } : {}),
       ...(directionMode ? { directionMode } : {}),
+      ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
+      ...(autoMerge ? { autoMerge } : {}),
       ...(merged > 0 ? { merged } : {}),
     };
     audit({
@@ -1463,6 +1570,8 @@ export async function tick(
     reason: 'ok',
     ...(Object.keys(backendDispatch).length > 0 ? { backends: backendDispatch } : {}),
     ...(directionMode ? { directionMode } : {}),
+    ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
+    ...(autoMerge ? { autoMerge } : {}),
     ...(merged > 0 ? { merged } : {}),
   };
   state.ticks = [...state.ticks, tickRecord];

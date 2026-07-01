@@ -1588,6 +1588,7 @@ export interface VerifyVerdict {
 /** The set of engines `ashlr run` can delegate to (or run locally). */
 export type EngineId =
   | 'builtin'
+  | 'local-coder'
   | 'ashlrcode'
   | 'aw'
   | 'claude'
@@ -2953,6 +2954,14 @@ export interface DaemonTick {
   backends?: Record<string, number>;
   /** M308: resource-aware direction mode applied to this tick when opt-in. */
   directionMode?: 'pause' | 'local-only' | 'verify-only' | 'backlog-build' | 'auto-merge-ready';
+  /** M308: one-line reason behind the applied autonomy direction. */
+  directionReason?: string;
+  /** M308/M48: maintenance work performed by the auto-merge pass this tick. */
+  autoMerge?: {
+    attempted: number;
+    judged: number;
+    merged: number;
+  };
   /** M48: proposals auto-merged this tick via the M47 gate (omitted/0 when disabled). */
   merged?: number;
 }

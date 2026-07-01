@@ -38,6 +38,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Add next autonomous control-plane execution improvement
 - [x] Follow-up: Clear nested Raycast audit vulnerabilities
 - [x] Follow-up: Repair nested Raycast local lint
+- [x] Follow-up: Harden executable autonomy control observability and local-only routing
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -68,6 +69,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Nested Raycast audit now passes after scoped overrides for patched `esbuild` and `minimatch`; `ray lint` still has separate packaging/config blockers (`author` 404 and ignored `src/**`).
 - `foundry.autonomyControlLoop` is the first opt-in executable direction mode: daemon ticks consume the resource strategy report, pause/verify-only modes suppress new proposal generation, and local-only clamps dispatch to local/builtin paths.
 - Nested Raycast local lint now has its own flat ESLint config and `npm run lint` no longer inherits the root `src/raycast/**` ignore. Raycast publish validation still requires replacing `author: "masonwyatt"` with a real Raycast username.
+- Daemon autonomy control now uses cheap daemon-tick resource-strategy dependencies, including a lightweight fleet snapshot, lightweight ecosystem report, and empty outcome records, so opt-in direction checks avoid expensive full status/doctor/outcome joins.
+- Local-only autonomy mode now preserves the first-class `local-coder` backend instead of collapsing it to `builtin`, keeping the free local coding workhorse available when frontier resources are constrained.
+- Daemon ticks, Mission Control logs, and Fleet Activity now show applied direction reason and auto-merge maintenance attempted/judged/merged counts; Mission Control distinguishes the active applied mode from the current recommended direction.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -95,4 +99,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current autonomy control pass makes outcome feedback item-accurate, skips permanent auto-merge blockers before judge calls, verifies before spending judge calls in verification mode, and adds a read-only resource-aware direction report.
 
 ## Status
-**Current batch verified locally** - Executable autonomy direction control, local Raycast lint repair, and Raycast source lint fixes are implemented and verified; preparing commit/push.
+**Current batch verified locally** - Autonomy control observability, cheap daemon strategy planning, local-coder local-only routing, and Mission Control active/recommended direction visibility are implemented and verified; preparing commit/push.
