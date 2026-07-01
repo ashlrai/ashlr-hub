@@ -26,6 +26,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Explore ecosystem doctor command implementation
 - [x] Follow-up: Evaluate dependency security migration path
 - [x] Follow-up: Verify, commit, and push next usefulness batch
+- [x] Follow-up: Add autonomy evidence packs and policy verdicts
 
 ## Key Questions
 1. What prevents Ashlr Hub from acting as a reliable always-on engineering fleet today?
@@ -43,6 +44,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Land daemon singleton hardening now: exclusive lock, heartbeat, stale dead-owner takeover, token-checked release, and state temp-file collision reduction.
 - Clear Vite/esbuild advisories with a conservative Vitest 3 + Vite 6 override migration instead of jumping straight to Vitest 4 / Vite 8.
 - Next local critical path is shared queue health in Mission Control because a multi-machine autonomous fleet needs visible lease, reclaim, and owner distribution signals.
+- Current autonomy critical path is making auto-merge evidence explicit and durable so higher-quality agents can merge by default without forcing Mason to reconstruct safety from logs.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -63,6 +65,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Repair UX audit found that `daemon status`, doctor, and web surfaces still mask malformed daemon/spend-guard state through forgiving loaders; next pass should expose a shared additive guard-health block before attempting auto-repair.
 - Backend trace audit found gateway decisions already have traces but daemon ticks persist only aggregate backend counts; next pass should persist bounded `backendAssignments` beside existing tick counts.
 - Ecosystem doctor audit recommends a read-only `ashlr ecosystem doctor [--json] [--root] [--deep]` command with tool inventory and sibling repo health.
+- Current autonomy pass adds `~/.ashlr/evidence/<proposalId>.json` evidence packs, a pure `AutonomyPolicyVerdict` ladder, and a pre-mutation Gate 8 in `autoMergeProposal` that fails closed if the evidence pack cannot be persisted or the policy denies the requested action.
 
 ## Status
-**Current queue health pass verifying** - Shared queue health is implemented and targeted tests/typecheck pass; running broader verification before commit and push.
+**Current autonomy pass verified** - Evidence packs and policy verdicts are implemented; focused merge/autonomy tests, typecheck, lint, build, and diff check pass. Preparing commit and push.

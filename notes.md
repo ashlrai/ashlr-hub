@@ -4,7 +4,7 @@
 - Hub repo: `/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub`
 - Branch: `master`
 - Remote: `https://github.com/ashlrai/ashlr-hub.git`
-- Latest pushed commit before this follow-up: `12431bd fix: Harden autonomous fleet operations`
+- Latest pushed commit before this follow-up: `4b14f6e feat: surface shared queue health`
 - Working tree at start of this push: clean and synced to `origin/master`
 - Entire: not set up; no checkpoint found for `master`
 
@@ -48,6 +48,9 @@
 - Queue health agent plan: add an additive `FleetStatus.queue.shared` object with active/expired/reclaimable leases, claims by machine, oldest expired age, next lease expiry, worked/cooldown/usage counts, and lock health; render in `/api/fleet`, `/api/control`, CLI fleet status, Mission Control, and Fleet Dashboard.
 - Backend trace agent plan: gateway decisions already include reason/trace, but concurrent dispatch and daemon ticks collapse them to aggregates. Add `DaemonTick.dispatches` with item id/title/repo, assigned backend, reason, trace, and attempted/dispatched status; surface in Mission Control logs and Fleet Activity.
 - Ecosystem doctor agent plan: add read-only `ashlr ecosystem doctor --json --root --deep` as an inventory command with synthetic sibling-repo tests, using existing `DoctorReport`/tool registry/dependency parser patterns without reusing write-capable doctor checks.
+- Autonomy evidence pass: added `src/core/autonomy/evidence-pack.ts` and `src/core/autonomy/policy.ts` so autonomous actions produce a metadata-only evidence pack and a structured policy verdict (`T0` escalate through `T5` deploy). The evidence pack stores proposal/producer/risk/scope/verification/gate metadata and intentionally does not persist raw diffs or command output.
+- Auto-merge policy integration: `autoMergeProposal` now adds a pre-mutation Gate 8 after all existing mechanical checks pass and before branch/merge mutation. It persists `~/.ashlr/evidence/<proposalId>.json`, evaluates the policy verdict, fails closed if evidence persistence fails, and refuses self-target autonomous merges unless `cfg.foundry.autoMerge.allowSelfMerge=true`.
+- Agent audit cautions: do not make persisted evidence authoritative for gates because local JSON is mutable; continue recomputing risk/provenance/verification from source inputs. Future follow-up should normalize decisions ordering before claiming "latest" judge entry and can expose evidence packs in Mission Control.
 
 ## Verification Log
 - `ASHLR_TEST_CI_TIMEOUT_MS=120000 npm run test:ci -- test/m30.ci.test.ts test/m33.release-meta.test.ts test/m262.visibility.test.ts test/m297.retry-transient-abort.test.ts`: passed, 63 tests.
@@ -71,3 +74,5 @@
 - Spend fail-closed final gate: `npm run typecheck`, `npm run build`, `npm audit`, `git diff --check`, and `npm run lint` passed. Lint remains at the existing 118-warning baseline with 0 errors.
 - Spend fail-closed invariants: `npm run test:invariants` passed, 41 files and 411 tests.
 - Spend fail-closed full CI: `npm run test:ci` passed, 396 files and 8,357 passed tests with 7 skipped.
+- Autonomy evidence focused pass: `npm test -- test/m301.autonomy-policy.test.ts test/m47.merge.test.ts test/m153.verification-gate.test.ts test/m48.automerge-pass.test.ts` passed, 4 files and 93 tests.
+- Autonomy evidence final local gates: `npm run typecheck`, `npm run lint`, `npm run build`, and `git diff --check` passed. Lint remains at the existing 118-warning baseline with 0 errors.

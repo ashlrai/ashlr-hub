@@ -31,6 +31,7 @@ import {
 import { createProposal, setStatus, loadProposal } from '../src/core/inbox/store.js';
 import { enroll, unenroll, setKill } from '../src/core/sandbox/policy.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
+import { evidencePath } from '../src/core/autonomy/evidence-pack.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -581,6 +582,14 @@ describe('M47 autoMergeProposal — local happy path', () => {
 
     // Proposal advanced to applied.
     expect(loadProposal(p.id)!.status).toBe('applied');
+
+    // M301: a successful autonomous merge leaves a durable evidence pack behind
+    // so future learning/operator UX can inspect why the merge was allowed.
+    const evidenceRaw = fs.readFileSync(evidencePath(p.id), 'utf8');
+    expect(evidenceRaw).toContain('"tier": "T4"');
+    expect(evidenceRaw).toContain('"action": "merge-main"');
+    expect(evidenceRaw).not.toContain('diff --git');
+    expect(evidenceRaw).not.toContain('+fresh doc');
 
     // The merged file is reachable from main.
     const tree = git(tmpRepo, ['ls-tree', '-r', '--name-only', 'main']);

@@ -119,6 +119,12 @@ import {
   type VerifyCommand,
 } from '../run/verify-commands.js';
 import { parseFailedTestIds } from '../run/completeness-gate.js';
+import {
+  buildAutonomyEvidencePack,
+  persistAutonomyEvidencePack,
+  type AutonomyGateEvidence,
+} from '../autonomy/evidence-pack.js';
+import { evaluateAutonomyPolicy } from '../autonomy/policy.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1294,6 +1300,11 @@ export async function autoMergeProposal(
       return refuse(`risk class '${risk}' exceeds maxRisk '${maxRisk}'`, repo);
     }
 
+    let scopeFilesForEvidence = 0;
+    let scopeLinesForEvidence = 0;
+    let maxFilesForEvidence = 4;
+    let maxLinesForEvidence = 150;
+
     // ── Gate 5.5 (M86): scope cap — only small, fully-bounded diffs auto-merge
     // to main. Defaults are conservative; config keys allow opt-in relaxation.
     // We require risk==='low' here (Gate 5 already enforces ≤maxRisk, but
@@ -1318,6 +1329,8 @@ export async function autoMergeProposal(
         typeof rawLines === 'number' && rawLines >= 1
           ? Math.floor(rawLines)
           : 150;
+      maxFilesForEvidence = MAX_AUTOMERGE_FILES;
+      maxLinesForEvidence = MAX_AUTOMERGE_LINES;
 
       // M295: respect cfg.foundry.autoMerge.maxRisk instead of hardcoding 'low'.
       // Previously this required risk==='low' for the size-based main merge even
@@ -1342,12 +1355,14 @@ export async function autoMergeProposal(
         const p = line.slice(4).trim().split('\t')[0];
         if (p && p !== '/dev/null') scopeFiles++;
       }
+      scopeFilesForEvidence = scopeFiles;
       // Count changed lines (same logic as classifyRisk body-line counter)
       let scopeLines = 0;
       for (const line of diff.split('\n')) {
         if (line.startsWith('+++') || line.startsWith('---')) continue;
         if (line.startsWith('+') || line.startsWith('-')) scopeLines++;
       }
+      scopeLinesForEvidence = scopeLines;
 
       if (scopeFiles > MAX_AUTOMERGE_FILES) {
         return refuse(
@@ -1483,6 +1498,7 @@ export async function autoMergeProposal(
       ((cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge'] as Record<string, unknown> | undefined)?.[
         'managerGate'
       ] === true;
+    let managerGateEvidence: AutonomyGateEvidence | undefined;
     if (managerGateEnabled) {
       // Resolve cached verdict: the most recent 'judged' entry for this proposal
       // within the last hour. A stale or absent entry triggers an inline judge call.
@@ -1666,12 +1682,74 @@ export async function autoMergeProposal(
       }
 
       // Gate 7 passed — record the merge decision.
+      managerGateEvidence = {
+        ok: true,
+        detail: `manager verdict '${managerVerdict.verdict}' with wouldMerge=true`,
+      };
       recordDecision({
         ts: new Date().toISOString(),
         proposalId: id,
         action: 'merged',
         reason: `gate 7 passed: verdict=${managerVerdict.verdict}, ${managerVerdict.rationale}`,
       });
+    }
+
+    // ── Gate 8: first-class autonomy policy verdict + durable evidence pack ──
+    // At this point every existing mechanical gate has passed. Before mutating
+    // anything, turn those scattered facts into one persisted evidence artifact
+    // and ask the policy engine what the farthest allowed autonomous action is.
+    // If the pack cannot be written, fail closed: an autonomous merge without an
+    // evidence trail recreates the human-as-integrator bottleneck.
+    const wantRemote = cfg.foundry?.autoMerge?.pushToRemote === true;
+    const hasGithub = getRemoteOrg(repo).org !== null;
+    const selfTarget = isSelfTargetProposal(proposal, cfg);
+    const allowSelfMerge =
+      ((cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge'] as Record<string, unknown> | undefined)?.[
+        'allowSelfMerge'
+      ] === true;
+    const evidencePack = buildAutonomyEvidencePack({
+      proposal,
+      target: toMain ? 'main' : 'branch',
+      trustBasis: trustBasis === 'verification' ? 'verification' : 'tier',
+      remotePreferred: wantRemote && hasGithub,
+      riskClass: risk,
+      authority: { ok: true, detail: authority.reason },
+      provenance: { ok: true, detail: provenance.reason ?? 'valid signed provenance' },
+      verification: {
+        passed: verify.ok,
+        detail: verify.detail,
+        commandKinds: verify.ran.map((cmd) => cmd.kind),
+      },
+      risk: { ok: true, detail: `risk '${risk}' within maxRisk '${maxRisk}'` },
+      scope: {
+        ok: true,
+        detail: `${scopeFilesForEvidence} file(s), ${scopeLinesForEvidence} changed line(s) within caps ${maxFilesForEvidence}/${maxLinesForEvidence}`,
+      },
+      ...(managerGateEvidence ? { manager: managerGateEvidence } : {}),
+      ...(selfTarget
+        ? {
+            selfTarget: {
+              ok: allowSelfMerge,
+              detail: allowSelfMerge
+                ? 'self-target allowed by cfg.foundry.autoMerge.allowSelfMerge=true'
+                : 'self-target autonomous merge requires cfg.foundry.autoMerge.allowSelfMerge=true',
+            },
+          }
+        : {}),
+    });
+    const policy = evaluateAutonomyPolicy(evidencePack, cfg);
+    evidencePack.policy = policy;
+    if (!persistAutonomyEvidencePack(evidencePack)) {
+      return refuse('autonomy evidence pack could not be persisted — fail closed', repo);
+    }
+    if (!policy.allowed) {
+      return refuse(`autonomy policy denied ${policy.action}: ${policy.reason}`, repo);
+    }
+    if (toMain && policy.action !== 'merge-main') {
+      return refuse(`autonomy policy returned '${policy.action}' but main merge requires 'merge-main'`, repo);
+    }
+    if (!toMain && policy.action !== 'apply-local-branch' && policy.action !== 'open-ready-pr') {
+      return refuse(`autonomy policy returned '${policy.action}' but branch application requires branch/PR action`, repo);
     }
 
     // ── ACTION: stage the diff on a branch off the default branch ────────────
@@ -1681,11 +1759,6 @@ export async function autoMergeProposal(
       return refuse(`could not stage merge branch: ${staged.detail}`, repo);
     }
     const branch = staged.branch;
-
-    // Decide the merge path: REMOTE (PR) when configured AND a github remote
-    // exists; otherwise LOCAL.
-    const wantRemote = cfg.foundry?.autoMerge?.pushToRemote === true;
-    const hasGithub = getRemoteOrg(repo).org !== null;
 
     let merged = false;
     let branchApplied = false; // M56: mid-tier applied to a branch/PR (never main)
