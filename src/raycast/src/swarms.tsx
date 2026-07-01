@@ -255,7 +255,7 @@ ${phasesBlock}
             />
           )}
           <Action.CopyToClipboard
-            title="Copy Swarm ID"
+            title="Copy Swarm Id"
             content={swarm.id}
             icon={Icon.Clipboard}
             shortcut={{ modifiers: ["cmd"], key: "c" }}

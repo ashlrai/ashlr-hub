@@ -129,6 +129,14 @@ export interface ResourceStrategyOptions {
   deps?: ResourceStrategyReadDeps;
 }
 
+export interface ResourceStrategyDaemonPlan {
+  mode: AutonomousDirectionMode;
+  allowDispatch: boolean;
+  forceLocalOnly: boolean;
+  runAutoMergeMaintenance: boolean;
+  reason: string;
+}
+
 const DEFAULT_MAX_OUTCOMES = 8;
 const DEFAULT_MAX_CHECKS = 8;
 const CLOUD_BACKENDS = new Set<string>(['claude', 'codex', 'nim', 'kimi', 'ashlrcode', 'opencode', 'hermes']);
@@ -480,4 +488,47 @@ export async function buildResourceStrategyReport(
     ecosystem: ecosystemSummary,
     budgets: budgetSummary,
   };
+}
+
+/**
+ * Convert the advisory report into a tiny daemon policy. This is pure so the
+ * opt-in daemon control loop can be tested independently from the readers.
+ */
+export function resourceStrategyToDaemonPlan(report: ResourceStrategyReport): ResourceStrategyDaemonPlan {
+  const reason = report.reasons[0] ?? `resource strategy recommended ${report.mode}`;
+  switch (report.mode) {
+    case 'pause':
+      return {
+        mode: report.mode,
+        allowDispatch: false,
+        forceLocalOnly: false,
+        runAutoMergeMaintenance: false,
+        reason,
+      };
+    case 'verify-only':
+    case 'auto-merge-ready':
+      return {
+        mode: report.mode,
+        allowDispatch: false,
+        forceLocalOnly: false,
+        runAutoMergeMaintenance: true,
+        reason,
+      };
+    case 'local-only':
+      return {
+        mode: report.mode,
+        allowDispatch: true,
+        forceLocalOnly: true,
+        runAutoMergeMaintenance: true,
+        reason,
+      };
+    case 'backlog-build':
+      return {
+        mode: report.mode,
+        allowDispatch: true,
+        forceLocalOnly: false,
+        runAutoMergeMaintenance: true,
+        reason,
+      };
+  }
 }

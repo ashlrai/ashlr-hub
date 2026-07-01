@@ -10,7 +10,7 @@
  * Zero new runtime dependencies — Node builtins + @raycast/api only.
  */
 
-import { execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -39,8 +39,6 @@ let _resolved: string | null = null;
  */
 export function resolveAshlr(): string {
   if (_resolved !== null) return _resolved;
-  const { execFileSync } =
-    require("child_process") as typeof import("child_process");
   for (const candidate of ASHLR_CANDIDATES) {
     if (candidate === "ashlr") {
       _resolved = candidate;

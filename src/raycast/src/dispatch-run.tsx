@@ -78,7 +78,7 @@ function RunResultDetail({ result }: { result: RunResult }) {
       actions={
         <ActionPanel>
           <Action.CopyToClipboard
-            title="Copy Run ID"
+            title="Copy Run Id"
             content={result.id}
             icon={Icon.Clipboard}
             shortcut={{ modifiers: ["cmd"], key: "c" }}

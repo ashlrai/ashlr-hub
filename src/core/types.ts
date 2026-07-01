@@ -125,6 +125,14 @@ export interface AshlrConfig {
   foundry?: {
     /** Backends the fleet may use. Absent ⇒ ['builtin'] only. */
     allowedBackends?: EngineId[];
+    /**
+     * M308: opt-in executable autonomy control loop. When true, each daemon
+     * tick consumes the resource-aware direction report before dispatching:
+     * pause/verify-only modes skip new proposal generation, local-only constrains
+     * routing to local-capable engines, and backlog-build keeps normal behavior.
+     * DEFAULT false: the direction report remains read-only/advisory.
+     */
+    autonomyControlLoop?: boolean;
     /** Per-backend preferred model id (keyed by EngineId). */
     models?: Partial<Record<EngineId, string>>;
     /** Run external engines inside a sandbox with diff capture (default true when foundry set). */
@@ -2943,6 +2951,8 @@ export interface DaemonTick {
   reason: string;
   /** M48: per-backend dispatch counts this tick (e.g. {builtin:2, claude:1}). */
   backends?: Record<string, number>;
+  /** M308: resource-aware direction mode applied to this tick when opt-in. */
+  directionMode?: 'pause' | 'local-only' | 'verify-only' | 'backlog-build' | 'auto-merge-ready';
   /** M48: proposals auto-merged this tick via the M47 gate (omitted/0 when disabled). */
   merged?: number;
 }

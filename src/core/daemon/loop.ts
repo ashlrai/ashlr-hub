@@ -81,6 +81,12 @@ import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
 import { sweepJudgedProposals } from '../fleet/worked-ledger.js';
 import { loadConfig } from '../config.js';
 import { hostname as osHostname } from 'node:os';
+import {
+  buildResourceStrategyReport,
+  resourceStrategyToDaemonPlan,
+  type AutonomousDirectionMode,
+  type ResourceStrategyDaemonPlan,
+} from '../autonomy/resource-strategy.js';
 
 // ---------------------------------------------------------------------------
 // DaemonConfig defaults (conservative)
@@ -92,6 +98,32 @@ const DEFAULTS: DaemonConfig = {
   parallel: 2,             // at most 2 concurrent sandboxed swarms per tick
   intervalMs: 5 * 60_000, // 5-minute tick interval in loop mode
 };
+
+const LOCAL_ONLY_BACKENDS = new Set<EngineId>(['builtin', 'ashlrcode', 'aw']);
+
+function autonomyControlEnabled(cfg: AshlrConfig): boolean {
+  return (cfg.foundry as Record<string, unknown> | undefined)?.['autonomyControlLoop'] === true;
+}
+
+function constrainToLocalBackends(cfg: AshlrConfig): AshlrConfig {
+  const foundry = cfg.foundry;
+  if (!foundry) {
+    return { ...cfg, foundry: { allowedBackends: ['builtin'] } };
+  }
+  const current: EngineId[] = foundry.allowedBackends?.length ? foundry.allowedBackends : ['builtin'];
+  const allowedBackends = current.filter((backend) => LOCAL_ONLY_BACKENDS.has(backend));
+  return {
+    ...cfg,
+    foundry: {
+      ...foundry,
+      allowedBackends: allowedBackends.length > 0 ? allowedBackends : ['builtin'],
+    },
+  };
+}
+
+function enforceLocalBackend(backend: EngineId, plan: ResourceStrategyDaemonPlan | null): EngineId {
+  return plan?.forceLocalOnly === true && !LOCAL_ONLY_BACKENDS.has(backend) ? 'builtin' : backend;
+}
 
 /**
  * Merge the hard-coded defaults with any partial overrides in cfg.daemon.
@@ -307,6 +339,9 @@ export async function tick(
   // WITHOUT this function clobbering an explicitly-supplied cfg.
   const liveCfg = cfg;
   const dcfg = resolveCfg(liveCfg);
+  let routingCfg = liveCfg;
+  let directionPlan: ResourceStrategyDaemonPlan | null = null;
+  let directionMode: AutonomousDirectionMode | undefined;
 
   // Append a tick record to persisted state so every operator cycle (including
   // no-op reasons like kill-switch / no-enrolled-repos / dry-run) is visible to
@@ -435,6 +470,52 @@ export async function tick(
     });
   }
 
+  if (autonomyControlEnabled(liveCfg)) {
+    try {
+      const report = await buildResourceStrategyReport(liveCfg);
+      directionPlan = resourceStrategyToDaemonPlan(report);
+      directionMode = directionPlan.mode;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      directionPlan = {
+        mode: 'pause',
+        allowDispatch: false,
+        forceLocalOnly: false,
+        runAutoMergeMaintenance: false,
+        reason: `resource strategy failed: ${msg.slice(0, 160)}`,
+      };
+      directionMode = directionPlan.mode;
+    }
+
+    routingCfg = directionPlan.forceLocalOnly ? constrainToLocalBackends(liveCfg) : liveCfg;
+
+    if (!directionPlan.allowDispatch) {
+      const autoMergePassResult = directionPlan.runAutoMergeMaintenance
+        ? await runAutoMergeMaintenancePass()
+        : null;
+      const merged = autoMergePassResult?.merged ?? 0;
+      saveDaemonState(state);
+      audit({
+        action: 'daemon:tick',
+        repo: null,
+        sandboxId: null,
+        summary: `tick ${directionPlan.mode}: ${directionPlan.reason}${
+          merged > 0 ? `; auto-merged ${merged} proposal(s)` : ''
+        }`,
+        result: 'ok',
+      });
+      return recordTick({
+        ts: now,
+        itemsConsidered: 0,
+        proposalsCreated: 0,
+        spentUsd: 0,
+        reason: directionPlan.mode,
+        directionMode,
+        ...(merged > 0 ? { merged } : {}),
+      });
+    }
+  }
+
   // -------------------------------------------------------------------------
   // 4. Build / refresh backlog for ENROLLED repos only.
   // -------------------------------------------------------------------------
@@ -467,6 +548,7 @@ export async function tick(
       proposalsCreated: 0,
       spentUsd: 0,
       reason: 'no-backlog',
+      ...(directionMode ? { directionMode } : {}),
       ...(merged > 0 ? { merged } : {}),
     });
   }
@@ -637,6 +719,7 @@ export async function tick(
       proposalsCreated: 0,
       spentUsd: 0,
       reason: 'dry-run',
+      ...(directionMode ? { directionMode } : {}),
     });
   }
 
@@ -790,10 +873,10 @@ export async function tick(
   // Determine each item's pool tier BEFORE building the task array so the
   // tieredBounded dispatcher knows which slot to request.
   const itemTiers: Array<'local' | 'cloud'> = workedSet.map((item) => {
-    const routed = routeBackend(item, liveCfg);
+    const routed = routeBackend(item, routingCfg);
     let backend = routed.backend;
-    if (backend !== 'builtin' && !withinLimit(backend, liveCfg)) backend = 'builtin';
-    const engineTier = engineTierOf(backend, liveCfg);
+    if (backend !== 'builtin' && !withinLimit(backend, routingCfg)) backend = 'builtin';
+    const engineTier = engineTierOf(backend, routingCfg);
     return poolTierOf(engineTier);
   });
 
@@ -845,9 +928,9 @@ export async function tick(
           return { item, spentUsd: 0, dispatched: false };
         }
         backend = assignedBackend;
-      } else if (liveCfg.foundry?.fabric?.gateway === true) {
-        const forecast = buildForecast('7d', liveCfg);
-        const gd = await gatewayDecide(item, liveCfg, {
+      } else if (routingCfg.foundry?.fabric?.gateway === true) {
+        const forecast = buildForecast('7d', routingCfg);
+        const gd = await gatewayDecide(item, routingCfg, {
           spentUsd: tickSpent + state.todaySpentUsd,
           forecast,
         });
@@ -890,9 +973,9 @@ export async function tick(
         // 'builtin'. A frontier backend over its rolling rate quota falls back to
         // local so work keeps flowing without exceeding the subscription's limit.
         // M85: use liveCfg (reloaded per-tick) for routing + quota checks.
-        const routed = routeBackend(item, liveCfg);
+        const routed = routeBackend(item, routingCfg);
         backend = routed.backend;
-        if (backend !== 'builtin' && !withinLimit(backend, liveCfg)) {
+        if (backend !== 'builtin' && !withinLimit(backend, routingCfg)) {
           backend = 'builtin';
         }
 
@@ -928,12 +1011,12 @@ export async function tick(
         // This file imports NO apply/merge/push/deploy primitive.
         // M85: use liveCfg for intelligence config.
         {
-          const intelRaw = liveCfg.foundry?.intelligence;
+          const intelRaw = routingCfg.foundry?.intelligence;
           if (intelRaw !== undefined && intelRaw !== null) {
-            const forecast = buildForecast('7d', liveCfg);
+            const forecast = buildForecast('7d', routingCfg);
             const goal = buildItemGoal(item);
-            const est = await estimateRun(goal, { maxTokens: perItemMaxTokens }, liveCfg);
-            const recommended = await recommendRoute(item, liveCfg, { estimate: est });
+            const est = await estimateRun(goal, { maxTokens: perItemMaxTokens }, routingCfg);
+            const recommended = await recommendRoute(item, routingCfg, { estimate: est });
             // Only override when the recommend result doesn't escalate a local decision.
             if (routed.tier !== 'local' || recommended.tier === 'local') {
               backend = recommended.backend;
@@ -941,7 +1024,7 @@ export async function tick(
             // Budget cascade: step down tier when near cap.
             const recovery = recoverWithinBudget(
               { backend, tier: recommended.tier, reason: recommended.reason },
-              liveCfg,
+              routingCfg,
               tickSpent + state.todaySpentUsd,
               forecast,
             );
@@ -961,6 +1044,7 @@ export async function tick(
         }
       } // end flag-off path
 
+      backend = enforceLocalBackend(backend, directionPlan);
       const goal = buildItemGoal(item);
       const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
 
@@ -978,7 +1062,7 @@ export async function tick(
       if (backend === 'builtin') {
         const swarmRun = await runSwarm(
           { goal },
-          liveCfg,
+          routingCfg,
           {
             sandbox: true,             // M21: isolated git-worktree — NEVER user's tree
             requireSandbox: true,      // M24: sandbox MANDATORY — abort if it can't be created
@@ -1016,10 +1100,10 @@ export async function tick(
         // Flag-off (ashlrcodeExecutor absent/false) → falls through to runGoal,
         // byte-identical to pre-M185 behavior.
         if (
-          (liveCfg.foundry as Record<string, unknown>)?.['ashlrcodeExecutor'] === true &&
-          poolTierOf(engineTierOf(backend)) === 'local'
+          (routingCfg.foundry as Record<string, unknown>)?.['ashlrcodeExecutor'] === true &&
+          poolTierOf(engineTierOf(backend, routingCfg)) === 'local'
         ) {
-          const acResult = await runViaAshlrcode(item, item.repo, liveCfg);
+          const acResult = await runViaAshlrcode(item, item.repo, routingCfg);
           swarmSpent = 0; // ac does not bill separately; cost accounted by engine
           tickSpent += swarmSpent;
           audit({
@@ -1036,9 +1120,9 @@ export async function tick(
         // candidates and let the critic pick the winner. Flag-off: bestOfN absent
         // or 1 → single runGoal call, byte-identical to pre-M170 behavior.
         const bestOfN: number =
-          typeof (liveCfg.foundry as Record<string, unknown> | undefined)?.['bestOfN'] === 'number' &&
-          ((liveCfg.foundry as Record<string, unknown>)['bestOfN'] as number) > 1
-            ? Math.floor((liveCfg.foundry as Record<string, unknown>)['bestOfN'] as number)
+          typeof (routingCfg.foundry as Record<string, unknown> | undefined)?.['bestOfN'] === 'number' &&
+          ((routingCfg.foundry as Record<string, unknown>)['bestOfN'] as number) > 1
+            ? Math.floor((routingCfg.foundry as Record<string, unknown>)['bestOfN'] as number)
             : 1;
 
         let runState: Awaited<ReturnType<typeof runGoal>>;
@@ -1046,7 +1130,7 @@ export async function tick(
           // Route through runBestOfN; use its winner's underlying runState.
           // runBestOfN never throws; if all candidates fail, winner is undefined
           // and we fall through to a zero-cost no-proposal outcome.
-          const bonResult = await runBestOfN(item, liveCfg, {
+          const bonResult = await runBestOfN(item, routingCfg, {
             n: bestOfN,
             workItemId: item.id,
             workSource: item.source,
@@ -1069,7 +1153,7 @@ export async function tick(
           runState = (bonResult.winner as unknown as { state: Awaited<ReturnType<typeof runGoal>> }).state
             ?? { id: bonResult.winner.proposalId ?? `bon-${Date.now()}`, status: 'done' as const, usage: undefined };
         } else {
-          runState = await runGoal(goal, liveCfg, {
+          runState = await runGoal(goal, routingCfg, {
             engine: backend,
             sandboxEngine: true,
             requireSandbox: true,
@@ -1117,13 +1201,13 @@ export async function tick(
     // file a TuningProposal. NEVER auto-apply. This block imports NO
     // apply/merge/push/deploy primitive.
     if (dispatched && swarmSpent > 0) {
-      const intelRaw2 = liveCfg.foundry?.intelligence;
+      const intelRaw2 = routingCfg.foundry?.intelligence;
       if (intelRaw2 !== undefined && intelRaw2 !== null) {
         const intelCfg2 = intelRaw2 as { anomalyK?: number };
         const anomalyK = typeof intelCfg2.anomalyK === 'number' && intelCfg2.anomalyK > 0
           ? intelCfg2.anomalyK : 4;
         const goal2 = buildItemGoal(item);
-        const est2 = await estimateRun(goal2, { maxTokens: perItemMaxTokens }, liveCfg).catch((err) => { console.warn('[ashlr] daemon:tick estimateRun failed:', (err as Error)?.message ?? err); return null; });
+        const est2 = await estimateRun(goal2, { maxTokens: perItemMaxTokens }, routingCfg).catch((err) => { console.warn('[ashlr] daemon:tick estimateRun failed:', (err as Error)?.message ?? err); return null; });
         const p50 = est2?.estCostUsd.median ?? 0;
         if (p50 > 0 && swarmSpent > anomalyK * p50) {
           audit({
@@ -1169,21 +1253,21 @@ export async function tick(
   //
   // FLAG-OFF (default): falls through to the existing batch/tieredBounded paths —
   // byte-identical to pre-M255 behavior.
-  const useConcurrentDispatch = liveCfg.foundry?.fabric?.concurrentDispatch === true;
+  const useConcurrentDispatch = routingCfg.foundry?.fabric?.concurrentDispatch === true;
 
   let outcomes: PromiseSettledResult<ItemOutcome>[];
 
   try {
   if (useConcurrentDispatch) {
     // Re-sense headroom before planning (cached 30s; no extra cost in practice).
-    const concurrentSnap = await getResourceSnapshot(liveCfg).catch(() => ({
+    const concurrentSnap = await getResourceSnapshot(routingCfg).catch(() => ({
       generatedAt: new Date().toISOString(),
       backends: [{ backend: 'builtin' as const, availability: 'open' as const, usedPct: null, cap: null, capUnit: null, capWindow: null, resetsAt: null, costPerMTokenOut: 0, p50LatencyMs: null, snapshotAt: new Date().toISOString(), reason: 'snapshot-failed', backoffUntilMs: null }],
     }));
 
     const maxSlotsPerBackend: number =
-      typeof (liveCfg.foundry?.fabric as Record<string, unknown> | undefined)?.['maxSlotsPerBackend'] === 'number'
-        ? Math.max(1, (liveCfg.foundry!.fabric as Record<string, unknown>)['maxSlotsPerBackend'] as number)
+      typeof (routingCfg.foundry?.fabric as Record<string, unknown> | undefined)?.['maxSlotsPerBackend'] === 'number'
+        ? Math.max(1, (routingCfg.foundry!.fabric as Record<string, unknown>)['maxSlotsPerBackend'] as number)
         : 3;
 
     const concurrentCfg = { maxSlotsPerBackend };
@@ -1192,9 +1276,9 @@ export async function tick(
     // Build routing hints in parallel via gateway.decide, then call the pure planner.
     const routeHints = new Map<string, EngineId>();
     const routeReasons = new Map<string, string>();
-    if (liveCfg.foundry?.fabric?.gateway === true) {
+    if (routingCfg.foundry?.fabric?.gateway === true) {
       const gds = await Promise.allSettled(
-        workedSet.map((item) => gatewayDecide(item, liveCfg, { spentUsd: tickSpent + state.todaySpentUsd }))
+        workedSet.map((item) => gatewayDecide(item, routingCfg, { spentUsd: tickSpent + state.todaySpentUsd }))
       );
       for (let i = 0; i < workedSet.length; i++) {
         const d = gds[i];
@@ -1353,6 +1437,7 @@ export async function tick(
       spentUsd: tickSpent,
       reason: 'state-persistence-failed',
       ...(Object.keys(backendDispatch).length > 0 ? { backends: backendDispatch } : {}),
+      ...(directionMode ? { directionMode } : {}),
       ...(merged > 0 ? { merged } : {}),
     };
     audit({
@@ -1377,6 +1462,7 @@ export async function tick(
     spentUsd: tickSpent,
     reason: 'ok',
     ...(Object.keys(backendDispatch).length > 0 ? { backends: backendDispatch } : {}),
+    ...(directionMode ? { directionMode } : {}),
     ...(merged > 0 ? { merged } : {}),
   };
   state.ticks = [...state.ticks, tickRecord];

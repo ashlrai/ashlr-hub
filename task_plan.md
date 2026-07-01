@@ -37,7 +37,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Resolve or explain GitHub Dependabot alert mismatch
 - [x] Follow-up: Add next autonomous control-plane execution improvement
 - [x] Follow-up: Clear nested Raycast audit vulnerabilities
-- [ ] Follow-up: Repair Raycast lint/package metadata
+- [x] Follow-up: Repair nested Raycast local lint
+- [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
 1. What prevents Ashlr Hub from acting as a reliable always-on engineering fleet today?
@@ -65,6 +66,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Fleet status now surfaces a lightweight `autonomyDirection` summary, so `/api/fleet`, CLI status, and web control JSON expose the current autonomous operating mode without running a full ecosystem doctor.
 - Idle daemon ticks now run the gated auto-merge maintenance pass before returning `no-backlog`, closing a 24/7 drain dead-zone where pending verified proposals could wait for unrelated fresh backlog.
 - Nested Raycast audit now passes after scoped overrides for patched `esbuild` and `minimatch`; `ray lint` still has separate packaging/config blockers (`author` 404 and ignored `src/**`).
+- `foundry.autonomyControlLoop` is the first opt-in executable direction mode: daemon ticks consume the resource strategy report, pause/verify-only modes suppress new proposal generation, and local-only clamps dispatch to local/builtin paths.
+- Nested Raycast local lint now has its own flat ESLint config and `npm run lint` no longer inherits the root `src/raycast/**` ignore. Raycast publish validation still requires replacing `author: "masonwyatt"` with a real Raycast username.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -92,4 +95,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current autonomy control pass makes outcome feedback item-accurate, skips permanent auto-merge blockers before judge calls, verifies before spending judge calls in verification mode, and adds a read-only resource-aware direction report.
 
 ## Status
-**Next batch verified locally** - Direction visibility, idle auto-merge maintenance, root alert cleanup, and nested Raycast audit fixes are implemented and verified; preparing commit/push.
+**Current batch verified locally** - Executable autonomy direction control, local Raycast lint repair, and Raycast source lint fixes are implemented and verified; preparing commit/push.

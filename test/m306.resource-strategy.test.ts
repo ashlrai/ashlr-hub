@@ -12,7 +12,10 @@ import type { ResourceSnapshot } from '../src/core/fabric/resource-monitor.js';
 import type { FleetStatus } from '../src/core/fleet/status.js';
 import type { OutcomeRecord } from '../src/core/autonomy/outcome-records.js';
 import type { ResourceStrategyReadDeps } from '../src/core/autonomy/resource-strategy.js';
-import { buildResourceStrategyReport } from '../src/core/autonomy/resource-strategy.js';
+import {
+  buildResourceStrategyReport,
+  resourceStrategyToDaemonPlan,
+} from '../src/core/autonomy/resource-strategy.js';
 import type { AshlrConfig } from '../src/core/types.js';
 
 function cfg(overrides: Partial<AshlrConfig> = {}): AshlrConfig {
@@ -263,3 +266,57 @@ describe('buildResourceStrategyReport', () => {
   });
 });
 
+describe('resourceStrategyToDaemonPlan', () => {
+  it('turns pause into a no-dispatch daemon plan', async () => {
+    const report = await buildResourceStrategyReport(cfg(), {
+      deps: deps({ diagnoseGuardHealth: () => guard(true) }),
+    });
+
+    const plan = resourceStrategyToDaemonPlan(report);
+
+    expect(plan).toMatchObject({
+      mode: 'pause',
+      allowDispatch: false,
+      forceLocalOnly: false,
+      runAutoMergeMaintenance: false,
+    });
+  });
+
+  it('turns verify-only into merge maintenance without new dispatch', async () => {
+    const report = await buildResourceStrategyReport(cfg(), {
+      deps: deps({
+        buildFleetStatus: async () => fleet({ proposals: { pending: 1, frontierPending: 1, applied: 0 } }),
+      }),
+    });
+
+    const plan = resourceStrategyToDaemonPlan(report);
+
+    expect(plan).toMatchObject({
+      mode: 'verify-only',
+      allowDispatch: false,
+      forceLocalOnly: false,
+      runAutoMergeMaintenance: true,
+    });
+  });
+
+  it('turns local-only into constrained dispatch with merge maintenance left on', async () => {
+    const report = await buildResourceStrategyReport(cfg(), {
+      deps: deps({
+        getResourceSnapshot: async () => resources([
+          backend('claude', 'exhausted'),
+          backend('codex', 'throttled'),
+          backend('builtin', 'open'),
+        ]),
+      }),
+    });
+
+    const plan = resourceStrategyToDaemonPlan(report);
+
+    expect(plan).toMatchObject({
+      mode: 'local-only',
+      allowDispatch: true,
+      forceLocalOnly: true,
+      runAutoMergeMaintenance: true,
+    });
+  });
+});

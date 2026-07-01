@@ -335,8 +335,7 @@ export default function Pulse() {
   // Initial load
   useEffect(() => {
     load(window);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [load, window]);
 
   // Auto-revalidate every 2 s when not already loading (M13)
   useAutoRevalidate(() => load(window), 2_000, !isLoading);
@@ -344,7 +343,6 @@ export default function Pulse() {
   // Reload when window changes
   const handleWindowChange = (w: Window) => {
     setWindow(w);
-    load(w);
   };
 
   // ── Loading state ──────────────────────────────────────────────────────────

@@ -145,6 +145,25 @@ vi.mock('../src/core/fleet/automerge-pass.js', () => ({
   runAutoMergePass: (...args: unknown[]) => mockRunAutoMergePass(...args),
 }));
 
+const mockBuildResourceStrategyReport = vi.fn();
+vi.mock('../src/core/autonomy/resource-strategy.js', () => ({
+  buildResourceStrategyReport: (...args: unknown[]) => mockBuildResourceStrategyReport(...args),
+  resourceStrategyToDaemonPlan: (report: { mode?: string; reasons?: string[] }) => {
+    const mode = report.mode ?? 'backlog-build';
+    const reason = report.reasons?.[0] ?? `mock ${mode}`;
+    if (mode === 'pause') {
+      return { mode, allowDispatch: false, forceLocalOnly: false, runAutoMergeMaintenance: false, reason };
+    }
+    if (mode === 'verify-only' || mode === 'auto-merge-ready') {
+      return { mode, allowDispatch: false, forceLocalOnly: false, runAutoMergeMaintenance: true, reason };
+    }
+    if (mode === 'local-only') {
+      return { mode, allowDispatch: true, forceLocalOnly: true, runAutoMergeMaintenance: true, reason };
+    }
+    return { mode: 'backlog-build', allowDispatch: true, forceLocalOnly: false, runAutoMergeMaintenance: true, reason };
+  },
+}));
+
 vi.mock('../src/core/run/learned-router.js', () => ({
   recommendRoute: async () => ({ backend: 'builtin', tier: 'local', reason: 'mock' }),
   recoverWithinBudget: (_r: unknown, _c: unknown) => ({
@@ -208,6 +227,7 @@ beforeEach(() => {
   mockRouteBackend.mockReset();
   mockEngineTierOf.mockReset();
   mockRunAutoMergePass.mockReset();
+  mockBuildResourceStrategyReport.mockReset();
 
   fx = makeFixture();
 
@@ -239,6 +259,7 @@ beforeEach(() => {
   mockRunCounterfactualReplay.mockResolvedValue({ replayed: 0, proposals: [] });
   mockRunViaAshlrcode.mockResolvedValue({ ok: true });
   mockRunAutoMergePass.mockResolvedValue({ merged: 0 });
+  mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'backlog-build', reasons: ['mock backlog'] });
   // Default: builtin backend (route to runSwarm path).
   mockRouteBackend.mockReturnValue({ backend: 'builtin', tier: 'local', reason: 'mock' });
   // Default: local engine tier.
@@ -396,6 +417,65 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunAutoMergePass).not.toHaveBeenCalled();
     expect(mockBuildBacklog).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1e: autonomy control pause skips backlog and dispatch', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'pause', reasons: ['mock guard block'] });
+
+    const result = await tick(
+      { ...cfgBuiltin(), foundry: { autonomyControlLoop: true } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('pause');
+    expect(result.directionMode).toBe('pause');
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockRunAutoMergePass).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1f: autonomy control verify-only runs merge maintenance and skips new backlog', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'verify-only', reasons: ['pending proposals need verification'] });
+    mockRunAutoMergePass.mockResolvedValue({ merged: 1 });
+
+    const result = await tick(
+      { ...cfgBuiltin(), foundry: { autonomyControlLoop: true, autoMerge: { enabled: true } } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('verify-only');
+    expect(result.directionMode).toBe('verify-only');
+    expect(result.merged).toBe(1);
+    expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1g: autonomy control local-only clamps cloud routing to builtin dispatch', async () => {
+    enrollWithItems(1);
+    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'local-only', reasons: ['cloud resources constrained'] });
+    mockRouteBackend.mockReturnValue({ backend: 'claude', tier: 'frontier', reason: 'mock cloud' });
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: {
+          autonomyControlLoop: true,
+          allowedBackends: ['claude', 'builtin'],
+        },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.directionMode).toBe('local-only');
+    expect(result.backends).toEqual({ builtin: 1 });
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal).not.toHaveBeenCalled();
   });
 
   it('A2: buildBacklog throws → tick swallows and returns no-backlog', async () => {
