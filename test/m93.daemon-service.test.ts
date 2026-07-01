@@ -126,6 +126,25 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(def.content).toContain('<false/>');
   });
 
+  it('plist crash restart throttle is independent from daemon work interval', () => {
+    const def = generateServiceDefinition({
+      ...baseOpts('darwin'),
+      intervalMs: 1_800_000,
+    });
+    expect(def.content).toContain('<key>ThrottleInterval</key>');
+    expect(def.content).toContain('<integer>30</integer>');
+    expect(def.content).toContain('<string>1800000</string>');
+    expect(def.content).not.toContain('<integer>1800</integer>');
+  });
+
+  it('plist honors custom restartSec with a 5s minimum', () => {
+    const custom = generateServiceDefinition({ ...baseOpts('darwin'), restartSec: 12 });
+    expect(custom.content).toContain('<integer>12</integer>');
+
+    const clamped = generateServiceDefinition({ ...baseOpts('darwin'), restartSec: 1 });
+    expect(clamped.content).toContain('<integer>5</integer>');
+  });
+
   it('plist PATH env includes ~/.local/bin and /opt/homebrew/bin', () => {
     const def = generateServiceDefinition(baseOpts('darwin'));
     expect(def.content).toContain(path.join(FAKE_HOME, '.local', 'bin'));
@@ -176,6 +195,24 @@ describe('generateServiceDefinition — linux (systemd)', () => {
   it('unit has Restart=always', () => {
     const def = generateServiceDefinition(baseOpts('linux'));
     expect(def.content).toContain('Restart=always');
+  });
+
+  it('unit RestartSec is independent from daemon work interval', () => {
+    const def = generateServiceDefinition({
+      ...baseOpts('linux'),
+      intervalMs: 1_800_000,
+    });
+    expect(def.content).toContain('RestartSec=30');
+    expect(def.content).toContain('--interval 1800000');
+    expect(def.content).not.toContain('RestartSec=1800');
+  });
+
+  it('unit honors custom restartSec with a 5s minimum', () => {
+    const custom = generateServiceDefinition({ ...baseOpts('linux'), restartSec: 9 });
+    expect(custom.content).toContain('RestartSec=9');
+
+    const clamped = generateServiceDefinition({ ...baseOpts('linux'), restartSec: 0 });
+    expect(clamped.content).toContain('RestartSec=5');
   });
 
   it('unit WantedBy=default.target', () => {

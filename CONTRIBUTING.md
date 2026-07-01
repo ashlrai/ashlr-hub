@@ -40,6 +40,7 @@ To install the CLI while developing:
 | `npm run dev` | Run the CLI from source via `tsx` (no compile step). E.g. `npm run dev -- status` |
 | `npm test` | Run the full vitest suite once (`vitest run`) |
 | `npm run test:serial` | Run tests without file parallelism — required for tests that touch the same home dir |
+| `npm run test:ci` | Run the hermetic serial suite with isolated HOME and a watchdog timeout |
 | `npm run lint` | ESLint over the repo |
 | `npm run typecheck` | `tsc --noEmit` — strict type check, no emit |
 | `npm run build` | `tsc -p tsconfig.json` + `scripts/copy-assets.mjs` → `dist/` |
@@ -51,7 +52,7 @@ To install the CLI while developing:
 A change is ready when all four pass:
 
 ```sh
-npm run typecheck && npm run lint && npm test && npm run build
+npm run typecheck && npm run lint && npm run test:ci && npm run build
 ```
 
 The test suite must stay green and must not shrink (900+ tests across `test/`). Tests are organized by milestone (`m4.*.test.ts`, `m45.*.test.ts`, …) plus hardening suites (`h1.*` through `h8.*`).
@@ -59,10 +60,10 @@ The test suite must stay green and must not shrink (900+ tests across `test/`). 
 ### Running tests hermetically (CI-safe)
 
 ```sh
-HOME=$(mktemp -d) npx vitest run --no-file-parallelism
+npm run test:ci
 ```
 
-This is the canonical CI invocation. Tests must not depend on the developer's real `~/.ashlr/`, real Desktop, real model endpoints, or installed tools.
+This is the canonical CI invocation. It isolates HOME/ASHLR_HOME and kills the run with exit code 124 if Vitest leaks handles or exceeds `ASHLR_TEST_CI_TIMEOUT_MS` (default 15 minutes). Tests must not depend on the developer's real `~/.ashlr/`, real Desktop, real model endpoints, or installed tools.
 
 ---
 

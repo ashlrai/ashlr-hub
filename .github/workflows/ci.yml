@@ -35,10 +35,10 @@ jobs:
         run: npm run build
 
       - name: Test (hermetic)
-        # HOME=$(mktemp -d) isolates tests from the developer's real ~/.ashlr/ state.
-        # --no-file-parallelism is required for tests that share home-dir fixtures.
+        # scripts/test-ci.mjs isolates HOME from real ~/.ashlr/ state and adds
+        # a watchdog so leaked handles fail loudly instead of hanging the gate.
         # This is the canonical CI invocation documented in CONTRIBUTING.md.
-        run: HOME=$(mktemp -d) npx vitest run --no-file-parallelism
+        run: npm run test:ci
 
       # M33: keep the published exports map honest — pack the tarball, install
       # it into a clean dir, and exercise the bin + the ./types entry point.

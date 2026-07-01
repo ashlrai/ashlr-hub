@@ -33,6 +33,8 @@ export interface ServiceInstallOptions {
   budget?: number;
   /** Interval in ms passed to `daemon start --interval`. */
   intervalMs?: number;
+  /** Crash restart throttle in seconds (default: 30). Independent of intervalMs. */
+  restartSec?: number;
   /** Parallelism passed to `daemon start --parallel`. */
   parallel?: number;
   /** Register the service to auto-start on login/boot (default: true). */
@@ -107,16 +109,19 @@ export function generateServiceDefinition(opts: ServiceInstallOptions = {}): Ser
 
   const budget = opts.budget ?? 5;
   const intervalMs = opts.intervalMs ?? 1_800_000;
+  const restartSec = Number.isFinite(opts.restartSec) && opts.restartSec !== undefined
+    ? Math.max(5, Math.floor(opts.restartSec))
+    : 30;
   const parallel = opts.parallel ?? 1;
   const keepAwake = opts.keepAwake ?? false;
 
   switch (platform) {
     case 'darwin':
-      return buildLaunchdDefinition({ nodePath, binPath, home, configDir, budget, intervalMs, parallel, keepAwake });
+      return buildLaunchdDefinition({ nodePath, binPath, home, configDir, budget, intervalMs, restartSec, parallel, keepAwake });
     case 'linux':
-      return buildSystemdDefinition({ nodePath, binPath, home, configDir, budget, intervalMs, parallel });
+      return buildSystemdDefinition({ nodePath, binPath, home, configDir, budget, intervalMs, restartSec, parallel });
     case 'win32':
-      return buildSchtasksDefinition({ nodePath, binPath, home, configDir, budget, intervalMs, parallel });
+      return buildSchtasksDefinition({ nodePath, binPath, home, configDir, budget, intervalMs, restartSec, parallel });
     default:
       throw new Error(`Unsupported platform: ${platform}`);
   }
@@ -133,6 +138,7 @@ interface BuildOpts {
   configDir: string;
   budget: number;
   intervalMs: number;
+  restartSec: number;
   parallel: number;
   /** Wrap ProgramArguments with caffeinate -i -s (macOS only). */
   keepAwake?: boolean;
@@ -206,7 +212,7 @@ ${programArgs.join('\n')}
 \t\t<false/>
 \t</dict>
 \t<key>ThrottleInterval</key>
-\t<integer>${Math.floor(o.intervalMs / 1000)}</integer>
+\t<integer>${o.restartSec}</integer>
 \t<key>StandardOutPath</key>
 \t<string>${outLog}</string>
 \t<key>StandardErrorPath</key>
@@ -240,7 +246,7 @@ After=network.target
 Type=simple
 ExecStart=${o.nodePath} ${o.binPath} daemon start --budget ${o.budget} --interval ${o.intervalMs} --parallel ${o.parallel}
 Restart=always
-RestartSec=${Math.floor(o.intervalMs / 1000)}
+RestartSec=${o.restartSec}
 Environment=HOME=${o.home}
 StandardOutput=append:${outLog}
 StandardError=append:${outLog}

@@ -15,7 +15,8 @@
  *  11. app.js snapshot SSE handler suppresses polling interval while SSE live
  *  12. app.js SSE error handler restores polling fallback
  *  13. app.js Fleet Dashboard wires the M262 visibility panel
- *  14. SSE response has Cache-Control: no-cache + Connection: keep-alive
+ *  14. app.js inbox detail reads current proposal review fields
+ *  15. SSE response has Cache-Control: no-cache + Connection: keep-alive
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -399,7 +400,17 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('snap.visibility');
   });
 
-  // ── 14. SSE response headers ──────────────────────────────────────────────
+  it('app.js inbox detail reads current proposal review fields', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    expect(src).toContain('p.riskClass ?? p.riskLevel');
+    expect(src).toContain("['Verify',  verify]");
+    expect(src).toContain("['Taste',   taste]");
+  });
+
+  // ── 15. SSE response headers ──────────────────────────────────────────────
 
   it('SSE response has Cache-Control: no-cache and Connection: keep-alive', async () => {
     const { res } = await openSseAndDrainInitial();

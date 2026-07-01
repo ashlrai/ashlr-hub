@@ -35,10 +35,9 @@ describe('M30 CI workflow', () => {
     expect(ciYml).toContain('npm run typecheck');
     expect(ciYml).toContain('npm run lint');
     expect(ciYml).toContain('npm run build');
-    // The hermetic test invocation isolates from the developer's ~/.ashlr/ state.
-    // HOME=$(mktemp -d) is required so CI tests never read real local config.
-    expect(ciYml).toMatch(/HOME=\$\(mktemp -d\).*vitest run/);
-    expect(ciYml).toContain('--no-file-parallelism');
+    // The canonical test runner isolates HOME and adds a watchdog timeout.
+    expect(ciYml).toContain('npm run test:ci');
+    expect(pkg.scripts?.['test:ci']).toContain('scripts/test-ci.mjs');
   });
 
   it('enables npm caching for fast installs', () => {

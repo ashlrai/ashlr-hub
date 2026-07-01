@@ -1,36 +1,33 @@
-# Task Plan: Ashlr Hub Productivity Push
+# Task Plan: Ashlr Autonomous Fleet Ambition Push
 
 ## Goal
-Make Ashlr Hub more functional by quickly identifying the highest-leverage broken or incomplete areas, implementing focused fixes, and verifying the repo is healthier than when we started.
+Identify and execute the highest-leverage work that makes Ashlr Hub and its surrounding tool ecosystem more useful as a 24/7 autonomous self-improving engineering fleet.
 
 ## Phases
-- [x] Phase 1: Establish current state and session context
-- [x] Phase 2: Parallel exploration of architecture, tests, and existing untracked work
-- [x] Phase 3: Choose a high-leverage implementation slice
-- [x] Phase 4: Execute fixes with focused ownership
-- [x] Phase 5: Verify end-to-end and summarize next work
-- [x] Phase 6: Continue with frontend visibility, docs/config drift, and M52 sandbox proof hardening
+- [x] Phase 1: Confirm repo/GitHub/session state
+- [x] Phase 2: Parallel multi-agent ecosystem audit
+- [x] Phase 3: Synthesize an ambitious product/architecture roadmap
+- [x] Phase 4: Execute high-leverage improvements now
+- [ ] Phase 5: Verify, commit, push, and leave resumable next steps
 
 ## Key Questions
-1. What is Ashlr Hub's intended primary workflow and where is it currently least functional?
-2. Are the current untracked files intentional in-progress work, generated scratch files, or abandoned changes?
-3. Which failing tests, TODOs, or integration gaps give the best functionality return for one focused coding pass?
+1. What prevents Ashlr Hub from acting as a reliable always-on engineering fleet today?
+2. Which surrounding Ashlr repos are key infrastructure versus abandoned experiments?
+3. What should be built into Mission Control so the system feels operationally useful every day?
+4. What risks would make 24/7 autonomy dangerous, expensive, noisy, or untrustworthy?
+5. What can be improved immediately in this repo without destabilizing the pushed baseline?
 
 ## Decisions Made
-- Use parallel agents for independent exploration because the user explicitly asked to deploy many agents and maximize Codex throughput.
-- Preserve untracked files until inspected; do not revert or overwrite unknown local work.
-- Prioritize M262 visibility and M297 transient retry because multiple explorers independently identified them as the highest-leverage functionality gaps.
-- Add low-risk gate hygiene from verification exploration: ignore generated/local artifacts in ESLint and run invariant tests serially.
-- Wire the new visibility snapshot into the existing Fleet Dashboard panel system instead of introducing new styling primitives.
-- Align Node support metadata to Node 22 because README, install script, CI, and release expectations now agree on that floor.
-- Fix M52 by reordering macOS SBPL write allows so broad TMPDIR writes cannot override the later HOME write deny.
+- Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
+- Keep current hub `master` clean and synced as baseline; new work should be incremental and verified before pushing.
+- Audit the ecosystem from local repos first, then use GitHub/official docs only where current external state matters.
+- Bound the CI/publish test gate with a hermetic wrapper instead of letting leaked handles freeze autonomous delivery indefinitely.
+- Land small operational patches now: service restart delay and inbox review fields.
+- Defer major Vitest 2 -> 4 / Vite 8 dependency migration to a separate focused branch because it is a major test-runner upgrade.
 
 ## Errors Encountered
-- `entire resume master`: no checkpoint found for this branch, so there is no prior Entire session to restore.
-- Initial M262 test runs leaked to the real decisions ledger; resolved with a visibility test injection seam and `ASHLR_HOME` support in the ledger.
-- Initial M297 retry runs did not reach the stub binary because the sandbox test hatch was not forwarded; resolved by forwarding `allowAnyRepo` only when `ASHLR_TEST_ALLOW_ANY_REPO=1`.
-- The first docs/config patch missed package-lock context; resolved with narrower hunks.
-- The M52 proof had been non-hermetic because fake HOME under TMPDIR exposed an SBPL ordering hole; resolved by moving broad temp write allows before the HOME write deny and re-allowing only intended HOME exceptions afterward.
+- Entire is not set up for this repo; `entire resume master` has no checkpoint.
+- Full serial Vitest can hang after many tests with one worker alive; mitigated with `scripts/test-ci.mjs` watchdog for CI/publish gates.
 
 ## Status
-**Complete** - M262/M297 functionality landed, Mission Control now has a visibility panel, Node/NIM drift is aligned, M52 sandbox proof is hermetic, and verification passed.
+**Currently in Phase 5** - Verifying the shipped gate/service/inbox improvements and preparing a pushed commit.

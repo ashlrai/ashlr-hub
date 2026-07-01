@@ -58,13 +58,14 @@
     "node": ">=22"
   },
   "scripts": {
-    "prepublishOnly": "npm run typecheck && npm run lint && npm run test:serial",
+    "prepublishOnly": "npm run typecheck && npm run lint && npm run test:ci",
     "prepack": "npm run build",
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "build:binary": "node scripts/build-sea.mjs",
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
     "test:serial": "vitest run --no-file-parallelism",
+    "test:ci": "node scripts/test-ci.mjs",
     "test:invariants": "vitest run test/h*.test.ts --no-file-parallelism",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"

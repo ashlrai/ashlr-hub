@@ -1865,6 +1865,17 @@ function buildInboxDetail(p) {
   }, '← Back'));
 
   const repoBase = (p.repo ?? '').split('/').filter(Boolean).pop() ?? p.repo ?? '—';
+  const risk = p.riskClass ?? p.riskLevel ?? '—';
+  const verify =
+    p.verifyResult == null
+      ? '—'
+      : p.verifyResult.passed === true
+        ? 'passed'
+        : `failed${Array.isArray(p.verifyResult.failed) && p.verifyResult.failed.length > 0 ? ` (${p.verifyResult.failed.length})` : ''}`;
+  const taste =
+    p.taste == null
+      ? '—'
+      : `${p.taste.verdict ?? 'scored'}${typeof p.taste.overall === 'number' ? ` (${fmt(p.taste.overall, 1)}/5)` : ''}`;
 
   // Summary card
   const summary = el('div', { cls: 'inbox-detail__summary card' });
@@ -1873,7 +1884,9 @@ function buildInboxDetail(p) {
     ['Kind',    p.kind ?? '—'],
     ['Repo',    p.repo ?? '—'],
     ['Engine',  p.engine ?? '—'],
-    ['Risk',    p.riskLevel ?? '—'],
+    ['Risk',    risk],
+    ['Verify',  verify],
+    ['Taste',   taste],
     ['Origin',  p.origin ?? '—'],
     ['Status',  p.status ?? '—'],
     ['Created', fmtDate(p.createdAt)],

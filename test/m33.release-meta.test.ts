@@ -87,7 +87,7 @@ describe('release workflow', () => {
   it('is tag-triggered and runs the full verify gate before publish', () => {
     expect(workflow).toContain('tags: ["v*"]');
     expect(workflow).toContain('needs: verify');
-    for (const step of ['npm run typecheck', 'npm run lint', 'npm test']) {
+    for (const step of ['npm run typecheck', 'npm run lint', 'npm run test:ci']) {
       expect(workflow).toContain(step);
     }
   });
