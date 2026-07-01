@@ -1960,6 +1960,12 @@ export interface DashboardSnapshot {
    */
   daemon?: { running: boolean; todaySpentUsd: number; pendingProposals: number };
   /**
+   * M49/M300: OPTIONAL fleet control-plane snapshot. Populated by the web
+   * dashboard producer so Fleet Dashboard can render queue/lease health without
+   * making a second request. READ-ONLY and never carries secrets.
+   */
+  fleet?: import('./fleet/status.js').FleetStatus;
+  /**
    * M29: OPTIONAL org-level portfolio roll-up. ABSENT on existing producers /
    * tests (so they stay valid); populated by buildSnapshot when the v2 sources
    * are present. READ-ONLY aggregation over already-local state — health (M27,

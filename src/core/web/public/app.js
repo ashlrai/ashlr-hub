@@ -2145,6 +2145,13 @@ function quotaTag(quota) {
   }, quota);
 }
 
+function sharedQueueMetric(shared) {
+  if (!shared) return null;
+  if (!shared.readable) return 'unreadable';
+  const suffix = shared.lock?.stale ? ' · stale lock' : '';
+  return `${shared.activeClaims ?? 0} active / ${shared.reclaimableClaims ?? 0} reclaimable${suffix}`;
+}
+
 function renderFleet() {
   if (state.activeView !== 'fleet') return;
   const main = getMain();
@@ -2181,13 +2188,20 @@ function renderFleet() {
 
   // Daemon + queue + merges summary card
   const summary = el('div', { cls: 'fleet-card card' });
-  summary.appendChild(infoGrid([
+  const sharedQueue = f.queue?.shared;
+  const summaryRows = [
     ['Daemon', f.daemon.running ? 'running' : 'stopped'],
     ['Last tick', f.daemon.lastTickAt ? fmtRelative(f.daemon.lastTickAt) : '—'],
     ['Spend today', f.daemon.todaySpentUsd != null ? `$${f.daemon.todaySpentUsd.toFixed(4)}` : '—'],
     ['Backlog queue', f.queue?.backlogItems ?? '—'],
     ['Merges (24h)', f.merges?.recent ?? '—'],
-  ]));
+  ];
+  if (sharedQueue) {
+    summaryRows.push(['Shared queue', sharedQueueMetric(sharedQueue)]);
+    summaryRows.push(['Owned leases', sharedQueue.ownedClaims ?? 0]);
+    summaryRows.push(['Cooldown items', sharedQueue.cooldownItems ?? 0]);
+  }
+  summary.appendChild(infoGrid(summaryRows));
   section.appendChild(summary);
 
   // Backends table
@@ -2506,8 +2520,13 @@ function renderControl() {
   }
 
   const heroMetrics = el('div', { cls: 'ctrl-hero-metrics' });
+  const sharedQueue = queue.shared;
   heroMetrics.appendChild(controlMetric('Spend today', daemon.todaySpentUsd != null ? `$${daemon.todaySpentUsd.toFixed(4)}` : '—', '#fbbf24'));
   heroMetrics.appendChild(controlMetric('Queue depth', queue.backlogItems ?? '—', '#60a5fa'));
+  if (sharedQueue) {
+    heroMetrics.appendChild(controlMetric('Shared leases', sharedQueue.activeClaims ?? '—', '#38bdf8'));
+    heroMetrics.appendChild(controlMetric('Reclaimable', sharedQueue.reclaimableClaims ?? '—', sharedQueue.reclaimableClaims > 0 ? '#f97316' : '#4ade80'));
+  }
   heroMetrics.appendChild(controlMetric('Proposals', props.pending ?? 0, '#a78bfa'));
   heroMetrics.appendChild(controlMetric('Merges (24h)', merges.recent ?? '—', '#4ade80'));
   heroMetrics.appendChild(controlMetric('Kill switch', isKilled ? 'ENGAGED' : 'off', isKilled ? '#f87171' : '#64748b'));
@@ -3209,6 +3228,7 @@ function fdRenderStatusPanel(snap) {
   const daemon = snap.daemon ?? {};
   const isRunning = daemon.running === true;
   const isKilled = snap.fleet?.killed ?? snap.control?.fleet?.killed ?? false;
+  const sharedQueue = snap.fleet?.queue?.shared ?? snap.control?.fleet?.queue?.shared ?? null;
 
   const body = el('div', { cls: 'fd-panel__body' });
 
@@ -3239,6 +3259,11 @@ function fdRenderStatusPanel(snap) {
   grid.appendChild(mkMeta('Pending proposals', String(pendingCount),
     pendingCount > 0 ? 'fd-meta-val--warn' : null));
   grid.appendChild(mkMeta('Items processed', String(daemon.itemsProcessed ?? 0)));
+  if (sharedQueue) {
+    grid.appendChild(mkMeta('Shared queue', sharedQueueMetric(sharedQueue),
+      !sharedQueue.readable || sharedQueue.reclaimableClaims > 0 || sharedQueue.lock?.stale ? 'fd-meta-val--warn' : null));
+    grid.appendChild(mkMeta('Owned leases', String(sharedQueue.ownedClaims ?? 0)));
+  }
   body.appendChild(grid);
 
   // Kill-switch banner

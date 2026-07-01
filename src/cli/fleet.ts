@@ -72,6 +72,14 @@ export function formatFleetStatus(s: FleetStatus): string {
 
   // Queue
   lines.push(`Queue:     ${s.queue.backlogItems} backlog item(s)`);
+  if (s.queue.shared) {
+    const shared = s.queue.shared;
+    lines.push(`  shared:        ${formatSharedQueueSummary(shared)}`);
+    if (shared.claimsByMachine.length > 0) {
+      lines.push(`  machines:      ${formatSharedQueueMachines(shared.claimsByMachine)}`);
+    }
+    lines.push(`  next expiry:   ${shared.nextLeaseExpiryAt ?? '—'}`);
+  }
   lines.push('');
 
   // Proposals
@@ -85,6 +93,30 @@ export function formatFleetStatus(s: FleetStatus): string {
   lines.push(`Merges:    ${s.merges.recent} auto-merge(s) in last 24h`);
 
   return lines.join('\n');
+}
+
+function formatSharedQueueSummary(shared: NonNullable<FleetStatus['queue']['shared']>): string {
+  const state = shared.readable ? 'ok' : 'unreadable';
+  const parts = [
+    state,
+    `${shared.activeClaims} active`,
+    `${shared.ownedClaims} owned`,
+    `${shared.reclaimableClaims} reclaimable`,
+    `${shared.cooldownItems} cooling`,
+  ];
+  if (shared.lock.present) {
+    parts.push(shared.lock.stale ? 'stale lock' : 'locked');
+  }
+  return parts.join(' / ');
+}
+
+function formatSharedQueueMachines(
+  machines: NonNullable<FleetStatus['queue']['shared']>['claimsByMachine'],
+): string {
+  return machines
+    .slice(0, 6)
+    .map((m) => `${m.machineId}:${m.active}${m.expired > 0 ? `(+${m.expired} reclaimable)` : ''}`)
+    .join(', ');
 }
 
 // ---------------------------------------------------------------------------
@@ -227,10 +259,13 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
     const header = [
       `fleet: ${state}`,
       `queue ${fs.queue.backlogItems}`,
+      fs.queue.shared
+        ? `shared ${fs.queue.shared.activeClaims}/${fs.queue.shared.reclaimableClaims}`
+        : null,
       `pending ${fs.proposals.pending}`,
       `spent today $${fs.daemon.todaySpentUsd.toFixed(2)}`,
       `last tick ${relTime(fs.daemon.lastTickAt)}`,
-    ].join(' · ');
+    ].filter(Boolean).join(' · ');
     if (fs.killed) {
       console.log('  ' + yellow(bold(header)));
     } else if (fs.daemon.running) {

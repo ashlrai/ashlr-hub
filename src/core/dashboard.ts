@@ -741,6 +741,18 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
     // Degrade to zeroed fields — daemon not yet initialised.
   }
 
+  // ── Fleet control-plane roll-up (OPTIONAL) ───────────────────────────────
+  // Lazily imported so dashboard.ts stays tolerant of fleet-source failures.
+  // This feeds Fleet Dashboard with the same read-only queue/backend/merge
+  // status as /api/fleet, including shared queue lease health when enabled.
+  let fleet: DashboardSnapshot['fleet'] | undefined;
+  try {
+    const { buildFleetStatus } = await import('./fleet/status.js');
+    fleet = await buildFleetStatus(cfg);
+  } catch {
+    fleet = undefined;
+  }
+
   // ── M194 frontier usage roll-up ──────────────────────────────────────────
   // getFrontierUsageSync reads the quota ledger + codex session files +
   // observability rollup — all bounded, synchronous, never-throws. Wrapped
@@ -833,6 +845,7 @@ export async function buildSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot
       todaySpentUsd: daemonSpentUsd,
       pendingProposals: inboxPending,
     },
+    ...(fleet !== undefined ? { fleet } : {}),
     // M29: OPTIONAL portfolio section — omitted entirely when the roll-up
     // could not be built, so existing producers/tests (which never set it)
     // stay valid and `portfolio === undefined` reads as "not populated".

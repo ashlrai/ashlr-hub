@@ -68,6 +68,49 @@ export interface SharedFleetQueue {
   usage: UsageEntry[];
 }
 
+/** Per-machine claim counts for read-only queue health surfaces. */
+export interface SharedQueueMachineHealth {
+  machineId: string;
+  active: number;
+  expired: number;
+}
+
+/** Read-only health summary of the shared filesystem queue. */
+export interface SharedQueueHealth {
+  /** Shared directory path backing the queue. */
+  path: string;
+  /** Lease duration used by this store instance. */
+  leaseMs: number;
+  /** True when the queue file is absent or readable/parseable. */
+  readable: boolean;
+  /** Active, non-expired claims across all machines. */
+  activeClaims: number;
+  /** Active claims currently owned by the requested machine. */
+  ownedClaims: number;
+  /** Expired claims that can be reclaimed by another machine. */
+  expiredClaims: number;
+  /** Alias for expiredClaims, named for operator-facing status surfaces. */
+  reclaimableClaims: number;
+  /** Claim counts grouped by machine id. */
+  claimsByMachine: SharedQueueMachineHealth[];
+  /** ISO timestamp of the soonest active lease expiry, or null when none. */
+  nextLeaseExpiryAt: string | null;
+  /** Age in ms of the oldest expired claim, or null when none. */
+  oldestExpiredMs: number | null;
+  /** Total bounded worked-ledger events currently retained. */
+  workedEvents: number;
+  /** Unique items currently in the shared empty-result cooldown window. */
+  cooldownItems: number;
+  /** Total shared subscription usage entries currently retained. */
+  usageEntries: number;
+  /** Advisory lock status. */
+  lock: {
+    present: boolean;
+    ageMs: number | null;
+    stale: boolean;
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -129,6 +172,15 @@ function parseQueue(raw: string): SharedFleetQueue {
   return { claims: validClaims, worked, usage };
 }
 
+function safeIso(ms: number | null): string | null {
+  if (ms === null || !Number.isFinite(ms)) return null;
+  try {
+    return new Date(ms).toISOString();
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // SharedStore
 // ---------------------------------------------------------------------------
@@ -170,13 +222,18 @@ export class SharedStore {
 
   /** Read the queue from disk. Returns emptyQueue() on any error. */
   private readQueue(): SharedFleetQueue {
+    return this.readQueueResult().queue;
+  }
+
+  /** Read the queue with a success bit for operator health reporting. */
+  private readQueueResult(): { queue: SharedFleetQueue; readable: boolean } {
     try {
       const p = this.queuePath();
-      if (!existsSync(p)) return emptyQueue();
+      if (!existsSync(p)) return { queue: emptyQueue(), readable: true };
       const raw = readFileSync(p, 'utf8');
-      return parseQueue(raw);
+      return { queue: parseQueue(raw), readable: true };
     } catch {
-      return emptyQueue();
+      return { queue: emptyQueue(), readable: false };
     }
   }
 
@@ -445,5 +502,113 @@ export class SharedStore {
    */
   readSnapshot(): SharedFleetQueue {
     return this.readQueue();
+  }
+
+  /**
+   * Read operator-facing health for the shared queue. Never throws and never
+   * mutates the queue, lock, or directory; unavailable/corrupt state is exposed
+   * via `readable:false` with zeroed counts.
+   */
+  readHealth(opts: { machineId?: string; cooldownMs?: number; now?: number } = {}): SharedQueueHealth {
+    const now = opts.now ?? Date.now();
+    const cooldownMs = opts.cooldownMs ?? 6 * 60 * 60 * 1000;
+    const owner = opts.machineId;
+
+    try {
+      const { queue, readable } = this.readQueueResult();
+      let activeClaims = 0;
+      let ownedClaims = 0;
+      let expiredClaims = 0;
+      let nextLeaseMs: number | null = null;
+      let oldestExpiredMs: number | null = null;
+      const byMachine = new Map<string, { active: number; expired: number }>();
+
+      for (const claim of Object.values(queue.claims)) {
+        const entry = byMachine.get(claim.machineId) ?? { active: 0, expired: 0 };
+        if (claim.leaseUntil > now) {
+          activeClaims++;
+          entry.active++;
+          if (owner && claim.machineId === owner) ownedClaims++;
+          if (nextLeaseMs === null || claim.leaseUntil < nextLeaseMs) {
+            nextLeaseMs = claim.leaseUntil;
+          }
+        } else {
+          expiredClaims++;
+          entry.expired++;
+          const age = Math.max(0, now - claim.leaseUntil);
+          if (oldestExpiredMs === null || age > oldestExpiredMs) {
+            oldestExpiredMs = age;
+          }
+        }
+        byMachine.set(claim.machineId, entry);
+      }
+
+      const cooldownItemIds = new Set<string>();
+      const seenWorked = new Set<string>();
+      for (let i = queue.worked.length - 1; i >= 0; i--) {
+        const event = queue.worked[i]!;
+        if (seenWorked.has(event.itemId)) continue;
+        seenWorked.add(event.itemId);
+        const eventMs = Date.parse(event.ts);
+        if (
+          event.outcome === 'empty' &&
+          !Number.isNaN(eventMs) &&
+          now - eventMs < cooldownMs
+        ) {
+          cooldownItemIds.add(event.itemId);
+        }
+      }
+
+      let lock: SharedQueueHealth['lock'] = { present: false, ageMs: null, stale: false };
+      try {
+        const lp = this.lockPath();
+        if (existsSync(lp)) {
+          const ageMs = Math.max(0, now - statSync(lp).mtimeMs);
+          lock = {
+            present: true,
+            ageMs,
+            stale: ageMs > this.leaseMs * STALE_LOCK_MULTIPLIER,
+          };
+        }
+      } catch {
+        lock = { present: true, ageMs: null, stale: false };
+      }
+
+      return {
+        path: this.dirPath,
+        leaseMs: this.leaseMs,
+        readable,
+        activeClaims,
+        ownedClaims,
+        expiredClaims,
+        reclaimableClaims: expiredClaims,
+        claimsByMachine: Array.from(byMachine.entries())
+          .map(([machineId, counts]) => ({ machineId, ...counts }))
+          .sort((a, b) => a.machineId.localeCompare(b.machineId)),
+        nextLeaseExpiryAt: safeIso(nextLeaseMs),
+        oldestExpiredMs,
+        workedEvents: queue.worked.length,
+        cooldownItems: cooldownItemIds.size,
+        usageEntries: queue.usage.length,
+        lock,
+      };
+    } catch {
+      return {
+        path: this.dirPath,
+        leaseMs: this.leaseMs,
+        readable: false,
+        activeClaims: 0,
+        ownedClaims: 0,
+        expiredClaims: 0,
+        reclaimableClaims: 0,
+        claimsByMachine: [],
+        nextLeaseExpiryAt: null,
+        oldestExpiredMs: null,
+        workedEvents: 0,
+        cooldownItems: 0,
+        usageEntries: 0,
+        lock: { present: false, ageMs: null, stale: false },
+      };
+    }
   }
 }

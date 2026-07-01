@@ -19,6 +19,7 @@ import { buildFleetStatus } from '../src/core/fleet/status.js';
 import { formatFleetStatus } from '../src/cli/fleet.js';
 import { recordUse } from '../src/core/fleet/quota.js';
 import { setKill } from '../src/core/sandbox/policy.js';
+import { SharedStore } from '../src/core/fleet/shared-store.js';
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -98,6 +99,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.daemon.lastTickAt).toBeNull();
     expect(s.daemon.todaySpentUsd).toBe(0);
     expect(s.queue.backlogItems).toBe(0);
+    expect(s.queue.shared).toBeUndefined();
     expect(s.proposals.pending).toBe(0);
     expect(s.proposals.frontierPending).toBe(0);
     expect(s.proposals.applied).toBe(0);
@@ -159,6 +161,42 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const s = await buildFleetStatus(baseConfig());
     expect(s.killed).toBe(true);
   });
+
+  it('includes shared queue health when filesystem coordination is enabled', async () => {
+    const sharedPath = join(tmpHome, 'shared-queue');
+    const store = new SharedStore(sharedPath, 20_000);
+    expect(store.claimItems(['owned', 'other'], 1, 'machine-A')).toEqual(['owned']);
+    expect(store.claimItems(['other'], 1, 'machine-B')).toEqual(['other']);
+
+    const cfg: AshlrConfig = {
+      ...baseConfig(),
+      fleet: {
+        sharedQueue: {
+          mode: 'filesystem',
+          path: sharedPath,
+          machineId: 'machine-A',
+          leaseMs: 20_000,
+        },
+      },
+    };
+
+    const s = await buildFleetStatus(cfg);
+    expect(s.queue.shared).toMatchObject({
+      enabled: true,
+      mode: 'filesystem',
+      path: sharedPath,
+      machineId: 'machine-A',
+      leaseMs: 20_000,
+      readable: true,
+      activeClaims: 2,
+      ownedClaims: 1,
+      reclaimableClaims: 0,
+    });
+    expect(s.queue.shared?.claimsByMachine).toEqual([
+      { machineId: 'machine-A', active: 1, expired: 0 },
+      { machineId: 'machine-B', active: 1, expired: 0 },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -174,7 +212,31 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         { backend: 'builtin', dispatchesRecent: 4, quota: 'unlimited' },
         { backend: 'claude', dispatchesRecent: 2, quota: 'warn' },
       ],
-      queue: { backlogItems: 7 },
+      queue: {
+        backlogItems: 7,
+        shared: {
+          enabled: true,
+          mode: 'filesystem',
+          path: '/shared',
+          machineId: 'machine-A',
+          leaseMs: 300_000,
+          readable: true,
+          activeClaims: 2,
+          ownedClaims: 1,
+          expiredClaims: 1,
+          reclaimableClaims: 1,
+          claimsByMachine: [
+            { machineId: 'machine-A', active: 1, expired: 0 },
+            { machineId: 'machine-B', active: 1, expired: 1 },
+          ],
+          nextLeaseExpiryAt: '2026-06-17T00:05:00.000Z',
+          oldestExpiredMs: 1_000,
+          workedEvents: 4,
+          cooldownItems: 2,
+          usageEntries: 1,
+          lock: { present: true, ageMs: 900_000, stale: true },
+        },
+      },
       proposals: { pending: 3, frontierPending: 1, applied: 5 },
       merges: { recent: 2 },
       killed: true,
@@ -189,6 +251,9 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('claude');
     expect(out).toContain('quota=warn');
     expect(out).toContain('7 backlog item(s)');
+    expect(out).toContain('shared:        ok / 2 active / 1 owned / 1 reclaimable / 2 cooling / stale lock');
+    expect(out).toContain('machine-A:1');
+    expect(out).toContain('machine-B:1(+1 reclaimable)');
     expect(out).toContain('frontier pending:  1');
     expect(out).toContain('applied:           5');
     expect(out).toContain('2 auto-merge(s)');

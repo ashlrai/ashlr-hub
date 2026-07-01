@@ -94,6 +94,36 @@ const FIXTURE_FRONTIER_USAGE = {
 const FIXTURE_INBOX_PENDING = 3;
 const FIXTURE_MCP_REGISTRY = { servers: [] };
 const FIXTURE_GENOME_ENTRIES: never[] = [];
+const FIXTURE_FLEET_STATUS = {
+  generatedAt: new Date().toISOString(),
+  daemon: { running: true, lastTickAt: FIXTURE_DAEMON_STATE.lastTickAt, todaySpentUsd: 0.0042 },
+  backends: [],
+  queue: {
+    backlogItems: 4,
+    shared: {
+      enabled: true,
+      mode: 'filesystem' as const,
+      path: '/tmp/shared-queue',
+      machineId: 'machine-A',
+      leaseMs: 300_000,
+      readable: true,
+      activeClaims: 2,
+      ownedClaims: 1,
+      expiredClaims: 0,
+      reclaimableClaims: 0,
+      claimsByMachine: [{ machineId: 'machine-A', active: 2, expired: 0 }],
+      nextLeaseExpiryAt: null,
+      oldestExpiredMs: null,
+      workedEvents: 0,
+      cooldownItems: 0,
+      usageEntries: 0,
+      lock: { present: false, ageMs: null, stale: false },
+    },
+  },
+  proposals: { pending: 3, frontierPending: 1, applied: 0 },
+  merges: { recent: 0 },
+  killed: false,
+};
 
 // ---------------------------------------------------------------------------
 // Module mocks (hoisted before imports)
@@ -113,6 +143,9 @@ vi.mock('../src/core/inbox/store.js', () => ({
 vi.mock('../src/core/daemon/state.js', () => ({ loadDaemonState: vi.fn(() => FIXTURE_DAEMON_STATE) }));
 vi.mock('../src/core/usage/frontier-usage.js', () => ({
   getFrontierUsageSync: vi.fn(() => FIXTURE_FRONTIER_USAGE),
+}));
+vi.mock('../src/core/fleet/status.js', () => ({
+  buildFleetStatus: vi.fn(async () => FIXTURE_FLEET_STATUS),
 }));
 
 // ---------------------------------------------------------------------------
@@ -136,6 +169,7 @@ beforeEach(async () => {
   const { pendingCount } = await import('../src/core/inbox/store.js');
   const { loadDaemonState } = await import('../src/core/daemon/state.js');
   const { getFrontierUsageSync } = await import('../src/core/usage/frontier-usage.js');
+  const { buildFleetStatus } = await import('../src/core/fleet/status.js');
 
   vi.mocked(loadIndex).mockReturnValue(FIXTURE_INDEX);
   vi.mocked(getToolsRegistry).mockReturnValue(FIXTURE_TOOLS_REGISTRY);
@@ -147,6 +181,7 @@ beforeEach(async () => {
   vi.mocked(pendingCount).mockReturnValue(FIXTURE_INBOX_PENDING);
   vi.mocked(loadDaemonState).mockReturnValue(FIXTURE_DAEMON_STATE);
   vi.mocked(getFrontierUsageSync).mockReturnValue(FIXTURE_FRONTIER_USAGE);
+  vi.mocked(buildFleetStatus).mockResolvedValue(FIXTURE_FLEET_STATUS);
 });
 
 // ---------------------------------------------------------------------------
@@ -179,6 +214,13 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
   it('daemon.pendingProposals reflects inboxPendingCount', async () => {
     const snap = await buildSnapshot(makeConfig());
     expect(snap.daemon!.pendingProposals).toBe(FIXTURE_INBOX_PENDING);
+  });
+
+  it('fleet status is embedded for Fleet Dashboard queue health', async () => {
+    const snap = await buildSnapshot(makeConfig());
+    expect(snap.fleet?.queue.backlogItems).toBe(4);
+    expect(snap.fleet?.queue.shared?.activeClaims).toBe(2);
+    expect(snap.fleet?.queue.shared?.ownedClaims).toBe(1);
   });
 
   it('daemon degrades to zeroed fields when loadDaemonState throws', async () => {

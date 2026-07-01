@@ -14,7 +14,9 @@
  * only reads what the daemon/quota/inbox/backlog modules already persist.
  */
 
+import { hostname } from 'node:os';
 import type { AshlrConfig, EngineId } from '../types.js';
+import type { SharedQueueHealth } from './shared-store.js';
 
 /** A single backend's recent activity + quota standing. */
 export interface FleetBackendStatus {
@@ -24,6 +26,13 @@ export interface FleetBackendStatus {
   dispatchesRecent: number;
   /** Quota standing: 'unlimited' when no rate limit is configured. */
   quota: 'ok' | 'warn' | 'over' | 'unlimited';
+}
+
+/** Shared filesystem queue health, when multi-machine queueing is enabled. */
+export interface FleetSharedQueueStatus extends SharedQueueHealth {
+  enabled: boolean;
+  mode: 'filesystem';
+  machineId: string;
 }
 
 /** One whole-fleet read-only snapshot. */
@@ -38,6 +47,7 @@ export interface FleetStatus {
   backends: FleetBackendStatus[];
   queue: {
     backlogItems: number;
+    shared?: FleetSharedQueueStatus;
   };
   proposals: {
     pending: number;
@@ -117,6 +127,13 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     backlogItems = 0;
   }
 
+  let sharedQueue: FleetSharedQueueStatus | undefined;
+  try {
+    sharedQueue = await buildSharedQueueStatus(cfg);
+  } catch {
+    sharedQueue = undefined;
+  }
+
   // ── proposals (pending / frontier-pending / applied) ──────────────────────
   let pending = 0;
   let frontierPending = 0;
@@ -166,11 +183,67 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     generatedAt,
     daemon,
     backends,
-    queue: { backlogItems },
+    queue: {
+      backlogItems,
+      ...(sharedQueue !== undefined ? { shared: sharedQueue } : {}),
+    },
     proposals: { pending, frontierPending, applied },
     merges: { recent: mergesRecent },
     killed,
   };
+}
+
+async function buildSharedQueueStatus(cfg: AshlrConfig): Promise<FleetSharedQueueStatus | undefined> {
+  const sq = cfg.fleet?.sharedQueue;
+  if (sq?.mode !== 'filesystem' || !sq.path || sq.path.trim().length === 0) {
+    return undefined;
+  }
+
+  const path = sq.path;
+  const machineId = sq.machineId && sq.machineId.trim().length > 0 ? sq.machineId : hostname();
+  const leaseMs =
+    typeof sq.leaseMs === 'number' && Number.isFinite(sq.leaseMs) && sq.leaseMs > 0
+      ? Math.floor(sq.leaseMs)
+      : 5 * 60 * 1000;
+  const cooldownMs = configCooldownMs(cfg);
+
+  try {
+    const { SharedStore } = await import('./shared-store.js');
+    const store = new SharedStore(path, leaseMs);
+    const health = store.readHealth({ machineId, ...(cooldownMs !== undefined ? { cooldownMs } : {}) });
+    return {
+      enabled: true,
+      mode: 'filesystem',
+      machineId,
+      ...health,
+    };
+  } catch {
+    return {
+      enabled: true,
+      mode: 'filesystem',
+      path,
+      machineId,
+      leaseMs,
+      readable: false,
+      activeClaims: 0,
+      ownedClaims: 0,
+      expiredClaims: 0,
+      reclaimableClaims: 0,
+      claimsByMachine: [],
+      nextLeaseExpiryAt: null,
+      oldestExpiredMs: null,
+      workedEvents: 0,
+      cooldownItems: 0,
+      usageEntries: 0,
+      lock: { present: false, ageMs: null, stale: false },
+    };
+  }
+}
+
+function configCooldownMs(cfg: AshlrConfig): number | undefined {
+  const daemon = (cfg as { daemon?: Record<string, unknown> }).daemon;
+  const value = daemon?.['cooldownMs'];
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 /**

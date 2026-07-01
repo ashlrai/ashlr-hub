@@ -257,6 +257,73 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
   });
 });
 
+describe('M111 SharedStore health snapshot', () => {
+  it('reports empty readable shared queue health without creating files', () => {
+    const store = makeStore(tmpDir, 5_000);
+    const health = store.readHealth({ machineId: 'machine-A', now: 1_000_000 });
+
+    expect(health.readable).toBe(true);
+    expect(health.path).toBe(tmpDir);
+    expect(health.leaseMs).toBe(5_000);
+    expect(health.activeClaims).toBe(0);
+    expect(health.ownedClaims).toBe(0);
+    expect(health.reclaimableClaims).toBe(0);
+    expect(health.claimsByMachine).toEqual([]);
+    expect(health.lock.present).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, 'ashlr-fleet-queue.json'))).toBe(false);
+  });
+
+  it('summarizes active, owned, expired, cooldown, usage, and lock state', () => {
+    const now = 2_000_000;
+    const store = makeStore(tmpDir, 10_000);
+    expect(store.claimItems(['owned-1', 'owned-2'], 2, 'machine-A')).toEqual(['owned-1', 'owned-2']);
+    expect(store.claimItems(['other-1'], 1, 'machine-B')).toEqual(['other-1']);
+    store.publishUsage({ machineId: 'machine-A', engine: 'codex', ts: new Date(now).toISOString() });
+    store.recordOutcome('cooling-item', 'empty', 'machine-A');
+
+    const queuePath = path.join(tmpDir, 'ashlr-fleet-queue.json');
+    const snap = JSON.parse(fs.readFileSync(queuePath, 'utf8')) as {
+      claims: Record<string, { machineId: string; leaseUntil: number }>;
+      worked: Array<{ itemId: string; outcome: string; ts: string }>;
+      usage: unknown[];
+    };
+    snap.claims['owned-1']!.leaseUntil = now + 1_000;
+    snap.claims['owned-2']!.leaseUntil = now - 2_000;
+    snap.claims['other-1']!.leaseUntil = now + 5_000;
+    snap.worked = [{ itemId: 'cooling-item', outcome: 'empty', ts: new Date(now - 100).toISOString() }];
+    fs.writeFileSync(queuePath, JSON.stringify(snap, null, 2));
+
+    const lockPath = path.join(tmpDir, 'ashlr-fleet-queue.json.lock');
+    fs.writeFileSync(lockPath, '');
+    fs.utimesSync(lockPath, new Date(now - 30_000), new Date(now - 30_000));
+
+    const health = store.readHealth({ machineId: 'machine-A', cooldownMs: 1_000, now });
+
+    expect(health.readable).toBe(true);
+    expect(health.activeClaims).toBe(2);
+    expect(health.ownedClaims).toBe(1);
+    expect(health.expiredClaims).toBe(1);
+    expect(health.reclaimableClaims).toBe(1);
+    expect(health.nextLeaseExpiryAt).toBe(new Date(now + 1_000).toISOString());
+    expect(health.oldestExpiredMs).toBe(2_000);
+    expect(health.cooldownItems).toBe(1);
+    expect(health.usageEntries).toBe(1);
+    expect(health.claimsByMachine).toEqual([
+      { machineId: 'machine-A', active: 1, expired: 1 },
+      { machineId: 'machine-B', active: 1, expired: 0 },
+    ]);
+    expect(health.lock).toEqual({ present: true, ageMs: 30_000, stale: true });
+  });
+
+  it('marks corrupt queue files unreadable and keeps the health method never-throwing', () => {
+    fs.writeFileSync(path.join(tmpDir, 'ashlr-fleet-queue.json'), '{not-json');
+    const health = makeStore(tmpDir).readHealth({ machineId: 'machine-A' });
+    expect(health.readable).toBe(false);
+    expect(health.activeClaims).toBe(0);
+    expect(health.claimsByMachine).toEqual([]);
+  });
+});
+
 // ===========================================================================
 // 3. TWO machines — disjoint claims proof (no double-claim)
 // ===========================================================================

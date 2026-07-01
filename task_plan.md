@@ -20,6 +20,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Explore backend assignment traces for Mission Control
 - [x] Follow-up: Explore ecosystem doctor implementation scope
 - [x] Follow-up: Verify, commit, and push spend persistence batch
+- [x] Follow-up: Implement shared queue health in Fleet/Mission Control
+- [x] Follow-up: Explore state repair UX for fail-closed ledger blocks
+- [x] Follow-up: Explore persisted backend assignment traces implementation
+- [x] Follow-up: Explore ecosystem doctor command implementation
 - [x] Follow-up: Evaluate dependency security migration path
 - [x] Follow-up: Verify, commit, and push next usefulness batch
 
@@ -38,7 +42,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Land small operational patches now: service restart delay and inbox review fields.
 - Land daemon singleton hardening now: exclusive lock, heartbeat, stale dead-owner takeover, token-checked release, and state temp-file collision reduction.
 - Clear Vite/esbuild advisories with a conservative Vitest 3 + Vite 6 override migration instead of jumping straight to Vitest 4 / Vite 8.
-- Next local critical path is spend/state persistence fail-closed behavior because a 24/7 autonomous fleet must refuse dispatch when its spend ledger is malformed or cannot be durably updated.
+- Next local critical path is shared queue health in Mission Control because a multi-machine autonomous fleet needs visible lease, reclaim, and owner distribution signals.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -55,6 +59,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current pass agents identified next lanes: spend persistence fail-closed dispatch guards, queue lease/reclaim metrics, backend assignment traces, and an `ashlr ecosystem doctor` inventory command.
 - Current pass landed strict daemon state reads, result-returning daemon state saves, a durable spend-commit guard, and daemon/run-loop fail-closed behavior for malformed/unwritable spend state.
 - Current pass agents refined next lanes: additive `FleetStatus.queue.shared` health, persisted daemon backend assignment traces, and a read-only `ashlr ecosystem doctor --json --root --deep`.
+- Current queue-health pass adds read-only shared queue lease/cooldown/lock health to `FleetStatus`, CLI status/watch, Mission Control, Fleet, and Fleet Dashboard snapshots.
+- Repair UX audit found that `daemon status`, doctor, and web surfaces still mask malformed daemon/spend-guard state through forgiving loaders; next pass should expose a shared additive guard-health block before attempting auto-repair.
+- Backend trace audit found gateway decisions already have traces but daemon ticks persist only aggregate backend counts; next pass should persist bounded `backendAssignments` beside existing tick counts.
+- Ecosystem doctor audit recommends a read-only `ashlr ecosystem doctor [--json] [--root] [--deep]` command with tool inventory and sibling repo health.
 
 ## Status
-**Current spend persistence batch complete** - Spend/state persistence now fails closed before dispatch and after spend commits. Typecheck, lint, build, audit, invariants, targeted daemon suites, and full CI passed.
+**Current queue health pass verifying** - Shared queue health is implemented and targeted tests/typecheck pass; running broader verification before commit and push.
