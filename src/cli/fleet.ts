@@ -93,6 +93,23 @@ export function formatFleetStatus(s: FleetStatus): string {
   lines.push(`Merges:    ${s.merges.recent} auto-merge(s) in last 24h`);
   lines.push('');
 
+  // Guard health
+  const guardHealth = s.guardHealth;
+  lines.push('Guard health:');
+  if (!guardHealth || guardHealth.blocks.length === 0) {
+    lines.push('  ok');
+  } else {
+    lines.push(`  blocked: ${guardHealth.blocks.length} block(s)`);
+    for (const block of guardHealth.blocks) {
+      lines.push(`  - ${block.id}: ${block.detail}`);
+      lines.push(`    path: ${block.path}`);
+      if (block.repairCommands.length > 0) {
+        lines.push(`    repair: ${block.repairCommands.join(' && ')}`);
+      }
+    }
+  }
+  lines.push('');
+
   // Autonomy evidence
   const autonomy = s.autonomy;
   lines.push('Autonomy evidence:');

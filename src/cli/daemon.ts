@@ -40,6 +40,8 @@ type StopDaemonFn = () => void;
 type LoadDaemonStateFn = () => DaemonState;
 type PendingCountFn = () => number;
 type LoadConfigFn = () => AshlrConfig;
+type GuardHealthDiagnosis = import('../core/daemon/guard-health.js').GuardHealthDiagnosis;
+type DiagnoseGuardHealthFn = () => GuardHealthDiagnosis;
 
 async function importLoop(): Promise<{
   runDaemon: RunDaemonFn;
@@ -82,6 +84,17 @@ async function importConfig(): Promise<LoadConfigFn | null> {
   try {
     const mod = (await import('../core/config.js')) as { loadConfig: LoadConfigFn };
     return mod.loadConfig;
+  } catch {
+    return null;
+  }
+}
+
+async function importGuardHealth(): Promise<DiagnoseGuardHealthFn | null> {
+  try {
+    const mod = (await import('../core/daemon/guard-health.js')) as {
+      diagnoseGuardHealth: DiagnoseGuardHealthFn;
+    };
+    return mod.diagnoseGuardHealth;
   } catch {
     return null;
   }
@@ -340,6 +353,20 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
     }
   }
 
+  let guardHealth: GuardHealthDiagnosis = {
+    generatedAt: new Date().toISOString(),
+    blocked: false,
+    blocks: [],
+  };
+  const diagnoseGuardHealth = await importGuardHealth();
+  if (diagnoseGuardHealth) {
+    try {
+      guardHealth = diagnoseGuardHealth();
+    } catch {
+      guardHealth = { generatedAt: new Date().toISOString(), blocked: false, blocks: [] };
+    }
+  }
+
   if (jsonMode) {
     console.log(
       JSON.stringify(
@@ -353,6 +380,7 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
           dailyBudgetUsd: dailyCap ?? null,
           itemsProcessed: state.itemsProcessed,
           pendingProposals: pending,
+          guardHealth,
         },
         null,
         2,
@@ -381,6 +409,20 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
       col.bold('pending props:  ') +
       (pending > 0 ? col.yellow(String(pending)) : col.dim('0')),
   );
+  console.log(
+    '  ' +
+      col.bold('guard health:   ') +
+      (guardHealth.blocked ? col.yellow(`${guardHealth.blocks.length} block(s)`) : col.green('ok')),
+  );
+  if (guardHealth.blocked) {
+    for (const block of guardHealth.blocks) {
+      console.log('    ' + col.yellow(block.id) + col.dim(` - ${block.detail}`));
+      if (block.path) console.log('    ' + col.dim(`path: ${block.path}`));
+      if (block.repairCommands.length > 0) {
+        console.log('    ' + col.dim(`repair: ${block.repairCommands.join(' && ')}`));
+      }
+    }
+  }
   console.log('');
   if (pending > 0) {
     console.log(col.dim('  Review with `ashlr inbox` — proposals are NEVER auto-applied.'));

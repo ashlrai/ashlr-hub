@@ -18,6 +18,7 @@ import { hostname } from 'node:os';
 import type { AshlrConfig, EngineId } from '../types.js';
 import type { SharedQueueHealth } from './shared-store.js';
 import type { AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
+import type { GuardHealthDiagnosis } from '../daemon/guard-health.js';
 
 /** A single backend's recent activity + quota standing. */
 export interface FleetBackendStatus {
@@ -83,6 +84,8 @@ export interface FleetStatus {
     recent: number;
   };
   autonomy?: FleetAutonomyStatus;
+  /** Read-only diagnosis of guard state that can block autonomous work. */
+  guardHealth?: GuardHealthDiagnosis;
   /** True when the global kill switch is engaged (fleet paused). */
   killed: boolean;
 }
@@ -205,6 +208,15 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     killed = false;
   }
 
+  // ── guard health / state repair UX ──────────────────────────────────────
+  let guardHealth: GuardHealthDiagnosis | undefined;
+  try {
+    const { diagnoseGuardHealth } = await import('../daemon/guard-health.js');
+    guardHealth = diagnoseGuardHealth();
+  } catch {
+    guardHealth = undefined;
+  }
+
   // ── autonomy evidence packs ──────────────────────────────────────────────
   let autonomy: FleetAutonomyStatus = {
     evidencePacks: 0,
@@ -232,6 +244,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     proposals: { pending, frontierPending, applied },
     merges: { recent: mergesRecent },
     autonomy,
+    ...(guardHealth !== undefined ? { guardHealth } : {}),
     killed,
   };
 }

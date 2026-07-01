@@ -193,6 +193,12 @@ const loadStackCmd = lazyCmd(
   'stack command requires src/cli/stack.ts (M73 module not yet built).',
 );
 
+const loadEcosystemCmd = lazyCmd(
+  () => import('./ecosystem.js' as unknown as string),
+  (m) => m.cmdEcosystem as Cmd,
+  'ecosystem command requires src/cli/ecosystem.ts.',
+);
+
 // ─── M5 lazy imports (graceful degradation if modules not yet built) ──────────
 
 import type { ActivityRollup } from '../core/types.js';
@@ -1773,6 +1779,12 @@ async function main(): Promise<void> {
         // confirm-gated add/apply (real provisioning).
         const cmdStack = await loadStackCmd();
         process.exitCode = await cmdStack(rest);
+        break;
+      }
+
+      case 'ecosystem': {
+        const cmdEcosystem = await loadEcosystemCmd();
+        process.exitCode = await cmdEcosystem(rest);
         break;
       }
 

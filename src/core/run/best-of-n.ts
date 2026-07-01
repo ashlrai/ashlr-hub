@@ -11,7 +11,7 @@
  * Flag-off parity: cfg.foundry.bestOfN defaults to 1 → identical to a single run.
  */
 
-import type { AshlrConfig, WorkItem, Proposal } from '../types.js';
+import type { AshlrConfig, WorkItem, Proposal, WorkSource } from '../types.js';
 import type { ManagerVerdict } from '../fleet/manager.js';
 import type { TasteScore } from '../fleet/taste-critic.js';
 
@@ -122,7 +122,7 @@ function syntheticProposal(item: WorkItem, diff: string, index: number): Proposa
 export async function runBestOfN(
   item: WorkItem,
   cfg: AshlrConfig,
-  opts?: { n?: number },
+  opts?: { n?: number; workItemId?: string; workSource?: WorkSource },
 ): Promise<BestOfNResult | { winner: undefined; candidates: CandidateResult[]; critique: BestOfNResult['critique'] }> {
   const n = readN(cfg, opts?.n);
   const goal = goalFor(item);
@@ -208,6 +208,8 @@ export async function runBestOfN(
         sourceRepo,
         propose: true,
         runId: `best-of-n-${i}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        workItemId: opts?.workItemId ?? item.id,
+        workSource: opts?.workSource ?? item.source,
       });
 
       const diff = (result.state as unknown as Record<string, unknown>)['result'] as string ?? '';

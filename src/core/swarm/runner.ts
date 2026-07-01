@@ -920,6 +920,7 @@ function captureSandboxAndCleanup(
   sink: StreamSink,
   propose = false,
   cfg?: import('../types.js').AshlrConfig,
+  causal?: { workItemId?: string; workSource?: import('../types.js').WorkSource },
 ): void {
   // Capture diff (read-only; never mutates source tree).
   let diff: SandboxDiff | null = null;
@@ -1005,6 +1006,9 @@ function captureSandboxAndCleanup(
           ].join('\n'),
           diff: scrubbedPatch,
           sandboxId: sb.id,
+          workItemId: causal?.workItemId,
+          workSource: causal?.workSource,
+          runId: run.id,
         });
         emitLog(sink, `[M24] PENDING proposal recorded for swarm ${run.id}`);
         // M32: unattended path (daemon-dispatched swarm) — fire opt-in desktop/
@@ -1144,6 +1148,7 @@ export async function runSwarm(
   );
   const budget = buildBudget(opts);
   const project = opts.project ?? null;
+  const causal = { workItemId: opts.workItemId, workSource: opts.workSource };
 
   // -------------------------------------------------------------------------
   // M21 SANDBOX SEAM: when opts.sandbox is true AND project is set AND the
@@ -1394,7 +1399,7 @@ export async function runSwarm(
       maybePersist(run);
       emitLog(sink, run.result);
       // M21: clean up sandbox even on planning failure (no diff to capture yet).
-      if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg);
+      if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal);
       await fireEmitSwarm(run, cfg);
       if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
       return run;
@@ -1441,7 +1446,7 @@ export async function runSwarm(
         persist(run);
         emitLog(sink, run.result);
         // M21: capture diff of work done so far, then remove sandbox.
-        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg);
+        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1454,7 +1459,7 @@ export async function runSwarm(
         // Stop cleanly — do NOT proceed to the next phase.
         emitLog(sink, `Swarm ${run.id} paused at phase "${phase}" — awaiting human approval.`);
         // M21: capture diff of partial work, then remove sandbox.
-        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg);
+        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1467,7 +1472,7 @@ export async function runSwarm(
         persist(run);
         emitLog(sink, run.result);
         // M21: capture diff of partial work, then remove sandbox.
-        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg);
+        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1480,7 +1485,7 @@ export async function runSwarm(
     persist(run);
     emitLog(sink, run.result);
     // M21: capture diff of any partial work, then remove sandbox.
-    if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg);
+    if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal);
     await fireEmitSwarm(run, cfg);
     if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
     return run;
@@ -1520,7 +1525,7 @@ export async function runSwarm(
   persist(run);
 
   // M21: capture full sandbox diff proposal, then remove sandbox.
-  if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg);
+  if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal);
 
   emitLog(sink, `Swarm ${run.id} finished with status: ${run.status}`);
 

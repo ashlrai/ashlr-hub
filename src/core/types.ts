@@ -1156,6 +1156,10 @@ export interface RunOptions {
   sandboxEngine?: boolean;
   /** M45: abort (no raw fallback) if a sandbox worktree cannot be created. */
   requireSandbox?: boolean;
+  /** Optional originating backlog/work item id for causal tracing. */
+  workItemId?: string;
+  /** Optional originating backlog scanner/source for causal tracing. */
+  workSource?: WorkSource;
 }
 
 /** A single message in a chat exchange with a provider. */
@@ -1909,6 +1913,10 @@ export interface SwarmOptions {
    * Defaults to OFF (preserves the legacy non-strict fallback for non-daemon callers).
    */
   requireSandbox?: boolean;
+  /** Optional originating backlog/work item id for causal tracing. */
+  workItemId?: string;
+  /** Optional originating backlog scanner/source for causal tracing. */
+  workSource?: WorkSource;
 }
 
 // ---------------------------------------------------------------------------
@@ -2715,6 +2723,12 @@ export interface Proposal {
   diff?: string;
   /** Optional id of the sandbox the diff was captured from (M21). */
   sandboxId?: string;
+  /** Optional originating backlog/work item id. Enables exact dedup and learning. */
+  workItemId?: string;
+  /** Optional originating backlog scanner/source. */
+  workSource?: WorkSource;
+  /** Optional run/swarm id that produced this proposal. */
+  runId?: string;
   /**
    * M45: provenance — backend + model that produced this proposal's diff
    * (e.g. 'codex:gpt-5.5'). A later merge-authority gate requires

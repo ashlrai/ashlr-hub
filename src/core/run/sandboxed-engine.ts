@@ -41,6 +41,7 @@ import type {
   RunTask,
   RunUsage,
   Sandbox,
+  WorkSource,
 } from '../types.js';
 import { buildEngineCommand, spawnEngine } from './engines.js';
 import type { TerminationReason } from './run-monitor.js';
@@ -97,6 +98,10 @@ export interface RunEngineSandboxedOptions {
   existingWorktree?: Sandbox;
   /** Pre-generated run id (else one is generated). */
   runId?: string;
+  /** Optional originating backlog/work item id for causal tracing. */
+  workItemId?: string;
+  /** Optional originating backlog scanner/source for causal tracing. */
+  workSource?: WorkSource;
 }
 
 type SpawnEngineResult = {
@@ -814,6 +819,9 @@ export async function runEngineSandboxed(
             diffHash,
             provenanceSig,
             sandboxId: sb.id,
+            workItemId: opts.workItemId,
+            workSource: opts.workSource,
+            runId: id,
             engineModel,
             engineTier: tier,
           });
@@ -1089,6 +1097,9 @@ export async function runApiModelSandboxed(
             diffHash,
             provenanceSig,
             sandboxId: sb.id,
+            workItemId: opts.workItemId,
+            workSource: opts.workSource,
+            runId: id,
             engineModel,
             engineTier: tier,
           });

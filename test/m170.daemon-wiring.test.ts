@@ -230,10 +230,18 @@ describe('M170 — best-of-N dispatch: bestOfN > 1 routes through runBestOfN', (
 
     await tick(cfg, { dryRun: false });
 
-    const [passedItem, passedCfg, passedOpts] = mockRunBestOfN.mock.calls[0] as [unknown, unknown, { n: number }];
+    const [passedItem, passedCfg, passedOpts] = mockRunBestOfN.mock.calls[0] as [
+      { id: string; source: string },
+      unknown,
+      { n: number; workItemId: string; workSource: string },
+    ];
     expect(typeof passedItem).toBe('object');
     expect(passedCfg).toBe(cfg);
-    expect(passedOpts).toMatchObject({ n: 5 });
+    expect(passedOpts).toMatchObject({
+      n: 5,
+      workItemId: passedItem.id,
+      workSource: passedItem.source,
+    });
   });
 
   it('tick completes successfully when runBestOfN returns a winner', async () => {
@@ -273,6 +281,9 @@ describe('M170 — best-of-N dispatch: bestOfN absent/1 → single-run path unch
 
     expect(mockRunBestOfN).not.toHaveBeenCalled();
     expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    const [_goal, _cfg, opts] = mockRunGoal.mock.calls[0] as [string, unknown, { workItemId?: string; workSource?: string }];
+    expect(opts.workItemId).toMatch(/:m170-item-0$/);
+    expect(opts.workSource).toBe('todo');
   });
 
   it('does NOT call runBestOfN when bestOfN === 1', async () => {
@@ -296,6 +307,9 @@ describe('M170 — best-of-N dispatch: bestOfN absent/1 → single-run path unch
     expect(mockRunBestOfN).not.toHaveBeenCalled();
     expect(mockRunGoal).not.toHaveBeenCalled();
     expect(mockRunSwarm).toHaveBeenCalled();
+    const [_input, _cfg, swarmOpts] = mockRunSwarm.mock.calls[0] as [unknown, unknown, { workItemId?: string; workSource?: string }];
+    expect(swarmOpts.workItemId).toMatch(/:m170-item-0$/);
+    expect(swarmOpts.workSource).toBe('todo');
   });
 });
 

@@ -1101,6 +1101,8 @@ export async function runGoal(
                   budget: opts.budget,
                   propose: isLastAttempt,
                   existingWorktree: titrrSandbox,
+                  workItemId: opts.workItemId,
+                  workSource: opts.workSource,
                 });
                 lastApiR = apiR;
 
@@ -1119,6 +1121,8 @@ export async function runGoal(
                       budget: opts.budget,
                       propose: true,
                       existingWorktree: titrrSandbox,
+                      workItemId: opts.workItemId,
+                      workSource: opts.workSource,
                     });
                     lastApiR = propR;
                   }
@@ -1199,6 +1203,8 @@ export async function runGoal(
                 budget: opts.budget,
                 propose: isLastAttempt,
                 existingWorktree: titrrSandbox ?? undefined,
+                workItemId: opts.workItemId,
+                workSource: opts.workSource,
               });
               lastR = r;
 
@@ -1234,6 +1240,8 @@ export async function runGoal(
                     budget: opts.budget,
                     propose: true,
                     existingWorktree: titrrSandbox ?? undefined,
+                    workItemId: opts.workItemId,
+                    workSource: opts.workSource,
                   });
                   lastR = propR;
                 }
@@ -1250,6 +1258,8 @@ export async function runGoal(
                     budget: opts.budget,
                     propose: true,
                     existingWorktree: titrrSandbox ?? undefined,
+                    workItemId: opts.workItemId,
+                    workSource: opts.workSource,
                   });
                   lastR = propR;
                 }

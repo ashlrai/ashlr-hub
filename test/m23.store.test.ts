@@ -146,6 +146,9 @@ describe('M23 createProposal — persistence + initial state', () => {
       title: 'My PR proposal',
       summary: 'Does important work',
       diff: 'diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n',
+      workItemId: 'repo:todo:refresh-token',
+      workSource: 'todo',
+      runId: 'run-causal-1',
     });
     const p = createProposal(input);
     expect(p.repo).toBe(input.repo);
@@ -154,6 +157,9 @@ describe('M23 createProposal — persistence + initial state', () => {
     expect(p.title).toBe(input.title);
     expect(p.summary).toBe(input.summary);
     expect(p.diff).toBe(input.diff);
+    expect(p.workItemId).toBe(input.workItemId);
+    expect(p.workSource).toBe(input.workSource);
+    expect(p.runId).toBe(input.runId);
   });
 
   it('does NOT set decidedAt on creation (pending)', () => {

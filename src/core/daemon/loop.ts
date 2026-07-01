@@ -968,6 +968,8 @@ export async function tick(
             parallel: 1,
             dryRun: false,
             noCapture: true,
+            workItemId: item.id,
+            workSource: item.source,
           },
           sink,
         );
@@ -1024,7 +1026,11 @@ export async function tick(
           // Route through runBestOfN; use its winner's underlying runState.
           // runBestOfN never throws; if all candidates fail, winner is undefined
           // and we fall through to a zero-cost no-proposal outcome.
-          const bonResult = await runBestOfN(item, liveCfg, { n: bestOfN });
+          const bonResult = await runBestOfN(item, liveCfg, {
+            n: bestOfN,
+            workItemId: item.id,
+            workSource: item.source,
+          });
           if (!bonResult.winner) {
             // All candidates were empty/failing — count as dispatched but $0.
             swarmSpent = 0;
@@ -1051,6 +1057,8 @@ export async function tick(
             budget: itemBudget,
             tools: true,
             noMemory: false,
+            workItemId: item.id,
+            workSource: item.source,
           });
         }
 
