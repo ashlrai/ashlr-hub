@@ -212,3 +212,12 @@
   - `npm test -- --run test/ecosystem-index-docs.test.ts test/m184.ecosystem-context.test.ts test/ecosystem-doctor.test.ts` passed, 3 files and 41 tests.
   - `npm run typecheck` passed.
   - `git diff --check` passed.
+- Current core-loop focus pass:
+  - Added a read-only ecosystem focus helper that loads `docs/ecosystem-index.json`, classifies repos as `core-fleet`, `force-multiplier`, `supporting`, or neutral `inventory`, and keeps `ashlr-mux` as an external candidate rather than a local repo.
+  - `buildBacklog()` now multiplies item scores by a gentle strategic repo multiplier so core-spine work wins close calls without starving support repos.
+  - Daemon selection now sorts round-robin repo order by strategic tier before claiming work, so scarce `perTickItems` capacity starts on core repos.
+  - `FleetStatus.queue.repos.byTier`, CLI `fleet status`, and Mission Control/Fleet cards now expose backlog pressure by strategic tier.
+  - `simple-conductor` now reroutes away from `throttled` Claude, not only `exhausted`/`unreachable`, so Codex/NIM/local remain useful while Claude Code usage is out.
+  - Focused verification: `npm test -- --run test/m312.ecosystem-focus.test.ts test/ecosystem-index-docs.test.ts test/m161.backlog-ranking.test.ts test/m49.fleet-status.test.ts test/m201.daemon-loop.test.ts test/m300.resource-aware-dispatch.test.ts` passed, 6 files and 121 tests; `npm run typecheck` passed; `node --check src/core/web/public/app.js` passed.
+- Current sibling repo side effect:
+  - `openclaw-setup` has local commit `df7a9a9 test: add OpenClaw smoke coverage`, not pushed because direct-pushing `main` was not considered branch-policy-safe by the worker.

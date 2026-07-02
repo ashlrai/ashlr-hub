@@ -2178,6 +2178,67 @@ function autonomyEvidenceMetric(autonomy) {
   return `${autonomy.evidencePacks} packs / ${autonomy.allowed ?? 0} allowed / ${autonomy.denied ?? 0} denied`;
 }
 
+function strategicTierLabel(tier) {
+  const labels = {
+    'core-fleet': 'Core fleet',
+    'force-multiplier': 'Force multipliers',
+    inventory: 'Inventory',
+    supporting: 'Supporting',
+  };
+  return labels[tier] ?? String(tier ?? 'Unknown');
+}
+
+function basenameFromPath(path) {
+  if (typeof path !== 'string' || path.length === 0) return '?';
+  const parts = path.split('/').filter(Boolean);
+  return parts[parts.length - 1] ?? path;
+}
+
+function renderStrategicFocusCard(queue, cls = 'ctrl-card card') {
+  const coverage = queue?.repos;
+  if (!coverage || !Array.isArray(coverage.byTier)) return null;
+
+  const tierRows = coverage.byTier.filter((row) => row && typeof row === 'object');
+  const byTier = new Map(tierRows.map((row) => [row.tier, row]));
+  const order = ['core-fleet', 'force-multiplier', 'inventory', 'supporting'];
+  const rows = order.map((tier) => {
+    const row = byTier.get(tier) ?? { tier, repos: 0, items: 0 };
+    return [
+      strategicTierLabel(tier),
+      `${row.items ?? 0} item${row.items === 1 ? '' : 's'} / ${row.repos ?? 0} repo${row.repos === 1 ? '' : 's'}`,
+    ];
+  });
+
+  const card = el('div', { cls });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Strategic Ecosystem Focus'),
+    el('span', { cls: 'card-subtitle' }, `${coverage.withBacklog ?? 0}/${coverage.existing ?? 0} active enrolled repos`)
+  ));
+
+  const body = el('div', { cls: 'card-body' });
+  body.appendChild(infoGrid(rows));
+
+  const top = Array.isArray(coverage.top) ? coverage.top.slice(0, 5) : [];
+  if (top.length > 0) {
+    const list = el('div', { cls: 'ctrl-backend-list' });
+    for (const repo of top) {
+      list.appendChild(el('div', { cls: 'ctrl-backend-row' },
+        el('span', { cls: 'ctrl-backend-name' }, basenameFromPath(repo.repo)),
+        el('span', { cls: 'ctrl-backend-dispatches' }, `${repo.items ?? 0} backlog item${repo.items === 1 ? '' : 's'}`)
+      ));
+    }
+    body.appendChild(list);
+  }
+
+  const core = byTier.get('core-fleet');
+  if (!core || core.items === 0) {
+    body.appendChild(el('p', { cls: 'hint' }, 'No core-fleet backlog items in the cached queue.'));
+  }
+
+  card.appendChild(body);
+  return card;
+}
+
 function formatDirectionMode(mode) {
   const labels = {
     pause: 'Pause',
@@ -2291,6 +2352,9 @@ function renderFleet() {
   }
   summary.appendChild(infoGrid(summaryRows));
   section.appendChild(summary);
+
+  const strategicFocusCard = renderStrategicFocusCard(f.queue, 'fleet-card card');
+  if (strategicFocusCard) section.appendChild(strategicFocusCard);
 
   // Backends table
   const backendsCard = el('div', { cls: 'fleet-card card' });
@@ -2706,6 +2770,9 @@ function renderControl() {
     directionCard.appendChild(directionBody);
     section.appendChild(directionCard);
   }
+
+  const strategicFocusCard = renderStrategicFocusCard(queue);
+  if (strategicFocusCard) section.appendChild(strategicFocusCard);
 
   // ── 2. Local models ────────────────────────────────────────────────────
   const modelsData = d.models ?? {};

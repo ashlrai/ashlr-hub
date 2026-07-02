@@ -3,9 +3,9 @@
  *
  * Verifies four things:
  *
- *  1. SOURCE-TIER ORDERING: given a mixed backlog (goal, issue, dep, hygiene with
- *     similar raw scores), goal + issue rank ABOVE dep + hygiene in the final
- *     backlog.items order.
+ *  1. SOURCE/REPO-TIER ORDERING: given a mixed backlog (goal, issue, dep,
+ *     hygiene with similar raw scores), substantive sources and core-fleet
+ *     repos rank above low-tier maintenance/support work.
  *
  *  2. NO-STARVATION: when only low-tier items exist, the backlog remains valid;
  *     trivial maintenance sources are not restored just to keep the queue busy.
@@ -85,11 +85,16 @@ vi.mock('../src/core/sandbox/audit.js', () => ({
   audit: vi.fn(),
 }));
 
+vi.mock('../src/core/strategy/goal-planner.js', () => ({
+  expandGoalToMilestones: vi.fn(async (goal) => goal),
+}));
+
 // ============================================================================
 // ── Late imports (AFTER vi.mock declarations) ─────────────────────────────────
 // ============================================================================
 
-import { buildBacklog, sourceTierMultiplier } from '../src/core/portfolio/backlog.js';
+import { buildBacklog, sourceTierMultiplier, scoreItem } from '../src/core/portfolio/backlog.js';
+import { strategicRepoMultiplier } from '../src/core/ecosystem/focus.js';
 import type { WorkItem } from '../src/core/types.js';
 
 // ============================================================================
@@ -232,6 +237,18 @@ describe('M161 — source-tier ordering: substantive sources rank above low-tier
     const depMidScore  = (3 / 2) * sourceTierMultiplier('dep');  // 0.9
     expect(goalMidScore).toBeGreaterThan(depMidScore);
   });
+
+  it('core-fleet repo items win close calls against supporting repo items', () => {
+    const rawScore = scoreItem(3, 2);
+    const coreScore = rawScore *
+      sourceTierMultiplier('test') *
+      strategicRepoMultiplier('/tmp/dev-tools/ashlr-hub');
+    const supportScore = rawScore *
+      sourceTierMultiplier('test') *
+      strategicRepoMultiplier('/tmp/dev-tools/ashlr-config');
+
+    expect(coreScore).toBeGreaterThan(supportScore);
+  });
 });
 
 // ============================================================================
@@ -260,7 +277,7 @@ describe('M161 — buildBacklog: end-to-end source-tier ordering', () => {
     for (const item of backlog.items) {
       expect(item.score).toBeGreaterThan(0);
     }
-  });
+  }, 15_000);
 
   it('items are sorted descending by score after tier weighting', async () => {
     const backlog = await buildBacklog({

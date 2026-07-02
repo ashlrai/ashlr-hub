@@ -203,6 +203,30 @@ describe('M300 [D1] exhausted claude → reroutes to codex', () => {
     const [calledEngine] = mockRunEngineSandboxed.mock.calls[0]!;
     expect(calledEngine).toBe('codex');
   });
+
+  it('dispatches to codex when claude is throttled', async () => {
+    const cfg = makeConfig();
+    writeTasks([baseTask({ engine: 'claude' })]);
+
+    mockGetResourceSnapshot.mockResolvedValue(makeSnapshot([
+      { backend: 'claude', availability: 'throttled' },
+      { backend: 'codex',  availability: 'open' },
+    ]));
+    mockResolveEngineSpec.mockImplementation((engine: string) => ({
+      id: engine,
+      kind: 'cli-agent',
+      tier: 'frontier',
+    }));
+
+    const { runSimpleConductor } = await import('../src/core/simple-conductor.js');
+    const result = await runSimpleConductor(cfg, { once: true, dryRun: false, allowCloud: false });
+
+    expect(result.errors).toHaveLength(0);
+    expect(result.proposalsFiled).toBe(1);
+    expect(mockRunEngineSandboxed).toHaveBeenCalledOnce();
+    const [calledEngine] = mockRunEngineSandboxed.mock.calls[0]!;
+    expect(calledEngine).toBe('codex');
+  });
 });
 
 // ---------------------------------------------------------------------------

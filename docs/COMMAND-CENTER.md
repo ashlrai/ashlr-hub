@@ -19,6 +19,7 @@ as well as humans.**
 | **Routing** | Which models handle what — opus/sonnet/haiku · codex:gpt-5.5 · local · NIM split, quota-window burn, and the *reason* each task routed where (e.g. "hard coding → codex:gpt-5.5"; "claude window 92% → local") | `GET /api/fleet-state` (.routing); MCP `ashlr_routing` |
 | **Scorecard** | Productivity · quality · impact, trended: accept/reject/verify-pass rates, trivial-ratio, per-engine quality | `POST /api/oversight` ingest (fleet_scorecard) + MCP `ashlr_scorecard` |
 | **Map** | The repo ecosystem as a live graph with health/activity | `/map` (already built) + repo health |
+| **Strategic Focus** | Cached backlog coverage by ecosystem tier: core fleet spine vs force multipliers vs supporting substrate, plus whether current queue pressure is aligned with the strategic focus map | `GET /api/fleet` / `GET /api/control` (`.fleet.queue.repos.byTier`) + `docs/ecosystem-index.json` |
 | **Alerts + Triage** | Degrading-quality warnings (worst-first) + the CEO agent's reversible cleanup (human-approved); critical advisories rendered non-actionable | AlertsPanel/TriagePanel (already built) + the fleet_command queue round-trip |
 | **Vision** | The end-state spec · progress-to-vision · the latest Elon briefing (current state, gap, recommendations, questions for you) | OversightSnapshot.vision + MCP `ashlr_oversight` |
 | **Inbox / Review** | Human-gated proposals (the ones the Manager escalated) — approve/reject | the fleet_command queue → daemon applies locally |
@@ -34,6 +35,7 @@ as well as humans.**
      "routing":  [ { "task": "...", "engine": "codex", "model": "gpt-5.5", "reason": "hard coding (effort 5)" }, ... ]
    }
    ```
+   The local `/api/fleet` and `/api/control` status surfaces also expose `fleet.queue.repos.byTier` as a read-only strategic-focus overlay derived from `docs/ecosystem-index.json`; the same strategic map also biases backlog scoring and scarce-capacity repo selection.
 2. **`POST /api/oversight`** (pulse ingest, already built) — the daemon pushes `OversightSnapshot` on a cadence → `fleet_scorecard` (trended).
 3. **OTLP spans** (`POST /api/otlp/v1/traces`) — fleet lifecycle events (tick/proposal/merge/decline) with `ashlr.fleet.owner` attribution + (extend) routing model attrs.
 4. **fleet_command queue** (cloud→local round-trip, already built) — the cockpit's triage actions land here; the daemon polls + executes locally (proposal-only-safe).

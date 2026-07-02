@@ -732,6 +732,40 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(dispatchedRepos).toContain(repo2.dir);
   });
 
+  it('A6b: strategic core repos lead round-robin when capacity is scarce', async () => {
+    const parent = fs.mkdtempSync(`${fx.home}/strategic-repos-`);
+    const supportingRepo = `${parent}/ashlr-config`;
+    const coreRepo = `${parent}/ashlr-hub`;
+    fs.mkdirSync(supportingRepo, { recursive: true });
+    fs.mkdirSync(coreRepo, { recursive: true });
+    fs.mkdirSync(fx.ashlrDir, { recursive: true });
+    fs.writeFileSync(
+      `${fx.ashlrDir}/enrollment.json`,
+      JSON.stringify({ repos: [supportingRepo, coreRepo] }),
+      'utf8',
+    );
+    const supportItems = makeItems(supportingRepo, 2);
+    const coreItems = makeItems(coreRepo, 2);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [supportingRepo, coreRepo],
+      items: [...supportItems, ...coreItems],
+    });
+    const dispatchedRepos: string[] = [];
+    mockRunSwarm.mockImplementation(async (_goal: unknown, _cfg: unknown, opts: unknown) => {
+      const project = (opts as Record<string, unknown>)?.project as string | undefined;
+      if (project) dispatchedRepos.push(project);
+      return { id: 'mock', status: 'done', goal: '', result: '', usage: { totalTokens: 10, estCostUsd: 0, steps: 1 } };
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(1);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(dispatchedRepos).toEqual([coreRepo]);
+  });
+
   it('A7: items with a pending proposal are skipped during selection', async () => {
     const { repo, items } = enrollWithItems(3);
     // Create a pending proposal whose title contains items[0].id so the skip logic fires.

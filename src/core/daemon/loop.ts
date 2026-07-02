@@ -92,6 +92,7 @@ import {
   type ResourceStrategyDaemonPlan,
 } from '../autonomy/resource-strategy.js';
 import { listReadyEvidenceOutcomeRecords } from '../autonomy/outcome-records.js';
+import { compareReposByStrategicFocus } from '../ecosystem/focus.js';
 
 // ---------------------------------------------------------------------------
 // DaemonConfig defaults (conservative)
@@ -861,7 +862,7 @@ export async function tick(
   // Per-repo cursors (index into each repo's item array).
   const repoCursors = new Map<string, number>();
   for (const repo of byRepo.keys()) repoCursors.set(repo, 0);
-  const repoOrder = [...byRepo.keys()];
+  const repoOrder = [...byRepo.keys()].sort(compareReposByStrategicFocus);
 
   const selected: WorkItem[] = [];
   // Guard: if no repos were grouped (shouldn't happen given backlogItems > 0,

@@ -87,6 +87,12 @@ export function formatFleetStatus(s: FleetStatus): string {
         .join(', ');
       lines.push(`  top repos:     ${topRepos}`);
     }
+    if (repoCoverage.byTier.length > 0) {
+      const tierSummary = repoCoverage.byTier
+        .map((row) => `${row.tier}:${row.repos}r/${row.items}i`)
+        .join(', ');
+      lines.push(`  focus tiers:   ${tierSummary}`);
+    }
   }
   if (Array.isArray(s.queue.next) && s.queue.next.length > 0) {
     for (const item of s.queue.next.slice(0, 5)) {

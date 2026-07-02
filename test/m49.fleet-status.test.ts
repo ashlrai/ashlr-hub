@@ -267,6 +267,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       existing: 1,
       withBacklog: 1,
       silent: 0,
+      byTier: [{ tier: 'inventory', repos: 1, items: 2 }],
       top: [{ repo, items: 2 }],
     });
     expect(s.queue.next).toEqual([
@@ -524,6 +525,10 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
           existing: 3,
           withBacklog: 2,
           silent: 1,
+          byTier: [
+            { tier: 'core-fleet', repos: 1, items: 5 },
+            { tier: 'supporting', repos: 1, items: 2 },
+          ],
           top: [
             { repo: '/repo/a', items: 5 },
             { repo: '/repo/b', items: 2 },
@@ -612,6 +617,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('7 backlog item(s)');
     expect(out).toContain('repos:         2/3 active (3 enrolled, 1 silent)');
     expect(out).toContain('top repos:     a:5, b:2');
+    expect(out).toContain('focus tiers:   core-fleet:1r/5i, supporting:1r/2i');
     expect(out).toContain('next:          Ship autonomy debugger (goal, score 5)');
     expect(out).toContain('shared:        ok / 2 active / 1 owned / 1 reclaimable / 2 cooling / stale lock');
     expect(out).toContain('machine-A:1');

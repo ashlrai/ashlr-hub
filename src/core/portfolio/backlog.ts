@@ -17,6 +17,7 @@ import { listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
 import { isTrivialItem } from './value-filter.js';
 import { computeOutcomePriors, scoreAdjustment } from '../fleet/feedback.js';
+import { strategicRepoMultiplier } from '../ecosystem/focus.js';
 
 // ---------------------------------------------------------------------------
 // M133: normalized title for dedup matching
@@ -292,9 +293,15 @@ export async function buildBacklog(opts?: {
   // M161: score = raw value/effort score × source-tier multiplier so substantive
   // sources (goal, issue, security, test) naturally outrank dep/lint/hygiene
   // even when raw scores are similar.
+  //
+  // Strategic focus weighting is intentionally gentler than source weighting:
+  // core-fleet repos should win close calls, but support repos are still scanned
+  // and can surface when they contain high-value work.
   const deduped = dedupeItems(allItems).map((item) => ({
     ...item,
-    score: scoreItem(item.value, item.effort) * sourceTierMultiplier(item.source),
+    score: scoreItem(item.value, item.effort) *
+      sourceTierMultiplier(item.source) *
+      strategicRepoMultiplier(item.repo),
   }));
   deduped.sort((a, b) => b.score - a.score);
 

@@ -158,7 +158,7 @@ export async function runSimpleConductor(
   }
 
   /**
-   * M300: Resolve effective engine, rerouting away from exhausted backends.
+   * M300: Resolve effective engine, rerouting away from unavailable backends.
    * Flag-gated: cfg.foundry.resourceAwareDispatch !== false (default ON).
    * Never throws.
    */
@@ -172,8 +172,9 @@ export async function runSimpleConductor(
         return state?.availability ?? 'unknown';
       };
 
+      const unavailable = new Set(['exhausted', 'throttled', 'unreachable']);
       const avail = getAvailability(requestedEngine);
-      if (avail !== 'exhausted' && avail !== 'unreachable') return requestedEngine;
+      if (!unavailable.has(avail)) return requestedEngine;
 
       // Primary engine is exhausted — try fallback order.
       const fallbackOrder = ((cfg.foundry as Record<string, unknown> | undefined)?.['engineFallbackOrder'] as string[] | undefined)
@@ -182,7 +183,7 @@ export async function runSimpleConductor(
       for (const candidate of fallbackOrder) {
         if (candidate === requestedEngine) continue;
         const candidateAvail = getAvailability(candidate);
-        if (candidateAvail !== 'exhausted' && candidateAvail !== 'unreachable') {
+        if (!unavailable.has(candidateAvail)) {
           console.log(`[simple-conductor] reroute: ${requestedEngine} ${avail} → ${candidate} (availability: ${candidateAvail})`);
           return candidate as EngineId;
         }

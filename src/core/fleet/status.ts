@@ -24,6 +24,7 @@ import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
 import type { GuardHealthDiagnosis } from '../daemon/guard-health.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import type { BackendAvailability, BackendResourceState } from '../fabric/resource-monitor.js';
+import { strategicTierOfRepo, type StrategicTier } from '../ecosystem/focus.js';
 import { listEnrolled } from '../sandbox/policy.js';
 
 export interface FleetBackendResourceStatus {
@@ -130,6 +131,7 @@ export interface FleetQueueRepoCoverage {
   withBacklog: number;
   silent: number;
   top: Array<{ repo: string; items: number }>;
+  byTier: Array<{ tier: StrategicTier; repos: number; items: number }>;
 }
 
 /** One whole-fleet read-only snapshot. */
@@ -306,15 +308,26 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       .filter((item): item is WorkItem => isVisibleBacklogItem(item, enrolledRepos));
     backlogItems = items.length;
     const byRepo = new Map<string, number>();
+    const byTier = new Map<StrategicTier, { repos: Set<string>; items: number }>();
     for (const item of items) {
       const key = resolve(item.repo);
       byRepo.set(key, (byRepo.get(key) ?? 0) + 1);
+      const tier = strategicTierOfRepo(key);
+      const tierRow = byTier.get(tier) ?? { repos: new Set<string>(), items: 0 };
+      tierRow.repos.add(key);
+      tierRow.items++;
+      byTier.set(tier, tierRow);
     }
     queueRepos = {
       enrolled: enrolledRaw.length,
       existing: enrolledRepos.size,
       withBacklog: byRepo.size,
       silent: Math.max(0, enrolledRepos.size - byRepo.size),
+      byTier: (['core-fleet', 'force-multiplier', 'inventory', 'supporting'] as StrategicTier[])
+        .flatMap((tier) => {
+          const row = byTier.get(tier);
+          return row ? [{ tier, repos: row.repos.size, items: row.items }] : [];
+        }),
       top: [...byRepo.entries()]
         .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
         .slice(0, 8)
