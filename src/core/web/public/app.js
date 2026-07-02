@@ -2180,6 +2180,24 @@ function directionAccent(mode) {
   return colors[mode] ?? '#94a3b8';
 }
 
+function formatControlMode(mode) {
+  const labels = {
+    executable: 'Executable',
+    advisory: 'Advisory',
+    disabled: 'Disabled',
+  };
+  return labels[mode] ?? (mode ? String(mode) : 'Disabled');
+}
+
+function controlModeAccent(mode) {
+  const colors = {
+    executable: '#4ade80',
+    advisory: '#fbbf24',
+    disabled: '#94a3b8',
+  };
+  return colors[mode] ?? '#94a3b8';
+}
+
 function autonomyRecentRows(autonomy) {
   const rows = [];
   const recent = Array.isArray(autonomy?.recent) ? autonomy.recent : [];
@@ -2603,6 +2621,7 @@ function renderControl() {
   heroMetrics.appendChild(controlMetric('Merges (24h)', merges.recent ?? '—', '#4ade80'));
   heroMetrics.appendChild(controlMetric('Evidence', autonomy?.evidencePacks ?? 0, autonomy?.denied > 0 ? '#f87171' : '#38bdf8'));
   heroMetrics.appendChild(controlMetric('Active Mode', formatDirectionMode(activeDirectionMode ?? direction?.mode ?? 'unknown'), directionAccent(activeDirectionMode ?? direction?.mode)));
+  heroMetrics.appendChild(controlMetric('Control Mode', formatControlMode(daemon.autonomyControlMode), controlModeAccent(daemon.autonomyControlMode)));
   heroMetrics.appendChild(controlMetric('Kill switch', isKilled ? 'ENGAGED' : 'off', isKilled ? '#f87171' : '#64748b'));
   heroPulse.appendChild(heroMetrics);
   section.appendChild(heroPulse);
@@ -2618,7 +2637,7 @@ function renderControl() {
       ['Active', formatDirectionMode(activeDirectionMode ?? 'unknown')],
       ['Recommended', formatDirectionMode(direction.mode)],
       ['Last applied', daemon.activeDirectionAt ? fmtRelative(daemon.activeDirectionAt) : 'never'],
-      ['Control loop', daemon.autonomyControlLoop ? 'enabled' : 'advisory'],
+      ['Control mode', formatControlMode(daemon.autonomyControlMode)],
       ['Resources', direction.resources?.posture ?? 'unknown'],
       ['Constrained', direction.resources?.constrained ?? 0],
       ['Depleted', direction.resources?.depleted ?? 0],

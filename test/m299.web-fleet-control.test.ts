@@ -132,9 +132,11 @@ describe('POST /api/fleet/pause|resume', () => {
     expect(fleetPaused.statusCode).toBe(200);
     const pausedFleet = JSON.parse(fleetPaused.body) as {
       killed: boolean;
+      autonomyControlMode?: unknown;
       autonomyDirection?: { mode?: unknown; resources?: unknown };
     };
     expect(pausedFleet.killed).toBe(true);
+    expect(['disabled', 'advisory', 'executable']).toContain(pausedFleet.autonomyControlMode);
     expect(typeof pausedFleet.autonomyDirection?.mode).toBe('string');
     expect(typeof pausedFleet.autonomyDirection?.resources).toBe('object');
 
@@ -153,9 +155,11 @@ describe('POST /api/fleet/pause|resume', () => {
     expect(fleetResumed.statusCode).toBe(200);
     const resumedFleet = JSON.parse(fleetResumed.body) as {
       killed: boolean;
+      autonomyControlMode?: unknown;
       autonomyDirection?: { mode?: unknown };
     };
     expect(resumedFleet.killed).toBe(false);
+    expect(['disabled', 'advisory', 'executable']).toContain(resumedFleet.autonomyControlMode);
     expect(typeof resumedFleet.autonomyDirection?.mode).toBe('string');
   });
 });

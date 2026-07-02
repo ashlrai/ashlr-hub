@@ -136,6 +136,7 @@ describe('buildControlSnapshot — full shape (M61)', () => {
     expect(snap.daemon.activeDirectionAt === null || typeof snap.daemon.activeDirectionAt === 'string').toBe(true);
     expect(snap.daemon.activeDirectionReason === null || typeof snap.daemon.activeDirectionReason === 'string').toBe(true);
     expect(typeof snap.daemon.autonomyControlLoop).toBe('boolean');
+    expect(['disabled', 'advisory', 'executable']).toContain(snap.daemon.autonomyControlMode);
   });
 
   it('usage section has required keys and window=7d', async () => {
@@ -176,6 +177,21 @@ describe('buildControlSnapshot — never throws (M61)', () => {
   it('does not throw when cfg.foundry.limits is absent', async () => {
     const cfg = withFoundry({ allowedBackends: ['builtin'] });
     await expect(buildControlSnapshot(cfg)).resolves.toBeDefined();
+  });
+
+  it('reports effective autonomy control mode', async () => {
+    await expect(buildControlSnapshot(baseConfig())).resolves.toMatchObject({
+      daemon: { autonomyControlLoop: false, autonomyControlMode: 'disabled' },
+      fleet: { autonomyControlMode: 'disabled' },
+    });
+    await expect(buildControlSnapshot(withFoundry({ autoMerge: { enabled: true } }))).resolves.toMatchObject({
+      daemon: { autonomyControlLoop: true, autonomyControlMode: 'executable' },
+      fleet: { autonomyControlMode: 'executable' },
+    });
+    await expect(buildControlSnapshot(withFoundry({ autonomyControlLoop: false }))).resolves.toMatchObject({
+      daemon: { autonomyControlLoop: false, autonomyControlMode: 'advisory' },
+      fleet: { autonomyControlMode: 'advisory' },
+    });
   });
 
   it('logs array is empty (not throwing) when no daemon state exists', async () => {
@@ -415,6 +431,7 @@ describe('logs section (M61)', () => {
     expect(snap.daemon.activeDirectionAt).toBe('2026-06-17T00:03:00.000Z');
     expect(snap.daemon.activeDirectionReason).toBe('pending proposals need verification');
     expect(snap.daemon.autonomyControlLoop).toBe(true);
+    expect(snap.daemon.autonomyControlMode).toBe('executable');
     expect(snap.logs[0]?.msg).toContain('direction=verify-only');
     expect(snap.logs[0]?.msg).toContain('mode=simulation');
     expect(snap.logs[0]?.dryRun).toBe(true);

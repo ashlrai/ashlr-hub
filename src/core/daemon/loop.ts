@@ -36,7 +36,7 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { AshlrConfig, DaemonConfig, DaemonDispatchTrace, DaemonState, DaemonTick, EngineId, EngineTier, WorkItem } from '../types.js';
-import type { FleetStatus } from '../fleet/status.js';
+import { resolveAutonomyControlMode, type FleetStatus } from '../fleet/status.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import { killSwitchOn, setKill, listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
@@ -212,6 +212,7 @@ function buildTickFleetStatus(
     queue: { backlogItems },
     proposals: { pending, frontierPending, applied },
     merges: { recent: recentMerges },
+    autonomyControlMode: resolveAutonomyControlMode(cfg),
     ...(guardHealth !== undefined ? { guardHealth } : {}),
     killed: false,
   };

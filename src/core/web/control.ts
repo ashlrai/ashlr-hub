@@ -17,7 +17,12 @@
  */
 
 import type { AshlrConfig, DaemonTick } from '../types.js';
-import { buildFleetStatus, type FleetStatus } from '../fleet/status.js';
+import {
+  buildFleetStatus,
+  resolveAutonomyControlMode,
+  type FleetAutonomyControlMode,
+  type FleetStatus,
+} from '../fleet/status.js';
 import { getProviderRegistry } from '../providers.js';
 import { buildRollup, modelToProviderKey, LOCAL_PROVIDER_KEYS } from '../observability/rollup.js';
 import { loadDaemonState } from '../daemon/state.js';
@@ -56,6 +61,7 @@ export interface ControlDaemon {
   activeDirectionAt: string | null;
   activeDirectionReason: string | null;
   autonomyControlLoop: boolean;
+  autonomyControlMode: FleetAutonomyControlMode;
 }
 
 export interface ControlUsageByProvider {
@@ -202,6 +208,7 @@ function fallbackDaemon(): ControlDaemon {
     activeDirectionAt: null,
     activeDirectionReason: null,
     autonomyControlLoop: false,
+    autonomyControlMode: 'disabled',
   };
 }
 
@@ -221,6 +228,7 @@ function buildDaemon(cfg: AshlrConfig): ControlDaemon {
       autonomyControlLoop:
         cfg.foundry !== undefined &&
         (cfg.foundry as Record<string, unknown>)['autonomyControlLoop'] !== false,
+      autonomyControlMode: resolveAutonomyControlMode(cfg),
     };
   } catch {
     return fallbackDaemon();
@@ -748,6 +756,7 @@ export async function buildControlSnapshot(cfg: AshlrConfig): Promise<ControlSna
         queue: { backlogItems: 0 },
         proposals: { pending: 0, frontierPending: 0, applied: 0 },
         merges: { recent: 0 },
+        autonomyControlMode: resolveAutonomyControlMode(cfg),
         killed: false,
       };
     }),

@@ -80,6 +80,8 @@ export interface FleetAutonomyDirectionSummary {
   budgets: Pick<ResourceStrategyReport['budgets'], 'daemonBudgetLevel' | 'daemonSpentTodayUsd'>;
 }
 
+export type FleetAutonomyControlMode = 'disabled' | 'advisory' | 'executable';
+
 export interface FleetAutoMergeBlockerSummary {
   proposalId: string;
   title: string;
@@ -132,6 +134,8 @@ export interface FleetStatus {
     recent: number;
   };
   autonomy?: FleetAutonomyStatus;
+  /** Effective autonomy control authority for daemon dispatch decisions. */
+  autonomyControlMode: FleetAutonomyControlMode;
   /** Read-only static readiness summary for pending auto-merge candidates. */
   autoMergeReadiness?: FleetAutoMergeReadinessStatus;
   /** Read-only resource-aware autonomous operating recommendation. */
@@ -156,6 +160,12 @@ function enrolledExistingRepoSet(): Set<string> {
 function isVisibleBacklogItem(item: WorkItem, enrolledRepos: Set<string>): boolean {
   if (enrolledRepos.size === 0) return false;
   return enrolledRepos.has(resolve(item.repo));
+}
+
+export function resolveAutonomyControlMode(cfg: AshlrConfig): FleetAutonomyControlMode {
+  const foundry = cfg.foundry as Record<string, unknown> | undefined;
+  if (!foundry) return 'disabled';
+  return foundry['autonomyControlLoop'] === false ? 'advisory' : 'executable';
 }
 
 /**
@@ -338,6 +348,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     proposals: { pending, frontierPending, applied },
     merges: { recent: mergesRecent },
     autonomy,
+    autonomyControlMode: resolveAutonomyControlMode(cfg),
     ...(autoMergeReadiness !== undefined ? { autoMergeReadiness } : {}),
     ...(guardHealth !== undefined ? { guardHealth } : {}),
     killed,

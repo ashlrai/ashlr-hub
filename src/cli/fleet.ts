@@ -162,6 +162,7 @@ export function formatFleetStatus(s: FleetStatus): string {
   // Autonomy direction
   const direction = s.autonomyDirection;
   lines.push('Autonomy direction:');
+  lines.push(`  control:    ${s.autonomyControlMode}`);
   if (!direction) {
     lines.push('  unavailable');
   } else {

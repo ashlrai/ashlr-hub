@@ -511,6 +511,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         byTier: { T4: 2, T0: 1 },
         recent: [],
       },
+      autonomyControlMode: 'executable',
       autoMergeReadiness: {
         enabled: true,
         trustBasis: 'verification',
@@ -565,6 +566,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('failed:    1 known verification failure(s)');
     expect(out).toContain('1x known verification failure: npm test');
     expect(out).toContain('Autonomy direction:');
+    expect(out).toContain('control:    executable');
     expect(out).toContain('mode:       local-only');
     expect(out).toContain('confidence: medium');
     expect(out).toContain('resources:  constrained (1 constrained, 0 depleted)');
