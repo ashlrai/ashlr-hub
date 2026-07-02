@@ -50,6 +50,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Reload full daemon config live and surface backend resource availability
 - [x] Follow-up: Add auto-merge gate explanations, effective config visibility, and protected remote PR handoff
 - [x] Follow-up: Bind verification to merge base, fail-close optional safety checks, finish live daemon reload, and harden unknown resource handling
+- [x] Follow-up: Add Mission Control service recovery, resource-aware judge throttling, and queued autonomy work survival
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -105,6 +106,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Optional safety layers must fail closed when explicitly enabled. Red-team, blast-radius, and spec-contract checks now skip/refuse proposals on thrown or malformed results and expose the blocker in both skipped/results.
 - Live daemon config reload must include loop behavior, not only tick inputs. The non-once loop now rereads mode, budget, interval, and idle backoff around every iteration so batch/continuous behavior and sleep intervals can change without a restart.
 - Unknown resource availability is not capacity. Concurrent dispatch gives `unknown` zero slots, and resource-aware gateway demotes unknown current backends to sensed open/near alternatives instead of treating missing signals as healthy.
+- Mission Control should show OS service health separately from daemon process state. `/api/daemon/service` gives fresh read-only service health, while `/api/control` uses cached service status so frequent dashboard polling does not synchronously probe launchd/systemd/schtasks every refresh.
+- Token-gated service repair should reinstall/reload the configured OS service definition instead of starting daemon work inside the web process. It uses the same `--allow-dispatch` plus session-token gate as fleet pause/resume.
+- Resource-aware judge selection should preserve constrained Claude headroom. Cached `throttled`, `exhausted`, or `unreachable` Claude availability now falls to Codex/local for judging when available.
+- Self-heal and invent work must survive backlog refresh. `scanQueuedAutonomyWork()` rehydrates queued self-heal items and durable `source:'invent'` backlog items into normal daemon selection.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -143,4 +148,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch in verification** - Merge-base binding, fail-closed optional checks, daemon live-loop reload, and conservative unknown resources are implemented; focused integration tests passed; running final gates and push.
+**Current batch in verification** - Mission Control service recovery, resource-aware judge throttling, and queued autonomy work survival are implemented; focused tests and typecheck passed; running final gates and push.

@@ -661,21 +661,23 @@ function resolveJudgeClient(
   const wantClaude = managerJudgeEngine === 'auto' || managerJudgeEngine === 'claude';
   const wantCodex = managerJudgeEngine === 'codex';
 
-  // M300: resource-aware judge — check if claude is exhausted so we can fall to codex.
+  // M300: resource-aware judge — if cached Claude headroom says unavailable,
+  // preserve it for operators and fall to Codex/local instead. This does not
+  // fabricate spend accounting; it only honors measured availability.
   // peekBackendAvailability reads the in-memory snapshot cache synchronously (no I/O,
   // never throws). Returns null when no fresh cache → permissive (try claude first).
-  let claudeExhausted = false;
+  let claudeUnavailableByResource = false;
   try {
     const claudeAvail = peekBackendAvailability('claude');
-    if (claudeAvail === 'exhausted' || claudeAvail === 'unreachable') {
-      claudeExhausted = true;
+    if (claudeAvail === 'exhausted' || claudeAvail === 'unreachable' || claudeAvail === 'throttled') {
+      claudeUnavailableByResource = true;
     }
   } catch {
     // never throws — treat as available
   }
 
   // Step 1: Claude CLI (primary frontier judge).
-  if (wantClaude && claudeAllowedForJudge && !claudeExhausted && engineInstalled('claude', cfg)) {
+  if (wantClaude && claudeAllowedForJudge && !claudeUnavailableByResource && engineInstalled('claude', cfg)) {
     // Use cfg.foundry.managerJudgeModel if it looks like a claude model,
     // otherwise fall back to the sonnet default.
     const isClaudeModel = judgeModel.startsWith('claude') || judgeModel.includes('claude');
@@ -688,7 +690,7 @@ function resolveJudgeClient(
 
   // Step 2: M300 Codex CLI judge — explicit 'codex' setting OR auto + claude exhausted.
   // codex is a genuine frontier model (gpt-5.5); its judge attestations pass isFrontierJudge.
-  const useCodex = wantCodex || (wantClaude && claudeExhausted);
+  const useCodex = wantCodex || (wantClaude && claudeUnavailableByResource);
   if (useCodex && engineInstalled('codex', cfg)) {
     // Use managerJudgeModel if it looks like a codex/gpt model, else the registry default.
     const isCodexModel = judgeModel.startsWith('gpt-') || judgeModel.startsWith('codex-') || judgeModel === 'gpt-5.5';

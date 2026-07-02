@@ -59,6 +59,7 @@ let tmpHome: string;
 const mockEngineInstalled = vi.fn();
 const mockBuildEngineCommand = vi.fn();
 const mockSpawnEngine = vi.fn();
+const mockPeekBackendAvailability = vi.fn();
 
 vi.mock('../src/core/run/engines.js', () => ({
   engineInstalled: (...args: unknown[]) => mockEngineInstalled(...args),
@@ -66,6 +67,10 @@ vi.mock('../src/core/run/engines.js', () => ({
   spawnEngine: (...args: unknown[]) => mockSpawnEngine(...args),
   resolveBinAbsolute: (bin: string) => bin,
   phantomInitializedAt: () => false,
+}));
+
+vi.mock('../src/core/fabric/resource-monitor.js', () => ({
+  peekBackendAvailability: (...args: unknown[]) => mockPeekBackendAvailability(...args),
 }));
 
 const mockSetStatus = vi.fn();
@@ -212,6 +217,7 @@ beforeEach(() => {
   });
 
   mockListProposals.mockReturnValue([]);
+  mockPeekBackendAvailability.mockReturnValue(null);
   mockAutoMergeProposal.mockResolvedValue({
     merged: true,
     branched: false,
@@ -296,6 +302,19 @@ describe('M274 frontier judge reachability', () => {
 
     expect(client).not.toBeNull();
     expect(client!.model).toMatch(/claude/i);
+  });
+
+  it('[R11] falls to codex when cached Claude availability is throttled', () => {
+    const cfg = baseCfg({ managerJudgeEngine: 'auto' });
+    mockEngineInstalled.mockImplementation((engine: string) => engine === 'claude' || engine === 'codex');
+    mockPeekBackendAvailability.mockImplementation((backend: string) =>
+      backend === 'claude' ? 'throttled' : null,
+    );
+
+    const client = resolveFrontierJudgeClient(cfg);
+
+    expect(client).not.toBeNull();
+    expect(client!.model).toBe('gpt-5.5');
   });
 
   it('[R8] returns null when claude not installed AND ollama unreachable', () => {

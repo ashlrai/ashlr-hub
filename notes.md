@@ -171,3 +171,23 @@
 - Autonomous hardening daemon/resource/safety gate: `npm run test:ci -- test/m193.gate-integration.test.ts test/m201.daemon-loop.test.ts test/m116.worker-pool.test.ts test/m250.resource-control.test.ts test/m255.concurrent-dispatch.test.ts test/m306.resource-strategy.test.ts` passed, 6 files and 153 tests.
 - Autonomous hardening integration recheck: after cleanup, `npm run typecheck`, `git diff --check`, and `npm run test:ci -- test/m201.daemon-loop.test.ts test/m250.resource-control.test.ts test/m255.concurrent-dispatch.test.ts test/m47.merge.test.ts test/m193.gate-integration.test.ts` passed, 5 files and 172 tests.
 - Autonomous hardening final gate: `npm run lint`, `npm run build`, and `npm audit --audit-level=moderate` passed. Lint remains at the existing 118-warning baseline with 0 errors; audit found 0 vulnerabilities.
+- Current state/ambition pass agents:
+  - Market/product research: current competitors emphasize background/cloud agents, PR-based collaboration, model-agnostic execution, enterprise context/governance, and AI review. Ashlr's best angle is a local-first 24/7 control plane that can choose, prove, recover, and merge across the user's own repos.
+  - Architecture audit: strongest local capabilities are proposal-first daemon execution, evidence-backed auto-merge gates, live resource direction, sandbox/worktree execution, fleet status, and Mission Control visibility. Remaining gaps include exact PR merge reconciliation, stronger default confinement, config schema parity, universal verify contracts, and richer resource sensing.
+  - Mission Control recovery audit: service helpers already exist (`install`, `uninstall`, `serviceStatus`); web mutations already share a token/content-type gate. Best next patch is a narrow token-gated service repair route plus read-only service health.
+  - Resource audit: do not debit display-only judge estimates as real spend; instead enforce known resource availability. If Claude is cached as `throttled`, `exhausted`, or `unreachable`, judge routing should preserve Claude headroom and fall to Codex/local where available.
+  - Self-improvement selection audit: self-heal writes `self-heal-queue.json` and invent appends `source:'invent'` to `backlog.json`, but a fresh backlog refresh could overwrite those generated items before selection. Best next patch is a read-only queued-autonomy scanner that rehydrates self-heal and invent work into the normal scanner set.
+- Current implementation pass:
+  - Added read-only `GET /api/daemon/service` and token-gated `POST /api/daemon/service/repair` using config-derived daemon service options. Mission Control now shows OS service installed/running/platform/path and exposes a Repair button when a session token is set.
+  - Added `serviceStatusCached()` for Mission Control polling so `/api/control` does not synchronously probe launchd/systemd/schtasks on every refresh.
+  - Added shared `daemonServiceInstallOptions()` so web recovery paths map daemon budget/interval/parallel consistently.
+  - Resource-aware judge resolver now treats cached Claude `throttled` as unavailable for judge routing and falls to Codex/local instead of spending protected Claude headroom.
+  - Added `scanQueuedAutonomyWork()` near the top of `SCANNERS`, rehydrating self-heal queue items and durable invent backlog items for the enrolled repo, capped at 25 and read-only.
+- Current focused verification:
+  - `npm test -- --run test/m310.queued-autonomy-work.test.ts test/m299.web-fleet-control.test.ts test/m274.judge-reachable.test.ts` passed, 3 files and 20 tests.
+  - `npm run typecheck` passed.
+- Current final verification:
+  - `npm run typecheck`, `node --check src/core/web/public/app.js`, and `git diff --check` passed.
+  - `npm run test:ci -- test/m310.queued-autonomy-work.test.ts test/m299.web-fleet-control.test.ts test/m274.judge-reachable.test.ts test/m93.daemon-service.test.ts test/m49.fleet-status.test.ts test/m61.control.test.ts` passed, 6 files and 104 tests.
+  - `npm run lint`, `npm run build`, and `npm audit --audit-level=moderate` passed. Lint remains at the existing 118-warning baseline with 0 errors; audit found 0 vulnerabilities.
+  - Live smoke: `bin/ashlr daemon status --json` reports running daemon PID `11304`, pending `2`, `$0` spent; `bin/ashlr fleet status --json` reports unpaused executable control mode, verify-only direction, queue depth `23`, guard clear.

@@ -34,6 +34,8 @@ import { buildFleetDigest, type FleetRepoRow } from '../fleet/digest.js';
 import { loadWorkedLedger } from '../fleet/worked-ledger.js';
 import { fleetReadiness, type EngineReadiness } from '../fleet/engine-readiness.js';
 import { readAudit } from '../sandbox/audit.js';
+import { serviceStatusCached, type ServiceStatusResult } from '../daemon/service.js';
+import { daemonServiceInstallOptions } from '../daemon/service-config.js';
 
 // ---------------------------------------------------------------------------
 // ControlSnapshot type
@@ -62,6 +64,7 @@ export interface ControlDaemon {
   activeDirectionReason: string | null;
   autonomyControlLoop: boolean;
   autonomyControlMode: FleetAutonomyControlMode;
+  service: ServiceStatusResult;
 }
 
 export interface ControlUsageByProvider {
@@ -209,6 +212,11 @@ function fallbackDaemon(): ControlDaemon {
     activeDirectionReason: null,
     autonomyControlLoop: false,
     autonomyControlMode: 'disabled',
+    service: {
+      installed: false,
+      running: false,
+      platformSpec: 'unknown',
+    },
   };
 }
 
@@ -217,6 +225,7 @@ function buildDaemon(cfg: AshlrConfig): ControlDaemon {
     const ds = loadDaemonState();
     const ticks = Array.isArray(ds.ticks) ? ds.ticks : [];
     const activeDirectionTick = [...ticks].reverse().find((tick) => tick.directionMode);
+    const service = serviceStatusCached(daemonServiceInstallOptions(cfg), 15_000);
     return {
       running: ds.running === true,
       pid: typeof ds.pid === 'number' ? ds.pid : null,
@@ -229,6 +238,7 @@ function buildDaemon(cfg: AshlrConfig): ControlDaemon {
         cfg.foundry !== undefined &&
         (cfg.foundry as Record<string, unknown>)['autonomyControlLoop'] !== false,
       autonomyControlMode: resolveAutonomyControlMode(cfg),
+      service,
     };
   } catch {
     return fallbackDaemon();

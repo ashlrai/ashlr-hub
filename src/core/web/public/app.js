@@ -216,6 +216,27 @@ async function toggleFleetPaused(targetPaused) {
   }
 }
 
+async function repairDaemonService() {
+  const token = getToken();
+  if (!token) {
+    showToast('No session token — click the gear icon to set it.');
+    return;
+  }
+  try {
+    const result = await apiPost('/api/daemon/service/repair', token);
+    if (state.control && result.service) {
+      state.control.daemon = Object.assign({}, state.control.daemon ?? {}, { service: result.service });
+    }
+    showToast(result.service?.running ? 'Daemon service repaired and running.' : 'Daemon service repair completed.');
+    if (state.activeView === 'control') {
+      renderControl();
+      await loadControl();
+    }
+  } catch (err) {
+    showToast(`Service repair failed: ${err.message}`);
+  }
+}
+
 function fleetPauseResumeButton(isPaused, size = '') {
   const targetPaused = !isPaused;
   const btn = el('button', {
@@ -2580,6 +2601,8 @@ function renderControl() {
   const activeDirectionMode = daemon.activeDirectionMode ?? null;
   const isRunning = daemon.running ?? false;
   const isKilled  = d.fleet?.killed ?? false;
+  const service = daemon.service ?? {};
+  const serviceLabel = service.running ? 'running' : service.installed ? 'installed' : 'missing';
 
   section.appendChild(el('div', { cls: 'view-header' },
     el('div', {},
@@ -2622,9 +2645,35 @@ function renderControl() {
   heroMetrics.appendChild(controlMetric('Evidence', autonomy?.evidencePacks ?? 0, autonomy?.denied > 0 ? '#f87171' : '#38bdf8'));
   heroMetrics.appendChild(controlMetric('Active Mode', formatDirectionMode(activeDirectionMode ?? direction?.mode ?? 'unknown'), directionAccent(activeDirectionMode ?? direction?.mode)));
   heroMetrics.appendChild(controlMetric('Control Mode', formatControlMode(daemon.autonomyControlMode), controlModeAccent(daemon.autonomyControlMode)));
+  heroMetrics.appendChild(controlMetric('OS Service', serviceLabel, service.running ? '#4ade80' : service.installed ? '#fbbf24' : '#f87171'));
   heroMetrics.appendChild(controlMetric('Kill switch', isKilled ? 'ENGAGED' : 'off', isKilled ? '#f87171' : '#64748b'));
   heroPulse.appendChild(heroMetrics);
   section.appendChild(heroPulse);
+
+  const serviceCard = el('div', { cls: 'ctrl-card card' });
+  serviceCard.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Daemon Service'),
+    el('span', { cls: 'card-subtitle' }, service.platformSpec ?? 'unknown')
+  ));
+  const serviceBody = el('div', { cls: 'card-body' });
+  serviceBody.appendChild(el('div', { cls: 'ctrl-service-row' },
+    el('span', { cls: `ctrl-health-dot ${service.running ? 'up' : 'down'}`, title: service.running ? 'Running' : 'Stopped' }),
+    el('span', { cls: 'ctrl-service-status' }, `${service.installed ? 'installed' : 'not installed'} · ${service.running ? 'running' : 'stopped'}`),
+    service.serviceFilePath ? el('span', { cls: 'ctrl-service-path', title: service.serviceFilePath }, service.serviceFilePath) : null,
+    getToken()
+      ? el('button', {
+          cls: 'btn btn-secondary btn-sm',
+          type: 'button',
+          title: 'Repair daemon service',
+          onClick: () => { void repairDaemonService(); },
+        }, 'Repair')
+      : null
+  ));
+  if (service.errorLog) {
+    serviceBody.appendChild(el('div', { cls: 'ctrl-service-error' }, service.errorLog));
+  }
+  serviceCard.appendChild(serviceBody);
+  section.appendChild(serviceCard);
 
   if (direction) {
     const directionCard = el('div', { cls: 'ctrl-card card' });

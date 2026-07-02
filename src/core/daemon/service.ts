@@ -64,6 +64,14 @@ export interface ServiceStatusResult {
   errorLog?: string;
 }
 
+interface CachedServiceStatusEntry {
+  key: string;
+  expiresAt: number;
+  status: ServiceStatusResult;
+}
+
+let cachedServiceStatus: CachedServiceStatusEntry | null = null;
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -419,6 +427,33 @@ export function serviceStatus(opts: ServiceInstallOptions = {}): ServiceStatusRe
     return querySchtasks(def.filePath, installed);
   }
   return { installed, running: false, platformSpec: 'unknown', serviceFilePath: def.filePath };
+}
+
+export function serviceStatusCached(
+  opts: ServiceInstallOptions = {},
+  cacheMs = 15_000,
+): ServiceStatusResult {
+  const key = JSON.stringify({
+    platform: opts.platform ?? process.platform,
+    homeDir: opts.homeDir ?? null,
+    nodePath: opts.nodePath ?? null,
+    binPath: opts.binPath ?? null,
+    budget: opts.budget ?? null,
+    intervalMs: opts.intervalMs ?? null,
+    parallel: opts.parallel ?? null,
+    keepAwake: opts.keepAwake ?? null,
+  });
+  const now = Date.now();
+  if (cachedServiceStatus && cachedServiceStatus.key === key && cachedServiceStatus.expiresAt > now) {
+    return cachedServiceStatus.status;
+  }
+  const status = serviceStatus(opts);
+  cachedServiceStatus = {
+    key,
+    expiresAt: now + Math.max(0, cacheMs),
+    status,
+  };
+  return status;
 }
 
 function queryLaunchd(filePath: string, installed: boolean): ServiceStatusResult {

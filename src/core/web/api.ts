@@ -25,6 +25,7 @@
  *   POST /api/open             -> openInEditor/openInFinder for an enrolled repo path (M100)
  *   POST /api/fleet/pause      -> engage the fleet kill switch
  *   POST /api/fleet/resume     -> clear the fleet kill switch
+ *   POST /api/daemon/service/repair -> reinstall/reload daemon OS service
  *
  * SECURITY:
  *  - Never throws (500 on internal error).
@@ -53,6 +54,8 @@ import { recall } from '../genome/recall.js';
 import { listProposals, loadProposal, setStatus } from '../inbox/store.js';
 // M24: read-only daemon state endpoint.
 import { loadDaemonState } from '../daemon/state.js';
+import { install as installDaemonService, serviceStatus } from '../daemon/service.js';
+import { daemonServiceInstallOptions } from '../daemon/service-config.js';
 import { buildFleetStatus } from '../fleet/status.js';
 // M61: Mission Control aggregator.
 import { buildControlSnapshot } from './control.js';
@@ -756,6 +759,41 @@ export async function handleApi(
     if (path === '/api/daemon' && method === 'GET') {
       const ds = loadDaemonState();
       sendJson(res, 200, ds);
+      return true;
+    }
+
+    // ── GET /api/daemon/service ────────────────────────────────────────────
+    // Read-only OS service health: installed/running/platform/path. This does
+    // not start, stop, install, or mutate anything.
+    if (path === '/api/daemon/service' && method === 'GET') {
+      const service = serviceStatus(daemonServiceInstallOptions(cfg));
+      sendJson(res, 200, service);
+      return true;
+    }
+
+    // ── POST /api/daemon/service/repair ────────────────────────────────────
+    // Operator recovery: reinstall/reload the OS service using the same config-
+    // derived service definition as `ashlr daemon install`, then return current
+    // service health. Hidden unless --allow-dispatch and token-gated.
+    if (path === '/api/daemon/service/repair' && method === 'POST') {
+      if (!ctx.allowDispatch) {
+        sendJson(res, 404, { error: 'not found' });
+        return true;
+      }
+      if (!passesMutationGate(req, res, ctx.token)) {
+        return true;
+      }
+
+      try {
+        const opts = daemonServiceInstallOptions(cfg, { autostart: true });
+        await installDaemonService(opts);
+        const service = serviceStatus(opts);
+        sendJson(res, 200, { ok: true, action: 'repair', service });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const service = serviceStatus(daemonServiceInstallOptions(cfg, { autostart: true }));
+        sendJson(res, 500, { ok: false, action: 'repair', error: msg, service });
+      }
       return true;
     }
 

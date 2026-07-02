@@ -10,8 +10,19 @@
  *     /api/fleet.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as http from 'node:http';
+
+const serviceMocks = vi.hoisted(() => ({
+  install: vi.fn(),
+  serviceStatus: vi.fn(),
+}));
+
+vi.mock('../src/core/daemon/service.js', () => ({
+  install: serviceMocks.install,
+  serviceStatus: serviceMocks.serviceStatus,
+  serviceStatusCached: serviceMocks.serviceStatus,
+}));
 
 import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
 import { startServer } from '../src/core/web/server.js';
@@ -25,6 +36,14 @@ beforeEach(() => {
   expect.hasAssertions();
   fx = makeFixture();
   openHandles = [];
+  serviceMocks.install.mockReset();
+  serviceMocks.serviceStatus.mockReset();
+  serviceMocks.serviceStatus.mockReturnValue({
+    installed: true,
+    running: true,
+    platformSpec: 'launchd',
+    serviceFilePath: '/tmp/ai.ashlr.daemon.plist',
+  });
 });
 
 afterEach(async () => {
@@ -164,5 +183,114 @@ describe('POST /api/fleet/pause|resume', () => {
     expect(resumedFleet.killed).toBe(false);
     expect(['disabled', 'advisory', 'executable']).toContain(resumedFleet.autonomyControlMode);
     expect(typeof resumedFleet.autonomyDirection?.mode).toBe('string');
+  });
+});
+
+describe('GET/POST /api/daemon/service', () => {
+  it('returns read-only daemon OS service health without a token', async () => {
+    serviceMocks.serviceStatus.mockReturnValueOnce({
+      installed: true,
+      running: false,
+      platformSpec: 'launchd',
+      serviceFilePath: '/tmp/ai.ashlr.daemon.plist',
+    });
+    const h = await startServer(makeCfg(), makeOpts({ allowDispatch: false }));
+    openHandles.push(h);
+
+    const res = await request('GET', `${h.url}/api/daemon/service`, h.port);
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as {
+      installed: boolean;
+      running: boolean;
+      platformSpec: string;
+      serviceFilePath?: string;
+    };
+    expect(body.installed).toBe(true);
+    expect(body.running).toBe(false);
+    expect(body.platformSpec).toBe('launchd');
+    expect(serviceMocks.install).not.toHaveBeenCalled();
+  });
+
+  it('hides daemon service repair unless dispatch controls are enabled', async () => {
+    const h = await startServer(makeCfg(), makeOpts({ allowDispatch: false }));
+    openHandles.push(h);
+
+    const res = await request(
+      'POST',
+      `${h.url}/api/daemon/service/repair`,
+      h.port,
+      { ...JSON_HEADERS, 'x-ashlr-token': h.token },
+      '{}',
+    );
+    expect(res.statusCode).toBe(404);
+    expect(serviceMocks.install).not.toHaveBeenCalled();
+  });
+
+  it('requires the operator token and JSON content type for service repair', async () => {
+    const h = await startServer(makeCfg(), makeOpts({ allowDispatch: true }));
+    openHandles.push(h);
+
+    const wrongToken = await request(
+      'POST',
+      `${h.url}/api/daemon/service/repair`,
+      h.port,
+      { ...JSON_HEADERS, 'x-ashlr-token': 'bad' },
+      '{}',
+    );
+    expect(wrongToken.statusCode).toBe(401);
+
+    const wrongType = await request(
+      'POST',
+      `${h.url}/api/daemon/service/repair`,
+      h.port,
+      { 'Content-Type': 'text/plain', 'x-ashlr-token': h.token },
+      '{}',
+    );
+    expect(wrongType.statusCode).toBe(415);
+    expect(serviceMocks.install).not.toHaveBeenCalled();
+  });
+
+  it('repairs the daemon service using config-derived daemon settings', async () => {
+    serviceMocks.serviceStatus.mockReturnValueOnce({
+      installed: true,
+      running: true,
+      platformSpec: 'launchd',
+      serviceFilePath: '/tmp/ai.ashlr.daemon.plist',
+    });
+
+    const cfg = makeCfg({
+      daemon: {
+        dailyBudgetUsd: 7,
+        intervalMs: 900_000,
+        parallel: 3,
+      },
+    });
+    const h = await startServer(cfg, makeOpts({ allowDispatch: true }));
+    openHandles.push(h);
+
+    const res = await request(
+      'POST',
+      `${h.url}/api/daemon/service/repair`,
+      h.port,
+      { ...JSON_HEADERS, 'x-ashlr-token': h.token },
+      '{}',
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(serviceMocks.install).toHaveBeenCalledWith({
+      budget: 7,
+      intervalMs: 900_000,
+      parallel: 3,
+      autostart: true,
+    });
+    const body = JSON.parse(res.body) as {
+      ok: boolean;
+      action: string;
+      service: { installed: boolean; running: boolean };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.action).toBe('repair');
+    expect(body.service.installed).toBe(true);
+    expect(body.service.running).toBe(true);
   });
 });

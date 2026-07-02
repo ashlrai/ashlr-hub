@@ -15,6 +15,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync, statSync, readFileSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -35,6 +36,7 @@ const NPM_TIMEOUT_MS = 20_000;
 const MAX_TODO_HITS = 200;
 const MAX_OUTDATED_ITEMS = 50;
 const MAX_VULN_ITEMS = 20;
+const MAX_QUEUED_AUTONOMY_ITEMS = 25;
 
 // ---------------------------------------------------------------------------
 // Shared ignore predicate — non-actionable / generated / vendored files
@@ -178,6 +180,74 @@ function makeItem(
     tags,
     ts: nowIso(),
   };
+}
+
+function readWorkItemsFile(filePath: string): WorkItem[] {
+  try {
+    if (!existsSync(filePath)) return [];
+    const raw = JSON.parse(readFileSync(filePath, 'utf8')) as unknown;
+    if (Array.isArray(raw)) return raw.filter(isWorkItemLike);
+    if (
+      raw &&
+      typeof raw === 'object' &&
+      Array.isArray((raw as { items?: unknown }).items)
+    ) {
+      return (raw as { items: unknown[] }).items.filter(isWorkItemLike);
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+function isWorkItemLike(value: unknown): value is WorkItem {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Partial<WorkItem>;
+  return (
+    typeof item.id === 'string' &&
+    typeof item.repo === 'string' &&
+    typeof item.source === 'string' &&
+    typeof item.title === 'string' &&
+    typeof item.detail === 'string' &&
+    typeof item.value === 'number' &&
+    typeof item.effort === 'number' &&
+    typeof item.score === 'number' &&
+    Array.isArray(item.tags) &&
+    item.tags.every((tag) => typeof tag === 'string') &&
+    typeof item.ts === 'string'
+  );
+}
+
+/**
+ * Rehydrate queued high-value autonomy work into the normal backlog refresh.
+ *
+ * Self-heal writes `~/.ashlr/self-heal-queue.json`; invent appends
+ * `source:'invent'` items into the previous `~/.ashlr/backlog.json`. A fresh
+ * scanner pass rewrites backlog.json, so without this reader those generated
+ * items can vanish before the daemon gets a chance to select them.
+ */
+export async function scanQueuedAutonomyWork(repo: string): Promise<WorkItem[]> {
+  try {
+    const root = join(homedir(), '.ashlr');
+    const queued = [
+      ...readWorkItemsFile(join(root, 'self-heal-queue.json')),
+      ...readWorkItemsFile(join(root, 'backlog.json')),
+    ];
+    const seen = new Set<string>();
+    const result: WorkItem[] = [];
+    for (const item of queued) {
+      if (item.repo !== repo) continue;
+      const isSelfHeal = item.tags.includes('self-heal');
+      if (item.source !== 'invent' && !isSelfHeal) continue;
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      result.push(item);
+      if (result.length >= MAX_QUEUED_AUTONOMY_ITEMS) break;
+    }
+    return result;
+  } catch {
+    return [];
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1559,6 +1629,7 @@ export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'
 
 export const SCANNERS: ReadonlyArray<(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>) => Promise<WorkItem[]>> = [
   // HIGH-VALUE sources (default ON): substantive work the fleet can ship.
+  scanQueuedAutonomyWork, // self-heal/invent work persisted by prior autonomy cycles
   scanIssues,      // real GitHub issues — user-requested work
   scanSecurity,    // binshield findings — actionable security fixes
   scanTests,       // failing CI / missing test script
