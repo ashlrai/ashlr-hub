@@ -424,7 +424,9 @@ export function serviceStatus(opts: ServiceInstallOptions = {}): ServiceStatusRe
 function queryLaunchd(filePath: string, installed: boolean): ServiceStatusResult {
   try {
     const result = spawnSync('launchctl', ['list', 'ai.ashlr.daemon'], { encoding: 'utf8', timeout: 5_000 });
-    const running = result.status === 0 && !!result.stdout && !result.stdout.includes('"PID" = 0');
+    const pidMatch = result.stdout.match(/"PID"\s*=\s*(\d+)/);
+    const pid = pidMatch ? Number(pidMatch[1]) : 0;
+    const running = result.status === 0 && Number.isFinite(pid) && pid > 0;
     return { installed, running, platformSpec: 'launchd', serviceFilePath: filePath };
   } catch {
     return { installed, running: false, platformSpec: 'launchd', serviceFilePath: filePath };

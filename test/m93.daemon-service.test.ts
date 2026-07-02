@@ -428,6 +428,18 @@ describe('serviceStatus() — mocked OS query output', () => {
     expect(s.platformSpec).toBe('launchd');
   });
 
+  it('darwin: running=false when launchctl list has no PID after a clean exit', () => {
+    existsSyncMock.mockReturnValue(true);
+    spawnSyncMock.mockReturnValue({
+      status: 0,
+      stdout: '{\n\t"Label" = "ai.ashlr.daemon";\n\t"LastExitStatus" = 0;\n}',
+      stderr: '',
+    });
+    const s = serviceStatus(baseOpts('darwin'));
+    expect(s.running).toBe(false);
+    expect(s.platformSpec).toBe('launchd');
+  });
+
   it('darwin: running=false when launchctl exits non-zero', () => {
     existsSyncMock.mockReturnValue(false);
     spawnSyncMock.mockReturnValue({ status: 1, stdout: '', stderr: 'Could not find service' });

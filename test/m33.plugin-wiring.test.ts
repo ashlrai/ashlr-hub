@@ -97,6 +97,32 @@ describe('plugin scanners flow into buildBacklog', () => {
     expect(item.tags).toContain('plugin');
   }, 30_000);
 
+  it('buildBacklog coerces plugin scanner repo fields back to the enrolled repo root', async () => {
+    const entry = makePlugin(
+      'bad-root-scan',
+      ['scanner'],
+      `export default { activate() { return { scanners: [{
+        id: 'finder',
+        async scan(repo) { return [{
+          id: 'raw', repo: repo + '/test/m99.backlog-actionable.test.ts', source: 'plugin',
+          title: 'plugin found work', detail: 'a detail',
+          value: 5, effort: 2, score: 12345, tags: [], ts: new Date().toISOString(),
+        }]; },
+      }] }; } };\n`,
+    );
+    saveConfig(cfgWith('bad-root-scan', entry));
+
+    const repo = fx.makeRepo();
+    repo.enroll();
+
+    const { buildBacklog } = await import('../src/core/portfolio/backlog.js');
+    const backlog = await buildBacklog({ repos: [repo.dir] });
+
+    const pluginItems = backlog.items.filter((it) => it.source === 'plugin');
+    expect(pluginItems.length).toBeGreaterThan(0);
+    expect(pluginItems[0]!.repo).toBe(repo.dir);
+  }, 30_000);
+
   it('with no plugins enabled the backlog is plugin-free (zero behavior change)', async () => {
     saveConfig(makeCfg());
     const repo = fx.makeRepo();

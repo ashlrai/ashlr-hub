@@ -42,6 +42,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Persist daemon backend assignment traces
 - [x] Follow-up: Add daemon simulation awareness and bounded ready-evidence autonomy input
 - [x] Follow-up: Surface auto-merge maintenance resource estimates and caps
+- [x] Follow-up: Repair daemon launchd liveness, status read-only behavior, sandbox/engine cwd normalization, active guard health, and manager auto-merge bounds
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -80,6 +81,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Daemon dry-run/simulation ticks now carry a canonical `dryRun` marker through persisted tick records, Mission Control logs, and Fleet Activity payloads, so no-op rehearsals are visible instead of inferred from `reason` alone.
 - Auto-merge maintenance now surfaces configured judge/verification caps, cap-hit counts, verification-before-judge runs, archive/TTL drains, and display-only judge spend estimates in daemon ticks, Mission Control logs, and Fleet Activity maintenance chips.
 - Do not debit display-only judge estimates into `todaySpentUsd` until `judgeProposal` exposes measured tokens/cost; fake budget precision is worse than an explicit estimate.
+- `fleet status` must never run full backlog refresh, goal expansion, or generative strategy work; it now reads only the last persisted backlog snapshot while the daemon/backlog CLI own refresh.
+- Plugin and scanner output must never be trusted for `WorkItem.repo`; backlog normalization now coerces every item back to the enrolled repo root scanned, and plugin wrappers force the same contract.
+- Manager `wouldMerge` is advisory but must mirror configured auto-merge risk/file/line bounds so Gate 7 does not block proposals that the real merge gate is configured to allow.
+- The installed `ai.ashlr.daemon` launch agent was stale and ran `ashlr loop --watch`; reinstalling from the repo generator now runs `node bin/ashlr daemon start --budget 5 --interval 1800000 --parallel 1`.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -108,6 +113,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current dispatch-trace pass persists bounded daemon dispatch assignment metadata and surfaces it in existing control logs and Fleet Activity tick streams.
 - Current pass adds canonical daemon dry-run awareness and a cheap ready-evidence reader so autonomy direction can see pending main-merge evidence when auto-merge is enabled.
 - Current pass adds maintenance resource/cap visibility for auto-merge judge and verify-before-judge work while preserving existing merge and budget behavior.
+- Current liveness pass found the daemon was installed but stopped, status could misreport a cleanly exited launchd job as running, `fleet status` could trigger backlog/goal-planner side effects, plugin scanners and engine adapter callers could smuggle file paths into execution cwd, active spend guards were reported as stale blocks, and manager `wouldMerge` used stale hard-coded caps.
+- Current liveness pass repairs those issues, enrolls `ashlr-hub`, reinstalls the daemon service from the generated plist, and verifies launchd is running the real `daemon start` command.
 
 ## Status
-**Current batch verified locally** - Auto-merge maintenance resource/cap visibility is implemented, surfaced, tested, and verified; preparing commit/push.
+**Current batch in verification** - Daemon liveness/status/sandbox/manager repairs are implemented; focused tests, typecheck, build, and live status checks passed; preparing final gates, commit, and push.

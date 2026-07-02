@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -171,6 +171,46 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(['pause', 'local-only', 'verify-only', 'backlog-build', 'auto-merge-ready']).toContain(
       s.autonomyDirection?.mode,
     );
+  });
+
+  it('does not refresh, persist, or audit backlog while building a status snapshot', async () => {
+    const cfg = baseConfig();
+    const s = await buildFleetStatus(cfg);
+
+    expect(s.queue.backlogItems).toBe(0);
+    expect(existsSync(join(tmpHome, '.ashlr', 'backlog.json'))).toBe(false);
+    expect(existsSync(join(tmpHome, '.ashlr', 'audit'))).toBe(false);
+  });
+
+  it('reports backlog count from the last persisted backlog snapshot only', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    mkdirSync(ashlrDir, { recursive: true });
+    const item = {
+      id: 'repo:goal:one',
+      repo: '/tmp/repo',
+      source: 'goal',
+      title: 'Advance goal one',
+      detail: 'detail',
+      value: 4,
+      effort: 2,
+      score: 2,
+      tags: ['goal'],
+      ts: '2026-07-01T00:00:00.000Z',
+    };
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: '2026-07-01T00:00:00.000Z',
+        repos: ['/tmp/repo'],
+        items: [item, { ...item, id: 'repo:goal:two', title: 'Advance goal two' }],
+      }),
+      'utf8',
+    );
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.queue.backlogItems).toBe(2);
+    expect(existsSync(join(tmpHome, '.ashlr', 'audit'))).toBe(false);
   });
 
   it('reflects allowedBackends — defaults to [builtin] when no foundry', async () => {

@@ -296,7 +296,7 @@ describe('m120 judgeProposal — wouldMerge logic', () => {
     expect(verdict.wouldMerge).toBe(true);
   });
 
-  it('wouldMerge=false when verdict=ship but risk=medium', async () => {
+  it('wouldMerge=false when verdict=ship but risk=medium under default low-risk bounds', async () => {
     const { classifyRisk } = await import('../src/core/inbox/merge.js');
     (classifyRisk as ReturnType<typeof vi.fn>).mockReturnValue('medium');
 
@@ -315,6 +315,39 @@ describe('m120 judgeProposal — wouldMerge logic', () => {
     const verdict = await judgeProposal(proposal, {} as never, client);
     expect(verdict.verdict).toBe('ship');
     expect(verdict.wouldMerge).toBe(false);
+  });
+
+  it('wouldMerge=true for medium risk when configured auto-merge bounds allow it', async () => {
+    const { classifyRisk } = await import('../src/core/inbox/merge.js');
+    (classifyRisk as ReturnType<typeof vi.fn>).mockReturnValue('medium');
+
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const proposal = makeProposal({ diff: makeDiff(6, 20) });
+
+    const client = mockClient({
+      verdict: 'ship',
+      value: 5,
+      correctness: 5,
+      scope: 2,
+      alignment: 5,
+      rationale: 'Medium risk but inside configured bounds.',
+    });
+
+    const verdict = await judgeProposal(
+      proposal,
+      {
+        foundry: {
+          autoMerge: {
+            maxRisk: 'medium',
+            maxAutomergeFiles: 10,
+            maxAutomergeLines: 300,
+          },
+        },
+      } as never,
+      client,
+    );
+    expect(verdict.verdict).toBe('ship');
+    expect(verdict.wouldMerge).toBe(true);
   });
 
   it('wouldMerge=false when verdict=ship but diff is large (>150 changed lines)', async () => {

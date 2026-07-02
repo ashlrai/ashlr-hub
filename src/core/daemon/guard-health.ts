@@ -40,6 +40,15 @@ function backupCommand(path: string): string {
   return `mv ${shellQuote(path)} ${shellQuote(`${path}.bak`)}`;
 }
 
+function pidIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function nearestExistingPath(path: string): string | null {
   let current = path;
   for (;;) {
@@ -138,7 +147,14 @@ export function diagnoseGuardHealth(): GuardHealthDiagnosis {
           path: spendGuard.path,
           repairCommands: ['ashlr daemon stop', backupCommand(spendGuard.path), 'ashlr daemon status'],
         });
-      } else {
+      } else if (
+        !(
+          daemonState.ok &&
+          daemonState.state.running === true &&
+          daemonState.state.pid === spendGuard.guard.pid &&
+          pidIsAlive(spendGuard.guard.pid)
+        )
+      ) {
         blocks.push({
           id: 'daemon-spend-guard-armed',
           detail: `daemon spend guard armed at ${spendGuard.guard.armedAt} for ${spendGuard.guard.itemIds.length} item(s)`,

@@ -121,6 +121,27 @@ describe('wrapScanner', () => {
     expect(items[0]!.source).toBe('plugin');
   });
 
+  it('forces repo to the scanned root even when a plugin returns a file path', async () => {
+    const scanner: PluginScanner = {
+      id: 'scan',
+      async scan(_repo, _ctx) {
+        return [{
+          id: 'x',
+          repo: '/repo/test/m99.backlog-actionable.test.ts',
+          source: 'todo',
+          title: 'item',
+          detail: '',
+          value: 3,
+          effort: 2,
+          tags: [],
+          ts: new Date().toISOString(),
+        }] as WorkItem[];
+      },
+    };
+    const items = await wrapScanner('p', scanner)('/repo');
+    expect(items[0]!.repo).toBe('/repo');
+  });
+
   it('forces required tags to include plugin, pluginName, and scanner id', async () => {
     const scanner: PluginScanner = {
       id: 'sc',

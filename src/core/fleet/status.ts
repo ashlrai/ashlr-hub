@@ -167,9 +167,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   // ── queue (backlog size) ──────────────────────────────────────────────────
   let backlogItems = 0;
   try {
-    const { buildBacklog } = await import('../portfolio/backlog.js');
-    const backlog = await buildBacklog();
-    backlogItems = Array.isArray(backlog.items) ? backlog.items.length : 0;
+    // Status must be observational. A full buildBacklog() refresh can run
+    // scanners, expand planning goals, persist ~/.ashlr/backlog.json, and audit.
+    // Read the last persisted snapshot only; the daemon/backlog CLI owns refresh.
+    const { loadBacklog } = await import('../portfolio/backlog.js');
+    const backlog = loadBacklog();
+    backlogItems = Array.isArray(backlog?.items) ? backlog.items.length : 0;
   } catch {
     backlogItems = 0;
   }

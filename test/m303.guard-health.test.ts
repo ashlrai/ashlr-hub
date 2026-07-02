@@ -18,6 +18,8 @@ import {
   armDaemonSpendGuard,
   daemonSpendGuardPath,
   daemonStatePath,
+  loadDaemonState,
+  saveDaemonState,
 } from '../src/core/daemon/state.js';
 import { buildFleetStatus } from '../src/core/fleet/status.js';
 import { setKill } from '../src/core/sandbox/policy.js';
@@ -126,6 +128,19 @@ describe('diagnoseGuardHealth', () => {
     const block = diagnosis.blocks.find((b) => b.id === 'daemon-spend-guard-malformed');
     expect(block?.path).toBe(spendGuardPath);
     expect(block?.repairCommands.join(' ')).toContain('.bak');
+  });
+
+  it('does not block on a spend guard owned by the currently running daemon pid', () => {
+    const state = loadDaemonState();
+    state.running = true;
+    state.pid = process.pid;
+    saveDaemonState(state);
+
+    const guard = armDaemonSpendGuard(['item-a']);
+    expect(guard.ok).toBe(true);
+
+    const diagnosis = diagnoseGuardHealth();
+    expect(diagnosis.blocks.map((b) => b.id)).not.toContain('daemon-spend-guard-armed');
   });
 });
 

@@ -18,6 +18,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AshlrConfig } from '../src/core/types.js';
 
 // ── Mock the engines.js collaborators ──────────────────────────────────────
@@ -199,6 +202,32 @@ describe('M185 runViaAshlrcode — happy path', () => {
     expect(res.ok).toBe(true);
     expect(res.diff).toBeUndefined();
     expect(res.files).toBeUndefined();
+  });
+
+  it('normalizes a file-valued repoDir to its parent directory for ac and git cwd', async () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'ashlr-m185-file-cwd-'));
+    try {
+      const srcDir = join(tmp, 'src', 'core', 'goals');
+      mkdirSync(srcDir, { recursive: true });
+      const filePath = join(srcDir, 'store.ts');
+      writeFileSync(filePath, 'export const x = 1;\n', 'utf8');
+      gitOk({ base: 'base-file', patch: 'patch-body', names: 'store.ts' });
+      spawnEngineMock.mockReturnValue({ ok: true, output: 'done' });
+
+      const res = await runViaAshlrcode(ITEM, filePath, enabledConfig());
+
+      expect(res.ok).toBe(true);
+      const cmd = spawnEngineMock.mock.calls[0][0] as { cwd: string };
+      expect(cmd.cwd).toBe(srcDir);
+      for (const call of spawnSyncMock.mock.calls) {
+        const args = call[1] as string[];
+        expect(args[0]).toBe('-C');
+        expect(args[1]).toBe(srcDir);
+        expect(args[1]).not.toBe(filePath);
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   it('respects an explicit opts.timeoutMs / maxIterations', async () => {

@@ -54,6 +54,8 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { existsSync, statSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { AshlrConfig, EngineCommand } from '../types.js';
 import { engineInstalled, spawnEngine } from './engines.js';
 
@@ -119,6 +121,17 @@ function gitTry(repoDir: string, args: string[]): string | undefined {
   }
 }
 
+function normalizeRepoDir(repoDir: string): string {
+  try {
+    if (existsSync(repoDir) && statSync(repoDir).isFile()) {
+      return dirname(repoDir);
+    }
+  } catch {
+    // Keep the original path; the git/ac probes below are already never-throw.
+  }
+  return repoDir;
+}
+
 /** Build the headless `ac --autonomous` goal string from the work item. */
 function buildGoal(item: AshlrcodeWorkItem): string {
   const detail = item.detail?.trim();
@@ -136,9 +149,10 @@ function buildGoal(item: AshlrcodeWorkItem): string {
  *     `{ ok:false, error:'ac not installed' }`.
  *
  * @param item    the work item (title + optional detail/spec).
- * @param repoDir absolute path of the repo/worktree to run `ac` against. The
- *                caller owns isolation — pass a sandbox worktree to keep the
- *                live tree clean.
+   * @param repoDir absolute path of the repo/worktree to run `ac` against. File
+   *                paths are normalized to their parent directory before any
+   *                git/ac cwd use. The caller owns isolation — pass a sandbox
+   *                worktree to keep the live tree clean.
  * @param cfg     the ashlr config (gate flag + engine resolution).
  * @param opts    optional model / timeout / maxIterations overrides.
  */
@@ -149,6 +163,8 @@ export async function runViaAshlrcode(
   opts?: RunViaAshlrcodeOptions,
 ): Promise<RunViaAshlrcodeResult> {
   try {
+    const runDir = normalizeRepoDir(repoDir);
+
     // Gate 1: flag (default off).
     if (!executorEnabled(cfg)) {
       return { ok: false, error: 'ashlrcode executor disabled' };
@@ -169,7 +185,7 @@ export async function runViaAshlrcode(
     // (ac --autonomous COMMITS its work, so post-run committed changes are only
     // visible relative to this base). Undefined when repoDir isn't a git repo —
     // we still run, just can't capture a baseHead-relative diff.
-    const baseHead = gitTry(repoDir, ['rev-parse', 'HEAD']);
+    const baseHead = gitTry(runDir, ['rev-parse', 'HEAD']);
 
     // Build the `ac --autonomous` headless command. We do NOT use
     // buildEngineCommand here because the registry's ashlrcode argv is the
@@ -190,7 +206,7 @@ export async function runViaAshlrcode(
       '--dangerously-skip-permissions',
       ...(surgical ? ['--surgical'] : []),
     ];
-    const cmd: EngineCommand = { bin: 'ac', args, cwd: repoDir };
+    const cmd: EngineCommand = { bin: 'ac', args, cwd: runDir };
 
     // Spawn via the same helper sandboxed-engine.ts uses (never throws; applies
     // the env-bridge allowlist; honours cmd.cwd → ac runs against repoDir).
@@ -205,11 +221,11 @@ export async function runViaAshlrcode(
     let files: string[] | undefined;
     if (baseHead) {
       // Best-effort: stage any uncommitted leftovers so new files are visible.
-      gitTry(repoDir, ['add', '-A']);
-      const patch = gitTry(repoDir, ['diff', baseHead]);
+      gitTry(runDir, ['add', '-A']);
+      const patch = gitTry(runDir, ['diff', baseHead]);
       if (patch && patch.length > 0) {
         diff = patch;
-        const names = gitTry(repoDir, ['diff', '--name-only', baseHead]);
+        const names = gitTry(runDir, ['diff', '--name-only', baseHead]);
         if (names) {
           const list = names.split('\n').map((l) => l.trim()).filter(Boolean);
           if (list.length > 0) files = list;

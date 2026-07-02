@@ -284,7 +284,7 @@ export async function buildBacklog(opts?: {
       }),
     );
     for (const items of perScannerResults) {
-      allItems.push(...items);
+      allItems.push(...items.map((item) => ({ ...item, repo })));
     }
   }
 

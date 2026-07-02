@@ -47,9 +47,9 @@ export interface ManagerVerdict {
   rationale: string;
   /**
    * Advisory: would this be safe to auto-merge?
-   * True only when: verdict==='ship' AND risk==='low' AND scope is small
-   * (≤4 files, ≤150 diff lines). NEVER true for noise/harmful. Never triggers
-   * any actual merge — purely informational.
+   * True only when: verdict==='ship' AND the proposal fits the configured
+   * auto-merge risk/scope bounds. NEVER true for noise/harmful. Never triggers
+   * any actual merge — purely informational; merge gates re-check everything.
    */
   wouldMerge: boolean;
 }
@@ -305,6 +305,32 @@ function clamp(n: unknown, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, Math.round(num)));
 }
 
+const RISK_ORDER = { low: 0, medium: 1, high: 2 } as const;
+
+function autoMergeBounds(cfg: AshlrConfig): {
+  maxRisk: 'low' | 'medium' | 'high';
+  maxFiles: number;
+  maxLines: number;
+} {
+  const autoMerge =
+    ((cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge'] as
+      | Record<string, unknown>
+      | undefined) ?? {};
+  const maxRisk =
+    autoMerge['maxRisk'] === 'medium' || autoMerge['maxRisk'] === 'high'
+      ? autoMerge['maxRisk']
+      : 'low';
+  const maxFiles =
+    typeof autoMerge['maxAutomergeFiles'] === 'number' && autoMerge['maxAutomergeFiles'] >= 1
+      ? Math.floor(autoMerge['maxAutomergeFiles'])
+      : 4;
+  const maxLines =
+    typeof autoMerge['maxAutomergeLines'] === 'number' && autoMerge['maxAutomergeLines'] >= 1
+      ? Math.floor(autoMerge['maxAutomergeLines'])
+      : 150;
+  return { maxRisk, maxFiles, maxLines };
+}
+
 /**
  * Call the frontier model and parse its verdict.
  * On any parse/network failure returns a safe 'review' verdict.
@@ -383,8 +409,8 @@ export async function judgeProposal(
       ? obj['rationale'].slice(0, 200)
       : 'no rationale provided';
 
-  // wouldMerge: advisory merge-safety flag (NEVER triggers actual merge).
-  // True only when: ship + low risk + small scope (≤4 files, ≤150 diff lines).
+  // wouldMerge is advisory only. The merge gate independently re-checks
+  // verification, provenance, risk, scope, enrollment, policy, and kill switch.
   let wouldMerge = false;
   if (verdict === 'ship') {
     try {
@@ -392,7 +418,11 @@ export async function judgeProposal(
       const risk = classifyRisk(proposal);
       const diffLines = countDiffLines(proposal.diff);
       const diffFiles = countDiffFiles(proposal.diff);
-      wouldMerge = risk === 'low' && diffFiles <= 4 && diffLines <= 150;
+      const bounds = autoMergeBounds(cfg);
+      wouldMerge =
+        RISK_ORDER[risk] <= RISK_ORDER[bounds.maxRisk] &&
+        diffFiles <= bounds.maxFiles &&
+        diffLines <= bounds.maxLines;
     } catch {
       wouldMerge = false;
     }

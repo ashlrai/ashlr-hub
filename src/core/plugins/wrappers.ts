@@ -4,7 +4,8 @@
  * CONTRACT RULES (non-negotiable):
  *  - wrapScanner: 15s AbortSignal timeout, never-throws (→ []), cap 100 items,
  *    clamp value/effort to 1..5 integers, recompute score via scoreItem,
- *    scrub title+detail with scrubSecrets, force source:'plugin', tags include
+ *    scrub title+detail with scrubSecrets, force repo to the scanned root,
+ *    force source:'plugin', tags include
  *    ['plugin', pluginName, s.id], ids namespaced plugin:<name>:<s.id>:<orig|index>.
  *  - validateTemplate: id prefixed <pluginName>: unless already, reject any
  *    template file path that is absolute, contains '..', or starts with '.git/'.
@@ -38,6 +39,7 @@ const SCANNER_TIMEOUT_MS = 15_000;
  *  - Clamps value/effort to integers in 1..5.
  *  - Recomputes score via scoreItem.
  *  - Scrubs title + detail with scrubSecrets.
+ *  - Forces repo to the scanner argument (never trust plugin-provided roots).
  *  - Forces source: 'plugin'.
  *  - Forces tags to include ['plugin', pluginName, s.id].
  *  - Namespaces id as "plugin:<name>:<s.id>:<orig-id-or-index>".
@@ -100,7 +102,7 @@ export function wrapScanner(
 
       const wrapped: WorkItem = {
         id,
-        repo: typeof item.repo === 'string' ? item.repo : repo,
+        repo,
         source: 'plugin',
         title,
         detail,
