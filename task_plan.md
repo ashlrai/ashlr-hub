@@ -188,4 +188,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Surfaced `invalidRejected` in daemon auto-merge tick summaries and Mission Control logs.
 - [x] Verified focused suites: M160/M222/M223, M258/M305/M307, M201/M61/M307, and diff checks.
 - [x] Run full type/lint/build/audit gates.
-- [ ] Commit, push to `origin/master`, clear the maintenance kill switch, restart launchd daemon, and verify live autonomous status.
+- [x] Commit, push to `origin/master`, clear the maintenance kill switch, restart launchd daemon, and verify live autonomous status.
