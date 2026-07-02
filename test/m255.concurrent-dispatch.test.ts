@@ -6,7 +6,7 @@
  *  1. SLOTS-OPEN: open availability → full maxSlotsPerBackend slots.
  *  2. SLOTS-NEAR: near availability → ceil(max/2) slots (at least 1).
  *  3. SLOTS-EXHAUSTED: throttled/exhausted/unreachable → 0 slots, NEVER assigned.
- *  4. SLOTS-UNKNOWN: unknown availability → maxSlotsPerBackend (permissive).
+ *  4. SLOTS-UNKNOWN: unknown availability → 0 slots until capacity is sensed.
  *  5. SPREAD: items spread across ALL open backends (not all-on-one).
  *  6. NEVER-EXCEED-CAP: no backend receives more items than its slot count.
  *  7. EVERY-ITEM-PLACED: every item appears exactly once in assignments XOR unassigned.
@@ -101,9 +101,9 @@ describe('slotsForAvailability', () => {
     expect(slotsForAvailability('unreachable', 3)).toBe(0);
   });
 
-  it('unknown → maxSlots (permissive — treat as open)', () => {
-    expect(slotsForAvailability('unknown', 3)).toBe(3);
-    expect(slotsForAvailability('unknown', 5)).toBe(5);
+  it('unknown → 0 (no trusted capacity signal)', () => {
+    expect(slotsForAvailability('unknown', 3)).toBe(0);
+    expect(slotsForAvailability('unknown', 5)).toBe(0);
   });
 
   it('uses default maxSlots=3 when not provided', () => {
@@ -207,13 +207,14 @@ describe('planConcurrentDispatch', () => {
     for (const item of items) expect(allIds.has(item.id)).toBe(true);
   });
 
-  it('unknown availability → maxSlots (permissive)', () => {
+  it('unknown availability → 0 slots and no assignment', () => {
     const snap = makeSnapshot([{ backend: 'nim', availability: 'unknown' }]);
     const items = [makeItem(), makeItem()];
     const plan = planConcurrentDispatch(items, snap, defaultCfg, () => 'nim');
 
-    expect(plan.slotsMap.get('nim')).toBe(3); // permissive = full slots
+    expect(plan.slotsMap.get('nim')).toBe(0);
     expect(plan.assignments).toHaveLength(2);
+    expect(plan.assignments.every((assignment) => assignment.backend === 'builtin')).toBe(true);
     expect(plan.unassigned).toHaveLength(0);
   });
 

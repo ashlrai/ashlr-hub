@@ -2703,6 +2703,8 @@ export interface ProposalVerifyResult {
   failed?: string[];
   detail?: string;
   ran?: Array<{ kind: 'typecheck' | 'test' | 'lint'; cmd: string[] }>;
+  baseBranch?: string;
+  baseHead?: string;
   verifiedAt?: string;
   source?: 'auto-merge' | 'auto-merge-preflight' | 'manual' | string;
 }

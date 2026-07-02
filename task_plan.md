@@ -49,6 +49,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Surface effective autonomy control mode in CLI/API/Mission Control
 - [x] Follow-up: Reload full daemon config live and surface backend resource availability
 - [x] Follow-up: Add auto-merge gate explanations, effective config visibility, and protected remote PR handoff
+- [x] Follow-up: Bind verification to merge base, fail-close optional safety checks, finish live daemon reload, and harden unknown resource handling
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -100,6 +101,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Auto-merge must be explainable from cheap read-only evidence before spending judge/verify resources. `explainAutoMergeGate()` now shares the pure gate logic for authority, provenance, risk, scope, verification evidence, self-target policy, and manager-gate evidence.
 - Effective operator config should be visible without dumping secrets or mutating config files. `ashlr config effective`, `/api/config/effective`, and the exported core API expose curated autonomy/daemon/foundry/backend settings with source labels.
 - Remote auto-merge must never bypass host branch protection. The GitHub path now opens a PR and attempts ordinary host auto-merge (`gh pr merge --auto --squash`) without privileged bypass, records the remote handoff as applied to prevent duplicate PR spam, and reports `merged=false` unless Ashlr can prove the host actually merged it.
+- Verification and merge must be bound to the same base commit. `verifyProposal()` now records `baseBranch`/`baseHead`, persisted verify results carry that binding, and auto-merge refuses or reverifies when the default branch moved or legacy cached verification lacks a base.
+- Optional safety layers must fail closed when explicitly enabled. Red-team, blast-radius, and spec-contract checks now skip/refuse proposals on thrown or malformed results and expose the blocker in both skipped/results.
+- Live daemon config reload must include loop behavior, not only tick inputs. The non-once loop now rereads mode, budget, interval, and idle backoff around every iteration so batch/continuous behavior and sleep intervals can change without a restart.
+- Unknown resource availability is not capacity. Concurrent dispatch gives `unknown` zero slots, and resource-aware gateway demotes unknown current backends to sensed open/near alternatives instead of treating missing signals as healthy.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -138,4 +143,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch in verification** - Auto-merge explanations, effective config visibility, and protected remote PR handoff are implemented; focused tests passed; running final gates and push.
+**Current batch in verification** - Merge-base binding, fail-closed optional checks, daemon live-loop reload, and conservative unknown resources are implemented; focused integration tests passed; running final gates and push.

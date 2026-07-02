@@ -584,6 +584,47 @@ describe('M252 Gateway — resource-aware demote', () => {
     expect(allowed.has(decision.backend)).toBe(true);
   });
 
+  it('resourceAware=true with unknown claude demotes to sensed open codex', async () => {
+    writeFileSync(
+      join(tmpHome, '.claude', 'stats-cache.json'),
+      JSON.stringify({
+        version: 1,
+        dailyActivity: [{ date: '2000-01-01', messageCount: 1 }],
+        lastComputedDate: '2000-01-01',
+      }),
+    );
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue({
+        primary: { usedPercent: 20, windowMinutes: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 },
+      }),
+    }));
+    vi.doMock('../src/core/run/engines.js', async () => ({
+      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
+        '../src/core/run/engines.js',
+      )),
+      engineInstalled: () => true,
+    }));
+
+    const { getResourceSnapshot } = await import('../src/core/fabric/resource-monitor.js');
+    const { decide } = await import('../src/core/fabric/gateway.js');
+    const cfg = withFoundry({
+      allowedBackends: ['claude', 'codex', 'builtin'] as EngineId[],
+      fabric: { gateway: true, resourceAware: true },
+      claudeResource: { weeklyMessageCap: 2000 },
+    });
+
+    const snapshot = await getResourceSnapshot(cfg);
+    expect(snapshot.backends.find((b) => b.backend === 'claude')?.availability).toBe('unknown');
+    expect(snapshot.backends.find((b) => b.backend === 'codex')?.availability).toBe('open');
+
+    const decision = await decide({ goal: 'reason about architecture', repo: tmpHome }, cfg);
+
+    expect(decision.backend).toBe('codex');
+    expect(decision.demotedFrom).toBe('claude');
+    expect(decision.resourceState?.availability).toBe('unknown');
+    expect(decision.reason).toMatch(/resourceDemote: claude→codex/i);
+  });
+
   it('never throws with resourceAware=true and corrupt cfg', async () => {
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),

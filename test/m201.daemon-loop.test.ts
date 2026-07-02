@@ -778,7 +778,7 @@ describe('M201 — Group B: TieredPool local/cloud concurrency caps', () => {
         perTickItems: opts.perTickItems ?? 4,
         parallel: 4,
         intervalMs: 50,
-        mode: 'continuous' as unknown as undefined,
+        mode: 'continuous',
         concurrency: {
           local: opts.local ?? 2,
           cloud: opts.cloud ?? 6,
@@ -1110,11 +1110,8 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
       return { id: `mock-${tickCount}`, status: 'done', goal: '', result: '', usage: { totalTokens: 10, estCostUsd: 0.001, steps: 1 } };
     });
 
-    // Use continuous mode — that is the only loop branch that honours maxCycles.
-    // Batch mode has no cycle counter; maxCycles is silently ignored there and
-    // the loop would spin until budget exhaustion / kill, causing a timeout.
-    // idleBackoffMs:1 ensures the idle-backoff sleep (triggered when the backlog
-    // appears empty after cooldown filtering) is negligible rather than 5 s.
+    // Use continuous mode to prove the non-empty loop does not require fixed
+    // interval sleeps between ticks. idleBackoffMs:1 keeps any idle branch fast.
     const cfg = makeCfg({
       daemon: {
         dailyBudgetUsd: 1.0,
@@ -1122,20 +1119,103 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
         parallel: 1,
         intervalMs: 50,
         idleBackoffMs: 1,
-        mode: 'continuous' as unknown as undefined,
+        mode: 'continuous',
         concurrency: { local: 2, cloud: 6, total: 8 },
       } as AshlrConfig['daemon'],
     });
+    mockLoadConfig.mockReturnValue(cfg);
     const state = await runDaemon(cfg, { once: false, dryRun: false, maxCycles: 2 });
 
     // Daemon should have run exactly 2 tick cycles and stopped.
     // ticks[] records one entry per cycle; daemon is no longer running.
     expect(state.ticks.length).toBe(2);
     expect(state.running).toBe(false);
-    // The loadConfig mock returns perTickItems:3; with 10 items available each
-    // cycle dispatches up to 3 items → at most 2 × 3 = 6 swarm calls total.
-    expect(mockRunSwarm.mock.calls.length).toBeLessThanOrEqual(6);
+    expect(mockRunSwarm.mock.calls.length).toBeLessThanOrEqual(2);
   }, 10_000);
+
+  it('E2b: batch loop sleeps with live daemon.intervalMs, not the startup config interval', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 10),
+    });
+
+    const startupCfg = cfgBuiltin({ perTickItems: 1, parallel: 1 }) as AshlrConfig;
+    startupCfg.daemon = { ...startupCfg.daemon, intervalMs: 10_000 };
+    const liveCfg = cfgBuiltin({ perTickItems: 1, parallel: 1 }) as AshlrConfig;
+    liveCfg.daemon = { ...liveCfg.daemon, intervalMs: 7 };
+    mockLoadConfig.mockReturnValue(liveCfg);
+
+    const realSetTimeout = globalThis.setTimeout;
+    const sleepMs: number[] = [];
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      sleepMs.push(Number(timeout ?? 0));
+      return realSetTimeout(handler as (...handlerArgs: unknown[]) => void, 0, ...args);
+    }) as typeof setTimeout);
+
+    try {
+      const state = await runDaemon(startupCfg, { once: false, dryRun: false, maxCycles: 2 });
+
+      expect(state.running).toBe(false);
+      expect(state.ticks.length).toBe(2);
+      expect(sleepMs).toContain(7);
+      expect(sleepMs).not.toContain(10_000);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
+  it('E2c: loop mode is re-read from live config between iterations', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: makeItems(repo.dir, 10),
+    });
+
+    const startupCfg = cfgBuiltin({ perTickItems: 1, parallel: 1 }) as AshlrConfig;
+    startupCfg.daemon = { ...startupCfg.daemon, intervalMs: 10_000, mode: 'batch' };
+    const liveBatch = {
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      daemon: { ...cfgBuiltin().daemon, perTickItems: 1, parallel: 1, intervalMs: 250, mode: 'batch' },
+    } as AshlrConfig;
+    const liveContinuous = {
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      daemon: {
+        ...cfgBuiltin().daemon,
+        perTickItems: 1,
+        parallel: 1,
+        intervalMs: 250,
+        idleBackoffMs: 5,
+        mode: 'continuous',
+        concurrency: { local: 2, cloud: 6, total: 8 },
+      },
+    } as AshlrConfig;
+    mockLoadConfig
+      .mockReturnValueOnce(liveBatch)
+      .mockReturnValue(liveContinuous);
+
+    const realSetTimeout = globalThis.setTimeout;
+    const sleepMs: number[] = [];
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      sleepMs.push(Number(timeout ?? 0));
+      return realSetTimeout(handler as (...handlerArgs: unknown[]) => void, 0, ...args);
+    }) as typeof setTimeout);
+
+    try {
+      const state = await runDaemon(startupCfg, { once: false, dryRun: false, maxCycles: 2 });
+
+      expect(state.running).toBe(false);
+      expect(state.ticks.length).toBe(2);
+      expect(sleepMs).not.toContain(250);
+      expect(sleepMs).not.toContain(10_000);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
 
   it('E3: runDaemon loop stops when kill switch is set before the next iteration', async () => {
     const repo = fx.makeRepo();

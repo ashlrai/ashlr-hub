@@ -6,7 +6,8 @@
  *
  * DESIGN INVARIANTS:
  *  - Never throws. Every sensing path is wrapped in try/catch and degrades
- *    to availability:'unknown' which the gateway treats as permissive.
+ *    to availability:'unknown', which resource-aware dispatch treats as no
+ *    trusted capacity signal.
  *  - No network calls except the Ollama localhost health check (2s timeout).
  *  - Claude sensing (M253): sums the FLEET's own claude token spend
  *    (tokensIn+tokensOut) or costUsd from the decisions-ledger over a rolling
@@ -118,8 +119,8 @@ export function clearBackoff(backend: EngineId): void {
  * available, otherwise returns null (no I/O, never throws).
  *
  * Used by resolveJudgeClient (sync) to avoid awaiting a new snapshot on
- * every judge resolution. If the cache is stale, the caller should treat the
- * backend as available (permissive default).
+ * every judge resolution. If the cache is stale, the caller decides whether a
+ * missing signal is acceptable for that path.
  */
 export function peekBackendAvailability(backend: EngineId): BackendAvailability | null {
   try {
@@ -1015,7 +1016,8 @@ export async function getBackendResourceState(
  *       b.availability === 'open'      ? cfg.maxConcurrent    :
  *       b.availability === 'near'      ? Math.ceil(cfg.maxConcurrent / 2) :
  *       b.availability === 'throttled' ? 0 :
- *       b.availability === 'exhausted' ? 0 : cfg.maxConcurrent  // unknown = permissive
+ *       b.availability === 'exhausted' ? 0 :
+ *       b.availability === 'unreachable' ? 0 : 0 // unknown/future = no trusted slots
  *     );
  *   }
  */

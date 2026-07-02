@@ -168,6 +168,8 @@ export async function decide(
 
     // Step 1: Base routing via routeBackend (or cli-base for non-WorkItem).
     let current: { backend: EngineId; tier: EngineTier; model?: string | null; reason: string };
+    let demotedFrom: EngineId | undefined;
+    let resourceState: GatewayDecision['resourceState'];
     if (isWorkItem(input)) {
       const d = routeBackend(input, cfg);
       current = { backend: d.backend, tier: d.tier, model: d.model, reason: d.reason };
@@ -200,6 +202,8 @@ export async function decide(
             resourceState: resourceDemote.resourceState,
           };
         }
+        demotedFrom = current.backend;
+        resourceState = resourceDemote.resourceState;
         current = resourceDemote.decision;
         trace.push({ stage: 'resourceDemote', backend: current.backend, tier: current.tier, reason: current.reason });
       }
@@ -291,6 +295,8 @@ export async function decide(
       source: isWorkItem(input) ? 'fleet' : 'cli',
       trace,
       reason: trace.at(-1)?.reason ?? current.reason,
+      ...(resourceState ? { resourceState } : {}),
+      ...(demotedFrom ? { demotedFrom } : {}),
     };
   } catch {
     // Never-throw: fail open to builtin on any error.
@@ -362,8 +368,10 @@ async function _resourceAwareDemote(
 
     if (!state) return null; // no state for this backend — permissive
 
-    // 'open', 'near', 'unknown' → no demote needed
-    if (state.availability === 'open' || state.availability === 'near' || state.availability === 'unknown') {
+    // Only sensed headroom is safe to use. Unknown capacity should fall through
+    // to the cascade so frontier/subscription backends do not get full trust
+    // merely because the monitor lacks a signal.
+    if (state.availability === 'open' || state.availability === 'near') {
       return null;
     }
 
@@ -394,7 +402,14 @@ async function _resourceAwareDemote(
       const candidateState = snapshot.backends.find(b => b.backend === candidate);
       const candidateAvail = candidateState?.availability ?? 'unknown';
 
-      if (candidateAvail === 'exhausted' || candidateAvail === 'unreachable') continue;
+      if (
+        candidateAvail === 'exhausted' ||
+        candidateAvail === 'throttled' ||
+        candidateAvail === 'unreachable' ||
+        candidateAvail === 'unknown'
+      ) {
+        continue;
+      }
 
       // Candidate is viable — demote to it
       const resolvedTier = engineTierOf(candidate, cfg);

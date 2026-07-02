@@ -8,7 +8,7 @@
  *     Maps BackendAvailability → concurrent-slot count (the hard governor).
  *     open        → maxSlots          (full headroom, default 3)
  *     near        → ceil(maxSlots/2)  (half headroom, round up)
- *     unknown     → maxSlots          (permissive — treat unknown as open)
+ *     unknown     → 0                 (no trusted capacity signal)
  *     throttled   → 0                 (rate-limited — never dispatch)
  *     exhausted   → 0                 (subscription cap hit — never dispatch)
  *     unreachable → 0                 (health failure — never dispatch)
@@ -120,7 +120,7 @@ export interface ConcurrentDispatchCfg {
  * Mapping (from resource-monitor.ts spec comment, M255):
  *   open        → maxSlots          (full headroom)
  *   near        → ceil(maxSlots/2)  (half headroom, round up — at least 1)
- *   unknown     → maxSlots          (permissive: unknown = treat as open)
+ *   unknown     → 0                 (no trusted capacity signal)
  *   throttled   → 0                 (rate-limited — hard stop)
  *   exhausted   → 0                 (subscription cap — hard stop)
  *   unreachable → 0                 (health check failed — hard stop)
@@ -132,11 +132,11 @@ export function slotsForAvailability(
   switch (avail) {
     case 'open':        return maxSlots;
     case 'near':        return Math.max(1, Math.ceil(maxSlots / 2));
-    case 'unknown':     return maxSlots;   // permissive — same as open
+    case 'unknown':     return 0;
     case 'throttled':   return 0;
     case 'exhausted':   return 0;
     case 'unreachable': return 0;
-    default:            return maxSlots;   // future availability values → permissive
+    default:            return 0;
   }
 }
 

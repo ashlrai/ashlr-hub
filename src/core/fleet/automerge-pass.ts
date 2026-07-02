@@ -132,6 +132,41 @@ function hasRecentShipVerdict(proposalId: string): boolean {
   }
 }
 
+function recordSafetySkip(
+  out: AutoMergePassResult,
+  proposalId: string,
+  check: string,
+  reason: string,
+): void {
+  out.results.push({ ok: false, merged: false, branched: false, reason });
+  out.skipped.push({ proposalId, check, reason });
+}
+
+function errorDetail(err: unknown): string {
+  return err instanceof Error && err.message ? err.message : String(err);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object';
+}
+
+function isRedTeamResult(value: unknown): value is { verdict: 'broken' | 'survived'; detail?: unknown } {
+  return isRecord(value) && (value['verdict'] === 'broken' || value['verdict'] === 'survived');
+}
+
+function isBlastRadiusResult(
+  value: unknown,
+): value is { risk: 'none' | 'low' | 'medium' | 'high'; detail?: unknown } {
+  return (
+    isRecord(value) &&
+    (value['risk'] === 'none' || value['risk'] === 'low' || value['risk'] === 'medium' || value['risk'] === 'high')
+  );
+}
+
+function isSpecContractResult(value: unknown): value is { satisfied: boolean; detail?: unknown } {
+  return isRecord(value) && typeof value['satisfied'] === 'boolean';
+}
+
 // ---------------------------------------------------------------------------
 // Public: runAutoMergePass
 // ---------------------------------------------------------------------------
@@ -520,23 +555,26 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
 
     // ── M193: additive gate-checks (flag-gated, default OFF, only tighten) ──
     // Each check runs only when its feature flag is enabled. A check that
-    // throws is treated as passed (fail-open) — the module's own never-throws
-    // contract governs the actual verdict, but a caught exception must not
-    // block a merge the core gate approved. When a check FAILS (explicit
-    // result), the proposal is skipped (stays pending) and the reason is
-    // recorded. These checks NEVER cause a merge that wouldn't happen otherwise.
+    // throws or returns an untrustworthy shape fails closed: the proposal is
+    // skipped (stays pending) and the reason is recorded. These checks NEVER
+    // cause a merge that wouldn't happen otherwise.
 
     // M191 — Red-team critic
     if ((foundry as Record<string, unknown> | undefined)?.['redTeam'] === true) {
       let shouldSkip = false;
       try {
         const rt = await redTeamProposal(p, cfg);
-        if (rt.verdict === 'broken') {
+        if (!isRedTeamResult(rt)) {
           shouldSkip = true;
-          out.skipped.push({ proposalId: p.id, check: 'red-team', reason: rt.detail });
+          recordSafetySkip(out, p.id, 'red-team', 'red-team check produced an untrustworthy result');
+        } else if (rt.verdict === 'broken') {
+          shouldSkip = true;
+          const detail = typeof rt.detail === 'string' && rt.detail ? rt.detail : 'red-team check failed';
+          recordSafetySkip(out, p.id, 'red-team', detail);
         }
-      } catch {
-        // fail-open: a thrown exception does not block the merge
+      } catch (err) {
+        shouldSkip = true;
+        recordSafetySkip(out, p.id, 'red-team', `red-team check failed closed: ${errorDetail(err)}`);
       }
       if (shouldSkip) continue;
     }
@@ -556,12 +594,17 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
           { repo: p.repo ?? '', changedFiles },
           cfg as unknown as import('../run/blast-radius.js').BlastRadiusConfig,
         );
-        if (br.risk === 'high') {
+        if (!isBlastRadiusResult(br)) {
           shouldSkip = true;
-          out.skipped.push({ proposalId: p.id, check: 'blast-radius', reason: br.detail });
+          recordSafetySkip(out, p.id, 'blast-radius', 'blast-radius check produced an untrustworthy result');
+        } else if (br.risk === 'high') {
+          shouldSkip = true;
+          const detail = typeof br.detail === 'string' && br.detail ? br.detail : 'blast-radius risk is high';
+          recordSafetySkip(out, p.id, 'blast-radius', detail);
         }
-      } catch {
-        // fail-open
+      } catch (err) {
+        shouldSkip = true;
+        recordSafetySkip(out, p.id, 'blast-radius', `blast-radius check failed closed: ${errorDetail(err)}`);
       }
       if (shouldSkip) continue;
     }
@@ -579,21 +622,33 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
             const loaded = loadSpec(specId, p.repo ?? undefined);
             if (loaded) specInput = { meta: loaded.meta, body: loaded.body };
           } catch {
-            // Spec load failed — treat as "no spec" (check is a no-op when spec is absent)
-            specInput = null;
+            shouldSkip = true;
+            recordSafetySkip(out, p.id, 'spec-contract', `spec-contract could not load spec '${specId}'`);
           }
-          if (specInput !== null) {
+          if (!shouldSkip && specInput === null) {
+            shouldSkip = true;
+            recordSafetySkip(out, p.id, 'spec-contract', `spec-contract could not load spec '${specId}'`);
+          }
+          if (!shouldSkip && specInput !== null) {
             const sc = await checkSpecContract(
               { spec: specInput, repoDir: p.repo ?? undefined, diff: p.diff },
               cfg,
             );
-            if (!sc.satisfied) {
+            if (!isSpecContractResult(sc)) {
               shouldSkip = true;
-              out.skipped.push({ proposalId: p.id, check: 'spec-contract', reason: sc.detail.reason ?? 'spec contract unsatisfied' });
+              recordSafetySkip(out, p.id, 'spec-contract', 'spec-contract check produced an untrustworthy result');
+            } else if (!sc.satisfied) {
+              shouldSkip = true;
+              const detail =
+                isRecord(sc.detail) && typeof sc.detail['reason'] === 'string'
+                  ? sc.detail['reason']
+                  : 'spec contract unsatisfied';
+              recordSafetySkip(out, p.id, 'spec-contract', detail);
             }
           }
-        } catch {
-          // fail-open
+        } catch (err) {
+          shouldSkip = true;
+          recordSafetySkip(out, p.id, 'spec-contract', `spec-contract check failed closed: ${errorDetail(err)}`);
         }
         if (shouldSkip) continue;
       }

@@ -159,6 +159,15 @@ function gitTry(cwd: string, args: string[]): string | null {
   }
 }
 
+/** Resolve the commit that auto-merge treats as the current default-branch base. */
+function resolveDefaultBranchHead(repo: string, base: string): string | null {
+  return (
+    gitTry(repo, ['rev-parse', '--verify', `refs/heads/${base}`]) ??
+    gitTry(repo, ['rev-parse', '--verify', `refs/remotes/origin/${base}`]) ??
+    gitTry(repo, ['rev-parse', 'HEAD'])
+  );
+}
+
 /** Write `content` to a temp file under ~/.ashlr/tmp; caller cleans it up. */
 function writeTmpFile(content: string): string {
   const dir = join(homedir(), '.ashlr', 'tmp');
@@ -1187,6 +1196,10 @@ export interface VerifyProposalResult {
   ok: boolean;
   ran: VerifyCommand[];
   detail: string;
+  /** Default branch name whose head was used to create the verify worktree. */
+  baseBranch?: string;
+  /** Exact commit checked out before applying the proposal diff in verification. */
+  baseHead?: string;
 }
 
 export function verifyResultFromProposalResult(
@@ -1199,8 +1212,32 @@ export function verifyResultFromProposalResult(
     ...(result.ok ? {} : { failed: [result.detail] }),
     detail: result.detail,
     ran: [...result.ran],
+    ...(result.baseBranch ? { baseBranch: result.baseBranch } : {}),
+    ...(result.baseHead ? { baseHead: result.baseHead } : {}),
     verifiedAt,
     source,
+  };
+}
+
+function hasVerifiedBaseBinding(
+  result: ProposalVerifyResult | undefined,
+): result is ProposalVerifyResult & { passed: true; baseBranch: string; baseHead: string } {
+  return (
+    result?.passed === true &&
+    typeof result.baseBranch === 'string' &&
+    result.baseBranch.length > 0 &&
+    typeof result.baseHead === 'string' &&
+    result.baseHead.length > 0
+  );
+}
+
+function verifyResultFromStored(result: ProposalVerifyResult): VerifyProposalResult {
+  return {
+    ok: result.passed,
+    ran: result.ran ?? [],
+    detail: result.detail ?? (result.passed ? 'pre-verified' : 'stored verification failed'),
+    ...(result.baseBranch ? { baseBranch: result.baseBranch } : {}),
+    ...(result.baseHead ? { baseHead: result.baseHead } : {}),
   };
 }
 
@@ -1256,12 +1293,9 @@ export async function verifyProposal(
 
   const base = defaultBranch(repo);
   // Resolve the head commit of the default branch WITHOUT touching the user tree.
-  const baseHead =
-    gitTry(repo, ['rev-parse', '--verify', `refs/heads/${base}`]) ??
-    gitTry(repo, ['rev-parse', '--verify', `refs/remotes/origin/${base}`]) ??
-    gitTry(repo, ['rev-parse', 'HEAD']);
+  const baseHead = resolveDefaultBranchHead(repo, base);
   if (!baseHead) {
-    return { ok: false, ran: [], detail: `could not resolve head of default branch '${base}'` };
+    return { ok: false, ran: [], detail: `could not resolve head of default branch '${base}'`, baseBranch: base };
   }
 
   const tmpBranch = `ashlr/verify/${randomBytes(6).toString('hex')}`;
@@ -1277,6 +1311,8 @@ export async function verifyProposal(
       ok: false,
       ran: [],
       detail: `git worktree add failed: ${err instanceof Error ? err.message : String(err)}`,
+      baseBranch: base,
+      baseHead,
     };
   }
 
@@ -1298,6 +1334,8 @@ export async function verifyProposal(
         detail: allow
           ? 'no verify commands detected; allowWithoutVerification=true → passing'
           : 'no verify commands detected and allowWithoutVerification=false → fail-closed',
+        baseBranch: base,
+        baseHead,
       };
     }
 
@@ -1334,6 +1372,8 @@ export async function verifyProposal(
         ok: false,
         ran: [],
         detail: `git apply failed in verify worktree: ${err instanceof Error ? err.message : String(err)}`,
+        baseBranch: base,
+        baseHead,
       };
     }
 
@@ -1363,6 +1403,8 @@ export async function verifyProposal(
                 ok: false,
                 ran,
                 detail: `verify 'test' failed — ${newFailures.size} new failure(s) introduced: ${listed}`,
+                baseBranch: base,
+                baseHead,
               };
             } else {
               // No parseable IDs — fall back to ok-flag delta
@@ -1372,6 +1414,8 @@ export async function verifyProposal(
                   ok: false,
                   ran,
                   detail: `verify 'test' failed — regression detected (suite was passing before change)`,
+                  baseBranch: base,
+                  baseHead,
                 };
               }
               // Baseline also failed (pre-existing) — tolerate
@@ -1391,6 +1435,8 @@ export async function verifyProposal(
                 ok: false,
                 ran,
                 detail: `verify 'lint' failed — change introduced lint errors (lint was clean before)`,
+                baseBranch: base,
+                baseHead,
               };
             }
             // Lint already failing on base (pre-existing debt) — tolerate and continue.
@@ -1402,6 +1448,8 @@ export async function verifyProposal(
           ok: false,
           ran,
           detail: `verify '${vc.kind}' failed (exit ${res.exitCode}): ${res.command}`,
+          baseBranch: base,
+          baseHead,
         };
       }
     }
@@ -1410,12 +1458,16 @@ export async function verifyProposal(
       ok: true,
       ran,
       detail: `all ${ran.length} verify command(s) passed: ${ran.map((c) => c.kind).join(', ')}`,
+      baseBranch: base,
+      baseHead,
     };
   } catch (err) {
     return {
       ok: false,
       ran,
       detail: `verifyProposal error: ${err instanceof Error ? err.message : String(err)}`,
+      baseBranch: base,
+      baseHead,
     };
   } finally {
     if (patchFile) {
@@ -1451,19 +1503,23 @@ function buildMergeBranch(
   id: string,
   diff: string,
   base: string,
+  expectedBaseHead?: string,
 ): { branch: string | null; detail: string } {
   const branch = `${MERGE_BRANCH_PREFIX}${id}`;
-  const baseHead =
-    gitTry(repo, ['rev-parse', '--verify', `refs/heads/${base}`]) ??
-    gitTry(repo, ['rev-parse', '--verify', `refs/remotes/origin/${base}`]) ??
-    gitTry(repo, ['rev-parse', 'HEAD']);
+  const baseHead = resolveDefaultBranchHead(repo, base);
   if (!baseHead) {
     return { branch: null, detail: `could not resolve head of default branch '${base}'` };
+  }
+  if (expectedBaseHead && baseHead !== expectedBaseHead) {
+    return {
+      branch: null,
+      detail: `default branch '${base}' moved since verification (verified ${expectedBaseHead.slice(0, 8)}, current ${baseHead.slice(0, 8)}) — reverify required`,
+    };
   }
 
   const tmpDir = join(homedir(), '.ashlr', 'tmp', `mwt-${randomBytes(6).toString('hex')}`);
   try {
-    gitRun(repo, ['worktree', 'add', '-b', branch, tmpDir, baseHead]);
+    gitRun(repo, ['worktree', 'add', '-b', branch, tmpDir, expectedBaseHead ?? baseHead]);
     linkNodeModules(repo, tmpDir);
   } catch (err) {
     gitTry(repo, ['worktree', 'prune']);
@@ -1509,6 +1565,7 @@ function mergeLocally(
   repo: string,
   branch: string,
   base: string,
+  expectedBaseHead?: string,
 ): { ok: boolean; detail: string } {
   // Guard: never operate on the default branch if it is the user's checked-out
   // working tree — a worktree add of an already-checked-out branch would fail,
@@ -1527,13 +1584,27 @@ function mergeLocally(
   // is actively standing on (same race as the checked-out-branch case above).
   if (status && status.branch === 'HEAD') {
     const headSha = gitTry(repo, ['rev-parse', 'HEAD']);
-    const baseSha =
-      gitTry(repo, ['rev-parse', '--verify', `refs/heads/${base}`]) ??
-      gitTry(repo, ['rev-parse', base]);
+    const baseSha = resolveDefaultBranchHead(repo, base);
     if (headSha && baseSha && headSha === baseSha) {
       return {
         ok: false,
         detail: `repo is in detached HEAD on the default branch commit (${base} @ ${headSha.slice(0, 8)}) — refusing local merge; branch '${branch}' left for manual merge`,
+      };
+    }
+  }
+
+  if (expectedBaseHead) {
+    const baseHead = resolveDefaultBranchHead(repo, base);
+    if (!baseHead) {
+      return {
+        ok: false,
+        detail: `could not resolve head of default branch '${base}' before local merge; branch '${branch}' left for manual merge`,
+      };
+    }
+    if (baseHead !== expectedBaseHead) {
+      return {
+        ok: false,
+        detail: `default branch '${base}' moved since verification (verified ${expectedBaseHead.slice(0, 8)}, current ${baseHead.slice(0, 8)}) — refusing local merge; branch '${branch}' left for manual reverify`,
       };
     }
   }
@@ -1545,6 +1616,17 @@ function mergeLocally(
   try {
     gitRun(repo, ['worktree', 'add', tmpDir, base]);
     linkNodeModules(repo, tmpDir);
+    if (expectedBaseHead) {
+      const checkedOutHead = gitTry(tmpDir, ['rev-parse', 'HEAD']);
+      if (checkedOutHead !== expectedBaseHead) {
+        gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
+        gitTry(repo, ['worktree', 'prune']);
+        return {
+          ok: false,
+          detail: `default branch '${base}' moved while preparing local merge (verified ${expectedBaseHead.slice(0, 8)}, checked out ${checkedOutHead?.slice(0, 8) ?? 'unknown'}) — branch '${branch}' left for manual reverify`,
+        };
+      }
+    }
   } catch (err) {
     gitTry(repo, ['worktree', 'prune']);
     return {
@@ -1658,7 +1740,7 @@ export async function autoMergeProposal(
       // evaluateVerificationGate Criterion 2 refuses (fail-closed). Verification
       // failure (verify.ok===false) short-circuits here before Gate 4 so no
       // merge can proceed on a failing diff.
-      if (proposal.verifyResult?.passed !== true) {
+      if (proposal.verifyResult?.passed !== true || !hasVerifiedBaseBinding(proposal.verifyResult)) {
         // If verifyResult is already present and explicitly false, skip the
         // expensive worktree run — we already know it failed. evaluateVerificationGate
         // Criterion 2 will refuse on passed===false. This preserves existing test
@@ -1668,10 +1750,11 @@ export async function autoMergeProposal(
           // Fall through to evaluateVerificationGate — Criterion 2 will refuse.
         } else {
           const preVerify = await verifyProposal(proposal, cfg);
+          const preVerifyResult = verifyResultFromProposalResult(preVerify, 'auto-merge');
           // Persist the REAL result — best-effort (failure → absent → gate refuses).
           try {
             updateProposalField(proposal.id, {
-              verifyResult: verifyResultFromProposalResult(preVerify, 'auto-merge'),
+              verifyResult: preVerifyResult,
             });
           } catch {
             // Persistence failure: verifyResult stays absent — gate refuses correctly.
@@ -1682,7 +1765,7 @@ export async function autoMergeProposal(
           // Update the in-memory proposal so evaluateVerificationGate reads it.
           // This does NOT mutate the on-disk record — that was done above. This
           // only ensures the pure gate function sees the real verifyResult.
-          proposal.verifyResult = verifyResultFromProposalResult(preVerify, 'auto-merge');
+          proposal.verifyResult = preVerifyResult;
         }
       }
 
@@ -1814,9 +1897,9 @@ export async function autoMergeProposal(
     // re-run; the result is already persisted and the gate already passed.
     // In tier mode (default), run verifyProposal() here as before.
     let verify: VerifyProposalResult;
-    if (trustBasis === 'verification' && proposal.verifyResult?.passed === true) {
+    if (trustBasis === 'verification' && hasVerifiedBaseBinding(proposal.verifyResult)) {
       // Already verified pre-Gate-4 and passed — skip re-run.
-      verify = { ok: true, ran: [], detail: 'pre-verified (M261: already ran before Gate 4)' };
+      verify = verifyResultFromStored(proposal.verifyResult);
     } else {
       verify = await verifyProposal(proposal, cfg);
       // Persist the result for the non-verification-mode path (best-effort).
@@ -1832,6 +1915,9 @@ export async function autoMergeProposal(
     }
     if (!verify.ok) {
       return refuse(`verification failed: ${verify.detail}`, repo);
+    }
+    if (!verify.baseBranch || !verify.baseHead) {
+      return refuse('verification did not record a default-branch base head — reverify required', repo);
     }
 
     // ── Gate 6.5 (M86/M54): self-eval parity — self-target proposals must pass
@@ -2180,8 +2266,15 @@ export async function autoMergeProposal(
     }
 
     // ── ACTION: stage the diff on a branch off the default branch ────────────
-    const base = defaultBranch(repo);
-    const staged = buildMergeBranch(repo, id, diff, base);
+    const base = verify.baseBranch;
+    const currentDefaultBranch = defaultBranch(repo);
+    if (currentDefaultBranch !== base) {
+      return refuse(
+        `default branch changed since verification (verified '${base}', current '${currentDefaultBranch}') — reverify required`,
+        repo,
+      );
+    }
+    const staged = buildMergeBranch(repo, id, diff, base, verify.baseHead);
     if (!staged.branch) {
       return refuse(`could not stage merge branch: ${staged.detail}`, repo);
     }
@@ -2194,6 +2287,13 @@ export async function autoMergeProposal(
     let prUrl: string | undefined;
 
     if (wantRemote && hasGithub) {
+      const baseHeadBeforePush = resolveDefaultBranchHead(repo, base);
+      if (!baseHeadBeforePush || baseHeadBeforePush !== verify.baseHead) {
+        return refuse(
+          `default branch '${base}' moved since verification — refusing remote handoff; branch '${branch}' left for manual reverify`,
+          repo,
+        );
+      }
       // H4: PUSH the staging branch to origin BEFORE opening the PR. createPr
       // points the PR head at `branch`, which the host cannot see unless we push
       // it first. Wrapped never-throw + audited; if the push fails we DO NOT
@@ -2271,7 +2371,7 @@ export async function autoMergeProposal(
       }
     } else if (toMain) {
       // LOCAL fallback — conservative; refuses if default branch is checked out.
-      const local = mergeLocally(repo, branch, base);
+      const local = mergeLocally(repo, branch, base, verify.baseHead);
       merged = local.ok;
       reason = local.detail;
     } else {

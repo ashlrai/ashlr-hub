@@ -2218,136 +2218,74 @@ export async function runDaemon(
         await tick(liveCfg, { dryRun: opts.dryRun });
       }
     } else {
-      // M116: choose loop strategy based on mode.
-      // Continuous mode: keep dispatching back-to-back with only a short idle
-      // backoff when the backlog is empty. Batch mode: existing behavior unchanged.
-      const isContinuous = dcfg.mode === 'continuous';
+      // M85/M116/M309: choose loop strategy from live config every iteration.
+      // Batch mode sleeps between ticks; continuous mode loops immediately while
+      // work is flowing and only sleeps on idle/no-op ticks.
+      let cyclesLeft = opts.maxCycles ?? Infinity;
+      while (true) {
+        if (!heartbeatDaemonLock(daemonLock)) break;
+        if (cyclesLeft-- <= 0) break;
+        if (killSwitchOn()) break;
 
-      if (isContinuous) {
-        // -----------------------------------------------------------------------
-        // M116 CONTINUOUS MODE — saturate the machine.
-        // Loop: reload cfg → tick → if backlog empty sleep idleBackoffMs → repeat.
-        // Every iteration re-checks kill-switch + budget (same guarantees as batch).
-        // NO fixed intervalMs sleep between non-empty ticks — the pool caps keep
-        // concurrency safe; we only back off when work runs dry.
-        // -----------------------------------------------------------------------
-        // maxCycles bounds the loop for testability/safety; production omits it
-        // (Infinity) so the daemon runs until kill-switch or budget exhaustion.
-        let cyclesLeft = opts.maxCycles ?? Infinity;
-        while (true) {
-          if (!heartbeatDaemonLock(daemonLock)) break;
-          if (cyclesLeft-- <= 0) break;
-          if (killSwitchOn()) break;
+        const liveCfg = reloadLiveConfigForDaemon(cfg);
+        const loopCfg = resolveCfg(liveCfg);
 
-          const liveCfg = reloadLiveConfigForDaemon(cfg);
-
-          const currentLoaded = loadDaemonStateStrict();
-          if (!currentLoaded.ok) {
-            audit({
-              action: 'daemon:persistence-failed',
-              repo: null,
-              sandboxId: null,
-              summary: `daemon loop stopped: daemon state ${currentLoaded.reason} (${currentLoaded.error})`,
-              result: 'refused',
-            });
-            break;
-          }
-          const current = currentLoaded.state;
-          const recheckCfg = resolveCfg(liveCfg);
-          if (current.todaySpentUsd >= recheckCfg.dailyBudgetUsd) break;
-
-          const tickResult = await tick(liveCfg, { dryRun: opts.dryRun });
-
-          if (opts.dryRun) break;
-
-          if (killSwitchOn()) break;
-          const afterTickLoaded = loadDaemonStateStrict();
-          if (!afterTickLoaded.ok) {
-            audit({
-              action: 'daemon:persistence-failed',
-              repo: null,
-              sandboxId: null,
-              summary: `daemon loop stopped after tick: daemon state ${afterTickLoaded.reason} (${afterTickLoaded.error})`,
-              result: 'refused',
-            });
-            break;
-          }
-          const afterTick = afterTickLoaded.state;
-          const recheck2 = resolveCfg(liveCfg);
-          if (afterTick.todaySpentUsd >= recheck2.dailyBudgetUsd) break;
-
-          // Back off only when the backlog was empty (no work dispatched this tick).
-          if (tickResult.itemsConsidered === 0 ||
-              tickResult.reason === 'no-backlog' ||
-              tickResult.reason === 'no-enrolled-repos') {
-            const idleMs = recheck2.idleBackoffMs ?? 5_000;
-            await sleep(idleMs);
-          }
-          // Non-empty tick: immediately loop back — no sleep.
-
-          if (killSwitchOn()) break;
+        const currentLoaded = loadDaemonStateStrict();
+        if (!currentLoaded.ok) {
+          audit({
+            action: 'daemon:persistence-failed',
+            repo: null,
+            sandboxId: null,
+            summary: `daemon loop stopped: daemon state ${currentLoaded.reason} (${currentLoaded.error})`,
+            result: 'refused',
+          });
+          break;
         }
-      } else {
-        // -----------------------------------------------------------------------
-        // BATCH MODE (default) — original behavior, byte-identical.
-        // -----------------------------------------------------------------------
-        while (true) {
-          if (!heartbeatDaemonLock(daemonLock)) break;
-          // Kill switch check — halt immediately.
-          if (killSwitchOn()) break;
+        const current = currentLoaded.state;
+        if (current.todaySpentUsd >= loopCfg.dailyBudgetUsd) break;
 
-          // M85/M309: reload full config from disk each iteration so daemon
-          // tuning, Foundry policy, auto-merge gates, and backend caps take
-          // effect without a restart. Never throws — falls back to caller cfg.
-          const liveCfg = reloadLiveConfigForDaemon(cfg);
+        const tickResult = await tick(liveCfg, { dryRun: opts.dryRun });
 
-          // Budget check — halt when daily cap exhausted.
-          const currentLoaded = loadDaemonStateStrict();
-          if (!currentLoaded.ok) {
-            audit({
-              action: 'daemon:persistence-failed',
-              repo: null,
-              sandboxId: null,
-              summary: `daemon loop stopped: daemon state ${currentLoaded.reason} (${currentLoaded.error})`,
-              result: 'refused',
-            });
-            break;
-          }
-          const current = currentLoaded.state;
-          const recheckCfg = resolveCfg(liveCfg);
-          if (current.todaySpentUsd >= recheckCfg.dailyBudgetUsd) break;
+        // Dry-run is inherently a one-shot PLAN: it records spentUsd:0 forever,
+        // so the budget break can never fire. Terminate after a single iteration
+        // (matching --once semantics) so a dry-run loop is BOUNDED, not endless.
+        if (opts.dryRun) break;
 
-          // Run one tick with the freshly-reloaded config.
-          await tick(liveCfg, { dryRun: opts.dryRun });
-
-          // Dry-run is inherently a one-shot PLAN: it records spentUsd:0 forever,
-          // so the budget break can never fire. Terminate after a single iteration
-          // (matching --once semantics) so a dry-run loop is BOUNDED, not endless.
-          if (opts.dryRun) break;
-
-          // Re-check kill switch + budget after the tick before sleeping.
-          if (killSwitchOn()) break;
-          const afterTickLoaded = loadDaemonStateStrict();
-          if (!afterTickLoaded.ok) {
-            audit({
-              action: 'daemon:persistence-failed',
-              repo: null,
-              sandboxId: null,
-              summary: `daemon loop stopped after tick: daemon state ${afterTickLoaded.reason} (${afterTickLoaded.error})`,
-              result: 'refused',
-            });
-            break;
-          }
-          const afterTick = afterTickLoaded.state;
-          if (afterTick.todaySpentUsd >= recheckCfg.dailyBudgetUsd) break;
-
-          // Sleep between ticks using a bounded interval.
-          await sleep(dcfg.intervalMs);
-          if (!heartbeatDaemonLock(daemonLock)) break;
-
-          // Final kill-switch check after sleep (in case stop() was called while sleeping).
-          if (killSwitchOn()) break;
+        if (killSwitchOn()) break;
+        const afterTickLoaded = loadDaemonStateStrict();
+        if (!afterTickLoaded.ok) {
+          audit({
+            action: 'daemon:persistence-failed',
+            repo: null,
+            sandboxId: null,
+            summary: `daemon loop stopped after tick: daemon state ${afterTickLoaded.reason} (${afterTickLoaded.error})`,
+            result: 'refused',
+          });
+          break;
         }
+
+        // Re-read config before post-tick controls so budget caps, mode, idle
+        // backoff, and batch interval changes can take effect without restart.
+        const afterTickCfg = reloadLiveConfigForDaemon(liveCfg);
+        const afterLoopCfg = resolveCfg(afterTickCfg);
+        const afterTick = afterTickLoaded.state;
+        if (afterTick.todaySpentUsd >= afterLoopCfg.dailyBudgetUsd) break;
+
+        const noWorkDispatched =
+          tickResult.itemsConsidered === 0 ||
+          tickResult.reason === 'no-backlog' ||
+          tickResult.reason === 'no-enrolled-repos';
+
+        if (afterLoopCfg.mode === 'continuous') {
+          if (noWorkDispatched) {
+            await sleep(afterLoopCfg.idleBackoffMs ?? 5_000);
+          }
+        } else {
+          await sleep(afterLoopCfg.intervalMs);
+        }
+
+        if (!heartbeatDaemonLock(daemonLock)) break;
+        if (killSwitchOn()) break;
       }
     }
   } catch {

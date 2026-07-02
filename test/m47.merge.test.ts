@@ -30,7 +30,8 @@ import {
 } from '../src/core/inbox/merge.js';
 import { createProposal, setStatus, loadProposal } from '../src/core/inbox/store.js';
 import { enroll, unenroll, setKill } from '../src/core/sandbox/policy.js';
-import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
+import { hashDiff, signJudgeAttestation, signProvenance } from '../src/core/foundry/provenance.js';
+import { recordDecision } from '../src/core/fleet/decisions-ledger.js';
 import { evidencePath } from '../src/core/autonomy/evidence-pack.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 
@@ -284,10 +285,13 @@ describe('M47 verifyProposal', () => {
   it('passing test script + a diff → ok', async () => {
     initRepo(tmpRepo);
     writePackageJson(tmpRepo, 'exit 0');
+    const baseHead = git(tmpRepo, ['rev-parse', 'main']);
     const p = makeProposal({ diff: addFileDiff('docs/x.md', 'doc') });
     const res = await verifyProposal(p, cfgWith());
     expect(res.ok).toBe(true);
     expect(res.ran.some((c) => c.kind === 'test')).toBe(true);
+    expect(res.baseBranch).toBe('main');
+    expect(res.baseHead).toBe(baseHead);
   });
 
   it('pre-existing failing test script (baseline fails) → ok:true (M281 delta-aware: no new failure introduced)', async () => {
@@ -662,6 +666,79 @@ describe('M47 autoMergeProposal — local happy path', () => {
     // main is untouched; the staging branch remains for a manual merge.
     expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
     expect(loadProposal(p.id)!.status).toBe('approved');
+  });
+
+  it('refuses when the default branch moved after the verified base was recorded', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOriginWithHead(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const verifiedBaseHead = git(tmpRepo, ['rev-parse', 'main']);
+    const staleDiff = addFileDiff('docs/stale-base.md', 'doc');
+    const staleHash = hashDiff(staleDiff);
+    const p = createProposal({
+      repo: tmpRepo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'docs update',
+      summary: 'add a doc',
+      diff: staleDiff,
+      diffHash: staleHash,
+      provenanceSig: signProvenance('local:qwen3-coder', 'local', staleHash),
+      engineModel: 'local:qwen3-coder',
+      engineTier: 'local',
+      verifyResult: {
+        passed: true,
+        detail: 'verified before base advanced',
+        baseBranch: 'main',
+        baseHead: verifiedBaseHead,
+      },
+    });
+    setStatus(p.id, 'pending');
+    recordDecision({
+      ts: new Date().toISOString(),
+      proposalId: p.id,
+      action: 'judged',
+      engine: 'claude-opus-4-5',
+      model: 'claude-opus-4-5',
+      verdict: 'ship',
+      detail: 'would-merge',
+      judgeAttestation: signJudgeAttestation({
+        proposalId: p.id,
+        judgeEngine: 'claude-opus-4-5',
+        verdict: 'ship',
+        diffHash: staleHash,
+      }),
+    });
+
+    git(tmpRepo, ['checkout', '-b', 'advance-main', 'main']);
+    fs.writeFileSync(path.join(tmpRepo, 'base.txt'), 'new base\n', 'utf8');
+    git(tmpRepo, ['add', 'base.txt']);
+    git(tmpRepo, ['commit', '-m', 'advance main']);
+    const movedMain = git(tmpRepo, ['rev-parse', 'advance-main']);
+    git(tmpRepo, ['checkout', 'work']);
+    git(tmpRepo, ['branch', '-f', 'main', movedMain]);
+
+    const r = await autoMergeProposal(
+      p.id,
+      cfgWith({
+        autoMerge: {
+          enabled: true,
+          trustBasis: 'verification',
+          maxRisk: 'low',
+          allowWithoutVerification: true,
+        },
+        mergeAuthority: [],
+      }),
+    );
+
+    expect(r.ok).toBe(false);
+    expect(r.merged).toBe(false);
+    expect(r.reason).toMatch(/moved since verification|reverify/i);
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(movedMain);
+    expect(listBranches(tmpRepo).some((b) => b.startsWith('ashlr/merge/'))).toBe(false);
+    expect(loadProposal(p.id)!.status).toBe('pending');
   });
 });
 

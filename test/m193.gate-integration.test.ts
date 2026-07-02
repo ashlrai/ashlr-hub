@@ -8,8 +8,8 @@
  *  Each check passes          → merge proceeds normally.
  *  All flags OFF              → byte-identical (autoMergeProposal called exactly
  *                               as M172/M175; the 3 modules are never called).
- *  Check throws               → does NOT block the merge (fail-open for the
- *                               additive layer).
+ *  Enabled check throws       → proposal is skipped (fail-closed).
+ *  Enabled check result shape → malformed/untrustworthy results are skipped.
  *  M153/M157 gate inside autoMergeProposal is untouched (mock-verified).
  *
  * FILE OWNERSHIP: automerge-pass.ts only — the modules are imported/mocked.
@@ -391,11 +391,11 @@ describe('M193 flag-off byte-identical', () => {
 });
 
 // ===========================================================================
-// [T1–T3] Fail-open: a check that throws does NOT block the merge
+// [T1–T3] Fail-closed: an enabled check that throws blocks the merge
 // ===========================================================================
 
-describe('M193 fail-open: throws do not block merge', () => {
-  it('[T1] redTeamProposal throws → merge proceeds (fail-open)', async () => {
+describe('M193 fail-closed: throws block merge when flag is enabled', () => {
+  it('[T1] redTeamProposal throws → skipped (fail-closed)', async () => {
     const p = makeProp('t1');
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([recentShipEntry('t1')]);
@@ -404,13 +404,17 @@ describe('M193 fail-open: throws do not block merge', () => {
     const r = await runAutoMergePass(enabledCfg({ redTeam: true }));
 
     expect(mockRedTeamProposal).toHaveBeenCalledOnce();
-    // Exception must NOT block the merge
-    expect(mockAutoMergeProposal).toHaveBeenCalledWith('t1', expect.anything());
-    expect(r.merged).toBe(1);
-    expect(r.skipped).toHaveLength(0);
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(r.merged).toBe(0);
+    expect(r.skipped).toEqual([
+      expect.objectContaining({ proposalId: 't1', check: 'red-team' }),
+    ]);
+    expect(r.results).toEqual([
+      expect.objectContaining({ ok: false, merged: false, branched: false }),
+    ]);
   });
 
-  it('[T2] analyzeBlastRadius throws → merge proceeds (fail-open)', async () => {
+  it('[T2] analyzeBlastRadius throws → skipped (fail-closed)', async () => {
     const p = makeProp('t2');
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([recentShipEntry('t2')]);
@@ -419,12 +423,17 @@ describe('M193 fail-open: throws do not block merge', () => {
     const r = await runAutoMergePass(enabledCfg({ blastRadius: true }));
 
     expect(mockAnalyzeBlastRadius).toHaveBeenCalledOnce();
-    expect(mockAutoMergeProposal).toHaveBeenCalledWith('t2', expect.anything());
-    expect(r.merged).toBe(1);
-    expect(r.skipped).toHaveLength(0);
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(r.merged).toBe(0);
+    expect(r.skipped).toEqual([
+      expect.objectContaining({ proposalId: 't2', check: 'blast-radius' }),
+    ]);
+    expect(r.results).toEqual([
+      expect.objectContaining({ ok: false, merged: false, branched: false }),
+    ]);
   });
 
-  it('[T3] checkSpecContract throws → merge proceeds (fail-open)', async () => {
+  it('[T3] checkSpecContract throws → skipped (fail-closed)', async () => {
     const p = makeProp('t3', 'frontier', 'spec-t3');
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([recentShipEntry('t3')]);
@@ -434,9 +443,74 @@ describe('M193 fail-open: throws do not block merge', () => {
     const r = await runAutoMergePass(enabledCfg({ specContract: true }));
 
     expect(mockCheckSpecContract).toHaveBeenCalledOnce();
-    expect(mockAutoMergeProposal).toHaveBeenCalledWith('t3', expect.anything());
-    expect(r.merged).toBe(1);
-    expect(r.skipped).toHaveLength(0);
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(r.merged).toBe(0);
+    expect(r.skipped).toEqual([
+      expect.objectContaining({ proposalId: 't3', check: 'spec-contract' }),
+    ]);
+    expect(r.results).toEqual([
+      expect.objectContaining({ ok: false, merged: false, branched: false }),
+    ]);
+  });
+});
+
+// ===========================================================================
+// [U1-U4] Fail-closed: untrustworthy enabled-check results block the merge
+// ===========================================================================
+
+describe('M193 fail-closed: untrustworthy enabled-check results block merge', () => {
+  it('[U1] redTeamProposal returns malformed result → skipped', async () => {
+    const p = makeProp('u1');
+    mockListProposals.mockReturnValue([p]);
+    mockReadDecisions.mockReturnValue([recentShipEntry('u1')]);
+    mockRedTeamProposal.mockResolvedValueOnce({ detail: 'missing verdict' });
+
+    const r = await runAutoMergePass(enabledCfg({ redTeam: true }));
+
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(r.skipped[0]).toMatchObject({ proposalId: 'u1', check: 'red-team' });
+    expect(r.results[0]).toMatchObject({ ok: false, merged: false, branched: false });
+  });
+
+  it('[U2] analyzeBlastRadius returns malformed result → skipped', async () => {
+    const p = makeProp('u2');
+    mockListProposals.mockReturnValue([p]);
+    mockReadDecisions.mockReturnValue([recentShipEntry('u2')]);
+    mockAnalyzeBlastRadius.mockResolvedValueOnce({ detail: 'missing risk' });
+
+    const r = await runAutoMergePass(enabledCfg({ blastRadius: true }));
+
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(r.skipped[0]).toMatchObject({ proposalId: 'u2', check: 'blast-radius' });
+    expect(r.results[0]).toMatchObject({ ok: false, merged: false, branched: false });
+  });
+
+  it('[U3] checkSpecContract returns malformed result → skipped', async () => {
+    const p = makeProp('u3', 'frontier', 'spec-u3');
+    mockListProposals.mockReturnValue([p]);
+    mockReadDecisions.mockReturnValue([recentShipEntry('u3')]);
+    mockLoadSpec.mockReturnValue({ meta: { id: 'spec-u3', goal: 'g', version: 1, project: null, path: '/tmp/s', status: 'active', createdAt: '', updatedAt: '' }, body: '## Verification\n- something\n' });
+    mockCheckSpecContract.mockResolvedValueOnce({ detail: { reason: 'missing satisfied' } });
+
+    const r = await runAutoMergePass(enabledCfg({ specContract: true }));
+
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(r.skipped[0]).toMatchObject({ proposalId: 'u3', check: 'spec-contract' });
+    expect(r.results[0]).toMatchObject({ ok: false, merged: false, branched: false });
+  });
+
+  it('[U4] specContract=true + specId present + loadSpec cannot load → skipped', async () => {
+    const p = makeProp('u4', 'frontier', 'spec-u4');
+    mockListProposals.mockReturnValue([p]);
+    mockReadDecisions.mockReturnValue([recentShipEntry('u4')]);
+    mockLoadSpec.mockReturnValueOnce(null);
+
+    const r = await runAutoMergePass(enabledCfg({ specContract: true }));
+
+    expect(mockCheckSpecContract).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(r.skipped[0]).toMatchObject({ proposalId: 'u4', check: 'spec-contract' });
+    expect(r.results[0]).toMatchObject({ ok: false, merged: false, branched: false });
   });
 });
 
