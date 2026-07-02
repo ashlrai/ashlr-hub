@@ -518,6 +518,35 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
+  it('A1i: live ticks persist bounded dispatch assignment traces', async () => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'builtin', tier: 'local', model: null, reason: 'test route' });
+
+    const result = await tick(
+      cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.dispatches?.[0]).toMatchObject({
+      itemId: items[0]!.id,
+      backend: 'builtin',
+      tier: 'local',
+      assignedBy: 'router',
+      reason: 'test route',
+      dispatched: true,
+      spentUsd: 0.001,
+    });
+
+    const state = loadDaemonState();
+    expect(state.ticks.at(-1)?.dispatches?.[0]).toMatchObject({
+      itemId: items[0]!.id,
+      backend: 'builtin',
+      reason: 'test route',
+      dispatched: true,
+    });
+  });
+
   it('A2: buildBacklog throws → tick swallows and returns no-backlog', async () => {
     const repo = fx.makeRepo();
     repo.enroll();

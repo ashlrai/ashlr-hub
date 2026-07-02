@@ -4,7 +4,7 @@
 - Hub repo: `/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub`
 - Branch: `master`
 - Remote: `https://github.com/ashlrai/ashlr-hub.git`
-- Latest pushed commit before this follow-up: `2f42610 feat: Execute autonomy direction loop`
+- Latest pushed commit before this follow-up: `586fdcc feat: Harden autonomy control loop`
 - Working tree at start of this push: clean and synced to `origin/master`
 - Entire: not set up; no checkpoint found for `master`
 
@@ -66,6 +66,9 @@
 - Autonomy control hardening follow-up: daemon direction planning now injects a cheap fleet snapshot, lightweight ecosystem doctor report, cached guard health, and empty outcome records so each tick avoids the expensive default `buildFleetStatus`, ecosystem doctor, and outcome-record joins while the full `ashlr fleet direction` command remains deep.
 - Local-only routing follow-up: `local-coder` is now a first-class `EngineId` and is preserved by `foundry.autonomyControlLoop` local-only constraints, so constrained resource posture still uses the free Ollama coding backend before falling back to `builtin`.
 - Direction observability follow-up: daemon ticks now persist `directionReason` and compact `autoMerge` maintenance counts (`attempted`, `judged`, `merged`). `/api/control` exposes the last applied direction mode/timestamp/reason, Mission Control shows active vs recommended direction, and Fleet Activity recent ticks carry the same metadata.
+- Dispatch trace follow-up: daemon live ticks now persist bounded `dispatches` metadata per item: id/title/repo/source, final backend/tier/model, assignment path, reason, dispatched/skipped state, spend, and skip reason. The trace is metadata-only and intentionally excludes prompts, diffs, command output, and secrets.
+- Dispatch trace visibility follow-up: `/api/control` emits compact dispatch log rows, `/api/fleet-activity` copies bounded dispatches onto recent ticks, and the Fleet Activity tick stream renders small backend/repo/status chips beside each tick.
+- Remaining autonomy risk from agent audit: auto-merge maintenance can still consume judge/verify resources without exact daemon budget charging; a future pass should add usage/spend reporting to `AutoMergePassResult` before making maintenance budget accounting fully precise.
 
 ## Verification Log
 - `ASHLR_TEST_CI_TIMEOUT_MS=120000 npm run test:ci -- test/m30.ci.test.ts test/m33.release-meta.test.ts test/m262.visibility.test.ts test/m297.retry-transient-abort.test.ts`: passed, 63 tests.
@@ -104,3 +107,5 @@
 - Executable autonomy/Raycast local lint final gates: root `npm run typecheck`, `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check` passed. Root lint remains at the existing 118-warning baseline with 0 errors. In `src/raycast`, `npm run lint`, `npm run build`, and `npm audit --audit-level=moderate` passed. `npm run lint:raycast` failed only on external Raycast author validation for `masonwyatt` (404).
 - Autonomy control hardening focused pass: `node --check src/core/web/public/app.js` passed; `npm test -- test/m201.daemon-loop.test.ts test/m61.control.test.ts test/m90.fleet-dashboard.test.ts test/m14.static.test.ts` passed, 4 files and 113 tests.
 - Autonomy control hardening final gates: `npm run typecheck`, `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check` passed. Root lint remains at the existing 118-warning baseline with 0 errors.
+- Dispatch trace focused pass: `node --check src/core/web/public/app.js` passed; `npm test -- test/m201.daemon-loop.test.ts test/m61.control.test.ts test/m90.fleet-dashboard.test.ts` passed, 3 files and 85 tests.
+- Dispatch trace final gates: `npm run typecheck`, `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check` passed. Root lint remains at the existing 118-warning baseline with 0 errors.

@@ -242,6 +242,18 @@ describe('buildFleetActivity — recent ticks', () => {
       directionMode: i === 29 ? 'verify-only' : 'backlog-build',
       directionReason: i === 29 ? 'pending proposals need verification' : 'healthy resources',
       autoMerge: i === 29 ? { attempted: 3, judged: 2, merged: 1 } : undefined,
+      dispatches: i === 29 ? [{
+        itemId: 'item-29',
+        title: 'Trace backend assignment',
+        repo: '/tmp/repo-alpha',
+        source: 'todo',
+        backend: 'builtin',
+        tier: 'local',
+        assignedBy: 'router',
+        reason: 'test route',
+        dispatched: true,
+        spentUsd: 0.001,
+      }] : undefined,
     }));
     writeFileSync(
       join(ashlrDir, 'daemon.json'),
@@ -259,6 +271,12 @@ describe('buildFleetActivity — recent ticks', () => {
     expect(snap.recentTicks[0]!.directionMode).toBe('verify-only');
     expect(snap.recentTicks[0]!.directionReason).toBe('pending proposals need verification');
     expect(snap.recentTicks[0]!.autoMerge).toEqual({ attempted: 3, judged: 2, merged: 1 });
+    expect(snap.recentTicks[0]!.dispatches?.[0]).toMatchObject({
+      itemId: 'item-29',
+      backend: 'builtin',
+      reason: 'test route',
+      dispatched: true,
+    });
     // Each tick has required shape
     for (const t of snap.recentTicks) {
       expect(typeof t.ts).toBe('string');
@@ -268,6 +286,7 @@ describe('buildFleetActivity — recent ticks', () => {
       expect(t.directionMode === null || typeof t.directionMode === 'string').toBe(true);
       expect(t.directionReason === null || typeof t.directionReason === 'string').toBe(true);
       expect(t.autoMerge === null || typeof t.autoMerge === 'object').toBe(true);
+      expect(Array.isArray(t.dispatches)).toBe(true);
     }
   });
 });

@@ -152,7 +152,7 @@ describe('buildControlSnapshot — full shape (M61)', () => {
     expect(snap.logs).toBeInstanceOf(Array);
     for (const entry of snap.logs) {
       expect(typeof entry.ts).toBe('string');
-      expect(['tick', 'merge', 'info']).toContain(entry.kind);
+      expect(['tick', 'merge', 'info', 'dispatch']).toContain(entry.kind);
       expect(typeof entry.msg).toBe('string');
     }
   });
@@ -381,6 +381,18 @@ describe('logs section (M61)', () => {
           directionMode: 'verify-only',
           directionReason: 'pending proposals need verification',
           autoMerge: { attempted: 3, judged: 2, merged: 0 },
+          dispatches: [{
+            itemId: 'item-1',
+            title: 'Improve daemon routing visibility',
+            repo: '/tmp/repo-alpha',
+            source: 'todo',
+            backend: 'builtin',
+            tier: 'local',
+            assignedBy: 'router',
+            reason: 'test route',
+            dispatched: true,
+            spentUsd: 0.001,
+          }],
         },
       ],
     }, null, 2));
@@ -392,6 +404,12 @@ describe('logs section (M61)', () => {
     expect(snap.daemon.autonomyControlLoop).toBe(true);
     expect(snap.logs[0]?.msg).toContain('direction=verify-only');
     expect(snap.logs[0]?.msg).toContain('maintenance=attempted:3,judged:2,merged:0');
+    expect(snap.logs.some((entry) =>
+      entry.kind === 'dispatch' &&
+      entry.msg.includes('builtin') &&
+      entry.msg.includes('Improve daemon routing visibility') &&
+      entry.msg.includes('test route'),
+    )).toBe(true);
   });
 
   it('logs are capped at 50 by default', async () => {

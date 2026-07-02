@@ -2938,6 +2938,33 @@ export interface DaemonConfig {
  * M24: the record of a single operator cycle (one `tick`). Pure accounting of
  * what was considered + proposed + spent. Creating a tick NEVER applies anything.
  */
+export interface DaemonDispatchTrace {
+  /** Work item id considered by this tick. */
+  itemId: string;
+  /** Bounded human-readable title for dashboard display. */
+  title: string;
+  /** Repository path for the item. */
+  repo: string;
+  /** Original backlog source. */
+  source: WorkItem['source'];
+  /** Final backend selected for this item, or null when skipped before routing. */
+  backend: EngineId | null;
+  /** Final engine tier, or null when skipped before routing. */
+  tier: EngineTier | null;
+  /** Model selected by routing, when known. */
+  model?: string | null;
+  /** Which routing path made or overrode the assignment. */
+  assignedBy: string;
+  /** Short routing/skip reason suitable for logs and dashboards. */
+  reason: string;
+  /** True only when an engine/swarm was actually invoked. */
+  dispatched: boolean;
+  /** Estimated USD spent by this item dispatch. */
+  spentUsd: number;
+  /** Skip/error reason when no engine was invoked or dispatch failed. */
+  skipReason?: string;
+}
+
 export interface DaemonTick {
   /** ISO timestamp the tick ran. */
   ts: string;
@@ -2962,6 +2989,8 @@ export interface DaemonTick {
     judged: number;
     merged: number;
   };
+  /** Bounded per-item backend assignment traces for this tick. */
+  dispatches?: DaemonDispatchTrace[];
   /** M48: proposals auto-merged this tick via the M47 gate (omitted/0 when disabled). */
   merged?: number;
 }

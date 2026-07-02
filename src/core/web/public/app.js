@@ -3227,6 +3227,13 @@ function renderFleetActivity() {
       const backendsStr = t.backends && Object.keys(t.backends).length > 0
         ? Object.entries(t.backends).map(([k, v]) => `${k}:${v}`).join(' ')
         : '';
+      const dispatches = Array.isArray(t.dispatches) ? t.dispatches : [];
+      const dispatchChips = dispatches.slice(0, 3).map((dispatch) => {
+        const repoName = typeof dispatch.repo === 'string' ? dispatch.repo.split('/').pop() || dispatch.repo : '?';
+        const stateLabel = dispatch.dispatched ? 'ran' : dispatch.skipReason || 'skipped';
+        return `${dispatch.backend ?? 'none'}:${repoName}:${stateLabel}`;
+      }).join(' ');
+      const dispatchMore = dispatches.length > 3 ? ` +${dispatches.length - 3}` : '';
       const hasMerge = t.merged > 0;
       const tickCls = `fa-tick-row${hasMerge ? ' fa-tick-merged' : ''}`;
       ticksBody.appendChild(el('div', { cls: tickCls },
@@ -3234,6 +3241,7 @@ function renderFleetActivity() {
         el('span', { cls: 'fa-tick-time' }, fmtRelative(t.ts)),
         el('span', { cls: 'fa-tick-reason' }, t.reason ?? 'ok'),
         backendsStr ? el('span', { cls: 'fa-tick-backends' }, backendsStr) : null,
+        dispatchChips ? el('span', { cls: 'fa-tick-dispatches' }, `${dispatchChips}${dispatchMore}`) : null,
         t.spentUsd > 0 ? el('span', { cls: 'fa-tick-spend' }, `$${t.spentUsd.toFixed(4)}`) : null,
         hasMerge ? el('span', { cls: 'fa-tick-merge-badge' }, `+${t.merged} merged`) : null
       ));

@@ -39,6 +39,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Clear nested Raycast audit vulnerabilities
 - [x] Follow-up: Repair nested Raycast local lint
 - [x] Follow-up: Harden executable autonomy control observability and local-only routing
+- [x] Follow-up: Persist daemon backend assignment traces
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -72,6 +73,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Daemon autonomy control now uses cheap daemon-tick resource-strategy dependencies, including a lightweight fleet snapshot, lightweight ecosystem report, and empty outcome records, so opt-in direction checks avoid expensive full status/doctor/outcome joins.
 - Local-only autonomy mode now preserves the first-class `local-coder` backend instead of collapsing it to `builtin`, keeping the free local coding workhorse available when frontier resources are constrained.
 - Daemon ticks, Mission Control logs, and Fleet Activity now show applied direction reason and auto-merge maintenance attempted/judged/merged counts; Mission Control distinguishes the active applied mode from the current recommended direction.
+- Daemon ticks now persist bounded per-item dispatch assignment traces with item, repo, backend, tier, model, assignment reason, dispatched/skipped state, and spend. Mission Control logs and Fleet Activity expose the same metadata without adding a new endpoint or heavyweight panel.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -97,6 +99,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current trust fix makes the newest judged decision authoritative in the verification gate, so a newer non-ship verdict overrides any older signed `ship`.
 - Current autonomy learning foundation pass added `workItemId`, `workSource`, and `runId` on proposals across daemon/swarm/best-of-N/sandboxed runs; guard-health diagnosis in daemon/fleet status; read-only outcome records; and read-only ecosystem doctor.
 - Current autonomy control pass makes outcome feedback item-accurate, skips permanent auto-merge blockers before judge calls, verifies before spending judge calls in verification mode, and adds a read-only resource-aware direction report.
+- Current dispatch-trace pass persists bounded daemon dispatch assignment metadata and surfaces it in existing control logs and Fleet Activity tick streams.
 
 ## Status
-**Current batch verified locally** - Autonomy control observability, cheap daemon strategy planning, local-coder local-only routing, and Mission Control active/recommended direction visibility are implemented and verified; preparing commit/push.
+**Current batch verified locally** - Daemon dispatch assignment traces are implemented, surfaced, tested, and verified; preparing commit/push.

@@ -33,7 +33,7 @@
  * No new runtime deps; node builtins only; never throws out of public API.
  */
 
-import type { AshlrConfig, DaemonConfig, DaemonState, DaemonTick, EngineId, WorkItem } from '../types.js';
+import type { AshlrConfig, DaemonConfig, DaemonDispatchTrace, DaemonState, DaemonTick, EngineId, EngineTier, WorkItem } from '../types.js';
 import type { FleetStatus } from '../fleet/status.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import { killSwitchOn, setKill, listEnrolled } from '../sandbox/policy.js';
@@ -102,6 +102,7 @@ const DEFAULTS: DaemonConfig = {
 };
 
 const LOCAL_ONLY_BACKENDS = new Set<EngineId>(['builtin', 'local-coder', 'ashlrcode', 'aw']);
+type TickItemOutcome = { item: WorkItem; spentUsd: number; dispatched: boolean; dispatch?: DaemonDispatchTrace };
 
 function autonomyControlEnabled(cfg: AshlrConfig): boolean {
   return (cfg.foundry as Record<string, unknown> | undefined)?.['autonomyControlLoop'] === true;
@@ -222,6 +223,46 @@ function autoMergeTickSummary(result: AutoMergePassResult | null): DaemonTick['a
   const merged = typeof result.merged === 'number' ? result.merged : 0;
   if (attempted <= 0 && judged <= 0 && merged <= 0) return undefined;
   return { attempted, judged, merged };
+}
+
+function boundedText(value: string, max = 220): string {
+  return value.length > max ? `${value.slice(0, max - 3)}...` : value;
+}
+
+function dispatchTrace(
+  item: WorkItem,
+  fields: {
+    backend?: EngineId | null;
+    tier?: EngineTier | null;
+    model?: string | null;
+    assignedBy: string;
+    reason: string;
+    dispatched: boolean;
+    spentUsd?: number;
+    skipReason?: string;
+  },
+): DaemonDispatchTrace {
+  return {
+    itemId: item.id,
+    title: boundedText(item.title, 120),
+    repo: item.repo,
+    source: item.source,
+    backend: fields.backend ?? null,
+    tier: fields.tier ?? null,
+    ...(fields.model !== undefined ? { model: fields.model } : {}),
+    assignedBy: fields.assignedBy,
+    reason: boundedText(fields.reason),
+    dispatched: fields.dispatched,
+    spentUsd: fields.spentUsd ?? 0,
+    ...(fields.skipReason ? { skipReason: boundedText(fields.skipReason, 160) } : {}),
+  };
+}
+
+function dispatchesFromOutcomes(outcomes: PromiseSettledResult<TickItemOutcome>[]): DaemonDispatchTrace[] | undefined {
+  const dispatches = outcomes.flatMap((outcome) =>
+    outcome.status === 'fulfilled' && outcome.value.dispatch ? [outcome.value.dispatch] : [],
+  );
+  return dispatches.length > 0 ? dispatches.slice(0, 20) : undefined;
 }
 
 /**
@@ -953,7 +994,7 @@ export async function tick(
   // `dispatched` = a swarm was actually invoked for this item (kill switch /
   // budget short-circuit did NOT skip it). Drives itemsProcessed so `daemon
   // status` reflects real work, not merely items considered.
-  type ItemOutcome = { item: WorkItem; spentUsd: number; dispatched: boolean };
+  type ItemOutcome = TickItemOutcome;
 
   // M116: build TieredPool from resolved config.
   // In batch mode (default), cap each tier at parallel to preserve identical behavior.
@@ -989,16 +1030,42 @@ export async function tick(
     run: async (assignedBackend?: EngineId, assignedReason?: string): Promise<ItemOutcome> => {
       // Re-check kill switch before each item dispatch.
       if (killSwitchOn()) {
-        return { item, spentUsd: 0, dispatched: false };
+        return {
+          item,
+          spentUsd: 0,
+          dispatched: false,
+          dispatch: dispatchTrace(item, {
+            assignedBy: 'preflight',
+            reason: 'kill switch is ON',
+            dispatched: false,
+            skipReason: 'kill-switch',
+          }),
+        };
       }
       // In-tick budget short-circuit: if cumulative realized spend has already
       // reached the remaining daily headroom, do NOT dispatch further items.
       if (tickSpent >= remainingBudget) {
-        return { item, spentUsd: 0, dispatched: false };
+        return {
+          item,
+          spentUsd: 0,
+          dispatched: false,
+          dispatch: dispatchTrace(item, {
+            assignedBy: 'preflight',
+            reason: `in-tick budget cap reached ($${tickSpent.toFixed(4)} >= $${remainingBudget.toFixed(4)})`,
+            dispatched: false,
+            skipReason: 'budget-cap',
+          }),
+        };
       }
 
       let swarmSpent = 0;
       let dispatched = false;
+      let backend: EngineId | undefined;
+      let backendTier: EngineTier | null = null;
+      let assignmentReason = 'not routed';
+      let assignedBy = 'preflight';
+      let selectedModel: string | null | undefined;
+      let dispatch: DaemonDispatchTrace | undefined;
 
       // M247: InferenceGateway — consolidates routing into one traceable decision.
       // FLAG-GATED: when cfg.foundry.fabric?.gateway === true, a single
@@ -1009,7 +1076,6 @@ export async function tick(
       //
       // Hoisted so both the gateway branch and the legacy branch can assign it,
       // and subsequent dispatch code sees the same name regardless of path.
-      let backend: EngineId;
       if (assignedBackend !== undefined) {
         if (assignedReason?.startsWith('throttled:') || assignedReason?.startsWith('resource-pause:')) {
           audit({
@@ -1019,7 +1085,19 @@ export async function tick(
             summary: assignedReason,
             result: 'ok',
           });
-          return { item, spentUsd: 0, dispatched: false };
+          return {
+            item,
+            spentUsd: 0,
+            dispatched: false,
+            dispatch: dispatchTrace(item, {
+              backend: assignedBackend,
+              tier: engineTierOf(assignedBackend, routingCfg),
+              assignedBy: 'concurrent-planner',
+              reason: assignedReason,
+              dispatched: false,
+              skipReason: assignedReason.split(':')[0] ?? 'concurrent-skip',
+            }),
+          };
         }
         if (assignedReason?.startsWith('budget-pause:')) {
           audit({
@@ -1029,9 +1107,24 @@ export async function tick(
             summary: `M255 concurrent dispatch: pausing "${item.title}" — ${assignedReason}`,
             result: 'ok',
           });
-          return { item, spentUsd: 0, dispatched: false };
+          return {
+            item,
+            spentUsd: 0,
+            dispatched: false,
+            dispatch: dispatchTrace(item, {
+              backend: assignedBackend,
+              tier: engineTierOf(assignedBackend, routingCfg),
+              assignedBy: 'concurrent-planner',
+              reason: assignedReason,
+              dispatched: false,
+              skipReason: 'budget-pause',
+            }),
+          };
         }
         backend = assignedBackend;
+        backendTier = engineTierOf(backend, routingCfg);
+        assignmentReason = assignedReason ?? `concurrent planner assigned ${backend}`;
+        assignedBy = 'concurrent-planner';
       } else if (routingCfg.foundry?.fabric?.gateway === true) {
         const forecast = buildForecast('7d', routingCfg);
         const gd = await gatewayDecide(item, routingCfg, {
@@ -1047,7 +1140,20 @@ export async function tick(
             summary: gd.reason,
             result: 'ok',
           });
-          return { item, spentUsd: 0, dispatched: false };
+          return {
+            item,
+            spentUsd: 0,
+            dispatched: false,
+            dispatch: dispatchTrace(item, {
+              backend: gd.backend,
+              tier: gd.tier,
+              model: gd.model,
+              assignedBy: 'gateway',
+              reason: gd.reason,
+              dispatched: false,
+              skipReason: 'throttled',
+            }),
+          };
         }
         // Budget pause: step down exhausted budget — skip item, same as old path.
         if (gd.reason.startsWith('budget-pause:')) {
@@ -1058,7 +1164,20 @@ export async function tick(
             summary: `M247 gateway budget cascade: pausing dispatch for "${item.title}" — ${gd.reason}`,
             result: 'ok',
           });
-          return { item, spentUsd: 0, dispatched: false };
+          return {
+            item,
+            spentUsd: 0,
+            dispatched: false,
+            dispatch: dispatchTrace(item, {
+              backend: gd.backend,
+              tier: gd.tier,
+              model: gd.model,
+              assignedBy: 'gateway',
+              reason: gd.reason,
+              dispatched: false,
+              skipReason: 'budget-pause',
+            }),
+          };
         }
         if (gd.reason.startsWith('resource-pause:')) {
           audit({
@@ -1068,10 +1187,27 @@ export async function tick(
             summary: gd.reason,
             result: 'ok',
           });
-          return { item, spentUsd: 0, dispatched: false };
+          return {
+            item,
+            spentUsd: 0,
+            dispatched: false,
+            dispatch: dispatchTrace(item, {
+              backend: gd.backend,
+              tier: gd.tier,
+              model: gd.model,
+              assignedBy: 'gateway',
+              reason: gd.reason,
+              dispatched: false,
+              skipReason: 'resource-pause',
+            }),
+          };
         }
         // Normal dispatch: use gateway decision's backend directly.
         backend = gd.backend;
+        backendTier = gd.tier;
+        selectedModel = gd.model;
+        assignmentReason = gd.reason;
+        assignedBy = 'gateway';
       } else {
         // M48: route this item to a backend (M46). Default (no cfg.foundry) →
         // 'builtin'. A frontier backend over its rolling rate quota falls back to
@@ -1079,8 +1215,15 @@ export async function tick(
         // M85: use liveCfg (reloaded per-tick) for routing + quota checks.
         const routed = routeBackend(item, routingCfg);
         backend = routed.backend;
+        backendTier = routed.tier;
+        selectedModel = routed.model;
+        assignmentReason = routed.reason;
+        assignedBy = 'router';
         if (backend !== 'builtin' && !withinLimit(backend, routingCfg)) {
+          assignmentReason = `${assignmentReason}; quota fallback to builtin`;
+          assignedBy = 'quota-fallback';
           backend = 'builtin';
+          backendTier = engineTierOf(backend, routingCfg);
         }
 
         // M80: subscription-window throttle — skip this item (not crash) when a
@@ -1105,7 +1248,20 @@ export async function tick(
               summary: `throttled: ${backend} subscription window — ${subCheck.reason}`,
               result: 'ok',
             });
-            return { item, spentUsd: 0, dispatched: false };
+            return {
+              item,
+              spentUsd: 0,
+              dispatched: false,
+              dispatch: dispatchTrace(item, {
+                backend,
+                tier: engineTierOf(backend, routingCfg),
+                model: selectedModel,
+                assignedBy: 'subscription-throttle',
+                reason: `throttled: ${backend} subscription window — ${subCheck.reason}`,
+                dispatched: false,
+                skipReason: 'subscription-throttle',
+              }),
+            };
           }
         }
 
@@ -1124,6 +1280,9 @@ export async function tick(
             // Only override when the recommend result doesn't escalate a local decision.
             if (routed.tier !== 'local' || recommended.tier === 'local') {
               backend = recommended.backend;
+              backendTier = recommended.tier;
+              assignmentReason = recommended.reason;
+              assignedBy = 'learned-router';
             }
             // Budget cascade: step down tier when near cap.
             const recovery = recoverWithinBudget(
@@ -1140,15 +1299,37 @@ export async function tick(
                 summary: `M53 budget cascade: pausing dispatch for "${item.title}" — ${recovery.reason}`,
                 result: 'ok',
               });
-              return { item, spentUsd: 0, dispatched: false };
+              return {
+                item,
+                spentUsd: 0,
+                dispatched: false,
+                dispatch: dispatchTrace(item, {
+                  backend,
+                  tier: backendTier ?? engineTierOf(backend, routingCfg),
+                  model: selectedModel,
+                  assignedBy: 'budget-cascade',
+                  reason: recovery.reason,
+                  dispatched: false,
+                  skipReason: 'budget-pause',
+                }),
+              };
             } else {
               backend = recovery.decision.backend;
+              backendTier = recovery.decision.tier;
+              assignmentReason = recovery.reason;
+              assignedBy = 'budget-cascade';
             }
           }
         }
       } // end flag-off path
 
+      const beforeLocalClamp = backend;
       backend = enforceLocalBackend(backend, directionPlan);
+      if (backend !== beforeLocalClamp) {
+        assignmentReason = `${assignmentReason}; autonomy local-only fallback to ${backend}`;
+        assignedBy = 'local-only';
+      }
+      backendTier = engineTierOf(backend, routingCfg);
       const goal = buildItemGoal(item);
       const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
 
@@ -1217,7 +1398,21 @@ export async function tick(
             summary: `ashlrcode executor: ${acResult.ok ? 'ok' : `failed: ${acResult.error}`} for "${item.title}"`,
             result: acResult.ok ? 'ok' : 'error',
           });
-          return { item, spentUsd: swarmSpent, dispatched: true };
+          return {
+            item,
+            spentUsd: swarmSpent,
+            dispatched: true,
+            dispatch: dispatchTrace(item, {
+              backend,
+              tier: backendTier,
+              model: selectedModel,
+              assignedBy,
+              reason: assignmentReason,
+              dispatched: true,
+              spentUsd: swarmSpent,
+              ...(acResult.ok ? {} : { skipReason: 'ashlrcode-error' }),
+            }),
+          };
         }
 
         // M170: best-of-N dispatch — when cfg.foundry.bestOfN > 1, generate N
@@ -1250,7 +1445,21 @@ export async function tick(
               summary: `best-of-${bestOfN}: all candidates empty for "${item.title}" — no proposal`,
               result: 'ok',
             });
-            return { item, spentUsd: 0, dispatched: true };
+            return {
+              item,
+              spentUsd: 0,
+              dispatched: true,
+              dispatch: dispatchTrace(item, {
+                backend,
+                tier: backendTier,
+                model: selectedModel,
+                assignedBy,
+                reason: `${assignmentReason}; best-of-${bestOfN}: all candidates empty`,
+                dispatched: true,
+                spentUsd: 0,
+                skipReason: 'empty-best-of-n',
+              }),
+            };
           }
           // Winner's underlying run state lives in the candidate's state field.
           // Cast to the shape runGoal returns (id, status, usage).
@@ -1287,19 +1496,39 @@ export async function tick(
           result: 'ok',
         });
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      audit({
-        action: 'daemon:swarm-error',
+	    } catch (err) {
+	      const msg = err instanceof Error ? err.message : String(err);
+	      dispatch = dispatchTrace(item, {
+	        backend: backend ?? null,
+	        tier: backendTier,
+	        model: selectedModel,
+	        assignedBy,
+	        reason: assignmentReason,
+	        dispatched,
+	        spentUsd: swarmSpent,
+	        skipReason: `dispatch-error: ${msg.slice(0, 120)}`,
+	      });
+	      audit({
+	        action: 'daemon:swarm-error',
         repo: item.repo,
         sandboxId: null,
         summary: `${backend} dispatch failed for "${item.title}": ${msg.slice(0, 200)}`,
         result: 'error',
       });
-    } finally {
-      if (prevInSwarm === undefined) delete process.env['ASHLR_IN_SWARM'];
-      else process.env['ASHLR_IN_SWARM'] = prevInSwarm;
-    }
+	    } finally {
+	      if (prevInSwarm === undefined) delete process.env['ASHLR_IN_SWARM'];
+	      else process.env['ASHLR_IN_SWARM'] = prevInSwarm;
+	    }
+
+	    dispatch ??= dispatchTrace(item, {
+	      backend,
+	      tier: backendTier,
+	      model: selectedModel,
+	      assignedBy,
+	      reason: assignmentReason,
+	      dispatched,
+	      spentUsd: swarmSpent,
+	    });
 
     // M53: anomaly-hold — if run cost > k×p50, hold the proposal PENDING and
     // file a TuningProposal. NEVER auto-apply. This block imports NO
@@ -1343,7 +1572,7 @@ export async function tick(
       }
     }
 
-    return { item, spentUsd: swarmSpent, dispatched };
+	    return { item, spentUsd: swarmSpent, dispatched, dispatch };
     }, // end run:
   }));  // end tasks.map
 
@@ -1409,10 +1638,22 @@ export async function tick(
         // We look up by item.id to reuse the existing tasks[] entries which
         // already capture tickSpent/state/liveCfg via closure.
         const taskEntry = tasks.find((_t, idx) => workedSet[idx]?.id === item.id);
-        if (taskEntry) return taskEntry.run(_backend, routeReasons.get(item.id));
-        // Fallback: build a minimal no-op outcome (item not in tasks — shouldn't happen).
-        return { item, spentUsd: 0, dispatched: false } satisfies ItemOutcome;
-      },
+	        if (taskEntry) return taskEntry.run(_backend, routeReasons.get(item.id));
+	        // Fallback: build a minimal no-op outcome (item not in tasks — shouldn't happen).
+	        return {
+	          item,
+	          spentUsd: 0,
+	          dispatched: false,
+	          dispatch: dispatchTrace(item, {
+	            backend: _backend,
+	            tier: engineTierOf(_backend, routingCfg),
+	            assignedBy: 'concurrent-planner',
+	            reason: 'concurrent planner assigned item with no task entry',
+	            dispatched: false,
+	            skipReason: 'missing-task-entry',
+	          }),
+	        } satisfies ItemOutcome;
+	      },
       killSwitchOn,
       concurrentCfg,
     );
@@ -1425,16 +1666,41 @@ export async function tick(
       const inner = r.settled?.status === 'fulfilled'
         ? (r.settled.value as ItemOutcome | undefined)
         : undefined;
-      return {
-        status: 'fulfilled',
-        value: inner ?? { item: r.item, spentUsd: 0, dispatched: r.attempted },
-      };
-    });
+	      return {
+	        status: 'fulfilled',
+	        value: inner ?? {
+	          item: r.item,
+	          spentUsd: 0,
+	          dispatched: r.attempted,
+	          dispatch: dispatchTrace(r.item, {
+	            backend: r.backend,
+	            tier: engineTierOf(r.backend, routingCfg),
+	            assignedBy: 'concurrent-planner',
+	            reason: 'concurrent dispatch result missing inner outcome',
+	            dispatched: r.attempted,
+	            skipReason: r.attempted ? 'missing-outcome' : 'not-attempted',
+	          }),
+	        },
+	      };
+	    });
 
-    // Add unassigned items as non-dispatched fulfilled outcomes.
-    for (const item of concurrentPlan.unassigned) {
-      outcomes.push({ status: 'fulfilled', value: { item, spentUsd: 0, dispatched: false } });
-    }
+	    // Add unassigned items as non-dispatched fulfilled outcomes.
+	    for (const item of concurrentPlan.unassigned) {
+	      outcomes.push({
+	        status: 'fulfilled',
+	        value: {
+	          item,
+	          spentUsd: 0,
+	          dispatched: false,
+	          dispatch: dispatchTrace(item, {
+	            assignedBy: 'concurrent-planner',
+	            reason: 'no concurrent dispatch slot assigned',
+	            dispatched: false,
+	            skipReason: 'unassigned',
+	          }),
+	        },
+	      });
+	    }
   } else {
     // Batch mode (default — no continuous mode, no explicit concurrency config):
     // use the exact pre-M116 bounded worker-pool so dispatch + the in-tick budget
@@ -1456,11 +1722,12 @@ export async function tick(
   // itemsProcessed counts items whose swarm was actually dispatched (not those
   // skipped by the kill switch or the in-tick budget short-circuit).
   let dispatchedCount = 0;
-  for (const outcome of outcomes) {
-    if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
-      dispatchedCount++;
-    }
-  }
+	  for (const outcome of outcomes) {
+	    if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
+	      dispatchedCount++;
+	    }
+	  }
+	  const dispatches = dispatchesFromOutcomes(outcomes);
 
   // Proposals actually recorded this tick = the PENDING-count delta (clamped >=0).
   let proposalsCreated = 0;
@@ -1540,13 +1807,14 @@ export async function tick(
       itemsConsidered: selected.length,
       proposalsCreated,
       spentUsd: tickSpent,
-      reason: 'state-persistence-failed',
-      ...(Object.keys(backendDispatch).length > 0 ? { backends: backendDispatch } : {}),
-      ...(directionMode ? { directionMode } : {}),
-      ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
-      ...(autoMerge ? { autoMerge } : {}),
-      ...(merged > 0 ? { merged } : {}),
-    };
+	      reason: 'state-persistence-failed',
+	      ...(Object.keys(backendDispatch).length > 0 ? { backends: backendDispatch } : {}),
+	      ...(directionMode ? { directionMode } : {}),
+	      ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
+	      ...(autoMerge ? { autoMerge } : {}),
+	      ...(dispatches ? { dispatches } : {}),
+	      ...(merged > 0 ? { merged } : {}),
+	    };
     audit({
       action: 'daemon:persistence-failed',
       repo: null,
@@ -1568,12 +1836,13 @@ export async function tick(
     proposalsCreated,
     spentUsd: tickSpent,
     reason: 'ok',
-    ...(Object.keys(backendDispatch).length > 0 ? { backends: backendDispatch } : {}),
-    ...(directionMode ? { directionMode } : {}),
-    ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
-    ...(autoMerge ? { autoMerge } : {}),
-    ...(merged > 0 ? { merged } : {}),
-  };
+	    ...(Object.keys(backendDispatch).length > 0 ? { backends: backendDispatch } : {}),
+	    ...(directionMode ? { directionMode } : {}),
+	    ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
+	    ...(autoMerge ? { autoMerge } : {}),
+	    ...(dispatches ? { dispatches } : {}),
+	    ...(merged > 0 ? { merged } : {}),
+	  };
   state.ticks = [...state.ticks, tickRecord];
   const saveResult = saveDaemonStateResult(state);
   if (!saveResult.ok) {

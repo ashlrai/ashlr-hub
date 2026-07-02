@@ -115,7 +115,7 @@ export interface SubscriptionEngineUsage {
 
 export interface ControlLogEntry {
   ts: string;
-  kind: 'tick' | 'merge' | 'info';
+  kind: 'tick' | 'merge' | 'info' | 'dispatch';
   msg: string;
 }
 
@@ -380,6 +380,16 @@ function buildLogs(cap = LOG_CAP): ControlLogEntry[] {
         kind: 'tick',
         msg: `tick reason=${tick.reason ?? 'ok'}${directionStr}${backendStr}${spendStr}${autoMergeStr}`,
       });
+      const dispatches = Array.isArray(tick.dispatches) ? tick.dispatches.slice(0, 5) : [];
+      for (const dispatch of dispatches) {
+        if (entries.length >= cap) break;
+        const repoName = dispatch.repo.split('/').pop() || dispatch.repo;
+        entries.push({
+          ts: tick.ts,
+          kind: 'dispatch',
+          msg: `${dispatch.dispatched ? 'dispatched' : 'skipped'} ${dispatch.backend ?? 'none'} for ${repoName}: ${dispatch.title} (${dispatch.reason})`,
+        });
+      }
     }
     return entries;
   } catch {
@@ -536,6 +546,7 @@ export interface FleetTickEntry {
   directionMode: DaemonTick['directionMode'] | null;
   directionReason: string | null;
   autoMerge: DaemonTick['autoMerge'] | null;
+  dispatches: DaemonTick['dispatches'];
 }
 
 /** Full fleet-activity payload. */
@@ -664,6 +675,7 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
       directionMode: t.directionMode ?? null,
       directionReason: t.directionReason ?? null,
       autoMerge: t.autoMerge ?? null,
+      dispatches: Array.isArray(t.dispatches) ? t.dispatches.slice(0, 5) : [],
     }));
   } catch {
     // degrade silently
