@@ -13,29 +13,42 @@
 
 This is a read-only inventory mirror of the local `dev-tools/` workspace. It keeps the map honest while the detailed profiles catch up. The machine-readable source for this table is [`docs/ecosystem-index.json`](./ecosystem-index.json).
 
-| Repo | Role | Profile state |
+### Strategic focus tiers
+
+The whole inventory matters, but it should not receive equal attention. Ashlr wins by making a small core spine outrageously good, then using support repos only when they unblock that spine.
+
+| Tier | Repos | Operating directive |
 |---|---|---|
-| ashlr-auth | shared auth/auth-context package | inventory-only |
-| ashlr-cli-common | shared CLI output/utilities | inventory-only |
-| ashlr-config | shared configuration package | inventory-only |
-| @ashlr/core-efficiency | compression substrate | expanded |
-| ashlr-cost | shared cost/accounting package | inventory-only |
-| ashlr-hub | conductor / autonomous fleet | expanded |
-| ashlr-mcp-kit | shared MCP scaffolding package | inventory-only |
-| ashlr-md | Markdown review surface | expanded |
-| ashlr-plugin | token-efficient MCP tool layer | expanded |
-| ashlr-pulse | observability / fleet dashboard | expanded |
-| ashlr-workbench | local executor fleet | expanded |
-| ashlrcode | terminal coding agent / executor | expanded |
-| binshield | dependency safety gate | expanded |
-| homebrew-ashlr | Homebrew tap for Ashlr tools | inventory-only |
-| homebrew-phantom | Homebrew tap for Phantom | inventory-only |
-| morphkit | React/TS to SwiftUI compiler | expanded |
-| openclaw-setup | OpenClaw setup/support tooling | inventory-only |
-| phantom-secrets | secrets manager / network-edge key injection | expanded |
-| prompt-trackr | prompt-quality scoring SaaS | expanded |
-| ashlr-stack | backend provisioning tool | expanded |
-| webfetch | license-first web/image fetch tool | composition-only |
+| **Core fleet spine** | ashlr-hub, phantom-secrets, ashlr-plugin, binshield, ashlr-md, ashlr-stack, ashlr-pulse, ashlrcode, ashlr-workbench | Keep these moving first. They are the product, execution harness, trust layer, review surface, observability plane, secrets layer, and infra layer that make the autonomous engineering fleet useful. |
+| **Core-adjacent candidate** | ashlr-mux | Not present in the local 21-repo inventory yet. Track as cofounder-owned and evaluate as core once the repo is available locally or via GitHub. |
+| **Force multipliers** | @ashlr/core-efficiency, morphkit, webfetch, prompt-trackr | Develop when they compound the core fleet: cheaper context, product-building leverage, retrieval/building blocks, or prompt-quality feedback. |
+| **Supporting substrate + distribution** | ashlr-auth, ashlr-cli-common, ashlr-config, ashlr-cost, ashlr-mcp-kit, homebrew-ashlr, homebrew-phantom, openclaw-setup | Maintain quality, package boundaries, and distribution. Do not let these pull focus from the core spine unless they are blocking it. |
+
+### Inventory table
+
+| Repo | Strategic tier | Role | Profile state |
+|---|---|---|---|
+| ashlr-auth | supporting | shared auth/auth-context package | inventory-only |
+| ashlr-cli-common | supporting | shared CLI output/utilities | inventory-only |
+| ashlr-config | supporting | shared configuration package | inventory-only |
+| @ashlr/core-efficiency | force-multiplier | compression substrate | expanded |
+| ashlr-cost | supporting | shared cost/accounting package | inventory-only |
+| ashlr-hub | core-fleet | conductor / autonomous fleet | expanded |
+| ashlr-mcp-kit | supporting | shared MCP scaffolding package | inventory-only |
+| ashlr-md | core-fleet | Markdown review surface | expanded |
+| ashlr-plugin | core-fleet | token-efficient MCP tool layer | expanded |
+| ashlr-pulse | core-fleet | observability / fleet dashboard | expanded |
+| ashlr-workbench | core-fleet | local executor fleet | expanded |
+| ashlrcode | core-fleet | terminal coding agent / executor | expanded |
+| binshield | core-fleet | dependency safety gate | expanded |
+| homebrew-ashlr | supporting | Homebrew tap for Ashlr tools | inventory-only |
+| homebrew-phantom | supporting | Homebrew tap for Phantom | inventory-only |
+| morphkit | force-multiplier | React/TS to SwiftUI compiler | expanded |
+| openclaw-setup | supporting | OpenClaw setup/support tooling | inventory-only |
+| phantom-secrets | core-fleet | secrets manager / network-edge key injection | expanded |
+| prompt-trackr | force-multiplier | prompt-quality scoring SaaS | expanded |
+| ashlr-stack | core-fleet | backend provisioning tool | expanded |
+| webfetch | force-multiplier | license-first web/image fetch tool | composition-only |
 
 `binshield-internal-backup` exists beside these repos locally but is intentionally excluded from the active 21-repo inventory.
 

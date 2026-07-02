@@ -52,6 +52,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Bind verification to merge base, fail-close optional safety checks, finish live daemon reload, and harden unknown resource handling
 - [x] Follow-up: Add Mission Control service recovery, resource-aware judge throttling, and queued autonomy work survival
 - [x] Follow-up: Enroll all local dev-tools repos and surface repo coverage in fleet status
+- [x] Follow-up: Prioritize the core fleet spine inside the ecosystem map
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -113,6 +114,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Self-heal and invent work must survive backlog refresh. `scanQueuedAutonomyWork()` rehydrates queued self-heal items and durable `source:'invent'` backlog items into normal daemon selection.
 - Fleet status needs repo coverage, not just item counts. The local ecosystem now has 21 enrolled dev-tools repos; `fleet status` should show how many enrolled repos have live backlog, how many are silent, and which repos dominate the queue.
 - The next autonomy bottleneck is fairness and health-aware routing: a 21-repo fleet with 10 active backlog repos but 19 hub items still behaves too much like a hub-centered daemon unless shared queue filling and repo-health inventory guide selection.
+- The ecosystem should not allocate equal attention to all 21 repos. The core fleet spine is `ashlr-hub`, `phantom-secrets`, `ashlr-plugin`, `binshield`, `ashlr-md`, `ashlr-stack`, `ashlr-pulse`, `ashlrcode`, and `ashlr-workbench`; `ashlr-mux` is tracked as a core-adjacent cofounder-owned candidate until it is available locally or through GitHub.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -151,4 +153,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch in verification** - All 21 local dev-tools repos are enrolled, `FleetStatus.queue.repos` is implemented and tested, and live built CLI status reports repo coverage. Final gates, agent integration, and push are in progress.
+**Current batch ready to ship** - The ecosystem map/index now encode a core fleet spine instead of treating all 21 enrolled repos equally. Focused docs tests, typecheck, and whitespace checks passed.

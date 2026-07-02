@@ -25,7 +25,8 @@
       "displayName": "ashlr-auth",
       "role": "shared auth/auth-context package",
       "category": "shared substrate",
-      "profileState": "inventory-only"
+      "profileState": "inventory-only",
+      "strategicTier": "supporting"
     },
     {
       "id": "ashlr-cli-common",
@@ -33,7 +34,8 @@
       "displayName": "ashlr-cli-common",
       "role": "shared CLI output and utility primitives",
       "category": "shared substrate",
-      "profileState": "inventory-only"
+      "profileState": "inventory-only",
+      "strategicTier": "supporting"
     },
     {
       "id": "ashlr-config",
@@ -41,7 +43,8 @@
       "displayName": "ashlr-config",
       "role": "shared configuration package",
       "category": "shared substrate",
-      "profileState": "inventory-only"
+      "profileState": "inventory-only",
+      "strategicTier": "supporting"
     },
     {
       "id": "ashlr-core-efficiency",
@@ -60,7 +63,8 @@
         "ashlr-plugin",
         "ashlrcode",
         "ashlr-hub"
-      ]
+      ],
+      "strategicTier": "force-multiplier"
     },
     {
       "id": "ashlr-cost",
@@ -68,7 +72,8 @@
       "displayName": "ashlr-cost",
       "role": "shared cost and accounting package",
       "category": "shared substrate",
-      "profileState": "inventory-only"
+      "profileState": "inventory-only",
+      "strategicTier": "supporting"
     },
     {
       "id": "ashlr-hub",
@@ -97,7 +102,8 @@
         "webfetch",
         "morphkit",
         "ashlr-md"
-      ]
+      ],
+      "strategicTier": "core-fleet"
     },
     {
       "id": "ashlr-mcp-kit",
@@ -105,7 +111,8 @@
       "displayName": "ashlr-mcp-kit",
       "role": "shared MCP scaffolding package",
       "category": "shared substrate",
-      "profileState": "inventory-only"
+      "profileState": "inventory-only",
+      "strategicTier": "supporting"
     },
     {
       "id": "ashlr-md",
@@ -119,7 +126,8 @@
         "Markdown MCP server",
         "mdopen CLI",
         "human review surface for agent-written Markdown"
-      ]
+      ],
+      "strategicTier": "core-fleet"
     },
     {
       "id": "ashlr-plugin",
@@ -135,7 +143,8 @@
       ],
       "consumes": [
         "ashlr-core-efficiency"
-      ]
+      ],
+      "strategicTier": "core-fleet"
     },
     {
       "id": "ashlr-pulse",
@@ -151,7 +160,8 @@
       ],
       "consumes": [
         "phantom-secrets"
-      ]
+      ],
+      "strategicTier": "core-fleet"
     },
     {
       "id": "ashlr-workbench",
@@ -169,7 +179,8 @@
       "consumes": [
         "ashlr-plugin",
         "ashlrcode"
-      ]
+      ],
+      "strategicTier": "core-fleet"
     },
     {
       "id": "ashlrcode",
@@ -185,7 +196,8 @@
       ],
       "consumes": [
         "ashlr-cost"
-      ]
+      ],
+      "strategicTier": "core-fleet"
     },
     {
       "id": "binshield",
@@ -198,7 +210,8 @@
         "dependency safety scan API",
         "GitHub Action",
         "SARIF output"
-      ]
+      ],
+      "strategicTier": "core-fleet"
     },
     {
       "id": "homebrew-ashlr",
@@ -206,7 +219,8 @@
       "displayName": "homebrew-ashlr",
       "role": "Homebrew tap for Ashlr tools",
       "category": "distribution",
-      "profileState": "inventory-only"
+      "profileState": "inventory-only",
+      "strategicTier": "supporting"
     },
     {
       "id": "homebrew-phantom",
@@ -214,7 +228,8 @@
       "displayName": "homebrew-phantom",
       "role": "Homebrew tap for Phantom",
       "category": "distribution",
-      "profileState": "inventory-only"
+      "profileState": "inventory-only",
+      "strategicTier": "supporting"
     },
     {
       "id": "morphkit",
@@ -230,7 +245,8 @@
       ],
       "consumes": [
         "ashlr-cli-common"
-      ]
+      ],
+      "strategicTier": "force-multiplier"
     },
     {
       "id": "openclaw-setup",
@@ -238,7 +254,8 @@
       "displayName": "openclaw-setup",
       "role": "OpenClaw setup and support tooling",
       "category": "support tooling",
-      "profileState": "inventory-only"
+      "profileState": "inventory-only",
+      "strategicTier": "supporting"
     },
     {
       "id": "phantom-secrets",
@@ -251,7 +268,8 @@
         "phantom CLI",
         "phantom MCP tools",
         "safe API-key injection"
-      ]
+      ],
+      "strategicTier": "core-fleet"
     },
     {
       "id": "prompt-trackr",
@@ -265,7 +283,8 @@
         "TypeScript SDK",
         "CLI",
         "Chrome extension"
-      ]
+      ],
+      "strategicTier": "force-multiplier"
     },
     {
       "id": "stack",
@@ -278,7 +297,8 @@
         "stack CLI",
         "stack MCP tools",
         "provider provisioning registry"
-      ]
+      ],
+      "strategicTier": "core-fleet"
     },
     {
       "id": "webfetch",
@@ -290,7 +310,8 @@
       "provides": [
         "license-first image search",
         "web fetch building block"
-      ]
+      ],
+      "strategicTier": "force-multiplier"
     }
   ],
   "compositionBets": [
@@ -353,5 +374,43 @@
         "ashlr-hub"
       ]
     }
-  ]
+  ],
+  "strategicFocus": {
+    "principle": "Prioritize the small set of repos that compound Ashlr into a useful autonomous engineering fleet; keep the full inventory visible, but do not allocate equal attention to every repo.",
+    "coreFleetRepos": [
+      "ashlr-hub",
+      "phantom-secrets",
+      "ashlr-plugin",
+      "binshield",
+      "ashlr-md",
+      "stack",
+      "ashlr-pulse",
+      "ashlrcode",
+      "ashlr-workbench"
+    ],
+    "externalCoreCandidates": [
+      {
+        "id": "ashlr-mux",
+        "status": "not-in-local-dev-tools-inventory",
+        "owner": "cofounder",
+        "rationale": "Potential orchestration/multiplexing layer that should be evaluated as a core fleet repo once it is available locally or through GitHub."
+      }
+    ],
+    "forceMultiplierRepos": [
+      "ashlr-core-efficiency",
+      "morphkit",
+      "webfetch",
+      "prompt-trackr"
+    ],
+    "supportingRepos": [
+      "ashlr-auth",
+      "ashlr-cli-common",
+      "ashlr-config",
+      "ashlr-cost",
+      "ashlr-mcp-kit",
+      "homebrew-ashlr",
+      "homebrew-phantom",
+      "openclaw-setup"
+    ]
+  }
 }

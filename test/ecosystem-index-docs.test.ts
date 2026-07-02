@@ -12,11 +12,18 @@ interface EcosystemIndex {
     compositionOnlyProfiles: number;
     inventoryOnlyProfiles: number;
   };
+  strategicFocus: {
+    coreFleetRepos: string[];
+    externalCoreCandidates: Array<{ id: string; status: string; owner: string }>;
+    forceMultiplierRepos: string[];
+    supportingRepos: string[];
+  };
   repositories: Array<{
     id: string;
     directory: string;
     displayName: string;
     profileState: 'expanded' | 'composition-only' | 'inventory-only';
+    strategicTier: 'core-fleet' | 'force-multiplier' | 'supporting' | 'inventory';
   }>;
 }
 
@@ -82,5 +89,42 @@ describe('ecosystem docs inventory', () => {
       compositionOnlyProfiles: compositionOnly,
       inventoryOnlyProfiles: inventoryOnly,
     });
+  });
+
+  it('keeps the core fleet spine explicit without counting unavailable external repos', () => {
+    const index = readIndex();
+    const map = readMap();
+    const repoIds = new Set(index.repositories.map((repo) => repo.id));
+    const coreFleetRepos = [
+      'ashlr-hub',
+      'phantom-secrets',
+      'ashlr-plugin',
+      'binshield',
+      'ashlr-md',
+      'stack',
+      'ashlr-pulse',
+      'ashlrcode',
+      'ashlr-workbench',
+    ];
+
+    expect(index.strategicFocus.coreFleetRepos).toEqual(coreFleetRepos);
+    expect(new Set(index.strategicFocus.coreFleetRepos).size).toBe(coreFleetRepos.length);
+    for (const id of coreFleetRepos) {
+      expect(repoIds.has(id), id).toBe(true);
+      expect(index.repositories.find((repo) => repo.id === id)?.strategicTier, id).toBe('core-fleet');
+    }
+
+    expect(repoIds.has('ashlr-mux')).toBe(false);
+    expect(index.strategicFocus.externalCoreCandidates).toContainEqual(
+      expect.objectContaining({
+        id: 'ashlr-mux',
+        status: 'not-in-local-dev-tools-inventory',
+        owner: 'cofounder',
+      }),
+    );
+
+    expect(map).toContain('### Strategic focus tiers');
+    expect(map).toContain('| **Core fleet spine** | ashlr-hub, phantom-secrets, ashlr-plugin, binshield, ashlr-md, ashlr-stack, ashlr-pulse, ashlrcode, ashlr-workbench |');
+    expect(map).toContain('| **Core-adjacent candidate** | ashlr-mux |');
   });
 });

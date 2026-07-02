@@ -189,6 +189,11 @@
   - `FleetStatus.queue.repos` now reports enrolled repo count, existing repo count, backlog-active repo count, silent repo count, and top backlog-heavy repos without refreshing scanners.
   - CLI `ashlr fleet status` renders repo coverage after build. Live smoke after backlog refresh reported `10/21 active (21 enrolled, 11 silent)` with top repos `ashlr-hub:19`, `phantom-secrets:5`, and `ashlr-plugin:2`.
   - Key critique: enrollment is no longer the immediate blocker; repo-health inventory, fair shared-queue filling, stale self-heal revalidation, and health-aware auto-merge blockers are now the main path to make this feel like a real 24/7 ecosystem fleet instead of a hub-centered queue.
+- Current strategic focus refinement:
+  - Mason clarified that a smaller set of repos are the real compounding surface: `ashlr-hub`, `phantom-secrets`, `ashlr-plugin`, `binshield`, `ashlr-md`, `ashlr-stack`, `ashlr-pulse`, `ashlrcode`, and `ashlr-workbench`.
+  - No local `ashlr-mux` checkout exists under `/Users/masonwyatt/Desktop/github/dev-tools` as of 2026-07-02, so `docs/ecosystem-index.json` tracks it as a cofounder-owned core-adjacent candidate without counting it in the 21 local repos.
+  - `docs/ecosystem-index.json` now includes `strategicFocus` plus per-repo `strategicTier` fields: `core-fleet`, `force-multiplier`, and `supporting`.
+  - `docs/ECOSYSTEM-MAP.md` now leads with a strategic focus tier table so future agents develop the core spine first instead of treating every enrolled repo as equally important.
 - Current focused verification:
   - `npm test -- --run test/m310.queued-autonomy-work.test.ts test/m299.web-fleet-control.test.ts test/m274.judge-reachable.test.ts` passed, 3 files and 20 tests.
   - `npm run typecheck` passed.
@@ -203,3 +208,7 @@
   - `npm run build` passed.
   - `git diff --check` passed.
   - Live smoke: `bin/ashlr fleet status` reports queue depth `35`, repo coverage `10/21 active (21 enrolled, 11 silent)`, guard health ok, executable control mode, and verify-only autonomy direction.
+- Current strategic focus verification:
+  - `npm test -- --run test/ecosystem-index-docs.test.ts test/m184.ecosystem-context.test.ts test/ecosystem-doctor.test.ts` passed, 3 files and 41 tests.
+  - `npm run typecheck` passed.
+  - `git diff --check` passed.
