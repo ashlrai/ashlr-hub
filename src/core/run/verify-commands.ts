@@ -22,7 +22,8 @@
 import { spawnSync } from 'node:child_process';
 import type { SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { AshlrConfig } from '../types.js';
 import { renderToolText } from '../mcp-native.js';
 import { audit } from '../sandbox/audit.js';
@@ -36,6 +37,9 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 
 /** Hard ceiling on the per-command timeout (ms). */
 const MAX_TIMEOUT_MS = 600_000;
+
+/** Extra grace for the wrapper itself after it asks the child tree to exit. */
+const WRAPPER_TIMEOUT_GRACE_MS = 10_000;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -199,6 +203,12 @@ export function detectVerifyCommands(workspaceRoot: string): VerifyCommand[] {
  * the host OS.
  */
 const WINDOWS_SHIM_BINS = new Set(['npm', 'npx', 'pnpm', 'pnpx', 'yarn', 'bun', 'bunx']);
+const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+
+function verifyRunnerPath(): string | null {
+  const p = resolve(MODULE_DIR, '../../../scripts/run-verify-command.mjs');
+  return existsSync(p) ? p : null;
+}
 
 export function spawnOptionsFor(
   workspaceRoot: string,
@@ -278,9 +288,35 @@ export function runVerifyCommand(
   }
 
   try {
-    const res = spawnSync(bin, vc.cmd.slice(1), spawnOptionsFor(workspaceRoot, timeout, bin));
+    const baseOptions = spawnOptionsFor(workspaceRoot, timeout, bin);
+    const runner = verifyRunnerPath();
+    const res = runner
+      ? spawnSync(
+          process.execPath,
+          [
+            runner,
+            String(timeout),
+            workspaceRoot,
+            Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
+          ],
+          {
+            cwd: workspaceRoot,
+            timeout: timeout + WRAPPER_TIMEOUT_GRACE_MS,
+            stdio: 'pipe',
+            encoding: 'utf8',
+            shell: false,
+            windowsHide: true,
+            env: {
+              ...(baseOptions.env ?? process.env),
+              ASHLR_VERIFY_SHELL: baseOptions.shell === true ? '1' : '0',
+            },
+          },
+        )
+      : spawnSync(bin, vc.cmd.slice(1), baseOptions);
 
-    const timedOut = res.error !== undefined && (res.error as NodeJS.ErrnoException).code === 'ETIMEDOUT';
+    const timedOut =
+      res.status === 124 ||
+      (res.error !== undefined && (res.error as NodeJS.ErrnoException).code === 'ETIMEDOUT');
 
     // spawn-level failure (binary not found, timeout, …): res.status is null.
     if (res.error) {
@@ -305,11 +341,11 @@ export function runVerifyCommand(
       action: 'verify:command',
       repo: workspaceRoot,
       sandboxId: null,
-      summary: `${vc.kind}: ${command} → exit ${exitCode}`,
+      summary: `${vc.kind}: ${command} → ${timedOut ? 'timed out' : `exit ${exitCode}`}`,
       result: ok ? 'ok' : 'error',
     });
 
-    return { ok, command, exitCode, output, timedOut: false };
+    return { ok, command, exitCode, output, timedOut };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const output = renderToolText(`${command}\n${msg}`);

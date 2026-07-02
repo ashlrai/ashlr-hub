@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type {
@@ -206,6 +206,33 @@ describe('runVerifyCommand', () => {
     const vc: VerifyCommand = { kind: 'lint', cmd: ['definitely-not-a-real-binary-xyz'] };
     const res = runVerifyCommand(vc, workdir, cfg);
     expect(res.ok).toBe(false);
+  });
+
+  it('times out and terminates child processes, not just the direct command', async () => {
+    const childPidPath = join(workdir, 'child.pid');
+    const childPidJson = JSON.stringify(childPidPath);
+    const script = [
+      'const { spawn } = require("node:child_process");',
+      'const fs = require("node:fs");',
+      'const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], { stdio: "ignore" });',
+      `fs.writeFileSync(${childPidJson}, String(child.pid));`,
+      'setTimeout(() => {}, 5000);',
+    ].join(' ');
+    const vc: VerifyCommand = { kind: 'test', cmd: ['node', '-e', script] };
+
+    const res = runVerifyCommand(vc, workdir, cfg, { timeoutMs: 250 });
+    expect(res.ok).toBe(false);
+    expect(res.timedOut).toBe(true);
+
+    await new Promise((resolveDone) => setTimeout(resolveDone, 150));
+    const childPid = Number(readFileSync(childPidPath, 'utf8'));
+    let alive = true;
+    try {
+      process.kill(childPid, 0);
+    } catch {
+      alive = false;
+    }
+    expect(alive).toBe(false);
   });
 });
 

@@ -57,6 +57,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Add explicit resource overrides for vendor lockouts the local sensors cannot infer
 - [x] Follow-up: Drain permanently failed verification proposals out of verify-only deadlock
 - [x] Follow-up: Harden daemon liveness heartbeat, service cadence, and auto-provider lockout sensing
+- [x] Follow-up: Bound daemon verification child process trees with a watchdog runner
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -161,4 +162,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch ready to ship** - Empty-backlog refill, daemon heartbeat truth, responsive service cadence, automatic Claude CLI rate-limit sensing, and post-review cadence/privacy fixes are implemented and verified; commit/push and live daemon restart are next.
+**Current batch ready to ship** - Empty-backlog refill, daemon heartbeat truth, responsive service cadence, automatic Claude CLI rate-limit sensing, post-review cadence/privacy fixes, and verification child-tree watchdog hardening are implemented and verified; commit/push and live daemon restart are next.
