@@ -378,6 +378,7 @@ describe('logs section (M61)', () => {
           proposalsCreated: 0,
           spentUsd: 0,
           reason: 'verify-only',
+          dryRun: true,
           directionMode: 'verify-only',
           directionReason: 'pending proposals need verification',
           autoMerge: { attempted: 3, judged: 2, merged: 0 },
@@ -403,6 +404,8 @@ describe('logs section (M61)', () => {
     expect(snap.daemon.activeDirectionReason).toBe('pending proposals need verification');
     expect(snap.daemon.autonomyControlLoop).toBe(true);
     expect(snap.logs[0]?.msg).toContain('direction=verify-only');
+    expect(snap.logs[0]?.msg).toContain('mode=simulation');
+    expect(snap.logs[0]?.dryRun).toBe(true);
     expect(snap.logs[0]?.msg).toContain('maintenance=attempted:3,judged:2,merged:0');
     expect(snap.logs.some((entry) =>
       entry.kind === 'dispatch' &&

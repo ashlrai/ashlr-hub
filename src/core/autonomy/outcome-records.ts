@@ -8,7 +8,7 @@
 
 import type { Proposal } from '../types.js';
 import type { DecisionEntry } from '../types.js';
-import { listProposals } from '../inbox/store.js';
+import { listProposals, loadProposal } from '../inbox/store.js';
 import type { JudgeTrace } from '../fleet/judge-trace.js';
 import { readJudgeTraces } from '../fleet/judge-trace.js';
 import type { WorkedEvent } from '../fleet/worked-ledger.js';
@@ -93,8 +93,13 @@ export interface OutcomeRecordReadDeps {
   readDecisions?: () => DecisionEntry[];
   readJudgeTraces?: () => JudgeTrace[];
   loadWorkedLedger?: () => { events: WorkedEvent[] };
-  listAutonomyEvidencePacks?: () => AutonomyEvidencePack[];
+  listAutonomyEvidencePacks?: (limit?: number) => AutonomyEvidencePack[];
   racingStats?: () => RacingStats;
+}
+
+export interface ReadyEvidenceOutcomeRecordDeps {
+  listAutonomyEvidencePacks?: (limit?: number) => AutonomyEvidencePack[];
+  loadProposal?: (id: string) => Proposal | null;
 }
 
 function safeArray<T>(read: () => T[] | undefined): T[] {
@@ -304,6 +309,51 @@ export function listOutcomeRecords(
     });
 
     return records.slice(0, cap);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Cheap daemon-facing outcome reader focused only on recent ready evidence.
+ *
+ * Unlike listOutcomeRecords(), this intentionally avoids decisions, judge traces,
+ * worked-ledger joins, and racing stats. It reads bounded evidence packs, resolves
+ * their live proposal state, and returns minimal records that are sufficient for
+ * resource strategy mode selection.
+ */
+export function listReadyEvidenceOutcomeRecords(
+  opts?: { limit?: number; deps?: ReadyEvidenceOutcomeRecordDeps },
+): OutcomeRecord[] {
+  const deps = opts?.deps ?? {};
+  const cap = boundedLimit(opts?.limit);
+  const readEvidence = deps.listAutonomyEvidencePacks ?? listAutonomyEvidencePacks;
+  const readProposal = deps.loadProposal ?? loadProposal;
+
+  try {
+    const evidence = safeArray(() => readEvidence(Math.max(cap * 4, 24)))
+      .sort(byNewestTs((pack) => pack.generatedAt));
+    const latestByProposal = new Map<string, AutonomyEvidencePack>();
+    for (const pack of evidence) {
+      if (!latestByProposal.has(pack.proposal.id)) latestByProposal.set(pack.proposal.id, pack);
+    }
+
+    const records: OutcomeRecord[] = [];
+    for (const pack of latestByProposal.values()) {
+      if (records.length >= cap) break;
+      const proposal = safeValue(() => readProposal(pack.proposal.id)) ?? null;
+      if (!proposal || proposal.status !== 'pending') continue;
+      records.push({
+        version: 1,
+        proposal: proposalSnapshot(proposal),
+        lastActivityAt: activityTime(pack.generatedAt, proposal.createdAt),
+        decisions: [],
+        judgeTraces: [],
+        evidencePacks: [evidenceSnapshot(pack)],
+        workedEvents: [],
+      });
+    }
+    return records;
   } catch {
     return [];
   }

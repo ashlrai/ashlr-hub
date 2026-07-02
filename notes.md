@@ -4,7 +4,7 @@
 - Hub repo: `/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub`
 - Branch: `master`
 - Remote: `https://github.com/ashlrai/ashlr-hub.git`
-- Latest pushed commit before this follow-up: `586fdcc feat: Harden autonomy control loop`
+- Latest pushed commit before this follow-up: `a49c0a4 feat: Add daemon dispatch traces`
 - Working tree at start of this push: clean and synced to `origin/master`
 - Entire: not set up; no checkpoint found for `master`
 
@@ -68,6 +68,9 @@
 - Direction observability follow-up: daemon ticks now persist `directionReason` and compact `autoMerge` maintenance counts (`attempted`, `judged`, `merged`). `/api/control` exposes the last applied direction mode/timestamp/reason, Mission Control shows active vs recommended direction, and Fleet Activity recent ticks carry the same metadata.
 - Dispatch trace follow-up: daemon live ticks now persist bounded `dispatches` metadata per item: id/title/repo/source, final backend/tier/model, assignment path, reason, dispatched/skipped state, spend, and skip reason. The trace is metadata-only and intentionally excludes prompts, diffs, command output, and secrets.
 - Dispatch trace visibility follow-up: `/api/control` emits compact dispatch log rows, `/api/fleet-activity` copies bounded dispatches onto recent ticks, and the Fleet Activity tick stream renders small backend/repo/status chips beside each tick.
+- Simulation-awareness follow-up: daemon `recordTick()` now normalizes dry-run ticks with `dryRun: true`, including no-backlog, kill-switch, no-enrollment, budget, and selected-work simulation exits. `/api/control` and `/api/fleet-activity` surface that marker, and Mission Control/Fleet Activity label simulation rows without changing dispatch behavior.
+- Auto-merge-ready reachability follow-up: added `listReadyEvidenceOutcomeRecords()` as a cheap daemon-facing reader that inspects bounded recent evidence packs, resolves live pending proposal state, and returns minimal outcome records without decision/judge/worked/racing joins. Daemon autonomy planning uses it only when `foundry.autoMerge.enabled=true`.
+- Resource-strategy hardening follow-up: `readyEvidence` now only counts pending proposals whose latest evidence targets `main`, passes verification, is policy-allowed, and has `policy.action === "merge-main"`, preventing stale applied proposals or branch-only evidence from driving `auto-merge-ready`.
 - Remaining autonomy risk from agent audit: auto-merge maintenance can still consume judge/verify resources without exact daemon budget charging; a future pass should add usage/spend reporting to `AutoMergePassResult` before making maintenance budget accounting fully precise.
 
 ## Verification Log
@@ -109,3 +112,5 @@
 - Autonomy control hardening final gates: `npm run typecheck`, `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check` passed. Root lint remains at the existing 118-warning baseline with 0 errors.
 - Dispatch trace focused pass: `node --check src/core/web/public/app.js` passed; `npm test -- test/m201.daemon-loop.test.ts test/m61.control.test.ts test/m90.fleet-dashboard.test.ts` passed, 3 files and 85 tests.
 - Dispatch trace final gates: `npm run typecheck`, `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check` passed. Root lint remains at the existing 118-warning baseline with 0 errors.
+- Simulation/evidence focused pass: `npm run typecheck`, `node --check src/core/web/public/app.js`, and `npm test -- --run test/m201.daemon-loop.test.ts test/m61.control.test.ts test/m90.fleet-dashboard.test.ts test/m304.outcome-records.test.ts test/m306.resource-strategy.test.ts` passed, 5 files and 99 tests.
+- Simulation/evidence final gates: `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check` passed. Root lint remains at the existing 118-warning baseline with 0 errors.

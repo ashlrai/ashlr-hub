@@ -2977,6 +2977,8 @@ export interface DaemonTick {
   /** Why the tick did what it did (e.g. 'ok', 'kill-switch', 'budget-exhausted',
    *  'no-enrolled-repos', 'no-backlog', 'dry-run'). */
   reason: string;
+  /** True when this tick was produced by a dry-run/simulation path. */
+  dryRun?: boolean;
   /** M48: per-backend dispatch counts this tick (e.g. {builtin:2, claude:1}). */
   backends?: Record<string, number>;
   /** M308: resource-aware direction mode applied to this tick when opt-in. */

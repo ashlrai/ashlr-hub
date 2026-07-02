@@ -40,6 +40,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Repair nested Raycast local lint
 - [x] Follow-up: Harden executable autonomy control observability and local-only routing
 - [x] Follow-up: Persist daemon backend assignment traces
+- [x] Follow-up: Add daemon simulation awareness and bounded ready-evidence autonomy input
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -71,9 +72,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - `foundry.autonomyControlLoop` is the first opt-in executable direction mode: daemon ticks consume the resource strategy report, pause/verify-only modes suppress new proposal generation, and local-only clamps dispatch to local/builtin paths.
 - Nested Raycast local lint now has its own flat ESLint config and `npm run lint` no longer inherits the root `src/raycast/**` ignore. Raycast publish validation still requires replacing `author: "masonwyatt"` with a real Raycast username.
 - Daemon autonomy control now uses cheap daemon-tick resource-strategy dependencies, including a lightweight fleet snapshot, lightweight ecosystem report, and empty outcome records, so opt-in direction checks avoid expensive full status/doctor/outcome joins.
+- Daemon autonomy control now reads bounded ready-evidence outcome records only when auto-merge is enabled, making `auto-merge-ready` reachable from recent pending main-merge evidence without paying for the full outcome-record join on every tick.
 - Local-only autonomy mode now preserves the first-class `local-coder` backend instead of collapsing it to `builtin`, keeping the free local coding workhorse available when frontier resources are constrained.
 - Daemon ticks, Mission Control logs, and Fleet Activity now show applied direction reason and auto-merge maintenance attempted/judged/merged counts; Mission Control distinguishes the active applied mode from the current recommended direction.
 - Daemon ticks now persist bounded per-item dispatch assignment traces with item, repo, backend, tier, model, assignment reason, dispatched/skipped state, and spend. Mission Control logs and Fleet Activity expose the same metadata without adding a new endpoint or heavyweight panel.
+- Daemon dry-run/simulation ticks now carry a canonical `dryRun` marker through persisted tick records, Mission Control logs, and Fleet Activity payloads, so no-op rehearsals are visible instead of inferred from `reason` alone.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -100,6 +103,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current autonomy learning foundation pass added `workItemId`, `workSource`, and `runId` on proposals across daemon/swarm/best-of-N/sandboxed runs; guard-health diagnosis in daemon/fleet status; read-only outcome records; and read-only ecosystem doctor.
 - Current autonomy control pass makes outcome feedback item-accurate, skips permanent auto-merge blockers before judge calls, verifies before spending judge calls in verification mode, and adds a read-only resource-aware direction report.
 - Current dispatch-trace pass persists bounded daemon dispatch assignment metadata and surfaces it in existing control logs and Fleet Activity tick streams.
+- Current pass adds canonical daemon dry-run awareness and a cheap ready-evidence reader so autonomy direction can see pending main-merge evidence when auto-merge is enabled.
 
 ## Status
-**Current batch verified locally** - Daemon dispatch assignment traces are implemented, surfaced, tested, and verified; preparing commit/push.
+**Current batch verified locally** - Daemon simulation awareness and bounded auto-merge-ready evidence input are implemented, surfaced, tested, and verified; preparing commit/push.

@@ -117,6 +117,7 @@ export interface ControlLogEntry {
   ts: string;
   kind: 'tick' | 'merge' | 'info' | 'dispatch';
   msg: string;
+  dryRun?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -375,10 +376,12 @@ function buildLogs(cap = LOG_CAP): ControlLogEntry[] {
       const autoMergeStr = tick.autoMerge
         ? ` maintenance=attempted:${tick.autoMerge.attempted},judged:${tick.autoMerge.judged},merged:${tick.autoMerge.merged}`
         : '';
+      const modeStr = tick.dryRun === true ? ' mode=simulation' : '';
       entries.push({
         ts: tick.ts,
         kind: 'tick',
-        msg: `tick reason=${tick.reason ?? 'ok'}${directionStr}${backendStr}${spendStr}${autoMergeStr}`,
+        msg: `tick reason=${tick.reason ?? 'ok'}${modeStr}${directionStr}${backendStr}${spendStr}${autoMergeStr}`,
+        ...(tick.dryRun === true ? { dryRun: true } : {}),
       });
       const dispatches = Array.isArray(tick.dispatches) ? tick.dispatches.slice(0, 5) : [];
       for (const dispatch of dispatches) {
@@ -388,6 +391,7 @@ function buildLogs(cap = LOG_CAP): ControlLogEntry[] {
           ts: tick.ts,
           kind: 'dispatch',
           msg: `${dispatch.dispatched ? 'dispatched' : 'skipped'} ${dispatch.backend ?? 'none'} for ${repoName}: ${dispatch.title} (${dispatch.reason})`,
+          ...(tick.dryRun === true ? { dryRun: true } : {}),
         });
       }
     }
@@ -540,6 +544,7 @@ export interface FleetMergeEvent {
 export interface FleetTickEntry {
   ts: string;
   reason: string | null;
+  dryRun: boolean;
   backends: Record<string, number>;
   spentUsd: number;
   merged: number;
@@ -669,6 +674,7 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
     recentTicks = [...ticks].reverse().slice(0, 20).map((t) => ({
       ts: t.ts,
       reason: t.reason ?? null,
+      dryRun: t.dryRun === true,
       backends: t.backends ?? {},
       spentUsd: typeof t.spentUsd === 'number' ? t.spentUsd : 0,
       merged: typeof t.merged === 'number' ? t.merged : 0,

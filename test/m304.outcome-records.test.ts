@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import type { OutcomeRecordReadDeps } from '../src/core/autonomy/outcome-records.js';
-import { listOutcomeRecords } from '../src/core/autonomy/outcome-records.js';
+import { listOutcomeRecords, listReadyEvidenceOutcomeRecords } from '../src/core/autonomy/outcome-records.js';
 import type { JudgeTrace } from '../src/core/fleet/judge-trace.js';
 import type { WorkedEvent } from '../src/core/fleet/worked-ledger.js';
 import type { DecisionEntry, Proposal } from '../src/core/types.js';
@@ -224,6 +224,46 @@ describe('m302 listOutcomeRecords', () => {
     expect(records[0]?.decisions).toEqual([]);
     expect(records[0]?.judgeTraces).toEqual([]);
     expect(records[0]?.evidencePacks).toEqual([]);
+    expect(records[0]?.workedEvents).toEqual([]);
+    expect(records[0]?.racing).toBeUndefined();
+  });
+
+  it('reads bounded ready evidence records without heavy outcome joins', () => {
+    const requestedLimits: Array<number | undefined> = [];
+    const loadedProposalIds: string[] = [];
+    const records = listReadyEvidenceOutcomeRecords({
+      limit: 2,
+      deps: {
+        listAutonomyEvidencePacks: (limit) => {
+          requestedLimits.push(limit);
+          return [
+            evidence('prop-ready', '2026-07-03T03:00:00.000Z'),
+            evidence('prop-missing', '2026-07-03T02:00:00.000Z'),
+            evidence('prop-applied', '2026-07-03T01:00:00.000Z'),
+            evidence('prop-ready', '2026-07-03T00:00:00.000Z'),
+          ];
+        },
+        loadProposal: (id) => {
+          loadedProposalIds.push(id);
+          if (id === 'prop-ready') {
+            return proposal({ id, createdAt: '2026-07-03T00:10:00.000Z', status: 'pending' });
+          }
+          if (id === 'prop-applied') {
+            return proposal({ id, createdAt: '2026-07-03T00:20:00.000Z', status: 'applied' });
+          }
+          return null;
+        },
+      },
+    });
+
+    expect(requestedLimits).toEqual([24]);
+    expect(loadedProposalIds).toEqual(['prop-ready', 'prop-missing', 'prop-applied']);
+    expect(records).toHaveLength(1);
+    expect(records[0]?.proposal).toMatchObject({ id: 'prop-ready', status: 'pending' });
+    expect(records[0]?.lastActivityAt).toBe('2026-07-03T03:00:00.000Z');
+    expect(records[0]?.evidencePacks[0]?.generatedAt).toBe('2026-07-03T03:00:00.000Z');
+    expect(records[0]?.decisions).toEqual([]);
+    expect(records[0]?.judgeTraces).toEqual([]);
     expect(records[0]?.workedEvents).toEqual([]);
     expect(records[0]?.racing).toBeUndefined();
   });

@@ -89,6 +89,7 @@ import {
   type AutonomousDirectionMode,
   type ResourceStrategyDaemonPlan,
 } from '../autonomy/resource-strategy.js';
+import { listReadyEvidenceOutcomeRecords } from '../autonomy/outcome-records.js';
 
 // ---------------------------------------------------------------------------
 // DaemonConfig defaults (conservative)
@@ -204,13 +205,15 @@ async function buildDaemonStrategyPlan(
   const { diagnoseGuardHealth } = await import('./guard-health.js');
   const guardHealth = diagnoseGuardHealth();
   const report = await buildResourceStrategyReport(cfg, {
-    maxOutcomes: 6,
-    maxChecks: 1,
-    deps: {
+	    maxOutcomes: 6,
+	    maxChecks: 1,
+	    deps: {
       buildFleetStatus: async () => buildTickFleetStatus(cfg, state, backlogItems, guardHealth),
       runEcosystemDoctor: async (opts) => lightweightEcosystemReport(opts?.now, opts?.root),
       diagnoseGuardHealth: () => guardHealth,
-      listOutcomeRecords: () => [],
+      listOutcomeRecords: cfg.foundry?.autoMerge?.enabled === true
+        ? (opts) => listReadyEvidenceOutcomeRecords({ limit: Math.min(opts?.limit ?? 6, 6) })
+        : () => [],
     },
   });
   return resourceStrategyToDaemonPlan(report);
@@ -487,19 +490,20 @@ export async function tick(
   // no-op reasons like kill-switch / no-enrolled-repos / dry-run) is visible to
   // `daemon status`, the TUI, and the web dashboard. Never throws.
   const recordTick = (t: DaemonTick): DaemonTick => {
+    const tick = opts.dryRun ? { ...t, dryRun: true } : t;
     try {
       const loaded = loadDaemonStateStrict();
-      if (!loaded.ok) return t;
+      if (!loaded.ok) return tick;
       let s = loaded.state;
       s = resetDayIfNeeded(s);
-      s.lastTickAt = t.ts;
-      s.ticks = [...s.ticks, t];
+      s.lastTickAt = tick.ts;
+      s.ticks = [...s.ticks, tick];
       saveDaemonStateResult(s);
     } catch (err) {
       // persistence best-effort — never let observability crash a tick
       console.warn('[ashlr] daemon:recordTick persistence failed:', (err as Error)?.message ?? err);
     }
-    return t;
+    return tick;
   };
   const persistenceRefusal = (summary: string, result: 'refused' | 'error' = 'refused'): DaemonTick => {
     audit({

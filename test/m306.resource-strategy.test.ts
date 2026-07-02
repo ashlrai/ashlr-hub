@@ -211,6 +211,35 @@ describe('buildResourceStrategyReport', () => {
     expect(report.recommendedActions.join(' ')).toContain('existing merge gates');
   });
 
+  it('does not treat branch-only or already-applied evidence as auto-merge-ready', async () => {
+    const base = outcome();
+    const branchOnly = outcome({
+      proposal: { ...base.proposal, id: 'prop-branch', status: 'pending' },
+      evidencePacks: [{
+        ...base.evidencePacks[0]!,
+        target: 'branch',
+        policy: { tier: 'T4', action: 'open-ready-pr', allowed: true, reason: 'branch only' },
+      }],
+    });
+    const alreadyApplied = outcome({
+      proposal: { ...base.proposal, id: 'prop-applied', status: 'applied' },
+      evidencePacks: [{
+        ...base.evidencePacks[0]!,
+        policy: { tier: 'T4', action: 'merge-main', allowed: true, reason: 'stale applied evidence' },
+      }],
+    });
+
+    const report = await buildResourceStrategyReport(
+      cfg({ foundry: { autoMerge: { enabled: true } } as NonNullable<AshlrConfig['foundry']> }),
+      {
+        deps: deps({ listOutcomeRecords: () => [branchOnly, alreadyApplied] }),
+      },
+    );
+
+    expect(report.mode).not.toBe('auto-merge-ready');
+    expect(report.outcomes.readyEvidence).toBe(0);
+  });
+
   it('recommends verify-only for pending proposals and verification failures', async () => {
     const failed = outcome({
       proposal: {

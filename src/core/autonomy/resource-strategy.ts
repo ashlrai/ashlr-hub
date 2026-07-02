@@ -251,7 +251,14 @@ function summarizeOutcomes(records: OutcomeRecord[], max: number): ResourceStrat
     const latestEvidence = record.evidencePacks[0];
     const verificationPassed = latestEvidence?.verification.passed ?? record.proposal.verifyResult?.passed ?? null;
     const policyAllowed = latestEvidence?.policy?.allowed ?? null;
-    if (verificationPassed === true && policyAllowed === true) readyEvidence++;
+    const policyAction = latestEvidence?.policy?.action ?? null;
+    if (
+      record.proposal.status === 'pending' &&
+      latestEvidence?.target === 'main' &&
+      verificationPassed === true &&
+      policyAllowed === true &&
+      policyAction === 'merge-main'
+    ) readyEvidence++;
     if (verificationPassed === false || record.proposal.verifyResult?.passed === false) verificationFailures++;
     return {
       proposalId: record.proposal.id,
@@ -260,7 +267,7 @@ function summarizeOutcomes(records: OutcomeRecord[], max: number): ResourceStrat
       lastActivityAt: record.lastActivityAt,
       verificationPassed,
       policyAllowed,
-      policyAction: latestEvidence?.policy?.action ?? null,
+      policyAction,
       riskClass: latestEvidence?.riskClass ?? record.proposal.riskClass ?? null,
     };
   });

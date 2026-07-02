@@ -401,6 +401,20 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     );
 
     expect(result.reason).toBe('no-backlog');
+    expect(result.dryRun).toBe(true);
+    expect(mockRunAutoMergePass).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1c2: selected backlog dry-run marks simulation and dispatches nothing', async () => {
+    enrollWithItems(1);
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1 }), { dryRun: true });
+
+    expect(result.reason).toBe('dry-run');
+    expect(result.dryRun).toBe(true);
+    expect(result.spentUsd).toBe(0);
+    expect(result.proposalsCreated).toBe(0);
     expect(mockRunAutoMergePass).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
@@ -965,6 +979,7 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     expect(state.running).toBe(false);
     // One tick happened (ticks array has at least one entry from the dry-run tick).
     expect(state.ticks.length).toBeGreaterThanOrEqual(1);
+    expect(state.ticks.at(-1)?.dryRun).toBe(true);
   });
 
   it('E2: runDaemon loop with maxCycles=2 runs exactly 2 ticks and stops', async () => {
@@ -1101,6 +1116,7 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     expect(state.running).toBe(false);
     // No swarm dispatched (dry-run path returns before dispatch).
     expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(state.ticks.at(-1)?.dryRun).toBe(true);
   });
 
   it('E7: runDaemon sets running=true on start and running=false on exit', async () => {

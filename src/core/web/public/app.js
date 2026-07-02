@@ -2960,9 +2960,10 @@ function renderControl() {
   } else {
     for (const entry of logs.slice(0, 50)) {
       const kind = entry.kind ?? 'info';
+      const kindLabel = entry.dryRun === true ? `${kind}:sim` : kind;
       logsBody.appendChild(el('div', { cls: `ctrl-log-row ctrl-log-row--${kind}` },
         el('span', { cls: 'ctrl-log-ts' }, entry.ts ? fmtRelative(entry.ts) : '—'),
-        el('span', { cls: `ctrl-log-kind ctrl-log-kind--${kind}` }, kind),
+        el('span', { cls: `ctrl-log-kind ctrl-log-kind--${kind}` }, kindLabel),
         el('span', { cls: 'ctrl-log-msg' }, entry.msg ?? '')
       ));
     }
@@ -3239,7 +3240,7 @@ function renderFleetActivity() {
       ticksBody.appendChild(el('div', { cls: tickCls },
         el('span', { cls: 'fa-tick-dot' }),
         el('span', { cls: 'fa-tick-time' }, fmtRelative(t.ts)),
-        el('span', { cls: 'fa-tick-reason' }, t.reason ?? 'ok'),
+        el('span', { cls: 'fa-tick-reason' }, t.dryRun === true ? `${t.reason ?? 'ok'}:sim` : (t.reason ?? 'ok')),
         backendsStr ? el('span', { cls: 'fa-tick-backends' }, backendsStr) : null,
         dispatchChips ? el('span', { cls: 'fa-tick-dispatches' }, `${dispatchChips}${dispatchMore}`) : null,
         t.spentUsd > 0 ? el('span', { cls: 'fa-tick-spend' }, `$${t.spentUsd.toFixed(4)}`) : null,
