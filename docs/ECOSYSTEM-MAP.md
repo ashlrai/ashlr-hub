@@ -1,13 +1,43 @@
 # Ashlr Ecosystem Map
 
-> THE doc to read first to understand the whole 13-repo Ashlr dev-tools platform fast.
+> THE doc to read first to understand the whole 21-repo Ashlr dev-tools platform fast.
 > ashlr-hub is the orchestrator at the center; every other repo is a **composable capability**.
 > The leverage is in the *compositions* — the fleet using its own tools to fix its own weaknesses and to build incredible things.
 > Feeds the strategist (direction), the invent engine (compositional ideas), and build agents (cross-tool reuse).
 > A machine-readable mirror of this map lives at [`docs/ecosystem-index.json`](./ecosystem-index.json) for the Inference Fabric memory layer + agents to load programmatically.
-> Generated 2026-06-29 from 13 per-repo structured maps; verify surfaces firsthand before load-bearing use.
+> Refreshed 2026-07-02 from the local `dev-tools/` sibling-directory inventory: 21 active repos, excluding `binshield-internal-backup`. Detailed capability profiles below are currently expanded for 12 repos; the index records the full current inventory.
 
 ---
+
+## Current 21-repo inventory
+
+This is a read-only inventory mirror of the local `dev-tools/` workspace. It keeps the map honest while the detailed profiles catch up. The machine-readable source for this table is [`docs/ecosystem-index.json`](./ecosystem-index.json).
+
+| Repo | Role | Profile state |
+|---|---|---|
+| ashlr-auth | shared auth/auth-context package | inventory-only |
+| ashlr-cli-common | shared CLI output/utilities | inventory-only |
+| ashlr-config | shared configuration package | inventory-only |
+| @ashlr/core-efficiency | compression substrate | expanded |
+| ashlr-cost | shared cost/accounting package | inventory-only |
+| ashlr-hub | conductor / autonomous fleet | expanded |
+| ashlr-mcp-kit | shared MCP scaffolding package | inventory-only |
+| ashlr-md | Markdown review surface | expanded |
+| ashlr-plugin | token-efficient MCP tool layer | expanded |
+| ashlr-pulse | observability / fleet dashboard | expanded |
+| ashlr-workbench | local executor fleet | expanded |
+| ashlrcode | terminal coding agent / executor | expanded |
+| binshield | dependency safety gate | expanded |
+| homebrew-ashlr | Homebrew tap for Ashlr tools | inventory-only |
+| homebrew-phantom | Homebrew tap for Phantom | inventory-only |
+| morphkit | React/TS to SwiftUI compiler | expanded |
+| openclaw-setup | OpenClaw setup/support tooling | inventory-only |
+| phantom-secrets | secrets manager / network-edge key injection | expanded |
+| prompt-trackr | prompt-quality scoring SaaS | expanded |
+| ashlr-stack | backend provisioning tool | expanded |
+| webfetch | license-first web/image fetch tool | composition-only |
+
+`binshield-internal-backup` exists beside these repos locally but is intentionally excluded from the active 21-repo inventory.
 
 ## The composition flywheel — who provides / consumes what
 
@@ -52,10 +82,12 @@ ashlr-hub is the **conductor**. It enrolls repos' backlogs, dispatches sandboxed
 
 ---
 
-## Per-repo capability profiles
+## Detailed per-repo capability profiles
+
+These profiles are the higher-confidence, manually expanded capability map for 12 repos. The current inventory above and `ecosystem-index.json` are the count source of truth until the remaining repos get full profiles.
 
 ### ashlr-hub — *the conductor*
-- **Purpose:** Autonomous engineering fleet (orchestrator at the center of the 13-repo platform): a single Node binary that scans enrolled repos' backlogs, dispatches sandboxed agent swarms across multiple backends, and deposits proposal-only diffs into a human-gated Approval Inbox — proposal-only, sandboxed, gated by model-trust tier. Also a local command center (project index, MCP gateway, spend tracking, ad-hoc run/swarm).
+- **Purpose:** Autonomous engineering fleet (orchestrator at the center of the 21-repo platform): a single Node binary that scans enrolled repos' backlogs, dispatches sandboxed agent swarms across multiple backends, and deposits proposal-only diffs into a human-gated Approval Inbox — proposal-only, sandboxed, gated by model-trust tier. Also a local command center (project index, MCP gateway, spend tracking, ad-hoc run/swarm).
 - **Stack:** TypeScript (ESM) on Node >=22. Build `tsc` → `dist/` + copy-assets; optional SEA binary. Vitest, ESLint 9. Zero runtime deps except `@modelcontextprotocol/sdk`. Sub-surfaces: Raycast extension, Tauri desktop app, terminal TUI.
 - **Status:** active / best-in-class-track. Published as `@ashlr/hub` (3.0.1). v1–v5 (M1–M55) shipped; v6 Verification-First (M140+) in progress. 367 adversarial test files, 10 named safety invariants each proven by a test.
 - **Key modules:** `src/cli/index.ts` (68KB ~70-case router); `src/api/{index,core,plugin,types}.ts` (public npm surface — `applyProposal` deliberately NOT exported); `src/core/types.ts` (155KB); `src/core/config.ts` (`~/.ashlr/config.json`); `src/core/daemon/loop.ts` (66KB operator loop); `src/core/run/orchestrator.ts` (96KB) + run/router + sandboxed-engine + sandbox/{worktree,confine,policy}; `src/core/swarm/{runner,gate,sign,rollback}`; `src/core/inbox/{store,merge,apply}` (merge 69KB); `src/core/fleet/` (28 files: manager/judge, router, quota, self-improve, regression-sentinel, red-team, taste-critic); `src/core/foundry/provenance.ts`; `src/core/genome/`; `src/core/goals/+vision/+strategy/`; `src/core/ecosystem/map.ts`; `src/core/integrations/`; `src/core/web/` (Mission Control 127.0.0.1:7777); `src/core/plugins/`; `bin/ashlr`; `schema/config.schema.json`.

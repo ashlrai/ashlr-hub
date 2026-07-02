@@ -1,0 +1,357 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-02",
+  "kind": "curated-dev-tools-inventory",
+  "description": "Read-only machine-readable mirror of the Ashlr dev-tools ecosystem map.",
+  "source": {
+    "method": "local sibling-directory inventory under dev-tools plus curated role labels from docs/ECOSYSTEM-MAP.md",
+    "includedRepoCount": 21,
+    "excluded": [
+      {
+        "directory": "binshield-internal-backup",
+        "reason": "backup directory, not active inventory"
+      }
+    ]
+  },
+  "coverage": {
+    "standaloneDetailedProfiles": 12,
+    "compositionOnlyProfiles": 1,
+    "inventoryOnlyProfiles": 8
+  },
+  "repositories": [
+    {
+      "id": "ashlr-auth",
+      "directory": "ashlr-auth",
+      "displayName": "ashlr-auth",
+      "role": "shared auth/auth-context package",
+      "category": "shared substrate",
+      "profileState": "inventory-only"
+    },
+    {
+      "id": "ashlr-cli-common",
+      "directory": "ashlr-cli-common",
+      "displayName": "ashlr-cli-common",
+      "role": "shared CLI output and utility primitives",
+      "category": "shared substrate",
+      "profileState": "inventory-only"
+    },
+    {
+      "id": "ashlr-config",
+      "directory": "ashlr-config",
+      "displayName": "ashlr-config",
+      "role": "shared configuration package",
+      "category": "shared substrate",
+      "profileState": "inventory-only"
+    },
+    {
+      "id": "ashlr-core-efficiency",
+      "directory": "ashlr-core-efficiency",
+      "displayName": "@ashlr/core-efficiency",
+      "role": "compression substrate",
+      "category": "shared substrate",
+      "profileState": "expanded",
+      "provides": [
+        "snipCompact and autoCompact",
+        "genome RAG",
+        "provider budgets",
+        "token counting"
+      ],
+      "consumedBy": [
+        "ashlr-plugin",
+        "ashlrcode",
+        "ashlr-hub"
+      ]
+    },
+    {
+      "id": "ashlr-cost",
+      "directory": "ashlr-cost",
+      "displayName": "ashlr-cost",
+      "role": "shared cost and accounting package",
+      "category": "shared substrate",
+      "profileState": "inventory-only"
+    },
+    {
+      "id": "ashlr-hub",
+      "directory": "ashlr-hub",
+      "displayName": "ashlr-hub",
+      "role": "conductor and autonomous engineering fleet",
+      "category": "orchestrator",
+      "profileState": "expanded",
+      "provides": [
+        "ashlr CLI",
+        "fleet daemon",
+        "approval inbox",
+        "MCP gateway",
+        "local Mission Control"
+      ],
+      "consumes": [
+        "phantom-secrets",
+        "ashlrcode",
+        "ashlr-workbench",
+        "ashlr-plugin",
+        "ashlr-core-efficiency",
+        "binshield",
+        "ashlr-pulse",
+        "stack",
+        "prompt-trackr",
+        "webfetch",
+        "morphkit",
+        "ashlr-md"
+      ]
+    },
+    {
+      "id": "ashlr-mcp-kit",
+      "directory": "ashlr-mcp-kit",
+      "displayName": "ashlr-mcp-kit",
+      "role": "shared MCP scaffolding package",
+      "category": "shared substrate",
+      "profileState": "inventory-only"
+    },
+    {
+      "id": "ashlr-md",
+      "directory": "ashlr-md",
+      "displayName": "ashlr-md",
+      "role": "Markdown review surface",
+      "category": "product surface",
+      "profileState": "expanded",
+      "provides": [
+        "desktop Markdown app",
+        "Markdown MCP server",
+        "mdopen CLI",
+        "human review surface for agent-written Markdown"
+      ]
+    },
+    {
+      "id": "ashlr-plugin",
+      "directory": "ashlr-plugin",
+      "displayName": "ashlr-plugin",
+      "role": "token-efficient MCP tool layer",
+      "category": "agent tool layer",
+      "profileState": "expanded",
+      "provides": [
+        "40 ashlr MCP tools",
+        "genome scribe",
+        "session savings ledger"
+      ],
+      "consumes": [
+        "ashlr-core-efficiency"
+      ]
+    },
+    {
+      "id": "ashlr-pulse",
+      "directory": "ashlr-pulse",
+      "displayName": "ashlr-pulse",
+      "role": "observability and fleet dashboard",
+      "category": "observability",
+      "profileState": "expanded",
+      "provides": [
+        "OTLP GenAI ingest",
+        "Fleet Oversight dashboard",
+        "cost and audit surfaces"
+      ],
+      "consumes": [
+        "phantom-secrets"
+      ]
+    },
+    {
+      "id": "ashlr-workbench",
+      "directory": "ashlr-workbench",
+      "displayName": "ashlr-workbench",
+      "role": "local executor fleet",
+      "category": "executor",
+      "profileState": "expanded",
+      "provides": [
+        "aw CLI",
+        "local agent launcher",
+        "MCP health probes",
+        "session checkpointing"
+      ],
+      "consumes": [
+        "ashlr-plugin",
+        "ashlrcode"
+      ]
+    },
+    {
+      "id": "ashlrcode",
+      "directory": "ashlrcode",
+      "displayName": "ashlrcode",
+      "role": "terminal coding agent and executor backend",
+      "category": "executor",
+      "profileState": "expanded",
+      "provides": [
+        "ac CLI",
+        "multi-provider coding agent",
+        "HTTP bridge"
+      ],
+      "consumes": [
+        "ashlr-cost"
+      ]
+    },
+    {
+      "id": "binshield",
+      "directory": "binshield",
+      "displayName": "binshield",
+      "role": "dependency safety gate",
+      "category": "security",
+      "profileState": "expanded",
+      "provides": [
+        "dependency safety scan API",
+        "GitHub Action",
+        "SARIF output"
+      ]
+    },
+    {
+      "id": "homebrew-ashlr",
+      "directory": "homebrew-ashlr",
+      "displayName": "homebrew-ashlr",
+      "role": "Homebrew tap for Ashlr tools",
+      "category": "distribution",
+      "profileState": "inventory-only"
+    },
+    {
+      "id": "homebrew-phantom",
+      "directory": "homebrew-phantom",
+      "displayName": "homebrew-phantom",
+      "role": "Homebrew tap for Phantom",
+      "category": "distribution",
+      "profileState": "inventory-only"
+    },
+    {
+      "id": "morphkit",
+      "directory": "morphkit",
+      "displayName": "morphkit",
+      "role": "React/TypeScript to SwiftUI compiler",
+      "category": "product builder",
+      "profileState": "expanded",
+      "provides": [
+        "morphkit CLI",
+        "morphkit MCP server",
+        "semantic React to SwiftUI generation"
+      ],
+      "consumes": [
+        "ashlr-cli-common"
+      ]
+    },
+    {
+      "id": "openclaw-setup",
+      "directory": "openclaw-setup",
+      "displayName": "openclaw-setup",
+      "role": "OpenClaw setup and support tooling",
+      "category": "support tooling",
+      "profileState": "inventory-only"
+    },
+    {
+      "id": "phantom-secrets",
+      "directory": "phantom-secrets",
+      "displayName": "phantom-secrets",
+      "role": "secrets manager and network-edge key injection",
+      "category": "security",
+      "profileState": "expanded",
+      "provides": [
+        "phantom CLI",
+        "phantom MCP tools",
+        "safe API-key injection"
+      ]
+    },
+    {
+      "id": "prompt-trackr",
+      "directory": "prompt-trackr",
+      "displayName": "prompt-trackr",
+      "role": "prompt-quality scoring SaaS",
+      "category": "quality and feedback",
+      "profileState": "expanded",
+      "provides": [
+        "AI Effectiveness Score",
+        "TypeScript SDK",
+        "CLI",
+        "Chrome extension"
+      ]
+    },
+    {
+      "id": "stack",
+      "directory": "stack",
+      "displayName": "ashlr-stack",
+      "role": "backend provisioning tool",
+      "category": "infra",
+      "profileState": "expanded",
+      "provides": [
+        "stack CLI",
+        "stack MCP tools",
+        "provider provisioning registry"
+      ]
+    },
+    {
+      "id": "webfetch",
+      "directory": "webfetch",
+      "displayName": "webfetch",
+      "role": "license-first web and image fetch tool",
+      "category": "product builder",
+      "profileState": "composition-only",
+      "provides": [
+        "license-first image search",
+        "web fetch building block"
+      ]
+    }
+  ],
+  "compositionBets": [
+    {
+      "id": "phantom-fleet-auth",
+      "tier": 1,
+      "summary": "Inject real engine/API keys into the daemon and sandboxes without putting secrets in config, logs, or LLM context.",
+      "repos": [
+        "phantom-secrets",
+        "ashlr-hub"
+      ]
+    },
+    {
+      "id": "executor-backends",
+      "tier": 1,
+      "summary": "Dispatch fleet work to stronger local executor surfaces instead of raw one-shot engine calls.",
+      "repos": [
+        "ashlrcode",
+        "ashlr-workbench",
+        "ashlr-hub"
+      ]
+    },
+    {
+      "id": "fleet-token-cost",
+      "tier": 1,
+      "summary": "Use shared compression, genome, and MCP tools to reduce fleet prompt and tool-call cost.",
+      "repos": [
+        "ashlr-core-efficiency",
+        "ashlr-plugin",
+        "ashlr-hub"
+      ]
+    },
+    {
+      "id": "dependency-safety-gate",
+      "tier": 1,
+      "summary": "Scan proposed dependency changes before autonomous merge decisions.",
+      "repos": [
+        "binshield",
+        "ashlr-hub"
+      ]
+    },
+    {
+      "id": "fleet-telemetry",
+      "tier": 2,
+      "summary": "Send fleet activity, proposal, and cost telemetry into the live oversight plane.",
+      "repos": [
+        "ashlr-pulse",
+        "ashlr-hub"
+      ]
+    },
+    {
+      "id": "product-building-blocks",
+      "tier": 3,
+      "summary": "Compose webfetch, morphkit, ashlr-md, and stack when the fleet builds downstream products.",
+      "repos": [
+        "webfetch",
+        "morphkit",
+        "ashlr-md",
+        "stack",
+        "ashlr-hub"
+      ]
+    }
+  ]
+}

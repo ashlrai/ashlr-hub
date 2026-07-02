@@ -302,7 +302,7 @@ The design is layered: each layer is independently shippable and compounds the p
 ```typescript
 export interface LocalCoderContext {
   northStar: string;          // ~300 tokens: grand vision distillation
-  ecosystemSummary: string;   // ~300 tokens: 13-repo platform map
+  ecosystemSummary: string;   // ~300 tokens: 21-repo platform map
   genomeHits: string;         // ~400 tokens: top-5 genome recall hits for this goal
   repoTree: string;           // ~200 tokens: 2-level directory tree of the repo
   activeFiles: string[];      // Recently modified files (git log --since=7d)
@@ -340,7 +340,7 @@ System prompt structure:
 === GRAND VISION (orient all work here) ===
 {northStar}
 
-=== PLATFORM MAP (13 repos, composition bets) ===
+=== PLATFORM MAP (21 repos, composition bets) ===
 {ecosystemSummary}
 
 === RELEVANT PRIOR WORK (genome recall) ===

@@ -74,6 +74,20 @@ export function formatFleetStatus(s: FleetStatus): string {
 
   // Queue
   lines.push(`Queue:     ${s.queue.backlogItems} backlog item(s)`);
+  if (s.queue.repos) {
+    const repoCoverage = s.queue.repos;
+    lines.push(
+      `  repos:         ${repoCoverage.withBacklog}/${repoCoverage.existing} active ` +
+        `(${repoCoverage.enrolled} enrolled, ${repoCoverage.silent} silent)`,
+    );
+    if (repoCoverage.top.length > 0) {
+      const topRepos = repoCoverage.top
+        .slice(0, 3)
+        .map((row) => `${row.repo.split('/').pop() ?? row.repo}:${row.items}`)
+        .join(', ');
+      lines.push(`  top repos:     ${topRepos}`);
+    }
+  }
   if (Array.isArray(s.queue.next) && s.queue.next.length > 0) {
     for (const item of s.queue.next.slice(0, 5)) {
       lines.push(`  next:          ${item.title} (${item.source}, score ${item.score})`);

@@ -339,7 +339,7 @@ just spread across independent subsystems with no common query surface:
 | Genome | `~/.ashlr/genome/hub.jsonl` + project `.ashlrcode/genome/` | knowledge entries, health |
 | Swarm runs | `~/.ashlr/swarms/*.json` | tasks, successRate, tokens, cost |
 | Reflection report | computed in `reflect.ts` | successRate, avgCostUsd, localShare, failureModes, WoW delta |
-| Ecosystem index | `docs/ecosystem-index.json` | 13-repo capabilities + composition bets |
+| Ecosystem index | `docs/ecosystem-index.json` | 21-repo inventory, profile coverage, capabilities + composition bets |
 | Stats cache | `~/.claude/stats-cache.json` | claude message counts (7d) |
 | Codex sessions | `~/.codex/sessions/*.jsonl` | usedPercent, windowMinutes, resetsAt |
 | Savings stats | `~/.ashlr/stats.json` | fleet-wide token/cost savings |

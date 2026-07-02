@@ -262,6 +262,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const s = await buildFleetStatus(baseConfig());
 
     expect(s.queue.backlogItems).toBe(2);
+    expect(s.queue.repos).toEqual({
+      enrolled: 1,
+      existing: 1,
+      withBacklog: 1,
+      silent: 0,
+      top: [{ repo, items: 2 }],
+    });
     expect(s.queue.next).toEqual([
       {
         id: 'repo:goal:one',
@@ -512,6 +519,16 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       ],
       queue: {
         backlogItems: 7,
+        repos: {
+          enrolled: 3,
+          existing: 3,
+          withBacklog: 2,
+          silent: 1,
+          top: [
+            { repo: '/repo/a', items: 5 },
+            { repo: '/repo/b', items: 2 },
+          ],
+        },
         next: [
           {
             id: 'item-a',
@@ -593,6 +610,8 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('resource=open used=0%');
     expect(out).toContain('resource=not-sensed');
     expect(out).toContain('7 backlog item(s)');
+    expect(out).toContain('repos:         2/3 active (3 enrolled, 1 silent)');
+    expect(out).toContain('top repos:     a:5, b:2');
     expect(out).toContain('next:          Ship autonomy debugger (goal, score 5)');
     expect(out).toContain('shared:        ok / 2 active / 1 owned / 1 reclaimable / 2 cooling / stale lock');
     expect(out).toContain('machine-A:1');

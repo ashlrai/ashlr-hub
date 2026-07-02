@@ -564,7 +564,7 @@ The director loop, once M257–M261 ship, makes the following demonstrable:
 > A local autonomous engineering org that sees its own resources in real time,
 > reasons first-principles about the highest-leverage next move, routes all work
 > optimally across three AI backends (claude / codex / kimi / local), runs a
-> 13-repo product factory, and reports to its human like a chief-of-staff — all
+> 21-repo product factory, and reports to its human like a chief-of-staff — all
 > while every safety gate (sandbox, judge, scope-cap, enrollment, kill-switch)
 > remains intact and all irreversible decisions escalate to Mason via Telegram.
 

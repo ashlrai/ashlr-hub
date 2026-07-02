@@ -183,6 +183,12 @@
   - Added shared `daemonServiceInstallOptions()` so web recovery paths map daemon budget/interval/parallel consistently.
   - Resource-aware judge resolver now treats cached Claude `throttled` as unavailable for judge routing and falls to Codex/local instead of spending protected Claude headroom.
   - Added `scanQueuedAutonomyWork()` near the top of `SCANNERS`, rehydrating self-heal queue items and durable invent backlog items for the enrolled repo, capped at 25 and read-only.
+- Current ecosystem expansion pass:
+  - Enrolled the remaining local dev-tools repos into Ashlr Hub: `ashlr-auth`, `ashlr-cli-common`, `ashlr-config`, `ashlr-cost`, `ashlr-mcp-kit`, `homebrew-ashlr`, `homebrew-phantom`, and `openclaw-setup`.
+  - Local enrollment now covers 21 repos under `/Users/masonwyatt/Desktop/github/dev-tools`.
+  - `FleetStatus.queue.repos` now reports enrolled repo count, existing repo count, backlog-active repo count, silent repo count, and top backlog-heavy repos without refreshing scanners.
+  - CLI `ashlr fleet status` renders repo coverage after build. Live smoke after backlog refresh reported `10/21 active (21 enrolled, 11 silent)` with top repos `ashlr-hub:19`, `phantom-secrets:5`, and `ashlr-plugin:2`.
+  - Key critique: enrollment is no longer the immediate blocker; repo-health inventory, fair shared-queue filling, stale self-heal revalidation, and health-aware auto-merge blockers are now the main path to make this feel like a real 24/7 ecosystem fleet instead of a hub-centered queue.
 - Current focused verification:
   - `npm test -- --run test/m310.queued-autonomy-work.test.ts test/m299.web-fleet-control.test.ts test/m274.judge-reachable.test.ts` passed, 3 files and 20 tests.
   - `npm run typecheck` passed.
@@ -191,3 +197,9 @@
   - `npm run test:ci -- test/m310.queued-autonomy-work.test.ts test/m299.web-fleet-control.test.ts test/m274.judge-reachable.test.ts test/m93.daemon-service.test.ts test/m49.fleet-status.test.ts test/m61.control.test.ts` passed, 6 files and 104 tests.
   - `npm run lint`, `npm run build`, and `npm audit --audit-level=moderate` passed. Lint remains at the existing 118-warning baseline with 0 errors; audit found 0 vulnerabilities.
   - Live smoke: `bin/ashlr daemon status --json` reports running daemon PID `11304`, pending `2`, `$0` spent; `bin/ashlr fleet status --json` reports unpaused executable control mode, verify-only direction, queue depth `23`, guard clear.
+- Current repo-coverage verification:
+  - `npm run typecheck` passed.
+  - `npm test -- --run test/m49.fleet-status.test.ts test/m299.web-fleet-control.test.ts test/m201.daemon-loop.test.ts test/m48.automerge-pass.test.ts` passed, 4 files and 84 tests.
+  - `npm run build` passed.
+  - `git diff --check` passed.
+  - Live smoke: `bin/ashlr fleet status` reports queue depth `35`, repo coverage `10/21 active (21 enrolled, 11 silent)`, guard health ok, executable control mode, and verify-only autonomy direction.

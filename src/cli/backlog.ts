@@ -7,7 +7,7 @@
  *
  * Flags:
  *   --repo <path>        Filter items to a specific enrolled repo.
- *   --source <source>    Filter by WorkSource (issue|todo|test|dep|doc|security|lint).
+ *   --source <source>    Filter by WorkSource (see BACKLOG_SOURCE_FILTERS).
  *   --limit <n>          Cap the number of rows shown.
  *   --json               Emit raw JSON (the full filtered Backlog object).
  *
@@ -58,6 +58,23 @@ async function getLoadBacklog(): Promise<LoadBacklogFn | null> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+export const BACKLOG_SOURCE_FILTERS = [
+  'issue',
+  'todo',
+  'test',
+  'dep',
+  'doc',
+  'security',
+  'plugin',
+  'self',
+  'lint',
+  'goal',
+  'hygiene',
+  'invent',
+] as const satisfies readonly WorkSource[];
+
+export const BACKLOG_SOURCE_FILTER_HELP = BACKLOG_SOURCE_FILTERS.join('|');
 
 const SOURCE_LABELS: Record<WorkSource, string> = {
   issue:    'issue',
@@ -207,7 +224,7 @@ export async function cmdBacklog(args: string[]): Promise<number> {
   let limit:        number | undefined;
   let jsonMode      = false;
 
-  const validSources = new Set<string>(['issue', 'todo', 'test', 'dep', 'doc', 'security']);
+  const validSources = new Set<string>(BACKLOG_SOURCE_FILTERS);
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -224,7 +241,7 @@ export async function cmdBacklog(args: string[]): Promise<number> {
     } else if (a === '--source') {
       const raw = args[++i];
       if (!raw || !validSources.has(raw)) {
-        console.error(col.red('error: ') + `--source requires one of: ${[...validSources].join('|')}, got: ${raw ?? '(missing)'}`);
+        console.error(col.red('error: ') + `--source requires one of: ${BACKLOG_SOURCE_FILTER_HELP}, got: ${raw ?? '(missing)'}`);
         return 2;
       }
       filterSource = raw as WorkSource;

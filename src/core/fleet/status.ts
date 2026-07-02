@@ -124,6 +124,14 @@ export interface FleetQueueNextItem {
   score: number;
 }
 
+export interface FleetQueueRepoCoverage {
+  enrolled: number;
+  existing: number;
+  withBacklog: number;
+  silent: number;
+  top: Array<{ repo: string; items: number }>;
+}
+
 /** One whole-fleet read-only snapshot. */
 export interface FleetStatus {
   /** ISO timestamp this snapshot was generated. */
@@ -136,6 +144,7 @@ export interface FleetStatus {
   backends: FleetBackendStatus[];
   queue: {
     backlogItems: number;
+    repos?: FleetQueueRepoCoverage;
     next?: FleetQueueNextItem[];
     shared?: FleetSharedQueueStatus;
   };
@@ -162,14 +171,6 @@ export interface FleetStatus {
 
 /** Recent window for dispatch + merge counting: the last 24 hours. */
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-function enrolledExistingRepoSet(): Set<string> {
-  try {
-    return new Set(listEnrolled().map((repo) => resolve(repo)).filter((repo) => existsSync(repo)));
-  } catch {
-    return new Set();
-  }
-}
 
 function isVisibleBacklogItem(item: WorkItem, enrolledRepos: Set<string>): boolean {
   if (enrolledRepos.size === 0) return false;
@@ -286,16 +287,39 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   // ── queue (backlog size) ──────────────────────────────────────────────────
   let backlogItems = 0;
   let nextQueueItems: FleetQueueNextItem[] = [];
+  let queueRepos: FleetQueueRepoCoverage | undefined;
   try {
     // Status must be observational. A full buildBacklog() refresh can run
     // scanners, expand planning goals, persist ~/.ashlr/backlog.json, and audit.
     // Read the last persisted snapshot only; the daemon/backlog CLI owns refresh.
     const { loadBacklog } = await import('../portfolio/backlog.js');
     const backlog = loadBacklog();
-    const enrolledRepos = enrolledExistingRepoSet();
+    const enrolledRaw = (() => {
+      try {
+        return listEnrolled().map((repo) => resolve(repo));
+      } catch {
+        return [] as string[];
+      }
+    })();
+    const enrolledRepos = new Set(enrolledRaw.filter((repo) => existsSync(repo)));
     const items = (Array.isArray(backlog?.items) ? backlog.items : [])
       .filter((item): item is WorkItem => isVisibleBacklogItem(item, enrolledRepos));
     backlogItems = items.length;
+    const byRepo = new Map<string, number>();
+    for (const item of items) {
+      const key = resolve(item.repo);
+      byRepo.set(key, (byRepo.get(key) ?? 0) + 1);
+    }
+    queueRepos = {
+      enrolled: enrolledRaw.length,
+      existing: enrolledRepos.size,
+      withBacklog: byRepo.size,
+      silent: Math.max(0, enrolledRepos.size - byRepo.size),
+      top: [...byRepo.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, 8)
+        .map(([repo, itemCount]) => ({ repo, items: itemCount })),
+    };
     nextQueueItems = items
       .slice()
       .sort((a, b) => b.score - a.score || a.title.localeCompare(b.title))
@@ -404,6 +428,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     backends,
     queue: {
       backlogItems,
+      ...(queueRepos !== undefined ? { repos: queueRepos } : {}),
       ...(nextQueueItems.length > 0 ? { next: nextQueueItems } : {}),
       ...(sharedQueue !== undefined ? { shared: sharedQueue } : {}),
     },

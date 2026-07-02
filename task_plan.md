@@ -51,6 +51,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Add auto-merge gate explanations, effective config visibility, and protected remote PR handoff
 - [x] Follow-up: Bind verification to merge base, fail-close optional safety checks, finish live daemon reload, and harden unknown resource handling
 - [x] Follow-up: Add Mission Control service recovery, resource-aware judge throttling, and queued autonomy work survival
+- [x] Follow-up: Enroll all local dev-tools repos and surface repo coverage in fleet status
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -110,6 +111,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Token-gated service repair should reinstall/reload the configured OS service definition instead of starting daemon work inside the web process. It uses the same `--allow-dispatch` plus session-token gate as fleet pause/resume.
 - Resource-aware judge selection should preserve constrained Claude headroom. Cached `throttled`, `exhausted`, or `unreachable` Claude availability now falls to Codex/local for judging when available.
 - Self-heal and invent work must survive backlog refresh. `scanQueuedAutonomyWork()` rehydrates queued self-heal items and durable `source:'invent'` backlog items into normal daemon selection.
+- Fleet status needs repo coverage, not just item counts. The local ecosystem now has 21 enrolled dev-tools repos; `fleet status` should show how many enrolled repos have live backlog, how many are silent, and which repos dominate the queue.
+- The next autonomy bottleneck is fairness and health-aware routing: a 21-repo fleet with 10 active backlog repos but 19 hub items still behaves too much like a hub-centered daemon unless shared queue filling and repo-health inventory guide selection.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -148,4 +151,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch in verification** - Mission Control service recovery, resource-aware judge throttling, and queued autonomy work survival are implemented; focused tests and typecheck passed; running final gates and push.
+**Current batch in verification** - All 21 local dev-tools repos are enrolled, `FleetStatus.queue.repos` is implemented and tested, and live built CLI status reports repo coverage. Final gates, agent integration, and push are in progress.
