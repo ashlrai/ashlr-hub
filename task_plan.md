@@ -189,3 +189,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Verified focused suites: M160/M222/M223, M258/M305/M307, M201/M61/M307, and diff checks.
 - [x] Run full type/lint/build/audit gates.
 - [x] Commit, push to `origin/master`, clear the maintenance kill switch, restart launchd daemon, and verify live autonomous status.
+
+## Current Continuation - Stale Self-Heal Cleanup
+- [x] Rechecked git, Entire, daemon status, fleet status, and live queue state after the previous push.
+- [x] Deployed explorer agents for stale self-heal cleanup, self-heal detection/workspace quality, daemon heartbeat liveness, remote PR truth, and live queue truth.
+- [x] Stopped the live daemon and set the maintenance kill switch before editing.
+- [x] Made `detectBreakage()` distinguish proven green from unknown/no-command/detect-error states.
+- [x] Pruned stale self-heal items from both `self-heal-queue.json` and persisted backlog echoes only after a scanned repo is verified green.
+- [x] Added regression coverage for green pruning, unknown preservation, no-command preservation, and disabled self-heal no-mutation behavior.
+- [x] Verified focused self-heal and queued-autonomy suites plus typecheck.
+- [x] Run full lint/build/audit/diff gates and broader related tests.
+- [ ] Commit, push, resume/restart daemon, and verify live queue truth.

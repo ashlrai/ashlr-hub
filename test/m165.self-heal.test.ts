@@ -116,6 +116,8 @@ describe('detectBreakage', () => {
     mockDetectVerifyCommands.mockReturnValue([]);
     const result = await detectBreakage('/tmp/fake-repo', makeCfg());
     expect(result.broken).toBe(false);
+    expect(result.verified).toBe(false);
+    expect(result.reason).toBe('no-verify-commands');
     expect(result.kind).toBeUndefined();
   });
 
@@ -124,6 +126,7 @@ describe('detectBreakage', () => {
     mockRunVerifyCommand.mockReturnValue(OK_RESULT);
     const result = await detectBreakage('/tmp/fake-repo', makeCfg());
     expect(result.broken).toBe(false);
+    expect(result.verified).toBe(true);
   });
 
   it('returns broken:true with kind=test when test command fails', async () => {
@@ -131,6 +134,7 @@ describe('detectBreakage', () => {
     mockRunVerifyCommand.mockReturnValue(FAIL_RESULT);
     const result = await detectBreakage('/tmp/fake-repo', makeCfg());
     expect(result.broken).toBe(true);
+    expect(result.verified).toBe(true);
     expect(result.kind).toBe('test');
     expect(result.detail).toBeTruthy();
     expect(result.detail!.length).toBeLessThanOrEqual(200);
@@ -141,6 +145,7 @@ describe('detectBreakage', () => {
     mockRunVerifyCommand.mockReturnValue(BUILD_FAIL_RESULT);
     const result = await detectBreakage('/tmp/fake-repo', makeCfg());
     expect(result.broken).toBe(true);
+    expect(result.verified).toBe(true);
     expect(result.kind).toBe('build');
     expect(result.detail).toMatch(/error|Error|FAIL/i);
   });
@@ -163,11 +168,16 @@ describe('detectBreakage', () => {
     mockDetectVerifyCommands.mockReturnValue([]);
     const result = await detectBreakage('/tmp/nonexistent-repo-xyz-12345', makeCfg());
     expect(result.broken).toBe(false);
+    expect(result.verified).toBe(false);
   });
 
-  it('never throws on exec errors — returns broken:false', async () => {
+  it('never throws on exec errors — returns unknown, not proven green', async () => {
     mockDetectVerifyCommands.mockImplementation(() => { throw new Error('spawnSync failed'); });
-    await expect(detectBreakage('/tmp/fake-repo', makeCfg())).resolves.toEqual({ broken: false });
+    await expect(detectBreakage('/tmp/fake-repo', makeCfg())).resolves.toMatchObject({
+      broken: false,
+      verified: false,
+      reason: 'detect-error',
+    });
   });
 
   it('extracts first error line from multi-line output', async () => {
@@ -273,6 +283,26 @@ describe('runSelfHealCycle', () => {
     expect(mockListEnrolled).not.toHaveBeenCalled();
   });
 
+  it('leaves existing queue files untouched when flag is disabled', async () => {
+    const ashlrDir = path.join(tmpHome, '.ashlr');
+    fs.mkdirSync(ashlrDir, { recursive: true });
+    const repoA = path.join(tmpHome, 'repo-a');
+    const staleA = proposeHeal(repoA, {
+      broken: true,
+      kind: 'build',
+      detail: 'old TypeScript error',
+    });
+    const before = JSON.stringify([staleA], null, 2);
+    fs.writeFileSync(path.join(ashlrDir, 'self-heal-queue.json'), before, 'utf8');
+
+    const result = await runSelfHealCycle({
+      foundry: { selfHeal: false } as unknown as AshlrConfig['foundry'],
+    });
+
+    expect(result).toEqual({ checked: 0, broken: [], healItems: [] });
+    expect(fs.readFileSync(path.join(ashlrDir, 'self-heal-queue.json'), 'utf8')).toBe(before);
+  });
+
   it('no-op when enrollment is empty', async () => {
     mockListEnrolled.mockReturnValue([]);
     const result = await runSelfHealCycle(makeCfg());
@@ -297,6 +327,128 @@ describe('runSelfHealCycle', () => {
     expect(result.healItems).toHaveLength(0);
   });
 
+  it('removes stale self-heal queue and backlog items for repos verified green', async () => {
+    const repoA = path.join(tmpHome, 'repo-a');
+    const repoB = path.join(tmpHome, 'repo-b');
+    fs.mkdirSync(repoA, { recursive: true });
+    fs.mkdirSync(repoB, { recursive: true });
+    const ashlrDir = path.join(tmpHome, '.ashlr');
+    fs.mkdirSync(ashlrDir, { recursive: true });
+
+    const staleA = proposeHeal(repoA, {
+      broken: true,
+      kind: 'build',
+      detail: 'old TypeScript error',
+    });
+    const staleB = proposeHeal(repoB, {
+      broken: true,
+      kind: 'test',
+      detail: 'other repo still broken',
+    });
+    const inventA: WorkItem = {
+      ...staleA,
+      id: 'invent-a',
+      source: 'invent',
+      tags: ['generative'],
+      title: 'Invent a useful repo-a feature',
+    };
+
+    fs.writeFileSync(
+      path.join(ashlrDir, 'self-heal-queue.json'),
+      JSON.stringify([staleA, staleB], null, 2),
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: '2026-07-02T00:00:00.000Z',
+        repos: [repoA, repoB],
+        items: [staleA, staleB, inventA],
+      }, null, 2),
+      'utf8',
+    );
+
+    mockListEnrolled.mockReturnValue([repoA]);
+    mockDetectVerifyCommands.mockReturnValue([GREEN_VC]);
+    mockRunVerifyCommand.mockReturnValue(OK_RESULT);
+
+    const result = await runSelfHealCycle(makeCfg());
+
+    expect(result.checked).toBe(1);
+    expect(result.broken).toHaveLength(0);
+    expect(result.healItems).toHaveLength(0);
+
+    const queue = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'self-heal-queue.json'), 'utf8'),
+    ) as WorkItem[];
+    expect(queue.map((item) => item.id)).toEqual([staleB.id]);
+
+    const backlog = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'backlog.json'), 'utf8'),
+    ) as { items: WorkItem[] };
+    expect(backlog.items.map((item) => item.id)).toEqual([staleB.id, inventA.id]);
+  });
+
+  it('keeps existing self-heal items when verification state is unknown', async () => {
+    const repoA = path.join(tmpHome, 'repo-a');
+    fs.mkdirSync(repoA, { recursive: true });
+    const ashlrDir = path.join(tmpHome, '.ashlr');
+    fs.mkdirSync(ashlrDir, { recursive: true });
+    const staleA = proposeHeal(repoA, {
+      broken: true,
+      kind: 'build',
+      detail: 'old TypeScript error',
+    });
+    fs.writeFileSync(
+      path.join(ashlrDir, 'self-heal-queue.json'),
+      JSON.stringify([staleA], null, 2),
+      'utf8',
+    );
+
+    mockListEnrolled.mockReturnValue([repoA]);
+    mockDetectVerifyCommands.mockImplementation(() => { throw new Error('detector unavailable'); });
+
+    const result = await runSelfHealCycle(makeCfg());
+
+    expect(result.checked).toBe(1);
+    expect(result.broken).toHaveLength(0);
+    expect(result.healItems).toHaveLength(0);
+    const queue = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'self-heal-queue.json'), 'utf8'),
+    ) as WorkItem[];
+    expect(queue.map((item) => item.id)).toEqual([staleA.id]);
+  });
+
+  it('keeps existing self-heal items when no verify commands are detected', async () => {
+    const repoA = path.join(tmpHome, 'repo-a');
+    fs.mkdirSync(repoA, { recursive: true });
+    const ashlrDir = path.join(tmpHome, '.ashlr');
+    fs.mkdirSync(ashlrDir, { recursive: true });
+    const staleA = proposeHeal(repoA, {
+      broken: true,
+      kind: 'build',
+      detail: 'old TypeScript error',
+    });
+    fs.writeFileSync(
+      path.join(ashlrDir, 'self-heal-queue.json'),
+      JSON.stringify([staleA], null, 2),
+      'utf8',
+    );
+
+    mockListEnrolled.mockReturnValue([repoA]);
+    mockDetectVerifyCommands.mockReturnValue([]);
+
+    const result = await runSelfHealCycle(makeCfg());
+
+    expect(result.checked).toBe(1);
+    expect(result.broken).toHaveLength(0);
+    expect(result.healItems).toHaveLength(0);
+    const queue = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'self-heal-queue.json'), 'utf8'),
+    ) as WorkItem[];
+    expect(queue.map((item) => item.id)).toEqual([staleA.id]);
+  });
+
   it('proposes heal only for broken repos', async () => {
     const repoA = path.join(tmpHome, 'repo-a');
     const repoB = path.join(tmpHome, 'repo-b');
@@ -304,10 +456,7 @@ describe('runSelfHealCycle', () => {
     fs.mkdirSync(repoB, { recursive: true });
 
     mockListEnrolled.mockReturnValue([repoA, repoB]);
-    mockDetectVerifyCommands.mockImplementation((dir: string) => {
-      // repoA: has a test command; repoB: has a test command
-      return [GREEN_VC];
-    });
+    mockDetectVerifyCommands.mockReturnValue([GREEN_VC]);
     mockRunVerifyCommand.mockImplementation((_vc: unknown, dir: string) => {
       // repoA is broken, repoB is green
       if (dir === repoA) return FAIL_RESULT;

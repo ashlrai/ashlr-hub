@@ -19,7 +19,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import type { AshlrConfig, WorkItem } from '../types.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import {
@@ -33,9 +33,12 @@ import {
 
 export interface BreakageResult {
   broken: boolean;
+  /** True only when the repo had verify commands and every checked command produced a trustworthy result. */
+  verified?: boolean;
   kind?: 'build' | 'test';
   /** First non-blank failure line from the command output, capped at 200 chars. */
   detail?: string;
+  reason?: 'no-verify-commands' | 'detect-error';
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +93,7 @@ export async function detectBreakage(
   try {
     const commands = detectVerifyCommands(repoDir);
     if (commands.length === 0) {
-      return { broken: false };
+      return { broken: false, verified: false, reason: 'no-verify-commands' };
     }
 
     // Per-command timeout: use cfg.foundry.timeoutMs if set, else 90 s (shorter
@@ -105,16 +108,17 @@ export async function detectBreakage(
       if (!result.ok) {
         return {
           broken: true,
+          verified: true,
           kind: kindOf(vc.kind),
           detail: firstFailureLine(result.output),
         };
       }
     }
 
-    return { broken: false };
+    return { broken: false, verified: true };
   } catch {
-    // Never throw — treat exec errors as "not broken" to avoid false positives
-    return { broken: false };
+    // Never throw, but do not treat detector failures as proven green.
+    return { broken: false, verified: false, reason: 'detect-error' };
   }
 }
 
@@ -178,6 +182,90 @@ function selfHealQueuePath(): string {
   return join(homedir(), '.ashlr', 'self-heal-queue.json');
 }
 
+function backlogPath(): string {
+  return join(homedir(), '.ashlr', 'backlog.json');
+}
+
+function readWorkItemsArray(filePath: string): WorkItem[] {
+  try {
+    if (!existsSync(filePath)) return [];
+    const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed as WorkItem[];
+  } catch {
+    return [];
+  }
+}
+
+function writeJsonAtomic(filePath: string, value: unknown): void {
+  const tmp = filePath + '.tmp';
+  writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8');
+  renameSync(tmp, filePath);
+}
+
+function isSelfHealItemForRepo(value: unknown, repoKey: string): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Partial<WorkItem>;
+  if (typeof item.repo !== 'string') return false;
+  if (!Array.isArray(item.tags) || !item.tags.includes('self-heal')) return false;
+  try {
+    return resolve(item.repo) === repoKey;
+  } catch {
+    return false;
+  }
+}
+
+function pruneSelfHealItemsFromQueue(repoDir: string): number {
+  try {
+    const qPath = selfHealQueuePath();
+    const existing = readWorkItemsArray(qPath);
+    if (existing.length === 0) return 0;
+    const repoKey = resolve(repoDir);
+    const filtered = existing.filter((item) => !isSelfHealItemForRepo(item, repoKey));
+    const removed = existing.length - filtered.length;
+    if (removed > 0) writeJsonAtomic(qPath, filtered);
+    return removed;
+  } catch {
+    return 0;
+  }
+}
+
+function pruneSelfHealItemsFromBacklog(repoDir: string): number {
+  try {
+    const bPath = backlogPath();
+    if (!existsSync(bPath)) return 0;
+    const parsed = JSON.parse(readFileSync(bPath, 'utf8')) as unknown;
+    const repoKey = resolve(repoDir);
+
+    if (Array.isArray(parsed)) {
+      const filtered = parsed.filter((item) => !isSelfHealItemForRepo(item, repoKey));
+      const removed = parsed.length - filtered.length;
+      if (removed > 0) writeJsonAtomic(bPath, filtered);
+      return removed;
+    }
+
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      Array.isArray((parsed as { items?: unknown }).items)
+    ) {
+      const envelope = parsed as { items: unknown[] };
+      const filtered = envelope.items.filter((item) => !isSelfHealItemForRepo(item, repoKey));
+      const removed = envelope.items.length - filtered.length;
+      if (removed > 0) writeJsonAtomic(bPath, { ...parsed, items: filtered });
+      return removed;
+    }
+
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
+function pruneStaleSelfHealItems(repoDir: string): number {
+  return pruneSelfHealItemsFromQueue(repoDir) + pruneSelfHealItemsFromBacklog(repoDir);
+}
+
 /**
  * Queue a heal item to disk so the fleet daemon picks it up on the next tick
  * ahead of other work. Best-effort — failure here must never abort the cycle.
@@ -188,23 +276,13 @@ function persistHealItem(item: WorkItem): void {
     const dir = join(homedir(), '.ashlr');
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
-    let existing: WorkItem[] = [];
-    if (existsSync(qPath)) {
-      try {
-        existing = JSON.parse(readFileSync(qPath, 'utf8')) as WorkItem[];
-        if (!Array.isArray(existing)) existing = [];
-      } catch {
-        existing = [];
-      }
-    }
+    const existing = readWorkItemsArray(qPath);
 
     // Replace existing entry for same id (idempotent)
     const filtered = existing.filter(i => i.id !== item.id);
     filtered.unshift(item); // high-priority: front of queue
 
-    const tmp = qPath + '.tmp';
-    writeFileSync(tmp, JSON.stringify(filtered, null, 2), 'utf8');
-    renameSync(tmp, qPath);
+    writeJsonAtomic(qPath, filtered);
   } catch {
     // Best-effort — never propagate
   }
@@ -241,6 +319,8 @@ export async function runSelfHealCycle(
           const item = proposeHeal(repo, result, cfg);
           healItems.push(item);
           persistHealItem(item);
+        } else if (result.verified === true) {
+          pruneStaleSelfHealItems(repo);
         }
       } catch {
         // Per-repo errors never abort the cycle
