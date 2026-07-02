@@ -142,6 +142,25 @@ function recordSafetySkip(
   out.skipped.push({ proposalId, check, reason });
 }
 
+function incrementStuckOrArchive(
+  proposal: Proposal,
+  threshold: number,
+  reason: string,
+): { archived: boolean; stuckPassCount: number } {
+  const current = (proposal as unknown as Record<string, unknown>)['stuckPassCount'];
+  const stuckPassCount = (typeof current === 'number' && Number.isFinite(current) ? current : 0) + 1;
+  if (stuckPassCount >= threshold) {
+    setStatus(proposal.id, 'rejected', undefined, reason);
+    return { archived: true, stuckPassCount };
+  }
+  updateProposalField(proposal.id, { stuckPassCount });
+  return { archived: false, stuckPassCount };
+}
+
+function knownFailedVerificationDetail(p: Proposal): string {
+  return p.verifyResult?.failed?.filter(Boolean).join('; ') ?? '';
+}
+
 function errorDetail(err: unknown): string {
   return err instanceof Error && err.message ? err.message : String(err);
 }
@@ -333,6 +352,19 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       const reason = `readiness preflight: ${readiness.reason ?? 'not ready'}${advisorySuffix}`;
       out.results.push({ ok: false, merged: false, branched: false, reason });
       out.skipped.push({ proposalId: p.id, check: 'readiness-preflight', reason });
+      if (p.verifyResult?.passed === false) {
+        const failed = knownFailedVerificationDetail(p);
+        const priorStuck = (p as unknown as Record<string, unknown>)['stuckPassCount'];
+        const nextStuck = (typeof priorStuck === 'number' && Number.isFinite(priorStuck) ? priorStuck : 0) + 1;
+        const drain = incrementStuckOrArchive(
+          p,
+          autoArchiveAfterRejects,
+          `auto-drained: known failed verification persisted for ${nextStuck} pass(es)${
+            failed ? ` (${failed})` : ''
+          }`,
+        );
+        if (drain.archived) out.autoArchived++;
+      }
       continue;
     }
 

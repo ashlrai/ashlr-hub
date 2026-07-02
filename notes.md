@@ -221,3 +221,11 @@
   - Focused verification: `npm test -- --run test/m312.ecosystem-focus.test.ts test/ecosystem-index-docs.test.ts test/m161.backlog-ranking.test.ts test/m49.fleet-status.test.ts test/m201.daemon-loop.test.ts test/m300.resource-aware-dispatch.test.ts` passed, 6 files and 121 tests; `npm run typecheck` passed; `node --check src/core/web/public/app.js` passed.
 - Current sibling repo side effect:
   - `openclaw-setup` has local commit `df7a9a9 test: add OpenClaw smoke coverage`, not pushed because direct-pushing `main` was not considered branch-policy-safe by the worker.
+- Current resource-truth pass:
+  - Added `foundry.resourceOverrides` support in the ResourceMonitor so known vendor lockouts that local telemetry cannot infer can force a backend to `throttled`/`exhausted` until a concrete reset time.
+  - The override path returns a normal `BackendResourceState`, so gateway routing, simple conductor fallback, manager judge selection, `ashlr resources`, and `fleet status` all inherit the same truth source.
+  - Focused verification: `npm test -- --run test/m250.resource-control.test.ts test/m253.claude-usage.test.ts test/m254.usage-api.test.ts test/m300.resource-aware-dispatch.test.ts` passed, 4 files and 107 tests; `npm run typecheck` passed.
+- Current verify-only drain pass:
+  - Known failed verification remains a hard no-merge, but `runAutoMergePass()` now increments `stuckPassCount` for those permanently blocked pending proposals and marks them `rejected` at the existing `autoArchiveAfterRejects` threshold.
+  - `buildResourceStrategyReport()` now counts verification failures only while the proposal is still pending, so already-rejected failures do not keep the daemon pinned in `verify-only`.
+  - Focused verification: `npm test -- --run test/m306.resource-strategy.test.ts test/m307.verify-before-judge.test.ts test/m250.resource-control.test.ts test/m300.resource-aware-dispatch.test.ts` passed, 4 files and 75 tests; `npm run typecheck` passed.

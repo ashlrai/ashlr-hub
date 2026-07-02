@@ -259,7 +259,10 @@ function summarizeOutcomes(records: OutcomeRecord[], max: number): ResourceStrat
       policyAllowed === true &&
       policyAction === 'merge-main'
     ) readyEvidence++;
-    if (verificationPassed === false || record.proposal.verifyResult?.passed === false) verificationFailures++;
+    if (
+      record.proposal.status === 'pending' &&
+      (verificationPassed === false || record.proposal.verifyResult?.passed === false)
+    ) verificationFailures++;
     return {
       proposalId: record.proposal.id,
       status: record.proposal.status,

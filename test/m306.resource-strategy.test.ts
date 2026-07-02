@@ -262,6 +262,26 @@ describe('buildResourceStrategyReport', () => {
     expect(report.reasons.join(' ')).toContain('pending proposal');
   });
 
+  it('ignores verification failures after proposals are no longer pending', async () => {
+    const rejected = outcome({
+      proposal: {
+        ...outcome().proposal,
+        id: 'prop-rejected-failed',
+        status: 'rejected',
+        title: 'Rejected failed proposal',
+        verifyResult: { passed: false },
+      },
+      evidencePacks: [],
+    });
+
+    const report = await buildResourceStrategyReport(cfg(), {
+      deps: deps({ listOutcomeRecords: () => [rejected] }),
+    });
+
+    expect(report.outcomes.verificationFailures).toBe(0);
+    expect(report.mode).toBe('backlog-build');
+  });
+
   it('bounds outcomes, checks, and backend summaries', async () => {
     const manyOutcomes = Array.from({ length: 12 }, (_, idx) =>
       outcome({

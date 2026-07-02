@@ -30,13 +30,14 @@ vi.mock('../src/core/inbox/merge.js', async (importOriginal) => {
 
 const mockListProposals = vi.fn();
 const mockUpdateProposalField = vi.fn();
+const mockSetStatus = vi.fn();
 vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
   return {
     ...actual,
     listProposals: (...args: unknown[]) => mockListProposals(...args),
     updateProposalField: (...args: unknown[]) => mockUpdateProposalField(...args),
-    setStatus: vi.fn(),
+    setStatus: (...args: unknown[]) => mockSetStatus(...args),
   };
 });
 
@@ -201,5 +202,56 @@ describe('M307 verify-before-judge', () => {
         reason: 'verify-before-judge: cap reached (0/pass)',
       },
     ]);
+  });
+
+  it('increments stuckPassCount for known failed verification without judge or merge spend', async () => {
+    mockListProposals.mockReturnValue([
+      proposal({
+        verifyResult: {
+          passed: false,
+          source: 'auto-merge-preflight',
+          failed: ['npm run test failed'],
+        },
+      }),
+    ]);
+
+    const r = await runAutoMergePass(cfg());
+
+    expect(mockVerifyProposal).not.toHaveBeenCalled();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 1 });
+    expect(mockSetStatus).not.toHaveBeenCalled();
+    expect(r.autoArchived).toBe(0);
+    expect(r.results[0]?.reason).toMatch(/readiness preflight: known verification failure/);
+  });
+
+  it('rejects known failed verification when the stuck threshold is reached', async () => {
+    mockListProposals.mockReturnValue([
+      proposal({
+        stuckPassCount: 2,
+        verifyResult: {
+          passed: false,
+          source: 'auto-merge-preflight',
+          failed: ['npm run test failed'],
+        },
+      }),
+    ]);
+    const config = cfg();
+    (config.foundry as Record<string, unknown>)['autoArchiveAfterRejects'] = 3;
+
+    const r = await runAutoMergePass(config);
+
+    expect(mockVerifyProposal).not.toHaveBeenCalled();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(mockSetStatus).toHaveBeenCalledWith(
+      'm307-prop',
+      'rejected',
+      undefined,
+      expect.stringMatching(/known failed verification persisted for 3 pass/),
+    );
+    expect(mockUpdateProposalField).not.toHaveBeenCalledWith('m307-prop', expect.objectContaining({ stuckPassCount: 3 }));
+    expect(r.autoArchived).toBe(1);
   });
 });

@@ -35,7 +35,7 @@ as well as humans.**
      "routing":  [ { "task": "...", "engine": "codex", "model": "gpt-5.5", "reason": "hard coding (effort 5)" }, ... ]
    }
    ```
-   The local `/api/fleet` and `/api/control` status surfaces also expose `fleet.queue.repos.byTier` as a read-only strategic-focus overlay derived from `docs/ecosystem-index.json`; the same strategic map also biases backlog scoring and scarce-capacity repo selection.
+   The local `/api/fleet` and `/api/control` status surfaces also expose `fleet.queue.repos.byTier` as a read-only strategic-focus overlay derived from `docs/ecosystem-index.json`; the same strategic map also biases backlog scoring and scarce-capacity repo selection. Known vendor lockouts that telemetry cannot infer can be represented with `foundry.resourceOverrides`; expired overrides are ignored automatically and active overrides flow through the same resource/status surfaces.
 2. **`POST /api/oversight`** (pulse ingest, already built) — the daemon pushes `OversightSnapshot` on a cadence → `fleet_scorecard` (trended).
 3. **OTLP spans** (`POST /api/otlp/v1/traces`) — fleet lifecycle events (tick/proposal/merge/decline) with `ashlr.fleet.owner` attribution + (extend) routing model attrs.
 4. **fleet_command queue** (cloud→local round-trip, already built) — the cockpit's triage actions land here; the daemon polls + executes locally (proposal-only-safe).

@@ -267,6 +267,63 @@ describe('M250 ResourceMonitor — Claude stats-cache 7d sum', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 1b. Operator resource overrides
+// ---------------------------------------------------------------------------
+
+describe('M250 ResourceMonitor — operator resource overrides', () => {
+  it('uses an active override before probing telemetry', async () => {
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue(null),
+    }));
+
+    const { getBackendResourceState } = await import('../src/core/fabric/resource-monitor.js');
+    const until = Math.floor(Date.now() / 1000) + 3600;
+    const cfg = withFoundry({
+      allowedBackends: ['claude'] as EngineId[],
+      resourceOverrides: {
+        claude: {
+          availability: 'exhausted',
+          resetsAt: until,
+          reason: 'Claude Code weekly usage exhausted',
+        },
+      },
+    });
+
+    const state = await getBackendResourceState('claude', cfg);
+
+    expect(state.availability).toBe('exhausted');
+    expect(state.resetsAt).toBe(until);
+    expect(state.reason).toMatch(/operator override/i);
+    expect(state.reason).toMatch(/weekly usage exhausted/i);
+  });
+
+  it('ignores an expired override and falls back to sensing', async () => {
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue(null),
+    }));
+
+    const { getBackendResourceState } = await import('../src/core/fabric/resource-monitor.js');
+    const cfg = withFoundry({
+      allowedBackends: ['claude'] as EngineId[],
+      claudeResource: { fiveHourMessageCap: 100, protectPct: 85 },
+      resourceOverrides: {
+        claude: {
+          availability: 'exhausted',
+          until: new Date(Date.now() - 60_000).toISOString(),
+          reason: 'stale outage',
+        },
+      },
+    });
+
+    const state = await getBackendResourceState('claude', cfg);
+
+    expect(state.availability).toBe('open');
+    expect(state.usedPct).toBe(0);
+    expect(state.reason).not.toMatch(/operator override/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 2. Codex delegation
 // ---------------------------------------------------------------------------
 

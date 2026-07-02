@@ -599,6 +599,23 @@ export interface AshlrConfig {
      */
     claudeResource?: {
       /**
+       * Estimated 5-hour message cap for Claude Code subscription sensing.
+       * When absent, the ResourceMonitor uses a conservative default.
+       */
+      fiveHourMessageCap?: number;
+      /**
+       * Optional 5-hour token cap override. Message-count sensing is usually
+       * the better Claude Code subscription proxy.
+       */
+      fiveHourTokenCap?: number;
+      /**
+       * Fleet-only Claude token budget. When set, ResourceMonitor measures the
+       * fleet decisions ledger instead of interactive transcript usage.
+       */
+      weeklyTokenBudget?: number;
+      /** Fleet-only Claude spend budget in USD. */
+      weeklyCostBudgetUsd?: number;
+      /**
        * Estimated weekly message cap for the Claude subscription plan.
        * Mason sets this to his plan's limit (e.g. 2000 for Pro, 5000 for Max).
        * The ResourceMonitor sums stats-cache.json messageCount over 7d and
@@ -615,6 +632,30 @@ export interface AshlrConfig {
        */
       protectPct?: number;
     };
+    /**
+     * Operator resource overrides for known external capacity events that are
+     * not reliably discoverable from local telemetry, such as a vendor weekly
+     * lockout. Expired overrides are ignored automatically.
+     *
+     * Example:
+     *   "resourceOverrides": {
+     *     "claude": {
+     *       "availability": "exhausted",
+     *       "until": "2026-07-03T09:00:00-04:00",
+     *       "reason": "Claude Code weekly usage exhausted"
+     *     }
+     *   }
+     */
+    resourceOverrides?: Record<string, {
+      availability?: 'open' | 'near' | 'throttled' | 'exhausted' | 'unreachable' | 'unknown';
+      until?: string | number;
+      resetsAt?: number;
+      reason?: string;
+      usedPct?: number;
+      cap?: number;
+      capUnit?: 'messages' | 'tokens' | 'requests' | 'concurrent' | null;
+      capWindow?: string;
+    }>;
     /**
      * M250 Resource Control Plane: local/Ollama concurrency config.
      */

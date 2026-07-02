@@ -54,6 +54,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Enroll all local dev-tools repos and surface repo coverage in fleet status
 - [x] Follow-up: Prioritize the core fleet spine inside the ecosystem map
 - [x] Follow-up: Make the autonomous loop obey core fleet focus under scarce resources
+- [x] Follow-up: Add explicit resource overrides for vendor lockouts the local sensors cannot infer
+- [x] Follow-up: Drain permanently failed verification proposals out of verify-only deadlock
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -118,6 +120,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - The ecosystem should not allocate equal attention to all 21 repos. The core fleet spine is `ashlr-hub`, `phantom-secrets`, `ashlr-plugin`, `binshield`, `ashlr-md`, `ashlr-stack`, `ashlr-pulse`, `ashlrcode`, and `ashlr-workbench`; `ashlr-mux` is tracked as a core-adjacent cofounder-owned candidate until it is available locally or through GitHub.
 - Strategic focus must affect behavior, not only docs. Core-fleet repos now receive a gentle backlog score boost, daemon round-robin starts with higher-strategic-tier repos when tick capacity is scarce, and fleet/Mission Control status surfaces backlog pressure by strategic tier.
 - Claude scarcity should not freeze the loop when Codex/NIM/local are available. Resource-aware paths already demote exhausted Claude; the simple conductor now also reroutes away from `throttled` Claude to open fallbacks such as Codex.
+- Some provider lockouts are not fully inferable from local transcript telemetry. The ResourceMonitor now accepts expiring `foundry.resourceOverrides` so an operator-known lockout can become a real dispatch signal until its reset time instead of living only in chat context.
+- Known failed verification is a permanent no-merge condition, but it should not freeze the fleet forever. Auto-merge maintenance now drains those proposals to `rejected` after the existing stuck threshold, and direction reports ignore terminal failures.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -156,4 +160,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch ready to ship** - Core fleet focus is wired into backlog scoring, daemon selection, fleet status, and Mission Control. Focused tests/typecheck/JS syntax checks passed; final gates and push are in progress.
+**Current batch ready to ship** - Core fleet focus is wired into backlog scoring, daemon selection, fleet status, and Mission Control. Resource overrides now let the loop obey known vendor lockouts, and permanently failed verification proposals can drain out of verify-only; focused tests/typecheck passed and final gates are in progress.

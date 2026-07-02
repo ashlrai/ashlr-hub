@@ -185,11 +185,66 @@ interface ClaudeResourceCfg {
   protectPct?: number;
 }
 
+interface ResourceOverrideCfg {
+  availability?: BackendAvailability;
+  until?: string | number;
+  resetsAt?: number;
+  reason?: string;
+  usedPct?: number;
+  cap?: number;
+  capUnit?: BackendResourceState['capUnit'];
+  capWindow?: string;
+}
+
 interface ResourceCfgShape {
   claude?: ClaudeResourceCfg;
+  overrides?: Record<string, ResourceOverrideCfg>;
   protectPct?: number;
   nim?: { costPerMTokenOut?: number };
   local?: { maxConcurrent?: number; baseUrl?: string };
+}
+
+const BACKEND_AVAILABILITIES = new Set<BackendAvailability>([
+  'open',
+  'near',
+  'throttled',
+  'exhausted',
+  'unreachable',
+  'unknown',
+]);
+
+function parseAvailability(value: unknown): BackendAvailability | undefined {
+  return typeof value === 'string' && BACKEND_AVAILABILITIES.has(value as BackendAvailability)
+    ? value as BackendAvailability
+    : undefined;
+}
+
+function parseCapUnit(value: unknown): BackendResourceState['capUnit'] | undefined {
+  return value === 'messages' || value === 'tokens' || value === 'requests' || value === 'concurrent'
+    ? value
+    : undefined;
+}
+
+function parseResourceOverrides(raw: unknown): Record<string, ResourceOverrideCfg> | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+  const out: Record<string, ResourceOverrideCfg> = {};
+  for (const [backend, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) continue;
+    const v = value as Record<string, unknown>;
+    const availability = parseAvailability(v['availability']);
+    if (!availability) continue;
+    out[backend] = {
+      availability,
+      until: typeof v['until'] === 'string' || typeof v['until'] === 'number' ? v['until'] : undefined,
+      resetsAt: typeof v['resetsAt'] === 'number' ? v['resetsAt'] : undefined,
+      reason: typeof v['reason'] === 'string' ? v['reason'] : undefined,
+      usedPct: typeof v['usedPct'] === 'number' ? v['usedPct'] : undefined,
+      cap: typeof v['cap'] === 'number' ? v['cap'] : undefined,
+      capUnit: parseCapUnit(v['capUnit']),
+      capWindow: typeof v['capWindow'] === 'string' ? v['capWindow'] : undefined,
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function extractResourceCfg(cfg: unknown): ResourceCfgShape {
@@ -234,6 +289,7 @@ function extractResourceCfg(cfg: unknown): ResourceCfgShape {
 
     return {
       claude: claudeCfg,
+      overrides: parseResourceOverrides(f['resourceOverrides']),
       protectPct,
       nim: (f['nim'] as Record<string, unknown> | undefined) as ResourceCfgShape['nim'],
       local: (f['local'] as Record<string, unknown> | undefined) as ResourceCfgShape['local'],
@@ -241,6 +297,49 @@ function extractResourceCfg(cfg: unknown): ResourceCfgShape {
   } catch {
     return {};
   }
+}
+
+function parseOverrideResetAt(override: ResourceOverrideCfg): number | null {
+  const raw = override.resetsAt ?? override.until;
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return raw > 10_000_000_000 ? Math.floor(raw / 1000) : Math.floor(raw);
+  }
+  if (typeof raw === 'string' && raw.trim().length > 0) {
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
+  }
+  return null;
+}
+
+function overrideState(
+  backend: EngineId,
+  override: ResourceOverrideCfg | undefined,
+): BackendResourceState | null {
+  if (!override?.availability) return null;
+  const resetsAt = parseOverrideResetAt(override);
+  if (resetsAt !== null && resetsAt * 1000 <= Date.now()) return null;
+
+  const untilSuffix = resetsAt !== null
+    ? ` until ${new Date(resetsAt * 1000).toISOString()}`
+    : '';
+  const reason = override.reason
+    ? `operator override: ${override.reason}${untilSuffix}`
+    : `operator override: ${backend} forced ${override.availability}${untilSuffix}`;
+
+  return {
+    backend,
+    availability: override.availability,
+    usedPct: typeof override.usedPct === 'number' ? override.usedPct : null,
+    cap: typeof override.cap === 'number' ? override.cap : null,
+    capUnit: override.capUnit ?? null,
+    capWindow: override.capWindow ?? null,
+    resetsAt,
+    costPerMTokenOut: 0,
+    p50LatencyMs: null,
+    snapshotAt: new Date().toISOString(),
+    reason,
+    backoffUntilMs: resetsAt !== null ? resetsAt * 1000 : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -975,6 +1074,9 @@ export async function getBackendResourceState(
 ): Promise<BackendResourceState> {
   try {
     const rcfg = extractResourceCfg(cfg);
+    const override = overrideState(backend, rcfg.overrides?.[backend]);
+    if (override) return override;
+
     switch (backend) {
       case 'claude':    return await senseClaudeState(rcfg);
       case 'codex':     return senseCodexState();
