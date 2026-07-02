@@ -298,6 +298,7 @@ function autoMergeTickSummary(result: AutoMergePassResult | null): DaemonTick['a
 	  const merged = typeof result.merged === 'number' ? result.merged : 0;
 	  const autoArchived = typeof result.autoArchived === 'number' ? result.autoArchived : 0;
 	  const ttlRejected = typeof result.ttlRejected === 'number' ? result.ttlRejected : 0;
+	  const invalidRejected = typeof result.invalidRejected === 'number' ? result.invalidRejected : 0;
 	  if (
 	    attempted <= 0 &&
 	    judged <= 0 &&
@@ -306,7 +307,8 @@ function autoMergeTickSummary(result: AutoMergePassResult | null): DaemonTick['a
 	    verifyBeforeJudgeCapped <= 0 &&
 	    merged <= 0 &&
 	    autoArchived <= 0 &&
-	    ttlRejected <= 0
+	    ttlRejected <= 0 &&
+	    invalidRejected <= 0
 	  ) return undefined;
 	  return {
 	    attempted,
@@ -320,6 +322,7 @@ function autoMergeTickSummary(result: AutoMergePassResult | null): DaemonTick['a
 	    merged,
 	    ...(autoArchived > 0 ? { autoArchived } : {}),
 	    ...(ttlRejected > 0 ? { ttlRejected } : {}),
+	    ...(invalidRejected > 0 ? { invalidRejected } : {}),
 	  };
 	}
 

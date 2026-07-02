@@ -416,6 +416,8 @@ function buildLogs(cap = LOG_CAP): ControlLogEntry[] {
             tick.autoMerge.autoArchived ? `,archived:${tick.autoMerge.autoArchived}` : ''
           }${
             tick.autoMerge.ttlRejected ? `,ttlRejected:${tick.autoMerge.ttlRejected}` : ''
+          }${
+            tick.autoMerge.invalidRejected ? `,invalidRejected:${tick.autoMerge.invalidRejected}` : ''
           }`
         : '';
       const modeStr = tick.dryRun === true ? ' mode=simulation' : '';

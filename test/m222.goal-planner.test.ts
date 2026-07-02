@@ -105,11 +105,11 @@ function makeCfg(overrides: Partial<NonNullable<AshlrConfig['foundry']>> = {}): 
   };
 }
 
-function makeActiveGoalNoMilestones(id: string, objective: string): Goal {
+function makeActiveGoalNoMilestones(id: string, objective: string, project: string | null = tmpDir): Goal {
   return {
     id,
     objective,
-    project: null,
+    project,
     status: 'active',
     milestones: [],
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -117,11 +117,11 @@ function makeActiveGoalNoMilestones(id: string, objective: string): Goal {
   };
 }
 
-function makeActiveGoalWithMilestone(id: string, objective: string): Goal {
+function makeActiveGoalWithMilestone(id: string, objective: string, project: string | null = tmpDir): Goal {
   return {
     id,
     objective,
-    project: null,
+    project,
     status: 'active',
     milestones: [
       {
@@ -357,6 +357,15 @@ describe('M222 — scanGoals wiring: expansion → value≥4 WorkItem', () => {
     const items = await scanGoals(tmpDir, cfg);
     expect(items).toHaveLength(1);
     expect(items[0]!.source).toBe('goal');
+  });
+
+  it('scanGoals emits [] for a projectless goal even when it has milestones', async () => {
+    clearGoalPlannerCache();
+    const goal = makeActiveGoalWithMilestone('goal-projectless', 'Projectless goal', null);
+    vi.mocked(listGoals).mockReturnValue([goal]);
+    const cfg = makeCfg({ goalPlanning: true });
+    const items = await scanGoals(tmpDir, cfg);
+    expect(items).toHaveLength(0);
   });
 
   it('scanGoals never throws when expansion throws internally', async () => {

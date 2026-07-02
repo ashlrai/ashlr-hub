@@ -3043,6 +3043,7 @@ export interface DaemonTick {
 	    merged: number;
 	    autoArchived?: number;
 	    ttlRejected?: number;
+	    invalidRejected?: number;
 	  };
   /** M313: producer maintenance attempted during this tick. Metadata-only. */
   producerMaintenance?: {

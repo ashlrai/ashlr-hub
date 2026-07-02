@@ -118,11 +118,11 @@ function makeCfg(overrides: Partial<NonNullable<AshlrConfig['foundry']>> = {}): 
   };
 }
 
-function makePlanningGoal(id: string, objective: string): Goal {
+function makePlanningGoal(id: string, objective: string, project: string | null = tmpDir): Goal {
   return {
     id,
     objective,
-    project: null,
+    project,
     status: 'planning',
     milestones: [],
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -130,11 +130,11 @@ function makePlanningGoal(id: string, objective: string): Goal {
   };
 }
 
-function makeActiveGoalNoMilestones(id: string, objective: string): Goal {
+function makeActiveGoalNoMilestones(id: string, objective: string, project: string | null = tmpDir): Goal {
   return {
     id,
     objective,
-    project: null,
+    project,
     status: 'active',
     milestones: [],
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -287,7 +287,36 @@ describe('M223 — in-process cache prevents double expansion', () => {
 });
 
 // ============================================================================
-// Suite 5 — flag-off: goalPlanning:false → planning goals not expanded
+// Suite 5 — repo scoping: scanGoals only emits work for this repo
+// ============================================================================
+
+describe('M223 — scanGoals respects goal project scope', () => {
+  it('does not emit or expand projectless planning goals', async () => {
+    const goal = makePlanningGoal('goal-projectless-1', 'Projectless planning goal', null);
+    _planningGoals = [goal];
+    _savedGoals.set(goal.id, structuredClone(goal));
+
+    const items = await scanGoals(tmpDir, makeCfg());
+
+    expect(items.filter((i) => i.source === 'goal')).toHaveLength(0);
+    expect(_completeImpl).not.toHaveBeenCalled();
+  });
+
+  it('does not emit or expand goals bound to a different repo', async () => {
+    const otherRepo = path.join(os.tmpdir(), 'ashlr-other-repo');
+    const goal = makePlanningGoal('goal-other-repo-1', 'Other repo goal', otherRepo);
+    _planningGoals = [goal];
+    _savedGoals.set(goal.id, structuredClone(goal));
+
+    const items = await scanGoals(tmpDir, makeCfg());
+
+    expect(items.filter((i) => i.source === 'goal')).toHaveLength(0);
+    expect(_completeImpl).not.toHaveBeenCalled();
+  });
+});
+
+// ============================================================================
+// Suite 6 — flag-off: goalPlanning:false → planning goals not expanded
 // ============================================================================
 
 describe('M223 — goalPlanning:false disables expansion for planning goals', () => {

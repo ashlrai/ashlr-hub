@@ -17,6 +17,16 @@ const docDiff = [
   '',
 ].join('\n');
 
+const highRiskDiff = [
+  'diff --git a/package.json b/package.json',
+  '--- a/package.json',
+  '+++ b/package.json',
+  '@@ -1 +1 @@',
+  '-{"scripts":{}}',
+  '+{"scripts":{"postinstall":"node scripts/install.js"}}',
+  '',
+].join('\n');
+
 const mockAutoMergeProposal = vi.fn();
 const mockVerifyProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', async (importOriginal) => {
@@ -249,9 +259,77 @@ describe('M307 verify-before-judge', () => {
       'm307-prop',
       'rejected',
       undefined,
-      expect.stringMatching(/known failed verification persisted for 3 pass/),
+      expect.stringMatching(/permanent readiness blocker persisted for 3 pass/),
     );
     expect(mockUpdateProposalField).not.toHaveBeenCalledWith('m307-prop', expect.objectContaining({ stuckPassCount: 3 }));
+    expect(r.autoArchived).toBe(1);
+  });
+
+  it('increments stuckPassCount for high-risk permanent readiness blockers without judge or merge spend', async () => {
+    mockListProposals.mockReturnValue([
+      proposal({ diff: highRiskDiff }),
+    ]);
+
+    const r = await runAutoMergePass(cfg());
+
+    expect(mockVerifyProposal).not.toHaveBeenCalled();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 1 });
+    expect(mockSetStatus).not.toHaveBeenCalled();
+    expect(r.autoArchived).toBe(0);
+    expect(r.results[0]?.reason).toMatch(/risk class 'high' exceeds maxRisk 'low'/);
+  });
+
+  it('rejects stale temp-worktree regression goal proposals before judge, verify, or merge spend', async () => {
+    mockListProposals.mockReturnValue([
+      proposal({
+        title: 'local-coder run: Advance goal "Fix regression in /Users/masonwyatt/.ashlr/tmp/vwt-56d7528d1586" —',
+        workSource: 'goal',
+        engineTier: 'mid',
+        engineModel: 'local-coder:qwen3-coder:30b',
+      } as Partial<Proposal>),
+    ]);
+
+    const r = await runAutoMergePass(cfg());
+
+    expect(mockVerifyProposal).not.toHaveBeenCalled();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(mockSetStatus).toHaveBeenCalledWith(
+      'm307-prop',
+      'rejected',
+      undefined,
+      'auto-rejected: proposal came from an ephemeral Ashlr temp-worktree regression goal',
+    );
+    expect(r.invalidRejected).toBe(1);
+    expect(r.skipped[0]).toMatchObject({
+      proposalId: 'm307-prop',
+      check: 'ephemeral-regression-goal',
+    });
+  });
+
+  it('rejects high-risk permanent readiness blockers when the stuck threshold is reached', async () => {
+    mockListProposals.mockReturnValue([
+      proposal({
+        diff: highRiskDiff,
+        stuckPassCount: 2,
+      }),
+    ]);
+    const config = cfg();
+    (config.foundry as Record<string, unknown>)['autoArchiveAfterRejects'] = 3;
+
+    const r = await runAutoMergePass(config);
+
+    expect(mockVerifyProposal).not.toHaveBeenCalled();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(mockSetStatus).toHaveBeenCalledWith(
+      'm307-prop',
+      'rejected',
+      undefined,
+      expect.stringMatching(/permanent readiness blocker persisted for 3 pass.*risk class 'high'/),
+    );
     expect(r.autoArchived).toBe(1);
   });
 });

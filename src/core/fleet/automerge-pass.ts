@@ -99,6 +99,11 @@ export interface AutoMergePassResult {
    * These proposals are now 'rejected' and will not be re-judged.
    */
   ttlRejected: number;
+  /**
+   * M314: proposals rejected because they were produced from ephemeral Ashlr
+   * temp-worktree regression goals. Reject-only; never merges.
+   */
+  invalidRejected: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +164,25 @@ function incrementStuckOrArchive(
 
 function knownFailedVerificationDetail(p: Proposal): string {
   return p.verifyResult?.failed?.filter(Boolean).join('; ') ?? '';
+}
+
+function referencesEphemeralAshlrPath(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const normalized = value.replace(/\\/g, '/');
+  return (
+    normalized.includes('/.ashlr/sandboxes/') ||
+    /\/\.ashlr\/tmp\/vwt-[^/\s"'`)]*/.test(normalized)
+  );
+}
+
+function isEphemeralRegressionGoalProposal(p: Proposal): boolean {
+  const rec = p as unknown as Record<string, unknown>;
+  return (
+    rec['workSource'] === 'goal' &&
+    typeof p.title === 'string' &&
+    p.title.includes('Fix regression in') &&
+    referencesEphemeralAshlrPath(p.title)
+  );
 }
 
 function errorDetail(err: unknown): string {
@@ -222,6 +246,7 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
 	    skipped: [],
 	    autoArchived: 0,
     ttlRejected: 0,
+    invalidRejected: 0,
   };
   if (cfg.foundry?.autoMerge?.enabled !== true) return out;
   if (killSwitchOn()) return out;
@@ -274,6 +299,30 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     if (a.createdAt > b.createdAt) return 1;
     return 0;
   });
+
+  // M314: reject stale proposals generated from goals that targeted ephemeral
+  // Ashlr execution worktrees. Those goals cannot be acted on after teardown,
+  // and letting their proposals remain pending pins the fleet in verify-only.
+  for (const p of pending) {
+    try {
+      if (!isEphemeralRegressionGoalProposal(p)) continue;
+      const reason = 'auto-rejected: proposal came from an ephemeral Ashlr temp-worktree regression goal';
+      setStatus(p.id, 'rejected', undefined, reason);
+      out.invalidRejected++;
+      out.skipped.push({ proposalId: p.id, check: 'ephemeral-regression-goal', reason });
+      out.results.push({ ok: false, merged: false, branched: false, reason });
+    } catch {
+      // Best-effort — invalid-goal rejection never disrupts the pass.
+    }
+  }
+  if (out.invalidRejected > 0) {
+    try {
+      pending = listProposals({ status: 'pending' });
+    } catch {
+      pending = pending.filter((p) => !isEphemeralRegressionGoalProposal(p));
+    }
+    pending = pending.filter((p) => !isEphemeralRegressionGoalProposal(p));
+  }
 
   // M259: TTL pre-pass — reject stale proposals before spending any judge calls.
   // Belt-and-suspenders: runs independently of the judge loop.
@@ -352,16 +401,17 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       const reason = `readiness preflight: ${readiness.reason ?? 'not ready'}${advisorySuffix}`;
       out.results.push({ ok: false, merged: false, branched: false, reason });
       out.skipped.push({ proposalId: p.id, check: 'readiness-preflight', reason });
-      if (p.verifyResult?.passed === false) {
-        const failed = knownFailedVerificationDetail(p);
+      if (readiness.permanent === true) {
         const priorStuck = (p as unknown as Record<string, unknown>)['stuckPassCount'];
         const nextStuck = (typeof priorStuck === 'number' && Number.isFinite(priorStuck) ? priorStuck : 0) + 1;
+        const failed = knownFailedVerificationDetail(p);
+        const detail = p.verifyResult?.passed === false && failed
+          ? `${readiness.reason ?? 'permanent readiness blocker'} (${failed})`
+          : (readiness.reason ?? 'permanent readiness blocker');
         const drain = incrementStuckOrArchive(
           p,
           autoArchiveAfterRejects,
-          `auto-drained: known failed verification persisted for ${nextStuck} pass(es)${
-            failed ? ` (${failed})` : ''
-          }`,
+          `auto-drained: permanent readiness blocker persisted for ${nextStuck} pass(es): ${detail}`,
         );
         if (drain.archived) out.autoArchived++;
       }

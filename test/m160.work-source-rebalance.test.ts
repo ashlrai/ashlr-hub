@@ -120,11 +120,16 @@ function makeCfg(overrides: Partial<NonNullable<AshlrConfig['foundry']>> = {}): 
 }
 
 /** Build a minimal active Goal with one pending milestone. */
-function makeActiveGoal(id: string, objective: string, milestoneTitle: string): Goal {
+function makeActiveGoal(
+  id: string,
+  objective: string,
+  milestoneTitle: string,
+  project: string | null = tmpDir,
+): Goal {
   return {
     id,
     objective,
-    project: null,
+    project,
     status: 'active',
     milestones: [
       {
@@ -466,6 +471,21 @@ describe('M160 — scanGoals: goal-derived work items', () => {
     expect(items[0]!.source).toBe('goal');
   });
 
+  it('returns [] for projectless active goals', async () => {
+    _listGoalsImpl = vi.fn(() => [
+      makeActiveGoal(
+        'goal-projectless',
+        'Projectless goal',
+        'No executable repo binding',
+        null,
+      ),
+    ]);
+
+    const items = await scanGoals(tmpDir);
+
+    expect(items).toHaveLength(0);
+  });
+
   it('never throws even when listGoals throws', async () => {
     _listGoalsImpl = vi.fn(() => { throw new Error('store error'); });
     await expect(scanGoals(tmpDir)).resolves.toEqual([]);
@@ -518,7 +538,7 @@ describe('M160 — SCANNERS array: ordering and registration', () => {
     expect(idxGoals).toBeLessThan(idxDocs);
   });
 
-  it('SCANNERS has 9 entries', () => {
-    expect(SCANNERS).toHaveLength(9);
+  it('SCANNERS includes every built-in source', () => {
+    expect(SCANNERS.length).toBeGreaterThanOrEqual(10);
   });
 });

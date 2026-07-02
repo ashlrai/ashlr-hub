@@ -175,3 +175,17 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Verified live patched `bin/ashlr fleet status --json` now reports 13 backlog items across 9 repos and `autonomyDirection.mode:"backlog-build"` instead of an empty queue.
 - [x] Verified focused/backlog/scanner suites, typecheck, lint, build, audit, and diff checks.
 - [ ] Commit, push, restart launchd daemon, and verify live service after restart.
+
+## Current Continuation - Goal Scope And Verify-Only Drain
+- [x] Rechecked git, Entire, daemon service, daemon status, fleet status, and live process state.
+- [x] Deployed explorer agents for goal/backlog scope, verify-only blockers, self-heal queue quality, daemon heartbeat liveness, and auto-merge usefulness.
+- [x] Stopped the daemon for the maintenance window so live verification would not run against a half-edited worktree.
+- [x] Fixed `scanGoals()` so only goals whose `Goal.project` resolves to the scanned repo can emit backlog work; projectless planning-only goals and wrong-repo goals are skipped before milestone expansion.
+- [x] Expanded goal-scanner regression coverage in M160/M222/M223 for projectless/wrong-repo goals.
+- [x] Prevented `regression:detected` from creating goals against ephemeral Ashlr execution worktrees under `~/.ashlr/sandboxes/*/worktree` or `~/.ashlr/tmp/vwt-*`.
+- [x] Added reject-only auto-merge maintenance for stale pending proposals produced from ephemeral temp-worktree regression goals.
+- [x] Generalized auto-merge preflight drain so all permanent readiness blockers, not only known failed verification, increment `stuckPassCount` and reject at the existing `autoArchiveAfterRejects` threshold.
+- [x] Surfaced `invalidRejected` in daemon auto-merge tick summaries and Mission Control logs.
+- [x] Verified focused suites: M160/M222/M223, M258/M305/M307, M201/M61/M307, and diff checks.
+- [x] Run full type/lint/build/audit gates.
+- [ ] Commit, push to `origin/master`, clear the maintenance kill switch, restart launchd daemon, and verify live autonomous status.

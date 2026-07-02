@@ -1,14 +1,14 @@
 /**
- * M258 — Sandbox-path goal guard + dedupe for regression:detected.
+ * M258 — Ephemeral-path goal guard + dedupe for regression:detected.
  *
  * Tests:
- *  1.  sandbox-path repo → no goal enqueued (translate-or-skip)
+ *  1.  ephemeral repo path → no goal enqueued (translate-or-skip)
  *  2.  real-repo path → goal enqueued normally (regression flow intact)
  *  3.  no repo at all → goal enqueued (absent repo is fine)
  *  4.  sandbox guard: goal is NEVER created with /.ashlr/sandboxes/ in objective
  *  5.  dedupe: identical-objective goal already exists → skip (no second enqueue)
  *  6.  dedupe: different objective → enqueues normally (no false positive)
- *  7.  SAFETY: sandbox-path skip does not call merge/push/apply primitives
+ *  7.  SAFETY: ephemeral-path skip does not call merge/push/apply primitives
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -111,25 +111,37 @@ async function flush(): Promise<void> {
   await new Promise<void>((r) => setTimeout(r, 0));
 }
 
-// Fixed sandbox path matching the real pattern
+// Fixed ephemeral paths matching the real patterns
 const SANDBOX_PATH = '/Users/masonwyatt/.ashlr/sandboxes/d7d42cf66944/worktree';
+const TEMP_WORKTREE_PATH = '/Users/masonwyatt/.ashlr/tmp/vwt-56d7528d1586';
 const REAL_REPO = '/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub';
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('M258 — sandbox-path goal guard', () => {
+describe('M258 — ephemeral-path goal guard', () => {
   beforeEach(() => {
     _clearHandlers();
     registerBuiltInHandlers();
   });
 
-  // 1. Sandbox path → NO goal
+  // 1. Ephemeral path → NO goal
   it('1. sandbox-path repo: no goal enqueued', async () => {
     emit(
       'regression:detected',
       { signal: 'test suite failed', repo: SANDBOX_PATH },
+      cfgOn(),
+    );
+    await flush();
+
+    expect(mockCreateGoal).not.toHaveBeenCalled();
+  });
+
+  it('1b. temp verifier worktree repo: no goal enqueued', async () => {
+    emit(
+      'regression:detected',
+      { signal: 'typecheck failed', repo: TEMP_WORKTREE_PATH },
       cfgOn(),
     );
     await flush();
@@ -217,11 +229,11 @@ describe('M258 — sandbox-path goal guard', () => {
     expect(mockCreateGoal).toHaveBeenCalledOnce();
   });
 
-  // 7. SAFETY: sandbox skip never touches destructive primitives
-  it('7. SAFETY: sandbox-path skip does not call merge/push/apply', async () => {
+  // 7. SAFETY: ephemeral skip never touches destructive primitives
+  it('7. SAFETY: ephemeral-path skip does not call merge/push/apply', async () => {
     emit(
       'regression:detected',
-      { signal: 'broken', repo: SANDBOX_PATH },
+      { signal: 'broken', repo: TEMP_WORKTREE_PATH },
       cfgOn(),
     );
     await flush();

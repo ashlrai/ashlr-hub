@@ -175,12 +175,17 @@ export function _handlerCounts(): Record<string, number> {
 // ---------------------------------------------------------------------------
 
 /**
- * Returns true when a path looks like an ephemeral ashlr sandbox worktree.
- * Sandbox paths follow the pattern ~/.ashlr/sandboxes/<id>/worktree.
- * A goal pointing at such a path is meaningless once the sandbox is torn down.
+ * Returns true when a path looks like an ephemeral Ashlr execution worktree.
+ * Sandbox paths follow ~/.ashlr/sandboxes/<id>/worktree; verifier/temp
+ * worktrees follow ~/.ashlr/tmp/vwt-*. A goal pointing at either path is
+ * meaningless once the worktree is torn down.
  */
-function _isSandboxPath(p: string): boolean {
-  return p.includes('/.ashlr/sandboxes/');
+function _isEphemeralAshlrPath(p: string): boolean {
+  const normalized = p.replace(/\\/g, '/');
+  return (
+    normalized.includes('/.ashlr/sandboxes/') ||
+    /\/\.ashlr\/tmp\/vwt-[^/\s"'`)]*/.test(normalized)
+  );
 }
 
 /**
@@ -188,9 +193,9 @@ function _isSandboxPath(p: string): boolean {
  * fix it.  The goal goes through the normal planning + approval flow and is
  * NEVER auto-applied.
  *
- * M258: sandbox-path guard — if payload.repo is a transient sandbox worktree
- * path (contains /.ashlr/sandboxes/), the goal is skipped entirely.  Sandbox
- * paths are ephemeral; a goal pointing at one is garbage after teardown.
+ * M258/M314: ephemeral-path guard — if payload.repo is a transient Ashlr
+ * execution worktree path, the goal is skipped entirely. These paths are
+ * ephemeral; a goal pointing at one is garbage after teardown.
  * Dedupe: skips if an identical-objective goal already exists.
  *
  * Flag-gated: runs only when cfg.foundry.eventBus !== false (inherits the
@@ -205,7 +210,7 @@ async function _handleRegressionDetected(
   cfg: AshlrConfig,
 ): Promise<void> {
   try {
-    // M258: translate-or-skip for sandbox worktree paths.
+    // M258/M314: translate-or-skip for ephemeral worktree paths.
     // When payload.repo is a transient sandbox path the goal would point at a
     // dead directory after the sandbox is torn down, polluting the goal-planner
     // with self-referential "path not present" noise.  We have no canonical
@@ -213,7 +218,7 @@ async function _handleRegressionDetected(
     // regression fired from process.cwd() of the live workspace will still
     // enqueue normally.
     const canonicalRepo: string | null =
-      payload.repo != null && !_isSandboxPath(payload.repo)
+      payload.repo != null && !_isEphemeralAshlrPath(payload.repo)
         ? payload.repo
         : null;
 
@@ -226,8 +231,8 @@ async function _handleRegressionDetected(
       `Fix regression${canonicalRepo ? ` in ${canonicalRepo}` : ''}` +
       (payload.signal ? `: ${payload.signal.slice(0, 120)}` : '');
 
-    // M258: guard — never create a goal whose text contains a sandbox path.
-    if (_isSandboxPath(objective)) return;
+    // M258/M314: guard — never create a goal whose text contains an ephemeral path.
+    if (_isEphemeralAshlrPath(objective)) return;
 
     // M258: dedupe — skip if an identical-objective goal already exists to
     // prevent pile-up when the sentinel fires repeatedly before a fix lands.

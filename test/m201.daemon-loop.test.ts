@@ -604,6 +604,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 	      merged: 1,
 	      autoArchived: 1,
 	      ttlRejected: 1,
+	      invalidRejected: 1,
 	    });
 
     const result = await tick(
@@ -628,6 +629,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 	      merged: 1,
 	      autoArchived: 1,
 	      ttlRejected: 1,
+	      invalidRejected: 1,
     });
     expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
     expect(mockBuildBacklog).not.toHaveBeenCalled();

@@ -15,7 +15,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync, statSync, readFileSync, readdirSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
 import type { WorkItem, WorkSource, AshlrConfig } from '../types.js';
@@ -1526,6 +1526,10 @@ export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'
 
     const items: WorkItem[] = [];
     for (let goal of allGoals) {
+      if (!goal.project || resolve(goal.project) !== resolve(repo)) {
+        continue;
+      }
+
       // M222/M223: lazily expand goals with zero milestones via the frontier
       // strategist (flag-gated: cfg.foundry?.goalPlanning !== false).
       // expandGoalToMilestones never throws; it is a no-op when flag-off.
