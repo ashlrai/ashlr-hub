@@ -66,7 +66,8 @@ export function formatFleetStatus(s: FleetStatus): string {
     const nameW = Math.max(8, ...s.backends.map((b) => b.backend.length));
     for (const b of s.backends) {
       const name = b.backend + ' '.repeat(Math.max(0, nameW - b.backend.length));
-      lines.push(`  ${name}  dispatches(24h)=${b.dispatchesRecent}  quota=${b.quota}`);
+      const resource = b.resource ? `  ${formatBackendResource(b.resource)}` : '';
+      lines.push(`  ${name}  dispatches(24h)=${b.dispatchesRecent}  quota=${b.quota}${resource}`);
     }
   }
   lines.push('');
@@ -183,6 +184,17 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
 
   return lines.join('\n');
+}
+
+function formatBackendResource(resource: NonNullable<FleetStatus['backends'][number]['resource']>): string {
+  const parts = [`resource=${resource.availability}`];
+  if (typeof resource.usedPct === 'number') {
+    parts.push(`used=${Math.round(resource.usedPct)}%`);
+  }
+  if (resource.resetsAt !== null) {
+    parts.push(`reset=${new Date(resource.resetsAt * 1000).toISOString()}`);
+  }
+  return parts.join(' ');
 }
 
 export function formatResourceStrategyReport(report: ResourceStrategyReport): string {

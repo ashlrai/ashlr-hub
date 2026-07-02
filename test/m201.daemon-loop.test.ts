@@ -174,8 +174,8 @@ vi.mock('../src/core/run/learned-router.js', () => ({
   }),
 }));
 
-vi.mock('../src/core/config.js', () => ({
-  loadConfig: () => ({
+function defaultReloadConfig(): AshlrConfig {
+  return {
     version: 1,
     daemon: {
       dailyBudgetUsd: 1.0,
@@ -183,7 +183,12 @@ vi.mock('../src/core/config.js', () => ({
       parallel: 2,
       intervalMs: 50,
     },
-  }),
+  } as AshlrConfig;
+}
+
+const mockLoadConfig = vi.fn(defaultReloadConfig);
+vi.mock('../src/core/config.js', () => ({
+  loadConfig: (...args: unknown[]) => mockLoadConfig(...args),
 }));
 
 // ---------------------------------------------------------------------------
@@ -263,6 +268,8 @@ beforeEach(() => {
   mockRunAutoMergePass.mockResolvedValue({ merged: 0 });
   mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'backlog-build', reasons: ['mock backlog'] });
   mockLoadBacklog.mockReturnValue(null);
+  mockLoadConfig.mockReset();
+  mockLoadConfig.mockImplementation(defaultReloadConfig);
   // Default: builtin backend (route to runSwarm path).
   mockRouteBackend.mockReturnValue({ backend: 'builtin', tier: 'local', reason: 'mock' });
   // Default: local engine tier.
@@ -1064,6 +1071,26 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     // One tick happened (ticks array has at least one entry from the dry-run tick).
     expect(state.ticks.length).toBeGreaterThanOrEqual(1);
     expect(state.ticks.at(-1)?.dryRun).toBe(true);
+  });
+
+  it('E1b: runDaemon once=true reloads Foundry policy from disk before ticking', async () => {
+    enrollWithItems(1);
+    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'verify-only', reasons: ['caller cfg would enforce verify-only'] });
+    mockLoadConfig.mockReturnValue({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { autonomyControlLoop: false, autoMerge: { enabled: true } },
+    } as AshlrConfig);
+
+    const callerCfg = {
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { autoMerge: { enabled: true } },
+    } as AshlrConfig;
+    const state = await runDaemon(callerCfg, { once: true, dryRun: false });
+
+    expect(mockBuildResourceStrategyReport).not.toHaveBeenCalled();
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(state.running).toBe(false);
+    expect(state.ticks.at(-1)?.reason).toBe('ok');
   });
 
   it('E2: runDaemon loop with maxCycles=2 runs exactly 2 ticks and stops', async () => {

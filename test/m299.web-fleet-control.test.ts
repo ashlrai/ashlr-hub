@@ -133,10 +133,13 @@ describe('POST /api/fleet/pause|resume', () => {
     const pausedFleet = JSON.parse(fleetPaused.body) as {
       killed: boolean;
       autonomyControlMode?: unknown;
+      backends?: Array<{ resource?: { availability?: unknown } }>;
       autonomyDirection?: { mode?: unknown; resources?: unknown };
     };
     expect(pausedFleet.killed).toBe(true);
     expect(['disabled', 'advisory', 'executable']).toContain(pausedFleet.autonomyControlMode);
+    expect(['open', 'near', 'throttled', 'exhausted', 'unreachable', 'unknown', 'not-sensed'])
+      .toContain(pausedFleet.backends?.[0]?.resource?.availability);
     expect(typeof pausedFleet.autonomyDirection?.mode).toBe('string');
     expect(typeof pausedFleet.autonomyDirection?.resources).toBe('object');
 

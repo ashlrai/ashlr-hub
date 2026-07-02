@@ -23,7 +23,19 @@ import type { AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
 import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
 import type { GuardHealthDiagnosis } from '../daemon/guard-health.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
+import type { BackendAvailability, BackendResourceState } from '../fabric/resource-monitor.js';
 import { listEnrolled } from '../sandbox/policy.js';
+
+export interface FleetBackendResourceStatus {
+  availability: BackendAvailability | 'not-sensed';
+  usedPct: number | null;
+  cap: number | null;
+  capUnit: BackendResourceState['capUnit'];
+  capWindow: string | null;
+  resetsAt: number | null;
+  reason: string;
+  snapshotAt: string | null;
+}
 
 /** A single backend's recent activity + quota standing. */
 export interface FleetBackendStatus {
@@ -33,6 +45,8 @@ export interface FleetBackendStatus {
   dispatchesRecent: number;
   /** Quota standing: 'unlimited' when no rate limit is configured. */
   quota: 'ok' | 'warn' | 'over' | 'unlimited';
+  /** Resource availability for the allowed backend, when sensed or explicitly unsensed. */
+  resource?: FleetBackendResourceStatus;
 }
 
 /** Shared filesystem queue health, when multi-machine queueing is enabled. */
@@ -168,6 +182,49 @@ export function resolveAutonomyControlMode(cfg: AshlrConfig): FleetAutonomyContr
   return foundry['autonomyControlLoop'] === false ? 'advisory' : 'executable';
 }
 
+function backendResourceStatus(
+  state: BackendResourceState | undefined,
+  fallbackReason = 'no resource sensor reported this allowed backend',
+): FleetBackendResourceStatus {
+  if (!state) {
+    return {
+      availability: 'not-sensed',
+      usedPct: null,
+      cap: null,
+      capUnit: null,
+      capWindow: null,
+      resetsAt: null,
+      reason: fallbackReason,
+      snapshotAt: null,
+    };
+  }
+  return {
+    availability: state.availability,
+    usedPct: state.usedPct,
+    cap: state.cap,
+    capUnit: state.capUnit,
+    capWindow: state.capWindow,
+    resetsAt: state.resetsAt,
+    reason: state.reason,
+    snapshotAt: state.snapshotAt,
+  };
+}
+
+async function attachBackendResources(backends: FleetBackendStatus[], cfg: AshlrConfig): Promise<void> {
+  const byBackend = new Map<EngineId, BackendResourceState>();
+  let fallbackReason = 'no resource sensor reported this allowed backend';
+  try {
+    const { getResourceSnapshot } = await import('../fabric/resource-monitor.js');
+    const snapshot = await getResourceSnapshot(cfg);
+    for (const state of snapshot.backends) byBackend.set(state.backend, state);
+  } catch {
+    fallbackReason = 'resource snapshot unavailable';
+  }
+  for (const backend of backends) {
+    backend.resource = backendResourceStatus(byBackend.get(backend.backend), fallbackReason);
+  }
+}
+
 /**
  * Build a read-only snapshot of the fleet. Async because the backlog scan is
  * async. NEVER throws — each source is independently guarded.
@@ -219,6 +276,11 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       quota = 'unlimited';
     }
     backends.push({ backend, dispatchesRecent, quota });
+  }
+  try {
+    await attachBackendResources(backends, cfg);
+  } catch {
+    // Optional observability only; backend rows remain useful without resources.
   }
 
   // ── queue (backlog size) ──────────────────────────────────────────────────

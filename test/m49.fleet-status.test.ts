@@ -301,6 +301,21 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(claude.dispatchesRecent).toBe(0);
   });
 
+  it('includes resource availability for allowed backends and marks unsensed backends', async () => {
+    const cfg = withFoundry({ allowedBackends: ['builtin', 'local-coder'] });
+    const s = await buildFleetStatus(cfg);
+    const builtin = s.backends.find((b) => b.backend === 'builtin')!;
+    const localCoder = s.backends.find((b) => b.backend === 'local-coder')!;
+
+    expect(builtin.resource?.availability).toBe('open');
+    expect(localCoder.resource).toMatchObject({
+      availability: 'not-sensed',
+      usedPct: null,
+      cap: null,
+      reason: expect.any(String),
+    });
+  });
+
   it('dispatchesRecent reflects recorded quota uses', async () => {
     const backend: EngineId = 'claude';
     const cfg = withFoundry({ allowedBackends: [backend] });
@@ -464,8 +479,36 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       generatedAt: '2026-06-17T00:00:00.000Z',
       daemon: { running: true, lastTickAt: '2026-06-17T00:00:00.000Z', todaySpentUsd: 1.2345 },
       backends: [
-        { backend: 'builtin', dispatchesRecent: 4, quota: 'unlimited' },
-        { backend: 'claude', dispatchesRecent: 2, quota: 'warn' },
+        {
+          backend: 'builtin',
+          dispatchesRecent: 4,
+          quota: 'unlimited',
+          resource: {
+            availability: 'open',
+            usedPct: 0,
+            cap: null,
+            capUnit: null,
+            capWindow: null,
+            resetsAt: null,
+            reason: 'builtin backend is always available',
+            snapshotAt: '2026-06-17T00:00:00.000Z',
+          },
+        },
+        {
+          backend: 'claude',
+          dispatchesRecent: 2,
+          quota: 'warn',
+          resource: {
+            availability: 'not-sensed',
+            usedPct: null,
+            cap: null,
+            capUnit: null,
+            capWindow: null,
+            resetsAt: null,
+            reason: 'no resource sensor reported this allowed backend',
+            snapshotAt: null,
+          },
+        },
       ],
       queue: {
         backlogItems: 7,
@@ -547,6 +590,8 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('builtin');
     expect(out).toContain('claude');
     expect(out).toContain('quota=warn');
+    expect(out).toContain('resource=open used=0%');
+    expect(out).toContain('resource=not-sensed');
     expect(out).toContain('7 backlog item(s)');
     expect(out).toContain('next:          Ship autonomy debugger (goal, score 5)');
     expect(out).toContain('shared:        ok / 2 active / 1 owned / 1 reclaimable / 2 cooling / stale lock');

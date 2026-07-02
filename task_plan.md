@@ -47,6 +47,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Make Foundry autonomy control executable by default when configured
 - [x] Follow-up: Pre-scan executable direction and hide stale unenrolled backlog from status
 - [x] Follow-up: Surface effective autonomy control mode in CLI/API/Mission Control
+- [x] Follow-up: Reload full daemon config live and surface backend resource availability
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -93,6 +94,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Executable resource direction must run before expensive backlog/scanner/planner refresh. When the fleet is in pause/verify-only, it should spend the tick on safety/verification/merge drain, not on generating or refreshing more candidate work.
 - `fleet status` should never treat stale persisted backlog from missing or unenrolled repos as live work. Read-only status can use cached snapshots, but must filter visibility to enrolled existing repos.
 - Effective autonomy authority must be explicit in operator surfaces. `disabled`, `advisory`, and `executable` mean materially different risk/control postures and should not be inferred from a hidden boolean.
+- Running daemons must reload full config, not just `daemon`, so Foundry policy, auto-merge settings, backend caps, and routing controls can change without service restarts.
+- Backend status should show resource availability for every allowed backend, including `not-sensed` for allowed engines without a resource sensor.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -128,6 +131,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Agent audits identified next high-leverage lanes: expose executable/advisory/disabled control mode explicitly, add effective config visibility, show resource availability in backend status, explain hidden stale backlog counts, make direction report basis visible, enforce exact judge/verify cost accounting, bind verification to the same base tree as merge, and replace readiness approximation with a shared dry-run gate explainer.
 - Current pre-scan direction pass moves daemon resource planning ahead of `buildBacklog()`, uses cached enrolled backlog counts for the lightweight direction snapshot, filters `FleetStatus.queue` to enrolled existing repos, and updates the self-target auto-merge gate test so `allowSelfMerge=true` is explicit.
 - Current control-mode pass adds a single effective `autonomyControlMode` resolver and surfaces it in `FleetStatus`, `/api/fleet`, `ControlDaemon`, `/api/control`, CLI fleet status, and Mission Control hero/detail UI while preserving the legacy `autonomyControlLoop` boolean.
+- Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch in verification** - Effective autonomy control mode is implemented and under focused test; running final gates and push.
+**Current batch in verification** - Full live config reload and backend resource status are implemented; focused tests passed; running final gates and push.

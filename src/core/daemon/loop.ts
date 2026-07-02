@@ -113,6 +113,14 @@ function autonomyControlEnabled(cfg: AshlrConfig): boolean {
   return foundry['autonomyControlLoop'] !== false;
 }
 
+function reloadLiveConfigForDaemon(fallbackCfg: AshlrConfig): AshlrConfig {
+  try {
+    return loadConfig();
+  } catch {
+    return fallbackCfg;
+  }
+}
+
 function cachedBacklogCountForEnrolledRepos(enrolled: string[]): number {
   try {
     const enrolledRepos = new Set(enrolled.map((repo) => resolve(repo)).filter((repo) => existsSync(repo)));
@@ -2204,9 +2212,8 @@ export async function runDaemon(
 
   try {
     if (opts.once) {
-      // Single-tick mode — reload config so a manual tick picks up disk changes.
-      let liveCfg = cfg;
-      try { liveCfg = { ...cfg, daemon: loadConfig().daemon ?? cfg.daemon }; } catch { liveCfg = cfg; }
+      // Single-tick mode — reload full config so a manual tick picks up disk changes.
+      const liveCfg = reloadLiveConfigForDaemon(cfg);
       if (heartbeatDaemonLock(daemonLock)) {
         await tick(liveCfg, { dryRun: opts.dryRun });
       }
@@ -2232,8 +2239,7 @@ export async function runDaemon(
           if (cyclesLeft-- <= 0) break;
           if (killSwitchOn()) break;
 
-          let liveCfg = cfg;
-          try { liveCfg = { ...cfg, daemon: loadConfig().daemon ?? cfg.daemon }; } catch { liveCfg = cfg; }
+          const liveCfg = reloadLiveConfigForDaemon(cfg);
 
           const currentLoaded = loadDaemonStateStrict();
           if (!currentLoaded.ok) {
@@ -2290,11 +2296,10 @@ export async function runDaemon(
           // Kill switch check — halt immediately.
           if (killSwitchOn()) break;
 
-          // M85: reload config from disk each iteration so daemon tuning
-          // (budget/parallel/interval/cooldown) takes effect without a restart.
-          // Never throws — falls back to the caller cfg's daemon section.
-          let liveCfg = cfg;
-          try { liveCfg = { ...cfg, daemon: loadConfig().daemon ?? cfg.daemon }; } catch { liveCfg = cfg; }
+          // M85/M309: reload full config from disk each iteration so daemon
+          // tuning, Foundry policy, auto-merge gates, and backend caps take
+          // effect without a restart. Never throws — falls back to caller cfg.
+          const liveCfg = reloadLiveConfigForDaemon(cfg);
 
           // Budget check — halt when daily cap exhausted.
           const currentLoaded = loadDaemonStateStrict();
