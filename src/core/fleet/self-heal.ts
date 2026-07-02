@@ -35,6 +35,8 @@ export interface BreakageResult {
   broken: boolean;
   /** True only when the repo had verify commands and every checked command produced a trustworthy result. */
   verified?: boolean;
+  /** Verification kinds proven green before the first failure. */
+  clearedKinds?: Array<'build' | 'test'>;
   kind?: 'build' | 'test';
   /** First non-blank failure line from the command output, capped at 200 chars. */
   detail?: string;
@@ -102,20 +104,24 @@ export async function detectBreakage(
       cfg?.foundry?.timeoutMs ?? 90_000,
       90_000,
     );
+    const clearedKinds = new Set<'build' | 'test'>();
 
     for (const vc of commands) {
+      const kind = kindOf(vc.kind);
       const result = runVerifyCommand(vc, repoDir, cfg as AshlrConfig ?? {} as AshlrConfig, { timeoutMs });
       if (!result.ok) {
         return {
           broken: true,
           verified: true,
-          kind: kindOf(vc.kind),
+          clearedKinds: Array.from(clearedKinds),
+          kind,
           detail: firstFailureLine(result.output),
         };
       }
+      clearedKinds.add(kind);
     }
 
-    return { broken: false, verified: true };
+    return { broken: false, verified: true, clearedKinds: Array.from(clearedKinds) };
   } catch {
     // Never throw, but do not treat detector failures as proven green.
     return { broken: false, verified: false, reason: 'detect-error' };
@@ -203,11 +209,16 @@ function writeJsonAtomic(filePath: string, value: unknown): void {
   renameSync(tmp, filePath);
 }
 
-function isSelfHealItemForRepo(value: unknown, repoKey: string): boolean {
+function isSelfHealItemForRepo(
+  value: unknown,
+  repoKey: string,
+  kinds?: ReadonlySet<'build' | 'test'>,
+): boolean {
   if (!value || typeof value !== 'object') return false;
   const item = value as Partial<WorkItem>;
   if (typeof item.repo !== 'string') return false;
   if (!Array.isArray(item.tags) || !item.tags.includes('self-heal')) return false;
+  if (kinds && !item.tags.some((tag) => kinds.has(tag as 'build' | 'test'))) return false;
   try {
     return resolve(item.repo) === repoKey;
   } catch {
@@ -215,13 +226,26 @@ function isSelfHealItemForRepo(value: unknown, repoKey: string): boolean {
   }
 }
 
-function pruneSelfHealItemsFromQueue(repoDir: string): number {
+function invalidSelfHealItem(value: unknown, enrolledRepoKeys: ReadonlySet<string>): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Partial<WorkItem>;
+  if (!Array.isArray(item.tags) || !item.tags.includes('self-heal')) return false;
+  if (typeof item.repo !== 'string') return true;
+  try {
+    const repoKey = resolve(item.repo);
+    return !enrolledRepoKeys.has(repoKey) || !existsSync(item.repo);
+  } catch {
+    return true;
+  }
+}
+
+function pruneSelfHealItemsFromQueue(repoDir: string, kinds?: ReadonlySet<'build' | 'test'>): number {
   try {
     const qPath = selfHealQueuePath();
     const existing = readWorkItemsArray(qPath);
     if (existing.length === 0) return 0;
     const repoKey = resolve(repoDir);
-    const filtered = existing.filter((item) => !isSelfHealItemForRepo(item, repoKey));
+    const filtered = existing.filter((item) => !isSelfHealItemForRepo(item, repoKey, kinds));
     const removed = existing.length - filtered.length;
     if (removed > 0) writeJsonAtomic(qPath, filtered);
     return removed;
@@ -230,7 +254,7 @@ function pruneSelfHealItemsFromQueue(repoDir: string): number {
   }
 }
 
-function pruneSelfHealItemsFromBacklog(repoDir: string): number {
+function pruneSelfHealItemsFromBacklog(repoDir: string, kinds?: ReadonlySet<'build' | 'test'>): number {
   try {
     const bPath = backlogPath();
     if (!existsSync(bPath)) return 0;
@@ -238,7 +262,7 @@ function pruneSelfHealItemsFromBacklog(repoDir: string): number {
     const repoKey = resolve(repoDir);
 
     if (Array.isArray(parsed)) {
-      const filtered = parsed.filter((item) => !isSelfHealItemForRepo(item, repoKey));
+      const filtered = parsed.filter((item) => !isSelfHealItemForRepo(item, repoKey, kinds));
       const removed = parsed.length - filtered.length;
       if (removed > 0) writeJsonAtomic(bPath, filtered);
       return removed;
@@ -250,7 +274,7 @@ function pruneSelfHealItemsFromBacklog(repoDir: string): number {
       Array.isArray((parsed as { items?: unknown }).items)
     ) {
       const envelope = parsed as { items: unknown[] };
-      const filtered = envelope.items.filter((item) => !isSelfHealItemForRepo(item, repoKey));
+      const filtered = envelope.items.filter((item) => !isSelfHealItemForRepo(item, repoKey, kinds));
       const removed = envelope.items.length - filtered.length;
       if (removed > 0) writeJsonAtomic(bPath, { ...parsed, items: filtered });
       return removed;
@@ -262,8 +286,53 @@ function pruneSelfHealItemsFromBacklog(repoDir: string): number {
   }
 }
 
-function pruneStaleSelfHealItems(repoDir: string): number {
-  return pruneSelfHealItemsFromQueue(repoDir) + pruneSelfHealItemsFromBacklog(repoDir);
+function pruneStaleSelfHealItems(repoDir: string, kinds?: Array<'build' | 'test'>): number {
+  const kindSet = kinds && kinds.length > 0 ? new Set(kinds) : undefined;
+  return pruneSelfHealItemsFromQueue(repoDir, kindSet) + pruneSelfHealItemsFromBacklog(repoDir, kindSet);
+}
+
+function pruneInvalidSelfHealItems(repos: string[]): number {
+  const enrolledRepoKeys = new Set<string>();
+  for (const repo of repos) {
+    try { enrolledRepoKeys.add(resolve(repo)); } catch { /* ignore invalid registry entries */ }
+  }
+
+  let removed = 0;
+  try {
+    const qPath = selfHealQueuePath();
+    const existing = readWorkItemsArray(qPath);
+    if (existing.length > 0) {
+      const filtered = existing.filter((item) => !invalidSelfHealItem(item, enrolledRepoKeys));
+      removed += existing.length - filtered.length;
+      if (filtered.length !== existing.length) writeJsonAtomic(qPath, filtered);
+    }
+  } catch {
+    // Best-effort only.
+  }
+
+  try {
+    const bPath = backlogPath();
+    if (!existsSync(bPath)) return removed;
+    const parsed = JSON.parse(readFileSync(bPath, 'utf8')) as unknown;
+    if (Array.isArray(parsed)) {
+      const filtered = parsed.filter((item) => !invalidSelfHealItem(item, enrolledRepoKeys));
+      removed += parsed.length - filtered.length;
+      if (filtered.length !== parsed.length) writeJsonAtomic(bPath, filtered);
+    } else if (
+      parsed &&
+      typeof parsed === 'object' &&
+      Array.isArray((parsed as { items?: unknown }).items)
+    ) {
+      const envelope = parsed as { items: unknown[] };
+      const filtered = envelope.items.filter((item) => !invalidSelfHealItem(item, enrolledRepoKeys));
+      removed += envelope.items.length - filtered.length;
+      if (filtered.length !== envelope.items.length) writeJsonAtomic(bPath, { ...parsed, items: filtered });
+    }
+  } catch {
+    // Best-effort only.
+  }
+
+  return removed;
 }
 
 /**
@@ -308,6 +377,7 @@ export async function runSelfHealCycle(
     }
 
     const repos = listEnrolled();
+    pruneInvalidSelfHealItems(repos);
     const broken: string[] = [];
     const healItems: WorkItem[] = [];
 
@@ -315,6 +385,7 @@ export async function runSelfHealCycle(
       try {
         const result = await detectBreakage(repo, cfg);
         if (result.broken) {
+          pruneStaleSelfHealItems(repo);
           broken.push(repo);
           const item = proposeHeal(repo, result, cfg);
           healItems.push(item);

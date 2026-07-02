@@ -368,15 +368,18 @@ describe('runSelfHealCycle', () => {
       'utf8',
     );
 
-    mockListEnrolled.mockReturnValue([repoA]);
+    mockListEnrolled.mockReturnValue([repoA, repoB]);
     mockDetectVerifyCommands.mockReturnValue([GREEN_VC]);
-    mockRunVerifyCommand.mockReturnValue(OK_RESULT);
+    mockRunVerifyCommand.mockImplementation((_vc: unknown, dir: string) => {
+      if (dir === repoB) return FAIL_RESULT;
+      return OK_RESULT;
+    });
 
     const result = await runSelfHealCycle(makeCfg());
 
-    expect(result.checked).toBe(1);
-    expect(result.broken).toHaveLength(0);
-    expect(result.healItems).toHaveLength(0);
+    expect(result.checked).toBe(2);
+    expect(result.broken).toEqual([repoB]);
+    expect(result.healItems.map((item) => item.id)).toEqual([staleB.id]);
 
     const queue = JSON.parse(
       fs.readFileSync(path.join(ashlrDir, 'self-heal-queue.json'), 'utf8'),
@@ -386,7 +389,136 @@ describe('runSelfHealCycle', () => {
     const backlog = JSON.parse(
       fs.readFileSync(path.join(ashlrDir, 'backlog.json'), 'utf8'),
     ) as { items: WorkItem[] };
-    expect(backlog.items.map((item) => item.id)).toEqual([staleB.id, inventA.id]);
+    expect(backlog.items.map((item) => item.id)).toEqual([inventA.id]);
+  });
+
+  it('replaces stale prior-kind self-heal items with the current first failure', async () => {
+    const repoA = path.join(tmpHome, 'repo-a');
+    fs.mkdirSync(repoA, { recursive: true });
+    const ashlrDir = path.join(tmpHome, '.ashlr');
+    fs.mkdirSync(ashlrDir, { recursive: true });
+
+    const staleBuild = proposeHeal(repoA, {
+      broken: true,
+      kind: 'build',
+      detail: 'old TypeScript error',
+    });
+    const staleTest = proposeHeal(repoA, {
+      broken: true,
+      kind: 'test',
+      detail: 'old test failure',
+    });
+    const inventA: WorkItem = {
+      ...staleBuild,
+      id: 'invent-a',
+      source: 'invent',
+      tags: ['generative'],
+      title: 'Invent a useful repo-a feature',
+    };
+
+    fs.writeFileSync(
+      path.join(ashlrDir, 'self-heal-queue.json'),
+      JSON.stringify([staleBuild, staleTest], null, 2),
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: '2026-07-02T00:00:00.000Z',
+        repos: [repoA],
+        items: [staleBuild, staleTest, inventA],
+      }, null, 2),
+      'utf8',
+    );
+
+    mockListEnrolled.mockReturnValue([repoA]);
+    mockDetectVerifyCommands.mockReturnValue([BUILD_VC, GREEN_VC]);
+    mockRunVerifyCommand
+      .mockReturnValueOnce(OK_RESULT)
+      .mockReturnValueOnce(FAIL_RESULT);
+
+    const result = await runSelfHealCycle(makeCfg());
+
+    expect(result.checked).toBe(1);
+    expect(result.broken).toEqual([repoA]);
+    expect(result.healItems).toHaveLength(1);
+    expect(result.healItems[0]!.id).toBe(staleTest.id);
+    expect(result.healItems[0]!.title).toContain('FAIL src/core/fleet/self-heal.ts');
+
+    const queue = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'self-heal-queue.json'), 'utf8'),
+    ) as WorkItem[];
+    expect(queue.map((item) => item.id)).toEqual([staleTest.id]);
+    expect(queue[0]!.title).toContain('FAIL src/core/fleet/self-heal.ts');
+
+    const backlog = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'backlog.json'), 'utf8'),
+    ) as { items: WorkItem[] };
+    expect(backlog.items.map((item) => item.id)).toEqual([inventA.id]);
+  });
+
+  it('drops self-heal items for missing or unenrolled repos', async () => {
+    const repoA = path.join(tmpHome, 'repo-a');
+    const repoB = path.join(tmpHome, 'repo-b');
+    const missingRepo = path.join(tmpHome, 'deleted-repo');
+    fs.mkdirSync(repoA, { recursive: true });
+    fs.mkdirSync(repoB, { recursive: true });
+    const ashlrDir = path.join(tmpHome, '.ashlr');
+    fs.mkdirSync(ashlrDir, { recursive: true });
+
+    const enrolled = proposeHeal(repoA, {
+      broken: true,
+      kind: 'build',
+      detail: 'still tracked',
+    });
+    const unenrolled = proposeHeal(repoB, {
+      broken: true,
+      kind: 'build',
+      detail: 'not enrolled',
+    });
+    const missing = proposeHeal(missingRepo, {
+      broken: true,
+      kind: 'test',
+      detail: 'deleted temp repo',
+    });
+    const inventUnenrolled: WorkItem = {
+      ...unenrolled,
+      id: 'invent-unenrolled',
+      source: 'invent',
+      tags: ['generative'],
+      title: 'Keep non-self-heal invent work untouched',
+    };
+
+    fs.writeFileSync(
+      path.join(ashlrDir, 'self-heal-queue.json'),
+      JSON.stringify([enrolled, unenrolled, missing], null, 2),
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: '2026-07-02T00:00:00.000Z',
+        repos: [repoA, repoB, missingRepo],
+        items: [enrolled, unenrolled, missing, inventUnenrolled],
+      }, null, 2),
+      'utf8',
+    );
+
+    mockListEnrolled.mockReturnValue([repoA]);
+    mockDetectVerifyCommands.mockReturnValue([]);
+
+    const result = await runSelfHealCycle(makeCfg());
+
+    expect(result.checked).toBe(1);
+    const queue = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'self-heal-queue.json'), 'utf8'),
+    ) as WorkItem[];
+    expect(queue.map((item) => item.id)).toEqual([enrolled.id]);
+
+    const backlog = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'backlog.json'), 'utf8'),
+    ) as { items: WorkItem[] };
+    expect(backlog.items.map((item) => item.id)).toEqual([enrolled.id, inventUnenrolled.id]);
   });
 
   it('keeps existing self-heal items when verification state is unknown', async () => {

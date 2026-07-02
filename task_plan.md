@@ -199,4 +199,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Added regression coverage for green pruning, unknown preservation, no-command preservation, and disabled self-heal no-mutation behavior.
 - [x] Verified focused self-heal and queued-autonomy suites plus typecheck.
 - [x] Run full lint/build/audit/diff gates and broader related tests.
+- [x] Commit and push the initial verified-green cleanup to `origin/master`.
+- [x] Live restart exposed a sharper stale-kind case: build repairs can be stale while tests remain red.
+- [x] Extended self-heal to keep one canonical current repair per repo and prune missing/unenrolled self-heal pollution.
+- [x] Run follow-up full gates.
 - [ ] Commit, push, resume/restart daemon, and verify live queue truth.
