@@ -162,7 +162,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch ready to ship** - API-model proposal gate parity and remote PR handoff truth are implemented with full verification passing; commit/push and live daemon restart remain.
+**Current batch shipped** - API-model proposal gate parity and remote PR handoff truth are implemented, fully verified, pushed to `origin/master`, and the live daemon/fleet have been restarted.
 
 ## Current Continuation
 - [x] Rechecked git/daemon/fleet state after the previous push.
@@ -227,4 +227,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Added hermetic regression coverage for API-model gate blocking/step capture and remote PR handoff truth.
 - [x] Focused gates passed: typecheck, diff check, 190 affected tests, and 149 merge/automerge/fleet/resource tests.
 - [x] Run full lint/build/audit/full-CI gates.
-- [ ] Commit, push to `origin/master`, resume/restart launchd daemon, and verify live autonomous status.
+- [x] Commit, push to `origin/master`, resume/restart launchd daemon, and verify live autonomous status.
