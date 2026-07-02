@@ -87,8 +87,8 @@ describe('M56 — executor keeps merge-to-main frontier-only (structural source 
     expect(merge).toMatch(/toMain = target === 'main'/);
   });
 
-  it('the squash-merge to main is guarded by toMain', () => {
-    // The `gh pr merge --squash` step only runs for a frontier (toMain) proposal.
+  it('the host auto-merge to main is guarded by toMain', () => {
+    // The `gh pr merge --auto --squash` step only runs for a frontier (toMain) proposal.
     expect(merge).toMatch(/if \(toMain && prUrl\)/);
   });
 

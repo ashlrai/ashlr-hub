@@ -664,3 +664,11 @@ describe('M47 autoMergeProposal — local happy path', () => {
     expect(loadProposal(p.id)!.status).toBe('approved');
   });
 });
+
+describe('M47 remote merge safety', () => {
+  it('does not request privileged GitHub merge bypass', () => {
+    const source = fs.readFileSync(path.resolve('src/core/inbox/merge.ts'), 'utf8');
+    expect(source).not.toContain('--admin');
+    expect(source).toContain("'--auto'");
+  });
+});

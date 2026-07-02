@@ -7,6 +7,7 @@
  *
  * Read-only routes (always available, no auth):
  *   GET /api/snapshot          -> buildSnapshot(cfg)
+ *   GET /api/config/effective  -> effective autonomy/daemon/foundry/backend config
  *   GET /api/portfolio         -> buildSnapshot(cfg).portfolio | null (read-only; M29)
  *   GET /api/runs              -> listRuns()
  *   GET /api/run/:id           -> loadRun(id) | 404
@@ -43,6 +44,7 @@ import { resolve as resolvePath } from 'node:path';
 
 import type { AshlrConfig } from '../types.js';
 import { buildSnapshot } from '../dashboard.js';
+import { loadEffectiveConfigSnapshot } from '../effective-config.js';
 import { listRuns, loadRun, runGoal } from '../run/orchestrator.js';
 import { listSwarms, loadSwarm } from '../swarm/store.js';
 import { buildRollup } from '../observability/rollup.js';
@@ -544,6 +546,14 @@ export async function handleApi(
       // M32: additive field so the frontend can show (not guess) whether the
       // dispatch/approve surfaces exist on this server instance.
       sendJson(res, 200, { ...snapshot, dispatchEnabled: ctx.allowDispatch });
+      return true;
+    }
+
+    // ── GET /api/config/effective ───────────────────────────────────────────
+    // Read-only operator config visibility. Re-reads raw config metadata so
+    // source labels can distinguish configured values from defaults.
+    if (path === '/api/config/effective' && method === 'GET') {
+      sendJson(res, 200, loadEffectiveConfigSnapshot());
       return true;
     }
 

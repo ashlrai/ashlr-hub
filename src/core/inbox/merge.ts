@@ -61,7 +61,7 @@
  * ║                                                                            ║
  * ║ Only after ALL gates pass do we mutate. Mutation paths:                    ║
  * ║   - REMOTE (preferred): open a PR to the default branch and best-effort    ║
- * ║     `gh pr merge --squash --admin`. Server-side branch protection / CI     ║
+ * ║     `gh pr merge --auto --squash` so branch protection / required checks   ║
  * ║     remain the outer safety net. gh failures NEVER throw.                  ║
  * ║   - LOCAL (fallback): merge the branch into the default branch via a       ║
  * ║     dedicated temp worktree (`git merge --no-ff`). We REFUSE the local     ║
@@ -101,7 +101,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
-import type { AshlrConfig, EngineTier, Proposal, ProposalVerifyResult } from '../types.js';
+import type { AshlrConfig, DecisionEntry, EngineTier, Proposal, ProposalVerifyResult } from '../types.js';
 import { loadProposal, setStatus, updateProposalField } from './store.js';
 import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
@@ -637,6 +637,304 @@ export function evaluateAutoMergeReadinessPreflight(
   } catch (err) {
     return block(`readiness preflight error: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+// ===========================================================================
+// 2c) Auto-merge gate explainer (PURE, read-only, shared display surface)
+// ===========================================================================
+
+export type AutoMergeGateCheckCode =
+  | 'auto-merge-disabled'
+  | 'proposal-missing'
+  | 'proposal-kind'
+  | 'missing-diff'
+  | 'missing-repo'
+  | 'merge-authority'
+  | 'verification-gate'
+  | 'missing-judge-evidence'
+  | 'missing-verification-evidence'
+  | 'missing-edv-evidence'
+  | 'provenance'
+  | 'risk-threshold'
+  | 'scope-cap'
+  | 'self-target-safety'
+  | 'self-target-policy'
+  | 'manager-gate';
+
+export interface AutoMergeGateCheck {
+  gate: string;
+  code: AutoMergeGateCheckCode;
+  ok: boolean;
+  detail: string;
+}
+
+export interface AutoMergeGateFacts {
+  trustBasis: 'tier' | 'verification';
+  target: MergeTarget | 'main';
+  maxRisk: RiskClass;
+  risk?: RiskClass;
+  scopeFiles?: number;
+  scopeLines?: number;
+  maxFiles?: number;
+  maxLines?: number;
+  selfTarget?: boolean;
+  allowSelfMerge?: boolean;
+}
+
+export interface AutoMergeGateExplanation {
+  mergeable: boolean;
+  reason: string;
+  checks: AutoMergeGateCheck[];
+  blockers: AutoMergeGateCheck[];
+  advisories: string[];
+  facts: AutoMergeGateFacts;
+}
+
+export interface ExplainAutoMergeGateOptions {
+  /**
+   * Decision entries already loaded by the caller. Required for explaining the
+   * verification trust basis without reading the decisions ledger here.
+   */
+  decisionsForProposal?: DecisionEntry[];
+  /**
+   * Pass true when the caller already knows the proposal targets ashlr-hub's own
+   * source. The explainer stays pure/read-only and never probes package.json.
+   */
+  selfTarget?: boolean;
+  /**
+   * Optional manager verdict supplied by a caller that already has one. When the
+   * manager gate is enabled and this is absent, the explainer reports missing
+   * evidence instead of invoking a judge.
+   */
+  managerVerdict?: { verdict: string; wouldMerge: boolean; rationale?: string };
+}
+
+function autoMergeConfigValue(cfg: AshlrConfig, key: string): unknown {
+  return ((cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge'] as Record<string, unknown> | undefined)?.[key];
+}
+
+function configuredTrustBasis(cfg: AshlrConfig): 'tier' | 'verification' {
+  return autoMergeConfigValue(cfg, 'trustBasis') === 'verification' ? 'verification' : 'tier';
+}
+
+function configuredMaxRisk(cfg: AshlrConfig): RiskClass {
+  const value = autoMergeConfigValue(cfg, 'maxRisk');
+  return value === 'medium' || value === 'high' ? value : 'low';
+}
+
+function configuredScopeCaps(cfg: AshlrConfig): { maxFiles: number; maxLines: number } {
+  const rawFiles = autoMergeConfigValue(cfg, 'maxAutomergeFiles');
+  const rawLines = autoMergeConfigValue(cfg, 'maxAutomergeLines');
+  return {
+    maxFiles: typeof rawFiles === 'number' && rawFiles >= 1 ? Math.floor(rawFiles) : 4,
+    maxLines: typeof rawLines === 'number' && rawLines >= 1 ? Math.floor(rawLines) : 150,
+  };
+}
+
+function countDiffScope(diff: string): { files: number; lines: number } {
+  let files = 0;
+  let lines = 0;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+++ ')) {
+      const p = line.slice(4).trim().split('\t')[0];
+      if (p && p !== '/dev/null') files++;
+      continue;
+    }
+    if (line.startsWith('+++') || line.startsWith('---')) continue;
+    if (line.startsWith('+') || line.startsWith('-')) lines++;
+  }
+  return { files, lines };
+}
+
+function verificationBlockerCode(reason: string): AutoMergeGateCheckCode {
+  if (reason.includes("no 'judged' decision") || reason.includes('judge attestation invalid')) {
+    return 'missing-judge-evidence';
+  }
+  if (reason.includes('proposal.verifyResult.passed')) return 'missing-verification-evidence';
+  if (reason.includes('EDV independent confirmation absent')) return 'missing-edv-evidence';
+  if (reason.includes('risk class')) return 'risk-threshold';
+  if (reason.includes('scope cap')) return 'scope-cap';
+  if (reason.includes('provenance check failed')) return 'provenance';
+  return 'verification-gate';
+}
+
+/**
+ * Explain, without side effects, whether the proposal is auto-mergeable from
+ * the evidence the caller already has. This is a display/helper surface for CLI,
+ * API, and UI: it never reads the inbox, decisions ledger, git state, enrollment
+ * policy, or package.json; it never runs verification or a judge.
+ *
+ * The mutating source of truth remains autoMergeProposal(). This helper reuses
+ * the same pure gate functions for authority, verification trust, provenance,
+ * risk, and self-target safety so display explanations follow gate behavior.
+ */
+export function explainAutoMergeGate(
+  proposal: Proposal | null | undefined,
+  cfg: AshlrConfig,
+  options: ExplainAutoMergeGateOptions = {},
+): AutoMergeGateExplanation {
+  const checks: AutoMergeGateCheck[] = [];
+  const advisories: string[] = [
+    'read-only explainer: mutation-time gates still re-check kill switch, enrollment, git state, verification, evidence persistence, and merge/PR execution',
+  ];
+  const trustBasis = configuredTrustBasis(cfg);
+  const maxRisk = configuredMaxRisk(cfg);
+  const caps = configuredScopeCaps(cfg);
+  const facts: AutoMergeGateFacts = {
+    trustBasis,
+    target: 'none',
+    maxRisk,
+    maxFiles: caps.maxFiles,
+    maxLines: caps.maxLines,
+  };
+  const add = (gate: string, code: AutoMergeGateCheckCode, ok: boolean, detail: string): void => {
+    checks.push({ gate, code, ok, detail });
+  };
+  const finish = (): AutoMergeGateExplanation => {
+    const blockers = checks.filter((check) => !check.ok);
+    return {
+      mergeable: blockers.length === 0,
+      reason:
+        blockers.length === 0
+          ? 'auto-merge gates are satisfied by available read-only evidence'
+          : blockers[0]!.detail,
+      checks,
+      blockers,
+      advisories,
+      facts,
+    };
+  };
+
+  if (cfg.foundry?.autoMerge?.enabled !== true) {
+    add('config', 'auto-merge-disabled', false, 'auto-merge disabled (cfg.foundry.autoMerge.enabled !== true)');
+    return finish();
+  }
+  add('config', 'auto-merge-disabled', true, 'auto-merge is enabled');
+
+  if (!proposal) {
+    add('proposal', 'proposal-missing', false, 'proposal not found');
+    return finish();
+  }
+
+  if (proposal.kind !== 'patch' && proposal.kind !== 'pr') {
+    add('proposal', 'proposal-kind', false, `proposal kind '${proposal.kind}' is not mergeable (need patch|pr)`);
+    return finish();
+  }
+  add('proposal', 'proposal-kind', true, `proposal kind '${proposal.kind}' is mergeable`);
+
+  const diff = proposal.diff ?? '';
+  if (!diff.trim()) {
+    add('proposal', 'missing-diff', false, 'proposal has no diff to merge');
+    return finish();
+  }
+  add('proposal', 'missing-diff', true, 'proposal has a diff');
+
+  if (!proposal.repo) {
+    add('proposal', 'missing-repo', false, 'proposal has no repo');
+    return finish();
+  }
+  add('proposal', 'missing-repo', true, 'proposal has a target repo');
+
+  if (trustBasis === 'verification') {
+    facts.target = 'main';
+    const verdict = evaluateVerificationGate(proposal, cfg, options.decisionsForProposal ?? []);
+    add('authority', verificationBlockerCode(verdict.reason), verdict.authorized, verdict.reason);
+  } else {
+    const target = mergeTargetForTier(proposal.engineTier);
+    facts.target = target;
+    const authority =
+      target === 'main'
+        ? evaluateMergeAuthority(proposal, cfg)
+        : target === 'branch'
+          ? evaluateBranchAuthority(proposal, cfg)
+          : { authorized: false, reason: `engineTier '${proposal.engineTier ?? 'unset'}' is proposal-only (local)` };
+    add('authority', 'merge-authority', authority.authorized, authority.reason);
+  }
+
+  const provenance = verifyProvenance(proposal);
+  add(
+    'provenance',
+    'provenance',
+    provenance.ok,
+    provenance.ok ? provenance.reason ?? 'valid signed provenance' : `provenance check failed: ${provenance.reason}`,
+  );
+
+  const risk = classifyRisk(proposal);
+  facts.risk = risk;
+  add(
+    'risk',
+    'risk-threshold',
+    RISK_ORDER[risk] <= RISK_ORDER[maxRisk],
+    RISK_ORDER[risk] <= RISK_ORDER[maxRisk]
+      ? `risk class '${risk}' is within maxRisk '${maxRisk}'`
+      : `risk class '${risk}' exceeds maxRisk '${maxRisk}'`,
+  );
+
+  const scope = countDiffScope(diff);
+  facts.scopeFiles = scope.files;
+  facts.scopeLines = scope.lines;
+  add(
+    'scope',
+    'scope-cap',
+    scope.files <= caps.maxFiles && scope.lines <= caps.maxLines,
+    scope.files <= caps.maxFiles && scope.lines <= caps.maxLines
+      ? `scope is within caps (${scope.files} file(s), ${scope.lines} line(s); max ${caps.maxFiles}/${caps.maxLines})`
+      : `scope cap exceeded (${scope.files} file(s), ${scope.lines} line(s); max ${caps.maxFiles}/${caps.maxLines})`,
+  );
+
+  if (proposal.verifyResult?.passed !== true) {
+    add(
+      'verification',
+      'missing-verification-evidence',
+      false,
+      proposal.verifyResult?.passed === false
+        ? `verification did not pass: ${proposal.verifyResult.detail ?? proposal.verifyResult.failed?.join('; ') ?? 'failed'}`
+        : 'verification evidence is missing: proposal.verifyResult.passed must be true',
+    );
+  } else {
+    add('verification', 'missing-verification-evidence', true, proposal.verifyResult.detail ?? 'verification passed');
+  }
+
+  const selfTarget = options.selfTarget === true;
+  facts.selfTarget = selfTarget;
+  const allowSelfMerge = autoMergeConfigValue(cfg, 'allowSelfMerge') === true;
+  facts.allowSelfMerge = allowSelfMerge;
+  if (selfTarget) {
+    const guard = guardSafetyTests(diff);
+    add(
+      'self-target',
+      'self-target-safety',
+      !guard.weakened,
+      guard.weakened ? `self-target guard: ${guard.reason}` : 'self-target safety guard did not detect weakening',
+    );
+    add(
+      'self-target',
+      'self-target-policy',
+      allowSelfMerge,
+      allowSelfMerge
+        ? 'self-target auto-merge is explicitly allowed'
+        : 'self-target autonomous merge requires cfg.foundry.autoMerge.allowSelfMerge=true',
+    );
+  }
+
+  const managerGateEnabled = autoMergeConfigValue(cfg, 'managerGate') === true;
+  if (managerGateEnabled) {
+    const verdict = options.managerVerdict;
+    if (!verdict) {
+      add('manager', 'manager-gate', false, 'manager quality gate evidence is missing');
+    } else {
+      add(
+        'manager',
+        'manager-gate',
+        verdict.verdict === 'ship' && verdict.wouldMerge === true,
+        verdict.verdict === 'ship' && verdict.wouldMerge === true
+          ? `manager gate passed: verdict='${verdict.verdict}', wouldMerge=true`
+          : `manager gate blocked: verdict='${verdict.verdict}', wouldMerge=${verdict.wouldMerge}${verdict.rationale ? ` — ${verdict.rationale}` : ''}`,
+      );
+    }
+  }
+
+  return finish();
 }
 
 // ===========================================================================
@@ -1891,6 +2189,7 @@ export async function autoMergeProposal(
 
     let merged = false;
     let branchApplied = false; // M56: mid-tier applied to a branch/PR (never main)
+    let remoteHandoff = false; // Remote PR created; host gates own the actual merge.
     let reason = '';
     let prUrl: string | undefined;
 
@@ -1937,29 +2236,38 @@ export async function autoMergeProposal(
         reason = `staged on ${branch} but PR creation failed: ${pr.detail}`;
       } else {
         prUrl = pr.url ?? undefined;
-        // Best-effort admin squash-merge. NEVER throw — branch protection /
-        // missing perms simply leave the PR open for a human.
+        // Best-effort host auto-merge. Never request privileged bypass:
+        // branch protection / required checks must remain the outer safety net.
         // M56: only a frontier (toMain) proposal is ever squash-merged to main.
         // A mid-tier proposal opens a PR and STOPS — a human merges it.
+        remoteHandoff = true;
         let mergeNote = toMain ? 'PR opened' : 'PR opened for review (mid-tier — never merged to main)';
         if (toMain && prUrl) {
           try {
-            execFileSync('gh', ['pr', 'merge', '--squash', '--admin', prUrl], {
+            execFileSync('gh', ['pr', 'merge', '--auto', '--squash', prUrl], {
               cwd: repo,
               timeout: GIT_TIMEOUT,
               stdio: 'pipe',
               encoding: 'utf8',
               env: { ...process.env, GH_NO_UPDATE_NOTIFIER: '1', NO_COLOR: '1' },
             });
-            merged = true;
-            mergeNote = 'PR opened and squash-merged';
+            mergeNote = 'PR opened with host auto-merge enabled';
           } catch {
-            mergeNote = 'PR opened (auto-merge deferred to host gates)';
+            mergeNote = 'PR opened; host auto-merge not enabled';
           }
         } else if (!toMain && prUrl) {
           branchApplied = true;
+          remoteHandoff = false;
         }
         reason = `${mergeNote}${prUrl ? `: ${prUrl}` : ''}`;
+        if (remoteHandoff && !merged) {
+          branchApplied = false;
+        }
+        // A created remote PR is a successful handoff, but not a merge. We mark
+        // the proposal applied below via reason/status to avoid duplicate PRs.
+        if (remoteHandoff) {
+          reason = `${reason} (remote handoff; awaiting host merge)`;
+        }
       }
     } else if (toMain) {
       // LOCAL fallback — conservative; refuses if default branch is checked out.
@@ -1977,7 +2285,7 @@ export async function autoMergeProposal(
     // it can be retried or hand-merged; the staging branch remains for review).
     // M56: success is a main-merge OR a mid-tier branch/PR application. Either
     // marks the proposal 'applied' so the pass does not re-open a PR every tick.
-    const success = merged || branchApplied;
+    const success = merged || branchApplied || remoteHandoff;
     if (success) {
       setStatus(id, 'applied', reason);
     }

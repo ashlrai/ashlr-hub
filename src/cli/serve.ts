@@ -273,6 +273,7 @@ function printUsage(): void {
   console.log('');
   console.log('  ' + bold('API routes (read-only):'));
   console.log(`    ${cyan('GET  /api/snapshot')}        Aggregated config + run/swarm/genome snapshot`);
+  console.log(`    ${cyan('GET  /api/config/effective')} Read-only effective operator config`);
   console.log(`    ${cyan('GET  /api/runs')}            List past runs`);
   console.log(`    ${cyan('GET  /api/run/:id')}         Single run detail`);
   console.log(`    ${cyan('GET  /api/swarms')}          List past swarms`);

@@ -10,6 +10,8 @@
 
 // Config (read + write of ~/.ashlr/config.json with validation)
 export { loadConfig, saveConfig, defaultConfig, CONFIG_PATH } from '../core/config.js';
+export { buildEffectiveConfigSnapshot, loadEffectiveConfigSnapshot } from '../core/effective-config.js';
+export type { EffectiveConfigSnapshot, EffectiveConfigValue, EffectiveBackendConfig } from '../core/effective-config.js';
 
 // Desktop index (read-only)
 export { loadIndex } from '../core/index-engine.js';

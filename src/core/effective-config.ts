@@ -1,0 +1,354 @@
+/**
+ * Read-only effective config snapshot for operator visibility.
+ *
+ * This deliberately projects a curated subset of autonomy/daemon/foundry/backend
+ * settings instead of dumping arbitrary config. Secret-like values are omitted;
+ * API credentials are represented only by env var names.
+ */
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import type { AshlrConfig, EngineId, EngineKind, EngineTier } from './types.js';
+import { defaultConfig, loadConfig } from './config.js';
+import { resolveAutonomyControlMode } from './fleet/status.js';
+import { resolveEngineRegistry } from './run/engine-registry.js';
+
+export type EffectiveConfigSource = 'configured' | 'default' | 'derived';
+
+export interface EffectiveConfigValue<T> {
+  value: T;
+  source: EffectiveConfigSource;
+  path?: string;
+}
+
+export interface EffectiveBackendConfig {
+  backend: string;
+  allowed: boolean;
+  kind: EngineKind | 'unknown';
+  tier: EngineTier | 'unknown';
+  model: EffectiveConfigValue<string | null>;
+  apiKeyEnvName?: string;
+  baseUrlEnvName?: string;
+  defaultBaseUrl?: string;
+  source: EffectiveConfigSource;
+}
+
+export interface EffectiveConfigSnapshot {
+  generatedAt: string;
+  configPath: string;
+  configFile: {
+    exists: boolean;
+    parsed: boolean;
+  };
+  autonomy: {
+    controlMode: EffectiveConfigValue<ReturnType<typeof resolveAutonomyControlMode>>;
+    controlLoop: EffectiveConfigValue<boolean>;
+    routingPolicy: EffectiveConfigValue<string>;
+    learnedRouting: EffectiveConfigValue<boolean>;
+    resourceAwareDispatch: EffectiveConfigValue<boolean>;
+    killSwitch: EffectiveConfigValue<boolean>;
+  };
+  daemon: {
+    dailyBudgetUsd: EffectiveConfigValue<number>;
+    perTickItems: EffectiveConfigValue<number>;
+    parallel: EffectiveConfigValue<number>;
+    intervalMs: EffectiveConfigValue<number>;
+    mode: EffectiveConfigValue<'batch' | 'continuous'>;
+    maxConcurrent: EffectiveConfigValue<number>;
+    concurrency: {
+      local: EffectiveConfigValue<number>;
+      cloud: EffectiveConfigValue<number>;
+      total: EffectiveConfigValue<number>;
+    };
+    idleBackoffMs: EffectiveConfigValue<number>;
+  };
+  foundry: {
+    enabled: EffectiveConfigValue<boolean>;
+    allowedBackends: EffectiveConfigValue<string[]>;
+    sandboxExternal: EffectiveConfigValue<boolean>;
+    completenessGate: EffectiveConfigValue<boolean>;
+    fleetMcp: EffectiveConfigValue<boolean>;
+    minItemValue: EffectiveConfigValue<number>;
+    scanners: {
+      todos: EffectiveConfigValue<boolean>;
+      deps: EffectiveConfigValue<boolean>;
+      dependencyBumps: EffectiveConfigValue<boolean>;
+      lint: EffectiveConfigValue<boolean>;
+      hygiene: EffectiveConfigValue<boolean>;
+    };
+    autoMerge: {
+      enabled: EffectiveConfigValue<boolean>;
+      trustBasis: EffectiveConfigValue<'tier' | 'verification'>;
+      maxRisk: EffectiveConfigValue<'low' | 'medium' | 'high'>;
+      pushToRemote: EffectiveConfigValue<boolean>;
+      midToBranch: EffectiveConfigValue<boolean>;
+      allowWithoutVerification: EffectiveConfigValue<boolean>;
+    };
+    fabric: {
+      gateway: EffectiveConfigValue<boolean>;
+      cacheShadow: EffectiveConfigValue<boolean>;
+      cache: EffectiveConfigValue<boolean>;
+      resourceAware: EffectiveConfigValue<boolean>;
+      concurrentDispatch: EffectiveConfigValue<boolean>;
+      maxSlotsPerBackend: EffectiveConfigValue<number>;
+      workhorseDispatch: EffectiveConfigValue<boolean>;
+    };
+    local: {
+      maxConcurrent: EffectiveConfigValue<number>;
+      baseUrl: EffectiveConfigValue<string>;
+    };
+  };
+  backends: EffectiveBackendConfig[];
+  warnings: string[];
+}
+
+interface RawConfigRead {
+  exists: boolean;
+  parsed: boolean;
+  raw?: Record<string, unknown>;
+}
+
+interface ResolvedDaemonConfig {
+  dailyBudgetUsd: number;
+  perTickItems: number;
+  parallel: number;
+  intervalMs: number;
+  mode: 'batch' | 'continuous';
+  maxConcurrent: number;
+  concurrency: { local: number; cloud: number; total: number };
+  idleBackoffMs: number;
+}
+
+const CONFIG_PATH_AT_RUNTIME = () => join(homedir(), '.ashlr', 'config.json');
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readRawConfig(configPath: string): RawConfigRead {
+  if (!existsSync(configPath)) return { exists: false, parsed: false };
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as unknown;
+    return isRecord(parsed)
+      ? { exists: true, parsed: true, raw: parsed }
+      : { exists: true, parsed: false };
+  } catch {
+    return { exists: true, parsed: false };
+  }
+}
+
+function rawHas(raw: Record<string, unknown> | undefined, path: string): boolean {
+  if (!raw) return false;
+  let cur: unknown = raw;
+  for (const part of path.split('.')) {
+    if (!isRecord(cur) || !Object.prototype.hasOwnProperty.call(cur, part)) return false;
+    cur = cur[part];
+  }
+  return true;
+}
+
+function value<T>(
+  raw: Record<string, unknown> | undefined,
+  path: string,
+  resolved: T,
+  fallbackSource: EffectiveConfigSource = 'default',
+): EffectiveConfigValue<T> {
+  return {
+    value: resolved,
+    source: rawHas(raw, path) ? 'configured' : fallbackSource,
+    path,
+  };
+}
+
+function boolValue(
+  raw: Record<string, unknown> | undefined,
+  path: string,
+  resolved: boolean,
+  fallbackSource: EffectiveConfigSource = 'default',
+): EffectiveConfigValue<boolean> {
+  return value(raw, path, resolved, fallbackSource);
+}
+
+function positiveNumber(input: unknown, fallback: number, integer = false): number {
+  if (typeof input !== 'number' || !Number.isFinite(input) || input <= 0) return fallback;
+  return integer ? Math.floor(input) : input;
+}
+
+function resolveDaemon(cfg: AshlrConfig): ResolvedDaemonConfig {
+  const o = cfg.daemon ?? {};
+  const concLocal = positiveNumber(o.concurrency?.local, 2, true);
+  const concCloud = positiveNumber(o.concurrency?.cloud, 6, true);
+  const concTotal = positiveNumber(o.concurrency?.total, 8, true);
+  const maxConcurrent = positiveNumber(
+    o.maxConcurrent,
+    typeof o.concurrency?.total === 'number' && o.concurrency.total > 0 ? Math.floor(o.concurrency.total) : 8,
+    true,
+  );
+  return {
+    dailyBudgetUsd: positiveNumber(o.dailyBudgetUsd, 1.0),
+    perTickItems: positiveNumber(o.perTickItems, 3, true),
+    parallel: typeof o.parallel === 'number' && Number.isFinite(o.parallel) && o.parallel > 0
+      ? Math.min(Math.floor(o.parallel), 8)
+      : 2,
+    intervalMs: positiveNumber(o.intervalMs, 5 * 60_000),
+    mode: o.mode === 'continuous' ? 'continuous' : 'batch',
+    maxConcurrent,
+    concurrency: { local: concLocal, cloud: concCloud, total: concTotal },
+    idleBackoffMs: positiveNumber(o.idleBackoffMs, 5_000),
+  };
+}
+
+function sourceFor(raw: Record<string, unknown> | undefined, path: string): EffectiveConfigSource {
+  return rawHas(raw, path) ? 'configured' : 'default';
+}
+
+function effectiveBackends(
+  cfg: AshlrConfig,
+  raw: Record<string, unknown> | undefined,
+  allowedBackends: string[],
+  warnings: string[],
+): EffectiveBackendConfig[] {
+  const registry = resolveEngineRegistry(cfg);
+  return allowedBackends.map((backend) => {
+    const spec = registry[backend];
+    if (!spec) {
+      warnings.push(`Allowed backend "${backend}" has no resolved engine registry entry.`);
+      return {
+        backend,
+        allowed: true,
+        kind: 'unknown',
+        tier: 'unknown',
+        model: { value: null, source: 'default', path: `foundry.models.${backend}` },
+        source: sourceFor(raw, 'foundry.allowedBackends'),
+      };
+    }
+    const modelPath = `foundry.models.${backend}`;
+    const model = cfg.foundry?.models?.[backend as EngineId] ??
+      spec.defaultModel ??
+      spec.api?.defaultModel ??
+      null;
+    return {
+      backend,
+      allowed: true,
+      kind: spec.kind,
+      tier: spec.tier,
+      model: value(raw, modelPath, model, model === null ? 'default' : 'derived'),
+      ...(spec.api?.envKey ? { apiKeyEnvName: spec.api.envKey } : {}),
+      ...(spec.api?.baseUrlEnv ? { baseUrlEnvName: spec.api.baseUrlEnv } : {}),
+      ...(spec.api?.defaultBaseUrl ? { defaultBaseUrl: spec.api.defaultBaseUrl } : {}),
+      source: sourceFor(raw, 'foundry.allowedBackends'),
+    };
+  });
+}
+
+export function buildEffectiveConfigSnapshot(
+  cfg: AshlrConfig,
+  opts: {
+    rawConfig?: Record<string, unknown>;
+    configPath?: string;
+    configExists?: boolean;
+    configParsed?: boolean;
+    now?: Date;
+  } = {},
+): EffectiveConfigSnapshot {
+  const raw = opts.rawConfig;
+  const warnings: string[] = [];
+  const daemon = resolveDaemon(cfg);
+  const foundryEnabled = cfg.foundry !== undefined;
+  const allowedBackends = cfg.foundry?.allowedBackends?.length
+    ? cfg.foundry.allowedBackends.map(String)
+    : ['builtin'];
+  const autoMerge = cfg.foundry?.autoMerge;
+  const fabric = cfg.foundry?.fabric;
+  const local = cfg.foundry?.local;
+
+  if (!opts.configExists) warnings.push('No config file existed when the snapshot was requested; loadConfig will bootstrap defaults.');
+  if (opts.configExists && opts.configParsed === false) warnings.push('Config file could not be parsed as a JSON object; effective values come from defaults.');
+  if (!rawHas(raw, 'daemon')) warnings.push('cfg.daemon is missing; daemon caps are hard-coded defaults.');
+  if (!foundryEnabled) warnings.push('cfg.foundry is missing; fleet routing is effectively builtin-only and Foundry-only features are off.');
+  if (foundryEnabled && !rawHas(raw, 'foundry.allowedBackends')) warnings.push('cfg.foundry.allowedBackends is missing; backend routing defaults to builtin only.');
+  if (autoMerge?.enabled === true && !cfg.foundry?.mergeAuthority?.length && autoMerge.trustBasis !== 'verification') {
+    warnings.push('autoMerge.enabled is true but mergeAuthority is empty; tier-based main auto-merge will not authorize proposals.');
+  }
+
+  return {
+    generatedAt: (opts.now ?? new Date()).toISOString(),
+    configPath: opts.configPath ?? CONFIG_PATH_AT_RUNTIME(),
+    configFile: {
+      exists: opts.configExists ?? false,
+      parsed: opts.configParsed ?? false,
+    },
+    autonomy: {
+      controlMode: { value: resolveAutonomyControlMode(cfg), source: 'derived' },
+      controlLoop: boolValue(raw, 'foundry.autonomyControlLoop', foundryEnabled ? cfg.foundry?.autonomyControlLoop !== false : false),
+      routingPolicy: value(raw, 'foundry.routingPolicy', cfg.foundry?.routingPolicy ?? 'balanced'),
+      learnedRouting: boolValue(raw, 'foundry.learnedRouting', cfg.foundry?.learnedRouting !== false),
+      resourceAwareDispatch: boolValue(raw, 'foundry.resourceAwareDispatch', cfg.foundry?.resourceAwareDispatch !== false),
+      killSwitch: boolValue(raw, 'foundry.killSwitch', cfg.foundry?.killSwitch === true),
+    },
+    daemon: {
+      dailyBudgetUsd: value(raw, 'daemon.dailyBudgetUsd', daemon.dailyBudgetUsd),
+      perTickItems: value(raw, 'daemon.perTickItems', daemon.perTickItems),
+      parallel: value(raw, 'daemon.parallel', daemon.parallel),
+      intervalMs: value(raw, 'daemon.intervalMs', daemon.intervalMs),
+      mode: value(raw, 'daemon.mode', daemon.mode),
+      maxConcurrent: value(raw, 'daemon.maxConcurrent', daemon.maxConcurrent, rawHas(raw, 'daemon.concurrency.total') ? 'derived' : 'default'),
+      concurrency: {
+        local: value(raw, 'daemon.concurrency.local', daemon.concurrency.local),
+        cloud: value(raw, 'daemon.concurrency.cloud', daemon.concurrency.cloud),
+        total: value(raw, 'daemon.concurrency.total', daemon.concurrency.total),
+      },
+      idleBackoffMs: value(raw, 'daemon.idleBackoffMs', daemon.idleBackoffMs),
+    },
+    foundry: {
+      enabled: { value: foundryEnabled, source: foundryEnabled ? 'configured' : 'default', path: 'foundry' },
+      allowedBackends: value(raw, 'foundry.allowedBackends', allowedBackends),
+      sandboxExternal: boolValue(raw, 'foundry.sandboxExternal', foundryEnabled ? cfg.foundry?.sandboxExternal !== false : false),
+      completenessGate: boolValue(raw, 'foundry.completenessGate', cfg.foundry?.completenessGate !== false),
+      fleetMcp: boolValue(raw, 'foundry.fleetMcp', cfg.foundry?.fleetMcp !== false),
+      minItemValue: value(raw, 'foundry.minItemValue', typeof cfg.foundry?.minItemValue === 'number' ? cfg.foundry.minItemValue : 2),
+      scanners: {
+        todos: boolValue(raw, 'foundry.scanTodos', cfg.foundry?.scanTodos === true),
+        deps: boolValue(raw, 'foundry.scanDeps', cfg.foundry?.scanDeps === true),
+        dependencyBumps: boolValue(raw, 'foundry.scanDependencyBumps', cfg.foundry?.scanDependencyBumps === true),
+        lint: boolValue(raw, 'foundry.scanLint', cfg.foundry?.scanLint === true),
+        hygiene: boolValue(raw, 'foundry.scanHygiene', cfg.foundry?.scanHygiene === true),
+      },
+      autoMerge: {
+        enabled: boolValue(raw, 'foundry.autoMerge.enabled', autoMerge?.enabled === true),
+        trustBasis: value(raw, 'foundry.autoMerge.trustBasis', autoMerge?.trustBasis === 'verification' ? 'verification' : 'tier'),
+        maxRisk: value(raw, 'foundry.autoMerge.maxRisk', autoMerge?.maxRisk ?? 'low'),
+        pushToRemote: boolValue(raw, 'foundry.autoMerge.pushToRemote', autoMerge?.pushToRemote === true),
+        midToBranch: boolValue(raw, 'foundry.autoMerge.midToBranch', autoMerge?.midToBranch === true),
+        allowWithoutVerification: boolValue(raw, 'foundry.autoMerge.allowWithoutVerification', autoMerge?.allowWithoutVerification === true),
+      },
+      fabric: {
+        gateway: boolValue(raw, 'foundry.fabric.gateway', fabric?.gateway === true),
+        cacheShadow: boolValue(raw, 'foundry.fabric.cacheShadow', fabric?.cacheShadow === true),
+        cache: boolValue(raw, 'foundry.fabric.cache', fabric?.cache === true),
+        resourceAware: boolValue(raw, 'foundry.fabric.resourceAware', fabric?.resourceAware === true),
+        concurrentDispatch: boolValue(raw, 'foundry.fabric.concurrentDispatch', fabric?.concurrentDispatch === true),
+        maxSlotsPerBackend: value(raw, 'foundry.fabric.maxSlotsPerBackend', typeof fabric?.maxSlotsPerBackend === 'number' ? fabric.maxSlotsPerBackend : 3),
+        workhorseDispatch: boolValue(raw, 'foundry.fabric.workhorseDispatch', fabric?.workhorseDispatch === true),
+      },
+      local: {
+        maxConcurrent: value(raw, 'foundry.local.maxConcurrent', typeof local?.maxConcurrent === 'number' ? local.maxConcurrent : 1),
+        baseUrl: value(raw, 'foundry.local.baseUrl', local?.baseUrl ?? 'http://localhost:11434'),
+      },
+    },
+    backends: effectiveBackends(cfg, raw, allowedBackends, warnings),
+    warnings,
+  };
+}
+
+export function loadEffectiveConfigSnapshot(): EffectiveConfigSnapshot {
+  const configPath = CONFIG_PATH_AT_RUNTIME();
+  const rawRead = readRawConfig(configPath);
+  const cfg = rawRead.exists ? loadConfig() : defaultConfig();
+  return buildEffectiveConfigSnapshot(cfg, {
+    rawConfig: rawRead.raw,
+    configPath,
+    configExists: rawRead.exists,
+    configParsed: rawRead.parsed,
+  });
+}

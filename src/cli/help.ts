@@ -246,6 +246,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'open [query]',                 desc: 'Open the best match in your editor; no query opens an interactive picker.', topic: 'core' },
   { cmd: 'tidy [--apply]',               desc: 'Show (or apply) tidy moves for loose Desktop files.', topic: 'core' },
   { cmd: 'config [get <k>|set <k> <v>]', desc: 'Read/write a config value. No args prints a summary.', topic: 'core' },
+  { cmd: 'config effective [--json]',     desc: 'Read-only effective autonomy/daemon/foundry/backend settings.', topic: 'core' },
   { cmd: 'config set <k> --json <v>',    desc: 'Set a structured (array/object) config value as JSON.', topic: 'core' },
   { cmd: 'config path',                  desc: 'Print the path to config.json.', topic: 'core' },
   { cmd: 'doctor',                       desc: 'One-glance health check: config, phantom, providers, ecosystem.', topic: 'core' },

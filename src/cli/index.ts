@@ -41,6 +41,7 @@
 
 import { existsSync } from 'node:fs';
 import { loadConfig, saveConfig, CONFIG_PATH } from '../core/config.js';
+import type { EffectiveConfigSnapshot, EffectiveConfigValue } from '../core/effective-config.js';
 import { buildIndex, loadIndex, writeIndex } from '../core/index-engine.js';
 import { planTidy, applyTidy } from '../core/tidy.js';
 import { openInEditor } from './open.js';
@@ -1350,8 +1351,76 @@ function cmdTidy(args: string[]): void {
 
 // ─── Command: config ─────────────────────────────────────────────────────────
 
-function cmdConfig(args: string[]): void {
+function formatEffectiveValue<T>(entry: EffectiveConfigValue<T>): string {
+  return `${String(entry.value)} ${dim(`(${entry.source})`)}`;
+}
+
+function formatEffectiveConfigSnapshot(snapshot: EffectiveConfigSnapshot): string {
+  const lines: string[] = [];
+  lines.push('Effective config');
+  lines.push(`  file:       ${snapshot.configPath}`);
+  lines.push(`  parsed:     ${snapshot.configFile.exists ? (snapshot.configFile.parsed ? 'yes' : 'no') : 'missing'}`);
+  lines.push('');
+  lines.push('Autonomy');
+  lines.push(`  control:    ${formatEffectiveValue(snapshot.autonomy.controlMode)}`);
+  lines.push(`  loop:       ${formatEffectiveValue(snapshot.autonomy.controlLoop)}`);
+  lines.push(`  routing:    ${formatEffectiveValue(snapshot.autonomy.routingPolicy)}`);
+  lines.push(`  learned:    ${formatEffectiveValue(snapshot.autonomy.learnedRouting)}`);
+  lines.push(`  resources:  ${formatEffectiveValue(snapshot.autonomy.resourceAwareDispatch)}`);
+  lines.push(`  kill flag:  ${formatEffectiveValue(snapshot.autonomy.killSwitch)}`);
+  lines.push('');
+  lines.push('Daemon');
+  lines.push(`  budget:     $${snapshot.daemon.dailyBudgetUsd.value.toFixed(2)} ${dim(`(${snapshot.daemon.dailyBudgetUsd.source})`)}`);
+  lines.push(`  per tick:   ${formatEffectiveValue(snapshot.daemon.perTickItems)}`);
+  lines.push(`  parallel:   ${formatEffectiveValue(snapshot.daemon.parallel)}`);
+  lines.push(`  interval:   ${formatEffectiveValue(snapshot.daemon.intervalMs)}ms`);
+  lines.push(`  mode:       ${formatEffectiveValue(snapshot.daemon.mode)}`);
+  lines.push(`  max conc:   ${formatEffectiveValue(snapshot.daemon.maxConcurrent)}`);
+  lines.push(`  tiers:      local=${snapshot.daemon.concurrency.local.value}, cloud=${snapshot.daemon.concurrency.cloud.value}, total=${snapshot.daemon.concurrency.total.value}`);
+  lines.push('');
+  lines.push('Foundry');
+  lines.push(`  enabled:    ${formatEffectiveValue(snapshot.foundry.enabled)}`);
+  lines.push(`  backends:   ${snapshot.foundry.allowedBackends.value.join(', ')} ${dim(`(${snapshot.foundry.allowedBackends.source})`)}`);
+  lines.push(`  sandbox:    ${formatEffectiveValue(snapshot.foundry.sandboxExternal)}`);
+  lines.push(`  gate:       ${formatEffectiveValue(snapshot.foundry.completenessGate)}`);
+  lines.push(`  min value:  ${formatEffectiveValue(snapshot.foundry.minItemValue)}`);
+  lines.push(`  automerge:  ${snapshot.foundry.autoMerge.enabled.value ? 'on' : 'off'} ${dim(`(${snapshot.foundry.autoMerge.enabled.source})`)}, trust=${snapshot.foundry.autoMerge.trustBasis.value}, maxRisk=${snapshot.foundry.autoMerge.maxRisk.value}`);
+  lines.push(`  fabric:     gateway=${snapshot.foundry.fabric.gateway.value}, resourceAware=${snapshot.foundry.fabric.resourceAware.value}, concurrent=${snapshot.foundry.fabric.concurrentDispatch.value}`);
+  lines.push('');
+  lines.push('Backends');
+  for (const backend of snapshot.backends) {
+    const model = backend.model.value ?? '—';
+    const api = backend.apiKeyEnvName ? ` apiKeyEnv=${backend.apiKeyEnvName}` : '';
+    lines.push(`  ${backend.backend}: ${backend.kind}/${backend.tier} model=${model} ${dim(`(${backend.model.source})`)}${api}`);
+  }
+  if (snapshot.warnings.length > 0) {
+    lines.push('');
+    lines.push('Warnings');
+    for (const warning of snapshot.warnings) lines.push(`  - ${warning}`);
+  }
+  return lines.join('\n');
+}
+
+async function cmdConfig(args: string[]): Promise<void> {
   const subCmd = args[0];
+
+  if (subCmd === 'effective') {
+    const jsonMode = args.includes('--json');
+    const { loadEffectiveConfigSnapshot } = await import('../core/effective-config.js');
+    const snapshot = loadEffectiveConfigSnapshot();
+    if (jsonMode) {
+      console.log(JSON.stringify(snapshot, null, 2));
+      return;
+    }
+    console.log('');
+    console.log(bold('  ashlr config effective') + gray(' — read-only operator settings'));
+    console.log('');
+    for (const line of formatEffectiveConfigSnapshot(snapshot).split('\n')) {
+      console.log('  ' + line);
+    }
+    console.log('');
+    return;
+  }
 
   const cfg = loadConfig();
 
@@ -1515,7 +1584,7 @@ async function main(): Promise<void> {
         break;
 
       case 'config':
-        cmdConfig(rest);
+        await cmdConfig(rest);
         break;
 
       case 'doctor':

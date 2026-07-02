@@ -48,6 +48,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Pre-scan executable direction and hide stale unenrolled backlog from status
 - [x] Follow-up: Surface effective autonomy control mode in CLI/API/Mission Control
 - [x] Follow-up: Reload full daemon config live and surface backend resource availability
+- [x] Follow-up: Add auto-merge gate explanations, effective config visibility, and protected remote PR handoff
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -96,6 +97,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Effective autonomy authority must be explicit in operator surfaces. `disabled`, `advisory`, and `executable` mean materially different risk/control postures and should not be inferred from a hidden boolean.
 - Running daemons must reload full config, not just `daemon`, so Foundry policy, auto-merge settings, backend caps, and routing controls can change without service restarts.
 - Backend status should show resource availability for every allowed backend, including `not-sensed` for allowed engines without a resource sensor.
+- Auto-merge must be explainable from cheap read-only evidence before spending judge/verify resources. `explainAutoMergeGate()` now shares the pure gate logic for authority, provenance, risk, scope, verification evidence, self-target policy, and manager-gate evidence.
+- Effective operator config should be visible without dumping secrets or mutating config files. `ashlr config effective`, `/api/config/effective`, and the exported core API expose curated autonomy/daemon/foundry/backend settings with source labels.
+- Remote auto-merge must never bypass host branch protection. The GitHub path now opens a PR and attempts ordinary host auto-merge (`gh pr merge --auto --squash`) without privileged bypass, records the remote handoff as applied to prevent duplicate PR spam, and reports `merged=false` unless Ashlr can prove the host actually merged it.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -134,4 +138,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch in verification** - Full live config reload and backend resource status are implemented; focused tests passed; running final gates and push.
+**Current batch in verification** - Auto-merge explanations, effective config visibility, and protected remote PR handoff are implemented; focused tests passed; running final gates and push.
