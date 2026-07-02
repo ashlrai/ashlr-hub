@@ -487,9 +487,11 @@ export interface AshlrConfig {
        * enabling main auto-merge does not implicitly enable the branch path.
        */
       midToBranch?: boolean;
-      /** Permit auto-merge when NO verification commands are detected (default false = fail-closed). */
-      allowWithoutVerification?: boolean;
-    };
+	      /** Permit auto-merge when NO verification commands are detected (default false = fail-closed). */
+	      allowWithoutVerification?: boolean;
+	      /** Max verification-before-judge runs per auto-merge pass (default judgePerPass). */
+	      verifyBeforeJudgePerPass?: number;
+	    };
     /**
      * M181: generative engine — "rip mode". DEFAULT false (opt-in).
      *
@@ -2986,11 +2988,19 @@ export interface DaemonTick {
   /** M308: one-line reason behind the applied autonomy direction. */
   directionReason?: string;
   /** M308/M48: maintenance work performed by the auto-merge pass this tick. */
-  autoMerge?: {
-    attempted: number;
-    judged: number;
-    merged: number;
-  };
+	  autoMerge?: {
+	    attempted: number;
+	    judgePerPass?: number;
+	    judged: number;
+	    judgeCapped?: number;
+	    verifyBeforeJudgePerPass?: number;
+	    verifyBeforeJudgeRan?: number;
+	    verifyBeforeJudgeCapped?: number;
+	    judgeEstimatedSpendUsd?: number;
+	    merged: number;
+	    autoArchived?: number;
+	    ttlRejected?: number;
+	  };
   /** Bounded per-item backend assignment traces for this tick. */
   dispatches?: DaemonDispatchTrace[];
   /** M48: proposals auto-merged this tick via the M47 gate (omitted/0 when disabled). */

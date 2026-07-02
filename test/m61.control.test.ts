@@ -381,7 +381,19 @@ describe('logs section (M61)', () => {
           dryRun: true,
           directionMode: 'verify-only',
           directionReason: 'pending proposals need verification',
-          autoMerge: { attempted: 3, judged: 2, merged: 0 },
+	          autoMerge: {
+	            attempted: 3,
+	            judgePerPass: 4,
+	            judged: 2,
+	            judgeCapped: 1,
+	            verifyBeforeJudgePerPass: 3,
+	            verifyBeforeJudgeRan: 2,
+	            verifyBeforeJudgeCapped: 1,
+	            judgeEstimatedSpendUsd: 0.0123,
+	            merged: 0,
+            autoArchived: 1,
+            ttlRejected: 1,
+          },
           dispatches: [{
             itemId: 'item-1',
             title: 'Improve daemon routing visibility',
@@ -406,7 +418,7 @@ describe('logs section (M61)', () => {
     expect(snap.logs[0]?.msg).toContain('direction=verify-only');
     expect(snap.logs[0]?.msg).toContain('mode=simulation');
     expect(snap.logs[0]?.dryRun).toBe(true);
-    expect(snap.logs[0]?.msg).toContain('maintenance=attempted:3,judged:2,merged:0');
+	    expect(snap.logs[0]?.msg).toContain('maintenance=attempted:3,judgeCalls:2/4,judgeCapped:1,verifyBeforeJudge:2/3,verifyCapped:1,judgeEst:$0.0123,merged:0,archived:1,ttlRejected:1');
     expect(snap.logs.some((entry) =>
       entry.kind === 'dispatch' &&
       entry.msg.includes('builtin') &&

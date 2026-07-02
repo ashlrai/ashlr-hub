@@ -163,10 +163,15 @@ describe('M307 verify-before-judge', () => {
 
     expect(mockVerifyProposal).toHaveBeenCalledTimes(1);
     expect(mockJudgeProposal).toHaveBeenCalledTimes(1);
-    expect(mockAutoMergeProposal).toHaveBeenCalledWith('m307-prop', expect.any(Object));
-    expect(r.judged).toBe(1);
-    expect(r.attempted).toBe(1);
-    expect(r.merged).toBe(1);
+	    expect(mockAutoMergeProposal).toHaveBeenCalledWith('m307-prop', expect.any(Object));
+	    expect(r.judgePerPass).toBe(4);
+	    expect(r.judged).toBe(1);
+	    expect(r.verifyBeforeJudgePerPass).toBe(4);
+	    expect(r.verifyBeforeJudgeRan).toBe(1);
+	    expect(r.verifyBeforeJudgeCapped).toBe(0);
+	    expect(r.judgeEstimatedSpendUsd).toBeGreaterThan(0);
+	    expect(r.attempted).toBe(1);
+	    expect(r.merged).toBe(1);
   });
 
   it('uses a cached passing verifyResult without re-running verification', async () => {
@@ -183,10 +188,13 @@ describe('M307 verify-before-judge', () => {
   it('respects the verify-before-judge cap before spending judge calls', async () => {
     const r = await runAutoMergePass(cfg({ verifyBeforeJudgePerPass: 0 }));
 
-    expect(mockVerifyProposal).not.toHaveBeenCalled();
-    expect(mockJudgeProposal).not.toHaveBeenCalled();
-    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
-    expect(r.skipped).toEqual([
+	    expect(mockVerifyProposal).not.toHaveBeenCalled();
+	    expect(mockJudgeProposal).not.toHaveBeenCalled();
+	    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+	    expect(r.verifyBeforeJudgePerPass).toBe(0);
+	    expect(r.verifyBeforeJudgeRan).toBe(0);
+	    expect(r.verifyBeforeJudgeCapped).toBe(1);
+	    expect(r.skipped).toEqual([
       {
         proposalId: 'm307-prop',
         check: 'verify-before-judge-cap',

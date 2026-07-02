@@ -374,7 +374,29 @@ function buildLogs(cap = LOG_CAP): ControlLogEntry[] {
         ? ` direction=${tick.directionMode}${tick.directionReason ? ` (${tick.directionReason})` : ''}`
         : '';
       const autoMergeStr = tick.autoMerge
-        ? ` maintenance=attempted:${tick.autoMerge.attempted},judged:${tick.autoMerge.judged},merged:${tick.autoMerge.merged}`
+        ? ` maintenance=attempted:${tick.autoMerge.attempted},judgeCalls:${tick.autoMerge.judged}${
+            tick.autoMerge.judgePerPass ? `/${tick.autoMerge.judgePerPass}` : ''
+          }${
+            tick.autoMerge.judgeCapped ? `,judgeCapped:${tick.autoMerge.judgeCapped}` : ''
+          }${
+            tick.autoMerge.verifyBeforeJudgeRan || tick.autoMerge.verifyBeforeJudgePerPass
+              ? `,verifyBeforeJudge:${tick.autoMerge.verifyBeforeJudgeRan ?? 0}${
+                  tick.autoMerge.verifyBeforeJudgePerPass !== undefined
+                    ? `/${tick.autoMerge.verifyBeforeJudgePerPass}`
+                    : ''
+                }`
+              : ''
+          }${
+            tick.autoMerge.verifyBeforeJudgeCapped ? `,verifyCapped:${tick.autoMerge.verifyBeforeJudgeCapped}` : ''
+          }${
+            tick.autoMerge.judgeEstimatedSpendUsd
+              ? `,judgeEst:$${tick.autoMerge.judgeEstimatedSpendUsd.toFixed(4)}`
+              : ''
+          },merged:${tick.autoMerge.merged}${
+            tick.autoMerge.autoArchived ? `,archived:${tick.autoMerge.autoArchived}` : ''
+          }${
+            tick.autoMerge.ttlRejected ? `,ttlRejected:${tick.autoMerge.ttlRejected}` : ''
+          }`
         : '';
       const modeStr = tick.dryRun === true ? ' mode=simulation' : '';
       entries.push({

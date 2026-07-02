@@ -466,7 +466,19 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
   it('A1f: autonomy control verify-only builds strategy snapshot and runs merge maintenance only', async () => {
     enrollWithItems(1);
     mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'verify-only', reasons: ['pending proposals need verification'] });
-    mockRunAutoMergePass.mockResolvedValue({ attempted: 3, judged: 2, merged: 1 });
+	    mockRunAutoMergePass.mockResolvedValue({
+	      attempted: 3,
+	      judgePerPass: 4,
+	      judged: 2,
+	      judgeCapped: 1,
+	      verifyBeforeJudgePerPass: 3,
+	      verifyBeforeJudgeRan: 2,
+	      verifyBeforeJudgeCapped: 1,
+	      judgeEstimatedSpendUsd: 0.0123,
+	      merged: 1,
+	      autoArchived: 1,
+	      ttlRejected: 1,
+	    });
 
     const result = await tick(
       { ...cfgBuiltin(), foundry: { autonomyControlLoop: true, autoMerge: { enabled: true } } } as AshlrConfig,
@@ -474,10 +486,23 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     );
 
     expect(result.reason).toBe('verify-only');
-    expect(result.directionMode).toBe('verify-only');
-    expect(result.directionReason).toBe('pending proposals need verification');
-    expect(result.merged).toBe(1);
-    expect(result.autoMerge).toEqual({ attempted: 3, judged: 2, merged: 1 });
+	    expect(result.directionMode).toBe('verify-only');
+	    expect(result.directionReason).toBe('pending proposals need verification');
+	    expect(result.merged).toBe(1);
+	    expect(result.spentUsd).toBe(0);
+	    expect(result.autoMerge).toEqual({
+	      attempted: 3,
+	      judgePerPass: 4,
+	      judged: 2,
+	      judgeCapped: 1,
+	      verifyBeforeJudgePerPass: 3,
+	      verifyBeforeJudgeRan: 2,
+	      verifyBeforeJudgeCapped: 1,
+	      judgeEstimatedSpendUsd: 0.0123,
+	      merged: 1,
+	      autoArchived: 1,
+	      ttlRejected: 1,
+	    });
     expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
     expect(mockBuildBacklog).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm).not.toHaveBeenCalled();

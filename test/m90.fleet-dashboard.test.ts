@@ -242,7 +242,19 @@ describe('buildFleetActivity — recent ticks', () => {
       dryRun: i === 29,
       directionMode: i === 29 ? 'verify-only' : 'backlog-build',
       directionReason: i === 29 ? 'pending proposals need verification' : 'healthy resources',
-      autoMerge: i === 29 ? { attempted: 3, judged: 2, merged: 1 } : undefined,
+	      autoMerge: i === 29 ? {
+	        attempted: 3,
+	        judgePerPass: 4,
+	        judged: 2,
+	        judgeCapped: 1,
+	        verifyBeforeJudgePerPass: 3,
+	        verifyBeforeJudgeRan: 2,
+	        verifyBeforeJudgeCapped: 1,
+	        judgeEstimatedSpendUsd: 0.0123,
+	        merged: 1,
+        autoArchived: 1,
+        ttlRejected: 1,
+      } : undefined,
       dispatches: i === 29 ? [{
         itemId: 'item-29',
         title: 'Trace backend assignment',
@@ -272,7 +284,19 @@ describe('buildFleetActivity — recent ticks', () => {
     expect(snap.recentTicks[0]!.dryRun).toBe(true);
     expect(snap.recentTicks[0]!.directionMode).toBe('verify-only');
     expect(snap.recentTicks[0]!.directionReason).toBe('pending proposals need verification');
-    expect(snap.recentTicks[0]!.autoMerge).toEqual({ attempted: 3, judged: 2, merged: 1 });
+    expect(snap.recentTicks[0]!.autoMerge).toEqual({
+	      attempted: 3,
+	      judgePerPass: 4,
+	      judged: 2,
+	      judgeCapped: 1,
+	      verifyBeforeJudgePerPass: 3,
+	      verifyBeforeJudgeRan: 2,
+	      verifyBeforeJudgeCapped: 1,
+	      judgeEstimatedSpendUsd: 0.0123,
+	      merged: 1,
+      autoArchived: 1,
+      ttlRejected: 1,
+    });
     expect(snap.recentTicks[0]!.dispatches?.[0]).toMatchObject({
       itemId: 'item-29',
       backend: 'builtin',

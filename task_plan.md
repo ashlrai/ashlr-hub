@@ -41,6 +41,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Harden executable autonomy control observability and local-only routing
 - [x] Follow-up: Persist daemon backend assignment traces
 - [x] Follow-up: Add daemon simulation awareness and bounded ready-evidence autonomy input
+- [x] Follow-up: Surface auto-merge maintenance resource estimates and caps
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -77,6 +78,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Daemon ticks, Mission Control logs, and Fleet Activity now show applied direction reason and auto-merge maintenance attempted/judged/merged counts; Mission Control distinguishes the active applied mode from the current recommended direction.
 - Daemon ticks now persist bounded per-item dispatch assignment traces with item, repo, backend, tier, model, assignment reason, dispatched/skipped state, and spend. Mission Control logs and Fleet Activity expose the same metadata without adding a new endpoint or heavyweight panel.
 - Daemon dry-run/simulation ticks now carry a canonical `dryRun` marker through persisted tick records, Mission Control logs, and Fleet Activity payloads, so no-op rehearsals are visible instead of inferred from `reason` alone.
+- Auto-merge maintenance now surfaces configured judge/verification caps, cap-hit counts, verification-before-judge runs, archive/TTL drains, and display-only judge spend estimates in daemon ticks, Mission Control logs, and Fleet Activity maintenance chips.
+- Do not debit display-only judge estimates into `todaySpentUsd` until `judgeProposal` exposes measured tokens/cost; fake budget precision is worse than an explicit estimate.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -104,6 +107,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current autonomy control pass makes outcome feedback item-accurate, skips permanent auto-merge blockers before judge calls, verifies before spending judge calls in verification mode, and adds a read-only resource-aware direction report.
 - Current dispatch-trace pass persists bounded daemon dispatch assignment metadata and surfaces it in existing control logs and Fleet Activity tick streams.
 - Current pass adds canonical daemon dry-run awareness and a cheap ready-evidence reader so autonomy direction can see pending main-merge evidence when auto-merge is enabled.
+- Current pass adds maintenance resource/cap visibility for auto-merge judge and verify-before-judge work while preserving existing merge and budget behavior.
 
 ## Status
-**Current batch verified locally** - Daemon simulation awareness and bounded auto-merge-ready evidence input are implemented, surfaced, tested, and verified; preparing commit/push.
+**Current batch verified locally** - Auto-merge maintenance resource/cap visibility is implemented, surfaced, tested, and verified; preparing commit/push.

@@ -4,7 +4,7 @@
 - Hub repo: `/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub`
 - Branch: `master`
 - Remote: `https://github.com/ashlrai/ashlr-hub.git`
-- Latest pushed commit before this follow-up: `a49c0a4 feat: Add daemon dispatch traces`
+- Latest pushed commit before this follow-up: `e7556be feat: Add daemon autonomy awareness`
 - Working tree at start of this push: clean and synced to `origin/master`
 - Entire: not set up; no checkpoint found for `master`
 
@@ -71,7 +71,9 @@
 - Simulation-awareness follow-up: daemon `recordTick()` now normalizes dry-run ticks with `dryRun: true`, including no-backlog, kill-switch, no-enrollment, budget, and selected-work simulation exits. `/api/control` and `/api/fleet-activity` surface that marker, and Mission Control/Fleet Activity label simulation rows without changing dispatch behavior.
 - Auto-merge-ready reachability follow-up: added `listReadyEvidenceOutcomeRecords()` as a cheap daemon-facing reader that inspects bounded recent evidence packs, resolves live pending proposal state, and returns minimal outcome records without decision/judge/worked/racing joins. Daemon autonomy planning uses it only when `foundry.autoMerge.enabled=true`.
 - Resource-strategy hardening follow-up: `readyEvidence` now only counts pending proposals whose latest evidence targets `main`, passes verification, is policy-allowed, and has `policy.action === "merge-main"`, preventing stale applied proposals or branch-only evidence from driving `auto-merge-ready`.
-- Remaining autonomy risk from agent audit: auto-merge maintenance can still consume judge/verify resources without exact daemon budget charging; a future pass should add usage/spend reporting to `AutoMergePassResult` before making maintenance budget accounting fully precise.
+- Maintenance resource visibility follow-up: `AutoMergePassResult` now reports configured `judgePerPass` and `verifyBeforeJudgePerPass`, cap hits, verify-before-judge runs, archive/TTL drains, and a display-only `judgeEstimatedSpendUsd` based on the shared pricing helper. Daemon tick summaries, Mission Control logs, and Fleet Activity maintenance chips surface those fields.
+- Agent critique decision: do not debit display-only judge estimates into daemon `todaySpentUsd` or tick `spentUsd` yet. The hard budget should use measured costs, not a made-up estimate. The next hardening pass should make `judgeProposal` return measured usage/cost and record it in the decisions ledger before using it for fail-closed maintenance budget accounting.
+- Remaining autonomy risk from agent audit: auto-merge maintenance can still consume judge/verify resources without exact daemon budget charging; after measured judge usage lands, make maintenance enforce the remaining daemon budget instead of only reporting estimates.
 
 ## Verification Log
 - `ASHLR_TEST_CI_TIMEOUT_MS=120000 npm run test:ci -- test/m30.ci.test.ts test/m33.release-meta.test.ts test/m262.visibility.test.ts test/m297.retry-transient-abort.test.ts`: passed, 63 tests.
@@ -114,3 +116,5 @@
 - Dispatch trace final gates: `npm run typecheck`, `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check` passed. Root lint remains at the existing 118-warning baseline with 0 errors.
 - Simulation/evidence focused pass: `npm run typecheck`, `node --check src/core/web/public/app.js`, and `npm test -- --run test/m201.daemon-loop.test.ts test/m61.control.test.ts test/m90.fleet-dashboard.test.ts test/m304.outcome-records.test.ts test/m306.resource-strategy.test.ts` passed, 5 files and 99 tests.
 - Simulation/evidence final gates: `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check` passed. Root lint remains at the existing 118-warning baseline with 0 errors.
+- Maintenance visibility focused pass: `npm run typecheck`, `node --check src/core/web/public/app.js`, `git diff --check`, and `npm test -- --run test/m307.verify-before-judge.test.ts test/m48.automerge-pass.test.ts test/m201.daemon-loop.test.ts test/m61.control.test.ts test/m90.fleet-dashboard.test.ts` passed, 5 files and 102 tests.
+- Maintenance visibility final gates: `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check` passed. Root lint remains at the existing 118-warning baseline with 0 errors.

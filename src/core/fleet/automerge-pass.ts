@@ -54,6 +54,7 @@ import { checkSpecContract } from '../run/spec-contract.js';
 import { notifyFleetEvent } from '../comms/events.js';
 // M214: fleet→pulse OTLP emit (fire-and-forget, flag-gated cfg.foundry.pulseEmit, default OFF)
 import { emitMerge, emitJudgeVerdict } from '../integrations/fleet-pulse-emit.js';
+import { estCostUsd } from '../run/budget.js';
 // M235: recursive self-improvement write-back (fire-and-forget, gated cfg.foundry.selfImprove, default ON)
 import { learnFromRejection } from './self-improve.js';
 // M243: skill-library write-back (fire-and-forget, gated cfg.foundry.skillLibrary, default ON)
@@ -68,10 +69,20 @@ export interface AutoMergePassResult {
   branched: number;
   /** Per-proposal gate results (for observability/audit). */
   results: AutoMergeResult[];
-  /** M172: how many proposals were judged inline this pass. */
-  judged: number;
-  /** M172: how many proposals were skipped by the judge-per-pass cap. */
-  judgeCapped: number;
+	  /** M172: how many proposals were judged inline this pass. */
+	  judged: number;
+	  /** M172: configured maximum inline judge calls for this pass. */
+	  judgePerPass: number;
+	  /** M172: how many proposals were skipped by the judge-per-pass cap. */
+	  judgeCapped: number;
+	  /** M307: configured maximum verification-before-judge runs for this pass. */
+	  verifyBeforeJudgePerPass: number;
+	  /** M307: how many verification-before-judge runs executed this pass. */
+	  verifyBeforeJudgeRan: number;
+	  /** M307: how many proposals were skipped by the verification-before-judge cap. */
+	  verifyBeforeJudgeCapped: number;
+	  /** Display-only estimate for inline frontier judge calls; not measured spend. */
+	  judgeEstimatedSpendUsd: number;
   /**
    * M193: proposals that passed the ship-verdict gate but were blocked by an
    * additive check (red-team / blast-radius / spec-contract). Per-skip detail
@@ -95,6 +106,8 @@ export interface AutoMergePassResult {
 // ---------------------------------------------------------------------------
 
 const JUDGE_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour — mirrors Gate 7 staleness window
+const JUDGE_ESTIMATE_TOKENS_IN = 4_000;
+const JUDGE_ESTIMATE_TOKENS_OUT = 1_000;
 
 /**
  * Return true when the decisions ledger already contains a recent frontier
@@ -144,11 +157,16 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     attempted: 0,
     merged: 0,
     branched: 0,
-    results: [],
-    judged: 0,
-    judgeCapped: 0,
-    skipped: [],
-    autoArchived: 0,
+	    results: [],
+	    judged: 0,
+	    judgePerPass: 0,
+	    judgeCapped: 0,
+	    verifyBeforeJudgePerPass: 0,
+	    verifyBeforeJudgeRan: 0,
+	    verifyBeforeJudgeCapped: 0,
+	    judgeEstimatedSpendUsd: 0,
+	    skipped: [],
+	    autoArchived: 0,
     ttlRejected: 0,
   };
   if (cfg.foundry?.autoMerge?.enabled !== true) return out;
@@ -171,12 +189,14 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       : 8;
 
   const autoMergeCfg = foundry?.['autoMerge'] as Record<string, unknown> | undefined;
-  const verifyBeforeJudgePerPass =
-    typeof autoMergeCfg?.['verifyBeforeJudgePerPass'] === 'number' &&
-    (autoMergeCfg['verifyBeforeJudgePerPass'] as number) >= 0
-      ? Math.floor(autoMergeCfg['verifyBeforeJudgePerPass'] as number)
-      : judgePerPass;
-  let verifyBeforeJudgeUsed = 0;
+	  const verifyBeforeJudgePerPass =
+	    typeof autoMergeCfg?.['verifyBeforeJudgePerPass'] === 'number' &&
+	    (autoMergeCfg['verifyBeforeJudgePerPass'] as number) >= 0
+	      ? Math.floor(autoMergeCfg['verifyBeforeJudgePerPass'] as number)
+	      : judgePerPass;
+	  out.judgePerPass = judgePerPass;
+	  out.verifyBeforeJudgePerPass = verifyBeforeJudgePerPass;
+	  let verifyBeforeJudgeUsed = 0;
 
   // autoArchiveAfterRejects: default 3 — archive after K non-ship verdicts.
   const autoArchiveAfterRejects =
@@ -296,12 +316,14 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
         }
 
         if (p.verifyResult?.passed !== true) {
-          if (verifyBeforeJudgeUsed >= verifyBeforeJudgePerPass) {
-            const reason = `verify-before-judge: cap reached (${verifyBeforeJudgePerPass}/pass)`;
-            out.skipped.push({ proposalId: p.id, check: 'verify-before-judge-cap', reason });
-            continue;
-          }
-          verifyBeforeJudgeUsed++;
+	          if (verifyBeforeJudgeUsed >= verifyBeforeJudgePerPass) {
+	            const reason = `verify-before-judge: cap reached (${verifyBeforeJudgePerPass}/pass)`;
+	            out.verifyBeforeJudgeCapped++;
+	            out.skipped.push({ proposalId: p.id, check: 'verify-before-judge-cap', reason });
+	            continue;
+	          }
+	          verifyBeforeJudgeUsed++;
+	          out.verifyBeforeJudgeRan++;
 
           const verify = await verifyProposal(p, cfg);
           const verifyResult = verifyResultFromProposalResult(verify, 'auto-merge-preflight');
@@ -366,8 +388,13 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
           // judgeProposal should never throw, but be defensive.
           verdict = null;
         }
-        out.judged++;
-        // M214: fire-and-forget judge-verdict emit — additive, never throws, no control-flow change.
+	        out.judged++;
+	        out.judgeEstimatedSpendUsd += estCostUsd(
+	          judgeClient.model,
+	          JUDGE_ESTIMATE_TOKENS_IN,
+	          JUDGE_ESTIMATE_TOKENS_OUT,
+	        );
+	        // M214: fire-and-forget judge-verdict emit — additive, never throws, no control-flow change.
         void emitJudgeVerdict(cfg, p.id, verdict?.verdict ?? 'null', p.repo, p.engineTier).catch(() => {});
 
         // Only proposals that the judge ships proceed to the merge gate.
