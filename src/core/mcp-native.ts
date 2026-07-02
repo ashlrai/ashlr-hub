@@ -396,7 +396,7 @@ const TOOLS: NativeToolImpl[] = [
       properties: {
         status: {
           type: 'string',
-          enum: ['pending', 'approved', 'rejected', 'applied', 'failed'],
+          enum: ['pending', 'approved', 'rejected', 'awaiting-host-merge', 'applied', 'failed'],
           description: 'Filter by status (optional).',
         },
       },

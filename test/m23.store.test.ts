@@ -412,7 +412,7 @@ describe('M23 setStatus — persistence only, no application', () => {
 
   it('all valid status values round-trip correctly', () => {
     const statuses: Array<import('../src/core/types.js').ProposalStatus> = [
-      'approved', 'rejected', 'applied', 'failed',
+      'approved', 'rejected', 'awaiting-host-merge', 'applied', 'failed',
     ];
     for (const status of statuses) {
       const p = createProposal(makeInput({ title: `status-${status}` }));
@@ -420,6 +420,21 @@ describe('M23 setStatus — persistence only, no application', () => {
       const loaded = loadProposal(p.id);
       expect(loaded!.status).toBe(status);
     }
+  });
+
+  it('awaiting-host-merge is not pending and is not counted as landed', () => {
+    const p = createProposal(makeInput());
+
+    setStatus(p.id, 'awaiting-host-merge', 'PR opened; awaiting host merge');
+
+    expect(pendingCount()).toBe(0);
+    expect(listProposals({ status: 'pending' })).toHaveLength(0);
+    expect(listProposals({ status: 'applied' })).toHaveLength(0);
+    expect(listProposals({ status: 'awaiting-host-merge' })[0]?.id).toBe(p.id);
+
+    const decision = readDecisions({ proposalId: p.id }).at(-1);
+    expect(decision?.action).toBe('handoff');
+    expect(decision?.verdict).toBe('awaiting-host-merge');
   });
 });
 

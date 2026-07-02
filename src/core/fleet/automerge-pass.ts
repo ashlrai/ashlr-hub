@@ -67,6 +67,8 @@ export interface AutoMergePassResult {
   merged: number;
   /** Of those, how many a MID-tier proposal applied to a branch/PR (M56). */
   branched: number;
+  /** Of those, how many opened a remote host PR awaiting host-side merge. */
+  handoffs: number;
   /** Per-proposal gate results (for observability/audit). */
   results: AutoMergeResult[];
 	  /** M172: how many proposals were judged inline this pass. */
@@ -235,6 +237,7 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     attempted: 0,
     merged: 0,
     branched: 0,
+    handoffs: 0,
 	    results: [],
 	    judged: 0,
 	    judgePerPass: 0,
@@ -752,6 +755,7 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
         void learnFromApplied(p, cfg);
       }
       if (res.branched) out.branched++;
+      if (res.handoff) out.handoffs++;
     } catch {
       // autoMergeProposal never throws by contract; defensive only.
     }

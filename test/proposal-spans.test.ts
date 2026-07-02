@@ -22,7 +22,8 @@
  *   setStatus 'approved'         → event 'merge',    outcome 'approved'
  *   setStatus 'applied'          → event 'merge',    outcome 'applied'
  *   setStatus 'rejected'         → event 'decline',  outcome 'rejected'
- *   setStatus 'pending'/'failed' → event 'proposal', outcome = status
+ *   setStatus 'pending'/'awaiting-host-merge'/'failed'
+ *                                → event 'proposal', outcome = status
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -173,6 +174,15 @@ describe('setStatus emits the matching lifecycle span', () => {
     const span = lastSpan();
     expect(span.event).toBe('merge');
     expect(span.outcome).toBe('applied');
+  });
+
+  it("awaiting-host-merge → event 'proposal', not 'merge'", () => {
+    const p = createProposal(makeInput());
+    emitMock.mockClear();
+    setStatus(p.id, 'awaiting-host-merge');
+    const span = lastSpan();
+    expect(span.event).toBe('proposal');
+    expect(span.outcome).toBe('awaiting-host-merge');
   });
 
   it("rejected → event 'decline', outcome 'rejected'", () => {

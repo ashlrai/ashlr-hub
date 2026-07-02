@@ -2382,6 +2382,7 @@ function renderFleet() {
   propsCard.appendChild(infoGrid([
     ['Pending', f.proposals?.pending ?? 0],
     ['Frontier pending', f.proposals?.frontierPending ?? 0],
+    ['Host PRs', f.proposals?.awaitingHostMerge ?? 0],
     ['Applied', f.proposals?.applied ?? 0],
   ]));
   section.appendChild(propsCard);

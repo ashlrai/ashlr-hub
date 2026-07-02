@@ -107,7 +107,7 @@ type LoadProposalFn   = (id: string) => Proposal | null;
 type SetStatusFn      = (id: string, status: ProposalStatus, result?: string) => void;
 type PendingCountFn   = () => number;
 type ApplyProposalFn  = (id: string, opts: { confirmed: boolean }) => Promise<import('../core/types.js').ApplyResult>;
-type AutoMergeResult  = { ok: boolean; merged: boolean; reason: string; prUrl?: string };
+type AutoMergeResult  = { ok: boolean; merged: boolean; handoff?: boolean; reason: string; prUrl?: string };
 type AutoMergeFn      = (id: string, cfg: import('../core/types.js').AshlrConfig) => Promise<AutoMergeResult>;
 
 let _listProposals:  ListProposalsFn  | null | undefined;
@@ -176,6 +176,7 @@ const STATUS_LABELS: Record<ProposalStatus, string> = {
   pending:  'pending',
   approved: 'approved',
   rejected: 'rejected',
+  'awaiting-host-merge': 'host-pr',
   applied:  'applied',
   failed:   'failed',
 };
@@ -186,6 +187,7 @@ const STATUS_COLORS: Record<ProposalStatus, ColKey> = {
   pending:  'yellow',
   approved: 'cyan',
   rejected: 'dim',
+  'awaiting-host-merge': 'magenta',
   applied:  'green',
   failed:   'red',
 };
@@ -305,7 +307,7 @@ function printStatusCounts(proposals: Proposal[], tty: boolean): void {
     counts[p.status] = (counts[p.status] ?? 0) + 1;
   }
 
-  const all: ProposalStatus[] = ['pending', 'approved', 'rejected', 'applied', 'failed'];
+  const all: ProposalStatus[] = ['pending', 'approved', 'rejected', 'awaiting-host-merge', 'applied', 'failed'];
   const parts = all
     .filter(s => (counts[s] ?? 0) > 0)
     .map(s => {
@@ -390,7 +392,7 @@ async function cmdInboxList(jsonMode: boolean): Promise<number> {
 
 function buildCounts(proposals: Proposal[]): Record<ProposalStatus, number> {
   const counts: Record<ProposalStatus, number> = {
-    pending: 0, approved: 0, rejected: 0, applied: 0, failed: 0,
+    pending: 0, approved: 0, rejected: 0, 'awaiting-host-merge': 0, applied: 0, failed: 0,
   };
   for (const p of proposals) {
     counts[p.status] = (counts[p.status] ?? 0) + 1;
@@ -773,6 +775,13 @@ async function cmdInboxAutoMerge(id: string, jsonMode: boolean): Promise<number>
 
   if (result.merged) {
     console.log(col.green('  ✓ Auto-merged: ') + result.reason);
+    if (result.prUrl) console.log(col.dim('    PR: ') + result.prUrl);
+    console.log('');
+    return 0;
+  }
+
+  if (result.handoff) {
+    console.log(col.green('  ✓ PR handed off: ') + result.reason);
     if (result.prUrl) console.log(col.dim('    PR: ') + result.prUrl);
     console.log('');
     return 0;

@@ -204,7 +204,7 @@ describe('M23 gate — setStatus NEVER calls applyProposal', () => {
 
   it('does NOT call applyProposal for any status transition', () => {
     const statuses: Array<import('../src/core/types.js').ProposalStatus> = [
-      'approved', 'rejected', 'applied', 'failed',
+      'approved', 'rejected', 'awaiting-host-merge', 'applied', 'failed',
     ];
     for (const status of statuses) {
       const p = createProposal(makeInput({ title: `status-${status}` }));

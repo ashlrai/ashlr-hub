@@ -645,6 +645,6 @@ describe('M23 applyProposal — never throws', () => {
     const result = await applyProposal('no-such-proposal', { confirmed: true });
     expect(typeof result.ok).toBe('boolean');
     expect(typeof result.detail).toBe('string');
-    expect(['pending', 'approved', 'rejected', 'applied', 'failed']).toContain(result.status);
+    expect(['pending', 'approved', 'rejected', 'awaiting-host-merge', 'applied', 'failed']).toContain(result.status);
   });
 });

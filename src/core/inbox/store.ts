@@ -147,6 +147,7 @@ function isValidProposal(parsed: unknown): parsed is Proposal {
  * understands:
  *   - creation                     → 'proposal'  (a proposal now exists)
  *   - approved / applied (merged)  → 'merge'      (it moved toward landing)
+ *   - awaiting-host-merge          → 'proposal'   (remote handoff, not landed)
  *   - rejected (declined)          → 'decline'    (it was turned down)
  * Any other transition (e.g. a 'pending' reset or an apply 'failed' outcome)
  * is surfaced as a generic 'proposal' span so the motion is still visible.
@@ -523,7 +524,9 @@ export function setStatus(
           ? 'merged'
           : status === 'rejected'
             ? 'rejected'
-            : 'judged';
+            : status === 'awaiting-host-merge'
+              ? 'handoff'
+              : 'judged';
       // Derive the engine id from the model string (segment before ':').
       const engineModel = updated.engineModel;
       const engineId = engineModel ? engineModel.split(':')[0] : undefined;
@@ -581,7 +584,7 @@ export function setStatus(
  */
 export function updateProposalField(
   id: string,
-  patch: Partial<Pick<Proposal, 'judgeNonShipCount' | 'verifyResult' | 'stuckPassCount'>>,
+  patch: Partial<Pick<Proposal, 'judgeNonShipCount' | 'verifyResult' | 'stuckPassCount' | 'remoteHandoff'>>,
 ): void {
   try {
     const existing = loadProposal(id);

@@ -173,6 +173,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     const capturedClientArgs: unknown[] = [];
     const capturedTaskArgs: unknown[] = [];
     const capturedProposalArgs: unknown[] = [];
+    const capturedGateArgs: unknown[] = [];
 
     vi.doMock('../src/core/sandbox/worktree.js', () => ({
       createSandbox: (repo: string) => ({
@@ -198,8 +199,15 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     }));
 
     vi.doMock('../src/core/run/agent-loop.js', () => ({
-      runTask: async (task: { status: string; result?: string }, _client: unknown, ctx: { tools?: unknown[] }) => {
+      runTask: async (task: { status: string; result?: string }, _client: unknown, ctx: { tools?: unknown[]; onStep?: (step: unknown) => void }) => {
         capturedTaskArgs.push(ctx.tools);
+        ctx.onStep?.({
+          ts: new Date().toISOString(),
+          taskId: 't1',
+          kind: 'model',
+          summary: 'changed hello.ts',
+          usage: { tokensIn: 11, tokensOut: 7, steps: 1, estCostUsd: 0 },
+        });
         task.status = 'done';
         task.result = 'Made the change.';
         return task;
@@ -231,6 +239,13 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
       signProvenance: () => 'sig-abc',
     }));
 
+    vi.doMock('../src/core/run/completeness-gate.js', () => ({
+      runCompletenessGate: async (args: unknown) => {
+        capturedGateArgs.push(args);
+        return { pass: true };
+      },
+    }));
+
     const { runApiModelSandboxed } = await import(
       '../src/core/run/sandboxed-engine.js?bust=' + randomUUID()
     ) as typeof import('../src/core/run/sandboxed-engine.js');
@@ -255,6 +270,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     expect((capturedTaskArgs[0] as unknown[]).length).toBeGreaterThan(0);
 
     // Proposal filed with correct fields
+    expect(capturedGateArgs.length).toBe(1);
     expect(capturedProposalArgs.length).toBe(1);
     const proposal = capturedProposalArgs[0] as Record<string, unknown>;
     expect(proposal['engineModel']).toBe('local-coder:qwen2.5:72b-instruct-q4_K_M');
@@ -265,6 +281,91 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     // Result is 'done' with proposalId
     expect(result.state.status).toBe('done');
     expect(result.proposalId).toBe(fakeProposalId);
+    expect(result.state.steps.length).toBeGreaterThan(0);
+    expect(result.state.usage.tokensIn).toBe(11);
+
+    vi.resetModules();
+  });
+
+  it('runs the completeness gate before filing an api-model proposal', async () => {
+    const capturedProposalArgs: unknown[] = [];
+    const capturedGateArgs: unknown[] = [];
+
+    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+      createSandbox: (repo: string) => ({
+        id: 'sb-test',
+        worktreePath: tmpRepo,
+        sourceRepo: repo,
+        branch: 'ashlr-sandbox-test',
+      }),
+      removeSandbox: () => {},
+      sandboxDiff: () => ({
+        files: 1,
+        patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
+        insertions: 1,
+        deletions: 1,
+      }),
+    }));
+
+    vi.doMock('../src/core/run/provider-client.js', () => ({
+      buildOpenAICompatibleClient: () => ({ id: 'openai-compat', model: 'local', supportsTools: true }),
+    }));
+
+    vi.doMock('../src/core/run/agent-loop.js', () => ({
+      runTask: async (task: { status: string; result?: string }) => {
+        task.status = 'done';
+        task.result = '[step cap reached — partial result]\nMade the change.';
+        return task;
+      },
+    }));
+
+    vi.doMock('../src/core/mcp-native-engineer.js', () => ({
+      buildEngineerToolSpecs: () => [{ name: 'write_file', fn: async () => 'ok' }],
+    }));
+
+    vi.doMock('../src/core/seams/inbox.js', () => ({
+      selectInboxStore: () => ({
+        create: (args: unknown) => {
+          capturedProposalArgs.push(args);
+          return { id: 'should-not-file' };
+        },
+      }),
+    }));
+
+    vi.doMock('../src/core/knowledge/index.js', () => ({
+      scrubSecrets: (s: string) => s,
+    }));
+
+    vi.doMock('../src/core/foundry/provenance.js', () => ({
+      hashDiff: () => 'hash-abc',
+      signProvenance: () => 'sig-abc',
+    }));
+
+    vi.doMock('../src/core/run/completeness-gate.js', () => ({
+      runCompletenessGate: async (args: unknown) => {
+        capturedGateArgs.push(args);
+        return { pass: false, reason: 'typecheck failed' };
+      },
+    }));
+
+    const { runApiModelSandboxed } = await import(
+      '../src/core/run/sandboxed-engine.js?bust=' + randomUUID()
+    ) as typeof import('../src/core/run/sandboxed-engine.js');
+
+    const result = await runApiModelSandboxed('local-coder', 'increment x', {
+      foundry: {
+        models: { 'local-coder': 'qwen2.5:72b-instruct-q4_K_M' },
+      },
+    } as never, {
+      sourceRepo: tmpRepo,
+      propose: true,
+    });
+
+    expect(capturedGateArgs).toHaveLength(1);
+    expect(capturedGateArgs[0]).toMatchObject({ isPartial: true });
+    expect(capturedProposalArgs).toHaveLength(0);
+    expect(result.state.status).toBe('done');
+    expect(result.proposalId).toBeUndefined();
 
     vi.resetModules();
   });

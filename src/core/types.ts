@@ -2734,10 +2734,13 @@ export type ProposalKind = 'patch' | 'pr' | 'deploy' | 'note' | 'desktop-action'
  *   'pending'  — created, awaiting Mason's explicit decision (NEVER auto-applies).
  *   'approved' — Mason approved; eligible for applyProposal (still confirm-gated).
  *   'rejected' — Mason rejected; discarded, never applied.
+ *   'awaiting-host-merge'
+ *              — Ashlr handed off a remote PR to the host, but has NOT proven the
+ *                host merged it yet.
  *   'applied'  — the approved outward action was performed successfully.
  *   'failed'   — apply was attempted (approved+confirmed) but errored.
  */
-export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'applied' | 'failed';
+export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'awaiting-host-merge' | 'applied' | 'failed';
 
 export interface ProposalVerifyResult {
   passed: boolean;
@@ -2748,6 +2751,17 @@ export interface ProposalVerifyResult {
   baseHead?: string;
   verifiedAt?: string;
   source?: 'auto-merge' | 'auto-merge-preflight' | 'manual' | string;
+}
+
+export interface ProposalRemoteHandoff {
+  provider: 'github';
+  state: 'awaiting-host-merge' | 'merged' | 'closed' | 'unknown';
+  prUrl?: string;
+  branch?: string;
+  base?: string;
+  createdAt: string;
+  updatedAt?: string;
+  detail?: string;
 }
 
 /**
@@ -2815,6 +2829,12 @@ export interface Proposal {
   decidedAt?: string;
   /** Outcome detail recorded by applyProposal (branch name, PR url, error). */
   result?: string;
+  /**
+   * Metadata for remote host handoffs. A proposal with status
+   * 'awaiting-host-merge' is not counted as landed until reconciliation proves
+   * the host merged the PR.
+   */
+  remoteHandoff?: ProposalRemoteHandoff;
   /**
    * M119/M307: Result of the verification step run against this proposal's diff.
    * Optional — not all proposals are verified before decision.
@@ -3039,9 +3059,10 @@ export interface DaemonTick {
 	    verifyBeforeJudgePerPass?: number;
 	    verifyBeforeJudgeRan?: number;
 	    verifyBeforeJudgeCapped?: number;
-	    judgeEstimatedSpendUsd?: number;
-	    merged: number;
-	    autoArchived?: number;
+    judgeEstimatedSpendUsd?: number;
+    merged: number;
+    handoffs?: number;
+    autoArchived?: number;
 	    ttlRejected?: number;
 	    invalidRejected?: number;
 	  };
@@ -4029,7 +4050,7 @@ export interface DecisionEntry {
   /** Optional run/swarm id that produced the proposal. */
   runId?: string;
   /** Lifecycle action. */
-  action: 'proposed' | 'verified' | 'judged' | 'merged' | 'rejected' | 'escalated';
+  action: 'proposed' | 'verified' | 'judged' | 'merged' | 'handoff' | 'rejected' | 'escalated';
   /** Engine id (e.g. 'codex', 'claude'). */
   engine?: string;
   /** Engine model string (e.g. 'codex:gpt-5.5'). */

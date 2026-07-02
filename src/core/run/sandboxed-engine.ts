@@ -55,7 +55,7 @@ import {
 import { buildSandboxLauncher, confinementProfileFor } from '../sandbox/confine.js';
 import { audit as auditConfinement } from '../sandbox/audit.js';
 import { killSwitchOn } from '../sandbox/policy.js';
-import { newUsage, estCostUsd } from './budget.js';
+import { addUsage, newUsage, estCostUsd } from './budget.js';
 import { withToolEnv } from '../env-bridge.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { selectInboxStore } from '../seams/inbox.js';
@@ -1027,6 +1027,7 @@ export async function runApiModelSandboxed(
       allowCloud: false,
     };
     const usage: RunUsage = newUsage();
+    const steps: RunState['steps'] = [];
 
     // M154: prepend repo-map + localization context to goal when flags are ON.
     // Flag-OFF → contextPrefix2 is '' → task.goal === goal (byte-identical).
@@ -1058,7 +1059,16 @@ export async function runApiModelSandboxed(
       tools,
       budget,
       usage,
-      onStep: () => { /* steps are not persisted for sandboxed api-model runs */ },
+      onStep: (step) => {
+        steps.push(step);
+        if (step.usage) {
+          const next = addUsage(usage, step.usage);
+          usage.tokensIn = next.tokensIn;
+          usage.tokensOut = next.tokensOut;
+          usage.steps = next.steps;
+          usage.estCostUsd = next.estCostUsd;
+        }
+      },
       systemPrefix: m264SystemPrefix,
     });
 
@@ -1066,6 +1076,9 @@ export async function runApiModelSandboxed(
       ...usage,
       estCostUsd: estCostUsd(engine, usage.tokensIn, usage.tokensOut),
     };
+    const isPartialResult =
+      typeof task.result === 'string' &&
+      (task.result.startsWith('[budget exceeded') || task.result.startsWith('[step cap reached'));
 
     if (task.status === 'failed') {
       return {
@@ -1073,6 +1086,8 @@ export async function runApiModelSandboxed(
           status: 'failed',
           result: task.error ?? 'api-model run failed',
           usage: finalUsage,
+          tasks: [task],
+          steps,
         }),
       };
     }
@@ -1085,11 +1100,30 @@ export async function runApiModelSandboxed(
           const scrubbed = scrubSecrets(diff.patch);
           const diffHash = hashDiff(scrubbed);
           const provenanceSig = signProvenance(engineModel, tier, diffHash);
+          let shouldFile = true;
+          if (cfg.foundry?.completenessGate !== false) {
+            const gateResult = await runCompletenessGate({
+              worktreePath: sb.worktreePath,
+              diff,
+              goal,
+              cfg,
+              ...(isPartialResult ? { isPartial: true } : {}),
+            });
+            if (!gateResult.pass) {
+              console.log(`[M275] completeness gate blocked api-model proposal: ${gateResult.reason}`);
+              shouldFile = false;
+            }
+          }
+          if (!shouldFile) {
+            return {
+              state: mk({ status: 'done', result: task.result ?? '', usage: finalUsage, tasks: [task], steps }),
+            };
+          }
           const proposal = selectInboxStore(cfg).create({
             repo: sb.sourceRepo,
             origin: 'agent',
             kind: 'patch',
-            title: `${engine} run: ${goal.slice(0, 80)}`,
+            title: `${isPartialResult ? '[partial] ' : ''}${engine} run: ${goal.slice(0, 80)}`,
             summary:
               `In-process ${engineModel} run produced ${diff.files} file(s) ` +
               `(+${diff.insertions}/-${diff.deletions}). Review before applying.`,
@@ -1102,8 +1136,25 @@ export async function runApiModelSandboxed(
             runId: id,
             engineModel,
             engineTier: tier,
+            ...(isPartialResult ? { isPartial: true } : {}),
           });
           proposalId = proposal.id;
+          try {
+            const { recordDecision } = await import('../fleet/decisions-ledger.js');
+            recordDecision({
+              ts: new Date().toISOString(),
+              proposalId: proposal.id,
+              action: 'proposed',
+              engine,
+              model: engineModel,
+              costUsd: finalUsage.estCostUsd,
+              tokensIn: finalUsage.tokensIn,
+              tokensOut: finalUsage.tokensOut,
+              cacheHit: finalUsage.tokensIn === 0 && finalUsage.estCostUsd === 0,
+            });
+          } catch {
+            // telemetry is best-effort — never fails the run
+          }
         }
       } catch {
         // diff/proposal capture is best-effort
@@ -1111,7 +1162,7 @@ export async function runApiModelSandboxed(
     }
 
     return {
-      state: mk({ status: 'done', result: task.result ?? '', usage: finalUsage }),
+      state: mk({ status: 'done', result: task.result ?? '', usage: finalUsage, tasks: [task], steps }),
       proposalId,
     };
   } finally {

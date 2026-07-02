@@ -213,6 +213,7 @@ function buildTickFleetStatus(
 ): FleetStatus {
   let pending = 0;
   let frontierPending = 0;
+  let awaitingHostMerge = 0;
   let applied = 0;
   try {
     for (const proposal of listProposals()) {
@@ -221,11 +222,14 @@ function buildTickFleetStatus(
         if (proposal.engineTier === 'frontier') frontierPending++;
       } else if (proposal.status === 'applied') {
         applied++;
+      } else if (proposal.status === 'awaiting-host-merge') {
+        awaitingHostMerge++;
       }
     }
   } catch {
     pending = 0;
     frontierPending = 0;
+    awaitingHostMerge = 0;
     applied = 0;
   }
 
@@ -251,7 +255,7 @@ function buildTickFleetStatus(
       quota: 'unlimited',
     })),
     queue: { backlogItems },
-    proposals: { pending, frontierPending, applied },
+    proposals: { pending, frontierPending, ...(awaitingHostMerge > 0 ? { awaitingHostMerge } : {}), applied },
     merges: { recent: recentMerges },
     autonomyControlMode: resolveAutonomyControlMode(cfg),
     ...(guardHealth !== undefined ? { guardHealth } : {}),
@@ -282,49 +286,52 @@ async function buildDaemonStrategyPlan(
 }
 
 function autoMergeTickSummary(result: AutoMergePassResult | null): DaemonTick['autoMerge'] | undefined {
-	  if (!result) return undefined;
-	  const attempted = typeof result.attempted === 'number' ? result.attempted : 0;
-	  const judgePerPass = typeof result.judgePerPass === 'number' ? result.judgePerPass : 0;
-	  const judged = typeof result.judged === 'number' ? result.judged : 0;
-	  const judgeCapped = typeof result.judgeCapped === 'number' ? result.judgeCapped : 0;
-	  const verifyBeforeJudgePerPass = typeof result.verifyBeforeJudgePerPass === 'number'
-	    ? result.verifyBeforeJudgePerPass
-	    : 0;
-	  const verifyBeforeJudgeRan = typeof result.verifyBeforeJudgeRan === 'number' ? result.verifyBeforeJudgeRan : 0;
-	  const verifyBeforeJudgeCapped = typeof result.verifyBeforeJudgeCapped === 'number' ? result.verifyBeforeJudgeCapped : 0;
-	  const judgeEstimatedSpendUsd = typeof result.judgeEstimatedSpendUsd === 'number'
-	    ? Math.max(0, result.judgeEstimatedSpendUsd)
-	    : 0;
-	  const merged = typeof result.merged === 'number' ? result.merged : 0;
-	  const autoArchived = typeof result.autoArchived === 'number' ? result.autoArchived : 0;
-	  const ttlRejected = typeof result.ttlRejected === 'number' ? result.ttlRejected : 0;
-	  const invalidRejected = typeof result.invalidRejected === 'number' ? result.invalidRejected : 0;
-	  if (
-	    attempted <= 0 &&
-	    judged <= 0 &&
-	    judgeCapped <= 0 &&
-	    verifyBeforeJudgeRan <= 0 &&
-	    verifyBeforeJudgeCapped <= 0 &&
-	    merged <= 0 &&
-	    autoArchived <= 0 &&
-	    ttlRejected <= 0 &&
-	    invalidRejected <= 0
-	  ) return undefined;
-	  return {
-	    attempted,
-	    ...(judgePerPass > 0 ? { judgePerPass } : {}),
-	    judged,
-	    ...(judgeCapped > 0 ? { judgeCapped } : {}),
-	    ...(verifyBeforeJudgePerPass > 0 ? { verifyBeforeJudgePerPass } : {}),
-	    ...(verifyBeforeJudgeRan > 0 ? { verifyBeforeJudgeRan } : {}),
-	    ...(verifyBeforeJudgeCapped > 0 ? { verifyBeforeJudgeCapped } : {}),
-	    ...(judgeEstimatedSpendUsd > 0 ? { judgeEstimatedSpendUsd } : {}),
-	    merged,
-	    ...(autoArchived > 0 ? { autoArchived } : {}),
-	    ...(ttlRejected > 0 ? { ttlRejected } : {}),
-	    ...(invalidRejected > 0 ? { invalidRejected } : {}),
-	  };
-	}
+  if (!result) return undefined;
+  const attempted = typeof result.attempted === 'number' ? result.attempted : 0;
+  const judgePerPass = typeof result.judgePerPass === 'number' ? result.judgePerPass : 0;
+  const judged = typeof result.judged === 'number' ? result.judged : 0;
+  const judgeCapped = typeof result.judgeCapped === 'number' ? result.judgeCapped : 0;
+  const verifyBeforeJudgePerPass = typeof result.verifyBeforeJudgePerPass === 'number'
+    ? result.verifyBeforeJudgePerPass
+    : 0;
+  const verifyBeforeJudgeRan = typeof result.verifyBeforeJudgeRan === 'number' ? result.verifyBeforeJudgeRan : 0;
+  const verifyBeforeJudgeCapped = typeof result.verifyBeforeJudgeCapped === 'number' ? result.verifyBeforeJudgeCapped : 0;
+  const judgeEstimatedSpendUsd = typeof result.judgeEstimatedSpendUsd === 'number'
+    ? Math.max(0, result.judgeEstimatedSpendUsd)
+    : 0;
+  const merged = typeof result.merged === 'number' ? result.merged : 0;
+  const handoffs = typeof result.handoffs === 'number' ? result.handoffs : 0;
+  const autoArchived = typeof result.autoArchived === 'number' ? result.autoArchived : 0;
+  const ttlRejected = typeof result.ttlRejected === 'number' ? result.ttlRejected : 0;
+  const invalidRejected = typeof result.invalidRejected === 'number' ? result.invalidRejected : 0;
+  if (
+    attempted <= 0 &&
+    judged <= 0 &&
+    judgeCapped <= 0 &&
+    verifyBeforeJudgeRan <= 0 &&
+    verifyBeforeJudgeCapped <= 0 &&
+    merged <= 0 &&
+    handoffs <= 0 &&
+    autoArchived <= 0 &&
+    ttlRejected <= 0 &&
+    invalidRejected <= 0
+  ) return undefined;
+  return {
+    attempted,
+    ...(judgePerPass > 0 ? { judgePerPass } : {}),
+    judged,
+    ...(judgeCapped > 0 ? { judgeCapped } : {}),
+    ...(verifyBeforeJudgePerPass > 0 ? { verifyBeforeJudgePerPass } : {}),
+    ...(verifyBeforeJudgeRan > 0 ? { verifyBeforeJudgeRan } : {}),
+    ...(verifyBeforeJudgeCapped > 0 ? { verifyBeforeJudgeCapped } : {}),
+    ...(judgeEstimatedSpendUsd > 0 ? { judgeEstimatedSpendUsd } : {}),
+    merged,
+    ...(handoffs > 0 ? { handoffs } : {}),
+    ...(autoArchived > 0 ? { autoArchived } : {}),
+    ...(ttlRejected > 0 ? { ttlRejected } : {}),
+    ...(invalidRejected > 0 ? { invalidRejected } : {}),
+  };
+}
 
 function boundedText(value: string, max = 220): string {
   return value.length > max ? `${value.slice(0, max - 3)}...` : value;

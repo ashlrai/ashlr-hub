@@ -154,6 +154,7 @@ export interface FleetStatus {
   proposals: {
     pending: number;
     frontierPending: number;
+    awaitingHostMerge?: number;
     applied: number;
   };
   merges: {
@@ -378,6 +379,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   // ── proposals (pending / frontier-pending / applied) ──────────────────────
   let pending = 0;
   let frontierPending = 0;
+  let awaitingHostMerge = 0;
   let applied = 0;
   const pendingProposals: Proposal[] = [];
   try {
@@ -390,11 +392,14 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         if (p.engineTier === 'frontier') frontierPending++;
       } else if (p.status === 'applied') {
         applied++;
+      } else if (p.status === 'awaiting-host-merge') {
+        awaitingHostMerge++;
       }
     }
   } catch {
     pending = 0;
     frontierPending = 0;
+    awaitingHostMerge = 0;
     applied = 0;
   }
 
@@ -464,7 +469,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ...(nextQueueItems.length > 0 ? { next: nextQueueItems } : {}),
       ...(sharedQueue !== undefined ? { shared: sharedQueue } : {}),
     },
-    proposals: { pending, frontierPending, applied },
+    proposals: { pending, frontierPending, ...(awaitingHostMerge > 0 ? { awaitingHostMerge } : {}), applied },
     merges: { recent: mergesRecent },
     autonomy,
     autonomyControlMode: resolveAutonomyControlMode(cfg),

@@ -162,7 +162,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch ready to ship** - Empty-backlog refill, daemon heartbeat truth, responsive service cadence, automatic Claude CLI rate-limit sensing, post-review cadence/privacy fixes, verification child-tree watchdog hardening, and queued self-heal visibility are implemented and verified; commit/push and live daemon restart are next.
+**Current batch ready to ship** - API-model proposal gate parity and remote PR handoff truth are implemented with full verification passing; commit/push and live daemon restart remain.
 
 ## Current Continuation
 - [x] Rechecked git/daemon/fleet state after the previous push.
@@ -214,3 +214,17 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Added regression tests proving async verification lets timers run, kills process trees, ships the wrapper in the package, and keeps self-target parity from treating promises as truthy.
 - [x] Repaired full-CI drift exposed by the migration: dynamic doctor HOME paths, stale mocks, stable reflection fixtures, multi-backend merge mocks, and production-panel mock reset.
 - [x] Run final full gates, commit, push, restart daemon, and verify live service/queue truth.
+
+## Current Continuation - Gate Parity And Remote Handoff Truth
+- [x] Rechecked git, Entire, task plan, notes, daemon status, fleet status, and live queue/resource state.
+- [x] Deployed explorer agents for API/local-coder proposal gate parity, remote PR handoff truth, live loop proposal effectiveness, and cross-repo fleet usefulness.
+- [x] Stopped the live daemon and engaged the fleet kill switch for the maintenance window before edits.
+- [x] Added API-model/local-coder proposal gate parity: in-process sandbox runs now run `runCompletenessGate()` before filing proposals.
+- [x] Treat API-model budget/step-cap results as partial for completeness-gate purposes, so partial diffs are blocked by default.
+- [x] Persist API-model run steps, task traces, usage, and proposed decision telemetry instead of discarding step/usage data.
+- [x] Added `awaiting-host-merge` proposal status and `handoff` decision action so remote GitHub PR handoffs do not count as landed merges.
+- [x] Persist structured `remoteHandoff` metadata on handoff proposals and surface host PR counts in fleet status/Mission Control.
+- [x] Added hermetic regression coverage for API-model gate blocking/step capture and remote PR handoff truth.
+- [x] Focused gates passed: typecheck, diff check, 190 affected tests, and 149 merge/automerge/fleet/resource tests.
+- [x] Run full lint/build/audit/full-CI gates.
+- [ ] Commit, push to `origin/master`, resume/restart launchd daemon, and verify live autonomous status.

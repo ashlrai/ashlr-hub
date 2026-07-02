@@ -1164,7 +1164,7 @@ export function evaluateVerificationGate(
   // are honoured. BUG-2 fix: previously cfg was not passed, silently ignoring config.
   const edvResult = edvConfirmationWeight(
     proposal,
-    decisionsForProposal as Array<{ action: 'proposed' | 'verified' | 'judged' | 'merged' | 'rejected' | 'escalated'; ts: string; proposalId: string; engine?: string; model?: string; verdict?: string; reason?: string; detail?: string }>,
+    decisionsForProposal as Array<{ action: 'proposed' | 'verified' | 'judged' | 'merged' | 'handoff' | 'rejected' | 'escalated'; ts: string; proposalId: string; engine?: string; model?: string; verdict?: string; reason?: string; detail?: string }>,
     cfg,
   );
   if (!edvResult.confirmed) {
@@ -1492,6 +1492,8 @@ export interface AutoMergeResult {
   merged: boolean;
   /** M56: true when a MID-tier proposal was applied to a BRANCH/PR (not main). */
   branched?: boolean;
+  /** True when a remote PR was opened and the host is responsible for final merge. */
+  handoff?: boolean;
   reason: string;
   prUrl?: string;
 }
@@ -2363,8 +2365,9 @@ export async function autoMergeProposal(
         if (remoteHandoff && !merged) {
           branchApplied = false;
         }
-        // A created remote PR is a successful handoff, but not a merge. We mark
-        // the proposal applied below via reason/status to avoid duplicate PRs.
+        // A created remote PR is a successful handoff, but not a merge. Keep it
+        // out of pending without claiming the work landed; a later reconciler can
+        // prove the host merged it and advance to applied.
         if (remoteHandoff) {
           reason = `${reason} (remote handoff; awaiting host merge)`;
         }
@@ -2387,13 +2390,31 @@ export async function autoMergeProposal(
     // marks the proposal 'applied' so the pass does not re-open a PR every tick.
     const success = merged || branchApplied || remoteHandoff;
     if (success) {
-      setStatus(id, 'applied', reason);
+      if (remoteHandoff) {
+        const now = new Date().toISOString();
+        updateProposalField(id, {
+          remoteHandoff: {
+            provider: 'github',
+            state: 'awaiting-host-merge',
+            ...(prUrl ? { prUrl } : {}),
+            branch,
+            base,
+            createdAt: now,
+            updatedAt: now,
+            detail: reason,
+          },
+        });
+        setStatus(id, 'awaiting-host-merge', reason, reason);
+      } else {
+        setStatus(id, 'applied', reason);
+      }
     }
 
     const result: AutoMergeResult = {
       ok: success,
       merged,
       ...(branchApplied ? { branched: true } : {}),
+      ...(remoteHandoff ? { handoff: true } : {}),
       reason,
       ...(prUrl ? { prUrl } : {}),
     };

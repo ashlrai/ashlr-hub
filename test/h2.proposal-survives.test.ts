@@ -253,8 +253,8 @@ describe('H2 stuck-proposal (b): an out-of-band status write round-trips to appr
     expect(repo.gitStatus()).toBe('');
   });
 
-  it('a crash can NEVER produce a non-lifecycle/limbo status (only the 5 valid states ever load)', () => {
-    const valid = new Set(['pending', 'approved', 'rejected', 'applied', 'failed']);
+  it('a crash can NEVER produce a non-lifecycle/limbo status (only valid states ever load)', () => {
+    const valid = new Set(['pending', 'approved', 'rejected', 'awaiting-host-merge', 'applied', 'failed']);
 
     // Walk the realistic crash points across the lifecycle, each persisted via
     // the REAL setStatus, and assert every recovered status is a defined

@@ -1,0 +1,166 @@
+/**
+ * M315 — remote PR handoff truth.
+ *
+ * A remote PR handoff prevents duplicate PR spam, but it is not proof that the
+ * host merged the PR. The proposal must leave the pending queue without being
+ * counted as applied/merged until a reconciler proves the host outcome.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
+
+const { createPrMock } = vi.hoisted(() => ({
+  createPrMock: vi.fn(),
+}));
+
+vi.mock('../src/core/git.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/git.js')>();
+  return {
+    ...actual,
+    getRemoteOrg: (repoPath: string) => ({
+      remote: `https://github.com/ashlrai/${path.basename(repoPath)}.git`,
+      org: 'ashlrai',
+    }),
+  };
+});
+
+vi.mock('../src/core/integrations/github.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/integrations/github.js')>();
+  return {
+    ...actual,
+    createPr: (...args: unknown[]) => createPrMock(...args),
+  };
+});
+
+import { autoMergeProposal } from '../src/core/inbox/merge.js';
+import { createProposal, listProposals, loadProposal, setStatus } from '../src/core/inbox/store.js';
+import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
+import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
+import { enroll, setKill, unenroll } from '../src/core/sandbox/policy.js';
+import type { AshlrConfig } from '../src/core/types.js';
+
+const origHome = process.env.HOME;
+const origAllowAny = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+let tmpHome: string;
+let tmpRepo: string;
+let bareRepo: string;
+
+function git(dir: string, args: string[]): string {
+  return execFileSync('git', ['-C', dir, ...args], { stdio: 'pipe', encoding: 'utf8' }).trim();
+}
+
+function initRepo(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true });
+  execFileSync('git', ['init', '--initial-branch=main', dir], { stdio: 'pipe' });
+  git(dir, ['config', 'user.email', 'test@ashlr.test']);
+  git(dir, ['config', 'user.name', 'Ashlr Test']);
+  fs.writeFileSync(path.join(dir, 'README.md'), '# fixture\n', 'utf8');
+  git(dir, ['add', 'README.md']);
+  git(dir, ['commit', '-m', 'init']);
+}
+
+function addFileDiff(filename: string, content: string): string {
+  return [
+    `diff --git a/${filename} b/${filename}`,
+    'new file mode 100644',
+    'index 0000000..1111111',
+    '--- /dev/null',
+    `+++ b/${filename}`,
+    '@@ -0,0 +1 @@',
+    `+${content}`,
+    '',
+  ].join('\n');
+}
+
+function cfg(): AshlrConfig {
+  return {
+    foundry: {
+      mergeAuthority: [{ engine: 'codex', model: 'gpt-5.5' }],
+      autoMerge: {
+        enabled: true,
+        maxRisk: 'low',
+        allowWithoutVerification: true,
+        pushToRemote: true,
+      },
+    },
+  } as unknown as AshlrConfig;
+}
+
+beforeEach(() => {
+  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-home-'));
+  tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-repo-'));
+  bareRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-bare-'));
+  process.env.HOME = tmpHome;
+  process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+  setKill(false);
+  initRepo(tmpRepo);
+  execFileSync('git', ['init', '--bare', bareRepo], { stdio: 'pipe' });
+  git(tmpRepo, ['remote', 'add', 'origin', bareRepo]);
+  git(tmpRepo, ['push', '-u', 'origin', 'main']);
+  git(tmpRepo, ['fetch', 'origin']);
+  git(tmpRepo, ['remote', 'set-head', 'origin', 'main']);
+  enroll(tmpRepo);
+  createPrMock.mockReset();
+  createPrMock.mockResolvedValue({
+    ok: true,
+    url: 'https://github.com/ashlrai/fixture/pull/123',
+    detail: 'PR created',
+  });
+});
+
+afterEach(() => {
+  try { unenroll(tmpRepo); } catch { /* ignore */ }
+  try { setKill(false); } catch { /* ignore */ }
+  fs.rmSync(tmpHome, { recursive: true, force: true });
+  fs.rmSync(tmpRepo, { recursive: true, force: true });
+  fs.rmSync(bareRepo, { recursive: true, force: true });
+  process.env.HOME = origHome;
+  if (origAllowAny === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+  else process.env.ASHLR_TEST_ALLOW_ANY_REPO = origAllowAny;
+});
+
+describe('M315 remote PR handoff truth', () => {
+  it('records a remote PR handoff without marking the proposal applied or merged', async () => {
+    const diff = addFileDiff('docs/handoff.md', 'truthful remote handoff');
+    const diffHash = hashDiff(diff);
+    const proposal = createProposal({
+      repo: tmpRepo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'remote handoff truth',
+      summary: 'Open a PR and wait for host merge truth.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', diffHash),
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+    });
+    setStatus(proposal.id, 'approved');
+
+    const result = await autoMergeProposal(proposal.id, cfg());
+
+    expect(result).toMatchObject({
+      ok: true,
+      merged: false,
+      handoff: true,
+      prUrl: 'https://github.com/ashlrai/fixture/pull/123',
+    });
+    expect(createPrMock).toHaveBeenCalledTimes(1);
+
+    const loaded = loadProposal(proposal.id);
+    expect(loaded?.status).toBe('awaiting-host-merge');
+    expect(loaded?.remoteHandoff).toMatchObject({
+      provider: 'github',
+      state: 'awaiting-host-merge',
+      prUrl: 'https://github.com/ashlrai/fixture/pull/123',
+    });
+    expect(listProposals({ status: 'pending' }).some((p) => p.id === proposal.id)).toBe(false);
+    expect(listProposals({ status: 'applied' }).some((p) => p.id === proposal.id)).toBe(false);
+
+    const decisions = readDecisions({ proposalId: proposal.id });
+    expect(decisions.some((d) => d.action === 'handoff')).toBe(true);
+  });
+});
