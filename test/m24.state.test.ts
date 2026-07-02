@@ -463,6 +463,30 @@ describe('M24 daemon singleton lock', () => {
       expect(releaseDaemonLock(acquired.lock)).toBe(true);
     }
   });
+
+  it('steals a fresh lock whose owner pid is already dead', () => {
+    const p = daemonLockPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const now = new Date().toISOString();
+    fs.writeFileSync(
+      p,
+      JSON.stringify({
+        pid: 2 ** 22,
+        token: 'fresh-dead-owner',
+        hostname: 'test-host',
+        acquiredAt: now,
+        heartbeatAt: now,
+      }) + '\n',
+      'utf8',
+    );
+
+    const acquired = acquireDaemonLock();
+    expect(acquired.acquired).toBe(true);
+    if (acquired.acquired) {
+      expect(acquired.replacedStale).toBe(true);
+      expect(releaseDaemonLock(acquired.lock)).toBe(true);
+    }
+  });
 });
 
 // ===========================================================================

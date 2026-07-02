@@ -171,6 +171,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Added a shared read-only queued-autonomy reader and wired it into `fleet status`, daemon cached backlog counts, and the queued autonomy scanner.
 - [x] Prevented daemon verification commands from writing into production `HOME`/`~/.ashlr` by giving each verify subprocess an isolated temp HOME.
 - [x] Prevented explicit subset/temp `buildBacklog({ repos })` scans from clobbering the global fleet backlog snapshot unless the caller opts into `persist:true`.
+- [x] Fixed daemon singleton lock recovery so a dead-owner lock with a fresh heartbeat does not block service restart.
 - [x] Verified live patched `bin/ashlr fleet status --json` now reports 13 backlog items across 9 repos and `autonomyDirection.mode:"backlog-build"` instead of an empty queue.
 - [x] Verified focused/backlog/scanner suites, typecheck, lint, build, audit, and diff checks.
 - [ ] Commit, push, restart launchd daemon, and verify live service after restart.

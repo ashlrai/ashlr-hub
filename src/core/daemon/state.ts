@@ -401,12 +401,10 @@ function pidExists(pid: number): boolean {
   }
 }
 
-function lockIsSafelyStale(owner: DaemonLockOwner | null, staleMs: number): boolean {
+function lockIsSafelyStale(owner: DaemonLockOwner | null, _staleMs: number): boolean {
   if (!owner || !Number.isFinite(owner.pid) || owner.pid <= 0) return true;
   if (pidExists(owner.pid)) return false;
-  const heartbeatMs = Date.parse(owner.heartbeatAt || owner.acquiredAt);
-  if (!Number.isFinite(heartbeatMs)) return true;
-  return Date.now() - heartbeatMs >= staleMs;
+  return true;
 }
 
 function writeNewLock(path: string, owner: DaemonLockOwner): void {
@@ -420,9 +418,9 @@ function writeNewLock(path: string, owner: DaemonLockOwner): void {
  * Acquire the same-machine daemon singleton lock.
  *
  * Uses an O_EXCL create so independent `ashlr daemon start` processes cannot
- * both enter the operator loop. A dead-owner lock is reclaimed only after the
- * recorded pid is gone and the heartbeat is older than `staleMs`; a live pid is
- * always treated as busy, even with an old heartbeat, to fail closed.
+ * both enter the operator loop. A dead-owner lock is reclaimed immediately once
+ * the recorded pid is gone; a live pid is always treated as busy to fail closed
+ * for slow or stuck live daemons.
  */
 export function acquireDaemonLock(opts?: { staleMs?: number }): AcquireDaemonLockResult {
   const path = daemonLockPath();
