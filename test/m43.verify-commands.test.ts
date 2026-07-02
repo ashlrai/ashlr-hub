@@ -24,6 +24,7 @@ import type {
 import {
   detectVerifyCommands,
   runVerifyCommand,
+  runVerifyCommandAsync,
   spawnOptionsFor,
   type VerifyCommand,
 } from '../src/core/run/verify-commands.js';
@@ -271,6 +272,88 @@ describe('runVerifyCommand', () => {
       alive = false;
     }
     expect(alive).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runVerifyCommandAsync
+// ---------------------------------------------------------------------------
+
+describe('runVerifyCommandAsync', () => {
+  it('reports the same passing result shape without blocking timers', async () => {
+    const vc: VerifyCommand = {
+      kind: 'test',
+      cmd: ['node', '-e', 'setTimeout(() => { console.log("ASYNC_DONE"); }, 250)'],
+    };
+    let ticks = 0;
+    const interval = setInterval(() => { ticks += 1; }, 25);
+
+    const res = await runVerifyCommandAsync(vc, workdir, cfg, { timeoutMs: 1_000 });
+    clearInterval(interval);
+
+    expect(res.ok).toBe(true);
+    expect(res.exitCode).toBe(0);
+    expect(res.timedOut).toBe(false);
+    expect(res.output).toContain('ASYNC_DONE');
+    expect(ticks).toBeGreaterThanOrEqual(4);
+  });
+
+  it('stream-caps noisy output before process close while preserving useful context', async () => {
+    const script = [
+      'process.stdout.write("HEAD_SENTINEL\\n");',
+      'process.stdout.write("A".repeat(1024 * 1024));',
+      'process.stdout.write("\\nTAIL_SENTINEL");',
+    ].join(' ');
+    const vc: VerifyCommand = { kind: 'test', cmd: ['node', '-e', script] };
+
+    const res = await runVerifyCommandAsync(vc, workdir, cfg, { timeoutMs: 5_000 });
+
+    expect(res.ok).toBe(true);
+    expect(res.output.length).toBeLessThanOrEqual(32 * 1024);
+    expect(res.output).toContain('HEAD_SENTINEL');
+    expect(res.output).toContain('TAIL_SENTINEL');
+    expect(res.output).toContain('verify output stream truncated');
+  });
+
+  it('times out and terminates child processes without blocking the event loop', async () => {
+    const childPidPath = join(workdir, 'async-child.pid');
+    const childPidJson = JSON.stringify(childPidPath);
+    const script = [
+      'const { spawn } = require("node:child_process");',
+      'const fs = require("node:fs");',
+      'const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], { stdio: "ignore" });',
+      `fs.writeFileSync(${childPidJson}, String(child.pid));`,
+      'setTimeout(() => {}, 5000);',
+    ].join(' ');
+    const vc: VerifyCommand = { kind: 'test', cmd: ['node', '-e', script] };
+    let ticks = 0;
+    const interval = setInterval(() => { ticks += 1; }, 25);
+
+    const res = await runVerifyCommandAsync(vc, workdir, cfg, { timeoutMs: 250 });
+    clearInterval(interval);
+
+    expect(res.ok).toBe(false);
+    expect(res.timedOut).toBe(true);
+    expect(ticks).toBeGreaterThanOrEqual(4);
+
+    await new Promise((resolveDone) => setTimeout(resolveDone, 150));
+    const childPid = Number(readFileSync(childPidPath, 'utf8'));
+    let alive = true;
+    try {
+      process.kill(childPid, 0);
+    } catch {
+      alive = false;
+    }
+    expect(alive).toBe(false);
+  });
+});
+
+describe('verification runner packaging', () => {
+  it('ships the process-tree verification wrapper in the npm package', () => {
+    const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
+      files?: string[];
+    };
+    expect(pkg.files).toContain('scripts/run-verify-command.mjs');
   });
 });
 

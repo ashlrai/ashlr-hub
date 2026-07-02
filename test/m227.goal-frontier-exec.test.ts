@@ -37,6 +37,7 @@ vi.mock('../src/core/run/verify.js', () => ({
 vi.mock('../src/core/run/verify-commands.js', () => ({
   detectVerifyCommands: vi.fn(() => []),
   runVerifyCommand: vi.fn(() => ({ ok: true, command: 'x', exitCode: 0, output: '', timedOut: false })),
+  runVerifyCommandAsync: vi.fn(async () => ({ ok: true, command: 'x', exitCode: 0, output: '', timedOut: false })),
 }));
 
 vi.mock('../src/core/run/router.js', () => ({

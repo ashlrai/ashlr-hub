@@ -52,6 +52,7 @@ vi.mock('../src/core/fleet/digest.js', () => ({
 
 vi.mock('../src/core/fleet/status.js', () => ({
   buildFleetStatus: (...args: unknown[]) => mockBuildFleetStatus(...args),
+  resolveAutonomyControlMode: () => 'disabled',
 }));
 
 vi.mock('../src/core/sandbox/audit.js', () => ({

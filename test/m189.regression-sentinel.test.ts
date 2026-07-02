@@ -43,6 +43,7 @@ const mockRunVerifyCommand = vi.fn();
 vi.mock('../src/core/run/verify-commands.js', () => ({
   detectVerifyCommands: (...args: unknown[]) => mockDetectVerifyCommands(...args),
   runVerifyCommand: (...args: unknown[]) => mockRunVerifyCommand(...args),
+  runVerifyCommandAsync: async (...args: unknown[]) => mockRunVerifyCommand(...args),
 }));
 
 // createProposal is mocked so NO real inbox proposal is persisted and we can

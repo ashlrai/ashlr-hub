@@ -12,6 +12,7 @@ import {
   isSafetyTestFile,
   guardSafetyTests,
   selfEvalParity,
+  selfEvalParityAsync,
   isSelfTargetProposal,
 } from '../src/core/fleet/self.js';
 import type { Proposal } from '../src/core/types.js';
@@ -100,6 +101,30 @@ describe('M54 — selfEvalParity (suite green flag-off AND flag-on)', () => {
         throw new Error('boom');
       }).ok,
     ).toBe(false);
+  });
+});
+
+describe('M54 — selfEvalParityAsync (async suite green flag-off AND flag-on)', () => {
+  it('ok only when BOTH async flag states are green', async () => {
+    await expect(selfEvalParityAsync(async () => true)).resolves.toMatchObject({ ok: true });
+  });
+
+  it('awaits async failures instead of treating promises as truthy passes', async () => {
+    const v = await selfEvalParityAsync(async (flagOn) => {
+      await new Promise((resolveDone) => setTimeout(resolveDone, 1));
+      return !flagOn;
+    });
+    expect(v.ok).toBe(false);
+    expect(v.reason).toMatch(/flag ON/);
+  });
+
+  it('fail-closed when the async runner rejects', async () => {
+    const v = await selfEvalParityAsync(async (flagOn) => {
+      if (!flagOn) return true;
+      throw new Error('boom');
+    });
+    expect(v.ok).toBe(false);
+    expect(v.reason).toMatch(/flag ON/);
   });
 });
 

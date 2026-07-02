@@ -194,6 +194,8 @@ import { buildSnapshot } from '../src/core/dashboard.js';
 // ---------------------------------------------------------------------------
 
 beforeEach(async () => {
+  vi.clearAllMocks();
+
   const { loadIndex } = await import('../src/core/index-engine.js');
   const { getToolsRegistry } = await import('../src/core/tools-registry.js');
   const { buildRollup } = await import('../src/core/observability/rollup.js');
@@ -406,7 +408,9 @@ describe('M224 judgeVerdicts24h', () => {
     expect(vi.mocked(readJudgeTraces)).toHaveBeenCalledWith(
       expect.objectContaining({ sinceMs: expect.any(Number) })
     );
-    const callArg = vi.mocked(readJudgeTraces).mock.calls[0]![0]!;
+    const callArg = vi.mocked(readJudgeTraces).mock.calls
+      .map((call) => call[0])
+      .find((arg) => arg && typeof arg.sinceMs === 'number')!;
     const windowMs = Date.now() - (callArg.sinceMs ?? 0);
     // sinceMs should be within ~1s of 24h ago
     expect(windowMs).toBeGreaterThan(23 * 3600 * 1000);

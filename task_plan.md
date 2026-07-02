@@ -204,3 +204,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Extended self-heal to keep one canonical current repair per repo and prune missing/unenrolled self-heal pollution.
 - [x] Run follow-up full gates.
 - [x] Commit, push, resume/restart daemon, and verify live queue truth.
+
+## Current Continuation - Async Verification Liveness
+- [x] Rechecked git status, recent commits, Entire state, task plan, and notes.
+- [x] Deployed parallel agents to audit async verification migration, auto-merge verification callers, and failure-kind/tooling classification.
+- [x] Stopped the live daemon for the maintenance window before edits.
+- [x] Added an async verification command runner that preserves process-tree timeout and isolated HOME behavior without blocking timers.
+- [x] Migrated production verification paths that can run inside daemon/autonomy work to the async runner: structured verification, auto-merge proposal verification, self-target parity, self-heal detection, TITRR/completeness gates, regression sentinel, and MCP-native lint-on-edit.
+- [x] Added regression tests proving async verification lets timers run, kills process trees, ships the wrapper in the package, and keeps self-target parity from treating promises as truthy.
+- [x] Repaired full-CI drift exposed by the migration: dynamic doctor HOME paths, stale mocks, stable reflection fixtures, multi-backend merge mocks, and production-panel mock reset.
+- [x] Run final full gates, commit, push, restart daemon, and verify live service/queue truth.

@@ -205,3 +205,28 @@ export function selfEvalParity(runSuite: (flagOn: boolean) => boolean): SelfEval
   }
   return { ok: true, reason: 'invariant suite green flag-off AND flag-on' };
 }
+
+/** Async variant for callers whose suite runner must not block daemon timers. */
+export async function selfEvalParityAsync(
+  runSuite: (flagOn: boolean) => boolean | Promise<boolean>,
+): Promise<SelfEvalVerdict> {
+  let offGreen: boolean;
+  let onGreen: boolean;
+  try {
+    offGreen = await runSuite(false);
+  } catch {
+    offGreen = false;
+  }
+  if (!offGreen) {
+    return { ok: false, reason: 'invariant suite not green with foundry flag OFF' };
+  }
+  try {
+    onGreen = await runSuite(true);
+  } catch {
+    onGreen = false;
+  }
+  if (!onGreen) {
+    return { ok: false, reason: 'invariant suite not green with foundry flag ON' };
+  }
+  return { ok: true, reason: 'invariant suite green flag-off AND flag-on' };
+}

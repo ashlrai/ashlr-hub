@@ -44,7 +44,7 @@ import {
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { AshlrConfig, Proposal } from '../types.js';
-import { detectVerifyCommands, runVerifyCommand } from '../run/verify-commands.js';
+import { detectVerifyCommands, runVerifyCommandAsync } from '../run/verify-commands.js';
 import { createProposal } from '../inbox/store.js';
 import { hashDiff, signProvenance } from '../foundry/provenance.js';
 
@@ -107,7 +107,7 @@ export type GitRunner = (args: string[]) => string | null;
 
 export interface SentinelOpts {
   /** Override the anomaly signal. Default: run the repo verify commands on HEAD. */
-  runSuite?: (repoDir: string, timeoutMs: number) => SuiteRun;
+  runSuite?: (repoDir: string, timeoutMs: number) => SuiteRun | Promise<SuiteRun>;
   /** Override git invocation. Default: spawnSync('git', …) confined to repoDir. */
   git?: GitRunner;
   /**
@@ -144,12 +144,12 @@ function firstFailureLine(output: string): string {
 }
 
 /** Default signal: run the repo's verify commands on HEAD; RED on first failure. */
-function defaultRunSuite(repoDir: string, timeoutMs: number): SuiteRun {
+async function defaultRunSuite(repoDir: string, timeoutMs: number): Promise<SuiteRun> {
   try {
     const commands = detectVerifyCommands(repoDir);
     if (commands.length === 0) return { red: false };
     for (const vc of commands) {
-      const result = runVerifyCommand(vc, repoDir, {} as AshlrConfig, { timeoutMs });
+      const result = await runVerifyCommandAsync(vc, repoDir, {} as AshlrConfig, { timeoutMs });
       if (!result.ok) return { red: true, detail: firstFailureLine(result.output) };
     }
     return { red: false };
@@ -290,7 +290,7 @@ export async function detectRegression(
 
     // (3) Built-in signal: run the suite on HEAD.
     const runSuite = opts?.runSuite ?? defaultRunSuite;
-    const run = runSuite(repoDir, sc.timeoutMs);
+    const run = await runSuite(repoDir, sc.timeoutMs);
 
     const git = opts?.git ?? defaultGit(repoDir, sc.timeoutMs);
     const head = git(['rev-parse', 'HEAD']) ?? '';
@@ -435,7 +435,7 @@ export async function bisectAndRevert(
     for (const sha of oldestFirst) {
       const ok = git(['checkout', '--quiet', sha]) !== null;
       if (!ok) continue;
-      const run = runSuite(repoDir, sc.timeoutMs);
+      const run = await runSuite(repoDir, sc.timeoutMs);
       if (run.red) {
         culprit = sha;
         break; // first bad in oldest→newest order

@@ -70,8 +70,16 @@ import * as path from 'node:path';
 // ---------------------------------------------------------------------------
 
 const mockAutoMergeProposal = vi.fn();
+const mockVerifyProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
+  verifyProposal: (...args: unknown[]) => mockVerifyProposal(...args),
+  verifyResultFromProposalResult: (result: { ok: boolean; detail?: string }, source: string) => ({
+    passed: result.ok,
+    source,
+    at: new Date().toISOString(),
+    ...(result.ok ? {} : { failed: [result.detail ?? 'verification failed'] }),
+  }),
   evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
   // Re-export the pure helpers directly from the real module (they have no I/O).
   isFrontierJudge: (s: string | undefined) => {
@@ -165,6 +173,13 @@ beforeEach(() => {
   mockListProposals.mockReturnValue([]);
   mockReadDecisions.mockReturnValue([]);
   mockAutoMergeProposal.mockResolvedValue({ ok: true, merged: true, branched: false, reason: 'ok' });
+  mockVerifyProposal.mockResolvedValue({
+    ok: true,
+    ran: [],
+    detail: 'mock verification passed',
+    baseBranch: 'main',
+    baseHead: 'abc123',
+  });
   mockGetActiveClient.mockResolvedValue({
     model: 'claude-opus-4-8',
     complete: async () =>

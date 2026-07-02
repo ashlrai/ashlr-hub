@@ -23,7 +23,7 @@ import { spawnSync } from 'node:child_process';
 import type { AshlrConfig } from '../types.js';
 import {
   detectVerifyCommands,
-  runVerifyCommand,
+  runVerifyCommandAsync,
   type VerifyCommand,
 } from './verify-commands.js';
 
@@ -173,13 +173,13 @@ function gitStashPop(dir: string): void {
  * `ids` is the set of parsed failing test IDs (may be empty if output unparseable).
  * `ok` is the raw runner result — used as a fallback when IDs are unparseable.
  */
-function collectFailingTests(
+async function collectFailingTests(
   cmd: VerifyCommand,
   dir: string,
   cfg: AshlrConfig,
   timeoutMs: number,
-): { ok: boolean; ids: Set<string> } | null {
-  const result = runVerifyCommand(cmd, dir, cfg, { timeoutMs });
+): Promise<{ ok: boolean; ids: Set<string> } | null> {
+  const result = await runVerifyCommandAsync(cmd, dir, cfg, { timeoutMs });
   if (result.timedOut) return null;
   if (result.ok) return { ok: true, ids: new Set<string>() };
   return { ok: false, ids: parseFailedTestIds(result.output) };
@@ -214,7 +214,7 @@ export async function runDeltaAwareTestCheck(
 
     if (!stashed) {
       // Cannot isolate baseline — fall back to direct run (original behaviour)
-      const result = runVerifyCommand(testCmd, worktreePath, cfg, { timeoutMs });
+      const result = await runVerifyCommandAsync(testCmd, worktreePath, cfg, { timeoutMs });
       if (!result.ok) {
         return {
           pass: false,
@@ -225,7 +225,7 @@ export async function runDeltaAwareTestCheck(
     }
 
     // Step 2: run baseline (pre-change)
-    const baseline = collectFailingTests(testCmd, worktreePath, cfg, timeoutMs);
+    const baseline = await collectFailingTests(testCmd, worktreePath, cfg, timeoutMs);
 
     // Step 3: restore agent changes
     gitStashPop(worktreePath);
@@ -236,7 +236,7 @@ export async function runDeltaAwareTestCheck(
     }
 
     // Step 4: run after (with agent changes)
-    const after = collectFailingTests(testCmd, worktreePath, cfg, timeoutMs);
+    const after = await collectFailingTests(testCmd, worktreePath, cfg, timeoutMs);
 
     if (after === null) {
       // After run timed out — treat as unknown, don't hard-block
@@ -349,7 +349,7 @@ export async function runCompletenessGate(
 
     const typecheckCmd = cmds.find((c) => c.kind === 'typecheck');
     if (typecheckCmd) {
-      const result = runVerifyCommand(typecheckCmd, worktreePath, cfg, {
+      const result = await runVerifyCommandAsync(typecheckCmd, worktreePath, cfg, {
         timeoutMs: SELF_VERIFY_TIMEOUT_MS,
       });
       if (!result.ok) {

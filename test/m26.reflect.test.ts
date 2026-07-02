@@ -130,7 +130,9 @@ function task(
 let swarmCounter = 0;
 function swarm(partial: Partial<SwarmRun>): SwarmRun {
   swarmCounter += 1;
-  const createdAt = partial.createdAt ?? `2026-06-0${(swarmCounter % 9) + 1}T00:00:00.000Z`;
+  const createdAt =
+    partial.createdAt ??
+    new Date(Date.now() - (swarmCounter % 9) * 86_400_000).toISOString();
   return {
     id: partial.id ?? `s${swarmCounter}`,
     goal: partial.goal ?? 'do something',

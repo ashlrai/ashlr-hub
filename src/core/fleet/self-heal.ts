@@ -24,7 +24,7 @@ import type { AshlrConfig, WorkItem } from '../types.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import {
   detectVerifyCommands,
-  runVerifyCommand,
+  runVerifyCommandAsync,
 } from '../run/verify-commands.js';
 
 // ---------------------------------------------------------------------------
@@ -108,7 +108,7 @@ export async function detectBreakage(
 
     for (const vc of commands) {
       const kind = kindOf(vc.kind);
-      const result = runVerifyCommand(vc, repoDir, cfg as AshlrConfig ?? {} as AshlrConfig, { timeoutMs });
+      const result = await runVerifyCommandAsync(vc, repoDir, cfg as AshlrConfig ?? {} as AshlrConfig, { timeoutMs });
       if (!result.ok) {
         return {
           broken: true,

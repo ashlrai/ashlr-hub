@@ -364,7 +364,7 @@ describe('M140 TITRR — titrrTestRun detects test command', () => {
     mockDetect.mockReturnValue([]);
     const { titrrTestRun } = await import('../src/core/run/orchestrator.js');
     const dir = mkTmp('ashlr-m140-notestcmd-');
-    const r = titrrTestRun(dir, makeConfig());
+    const r = await titrrTestRun(dir, makeConfig());
     expect(r).toBeNull();
   });
 
@@ -373,7 +373,7 @@ describe('M140 TITRR — titrrTestRun detects test command', () => {
     const { titrrTestRun } = await import('../src/core/run/orchestrator.js');
     const dir = mkTmp('ashlr-m140-notest-');
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'x', scripts: {} }), 'utf8');
-    const r = titrrTestRun(dir, makeConfig());
+    const r = await titrrTestRun(dir, makeConfig());
     expect(r).toBeNull();
   });
 
@@ -384,7 +384,7 @@ describe('M140 TITRR — titrrTestRun detects test command', () => {
     // Mock runVerifyCommand to return pass.
     mockRun.mockReturnValue({ ok: true, command: 'sh -c exit 0', exitCode: 0, output: '', timedOut: false });
     const { titrrTestRun } = await import('../src/core/run/orchestrator.js');
-    const r = titrrTestRun(dir, makeConfig());
+    const r = await titrrTestRun(dir, makeConfig());
     expect(r).not.toBeNull();
     expect(r!.ok).toBe(true);
   });
@@ -400,7 +400,7 @@ describe('M140 TITRR — titrrTestRun detects test command', () => {
       timedOut: false,
     });
     const { titrrTestRun } = await import('../src/core/run/orchestrator.js');
-    const r = titrrTestRun(dir, makeConfig());
+    const r = await titrrTestRun(dir, makeConfig());
     expect(r).not.toBeNull();
     expect(r!.ok).toBe(false);
     expect(r!.output).toMatch(/FAIL/);
@@ -460,6 +460,7 @@ const mockRun = vi.fn();
 vi.mock('../src/core/run/verify-commands.js', () => ({
   detectVerifyCommands: (...args: unknown[]) => mockDetect(...args),
   runVerifyCommand: (...args: unknown[]) => mockRun(...args),
+  runVerifyCommandAsync: async (...args: unknown[]) => mockRun(...args),
 }));
 
 // Mock policy so assertMayMutate/killSwitchOn pass without enrolled repos.

@@ -87,7 +87,7 @@ import { nullSink } from './streaming.js';
 import type { StreamSink } from './streaming.js';
 import { withRetry } from './retry.js';
 import { verifyTaskStructured } from './verify.js';
-import { detectVerifyCommands, runVerifyCommand } from './verify-commands.js';
+import { detectVerifyCommands, runVerifyCommandAsync } from './verify-commands.js';
 import { withHeal, defaultHealPolicy } from './self-heal.js';
 import type { HealEvent, Sandbox } from '../types.js';
 import { PLANNER_ROLE, SYNTHESIZER_ROLE } from './prompts/roles.js';
@@ -885,19 +885,19 @@ const TITRR_OUTPUT_CAP = 4_000;
  * hard timeout and output cap. Returns null when no test command is detected
  * (no-test-command repo → caller skips gracefully).
  *
- * Reuses detectVerifyCommands + runVerifyCommand from verify-commands.ts (DRY).
+ * Reuses detectVerifyCommands + runVerifyCommandAsync from verify-commands.ts (DRY).
  * Never throws — all errors surface as { ok:false, output:... }.
  */
-export function titrrTestRun(
+export async function titrrTestRun(
   worktreePath: string,
   cfg: AshlrConfig,
-): { ok: boolean; output: string } | null {
+): Promise<{ ok: boolean; output: string } | null> {
   // Only run the test command — typecheck/lint are out of scope for TITRR.
   const allCmds = detectVerifyCommands(worktreePath);
   const testCmd = allCmds.find((c) => c.kind === 'test');
   if (!testCmd) return null; // no test command → skip gracefully
 
-  const result = runVerifyCommand(testCmd, worktreePath, cfg, {
+  const result = await runVerifyCommandAsync(testCmd, worktreePath, cfg, {
     timeoutMs: TITRR_TEST_TIMEOUT_MS,
   });
 
@@ -1112,7 +1112,7 @@ export async function runGoal(
                 // and treat as if no test command was found (propose immediately).
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- m140 pins this exact source text
                 const realTestLoop = (cfg.foundry as any)?.realTestLoop ?? true;
-                const titrrResult = realTestLoop ? titrrTestRun(titrrSandbox.worktreePath, cfg) : null;
+                const titrrResult = realTestLoop ? await titrrTestRun(titrrSandbox.worktreePath, cfg) : null;
                 if (!titrrResult || titrrResult.ok) {
                   if (!isLastAttempt) {
                     const propR = await runApiModelSandboxed(engineId, apiGoal, cfg, {
@@ -1227,7 +1227,7 @@ export async function runGoal(
                   text: `[TITRR] attempt ${titrrAttempt}/${titrrMax}: running tests in ${testRoot}`,
                 });
               }
-              titrrResult = realTestLoop ? titrrTestRun(testRoot, cfg) : null;
+              titrrResult = realTestLoop ? await titrrTestRun(testRoot, cfg) : null;
 
               if (titrrResult === null) {
                 // No test command detected — annotate and stop early.

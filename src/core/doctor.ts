@@ -10,7 +10,7 @@ import { homedir } from 'node:os';
 import { join, delimiter } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { AshlrConfig, DoctorCheck, DoctorCheckStatus, DoctorReport, McpRegistry, ToolsRegistry } from './types.js';
-import { CONFIG_PATH, INDEX_PATH, loadConfig } from './config.js';
+import { loadConfig } from './config.js';
 import { getPhantomStatus } from './phantom.js';
 import { getProviderRegistry } from './providers.js';
 // H7 — 5 NEW read-only probes share the SAME read-only readiness facets that
@@ -373,24 +373,25 @@ function checkAshlrInstalled(): DoctorCheck {
 
 /** ~/.ashlr/config.json exists and parses */
 function checkConfig(): DoctorCheck {
+  const configPath = join(homedir(), '.ashlr', 'config.json');
   try {
-    if (!existsSync(CONFIG_PATH)) {
+    if (!existsSync(configPath)) {
       return check(
         'config',
         'Config file exists',
         'fail',
-        `${CONFIG_PATH} not found`,
+        `${configPath} not found`,
         'Run: ashlr init',
       );
     }
     loadConfig(); // will throw on parse failure
-    return check('config', 'Config file exists', 'pass', `${CONFIG_PATH} is valid JSON`);
+    return check('config', 'Config file exists', 'pass', `${configPath} is valid JSON`);
   } catch (err) {
     return check(
       'config',
       'Config file exists',
       'fail',
-      `${CONFIG_PATH} is invalid: ${String(err)}`,
+      `${configPath} is invalid: ${String(err)}`,
       'Fix JSON syntax errors in ~/.ashlr/config.json',
     );
   }
@@ -398,18 +399,19 @@ function checkConfig(): DoctorCheck {
 
 /** ~/.ashlr/index.json present + not stale (> 7 days old = warn) */
 function checkIndex(): DoctorCheck {
+  const indexPath = join(homedir(), '.ashlr', 'index.json');
   try {
-    if (!existsSync(INDEX_PATH)) {
+    if (!existsSync(indexPath)) {
       return check(
         'index',
         'Index file present',
         'warn',
-        `${INDEX_PATH} not found — run ashlr index to build it`,
+        `${indexPath} not found — run ashlr index to build it`,
         'ashlr index',
       );
     }
 
-    const raw = readFileSync(INDEX_PATH, 'utf8');
+    const raw = readFileSync(indexPath, 'utf8');
     let generatedAt: Date | null = null;
     try {
       const parsed = JSON.parse(raw) as { generatedAt?: string };
@@ -422,7 +424,7 @@ function checkIndex(): DoctorCheck {
 
     const ageMs = generatedAt
       ? Date.now() - generatedAt.getTime()
-      : Date.now() - statSync(INDEX_PATH).mtimeMs;
+      : Date.now() - statSync(indexPath).mtimeMs;
 
     const ageDays = ageMs / (1000 * 60 * 60 * 24);
     const ageLabel = `${ageDays.toFixed(1)} days old`;

@@ -69,10 +69,14 @@ vi.mock('../src/core/run/verify.js', () => ({
 }));
 
 // Mock verify-commands so titrrTestRun is hermetic.
-vi.mock('../src/core/run/verify-commands.js', () => ({
-  detectVerifyCommands: vi.fn(() => []),
-  runVerifyCommand: vi.fn(() => ({ ok: true, command: 'x', exitCode: 0, output: '', timedOut: false })),
-}));
+vi.mock('../src/core/run/verify-commands.js', () => {
+  const runVerifyCommand = vi.fn(() => ({ ok: true, command: 'x', exitCode: 0, output: '', timedOut: false }));
+  return {
+    detectVerifyCommands: vi.fn(() => []),
+    runVerifyCommand,
+    runVerifyCommandAsync: runVerifyCommand,
+  };
+});
 
 // Mock router — default: unavailable (returns null from loadRouter path).
 // The orchestrator does: import('./router.js') — mock the module it imports.
@@ -515,29 +519,29 @@ describe('M199 TITRR_MAX_ATTEMPTS constant', () => {
 // ---------------------------------------------------------------------------
 
 describe('M199 titrrTestRun — null when no test command', () => {
-  it('returns null when detectVerifyCommands returns empty', () => {
+  it('returns null when detectVerifyCommands returns empty', async () => {
     vi.mocked(detectVerifyCommands).mockReturnValue([]);
-    const result = titrrTestRun('/tmp/noop', makeConfig());
+    const result = await titrrTestRun('/tmp/noop', makeConfig());
     expect(result).toBeNull();
   });
 
-  it('returns {ok:true} when mocked test command passes', () => {
+  it('returns {ok:true} when mocked test command passes', async () => {
     vi.mocked(detectVerifyCommands).mockReturnValue([{ kind: 'test', cmd: ['sh', '-c', 'exit 0'] } as any]);
     vi.mocked(runVerifyCommand).mockReturnValue({ ok: true, command: 'sh', exitCode: 0, output: 'all pass', timedOut: false });
-    const result = titrrTestRun('/tmp/noop', makeConfig());
+    const result = await titrrTestRun('/tmp/noop', makeConfig());
     expect(result).not.toBeNull();
     expect(result!.ok).toBe(true);
   });
 
-  it('returns {ok:false} when mocked test command fails', () => {
+  it('returns {ok:false} when mocked test command fails', async () => {
     vi.mocked(detectVerifyCommands).mockReturnValue([{ kind: 'test', cmd: ['sh', '-c', 'exit 1'] } as any]);
     vi.mocked(runVerifyCommand).mockReturnValue({ ok: false, command: 'sh', exitCode: 1, output: 'FAIL test_x', timedOut: false });
-    const result = titrrTestRun('/tmp/noop', makeConfig());
+    const result = await titrrTestRun('/tmp/noop', makeConfig());
     expect(result!.ok).toBe(false);
     expect(result!.output).toContain('FAIL');
   });
 
-  it('truncates output when it exceeds TITRR_OUTPUT_CAP (4000 chars)', () => {
+  it('truncates output when it exceeds TITRR_OUTPUT_CAP (4000 chars)', async () => {
     vi.mocked(detectVerifyCommands).mockReturnValue([{ kind: 'test', cmd: ['x'] } as any]);
     vi.mocked(runVerifyCommand).mockReturnValue({
       ok: false,
@@ -546,7 +550,7 @@ describe('M199 titrrTestRun — null when no test command', () => {
       output: 'A'.repeat(6000),
       timedOut: false,
     });
-    const result = titrrTestRun('/tmp/noop', makeConfig());
+    const result = await titrrTestRun('/tmp/noop', makeConfig());
     expect(result!.output.length).toBeLessThanOrEqual(4050); // 4000 + truncation marker
     expect(result!.output).toContain('[output truncated]');
   });

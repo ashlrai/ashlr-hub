@@ -108,14 +108,14 @@ import { audit } from '../sandbox/audit.js';
 import { isRepo, getGitStatus, getRemoteOrg, defaultBranch } from '../git.js';
 import { createPr } from '../integrations/github.js';
 import { scrubSecrets } from '../knowledge/index.js';
-import { isSelfTargetProposal, guardSafetyTests, selfEvalParity } from '../fleet/self.js';
+import { isSelfTargetProposal, guardSafetyTests, selfEvalParityAsync } from '../fleet/self.js';
 import { verifyProvenance, verifyJudgeAttestation, hashDiff } from '../foundry/provenance.js';
 import { judgeProposal } from '../fleet/manager.js';
 import { readDecisions, recordDecision } from '../fleet/decisions-ledger.js';
 import { edvConfirmationWeight } from '../portfolio/edv-verify.js';
 import {
   detectVerifyCommands,
-  runVerifyCommand,
+  runVerifyCommandAsync,
   type VerifyCommand,
 } from '../run/verify-commands.js';
 import { parseFailedTestIds } from '../run/completeness-gate.js';
@@ -1350,7 +1350,7 @@ export async function verifyProposal(
       // tested change must not be blocked by lint debt it did not introduce. Baseline
       // lint and tolerate pre-existing failures (block only a clean→failing regression).
       if (vc.kind === 'test' || vc.kind === 'lint') {
-        const baseRes = runVerifyCommand(vc, tmpDir, cfg);
+        const baseRes = await runVerifyCommandAsync(vc, tmpDir, cfg);
         if (!baseRes.timedOut) {
           const key = Array.isArray(vc.cmd) ? vc.cmd.join(' ') : vc.kind;
           baselineResults.set(key, {
@@ -1379,7 +1379,7 @@ export async function verifyProposal(
 
     for (const vc of commands) {
       ran.push(vc);
-      const res = runVerifyCommand(vc, tmpDir, cfg);
+      const res = await runVerifyCommandAsync(vc, tmpDir, cfg);
 
       if (!res.ok) {
         // M281: for test commands, only block if NEW failures were introduced.
@@ -1926,7 +1926,7 @@ export async function autoMergeProposal(
     // check is the second layer that runs AFTER verify passes, so a self-edit
     // cannot silently break the suite under either foundry-enabled state.
     if (isSelfTargetProposal(proposal, cfg)) {
-      const parity = selfEvalParity((flagOn: boolean) => {
+      const parity = await selfEvalParityAsync(async (flagOn: boolean) => {
         // Re-use detectVerifyCommands/runVerifyCommand on the REPO (base tree).
         // The diff was already verified green in an isolated worktree by Gate 6;
         // here we check that the EXISTING suite (without the diff applied) stays
@@ -1978,7 +1978,7 @@ export async function autoMergeProposal(
             kind: 'test',
             cmd: [pm, 'run', 'test:invariants'],
           };
-          const res = runVerifyCommand(invariantCmd, repo, parityCfg);
+          const res = await runVerifyCommandAsync(invariantCmd, repo, parityCfg);
           return res.ok;
         }
         // Fallback: no targeted script — run all detected verify commands.
@@ -1989,7 +1989,7 @@ export async function autoMergeProposal(
           return true;
         }
         for (const vc of cmds) {
-          const res = runVerifyCommand(vc, repo, parityCfg);
+          const res = await runVerifyCommandAsync(vc, repo, parityCfg);
           if (!res.ok) return false;
         }
         return true;

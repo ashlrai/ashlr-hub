@@ -105,6 +105,7 @@ vi.mock('node:child_process', () => ({
 vi.mock('../src/core/run/verify-commands.js', () => ({
   detectVerifyCommands: (...a: unknown[]) => mockDetectVerifyCommands(...a),
   runVerifyCommand: (...a: unknown[]) => mockRunVerifyCommand(...a),
+  runVerifyCommandAsync: async (...a: unknown[]) => mockRunVerifyCommand(...a),
 }));
 
 // diff-safety.js — never destructive.
@@ -117,6 +118,7 @@ vi.mock('../src/core/fleet/self.js', () => ({
   isSelfTargetProposal: () => false,
   guardSafetyTests: () => ({ weakened: false }),
   selfEvalParity: () => ({ ok: true, reason: 'mock parity' }),
+  selfEvalParityAsync: async () => ({ ok: true, reason: 'mock parity' }),
 }));
 
 // kill-switch + enrollment.

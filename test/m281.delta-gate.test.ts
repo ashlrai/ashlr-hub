@@ -30,10 +30,14 @@ import type { VerifyCommand, VerifyCommandResult } from '../src/core/run/verify-
 // ---------------------------------------------------------------------------
 // Mock verify-commands so no real subprocesses run.
 // ---------------------------------------------------------------------------
-vi.mock('../src/core/run/verify-commands.js', () => ({
-  detectVerifyCommands: vi.fn(),
-  runVerifyCommand: vi.fn(),
-}));
+vi.mock('../src/core/run/verify-commands.js', () => {
+  const runVerifyCommand = vi.fn();
+  return {
+    detectVerifyCommands: vi.fn(),
+    runVerifyCommand,
+    runVerifyCommandAsync: runVerifyCommand,
+  };
+});
 
 // Mock node:fs existsSync for lockfile repo-root check.
 vi.mock('node:fs', async (importOriginal) => {
@@ -309,13 +313,9 @@ describe('M281 · runDeltaAwareTestCheck() — core delta logic', () => {
     // Make spawnSync throw
     spawnSync.mockImplementation(() => { throw new Error('ENOENT git'); });
 
-    let result: Awaited<ReturnType<typeof runDeltaAwareTestCheck>> | undefined;
-    await expect(async () => {
-      result = await runDeltaAwareTestCheck(TEST_CMD, FAKE_WORKTREE, makeCfg(), 60_000);
-    }).not.toThrow();
-
-    expect(result).toBeDefined();
-    expect(result!.pass).toBe(true); // safe fallback
+    await expect(
+      runDeltaAwareTestCheck(TEST_CMD, FAKE_WORKTREE, makeCfg(), 60_000),
+    ).resolves.toMatchObject({ pass: true }); // safe fallback
   });
 });
 

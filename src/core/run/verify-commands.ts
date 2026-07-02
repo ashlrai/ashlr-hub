@@ -13,13 +13,13 @@
  *
  * Rules (mirroring git.ts):
  *   - Node builtins only; zero third-party deps.
- *   - Subprocesses run with execFileSync / spawnSync via ARG ARRAYS, NO shell,
- *     and a tight timeout so a hung verify can never block the orchestrator.
- *   - runVerifyCommand never throws — any failure resolves to { ok:false } with
- *     the error captured in `output`.
+ *   - Subprocesses run via ARG ARRAYS, NO shell except Windows package-manager
+ *     shims, and a tight timeout so a hung verify can never block forever.
+ *   - runVerifyCommand/runVerifyCommandAsync never throw — any failure resolves
+ *     to { ok:false } with the error captured in `output`.
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import type { SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -44,6 +44,12 @@ const WRAPPER_TIMEOUT_GRACE_MS = 10_000;
 
 /** Prefix for per-command HOME directories used by verification subprocesses. */
 const VERIFY_HOME_PREFIX = 'ashlr-verify-home-';
+
+/** Per-stream async capture cap before the final renderToolText 32KB cap. */
+const ASYNC_STREAM_CAPTURE_CHARS = 28 * 1024;
+const ASYNC_STREAM_HEAD_CHARS = 20 * 1024;
+const ASYNC_STREAM_TAIL_CHARS = 6 * 1024;
+const ASYNC_STREAM_TRUNCATION_MARK = '\n[ashlr: verify output stream truncated]\n';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -136,6 +142,39 @@ function hasConfigFile(root: string, prefix: string): boolean {
   } catch {
     return false;
   }
+}
+
+function createBoundedStreamCapture(): { append: (chunk: unknown) => void; text: () => string } {
+  let head = '';
+  let tail = '';
+  let truncated = false;
+
+  return {
+    append(chunk: unknown): void {
+      const text = String(chunk);
+      if (text.length === 0) return;
+
+      if (!truncated) {
+        const combined = head + text;
+        if (combined.length <= ASYNC_STREAM_CAPTURE_CHARS) {
+          head = combined;
+          return;
+        }
+
+        truncated = true;
+        head = combined.slice(0, ASYNC_STREAM_HEAD_CHARS);
+        tail = combined.slice(-ASYNC_STREAM_TAIL_CHARS);
+        return;
+      }
+
+      tail = (tail + text).slice(-ASYNC_STREAM_TAIL_CHARS);
+    },
+
+    text(): string {
+      if (!truncated) return head;
+      return `${head}${ASYNC_STREAM_TRUNCATION_MARK}${tail}`;
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +422,161 @@ export function runVerifyCommand(
 
     return { ok, command, exitCode, output, timedOut };
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const output = renderToolText(`${command}\n${msg}`);
+    audit({
+      action: 'verify:command',
+      repo: workspaceRoot,
+      sandboxId: null,
+      summary: `${vc.kind}: ${command} → threw: ${msg}`,
+      result: 'error',
+    });
+    return { ok: false, command, exitCode: -1, output, timedOut: false };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public: runVerifyCommandAsync
+// ---------------------------------------------------------------------------
+
+/**
+ * Async twin of runVerifyCommand().
+ *
+ * It preserves the same wrapper, isolated HOME, timeout, output, and audit
+ * contract, but waits without blocking Node's event loop. Daemon callers should
+ * prefer this path so lock heartbeats, shared-queue lease renewal, and status
+ * polling can continue during long repo verification.
+ */
+export async function runVerifyCommandAsync(
+  vc: VerifyCommand,
+  workspaceRoot: string,
+  _cfg: AshlrConfig,
+  opts?: { timeoutMs?: number },
+): Promise<VerifyCommandResult> {
+  const command = vc.cmd.join(' ');
+  const timeout = Math.min(
+    MAX_TIMEOUT_MS,
+    Math.max(1, opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+  );
+
+  const bin = vc.cmd[0];
+  if (!bin) {
+    const output = renderToolText(`verify command "${vc.kind}" has an empty argv`);
+    audit({
+      action: 'verify:command',
+      repo: workspaceRoot,
+      sandboxId: null,
+      summary: `${vc.kind}: empty argv`,
+      result: 'error',
+    });
+    return { ok: false, command, exitCode: -1, output, timedOut: false };
+  }
+
+  let isolated: { env: NodeJS.ProcessEnv; cleanup: () => void } | null = null;
+  try {
+    const baseOptions = spawnOptionsFor(workspaceRoot, timeout, bin);
+    const runner = verifyRunnerPath();
+    isolated = makeIsolatedVerifyEnv(baseOptions.env ?? process.env);
+
+    const child = runner
+      ? spawn(
+          process.execPath,
+          [
+            runner,
+            String(timeout),
+            workspaceRoot,
+            Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
+          ],
+          {
+            cwd: workspaceRoot,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            shell: false,
+            windowsHide: true,
+            env: {
+              ...isolated.env,
+              ASHLR_VERIFY_SHELL: baseOptions.shell === true ? '1' : '0',
+            },
+          },
+        )
+      : spawn(bin, vc.cmd.slice(1), {
+          cwd: workspaceRoot,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          shell: baseOptions.shell === true,
+          windowsHide: true,
+          env: isolated.env,
+        });
+
+    return await new Promise<VerifyCommandResult>((resolveDone) => {
+      const stdout = createBoundedStreamCapture();
+      const stderr = createBoundedStreamCapture();
+      let spawnError: Error | undefined;
+      let wrapperTimedOut = false;
+      let settled = false;
+
+      const parentTimeout = runner ? timeout + WRAPPER_TIMEOUT_GRACE_MS : timeout;
+      const wrapperTimer = setTimeout(() => {
+        wrapperTimedOut = true;
+        stderr.append(`\n[verify-runner] wrapper timed out after ${parentTimeout}ms`);
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          try { child.kill(); } catch { /* best effort */ }
+        }
+      }, parentTimeout);
+
+      const finish = (result: VerifyCommandResult) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(wrapperTimer);
+        isolated?.cleanup();
+        resolveDone(result);
+      };
+
+      child.stdout?.on('data', (chunk) => { stdout.append(chunk); });
+      child.stderr?.on('data', (chunk) => { stderr.append(chunk); });
+
+      child.on('error', (err) => {
+        spawnError = err;
+      });
+
+      child.on('close', (code, signal) => {
+        const timedOut =
+          wrapperTimedOut ||
+          code === 124 ||
+          (spawnError !== undefined && (spawnError as NodeJS.ErrnoException).code === 'ETIMEDOUT');
+
+        if (spawnError) {
+          const output = renderToolText(
+            `${command}\n${stdout.text()}${stderr.text()}\n${spawnError.message}`,
+          );
+          audit({
+            action: 'verify:command',
+            repo: workspaceRoot,
+            sandboxId: null,
+            summary: `${vc.kind}: ${command} → ${timedOut ? 'timed out' : 'spawn error'}`,
+            result: 'error',
+          });
+          finish({ ok: false, command, exitCode: -1, output, timedOut });
+          return;
+        }
+
+        const exitCode = code ?? (signal ? 1 : -1);
+        const ok = exitCode === 0 && !wrapperTimedOut;
+        const output = renderToolText(`${stdout.text()}${stderr.text()}`);
+
+        audit({
+          action: 'verify:command',
+          repo: workspaceRoot,
+          sandboxId: null,
+          summary: `${vc.kind}: ${command} → ${timedOut ? 'timed out' : `exit ${exitCode}`}`,
+          result: ok ? 'ok' : 'error',
+        });
+
+        finish({ ok, command, exitCode, output, timedOut });
+      });
+    });
+  } catch (err) {
+    isolated?.cleanup();
     const msg = err instanceof Error ? err.message : String(err);
     const output = renderToolText(`${command}\n${msg}`);
     audit({

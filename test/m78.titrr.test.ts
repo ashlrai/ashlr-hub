@@ -80,7 +80,7 @@ describe('titrrTestRun — unit (real detectVerifyCommands)', () => {
     const { titrrTestRun } = await import('../src/core/run/orchestrator.js');
     const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m78-'));
     try {
-      expect(titrrTestRun(emptyDir, makeConfig())).toBeNull();
+      await expect(titrrTestRun(emptyDir, makeConfig())).resolves.toBeNull();
     } finally {
       fs.rmSync(emptyDir, { recursive: true, force: true });
     }
@@ -94,7 +94,7 @@ describe('titrrTestRun — unit (real detectVerifyCommands)', () => {
         path.join(dir, 'package.json'),
         JSON.stringify({ name: 'x', scripts: { build: 'tsc' } }),
       );
-      expect(titrrTestRun(dir, makeConfig())).toBeNull();
+      await expect(titrrTestRun(dir, makeConfig())).resolves.toBeNull();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -102,8 +102,7 @@ describe('titrrTestRun — unit (real detectVerifyCommands)', () => {
 
   it('never throws for a non-existent path', async () => {
     const { titrrTestRun } = await import('../src/core/run/orchestrator.js');
-    expect(() => titrrTestRun('/nonexistent-m78-xyz', makeConfig())).not.toThrow();
-    expect(titrrTestRun('/nonexistent-m78-xyz', makeConfig())).toBeNull();
+    await expect(titrrTestRun('/nonexistent-m78-xyz', makeConfig())).resolves.toBeNull();
   });
 });
 
@@ -146,6 +145,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     vi.doMock('../src/core/run/verify-commands.js', () => ({
       detectVerifyCommands: detectVCMockFn,
       runVerifyCommand: runVCMockFn,
+      runVerifyCommandAsync: runVCMockFn,
       spawnOptionsFor: vi.fn(),
     }));
 

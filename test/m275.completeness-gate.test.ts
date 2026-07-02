@@ -31,10 +31,14 @@ import type { VerifyCommand, VerifyCommandResult } from '../src/core/run/verify-
 // ---------------------------------------------------------------------------
 // Mock verify-commands so no real subprocesses run.
 // ---------------------------------------------------------------------------
-vi.mock('../src/core/run/verify-commands.js', () => ({
-  detectVerifyCommands: vi.fn(),
-  runVerifyCommand: vi.fn(),
-}));
+vi.mock('../src/core/run/verify-commands.js', () => {
+  const runVerifyCommand = vi.fn();
+  return {
+    detectVerifyCommands: vi.fn(),
+    runVerifyCommand,
+    runVerifyCommandAsync: runVerifyCommand,
+  };
+});
 
 // Mock node:fs existsSync for lockfile repo-root check.
 vi.mock('node:fs', async (importOriginal) => {

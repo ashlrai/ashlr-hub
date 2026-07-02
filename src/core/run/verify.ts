@@ -21,7 +21,7 @@ import type {
   AshlrConfig,
 } from '../types.js';
 import { overBudget, addUsage } from './budget.js';
-import { detectVerifyCommands, runVerifyCommand } from './verify-commands.js';
+import { detectVerifyCommands, runVerifyCommandAsync } from './verify-commands.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -269,7 +269,7 @@ export interface StructuredVerdict extends VerifyVerdict {
  * Otherwise (no workspace, exec not allowed, no cfg, or nothing detected) fall
  * back to the heuristic/model verifyTask, wrapped to the StructuredVerdict shape.
  *
- * Never throws (runVerifyCommand and verifyTask are both non-throwing).
+ * Never throws (runVerifyCommandAsync and verifyTask are both non-throwing).
  */
 export async function verifyTaskStructured(
   task: RunTask,
@@ -289,7 +289,7 @@ export async function verifyTaskStructured(
     const commands = detectVerifyCommands(workspaceRoot);
     if (commands.length > 0) {
       for (const vc of commands) {
-        const res = runVerifyCommand(vc, workspaceRoot, cfg);
+        const res = await runVerifyCommandAsync(vc, workspaceRoot, cfg);
         if (!res.ok) {
           return {
             ok: false,

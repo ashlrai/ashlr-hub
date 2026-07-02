@@ -65,7 +65,7 @@ import { assertMayMutate, killSwitchOn } from './sandbox/policy.js';
 import { audit } from './sandbox/audit.js';
 import { withToolEnv } from './env-bridge.js';
 import { applyEdit } from './run/diff.js';
-import { detectVerifyCommands, runVerifyCommand } from './run/verify-commands.js';
+import { detectVerifyCommands, runVerifyCommandAsync } from './run/verify-commands.js';
 
 // ---------------------------------------------------------------------------
 // Constants — bounds keep a tool reply from blowing agent context.
@@ -854,7 +854,7 @@ async function handleEditFile(
 
   // M140: lint/typecheck-on-edit — fast syntax check after write.
   // Reject a syntactically broken edit BEFORE spending a test run.
-  const lintResult = runLintOnEdit(abs, eng.workspaceRoot, cfg);
+  const lintResult = await runLintOnEdit(abs, eng.workspaceRoot, cfg);
   if (lintResult !== null && !lintResult.ok) {
     // Roll back the broken write.
     writeFileSync(abs, original, 'utf8');
@@ -877,16 +877,16 @@ async function handleEditFile(
  * Returns null when no typecheck command is available (graceful degrade).
  * Returns { ok, output } otherwise. Never throws.
  */
-function runLintOnEdit(
+async function runLintOnEdit(
   _editedFile: string,
   workspaceRoot: string,
   cfg: AshlrConfig,
-): { ok: boolean; output: string } | null {
+): Promise<{ ok: boolean; output: string } | null> {
   try {
     const cmds = detectVerifyCommands(workspaceRoot);
     const typecheck = cmds.find((c) => c.kind === 'typecheck');
     if (!typecheck) return null;
-    const r = runVerifyCommand(typecheck, workspaceRoot, cfg, { timeoutMs: 30_000 });
+    const r = await runVerifyCommandAsync(typecheck, workspaceRoot, cfg, { timeoutMs: 30_000 });
     return { ok: r.ok, output: r.output };
   } catch {
     return null; // graceful degrade — never fail an edit on a lint tool error

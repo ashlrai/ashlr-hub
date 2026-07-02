@@ -40,6 +40,7 @@ const mockRunVerifyCommand = vi.fn();
 vi.mock('../src/core/run/verify-commands.js', () => ({
   detectVerifyCommands: (...args: unknown[]) => mockDetectVerifyCommands(...args),
   runVerifyCommand: (...args: unknown[]) => mockRunVerifyCommand(...args),
+  runVerifyCommandAsync: (...args: unknown[]) => mockRunVerifyCommand(...args),
 }));
 
 const mockListEnrolled = vi.fn();
