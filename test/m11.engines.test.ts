@@ -12,7 +12,10 @@
  * GUARDRAIL: NO real delegated runs. All child_process calls are mocked.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AshlrConfig, EngineCommand } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -126,6 +129,36 @@ const CWD = '/home/u/project';
 // Pattern that must NEVER appear as an env key we add.
 const SECRET_KEY_RE =
   /(_API_KEY|_SECRET|_TOKEN|PASSWORD|^ANTHROPIC_|^OPENAI_API|^GEMINI_|^COHERE_|^GROQ_)/i;
+
+let tmpHome: string | null = null;
+let origHome: string | undefined;
+let origUserProfile: string | undefined;
+let tempHomeActive = false;
+
+function withTempHome(): string {
+  tmpHome = mkdtempSync(join(tmpdir(), 'ashlr-m11-'));
+  origHome = process.env['HOME'];
+  origUserProfile = process.env['USERPROFILE'];
+  tempHomeActive = true;
+  process.env['HOME'] = tmpHome;
+  process.env['USERPROFILE'] = tmpHome;
+  return tmpHome;
+}
+
+afterEach(() => {
+  if (!tempHomeActive) return;
+  if (tmpHome) {
+    rmSync(tmpHome, { recursive: true, force: true });
+    tmpHome = null;
+  }
+  if (origHome === undefined) delete process.env['HOME'];
+  else process.env['HOME'] = origHome;
+  if (origUserProfile === undefined) delete process.env['USERPROFILE'];
+  else process.env['USERPROFILE'] = origUserProfile;
+  origHome = undefined;
+  origUserProfile = undefined;
+  tempHomeActive = false;
+});
 
 // ---------------------------------------------------------------------------
 // buildEngineCommand — builtin
@@ -421,6 +454,34 @@ describe('spawnEngine — never throws on failure', () => {
       expect(result.usage.tokensOut).toBe(17);
     }
     // usage may be omitted when the json doesn't match — that's fine per contract
+  });
+
+  it('records Claude CLI rate_limit_event metadata from streamed output', async () => {
+    withTempHome();
+    const reset = Math.floor(Date.now() / 1000) + 3600;
+    const rateLimitLine = JSON.stringify({
+      type: 'rate_limit_event',
+      status: 'allowed_warning',
+      rateLimitType: 'seven_day',
+      utilization: 1,
+      resetsAt: reset,
+    });
+    const cmd: EngineCommand = {
+      bin: 'claude',
+      args: ['-p', GOAL, '--output-format', 'stream-json'],
+    };
+
+    const p = spawnEngine(cmd, makeConfig());
+    getSpawnControl().resolve(0, null, rateLimitLine + '\n');
+    const result = await p;
+
+    const { readLatestClaudeRateLimitEvent } = await import('../src/core/fabric/claude-rate-limit-event.js');
+    expect(result.ok).toBe(true);
+    expect(readLatestClaudeRateLimitEvent()).toMatchObject({
+      rateLimitType: 'seven_day',
+      utilization: 1,
+      resetsAt: reset,
+    });
   });
 
   it('uses withToolEnv (allowlist) — no secret-shaped keys in child env', async () => {

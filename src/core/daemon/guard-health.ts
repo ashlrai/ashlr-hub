@@ -171,8 +171,19 @@ export function diagnoseGuardHealth(): GuardHealthDiagnosis {
       } else {
         const lockOwner = readDaemonLockOwner();
         const lockAge = lockOwner?.pid === spendGuard.guard.pid ? heartbeatAgeMs(lockOwner.heartbeatAt) : null;
-        const staleLiveOwnerMs = 10 * 60_000;
-        if (lockAge !== null && lockAge >= staleLiveOwnerMs) {
+        // The daemon refreshes its lock every 30s. Missing several pulses while
+        // a spend guard is armed means in-flight accounting may be wedged.
+        const staleLiveOwnerMs = 2 * 60_000;
+        if (!lockOwner || lockOwner.pid !== spendGuard.guard.pid || lockAge === null) {
+          blocks.push({
+            id: 'daemon-spend-guard-stale-live-owner',
+            detail:
+              `daemon spend guard is owned by live pid ${spendGuard.guard.pid}, ` +
+              'but no matching daemon lock heartbeat is present',
+            path: daemonLockPath(),
+            repairCommands: ['ashlr daemon stop', backupCommand(spendGuard.path), 'ashlr daemon status'],
+          });
+        } else if (lockAge >= staleLiveOwnerMs) {
           blocks.push({
             id: 'daemon-spend-guard-stale-live-owner',
             detail:

@@ -54,6 +54,7 @@ import {
   saveDaemonState,
   saveDaemonStateResult,
 } from './state.js';
+import type { DaemonLock } from './state.js';
 import { nullSink } from '../run/streaming.js';
 import { runSwarm } from '../swarm/runner.js';
 import { runGoal } from '../run/orchestrator.js';
@@ -156,6 +157,27 @@ function constrainToLocalBackends(cfg: AshlrConfig): AshlrConfig {
 
 function enforceLocalBackend(backend: EngineId, plan: ResourceStrategyDaemonPlan | null): EngineId {
   return plan?.forceLocalOnly === true && !LOCAL_ONLY_BACKENDS.has(backend) ? 'builtin' : backend;
+}
+
+function startDaemonLockHeartbeat(lock: DaemonLock): () => void {
+  const interval = setInterval(() => {
+    heartbeatDaemonLock(lock);
+  }, 30_000);
+  (interval as { unref?: () => void }).unref?.();
+  return () => clearInterval(interval);
+}
+
+function lastProducerMaintenanceAtMs(state: DaemonState): number | null {
+  for (let i = state.ticks.length - 1; i >= 0; i--) {
+    const tick = state.ticks[i];
+    if (!tick) continue;
+    const maintenance = tick.producerMaintenance;
+    if (!maintenance) continue;
+    if (!maintenance.selfHeal && !maintenance.invent && !maintenance.ancillary) continue;
+    const parsed = Date.parse(tick.ts);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
 }
 
 function lightweightEcosystemReport(now: Date | undefined, root: string | undefined): EcosystemDoctorReport {
@@ -593,6 +615,100 @@ export async function tick(
       return null;
     }
   };
+  let preDispatchAutoMergePassResult: AutoMergePassResult | null = null;
+  let preDispatchAutoMergePassRan = false;
+  let selfHealMaintenanceRan = false;
+  let inventMaintenanceRan = false;
+  let ancillaryMaintenanceRan = false;
+  let skipInventAfterSelfHealRefill = false;
+  let producerMaintenanceSkippedByCadence = false;
+  let producerMaintenanceNextAfter: string | undefined;
+  const producerMaintenanceSummary = (): DaemonTick['producerMaintenance'] | undefined => {
+    if (
+      !selfHealMaintenanceRan &&
+      !inventMaintenanceRan &&
+      !ancillaryMaintenanceRan &&
+      !producerMaintenanceSkippedByCadence
+    ) {
+      return undefined;
+    }
+    return {
+      selfHeal: selfHealMaintenanceRan,
+      invent: inventMaintenanceRan,
+      ancillary: ancillaryMaintenanceRan,
+      ...(producerMaintenanceSkippedByCadence ? { skippedByCadence: true } : {}),
+      ...(producerMaintenanceNextAfter ? { nextAfter: producerMaintenanceNextAfter } : {}),
+    };
+  };
+  const shouldRunProducerMaintenance = (currentState: DaemonState): boolean => {
+    const lastRanAt = lastProducerMaintenanceAtMs(currentState);
+    if (lastRanAt === null) return true;
+    const nextRunAt = lastRanAt + Math.max(1, dcfg.intervalMs);
+    const nowMs = Date.parse(now);
+    if (!Number.isFinite(nowMs) || nowMs >= nextRunAt) return true;
+    producerMaintenanceSkippedByCadence = true;
+    producerMaintenanceNextAfter = new Date(nextRunAt).toISOString();
+    return false;
+  };
+  const runSelfHealMaintenance = async (): Promise<void> => {
+    if (opts.dryRun || selfHealMaintenanceRan) return;
+    selfHealMaintenanceRan = true;
+    try {
+      await runSelfHealCycle(liveCfg);
+    } catch (err) {
+      // Best-effort — self-heal must never crash the tick.
+      console.warn('[ashlr] daemon:tick runSelfHealCycle failed:', (err as Error)?.message ?? err);
+    }
+  };
+  const runInventMaintenance = async (): Promise<boolean> => {
+    if (opts.dryRun || inventMaintenanceRan || skipInventAfterSelfHealRefill) return false;
+    if (directionPlan?.forceLocalOnly === true) return false;
+    if ((liveCfg.foundry as Record<string, unknown>)?.generative !== true) return false;
+    inventMaintenanceRan = true;
+    try {
+      await runInventCycle(liveCfg);
+      return true;
+    } catch (err) {
+      console.warn('[ashlr] daemon:tick runInventCycle failed:', (err as Error)?.message ?? err);
+      return false;
+    }
+  };
+  const runAncillaryMaintenance = async (): Promise<void> => {
+    if (opts.dryRun || ancillaryMaintenanceRan) return;
+    ancillaryMaintenanceRan = true;
+
+    // M187: Counterfactual replay — low-cadence judge calibration.
+    if (
+      (liveCfg.foundry as Record<string, unknown>)?.counterfactual === true &&
+      state.ticks.length % 20 === 0
+    ) {
+      try { await runCounterfactualReplay(liveCfg); } catch (err) { console.warn('[ashlr] daemon:tick runCounterfactualReplay failed:', (err as Error)?.message ?? err); }
+    }
+
+    // M189: Regression sentinel — detect regressions introduced by auto-merge and bisect/revert.
+    if ((liveCfg.foundry as Record<string, unknown>)?.regressionSentinel === true) {
+      try {
+        const r = await detectRegression(liveCfg);
+        if (r.regressed) {
+          await bisectAndRevert(liveCfg);
+          // M212: fire-and-forget anomaly notification — additive, never throws.
+          void notifyFleetEvent('anomaly', { detail: 'Regression detected — bisect/revert triggered' }, liveCfg);
+          // M241: fire-and-forget fleet event-bus emit — additive, never throws, no control-flow change.
+          void import('../fleet/event-bus.js').then(({ emit }) => emit('regression:detected', { signal: r.signal, repo: process.cwd() }, liveCfg)).catch(() => {});
+        }
+      } catch (err) { console.warn('[ashlr] daemon:tick regressionSentinel failed:', (err as Error)?.message ?? err); }
+    }
+  };
+  const refreshBacklogForTick = async (): Promise<WorkItem[]> => {
+    try {
+      const backlog = await buildBacklog({ repos: enrolled });
+      return backlog.items;
+    } catch (err) {
+      // buildBacklog never throws by contract; extra guard
+      console.warn('[ashlr] daemon:tick buildBacklog guard caught:', (err as Error)?.message ?? err);
+      return [];
+    }
+  };
 
   // -------------------------------------------------------------------------
   // 1. Kill-switch check.
@@ -731,41 +847,59 @@ export async function tick(
   // -------------------------------------------------------------------------
   // 5. Build / refresh backlog for ENROLLED repos only.
   // -------------------------------------------------------------------------
-  let backlogItems: WorkItem[] = [];
-  try {
-    const backlog = await buildBacklog({ repos: enrolled });
-    backlogItems = backlog.items;
-  } catch (err) {
-    // buildBacklog never throws by contract; extra guard
-    console.warn('[ashlr] daemon:tick buildBacklog guard caught:', (err as Error)?.message ?? err);
-    backlogItems = [];
-  }
+  let backlogItems: WorkItem[] = await refreshBacklogForTick();
 
   if (backlogItems.length === 0) {
     const autoMergePassResult = await runAutoMergeMaintenancePass();
+    preDispatchAutoMergePassResult = autoMergePassResult;
+    preDispatchAutoMergePassRan = true;
     const autoMerge = autoMergeTickSummary(autoMergePassResult);
     const merged = autoMergePassResult?.merged ?? 0;
-    saveDaemonState(state);
-    audit({
-      action: 'daemon:tick',
-      repo: null,
-      sandboxId: null,
-      summary: `tick skipped: backlog is empty for enrolled repos${
-        merged > 0 ? `; auto-merged ${merged} proposal(s)` : ''
-      }`,
-      result: 'ok',
-    });
-    return recordTick({
-      ts: now,
-      itemsConsidered: 0,
-      proposalsCreated: 0,
-      spentUsd: 0,
-      reason: 'no-backlog',
-      ...(directionMode ? { directionMode } : {}),
-      ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
-      ...(autoMerge ? { autoMerge } : {}),
-      ...(merged > 0 ? { merged } : {}),
-    });
+
+    if (!opts.dryRun && shouldRunProducerMaintenance(state)) {
+      await runSelfHealMaintenance();
+      backlogItems = await refreshBacklogForTick();
+      if (backlogItems.length > 0) {
+        skipInventAfterSelfHealRefill = true;
+      } else {
+        const invented = await runInventMaintenance();
+        if (invented) backlogItems = await refreshBacklogForTick();
+      }
+      await runAncillaryMaintenance();
+    }
+
+    if (backlogItems.length > 0) {
+      audit({
+        action: 'daemon:tick',
+        repo: null,
+        sandboxId: null,
+        summary: `backlog refilled after empty scan: ${backlogItems.length} item(s)`,
+        result: 'ok',
+      });
+    } else {
+      saveDaemonState(state);
+      audit({
+        action: 'daemon:tick',
+        repo: null,
+        sandboxId: null,
+        summary: `tick skipped: backlog is empty for enrolled repos${
+          merged > 0 ? `; auto-merged ${merged} proposal(s)` : ''
+        }`,
+        result: 'ok',
+      });
+      return recordTick({
+        ts: now,
+        itemsConsidered: 0,
+        proposalsCreated: 0,
+        spentUsd: 0,
+        reason: 'no-backlog',
+        ...(directionMode ? { directionMode } : {}),
+        ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
+        ...(autoMerge ? { autoMerge } : {}),
+        ...(producerMaintenanceSummary() ? { producerMaintenance: producerMaintenanceSummary() } : {}),
+        ...(merged > 0 ? { merged } : {}),
+      });
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -938,6 +1072,15 @@ export async function tick(
     });
   }
 
+  // M170/M186/M187/M189 live maintenance cadence. Keep it outside the spend
+  // guard so queued work discovery and regression watches do not extend an
+  // in-flight accounting guard for selected dispatches.
+  if (shouldRunProducerMaintenance(state)) {
+    await runSelfHealMaintenance();
+    await runInventMaintenance();
+    await runAncillaryMaintenance();
+  }
+
   const workedSetIds = workedSet.map((i) => i.id);
   const spendGuard = armDaemonSpendGuard(workedSetIds);
   if (!spendGuard.ok) {
@@ -982,51 +1125,6 @@ export async function tick(
   //     This file has NO outward-action primitive of any kind; a PENDING
   //     proposal is applied LATER only by an explicit human inbox approve.
   // -------------------------------------------------------------------------
-
-  // M170: Self-heal cadence — detect broken repos and queue HIGH-PRIORITY heal
-  // WorkItems for the next backlog selection. Flag-gated: default ON (fix-forward
-  // posture). Never throws; never blocks or breaks the tick on any error.
-  // Runs at the START of a LIVE tick (NOT dry-run — dry-run returned above).
-  // cfg.foundry?.selfHeal === false → skipped entirely (flag-off = no-op).
-  try {
-    await runSelfHealCycle(liveCfg);
-  } catch (err) {
-    // Best-effort — self-heal must never crash the tick.
-    console.warn('[ashlr] daemon:tick runSelfHealCycle failed:', (err as Error)?.message ?? err);
-  }
-
-  // M186: Generative invent cycle — synthesise new work items from enrolled repos.
-  // Flag-gated: cfg.foundry.generative === true → ON; absent/false → skipped (default OFF).
-  // Never throws; never blocks or breaks the tick on any error.
-  if ((liveCfg.foundry as Record<string, unknown>)?.generative === true) {
-    try { await runInventCycle(liveCfg); } catch (err) { console.warn('[ashlr] daemon:tick runInventCycle failed:', (err as Error)?.message ?? err); }
-  }
-
-  // M187: Counterfactual replay — low-cadence judge calibration.
-  // Flag-gated: cfg.foundry.counterfactual === true AND sparse tick cadence (every 20 ticks).
-  // Never throws; never blocks or breaks the tick on any error.
-  if (
-    (liveCfg.foundry as Record<string, unknown>)?.counterfactual === true &&
-    state.ticks.length % 20 === 0
-  ) {
-    try { await runCounterfactualReplay(liveCfg); } catch (err) { console.warn('[ashlr] daemon:tick runCounterfactualReplay failed:', (err as Error)?.message ?? err); }
-  }
-
-  // M189: Regression sentinel — detect regressions introduced by auto-merge and bisect/revert.
-  // Flag-gated: cfg.foundry.regressionSentinel === true → ON; absent/false → skipped (default OFF).
-  // Never throws; never blocks or breaks the tick on any error.
-  if ((liveCfg.foundry as Record<string, unknown>)?.regressionSentinel === true) {
-    try {
-      const r = await detectRegression(liveCfg);
-      if (r.regressed) {
-        await bisectAndRevert(liveCfg);
-        // M212: fire-and-forget anomaly notification — additive, never throws.
-        void notifyFleetEvent('anomaly', { detail: 'Regression detected — bisect/revert triggered' }, liveCfg);
-        // M241: fire-and-forget fleet event-bus emit — additive, never throws, no control-flow change.
-        void import('../fleet/event-bus.js').then(({ emit }) => emit('regression:detected', { signal: r.signal, repo: process.cwd() }, liveCfg)).catch(() => {});
-      }
-    } catch (err) { console.warn('[ashlr] daemon:tick regressionSentinel failed:', (err as Error)?.message ?? err); }
-  }
 
   // Shared, mutable in-tick spend tally. Read+incremented by each concurrent
   // task so later dispatches can short-circuit once cumulative realized spend
@@ -1863,9 +1961,10 @@ export async function tick(
   // strictly proposal-only.
   let merged = 0;
   let autoMergePassResult: AutoMergePassResult | null = null;
-  autoMergePassResult = await runAutoMergeMaintenancePass();
+  autoMergePassResult = preDispatchAutoMergePassRan ? preDispatchAutoMergePassResult : await runAutoMergeMaintenancePass();
   const autoMerge = autoMergeTickSummary(autoMergePassResult);
   merged = autoMergePassResult?.merged ?? 0;
+  const producerMaintenance = producerMaintenanceSummary();
 
   // -------------------------------------------------------------------------
   // 7. Update + persist state with this tick's accounting.
@@ -1882,6 +1981,7 @@ export async function tick(
 	      ...(directionMode ? { directionMode } : {}),
 	      ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
 	      ...(autoMerge ? { autoMerge } : {}),
+	      ...(producerMaintenance ? { producerMaintenance } : {}),
 	      ...(dispatches ? { dispatches } : {}),
 	      ...(merged > 0 ? { merged } : {}),
 	    };
@@ -1910,6 +2010,7 @@ export async function tick(
 	    ...(directionMode ? { directionMode } : {}),
 	    ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
 	    ...(autoMerge ? { autoMerge } : {}),
+	    ...(producerMaintenance ? { producerMaintenance } : {}),
 	    ...(dispatches ? { dispatches } : {}),
 	    ...(merged > 0 ? { merged } : {}),
 	  };
@@ -2147,6 +2248,7 @@ export async function runDaemon(
     return loadDaemonState();
   }
   heartbeatDaemonLock(daemonLock);
+  const stopLockHeartbeat = startDaemonLockHeartbeat(daemonLock);
 
   audit({
     action: 'daemon:start',
@@ -2292,6 +2394,7 @@ export async function runDaemon(
   } catch {
     // Unexpected error — swallow; still clean up running state below.
   }
+  stopLockHeartbeat();
 
   // -------------------------------------------------------------------------
   // Clear running state on exit.

@@ -62,7 +62,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
-import type { AshlrConfig } from '../src/core/types.js';
+import type { AshlrConfig, DaemonTick } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
 // Core mocks — MUST be declared before lazy imports.
@@ -311,6 +311,20 @@ function seedSpend(spentUsd: number): void {
   });
 }
 
+/** Seed daemon state with recent tick history. */
+function seedTicks(ticks: DaemonTick[]): void {
+  saveDaemonState({
+    running: false,
+    pid: null,
+    startedAt: null,
+    lastTickAt: ticks.at(-1)?.ts ?? null,
+    todayDate: today(),
+    todaySpentUsd: 0,
+    itemsProcessed: 0,
+    ticks,
+  });
+}
+
 /** Build N synthetic WorkItems for a given repo. */
 function makeItems(repoDir: string, count: number) {
   const now = new Date().toISOString();
@@ -372,7 +386,100 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.reason).toBe('no-backlog');
     expect(result.proposalsCreated).toBe(0);
     expect(result.itemsConsidered).toBe(0);
+    expect(mockRunSelfHealCycle).toHaveBeenCalledTimes(1);
+    expect(mockRunInventCycle).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1a: empty backlog runs self-heal, rebuilds, and dispatches refilled work in the same tick', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const items = makeItems(repo.dir, 1);
+    mockBuildBacklog
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [] })
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(1);
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(2);
+    expect(mockRunSelfHealCycle).toHaveBeenCalledTimes(1);
+    expect(mockRunInventCycle).not.toHaveBeenCalled();
+    expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+  });
+
+  it('A1a2: empty backlog runs bounded invent only after self-heal refill stays empty', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const items = makeItems(repo.dir, 1);
+    mockBuildBacklog
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [] })
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [] })
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items });
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { autonomyControlLoop: false, generative: true },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(1);
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(3);
+    expect(mockRunSelfHealCycle).toHaveBeenCalledTimes(1);
+    expect(mockRunInventCycle).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+  });
+
+  it('A1a3: empty backlog does not rerun producer maintenance inside the daemon interval', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [],
+    });
+    seedTicks([{
+      ts: new Date().toISOString(),
+      itemsConsidered: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'no-backlog',
+      producerMaintenance: {
+        selfHeal: true,
+        invent: false,
+        ancillary: true,
+      },
+    }]);
+
+    const result = await tick(
+      {
+        ...cfgBuiltin(),
+        daemon: {
+          ...cfgBuiltin().daemon,
+          intervalMs: 60_000,
+          mode: 'continuous',
+          idleBackoffMs: 1,
+        },
+        foundry: { autonomyControlLoop: false, generative: true },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('no-backlog');
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(1);
+    expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
+    expect(mockRunInventCycle).not.toHaveBeenCalled();
+    expect(result.producerMaintenance).toMatchObject({
+      selfHeal: false,
+      invent: false,
+      ancillary: false,
+      skippedByCadence: true,
+    });
   });
 
   it('A1b: empty backlog still runs auto-merge maintenance when enabled', async () => {
@@ -413,6 +520,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.reason).toBe('no-backlog');
     expect(result.dryRun).toBe(true);
     expect(mockRunAutoMergePass).not.toHaveBeenCalled();
+    expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
+    expect(mockRunInventCycle).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
@@ -500,7 +609,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 	    expect(result.directionReason).toBe('pending proposals need verification');
 	    expect(result.merged).toBe(1);
 	    expect(result.spentUsd).toBe(0);
-	    expect(result.autoMerge).toEqual({
+    expect(result.autoMerge).toEqual({
 	      attempted: 3,
 	      judgePerPass: 4,
 	      judged: 2,
@@ -512,9 +621,11 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 	      merged: 1,
 	      autoArchived: 1,
 	      ttlRejected: 1,
-	    });
+    });
     expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
     expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
+    expect(mockRunInventCycle).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
@@ -533,6 +644,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.directionReason).toBe('pending proposals need verification');
     expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
     expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
+    expect(mockRunInventCycle).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 

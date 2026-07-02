@@ -3044,6 +3044,14 @@ export interface DaemonTick {
 	    autoArchived?: number;
 	    ttlRejected?: number;
 	  };
+  /** M313: producer maintenance attempted during this tick. Metadata-only. */
+  producerMaintenance?: {
+    selfHeal: boolean;
+    invent: boolean;
+    ancillary: boolean;
+    skippedByCadence?: boolean;
+    nextAfter?: string;
+  };
   /** Bounded per-item backend assignment traces for this tick. */
   dispatches?: DaemonDispatchTrace[];
   /** M48: proposals auto-merged this tick via the M47 gate (omitted/0 when disabled). */

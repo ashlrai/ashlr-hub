@@ -9,8 +9,11 @@
  *    to availability:'unknown', which resource-aware dispatch treats as no
  *    trusted capacity signal.
  *  - No network calls except the Ollama localhost health check (2s timeout).
- *  - Claude sensing (M253): sums the FLEET's own claude token spend
- *    (tokensIn+tokensOut) or costUsd from the decisions-ledger over a rolling
+ *  - Claude sensing: first trusts unexpired Claude CLI rate_limit_event JSONL
+ *    captured locally, then falls back to OAuth usage, transcript sensing, and
+ *    finally legacy stats-cache/fleet budget paths.
+ *  - M253 sums the FLEET's own claude token spend (tokensIn+tokensOut) or
+ *    costUsd from the decisions-ledger over a rolling
  *    window (default 7d) vs a configured budget. This reflects what the fleet
  *    has consumed — NOT Mason's interactive usage, which is not programmatically
  *    obtainable (stats-cache.json is dead/stale on most machines). The label
@@ -42,6 +45,11 @@ import {
   DEFAULT_5H_MESSAGE_CAP_PRO,
 } from './claude-usage.js';
 import { fetchClaudeUsageApi } from './usage-api.js';
+import {
+  onClaudeRateLimitEventRecorded,
+  readLatestClaudeRateLimitEvent,
+  type ClaudeRateLimitEvent,
+} from './claude-rate-limit-event.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -143,6 +151,12 @@ interface SnapshotCache {
 
 let _snapshotCache: SnapshotCache | null = null;
 const CACHE_TTL_MS = 30_000; // 30 seconds
+
+function invalidateResourceSnapshotCache(): void {
+  _snapshotCache = null;
+}
+
+onClaudeRateLimitEventRecorded(invalidateResourceSnapshotCache);
 
 // ---------------------------------------------------------------------------
 // Config shape (read defensively — never import from types to avoid coupling)
@@ -428,6 +442,113 @@ function tryStatsCacheFallback(windowMs: number): number | null {
   }
 }
 
+function usedPctFromClaudeRateLimitEvent(event: ClaudeRateLimitEvent): number {
+  if (event.utilization >= 1) return 100;
+  return Math.max(0, Math.min(99, Math.floor(event.utilization * 100)));
+}
+
+function capWindowFromClaudeRateLimitType(rateLimitType: string): string {
+  switch (rateLimitType) {
+    case 'five_hour': return '5h';
+    case 'seven_day': return '7d';
+    default: return rateLimitType;
+  }
+}
+
+function claudeRateLimitWindowPriority(rateLimitType: string): number {
+  switch (rateLimitType) {
+    case 'seven_day': return 2;
+    case 'five_hour': return 1;
+    default: return 0;
+  }
+}
+
+interface ClaudeRateLimitClassification {
+  availability: BackendAvailability;
+  stateLabel: string;
+  usedPct: number;
+  severity: number;
+}
+
+function classifyClaudeRateLimitEvent(
+  event: ClaudeRateLimitEvent,
+  protectPct: number,
+): ClaudeRateLimitClassification | null {
+  const usedPct = usedPctFromClaudeRateLimitEvent(event);
+  if (event.utilization < 1 && usedPct < 75) return null;
+
+  if (event.utilization >= 1) {
+    return {
+      availability: 'exhausted',
+      stateLabel: 'exhausted',
+      usedPct,
+      severity: 3,
+    };
+  }
+  if (usedPct >= protectPct) {
+    return {
+      availability: 'throttled',
+      stateLabel: `at protectPct=${protectPct}%`,
+      usedPct,
+      severity: 2,
+    };
+  }
+  return {
+    availability: 'near',
+    stateLabel: 'nearing limit',
+    usedPct,
+    severity: 1,
+  };
+}
+
+function claudeStateFromRateLimitEvent(rcfg: ResourceCfgShape, nowIso: string): BackendResourceState | null {
+  const protectPct = rcfg.protectPct ?? 85;
+  const candidates = [
+    readLatestClaudeRateLimitEvent({ rateLimitType: 'seven_day' }),
+    readLatestClaudeRateLimitEvent({ rateLimitType: 'five_hour' }),
+  ].flatMap((event) => {
+    if (!event) return [];
+    const classification = classifyClaudeRateLimitEvent(event, protectPct);
+    return classification ? [{ event, classification }] : [];
+  });
+  candidates.sort((a, b) =>
+    b.classification.severity - a.classification.severity ||
+    b.classification.usedPct - a.classification.usedPct ||
+    claudeRateLimitWindowPriority(b.event.rateLimitType) - claudeRateLimitWindowPriority(a.event.rateLimitType)
+  );
+  const selected = candidates[0];
+  if (!selected) return null;
+
+  const { event, classification } = selected;
+  const {
+    availability,
+    stateLabel,
+    usedPct,
+  } = classification;
+
+  if (availability === 'open') {
+    return null;
+  }
+
+  const resetIso = new Date(event.resetsAt * 1000).toISOString();
+  const capWindow = capWindowFromClaudeRateLimitType(event.rateLimitType);
+
+  return {
+    backend: 'claude',
+    availability,
+    usedPct,
+    cap: 100,
+    capUnit: null,
+    capWindow,
+    resetsAt: event.resetsAt,
+    costPerMTokenOut: 0,
+    p50LatencyMs: null,
+    snapshotAt: nowIso,
+    reason: `claude ${event.rateLimitType} CLI rate_limit_event ${stateLabel}: ${usedPct}% used; status=${event.status}; resetsAt=${resetIso}; source=claude-cli-rate_limit_event`,
+    backoffUntilMs: availability === 'exhausted' ? event.resetsAt * 1000 : null,
+  };
+}
+
 async function senseClaudeState(rcfg: ResourceCfgShape): Promise<BackendResourceState> {
   const now = new Date().toISOString();
   const backoff = backoffStore.get('claude');
@@ -454,8 +575,11 @@ async function senseClaudeState(rcfg: ResourceCfgShape): Promise<BackendResource
   const windowLabel = rcfg.claude?.window ?? '7d';
   const windowMs = 7 * 24 * 60 * 60 * 1000; // always 7d for now
 
+  const cliRateLimitState = claudeStateFromRateLimitEvent(rcfg, now);
+  if (cliRateLimitState) return cliRateLimitState;
+
   // -------------------------------------------------------------------------
-  // M254 OAUTH USAGE API PATH (authoritative — try first).
+  // M254 OAUTH USAGE API PATH (authoritative when no fresh CLI event exists).
   //
   // Fetches five_hour + seven_day utilization from the internal Claude Code
   // OAuth endpoint. 60-second cache; never-throws; returns null on any error

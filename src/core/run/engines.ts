@@ -21,12 +21,13 @@ import { spawnSync, execFileSync, spawn } from 'node:child_process';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { AshlrConfig, EngineId, EngineCommand } from '../types.js';
 import { withToolEnv } from '../env-bridge.js';
 import { resolveEngineSpec, compileArgv } from './engine-registry.js';
 import { attachStallMonitor } from './run-monitor.js';
 import type { TerminationReason } from './run-monitor.js';
+import { recordClaudeRateLimitEventLine } from '../fabric/claude-rate-limit-event.js';
 
 // ---------------------------------------------------------------------------
 // RunEvent — normalised event emitted by a streaming engine subprocess
@@ -473,6 +474,11 @@ function parseUsageFromLines(
   return undefined;
 }
 
+function isClaudeEngineBin(bin: string): boolean {
+  const base = basename(bin);
+  return base === 'claude' || base === 'claude.exe';
+}
+
 async function spawnEngineInner(
   cmd: EngineCommand,
   cfg: AshlrConfig,
@@ -525,8 +531,14 @@ async function spawnEngineInner(
     const stdoutLines: string[] = [];
     const stderrLines: string[] = [];
     const callerOnEvent = opts?.onEvent;
+    const captureClaudeRateLimitEvents = isClaudeEngineBin(cmd.bin);
     let terminationReason: TerminationReason | undefined;
     let settled = false;
+
+    function captureClaudeRateLimitLine(line: string): void {
+      if (!captureClaudeRateLimitEvents) return;
+      recordClaudeRateLimitEventLine(line);
+    }
 
     function settle(
       result: { ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string; terminationReason?: TerminationReason },
@@ -578,6 +590,7 @@ async function spawnEngineInner(
         const line = stdoutBuf.slice(0, nl);
         stdoutBuf = stdoutBuf.slice(nl + 1);
         stdoutLines.push(line);
+        captureClaudeRateLimitLine(line);
         const ev = normaliseEngineOutputLine(line, cmd.bin, Date.now());
         monitor.onEvent(ev);
         if (callerOnEvent) callerOnEvent(ev);
@@ -595,6 +608,7 @@ async function spawnEngineInner(
         const line = stderrBuf.slice(0, nl);
         stderrBuf = stderrBuf.slice(nl + 1);
         stderrLines.push(line);
+        captureClaudeRateLimitLine(line);
       }
     });
 
@@ -611,10 +625,14 @@ async function spawnEngineInner(
       // Flush any remaining partial line buffers.
       if (stdoutBuf.trim()) {
         stdoutLines.push(stdoutBuf);
+        captureClaudeRateLimitLine(stdoutBuf);
         const ev = normaliseEngineOutputLine(stdoutBuf, cmd.bin, Date.now());
         if (callerOnEvent) callerOnEvent(ev);
       }
-      if (stderrBuf.trim()) stderrLines.push(stderrBuf);
+      if (stderrBuf.trim()) {
+        stderrLines.push(stderrBuf);
+        captureClaudeRateLimitLine(stderrBuf);
+      }
 
       const exitedClean = code === 0 && signal === null;
 

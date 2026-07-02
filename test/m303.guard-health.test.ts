@@ -140,8 +140,40 @@ describe('diagnoseGuardHealth', () => {
     const guard = armDaemonSpendGuard(['item-a']);
     expect(guard.ok).toBe(true);
 
+    const lockPath = daemonLockPath();
+    mkdirSync(dirname(lockPath), { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: process.pid,
+        token: 'test-lock',
+        hostname: 'test-host',
+        acquiredAt: now,
+        heartbeatAt: now,
+      }, null, 2) + '\n',
+      'utf8',
+    );
+
     const diagnosis = diagnoseGuardHealth();
     expect(diagnosis.blocks.map((b) => b.id)).not.toContain('daemon-spend-guard-armed');
+    expect(diagnosis.blocks.map((b) => b.id)).not.toContain('daemon-spend-guard-stale-live-owner');
+  });
+
+  it('blocks on a live daemon spend guard when the daemon lock heartbeat is missing', () => {
+    const state = loadDaemonState();
+    state.running = true;
+    state.pid = process.pid;
+    saveDaemonState(state);
+
+    const guard = armDaemonSpendGuard(['item-a']);
+    expect(guard.ok).toBe(true);
+
+    const diagnosis = diagnoseGuardHealth();
+    const block = diagnosis.blocks.find((b) => b.id === 'daemon-spend-guard-stale-live-owner');
+    expect(block).toBeDefined();
+    expect(block?.detail).toContain('no matching daemon lock heartbeat');
+    expect(block?.path).toBe(daemonLockPath());
   });
 
   it('blocks on a live daemon spend guard when the daemon heartbeat is stale', () => {

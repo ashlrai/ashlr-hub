@@ -48,6 +48,7 @@ import {
   uninstall,
   serviceStatus,
 } from '../src/core/daemon/service.js';
+import { daemonServiceInstallOptions } from '../src/core/daemon/service-config.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -68,6 +69,30 @@ function baseOpts(platform: 'darwin' | 'linux' | 'win32') {
     parallel: 1,
   };
 }
+
+describe('daemonServiceInstallOptions', () => {
+  it('uses responsive effective daemon defaults when config omits interval and parallel', () => {
+    expect(daemonServiceInstallOptions({ daemon: { dailyBudgetUsd: 5 } })).toMatchObject({
+      budget: 5,
+      intervalMs: 300_000,
+      parallel: 1,
+    });
+  });
+
+  it('honors configured daemon budget, interval, and parallelism', () => {
+    expect(daemonServiceInstallOptions({
+      daemon: {
+        dailyBudgetUsd: 7,
+        intervalMs: 45_000,
+        parallel: 3,
+      },
+    })).toMatchObject({
+      budget: 7,
+      intervalMs: 45_000,
+      parallel: 3,
+    });
+  });
+});
 
 // ---------------------------------------------------------------------------
 // 1. launchd plist generation

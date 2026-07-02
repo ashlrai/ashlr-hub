@@ -27,6 +27,7 @@
 import { makeColors } from './ui.js';
 import type { AshlrConfig, DaemonConfig, DaemonState } from '../core/types.js';
 import type { ServiceInstallOptions, ServiceStatusResult } from '../core/daemon/service.js';
+import { daemonServiceInstallOptions } from '../core/daemon/service-config.js';
 
 // ---------------------------------------------------------------------------
 // Lazy loaders — degrade gracefully if a core module is not yet built.
@@ -468,19 +469,17 @@ async function cmdDaemonInstall(args: string[]): Promise<number> {
     return 1;
   }
 
-  // Pull budget/interval/parallel from config for the service args
+  // Pull budget/interval/parallel from config for the service args.
   const loadConfig = await importConfig();
-  const opts: ServiceInstallOptions = { autostart };
+  let cfg: AshlrConfig | null = null;
   if (loadConfig) {
     try {
-      const cfg = loadConfig();
-      if (cfg.daemon?.dailyBudgetUsd !== undefined) opts.budget = cfg.daemon.dailyBudgetUsd;
-      if (cfg.daemon?.intervalMs !== undefined) opts.intervalMs = cfg.daemon.intervalMs;
-      if (cfg.daemon?.parallel !== undefined) opts.parallel = cfg.daemon.parallel;
+      cfg = loadConfig();
     } catch {
       // proceed with defaults
     }
   }
+  const opts: ServiceInstallOptions = daemonServiceInstallOptions(cfg, { autostart });
 
   try {
     await svcMod.install(opts);

@@ -56,6 +56,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Make the autonomous loop obey core fleet focus under scarce resources
 - [x] Follow-up: Add explicit resource overrides for vendor lockouts the local sensors cannot infer
 - [x] Follow-up: Drain permanently failed verification proposals out of verify-only deadlock
+- [x] Follow-up: Harden daemon liveness heartbeat, service cadence, and auto-provider lockout sensing
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -160,4 +161,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch ready to ship** - Core fleet focus is wired into backlog scoring, daemon selection, fleet status, and Mission Control. Resource overrides now let the loop obey known vendor lockouts, and permanently failed verification proposals can drain out of verify-only; focused tests/typecheck passed and final gates are in progress.
+**Current batch ready to ship** - Empty-backlog refill, daemon heartbeat truth, responsive service cadence, automatic Claude CLI rate-limit sensing, and post-review cadence/privacy fixes are implemented and verified; commit/push and live daemon restart are next.
