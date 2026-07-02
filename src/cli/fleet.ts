@@ -73,6 +73,11 @@ export function formatFleetStatus(s: FleetStatus): string {
 
   // Queue
   lines.push(`Queue:     ${s.queue.backlogItems} backlog item(s)`);
+  if (Array.isArray(s.queue.next) && s.queue.next.length > 0) {
+    for (const item of s.queue.next.slice(0, 5)) {
+      lines.push(`  next:          ${item.title} (${item.source}, score ${item.score})`);
+    }
+  }
   if (s.queue.shared) {
     const shared = s.queue.shared;
     lines.push(`  shared:        ${formatSharedQueueSummary(shared)}`);
@@ -126,6 +131,31 @@ export function formatFleetStatus(s: FleetStatus): string {
     lines.push(`  denied:    ${autonomy.denied}`);
     lines.push(`  latest:    ${autonomy.latestAt ?? '—'}`);
     lines.push(`  tiers:     ${tiers || '—'}`);
+  }
+  lines.push('');
+
+  // Auto-merge readiness
+  const readiness = s.autoMergeReadiness;
+  lines.push('Auto-merge readiness:');
+  if (!readiness) {
+    lines.push('  unavailable');
+  } else {
+    lines.push(`  enabled:   ${readiness.enabled ? 'yes' : 'no'}`);
+    lines.push(`  trust:     ${readiness.trustBasis}`);
+    lines.push(
+      `  pending:   ${readiness.pending} ` +
+        `(preflight ${readiness.preflightReady}, verify ${readiness.needsVerification}, blocked ${readiness.blocked})`,
+    );
+    if (readiness.knownVerificationFailed > 0) {
+      lines.push(`  failed:    ${readiness.knownVerificationFailed} known verification failure(s)`);
+    }
+    const reasons = Object.entries(readiness.byReason)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 3)
+      .map(([reason, count]) => `${count}x ${reason}`);
+    if (reasons.length > 0) {
+      lines.push(`  blockers:  ${reasons.join('; ')}`);
+    }
   }
   lines.push('');
 

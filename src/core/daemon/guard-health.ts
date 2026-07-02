@@ -10,11 +10,12 @@ import { dirname } from 'node:path';
 
 import { evidenceDir } from '../autonomy/evidence-pack.js';
 import { killSwitchOn, killSwitchPath } from '../sandbox/policy.js';
-import { loadDaemonStateStrict, readDaemonSpendGuard } from './state.js';
+import { daemonLockPath, loadDaemonStateStrict, readDaemonLockOwner, readDaemonSpendGuard } from './state.js';
 
 export type GuardHealthBlockId =
   | 'daemon-state-malformed'
   | 'daemon-spend-guard-armed'
+  | 'daemon-spend-guard-stale-live-owner'
   | 'daemon-spend-guard-malformed'
   | 'kill-switch'
   | 'autonomy-evidence-unwritable';
@@ -47,6 +48,12 @@ function pidIsAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+function heartbeatAgeMs(heartbeatAt: string): number | null {
+  const ms = Date.parse(heartbeatAt);
+  if (!Number.isFinite(ms)) return null;
+  return Math.max(0, Date.now() - ms);
 }
 
 function nearestExistingPath(path: string): string | null {
@@ -161,6 +168,20 @@ export function diagnoseGuardHealth(): GuardHealthDiagnosis {
           path: spendGuard.path,
           repairCommands: ['ashlr daemon stop', backupCommand(spendGuard.path), 'ashlr daemon status'],
         });
+      } else {
+        const lockOwner = readDaemonLockOwner();
+        const lockAge = lockOwner?.pid === spendGuard.guard.pid ? heartbeatAgeMs(lockOwner.heartbeatAt) : null;
+        const staleLiveOwnerMs = 10 * 60_000;
+        if (lockAge !== null && lockAge >= staleLiveOwnerMs) {
+          blocks.push({
+            id: 'daemon-spend-guard-stale-live-owner',
+            detail:
+              `daemon spend guard is owned by live pid ${spendGuard.guard.pid}, ` +
+              `but daemon lock heartbeat is stale (${Math.round(lockAge / 1000)}s old)`,
+            path: daemonLockPath(),
+            repairCommands: ['ashlr daemon stop', backupCommand(spendGuard.path), 'ashlr daemon status'],
+          });
+        }
       }
     }
 

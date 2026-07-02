@@ -22,6 +22,8 @@ import { setKill } from '../src/core/sandbox/policy.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
 import { buildAutonomyEvidencePack, persistAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
+import { createProposal } from '../src/core/inbox/store.js';
+import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import type { Proposal } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -86,6 +88,48 @@ function makeEvidencePack(id: string, generatedAt: string) {
   return pack;
 }
 
+function docsDiff(body: string): string {
+  return [
+    'diff --git a/docs/fleet.md b/docs/fleet.md',
+    '--- /dev/null',
+    '+++ b/docs/fleet.md',
+    '@@ -0,0 +1 @@',
+    `+${body}`,
+    '',
+  ].join('\n');
+}
+
+function createSignedProposal(
+  cfg: AshlrConfig,
+  opts: {
+    title: string;
+    diff: string;
+    verifyResult?: Proposal['verifyResult'];
+    engineTier?: Proposal['engineTier'];
+    engineModel?: string;
+  },
+): Proposal {
+  const engineModel = opts.engineModel ?? 'codex:gpt-5.5';
+  const engineTier = opts.engineTier ?? 'frontier';
+  const diffHash = hashDiff(opts.diff);
+  return createProposal(
+    {
+      repo: '/tmp/repo',
+      origin: 'agent',
+      kind: 'patch',
+      title: opts.title,
+      summary: opts.title,
+      diff: opts.diff,
+      diffHash,
+      engineModel,
+      engineTier,
+      provenanceSig: signProvenance(engineModel, engineTier, diffHash),
+      ...(opts.verifyResult ? { verifyResult: opts.verifyResult } : {}),
+    },
+    cfg,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // HOME isolation
 // ---------------------------------------------------------------------------
@@ -141,6 +185,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.daemon.lastTickAt).toBeNull();
     expect(s.daemon.todaySpentUsd).toBe(0);
     expect(s.queue.backlogItems).toBe(0);
+    expect(s.queue.next).toBeUndefined();
     expect(s.queue.shared).toBeUndefined();
     expect(s.proposals.pending).toBe(0);
     expect(s.proposals.frontierPending).toBe(0);
@@ -210,6 +255,22 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const s = await buildFleetStatus(baseConfig());
 
     expect(s.queue.backlogItems).toBe(2);
+    expect(s.queue.next).toEqual([
+      {
+        id: 'repo:goal:one',
+        title: 'Advance goal one',
+        repo: '/tmp/repo',
+        source: 'goal',
+        score: 2,
+      },
+      {
+        id: 'repo:goal:two',
+        title: 'Advance goal two',
+        repo: '/tmp/repo',
+        source: 'goal',
+        score: 2,
+      },
+    ]);
     expect(existsSync(join(tmpHome, '.ashlr', 'audit'))).toBe(false);
   });
 
@@ -326,6 +387,64 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       changedLines: 1,
     });
   });
+
+  it('includes read-only auto-merge readiness for pending proposals', async () => {
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'verification',
+        maxRisk: 'low',
+      },
+    });
+
+    createSignedProposal(cfg, {
+      title: 'Ready docs change',
+      diff: docsDiff('ready'),
+      verifyResult: { passed: true, source: 'manual' },
+    });
+    createSignedProposal(cfg, {
+      title: 'Needs verify docs change',
+      diff: docsDiff('needs verify'),
+    });
+    createSignedProposal(cfg, {
+      title: 'Failed verify docs change',
+      diff: docsDiff('failed verify'),
+      verifyResult: { passed: false, failed: ['npm test'], source: 'auto-merge-preflight' },
+    });
+    createProposal(
+      {
+        repo: '/tmp/repo',
+        origin: 'agent',
+        kind: 'patch',
+        title: 'Unsigned docs change',
+        summary: 'missing provenance',
+        diff: docsDiff('unsigned'),
+        engineModel: 'codex:gpt-5.5',
+        engineTier: 'frontier',
+      },
+      cfg,
+    );
+
+    const s = await buildFleetStatus(cfg);
+
+    expect(s.autoMergeReadiness).toMatchObject({
+      enabled: true,
+      trustBasis: 'verification',
+      pending: 4,
+      preflightReady: 1,
+      needsVerification: 1,
+      knownVerificationFailed: 1,
+      blocked: 2,
+    });
+    expect(s.autoMergeReadiness?.byReason).toMatchObject({
+      'known verification failure: npm test': 1,
+      'provenance check failed: missing diffHash': 1,
+    });
+    expect(s.autoMergeReadiness?.recentBlockers.map((b) => b.title)).toEqual([
+      'Unsigned docs change',
+      'Failed verify docs change',
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -343,6 +462,15 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       ],
       queue: {
         backlogItems: 7,
+        next: [
+          {
+            id: 'item-a',
+            title: 'Ship autonomy debugger',
+            repo: '/repo/a',
+            source: 'goal',
+            score: 5,
+          },
+        ],
         shared: {
           enabled: true,
           mode: 'filesystem',
@@ -376,6 +504,20 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         byTier: { T4: 2, T0: 1 },
         recent: [],
       },
+      autoMergeReadiness: {
+        enabled: true,
+        trustBasis: 'verification',
+        pending: 4,
+        preflightReady: 1,
+        needsVerification: 1,
+        knownVerificationFailed: 1,
+        blocked: 2,
+        byReason: {
+          'known verification failure: npm test': 1,
+          'provenance check failed: missing diffHash': 1,
+        },
+        recentBlockers: [],
+      },
       autonomyDirection: {
         generatedAt: '2026-06-17T00:02:00.000Z',
         mode: 'local-only',
@@ -398,6 +540,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('claude');
     expect(out).toContain('quota=warn');
     expect(out).toContain('7 backlog item(s)');
+    expect(out).toContain('next:          Ship autonomy debugger (goal, score 5)');
     expect(out).toContain('shared:        ok / 2 active / 1 owned / 1 reclaimable / 2 cooling / stale lock');
     expect(out).toContain('machine-A:1');
     expect(out).toContain('machine-B:1(+1 reclaimable)');
@@ -408,6 +551,12 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('packs:     3');
     expect(out).toContain('denied:    1');
     expect(out).toContain('T4:2');
+    expect(out).toContain('Auto-merge readiness:');
+    expect(out).toContain('enabled:   yes');
+    expect(out).toContain('trust:     verification');
+    expect(out).toContain('pending:   4 (preflight 1, verify 1, blocked 2)');
+    expect(out).toContain('failed:    1 known verification failure(s)');
+    expect(out).toContain('1x known verification failure: npm test');
     expect(out).toContain('Autonomy direction:');
     expect(out).toContain('mode:       local-only');
     expect(out).toContain('confidence: medium');

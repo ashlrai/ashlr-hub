@@ -15,7 +15,7 @@
  */
 
 import { hostname } from 'node:os';
-import type { AshlrConfig, EngineId } from '../types.js';
+import type { AshlrConfig, EngineId, Proposal, WorkItem } from '../types.js';
 import type { SharedQueueHealth } from './shared-store.js';
 import type { AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
 import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
@@ -77,6 +77,34 @@ export interface FleetAutonomyDirectionSummary {
   budgets: Pick<ResourceStrategyReport['budgets'], 'daemonBudgetLevel' | 'daemonSpentTodayUsd'>;
 }
 
+export interface FleetAutoMergeBlockerSummary {
+  proposalId: string;
+  title: string;
+  tier: string | null;
+  reason: string;
+  riskClass: string | null;
+}
+
+export interface FleetAutoMergeReadinessStatus {
+  enabled: boolean;
+  trustBasis: 'tier' | 'verification';
+  pending: number;
+  preflightReady: number;
+  needsVerification: number;
+  knownVerificationFailed: number;
+  blocked: number;
+  byReason: Record<string, number>;
+  recentBlockers: FleetAutoMergeBlockerSummary[];
+}
+
+export interface FleetQueueNextItem {
+  id: string;
+  title: string;
+  repo: string;
+  source: WorkItem['source'];
+  score: number;
+}
+
 /** One whole-fleet read-only snapshot. */
 export interface FleetStatus {
   /** ISO timestamp this snapshot was generated. */
@@ -89,6 +117,7 @@ export interface FleetStatus {
   backends: FleetBackendStatus[];
   queue: {
     backlogItems: number;
+    next?: FleetQueueNextItem[];
     shared?: FleetSharedQueueStatus;
   };
   proposals: {
@@ -100,6 +129,8 @@ export interface FleetStatus {
     recent: number;
   };
   autonomy?: FleetAutonomyStatus;
+  /** Read-only static readiness summary for pending auto-merge candidates. */
+  autoMergeReadiness?: FleetAutoMergeReadinessStatus;
   /** Read-only resource-aware autonomous operating recommendation. */
   autonomyDirection?: FleetAutonomyDirectionSummary;
   /** Read-only diagnosis of guard state that can block autonomous work. */
@@ -166,15 +197,29 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
 
   // ── queue (backlog size) ──────────────────────────────────────────────────
   let backlogItems = 0;
+  let nextQueueItems: FleetQueueNextItem[] = [];
   try {
     // Status must be observational. A full buildBacklog() refresh can run
     // scanners, expand planning goals, persist ~/.ashlr/backlog.json, and audit.
     // Read the last persisted snapshot only; the daemon/backlog CLI owns refresh.
     const { loadBacklog } = await import('../portfolio/backlog.js');
     const backlog = loadBacklog();
-    backlogItems = Array.isArray(backlog?.items) ? backlog.items.length : 0;
+    const items = Array.isArray(backlog?.items) ? backlog.items : [];
+    backlogItems = items.length;
+    nextQueueItems = items
+      .slice()
+      .sort((a, b) => b.score - a.score || a.title.localeCompare(b.title))
+      .slice(0, 5)
+      .map((item) => ({
+        id: item.id,
+        title: item.title,
+        repo: item.repo,
+        source: item.source,
+        score: item.score,
+      }));
   } catch {
     backlogItems = 0;
+    nextQueueItems = [];
   }
 
   let sharedQueue: FleetSharedQueueStatus | undefined;
@@ -188,12 +233,14 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let pending = 0;
   let frontierPending = 0;
   let applied = 0;
+  const pendingProposals: Proposal[] = [];
   try {
     const { listProposals } = await import('../inbox/store.js');
     const all = listProposals();
     for (const p of all) {
       if (p.status === 'pending') {
         pending++;
+        pendingProposals.push(p);
         if (p.engineTier === 'frontier') frontierPending++;
       } else if (p.status === 'applied') {
         applied++;
@@ -254,17 +301,26 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     // leave fallback
   }
 
+  let autoMergeReadiness: FleetAutoMergeReadinessStatus | undefined;
+  try {
+    autoMergeReadiness = await buildAutoMergeReadinessStatus(cfg, pendingProposals);
+  } catch {
+    autoMergeReadiness = undefined;
+  }
+
   const status: FleetStatus = {
     generatedAt,
     daemon,
     backends,
     queue: {
       backlogItems,
+      ...(nextQueueItems.length > 0 ? { next: nextQueueItems } : {}),
       ...(sharedQueue !== undefined ? { shared: sharedQueue } : {}),
     },
     proposals: { pending, frontierPending, applied },
     merges: { recent: mergesRecent },
     autonomy,
+    ...(autoMergeReadiness !== undefined ? { autoMergeReadiness } : {}),
     ...(guardHealth !== undefined ? { guardHealth } : {}),
     killed,
   };
@@ -287,6 +343,138 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   }
 
   return status;
+}
+
+async function buildAutoMergeReadinessStatus(
+  cfg: AshlrConfig,
+  pendingProposals: Proposal[],
+): Promise<FleetAutoMergeReadinessStatus> {
+  const autoMerge = cfg.foundry?.autoMerge;
+  const enabled = autoMerge?.enabled === true;
+  const trustBasis: 'tier' | 'verification' =
+    autoMerge?.trustBasis === 'verification' ? 'verification' : 'tier';
+  const maxRisk = autoMerge?.maxRisk ?? 'low';
+
+  const byReason: Record<string, number> = {};
+  const recentBlockers: FleetAutoMergeBlockerSummary[] = [];
+  let preflightReady = 0;
+  let needsVerification = 0;
+  let knownVerificationFailed = 0;
+  let blocked = 0;
+
+  const {
+    classifyRisk,
+    evaluateBranchAuthority,
+    evaluateMergeAuthority,
+    mergeTargetForTier,
+  } = await import('../inbox/merge.js');
+  const { hashDiff } = await import('../foundry/provenance.js');
+  const riskOrder: Record<string, number> = { low: 0, medium: 1, high: 2 };
+
+  const noteBlocker = (proposal: Proposal, reason: string, riskClass: string | null): void => {
+    blocked++;
+    byReason[reason] = (byReason[reason] ?? 0) + 1;
+    if (recentBlockers.length < 8) {
+      recentBlockers.push({
+        proposalId: proposal.id,
+        title: proposal.title,
+        tier: proposal.engineTier ?? null,
+        reason,
+        riskClass,
+      });
+    }
+  };
+
+  for (const proposal of pendingProposals) {
+    let riskClass: string | null = null;
+
+    if (!enabled) {
+      noteBlocker(proposal, 'auto-merge disabled', riskClass);
+      continue;
+    }
+    if (proposal.kind !== 'patch' && proposal.kind !== 'pr') {
+      noteBlocker(proposal, `proposal kind '${proposal.kind}' is not mergeable`, riskClass);
+      continue;
+    }
+    if (!proposal.diff?.trim()) {
+      noteBlocker(proposal, 'proposal has no diff', riskClass);
+      continue;
+    }
+    if (!proposal.repo) {
+      noteBlocker(proposal, 'proposal has no repo', riskClass);
+      continue;
+    }
+    if (proposal.verifyResult?.passed === false) {
+      knownVerificationFailed++;
+      const failed = proposal.verifyResult.failed?.filter(Boolean).join('; ');
+      noteBlocker(
+        proposal,
+        failed ? `known verification failure: ${failed}` : 'known verification failure',
+        riskClass,
+      );
+      continue;
+    }
+
+    if (trustBasis !== 'verification') {
+      const target = mergeTargetForTier(proposal.engineTier);
+      const authority =
+        target === 'main'
+          ? evaluateMergeAuthority(proposal, cfg)
+          : target === 'branch'
+            ? evaluateBranchAuthority(proposal, cfg)
+            : { authorized: false, reason: `engineTier '${proposal.engineTier ?? 'unset'}' is proposal-only` };
+      if (!authority.authorized) {
+        noteBlocker(proposal, `merge authority denied: ${authority.reason}`, riskClass);
+        continue;
+      }
+    }
+
+    if (!proposal.engineModel) {
+      noteBlocker(proposal, 'provenance check failed: missing engineModel', riskClass);
+      continue;
+    }
+    if (!proposal.engineTier) {
+      noteBlocker(proposal, 'provenance check failed: missing engineTier', riskClass);
+      continue;
+    }
+    if (!proposal.diffHash) {
+      noteBlocker(proposal, 'provenance check failed: missing diffHash', riskClass);
+      continue;
+    }
+    if (!proposal.provenanceSig) {
+      noteBlocker(proposal, 'provenance check failed: missing provenanceSig', riskClass);
+      continue;
+    }
+    if (hashDiff(proposal.diff) !== proposal.diffHash) {
+      noteBlocker(proposal, 'provenance check failed: diff hash mismatch', riskClass);
+      continue;
+    }
+
+    riskClass = classifyRisk(proposal);
+    if ((riskOrder[riskClass] ?? Number.POSITIVE_INFINITY) > (riskOrder[maxRisk] ?? 0)) {
+      noteBlocker(proposal, `risk class '${riskClass}' exceeds maxRisk '${maxRisk}'`, riskClass);
+      continue;
+    }
+
+    if (trustBasis === 'verification' && proposal.verifyResult?.passed !== true) {
+      needsVerification++;
+      continue;
+    }
+
+    preflightReady++;
+  }
+
+  return {
+    enabled,
+    trustBasis,
+    pending: pendingProposals.length,
+    preflightReady,
+    needsVerification,
+    knownVerificationFailed,
+    blocked,
+    byReason,
+    recentBlockers,
+  };
 }
 
 function lightweightEcosystemReport(now: Date | undefined, root: string | undefined): EcosystemDoctorReport {

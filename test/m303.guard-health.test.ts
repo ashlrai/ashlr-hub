@@ -16,6 +16,7 @@ import { formatFleetStatus } from '../src/cli/fleet.js';
 import { diagnoseGuardHealth } from '../src/core/daemon/guard-health.js';
 import {
   armDaemonSpendGuard,
+  daemonLockPath,
   daemonSpendGuardPath,
   daemonStatePath,
   loadDaemonState,
@@ -141,6 +142,38 @@ describe('diagnoseGuardHealth', () => {
 
     const diagnosis = diagnoseGuardHealth();
     expect(diagnosis.blocks.map((b) => b.id)).not.toContain('daemon-spend-guard-armed');
+  });
+
+  it('blocks on a live daemon spend guard when the daemon heartbeat is stale', () => {
+    const state = loadDaemonState();
+    state.running = true;
+    state.pid = process.pid;
+    saveDaemonState(state);
+
+    const guard = armDaemonSpendGuard(['item-a']);
+    expect(guard.ok).toBe(true);
+
+    const lockPath = daemonLockPath();
+    mkdirSync(dirname(lockPath), { recursive: true });
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: process.pid,
+        token: 'test-lock',
+        hostname: 'test-host',
+        acquiredAt: '2026-07-01T00:00:00.000Z',
+        heartbeatAt: '2026-07-01T00:00:00.000Z',
+      }, null, 2) + '\n',
+      'utf8',
+    );
+
+    const diagnosis = diagnoseGuardHealth();
+    const ids = diagnosis.blocks.map((b) => b.id);
+    expect(ids).toContain('daemon-spend-guard-stale-live-owner');
+    expect(ids).not.toContain('daemon-spend-guard-armed');
+    const block = diagnosis.blocks.find((b) => b.id === 'daemon-spend-guard-stale-live-owner');
+    expect(block?.path).toBe(lockPath);
+    expect(block?.detail).toContain('heartbeat is stale');
   });
 });
 

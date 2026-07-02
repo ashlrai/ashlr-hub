@@ -383,7 +383,7 @@ function parseLockOwner(raw: string): DaemonLockOwner | null {
   }
 }
 
-function readDaemonLockOwner(): DaemonLockOwner | null {
+export function readDaemonLockOwner(): DaemonLockOwner | null {
   try {
     return parseLockOwner(readFileSync(daemonLockPath(), 'utf8'));
   } catch {

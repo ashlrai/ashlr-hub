@@ -43,6 +43,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Add daemon simulation awareness and bounded ready-evidence autonomy input
 - [x] Follow-up: Surface auto-merge maintenance resource estimates and caps
 - [x] Follow-up: Repair daemon launchd liveness, status read-only behavior, sandbox/engine cwd normalization, active guard health, and manager auto-merge bounds
+- [x] Follow-up: Surface auto-merge preflight blockers, top queue work, and stale live-owner spend guards in fleet status
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -115,6 +116,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current pass adds maintenance resource/cap visibility for auto-merge judge and verify-before-judge work while preserving existing merge and budget behavior.
 - Current liveness pass found the daemon was installed but stopped, status could misreport a cleanly exited launchd job as running, `fleet status` could trigger backlog/goal-planner side effects, plugin scanners and engine adapter callers could smuggle file paths into execution cwd, active spend guards were reported as stale blocks, and manager `wouldMerge` used stale hard-coded caps.
 - Current liveness pass repairs those issues, enrolls `ashlr-hub`, reinstalls the daemon service from the generated plist, and verifies launchd is running the real `daemon start` command.
+- Current observability pass adds read-only `autoMergeReadiness` to `FleetStatus`, renders auto-merge preflight blockers in CLI status, adds top persisted backlog work under `queue.next`, and marks a live daemon spend guard as blocked when the owning daemon lock heartbeat is stale.
 
 ## Status
-**Current batch in verification** - Daemon liveness/status/sandbox/manager repairs are implemented; focused tests, typecheck, build, and live status checks passed; preparing final gates, commit, and push.
+**Current batch in verification** - Auto-merge readiness, queue-next status, and stale live-owner guard-health repairs are implemented; focused tests, typecheck, lint, build, audit, diff check, and live status checks passed; preparing commit and push.
