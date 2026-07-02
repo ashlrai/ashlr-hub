@@ -126,11 +126,11 @@ export interface AshlrConfig {
     /** Backends the fleet may use. Absent ⇒ ['builtin'] only. */
     allowedBackends?: EngineId[];
     /**
-     * M308: opt-in executable autonomy control loop. When true, each daemon
-     * tick consumes the resource-aware direction report before dispatching:
+     * M308: executable autonomy control loop. When Foundry is configured, each
+     * daemon tick consumes the resource-aware direction report before dispatching:
      * pause/verify-only modes skip new proposal generation, local-only constrains
      * routing to local-capable engines, and backlog-build keeps normal behavior.
-     * DEFAULT false: the direction report remains read-only/advisory.
+     * DEFAULT true when `foundry` is present; set false for advisory-only mode.
      */
     autonomyControlLoop?: boolean;
     /** Per-backend preferred model id (keyed by EngineId). */

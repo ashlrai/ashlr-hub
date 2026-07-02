@@ -74,8 +74,10 @@ vi.mock('../src/core/swarm/runner.js', () => ({
 }));
 
 const mockBuildBacklog = vi.fn();
+const mockLoadBacklog = vi.fn();
 vi.mock('../src/core/portfolio/backlog.js', () => ({
   buildBacklog: (...args: unknown[]) => mockBuildBacklog(...args),
+  loadBacklog: (...args: unknown[]) => mockLoadBacklog(...args),
 }));
 
 const mockRunGoal = vi.fn();
@@ -260,6 +262,7 @@ beforeEach(() => {
   mockRunViaAshlrcode.mockResolvedValue({ ok: true });
   mockRunAutoMergePass.mockResolvedValue({ merged: 0 });
   mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'backlog-build', reasons: ['mock backlog'] });
+  mockLoadBacklog.mockReturnValue(null);
   // Default: builtin backend (route to runSwarm path).
   mockRouteBackend.mockReturnValue({ backend: 'builtin', tier: 'local', reason: 'mock' });
   // Default: local engine tier.
@@ -444,7 +447,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
     expect(result.reason).toBe('pause');
     expect(result.directionMode).toBe('pause');
-    expect(mockBuildBacklog).toHaveBeenCalledTimes(1);
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
     const strategyOpts = mockBuildResourceStrategyReport.mock.calls[0]?.[1] as {
       deps?: {
         buildFleetStatus?: () => Promise<{ queue?: { backlogItems?: number } }>;
@@ -453,7 +456,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       };
     };
     await expect(strategyOpts.deps?.buildFleetStatus?.()).resolves.toMatchObject({
-      queue: { backlogItems: 1 },
+      queue: { backlogItems: 0 },
     });
     await expect(strategyOpts.deps?.runEcosystemDoctor?.()).resolves.toMatchObject({
       summary: { total: 1 },
@@ -504,8 +507,64 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 	      ttlRejected: 1,
 	    });
     expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
-    expect(mockBuildBacklog).toHaveBeenCalledTimes(1);
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1f2: Foundry defaults to executable verify-only control', async () => {
+    enrollWithItems(1);
+    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'verify-only', reasons: ['pending proposals need verification'] });
+    mockRunAutoMergePass.mockResolvedValue({ attempted: 1, merged: 0 });
+
+    const result = await tick(
+      { ...cfgBuiltin(), foundry: { autoMerge: { enabled: true } } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('verify-only');
+    expect(result.directionMode).toBe('verify-only');
+    expect(result.directionReason).toBe('pending proposals need verification');
+    expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1f4: executable direction uses persisted enrolled backlog count before scanner refresh', async () => {
+    const { repo, items } = enrollWithItems(1);
+    mockLoadBacklog.mockReturnValue({ generatedAt: new Date().toISOString(), repos: [repo.dir], items });
+    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'pause', reasons: ['cached count only'] });
+
+    const result = await tick(
+      { ...cfgBuiltin(), foundry: { autoMerge: { enabled: true } } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('pause');
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
+    const strategyOpts = mockBuildResourceStrategyReport.mock.calls[0]?.[1] as {
+      deps?: { buildFleetStatus?: () => Promise<{ queue?: { backlogItems?: number } }> };
+    };
+    await expect(strategyOpts.deps?.buildFleetStatus?.()).resolves.toMatchObject({
+      queue: { backlogItems: 1 },
+    });
+  });
+
+  it('A1f3: explicit autonomyControlLoop=false keeps Foundry advisory-only', async () => {
+    enrollWithItems(1);
+    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'verify-only', reasons: ['pending proposals need verification'] });
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { autonomyControlLoop: false, autoMerge: { enabled: true } },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.directionMode).toBeUndefined();
+    expect(mockBuildResourceStrategyReport).not.toHaveBeenCalled();
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
   });
 
   it('A1g: autonomy control local-only clamps cloud routing to builtin dispatch', async () => {

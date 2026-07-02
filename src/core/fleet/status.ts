@@ -14,13 +14,16 @@
  * only reads what the daemon/quota/inbox/backlog modules already persist.
  */
 
+import { existsSync } from 'node:fs';
 import { hostname } from 'node:os';
+import { resolve } from 'node:path';
 import type { AshlrConfig, EngineId, Proposal, WorkItem } from '../types.js';
 import type { SharedQueueHealth } from './shared-store.js';
 import type { AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
 import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
 import type { GuardHealthDiagnosis } from '../daemon/guard-health.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
+import { listEnrolled } from '../sandbox/policy.js';
 
 /** A single backend's recent activity + quota standing. */
 export interface FleetBackendStatus {
@@ -142,6 +145,19 @@ export interface FleetStatus {
 /** Recent window for dispatch + merge counting: the last 24 hours. */
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+function enrolledExistingRepoSet(): Set<string> {
+  try {
+    return new Set(listEnrolled().map((repo) => resolve(repo)).filter((repo) => existsSync(repo)));
+  } catch {
+    return new Set();
+  }
+}
+
+function isVisibleBacklogItem(item: WorkItem, enrolledRepos: Set<string>): boolean {
+  if (enrolledRepos.size === 0) return false;
+  return enrolledRepos.has(resolve(item.repo));
+}
+
 /**
  * Build a read-only snapshot of the fleet. Async because the backlog scan is
  * async. NEVER throws — each source is independently guarded.
@@ -204,7 +220,9 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     // Read the last persisted snapshot only; the daemon/backlog CLI owns refresh.
     const { loadBacklog } = await import('../portfolio/backlog.js');
     const backlog = loadBacklog();
-    const items = Array.isArray(backlog?.items) ? backlog.items : [];
+    const enrolledRepos = enrolledExistingRepoSet();
+    const items = (Array.isArray(backlog?.items) ? backlog.items : [])
+      .filter((item): item is WorkItem => isVisibleBacklogItem(item, enrolledRepos));
     backlogItems = items.length;
     nextQueueItems = items
       .slice()

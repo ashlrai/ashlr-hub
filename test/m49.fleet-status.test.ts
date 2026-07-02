@@ -229,10 +229,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
   it('reports backlog count from the last persisted backlog snapshot only', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
     mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
     const item = {
       id: 'repo:goal:one',
-      repo: '/tmp/repo',
+      repo,
       source: 'goal',
       title: 'Advance goal one',
       detail: 'detail',
@@ -246,8 +249,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       join(ashlrDir, 'backlog.json'),
       JSON.stringify({
         generatedAt: '2026-07-01T00:00:00.000Z',
-        repos: ['/tmp/repo'],
-        items: [item, { ...item, id: 'repo:goal:two', title: 'Advance goal two' }],
+        repos: [repo],
+        items: [
+          item,
+          { ...item, id: 'repo:goal:two', title: 'Advance goal two' },
+          { ...item, id: 'stale:goal:tmp', repo: '/tmp/ashlr-deleted-fixture', title: 'Stale test fixture' },
+        ],
       }),
       'utf8',
     );
@@ -259,14 +266,14 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       {
         id: 'repo:goal:one',
         title: 'Advance goal one',
-        repo: '/tmp/repo',
+        repo,
         source: 'goal',
         score: 2,
       },
       {
         id: 'repo:goal:two',
         title: 'Advance goal two',
-        repo: '/tmp/repo',
+        repo,
         source: 'goal',
         score: 2,
       },

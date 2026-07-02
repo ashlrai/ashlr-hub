@@ -218,7 +218,9 @@ function buildDaemon(cfg: AshlrConfig): ControlDaemon {
       activeDirectionMode: activeDirectionTick?.directionMode ?? null,
       activeDirectionAt: activeDirectionTick?.ts ?? null,
       activeDirectionReason: activeDirectionTick?.directionReason ?? null,
-      autonomyControlLoop: (cfg.foundry as Record<string, unknown> | undefined)?.['autonomyControlLoop'] === true,
+      autonomyControlLoop:
+        cfg.foundry !== undefined &&
+        (cfg.foundry as Record<string, unknown>)['autonomyControlLoop'] !== false,
     };
   } catch {
     return fallbackDaemon();

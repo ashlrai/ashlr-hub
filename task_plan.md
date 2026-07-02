@@ -44,6 +44,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Surface auto-merge maintenance resource estimates and caps
 - [x] Follow-up: Repair daemon launchd liveness, status read-only behavior, sandbox/engine cwd normalization, active guard health, and manager auto-merge bounds
 - [x] Follow-up: Surface auto-merge preflight blockers, top queue work, and stale live-owner spend guards in fleet status
+- [x] Follow-up: Make Foundry autonomy control executable by default when configured
+- [x] Follow-up: Pre-scan executable direction and hide stale unenrolled backlog from status
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -86,6 +88,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Plugin and scanner output must never be trusted for `WorkItem.repo`; backlog normalization now coerces every item back to the enrolled repo root scanned, and plugin wrappers force the same contract.
 - Manager `wouldMerge` is advisory but must mirror configured auto-merge risk/file/line bounds so Gate 7 does not block proposals that the real merge gate is configured to allow.
 - The installed `ai.ashlr.daemon` launch agent was stale and ran `ashlr loop --watch`; reinstalling from the repo generator now runs `node bin/ashlr daemon start --budget 5 --interval 1800000 --parallel 1`.
+- Foundry autonomy control should be executable by default when a `foundry` block exists. Advisory-only behavior is still available with `foundry.autonomyControlLoop=false`, but a self-improving fleet must obey its own resource-direction loop without requiring a hidden opt-in.
+- Executable resource direction must run before expensive backlog/scanner/planner refresh. When the fleet is in pause/verify-only, it should spend the tick on safety/verification/merge drain, not on generating or refreshing more candidate work.
+- `fleet status` should never treat stale persisted backlog from missing or unenrolled repos as live work. Read-only status can use cached snapshots, but must filter visibility to enrolled existing repos.
 
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
@@ -117,6 +122,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current liveness pass found the daemon was installed but stopped, status could misreport a cleanly exited launchd job as running, `fleet status` could trigger backlog/goal-planner side effects, plugin scanners and engine adapter callers could smuggle file paths into execution cwd, active spend guards were reported as stale blocks, and manager `wouldMerge` used stale hard-coded caps.
 - Current liveness pass repairs those issues, enrolls `ashlr-hub`, reinstalls the daemon service from the generated plist, and verifies launchd is running the real `daemon start` command.
 - Current observability pass adds read-only `autoMergeReadiness` to `FleetStatus`, renders auto-merge preflight blockers in CLI status, adds top persisted backlog work under `queue.next`, and marks a live daemon spend guard as blocked when the owning daemon lock heartbeat is stale.
+- Current executable-control pass makes `foundry.autonomyControlLoop` default on whenever Foundry is configured, keeps explicit `false` as advisory-only, updates Mission Control control JSON to report the effective default, and verifies daemon ticks suppress new work in `verify-only` mode by default.
+- Agent audits identified next high-leverage lanes: expose executable/advisory/disabled control mode explicitly, add effective config visibility, show resource availability in backend status, explain hidden stale backlog counts, make direction report basis visible, enforce exact judge/verify cost accounting, bind verification to the same base tree as merge, and replace readiness approximation with a shared dry-run gate explainer.
+- Current pre-scan direction pass moves daemon resource planning ahead of `buildBacklog()`, uses cached enrolled backlog counts for the lightweight direction snapshot, filters `FleetStatus.queue` to enrolled existing repos, and updates the self-target auto-merge gate test so `allowSelfMerge=true` is explicit.
 
 ## Status
-**Current batch in verification** - Auto-merge readiness, queue-next status, and stale live-owner guard-health repairs are implemented; focused tests, typecheck, lint, build, audit, diff check, and live status checks passed; preparing commit and push.
+**Current batch in final verification** - Executable control default, pre-scan direction, stale backlog status filtering, and explicit self-merge test contract are implemented; focused tests passed; running final gates and push.

@@ -33,12 +33,14 @@
  * No new runtime deps; node builtins only; never throws out of public API.
  */
 
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { AshlrConfig, DaemonConfig, DaemonDispatchTrace, DaemonState, DaemonTick, EngineId, EngineTier, WorkItem } from '../types.js';
 import type { FleetStatus } from '../fleet/status.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import { killSwitchOn, setKill, listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
-import { buildBacklog } from '../portfolio/backlog.js';
+import { buildBacklog, loadBacklog } from '../portfolio/backlog.js';
 import {
   acquireDaemonLock,
   armDaemonSpendGuard,
@@ -106,7 +108,25 @@ const LOCAL_ONLY_BACKENDS = new Set<EngineId>(['builtin', 'local-coder', 'ashlrc
 type TickItemOutcome = { item: WorkItem; spentUsd: number; dispatched: boolean; dispatch?: DaemonDispatchTrace };
 
 function autonomyControlEnabled(cfg: AshlrConfig): boolean {
-  return (cfg.foundry as Record<string, unknown> | undefined)?.['autonomyControlLoop'] === true;
+  const foundry = cfg.foundry as Record<string, unknown> | undefined;
+  if (!foundry) return false;
+  return foundry['autonomyControlLoop'] !== false;
+}
+
+function cachedBacklogCountForEnrolledRepos(enrolled: string[]): number {
+  try {
+    const enrolledRepos = new Set(enrolled.map((repo) => resolve(repo)).filter((repo) => existsSync(repo)));
+    if (enrolledRepos.size === 0) return 0;
+    const backlog = loadBacklog();
+    const items = Array.isArray(backlog?.items) ? backlog.items : [];
+    let count = 0;
+    for (const item of items) {
+      if (enrolledRepos.has(resolve(item.repo))) count++;
+    }
+    return count;
+  } catch {
+    return 0;
+  }
 }
 
 function constrainToLocalBackends(cfg: AshlrConfig): AshlrConfig {
@@ -648,21 +668,11 @@ export async function tick(
   }
 
   // -------------------------------------------------------------------------
-  // 4. Build / refresh backlog for ENROLLED repos only.
+  // 4. Resource direction check before expensive scanner/planner refresh.
   // -------------------------------------------------------------------------
-  let backlogItems: WorkItem[] = [];
-  try {
-    const backlog = await buildBacklog({ repos: enrolled });
-    backlogItems = backlog.items;
-  } catch (err) {
-    // buildBacklog never throws by contract; extra guard
-    console.warn('[ashlr] daemon:tick buildBacklog guard caught:', (err as Error)?.message ?? err);
-    backlogItems = [];
-  }
-
   if (autonomyControlEnabled(liveCfg)) {
     try {
-      directionPlan = await buildDaemonStrategyPlan(liveCfg, state, backlogItems.length);
+      directionPlan = await buildDaemonStrategyPlan(liveCfg, state, cachedBacklogCountForEnrolledRepos(enrolled));
       directionMode = directionPlan.mode;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -706,6 +716,19 @@ export async function tick(
         ...(merged > 0 ? { merged } : {}),
       });
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // 5. Build / refresh backlog for ENROLLED repos only.
+  // -------------------------------------------------------------------------
+  let backlogItems: WorkItem[] = [];
+  try {
+    const backlog = await buildBacklog({ repos: enrolled });
+    backlogItems = backlog.items;
+  } catch (err) {
+    // buildBacklog never throws by contract; extra guard
+    console.warn('[ashlr] daemon:tick buildBacklog guard caught:', (err as Error)?.message ?? err);
+    backlogItems = [];
   }
 
   if (backlogItems.length === 0) {

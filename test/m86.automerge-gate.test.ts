@@ -30,7 +30,7 @@
  *  PERMIT — files exactly at cap          [15]
  *  PERMIT — custom caps (larger)          [16]
  *  PERMIT — flag-off: disabled → no auto-merge (byte-identical to today) [17]
- *  PERMIT — self-target: guard+parity both pass              [18]
+ *  PERMIT — self-target: guard+parity+allowSelfMerge pass    [18]
  *  REFUSE — non-frontier proposal (authority denied)         [19]
  *  REFUSE — kill switch on                                   [20]
  *  REFUSE — not enrolled                                     [21]
@@ -563,7 +563,7 @@ describe('M86 PERMIT — fires when all gates pass', () => {
     expect(loadProposal(p.id)!.status).toBe('approved');
   });
 
-  it('[18] self-target: guardSafetyTests + parity both pass → merges', async () => {
+  it('[18] self-target: guardSafetyTests + parity + allowSelfMerge pass → merges', async () => {
     initRepo(tmpRepo, 'main');
     attachOrigin(tmpRepo, 'main');
     git(tmpRepo, ['checkout', '-b', 'work']);
@@ -584,7 +584,7 @@ describe('M86 PERMIT — fires when all gates pass', () => {
     const diff = addFileDiff('docs/self-ok.md', 'self doc permitted');
     const p = frontierPatch(diff);
 
-    const r = await autoMergeProposal(p.id, frontierCfg({ allowWithoutVerification: true }));
+    const r = await autoMergeProposal(p.id, frontierCfg({ allowWithoutVerification: true, allowSelfMerge: true }));
 
     expect(r.ok).toBe(true);
     expect(r.merged).toBe(true);
