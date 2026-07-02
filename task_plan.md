@@ -162,4 +162,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch ready to ship** - Empty-backlog refill, daemon heartbeat truth, responsive service cadence, automatic Claude CLI rate-limit sensing, post-review cadence/privacy fixes, and verification child-tree watchdog hardening are implemented and verified; commit/push and live daemon restart are next.
+**Current batch ready to ship** - Empty-backlog refill, daemon heartbeat truth, responsive service cadence, automatic Claude CLI rate-limit sensing, post-review cadence/privacy fixes, verification child-tree watchdog hardening, and queued self-heal visibility are implemented and verified; commit/push and live daemon restart are next.
+
+## Current Continuation
+- [x] Rechecked git/daemon/fleet state after the previous push.
+- [x] Deployed fresh explorer agents on daemon refill, fleet/backlog persistence, and cross-repo discovery.
+- [x] Found live fleet status showing zero backlog because persisted `backlog.json` was a stale temp-test snapshot while real self-heal work lived in `~/.ashlr/self-heal-queue.json`.
+- [x] Added a shared read-only queued-autonomy reader and wired it into `fleet status`, daemon cached backlog counts, and the queued autonomy scanner.
+- [x] Prevented daemon verification commands from writing into production `HOME`/`~/.ashlr` by giving each verify subprocess an isolated temp HOME.
+- [x] Prevented explicit subset/temp `buildBacklog({ repos })` scans from clobbering the global fleet backlog snapshot unless the caller opts into `persist:true`.
+- [x] Verified live patched `bin/ashlr fleet status --json` now reports 13 backlog items across 9 repos and `autonomyDirection.mode:"backlog-build"` instead of an empty queue.
+- [x] Verified focused/backlog/scanner suites, typecheck, lint, build, audit, and diff checks.
+- [ ] Commit, push, restart launchd daemon, and verify live service after restart.

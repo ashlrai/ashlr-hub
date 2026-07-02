@@ -11,7 +11,7 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { Backlog, Proposal, WorkItem } from '../types.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
@@ -176,6 +176,16 @@ function dedupeItems(items: WorkItem[]): WorkItem[] {
   return out;
 }
 
+function sameRepoSet(a: string[], b: string[]): boolean {
+  const left = new Set(a.map((repo) => resolve(repo)));
+  const right = new Set(b.map((repo) => resolve(repo)));
+  if (left.size !== right.size) return false;
+  for (const repo of left) {
+    if (!right.has(repo)) return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // buildBacklog
 // ---------------------------------------------------------------------------
@@ -222,6 +232,8 @@ async function getScanners(): Promise<ReadonlyArray<Scanner>> {
 export async function buildBacklog(opts?: {
   repos?: string[];
   minItemValue?: number;
+  /** Persist the global backlog snapshot. Defaults to true for full enrolled scans only. */
+  persist?: boolean;
   /** M125: injectable listProposals for feedback-loop tests. */
   listProposals?: () => Proposal[];
   /**
@@ -234,7 +246,8 @@ export async function buildBacklog(opts?: {
   /** Override the loaded config (tests / programmatic scanner-flag control, e.g. scanTodos). */
   cfg?: Pick<AshlrConfig, "foundry">;
 }): Promise<Backlog> {
-  const repos: string[] = opts?.repos ?? listEnrolled();
+  const enrolledSnapshot = listEnrolled();
+  const repos: string[] = opts?.repos ?? enrolledSnapshot;
   const scanners = await getScanners();
   const now = new Date().toISOString();
 
@@ -429,11 +442,14 @@ export async function buildBacklog(opts?: {
     items: finalItems,
   };
 
-  // Persist; never throw on persistence failure.
-  try {
-    persistBacklog(backlog);
-  } catch {
-    // Persistence failure does not prevent returning the in-memory backlog.
+  const shouldPersist = opts?.persist ?? (opts?.repos === undefined || sameRepoSet(repos, enrolledSnapshot));
+  if (shouldPersist) {
+    // Persist; never throw on persistence failure.
+    try {
+      persistBacklog(backlog);
+    } catch {
+      // Persistence failure does not prevent returning the in-memory backlog.
+    }
   }
 
   // Audit record (metadata only; never secrets).

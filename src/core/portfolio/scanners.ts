@@ -15,7 +15,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync, statSync, readFileSync, readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -24,6 +23,7 @@ import { listIssues, githubStatus } from '../integrations/github.js';
 import { isTrivialItem, isNonCodePath } from './value-filter.js';
 import { listGoals } from '../goals/store.js';
 import { expandGoalToMilestones } from '../strategy/goal-planner.js';
+import { loadQueuedAutonomyItemsForRepo } from './queued-autonomy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -182,42 +182,6 @@ function makeItem(
   };
 }
 
-function readWorkItemsFile(filePath: string): WorkItem[] {
-  try {
-    if (!existsSync(filePath)) return [];
-    const raw = JSON.parse(readFileSync(filePath, 'utf8')) as unknown;
-    if (Array.isArray(raw)) return raw.filter(isWorkItemLike);
-    if (
-      raw &&
-      typeof raw === 'object' &&
-      Array.isArray((raw as { items?: unknown }).items)
-    ) {
-      return (raw as { items: unknown[] }).items.filter(isWorkItemLike);
-    }
-    return [];
-  } catch {
-    return [];
-  }
-}
-
-function isWorkItemLike(value: unknown): value is WorkItem {
-  if (!value || typeof value !== 'object') return false;
-  const item = value as Partial<WorkItem>;
-  return (
-    typeof item.id === 'string' &&
-    typeof item.repo === 'string' &&
-    typeof item.source === 'string' &&
-    typeof item.title === 'string' &&
-    typeof item.detail === 'string' &&
-    typeof item.value === 'number' &&
-    typeof item.effort === 'number' &&
-    typeof item.score === 'number' &&
-    Array.isArray(item.tags) &&
-    item.tags.every((tag) => typeof tag === 'string') &&
-    typeof item.ts === 'string'
-  );
-}
-
 /**
  * Rehydrate queued high-value autonomy work into the normal backlog refresh.
  *
@@ -228,23 +192,7 @@ function isWorkItemLike(value: unknown): value is WorkItem {
  */
 export async function scanQueuedAutonomyWork(repo: string): Promise<WorkItem[]> {
   try {
-    const root = join(homedir(), '.ashlr');
-    const queued = [
-      ...readWorkItemsFile(join(root, 'self-heal-queue.json')),
-      ...readWorkItemsFile(join(root, 'backlog.json')),
-    ];
-    const seen = new Set<string>();
-    const result: WorkItem[] = [];
-    for (const item of queued) {
-      if (item.repo !== repo) continue;
-      const isSelfHeal = item.tags.includes('self-heal');
-      if (item.source !== 'invent' && !isSelfHeal) continue;
-      if (seen.has(item.id)) continue;
-      seen.add(item.id);
-      result.push(item);
-      if (result.length >= MAX_QUEUED_AUTONOMY_ITEMS) break;
-    }
-    return result;
+    return loadQueuedAutonomyItemsForRepo(repo, MAX_QUEUED_AUTONOMY_ITEMS);
   } catch {
     return [];
   }

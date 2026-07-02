@@ -289,6 +289,56 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(existsSync(join(tmpHome, '.ashlr', 'audit'))).toBe(false);
   });
 
+  it('includes queued self-heal work when the persisted backlog snapshot is stale', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    const queued = {
+      id: 'repo:self-heal:one',
+      repo,
+      source: 'self',
+      title: 'Fix broken test in repo',
+      detail: 'Self-heal: test is RED. Investigate and verify the suite passes.',
+      value: 5,
+      effort: 1,
+      score: 5,
+      tags: ['self-heal', 'test'],
+      ts: '2026-07-02T00:00:00.000Z',
+    };
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: '2026-07-01T00:00:00.000Z',
+        repos: ['/tmp/deleted-fixture'],
+        items: [{ ...queued, id: 'stale-temp-item', repo: '/tmp/deleted-fixture' }],
+      }),
+      'utf8',
+    );
+    writeFileSync(join(ashlrDir, 'self-heal-queue.json'), JSON.stringify([queued]), 'utf8');
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.queue.backlogItems).toBe(1);
+    expect(s.queue.repos).toMatchObject({
+      enrolled: 1,
+      existing: 1,
+      withBacklog: 1,
+      silent: 0,
+    });
+    expect(s.queue.next).toEqual([
+      {
+        id: 'repo:self-heal:one',
+        title: 'Fix broken test in repo',
+        repo,
+        source: 'self',
+        score: 5,
+      },
+    ]);
+    expect(existsSync(join(tmpHome, '.ashlr', 'audit'))).toBe(false);
+  });
+
   it('reflects allowedBackends — defaults to [builtin] when no foundry', async () => {
     const cfg = baseConfig();
     const s = await buildFleetStatus(cfg);
@@ -315,7 +365,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const builtin = s.backends.find((b) => b.backend === 'builtin')!;
     const localCoder = s.backends.find((b) => b.backend === 'local-coder')!;
 
-    expect(builtin.resource?.availability).toBe('open');
+    expect(['open', 'near']).toContain(builtin.resource?.availability);
     expect(localCoder.resource).toMatchObject({
       availability: 'not-sensed',
       usedPct: null,

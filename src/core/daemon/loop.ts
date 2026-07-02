@@ -41,6 +41,7 @@ import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import { killSwitchOn, setKill, listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
 import { buildBacklog, loadBacklog } from '../portfolio/backlog.js';
+import { loadQueuedAutonomyItems } from '../portfolio/queued-autonomy.js';
 import {
   acquireDaemonLock,
   armDaemonSpendGuard,
@@ -128,10 +129,19 @@ function cachedBacklogCountForEnrolledRepos(enrolled: string[]): number {
     const enrolledRepos = new Set(enrolled.map((repo) => resolve(repo)).filter((repo) => existsSync(repo)));
     if (enrolledRepos.size === 0) return 0;
     const backlog = loadBacklog();
-    const items = Array.isArray(backlog?.items) ? backlog.items : [];
+    const items = [
+      ...(Array.isArray(backlog?.items) ? backlog.items : []),
+      ...loadQueuedAutonomyItems(),
+    ];
+    const seen = new Set<string>();
     let count = 0;
     for (const item of items) {
-      if (enrolledRepos.has(resolve(item.repo))) count++;
+      const repo = resolve(item.repo);
+      if (!enrolledRepos.has(repo)) continue;
+      const key = `${repo}\0${item.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      count++;
     }
     return count;
   } catch {

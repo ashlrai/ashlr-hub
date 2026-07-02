@@ -80,6 +80,11 @@ vi.mock('../src/core/portfolio/backlog.js', () => ({
   loadBacklog: (...args: unknown[]) => mockLoadBacklog(...args),
 }));
 
+const mockLoadQueuedAutonomyItems = vi.fn();
+vi.mock('../src/core/portfolio/queued-autonomy.js', () => ({
+  loadQueuedAutonomyItems: (...args: unknown[]) => mockLoadQueuedAutonomyItems(...args),
+}));
+
 const mockRunGoal = vi.fn();
 vi.mock('../src/core/run/orchestrator.js', () => ({
   runGoal: (...args: unknown[]) => mockRunGoal(...args),
@@ -235,6 +240,7 @@ beforeEach(() => {
   mockEngineTierOf.mockReset();
   mockRunAutoMergePass.mockReset();
   mockBuildResourceStrategyReport.mockReset();
+  mockLoadQueuedAutonomyItems.mockReset();
 
   fx = makeFixture();
 
@@ -268,6 +274,7 @@ beforeEach(() => {
   mockRunAutoMergePass.mockResolvedValue({ merged: 0 });
   mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'backlog-build', reasons: ['mock backlog'] });
   mockLoadBacklog.mockReturnValue(null);
+  mockLoadQueuedAutonomyItems.mockReturnValue([]);
   mockLoadConfig.mockReset();
   mockLoadConfig.mockImplementation(defaultReloadConfig);
   // Default: builtin backend (route to runSwarm path).
@@ -667,6 +674,39 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     await expect(strategyOpts.deps?.buildFleetStatus?.()).resolves.toMatchObject({
       queue: { backlogItems: 1 },
     });
+  });
+
+  it('A1f5: executable direction counts queued self-heal work when persisted backlog is stale', async () => {
+    const { repo, items } = enrollWithItems(1);
+    mockLoadBacklog.mockReturnValue({
+      generatedAt: new Date().toISOString(),
+      repos: ['/tmp/deleted-fixture'],
+      items: [{ ...items[0]!, repo: '/tmp/deleted-fixture', id: 'stale-temp-item' }],
+    });
+    mockLoadQueuedAutonomyItems.mockReturnValue([
+      {
+        ...items[0]!,
+        id: 'queued-self-heal',
+        repo: repo.dir,
+        source: 'self',
+        tags: ['self-heal', 'test'],
+      },
+    ]);
+    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'pause', reasons: ['cached count only'] });
+
+    const result = await tick(
+      { ...cfgBuiltin(), foundry: { autoMerge: { enabled: true } } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('pause');
+    const strategyOpts = mockBuildResourceStrategyReport.mock.calls[0]?.[1] as {
+      deps?: { buildFleetStatus?: () => Promise<{ queue?: { backlogItems?: number } }> };
+    };
+    await expect(strategyOpts.deps?.buildFleetStatus?.()).resolves.toMatchObject({
+      queue: { backlogItems: 1 },
+    });
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
   });
 
   it('A1f3: explicit autonomyControlLoop=false keeps Foundry advisory-only', async () => {

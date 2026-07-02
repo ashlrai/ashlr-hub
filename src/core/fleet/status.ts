@@ -26,6 +26,7 @@ import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import type { BackendAvailability, BackendResourceState } from '../fabric/resource-monitor.js';
 import { strategicTierOfRepo, type StrategicTier } from '../ecosystem/focus.js';
 import { listEnrolled } from '../sandbox/policy.js';
+import { loadQueuedAutonomyItems } from '../portfolio/queued-autonomy.js';
 
 export interface FleetBackendResourceStatus {
   availability: BackendAvailability | 'not-sensed';
@@ -179,6 +180,19 @@ function isVisibleBacklogItem(item: WorkItem, enrolledRepos: Set<string>): boole
   return enrolledRepos.has(resolve(item.repo));
 }
 
+function mergeVisibleQueueItems(items: WorkItem[], enrolledRepos: Set<string>): WorkItem[] {
+  const seen = new Set<string>();
+  const merged: WorkItem[] = [];
+  for (const item of items) {
+    if (!isVisibleBacklogItem(item, enrolledRepos)) continue;
+    const key = `${resolve(item.repo)}\0${item.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+  }
+  return merged;
+}
+
 export function resolveAutonomyControlMode(cfg: AshlrConfig): FleetAutonomyControlMode {
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
   if (!foundry) return 'disabled';
@@ -304,8 +318,13 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       }
     })();
     const enrolledRepos = new Set(enrolledRaw.filter((repo) => existsSync(repo)));
-    const items = (Array.isArray(backlog?.items) ? backlog.items : [])
-      .filter((item): item is WorkItem => isVisibleBacklogItem(item, enrolledRepos));
+    const items = mergeVisibleQueueItems(
+      [
+        ...(Array.isArray(backlog?.items) ? backlog.items : []),
+        ...loadQueuedAutonomyItems(),
+      ],
+      enrolledRepos,
+    );
     backlogItems = items.length;
     const byRepo = new Map<string, number>();
     const byTier = new Map<StrategicTier, { repos: Set<string>; items: number }>();

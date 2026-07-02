@@ -10,8 +10,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type {
   RunTask,
@@ -200,6 +200,44 @@ describe('runVerifyCommand', () => {
     expect(res.ok).toBe(true);
     expect(res.output).toContain('HELLO_STDOUT');
     expect(res.output).toContain('HELLO_STDERR');
+  });
+
+  it('runs verification commands with an isolated HOME and ASHLR_HOME', () => {
+    const realHome = process.env.HOME ?? process.env.USERPROFILE ?? '';
+    const markerName = `m43-real-home-leak-${Date.now()}.txt`;
+    const realMarker = join(realHome, '.ashlr', markerName);
+    const script = [
+      'const fs = require("node:fs");',
+      'const path = require("node:path");',
+      'const marker = process.argv[1];',
+      'fs.mkdirSync(path.join(process.env.HOME, ".ashlr"), { recursive: true });',
+      'fs.writeFileSync(path.join(process.env.HOME, ".ashlr", marker), "verify");',
+      'console.log(JSON.stringify({',
+      'home: process.env.HOME,',
+      'userprofile: process.env.USERPROFILE,',
+      'ashlrHome: process.env.ASHLR_HOME,',
+      'realHome: process.env.ASHLR_REAL_HOME',
+      '}));',
+    ].join(' ');
+    const vc: VerifyCommand = { kind: 'test', cmd: ['node', '-e', script, markerName] };
+
+    const res = runVerifyCommand(vc, workdir, cfg);
+
+    expect(res.ok).toBe(true);
+    const match = res.output.match(/\{[^\n]*"home"[^\n]*\}/);
+    expect(match).not.toBeNull();
+    const env = JSON.parse(match![0]) as {
+      home: string;
+      userprofile: string;
+      ashlrHome: string;
+      realHome: string;
+    };
+    expect(resolve(env.home)).not.toBe(resolve(realHome));
+    expect(resolve(env.userprofile)).toBe(resolve(env.home));
+    expect(resolve(env.ashlrHome)).toBe(resolve(join(env.home, '.ashlr')));
+    expect(env.realHome.length).toBeGreaterThan(0);
+    expect(resolve(env.realHome)).not.toBe(resolve(env.home));
+    expect(existsSync(realMarker)).toBe(false);
   });
 
   it('never throws on a missing binary — returns ok:false', () => {

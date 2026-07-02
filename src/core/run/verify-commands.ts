@@ -21,7 +21,8 @@
 
 import { spawnSync } from 'node:child_process';
 import type { SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AshlrConfig } from '../types.js';
@@ -40,6 +41,9 @@ const MAX_TIMEOUT_MS = 600_000;
 
 /** Extra grace for the wrapper itself after it asks the child tree to exit. */
 const WRAPPER_TIMEOUT_GRACE_MS = 10_000;
+
+/** Prefix for per-command HOME directories used by verification subprocesses. */
+const VERIFY_HOME_PREFIX = 'ashlr-verify-home-';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -210,6 +214,28 @@ function verifyRunnerPath(): string | null {
   return existsSync(p) ? p : null;
 }
 
+function makeIsolatedVerifyEnv(baseEnv: NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv; cleanup: () => void } {
+  const home = mkdtempSync(join(tmpdir(), VERIFY_HOME_PREFIX));
+  const realHome = baseEnv.HOME ?? baseEnv.USERPROFILE ?? '';
+  const env: NodeJS.ProcessEnv = {
+    ...baseEnv,
+    HOME: home,
+    USERPROFILE: home,
+    ASHLR_HOME: join(home, '.ashlr'),
+    ASHLR_REAL_HOME: realHome,
+  };
+  return {
+    env,
+    cleanup: () => {
+      try {
+        rmSync(home, { recursive: true, force: true });
+      } catch {
+        // Best effort cleanup; the temp directory lives under the OS temp dir.
+      }
+    },
+  };
+}
+
 export function spawnOptionsFor(
   workspaceRoot: string,
   timeout: number,
@@ -290,29 +316,39 @@ export function runVerifyCommand(
   try {
     const baseOptions = spawnOptionsFor(workspaceRoot, timeout, bin);
     const runner = verifyRunnerPath();
-    const res = runner
-      ? spawnSync(
-          process.execPath,
-          [
-            runner,
-            String(timeout),
-            workspaceRoot,
-            Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
-          ],
-          {
-            cwd: workspaceRoot,
-            timeout: timeout + WRAPPER_TIMEOUT_GRACE_MS,
-            stdio: 'pipe',
-            encoding: 'utf8',
-            shell: false,
-            windowsHide: true,
-            env: {
-              ...(baseOptions.env ?? process.env),
-              ASHLR_VERIFY_SHELL: baseOptions.shell === true ? '1' : '0',
-            },
-          },
-        )
-      : spawnSync(bin, vc.cmd.slice(1), baseOptions);
+    const isolated = makeIsolatedVerifyEnv(baseOptions.env ?? process.env);
+    const res = (() => {
+      try {
+        return runner
+          ? spawnSync(
+              process.execPath,
+              [
+                runner,
+                String(timeout),
+                workspaceRoot,
+                Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
+              ],
+              {
+                cwd: workspaceRoot,
+                timeout: timeout + WRAPPER_TIMEOUT_GRACE_MS,
+                stdio: 'pipe',
+                encoding: 'utf8',
+                shell: false,
+                windowsHide: true,
+                env: {
+                  ...isolated.env,
+                  ASHLR_VERIFY_SHELL: baseOptions.shell === true ? '1' : '0',
+                },
+              },
+            )
+          : spawnSync(bin, vc.cmd.slice(1), {
+              ...baseOptions,
+              env: isolated.env,
+            });
+      } finally {
+        isolated.cleanup();
+      }
+    })();
 
     const timedOut =
       res.status === 124 ||

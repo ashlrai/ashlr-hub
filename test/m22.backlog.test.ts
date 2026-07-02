@@ -440,6 +440,31 @@ describe('M22 buildBacklog — over an enrolled tmp repo', () => {
     expect(bl.repos).toContain(tmpRepo);
   });
 
+  it('explicit subset scans do not clobber an existing fleet backlog snapshot', async () => {
+    enroll(tmpRepo);
+    const persisted = await buildBacklog();
+    const loadedBefore = loadBacklog();
+    expect(loadedBefore).not.toBeNull();
+    expect(loadedBefore!.generatedAt).toBe(persisted.generatedAt);
+
+    unenroll(tmpRepo);
+    const subset = await buildBacklog({ repos: [tmpRepo] });
+
+    expect(subset.repos).toEqual([tmpRepo]);
+    expect(loadBacklog()).toEqual(loadedBefore);
+  });
+
+  it('explicit subset scans can still persist when the caller opts in', async () => {
+    unenroll(tmpRepo);
+
+    const subset = await buildBacklog({ repos: [tmpRepo], persist: true });
+    const loaded = loadBacklog();
+
+    expect(loaded).not.toBeNull();
+    expect(loaded!.generatedAt).toBe(subset.generatedAt);
+    expect(loaded!.repos).toEqual([tmpRepo]);
+  });
+
   it('score on each WorkItem equals scoreItem(value, effort)', async () => {
     _execFileImpl = vi.fn((...args: unknown[]) => {
       const cb = args[args.length - 1] as ((err: Error | null, stdout: string, stderr: string) => void) | undefined;
