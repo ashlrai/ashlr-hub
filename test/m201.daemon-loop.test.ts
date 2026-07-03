@@ -41,6 +41,8 @@
  *    E5. runDaemon re-entrancy guard: refuses when ASHLR_IN_SWARM is set
  *    E6. runDaemon dry-run loop terminates after one iteration
  *    E7. runDaemon sets running=true on start, running=false on exit
+ *    E8. runDaemon loop stays resident and sleeps when same-day budget is exhausted
+ *    E9. resident loop wakes on the next UTC budget day, resets spend, and dispatches
  *
  *  Group F — buildItemGoal purity
  *    F1. includes item title
@@ -319,6 +321,20 @@ function seedSpend(spentUsd: number): void {
     startedAt: null,
     lastTickAt: null,
     todayDate: today(),
+    todaySpentUsd: spentUsd,
+    itemsProcessed: 0,
+    ticks: [],
+  });
+}
+
+/** Seed daemon state with a spent amount for an explicit UTC budget day. */
+function seedSpendForDate(date: string, spentUsd: number): void {
+  saveDaemonState({
+    running: false,
+    pid: null,
+    startedAt: null,
+    lastTickAt: null,
+    todayDate: date,
     todaySpentUsd: spentUsd,
     itemsProcessed: 0,
     ticks: [],
@@ -815,6 +831,15 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       dispatched: true,
       spentUsd: 0.001,
     });
+    expect(result.proposalProduction).toMatchObject({
+      selected: 1,
+      claimed: 1,
+      dispatched: 1,
+      skipped: 0,
+      errors: 0,
+      proposalsCreated: 0,
+      noProposalDispatches: 1,
+    });
 
     const state = loadDaemonState();
     expect(state.ticks.at(-1)?.dispatches?.[0]).toMatchObject({
@@ -823,6 +848,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       reason: 'test route',
       dispatched: true,
     });
+    expect(state.ticks.at(-1)?.proposalProduction?.noProposalDispatches).toBe(1);
   });
 
   it('A2: buildBacklog throws → tick swallows and returns no-backlog', async () => {
@@ -1146,6 +1172,15 @@ describe('M201 — Group C: per-item dispatch accounting', () => {
 
     expect(result.reason).toBe('ok');
     expect(result.proposalsCreated).toBe(0);
+    expect(result.proposalProduction).toMatchObject({
+      selected: 2,
+      claimed: 2,
+      dispatched: 2,
+      skipped: 0,
+      errors: 0,
+      proposalsCreated: 0,
+      noProposalDispatches: 2,
+    });
     expect(pendingCount()).toBe(before);
   });
 
@@ -1541,6 +1576,129 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     // running=false after runDaemon resolves.
     expect(finalState.running).toBe(false);
   });
+
+  it('E8: same-day exhausted budget keeps the loop resident and sleeps without backlog or dispatch', async () => {
+    vi.useFakeTimers();
+    let run: Promise<unknown> | undefined;
+    let settled = false;
+    try {
+      vi.setSystemTime(new Date('2026-07-02T23:59:59.000Z'));
+      const repo = fx.makeRepo();
+      repo.enroll();
+      mockBuildBacklog.mockResolvedValue({
+        generatedAt: new Date().toISOString(),
+        repos: [repo.dir],
+        items: makeItems(repo.dir, 1),
+      });
+      seedSpendForDate('2026-07-02', 1.0);
+      const cfg = makeCfg({
+        daemon: {
+          dailyBudgetUsd: 1.0,
+          perTickItems: 1,
+          parallel: 1,
+          intervalMs: 50,
+          idleBackoffMs: 1,
+          mode: 'continuous',
+          concurrency: { local: 2, cloud: 6, total: 8 },
+        } as AshlrConfig['daemon'],
+      });
+      mockLoadConfig.mockReturnValue(cfg);
+
+      run = runDaemon(cfg, { once: false, dryRun: false, maxCycles: 1 }).then((state) => {
+        settled = true;
+        return state;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+
+      expect(settled).toBe(false);
+      const sleepingState = loadDaemonState();
+      expect(sleepingState.running).toBe(true);
+      expect(sleepingState.ticks.at(-1)?.reason).toBe('budget-exhausted');
+      expect(mockBuildBacklog).not.toHaveBeenCalled();
+      expect(mockRunSwarm).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1_001);
+      const finalState = await run;
+      expect((finalState as { running?: boolean }).running).toBe(false);
+      expect(mockBuildBacklog).not.toHaveBeenCalled();
+      expect(mockRunSwarm).not.toHaveBeenCalled();
+    } finally {
+      if (run && !settled) {
+        try {
+          fx.setKill(true);
+          await vi.advanceTimersByTimeAsync(1_001);
+          await run;
+        } catch {
+          // best-effort cleanup for failed assertions
+        }
+      }
+      vi.useRealTimers();
+    }
+  });
+
+  it('E9: resident loop wakes on the next UTC budget day, resets stale spend, and dispatches', async () => {
+    vi.useFakeTimers();
+    let run: Promise<unknown> | undefined;
+    let settled = false;
+    try {
+      vi.setSystemTime(new Date('2026-07-02T23:59:59.000Z'));
+      const repo = fx.makeRepo();
+      repo.enroll();
+      mockBuildBacklog.mockResolvedValue({
+        generatedAt: new Date().toISOString(),
+        repos: [repo.dir],
+        items: makeItems(repo.dir, 1),
+      });
+      seedSpendForDate('2026-07-02', 1.0);
+      const cfg = makeCfg({
+        daemon: {
+          dailyBudgetUsd: 1.0,
+          perTickItems: 1,
+          parallel: 1,
+          intervalMs: 50,
+          idleBackoffMs: 1,
+          mode: 'continuous',
+          concurrency: { local: 2, cloud: 6, total: 8 },
+        } as AshlrConfig['daemon'],
+      });
+      mockLoadConfig.mockReturnValue(cfg);
+
+      run = runDaemon(cfg, { once: false, dryRun: false, maxCycles: 2 }).then((state) => {
+        settled = true;
+        return state;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+
+      expect(settled).toBe(false);
+      expect(loadDaemonState().ticks.at(-1)?.reason).toBe('budget-exhausted');
+      expect(mockBuildBacklog).not.toHaveBeenCalled();
+      expect(mockRunSwarm).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1_001);
+      const finalState = await run;
+
+      expect((finalState as { running?: boolean }).running).toBe(false);
+      expect(mockBuildBacklog).toHaveBeenCalledTimes(1);
+      expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+      const loaded = loadDaemonState();
+      expect(loaded.todayDate).toBe('2026-07-03');
+      expect(loaded.todaySpentUsd).toBeCloseTo(0.001, 10);
+      expect(loaded.ticks.at(-1)?.reason).toBe('ok');
+    } finally {
+      if (run && !settled) {
+        try {
+          fx.setKill(true);
+          await vi.advanceTimersByTimeAsync(1_001);
+          await run;
+        } catch {
+          // best-effort cleanup for failed assertions
+        }
+      }
+      vi.useRealTimers();
+    }
+  });
 });
 
 // ===========================================================================
@@ -1620,7 +1778,9 @@ describe('M201 — Group G: concurrent dispatch routing wire guards', () => {
     expect(source).toContain('const routeModels = new Map<string, string | null>();');
     expect(source).toContain('routeReasons.set(workedSet[i]!.id, d.value.reason);');
     expect(source).toContain('routeModels.set(workedSet[i]!.id, d.value.model ?? null);');
-    expect(source).toContain('return taskEntry.run(_backend, routeReasons.get(item.id), routeModels.get(item.id));');
+    expect(source).toContain('const assignedModel = hintedBackend === _backend ? routeModels.get(item.id) : undefined;');
+    expect(source).toContain('return taskEntry.run(_backend, assignedReason, assignedModel);');
+    expect(source).toContain('buildConcurrentDispatchRouteItem(');
   });
 
   it('G2: assigned gateway resource-pause decisions skip instead of dispatching', () => {

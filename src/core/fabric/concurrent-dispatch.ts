@@ -422,19 +422,7 @@ export async function buildGatewayDispatchPlan(
       }
     }
 
-    // M256: workhorse-dispatch path — spread bulk items evenly across
-    // WORKHORSE_BACKENDS (local-coder, codex, nim) that have headroom,
-    // rather than always preferring the single backend the gateway returned.
-    // Gated: only active when BOTH concurrentDispatch=true AND workhorseDispatch=true.
-    // Flag-off (workhorseDispatch !== true) → gateway-preference routeItem (unchanged).
-    if (cfg.foundry?.fabric?.workhorseDispatch === true) {
-      const routeItem = buildWorkhorseSpreader(snapshot, dispatchCfg);
-      return planConcurrentDispatch(items, snapshot, dispatchCfg, routeItem);
-    }
-
-    const routeItem = (item: WorkItem): EngineId =>
-      routeHints.get(item.id) ?? 'builtin';
-
+    const routeItem = buildConcurrentDispatchRouteItem(snapshot, dispatchCfg, cfg, routeHints);
     return planConcurrentDispatch(items, snapshot, dispatchCfg, routeItem);
   } catch {
     // Never-throws: safe fallback assigns everything to builtin
@@ -451,6 +439,28 @@ export async function buildGatewayDispatchPlan(
 // ---------------------------------------------------------------------------
 // M256: buildWorkhorseSpreader — round-robin routeItem across workhorse backends
 // ---------------------------------------------------------------------------
+
+/**
+ * Build the routeItem function used by concurrent daemon dispatch.
+ *
+ * M256: workhorse-dispatch path spreads bulk items evenly across
+ * WORKHORSE_BACKENDS (local-coder, codex, nim) that have headroom, rather than
+ * always preferring the single backend the gateway returned.
+ *
+ * Gated: only active when concurrentDispatch=true invokes this planner and
+ * workhorseDispatch=true. Flag-off returns the gateway/router hint unchanged.
+ */
+export function buildConcurrentDispatchRouteItem(
+  snapshot: ResourceSnapshot,
+  dispatchCfg: ConcurrentDispatchCfg,
+  cfg: AshlrConfig,
+  routeHints: ReadonlyMap<string, EngineId>,
+): (item: WorkItem) => EngineId {
+  if (cfg.foundry?.fabric?.workhorseDispatch === true) {
+    return buildWorkhorseSpreader(snapshot, dispatchCfg);
+  }
+  return (item: WorkItem): EngineId => routeHints.get(item.id) ?? 'builtin';
+}
 
 /**
  * M256: Build a stateful round-robin routeItem function that distributes items

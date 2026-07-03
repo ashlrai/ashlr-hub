@@ -423,11 +423,14 @@ function buildLogs(cap = LOG_CAP): ControlLogEntry[] {
       const remoteHandoffStr = tick.remoteHandoff
         ? ` remoteHandoff=checked:${tick.remoteHandoff.checked},merged:${tick.remoteHandoff.merged},closed:${tick.remoteHandoff.closed},open:${tick.remoteHandoff.open},unknown:${tick.remoteHandoff.unknown}`
         : '';
+      const productionStr = tick.proposalProduction
+        ? ` production=selected:${tick.proposalProduction.selected},claimed:${tick.proposalProduction.claimed},dispatched:${tick.proposalProduction.dispatched},skipped:${tick.proposalProduction.skipped},errors:${tick.proposalProduction.errors},proposals:${tick.proposalProduction.proposalsCreated},noProposal:${tick.proposalProduction.noProposalDispatches}`
+        : '';
       const modeStr = tick.dryRun === true ? ' mode=simulation' : '';
       entries.push({
         ts: tick.ts,
         kind: 'tick',
-        msg: `tick reason=${tick.reason ?? 'ok'}${modeStr}${directionStr}${backendStr}${spendStr}${autoMergeStr}${remoteHandoffStr}`,
+        msg: `tick reason=${tick.reason ?? 'ok'}${modeStr}${directionStr}${backendStr}${spendStr}${autoMergeStr}${remoteHandoffStr}${productionStr}`,
         ...(tick.dryRun === true ? { dryRun: true } : {}),
       });
       const dispatches = Array.isArray(tick.dispatches) ? tick.dispatches.slice(0, 5) : [];
@@ -599,6 +602,7 @@ export interface FleetTickEntry {
   directionReason: string | null;
   autoMerge: DaemonTick['autoMerge'] | null;
   remoteHandoff: DaemonTick['remoteHandoff'] | null;
+  proposalProduction: DaemonTick['proposalProduction'] | null;
   dispatches: DaemonTick['dispatches'];
 }
 
@@ -730,6 +734,7 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
       directionReason: t.directionReason ?? null,
       autoMerge: t.autoMerge ?? null,
       remoteHandoff: t.remoteHandoff ?? null,
+      proposalProduction: t.proposalProduction ?? null,
       dispatches: Array.isArray(t.dispatches) ? t.dispatches.slice(0, 5) : [],
     }));
   } catch {

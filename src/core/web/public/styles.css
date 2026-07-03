@@ -2721,6 +2721,12 @@ a:hover {
   font-size: 10.5px;
   overflow-wrap: anywhere;
 }
+.fa-tick-production {
+  color: var(--status-running);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
 .fa-tick-maintenance {
   color: var(--status-warn);
   font-family: var(--font-mono);

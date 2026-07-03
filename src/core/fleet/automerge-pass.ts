@@ -601,6 +601,9 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
           recordDecision({
             ts: new Date().toISOString(),
             proposalId: p.id,
+            ...(p.workItemId ? { workItemId: p.workItemId } : {}),
+            ...(p.workSource ? { workSource: p.workSource } : {}),
+            ...(p.runId ? { runId: p.runId } : {}),
             action: 'judged',
             engine: judgeEngine,
             model: judgeEngine,

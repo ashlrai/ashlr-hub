@@ -5,7 +5,7 @@
  *  - tick(cfg, opts): one operator cycle — check guards, load backlog, dispatch
  *    sandboxed swarms, create PENDING inbox proposals, record spend + state.
  *  - runDaemon(cfg, opts): loop ticks on an interval (or once); REFUSES when
- *    nested; marks running state; stops on kill switch / budget exhaustion.
+ *    nested; marks running state; stops on kill switch; idles on budget exhaustion.
  *  - stopDaemon(): set kill switch + clear running state.
  *
  * NON-NEGOTIABLE GUARDRAILS (enforced here, grep-provable):
@@ -65,7 +65,7 @@ import { engineTierOf } from '../run/sandboxed-engine.js';
 import { subscriptionAllows, isSubscriptionEngine } from '../fleet/subscription-usage.js'; // M80
 import { recommendRoute, recoverWithinBudget } from '../run/learned-router.js';
 import { decide as gatewayDecide } from '../fabric/gateway.js'; // M247: InferenceGateway
-import { planConcurrentDispatch, runConcurrentDispatch } from '../fabric/concurrent-dispatch.js'; // M255
+import { buildConcurrentDispatchRouteItem, planConcurrentDispatch, runConcurrentDispatch } from '../fabric/concurrent-dispatch.js'; // M255/M256
 import { getResourceSnapshot } from '../fabric/resource-monitor.js'; // M255
 import { estimateRun } from '../observability/estimate.js';
 import { buildForecast } from '../observability/forecast.js';
@@ -385,6 +385,54 @@ function dispatchesFromOutcomes(outcomes: PromiseSettledResult<TickItemOutcome>[
     outcome.status === 'fulfilled' && outcome.value.dispatch ? [outcome.value.dispatch] : [],
   );
   return dispatches.length > 0 ? dispatches.slice(0, 20) : undefined;
+}
+
+function proposalProductionSummary(
+  selectedCount: number,
+  claimedCount: number,
+  outcomes: PromiseSettledResult<TickItemOutcome>[],
+  proposalsCreated: number,
+): DaemonTick['proposalProduction'] | undefined {
+  if (selectedCount <= 0 && claimedCount <= 0 && outcomes.length === 0 && proposalsCreated <= 0) {
+    return undefined;
+  }
+
+  let dispatched = 0;
+  let skipped = 0;
+  let errors = 0;
+  const reasonCounts = new Map<string, number>();
+  const countReason = (reason: string) => {
+    const key = boundedText(reason || 'unknown', 120);
+    reasonCounts.set(key, (reasonCounts.get(key) ?? 0) + 1);
+  };
+
+  for (const outcome of outcomes) {
+    if (outcome.status === 'rejected') {
+      errors++;
+      countReason('task-error');
+      continue;
+    }
+    const trace = outcome.value.dispatch;
+    if (outcome.value.dispatched) dispatched++;
+    else skipped++;
+    countReason(trace?.skipReason ?? trace?.reason ?? (outcome.value.dispatched ? 'dispatched' : 'skipped'));
+  }
+
+  const reasons = [...reasonCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 8)
+    .map(([reason, count]) => ({ reason, count }));
+
+  return {
+    selected: selectedCount,
+    claimed: claimedCount,
+    dispatched,
+    skipped,
+    errors,
+    proposalsCreated,
+    noProposalDispatches: Math.max(0, dispatched - proposalsCreated),
+    ...(reasons.length > 0 ? { reasons } : {}),
+  };
 }
 
 /**
@@ -1868,11 +1916,17 @@ export async function tick(
         }
       }
     }
+    const routeItem = buildConcurrentDispatchRouteItem(
+      concurrentSnap,
+      concurrentCfg,
+      routingCfg,
+      routeHints,
+    );
     const concurrentPlan = planConcurrentDispatch(
       workedSet,
       concurrentSnap,
       concurrentCfg,
-      (item) => routeHints.get(item.id) ?? 'builtin',
+      routeItem,
     );
 
     // runConcurrentDispatch: executes plan with full cross-backend parallelism.
@@ -1885,7 +1939,22 @@ export async function tick(
         // We look up by item.id to reuse the existing tasks[] entries which
         // already capture tickSpent/state/liveCfg via closure.
         const taskEntry = tasks.find((_t, idx) => workedSet[idx]?.id === item.id);
-	        if (taskEntry) return taskEntry.run(_backend, routeReasons.get(item.id), routeModels.get(item.id));
+        if (taskEntry) {
+          const hintedBackend = routeHints.get(item.id);
+          const baseReason = routeReasons.get(item.id);
+          const assignedReason = (
+            hintedBackend !== undefined &&
+            hintedBackend !== _backend &&
+            baseReason &&
+            !baseReason.startsWith('throttled:') &&
+            !baseReason.startsWith('budget-pause:') &&
+            !baseReason.startsWith('resource-pause:')
+          )
+            ? `${baseReason}; concurrent planner assigned ${_backend}`
+            : baseReason;
+          const assignedModel = hintedBackend === _backend ? routeModels.get(item.id) : undefined;
+          return taskEntry.run(_backend, assignedReason, assignedModel);
+        }
 	        // Fallback: build a minimal no-op outcome (item not in tasks — shouldn't happen).
 	        return {
 	          item,
@@ -1979,6 +2048,7 @@ export async function tick(
   // Proposals actually recorded this tick = the PENDING-count delta (clamped >=0).
   let proposalsCreated = 0;
   try { proposalsCreated = Math.max(0, pendingCount() - pendingBefore); } catch (err) { console.warn('[ashlr] daemon:tick proposalDelta count failed:', (err as Error)?.message ?? err); proposalsCreated = 0; }
+  const proposalProduction = proposalProductionSummary(selected.length, workedSet.length, outcomes, proposalsCreated);
 
   // M85/M305: record item-accurate outcomes to the worked ledger. New proposals
   // carry workItemId, so a multi-item tick can tell which dispatched item filed
@@ -2062,6 +2132,7 @@ export async function tick(
 	      ...(autoMerge ? { autoMerge } : {}),
 	      ...(remoteHandoff ? { remoteHandoff } : {}),
 	      ...(producerMaintenance ? { producerMaintenance } : {}),
+	      ...(proposalProduction ? { proposalProduction } : {}),
 	      ...(dispatches ? { dispatches } : {}),
 	      ...(merged > 0 ? { merged } : {}),
 	    };
@@ -2092,6 +2163,7 @@ export async function tick(
 	    ...(autoMerge ? { autoMerge } : {}),
 	    ...(remoteHandoff ? { remoteHandoff } : {}),
 	    ...(producerMaintenance ? { producerMaintenance } : {}),
+	    ...(proposalProduction ? { proposalProduction } : {}),
 	    ...(dispatches ? { dispatches } : {}),
 	    ...(merged > 0 ? { merged } : {}),
 	  };
@@ -2241,8 +2313,10 @@ export async function tick(
  *
  * opts.once = true  => run exactly one tick then stop.
  * opts.once = false => loop: tick → sleep intervalMs → tick → ... until kill
- *                      switch is set OR daily budget is exhausted.
- *                      NO unbounded loop — every iteration re-checks both.
+ *                      switch is set. Same-day budget exhaustion keeps the
+ *                      resident daemon alive and paused until the next UTC
+ *                      budget day, then tick() resets/guards spend before work.
+ *                      NO unbounded dispatch — every iteration re-checks both.
  *
  * Never throws.
  */
@@ -2412,7 +2486,6 @@ export async function runDaemon(
         if (killSwitchOn()) break;
 
         const liveCfg = reloadLiveConfigForDaemon(cfg);
-        const loopCfg = resolveCfg(liveCfg);
 
         const currentLoaded = loadDaemonStateStrict();
         if (!currentLoaded.ok) {
@@ -2425,9 +2498,6 @@ export async function runDaemon(
           });
           break;
         }
-        const current = currentLoaded.state;
-        if (current.todaySpentUsd >= loopCfg.dailyBudgetUsd) break;
-
         const tickResult = await tick(liveCfg, { dryRun: opts.dryRun });
 
         // Dry-run is inherently a one-shot PLAN: it records spentUsd:0 forever,
@@ -2453,7 +2523,17 @@ export async function runDaemon(
         const afterTickCfg = reloadLiveConfigForDaemon(liveCfg);
         const afterLoopCfg = resolveCfg(afterTickCfg);
         const afterTick = afterTickLoaded.state;
-        if (afterTick.todaySpentUsd >= afterLoopCfg.dailyBudgetUsd) break;
+        if (budgetExhaustedForCurrentUtcDay(afterTick, afterLoopCfg)) {
+          audit({
+            action: 'daemon:tick',
+            repo: null,
+            sandboxId: null,
+            summary: 'daily budget exhausted; daemon sleeping until the next UTC budget day',
+            result: 'ok',
+          });
+          if (!(await sleepUntilNextUtcBudgetDay(daemonLock))) break;
+          continue;
+        }
 
         const noWorkDispatched =
           tickResult.itemsConsidered === 0 ||
@@ -2568,6 +2648,34 @@ export function stopDaemon(): void {
 /** Promise-based sleep (bounded; never less than 0ms). */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+function currentUtcBudgetDay(now = new Date()): string {
+  return now.toISOString().slice(0, 10);
+}
+
+function nextUtcBudgetDayStartMs(now = new Date()): number {
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+}
+
+function msUntilUtcTimestamp(targetMs: number, nowMs = Date.now()): number {
+  return Math.max(0, targetMs - nowMs);
+}
+
+function budgetExhaustedForCurrentUtcDay(state: DaemonState, dcfg: DaemonConfig): boolean {
+  return state.todayDate === currentUtcBudgetDay() && state.todaySpentUsd >= dcfg.dailyBudgetUsd;
+}
+
+async function sleepUntilNextUtcBudgetDay(lock: DaemonLock): Promise<boolean> {
+  const maxChunkMs = 60_000;
+  const wakeAtMs = nextUtcBudgetDayStartMs();
+  while (true) {
+    if (killSwitchOn()) return false;
+    const remainingMs = msUntilUtcTimestamp(wakeAtMs);
+    if (remainingMs <= 0) return true;
+    await sleep(Math.min(maxChunkMs, remainingMs + 1));
+    if (!heartbeatDaemonLock(lock)) return false;
+  }
 }
 
 /**

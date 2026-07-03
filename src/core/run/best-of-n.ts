@@ -11,9 +11,10 @@
  * Flag-off parity: cfg.foundry.bestOfN defaults to 1 → identical to a single run.
  */
 
-import type { AshlrConfig, WorkItem, Proposal, WorkSource, EngineId } from '../types.js';
+import type { AshlrConfig, WorkItem, Proposal, WorkSource, EngineId, RunState } from '../types.js';
 import type { ManagerVerdict } from '../fleet/manager.js';
 import type { TasteScore } from '../fleet/taste-critic.js';
+import { resolveEngineSpec } from './engine-registry.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -105,6 +106,27 @@ function syntheticProposal(item: WorkItem, diff: string, index: number): Proposa
   } as Proposal;
 }
 
+function stateResultMessage(state: RunState): string | undefined {
+  return typeof state.result === 'string' && state.result.trim().length > 0
+    ? state.result.trim()
+    : undefined;
+}
+
+function candidateErrorFromState(state: RunState, proposalId?: string): string | undefined {
+  if (state.status === 'failed' || state.status === 'aborted') {
+    return stateResultMessage(state) ?? `sandboxed candidate ${state.status}`;
+  }
+
+  // Most no-proposal success paths are just empty diffs. If a runner does return
+  // an explicit gate/block reason in the existing RunState shape, surface it.
+  if (!proposalId) {
+    const msg = stateResultMessage(state);
+    if (msg && /\b(blocked|gate|refused|denied)\b/i.test(msg)) return msg;
+  }
+
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Core function
 // ---------------------------------------------------------------------------
@@ -127,13 +149,16 @@ export async function runBestOfN(
   const n = readN(cfg, opts?.n);
   const goal = goalFor(item);
 
-  // ── 1. Resolve sandbox runner ───────────────────────────────────────────
-  // Prefer runApiModelSandboxed (free local engine). Import lazily so the
-  // module doesn't blow up when sandboxed-engine isn't built yet (tests mock it).
-  let runSandboxed: typeof import('./sandboxed-engine.js').runApiModelSandboxed | undefined;
+  // ── 1. Resolve sandbox runners ──────────────────────────────────────────
+  // Import lazily so the module doesn't blow up when sandboxed-engine isn't
+  // built yet (tests mock it).
+  type SandboxedRunner = typeof import('./sandboxed-engine.js').runEngineSandboxed;
+  let runEngineSandboxed: SandboxedRunner | undefined;
+  let runApiModelSandboxed: SandboxedRunner | undefined;
   try {
     const mod = await import('./sandboxed-engine.js');
-    runSandboxed = mod.runApiModelSandboxed;
+    runEngineSandboxed = mod.runEngineSandboxed;
+    runApiModelSandboxed = mod.runApiModelSandboxed;
   } catch {
     // sandboxed-engine unavailable — all candidates will error
   }
@@ -187,7 +212,7 @@ export async function runBestOfN(
   //   1. Use 'local-coder' if it appears in cfg.foundry.allowedBackends.
   //   2. Otherwise use the first allowed backend (whatever the operator configured).
   //   3. If allowedBackends is empty, default to 'local-coder'.
-  // If runSandboxed is unavailable we can't generate candidates — they will all error below.
+  // If the selected runner is unavailable we can't generate candidates — they will all error below.
   const engine = (() => {
     if (opts?.engine) return opts.engine;
     const allowed = cfg.foundry?.allowedBackends ?? [];
@@ -198,6 +223,11 @@ export async function runBestOfN(
     // Fall back to the first configured backend, or 'local-coder' as last resort
     return allowed[0] ?? ('local-coder' as import('../types.js').EngineId);
   })();
+  const engineSpec = resolveEngineSpec(engine, cfg);
+  const runSandboxed = engineSpec?.kind === 'api-model' ? runApiModelSandboxed : runEngineSandboxed;
+  const missingRunnerMessage = engineSpec?.kind === 'api-model'
+    ? 'api-model sandbox runner unavailable'
+    : 'cli-agent sandbox runner unavailable';
 
   const sourceRepo = item.repo ?? process.cwd();
 
@@ -209,7 +239,7 @@ export async function runBestOfN(
     const base: CandidateResult = { index: i, diff: '', score: 0 };
 
     if (!runSandboxed) {
-      return { ...base, error: 'sandboxed-engine module unavailable' };
+      return { ...base, error: missingRunnerMessage };
     }
 
     try {
@@ -226,10 +256,12 @@ export async function runBestOfN(
       // The actual diff patch lives in the proposal; the state.result is the
       // engine's stdout. We'll use proposalId to fetch the diff from the inbox
       // if needed — but for scoring we work with what we have.
+      const candidateError = candidateErrorFromState(result.state, result.proposalId);
       return {
         ...base,
         diff: typeof diff === 'string' ? diff : '',
         proposalId: result.proposalId,
+        ...(candidateError ? { error: candidateError } : {}),
         state: result.state,
       } as CandidateResult & { state: unknown };
     } catch (err) {

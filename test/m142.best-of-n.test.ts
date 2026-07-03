@@ -78,6 +78,16 @@ function makeSandboxMock(opts: {
   });
 }
 
+function mockSandboxedEngine(
+  apiSandboxMock: ReturnType<typeof vi.fn>,
+  engineSandboxMock: ReturnType<typeof vi.fn> = vi.fn(),
+) {
+  vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
+    runApiModelSandboxed: apiSandboxMock,
+    runEngineSandboxed: engineSandboxMock,
+  }));
+}
+
 /** Build a mock judgeProposal that returns scores in the given order. */
 function makeJudgeMock(scores: number[]) {
   let callCount = 0;
@@ -121,9 +131,7 @@ describe('M142 — N=1 parity (flag-off)', () => {
   it('N=1 produces exactly one candidate and uses it as winner when non-empty', async () => {
     const sandboxMock = makeSandboxMock({ withProposalAt: [0] });
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    mockSandboxedEngine(sandboxMock);
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: makeJudgeMock([12]),
     }));
@@ -141,9 +149,7 @@ describe('M142 — N=1 parity (flag-off)', () => {
   it('default cfg (no bestOfN field) is equivalent to N=1', async () => {
     const sandboxMock = makeSandboxMock({ withProposalAt: [0] });
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    mockSandboxedEngine(sandboxMock);
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: makeJudgeMock([10]),
     }));
@@ -172,9 +178,7 @@ describe('M142 — N=3 candidate selection', () => {
     const sandboxMock = makeSandboxMock({ withProposalAt: [0, 1, 2] });
     const judgeMock = makeJudgeMock([8, 16, 12]);
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    mockSandboxedEngine(sandboxMock);
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
     }));
@@ -196,9 +200,7 @@ describe('M142 — N=3 candidate selection', () => {
     const sandboxMock = makeSandboxMock({ withProposalAt: [0, 1, 2] });
     const judgeMock = makeJudgeMock([10, 10, 10]);
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    mockSandboxedEngine(sandboxMock);
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
     }));
@@ -216,9 +218,7 @@ describe('M142 — N=3 candidate selection', () => {
     const sandboxMock = makeSandboxMock({ withProposalAt: [0, 2] });
     const judgeMock = makeJudgeMock([5, 18]); // 2 judged calls (not 3)
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    mockSandboxedEngine(sandboxMock);
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
     }));
@@ -244,9 +244,7 @@ describe('M142 — all-empty → no winner', () => {
     // withProposalAt: [] → none get proposals
     const sandboxMock = makeSandboxMock({ withProposalAt: [] });
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    mockSandboxedEngine(sandboxMock);
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: vi.fn(),
     }));
@@ -290,9 +288,7 @@ describe('M142 — never throws on candidate error', () => {
     const sandboxMock = makeSandboxMock({ withProposalAt: [1, 2], throwAt: [0] });
     const judgeMock = makeJudgeMock([14, 10]);
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    mockSandboxedEngine(sandboxMock);
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
     }));
@@ -313,9 +309,7 @@ describe('M142 — never throws on candidate error', () => {
     const sandboxMock = makeSandboxMock({ withProposalAt: [0, 1] });
     const judgeMock = vi.fn().mockRejectedValue(new Error('judge unavailable'));
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    mockSandboxedEngine(sandboxMock);
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
     }));
@@ -343,9 +337,7 @@ describe('M142 — cfg.foundry.bestOfN flag', () => {
   it('reads N from cfg.foundry.bestOfN when opts.n is absent', async () => {
     const sandboxMock = makeSandboxMock({ withProposalAt: [0, 1, 2, 3] });
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    mockSandboxedEngine(sandboxMock);
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: makeJudgeMock([5, 5, 5, 5]),
     }));
@@ -360,9 +352,7 @@ describe('M142 — cfg.foundry.bestOfN flag', () => {
   it('opts.n overrides cfg.foundry.bestOfN', async () => {
     const sandboxMock = makeSandboxMock({ withProposalAt: [0, 1] });
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    mockSandboxedEngine(sandboxMock);
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: makeJudgeMock([5, 5]),
     }));
@@ -383,28 +373,77 @@ describe('M142 — cfg.foundry.bestOfN flag', () => {
 describe('M142 — daemon routing alignment', () => {
   afterEach(() => { vi.resetModules(); });
 
-  it('honors assigned engine and model from daemon routing', async () => {
-    const sandboxMock = makeSandboxMock({ withProposalAt: [0] });
+  it('routes codex cli-agent candidates through runEngineSandboxed and preserves proposal metadata', async () => {
+    const apiSandboxMock = makeSandboxMock({ withProposalAt: [0] });
+    const engineSandboxMock = makeSandboxMock({ withProposalAt: [0] });
 
     vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
+      runApiModelSandboxed: apiSandboxMock,
+      runEngineSandboxed: engineSandboxMock,
     }));
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: makeJudgeMock([10]),
     }));
 
-    const { runBestOfN } = await import('../src/core/run/best-of-n.js?assigned=' + randomUUID());
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?cliassigned=' + randomUUID());
     await runBestOfN(makeItem(), makeConfig(1), {
       n: 1,
       engine: 'codex' as import('../src/core/types.js').EngineId,
       model: 'gpt-5-codex',
+      workItemId: 'work-42',
+      workSource: 'issue',
     });
 
-    expect(sandboxMock).toHaveBeenCalledWith(
+    expect(apiSandboxMock).not.toHaveBeenCalled();
+    expect(engineSandboxMock).toHaveBeenCalledTimes(1);
+    expect(engineSandboxMock).toHaveBeenCalledWith(
       'codex',
       expect.any(String),
       expect.any(Object),
-      expect.objectContaining({ model: 'gpt-5-codex' }),
+      expect.objectContaining({
+        model: 'gpt-5-codex',
+        propose: true,
+        sourceRepo: MOCK_REPO,
+        workItemId: 'work-42',
+        workSource: 'issue',
+      }),
+    );
+  });
+
+  it('routes api-model candidates through runApiModelSandboxed and preserves proposal metadata', async () => {
+    const apiSandboxMock = makeSandboxMock({ withProposalAt: [0] });
+    const engineSandboxMock = makeSandboxMock({ withProposalAt: [0] });
+
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
+      runApiModelSandboxed: apiSandboxMock,
+      runEngineSandboxed: engineSandboxMock,
+    }));
+    vi.doMock('../src/core/fleet/manager.js', () => ({
+      judgeProposal: makeJudgeMock([10]),
+    }));
+
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?apiassigned=' + randomUUID());
+    await runBestOfN(makeItem(), makeConfig(1), {
+      n: 1,
+      engine: 'local-coder' as import('../src/core/types.js').EngineId,
+      model: 'qwen2.5-coder:32b',
+      workItemId: 'work-43',
+      workSource: 'goal',
+    });
+
+    expect(engineSandboxMock).not.toHaveBeenCalled();
+    expect(apiSandboxMock).toHaveBeenCalledTimes(1);
+    expect(apiSandboxMock).toHaveBeenCalledWith(
+      'local-coder',
+      expect.any(String),
+      expect.any(Object),
+      expect.objectContaining({
+        model: 'qwen2.5-coder:32b',
+        propose: true,
+        sourceRepo: MOCK_REPO,
+        workItemId: 'work-43',
+        workSource: 'goal',
+      }),
     );
   });
 
@@ -421,9 +460,7 @@ describe('M142 — daemon routing alignment', () => {
       wouldMerge: true,
     }));
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    mockSandboxedEngine(sandboxMock);
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
     }));

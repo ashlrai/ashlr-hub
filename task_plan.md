@@ -280,3 +280,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Focused verification passed: typecheck, web JS syntax check, `m49`, `m112`, `m111`, and `git diff --check`.
 - [x] Broad gates passed: lint, build, audit, invariants, and full `npm run test:ci`.
 - [x] Commit, push to `origin/master`, and verify live daemon/fleet status with the new effectiveness field.
+
+## Current Continuation - Recursive Self-Improvement Proposal Production
+- [x] Rechecked git, recent commits, Entire state, task plan, notes, daemon status, and fleet status.
+- [x] Confirmed live bottleneck remains `autonomyEffectiveness.phase:"proposal-starved"`: healthy daemon, 30 backlog items, 0 pending proposals, 0 recent merges.
+- [x] Deployed agents for proposal-production starvation, recursive self-improvement loops, daemon workhorse dispatch, service budget liveness, and judge parser reliability.
+- [x] Added daemon proposal-production telemetry so ticks report selected, claimed, dispatched, skipped, errors, proposals created, and dispatched-without-proposal counts.
+- [x] Integrated agent findings into safe patches: Best-of-N uses CLI/API runner by engine kind, daemon honors workhorse dispatch, budget exhaustion sleeps resident until the next UTC budget day, Codex/GPT judge parsing handles JSONL/reasoning output, and learned routing uses canonical work identity.
+- [x] Focused verification passed: typecheck, diff-check, JS syntax, and 169 tests across manager, Best-of-N, daemon loop, learned routing, workhorse dispatch, auto-merge, and Mission Control.
+- [x] Fixed the final audit finding: judge parsing no longer treats bare telemetry score fields as verdict JSON, and now preserves valid nested JSONL verdicts even when later telemetry contains `value`.
+- [x] Final full CI passed after audit fix: `npm run test:ci` covered 412 files, 8583 passed tests, and 7 skipped.
+- [x] Final package gates passed: build, lint (117 existing warnings, 0 errors), audit (0 vulnerabilities), and diff check.
+- [ ] Commit, push, reinstall/restart daemon, and verify live status.

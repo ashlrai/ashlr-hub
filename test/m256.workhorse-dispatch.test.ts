@@ -31,9 +31,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { WorkItem, WorkSource, EngineId } from '../src/core/types.js';
+import type { WorkItem, WorkSource, EngineId, AshlrConfig } from '../src/core/types.js';
 import type { ResourceSnapshot, BackendAvailability } from '../src/core/fabric/resource-monitor.js';
 import {
+  buildConcurrentDispatchRouteItem,
   planConcurrentDispatch,
   slotsForAvailability,
   type ConcurrentDispatchCfg,
@@ -109,12 +110,35 @@ function makeWorkhorseSpreader(
 }
 
 const dispatchCfg: ConcurrentDispatchCfg = { maxSlotsPerBackend: 3 };
+const cfgWorkhorse = {
+  version: 1,
+  foundry: { fabric: { concurrentDispatch: true, workhorseDispatch: true } },
+} as AshlrConfig;
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 describe('M256 workhorseDispatch', () => {
+  it('PRODUCTION-HELPER: workhorseDispatch overrides single-backend route hints and spreads', () => {
+    const snap = makeSnapshot([
+      { backend: 'local-coder', availability: 'open' },
+      { backend: 'codex',       availability: 'open' },
+      { backend: 'nim',         availability: 'open' },
+      { backend: 'builtin',     availability: 'open' },
+    ]);
+    const items = Array.from({ length: 6 }, makeItem);
+    const routeHints = new Map<string, EngineId>();
+    for (const item of items) routeHints.set(item.id, 'local-coder');
+
+    const routeItem = buildConcurrentDispatchRouteItem(snap, dispatchCfg, cfgWorkhorse, routeHints);
+    const plan = planConcurrentDispatch(items, snap, dispatchCfg, routeItem);
+
+    expect(plan.assignments.filter((a) => a.backend === 'local-coder')).toHaveLength(2);
+    expect(plan.assignments.filter((a) => a.backend === 'codex')).toHaveLength(2);
+    expect(plan.assignments.filter((a) => a.backend === 'nim')).toHaveLength(2);
+    expect(plan.unassigned).toHaveLength(0);
+  });
 
   // 1a. WORKHORSE-SPREAD: codex gets a fair share when all three workhorses are open
   it('WORKHORSE-SPREAD: bulk items spread across local-coder + codex + nim (codex > 0)', () => {

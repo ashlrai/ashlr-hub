@@ -139,6 +139,13 @@ function makeSandboxMock(withProposalAt: number[] = [0, 1, 2]) {
   });
 }
 
+function makeSandboxModule(sandboxMock: ReturnType<typeof makeSandboxMock>) {
+  return {
+    runApiModelSandboxed: sandboxMock,
+    runEngineSandboxed: sandboxMock,
+  };
+}
+
 /** Build a mock judgeProposal (correctness judge). */
 function makeJudgeMock(scores: number[]) {
   let callCount = 0;
@@ -347,9 +354,7 @@ describe('M183 — best-of-N prefers highest taste when tasteCritic=true', () =>
     const judgeMock = makeJudgeMock([10, 10, 10]);
     const tasteMock = makeTasteMock([3.0, 4.5, 2.5]);
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => makeSandboxModule(sandboxMock));
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
       resolveFrontierJudgeClient: vi.fn(() => null),
@@ -374,9 +379,7 @@ describe('M183 — best-of-N prefers highest taste when tasteCritic=true', () =>
     const judgeMock = makeJudgeMock([8, 16, 12]);
     const tasteMock = makeTasteMock([3.5, 3.5, 3.5]);
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => makeSandboxModule(sandboxMock));
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
       resolveFrontierJudgeClient: vi.fn(() => null),
@@ -397,9 +400,7 @@ describe('M183 — best-of-N prefers highest taste when tasteCritic=true', () =>
     const judgeMock = makeJudgeMock([12]);
     const tasteMock = makeTasteMock([4.2]);
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => makeSandboxModule(sandboxMock));
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
       resolveFrontierJudgeClient: vi.fn(() => null),
@@ -422,9 +423,7 @@ describe('M183 — best-of-N prefers highest taste when tasteCritic=true', () =>
     const judgeMock = makeJudgeMock([8, 10]);
     const tasteMock = makeTasteMock([3.0, 4.0]);
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => makeSandboxModule(sandboxMock));
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
       resolveFrontierJudgeClient: vi.fn(() => null),
@@ -453,9 +452,7 @@ describe('M183 — flag-off: selection byte-identical to pre-M183', () => {
     const judgeMock = makeJudgeMock([8, 16, 12]); // candidate 1 wins on correctness
     const tasteMock = vi.fn(async () => ({ alignment: 5, ambition: 5, design: 5, overall: 5, verdict: 'gold', rationale: '' }));
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => makeSandboxModule(sandboxMock));
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
       resolveFrontierJudgeClient: vi.fn(() => null),
@@ -477,9 +474,7 @@ describe('M183 — flag-off: selection byte-identical to pre-M183', () => {
     const sandboxMock = makeSandboxMock([0]);
     const judgeMock = makeJudgeMock([12]);
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => makeSandboxModule(sandboxMock));
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
       resolveFrontierJudgeClient: vi.fn(() => null),
@@ -496,9 +491,7 @@ describe('M183 — flag-off: selection byte-identical to pre-M183', () => {
     const sandboxMock = makeSandboxMock([0, 1, 2]);
     const judgeMock = makeJudgeMock([5, 18, 10]);
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => makeSandboxModule(sandboxMock));
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
       resolveFrontierJudgeClient: vi.fn(() => null),
@@ -595,9 +588,7 @@ describe('M183 — never-throws on taste critic failure', () => {
     // scoreTaste always throws — should not prevent winner selection
     const tasteMock = vi.fn(async () => { throw new Error('taste explodes'); });
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => makeSandboxModule(sandboxMock));
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
       resolveFrontierJudgeClient: vi.fn(() => null),
@@ -687,9 +678,7 @@ describe('M183 — proposal tagged with taste field', () => {
     const judgeMock = makeJudgeMock([10, 10]);
     const tasteMock = makeTasteMock([3.5, 4.8]);
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => makeSandboxModule(sandboxMock));
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
       resolveFrontierJudgeClient: vi.fn(() => null),
@@ -723,9 +712,7 @@ describe('M183 — proposal tagged with taste field', () => {
       rationale: 'Strong vision alignment and ambition.',
     }));
 
-    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
-      runApiModelSandboxed: sandboxMock,
-    }));
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => makeSandboxModule(sandboxMock));
     vi.doMock('../src/core/fleet/manager.js', () => ({
       judgeProposal: judgeMock,
       resolveFrontierJudgeClient: vi.fn(() => null),

@@ -253,7 +253,12 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
   });
 
   it('records a signed attestation for GPT-5/Codex frontier judges', async () => {
-    pendingProposals = [makeProposal('frontier-gpt', { engineTier: 'frontier' })];
+    pendingProposals = [makeProposal('frontier-gpt', {
+      engineTier: 'frontier',
+      workItemId: '/tmp/repo:issue:frontier-gpt',
+      workSource: 'issue',
+      runId: 'run-frontier-gpt',
+    })];
     mockResolveFrontierJudgeClient.mockReturnValue({
       model: 'gpt-5.5',
       complete: async () => '{"verdict":"ship","value":5,"correctness":5,"scope":1,"alignment":5,"rationale":"mock"}',
@@ -269,6 +274,9 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
       engine: 'gpt-5.5',
       model: 'gpt-5.5',
       verdict: 'ship',
+      workItemId: '/tmp/repo:issue:frontier-gpt',
+      workSource: 'issue',
+      runId: 'run-frontier-gpt',
     });
     expect(typeof judgedCall?.[0]?.judgeAttestation).toBe('string');
     expect(judgedCall?.[0]?.judgeAttestation).toHaveLength(64);

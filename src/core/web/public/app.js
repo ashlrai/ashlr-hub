@@ -3495,6 +3495,13 @@ function renderFleetActivity() {
 	          (handoff.closed ? ` ${handoff.closed} closed` : '') +
 	          (handoff.unknown ? ` ${handoff.unknown} unknown` : '')
 	        : '';
+	      const production = t.proposalProduction && typeof t.proposalProduction === 'object' ? t.proposalProduction : null;
+	      const productionStr = production
+	        ? `prod ${production.dispatched ?? 0}/${production.claimed ?? 0}` +
+	          (production.proposalsCreated ? ` props ${production.proposalsCreated}` : '') +
+	          (production.noProposalDispatches ? ` no-prop ${production.noProposalDispatches}` : '') +
+	          (production.errors ? ` err ${production.errors}` : '')
+	        : '';
 	      const hasMerge = t.merged > 0;
 	      const tickCls = `fa-tick-row${hasMerge ? ' fa-tick-merged' : ''}`;
       ticksBody.appendChild(el('div', { cls: tickCls },
@@ -3503,6 +3510,7 @@ function renderFleetActivity() {
 	        el('span', { cls: 'fa-tick-reason' }, t.dryRun === true ? `${t.reason ?? 'ok'}:sim` : (t.reason ?? 'ok')),
 	        backendsStr ? el('span', { cls: 'fa-tick-backends' }, backendsStr) : null,
 	        dispatchChips ? el('span', { cls: 'fa-tick-dispatches' }, `${dispatchChips}${dispatchMore}`) : null,
+	        productionStr ? el('span', { cls: 'fa-tick-production' }, productionStr) : null,
 	        maintenanceStr ? el('span', { cls: 'fa-tick-maintenance' }, maintenanceStr) : null,
 	        handoffStr ? el('span', { cls: 'fa-tick-maintenance' }, handoffStr) : null,
 	        t.spentUsd > 0 ? el('span', { cls: 'fa-tick-spend' }, `$${t.spentUsd.toFixed(4)}`) : null,

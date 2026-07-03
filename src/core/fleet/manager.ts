@@ -227,11 +227,116 @@ function extractFullReasoning(raw: string): string {
   return '';
 }
 
+type JsonRecord = Record<string, unknown>;
+
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isVerdictJson(value: unknown): value is JsonRecord {
+  if (!isJsonRecord(value)) return false;
+  if (Object.prototype.hasOwnProperty.call(value, 'verdict')) return true;
+
+  // Single score-like fields appear in provider telemetry envelopes. Treat a
+  // score-only object as verdict JSON only when it carries the complete rubric.
+  return (
+    Object.prototype.hasOwnProperty.call(value, 'value') &&
+    Object.prototype.hasOwnProperty.call(value, 'correctness') &&
+    Object.prototype.hasOwnProperty.call(value, 'scope') &&
+    Object.prototype.hasOwnProperty.call(value, 'alignment')
+  );
+}
+
+function addTextCandidate(candidates: string[], text: unknown): void {
+  if (typeof text === 'string' && text.trim().length > 0) candidates.push(text);
+}
+
+function textBlockCandidates(value: unknown): string[] {
+  const candidates: string[] = [];
+  if (typeof value === 'string') {
+    addTextCandidate(candidates, value);
+    return candidates;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) candidates.push(...textBlockCandidates(item));
+    return candidates;
+  }
+  if (!isJsonRecord(value)) return candidates;
+
+  const type = typeof value['type'] === 'string' ? value['type'] : '';
+  if (
+    typeof value['text'] === 'string' &&
+    (type === '' || type === 'text' || type === 'output_text' || type === 'input_text')
+  ) {
+    addTextCandidate(candidates, value['text']);
+  }
+  return candidates;
+}
+
+function knownTextFieldCandidates(value: unknown): string[] {
+  const candidates: string[] = [];
+  if (Array.isArray(value)) {
+    for (const item of value) candidates.push(...knownTextFieldCandidates(item));
+    return candidates;
+  }
+  if (!isJsonRecord(value)) return candidates;
+
+  addTextCandidate(candidates, value['result']);
+  candidates.push(...textBlockCandidates(value['content']));
+
+  const message = value['message'];
+  if (isJsonRecord(message)) {
+    candidates.push(...textBlockCandidates(message['content']));
+  }
+
+  candidates.push(...textBlockCandidates(value));
+
+  for (const nested of Object.values(value)) {
+    if (isJsonRecord(nested) || Array.isArray(nested)) {
+      candidates.push(...knownTextFieldCandidates(nested));
+    }
+  }
+
+  return candidates;
+}
+
+function parseJsonValues(raw: string): unknown[] {
+  const values: unknown[] = [];
+  try {
+    values.push(JSON.parse(raw.trim()));
+  } catch { /* fall through */ }
+
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) continue;
+    try {
+      values.push(JSON.parse(trimmed));
+    } catch { /* ignore non-JSON log lines */ }
+  }
+
+  return values;
+}
+
+function normaliseJudgeTextCandidates(raw: string): string[] {
+  const candidates = [raw];
+  for (const value of parseJsonValues(raw)) {
+    candidates.push(...knownTextFieldCandidates(value));
+  }
+
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    const trimmed = candidate.trim();
+    if (trimmed.length === 0 || seen.has(trimmed)) return false;
+    seen.add(trimmed);
+    return true;
+  });
+}
+
 function extractJson(raw: string): Record<string, unknown> | null {
   // Try direct parse first.
   try {
     const parsed = JSON.parse(raw.trim());
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    if (isVerdictJson(parsed)) return parsed;
   } catch { /* fall through */ }
 
   // Strip markdown fences.
@@ -239,33 +344,22 @@ function extractJson(raw: string): Record<string, unknown> | null {
   if (fenceMatch?.[1]) {
     try {
       const parsed = JSON.parse(fenceMatch[1].trim());
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+      if (isVerdictJson(parsed)) return parsed;
     } catch { /* fall through */ }
   }
 
   // Find the {...} block that is the VERDICT (M300c). Models — especially the
   // codex CLI — emit OTHER JSON objects (event/telemetry envelopes) AFTER the
   // verdict, so the naive "last {...}" grabbed a non-verdict object whose missing
-  // value/correctness fields clamped to 1. Prefer the LAST {...} that actually
-  // contains a verdict key ("verdict"/"value"/"correctness"); fall back to the
-  // last parseable object only if none has those keys.
+  // value/correctness fields clamped to 1. Prefer the LAST {...} that carries
+  // verdict fields; arbitrary event JSON is handled by text-candidate
+  // normalisation above, not treated as a verdict.
   const allBraceMatches = [...raw.matchAll(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*/g)];
   for (let i = allBraceMatches.length - 1; i >= 0; i--) {
     try {
       const parsed = JSON.parse(allBraceMatches[i]![0]);
-      if (
-        parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
-        ('verdict' in parsed || 'value' in parsed || 'correctness' in parsed)
-      ) {
-        return parsed as Record<string, unknown>;
-      }
+      if (isVerdictJson(parsed)) return parsed;
     } catch { /* keep scanning */ }
-  }
-  for (let i = allBraceMatches.length - 1; i >= 0; i--) {
-    try {
-      const parsed = JSON.parse(allBraceMatches[i]![0]);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
-    } catch { /* fall through */ }
   }
 
   // Greedy: find the outermost balanced {...} block.
@@ -280,12 +374,61 @@ function extractJson(raw: string): Record<string, unknown> | null {
     if (end !== -1) {
       try {
         const parsed = JSON.parse(raw.slice(start, end + 1));
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+        if (isVerdictJson(parsed)) return parsed;
       } catch { /* fall through */ }
     }
   }
 
   return null;
+}
+
+function parseStrictReasoning(raw: string): Record<string, unknown> | null {
+  const prose = extractFullReasoning(raw) || raw;
+  const rNum = (label: string): number | null => {
+    const m = prose.match(new RegExp(`(?:^|\\n)\\s*${label}\\s*[:=]\\s*([1-5])\\b`, 'i'));
+    return m ? Number(m[1]) : null;
+  };
+
+  const value = rNum('VALUE');
+  const correctness = rNum('CORRECTNESS');
+  const scope = rNum('SCOPE');
+  const alignment = rNum('ALIGNMENT');
+  const verdictMatch = prose.match(/(?:^|\n)\s*VERDICT\s*[:=]\s*(ship|review|noise|harmful)\b/i);
+  if (
+    value === null ||
+    correctness === null ||
+    scope === null ||
+    alignment === null ||
+    !verdictMatch?.[1]
+  ) {
+    return null;
+  }
+
+  const rationaleMatch = prose.match(/(?:^|\n)\s*RATIONALE\s*[:=]\s*(.+?)(?:\n|$)/i);
+  const verdict = verdictMatch[1].toLowerCase() as ManagerVerdict['verdict'];
+  const rationale =
+    rationaleMatch?.[1]?.trim() ||
+    verdictMatch[0].replace(/^\s*VERDICT\s*[:=]\s*/i, '').trim() ||
+    'structured reasoning verdict';
+
+  return { value, correctness, scope, alignment, verdict, rationale };
+}
+
+function parseJudgeResponse(raw: string): { obj: Record<string, unknown> | null; fullReasoning: string } {
+  const candidates = normaliseJudgeTextCandidates(raw);
+  const fullReasoning = candidates.map(extractFullReasoning).find((r) => r.length > 0) ?? '';
+
+  for (const candidate of candidates) {
+    const obj = extractJson(candidate);
+    if (obj) return { obj, fullReasoning };
+  }
+
+  for (const candidate of candidates) {
+    const obj = parseStrictReasoning(candidate);
+    if (obj) return { obj, fullReasoning: fullReasoning || extractFullReasoning(candidate) || candidate.trim() };
+  }
+
+  return { obj: null, fullReasoning };
 }
 
 const VALID_VERDICTS = new Set(['ship', 'review', 'noise', 'harmful']);
@@ -365,18 +508,21 @@ export async function judgeProposal(
   let fullReasoning = '';
   try {
     raw = await client.complete(effectiveJudgeSystem, buildJudgePrompt(proposal, specCtx));
-    fullReasoning = extractFullReasoning(raw);
   } catch {
     return fallback();
   }
 
-  let obj = extractJson(raw);
+  const parsed = parseJudgeResponse(raw);
+  let obj = parsed.obj;
+  fullReasoning = parsed.fullReasoning;
   // ONE-SHOT RETRY: if parse failed, re-prompt the model asking for JSON only.
   if (!obj) {
     try {
       const retryPrompt = buildJudgePrompt(proposal, specCtx) + JUDGE_RETRY_SUFFIX;
       const raw2 = await client.complete(effectiveJudgeSystem, retryPrompt);
-      obj = extractJson(raw2);
+      const retryParsed = parseJudgeResponse(raw2);
+      obj = retryParsed.obj;
+      fullReasoning = fullReasoning || retryParsed.fullReasoning;
     } catch { /* retry failed — fall through to fallback */ }
   }
   // M300d: parse scores/verdict from the structured <reasoning> prose
@@ -385,20 +531,22 @@ export async function judgeProposal(
   // strict trailing {"value":..} JSON, so extractJson found a non-verdict object
   // and every field clamped to 1 (a parse artifact, not a real judgment). We use
   // a reasoning-derived score whenever the JSON omitted that field.
-  const rprose = fullReasoning || raw;
+  const rprose = fullReasoning;
   const rNum = (label: string): number | undefined => {
     const m = rprose.match(new RegExp(label + '\\s*[:=]\\s*(\\d)', 'i'));
     return m ? Number(m[1]) : undefined;
   };
-  const rVerdictM = rprose.match(/VERDICT\s*[:=]\s*([a-z]+)/i);
+  const rVerdictM = rprose.match(/VERDICT\s*[:=]\s*(ship|review|noise|harmful)\b/i);
 
   if (!obj) return fallback();
 
-  const rawVerdict =
-    typeof obj['verdict'] === 'string' ? obj['verdict'] : (rVerdictM?.[1] ?? '');
-  const verdict: ManagerVerdict['verdict'] = VALID_VERDICTS.has(rawVerdict)
-    ? (rawVerdict as ManagerVerdict['verdict'])
-    : normaliseVerdict(rawVerdict);
+  const jsonVerdict = typeof obj['verdict'] === 'string' ? obj['verdict'] : undefined;
+  const reasoningVerdict = rVerdictM?.[1]?.toLowerCase();
+  const verdict: ManagerVerdict['verdict'] = jsonVerdict
+    ? (VALID_VERDICTS.has(jsonVerdict.toLowerCase())
+        ? (jsonVerdict.toLowerCase() as ManagerVerdict['verdict'])
+        : normaliseVerdict(jsonVerdict))
+    : ((reasoningVerdict as ManagerVerdict['verdict'] | undefined) ?? 'review');
 
   const value = clamp(obj['value'] ?? rNum('VALUE'), 1, 5);
   const correctness = clamp(obj['correctness'] ?? rNum('CORRECTNESS'), 1, 5);
@@ -995,6 +1143,9 @@ export async function runManager(
       recordDecision({
         ts: new Date().toISOString(),
         proposalId: proposal.id,
+        ...(proposal.workItemId ? { workItemId: proposal.workItemId } : {}),
+        ...(proposal.workSource ? { workSource: proposal.workSource } : {}),
+        ...(proposal.runId ? { runId: proposal.runId } : {}),
         action: 'judged',
         engine: judgeEngine,
         model: judgeEngine,

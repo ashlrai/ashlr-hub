@@ -495,6 +495,7 @@ function parseItemId(itemId: string): { source: string; repo: string } | null {
  * best available proxy.
  */
 function proposalSourceOf(p: Proposal): string {
+  if (p.workSource) return p.workSource;
   const KIND_TO_SOURCE: Record<string, string> = {
     patch: 'todo',
     pr: 'todo',

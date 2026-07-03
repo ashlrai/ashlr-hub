@@ -573,13 +573,38 @@ export interface EngineScore {
  */
 export type EngineScoreMap = Map<string, EngineScore>;
 
+function legacyTaskClassFromProposalId(proposalId?: string): string | null {
+  const parts = (proposalId ?? '').split(':');
+  return parts.length >= 2 && parts[1] ? parts[1] : null;
+}
+
+function taskClassFromWorkItemId(workItemId?: string): string | null {
+  if (!workItemId) return null;
+  const parts = workItemId.split(':');
+  return parts.length >= 3 && parts[1] ? parts[1] : null;
+}
+
+function taskClassFromDecisionEntry(entry: {
+  workSource?: string;
+  workItemId?: string;
+  proposalId?: string;
+}): string {
+  return (
+    entry.workSource ||
+    taskClassFromWorkItemId(entry.workItemId) ||
+    legacyTaskClassFromProposalId(entry.proposalId) ||
+    '*'
+  );
+}
+
 /**
  * M240: Build a score map for a given `taskClass` from the decisions ledger.
  *
  * Algorithm:
  *  1. Read recent 'judged' decisions (sinceMs = now - 90 days max).
  *  2. For each entry, extract engine + model + verdict + ts.
- *  3. Derive taskClass from the proposalId prefix (`repoBasename:source:...`).
+ *  3. Derive taskClass from canonical workSource/workItemId, with legacy
+ *     proposalId parsing only for old ledgers.
  *  4. Apply recency weight: w = 2^(-(age_ms / HALF_LIFE_MS)).
  *  5. Accumulate weighted ship/reject counts per (engine:model, taskClass) key.
  *  6. ship_rate = weightedShip / (weightedShip + weightedReject); neutral 0.5
@@ -617,11 +642,7 @@ export function buildEngineScores(
       const isReject = REJECT_VERDICTS.has(verdict);
       if (!isShip && !isReject) continue;
 
-      // Derive taskClass from proposalId: format is `repoBasename:source:sha1`
-      // Fall back to '*' when the proposalId doesn't match the pattern.
-      const pid = entry.proposalId ?? '';
-      const parts = pid.split(':');
-      const entryTaskClass = parts.length >= 2 ? (parts[1] ?? '*') : '*';
+      const entryTaskClass = taskClassFromDecisionEntry(entry);
 
       // Only count entries that match the requested taskClass (or wildcard).
       if (entryTaskClass !== taskClass && entryTaskClass !== '*') continue;

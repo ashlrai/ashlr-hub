@@ -146,6 +146,14 @@ function mockClient(verdictJson: object): { complete: (s: string, u: string) => 
   };
 }
 
+/** Create a mock client that returns raw judge output. */
+function mockClientRaw(raw: string): { complete: (s: string, u: string) => Promise<string>; model: string } {
+  return {
+    model: 'test-judge',
+    complete: vi.fn().mockResolvedValue(raw),
+  };
+}
+
 /** Create a mock client that returns unparseable prose. */
 function mockClientParseFail(): { complete: (s: string, u: string) => Promise<string>; model: string } {
   return {
@@ -267,6 +275,121 @@ describe('m120 judgeProposal — score parsing', () => {
 
     const verdict = await judgeProposal(proposal, {} as never, client);
     expect(verdict.verdict).toBe('review');
+  });
+
+  it('parses a complete reasoning-only ship verdict', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const proposal = makeProposal({ diff: makeDiff(1, 2) });
+    const client = mockClientRaw(`<reasoning>
+VALUE: 4 — Useful behavior fix.
+CORRECTNESS: 5 — The change is straightforward and covered.
+SCOPE: 1 — One small file.
+ALIGNMENT: 4 — Improves fleet reliability.
+VERDICT: ship — Correct, useful, and low risk.
+RATIONALE: Small correct fix with low blast radius.
+</reasoning>`);
+
+    const verdict = await judgeProposal(proposal, {} as never, client);
+    expect(verdict.verdict).toBe('ship');
+    expect(verdict.value).toBe(4);
+    expect(verdict.correctness).toBe(5);
+    expect(verdict.scope).toBe(1);
+    expect(verdict.alignment).toBe(4);
+    expect(verdict.wouldMerge).toBe(true);
+  });
+
+  it('keeps weak-correctness reasoning as review, not a mergeable ship', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const proposal = makeProposal({ diff: makeDiff(1, 1) });
+    const client = mockClientRaw(`<reasoning>
+VALUE: 5 — Valuable if correct.
+CORRECTNESS: 2 — The implementation has unresolved correctness risk.
+SCOPE: 1 — Narrow diff.
+ALIGNMENT: 5 — Strongly aligned.
+VERDICT: review — Weak correctness needs human inspection.
+RATIONALE: Valuable but correctness is too uncertain to ship.
+</reasoning>`);
+
+    const verdict = await judgeProposal(proposal, {} as never, client);
+    expect(verdict.verdict).toBe('review');
+    expect(verdict.correctness).toBe(2);
+    expect(verdict.wouldMerge).toBe(false);
+  });
+
+  it('parses verdict text from Codex-style JSONL message content', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const proposal = makeProposal({ diff: makeDiff(1, 2) });
+    const verdictText = `<reasoning>
+VALUE: 4 — Useful reliability improvement.
+CORRECTNESS: 5 — The logic is clearly correct.
+SCOPE: 1 — Tiny change.
+ALIGNMENT: 4 — Matches the project goals.
+VERDICT: ship — Good low-risk fix.
+RATIONALE: Useful and correct with minimal scope.
+</reasoning>
+{"value":4,"correctness":5,"scope":1,"alignment":4,"verdict":"ship","rationale":"Useful and correct with minimal scope."}`;
+    const jsonl = [
+      JSON.stringify({ type: 'session.created', session_id: 'codex-test' }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: verdictText }],
+        },
+      }),
+      JSON.stringify({ type: 'turn.completed', usage: { total_tokens: 1234 } }),
+    ].join('\n');
+
+    const verdict = await judgeProposal(proposal, {} as never, mockClientRaw(jsonl));
+    expect(verdict.verdict).toBe('ship');
+    expect(verdict.rationale).toBe('Useful and correct with minimal scope.');
+    expect(verdict.wouldMerge).toBe(true);
+  });
+
+  it('ignores score-shaped telemetry after a nested JSONL verdict', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const proposal = makeProposal({ diff: makeDiff(1, 2) });
+    const verdictText = JSON.stringify({
+      value: 5,
+      correctness: 5,
+      scope: 1,
+      alignment: 5,
+      verdict: 'ship',
+      rationale: 'The nested verdict should beat later telemetry.',
+    });
+    const jsonl = [
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: verdictText }],
+        },
+      }),
+      JSON.stringify({ type: 'response.completed', value: 0, usage: { total_tokens: 321 } }),
+    ].join('\n');
+
+    const verdict = await judgeProposal(proposal, {} as never, mockClientRaw(jsonl));
+    expect(verdict.verdict).toBe('ship');
+    expect(verdict.value).toBe(5);
+    expect(verdict.rationale).toBe('The nested verdict should beat later telemetry.');
+    expect(verdict.wouldMerge).toBe(true);
+  });
+
+  it('keeps telemetry-only JSONL output on safe review fallback', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const proposal = makeProposal({ diff: makeDiff(1, 1) });
+    const jsonl = [
+      JSON.stringify({ type: 'session.created', session_id: 'codex-test' }),
+      JSON.stringify({ type: 'turn.completed', usage: { total_tokens: 1234 } }),
+    ].join('\n');
+
+    const verdict = await judgeProposal(proposal, {} as never, mockClientRaw(jsonl));
+    expect(verdict.verdict).toBe('review');
+    expect(verdict.value).toBe(3);
+    expect(verdict.correctness).toBe(3);
+    expect(verdict.wouldMerge).toBe(false);
   });
 });
 
@@ -488,8 +611,18 @@ describe('m120 runManager — shadow mode', () => {
       mockClient({ verdict: 'ship', value: 4, correctness: 4, scope: 2, alignment: 4, rationale: 'Good.' }),
     );
 
-    mockProposals.push(makeProposal({ id: 'prop-shadow-001' }));
-    mockProposals.push(makeProposal({ id: 'prop-shadow-002' }));
+    mockProposals.push(makeProposal({
+      id: 'prop-shadow-001',
+      workItemId: '/repos/alpha:issue:001',
+      workSource: 'issue',
+      runId: 'run-shadow-001',
+    }));
+    mockProposals.push(makeProposal({
+      id: 'prop-shadow-002',
+      workItemId: '/repos/alpha:todo:002',
+      workSource: 'todo',
+      runId: 'run-shadow-002',
+    }));
 
     const { runManager } = await import('../src/core/fleet/manager.js');
     const report = await runManager({} as never, { window: '7d', applyRejects: false });
@@ -504,6 +637,11 @@ describe('m120 runManager — shadow mode', () => {
     expect(entries.length).toBeGreaterThanOrEqual(2);
     const actions = entries.map((e) => e.action);
     expect(actions.every((a) => a === 'judged')).toBe(true);
+    expect(entries.find((e) => e.proposalId === 'prop-shadow-001')).toMatchObject({
+      workItemId: '/repos/alpha:issue:001',
+      workSource: 'issue',
+      runId: 'run-shadow-001',
+    });
   });
 
   it('does NOT call setStatus in shadow mode (applyRejects=false)', async () => {

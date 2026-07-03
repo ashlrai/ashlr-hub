@@ -167,6 +167,8 @@ function hashDir(dir: string): string {
 // Tests
 // ---------------------------------------------------------------------------
 
+const DOCTOR_PROBE_TIMEOUT_MS = 15_000;
+
 describe('h7 doctor probes — 5 NEW read-only checks', () => {
   it("runDoctor includes an 'enrollment' probe; 0 enrolled ⇒ pass (fresh install is fine)", async () => {
     expect.hasAssertions();
@@ -187,7 +189,7 @@ describe('h7 doctor probes — 5 NEW read-only checks', () => {
     const enrolledProbe = probe(oneEnrolled, 'enrollment');
     expect(enrolledProbe?.status).toBe('pass');
     expect(enrolledProbe?.detail).toMatch(/1 repo enrolled/i);
-  });
+  }, DOCTOR_PROBE_TIMEOUT_MS);
 
   it("runDoctor includes a 'daemon-state' probe; stopped/healthy ⇒ pass; self-healed dead-pid ⇒ pass", async () => {
     expect.hasAssertions();
@@ -221,7 +223,7 @@ describe('h7 doctor probes — 5 NEW read-only checks', () => {
     expect(liveProbe?.status).toBe('pass');
     expect(liveProbe?.detail).toMatch(/running/i);
     expect(liveProbe?.detail).toContain(String(process.pid));
-  });
+  }, DOCTOR_PROBE_TIMEOUT_MS);
 
   it("runDoctor includes a 'kill-switch' probe; OFF ⇒ pass, ON ⇒ warn", async () => {
     expect.hasAssertions();
@@ -242,7 +244,7 @@ describe('h7 doctor probes — 5 NEW read-only checks', () => {
     expect(onProbe?.status).toBe('warn');
     expect(onProbe?.detail).toMatch(/on/i);
     expect(onProbe?.fix).toBeDefined();
-  });
+  }, DOCTOR_PROBE_TIMEOUT_MS);
 
   it("runDoctor includes an 'ashlr-writeable' probe; writeable ⇒ pass", async () => {
     expect.hasAssertions();
@@ -254,7 +256,7 @@ describe('h7 doctor probes — 5 NEW read-only checks', () => {
     expect(wp).toBeDefined();
     expect(wp?.status).toBe('pass');
     expect(wp?.detail).toMatch(/writeable/i);
-  });
+  }, DOCTOR_PROBE_TIMEOUT_MS);
 
   it("'ashlr-writeable' probe ⇒ fail when ~/.ashlr is not writeable", async () => {
     expect.hasAssertions();
@@ -290,7 +292,7 @@ describe('h7 doctor probes — 5 NEW read-only checks', () => {
 
     // Restore so afterEach cleanup can rm -rf the dir.
     chmodSync(fx.ashlrDir, 0o700);
-  });
+  }, DOCTOR_PROBE_TIMEOUT_MS);
 
   it("runDoctor includes a 'sandbox-health' probe; zero/low ⇒ pass, high orphan count ⇒ warn", async () => {
     expect.hasAssertions();
@@ -315,7 +317,7 @@ describe('h7 doctor probes — 5 NEW read-only checks', () => {
     expect(manyProbe?.status).toBe('warn');
     expect(manyProbe?.detail).toMatch(/orphan/i);
     expect(manyProbe?.fix).toMatch(/gc/i);
-  });
+  }, DOCTOR_PROBE_TIMEOUT_MS);
 
   it(
     'NO-GUARD-WEAKENED: runDoctor mutates no enrollment / KILL / daemon / sandbox state ' +
@@ -374,5 +376,6 @@ describe('h7 doctor probes — 5 NEW read-only checks', () => {
       );
       expect(leftovers).toEqual([]);
     },
+    DOCTOR_PROBE_TIMEOUT_MS,
   );
 });

@@ -56,6 +56,9 @@ function writeDecisions(
   entries: Array<{
     proposalId: string;
     action: string;
+    workItemId?: string;
+    workSource?: string;
+    runId?: string;
     engine?: string;
     model?: string;
     verdict?: string;
@@ -71,6 +74,9 @@ function writeDecisions(
       JSON.stringify({
         ts: e.ts ?? new Date().toISOString(),
         proposalId: e.proposalId,
+        ...(e.workItemId !== undefined ? { workItemId: e.workItemId } : {}),
+        ...(e.workSource !== undefined ? { workSource: e.workSource } : {}),
+        ...(e.runId !== undefined ? { runId: e.runId } : {}),
         action: e.action,
         ...(e.engine !== undefined ? { engine: e.engine } : {}),
         ...(e.model !== undefined ? { model: e.model } : {}),
@@ -217,6 +223,39 @@ describe('buildEngineScores — sample floor', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildEngineScores — ship/reject bias', () => {
+  it('prefers canonical workSource over opaque proposal ids', () => {
+    const n = LEARNED_ROUTING_MIN_SAMPLES + 2;
+    writeDecisions(Array.from({ length: n }, (_, i) => ({
+      proposalId: `prop-opaque-${i}`,
+      workSource: 'issue',
+      action: 'judged',
+      engine: 'codex',
+      model: 'gpt-5.5',
+      verdict: 'ship',
+    })));
+
+    const issueScores = buildEngineScores('issue');
+    expect(issueScores.get('codex:gpt-5.5')?.score).toBeGreaterThan(0.5);
+    expect(buildEngineScores('todo').size).toBe(0);
+  });
+
+  it('derives task class from canonical workItemId when workSource is absent', () => {
+    const n = LEARNED_ROUTING_MIN_SAMPLES + 2;
+    writeDecisions(Array.from({ length: n }, (_, i) => ({
+      proposalId: `prop-opaque-${i}`,
+      workItemId: `/tmp/repo-alpha:lint:item-${i}`,
+      action: 'judged',
+      engine: 'local-coder',
+      model: 'qwen',
+      verdict: 'noise',
+    })));
+
+    const scores = buildEngineScores('lint');
+    const s = scores.get('local-coder:qwen');
+    expect(s).toBeDefined();
+    expect(s!.score).toBeLessThan(0.5);
+  });
+
   it('claude:opus has score > 0.5 after many ship verdicts', () => {
     writeDecisions(judgedEntries(LEARNED_ROUTING_MIN_SAMPLES + 3, 'claude', 'opus', 'issue', 'ship'));
     const scores = buildEngineScores('issue');

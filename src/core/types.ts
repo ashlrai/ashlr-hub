@@ -3030,6 +3030,32 @@ export interface DaemonDispatchTrace {
   skipReason?: string;
 }
 
+export interface DaemonProposalProductionReason {
+  /** Bounded routing, skip, or error reason. */
+  reason: string;
+  /** Number of item outcomes with this reason. */
+  count: number;
+}
+
+export interface DaemonProposalProductionSummary {
+  /** Backlog items selected after scoring, pending-proposal dedupe, and budget caps. */
+  selected: number;
+  /** Items successfully claimed from the work queue coordinator. */
+  claimed: number;
+  /** Items whose engine/swarm path was actually invoked. */
+  dispatched: number;
+  /** Claimed item outcomes skipped before engine invocation. */
+  skipped: number;
+  /** Dispatch tasks that rejected outside normal per-item handling. */
+  errors: number;
+  /** PENDING proposals created by the tick, measured by inbox delta. */
+  proposalsCreated: number;
+  /** Batch-level signal: dispatched items minus created proposals, clamped to >= 0. */
+  noProposalDispatches: number;
+  /** Top bounded reasons explaining dispatch, skip, or error outcomes. */
+  reasons?: DaemonProposalProductionReason[];
+}
+
 export interface DaemonTick {
   /** ISO timestamp the tick ran. */
   ts: string;
@@ -3082,6 +3108,8 @@ export interface DaemonTick {
     skippedByCadence?: boolean;
     nextAfter?: string;
   };
+  /** M314: machine-readable proposal production accounting for this tick. */
+  proposalProduction?: DaemonProposalProductionSummary;
   /** Bounded per-item backend assignment traces for this tick. */
   dispatches?: DaemonDispatchTrace[];
   /** M48: proposals auto-merged this tick via the M47 gate (omitted/0 when disabled). */
