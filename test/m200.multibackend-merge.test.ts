@@ -155,6 +155,7 @@ import {
 } from '../src/core/fleet/quota.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { ManagerVerdict } from '../src/core/fleet/manager.js';
+import { hashDiff, signJudgeAttestation } from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -242,6 +243,10 @@ function nimLimitCfg(max: number, window = '1h'): AshlrConfig {
 }
 
 /** Build a proposal produced by the NIM/Kimi backend at a given tier. */
+function nimDiff(id: string): string {
+  return `--- a/src/fix.ts\n+++ b/src/fix.ts\n+// nim fix ${id}\n`;
+}
+
 function makeNimProp(
   id: string,
   tier: 'frontier' | 'mid' | 'local' = 'mid',
@@ -253,7 +258,7 @@ function makeNimProp(
     kind: 'patch',
     title: `m200 nim prop ${id}`,
     summary: 'NIM/Kimi-produced proposal',
-    diff: `--- a/src/fix.ts\n+++ b/src/fix.ts\n+// nim fix ${id}\n`,
+    diff: nimDiff(id),
     diffHash: `nim-hash-${id}`,
     // Producer is NIM/Kimi — NOT claude.
     engineModel: 'moonshotai/kimi-k2.6',
@@ -273,21 +278,34 @@ function frontierShipEntry(proposalId: string, judgeModel = 'claude-opus-4-8'): 
     engine: judgeModel,
     model: judgeModel,
     reason: 'cached',
-    judgeAttestation: 'a'.repeat(64), // non-empty → hasRecentShipVerdict returns true
+    detail: 'would-merge',
+    judgeAttestation: signJudgeAttestation({
+      proposalId,
+      judgeEngine: judgeModel,
+      verdict: 'ship',
+      diffHash: hashDiff(nimDiff(proposalId)),
+    }),
   };
 }
 
 /** A decisions-ledger entry simulating a local/non-frontier judge 'ship'. */
 function localJudgeShipEntry(proposalId: string): Record<string, unknown> {
+  const judgeEngine = 'qwen2.5:72b-instruct-q4_K_M';
   return {
     ts: new Date().toISOString(),
     proposalId,
     action: 'judged',
     verdict: 'ship',
-    engine: 'qwen2.5:72b-instruct-q4_K_M', // local — NOT frontier
-    model: 'qwen2.5:72b-instruct-q4_K_M',
+    engine: judgeEngine, // local — NOT frontier
+    model: judgeEngine,
     reason: 'local judge',
-    judgeAttestation: 'b'.repeat(64),
+    detail: 'would-merge',
+    judgeAttestation: signJudgeAttestation({
+      proposalId,
+      judgeEngine,
+      verdict: 'ship',
+      diffHash: hashDiff(nimDiff(proposalId)),
+    }),
   };
 }
 
@@ -483,32 +501,27 @@ describe('M200 [A] verification gate — NIM-produced proposal in verification m
     expect(r.merged).toBe(1);
   });
 
-  it('[A-V7] NIM proposal judged by LOCAL 72b model → gate invariant: autoMergeProposal called, but gate REFUSES (non-frontier judge)', async () => {
+  it('[A-V7] cached LOCAL 72b ship does not satisfy the judge cache', async () => {
     const p = makeNimProp('av7', 'mid');
     mockListProposals.mockReturnValue([p]);
-    // The ledger has a ship entry but from a local model — not frontier.
-    // hasRecentShipVerdict checks for judgeAttestation presence + action=judged +
-    // verdict=ship; it does NOT check the judge engine. So this will be a cache
-    // hit → judge not called → autoMergeProposal called.
-    // The gate inside autoMergeProposal (evaluateVerificationGate criterion 1)
-    // then refuses because the judge engine is not claude-*.
+    // The ledger has a syntactically signed ship entry, but from a local model.
+    // It must not be treated as a cache hit; the pass should spend a real
+    // frontier judge call before forwarding anything to the merge gate.
     mockReadDecisions.mockReturnValue([localJudgeShipEntry('av7')]);
 
     mockAutoMergeProposal.mockResolvedValueOnce({
-      ok: false,
-      merged: false,
+      ok: true,
+      merged: true,
       branched: false,
-      reason: 'merge authority denied: judge "qwen2.5:72b-instruct-q4_K_M" is not a frontier judge',
     });
 
     const r = await runAutoMergePass(verifyCfg());
 
-    // Judge is NOT re-called (cache hit — attestation present), but
-    // autoMergeProposal IS called (pass forwards it).
-    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockJudgeProposal).toHaveBeenCalledOnce();
     expect(mockAutoMergeProposal).toHaveBeenCalledWith('av7', expect.anything());
+    expect(r.judged).toBe(1);
     expect(r.attempted).toBe(1);
-    expect(r.merged).toBe(0); // gate refused
+    expect(r.merged).toBe(1);
   });
 
   it('[A-V8] mixed nim + claude proposals, verification mode → both judged; claude-produced also goes through same gate', async () => {

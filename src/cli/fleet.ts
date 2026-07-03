@@ -131,6 +131,19 @@ export function formatFleetStatus(s: FleetStatus): string {
   lines.push(`Merges:    ${s.merges.recent} auto-merge(s) in last 24h`);
   lines.push('');
 
+  // Next actions
+  lines.push('Next actions:');
+  const nextActions = Array.isArray(s.nextActions) ? s.nextActions : [];
+  if (nextActions.length === 0) {
+    lines.push('  (none)');
+  } else {
+    for (const action of nextActions.slice(0, 6)) {
+      const target = action.target ? ` [${formatActionTarget(action.target)}]` : '';
+      lines.push(`  [${action.priority}] ${action.label}${target}: ${action.detail}`);
+    }
+  }
+  lines.push('');
+
   // Guard health
   const guardHealth = s.guardHealth;
   lines.push('Guard health:');
@@ -225,7 +238,21 @@ function formatBackendResource(resource: NonNullable<FleetStatus['backends'][num
   if (resource.resetsAt !== null) {
     parts.push(`reset=${new Date(resource.resetsAt * 1000).toISOString()}`);
   }
+  if (resource.reason) {
+    parts.push(`reason=${compactResourceReason(resource.reason)}`);
+  }
   return parts.join(' ');
+}
+
+function compactResourceReason(reason: string): string {
+  const clean = reason.replace(/\s+/g, ' ').trim();
+  return clean.length > 96 ? clean.slice(0, 93) + '...' : clean;
+}
+
+function formatActionTarget(target: string): string {
+  const trimmed = target.replace(/\/+$/, '');
+  const tail = trimmed.split('/').filter(Boolean).pop();
+  return tail ?? target;
 }
 
 export function formatResourceStrategyReport(report: ResourceStrategyReport): string {

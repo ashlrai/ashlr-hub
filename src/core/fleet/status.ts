@@ -119,6 +119,14 @@ export interface FleetAutoMergeReadinessStatus {
   recentBlockers: FleetAutoMergeBlockerSummary[];
 }
 
+export interface FleetNextAction {
+  id: string;
+  priority: 'critical' | 'high' | 'medium' | 'low';
+  label: string;
+  detail: string;
+  target?: string;
+}
+
 export interface FleetQueueNextItem {
   id: string;
   title: string;
@@ -176,6 +184,8 @@ export interface FleetStatus {
   autonomyDirection?: FleetAutonomyDirectionSummary;
   /** Read-only diagnosis of guard state that can block autonomous work. */
   guardHealth?: GuardHealthDiagnosis;
+  /** Ranked read-only operator/agent actions derived from the snapshot. */
+  nextActions?: FleetNextAction[];
   /** True when the global kill switch is engaged (fleet paused). */
   killed: boolean;
 }
@@ -503,7 +513,151 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     // strategy signal source is unavailable.
   }
 
+  status.nextActions = buildNextActions(status);
+
   return status;
+}
+
+function buildNextActions(status: FleetStatus): FleetNextAction[] {
+  const actions: FleetNextAction[] = [];
+  const add = (action: FleetNextAction): void => {
+    if (actions.some((existing) => existing.id === action.id)) return;
+    actions.push(action);
+  };
+
+  if (status.killed) {
+    add({
+      id: 'resume-fleet',
+      priority: 'critical',
+      label: 'Resume fleet',
+      detail: 'The global kill switch is engaged, so no autonomous dispatch can run.',
+    });
+  }
+
+  if (!status.daemon.running) {
+    add({
+      id: 'start-daemon',
+      priority: 'critical',
+      label: 'Start daemon',
+      detail: 'The daemon is stopped; the fleet cannot drain backlog or proposals.',
+    });
+  }
+
+  const firstGuardBlock = status.guardHealth?.blocks?.[0];
+  if (firstGuardBlock) {
+    add({
+      id: 'repair-guard',
+      priority: 'critical',
+      label: 'Repair guard block',
+      detail: firstGuardBlock.detail,
+      target: firstGuardBlock.path,
+    });
+  }
+  const controlBlocked = status.killed || !status.daemon.running || Boolean(firstGuardBlock);
+
+  const awaitingHostMerge = status.proposals.awaitingHostMerge ?? 0;
+  if (awaitingHostMerge > 0) {
+    add({
+      id: 'reconcile-host-prs',
+      priority: 'high',
+      label: 'Reconcile host PRs',
+      detail: `${awaitingHostMerge} proposal(s) are waiting for GitHub/host merge confirmation.`,
+    });
+  }
+
+  const readiness = status.autoMergeReadiness;
+  if (readiness?.enabled && !controlBlocked) {
+    if (readiness.preflightReady > 0) {
+      add({
+        id: 'drain-ready-auto-merges',
+        priority: 'high',
+        label: 'Drain ready auto-merges',
+        detail: `${readiness.preflightReady} pending proposal(s) have cheap preflight-ready evidence.`,
+      });
+    }
+    if (readiness.needsVerification > 0) {
+      add({
+        id: 'verify-pending-proposals',
+        priority: 'high',
+        label: 'Verify pending proposals',
+        detail: `${readiness.needsVerification} proposal(s) need verification before judge or merge spend.`,
+      });
+    }
+    if (readiness.knownVerificationFailed > 0) {
+      add({
+        id: 'repair-verification-failures',
+        priority: 'medium',
+        label: 'Repair failed proposals',
+        detail: `${readiness.knownVerificationFailed} proposal(s) have known verification failures.`,
+      });
+    }
+    if (readiness.blocked > 0 && readiness.preflightReady === 0 && readiness.needsVerification === 0) {
+      const topReason = Object.entries(readiness.byReason)
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
+      add({
+        id: 'inspect-auto-merge-blockers',
+        priority: 'medium',
+        label: 'Inspect merge blockers',
+        detail: topReason ? `${topReason[1]}x ${topReason[0]}` : `${readiness.blocked} proposal(s) are blocked.`,
+      });
+    }
+  }
+
+  const constrained = status.backends.find((backend) => {
+    const availability = backend.resource?.availability;
+    return availability === 'exhausted' || availability === 'throttled' || availability === 'unreachable';
+  });
+  if (constrained?.resource) {
+    add({
+      id: `resource-${constrained.backend}`,
+      priority: constrained.resource.availability === 'exhausted' ? 'high' : 'medium',
+      label: `Route around ${constrained.backend}`,
+      detail: constrained.resource.reason,
+      target: constrained.backend,
+    });
+  }
+
+  if (status.queue.backlogItems > 0 && !controlBlocked) {
+    const top = status.queue.next?.[0];
+    add({
+      id: 'build-backlog',
+      priority: 'medium',
+      label: 'Build backlog proposals',
+      detail: top
+        ? `Start with ${top.title}`
+        : `${status.queue.backlogItems} backlog item(s) are available.`,
+      ...(top?.repo ? { target: top.repo } : {}),
+    });
+  }
+
+  const missingVerify = status.queue.repos?.executionProfiles?.reposMissingVerifyCommands ?? 0;
+  if (missingVerify > 0) {
+    add({
+      id: 'add-repo-verify-contracts',
+      priority: 'low',
+      label: 'Add repo verify contracts',
+      detail: `${missingVerify} enrolled repo(s) have no detected verify commands.`,
+    });
+  }
+
+  if (actions.length === 0) {
+    add({
+      id: 'refresh-backlog',
+      priority: 'low',
+      label: 'Refresh backlog',
+      detail: 'No immediate blockers or ready work are visible in the current snapshot.',
+    });
+  }
+
+  const priorityRank: Record<FleetNextAction['priority'], number> = {
+    critical: 0,
+    high: 1,
+    medium: 2,
+    low: 3,
+  };
+  return actions
+    .sort((a, b) => priorityRank[a.priority] - priorityRank[b.priority] || a.id.localeCompare(b.id))
+    .slice(0, 6);
 }
 
 async function buildAutoMergeReadinessStatus(

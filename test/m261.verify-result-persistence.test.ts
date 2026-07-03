@@ -223,6 +223,7 @@ function makeShipDecision(proposalId: string) {
     model: 'claude-sonnet-4-5',
     judgeAttestation: 'mock-attestation',
     reason: 'looks good',
+    detail: 'would-merge',
   };
 }
 

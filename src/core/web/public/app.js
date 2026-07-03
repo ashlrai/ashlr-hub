@@ -2178,6 +2178,21 @@ function autonomyEvidenceMetric(autonomy) {
   return `${autonomy.evidencePacks} packs / ${autonomy.allowed ?? 0} allowed / ${autonomy.denied ?? 0} denied`;
 }
 
+function compactFleetReason(reason, max = 88) {
+  const clean = String(reason ?? '').replace(/\s+/g, ' ').trim();
+  return clean.length > max ? clean.slice(0, Math.max(0, max - 3)) + '...' : clean;
+}
+
+function backendResourceText(backend) {
+  const resource = backend?.resource;
+  if (!resource) return '';
+  const parts = [resource.availability ?? 'unknown'];
+  if (typeof resource.usedPct === 'number') parts.push(`${Math.round(resource.usedPct)}%`);
+  if (resource.resetsAt) parts.push(`resets ${new Date(resource.resetsAt * 1000).toLocaleString()}`);
+  if (resource.reason) parts.push(compactFleetReason(resource.reason));
+  return parts.join(' · ');
+}
+
 function strategicTierLabel(tier) {
   const labels = {
     'core-fleet': 'Core fleet',
@@ -2356,6 +2371,23 @@ function renderFleet() {
   const strategicFocusCard = renderStrategicFocusCard(f.queue, 'fleet-card card');
   if (strategicFocusCard) section.appendChild(strategicFocusCard);
 
+  const nextActions = Array.isArray(f.nextActions) ? f.nextActions : [];
+  if (nextActions.length > 0) {
+    const actionsCard = el('div', { cls: 'fleet-card card' });
+    actionsCard.appendChild(el('h2', { cls: 'card-title' }, 'Next Actions'));
+    const list = el('div', { cls: 'fleet-backends' });
+    for (const action of nextActions.slice(0, 6)) {
+      const title = [action.detail, action.target ? `Target: ${action.target}` : ''].filter(Boolean).join(' | ');
+      list.appendChild(el('div', { cls: 'fleet-backend-row', title },
+        el('span', { cls: 'fleet-backend-name' }, action.label ?? action.id ?? 'Action'),
+        el('span', { cls: 'fleet-backend-dispatches' }, compactFleetReason(action.detail ?? '')),
+        el('span', { cls: 'fleet-quota' }, action.priority ?? 'low')
+      ));
+    }
+    actionsCard.appendChild(list);
+    section.appendChild(actionsCard);
+  }
+
   // Backends table
   const backendsCard = el('div', { cls: 'fleet-card card' });
   backendsCard.appendChild(el('h2', { cls: 'card-title' }, 'Backends'));
@@ -2365,9 +2397,12 @@ function renderFleet() {
   } else {
     const list = el('div', { cls: 'fleet-backends' });
     for (const b of backends) {
+      const resourceText = backendResourceText(b);
       const row = el('div', { cls: 'fleet-backend-row' },
         el('span', { cls: 'fleet-backend-name' }, b.backend),
-        el('span', { cls: 'fleet-backend-dispatches' }, `${b.dispatchesRecent} dispatch(es) / 24h`),
+        el('span', { cls: 'fleet-backend-dispatches' },
+          `${b.dispatchesRecent} dispatch(es) / 24h${resourceText ? ` · ${resourceText}` : ''}`
+        ),
         quotaTag(b.quota)
       );
       list.appendChild(row);
@@ -2908,9 +2943,12 @@ function renderControl() {
   if (backends.length > 0) {
     const bList = el('div', { cls: 'ctrl-backend-list' });
     for (const b of backends) {
+      const resourceText = backendResourceText(b);
       bList.appendChild(el('div', { cls: 'ctrl-backend-row' },
         el('span', { cls: 'ctrl-backend-name' }, b.id ?? b.backend ?? '?'),
-        el('span', { cls: 'ctrl-backend-dispatches' }, `${b.dispatchesRecent ?? 0} dispatch(es) / 24h`),
+        el('span', { cls: 'ctrl-backend-dispatches' },
+          `${b.dispatchesRecent ?? 0} dispatch(es) / 24h${resourceText ? ` · ${resourceText}` : ''}`
+        ),
         quotaTag(b.quota ?? 'ok')
       ));
     }

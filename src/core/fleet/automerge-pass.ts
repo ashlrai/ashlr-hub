@@ -15,8 +15,8 @@
  *
  * M172: judge-then-merge loop.
  * Before merging, each PENDING proposal that has no recent frontier 'ship'
- * verdict + HMAC attestation (checked via the decisions ledger) is sent to the
- * frontier judge (judgeProposal from manager.ts). This closes the gap where
+ * verdict + valid HMAC attestation (checked via the decisions ledger) is sent
+ * to the frontier judge (judgeProposal from manager.ts). This closes the gap where
  * proposals accumulate in 'pending' state because the daily oversight cron is
  * the only place the judge ran.
  *
@@ -45,7 +45,7 @@ import { judgeProposal, resolveFrontierJudgeClient, type ManagerVerdict } from '
 // M294: sign + record the attested 'judged'/ship ledger entry that the merge gate
 // (hasRecentShipVerdict / evaluateVerificationGate) requires. Previously the
 // automerge-pass judged 'ship' but never wrote this entry → every merge refused.
-import { hashDiff, signJudgeAttestation } from '../foundry/provenance.js';
+import { hashDiff, signJudgeAttestation, verifyJudgeAttestation } from '../foundry/provenance.js';
 // M193: additive gate-modules (flag-gated, default OFF, only tighten)
 import { redTeamProposal } from './red-team.js';
 import { analyzeBlastRadius } from '../run/blast-radius.js';
@@ -118,22 +118,30 @@ const JUDGE_ESTIMATE_TOKENS_OUT = 1_000;
 
 /**
  * Return true when the decisions ledger already contains a recent frontier
- * 'ship' verdict for this proposal (with a judge attestation field present).
+ * 'ship' verdict for this proposal with an HMAC-valid frontier judge attestation.
  * "Recent" = within the last hour (idempotent skip).
  *
  * Never throws.
  */
-function hasRecentShipVerdict(proposalId: string): boolean {
+function hasRecentShipVerdict(proposal: Proposal): boolean {
   try {
     const sinceMs = Date.now() - JUDGE_CACHE_TTL_MS;
-    const decisions = readDecisions({ proposalId, sinceMs });
-    return decisions.some(
-      (d) =>
-        d.action === 'judged' &&
-        d.verdict === 'ship' &&
-        typeof (d as unknown as Record<string, unknown>)['judgeAttestation'] === 'string' &&
-        ((d as unknown as Record<string, unknown>)['judgeAttestation'] as string).length > 0,
-    );
+    const decisions = readDecisions({ proposalId: proposal.id, sinceMs });
+    const diffHash = hashDiff(proposal.diff ?? '');
+    return decisions.some((d) => {
+      if (d.action !== 'judged' || d.verdict !== 'ship' || d.detail !== 'would-merge') return false;
+      const judgeEngine = d.engine ?? d.model;
+      if (!judgeEngine) return false;
+      if (!isFrontierJudge(judgeEngine)) return false;
+      const attestation = (d as unknown as Record<string, unknown>)['judgeAttestation'];
+      if (typeof attestation !== 'string' || attestation.length === 0) return false;
+      return verifyJudgeAttestation(attestation, {
+        proposalId: proposal.id,
+        judgeEngine,
+        verdict: 'ship',
+        diffHash,
+      }).ok;
+    });
   } catch {
     return false;
   }
@@ -224,9 +232,9 @@ function isSpecContractResult(value: unknown): value is { satisfied: boolean; de
  * M172 extension: before attempting to merge each eligible proposal, if it has
  * no recent frontier 'ship' verdict in the decisions ledger, run the frontier
  * judge on it (via judgeProposal from manager.ts). The judge records a
- * decisions-ledger entry + HMAC attestation (on 'ship'), enabling
- * autoMergeProposal's verification gate to proceed. Only proposals that receive
- * a 'ship' verdict are forwarded to autoMergeProposal.
+ * decisions-ledger entry + HMAC attestation (on mergeable 'ship'), enabling
+ * autoMergeProposal's verification gate to proceed. Only proposals whose judge
+ * verdict is `ship` with `wouldMerge === true` are forwarded to autoMergeProposal.
  *
  * Bounds: at most cfg.foundry.judgePerPass (default 5) unjudged proposals are
  * judged per pass. Already-judged proposals (cache hit) do NOT count against
@@ -353,9 +361,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       try {
         pending = listProposals({ status: 'pending' });
       } catch {
-        // If re-fetch fails, continue with the original list; TTL-rejected ones
-        // will simply be skipped (their status is 'rejected', not 'pending' —
-        // they'll pass the hasRecentShipVerdict check and be skipped by setStatus).
+        // If re-fetch fails, continue with the original list. Downstream store
+        // reads and merge gates still enforce the rejected status fail-closed.
       }
     }
   }
@@ -422,8 +429,9 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     }
 
     // ── M172: judge-then-merge ─────────────────────────────────────────────
-    // Skip judging if there is already a recent ship verdict + attestation.
-    if (!hasRecentShipVerdict(p.id)) {
+    // Skip judging only if there is already a recent mergeable ship verdict
+    // with a valid frontier judge attestation for this exact proposal diff.
+    if (!hasRecentShipVerdict(p)) {
       if (isVerificationMode) {
         if (p.verifyResult?.passed === false) {
           const failed = p.verifyResult.failed?.filter(Boolean).join('; ');
@@ -517,10 +525,11 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
 	        // M214: fire-and-forget judge-verdict emit — additive, never throws, no control-flow change.
         void emitJudgeVerdict(cfg, p.id, verdict?.verdict ?? 'null', p.repo, p.engineTier).catch(() => {});
 
-        // Only proposals that the judge ships proceed to the merge gate.
-        // 'review', 'noise', 'harmful' → auto-archive after K non-ship verdicts (M259).
+        // Only proposals the judge would actually merge proceed to the merge gate.
+        // 'ship' with wouldMerge=false is non-mergeable and must not create
+        // durable merge authority.
         // SAFETY: this ONLY adds a reject path — it can NEVER cause a merge.
-        if (!verdict || verdict.verdict !== 'ship') {
+        if (!verdict || verdict.verdict !== 'ship' || verdict.wouldMerge !== true) {
           // M235: fire-and-forget self-improvement write-back — additive, never throws, no control-flow change.
           try {
             learnFromRejection(
@@ -532,8 +541,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
             );
           } catch { /* learnFromRejection never throws; defensive */ }
 
-          // M259: track non-ship count + auto-archive when threshold reached.
-          // NEVER archive a proposal that received a 'ship' verdict (those proceed above).
+          // M259: track non-mergeable count + auto-archive when threshold reached.
+          // `ship` + `wouldMerge=false` is intentionally non-mergeable.
           try {
             const newCount = ((p as unknown as Record<string, unknown>)['judgeNonShipCount'] as number ?? 0) + 1;
             if (newCount >= autoArchiveAfterRejects) {
@@ -544,7 +553,7 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
                 p.id,
                 'rejected',
                 undefined,
-                `auto-archived: judge returned non-ship verdict ${newCount} time(s) (threshold: ${autoArchiveAfterRejects})`,
+                `auto-archived: judge returned non-mergeable verdict ${newCount} time(s) (threshold: ${autoArchiveAfterRejects})`,
               );
               out.autoArchived++;
             } else {

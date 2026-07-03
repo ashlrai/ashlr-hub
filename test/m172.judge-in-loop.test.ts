@@ -60,6 +60,10 @@ const mockVerifyProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
   evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
+  isFrontierJudge: (engine: string | undefined) => {
+    const value = String(engine ?? '').toLowerCase();
+    return value.startsWith('claude') || value.includes('claude') || value.startsWith('gpt-5');
+  },
   verifyProposal: (...args: unknown[]) => mockVerifyProposal(...args),
   verifyResultFromProposalResult: (result: { ok: boolean; ran: unknown[]; detail: string }) => ({
     passed: result.ok,
@@ -84,9 +88,10 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
 }));
 
 const mockReadDecisions = vi.fn(() => []);
+const mockRecordDecision = vi.fn();
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: (...args: unknown[]) => mockReadDecisions(...args),
-  recordDecision: vi.fn(),
+  recordDecision: (...args: unknown[]) => mockRecordDecision(...args),
 }));
 
 const mockJudgeProposal = vi.fn();
@@ -108,6 +113,7 @@ vi.mock('../src/core/run/provider-client.js', () => ({
 import { runAutoMergePass } from '../src/core/fleet/automerge-pass.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { ManagerVerdict } from '../src/core/fleet/manager.js';
+import { hashDiff, signJudgeAttestation } from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -183,15 +189,22 @@ function makeProp(id: string, tier: 'frontier' | 'mid' | 'local' = 'frontier'): 
 
 /** A recent decisions-ledger entry with a ship verdict + attestation. */
 function recentShipEntry(proposalId: string): Record<string, unknown> {
+  const judgeEngine = 'claude-opus-4-5';
   return {
     ts: new Date().toISOString(),
     proposalId,
     action: 'judged',
     verdict: 'ship',
-    engine: 'claude-opus-4-5',
-    model: 'claude-opus-4-5',
+    engine: judgeEngine,
+    model: judgeEngine,
     reason: 'cached',
-    judgeAttestation: 'a'.repeat(64), // non-empty → hasRecentShipVerdict returns true
+    detail: 'would-merge',
+    judgeAttestation: signJudgeAttestation({
+      proposalId,
+      judgeEngine,
+      verdict: 'ship',
+      diffHash: hashDiff(`+fix ${proposalId}\n`),
+    }),
   };
 }
 
@@ -219,6 +232,28 @@ describe('M172 judge-then-merge — basic flow', () => {
     expect(r.merged).toBe(1);
   });
 
+  it('[J1b] judge returns ship but wouldMerge=false → autoMergeProposal NOT called', async () => {
+    const p = makeProp('j1b');
+    mockListProposals.mockReturnValue([p]);
+    mockReadDecisions.mockReturnValue([]);
+
+    mockJudgeProposal.mockResolvedValueOnce({
+      proposalId: 'j1b', verdict: 'ship', value: 4, correctness: 4,
+      scope: 1, alignment: 4, rationale: 'ship but do not merge', wouldMerge: false,
+    } satisfies ManagerVerdict);
+
+    const r = await runAutoMergePass(enabledCfg());
+
+    expect(mockJudgeProposal).toHaveBeenCalledOnce();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(mockRecordDecision).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'judged',
+      verdict: 'ship',
+    }));
+    expect(r.judged).toBe(1);
+    expect(r.attempted).toBe(0);
+  });
+
   it('[J2] already-judged (hasRecentShipVerdict=true) → judge NOT called, goes to merge', async () => {
     const p = makeProp('j2');
     mockListProposals.mockReturnValue([p]);
@@ -232,6 +267,24 @@ describe('M172 judge-then-merge — basic flow', () => {
     // But autoMergeProposal IS called (cache hit → proceed to merge gate)
     expect(mockAutoMergeProposal).toHaveBeenCalledWith('j2', expect.anything());
     expect(r.judged).toBe(0);
+    expect(r.attempted).toBe(1);
+  });
+
+  it('[J2b] forged cached ship attestation → judge re-runs before merge', async () => {
+    const p = makeProp('j2b');
+    mockListProposals.mockReturnValue([p]);
+    mockReadDecisions.mockReturnValue([
+      {
+        ...recentShipEntry('j2b'),
+        judgeAttestation: '0'.repeat(64),
+      },
+    ]);
+
+    const r = await runAutoMergePass(enabledCfg());
+
+    expect(mockJudgeProposal).toHaveBeenCalledOnce();
+    expect(mockAutoMergeProposal).toHaveBeenCalledWith('j2b', expect.anything());
+    expect(r.judged).toBe(1);
     expect(r.attempted).toBe(1);
   });
 

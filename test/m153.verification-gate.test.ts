@@ -605,6 +605,17 @@ describe('M153 evaluateVerificationGate — pure, all 5 criteria', () => {
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/newer non-ship verdict overrides any older ship/i);
   });
+
+  it('[V16] signed ship without would-merge detail is not merge-authority evidence', () => {
+    const p = goodProposal('p16');
+    const shipWithoutMergeIntent: DecisionEntry = {
+      ...frontierShipDecision('p16'),
+      detail: '',
+    };
+    const r = evaluateVerificationGate(p, cfg, [shipWithoutMergeIntent, verifiedDecision('p16')]);
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/wouldMerge=true/);
+  });
 });
 
 // ===========================================================================

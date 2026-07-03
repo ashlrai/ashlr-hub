@@ -529,6 +529,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       'Unsigned docs change',
       'Failed verify docs change',
     ]);
+    const actionIds = s.nextActions?.map((a) => a.id) ?? [];
+    expect(actionIds).toContain('start-daemon');
+    expect(actionIds).not.toContain('drain-ready-auto-merges');
+    expect(actionIds).not.toContain('verify-pending-proposals');
+    expect(actionIds).not.toContain('repair-verification-failures');
   });
 });
 
@@ -632,6 +637,21 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       },
       proposals: { pending: 3, frontierPending: 1, applied: 5 },
       merges: { recent: 2 },
+      nextActions: [
+        {
+          id: 'drain-ready-auto-merges',
+          priority: 'high',
+          label: 'Drain ready auto-merges',
+          detail: '1 pending proposal has cheap preflight-ready evidence.',
+        },
+        {
+          id: 'build-backlog',
+          priority: 'medium',
+          label: 'Build backlog proposals',
+          detail: 'Start with Ship autonomy debugger',
+          target: '/repo/a',
+        },
+      ],
       autonomy: {
         evidencePacks: 3,
         latestAt: '2026-06-17T00:01:00.000Z',
@@ -677,6 +697,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('claude');
     expect(out).toContain('quota=warn');
     expect(out).toContain('resource=open used=0%');
+    expect(out).toContain('reason=builtin backend is always available');
     expect(out).toContain('resource=not-sensed');
     expect(out).toContain('7 backlog item(s)');
     expect(out).toContain('repos:         2/3 active (3 enrolled, 1 silent)');
@@ -690,6 +711,9 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('frontier pending:  1');
     expect(out).toContain('applied:           5');
     expect(out).toContain('2 auto-merge(s)');
+    expect(out).toContain('Next actions:');
+    expect(out).toContain('[high] Drain ready auto-merges');
+    expect(out).toContain('[medium] Build backlog proposals [a]: Start with Ship autonomy debugger');
     expect(out).toContain('Autonomy evidence:');
     expect(out).toContain('packs:     3');
     expect(out).toContain('denied:    1');

@@ -470,6 +470,7 @@ describe('M300 [A1] codex ship attestation → evaluateVerificationGate accepts 
         verdict: 'ship',
         engine: judgeEngine,
         model: judgeEngine,
+        detail: 'would-merge',
         judgeAttestation,
       },
     ];
@@ -532,6 +533,7 @@ describe('M300 [S1] non-frontier judge → evaluateVerificationGate refuses', ()
         verdict: 'ship',
         engine: judgeEngine,
         model: judgeEngine,
+        detail: 'would-merge',
         judgeAttestation: undefined,
       },
     ];

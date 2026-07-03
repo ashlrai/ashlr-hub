@@ -162,7 +162,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch ready to ship** - Repo execution profiles, local-coder resource sensing, Best-of-N routing alignment, builtin fallback/resource-cache hardening, and shared tool PATH support are implemented and fully verified; commit, push, and daemon restart remain.
+**Current batch in final verification** - The repo execution-profile/resource-routing batch is committed and pushed; the active follow-up adds ranked fleet next actions, richer resource visibility, and a stricter judge `wouldMerge` trust contract.
 
 ## Current Continuation - Execution Profiles And Routing Truth
 - [x] Rechecked git, Entire, task plan, notes, daemon status, and fleet status.
@@ -179,7 +179,18 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Fixed the production-panel UTC fixture so "today" tests use the current ISO day instead of crossing UTC midnight with `now - 30m`.
 - [x] Agent audits queued the next high-leverage lanes: swarm/engineer proposal gate parity, daemon `ashlrcode` sandbox-only capture, single-source auto-merge readiness, repo-specific verify profiles for the core fleet, and richer resource/status visibility.
 - [x] Full gates passed: `npm run typecheck`, focused profile/resource/status/service suites, `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, `node --check src/core/web/public/app.js`, `npm run test:invariants`, full `npm run test:ci` (412 files, 8548 passed, 7 skipped), and `git diff --check`.
-- [ ] Commit, push to `origin/master`, resume/restart launchd daemon, and verify live autonomous status.
+- [x] Commit, push to `origin/master`, resume/restart launchd daemon, and verify live autonomous status.
+
+## Current Continuation - Next Actions And Judge Trust
+- [x] Deployed a broader explorer wave for auto-merge trust, daemon reliability, cross-repo coordination, command-center UI, and market/open-source leverage.
+- [x] Added `FleetStatus.nextActions`, a ranked read-only action list derived from daemon state, guard health, host PR handoffs, auto-merge readiness, backend resource state, backlog, and repo verify coverage.
+- [x] Rendered next actions in `ashlr fleet status` and the Fleet web view, and surfaced compact backend resource reasons in CLI/Fleet/Mission Control backend rows.
+- [x] Tightened judge trust so cached `ship` decisions require `detail:'would-merge'` plus a valid HMAC attestation, and `evaluateVerificationGate()` requires explicit merge intent; `ship` with `wouldMerge=false` is now non-mergeable feedback, not merge authority.
+- [x] Stopped manager/inline judge paths from signing `ship` attestations when `wouldMerge=false`.
+- [x] Gated executable next actions behind fleet/daemon/guard readiness so stopped or blocked fleets prioritize control-plane repair before drain/verify/build work.
+- [x] Focused verification passed: typecheck, web JS syntax check, `m49`, `m172`, `m153`, `m157` (97 tests), plus adjacent `m48`, `m47`, and `m201` suites (109 tests).
+- [x] Full gates passed: `npm run typecheck`, `node --check src/core/web/public/app.js`, focused trust/status/daemon suites (12 files, 338 tests), `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, `npm run test:invariants` (41 files, 411 tests), full `npm run test:ci` (412 files, 8552 passed, 7 skipped), and `git diff --check`.
+- [ ] Commit, push to `origin/master`, and verify live daemon/fleet status.
 
 ## Current Continuation
 - [x] Rechecked git/daemon/fleet state after the previous push.

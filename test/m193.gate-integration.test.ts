@@ -42,6 +42,10 @@ const mockAutoMergeProposal = vi.fn();
 vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
   evaluateAutoMergeReadinessPreflight: () => ({ ready: true, advisories: [] }),
+  isFrontierJudge: (engine: string | undefined) => {
+    const value = String(engine ?? '').toLowerCase();
+    return value.startsWith('claude') || value.includes('claude') || value.startsWith('gpt-5');
+  },
 }));
 
 const mockListProposals = vi.fn();
@@ -95,6 +99,7 @@ vi.mock('../src/core/spec/spec-store.js', () => ({
 import { runAutoMergePass } from '../src/core/fleet/automerge-pass.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { ManagerVerdict } from '../src/core/fleet/manager.js';
+import { hashDiff, signJudgeAttestation } from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -192,15 +197,22 @@ function makeProp(id: string, tier: 'frontier' | 'mid' | 'local' = 'frontier', s
 
 /** A recent decisions-ledger entry (ship + attestation) so judge is skipped. */
 function recentShipEntry(proposalId: string): Record<string, unknown> {
+  const judgeEngine = 'claude-opus-4-5';
   return {
     ts: new Date().toISOString(),
     proposalId,
     action: 'judged',
     verdict: 'ship',
-    engine: 'claude-opus-4-5',
-    model: 'claude-opus-4-5',
+    engine: judgeEngine,
+    model: judgeEngine,
     reason: 'cached',
-    judgeAttestation: 'a'.repeat(64),
+    detail: 'would-merge',
+    judgeAttestation: signJudgeAttestation({
+      proposalId,
+      judgeEngine,
+      verdict: 'ship',
+      diffHash: hashDiff(`+++ a/src/foo.ts\n+fix ${proposalId}\n`),
+    }),
   };
 }
 

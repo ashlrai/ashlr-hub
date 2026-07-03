@@ -34,6 +34,7 @@
  *
  *  manager.ts signing path
  *  [M1]  judgeProposal 'ship' + frontier (claude-*) → recordDecision includes judgeAttestation
+ *  [M1b] judgeProposal 'ship' + wouldMerge=false → NO judgeAttestation
  *  [M2]  judgeProposal 'ship' + local judge (qwen) → NO attestation in recordDecision
  *  [M3]  judgeProposal 'review' + frontier → NO attestation (only 'ship' is signed)
  *  [M4]  judgeProposal 'noise' + frontier → NO attestation
@@ -349,6 +350,7 @@ describe('M157 evaluateVerificationGate criterion 1 — HMAC attestation require
       model: 'qwen2.5:72b-instruct-q4_K_M',
       verdict: 'ship',
       reason: 'local judge ship',
+      detail: 'would-merge',
       // no judgeAttestation — local judges are never signed
     };
 
@@ -408,6 +410,7 @@ describe('M157 evaluateVerificationGate criterion 1 — HMAC attestation require
       engine: 'qwen2.5:72b',       // non-frontier
       model: 'qwen2.5:72b',
       verdict: 'ship',
+      detail: 'would-merge',
       judgeAttestation: localAtt,  // technically valid MAC, but for a non-frontier engine
     };
 
@@ -437,7 +440,14 @@ describe('M157 evaluateVerificationGate criterion 1 — HMAC attestation require
 describe('M157 manager.ts signing path — attestation in recordDecision', () => {
   const JUDGE_ENGINE = 'claude-sonnet-4-5';
   const LOCAL_ENGINE = 'qwen2.5:72b-instruct-q4_K_M';
-  const TEST_DIFF = '+fix: apply manager signing\n';
+  const TEST_DIFF = [
+    'diff --git a/docs/manager.md b/docs/manager.md',
+    '--- /dev/null',
+    '+++ b/docs/manager.md',
+    '@@ -0,0 +1 @@',
+    '+fix: apply manager signing',
+    '',
+  ].join('\n');
 
   const testProposal: Proposal = {
     id: 'mgr-prop-001',
@@ -495,6 +505,50 @@ describe('M157 manager.ts signing path — attestation in recordDecision', () =>
       diffHash,
     });
     expect(verifyResult.ok).toBe(true);
+  });
+
+  it('[M1b] frontier judge ship with wouldMerge=false → NO judgeAttestation', async () => {
+    const mediumRiskDiff = [
+      'diff --git a/src/a.ts b/src/a.ts',
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -1 +1 @@',
+      '-old',
+      '+new',
+      'diff --git a/src/b.ts b/src/b.ts',
+      '--- a/src/b.ts',
+      '+++ b/src/b.ts',
+      '@@ -1 +1 @@',
+      '-old',
+      '+new',
+      '',
+    ].join('\n');
+    const prop: Proposal = {
+      ...testProposal,
+      id: 'mgr-prop-001b',
+      diff: mediumRiskDiff,
+      diffHash: hashDiff(mediumRiskDiff),
+    };
+    vi.mocked(storeMock.listProposals).mockReturnValueOnce([prop] as never);
+    mockEngineInstalled.mockReturnValue(false);
+    mockGetActiveClient.mockResolvedValue({
+      model: JUDGE_ENGINE,
+      complete: async () =>
+        JSON.stringify({ verdict: 'ship', value: 5, correctness: 5, scope: 1, alignment: 5, rationale: 'looks good but exceeds merge bounds' }),
+    });
+
+    await runManager(managerCfg, { window: '7d', limit: 1 });
+
+    const judgedCall = mockRecordDecision.mock.calls.find(
+      (args) =>
+        (args[0] as DecisionEntry).proposalId === 'mgr-prop-001b' &&
+        (args[0] as DecisionEntry).action === 'judged',
+    );
+    expect(judgedCall, 'expected a judged=ship recordDecision call').toBeDefined();
+    const entry = judgedCall![0] as DecisionEntry;
+    expect(entry.verdict).toBe('ship');
+    expect(entry.detail).toBe('');
+    expect(entry.judgeAttestation).toBeUndefined();
   });
 
   it('[M2] local judge (qwen) + verdict ship → NO judgeAttestation in recordDecision', async () => {

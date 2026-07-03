@@ -127,7 +127,7 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 describe('[A1] emitMerge called on successful merge', () => {
   it('calls emitMerge with correct args when res.merged===true', async () => {
-    mockJudgeProposal.mockResolvedValue({ verdict: 'ship', proposalId: proposal.id });
+    mockJudgeProposal.mockResolvedValue({ verdict: 'ship', wouldMerge: true, proposalId: proposal.id });
     mockAutoMergeProposal.mockResolvedValue({ merged: true, branched: false, reason: 'ok' });
 
     await runAutoMergePass(baseCfg as never);
@@ -143,7 +143,7 @@ describe('[A1] emitMerge called on successful merge', () => {
   });
 
   it('does NOT call emitMerge when merge did not happen (merged===false)', async () => {
-    mockJudgeProposal.mockResolvedValue({ verdict: 'ship', proposalId: proposal.id });
+    mockJudgeProposal.mockResolvedValue({ verdict: 'ship', wouldMerge: true, proposalId: proposal.id });
     mockAutoMergeProposal.mockResolvedValue({ merged: false, branched: false, reason: 'gate-fail' });
 
     await runAutoMergePass(baseCfg as never);
@@ -158,7 +158,7 @@ describe('[A1] emitMerge called on successful merge', () => {
 // ---------------------------------------------------------------------------
 describe('[A2] emitJudgeVerdict called for every inline judge call', () => {
   it('called with ship verdict when judge ships', async () => {
-    mockJudgeProposal.mockResolvedValue({ verdict: 'ship', proposalId: proposal.id });
+    mockJudgeProposal.mockResolvedValue({ verdict: 'ship', wouldMerge: true, proposalId: proposal.id });
     mockAutoMergeProposal.mockResolvedValue({ merged: true, branched: false, reason: 'ok' });
 
     await runAutoMergePass(baseCfg as never);
@@ -213,7 +213,7 @@ describe('[A2] emitJudgeVerdict called for every inline judge call', () => {
 // ---------------------------------------------------------------------------
 describe('[A3] automerge result unchanged when hooks fail', () => {
   it('merged count correct even when emitMerge rejects', async () => {
-    mockJudgeProposal.mockResolvedValue({ verdict: 'ship', proposalId: proposal.id });
+    mockJudgeProposal.mockResolvedValue({ verdict: 'ship', wouldMerge: true, proposalId: proposal.id });
     mockAutoMergeProposal.mockResolvedValue({ merged: true, branched: false, reason: 'ok' });
     mockEmitMerge.mockRejectedValueOnce(new Error('emit network error'));
 
@@ -223,7 +223,7 @@ describe('[A3] automerge result unchanged when hooks fail', () => {
   });
 
   it('judged count correct even when emitJudgeVerdict rejects', async () => {
-    mockJudgeProposal.mockResolvedValue({ verdict: 'ship', proposalId: proposal.id });
+    mockJudgeProposal.mockResolvedValue({ verdict: 'ship', wouldMerge: true, proposalId: proposal.id });
     mockAutoMergeProposal.mockResolvedValue({ merged: true, branched: false, reason: 'ok' });
     mockEmitJudgeVerdict.mockRejectedValueOnce(new Error('emit error'));
 
@@ -232,7 +232,7 @@ describe('[A3] automerge result unchanged when hooks fail', () => {
   });
 
   it('runAutoMergePass never throws when both hooks fail', async () => {
-    mockJudgeProposal.mockResolvedValue({ verdict: 'ship', proposalId: proposal.id });
+    mockJudgeProposal.mockResolvedValue({ verdict: 'ship', wouldMerge: true, proposalId: proposal.id });
     mockAutoMergeProposal.mockResolvedValue({ merged: true, branched: false, reason: 'ok' });
     mockEmitMerge.mockRejectedValue(new Error('emit error'));
     mockEmitJudgeVerdict.mockRejectedValue(new Error('emit error'));

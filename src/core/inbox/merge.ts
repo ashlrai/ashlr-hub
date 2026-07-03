@@ -1030,7 +1030,7 @@ export function isFrontierJudge(judgeEngine: string | undefined): boolean {
 export function evaluateVerificationGate(
   proposal: Proposal,
   cfg: AshlrConfig,
-  decisionsForProposal: Array<{ action: string; ts?: string; verdict?: string; engine?: string; model?: string; judgeAttestation?: string }>,
+  decisionsForProposal: Array<{ action: string; ts?: string; verdict?: string; engine?: string; model?: string; detail?: string; judgeAttestation?: string }>,
 ): VerificationGateVerdict {
   const refuse = (reason: string): VerificationGateVerdict => ({ authorized: false, reason });
 
@@ -1070,6 +1070,12 @@ export function evaluateVerificationGate(
     return refuse(
       `verification gate: most recent judged decision verdict='${shipEntry.verdict ?? 'unknown'}', not 'ship' — ` +
         `a newer non-ship verdict overrides any older ship attestation`,
+    );
+  }
+  if (shipEntry.detail !== 'would-merge') {
+    return refuse(
+      `verification gate: most recent judged ship is not merge-authoritative ` +
+        `(detail='${shipEntry.detail ?? 'missing'}') — judge must explicitly set wouldMerge=true`,
     );
   }
 
@@ -2102,7 +2108,7 @@ export async function autoMergeProposal(
           // This mirrors the runManager path so evaluateVerificationGate criterion 1
           // can verify the HMAC regardless of which path produced the ledger entry.
           let inlineAttestation: string | undefined;
-          if (verdict.verdict === 'ship' && isFrontierJudge(inlineJudgeEngine)) {
+          if (verdict.verdict === 'ship' && verdict.wouldMerge === true && isFrontierJudge(inlineJudgeEngine)) {
             try {
               const { signJudgeAttestation: signAtt, hashDiff: hd } = await import('../foundry/provenance.js');
               const dh = hd(proposal.diff ?? '');

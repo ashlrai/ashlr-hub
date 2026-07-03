@@ -967,13 +967,15 @@ export async function runManager(
       // M157: For frontier 'ship' verdicts, HMAC-sign the attestation tuple so
       // evaluateVerificationGate can verify it cryptographically. A forged
       // ledger entry cannot pass without the host-local provenance key.
-      // Only sign when the judge is a frontier (claude-*) model AND verdict is 'ship'.
+      // Only sign when the judge is frontier and explicitly says it would merge.
+      // A `ship` verdict with wouldMerge=false is useful feedback, but it is
+      // not merge-authority evidence.
       let judgeAttestation: string | undefined;
       // M300: accept codex/gpt-5.5 frontier models in addition to claude-* (mirrors isFrontierJudge in merge.ts)
       const isFrontierJudgeModel =
         judgeEngine.startsWith('claude') || judgeEngine.includes('claude') ||
         judgeEngine.startsWith('gpt-5') || judgeEngine.startsWith('codex-') || judgeEngine === 'codex';
-      if (verdict.verdict === 'ship' && isFrontierJudgeModel) {
+      if (verdict.verdict === 'ship' && verdict.wouldMerge === true && isFrontierJudgeModel) {
         try {
           const diffHash = hashDiff(proposal.diff ?? '');
           judgeAttestation = signJudgeAttestation({
