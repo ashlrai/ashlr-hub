@@ -166,7 +166,31 @@ describe('M171 foldBrowserVerify — clean pass → PASS suffix with evidence', 
   it('includes screenshotPath in evidence when present', () => {
     const bv = makePass({ screenshotPath: '/tmp/shot.png', detail: 'renders clean' });
     const result = foldBrowserVerify('task output', bv);
-    expect(result!).toContain('screenshot: /tmp/shot.png');
+    expect(result!).toContain('screenshot: captured');
+    expect(result!).not.toContain('/tmp/shot.png');
+  });
+
+  it('includes compact visual grounding metadata when present', () => {
+    const bv: BrowserVerifyResult = {
+      ...makePass({ screenshotPath: '/tmp/shot.png', detail: 'renders clean' }),
+      visualGrounding: {
+        status: 'ok',
+        provider: 'generic-openai-vision',
+        boxCount: 1,
+        boxes: [{ x1: 10, y1: 20, x2: 300, y2: 400, scale: 'normalized-1000' }],
+        detail: 'visual grounding found 1 box',
+        image: {
+          bytes: 8,
+          sha256: 'a'.repeat(64),
+        },
+      },
+    };
+    const result = foldBrowserVerify('task output', bv);
+    expect(result!).toContain('visual grounding: ok');
+    expect(result!).toContain('provider: generic-openai-vision');
+    expect(result!).toContain('boxes: 1');
+    expect(result!).toContain(`image sha256: ${'a'.repeat(64)}`);
+    expect(result!).not.toContain('/tmp/shot.png');
   });
 
   it('omits screenshot token when screenshotPath is absent', () => {

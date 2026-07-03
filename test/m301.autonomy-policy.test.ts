@@ -156,6 +156,57 @@ describe('M301 evaluateAutonomyPolicy', () => {
 });
 
 describe('M301 autonomy evidence pack persistence', () => {
+  it('persists sanitized browser visual evidence without raw provider fields', () => {
+    const pack = goodPack({
+      verification: {
+        passed: true,
+        detail: 'all verify commands passed; browser verify passed',
+        commandKinds: ['test'],
+        browser: {
+          ok: true,
+          renderOk: true,
+          consoleErrorCount: 0,
+          screenshotCaptured: true,
+          detail: 'renders clean, 0 console errors',
+          visualGrounding: {
+            status: 'ok',
+            provider: 'generic-openai-vision',
+            boxCount: 1,
+            boxes: [
+              {
+                x1: 10,
+                y1: 20,
+                x2: 300,
+                y2: 400,
+                scale: 'normalized-1000',
+                label: 'deploy',
+                sourceText: 'raw provider source',
+              } as never,
+            ],
+            image: {
+              bytes: 8,
+              sha256: 'c'.repeat(64),
+              path: '/tmp/browser-verify/shot.png',
+            } as never,
+            detail: 'visual grounding found 1 box',
+            rawText: 'raw provider text data:image/png;base64,AAAA',
+          } as never,
+        },
+      },
+    });
+
+    const raw = JSON.stringify(pack);
+    expect(pack.verification.browser?.visualGrounding).toEqual(expect.objectContaining({
+      status: 'ok',
+      boxCount: 1,
+      image: { bytes: 8, sha256: 'c'.repeat(64) },
+    }));
+    expect(raw).not.toContain('/tmp/browser-verify');
+    expect(raw).not.toContain('raw provider');
+    expect(raw).not.toContain('base64');
+    expect(raw).not.toContain('sourceText');
+  });
+
   it('persists metadata without storing the raw diff', () => {
     const pack = goodPack();
     pack.policy = evaluateAutonomyPolicy(pack, cfg());

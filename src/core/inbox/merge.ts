@@ -101,7 +101,14 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
-import type { AshlrConfig, DecisionEntry, EngineTier, Proposal, ProposalVerifyResult } from '../types.js';
+import type {
+  AshlrConfig,
+  DecisionEntry,
+  EngineTier,
+  Proposal,
+  ProposalBrowserVerifyEvidence,
+  ProposalVerifyResult,
+} from '../types.js';
 import { loadProposal, setStatus, updateProposalField } from './store.js';
 import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
@@ -118,6 +125,11 @@ import {
   runVerifyCommandAsync,
   type VerifyCommand,
 } from '../run/verify-commands.js';
+import {
+  isWebApp,
+  verifyInBrowser,
+  type BrowserVerifyResult,
+} from '../run/browser-verify.js';
 import { parseFailedTestIds } from '../run/completeness-gate.js';
 import {
   buildAutonomyEvidencePack,
@@ -1202,6 +1214,7 @@ export interface VerifyProposalResult {
   ok: boolean;
   ran: VerifyCommand[];
   detail: string;
+  browser?: ProposalBrowserVerifyEvidence;
   /** Default branch name whose head was used to create the verify worktree. */
   baseBranch?: string;
   /** Exact commit checked out before applying the proposal diff in verification. */
@@ -1218,6 +1231,7 @@ export function verifyResultFromProposalResult(
     ...(result.ok ? {} : { failed: [result.detail] }),
     detail: result.detail,
     ran: [...result.ran],
+    ...(result.browser ? { browser: result.browser } : {}),
     ...(result.baseBranch ? { baseBranch: result.baseBranch } : {}),
     ...(result.baseHead ? { baseHead: result.baseHead } : {}),
     verifiedAt,
@@ -1242,9 +1256,37 @@ function verifyResultFromStored(result: ProposalVerifyResult): VerifyProposalRes
     ok: result.passed,
     ran: result.ran ?? [],
     detail: result.detail ?? (result.passed ? 'pre-verified' : 'stored verification failed'),
+    ...(result.browser ? { browser: result.browser } : {}),
     ...(result.baseBranch ? { baseBranch: result.baseBranch } : {}),
     ...(result.baseHead ? { baseHead: result.baseHead } : {}),
   };
+}
+
+function truncateEvidenceText(text: string, limit = 500): string {
+  const scrubbed = scrubSecrets(text);
+  return scrubbed.length <= limit ? scrubbed : `${scrubbed.slice(0, limit - 16)}...[truncated]`;
+}
+
+function browserEvidenceFromResult(result: BrowserVerifyResult): ProposalBrowserVerifyEvidence {
+  return {
+    ok: result.ok,
+    renderOk: result.renderOk,
+    consoleErrorCount: result.consoleErrors.length,
+    screenshotCaptured: result.screenshotPath !== undefined,
+    detail: truncateEvidenceText(result.detail),
+    ...(result.visualGrounding ? { visualGrounding: result.visualGrounding } : {}),
+  };
+}
+
+async function verifyProposalInBrowser(
+  worktreeDir: string,
+  cfg: AshlrConfig,
+): Promise<ProposalBrowserVerifyEvidence | null> {
+  if ((cfg.foundry as { browserVerify?: boolean } | undefined)?.browserVerify !== true) return null;
+  if (!isWebApp(worktreeDir)) return null;
+  const result = await verifyInBrowser(worktreeDir, cfg);
+  if (result.skipped) return null;
+  return browserEvidenceFromResult(result);
 }
 
 /**
@@ -1460,10 +1502,23 @@ export async function verifyProposal(
       }
     }
 
+    const browser = await verifyProposalInBrowser(tmpDir, cfg);
+    if (browser && !browser.ok) {
+      return {
+        ok: false,
+        ran,
+        detail: `browser verify failed: ${browser.detail}`,
+        browser,
+        baseBranch: base,
+        baseHead,
+      };
+    }
+
     return {
       ok: true,
       ran,
-      detail: `all ${ran.length} verify command(s) passed: ${ran.map((c) => c.kind).join(', ')}`,
+      detail: `all ${ran.length} verify command(s) passed: ${ran.map((c) => c.kind).join(', ')}${browser ? '; browser verify passed' : ''}`,
+      ...(browser ? { browser } : {}),
       baseBranch: base,
       baseHead,
     };
@@ -2240,6 +2295,7 @@ export async function autoMergeProposal(
         passed: verify.ok,
         detail: verify.detail,
         commandKinds: verify.ran.map((cmd) => cmd.kind),
+        ...(verify.browser ? { browser: verify.browser } : {}),
       },
       risk: { ok: true, detail: `risk '${risk}' within maxRisk '${maxRisk}'` },
       scope: {

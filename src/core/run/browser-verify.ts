@@ -25,7 +25,13 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import type { AshlrConfig } from '../types.js';
+import type { AshlrConfig, VisualGroundingEvidence } from '../types.js';
+import {
+  locateVisualTargets,
+  visualGroundingEvidenceFromResult,
+  type VisualGroundingResult,
+} from '../visual/grounding.js';
+import { scrubSecrets } from '../util/scrub.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -71,6 +77,8 @@ export interface BrowserVerifyResult {
   consoleErrors: string[];
   /** Absolute path to the screenshot file, if captured. */
   screenshotPath?: string;
+  /** Optional screenshot grounding evidence. Metadata only; raw image data is never returned. */
+  visualGrounding?: VisualGroundingEvidence;
   /** Short narrative for the judge ("renders clean, 0 console errors"). */
   detail: string;
 }
@@ -469,6 +477,11 @@ export interface BrowserVerifyOptions {
    * Both the server-start and the browser-capture calls receive this override.
    */
   _spawnFn?: typeof spawn;
+  /**
+   * Injected for testing — replace visual grounding so no provider/network call
+   * is made. Production uses locateVisualTargets.
+   */
+  _locateVisualTargetsFn?: typeof locateVisualTargets;
 }
 
 /**
@@ -557,6 +570,9 @@ export async function verifyInBrowser(
     // 3. Assemble result
     const ok = capture.renderOk && capture.consoleErrors.length === 0;
     const errCount = capture.consoleErrors.length;
+    const visualGrounding = capture.captured
+      ? await maybeGroundBrowserScreenshot(shotPath, cfg, opts)
+      : undefined;
     const detail = capture.renderOk
       ? `renders clean, ${errCount === 0 ? '0' : String(errCount)} console error${errCount === 1 ? '' : 's'}`
       : `blank/error page${errCount > 0 ? `; console error: ${capture.consoleErrors[0] ?? ''}` : ''}`;
@@ -566,10 +582,11 @@ export async function verifyInBrowser(
       renderOk: capture.renderOk,
       consoleErrors: capture.consoleErrors,
       screenshotPath: capture.captured ? shotPath : undefined,
+      ...(visualGrounding ? { visualGrounding } : {}),
       detail,
     };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = scrubSecrets(err instanceof Error ? err.message : String(err));
     return {
       ok: false,
       renderOk: false,
@@ -581,5 +598,40 @@ export async function verifyInBrowser(
     if (serverHandle) {
       try { serverHandle.kill(); } catch { /* ignore */ }
     }
+  }
+}
+
+function visualGroundingQuery(cfg: AshlrConfig): string | null {
+  const query = cfg.foundry?.visualGrounding?.query;
+  return typeof query === 'string' && query.trim() ? query.trim() : null;
+}
+
+async function maybeGroundBrowserScreenshot(
+  imagePath: string,
+  cfg: AshlrConfig,
+  opts?: BrowserVerifyOptions,
+): Promise<VisualGroundingEvidence | undefined> {
+  const query = visualGroundingQuery(cfg);
+  if (!query) return undefined;
+  const locate = opts?._locateVisualTargetsFn ?? locateVisualTargets;
+  try {
+    const result = await locate(
+      { imagePath, query, purpose: 'browser-verify' },
+      cfg,
+    );
+    return visualGroundingEvidenceFromResult(result);
+  } catch (err) {
+    const msg = scrubSecrets(err instanceof Error ? err.message : String(err));
+    const provider = cfg.foundry?.visualGrounding?.provider === 'generic-openai-vision'
+      ? 'generic-openai-vision'
+      : 'locateanything-http';
+    const result: VisualGroundingResult = {
+      ok: false,
+      provider,
+      boxes: [],
+      detail: `visual grounding failed: ${msg}`,
+      reason: msg,
+    };
+    return visualGroundingEvidenceFromResult(result);
   }
 }

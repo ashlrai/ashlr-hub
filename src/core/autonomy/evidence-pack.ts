@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFile
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import type { EngineTier, Proposal } from '../types.js';
+import type { EngineTier, Proposal, ProposalBrowserVerifyEvidence, VisualGroundingEvidence } from '../types.js';
 
 export type AutonomyTarget = 'proposal' | 'branch' | 'main' | 'preview' | 'production';
 
@@ -28,6 +28,7 @@ export interface AutonomyVerificationEvidence {
   passed: boolean;
   detail: string;
   commandKinds: string[];
+  browser?: ProposalBrowserVerifyEvidence;
 }
 
 export interface AutonomyEvidencePack {
@@ -155,7 +156,53 @@ export function buildAutonomyEvidencePack(input: BuildAutonomyEvidenceInput): Au
       ...(input.selfTarget ? { selfTarget: input.selfTarget } : {}),
       ...(input.edv ? { edv: input.edv } : {}),
     },
-    verification: input.verification,
+    verification: copyVerificationEvidence(input.verification),
+  };
+}
+
+function copyVisualEvidence(input: VisualGroundingEvidence): VisualGroundingEvidence {
+  return {
+    status: input.status,
+    provider: input.provider,
+    boxCount: input.boxCount,
+    boxes: input.boxes.map((box) => ({
+      x1: box.x1,
+      y1: box.y1,
+      x2: box.x2,
+      y2: box.y2,
+      scale: box.scale,
+      ...(box.label ? { label: box.label } : {}),
+      ...(typeof box.confidence === 'number' ? { confidence: box.confidence } : {}),
+    })),
+    ...(input.image
+      ? {
+          image: {
+            bytes: input.image.bytes,
+            sha256: input.image.sha256,
+          },
+        }
+      : {}),
+    detail: input.detail,
+  };
+}
+
+function copyBrowserEvidence(input: ProposalBrowserVerifyEvidence): ProposalBrowserVerifyEvidence {
+  return {
+    ok: input.ok,
+    renderOk: input.renderOk,
+    consoleErrorCount: input.consoleErrorCount,
+    screenshotCaptured: input.screenshotCaptured,
+    detail: input.detail,
+    ...(input.visualGrounding ? { visualGrounding: copyVisualEvidence(input.visualGrounding) } : {}),
+  };
+}
+
+function copyVerificationEvidence(input: AutonomyVerificationEvidence): AutonomyVerificationEvidence {
+  return {
+    passed: input.passed,
+    detail: input.detail,
+    commandKinds: [...input.commandKinds],
+    ...(input.browser ? { browser: copyBrowserEvidence(input.browser) } : {}),
   };
 }
 

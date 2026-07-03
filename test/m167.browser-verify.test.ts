@@ -412,6 +412,100 @@ describe('verifyInBrowser — mocked browser', () => {
     expect(result.detail).toMatch(/renders clean/);
   });
 
+  it('does not call visual grounding unless a screenshot query is configured', async () => {
+    const repo = mkTmp('m167-visual-noquery-');
+    writePackageJson(repo, {
+      scripts: { dev: 'vite' },
+      devDependencies: { vite: '5.0.0' },
+    });
+    installFakePlaywright(repo);
+
+    const { spawnFn } = makeComboSpawn('http://localhost:5173', {
+      renderOk: true,
+      consoleErrors: [],
+      captured: true,
+    });
+    const locate = vi.fn(async () => ({
+      ok: true,
+      provider: 'generic-openai-vision' as const,
+      boxes: [],
+      detail: 'unused',
+    }));
+
+    const cfg = makeCfg({
+      foundry: {
+        browserVerify: true,
+        visualGrounding: {
+          enabled: true,
+          provider: 'generic-openai-vision',
+          endpoint: 'http://127.0.0.1:8000',
+        },
+      },
+    });
+    const result = await verifyInBrowser(repo, cfg, {
+      _spawnFn: spawnFn,
+      _locateVisualTargetsFn: locate,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.visualGrounding).toBeUndefined();
+    expect(locate).not.toHaveBeenCalled();
+  });
+
+  it('attaches visual grounding evidence when a captured screenshot query is configured', async () => {
+    const repo = mkTmp('m167-visual-query-');
+    writePackageJson(repo, {
+      scripts: { dev: 'vite' },
+      devDependencies: { vite: '5.0.0' },
+    });
+    installFakePlaywright(repo);
+
+    const { spawnFn } = makeComboSpawn('http://localhost:5173', {
+      renderOk: true,
+      consoleErrors: [],
+      captured: true,
+    });
+    const locate = vi.fn(async (request) => ({
+      ok: true,
+      provider: 'generic-openai-vision' as const,
+      boxes: [{ x1: 10, y1: 20, x2: 200, y2: 300, scale: 'normalized-1000' as const }],
+      detail: 'visual grounding found 1 box',
+      image: {
+        path: request.imagePath,
+        bytes: 8,
+        sha256: 'a'.repeat(64),
+      },
+    }));
+
+    const cfg = makeCfg({
+      foundry: {
+        browserVerify: true,
+        visualGrounding: {
+          enabled: true,
+          provider: 'generic-openai-vision',
+          endpoint: 'http://127.0.0.1:8000',
+          query: 'Find the primary action',
+        },
+      },
+    });
+    const result = await verifyInBrowser(repo, cfg, {
+      _spawnFn: spawnFn,
+      _locateVisualTargetsFn: locate,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.visualGrounding?.status).toBe('ok');
+    expect(result.visualGrounding?.boxCount).toBe(1);
+    expect(result.visualGrounding?.boxes).toHaveLength(1);
+    expect(result.visualGrounding).not.toHaveProperty('rawText');
+    expect(locate).toHaveBeenCalledOnce();
+    expect(locate.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      imagePath: result.screenshotPath,
+      purpose: 'browser-verify',
+      query: 'Find the primary action',
+    }));
+  });
+
   it('returns ok:false + consoleErrors when the page has errors', async () => {
     const repo = mkTmp('m167-errors-');
     writePackageJson(repo, {

@@ -15,7 +15,7 @@
  * autoMergeProposal refusals + the local happy path.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -34,6 +34,14 @@ import { hashDiff, signJudgeAttestation, signProvenance } from '../src/core/foun
 import { recordDecision } from '../src/core/fleet/decisions-ledger.js';
 import { evidencePath } from '../src/core/autonomy/evidence-pack.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
+
+const mockIsWebApp = vi.hoisted(() => vi.fn<[string], boolean>(() => false));
+const mockVerifyInBrowser = vi.hoisted(() => vi.fn());
+
+vi.mock('../src/core/run/browser-verify.js', () => ({
+  isWebApp: mockIsWebApp,
+  verifyInBrowser: mockVerifyInBrowser,
+}));
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -111,6 +119,9 @@ beforeEach(() => {
   tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m47-repo-'));
   process.env.HOME = tmpHome;
   process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+  mockIsWebApp.mockReset();
+  mockIsWebApp.mockReturnValue(false);
+  mockVerifyInBrowser.mockReset();
   setKill(false);
 });
 
@@ -292,6 +303,72 @@ describe('M47 verifyProposal', () => {
     expect(res.ran.some((c) => c.kind === 'test')).toBe(true);
     expect(res.baseBranch).toBe('main');
     expect(res.baseHead).toBe(baseHead);
+  });
+
+  it('browserVerify=true attaches browser and visual evidence from the patched worktree', async () => {
+    initRepo(tmpRepo);
+    writePackageJson(tmpRepo, 'exit 0');
+    mockIsWebApp.mockReturnValue(true);
+    mockVerifyInBrowser.mockResolvedValue({
+      ok: true,
+      renderOk: true,
+      consoleErrors: [],
+      screenshotPath: '/tmp/shot.png',
+      detail: 'renders clean, 0 console errors',
+      visualGrounding: {
+        status: 'ok',
+        provider: 'generic-openai-vision',
+        boxCount: 1,
+        boxes: [{ x1: 10, y1: 20, x2: 300, y2: 400, scale: 'normalized-1000' }],
+        image: { bytes: 8, sha256: 'b'.repeat(64) },
+        detail: 'visual grounding found 1 box',
+      },
+    });
+
+    const p = makeProposal({ diff: addFileDiff('docs/browser.md', 'doc') });
+    const res = await verifyProposal(p, cfgWith({ browserVerify: true }));
+
+    expect(res.ok).toBe(true);
+    expect(res.detail).toMatch(/browser verify passed/);
+    expect(res.browser).toEqual(expect.objectContaining({
+      ok: true,
+      renderOk: true,
+      consoleErrorCount: 0,
+      screenshotCaptured: true,
+    }));
+    expect(res.browser?.visualGrounding).toEqual(expect.objectContaining({
+      status: 'ok',
+      boxCount: 1,
+      image: { bytes: 8, sha256: 'b'.repeat(64) },
+    }));
+    expect(mockVerifyInBrowser).toHaveBeenCalledOnce();
+    const worktree = mockVerifyInBrowser.mock.calls[0]?.[0];
+    expect(worktree).toContain(path.join('.ashlr', 'tmp', 'vwt-'));
+    expect(worktree).not.toBe(tmpRepo);
+  });
+
+  it('browserVerify=true fails closed on a non-skipped browser render failure', async () => {
+    initRepo(tmpRepo);
+    writePackageJson(tmpRepo, 'exit 0');
+    mockIsWebApp.mockReturnValue(true);
+    mockVerifyInBrowser.mockResolvedValue({
+      ok: false,
+      renderOk: false,
+      consoleErrors: [],
+      detail: 'blank/error page',
+    });
+
+    const p = makeProposal({ diff: addFileDiff('docs/browser-fail.md', 'doc') });
+    const res = await verifyProposal(p, cfgWith({ browserVerify: true }));
+
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/browser verify failed: blank\/error page/);
+    expect(res.browser).toEqual(expect.objectContaining({
+      ok: false,
+      renderOk: false,
+      consoleErrorCount: 0,
+      screenshotCaptured: false,
+    }));
   });
 
   it('pre-existing failing test script (baseline fails) → ok:true (M281 delta-aware: no new failure introduced)', async () => {

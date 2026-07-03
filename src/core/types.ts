@@ -18,6 +18,35 @@ export interface TidyRule {
   description?: string;
 }
 
+export interface VisualGroundingEvidence {
+  status: 'ok' | 'blocked' | 'skipped' | 'no-boxes' | 'failed';
+  provider: 'locateanything-http' | 'generic-openai-vision' | 'disabled';
+  boxCount: number;
+  boxes: Array<{
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    scale: 'normalized-1000';
+    label?: string;
+    confidence?: number;
+  }>;
+  image?: {
+    bytes: number;
+    sha256: string;
+  };
+  detail: string;
+}
+
+export interface ProposalBrowserVerifyEvidence {
+  ok: boolean;
+  renderOk: boolean;
+  consoleErrorCount: number;
+  screenshotCaptured: boolean;
+  detail: string;
+  visualGrounding?: VisualGroundingEvidence;
+}
+
 /** Persisted configuration for the hub. Lives at ~/.ashlr/config.json. */
 export interface AshlrConfig {
   /** Schema/config version for forward migration. */
@@ -307,6 +336,11 @@ export interface AshlrConfig {
       endpoint?: string;
       /** Model id sent to the provider. Default depends on provider. */
       model?: string;
+      /**
+       * Optional default query used by browser verification screenshot grounding.
+       * When omitted, browser verification never calls a visual grounding model.
+       */
+      query?: string;
       /** Env var NAME containing a bearer token for the provider. */
       apiKeyEnv?: string;
       /** Hard timeout for one grounding call. Default 30000ms. */
@@ -2785,6 +2819,7 @@ export interface ProposalVerifyResult {
   failed?: string[];
   detail?: string;
   ran?: Array<{ kind: 'typecheck' | 'test' | 'lint'; cmd: string[] }>;
+  browser?: ProposalBrowserVerifyEvidence;
   baseBranch?: string;
   baseHead?: string;
   verifiedAt?: string;

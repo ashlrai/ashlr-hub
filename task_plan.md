@@ -304,3 +304,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Final full CI passed after audit fix: `npm run test:ci` covered 412 files, 8583 passed tests, and 7 skipped.
 - [x] Final package gates passed: build, lint (117 existing warnings, 0 errors), audit (0 vulnerabilities), and diff check.
 - [ ] Commit, push, reinstall/restart daemon, and verify live status.
+
+## Current Continuation - Visual Evidence Into Auto-Merge Verification
+- [x] Rechecked git, Entire, task plan, notes, daemon status, and fleet status.
+- [x] Deployed explorer agents for visual grounding evidence wiring and operator visibility.
+- [x] Added explicit `foundry.visualGrounding.query` gating so browser verification never calls a visual model unless an operator configured a screenshot query.
+- [x] Added sanitized `VisualGroundingEvidence` and `ProposalBrowserVerifyEvidence` contracts.
+- [x] Made browser verification attach visual evidence metadata only: provider, status, boxes, bytes, hash, and scrubbed detail; no raw provider text, sourceText, base64, or screenshot paths.
+- [x] Wired `verifyProposal()` to run opt-in browser verification against the patched isolated verify worktree, fail closed on non-skipped render/console failures, and persist compact browser/visual evidence into proposal verification and autonomy evidence packs.
+- [x] Updated browser/orchestrator/merge/autonomy tests for sanitized evidence and worktree browser verification.
+- [x] Run final full gates.
+- [ ] Commit, push to `origin/master`, and verify live daemon/fleet status.
+- [ ] Next slice: expose daemon proposal-production diagnosis in Fleet/Mission Control so `proposal-starved` explains selected, dispatched, no-proposal, and error causes.

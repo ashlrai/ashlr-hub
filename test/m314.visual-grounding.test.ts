@@ -7,6 +7,7 @@ import {
   locateVisualTargets,
   parseLocateAnythingBoxes,
   resolveVisualGroundingConfig,
+  visualGroundingEvidenceFromResult,
   type VisualGroundingResult,
 } from '../src/core/visual/grounding.js';
 import type { AshlrConfig } from '../src/core/types.js';
@@ -145,5 +146,42 @@ describe('visual grounding config gates', () => {
     ]);
     expect(result.image?.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(result.rawText).not.toContain('base64,');
+  });
+
+  it('sanitizes provider results before they become durable evidence', () => {
+    const evidence = visualGroundingEvidenceFromResult({
+      ok: true,
+      provider: 'generic-openai-vision',
+      boxes: [
+        {
+          x1: 10,
+          y1: 20,
+          x2: 300,
+          y2: 400,
+          scale: 'normalized-1000',
+          label: 'deploy',
+          confidence: 0.8,
+          sourceText: '<raw>provider internals</raw>',
+        },
+      ],
+      detail: 'visual grounding found 1 box',
+      image: {
+        path: '/tmp/browser-verify/shot.png',
+        bytes: 8,
+        sha256: 'a'.repeat(64),
+      },
+      rawText: 'raw provider text data:image/png;base64,AAAA',
+    });
+
+    expect(evidence).toEqual(expect.objectContaining({
+      status: 'ok',
+      provider: 'generic-openai-vision',
+      boxCount: 1,
+      image: { bytes: 8, sha256: 'a'.repeat(64) },
+    }));
+    expect(evidence.boxes[0]).not.toHaveProperty('sourceText');
+    expect(JSON.stringify(evidence)).not.toContain('/tmp/browser-verify');
+    expect(JSON.stringify(evidence)).not.toContain('raw provider text');
+    expect(JSON.stringify(evidence)).not.toContain('base64');
   });
 });

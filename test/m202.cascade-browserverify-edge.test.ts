@@ -761,7 +761,7 @@ describe('M202/B5 — foldBrowserVerify: ok:false + skipped:true is still neutra
 // ---------------------------------------------------------------------------
 
 describe('M202/B6 — foldBrowserVerify clean pass: evidence appended correctly', () => {
-  it('pass with screenshot: output contains "screenshot:" token', () => {
+  it('pass with screenshot: output contains captured screenshot token without the path', () => {
     const bv: BrowserVerifyResult = {
       ok: true,
       renderOk: true,
@@ -772,7 +772,8 @@ describe('M202/B6 — foldBrowserVerify clean pass: evidence appended correctly'
     const result = foldBrowserVerify('existing task output', bv);
     expect(result).not.toBeNull();
     expect(result!).toContain('[browser-verify: PASS');
-    expect(result!).toContain('screenshot: /tmp/browser-verify/shot.png');
+    expect(result!).toContain('screenshot: captured');
+    expect(result!).not.toContain('/tmp/browser-verify/shot.png');
     expect(result!).toContain('console errors: 0');
     expect(result!).toContain('existing task output');
   });

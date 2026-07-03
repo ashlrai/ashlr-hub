@@ -871,10 +871,25 @@ export function foldBrowserVerify(
   // Clean pass.
   const evidence = [
     bv.detail,
-    bv.screenshotPath ? `screenshot: ${bv.screenshotPath}` : '',
+    bv.screenshotPath ? 'screenshot: captured' : '',
+    browserVisualGroundingEvidence(bv.visualGrounding),
     `console errors: ${bv.consoleErrors.length}`,
   ].filter(Boolean).join(' | ');
   return `${existing ?? ''}\n[browser-verify: PASS — ${evidence}]`.trimStart();
+}
+
+function browserVisualGroundingEvidence(
+  vg: import('../types.js').VisualGroundingEvidence | undefined,
+): string {
+  if (!vg) return '';
+  const parts = [
+    `visual grounding: ${vg.status}`,
+    `provider: ${vg.provider}`,
+    `boxes: ${vg.boxCount}`,
+    vg.image?.sha256 ? `image sha256: ${vg.image.sha256}` : '',
+    vg.detail ? `detail: ${vg.detail}` : '',
+  ];
+  return parts.filter(Boolean).join(', ');
 }
 
 /** Maximum output characters fed back to the engine as failure context. */

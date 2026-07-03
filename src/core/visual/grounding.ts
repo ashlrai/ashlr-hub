@@ -10,8 +10,9 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { extname } from 'node:path';
 
-import type { AshlrConfig } from '../types.js';
+import type { AshlrConfig, VisualGroundingEvidence } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
+export type { VisualGroundingEvidence } from '../types.js';
 
 export type VisualGroundingProviderId = 'locateanything-http' | 'generic-openai-vision';
 
@@ -118,6 +119,41 @@ export function resolveVisualGroundingConfig(cfg: Pick<AshlrConfig, 'foundry'>):
     licenseAccepted,
     allowRemoteEndpoint,
     ...(blockedReason ? { blockedReason } : {}),
+  };
+}
+
+export function visualGroundingEvidenceFromResult(result: VisualGroundingResult): VisualGroundingEvidence {
+  const status: VisualGroundingEvidence['status'] = result.ok
+    ? 'ok'
+    : result.blocked
+      ? 'blocked'
+      : result.skipped
+        ? 'skipped'
+        : result.boxes.length === 0 && /no parseable boxes/i.test(result.detail)
+          ? 'no-boxes'
+          : 'failed';
+  return {
+    status,
+    provider: result.provider,
+    boxCount: result.boxes.length,
+    boxes: result.boxes.slice(0, MAX_BOXES).map((box) => ({
+      x1: box.x1,
+      y1: box.y1,
+      x2: box.x2,
+      y2: box.y2,
+      scale: box.scale,
+      ...(box.label ? { label: shorten(box.label, 120) } : {}),
+      ...(typeof box.confidence === 'number' ? { confidence: box.confidence } : {}),
+    })),
+    ...(result.image
+      ? {
+          image: {
+            bytes: result.image.bytes,
+            sha256: result.image.sha256,
+          },
+        }
+      : {}),
+    detail: shorten(result.reason ?? result.detail, 500),
   };
 }
 
