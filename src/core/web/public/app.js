@@ -2254,6 +2254,78 @@ function renderStrategicFocusCard(queue, cls = 'ctrl-card card') {
   return card;
 }
 
+function formatEffectivenessPhase(phase) {
+  const labels = {
+    'control-blocked': 'Control Blocked',
+    'host-handoff': 'Host Handoff',
+    'merge-ready': 'Merge Ready',
+    'verification-needed': 'Verification Needed',
+    'merge-blocked': 'Merge Blocked',
+    'proposal-starved': 'Proposal Starved',
+    idle: 'Idle',
+  };
+  return labels[phase] ?? String(phase ?? 'Unknown');
+}
+
+function effectivenessAccent(phase) {
+  const colors = {
+    'control-blocked': '#f87171',
+    'merge-blocked': '#f97316',
+    'verification-needed': '#fbbf24',
+    'proposal-starved': '#a78bfa',
+    'host-handoff': '#38bdf8',
+    'merge-ready': '#4ade80',
+    idle: '#94a3b8',
+  };
+  return colors[phase] ?? '#94a3b8';
+}
+
+function renderAutonomyEffectivenessCard(effectiveness, cls = 'ctrl-card card') {
+  if (!effectiveness) return null;
+  const counts = effectiveness.counts ?? {};
+  const card = el('div', { cls });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Autonomy Effectiveness'),
+    el('span', { cls: 'card-subtitle' }, formatEffectivenessPhase(effectiveness.phase))
+  ));
+  const body = el('div', { cls: 'card-body' });
+  body.appendChild(infoGrid([
+    ['Phase', formatEffectivenessPhase(effectiveness.phase)],
+    ['Bottleneck', effectiveness.bottleneck ?? 'unknown'],
+    ['Merge now', effectiveness.canAutoMergeNow ? 'yes' : 'no'],
+    ['Backlog', counts.backlogItems ?? 0],
+    ['Pending', counts.pendingProposals ?? 0],
+    ['Ready', counts.preflightReady ?? 0],
+    ['Verify', counts.needsVerification ?? 0],
+    ['Blocked', counts.blocked ?? 0],
+    ['Host PRs', counts.awaitingHostMerge ?? 0],
+    ['Merges 24h', counts.recentMerges ?? 0],
+  ]));
+  if (effectiveness.summary) {
+    body.appendChild(el('p', { cls: 'hint' }, effectiveness.summary));
+  }
+  card.appendChild(body);
+  return card;
+}
+
+function renderFleetNextActionsCard(nextActions, cls = 'ctrl-card card') {
+  const actions = Array.isArray(nextActions) ? nextActions : [];
+  if (actions.length === 0) return null;
+  const card = el('div', { cls });
+  card.appendChild(el('h2', { cls: 'card-title' }, 'Next Actions'));
+  const list = el('div', { cls: 'fleet-backends' });
+  for (const action of actions.slice(0, 6)) {
+    const title = [action.detail, action.target ? `Target: ${action.target}` : ''].filter(Boolean).join(' | ');
+    list.appendChild(el('div', { cls: 'fleet-backend-row', title },
+      el('span', { cls: 'fleet-backend-name' }, action.label ?? action.id ?? 'Action'),
+      el('span', { cls: 'fleet-backend-dispatches' }, compactFleetReason(action.detail ?? '')),
+      el('span', { cls: 'fleet-quota' }, action.priority ?? 'low')
+    ));
+  }
+  card.appendChild(list);
+  return card;
+}
+
 function formatDirectionMode(mode) {
   const labels = {
     pause: 'Pause',
@@ -2368,25 +2440,14 @@ function renderFleet() {
   summary.appendChild(infoGrid(summaryRows));
   section.appendChild(summary);
 
+  const effectivenessCard = renderAutonomyEffectivenessCard(f.autonomyEffectiveness, 'fleet-card card');
+  if (effectivenessCard) section.appendChild(effectivenessCard);
+
   const strategicFocusCard = renderStrategicFocusCard(f.queue, 'fleet-card card');
   if (strategicFocusCard) section.appendChild(strategicFocusCard);
 
-  const nextActions = Array.isArray(f.nextActions) ? f.nextActions : [];
-  if (nextActions.length > 0) {
-    const actionsCard = el('div', { cls: 'fleet-card card' });
-    actionsCard.appendChild(el('h2', { cls: 'card-title' }, 'Next Actions'));
-    const list = el('div', { cls: 'fleet-backends' });
-    for (const action of nextActions.slice(0, 6)) {
-      const title = [action.detail, action.target ? `Target: ${action.target}` : ''].filter(Boolean).join(' | ');
-      list.appendChild(el('div', { cls: 'fleet-backend-row', title },
-        el('span', { cls: 'fleet-backend-name' }, action.label ?? action.id ?? 'Action'),
-        el('span', { cls: 'fleet-backend-dispatches' }, compactFleetReason(action.detail ?? '')),
-        el('span', { cls: 'fleet-quota' }, action.priority ?? 'low')
-      ));
-    }
-    actionsCard.appendChild(list);
-    section.appendChild(actionsCard);
-  }
+  const actionsCard = renderFleetNextActionsCard(f.nextActions, 'fleet-card card');
+  if (actionsCard) section.appendChild(actionsCard);
 
   // Backends table
   const backendsCard = el('div', { cls: 'fleet-card card' });
@@ -2743,6 +2804,10 @@ function renderControl() {
   heroMetrics.appendChild(controlMetric('Proposals', props.pending ?? 0, '#a78bfa'));
   heroMetrics.appendChild(controlMetric('Merges (24h)', merges.recent ?? '—', '#4ade80'));
   heroMetrics.appendChild(controlMetric('Evidence', autonomy?.evidencePacks ?? 0, autonomy?.denied > 0 ? '#f87171' : '#38bdf8'));
+  const effectiveness = d.fleet?.autonomyEffectiveness ?? fleet.autonomyEffectiveness ?? null;
+  if (effectiveness) {
+    heroMetrics.appendChild(controlMetric('Loop State', formatEffectivenessPhase(effectiveness.phase), effectivenessAccent(effectiveness.phase)));
+  }
   heroMetrics.appendChild(controlMetric('Active Mode', formatDirectionMode(activeDirectionMode ?? direction?.mode ?? 'unknown'), directionAccent(activeDirectionMode ?? direction?.mode)));
   heroMetrics.appendChild(controlMetric('Control Mode', formatControlMode(daemon.autonomyControlMode), controlModeAccent(daemon.autonomyControlMode)));
   heroMetrics.appendChild(controlMetric('OS Service', serviceLabel, service.running ? '#4ade80' : service.installed ? '#fbbf24' : '#f87171'));
@@ -2806,6 +2871,12 @@ function renderControl() {
     directionCard.appendChild(directionBody);
     section.appendChild(directionCard);
   }
+
+  const missionEffectivenessCard = renderAutonomyEffectivenessCard(effectiveness);
+  if (missionEffectivenessCard) section.appendChild(missionEffectivenessCard);
+
+  const missionActionsCard = renderFleetNextActionsCard(d.fleet?.nextActions ?? fleet.nextActions ?? null);
+  if (missionActionsCard) section.appendChild(missionActionsCard);
 
   const strategicFocusCard = renderStrategicFocusCard(queue);
   if (strategicFocusCard) section.appendChild(strategicFocusCard);

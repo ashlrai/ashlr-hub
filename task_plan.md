@@ -269,3 +269,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Focused gates passed: typecheck, diff check, 190 affected tests, and 149 merge/automerge/fleet/resource tests.
 - [x] Run full lint/build/audit/full-CI gates.
 - [x] Commit, push to `origin/master`, resume/restart launchd daemon, and verify live autonomous status.
+
+## Current Continuation - Autonomy Effectiveness And Worker Queue Truth
+- [x] Rechecked git, recent commits, Entire state, notes/task plan, live daemon status, and live fleet status.
+- [x] Deployed parallel agents for auto-merge truth, daemon autonomy reliability, cross-repo backlog, and Mission Control visibility; deployed one worker agent on the safest cross-repo self-heal item.
+- [x] Confirmed current truth: Ashlr Hub is online, auto-merge is enabled, and guards are clear, but it is not effectively auto-merging because there are `0` pending/preflight-ready proposals and `0` recent merges.
+- [x] Added read-only `FleetStatus.autonomyEffectiveness` with explicit phases such as `proposal-starved`, `merge-ready`, `verification-needed`, `host-handoff`, and `control-blocked`.
+- [x] Surfaced autonomy effectiveness in `ashlr fleet status`, `/api/fleet`/control consumers, Fleet, and Mission Control, and promoted ranked next actions into Mission Control.
+- [x] Fixed `ashlr worker setup --queue` so shared workers persist `sharedQueue.mode:'filesystem'` instead of silently configuring a path that the coordinator treats as local-only.
+- [x] Focused verification passed: typecheck, web JS syntax check, `m49`, `m112`, `m111`, and `git diff --check`.
+- [x] Broad gates passed: lint, build, audit, invariants, and full `npm run test:ci`.
+- [ ] Commit, push to `origin/master`, and verify live daemon/fleet status with the new effectiveness field.

@@ -130,6 +130,25 @@ function createSignedProposal(
   );
 }
 
+function writeRunningDaemon(home: string): void {
+  const ashlrDir = join(home, '.ashlr');
+  mkdirSync(ashlrDir, { recursive: true });
+  writeFileSync(
+    join(ashlrDir, 'daemon.json'),
+    JSON.stringify({
+      running: true,
+      pid: process.pid,
+      startedAt: '2026-07-03T00:00:00.000Z',
+      lastTickAt: '2026-07-03T00:05:00.000Z',
+      todayDate: '2026-07-03',
+      todaySpentUsd: 0,
+      itemsProcessed: 1,
+      ticks: [],
+    }),
+    'utf8',
+  );
+}
+
 // ---------------------------------------------------------------------------
 // HOME isolation
 // ---------------------------------------------------------------------------
@@ -191,6 +210,16 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.proposals.frontierPending).toBe(0);
     expect(s.proposals.applied).toBe(0);
     expect(s.merges.recent).toBe(0);
+    expect(s.autonomyEffectiveness).toMatchObject({
+      phase: 'control-blocked',
+      canAutoMergeNow: false,
+      bottleneck: 'control',
+      counts: {
+        backlogItems: 0,
+        pendingProposals: 0,
+        preflightReady: 0,
+      },
+    });
     expect(s.autonomy).toMatchObject({
       evidencePacks: 0,
       latestAt: null,
@@ -292,7 +321,58 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         score: 2,
       },
     ]);
+    expect(s.autonomyEffectiveness).toMatchObject({
+      phase: 'control-blocked',
+      bottleneck: 'control',
+      counts: {
+        backlogItems: 2,
+        pendingProposals: 0,
+      },
+    });
     expect(existsSync(join(tmpHome, '.ashlr', 'audit'))).toBe(false);
+  });
+
+  it('summarizes proposal starvation when the daemon is running with backlog but no proposals', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome);
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: '2026-07-03T00:00:00.000Z',
+        repos: [repo],
+        items: [{
+          id: 'repo:self-heal:one',
+          repo,
+          source: 'self',
+          title: 'Fix broken test in repo',
+          detail: 'detail',
+          value: 5,
+          effort: 1,
+          score: 5,
+          tags: ['self-heal'],
+          ts: '2026-07-03T00:00:00.000Z',
+        }],
+      }),
+      'utf8',
+    );
+
+    const s = await buildFleetStatus(withFoundry({
+      autoMerge: { enabled: true, trustBasis: 'verification' },
+    }));
+
+    expect(s.autonomyEffectiveness).toMatchObject({
+      phase: 'proposal-starved',
+      canAutoMergeNow: false,
+      bottleneck: 'proposal-production',
+      counts: {
+        backlogItems: 1,
+        pendingProposals: 0,
+      },
+    });
+    expect(s.autonomyEffectiveness?.summary).toContain('no pending proposals');
   });
 
   it('includes queued self-heal work when the persisted backlog snapshot is stale', async () => {
@@ -529,11 +609,50 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       'Unsigned docs change',
       'Failed verify docs change',
     ]);
+    expect(s.autonomyEffectiveness).toMatchObject({
+      phase: 'control-blocked',
+      canAutoMergeNow: false,
+      bottleneck: 'control',
+      counts: {
+        pendingProposals: 4,
+        preflightReady: 1,
+        needsVerification: 1,
+        blocked: 2,
+      },
+    });
     const actionIds = s.nextActions?.map((a) => a.id) ?? [];
     expect(actionIds).toContain('start-daemon');
     expect(actionIds).not.toContain('drain-ready-auto-merges');
     expect(actionIds).not.toContain('verify-pending-proposals');
     expect(actionIds).not.toContain('repair-verification-failures');
+  });
+
+  it('marks running fleets with preflight-ready proposals as merge-ready', async () => {
+    writeRunningDaemon(tmpHome);
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'verification',
+        maxRisk: 'low',
+      },
+    });
+    createSignedProposal(cfg, {
+      title: 'Ready docs change',
+      diff: docsDiff('ready'),
+      verifyResult: { passed: true, source: 'manual' },
+    });
+
+    const s = await buildFleetStatus(cfg);
+
+    expect(s.autonomyEffectiveness).toMatchObject({
+      phase: 'merge-ready',
+      canAutoMergeNow: true,
+      bottleneck: 'merge-drain',
+      counts: {
+        pendingProposals: 1,
+        preflightReady: 1,
+      },
+    });
   });
 });
 
@@ -652,6 +771,23 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
           target: '/repo/a',
         },
       ],
+      autonomyEffectiveness: {
+        phase: 'merge-ready',
+        canAutoMergeNow: true,
+        bottleneck: 'merge-drain',
+        summary: '1 proposal is preflight-ready for the auto-merge drain.',
+        counts: {
+          backlogItems: 7,
+          pendingProposals: 3,
+          frontierPending: 1,
+          awaitingHostMerge: 0,
+          preflightReady: 1,
+          needsVerification: 1,
+          blocked: 2,
+          knownVerificationFailed: 1,
+          recentMerges: 2,
+        },
+      },
       autonomy: {
         evidencePacks: 3,
         latestAt: '2026-06-17T00:01:00.000Z',
@@ -714,6 +850,11 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('Next actions:');
     expect(out).toContain('[high] Drain ready auto-merges');
     expect(out).toContain('[medium] Build backlog proposals [a]: Start with Ship autonomy debugger');
+    expect(out).toContain('Autonomy effectiveness:');
+    expect(out).toContain('phase:      merge-ready');
+    expect(out).toContain('bottleneck: merge-drain');
+    expect(out).toContain('merge now:  yes');
+    expect(out).toContain('counts:     backlog 7, pending 3, ready 1, verify 1, blocked 2, host 0');
     expect(out).toContain('Autonomy evidence:');
     expect(out).toContain('packs:     3');
     expect(out).toContain('denied:    1');

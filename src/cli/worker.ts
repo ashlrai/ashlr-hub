@@ -40,6 +40,13 @@ function makeColors(enabled: boolean) {
 
 // ─── Worker setup ─────────────────────────────────────────────────────────────
 
+function sharedQueueLabel(sharedQueue: unknown, dim: (s: string) => string): string {
+  const sq = sharedQueue as { mode?: string; path?: string } | undefined;
+  if (!sq?.path) return dim('standalone (repo-partition)');
+  const mode = sq.mode === 'filesystem' ? 'filesystem' : 'legacy';
+  return dim(`${sq.path} (${mode})`);
+}
+
 async function cmdWorkerSetup(args: string[]): Promise<number> {
   const colors = makeColors(isTty());
   const { bold, green, cyan, yellow, dim } = colors;
@@ -89,11 +96,16 @@ async function cmdWorkerSetup(args: string[]): Promise<number> {
   if (queuePath) {
     const cfgAny = cfg as unknown as Record<string, unknown>;
     const fleet = (cfgAny.fleet as Record<string, unknown> | undefined) ?? {};
+    const existingSharedQueue = (fleet.sharedQueue as Record<string, unknown> | undefined) ?? {};
     const updated = {
       ...cfg,
       fleet: {
         ...fleet,
-        sharedQueue: { path: queuePath },
+        sharedQueue: {
+          ...existingSharedQueue,
+          mode: 'filesystem',
+          path: queuePath,
+        },
       },
     };
     saveConfig(updated as typeof cfg);
@@ -113,12 +125,11 @@ async function cmdWorkerSetup(args: string[]): Promise<number> {
   const workerName = cfg.user?.name ?? userName ?? 'unnamed';
   const enrolled   = listEnrolled();
   const fleet      = ((cfg as unknown as Record<string, unknown>).fleet) as Record<string, unknown> | undefined;
-  const sharedQ    = (fleet?.sharedQueue as { path?: string } | undefined)?.path;
 
   console.log('\n' + green('  this Mac is now worker') + ' ' + bold(cyan(workerName)) + '\n');
 
   console.log('  repos   : ' + (enrolled.length ? enrolled.map((r) => dim(r)).join(', ') : dim('(none enrolled)')));
-  console.log('  queue   : ' + (sharedQ ? dim(sharedQ) : dim('standalone (repo-partition)')));
+  console.log('  queue   : ' + sharedQueueLabel(fleet?.sharedQueue, dim));
   console.log('  keepAwake: ' + green('on') + dim('  (caffeinate -i -s — daemon ticks while plugged in)'));
   console.log('');
 
@@ -154,7 +165,6 @@ async function cmdWorkerStatus(_args: string[]): Promise<number> {
   const userId = cfg.user?.id   ?? dim('(not set)');
   const enrolled = listEnrolled();
   const fleet  = ((cfg as unknown as Record<string, unknown>).fleet) as Record<string, unknown> | undefined;
-  const sharedQ = (fleet?.sharedQueue as { path?: string } | undefined)?.path;
 
   const svc = serviceStatus();
 
@@ -167,7 +177,7 @@ async function cmdWorkerStatus(_args: string[]): Promise<number> {
   console.log('\n' + bold('ashlr worker status') + '\n');
   console.log('  identity   : ' + bold(cyan(String(name))) + '  ' + dim(String(userId)));
   console.log('  repos      : ' + (enrolled.length ? enrolled.map((r) => dim(r)).join(', ') : dim('(none)')));
-  console.log('  queue      : ' + (sharedQ ? dim(sharedQ) : dim('standalone (repo-partition)')));
+  console.log('  queue      : ' + sharedQueueLabel(fleet?.sharedQueue, dim));
   console.log('  daemon     : ' + runningLabel + dim('  [' + svc.platformSpec + ']'));
   if (svc.serviceFilePath) {
     console.log('  svc file   : ' + dim(svc.serviceFilePath));

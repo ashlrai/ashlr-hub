@@ -127,6 +127,40 @@ export interface FleetNextAction {
   target?: string;
 }
 
+export type FleetAutonomyEffectivenessPhase =
+  | 'control-blocked'
+  | 'host-handoff'
+  | 'merge-ready'
+  | 'verification-needed'
+  | 'merge-blocked'
+  | 'proposal-starved'
+  | 'idle';
+
+export interface FleetAutonomyEffectivenessStatus {
+  phase: FleetAutonomyEffectivenessPhase;
+  canAutoMergeNow: boolean;
+  bottleneck:
+    | 'control'
+    | 'host-handoff'
+    | 'merge-drain'
+    | 'verification'
+    | 'merge-gate'
+    | 'proposal-production'
+    | 'none';
+  summary: string;
+  counts: {
+    backlogItems: number;
+    pendingProposals: number;
+    frontierPending: number;
+    awaitingHostMerge: number;
+    preflightReady: number;
+    needsVerification: number;
+    blocked: number;
+    knownVerificationFailed: number;
+    recentMerges: number;
+  };
+}
+
 export interface FleetQueueNextItem {
   id: string;
   title: string;
@@ -186,6 +220,8 @@ export interface FleetStatus {
   guardHealth?: GuardHealthDiagnosis;
   /** Ranked read-only operator/agent actions derived from the snapshot. */
   nextActions?: FleetNextAction[];
+  /** Read-only explanation of whether the autonomous loop can merge right now. */
+  autonomyEffectiveness?: FleetAutonomyEffectivenessStatus;
   /** True when the global kill switch is engaged (fleet paused). */
   killed: boolean;
 }
@@ -513,9 +549,98 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     // strategy signal source is unavailable.
   }
 
+  status.autonomyEffectiveness = buildAutonomyEffectiveness(status);
   status.nextActions = buildNextActions(status);
 
   return status;
+}
+
+function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffectivenessStatus {
+  const readiness = status.autoMergeReadiness;
+  const counts: FleetAutonomyEffectivenessStatus['counts'] = {
+    backlogItems: status.queue.backlogItems,
+    pendingProposals: status.proposals.pending,
+    frontierPending: status.proposals.frontierPending,
+    awaitingHostMerge: status.proposals.awaitingHostMerge ?? 0,
+    preflightReady: readiness?.preflightReady ?? 0,
+    needsVerification: readiness?.needsVerification ?? 0,
+    blocked: readiness?.blocked ?? 0,
+    knownVerificationFailed: readiness?.knownVerificationFailed ?? 0,
+    recentMerges: status.merges.recent,
+  };
+  const firstGuardBlock = status.guardHealth?.blocks?.[0];
+  if (status.killed || !status.daemon.running || firstGuardBlock) {
+    const reason = status.killed
+      ? 'kill switch is engaged'
+      : !status.daemon.running
+        ? 'daemon is stopped'
+        : firstGuardBlock?.detail ?? 'guard is blocking';
+    return {
+      phase: 'control-blocked',
+      canAutoMergeNow: false,
+      bottleneck: 'control',
+      summary: `Autonomy is control-blocked: ${reason}.`,
+      counts,
+    };
+  }
+  if (counts.awaitingHostMerge > 0) {
+    return {
+      phase: 'host-handoff',
+      canAutoMergeNow: false,
+      bottleneck: 'host-handoff',
+      summary: `${counts.awaitingHostMerge} proposal(s) are waiting for host PR merge confirmation.`,
+      counts,
+    };
+  }
+  if (readiness?.enabled && counts.preflightReady > 0) {
+    return {
+      phase: 'merge-ready',
+      canAutoMergeNow: true,
+      bottleneck: 'merge-drain',
+      summary: `${counts.preflightReady} proposal(s) are preflight-ready for the auto-merge drain.`,
+      counts,
+    };
+  }
+  if (readiness?.enabled && counts.needsVerification > 0) {
+    return {
+      phase: 'verification-needed',
+      canAutoMergeNow: false,
+      bottleneck: 'verification',
+      summary: `${counts.needsVerification} proposal(s) need verification before judge or merge spend.`,
+      counts,
+    };
+  }
+  if (readiness?.enabled && counts.blocked > 0) {
+    const topReason = Object.entries(readiness.byReason)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
+    return {
+      phase: 'merge-blocked',
+      canAutoMergeNow: false,
+      bottleneck: 'merge-gate',
+      summary: topReason
+        ? `${counts.blocked} proposal(s) are blocked at the merge gate; top blocker: ${topReason}.`
+        : `${counts.blocked} proposal(s) are blocked at the merge gate.`,
+      counts,
+    };
+  }
+  if (counts.pendingProposals === 0 && counts.backlogItems > 0) {
+    return {
+      phase: 'proposal-starved',
+      canAutoMergeNow: false,
+      bottleneck: 'proposal-production',
+      summary: `${counts.backlogItems} backlog item(s) are available, but there are no pending proposals for auto-merge.`,
+      counts,
+    };
+  }
+  return {
+    phase: 'idle',
+    canAutoMergeNow: false,
+    bottleneck: 'none',
+    summary: counts.recentMerges > 0
+      ? `No pending merge work is visible; ${counts.recentMerges} auto-merge(s) landed in the last 24h.`
+      : 'No pending proposals or backlog work are visible.',
+    counts,
+  };
 }
 
 function buildNextActions(status: FleetStatus): FleetNextAction[] {

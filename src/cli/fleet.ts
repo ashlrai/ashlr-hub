@@ -144,6 +144,24 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  // Autonomy effectiveness
+  const effectiveness = s.autonomyEffectiveness;
+  lines.push('Autonomy effectiveness:');
+  if (!effectiveness) {
+    lines.push('  unavailable');
+  } else {
+    lines.push(`  phase:      ${effectiveness.phase}`);
+    lines.push(`  bottleneck: ${effectiveness.bottleneck}`);
+    lines.push(`  merge now:  ${effectiveness.canAutoMergeNow ? 'yes' : 'no'}`);
+    lines.push(`  summary:    ${effectiveness.summary}`);
+    lines.push(
+      `  counts:     backlog ${effectiveness.counts.backlogItems}, pending ${effectiveness.counts.pendingProposals}, ` +
+        `ready ${effectiveness.counts.preflightReady}, verify ${effectiveness.counts.needsVerification}, ` +
+        `blocked ${effectiveness.counts.blocked}, host ${effectiveness.counts.awaitingHostMerge}`,
+    );
+  }
+  lines.push('');
+
   // Guard health
   const guardHealth = s.guardHealth;
   lines.push('Guard health:');

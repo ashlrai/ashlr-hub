@@ -6,7 +6,7 @@
  *   2. generateServiceDefinition() with keepAwake: false → no caffeinate
  *   3. generateServiceDefinition() default (keepAwake omitted) → no caffeinate
  *   4. cmdWorker setup — calls setupWizard + enroll + install + prints worker summary
- *   5. cmdWorker setup --queue → sets cfg.fleet.sharedQueue.path + reported in output
+ *   5. cmdWorker setup --queue → sets cfg.fleet.sharedQueue filesystem mode/path + reported in output
  *   6. cmdWorker status → reports identity / repos / service state
  *   7. cmdWorker unknown subcommand → exits 1
  *
@@ -207,7 +207,7 @@ describe('M112 — cmdWorker setup', () => {
     expect(mockEnroll).toHaveBeenCalledWith('/repo/b');
   });
 
-  it('--queue sets cfg.fleet.sharedQueue.path', async () => {
+  it('--queue sets cfg.fleet.sharedQueue filesystem mode and path', async () => {
     const { cmdWorker } = await importWorker();
     captureConsole();
 
@@ -215,19 +215,27 @@ describe('M112 — cmdWorker setup', () => {
 
     // saveConfig must have been called — fakeConfig mutated in place
     const fleet = fakeConfig.fleet as Record<string, unknown> | undefined;
-    const sharedQ = fleet?.sharedQueue as { path?: string } | undefined;
+    const sharedQ = fleet?.sharedQueue as { mode?: string; path?: string } | undefined;
+    expect(sharedQ?.mode).toBe('filesystem');
     expect(sharedQ?.path).toBe('/shared/queue');
   });
 
   it('--queue path appears in status output when config carries it', async () => {
     // fakeConfig carries the sharedQueue so loadConfig() returns it in the summary print
-    fakeConfig = { roots: [], version: 1, user: { name: 'WorkerBot' }, fleet: { sharedQueue: { path: '/shared/queue' } } };
+    fakeConfig = {
+      roots: [],
+      version: 1,
+      user: { name: 'WorkerBot' },
+      fleet: { sharedQueue: { mode: 'filesystem', path: '/shared/queue' } },
+    };
     const { cmdWorker } = await importWorker();
     const { lines } = captureConsole();
 
     await cmdWorker(['status']);
 
-    expect(lines.join('\n')).toContain('/shared/queue');
+    const output = lines.join('\n');
+    expect(output).toContain('/shared/queue');
+    expect(output).toContain('filesystem');
   });
 
   it('worker summary mentions keepAwake and subscription engine tip', async () => {
@@ -302,14 +310,21 @@ describe('M112 — cmdWorker status', () => {
   });
 
   it('reports shared queue path when configured', async () => {
-    fakeConfig = { roots: [], version: 1, user: { name: 'Bot' }, fleet: { sharedQueue: { path: '/shared/q' } } };
+    fakeConfig = {
+      roots: [],
+      version: 1,
+      user: { name: 'Bot' },
+      fleet: { sharedQueue: { mode: 'filesystem', path: '/shared/q' } },
+    };
 
     const { cmdWorker } = await importWorker();
     const { lines } = captureConsole();
 
     await cmdWorker(['status']);
 
-    expect(lines.join('\n')).toContain('/shared/q');
+    const output = lines.join('\n');
+    expect(output).toContain('/shared/q');
+    expect(output).toContain('filesystem');
   });
 });
 
