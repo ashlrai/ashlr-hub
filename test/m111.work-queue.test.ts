@@ -437,6 +437,53 @@ describe('M111 SharedWorkQueueCoordinator — global cooldown crosses machines',
     expect(coordB.shouldSkip('global-cooled', 6 * 60 * 60 * 1000)).toBe(true);
   });
 
+  it('item marked judged-noise by machine A is skipped by machine B', () => {
+    const store = makeStore(tmpDir);
+    const coordA = makeSharedCoordinator(store, 'machine-A');
+    const coordB = makeSharedCoordinator(store, 'machine-B');
+
+    const item = makeItem('global-judged-noise');
+    coordA.claimItems([item], 1, 'machine-A');
+    coordA.recordOutcome('global-judged-noise', 'judged-noise', 'machine-A');
+
+    expect(coordB.shouldSkip('global-judged-noise', 6 * 60 * 60 * 1000)).toBe(true);
+  });
+
+  it('claimItems excludes globally cooled judged-decline items', () => {
+    const store = makeStore(tmpDir);
+    const coordA = makeSharedCoordinator(store, 'machine-A');
+    const coordB = makeSharedCoordinator(store, 'machine-B');
+
+    const declined = makeItem('global-judged-decline', '/tmp/repo', 10);
+    const fresh = makeItem('global-fresh', '/tmp/repo', 5);
+    coordA.recordOutcome(declined.id, 'judged-decline', 'machine-A');
+
+    const claimed = coordB.claimItems([declined, fresh], 2, 'machine-B');
+
+    expect(claimed.map((item) => item.id)).toEqual(['global-fresh']);
+  });
+
+  it('a later diff outcome clears a prior judged-review cooldown', () => {
+    const store = makeStore(tmpDir);
+    const coordA = makeSharedCoordinator(store, 'machine-A');
+    const coordB = makeSharedCoordinator(store, 'machine-B');
+
+    coordA.recordOutcome('global-review-reset', 'judged-review', 'machine-A');
+    coordA.recordOutcome('global-review-reset', 'diff', 'machine-A');
+
+    expect(coordB.shouldSkip('global-review-reset', 6 * 60 * 60 * 1000)).toBe(false);
+  });
+
+  it('readHealth counts judged suppressible outcomes as cooldown items', () => {
+    const store = makeStore(tmpDir);
+    const coord = makeSharedCoordinator(store, 'machine-A');
+
+    coord.recordOutcome('global-health-noise', 'judged-noise', 'machine-A');
+    coord.recordOutcome('global-health-diff', 'diff', 'machine-A');
+
+    expect(store.readHealth({ cooldownMs: 6 * 60 * 60 * 1000 }).cooldownItems).toBe(1);
+  });
+
   it('item marked diff by machine A is NOT skipped by machine B', () => {
     const store = makeStore(tmpDir);
     const coordA = makeSharedCoordinator(store, 'machine-A');

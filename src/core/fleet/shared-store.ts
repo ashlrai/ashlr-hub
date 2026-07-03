@@ -32,6 +32,7 @@ import {
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { isSuppressibleWorkedOutcome, isWorkedOutcome } from './worked-ledger.js';
 import type { WorkedOutcome, WorkedEvent } from './worked-ledger.js';
 
 // ---------------------------------------------------------------------------
@@ -156,8 +157,7 @@ function parseQueue(raw: string): SharedFleetQueue {
           isPlainObject(e) &&
           typeof (e as Record<string, unknown>)['itemId'] === 'string' &&
           typeof (e as Record<string, unknown>)['ts'] === 'string' &&
-          ((e as Record<string, unknown>)['outcome'] === 'diff' ||
-            (e as Record<string, unknown>)['outcome'] === 'empty'),
+          isWorkedOutcome((e as Record<string, unknown>)['outcome']),
       )
     : [];
   const usage = Array.isArray(parsed['usage'])
@@ -418,7 +418,7 @@ export class SharedStore {
           break;
         }
       }
-      if (!last || last.outcome !== 'empty') return false;
+      if (!last || !isSuppressibleWorkedOutcome(last.outcome)) return false;
       const eventMs = Date.parse(last.ts);
       if (Number.isNaN(eventMs)) return false;
       return (now ?? Date.now()) - eventMs < cooldownMs;
@@ -551,7 +551,7 @@ export class SharedStore {
         seenWorked.add(event.itemId);
         const eventMs = Date.parse(event.ts);
         if (
-          event.outcome === 'empty' &&
+          isSuppressibleWorkedOutcome(event.outcome) &&
           !Number.isNaN(eventMs) &&
           now - eventMs < cooldownMs
         ) {

@@ -192,6 +192,19 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Full gates passed: `npm run typecheck`, `node --check src/core/web/public/app.js`, focused trust/status/daemon suites (12 files, 338 tests), `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, `npm run test:invariants` (41 files, 411 tests), full `npm run test:ci` (412 files, 8552 passed, 7 skipped), and `git diff --check`.
 - [x] Committed and pushed to `origin/master`; live daemon/fleet checks passed after launchd reinstall/reload and `fleet resume`.
 
+## Current Continuation - Remote Handoff Reconciliation
+- [x] Rechecked git status, recent commits, Entire state, task plan, and notes after the previous push.
+- [x] Deployed parallel agents for remote PR reconciliation, proposal unblockers, service progress health, active kill cancellation, repo contracts, and shared cooldown parity.
+- [x] Implemented read-only GitHub PR reconciliation for proposals waiting on remote host merge outcomes.
+- [x] Required strong PR identity before terminal reconciliation: exact PR URL or matching head/base refs; ambiguous terminal responses stay awaiting/unknown.
+- [x] Hooked reconciliation into daemon maintenance while skipping dry-run, kill/no-enrollment/budget gates, and resource-control `pause`.
+- [x] Surfaced remote handoff reconciliation counts in daemon ticks, control logs, Fleet Activity API, and Mission Control tick stream without mixing them into autonomous merge counts.
+- [x] Fixed shared cooldown parity so `judged-*` anti-clog outcomes survive shared-store parsing, suppress cross-machine work, and are counted in shared queue health.
+- [x] Routed daemon anti-clog sweep through the active work-queue coordinator so shared fleets cool down rejected/noise work globally.
+- [x] Focused verification passed: typecheck; `m18`, `m201`, `m315`, `m61`, `m90`; and shared cooldown suites `m111`, `m220`.
+- [x] Broad gates passed: typecheck, node web syntax check, lint, build, audit, diff check, invariants, and full `npm run test:ci`.
+- [ ] Commit, push to `origin/master`, and verify live daemon/fleet status.
+
 ## Current Continuation
 - [x] Rechecked git/daemon/fleet state after the previous push.
 - [x] Deployed fresh explorer agents on daemon refill, fleet/backlog persistence, and cross-repo discovery.

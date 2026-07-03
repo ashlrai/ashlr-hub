@@ -255,6 +255,13 @@ describe('buildFleetActivity — recent ticks', () => {
         autoArchived: 1,
         ttlRejected: 1,
       } : undefined,
+      remoteHandoff: i === 29 ? {
+        checked: 2,
+        merged: 1,
+        closed: 0,
+        open: 1,
+        unknown: 0,
+      } : undefined,
       dispatches: i === 29 ? [{
         itemId: 'item-29',
         title: 'Trace backend assignment',
@@ -297,6 +304,13 @@ describe('buildFleetActivity — recent ticks', () => {
       autoArchived: 1,
       ttlRejected: 1,
     });
+    expect(snap.recentTicks[0]!.remoteHandoff).toEqual({
+      checked: 2,
+      merged: 1,
+      closed: 0,
+      open: 1,
+      unknown: 0,
+    });
     expect(snap.recentTicks[0]!.dispatches?.[0]).toMatchObject({
       itemId: 'item-29',
       backend: 'builtin',
@@ -313,6 +327,7 @@ describe('buildFleetActivity — recent ticks', () => {
       expect(t.directionMode === null || typeof t.directionMode === 'string').toBe(true);
       expect(t.directionReason === null || typeof t.directionReason === 'string').toBe(true);
       expect(t.autoMerge === null || typeof t.autoMerge === 'object').toBe(true);
+      expect(t.remoteHandoff === null || typeof t.remoteHandoff === 'object').toBe(true);
       expect(Array.isArray(t.dispatches)).toBe(true);
     }
   });

@@ -32,6 +32,7 @@ vi.mock('node:child_process', () => ({
 import {
   githubStatus,
   listPrs,
+  viewPr,
   listIssues,
   createPr,
 } from '../src/core/integrations/github.js';
@@ -73,6 +74,18 @@ const PR_LIST_JSON = JSON.stringify([
   { number: 1, title: 'Fix bug', url: 'https://github.com/acme/my-repo/pull/1', state: 'OPEN', author: { login: 'alice' } },
   { number: 2, title: 'Add feature', url: 'https://github.com/acme/my-repo/pull/2', state: 'OPEN', author: { login: 'bob' } },
 ]);
+const PR_VIEW_JSON = JSON.stringify({
+  number: 42,
+  title: 'Remote handoff',
+  url: 'https://github.com/acme/my-repo/pull/42',
+  state: 'MERGED',
+  mergedAt: '2026-07-03T01:00:00Z',
+  closed: true,
+  closedAt: '2026-07-03T01:00:00Z',
+  headRefName: 'ashlr/proposal-42',
+  baseRefName: 'main',
+  mergeCommit: { oid: 'abc123def456' },
+});
 const ISSUE_LIST_JSON = JSON.stringify([
   { number: 10, title: 'Bug report', url: 'https://github.com/acme/my-repo/issues/10', state: 'OPEN', author: { login: 'carol' } },
 ]);
@@ -399,6 +412,66 @@ describe('listPrs — returns [] on any failure', () => {
   it('never throws on any failure', () => {
     _spawnSyncImpl = () => { throw new Error('boom'); };
     expect(() => listPrs('/fake/cwd')).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// viewPr — read-only PR detail
+// ---------------------------------------------------------------------------
+
+describe('viewPr — read-only PR detail', () => {
+  it('parses PR detail and merge commit metadata', () => {
+    setSpawnAlways(makeSpawn(PR_VIEW_JSON));
+
+    const pr = viewPr('/fake/cwd', 'https://github.com/acme/my-repo/pull/42');
+
+    expect(pr).toEqual({
+      number: 42,
+      url: 'https://github.com/acme/my-repo/pull/42',
+      state: 'MERGED',
+      mergedAt: '2026-07-03T01:00:00Z',
+      closed: true,
+      closedAt: '2026-07-03T01:00:00Z',
+      headRefName: 'ashlr/proposal-42',
+      baseRefName: 'main',
+      mergeCommitOid: 'abc123def456',
+    });
+  });
+
+  it('uses gh pr view with an explicit read-only json field list', () => {
+    const calls: Array<{ cmd: unknown; args: unknown }> = [];
+    _spawnSyncImpl = (cmd: unknown, args: unknown) => {
+      calls.push({ cmd, args });
+      return makeSpawn(PR_VIEW_JSON);
+    };
+
+    viewPr('/fake/cwd', 'ashlr/proposal-42');
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.cmd).toBe('gh');
+    expect(calls[0]?.args).toEqual([
+      'pr',
+      'view',
+      'ashlr/proposal-42',
+      '--json',
+      'number,url,state,mergedAt,closed,closedAt,headRefName,baseRefName,mergeCommit',
+    ]);
+  });
+
+  it('returns null when gh exits non-zero', () => {
+    setSpawnAlways(makeSpawn('', 1));
+    expect(viewPr('/fake/cwd', '42')).toBeNull();
+  });
+
+  it('returns null on malformed JSON', () => {
+    setSpawnAlways(makeSpawn('not json'));
+    expect(viewPr('/fake/cwd', '42')).toBeNull();
+  });
+
+  it('never throws on unexpected spawn errors', () => {
+    _spawnSyncImpl = () => { throw new Error('boom'); };
+    expect(() => viewPr('/fake/cwd', '42')).not.toThrow();
+    expect(viewPr('/fake/cwd', '42')).toBeNull();
   });
 });
 

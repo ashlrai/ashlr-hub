@@ -12,8 +12,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-const { createPrMock } = vi.hoisted(() => ({
+const { createPrMock, viewPrMock } = vi.hoisted(() => ({
   createPrMock: vi.fn(),
+  viewPrMock: vi.fn(),
 }));
 
 vi.mock('../src/core/git.js', async (importOriginal) => {
@@ -32,11 +33,13 @@ vi.mock('../src/core/integrations/github.js', async (importOriginal) => {
   return {
     ...actual,
     createPr: (...args: unknown[]) => createPrMock(...args),
+    viewPr: (...args: unknown[]) => viewPrMock(...args),
   };
 });
 
 import { autoMergeProposal } from '../src/core/inbox/merge.js';
-import { createProposal, listProposals, loadProposal, setStatus } from '../src/core/inbox/store.js';
+import { reconcileRemoteHandoffs } from '../src/core/inbox/remote-handoff.js';
+import { createProposal, listProposals, loadProposal, setStatus, updateProposalField } from '../src/core/inbox/store.js';
 import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import { enroll, setKill, unenroll } from '../src/core/sandbox/policy.js';
@@ -109,6 +112,7 @@ beforeEach(() => {
     url: 'https://github.com/ashlrai/fixture/pull/123',
     detail: 'PR created',
   });
+  viewPrMock.mockReset();
 });
 
 afterEach(() => {
@@ -123,7 +127,7 @@ afterEach(() => {
 });
 
 describe('M315 remote PR handoff truth', () => {
-  it('records a remote PR handoff without marking the proposal applied or merged', async () => {
+  async function createRemoteHandoffProposal() {
     const diff = addFileDiff('docs/handoff.md', 'truthful remote handoff');
     const diffHash = hashDiff(diff);
     const proposal = createProposal({
@@ -141,6 +145,11 @@ describe('M315 remote PR handoff truth', () => {
     setStatus(proposal.id, 'approved');
 
     const result = await autoMergeProposal(proposal.id, cfg());
+    return { proposal, result };
+  }
+
+  it('records a remote PR handoff without marking the proposal applied or merged', async () => {
+    const { proposal, result } = await createRemoteHandoffProposal();
 
     expect(result).toMatchObject({
       ok: true,
@@ -156,11 +165,181 @@ describe('M315 remote PR handoff truth', () => {
       provider: 'github',
       state: 'awaiting-host-merge',
       prUrl: 'https://github.com/ashlrai/fixture/pull/123',
+      base: 'main',
     });
     expect(listProposals({ status: 'pending' }).some((p) => p.id === proposal.id)).toBe(false);
     expect(listProposals({ status: 'applied' }).some((p) => p.id === proposal.id)).toBe(false);
 
     const decisions = readDecisions({ proposalId: proposal.id });
     expect(decisions.some((d) => d.action === 'handoff')).toBe(true);
+  });
+
+  it('reconciles a host-merged PR to applied only with positive merge evidence', async () => {
+    const { proposal } = await createRemoteHandoffProposal();
+    const handoff = loadProposal(proposal.id)?.remoteHandoff;
+    viewPrMock.mockReturnValueOnce({
+      state: 'MERGED',
+      mergedAt: '2026-07-03T01:00:00Z',
+      url: 'https://github.com/ashlrai/fixture/pull/123',
+      headRefName: handoff?.branch,
+      baseRefName: handoff?.base,
+    });
+
+    const r = reconcileRemoteHandoffs();
+
+    expect(r).toEqual({ checked: 1, merged: 1, closed: 0, open: 0, unknown: 0 });
+    const loaded = loadProposal(proposal.id);
+    expect(loaded?.status).toBe('applied');
+    expect(loaded?.remoteHandoff).toMatchObject({
+      state: 'merged',
+      detail: expect.stringContaining('remote PR merged'),
+    });
+    const decisions = readDecisions({ proposalId: proposal.id });
+    expect(decisions.some((d) => d.action === 'merged' && d.verdict === 'applied')).toBe(true);
+  });
+
+  it('reconciles a closed-unmerged host PR to rejected without claiming a merge', async () => {
+    const { proposal } = await createRemoteHandoffProposal();
+    const handoff = loadProposal(proposal.id)?.remoteHandoff;
+    viewPrMock.mockReturnValueOnce({
+      state: 'CLOSED',
+      closed: true,
+      url: 'https://github.com/ashlrai/fixture/pull/123',
+      headRefName: handoff?.branch,
+      baseRefName: handoff?.base,
+    });
+
+    const r = reconcileRemoteHandoffs();
+
+    expect(r).toEqual({ checked: 1, merged: 0, closed: 1, open: 0, unknown: 0 });
+    const loaded = loadProposal(proposal.id);
+    expect(loaded?.status).toBe('rejected');
+    expect(loaded?.remoteHandoff).toMatchObject({
+      state: 'closed',
+      detail: expect.stringContaining('closed without merge'),
+    });
+    const decisions = readDecisions({ proposalId: proposal.id });
+    expect(decisions.some((d) => d.action === 'rejected' && d.verdict === 'rejected')).toBe(true);
+    expect(listProposals({ status: 'applied' }).some((p) => p.id === proposal.id)).toBe(false);
+  });
+
+  it('leaves the proposal awaiting host merge when GitHub state is unavailable', async () => {
+    const { proposal } = await createRemoteHandoffProposal();
+    viewPrMock.mockReturnValueOnce(null);
+
+    const r = reconcileRemoteHandoffs();
+
+    expect(r).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    const loaded = loadProposal(proposal.id);
+    expect(loaded?.status).toBe('awaiting-host-merge');
+    expect(loaded?.remoteHandoff).toMatchObject({
+      state: 'awaiting-host-merge',
+      prUrl: 'https://github.com/ashlrai/fixture/pull/123',
+    });
+  });
+
+  it('keeps an open host PR awaiting merge and refreshes the PR URL', async () => {
+    const { proposal } = await createRemoteHandoffProposal();
+    const handoff = loadProposal(proposal.id)?.remoteHandoff;
+    expect(handoff?.branch).toBeTruthy();
+    expect(handoff?.base).toBe('main');
+    if (handoff) {
+      const { prUrl: _prUrl, ...handoffWithoutUrl } = handoff;
+      updateProposalField(proposal.id, { remoteHandoff: handoffWithoutUrl });
+    }
+    viewPrMock.mockReturnValueOnce({
+      state: 'OPEN',
+      closed: false,
+      url: 'https://github.com/ashlrai/fixture/pull/124',
+      headRefName: handoff?.branch,
+      baseRefName: 'main',
+    });
+
+    const r = reconcileRemoteHandoffs();
+
+    expect(r).toEqual({ checked: 1, merged: 0, closed: 0, open: 1, unknown: 0 });
+    const loaded = loadProposal(proposal.id);
+    expect(loaded?.status).toBe('awaiting-host-merge');
+    expect(loaded?.remoteHandoff).toMatchObject({
+      state: 'awaiting-host-merge',
+      prUrl: 'https://github.com/ashlrai/fixture/pull/124',
+    });
+  });
+
+  it('does not advance when GitHub resolves a different branch/base than the handoff', async () => {
+    const { proposal } = await createRemoteHandoffProposal();
+    viewPrMock.mockReturnValueOnce({
+      state: 'MERGED',
+      mergedAt: '2026-07-03T01:00:00Z',
+      url: 'https://github.com/ashlrai/fixture/pull/999',
+      headRefName: 'somebody-elses-branch',
+      baseRefName: 'main',
+    });
+
+    const r = reconcileRemoteHandoffs();
+
+    expect(r).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    const loaded = loadProposal(proposal.id);
+    expect(loaded?.status).toBe('awaiting-host-merge');
+    expect(loaded?.remoteHandoff).toMatchObject({
+      state: 'awaiting-host-merge',
+      prUrl: 'https://github.com/ashlrai/fixture/pull/123',
+    });
+  });
+
+  it('does not advance a terminal response that lacks PR identity evidence', async () => {
+    const { proposal } = await createRemoteHandoffProposal();
+    viewPrMock.mockReturnValueOnce({
+      state: 'MERGED',
+      mergedAt: '2026-07-03T01:00:00Z',
+    });
+
+    const r = reconcileRemoteHandoffs();
+
+    expect(r).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    const loaded = loadProposal(proposal.id);
+    expect(loaded?.status).toBe('awaiting-host-merge');
+    expect(loaded?.remoteHandoff).toMatchObject({
+      state: 'awaiting-host-merge',
+      prUrl: 'https://github.com/ashlrai/fixture/pull/123',
+    });
+  });
+
+  it('does not advance a terminal response when the PR URL conflicts with the handoff', async () => {
+    const { proposal } = await createRemoteHandoffProposal();
+    const handoff = loadProposal(proposal.id)?.remoteHandoff;
+    viewPrMock.mockReturnValueOnce({
+      state: 'MERGED',
+      mergedAt: '2026-07-03T01:00:00Z',
+      url: 'https://github.com/ashlrai/fixture/pull/999',
+      headRefName: handoff?.branch,
+      baseRefName: handoff?.base,
+    });
+
+    const r = reconcileRemoteHandoffs();
+
+    expect(r).toEqual({ checked: 1, merged: 0, closed: 0, open: 0, unknown: 1 });
+    const loaded = loadProposal(proposal.id);
+    expect(loaded?.status).toBe('awaiting-host-merge');
+    expect(loaded?.remoteHandoff).toMatchObject({
+      state: 'awaiting-host-merge',
+      prUrl: 'https://github.com/ashlrai/fixture/pull/123',
+    });
+  });
+
+  it('is idempotent after a terminal host merge reconciliation', async () => {
+    const { proposal } = await createRemoteHandoffProposal();
+    viewPrMock.mockReturnValueOnce({
+      state: 'MERGED',
+      mergedAt: '2026-07-03T01:00:00Z',
+      url: 'https://github.com/ashlrai/fixture/pull/123',
+    });
+
+    const first = reconcileRemoteHandoffs();
+    const second = reconcileRemoteHandoffs();
+
+    expect(first.merged).toBe(1);
+    expect(second).toEqual({ checked: 0, merged: 0, closed: 0, open: 0, unknown: 0 });
+    expect(loadProposal(proposal.id)?.status).toBe('applied');
   });
 });

@@ -72,6 +72,23 @@ export interface WorkedLedger {
   events: WorkedEvent[];
 }
 
+export function isWorkedOutcome(outcome: unknown): outcome is WorkedOutcome {
+  return (
+    outcome === 'diff' ||
+    outcome === 'empty' ||
+    outcome === 'judged-review' ||
+    outcome === 'judged-noise' ||
+    outcome === 'judged-decline'
+  );
+}
+
+export function isSuppressibleWorkedOutcome(outcome: WorkedOutcome): boolean {
+  return outcome === 'empty' ||
+    outcome === 'judged-review' ||
+    outcome === 'judged-noise' ||
+    outcome === 'judged-decline';
+}
+
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call time so tests can relocate HOME)
 // ---------------------------------------------------------------------------
@@ -118,15 +135,8 @@ export function loadWorkedLedger(): WorkedLedger {
             e !== null &&
             !Array.isArray(e) &&
             typeof (e as Record<string, unknown>)['itemId'] === 'string' &&
-            typeof (e as Record<string, unknown>)['outcome'] === 'string' &&
             typeof (e as Record<string, unknown>)['ts'] === 'string' &&
-            (
-              (e as Record<string, unknown>)['outcome'] === 'diff' ||
-              (e as Record<string, unknown>)['outcome'] === 'empty' ||
-              (e as Record<string, unknown>)['outcome'] === 'judged-review' ||
-              (e as Record<string, unknown>)['outcome'] === 'judged-noise' ||
-              (e as Record<string, unknown>)['outcome'] === 'judged-decline'
-            ),
+            isWorkedOutcome((e as Record<string, unknown>)['outcome']),
         )
       : [];
     return { events };
@@ -218,15 +228,7 @@ export function recentlyDeclined(
       }
     }
     if (!lastEvent) return false;
-    // Only suppress when the last outcome is a "decline-class" outcome.
-    // 'diff' means real work was done — do NOT suppress.
-    const suppressible: WorkedOutcome[] = [
-      'empty',
-      'judged-review',
-      'judged-noise',
-      'judged-decline',
-    ];
-    if (!suppressible.includes(lastEvent.outcome)) return false;
+    if (!isSuppressibleWorkedOutcome(lastEvent.outcome)) return false;
     const eventMs = Date.parse(lastEvent.ts);
     if (Number.isNaN(eventMs)) return false;
     const nowMs = now ?? Date.now();
@@ -344,6 +346,7 @@ export function sweepJudgedProposals(
   }>,
   backlogItems: ReadonlyArray<WorkItem>,
   ts?: string,
+  record: (itemId: string, outcome: WorkedOutcome, ts?: string) => void = recordOutcome,
 ): number {
   let recorded = 0;
   try {
@@ -368,7 +371,7 @@ export function sweepJudgedProposals(
       }
 
       if (prop.workItemId) {
-        recordOutcome(prop.workItemId, outcome, ts);
+        record(prop.workItemId, outcome, ts);
         recorded++;
         continue;
       }
@@ -393,7 +396,7 @@ export function sweepJudgedProposals(
 
       if (!matched) continue;
 
-      recordOutcome(matched.id, outcome, ts);
+      record(matched.id, outcome, ts);
       recorded++;
     }
   } catch {

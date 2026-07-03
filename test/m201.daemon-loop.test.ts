@@ -152,6 +152,11 @@ vi.mock('../src/core/fleet/automerge-pass.js', () => ({
   runAutoMergePass: (...args: unknown[]) => mockRunAutoMergePass(...args),
 }));
 
+const mockReconcileRemoteHandoffs = vi.fn();
+vi.mock('../src/core/inbox/remote-handoff.js', () => ({
+  reconcileRemoteHandoffs: (...args: unknown[]) => mockReconcileRemoteHandoffs(...args),
+}));
+
 const mockBuildResourceStrategyReport = vi.fn();
 vi.mock('../src/core/autonomy/resource-strategy.js', () => ({
   buildResourceStrategyReport: (...args: unknown[]) => mockBuildResourceStrategyReport(...args),
@@ -239,6 +244,7 @@ beforeEach(() => {
   mockRouteBackend.mockReset();
   mockEngineTierOf.mockReset();
   mockRunAutoMergePass.mockReset();
+  mockReconcileRemoteHandoffs.mockReset();
   mockBuildResourceStrategyReport.mockReset();
   mockLoadQueuedAutonomyItems.mockReset();
 
@@ -272,6 +278,7 @@ beforeEach(() => {
   mockRunCounterfactualReplay.mockResolvedValue({ replayed: 0, proposals: [] });
   mockRunViaAshlrcode.mockResolvedValue({ ok: true });
   mockRunAutoMergePass.mockResolvedValue({ merged: 0 });
+  mockReconcileRemoteHandoffs.mockReturnValue({ checked: 0, merged: 0, closed: 0, open: 0, unknown: 0 });
   mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'backlog-build', reasons: ['mock backlog'] });
   mockLoadBacklog.mockReturnValue(null);
   mockLoadQueuedAutonomyItems.mockReturnValue([]);
@@ -527,6 +534,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.reason).toBe('no-backlog');
     expect(result.dryRun).toBe(true);
     expect(mockRunAutoMergePass).not.toHaveBeenCalled();
+    expect(mockReconcileRemoteHandoffs).not.toHaveBeenCalled();
     expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
     expect(mockRunInventCycle).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
@@ -542,6 +550,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.spentUsd).toBe(0);
     expect(result.proposalsCreated).toBe(0);
     expect(mockRunAutoMergePass).not.toHaveBeenCalled();
+    expect(mockReconcileRemoteHandoffs).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
@@ -562,6 +571,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
   it('A1e: autonomy control pause builds strategy snapshot and skips dispatch', async () => {
     enrollWithItems(1);
     mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'pause', reasons: ['mock guard block'] });
+    mockReconcileRemoteHandoffs.mockReturnValue({ checked: 1, merged: 1, closed: 0, open: 0, unknown: 0 });
 
     const result = await tick(
       { ...cfgBuiltin(), foundry: { autonomyControlLoop: true } } as AshlrConfig,
@@ -586,6 +596,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     expect(strategyOpts.deps?.listOutcomeRecords?.()).toEqual([]);
     expect(mockRunAutoMergePass).not.toHaveBeenCalled();
+    expect(mockReconcileRemoteHandoffs).not.toHaveBeenCalled();
+    expect(result.remoteHandoff).toBeUndefined();
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
@@ -632,6 +644,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 	      invalidRejected: 1,
     });
     expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
+    expect(mockReconcileRemoteHandoffs).toHaveBeenCalledTimes(1);
     expect(mockBuildBacklog).not.toHaveBeenCalled();
     expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
     expect(mockRunInventCycle).not.toHaveBeenCalled();
@@ -642,6 +655,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     enrollWithItems(1);
     mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'verify-only', reasons: ['pending proposals need verification'] });
     mockRunAutoMergePass.mockResolvedValue({ attempted: 1, merged: 0 });
+    mockReconcileRemoteHandoffs.mockReturnValue({ checked: 2, merged: 1, closed: 1, open: 0, unknown: 0 });
 
     const result = await tick(
       { ...cfgBuiltin(), foundry: { autoMerge: { enabled: true } } } as AshlrConfig,
@@ -651,7 +665,11 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.reason).toBe('verify-only');
     expect(result.directionMode).toBe('verify-only');
     expect(result.directionReason).toBe('pending proposals need verification');
+    expect(result.remoteHandoff).toEqual({ checked: 2, merged: 1, closed: 1, open: 0, unknown: 0 });
+    const state = loadDaemonState();
+    expect(state.ticks.at(-1)?.remoteHandoff).toEqual({ checked: 2, merged: 1, closed: 1, open: 0, unknown: 0 });
     expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
+    expect(mockReconcileRemoteHandoffs).toHaveBeenCalledTimes(1);
     expect(mockBuildBacklog).not.toHaveBeenCalled();
     expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
     expect(mockRunInventCycle).not.toHaveBeenCalled();

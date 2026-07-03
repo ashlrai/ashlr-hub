@@ -3051,10 +3051,10 @@ export interface DaemonTick {
   /** M308: one-line reason behind the applied autonomy direction. */
   directionReason?: string;
   /** M308/M48: maintenance work performed by the auto-merge pass this tick. */
-	  autoMerge?: {
-	    attempted: number;
-	    judgePerPass?: number;
-	    judged: number;
+  autoMerge?: {
+    attempted: number;
+    judgePerPass?: number;
+    judged: number;
 	    judgeCapped?: number;
 	    verifyBeforeJudgePerPass?: number;
 	    verifyBeforeJudgeRan?: number;
@@ -3066,6 +3066,14 @@ export interface DaemonTick {
 	    ttlRejected?: number;
 	    invalidRejected?: number;
 	  };
+  /** Remote host PR handoff reconciliation performed this tick. */
+  remoteHandoff?: {
+    checked: number;
+    merged: number;
+    closed: number;
+    open: number;
+    unknown: number;
+  };
   /** M313: producer maintenance attempted during this tick. Metadata-only. */
   producerMaintenance?: {
     selfHeal: boolean;

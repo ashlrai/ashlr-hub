@@ -71,6 +71,7 @@ import { estimateRun } from '../observability/estimate.js';
 import { buildForecast } from '../observability/forecast.js';
 import { emitTuningProposals } from '../learn/tuning.js';
 import { runAutoMergePass, type AutoMergePassResult } from '../fleet/automerge-pass.js';
+import { reconcileRemoteHandoffs, type RemoteHandoffReconcileResult } from '../inbox/remote-handoff.js';
 import { runBestOfN } from '../run/best-of-n.js';
 import { runSelfHealCycle } from '../fleet/self-heal.js';
 import { runViaAshlrcode } from '../run/ashlrcode-engine.js'; // M185
@@ -331,6 +332,19 @@ function autoMergeTickSummary(result: AutoMergePassResult | null): DaemonTick['a
     ...(ttlRejected > 0 ? { ttlRejected } : {}),
     ...(invalidRejected > 0 ? { invalidRejected } : {}),
   };
+}
+
+function remoteHandoffTickSummary(
+  result: RemoteHandoffReconcileResult | null,
+): DaemonTick['remoteHandoff'] | undefined {
+  if (!result) return undefined;
+  const checked = typeof result.checked === 'number' ? result.checked : 0;
+  const merged = typeof result.merged === 'number' ? result.merged : 0;
+  const closed = typeof result.closed === 'number' ? result.closed : 0;
+  const open = typeof result.open === 'number' ? result.open : 0;
+  const unknown = typeof result.unknown === 'number' ? result.unknown : 0;
+  if (checked <= 0 && merged <= 0 && closed <= 0 && open <= 0 && unknown <= 0) return undefined;
+  return { checked, merged, closed, open, unknown };
 }
 
 function boundedText(value: string, max = 220): string {
@@ -637,6 +651,31 @@ export async function tick(
   };
   let preDispatchAutoMergePassResult: AutoMergePassResult | null = null;
   let preDispatchAutoMergePassRan = false;
+  let remoteHandoffReconcileResult: RemoteHandoffReconcileResult | null = null;
+  let remoteHandoff: DaemonTick['remoteHandoff'] | undefined;
+  const runRemoteHandoffReconciliation = (): RemoteHandoffReconcileResult | null => {
+    if (opts.dryRun || remoteHandoffReconcileResult !== null) return remoteHandoffReconcileResult;
+    try {
+      remoteHandoffReconcileResult = reconcileRemoteHandoffs();
+      const summary = remoteHandoffTickSummary(remoteHandoffReconcileResult);
+      if (summary) {
+        audit({
+          action: 'daemon:tick',
+          repo: null,
+          sandboxId: null,
+          summary:
+            `remote handoff reconciliation checked=${summary.checked}, merged=${summary.merged}, ` +
+            `closed=${summary.closed}, open=${summary.open}, unknown=${summary.unknown}`,
+          result: 'ok',
+        });
+      }
+      return remoteHandoffReconcileResult;
+    } catch (err) {
+      console.warn('[ashlr] daemon:tick reconcileRemoteHandoffs failed:', (err as Error)?.message ?? err);
+      remoteHandoffReconcileResult = null;
+      return null;
+    }
+  };
   let selfHealMaintenanceRan = false;
   let inventMaintenanceRan = false;
   let ancillaryMaintenanceRan = false;
@@ -833,6 +872,10 @@ export async function tick(
     }
 
     routingCfg = directionPlan.forceLocalOnly ? constrainToLocalBackends(liveCfg) : liveCfg;
+    if (directionPlan.mode !== 'pause') {
+      runRemoteHandoffReconciliation();
+      remoteHandoff = remoteHandoffTickSummary(remoteHandoffReconcileResult);
+    }
 
     if (!directionPlan.allowDispatch) {
       const autoMergePassResult = directionPlan.runAutoMergeMaintenance
@@ -859,9 +902,14 @@ export async function tick(
         directionMode,
         directionReason: directionPlan.reason,
         ...(autoMerge ? { autoMerge } : {}),
+        ...(remoteHandoff ? { remoteHandoff } : {}),
         ...(merged > 0 ? { merged } : {}),
       });
     }
+  }
+  if (!directionPlan) {
+    runRemoteHandoffReconciliation();
+    remoteHandoff = remoteHandoffTickSummary(remoteHandoffReconcileResult);
   }
 
   // -------------------------------------------------------------------------
@@ -916,6 +964,7 @@ export async function tick(
         ...(directionMode ? { directionMode } : {}),
         ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
         ...(autoMerge ? { autoMerge } : {}),
+        ...(remoteHandoff ? { remoteHandoff } : {}),
         ...(producerMaintenanceSummary() ? { producerMaintenance: producerMaintenanceSummary() } : {}),
         ...(merged > 0 ? { merged } : {}),
       });
@@ -950,22 +999,6 @@ export async function tick(
       ? (liveCfg.daemon as Record<string, unknown>)['cooldownMs'] as number
       : 6 * 60 * 60 * 1000; // default 6h
 
-  // M220: verdict-feedback sweep — feed judge rejections back to the worked ledger
-  // BEFORE selection so items whose proposals were judged review/noise/harmful are
-  // suppressed this tick. Gated: cfg.foundry?.antiClog !== false (DEFAULT ON).
-  // Flag-off (antiClog:false) = skip the sweep = exact pre-M220 behavior.
-  if ((liveCfg.foundry as Record<string, unknown> | undefined)?.['antiClog'] !== false) {
-    try {
-      const rejected = listProposals({ status: 'rejected' });
-      if (rejected.length > 0) {
-        sweepJudgedProposals(rejected, backlogItems);
-      }
-    } catch (err) {
-      // Best-effort — sweep must never crash selection.
-      console.warn('[ashlr] daemon:tick sweepJudgedProposals failed:', (err as Error)?.message ?? err);
-    }
-  }
-
   // M113: coordinator seam — once per tick. Local (default) = today's behavior;
   // Shared = multi-machine atomic claim (cfg.fleet.sharedQueue.mode==='filesystem').
   const coordinator = selectWorkQueueCoordinator(liveCfg);
@@ -980,6 +1013,27 @@ export async function tick(
     (((liveCfg.fleet as Record<string, unknown>)['sharedQueue'] as Record<string, unknown>)['leaseMs'] as number) > 0
       ? Math.floor(((liveCfg.fleet as Record<string, unknown>)['sharedQueue'] as Record<string, unknown>)['leaseMs'] as number)
       : 5 * 60 * 1000;
+
+  // M220: verdict-feedback sweep — feed judge rejections back to the worked ledger
+  // BEFORE selection so items whose proposals were judged review/noise/harmful are
+  // suppressed this tick. Gated: cfg.foundry?.antiClog !== false (DEFAULT ON).
+  // Flag-off (antiClog:false) = skip the sweep = exact pre-M220 behavior.
+  if ((liveCfg.foundry as Record<string, unknown> | undefined)?.['antiClog'] !== false) {
+    try {
+      const rejected = listProposals({ status: 'rejected' });
+      if (rejected.length > 0) {
+        sweepJudgedProposals(
+          rejected,
+          backlogItems,
+          undefined,
+          (itemId, outcome) => coordinator.recordOutcome(itemId, outcome, machineId),
+        );
+      }
+    } catch (err) {
+      // Best-effort — sweep must never crash selection.
+      console.warn('[ashlr] daemon:tick sweepJudgedProposals failed:', (err as Error)?.message ?? err);
+    }
+  }
 
   // Build a set of item ids that already have an open PENDING proposal so we
   // can skip duplicating work. Best-effort: match on item.id appearing in the
@@ -2006,6 +2060,7 @@ export async function tick(
 	      ...(directionMode ? { directionMode } : {}),
 	      ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
 	      ...(autoMerge ? { autoMerge } : {}),
+	      ...(remoteHandoff ? { remoteHandoff } : {}),
 	      ...(producerMaintenance ? { producerMaintenance } : {}),
 	      ...(dispatches ? { dispatches } : {}),
 	      ...(merged > 0 ? { merged } : {}),
@@ -2035,6 +2090,7 @@ export async function tick(
 	    ...(directionMode ? { directionMode } : {}),
 	    ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
 	    ...(autoMerge ? { autoMerge } : {}),
+	    ...(remoteHandoff ? { remoteHandoff } : {}),
 	    ...(producerMaintenance ? { producerMaintenance } : {}),
 	    ...(dispatches ? { dispatches } : {}),
 	    ...(merged > 0 ? { merged } : {}),

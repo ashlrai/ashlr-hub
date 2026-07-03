@@ -420,11 +420,14 @@ function buildLogs(cap = LOG_CAP): ControlLogEntry[] {
             tick.autoMerge.invalidRejected ? `,invalidRejected:${tick.autoMerge.invalidRejected}` : ''
           }`
         : '';
+      const remoteHandoffStr = tick.remoteHandoff
+        ? ` remoteHandoff=checked:${tick.remoteHandoff.checked},merged:${tick.remoteHandoff.merged},closed:${tick.remoteHandoff.closed},open:${tick.remoteHandoff.open},unknown:${tick.remoteHandoff.unknown}`
+        : '';
       const modeStr = tick.dryRun === true ? ' mode=simulation' : '';
       entries.push({
         ts: tick.ts,
         kind: 'tick',
-        msg: `tick reason=${tick.reason ?? 'ok'}${modeStr}${directionStr}${backendStr}${spendStr}${autoMergeStr}`,
+        msg: `tick reason=${tick.reason ?? 'ok'}${modeStr}${directionStr}${backendStr}${spendStr}${autoMergeStr}${remoteHandoffStr}`,
         ...(tick.dryRun === true ? { dryRun: true } : {}),
       });
       const dispatches = Array.isArray(tick.dispatches) ? tick.dispatches.slice(0, 5) : [];
@@ -595,6 +598,7 @@ export interface FleetTickEntry {
   directionMode: DaemonTick['directionMode'] | null;
   directionReason: string | null;
   autoMerge: DaemonTick['autoMerge'] | null;
+  remoteHandoff: DaemonTick['remoteHandoff'] | null;
   dispatches: DaemonTick['dispatches'];
 }
 
@@ -725,6 +729,7 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
       directionMode: t.directionMode ?? null,
       directionReason: t.directionReason ?? null,
       autoMerge: t.autoMerge ?? null,
+      remoteHandoff: t.remoteHandoff ?? null,
       dispatches: Array.isArray(t.dispatches) ? t.dispatches.slice(0, 5) : [],
     }));
   } catch {

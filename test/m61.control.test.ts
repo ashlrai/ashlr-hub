@@ -348,6 +348,7 @@ describe('logs section (M61)', () => {
           reason: 'ok',
           merged: 1,
           backends: { claude: 1 },
+          remoteHandoff: { checked: 2, merged: 1, closed: 0, open: 1, unknown: 0 },
         },
       ],
     };
@@ -360,6 +361,7 @@ describe('logs section (M61)', () => {
     const kinds = snap.logs.map((l) => l.kind);
     expect(kinds).toContain('tick');
     expect(kinds).toContain('merge');
+    expect(snap.logs.some((l) => l.msg.includes('remoteHandoff=checked:2,merged:1,closed:0,open:1,unknown:0'))).toBe(true);
 
     // All entries have valid ISO ts
     for (const entry of snap.logs) {
@@ -411,6 +413,7 @@ describe('logs section (M61)', () => {
             ttlRejected: 1,
             invalidRejected: 1,
           },
+          remoteHandoff: { checked: 3, merged: 1, closed: 1, open: 0, unknown: 1 },
           dispatches: [{
             itemId: 'item-1',
             title: 'Improve daemon routing visibility',
@@ -437,6 +440,7 @@ describe('logs section (M61)', () => {
     expect(snap.logs[0]?.msg).toContain('mode=simulation');
     expect(snap.logs[0]?.dryRun).toBe(true);
 	    expect(snap.logs[0]?.msg).toContain('maintenance=attempted:3,judgeCalls:2/4,judgeCapped:1,verifyBeforeJudge:2/3,verifyCapped:1,judgeEst:$0.0123,merged:0,archived:1,ttlRejected:1,invalidRejected:1');
+    expect(snap.logs[0]?.msg).toContain('remoteHandoff=checked:3,merged:1,closed:1,open:0,unknown:1');
     expect(snap.logs.some((entry) =>
       entry.kind === 'dispatch' &&
       entry.msg.includes('builtin') &&

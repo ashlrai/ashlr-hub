@@ -34,6 +34,19 @@ export interface PrSummary {
   author: string;
 }
 
+/** Detailed read-only PR status used to reconcile remote host handoffs. */
+export interface PrView {
+  number?: number;
+  url?: string;
+  state?: string;
+  mergedAt?: string | null;
+  closed?: boolean;
+  closedAt?: string | null;
+  headRefName?: string;
+  baseRefName?: string;
+  mergeCommitOid?: string;
+}
+
 /** A single issue summary (read-only list). */
 export interface IssueSummary {
   number: number;
@@ -274,6 +287,42 @@ export function listPrs(cwd: string): PrSummary[] {
     results.push({ number, title, url, state, author });
   }
   return results;
+}
+
+/**
+ * Read one PR via `gh pr view`. NEVER throws — returns null on any failure.
+ *
+ * `selector` may be a PR URL, number, or branch name supported by the gh CLI.
+ * This is read-only and is safe for daemon reconciliation loops.
+ */
+export function viewPr(cwd: string, selector: string): PrView | null {
+  const raw = runGh(cwd, [
+    'pr',
+    'view',
+    selector,
+    '--json',
+    'number,url,state,mergedAt,closed,closedAt,headRefName,baseRefName,mergeCommit',
+  ]);
+  const parsed = safeJson(raw);
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const obj = parsed as Record<string, unknown>;
+  const mergeCommit = obj['mergeCommit'];
+  let mergeCommitOid: string | undefined;
+  if (mergeCommit !== null && typeof mergeCommit === 'object' && !Array.isArray(mergeCommit)) {
+    const commitObj = mergeCommit as Record<string, unknown>;
+    if (typeof commitObj['oid'] === 'string') mergeCommitOid = commitObj['oid'];
+  }
+  return {
+    ...(typeof obj['number'] === 'number' ? { number: obj['number'] } : {}),
+    ...(typeof obj['url'] === 'string' ? { url: obj['url'] } : {}),
+    ...(typeof obj['state'] === 'string' ? { state: obj['state'] } : {}),
+    ...(typeof obj['mergedAt'] === 'string' || obj['mergedAt'] === null ? { mergedAt: obj['mergedAt'] } : {}),
+    ...(typeof obj['closed'] === 'boolean' ? { closed: obj['closed'] } : {}),
+    ...(typeof obj['closedAt'] === 'string' || obj['closedAt'] === null ? { closedAt: obj['closedAt'] } : {}),
+    ...(typeof obj['headRefName'] === 'string' ? { headRefName: obj['headRefName'] } : {}),
+    ...(typeof obj['baseRefName'] === 'string' ? { baseRefName: obj['baseRefName'] } : {}),
+    ...(mergeCommitOid ? { mergeCommitOid } : {}),
+  };
 }
 
 /**

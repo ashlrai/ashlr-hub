@@ -3417,6 +3417,13 @@ function renderFleetActivity() {
 	            : '') +
 	          (maintenance.judgeEstimatedSpendUsd ? ` est $${maintenance.judgeEstimatedSpendUsd.toFixed(4)}` : '')
 	        : '';
+	      const handoff = t.remoteHandoff && typeof t.remoteHandoff === 'object' ? t.remoteHandoff : null;
+	      const handoffStr = handoff && handoff.checked > 0
+	        ? `handoff ${handoff.checked} checked` +
+	          (handoff.merged ? ` ${handoff.merged} merged` : '') +
+	          (handoff.closed ? ` ${handoff.closed} closed` : '') +
+	          (handoff.unknown ? ` ${handoff.unknown} unknown` : '')
+	        : '';
 	      const hasMerge = t.merged > 0;
 	      const tickCls = `fa-tick-row${hasMerge ? ' fa-tick-merged' : ''}`;
       ticksBody.appendChild(el('div', { cls: tickCls },
@@ -3426,6 +3433,7 @@ function renderFleetActivity() {
 	        backendsStr ? el('span', { cls: 'fa-tick-backends' }, backendsStr) : null,
 	        dispatchChips ? el('span', { cls: 'fa-tick-dispatches' }, `${dispatchChips}${dispatchMore}`) : null,
 	        maintenanceStr ? el('span', { cls: 'fa-tick-maintenance' }, maintenanceStr) : null,
+	        handoffStr ? el('span', { cls: 'fa-tick-maintenance' }, handoffStr) : null,
 	        t.spentUsd > 0 ? el('span', { cls: 'fa-tick-spend' }, `$${t.spentUsd.toFixed(4)}`) : null,
         hasMerge ? el('span', { cls: 'fa-tick-merge-badge' }, `+${t.merged} merged`) : null
       ));

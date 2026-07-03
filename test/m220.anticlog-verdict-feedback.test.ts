@@ -94,6 +94,7 @@ import {
   loadWorkedLedger,
   workedLedgerPath,
 } from '../src/core/fleet/worked-ledger.js';
+import { SharedStore } from '../src/core/fleet/shared-store.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -529,6 +530,50 @@ describe('M220 tick() integration — antiClog default ON', () => {
 
     // The fresh item should have been dispatched
     expect(dispatched.length).toBeGreaterThan(0);
+  });
+
+  it('shared queue mode writes rejected/noise sweep feedback to the shared store', async () => {
+    const judgedId = 'shared-judged-noise-item';
+    const freshId = 'shared-fresh-item';
+    const sharedDir = path.join(tmpHome, 'shared-queue');
+
+    createRejectedProposal({
+      repo: tmpRepo,
+      title: `Fix ${judgedId}`,
+      summary: `Addresses ${judgedId}`,
+      decisionReason: 'noise',
+    });
+
+    backlogItems = [
+      makeItem(judgedId, tmpRepo, { score: 10 }),
+      makeItem(freshId, tmpRepo, { score: 5 }),
+    ];
+    mockBuildBacklog.mockImplementation(async () => ({
+      generatedAt: new Date().toISOString(),
+      repos: [tmpRepo],
+      items: backlogItems,
+    }));
+
+    const cfg = {
+      ...makeCfgWithAntiClog(true),
+      fleet: {
+        sharedQueue: {
+          mode: 'filesystem',
+          path: sharedDir,
+          machineId: 'machine-A',
+          leaseMs: 10_000,
+        },
+      },
+    } as AshlrConfig;
+    mockLoadConfig.mockReturnValue(cfg);
+
+    await tick(cfg, { dryRun: false });
+
+    const sharedStore = new SharedStore(sharedDir);
+    const sharedEvents = sharedStore.readSnapshot().worked.filter((event) => event.itemId === judgedId);
+    expect(sharedEvents.some((event) => event.outcome === 'judged-noise')).toBe(true);
+    expect(sharedStore.recentlyDeclined(judgedId, 6 * 60 * 60 * 1000)).toBe(true);
+    expect(loadWorkedLedger().events.some((event) => event.itemId === judgedId)).toBe(false);
   });
 
   it('a fresh substantive item is NOT skipped when antiClog is ON', async () => {
