@@ -314,5 +314,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Wired `verifyProposal()` to run opt-in browser verification against the patched isolated verify worktree, fail closed on non-skipped render/console failures, and persist compact browser/visual evidence into proposal verification and autonomy evidence packs.
 - [x] Updated browser/orchestrator/merge/autonomy tests for sanitized evidence and worktree browser verification.
 - [x] Run final full gates.
-- [ ] Commit, push to `origin/master`, and verify live daemon/fleet status.
+- [x] Commit, push to `origin/master`, and verify live daemon/fleet status.
 - [ ] Next slice: expose daemon proposal-production diagnosis in Fleet/Mission Control so `proposal-starved` explains selected, dispatched, no-proposal, and error causes.
