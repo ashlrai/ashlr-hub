@@ -121,6 +121,18 @@ const FIXTURE_FLEET_STATUS = {
     },
   },
   proposals: { pending: 3, frontierPending: 1, applied: 0 },
+  proposalProduction: {
+    windowHours: 24,
+    selected: 3,
+    claimed: 3,
+    dispatched: 2,
+    skipped: 1,
+    errors: 0,
+    proposalsCreated: 1,
+    noProposalDispatches: 1,
+    topReasons: [{ reason: 'agent returned no diff', count: 1 }],
+    recentNoProposalDispatches: [],
+  },
   merges: { recent: 0 },
   killed: false,
 };
@@ -221,6 +233,8 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(snap.fleet?.queue.backlogItems).toBe(4);
     expect(snap.fleet?.queue.shared?.activeClaims).toBe(2);
     expect(snap.fleet?.queue.shared?.ownedClaims).toBe(1);
+    expect(snap.fleet?.proposalProduction?.noProposalDispatches).toBe(1);
+    expect(snap.fleet?.proposalProduction?.topReasons[0]?.reason).toBe('agent returned no diff');
   });
 
   it('daemon degrades to zeroed fields when loadDaemonState throws', async () => {

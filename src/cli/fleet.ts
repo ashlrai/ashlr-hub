@@ -127,6 +127,33 @@ export function formatFleetStatus(s: FleetStatus): string {
   lines.push(`  applied:           ${s.proposals.applied}`);
   lines.push('');
 
+  // Proposal production
+  const production = s.proposalProduction;
+  lines.push('Proposal production:');
+  if (!production) {
+    lines.push('  unavailable');
+  } else {
+    lines.push(`  window:    ${formatProductionWindow(production.windowHours)}`);
+    lines.push(
+      `  queue:     selected ${production.selected}, claimed ${production.claimed}, ` +
+        `dispatched ${production.dispatched}, skipped ${production.skipped}`,
+    );
+    lines.push(
+      `  output:    proposals ${production.proposalsCreated}, ` +
+        `no-proposal ${production.noProposalDispatches}, errors ${production.errors}`,
+    );
+    if (production.topReasons.length > 0) {
+      lines.push(`  reasons:   ${production.topReasons.slice(0, 3).map(formatProductionReason).join('; ')}`);
+    }
+    for (const dispatch of production.recentNoProposalDispatches.slice(0, 3)) {
+      lines.push(
+        `  recent:    ${dispatch.backend ?? 'unknown'} ${formatActionTarget(dispatch.repo)} ` +
+          `${compactResourceReason(dispatch.title)} (${compactResourceReason(dispatch.reason)})`,
+      );
+    }
+  }
+  lines.push('');
+
   // Merges
   lines.push(`Merges:    ${s.merges.recent} auto-merge(s) in last 24h`);
   lines.push('');
@@ -265,6 +292,14 @@ function formatBackendResource(resource: NonNullable<FleetStatus['backends'][num
 function compactResourceReason(reason: string): string {
   const clean = reason.replace(/\s+/g, ' ').trim();
   return clean.length > 96 ? clean.slice(0, 93) + '...' : clean;
+}
+
+function formatProductionWindow(windowHours: number): string {
+  return Number.isInteger(windowHours) ? `${windowHours}h` : `${windowHours.toFixed(1)}h`;
+}
+
+function formatProductionReason(reason: NonNullable<FleetStatus['proposalProduction']>['topReasons'][number]): string {
+  return `${reason.count}x ${compactResourceReason(reason.reason)}`;
 }
 
 function formatActionTarget(target: string): string {

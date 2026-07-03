@@ -400,6 +400,19 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('snap.visibility');
   });
 
+  it('app.js surfaces proposal production in Fleet, Mission Control, and Fleet Dashboard', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    expect(src).toContain('function renderProposalProductionCard');
+    expect(src).toContain("renderProposalProductionCard(f.proposalProduction, 'fleet-card card')");
+    expect(src).toContain('renderProposalProductionCard(production)');
+    expect(src).toContain("controlMetric('No-prop 24h'");
+    expect(src).toContain("snap.fleet?.proposalProduction ?? snap.control?.fleet?.proposalProduction");
+    expect(src).toContain("'Proposal production'");
+  });
+
   it('app.js inbox detail reads current proposal review fields', () => {
     const src = fs.readFileSync(
       path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),

@@ -262,6 +262,16 @@ describe('buildFleetActivity — recent ticks', () => {
         open: 1,
         unknown: 0,
       } : undefined,
+      proposalProduction: i === 29 ? {
+        selected: 1,
+        claimed: 1,
+        dispatched: 1,
+        skipped: 0,
+        errors: 0,
+        proposalsCreated: 0,
+        noProposalDispatches: 1,
+        reasons: [{ reason: 'test route', count: 1 }],
+      } : undefined,
       dispatches: i === 29 ? [{
         itemId: 'item-29',
         title: 'Trace backend assignment',
@@ -317,6 +327,14 @@ describe('buildFleetActivity — recent ticks', () => {
       reason: 'test route',
       dispatched: true,
     });
+    expect(snap.recentTicks[0]!.proposalProduction).toMatchObject({
+      selected: 1,
+      claimed: 1,
+      dispatched: 1,
+      proposalsCreated: 0,
+      noProposalDispatches: 1,
+      reasons: [{ reason: 'test route', count: 1 }],
+    });
     // Each tick has required shape
     for (const t of snap.recentTicks) {
       expect(typeof t.ts).toBe('string');
@@ -328,6 +346,7 @@ describe('buildFleetActivity — recent ticks', () => {
       expect(t.directionReason === null || typeof t.directionReason === 'string').toBe(true);
       expect(t.autoMerge === null || typeof t.autoMerge === 'object').toBe(true);
       expect(t.remoteHandoff === null || typeof t.remoteHandoff === 'object').toBe(true);
+      expect(t.proposalProduction === null || typeof t.proposalProduction === 'object').toBe(true);
       expect(Array.isArray(t.dispatches)).toBe(true);
     }
   });

@@ -315,4 +315,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Updated browser/orchestrator/merge/autonomy tests for sanitized evidence and worktree browser verification.
 - [x] Run final full gates.
 - [x] Commit, push to `origin/master`, and verify live daemon/fleet status.
-- [ ] Next slice: expose daemon proposal-production diagnosis in Fleet/Mission Control so `proposal-starved` explains selected, dispatched, no-proposal, and error causes.
+- [x] Next slice: expose daemon proposal-production diagnosis in Fleet/Mission Control so `proposal-starved` explains selected, dispatched, no-proposal, and error causes.
+
+## Current Continuation - Proposal Production Diagnosis
+- [x] Rechecked git status, recent commits, Entire state, task plan, notes, and relevant fleet/control/dashboard code.
+- [x] Deployed explorer agents for fleet/status diagnosis, Mission Control/Fleet UI wiring, and test/API coverage.
+- [x] Added read-only `FleetStatus.proposalProduction` aggregation from recent daemon ticks: selected, claimed, dispatched, skipped, errors, proposals created, no-proposal dispatches, top reasons, and bounded recent examples.
+- [x] Folded proposal-production diagnosis into `autonomyEffectiveness.phase:"proposal-starved"` summaries and ranked `inspect-proposal-production` next actions.
+- [x] Surfaced proposal production in `ashlr fleet status`, Fleet view, Mission Control hero/cards, Fleet Dashboard production panel, and Fleet Activity tick tests.
+- [x] Added backend, CLI, control, dashboard snapshot, Fleet Activity, and static web wiring regression coverage.
+- [x] Focused verification passed: typecheck, web JS syntax check, and 103 tests across M49, M61, M90, M210, and M213.
+- [x] Run final full gates.
+- [x] Commit, push to `origin/master`, and verify live daemon/fleet status.

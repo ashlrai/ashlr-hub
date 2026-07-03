@@ -382,12 +382,13 @@ describe('logs section (M61)', () => {
   it('exposes the most recent applied autonomy direction from daemon ticks', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     mkdirSync(ashlrDir, { recursive: true });
+    const recentTickAt = new Date().toISOString();
     writeFileSync(join(ashlrDir, 'daemon.json'), JSON.stringify({
       running: true,
       pid: 123,
       startedAt: '2026-06-17T00:00:00.000Z',
-      lastTickAt: '2026-06-17T00:03:00.000Z',
-      todayDate: '2026-06-17',
+      lastTickAt: recentTickAt,
+      todayDate: recentTickAt.slice(0, 10),
       todaySpentUsd: 0.05,
       itemsProcessed: 2,
       ticks: [
@@ -401,7 +402,7 @@ describe('logs section (M61)', () => {
           directionReason: 'healthy resources',
         },
         {
-          ts: '2026-06-17T00:03:00.000Z',
+          ts: recentTickAt,
           itemsConsidered: 0,
           proposalsCreated: 0,
           spentUsd: 0,
@@ -452,7 +453,7 @@ describe('logs section (M61)', () => {
 
     const snap = await buildControlSnapshot(withFoundry({ autonomyControlLoop: true }));
     expect(snap.daemon.activeDirectionMode).toBe('verify-only');
-    expect(snap.daemon.activeDirectionAt).toBe('2026-06-17T00:03:00.000Z');
+    expect(snap.daemon.activeDirectionAt).toBe(recentTickAt);
     expect(snap.daemon.activeDirectionReason).toBe('pending proposals need verification');
     expect(snap.daemon.autonomyControlLoop).toBe(true);
     expect(snap.daemon.autonomyControlMode).toBe('executable');
@@ -462,6 +463,14 @@ describe('logs section (M61)', () => {
 	    expect(snap.logs[0]?.msg).toContain('maintenance=attempted:3,judgeCalls:2/4,judgeCapped:1,verifyBeforeJudge:2/3,verifyCapped:1,judgeEst:$0.0123,merged:0,archived:1,ttlRejected:1,invalidRejected:1');
     expect(snap.logs[0]?.msg).toContain('remoteHandoff=checked:3,merged:1,closed:1,open:0,unknown:1');
     expect(snap.logs[0]?.msg).toContain('production=selected:1,claimed:1,dispatched:1,skipped:0,errors:0,proposals:0,noProposal:1');
+    expect(snap.fleet.proposalProduction).toMatchObject({
+      selected: 1,
+      claimed: 1,
+      dispatched: 1,
+      proposalsCreated: 0,
+      noProposalDispatches: 1,
+      topReasons: [{ reason: 'test route', count: 1 }],
+    });
     const activity = await buildFleetActivity(withFoundry({ autonomyControlLoop: true }));
     expect(activity.recentTicks[0]?.proposalProduction?.noProposalDispatches).toBe(1);
     expect(snap.logs.some((entry) =>

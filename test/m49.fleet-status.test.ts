@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { AshlrConfig, EngineId } from '../src/core/types.js';
+import type { AshlrConfig, DaemonTick, EngineId } from '../src/core/types.js';
 import { buildFleetStatus } from '../src/core/fleet/status.js';
 import { formatFleetStatus } from '../src/cli/fleet.js';
 import { recordUse } from '../src/core/fleet/quota.js';
@@ -130,7 +130,7 @@ function createSignedProposal(
   );
 }
 
-function writeRunningDaemon(home: string): void {
+function writeRunningDaemon(home: string, ticks: DaemonTick[] = []): void {
   const ashlrDir = join(home, '.ashlr');
   mkdirSync(ashlrDir, { recursive: true });
   writeFileSync(
@@ -143,7 +143,7 @@ function writeRunningDaemon(home: string): void {
       todayDate: '2026-07-03',
       todaySpentUsd: 0,
       itemsProcessed: 1,
-      ticks: [],
+      ticks,
     }),
     'utf8',
   );
@@ -336,7 +336,67 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');
     mkdirSync(repo, { recursive: true });
-    writeRunningDaemon(tmpHome);
+    const recentTick: DaemonTick = {
+      ts: new Date().toISOString(),
+      itemsConsidered: 2,
+      proposalsCreated: 0,
+      spentUsd: 0.02,
+      reason: 'ok',
+      proposalProduction: {
+        selected: 2,
+        claimed: 2,
+        dispatched: 2,
+        skipped: 0,
+        errors: 0,
+        proposalsCreated: 0,
+        noProposalDispatches: 2,
+        reasons: [{ reason: 'agent returned no diff', count: 2 }],
+      },
+      dispatches: [
+        {
+          itemId: 'repo:self-heal:one',
+          title: 'Fix broken test in repo',
+          repo,
+          source: 'self',
+          backend: 'builtin',
+          tier: 'local',
+          assignedBy: 'router',
+          reason: 'agent returned no diff',
+          dispatched: true,
+          spentUsd: 0.01,
+        },
+        {
+          itemId: 'repo:self-heal:two',
+          title: 'Add missing verify command',
+          repo,
+          source: 'todo',
+          backend: 'builtin',
+          tier: 'local',
+          assignedBy: 'router',
+          reason: 'agent returned no diff',
+          dispatched: true,
+          spentUsd: 0.01,
+        },
+      ],
+    };
+    const staleTick: DaemonTick = {
+      ts: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+      itemsConsidered: 99,
+      proposalsCreated: 99,
+      spentUsd: 0,
+      reason: 'stale',
+      proposalProduction: {
+        selected: 99,
+        claimed: 99,
+        dispatched: 99,
+        skipped: 0,
+        errors: 99,
+        proposalsCreated: 99,
+        noProposalDispatches: 99,
+        reasons: [{ reason: 'stale should be ignored', count: 99 }],
+      },
+    };
+    writeRunningDaemon(tmpHome, [staleTick, recentTick]);
     writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
     writeFileSync(
       join(ashlrDir, 'backlog.json'),
@@ -373,6 +433,28 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     expect(s.autonomyEffectiveness?.summary).toContain('no pending proposals');
+    expect(s.proposalProduction).toMatchObject({
+      selected: 2,
+      claimed: 2,
+      dispatched: 2,
+      skipped: 0,
+      errors: 0,
+      proposalsCreated: 0,
+      noProposalDispatches: 2,
+      topReasons: [{ reason: 'agent returned no diff', count: 2 }],
+    });
+    expect(s.proposalProduction?.recentNoProposalDispatches).toHaveLength(2);
+    expect(s.autonomyEffectiveness?.summary).toContain('2 recent dispatch(es) produced no proposal');
+    expect(s.autonomyEffectiveness?.summary).toContain('top reason: agent returned no diff');
+    expect(s.nextActions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'inspect-proposal-production',
+          label: 'Inspect proposal production',
+          detail: expect.stringContaining('agent returned no diff'),
+        }),
+      ]),
+    );
   });
 
   it('includes queued self-heal work when the persisted backlog snapshot is stale', async () => {
@@ -755,6 +837,31 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         },
       },
       proposals: { pending: 3, frontierPending: 1, applied: 5 },
+      proposalProduction: {
+        windowHours: 24,
+        selected: 5,
+        claimed: 4,
+        dispatched: 3,
+        skipped: 1,
+        errors: 1,
+        proposalsCreated: 2,
+        noProposalDispatches: 1,
+        topReasons: [
+          { reason: 'agent returned no diff', count: 2 },
+          { reason: 'tool timeout', count: 1 },
+        ],
+        recentNoProposalDispatches: [
+          {
+            ts: '2026-06-17T00:03:00.000Z',
+            itemId: 'item-a',
+            title: 'Ship autonomy debugger',
+            repo: '/repo/a',
+            source: 'goal',
+            backend: 'builtin',
+            reason: 'agent returned no diff',
+          },
+        ],
+      },
       merges: { recent: 2 },
       nextActions: [
         {
@@ -846,6 +953,12 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('machine-B:1(+1 reclaimable)');
     expect(out).toContain('frontier pending:  1');
     expect(out).toContain('applied:           5');
+    expect(out).toContain('Proposal production:');
+    expect(out).toContain('window:    24h');
+    expect(out).toContain('queue:     selected 5, claimed 4, dispatched 3, skipped 1');
+    expect(out).toContain('output:    proposals 2, no-proposal 1, errors 1');
+    expect(out).toContain('2x agent returned no diff');
+    expect(out).toContain('recent:    builtin a Ship autonomy debugger (agent returned no diff)');
     expect(out).toContain('2 auto-merge(s)');
     expect(out).toContain('Next actions:');
     expect(out).toContain('[high] Drain ready auto-merges');
@@ -885,6 +998,8 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     });
     expect(out).not.toContain('[PAUSED');
     expect(out).toContain('(none)');
+    expect(out).toContain('Proposal production:');
+    expect(out).toContain('unavailable');
     expect(out).toContain('Autonomy direction:');
     expect(out).toContain('unavailable');
   });

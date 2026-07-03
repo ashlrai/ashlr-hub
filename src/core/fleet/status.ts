@@ -17,7 +17,7 @@
 import { existsSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
-import type { AshlrConfig, EngineId, Proposal, WorkItem } from '../types.js';
+import type { AshlrConfig, DaemonDispatchTrace, DaemonTick, EngineId, Proposal, WorkItem } from '../types.js';
 import type { SharedQueueHealth } from './shared-store.js';
 import type { AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
 import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
@@ -161,6 +161,34 @@ export interface FleetAutonomyEffectivenessStatus {
   };
 }
 
+export interface FleetProposalProductionReasonSummary {
+  reason: string;
+  count: number;
+}
+
+export interface FleetProposalProductionDispatchSummary {
+  ts: string;
+  itemId: string;
+  title: string;
+  repo: string;
+  source: WorkItem['source'];
+  backend: EngineId | null;
+  reason: string;
+}
+
+export interface FleetProposalProductionStatus {
+  windowHours: number;
+  selected: number;
+  claimed: number;
+  dispatched: number;
+  skipped: number;
+  errors: number;
+  proposalsCreated: number;
+  noProposalDispatches: number;
+  topReasons: FleetProposalProductionReasonSummary[];
+  recentNoProposalDispatches: FleetProposalProductionDispatchSummary[];
+}
+
 export interface FleetQueueNextItem {
   id: string;
   title: string;
@@ -222,6 +250,8 @@ export interface FleetStatus {
   nextActions?: FleetNextAction[];
   /** Read-only explanation of whether the autonomous loop can merge right now. */
   autonomyEffectiveness?: FleetAutonomyEffectivenessStatus;
+  /** Read-only diagnosis of recent proposal production from daemon ticks. */
+  proposalProduction?: FleetProposalProductionStatus;
   /** True when the global kill switch is engaged (fleet paused). */
   killed: boolean;
 }
@@ -310,7 +340,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     todaySpentUsd: 0,
   };
   // Recent ticks are reused for merge counting below.
-  let recentTicks: Array<{ ts?: string; merged?: number; backends?: Record<string, number> }> = [];
+  let recentTicks: DaemonTick[] = [];
   try {
     const { loadDaemonState } = await import('../daemon/state.js');
     const ds = loadDaemonState();
@@ -531,6 +561,8 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     ...(guardHealth !== undefined ? { guardHealth } : {}),
     killed,
   };
+  const proposalProduction = buildProposalProductionStatus(recentTicks);
+  if (proposalProduction) status.proposalProduction = proposalProduction;
 
   try {
     const { buildResourceStrategyReport } = await import('../autonomy/resource-strategy.js');
@@ -553,6 +585,104 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   status.nextActions = buildNextActions(status);
 
   return status;
+}
+
+function buildProposalProductionStatus(ticks: DaemonTick[]): FleetProposalProductionStatus | undefined {
+  const cutoff = Date.now() - RECENT_WINDOW_MS;
+  const recent = ticks.filter((tick) => {
+    if (!tick.proposalProduction) return false;
+    const ts = Date.parse(tick.ts);
+    return Number.isNaN(ts) || ts >= cutoff;
+  });
+  if (recent.length === 0) return undefined;
+
+  const reasons = new Map<string, number>();
+  const recentNoProposalDispatches: FleetProposalProductionDispatchSummary[] = [];
+  let selected = 0;
+  let claimed = 0;
+  let dispatched = 0;
+  let skipped = 0;
+  let errors = 0;
+  let proposalsCreated = 0;
+  let noProposalDispatches = 0;
+
+  const addReason = (reason: string, count = 1): void => {
+    const key = reason.trim() || 'unknown';
+    reasons.set(key, (reasons.get(key) ?? 0) + count);
+  };
+
+  for (const tick of recent) {
+    const production = tick.proposalProduction;
+    if (!production) continue;
+    selected += production.selected;
+    claimed += production.claimed;
+    dispatched += production.dispatched;
+    skipped += production.skipped;
+    errors += production.errors;
+    proposalsCreated += production.proposalsCreated;
+    noProposalDispatches += production.noProposalDispatches;
+    for (const reason of production.reasons ?? []) {
+      addReason(reason.reason, reason.count);
+    }
+    if (production.noProposalDispatches > 0) {
+      let examplesRemaining = production.noProposalDispatches;
+      for (const dispatch of tick.dispatches ?? []) {
+        if (examplesRemaining <= 0) break;
+        if (recentNoProposalDispatches.length >= 8) break;
+        if (!dispatch.dispatched) continue;
+        recentNoProposalDispatches.push(proposalProductionDispatchSummary(tick.ts, dispatch));
+        examplesRemaining--;
+      }
+    }
+  }
+
+  return {
+    windowHours: RECENT_WINDOW_MS / (60 * 60 * 1000),
+    selected,
+    claimed,
+    dispatched,
+    skipped,
+    errors,
+    proposalsCreated,
+    noProposalDispatches,
+    topReasons: [...reasons.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 8)
+      .map(([reason, count]) => ({ reason, count })),
+    recentNoProposalDispatches,
+  };
+}
+
+function proposalProductionDispatchSummary(
+  ts: string,
+  dispatch: DaemonDispatchTrace,
+): FleetProposalProductionDispatchSummary {
+  return {
+    ts,
+    itemId: dispatch.itemId,
+    title: dispatch.title,
+    repo: dispatch.repo,
+    source: dispatch.source,
+    backend: dispatch.backend,
+    reason: dispatch.skipReason ?? dispatch.reason,
+  };
+}
+
+function proposalProductionDiagnosis(production: FleetProposalProductionStatus): string {
+  const topReason = production.topReasons[0];
+  if (production.errors > 0) {
+    return `recent production saw ${production.errors} error(s)${topReason ? `; top reason: ${topReason.reason}` : ''}`;
+  }
+  if (production.noProposalDispatches > 0) {
+    return `${production.noProposalDispatches} recent dispatch(es) produced no proposal${topReason ? `; top reason: ${topReason.reason}` : ''}`;
+  }
+  if (production.selected > 0 && production.dispatched === 0) {
+    return `${production.selected} item(s) were selected but none dispatched${topReason ? `; top reason: ${topReason.reason}` : ''}`;
+  }
+  if (production.dispatched > 0 && production.proposalsCreated > 0) {
+    return `${production.dispatched} dispatch(es) produced ${production.proposalsCreated} proposal(s)`;
+  }
+  return topReason ? `recent production top reason: ${topReason.reason}` : 'no recent proposal-production diagnosis is available';
 }
 
 function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffectivenessStatus {
@@ -624,11 +754,15 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
     };
   }
   if (counts.pendingProposals === 0 && counts.backlogItems > 0) {
+    const production = status.proposalProduction;
+    const productionDetail = production ? proposalProductionDiagnosis(production) : null;
     return {
       phase: 'proposal-starved',
       canAutoMergeNow: false,
       bottleneck: 'proposal-production',
-      summary: `${counts.backlogItems} backlog item(s) are available, but there are no pending proposals for auto-merge.`,
+      summary: productionDetail
+        ? `${counts.backlogItems} backlog item(s) are available, but there are no pending proposals for auto-merge; ${productionDetail}.`
+        : `${counts.backlogItems} backlog item(s) are available, but there are no pending proposals for auto-merge.`,
       counts,
     };
   }
@@ -743,6 +877,15 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   }
 
   if (status.queue.backlogItems > 0 && !controlBlocked) {
+    const production = status.proposalProduction;
+    if (production && (production.errors > 0 || production.noProposalDispatches > 0 || (production.selected > 0 && production.dispatched === 0))) {
+      add({
+        id: 'inspect-proposal-production',
+        priority: production.errors > 0 ? 'high' : 'medium',
+        label: 'Inspect proposal production',
+        detail: proposalProductionDiagnosis(production),
+      });
+    }
     const top = status.queue.next?.[0];
     add({
       id: 'build-backlog',

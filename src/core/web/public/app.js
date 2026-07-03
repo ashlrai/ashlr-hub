@@ -2308,6 +2308,69 @@ function renderAutonomyEffectivenessCard(effectiveness, cls = 'ctrl-card card') 
   return card;
 }
 
+function proposalProductionWindowLabel(production) {
+  const hours = Number(production?.windowHours);
+  if (!Number.isFinite(hours) || hours <= 0) return '24h';
+  return Number.isInteger(hours) ? `${hours}h` : `${hours.toFixed(1)}h`;
+}
+
+function proposalProductionReasons(production, limit = 3) {
+  const reasons = Array.isArray(production?.topReasons) ? production.topReasons : [];
+  return reasons
+    .slice(0, limit)
+    .map((row) => `${row.count ?? 0}x ${compactFleetReason(row.reason ?? 'unknown')}`);
+}
+
+function renderProposalProductionCard(production, cls = 'ctrl-card card') {
+  if (!production) return null;
+  const noProposal = production.noProposalDispatches ?? 0;
+  const errors = production.errors ?? 0;
+  const reasons = proposalProductionReasons(production);
+  const examples = Array.isArray(production.recentNoProposalDispatches)
+    ? production.recentNoProposalDispatches.slice(0, 4)
+    : [];
+
+  const card = el('div', { cls });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Proposal Production'),
+    el('span', { cls: 'card-subtitle' },
+      errors > 0 ? `${errors} error${errors === 1 ? '' : 's'}` :
+        noProposal > 0 ? `${noProposal} no-proposal` :
+          `${production.proposalsCreated ?? 0} proposal${production.proposalsCreated === 1 ? '' : 's'}`
+    )
+  ));
+
+  const body = el('div', { cls: 'card-body' });
+  body.appendChild(infoGrid([
+    ['Window', proposalProductionWindowLabel(production)],
+    ['Selected', production.selected ?? 0],
+    ['Claimed', production.claimed ?? 0],
+    ['Dispatched', production.dispatched ?? 0],
+    ['Skipped', production.skipped ?? 0],
+    ['Proposals', production.proposalsCreated ?? 0],
+    ['No-proposal', noProposal],
+    ['Errors', errors],
+  ]));
+
+  if (reasons.length > 0) {
+    body.appendChild(el('p', { cls: 'hint' }, `Top reason: ${reasons[0]}`));
+  }
+
+  if (examples.length > 0) {
+    const list = el('div', { cls: 'ctrl-backend-list' });
+    for (const item of examples) {
+      list.appendChild(el('div', { cls: 'ctrl-backend-row', title: item.reason ?? '' },
+        el('span', { cls: 'ctrl-backend-name' }, `${item.backend ?? 'unknown'} · ${basenameFromPath(item.repo ?? '')}`),
+        el('span', { cls: 'ctrl-backend-dispatches' }, compactFleetReason(item.title ?? item.itemId ?? 'dispatch'))
+      ));
+    }
+    body.appendChild(list);
+  }
+
+  card.appendChild(body);
+  return card;
+}
+
 function renderFleetNextActionsCard(nextActions, cls = 'ctrl-card card') {
   const actions = Array.isArray(nextActions) ? nextActions : [];
   if (actions.length === 0) return null;
@@ -2442,6 +2505,9 @@ function renderFleet() {
 
   const effectivenessCard = renderAutonomyEffectivenessCard(f.autonomyEffectiveness, 'fleet-card card');
   if (effectivenessCard) section.appendChild(effectivenessCard);
+
+  const productionCard = renderProposalProductionCard(f.proposalProduction, 'fleet-card card');
+  if (productionCard) section.appendChild(productionCard);
 
   const strategicFocusCard = renderStrategicFocusCard(f.queue, 'fleet-card card');
   if (strategicFocusCard) section.appendChild(strategicFocusCard);
@@ -2805,8 +2871,12 @@ function renderControl() {
   heroMetrics.appendChild(controlMetric('Merges (24h)', merges.recent ?? '—', '#4ade80'));
   heroMetrics.appendChild(controlMetric('Evidence', autonomy?.evidencePacks ?? 0, autonomy?.denied > 0 ? '#f87171' : '#38bdf8'));
   const effectiveness = d.fleet?.autonomyEffectiveness ?? fleet.autonomyEffectiveness ?? null;
+  const production = d.fleet?.proposalProduction ?? fleet.proposalProduction ?? null;
   if (effectiveness) {
     heroMetrics.appendChild(controlMetric('Loop State', formatEffectivenessPhase(effectiveness.phase), effectivenessAccent(effectiveness.phase)));
+  }
+  if (production) {
+    heroMetrics.appendChild(controlMetric('No-prop 24h', production.noProposalDispatches ?? 0, production.noProposalDispatches > 0 ? '#f97316' : '#4ade80'));
   }
   heroMetrics.appendChild(controlMetric('Active Mode', formatDirectionMode(activeDirectionMode ?? direction?.mode ?? 'unknown'), directionAccent(activeDirectionMode ?? direction?.mode)));
   heroMetrics.appendChild(controlMetric('Control Mode', formatControlMode(daemon.autonomyControlMode), controlModeAccent(daemon.autonomyControlMode)));
@@ -2874,6 +2944,9 @@ function renderControl() {
 
   const missionEffectivenessCard = renderAutonomyEffectivenessCard(effectiveness);
   if (missionEffectivenessCard) section.appendChild(missionEffectivenessCard);
+
+  const missionProductionCard = renderProposalProductionCard(production);
+  if (missionProductionCard) section.appendChild(missionProductionCard);
 
   const missionActionsCard = renderFleetNextActionsCard(d.fleet?.nextActions ?? fleet.nextActions ?? null);
   if (missionActionsCard) section.appendChild(missionActionsCard);
@@ -3834,12 +3907,31 @@ function fdRenderActivityPanel(snap) {
 
 function fdRenderProductionPanel(snap) {
   const prod = snap.production;
+  const production = snap.fleet?.proposalProduction ?? snap.control?.fleet?.proposalProduction ?? null;
   const body = el('div', { cls: 'fd-panel__body' });
 
-  if (!prod) {
+  if (!prod && !production) {
     body.appendChild(el('p', { cls: 'hint' }, 'Production data unavailable.'));
     return body;
   }
+
+  if (production) {
+    body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Proposal production'));
+    body.appendChild(infoGrid([
+      ['Window', proposalProductionWindowLabel(production)],
+      ['Selected', production.selected ?? 0],
+      ['Dispatched', production.dispatched ?? 0],
+      ['Proposals', production.proposalsCreated ?? 0],
+      ['No-proposal', production.noProposalDispatches ?? 0],
+      ['Errors', production.errors ?? 0],
+    ]));
+    const reasons = proposalProductionReasons(production, 2);
+    if (reasons.length > 0) {
+      body.appendChild(el('p', { cls: 'hint' }, `Top reason: ${reasons.join('; ')}`));
+    }
+  }
+
+  if (!prod) return body;
 
   // ── Scorecard row: proposals + judge verdicts ─────────────────────────────
   const scorecard = el('div', { cls: 'fd-prod-scorecard' });
