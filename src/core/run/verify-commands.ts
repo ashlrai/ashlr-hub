@@ -21,13 +21,15 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import type { SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AshlrConfig } from '../types.js';
 import { renderToolText } from '../mcp-native.js';
 import { audit } from '../sandbox/audit.js';
+import { detectRepoExecutionProfile } from './repo-profile.js';
+import { buildToolPath } from './tool-path.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -60,6 +62,8 @@ export interface VerifyCommand {
   kind: 'typecheck' | 'test' | 'lint';
   /** Exact argv (executable + args). NEVER passed through a shell. */
   cmd: string[];
+  /** Optional project root to run from when the repo has nested packages. */
+  cwd?: string;
 }
 
 /** Outcome of running one VerifyCommand. */
@@ -76,73 +80,6 @@ export interface VerifyCommandResult {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Detect the package-manager runner from the lockfile present in `root`.
- * Order matters only insofar as a repo should have exactly one lockfile;
- * pnpm → yarn → bun → npm (default).
- */
-function detectPackageManager(root: string): 'pnpm' | 'yarn' | 'bun' | 'npm' {
-  if (existsSync(join(root, 'pnpm-lock.yaml'))) return 'pnpm';
-  if (existsSync(join(root, 'yarn.lock'))) return 'yarn';
-  if (existsSync(join(root, 'bun.lockb'))) return 'bun';
-  return 'npm';
-}
-
-/** Build the argv to run a package.json script named `script` via `pm`. */
-function runScriptArgv(pm: string, script: string): string[] {
-  // npm/pnpm/yarn/bun all accept `<pm> run <script>`.
-  return [pm, 'run', script];
-}
-
-/** The subset of package.json fields verification detection cares about. */
-interface PackageJson {
-  scripts?: Record<string, unknown>;
-  dependencies?: Record<string, unknown>;
-  devDependencies?: Record<string, unknown>;
-}
-
-/** Read & parse package.json once; returns the parsed object or null on any error. */
-function readPackageJson(root: string): PackageJson | null {
-  try {
-    const raw = readFileSync(join(root, 'package.json'), 'utf8');
-    return JSON.parse(raw) as PackageJson;
-  } catch {
-    return null;
-  }
-}
-
-/** Extract the string-valued scripts map from a parsed package.json; {} when absent. */
-function scriptsOf(pkg: PackageJson | null): Record<string, string> {
-  const scripts = pkg?.scripts;
-  if (!scripts || typeof scripts !== 'object') return {};
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(scripts)) {
-    if (typeof v === 'string') out[k] = v;
-  }
-  return out;
-}
-
-/** True when the parsed package.json declares `dep` in deps or devDeps. */
-function hasDep(pkg: PackageJson | null, dep: string): boolean {
-  if (!pkg) return false;
-  return (
-    (pkg.dependencies !== undefined && dep in pkg.dependencies) ||
-    (pkg.devDependencies !== undefined && dep in pkg.devDependencies)
-  );
-}
-
-/** True when a file matching `<prefix>.<ext>` exists for any common config ext. */
-function hasConfigFile(root: string, prefix: string): boolean {
-  try {
-    const entries = readdirSync(root);
-    return entries.some(
-      (f) => f === prefix || f.startsWith(`${prefix}.`),
-    );
-  } catch {
-    return false;
-  }
-}
 
 function createBoundedStreamCapture(): { append: (chunk: unknown) => void; text: () => string } {
   let head = '';
@@ -197,31 +134,7 @@ function createBoundedStreamCapture(): { append: (chunk: unknown) => void; text:
  * treats an empty list as a no-op.
  */
 export function detectVerifyCommands(workspaceRoot: string): VerifyCommand[] {
-  const commands: VerifyCommand[] = [];
-  const pkg = readPackageJson(workspaceRoot);
-  const scripts = scriptsOf(pkg);
-  const pm = detectPackageManager(workspaceRoot);
-
-  // --- typecheck ---
-  if (scripts['typecheck']) {
-    commands.push({ kind: 'typecheck', cmd: runScriptArgv(pm, 'typecheck') });
-  } else if (existsSync(join(workspaceRoot, 'tsconfig.json'))) {
-    commands.push({ kind: 'typecheck', cmd: ['npx', 'tsc', '--noEmit'] });
-  }
-
-  // --- test ---
-  if (scripts['test']) {
-    commands.push({ kind: 'test', cmd: runScriptArgv(pm, 'test') });
-  } else if (hasDep(pkg, 'vitest') || hasConfigFile(workspaceRoot, 'vitest.config')) {
-    commands.push({ kind: 'test', cmd: ['npx', 'vitest', 'run'] });
-  }
-
-  // --- lint ---
-  if (scripts['lint']) {
-    commands.push({ kind: 'lint', cmd: runScriptArgv(pm, 'lint') });
-  }
-
-  return commands;
+  return detectRepoExecutionProfile(workspaceRoot).verifyCommands;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +166,25 @@ function verifyRunnerPath(): string | null {
   return existsSync(p) ? p : null;
 }
 
+function commandRootFor(vc: VerifyCommand, workspaceRoot: string): string {
+  const root = resolve(workspaceRoot);
+  if (!vc.cwd) return root;
+  const cwd = resolve(root, vc.cwd);
+  const rel = relative(root, cwd);
+  if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) return cwd;
+  return root;
+}
+
+function formatVerifyCommand(vc: VerifyCommand, workspaceRoot: string): string {
+  const command = vc.cmd.join(' ');
+  const root = resolve(workspaceRoot);
+  const cwd = commandRootFor(vc, root);
+  const rel = relative(root, cwd);
+  return rel && !rel.startsWith('..') && !isAbsolute(rel)
+    ? `(cd ${rel} && ${command})`
+    : command;
+}
+
 function makeIsolatedVerifyEnv(baseEnv: NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv; cleanup: () => void } {
   const home = mkdtempSync(join(tmpdir(), VERIFY_HOME_PREFIX));
   const realHome = baseEnv.HOME ?? baseEnv.USERPROFILE ?? '';
@@ -280,6 +212,7 @@ export function spawnOptionsFor(
   timeout: number,
   bin?: string,
   platform: NodeJS.Platform = process.platform,
+  opts?: { extraBinRoots?: string[] },
 ): SpawnSyncOptionsWithStringEncoding {
   const isWin = platform === 'win32';
   const needsShell = isWin && bin !== undefined && WINDOWS_SHIM_BINS.has(bin);
@@ -297,11 +230,18 @@ export function spawnOptionsFor(
   //  - Use resolve() to normalise the path (handles symlinks transparently).
   //  - Never set env to undefined — always carry the full parent environment so
   //    NODE_PATH, HOME, etc. are inherited.
-  const localBin = resolve(workspaceRoot, 'node_modules', '.bin');
-  const parentPath = process.env.PATH ?? '';
-  const env: NodeJS.ProcessEnv = existsSync(localBin)
-    ? { ...process.env, PATH: `${localBin}${isWin ? ';' : ':'}${parentPath}` }
-    : { ...process.env };
+  const binRoots = [
+    workspaceRoot,
+    ...(opts?.extraBinRoots ?? []),
+  ].map((root) => resolve(root, 'node_modules', '.bin'));
+  const localBins = [...new Set(binRoots)].filter((binRoot) => existsSync(binRoot));
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: buildToolPath({
+      prepend: localBins,
+      separator: isWin ? ';' : undefined,
+    }),
+  };
 
   return {
     cwd: workspaceRoot,
@@ -333,7 +273,8 @@ export function runVerifyCommand(
   _cfg: AshlrConfig,
   opts?: { timeoutMs?: number },
 ): VerifyCommandResult {
-  const command = vc.cmd.join(' ');
+  const command = formatVerifyCommand(vc, workspaceRoot);
+  const commandRoot = commandRootFor(vc, workspaceRoot);
   const timeout = Math.min(
     MAX_TIMEOUT_MS,
     Math.max(1, opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS),
@@ -353,7 +294,9 @@ export function runVerifyCommand(
   }
 
   try {
-    const baseOptions = spawnOptionsFor(workspaceRoot, timeout, bin);
+    const baseOptions = spawnOptionsFor(commandRoot, timeout, bin, process.platform, {
+      extraBinRoots: [workspaceRoot],
+    });
     const runner = verifyRunnerPath();
     const isolated = makeIsolatedVerifyEnv(baseOptions.env ?? process.env);
     const res = (() => {
@@ -364,11 +307,11 @@ export function runVerifyCommand(
               [
                 runner,
                 String(timeout),
-                workspaceRoot,
+                commandRoot,
                 Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
               ],
               {
-                cwd: workspaceRoot,
+                cwd: commandRoot,
                 timeout: timeout + WRAPPER_TIMEOUT_GRACE_MS,
                 stdio: 'pipe',
                 encoding: 'utf8',
@@ -453,7 +396,8 @@ export async function runVerifyCommandAsync(
   _cfg: AshlrConfig,
   opts?: { timeoutMs?: number },
 ): Promise<VerifyCommandResult> {
-  const command = vc.cmd.join(' ');
+  const command = formatVerifyCommand(vc, workspaceRoot);
+  const commandRoot = commandRootFor(vc, workspaceRoot);
   const timeout = Math.min(
     MAX_TIMEOUT_MS,
     Math.max(1, opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS),
@@ -474,7 +418,9 @@ export async function runVerifyCommandAsync(
 
   let isolated: { env: NodeJS.ProcessEnv; cleanup: () => void } | null = null;
   try {
-    const baseOptions = spawnOptionsFor(workspaceRoot, timeout, bin);
+    const baseOptions = spawnOptionsFor(commandRoot, timeout, bin, process.platform, {
+      extraBinRoots: [workspaceRoot],
+    });
     const runner = verifyRunnerPath();
     isolated = makeIsolatedVerifyEnv(baseOptions.env ?? process.env);
 
@@ -484,11 +430,11 @@ export async function runVerifyCommandAsync(
           [
             runner,
             String(timeout),
-            workspaceRoot,
+            commandRoot,
             Buffer.from(JSON.stringify(vc.cmd), 'utf8').toString('base64'),
           ],
           {
-            cwd: workspaceRoot,
+            cwd: commandRoot,
             stdio: ['ignore', 'pipe', 'pipe'],
             shell: false,
             windowsHide: true,
@@ -499,7 +445,7 @@ export async function runVerifyCommandAsync(
           },
         )
       : spawn(bin, vc.cmd.slice(1), {
-          cwd: workspaceRoot,
+          cwd: commandRoot,
           stdio: ['ignore', 'pipe', 'pipe'],
           shell: baseOptions.shell === true,
           windowsHide: true,

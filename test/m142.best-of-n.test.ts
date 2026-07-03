@@ -375,3 +375,81 @@ describe('M142 — cfg.foundry.bestOfN flag', () => {
     expect(result.critique.n).toBe(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 7. DAEMON ALIGNMENT — assigned backend/model and real proposal diffs
+// ---------------------------------------------------------------------------
+
+describe('M142 — daemon routing alignment', () => {
+  afterEach(() => { vi.resetModules(); });
+
+  it('honors assigned engine and model from daemon routing', async () => {
+    const sandboxMock = makeSandboxMock({ withProposalAt: [0] });
+
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
+      runApiModelSandboxed: sandboxMock,
+    }));
+    vi.doMock('../src/core/fleet/manager.js', () => ({
+      judgeProposal: makeJudgeMock([10]),
+    }));
+
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?assigned=' + randomUUID());
+    await runBestOfN(makeItem(), makeConfig(1), {
+      n: 1,
+      engine: 'codex' as import('../src/core/types.js').EngineId,
+      model: 'gpt-5-codex',
+    });
+
+    expect(sandboxMock).toHaveBeenCalledWith(
+      'codex',
+      expect.any(String),
+      expect.any(Object),
+      expect.objectContaining({ model: 'gpt-5-codex' }),
+    );
+  });
+
+  it('judges the persisted proposal diff instead of sandbox stdout', async () => {
+    const sandboxMock = makeSandboxMock({ withProposalAt: [0] });
+    const judgeMock = vi.fn(async (proposal: { diff?: string }) => ({
+      proposalId: 'verdict-real-diff',
+      verdict: 'ship' as const,
+      value: proposal.diff === 'REAL_PROPOSAL_DIFF' ? 5 : 1,
+      correctness: 5,
+      scope: 1,
+      alignment: 5,
+      rationale: 'uses real diff',
+      wouldMerge: true,
+    }));
+
+    vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
+      runApiModelSandboxed: sandboxMock,
+    }));
+    vi.doMock('../src/core/fleet/manager.js', () => ({
+      judgeProposal: judgeMock,
+    }));
+    vi.doMock('../src/core/inbox/store.js', () => ({
+      loadProposal: vi.fn((id: string) => ({
+        id,
+        repo: MOCK_REPO,
+        origin: 'agent',
+        kind: 'patch',
+        title: 'Persisted proposal',
+        summary: 'stored diff',
+        diff: 'REAL_PROPOSAL_DIFF',
+        status: 'pending',
+        createdAt: '2026-07-02T00:00:00.000Z',
+        updatedAt: '2026-07-02T00:00:00.000Z',
+      })),
+    }));
+
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?realdiff=' + randomUUID());
+    const result = await runBestOfN(makeItem(), makeConfig(1), { n: 1 });
+
+    expect(judgeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ diff: 'REAL_PROPOSAL_DIFF' }),
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(result.winner?.diff).toBe('REAL_PROPOSAL_DIFF');
+  });
+});

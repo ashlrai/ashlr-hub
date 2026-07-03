@@ -27,6 +27,7 @@ import type { BackendAvailability, BackendResourceState } from '../fabric/resour
 import { strategicTierOfRepo, type StrategicTier } from '../ecosystem/focus.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import { loadQueuedAutonomyItems } from '../portfolio/queued-autonomy.js';
+import { detectRepoExecutionProfile, type RepoPackageManager } from '../run/repo-profile.js';
 
 export interface FleetBackendResourceStatus {
   availability: BackendAvailability | 'not-sensed';
@@ -131,6 +132,12 @@ export interface FleetQueueRepoCoverage {
   existing: number;
   withBacklog: number;
   silent: number;
+  executionProfiles?: {
+    reposWithProjects: number;
+    reposWithVerifyCommands: number;
+    reposMissingVerifyCommands: number;
+    packageManagers: Array<{ manager: RepoPackageManager; repos: number }>;
+  };
   top: Array<{ repo: string; items: number }>;
   byTier: Array<{ tier: StrategicTier; repos: number; items: number }>;
 }
@@ -343,6 +350,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       existing: enrolledRepos.size,
       withBacklog: byRepo.size,
       silent: Math.max(0, enrolledRepos.size - byRepo.size),
+      executionProfiles: buildRepoExecutionCoverage(enrolledRepos),
       byTier: (['core-fleet', 'force-multiplier', 'inventory', 'supporting'] as StrategicTier[])
         .flatMap((tier) => {
           const row = byTier.get(tier);
@@ -752,6 +760,36 @@ async function buildSharedQueueStatus(cfg: AshlrConfig): Promise<FleetSharedQueu
       lock: { present: false, ageMs: null, stale: false },
     };
   }
+}
+
+function buildRepoExecutionCoverage(enrolledRepos: ReadonlySet<string>): NonNullable<FleetQueueRepoCoverage['executionProfiles']> {
+  let reposWithProjects = 0;
+  let reposWithVerifyCommands = 0;
+  const packageManagers = new Map<RepoPackageManager, Set<string>>();
+
+  for (const repo of enrolledRepos) {
+    try {
+      const profile = detectRepoExecutionProfile(repo);
+      if (profile.projects.length > 0) reposWithProjects++;
+      if (profile.verifyCommands.length > 0) reposWithVerifyCommands++;
+      for (const project of profile.projects) {
+        const repos = packageManagers.get(project.packageManager) ?? new Set<string>();
+        repos.add(repo);
+        packageManagers.set(project.packageManager, repos);
+      }
+    } catch {
+      // Read-only observability only; a broken profile scan should not hide queue status.
+    }
+  }
+
+  return {
+    reposWithProjects,
+    reposWithVerifyCommands,
+    reposMissingVerifyCommands: Math.max(0, enrolledRepos.size - reposWithVerifyCommands),
+    packageManagers: [...packageManagers.entries()]
+      .map(([manager, repos]) => ({ manager, repos: repos.size }))
+      .sort((a, b) => b.repos - a.repos || a.manager.localeCompare(b.manager)),
+  };
 }
 
 function configCooldownMs(cfg: AshlrConfig): number | undefined {

@@ -334,7 +334,7 @@ function buildNullForecast(): CostForecast {
 // ---------------------------------------------------------------------------
 
 /** Ordered preference for demote cascade: frontier first, then mid, then local. */
-const DEMOTE_CASCADE: EngineId[] = ['claude', 'codex', 'nim', 'builtin'];
+const DEMOTE_CASCADE: EngineId[] = ['claude', 'codex', 'nim', 'local-coder', 'builtin'];
 
 /**
  * Hard items: effort >= 4 or source === 'escalation'.

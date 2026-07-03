@@ -233,12 +233,13 @@ describe('M170 — best-of-N dispatch: bestOfN > 1 routes through runBestOfN', (
     const [passedItem, passedCfg, passedOpts] = mockRunBestOfN.mock.calls[0] as [
       { id: string; source: string },
       unknown,
-      { n: number; workItemId: string; workSource: string },
+      { n: number; engine: string; model?: string | null; workItemId: string; workSource: string },
     ];
     expect(typeof passedItem).toBe('object');
     expect(passedCfg).toBe(cfg);
     expect(passedOpts).toMatchObject({
       n: 5,
+      engine: 'claude',
       workItemId: passedItem.id,
       workSource: passedItem.source,
     });

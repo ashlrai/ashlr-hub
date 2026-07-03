@@ -1599,8 +1599,10 @@ describe('M201 — Group G: concurrent dispatch routing wire guards', () => {
     const source = fs.readFileSync(new URL('../src/core/daemon/loop.ts', import.meta.url), 'utf8');
 
     expect(source).toContain('const routeReasons = new Map<string, string>();');
+    expect(source).toContain('const routeModels = new Map<string, string | null>();');
     expect(source).toContain('routeReasons.set(workedSet[i]!.id, d.value.reason);');
-    expect(source).toContain('return taskEntry.run(_backend, routeReasons.get(item.id));');
+    expect(source).toContain('routeModels.set(workedSet[i]!.id, d.value.model ?? null);');
+    expect(source).toContain('return taskEntry.run(_backend, routeReasons.get(item.id), routeModels.get(item.id));');
   });
 
   it('G2: assigned gateway resource-pause decisions skip instead of dispatching', () => {

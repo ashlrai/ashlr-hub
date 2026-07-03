@@ -93,6 +93,17 @@ export function formatFleetStatus(s: FleetStatus): string {
         .join(', ');
       lines.push(`  focus tiers:   ${tierSummary}`);
     }
+    if (repoCoverage.executionProfiles) {
+      const profile = repoCoverage.executionProfiles;
+      const managers = profile.packageManagers
+        .slice(0, 4)
+        .map((row) => `${row.manager}:${row.repos}`)
+        .join(', ');
+      lines.push(
+        `  verify roots:   ${profile.reposWithVerifyCommands}/${repoCoverage.existing} repos ` +
+          `(${profile.reposMissingVerifyCommands} missing${managers ? `; ${managers}` : ''})`,
+      );
+    }
   }
   if (Array.isArray(s.queue.next) && s.queue.next.length > 0) {
     for (const item of s.queue.next.slice(0, 5)) {

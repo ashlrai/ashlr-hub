@@ -11,7 +11,7 @@
  * Flag-off parity: cfg.foundry.bestOfN defaults to 1 → identical to a single run.
  */
 
-import type { AshlrConfig, WorkItem, Proposal, WorkSource } from '../types.js';
+import type { AshlrConfig, WorkItem, Proposal, WorkSource, EngineId } from '../types.js';
 import type { ManagerVerdict } from '../fleet/manager.js';
 import type { TasteScore } from '../fleet/taste-critic.js';
 
@@ -122,7 +122,7 @@ function syntheticProposal(item: WorkItem, diff: string, index: number): Proposa
 export async function runBestOfN(
   item: WorkItem,
   cfg: AshlrConfig,
-  opts?: { n?: number; workItemId?: string; workSource?: WorkSource },
+  opts?: { n?: number; workItemId?: string; workSource?: WorkSource; engine?: EngineId; model?: string | null },
 ): Promise<BestOfNResult | { winner: undefined; candidates: CandidateResult[]; critique: BestOfNResult['critique'] }> {
   const n = readN(cfg, opts?.n);
   const goal = goalFor(item);
@@ -174,6 +174,14 @@ export async function runBestOfN(
     }
   }
 
+  let loadProposal: typeof import('../inbox/store.js').loadProposal | undefined;
+  try {
+    const mod = await import('../inbox/store.js');
+    loadProposal = mod.loadProposal;
+  } catch {
+    // Inbox unavailable in tests/partial builds — fall back to synthetic diffs.
+  }
+
   // ── 4. Choose engine ────────────────────────────────────────────────────
   // Engine selection priority:
   //   1. Use 'local-coder' if it appears in cfg.foundry.allowedBackends.
@@ -181,6 +189,7 @@ export async function runBestOfN(
   //   3. If allowedBackends is empty, default to 'local-coder'.
   // If runSandboxed is unavailable we can't generate candidates — they will all error below.
   const engine = (() => {
+    if (opts?.engine) return opts.engine;
     const allowed = cfg.foundry?.allowedBackends ?? [];
     // Prefer 'local-coder' if explicitly allowed
     if (allowed.includes('local-coder' as import('../types.js').EngineId)) {
@@ -205,6 +214,7 @@ export async function runBestOfN(
 
     try {
       const result = await runSandboxed(engine as import('../types.js').EngineId, goal, cfg, {
+        ...(typeof opts?.model === 'string' ? { model: opts.model } : {}),
         sourceRepo,
         propose: true,
         runId: `best-of-n-${i}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
@@ -247,11 +257,17 @@ export async function runBestOfN(
       let verdict: ManagerVerdict | undefined;
       let score = 0;
       let testsPassed: boolean | undefined;
+      let proposalForCritic: Proposal | undefined;
+      try {
+        proposalForCritic = loadProposal?.(c.proposalId) ?? undefined;
+      } catch {
+        proposalForCritic = undefined;
+      }
+      const proposal = proposalForCritic ?? syntheticProposal(item, c.diff, c.index);
 
       // Score via judge
       if (judgeProposal) {
         try {
-          const proposal = syntheticProposal(item, c.diff, c.index);
           verdict = await judgeProposal(proposal, cfg, judgeClient);
           score = scoreVerdict(verdict);
         } catch {
@@ -274,7 +290,6 @@ export async function runBestOfN(
       let taste: TasteScore | undefined;
       if (scoreTaste && c.proposalId) {
         try {
-          const proposal = syntheticProposal(item, c.diff, c.index);
           taste = await scoreTaste(
             proposal,
             { repo: sourceRepo },
@@ -285,7 +300,7 @@ export async function runBestOfN(
         }
       }
 
-      return { ...c, verdict, score, testsPassed, taste };
+      return { ...c, diff: proposal.diff ?? c.diff, verdict, score, testsPassed, taste };
     }),
   );
 

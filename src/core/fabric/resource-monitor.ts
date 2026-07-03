@@ -147,6 +147,7 @@ export function peekBackendAvailability(backend: EngineId): BackendAvailability 
 interface SnapshotCache {
   snapshot: ResourceSnapshot;
   expiresAt: number;
+  key: string;
 }
 
 let _snapshotCache: SnapshotCache | null = null;
@@ -311,6 +312,19 @@ function extractResourceCfg(cfg: unknown): ResourceCfgShape {
   } catch {
     return {};
   }
+}
+
+function resourceSnapshotCacheKey(cfg: unknown, backends: EngineId[]): string {
+  const rcfg = extractResourceCfg(cfg);
+  return JSON.stringify({
+    backends,
+    claude: rcfg.claude ?? null,
+    overrides: rcfg.overrides ?? null,
+    protectPct: rcfg.protectPct ?? null,
+    nim: rcfg.nim ?? null,
+    local: rcfg.local ?? null,
+    ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? null,
+  });
 }
 
 function parseOverrideResetAt(override: ResourceOverrideCfg): number | null {
@@ -1084,15 +1098,15 @@ function ollamaPs(baseUrl: string): Promise<{ models: unknown[] } | null> {
   });
 }
 
-async function senseLocalState(rcfg: ResourceCfgShape): Promise<BackendResourceState> {
+async function senseOllamaState(backend: EngineId, rcfg: ResourceCfgShape): Promise<BackendResourceState> {
   const now = new Date().toISOString();
-  const backoff = backoffStore.get('builtin'); // local uses 'builtin' or its own engine id
+  const backoff = backoffStore.get(backend);
   const maxConcurrent = rcfg.local?.maxConcurrent ?? 1;
-  const baseUrl = rcfg.local?.baseUrl ?? 'http://localhost:11434';
+  const baseUrl = rcfg.local?.baseUrl ?? process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434';
 
   if (backoff && backoff.until > Date.now()) {
     return {
-      backend: 'builtin',
+      backend,
       availability: 'throttled',
       usedPct: null,
       cap: maxConcurrent,
@@ -1111,7 +1125,7 @@ async function senseLocalState(rcfg: ResourceCfgShape): Promise<BackendResourceS
     const ps = await ollamaPs(baseUrl);
     if (ps === null) {
       return {
-        backend: 'builtin',
+        backend,
         availability: 'unreachable',
         usedPct: null,
         cap: maxConcurrent,
@@ -1135,7 +1149,7 @@ async function senseLocalState(rcfg: ResourceCfgShape): Promise<BackendResourceS
       : `ollama idle: ${activeCount}/${maxConcurrent} concurrent`;
 
     return {
-      backend: 'builtin',
+      backend,
       availability,
       usedPct,
       cap: maxConcurrent,
@@ -1151,7 +1165,7 @@ async function senseLocalState(rcfg: ResourceCfgShape): Promise<BackendResourceS
   } catch {
     // Never block on Ollama health check failure — it's optional infrastructure
     return {
-      backend: 'builtin',
+      backend,
       availability: 'open',
       usedPct: null,
       cap: maxConcurrent,
@@ -1205,7 +1219,8 @@ export async function getBackendResourceState(
       case 'claude':    return await senseClaudeState(rcfg);
       case 'codex':     return senseCodexState();
       case 'nim':       return senseNimState(rcfg);
-      case 'builtin':   return await senseLocalState(rcfg);
+      case 'builtin':   return builtinState('builtin');
+      case 'local-coder': return await senseOllamaState('local-coder', rcfg);
       default:          return builtinState(backend);
     }
   } catch {
@@ -1251,13 +1266,8 @@ export async function getResourceSnapshot(cfg: unknown): Promise<ResourceSnapsho
   try {
     const now = Date.now();
 
-    // Return cached snapshot if fresh
-    if (_snapshotCache && _snapshotCache.expiresAt > now) {
-      return _snapshotCache.snapshot;
-    }
-
     // Determine which backends to sense (based on allowedBackends config)
-    const backendsToSense: EngineId[] = ['claude', 'codex', 'nim', 'builtin'];
+    const backendsToSense: EngineId[] = ['claude', 'codex', 'nim', 'local-coder', 'builtin'];
     try {
       if (typeof cfg === 'object' && cfg !== null) {
         const foundry = (cfg as Record<string, unknown>)['foundry'];
@@ -1267,19 +1277,26 @@ export async function getResourceSnapshot(cfg: unknown): Promise<ResourceSnapsho
             // Sense only configured backends + builtin (always)
             const configuredSet = new Set<EngineId>(
               (allowed as string[]).filter((b): b is EngineId =>
-                ['builtin', 'claude', 'codex', 'nim', 'ashlrcode', 'aw', 'hermes', 'opencode'].includes(b)
+                ['builtin', 'local-coder', 'claude', 'codex', 'nim', 'ashlrcode', 'aw', 'hermes', 'opencode'].includes(b)
               )
             );
             configuredSet.add('builtin');
             // Replace with configured set but keep all unique
             backendsToSense.splice(0, backendsToSense.length,
-              ...(['claude', 'codex', 'nim', 'builtin'] as EngineId[]).filter(b => configuredSet.has(b))
+              ...(['claude', 'codex', 'nim', 'local-coder', 'builtin'] as EngineId[]).filter(b => configuredSet.has(b))
             );
           }
         }
       }
     } catch {
       // Use default list
+    }
+
+    const cacheKey = resourceSnapshotCacheKey(cfg, backendsToSense);
+
+    // Return cached snapshot if fresh and built for equivalent resource config.
+    if (_snapshotCache && _snapshotCache.expiresAt > now && _snapshotCache.key === cacheKey) {
+      return _snapshotCache.snapshot;
     }
 
     const states = await Promise.all(
@@ -1301,7 +1318,7 @@ export async function getResourceSnapshot(cfg: unknown): Promise<ResourceSnapsho
       backends,
     };
 
-    _snapshotCache = { snapshot, expiresAt: now + CACHE_TTL_MS };
+    _snapshotCache = { snapshot, expiresAt: now + CACHE_TTL_MS, key: cacheKey };
     return snapshot;
   } catch {
     // Belt-and-suspenders: return a safe fallback snapshot

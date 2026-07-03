@@ -10,8 +10,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { delimiter, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type {
   RunTask,
@@ -120,6 +120,84 @@ describe('detectVerifyCommands', () => {
       const test = cmds.find((c) => c.kind === 'test');
       expect(tc?.cmd).toEqual(['pnpm', 'run', 'typecheck']);
       expect(test?.cmd).toEqual(['pnpm', 'run', 'test']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses bun when a modern bun.lock file is present', () => {
+    const dir = makeFixture();
+    try {
+      writePkg(dir, { scripts: { typecheck: 'tsc --noEmit', test: 'vitest' } });
+      writeFileSync(join(dir, 'bun.lock'), '# bun lockfile\n', 'utf8');
+      const cmds = detectVerifyCommands(dir);
+
+      const tc = cmds.find((c) => c.kind === 'typecheck');
+      const test = cmds.find((c) => c.kind === 'test');
+      expect(tc?.cmd).toEqual(['bun', 'run', 'typecheck']);
+      expect(test?.cmd).toEqual(['bun', 'run', 'test']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses check/build scripts as typecheck fallbacks', () => {
+    const dir = makeFixture();
+    try {
+      writePkg(dir, { scripts: { check: 'biome check .', test: 'bun test' } });
+      const cmds = detectVerifyCommands(dir);
+      const tc = cmds.find((c) => c.kind === 'typecheck');
+      expect(tc?.cmd).toEqual(['npm', 'run', 'check']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('discovers nested package roots when the repo root has no manifest', () => {
+    const dir = makeFixture();
+    try {
+      const server = join(dir, 'server');
+      mkdirSync(server, { recursive: true });
+      writePkg(server, { scripts: { typecheck: 'tsc --noEmit', test: 'vitest' } });
+      writeFileSync(join(server, 'bun.lock'), '# bun lockfile\n', 'utf8');
+
+      const cmds = detectVerifyCommands(dir);
+
+      expect(cmds).toHaveLength(2);
+      expect(cmds[0]).toMatchObject({ kind: 'typecheck', cmd: ['bun', 'run', 'typecheck'], cwd: server });
+      expect(cmds[1]).toMatchObject({ kind: 'test', cmd: ['bun', 'run', 'test'], cwd: server });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('detects cargo verification commands for Rust repos', () => {
+    const dir = makeFixture();
+    try {
+      writeFileSync(join(dir, 'Cargo.toml'), '[package]\nname = "rusty"\nversion = "0.1.0"\n', 'utf8');
+
+      const cmds = detectVerifyCommands(dir);
+
+      expect(cmds).toEqual([
+        { kind: 'typecheck', cmd: ['cargo', 'check'] },
+        { kind: 'test', cmd: ['cargo', 'test'] },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('detects bats tests for shell-only repos', () => {
+    const dir = makeFixture();
+    try {
+      mkdirSync(join(dir, 'tests'), { recursive: true });
+      writeFileSync(join(dir, 'tests', 'smoke.bats'), '@test "smoke" { true; }\n', 'utf8');
+
+      const cmds = detectVerifyCommands(dir);
+
+      expect(cmds).toEqual([
+        { kind: 'test', cmd: ['bats', join('tests', 'smoke.bats')] },
+      ]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -239,6 +317,19 @@ describe('runVerifyCommand', () => {
     expect(env.realHome.length).toBeGreaterThan(0);
     expect(resolve(env.realHome)).not.toBe(resolve(env.home));
     expect(existsSync(realMarker)).toBe(false);
+  });
+
+  it('runs nested verification commands from their project cwd', () => {
+    const nested = join(workdir, 'apps', 'web');
+    mkdirSync(nested, { recursive: true });
+    const script = 'console.log(process.cwd().split(/[\\\\/]/).slice(-2).join("/"))';
+    const vc: VerifyCommand = { kind: 'test', cmd: ['node', '-e', script], cwd: nested };
+
+    const res = runVerifyCommand(vc, workdir, cfg);
+
+    expect(res.ok).toBe(true);
+    expect(res.output.trim()).toBe('apps/web');
+    expect(res.command).toContain('cd apps/web');
   });
 
   it('never throws on a missing binary — returns ok:false', () => {
@@ -387,6 +478,25 @@ describe('spawnOptionsFor', () => {
   it('defaults platform to process.platform', () => {
     const opts = spawnOptionsFor(workdir, 120_000, 'npm');
     expect(opts.shell).toBe(process.platform === 'win32');
+  });
+
+  it('prepends nested and repo-local binaries before common tool paths', () => {
+    const nested = join(workdir, 'apps', 'web');
+    const nestedBin = join(nested, 'node_modules', '.bin');
+    const rootBin = join(workdir, 'node_modules', '.bin');
+    mkdirSync(nestedBin, { recursive: true });
+    mkdirSync(rootBin, { recursive: true });
+
+    const opts = spawnOptionsFor(nested, 120_000, 'bun', process.platform, {
+      extraBinRoots: [workdir],
+    });
+    const pathEntries = String(opts.env?.PATH ?? '').split(delimiter);
+
+    expect(pathEntries[0]).toBe(resolve(nestedBin));
+    expect(pathEntries[1]).toBe(resolve(rootBin));
+    expect(pathEntries).toContain(join(process.env.HOME ?? '', '.cargo', 'bin'));
+    expect(pathEntries).toContain(join(process.env.HOME ?? '', '.bun', 'bin'));
+    expect(pathEntries).toContain('/opt/homebrew/bin');
   });
 });
 

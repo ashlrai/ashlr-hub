@@ -170,9 +170,11 @@ describe('generateServiceDefinition — darwin (launchd)', () => {
     expect(clamped.content).toContain('<integer>5</integer>');
   });
 
-  it('plist PATH env includes ~/.local/bin and /opt/homebrew/bin', () => {
+  it('plist PATH env includes common developer tool bins', () => {
     const def = generateServiceDefinition(baseOpts('darwin'));
     expect(def.content).toContain(path.join(FAKE_HOME, '.local', 'bin'));
+    expect(def.content).toContain(path.join(FAKE_HOME, '.cargo', 'bin'));
+    expect(def.content).toContain(path.join(FAKE_HOME, '.bun', 'bin'));
     expect(def.content).toContain('/opt/homebrew/bin');
   });
 
@@ -248,6 +250,14 @@ describe('generateServiceDefinition — linux (systemd)', () => {
   it('unit HOME env is set', () => {
     const def = generateServiceDefinition(baseOpts('linux'));
     expect(def.content).toContain(`Environment=HOME=${FAKE_HOME}`);
+  });
+
+  it('unit PATH env includes common developer tool bins', () => {
+    const def = generateServiceDefinition(baseOpts('linux'));
+    expect(def.content).toContain(`Environment=PATH=${path.join(FAKE_HOME, '.local', 'bin')}`);
+    expect(def.content).toContain(path.join(FAKE_HOME, '.cargo', 'bin'));
+    expect(def.content).toContain(path.join(FAKE_HOME, '.bun', 'bin'));
+    expect(def.content).toContain('/opt/homebrew/bin');
   });
 
   it('unit log path under CONFIG_DIR', () => {

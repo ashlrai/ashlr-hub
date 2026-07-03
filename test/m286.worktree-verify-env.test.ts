@@ -17,7 +17,7 @@
  *   - worktree without source node_modules: no symlink created, no error
  *   - worktree already has node_modules: symlink NOT clobbered
  *   - spawnOptionsFor: injects local .bin into PATH when node_modules/.bin exists
- *   - spawnOptionsFor: no PATH injection when node_modules/.bin absent
+ *   - spawnOptionsFor: common developer tool PATHs exist even when .bin absent
  *   - spawnOptionsFor: existing tests still pass (shell/platform behaviour intact)
  *   - verify command resolves tsc via symlinked node_modules (integration smoke)
  *   - node_modules NOT captured in sandboxDiff (gitignored, not staged)
@@ -236,27 +236,25 @@ describe('M286 spawnOptionsFor — PATH injection', () => {
       const envPath = (opts.env as NodeJS.ProcessEnv).PATH ?? '';
       // The local .bin must be the first component
       expect(envPath.startsWith(path.resolve(localBin))).toBe(true);
-      // The rest of the path still contains the parent PATH
-      const parentPath = process.env.PATH ?? '';
-      if (parentPath) {
-        expect(envPath).toContain(parentPath);
-      }
+      const parentPathEntry = (process.env.PATH ?? '').split(':').find(Boolean);
+      if (parentPathEntry) expect(envPath.split(':')).toContain(parentPathEntry);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('does NOT inject PATH when node_modules/.bin is absent', () => {
+  it('does NOT prepend workspace .bin when absent but still includes tool paths', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'm286-spawn-nobin-'));
     try {
       const opts = spawnOptionsFor(dir, 30_000, 'npm', 'linux');
-      // env is still set (process.env copy) but PATH should equal the parent
       const envPath = (opts.env as NodeJS.ProcessEnv | undefined)?.PATH ?? '';
-      const parentPath = process.env.PATH ?? '';
-      // Must not have a local .bin prepended
-      expect(envPath.startsWith(path.join(dir, 'node_modules', '.bin'))).toBe(false);
-      // Must equal parent PATH
-      expect(envPath).toBe(parentPath);
+      const entries = envPath.split(':');
+
+      expect(entries).not.toContain(path.resolve(path.join(dir, 'node_modules', '.bin')));
+      expect(entries).toContain(path.join(process.env.HOME ?? '', '.cargo', 'bin'));
+      expect(entries).toContain(path.join(process.env.HOME ?? '', '.bun', 'bin'));
+      const parentPathEntry = (process.env.PATH ?? '').split(':').find(Boolean);
+      if (parentPathEntry) expect(entries).toContain(parentPathEntry);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

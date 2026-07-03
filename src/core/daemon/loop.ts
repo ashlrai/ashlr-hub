@@ -1213,9 +1213,9 @@ export async function tick(
     return poolTierOf(engineTier);
   });
 
-  const tasks: Array<{ tier: 'local' | 'cloud'; run: (assignedBackend?: EngineId, assignedReason?: string) => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => ({
+  const tasks: Array<{ tier: 'local' | 'cloud'; run: (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null) => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => ({
     tier: itemTiers[_taskIdx] ?? 'local',
-    run: async (assignedBackend?: EngineId, assignedReason?: string): Promise<ItemOutcome> => {
+    run: async (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null): Promise<ItemOutcome> => {
       // Re-check kill switch before each item dispatch.
       if (killSwitchOn()) {
         return {
@@ -1311,6 +1311,7 @@ export async function tick(
         }
         backend = assignedBackend;
         backendTier = engineTierOf(backend, routingCfg);
+        selectedModel = assignedModel;
         assignmentReason = assignedReason ?? `concurrent planner assigned ${backend}`;
         assignedBy = 'concurrent-planner';
       } else if (routingCfg.foundry?.fabric?.gateway === true) {
@@ -1619,6 +1620,8 @@ export async function tick(
           // and we fall through to a zero-cost no-proposal outcome.
           const bonResult = await runBestOfN(item, routingCfg, {
             n: bestOfN,
+            engine: backend,
+            model: selectedModel,
             workItemId: item.id,
             workSource: item.source,
           });
@@ -1797,6 +1800,7 @@ export async function tick(
     // Build routing hints in parallel via gateway.decide, then call the pure planner.
     const routeHints = new Map<string, EngineId>();
     const routeReasons = new Map<string, string>();
+    const routeModels = new Map<string, string | null>();
     if (routingCfg.foundry?.fabric?.gateway === true) {
       const gds = await Promise.allSettled(
         workedSet.map((item) => gatewayDecide(item, routingCfg, { spentUsd: tickSpent + state.todaySpentUsd }))
@@ -1806,6 +1810,7 @@ export async function tick(
         if (d?.status === 'fulfilled') {
           routeHints.set(workedSet[i]!.id, d.value.backend);
           routeReasons.set(workedSet[i]!.id, d.value.reason);
+          routeModels.set(workedSet[i]!.id, d.value.model ?? null);
         }
       }
     }
@@ -1826,7 +1831,7 @@ export async function tick(
         // We look up by item.id to reuse the existing tasks[] entries which
         // already capture tickSpent/state/liveCfg via closure.
         const taskEntry = tasks.find((_t, idx) => workedSet[idx]?.id === item.id);
-	        if (taskEntry) return taskEntry.run(_backend, routeReasons.get(item.id));
+	        if (taskEntry) return taskEntry.run(_backend, routeReasons.get(item.id), routeModels.get(item.id));
 	        // Fallback: build a minimal no-op outcome (item not in tasks — shouldn't happen).
 	        return {
 	          item,

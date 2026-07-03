@@ -267,6 +267,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       existing: 1,
       withBacklog: 1,
       silent: 0,
+      executionProfiles: {
+        reposWithProjects: 0,
+        reposWithVerifyCommands: 0,
+        reposMissingVerifyCommands: 1,
+        packageManagers: [],
+      },
       byTier: [{ tier: 'inventory', repos: 1, items: 2 }],
       top: [{ repo, items: 2 }],
     });
@@ -359,19 +365,18 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(claude.dispatchesRecent).toBe(0);
   });
 
-  it('includes resource availability for allowed backends and marks unsensed backends', async () => {
+  it('includes resource availability for allowed local backends', async () => {
     const cfg = withFoundry({ allowedBackends: ['builtin', 'local-coder'] });
     const s = await buildFleetStatus(cfg);
     const builtin = s.backends.find((b) => b.backend === 'builtin')!;
     const localCoder = s.backends.find((b) => b.backend === 'local-coder')!;
 
-    expect(['open', 'near']).toContain(builtin.resource?.availability);
-    expect(localCoder.resource).toMatchObject({
-      availability: 'not-sensed',
-      usedPct: null,
-      cap: null,
-      reason: expect.any(String),
-    });
+    expect(builtin.resource?.availability).toBe('open');
+    expect(builtin.resource?.reason).toMatch(/always available/i);
+    expect(['open', 'near', 'unreachable']).toContain(localCoder.resource?.availability);
+    expect(localCoder.resource?.availability).not.toBe('not-sensed');
+    expect(localCoder.resource?.cap).toBe(1);
+    expect(localCoder.resource?.capUnit).toBe('concurrent');
   });
 
   it('dispatchesRecent reflects recorded quota uses', async () => {
@@ -575,6 +580,15 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
           existing: 3,
           withBacklog: 2,
           silent: 1,
+          executionProfiles: {
+            reposWithProjects: 3,
+            reposWithVerifyCommands: 2,
+            reposMissingVerifyCommands: 1,
+            packageManagers: [
+              { manager: 'bun', repos: 1 },
+              { manager: 'cargo', repos: 1 },
+            ],
+          },
           byTier: [
             { tier: 'core-fleet', repos: 1, items: 5 },
             { tier: 'supporting', repos: 1, items: 2 },
@@ -668,6 +682,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('repos:         2/3 active (3 enrolled, 1 silent)');
     expect(out).toContain('top repos:     a:5, b:2');
     expect(out).toContain('focus tiers:   core-fleet:1r/5i, supporting:1r/2i');
+    expect(out).toContain('verify roots:   2/3 repos (1 missing; bun:1, cargo:1)');
     expect(out).toContain('next:          Ship autonomy debugger (goal, score 5)');
     expect(out).toContain('shared:        ok / 2 active / 1 owned / 1 reclaimable / 2 cooling / stale lock');
     expect(out).toContain('machine-A:1');

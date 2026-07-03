@@ -469,8 +469,7 @@ describe('M250 ResourceMonitor — NIM backoff store', () => {
 // ---------------------------------------------------------------------------
 
 describe('M250 ResourceMonitor — Ollama health (never-throw contract)', () => {
-  it('returns a defined state for builtin — never throws', async () => {
-    // Ollama is not running in test env; resource-monitor must handle gracefully.
+  it('returns builtin as always-open without probing Ollama', async () => {
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),
     }));
@@ -481,13 +480,13 @@ describe('M250 ResourceMonitor — Ollama health (never-throw contract)', () => 
       local: { maxConcurrent: 1, baseUrl: 'http://localhost:11434' },
     });
 
-    // Should not throw; returns either 'open' (timeout → catch → open) or 'unreachable'
     const state = await getBackendResourceState('builtin', cfg);
     expect(state).toBeDefined();
     expect(state.backend).toBe('builtin');
-    expect(['open', 'unreachable', 'near', 'unknown']).toContain(state.availability);
-    expect(state.cap).toBe(1);
-    expect(state.capUnit).toBe('concurrent');
+    expect(state.availability).toBe('open');
+    expect(state.cap).toBeNull();
+    expect(state.capUnit).toBeNull();
+    expect(state.reason).toMatch(/always available/i);
   });
 
   it('builtin always has costPerMTokenOut=0', async () => {
@@ -498,6 +497,26 @@ describe('M250 ResourceMonitor — Ollama health (never-throw contract)', () => 
     const { getBackendResourceState } = await import('../src/core/fabric/resource-monitor.js');
 
     const state = await getBackendResourceState('builtin', baseCfg());
+    expect(state.costPerMTokenOut).toBe(0);
+  });
+
+  it('local-coder uses the Ollama-backed local resource sensor', async () => {
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue(null),
+    }));
+
+    const { getBackendResourceState } = await import('../src/core/fabric/resource-monitor.js');
+    const cfg = withFoundry({
+      allowedBackends: ['local-coder'] as EngineId[],
+      local: { maxConcurrent: 2, baseUrl: 'http://127.0.0.1:9' },
+    });
+
+    const state = await getBackendResourceState('local-coder', cfg);
+
+    expect(state.backend).toBe('local-coder');
+    expect(['open', 'near', 'unreachable', 'throttled']).toContain(state.availability);
+    expect(state.cap).toBe(2);
+    expect(state.capUnit).toBe('concurrent');
     expect(state.costPerMTokenOut).toBe(0);
   });
 });
@@ -532,6 +551,25 @@ describe('M250 ResourceMonitor — graceful degradation when all sources fail', 
     }
   });
 
+  it('getResourceSnapshot includes allowed local-coder as a sensed backend', async () => {
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue(null),
+    }));
+
+    const { getResourceSnapshot } = await import('../src/core/fabric/resource-monitor.js');
+    const cfg = withFoundry({
+      allowedBackends: ['local-coder', 'builtin'] as EngineId[],
+      local: { maxConcurrent: 2, baseUrl: 'http://127.0.0.1:9' },
+    });
+
+    const snap = await getResourceSnapshot(cfg);
+    const localCoder = snap.backends.find((b) => b.backend === 'local-coder');
+
+    expect(localCoder).toBeDefined();
+    expect(localCoder?.cap).toBe(2);
+    expect(localCoder?.capUnit).toBe('concurrent');
+  });
+
   it('snapshot cache: second call within TTL returns same generatedAt', async () => {
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),
@@ -545,6 +583,29 @@ describe('M250 ResourceMonitor — graceful degradation when all sources fail', 
 
     // Both came from same cache slot → same generatedAt
     expect(snap1.generatedAt).toBe(snap2.generatedAt);
+  });
+
+  it('snapshot cache is keyed by allowed backends and local resource config', async () => {
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue(null),
+    }));
+
+    const { getResourceSnapshot } = await import('../src/core/fabric/resource-monitor.js');
+
+    const builtinOnly = await getResourceSnapshot(
+      withFoundry({ allowedBackends: ['builtin'] as EngineId[] }),
+    );
+    const withLocalCoder = await getResourceSnapshot(
+      withFoundry({
+        allowedBackends: ['builtin', 'local-coder'] as EngineId[],
+        local: { maxConcurrent: 3, baseUrl: 'http://127.0.0.1:9' },
+      }),
+    );
+
+    expect(builtinOnly.backends.map((b) => b.backend)).toEqual(['builtin']);
+    const localCoder = withLocalCoder.backends.find((b) => b.backend === 'local-coder');
+    expect(localCoder).toBeDefined();
+    expect(localCoder?.cap).toBe(3);
   });
 
   it('recordBackoff invalidates the cache', async () => {
@@ -680,6 +741,45 @@ describe('M252 Gateway — resource-aware demote', () => {
     expect(decision.demotedFrom).toBe('claude');
     expect(decision.resourceState?.availability).toBe('unknown');
     expect(decision.reason).toMatch(/resourceDemote: claude→codex/i);
+  });
+
+  it('resourceAware=true can demote exhausted claude to open local-coder before builtin', async () => {
+    writeFileSync(
+      join(tmpHome, '.claude', 'stats-cache.json'),
+      JSON.stringify({
+        version: 1,
+        dailyActivity: [{ date: '2000-01-01', messageCount: 1 }],
+        lastComputedDate: '2000-01-01',
+      }),
+    );
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue(null),
+    }));
+    vi.doMock('../src/core/run/engines.js', async () => ({
+      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
+        '../src/core/run/engines.js',
+      )),
+      engineInstalled: () => true,
+    }));
+
+    const { decide } = await import('../src/core/fabric/gateway.js');
+    const cfg = withFoundry({
+      allowedBackends: ['claude', 'local-coder', 'builtin'] as EngineId[],
+      fabric: { gateway: true, resourceAware: true },
+      claudeResource: { weeklyMessageCap: 2000 },
+      resourceOverrides: {
+        'local-coder': {
+          availability: 'open',
+          reason: 'test local coder capacity',
+        },
+      },
+    });
+
+    const decision = await decide({ goal: 'implement routine fix', repo: tmpHome }, cfg);
+
+    expect(decision.backend).toBe('local-coder');
+    expect(decision.demotedFrom).toBe('claude');
+    expect(decision.reason).toMatch(/resourceDemote: claude→local-coder/i);
   });
 
   it('never throws with resourceAware=true and corrupt cfg', async () => {

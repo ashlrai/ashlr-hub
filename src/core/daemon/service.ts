@@ -16,6 +16,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { buildToolPath } from '../run/tool-path.js';
 
 // ---------------------------------------------------------------------------
 // Types (local — do NOT add to types.ts per file-ownership constraints)
@@ -157,16 +158,8 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
   const outLog = path.join(o.configDir, 'daemon.launchd.out.log');
   const errLog = path.join(o.configDir, 'daemon.launchd.err.log');
 
-  // PATH that mirrors the hand-crafted plist
-  const pathEnv = [
-    path.join(o.home, '.local', 'bin'),
-    '/opt/homebrew/bin',
-    '/usr/local/bin',
-    '/usr/bin',
-    '/bin',
-    '/usr/sbin',
-    '/sbin',
-  ].join(':');
+  // PATH that mirrors common developer shells without requiring a login shell.
+  const pathEnv = buildToolPath({ home: o.home, basePath: '' });
 
   // When keepAwake is set, prepend `caffeinate -i -s --` so launchd keeps the
   // daemon alive through idle + system sleep while on AC power (lid-closed use).
@@ -256,6 +249,7 @@ ExecStart=${o.nodePath} ${o.binPath} daemon start --budget ${o.budget} --interva
 Restart=always
 RestartSec=${o.restartSec}
 Environment=HOME=${o.home}
+Environment=PATH=${buildToolPath({ home: o.home, basePath: '' })}
 StandardOutput=append:${outLog}
 StandardError=append:${outLog}
 

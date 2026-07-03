@@ -47,9 +47,9 @@ function makeConfig(): AshlrConfig {
 // ---------------------------------------------------------------------------
 
 const NOW = Date.now();
-// Use a very recent timestamp (30 min ago) so it is always "today" regardless of the
-// exact wall-clock time the test suite runs — avoids midnight rollover flakiness.
-const THIRTY_MIN_AGO = new Date(NOW - 30 * 60 * 1000).toISOString();
+// Use the exact current ISO timestamp for "today" checks because production
+// groups calendar dates by UTC ISO date.
+const NOW_ISO = new Date(NOW).toISOString();
 const TWELVE_HOURS_AGO = new Date(NOW - 12 * 3600 * 1000).toISOString();
 const TWENTY_FIVE_HOURS_AGO = new Date(NOW - 25 * 3600 * 1000).toISOString();
 const TODAY_DATE = new Date(NOW).toISOString().slice(0, 10);
@@ -335,8 +335,8 @@ describe('M224 autoMergesToday', () => {
   it('counts applied proposals with createdAt today', async () => {
     const { listProposals } = await import('../src/core/inbox/store.js');
     vi.mocked(listProposals).mockReturnValue([
-      makeProposal({ status: 'applied', createdAt: THIRTY_MIN_AGO, title: 'Fix auth bug' }),
-      makeProposal({ status: 'applied', createdAt: THIRTY_MIN_AGO, title: 'Add test coverage' }),
+      makeProposal({ status: 'applied', createdAt: NOW_ISO, title: 'Fix auth bug' }),
+      makeProposal({ status: 'applied', createdAt: NOW_ISO, title: 'Add test coverage' }),
       // different day — should NOT count
       makeProposal({ status: 'applied', createdAt: TWENTY_FIVE_HOURS_AGO, title: 'Old merge' }),
     ] as ReturnType<typeof makeProposal>[]);
@@ -490,12 +490,12 @@ describe('M224 shipsPerDayTrend', () => {
   it('counts applied proposals per calendar day', async () => {
     const { listProposals } = await import('../src/core/inbox/store.js');
     vi.mocked(listProposals).mockReturnValue([
-      makeProposal({ status: 'applied', createdAt: THIRTY_MIN_AGO }),
-      makeProposal({ status: 'applied', createdAt: THIRTY_MIN_AGO }),
+      makeProposal({ status: 'applied', createdAt: NOW_ISO }),
+      makeProposal({ status: 'applied', createdAt: NOW_ISO }),
       // 5 days ago — still within 7d trend window
       makeProposal({ status: 'applied', createdAt: `${FIVE_DAYS_AGO}T10:00:00.000Z` }),
       // pending — should NOT appear in trend
-      makeProposal({ status: 'pending', createdAt: THIRTY_MIN_AGO }),
+      makeProposal({ status: 'pending', createdAt: NOW_ISO }),
     ] as ReturnType<typeof makeProposal>[]);
 
     const snap = await buildSnapshot(makeConfig());

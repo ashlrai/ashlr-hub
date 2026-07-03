@@ -162,7 +162,24 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch shipped** - API-model proposal gate parity and remote PR handoff truth are implemented, fully verified, pushed to `origin/master`, and the live daemon/fleet have been restarted.
+**Current batch ready to ship** - Repo execution profiles, local-coder resource sensing, Best-of-N routing alignment, builtin fallback/resource-cache hardening, and shared tool PATH support are implemented and fully verified; commit, push, and daemon restart remain.
+
+## Current Continuation - Execution Profiles And Routing Truth
+- [x] Rechecked git, Entire, task plan, notes, daemon status, and fleet status.
+- [x] Deployed parallel explorer agents for repo execution profiles, local-coder resource sensing, swarm gate parity, Best-of-N routing, and sibling repo verify inventory.
+- [x] Paused the live daemon/fleet for the maintenance window before edits.
+- [x] Added a shared read-only repo execution profile layer for Node/Bun/pnpm/yarn, Cargo/Rust, Make/Just, Bats, nested package roots, and package-manager precedence.
+- [x] Routed `detectVerifyCommands()` through the profile layer and taught verification runners to execute nested project commands from their project cwd.
+- [x] Surfaced repo execution-profile coverage in fleet status so operators can see verify-command coverage and detected toolchains.
+- [x] Made `local-coder` a sensed Ollama-backed resource state instead of `not-sensed`, and added it to resource-aware demotion before builtin.
+- [x] Made Best-of-N honor daemon-assigned backend/model and judge/taste the persisted proposal diff instead of sandbox stdout when available.
+- [x] Focused verification passed: typecheck plus 276 tests across verify/profile/status/self-heal/resource/Best-of-N/daemon suites.
+- [x] Hardened profile discovery against symlinked directories, preserved hoisted workspace `node_modules/.bin`, and shared daemon/verification tool PATHs for Cargo, Bun, Homebrew, local user bins, and system bins.
+- [x] Kept builtin as an always-open fallback, keyed resource snapshot caching by config/resource inputs, and added regression coverage for local-coder sensing after builtin-only snapshots.
+- [x] Fixed the production-panel UTC fixture so "today" tests use the current ISO day instead of crossing UTC midnight with `now - 30m`.
+- [x] Agent audits queued the next high-leverage lanes: swarm/engineer proposal gate parity, daemon `ashlrcode` sandbox-only capture, single-source auto-merge readiness, repo-specific verify profiles for the core fleet, and richer resource/status visibility.
+- [x] Full gates passed: `npm run typecheck`, focused profile/resource/status/service suites, `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, `node --check src/core/web/public/app.js`, `npm run test:invariants`, full `npm run test:ci` (412 files, 8548 passed, 7 skipped), and `git diff --check`.
+- [ ] Commit, push to `origin/master`, resume/restart launchd daemon, and verify live autonomous status.
 
 ## Current Continuation
 - [x] Rechecked git/daemon/fleet state after the previous push.
