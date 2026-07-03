@@ -163,7 +163,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch in implementation** - The hub is clean/synced at the pushed autonomy-loop baseline; the active follow-up adds a provider-neutral visual grounding foundation informed by NVIDIA LocateAnything research.
+**Current batch pushed** - The visual grounding foundation is committed and pushed to `origin/master`; the live daemon is running with preflight ready and an active Codex self-heal dispatch in progress.
 
 ## Current Continuation - Visual Grounding Foundation
 - [x] Rechecked git status, recent commits, Entire state, daemon status, task plan, notes, and relevant code.
@@ -174,7 +174,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Added `src/core/visual/grounding.ts` with normalized box parsing, local image metadata, OpenAI-compatible local worker support, and fail-closed provider guards.
 - [x] Added focused parser/config/provider tests and a visual grounding roadmap doc.
 - [x] Run focused/full verification.
-- [ ] Commit, push, and verify live daemon health.
+- [x] Commit, push, and verify live daemon health.
 
 ## Current Continuation - Execution Profiles And Routing Truth
 - [x] Rechecked git, Entire, task plan, notes, daemon status, and fleet status.
