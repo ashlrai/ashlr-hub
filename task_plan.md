@@ -190,7 +190,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Gated executable next actions behind fleet/daemon/guard readiness so stopped or blocked fleets prioritize control-plane repair before drain/verify/build work.
 - [x] Focused verification passed: typecheck, web JS syntax check, `m49`, `m172`, `m153`, `m157` (97 tests), plus adjacent `m48`, `m47`, and `m201` suites (109 tests).
 - [x] Full gates passed: `npm run typecheck`, `node --check src/core/web/public/app.js`, focused trust/status/daemon suites (12 files, 338 tests), `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, `npm run test:invariants` (41 files, 411 tests), full `npm run test:ci` (412 files, 8552 passed, 7 skipped), and `git diff --check`.
-- [ ] Commit, push to `origin/master`, and verify live daemon/fleet status.
+- [x] Committed and pushed to `origin/master`; live daemon/fleet checks passed after launchd reinstall/reload and `fleet resume`.
 
 ## Current Continuation
 - [x] Rechecked git/daemon/fleet state after the previous push.
