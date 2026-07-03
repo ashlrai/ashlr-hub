@@ -281,6 +281,44 @@ export interface AshlrConfig {
      */
     browserVerify?: boolean;
     /**
+     * Pluggable visual grounding layer for screenshot/document perception.
+     *
+     * DEFAULT false. This is intentionally separate from `src/core/vision`,
+     * which stores the strategic north-star vision. Visual grounding means
+     * pixel-space localization: image + natural-language query -> normalized
+     * boxes/points that can become verification evidence or proposed UI actions.
+     *
+     * Providers that upload local screenshots to an HTTP endpoint require an
+     * explicit config opt-in. NVIDIA LocateAnything-3B is supported as a local
+     * research worker shape, but its released weights are non-commercial; set
+     * `licenseAccepted:true` only after the operator has reviewed the model
+     * terms for the intended use.
+     */
+    visualGrounding?: {
+      /** Master switch. Absent/false means no image reads or provider calls. */
+      enabled?: boolean;
+      /** Provider implementation. Default 'locateanything-http'. */
+      provider?: 'locateanything-http' | 'generic-openai-vision';
+      /**
+       * Base URL or full /chat/completions URL for an OpenAI-compatible worker.
+       * Loopback endpoints are allowed by default; remote endpoints also require
+       * allowRemoteEndpoint=true because screenshots may contain sensitive data.
+       */
+      endpoint?: string;
+      /** Model id sent to the provider. Default depends on provider. */
+      model?: string;
+      /** Env var NAME containing a bearer token for the provider. */
+      apiKeyEnv?: string;
+      /** Hard timeout for one grounding call. Default 30000ms. */
+      timeoutMs?: number;
+      /** Max local image size to upload/read. Default 8 MiB. */
+      maxImageBytes?: number;
+      /** Required for LocateAnything because released weights are non-commercial. */
+      licenseAccepted?: boolean;
+      /** Required before sending screenshots to non-loopback endpoints. */
+      allowRemoteEndpoint?: boolean;
+    };
+    /**
      * M168: opt-in phantom-secret injection for fleet VERIFICATION/integration
      * tasks (e.g. integration tests, deploy checks, browser verify against a
      * real backend). DEFAULT false — no phantom calls unless explicitly enabled.

@@ -58,6 +58,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Drain permanently failed verification proposals out of verify-only deadlock
 - [x] Follow-up: Harden daemon liveness heartbeat, service cadence, and auto-provider lockout sensing
 - [x] Follow-up: Bound daemon verification child process trees with a watchdog runner
+- [x] Follow-up: Research NVIDIA LocateAnything and add safe visual-grounding foundation
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -162,7 +163,18 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch in final verification** - The repo execution-profile/resource-routing batch is committed and pushed; the active follow-up adds ranked fleet next actions, richer resource visibility, and a stricter judge `wouldMerge` trust contract.
+**Current batch in implementation** - The hub is clean/synced at the pushed autonomy-loop baseline; the active follow-up adds a provider-neutral visual grounding foundation informed by NVIDIA LocateAnything research.
+
+## Current Continuation - Visual Grounding Foundation
+- [x] Rechecked git status, recent commits, Entire state, daemon status, task plan, notes, and relevant code.
+- [x] Deployed parallel agents for LocateAnything model/release/license, Ashlr integration architecture, product strategy, and competitive/open-source landscape.
+- [x] Verified primary NVIDIA sources: LocateAnything project page, NVlabs/Eagle, and Hugging Face model/license.
+- [x] Decided to treat LocateAnything as an optional research backend because released weights are non-commercial/research-use, while building a provider-neutral Ashlr visual grounding layer.
+- [x] Added `foundry.visualGrounding` config shape with explicit endpoint, license, and remote-upload gates.
+- [x] Added `src/core/visual/grounding.ts` with normalized box parsing, local image metadata, OpenAI-compatible local worker support, and fail-closed provider guards.
+- [x] Added focused parser/config/provider tests and a visual grounding roadmap doc.
+- [x] Run focused/full verification.
+- [ ] Commit, push, and verify live daemon health.
 
 ## Current Continuation - Execution Profiles And Routing Truth
 - [x] Rechecked git, Entire, task plan, notes, daemon status, and fleet status.

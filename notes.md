@@ -27,6 +27,8 @@
 - `/Users/masonwyatt/Desktop/github/dev-tools/webfetch`
 
 ## Findings
+- NVIDIA LocateAnything research follow-up: NVIDIA released LocateAnything-3B through NVlabs/Eagle and Hugging Face as a visual grounding model for GUI grounding, OCR/text localization, document layout, dense detection, and natural-language box/point localization. The project page highlights Parallel Box Decoding, 138M language queries, and 785M boxes. The repo code is Apache-2.0, but the Hugging Face model weights are NVIDIA-license non-commercial/research-use only, so Ashlr should not make it a default commercial dependency without license review.
+- Visual grounding architecture decision: create a new `src/core/visual` namespace for pixel perception. Do not reuse `src/core/vision`, which stores the north-star/strategist vision system. The first patch should provide a safe provider abstraction, normalized box parser, explicit license/endpoint guards, and docs; MCP tools and browser/evidence-pack wiring can follow once the operator UX around screenshot upload is explicit.
 - Reliability audit: biggest 24/7 risks are cross-process daemon singleton locking, fail-closed spend persistence, queue lease renewal for long frontier runs, hard enforcement of concurrent-dispatch backend assignments, fail-closed resource-control mode, and better fatal sidecar observability.
 - Follow-up reliability patch: added a same-machine daemon singleton lock (`~/.ashlr/daemon.lock`) with token-checked release, heartbeat, dead-owner stale takeover, and `runDaemon` refusal before ticking when another process owns the lock.
 - State persistence hardening: daemon saves now use unique temp files instead of one shared `daemon.json.tmp`, and `lastPulseExportAt` survives load/save cycles.
