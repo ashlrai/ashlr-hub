@@ -279,4 +279,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Fixed `ashlr worker setup --queue` so shared workers persist `sharedQueue.mode:'filesystem'` instead of silently configuring a path that the coordinator treats as local-only.
 - [x] Focused verification passed: typecheck, web JS syntax check, `m49`, `m112`, `m111`, and `git diff --check`.
 - [x] Broad gates passed: lint, build, audit, invariants, and full `npm run test:ci`.
-- [ ] Commit, push to `origin/master`, and verify live daemon/fleet status with the new effectiveness field.
+- [x] Commit, push to `origin/master`, and verify live daemon/fleet status with the new effectiveness field.
