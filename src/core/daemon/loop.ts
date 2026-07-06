@@ -792,6 +792,21 @@ export async function tick(
       try { await runCounterfactualReplay(liveCfg); } catch (err) { console.warn('[ashlr] daemon:tick runCounterfactualReplay failed:', (err as Error)?.message ?? err); }
     }
 
+    // M332: outcome watcher — link real-world reverts / follow-up fixes back
+    // onto judge traces so calibration + learned routing see post-merge truth.
+    // READ-ONLY on repos; ledger writes go through linkOutcome IN THIS SERIAL
+    // maintenance phase only (its in-place JSONL rewrite must never run inside
+    // the concurrent dispatch closure). Internal 6h throttle; opt out with
+    // cfg.foundry.outcomeWatcher === false.
+    if ((liveCfg.foundry as Record<string, unknown>)?.['outcomeWatcher'] !== false) {
+      try {
+        const { scanRealWorldOutcomes } = await import('../fleet/outcome-watcher.js');
+        await scanRealWorldOutcomes(liveCfg);
+      } catch (err) {
+        console.warn('[ashlr] daemon:tick outcomeWatcher failed:', (err as Error)?.message ?? err);
+      }
+    }
+
     // M189: Regression sentinel — detect regressions introduced by auto-merge and bisect/revert.
     if ((liveCfg.foundry as Record<string, unknown>)?.regressionSentinel === true) {
       try {

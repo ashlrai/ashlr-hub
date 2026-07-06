@@ -34,6 +34,7 @@ import type { CostForecast } from '../types.js';
 import { readDecisions } from '../fleet/decisions-ledger.js';
 import { engineTierOf as _engineTierOf } from './sandboxed-engine.js';
 import { canonicalModelTag, type ModelEntry } from './model-catalog.js';
+import { readJudgeTraces } from '../fleet/judge-trace.js';
 
 // ---------------------------------------------------------------------------
 // M155: Re-export cascade routing API from router.ts for discoverability.
@@ -813,6 +814,27 @@ export function buildProducerScores(
       }
       if (isShip) slot.ship += weight;
       else slot.reject += weight;
+    }
+
+    // Pass 3 (M332): real-world outcomes. A merge that was later REVERTED
+    // counts as a full extra reject on the producer; a near-term FOLLOW-UP
+    // fix counts as half a reject — the judge's moment-of-merge 'ship' is
+    // corrected by what actually happened on main.
+    try {
+      const traces = readJudgeTraces({ outcomeOnly: true, sinceMs: windowStart });
+      for (const t of traces) {
+        if (t.outcome !== 'reverted' && t.outcome !== 'followed-up') continue;
+        const producer = producerOf.get(t.proposalId);
+        if (!producer) continue;
+        const key = producer.tag ? `${producer.engine}:${producer.tag}` : String(producer.engine);
+        const slot = acc.get(key);
+        if (!slot) continue;
+        const ageMs = now - Date.parse(t.outcomeAt ?? t.ts);
+        const weight = Math.pow(2, -(Math.max(0, ageMs) / LEARNED_ROUTING_HALF_LIFE_MS));
+        slot.reject += weight * (t.outcome === 'reverted' ? 1 : 0.5);
+      }
+    } catch {
+      // outcome enrichment is best-effort — scores fall back to verdict-only
     }
 
     for (const [key, { engine, model, ship, reject }] of acc) {

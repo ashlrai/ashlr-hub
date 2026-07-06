@@ -149,10 +149,11 @@ function verdictToIntent(verdict: string): string {
   return 'reject';
 }
 
-/** merged → merge, reverted → review, rejected → reject. */
+/** merged → merge, reverted/followed-up → review, rejected → reject. */
 function outcomeToIntent(outcome: string): string {
   if (outcome === 'merged') return 'merge';
   if (outcome === 'reverted') return 'review';
+  if (outcome === 'followed-up') return 'review'; // M332
   return 'reject';
 }
 

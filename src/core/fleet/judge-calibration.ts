@@ -537,6 +537,7 @@ export function verdictToIntent(verdict: string): string {
 export function outcomeToIntent(outcome: string): string {
   if (outcome === 'merged') return 'merge';
   if (outcome === 'reverted') return 'review';
+  if (outcome === 'followed-up') return 'review'; // M332
   return 'reject';
 }
 

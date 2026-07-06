@@ -30,7 +30,10 @@ import { scrubSecrets } from '../util/scrub.js';
 // Types
 // ---------------------------------------------------------------------------
 
-export type JudgeOutcome = 'merged' | 'reverted' | 'rejected';
+export type JudgeOutcome = 'merged' | 'reverted' | 'rejected' | 'followed-up';
+// M332: 'followed-up' — the merge survived but a near-term fix commit touched
+// the same files (detected by outcome-watcher.ts). Weaker negative signal
+// than 'reverted'; maps to intent 'review' in calibration.
 
 export interface JudgeTrace {
   /** Proposal id this trace belongs to. */

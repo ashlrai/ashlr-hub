@@ -211,6 +211,13 @@ export interface AshlrConfig {
      * repaired worktree. Flag-off ⇒ byte-identical single-shot gate. The
      * api-model path is out of scope (agent-loop patch application).
      */
+    /**
+     * M332: outcome watcher — maintenance pass linking real-world reverts and
+     * near-term follow-up fixes back onto judge traces. READ-ONLY on repos,
+     * append-only ledgers, internally throttled to one scan per 6h.
+     * DEFAULT ON (telemetry enrichment, no behavior change); false disables.
+     */
+    outcomeWatcher?: boolean;
     verifyToGreen?: {
       /** Master switch. Default false. */
       enabled?: boolean;
