@@ -37,7 +37,13 @@ import type { EngineId } from '../types.js';
 import { resolveEngineSpec } from './engine-registry.js';
 // M240: learned-bias tie-breaker — reorders engine candidates by historical ship-rate.
 // Import is synchronous (no async); cold-start (empty ledger) = no-op.
-import { buildEngineScores, sortEnginesByScore, type EngineScoreMap } from './learned-router.js';
+import {
+  buildEngineScores,
+  sortEnginesByScore,
+  buildProducerScores,
+  selectCostAwareModel,
+  type EngineScoreMap,
+} from './learned-router.js';
 
 // ---------------------------------------------------------------------------
 // Cloud provider env-key map — detection only, values are NEVER read/logged.
@@ -406,6 +412,43 @@ export function routeTask(
       ? buildEngineScores(item.source)
       : new Map();
 
+    // ── M323: model-granular cost-aware selection (DEFAULT OFF) ─────────
+    // Producer-attributed scores (judged verdicts joined to 'proposed'
+    // entries by proposalId) drive a cheapest-model-that-ships pick inside
+    // tryEngine/tryFrontier. Flag off / cold start / thin samples ⇒ null ⇒
+    // the static policy pick below — byte-identical behavior.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mgCfg = (cfg.foundry as any)?.modelGranularRouting as
+      | { enabled?: boolean; minShipRate?: number }
+      | undefined;
+    const producerScores: EngineScoreMap | null =
+      mgCfg?.enabled === true ? buildProducerScores(item.source) : null;
+    const minShipRate = typeof mgCfg?.minShipRate === 'number' ? mgCfg.minShipRate : 0.6;
+
+    const tryLearnedModel = (
+      engine: EngineId,
+      capability: ModelCapability | null,
+      effortCap: number,
+      overrideReason: string,
+    ): TaskRouteDecision | null => {
+      if (!producerScores || producerScores.size === 0) return null;
+      const cands = KNOWN_MODELS.filter(
+        (m) =>
+          m.engine === engine &&
+          (!capability || m.capabilities.includes(capability)) &&
+          m.minEffort <= effortCap &&
+          !c5Excludes.has(m.id),
+      );
+      const learned = selectCostAwareModel(cands, producerScores, { minShipRate });
+      if (!learned) return null;
+      return {
+        engine,
+        model: decisionModelFor(learned),
+        catalogEntry: learned,
+        reason: `${overrideReason} (M323 learned: ship-rate ≥ ${minShipRate}, cheapest)`,
+      };
+    };
+
     // ── Helpers ──────────────────────────────────────────────────────────
 
     const available = (e: EngineId) => engineAvailable(e, cfg, ctx);
@@ -430,6 +473,10 @@ export function routeTask(
           reason: `${overrideReason} (cfg override → ${cfgModel})`,
         };
       }
+      // M323: learned cost-aware pick wins over the static pick when the flag
+      // is on and this engine has a sampled model clearing the ship-rate bar.
+      const learnedPick = tryLearnedModel(engine, capability, effort, overrideReason);
+      if (learnedPick) return learnedPick;
       const entry = pickForEngine(engine, capability, preferCheap && !preferQuality, effort, {
         preferStrong: preferQuality,
         excludeIds: c5Excludes,
@@ -501,6 +548,9 @@ export function routeTask(
             KNOWN_MODELS.find((m) => m.engine === engine && m.id.endsWith(':' + cfgModel)) ?? null;
           return { engine, model: cfgModel, catalogEntry: entry, reason: `${reason} (cfg override → ${cfgModel})` };
         }
+        // M323: learned cost-aware pick first (flag-gated; null ⇒ static).
+        const learnedPick = tryLearnedModel(engine, capability, 5, reason);
+        if (learnedPick) return learnedPick;
         // Use effort=5 to bypass minEffort filtering — we always want the strongest
         // model. M321: preferStrong sorts by qualityRank so the quality fast-path
         // reaches Fable 5 (when claude5.fable is on) over the cheaper Sonnet 5.

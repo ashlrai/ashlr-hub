@@ -33,6 +33,7 @@ import { routeBackend, type RouteDecision } from '../fleet/router.js';
 import type { CostForecast } from '../types.js';
 import { readDecisions } from '../fleet/decisions-ledger.js';
 import { engineTierOf as _engineTierOf } from './sandboxed-engine.js';
+import { canonicalModelTag, type ModelEntry } from './model-catalog.js';
 
 // ---------------------------------------------------------------------------
 // M155: Re-export cascade routing API from router.ts for discoverability.
@@ -742,4 +743,119 @@ export function sortEnginesByScore(
   const withScores = engines.map((e) => ({ e, s: engineScoreFor(scores, e, model) }));
   withScores.sort((a, b) => b.s - a.s);
   return withScores.map((x) => x.e);
+}
+
+// ---------------------------------------------------------------------------
+// M323: producer-attributed scores + cost-aware model selection
+// ---------------------------------------------------------------------------
+
+/**
+ * M323: Build a PRODUCER-attributed score map for `taskClass`.
+ *
+ * M240's buildEngineScores keys on the 'judged' entries' engine/model — which
+ * is the JUDGE's identity (all three judged record sites write judgeEngine
+ * into both fields), so producer engines never matched a key and the learned
+ * bias stayed effectively neutral. This variant joins each judged verdict
+ * back to its 'proposed' entry by proposalId and accumulates the
+ * recency-weighted ship/reject counts onto the PRODUCER's
+ * `${engine}:${canonicalTag}` key — canonicalModelTag collapses ledger
+ * spelling variants ('claude:claude-sonnet-5' vs 'sonnet-5') onto one key.
+ *
+ * PURE read of the ledger; never throws; cold start → empty map.
+ */
+export function buildProducerScores(
+  taskClass: string,
+  nowMs?: number,
+  sinceMs?: number,
+): EngineScoreMap {
+  const map: EngineScoreMap = new Map();
+  try {
+    const now = nowMs ?? Date.now();
+    const windowStart = sinceMs ?? now - 90 * 24 * 60 * 60 * 1000;
+    const entries = readDecisions({ sinceMs: windowStart });
+    if (entries.length === 0) return map;
+
+    // Pass 1: producer identity per proposal (from 'proposed' entries),
+    // filtered to the requested taskClass. readDecisions returns newest-first,
+    // so the map MUST be complete before verdicts are attributed (a judged
+    // entry chronologically follows — and therefore precedes in this order —
+    // its 'proposed').
+    const producerOf = new Map<string, { engine: EngineId; tag: string }>();
+    for (const e of entries) {
+      if (e.action !== 'proposed' || !e.engine) continue;
+      const entryTaskClass = taskClassFromDecisionEntry(e);
+      if (entryTaskClass !== taskClass && entryTaskClass !== '*') continue;
+      if (producerOf.has(e.proposalId)) continue;
+      const tag = canonicalModelTag(e.engine, e.model ?? '');
+      producerOf.set(e.proposalId, { engine: e.engine as EngineId, tag });
+    }
+
+    // Pass 2: judged verdicts joined back to the producer.
+    const acc = new Map<
+      string,
+      { engine: EngineId; model: string | null; ship: number; reject: number }
+    >();
+    for (const e of entries) {
+      if (e.action !== 'judged') continue;
+      const producer = producerOf.get(e.proposalId);
+      if (!producer) continue;
+      const verdict = e.verdict ?? '';
+      const isShip = SHIP_VERDICTS.has(verdict);
+      const isReject = REJECT_VERDICTS.has(verdict);
+      if (!isShip && !isReject) continue;
+      const key = producer.tag ? `${producer.engine}:${producer.tag}` : String(producer.engine);
+      const ageMs = now - Date.parse(e.ts);
+      const weight = Math.pow(2, -(Math.max(0, ageMs) / LEARNED_ROUTING_HALF_LIFE_MS));
+      let slot = acc.get(key);
+      if (!slot) {
+        slot = { engine: producer.engine, model: producer.tag || null, ship: 0, reject: 0 };
+        acc.set(key, slot);
+      }
+      if (isShip) slot.ship += weight;
+      else slot.reject += weight;
+    }
+
+    for (const [key, { engine, model, ship, reject }] of acc) {
+      const total = ship + reject;
+      const score = total >= LEARNED_ROUTING_MIN_SAMPLES ? ship / total : 0.5;
+      map.set(key, { key, engine, model, score, samples: total });
+    }
+  } catch {
+    // Never throw — cold-start fallback is an empty map.
+  }
+  return map;
+}
+
+/**
+ * M323: choose the CHEAPEST candidate whose learned producer ship-rate is
+ * ≥ opts.minShipRate with ≥ LEARNED_ROUTING_MIN_SAMPLES samples.
+ *
+ * Returns null (→ caller falls back to the static pick, byte-identically)
+ * when NO candidate has enough samples. When sampled candidates exist but
+ * none clears the bar, the best-scoring sampled candidate wins ONLY if its
+ * score ≥ 0.5 — we never learn INTO a bad model; static policy is the floor.
+ *
+ * PURE — imports no apply/merge primitives (CONTRACT-M53: learned decisions
+ * never auto-apply). Hard constraints (availability, tier, quota, capability,
+ * effort, claude5 gating) are the CALLER's responsibility via `candidates`.
+ */
+export function selectCostAwareModel(
+  candidates: readonly ModelEntry[],
+  scores: EngineScoreMap,
+  opts: { minShipRate: number },
+): ModelEntry | null {
+  if (candidates.length === 0 || scores.size === 0) return null;
+  const byCost = [...candidates].sort(
+    (a, b) => a.costPerMTokIn + a.costPerMTokOut - (b.costPerMTokIn + b.costPerMTokOut),
+  );
+  let bestSampled: { entry: ModelEntry; score: number } | null = null;
+  for (const entry of byCost) {
+    const tag = canonicalModelTag(entry.engine, entry.id.slice(entry.id.indexOf(':') + 1));
+    const s = scores.get(`${entry.engine}:${tag}`);
+    if (!s || s.samples < LEARNED_ROUTING_MIN_SAMPLES) continue;
+    if (s.score >= opts.minShipRate) return entry; // cheapest clearing the bar
+    if (!bestSampled || s.score > bestSampled.score) bestSampled = { entry, score: s.score };
+  }
+  if (bestSampled && bestSampled.score >= 0.5) return bestSampled.entry;
+  return null;
 }

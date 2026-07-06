@@ -183,6 +183,24 @@ export interface AshlrConfig {
        */
       fable?: boolean;
     };
+    /**
+     * M323: model-granular cost-aware learned routing. DEFAULT OFF. When
+     * enabled, routeTask prefers the CHEAPEST catalog model whose learned
+     * producer ship-rate (judged verdicts joined to 'proposed' ledger entries
+     * by proposalId) clears minShipRate with enough samples; it falls back to
+     * the static policy pick otherwise — cold start / thin samples are
+     * byte-identical to flag-off. Learned decisions never auto-apply.
+     *
+     * Deliberately NOT under foundry.intelligence — that block's PRESENCE
+     * activates the M53 anomaly/budget nudges, which this flag must not
+     * silently switch on.
+     */
+    modelGranularRouting?: {
+      /** Master switch. Default false. */
+      enabled?: boolean;
+      /** Minimum learned ship-rate for the cost-aware pick (0..1, default 0.6). */
+      minShipRate?: number;
+    };
     /** Run external engines inside a sandbox with diff capture (default true when foundry set). */
     sandboxExternal?: boolean;
     /** Hard wall-clock per external run (ms). Default 20 min. */
