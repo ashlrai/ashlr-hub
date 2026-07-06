@@ -24,6 +24,8 @@ import { estCostUsd } from './budget.js';
 import {
   KNOWN_MODELS,
   pickModel,
+  claude5ExcludeIds,
+  CLAUDE5_CATALOG_IDS,
   type ModelEntry,
   type ModelCapability,
 } from './model-catalog.js';
@@ -337,12 +339,18 @@ function pickForEngine(
   capability: ModelCapability | null,
   preferCheap: boolean,
   effort: number,
+  // M321: preferStrong = quality-policy sort (qualityRank desc); excludeIds
+  // gates the Claude 5 generation per cfg.foundry.claude5. Omitted ⇒ pickModel
+  // excludes the Claude 5 ids by default (pre-M320 byte-identical).
+  opts?: { preferStrong?: boolean; excludeIds?: ReadonlySet<string> },
 ): ModelEntry | null {
   return pickModel({
     engine,
     capability: capability ?? undefined,
     maxEffort: effort,
     preferCheap,
+    preferStrong: opts?.preferStrong,
+    excludeIds: opts?.excludeIds,
   });
 }
 
@@ -374,6 +382,18 @@ export function routeTask(
 
     const preferCheap = policy === 'cost';
     const preferQuality = policy === 'quality';
+
+    // ── M321: Claude 5 routing ────────────────────────────────────
+    // c5Excludes gates the new generation per cfg.foundry.claude5 (default on;
+    // enabled:false ⇒ byte-identical pre-M320 routing). decisionModelFor maps a
+    // picked entry to the string dispatched to the engine CLI: Claude 5 entries
+    // carry the full API id ('claude-sonnet-5' — the bare 'sonnet-5' tag is not
+    // a documented CLI alias); legacy entries keep their tags unchanged.
+    const c5Excludes = claude5ExcludeIds(cfg);
+    const decisionModelFor = (entry: ModelEntry): string =>
+      CLAUDE5_CATALOG_IDS.has(entry.id) && entry.apiModelId
+        ? entry.apiModelId
+        : modelTagFrom(entry.id);
 
     // ── M240: Learned-bias score map ──────────────────────────────────────
     // Build once per routeTask call. When cfg.foundry.learnedRouting === false
@@ -410,14 +430,17 @@ export function routeTask(
           reason: `${overrideReason} (cfg override → ${cfgModel})`,
         };
       }
-      const entry = pickForEngine(engine, capability, preferCheap && !preferQuality, effort);
+      const entry = pickForEngine(engine, capability, preferCheap && !preferQuality, effort, {
+        preferStrong: preferQuality,
+        excludeIds: c5Excludes,
+      });
       if (!entry) {
         // Engine available but no matching catalog entry — return engine with null model
         return { engine, model: null, catalogEntry: null, reason: overrideReason };
       }
       return {
         engine,
-        model: modelTagFrom(entry.id),
+        model: decisionModelFor(entry),
         catalogEntry: entry,
         reason: overrideReason,
       };
@@ -478,17 +501,22 @@ export function routeTask(
             KNOWN_MODELS.find((m) => m.engine === engine && m.id.endsWith(':' + cfgModel)) ?? null;
           return { engine, model: cfgModel, catalogEntry: entry, reason: `${reason} (cfg override → ${cfgModel})` };
         }
-        // Use effort=5 to bypass minEffort filtering — we always want the strongest model.
-        const entry = pickForEngine(engine, capability, false, 5);
+        // Use effort=5 to bypass minEffort filtering — we always want the strongest
+        // model. M321: preferStrong sorts by qualityRank so the quality fast-path
+        // reaches Fable 5 (when claude5.fable is on) over the cheaper Sonnet 5.
+        const entry = pickForEngine(engine, capability, false, 5, {
+          preferStrong: true,
+          excludeIds: c5Excludes,
+        });
         if (!entry) return { engine, model: null, catalogEntry: null, reason };
-        return { engine, model: modelTagFrom(entry.id), catalogEntry: entry, reason };
+        return { engine, model: decisionModelFor(entry), catalogEntry: entry, reason };
       };
 
       // Primary frontier engine
       const primary = tryFrontier(
         frontierEngine,
         cap164,
-        `${reasonPrefix} → ${frontierEngine}-${frontierEngine === 'claude' ? 'opus (reasoning/architecture)' : 'gpt-5.5 (implementation)'}`,
+        `${reasonPrefix} → ${frontierEngine}-${frontierEngine === 'claude' ? `${c5Excludes.has('claude:fable-5') ? 'opus' : 'fable-5'} (reasoning/architecture)` : 'gpt-5.5 (implementation)'}`,
       );
       if (primary) return primary;
 
@@ -627,16 +655,19 @@ export function routeTask(
         const nim = tryEngine('nim' as EngineId, cap, `${medLabel} → nim (cost policy)`);
         if (nim) return nim;
 
-        // claude:sonnet as cheap cloud
+        // M321: Sonnet 5 as the cheap-cloud escalation when claude5 is on —
+        // frontier-class quality at the same $3/$15 price point; the legacy
+        // claude:sonnet entry only when the rollout flag is off.
+        const costSonnetId = c5Excludes.has('claude:sonnet-5') ? 'claude:sonnet' : 'claude:sonnet-5';
         const sonnet = available('claude')
           ? (() => {
-              const entry = KNOWN_MODELS.find((m) => m.id === 'claude:sonnet');
+              const entry = KNOWN_MODELS.find((m) => m.id === costSonnetId);
               if (!entry) return null;
               return {
                 engine: 'claude' as EngineId,
-                model: 'sonnet',
+                model: decisionModelFor(entry),
                 catalogEntry: entry,
-                reason: `${medLabel} → claude:sonnet (cost policy, medium)`,
+                reason: `${medLabel} → ${costSonnetId} (cost policy, medium)`,
               };
             })()
           : null;
@@ -652,16 +683,18 @@ export function routeTask(
           if (localCoder) return localCoder;
         }
 
-        // General medium: sonnet
+        // General medium: sonnet. M321: Sonnet 5 when claude5 is on (frontier
+        // quality as the balanced workhorse); legacy claude:sonnet otherwise.
+        const balSonnetId = c5Excludes.has('claude:sonnet-5') ? 'claude:sonnet' : 'claude:sonnet-5';
         const sonnet = available('claude')
           ? (() => {
-              const entry = KNOWN_MODELS.find((m) => m.id === 'claude:sonnet');
+              const entry = KNOWN_MODELS.find((m) => m.id === balSonnetId);
               if (!entry) return null;
               return {
                 engine: 'claude' as EngineId,
-                model: 'sonnet',
+                model: decisionModelFor(entry),
                 catalogEntry: entry,
-                reason: `${medLabel} → claude:sonnet (balanced medium)`,
+                reason: `${medLabel} → ${balSonnetId} (balanced medium)`,
               };
             })()
           : null;

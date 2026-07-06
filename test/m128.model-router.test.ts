@@ -79,7 +79,10 @@ function baseConfig(): AshlrConfig {
 }
 
 function withFoundry(foundry: NonNullable<AshlrConfig['foundry']>): AshlrConfig {
-  return { ...baseConfig(), foundry } as AshlrConfig;
+  // M321: this suite pins PRE-Claude-5 routing expectations — claude5 is
+  // disabled here so it stays the flag-off parity baseline (byte-identical
+  // guarantee). Default-on behavior lives in m321.claude5-routing.test.ts.
+  return { ...baseConfig(), foundry: { claude5: { enabled: false }, ...foundry } } as AshlrConfig;
 }
 
 let _seq = 0;
