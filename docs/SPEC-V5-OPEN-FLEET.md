@@ -272,3 +272,25 @@ import, `ashlr spec import --from docs/SPEC-V5-OPEN-FLEET.md` makes it a
 first-class SpecArtifact. Each milestone updates its row in §7 and ticks its
 invariants in §9 with the test that proves them. The gates in §8 open only when
 their named tests are green on the founders' machines and CI.
+
+---
+
+## Addendum — v5.1 Claude 5 Model Intelligence (M320–M324, shipped 2026-07)
+
+The routing layer described above gained model-generation awareness:
+
+- **M320** — `claude:sonnet-5` / `claude:fable-5` in the catalog behind
+  `cfg.foundry.claude5` (default on; `enabled:false` is a byte-identical
+  rollback). Fable 5 is the default judge/strategist with automatic per-call
+  Opus 4.8 fallback. Merge-authority matching is spelling-variant-safe via
+  `canonicalModelTag`.
+- **M321** — Sonnet 5 is the frontier routing workhorse (hard/medium claude
+  picks); quality policy sorts by `qualityRank` so Fable/Opus stay the strong
+  picks. Claude 5 dispatches use full API ids.
+- **M322** — judge calls record cost/tokens/latency + the actual answering
+  model; `computeModelRoi` derives per-model ship-rate and
+  cost-per-merged-proposal with producer-attributed joins.
+- **M323** — `cfg.foundry.modelGranularRouting` (default off): route to the
+  CHEAPEST model whose producer-attributed learned ship-rate clears the bar.
+  M51 tri-tier trust, quota, and availability constraints are unchanged; the
+  M53 safety invariant stands — learned decisions never auto-apply.

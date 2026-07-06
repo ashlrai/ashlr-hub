@@ -49,6 +49,16 @@ file states direction; contracts state commitments.
   never-weaken guard + self-eval harness; and the `ashlr goal` / `ashlr loop`
   (+ `/goal`, `/loop`) conductor. See
   [`docs/SPEC-V5-OPEN-FLEET.md`](./SPEC-V5-OPEN-FLEET.md).
+- **v5.1 Claude 5 Model Intelligence (M320–M324)** — the Claude 5 generation
+  wired into the fleet: Sonnet 5 (`claude-sonnet-5`) as the frontier routing
+  workhorse and Fable 5 (`claude-fable-5`, Mythos-class) as the default
+  judge/strategist with automatic Opus 4.8 fallback (`cfg.foundry.claude5`);
+  spelling-variant-safe merge authority (`canonicalModelTag`); judge-cost
+  telemetry + per-model ROI (`computeModelRoi`: ship-rate, latency,
+  cost-per-merged-proposal); and cost-aware model-granular learned routing
+  (`cfg.foundry.modelGranularRouting`, default off) with producer-attributed
+  ship-rates — the fleet routes to the cheapest model that ships. Every
+  milestone flag-gated with byte-identical-off parity suites.
 
 ## Near-term (v2.3 candidates — direction, not commitments)
 

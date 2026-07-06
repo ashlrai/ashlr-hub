@@ -68,6 +68,62 @@ the engine's own default is used.
 
 ---
 
+### `claude5` (M320–M321)
+
+```json
+"claude5": {
+  "enabled": true,
+  "fable": true
+}
+```
+
+Claude 5 generation rollout. **Absent ⇒ enabled** — both fields default `true`.
+
+- `enabled: false` — full rollback: `claude:sonnet-5` / `claude:fable-5` are
+  excluded from routing and every model default reverts to the pre-M320 values
+  (byte-identical routing, verified by the m128/m164/m155 parity suites).
+- `fable: false` — keep Sonnet 5 as the routing workhorse but revert the
+  judge + strategist defaults to `claude-opus-4-8`.
+- With the rollout on: Sonnet 5 (`claude-sonnet-5`, frontier-class coding at
+  $3/$15 per MTok) is the default claude pick for hard/medium work; Fable 5
+  (`claude-fable-5`, Mythos-class, $10/$50) is the default judge/strategist,
+  with an automatic per-call fallback to Opus 4.8 when a Fable call fails, is
+  refused, or returns empty.
+- Claude 5 dispatches always use the FULL API id (`--model claude-sonnet-5`);
+  legacy entries keep their short tags.
+- **Auto-merge note:** if `autoMerge.enabled` is on, add
+  `{ "engine": "claude", "model": "claude-sonnet-5" }` to `mergeAuthority` —
+  otherwise Sonnet 5 proposals verify + judge but never auto-merge (an
+  effective-config warning surfaces this).
+
+---
+
+### `modelGranularRouting` (M323)
+
+```json
+"modelGranularRouting": {
+  "enabled": true,
+  "minShipRate": 0.6
+}
+```
+
+Cost-aware, model-granular learned routing. **DEFAULT OFF.** When enabled,
+`routeTask` prefers the CHEAPEST catalog model whose learned producer
+ship-rate clears `minShipRate` (default 0.6) with ≥5 judged samples for the
+task class. Ship-rates are producer-attributed: judge verdicts are joined back
+to the `proposed` ledger entry by proposalId, so the judge's own model never
+pollutes the scores.
+
+- Cold start / thin samples → the static policy pick, byte-identically.
+- The selector never learns INTO a bad model: candidates scoring < 0.5 are
+  refused even when nothing clears the bar.
+- Hard constraints are untouched: `models` overrides, availability, quota,
+  trust tier, and `claude5` gating all still apply first.
+- Deliberately NOT under `intelligence` — that block's presence activates the
+  M53 anomaly/budget nudges, which this flag must not silently switch on.
+
+---
+
 ### `engines`
 
 ```json
@@ -176,6 +232,14 @@ when **all** of the following hold:
 (tier `"local"`) can never satisfy rule 1, so they can never reach `main` even
 if you added them here. The fleet scheduler enforces this invariant (tested in
 `test/m51.trust.test.ts`).
+
+**M320 — spelling-variant-safe matching.** Entries match through
+`canonicalModelTag`, so `"sonnet-5"`, `"claude-sonnet-5"`, and a proposal's
+doubled `claude:claude-sonnet-5` engineModel all land on the same key — a
+spelling mismatch can never silently disable auto-merge for an authorized
+model. With the Claude 5 rollout on, include
+`{ "engine": "claude", "model": "claude-sonnet-5" }` so the Sonnet 5 workhorse
+can auto-merge (and optionally `claude-fable-5`).
 
 ---
 

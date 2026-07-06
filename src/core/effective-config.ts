@@ -285,6 +285,23 @@ export function buildEffectiveConfigSnapshot(
       'claude5 is enabled but mergeAuthority has no claude-sonnet-5 entry; Sonnet 5 proposals will never auto-merge. Add {engine:"claude",model:"claude-sonnet-5"} (and optionally claude-fable-5).',
     );
   }
+  // M324: config-consistency — an explicit Fable pin with the fable flag off
+  // means the explicit model STILL wins (strategistModel/managerJudgeModel
+  // always override the default resolver), so the operator pays Fable costs
+  // they believed they disabled. Surface the contradiction.
+  {
+    const claude5Cfg = cfg.foundry?.claude5;
+    const fableOff = claude5Cfg?.enabled === false || claude5Cfg?.fable === false;
+    const foundryRaw = cfg.foundry as Record<string, unknown> | undefined;
+    const explicitFable = [foundryRaw?.['strategistModel'], foundryRaw?.['managerJudgeModel']].some(
+      (m) => typeof m === 'string' && m.includes('fable'),
+    );
+    if (fableOff && explicitFable) {
+      warnings.push(
+        'strategistModel/managerJudgeModel pins a Fable model while claude5.fable is off; the explicit pin still wins — remove the pin or re-enable claude5.fable.',
+      );
+    }
+  }
 
   return {
     generatedAt: (opts.now ?? new Date()).toISOString(),
