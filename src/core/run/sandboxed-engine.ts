@@ -44,6 +44,7 @@ import type {
   WorkSource,
 } from '../types.js';
 import { buildEngineCommand, spawnEngine } from './engines.js';
+import { iterateToGreen } from './verify-to-green.js';
 import type { TerminationReason } from './run-monitor.js';
 import { resolveEngineSpec } from './engine-registry.js';
 import { buildOpenAICompatibleClient } from './provider-client.js';
@@ -788,19 +789,78 @@ export async function runEngineSandboxed(
           // the stored diff and the signed hash — so the merge gate recomputes
           // an identical hash. Bind {engineModel, tier, diffHash} with an HMAC
           // so a forged on-disk record cannot claim frontier merge-authority.
-          const scrubbed = scrubSecrets(diff.patch);
-          const diffHash = hashDiff(scrubbed);
-          const provenanceSig = signProvenance(engineModel, tier, diffHash);
+          // M331: bindings are `let` — a verify-to-green repair mutates the
+          // worktree, so the diff is re-captured and RE-SIGNED after repair.
+          let effDiff = diff;
+          let scrubbed = scrubSecrets(effDiff.patch);
+          let diffHash = hashDiff(scrubbed);
+          let provenanceSig = signProvenance(engineModel, tier, diffHash);
           // M275: completeness + self-verify gate. Runs typecheck/test in the
           // sandbox worktree before filing. Flag-off → byte-identical to pre-M275.
           let _m275ShouldFile = true;
           if (cfg.foundry?.completenessGate !== false) {
-            const _gateResult = await runCompletenessGate({
+            let _gateResult = await runCompletenessGate({
               worktreePath: sb.worktreePath,
-              diff,
+              diff: effDiff,
               goal,
               cfg,
             });
+            // M331: verify-to-green — bounded repair loop (DEFAULT OFF). When
+            // the gate fails, re-invoke the SAME engine inside the SAME confined
+            // worktree (identical contained env + OS sandbox launcher — worktree
+            // jail and severed push fully preserved) with the failure tail, then
+            // re-verify. Only a green worktree is filed, re-signed against the
+            // repaired diff. Flag-off ⇒ the single-shot gate above, unchanged.
+            const _v2g = cfg.foundry?.verifyToGreen;
+            if (!_gateResult.pass && _v2g?.enabled === true) {
+              const _v2gOut = await iterateToGreen({
+                cfg,
+                initialFailure: String(_gateResult.reason ?? ''),
+                verify: async () => {
+                  const d = wt.sandboxDiff(sb);
+                  const g = await runCompletenessGate({
+                    worktreePath: sb.worktreePath,
+                    diff: d,
+                    goal,
+                    cfg,
+                  });
+                  return { pass: g.pass, reason: String(g.reason ?? '') };
+                },
+                repair: async (failureTail: string) => {
+                  const repairGoal =
+                    `${goal}\n\n[verify-to-green] A previous attempt failed verification. ` +
+                    `Fix ONLY what is needed to make the checks pass — do not start new work.\n` +
+                    `Verification failure (tail):\n${failureTail}`;
+                  const repairCmd = buildEngineCommand(engine, repairGoal, cfg, {
+                    cwd: sb.worktreePath,
+                    model,
+                    autonomous: true,
+                  });
+                  if (!repairCmd) return null;
+                  const r = await spawnEngine(repairCmd, cfg, {
+                    env,
+                    timeoutMs: _v2g.perRunTimeoutMs ?? 180_000,
+                    launcher: launcher ?? undefined,
+                  });
+                  return { ok: r.ok };
+                },
+              });
+              if (_v2gOut.green) {
+                const repaired = wt.sandboxDiff(sb);
+                if (repaired.files > 0 && repaired.patch.trim().length > 0) {
+                  effDiff = repaired;
+                  scrubbed = scrubSecrets(effDiff.patch);
+                  diffHash = hashDiff(scrubbed);
+                  provenanceSig = signProvenance(engineModel, tier, diffHash);
+                  _gateResult = {
+                    ..._gateResult,
+                    pass: true,
+                    reason: `verify-to-green: green after ${_v2gOut.iterations} repair iteration(s)`,
+                  };
+                  console.log(`[M331] ${_gateResult.reason}`);
+                }
+              }
+            }
             if (!_gateResult.pass) {
               console.log(`[M275] completeness gate blocked proposal: ${_gateResult.reason}`);
               _m275ShouldFile = false;
@@ -813,8 +873,8 @@ export async function runEngineSandboxed(
             kind: 'patch',
             title: `${engine} run: ${goal.slice(0, 80)}`,
             summary:
-              `Sandboxed ${engineModel} run produced ${diff.files} file(s) ` +
-              `(+${diff.insertions}/-${diff.deletions}). Review before applying.`,
+              `Sandboxed ${engineModel} run produced ${effDiff.files} file(s) ` +
+              `(+${effDiff.insertions}/-${effDiff.deletions}). Review before applying.`,
             diff: scrubbed,
             diffHash,
             provenanceSig,

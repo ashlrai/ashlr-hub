@@ -201,6 +201,26 @@ export interface AshlrConfig {
       /** Minimum learned ship-rate for the cost-aware pick (0..1, default 0.6). */
       minShipRate?: number;
     };
+    /**
+     * M331: verify-to-green — bounded engine repair loop before a proposal is
+     * filed. DEFAULT OFF. When enabled and the M275 completeness gate fails a
+     * cli-agent run, the SAME engine is re-invoked inside the SAME confined
+     * worktree (identical contained env + OS sandbox launcher) with the
+     * verification failure tail, up to maxIterations times; the diff is only
+     * filed once the gate passes, re-captured and re-signed against the
+     * repaired worktree. Flag-off ⇒ byte-identical single-shot gate. The
+     * api-model path is out of scope (agent-loop patch application).
+     */
+    verifyToGreen?: {
+      /** Master switch. Default false. */
+      enabled?: boolean;
+      /** Max repair iterations (clamped 1–5, default 3). */
+      maxIterations?: number;
+      /** Per repair-run timeout in ms (default 180_000). */
+      perRunTimeoutMs?: number;
+      /** Verification-failure tail bytes fed back to the engine (default 8192). */
+      failureTailBytes?: number;
+    };
     /** Run external engines inside a sandbox with diff capture (default true when foundry set). */
     sandboxExternal?: boolean;
     /** Hard wall-clock per external run (ms). Default 20 min. */
