@@ -698,6 +698,15 @@ export interface AshlrConfig {
        */
       gateway?: boolean;
       /**
+       * M334 stage 1: run the gateway OBSERVE-ONLY beside the live legacy
+       * routing path and record decision divergences to
+       * ~/.ashlr/fabric/gateway-shadow-*.jsonl (divergenceStats() evaluates
+       * the CONTRACT-M334 stage-2 exit criteria). THE LEGACY RESULT ALWAYS
+       * WINS — shadow mode never changes a routing decision. Ignored when
+       * fabric.gateway is already true. DEFAULT false.
+       */
+      gatewayShadow?: boolean;
+      /**
        * M249: RunCache shadow mode — compute cache keys and log would-hit/would-miss
        * to the decisions ledger. NEVER short-circuits a spawn or serves a cached diff.
        * Pure measurement phase. DEFAULT false → byte-identical to pre-M249.

@@ -1372,6 +1372,52 @@ export async function tick(
       let selectedModel: string | null | undefined;
       let dispatch: DaemonDispatchTrace | undefined;
 
+      // M334 stage 1: observe-only gateway shadow. Runs the M247 gateway
+      // BESIDE the live legacy decision and records the comparison — THE
+      // LEGACY RESULT ALWAYS WINS. Called at the legacy subscription-throttle
+      // block and just before dispatch (M53 intelligence-pause returns are not
+      // shadowed — rare, intelligence-block-gated). Any failure is swallowed.
+      const shadowGateway = async (legacyOutcome: {
+        backend: string;
+        tier: string | null;
+        model?: string | null;
+        dispatched: boolean;
+      }): Promise<void> => {
+        if (routingCfg.foundry?.fabric?.gatewayShadow !== true) return;
+        if (routingCfg.foundry?.fabric?.gateway === true) return;
+        try {
+          const shadowCfg = {
+            ...routingCfg,
+            foundry: {
+              ...routingCfg.foundry,
+              fabric: { ...routingCfg.foundry?.fabric, gateway: true },
+            },
+          } as typeof routingCfg;
+          const gd = await gatewayDecide(item, shadowCfg, {
+            spentUsd: tickSpent + state.todaySpentUsd,
+          });
+          const { recordGatewayShadow, compareDecisions } = await import(
+            '../fabric/gateway-shadow.js'
+          );
+          const gw = {
+            backend: String(gd.backend),
+            tier: gd.tier === null || gd.tier === undefined ? null : String(gd.tier),
+            model: gd.model ?? null,
+            wouldDispatch: !/^(throttled|budget-pause|resource-pause):/.test(gd.reason),
+          };
+          recordGatewayShadow({
+            ts: new Date().toISOString(),
+            workItemId: item.id,
+            source: String(item.source ?? ''),
+            legacy: legacyOutcome,
+            gateway: gw,
+            ...compareDecisions(legacyOutcome, gw),
+          });
+        } catch {
+          // shadow is observe-only — never affects the dispatch
+        }
+      };
+
       // M247: InferenceGateway — consolidates routing into one traceable decision.
       // FLAG-GATED: when cfg.foundry.fabric?.gateway === true, a single
       // gateway.decide() call replaces the double routeBackend + quota guard +
@@ -1547,6 +1593,14 @@ export async function tick(
             : 90;
           const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
           if (!subCheck.allowed) {
+            // M334: shadow the BLOCKED legacy decision — a gateway that would
+            // have dispatched here is the safety-relevant divergence class.
+            await shadowGateway({
+              backend: String(backend),
+              tier: backendTier === null ? null : String(backendTier),
+              model: selectedModel ?? null,
+              dispatched: false,
+            });
             audit({
               action: 'daemon:tick',
               repo: item.repo,
@@ -1720,6 +1774,14 @@ export async function tick(
             }),
           };
         }
+
+        // M334: shadow the about-to-dispatch legacy decision (observe-only).
+        await shadowGateway({
+          backend: String(backend ?? 'builtin'),
+          tier: backendTier === null ? null : String(backendTier),
+          model: selectedModel ?? null,
+          dispatched: true,
+        });
 
         // M170: best-of-N dispatch — when cfg.foundry.bestOfN > 1, generate N
         // candidates and let the critic pick the winner. Flag-off: bestOfN absent
