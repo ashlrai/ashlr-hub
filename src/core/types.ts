@@ -164,6 +164,25 @@ export interface AshlrConfig {
     autonomyControlLoop?: boolean;
     /** Per-backend preferred model id (keyed by EngineId). */
     models?: Partial<Record<EngineId, string>>;
+    /**
+     * M320: Claude 5 generation rollout (Sonnet 5 workhorse + Fable 5
+     * judge/strategist). Absent ⇒ enabled.
+     */
+    claude5?: {
+      /**
+       * Master switch. false ⇒ claude:sonnet-5 / claude:fable-5 are excluded
+       * from routing and all model defaults revert to the pre-M320 values
+       * (byte-identical rollback). Default true.
+       */
+      enabled?: boolean;
+      /**
+       * Fable 5 (claude-fable-5, Mythos-class above Opus) as the default
+       * judge + strategist model, with automatic fallback to claude-opus-4-8
+       * when a Fable call fails, is refused, or returns empty. false ⇒
+       * judge/strategist defaults stay claude-opus-4-8. Default true.
+       */
+      fable?: boolean;
+    };
     /** Run external engines inside a sandbox with diff capture (default true when foundry set). */
     sandboxExternal?: boolean;
     /** Hard wall-clock per external run (ms). Default 20 min. */

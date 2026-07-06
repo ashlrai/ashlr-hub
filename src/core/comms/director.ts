@@ -22,6 +22,7 @@
  */
 
 import type { AshlrConfig } from '../types.js';
+import { defaultStrategistModel } from '../run/model-catalog.js';
 import { buildDirectorContext } from './director-context.js';
 import { DIRECTOR_SYSTEM_PROMPT, renderDirectorPrompt } from './director-prompt.js';
 import { sendTelegramMessage, telegramEnabled } from '../integrations/telegram.js';
@@ -60,7 +61,8 @@ export interface DirectorDecision {
 // LLM caller (mirrors buildComplete from elon-dialogue.ts)
 // ---------------------------------------------------------------------------
 
-const CLAUDE_DEFAULT_STRATEGIST_MODEL = 'claude-opus-4-8';
+// M320: strategist default resolves via defaultStrategistModel() in
+// run/model-catalog.ts (Fable 5 when claude5.fable is on, else Opus 4.8).
 
 async function buildComplete(
   cfg: AshlrConfig,
@@ -71,7 +73,7 @@ async function buildComplete(
   const allowedBackends: string[] =
     (foundry?.['allowedBackends'] as string[] | undefined) ?? ['builtin'];
   const configuredModel = foundry?.['strategistModel'] as string | undefined;
-  const eliteModel = configuredModel ?? CLAUDE_DEFAULT_STRATEGIST_MODEL;
+  const eliteModel = configuredModel ?? defaultStrategistModel(cfg);
 
   const wantClaude =
     managerJudgeEngine === 'auto' || managerJudgeEngine === 'claude';

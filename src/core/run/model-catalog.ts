@@ -52,6 +52,18 @@ export interface ModelEntry {
    * Models with minEffort <= 1 handle everything.
    */
   minEffort: 1 | 2 | 3 | 4 | 5;
+  /**
+   * M320: full provider API model id (e.g. 'claude-sonnet-5'). Used for CLI
+   * --model dispatch of Claude 5 entries, mergeAuthority matching, and
+   * telemetry key normalization (canonicalModelTag). Absent ⇒ the catalog tag
+   * (after ':') is used verbatim (legacy behavior).
+   */
+  apiModelId?: string;
+  /**
+   * M320: quality rank within an engine (higher = more capable). Drives the
+   * pickModel preferStrong sort (quality policy). Absent ⇒ derived from tier.
+   */
+  qualityRank?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,10 +76,14 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
     id: 'claude:opus',
     engine: 'claude',
     tier: 'large',
-    costPerMTokIn: 15.0,
-    costPerMTokOut: 75.0,
+    // M320: corrected to Opus 4.8 sticker pricing ($5/$25 per MTok — the old
+    // 15/75 predates the 4.x price cuts and skewed cost estimates 3x high).
+    costPerMTokIn: 5.0,
+    costPerMTokOut: 25.0,
     capabilities: ['general', 'reasoning', 'long-context'],
     minEffort: 3,
+    apiModelId: 'claude-opus-4-8',
+    qualityRank: 4,
   },
   {
     id: 'claude:sonnet',
@@ -77,15 +93,55 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
     costPerMTokOut: 15.0,
     capabilities: ['fast', 'general', 'coder'],
     minEffort: 2,
+    // M320: pinned legacy generation. Dispatch still sends the bare 'sonnet'
+    // tag — this id only anchors canonicalModelTag / telemetry mapping.
+    apiModelId: 'claude-sonnet-4-6',
+    qualityRank: 2,
   },
   {
     id: 'claude:haiku',
     engine: 'claude',
     tier: 'small',
-    costPerMTokIn: 0.25,
-    costPerMTokOut: 1.25,
+    // M320: corrected to Haiku 4.5 sticker pricing ($1/$5 per MTok).
+    costPerMTokIn: 1.0,
+    costPerMTokOut: 5.0,
     capabilities: ['fast', 'general'],
     minEffort: 1,
+    apiModelId: 'claude-haiku-4-5',
+    qualityRank: 1,
+  },
+
+  // -- Claude 5 generation (M320) -------------------------------------------
+  // Sonnet 5: frontier-class coding at mid cost — the fleet's generation
+  // workhorse once M321 routing lands. Large tier + cheapest-large means the
+  // default pickModel sort prefers it over Opus automatically — but ONLY for
+  // callers that opt in via claude5ExcludeIds(cfg); every legacy pickModel
+  // call site excludes these ids by default (see pickModel excludeIds).
+  {
+    id: 'claude:sonnet-5',
+    engine: 'claude',
+    tier: 'large',
+    costPerMTokIn: 3.0,
+    costPerMTokOut: 15.0,
+    capabilities: ['fast', 'general', 'coder', 'reasoning', 'long-context'],
+    minEffort: 2,
+    apiModelId: 'claude-sonnet-5',
+    qualityRank: 3,
+  },
+  // Fable 5: Mythos-class tier ABOVE Opus — judge/strategist material.
+  // minEffort 5 keeps it out of every default generation path; it is reachable
+  // only via the quality fast-path at effort 5 or explicit config. Priced
+  // above Opus, so it must never become an accidental workhorse.
+  {
+    id: 'claude:fable-5',
+    engine: 'claude',
+    tier: 'large',
+    costPerMTokIn: 10.0,
+    costPerMTokOut: 50.0,
+    capabilities: ['general', 'reasoning', 'long-context', 'coder'],
+    minEffort: 5,
+    apiModelId: 'claude-fable-5',
+    qualityRank: 5,
   },
 
   // -- Codex / OpenAI -------------------------------------------------------
@@ -258,8 +314,18 @@ export function pickModel(opts: {
   capability?: ModelCapability;
   maxEffort?: number;
   preferCheap?: boolean;
+  /** M320: sort by qualityRank desc (strongest first), then cost asc. */
+  preferStrong?: boolean;
+  /**
+   * M320: catalog ids to exclude. DEFAULT: the Claude 5 ids — callers must
+   * opt in via claude5ExcludeIds(cfg) to route the new generation, so every
+   * pre-M320 call site stays byte-identical without changes.
+   */
+  excludeIds?: ReadonlySet<string>;
 }): ModelEntry | null {
+  const excluded = opts.excludeIds ?? CLAUDE5_CATALOG_IDS;
   let pool = KNOWN_MODELS.filter((m) => {
+    if (excluded.has(m.id)) return false;
     if (opts.engine && m.engine !== (opts.engine as EngineId)) return false;
     if (opts.capability && !m.capabilities.includes(opts.capability)) return false;
     if (opts.maxEffort !== undefined && m.minEffort > opts.maxEffort) return false;
@@ -270,7 +336,19 @@ export function pickModel(opts: {
 
   const tierRank: Record<ModelEntry['tier'], number> = { small: 0, mid: 1, large: 2 };
 
-  if (opts.preferCheap) {
+  if (opts.preferStrong) {
+    // M320: strongest first (qualityRank desc, tier-derived fallback), then
+    // cost ascending — the quality-policy sort. Fable 5 (5) > Opus (4) >
+    // Sonnet 5 (3) > unranked large (3, costlier loses) > mid > small.
+    const qualityOf = (m: ModelEntry): number => m.qualityRank ?? tierRank[m.tier] + 1;
+    pool = [...pool].sort((a, b) => {
+      const qDiff = qualityOf(b) - qualityOf(a);
+      if (qDiff !== 0) return qDiff;
+      const aCost = a.costPerMTokIn + a.costPerMTokOut;
+      const bCost = b.costPerMTokIn + b.costPerMTokOut;
+      return aCost - bCost;
+    });
+  } else if (opts.preferCheap) {
     // Sort by total cost ascending (free first), break ties by tier ascending
     pool = [...pool].sort((a, b) => {
       const aCost = a.costPerMTokIn + a.costPerMTokOut;
@@ -290,4 +368,79 @@ export function pickModel(opts: {
   }
 
   return pool[0] ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// M320: Claude 5 generation — ids, flags, canonical spelling
+// ---------------------------------------------------------------------------
+
+/** Full provider API ids for the Claude 5 rollout (M320). */
+export const CLAUDE5_SONNET_API_ID = 'claude-sonnet-5';
+export const CLAUDE5_FABLE_API_ID = 'claude-fable-5';
+export const CLAUDE_OPUS_API_ID = 'claude-opus-4-8';
+
+/** Catalog ids introduced by M320 — excluded from pickModel unless opted in. */
+export const CLAUDE5_CATALOG_IDS: ReadonlySet<string> = new Set([
+  'claude:sonnet-5',
+  'claude:fable-5',
+]);
+
+const EMPTY_EXCLUDES: ReadonlySet<string> = new Set();
+const FABLE_ONLY_EXCLUDES: ReadonlySet<string> = new Set(['claude:fable-5']);
+
+/** Minimal structural view of cfg — keeps this module dependency-light/PURE. */
+type Claude5Cfg = { foundry?: { claude5?: { enabled?: boolean; fable?: boolean } } };
+
+/** M320 master switch. Absent ⇒ enabled. false ⇒ pre-M320 byte-identical. */
+export function claude5Enabled(cfg?: Claude5Cfg): boolean {
+  return cfg?.foundry?.claude5?.enabled !== false;
+}
+
+/** Fable 5 as judge/strategist default. Requires claude5Enabled. Absent ⇒ on. */
+export function fableEnabled(cfg?: Claude5Cfg): boolean {
+  return claude5Enabled(cfg) && cfg?.foundry?.claude5?.fable !== false;
+}
+
+/**
+ * The excludeIds set a Claude5-aware caller passes to pickModel:
+ * claude5 off ⇒ both new ids excluded (pre-M320 byte-identical);
+ * fable off ⇒ only fable-5 excluded; otherwise nothing excluded.
+ */
+export function claude5ExcludeIds(cfg?: Claude5Cfg): ReadonlySet<string> {
+  if (!claude5Enabled(cfg)) return CLAUDE5_CATALOG_IDS;
+  if (!fableEnabled(cfg)) return FABLE_ONLY_EXCLUDES;
+  return EMPTY_EXCLUDES;
+}
+
+/**
+ * M320: single source of truth for the strategist default model
+ * (comms/director.ts, vision/strategist.ts, comms/elon-dialogue.ts — this
+ * ends the triple-maintained constant). Fable 5 when claude5.fable is on,
+ * else Opus 4.8. cfg.foundry.strategistModel always overrides at call sites.
+ */
+export function defaultStrategistModel(cfg?: Claude5Cfg): string {
+  return fableEnabled(cfg) ? CLAUDE5_FABLE_API_ID : CLAUDE_OPUS_API_ID;
+}
+
+/**
+ * Map any spelling of a model to its canonical catalog tag for `engine`:
+ *   'sonnet-5' | 'claude-sonnet-5' | 'claude:sonnet-5' | 'claude:claude-sonnet-5'
+ * all → 'sonnet-5'. Unknown strings are returned with the engine prefix
+ * stripped. Used by the merge-authority gate (M320) and telemetry key
+ * normalization (M322/M323) so spelling variants never split a key.
+ */
+export function canonicalModelTag(
+  engine: EngineId | string,
+  model: string | null | undefined,
+): string {
+  if (!model) return '';
+  let tag = model.trim();
+  const prefix = `${String(engine)}:`;
+  while (tag.startsWith(prefix)) tag = tag.slice(prefix.length);
+  for (const m of KNOWN_MODELS) {
+    if (m.engine !== (engine as EngineId)) continue;
+    const mTag = m.id.slice(m.id.indexOf(':') + 1);
+    if (tag === mTag || (m.apiModelId !== undefined && tag === m.apiModelId)) return mTag;
+  }
+  return tag;
 }

@@ -143,7 +143,7 @@ function pickCloudProvider(chain: string[]): string | null {
  */
 function defaultCloudModel(provider: string): string {
   const models: Record<string, string> = {
-    anthropic: 'claude-3-5-haiku',
+    anthropic: 'claude-haiku-4-5',
     openai: 'gpt-4o-mini',
     gemini: 'gemini-1.5-flash',
     cohere: 'command-r',

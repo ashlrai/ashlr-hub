@@ -270,6 +270,21 @@ export function buildEffectiveConfigSnapshot(
   if (autoMerge?.enabled === true && !cfg.foundry?.mergeAuthority?.length && autoMerge.trustBasis !== 'verification') {
     warnings.push('autoMerge.enabled is true but mergeAuthority is empty; tier-based main auto-merge will not authorize proposals.');
   }
+  // M320: Sonnet 5 becomes the routing workhorse (M321) — if auto-merge is on
+  // and an explicit mergeAuthority exists without a sonnet-5 entry, Sonnet 5
+  // proposals verify + judge but silently never auto-merge. Surface it.
+  if (
+    autoMerge?.enabled === true &&
+    (cfg.foundry?.mergeAuthority?.length ?? 0) > 0 &&
+    cfg.foundry?.claude5?.enabled !== false &&
+    !cfg.foundry?.mergeAuthority?.some(
+      (e) => String(e.engine) === 'claude' && String(e.model).includes('sonnet-5'),
+    )
+  ) {
+    warnings.push(
+      'claude5 is enabled but mergeAuthority has no claude-sonnet-5 entry; Sonnet 5 proposals will never auto-merge. Add {engine:"claude",model:"claude-sonnet-5"} (and optionally claude-fable-5).',
+    );
+  }
 
   return {
     generatedAt: (opts.now ?? new Date()).toISOString(),

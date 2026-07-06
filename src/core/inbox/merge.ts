@@ -110,6 +110,7 @@ import type {
   ProposalVerifyResult,
 } from '../types.js';
 import { loadProposal, setStatus, updateProposalField } from './store.js';
+import { canonicalModelTag } from '../run/model-catalog.js';
 import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
 import { isRepo, getGitStatus, getRemoteOrg, defaultBranch } from '../git.js';
@@ -494,7 +495,22 @@ export function evaluateMergeAuthority(
     };
   }
 
-  const match = authority.some((e) => `${e.engine}:${e.model}` === engineModel);
+  // M320: spelling-variant-safe matching. engineModel strings and mergeAuthority
+  // entries may pin the same model under different spellings ('sonnet-5' vs
+  // 'claude-sonnet-5' vs a doubled 'claude:claude-sonnet-5') — canonicalModelTag
+  // maps all of them onto one catalog tag so a spelling mismatch can never
+  // silently disable auto-merge for an authorized model. The exact-string match
+  // is checked first (byte-identical for every pre-M320 config).
+  const sep = engineModel.indexOf(':');
+  const pEngine = sep > 0 ? engineModel.slice(0, sep) : '';
+  const pTag = sep > 0 ? canonicalModelTag(pEngine, engineModel.slice(sep + 1)) : '';
+  const match = authority.some(
+    (e) =>
+      `${e.engine}:${e.model}` === engineModel ||
+      (pEngine !== '' &&
+        String(e.engine) === pEngine &&
+        canonicalModelTag(e.engine, e.model) === pTag),
+  );
   if (!match) {
     return {
       authorized: false,

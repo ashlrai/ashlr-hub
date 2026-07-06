@@ -25,6 +25,7 @@ import { computeQualityMetrics } from './quality-metrics.js';
 import { renderPlaybook } from '../vision/playbook.js';
 import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
 import { peekBackendAvailability } from '../fabric/resource-monitor.js';
+import { CLAUDE5_FABLE_API_ID, fableEnabled } from '../run/model-catalog.js';
 
 // ---------------------------------------------------------------------------
 // Public types (defined here — not in types.ts per file ownership rules)
@@ -697,10 +698,18 @@ async function ollamaDirectComplete(
 // ---------------------------------------------------------------------------
 
 /**
- * Default model for the Claude CLI judge when cfg.foundry.managerJudgeModel
- * does not specify an explicit claude model.
+ * M320: default model for the Claude CLI judge when cfg.foundry.managerJudgeModel
+ * does not specify an explicit claude model. Fable 5 (Mythos-class — the
+ * strongest available judge; its quality compounds through every auto-merge
+ * decision) when cfg.foundry.claude5.fable is on; Opus 4.8 otherwise. Fable
+ * calls that fail, are refused, or return empty retry once on the Opus
+ * fallback inside buildClaudeCliComplete — a judge pass never dies because
+ * Fable is unavailable on this account.
  */
-const CLAUDE_DEFAULT_JUDGE_MODEL = 'claude-sonnet-4-5';
+const CLAUDE_JUDGE_FALLBACK_MODEL = 'claude-opus-4-8';
+function defaultClaudeJudgeModel(cfg: AshlrConfig): string {
+  return fableEnabled(cfg) ? CLAUDE5_FABLE_API_ID : CLAUDE_JUDGE_FALLBACK_MODEL;
+}
 
 /**
  * Build a `complete(system, user)` function that uses the Claude Code CLI
@@ -714,6 +723,24 @@ const CLAUDE_DEFAULT_JUDGE_MODEL = 'claude-sonnet-4-5';
  * falls through to the parse-failure → 'review' path.
  */
 function buildClaudeCliComplete(
+  cfg: AshlrConfig,
+  model: string,
+): (system: string, user: string) => Promise<string> {
+  const primary = buildClaudeCliCompleteSingle(cfg, model);
+  // M320: Fable 5 judge calls fall back to Opus 4.8 when the primary call
+  // fails, is refused by safety classifiers, or returns empty — the empty
+  // string is the never-throw failure signal of the single-shot path, so
+  // `|| fallback(...)` covers all three. Non-Fable models keep the exact
+  // pre-M320 single-shot behavior.
+  if (model !== CLAUDE5_FABLE_API_ID) return primary;
+  const fallback = buildClaudeCliCompleteSingle(cfg, CLAUDE_JUDGE_FALLBACK_MODEL);
+  return async (system: string, user: string): Promise<string> => {
+    const out = await primary(system, user);
+    return out || fallback(system, user);
+  };
+}
+
+function buildClaudeCliCompleteSingle(
   cfg: AshlrConfig,
   model: string,
 ): (system: string, user: string) => Promise<string> {
@@ -829,7 +856,7 @@ function resolveJudgeClient(
     // Use cfg.foundry.managerJudgeModel if it looks like a claude model,
     // otherwise fall back to the sonnet default.
     const isClaudeModel = judgeModel.startsWith('claude') || judgeModel.includes('claude');
-    const claudeModel = isClaudeModel ? judgeModel : CLAUDE_DEFAULT_JUDGE_MODEL;
+    const claudeModel = isClaudeModel ? judgeModel : defaultClaudeJudgeModel(cfg);
     return {
       complete: buildClaudeCliComplete(cfg, claudeModel),
       judgeEngine: claudeModel,

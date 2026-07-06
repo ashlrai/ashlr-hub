@@ -23,6 +23,7 @@
  */
 
 import type { AshlrConfig } from '../types.js';
+import { defaultStrategistModel } from '../run/model-catalog.js';
 import { loadLatestBriefing } from '../vision/strategist.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { loadPauseState, savePauseState } from './pause.js';
@@ -32,7 +33,8 @@ import { loadPauseState, savePauseState } from './pause.js';
 // in strategist.ts — duplicated per file-ownership rules).
 // ---------------------------------------------------------------------------
 
-const CLAUDE_DEFAULT_STRATEGIST_MODEL = 'claude-opus-4-8';
+// M320: strategist default resolves via defaultStrategistModel() in
+// run/model-catalog.ts (Fable 5 when claude5.fable is on, else Opus 4.8).
 
 /** Lazy imports to allow test mocks to intercept. */
 async function buildComplete(
@@ -42,7 +44,7 @@ async function buildComplete(
   const managerJudgeEngine = (foundry?.['managerJudgeEngine'] as string | undefined) ?? 'auto';
   const allowedBackends: string[] = (foundry?.['allowedBackends'] as string[] | undefined) ?? ['builtin'];
   const configuredModel = (foundry?.['strategistModel'] as string | undefined);
-  const eliteModel = configuredModel ?? CLAUDE_DEFAULT_STRATEGIST_MODEL;
+  const eliteModel = configuredModel ?? defaultStrategistModel(cfg);
 
   const wantClaude = managerJudgeEngine === 'auto' || managerJudgeEngine === 'claude';
   const claudeAllowed = allowedBackends.includes('claude');

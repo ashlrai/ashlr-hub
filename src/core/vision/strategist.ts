@@ -42,6 +42,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { AshlrConfig } from '../types.js';
+import { defaultStrategistModel } from '../run/model-catalog.js';
 import { loadSpec, applyEvolution } from './spec.js';
 import type { EndStateSpec, ToolRoadmapEntry } from './spec.js';
 import { addDelta, curate, renderPlaybook } from './playbook.js';
@@ -268,7 +269,8 @@ questionsForMason: only ask when a strategic fork GENUINELY requires Mason's jud
  * Founder-grade strategy requires the best reasoning. Overridden by
  * cfg.foundry.strategistModel.
  */
-const CLAUDE_DEFAULT_STRATEGIST_MODEL = 'claude-opus-4-8';
+// M320: strategist default resolves via defaultStrategistModel() in
+// run/model-catalog.ts (Fable 5 when claude5.fable is on, else Opus 4.8).
 
 /**
  * Build a `complete(system, user)` function using the Claude Code CLI.
@@ -305,8 +307,9 @@ function buildClaudeCliCompleteStrategist(
 /**
  * Resolve the best available client for strategic briefings.
  *
- * M162: model priority — cfg.foundry.strategistModel → CLAUDE_DEFAULT_STRATEGIST_MODEL
- * ('claude-opus-4-8'). Founder-grade strategy always uses the elite model.
+ * M162/M320: model priority — cfg.foundry.strategistModel → defaultStrategistModel(cfg)
+ * (Fable 5 when claude5.fable is on, else 'claude-opus-4-8'). Founder-grade
+ * strategy always uses the elite model.
  *
  * Engine priority (controlled by cfg.foundry.managerJudgeEngine):
  *   1. 'auto' / 'claude' + claude allowed+installed → Claude CLI (with elite model)
@@ -325,7 +328,7 @@ function resolveStrategistClient(
 
   // M162: read strategistModel from cfg — override the default elite model.
   const configuredModel = (foundry?.['strategistModel'] as string | undefined);
-  const eliteModel = configuredModel ?? CLAUDE_DEFAULT_STRATEGIST_MODEL;
+  const eliteModel = configuredModel ?? defaultStrategistModel(cfg);
 
   const wantClaude = managerJudgeEngine === 'auto' || managerJudgeEngine === 'claude';
   const claudeAllowed = allowedBackends.includes('claude');
