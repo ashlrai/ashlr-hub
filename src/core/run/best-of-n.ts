@@ -38,6 +38,14 @@ export interface CandidateResult {
    * Scores vision-alignment, ambition/impact, and design taste (1–5 each).
    */
   taste?: TasteScore;
+  /** M333: the engine that produced this candidate (multi-model mode). */
+  engine?: EngineId;
+  /** M333: the model spec used for this candidate (null = engine default). */
+  model?: string | null;
+  /** M333: raw generation cost for this candidate (USD, pre-subscription-rule). */
+  costUsd?: number;
+  /** M333: wall-clock generation latency for this candidate (ms). */
+  latencyMs?: number;
   /** Error from the sandbox run or judge, if any. */
   error?: string;
 }
@@ -52,6 +60,15 @@ export interface BestOfNResult {
     judged: number;
     topScore: number;
     winnerIndex: number;
+    /** M333: summed raw generation cost across ALL candidates (USD). */
+    totalCostUsd: number;
+    /**
+     * M333: totalCostUsd with the M80 subscription-$0 rule applied
+     * PER-CANDIDATE — this is what the daemon counts against the tick budget
+     * (the pre-M333 daemon counted only the winner's spend, under-reporting
+     * a fan-out by ~N-1 candidates).
+     */
+    billableCostUsd: number;
   };
 }
 
@@ -144,7 +161,21 @@ function candidateErrorFromState(state: RunState, proposalId?: string): string |
 export async function runBestOfN(
   item: WorkItem,
   cfg: AshlrConfig,
-  opts?: { n?: number; workItemId?: string; workSource?: WorkSource; engine?: EngineId; model?: string | null },
+  opts?: {
+    n?: number;
+    workItemId?: string;
+    workSource?: WorkSource;
+    engine?: EngineId;
+    model?: string | null;
+    /**
+     * M333: per-candidate engine/model specs. Candidate i runs on
+     * specs[i % specs.length] — one candidate per spec when n matches the
+     * list length, cycling when the operator asks for more candidates than
+     * specs. Absent → single-engine stochastic resampling (M142/M170
+     * byte-identical).
+     */
+    candidates?: Array<{ engine: EngineId; model?: string | null }>;
+  },
 ): Promise<BestOfNResult | { winner: undefined; candidates: CandidateResult[]; critique: BestOfNResult['critique'] }> {
   const n = readN(cfg, opts?.n);
   const goal = goalFor(item);
@@ -213,7 +244,7 @@ export async function runBestOfN(
   //   2. Otherwise use the first allowed backend (whatever the operator configured).
   //   3. If allowedBackends is empty, default to 'local-coder'.
   // If the selected runner is unavailable we can't generate candidates — they will all error below.
-  const engine = (() => {
+  const defaultEngine = (() => {
     if (opts?.engine) return opts.engine;
     const allowed = cfg.foundry?.allowedBackends ?? [];
     // Prefer 'local-coder' if explicitly allowed
@@ -223,11 +254,20 @@ export async function runBestOfN(
     // Fall back to the first configured backend, or 'local-coder' as last resort
     return allowed[0] ?? ('local-coder' as import('../types.js').EngineId);
   })();
-  const engineSpec = resolveEngineSpec(engine, cfg);
-  const runSandboxed = engineSpec?.kind === 'api-model' ? runApiModelSandboxed : runEngineSandboxed;
-  const missingRunnerMessage = engineSpec?.kind === 'api-model'
-    ? 'api-model sandbox runner unavailable'
-    : 'cli-agent sandbox runner unavailable';
+  // M333: multi-model candidate specs — absent → the single-engine
+  // stochastic-resampling behavior, byte-identical to M142/M170.
+  const specs: Array<{ engine: EngineId; model?: string | null }> =
+    opts?.candidates && opts.candidates.length > 0
+      ? opts.candidates
+      : [{ engine: defaultEngine, model: opts?.model ?? null }];
+  const runnerFor = (e: EngineId): typeof runEngineSandboxed => {
+    const spec = resolveEngineSpec(e, cfg);
+    return spec?.kind === 'api-model' ? runApiModelSandboxed : runEngineSandboxed;
+  };
+  const missingRunnerMessageFor = (e: EngineId): string =>
+    resolveEngineSpec(e, cfg)?.kind === 'api-model'
+      ? 'api-model sandbox runner unavailable'
+      : 'cli-agent sandbox runner unavailable';
 
   const sourceRepo = item.repo ?? process.cwd();
 
@@ -236,15 +276,20 @@ export async function runBestOfN(
     // Vary temperature and seed so candidates differ across calls.
     // We pass opts into the sandbox via model override naming conventions where
     // supported; the primary divergence comes from the engine's own stochasticity.
-    const base: CandidateResult = { index: i, diff: '', score: 0 };
+    const spec = specs[i % specs.length]!;
+    const cEngine = spec.engine;
+    const cModel = spec.model ?? null;
+    const base: CandidateResult = { index: i, diff: '', score: 0, engine: cEngine, model: cModel };
+    const runSandboxed = runnerFor(cEngine);
 
     if (!runSandboxed) {
-      return { ...base, error: missingRunnerMessage };
+      return { ...base, error: missingRunnerMessageFor(cEngine) };
     }
 
+    const t0 = Date.now();
     try {
-      const result = await runSandboxed(engine as import('../types.js').EngineId, goal, cfg, {
-        ...(typeof opts?.model === 'string' ? { model: opts.model } : {}),
+      const result = await runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
+        ...(typeof cModel === 'string' ? { model: cModel } : {}),
         sourceRepo,
         propose: true,
         runId: `best-of-n-${i}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
@@ -261,12 +306,17 @@ export async function runBestOfN(
         ...base,
         diff: typeof diff === 'string' ? diff : '',
         proposalId: result.proposalId,
+        latencyMs: Date.now() - t0,
+        ...(typeof result.state.usage?.estCostUsd === 'number'
+          ? { costUsd: result.state.usage.estCostUsd }
+          : {}),
         ...(candidateError ? { error: candidateError } : {}),
         state: result.state,
       } as CandidateResult & { state: unknown };
     } catch (err) {
       return {
         ...base,
+        latencyMs: Date.now() - t0,
         error: err instanceof Error ? err.message : String(err),
       };
     }
@@ -360,13 +410,84 @@ export async function runBestOfN(
 
   const winner = eligible[0];
 
+  // ── M333: full-cost accounting across ALL candidates ────────────────
+  let isSubscription: ((e: string) => boolean) | undefined;
+  try {
+    const mod = await import('../fleet/subscription-usage.js');
+    isSubscription = mod.isSubscriptionEngine as (e: string) => boolean;
+  } catch {
+    // conservative fallback: treat every candidate as billable
+  }
+  const totalCostUsd = scored.reduce((s, c) => s + (c.costUsd ?? 0), 0);
+  const billableCostUsd = scored.reduce(
+    (s, c) =>
+      s + (isSubscription && c.engine && isSubscription(String(c.engine)) ? 0 : (c.costUsd ?? 0)),
+    0,
+  );
+
   const critique: BestOfNResult['critique'] = {
     n,
     nonEmpty: withProposals.length,
     judged: eligible.filter(c => c.verdict != null).length,
     topScore: winner?.score ?? 0,
     winnerIndex: winner?.index ?? -1,
+    totalCostUsd,
+    billableCostUsd,
   };
+
+  // ── M333: exactly ONE pending proposal per work item ────────────────
+  // Losers are archived with a provenance reason. This is an explicit
+  // reason-tagged rejection, NOT a judge non-ship verdict — the M259/M271
+  // auto-archive counters key on judge verdicts and stay untouched.
+  const winnerPid = winner?.proposalId;
+  const losers = scored.filter((c) => c.proposalId && c.proposalId !== winnerPid);
+  if (losers.length > 0) {
+    try {
+      const { setStatus } = await import('../inbox/store.js');
+      for (const l of losers) {
+        try {
+          setStatus(
+            l.proposalId!,
+            'rejected',
+            undefined,
+            `best-of-n loser${winnerPid ? `: winner ${winnerPid}` : ' (no winner)'}`,
+          );
+        } catch {
+          // best-effort per loser
+        }
+      }
+    } catch {
+      // inbox unavailable (tests/partial builds)
+    }
+  }
+
+  // ── M333: per-candidate record stream (feeds M335 win-rates) ─────────
+  try {
+    const { recordBestOfN } = await import('../fleet/best-of-n-ledger.js');
+    recordBestOfN({
+      ts: new Date().toISOString(),
+      workItemId: opts?.workItemId ?? item.id,
+      source: String(item.source ?? ''),
+      repo: item.repo ?? null,
+      n,
+      winnerIndex: winner?.index ?? -1,
+      winnerProposalId: winnerPid ?? null,
+      totalCostUsd,
+      candidates: scored.map((c) => ({
+        index: c.index,
+        engine: String(c.engine ?? ''),
+        model: c.model ?? null,
+        score: c.score,
+        ...(c.testsPassed !== undefined ? { testsPassed: c.testsPassed } : {}),
+        ...(c.costUsd !== undefined ? { costUsd: c.costUsd } : {}),
+        ...(c.latencyMs !== undefined ? { latencyMs: c.latencyMs } : {}),
+        proposalId: c.proposalId ?? null,
+        won: c.proposalId != null && c.proposalId === winnerPid,
+      })),
+    });
+  } catch {
+    // ledger is best-effort
+  }
 
   if (!winner) {
     // All candidates empty or failing — caller skips proposing

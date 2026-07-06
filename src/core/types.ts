@@ -212,6 +212,30 @@ export interface AshlrConfig {
      * api-model path is out of scope (agent-loop patch application).
      */
     /**
+     * M170/M333: best-of-N candidate generation. N > 1 ⇒ the dispatch loop
+     * generates N candidates and the critic picks the winner. Formalized here
+     * in M333 (read via `as any` since M170). Default 1 (single dispatch).
+     */
+    bestOfN?: number;
+    /**
+     * M333: per-candidate engine/model specs for multi-model best-of-N —
+     * e.g. [{engine:'claude', model:'claude-sonnet-5'}, {engine:'codex'},
+     * {engine:'local-coder'}]. Candidate i runs on specs[i % specs.length].
+     * Entries not in allowedBackends are dropped at dispatch. Absent ⇒
+     * single-engine stochastic resampling (M170 behavior). Trust is
+     * unchanged: a winning mid/local candidate keeps its tier tag and can
+     * never gain merge authority.
+     */
+    bestOfNCandidates?: Array<{ engine: EngineId; model?: string | null }>;
+    /**
+     * M333: fan out only for work items whose score ≥ this threshold; below
+     * it, single dispatch. Absent ⇒ every item fans out when bestOfN > 1
+     * (M170 behavior). Cost guard: full candidate spend (billableCostUsd,
+     * subscription-aware) counts against the tick budget — the pre-M333
+     * accounting counted only the winner.
+     */
+    bestOfNMinItemScore?: number;
+    /**
      * M332: outcome watcher — maintenance pass linking real-world reverts and
      * near-term follow-up fixes back onto judge traces. READ-ONLY on repos,
      * append-only ledgers, internally throttled to one scan per 6h.

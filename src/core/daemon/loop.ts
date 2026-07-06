@@ -1730,8 +1730,28 @@ export async function tick(
             ? Math.floor((routingCfg.foundry as Record<string, unknown>)['bestOfN'] as number)
             : 1;
 
+        // M333: fan-out gating + multi-model candidate specs + full-cost
+        // accounting. bestOfNMinItemScore (absent ⇒ every item, M170 behavior)
+        // keeps N× generation for high-value items only; bestOfNCandidates are
+        // filtered to allowedBackends; billableCostUsd (ALL candidates,
+        // subscription-aware) replaces the winner-only spend accounting.
+        const _bonCfg = routingCfg.foundry as Record<string, unknown> | undefined;
+        const _bonMinScore = _bonCfg?.['bestOfNMinItemScore'];
+        const _bonRawCandidates = _bonCfg?.['bestOfNCandidates'];
+        const _bonCandidates = Array.isArray(_bonRawCandidates)
+          ? (_bonRawCandidates as Array<{ engine?: unknown; model?: unknown }>)
+              .filter((c): c is { engine: string; model?: string | null } =>
+                !!c && typeof c.engine === 'string')
+              .filter((c) =>
+                ((routingCfg.foundry?.allowedBackends ?? []) as string[]).includes(c.engine))
+          : undefined;
+        const fanOut =
+          bestOfN > 1 &&
+          (typeof _bonMinScore !== 'number' || (item.score ?? 0) >= _bonMinScore);
+        let bonBillable: number | null = null;
+
         let runState: Awaited<ReturnType<typeof runGoal>>;
-        if (bestOfN > 1) {
+        if (fanOut) {
           // Route through runBestOfN; use its winner's underlying runState.
           // runBestOfN never throws; if all candidates fail, winner is undefined
           // and we fall through to a zero-cost no-proposal outcome.
@@ -1739,12 +1759,17 @@ export async function tick(
             n: bestOfN,
             engine: backend,
             model: selectedModel,
+            ...(_bonCandidates && _bonCandidates.length > 0
+              ? { candidates: _bonCandidates as never }
+              : {}),
             workItemId: item.id,
             workSource: item.source,
           });
+          bonBillable = bonResult.critique.billableCostUsd ?? 0;
           if (!bonResult.winner) {
-            // All candidates were empty/failing — count as dispatched but $0.
-            swarmSpent = 0;
+            // All candidates were empty/failing — still count what the fan-out
+            // actually spent (M333: the pre-M333 $0 under-reported real spend).
+            swarmSpent = bonBillable;
             tickSpent += swarmSpent;
             audit({
               action: 'daemon:proposal-created',
@@ -1755,7 +1780,7 @@ export async function tick(
             });
             return {
               item,
-              spentUsd: 0,
+              spentUsd: swarmSpent,
               dispatched: true,
               dispatch: dispatchTrace(item, {
                 backend,
@@ -1764,7 +1789,7 @@ export async function tick(
                 assignedBy,
                 reason: `${assignmentReason}; best-of-${bestOfN}: all candidates empty`,
                 dispatched: true,
-                spentUsd: 0,
+                spentUsd: swarmSpent,
                 skipReason: 'empty-best-of-n',
               }),
             };
@@ -1791,9 +1816,14 @@ export async function tick(
         // dailyBudgetUsd so they don't exhaust the daily cap. The subscription-
         // window guard (subscriptionAllows above) governs their pacing instead.
         // API-model / builtin paths are unaffected (their isSubscriptionEngine is false).
-        swarmSpent = isSubscriptionEngine(backend)
-          ? 0
-          : (runState.usage?.estCostUsd ?? 0);
+        // M333: a fan-out counts EVERY candidate's billable spend (subscription
+        // rule applied per-candidate inside runBestOfN); single dispatch keeps
+        // the M80 winner-path accounting byte-identically.
+        swarmSpent = bonBillable !== null
+          ? bonBillable
+          : isSubscriptionEngine(backend)
+            ? 0
+            : (runState.usage?.estCostUsd ?? 0);
         tickSpent += swarmSpent;
 
         audit({
