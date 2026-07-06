@@ -627,6 +627,18 @@ export async function handleApi(
       return true;
     }
 
+    // ── GET /api/models ──────────────────────────────────────────
+    // M335: joined per-model economics — ROI (M322) + real-world outcomes
+    // (M332) + best-of-N win rates (M333). Read-only. ?window=7d|30d|all
+    // (default 30d).
+    if (path === '/api/models' && method === 'GET') {
+      const rawW = getQueryParam(req.url ?? '', 'window');
+      const statsWindow = rawW === '7d' ? '7d' : rawW === 'all' ? 'all' : '30d';
+      const { computeModelStats } = await import('../fleet/model-stats.js');
+      sendJson(res, 200, { window: statsWindow, models: computeModelStats(statsWindow) });
+      return true;
+    }
+
     // ── GET /api/genome ──────────────────────────────────────────────────────
     if (path === '/api/genome' && method === 'GET') {
       const q = getQueryParam(req.url ?? '', 'q');

@@ -24,7 +24,7 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-const VIEWS = ['fleet-dashboard', 'control', 'fleet-activity', 'goals', 'overview', 'runs', 'swarms', 'pulse', 'genome', 'portfolio', 'inbox', 'daemon', 'fleet'];
+const VIEWS = ['fleet-dashboard', 'control', 'fleet-activity', 'goals', 'overview', 'runs', 'swarms', 'pulse', 'models', 'genome', 'portfolio', 'inbox', 'daemon', 'fleet'];
 const DEFAULT_VIEW = 'fleet-dashboard';
 const API_BASE = '';  // same origin
 
@@ -383,6 +383,8 @@ function connectSSE() {
         state.inboxBadge = data.pending ?? 0;
         updateInboxBadge();
         if (state.activeView === 'inbox') renderInbox();
+        // M335: verdict/merge activity changes per-model ROI — refresh the tab.
+        if (state.activeView === 'models') loadModels(state.models?.window ?? '30d');
       } catch {}
     });
     // M32: live daemon state
@@ -475,6 +477,7 @@ function renderActiveView() {
   else if (view === 'runs') renderRuns();
   else if (view === 'swarms') renderSwarms();
   else if (view === 'pulse') renderPulse();
+  else if (view === 'models') renderModels();
   else if (view === 'genome') renderGenome();
   else if (view === 'portfolio') renderPortfolio();
   else if (view === 'inbox') renderInbox();
@@ -506,6 +509,7 @@ async function loadView(view) {
   else if (view === 'runs') await loadRuns();
   else if (view === 'swarms') await loadSwarms();
   else if (view === 'pulse') await loadPulse();
+  else if (view === 'models') await loadModels();
   else if (view === 'genome') await loadGenome();
   else if (view === 'portfolio') await loadPortfolio();
   else if (view === 'inbox') await loadInbox();
@@ -1493,6 +1497,81 @@ function buildProjectTable(byProject) {
   table.appendChild(tbody);
   wrap.appendChild(table);
   return wrap;
+}
+
+// ---------------------------------------------------------------------------
+// Models view (M335) — per-model ship rate, cost-per-merge, outcomes, BoN wins
+// ---------------------------------------------------------------------------
+
+async function loadModels(window = '30d') {
+  showLoading('models');
+  try {
+    state.models = await apiFetch(`/api/models?window=${window}`);
+    renderModels();
+  } catch (err) {
+    showError('models', err.message);
+  }
+}
+
+function renderModels() {
+  if (state.activeView !== 'models') return;
+  const data = state.models;
+  const main = getMain();
+  if (!main) return;
+  main.innerHTML = '';
+
+  const section = el('section', { cls: 'view-section' });
+
+  const windowPicker = el('div', { cls: 'window-picker' });
+  for (const w of ['7d', '30d', 'all']) {
+    const btn = el('button', {
+      cls: `btn window-btn ${data?.window === w ? 'active' : ''}`,
+      onClick: () => loadModels(w)
+    }, w);
+    windowPicker.appendChild(btn);
+  }
+  section.appendChild(el('div', { cls: 'view-header' },
+    el('h1', { cls: 'view-title' }, 'Models'),
+    windowPicker
+  ));
+
+  const models = data?.models ?? [];
+  if (models.length === 0) {
+    section.appendChild(el('p', {},
+      'No model telemetry yet — dispatch some work and the per-model ROI (ship rate, cost per merge, best-of-N win rate) lands here.'));
+    main.appendChild(section);
+    return;
+  }
+
+  const wrap = el('div', { cls: 'table-wrap' });
+  const table = el('table', { cls: 'data-table' });
+  const thead = el('thead', {});
+  const headerRow = el('tr', {});
+  for (const h of ['Model', 'Dispatches', 'Ship rate', 'Merged', 'Rev / Fix', 'Spend', '$ / merge', 'Latency', 'BoN wins']) {
+    headerRow.appendChild(el('th', {}, h));
+  }
+  thead.appendChild(headerRow);
+  table.appendChild(thead);
+
+  const tbody = el('tbody', {});
+  for (const m of models) {
+    const tr = el('tr', { cls: 'table-row' });
+    tr.appendChild(el('td', { title: m.engineModel }, m.engineModel));
+    tr.appendChild(el('td', { cls: 'num' }, String(m.dispatches)));
+    tr.appendChild(el('td', { cls: 'num' }, m.judged > 0 ? `${Math.round(m.shipRate * 100)}%` : '—'));
+    tr.appendChild(el('td', { cls: 'num' }, String(m.merged)));
+    tr.appendChild(el('td', { cls: 'num' }, `${m.outcomes?.reverted ?? 0} / ${m.outcomes?.followedUp ?? 0}`));
+    tr.appendChild(el('td', { cls: 'num' }, `$${fmt((m.costUsd ?? 0) + (m.judgeCostUsd ?? 0))}`));
+    tr.appendChild(el('td', { cls: 'num' }, m.costPerMergedUsd != null ? `$${fmt(m.costPerMergedUsd)}` : '—'));
+    tr.appendChild(el('td', { cls: 'num' }, m.avgLatencyMs != null ? `${Math.round(m.avgLatencyMs / 1000)}s` : '—'));
+    tr.appendChild(el('td', { cls: 'num' },
+      m.bestOfN?.entered > 0 ? `${m.bestOfN.won}/${m.bestOfN.entered} (${Math.round(m.bestOfN.winRate * 100)}%)` : '—'));
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  section.appendChild(wrap);
+  main.appendChild(section);
 }
 
 // ---------------------------------------------------------------------------
