@@ -712,6 +712,20 @@ function defaultClaudeJudgeModel(cfg: AshlrConfig): string {
 }
 
 /**
+ * M322: per-call judge telemetry captured from the CLI JSON output.
+ * `model` is the model that ACTUALLY answered — a Fable primary that fell
+ * back to Opus reports Opus, so the ledger never lies about the answering
+ * model. All fields best-effort; absent on local/ollama judge paths.
+ */
+interface JudgeCallStats {
+  model?: string;
+  durationMs?: number;
+  costUsd?: number;
+  tokensIn?: number;
+  tokensOut?: number;
+}
+
+/**
  * Build a `complete(system, user)` function that uses the Claude Code CLI
  * (`claude -p "<combined prompt>" --model <M> --output-format json`).
  *
@@ -725,15 +739,16 @@ function defaultClaudeJudgeModel(cfg: AshlrConfig): string {
 function buildClaudeCliComplete(
   cfg: AshlrConfig,
   model: string,
+  stats?: JudgeCallStats,
 ): (system: string, user: string) => Promise<string> {
-  const primary = buildClaudeCliCompleteSingle(cfg, model);
+  const primary = buildClaudeCliCompleteSingle(cfg, model, stats);
   // M320: Fable 5 judge calls fall back to Opus 4.8 when the primary call
   // fails, is refused by safety classifiers, or returns empty — the empty
   // string is the never-throw failure signal of the single-shot path, so
   // `|| fallback(...)` covers all three. Non-Fable models keep the exact
   // pre-M320 single-shot behavior.
   if (model !== CLAUDE5_FABLE_API_ID) return primary;
-  const fallback = buildClaudeCliCompleteSingle(cfg, CLAUDE_JUDGE_FALLBACK_MODEL);
+  const fallback = buildClaudeCliCompleteSingle(cfg, CLAUDE_JUDGE_FALLBACK_MODEL, stats);
   return async (system: string, user: string): Promise<string> => {
     const out = await primary(system, user);
     return out || fallback(system, user);
@@ -743,21 +758,41 @@ function buildClaudeCliComplete(
 function buildClaudeCliCompleteSingle(
   cfg: AshlrConfig,
   model: string,
+  stats?: JudgeCallStats,
 ): (system: string, user: string) => Promise<string> {
   return async (system: string, user: string): Promise<string> => {
     try {
+      const t0 = Date.now();
       const combined = `${system}\n\n${user}`;
       const cmd = buildEngineCommand('claude', combined, cfg, { model });
       if (!cmd) return '';
       const result = await spawnEngine(cmd, cfg, { timeoutMs: 300_000 }); // 5 min for frontier
       if (!result.ok || !result.output) return '';
-      // claude --output-format json → { result: "<text>", ... }
+      // claude --output-format json → { result: "<text>", total_cost_usd, usage, ... }
       try {
         const parsed = JSON.parse(result.output) as Record<string, unknown>;
         const text = parsed['result'];
+        // M322: capture per-call telemetry (best-effort — fields only set when
+        // the CLI JSON carries them). Judge spend was previously invisible.
+        if (stats) {
+          stats.model = model;
+          stats.durationMs = Date.now() - t0;
+          const cost = parsed['total_cost_usd'];
+          if (typeof cost === 'number') stats.costUsd = cost;
+          const usage = parsed['usage'];
+          if (usage !== null && typeof usage === 'object') {
+            const u = usage as Record<string, unknown>;
+            if (typeof u['input_tokens'] === 'number') stats.tokensIn = u['input_tokens'];
+            if (typeof u['output_tokens'] === 'number') stats.tokensOut = u['output_tokens'];
+          }
+        }
         return typeof text === 'string' ? text : result.output;
       } catch {
         // Not JSON-wrapped (older claude versions) — return raw output.
+        if (stats) {
+          stats.model = model;
+          stats.durationMs = Date.now() - t0;
+        }
         return result.output;
       }
     } catch {
@@ -779,15 +814,21 @@ function buildClaudeCliCompleteSingle(
 function buildCodexCliComplete(
   cfg: AshlrConfig,
   model: string,
+  stats?: JudgeCallStats,
 ): (system: string, user: string) => Promise<string> {
   return async (system: string, user: string): Promise<string> => {
     try {
+      const t0 = Date.now();
       const combined = `${system}\n\n${user}`;
       const cmd = buildEngineCommand('codex', combined, cfg, { model });
       if (!cmd) return '';
       const result = await spawnEngine(cmd, cfg, { timeoutMs: 300_000 }); // 5 min for frontier
       if (!result.ok || !result.output) return '';
-      // codex output is plain text — return as-is
+      // codex output is plain text — model + latency only (no parseable usage).
+      if (stats) {
+        stats.model = model;
+        stats.durationMs = Date.now() - t0;
+      }
       return result.output;
     } catch {
       return '';
@@ -813,9 +854,15 @@ function resolveJudgeClient(
   cfg: AshlrConfig,
   ollamaBaseUrl: string,
   judgeModel: string,
-): { complete: (system: string, user: string) => Promise<string>; judgeEngine: string } {
+): {
+  complete: (system: string, user: string) => Promise<string>;
+  judgeEngine: string;
+  /** M322: shared telemetry holder — populated per call by the CLI complete fns. */
+  stats: JudgeCallStats;
+} {
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
   const managerJudgeEngine = (foundry?.['managerJudgeEngine'] as string | undefined) ?? 'auto';
+  const stats: JudgeCallStats = {};
 
   // M274: The judge is an OVERSIGHT role, not a proposal-execution backend.
   // cfg.foundry.allowedBackends restricts which engines may EXECUTE proposals
@@ -858,8 +905,9 @@ function resolveJudgeClient(
     const isClaudeModel = judgeModel.startsWith('claude') || judgeModel.includes('claude');
     const claudeModel = isClaudeModel ? judgeModel : defaultClaudeJudgeModel(cfg);
     return {
-      complete: buildClaudeCliComplete(cfg, claudeModel),
+      complete: buildClaudeCliComplete(cfg, claudeModel, stats),
       judgeEngine: claudeModel,
+      stats,
     };
   }
 
@@ -872,8 +920,9 @@ function resolveJudgeClient(
     const codexDefaultModel = 'gpt-5.5';
     const codexModel = isCodexModel ? judgeModel : codexDefaultModel;
     return {
-      complete: buildCodexCliComplete(cfg, codexModel),
+      complete: buildCodexCliComplete(cfg, codexModel, stats),
       judgeEngine: codexModel,
+      stats,
     };
   }
 
@@ -884,6 +933,7 @@ function resolveJudgeClient(
     complete: (system: string, user: string) =>
       ollamaDirectComplete(localBaseUrl, localModel, system, user, 512, 0),
     judgeEngine: localModel,
+    stats,
   };
 }
 
@@ -1073,6 +1123,7 @@ export async function runManager(
     const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
 
     let judgeClient: { complete: (system: string, user: string) => Promise<string> } | null = null;
+    let judgeStats: JudgeCallStats | null = null;
 
     // Step 1: resolveJudgeClient — Claude CLI when allowed+installed, else local-72b.
     // engineInstalled('claude') is the gating check: real binary must exist on PATH.
@@ -1083,6 +1134,7 @@ export async function runManager(
       const resolved = resolveJudgeClient(cfg, ollamaBaseUrl, judgeModel);
       judgeClient = resolved;
       judgeEngine = resolved.judgeEngine;
+      judgeStats = resolved.stats;
     } catch {
       judgeEngine = 'unavailable';
       judgeClient = null;
@@ -1175,7 +1227,15 @@ export async function runManager(
         ...(proposal.runId ? { runId: proposal.runId } : {}),
         action: 'judged',
         engine: judgeEngine,
-        model: judgeEngine,
+        // M322: record the model that ACTUALLY answered (fallback-aware — a
+        // Fable primary that fell back to Opus reports Opus) plus per-call
+        // cost/tokens/latency parsed from the CLI JSON. Judge spend was
+        // previously invisible; with Fable 5 judging it must be measured.
+        model: judgeStats?.model ?? judgeEngine,
+        ...(judgeStats?.durationMs !== undefined ? { durationMs: judgeStats.durationMs } : {}),
+        ...(judgeStats?.costUsd !== undefined ? { costUsd: judgeStats.costUsd } : {}),
+        ...(judgeStats?.tokensIn !== undefined ? { tokensIn: judgeStats.tokensIn } : {}),
+        ...(judgeStats?.tokensOut !== undefined ? { tokensOut: judgeStats.tokensOut } : {}),
         verdict: verdict.verdict,
         reason: verdict.rationale,
         detail: verdict.wouldMerge ? 'would-merge' : '',

@@ -10,6 +10,7 @@
 import type { QualityMetrics, EngineQuality } from '../types.js';
 import { listProposals } from '../inbox/store.js';
 import { readDecisions } from './decisions-ledger.js';
+import { canonicalModelTag } from '../run/model-catalog.js';
 
 // ---------------------------------------------------------------------------
 // Trivial-patch heuristics
@@ -280,4 +281,142 @@ function zeroMetrics(window: string): QualityMetrics {
     byEngine: {},
     byRepo: {},
   };
+}
+
+// ---------------------------------------------------------------------------
+// M322: per-model ROI rollup — cost-per-merged-proposal, ship-rate, latency
+// ---------------------------------------------------------------------------
+
+/**
+ * M322: aggregated economics for one (engine, canonical model) pair, derived
+ * entirely from the decisions ledger. Producer stats come from 'proposed'
+ * entries; verdict/outcome stats are JOINED back to the producer by
+ * proposalId (a 'judged' entry carries the JUDGE's model, not the
+ * producer's — attribution must go through the join).
+ */
+export interface ModelRoi {
+  engine: string;
+  /** Canonical model tag (canonicalModelTag) — spelling variants collapse. */
+  model: string;
+  /** 'proposed' dispatches. */
+  dispatches: number;
+  /** Proposals from this model that received a judge verdict. */
+  judged: number;
+  /** Judge verdicts of 'ship'. */
+  shipVerdicts: number;
+  merged: number;
+  rejected: number;
+  tokensIn: number;
+  tokensOut: number;
+  /** Producer-side generation spend (USD). */
+  costUsd: number;
+  /** Judge spend attributed to this producer's proposals (USD). */
+  judgeCostUsd: number;
+  /** Mean producer dispatch latency; null when no durations were recorded. */
+  avgLatencyMs: number | null;
+  /** shipVerdicts / judged (0 when never judged). */
+  shipRate: number;
+  /** (costUsd + judgeCostUsd) / merged; null when nothing merged yet. */
+  costPerMergedUsd: number | null;
+}
+
+/**
+ * Compute per-model ROI over the requested window. PURE read of the
+ * decisions ledger — no repo or network I/O. Never throws; returns {} on
+ * any error or cold start (empty ledger).
+ *
+ * Keys are `${engine}:${canonicalTag}` (e.g. 'claude:sonnet-5') so ledger
+ * spelling variants ('claude:claude-sonnet-5', 'sonnet-5', …) land on one
+ * key. This is the data source for M323 cost-aware routing and the M335
+ * Models dashboard tab.
+ */
+export function computeModelRoi(window: '7d' | '30d' | 'all'): Record<string, ModelRoi> {
+  try {
+    const wm = windowMs(window);
+    const sinceMs = wm !== undefined ? Date.now() - wm : undefined;
+    const entries = readDecisions(sinceMs !== undefined ? { sinceMs } : undefined);
+    if (entries.length === 0) return {};
+
+    const out: Record<string, ModelRoi> = {};
+    const latency: Record<string, { total: number; n: number }> = {};
+    /** proposalId → producer roi key, from 'proposed' entries. */
+    const producerOf = new Map<string, string>();
+
+    const keyFor = (engine: string | undefined, model: string | null | undefined): string | null => {
+      if (!engine) return null;
+      const tag = canonicalModelTag(engine, model ?? '');
+      return tag ? `${engine}:${tag}` : engine;
+    };
+
+    const ensure = (key: string, engine: string, model: string | null | undefined): ModelRoi => {
+      if (!out[key]) {
+        out[key] = {
+          engine,
+          model: canonicalModelTag(engine, model ?? '') || '(unknown)',
+          dispatches: 0,
+          judged: 0,
+          shipVerdicts: 0,
+          merged: 0,
+          rejected: 0,
+          tokensIn: 0,
+          tokensOut: 0,
+          costUsd: 0,
+          judgeCostUsd: 0,
+          avgLatencyMs: null,
+          shipRate: 0,
+          costPerMergedUsd: null,
+        };
+      }
+      return out[key];
+    };
+
+    // Pass 1: producer dispatches ('proposed'). readDecisions returns
+    // newest-first, so the producer map MUST be complete before verdicts
+    // (which chronologically follow their 'proposed') are attributed.
+    for (const e of entries) {
+      if (e.action !== 'proposed') continue;
+      const key = keyFor(e.engine, e.model);
+      if (!key || !e.engine) continue;
+      const roi = ensure(key, e.engine, e.model);
+      roi.dispatches++;
+      if (typeof e.tokensIn === 'number') roi.tokensIn += e.tokensIn;
+      if (typeof e.tokensOut === 'number') roi.tokensOut += e.tokensOut;
+      if (typeof e.costUsd === 'number') roi.costUsd += e.costUsd;
+      if (typeof e.durationMs === 'number') {
+        const l = (latency[key] ??= { total: 0, n: 0 });
+        l.total += e.durationMs;
+        l.n++;
+      }
+      if (!producerOf.has(e.proposalId)) producerOf.set(e.proposalId, key);
+    }
+
+    // Pass 2: verdicts + outcomes joined back to the producer.
+    for (const e of entries) {
+      if (e.action === 'proposed') continue;
+      const key = producerOf.get(e.proposalId);
+      if (!key || !out[key]) continue;
+      const roi = out[key];
+      if (e.action === 'judged') {
+        roi.judged++;
+        if (e.verdict === 'ship') roi.shipVerdicts++;
+        if (typeof e.costUsd === 'number') roi.judgeCostUsd += e.costUsd;
+      } else if (e.action === 'merged') {
+        roi.merged++;
+      } else if (e.action === 'rejected') {
+        roi.rejected++;
+      }
+    }
+
+    for (const [key, roi] of Object.entries(out)) {
+      const l = latency[key];
+      roi.avgLatencyMs = l && l.n > 0 ? Math.round(l.total / l.n) : null;
+      roi.shipRate = roi.judged > 0 ? roi.shipVerdicts / roi.judged : 0;
+      const totalSpend = roi.costUsd + roi.judgeCostUsd;
+      roi.costPerMergedUsd = roi.merged > 0 ? totalSpend / roi.merged : null;
+    }
+
+    return out;
+  } catch {
+    return {};
+  }
 }
