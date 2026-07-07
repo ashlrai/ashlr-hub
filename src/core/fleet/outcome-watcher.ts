@@ -125,9 +125,20 @@ export async function scanRealWorldOutcomes(
     const followedUpPids = new Set(
       allTraces.filter((t) => t.outcome === 'followed-up').map((t) => t.proposalId),
     );
-    const traces = allTraces.filter(
-      (t) => t.outcome === 'merged' && !revertedPids.has(t.proposalId),
-    );
+    // M339 (review fix): a SAME-day linkOutcome('followed-up') rewrites the
+    // trace IN PLACE, so a followed-up proposal may have no surviving
+    // 'merged' record at all — filtering on 'merged' alone made the reverted
+    // upgrade path dead for same-UTC-day merges. Scan each proposal ONCE
+    // whose latest known outcome is merged OR followed-up (reverted stays
+    // terminal; the follow-up re-link is suppressed inside the loop).
+    const seenPid = new Set<string>();
+    const traces = allTraces.filter((t) => {
+      if (t.outcome !== 'merged' && t.outcome !== 'followed-up') return false;
+      if (revertedPids.has(t.proposalId)) return false;
+      if (seenPid.has(t.proposalId)) return false;
+      seenPid.add(t.proposalId);
+      return true;
+    });
     if (traces.length === 0) return scan;
 
     const { loadProposal } = await import('../inbox/store.js');

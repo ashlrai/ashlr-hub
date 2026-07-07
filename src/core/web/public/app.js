@@ -1513,9 +1513,16 @@ function buildProjectTable(byProject) {
 // M338: monotonically increasing fetch token — a stale (slower/older)
 // response must never overwrite a newer window selection.
 let _modelsFetchSeq = 0;
+// M339: background (quiet) refreshes are SECOND-CLASS — they must never
+// preempt an in-flight load. Without this, a quiet SSE refresh could take a
+// newer seq, discard the user fetch's response, and — if the quiet fetch
+// then failed with errors suppressed — strand the view on the spinner.
+let _modelsFetchBusy = false;
 
 async function loadModels(window = '30d', opts = {}) {
+  if (opts.quiet && _modelsFetchBusy) return;
   const seq = ++_modelsFetchSeq;
+  _modelsFetchBusy = true;
   // M337: quiet refreshes (SSE-triggered) keep the table on screen — only a
   // user-initiated load shows the spinner.
   if (!opts.quiet) showLoading('models');
@@ -1532,6 +1539,10 @@ async function loadModels(window = '30d', opts = {}) {
     // on screen instead of wiping it with the error panel.
     state.modelsRefreshedAt = Date.now();
     if (!opts.quiet) showError('models', err.message);
+  } finally {
+    // Only the CURRENT request owns the busy latch — a superseded call must
+    // not clear it out from under the newer one.
+    if (seq === _modelsFetchSeq) _modelsFetchBusy = false;
   }
 }
 

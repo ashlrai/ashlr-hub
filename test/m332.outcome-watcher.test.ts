@@ -216,6 +216,27 @@ describe('M332 scanRealWorldOutcomes', () => {
     expect(linked).toContainEqual(['p-upg', 'reverted']);
   }, 30_000);
 
+  it('M339: same-day in-place rewrite — a SINGLE followed-up record (no surviving merged) still upgrades to reverted', async () => {
+    proposalRepo = repoWithMerge('p-day');
+    const mergeSha = g(proposalRepo, ['rev-parse', 'HEAD']).trim();
+    g(proposalRepo, ['revert', '--no-edit', mergeSha]);
+    // Same-UTC-day linkOutcome('followed-up') rewrote the trace IN PLACE —
+    // there is NO surviving 'merged' record, only the followed-up line.
+    traces = [{ ...mergedTrace('p-day'), outcome: 'followed-up' }];
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+    expect(scan.reverts).toBe(1);
+    expect(linked).toContainEqual(['p-day', 'reverted']);
+  }, 30_000);
+
+  it('M339: single followed-up record with NO revert — scanned once, nothing linked', async () => {
+    proposalRepo = repoWithMerge('p-day2');
+    traces = [{ ...mergedTrace('p-day2'), outcome: 'followed-up' }];
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+    expect(scan.scanned).toBe(1);
+    expect(scan.followUps).toBe(0);
+    expect(linked.length).toBe(0);
+  }, 30_000);
+
   it('M338: an already-followed-up proposal with NO revert is not re-linked', async () => {
     proposalRepo = repoWithMerge('p-nore');
     writeFileSync(join(proposalRepo, 'file.ts'), 'fixed change\n');
