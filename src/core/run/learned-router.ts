@@ -822,8 +822,13 @@ export function buildProducerScores(
     // corrected by what actually happened on main.
     try {
       const traces = readJudgeTraces({ outcomeOnly: true, sinceMs: windowStart });
+      // M337 (review fix): cross-day linkOutcome appends PATCH records, so
+      // one proposal's outcome can appear multiple times — count it ONCE.
+      const seenOutcome = new Set<string>();
       for (const t of traces) {
         if (t.outcome !== 'reverted' && t.outcome !== 'followed-up') continue;
+        if (seenOutcome.has(t.proposalId)) continue;
+        seenOutcome.add(t.proposalId);
         const producer = producerOf.get(t.proposalId);
         if (!producer) continue;
         const key = producer.tag ? `${producer.engine}:${producer.tag}` : String(producer.engine);

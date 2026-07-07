@@ -109,7 +109,21 @@ export async function scanRealWorldOutcomes(
     const windowDays = Math.max(1, opts?.followUpWindowDays ?? DEFAULT_FOLLOWUP_WINDOW_DAYS);
     const sinceMs = now - lookbackDays * 24 * 60 * 60 * 1000;
 
-    const traces = readJudgeTraces({ sinceMs }).filter((t) => t.outcome === 'merged');
+    // M337 (review fix): linkOutcome cannot rewrite a PRIOR-day trace file —
+    // it appends a patch record to today's file and the original line keeps
+    // outcome:'merged' forever. Filtering on 'merged' alone therefore
+    // re-detected the same revert on every scan, appending duplicate patch
+    // records that multiplied the reject signal. Skip any proposal that
+    // ALREADY has a reverted/followed-up record anywhere in the stream.
+    const allTraces = readJudgeTraces({ sinceMs });
+    const alreadyLinked = new Set(
+      allTraces
+        .filter((t) => t.outcome === 'reverted' || t.outcome === 'followed-up')
+        .map((t) => t.proposalId),
+    );
+    const traces = allTraces.filter(
+      (t) => t.outcome === 'merged' && !alreadyLinked.has(t.proposalId),
+    );
     if (traces.length === 0) return scan;
 
     const { loadProposal } = await import('../inbox/store.js');
@@ -163,19 +177,25 @@ export async function scanRealWorldOutcomes(
         const mergedFiles = filesOf(repo, mergeSha);
         if (mergedFiles.size === 0) continue;
 
+        // M337 (review fix): git log is newest-first, but the commits INSIDE
+        // the follow-up window are the OLDEST ones since the merge — slicing
+        // the newest 50 silently dropped exactly the window commits in any
+        // active repo. Examine oldest-first and stop once past the window.
         const candidates = git(repo, [
           'log', `${mergeSha}..HEAD`, '--format=%H%x09%ct%x09%s',
         ])
           .split('\n')
           .map((l) => l.trim())
           .filter((l) => l.length > 0)
+          .reverse()
           .slice(0, MAX_CANDIDATE_COMMITS);
 
         for (const line of candidates) {
           const [sha, ctRaw, ...subjectParts] = line.split('\t');
           const subject = subjectParts.join('\t');
           const ctMs = Number(ctRaw) * 1000;
-          if (!sha || !Number.isFinite(ctMs) || ctMs > windowEnd) continue;
+          if (!sha || !Number.isFinite(ctMs)) continue;
+          if (ctMs > windowEnd) break; // oldest-first: past the window ⇒ done
           if (!FOLLOWUP_SUBJECT_RE.test(subject ?? '')) continue;
           const touched = filesOf(repo, sha);
           const overlaps = [...touched].some((f) => mergedFiles.has(f));

@@ -84,26 +84,32 @@ async function buildComplete(
       await import('../run/engines.js');
 
     if (wantClaude && claudeAllowed && engineInstalled('claude', cfg)) {
-      return async (system: string, user: string): Promise<string> => {
-        try {
-          const combined = `${system}\n\n${user}`;
-          const cmd = buildEngineCommand('claude', combined, cfg, {
-            model: eliteModel,
-          });
-          if (!cmd) return '';
-          const result = await spawnEngine(cmd, cfg, { timeoutMs: 120_000 });
-          if (!result.ok || !result.output) return '';
+      const single = (model: string) =>
+        async (system: string, user: string): Promise<string> => {
           try {
-            const parsed = JSON.parse(result.output) as Record<string, unknown>;
-            const text = parsed['result'];
-            return typeof text === 'string' ? text : result.output;
+            const combined = `${system}\n\n${user}`;
+            const cmd = buildEngineCommand('claude', combined, cfg, { model });
+            if (!cmd) return '';
+            const result = await spawnEngine(cmd, cfg, { timeoutMs: 120_000 });
+            if (!result.ok || !result.output) return '';
+            try {
+              const parsed = JSON.parse(result.output) as Record<string, unknown>;
+              const text = parsed['result'];
+              return typeof text === 'string' ? text : result.output;
+            } catch {
+              return result.output;
+            }
           } catch {
-            return result.output;
+            return '';
           }
-        } catch {
-          return '';
-        }
-      };
+        };
+      const primary = single(eliteModel);
+      // M337 (review fix): mirror the judge's Fable→Opus fallback — the
+      // claude5.fable contract promises it for every elite-model surface.
+      if (eliteModel !== 'claude-fable-5') return primary;
+      const fallback = single('claude-opus-4-8');
+      return async (system: string, user: string): Promise<string> =>
+        (await primary(system, user)) || fallback(system, user);
     }
   } catch {
     // engines unavailable — fall through to Ollama

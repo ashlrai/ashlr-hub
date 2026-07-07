@@ -656,8 +656,15 @@ export async function tick(
   // Append a tick record to persisted state so every operator cycle (including
   // no-op reasons like kill-switch / no-enrolled-repos / dry-run) is visible to
   // `daemon status`, the TUI, and the web dashboard. Never throws.
+  // M334: every return path funnels through recordTick, so stamping the
+  // wall-clock here covers all of them — the stage-2 soak compares tick
+  // p50/p95 before/after enabling concurrent dispatch.
+  const _tickStartMs = Date.now();
   const recordTick = (t: DaemonTick): DaemonTick => {
-    const tick = opts.dryRun ? { ...t, dryRun: true } : t;
+    const tick: DaemonTick = {
+      ...(opts.dryRun ? { ...t, dryRun: true } : t),
+      durationMs: t.durationMs ?? Date.now() - _tickStartMs,
+    };
     try {
       const loaded = loadDaemonStateStrict();
       if (!loaded.ok) return tick;

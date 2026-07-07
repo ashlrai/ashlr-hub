@@ -3229,6 +3229,12 @@ export interface DaemonProposalProductionSummary {
 export interface DaemonTick {
   /** ISO timestamp the tick ran. */
   ts: string;
+  /**
+   * M334: wall-clock duration of this tick (ms). The CONTRACT-M334 stage-2
+   * soak instrument — compare p50/p95 before/after enabling concurrent
+   * dispatch. Recorded by the recordTick funnel; absent on pre-M334 records.
+   */
+  durationMs?: number;
   /** How many backlog items were considered (post budget/cap selection). */
   itemsConsidered: number;
   /** How many PENDING proposals this tick created in the inbox. */

@@ -23,6 +23,9 @@ const ts = (hoursAgo: number) => new Date(NOW - hoursAgo * HOUR).toISOString();
 // newest-first, like the real readDecisions
 const FIXTURE: Record<string, unknown>[] = [
   // ── outcomes / verdicts (chronologically after the proposals) ──────────
+  // M337: a manager-gated auto-merge writes TWO 'merged' entries per proposal
+  // (gate-7 record + setStatus record) — the ROI must count it ONCE.
+  { ts: ts(0.9), proposalId: 'p-s5-a', action: 'merged', engine: 'claude', model: 'claude:claude-sonnet-5' },
   { ts: ts(1), proposalId: 'p-s5-a', action: 'merged', engine: 'claude', model: 'claude:claude-sonnet-5' },
   {
     ts: ts(2), proposalId: 'p-s5-a', action: 'judged',
@@ -113,6 +116,8 @@ describe('M322 computeModelRoi', () => {
     expect(s5.judged).toBe(2);
     expect(s5.shipVerdicts).toBe(1);
     expect(s5.shipRate).toBeCloseTo(0.5, 5);
+    // M337: the fixture carries a DUPLICATE 'merged' entry for p-s5-a — the
+    // manager-gate double-record must count once per proposal.
     expect(s5.merged).toBe(1);
     // the judge's own model never becomes a producer key
     expect(roi['claude-fable-5:claude-fable-5']).toBeUndefined();

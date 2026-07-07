@@ -336,8 +336,18 @@ function resolveStrategistClient(
   if (wantClaude && claudeAllowed && engineInstalled('claude', cfg)) {
     // Always use the elite model for strategic briefings — ignore whether
     // eliteModel starts with 'claude'; the explicit --model flag is always set.
+    const primary = buildClaudeCliCompleteStrategist(cfg, eliteModel);
+    // M337 (review fix): the claude5.fable contract promises an automatic
+    // Opus 4.8 fallback for the STRATEGIST too — without it, accounts
+    // lacking Fable access silently produced empty briefings. Mirror the
+    // judge wrapper: retry once on Opus when a Fable call yields nothing.
+    if (eliteModel !== 'claude-fable-5') {
+      return { complete: primary, judgeEngine: eliteModel };
+    }
+    const fallback = buildClaudeCliCompleteStrategist(cfg, 'claude-opus-4-8');
     return {
-      complete: buildClaudeCliCompleteStrategist(cfg, eliteModel),
+      complete: async (system: string, user: string): Promise<string> =>
+        (await primary(system, user)) || fallback(system, user),
       judgeEngine: eliteModel,
     };
   }

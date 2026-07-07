@@ -762,6 +762,16 @@ function buildClaudeCliCompleteSingle(
 ): (system: string, user: string) => Promise<string> {
   return async (system: string, user: string): Promise<string> => {
     try {
+      // M337 (review fix): reset the shared holder EVERY call — a failed or
+      // usage-less call must record NOTHING, never the previous proposal's
+      // model/cost/tokens (the ledger must not lie about the answering model).
+      if (stats) {
+        delete stats.model;
+        delete stats.durationMs;
+        delete stats.costUsd;
+        delete stats.tokensIn;
+        delete stats.tokensOut;
+      }
       const t0 = Date.now();
       const combined = `${system}\n\n${user}`;
       const cmd = buildEngineCommand('claude', combined, cfg, { model });
@@ -818,6 +828,15 @@ function buildCodexCliComplete(
 ): (system: string, user: string) => Promise<string> {
   return async (system: string, user: string): Promise<string> => {
     try {
+      // M337 (review fix): reset the shared holder EVERY call (see the claude
+      // single-shot builder above).
+      if (stats) {
+        delete stats.model;
+        delete stats.durationMs;
+        delete stats.costUsd;
+        delete stats.tokensIn;
+        delete stats.tokensOut;
+      }
       const t0 = Date.now();
       const combined = `${system}\n\n${user}`;
       const cmd = buildEngineCommand('codex', combined, cfg, { model });

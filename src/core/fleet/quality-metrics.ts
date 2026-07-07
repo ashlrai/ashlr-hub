@@ -341,6 +341,8 @@ export function computeModelRoi(window: '7d' | '30d' | 'all'): Record<string, Mo
     const latency: Record<string, { total: number; n: number }> = {};
     /** proposalId → producer roi key, from 'proposed' entries. */
     const producerOf = new Map<string, string>();
+    /** M337 (review fix): terminal outcomes counted once per proposal. */
+    const outcomeSeen = new Set<string>();
 
     const keyFor = (engine: string | undefined, model: string | null | undefined): string | null => {
       if (!engine) return null;
@@ -401,9 +403,18 @@ export function computeModelRoi(window: '7d' | '30d' | 'all'): Record<string, Mo
         if (e.verdict === 'ship') roi.shipVerdicts++;
         if (typeof e.costUsd === 'number') roi.judgeCostUsd += e.costUsd;
       } else if (e.action === 'merged') {
-        roi.merged++;
+        // M337 (review fix): a manager-gated auto-merge writes TWO 'merged'
+        // entries per proposal (gate-7 record + setStatus record) — counting
+        // both doubled roi.merged and halved costPerMergedUsd.
+        if (!outcomeSeen.has(`merged:${e.proposalId}`)) {
+          outcomeSeen.add(`merged:${e.proposalId}`);
+          roi.merged++;
+        }
       } else if (e.action === 'rejected') {
-        roi.rejected++;
+        if (!outcomeSeen.has(`rejected:${e.proposalId}`)) {
+          outcomeSeen.add(`rejected:${e.proposalId}`);
+          roi.rejected++;
+        }
       }
     }
 

@@ -27,6 +27,12 @@ Safe, staged activation of two flag-gated subsystems that have shipped dark:
   `~/.ashlr/fabric/gateway-shadow-YYYY-MM-DD.jsonl`.
 - `divergenceStats()` evaluates the exit criteria live (`src/core/fabric/
   gateway-shadow.ts`).
+- `DaemonTick.durationMs` — tick wall-clock stamped by the recordTick funnel
+  and exported as `ashlr.fleet.tick_duration_ms` on fleet.tick pulse spans;
+  the stage-2 soak compares p50/p95 before/after enabling concurrent
+  dispatch. (A dedicated per-tick concurrency-used counter was NOT added —
+  `tick.backends` per-backend dispatch counts plus the wall-clock delta carry
+  the same soak signal without new plumbing through the dispatch closure.)
 - Concurrent dispatch: the m255/m256 suites already prove slot caps and
   flag-off byte-identity; m334 adds divergence-classification coverage.
 

@@ -190,6 +190,10 @@ export function buildFleetSpans(sinceTs?: string, owner?: string): OtlpPayload {
           str('ashlr.fleet.outcome', tick.reason),
           str('ashlr.fleet.cost_usd', tick.spentUsd.toFixed(6)),
           str('ashlr.fleet.ref_id', refId),
+          // M334: tick wall-clock — the concurrent-dispatch soak metric.
+          ...(typeof tick.durationMs === 'number'
+            ? [int('ashlr.fleet.tick_duration_ms', tick.durationMs)]
+            : []),
           // M109: fleet owner attribution — present only when configured.
           ...(owner ? [str('ashlr.fleet.owner', owner)] : []),
         ],

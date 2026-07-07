@@ -169,6 +169,11 @@ available — it is, since M331).
   dropped at dispatch. Absent → single-engine stochastic resampling.
 - `bestOfNMinItemScore` — fan out only for items whose score clears the
   threshold; below it, single dispatch. Absent → every item fans out.
+- **No `bestOfNMaxCostUsd` knob** (deliberate): the daemon's per-item budget
+  is tokens/steps, not dollars, so a pre-dispatch USD estimate would be a
+  fiction. The honest guards are `bestOfNMinItemScore` plus the accurate
+  full-cost accounting — fan-out overspend counts against the tick budget
+  immediately and stops further dispatches this tick.
 - **Cost:** the daemon counts EVERY candidate's billable spend (the M80
   subscription-\$0 rule applied per candidate) against the tick budget — not
   just the winner's. Losers are rejected with a provenance reason naming the

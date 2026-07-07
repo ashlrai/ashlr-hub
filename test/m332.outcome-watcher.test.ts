@@ -190,6 +190,35 @@ describe('M332 scanRealWorldOutcomes', () => {
     expect(scan.skipped).toBe(1);
     expect(linked.length).toBe(0);
   });
+
+  it('M337: already-linked proposals are skipped — no duplicate patch records', async () => {
+    proposalRepo = repoWithMerge('p-dup');
+    const mergeSha = g(proposalRepo, ['rev-parse', 'HEAD']).trim();
+    g(proposalRepo, ['revert', '--no-edit', mergeSha]);
+    // The trace stream contains BOTH the stale 'merged' original (a prior-day
+    // file linkOutcome could not rewrite) AND the appended 'reverted' patch
+    // record — the scan must treat the proposal as already linked.
+    traces = [mergedTrace('p-dup'), { ...mergedTrace('p-dup'), outcome: 'reverted' }];
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+    expect(scan.scanned).toBe(0);
+    expect(linked.length).toBe(0);
+  }, 30_000);
+
+  it('M337: a follow-up fix is found even with 55 newer commits after it', async () => {
+    proposalRepo = repoWithMerge('p-busy');
+    writeFileSync(join(proposalRepo, 'file.ts'), 'fixed change\n');
+    g(proposalRepo, ['add', '-A']);
+    g(proposalRepo, ['commit', '--quiet', '-m', 'fix: repair the merged change']);
+    // Bury the fix under 55 unrelated commits — the pre-M337 newest-first
+    // slice(0, 50) dropped exactly the window commits.
+    for (let i = 0; i < 55; i++) {
+      g(proposalRepo, ['commit', '--quiet', '--allow-empty', '-m', `chore: filler ${i}`]);
+    }
+    traces = [mergedTrace('p-busy')];
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+    expect(scan.followUps).toBe(1);
+    expect(linked).toContainEqual(['p-busy', 'followed-up']);
+  }, 60_000);
 });
 
 // ---------------------------------------------------------------------------

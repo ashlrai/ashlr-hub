@@ -812,6 +812,11 @@ export async function runEngineSandboxed(
             // re-verify. Only a green worktree is filed, re-signed against the
             // repaired diff. Flag-off ⇒ the single-shot gate above, unchanged.
             const _v2g = cfg.foundry?.verifyToGreen;
+            // M337 (review fix): repair spend is REAL spend — accumulate the
+            // repair runs' tokens and book them into the run usage + the
+            // 'proposed' ledger entry (previously discarded at $0, skewing
+            // per-model ROI downward for exactly the models needing repairs).
+            const _v2gRepair = { tokensIn: 0, tokensOut: 0 };
             if (!_gateResult.pass && _v2g?.enabled === true) {
               const _v2gOut = await iterateToGreen({
                 cfg,
@@ -842,6 +847,10 @@ export async function runEngineSandboxed(
                     timeoutMs: _v2g.perRunTimeoutMs ?? 180_000,
                     launcher: launcher ?? undefined,
                   });
+                  if (r.usage) {
+                    _v2gRepair.tokensIn += r.usage.tokensIn;
+                    _v2gRepair.tokensOut += r.usage.tokensOut;
+                  }
                   return { ok: r.ok };
                 },
               });
@@ -859,6 +868,11 @@ export async function runEngineSandboxed(
                   };
                   console.log(`[M331] ${_gateResult.reason}`);
                 }
+              }
+              if ((_v2gRepair.tokensIn > 0 || _v2gRepair.tokensOut > 0) && usage) {
+                usage.tokensIn += _v2gRepair.tokensIn;
+                usage.tokensOut += _v2gRepair.tokensOut;
+                usage.estCostUsd = estCostUsd(engine, usage.tokensIn, usage.tokensOut);
               }
             }
             if (!_gateResult.pass) {
@@ -895,9 +909,11 @@ export async function runEngineSandboxed(
               action: 'proposed',
               engine,
               model: engineModel,
-              costUsd: _computedCost,
-              tokensIn: _resUsage?.tokensIn,
-              tokensOut: _resUsage?.tokensOut,
+              // M337 (review fix): `usage` includes verify-to-green repair
+              // spend when the loop ran — book the true totals.
+              costUsd: usage?.estCostUsd ?? _computedCost,
+              tokensIn: usage?.tokensIn ?? _resUsage?.tokensIn,
+              tokensOut: usage?.tokensOut ?? _resUsage?.tokensOut,
               durationMs: _spawnDurationMs,
               cacheHit: _resUsage ? (_resUsage.tokensIn === 0 && _computedCost === 0) : false,
             });

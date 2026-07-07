@@ -383,8 +383,15 @@ function connectSSE() {
         state.inboxBadge = data.pending ?? 0;
         updateInboxBadge();
         if (state.activeView === 'inbox') renderInbox();
-        // M335: verdict/merge activity changes per-model ROI — refresh the tab.
-        if (state.activeView === 'models') loadModels(state.models?.window ?? '30d');
+        // M335/M337: verdict/merge activity changes per-model ROI — refresh
+        // the tab QUIETLY and at most every 30s (the inbox SSE event fires on
+        // every poll tick, and showLoading() would wipe the table each time).
+        if (state.activeView === 'models') {
+          const nowMs = Date.now();
+          if (!state.modelsRefreshedAt || nowMs - state.modelsRefreshedAt > 30_000) {
+            loadModels(state.models?.window ?? '30d', { quiet: true });
+          }
+        }
       } catch {}
     });
     // M32: live daemon state
@@ -1503,10 +1510,13 @@ function buildProjectTable(byProject) {
 // Models view (M335) — per-model ship rate, cost-per-merge, outcomes, BoN wins
 // ---------------------------------------------------------------------------
 
-async function loadModels(window = '30d') {
-  showLoading('models');
+async function loadModels(window = '30d', opts = {}) {
+  // M337: quiet refreshes (SSE-triggered) keep the table on screen — only a
+  // user-initiated load shows the spinner.
+  if (!opts.quiet) showLoading('models');
   try {
     state.models = await apiFetch(`/api/models?window=${window}`);
+    state.modelsRefreshedAt = Date.now();
     renderModels();
   } catch (err) {
     showError('models', err.message);
