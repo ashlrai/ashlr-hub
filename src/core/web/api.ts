@@ -41,7 +41,25 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual, randomBytes } from 'node:crypto';
-import { resolve as resolvePath } from 'node:path';
+import { resolve as resolvePath, sep as pathSep } from 'node:path';
+import { realpathSync } from 'node:fs';
+
+/**
+ * M341c (win32): canonicalize a path for COMPARISON only. Windows paths can
+ * differ by 8.3 short names (RUNNER~1 vs runneradmin) and case while naming
+ * the same directory — exact string equality 403'd every /api/open there.
+ * POSIX is untouched (identity) so existing behavior stays byte-identical.
+ */
+function canonForCompare(p: string): string {
+  if (process.platform !== 'win32') return p;
+  let out = p;
+  try {
+    out = realpathSync.native(p);
+  } catch {
+    // nonexistent path — compare the resolved spelling
+  }
+  return out.toLowerCase();
+}
 
 import type { AshlrConfig } from '../types.js';
 import { buildSnapshot } from '../dashboard.js';
@@ -1018,7 +1036,8 @@ export async function handleApi(
       // Resolve the requested repo path and verify it is enrolled.
       const resolvedRepo = resolvePath(rawRepo);
       const enrolled = listEnrolled();
-      if (!enrolled.includes(resolvedRepo)) {
+      const repoCanon = canonForCompare(resolvedRepo);
+      if (!enrolled.some((e) => canonForCompare(e) === repoCanon)) {
         sendJson(res, 403, { error: 'path not in an enrolled repo' });
         return true;
       }
@@ -1028,8 +1047,11 @@ export async function handleApi(
       if (rawFile) {
         const resolvedFile = resolvePath(resolvedRepo, rawFile);
         // Path-traversal guard: the resolved file must be under the repo root.
-        const repoWithSep = resolvedRepo.endsWith('/') ? resolvedRepo : resolvedRepo + '/';
-        if (resolvedFile !== resolvedRepo && !resolvedFile.startsWith(repoWithSep)) {
+        // M341c: native separator (a hardcoded '/' rejected every win32 file)
+        // + canonical comparison for 8.3/case variance.
+        const fileCanon = canonForCompare(resolvedFile);
+        const repoWithSep = repoCanon.endsWith(pathSep) ? repoCanon : repoCanon + pathSep;
+        if (fileCanon !== repoCanon && !fileCanon.startsWith(repoWithSep)) {
           sendJson(res, 403, { error: 'file path escapes the repo root' });
           return true;
         }

@@ -195,7 +195,10 @@ afterEach(() => {
   }
 });
 
-describe('M297 runEngineSandboxed retry integration', () => {
+// win32: the fake 'codex' binary is a #!/bin/sh script — not executable on
+// Windows (real shims there are .cmd). The retry logic itself is covered by
+// the in-process unit tests above, which run on every platform.
+describe.skipIf(process.platform === 'win32')('M297 runEngineSandboxed retry integration', () => {
   it('success on attempt 1 → exactly 1 spawn, no retry', async () => {
     const counterFile = join(tmpdir(), `m297-ctr-${Date.now()}-a.txt`);
     _cleanupFiles.push(counterFile);
