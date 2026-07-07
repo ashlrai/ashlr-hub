@@ -146,6 +146,28 @@ describe('M324 effective-config warnings', () => {
     expect(snap.warnings.some((w) => w.includes('Fable'))).toBe(true);
   });
 
+  it('M340: warns on unknown foundry keys (typo detection)', () => {
+    const cfg = cfgWith({ modelGranularRoutng: { enabled: true }, verifyToGren: { enabled: true } });
+    const snap = buildEffectiveConfigSnapshot(cfg, snapOpts);
+    const w = snap.warnings.find((x) => x.includes('not recognized'));
+    expect(w).toBeDefined();
+    expect(w).toContain('modelGranularRoutng');
+    expect(w).toContain('verifyToGren');
+  });
+
+  it('M340: no unknown-key warning for a fully-known foundry block', () => {
+    const cfg = cfgWith({
+      allowedBackends: ['claude'],
+      claude5: { enabled: true },
+      modelGranularRouting: { enabled: false },
+      verifyToGreen: { enabled: true },
+      bestOfN: 3,
+      mergeAuthority: [{ engine: 'claude', model: 'claude-sonnet-5' }],
+    });
+    const snap = buildEffectiveConfigSnapshot(cfg, snapOpts);
+    expect(snap.warnings.some((x) => x.includes('not recognized'))).toBe(false);
+  });
+
   it('no Fable warning when the pin and the flag agree', () => {
     const pinnedAndOn = cfgWith({ strategistModel: 'claude-fable-5' });
     expect(

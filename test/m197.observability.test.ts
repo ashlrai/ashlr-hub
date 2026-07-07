@@ -67,6 +67,46 @@ vi.mock('../src/core/fleet/automerge-pass.js', () => ({
 
 // Mock estimateRun — used in the anomaly-detection path.
 const mockEstimateRun = vi.fn();
+// M84 (CI-green): buildRollup aggregates the REAL ~/.ashlr observability
+// history — ~7s on a machine with a live production fleet. Stub only the
+// aggregation; keep the module's pure exports (modelToProviderKey,
+// LOCAL_PROVIDER_KEYS) that control.ts also imports.
+vi.mock('../src/core/observability/rollup.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/observability/rollup.js')>();
+  return {
+    ...actual,
+    buildRollup: () => ({
+      window: '7d',
+      totals: { estCostUsd: 0, tokensIn: 0, tokensOut: 0, sessions: 0, commits: 0 },
+      byDay: [],
+      byProvider: [],
+      byModel: [],
+    }),
+  };
+});
+
+// M84 (CI-green): buildControlSnapshot's models section probes EVERY provider
+// endpoint over HTTP (ollama/lmstudio localhost + each cloud provider whose
+// key is in env, 2s timeout apiece). Hermetic stub — the snapshot shape is
+// what these tests assert, not live provider reachability.
+vi.mock('../src/core/providers.js', () => ({
+  getProviderRegistry: () =>
+    Promise.resolve({ activeProvider: null, providers: [] }),
+}));
+
+// M84 (CI-green): resolveUsageWindows makes REAL network calls to the
+// OpenAI/Anthropic usage APIs when this machine has API keys in env — up to
+// 4s timeout per provider, blowing the 5s test budget. Hermetic stub.
+vi.mock('../src/core/observability/limits.js', () => ({
+  resolveUsageWindows: () =>
+    Promise.resolve({
+      connected: false,
+      windows: [],
+      providers: [],
+      note: 'Usage data unavailable.',
+    }),
+}));
+
 vi.mock('../src/core/observability/estimate.js', () => ({
   estimateRun: (...args: unknown[]) => mockEstimateRun(...args),
 }));

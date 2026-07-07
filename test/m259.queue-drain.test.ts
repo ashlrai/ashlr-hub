@@ -189,6 +189,11 @@ function shipVerdict(proposalId: string) {
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
+  // M84 (CI-green): the fixtures hardcode createdAt = NOW_ISO (2026-06-29).
+  // Real time crossing NOW_ISO + proposalTtlDays turned the 7-day TTL
+  // pre-pass into a time bomb that rejected every fixture. Pin ONLY Date
+  // (not setTimeout etc. — the pass awaits real async work) to NOW_MS.
+  vi.useFakeTimers({ now: NOW_MS, toFake: ['Date'] });
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m259-home-'));
   process.env.HOME = tmpHome;
 
@@ -218,6 +223,7 @@ afterEach(() => {
   fs.rmSync(tmpHome, { recursive: true, force: true });
   process.env.HOME = origHome;
   vi.clearAllMocks();
+  vi.useRealTimers();
 });
 
 // ===========================================================================

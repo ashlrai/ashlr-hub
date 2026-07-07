@@ -241,6 +241,35 @@ function effectiveBackends(
   });
 }
 
+/**
+ * M340: every foundry key this version reads — union of the types.ts foundry
+ * interface members and the dynamic `foundry[...]` / `foundry?.x` reads across
+ * src/. INCLUSIVE list: a stray entry only suppresses a warning, never causes
+ * one. Regenerate when adding foundry keys:
+ *   grep -rhoE "foundry\??\.[a-zA-Z]+|foundry[^;]{0,60}\[['\"][a-zA-Z]+['\"]\]" src/
+ */
+const KNOWN_FOUNDRY_KEYS: ReadonlySet<string> = new Set([
+  'allowedBackends', 'antiClog', 'ashlrcodeExecutor', 'askBorderlineReview',
+  'autoArchiveAfterRejects', 'autoMerge', 'autonomyControlLoop', 'bestOfN',
+  'bestOfNCandidates', 'bestOfNMinItemScore', 'blastRadius', 'browserVerify',
+  'cascade', 'claude5', 'claudeResource', 'completenessGate', 'confinement',
+  'counterfactual', 'counterfactualSampleCap', 'diffSafety', 'dispatchRetries',
+  'edvUnverifiedWeight', 'edvVerify', 'engineFallbackOrder', 'engines',
+  'eventBus', 'fabric', 'feedbackEnabled', 'fleetMcp', 'generative',
+  'goalPlanning', 'grok', 'intelligence', 'inventPerCycle',
+  'judgeAllowedBackends', 'judgePerPass', 'killSwitch', 'kimi',
+  'learnedRouting', 'limits', 'local', 'localContext', 'localModel',
+  'managerJudgeEngine', 'managerJudgeModel', 'mergeAuthority', 'minItemValue',
+  'modelGranularRouting', 'modelRacing', 'models', 'nim', 'ollamaBaseUrl',
+  'outcomeWatcher', 'proposalTtlDays', 'pulseEmit', 'regressionSentinel',
+  'repoMap', 'resourceAwareDispatch', 'resourceOverrides', 'routingPolicy',
+  'sandboxExternal', 'scanDependencyBumps', 'scanDeps', 'scanHygiene',
+  'scanLint', 'scanTodos', 'selfHeal', 'selfImprove', 'simpleConductor',
+  'skillLibrary', 'specContract', 'stallIdleMs', 'strategistModel',
+  'subscriptionMaxPercent', 'tasteCritic', 'timeoutMs', 'usePhantom',
+  'verifyToGreen', 'visualGrounding',
+]);
+
 export function buildEffectiveConfigSnapshot(
   cfg: AshlrConfig,
   opts: {
@@ -300,6 +329,24 @@ export function buildEffectiveConfigSnapshot(
       warnings.push(
         'strategistModel/managerJudgeModel pins a Fable model while claude5.fable is off; the explicit pin still wins — remove the pin or re-enable claude5.fable.',
       );
+    }
+  }
+  // M340: unknown foundry keys. The JSON schema is not enforced at load time,
+  // so a typo'd key (e.g. modelGranularRoutng) silently disables its feature
+  // with zero feedback. Warn (never fatal) on keys this version does not
+  // recognize — they are typos, keys removed in an upgrade, or config
+  // consumed by an external tool.
+  {
+    const fRaw = cfg.foundry as Record<string, unknown> | undefined;
+    if (fRaw) {
+      const unknown = Object.keys(fRaw)
+        .filter((k) => !KNOWN_FOUNDRY_KEYS.has(k))
+        .sort();
+      if (unknown.length > 0) {
+        warnings.push(
+          `foundry keys not recognized by this ashlr version (typo, removed, or consumed by an external tool?): ${unknown.join(', ')}`,
+        );
+      }
     }
   }
 

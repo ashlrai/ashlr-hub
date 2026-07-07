@@ -156,7 +156,7 @@
     "plugins": {
       "type": "object",
       "additionalProperties": false,
-      "description": "M33 plugin-system configuration. Default empty — enabled:[] means no plugins load.",
+      "description": "M33 plugin-system configuration. Default empty \u2014 enabled:[] means no plugins load.",
       "properties": {
         "enabled": {
           "type": "array",
@@ -188,6 +188,41 @@
           "additionalProperties": false
         }
       }
+    },
+    "foundry": {
+      "type": "object",
+      "description": "v4/v5 autonomous-fleet configuration (M45+). Full key reference: docs/FOUNDRY-CONFIG.md. Deep validation is runtime: unknown keys surface as effective-config warnings (M340).",
+      "additionalProperties": true
+    },
+    "daemon": {
+      "type": "object",
+      "description": "Daemon loop tuning (M22+): budget caps, tick interval, parallelism, cooldowns.",
+      "additionalProperties": true
+    },
+    "user": {
+      "type": "object",
+      "description": "Fleet owner identity (M109) \u2014 attribution on pulse spans and team surfaces.",
+      "additionalProperties": true
+    },
+    "notify": {
+      "type": "object",
+      "description": "Outward notification targets (M18) \u2014 opt-in webhook for run/swarm completion summaries.",
+      "additionalProperties": true
+    },
+    "comms": {
+      "type": "object",
+      "description": "Operator comms channels (Telegram polling etc.).",
+      "additionalProperties": true
+    },
+    "fleet": {
+      "type": "object",
+      "description": "Fleet enrollment/supervisor settings.",
+      "additionalProperties": true
+    },
+    "pulse": {
+      "type": "object",
+      "description": "Ashlr Pulse (OTLP export) settings.",
+      "additionalProperties": true
     }
   },
   "definitions": {

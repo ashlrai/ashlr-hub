@@ -235,11 +235,14 @@ describe('reflect propose — proposals are pending notes, config untouched', ()
   it('creates PENDING inbox proposals of kind note', async () => {
     // Seed conditions that trigger tuning suggestions: a recurring failure +
     // a fully-local category.
-    seedSwarm({ id: 's1', goal: 'add feature', status: 'done', createdAt: '2026-06-01T00:00:00.000Z' });
-    seedSwarm({ id: 's2', goal: 'add another feature', status: 'done', createdAt: '2026-06-02T00:00:00.000Z' });
-    seedSwarm({ id: 's3', goal: 'add a third feature', status: 'done', createdAt: '2026-06-03T00:00:00.000Z' });
-    seedSwarm({ id: 's4', goal: 'fix login bug', status: 'failed', createdAt: '2026-06-04T00:00:00.000Z', failedError: 'auth failure' });
-    seedSwarm({ id: 's5', goal: 'fix login bug again', status: 'failed', createdAt: '2026-06-05T00:00:00.000Z', failedError: 'auth failure' });
+    // M84 (CI-green): RELATIVE dates — absolute June timestamps fell out of
+    // reflect's 30-day usage-lookback window once real time crossed July,
+    // silently producing 0 tuning proposals (a fixture time bomb).
+    seedSwarm({ id: 's1', goal: 'add feature', status: 'done', createdAt: daysAgoIso(5) });
+    seedSwarm({ id: 's2', goal: 'add another feature', status: 'done', createdAt: daysAgoIso(4) });
+    seedSwarm({ id: 's3', goal: 'add a third feature', status: 'done', createdAt: daysAgoIso(3) });
+    seedSwarm({ id: 's4', goal: 'fix login bug', status: 'failed', createdAt: daysAgoIso(2), failedError: 'auth failure' });
+    seedSwarm({ id: 's5', goal: 'fix login bug again', status: 'failed', createdAt: daysAgoIso(1), failedError: 'auth failure' });
 
     const { code, out } = await captureStdout(() => cmdReflect(['propose']));
     expect(code).toBe(0);
@@ -267,8 +270,8 @@ describe('reflect propose — proposals are pending notes, config untouched', ()
     expect(fs.existsSync(configPath)).toBe(true);
     const before = fs.readFileSync(configPath, 'utf8');
 
-    seedSwarm({ id: 's1', goal: 'fix bug', status: 'failed', createdAt: '2026-06-01T00:00:00.000Z', failedError: 'boom' });
-    seedSwarm({ id: 's2', goal: 'fix bug 2', status: 'failed', createdAt: '2026-06-02T00:00:00.000Z', failedError: 'boom' });
+    seedSwarm({ id: 's1', goal: 'fix bug', status: 'failed', createdAt: daysAgoIso(2), failedError: 'boom' });
+    seedSwarm({ id: 's2', goal: 'fix bug 2', status: 'failed', createdAt: daysAgoIso(1), failedError: 'boom' });
 
     await captureStdout(() => cmdReflect(['propose']));
 

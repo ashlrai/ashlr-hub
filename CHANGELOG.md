@@ -18,6 +18,66 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   Milestones M34–M40, thirteen new team safety invariants, registered as a
   living ashlr goal. ROADMAP and contracts README updated to point at it.
 
+## [3.1.0] — 2026-07-06 — v5.1 Claude 5 Model Intelligence · v6 Verification-First (M320–M340)
+
+The fleet routes by MEASURED per-model economics instead of static
+Opus-everywhere heuristics, and shifts weight from generation to
+verification. Every milestone flag-gated with byte-identical-off parity
+suites; a 65-agent adversarial review loop ran until dry (19 confirmed
+findings → 13 defects fixed pre-release).
+
+- **Claude 5 routing (M320–M321):** Sonnet 5 (`claude-sonnet-5`) is the
+  frontier generation workhorse; Fable 5 (`claude-fable-5`, Mythos-class) is
+  the default judge + strategist with automatic per-call Opus 4.8 fallback on
+  failure/refusal/empty — on every elite surface (judge, strategist,
+  director, dialogue). `cfg.foundry.claude5 {enabled, fable}`; `enabled:false`
+  is a byte-identical rollback. Merge-authority matching is
+  spelling-variant-safe (`canonicalModelTag`).
+- **Per-model ROI (M322):** judge calls record cost/tokens/latency + the
+  ACTUAL answering model; `computeModelRoi` derives ship-rate, latency, and
+  cost-per-merged-proposal with producer-attributed joins (a judged entry
+  carries the judge's identity — attribution goes through the proposalId
+  join).
+- **Cost-aware learned routing (M323):** `cfg.foundry.modelGranularRouting`
+  (default off) routes to the CHEAPEST model whose producer-attributed
+  ship-rate clears the bar; never learns into a bad model; cold start is
+  byte-identical static routing.
+- **Verify-to-green (M331, completes M140):** the `run-tests` keystone
+  best-of-N had imported since M170 now exists (activates tests-green
+  candidate selection), plus a bounded same-worktree engine repair loop
+  (`cfg.foundry.verifyToGreen`, re-captured + RE-SIGNED diff, repair spend
+  booked).
+- **Real-world outcomes (M332, completes M141):** the outcome watcher links
+  `git revert`s and near-term follow-up fixes back onto judge traces
+  (`reverted` / new `followed-up`), feeding judge calibration and learned
+  routing with post-merge truth. Read-only on repos; 6h throttle.
+- **Multi-model best-of-N (M333, completes M142):** race per-candidate
+  engine/model specs (`bestOfNCandidates`) on one item; full-cost accounting
+  (every candidate's billable spend counts — the old path booked only the
+  winner); losers archived with provenance; per-candidate record stream.
+- **Staged activation (M334):** gateway SHADOW mode (observe-only beside the
+  legacy path; legacy always wins) + `divergenceStats()` exit criteria +
+  `DaemonTick.durationMs` soak metric — the [CONTRACT-M334] program for
+  flipping `fabric.gateway` / `concurrentDispatch` defaults.
+- **Dashboard Models tab (M335):** `/api/models` — per-model ship rate,
+  cost-per-merge, reverts/fixes, spend, latency, best-of-N win rates; live
+  SSE refresh (quiet + throttled + stale-response guarded).
+- **SWE-bench regression gate (M336, completes M143):**
+  `ashlr eval swe-bench --gate [--baseline <report>]` exits 3 on a
+  newly-broken task or resolve-rate drop; first run seeds the baseline —
+  CI/cron-safe from day one.
+- **Review-fleet hardening (M337–M339):** 13 defects found by the
+  adversarial fleet and fixed pre-release — judge-telemetry staleness,
+  outcome-watcher windowing + cross-day duplicates + same-day rewrite
+  upgrade path, ROI double-counts, strategist Fable fallback, repair-spend
+  booking, Models-tab race/flicker — each pinned by a regression test.
+- **Config safety (M340):** unknown `foundry.*` keys now surface as
+  effective-config warnings (a typo'd key silently disabled its feature);
+  the JSON schema gained the missing v3/v4/v5 top-level blocks. Fixture
+  time bombs in m26/m259 defused (relative dates / pinned clock).
+- **Docs:** FOUNDRY-CONFIG.md sections for every new key; ROADMAP v5.1/v6
+  entries; SPEC-V5 addendum; CONTRACT-M334.
+
 ## [3.0.1] — 2026-06-17 — presentation + polish
 
 A patch release on top of 3.0.0 — no change to the engine, fleet, or safety
