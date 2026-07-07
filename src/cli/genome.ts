@@ -1079,8 +1079,6 @@ function printGenomeHuman(health: GenomeHealth): void {
     embeddingsAvailable,
   } = health;
 
-  const projectEntries = Math.max(0, totalEntries - hubEntries);
-
   // Status badge
   const statusBadge = totalEntries === 0
     ? yellow('empty')
@@ -1096,9 +1094,12 @@ function printGenomeHuman(health: GenomeHealth): void {
   }
 
   row('Status',              statusBadge);
-  row('Total entries',       cyan(String(totalEntries)));
-  row('  hub entries',       String(hubEntries));
-  row('  project entries',   String(projectEntries));
+  // M341: these two counters measure DIFFERENT things — loadGenome caps the
+  // recall window at HUB_MAX_ENTRIES while the disk store keeps everything.
+  // The old display subtracted them ("project entries") and produced a
+  // subtotal 85% larger than its own total.
+  row('Loaded entries',      cyan(String(totalEntries)) + dim('  (recall window)'));
+  row('Hub store (disk)',    String(hubEntries));
   row('Projects covered',    projects > 0 ? cyan(String(projects)) : dim('0'));
   row('Store size',          fmtBytes(sizeBytes));
   row('Last learned',        lastLearnedAt ? relativeTime(lastLearnedAt) : dim('never'));
@@ -1143,6 +1144,13 @@ export async function cmdGenome(args: string[]): Promise<number> {
     printGenomeHelp();
     return 0;
   }
+
+  // M341: `genome recall`/`genome learn` are documented aliases of the
+  // top-level commands — previously these args were silently ignored and the
+  // health panel printed with exit 0 (a `genome learn "note"` looked like it
+  // succeeded while recording nothing).
+  if (args[0] === 'recall') return cmdRecall(args.slice(1));
+  if (args[0] === 'learn') return cmdLearn(args.slice(1));
 
   // Load config — required by all paths
   let cfg: import('../core/types.js').AshlrConfig;

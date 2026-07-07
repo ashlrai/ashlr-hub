@@ -295,7 +295,7 @@ ashlr audit                # append-only confinement + action audit log
 | `ashlr backlog` | View the scored work queue |
 | `ashlr invent [repo] [--emit]` | Generative engine — invent net-new features; `--emit` files them to the backlog |
 | `ashlr digest [--notify]` | Org-level portfolio digest (health, goals, costs) → `~/.ashlr/digests/`, read-only |
-| `ashlr spec import/show` | Manage spec artifacts |
+| `ashlr spec new/list/show/refine` | Manage spec artifacts |
 | `ashlr genome recall/learn` | Shared memory + knowledge recall |
 | `ashlr serve [--open]` | Web dashboard (Mission Control) at 127.0.0.1:7777 |
 | `ashlr pulse` | Rolling activity + spend analytics |

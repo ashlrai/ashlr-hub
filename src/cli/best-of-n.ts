@@ -26,8 +26,8 @@ const _yellow = (s: string): string => `\x1b[33m${s}${_reset}`;
 const _red    = (s: string): string => `\x1b[31m${s}${_reset}`;
 const _cyan   = (s: string): string => `\x1b[36m${s}${_reset}`;
 
-function printUsage(): void {
-  console.error(`${_bold_s}ashlr best-of-n${_reset} — M142 best-of-N generation + critic selection
+function printUsage(log: (s: string) => void = console.error): void {
+  log(`${_bold_s}ashlr best-of-n${_reset} — M142 best-of-N generation + critic selection
 
 ${_bold_s}Usage:${_reset}
   ashlr best-of-n <workItemId> [-n N]
@@ -74,6 +74,13 @@ const cmdBestOfN: Cmd = async (args: string[]): Promise<number> => {
   }
 
   // ── Validate ──────────────────────────────────────────────────────────────
+  // M341: an explicit help request is not a usage ERROR — help goes to
+  // stdout with exit 0 (sibling commands' convention; `--help && …` chains
+  // and stdout capture were broken by the old exit-2-on-stderr path).
+  if (args.includes('--help') || args.includes('-h') || args[0] === 'help') {
+    printUsage(console.log);
+    return 0;
+  }
   if (!workItemId && !(repo && title)) {
     printUsage();
     return 2;

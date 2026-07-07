@@ -87,7 +87,12 @@ export function loadOrCreateKey(): Buffer {
       // signatures — the merge gate becomes worthless. 0o077 masks any
       // group-read/write/exec or other-read/write/exec bit.
       const st = statSync(keyPath);
-      if ((st.mode & 0o077) !== 0) {
+      // POSIX only: Windows has no mode bits (Node synthesizes 0o666 there;
+      // the user-profile NTFS ACL is the actual protection). Enforcing 0600
+      // on win32 threw for EVERY key and failed-closed the entire merge/
+      // provenance path — the M83 Windows lane's single biggest cluster
+      // (~120 of 162 failing tests traced here).
+      if (process.platform !== 'win32' && (st.mode & 0o077) !== 0) {
         throw new Error(
           `provenance key at ${keyPath} has unsafe permissions (mode ${'0o' + (st.mode & 0o777).toString(8)}); ` +
           'expected 0600 — run: chmod 600 ' + keyPath,

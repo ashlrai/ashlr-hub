@@ -550,7 +550,14 @@ describe('M111 SharedStore — degraded / unwritable path', () => {
   });
 
   it('readSnapshot returns empty queue on bad path', () => {
-    const store = new SharedStore('/nonexistent-root-path/ashlr-fleet/shared');
+    // M341 (win32): '/nonexistent-root-path' is CREATABLE on Windows (it
+    // resolves to C:\nonexistent-root-path), so the store came up live and
+    // the queue was non-empty. A path UNDER a regular FILE is unusable on
+    // every platform.
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m111-bad-'));
+    const blocker = path.join(parent, 'blocker-file');
+    fs.writeFileSync(blocker, '');
+    const store = new SharedStore(path.join(blocker, 'ashlr-fleet', 'shared'));
     const snap = store.readSnapshot();
     expect(snap.claims).toEqual({});
     expect(snap.worked).toEqual([]);

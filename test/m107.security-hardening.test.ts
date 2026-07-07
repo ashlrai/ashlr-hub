@@ -291,7 +291,8 @@ describe('P0-D: desktop-action symlink TOCTOU — apply.ts', () => {
     expect(openInEditorMock).not.toHaveBeenCalled();
   });
 
-  it('ALLOWS when target is a symlink pointing inside enrolled repo', async () => {
+  // win32: symlink creation needs admin/dev-mode on Windows runners.
+  it.skipIf(process.platform === 'win32')('ALLOWS when target is a symlink pointing inside enrolled repo', async () => {
     // Symlink inside fxRepo resolves to another path also inside fxRepo.
     const realFile = path.join(fxRepo, 'real-file.ts');
     const linkPath = path.join(fxRepo, 'link-file.ts');
@@ -337,7 +338,8 @@ describe('P1: provenance key — refuses group/world-readable key', () => {
     expect(() => loadOrCreateKey()).toThrow(/unsafe permissions/);
   });
 
-  it('succeeds when key file has mode 0600 (owner only)', () => {
+  // win32: no POSIX mode bits (Node synthesizes 0o666) — NTFS ACLs are the protection.
+  it.skipIf(process.platform === 'win32')('succeeds when key file has mode 0600 (owner only)', () => {
     const keyDir = path.join(tmpHome, '.ashlr', 'foundry');
     fs.mkdirSync(keyDir, { recursive: true });
     const keyPath = path.join(keyDir, 'provenance.key');
@@ -349,7 +351,8 @@ describe('P1: provenance key — refuses group/world-readable key', () => {
     expect(key.equals(secretBytes)).toBe(true);
   });
 
-  it('creates a new key at mode 0600 when no key exists', () => {
+  // win32: no POSIX mode bits — the 0600 assertion is meaningless there.
+  it.skipIf(process.platform === 'win32')('creates a new key at mode 0600 when no key exists', () => {
     // tmpHome/.ashlr/foundry does not exist yet.
     const key = loadOrCreateKey();
     expect(key.length).toBe(32);

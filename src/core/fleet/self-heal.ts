@@ -53,10 +53,16 @@ export interface BreakageResult {
  */
 function firstFailureLine(output: string): string {
   const lines = output.split('\n').map(l => l.trim()).filter(Boolean);
-  // Prefer a line that looks like an error
-  const errorLine = lines.find(l =>
-    /error|fail|FAIL|Error/i.test(l)
-  );
+  // M341: a PASSING line whose test NAME contains "error"/"failure" must never
+  // be quoted as the failure — "(pass) … handles success and failure cases"
+  // and "ok 56 … without error" were being fed to fleet workers as the broken
+  // test, producing unfixable self-heal items.
+  const isPassLine = (l: string) => /^\((pass|skip|todo)\)|^ok \d|^[✓√]|\bpassed\b/i.test(l);
+  const candidates = lines.filter((l) => !isPassLine(l));
+  // Strong failure markers first (bun/tap/vitest), then the generic match.
+  const errorLine =
+    candidates.find((l) => /^\(fail\)|^not ok\b|^[✗×]|\bFAIL\b|\bERROR\b/.test(l)) ??
+    candidates.find((l) => /error|fail/i.test(l));
   const chosen = errorLine ?? lines[0] ?? 'unknown failure';
   return chosen.slice(0, 200);
 }

@@ -353,7 +353,8 @@ describe('unwritable path: falls back to local decision, never throws', () => {
     expect(() => subscriptionAllows('codex', { maxPercent: 80, cfg: badCfg })).not.toThrow();
   });
 
-  it('subscriptionAllows falls back to local decision when shared path is unwritable', () => {
+  // win32: chmod-based unwritable-dir setup has no effect on Windows.
+  it.skipIf(process.platform === 'win32')('subscriptionAllows falls back to local decision when shared path is unwritable', () => {
     const badCfg = sharedCfg('/nonexistent-path-that-cannot-be-created-m114', 'machine-X');
     // Local reads 95% → should block even without shared store.
     mockRateLimitsReturn = makeRateLimits(95);
