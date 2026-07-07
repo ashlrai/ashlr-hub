@@ -249,6 +249,12 @@ function effectiveBackends(
  *   grep -rhoE "foundry\??\.[a-zA-Z]+|foundry[^;]{0,60}\[['\"][a-zA-Z]+['\"]\]" src/
  */
 const KNOWN_FOUNDRY_KEYS: ReadonlySet<string> = new Set([
+  // M340a: three keys the first mechanical extraction missed (they are read
+  // via `(cfg.foundry as Record<string, unknown> | undefined)?.['key']`
+  // casts) — confirmed consumed by an agent sweep: acePlaybook
+  // (strategist.ts:812, manager.ts), localization (sandboxed-engine.ts:170),
+  // redTeam (automerge-pass.ts:660).
+  'acePlaybook', 'localization', 'redTeam',
   'allowedBackends', 'antiClog', 'ashlrcodeExecutor', 'askBorderlineReview',
   'autoArchiveAfterRejects', 'autoMerge', 'autonomyControlLoop', 'bestOfN',
   'bestOfNCandidates', 'bestOfNMinItemScore', 'blastRadius', 'browserVerify',
