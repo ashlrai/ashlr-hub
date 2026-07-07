@@ -1,0 +1,18 @@
+# M85: repo EOL hygiene. Windows checkouts previously got CRLF and every edit
+# risked an LF<->CRLF flip (PR #8 staged a ~45-line change as 3000+ lines until
+# normalized). All text files are LF in the repo and in checkouts.
+* text=auto eol=lf
+
+# Binary files — never normalize.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.tgz binary
+*.gz binary
+*.zip binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
