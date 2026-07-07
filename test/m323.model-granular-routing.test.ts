@@ -219,8 +219,17 @@ describe('M323 selectCostAwareModel', () => {
   });
 
   it('never learns INTO a bad model: all sampled < 0.5 → null', () => {
-    fixture = chains('s5', 'claude:claude-sonnet-5', ['rejected', 'rejected', 'rejected', 'rejected', 'ship']);
+    // M338 (review fix): 8 verdicts so the recency-weighted sample count
+    // clears LEARNED_ROUTING_MIN_SAMPLES — 5 verdicts at ages 1–5h decay to
+    // ~4.94 weighted samples, which silently exercised the THIN-SAMPLE path
+    // instead of the <0.5 floor this test exists to pin.
+    fixture = chains('s5', 'claude:claude-sonnet-5', [
+      'rejected', 'rejected', 'rejected', 'rejected', 'rejected', 'rejected', 'rejected', 'ship',
+    ]);
     const scores = buildProducerScores('issue', NOW);
+    const s5 = scores.get('claude:sonnet-5')!;
+    expect(s5.samples).toBeGreaterThanOrEqual(LEARNED_ROUTING_MIN_SAMPLES); // floor path, not thin-sample
+    expect(s5.score).toBeLessThan(0.5);
     const onlySonnet = KNOWN_MODELS.filter((m) => m.id === 'claude:sonnet-5');
     expect(selectCostAwareModel(onlySonnet, scores, { minShipRate: 0.6 })).toBeNull();
   });

@@ -138,6 +138,26 @@ describe('M322 computeModelRoi', () => {
     expect(roi['claude:opus']!.rejected).toBe(1);
   });
 
+  it('M338: a proposal with BOTH merged and rejected entries counts once, newest wins', () => {
+    const flip: Record<string, unknown>[] = [
+      // newest-first: the rejection is the proposal's actual final state
+      // (gate-7 wrote a stale 'merged' before Gate 8 refused).
+      { ts: ts(0.4), proposalId: 'p-flip', action: 'rejected', engine: 'claude', model: 'claude:claude-sonnet-5' },
+      { ts: ts(0.6), proposalId: 'p-flip', action: 'merged', engine: 'claude', model: 'claude:claude-sonnet-5' },
+      { ts: ts(5.5), proposalId: 'p-flip', action: 'proposed', engine: 'claude', model: 'claude:claude-sonnet-5', costUsd: 0.1 },
+    ];
+    fixture = [...flip, ...FIXTURE];
+    try {
+      const s5 = computeModelRoi('all')['claude:sonnet-5']!;
+      // p-s5-a merged once (dedup) + p-flip must NOT add a merged…
+      expect(s5.merged).toBe(1);
+      // …it lands in rejected exactly once instead.
+      expect(s5.rejected).toBe(1);
+    } finally {
+      fixture = FIXTURE;
+    }
+  });
+
   it('never-judged local producer: shipRate 0, latency null when unrecorded', () => {
     const local = computeModelRoi('all')['local-coder:qwen2.5-coder:32b']!;
     expect(local.dispatches).toBe(1);

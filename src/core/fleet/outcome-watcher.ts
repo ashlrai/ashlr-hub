@@ -116,13 +116,17 @@ export async function scanRealWorldOutcomes(
     // records that multiplied the reject signal. Skip any proposal that
     // ALREADY has a reverted/followed-up record anywhere in the stream.
     const allTraces = readJudgeTraces({ sinceMs });
-    const alreadyLinked = new Set(
-      allTraces
-        .filter((t) => t.outcome === 'reverted' || t.outcome === 'followed-up')
-        .map((t) => t.proposalId),
+    // M338 (review fix): only 'reverted' is TERMINAL. A 'followed-up' link
+    // must not block a later real revert — the proposal stays scannable for
+    // the revert upgrade, while the follow-up re-link is suppressed below.
+    const revertedPids = new Set(
+      allTraces.filter((t) => t.outcome === 'reverted').map((t) => t.proposalId),
+    );
+    const followedUpPids = new Set(
+      allTraces.filter((t) => t.outcome === 'followed-up').map((t) => t.proposalId),
     );
     const traces = allTraces.filter(
-      (t) => t.outcome === 'merged' && !alreadyLinked.has(t.proposalId),
+      (t) => t.outcome === 'merged' && !revertedPids.has(t.proposalId),
     );
     if (traces.length === 0) return scan;
 
@@ -165,6 +169,10 @@ export async function scanRealWorldOutcomes(
           scan.reverts++;
           continue;
         }
+
+        // M338: already followed-up — only the reverted UPGRADE above is
+        // interesting for this proposal; never re-link the same outcome.
+        if (followedUpPids.has(trace.proposalId)) continue;
 
         // (b) Follow-up fix: a near-term commit after the merge touching the
         //     same files with a fix-flavored subject.

@@ -204,6 +204,30 @@ describe('M332 scanRealWorldOutcomes', () => {
     expect(linked.length).toBe(0);
   }, 30_000);
 
+  it('M338: a followed-up proposal is UPGRADED to reverted when a real revert lands', async () => {
+    proposalRepo = repoWithMerge('p-upg');
+    const mergeSha = g(proposalRepo, ['rev-parse', 'HEAD']).trim();
+    g(proposalRepo, ['revert', '--no-edit', mergeSha]);
+    // Stream already carries a followed-up patch record — the revert must
+    // still be detected and linked (followed-up is NOT terminal).
+    traces = [mergedTrace('p-upg'), { ...mergedTrace('p-upg'), outcome: 'followed-up' }];
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+    expect(scan.reverts).toBe(1);
+    expect(linked).toContainEqual(['p-upg', 'reverted']);
+  }, 30_000);
+
+  it('M338: an already-followed-up proposal with NO revert is not re-linked', async () => {
+    proposalRepo = repoWithMerge('p-nore');
+    writeFileSync(join(proposalRepo, 'file.ts'), 'fixed change\n');
+    g(proposalRepo, ['add', '-A']);
+    g(proposalRepo, ['commit', '--quiet', '-m', 'fix: repair the merged change']);
+    traces = [mergedTrace('p-nore'), { ...mergedTrace('p-nore'), outcome: 'followed-up' }];
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+    expect(scan.followUps).toBe(0);
+    expect(linked.length).toBe(0);
+    expect(scan.scanned).toBe(1); // scanned for the revert upgrade, found none
+  }, 30_000);
+
   it('M337: a follow-up fix is found even with 55 newer commits after it', async () => {
     proposalRepo = repoWithMerge('p-busy');
     writeFileSync(join(proposalRepo, 'file.ts'), 'fixed change\n');

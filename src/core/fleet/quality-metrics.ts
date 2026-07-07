@@ -402,18 +402,19 @@ export function computeModelRoi(window: '7d' | '30d' | 'all'): Record<string, Mo
         roi.judged++;
         if (e.verdict === 'ship') roi.shipVerdicts++;
         if (typeof e.costUsd === 'number') roi.judgeCostUsd += e.costUsd;
-      } else if (e.action === 'merged') {
-        // M337 (review fix): a manager-gated auto-merge writes TWO 'merged'
-        // entries per proposal (gate-7 record + setStatus record) — counting
-        // both doubled roi.merged and halved costPerMergedUsd.
-        if (!outcomeSeen.has(`merged:${e.proposalId}`)) {
-          outcomeSeen.add(`merged:${e.proposalId}`);
-          roi.merged++;
-        }
-      } else if (e.action === 'rejected') {
-        if (!outcomeSeen.has(`rejected:${e.proposalId}`)) {
-          outcomeSeen.add(`rejected:${e.proposalId}`);
-          roi.rejected++;
+      } else if (e.action === 'merged' || e.action === 'rejected') {
+        // M337/M338 (review fixes): terminal outcomes count ONCE PER PROPOSAL,
+        // NEWEST action wins. Two failure modes collapse here: (a) a
+        // manager-gated auto-merge writes TWO 'merged' entries (gate-7 +
+        // setStatus); (b) a gate-7 'merged' record can precede a Gate-8
+        // refusal, after which the still-pending proposal is later 'rejected'
+        // — counting both buckets inflated merged and deflated
+        // costPerMergedUsd. Entries are newest-first, so the FIRST terminal
+        // action seen per proposal is the proposal's actual final state.
+        if (!outcomeSeen.has(e.proposalId)) {
+          outcomeSeen.add(e.proposalId);
+          if (e.action === 'merged') roi.merged++;
+          else roi.rejected++;
         }
       }
     }

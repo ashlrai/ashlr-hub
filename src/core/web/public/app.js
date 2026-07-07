@@ -1510,16 +1510,28 @@ function buildProjectTable(byProject) {
 // Models view (M335) — per-model ship rate, cost-per-merge, outcomes, BoN wins
 // ---------------------------------------------------------------------------
 
+// M338: monotonically increasing fetch token — a stale (slower/older)
+// response must never overwrite a newer window selection.
+let _modelsFetchSeq = 0;
+
 async function loadModels(window = '30d', opts = {}) {
+  const seq = ++_modelsFetchSeq;
   // M337: quiet refreshes (SSE-triggered) keep the table on screen — only a
   // user-initiated load shows the spinner.
   if (!opts.quiet) showLoading('models');
   try {
-    state.models = await apiFetch(`/api/models?window=${window}`);
+    const data = await apiFetch(`/api/models?window=${window}`);
+    if (seq !== _modelsFetchSeq) return; // superseded by a newer request
+    state.models = data;
     state.modelsRefreshedAt = Date.now();
     renderModels();
   } catch (err) {
-    showError('models', err.message);
+    if (seq !== _modelsFetchSeq) return;
+    // M338: failures also arm the 30s throttle (otherwise every 1.5s SSE
+    // tick refires the failing fetch), and a QUIET failure keeps the table
+    // on screen instead of wiping it with the error panel.
+    state.modelsRefreshedAt = Date.now();
+    if (!opts.quiet) showError('models', err.message);
   }
 }
 
