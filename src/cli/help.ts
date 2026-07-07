@@ -313,6 +313,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'goals plan <id>',              desc: 'Decompose a goal into ordered milestones + author/link each milestone spec (LOCAL-FIRST; --allow-cloud to use cloud).', topic: 'autonomy' },
   { cmd: 'goals advance <id>',           desc: 'Advance the next actionable milestone via a SANDBOXED, proposal-only swarm (ENROLLED repos only; emits a PENDING proposal).', topic: 'autonomy' },
   { cmd: 'goals status [id]',            desc: 'Read-only roll-up of goal/milestone progress + linked swarm/proposal state (mutates nothing).', topic: 'autonomy' },
+  { cmd: 'roadmap <run|resume|status>',  desc: 'Goal Loop: run a roadmap of milestone files, one FRESH agent process per milestone; resumable from state.json (LOCAL-FIRST; --allow-cloud for API engines).', topic: 'autonomy' },
   { cmd: 'reflect [--since <Nd>]',       desc: 'Score your OWN past runs/swarms locally; report effectiveness/cost deltas (read-only).', topic: 'autonomy' },
   { cmd: 'reflect playbooks [--persist]', desc: 'Distill repeatable playbooks from past swarms (report-only; --persist writes them to the genome).', topic: 'autonomy' },
   { cmd: 'reflect propose',              desc: 'Emit routing/policy/prompt tuning suggestions as PENDING inbox proposals (never auto-applies).', topic: 'autonomy' },

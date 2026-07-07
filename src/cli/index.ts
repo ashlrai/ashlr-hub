@@ -172,6 +172,14 @@ const loadLoopCmd = lazyCmd(
   'loop command requires src/cli/loop.ts (M55 module not yet built).',
 );
 
+// ─── M86 the Goal Loop roadmap runner: `ashlr roadmap` ────────────────────────
+
+const loadRoadmapCmd = lazyCmd(
+  () => import('./roadmap.js' as unknown as string),
+  (m) => m.cmdRoadmap as Cmd,
+  'roadmap command requires src/cli/roadmap.ts (M86 module not yet built).',
+);
+
 // ─── M120 fleet manager / CEO agent ──────────────────────────────────────────
 
 const loadManagerCmd = lazyCmd(
@@ -1840,6 +1848,14 @@ async function main(): Promise<void> {
         // M55: the conductor — run the proposal-first fleet over the portfolio.
         const cmdLoop = await loadLoopCmd();
         process.exitCode = await cmdLoop(rest);
+        break;
+      }
+
+      case 'roadmap': {
+        // M86: the Goal Loop — fresh-process-per-milestone roadmap runner,
+        // resumable from state.json, local-first (--allow-cloud opt-in).
+        const cmdRoadmap = await loadRoadmapCmd();
+        process.exitCode = await cmdRoadmap(rest);
         break;
       }
 
