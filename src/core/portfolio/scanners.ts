@@ -1455,9 +1455,12 @@ export async function scanLint(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>)
       if (!filePath) continue;
 
       // Repo-relative display path
-      const displayPath = filePath.startsWith(repo)
-        ? filePath.slice(repo.length).replace(/^\//, '')
-        : filePath;
+      // M341b: strip either leading sep and posix-normalize — item ids and
+      // titles cross machines via ledgers, so they must not carry '\'.
+      const displayPath = (filePath.startsWith(repo)
+        ? filePath.slice(repo.length).replace(/^[/\\]/, '')
+        : filePath
+      ).replace(/\\/g, '/');
 
       const messages = Array.isArray(fileResult.messages) ? fileResult.messages : [];
       for (const msg of messages) {

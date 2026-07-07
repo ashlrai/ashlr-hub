@@ -353,7 +353,8 @@ describe('H5 · leak-containment · (c) removeSandbox containment refuses a tamp
 // ===========================================================================
 
 describe('H5 · leak-containment · (d) repeated create/remove cycles leave zero residue', () => {
-  it('many create -> remove cycles accrete NO sandbox, worktree, or scratch branch', () => {
+  // 120s: repeated worktree create/remove is git-heavy — Windows CI runners need headroom.
+  it('many create -> remove cycles accrete NO sandbox, worktree, or scratch branch', { timeout: 120_000 }, () => {
     expect.hasAssertions();
     setup();
 

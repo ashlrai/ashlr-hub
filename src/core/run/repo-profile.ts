@@ -167,7 +167,7 @@ function nodeProject(repoRoot: string, root: string): RepoProjectProfile | null 
 
   return {
     root,
-    relativeRoot: relative(repoRoot, root) || '.',
+    relativeRoot: relative(repoRoot, root).replace(/\\/g, '/') || '.', // M341b: posix in profiles/ledgers
     kind: 'node',
     packageManager: pm,
     scripts: Object.keys(scripts).sort(),
@@ -184,7 +184,7 @@ function rustProject(repoRoot: string, root: string): RepoProjectProfile | null 
   if (!hasFile(root, 'Cargo.toml')) return null;
   return {
     root,
-    relativeRoot: relative(repoRoot, root) || '.',
+    relativeRoot: relative(repoRoot, root).replace(/\\/g, '/') || '.', // M341b: posix in profiles/ledgers
     kind: 'rust',
     packageManager: 'cargo',
     scripts: [],
@@ -228,7 +228,7 @@ function shellProject(repoRoot: string, root: string): RepoProjectProfile | null
   if (!makeFile && !justFile && bats.length > 0) {
     return {
       root,
-      relativeRoot: relative(repoRoot, root) || '.',
+      relativeRoot: relative(repoRoot, root).replace(/\\/g, '/') || '.', // M341b: posix in profiles/ledgers
       kind: 'bats',
       packageManager: 'bats',
       scripts: ['test'],
@@ -246,7 +246,7 @@ function shellProject(repoRoot: string, root: string): RepoProjectProfile | null
   if (scripts.length === 0 && bats.length > 0) {
     return {
       root,
-      relativeRoot: relative(repoRoot, root) || '.',
+      relativeRoot: relative(repoRoot, root).replace(/\\/g, '/') || '.', // M341b: posix in profiles/ledgers
       kind: 'bats',
       packageManager: 'bats',
       scripts: ['test'],
@@ -261,7 +261,7 @@ function shellProject(repoRoot: string, root: string): RepoProjectProfile | null
 
   return {
     root,
-    relativeRoot: relative(repoRoot, root) || '.',
+    relativeRoot: relative(repoRoot, root).replace(/\\/g, '/') || '.', // M341b: posix in profiles/ledgers
     kind: useJust ? 'just' : 'make',
     packageManager: useJust ? 'just' : 'make',
     scripts,

@@ -179,7 +179,9 @@ function formatVerifyCommand(vc: VerifyCommand, workspaceRoot: string): string {
   const command = vc.cmd.join(' ');
   const root = resolve(workspaceRoot);
   const cwd = commandRootFor(vc, root);
-  const rel = relative(root, cwd);
+  // M341b: posix-normalize — 'cd apps/web' works in sh AND cmd.exe, while a
+  // native '\' sep leaks platform-specific strings into ledgers/logs.
+  const rel = relative(root, cwd).replace(/\\/g, '/');
   return rel && !rel.startsWith('..') && !isAbsolute(rel)
     ? `(cd ${rel} && ${command})`
     : command;
@@ -239,7 +241,9 @@ export function spawnOptionsFor(
     ...process.env,
     PATH: buildToolPath({
       prepend: localBins,
-      separator: isWin ? ';' : undefined,
+      // M341b: explicit for BOTH branches — 'undefined' fell back to the
+      // HOST delimiter, so simulating linux on a win32 host joined with ';'.
+      separator: isWin ? ';' : ':',
     }),
   };
 

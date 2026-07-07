@@ -688,7 +688,7 @@ describe('genomeHealth — counts match reality', () => {
     expect(health.lastLearnedAt).not.toBeNull();
   });
 
-  it('genomeHealth counts grow with each append', () => {
+  it('genomeHealth counts grow with each append', { timeout: 30_000 }, () => { // slow-runner headroom
     const h0 = genomeHealth(makeConfig());
     appendHubEntry({ text: 'Entry 1' });
     const h1 = genomeHealth(makeConfig());

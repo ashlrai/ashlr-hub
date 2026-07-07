@@ -235,7 +235,7 @@ function resolveChangedRepoDir(input: BlastRadiusInput, graph: EcosystemGraph): 
 
   // Absolute path → last segment if it's a known node.
   if (repo.startsWith('/')) {
-    const base = repo.replace(/\/+$/, '').split('/').pop() ?? '';
+    const base = repo.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''; // M341b: win32 paths use '\'
     if (graph.nodes.has(base)) return base;
   }
   // Direct dir-name match.
@@ -244,7 +244,7 @@ function resolveChangedRepoDir(input: BlastRadiusInput, graph: EcosystemGraph): 
   if (graph.pkgToDir.has(repo)) return graph.pkgToDir.get(repo)!;
 
   // Last path segment fallback (e.g. trailing-slash, nested path).
-  const base = repo.replace(/\/+$/, '').split('/').pop() ?? '';
+  const base = repo.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''; // M341b: win32 paths use '\'
   if (graph.nodes.has(base)) return base;
 
   return null;
@@ -273,7 +273,7 @@ function depReferencesProducer(
   // 2. file:../<dir> link
   const fileMatch = /^(?:file:|link:)(.+)$/.exec(value);
   if (fileMatch) {
-    const target = fileMatch[1].replace(/\/+$/, '').split('/').pop() ?? '';
+    const target = fileMatch[1].replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''; // M341b
     if (target === producer.dir) return true;
   }
 

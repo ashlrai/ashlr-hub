@@ -146,8 +146,10 @@ describe('M225 — sandbox/git cwd is always a directory', () => {
     expect(result.status).toBe(0);
     expect(result.error).toBeUndefined();
     // The top-level must be the repo root, not the file path.
-    // Use realpathSync to handle macOS /var → /private/var symlink.
-    expect(result.stdout.trim()).toBe(realpathSync(repoDir));
+    // realpathSync.native handles macOS /var → /private/var AND win32 8.3
+    // short names (RUNNER~1); git prints '/' seps, so normalize those too.
+    const norm = (p: string) => realpathSync.native(p).replace(/\\/g, '/');
+    expect(norm(result.stdout.trim())).toBe(norm(repoDir));
   });
 
   // -------------------------------------------------------------------------

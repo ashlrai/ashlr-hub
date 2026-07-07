@@ -310,7 +310,9 @@ describe('M286 spawnOptionsFor — PATH injection', () => {
 // ---------------------------------------------------------------------------
 
 describe('M286 integration — verify command resolves binary via symlink', () => {
-  it('a node script in node_modules/.bin is reachable when PATH is injected', async () => {
+  // win32: the fixture is an extension-less POSIX script — Windows cannot exec
+  // it regardless of PATH (real shims there are .cmd/.ps1, covered above).
+  it.skipIf(process.platform === 'win32')('a node script in node_modules/.bin is reachable when PATH is injected', async () => {
     // Build a tiny fake "tsc" script in a temp node_modules/.bin
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'm286-integ-'));
     try {

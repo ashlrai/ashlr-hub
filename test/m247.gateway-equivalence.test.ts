@@ -338,7 +338,7 @@ describe('M247 InferenceGateway', () => {
       expect(gd.trace).toHaveLength(0);
     });
 
-    it('flag-OFF: 20 WorkItems all match direct routeBackend', async () => {
+    it('flag-OFF: 20 WorkItems all match direct routeBackend', { timeout: 30_000 }, async () => { // slow-runner headroom
       const cfg = withFoundry({
         allowedBackends: ['builtin', 'claude', 'local-coder'] as EngineId[],
       });

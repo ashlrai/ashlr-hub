@@ -233,13 +233,14 @@ describe('runDoctor — no local provider up', () => {
     };
   });
 
-  it('produces at least one fail check when no provider is up', async () => {
+  // 30s: provider probes stack multiple 2s connection timeouts on slow CI runners.
+  it('produces at least one fail check when no provider is up', { timeout: 30_000 }, async () => {
     const cfg = makeConfig(tmpHome);
     const report = await runDoctor(cfg);
     expect(report.summary.fail).toBeGreaterThan(0);
   });
 
-  it('summary.fail is reflected correctly in summary counts', async () => {
+  it('summary.fail is reflected correctly in summary counts', { timeout: 30_000 }, async () => {
     const cfg = makeConfig(tmpHome);
     const report = await runDoctor(cfg);
     const failChecks = report.checks.filter(c => c.status === 'fail');

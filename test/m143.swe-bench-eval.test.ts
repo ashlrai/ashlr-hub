@@ -80,7 +80,9 @@ describe('applyDiff', () => {
       ].join('\n');
       const ok = applyDiff(diff, dir);
       expect(ok).toBe(true);
-      expect(fs.readFileSync(path.join(dir, 'hello.txt'), 'utf8')).toBe('hello patched\n');
+      // win32: git apply honors core.autocrlf=true (the runner default) and
+      // writes CRLF into the working tree — the CONTENT is what we assert.
+      expect(fs.readFileSync(path.join(dir, 'hello.txt'), 'utf8').replace(/\r\n/g, '\n')).toBe('hello patched\n');
     } finally {
       rmDir(dir);
     }
@@ -455,7 +457,8 @@ describe('loadSweBenchDataset', () => {
     );
 
     const tasks = loadSweBenchDataset(tmpFile, '/repos');
-    expect(tasks[0]!.repoPath).toBe('/repos/org__repo');
+    // repoPath is a real filesystem path — native separators are correct.
+    expect(tasks[0]!.repoPath).toBe(path.join('/repos', 'org__repo'));
   });
 
   it('skips malformed JSON lines and continues parsing', () => {
