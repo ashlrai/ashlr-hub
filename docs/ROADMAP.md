@@ -59,6 +59,18 @@ file states direction; contracts state commitments.
   (`cfg.foundry.modelGranularRouting`, default off) with producer-attributed
   ship-rates — the fleet routes to the cheapest model that ships. Every
   milestone flag-gated with byte-identical-off parity suites.
+- **v6-Verification-First (M331–M336)** — generation → verification: the
+  `run-tests` keystone (activates tests-green best-of-N selection) + the
+  verify-to-green repair loop (`cfg.foundry.verifyToGreen`, same confined
+  worktree, re-signed provenance); the outcome watcher linking real-world
+  reverts/follow-up fixes back onto judge traces and into learned routing;
+  multi-model best-of-N races (`bestOfNCandidates`) with full-cost
+  accounting and loser archival; the staged dormant-flag activation program
+  (gateway shadow mode + [`CONTRACT-M334`](./contracts/CONTRACT-M334.md));
+  the dashboard **Models** tab (`/api/models`: ship rate, cost-per-merge,
+  reverts, best-of-N win rates); and the `ashlr eval swe-bench --gate`
+  regression gate (exit 3 on a newly-broken task or resolve-rate drop —
+  wire into CI/cron).
 
 ## Near-term (v2.3 candidates — direction, not commitments)
 

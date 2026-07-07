@@ -124,6 +124,97 @@ pollutes the scores.
 
 ---
 
+### `verifyToGreen` (M331)
+
+```json
+"verifyToGreen": {
+  "enabled": true,
+  "maxIterations": 3,
+  "perRunTimeoutMs": 180000,
+  "failureTailBytes": 8192
+}
+```
+
+Bounded engine repair loop before a proposal is filed. **DEFAULT OFF.** When
+the M275 completeness gate fails a cli-agent run, the SAME engine is
+re-invoked inside the SAME confined worktree (identical contained env + OS
+sandbox launcher — jail and severed push fully preserved) with the
+verification-failure tail, up to `maxIterations` (clamped 1–5) times. A green
+worktree is re-captured and RE-SIGNED before filing; a still-red worktree is
+simply not filed (fail-closed). Flag-off is the byte-identical single-shot
+gate. The api-model path is out of scope (agent-loop patch application).
+
+---
+
+### `bestOfN` / `bestOfNCandidates` / `bestOfNMinItemScore` (M170/M333)
+
+```json
+"bestOfN": 3,
+"bestOfNCandidates": [
+  { "engine": "claude", "model": "claude-sonnet-5" },
+  { "engine": "codex" },
+  { "engine": "local-coder" }
+],
+"bestOfNMinItemScore": 7
+```
+
+Multi-model best-of-N: generate N candidates and let the critic pick the
+winner (test-passing candidates preferred once M331's `run-tests` is
+available — it is, since M331).
+
+- `bestOfN` (default 1 = single dispatch) — formalized in M333 after being
+  read via `as any` since M170.
+- `bestOfNCandidates` — candidate i runs on `specs[i % specs.length]` with
+  its own engine/model + runner kind. Entries not in `allowedBackends` are
+  dropped at dispatch. Absent → single-engine stochastic resampling.
+- `bestOfNMinItemScore` — fan out only for items whose score clears the
+  threshold; below it, single dispatch. Absent → every item fans out.
+- **Cost:** the daemon counts EVERY candidate's billable spend (the M80
+  subscription-\$0 rule applied per candidate) against the tick budget — not
+  just the winner's. Losers are rejected with a provenance reason naming the
+  winner, so the inbox holds exactly one pending proposal per item.
+- **Trust unchanged:** a winning mid/local candidate keeps its tier tag and
+  can never gain main merge authority.
+- Per-candidate records land in `~/.ashlr/best-of-n/` (win rates feed the
+  dashboard Models tab).
+
+---
+
+### `outcomeWatcher` (M332)
+
+```json
+"outcomeWatcher": true
+```
+
+Maintenance pass linking REAL-WORLD outcomes back onto judge traces: a
+`git revert` of an auto-merged proposal → outcome `reverted`; a near-term fix
+commit touching the same files → `followed-up`. READ-ONLY on repos,
+append-only ledgers, internally throttled to one scan per 6h. **DEFAULT ON**
+(telemetry enrichment only — no behavior change); set `false` to disable.
+Learned routing counts a reverted merge as a full extra reject on the
+producer model (follow-up = half), so the judge's moment-of-merge verdict is
+corrected by what actually happened on `main`.
+
+---
+
+### `fabric.gatewayShadow` (M334 stage 1)
+
+```json
+"fabric": { "gatewayShadow": true }
+```
+
+Runs the M247 InferenceGateway OBSERVE-ONLY beside the live legacy routing
+path and records decision divergences to
+`~/.ashlr/fabric/gateway-shadow-*.jsonl`. **The legacy result always wins.**
+`divergenceStats()` evaluates the staged-activation exit criteria live
+(≥200 decisions, <2% divergence, ZERO safety-relevant divergences — see
+[`docs/contracts/CONTRACT-M334.md`](./contracts/CONTRACT-M334.md) for the
+full three-stage program before flipping `fabric.gateway` /
+`fabric.concurrentDispatch` defaults). DEFAULT off; ignored when
+`fabric.gateway` is already live.
+
+---
+
 ### `engines`
 
 ```json

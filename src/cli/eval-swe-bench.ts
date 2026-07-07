@@ -3,6 +3,7 @@
  *
  * Usage:
  *   ashlr eval swe-bench [--fixtures] [--dataset DIR] [--engine E] [-n N] [--json]
+ *                        [--gate] [--baseline <report.json>]
  *
  * Options:
  *   --fixtures          Run the bundled local fixture tasks (default when no --dataset).
@@ -10,11 +11,18 @@
  *   --engine <id>       Engine id to use (default: local-coder).
  *   -n <N>              Limit to the first N tasks.
  *   --json              Emit JSON report instead of a human-readable table.
+ *   --gate              M336: exit non-zero when this run REGRESSED vs the
+ *                       baseline (a newly-broken task or a resolve-rate drop).
+ *                       Wire into CI or a weekly cron for "are we improving?".
+ *   --baseline <path>   M336: explicit baseline report JSON. Default: the most
+ *                       recent persisted report in ~/.ashlr/eval/.
  *
  * Exit codes:
- *   0  run completed (even when some tasks failed to resolve)
- *   1  fatal error (bad args, missing dataset file, etc.)
+ *   0  run completed (even when some tasks failed to resolve; with --gate:
+ *      no regression, or first run seeding the baseline)
+ *   1  fatal error (bad args, missing dataset/baseline file, etc.)
  *   2  usage error
+ *   3  --gate: run REGRESSED vs the baseline
  *
  * Report persistence:
  *   Each run appends ~/.ashlr/eval/<id>.json. The CLI prints the resolve-rate
@@ -57,11 +65,15 @@ interface ParsedArgs {
   engine: string;
   limit?: number;
   json: boolean;
+  /** M336: exit 3 when the run regressed vs the baseline. */
+  gate: boolean;
+  /** M336: explicit baseline report path (default: last persisted report). */
+  baselinePath?: string;
   usageError?: string;
 }
 
 function parseArgs(args: string[]): ParsedArgs {
-  const result: ParsedArgs = { useFixtures: false, engine: 'local-coder', json: false };
+  const result: ParsedArgs = { useFixtures: false, engine: 'local-coder', json: false, gate: false };
   let i = 0;
   while (i < args.length) {
     const arg = args[i]!;
@@ -84,6 +96,16 @@ function parseArgs(args: string[]): ParsedArgs {
       i++;
     } else if (arg === '--json') {
       result.json = true;
+      i++;
+    } else if (arg === '--gate') {
+      result.gate = true;
+      i++;
+    } else if (arg === '--baseline') {
+      result.baselinePath = args[++i];
+      if (!result.baselinePath) {
+        result.usageError = '--baseline requires a report path';
+        return result;
+      }
       i++;
     } else if (arg === '--help' || arg === '-h') {
       result.usageError = 'help';
@@ -243,6 +265,8 @@ function renderHelp(): void {
     ['--engine <id>', 'Engine id to benchmark (default: local-coder).'],
     ['-n <N>', 'Limit to the first N tasks.'],
     ['--json', 'Emit JSON report instead of a table.'],
+    ['--gate', 'Exit 3 when this run regressed vs the baseline (M336; for CI/cron).'],
+    ['--baseline <path>', 'Explicit baseline report JSON (default: last persisted report).'],
   ];
   const w = Math.max(...opts.map(([o]) => o.length));
   for (const [o, d] of opts) {
@@ -302,8 +326,27 @@ export async function cmdSweBench(
     return 0;
   }
 
-  // Run
-  const prior = loadLastReport();
+  // M336: baseline resolution — an explicit --baseline file wins over the
+  // most recent persisted report.
+  let prior = loadLastReport();
+  if (parsed.baselinePath) {
+    if (!fs.existsSync(parsed.baselinePath)) {
+      process.stderr.write(red('error: ') + `baseline not found: ${parsed.baselinePath}\n`);
+      return 1;
+    }
+    try {
+      const raw = JSON.parse(fs.readFileSync(parsed.baselinePath, 'utf8')) as BenchReport;
+      if (!Array.isArray(raw.perTask) || typeof raw.resolveRate !== 'number') {
+        throw new Error('bad shape');
+      }
+      prior = raw;
+    } catch {
+      process.stderr.write(
+        red('error: ') + `baseline is not a valid BenchReport: ${parsed.baselinePath}\n`,
+      );
+      return 1;
+    }
+  }
 
   if (!parsed.json) {
     process.stderr.write(
@@ -329,6 +372,25 @@ export async function cmdSweBench(
     renderReport(report, delta);
     console.log(`  ${dim('report saved:')} ${savedPath}`);
     console.log('');
+  }
+
+  // M336: regression gate — exit 3 when this run REGRESSED vs the baseline
+  // (a newly-broken task, or a resolve-rate drop). A first run with no
+  // baseline seeds it and passes, so the gate is safe to wire into CI/cron
+  // from day one.
+  if (parsed.gate) {
+    if (!delta) {
+      process.stderr.write(yellow('gate: ') + 'no baseline yet — this report seeds it (pass)\n');
+      return 0;
+    }
+    if (delta.regressed) {
+      process.stderr.write(
+        red('gate: REGRESSED') +
+          ` (${delta.newlyBroken.length} newly broken, resolve-rate ${(delta.resolveRateDelta * 100).toFixed(1)}%)\n`,
+      );
+      return 3;
+    }
+    process.stderr.write(green('gate: PASS') + '\n');
   }
 
   return 0;
