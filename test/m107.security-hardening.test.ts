@@ -318,7 +318,8 @@ describe('P0-D: desktop-action symlink TOCTOU — apply.ts', () => {
 // ===========================================================================
 
 describe('P1: provenance key — refuses group/world-readable key', () => {
-  it('throws when key file has mode 0644 (world-readable)', () => {
+  // win32: the 0600 check is deliberately POSIX-only (no mode bits on NTFS).
+  it.skipIf(process.platform === 'win32')('throws when key file has mode 0644 (world-readable)', () => {
     const keyDir = path.join(tmpHome, '.ashlr', 'foundry');
     fs.mkdirSync(keyDir, { recursive: true });
     const keyPath = path.join(keyDir, 'provenance.key');
@@ -329,7 +330,7 @@ describe('P1: provenance key — refuses group/world-readable key', () => {
     expect(() => loadOrCreateKey()).toThrow(/0600/);
   });
 
-  it('throws when key file has mode 0640 (group-readable)', () => {
+  it.skipIf(process.platform === 'win32')('throws when key file has mode 0640 (group-readable)', () => {
     const keyDir = path.join(tmpHome, '.ashlr', 'foundry');
     fs.mkdirSync(keyDir, { recursive: true });
     const keyPath = path.join(keyDir, 'provenance.key');

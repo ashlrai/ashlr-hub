@@ -21,6 +21,7 @@ import { join } from 'node:path';
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync as fsWriteFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
 import {
   buildCacheKey,
@@ -341,7 +342,7 @@ describe('shadow hook — never short-circuits spawn', () => {
     // full runEngineSandboxed path, we verify the architectural invariant:
     // the shadow block contains NO return / short-circuit statement.
     const src = readFileSync(
-      new URL('../src/core/run/sandboxed-engine.ts', import.meta.url).pathname,
+      fileURLToPath(new URL('../src/core/run/sandboxed-engine.ts', import.meta.url)), // win32: .pathname gives '/D:/…' → 'D:\D:\…'
       'utf8',
     );
 
@@ -367,7 +368,7 @@ describe('shadow hook — never short-circuits spawn', () => {
 
   it('shadow block is entirely wrapped in try/catch (never-throw)', () => {
     const src = readFileSync(
-      new URL('../src/core/run/sandboxed-engine.ts', import.meta.url).pathname,
+      fileURLToPath(new URL('../src/core/run/sandboxed-engine.ts', import.meta.url)), // win32: .pathname gives '/D:/…' → 'D:\D:\…'
       'utf8',
     );
 

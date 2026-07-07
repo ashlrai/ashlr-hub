@@ -236,8 +236,10 @@ describe('M286 spawnOptionsFor — PATH injection', () => {
       const envPath = (opts.env as NodeJS.ProcessEnv).PATH ?? '';
       // The local .bin must be the first component
       expect(envPath.startsWith(path.resolve(localBin))).toBe(true);
-      const parentPathEntry = (process.env.PATH ?? '').split(':').find(Boolean);
-      if (parentPathEntry) expect(envPath.split(':')).toContain(parentPathEntry);
+      // win32: PATH entries are ';'-separated — a hardcoded ':' split cuts
+      // 'C:\…' into characters. path.delimiter is the portable separator.
+      const parentPathEntry = (process.env.PATH ?? '').split(path.delimiter).find(Boolean);
+      if (parentPathEntry) expect(envPath.split(path.delimiter)).toContain(parentPathEntry);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -248,12 +250,12 @@ describe('M286 spawnOptionsFor — PATH injection', () => {
     try {
       const opts = spawnOptionsFor(dir, 30_000, 'npm', 'linux');
       const envPath = (opts.env as NodeJS.ProcessEnv | undefined)?.PATH ?? '';
-      const entries = envPath.split(':');
+      const entries = envPath.split(path.delimiter); // win32: ';' — see below
 
       expect(entries).not.toContain(path.resolve(path.join(dir, 'node_modules', '.bin')));
       expect(entries).toContain(path.join(process.env.HOME ?? '', '.cargo', 'bin'));
       expect(entries).toContain(path.join(process.env.HOME ?? '', '.bun', 'bin'));
-      const parentPathEntry = (process.env.PATH ?? '').split(':').find(Boolean);
+      const parentPathEntry = (process.env.PATH ?? '').split(path.delimiter).find(Boolean);
       if (parentPathEntry) expect(entries).toContain(parentPathEntry);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });

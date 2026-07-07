@@ -26,6 +26,7 @@ import {
   applyGrokConfig,
 } from '../src/core/run/engine-registry.js';
 import { buildEngineCommand } from '../src/core/run/engines.js';
+import { fileURLToPath } from 'node:url';
 import { engineTierOf } from '../src/core/run/sandboxed-engine.js';
 import { evaluateMergeAuthority } from '../src/core/inbox/merge.js';
 import type { Proposal } from '../src/core/types.js';
@@ -371,7 +372,7 @@ describe('M298 Part 3 — simple-conductor full-suite directive', () => {
     else {
       const { readFileSync } = await import('node:fs');
       const src = readFileSync(
-        new URL('../src/core/simple-conductor.ts', import.meta.url).pathname,
+        fileURLToPath(new URL('../src/core/simple-conductor.ts', import.meta.url)), // win32: .pathname gives '/D:/…' → 'D:\D:\…'
         'utf8',
       );
       expect(src).toContain('npm test');
@@ -384,7 +385,7 @@ describe('M298 Part 3 — simple-conductor full-suite directive', () => {
   it('full-suite directive source is present in simple-conductor.ts (source-level check)', async () => {
     const { readFileSync } = await import('node:fs');
     const src = readFileSync(
-      new URL('../src/core/simple-conductor.ts', import.meta.url).pathname,
+      fileURLToPath(new URL('../src/core/simple-conductor.ts', import.meta.url)),
       'utf8',
     );
     expect(src).toContain('fullSuiteDirective');

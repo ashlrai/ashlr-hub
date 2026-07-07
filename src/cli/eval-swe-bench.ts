@@ -39,6 +39,7 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 import {
   runBenchmark,
@@ -126,8 +127,11 @@ function parseArgs(args: string[]): ParsedArgs {
 // Fixture loader
 // ---------------------------------------------------------------------------
 
+// M341a (win32): URL.pathname yields '/D:/a/…' on Windows, which Node then
+// resolves against the drive root as 'D:\D:\a\…' — fileURLToPath is the
+// portable conversion. This broke `--fixtures` for every Windows user.
 const FIXTURE_DIR = path.join(
-  path.dirname(new URL(import.meta.url).pathname),
+  path.dirname(fileURLToPath(import.meta.url)),
   '../../test/fixtures/swe-bench',
 );
 
