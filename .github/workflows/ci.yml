@@ -9,8 +9,16 @@ on:
 jobs:
   ci:
     # Node 22 is the hard minimum — install.sh and CONTRIBUTING.md both enforce it.
-    name: CI (Node 22)
-    runs-on: ubuntu-latest
+    # M83: windows-latest locks in the PR #8 cross-platform work — without a
+    # Windows lane the next refactor reintroduces a split('/') or a `which`
+    # and nobody notices. Platform-incompatible tests stay skip-guarded with a
+    # stated reason (symlinks/EPERM, POSIX mode bits, sandbox-exec, rg/grep).
+    name: CI (Node 22, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -42,7 +50,11 @@ jobs:
 
       # M33: keep the published exports map honest — pack the tarball, install
       # it into a clean dir, and exercise the bin + the ./types entry point.
+      # M83: ubuntu-only — the tarball-exports check is OS-independent, and the
+      # bash heredoc (mktemp/$PWD/.bin shims) is not worth porting to Windows.
       - name: Pack smoke (exports map)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
         run: |
           npm pack
           SMOKE_DIR=$(mktemp -d)
