@@ -2317,7 +2317,7 @@ function strategicTierLabel(tier) {
 
 function basenameFromPath(path) {
   if (typeof path !== 'string' || path.length === 0) return '?';
-  const parts = path.split('/').filter(Boolean);
+  const parts = path.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? path;
 }
 
@@ -2551,6 +2551,49 @@ function renderDispatchProductionCard(dispatchProduction, cls = 'ctrl-card card'
   return card;
 }
 
+function renderGlobalWorkspaceCard(workspace, cls = 'ctrl-card card') {
+  if (!workspace) return null;
+  const eventCount = workspace.eventCount ?? 0;
+  const card = el('div', { cls });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Global Workspace'),
+    el('span', { cls: 'card-subtitle' }, `${eventCount} event${eventCount === 1 ? '' : 's'} · ${proposalProductionWindowLabel(workspace)}`)
+  ));
+
+  const body = el('div', { cls: 'card-body' });
+  body.appendChild(infoGrid([
+    ['Latest', workspace.latestAt ? fmtRelative(workspace.latestAt) : '—'],
+    ['Machines', Array.isArray(workspace.activeMachines) ? workspace.activeMachines.length : 0],
+    ['Proposals', workspace.proposalEvents ?? 0],
+    ['No-proposal', workspace.noProposalEvents ?? 0],
+    ['Spend', `$${Number(workspace.spendUsd ?? 0).toFixed(4)}`],
+    ['Action entropy', workspace.entropy?.action ?? 0],
+  ]));
+
+  const attention = Array.isArray(workspace.attention) ? workspace.attention.slice(0, 5) : [];
+  if (attention.length > 0) {
+    const list = el('div', { cls: 'ctrl-backend-list' });
+    for (const topic of attention) {
+      const label = topic.kind === 'repo' ? basenameFromPath(topic.topic ?? '') : String(topic.topic ?? 'unknown');
+      list.appendChild(el('div', { cls: 'ctrl-backend-row', title: topic.detail ?? '' },
+        el('span', { cls: 'ctrl-backend-name' }, `${topic.kind}:${label}`),
+        el('span', { cls: 'ctrl-backend-dispatches' }, String(topic.weight ?? 0))
+      ));
+    }
+    body.appendChild(list);
+  }
+
+  const recent = Array.isArray(workspace.recentActions) ? workspace.recentActions[0] : null;
+  if (recent) {
+    body.appendChild(el('p', { cls: 'hint' },
+      `${recent.kind}/${recent.outcome}: ${compactFleetReason(recent.summary ?? recent.action ?? 'recent action')}`
+    ));
+  }
+
+  card.appendChild(body);
+  return card;
+}
+
 function renderFleetNextActionsCard(nextActions, cls = 'ctrl-card card') {
   const actions = Array.isArray(nextActions) ? nextActions : [];
   if (actions.length === 0) return null;
@@ -2691,6 +2734,9 @@ function renderFleet() {
 
   const dispatchProductionCard = renderDispatchProductionCard(f.dispatchProduction, 'fleet-card card');
   if (dispatchProductionCard) section.appendChild(dispatchProductionCard);
+
+  const workspaceCard = renderGlobalWorkspaceCard(f.workspace, 'fleet-card card');
+  if (workspaceCard) section.appendChild(workspaceCard);
 
   const strategicFocusCard = renderStrategicFocusCard(f.queue, 'fleet-card card');
   if (strategicFocusCard) section.appendChild(strategicFocusCard);
@@ -3056,6 +3102,7 @@ function renderControl() {
   const effectiveness = d.fleet?.autonomyEffectiveness ?? fleet.autonomyEffectiveness ?? null;
   const production = d.fleet?.proposalProduction ?? fleet.proposalProduction ?? null;
   const dispatchProduction = d.fleet?.dispatchProduction ?? fleet.dispatchProduction ?? null;
+  const workspace = d.fleet?.workspace ?? fleet.workspace ?? null;
   if (effectiveness) {
     heroMetrics.appendChild(controlMetric('Loop State', formatEffectivenessPhase(effectiveness.phase), effectivenessAccent(effectiveness.phase)));
   }
@@ -3064,6 +3111,9 @@ function renderControl() {
   }
   if (dispatchProduction) {
     heroMetrics.appendChild(controlMetric('Yield 24h', formatFleetPercent(dispatchProduction.proposalRate), dispatchProduction.proposalRate > 0 ? '#4ade80' : '#f97316'));
+  }
+  if (workspace) {
+    heroMetrics.appendChild(controlMetric('Workspace', workspace.eventCount ?? 0, workspace.eventCount > 0 ? '#38bdf8' : '#64748b'));
   }
   heroMetrics.appendChild(controlMetric('Active Mode', formatDirectionMode(activeDirectionMode ?? direction?.mode ?? 'unknown'), directionAccent(activeDirectionMode ?? direction?.mode)));
   heroMetrics.appendChild(controlMetric('Control Mode', formatControlMode(daemon.autonomyControlMode), controlModeAccent(daemon.autonomyControlMode)));
@@ -3134,6 +3184,9 @@ function renderControl() {
 
   const missionProductionCard = renderProposalProductionCard(production);
   if (missionProductionCard) section.appendChild(missionProductionCard);
+
+  const missionWorkspaceCard = renderGlobalWorkspaceCard(workspace);
+  if (missionWorkspaceCard) section.appendChild(missionWorkspaceCard);
 
   const missionActionsCard = renderFleetNextActionsCard(d.fleet?.nextActions ?? fleet.nextActions ?? null);
   if (missionActionsCard) section.appendChild(missionActionsCard);
@@ -3698,7 +3751,32 @@ function renderFleetActivity() {
   mergesCard.appendChild(mergesBody);
   section.appendChild(mergesCard);
 
-  // ── 5. Cooldown count + Live tick stream ───────────────────────────────
+  // ── 5. Agent action feed ────────────────────────────────────────────────
+  const actionsCard = el('div', { cls: 'fa-card card' });
+  const actions = Array.isArray(d.recentActions) ? d.recentActions : [];
+  actionsCard.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Agent Action Feed'),
+    el('span', { cls: 'card-subtitle' }, `${actions.length} recent action${actions.length === 1 ? '' : 's'}`)
+  ));
+  const actionsBody = el('div', { cls: 'fa-feed fa-card-body' });
+  if (actions.length === 0) {
+    actionsBody.appendChild(el('p', { cls: 'hint' }, 'No agent action telemetry recorded yet.'));
+  } else {
+    for (const action of actions.slice(0, 20)) {
+      const repoName = action.repo ? basenameFromPath(action.repo) : action.backend ?? action.actor ?? 'fleet';
+      actionsBody.appendChild(el('div', { cls: 'fa-feed-row', title: action.summary ?? '' },
+        el('span', { cls: 'fa-feed-dot' }),
+        el('span', { cls: 'fa-feed-time' }, fmtRelative(action.ts)),
+        el('span', { cls: 'fa-feed-repo' }, repoName),
+        el('span', { cls: 'fa-feed-engine badge' }, `${action.kind ?? 'action'}/${action.outcome ?? 'unknown'}`),
+        el('span', { cls: 'fa-feed-pid' }, compactFleetReason(action.summary ?? action.action ?? '', 72))
+      ));
+    }
+  }
+  actionsCard.appendChild(actionsBody);
+  section.appendChild(actionsCard);
+
+  // ── 6. Cooldown count + Live tick stream ───────────────────────────────
   const statsRow = el('div', { cls: 'fa-stats-row' });
 
   const coolCard = el('div', { cls: 'fa-card card fa-stat-mini' });
@@ -3718,7 +3796,7 @@ function renderFleetActivity() {
 
   section.appendChild(statsRow);
 
-  // ── 6. Live tick stream ────────────────────────────────────────────────
+  // ── 7. Live tick stream ────────────────────────────────────────────────
   const ticksCard = el('div', { cls: 'fa-card card' });
   ticksCard.appendChild(el('div', { cls: 'card-header' },
     el('span', { cls: 'card-title' }, 'Daemon Tick Stream'),
@@ -4096,9 +4174,11 @@ function fdRenderProductionPanel(snap) {
   const prod = snap.production;
   const production = snap.fleet?.proposalProduction ?? snap.control?.fleet?.proposalProduction ?? null;
   const dispatchProduction = snap.fleet?.dispatchProduction ?? snap.control?.fleet?.dispatchProduction ?? null;
+  const workspace = snap.fleet?.workspace ?? snap.control?.fleet?.workspace ?? null;
+  const workspaceHasEvents = Number(workspace?.eventCount ?? 0) > 0;
   const body = el('div', { cls: 'fd-panel__body' });
 
-  if (!prod && !production && !dispatchProduction) {
+  if (!prod && !production && !dispatchProduction && !workspaceHasEvents) {
     body.appendChild(el('p', { cls: 'hint' }, 'Production data unavailable.'));
     return body;
   }
@@ -4134,6 +4214,22 @@ function fdRenderProductionPanel(snap) {
       body.appendChild(el('p', { cls: 'hint' },
         `Weakest backend: ${dispatchProductionBucketLabel(backend)} ${backend.proposalsCreated ?? 0}/${backend.attempts ?? 0} (${formatFleetPercent(backend.proposalRate)})`
       ));
+    }
+  }
+
+  if (workspaceHasEvents) {
+    body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Global workspace'));
+    body.appendChild(infoGrid([
+      ['Window', proposalProductionWindowLabel(workspace)],
+      ['Events', workspace.eventCount ?? 0],
+      ['Proposals', workspace.proposalEvents ?? 0],
+      ['No-proposal', workspace.noProposalEvents ?? 0],
+      ['Action entropy', workspace.entropy?.action ?? 0],
+    ]));
+    const attention = Array.isArray(workspace.attention) ? workspace.attention[0] : null;
+    if (attention) {
+      const topic = attention.kind === 'repo' ? basenameFromPath(attention.topic ?? '') : attention.topic;
+      body.appendChild(el('p', { cls: 'hint' }, `Top attention: ${attention.kind}:${topic} (${attention.weight ?? 0})`));
     }
   }
 

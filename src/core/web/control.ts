@@ -36,6 +36,7 @@ import { fleetReadiness, type EngineReadiness } from '../fleet/engine-readiness.
 import { readAudit } from '../sandbox/audit.js';
 import { serviceStatusCached, type ServiceStatusResult } from '../daemon/service.js';
 import { daemonServiceInstallOptions } from '../daemon/service-config.js';
+import { readAgentActions, type AgentWorkspaceRecentAction } from '../fleet/agent-action-ledger.js';
 
 // ---------------------------------------------------------------------------
 // ControlSnapshot type
@@ -617,6 +618,8 @@ export interface FleetActivitySnapshot {
   totalDeclined: number;
   /** Recent auto-merge audit events (newest-first, capped 20). */
   recentMerges: FleetMergeEvent[];
+  /** Recent metadata-only agent action events (newest-first, capped 20). */
+  recentActions: AgentWorkspaceRecentAction[];
   /** Per-engine readiness (throttled to ~10s). */
   engineReadiness: EngineReadiness[];
   /** Per-engine subscription burn-down (reused from buildSubscriptionUsage). */
@@ -700,6 +703,26 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
   // Engine readiness (throttled)
   const engineReadinessResult = cachedFleetReadiness(cfg);
 
+  let recentActions: AgentWorkspaceRecentAction[] = [];
+  try {
+    recentActions = readAgentActions({ limit: 20, maxFiles: 3 }).map((event) => ({
+      ts: event.ts,
+      actor: event.actor,
+      kind: event.kind,
+      outcome: event.outcome,
+      action: event.action,
+      summary: event.summary,
+      ...(event.repo ? { repo: event.repo } : {}),
+      ...(event.itemId ? { itemId: event.itemId } : {}),
+      ...(event.proposalId ? { proposalId: event.proposalId } : {}),
+      ...(event.runId ? { runId: event.runId } : {}),
+      ...(event.backend !== undefined ? { backend: event.backend } : {}),
+      ...(event.model !== undefined ? { model: event.model } : {}),
+    }));
+  } catch {
+    recentActions = [];
+  }
+
   // Subscription burn-down (reuse existing builder)
   const subscriptionUsage = buildSubscriptionUsage();
 
@@ -749,6 +772,7 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
     totalPending: digest.totalPending,
     totalDeclined: digest.totalDeclined,
     recentMerges,
+    recentActions,
     engineReadiness: engineReadinessResult,
     subscriptionUsage,
     cooldownCount,

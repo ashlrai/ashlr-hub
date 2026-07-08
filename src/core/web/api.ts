@@ -1173,12 +1173,19 @@ export async function handleApi(
         routingSection = deriveRoutingData(50);
       } catch { /* degrade gracefully */ }
 
+      let workspaceSection: unknown = null;
+      try {
+        const { readAgentWorkspace } = await import('../fleet/agent-action-ledger.js');
+        workspaceSection = readAgentWorkspace({ limit: 500, recentLimit: 20 });
+      } catch { /* degrade gracefully */ }
+
       sendJson(res, 200, {
         generatedAt: new Date().toISOString(),
         daemon: daemonSection,
         scorecard: scorecardSection,
         oversight: oversightSection,
         routing: routingSection,
+        workspace: workspaceSection,
       });
       return true;
     }

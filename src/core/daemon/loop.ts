@@ -98,6 +98,11 @@ import {
   type DispatchProductionBasis,
   type DispatchProductionEvent,
 } from '../fleet/dispatch-production-ledger.js';
+import {
+  recordAgentAction,
+  type AgentActionEvent,
+  type AgentActionOutcome,
+} from '../fleet/agent-action-ledger.js';
 // worked-ledger is used transitively via LocalWorkQueueCoordinator (selectWorkQueueCoordinator).
 import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
 // M220: verdict-feedback sweep — feed judge rejections back to the ledger so
@@ -511,6 +516,94 @@ function dispatchProductionEventFromOutcome(
   };
 }
 
+function agentOutcomeFromDispatchEvent(event: DispatchProductionEvent): AgentActionOutcome {
+  if (event.proposalCreated) return 'proposal-created';
+  switch (event.outcome) {
+    case 'empty-diff':
+    case 'gate-blocked':
+    case 'proposal-disabled':
+      return 'no-proposal';
+    case 'engine-failed':
+    case 'sandbox-failed':
+    case 'proposal-capture-error':
+      return 'failed';
+    case 'proposal-created':
+      return 'proposal-created';
+    default:
+      return 'unknown';
+  }
+}
+
+function agentActionFromDispatchEvent(event: DispatchProductionEvent): AgentActionEvent {
+  const outcome = agentOutcomeFromDispatchEvent(event);
+  return {
+    schemaVersion: 1,
+    ts: event.ts,
+    ...(event.machineId ? { machineId: event.machineId } : {}),
+    actor: 'daemon',
+    kind: 'dispatch',
+    outcome,
+    action: 'daemon:dispatch',
+    summary: `${event.backend ?? 'unknown'} ${event.outcome} for ${event.title}`,
+    repo: event.repo,
+    itemId: event.itemId,
+    source: event.source,
+    ...(event.proposalId ? { proposalId: event.proposalId } : {}),
+    ...(event.runId ? { runId: event.runId } : {}),
+    backend: event.backend,
+    tier: event.tier,
+    ...(event.model !== undefined ? { model: event.model } : {}),
+    reason: event.reason ?? event.routeReason,
+    spentUsd: event.spentUsd,
+    tags: [event.source, event.outcome, event.basis],
+    counts: {
+      ...(typeof event.diffFiles === 'number' ? { diffFiles: event.diffFiles } : {}),
+      ...(typeof event.diffLines === 'number' ? { diffLines: event.diffLines } : {}),
+      proposalCreated: event.proposalCreated ? 1 : 0,
+    },
+  };
+}
+
+function tickAgentOutcome(tick: DaemonTick): AgentActionOutcome {
+  if (tick.reason === 'ok') return 'ok';
+  if (tick.reason === 'state-persistence-failed') return 'failed';
+  if (tick.reason === 'kill-switch' || tick.reason === 'pause' || tick.reason === 'verify-only') return 'blocked';
+  if (tick.reason === 'no-backlog' || tick.reason === 'no-enrolled-repos' || tick.reason === 'budget-exhausted' || tick.reason === 'dry-run') {
+    return 'skipped';
+  }
+  return 'unknown';
+}
+
+function recordTickAgentAction(tick: DaemonTick, machineId?: string): void {
+  recordAgentAction({
+    schemaVersion: 1,
+    ts: tick.ts,
+    machineId: machineId ?? osHostname(),
+    actor: 'daemon',
+    kind: 'tick',
+    outcome: tickAgentOutcome(tick),
+    action: 'daemon:tick',
+    summary:
+      `${tick.reason}: considered ${tick.itemsConsidered}, proposals ${tick.proposalsCreated}, ` +
+      `spent $${tick.spentUsd.toFixed(4)}`,
+    reason: tick.directionReason ?? tick.reason,
+    durationMs: tick.durationMs,
+    spentUsd: tick.spentUsd,
+    tags: [
+      tick.reason,
+      ...(tick.directionMode ? [tick.directionMode] : []),
+      ...(tick.dryRun ? ['dry-run'] : []),
+    ],
+    counts: {
+      itemsConsidered: tick.itemsConsidered,
+      proposalsCreated: tick.proposalsCreated,
+      ...(typeof tick.merged === 'number' ? { merged: tick.merged } : {}),
+      ...(tick.proposalProduction ? { dispatched: tick.proposalProduction.dispatched } : {}),
+      ...(tick.proposalProduction ? { noProposal: tick.proposalProduction.noProposalDispatches } : {}),
+    },
+  });
+}
+
 function dispatchTrace(
   item: WorkItem,
   fields: {
@@ -851,6 +944,7 @@ export async function tick(
       // persistence best-effort — never let observability crash a tick
       console.warn('[ashlr] daemon:recordTick persistence failed:', (err as Error)?.message ?? err);
     }
+    recordTickAgentAction(tick);
     return tick;
   };
   const persistenceRefusal = (summary: string, result: 'refused' | 'error' = 'refused'): DaemonTick => {
@@ -2444,6 +2538,7 @@ export async function tick(
         return event ? [event] : [];
       });
       recordDispatchProduction(productionEvents);
+      recordAgentAction(productionEvents.map(agentActionFromDispatchEvent));
     } catch (err) {
       console.warn('[ashlr] daemon:tick dispatch production ledger failed:', (err as Error)?.message ?? err);
     }
@@ -2505,6 +2600,7 @@ export async function tick(
       summary: `tick completed but spend accounting refused: daemon state ${finalLoadedState.reason} (${finalLoadedState.error}); spend guard remains armed`,
       result: 'error',
     });
+    recordTickAgentAction(failedTick, machineId);
     return failedTick;
   }
   state = finalLoadedState.state;
@@ -2539,7 +2635,9 @@ export async function tick(
       summary: `tick completed but spend accounting save failed (${saveResult.error}); spend guard remains armed`,
       result: 'error',
     });
-    return { ...tickRecord, reason: 'state-persistence-failed' };
+    const failedTick = { ...tickRecord, reason: 'state-persistence-failed' };
+    recordTickAgentAction(failedTick, machineId);
+    return failedTick;
   }
   const clearGuardResult = clearDaemonSpendGuard(spendGuard.guard.token);
   if (!clearGuardResult.ok) {
@@ -2550,8 +2648,12 @@ export async function tick(
       summary: `tick completed but spend guard clear failed (${clearGuardResult.error}); future ticks will refuse`,
       result: 'error',
     });
-    return { ...tickRecord, reason: 'state-persistence-failed' };
+    const failedTick = { ...tickRecord, reason: 'state-persistence-failed' };
+    recordTickAgentAction(failedTick, machineId);
+    return failedTick;
   }
+
+  recordTickAgentAction(tickRecord, machineId);
 
   // M89/M91: best-effort fleet→pulse telemetry export. Runs OUTSIDE the proposal
   // guarantees — only reads state + POSTs telemetry; never mutates repos.

@@ -40,6 +40,10 @@ import {
   readDispatchProductionYield,
   type DispatchProductionYieldSummary,
 } from './dispatch-production-ledger.js';
+import {
+  readAgentWorkspace,
+  type AgentWorkspaceStatus,
+} from './agent-action-ledger.js';
 
 export interface FleetBackendResourceStatus {
   availability: BackendAvailability | 'not-sensed';
@@ -267,6 +271,8 @@ export interface FleetStatus {
   proposalProduction?: FleetProposalProductionStatus;
   /** Durable 24h dispatch-production yield summary from the append-only ledger. */
   dispatchProduction?: DispatchProductionYieldSummary;
+  /** Durable 24h agent-action global workspace summary from append-only telemetry. */
+  workspace?: AgentWorkspaceStatus;
   /** True when the global kill switch is engaged (fleet paused). */
   killed: boolean;
 }
@@ -588,6 +594,16 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   } catch {
     // Optional history/analytics surface only. Fleet status must stay read-only
     // and available even when the append-only ledger is absent or corrupt.
+  }
+  try {
+    status.workspace = readAgentWorkspace({
+      windowMs: RECENT_WINDOW_MS,
+      limit: 1200,
+      limitPerDimension: 8,
+      recentLimit: 8,
+    });
+  } catch {
+    // Optional history/analytics surface only.
   }
 
   try {

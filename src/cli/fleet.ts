@@ -181,6 +181,40 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  // Global workspace
+  const workspace = s.workspace;
+  lines.push('Global workspace:');
+  if (!workspace) {
+    lines.push('  unavailable');
+  } else {
+    const activeMachines = Array.isArray(workspace.activeMachines) ? workspace.activeMachines : [];
+    const attention = Array.isArray(workspace.attention) ? workspace.attention : [];
+    const byAction = Array.isArray(workspace.byAction) ? workspace.byAction : [];
+    const recentActions = Array.isArray(workspace.recentActions) ? workspace.recentActions : [];
+    const spendUsd = typeof workspace.spendUsd === 'number' && Number.isFinite(workspace.spendUsd)
+      ? workspace.spendUsd
+      : 0;
+    lines.push(`  window:    ${formatProductionWindow(workspace.windowHours)}`);
+    lines.push(`  events:    ${workspace.eventCount ?? 0}`);
+    lines.push(`  latest:    ${workspace.latestAt ?? '—'}`);
+    lines.push(`  machines:  ${activeMachines.length > 0 ? activeMachines.join(', ') : '—'}`);
+    lines.push(
+      `  outcomes:  proposals ${workspace.proposalEvents ?? 0}, no-proposal ${workspace.noProposalEvents ?? 0}, ` +
+        `spend $${spendUsd.toFixed(4)}`,
+    );
+    if (attention.length > 0) {
+      lines.push(`  attention: ${attention.slice(0, 4).map(formatWorkspaceAttention).join('; ')}`);
+    }
+    if (byAction.length > 0) {
+      lines.push(`  actions:   ${byAction.slice(0, 4).map(formatWorkspaceCount).join(', ')}`);
+    }
+    if (recentActions.length > 0) {
+      const action = recentActions[0]!;
+      lines.push(`  recent:    ${action.kind}/${action.outcome}: ${compactResourceReason(action.summary)}`);
+    }
+  }
+  lines.push('');
+
   // Merges
   lines.push(`Merges:    ${s.merges.recent} auto-merge(s) in last 24h`);
   lines.push('');
@@ -338,6 +372,14 @@ function formatDispatchYieldBucket(
 ): string {
   const label = bucket.backend ?? bucket.source ?? (bucket.repo ? formatActionTarget(bucket.repo) : bucket.key);
   return `${label} ${bucket.proposalsCreated}/${bucket.attempts} ${formatPercent(bucket.proposalRate)}`;
+}
+
+function formatWorkspaceCount(row: NonNullable<FleetStatus['workspace']>['byAction'][number]): string {
+  return `${row.key}:${row.count}`;
+}
+
+function formatWorkspaceAttention(row: NonNullable<FleetStatus['workspace']>['attention'][number]): string {
+  return `${row.kind}:${formatActionTarget(row.topic)}(${row.weight})`;
 }
 
 function formatActionTarget(target: string): string {
@@ -591,6 +633,7 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
         : null,
       `pending ${fs.proposals.pending}`,
       fs.autonomy ? `evidence ${fs.autonomy.evidencePacks}` : null,
+      fs.workspace ? `workspace ${fs.workspace.eventCount}` : null,
       `spent today $${fs.daemon.todaySpentUsd.toFixed(2)}`,
       `last tick ${relTime(fs.daemon.lastTickAt)}`,
     ].filter(Boolean).join(' · ');

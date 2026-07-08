@@ -412,3 +412,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Rejected queued self-heal noise such as npm script banners, rustup setup errors, Cargo download chatter, missing local tool binaries, TAP plan lines, and termination noise while preserving concrete code diagnostics.
 - [x] Added a distinct `daemon-spend-guard-dead-owner` guard-health diagnosis for future stale guard incidents.
 - [x] Verification passed: focused status/self-heal/queued-autonomy/guard-health suite, adjacent daemon/control/dashboard/ledger/workhorse suites, typecheck, build, lint, audit, and diff checks.
+
+## Current Continuation - Global Workspace Agent Telemetry
+- [x] Rechecked branch state, Entire session context, recent progress notes, and the pre-existing dirty worktree before editing.
+- [x] Deployed parallel research/code/UI/test/verification agents and folded their findings into the implementation plan.
+- [x] Researched Anthropic's July 6, 2026 global workspace/J-lens work plus adjacent agent-observability, blackboard, executable-harness, and trajectory-learning research.
+- [x] Added an append-only, metadata-only `agent-actions` JSONL ledger with secret scrubbing, bounded fields, HOME fallback, malformed-line skipping, finite numeric handling, and poisoned legacy-row normalization.
+- [x] Wired daemon ticks and dispatch-production outcomes into durable agent-action events so the fleet records what it attended to, skipped, blocked on, dispatched, and produced.
+- [x] Added `FleetStatus.workspace`, `/api/fleet-state.workspace`, Fleet Activity `recentActions`, CLI global-workspace output, Mission Control metrics/cards, Fleet view cards, Fleet Dashboard production summaries, and an agent action feed.
+- [x] Hardened browser and CLI surfaces for empty workspace data, partial stale status objects, and Windows-style repo paths.
+- [x] Added focused regression tests for append/read/window limits, fallback paths, secret scrubbing, poisoned legacy dimensions, non-finite numbers, summaries, FleetStatus, dashboard snapshots, and agent-readable API output.
+- [x] Production verification passed: JS syntax, typecheck, focused affected suites, adjacent daemon/control suites, build, lint, audit, diff check, and full `npm run test:ci` (428 files, 8,811 passed, 7 skipped).
+- [ ] Commit only this pass's files, push to `origin/master`, and restart/verify the live daemon.

@@ -25,6 +25,7 @@ import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
 import { createProposal } from '../src/core/inbox/store.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import { recordDispatchProduction, type DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
+import { recordAgentAction, type AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
 import type { Proposal } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -539,6 +540,64 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('proposals 1/3');
     expect(formatted).toContain('local-coder 0/2 0%');
     expect(formatted).toContain('codex 1/1 100%');
+  });
+
+  it('reports durable global workspace action telemetry from the append-only ledger', async () => {
+    const now = new Date().toISOString();
+    const baseEvent: AgentActionEvent = {
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      actor: 'daemon',
+      kind: 'dispatch',
+      outcome: 'no-proposal',
+      action: 'daemon:dispatch',
+      summary: 'local-coder empty-diff for Improve proposal yield',
+      repo: '/repo/a',
+      itemId: 'item-a',
+      source: 'todo',
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      reason: 'agent returned no diff',
+      spentUsd: 0.001,
+    };
+    recordAgentAction([
+      baseEvent,
+      { ...baseEvent, itemId: 'item-b', kind: 'tick', outcome: 'ok', action: 'daemon:tick', summary: 'tick ok', backend: null, repo: undefined },
+      {
+        ...baseEvent,
+        itemId: 'item-c',
+        outcome: 'proposal-created',
+        action: 'daemon:dispatch',
+        proposalId: 'prop-c',
+        backend: 'codex',
+        tier: 'frontier',
+        model: 'gpt-5.5',
+        summary: 'codex proposal-created for Improve proposal yield',
+      },
+    ]);
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.workspace).toMatchObject({
+      eventCount: 3,
+      proposalEvents: 1,
+      noProposalEvents: 1,
+      activeMachines: ['m49'],
+    });
+    expect(s.workspace?.byAction).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'dispatch', count: 2 }),
+        expect.objectContaining({ key: 'tick', count: 1 }),
+      ]),
+    );
+    expect(s.workspace?.recentActions[0]).toMatchObject({ proposalId: 'prop-c' });
+
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('Global workspace:');
+    expect(formatted).toContain('events:    3');
+    expect(formatted).toContain('proposals 1, no-proposal 1');
   });
 
   it('promotes poor durable dispatch yield into next actions', async () => {

@@ -22,6 +22,7 @@ import {
   callNativeTool,
 } from '../src/core/mcp-native.js';
 import { handleApi } from '../src/core/web/api.js';
+import { recordAgentAction } from '../src/core/fleet/agent-action-ledger.js';
 
 let fx: H1Fixture;
 
@@ -242,9 +243,34 @@ describe('GET /api/fleet-state', () => {
   }
 
   it('returns 200 with the combined fleet-state envelope', async () => {
+    const prevAshlrHome = process.env.ASHLR_HOME;
+    let handled = false;
     const cfg = makeCfg();
     const { res, status, body } = makeRes();
-    const handled = await handleApi(makeReq(), res, cfg, { token: 'test', allowDispatch: false });
+    try {
+      process.env.ASHLR_HOME = fx.ashlrDir;
+      recordAgentAction({
+        schemaVersion: 1,
+        ts: new Date().toISOString(),
+        machineId: 'm129',
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'proposal-created',
+        action: 'daemon:dispatch',
+        summary: 'codex proposal-created for API surface test',
+        repo: '/repo/alpha',
+        itemId: 'item-a',
+        source: 'goal',
+        proposalId: 'prop-a',
+        backend: 'codex',
+        tier: 'frontier',
+        model: 'gpt-5.5',
+      });
+      handled = await handleApi(makeReq(), res, cfg, { token: 'test', allowDispatch: false });
+    } finally {
+      if (prevAshlrHome === undefined) delete process.env.ASHLR_HOME;
+      else process.env.ASHLR_HOME = prevAshlrHome;
+    }
 
     expect(handled).toBe(true);
     expect(status()).toBe(200);
@@ -256,6 +282,10 @@ describe('GET /api/fleet-state', () => {
     expect('scorecard' in payload).toBe(true);
     expect('oversight' in payload).toBe(true);
     expect('routing' in payload).toBe(true);
+    expect('workspace' in payload).toBe(true);
+    const workspace = payload['workspace'] as { eventCount?: number; recentActions?: unknown[] };
+    expect(workspace.eventCount).toBe(1);
+    expect(Array.isArray(workspace.recentActions)).toBe(true);
   });
 
   it('routing section has recent array and modelSplit object', async () => {

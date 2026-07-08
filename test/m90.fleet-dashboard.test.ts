@@ -22,6 +22,7 @@ import {
   buildFleetActivity,
   resetReadinessCache,
 } from '../src/core/web/control.js';
+import { recordAgentAction } from '../src/core/fleet/agent-action-ledger.js';
 
 // ---------------------------------------------------------------------------
 // Config helpers (mirror m61 pattern)
@@ -53,13 +54,16 @@ function baseConfig(): AshlrConfig {
 let tmpHome: string;
 let prevHome: string | undefined;
 let prevUserProfile: string | undefined;
+let prevAshlrHome: string | undefined;
 
 beforeEach(() => {
   tmpHome = mkdtempSync(join(tmpdir(), 'ashlr-m90-'));
   prevHome = process.env.HOME;
   prevUserProfile = process.env.USERPROFILE;
+  prevAshlrHome = process.env.ASHLR_HOME;
   process.env.HOME = tmpHome;
   process.env.USERPROFILE = tmpHome;
+  process.env.ASHLR_HOME = join(tmpHome, '.ashlr');
   resetReadinessCache();
 });
 
@@ -68,6 +72,8 @@ afterEach(() => {
   else process.env.HOME = prevHome;
   if (prevUserProfile === undefined) delete process.env.USERPROFILE;
   else process.env.USERPROFILE = prevUserProfile;
+  if (prevAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = prevAshlrHome;
   resetReadinessCache();
   try {
     rmSync(tmpHome, { recursive: true, force: true });
@@ -90,6 +96,7 @@ describe('buildFleetActivity — shape on empty state', () => {
     expect(snap).toHaveProperty('totalPending');
     expect(snap).toHaveProperty('totalDeclined');
     expect(snap).toHaveProperty('recentMerges');
+    expect(snap).toHaveProperty('recentActions');
     expect(snap).toHaveProperty('engineReadiness');
     expect(snap).toHaveProperty('subscriptionUsage');
     expect(snap).toHaveProperty('cooldownCount');
@@ -106,6 +113,7 @@ describe('buildFleetActivity — shape on empty state', () => {
     const snap = await buildFleetActivity(baseConfig());
     expect(snap.repos).toBeInstanceOf(Array);
     expect(snap.recentMerges).toBeInstanceOf(Array);
+    expect(snap.recentActions).toBeInstanceOf(Array);
     expect(snap.recentTicks).toBeInstanceOf(Array);
     expect(snap.engineReadiness).toBeInstanceOf(Array);
     expect(snap.subscriptionUsage).toBeInstanceOf(Array);
@@ -394,6 +402,43 @@ describe('buildFleetActivity — recent merge events from audit', () => {
   it('recentMerges is [] when audit directory is absent', async () => {
     const snap = await buildFleetActivity(baseConfig());
     expect(snap.recentMerges).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Recent agent action events
+// ---------------------------------------------------------------------------
+
+describe('buildFleetActivity — recent agent action telemetry', () => {
+  it('surfaces metadata-only agent action rows', async () => {
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: new Date().toISOString(),
+      machineId: 'm90',
+      actor: 'daemon',
+      kind: 'dispatch',
+      outcome: 'proposal-created',
+      action: 'daemon:dispatch',
+      summary: 'codex proposal-created for Useful work',
+      repo: '/repo/alpha',
+      itemId: 'item-a',
+      source: 'goal',
+      proposalId: 'prop-a',
+      backend: 'codex',
+      tier: 'frontier',
+      model: 'gpt-5.5',
+    });
+
+    const snap = await buildFleetActivity(baseConfig());
+
+    expect(snap.recentActions).toHaveLength(1);
+    expect(snap.recentActions[0]).toMatchObject({
+      actor: 'daemon',
+      kind: 'dispatch',
+      outcome: 'proposal-created',
+      repo: '/repo/alpha',
+      proposalId: 'prop-a',
+    });
   });
 });
 
