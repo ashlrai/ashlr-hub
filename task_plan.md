@@ -65,6 +65,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Add cap-aware route-preserving dispatch
 - [x] Follow-up: Add durable dispatch-production ledger and judge-free default maintenance
 - [x] Follow-up: Feed dispatch-production yield into routing/status surfaces and final backend guards
+- [x] Follow-up: Repair live dead-owner spend guard and filter noisy self-heal backlog
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -170,7 +171,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch complete** - Dispatch-production yield now informs routing, Fleet/CLI/web status, docs, and final backend safety guards while keeping judge-free default/evidence merge maintenance intact.
+**Current batch verified** - Live dead-owner spend guard was repaired, low dispatch yield now becomes a shared next action, queued self-heal work is trust-filtered, and focused/adjacent gates pass.
 
 ## Current Continuation - Visual Grounding Foundation
 - [x] Rechecked git status, recent commits, Entire state, daemon status, task plan, notes, and relevant code.
@@ -400,3 +401,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Tightened evidence-mode readiness so cached verification must be bound to the current proposal diff hash before being counted preflight-ready.
 - [x] Updated operator docs/examples for yield knobs, trust-basis semantics, JSON-only yield dimensions, and current model examples.
 - [x] Verification passed: focused dispatch/routing/status/dashboard suites, broader merge/resource/judge suites, typecheck, JS syntax, lint, build, audit, and diff checks.
+
+## Current Continuation - Live Guard Recovery And Self-Heal Trust
+- [x] Rechecked post-push repo, Entire, live daemon, fleet status, task plan, and notes.
+- [x] Deployed parallel auditors for live guard recovery, proposal capture unification, backlog quality, operator surfaces, and merge effectiveness.
+- [x] Repaired the live control block by confirming stale spend guard PID `3403` was dead, archiving the guard, reinstalling/restarting launchd, and verifying guard health clear.
+- [x] Paused the daemon for the maintenance patch to avoid racing live autonomous dispatch.
+- [x] Added a shared next action for poor durable dispatch yield so CLI, Fleet, and Mission Control direct agents toward low-yield backends.
+- [x] Added a pure self-heal trust filter and used it for both fresh self-heal classification and queued self-heal rehydration.
+- [x] Rejected queued self-heal noise such as npm script banners, rustup setup errors, Cargo download chatter, missing local tool binaries, TAP plan lines, and termination noise while preserving concrete code diagnostics.
+- [x] Added a distinct `daemon-spend-guard-dead-owner` guard-health diagnosis for future stale guard incidents.
+- [x] Verification passed: focused status/self-heal/queued-autonomy/guard-health suite, adjacent daemon/control/dashboard/ledger/workhorse suites, typecheck, build, lint, audit, and diff checks.

@@ -26,6 +26,10 @@ import {
   detectVerifyCommands,
   runVerifyCommandAsync,
 } from '../run/verify-commands.js';
+import {
+  isActionableSelfHealFailureText,
+  isActionableSelfHealItem,
+} from './self-heal-trust.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -125,12 +129,21 @@ export async function detectBreakage(
             reason: 'untrusted-verify-result',
           };
         }
+        const detail = firstFailureLine(result.output);
+        if (!isActionableSelfHealFailureText(detail)) {
+          return {
+            broken: false,
+            verified: false,
+            clearedKinds: Array.from(clearedKinds),
+            reason: 'untrusted-verify-result',
+          };
+        }
         return {
           broken: true,
           verified: true,
           clearedKinds: Array.from(clearedKinds),
           kind,
-          detail: firstFailureLine(result.output),
+          detail,
         };
       }
       clearedKinds.add(kind);
@@ -246,9 +259,21 @@ function invalidSelfHealItem(value: unknown, enrolledRepoKeys: ReadonlySet<strin
   const item = value as Partial<WorkItem>;
   if (!Array.isArray(item.tags) || !item.tags.includes('self-heal')) return false;
   if (typeof item.repo !== 'string') return true;
+  if (
+    typeof item.id !== 'string' ||
+    typeof item.source !== 'string' ||
+    typeof item.title !== 'string' ||
+    typeof item.detail !== 'string' ||
+    typeof item.value !== 'number' ||
+    typeof item.effort !== 'number' ||
+    typeof item.score !== 'number' ||
+    typeof item.ts !== 'string'
+  ) return true;
   try {
     const repoKey = resolve(item.repo);
-    return !enrolledRepoKeys.has(repoKey) || !existsSync(item.repo);
+    return !enrolledRepoKeys.has(repoKey) ||
+      !existsSync(item.repo) ||
+      !isActionableSelfHealItem(item as WorkItem);
   } catch {
     return true;
   }

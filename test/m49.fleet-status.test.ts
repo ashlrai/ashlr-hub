@@ -541,6 +541,87 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('codex 1/1 100%');
   });
 
+  it('promotes poor durable dispatch yield into next actions', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome);
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: new Date().toISOString(),
+        repos: [repo],
+        items: [
+          {
+            id: 'repo:goal:yield',
+            repo,
+            source: 'goal',
+            title: 'Improve low-yield dispatch',
+            detail: 'Investigate repeated no-proposal outcomes.',
+            value: 5,
+            effort: 1,
+            score: 5,
+            tags: ['yield'],
+            ts: new Date().toISOString(),
+          },
+        ],
+      }),
+      'utf8',
+    );
+    const now = new Date().toISOString();
+    const baseEvent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'item-a',
+      source: 'goal',
+      repo,
+      title: 'Improve low-yield dispatch',
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      routeReason: 'local-mid bulk',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0.001,
+      reason: 'agent returned no diff',
+      basis: 'run-proposal-outcome',
+    };
+    recordDispatchProduction([
+      baseEvent,
+      { ...baseEvent, itemId: 'item-b', outcome: 'gate-blocked', reason: 'completeness gate blocked proposal' },
+      { ...baseEvent, itemId: 'item-c', outcome: 'engine-failed', reason: 'engine exited without diff' },
+    ]);
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.dispatchProduction).toMatchObject({
+      attempts: 3,
+      proposalsCreated: 0,
+      proposalRate: 0,
+    });
+    expect(s.nextActions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'inspect-dispatch-yield',
+          priority: 'medium',
+          label: 'Inspect dispatch yield',
+          detail: expect.stringContaining('local-coder proposal yield 0/3 (0%)'),
+          target: 'local-coder',
+        }),
+      ]),
+    );
+    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
+      .toContain('top reason: agent returned no diff');
+
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('[medium] Inspect dispatch yield [local-coder]');
+    expect(formatted).toContain('local-coder proposal yield 0/3 (0%)');
+  });
+
   it('includes queued self-heal work when the persisted backlog snapshot is stale', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');
@@ -551,8 +632,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       id: 'repo:self-heal:one',
       repo,
       source: 'self',
-      title: 'Fix broken test in repo',
-      detail: 'Self-heal: test is RED. Investigate and verify the suite passes.',
+      title: 'Fix broken test in repo: FAIL src/repo.test.ts: expected true to be false',
+      detail: 'Self-heal: test is RED.\nFirst failure: FAIL src/repo.test.ts: expected true to be false.\nInvestigate and verify the suite passes.',
       value: 5,
       effort: 1,
       score: 5,
@@ -582,7 +663,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.queue.next).toEqual([
       {
         id: 'repo:self-heal:one',
-        title: 'Fix broken test in repo',
+        title: 'Fix broken test in repo: FAIL src/repo.test.ts: expected true to be false',
         repo,
         source: 'self',
         score: 5,

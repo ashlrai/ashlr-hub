@@ -29,7 +29,7 @@ function item(repo: string, id: string, overrides: Partial<WorkItem> = {}): Work
     effort: 2,
     score: 2.5,
     tags: ['generative', 'bold'],
-    ts: '2026-07-02T00:00:00.000Z',
+    ts: new Date().toISOString(),
     ...overrides,
   };
 }
@@ -46,7 +46,12 @@ describe('queued autonomy work scanner', () => {
     repo.enroll();
     otherRepo.enroll();
 
-    const heal = item(repo.dir, 'heal-1', { source: 'self', tags: ['self-heal', 'verify'] });
+    const heal = item(repo.dir, 'heal-1', {
+      source: 'self',
+      title: 'Fix broken build in repo: src/index.ts(12,5): error TS2345',
+      detail: "Self-heal: build is RED.\nFirst failure: src/index.ts(12,5): error TS2345: Argument of type 'string' is not assignable.",
+      tags: ['self-heal', 'verify', 'build'],
+    });
     const invent = item(repo.dir, 'invent-1');
     const wrongRepo = item(otherRepo.dir, 'invent-other');
     const lowSignal = item(repo.dir, 'todo-1', { source: 'todo', tags: ['todo'] });
@@ -69,7 +74,8 @@ describe('queued autonomy work scanner', () => {
 
     const heal = item(repo.dir, 'heal-build-1', {
       source: 'self',
-      title: 'Repair failing autonomous daemon verification',
+      title: 'Repair failing autonomous daemon verification: src/daemon.ts(4,1): error TS2304',
+      detail: 'Self-heal: build is RED.\nFirst failure: src/daemon.ts(4,1): error TS2304: Cannot find name daemon.',
       tags: ['self-heal', 'daemon'],
     });
     const invent = item(repo.dir, 'invent-build-1', {
@@ -93,5 +99,53 @@ describe('queued autonomy work scanner', () => {
 
     expect(backlog.items.some((x) => x.id === 'heal-build-1')).toBe(true);
     expect(backlog.items.some((x) => x.id === 'invent-build-1')).toBe(true);
+  });
+
+  it('drops queued self-heal items that only contain toolchain or lifecycle noise', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+
+    const actionable = item(repo.dir, 'heal-actionable', {
+      source: 'self',
+      title: 'Fix broken build in repo: src/__tests__/capability-registry.test.ts(256,39): error TS2769',
+      detail: 'Self-heal: build is RED.\nFirst failure: src/__tests__/capability-registry.test.ts(256,39): error TS2769: No overload matches this call.',
+      tags: ['self-heal', 'build'],
+    });
+    const banner = item(repo.dir, 'heal-banner', {
+      source: 'self',
+      title: 'Fix broken build in 10:4: > clipbridge-relay@0.1.0 check',
+      detail: 'Self-heal: build is RED.\nFirst failure: > clipbridge-relay@0.1.0 check',
+      tags: ['self-heal', 'build'],
+    });
+    const rustup = item(repo.dir, 'heal-rustup', {
+      source: 'self',
+      title: "Fix broken build in ashlr-pulse: error: rustup could not choose a version of cargo to run, because one wasn't specified explicitly, and no default is configured.",
+      detail: "Self-heal: build is RED.\nFirst failure: error: rustup could not choose a version of cargo to run, because one wasn't specified explicitly, and no default is configured.",
+      tags: ['self-heal', 'build'],
+    });
+    const cargoProgress = item(repo.dir, 'heal-cargo-progress', {
+      source: 'self',
+      title: 'Fix broken build in phantom-secrets: Downloaded thiserror v2.0.18',
+      detail: 'Self-heal: build is RED.\nFirst failure: Downloaded thiserror v2.0.18',
+      tags: ['self-heal', 'build'],
+    });
+    const missingTool = item(repo.dir, 'heal-missing-tool', {
+      source: 'self',
+      title: `Fix broken build in binshield: Error: Cannot find module '${repo.dir}/node_modules/typescript/bin/tsc'`,
+      detail: `Self-heal: build is RED.\nFirst failure: Error: Cannot find module '${repo.dir}/node_modules/typescript/bin/tsc'`,
+      tags: ['self-heal', 'build'],
+    });
+
+    writeJson(join(fx.ashlrDir, 'self-heal-queue.json'), [
+      actionable,
+      banner,
+      rustup,
+      cargoProgress,
+      missingTool,
+    ]);
+
+    const found = await scanQueuedAutonomyWork(repo.dir);
+
+    expect(found.map((x) => x.id)).toEqual(['heal-actionable']);
   });
 });

@@ -15,6 +15,7 @@ import { daemonLockPath, loadDaemonStateStrict, readDaemonLockOwner, readDaemonS
 export type GuardHealthBlockId =
   | 'daemon-state-malformed'
   | 'daemon-spend-guard-armed'
+  | 'daemon-spend-guard-dead-owner'
   | 'daemon-spend-guard-stale-live-owner'
   | 'daemon-spend-guard-malformed'
   | 'kill-switch'
@@ -154,12 +155,20 @@ export function diagnoseGuardHealth(): GuardHealthDiagnosis {
           path: spendGuard.path,
           repairCommands: ['ashlr daemon stop', backupCommand(spendGuard.path), 'ashlr daemon status'],
         });
+      } else if (!pidIsAlive(spendGuard.guard.pid)) {
+        blocks.push({
+          id: 'daemon-spend-guard-dead-owner',
+          detail:
+            `daemon spend guard owner pid ${spendGuard.guard.pid} is not running; ` +
+            `guard was armed at ${spendGuard.guard.armedAt} for ${spendGuard.guard.itemIds.length} item(s)`,
+          path: spendGuard.path,
+          repairCommands: ['ashlr daemon stop', backupCommand(spendGuard.path), 'ashlr daemon status'],
+        });
       } else if (
         !(
           daemonState.ok &&
           daemonState.state.running === true &&
-          daemonState.state.pid === spendGuard.guard.pid &&
-          pidIsAlive(spendGuard.guard.pid)
+          daemonState.state.pid === spendGuard.guard.pid
         )
       ) {
         blocks.push({

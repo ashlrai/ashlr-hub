@@ -10,6 +10,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { WorkItem } from '../types.js';
+import { isActionableSelfHealItem } from '../fleet/self-heal-trust.js';
 
 function isWorkItemLike(value: unknown): value is WorkItem {
   if (!value || typeof value !== 'object') return false;
@@ -48,7 +49,9 @@ function readWorkItemsFile(filePath: string): WorkItem[] {
 }
 
 function isQueuedAutonomyItem(item: WorkItem): boolean {
-  return item.source === 'invent' || item.tags.includes('self-heal');
+  if (item.source === 'invent') return true;
+  if (!item.tags.includes('self-heal')) return false;
+  return isActionableSelfHealItem(item);
 }
 
 /** Return all queued self-heal/invent items without mutating any state. */

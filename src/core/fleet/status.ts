@@ -716,6 +716,31 @@ function proposalProductionDiagnosis(production: FleetProposalProductionStatus):
   return topReason ? `recent production top reason: ${topReason.reason}` : 'no recent proposal-production diagnosis is available';
 }
 
+const MIN_DISPATCH_YIELD_ACTION_ATTEMPTS = 3;
+const LOW_DISPATCH_YIELD_ACTION_RATE = 0.2;
+
+function formatActionPercent(rate: number): string {
+  if (!Number.isFinite(rate)) return '0%';
+  return `${Math.round(Math.max(0, Math.min(1, rate)) * 100)}%`;
+}
+
+function dispatchYieldNextActionDetail(dispatchProduction: DispatchProductionYieldSummary): string | null {
+  if (
+    dispatchProduction.attempts < MIN_DISPATCH_YIELD_ACTION_ATTEMPTS ||
+    dispatchProduction.proposalRate >= LOW_DISPATCH_YIELD_ACTION_RATE
+  ) {
+    return null;
+  }
+  const weakest = dispatchProduction.byBackend[0];
+  const subject = weakest?.backend ?? weakest?.key ?? 'dispatches';
+  const attempts = weakest?.attempts ?? dispatchProduction.attempts;
+  const proposals = weakest?.proposalsCreated ?? dispatchProduction.proposalsCreated;
+  const rate = weakest?.proposalRate ?? dispatchProduction.proposalRate;
+  const topReason = weakest?.topReasons[0] ?? dispatchProduction.topReasons[0];
+  const reason = topReason ? `; top reason: ${topReason.reason}` : '';
+  return `${subject} proposal yield ${proposals}/${attempts} (${formatActionPercent(rate)})${reason}`;
+}
+
 function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffectivenessStatus {
   const readiness = status.autoMergeReadiness;
   const counts: FleetAutonomyEffectivenessStatus['counts'] = {
@@ -908,6 +933,19 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   }
 
   if (status.queue.backlogItems > 0 && !controlBlocked) {
+    const dispatchYieldDetail = status.dispatchProduction
+      ? dispatchYieldNextActionDetail(status.dispatchProduction)
+      : null;
+    if (dispatchYieldDetail) {
+      const weakest = status.dispatchProduction?.byBackend[0];
+      add({
+        id: 'inspect-dispatch-yield',
+        priority: 'medium',
+        label: 'Inspect dispatch yield',
+        detail: dispatchYieldDetail,
+        ...(weakest?.backend ? { target: weakest.backend } : {}),
+      });
+    }
     const production = status.proposalProduction;
     if (production && (production.errors > 0 || production.noProposalDispatches > 0 || (production.selected > 0 && production.dispatched === 0))) {
       add({

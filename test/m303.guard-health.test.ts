@@ -131,6 +131,31 @@ describe('diagnoseGuardHealth', () => {
     expect(block?.repairCommands.join(' ')).toContain('.bak');
   });
 
+  it('reports a dead-owner spend guard distinctly from an in-flight guard', () => {
+    const spendGuardPath = daemonSpendGuardPath();
+    mkdirSync(dirname(spendGuardPath), { recursive: true });
+    writeFileSync(
+      spendGuardPath,
+      JSON.stringify({
+        token: 'dead-owner-token',
+        pid: 9_999_999,
+        hostname: 'test-host',
+        armedAt: '2026-07-08T07:01:26.780Z',
+        itemIds: ['item-a', 'item-b'],
+      }, null, 2) + '\n',
+      'utf8',
+    );
+
+    const diagnosis = diagnoseGuardHealth();
+    const ids = diagnosis.blocks.map((b) => b.id);
+    expect(ids).toContain('daemon-spend-guard-dead-owner');
+    expect(ids).not.toContain('daemon-spend-guard-armed');
+    const block = diagnosis.blocks.find((b) => b.id === 'daemon-spend-guard-dead-owner');
+    expect(block?.path).toBe(spendGuardPath);
+    expect(block?.detail).toContain('owner pid 9999999 is not running');
+    expect(block?.detail).toContain('2 item(s)');
+  });
+
   it('does not block on a spend guard owned by the currently running daemon pid', () => {
     const state = loadDaemonState();
     state.running = true;

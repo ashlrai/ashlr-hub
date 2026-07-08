@@ -57,6 +57,9 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
 const { detectBreakage, proposeHeal, runSelfHealCycle } = await import(
   '../src/core/fleet/self-heal.js'
 );
+const { isActionableSelfHealFailureText } = await import(
+  '../src/core/fleet/self-heal-trust.js'
+);
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -228,6 +231,48 @@ describe('detectBreakage', () => {
     const result = await detectBreakage('/tmp/fake-repo', makeCfg());
     expect(result.broken).toBe(true);
     expect(result.detail).toMatch(/Error: null pointer/);
+  });
+
+  it('does not classify lifecycle banners as actionable code failures', async () => {
+    mockDetectVerifyCommands.mockReturnValue([BUILD_VC]);
+    mockRunVerifyCommand.mockReturnValue({
+      ...BUILD_FAIL_RESULT,
+      output: '> clipbridge-relay@0.1.0 check',
+    });
+
+    const result = await detectBreakage('/tmp/fake-repo', makeCfg());
+
+    expect(result).toMatchObject({
+      broken: false,
+      verified: false,
+      reason: 'untrusted-verify-result',
+    });
+  });
+
+  it('does not classify toolchain setup chatter as actionable code failures', async () => {
+    mockDetectVerifyCommands.mockReturnValue([BUILD_VC]);
+    mockRunVerifyCommand.mockReturnValue({
+      ...BUILD_FAIL_RESULT,
+      output: "error: rustup could not choose a version of cargo to run, because one wasn't specified explicitly, and no default is configured.",
+    });
+
+    const result = await detectBreakage('/tmp/fake-repo', makeCfg());
+
+    expect(result).toMatchObject({
+      broken: false,
+      verified: false,
+      reason: 'untrusted-verify-result',
+    });
+  });
+});
+
+describe('isActionableSelfHealFailureText', () => {
+  it('keeps concrete code diagnostics and rejects noisy build output', () => {
+    expect(isActionableSelfHealFailureText('src/index.ts(12,5): error TS2345: bad type')).toBe(true);
+    expect(isActionableSelfHealFailureText('FAIL src/foo.test.ts: expected 1 to equal 2')).toBe(true);
+    expect(isActionableSelfHealFailureText('> clipbridge-relay@0.1.0 check')).toBe(false);
+    expect(isActionableSelfHealFailureText('Downloaded thiserror v2.0.18')).toBe(false);
+    expect(isActionableSelfHealFailureText("Error: Cannot find module '/repo/node_modules/typescript/bin/tsc'")).toBe(false);
   });
 });
 
@@ -508,7 +553,7 @@ describe('runSelfHealCycle', () => {
     const enrolled = proposeHeal(repoA, {
       broken: true,
       kind: 'build',
-      detail: 'still tracked',
+      detail: "src/index.ts(12,5): error TS2345: Argument of type 'string' is not assignable",
     });
     const unenrolled = proposeHeal(repoB, {
       broken: true,
