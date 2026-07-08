@@ -40,7 +40,7 @@ export interface BreakageResult {
   kind?: 'build' | 'test';
   /** First non-blank failure line from the command output, capped at 200 chars. */
   detail?: string;
-  reason?: 'no-verify-commands' | 'detect-error';
+  reason?: 'no-verify-commands' | 'detect-error' | 'untrusted-verify-result';
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +116,15 @@ export async function detectBreakage(
       const kind = kindOf(vc.kind);
       const result = await runVerifyCommandAsync(vc, repoDir, cfg as AshlrConfig ?? {} as AshlrConfig, { timeoutMs });
       if (!result.ok) {
+        const failureCategory = result.failureCategory ?? 'code';
+        if (failureCategory !== 'code') {
+          return {
+            broken: false,
+            verified: false,
+            clearedKinds: Array.from(clearedKinds),
+            reason: 'untrusted-verify-result',
+          };
+        }
         return {
           broken: true,
           verified: true,

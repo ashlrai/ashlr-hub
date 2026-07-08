@@ -9,7 +9,13 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFile
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import type { EngineTier, Proposal, ProposalBrowserVerifyEvidence, VisualGroundingEvidence } from '../types.js';
+import type {
+  AutoMergeTrustBasis,
+  EngineTier,
+  Proposal,
+  ProposalBrowserVerifyEvidence,
+  VisualGroundingEvidence,
+} from '../types.js';
 
 export type AutonomyTarget = 'proposal' | 'branch' | 'main' | 'preview' | 'production';
 
@@ -49,7 +55,7 @@ export interface AutonomyEvidencePack {
   };
   diff: AutonomyDiffEvidence;
   target: AutonomyTarget;
-  trustBasis: 'tier' | 'verification';
+  trustBasis: AutoMergeTrustBasis;
   remotePreferred: boolean;
   riskClass: 'low' | 'medium' | 'high';
   gates: {
@@ -74,7 +80,7 @@ export interface AutonomyEvidencePack {
 export interface BuildAutonomyEvidenceInput {
   proposal: Proposal;
   target: AutonomyTarget;
-  trustBasis: 'tier' | 'verification';
+  trustBasis: AutoMergeTrustBasis;
   remotePreferred?: boolean;
   riskClass: 'low' | 'medium' | 'high';
   authority: AutonomyGateEvidence;

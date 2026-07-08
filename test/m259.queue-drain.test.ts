@@ -147,7 +147,7 @@ function drainCfg(overrides?: Record<string, unknown>): AshlrConfig {
   return {
     version: 1,
     foundry: {
-      autoMerge: { enabled: true },
+      autoMerge: { enabled: true, managerGate: true },
       autoArchiveAfterRejects: 3,
       proposalTtlDays: 7,
       judgePerPass: 8,
@@ -664,7 +664,7 @@ describe('M259 judgePerPass default is 8', () => {
 
     const out = await runAutoMergePass({
       version: 1,
-      foundry: { autoMerge: { enabled: true } },
+      foundry: { autoMerge: { enabled: true, managerGate: true } },
     } as AshlrConfig);
 
     expect(out.judged).toBe(8);

@@ -1,6 +1,7 @@
 /**
  * M175 — Verification-mode pre-filter: any-tier proposals are judged in
- * verification mode; tier mode remains frontier-only (M51 locked).
+ * verification mode; default tier mode remains frontier-only but judge-free
+ * unless the explicit managerGate is enabled.
  *
  * WHAT THIS TESTS:
  *   The pre-filter in runAutoMergePass (~line 164 after M175 patch) that was
@@ -15,8 +16,9 @@
  *       IS IN THE GATE, NOT THE PRE-FILTER.
  *
  *     - trustBasis='tier' or absent (M51 default) → LOCAL + MID proposals ARE
- *       still pre-filtered. Judge never called for them. Byte-identical to
- *       pre-M175 behaviour.
+ *       still pre-filtered. Frontier proposals reach autoMergeProposal without
+ *       a pass-level judge unless managerGate=true. The downstream merge gate
+ *       still owns authority, provenance, verification, risk, and scope.
  *
  * ADVERSARIAL MATRIX:
  *
@@ -33,7 +35,8 @@
  *  [L1]  local proposal, trustBasis absent (tier default) → skipped, judge not called
  *  [L2]  local proposal, trustBasis='tier' explicit → skipped, judge not called
  *  [L3]  mid proposal, trustBasis absent, midToBranch=false → skipped
- *  [L4]  frontier proposal, trustBasis absent → NOT skipped (M51 happy path)
+ *  [L4]  frontier proposal, trustBasis absent → NOT skipped, no pass-level judge
+ *  [L5]  frontier proposal, managerGate=true → judged before merge
  *
  *  Gate enforcement (autoMergeProposal still guards the actual merge)
  *  [G1]  verification mode, local, judge ships, autoMergeProposal refuses → r.merged=0
@@ -315,7 +318,7 @@ describe('M175 verification-mode eligibility — any tier is judged', () => {
 });
 
 // ===========================================================================
-// [L1–L4] M51 tier-mode lock — local/mid still skipped in tier mode
+// [L1–L5] M51 tier-mode lock — local/mid still skipped in tier mode
 // ===========================================================================
 
 describe('M175 M51 tier-mode lock — local/mid still skipped', () => {
@@ -354,15 +357,28 @@ describe('M175 M51 tier-mode lock — local/mid still skipped', () => {
     expect(r.judged).toBe(0);
   });
 
-  it('[L4] frontier proposal, trustBasis absent → NOT skipped (M51 happy path)', async () => {
+  it('[L4] frontier proposal, trustBasis absent → NOT skipped, no pass-level judge', async () => {
     const p = makeProp('l4', 'frontier');
     mockListProposals.mockReturnValue([p]);
     mockJudgeProposal.mockResolvedValueOnce(shipVerdict('l4'));
 
     const r = await runAutoMergePass(tierCfg());
 
-    expect(mockJudgeProposal).toHaveBeenCalledOnce();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(mockAutoMergeProposal).toHaveBeenCalledWith('l4', expect.anything());
+    expect(r.attempted).toBe(1);
+  });
+
+  it('[L5] frontier proposal, managerGate=true → judged before merge', async () => {
+    const p = makeProp('l5', 'frontier');
+    mockListProposals.mockReturnValue([p]);
+    mockJudgeProposal.mockResolvedValueOnce(shipVerdict('l5'));
+
+    const r = await runAutoMergePass(tierCfg({ managerGate: true }));
+
+    expect(mockJudgeProposal).toHaveBeenCalledOnce();
+    expect(mockAutoMergeProposal).toHaveBeenCalledWith('l5', expect.anything());
+    expect(r.judged).toBe(1);
     expect(r.attempted).toBe(1);
   });
 });

@@ -18,9 +18,10 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { WorkItem, WorkSource } from '../src/core/types.js';
-import type { ResourceSnapshot, BackendAvailability } from '../src/core/fabric/resource-monitor.js';
+import type { ResourceSnapshot, BackendAvailability, BackendResourceState } from '../src/core/fabric/resource-monitor.js';
 import {
   slotsForAvailability,
+  slotsForBackendState,
   planConcurrentDispatch,
   runConcurrentDispatch,
   type ConcurrentDispatchCfg,
@@ -48,16 +49,22 @@ function makeItem(overrides: Partial<WorkItem> = {}): WorkItem {
 }
 
 function makeSnapshot(
-  backends: Array<{ backend: string; availability: BackendAvailability }>
+  backends: Array<{
+    backend: string;
+    availability: BackendAvailability;
+    usedPct?: number | null;
+    cap?: number | null;
+    capUnit?: BackendResourceState['capUnit'];
+  }>
 ): ResourceSnapshot {
   return {
     generatedAt: new Date().toISOString(),
-    backends: backends.map(({ backend, availability }) => ({
+    backends: backends.map(({ backend, availability, usedPct, cap, capUnit }) => ({
       backend: backend as import('../src/core/types.js').EngineId,
       availability,
-      usedPct: null,
-      cap: null,
-      capUnit: null,
+      usedPct: usedPct ?? null,
+      cap: cap ?? null,
+      capUnit: capUnit ?? null,
       capWindow: null,
       resetsAt: null,
       costPerMTokenOut: 0,
@@ -110,6 +117,38 @@ describe('slotsForAvailability', () => {
     expect(slotsForAvailability('open')).toBe(3);
     expect(slotsForAvailability('near')).toBe(2);
   });
+
+  it('capUnit=concurrent clamps generic slots to remaining backend capacity', () => {
+    expect(slotsForBackendState({
+      availability: 'open',
+      usedPct: 0,
+      cap: 1,
+      capUnit: 'concurrent',
+    }, 3)).toBe(1);
+
+    expect(slotsForBackendState({
+      availability: 'open',
+      usedPct: 50,
+      cap: 4,
+      capUnit: 'concurrent',
+    }, 6)).toBe(2);
+
+    expect(slotsForBackendState({
+      availability: 'near',
+      usedPct: 75,
+      cap: 4,
+      capUnit: 'concurrent',
+    }, 6)).toBe(1);
+  });
+
+  it('capUnit=concurrent saturated state maps to zero slots', () => {
+    expect(slotsForBackendState({
+      availability: 'near',
+      usedPct: 100,
+      cap: 1,
+      capUnit: 'concurrent',
+    }, 3)).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -126,6 +165,36 @@ describe('planConcurrentDispatch', () => {
     expect(plan.assignments).toHaveLength(2);
     expect(plan.assignments.every((a) => a.backend === 'claude')).toBe(true);
     expect(plan.slotsMap.get('claude')).toBe(3);
+  });
+
+  it('clamps local-coder open slots by capUnit=concurrent capacity', () => {
+    const snap = makeSnapshot([
+      { backend: 'local-coder', availability: 'open', usedPct: 0, cap: 1, capUnit: 'concurrent' },
+      { backend: 'codex', availability: 'open' },
+      { backend: 'builtin', availability: 'exhausted' },
+    ]);
+    const items = Array.from({ length: 3 }, makeItem);
+    const plan = planConcurrentDispatch(items, snap, defaultCfg, () => 'local-coder');
+
+    expect(plan.slotsMap.get('local-coder')).toBe(1);
+    expect(plan.assignments.filter((a) => a.backend === 'local-coder')).toHaveLength(1);
+    expect(plan.assignments.filter((a) => a.backend === 'codex')).toHaveLength(2);
+    expect(plan.unassigned).toHaveLength(0);
+  });
+
+  it('does not assign saturated local-coder when concurrent cap is already used', () => {
+    const snap = makeSnapshot([
+      { backend: 'local-coder', availability: 'near', usedPct: 100, cap: 1, capUnit: 'concurrent' },
+      { backend: 'codex', availability: 'open' },
+      { backend: 'builtin', availability: 'exhausted' },
+    ]);
+    const items = [makeItem(), makeItem()];
+    const plan = planConcurrentDispatch(items, snap, defaultCfg, () => 'local-coder');
+
+    expect(plan.slotsMap.get('local-coder')).toBe(0);
+    expect(plan.assignments.every((a) => a.backend !== 'local-coder')).toBe(true);
+    expect(plan.assignments.filter((a) => a.backend === 'codex')).toHaveLength(2);
+    expect(plan.unassigned).toHaveLength(0);
   });
 
   it('near backend gets ceil(max/2) slots — does not exceed cap', () => {

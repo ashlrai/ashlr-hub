@@ -2483,6 +2483,74 @@ function renderProposalProductionCard(production, cls = 'ctrl-card card') {
   return card;
 }
 
+function formatFleetPercent(rate) {
+  const n = Number(rate);
+  if (!Number.isFinite(n)) return '0%';
+  return `${Math.round(Math.max(0, Math.min(1, n)) * 100)}%`;
+}
+
+function dispatchProductionBucketLabel(bucket) {
+  if (!bucket || typeof bucket !== 'object') return 'unknown';
+  if (bucket.backend) return String(bucket.backend);
+  if (bucket.source) return String(bucket.source);
+  if (bucket.repo) return basenameFromPath(bucket.repo);
+  return String(bucket.key ?? 'unknown');
+}
+
+function renderDispatchProductionCard(dispatchProduction, cls = 'ctrl-card card') {
+  const card = el('div', { cls });
+  if (!dispatchProduction) {
+    card.appendChild(el('div', { cls: 'card-header' },
+      el('span', { cls: 'card-title' }, 'Dispatch Yield'),
+      el('span', { cls: 'card-subtitle' }, 'unavailable')
+    ));
+    card.appendChild(el('div', { cls: 'card-body' },
+      el('p', { cls: 'hint' }, 'Dispatch yield data unavailable.')
+    ));
+    return card;
+  }
+
+  const proposalRate = formatFleetPercent(dispatchProduction.proposalRate);
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Dispatch Yield'),
+    el('span', { cls: 'card-subtitle' }, `${dispatchProduction.proposalsCreated ?? 0}/${dispatchProduction.events ?? 0} proposals`)
+  ));
+
+  const body = el('div', { cls: 'card-body' });
+  body.appendChild(infoGrid([
+    ['Window', proposalProductionWindowLabel(dispatchProduction)],
+    ['Attempts', dispatchProduction.events ?? 0],
+    ['Proposals', dispatchProduction.proposalsCreated ?? 0],
+    ['Yield', proposalRate],
+    ['No-proposal', dispatchProduction.noProposal ?? 0],
+    ['Spend', `$${Number(dispatchProduction.spentUsd ?? 0).toFixed(4)}`],
+  ]));
+
+  const backends = Array.isArray(dispatchProduction.byBackend)
+    ? dispatchProduction.byBackend.slice(0, 4)
+    : [];
+  if (backends.length > 0) {
+    const list = el('div', { cls: 'ctrl-backend-list' });
+    for (const bucket of backends) {
+      list.appendChild(el('div', { cls: 'ctrl-backend-row', title: bucket.topReasons?.[0]?.reason ?? '' },
+        el('span', { cls: 'ctrl-backend-name' }, dispatchProductionBucketLabel(bucket)),
+        el('span', { cls: 'ctrl-backend-dispatches' },
+          `${bucket.proposalsCreated ?? 0}/${bucket.attempts ?? 0} · ${formatFleetPercent(bucket.proposalRate)}`
+        )
+      ));
+    }
+    body.appendChild(list);
+  }
+
+  const reasons = proposalProductionReasons(dispatchProduction, 2);
+  if (reasons.length > 0) {
+    body.appendChild(el('p', { cls: 'hint' }, `Top reason: ${reasons.join('; ')}`));
+  }
+
+  card.appendChild(body);
+  return card;
+}
+
 function renderFleetNextActionsCard(nextActions, cls = 'ctrl-card card') {
   const actions = Array.isArray(nextActions) ? nextActions : [];
   if (actions.length === 0) return null;
@@ -2620,6 +2688,9 @@ function renderFleet() {
 
   const productionCard = renderProposalProductionCard(f.proposalProduction, 'fleet-card card');
   if (productionCard) section.appendChild(productionCard);
+
+  const dispatchProductionCard = renderDispatchProductionCard(f.dispatchProduction, 'fleet-card card');
+  if (dispatchProductionCard) section.appendChild(dispatchProductionCard);
 
   const strategicFocusCard = renderStrategicFocusCard(f.queue, 'fleet-card card');
   if (strategicFocusCard) section.appendChild(strategicFocusCard);
@@ -2984,11 +3055,15 @@ function renderControl() {
   heroMetrics.appendChild(controlMetric('Evidence', autonomy?.evidencePacks ?? 0, autonomy?.denied > 0 ? '#f87171' : '#38bdf8'));
   const effectiveness = d.fleet?.autonomyEffectiveness ?? fleet.autonomyEffectiveness ?? null;
   const production = d.fleet?.proposalProduction ?? fleet.proposalProduction ?? null;
+  const dispatchProduction = d.fleet?.dispatchProduction ?? fleet.dispatchProduction ?? null;
   if (effectiveness) {
     heroMetrics.appendChild(controlMetric('Loop State', formatEffectivenessPhase(effectiveness.phase), effectivenessAccent(effectiveness.phase)));
   }
   if (production) {
     heroMetrics.appendChild(controlMetric('No-prop 24h', production.noProposalDispatches ?? 0, production.noProposalDispatches > 0 ? '#f97316' : '#4ade80'));
+  }
+  if (dispatchProduction) {
+    heroMetrics.appendChild(controlMetric('Yield 24h', formatFleetPercent(dispatchProduction.proposalRate), dispatchProduction.proposalRate > 0 ? '#4ade80' : '#f97316'));
   }
   heroMetrics.appendChild(controlMetric('Active Mode', formatDirectionMode(activeDirectionMode ?? direction?.mode ?? 'unknown'), directionAccent(activeDirectionMode ?? direction?.mode)));
   heroMetrics.appendChild(controlMetric('Control Mode', formatControlMode(daemon.autonomyControlMode), controlModeAccent(daemon.autonomyControlMode)));
@@ -4020,9 +4095,10 @@ function fdRenderActivityPanel(snap) {
 function fdRenderProductionPanel(snap) {
   const prod = snap.production;
   const production = snap.fleet?.proposalProduction ?? snap.control?.fleet?.proposalProduction ?? null;
+  const dispatchProduction = snap.fleet?.dispatchProduction ?? snap.control?.fleet?.dispatchProduction ?? null;
   const body = el('div', { cls: 'fd-panel__body' });
 
-  if (!prod && !production) {
+  if (!prod && !production && !dispatchProduction) {
     body.appendChild(el('p', { cls: 'hint' }, 'Production data unavailable.'));
     return body;
   }
@@ -4040,6 +4116,24 @@ function fdRenderProductionPanel(snap) {
     const reasons = proposalProductionReasons(production, 2);
     if (reasons.length > 0) {
       body.appendChild(el('p', { cls: 'hint' }, `Top reason: ${reasons.join('; ')}`));
+    }
+  }
+
+  if (dispatchProduction) {
+    body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Dispatch yield'));
+    body.appendChild(infoGrid([
+      ['Window', proposalProductionWindowLabel(dispatchProduction)],
+      ['Attempts', dispatchProduction.events ?? 0],
+      ['Proposals', dispatchProduction.proposalsCreated ?? 0],
+      ['Yield', formatFleetPercent(dispatchProduction.proposalRate)],
+      ['No-proposal', dispatchProduction.noProposal ?? 0],
+      ['Spend', `$${Number(dispatchProduction.spentUsd ?? 0).toFixed(4)}`],
+    ]));
+    const backend = Array.isArray(dispatchProduction.byBackend) ? dispatchProduction.byBackend[0] : null;
+    if (backend) {
+      body.appendChild(el('p', { cls: 'hint' },
+        `Weakest backend: ${dispatchProductionBucketLabel(backend)} ${backend.proposalsCreated ?? 0}/${backend.attempts ?? 0} (${formatFleetPercent(backend.proposalRate)})`
+      ));
     }
   }
 

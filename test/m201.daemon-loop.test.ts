@@ -64,6 +64,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
+import { join } from 'node:path';
 import type { AshlrConfig, DaemonTick } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -178,12 +179,14 @@ vi.mock('../src/core/autonomy/resource-strategy.js', () => ({
   },
 }));
 
+const mockRecommendRoute = vi.fn(async () => ({ backend: 'builtin', tier: 'local', reason: 'mock' }));
+const mockRecoverWithinBudget = vi.fn((_r: unknown, _c: unknown) => ({
+  action: 'proceed',
+  decision: { backend: 'builtin', tier: 'local', reason: 'mock' },
+}));
 vi.mock('../src/core/run/learned-router.js', () => ({
-  recommendRoute: async () => ({ backend: 'builtin', tier: 'local', reason: 'mock' }),
-  recoverWithinBudget: (_r: unknown, _c: unknown) => ({
-    action: 'proceed',
-    decision: { backend: 'builtin', tier: 'local', reason: 'mock' },
-  }),
+  recommendRoute: (...args: unknown[]) => mockRecommendRoute(...args),
+  recoverWithinBudget: (...args: unknown[]) => mockRecoverWithinBudget(...args),
 }));
 
 function defaultReloadConfig(): AshlrConfig {
@@ -207,7 +210,7 @@ vi.mock('../src/core/config.js', () => ({
 // Lazy imports — AFTER all mocks.
 // ---------------------------------------------------------------------------
 
-import { tick, runDaemon, buildItemGoal } from '../src/core/daemon/loop.js';
+import { tick, runDaemon, buildItemGoal, workedOutcomeFromDispatchProduction } from '../src/core/daemon/loop.js';
 import {
   acquireDaemonLock,
   loadDaemonState,
@@ -218,6 +221,7 @@ import {
   createProposal,
   pendingCount,
 } from '../src/core/inbox/store.js';
+import { readDispatchProductionEvents } from '../src/core/fleet/dispatch-production-ledger.js';
 import { loadWorkedLedger } from '../src/core/fleet/worked-ledger.js';
 import {
   makeFixture,
@@ -231,6 +235,7 @@ import { makeSpendingSwarmStub } from './helpers/h3-stress.js';
 // ---------------------------------------------------------------------------
 
 let fx: H1Fixture;
+let prevAshlrHome: string | undefined;
 
 beforeEach(() => {
   mockRunSwarm.mockReset();
@@ -245,12 +250,16 @@ beforeEach(() => {
   mockBisectAndRevert.mockReset();
   mockRouteBackend.mockReset();
   mockEngineTierOf.mockReset();
+  mockRecommendRoute.mockReset();
+  mockRecoverWithinBudget.mockReset();
   mockRunAutoMergePass.mockReset();
   mockReconcileRemoteHandoffs.mockReset();
   mockBuildResourceStrategyReport.mockReset();
   mockLoadQueuedAutonomyItems.mockReset();
 
   fx = makeFixture();
+  prevAshlrHome = process.env.ASHLR_HOME;
+  process.env.ASHLR_HOME = join(fx.home, '.ashlr');
 
   // Default benign implementations.
   mockRunSelfHealCycle.mockResolvedValue({ checked: 0, broken: [], healItems: [] });
@@ -278,6 +287,11 @@ beforeEach(() => {
   mockBisectAndRevert.mockResolvedValue({ reverted: false });
   mockRunInventCycle.mockResolvedValue({ invented: 0, items: [] });
   mockRunCounterfactualReplay.mockResolvedValue({ replayed: 0, proposals: [] });
+  mockRecommendRoute.mockResolvedValue({ backend: 'builtin', tier: 'local', reason: 'mock' });
+  mockRecoverWithinBudget.mockReturnValue({
+    action: 'proceed',
+    decision: { backend: 'builtin', tier: 'local', reason: 'mock' },
+  });
   mockRunViaAshlrcode.mockResolvedValue({ ok: true });
   mockRunAutoMergePass.mockResolvedValue({ merged: 0 });
   mockReconcileRemoteHandoffs.mockReturnValue({ checked: 0, merged: 0, closed: 0, open: 0, unknown: 0 });
@@ -302,6 +316,8 @@ beforeEach(() => {
 
 afterEach(() => {
   fx.cleanup();
+  if (prevAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = prevAshlrHome;
 });
 
 // ---------------------------------------------------------------------------
@@ -402,6 +418,27 @@ function cfgBuiltin(daemon: { dailyBudgetUsd?: number; perTickItems?: number; pa
 // ===========================================================================
 
 describe('M201 — Group A: backlog build + top-K selection', () => {
+  it('A0: dispatch production maps proposal-created to diff and no-proposal outcomes to empty', () => {
+    expect(workedOutcomeFromDispatchProduction(undefined)).toBeUndefined();
+    expect(workedOutcomeFromDispatchProduction({
+      outcome: 'proposal-created',
+      proposalId: 'p1',
+      runId: 'r1',
+    })).toBe('diff');
+
+    for (const outcome of [
+      'empty-diff',
+      'gate-blocked',
+      'engine-failed',
+      'sandbox-failed',
+      'proposal-capture-error',
+      'proposal-disabled',
+      'unknown',
+    ] as const) {
+      expect(workedOutcomeFromDispatchProduction({ outcome, runId: `run-${outcome}` })).toBe('empty');
+    }
+  });
+
   it('A1: empty backlog → reason no-backlog, proposalsCreated=0, runSwarm not called', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -810,6 +847,349 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunGoal).toHaveBeenCalledTimes(1);
     expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ engine: 'local-coder' });
     expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1h2: sandboxed engine proposal outcomes are persisted on dispatch traces', async () => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock local-coder' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-empty-diff',
+      status: 'done',
+      usage: { totalTokens: 100, estCostUsd: 0.004, steps: 1 },
+      proposalOutcome: {
+        kind: 'empty-diff',
+        reason: 'engine "local-coder" completed without file changes',
+      },
+    });
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: {
+          allowedBackends: ['local-coder'],
+        },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.dispatches?.[0]).toMatchObject({
+      itemId: items[0]!.id,
+      backend: 'local-coder',
+      dispatched: true,
+      skipReason: 'empty-diff: engine "local-coder" completed without file changes',
+      production: {
+        outcome: 'empty-diff',
+        runId: 'run-empty-diff',
+        reason: 'engine "local-coder" completed without file changes',
+      },
+    });
+    expect(result.proposalProduction?.reasons?.[0]).toEqual({
+      reason: 'empty-diff: engine "local-coder" completed without file changes',
+      count: 1,
+    });
+    expect(loadDaemonState().ticks.at(-1)?.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'empty-diff',
+      runId: 'run-empty-diff',
+    });
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      itemId: items[0]!.id,
+      source: 'todo',
+      repo: items[0]!.repo,
+      title: items[0]!.title,
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'router',
+      routeReason: 'mock local-coder',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'run-empty-diff',
+      spentUsd: 0.004,
+      reason: 'engine "local-coder" completed without file changes',
+      basis: 'run-proposal-outcome',
+    });
+  });
+
+  it('A1h3: routed model is passed into the normal sandboxed runGoal path', async () => {
+    enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen-routed-model',
+      reason: 'mock local-coder model route',
+    });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: {
+          allowedBackends: ['local-coder'],
+        },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({
+      engine: 'local-coder',
+      model: 'qwen-routed-model',
+      sandboxEngine: true,
+      requireSandbox: true,
+    });
+    expect(result.dispatches?.[0]).toMatchObject({
+      backend: 'local-coder',
+      model: 'qwen-routed-model',
+    });
+  });
+
+  it('A1h3b: learned-router backend changes do not keep the previous backend model', async () => {
+    enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen-routed-model',
+      reason: 'mock local-coder model route',
+    });
+    mockEngineTierOf.mockImplementation((backend: unknown) =>
+      backend === 'local-coder' || backend === 'codex' ? 'mid' : 'local',
+    );
+    mockRecommendRoute.mockResolvedValue({
+      backend: 'codex',
+      tier: 'mid',
+      reason: 'learned-router: same-tier reroute to codex',
+    });
+    mockRecoverWithinBudget.mockImplementation((decision: unknown) => ({
+      action: 'proceed',
+      decision,
+    }));
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: {
+          allowedBackends: ['local-coder', 'codex'],
+          intelligence: {},
+        },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    const opts = mockRunGoal.mock.calls[0]?.[2] as Record<string, unknown>;
+    expect(opts).toMatchObject({
+      engine: 'codex',
+      sandboxEngine: true,
+      requireSandbox: true,
+    });
+    expect(opts).not.toHaveProperty('model');
+  });
+
+  it('A1h4: dispatch-production ledger records filed proposal outcomes with proposal id', async () => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', model: 'qwen', reason: 'mock local-coder filed' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockRunGoal.mockImplementationOnce(async () => {
+      const proposal = createProposal({
+        repo: items[0]!.repo,
+        origin: 'swarm',
+        kind: 'patch',
+        title: 'Filed from daemon',
+        summary: 'daemon filed proposal',
+        diff: 'diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-old\n+new\n',
+        workItemId: items[0]!.id,
+        workSource: items[0]!.source,
+        runId: 'run-filed',
+      });
+      return {
+        id: 'run-filed',
+        status: 'done',
+        usage: { totalTokens: 100, estCostUsd: 0.006, steps: 1 },
+        proposalOutcome: {
+          kind: 'filed',
+          proposalId: proposal.id,
+          files: 1,
+          insertions: 1,
+          deletions: 1,
+        },
+      };
+    });
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: {
+          allowedBackends: ['local-coder'],
+        },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.proposalsCreated).toBe(1);
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      itemId: items[0]!.id,
+      backend: 'local-coder',
+      model: 'qwen',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: expect.stringMatching(/^prop-/),
+      runId: 'run-filed',
+      spentUsd: 0.006,
+      diffFiles: 1,
+      diffLines: 2,
+      basis: 'run-proposal-outcome',
+    });
+  });
+
+  it('A1h5: proposal-created production records worked diff even when pending delta is zero', async () => {
+    const before = pendingCount();
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock production-only filed' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-filed-production-only',
+      status: 'done',
+      usage: { totalTokens: 100, estCostUsd: 0.003, steps: 1 },
+      proposalOutcome: {
+        kind: 'filed',
+        proposalId: 'p-production-only',
+        files: 1,
+        insertions: 2,
+        deletions: 1,
+      },
+    });
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: {
+          allowedBackends: ['local-coder'],
+        },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.proposalsCreated).toBe(0);
+    expect(pendingCount()).toBe(before);
+    expect(result.dispatches?.[0]).toMatchObject({
+      itemId: items[0]!.id,
+      backend: 'local-coder',
+      dispatched: true,
+      production: {
+        outcome: 'proposal-created',
+        proposalId: 'p-production-only',
+        runId: 'run-filed-production-only',
+        diffFiles: 1,
+        diffLines: 3,
+      },
+    });
+    expect(loadWorkedLedger().events.filter((event) => event.itemId === items[0]!.id)).toEqual([
+      expect.objectContaining({ itemId: items[0]!.id, outcome: 'diff' }),
+    ]);
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      itemId: items[0]!.id,
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: 'p-production-only',
+      basis: 'run-proposal-outcome',
+    });
+  });
+
+  it('A1h6: non-proposal production does not inherit proposal ids from the pending delta', async () => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock empty with side proposal' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockRunGoal.mockImplementationOnce(async () => {
+      createProposal({
+        repo: items[0]!.repo,
+        origin: 'swarm',
+        kind: 'patch',
+        title: 'Side proposal',
+        summary: 'created by another capture path',
+        diff: 'diff --git a/y.ts b/y.ts\n--- a/y.ts\n+++ b/y.ts\n@@ -1 +1 @@\n-old\n+new\n',
+        workItemId: items[0]!.id,
+        workSource: items[0]!.source,
+        runId: 'run-side-proposal',
+      });
+      return {
+        id: 'run-empty-with-side-proposal',
+        status: 'done',
+        usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+        proposalOutcome: {
+          kind: 'empty-diff',
+          reason: 'empty result despite a side proposal',
+        },
+      };
+    });
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: {
+          allowedBackends: ['local-coder'],
+        },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.proposalsCreated).toBe(1);
+    expect(loadWorkedLedger().events.filter((event) => event.itemId === items[0]!.id)).toEqual([
+      expect.objectContaining({ itemId: items[0]!.id, outcome: 'empty' }),
+    ]);
+    const event = readDispatchProductionEvents({ limit: 1 })[0]!;
+    expect(event).toMatchObject({
+      itemId: items[0]!.id,
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'run-empty-with-side-proposal',
+      basis: 'run-proposal-outcome',
+    });
+    expect(event).not.toHaveProperty('proposalId');
+  });
+
+  it('A1h7: thrown sandboxed dispatch records an engine-failed production outcome', async () => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock local-coder throw' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockRunGoal.mockRejectedValueOnce(new Error('model process crashed'));
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: {
+          allowedBackends: ['local-coder'],
+        },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.dispatches?.[0]).toMatchObject({
+      itemId: items[0]!.id,
+      backend: 'local-coder',
+      dispatched: true,
+      skipReason: 'dispatch-error: model process crashed',
+      production: {
+        outcome: 'engine-failed',
+        reason: 'dispatch-error: model process crashed',
+      },
+    });
+    expect(loadWorkedLedger().events.filter((event) => event.itemId === items[0]!.id)).toEqual([
+      expect.objectContaining({ itemId: items[0]!.id, outcome: 'empty' }),
+    ]);
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      itemId: items[0]!.id,
+      outcome: 'engine-failed',
+      proposalCreated: false,
+      reason: 'dispatch-error: model process crashed',
+      basis: 'run-proposal-outcome',
+    });
   });
 
   it('A1i: live ticks persist bounded dispatch assignment traces', async () => {
@@ -1778,6 +2158,7 @@ describe('M201 — Group G: concurrent dispatch routing wire guards', () => {
     expect(source).toContain('const routeModels = new Map<string, string | null>();');
     expect(source).toContain('routeReasons.set(workedSet[i]!.id, d.value.reason);');
     expect(source).toContain('routeModels.set(workedSet[i]!.id, d.value.model ?? null);');
+    expect(source).toContain('routeReasons,');
     expect(source).toContain('const assignedModel = hintedBackend === _backend ? routeModels.get(item.id) : undefined;');
     expect(source).toContain('return taskEntry.run(_backend, assignedReason, assignedModel);');
     expect(source).toContain('buildConcurrentDispatchRouteItem(');

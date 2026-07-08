@@ -36,6 +36,7 @@ import type {
   AshlrConfig,
   EngineId,
   EngineTier,
+  RunProposalOutcome,
   RunBudget,
   RunState,
   RunTask,
@@ -84,6 +85,8 @@ export interface SandboxedEngineResult {
   state: RunState;
   /** Inbox proposal id when a non-empty diff was captured. */
   proposalId?: string;
+  /** Metadata-only explanation of whether proposal filing happened. */
+  proposalOutcome?: RunProposalOutcome;
 }
 
 export interface RunEngineSandboxedOptions {
@@ -146,6 +149,30 @@ function dispatchMaxAttempts(cfg: AshlrConfig): number {
   const raw = (cfg.foundry as { dispatchRetries?: number } | undefined)?.dispatchRetries;
   const retries = Number.isFinite(raw) ? Math.max(0, Math.floor(raw as number)) : 2;
   return 1 + Math.min(retries, 5);
+}
+
+function proposalOutcome(
+  kind: RunProposalOutcome['kind'],
+  reason: string,
+  diff?: { files: number; insertions: number; deletions: number },
+  proposalId?: string,
+): RunProposalOutcome {
+  return {
+    kind,
+    reason: reason.length > 240 ? reason.slice(0, 237) + '...' : reason,
+    ...(proposalId ? { proposalId } : {}),
+    ...(diff
+      ? {
+          files: diff.files,
+          insertions: diff.insertions,
+          deletions: diff.deletions,
+        }
+      : {}),
+  };
+}
+
+function withProposalOutcome(state: RunState, outcome: RunProposalOutcome | undefined): RunState {
+  return outcome ? { ...state, proposalOutcome: outcome } : state;
 }
 
 // ---------------------------------------------------------------------------
@@ -514,7 +541,11 @@ export async function runEngineSandboxed(
   });
 
   if (killSwitchOn() || (cfg.foundry as { killSwitch?: boolean } | undefined)?.killSwitch === true) {
-    return { state: mk({ status: 'failed', result: 'autonomy kill-switch is ON' }) };
+    const outcome = proposalOutcome('kill-switch', 'autonomy kill-switch is ON');
+    return {
+      state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome),
+      proposalOutcome: outcome,
+    };
   }
 
   const wt = await import('../sandbox/worktree.js');
@@ -532,7 +563,11 @@ export async function runEngineSandboxed(
       createdHere = true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      return { state: mk({ status: 'failed', result: `sandbox unavailable: ${msg}` }) };
+      const outcome = proposalOutcome('sandbox-unavailable', `sandbox unavailable: ${msg}`);
+      return {
+        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome),
+        proposalOutcome: outcome,
+      };
     }
   }
 
@@ -544,6 +579,7 @@ export async function runEngineSandboxed(
   env.CLAUDE_SESSION_ID = `ashlr-fleet-${id}`;
 
   let proposalId: string | undefined;
+  let proposalOutcomeResult: RunProposalOutcome | undefined;
 
   // M248: write .mcp.json to worktree (guarded: only when ashlr is on PATH).
   // fleetMcp defaults to true (on) — set cfg.foundry.fleetMcp = false to opt out.
@@ -572,7 +608,11 @@ export async function runEngineSandboxed(
       cmd = { ...cmd, args: [...cmd.args, '--mcp-config', mcpConfigPath] };
     }
     if (!cmd) {
-      return { state: mk({ status: 'failed', result: `no command for engine "${engine}"` }) };
+      proposalOutcomeResult = proposalOutcome('engine-command-missing', `no command for engine "${engine}"`);
+      return {
+        state: withProposalOutcome(mk({ status: 'failed', result: proposalOutcomeResult.reason }), proposalOutcomeResult),
+        proposalOutcome: proposalOutcomeResult,
+      };
     }
 
     // M249: RunCache SHADOW MODE — compute the key and log would-hit/would-miss.
@@ -728,6 +768,11 @@ export async function runEngineSandboxed(
               });
               if (!_gateResult.pass) {
                 console.log(`[M275] completeness gate blocked partial proposal: ${_gateResult.reason}`);
+                proposalOutcomeResult = proposalOutcome(
+                  'partial-completeness-gate',
+                  `partial completeness gate blocked proposal: ${_gateResult.reason ?? 'blocked'}`,
+                  diff,
+                );
                 // Partial run with blocked gate — do not file as proposal.
               } else {
                 const proposal = selectInboxStore(cfg).create({
@@ -748,6 +793,7 @@ export async function runEngineSandboxed(
                   isPartial: true,
                 });
                 proposalId = proposal.id;
+                proposalOutcomeResult = proposalOutcome('filed', 'partial proposal filed', diff, proposal.id);
               }
             } else {
               const proposal = selectInboxStore(cfg).create({
@@ -768,15 +814,29 @@ export async function runEngineSandboxed(
                 isPartial: true,
               });
               proposalId = proposal.id;
+              proposalOutcomeResult = proposalOutcome('filed', 'partial proposal filed', diff, proposal.id);
             }
+          } else {
+            proposalOutcomeResult = proposalOutcome(
+              'engine-failed-no-diff',
+              `engine "${engine}" failed before producing a diff: ${res.error ?? terminationReason ?? 'unknown error'}`,
+            );
           }
-        } catch {
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          proposalOutcomeResult = proposalOutcome('proposal-capture-error', `proposal capture failed after engine error: ${msg}`);
           // diff/proposal capture is best-effort — never fail the run on it.
         }
+      } else {
+        proposalOutcomeResult = proposalOutcome('proposal-disabled', 'proposal filing disabled for this sandboxed attempt');
       }
       return {
-        state: mk({ status: 'failed', result: `engine "${engine}" failed: ${res.error ?? 'unknown error'}`, usage, terminationReason }),
+        state: withProposalOutcome(
+          mk({ status: 'failed', result: `engine "${engine}" failed: ${res.error ?? 'unknown error'}`, usage, terminationReason }),
+          proposalOutcomeResult,
+        ),
         proposalId,
+        proposalOutcome: proposalOutcomeResult,
       };
     }
 
@@ -877,6 +937,11 @@ export async function runEngineSandboxed(
             }
             if (!_gateResult.pass) {
               console.log(`[M275] completeness gate blocked proposal: ${_gateResult.reason}`);
+              proposalOutcomeResult = proposalOutcome(
+                'completeness-gate',
+                `completeness gate blocked proposal: ${_gateResult.reason ?? 'blocked'}`,
+                effDiff,
+              );
               _m275ShouldFile = false;
             }
           }
@@ -900,6 +965,7 @@ export async function runEngineSandboxed(
             engineTier: tier,
           });
           proposalId = proposal.id;
+          proposalOutcomeResult = proposalOutcome('filed', 'proposal filed', effDiff, proposal.id);
           // M246: record telemetry fields on the decision entry (additive, never-throws).
           try {
             const { recordDecision } = await import('../fleet/decisions-ledger.js');
@@ -952,13 +1018,23 @@ export async function runEngineSandboxed(
             }
           } catch { /* shadow write is best-effort */ }
           } // end if (_m275ShouldFile)
+        } else {
+          proposalOutcomeResult = proposalOutcome('empty-diff', `engine "${engine}" completed without file changes`);
         }
-      } catch {
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        proposalOutcomeResult = proposalOutcome('proposal-capture-error', `proposal capture failed: ${msg}`);
         // diff/proposal capture is best-effort — never fail the run on it.
       }
+    } else {
+      proposalOutcomeResult = proposalOutcome('proposal-disabled', 'proposal filing disabled for this sandboxed attempt');
     }
 
-    return { state: mk({ status: 'done', result: res.output, usage }), proposalId };
+    return {
+      state: withProposalOutcome(mk({ status: 'done', result: res.output, usage }), proposalOutcomeResult),
+      proposalId,
+      proposalOutcome: proposalOutcomeResult,
+    };
   } finally {
     try {
       rmSync(hooksDir, { recursive: true, force: true });
@@ -1005,8 +1081,9 @@ export async function runApiModelSandboxed(
 ): Promise<SandboxedEngineResult> {
   const spec = resolveEngineSpec(engine, cfg);
   if (!spec || spec.kind !== 'api-model' || !spec.api) {
+    const outcome = proposalOutcome('engine-unsupported', `engine "${engine}" is not an api-model — cannot run in-process`);
     return {
-      state: {
+      state: withProposalOutcome({
         id: `run-${Date.now().toString(36)}`,
         goal,
         engine,
@@ -1018,8 +1095,9 @@ export async function runApiModelSandboxed(
         tasks: [],
         steps: [],
         status: 'failed',
-        result: `engine "${engine}" is not an api-model — cannot run in-process`,
-      },
+        result: outcome.reason,
+      }, outcome),
+      proposalOutcome: outcome,
     };
   }
 
@@ -1065,11 +1143,16 @@ export async function runApiModelSandboxed(
       createdHere = true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      return { state: mk({ status: 'failed', result: `sandbox unavailable: ${msg}` }) };
+      const outcome = proposalOutcome('sandbox-unavailable', `sandbox unavailable: ${msg}`);
+      return {
+        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome),
+        proposalOutcome: outcome,
+      };
     }
   }
 
   let proposalId: string | undefined;
+  let proposalOutcomeResult: RunProposalOutcome | undefined;
 
   try {
     // Build baseUrl — honour env override, then spec default, then Ollama fallback.
@@ -1157,14 +1240,19 @@ export async function runApiModelSandboxed(
       (task.result.startsWith('[budget exceeded') || task.result.startsWith('[step cap reached'));
 
     if (task.status === 'failed') {
+      proposalOutcomeResult = proposalOutcome('api-model-task-failed', task.error ?? 'api-model run failed');
       return {
-        state: mk({
-          status: 'failed',
-          result: task.error ?? 'api-model run failed',
-          usage: finalUsage,
-          tasks: [task],
-          steps,
-        }),
+        state: withProposalOutcome(
+          mk({
+            status: 'failed',
+            result: task.error ?? 'api-model run failed',
+            usage: finalUsage,
+            tasks: [task],
+            steps,
+          }),
+          proposalOutcomeResult,
+        ),
+        proposalOutcome: proposalOutcomeResult,
       };
     }
 
@@ -1187,12 +1275,21 @@ export async function runApiModelSandboxed(
             });
             if (!gateResult.pass) {
               console.log(`[M275] completeness gate blocked api-model proposal: ${gateResult.reason}`);
+              proposalOutcomeResult = proposalOutcome(
+                isPartialResult ? 'partial-completeness-gate' : 'completeness-gate',
+                `${isPartialResult ? 'partial ' : ''}completeness gate blocked api-model proposal: ${gateResult.reason ?? 'blocked'}`,
+                diff,
+              );
               shouldFile = false;
             }
           }
           if (!shouldFile) {
             return {
-              state: mk({ status: 'done', result: task.result ?? '', usage: finalUsage, tasks: [task], steps }),
+              state: withProposalOutcome(
+                mk({ status: 'done', result: task.result ?? '', usage: finalUsage, tasks: [task], steps }),
+                proposalOutcomeResult,
+              ),
+              proposalOutcome: proposalOutcomeResult,
             };
           }
           const proposal = selectInboxStore(cfg).create({
@@ -1215,6 +1312,7 @@ export async function runApiModelSandboxed(
             ...(isPartialResult ? { isPartial: true } : {}),
           });
           proposalId = proposal.id;
+          proposalOutcomeResult = proposalOutcome('filed', 'proposal filed', diff, proposal.id);
           try {
             const { recordDecision } = await import('../fleet/decisions-ledger.js');
             recordDecision({
@@ -1231,15 +1329,25 @@ export async function runApiModelSandboxed(
           } catch {
             // telemetry is best-effort — never fails the run
           }
+        } else {
+          proposalOutcomeResult = proposalOutcome('empty-diff', `api-model engine "${engine}" completed without file changes`);
         }
-      } catch {
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        proposalOutcomeResult = proposalOutcome('proposal-capture-error', `api-model proposal capture failed: ${msg}`);
         // diff/proposal capture is best-effort
       }
+    } else {
+      proposalOutcomeResult = proposalOutcome('proposal-disabled', 'proposal filing disabled for this api-model attempt');
     }
 
     return {
-      state: mk({ status: 'done', result: task.result ?? '', usage: finalUsage, tasks: [task], steps }),
+      state: withProposalOutcome(
+        mk({ status: 'done', result: task.result ?? '', usage: finalUsage, tasks: [task], steps }),
+        proposalOutcomeResult,
+      ),
       proposalId,
+      proposalOutcome: proposalOutcomeResult,
     };
   } finally {
     if (createdHere) {

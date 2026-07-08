@@ -288,6 +288,63 @@ export async function decide(
       }
     }
 
+    // Step 5: final dispatch guards after learned/budget reroutes. Earlier
+    // checks protect the base route; this protects the backend that will
+    // actually run after M53 or budget cascade changes.
+    if (cfg.foundry?.fabric?.resourceAware === true) {
+      const resourceDemote = await _resourceAwareDemote(input, current, cfg, trace);
+      if (resourceDemote !== null) {
+        if (resourceDemote.pause) {
+          return {
+            backend: current.backend,
+            tier: current.tier,
+            model: current.model ?? null,
+            source: isWorkItem(input) ? 'fleet' : 'cli',
+            trace,
+            reason: `resource-pause: ${resourceDemote.reason}`,
+            resourceState: resourceDemote.resourceState,
+            ...(demotedFrom ? { demotedFrom } : {}),
+          };
+        }
+        if (!demotedFrom && resourceDemote.decision.backend !== current.backend) {
+          demotedFrom = current.backend;
+        }
+        resourceState = resourceDemote.resourceState;
+        current = resourceDemote.decision;
+        trace.push({ stage: 'finalResourceDemote', backend: current.backend, tier: current.tier, reason: current.reason });
+      }
+    }
+
+    if (current.backend !== 'builtin' && !withinLimit(current.backend, cfg)) {
+      current = { backend: 'builtin', tier: 'local', model: null, reason: 'final quota guard — fallback to builtin' };
+      trace.push({ stage: 'finalQuotaGuard', backend: current.backend, tier: current.tier, reason: current.reason });
+    }
+
+    if (isSubscriptionEngine(current.backend)) {
+      const rawPct = (cfg.foundry as Record<string, unknown> | undefined)?.['subscriptionMaxPercent'];
+      const maxPct: number =
+        typeof ctx.subscriptionMaxPercent === 'number'
+          ? Math.min(100, Math.max(1, ctx.subscriptionMaxPercent))
+          : typeof rawPct === 'number'
+            ? Math.min(100, Math.max(1, rawPct))
+            : 90;
+      const subCheck = subscriptionAllows(current.backend, { maxPercent: maxPct });
+      if (!subCheck.allowed) {
+        const reason = `throttled: subscription window — ${subCheck.reason}`;
+        trace.push({ stage: 'finalSubscriptionThrottle', backend: current.backend, tier: current.tier, reason });
+        return {
+          backend: current.backend,
+          tier: current.tier,
+          model: current.model,
+          source: isWorkItem(input) ? 'fleet' : 'cli',
+          trace,
+          reason,
+          ...(resourceState ? { resourceState } : {}),
+          ...(demotedFrom ? { demotedFrom } : {}),
+        };
+      }
+    }
+
     return {
       backend: current.backend,
       tier: current.tier,

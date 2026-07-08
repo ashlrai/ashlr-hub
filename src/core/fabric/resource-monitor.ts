@@ -1248,14 +1248,16 @@ export async function getBackendResourceState(
  * Never throws.
  *
  * M255 integration point: the concurrent dispatcher calls this before
- * building its concurrency slots map:
+ * building its concurrency slots map. Dispatcher slot count uses
+ * `foundry.fabric.maxSlotsPerBackend`; local Ollama capacity uses
+ * `foundry.local.maxConcurrent` and is reported as capUnit='concurrent'.
  *
  *   const snap = await getResourceSnapshot(cfg);
  *   const slotsPerBackend = new Map<EngineId, number>();
  *   for (const b of snap.backends) {
  *     slotsPerBackend.set(b.backend,
- *       b.availability === 'open'      ? cfg.maxConcurrent    :
- *       b.availability === 'near'      ? Math.ceil(cfg.maxConcurrent / 2) :
+ *       b.availability === 'open'      ? maxSlotsPerBackend    :
+ *       b.availability === 'near'      ? Math.ceil(maxSlotsPerBackend / 2) :
  *       b.availability === 'throttled' ? 0 :
  *       b.availability === 'exhausted' ? 0 :
  *       b.availability === 'unreachable' ? 0 : 0 // unknown/future = no trusted slots

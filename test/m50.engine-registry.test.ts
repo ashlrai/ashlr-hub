@@ -124,6 +124,18 @@ describe('M50 registry — buildEngineCommand argv PARITY (byte-identical)', () 
     expect(cmd!.args).toEqual(['--goal', GOAL]);
   });
 
+  it('ashlrcode — autonomous appends unattended ac flags', () => {
+    const cmd = buildEngineCommand('ashlrcode', GOAL, cfg, { cwd: CWD, autonomous: true });
+    expect(cmd!.bin).toBe('ac');
+    expect(cmd!.args).toEqual([
+      '--goal',
+      GOAL,
+      '--autonomous',
+      '--dangerously-skip-permissions',
+      '--surgical',
+    ]);
+  });
+
   it('empty model string is treated as absent', () => {
     expect(buildEngineCommand('codex', GOAL, cfg, { cwd: CWD, model: '' })!.args).not.toContain('--model');
   });

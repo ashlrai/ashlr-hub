@@ -133,6 +133,51 @@ const FIXTURE_FLEET_STATUS = {
     topReasons: [{ reason: 'agent returned no diff', count: 1 }],
     recentNoProposalDispatches: [],
   },
+  dispatchProduction: {
+    windowHours: 24,
+    attempts: 2,
+    events: 2,
+    proposalsCreated: 1,
+    noProposal: 1,
+    proposalRate: 0.5,
+    spentUsd: 0.002,
+    outcomes: {
+      proposalCreated: 1,
+      emptyDiff: 1,
+      gateBlocked: 0,
+      engineFailed: 0,
+      sandboxFailed: 0,
+      proposalCaptureError: 0,
+      proposalDisabled: 0,
+      unknown: 0,
+    },
+    topReasons: [{ reason: 'agent returned no diff', count: 1 }],
+    byBackend: [
+      {
+        key: 'builtin',
+        backend: 'builtin' as const,
+        attempts: 2,
+        proposalsCreated: 1,
+        noProposal: 1,
+        proposalRate: 0.5,
+        spentUsd: 0.002,
+        outcomes: {
+          proposalCreated: 1,
+          emptyDiff: 1,
+          gateBlocked: 0,
+          engineFailed: 0,
+          sandboxFailed: 0,
+          proposalCaptureError: 0,
+          proposalDisabled: 0,
+          unknown: 0,
+        },
+        topReasons: [{ reason: 'agent returned no diff', count: 1 }],
+      },
+    ],
+    bySource: [],
+    byRepo: [],
+    byBackendModel: [],
+  },
   merges: { recent: 0 },
   killed: false,
 };
@@ -235,6 +280,8 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(snap.fleet?.queue.shared?.ownedClaims).toBe(1);
     expect(snap.fleet?.proposalProduction?.noProposalDispatches).toBe(1);
     expect(snap.fleet?.proposalProduction?.topReasons[0]?.reason).toBe('agent returned no diff');
+    expect(snap.fleet?.dispatchProduction?.proposalRate).toBe(0.5);
+    expect(snap.fleet?.dispatchProduction?.byBackend[0]?.key).toBe('builtin');
   });
 
   it('daemon degrades to zeroed fields when loadDaemonState throws', async () => {

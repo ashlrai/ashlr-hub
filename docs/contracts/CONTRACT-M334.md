@@ -12,8 +12,8 @@ Safe, staged activation of two flag-gated subsystems that have shipped dark:
 
 ## Invariants (hold at every stage)
 
-1. Proposal-only autonomy; frontier-only merge authority; kill switch; budget
-   caps — none of these paths are touched by activation.
+1. Proposal-only autonomy; default tier-mode frontier merge authority; kill
+   switch; budget caps — none of these paths are touched by activation.
 2. Shadow mode NEVER changes a routing decision — the legacy result always
    wins; the gateway runs observe-only beside it.
 3. Outcome processing (ledger writes, `linkOutcome`'s in-place JSONL rewrite,
@@ -33,15 +33,17 @@ Safe, staged activation of two flag-gated subsystems that have shipped dark:
   dispatch. (A dedicated per-tick concurrency-used counter was NOT added —
   `tick.backends` per-backend dispatch counts plus the wall-clock delta carry
   the same soak signal without new plumbing through the dispatch closure.)
-- Concurrent dispatch: the m255/m256 suites already prove slot caps and
+- Concurrent dispatch: the m255/m256 suites already prove slot caps,
+  cap-aware local concurrency clamps, route-preserving workhorse spread, and
   flag-off byte-identity; m334 adds divergence-classification coverage.
 
 ## Stage 2 — supervised soak (OPERATIONAL, no code)
 
 1. Enable `fabric.concurrentDispatch: true, maxSlotsPerBackend: 2` on the
    operator's own enrollment for ≥1 week. Watch: tick wall-clock p50/p95,
-   proposals/tick, todaySpentUsd vs the serial baseline, judge-verdict
-   distribution drift, 429/backoff counters. Zero h-suite regressions in CI.
+   proposals/tick, durable dispatch yield by backend/source, todaySpentUsd vs
+   the serial baseline, judge-verdict distribution drift, 429/backoff counters.
+   Zero h-suite regressions in CI.
 2. Enable `fabric.gatewayShadow: true` until `divergenceStats()` reports
    ≥ **200 decisions**, divergence rate < **2%**, and **ZERO** safety-relevant
    divergences (gateway-would-dispatch where legacy blocked).

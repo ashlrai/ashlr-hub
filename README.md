@@ -204,9 +204,9 @@ The kill-switch is checked before every mutating operation in every backend and 
 |------|----------|-------------------|
 | `local` | Ollama, LM Studio | Proposals only (always) |
 | `mid` | Kimi K2, Hermes, NIM-hosted 70B | Branch/PR (opt-in, `autoMerge.midToBranch`) |
-| `frontier` | Claude Opus, Codex GPT | `main` — only with CI green + signed provenance + `mergeAuthority` config (default off) |
+| `frontier` | Claude Opus, Codex GPT | `main` in default `trustBasis:"tier"` mode — only with CI green + signed provenance + `mergeAuthority` config (default off) |
 
-Adding a backend is one entry in `cfg.foundry.engines` — no code change. The backend router uses learned routing (verified-outcome priors + cost estimates) to dispatch each backlog item to the appropriate tier.
+Adding a backend is one entry in `cfg.foundry.engines` — no code change. The backend router uses learned routing (verified-outcome priors, dispatch-production yield, and cost estimates) to dispatch each backlog item to the appropriate tier.
 
 ---
 
@@ -270,6 +270,13 @@ ashlr pulse                # rolling activity + spend analytics (1d/7d/30d)
 ashlr audit                # append-only confinement + action audit log
 ```
 
+`fleet status` shows both tick-level **Proposal production** and durable
+**Dispatch yield**. Dispatch yield is read from
+`~/.ashlr/dispatch-production/YYYY-MM-DD.jsonl` and reports
+`proposalRate = proposalsCreated / dispatch attempts`, plus no-proposal reasons
+grouped by backend/source in the human view and by backend, source, repo, and
+backend+model in JSON/API output.
+
 ---
 
 ## Command reference
@@ -327,7 +334,7 @@ Every safety property below is proven by a named adversarial test. These invaria
 5. **Git push is blocked.** The pre-push hook + credential strip make every push from the worktree fail. Proven by `test/m45.*` pre-push test.
 6. **Only the diff is consumed.** The loop ingests only the captured, scrubbed diff. The agent's own commits die with the sandbox. Proven by `test/m45.*` diff-only test.
 7. **Immutable signed provenance.** Every run and proposal carries write-once `{engineModel, engineTier}`, HMAC-signed at produce time. The merge gate re-verifies the HMAC before any merge-to-main. Proven by `test/m47.*` and `test/m47-1.*`.
-8. **Merge-to-main requires frontier + verification.** CI/verify green AND matching `cfg.foundry.mergeAuthority` entry required. Local/mid authors refused regardless. Proven by `test/m47.*` trust-and-verify test.
+8. **Merge-to-main requires explicit authority + verification.** Default `trustBasis: "tier"` requires CI/verify green plus a matching frontier `cfg.foundry.mergeAuthority` entry. Opt-in `trustBasis: "verification"` can authorize any producer only with a signed frontier judge ship, and opt-in `trustBasis: "evidence"` skips the judge only when base-bound deterministic evidence clears. Proven by `test/m47.*`, `test/m153.*`, and `test/m307.*`.
 9. **Self-improvement cannot self-disarm.** A self-target diff must pass the invariant suite flag-off and flag-on. Any diff weakening a safety test is refused. Proven by `test/m54.*`.
 10. **Zero new runtime dependencies.** Backends are CLIs or APIs the user already has. Proven by dependency-manifest grep-guard.
 
@@ -345,7 +352,10 @@ Full invariant set: [`docs/SPEC-V4-FOUNDRY.md`](docs/SPEC-V4-FOUNDRY.md) §9 and
 ├── runs/                # RunState per agent run (atomic, resumable)
 ├── swarms/              # SwarmState per multi-agent swarm
 ├── inbox/               # Pending/approved/rejected proposals (append-only lifecycle)
+├── dispatch-production/ # Append-only dispatch yield events (metadata only)
 ├── goals/               # Goal + milestone state
+├── fleet/
+│   └── worked.json      # Per-item cooldown outcomes (diff/empty)
 ├── genome/
 │   └── hub.jsonl        # Append-only hub memory store
 ├── foundry/
@@ -373,13 +383,15 @@ The config is validated against [`schema/config.schema.json`](schema/config.sche
   },
   "foundry": {
     // absent = proposal-only behavior, byte-identical to pre-foundry
-    "intelligence": true,          // learned routing (M53)
+    "intelligence": {},            // learned routing (M53; optional knobs in docs)
     "autoMerge": {
       "enabled": false,            // DEFAULT OFF — fleet never auto-merges to main
+      "trustBasis": "tier",        // tier | verification | evidence
       "midToBranch": false         // mid-tier proposals to branch (opt-in)
     },
     "mergeAuthority": [
-      { "engine": "claude", "model": "claude-opus-4-5" }
+      { "engine": "claude", "model": "claude-sonnet-5" },
+      { "engine": "codex", "model": "gpt-5.5" }
     ],
     "confinement": {               // OS-level jail per-engine or fleet-wide
       "*": { "mode": "os", "onUnsupported": "fallback" }

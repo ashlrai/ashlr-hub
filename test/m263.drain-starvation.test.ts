@@ -139,7 +139,7 @@ function baseCfg(overrides?: Record<string, unknown>): AshlrConfig {
   return {
     version: 1,
     foundry: {
-      autoMerge: { enabled: true },
+      autoMerge: { enabled: true, managerGate: true },
       autoArchiveAfterRejects: 3,
       proposalTtlDays: 14,
       judgePerPass: 8,

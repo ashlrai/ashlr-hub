@@ -64,6 +64,8 @@ export interface WorkedEvent {
   outcome: WorkedOutcome;
   /** ISO timestamp of the outcome. */
   ts: string;
+  /** Rejected proposal already swept into this outcome, when applicable. */
+  proposalId?: string;
 }
 
 /** The persisted worked ledger. */
@@ -138,6 +140,15 @@ export function loadWorkedLedger(): WorkedLedger {
             typeof (e as Record<string, unknown>)['ts'] === 'string' &&
             isWorkedOutcome((e as Record<string, unknown>)['outcome']),
         )
+        .map((e) => {
+          const raw = e as unknown as Record<string, unknown>;
+          return {
+            itemId: e.itemId,
+            outcome: e.outcome,
+            ts: e.ts,
+            ...(typeof raw['proposalId'] === 'string' ? { proposalId: raw['proposalId'] } : {}),
+          };
+        })
       : [];
     return { events };
   } catch {
@@ -188,13 +199,54 @@ export function recordOutcome(
   outcome: WorkedOutcome,
   ts?: string,
 ): void {
+  recordOutcomeEvent(itemId, outcome, ts);
+}
+
+function recordOutcomeEvent(
+  itemId: string,
+  outcome: WorkedOutcome,
+  ts?: string,
+  proposalId?: string,
+): void {
   try {
     const l = loadWorkedLedger();
-    l.events.push({ itemId, outcome, ts: ts ?? new Date().toISOString() });
+    l.events.push({
+      itemId,
+      outcome,
+      ts: ts ?? new Date().toISOString(),
+      ...(proposalId ? { proposalId } : {}),
+    });
     saveWorkedLedger(l);
   } catch {
     // Never throws.
   }
+}
+
+function proposalAlreadySwept(proposalId: string): boolean {
+  try {
+    return loadWorkedLedger().events.some((event) => event.proposalId === proposalId);
+  } catch {
+    return false;
+  }
+}
+
+function sweptProposalMarkerItemId(proposalId: string): string {
+  return `__swept_proposal__:${proposalId}`;
+}
+
+function recordSweptProposalOutcome(
+  itemId: string,
+  outcome: WorkedOutcome,
+  proposalId: string,
+  ts: string | undefined,
+  record: (itemId: string, outcome: WorkedOutcome, ts?: string) => void,
+): void {
+  if (record === recordOutcome) {
+    recordOutcomeEvent(itemId, outcome, ts, proposalId);
+    return;
+  }
+  record(itemId, outcome, ts);
+  recordOutcomeEvent(sweptProposalMarkerItemId(proposalId), outcome, ts, proposalId);
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +410,8 @@ export function sweepJudgedProposals(
     }
 
     for (const prop of judgedProposals) {
+      if (proposalAlreadySwept(prop.id)) continue;
+
       // Determine the verdict outcome from the proposal.
       // For rejected proposals: decisionReason may carry the raw verdict.
       // When absent, treat as 'judged-decline' (the manager only rejects noise/harmful).
@@ -371,7 +425,7 @@ export function sweepJudgedProposals(
       }
 
       if (prop.workItemId) {
-        record(prop.workItemId, outcome, ts);
+        recordSweptProposalOutcome(prop.workItemId, outcome, prop.id, ts, record);
         recorded++;
         continue;
       }
@@ -396,7 +450,7 @@ export function sweepJudgedProposals(
 
       if (!matched) continue;
 
-      record(matched.id, outcome, ts);
+      recordSweptProposalOutcome(matched.id, outcome, prop.id, ts, record);
       recorded++;
     }
   } catch {

@@ -164,6 +164,32 @@ describe('effective config snapshot', () => {
     expect(serialized).not.toContain('super-secret-token');
   });
 
+  it('surfaces evidence auto-merge trust without tier mergeAuthority warnings', () => {
+    const cfg = makeCfg({
+      foundry: {
+        allowedBackends: ['local-coder'],
+        mergeAuthority: [],
+        autoMerge: { enabled: true, trustBasis: 'evidence' },
+      },
+    } as Partial<AshlrConfig>);
+
+    const snapshot = buildEffectiveConfigSnapshot(cfg, {
+      rawConfig: {
+        foundry: {
+          allowedBackends: ['local-coder'],
+          mergeAuthority: [],
+          autoMerge: { enabled: true, trustBasis: 'evidence' },
+        },
+      },
+      configPath: join(fx.ashlrDir, 'config.json'),
+      configExists: true,
+      configParsed: true,
+    });
+
+    expect(snapshot.foundry.autoMerge.trustBasis.value).toBe('evidence');
+    expect(snapshot.warnings.join('\n')).not.toMatch(/mergeAuthority is empty/);
+  });
+
   it('GET /api/config/effective exposes the read-only snapshot', async () => {
     mkdirSync(fx.ashlrDir, { recursive: true });
     writeFileSync(

@@ -3,10 +3,10 @@
  *
  * Tests all 4 hooks committed in M185–M189:
  *
- *  Hook 1 — M185 ashlrcodeExecutor (src/core/run/ashlrcode-engine.js)
- *    a. flag ON + local-tier backend → runViaAshlrcode called; runGoal NOT called
- *    b. flag OFF → runGoal path used; runViaAshlrcode NOT called
- *    c. throws → tick still returns reason 'ok' (or valid early-exit)
+ *  Hook 1 — M185 ashlrcodeExecutor
+ *    a. flag ON + local-tier backend → runGoal uses sandboxed ashlrcode engine
+ *    b. flag OFF → original runGoal path used; legacy runViaAshlrcode NOT called
+ *    c. legacy adapter throws → irrelevant; daemon no longer calls it
  *    d. dry-run → NOT called
  *
  *  Hook 2 — M186 generative invent cycle (src/core/generative/invent-cycle.js)
@@ -186,7 +186,7 @@ beforeEach(() => {
     critique: { n: 1, nonEmpty: 1, judged: 1, topScore: 10, winnerIndex: 0 },
   });
 
-  // runViaAshlrcode: success result.
+  // Legacy direct adapter: daemon should no longer call this path.
   mockRunViaAshlrcode.mockResolvedValue({ ok: true });
 
   // runInventCycle: success.
@@ -264,7 +264,10 @@ function enrollBuiltinRepo() {
 function makeAcCfg(extra: Record<string, unknown> = {}): AshlrConfig {
   return makeCfg({
     foundry: {
-      allowedBackends: ['claude' as import('../src/core/types.js').EngineId],
+      allowedBackends: [
+        'claude' as import('../src/core/types.js').EngineId,
+        'ashlrcode' as import('../src/core/types.js').EngineId,
+      ],
       ashlrcodeExecutor: true,
       ...extra,
     } as unknown as AshlrConfig['foundry'],
@@ -286,31 +289,44 @@ function makeFlagCfg(flag: string, extra: Record<string, unknown> = {}): AshlrCo
 // Hook 1 — M185: ashlrcodeExecutor
 // ===========================================================================
 
-describe('M192 / M185 — ashlrcodeExecutor: flag ON → runViaAshlrcode', () => {
-  it('calls runViaAshlrcode when flag is ON + local-tier backend', async () => {
+describe('M192 / M185 — ashlrcodeExecutor: flag ON → sandboxed runGoal', () => {
+  it('routes through sandboxed runGoal as ashlrcode when flag is ON + local-tier backend', async () => {
     enrollFrontierRepo();
     const result = await tick(makeAcCfg(), { dryRun: false });
 
     expect(result.reason).toBe('ok');
-    expect(mockRunViaAshlrcode).toHaveBeenCalledTimes(1);
-    // runGoal must NOT be reached — ashlrcode executor short-circuited it.
-    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(mockRunViaAshlrcode).not.toHaveBeenCalled();
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    const [, , opts] = mockRunGoal.mock.calls[0] as [unknown, unknown, Record<string, unknown>];
+    expect(opts).toMatchObject({
+      engine: 'ashlrcode',
+      sandboxEngine: true,
+      requireSandbox: true,
+    });
   });
 
-  it('passes (item, repo, cfg) to runViaAshlrcode', async () => {
+  it('preserves work item context on the sandboxed ashlrcode run', async () => {
     const repo = enrollFrontierRepo();
     const cfg = makeAcCfg();
 
     await tick(cfg, { dryRun: false });
 
-    const [passedItem, passedRepo, passedCfg] = mockRunViaAshlrcode.mock.calls[0] as [
-      unknown,
+    expect(mockRunViaAshlrcode).not.toHaveBeenCalled();
+    const [goal, passedCfg, opts] = mockRunGoal.mock.calls[0] as [
       string,
       unknown,
+      Record<string, unknown>,
     ];
-    expect(typeof passedItem).toBe('object');
-    expect(passedRepo).toBe(repo.dir);
+    expect(goal).toContain('M192 test item 0');
     expect(passedCfg).toBe(cfg);
+    expect(opts).toMatchObject({
+      engine: 'ashlrcode',
+      cwd: repo.dir,
+      workItemId: `${repo.dir}:m192-item-0`,
+      workSource: 'todo',
+      sandboxEngine: true,
+      requireSandbox: true,
+    });
   });
 
   it('flag OFF → runGoal used; runViaAshlrcode NOT called', async () => {
@@ -332,7 +348,10 @@ describe('M192 / M185 — ashlrcodeExecutor: flag ON → runViaAshlrcode', () =>
     enrollFrontierRepo();
     const cfg = makeCfg({
       foundry: {
-        allowedBackends: ['claude' as import('../src/core/types.js').EngineId],
+        allowedBackends: [
+          'claude' as import('../src/core/types.js').EngineId,
+          'ashlrcode' as import('../src/core/types.js').EngineId,
+        ],
         ashlrcodeExecutor: false,
       } as unknown as AshlrConfig['foundry'],
     });
@@ -343,13 +362,30 @@ describe('M192 / M185 — ashlrcodeExecutor: flag ON → runViaAshlrcode', () =>
     expect(mockRunGoal).toHaveBeenCalledTimes(1);
   });
 
-  it('runViaAshlrcode throws → tick still returns reason ok', async () => {
+  it('flag ON but ashlrcode disallowed → original runGoal path is preserved', async () => {
+    enrollFrontierRepo();
+    const result = await tick(makeAcCfg({
+      allowedBackends: ['claude' as import('../src/core/types.js').EngineId],
+    }), { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(mockRunViaAshlrcode).not.toHaveBeenCalled();
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    const [, , opts] = mockRunGoal.mock.calls[0] as [unknown, unknown, Record<string, unknown>];
+    expect(opts.engine).toBe('claude');
+  });
+
+  it('legacy runViaAshlrcode failure is ignored because daemon no longer calls it', async () => {
     enrollFrontierRepo();
     mockRunViaAshlrcode.mockRejectedValue(new Error('ashlrcode exploded'));
 
     const result = await tick(makeAcCfg(), { dryRun: false });
 
-    expect(['ok', 'no-backlog', 'no-enrolled-repos']).toContain(result.reason);
+    expect(result.reason).toBe('ok');
+    expect(mockRunViaAshlrcode).not.toHaveBeenCalled();
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    const [, , opts] = mockRunGoal.mock.calls[0] as [unknown, unknown, Record<string, unknown>];
+    expect(opts.engine).toBe('ashlrcode');
     expect(typeof result.proposalsCreated).toBe('number');
   });
 

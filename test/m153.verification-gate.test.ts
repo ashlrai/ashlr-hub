@@ -106,6 +106,7 @@ vi.mock('../src/core/run/provider-client.js', () => ({
 
 import {
   autoMergeProposal,
+  evaluateEvidenceGate,
   evaluateVerificationGate,
   isFrontierJudge,
 } from '../src/core/inbox/merge.js';
@@ -236,6 +237,23 @@ function verifyCfg(over: Record<string, unknown> = {}): AshlrConfig {
         allowWithoutVerification: true,
         managerGate: false,          // Gate 7 OFF — verification gate replaces Gate 4
         trustBasis: 'verification',
+        ...over,
+      },
+    },
+  } as unknown as AshlrConfig;
+}
+
+/** Base config for judge-free evidence trust basis. */
+function evidenceCfg(over: Record<string, unknown> = {}): AshlrConfig {
+  return {
+    foundry: {
+      mergeAuthority: [],            // not consulted in evidence mode
+      autoMerge: {
+        enabled: true,
+        maxRisk: 'low',
+        allowWithoutVerification: true,
+        managerGate: false,
+        trustBasis: 'evidence',
         ...over,
       },
     },
@@ -619,6 +637,93 @@ describe('M153 evaluateVerificationGate — pure, all 5 criteria', () => {
 });
 
 // ===========================================================================
+// [E1-E3] evaluateEvidenceGate — pure judge-free authority
+// ===========================================================================
+
+describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () => {
+  function evidenceProposal(proposalId = 'e1', diff = docsDiff('docs/evidence.md')): Proposal {
+    const diffHash = hashDiff(diff);
+    const sig = signProvenance('local:qwen3-coder', 'local', diffHash);
+    return {
+      id: proposalId,
+      repo: tmpRepo,
+      origin: 'agent' as const,
+      kind: 'patch' as const,
+      title: 'evidence proposal',
+      summary: 'judge-free evidence gate',
+      diff,
+      diffHash,
+      provenanceSig: sig,
+      engineModel: 'local:qwen3-coder',
+      engineTier: 'local',
+      verifyResult: {
+        passed: true,
+        detail: 'all checks passed',
+        baseBranch: 'main',
+        baseHead: '0123456789abcdef0123456789abcdef01234567',
+        diffHash,
+      },
+      status: 'pending' as const,
+      createdAt: new Date().toISOString(),
+    } as Proposal;
+  }
+
+  it('[E1] suite-green base-bound evidence authorizes without any judged decision', () => {
+    const p = evidenceProposal();
+    const r = evaluateEvidenceGate(p, evidenceCfg(), []);
+
+    expect(r.authorized).toBe(true);
+    expect(r.reason).toMatch(/evidence gate cleared/);
+    expect(r.reason).toMatch(/base-bound suite green/);
+  });
+
+  it('[E2] passing verification without base binding is refused', () => {
+    const p: Proposal = {
+      ...evidenceProposal('e2'),
+      verifyResult: { passed: true, detail: 'legacy green result' },
+    };
+    const r = evaluateEvidenceGate(p, evidenceCfg(), []);
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/base-bound verification is missing/);
+  });
+
+  it('[E2b] base-bound verification for a different diff is refused', () => {
+    const p: Proposal = {
+      ...evidenceProposal('e2b'),
+      verifyResult: {
+        passed: true,
+        detail: 'old checks passed',
+        baseBranch: 'main',
+        baseHead: '0123456789abcdef0123456789abcdef01234567',
+        diffHash: hashDiff(docsDiff('docs/old.md')),
+      },
+    };
+    const r = evaluateEvidenceGate(p, evidenceCfg(), []);
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/verification diff binding is missing or stale/);
+  });
+
+  it('[E3] build, CI, and manifest diffs require judge or human review', () => {
+    const diff = [
+      'diff --git a/package.json b/package.json',
+      '--- a/package.json',
+      '+++ b/package.json',
+      '@@ -1 +1 @@',
+      '-{"scripts":{}}',
+      '+{"scripts":{"postinstall":"node x.js"}}',
+      '',
+    ].join('\n');
+    const p = evidenceProposal('e3', diff);
+    const r = evaluateEvidenceGate(p, evidenceCfg(), []);
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/build\/CI\/manifest/);
+  });
+});
+
+// ===========================================================================
 // [T1–T3] autoMergeProposal — trustBasis='tier' (M51 unchanged)
 // ===========================================================================
 
@@ -985,6 +1090,77 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
 
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/self-confirmation trap/);
+  });
+});
+
+// ===========================================================================
+// [E4-E5] autoMergeProposal — trustBasis='evidence'
+// ===========================================================================
+
+describe("M342 autoMergeProposal trustBasis='evidence'", () => {
+  it('[E4] local producer + deterministic evidence merges without a judged ledger entry', async () => {
+    initRepo(tmpRepo, 'main');
+    attachOrigin(tmpRepo, 'main');
+    git(tmpRepo, ['checkout', '-b', 'work']);
+    enroll(tmpRepo);
+
+    const diff = docsDiff('docs/e4.md');
+    const p = makePatch(diff, {
+      engineTier: 'local',
+      engineModel: 'local:qwen3-coder',
+    });
+    mockReadDecisions.mockReturnValue([]);
+    const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
+
+    const r = await autoMergeProposal(p.id, evidenceCfg());
+
+    expect(r.ok).toBe(true);
+    expect(r.merged).toBe(true);
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(git(tmpRepo, ['rev-parse', 'main'])).not.toBe(mainBefore);
+    expect(loadProposal(p.id)?.status).toBe('applied');
+    expect(loadProposal(p.id)?.verifyResult).toMatchObject({
+      passed: true,
+      baseBranch: 'main',
+      diffHash: hashDiff(diff),
+    });
+  });
+
+  it('[E5] evidence mode still refuses high-risk changes before merge', async () => {
+    initRepo(tmpRepo, 'main');
+    fs.mkdirSync(path.join(tmpRepo, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(tmpRepo, 'src/a.ts'), 'old\n', 'utf8');
+    fs.writeFileSync(path.join(tmpRepo, 'src/b.ts'), 'old\n', 'utf8');
+    git(tmpRepo, ['add', 'src/a.ts', 'src/b.ts']);
+    git(tmpRepo, ['commit', '-m', 'add source files']);
+    enroll(tmpRepo);
+
+    const diff = [
+      'diff --git a/src/a.ts b/src/a.ts',
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -1 +1 @@',
+      '-old',
+      '+new',
+      'diff --git a/src/b.ts b/src/b.ts',
+      '--- a/src/b.ts',
+      '+++ b/src/b.ts',
+      '@@ -1 +1 @@',
+      '-old',
+      '+new',
+      '',
+    ].join('\n');
+    const p = makePatch(diff, {
+      engineTier: 'local',
+      engineModel: 'local:qwen3-coder',
+    });
+
+    const r = await autoMergeProposal(p.id, evidenceCfg());
+
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/risk/);
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(loadProposal(p.id)?.status).toBe('pending');
   });
 });
 

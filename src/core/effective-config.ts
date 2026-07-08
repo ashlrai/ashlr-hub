@@ -8,7 +8,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { AshlrConfig, EngineId, EngineKind, EngineTier } from './types.js';
+import type { AshlrConfig, AutoMergeTrustBasis, EngineId, EngineKind, EngineTier } from './types.js';
 import { defaultConfig, loadConfig } from './config.js';
 import { resolveAutonomyControlMode } from './fleet/status.js';
 import { resolveEngineRegistry } from './run/engine-registry.js';
@@ -78,7 +78,7 @@ export interface EffectiveConfigSnapshot {
     };
     autoMerge: {
       enabled: EffectiveConfigValue<boolean>;
-      trustBasis: EffectiveConfigValue<'tier' | 'verification'>;
+      trustBasis: EffectiveConfigValue<AutoMergeTrustBasis>;
       maxRisk: EffectiveConfigValue<'low' | 'medium' | 'high'>;
       pushToRemote: EffectiveConfigValue<boolean>;
       midToBranch: EffectiveConfigValue<boolean>;
@@ -302,7 +302,12 @@ export function buildEffectiveConfigSnapshot(
   if (!rawHas(raw, 'daemon')) warnings.push('cfg.daemon is missing; daemon caps are hard-coded defaults.');
   if (!foundryEnabled) warnings.push('cfg.foundry is missing; fleet routing is effectively builtin-only and Foundry-only features are off.');
   if (foundryEnabled && !rawHas(raw, 'foundry.allowedBackends')) warnings.push('cfg.foundry.allowedBackends is missing; backend routing defaults to builtin only.');
-  if (autoMerge?.enabled === true && !cfg.foundry?.mergeAuthority?.length && autoMerge.trustBasis !== 'verification') {
+  if (
+    autoMerge?.enabled === true &&
+    !cfg.foundry?.mergeAuthority?.length &&
+    autoMerge.trustBasis !== 'verification' &&
+    autoMerge.trustBasis !== 'evidence'
+  ) {
     warnings.push('autoMerge.enabled is true but mergeAuthority is empty; tier-based main auto-merge will not authorize proposals.');
   }
   // M320: Sonnet 5 becomes the routing workhorse (M321) — if auto-merge is on
@@ -401,7 +406,13 @@ export function buildEffectiveConfigSnapshot(
       },
       autoMerge: {
         enabled: boolValue(raw, 'foundry.autoMerge.enabled', autoMerge?.enabled === true),
-        trustBasis: value(raw, 'foundry.autoMerge.trustBasis', autoMerge?.trustBasis === 'verification' ? 'verification' : 'tier'),
+        trustBasis: value(
+          raw,
+          'foundry.autoMerge.trustBasis',
+          autoMerge?.trustBasis === 'verification' || autoMerge?.trustBasis === 'evidence'
+            ? autoMerge.trustBasis
+            : 'tier',
+        ),
         maxRisk: value(raw, 'foundry.autoMerge.maxRisk', autoMerge?.maxRisk ?? 'low'),
         pushToRemote: boolValue(raw, 'foundry.autoMerge.pushToRemote', autoMerge?.pushToRemote === true),
         midToBranch: boolValue(raw, 'foundry.autoMerge.midToBranch', autoMerge?.midToBranch === true),

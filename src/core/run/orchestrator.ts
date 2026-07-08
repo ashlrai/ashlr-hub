@@ -1037,7 +1037,10 @@ export async function runGoal(
       // buildEngineCommand produces the EXACT argv for the real CLI.
       // spawnEngine applies withToolEnv(cfg) + phantom-exec wrap when enabled.
       // This is a SINGLE BOUNDED SPAWN — never recursive.
-      const modelEnv = process.env['ASHLR_MODEL'] ?? process.env['AC_MODEL'];
+      const modelEnv =
+        typeof opts.model === 'string' && opts.model.trim().length > 0
+          ? opts.model.trim()
+          : process.env['ASHLR_MODEL'] ?? process.env['AC_MODEL'];
       // Honor opts.cwd (e.g. a swarm task's target project dir) so the engine
       // spawns WITHIN the intended project, not wherever the parent launched.
       // Validate it is an existing directory before use; fall back to cwd.

@@ -199,6 +199,56 @@ describe('M333 — full-cost accounting', () => {
     expect(result.critique.totalCostUsd).toBeCloseTo(2.0, 5);
     expect(result.critique.billableCostUsd).toBeCloseTo(1.0, 5);
   });
+
+  it('summarizes terminal no-proposal reasons when every candidate is gate-blocked', async () => {
+    const cli = vi.fn(async (_engine: unknown, _goal: unknown, _cfg: unknown, runOpts: Record<string, unknown>) => ({
+      state: {
+        id: String(runOpts['runId'] ?? 'run-gate-blocked'),
+        status: 'done',
+        result: 'typecheck failed',
+        usage: { estCostUsd: 0.25 },
+        proposalOutcome: {
+          kind: 'completeness-gate',
+          reason: 'completeness gate blocked proposal: typecheck failed',
+          files: 2,
+          insertions: 4,
+          deletions: 1,
+        },
+      },
+      proposalOutcome: {
+        kind: 'completeness-gate',
+        reason: 'completeness gate blocked proposal: typecheck failed',
+        files: 2,
+        insertions: 4,
+        deletions: 1,
+      },
+    }));
+    const api = makeSandboxMock(0.0, 'api');
+    const h = await harness({ cli, api: api.fn, subscriptionEngines: [] });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      engine: 'claude' as never,
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.critique.noProposalReasons).toEqual([
+      {
+        reason: 'completeness-gate: completeness gate blocked proposal: typecheck failed',
+        count: 2,
+      },
+    ]);
+    expect(h.recordBestOfN).toHaveBeenCalledTimes(1);
+    const rec = h.recordBestOfN.mock.calls[0]![0] as {
+      candidates: Array<{ proposalOutcome?: string; proposalOutcomeReason?: string; proposalId: string | null }>;
+    };
+    expect(rec.candidates).toHaveLength(2);
+    expect(rec.candidates[0]).toMatchObject({
+      proposalId: null,
+      proposalOutcome: 'completeness-gate',
+      proposalOutcomeReason: 'completeness gate blocked proposal: typecheck failed',
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

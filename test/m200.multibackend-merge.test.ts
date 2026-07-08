@@ -218,7 +218,7 @@ afterEach(() => {
 function tierCfg(over: Record<string, unknown> = {}): AshlrConfig {
   return {
     foundry: {
-      autoMerge: { enabled: true, ...over },
+      autoMerge: { enabled: true, managerGate: true, ...over },
     },
   } as unknown as AshlrConfig;
 }
@@ -881,7 +881,7 @@ describe('M200 [C] tri-tier invariants — nim same as claude/codex', () => {
     // judgePerPass is a top-level foundry key, not under autoMerge:
     const r2 = await runAutoMergePass({
       foundry: {
-        autoMerge: { enabled: true },
+        autoMerge: { enabled: true, managerGate: true },
         judgePerPass: 2,
       },
     } as unknown as AshlrConfig);

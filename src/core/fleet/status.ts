@@ -17,7 +17,15 @@
 import { existsSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
-import type { AshlrConfig, DaemonDispatchTrace, DaemonTick, EngineId, Proposal, WorkItem } from '../types.js';
+import type {
+  AshlrConfig,
+  AutoMergeTrustBasis,
+  DaemonDispatchTrace,
+  DaemonTick,
+  EngineId,
+  Proposal,
+  WorkItem,
+} from '../types.js';
 import type { SharedQueueHealth } from './shared-store.js';
 import type { AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
 import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
@@ -28,6 +36,10 @@ import { strategicTierOfRepo, type StrategicTier } from '../ecosystem/focus.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import { loadQueuedAutonomyItems } from '../portfolio/queued-autonomy.js';
 import { detectRepoExecutionProfile, type RepoPackageManager } from '../run/repo-profile.js';
+import {
+  readDispatchProductionYield,
+  type DispatchProductionYieldSummary,
+} from './dispatch-production-ledger.js';
 
 export interface FleetBackendResourceStatus {
   availability: BackendAvailability | 'not-sensed';
@@ -109,7 +121,7 @@ export interface FleetAutoMergeBlockerSummary {
 
 export interface FleetAutoMergeReadinessStatus {
   enabled: boolean;
-  trustBasis: 'tier' | 'verification';
+  trustBasis: AutoMergeTrustBasis;
   pending: number;
   preflightReady: number;
   needsVerification: number;
@@ -173,6 +185,7 @@ export interface FleetProposalProductionDispatchSummary {
   repo: string;
   source: WorkItem['source'];
   backend: EngineId | null;
+  productionOutcome?: string;
   reason: string;
 }
 
@@ -252,6 +265,8 @@ export interface FleetStatus {
   autonomyEffectiveness?: FleetAutonomyEffectivenessStatus;
   /** Read-only diagnosis of recent proposal production from daemon ticks. */
   proposalProduction?: FleetProposalProductionStatus;
+  /** Durable 24h dispatch-production yield summary from the append-only ledger. */
+  dispatchProduction?: DispatchProductionYieldSummary;
   /** True when the global kill switch is engaged (fleet paused). */
   killed: boolean;
 }
@@ -563,6 +578,17 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   };
   const proposalProduction = buildProposalProductionStatus(recentTicks);
   if (proposalProduction) status.proposalProduction = proposalProduction;
+  try {
+    const dispatchProduction = readDispatchProductionYield({
+      windowMs: RECENT_WINDOW_MS,
+      limit: 1200,
+      limitPerDimension: 8,
+    });
+    if (dispatchProduction) status.dispatchProduction = dispatchProduction;
+  } catch {
+    // Optional history/analytics surface only. Fleet status must stay read-only
+    // and available even when the append-only ledger is absent or corrupt.
+  }
 
   try {
     const { buildResourceStrategyReport } = await import('../autonomy/resource-strategy.js');
@@ -624,14 +650,18 @@ function buildProposalProductionStatus(ticks: DaemonTick[]): FleetProposalProduc
     for (const reason of production.reasons ?? []) {
       addReason(reason.reason, reason.count);
     }
-    if (production.noProposalDispatches > 0) {
-      let examplesRemaining = production.noProposalDispatches;
-      for (const dispatch of tick.dispatches ?? []) {
-        if (examplesRemaining <= 0) break;
+    if (production.noProposalDispatches > 0 && recentNoProposalDispatches.length < 8) {
+      const knownNoProposalDispatches = (tick.dispatches ?? []).filter((dispatch) =>
+        dispatch.dispatched &&
+        dispatch.production !== undefined &&
+        dispatch.production.outcome !== 'proposal-created',
+      );
+      const sample = knownNoProposalDispatches.length > 0
+        ? knownNoProposalDispatches
+        : (tick.dispatches ?? []).filter((dispatch) => dispatch.dispatched).slice(0, production.noProposalDispatches);
+      for (const dispatch of sample) {
         if (recentNoProposalDispatches.length >= 8) break;
-        if (!dispatch.dispatched) continue;
         recentNoProposalDispatches.push(proposalProductionDispatchSummary(tick.ts, dispatch));
-        examplesRemaining--;
       }
     }
   }
@@ -664,7 +694,8 @@ function proposalProductionDispatchSummary(
     repo: dispatch.repo,
     source: dispatch.source,
     backend: dispatch.backend,
-    reason: dispatch.skipReason ?? dispatch.reason,
+    ...(dispatch.production?.outcome ? { productionOutcome: dispatch.production.outcome } : {}),
+    reason: dispatch.production?.reason ?? dispatch.skipReason ?? dispatch.reason,
   };
 }
 
@@ -934,8 +965,10 @@ async function buildAutoMergeReadinessStatus(
 ): Promise<FleetAutoMergeReadinessStatus> {
   const autoMerge = cfg.foundry?.autoMerge;
   const enabled = autoMerge?.enabled === true;
-  const trustBasis: 'tier' | 'verification' =
-    autoMerge?.trustBasis === 'verification' ? 'verification' : 'tier';
+  const trustBasis: AutoMergeTrustBasis =
+    autoMerge?.trustBasis === 'verification' || autoMerge?.trustBasis === 'evidence'
+      ? autoMerge.trustBasis
+      : 'tier';
   const maxRisk = autoMerge?.maxRisk ?? 'low';
 
   const byReason: Record<string, number> = {};
@@ -948,6 +981,7 @@ async function buildAutoMergeReadinessStatus(
   const {
     classifyRisk,
     evaluateBranchAuthority,
+    evaluateAutoMergeReadinessPreflight,
     evaluateMergeAuthority,
     mergeTargetForTier,
   } = await import('../inbox/merge.js');
@@ -998,7 +1032,13 @@ async function buildAutoMergeReadinessStatus(
       continue;
     }
 
-    if (trustBasis !== 'verification') {
+    const readiness = evaluateAutoMergeReadinessPreflight(proposal, cfg);
+    if (!readiness.ready) {
+      noteBlocker(proposal, readiness.reason ?? 'not ready for auto-merge', riskClass);
+      continue;
+    }
+
+    if (trustBasis === 'tier') {
       const target = mergeTargetForTier(proposal.engineTier);
       const authority =
         target === 'main'
@@ -1042,6 +1082,24 @@ async function buildAutoMergeReadinessStatus(
     if (trustBasis === 'verification' && proposal.verifyResult?.passed !== true) {
       needsVerification++;
       continue;
+    }
+
+    if (trustBasis === 'evidence') {
+      const verify = proposal.verifyResult;
+      const hasBaseBinding =
+        verify?.passed === true &&
+        typeof verify.baseBranch === 'string' &&
+        verify.baseBranch.length > 0 &&
+        typeof verify.baseHead === 'string' &&
+        verify.baseHead.length > 0;
+      const hasCurrentDiffBinding =
+        hasBaseBinding &&
+        typeof verify.diffHash === 'string' &&
+        verify.diffHash === hashDiff(proposal.diff);
+      if (!hasCurrentDiffBinding) {
+        needsVerification++;
+        continue;
+      }
     }
 
     preflightReady++;

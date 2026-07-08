@@ -47,6 +47,8 @@ export interface ProposalBrowserVerifyEvidence {
   visualGrounding?: VisualGroundingEvidence;
 }
 
+export type AutoMergeTrustBasis = 'tier' | 'verification' | 'evidence';
+
 /** Persisted configuration for the hub. Lives at ~/.ashlr/config.json. */
 export interface AshlrConfig {
   /** Schema/config version for forward migration. */
@@ -538,6 +540,14 @@ export interface AshlrConfig {
       anomalyK?: number;
       /** Min verified-success rate below which a class is nudged off frontier (0..1, default 0.5). */
       minFrontierSuccessRate?: number;
+      /**
+       * Min recent dispatch proposal-yield rate below which same-tier alternates
+       * may be preferred (0..1, default 0.2). Uses metadata-only
+       * dispatch-production events and never escalates tier.
+       */
+      minProposalYieldRate?: number;
+      /** Window for dispatch-production yield priors in hours (default 24). */
+      dispatchYieldWindowHours?: number;
     };
     /**
      * M47: tiered-trust auto-merge to main. DEFAULT DISABLED. When enabled, a
@@ -558,6 +568,9 @@ export interface AshlrConfig {
      *     be local. Self-confirmation (local judge) is NEVER allowed in this mode.
      *     The tier/mergeAuthority check is REPLACED (not bypassed) by this bar.
      *     M54 never-weaken + self-target guard + allowSelfMerge parity unchanged.
+     *   'evidence' — judge-free deterministic authority: base-bound suite green,
+     *     current-diff verification binding, valid provenance, EDV confirmation,
+     *     risk/scope caps, no partial capture, and no build/CI/manifest changes.
      */
     /**
      * M214: emit GenAI-OTel spans for fleet events (proposal, merge, judge
@@ -636,9 +649,17 @@ export interface AshlrConfig {
        * M153: trust basis for Gate 4 (default 'tier' = M51 behavior unchanged).
        * See comment above for full semantics.
        */
-      trustBasis?: 'tier' | 'verification';
+      trustBasis?: AutoMergeTrustBasis;
       /** Max risk class permitted to auto-merge (default 'low'). */
       maxRisk?: 'low' | 'medium' | 'high';
+      /** Optional pass-level manager quality gate. Default false. */
+      managerGate?: boolean;
+      /** Permit self-target auto-merge after self safety checks. Default false. */
+      allowSelfMerge?: boolean;
+      /** Max files permitted in an auto-merge diff (default 4). */
+      maxAutomergeFiles?: number;
+      /** Max changed lines permitted in an auto-merge diff (default 150). */
+      maxAutomergeLines?: number;
       /** Also merge/push on the remote (gh pr merge) when applying (default false). */
       pushToRemote?: boolean;
       /**
@@ -737,19 +758,21 @@ export interface AshlrConfig {
       concurrentDispatch?: boolean;
       /**
        * M255: maximum concurrent slots per backend when concurrentDispatch=true.
-       * open backends get this many slots; near backends get ceil(N/2).
+       * open backends get this many slots; near backends get ceil(N/2);
+       * backends that report capUnit='concurrent' are further clamped by their
+       * remaining local concurrency.
        * DEFAULT 3.
        */
       maxSlotsPerBackend?: number;
       /**
        * M256 Workhorse Dispatch: when true (alongside concurrentDispatch=true),
-       * bulk items are spread evenly across WORKHORSE_BACKENDS (local-coder,
-       * codex, nim) that have headroom, rather than always routing to whichever
-       * single backend the gateway prefers. Makes codex a co-equal parallel
-       * workhorse for bulk volume instead of sitting at 0 dispatches.
+       * local-mid bulk items are spread evenly across WORKHORSE_BACKENDS
+       * (local-coder, codex, nim) that have headroom. Protected gateway choices
+       * such as frontier, throttled, budget-pause, and resource-pause decisions
+       * keep their route hints.
        *
        * Safety: 0-slot governor still holds; codex retains frontier tier for
-       * trust/merge decisions; only the bulk-spread routeItem is changed.
+       * trust/merge decisions; only bulk route spreading is changed.
        * DEFAULT false → byte-identical to pre-M256. Requires concurrentDispatch=true.
        */
       workhorseDispatch?: boolean;
@@ -1278,6 +1301,29 @@ export interface RunStep {
   usage?: RunUsage;
 }
 
+export type RunProposalOutcomeKind =
+  | 'filed'
+  | 'empty-diff'
+  | 'completeness-gate'
+  | 'partial-completeness-gate'
+  | 'engine-failed-no-diff'
+  | 'api-model-task-failed'
+  | 'sandbox-unavailable'
+  | 'engine-command-missing'
+  | 'engine-unsupported'
+  | 'kill-switch'
+  | 'proposal-disabled'
+  | 'proposal-capture-error';
+
+export interface RunProposalOutcome {
+  kind: RunProposalOutcomeKind;
+  reason: string;
+  proposalId?: string;
+  files?: number;
+  insertions?: number;
+  deletions?: number;
+}
+
 /** Full persisted state of a run. Lives at ~/.ashlr/runs/<id>.json. */
 export interface RunState {
   /** Stable run id. */
@@ -1311,6 +1357,8 @@ export interface RunState {
   status: 'running' | 'done' | 'aborted' | 'failed';
   /** Synthesized final answer, present when done. */
   result?: string;
+  /** Metadata-only reason a sandboxed autonomous run did or did not file a proposal. */
+  proposalOutcome?: RunProposalOutcome;
   /**
    * M236: why a stall-terminated run was stopped.
    * Set only when the run was terminated by the stall monitor (run-monitor.ts).
@@ -1327,6 +1375,11 @@ export interface RunOptions {
   parallel?: number;
   /** Engine selector ('builtin' | 'ashlrcode' | 'aw'). */
   engine?: string;
+  /**
+   * Optional concrete model chosen by the router/gateway for this run. When set,
+   * external CLI/API engines use it instead of ASHLR_MODEL / AC_MODEL.
+   */
+  model?: string;
   /** Whether to load aggregated MCP tools (default true). */
   tools?: boolean;
   /** Whether cloud providers are permitted. */
@@ -2919,6 +2972,8 @@ export interface ProposalVerifyResult {
   browser?: ProposalBrowserVerifyEvidence;
   baseBranch?: string;
   baseHead?: string;
+  /** Hash of the proposal diff that was verified. Required for judge-free evidence reuse. */
+  diffHash?: string;
   verifiedAt?: string;
   source?: 'auto-merge' | 'auto-merge-preflight' | 'manual' | string;
 }
@@ -3198,6 +3253,27 @@ export interface DaemonDispatchTrace {
   spentUsd: number;
   /** Skip/error reason when no engine was invoked or dispatch failed. */
   skipReason?: string;
+  /** Terminal proposal-production outcome for dispatched work, when known. */
+  production?: DaemonDispatchProduction;
+}
+
+export type DaemonDispatchProductionOutcome =
+  | 'proposal-created'
+  | 'empty-diff'
+  | 'gate-blocked'
+  | 'engine-failed'
+  | 'sandbox-failed'
+  | 'proposal-capture-error'
+  | 'proposal-disabled'
+  | 'unknown';
+
+export interface DaemonDispatchProduction {
+  outcome: DaemonDispatchProductionOutcome;
+  proposalId?: string;
+  runId?: string;
+  reason?: string;
+  diffFiles?: number;
+  diffLines?: number;
 }
 
 export interface DaemonProposalProductionReason {

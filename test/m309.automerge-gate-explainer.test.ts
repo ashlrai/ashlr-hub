@@ -125,6 +125,29 @@ describe('M309 explainAutoMergeGate', () => {
     expect(r.reason).toMatch(/no 'judged' decision/);
   });
 
+  it('explains evidence-mode authority without requiring judge evidence', () => {
+    const diff = docDiff;
+    const r = explainAutoMergeGate(
+      proposal({
+        diff,
+        verifyResult: {
+          passed: true,
+          detail: 'green',
+          baseBranch: 'main',
+          baseHead: '0123456789abcdef0123456789abcdef01234567',
+          diffHash: hashDiff(diff),
+        },
+      }),
+      cfg({ trustBasis: 'evidence' }),
+      { decisionsForProposal: [] },
+    );
+
+    expect(r.mergeable).toBe(true);
+    expect(r.blockers).toEqual([]);
+    expect(r.facts.trustBasis).toBe('evidence');
+    expect(r.reason).toMatch(/satisfied by available read-only evidence/);
+  });
+
   it('explains risk threshold blockers', () => {
     const r = explainAutoMergeGate(
       proposal({ diff: sourceDiff, verifyResult: { passed: true, detail: 'green' } }),

@@ -354,6 +354,29 @@ describe('M220 sweepJudgedProposals — pure unit', () => {
     expect(event?.outcome).toBe('judged-noise');
   });
 
+  it('records each rejected proposal only once across repeated sweeps', () => {
+    const item = makeItem('repeat-item', tmpRepo, { title: 'Repeated rejected proposal' });
+    const proposals = [{
+      id: 'prop-repeat',
+      title: 'Repeated rejected proposal',
+      summary: '',
+      repo: tmpRepo,
+      status: 'rejected',
+      decisionReason: 'harmful',
+      workItemId: item.id,
+    }];
+
+    expect(sweepJudgedProposals(proposals, [item])).toBe(1);
+    expect(sweepJudgedProposals(proposals, [item])).toBe(0);
+
+    const events = loadWorkedLedger().events.filter((e) => e.itemId === item.id);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      outcome: 'judged-decline',
+      proposalId: 'prop-repeat',
+    });
+  });
+
   it('prefers proposal.workItemId over title/summary matching', () => {
     const right = makeItem('right-item', tmpRepo, { title: 'Right item' });
     const wrong = makeItem('wrong-item', tmpRepo, { title: 'Wrong item' });

@@ -4,7 +4,7 @@ This document describes every field in the `foundry` block of `~/.ashlr/config.j
 A copy-pasteable example lives at `docs/examples/foundry.config.json`.
 
 See `docs/SPEC-V5-OPEN-FLEET.md` for the full v5 Open Fleet design that this
-configuration severs.
+configuration serves.
 
 ---
 
@@ -19,8 +19,10 @@ this block:
 
 - **Proposal-first**: work is always a diff proposal routed through the M23 inbox
   before any outward mutation.
-- **Tier gate**: only `frontier` backends (claude + codex in the builtin roster)
-  may ever reach `main`. Mid-tier and local backends are branch-eligible only.
+- **Default tier gate**: in `autoMerge.trustBasis: "tier"` mode, only
+  configured `frontier` backends (claude + codex in the builtin roster) may
+  reach `main`. Opt-in `verification` and `evidence` trust modes replace that
+  producer-tier authority with stronger judge/evidence gates.
 - **No implicit frontier**: a malformed or tier-less entry added via
   `cfg.foundry.engines` is silently dropped, never promoted.
 
@@ -52,8 +54,8 @@ key required).
 
 ```json
 "models": {
-  "claude": "claude-opus-4-5",
-  "codex":  "gpt-5o",
+  "claude": "claude-sonnet-5",
+  "codex":  "gpt-5.5",
   "hermes": "hermes-3-llama-3.1-70b"
 }
 ```
@@ -95,6 +97,36 @@ Claude 5 generation rollout. **Absent ⇒ enabled** — both fields default `tru
   `{ "engine": "claude", "model": "claude-sonnet-5" }` to `mergeAuthority` —
   otherwise Sonnet 5 proposals verify + judge but never auto-merge (an
   effective-config warning surfaces this).
+
+---
+
+### `intelligence` (M53)
+
+```json
+"intelligence": {
+  "anomalyK": 4,
+  "minFrontierSuccessRate": 0.5,
+  "minProposalYieldRate": 0.2,
+  "dispatchYieldWindowHours": 24
+}
+```
+
+Fleet-intelligence routing is enabled by the presence of this object. When the
+field is absent, routing stays byte-identical to the static router. The knobs are
+conservative nudges only:
+
+- `anomalyK` holds unusually expensive runs for review.
+- `minFrontierSuccessRate` nudges task classes away from frontier when judged
+  success is thin.
+- `minProposalYieldRate` uses durable dispatch-production yield to prefer an
+  installed same-tier alternative after at least three recent attempts. It never
+  escalates tier and defaults to `0.2`.
+- `dispatchYieldWindowHours` controls the metadata-only yield window read from
+  `~/.ashlr/dispatch-production/YYYY-MM-DD.jsonl` (default `24`).
+
+`dispatch yield` is distinct from judged ship rate: it measures whether
+dispatches create proposals at all, grouped by backend/source/repo/model, and is
+also visible in `ashlr fleet status` and Mission Control.
 
 ---
 
@@ -220,6 +252,36 @@ full three-stage program before flipping `fabric.gateway` /
 
 ---
 
+### `fabric.concurrentDispatch`, `fabric.maxSlotsPerBackend`, `fabric.workhorseDispatch`
+
+```json
+"fabric": {
+  "gateway": true,
+  "concurrentDispatch": true,
+  "maxSlotsPerBackend": 3,
+  "workhorseDispatch": true
+},
+"local": {
+  "maxConcurrent": 1
+}
+```
+
+`concurrentDispatch` lets the daemon plan one tick across every backend with
+trusted headroom instead of running the item loop serially. `maxSlotsPerBackend`
+is the generic per-backend planning cap: `open` gets that many slots, `near`
+gets half rounded up, and unknown/throttled/exhausted/unreachable get zero.
+Backends that report `capUnit:"concurrent"` are further clamped by remaining
+local concurrency, so `foundry.local.maxConcurrent:1` prevents local-coder from
+receiving a multi-item wave while Ollama is already busy.
+
+`workhorseDispatch` spreads local-mid bulk items across local-coder, codex, and
+nim when they have slots. It preserves protected gateway decisions such as
+frontier, throttled, budget-pause, and resource-pause routes, so hard items and
+skip semantics are not downgraded by the bulk spreader. DEFAULT off; requires
+`fabric.concurrentDispatch:true`, and is most useful with `fabric.gateway:true`.
+
+---
+
 ### `engines`
 
 ```json
@@ -309,25 +371,26 @@ The base URL can be overridden per-provider with a `baseUrlEnv` field (e.g.
 
 ```json
 "mergeAuthority": [
-  { "engine": "claude", "model": "claude-opus-4-5" },
-  { "engine": "codex",  "model": "gpt-5o" }
+  { "engine": "claude", "model": "claude-sonnet-5" },
+  { "engine": "codex",  "model": "gpt-5.5" }
 ]
 ```
 
-Allowlist of `{engine, model}` pairs that may ever auto-apply a proposal to `main`.
-The gate is enforced by the M47 tiered-trust merge gate — a proposal only passes
-when **all** of the following hold:
+Allowlist of `{engine, model}` pairs that may auto-apply a proposal to `main` in
+the default `autoMerge.trustBasis: "tier"` mode. The M47 tiered-trust merge gate
+only passes when **all** of the following hold:
 
 1. The engine's registry `tier` is `"frontier"`.
 2. The `{engine, model}` pair appears in this list.
 3. `autoMerge.enabled` is `true`.
 4. Full verification passes and risk class ≤ `autoMerge.maxRisk`.
 
-**Mid-tier and local backends are intentionally absent from this list.** `hermes`
-(tier `"mid"`), `kimi` (tier `"mid"`), `opencode` (tier `"local"`), `builtin`
-(tier `"local"`) can never satisfy rule 1, so they can never reach `main` even
-if you added them here. The fleet scheduler enforces this invariant (tested in
-`test/m51.trust.test.ts`).
+**Mid-tier and local backends are intentionally absent from this list.** In tier
+mode, `hermes` (tier `"mid"`), `kimi` (tier `"mid"`), `opencode` (tier
+`"local"`), and `builtin` (tier `"local"`) can never satisfy rule 1, so adding
+them here does not grant main authority. In `verification` and `evidence` trust
+modes, `mergeAuthority` is replaced by the stronger judge/evidence authority
+bar described under `autoMerge`.
 
 **M320 — spelling-variant-safe matching.** Entries match through
 `canonicalModelTag`, so `"sonnet-5"`, `"claude-sonnet-5"`, and a proposal's
@@ -407,14 +470,26 @@ path. When `false` (or absent), proposals never auto-apply to `main` regardless
 of tier, mergeAuthority, or verification result — everything goes through the M23
 inbox for manual approval.
 
-Set `enabled: true` only after you have validated the mergeAuthority list and
-are confident in the verification harness. Additional guards:
+Set `enabled: true` only after you have validated the authority mode and are
+confident in the verification harness. Additional guards:
 
 | Field                     | Default   | Effect when `enabled: true`                         |
 |---------------------------|-----------|-----------------------------------------------------|
+| `trustBasis`              | `"tier"`  | Authority mode: `"tier"`, `"verification"`, or `"evidence"`. |
 | `maxRisk`                 | `"low"`   | Only `"low"` risk proposals auto-merge.             |
 | `pushToRemote`            | `false`   | Also run `gh pr merge` when applying.               |
 | `allowWithoutVerification`| `false`   | Fail-closed: refuse auto-merge with no tests found. |
+
+`trustBasis: "tier"` is the conservative default: only configured frontier
+`mergeAuthority` producers can reach `main`. `trustBasis: "verification"`
+replaces producer-tier authority with a stronger judge-backed bar: suite green,
+signed frontier judge `ship`, EDV confirmation, provenance, and risk/scope caps.
+`trustBasis: "evidence"` is the judge-free mode: no frontier judge is called, but
+the proposal must carry base-bound suite-green verification whose
+`verifyResult.diffHash` matches the current proposal diff, plus provenance, EDV,
+manifest-safety, and risk/scope evidence. Missing or stale diff binding triggers
+reverification/refusal. All modes still obey enrollment, kill switch, self-target
+guards, evidence-pack persistence, and the same final merge/PR execution gates.
 
 ---
 
@@ -489,10 +564,10 @@ ashlr run --allow-cloud "harden the inbox apply path"
 
 `ashlr models` will show NIM with its readiness status (key present? reachable?).
 
-**Trust tier:** `nim` is `mid` — branch-eligible after verification, never
-merge-authority for `main`. It cannot reach `main` regardless of `mergeAuthority`
-unless you explicitly promote it to `frontier` and add it to `mergeAuthority`
-(requires a code-reviewed change to the builtin registry).
+**Trust tier:** `nim` is `mid` — branch-eligible after verification in default
+tier mode and never listed as tier-mode merge authority. It can only reach
+`main` through opt-in `verification` or `evidence` authority, or by an explicit
+code-reviewed promotion to `frontier` plus `mergeAuthority`.
 
 ---
 

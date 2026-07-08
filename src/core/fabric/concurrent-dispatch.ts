@@ -4,10 +4,12 @@
  * Provides pure planning + async execution primitives for running the work queue
  * across ALL backends with headroom simultaneously, rather than one at a time.
  *
- *   slotsForAvailability(avail, maxSlots)
- *     Maps BackendAvailability → concurrent-slot count (the hard governor).
+ *   slotsForAvailability(avail, maxSlots) / slotsForBackendState(state, maxSlots)
+ *     Maps BackendAvailability plus backend-specific hard caps to
+ *     concurrent-slot count (the hard governor).
  *     open        → maxSlots          (full headroom, default 3)
  *     near        → ceil(maxSlots/2)  (half headroom, round up)
+ *     capUnit=concurrent clamps by remaining local concurrency
  *     unknown     → 0                 (no trusted capacity signal)
  *     throttled   → 0                 (rate-limited — never dispatch)
  *     exhausted   → 0                 (subscription cap hit — never dispatch)
@@ -31,8 +33,9 @@
  *     routing hint map, then delegates to planConcurrentDispatch.
  *     When cfg.foundry.fabric.workhorseDispatch=true (M256), bulk items are
  *     spread evenly across WORKHORSE_BACKENDS (local-coder, codex, nim) that
- *     have headroom, making codex a co-equal parallel workhorse instead of
- *     frontier-only overflow. Flag-off = today's gateway-preference behavior.
+ *     have headroom, while protected gateway decisions (frontier, throttled,
+ *     budget-pause, resource-pause) keep their route hint. Flag-off = today's
+ *     gateway-preference behavior.
  *     Never throws.
  *
  * Safety invariants:
@@ -48,7 +51,7 @@
  */
 
 import type { EngineId, WorkItem, AshlrConfig } from '../types.js';
-import type { BackendAvailability, ResourceSnapshot } from './resource-monitor.js';
+import type { BackendAvailability, BackendResourceState, ResourceSnapshot } from './resource-monitor.js';
 import { decide as gatewayDecide } from './gateway.js';
 
 // ---------------------------------------------------------------------------
@@ -140,6 +143,43 @@ export function slotsForAvailability(
   }
 }
 
+/**
+ * Map a full backend resource state to concurrent slots.
+ *
+ * Most backends use availability buckets only. Local engines can report
+ * `capUnit:'concurrent'`, where `cap` is the actual hard process/model
+ * concurrency and `usedPct` estimates how much of that cap is already occupied.
+ * Clamp the generic availability slot budget by that remaining capacity so a
+ * local-coder with maxConcurrent=1 cannot receive multiple new assignments.
+ */
+export function slotsForBackendState(
+  state: Pick<BackendResourceState, 'availability' | 'usedPct' | 'cap' | 'capUnit'>,
+  maxSlots = 3,
+): number {
+  const baseSlots = slotsForAvailability(state.availability, maxSlots);
+  if (baseSlots <= 0 || state.capUnit !== 'concurrent') {
+    return baseSlots;
+  }
+
+  if (typeof state.cap !== 'number' || !Number.isFinite(state.cap)) {
+    return baseSlots;
+  }
+
+  const concurrentCap = Math.max(0, Math.floor(state.cap));
+  if (concurrentCap <= 0) {
+    return 0;
+  }
+
+  let remainingByCap = concurrentCap;
+  if (typeof state.usedPct === 'number' && Number.isFinite(state.usedPct)) {
+    const usedPct = Math.min(100, Math.max(0, state.usedPct));
+    const usedSlots = Math.round((concurrentCap * usedPct) / 100);
+    remainingByCap = Math.max(0, concurrentCap - usedSlots);
+  }
+
+  return Math.min(baseSlots, remainingByCap);
+}
+
 // ---------------------------------------------------------------------------
 // planConcurrentDispatch — pure planner
 // ---------------------------------------------------------------------------
@@ -148,7 +188,7 @@ export function slotsForAvailability(
  * Pure planning function. Assigns items across ALL backends that have headroom.
  *
  * Algorithm:
- *  1. Compute slot budgets for every backend in the snapshot via slotsForAvailability.
+ *  1. Compute slot budgets for every backend in the snapshot via slotsForBackendState.
  *  2. Ensure builtin always appears: if absent from snapshot, add it as open.
  *     If the snapshot marks builtin exhausted/throttled/unreachable, slots = 0
  *     (monitor wins — we do NOT force-open a backend the monitor says is dead).
@@ -182,12 +222,12 @@ export function planConcurrentDispatch(
   // Build slot budget map from snapshot.
   const slotsMap = new Map<EngineId, number>();
   for (const state of snapshot.backends) {
-    slotsMap.set(state.backend, slotsForAvailability(state.availability, maxSlots));
+    slotsMap.set(state.backend, slotsForBackendState(state, maxSlots));
   }
 
   // Ensure builtin is present as a fallback if not in snapshot.
   // Only add if absent — if the snapshot marks builtin exhausted/throttled,
-  // slotsForAvailability will return 0 for it, and it won't get eligible.
+  // slotsForBackendState will return 0 for it, and it won't get eligible.
   if (!slotsMap.has('builtin')) {
     slotsMap.set('builtin', maxSlots);
   }
@@ -407,6 +447,7 @@ export async function buildGatewayDispatchPlan(
 ): Promise<DispatchPlan> {
   try {
     const routeHints = new Map<string, EngineId>();
+    const routeReasons = new Map<string, string>();
 
     if (cfg.foundry?.fabric?.gateway === true) {
       const decisions = await Promise.allSettled(
@@ -417,12 +458,13 @@ export async function buildGatewayDispatchPlan(
         const d = decisions[i];
         if (d?.status === 'fulfilled') {
           routeHints.set(item.id, d.value.backend);
+          routeReasons.set(item.id, d.value.reason);
         }
         // Error → item gets 'builtin' via fallback below
       }
     }
 
-    const routeItem = buildConcurrentDispatchRouteItem(snapshot, dispatchCfg, cfg, routeHints);
+    const routeItem = buildConcurrentDispatchRouteItem(snapshot, dispatchCfg, cfg, routeHints, routeReasons);
     return planConcurrentDispatch(items, snapshot, dispatchCfg, routeItem);
   } catch {
     // Never-throws: safe fallback assigns everything to builtin
@@ -443,9 +485,10 @@ export async function buildGatewayDispatchPlan(
 /**
  * Build the routeItem function used by concurrent daemon dispatch.
  *
- * M256: workhorse-dispatch path spreads bulk items evenly across
- * WORKHORSE_BACKENDS (local-coder, codex, nim) that have headroom, rather than
- * always preferring the single backend the gateway returned.
+ * M256: workhorse-dispatch path spreads local-mid bulk items evenly across
+ * WORKHORSE_BACKENDS (local-coder, codex, nim) that have headroom, while
+ * preserving protected gateway route hints such as frontier, throttled,
+ * budget-pause, and resource-pause decisions.
  *
  * Gated: only active when concurrentDispatch=true invokes this planner and
  * workhorseDispatch=true. Flag-off returns the gateway/router hint unchanged.
@@ -455,16 +498,45 @@ export function buildConcurrentDispatchRouteItem(
   dispatchCfg: ConcurrentDispatchCfg,
   cfg: AshlrConfig,
   routeHints: ReadonlyMap<string, EngineId>,
+  routeReasons?: ReadonlyMap<string, string>,
 ): (item: WorkItem) => EngineId {
   if (cfg.foundry?.fabric?.workhorseDispatch === true) {
-    return buildWorkhorseSpreader(snapshot, dispatchCfg);
+    const spreadBulkItem = buildWorkhorseSpreader(snapshot, dispatchCfg);
+    return (item: WorkItem): EngineId => {
+      const hinted = routeHints.get(item.id);
+      const reason = routeReasons?.get(item.id);
+      if (hinted !== undefined && shouldPreserveWorkhorseRouteHint(hinted, reason)) {
+        return hinted;
+      }
+      return spreadBulkItem(item);
+    };
   }
   return (item: WorkItem): EngineId => routeHints.get(item.id) ?? 'builtin';
 }
 
+function shouldPreserveWorkhorseRouteHint(hinted: EngineId, reason: string | undefined): boolean {
+  const normalized = reason?.trim() ?? '';
+  if (
+    normalized.startsWith('throttled:') ||
+    normalized.startsWith('budget-pause:') ||
+    normalized.startsWith('resource-pause:') ||
+    normalized.startsWith('frontier:') ||
+    normalized.startsWith('frontier-fallback:')
+  ) {
+    return true;
+  }
+
+  if (normalized.startsWith('local-mid bulk:')) {
+    return false;
+  }
+
+  return !WORKHORSE_BACKENDS.includes(hinted);
+}
+
 /**
  * M256: Build a stateful round-robin routeItem function that distributes items
- * across WORKHORSE_BACKENDS that have available slots in the current snapshot.
+ * across WORKHORSE_BACKENDS that have cap-aware available slots in the current
+ * snapshot.
  *
  * Only backends that are BOTH in WORKHORSE_BACKENDS AND have > 0 slots in
  * the snapshot participate. If no workhorse backends have slots, falls back
@@ -486,7 +558,7 @@ function buildWorkhorseSpreader(
   // Build a slot budget map from the snapshot (same logic as planConcurrentDispatch).
   const snapshotSlots = new Map<EngineId, number>();
   for (const state of snapshot.backends) {
-    snapshotSlots.set(state.backend, slotsForAvailability(state.availability, maxSlots));
+    snapshotSlots.set(state.backend, slotsForBackendState(state, maxSlots));
   }
 
   // Active workhorses = WORKHORSE_BACKENDS that have > 0 slots.

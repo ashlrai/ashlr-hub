@@ -140,7 +140,7 @@ function cfg271(overrides?: Record<string, unknown>): AshlrConfig {
   return {
     version: 1,
     foundry: {
-      autoMerge: { enabled: true },
+      autoMerge: { enabled: true, managerGate: true },
       autoArchiveAfterRejects: 3,
       proposalTtlDays: 30,
       judgePerPass: 1, // tight cap so proposals are capped by default

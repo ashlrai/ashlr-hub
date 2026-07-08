@@ -310,6 +310,17 @@ describe('buildEngineCommand — ashlrcode', () => {
     expect(cmd!.args[1]).toBe(GOAL);
   });
 
+  it('appends unattended flags when autonomous', () => {
+    const cmd = buildEngineCommand('ashlrcode', GOAL, makeConfig(), { autonomous: true });
+    expect(cmd!.args).toEqual([
+      '--goal',
+      GOAL,
+      '--autonomous',
+      '--dangerously-skip-permissions',
+      '--surgical',
+    ]);
+  });
+
   it('is a pure function — does not actually spawn anything', () => {
     // Just calling it twice must return the same shape deterministically.
     const a = buildEngineCommand('ashlrcode', GOAL, makeConfig());

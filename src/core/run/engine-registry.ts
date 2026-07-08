@@ -10,8 +10,9 @@
  * no code change.
  *
  * PARITY GUARANTEE (locked by test/m50.engine-registry): `compileArgv` reproduces
- * the EXACT argv the pre-M50 switch produced for builtin/ashlrcode/aw/claude/codex,
- * with and without a model and with and without autonomous mode.
+ * the EXACT non-autonomous argv the pre-M50 switch produced for builtin/ashlrcode/
+ * aw/claude/codex, while autonomous mode may append engine-specific unattended
+ * flags required by the sandboxed fleet executor.
  *
  * GUARDRAILS:
  *  - compileArgv is PURE and injection-safe: placeholders are substituted only as
@@ -124,6 +125,8 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
   },
 
   // ac --goal <goal>   (real bin is 'ac'; alias 'ashlrcode')
+  // autonomous: run ac's unattended single-shot agent loop inside Ashlr's
+  // external sandbox/proposal-capture path.
   ashlrcode: {
     id: 'ashlrcode',
     kind: 'cli-agent',
@@ -131,6 +134,7 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
     bin: 'ac',
     bins: ['ac', 'ashlrcode'],
     argv: ['--goal', '$GOAL'],
+    autonomousArgv: ['--autonomous', '--dangerously-skip-permissions', '--surgical'],
     capabilities: ['agent', 'edit'],
   },
 

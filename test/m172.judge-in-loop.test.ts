@@ -163,7 +163,7 @@ afterEach(() => {
 function enabledCfg(over: Record<string, unknown> = {}): AshlrConfig {
   return {
     foundry: {
-      autoMerge: { enabled: true },
+      autoMerge: { enabled: true, managerGate: true },
       ...over,
     },
   } as unknown as AshlrConfig;
@@ -582,8 +582,13 @@ describe('M172+M175 trust-basis-aware pre-filter', () => {
     const p = makeProp('t3-local', 'local');
     mockListProposals.mockReturnValue([p]);
 
-    // enabledCfg() has no trustBasis → defaults to tier mode
-    const r = await runAutoMergePass(enabledCfg());
+    const cfg = {
+      foundry: {
+        autoMerge: { enabled: true },
+      },
+    } as unknown as AshlrConfig;
+
+    const r = await runAutoMergePass(cfg);
 
     // Pre-filter must skip the local proposal before the judge is called.
     expect(mockJudgeProposal).not.toHaveBeenCalled();
@@ -636,21 +641,22 @@ describe('M172+M175 trust-basis-aware pre-filter', () => {
     expect(r.attempted).toBe(0);
   });
 
-  it('[T6] tier mode: FRONTIER proposal still judged+merged (M51 happy path unaffected)', async () => {
+  it('[T6] tier mode: FRONTIER proposal reaches merge gate without pass-level judging', async () => {
     const p = makeProp('t6-frontier', 'frontier');
     mockListProposals.mockReturnValue([p]);
     mockReadDecisions.mockReturnValue([]);
 
-    mockJudgeProposal.mockResolvedValueOnce({
-      proposalId: 't6-frontier', verdict: 'ship', value: 5, correctness: 5,
-      scope: 1, alignment: 5, rationale: 'ship', wouldMerge: true,
-    } satisfies ManagerVerdict);
+    const cfg = {
+      foundry: {
+        autoMerge: { enabled: true },
+      },
+    } as unknown as AshlrConfig;
 
-    const r = await runAutoMergePass(enabledCfg());
+    const r = await runAutoMergePass(cfg);
 
-    expect(mockJudgeProposal).toHaveBeenCalledOnce();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(mockAutoMergeProposal).toHaveBeenCalledWith('t6-frontier', expect.anything());
-    expect(r.judged).toBe(1);
+    expect(r.judged).toBe(0);
     expect(r.attempted).toBe(1);
   });
 });

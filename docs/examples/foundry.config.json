@@ -1,11 +1,16 @@
 {
   "foundry": {
-    "allowedBackends": ["builtin", "claude", "codex", "hermes"],
+    "allowedBackends": ["builtin", "claude", "codex", "local-coder", "nim", "hermes"],
 
     "models": {
-      "claude": "claude-opus-4-5",
-      "codex": "gpt-5o",
+      "claude": "claude-sonnet-5",
+      "codex": "gpt-5.5",
       "hermes": "hermes-3-llama-3.1-70b"
+    },
+
+    "intelligence": {
+      "minProposalYieldRate": 0.2,
+      "dispatchYieldWindowHours": 24
     },
 
     "engines": {
@@ -47,13 +52,24 @@
     },
 
     "mergeAuthority": [
-      { "engine": "claude", "model": "claude-opus-4-5" },
-      { "engine": "codex",  "model": "gpt-5o" }
+      { "engine": "claude", "model": "claude-sonnet-5" },
+      { "engine": "codex",  "model": "gpt-5.5" }
     ],
 
     "limits": {
       "claude": { "window": "5h", "max": 50 },
       "codex":  { "window": "5h", "max": 50 }
+    },
+
+    "fabric": {
+      "gateway": true,
+      "concurrentDispatch": true,
+      "maxSlotsPerBackend": 3,
+      "workhorseDispatch": true
+    },
+
+    "local": {
+      "maxConcurrent": 1
     },
 
     "confinement": {
@@ -65,7 +81,8 @@
     },
 
     "autoMerge": {
-      "enabled": false
+      "enabled": false,
+      "trustBasis": "tier"
     }
   }
 }

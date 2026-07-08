@@ -95,7 +95,7 @@ import { runAutoMergePass } from '../src/core/fleet/automerge-pass.js';
 const baseCfg = {
   foundry: {
     pulseEmit: true,
-    autoMerge: { enabled: true },
+    autoMerge: { enabled: true, managerGate: true },
   },
 };
 

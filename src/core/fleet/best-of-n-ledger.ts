@@ -23,6 +23,9 @@ export interface BestOfNCandidateRecord {
   testsPassed?: boolean;
   costUsd?: number;
   latencyMs?: number;
+  error?: string;
+  proposalOutcome?: string;
+  proposalOutcomeReason?: string;
   proposalId: string | null;
   won: boolean;
 }

@@ -35,7 +35,20 @@
 
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { AshlrConfig, DaemonConfig, DaemonDispatchTrace, DaemonState, DaemonTick, EngineId, EngineTier, WorkItem } from '../types.js';
+import type {
+  AshlrConfig,
+  DaemonConfig,
+  DaemonDispatchProduction,
+  DaemonDispatchProductionOutcome,
+  DaemonDispatchTrace,
+  DaemonState,
+  DaemonTick,
+  EngineId,
+  EngineTier,
+  Proposal,
+  RunProposalOutcome,
+  WorkItem,
+} from '../types.js';
 import { resolveAutonomyControlMode, type FleetStatus } from '../fleet/status.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import { killSwitchOn, setKill, listEnrolled } from '../sandbox/policy.js';
@@ -74,13 +87,17 @@ import { runAutoMergePass, type AutoMergePassResult } from '../fleet/automerge-p
 import { reconcileRemoteHandoffs, type RemoteHandoffReconcileResult } from '../inbox/remote-handoff.js';
 import { runBestOfN } from '../run/best-of-n.js';
 import { runSelfHealCycle } from '../fleet/self-heal.js';
-import { runViaAshlrcode } from '../run/ashlrcode-engine.js'; // M185
 import { runInventCycle } from '../generative/invent-cycle.js'; // M186
 import { runCounterfactualReplay } from '../fleet/counterfactual.js'; // M187
 import { detectRegression, bisectAndRevert } from '../fleet/regression-sentinel.js'; // M189
 // M212: proactive notifications (fire-and-forget, never throws, never alters control flow)
 import { notifyFleetEvent } from '../comms/events.js';
 import { pendingCount, listProposals } from '../inbox/store.js';
+import {
+  recordDispatchProduction,
+  type DispatchProductionBasis,
+  type DispatchProductionEvent,
+} from '../fleet/dispatch-production-ledger.js';
 // worked-ledger is used transitively via LocalWorkQueueCoordinator (selectWorkQueueCoordinator).
 import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
 // M220: verdict-feedback sweep — feed judge rejections back to the ledger so
@@ -110,6 +127,7 @@ const DEFAULTS: DaemonConfig = {
 
 const LOCAL_ONLY_BACKENDS = new Set<EngineId>(['builtin', 'local-coder', 'ashlrcode', 'aw']);
 type TickItemOutcome = { item: WorkItem; spentUsd: number; dispatched: boolean; dispatch?: DaemonDispatchTrace };
+type BestOfNRunResult = Awaited<ReturnType<typeof runBestOfN>>;
 
 function autonomyControlEnabled(cfg: AshlrConfig): boolean {
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
@@ -168,6 +186,11 @@ function constrainToLocalBackends(cfg: AshlrConfig): AshlrConfig {
 
 function enforceLocalBackend(backend: EngineId, plan: ResourceStrategyDaemonPlan | null): EngineId {
   return plan?.forceLocalOnly === true && !LOCAL_ONLY_BACKENDS.has(backend) ? 'builtin' : backend;
+}
+
+function configuredModelForBackend(backend: EngineId, cfg: AshlrConfig): string | null {
+  const model = cfg.foundry?.models?.[backend];
+  return typeof model === 'string' && model.trim() ? model : null;
 }
 
 function startDaemonLockHeartbeat(lock: DaemonLock): () => void {
@@ -351,6 +374,143 @@ function boundedText(value: string, max = 220): string {
   return value.length > max ? `${value.slice(0, max - 3)}...` : value;
 }
 
+function productionOutcomeFromRunProposalOutcome(kind: RunProposalOutcome['kind']): DaemonDispatchProductionOutcome {
+  switch (kind) {
+    case 'filed':
+      return 'proposal-created';
+    case 'empty-diff':
+      return 'empty-diff';
+    case 'completeness-gate':
+    case 'partial-completeness-gate':
+      return 'gate-blocked';
+    case 'sandbox-unavailable':
+    case 'kill-switch':
+      return 'sandbox-failed';
+    case 'proposal-capture-error':
+      return 'proposal-capture-error';
+    case 'proposal-disabled':
+      return 'proposal-disabled';
+    case 'api-model-task-failed':
+    case 'engine-command-missing':
+    case 'engine-failed-no-diff':
+    case 'engine-unsupported':
+      return 'engine-failed';
+    default:
+      return 'unknown';
+  }
+}
+
+function dispatchProductionFromProposalOutcome(
+  outcome: RunProposalOutcome | undefined,
+  runId?: string,
+): DaemonDispatchProduction | undefined {
+  if (!outcome) return undefined;
+  const diffLines =
+    typeof outcome.insertions === 'number' || typeof outcome.deletions === 'number'
+      ? (outcome.insertions ?? 0) + (outcome.deletions ?? 0)
+      : undefined;
+  return {
+    outcome: productionOutcomeFromRunProposalOutcome(outcome.kind),
+    ...(outcome.proposalId ? { proposalId: outcome.proposalId } : {}),
+    ...(runId ? { runId } : {}),
+    ...(outcome.reason ? { reason: boundedText(outcome.reason, 220) } : {}),
+    ...(typeof outcome.files === 'number' ? { diffFiles: outcome.files } : {}),
+    ...(typeof diffLines === 'number' ? { diffLines } : {}),
+  };
+}
+
+export function workedOutcomeFromDispatchProduction(
+  production: DaemonDispatchProduction | undefined,
+): 'diff' | 'empty' | undefined {
+  if (!production) return undefined;
+  return production.outcome === 'proposal-created' ? 'diff' : 'empty';
+}
+
+function productionReason(production: DaemonDispatchProduction): string {
+  return production.reason
+    ? `${production.outcome}: ${production.reason}`
+    : production.outcome;
+}
+
+function noProposalProductionReason(production: DaemonDispatchProduction | undefined): string | undefined {
+  if (!production || production.outcome === 'proposal-created') return undefined;
+  return boundedText(productionReason(production), 160);
+}
+
+function noProposalOutcomeFromReason(reason: string): DaemonDispatchProductionOutcome {
+  if (/\bempty-diff\b/i.test(reason)) return 'empty-diff';
+  if (/\b(completeness-gate|gate-blocked|gate)\b/i.test(reason)) return 'gate-blocked';
+  if (/\b(sandbox-unavailable|sandbox)\b/i.test(reason)) return 'sandbox-failed';
+  if (/\b(proposal-capture-error|capture)\b/i.test(reason)) return 'proposal-capture-error';
+  if (/\b(proposal-disabled)\b/i.test(reason)) return 'proposal-disabled';
+  if (/\b(engine|api-model-task-failed|command-missing|unsupported|failed)\b/i.test(reason)) return 'engine-failed';
+  return 'unknown';
+}
+
+function bestOfNNoWinnerProduction(result: BestOfNRunResult, n: number): DaemonDispatchProduction {
+  const top = result.critique.noProposalReasons?.[0]?.reason;
+  const reason = top
+    ? `best-of-${n}: ${top}`
+    : `best-of-${n}: all candidates failed to produce a proposal`;
+  return {
+    outcome: noProposalOutcomeFromReason(reason),
+    reason: boundedText(reason, 220),
+  };
+}
+
+function dispatchProductionBasis(
+  production: DaemonDispatchProduction | undefined,
+  proposal: Proposal | undefined,
+): DispatchProductionBasis {
+  if (production) {
+    if (production.reason?.startsWith('best-of-')) return 'best-of-n-summary';
+    return 'run-proposal-outcome';
+  }
+  if (proposal) return 'pending-proposal-delta';
+  return 'unknown';
+}
+
+function dispatchProductionEventFromOutcome(
+  value: TickItemOutcome,
+  proposal: Proposal | undefined,
+  machineId: string,
+  ts: string,
+): DispatchProductionEvent | null {
+  if (!value.dispatched) return null;
+  const trace = value.dispatch;
+  if (!trace) return null;
+  const production = trace.production;
+  const outcome: DaemonDispatchProductionOutcome =
+    production?.outcome ?? (proposal ? 'proposal-created' : 'unknown');
+  const allowProposalFallback = !production || production.outcome === 'proposal-created';
+  const proposalId = production?.proposalId ?? (allowProposalFallback ? proposal?.id : undefined);
+  const runId = production?.runId ?? (allowProposalFallback ? proposal?.runId : undefined);
+  const proposalCreated = outcome === 'proposal-created';
+  return {
+    schemaVersion: 1,
+    ts,
+    machineId,
+    itemId: value.item.id,
+    source: value.item.source,
+    repo: value.item.repo,
+    title: value.item.title,
+    backend: trace.backend,
+    tier: trace.tier,
+    ...(trace.model !== undefined ? { model: trace.model } : {}),
+    assignedBy: trace.assignedBy,
+    routeReason: trace.reason,
+    outcome,
+    proposalCreated,
+    ...(proposalId ? { proposalId } : {}),
+    ...(runId ? { runId } : {}),
+    spentUsd: value.spentUsd,
+    ...(typeof production?.diffFiles === 'number' ? { diffFiles: production.diffFiles } : {}),
+    ...(typeof production?.diffLines === 'number' ? { diffLines: production.diffLines } : {}),
+    ...(production?.reason ? { reason: production.reason } : trace.skipReason ? { reason: trace.skipReason } : {}),
+    basis: dispatchProductionBasis(production, proposal),
+  };
+}
+
 function dispatchTrace(
   item: WorkItem,
   fields: {
@@ -362,6 +522,7 @@ function dispatchTrace(
     dispatched: boolean;
     spentUsd?: number;
     skipReason?: string;
+    production?: DaemonDispatchProduction;
   },
 ): DaemonDispatchTrace {
   return {
@@ -377,6 +538,14 @@ function dispatchTrace(
     dispatched: fields.dispatched,
     spentUsd: fields.spentUsd ?? 0,
     ...(fields.skipReason ? { skipReason: boundedText(fields.skipReason, 160) } : {}),
+    ...(fields.production
+      ? {
+          production: {
+            ...fields.production,
+            ...(fields.production.reason ? { reason: boundedText(fields.production.reason, 220) } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -415,7 +584,12 @@ function proposalProductionSummary(
     const trace = outcome.value.dispatch;
     if (outcome.value.dispatched) dispatched++;
     else skipped++;
-    countReason(trace?.skipReason ?? trace?.reason ?? (outcome.value.dispatched ? 'dispatched' : 'skipped'));
+    const production = trace?.production;
+    countReason(
+      production && production.outcome !== 'proposal-created'
+        ? productionReason(production)
+        : trace?.skipReason ?? trace?.reason ?? (outcome.value.dispatched ? 'dispatched' : 'skipped'),
+    );
   }
 
   const reasons = [...reasonCounts.entries()]
@@ -1583,6 +1757,7 @@ export async function tick(
           assignedBy = 'quota-fallback';
           backend = 'builtin';
           backendTier = engineTierOf(backend, routingCfg);
+          selectedModel = null;
         }
 
         // M80: subscription-window throttle — skip this item (not crash) when a
@@ -1648,6 +1823,9 @@ export async function tick(
             if (routed.tier !== 'local' || recommended.tier === 'local') {
               backend = recommended.backend;
               backendTier = recommended.tier;
+              if (backend !== routed.backend) {
+                selectedModel = configuredModelForBackend(backend, routingCfg);
+              }
               assignmentReason = recommended.reason;
               assignedBy = 'learned-router';
             }
@@ -1681,8 +1859,12 @@ export async function tick(
                 }),
               };
             } else {
+              const previousBackend = backend;
               backend = recovery.decision.backend;
               backendTier = recovery.decision.tier;
+              if (backend !== previousBackend) {
+                selectedModel = configuredModelForBackend(backend, routingCfg);
+              }
               assignmentReason = recovery.reason;
               assignedBy = 'budget-cascade';
             }
@@ -1695,8 +1877,47 @@ export async function tick(
       if (backend !== beforeLocalClamp) {
         assignmentReason = `${assignmentReason}; autonomy local-only fallback to ${backend}`;
         assignedBy = 'local-only';
+        selectedModel = configuredModelForBackend(backend, routingCfg);
       }
       backendTier = engineTierOf(backend, routingCfg);
+      if (backend !== 'builtin' && !withinLimit(backend, routingCfg)) {
+        assignmentReason = `${assignmentReason}; final quota fallback to builtin`;
+        assignedBy = 'quota-fallback';
+        backend = 'builtin';
+        backendTier = engineTierOf(backend, routingCfg);
+        selectedModel = null;
+      }
+      if (isSubscriptionEngine(backend)) {
+        const rawPct = (routingCfg.foundry as Record<string, unknown> | undefined
+          )?.['subscriptionMaxPercent'];
+        const maxPct: number = typeof rawPct === 'number'
+          ? Math.min(100, Math.max(1, rawPct))
+          : 90;
+        const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
+        if (!subCheck.allowed) {
+          audit({
+            action: 'daemon:tick',
+            repo: item.repo,
+            sandboxId: null,
+            summary: `throttled: ${backend} subscription window — ${subCheck.reason}`,
+            result: 'ok',
+          });
+          return {
+            item,
+            spentUsd: 0,
+            dispatched: false,
+            dispatch: dispatchTrace(item, {
+              backend,
+              tier: backendTier,
+              model: selectedModel,
+              assignedBy: 'subscription-throttle',
+              reason: `throttled: ${backend} subscription window — ${subCheck.reason}`,
+              dispatched: false,
+              skipReason: 'subscription-throttle',
+            }),
+          };
+        }
+      }
       const goal = buildItemGoal(item);
       const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
 
@@ -1705,6 +1926,8 @@ export async function tick(
     // restoring keeps each subsequent dispatch / tick from hitting the recursion
     // guard while the runner's own child-spawn inheritance still works mid-call.
     const prevInSwarm = process.env['ASHLR_IN_SWARM'];
+    let dispatchProduction: DaemonDispatchProduction | undefined;
+    let dispatchSkipReason: string | undefined;
 
     try {
       const sink = nullSink();
@@ -1745,42 +1968,24 @@ export async function tick(
         // the WHOLE item as ONE sandboxed-external run (M45): worktree → agent →
         // diff → PENDING proposal. No nested swarm. M45 containment (severed git
         // push, scrubbed diff) + the M47 merge gate still apply downstream.
-        recordUse(backend);
-
-        // M185: ashlrcode executor — when flag ON and backend is a LOCAL tier,
-        // delegate the item to the `ac` agent instead of the raw runGoal path.
-        // Flag-off (ashlrcodeExecutor absent/false) → falls through to runGoal,
-        // byte-identical to pre-M185 behavior.
+        const allowedBackends = routingCfg.foundry?.allowedBackends;
+        const ashlrcodeExecutorAllowed = Array.isArray(allowedBackends)
+          ? allowedBackends.includes('ashlrcode')
+          : false;
         if (
           (routingCfg.foundry as Record<string, unknown>)?.['ashlrcodeExecutor'] === true &&
+          ashlrcodeExecutorAllowed &&
+          backend !== 'ashlrcode' &&
           poolTierOf(engineTierOf(backend, routingCfg)) === 'local'
         ) {
-          const acResult = await runViaAshlrcode(item, item.repo, routingCfg);
-          swarmSpent = 0; // ac does not bill separately; cost accounted by engine
-          tickSpent += swarmSpent;
-          audit({
-            action: 'daemon:proposal-created',
-            repo: item.repo,
-            sandboxId: null,
-            summary: `ashlrcode executor: ${acResult.ok ? 'ok' : `failed: ${acResult.error}`} for "${item.title}"`,
-            result: acResult.ok ? 'ok' : 'error',
-          });
-          return {
-            item,
-            spentUsd: swarmSpent,
-            dispatched: true,
-            dispatch: dispatchTrace(item, {
-              backend,
-              tier: backendTier,
-              model: selectedModel,
-              assignedBy,
-              reason: assignmentReason,
-              dispatched: true,
-              spentUsd: swarmSpent,
-              ...(acResult.ok ? {} : { skipReason: 'ashlrcode-error' }),
-            }),
-          };
+          const previousBackend = backend;
+          backend = 'ashlrcode';
+          backendTier = engineTierOf(backend, routingCfg);
+          selectedModel = routingCfg.foundry?.models?.[backend] ?? null;
+          assignedBy = 'ashlrcode-executor';
+          assignmentReason = `${assignmentReason}; ashlrcodeExecutor sandboxed ${previousBackend} via ashlrcode`;
         }
+        recordUse(backend);
 
         // M334: shadow the about-to-dispatch legacy decision (observe-only).
         await shadowGateway({
@@ -1840,11 +2045,12 @@ export async function tick(
             // actually spent (M333: the pre-M333 $0 under-reported real spend).
             swarmSpent = bonBillable;
             tickSpent += swarmSpent;
+            const production = bestOfNNoWinnerProduction(bonResult, bestOfN);
             audit({
-              action: 'daemon:proposal-created',
+              action: 'daemon:no-proposal',
               repo: item.repo,
               sandboxId: null,
-              summary: `best-of-${bestOfN}: all candidates empty for "${item.title}" — no proposal`,
+              summary: `${production.reason ?? `best-of-${bestOfN}: no proposal`} for "${item.title}"`,
               result: 'ok',
             });
             return {
@@ -1859,7 +2065,8 @@ export async function tick(
                 reason: `${assignmentReason}; best-of-${bestOfN}: all candidates empty`,
                 dispatched: true,
                 spentUsd: swarmSpent,
-                skipReason: 'empty-best-of-n',
+                skipReason: noProposalProductionReason(production) ?? 'empty-best-of-n',
+                production,
               }),
             };
           }
@@ -1876,10 +2083,13 @@ export async function tick(
             budget: itemBudget,
             tools: true,
             noMemory: false,
+            ...(selectedModel ? { model: selectedModel } : {}),
             workItemId: item.id,
             workSource: item.source,
           });
         }
+        dispatchProduction = dispatchProductionFromProposalOutcome(runState.proposalOutcome, runState.id);
+        dispatchSkipReason = noProposalProductionReason(dispatchProduction);
 
         // M80: subscription-tier runs are not dollar-billed — count $0 toward
         // dailyBudgetUsd so they don't exhaust the daily cap. The subscription-
@@ -1903,18 +2113,23 @@ export async function tick(
           result: 'ok',
         });
       }
-	    } catch (err) {
-	      const msg = err instanceof Error ? err.message : String(err);
-	      dispatch = dispatchTrace(item, {
-	        backend: backend ?? null,
-	        tier: backendTier,
-	        model: selectedModel,
-	        assignedBy,
-	        reason: assignmentReason,
-	        dispatched,
-	        spentUsd: swarmSpent,
-	        skipReason: `dispatch-error: ${msg.slice(0, 120)}`,
-	      });
+		    } catch (err) {
+		      const msg = err instanceof Error ? err.message : String(err);
+		      const errorReason = `dispatch-error: ${msg.slice(0, 120)}`;
+		      dispatch = dispatchTrace(item, {
+		        backend: backend ?? null,
+		        tier: backendTier,
+		        model: selectedModel,
+		        assignedBy,
+		        reason: assignmentReason,
+		        dispatched,
+		        spentUsd: swarmSpent,
+		        skipReason: errorReason,
+		        production: {
+		          outcome: 'engine-failed',
+		          reason: errorReason,
+		        },
+		      });
 	      audit({
 	        action: 'daemon:swarm-error',
         repo: item.repo,
@@ -1935,6 +2150,8 @@ export async function tick(
 	      reason: assignmentReason,
 	      dispatched,
 	      spentUsd: swarmSpent,
+	      ...(dispatchSkipReason ? { skipReason: dispatchSkipReason } : {}),
+	      ...(dispatchProduction ? { production: dispatchProduction } : {}),
 	    });
 
     // M53: anomaly-hold — if run cost > k×p50, hold the proposal PENDING and
@@ -1987,7 +2204,9 @@ export async function tick(
   // When fabric.concurrentDispatch === true, replace the serial per-item loop
   // with planConcurrentDispatch + runConcurrentDispatch across ALL backends with
   // headroom in PARALLEL. Each backend is bounded to its slot cap from the
-  // resource monitor. Results are converted to the same PromiseSettledResult<ItemOutcome>[]
+  // resource monitor; protected gateway route hints are preserved while
+  // local-mid bulk items can spread across workhorse backends. Results are
+  // converted to the same PromiseSettledResult<ItemOutcome>[]
   // shape as the existing paths so all downstream accounting (dispatchedCount,
   // proposalDelta, ledger recording) is byte-identical.
   //
@@ -2035,6 +2254,7 @@ export async function tick(
       concurrentCfg,
       routingCfg,
       routeHints,
+      routeReasons,
     );
     const concurrentPlan = planConcurrentDispatch(
       workedSet,
@@ -2164,6 +2384,19 @@ export async function tick(
   try { proposalsCreated = Math.max(0, pendingCount() - pendingBefore); } catch (err) { console.warn('[ashlr] daemon:tick proposalDelta count failed:', (err as Error)?.message ?? err); proposalsCreated = 0; }
   const proposalProduction = proposalProductionSummary(selected.length, workedSet.length, outcomes, proposalsCreated);
 
+  const newPendingProposalsByItemId = new Map<string, Proposal>();
+  let pendingProposalDeltaReadFailed = false;
+  try {
+    for (const proposal of listProposals({ status: 'pending' })) {
+      if (pendingBeforeIds.has(proposal.id)) continue;
+      if (proposal.workItemId && !newPendingProposalsByItemId.has(proposal.workItemId)) {
+        newPendingProposalsByItemId.set(proposal.workItemId, proposal);
+      }
+    }
+  } catch {
+    pendingProposalDeltaReadFailed = true;
+  }
+
   // M85/M305: record item-accurate outcomes to the worked ledger. New proposals
   // carry workItemId, so a multi-item tick can tell which dispatched item filed
   // a patch instead of relying on the old aggregate pending-count heuristic.
@@ -2171,13 +2404,8 @@ export async function tick(
   // were never run, so they should not trigger a cooldown.
   if (dispatchedCount > 0) {
     try {
-      const proposalItemIds = new Set<string>();
-      try {
-        for (const proposal of listProposals({ status: 'pending' })) {
-          if (pendingBeforeIds.has(proposal.id)) continue;
-          if (proposal.workItemId) proposalItemIds.add(proposal.workItemId);
-        }
-      } catch {
+      const proposalItemIds = new Set<string>(newPendingProposalsByItemId.keys());
+      if (pendingProposalDeltaReadFailed) {
         // Fallback preserves the old conservative behavior if the inbox cannot
         // be read after dispatch.
         if (proposalsCreated >= dispatchedCount) {
@@ -2190,7 +2418,9 @@ export async function tick(
       }
       for (const outcome of outcomes) {
         if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
-          const outcomeLabel: 'diff' | 'empty' = proposalItemIds.has(outcome.value.item.id) ? 'diff' : 'empty';
+          const outcomeLabel =
+            workedOutcomeFromDispatchProduction(outcome.value.dispatch?.production) ??
+            (proposalItemIds.has(outcome.value.item.id) ? 'diff' : 'empty');
           // M113: route through coordinator (Local → worked-ledger; Shared → global store).
           coordinator.recordOutcome(outcome.value.item.id, outcomeLabel, machineId);
         }
@@ -2198,6 +2428,24 @@ export async function tick(
     } catch (err) {
       // Ledger recording must never crash the tick.
       console.warn('[ashlr] daemon:tick ledger recordOutcome failed:', (err as Error)?.message ?? err);
+    }
+  }
+
+  if (dispatchedCount > 0) {
+    try {
+      const productionEvents = outcomes.flatMap((outcome): DispatchProductionEvent[] => {
+        if (outcome.status !== 'fulfilled' || !outcome.value.dispatched) return [];
+        const event = dispatchProductionEventFromOutcome(
+          outcome.value,
+          newPendingProposalsByItemId.get(outcome.value.item.id),
+          machineId,
+          now,
+        );
+        return event ? [event] : [];
+      });
+      recordDispatchProduction(productionEvents);
+    } catch (err) {
+      console.warn('[ashlr] daemon:tick dispatch production ledger failed:', (err as Error)?.message ?? err);
     }
   }
 

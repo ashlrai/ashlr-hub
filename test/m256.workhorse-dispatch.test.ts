@@ -1,15 +1,15 @@
 /**
  * test/m256.workhorse-dispatch.test.ts — M256 Workhorse Dispatch tests.
  *
- * Strategy: all invariants are tested via planConcurrentDispatch with a
- * workhorse-style routeItem (round-robin across active workhorses), which is
- * exactly what buildWorkhorseSpreader produces inside buildGatewayDispatchPlan
- * when workhorseDispatch=true. No gateway I/O mocking needed.
+ * Strategy: production-helper invariants exercise buildConcurrentDispatchRouteItem
+ * directly; lower-level spread invariants use planConcurrentDispatch with a
+ * mirrored workhorse-style routeItem. No gateway I/O mocking needed.
  *
  * Invariants proved:
  *
- *  1. WORKHORSE-SPREAD: when local-coder + codex + nim are all open,
- *     a workhorse routeItem spreads items across all three (codex > 0).
+ *  1. WORKHORSE-SPREAD: local-mid bulk route hints spread across active
+ *     workhorses, while protected route hints stay assigned to the gateway
+ *     backend.
  *
  *  2. CODEX-EXHAUSTED: when codex is exhausted (0 slots), the spreader
  *     excludes codex; local-coder + nim carry the load; codex gets 0.
@@ -26,17 +26,17 @@
  *  6. FLAG-ON-PARITY-COUNT: total assigned items is the same under
  *     workhorse spread vs. single-backend preference (same total capacity).
  *
- *  7. WORKHORSE-SPREADER-LOGIC: slotsForAvailability correctly gates which
- *     workhorses are active (exhausted/throttled excluded, open included).
+ *  7. WORKHORSE-SPREADER-LOGIC: cap-aware slot planning correctly gates which
+ *     workhorses are active (saturated/exhausted/throttled excluded, open included).
  */
 
 import { describe, it, expect } from 'vitest';
 import type { WorkItem, WorkSource, EngineId, AshlrConfig } from '../src/core/types.js';
-import type { ResourceSnapshot, BackendAvailability } from '../src/core/fabric/resource-monitor.js';
+import type { ResourceSnapshot, BackendAvailability, BackendResourceState } from '../src/core/fabric/resource-monitor.js';
 import {
   buildConcurrentDispatchRouteItem,
   planConcurrentDispatch,
-  slotsForAvailability,
+  slotsForBackendState,
   type ConcurrentDispatchCfg,
 } from '../src/core/fabric/concurrent-dispatch.js';
 
@@ -61,16 +61,22 @@ function makeItem(overrides: Partial<WorkItem> = {}): WorkItem {
 }
 
 function makeSnapshot(
-  backends: Array<{ backend: string; availability: BackendAvailability }>,
+  backends: Array<{
+    backend: string;
+    availability: BackendAvailability;
+    usedPct?: number | null;
+    cap?: number | null;
+    capUnit?: BackendResourceState['capUnit'];
+  }>,
 ): ResourceSnapshot {
   return {
     generatedAt: new Date().toISOString(),
-    backends: backends.map(({ backend, availability }) => ({
+    backends: backends.map(({ backend, availability, usedPct, cap, capUnit }) => ({
       backend: backend as EngineId,
       availability,
-      usedPct: null,
-      cap: null,
-      capUnit: null,
+      usedPct: usedPct ?? null,
+      cap: cap ?? null,
+      capUnit: capUnit ?? null,
       capWindow: null,
       resetsAt: null,
       costPerMTokenOut: 0,
@@ -97,7 +103,7 @@ function makeWorkhorseSpreader(
   const maxSlots = Math.max(1, cfg.maxSlotsPerBackend ?? 3);
   const snapshotSlots = new Map<EngineId, number>();
   for (const state of snap.backends) {
-    snapshotSlots.set(state.backend, slotsForAvailability(state.availability, maxSlots));
+    snapshotSlots.set(state.backend, slotsForBackendState(state, maxSlots));
   }
   const activeWorkhorses = WORKHORSE_BACKENDS.filter((b) => (snapshotSlots.get(b) ?? 0) > 0);
   if (activeWorkhorses.length === 0) return () => 'builtin' as EngineId;
@@ -120,7 +126,7 @@ const cfgWorkhorse = {
 // ---------------------------------------------------------------------------
 
 describe('M256 workhorseDispatch', () => {
-  it('PRODUCTION-HELPER: workhorseDispatch overrides single-backend route hints and spreads', () => {
+  it('PRODUCTION-HELPER: workhorseDispatch spreads local-mid bulk route hints', () => {
     const snap = makeSnapshot([
       { backend: 'local-coder', availability: 'open' },
       { backend: 'codex',       availability: 'open' },
@@ -129,12 +135,81 @@ describe('M256 workhorseDispatch', () => {
     ]);
     const items = Array.from({ length: 6 }, makeItem);
     const routeHints = new Map<string, EngineId>();
+    const routeReasons = new Map<string, string>();
     for (const item of items) routeHints.set(item.id, 'local-coder');
+    for (const item of items) routeReasons.set(item.id, `local-mid bulk: local-coder (source=${item.source}, effort=${item.effort})`);
 
-    const routeItem = buildConcurrentDispatchRouteItem(snap, dispatchCfg, cfgWorkhorse, routeHints);
+    const routeItem = buildConcurrentDispatchRouteItem(snap, dispatchCfg, cfgWorkhorse, routeHints, routeReasons);
     const plan = planConcurrentDispatch(items, snap, dispatchCfg, routeItem);
 
     expect(plan.assignments.filter((a) => a.backend === 'local-coder')).toHaveLength(2);
+    expect(plan.assignments.filter((a) => a.backend === 'codex')).toHaveLength(2);
+    expect(plan.assignments.filter((a) => a.backend === 'nim')).toHaveLength(2);
+    expect(plan.unassigned).toHaveLength(0);
+  });
+
+  it('PRODUCTION-HELPER: workhorseDispatch preserves frontier route hints', () => {
+    const snap = makeSnapshot([
+      { backend: 'claude',      availability: 'open' },
+      { backend: 'local-coder', availability: 'open' },
+      { backend: 'codex',       availability: 'open' },
+      { backend: 'nim',         availability: 'open' },
+      { backend: 'builtin',     availability: 'open' },
+    ]);
+    const items = Array.from({ length: 3 }, () => makeItem({ effort: 5 }));
+    const routeHints = new Map<string, EngineId>();
+    const routeReasons = new Map<string, string>();
+    for (const item of items) {
+      routeHints.set(item.id, 'claude');
+      routeReasons.set(item.id, `frontier: hard/escalation item (source=${item.source}, effort=${item.effort}) -> claude`);
+    }
+
+    const routeItem = buildConcurrentDispatchRouteItem(snap, dispatchCfg, cfgWorkhorse, routeHints, routeReasons);
+    const plan = planConcurrentDispatch(items, snap, dispatchCfg, routeItem);
+
+    expect(plan.assignments).toHaveLength(3);
+    expect(plan.assignments.every((a) => a.backend === 'claude')).toBe(true);
+    expect(plan.unassigned).toHaveLength(0);
+  });
+
+  it('PRODUCTION-HELPER: workhorseDispatch preserves pause route hints for skip semantics', () => {
+    const snap = makeSnapshot([
+      { backend: 'codex',       availability: 'open' },
+      { backend: 'local-coder', availability: 'open' },
+      { backend: 'nim',         availability: 'open' },
+      { backend: 'builtin',     availability: 'open' },
+    ]);
+    const item = makeItem();
+    const routeHints = new Map<string, EngineId>([[item.id, 'codex']]);
+    const routeReasons = new Map<string, string>([[item.id, 'budget-pause: daily budget exhausted']]);
+
+    const routeItem = buildConcurrentDispatchRouteItem(snap, dispatchCfg, cfgWorkhorse, routeHints, routeReasons);
+    const plan = planConcurrentDispatch([item], snap, dispatchCfg, routeItem);
+
+    expect(plan.assignments).toEqual([{ item, backend: 'codex' }]);
+    expect(plan.unassigned).toHaveLength(0);
+  });
+
+  it('PRODUCTION-HELPER: cap-aware workhorse spread excludes saturated local-coder', () => {
+    const snap = makeSnapshot([
+      { backend: 'local-coder', availability: 'near', usedPct: 100, cap: 1, capUnit: 'concurrent' },
+      { backend: 'codex',       availability: 'open' },
+      { backend: 'nim',         availability: 'open' },
+      { backend: 'builtin',     availability: 'exhausted' },
+    ]);
+    const items = Array.from({ length: 4 }, makeItem);
+    const routeHints = new Map<string, EngineId>();
+    const routeReasons = new Map<string, string>();
+    for (const item of items) {
+      routeHints.set(item.id, 'local-coder');
+      routeReasons.set(item.id, `local-mid bulk: local-coder (source=${item.source}, effort=${item.effort})`);
+    }
+
+    const routeItem = buildConcurrentDispatchRouteItem(snap, dispatchCfg, cfgWorkhorse, routeHints, routeReasons);
+    const plan = planConcurrentDispatch(items, snap, dispatchCfg, routeItem);
+
+    expect(plan.slotsMap.get('local-coder')).toBe(0);
+    expect(plan.assignments.filter((a) => a.backend === 'local-coder')).toHaveLength(0);
     expect(plan.assignments.filter((a) => a.backend === 'codex')).toHaveLength(2);
     expect(plan.assignments.filter((a) => a.backend === 'nim')).toHaveLength(2);
     expect(plan.unassigned).toHaveLength(0);

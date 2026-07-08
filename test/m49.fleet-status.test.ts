@@ -24,6 +24,7 @@ import { buildAutonomyEvidencePack, persistAutonomyEvidencePack } from '../src/c
 import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
 import { createProposal } from '../src/core/inbox/store.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
+import { recordDispatchProduction, type DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import type { Proposal } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -157,13 +158,16 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
   let tmpHome: string;
   let prevHome: string | undefined;
   let prevUserProfile: string | undefined;
+  let prevAshlrHome: string | undefined;
 
   beforeEach(() => {
     tmpHome = mkdtempSync(join(tmpdir(), 'ashlr-m49-'));
     prevHome = process.env.HOME;
     prevUserProfile = process.env.USERPROFILE;
+    prevAshlrHome = process.env.ASHLR_HOME;
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome; // win32 homedir()
+    process.env.ASHLR_HOME = join(tmpHome, '.ashlr');
   });
 
   afterEach(() => {
@@ -178,6 +182,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     else process.env.HOME = prevHome;
     if (prevUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = prevUserProfile;
+    if (prevAshlrHome === undefined) delete process.env.ASHLR_HOME;
+    else process.env.ASHLR_HOME = prevAshlrHome;
     try {
       rmSync(tmpHome, { recursive: true, force: true });
     } catch {
@@ -350,7 +356,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         errors: 0,
         proposalsCreated: 0,
         noProposalDispatches: 2,
-        reasons: [{ reason: 'agent returned no diff', count: 2 }],
+        reasons: [{ reason: 'gate-blocked: completeness gate blocked proposal: typecheck failed', count: 2 }],
       },
       dispatches: [
         {
@@ -364,6 +370,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
           reason: 'agent returned no diff',
           dispatched: true,
           spentUsd: 0.01,
+          production: {
+            outcome: 'gate-blocked',
+            reason: 'completeness gate blocked proposal: typecheck failed',
+          },
         },
         {
           itemId: 'repo:self-heal:two',
@@ -376,6 +386,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
           reason: 'agent returned no diff',
           dispatched: true,
           spentUsd: 0.01,
+          production: {
+            outcome: 'gate-blocked',
+            reason: 'completeness gate blocked proposal: typecheck failed',
+          },
         },
       ],
     };
@@ -441,20 +455,90 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       errors: 0,
       proposalsCreated: 0,
       noProposalDispatches: 2,
-      topReasons: [{ reason: 'agent returned no diff', count: 2 }],
+      topReasons: [{ reason: 'gate-blocked: completeness gate blocked proposal: typecheck failed', count: 2 }],
     });
     expect(s.proposalProduction?.recentNoProposalDispatches).toHaveLength(2);
+    expect(s.proposalProduction?.recentNoProposalDispatches[0]).toMatchObject({
+      productionOutcome: 'gate-blocked',
+      reason: 'completeness gate blocked proposal: typecheck failed',
+    });
     expect(s.autonomyEffectiveness?.summary).toContain('2 recent dispatch(es) produced no proposal');
-    expect(s.autonomyEffectiveness?.summary).toContain('top reason: agent returned no diff');
+    expect(s.autonomyEffectiveness?.summary).toContain('top reason: gate-blocked: completeness gate blocked proposal: typecheck failed');
     expect(s.nextActions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           id: 'inspect-proposal-production',
           label: 'Inspect proposal production',
-          detail: expect.stringContaining('agent returned no diff'),
+          detail: expect.stringContaining('typecheck failed'),
         }),
       ]),
     );
+  });
+
+  it('reports durable dispatch-production yield from the append-only ledger', async () => {
+    const now = new Date().toISOString();
+    const baseEvent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'item-a',
+      source: 'todo',
+      repo: '/repo/a',
+      title: 'Improve proposal yield',
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      routeReason: 'local-mid bulk',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0.001,
+      reason: 'agent returned no diff',
+      basis: 'run-proposal-outcome',
+    };
+    recordDispatchProduction([
+      baseEvent,
+      { ...baseEvent, itemId: 'item-b', outcome: 'gate-blocked', reason: 'completeness gate blocked proposal' },
+      {
+        ...baseEvent,
+        itemId: 'item-c',
+        source: 'goal',
+        backend: 'codex',
+        tier: 'frontier',
+        model: 'gpt-5.5',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+        proposalId: 'prop-c',
+        reason: 'proposal filed',
+      },
+    ]);
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.dispatchProduction).toMatchObject({
+      events: 3,
+      attempts: 3,
+      proposalsCreated: 1,
+      noProposal: 2,
+      proposalRate: 1 / 3,
+      outcomes: {
+        proposalCreated: 1,
+        emptyDiff: 1,
+        gateBlocked: 1,
+      },
+    });
+    expect(s.dispatchProduction?.byBackend[0]).toMatchObject({
+      backend: 'local-coder',
+      attempts: 2,
+      proposalsCreated: 0,
+      proposalRate: 0,
+    });
+
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('Dispatch yield:');
+    expect(formatted).toContain('proposals 1/3');
+    expect(formatted).toContain('local-coder 0/2 0%');
+    expect(formatted).toContain('codex 1/1 100%');
   });
 
   it('includes queued self-heal work when the persisted backlog snapshot is stale', async () => {
@@ -736,6 +820,70 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
   });
+
+  it('surfaces evidence trust basis in auto-merge readiness', async () => {
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'evidence',
+        maxRisk: 'low',
+      },
+    });
+    const diff = docsDiff('evidence');
+    createSignedProposal(cfg, {
+      title: 'Evidence docs change',
+      diff,
+      verifyResult: {
+        passed: true,
+        source: 'auto-merge-preflight',
+        baseBranch: 'main',
+        baseHead: '0123456789abcdef0123456789abcdef01234567',
+        diffHash: hashDiff(diff),
+      },
+    });
+
+    const s = await buildFleetStatus(cfg);
+
+    expect(s.autoMergeReadiness).toMatchObject({
+      enabled: true,
+      trustBasis: 'evidence',
+      pending: 1,
+      preflightReady: 1,
+      needsVerification: 0,
+      blocked: 0,
+    });
+  });
+
+  it('treats evidence-mode verification without current diff binding as needing reverify', async () => {
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'evidence',
+        maxRisk: 'low',
+      },
+    });
+    createSignedProposal(cfg, {
+      title: 'Evidence docs change without diff binding',
+      diff: docsDiff('evidence stale'),
+      verifyResult: {
+        passed: true,
+        source: 'auto-merge-preflight',
+        baseBranch: 'main',
+        baseHead: '0123456789abcdef0123456789abcdef01234567',
+      },
+    });
+
+    const s = await buildFleetStatus(cfg);
+
+    expect(s.autoMergeReadiness).toMatchObject({
+      enabled: true,
+      trustBasis: 'evidence',
+      pending: 1,
+      preflightReady: 0,
+      needsVerification: 1,
+      blocked: 0,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -862,6 +1010,73 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
           },
         ],
       },
+      dispatchProduction: {
+        windowHours: 24,
+        attempts: 3,
+        events: 3,
+        proposalsCreated: 1,
+        noProposal: 2,
+        proposalRate: 1 / 3,
+        spentUsd: 0.003,
+        outcomes: {
+          proposalCreated: 1,
+          emptyDiff: 1,
+          gateBlocked: 1,
+          engineFailed: 0,
+          sandboxFailed: 0,
+          proposalCaptureError: 0,
+          proposalDisabled: 0,
+          unknown: 0,
+        },
+        topReasons: [
+          { reason: 'agent returned no diff', count: 2 },
+        ],
+        byBackend: [
+          {
+            key: 'local-coder',
+            backend: 'local-coder',
+            attempts: 2,
+            proposalsCreated: 0,
+            noProposal: 2,
+            proposalRate: 0,
+            spentUsd: 0.002,
+            outcomes: {
+              proposalCreated: 0,
+              emptyDiff: 1,
+              gateBlocked: 1,
+              engineFailed: 0,
+              sandboxFailed: 0,
+              proposalCaptureError: 0,
+              proposalDisabled: 0,
+              unknown: 0,
+            },
+            topReasons: [{ reason: 'agent returned no diff', count: 2 }],
+          },
+          {
+            key: 'codex',
+            backend: 'codex',
+            attempts: 1,
+            proposalsCreated: 1,
+            noProposal: 0,
+            proposalRate: 1,
+            spentUsd: 0.001,
+            outcomes: {
+              proposalCreated: 1,
+              emptyDiff: 0,
+              gateBlocked: 0,
+              engineFailed: 0,
+              sandboxFailed: 0,
+              proposalCaptureError: 0,
+              proposalDisabled: 0,
+              unknown: 0,
+            },
+            topReasons: [{ reason: 'proposal filed', count: 1 }],
+          },
+        ],
+        bySource: [],
+        byRepo: [],
+        byBackendModel: [],
+      },
       merges: { recent: 2 },
       nextActions: [
         {
@@ -959,6 +1174,9 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('output:    proposals 2, no-proposal 1, errors 1');
     expect(out).toContain('2x agent returned no diff');
     expect(out).toContain('recent:    builtin a Ship autonomy debugger (agent returned no diff)');
+    expect(out).toContain('Dispatch yield:');
+    expect(out).toContain('output:    proposals 1/3 (33%), no-proposal 2');
+    expect(out).toContain('backends:  local-coder 0/2 0%; codex 1/1 100%');
     expect(out).toContain('2 auto-merge(s)');
     expect(out).toContain('Next actions:');
     expect(out).toContain('[high] Drain ready auto-merges');

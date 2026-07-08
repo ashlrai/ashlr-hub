@@ -59,6 +59,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Harden daemon liveness heartbeat, service cadence, and auto-provider lockout sensing
 - [x] Follow-up: Bound daemon verification child process trees with a watchdog runner
 - [x] Follow-up: Research NVIDIA LocateAnything and add safe visual-grounding foundation
+- [x] Follow-up: Add deterministic judge-free evidence trust basis for auto-merge
+- [x] Follow-up: Make proposal production high-yield enough to feed judge-free auto-merge
+- [x] Follow-up: Sandbox-wrap ashlrcode executor, pass routed models, and block self-heal infra false positives
+- [x] Follow-up: Add cap-aware route-preserving dispatch
+- [x] Follow-up: Add durable dispatch-production ledger and judge-free default maintenance
+- [x] Follow-up: Feed dispatch-production yield into routing/status surfaces and final backend guards
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
@@ -129,6 +135,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 ## Errors Encountered
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
 - Full serial Vitest can hang after many tests with one worker alive; mitigated with `scripts/test-ci.mjs` watchdog for CI/publish gates.
+- Full CI initially exposed two stale auto-merge test expectations: default tier frontier proposals no longer get a pass-level judge, and evidence-mode explainer fixtures now need a diff-bound verification hash. Updated tests and reran affected suites plus full CI.
 
 ## Agent Findings From Follow-Up Audit
 - Shared queue leases are not renewed during long runs; dry-run shared claims should release immediately.
@@ -163,7 +170,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch pushed** - The visual grounding foundation is committed and pushed to `origin/master`; the live daemon is running with preflight ready and an active Codex self-heal dispatch in progress.
+**Current batch complete** - Dispatch-production yield now informs routing, Fleet/CLI/web status, docs, and final backend safety guards while keeping judge-free default/evidence merge maintenance intact.
 
 ## Current Continuation - Visual Grounding Foundation
 - [x] Rechecked git status, recent commits, Entire state, daemon status, task plan, notes, and relevant code.
@@ -258,6 +265,29 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Run follow-up full gates.
 - [x] Commit, push, resume/restart daemon, and verify live queue truth.
 
+## Current Continuation - Judge-Free Autonomy Push
+- [x] Rechecked git status, recent commits, Entire state, task plan, notes, and package/test surface.
+- [x] Deployed parallel explorers for auto-merge trust gates, daemon throughput, operator surfaces, config/schema/docs, deterministic risk signals, and unfinished follow-up lanes.
+- [x] Synthesize explorer findings into one high-leverage implementation slice.
+- [x] Implemented `foundry.autoMerge.trustBasis:"evidence"` with deterministic gates for base-bound verification, provenance, EDV confirmation, risk/scope caps, partial-proposal refusal, and build/CI/manifest safety.
+- [x] Routed evidence mode through daemon maintenance without resolving or calling the judge, while preserving verification mode's judge-backed path.
+- [x] Shared auto-merge readiness preflight with FleetStatus so status and merge maintenance no longer drift on evidence/verification blockers.
+- [x] Updated docs/effective-config/status/evidence-pack typing for tier, verification, and evidence trust modes.
+- [x] Run focused verification, typecheck, lint, build, audit, invariants, full test:ci, node syntax, and diff checks.
+- [x] Leave updated notes and commit-ready status; live daemon was not restarted because no live config/service mutation was required.
+
+## Current Continuation - Proposal Production Yield Push
+- [x] Rechecked git status, recent commits, Entire state, task plan, notes, daemon status, and fleet status.
+- [x] Confirmed live bottleneck remains proposal production: daemon running, guard clear, 33 backlog items, 0 pending proposals, and 53 no-proposal dispatches in the recent window.
+- [x] Deployed parallel agents across dispatch defaults, proposal capture, live telemetry, backlog quality, verification contracts, and operator surfaces.
+- [x] Implemented structured `RunProposalOutcome` and daemon `dispatch.production` telemetry so empty diffs, gate blocks, engine failures, sandbox failures, disabled proposal filing, and capture failures are distinguishable.
+- [x] Threaded production outcomes through Best-of-N, daemon tick summaries, FleetStatus recent no-proposal examples, and the Best-of-N candidate ledger.
+- [x] Marked the legacy `ashlrcodeExecutor` branch as an explicit no-proposal/capture-bypass outcome instead of letting it look like successful proposal creation.
+- [x] Made judged-proposal anti-clog sweeps idempotent by proposal ID so the same rejected proposal cannot keep producing duplicate `judged-decline` events.
+- [x] Added focused regression coverage for API-model gate-block outcomes, Best-of-N no-proposal summaries, daemon dispatch production traces, FleetStatus production examples, and judged sweep idempotency.
+- [x] Verification passed: `npm run typecheck -- --pretty false`; focused `test:ci` over 5 affected suites (121 passed, 1 skipped); full `npm run test:ci` (426 files, 8751 passed, 7 skipped); `npm run build`; `npm run lint` (existing 117-warning baseline, 0 errors); `npm audit --audit-level=moderate`; and `git diff --check`.
+- [x] Updated notes/task plan and left commit-ready status.
+
 ## Current Continuation - Async Verification Liveness
 - [x] Rechecked git status, recent commits, Entire state, task plan, and notes.
 - [x] Deployed parallel agents to audit async verification migration, auto-merge verification callers, and failure-kind/tooling classification.
@@ -327,3 +357,46 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Focused verification passed: typecheck, web JS syntax check, and 103 tests across M49, M61, M90, M210, and M213.
 - [x] Run final full gates.
 - [x] Commit, push to `origin/master`, and verify live daemon/fleet status.
+
+## Current Continuation - Sandboxed Executor And Self-Heal Trust
+- [x] Rechecked git status, recent commits, Entire state, task plan, and notes.
+- [x] Deployed six parallel scout agents across ashlrcode executor routing, proposal capture, verify/self-heal taxonomy, workhorse dispatch, cross-repo usefulness, and production-outcome learning.
+- [x] Removed the daemon's direct `runViaAshlrcode` dispatch path from live routing and rewrote `ashlrcodeExecutor` to use normal sandboxed `runGoal(... engine:'ashlrcode', sandboxEngine:true, requireSandbox:true ...)`.
+- [x] Added an allowlist guard so `ashlrcodeExecutor` only rewrites to `ashlrcode` when `foundry.allowedBackends` explicitly includes it.
+- [x] Added autonomous `ac` argv coverage: `--autonomous --dangerously-skip-permissions --surgical` now comes from the engine registry and is used by sandboxed engine execution.
+- [x] Threaded the routed daemon model into the normal sandboxed `runGoal` path so dispatch traces and executed model no longer diverge.
+- [x] Added `VerifyFailureCategory` and made self-heal treat only `code` verify failures as repairable; tool, timeout, infra, and invalid-command failures stay untrusted and do not create queue work.
+- [x] Focused verification passed: typecheck; affected executor/model/self-heal suites (9 files, 250 passed, 1 skipped); build; lint (existing 117-warning baseline, 0 errors); audit; and diff-check.
+- [x] Full `npm run test:ci` passed: 426 files, 8,759 passed tests, 7 skipped.
+
+## Current Continuation - Cap-Aware Route-Preserving Dispatch
+- [x] Rechecked current branch state, persistent plan/notes context, recent commits, and Entire resume state.
+- [x] Harvested and closed the prior six scout agents; their strongest next finding was cap-aware local/workhorse dispatch.
+- [x] Deployed a fresh read-only scout wave for proposal capture, dispatch-production ledger, config/docs comments, and route-model regression coverage.
+- [x] Add backend-state-aware concurrent slot budgeting so `capUnit:'concurrent'` and `usedPct` clamp local-coder/workhorse capacity instead of the generic open/near slot count.
+- [x] Make `workhorseDispatch` preserve protected gateway decisions such as frontier, throttle, budget-pause, and resource-pause routes while still spreading local-mid bulk work.
+- [x] Add focused tests for local-coder cap clamping, saturated local-coder zero assignment, and route-preserving workhorse dispatch.
+- [x] Updated operator/config docs and resource-control wording for cap-aware, route-preserving dispatch.
+- [x] Verification passed: focused dispatch/daemon tests, adjacent routing/resource suites, typecheck, build, diff check, lint, audit, and full CI.
+
+## Current Continuation - Dispatch Production Ledger
+- [x] Rechecked current branch state, recent commits, Entire state, task plan, and notes.
+- [x] Deployed parallel scouts across ledger integration, tests, proposal capture, MCP diff redaction, status consumers, live fleet lanes, and judge-free merge paths.
+- [x] Added append-only metadata-only dispatch production JSONL ledger under `$ASHLR_HOME/dispatch-production/YYYY-MM-DD.jsonl`.
+- [x] Wrote daemon dispatch production events after dispatch outcomes settle, reusing run proposal outcomes, Best-of-N no-winner truth, and pending-proposal delta fallback without double-counting side proposals.
+- [x] Added focused ledger and daemon regression tests for append/read, scrubbing, malformed lines, unavailable persistence, empty diffs, filed proposals, side-proposal fallback, and thrown dispatch failures.
+- [x] Made default tier/evidence auto-merge maintenance judge-free at the pass layer; explicit `trustBasis:"verification"` and `managerGate:true` remain judge-backed.
+- [x] Bound evidence-mode cached verification to the current proposal diff via `ProposalVerifyResult.diffHash`, with stale/missing hashes forcing reverify or fail-closed evidence explanations.
+- [x] Repaired stale judge-path tests to make manager-gated suites explicit and updated read-only gate explainer fixtures for diff-bound evidence.
+- [x] Verification passed: focused affected suites, `npm run typecheck -- --pretty false`, `git diff --check`, and full `npm run test:ci` (427 files, 8779 passed, 7 skipped).
+
+## Current Continuation - Dispatch Yield And Route Truth
+- [x] Rechecked worktree/session state, task plan, notes, and the relevant dispatch/status/routing diffs.
+- [x] Deployed and harvested parallel auditors for dispatch yield ledger hardening, Fleet/Mission Control surfaces, routing safety, and final verification gates.
+- [x] Hardened dispatch-production reads for `$ASHLR_HOME` fallback, sanitized legacy rows, date-window pruning, loose legacy JSONL compatibility, and longer window file selection.
+- [x] Fed source-isolated dispatch-production yield into learned routing as a conservative same-tier reroute signal with a sample floor and no escalation.
+- [x] Cleared stale routed models and rechecked quota, subscription, and resource guards after learned/budget/resource reroutes in daemon and gateway paths.
+- [x] Surfaced durable dispatch yield in `FleetStatus`, CLI status, Mission Control/Fleet Dashboard production panels, and dashboard/control snapshots.
+- [x] Tightened evidence-mode readiness so cached verification must be bound to the current proposal diff hash before being counted preflight-ready.
+- [x] Updated operator docs/examples for yield knobs, trust-basis semantics, JSON-only yield dimensions, and current model examples.
+- [x] Verification passed: focused dispatch/routing/status/dashboard suites, broader merge/resource/judge suites, typecheck, JS syntax, lint, build, audit, and diff checks.

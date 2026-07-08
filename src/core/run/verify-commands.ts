@@ -66,6 +66,13 @@ export interface VerifyCommand {
   cwd?: string;
 }
 
+export type VerifyFailureCategory =
+  | 'code'
+  | 'tool'
+  | 'timeout'
+  | 'infra'
+  | 'invalid-command';
+
 /** Outcome of running one VerifyCommand. */
 export interface VerifyCommandResult {
   ok: boolean;
@@ -75,6 +82,8 @@ export interface VerifyCommandResult {
   /** Combined stdout+stderr, secret-scrubbed and size-capped (≤32KB). */
   output: string;
   timedOut: boolean;
+  /** Present only for non-OK results; lets autonomous repair loops avoid infra false positives. */
+  failureCategory?: VerifyFailureCategory;
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +121,27 @@ function createBoundedStreamCapture(): { append: (chunk: unknown) => void; text:
       return `${head}${ASYNC_STREAM_TRUNCATION_MARK}${tail}`;
     },
   };
+}
+
+function verifyFailureCategory(
+  output: string,
+  opts: { exitCode: number; timedOut: boolean; error?: Error },
+): VerifyFailureCategory {
+  if (opts.timedOut || opts.exitCode === 124) return 'timeout';
+  if (
+    /\b(usage: run-verify-command|invalid argv|empty argv)\b/i.test(output)
+  ) return 'invalid-command';
+
+  const errorCode = (opts.error as NodeJS.ErrnoException | undefined)?.code;
+  if (
+    errorCode === 'ENOENT' ||
+    opts.exitCode === 127 ||
+    /\b(ENOENT|command not found|not recognized as an internal|not recognized as a command)\b/i.test(output) ||
+    /\[verify-runner\] failed to start\b/i.test(output)
+  ) return 'tool';
+
+  if (opts.error) return 'infra';
+  return 'code';
 }
 
 // ---------------------------------------------------------------------------
@@ -294,7 +324,14 @@ export function runVerifyCommand(
       summary: `${vc.kind}: empty argv`,
       result: 'error',
     });
-    return { ok: false, command, exitCode: -1, output, timedOut: false };
+    return {
+      ok: false,
+      command,
+      exitCode: -1,
+      output,
+      timedOut: false,
+      failureCategory: 'invalid-command',
+    };
   }
 
   try {
@@ -345,6 +382,11 @@ export function runVerifyCommand(
       const output = renderToolText(
         `${command}\n${(res.stdout ?? '')}${res.stderr ?? ''}\n${res.error.message}`,
       );
+      const failureCategory = verifyFailureCategory(output, {
+        exitCode: -1,
+        timedOut,
+        error: res.error,
+      });
       audit({
         action: 'verify:command',
         repo: workspaceRoot,
@@ -352,12 +394,15 @@ export function runVerifyCommand(
         summary: `${vc.kind}: ${command} → ${timedOut ? 'timed out' : 'spawn error'}`,
         result: 'error',
       });
-      return { ok: false, command, exitCode: -1, output, timedOut };
+      return { ok: false, command, exitCode: -1, output, timedOut, failureCategory };
     }
 
     const exitCode = res.status ?? -1;
     const ok = exitCode === 0;
     const output = renderToolText(`${(res.stdout ?? '')}${res.stderr ?? ''}`);
+    const failureCategory = ok
+      ? undefined
+      : verifyFailureCategory(output, { exitCode, timedOut });
 
     audit({
       action: 'verify:command',
@@ -367,7 +412,7 @@ export function runVerifyCommand(
       result: ok ? 'ok' : 'error',
     });
 
-    return { ok, command, exitCode, output, timedOut };
+    return { ok, command, exitCode, output, timedOut, ...(failureCategory ? { failureCategory } : {}) };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const output = renderToolText(`${command}\n${msg}`);
@@ -378,7 +423,7 @@ export function runVerifyCommand(
       summary: `${vc.kind}: ${command} → threw: ${msg}`,
       result: 'error',
     });
-    return { ok: false, command, exitCode: -1, output, timedOut: false };
+    return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'infra' };
   }
 }
 
@@ -417,7 +462,14 @@ export async function runVerifyCommandAsync(
       summary: `${vc.kind}: empty argv`,
       result: 'error',
     });
-    return { ok: false, command, exitCode: -1, output, timedOut: false };
+    return {
+      ok: false,
+      command,
+      exitCode: -1,
+      output,
+      timedOut: false,
+      failureCategory: 'invalid-command',
+    };
   }
 
   let isolated: { env: NodeJS.ProcessEnv; cleanup: () => void } | null = null;
@@ -499,6 +551,11 @@ export async function runVerifyCommandAsync(
           const output = renderToolText(
             `${command}\n${stdout.text()}${stderr.text()}\n${spawnError.message}`,
           );
+          const failureCategory = verifyFailureCategory(output, {
+            exitCode: -1,
+            timedOut,
+            error: spawnError,
+          });
           audit({
             action: 'verify:command',
             repo: workspaceRoot,
@@ -506,13 +563,16 @@ export async function runVerifyCommandAsync(
             summary: `${vc.kind}: ${command} → ${timedOut ? 'timed out' : 'spawn error'}`,
             result: 'error',
           });
-          finish({ ok: false, command, exitCode: -1, output, timedOut });
+          finish({ ok: false, command, exitCode: -1, output, timedOut, failureCategory });
           return;
         }
 
         const exitCode = code ?? (signal ? 1 : -1);
         const ok = exitCode === 0 && !wrapperTimedOut;
         const output = renderToolText(`${stdout.text()}${stderr.text()}`);
+        const failureCategory = ok
+          ? undefined
+          : verifyFailureCategory(output, { exitCode, timedOut });
 
         audit({
           action: 'verify:command',
@@ -522,7 +582,7 @@ export async function runVerifyCommandAsync(
           result: ok ? 'ok' : 'error',
         });
 
-        finish({ ok, command, exitCode, output, timedOut });
+        finish({ ok, command, exitCode, output, timedOut, ...(failureCategory ? { failureCategory } : {}) });
       });
     });
   } catch (err) {
@@ -536,6 +596,6 @@ export async function runVerifyCommandAsync(
       summary: `${vc.kind}: ${command} → threw: ${msg}`,
       result: 'error',
     });
-    return { ok: false, command, exitCode: -1, output, timedOut: false };
+    return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'infra' };
   }
 }

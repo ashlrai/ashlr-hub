@@ -111,6 +111,10 @@ function enabledCfg(): AshlrConfig {
   return { version: 1, foundry: { autoMerge: { enabled: true } } } as AshlrConfig;
 }
 
+function managerGateCfg(): AshlrConfig {
+  return { version: 1, foundry: { autoMerge: { enabled: true, managerGate: true } } } as AshlrConfig;
+}
+
 // ---------------------------------------------------------------------------
 // beforeEach / afterEach
 // ---------------------------------------------------------------------------
@@ -264,7 +268,7 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
       complete: async () => '{"verdict":"ship","value":5,"correctness":5,"scope":1,"alignment":5,"rationale":"mock"}',
     });
 
-    await runAutoMergePass(enabledCfg());
+    await runAutoMergePass(managerGateCfg());
 
     const judgedCall = mockRecordDecision.mock.calls.find((c) => c[0]?.action === 'judged');
     expect(judgedCall).toBeDefined();

@@ -103,6 +103,7 @@ import { randomBytes } from 'node:crypto';
 
 import type {
   AshlrConfig,
+  AutoMergeTrustBasis,
   DecisionEntry,
   EngineTier,
   Proposal,
@@ -641,11 +642,11 @@ export function evaluateAutoMergeReadinessPreflight(
       : 'tier';
 
     const advisories: string[] = [];
-    if (trustBasis === 'verification' && proposal.verifyResult === undefined) {
+    if ((trustBasis === 'verification' || trustBasis === 'evidence') && proposal.verifyResult === undefined) {
       advisories.push('verification result absent; autoMergeProposal may run verify before the full gate');
     }
 
-    if (trustBasis !== 'verification') {
+    if (trustBasis === 'tier') {
       const target = mergeTargetForTier(proposal.engineTier);
       const authority =
         target === 'main'
@@ -706,7 +707,7 @@ export interface AutoMergeGateCheck {
 }
 
 export interface AutoMergeGateFacts {
-  trustBasis: 'tier' | 'verification';
+  trustBasis: AutoMergeTrustBasis;
   target: MergeTarget | 'main';
   maxRisk: RiskClass;
   risk?: RiskClass;
@@ -750,8 +751,9 @@ function autoMergeConfigValue(cfg: AshlrConfig, key: string): unknown {
   return ((cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge'] as Record<string, unknown> | undefined)?.[key];
 }
 
-function configuredTrustBasis(cfg: AshlrConfig): 'tier' | 'verification' {
-  return autoMergeConfigValue(cfg, 'trustBasis') === 'verification' ? 'verification' : 'tier';
+function configuredTrustBasis(cfg: AshlrConfig): AutoMergeTrustBasis {
+  const value = autoMergeConfigValue(cfg, 'trustBasis');
+  return value === 'verification' || value === 'evidence' ? value : 'tier';
 }
 
 function configuredMaxRisk(cfg: AshlrConfig): RiskClass {
@@ -787,7 +789,9 @@ function verificationBlockerCode(reason: string): AutoMergeGateCheckCode {
   if (reason.includes("no 'judged' decision") || reason.includes('judge attestation invalid')) {
     return 'missing-judge-evidence';
   }
-  if (reason.includes('proposal.verifyResult.passed')) return 'missing-verification-evidence';
+  if (reason.includes('proposal.verifyResult.passed') || reason.includes('base-bound verification')) {
+    return 'missing-verification-evidence';
+  }
   if (reason.includes('EDV independent confirmation absent')) return 'missing-edv-evidence';
   if (reason.includes('risk class')) return 'risk-threshold';
   if (reason.includes('scope cap')) return 'scope-cap';
@@ -875,6 +879,10 @@ export function explainAutoMergeGate(
   if (trustBasis === 'verification') {
     facts.target = 'main';
     const verdict = evaluateVerificationGate(proposal, cfg, options.decisionsForProposal ?? []);
+    add('authority', verificationBlockerCode(verdict.reason), verdict.authorized, verdict.reason);
+  } else if (trustBasis === 'evidence') {
+    facts.target = 'main';
+    const verdict = evaluateEvidenceGate(proposal, cfg, options.decisionsForProposal ?? []);
     add('authority', verificationBlockerCode(verdict.reason), verdict.authorized, verdict.reason);
   } else {
     const target = mergeTargetForTier(proposal.engineTier);
@@ -1222,6 +1230,79 @@ export function evaluateVerificationGate(
   };
 }
 
+/**
+ * Evidence-strength authority gate for judge-free autonomous merge.
+ *
+ * This is intentionally separate from trustBasis='verification'. Verification
+ * mode keeps the frontier judge requirement. Evidence mode trades that model
+ * opinion for stricter deterministic proof: base-bound suite green, valid
+ * provenance, low/scope-bounded diff, EDV confirmation, no partial capture, and
+ * no build/CI/manifest changes that could rewrite the verifier.
+ */
+export function evaluateEvidenceGate(
+  proposal: Proposal,
+  cfg: AshlrConfig,
+  decisionsForProposal: DecisionEntry[],
+): VerificationGateVerdict {
+  const refuse = (reason: string): VerificationGateVerdict => ({ authorized: false, reason });
+
+  if (proposal.isPartial === true) {
+    return refuse('evidence gate: partial/timeout-captured proposals require judge or human review');
+  }
+
+  if (!hasVerifiedBaseBinding(proposal.verifyResult)) {
+    if (proposal.verifyResult?.passed === true) {
+      return refuse('evidence gate: base-bound verification is missing — reverify required');
+    }
+    return refuse(
+      `evidence gate: proposal.verifyResult.passed is ${
+        proposal.verifyResult === undefined ? 'absent' : 'false'
+      } — deterministic merge requires suite green`,
+    );
+  }
+  if (!hasVerifiedDiffBinding(proposal)) {
+    return refuse('evidence gate: verification diff binding is missing or stale — reverify required');
+  }
+
+  const diff = proposal.diff ?? '';
+  const changedFiles = changedFilesFromDiff(diff);
+  if (changedFiles.some(isBuildOrCiOrManifest)) {
+    return refuse('evidence gate: diff touches build/CI/manifest files — judge or human review required');
+  }
+
+  const provenance = verifyProvenance(proposal);
+  if (!provenance.ok) {
+    return refuse(`evidence gate: provenance check failed — ${provenance.reason}`);
+  }
+
+  const risk = classifyRisk(proposal);
+  const maxRisk = configuredMaxRisk(cfg);
+  if (RISK_ORDER[risk] > RISK_ORDER[maxRisk]) {
+    return refuse(`evidence gate: risk class '${risk}' exceeds maxRisk '${maxRisk}'`);
+  }
+
+  const scope = countDiffScope(diff);
+  const caps = configuredScopeCaps(cfg);
+  if (scope.files > caps.maxFiles) {
+    return refuse(`evidence gate: scope cap — diff touches ${scope.files} files (max ${caps.maxFiles})`);
+  }
+  if (scope.lines > caps.maxLines) {
+    return refuse(`evidence gate: scope cap — diff has ${scope.lines} changed lines (max ${caps.maxLines})`);
+  }
+
+  const edvResult = edvConfirmationWeight(proposal, decisionsForProposal, cfg);
+  if (!edvResult.confirmed) {
+    return refuse(
+      `evidence gate: EDV independent confirmation absent (source='${edvResult.source}', weight=${edvResult.weight}) — deterministic merge requires objective confirmation`,
+    );
+  }
+
+  return {
+    authorized: true,
+    reason: `evidence gate cleared: base-bound suite green (${proposal.verifyResult.baseBranch}@${proposal.verifyResult.baseHead.slice(0, 8)}); risk=${risk}≤${maxRisk}; scope ok (${scope.files}f/${scope.lines}l); EDV confirmed; provenance valid`,
+  };
+}
+
 // ===========================================================================
 // 4) verifyProposal — apply diff to an isolated worktree + run verify commands
 // ===========================================================================
@@ -1241,6 +1322,7 @@ export function verifyResultFromProposalResult(
   result: VerifyProposalResult,
   source: ProposalVerifyResult['source'] = 'auto-merge',
   verifiedAt = new Date().toISOString(),
+  diffHash?: string,
 ): ProposalVerifyResult {
   return {
     passed: result.ok,
@@ -1250,6 +1332,7 @@ export function verifyResultFromProposalResult(
     ...(result.browser ? { browser: result.browser } : {}),
     ...(result.baseBranch ? { baseBranch: result.baseBranch } : {}),
     ...(result.baseHead ? { baseHead: result.baseHead } : {}),
+    ...(diffHash ? { diffHash } : {}),
     verifiedAt,
     source,
   };
@@ -1264,6 +1347,19 @@ function hasVerifiedBaseBinding(
     result.baseBranch.length > 0 &&
     typeof result.baseHead === 'string' &&
     result.baseHead.length > 0
+  );
+}
+
+function currentProposalDiffHash(proposal: Proposal): string {
+  return hashDiff(proposal.diff ?? '');
+}
+
+function hasVerifiedDiffBinding(
+  proposal: Proposal,
+): proposal is Proposal & { verifyResult: ProposalVerifyResult & { passed: true; baseBranch: string; baseHead: string; diffHash: string } } {
+  return (
+    hasVerifiedBaseBinding(proposal.verifyResult) &&
+    proposal.verifyResult.diffHash === currentProposalDiffHash(proposal)
   );
 }
 
@@ -1793,15 +1889,17 @@ export async function autoMergeProposal(
     //   tier may proceed; the bar IS the authority. The merge target is always
     //   'main' in this mode (the verification bar is stronger than tier-gating).
     //
+    //   'evidence': judge-free deterministic authority. ANY producer tier may
+    //   proceed only when base-bound verification, provenance, EDV, risk/scope,
+    //   and manifest-safety facts satisfy evaluateEvidenceGate().
+    //
     // M54 never-weaken + allowSelfMerge guard unchanged in both modes.
-    const trustBasis = (cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge']
-      ? (((cfg.foundry as Record<string, unknown>)['autoMerge'] as Record<string, unknown>)?.['trustBasis'] as string | undefined) ?? 'tier'
-      : 'tier';
+    const trustBasis = configuredTrustBasis(cfg);
 
     let toMain: boolean;
     let authority: { authorized: boolean; reason: string };
 
-    if (trustBasis === 'verification') {
+    if (trustBasis === 'verification' || trustBasis === 'evidence') {
       // M261: in verification mode, run verifyProposal() BEFORE calling
       // evaluateVerificationGate so that Criterion 2 (verifyResult.passed===true)
       // can read the REAL test-run result. evaluateVerificationGate is a pure
@@ -1819,7 +1917,10 @@ export async function autoMergeProposal(
       // evaluateVerificationGate Criterion 2 refuses (fail-closed). Verification
       // failure (verify.ok===false) short-circuits here before Gate 4 so no
       // merge can proceed on a failing diff.
-      if (proposal.verifyResult?.passed !== true || !hasVerifiedBaseBinding(proposal.verifyResult)) {
+      const verifiedForCurrentDiff = trustBasis === 'evidence'
+        ? hasVerifiedDiffBinding(proposal)
+        : hasVerifiedBaseBinding(proposal.verifyResult);
+      if (proposal.verifyResult?.passed !== true || !verifiedForCurrentDiff) {
         // If verifyResult is already present and explicitly false, skip the
         // expensive worktree run — we already know it failed. evaluateVerificationGate
         // Criterion 2 will refuse on passed===false. This preserves existing test
@@ -1829,7 +1930,12 @@ export async function autoMergeProposal(
           // Fall through to evaluateVerificationGate — Criterion 2 will refuse.
         } else {
           const preVerify = await verifyProposal(proposal, cfg);
-          const preVerifyResult = verifyResultFromProposalResult(preVerify, 'auto-merge');
+          const preVerifyResult = verifyResultFromProposalResult(
+            preVerify,
+            'auto-merge',
+            new Date().toISOString(),
+            currentProposalDiffHash(proposal),
+          );
           // Persist the REAL result — best-effort (failure → absent → gate refuses).
           try {
             updateProposalField(proposal.id, {
@@ -1848,12 +1954,13 @@ export async function autoMergeProposal(
         }
       }
 
-      // Verification mode: load decisions for this proposal now (needed by
-      // evaluateVerificationGate criterion 1 + 4). The full ledger read is
-      // cheap; no limit so we see ALL prior judged/verified entries.
+      // Evidence-backed modes load decisions for this proposal now. Verification
+      // mode needs judged + EDV entries; evidence mode needs EDV entries only.
       const allDecisions = readDecisions({ proposalId: id });
-      authority = evaluateVerificationGate(proposal, cfg, allDecisions);
-      // In verification mode the merge always targets main (the bar is the gate).
+      authority = trustBasis === 'verification'
+        ? evaluateVerificationGate(proposal, cfg, allDecisions)
+        : evaluateEvidenceGate(proposal, cfg, allDecisions);
+      // Evidence-backed modes always target main (the bar is the gate).
       toMain = true;
     } else {
       // 'tier' mode (default): M51/M56 — byte-identical to pre-M153.
@@ -1971,12 +2078,14 @@ export async function autoMergeProposal(
     }
 
     // ── Gate 6: full verification in an isolated worktree ────────────────────
-    // M261: in verification mode, verifyProposal() already ran pre-Gate-4 above
-    // (to satisfy evaluateVerificationGate Criterion 2). Skip the redundant
-    // re-run; the result is already persisted and the gate already passed.
-    // In tier mode (default), run verifyProposal() here as before.
+    // M261/M342: in evidence-backed modes, verifyProposal() already ran
+    // pre-Gate-4 above. Skip the redundant re-run only when the stored result is
+    // base-bound. In tier mode (default), run verifyProposal() here as before.
     let verify: VerifyProposalResult;
-    if (trustBasis === 'verification' && hasVerifiedBaseBinding(proposal.verifyResult)) {
+    const canReuseStoredVerify =
+      (trustBasis === 'verification' && hasVerifiedBaseBinding(proposal.verifyResult)) ||
+      (trustBasis === 'evidence' && hasVerifiedDiffBinding(proposal));
+    if (canReuseStoredVerify && proposal.verifyResult) {
       // Already verified pre-Gate-4 and passed — skip re-run.
       verify = verifyResultFromStored(proposal.verifyResult);
     } else {
@@ -1986,7 +2095,12 @@ export async function autoMergeProposal(
       // AND the pre-Gate-4 path somehow did not set it — fail-closed by design.
       try {
         updateProposalField(proposal.id, {
-          verifyResult: verifyResultFromProposalResult(verify, 'auto-merge'),
+	          verifyResult: verifyResultFromProposalResult(
+	            verify,
+	            'auto-merge',
+	            new Date().toISOString(),
+	            currentProposalDiffHash(proposal),
+	          ),
         });
       } catch {
         // Persistence failure — swallow; the verify outcome still drives the gate.
@@ -2302,7 +2416,7 @@ export async function autoMergeProposal(
     const evidencePack = buildAutonomyEvidencePack({
       proposal,
       target: toMain ? 'main' : 'branch',
-      trustBasis: trustBasis === 'verification' ? 'verification' : 'tier',
+      trustBasis,
       remotePreferred: wantRemote && hasGithub,
       riskClass: risk,
       authority: { ok: true, detail: authority.reason },

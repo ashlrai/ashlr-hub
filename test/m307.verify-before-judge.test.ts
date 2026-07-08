@@ -185,6 +185,40 @@ describe('M307 verify-before-judge', () => {
 	    expect(r.merged).toBe(1);
   });
 
+  it('evidence mode verifies and attempts merge without resolving or calling the judge', async () => {
+    const r = await runAutoMergePass(cfg({ trustBasis: 'evidence' }));
+
+    expect(mockVerifyProposal).toHaveBeenCalledTimes(1);
+    expect(mockResolveFrontierJudgeClient).not.toHaveBeenCalled();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).toHaveBeenCalledWith('m307-prop', expect.any(Object));
+    expect(r.judged).toBe(0);
+    expect(r.verifyBeforeJudgeRan).toBe(1);
+    expect(r.attempted).toBe(1);
+    expect(r.merged).toBe(1);
+  });
+
+  it('evidence mode re-verifies cached results that are not bound to the current diff', async () => {
+    mockListProposals.mockReturnValue([
+      proposal({
+        verifyResult: {
+          passed: true,
+          source: 'auto-merge-preflight',
+          baseBranch: 'main',
+          baseHead: '0123456789abcdef0123456789abcdef01234567',
+          diffHash: hashDiff('diff --git a/docs/old.md b/docs/old.md\n+old\n'),
+        },
+      }),
+    ]);
+
+    const r = await runAutoMergePass(cfg({ trustBasis: 'evidence' }));
+
+    expect(mockVerifyProposal).toHaveBeenCalledTimes(1);
+    expect(mockResolveFrontierJudgeClient).not.toHaveBeenCalled();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(r.verifyBeforeJudgeRan).toBe(1);
+  });
+
   it('uses a cached passing verifyResult without re-running verification', async () => {
     mockListProposals.mockReturnValue([
       proposal({ verifyResult: { passed: true, source: 'auto-merge-preflight' } }),

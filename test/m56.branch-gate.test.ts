@@ -72,15 +72,15 @@ describe('M56 — executor keeps merge-to-main frontier-only (structural source 
   it('autoMergeProposal branches on mergeTargetForTier', () => {
     // M153 added a trustBasis branch: in 'tier' mode (the default, unchanged
     // from pre-M153) the executor still calls mergeTargetForTier and derives
-    // toMain from it.  In 'verification' mode toMain is hardcoded true — a
+    // toMain from it.  In evidence-backed modes toMain is hardcoded true — a
     // separate, additive path that does NOT weaken the tier mapping.
     //
     // Safety invariant (MUST remain true):
     //   In 'tier' mode: frontier→main / mid→branch / local→refused.
-    //   The 'verification' path is an addition, NOT a weakening of that mapping.
+    //   Evidence-backed paths are additions, NOT weakenings of that mapping.
     //
     // We assert both the trustBasis dispatch AND the unchanged tier path.
-    expect(merge).toMatch(/trustBasis === 'verification'/);
+    expect(merge).toMatch(/trustBasis === 'verification' \|\| trustBasis === 'evidence'/);
     // In the tier (else) branch, mergeTargetForTier still drives the decision:
     expect(merge).toMatch(/const target = mergeTargetForTier\(proposal\.engineTier\)/);
     // toMain is now a let assigned inside the else block (not a const at top-level):

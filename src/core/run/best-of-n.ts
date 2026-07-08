@@ -11,7 +11,7 @@
  * Flag-off parity: cfg.foundry.bestOfN defaults to 1 → identical to a single run.
  */
 
-import type { AshlrConfig, WorkItem, Proposal, WorkSource, EngineId, RunState } from '../types.js';
+import type { AshlrConfig, WorkItem, Proposal, WorkSource, EngineId, RunProposalOutcome, RunState } from '../types.js';
 import type { ManagerVerdict } from '../fleet/manager.js';
 import type { TasteScore } from '../fleet/taste-critic.js';
 import { resolveEngineSpec } from './engine-registry.js';
@@ -48,6 +48,8 @@ export interface CandidateResult {
   latencyMs?: number;
   /** Error from the sandbox run or judge, if any. */
   error?: string;
+  /** Structured reason the sandbox run did or did not file a proposal. */
+  proposalOutcome?: RunProposalOutcome;
 }
 
 export interface BestOfNResult {
@@ -69,6 +71,8 @@ export interface BestOfNResult {
      * a fan-out by ~N-1 candidates).
      */
     billableCostUsd: number;
+    /** Top terminal reasons for candidates that produced no proposal. */
+    noProposalReasons?: Array<{ reason: string; count: number }>;
   };
 }
 
@@ -129,7 +133,23 @@ function stateResultMessage(state: RunState): string | undefined {
     : undefined;
 }
 
-function candidateErrorFromState(state: RunState, proposalId?: string): string | undefined {
+function formatProposalOutcome(outcome?: RunProposalOutcome): string | undefined {
+  if (!outcome || outcome.kind === 'filed') return undefined;
+  const reason = outcome.reason?.trim();
+  const label = reason ? `${outcome.kind}: ${reason}` : outcome.kind;
+  return label.length > 220 ? `${label.slice(0, 217)}...` : label;
+}
+
+function candidateErrorFromState(
+  state: RunState,
+  proposalId?: string,
+  outcome: RunProposalOutcome | undefined = state.proposalOutcome,
+): string | undefined {
+  if (!proposalId) {
+    const proposalReason = formatProposalOutcome(outcome);
+    if (proposalReason) return proposalReason;
+  }
+
   if (state.status === 'failed' || state.status === 'aborted') {
     return stateResultMessage(state) ?? `sandboxed candidate ${state.status}`;
   }
@@ -142,6 +162,19 @@ function candidateErrorFromState(state: RunState, proposalId?: string): string |
   }
 
   return undefined;
+}
+
+function summarizeNoProposalReasons(candidates: CandidateResult[]): Array<{ reason: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const c of candidates) {
+    if (c.proposalId) continue;
+    const reason = c.error ?? formatProposalOutcome(c.proposalOutcome) ?? 'no proposal filed';
+    counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 8)
+    .map(([reason, count]) => ({ reason, count }));
 }
 
 // ---------------------------------------------------------------------------
@@ -301,11 +334,13 @@ export async function runBestOfN(
       // The actual diff patch lives in the proposal; the state.result is the
       // engine's stdout. We'll use proposalId to fetch the diff from the inbox
       // if needed — but for scoring we work with what we have.
-      const candidateError = candidateErrorFromState(result.state, result.proposalId);
+      const proposalOutcome = result.proposalOutcome ?? result.state.proposalOutcome;
+      const candidateError = candidateErrorFromState(result.state, result.proposalId, proposalOutcome);
       return {
         ...base,
         diff: typeof diff === 'string' ? diff : '',
         proposalId: result.proposalId,
+        ...(proposalOutcome ? { proposalOutcome } : {}),
         latencyMs: Date.now() - t0,
         ...(typeof result.state.usage?.estCostUsd === 'number'
           ? { costUsd: result.state.usage.estCostUsd }
@@ -424,6 +459,7 @@ export async function runBestOfN(
       s + (isSubscription && c.engine && isSubscription(String(c.engine)) ? 0 : (c.costUsd ?? 0)),
     0,
   );
+  const noProposalReasons = summarizeNoProposalReasons(scored);
 
   const critique: BestOfNResult['critique'] = {
     n,
@@ -433,6 +469,7 @@ export async function runBestOfN(
     winnerIndex: winner?.index ?? -1,
     totalCostUsd,
     billableCostUsd,
+    ...(noProposalReasons.length > 0 ? { noProposalReasons } : {}),
   };
 
   // ── M333: exactly ONE pending proposal per work item ────────────────
@@ -481,6 +518,13 @@ export async function runBestOfN(
         ...(c.testsPassed !== undefined ? { testsPassed: c.testsPassed } : {}),
         ...(c.costUsd !== undefined ? { costUsd: c.costUsd } : {}),
         ...(c.latencyMs !== undefined ? { latencyMs: c.latencyMs } : {}),
+        ...(c.error ? { error: c.error } : {}),
+        ...(c.proposalOutcome
+          ? {
+              proposalOutcome: c.proposalOutcome.kind,
+              proposalOutcomeReason: c.proposalOutcome.reason,
+            }
+          : {}),
         proposalId: c.proposalId ?? null,
         won: c.proposalId != null && c.proposalId === winnerPid,
       })),

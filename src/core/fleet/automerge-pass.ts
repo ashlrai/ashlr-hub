@@ -383,23 +383,30 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     // trust, not the producer's tier.  We do NOT skip local/mid proposals here;
     // autoMergeProposal will refuse them if any criterion is unmet.
     //
+    // trustBasis='evidence': ANY tier may proceed to the deterministic evidence
+    // gate after verification. This mode intentionally skips frontier judging.
+    //
     // trustBasis='tier' or absent (default / M51): frontier proposals are
     // main-merge-eligible; mid proposals are branch/PR-eligible ONLY when the
     // separate default-off midToBranch flag is on; local/undefined are skipped.
     // This path is BYTE-IDENTICAL to pre-M175 behaviour — M51 is untouched.
     const trustBasis = (cfg.foundry as Record<string, unknown> | undefined)
       ?.['autoMerge'] as Record<string, unknown> | undefined;
-    const isVerificationMode =
-      (trustBasis?.['trustBasis'] as string | undefined) === 'verification';
+    const trustMode = trustBasis?.['trustBasis'] as string | undefined;
+    const isVerificationMode = trustMode === 'verification';
+    const isEvidenceMode = trustMode === 'evidence';
+    const isEvidenceBackedMode = isVerificationMode || isEvidenceMode;
+    const managerGateEnabled = trustBasis?.['managerGate'] === true;
+    const shouldJudgeBeforeMerge = isVerificationMode || managerGateEnabled;
 
-    if (!isVerificationMode) {
+    if (!isEvidenceBackedMode) {
       // Tier-mode pre-filter (M51 — unchanged).
       const midEligible = cfg.foundry?.autoMerge?.midToBranch === true && p.engineTier === 'mid';
       if (p.engineTier !== 'frontier' && !midEligible) continue;
     }
-    // In verification mode: no tier pre-filter — fall through to judge-then-merge.
+    // In evidence-backed modes: no tier pre-filter — the full gate is authority.
 
-    // Cheap static readiness gate before spending a frontier judge call.
+    // Cheap static readiness gate before spending judge/merge resources.
     // autoMergeProposal remains authoritative; this only avoids judging records
     // that already fail immutable, pure, no-I/O merge prerequisites.
     const readiness = evaluateAutoMergeReadinessPreflight(p, cfg);
@@ -428,48 +435,67 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       continue;
     }
 
-    // ── M172: judge-then-merge ─────────────────────────────────────────────
-    // Skip judging only if there is already a recent mergeable ship verdict
-    // with a valid frontier judge attestation for this exact proposal diff.
-    if (!hasRecentShipVerdict(p)) {
-      if (isVerificationMode) {
-        if (p.verifyResult?.passed === false) {
-          const failed = p.verifyResult.failed?.filter(Boolean).join('; ');
-          const reason = `verify-before-judge: known failed verification${
-            failed ? `: ${failed}` : ''
-          }`;
-          out.results.push({ ok: false, merged: false, branched: false, reason });
-          out.skipped.push({ proposalId: p.id, check: 'verify-before-judge', reason });
+    if (isEvidenceBackedMode) {
+      const verifyCheck = isEvidenceMode ? 'verify-before-merge' : 'verify-before-judge';
+      const verifyResultIsReusable =
+        p.verifyResult?.passed === true &&
+        (
+          !isEvidenceMode ||
+          (
+            typeof p.verifyResult.baseBranch === 'string' &&
+            p.verifyResult.baseBranch.length > 0 &&
+            typeof p.verifyResult.baseHead === 'string' &&
+            p.verifyResult.baseHead.length > 0 &&
+            p.verifyResult.diffHash === hashDiff(p.diff ?? '')
+          )
+        );
+      if (p.verifyResult?.passed === false) {
+        const failed = p.verifyResult.failed?.filter(Boolean).join('; ');
+        const reason = `${verifyCheck}: known failed verification${failed ? `: ${failed}` : ''}`;
+        out.results.push({ ok: false, merged: false, branched: false, reason });
+        out.skipped.push({ proposalId: p.id, check: verifyCheck, reason });
+        continue;
+      }
+
+      if (!verifyResultIsReusable) {
+        if (verifyBeforeJudgeUsed >= verifyBeforeJudgePerPass) {
+          const reason = `${verifyCheck}: cap reached (${verifyBeforeJudgePerPass}/pass)`;
+          out.verifyBeforeJudgeCapped++;
+          out.skipped.push({ proposalId: p.id, check: `${verifyCheck}-cap`, reason });
           continue;
         }
+        verifyBeforeJudgeUsed++;
+        out.verifyBeforeJudgeRan++;
 
-        if (p.verifyResult?.passed !== true) {
-	          if (verifyBeforeJudgeUsed >= verifyBeforeJudgePerPass) {
-	            const reason = `verify-before-judge: cap reached (${verifyBeforeJudgePerPass}/pass)`;
-	            out.verifyBeforeJudgeCapped++;
-	            out.skipped.push({ proposalId: p.id, check: 'verify-before-judge-cap', reason });
-	            continue;
-	          }
-	          verifyBeforeJudgeUsed++;
-	          out.verifyBeforeJudgeRan++;
+        const verify = await verifyProposal(p, cfg);
+        const verifyResult = verifyResultFromProposalResult(
+          verify,
+          'auto-merge-preflight',
+          new Date().toISOString(),
+          hashDiff(p.diff ?? ''),
+        );
+        try {
+          updateProposalField(p.id, { verifyResult });
+        } catch {
+          // Best-effort evidence write. The merge gate still re-checks/fails closed.
+        }
+        p.verifyResult = verifyResult;
 
-          const verify = await verifyProposal(p, cfg);
-          const verifyResult = verifyResultFromProposalResult(verify, 'auto-merge-preflight');
-          try {
-            updateProposalField(p.id, { verifyResult });
-          } catch {
-            // Best-effort evidence write. The merge gate still re-checks/fails closed.
-          }
-          p.verifyResult = verifyResult;
-
-          if (!verify.ok) {
-            const reason = `verify-before-judge: verification failed: ${verify.detail}`;
-            out.results.push({ ok: false, merged: false, branched: false, reason });
-            out.skipped.push({ proposalId: p.id, check: 'verify-before-judge', reason });
-            continue;
-          }
+        if (!verify.ok) {
+          const reason = `${verifyCheck}: verification failed: ${verify.detail}`;
+          out.results.push({ ok: false, merged: false, branched: false, reason });
+          out.skipped.push({ proposalId: p.id, check: verifyCheck, reason });
+          continue;
         }
       }
+    }
+
+    // ── M172: judge-then-merge ─────────────────────────────────────────────
+    // Judge in explicit judge-backed modes only: verification trust or
+    // managerGate. Tier/evidence modes proceed to autoMergeProposal(), whose
+    // merge gate remains authoritative for verification, risk/scope, provenance,
+    // enrollment, kill switch, self-target, and host/local merge safety.
+    if (shouldJudgeBeforeMerge && !hasRecentShipVerdict(p)) {
 
       // Check per-pass cap before spending a frontier judge call.
       if (out.judged >= judgePerPass) {

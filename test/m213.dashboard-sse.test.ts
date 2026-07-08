@@ -406,11 +406,17 @@ describe('M213 Dashboard SSE — /api/events', () => {
       'utf8',
     );
     expect(src).toContain('function renderProposalProductionCard');
+    expect(src).toContain('function renderDispatchProductionCard');
+    expect(src).toContain('Dispatch yield data unavailable.');
     expect(src).toContain("renderProposalProductionCard(f.proposalProduction, 'fleet-card card')");
+    expect(src).toContain("renderDispatchProductionCard(f.dispatchProduction, 'fleet-card card')");
     expect(src).toContain('renderProposalProductionCard(production)');
     expect(src).toContain("controlMetric('No-prop 24h'");
+    expect(src).toContain("controlMetric('Yield 24h'");
     expect(src).toContain("snap.fleet?.proposalProduction ?? snap.control?.fleet?.proposalProduction");
+    expect(src).toContain("snap.fleet?.dispatchProduction ?? snap.control?.fleet?.dispatchProduction");
     expect(src).toContain("'Proposal production'");
+    expect(src).toContain("'Dispatch yield'");
   });
 
   it('app.js inbox detail reads current proposal review fields', () => {

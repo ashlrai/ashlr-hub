@@ -268,6 +268,7 @@ describe('runVerifyCommand', () => {
     const res = runVerifyCommand(vc, workdir, cfg);
     expect(res.ok).toBe(false);
     expect(res.exitCode).toBe(1);
+    expect(res.failureCategory).toBe('code');
   });
 
   it('captures stdout+stderr in output', () => {
@@ -336,6 +337,14 @@ describe('runVerifyCommand', () => {
     const vc: VerifyCommand = { kind: 'lint', cmd: ['definitely-not-a-real-binary-xyz'] };
     const res = runVerifyCommand(vc, workdir, cfg);
     expect(res.ok).toBe(false);
+    expect(res.failureCategory).toBe('tool');
+  });
+
+  it('marks an empty argv as invalid-command without spawning', () => {
+    const vc: VerifyCommand = { kind: 'lint', cmd: [] };
+    const res = runVerifyCommand(vc, workdir, cfg);
+    expect(res.ok).toBe(false);
+    expect(res.failureCategory).toBe('invalid-command');
   });
 
   it('times out and terminates child processes, not just the direct command', async () => {
@@ -353,6 +362,7 @@ describe('runVerifyCommand', () => {
     const res = runVerifyCommand(vc, workdir, cfg, { timeoutMs: 250 });
     expect(res.ok).toBe(false);
     expect(res.timedOut).toBe(true);
+    expect(res.failureCategory).toBe('timeout');
 
     await new Promise((resolveDone) => setTimeout(resolveDone, 150));
     const childPid = Number(readFileSync(childPidPath, 'utf8'));
@@ -425,6 +435,7 @@ describe('runVerifyCommandAsync', () => {
 
     expect(res.ok).toBe(false);
     expect(res.timedOut).toBe(true);
+    expect(res.failureCategory).toBe('timeout');
     expect(ticks).toBeGreaterThanOrEqual(4);
 
     await new Promise((resolveDone) => setTimeout(resolveDone, 150));

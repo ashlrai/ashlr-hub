@@ -366,6 +366,17 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     expect(capturedProposalArgs).toHaveLength(0);
     expect(result.state.status).toBe('done');
     expect(result.proposalId).toBeUndefined();
+    expect(result.proposalOutcome).toMatchObject({
+      kind: 'partial-completeness-gate',
+      reason: expect.stringContaining('typecheck failed'),
+      files: 1,
+      insertions: 1,
+      deletions: 1,
+    });
+    expect(result.state.proposalOutcome).toMatchObject({
+      kind: 'partial-completeness-gate',
+      reason: expect.stringContaining('typecheck failed'),
+    });
 
     vi.resetModules();
   });

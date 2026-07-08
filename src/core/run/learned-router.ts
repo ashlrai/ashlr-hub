@@ -33,8 +33,13 @@ import { routeBackend, type RouteDecision } from '../fleet/router.js';
 import type { CostForecast } from '../types.js';
 import { readDecisions } from '../fleet/decisions-ledger.js';
 import { engineTierOf as _engineTierOf } from './sandboxed-engine.js';
+import { engineInstalled } from './engines.js';
 import { canonicalModelTag, type ModelEntry } from './model-catalog.js';
 import { readJudgeTraces } from '../fleet/judge-trace.js';
+import {
+  readDispatchProductionEvents,
+  type DispatchProductionEvent,
+} from '../fleet/dispatch-production-ledger.js';
 
 // ---------------------------------------------------------------------------
 // M155: Re-export cascade routing API from router.ts for discoverability.
@@ -94,6 +99,13 @@ export interface FoundryIntelligenceCfg {
    * frontier (0..1, default 0.5).
    */
   minFrontierSuccessRate?: number;
+  /**
+   * Minimum recent proposal-yield rate for a backend before trying an allowed
+   * same-tier alternative. Default 0.2; requires at least three samples.
+   */
+  minProposalYieldRate?: number;
+  /** Window for dispatch-production yield priors, in hours. Default 24. */
+  dispatchYieldWindowHours?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +176,8 @@ function backendForTier(
 
 /** The preferred frontier backend ordering (mirrors FRONTIER_PREFERENCE in router.ts). */
 const FRONTIER_PREFERENCE: readonly EngineId[] = ['claude', 'codex'];
+const MIN_DISPATCH_YIELD_SAMPLES = 3;
+const DEFAULT_DISPATCH_YIELD_WINDOW_HOURS = 24;
 
 // ---------------------------------------------------------------------------
 // Verified-outcome prior loading
@@ -213,6 +227,81 @@ async function loadPrior(source: string): Promise<OutcomePrior> {
   }
 }
 
+interface DispatchYieldPrior {
+  attempts: number;
+  proposalsCreated: number;
+  proposalRate: number;
+  topReason?: string;
+}
+
+function clampRate(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.min(1, value))
+    : fallback;
+}
+
+function loadDispatchYieldEvents(
+  intel: FoundryIntelligenceCfg,
+  eventsOverride?: DispatchProductionEvent[],
+): DispatchProductionEvent[] {
+  if (eventsOverride !== undefined) return eventsOverride;
+  try {
+    const hours =
+      typeof intel.dispatchYieldWindowHours === 'number' && intel.dispatchYieldWindowHours > 0
+        ? intel.dispatchYieldWindowHours
+        : DEFAULT_DISPATCH_YIELD_WINDOW_HOURS;
+    return readDispatchProductionEvents({
+      sinceMs: Date.now() - hours * 60 * 60 * 1000,
+      limit: 1000,
+      maxFiles: Math.max(1, Math.ceil(hours / 24) + 1),
+    });
+  } catch {
+    return [];
+  }
+}
+
+function dispatchYieldForBackend(
+  events: DispatchProductionEvent[],
+  backend: EngineId,
+  source: WorkItem['source'],
+): DispatchYieldPrior {
+  const reasons = new Map<string, number>();
+  let attempts = 0;
+  let proposalsCreated = 0;
+  for (const event of events) {
+    if (event.backend !== backend) continue;
+    if (event.source !== source) continue;
+    attempts++;
+    if (event.proposalCreated) proposalsCreated++;
+    const reason = event.reason ?? event.routeReason ?? event.outcome;
+    reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
+  }
+  const topReason = [...reasons.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
+  return {
+    attempts,
+    proposalsCreated,
+    proposalRate: attempts > 0 ? proposalsCreated / attempts : 1,
+    ...(topReason ? { topReason } : {}),
+  };
+}
+
+function installedSameTierAlternative(
+  current: EngineId,
+  tier: EngineTier,
+  allowed: Set<EngineId>,
+  cfg: AshlrConfig,
+): EngineId | null {
+  for (const backend of allowed) {
+    if (backend === current) continue;
+    if (backend === 'builtin') continue;
+    if (tierOf(backend, cfg) !== tier) continue;
+    if (!engineInstalled(backend, cfg)) continue;
+    return backend;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // p50 anomaly helper (exposed for daemon use)
 // ---------------------------------------------------------------------------
@@ -258,6 +347,7 @@ export async function recommendRoute(
   opts?: {
     estimate?: RunEstimate;
     prior?: OutcomePrior;
+    dispatchProductionEvents?: DispatchProductionEvent[];
   },
 ): Promise<LearnedRoute> {
   // ── FLAG-OFF: absent intelligence config ⇒ defer to routeBackend exactly ──
@@ -354,6 +444,34 @@ export async function recommendRoute(
           confidence: 0.6,
         };
       }
+    }
+  }
+
+  // ── Dispatch-production yield penalty ────────────────────────────────────
+  // Uses the append-only no-diff/proposal-created ledger. This never escalates
+  // tier and only fires with enough same-backend/source samples, so it is a
+  // final same-tier nudge, not a safety authority. Lower-tier safety/cost
+  // nudges above get priority.
+  const dispatchEvents = loadDispatchYieldEvents(intel, opts?.dispatchProductionEvents);
+  const yieldPrior = dispatchYieldForBackend(dispatchEvents, base.backend, item.source);
+  const minProposalYieldRate = clampRate(intel.minProposalYieldRate, 0.2);
+  if (
+    yieldPrior.attempts >= MIN_DISPATCH_YIELD_SAMPLES &&
+    yieldPrior.proposalRate < minProposalYieldRate
+  ) {
+    const alternate = installedSameTierAlternative(base.backend, base.tier, allowed, cfg);
+    if (alternate !== null) {
+      return {
+        backend: alternate,
+        tier: base.tier,
+        reason:
+          `learned-router: recent proposal yield for ${base.backend} ` +
+          `${yieldPrior.proposalsCreated}/${yieldPrior.attempts} ` +
+          `< threshold ${(minProposalYieldRate * 100).toFixed(0)}%` +
+          `${yieldPrior.topReason ? ` (top: ${yieldPrior.topReason})` : ''} — ` +
+          `same-tier reroute to ${alternate}`,
+        confidence: Math.min(0.55 + (yieldPrior.attempts / 20) * 0.35, 0.9),
+      };
     }
   }
 

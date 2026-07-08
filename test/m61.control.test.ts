@@ -18,6 +18,7 @@ import { join } from 'node:path';
 
 import type { AshlrConfig } from '../src/core/types.js';
 import { buildControlSnapshot, buildFleetActivity } from '../src/core/web/control.js';
+import { recordDispatchProduction } from '../src/core/fleet/dispatch-production-ledger.js';
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -49,13 +50,16 @@ function withFoundry(foundry: NonNullable<AshlrConfig['foundry']>): AshlrConfig 
 let tmpHome: string;
 let prevHome: string | undefined;
 let prevUserProfile: string | undefined;
+let prevAshlrHome: string | undefined;
 
 beforeEach(() => {
   tmpHome = mkdtempSync(join(tmpdir(), 'ashlr-m61-'));
   prevHome = process.env.HOME;
   prevUserProfile = process.env.USERPROFILE;
+  prevAshlrHome = process.env.ASHLR_HOME;
   process.env.HOME = tmpHome;
   process.env.USERPROFILE = tmpHome;
+  process.env.ASHLR_HOME = join(tmpHome, '.ashlr');
 });
 
 afterEach(() => {
@@ -63,6 +67,8 @@ afterEach(() => {
   else process.env.HOME = prevHome;
   if (prevUserProfile === undefined) delete process.env.USERPROFILE;
   else process.env.USERPROFILE = prevUserProfile;
+  if (prevAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = prevAshlrHome;
   try {
     rmSync(tmpHome, { recursive: true, force: true });
   } catch {
@@ -450,6 +456,24 @@ describe('logs section (M61)', () => {
         },
       ],
     }, null, 2));
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: new Date().toISOString(),
+      machineId: 'm61',
+      itemId: 'item-1',
+      source: 'todo',
+      repo: '/tmp/repo-alpha',
+      title: 'Improve daemon routing visibility',
+      backend: 'builtin',
+      tier: 'local',
+      assignedBy: 'router',
+      routeReason: 'test route',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0.001,
+      reason: 'test route',
+      basis: 'run-proposal-outcome',
+    });
 
     const snap = await buildControlSnapshot(withFoundry({ autonomyControlLoop: true }));
     expect(snap.daemon.activeDirectionMode).toBe('verify-only');
@@ -470,6 +494,12 @@ describe('logs section (M61)', () => {
       proposalsCreated: 0,
       noProposalDispatches: 1,
       topReasons: [{ reason: 'test route', count: 1 }],
+    });
+    expect(snap.fleet.dispatchProduction).toMatchObject({
+      events: 1,
+      proposalsCreated: 0,
+      noProposal: 1,
+      byBackend: [expect.objectContaining({ key: 'builtin', attempts: 1 })],
     });
     const activity = await buildFleetActivity(withFoundry({ autonomyControlLoop: true }));
     expect(activity.recentTicks[0]?.proposalProduction?.noProposalDispatches).toBe(1);

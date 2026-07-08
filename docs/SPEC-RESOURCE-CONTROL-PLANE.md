@@ -1,7 +1,7 @@
 # SPEC: Resource Control Plane (M250–M254)
 
-**Status:** Design — not yet implemented  
-**Branch target:** `feat/v5-open-fleet` (M250+ sequence, after M249 run-cache-shadow)  
+**Status:** Implemented and maintained as living design/reference (M250+)
+**Branch target:** shipped on the Open Fleet line
 **Driver:** Fleet self-routes OFF claude when weekly subscription usage is high, preserving headroom for human sessions. Never routes blindly when a cheaper/more-available backend exists.
 
 ---
@@ -37,9 +37,9 @@ This section is the spec's honest foundation. Do NOT implement sensing that isn'
 | Subscription window reset time | **UNKNOWN** | Not exposed by any local file. |
 
 **Conclusion for Claude:** The fleet cannot read Claude's true used-% or hard limit. The actionable approach is:
-1. Configure a `weeklyMessageCap` in `cfg.foundry.limits.claude` (Mason sets this to, e.g., 1000/week based on his plan).
+1. Configure a `weeklyMessageCap` in `cfg.foundry.claudeResource` (Mason sets this to, e.g., 1000/week based on his plan).
 2. Derive used% by summing `stats-cache.json` `messageCount` over the rolling 7-day window — this is a COUNT of human + fleet messages combined, so it is a conservative over-estimate of fleet contribution. Acceptable for a demotion signal.
-3. As a richer alternative: sum tokens from `collectUsageEvents()` over 7d, compare to a configured `weeklyTokenCap`. Token spend is already tracked per-model via `usage-source.ts` and `rollup.ts`.
+3. As a richer alternative: sum tokens from `collectUsageEvents()` over 7d, compare to a configured `weeklyTokenBudget`. Token spend is already tracked per-model via `usage-source.ts` and `rollup.ts`.
 4. Treat 429 responses from Claude as an immediate "exhausted" signal with exponential backoff before re-admission.
 
 ### 2.2 Codex (OpenAI subscription plan)
@@ -87,7 +87,7 @@ This section is the spec's honest foundation. Do NOT implement sensing that isn'
 // src/core/fabric/resource-monitor.ts
 
 export type BackendAvailability =
-  | 'available'    // within limits, no recent errors
+  | 'open'         // within limits, no recent errors
   | 'near'         // >= warningThreshold% of configured cap
   | 'exhausted'    // >= 100% of cap OR recent 429 with no reset time
   | 'throttled'    // deliberately held back (e.g. protect headroom for human)
@@ -137,11 +137,11 @@ getResourceState(backend, cfg): BackendResourceState
 
   'claude':
     1. Sum messageCount from ~/.claude/stats-cache.json over rolling 7d.
-    2. Compare to cfg.foundry.limits.claude.weeklyMessageCap (if set).
+    2. Compare to cfg.foundry.claudeResource.weeklyMessageCap (if set).
     3. If no cap configured → usedPct=null, availability='unknown' but still
        check: if dispatchCount (quota.ts, 7d) is very high → 'near'.
     4. Check backoffState (set on 429): if backoffUntilMs > now → 'throttled'.
-    5. Check cfg.foundry.claude.protectPct: if usedPct >= protectPct → 'throttled'
+    5. Check cfg.foundry.claudeResource.protectPct: if usedPct >= protectPct → 'throttled'
        (e.g. "protect 85% headroom for human sessions, fleet stops at 85%").
     costPerMTokenOut: 0 (subscription, no per-token billing).
 
@@ -154,18 +154,20 @@ getResourceState(backend, cfg): BackendResourceState
   'nim':
     1. Check backoff state (set on last 429 with rate-limit headers).
     2. If backoffUntilMs > now → 'throttled', reason = 'rate-limit backoff'.
-    3. Else → availability='available', usedPct=null (no proactive signal).
+    3. Else → availability='open', usedPct=null (no proactive signal).
     costPerMTokenOut: read from cfg.foundry.nim.costPerMTokenOut or default.
 
   'local-coder' / 'ollama':
     1. GET ${ollamaBaseUrl}/api/ps with 2s timeout.
     2. Unreachable → 'unreachable'.
-    3. ps.models.length >= cfg.foundry.local.maxConcurrent → 'near' (saturated).
-    4. Else → 'available'.
+    3. ps.models.length >= cfg.foundry.local.maxConcurrent → 'near' with
+       `capUnit:'concurrent'` and `usedPct:100`; the concurrent dispatcher
+       clamps this to 0 assignable local slots.
+    4. Else → 'open'.
     costPerMTokenOut: 0.
 
   'builtin':
-    Always availability='available', costPerMTokenOut=0, usedPct=null.
+    Always availability='open', costPerMTokenOut=0, usedPct=null.
 ```
 
 ### 3.3 Backoff Store
@@ -283,10 +285,10 @@ ashlr resources [--json] [--watch]
     engine       avail       used%  cap        resets-in  $/1M-out  p50-ms
     ─────────────────────────────────────────────────────────────────────────
     claude       near        82%    1000/7d    6d 2h      $0        —
-    codex        available   31%    5h win     3h 42m     $0        —
-    nim          available   —      —          —          $0.42     1240ms
-    local-coder  available   0/1    —          —          $0        340ms
-    builtin      available   —      —          —          $0        —
+    codex        open        31%    5h win     3h 42m     $0        —
+    nim          open        —      —          —          $0.42     1240ms
+    local-coder  open        0/1    —          —          $0        340ms
+    builtin      open        —      —          —          $0        —
 
     ⚠  claude at 82% of weekly cap — fleet will prefer codex/nim/local for new work.
     Run `ashlr resources --json` for machine-readable snapshot.
@@ -301,7 +303,7 @@ In `src/core/web/control.ts` (Mission Control), add a `ResourcePanel` that calls
 `ashlr status` (existing) gains a one-line resource summary:
 
 ```
-  Resources  claude:near(82%)  codex:ok(31%)  nim:ok  local:ok
+  Resources  claude:near(82%)  codex:open(31%)  nim:open  local:open
 ```
 
 This calls `getResourceSnapshot()` and formats each backend's availability.
@@ -315,17 +317,17 @@ The smallest slice that helps Mason today, buildable in a single session:
 **M250 — ResourceMonitor core** (`src/core/fabric/resource-monitor.ts`):
 - `BackendResourceState` type + `ResourceSnapshot` type
 - `getResourceSnapshot(cfg)` with real sensing for:
-  - Claude: sum `stats-cache.json` messages over 7d vs `cfg.foundry.limits.claude.weeklyMessageCap`
+  - Claude: sum `stats-cache.json` messages over 7d vs `cfg.foundry.claudeResource.weeklyMessageCap`
   - Codex: delegate to existing `readCodexRateLimits()` — zero new code
   - NIM: check backoff store only (no proactive sensing yet)
   - Local: `GET /api/ps` with 2s timeout
-  - Builtin: always available
+  - Builtin: always open
 - `recordBackoff(backend, retryAfterMs, reason)` + `clearBackoff(backend)`
 - 30s in-memory cache
 
 **M251 — Config schema additions**:
-- `cfg.foundry.limits.claude.weeklyMessageCap: number` — Mason sets this to his plan's weekly message limit
-- `cfg.foundry.claude.protectPct: number` — default 85; fleet backs off when claude hits this %
+- `cfg.foundry.claudeResource.weeklyMessageCap: number` — Mason sets this to his plan's weekly message limit
+- `cfg.foundry.claudeResource.protectPct: number` — default 85; fleet backs off when claude hits this %
 - `cfg.foundry.fabric.resourceAware: boolean` — default false (flag-off)
 - `cfg.foundry.local.maxConcurrent: number` — default 1
 
@@ -354,13 +356,9 @@ The smallest slice that helps Mason today, buildable in a single session:
       "gateway": true,
       "resourceAware": true
     },
-    "limits": {
-      "claude": {
-        "weeklyMessageCap": 2000,   // set to your plan's weekly limit
-        "window": "7d"
-      }
-    },
-    "claude": {
+    "claudeResource": {
+      "weeklyMessageCap": 2000,     // set to your plan's weekly limit
+      "window": "7d",
       "protectPct": 80              // fleet backs off at 80%, preserving 20% headroom
     }
   }
@@ -379,7 +377,7 @@ With this config: when Mason's `stats-cache.json` shows ≥ 80% of 2000 messages
 | 2 | M255 | Parse Claude 429 responses as structured `{ retryAfterMs, windowResetAt }` events; call `recordBackoff()` from retry handler | 0.5 session |
 | 3 | M256 | NIM rate-limit header parsing on 429 → `recordBackoff()` with real retry-after | 0.5 session |
 | 4 | M257 | Cross-machine ResourceSnapshot sharing via the existing `SharedStore` (M114 pattern) — multiple laptops sharing one Claude plan see each other's usage | 1 session |
-| 5 | M258 | Token-based weekly cap for Claude (more accurate than message count): sum 7d tokens from `collectUsageEvents()` vs `cfg.foundry.limits.claude.weeklyTokenCap` | 0.5 session |
+| 5 | M258 | Token-based weekly cap for Claude (more accurate than message count): sum 7d tokens from `collectUsageEvents()` vs `cfg.foundry.claudeResource.weeklyTokenBudget` | 0.5 session |
 | 6 | M259 | ResourceSnapshot persisted to `~/.ashlr/fleet/resource-snapshot.json` (so cross-process / daemon restart doesn't lose backoff state entirely) | 0.5 session |
 | 7 | M260 | Live Ollama load sensing: track in-flight dispatches via the quota ledger's sub-minute window; prefer local-coder when concurrency < max | 1 session |
 
@@ -393,11 +391,11 @@ These constraints are NEVER relaxed by resource routing:
 
 2. **Hard items are not silently downgraded.** An item with `effort >= FRONTIER_EFFORT_THRESHOLD` (4) or `source === 'escalation'` is either routed to a non-exhausted frontier backend, or **paused** (queued for retry at window reset). It is never silently routed to `local-coder` or `builtin`, which lack merge authority.
 
-3. **`builtin` is always available as last resort for bulk items.** The cascade never returns "no backend" for effort < 4 items — builtin (0-diff, plans only) is always the floor.
+3. **`builtin` is always open as last resort for bulk items.** The cascade never returns "no backend" for effort < 4 items — builtin (0-diff, plans only) is always the floor.
 
 4. **Flag-off by default.** `cfg.foundry.fabric.resourceAware` defaults to `false`. The existing fleet behavior is byte-identical when this flag is off.
 
-5. **Never throws.** `getResourceSnapshot()` follows the same never-throw contract as all other fleet data sources. Sensing failures degrade to `availability: 'unknown'` — unknown is treated as permissive (same as `subscriptionAllows`).
+5. **Never throws.** `getResourceSnapshot()` follows the same never-throw contract as all other fleet data sources. Sensing failures degrade to `availability: 'unknown'`; dispatch planners treat unknown capacity conservatively and the gateway prefers sensed open/near alternatives when available.
 
 6. **No network calls for sensing (except Ollama health check).** Claude and Codex sensing reads local files only. The Ollama health check is localhost-only. No external API calls in the ResourceMonitor (the existing `limits.ts` API-key path is a separate system).
 
@@ -423,14 +421,14 @@ Fleet sessions are typically short-lived (one `ashlr loop` tick). Persisting bac
 
 | File | Action | Notes |
 |------|--------|-------|
-| `src/core/fabric/resource-monitor.ts` | **CREATE** (M250) | ResourceMonitor, BackendResourceState, backoff store, sensing logic |
-| `src/core/fabric/gateway.ts` | **EXTEND** (M252) | Add Step 2b resource-aware demote; extend GatewayDecision |
-| `src/core/types.ts` | **EXTEND** (M251) | Add `weeklyMessageCap`, `protectPct`, `resourceAware`, `maxConcurrent` to config types |
-| `src/cli/resources.ts` | **CREATE** (M253) | `ashlr resources` command |
-| `src/cli/index.ts` | **EXTEND** (M253) | Register `resources` command loader |
-| `src/cli/status.ts` | **EXTEND** (M254) | Add one-line resource summary |
-| `src/core/web/control.ts` | **EXTEND** (M254) | Add ResourcePanel to Mission Control |
-| `src/core/daemon/loop.ts` | **EXTEND** (M252) | Call `recordBackoff()` on 429/rate-limit errors |
+| `src/core/fabric/resource-monitor.ts` | **IMPLEMENTED** (M250) | ResourceMonitor, BackendResourceState, backoff store, sensing logic |
+| `src/core/fabric/gateway.ts` | **IMPLEMENTED** (M252) | Step 2b resource-aware demote; extended GatewayDecision |
+| `src/core/types.ts` | **IMPLEMENTED** (M251) | `claudeResource`, `resourceAware`, and local concurrency config types |
+| `src/cli/resources.ts` | **IMPLEMENTED** (M253) | `ashlr resources` command |
+| `src/cli/index.ts` | **IMPLEMENTED** (M253) | Registered `resources` command loader |
+| `src/cli/status.ts` | **IMPLEMENTED** (M254) | One-line resource summary |
+| `src/core/web/control.ts` | **IMPLEMENTED** (M254) | Resource status surfaced in Mission Control/control snapshots |
+| `src/core/daemon/loop.ts` | **IMPLEMENTED** (M252) | Rate-limit/resource signals feed daemon routing |
 
 ---
 

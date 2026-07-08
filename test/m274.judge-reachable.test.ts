@@ -356,7 +356,7 @@ describe('M274 frontier judge reachability', () => {
 
   // ── Pass-level integration tests (judge → merge gate) ───────────────────
 
-  it('[R6] ship verdict from reachable claude judge flows to autoMergeProposal', async () => {
+  it('[R6] managerGate ship verdict from reachable claude judge flows to autoMergeProposal', async () => {
     const p = makeProposal('p-ship');
     mockListProposals.mockReturnValue([p]);
     // judgeProposal (mocked) returns ship → autoMergeProposal must be called
@@ -378,7 +378,7 @@ describe('M274 frontier judge reachability', () => {
 
     // Re-import after mock update
     const { runAutoMergePass: freshPass } = await import('../src/core/fleet/automerge-pass.js');
-    const result = await freshPass(baseCfg());
+    const result = await freshPass(baseCfg({ autoMerge: { enabled: true, managerGate: true } }));
 
     // autoMergeProposal called (gate reached)
     expect(mockAutoMergeProposal).toHaveBeenCalledWith('p-ship', expect.anything());
@@ -409,7 +409,7 @@ describe('M274 frontier judge reachability', () => {
     });
 
     const { runAutoMergePass: freshPass } = await import('../src/core/fleet/automerge-pass.js');
-    const result = await freshPass(baseCfg());
+    const result = await freshPass(baseCfg({ autoMerge: { enabled: true, managerGate: true } }));
 
     // autoMergeProposal must NOT be called
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
@@ -433,7 +433,7 @@ describe('M274 frontier judge reachability', () => {
     mockJudgeProposal.mockResolvedValue(shipVerdict('p-gate-check'));
 
     const { runAutoMergePass: freshPass } = await import('../src/core/fleet/automerge-pass.js');
-    await freshPass(baseCfg());
+    await freshPass(baseCfg({ autoMerge: { enabled: true, managerGate: true } }));
 
     // autoMergeProposal called with exact proposal id — no tampering
     const callArgs = mockAutoMergeProposal.mock.calls[0];

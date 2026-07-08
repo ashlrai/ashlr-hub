@@ -154,6 +154,33 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  // Durable dispatch-production yield
+  const dispatchProduction = s.dispatchProduction;
+  lines.push('Dispatch yield:');
+  if (!dispatchProduction) {
+    lines.push('  unavailable');
+  } else {
+    lines.push(`  window:    ${formatProductionWindow(dispatchProduction.windowHours)}`);
+    lines.push(
+      `  output:    proposals ${dispatchProduction.proposalsCreated}/${dispatchProduction.events} ` +
+        `(${formatPercent(dispatchProduction.proposalRate)}), no-proposal ${dispatchProduction.noProposal}`,
+    );
+    if (dispatchProduction.byBackend.length > 0) {
+      lines.push(
+        `  backends:  ${dispatchProduction.byBackend.slice(0, 3).map(formatDispatchYieldBucket).join('; ')}`,
+      );
+    }
+    if (dispatchProduction.bySource.length > 0) {
+      lines.push(
+        `  sources:   ${dispatchProduction.bySource.slice(0, 3).map(formatDispatchYieldBucket).join('; ')}`,
+      );
+    }
+    if (dispatchProduction.topReasons.length > 0) {
+      lines.push(`  reasons:   ${dispatchProduction.topReasons.slice(0, 3).map(formatProductionReason).join('; ')}`);
+    }
+  }
+  lines.push('');
+
   // Merges
   lines.push(`Merges:    ${s.merges.recent} auto-merge(s) in last 24h`);
   lines.push('');
@@ -300,6 +327,17 @@ function formatProductionWindow(windowHours: number): string {
 
 function formatProductionReason(reason: NonNullable<FleetStatus['proposalProduction']>['topReasons'][number]): string {
   return `${reason.count}x ${compactResourceReason(reason.reason)}`;
+}
+
+function formatPercent(rate: number): string {
+  return `${Math.round(rate * 100)}%`;
+}
+
+function formatDispatchYieldBucket(
+  bucket: NonNullable<FleetStatus['dispatchProduction']>['byBackend'][number],
+): string {
+  const label = bucket.backend ?? bucket.source ?? (bucket.repo ? formatActionTarget(bucket.repo) : bucket.key);
+  return `${label} ${bucket.proposalsCreated}/${bucket.attempts} ${formatPercent(bucket.proposalRate)}`;
 }
 
 function formatActionTarget(target: string): string {

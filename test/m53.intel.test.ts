@@ -38,26 +38,33 @@ import { dirname, resolve } from 'node:path';
 // ---------------------------------------------------------------------------
 
 const origHome = process.env['HOME'];
+const origAshlrHome = process.env['ASHLR_HOME'];
 let tmpHome: string;
 
 beforeEach(() => {
   tmpHome = mkdtempSync(tmpdir() + '/ashlr-m53-');
   process.env['HOME'] = tmpHome;
+  process.env['ASHLR_HOME'] = tmpHome;
 });
 
 afterEach(() => {
-  process.env['HOME'] = origHome;
+  if (origHome === undefined) delete process.env['HOME'];
+  else process.env['HOME'] = origHome;
+  if (origAshlrHome === undefined) delete process.env['ASHLR_HOME'];
+  else process.env['ASHLR_HOME'] = origAshlrHome;
   rmSync(tmpHome, { recursive: true, force: true });
 });
 
 import type {
   AshlrConfig,
+  EngineId,
   EngineTier,
   RunEstimate,
   WorkItem,
   WorkSource,
 } from '../src/core/types.js';
 import type { CostForecast } from '../src/core/types.js';
+import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 
 import {
   recommendRoute,
@@ -98,6 +105,8 @@ function withFoundry(foundry: NonNullable<AshlrConfig['foundry']>): AshlrConfig 
 function withIntelligence(extra?: {
   anomalyK?: number;
   minFrontierSuccessRate?: number;
+  minProposalYieldRate?: number;
+  dispatchYieldWindowHours?: number;
   allowedBackends?: string[];
 }): AshlrConfig {
   return {
@@ -108,8 +117,33 @@ function withIntelligence(extra?: {
       intelligence: {
         anomalyK: extra?.anomalyK ?? 4,
         minFrontierSuccessRate: extra?.minFrontierSuccessRate ?? 0.5,
+        ...(extra?.minProposalYieldRate !== undefined ? { minProposalYieldRate: extra.minProposalYieldRate } : {}),
+        ...(extra?.dispatchYieldWindowHours !== undefined ? { dispatchYieldWindowHours: extra.dispatchYieldWindowHours } : {}),
       },
     } as AshlrConfig['foundry'],
+  } as AshlrConfig;
+}
+
+function withInstalledFrontierEngines(cfg: AshlrConfig): AshlrConfig {
+  const engine = (id: EngineId) => ({
+    id,
+    kind: 'cli-agent' as const,
+    tier: 'frontier' as const,
+    bin: 'node',
+    bins: ['node'],
+    argv: ['--version'],
+    capabilities: ['agent', 'edit'],
+  });
+  return {
+    ...cfg,
+    foundry: {
+      ...cfg.foundry,
+      engines: {
+        ...(cfg.foundry?.engines ?? {}),
+        claude: engine('claude'),
+        codex: engine('codex'),
+      },
+    },
   } as AshlrConfig;
 }
 
@@ -148,6 +182,29 @@ function makeEstimate(medianCost: number, sampleSize = 10): RunEstimate {
     durationMs: { p25: 1000, median: 2000, p75: 3000 },
     budgetClamped: false,
     generatedAt: new Date().toISOString(),
+  };
+}
+
+function makeDispatchProductionEvent(over: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
+  return {
+    schemaVersion: 1,
+    ts: new Date().toISOString(),
+    machineId: 'm53',
+    itemId: 'repo:security:item',
+    source: 'security',
+    repo: '/repo',
+    title: 'security item',
+    backend: 'claude',
+    tier: 'frontier',
+    model: 'claude-opus',
+    assignedBy: 'daemon',
+    routeReason: 'frontier',
+    outcome: 'empty-diff',
+    proposalCreated: false,
+    spentUsd: 0,
+    reason: 'agent returned no diff',
+    basis: 'run-proposal-outcome',
+    ...over,
   };
 }
 
@@ -526,6 +583,76 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     const base = routeBackend(item, cfg);
     expect(rec.backend).toBe(base.backend);
     expect(rec.tier).toBe(base.tier);
+  });
+
+  it('low dispatch-production yield can reroute to an installed same-tier alternative', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const dispatchProductionEvents = [
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
+    ];
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents,
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(alternate);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).toContain('recent proposal yield');
+    expect(rec.reason).toContain('same-tier reroute');
+  });
+
+  it('dispatch-production yield sample floor keeps routing byte-identical', async () => {
+    const cfg = withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.9,
+    });
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents: [
+        makeDispatchProductionEvent({ backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
+        makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
+      ],
+    });
+
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+  });
+
+  it('dispatch-production yield is isolated by work source', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.9,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents: [
+        makeDispatchProductionEvent({ source: 'todo', backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
+        makeDispatchProductionEvent({ source: 'todo', backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
+        makeDispatchProductionEvent({ source: 'todo', backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
+      ],
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('recent proposal yield');
   });
 
   it('confidence is a number in [0, 1]', async () => {

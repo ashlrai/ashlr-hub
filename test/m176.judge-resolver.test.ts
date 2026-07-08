@@ -131,7 +131,7 @@ afterEach(() => {
 function enabledCfg(over: Record<string, unknown> = {}): AshlrConfig {
   return {
     foundry: {
-      autoMerge: { enabled: true },
+      autoMerge: { enabled: true, managerGate: true },
       allowedBackends: ['claude', 'ollama'],
       managerJudgeModel: 'claude-opus-4-8',
       managerJudgeEngine: 'claude',
@@ -265,7 +265,9 @@ describe('M176 provenance — resolveFrontierJudgeClient export', () => {
     await runAutoMergePass(enabledCfg());
 
     expect(mockResolveFrontierJudgeClient).toHaveBeenCalledWith(expect.objectContaining({
-      foundry: expect.objectContaining({ autoMerge: { enabled: true } }),
+      foundry: expect.objectContaining({
+        autoMerge: expect.objectContaining({ enabled: true, managerGate: true }),
+      }),
     }));
   });
 

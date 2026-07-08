@@ -93,6 +93,24 @@ const BUILD_FAIL_RESULT = {
   timedOut: false,
 };
 
+const TOOL_FAIL_RESULT = {
+  ok: false,
+  command: 'missing-tool --version',
+  exitCode: 127,
+  output: '[verify-runner] failed to start: spawn missing-tool ENOENT',
+  timedOut: false,
+  failureCategory: 'tool',
+};
+
+const TIMEOUT_FAIL_RESULT = {
+  ok: false,
+  command: 'npm test',
+  exitCode: 124,
+  output: '[verify-runner] timed out after 1000ms; terminating process group',
+  timedOut: true,
+  failureCategory: 'timeout',
+};
+
 // ---------------------------------------------------------------------------
 // Setup / teardown
 // ---------------------------------------------------------------------------
@@ -149,6 +167,26 @@ describe('detectBreakage', () => {
     expect(result.verified).toBe(true);
     expect(result.kind).toBe('build');
     expect(result.detail).toMatch(/error|Error|FAIL/i);
+  });
+
+  it('returns broken:false when verification fails because a tool is unavailable', async () => {
+    mockDetectVerifyCommands.mockReturnValue([GREEN_VC]);
+    mockRunVerifyCommand.mockReturnValue(TOOL_FAIL_RESULT);
+    const result = await detectBreakage('/tmp/fake-repo', makeCfg());
+    expect(result.broken).toBe(false);
+    expect(result.verified).toBe(false);
+    expect(result.reason).toBe('untrusted-verify-result');
+    expect(result.kind).toBeUndefined();
+  });
+
+  it('returns broken:false when verification times out', async () => {
+    mockDetectVerifyCommands.mockReturnValue([GREEN_VC]);
+    mockRunVerifyCommand.mockReturnValue(TIMEOUT_FAIL_RESULT);
+    const result = await detectBreakage('/tmp/fake-repo', makeCfg());
+    expect(result.broken).toBe(false);
+    expect(result.verified).toBe(false);
+    expect(result.reason).toBe('untrusted-verify-result');
+    expect(result.kind).toBeUndefined();
   });
 
   it('stops at first failing command (does not run all)', async () => {
@@ -580,6 +618,22 @@ describe('runSelfHealCycle', () => {
       fs.readFileSync(path.join(ashlrDir, 'self-heal-queue.json'), 'utf8'),
     ) as WorkItem[];
     expect(queue.map((item) => item.id)).toEqual([staleA.id]);
+  });
+
+  it('does not create or persist heal items for untrusted verify failures', async () => {
+    const repoA = path.join(tmpHome, 'repo-a');
+    fs.mkdirSync(repoA, { recursive: true });
+
+    mockListEnrolled.mockReturnValue([repoA]);
+    mockDetectVerifyCommands.mockReturnValue([GREEN_VC]);
+    mockRunVerifyCommand.mockReturnValue(TOOL_FAIL_RESULT);
+
+    const result = await runSelfHealCycle(makeCfg());
+
+    expect(result.checked).toBe(1);
+    expect(result.broken).toHaveLength(0);
+    expect(result.healItems).toHaveLength(0);
+    expect(fs.existsSync(path.join(tmpHome, '.ashlr', 'self-heal-queue.json'))).toBe(false);
   });
 
   it('proposes heal only for broken repos', async () => {
