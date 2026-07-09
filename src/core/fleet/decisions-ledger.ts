@@ -21,6 +21,7 @@ import {
 } from 'node:fs';
 import type { DecisionEntry } from '../types.js';
 import { normalizeDecisionLearningFields } from '../learning/causal.js';
+import { scrubSecrets } from '../util/scrub.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -41,20 +42,7 @@ function todayDateString(): string {
 // ---------------------------------------------------------------------------
 
 function stripSecrets(s: string): string {
-  return (
-    s
-      .replace(/\b(Bearer|Token|Authorization)\s+[A-Za-z0-9\-._~+/]+=*/gi, '$1 [REDACTED]')
-      .replace(
-        /\b(api[_-]?key|secret|token|password|passwd|auth|credential)[=:\s]+[^\s,;'"]{8,}/gi,
-        '$1=[REDACTED]',
-      )
-      .replace(/\bsk-[A-Za-z0-9_-]{16,}/g, '[REDACTED]')
-      .replace(/\bgh[poursa]_[A-Za-z0-9]{16,}/g, '[REDACTED]')
-      .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}/gi, '[REDACTED]')
-      .replace(/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED]')
-      .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[REDACTED]')
-      .replace(/\b[0-9a-fA-F]{64,}\b/g, '[REDACTED]')
-  );
+  return scrubSecrets(s);
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +65,13 @@ export function recordDecision(entry: DecisionEntry): void {
     const record: DecisionEntry = normalizeDecisionLearningFields({
       ...entry,
       ts: entry.ts || new Date().toISOString(),
+      proposalId: stripSecrets(entry.proposalId),
+      ...(entry.workItemId !== undefined ? { workItemId: stripSecrets(entry.workItemId) } : {}),
+      ...(entry.runId !== undefined ? { runId: stripSecrets(entry.runId) } : {}),
+      ...(entry.engine !== undefined ? { engine: stripSecrets(entry.engine) } : {}),
+      ...(entry.model !== undefined ? { model: stripSecrets(entry.model) } : {}),
+      ...(entry.verdict !== undefined ? { verdict: stripSecrets(entry.verdict) } : {}),
+      ...(entry.reason !== undefined ? { reason: stripSecrets(entry.reason) } : {}),
       ...(entry.detail !== undefined ? { detail: stripSecrets(entry.detail) } : {}),
     });
 

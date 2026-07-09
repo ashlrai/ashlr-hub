@@ -536,3 +536,18 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Verification passed: typecheck, focused Phantom/readiness/FleetStatus/dashboard/control suites, lint, build, audit, diff check, invariants, built CLI smoke, and privacy greps.
 - [x] Full `npm run test:ci` passed 434/435 files with 8,908 passing tests and 7 skipped; the sole failure was an order-sensitive `test/m78.titrr.test.ts` mock assertion that passed immediately in direct rerun and in a mixed Phantom/Fleet/TITRR subset.
 - [x] Commit `a576d9c`, push to `origin/master`, reinstall/restart the daemon, and verify live fleet status.
+
+## Current Continuation - Hub Secret-Safety Invariant Plane
+- [x] Rechecked clean `master`, recent commits, Entire state, task plan, notes, and local privacy/scrub tests after the Phantom capability deployment.
+- [x] Deployed parallel agents to audit secret-safety utilities, persistence surfaces, Phantom/MCP backlog, and product-grade safety questions.
+- [x] Identified the highest-leverage safety gap for the recursive learning loop: scattered scrub logic plus unsanitized decision `reason`, direct genome hub appends, and partial dispatch-production field sanitization.
+- [x] Extended the shared `util/scrub.ts` canary coverage for PEM/private-key blocks, `github_pat_`, GitLab/HuggingFace/npm/Google token prefixes, URL authority passwords, connection strings, access/refresh/session tokens, long base64, and existing provider families.
+- [x] Moved audit and decisions ledgers onto the shared scrubber; decisions now sanitize `reason`, verdict/model/engine, and causal IDs before append.
+- [x] Rebuilt dispatch-production sanitization as an explicit sanitized record instead of `...event` passthrough so corrupted legacy fields cannot leak into durable production-yield data.
+- [x] Hardened genome hub write/read paths so direct `appendHubEntry()` and legacy hub JSONL loads scrub title/text/project/tags before persistence/API/export use.
+- [x] Added `test/m349.secret-safety-invariants.test.ts`, a cross-store fake-secret canary that drives synthetic provider-shaped values through audit, decisions, dispatch-production, agent-actions, judge traces, genome hub, and raw on-disk `.ashlr` bytes.
+- [x] Focused verification passed: new canary, dispatch ledger, learning graph, judge trace, audit, genome capture/store, typecheck, and diff check.
+- [x] Wider verification passed: adjacent quality/dashboard/phantom/attention suites, lint, build, audit, and full `test:invariants`.
+- [ ] Commit, push to `origin/master`, and continue into the next safety/product lane.
+- [ ] Next lane: sanitize public inbox/proposal and dashboard/control read surfaces without erasing legitimate source diffs needed for review.
+- [ ] Next lane: split raw MCP specs from sanitized public MCP views and unify Phantom name-only parsing across Hub integration paths.

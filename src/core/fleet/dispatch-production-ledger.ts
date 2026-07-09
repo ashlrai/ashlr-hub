@@ -21,6 +21,7 @@ import type {
   WorkItem,
 } from '../types.js';
 import { causalMetadata } from '../learning/causal.js';
+import { scrubSecrets } from '../util/scrub.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
@@ -132,20 +133,7 @@ function eventTimestamp(ts: string): string {
 }
 
 function stripSecrets(value: string): string {
-  return (
-    value
-      .replace(/\b(Bearer|Token|Authorization)\s+[A-Za-z0-9\-._~+/]+=*/gi, '$1 [REDACTED]')
-      .replace(
-        /\b(api[_-]?key|secret|token|password|passwd|auth|credential)[=:\s]+[^\s,;'"]{8,}/gi,
-        '$1=[REDACTED]',
-      )
-      .replace(/\bsk-[A-Za-z0-9_-]{16,}/g, '[REDACTED]')
-      .replace(/\bgh[poursa]_[A-Za-z0-9]{16,}/g, '[REDACTED]')
-      .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}/gi, '[REDACTED]')
-      .replace(/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED]')
-      .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[REDACTED]')
-      .replace(/\b[0-9a-fA-F]{64,}\b/g, '[REDACTED]')
-  );
+  return scrubSecrets(value);
 }
 
 function boundedText(value: string, max: number): string {
@@ -153,30 +141,80 @@ function boundedText(value: string, max: number): string {
   return stripped.length > max ? `${stripped.slice(0, max - 3)}...` : stripped;
 }
 
+function boundedOptionalText(value: unknown, max: number): string | undefined {
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
+  return boundedText(value, max);
+}
+
+function boundedNullableText(value: unknown, max: number): string | null | undefined {
+  if (value === null) return null;
+  return boundedOptionalText(value, max);
+}
+
+function finiteNonNegative(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : undefined;
+}
+
 function sanitizeEvent(event: DispatchProductionEvent): DispatchProductionEvent {
   const ts = eventTimestamp(event.ts);
+  const machineId = boundedOptionalText(event.machineId, 120);
+  const itemId = boundedText(event.itemId, 240) || 'unknown';
+  const source = boundedText(event.source, 80) as WorkItem['source'];
+  const repo = boundedText(event.repo, 500) || 'unknown';
+  const title = boundedText(event.title, 160) || 'untitled';
+  const backend = boundedNullableText(event.backend, 80) as EngineId | null | undefined;
+  const tier = boundedNullableText(event.tier, 40) as EngineTier | null | undefined;
+  const model = boundedNullableText(event.model, 160) as string | null | undefined;
+  const assignedBy = boundedText(event.assignedBy, 80) || 'unknown';
+  const routeReason = boundedText(event.routeReason, 240) || 'unknown';
+  const proposalId = boundedOptionalText(event.proposalId, 160);
+  const runId = boundedOptionalText(event.runId, 160);
+  const trajectoryId = boundedOptionalText(event.trajectoryId, 240);
+  const routerPolicyVersion = boundedOptionalText(event.routerPolicyVersion, 80);
+  const learningEpoch = boundedOptionalText(event.learningEpoch, 40);
+  const outcome = boundedText(event.outcome, 80) as DaemonDispatchProductionOutcome;
+  const basis = boundedText(event.basis, 80) as DispatchProductionBasis;
+  const reason = boundedOptionalText(event.reason, 240);
+  const diffFiles = finiteNonNegative(event.diffFiles);
+  const diffLines = finiteNonNegative(event.diffLines);
+  const spentUsd = finiteNonNegative(event.spentUsd) ?? 0;
   const causal = causalMetadata({
     ts,
-    itemId: event.itemId,
-    proposalId: event.proposalId,
-    runId: event.runId,
-    trajectoryId: event.trajectoryId,
+    itemId,
+    proposalId,
+    runId,
+    trajectoryId,
     routeSnapshot: event.routeSnapshot,
     runEventSummary: event.runEventSummary,
     evidenceOutcome: event.evidenceOutcome,
     learningSource: event.learningSource ?? 'daemon-dispatch',
     labelBasis: event.labelBasis ?? 'dispatch-outcome',
-    routerPolicyVersion: event.routerPolicyVersion,
-    learningEpoch: event.learningEpoch,
+    routerPolicyVersion,
+    learningEpoch,
   });
   return {
-    ...event,
+    schemaVersion: 1,
     ts,
-    title: boundedText(event.title, 160),
-    repo: boundedText(event.repo, 500),
-    routeReason: boundedText(event.routeReason, 240),
-    ...(event.reason ? { reason: boundedText(event.reason, 240) } : {}),
+    ...(machineId ? { machineId } : {}),
+    itemId,
+    source,
+    repo,
+    title,
+    backend: backend ?? null,
+    tier: tier ?? null,
+    ...(model !== undefined ? { model } : {}),
+    assignedBy,
+    routeReason,
+    outcome,
+    proposalCreated: Boolean(event.proposalCreated),
+    ...(proposalId ? { proposalId } : {}),
+    ...(runId ? { runId } : {}),
     ...causal,
+    spentUsd,
+    ...(diffFiles !== undefined ? { diffFiles } : {}),
+    ...(diffLines !== undefined ? { diffLines } : {}),
+    ...(reason ? { reason } : {}),
+    basis,
   };
 }
 

@@ -19,6 +19,7 @@ import {
   readFileSync,
 } from 'node:fs';
 import type { AuditEntry } from '../types.js';
+import { scrubSecrets } from '../util/scrub.js';
 
 // ---------------------------------------------------------------------------
 // Public: auditDir()
@@ -50,31 +51,7 @@ function todayDateString(): string {
  * only, never secrets"; callers are the primary enforcement point.
  */
 function stripSecrets(summary: string): string {
-  return (
-    summary
-      // bearer / auth headers
-      .replace(/\b(Bearer|Token|Authorization)\s+[A-Za-z0-9\-._~+/]+=*/gi, '$1 [REDACTED]')
-      // key=value credential patterns  (api_key=xxx, secret=xxx, token=xxx, password=xxx)
-      .replace(
-        /\b(api[_-]?key|secret|token|password|passwd|auth|credential)[=:\s]+[^\s,;'"]{8,}/gi,
-        '$1=[REDACTED]',
-      )
-      // Known-prefix provider tokens (anchored on the prefix so we don't redact
-      // ordinary identifiers). Covers OpenAI/Anthropic-style sk-, GitHub PAT/OAuth
-      // ghp_/gho_/ghu_/ghs_/ghr_, Slack xox[baprs]-, and AWS access key ids.
-      .replace(/\bsk-[A-Za-z0-9_-]{16,}/g, '[REDACTED]')
-      .replace(/\bgh[poursa]_[A-Za-z0-9]{16,}/g, '[REDACTED]')
-      .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}/gi, '[REDACTED]')
-      .replace(/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED]')
-      // JWTs: three base64url segments separated by dots, header starts with eyJ.
-      .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[REDACTED]')
-      // Long hex strings ≥ 40 hex chars (private keys, raw API keys). Threshold
-      // raised above 32 so git SHA-1 (40) is borderline — but git short SHAs and
-      // path components are <40, and we WANT full forensic SHAs preserved, so we
-      // anchor on a length that real secrets exceed while commit/file metadata
-      // generally does not. Conservative: over-redaction would harm forensics.
-      .replace(/\b[0-9a-fA-F]{64,}\b/g, '[REDACTED]')
-  );
+  return scrubSecrets(summary);
 }
 
 // ---------------------------------------------------------------------------

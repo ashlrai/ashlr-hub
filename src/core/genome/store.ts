@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { loadIndex } from '../index-engine.js';
 import type { AshlrConfig, GenomeEntry, GenomeHealth, LearnInput } from '../types.js';
+import { scrubSecrets } from '../util/scrub.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -339,12 +340,14 @@ function loadHubEntries(): GenomeEntry[] {
 
       entries.push({
         id: e['id'] as string,
-        project: typeof e['project'] === 'string' ? e['project'] : null,
+        project: typeof e['project'] === 'string' ? scrubSecrets(e['project']) : null,
         source: 'hub',
-        title: e['title'] as string,
-        text: e['text'] as string,
+        title: scrubSecrets(e['title'] as string),
+        text: scrubSecrets(e['text'] as string),
         tags: Array.isArray(e['tags'])
-          ? (e['tags'] as unknown[]).filter((t): t is string => typeof t === 'string')
+          ? (e['tags'] as unknown[])
+              .filter((t): t is string => typeof t === 'string')
+              .map((t) => scrubSecrets(t))
           : [],
         ts: e['ts'] as string,
       });
@@ -522,11 +525,12 @@ export function loadGenome(cfg: AshlrConfig): GenomeEntry[] {
  */
 export function appendHubEntry(input: LearnInput): GenomeEntry {
   const now = new Date().toISOString();
+  const safeText = scrubSecrets(input.text).trim();
 
   // Derive title: supplied title, else first non-empty line of text.
   const title =
-    (input.title ?? '').trim() ||
-    input.text
+    scrubSecrets(input.title ?? '').trim() ||
+    safeText
       .trim()
       .split('\n')[0]
       ?.replace(/^#+\s*/, '')
@@ -534,9 +538,9 @@ export function appendHubEntry(input: LearnInput): GenomeEntry {
       .slice(0, 80) ||
     'Note';
 
-  const project = (input.project ?? '').trim() || null;
-  const tags = (input.tags ?? []).map((t) => t.trim()).filter(Boolean);
-  const text = input.text.trim();
+  const project = scrubSecrets(input.project ?? '').trim() || null;
+  const tags = (input.tags ?? []).map((t) => scrubSecrets(t).trim()).filter(Boolean);
+  const text = safeText;
 
   // Id: stable slug from title + timestamp (unique per call).
   const id = makeId(`hub:${title}:${now}`);
