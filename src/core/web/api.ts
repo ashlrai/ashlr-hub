@@ -84,6 +84,7 @@ import { openInEditor, openInFinder } from '../../cli/open.js';
 import { listEnrolled, setKill } from '../sandbox/policy.js';
 import { listGoals } from '../goals/store.js';
 import { progressOf } from '../goals/advance.js';
+import { sanitizePublicJson } from '../util/public-json.js';
 
 // ---------------------------------------------------------------------------
 // SSE registry — shared across all open SSE connections so server.ts can
@@ -146,7 +147,7 @@ const SSE_MAX_CONNECTIONS = 64;
 /** Write a JSON response. Never throws. */
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   try {
-    const payload = JSON.stringify(body);
+    const payload = JSON.stringify(sanitizePublicJson(body) ?? null);
     res.writeHead(status, {
       'Content-Type': 'application/json',
       'Cache-Control': 'no-store',
@@ -356,7 +357,7 @@ function handleSseEvents(
   // Helper: send one NAMED SSE event so the client's per-name listeners fire.
   function sendNamed(event: string, payload: unknown): void {
     try {
-      const line = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
+      const line = `event: ${event}\ndata: ${JSON.stringify(sanitizePublicJson(payload))}\n\n`;
       res.write(line);
     } catch {
       // Socket closed; cleanup will be triggered by 'close' event.

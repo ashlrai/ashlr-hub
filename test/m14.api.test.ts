@@ -33,6 +33,10 @@ import type { AshlrConfig, Proposal, WebServerOptions } from '../src/core/types.
 import { buildAutonomyEvidencePack, persistAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
 
+const API_SECRET_A = 'sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const API_SECRET_B = 'github_pat_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const API_SECRET_C = 'glpat-cccccccccccccccccccccccc';
+
 // ---------------------------------------------------------------------------
 // Module mocks
 // ---------------------------------------------------------------------------
@@ -48,7 +52,13 @@ const MOCK_SNAPSHOT = {
   swarms: [
     { id: 'swarm-001', goal: 'Implement M14', status: 'running', tasksDone: 1, tasksTotal: 3, phase: 'build' },
   ],
-  mcp: [{ name: 'ashlr', ok: true, tools: 12 }],
+  mcp: [{
+    name: 'ashlr',
+    ok: true,
+    tools: 12,
+    argv: ['node', 'server.js', `--token=${API_SECRET_B}`],
+    env: { OPENAI_API_KEY: API_SECRET_A },
+  }],
   genome: { entries: 42, projects: 7 },
 };
 
@@ -65,7 +75,7 @@ const MOCK_RUNS = [
     tasks: [],
     steps: [],
     status: 'done' as const,
-    result: 'Feature complete.',
+    result: `Feature complete with ${API_SECRET_A} redacted.`,
   },
 ];
 
@@ -105,7 +115,7 @@ const MOCK_ROLLUP = {
 };
 
 const MOCK_GENOME_ENTRIES = [
-  { id: 'g-0', project: 'proj-a', source: 'project' as const, title: 'Entry 0', text: 'body 0', tags: [], ts: '2026-06-09T00:00:00.000Z' },
+  { id: 'g-0', project: 'proj-a', source: 'project' as const, title: 'Entry 0', text: `body 0 ${API_SECRET_C}`, tags: [], ts: '2026-06-09T00:00:00.000Z' },
   { id: 'g-1', project: 'proj-b', source: 'hub' as const, title: 'Entry 1', text: 'body 1', tags: [], ts: '2026-06-09T00:00:00.000Z' },
 ];
 
@@ -160,6 +170,7 @@ vi.mock('../src/cli/run.js', () => ({
 // ---------------------------------------------------------------------------
 
 import { startServer } from '../src/core/web/server.js';
+import { createProposal } from '../src/core/inbox/store.js';
 
 // ---------------------------------------------------------------------------
 // Config / opts helpers
@@ -237,6 +248,47 @@ function post(url: string, port: number, headers: Record<string, string> = {}, b
     'Content-Length': String(Buffer.byteLength(body)),
     ...headers,
   }, body);
+}
+
+function readSseChunk(url: string, port: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    let settled = false;
+    const req = http.request(
+      {
+        hostname: parsed.hostname,
+        port: Number(parsed.port),
+        path: parsed.pathname + parsed.search,
+        method: 'GET',
+        headers: { Host: `127.0.0.1:${port}` },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => {
+          data += chunk.toString('utf8');
+          const inboxFrame = data.slice(Math.max(0, data.lastIndexOf('event: inbox')));
+          if (!settled && inboxFrame.includes('event: inbox') && inboxFrame.includes('\n\n')) {
+            settled = true;
+            res.destroy();
+            req.destroy();
+            resolve(data);
+          }
+        });
+      },
+    );
+    req.on('error', (err: NodeJS.ErrnoException) => {
+      if (settled && err.code === 'ECONNRESET') return;
+      reject(err);
+    });
+    req.setTimeout(2000, () => {
+      if (!settled) {
+        settled = true;
+        req.destroy();
+        reject(new Error('timed out waiting for SSE payload'));
+      }
+    });
+    req.end();
+  });
 }
 
 function seedEvidencePack(id: string, generatedAt = '2026-07-01T00:00:00.000Z'): void {
@@ -777,6 +829,63 @@ describe('handleApi — no secrets in any response', () => {
     const body = res.body;
     // No session token in body
     expect(body).not.toContain(h.token);
+  });
+
+  it('scrubs secret-shaped values and home paths from public JSON and SSE payloads', async () => {
+    const repo = path.join(tmpHome, 'secret-repo');
+    fs.mkdirSync(repo, { recursive: true });
+    const proposal = createProposal({
+      repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: `Patch ${API_SECRET_A}`,
+      summary: `Summary ${API_SECRET_B}`,
+      diff: [
+        'diff --git a/docs/config.md b/docs/config.md',
+        '--- a/docs/config.md',
+        '+++ b/docs/config.md',
+        '@@ -1 +1 @@',
+        `+TOKEN=${API_SECRET_C}`,
+        `+HOME_PATH=${tmpHome}/docs/config.md`,
+        '',
+      ].join('\n'),
+      engineModel: `codex:${API_SECRET_A}`,
+      engineTier: 'frontier',
+    });
+    const h = await startServer(makeConfig(), makeOpts());
+    openHandles.push(h);
+
+    const endpoints = [
+      '/api/snapshot',
+      '/api/runs',
+      '/api/run/run-001',
+      '/api/genome',
+      '/api/genome?q=foo',
+      '/api/inbox',
+      `/api/inbox/${proposal.id}`,
+    ];
+    for (const endpoint of endpoints) {
+      const res = await get(`${h.url}${endpoint}`, h.port);
+      expect(res.statusCode).toBe(200);
+      for (const secret of [API_SECRET_A, API_SECRET_B, API_SECRET_C]) {
+        expect(res.body).not.toContain(secret);
+      }
+      expect(res.body).not.toContain(tmpHome);
+    }
+
+    const detail = await get(`${h.url}/api/inbox/${proposal.id}`, h.port);
+    const detailBody = JSON.parse(detail.body) as Proposal;
+    expect(detailBody.title).toContain('[REDACTED]');
+    expect(detailBody.summary).toContain('[REDACTED]');
+    expect(detailBody.diff ?? '').toContain('[REDACTED]');
+    expect(detailBody.diff ?? '').toContain('~/docs/config.md');
+
+    const sse = await readSseChunk(`${h.url}/api/events`, h.port);
+    for (const secret of [API_SECRET_A, API_SECRET_B, API_SECRET_C]) {
+      expect(sse).not.toContain(secret);
+    }
+    expect(sse).not.toContain(tmpHome);
+    expect(sse).toContain('[REDACTED]');
   });
 
   it('runs response does not include the session token', async () => {
