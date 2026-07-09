@@ -1147,3 +1147,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Refuse secret-like MCP argv before spawning downstream MCP child processes and redact refusal text.
 - [x] Force daemon-launched Claude MCP config into strict mode so global MCP servers are not inherited.
 - [x] Run focused MCP/Fleet MCP verification, typecheck, lint/build/audit gates, commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Done-Diff Proposal Capture
+- [x] Rechecked clean pushed MCP baseline and live fleet smoke after deployment.
+- [x] Use scout finding to target daemon-required proposal capture parity.
+- [x] Reclassify required `proposal-disabled` runs with produced diff metadata and zero capture attempts as `proposal-capture-error`.
+- [x] Preserve failed-before-capture behavior and add a distinct done-with-diff diagnostic reason.
+- [x] Add daemon loop regression for done run with diff but no filed proposal, including delegation contract, diff metadata, worked ledger, and learning label.
+- [x] Run focused/adjacent verification and broad local gates.
+- [ ] Commit, push, reload daemon, and smoke live status.

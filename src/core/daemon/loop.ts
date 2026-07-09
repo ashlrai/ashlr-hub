@@ -555,16 +555,20 @@ function dispatchProductionFromProposalOutcome(
   options: { proposalRequired?: boolean } = {},
 ): DaemonDispatchProduction | undefined {
   if (!outcome) return undefined;
+  const diffFiles =
+    nonNegativeCount(outcome.files) ??
+    nonNegativeCount(summary?.diffFiles) ??
+    nonNegativeCount(summary?.actionCounts?.diffFiles);
   const diffLines =
     typeof outcome.insertions === 'number' || typeof outcome.deletions === 'number'
-      ? (outcome.insertions ?? 0) + (outcome.deletions ?? 0)
-      : undefined;
-  const captureMissing = isRequiredProposalCaptureMissing(outcome, summary, options);
-  const productionOutcome: DaemonDispatchProductionOutcome = captureMissing
+      ? Math.max(0, Math.trunc((outcome.insertions ?? 0) + (outcome.deletions ?? 0)))
+      : nonNegativeCount(summary?.diffLines) ?? nonNegativeCount(summary?.actionCounts?.diffLines);
+  const captureMissingReason = requiredProposalCaptureMissingReason(outcome, summary, options);
+  const productionOutcome: DaemonDispatchProductionOutcome = captureMissingReason
     ? 'proposal-capture-error'
     : productionOutcomeFromRunProposalOutcome(outcome.kind);
-  const reason = captureMissing
-    ? 'capture-missing: required proposal dispatch ended before final capture'
+  const reason = captureMissingReason
+    ? captureMissingReason
     : outcome.reason;
   return {
     outcome: productionOutcome,
@@ -572,28 +576,50 @@ function dispatchProductionFromProposalOutcome(
     ...(runId ? { runId } : {}),
     ...(summary ? { runEventSummary: summary } : {}),
     ...(reason ? { reason: boundedText(reason, 220) } : {}),
-    ...(typeof outcome.files === 'number' ? { diffFiles: outcome.files } : {}),
+    ...(typeof diffFiles === 'number' ? { diffFiles } : {}),
     ...(typeof diffLines === 'number' ? { diffLines } : {}),
   };
 }
 
-function isRequiredProposalCaptureMissing(
+function nonNegativeCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.trunc(value))
+    : undefined;
+}
+
+function positiveCount(value: unknown): number {
+  return nonNegativeCount(value) ?? 0;
+}
+
+function hasDiffMetadata(outcome: RunProposalOutcome, summary: RunEventSummary | undefined): boolean {
+  const counts = summary?.actionCounts;
+  const outcomeLines = (outcome.insertions ?? 0) + (outcome.deletions ?? 0);
+  return positiveCount(outcome.files) > 0 ||
+    positiveCount(outcomeLines) > 0 ||
+    positiveCount(summary?.diffFiles) > 0 ||
+    positiveCount(summary?.diffLines) > 0 ||
+    positiveCount(counts?.diffFiles) > 0 ||
+    positiveCount(counts?.diffLines) > 0;
+}
+
+function requiredProposalCaptureMissingReason(
   outcome: RunProposalOutcome,
   summary: RunEventSummary | undefined,
   options: { proposalRequired?: boolean },
-): boolean {
-  if (options.proposalRequired !== true) return false;
-  if (outcome.kind !== 'proposal-disabled') return false;
+): string | undefined {
+  if (options.proposalRequired !== true) return undefined;
+  if (outcome.kind !== 'proposal-disabled') return undefined;
   const counts = summary?.actionCounts;
-  const proposalDisabled = typeof counts?.proposalDisabled === 'number' && Number.isFinite(counts.proposalDisabled)
-    ? Math.max(0, Math.trunc(counts.proposalDisabled))
-    : 0;
-  const captureAttempts = typeof counts?.proposalCaptureAttempts === 'number' && Number.isFinite(counts.proposalCaptureAttempts)
-    ? Math.max(0, Math.trunc(counts.proposalCaptureAttempts))
-    : 0;
-  if (proposalDisabled <= 0 || captureAttempts > 0) return false;
-  if (summary?.proposalCreated === true) return false;
-  return summary?.status !== undefined && summary.status !== 'done';
+  const captureAttempts = positiveCount(counts?.proposalCaptureAttempts);
+  if (captureAttempts > 0) return undefined;
+  if (summary?.proposalCreated === true) return undefined;
+  if (summary?.status !== undefined && summary.status !== 'done') {
+    return 'capture-missing: required proposal dispatch ended before final capture';
+  }
+  if (hasDiffMetadata(outcome, summary)) {
+    return 'capture-missing: required proposal dispatch produced changes without proposal filing';
+  }
+  return undefined;
 }
 
 export function workedOutcomeFromDispatchProduction(
@@ -873,12 +899,12 @@ function dispatchTrace(
   const summary = runEventSummary({
     ...(fields.production?.runEventSummary ?? {}),
     runId: fields.production?.runId,
-    status: fields.dispatched ? 'done' : 'skipped',
+    status: fields.production?.runEventSummary?.status ?? (fields.dispatched ? 'done' : 'skipped'),
     outcome: fields.production?.outcome ?? (fields.dispatched ? 'unknown' : 'skipped'),
     proposalCreated: fields.production?.outcome === 'proposal-created',
     proposalId: fields.production?.proposalId,
-    diffFiles: fields.production?.diffFiles,
-    diffLines: fields.production?.diffLines,
+    diffFiles: fields.production?.diffFiles ?? fields.production?.runEventSummary?.diffFiles,
+    diffLines: fields.production?.diffLines ?? fields.production?.runEventSummary?.diffLines,
     costUsd: fields.spentUsd ?? 0,
   });
   const causal = causalMetadata({

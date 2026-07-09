@@ -1705,6 +1705,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       backend: 'local-coder',
       dispatched: true,
       skipReason: 'proposal-capture-error: capture-missing: required proposal dispatch ended before final capture',
+      runEventSummary: {
+        status: 'failed',
+      },
       production: {
         outcome: 'proposal-capture-error',
         runId: 'run-capture-missing',
@@ -1720,6 +1723,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       proposalCreated: false,
       runId: 'run-capture-missing',
       reason: 'capture-missing: required proposal dispatch ended before final capture',
+      runEventSummary: {
+        status: 'failed',
+      },
       basis: 'run-proposal-outcome',
       learningLabel: {
         learningKind: 'diagnostic-no-proposal',
@@ -1730,6 +1736,151 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
           captureOrGateBlocked: 1,
           policyDisabled: 0,
         },
+      },
+    });
+  });
+
+  it('A1h5d: daemon-required done run with diff but no proposal is capture-missing diagnostic', async () => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock done diff no proposal' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-done-diff-no-proposal',
+      status: 'done',
+      usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+      proposalOutcome: {
+        kind: 'proposal-disabled',
+        reason: 'proposal filing disabled for this sandboxed attempt',
+      },
+      runEventSummary: {
+        runId: 'run-done-diff-no-proposal',
+        status: 'done',
+        outcome: 'proposal-disabled',
+        proposalCreated: false,
+        diffFiles: 2,
+        diffLines: 5,
+        actionCounts: {
+          proposalDisabled: 1,
+          proposalCaptureAttempts: 0,
+          proposalCreated: 0,
+          diffFiles: 2,
+          diffLines: 5,
+        },
+      },
+    });
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: {
+          allowedBackends: ['local-coder'],
+        },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.proposalsCreated).toBe(0);
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({
+      delegationScope: {
+        resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+      },
+    });
+    expect(result.dispatches?.[0]).toMatchObject({
+      itemId: items[0]!.id,
+      backend: 'local-coder',
+      dispatched: true,
+      skipReason: 'proposal-capture-error: capture-missing: required proposal dispatch produced changes without proposal filing',
+      production: {
+        outcome: 'proposal-capture-error',
+        runId: 'run-done-diff-no-proposal',
+        reason: 'capture-missing: required proposal dispatch produced changes without proposal filing',
+        diffFiles: 2,
+        diffLines: 5,
+      },
+    });
+    expect(loadWorkedLedger().events.filter((event) => event.itemId === items[0]!.id)).toEqual([
+      expect.objectContaining({ itemId: items[0]!.id, outcome: 'empty' }),
+    ]);
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      itemId: items[0]!.id,
+      outcome: 'proposal-capture-error',
+      proposalCreated: false,
+      runId: 'run-done-diff-no-proposal',
+      reason: 'capture-missing: required proposal dispatch produced changes without proposal filing',
+      diffFiles: 2,
+      diffLines: 5,
+      basis: 'run-proposal-outcome',
+      learningLabel: {
+        learningKind: 'diagnostic-no-proposal',
+        policySuppressed: false,
+        diagnosticNoProposal: true,
+        diagnosticAttempt: true,
+        attemptShape: {
+          captureOrGateBlocked: 1,
+          policyDisabled: 0,
+        },
+      },
+    });
+  });
+
+  it('A1h5e: done diff capture-missing works without action count telemetry', async () => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock done diff no counts' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-done-diff-no-counts',
+      status: 'done',
+      usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+      proposalOutcome: {
+        kind: 'proposal-disabled',
+        reason: 'proposal filing disabled for this sandboxed attempt',
+      },
+      runEventSummary: {
+        runId: 'run-done-diff-no-counts',
+        status: 'done',
+        outcome: 'proposal-disabled',
+        proposalCreated: false,
+        diffFiles: 1,
+        diffLines: 4,
+      },
+    });
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: {
+          allowedBackends: ['local-coder'],
+        },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.dispatches?.[0]).toMatchObject({
+      itemId: items[0]!.id,
+      backend: 'local-coder',
+      dispatched: true,
+      skipReason: 'proposal-capture-error: capture-missing: required proposal dispatch produced changes without proposal filing',
+      production: {
+        outcome: 'proposal-capture-error',
+        runId: 'run-done-diff-no-counts',
+        reason: 'capture-missing: required proposal dispatch produced changes without proposal filing',
+        diffFiles: 1,
+        diffLines: 4,
+      },
+    });
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      itemId: items[0]!.id,
+      outcome: 'proposal-capture-error',
+      runId: 'run-done-diff-no-counts',
+      reason: 'capture-missing: required proposal dispatch produced changes without proposal filing',
+      diffFiles: 1,
+      diffLines: 4,
+      runEventSummary: {
+        status: 'done',
+        diffFiles: 1,
+        diffLines: 4,
       },
     });
   });
