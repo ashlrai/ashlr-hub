@@ -2571,6 +2571,102 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(stalledDrainAction?.detail).toContain('reslice-drain-stalled');
   });
 
+  it('keeps verification failure repair ahead of diagnostic drain while merge gate is blocked', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    const now = new Date().toISOString();
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome, [], now);
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: now,
+        repos: [repo],
+        items: [
+          makeBacklogItem(
+            repo,
+            'repo:proposal-repair-nodiff:abcdef123456',
+            'Reslice no-diff dispatch for repo item repo:goal:no-alt',
+            9,
+            'self',
+            ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+          ),
+        ],
+      }),
+      'utf8',
+    );
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'verification',
+        maxRisk: 'low',
+      },
+    });
+    createSignedProposal(cfg, {
+      title: 'Failed verify docs change',
+      diff: docsDiff('failed verify with reslices'),
+      verifyResult: { passed: false, failed: ['npm test'], source: 'auto-merge-preflight' },
+    });
+    const baseEvent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'item-reslice-a',
+      source: 'goal',
+      repo,
+      title: 'Improve no-alt yield',
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      routeReason: 'local-coder bulk',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0.001,
+      reason: 'engine "local-coder" completed without file changes',
+      basis: 'run-proposal-outcome',
+    };
+    recordDispatchProduction([
+      baseEvent,
+      { ...baseEvent, itemId: 'item-reslice-b' },
+      { ...baseEvent, itemId: 'item-reslice-c' },
+    ]);
+
+    const s = await buildFleetStatus(cfg);
+    const actionIds = s.nextActions?.map((action) => action.id) ?? [];
+
+    expect(s.autoMergeReadiness).toMatchObject({
+      knownVerificationFailed: 1,
+      blocked: 1,
+    });
+    expect(actionIds[0]).toBe('repair-verification-failures');
+    expect(actionIds).toContain('drain-diagnostic-reslices');
+    const failureAction = s.nextActions?.find((action) => action.id === 'repair-verification-failures');
+    expect(failureAction).toMatchObject({
+      label: 'Drain failed proposals',
+      commands: expect.arrayContaining([
+        expect.objectContaining({
+          label: 'Run merge maintenance',
+          argv: ['ashlr', 'daemon', 'start', '--once'],
+        }),
+      ]),
+    });
+    expect(s.autonomousShipReadiness?.topBlocker).toMatchObject({
+      id: 'verification-failed',
+    });
+    expect(s.autonomousShipReadiness?.primaryAction).toMatchObject({
+      id: 'repair-verification-failures',
+    });
+    expect(s.missionBrief).toMatchObject({
+      directive: 'Drain failed proposal blockers',
+      operatingMode: 'verify-only',
+      blocker: { id: 'verification-failed' },
+      action: { id: 'repair-verification-failures' },
+    });
+  });
+
   it('surfaces latest diagnostic reslice drain result even after queued generated work is gone', async () => {
     const now = new Date().toISOString();
     writeRunningDaemon(tmpHome, [

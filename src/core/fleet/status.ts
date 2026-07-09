@@ -2273,12 +2273,12 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     if (readiness.knownVerificationFailed > 0) {
       add({
         id: 'repair-verification-failures',
-        priority: 'medium',
-        label: 'Repair failed proposals',
-        detail: `${readiness.knownVerificationFailed} proposal(s) have known verification failures.`,
+        priority: 'high',
+        label: 'Drain failed proposals',
+        detail: `${readiness.knownVerificationFailed} proposal(s) have permanent verification blockers; run merge maintenance to reject or drain them.`,
         commands: [
           nextActionCommand('Inspect failed proposals', ['ashlr', 'inbox', '--json'], 'read-only'),
-          nextActionCommand('Run repair cycle', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch'),
+          nextActionCommand('Run merge maintenance', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch'),
         ],
       });
     }
@@ -2541,7 +2541,8 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     low: 3,
   };
   const actionRank = (action: FleetNextAction): number => {
-    if (action.id === 'drain-diagnostic-reslices') return -1.2;
+    if (action.id === 'repair-verification-failures' && (status.autoMergeReadiness?.knownVerificationFailed ?? 0) > 0) return -1.4;
+    if (action.id === 'drain-diagnostic-reslices' && (status.autoMergeReadiness?.knownVerificationFailed ?? 0) === 0) return -1.2;
     if (action.id === 'inspect-dispatch-yield') return -1;
     if (action.id === 'inspect-attempt-causal-coverage') return -0.5;
     return 0;
@@ -3244,7 +3245,7 @@ function missionDirective(
     case 'verify-pending-proposals':
       return 'Verify pending proposals';
     case 'repair-verification-failures':
-      return 'Repair failed proposal verification';
+      return 'Drain failed proposal blockers';
     case 'inspect-auto-merge-blockers':
       return 'Inspect merge blockers';
     case 'drain-diagnostic-reslices':

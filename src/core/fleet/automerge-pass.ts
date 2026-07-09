@@ -205,6 +205,7 @@ function incrementStuckOrArchive(
   const current = (proposal as unknown as Record<string, unknown>)['stuckPassCount'];
   const stuckPassCount = (typeof current === 'number' && Number.isFinite(current) ? current : 0) + 1;
   if (stuckPassCount >= threshold) {
+    updateProposalField(proposal.id, { stuckPassCount });
     setStatus(proposal.id, 'rejected', undefined, reason);
     return { archived: true, stuckPassCount };
   }

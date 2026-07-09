@@ -344,7 +344,10 @@ describe('M307 verify-before-judge', () => {
       undefined,
       expect.stringMatching(/permanent readiness blocker persisted for 3 pass/),
     );
-    expect(mockUpdateProposalField).not.toHaveBeenCalledWith('m307-prop', expect.objectContaining({ stuckPassCount: 3 }));
+    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 3 });
+    expect(mockUpdateProposalField.mock.invocationCallOrder[0]!).toBeLessThan(
+      mockSetStatus.mock.invocationCallOrder[0]!,
+    );
     expect(r.autoArchived).toBe(1);
   });
 
@@ -413,6 +416,7 @@ describe('M307 verify-before-judge', () => {
       undefined,
       expect.stringMatching(/permanent readiness blocker persisted for 3 pass.*risk class 'high'/),
     );
+    expect(mockUpdateProposalField).toHaveBeenCalledWith('m307-prop', { stuckPassCount: 3 });
     expect(r.autoArchived).toBe(1);
   });
 });

@@ -1164,3 +1164,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused daemon-loop regressions for auto-drain priority, local-only preservation, pending/cooldown fallback, malformed lookalikes, status, router trust, and web telemetry.
 - [x] Run focused and broad local verification gates.
 - [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Verify-Only Action Ranking
+- [x] Rechecked clean pushed auto-drain baseline and live fleet status.
+- [x] Deploy scouts for Mission Brief action ranking and known verification failure drain semantics.
+- [x] Promote failed-verification repair ahead of diagnostic reslice drain when the merge gate is blocked.
+- [x] Add focused FleetStatus regression for verify-only plus queued diagnostic reslices.
+- [x] Persist terminal stuck-pass count before rejecting permanent auto-merge blockers.
+- [x] Run production gates for the verify-only action ranking slice.
+- [ ] Commit, push, reload daemon, and smoke live status.
