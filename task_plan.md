@@ -234,7 +234,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Map current goal progress/proposal status behavior locally.
 - [x] Implement the smallest safe merged+verified completion signal or repair path.
 - [x] Add focused regression coverage for applied-but-unverified versus applied-and-verified goal milestones.
-- [ ] Run verification, commit, push, restart/resume daemon, and smoke live goal-focus state.
+- [x] Run verification, commit, push, restart/resume daemon, and smoke live goal-focus state.
 
 ## Current Continuation - Remote Handoff Reconciliation
 - [x] Rechecked git status, recent commits, Entire state, task plan, and notes after the previous push.

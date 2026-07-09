@@ -7,6 +7,9 @@
 - Implementation: added a shared `proposalCompletesGoalMilestone()` predicate and routed both read-only progress reconciliation and best-effort milestone linkage through it. A proposal now closes a goal milestone only when `status === 'applied'` and `verifyResult.passed === true`.
 - Delayed evidence repair: `updateProposalField()` now links a milestone to `done` when passing verification is later persisted onto an already applied proposal, while failing/missing verification leaves the milestone incomplete.
 - Regression coverage: `m28.advance` now proves applied-without-verification stays incomplete; `m228.milestone-proposal-link` now covers passing verification, missing verification, failing verification, and delayed verification updates.
+- Verification passed: `npm run typecheck -- --pretty false`, focused goal/proposal CI (41 tests), adjacent remote/status/production/verify CI (94 tests), `npm run lint` (existing 115-warning baseline, 0 errors), `npm run build`, `npm audit --audit-level=moderate`, `npm run test:invariants` (41 files, 411 tests), and `git diff --check`.
+- Production push/reload: pushed `863a661 feat: Require verification for goal completion`, reinstalled/resumed the launchd daemon, and live smoke showed daemon PID `24640`, guard clear, goal-focus enabled with 12 actionable active goals over threshold 4, 13 backlog items / 11 eligible, and `autonomyDirection.mode:"backlog-build"`.
+- Next overnight lane from agent audit: add derived, read-only `FleetStatus.laneLocks` before enforcing lane locks in daemon selection. Track active goal lanes, stale in-progress milestones, awaiting-host-merge lanes, unverified applied proposals, and bounded privacy-safe samples.
 
 ## Current Fleet Usefulness Continuation
 - Start state: clean `master...origin/master` at `08b0fd5`; Entire still not set up.
