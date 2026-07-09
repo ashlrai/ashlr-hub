@@ -1612,6 +1612,11 @@ interface DiagnosticDispatchYieldAction {
   backend?: EngineId | null;
 }
 
+function isDiagnosticResliceQueueItem(item: FleetQueueNextItem): boolean {
+  return item.id.includes(':proposal-repair-nodiff:') ||
+    item.title.toLowerCase().startsWith('reslice no-diff dispatch');
+}
+
 function diagnosticPolicyDisabled(
   value: Pick<DispatchProductionYieldSummary, 'outcomes' | 'attemptShape'>,
 ): number {
@@ -1928,6 +1933,39 @@ function dispatchYieldNextAction(diagnostic: FleetDispatchYieldDiagnostics): Dia
   return {
     detail: formatDispatchYieldDiagnosticDetail(diagnostic),
     ...(candidate?.backend ? { backend: candidate.backend } : {}),
+  };
+}
+
+function diagnosticResliceDrainNextAction(status: FleetStatus): FleetNextAction | null {
+  const diagnostic = status.dispatchYieldDiagnostics;
+  const resliceCount = status.queue.generatedWork?.diagnosticReslices ?? 0;
+  if (
+    !diagnostic ||
+    diagnostic.verdict !== 'actionable' ||
+    diagnostic.action !== 'tighten-context-or-reslice' ||
+    resliceCount <= 0
+  ) {
+    return null;
+  }
+
+  const topReslice = status.queue.next?.find(isDiagnosticResliceQueueItem) ?? null;
+  const diagnosticDetail = formatDispatchYieldDiagnosticDetail(diagnostic);
+  const target = topReslice?.repo ?? diagnostic.primaryCandidate?.backend;
+  const first = topReslice ? ` First: ${topReslice.title}.` : '';
+  return {
+    id: 'drain-diagnostic-reslices',
+    priority: 'high',
+    label: 'Drain diagnostic reslices',
+    detail:
+      `${resliceCount} diagnostic no-diff reslice item(s) are queued while dispatch yield is actionable: ` +
+      `${diagnosticDetail}.${first}`,
+    ...(target ? { target } : {}),
+    commands: [
+      nextActionCommand('Drain diagnostic reslices', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch', {
+        note: 'Runs the existing guarded daemon path to drain already-queued diagnostic no-diff reslices.',
+      }),
+      nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+    ],
   };
 }
 
@@ -2256,6 +2294,8 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
 
   const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
   if (eligibleBacklogItems > 0 && !controlBlocked) {
+    const diagnosticResliceDrainAction = diagnosticResliceDrainNextAction(status);
+    if (diagnosticResliceDrainAction) add(diagnosticResliceDrainAction);
     const dispatchYieldDetail = status.dispatchYieldDiagnostics
       ? dispatchYieldNextAction(status.dispatchYieldDiagnostics)
       : null;
@@ -2401,6 +2441,7 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     low: 3,
   };
   const actionRank = (action: FleetNextAction): number => {
+    if (action.id === 'drain-diagnostic-reslices') return -1.2;
     if (action.id === 'inspect-dispatch-yield') return -1;
     if (action.id === 'inspect-attempt-causal-coverage') return -0.5;
     return 0;
@@ -3106,6 +3147,8 @@ function missionDirective(
       return 'Repair failed proposal verification';
     case 'inspect-auto-merge-blockers':
       return 'Inspect merge blockers';
+    case 'drain-diagnostic-reslices':
+      return 'Drain diagnostic reslices';
     case 'inspect-dispatch-yield':
       return 'Recover dispatch yield';
     case 'inspect-dispatch-skips':

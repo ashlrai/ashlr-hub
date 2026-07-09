@@ -1082,4 +1082,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Render delegation safety counts in CLI, Fleet, Mission Control, and Fleet Dashboard status surfaces.
 - [x] Add focused Phantom parser, FleetStatus/CLI, and web surface regression coverage.
 - [x] Run focused tests, typecheck, node syntax check, lint, build, audit, and diff checks.
-- [ ] Commit, push, reload daemon, and smoke live status.
+- [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Diagnostic Reslice Drain Action
+- [x] Deploy scouts for dispatch yield, causal context-summary coverage, and evidence-pack quality.
+- [x] Select dispatch-yield reslice drain as the live critical path because fleet status reports `dispatch-yield-actionable` and queued no-diff reslices.
+- [x] Add a high-priority `drain-diagnostic-reslices` next action when dispatch yield is actionable, the recommended repair is tighten/reslice, and queued no-diff diagnostic reslices exist.
+- [x] Make Mission Brief use `Drain diagnostic reslices` when that action is primary.
+- [x] Add focused FleetStatus/CLI regression coverage.
+- [x] Run focused M49 status tests, typecheck, and diff checks.
+- [ ] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.

@@ -2433,6 +2433,111 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatFleetStatus(s)).toContain('diagnosis: actionable · nim/goal 0/3 0% · tighten context/reslice');
   });
 
+  it('promotes queued no-diff diagnostic reslices ahead of dispatch-yield inspection', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    const now = new Date().toISOString();
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome, [], now);
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: now,
+        repos: [repo],
+        items: [
+          makeBacklogItem(
+            repo,
+            'repo:proposal-repair-nodiff:abcdef123456',
+            'Reslice no-diff dispatch for repo item repo:goal:no-alt',
+            9,
+            'self',
+            ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+          ),
+        ],
+      }),
+      'utf8',
+    );
+    const baseEvent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'item-reslice-a',
+      source: 'goal',
+      repo,
+      title: 'Improve no-alt yield',
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      routeReason: 'local-coder bulk',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0.001,
+      reason: 'engine "local-coder" completed without file changes',
+      basis: 'run-proposal-outcome',
+    };
+    recordDispatchProduction([
+      baseEvent,
+      { ...baseEvent, itemId: 'item-reslice-b' },
+      { ...baseEvent, itemId: 'item-reslice-c' },
+    ]);
+
+    const s = await buildFleetStatus(baseConfig());
+    const actionIds = s.nextActions?.map((action) => action.id) ?? [];
+    const drainAction = s.nextActions?.find((candidate) => candidate.id === 'drain-diagnostic-reslices');
+
+    expect(s.queue.generatedWork).toMatchObject({
+      diagnosticReslices: 1,
+      proposalRepair: 1,
+    });
+    expect(s.dispatchYieldDiagnostics).toMatchObject({
+      verdict: 'actionable',
+      action: 'tighten-context-or-reslice',
+      primaryCandidate: {
+        backend: 'local-coder',
+        source: 'goal',
+        diagnosticAttempts: 3,
+      },
+    });
+    expect(actionIds[0]).toBe('drain-diagnostic-reslices');
+    expect(actionIds).toContain('inspect-dispatch-yield');
+    expect(drainAction).toMatchObject({
+      priority: 'high',
+      label: 'Drain diagnostic reslices',
+      detail: expect.stringContaining('1 diagnostic no-diff reslice item(s) are queued'),
+      commands: [
+        expect.objectContaining({
+          label: 'Drain diagnostic reslices',
+          argv: ['ashlr', 'daemon', 'start', '--once'],
+          safety: 'autonomous-dispatch',
+        }),
+        expect.objectContaining({
+          label: 'Inspect fleet status',
+          argv: ['ashlr', 'fleet', 'status', '--json'],
+          safety: 'read-only',
+        }),
+      ],
+    });
+    expect(drainAction?.detail).toContain('sample-gated action: tighten context/reslice');
+    expect(drainAction?.detail).toContain('First: Reslice no-diff dispatch for repo item repo:goal:no-alt.');
+    expect(s.autonomousShipReadiness).toMatchObject({
+      primaryAction: {
+        id: 'drain-diagnostic-reslices',
+      },
+    });
+    expect(s.missionBrief).toMatchObject({
+      directive: 'Drain diagnostic reslices',
+      action: {
+        id: 'drain-diagnostic-reslices',
+      },
+    });
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('[high] Drain diagnostic reslices');
+    expect(formatted).toContain('cmd: Drain diagnostic reslices: ashlr daemon start --once (autonomous-dispatch)');
+  });
+
   it('excludes proposal-disabled dispatch-production from weak-yield next action', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');

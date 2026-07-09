@@ -1017,6 +1017,14 @@
   - Fleet OS: `sanitizeFleetPhantomAgentReport()` drops non-allowlisted nested keys, and `review-phantom-audit` now includes unsafe, blocked, and review delegation aggregate signals.
   - CLI/UI: `ashlr fleet status` renders `safety=...`, `delegation-status=...`, and `actions=...` segments. Fleet, Mission Control, and Fleet Dashboard render a compact Phantom card/meta row with values hidden.
   - Verification passed: `npm run typecheck -- --pretty false`; focused `npm run test:ci -- test/m2.phantom.test.ts test/m348.fleet-phantom.test.ts test/m213.dashboard-sse.test.ts` (72 tests); adjacent dashboard suite `npm run test:ci -- test/m210.dashboard.test.ts test/m2.phantom.test.ts test/m348.fleet-phantom.test.ts test/m213.dashboard-sse.test.ts` (96 tests); `node --check src/core/web/public/app.js`; `npm run lint` (known 115-warning baseline, 0 errors); `npm run build`; `npm audit --audit-level=moderate`; and `git diff --check`.
+  - Deployed as `a149136` on `origin/master`, reinstalled/resumed/kickstarted launchd, and smoked live status. Daemon PID `59002`, guard clear, kill switch off, tick in progress with fresh heartbeat, mission still `Recover dispatch yield`; Phantom is installed but not initialized, so the new aggregate-only card is dormant until agent reports are configured.
+
+- Current diagnostic reslice drain action pass:
+  - Scout finding: live fleet status has `dispatch-yield-actionable` as the top blocker, `0` pending proposals, queued `proposal-repair-nodiff` work, and the recommended repair is `tighten-context-or-reslice`; the existing primary action still said "inspect" even though the fleet already had a guarded daemon path to drain those reslices.
+  - Implementation: `buildNextActions()` now promotes a high-priority `drain-diagnostic-reslices` action only when dispatch yield is actionable, the diagnostic action is `tighten-context-or-reslice`, and `queue.generatedWork.diagnosticReslices > 0`. The action points to `ashlr daemon start --once` plus read-only status inspection and includes the first queued reslice title when visible.
+  - Mission Brief: `missionDirective()` now reports `Drain diagnostic reslices` when that action is primary, so Mission Control points at execution rather than passive inspection.
+  - Verification passed so far: `npm run test:ci -- test/m49.fleet-status.test.ts` (57 tests), `npm run typecheck -- --pretty false`, and `git diff --check`.
+  - Next queued lanes from scouts: instrument metadata-only `runEventSummary.contextSummary` in the local api-model path to clear `no-context-summary-events`, and fix delete-only autonomy evidence packs so removed files are still represented in `pack.diff.files`.
 
 - Current epoch-gated learned routing pass:
   - Purpose: allow the existing dispatch-yield learned reroute to use the new label foundation, but only for current, authoritative, metadata-only samples.
