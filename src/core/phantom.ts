@@ -7,7 +7,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import type { PhantomCapabilitySnapshot, PhantomStatus } from './types.js';
+import type { PhantomAgentReportRollup, PhantomCapabilitySnapshot, PhantomStatus } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -25,6 +25,16 @@ const UNKNOWN_PHANTOM_COMMANDS: PhantomCapabilitySnapshot['commands'] = {
   mcpAvailable: false,
   agentAvailable: false,
 };
+
+const AGENT_REPORT_COUNT_MAX = Number.MAX_SAFE_INTEGER;
+const AGENT_REPORT_ARRAY_MAX = 10_000;
+
+type CountKind = 'status' | 'risk' | 'severity';
+
+interface PhantomStatusOptions {
+  timeoutMs?: number;
+  includeAgentReport?: boolean;
+}
 
 export const PHANTOM_KNOWN_FLEET_SECRET_NAMES = [
   'ANTHROPIC_API_KEY',
@@ -74,11 +84,12 @@ function runPhantom(
 
 let cachedFleetStatus: { key: string; expiresAt: number; status: PhantomStatus } | null = null;
 
-function phantomCacheKey(): string {
+function phantomCacheKey(options: { includeAgentReport?: boolean } = {}): string {
   return JSON.stringify({
     home: process.env.HOME ?? '',
     userProfile: process.env.USERPROFILE ?? '',
     path: process.env.PATH ?? '',
+    includeAgentReport: options.includeAgentReport === true,
   });
 }
 
@@ -101,7 +112,7 @@ export function phantomInstalled(options: { timeoutMs?: number } = {}): boolean 
  *  - Degrades gracefully when phantom is absent, uninitialized, or returns
  *    an unexpected format.
  */
-export function getPhantomStatus(options: { timeoutMs?: number } = {}): PhantomStatus {
+export function getPhantomStatus(options: PhantomStatusOptions = {}): PhantomStatus {
   const timeoutMs = options.timeoutMs;
   // ── 1. Binary presence ──────────────────────────────────────────────────
   if (!phantomInstalled({ timeoutMs })) {
@@ -183,6 +194,9 @@ export function getPhantomStatus(options: { timeoutMs?: number } = {}): PhantomS
   }
 
   const commands = detectPhantomCommandSupport({ timeoutMs });
+  const agentReport = options.includeAgentReport === true && commands.agentAvailable
+    ? readPhantomAgentReport({ timeoutMs })
+    : undefined;
 
   const base = {
     installed: true,
@@ -195,6 +209,7 @@ export function getPhantomStatus(options: { timeoutMs?: number } = {}): PhantomS
   const result: PhantomStatus = {
     ...base,
     capability: buildPhantomCapabilitySnapshot(base),
+    ...(agentReport ? { agentReport } : {}),
   };
 
   if (statusError !== undefined) {
@@ -208,13 +223,17 @@ export function getCachedFleetPhantomStatus(options: {
   ttlMs?: number;
   timeoutMs?: number;
   nowMs?: number;
+  includeAgentReport?: boolean;
 } = {}): PhantomStatus {
   const nowMs = options.nowMs ?? Date.now();
-  const key = phantomCacheKey();
+  const key = phantomCacheKey({ includeAgentReport: options.includeAgentReport });
   if (cachedFleetStatus && cachedFleetStatus.key === key && cachedFleetStatus.expiresAt > nowMs) {
     return cachedFleetStatus.status;
   }
-  const status = getPhantomStatus({ timeoutMs: options.timeoutMs ?? FLEET_TIMEOUT_MS });
+  const status = getPhantomStatus({
+    timeoutMs: options.timeoutMs ?? FLEET_TIMEOUT_MS,
+    includeAgentReport: options.includeAgentReport,
+  });
   cachedFleetStatus = {
     key,
     expiresAt: nowMs + (options.ttlMs ?? FLEET_CACHE_TTL_MS),
@@ -324,6 +343,35 @@ function detectPhantomCommandSupport(
   return parsePhantomCommandHelp(`${stdout}\n${stderr}`);
 }
 
+function readPhantomAgentReport(options: { timeoutMs?: number } = {}): PhantomAgentReportRollup {
+  const { stdout, error } = runPhantom(['agent', 'report', '--json'], options);
+  if (error !== undefined || stdout.trim().length === 0) {
+    return failedAgentReportRollup();
+  }
+  return aggregatePhantomAgentReport(stdout);
+}
+
+export function aggregatePhantomAgentReport(raw: string): PhantomAgentReportRollup {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return failedAgentReportRollup();
+  }
+
+  const records = extractAgentReportRecords(parsed);
+  let rollup = records.length > 0 ? aggregateAgentReportRecords(records) : emptyAgentReportRollup();
+  let sawAggregate = records.length > 0 || hasExplicitAgentReportRecordList(parsed);
+
+  for (const source of aggregateSources(parsed)) {
+    const applied = applyAgentReportAggregateFields(rollup, source);
+    rollup = applied.rollup;
+    sawAggregate = sawAggregate || applied.sawAggregate;
+  }
+
+  return sawAggregate ? rollup : failedAgentReportRollup();
+}
+
 function parsePhantomCommandHelp(raw: string): PhantomCapabilitySnapshot['commands'] {
   const commandNames = new Set<string>();
   let inCommandsBlock = false;
@@ -352,6 +400,276 @@ function parsePhantomCommandHelp(raw: string): PhantomCapabilitySnapshot['comman
     mcpAvailable: commandNames.has('mcp'),
     agentAvailable: commandNames.has('agent'),
   };
+}
+
+function emptyAgentReportRollup(): PhantomAgentReportRollup {
+  return {
+    valuesHidden: true,
+    scannedRepos: 0,
+    validReports: 0,
+    failedReports: 0,
+    statusCounts: {},
+    riskCounts: {},
+    severityCounts: {},
+    requiresApprovalCount: 0,
+  };
+}
+
+function failedAgentReportRollup(): PhantomAgentReportRollup {
+  return {
+    ...emptyAgentReportRollup(),
+    failedReports: 1,
+  };
+}
+
+function aggregateSources(parsed: unknown): Record<string, unknown>[] {
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+  const obj = parsed as Record<string, unknown>;
+  const sources = [obj];
+  for (const key of ['summary', 'aggregate', 'rollup', 'totals']) {
+    const value = obj[key];
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      sources.push(value as Record<string, unknown>);
+    }
+  }
+  return sources;
+}
+
+function hasExplicitAgentReportRecordList(parsed: unknown): boolean {
+  if (Array.isArray(parsed)) return true;
+  if (parsed === null || typeof parsed !== 'object') return false;
+  const obj = parsed as Record<string, unknown>;
+  return ['reports', 'repos', 'results', 'items', 'entries'].some((key) => Array.isArray(obj[key]));
+}
+
+function applyAgentReportAggregateFields(
+  input: PhantomAgentReportRollup,
+  source: Record<string, unknown>,
+): { rollup: PhantomAgentReportRollup; sawAggregate: boolean } {
+  const rollup: PhantomAgentReportRollup = {
+    ...input,
+    statusCounts: { ...input.statusCounts },
+    riskCounts: { ...input.riskCounts },
+    severityCounts: { ...input.severityCounts },
+  };
+  let sawAggregate = false;
+
+  const scannedRepos = readCountField(source, ['scannedRepos', 'scanned_repos', 'reposScanned', 'repos_scanned', 'totalRepos', 'total_repos']);
+  if (scannedRepos !== undefined) {
+    rollup.scannedRepos = scannedRepos;
+    sawAggregate = true;
+  }
+
+  const validReports = readCountField(source, ['validReports', 'valid_reports']);
+  if (validReports !== undefined) {
+    rollup.validReports = validReports;
+    sawAggregate = true;
+  }
+
+  const failedReports = readCountField(source, ['failedReports', 'failed_reports', 'invalidReports', 'invalid_reports']);
+  if (failedReports !== undefined) {
+    rollup.failedReports = failedReports;
+    sawAggregate = true;
+  }
+
+  const requiresApprovalCount = readCountField(source, [
+    'requiresApprovalCount',
+    'requires_approval_count',
+    'approvalRequiredCount',
+    'approval_required_count',
+  ]);
+  if (requiresApprovalCount !== undefined) {
+    rollup.requiresApprovalCount = requiresApprovalCount;
+    sawAggregate = true;
+  }
+
+  const statusCounts = readCountObject(source, ['statusCounts', 'status_counts', 'statuses', 'byStatus', 'by_status'], 'status');
+  if (statusCounts !== undefined) {
+    rollup.statusCounts = statusCounts;
+    sawAggregate = true;
+  }
+
+  const riskCounts = readCountObject(source, ['riskCounts', 'risk_counts', 'risks', 'riskLevels', 'risk_levels', 'byRisk', 'by_risk'], 'risk');
+  if (riskCounts !== undefined) {
+    rollup.riskCounts = riskCounts;
+    sawAggregate = true;
+  }
+
+  const severityCounts = readCountObject(source, [
+    'severityCounts',
+    'severity_counts',
+    'severities',
+    'bySeverity',
+    'by_severity',
+  ], 'severity');
+  if (severityCounts !== undefined) {
+    rollup.severityCounts = severityCounts;
+    sawAggregate = true;
+  }
+
+  return { rollup, sawAggregate };
+}
+
+function extractAgentReportRecords(parsed: unknown): Record<string, unknown>[] {
+  const rawRecords = Array.isArray(parsed)
+    ? parsed
+    : parsed !== null && typeof parsed === 'object'
+      ? firstArrayField(parsed as Record<string, unknown>, ['reports', 'repos', 'results', 'items', 'entries'])
+      : [];
+
+  return rawRecords
+    .slice(0, AGENT_REPORT_ARRAY_MAX)
+    .filter((item): item is Record<string, unknown> => item !== null && typeof item === 'object' && !Array.isArray(item));
+}
+
+function aggregateAgentReportRecords(records: Record<string, unknown>[]): PhantomAgentReportRollup {
+  const rollup = emptyAgentReportRollup();
+  rollup.scannedRepos = records.length;
+
+  for (const record of records) {
+    const status = readStringField(record, ['status', 'state', 'result', 'outcome']);
+    const normalizedStatus = status ? normalizeAgentReportCountKey('status', status) : undefined;
+    if (normalizedStatus) {
+      addCount(rollup.statusCounts, normalizedStatus, 1);
+    }
+
+    const requiresApproval = recordRequiresApproval(record, normalizedStatus);
+    if (requiresApproval) {
+      rollup.requiresApprovalCount += 1;
+    }
+
+    if (recordIndicatesFailure(record, normalizedStatus)) {
+      rollup.failedReports += 1;
+    } else {
+      rollup.validReports += 1;
+    }
+
+    const findings = firstArrayField(record, ['findings', 'issues', 'risks', 'violations']);
+    if (findings.length > 0) {
+      for (const finding of findings.slice(0, AGENT_REPORT_ARRAY_MAX)) {
+        if (finding === null || typeof finding !== 'object' || Array.isArray(finding)) continue;
+        addRiskSeverityCounts(rollup, finding as Record<string, unknown>);
+      }
+    } else {
+      addRiskSeverityCounts(rollup, record);
+    }
+  }
+
+  return rollup;
+}
+
+function addRiskSeverityCounts(rollup: PhantomAgentReportRollup, source: Record<string, unknown>): void {
+  const risk = readStringField(source, ['risk', 'riskLevel', 'risk_level', 'maxRisk', 'max_risk']);
+  if (risk) addCount(rollup.riskCounts, normalizeAgentReportCountKey('risk', risk), 1);
+
+  const severity = readStringField(source, ['severity', 'maxSeverity', 'max_severity']);
+  if (severity) addCount(rollup.severityCounts, normalizeAgentReportCountKey('severity', severity), 1);
+}
+
+function recordRequiresApproval(record: Record<string, unknown>, normalizedStatus: string | undefined): boolean {
+  if (normalizedStatus === 'requires-approval') return true;
+  return readBooleanField(record, ['requiresApproval', 'requires_approval', 'approvalRequired', 'approval_required']) === true;
+}
+
+function recordIndicatesFailure(record: Record<string, unknown>, normalizedStatus: string | undefined): boolean {
+  if (normalizedStatus === 'failed') return true;
+  if (readBooleanField(record, ['valid', 'ok', 'passed']) === false) return true;
+  if (readBooleanField(record, ['failed', 'error', 'errored']) === true) return true;
+  const error = record['error'];
+  return typeof error === 'string' && error.trim().length > 0;
+}
+
+function readCountField(source: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const count = coerceCount(source[key]);
+    if (count !== undefined) return count;
+  }
+  return undefined;
+}
+
+function readCountObject(
+  source: Record<string, unknown>,
+  keys: string[],
+  kind: CountKind,
+): Record<string, number> | undefined {
+  for (const key of keys) {
+    const value = source[key];
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) continue;
+    const counts: Record<string, number> = {};
+    let sawCount = false;
+    for (const [rawKey, rawCount] of Object.entries(value as Record<string, unknown>)) {
+      const count = coerceCount(rawCount);
+      if (count === undefined) continue;
+      addCount(counts, normalizeAgentReportCountKey(kind, rawKey), count);
+      sawCount = true;
+    }
+    if (sawCount) return counts;
+  }
+  return undefined;
+}
+
+function firstArrayField(source: Record<string, unknown>, keys: string[]): unknown[] {
+  for (const key of keys) {
+    const value = source[key];
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
+function readStringField(source: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === 'string' && value.trim().length > 0) return value;
+  }
+  return undefined;
+}
+
+function readBooleanField(source: Record<string, unknown>, keys: string[]): boolean | undefined {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === 'boolean') return value;
+  }
+  return undefined;
+}
+
+function coerceCount(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
+  return Math.min(Math.floor(value), AGENT_REPORT_COUNT_MAX);
+}
+
+function addCount(counts: Record<string, number>, key: string, amount: number): void {
+  counts[key] = Math.min((counts[key] ?? 0) + amount, AGENT_REPORT_COUNT_MAX);
+}
+
+function normalizeAgentReportCountKey(kind: CountKind, value: string): string {
+  const key = value.trim().toLowerCase().replace(/[\s_]+/g, '-');
+  if (!key) return 'unknown';
+
+  if (kind === 'status') {
+    if (['ok', 'pass', 'passed', 'success', 'succeeded', 'clean', 'valid'].includes(key)) return 'ok';
+    if (['warn', 'warning'].includes(key)) return 'warning';
+    if (['review', 'needs-review'].includes(key)) return 'review';
+    if (['requires-approval', 'approval-required', 'needs-approval'].includes(key)) return 'requires-approval';
+    if (['fail', 'failed', 'error', 'errored', 'invalid'].includes(key)) return 'failed';
+    if (['blocked', 'skipped', 'unknown'].includes(key)) return key;
+    return 'other';
+  }
+
+  if (kind === 'risk') {
+    if (['none', 'no-risk'].includes(key)) return 'none';
+    if (['low', 'medium', 'high', 'critical', 'unknown'].includes(key)) return key;
+    if (key === 'med') return 'medium';
+    if (key === 'crit') return 'critical';
+    return 'other';
+  }
+
+  if (['info', 'informational'].includes(key)) return 'info';
+  if (['low', 'minor'].includes(key)) return 'low';
+  if (['medium', 'moderate'].includes(key)) return 'medium';
+  if (['high', 'major'].includes(key)) return 'high';
+  if (['critical', 'crit', 'blocker'].includes(key)) return 'critical';
+  if (key === 'unknown') return 'unknown';
+  return 'other';
 }
 
 /**

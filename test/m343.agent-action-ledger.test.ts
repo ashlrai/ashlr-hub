@@ -222,6 +222,38 @@ describe('M343 agent action ledger', () => {
     expect(raw).not.toContain('"spentUsd":null');
   });
 
+  it('sanitizes run action-count summaries while dropping arbitrary secret-shaped keys', () => {
+    const secretKey = 'GITHUB_TOKEN=ghp_1234567890abcdefABCDEF1234567890abcdef';
+    recordAgentAction(makeEvent({
+      action: 'run-action-counts',
+      runEventSummary: {
+        runId: 'run-action-counts',
+        status: 'done',
+        actionCounts: {
+          sandboxCreated: 1,
+          spawnAttempts: 2.8,
+          transientRetries: -1,
+          proposalDisabled: 1,
+          [secretKey]: 7,
+          unknownCounter: 9,
+        } as never,
+      },
+    }));
+
+    const event = readAgentActions({ limit: 1 })[0]!;
+    const serialized = JSON.stringify(event);
+
+    expect(event.runEventSummary?.actionCounts).toMatchObject({
+      sandboxCreated: 1,
+      spawnAttempts: 2,
+      transientRetries: 0,
+      proposalDisabled: 1,
+    });
+    expect(serialized).not.toContain('unknownCounter');
+    expect(serialized).not.toContain(secretKey);
+    expect(serialized).not.toContain('ghp_1234567890abcdefABCDEF1234567890abcdef');
+  });
+
   it('never throws when persistence is unavailable', () => {
     process.env.ASHLR_HOME = join(home, 'file-home');
     writeFileSync(process.env.ASHLR_HOME, 'not a directory', 'utf8');

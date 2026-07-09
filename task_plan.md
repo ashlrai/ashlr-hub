@@ -622,3 +622,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add default-on merge-contract backlog scanner work for repos with inferred verify commands but no explicit merge-grade `ashlr.verify.json`.
 - [x] Verify capture/scanner lanes with focused, adjacent, static, invariant, and full-CI gates.
 - [x] Commit and push `79dae3b`, reload launchd daemon, resume fleet, and smoke FleetStatus with guard clear.
+
+## Current Continuation - Overnight Data Loop And Phantom Rollup
+- [x] Rechecked current dirty state after compaction, recent commits, plan/notes, and verification sessions.
+- [x] Deployed parallel agents for diff audit and next-lane strategy while keeping local verification on the critical path.
+- [x] Added metadata-only sandbox action-count telemetry across sandbox creation, model/tool steps, retries, capture attempts, gate/repair attempts, diff size, and proposal outcome counters.
+- [x] Persisted action counts through run summaries, daemon dispatch-production traces, causal sanitization, and terminal agent-action ledger records without raw prompts, diffs, stdout, stderr, env, or file contents.
+- [x] Added default-off, values-free Phantom `agent report --json` rollup gated by actual top-level `agent` command detection.
+- [x] Split skipped/not-attempted dispatch rows from actionable no-proposal diagnostics so FleetStatus can distinguish selection skips from backend/capture yield failures.
+- [x] Repaired sibling `ashlrcode` TypeScript/test compatibility and pushed commit `3065031` to `origin/main`.
+- [x] Verify current hub batch with typecheck, focused Vitest, Phantom reruns, lint, build, audit, invariants, and CI-wrapper affected suites.
+- [ ] Commit and push the current hub telemetry/Phantom/status batch.
+- [ ] Next lane: use action-count telemetry for sample-gated, same-tier proposal-yield diagnostics/routing without escalating risk.

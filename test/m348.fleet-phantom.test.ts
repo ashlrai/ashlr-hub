@@ -88,7 +88,12 @@ async function withFleetMocks<T>(
   process.env.ASHLR_HOME = join(tmpHome, '.ashlr');
   vi.resetModules();
   vi.doMock('../src/core/phantom.js', () => ({
-    getCachedFleetPhantomStatus: () => statusFactory(),
+    getCachedFleetPhantomStatus: (options?: { includeAgentReport?: boolean }) => {
+      const status = statusFactory();
+      return options?.includeAgentReport === true
+        ? status
+        : { ...status, agentReport: undefined };
+    },
   }));
   vi.doMock('../src/core/mcp-registry.js', () => ({
     discoverMcpServers: () => ({
@@ -200,8 +205,95 @@ describe('M348 FleetStatus Phantom capability', () => {
       const rendered = formatFleetStatus(status);
 
       expect(status.phantom?.commands.agentAvailable).toBe(true);
+      expect(status.phantom?.agentReport).toBeUndefined();
       expect(rendered).toContain('agent yes');
+      expect(rendered).not.toContain('report repos=');
       expect(rendered).toContain('values hidden');
+    });
+  });
+
+  it('surfaces and renders only aggregate Phantom agent report counts', async () => {
+    await withFleetMocks(() => {
+      const base = phantomStatus();
+      return {
+        ...base,
+        capability: {
+          ...base.capability,
+          commands: {
+            ...base.capability.commands,
+            agentAvailable: true,
+          },
+        },
+        agentReport: {
+          valuesHidden: true,
+          scannedRepos: 3,
+          validReports: 2,
+          failedReports: 1,
+          statusCounts: {
+            ok: 1,
+            'requires-approval': 1,
+            failed: 1,
+          },
+          riskCounts: {
+            critical: 1,
+            high: 1,
+            low: 1,
+          },
+          severityCounts: {
+            critical: 1,
+            high: 1,
+            info: 1,
+          },
+          requiresApprovalCount: 1,
+        },
+      };
+    }, async ({ buildFleetStatus, formatFleetStatus }) => {
+      const cfg = baseConfig();
+      cfg.phantom = {
+        enabled: true,
+        agentReportRollup: { enabled: true },
+      };
+      const status = await buildFleetStatus(cfg);
+      const serialized = JSON.stringify(status.phantom);
+
+      expect(status.phantom?.agentReport).toEqual({
+        valuesHidden: true,
+        scannedRepos: 3,
+        validReports: 2,
+        failedReports: 1,
+        statusCounts: {
+          ok: 1,
+          'requires-approval': 1,
+          failed: 1,
+        },
+        riskCounts: {
+          critical: 1,
+          high: 1,
+          low: 1,
+        },
+        severityCounts: {
+          critical: 1,
+          high: 1,
+          info: 1,
+        },
+        requiresApprovalCount: 1,
+      });
+      expect(serialized).not.toContain('ANTHROPIC_API_KEY');
+      expect(serialized).not.toContain('ASHLR_PULSE_TOKEN');
+      expect(serialized).not.toContain('/Users/masonwyatt');
+      expect(serialized).not.toContain('agent report --json');
+
+      const rendered = formatFleetStatus(status);
+      expect(rendered).toContain('agent yes');
+      expect(rendered).toContain('report repos=3 valid=2 failed=1 approvals=1');
+      expect(rendered).toContain('status=failed=1/ok=1/requires-approval=1');
+      expect(rendered).toContain('risk=critical=1/high=1/low=1');
+      expect(rendered).toContain('severity=critical=1/high=1/info=1');
+      expect(rendered).toContain('values hidden');
+      expect(rendered).not.toContain('ANTHROPIC_API_KEY');
+      expect(rendered).not.toContain('ASHLR_PULSE_TOKEN');
+      expect(rendered).not.toContain('/Users/masonwyatt');
+      expect(rendered).not.toContain('agent report --json');
     });
   });
 

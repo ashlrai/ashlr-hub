@@ -330,6 +330,7 @@ vi.mock('../src/core/run/engines.js', async (importOriginal) => {
 
 import { spawnEngine } from '../src/core/run/engines.js';
 import { runEngineSandboxed } from '../src/core/run/sandboxed-engine.js';
+import { readAgentActions } from '../src/core/fleet/agent-action-ledger.js';
 import { withTmpHome } from './helpers/h1-fixture.js';
 import { writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -392,17 +393,106 @@ describe('M236 terminationReason on RunState', () => {
             if (cmd?.cwd && existsSync(cmd.cwd)) {
               writeFileSync(join(cmd.cwd, 'output.ts'), 'export const y = 2;\n', 'utf8');
             }
-            return Promise.resolve({ ok: true, output: '{}', usage: { tokensIn: 10, tokensOut: 5 } });
+            return Promise.resolve({
+              ok: true,
+              output: 'RAW_STDOUT_SENTINEL engine output should not enter metadata',
+              usage: { tokensIn: 10, tokensOut: 5 },
+            });
           },
         );
 
-        const result = await runEngineSandboxed('claude', 'Write output.ts', makeConfig(), {
+        const result = await runEngineSandboxed('claude', 'RAW_PROMPT_SENTINEL Write output.ts', makeConfig(), {
           sourceRepo: repo.dir,
           propose: true,
         });
 
         expect(result.state.status).toBe('done');
         expect(result.state.terminationReason).toBeUndefined();
+        const event = readAgentActions().find((row) => row.action === 'sandboxed-engine:run' && row.runId === result.state.id);
+        expect(event).toMatchObject({
+          actor: 'agent',
+          kind: 'maintenance',
+          outcome: 'ok',
+          runId: result.state.id,
+          runEventSummary: {
+            runId: result.state.id,
+            status: 'done',
+            outcome: 'proposal-created',
+            proposalCreated: true,
+            actionCounts: {
+              sandboxCreated: 1,
+              spawnAttempts: 1,
+              proposalCaptureAttempts: 1,
+              proposalCreated: 1,
+              diffFiles: 1,
+              diffLines: 1,
+            },
+          },
+        });
+        expect(event?.counts).toMatchObject({
+          sandboxCreated: 1,
+          spawnAttempts: 1,
+          proposalCaptureAttempts: 1,
+          proposalCreated: 1,
+        });
+        const serialized = JSON.stringify(event);
+        expect(serialized).not.toContain('RAW_PROMPT_SENTINEL');
+        expect(serialized).not.toContain('RAW_STDOUT_SENTINEL');
+      } finally {
+        if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
+      }
+    });
+  });
+
+  it('proposal-disabled terminal telemetry is outcome-neutral and counted', async () => {
+    await withTmpHome(async (fx) => {
+      const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      try {
+        const repo = fx.makeRepo();
+        repo.enroll();
+
+        spawnEngineMock.mockResolvedValueOnce({
+          ok: true,
+          output: 'RAW_STDOUT_SENTINEL disabled proposal output',
+          usage: { tokensIn: 7, tokensOut: 3 },
+        });
+
+        const result = await runEngineSandboxed('claude', 'RAW_PROMPT_SENTINEL internal attempt', makeConfig(), {
+          sourceRepo: repo.dir,
+          propose: false,
+        });
+
+        expect(result.state.status).toBe('done');
+        expect(result.proposalOutcome?.kind).toBe('proposal-disabled');
+        const event = readAgentActions().find((row) => row.action === 'sandboxed-engine:run' && row.runId === result.state.id);
+        expect(event).toMatchObject({
+          actor: 'agent',
+          kind: 'maintenance',
+          outcome: 'ok',
+          runId: result.state.id,
+          runEventSummary: {
+            runId: result.state.id,
+            status: 'done',
+            outcome: 'proposal-disabled',
+            actionCounts: {
+              sandboxCreated: 1,
+              spawnAttempts: 1,
+              proposalDisabled: 1,
+            },
+          },
+        });
+        expect(event?.runEventSummary?.proposalCreated).toBeUndefined();
+        expect(event?.counts).toMatchObject({
+          sandboxCreated: 1,
+          spawnAttempts: 1,
+          proposalCaptureAttempts: 0,
+          proposalDisabled: 1,
+        });
+        const serialized = JSON.stringify(event);
+        expect(serialized).not.toContain('RAW_PROMPT_SENTINEL');
+        expect(serialized).not.toContain('RAW_STDOUT_SENTINEL');
       } finally {
         if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
         else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;

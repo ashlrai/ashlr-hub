@@ -203,4 +203,35 @@ describe('M338 learning graph metadata summaries', () => {
     expect(serialized).not.toContain('RAW_DIFF_SENTINEL');
     expect(serialized).not.toContain('RAW_STDOUT_SENTINEL');
   });
+
+  it('sanitizes fixed run action counts and drops unknown secret-shaped keys', () => {
+    const secretKey = 'OPENAI_API_KEY=sk-testvalue-verysecret00000000';
+    const meta = causalMetadata({
+      runId: 'run-action-counts',
+      runEventSummary: {
+        runId: 'run-action-counts',
+        status: 'done',
+        actionCounts: {
+          sandboxCreated: 1.9,
+          spawnAttempts: 2,
+          transientRetries: -1,
+          proposalDisabled: 1,
+          diffFiles: Number.NaN,
+          [secretKey]: 7,
+          unknownCounter: 9,
+        } as never,
+      },
+    });
+
+    expect(meta.runEventSummary?.actionCounts).toMatchObject({
+      sandboxCreated: 1,
+      spawnAttempts: 2,
+      transientRetries: 0,
+      proposalDisabled: 1,
+    });
+    const serialized = JSON.stringify(meta.runEventSummary);
+    expect(serialized).not.toContain('unknownCounter');
+    expect(serialized).not.toContain(secretKey);
+    expect(serialized).not.toContain('sk-testvalue-verysecret00000000');
+  });
 });

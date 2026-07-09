@@ -23,6 +23,7 @@ import type {
   DaemonDispatchTrace,
   DaemonTick,
   EngineId,
+  PhantomAgentReportRollup,
   Proposal,
   WorkItem,
 } from '../types.js';
@@ -116,6 +117,7 @@ export interface FleetPhantomStatus {
     mcpAvailable: boolean;
     agentAvailable: boolean;
   };
+  agentReport?: PhantomAgentReportRollup;
   config: {
     phantomExecEnabled: boolean;
     fleetSecretInjectionEnabled: boolean;
@@ -327,6 +329,7 @@ export interface FleetProposalProductionStatus {
   diagnosticNoProposalDispatches: number;
   topReasons: FleetProposalProductionReasonSummary[];
   diagnosticTopReasons: FleetProposalProductionReasonSummary[];
+  skipReasons: FleetProposalProductionReasonSummary[];
   recentNoProposalDispatches: FleetProposalProductionDispatchSummary[];
   recentDiagnosticNoProposalDispatches: FleetProposalProductionDispatchSummary[];
 }
@@ -908,7 +911,12 @@ async function buildFleetPhantomStatus(cfg: AshlrConfig): Promise<FleetPhantomSt
   const observedAt = new Date().toISOString();
   try {
     const { getCachedFleetPhantomStatus } = await import('../phantom.js');
-    const status = getCachedFleetPhantomStatus();
+    const includeAgentReport = cfg.phantom?.agentReportRollup?.enabled === true;
+    const status = getCachedFleetPhantomStatus({
+      includeAgentReport,
+      ...(cfg.phantom?.agentReportRollup?.timeoutMs ? { timeoutMs: cfg.phantom.agentReportRollup.timeoutMs } : {}),
+      ...(cfg.phantom?.agentReportRollup?.cacheTtlMs ? { ttlMs: cfg.phantom.agentReportRollup.cacheTtlMs } : {}),
+    });
     const known = status.capability.knownFleetSecrets;
     const state: FleetPhantomState = status.error
       ? 'degraded'
@@ -941,6 +949,7 @@ async function buildFleetPhantomStatus(cfg: AshlrConfig): Promise<FleetPhantomSt
       mcp: {
         configured: await phantomMcpConfigured(),
       },
+      ...(status.capability.commands.agentAvailable && status.agentReport ? { agentReport: status.agentReport } : {}),
       ...(status.error ? { error: sanitizeFleetPhantomError(status.error) } : {}),
     };
   } catch (err) {
@@ -1018,6 +1027,7 @@ function buildProposalProductionStatus(ticks: DaemonTick[]): FleetProposalProduc
 
   const reasons = new Map<string, number>();
   const diagnosticReasons = new Map<string, number>();
+  const skipReasons = new Map<string, number>();
   const recentNoProposalDispatches: FleetProposalProductionDispatchSummary[] = [];
   const recentDiagnosticNoProposalDispatches: FleetProposalProductionDispatchSummary[] = [];
   let selected = 0;
@@ -1032,9 +1042,20 @@ function buildProposalProductionStatus(ticks: DaemonTick[]): FleetProposalProduc
   const addReason = (reason: string, count = 1): void => {
     const key = reason.trim() || 'unknown';
     reasons.set(key, (reasons.get(key) ?? 0) + count);
-    if (!isSuppressedProposalProductionReason(key)) {
+  };
+
+  const addDiagnosticReason = (reason: string | undefined, count = 1): boolean => {
+    const key = (reason ?? '').trim() || 'unknown';
+    if (!isSuppressedProposalProductionReason(key) && !isSkippedProposalProductionReason(key)) {
       diagnosticReasons.set(key, (diagnosticReasons.get(key) ?? 0) + count);
+      return true;
     }
+    return false;
+  };
+
+  const addSkipReason = (reason: string | undefined, count = 1): void => {
+    const key = (reason ?? '').trim() || 'unknown';
+    skipReasons.set(key, (skipReasons.get(key) ?? 0) + count);
   };
 
   for (const tick of recent) {
@@ -1047,8 +1068,24 @@ function buildProposalProductionStatus(ticks: DaemonTick[]): FleetProposalProduc
     errors += production.errors;
     proposalsCreated += production.proposalsCreated;
     noProposalDispatches += production.noProposalDispatches;
+    let hasAggregateDiagnosticReason = false;
+    let sawSkippedDispatchReason = false;
     for (const reason of production.reasons ?? []) {
       addReason(reason.reason, reason.count);
+      if (isSkippedProposalProductionReason(reason.reason)) continue;
+      hasAggregateDiagnosticReason = addDiagnosticReason(reason.reason, reason.count) || hasAggregateDiagnosticReason;
+    }
+    for (const dispatch of tick.dispatches ?? []) {
+      if (dispatch.dispatched) continue;
+      addSkipReason(dispatch.skipReason ?? dispatch.reason);
+      sawSkippedDispatchReason = true;
+    }
+    if (!sawSkippedDispatchReason) {
+      for (const reason of production.reasons ?? []) {
+        if (isSkippedProposalProductionReason(reason.reason)) {
+          addSkipReason(reason.reason, reason.count);
+        }
+      }
     }
     if (production.noProposalDispatches > 0 && recentNoProposalDispatches.length < 8) {
       const knownNoProposalDispatches = (tick.dispatches ?? []).filter((dispatch) =>
@@ -1075,6 +1112,9 @@ function buildProposalProductionStatus(ticks: DaemonTick[]): FleetProposalProduc
         recentNoProposalDispatches.push(summary);
         if (isSuppressedProposalProductionDispatch(dispatch)) {
           continue;
+        }
+        if (!hasAggregateDiagnosticReason) {
+          addDiagnosticReason(proposalProductionDiagnosticReason(dispatch));
         }
         if (recentDiagnosticNoProposalDispatches.length < 8) {
           recentDiagnosticNoProposalDispatches.push(summary);
@@ -1109,6 +1149,10 @@ function buildProposalProductionStatus(ticks: DaemonTick[]): FleetProposalProduc
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .slice(0, 8)
       .map(([reason, count]) => ({ reason, count })),
+    skipReasons: [...skipReasons.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 8)
+      .map(([reason, count]) => ({ reason, count })),
     recentNoProposalDispatches,
     recentDiagnosticNoProposalDispatches,
   };
@@ -1120,10 +1164,24 @@ function isSuppressedProposalProductionReason(reason: string | undefined): boole
     normalized.includes('proposal filing disabled for this sandboxed attempt');
 }
 
+function isSkippedProposalProductionReason(reason: string | undefined): boolean {
+  const normalized = String(reason ?? '').trim().toLowerCase();
+  return normalized === 'not-attempted' ||
+    normalized.startsWith('not-attempted:') ||
+    normalized.includes('selected item(s) were not attempted');
+}
+
 function isSuppressedProposalProductionDispatch(dispatch: DaemonDispatchTrace): boolean {
   return dispatch.production?.outcome === 'proposal-disabled' ||
     isSuppressedProposalProductionReason(dispatch.production?.reason) ||
     isSuppressedProposalProductionReason(dispatch.reason);
+}
+
+function proposalProductionDiagnosticReason(dispatch: DaemonDispatchTrace): string {
+  const reason = (dispatch.production?.reason ?? dispatch.reason ?? 'unknown').trim() || 'unknown';
+  const outcome = dispatch.production?.outcome;
+  if (!outcome || outcome === 'unknown' || outcome === 'proposal-created') return reason;
+  return reason.startsWith(`${outcome}:`) ? reason : `${outcome}: ${reason}`;
 }
 
 function proposalProductionDispatchSummary(
@@ -1143,14 +1201,18 @@ function proposalProductionDispatchSummary(
 }
 
 function proposalProductionDiagnosis(production: FleetProposalProductionStatus): string {
-  const topReasons = production.diagnosticTopReasons.length > 0 ? production.diagnosticTopReasons : production.topReasons;
-  const topReason = topReasons[0];
+  const diagnosticTopReason = production.diagnosticTopReasons[0];
+  const topReason = diagnosticTopReason ?? production.topReasons[0];
   const diagnosticNoProposalDispatches = production.diagnosticNoProposalDispatches ?? production.noProposalDispatches;
   if (production.errors > 0) {
     return `recent production saw ${production.errors} error(s)${topReason ? `; top reason: ${topReason.reason}` : ''}`;
   }
   if (diagnosticNoProposalDispatches > 0) {
-    return `${diagnosticNoProposalDispatches} recent dispatch(es) produced no proposal${topReason ? `; top reason: ${topReason.reason}` : ''}`;
+    return `${diagnosticNoProposalDispatches} recent dispatch(es) produced no proposal${diagnosticTopReason ? `; top reason: ${diagnosticTopReason.reason}` : ''}`;
+  }
+  if (production.skipped > 0) {
+    const topSkip = production.skipReasons[0];
+    return `${production.skipped} selected item(s) were not attempted${topSkip ? `; top skip: ${topSkip.reason}` : ''}`;
   }
   if (production.suppressedDispatches > 0) {
     return `${production.suppressedDispatches} recent dispatch(es) were suppressed by internal proposal filing policy`;
@@ -1469,7 +1531,16 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     }
     const production = status.proposalProduction;
     const diagnosticNoProposalDispatches = production?.diagnosticNoProposalDispatches ?? production?.noProposalDispatches ?? 0;
-    if (production && (production.errors > 0 || diagnosticNoProposalDispatches > 0 || (production.selected > 0 && production.dispatched === 0))) {
+    if (production && production.skipped > 0) {
+      const topSkip = production.skipReasons[0];
+      add({
+        id: 'inspect-dispatch-skips',
+        priority: 'medium',
+        label: 'Inspect dispatch skips',
+        detail: `${production.skipped} selected item(s) were not attempted${topSkip ? `; top skip: ${topSkip.reason}` : ''}`,
+      });
+    }
+    if (production && (production.errors > 0 || diagnosticNoProposalDispatches > 0)) {
       add({
         id: 'inspect-proposal-production',
         priority: production.errors > 0 ? 'high' : 'medium',

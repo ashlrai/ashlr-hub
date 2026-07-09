@@ -100,6 +100,10 @@ function spawnListSecrets(names: string[]): SpawnSyncReturns<string> {
   return makeSpawnResult(JSON.stringify(names) + '\n');
 }
 
+function spawnAgentReport(report: unknown): SpawnSyncReturns<string> {
+  return makeSpawnResult(JSON.stringify(report) + '\n');
+}
+
 // ---------------------------------------------------------------------------
 // Control helper: set up a sequence of spawnSync return values per invocation.
 // ---------------------------------------------------------------------------
@@ -332,6 +336,31 @@ describe('getPhantomStatus — command support from help output', () => {
     expect(calls).not.toContainEqual(['agent', '--help']);
   });
 
+  it('does not run the agent report when the Commands block has no agent command', () => {
+    const calls: string[][] = [];
+    const responses = [
+      spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
+      spawnStatusInitialized(),
+      spawnListSecrets([]),
+      spawnHelp(['setup', 'mcp', 'exec', 'status', 'list']),
+    ];
+    let idx = 0;
+    _spawnSyncImpl = (_bin: unknown, args: unknown) => {
+      calls.push(Array.isArray(args) ? args.map(String) : []);
+      const res = responses[idx] ?? responses[responses.length - 1];
+      idx++;
+      return res;
+    };
+
+    const status = getPhantomStatus({ includeAgentReport: true });
+
+    expect(status.capability.commands.agentAvailable).toBe(false);
+    expect(status.agentReport).toBeUndefined();
+    expect(calls).toContainEqual(['--help']);
+    expect(calls).not.toContainEqual(['agent', 'report', '--json']);
+  });
+
   it('reports agentAvailable only when agent is an actual command', () => {
     setSpawnSequence([
       spawnVersion('0.6.0'),
@@ -347,6 +376,201 @@ describe('getPhantomStatus — command support from help output', () => {
       commandsKnown: true,
       agentAvailable: true,
     });
+    expect(status.agentReport).toBeUndefined();
+  });
+
+  it('collapses malformed agent report output to an aggregate failure without raw output', () => {
+    const calls: string[][] = [];
+    const responses = [
+      spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
+      spawnStatusInitialized(),
+      spawnListSecrets([]),
+      spawnHelp(['setup', 'mcp', 'exec', 'agent']),
+      makeSpawnResult('{not valid json from /Users/masonwyatt/secret\n'),
+    ];
+    let idx = 0;
+    _spawnSyncImpl = (_bin: unknown, args: unknown) => {
+      calls.push(Array.isArray(args) ? args.map(String) : []);
+      const res = responses[idx] ?? responses[responses.length - 1];
+      idx++;
+      return res;
+    };
+
+    const status = getPhantomStatus({ includeAgentReport: true });
+
+    expect(calls).toContainEqual(['agent', 'report', '--json']);
+    expect(status.agentReport).toEqual({
+      valuesHidden: true,
+      scannedRepos: 0,
+      validReports: 0,
+      failedReports: 1,
+      statusCounts: {},
+      riskCounts: {},
+      severityCounts: {},
+      requiresApprovalCount: 0,
+    });
+    expect(JSON.stringify(status.agentReport)).not.toContain('/Users/masonwyatt/secret');
+    expect(JSON.stringify(status.agentReport)).not.toContain('not valid json');
+  });
+
+  it('treats explicit empty agent reports as successful empty aggregates', () => {
+    for (const report of [[], { reports: [] }]) {
+      setSpawnSequence([
+        spawnVersion('0.6.0'),
+        spawnVersion('0.6.0'),
+        spawnStatusInitialized(),
+        spawnListSecrets([]),
+        spawnHelp(['setup', 'mcp', 'exec', 'agent']),
+        spawnAgentReport(report),
+      ]);
+
+      const status = getPhantomStatus({ includeAgentReport: true });
+
+      expect(status.agentReport).toEqual({
+        valuesHidden: true,
+        scannedRepos: 0,
+        validReports: 0,
+        failedReports: 0,
+        statusCounts: {},
+        riskCounts: {},
+        severityCounts: {},
+        requiresApprovalCount: 0,
+      });
+    }
+  });
+
+  it('parses valid agent report stdout even when the command exits non-zero', () => {
+    setSpawnSequence([
+      spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
+      spawnStatusInitialized(),
+      spawnListSecrets([]),
+      spawnHelp(['setup', 'mcp', 'exec', 'agent']),
+      makeSpawnResult(JSON.stringify({
+        reports: [
+          {
+            status: 'requires_approval',
+            requiresApproval: true,
+            findings: [
+              {
+                risk: 'critical',
+                severity: 'high',
+                message: 'raw unsafe finding should not appear',
+                path: '/Users/masonwyatt/private/.env',
+              },
+            ],
+          },
+        ],
+      }) + '\n', 'raw stderr should not appear', 1),
+    ]);
+
+    const status = getPhantomStatus({ includeAgentReport: true });
+    const serialized = JSON.stringify(status.agentReport);
+
+    expect(status.agentReport).toEqual({
+      valuesHidden: true,
+      scannedRepos: 1,
+      validReports: 1,
+      failedReports: 0,
+      statusCounts: { 'requires-approval': 1 },
+      riskCounts: { critical: 1 },
+      severityCounts: { high: 1 },
+      requiresApprovalCount: 1,
+    });
+    expect(serialized).not.toContain('raw unsafe finding');
+    expect(serialized).not.toContain('raw stderr');
+    expect(serialized).not.toContain('/Users/masonwyatt');
+  });
+
+  it('returns only aggregate agent report counts and scrubs raw findings, paths, commands, streams, and secret names', () => {
+    setSpawnSequence([
+      spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
+      spawnStatusInitialized(),
+      spawnListSecrets([]),
+      spawnHelp(['setup', 'mcp', 'exec', 'agent']),
+      spawnAgentReport({
+        stdout: 'raw stdout should never persist',
+        stderr: 'raw stderr should never persist',
+        helpText: 'Commands:\n  agent    raw help text',
+        secretNames: ['LEAKED_SECRET_NAME'],
+        reports: [
+          {
+            repoPath: '/Users/masonwyatt/private/repo-a',
+            command: 'cat ~/.ssh/id_rsa',
+            status: 'ok',
+            findings: [
+              {
+                message: 'raw finding with TOKEN=abc123',
+                path: '/Users/masonwyatt/private/repo-a/.env',
+                risk: 'High',
+                severity: 'Critical',
+              },
+            ],
+          },
+          {
+            repo: '/Users/masonwyatt/private/repo-b',
+            status: 'requires_approval',
+            requiresApproval: true,
+            findings: [
+              {
+                message: 'approval finding should not appear',
+                risk: 'critical',
+                severity: 'high',
+              },
+            ],
+          },
+          {
+            cwd: '/Users/masonwyatt/private/repo-c',
+            status: 'failed',
+            error: 'fatal scan failure at /Users/masonwyatt/private/repo-c',
+            findings: [
+              {
+                command: 'phantom reveal SECRET',
+                risk: 'low',
+                severity: 'info',
+              },
+            ],
+          },
+        ],
+      }),
+    ]);
+
+    const status = getPhantomStatus({ includeAgentReport: true });
+    const serializedReport = JSON.stringify(status.agentReport);
+
+    expect(status.agentReport).toEqual({
+      valuesHidden: true,
+      scannedRepos: 3,
+      validReports: 2,
+      failedReports: 1,
+      statusCounts: {
+        ok: 1,
+        'requires-approval': 1,
+        failed: 1,
+      },
+      riskCounts: {
+        high: 1,
+        critical: 1,
+        low: 1,
+      },
+      severityCounts: {
+        critical: 1,
+        high: 1,
+        info: 1,
+      },
+      requiresApprovalCount: 1,
+    });
+    expect(serializedReport).not.toContain('/Users/masonwyatt');
+    expect(serializedReport).not.toContain('cat ~/.ssh/id_rsa');
+    expect(serializedReport).not.toContain('phantom reveal SECRET');
+    expect(serializedReport).not.toContain('raw stdout');
+    expect(serializedReport).not.toContain('raw stderr');
+    expect(serializedReport).not.toContain('LEAKED_SECRET_NAME');
+    expect(serializedReport).not.toContain('raw finding');
+    expect(serializedReport).not.toContain('Commands:');
+    expect(serializedReport).not.toContain('fatal scan failure');
   });
 
   it('reports unknown command support when help has no Commands block', () => {

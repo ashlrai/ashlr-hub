@@ -183,6 +183,16 @@ describe('saveRun / loadRun / listRuns — persistence round-trip', () => {
     state.status = 'done';
     state.result = 'RAW_RESULT_SENTINEL stdout diff --git a/raw b/raw should stay operational only';
     state.usage = { tokensIn: 100, tokensOut: 50, steps: 3, estCostUsd: 0.0123 };
+    state.runEventSummary = {
+      actionCounts: {
+        sandboxCreated: 1,
+        spawnAttempts: 1.8,
+        proposalCaptureAttempts: 1,
+        proposalCreated: 1,
+        RAW_API_KEY: 7,
+        unknownCounter: 9,
+      } as never,
+    };
     state.proposalOutcome = {
       kind: 'filed',
       reason: 'RAW_STDOUT_SENTINEL proposal filed',
@@ -210,6 +220,12 @@ describe('saveRun / loadRun / listRuns — persistence round-trip', () => {
         tokensIn: 100,
         tokensOut: 50,
         costUsd: 0.0123,
+        actionCounts: {
+          sandboxCreated: 1,
+          spawnAttempts: 1,
+          proposalCaptureAttempts: 1,
+          proposalCreated: 1,
+        },
       },
     });
     expect(loaded?.learningEpoch).toMatch(/^\d{4}-\d{2}-\d{2}$/);
@@ -221,6 +237,8 @@ describe('saveRun / loadRun / listRuns — persistence round-trip', () => {
     expect(summary).not.toContain('RAW_GOAL_SENTINEL');
     expect(summary).not.toContain('RAW_RESULT_SENTINEL');
     expect(summary).not.toContain('RAW_STDOUT_SENTINEL');
+    expect(summary).not.toContain('RAW_API_KEY');
+    expect(summary).not.toContain('unknownCounter');
     expect(summary).not.toContain('diff --git');
   });
 

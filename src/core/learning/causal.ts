@@ -6,6 +6,7 @@ import type {
   LearningSource,
   Proposal,
   PromptContextSummary,
+  RunActionCounts,
   RetrievalContextSummary,
   RouteSnapshot,
   RunContextSummary,
@@ -36,6 +37,22 @@ type CausalMetadataInput = CausalSource & {
 
 const MAX_ID = 240;
 const MAX_REASON = 240;
+const RUN_ACTION_COUNT_KEYS = [
+  'sandboxCreated',
+  'spawnAttempts',
+  'transientRetries',
+  'proposalCaptureAttempts',
+  'completenessGateRuns',
+  'verifyRepairAttempts',
+  'modelSteps',
+  'toolSteps',
+  'totalSteps',
+  'diffFiles',
+  'diffLines',
+  'proposalCreated',
+  'proposalBlocked',
+  'proposalDisabled',
+] as const satisfies readonly (keyof RunActionCounts)[];
 
 function boundedText(value: unknown, max: number): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -55,6 +72,12 @@ function optionalBoolean(value: unknown): boolean | undefined {
 function nonNegativeNumber(value: unknown): number | undefined {
   const n = finiteNumber(value);
   return n !== undefined && n >= 0 ? n : undefined;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  const n = finiteNumber(value);
+  if (n === undefined) return undefined;
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.trunc(n)));
 }
 
 function ratio(value: unknown): number | undefined {
@@ -156,6 +179,17 @@ function runContextSummary(input: RunContextSummary | undefined): RunContextSumm
   };
 }
 
+function runActionCounts(input: RunActionCounts | undefined): RunActionCounts | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const record = input as Record<string, unknown>;
+  const out: RunActionCounts = {};
+  for (const key of RUN_ACTION_COUNT_KEYS) {
+    const count = nonNegativeInteger(record[key]);
+    if (count !== undefined) out[key] = count;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export function learningEpochFromTimestamp(ts?: string): string {
   const ms = typeof ts === 'string' ? Date.parse(ts) : NaN;
   const date = Number.isFinite(ms) ? new Date(ms) : new Date();
@@ -206,6 +240,7 @@ export function runEventSummary(input: RunEventSummary | undefined): RunEventSum
   const proposalCreated = optionalBoolean(input.proposalCreated);
   const cacheHit = optionalBoolean(input.cacheHit);
   const contextSummary = runContextSummary(input.contextSummary);
+  const actionCounts = runActionCounts(input.actionCounts);
   return {
     ...(runId ? { runId } : {}),
     ...(status ? { status } : {}),
@@ -220,6 +255,7 @@ export function runEventSummary(input: RunEventSummary | undefined): RunEventSum
     ...(durationMs !== undefined ? { durationMs } : {}),
     ...(cacheHit !== undefined ? { cacheHit } : {}),
     ...(contextSummary ? { contextSummary } : {}),
+    ...(actionCounts ? { actionCounts } : {}),
   };
 }
 

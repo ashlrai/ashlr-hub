@@ -75,6 +75,7 @@ import type {
   ChatMessage,
   RouteDecision,
   EscalationReason,
+  RunActionCounts,
 } from '../types.js';
 
 import { getActiveClient } from './provider-client.js';
@@ -249,6 +250,20 @@ function runMetadataSummary(state: RunState): NonNullable<RunState['runEventSumm
       ? (insertions ?? 0) + (deletions ?? 0)
       : state.runEventSummary?.diffLines;
   const durationMs = runDurationMs(state);
+  const actionCounts = state.runEventSummary?.actionCounts
+    ? ({
+        ...state.runEventSummary.actionCounts,
+        ...(files !== undefined ? { diffFiles: files } : {}),
+        ...(diffLines !== undefined ? { diffLines } : {}),
+        ...(proposalOutcome
+          ? {
+              proposalCreated: proposalOutcome.kind === 'filed' ? 1 : 0,
+              proposalBlocked: proposalOutcome.kind !== 'filed' && proposalOutcome.kind !== 'proposal-disabled' ? 1 : 0,
+              proposalDisabled: proposalOutcome.kind === 'proposal-disabled' ? 1 : 0,
+            }
+          : {}),
+      } satisfies RunActionCounts)
+    : undefined;
   return {
     ...(state.runEventSummary ?? {}),
     runId: state.id,
@@ -262,6 +277,7 @@ function runMetadataSummary(state: RunState): NonNullable<RunState['runEventSumm
     tokensOut: state.usage.tokensOut,
     costUsd: state.usage.estCostUsd,
     ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(actionCounts ? { actionCounts } : {}),
   };
 }
 

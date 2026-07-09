@@ -38,6 +38,7 @@ import type {
   EngineId,
   EngineTier,
   ProposalVerifyResult,
+  RunActionCounts,
   RunProposalOutcome,
   RunBudget,
   RunState,
@@ -70,6 +71,7 @@ import { addUsage, newUsage, estCostUsd } from './budget.js';
 import { withToolEnv } from '../env-bridge.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { selectInboxStore } from '../seams/inbox.js';
+import { recordAgentAction, type AgentActionOutcome } from '../fleet/agent-action-ledger.js';
 import { hashDiff, signProvenance } from '../foundry/provenance.js';
 // M249: RunCache shadow mode — key construction + store (import lazy so flag-off path
 // incurs zero module load cost; the dynamic import is cached by Node after first call).
@@ -150,6 +152,8 @@ export interface CaptureSandboxedProposalOptions {
   producerStatus?: RunState['status'];
   /** Optional advisory delegation contract for context/result expectations. */
   delegationScope?: DelegationScope;
+  /** Optional mutable metadata-only counter bag for enclosing sandbox run telemetry. */
+  actionCounts?: RunActionCounts;
 }
 
 type SpawnEngineResult = {
@@ -224,10 +228,6 @@ function captureGateVerifyResult(reason: string): ProposalVerifyResult {
   };
 }
 
-function withProposalOutcome(state: RunState, outcome: RunProposalOutcome | undefined): RunState {
-  return outcome ? { ...state, proposalOutcome: outcome } : state;
-}
-
 function diffLineCount(outcome: RunProposalOutcome | undefined): number | undefined {
   if (
     outcome === undefined ||
@@ -236,6 +236,225 @@ function diffLineCount(outcome: RunProposalOutcome | undefined): number | undefi
     return undefined;
   }
   return (outcome.insertions ?? 0) + (outcome.deletions ?? 0);
+}
+
+const RUN_ACTION_COUNT_ZEROES: Required<RunActionCounts> = {
+  sandboxCreated: 0,
+  spawnAttempts: 0,
+  transientRetries: 0,
+  proposalCaptureAttempts: 0,
+  completenessGateRuns: 0,
+  verifyRepairAttempts: 0,
+  modelSteps: 0,
+  toolSteps: 0,
+  totalSteps: 0,
+  diffFiles: 0,
+  diffLines: 0,
+  proposalCreated: 0,
+  proposalBlocked: 0,
+  proposalDisabled: 0,
+};
+
+const RUN_ACTION_COUNT_KEYS = Object.keys(RUN_ACTION_COUNT_ZEROES) as Array<keyof Required<RunActionCounts>>;
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.trunc(value)));
+}
+
+function completeRunActionCounts(counts: RunActionCounts | undefined): Required<RunActionCounts> {
+  const out = { ...RUN_ACTION_COUNT_ZEROES };
+  if (!counts || typeof counts !== 'object' || Array.isArray(counts)) return out;
+  const record = counts as Record<string, unknown>;
+  for (const key of RUN_ACTION_COUNT_KEYS) out[key] = nonNegativeInteger(record[key]) ?? 0;
+  return out;
+}
+
+function setRunActionCount(
+  counts: RunActionCounts,
+  key: keyof RunActionCounts,
+  value: unknown,
+): void {
+  const count = nonNegativeInteger(value);
+  if (count !== undefined) counts[key] = count;
+}
+
+function incrementRunActionCount(
+  counts: RunActionCounts | undefined,
+  key: keyof RunActionCounts,
+  by = 1,
+): void {
+  if (!counts) return;
+  const current = nonNegativeInteger(counts[key]) ?? 0;
+  setRunActionCount(counts, key, current + by);
+}
+
+function sanitizedRunActionCounts(counts: RunActionCounts): RunActionCounts | undefined {
+  return runEventSummary({ actionCounts: completeRunActionCounts(counts) })?.actionCounts;
+}
+
+function setRunDiffActionCounts(counts: RunActionCounts | undefined, diff: SandboxDiff | undefined): void {
+  if (!counts || !diff) return;
+  setRunActionCount(counts, 'diffFiles', diff.files);
+  setRunActionCount(counts, 'diffLines', (diff.insertions ?? 0) + (diff.deletions ?? 0));
+}
+
+function trySetRunDiffActionCounts(counts: RunActionCounts, readDiff: () => SandboxDiff): void {
+  try {
+    setRunDiffActionCounts(counts, readDiff());
+  } catch {
+    // Metadata collection is best-effort and must never perturb sandbox behavior.
+  }
+}
+
+function isProposalBlockedOutcome(outcome: RunProposalOutcome | undefined): boolean {
+  return !!outcome && outcome.kind !== 'filed' && outcome.kind !== 'proposal-disabled';
+}
+
+function actionCountsWithOutcome(
+  counts: RunActionCounts,
+  outcome: RunProposalOutcome | undefined,
+): RunActionCounts {
+  const out: RunActionCounts = completeRunActionCounts(counts);
+  setRunActionCount(out, 'diffFiles', outcome?.files);
+  setRunActionCount(out, 'diffLines', diffLineCount(outcome));
+  setRunActionCount(out, 'proposalCreated', outcome?.kind === 'filed' ? 1 : 0);
+  setRunActionCount(out, 'proposalBlocked', isProposalBlockedOutcome(outcome) ? 1 : 0);
+  setRunActionCount(out, 'proposalDisabled', outcome?.kind === 'proposal-disabled' ? 1 : 0);
+  return out;
+}
+
+function withProposalOutcome(
+  state: RunState,
+  outcome: RunProposalOutcome | undefined,
+  counts?: RunActionCounts,
+): RunState {
+  if (!outcome && !counts) return state;
+  const actionCounts = counts ? sanitizedRunActionCounts(actionCountsWithOutcome(counts, outcome)) : undefined;
+  const proposalCreated = proposalCreatedForRunEvent(outcome);
+  const summary = runEventSummary({
+    ...(state.runEventSummary ?? {}),
+    runId: state.id,
+    status: state.status,
+    ...(outcome ? { outcome: outcome.kind === 'filed' ? 'proposal-created' : outcome.kind } : {}),
+    ...(proposalCreated !== undefined ? { proposalCreated } : {}),
+    proposalId: outcome?.proposalId,
+    diffFiles: outcome?.files ?? actionCounts?.diffFiles,
+    diffLines: diffLineCount(outcome) ?? actionCounts?.diffLines,
+    tokensIn: state.usage.tokensIn,
+    tokensOut: state.usage.tokensOut,
+    costUsd: state.usage.estCostUsd,
+    ...(actionCounts ? { actionCounts } : {}),
+  });
+  return {
+    ...state,
+    ...(outcome ? { proposalOutcome: outcome } : {}),
+    ...(summary ? { runEventSummary: summary } : {}),
+  };
+}
+
+function proposalCreatedForRunEvent(outcome: RunProposalOutcome | undefined): boolean | undefined {
+  if (!outcome || outcome.kind === 'proposal-disabled') return undefined;
+  return outcome.kind === 'filed';
+}
+
+function sandboxAgentOutcome(
+  outcome: RunProposalOutcome | undefined,
+  status: RunState['status'],
+): AgentActionOutcome {
+  switch (outcome?.kind) {
+    case 'filed':
+      return 'ok';
+    case 'proposal-disabled':
+      return 'ok';
+    case 'empty-diff':
+      return 'ok';
+    case 'trivial-proposal':
+    case 'completeness-gate':
+    case 'partial-completeness-gate':
+    case 'kill-switch':
+      return 'blocked';
+    case 'engine-failed-no-diff':
+    case 'api-model-task-failed':
+    case 'sandbox-unavailable':
+    case 'engine-command-missing':
+    case 'engine-unsupported':
+    case 'proposal-capture-error':
+      return 'failed';
+    default:
+      return status === 'failed' ? 'failed' : 'ok';
+  }
+}
+
+function recordSandboxedRunAgentAction(fields: {
+  engine: EngineId;
+  engineModel: string;
+  tier: EngineTier;
+  runId: string;
+  sourceRepo: string;
+  workItemId?: string;
+  workSource?: WorkSource;
+  proposalId?: string;
+  outcome?: RunProposalOutcome;
+  status: RunState['status'];
+  usage?: RunUsage;
+  durationMs?: number;
+  actionCounts: RunActionCounts;
+}): void {
+  try {
+    const counts = sanitizedRunActionCounts(actionCountsWithOutcome(fields.actionCounts, fields.outcome));
+    const outcomeLabel = fields.outcome?.kind ?? fields.status;
+    const proposalId = fields.proposalId ?? fields.outcome?.proposalId;
+    const proposalCreated = proposalCreatedForRunEvent(fields.outcome);
+    const summary = runEventSummary({
+      runId: fields.runId,
+      status: fields.status,
+      outcome: fields.outcome?.kind === 'filed' ? 'proposal-created' : outcomeLabel,
+      ...(proposalCreated !== undefined ? { proposalCreated } : {}),
+      proposalId,
+      diffFiles: fields.outcome?.files,
+      diffLines: diffLineCount(fields.outcome),
+      tokensIn: fields.usage?.tokensIn,
+      tokensOut: fields.usage?.tokensOut,
+      costUsd: fields.usage?.estCostUsd,
+      durationMs: fields.durationMs,
+      ...(counts ? { actionCounts: counts } : {}),
+    });
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: new Date().toISOString(),
+      actor: 'agent',
+      kind: 'maintenance',
+      outcome: sandboxAgentOutcome(fields.outcome, fields.status),
+      action: 'sandboxed-engine:run',
+      summary: `${fields.engine} sandboxed-engine run ${fields.status}:${outcomeLabel}`,
+      repo: fields.sourceRepo,
+      ...(fields.workItemId ? { itemId: fields.workItemId } : {}),
+      ...(fields.workSource ? { source: fields.workSource } : {}),
+      ...(proposalId ? { proposalId } : {}),
+      runId: fields.runId,
+      routeSnapshot: {
+        backend: fields.engine,
+        tier: fields.tier,
+        model: fields.engineModel,
+        assignedBy: 'sandboxed-engine',
+        reason: 'sandboxed terminal telemetry',
+      },
+      ...(summary ? { runEventSummary: summary } : {}),
+      learningSource: 'agent-action',
+      labelBasis: 'dispatch-outcome',
+      backend: fields.engine,
+      tier: fields.tier,
+      model: fields.engineModel,
+      reason: outcomeLabel,
+      ...(fields.durationMs !== undefined ? { durationMs: fields.durationMs } : {}),
+      ...(fields.usage ? { spentUsd: fields.usage.estCostUsd } : {}),
+      tags: ['sandboxed-engine', fields.engine, outcomeLabel],
+      ...(counts ? { counts: { ...counts } } : {}),
+    });
+  } catch {
+    // Terminal telemetry is best-effort and must never perturb sandbox behavior.
+  }
 }
 
 const TRIVIAL_PROPOSAL_CHANGED_LINE_THRESHOLD = 15;
@@ -267,6 +486,7 @@ function sandboxedProducerCausalMetadata(fields: {
   usage?: RunUsage;
   durationMs?: number;
   status?: string;
+  actionCounts?: RunActionCounts;
 }) {
   const rs = routeSnapshot({
     backend: fields.engine,
@@ -287,6 +507,7 @@ function sandboxedProducerCausalMetadata(fields: {
     tokensOut: fields.usage?.tokensOut,
     costUsd: fields.usage?.estCostUsd,
     durationMs: fields.durationMs,
+    actionCounts: fields.actionCounts,
   });
   return {
     ...(fields.workItemId ? { workItemId: fields.workItemId } : {}),
@@ -649,6 +870,8 @@ export async function captureSandboxedProposal(
   const sb = opts.existingWorktree;
   const now = new Date().toISOString();
   const producerStatus = opts.producerStatus ?? 'done';
+  const actionCounts = opts.actionCounts ?? {};
+  incrementRunActionCount(actionCounts, 'proposalCaptureAttempts');
   const delegationScope = opts.delegationScope
     ? normalizeDelegationScope(opts.delegationScope, {
         origin: 'run',
@@ -694,10 +917,11 @@ export async function captureSandboxedProposal(
   try {
     const wt = await import('../sandbox/worktree.js');
     const diff: SandboxDiff = wt.sandboxDiff(sb);
+    setRunDiffActionCounts(actionCounts, diff);
     if (diff.files <= 0 || diff.patch.trim().length === 0) {
       const outcome = proposalOutcome('empty-diff', `engine "${engine}" completed without file changes`);
       return {
-        state: withProposalOutcome(mk({ result: outcome.reason }), outcome),
+        state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts),
         proposalOutcome: outcome,
       };
     }
@@ -705,7 +929,7 @@ export async function captureSandboxedProposal(
     const trivialOutcome = trivialProposalOutcomeForDiff(diff);
     if (trivialOutcome) {
       return {
-        state: withProposalOutcome(mk({ result: trivialOutcome.reason }), trivialOutcome),
+        state: withProposalOutcome(mk({ result: trivialOutcome.reason }), trivialOutcome, actionCounts),
         proposalOutcome: trivialOutcome,
       };
     }
@@ -719,7 +943,7 @@ export async function captureSandboxedProposal(
       );
       if (!opts.isPartial) {
         return {
-          state: withProposalOutcome(mk({ result: outcome.reason }), outcome),
+          state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts),
           proposalOutcome: outcome,
         };
       }
@@ -729,6 +953,7 @@ export async function captureSandboxedProposal(
     let shouldFile = true;
     let blockedOutcome: RunProposalOutcome | undefined;
     if (reviewOnlyVerifyResult === undefined && cfg.foundry?.completenessGate !== false) {
+      incrementRunActionCount(actionCounts, 'completenessGateRuns');
       const gateResult = await runCompletenessGate({
         worktreePath: sb.worktreePath,
         diff,
@@ -752,7 +977,7 @@ export async function captureSandboxedProposal(
 
     if (!shouldFile && blockedOutcome) {
       return {
-        state: withProposalOutcome(mk({ result: blockedOutcome.reason }), blockedOutcome),
+        state: withProposalOutcome(mk({ result: blockedOutcome.reason }), blockedOutcome, actionCounts),
         proposalOutcome: blockedOutcome,
       };
     }
@@ -796,6 +1021,7 @@ export async function captureSandboxedProposal(
         usage: opts.usage,
         durationMs: opts.durationMs,
         status: producerStatus,
+        actionCounts: actionCountsWithOutcome(actionCounts, filedOutcomeForMetadata),
       }),
       ...(opts.isPartial ? { isPartial: true } : {}),
     });
@@ -823,6 +1049,7 @@ export async function captureSandboxedProposal(
           usage: opts.usage,
           durationMs: opts.durationMs,
           status: producerStatus,
+          actionCounts: actionCountsWithOutcome(actionCounts, outcome),
         }),
         action: 'proposed',
         engine,
@@ -838,7 +1065,7 @@ export async function captureSandboxedProposal(
     }
 
     return {
-      state: withProposalOutcome(mk({ result: outcome.reason }), outcome),
+      state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts),
       proposalId: proposal.id,
       proposalOutcome: outcome,
     };
@@ -846,7 +1073,7 @@ export async function captureSandboxedProposal(
     const msg = err instanceof Error ? err.message : String(err);
     const outcome = proposalOutcome('proposal-capture-error', `proposal capture failed: ${msg}`);
     return {
-      state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome),
+      state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
       proposalOutcome: outcome,
     };
   }
@@ -910,11 +1137,24 @@ export async function runEngineSandboxed(
     ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
     ...over,
   });
+  const actionCounts: RunActionCounts = {};
 
   if (killSwitchOn() || (cfg.foundry as { killSwitch?: boolean } | undefined)?.killSwitch === true) {
     const outcome = proposalOutcome('kill-switch', 'autonomy kill-switch is ON');
+    recordSandboxedRunAgentAction({
+      engine,
+      engineModel,
+      tier,
+      runId: id,
+      sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId,
+      workSource: opts.workSource,
+      outcome,
+      status: 'failed',
+      actionCounts,
+    });
     return {
-      state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome),
+      state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
       proposalOutcome: outcome,
     };
   }
@@ -926,17 +1166,31 @@ export async function runEngineSandboxed(
   let createdHere = false;
   if (opts.existingWorktree) {
     sb = opts.existingWorktree;
+    setRunActionCount(actionCounts, 'sandboxCreated', 0);
   } else {
     try {
       sb = wt.createSandbox(opts.sourceRepo, {
         allowAnyRepo: process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1',
       });
       createdHere = true;
+      setRunActionCount(actionCounts, 'sandboxCreated', 1);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const outcome = proposalOutcome('sandbox-unavailable', `sandbox unavailable: ${msg}`);
+      recordSandboxedRunAgentAction({
+        engine,
+        engineModel,
+        tier,
+        runId: id,
+        sourceRepo: opts.sourceRepo,
+        workItemId: opts.workItemId,
+        workSource: opts.workSource,
+        outcome,
+        status: 'failed',
+        actionCounts,
+      });
       return {
-        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome),
+        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
         proposalOutcome: outcome,
       };
     }
@@ -1000,8 +1254,20 @@ export async function runEngineSandboxed(
     }
     if (!cmd) {
       proposalOutcomeResult = proposalOutcome('engine-command-missing', `no command for engine "${engine}"`);
+      recordSandboxedRunAgentAction({
+        engine,
+        engineModel,
+        tier,
+        runId: id,
+        sourceRepo: opts.sourceRepo,
+        workItemId: opts.workItemId,
+        workSource: opts.workSource,
+        outcome: proposalOutcomeResult,
+        status: 'failed',
+        actionCounts,
+      });
       return {
-        state: withProposalOutcome(mk({ status: 'failed', result: proposalOutcomeResult.reason }), proposalOutcomeResult),
+        state: withProposalOutcome(mk({ status: 'failed', result: proposalOutcomeResult.reason }), proposalOutcomeResult, actionCounts),
         proposalOutcome: proposalOutcomeResult,
       };
     }
@@ -1084,6 +1350,9 @@ export async function runEngineSandboxed(
     let res: SpawnEngineResult = { ok: false, output: '', error: 'engine did not run' };
     let _spawnDurationMs = 0;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      setRunActionCount(actionCounts, 'spawnAttempts', attempt);
+      setRunActionCount(actionCounts, 'modelSteps', attempt);
+      setRunActionCount(actionCounts, 'totalSteps', attempt);
       const _spawnStart = Date.now();
       res = await spawnEngine(cmd, cfg, {
         env,
@@ -1097,12 +1366,14 @@ export async function runEngineSandboxed(
       let hasDiff = false;
       try {
         const diff = wt.sandboxDiff(sb);
+        setRunDiffActionCounts(actionCounts, diff);
         hasDiff = diff.files > 0 && diff.patch.trim().length > 0;
       } catch {
         hasDiff = false;
       }
 
       if (attempt < maxAttempts && isTransientAbort(res, hasDiff)) {
+        incrementRunActionCount(actionCounts, 'transientRetries');
         continue;
       }
       break;
@@ -1165,6 +1436,7 @@ export async function runEngineSandboxed(
             usage,
             durationMs: _spawnDurationMs,
             producerStatus: 'failed',
+            actionCounts,
           });
           proposalId = captured.proposalId;
           proposalOutcomeResult = captured.proposalOutcome;
@@ -1180,12 +1452,29 @@ export async function runEngineSandboxed(
           // diff/proposal capture is best-effort — never fail the run on it.
         }
       } else {
+        trySetRunDiffActionCounts(actionCounts, () => wt.sandboxDiff(sb));
         proposalOutcomeResult = proposalOutcome('proposal-disabled', 'proposal filing disabled for this sandboxed attempt');
       }
+      recordSandboxedRunAgentAction({
+        engine,
+        engineModel,
+        tier,
+        runId: id,
+        sourceRepo: opts.sourceRepo,
+        workItemId: opts.workItemId,
+        workSource: opts.workSource,
+        proposalId,
+        outcome: proposalOutcomeResult,
+        status: 'failed',
+        usage,
+        durationMs: _spawnDurationMs,
+        actionCounts,
+      });
       return {
         state: withProposalOutcome(
           mk({ status: 'failed', result: `engine "${engine}" failed: ${res.error ?? 'unknown error'}`, usage, terminationReason }),
           proposalOutcomeResult,
+          actionCounts,
         ),
         proposalId,
         proposalOutcome: proposalOutcomeResult,
@@ -1194,8 +1483,10 @@ export async function runEngineSandboxed(
 
     // Capture the worktree diff (best-effort) and file it as a PENDING proposal.
     if (opts.propose !== false) {
+      incrementRunActionCount(actionCounts, 'proposalCaptureAttempts');
       try {
         const diff = wt.sandboxDiff(sb);
+        setRunDiffActionCounts(actionCounts, diff);
         if (diff.files > 0 && diff.patch.trim().length > 0) {
           const trivialOutcome = trivialProposalOutcomeForDiff(diff);
           if (trivialOutcome) {
@@ -1215,6 +1506,7 @@ export async function runEngineSandboxed(
           // sandbox worktree before filing. Flag-off → byte-identical to pre-M275.
           let _m275ShouldFile = true;
           if (cfg.foundry?.completenessGate !== false) {
+            incrementRunActionCount(actionCounts, 'completenessGateRuns');
             let _gateResult = await runCompletenessGate({
               worktreePath: sb.worktreePath,
               diff: effDiff,
@@ -1239,6 +1531,7 @@ export async function runEngineSandboxed(
                 initialFailure: String(_gateResult.reason ?? ''),
                 verify: async () => {
                   const d = wt.sandboxDiff(sb);
+                  incrementRunActionCount(actionCounts, 'completenessGateRuns');
                   const g = await runCompletenessGate({
                     worktreePath: sb.worktreePath,
                     diff: d,
@@ -1258,6 +1551,10 @@ export async function runEngineSandboxed(
                     autonomous: true,
                   });
                   if (!repairCmd) return null;
+                  incrementRunActionCount(actionCounts, 'verifyRepairAttempts');
+                  incrementRunActionCount(actionCounts, 'spawnAttempts');
+                  incrementRunActionCount(actionCounts, 'modelSteps');
+                  incrementRunActionCount(actionCounts, 'totalSteps');
                   const r = await spawnEngine(repairCmd, cfg, {
                     env,
                     timeoutMs: _v2g.perRunTimeoutMs ?? 180_000,
@@ -1332,6 +1629,7 @@ export async function runEngineSandboxed(
               usage,
               durationMs: _spawnDurationMs,
               status: 'done',
+              actionCounts: actionCountsWithOutcome(actionCounts, filedOutcomeForMetadata),
             }),
           });
           proposalId = proposal.id;
@@ -1354,6 +1652,7 @@ export async function runEngineSandboxed(
                 usage,
                 durationMs: _spawnDurationMs,
                 status: 'done',
+                actionCounts: actionCountsWithOutcome(actionCounts, proposalOutcomeResult),
               }),
               action: 'proposed',
               engine,
@@ -1411,11 +1710,27 @@ export async function runEngineSandboxed(
         // diff/proposal capture is best-effort — never fail the run on it.
       }
     } else {
+      trySetRunDiffActionCounts(actionCounts, () => wt.sandboxDiff(sb));
       proposalOutcomeResult = proposalOutcome('proposal-disabled', 'proposal filing disabled for this sandboxed attempt');
     }
 
+    recordSandboxedRunAgentAction({
+      engine,
+      engineModel,
+      tier,
+      runId: id,
+      sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId,
+      workSource: opts.workSource,
+      proposalId,
+      outcome: proposalOutcomeResult,
+      status: 'done',
+      usage,
+      durationMs: _spawnDurationMs,
+      actionCounts,
+    });
     return {
-      state: withProposalOutcome(mk({ status: 'done', result: res.output, usage }), proposalOutcomeResult),
+      state: withProposalOutcome(mk({ status: 'done', result: res.output, usage }), proposalOutcomeResult, actionCounts),
       proposalId,
       proposalOutcome: proposalOutcomeResult,
     };
@@ -1463,12 +1778,26 @@ export async function runApiModelSandboxed(
   cfg: AshlrConfig,
   opts: RunEngineSandboxedOptions,
 ): Promise<SandboxedEngineResult> {
+  const actionCounts: RunActionCounts = {};
   const spec = resolveEngineSpec(engine, cfg);
   if (!spec || spec.kind !== 'api-model' || !spec.api) {
     const outcome = proposalOutcome('engine-unsupported', `engine "${engine}" is not an api-model — cannot run in-process`);
+    const unsupportedRunId = `run-${Date.now().toString(36)}`;
+    recordSandboxedRunAgentAction({
+      engine,
+      engineModel: `${engine}:${resolveConcreteModel(engine, cfg, opts.model)}`,
+      tier: engineTierOf(engine, cfg),
+      runId: unsupportedRunId,
+      sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId,
+      workSource: opts.workSource,
+      outcome,
+      status: 'failed',
+      actionCounts,
+    });
     return {
       state: withProposalOutcome({
-        id: `run-${Date.now().toString(36)}`,
+        id: unsupportedRunId,
         goal,
         engine,
         provider: 'none',
@@ -1480,7 +1809,7 @@ export async function runApiModelSandboxed(
         steps: [],
         status: 'failed',
         result: outcome.reason,
-      }, outcome),
+      }, outcome, actionCounts),
       proposalOutcome: outcome,
     };
   }
@@ -1539,17 +1868,31 @@ export async function runApiModelSandboxed(
   let createdHere = false;
   if (opts.existingWorktree) {
     sb = opts.existingWorktree;
+    setRunActionCount(actionCounts, 'sandboxCreated', 0);
   } else {
     try {
       sb = wt.createSandbox(opts.sourceRepo, {
         allowAnyRepo: process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1',
       });
       createdHere = true;
+      setRunActionCount(actionCounts, 'sandboxCreated', 1);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const outcome = proposalOutcome('sandbox-unavailable', `sandbox unavailable: ${msg}`);
+      recordSandboxedRunAgentAction({
+        engine,
+        engineModel,
+        tier,
+        runId: id,
+        sourceRepo: opts.sourceRepo,
+        workItemId: opts.workItemId,
+        workSource: opts.workSource,
+        outcome,
+        status: 'failed',
+        actionCounts,
+      });
       return {
-        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome),
+        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
         proposalOutcome: outcome,
       };
     }
@@ -1577,6 +1920,7 @@ export async function runApiModelSandboxed(
 
   let proposalId: string | undefined;
   let proposalOutcomeResult: RunProposalOutcome | undefined;
+  const runStartedAt = Date.now();
 
   try {
     // Build baseUrl — honour env override, then spec default, then Ollama fallback.
@@ -1659,6 +2003,10 @@ export async function runApiModelSandboxed(
       ...usage,
       estCostUsd: estCostUsd(engine, usage.tokensIn, usage.tokensOut),
     };
+    setRunActionCount(actionCounts, 'modelSteps', steps.filter((step) => step.kind === 'model').length);
+    setRunActionCount(actionCounts, 'toolSteps', steps.filter((step) => step.kind === 'tool').length);
+    setRunActionCount(actionCounts, 'totalSteps', steps.length);
+    const durationMs = Date.now() - runStartedAt;
     const isPartialResult =
       typeof task.result === 'string' &&
       (task.result.startsWith('[budget exceeded') || task.result.startsWith('[step cap reached'));
@@ -1676,6 +2024,10 @@ export async function runApiModelSandboxed(
           delegationScope,
           isPartial: true,
           sourceLabel: 'api-model',
+          usage: finalUsage,
+          durationMs,
+          producerStatus: 'failed',
+          actionCounts,
         });
         proposalId = captured.proposalId;
         proposalOutcomeResult =
@@ -1683,8 +2035,24 @@ export async function runApiModelSandboxed(
             ? proposalOutcome('api-model-task-failed', task.error ?? 'api-model run failed')
             : captured.proposalOutcome;
       } else {
+        trySetRunDiffActionCounts(actionCounts, () => wt.sandboxDiff(sb));
         proposalOutcomeResult = proposalOutcome('proposal-disabled', 'proposal filing disabled for this api-model attempt');
       }
+      recordSandboxedRunAgentAction({
+        engine,
+        engineModel,
+        tier,
+        runId: id,
+        sourceRepo: opts.sourceRepo,
+        workItemId: opts.workItemId,
+        workSource: opts.workSource,
+        proposalId,
+        outcome: proposalOutcomeResult,
+        status: 'failed',
+        usage: finalUsage,
+        durationMs,
+        actionCounts,
+      });
       return {
         state: withProposalOutcome(
           mk({
@@ -1695,6 +2063,7 @@ export async function runApiModelSandboxed(
             steps,
           }),
           proposalOutcomeResult,
+          actionCounts,
         ),
         proposalId,
         proposalOutcome: proposalOutcomeResult,
@@ -1716,7 +2085,9 @@ export async function runApiModelSandboxed(
           isPartial: isPartialResult,
           sourceLabel: 'api-model',
           usage: finalUsage,
+          durationMs,
           producerStatus: 'done',
+          actionCounts,
         });
         proposalId = captured.proposalId;
         proposalOutcomeResult = captured.proposalOutcome;
@@ -1729,13 +2100,30 @@ export async function runApiModelSandboxed(
         // diff/proposal capture is best-effort
       }
     } else {
+      trySetRunDiffActionCounts(actionCounts, () => wt.sandboxDiff(sb));
       proposalOutcomeResult = proposalOutcome('proposal-disabled', 'proposal filing disabled for this api-model attempt');
     }
 
+    recordSandboxedRunAgentAction({
+      engine,
+      engineModel,
+      tier,
+      runId: id,
+      sourceRepo: opts.sourceRepo,
+      workItemId: opts.workItemId,
+      workSource: opts.workSource,
+      proposalId,
+      outcome: proposalOutcomeResult,
+      status: 'done',
+      usage: finalUsage,
+      durationMs,
+      actionCounts,
+    });
     return {
       state: withProposalOutcome(
         mk({ status: 'done', result: task.result ?? '', usage: finalUsage, tasks: [task], steps }),
         proposalOutcomeResult,
+        actionCounts,
       ),
       proposalId,
       proposalOutcome: proposalOutcomeResult,

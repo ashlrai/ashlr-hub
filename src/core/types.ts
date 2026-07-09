@@ -126,6 +126,23 @@ export interface RunContextSummary {
   compression?: CompressionContextSummary;
 }
 
+export interface RunActionCounts {
+  sandboxCreated?: number;
+  spawnAttempts?: number;
+  transientRetries?: number;
+  proposalCaptureAttempts?: number;
+  completenessGateRuns?: number;
+  verifyRepairAttempts?: number;
+  modelSteps?: number;
+  toolSteps?: number;
+  totalSteps?: number;
+  diffFiles?: number;
+  diffLines?: number;
+  proposalCreated?: number;
+  proposalBlocked?: number;
+  proposalDisabled?: number;
+}
+
 export interface RunEventSummary {
   runId?: string;
   status?: string;
@@ -141,6 +158,8 @@ export interface RunEventSummary {
   cacheHit?: boolean;
   /** Metadata-only context utilization/retrieval/compression signals. */
   contextSummary?: RunContextSummary;
+  /** Metadata-only fixed-key sandbox/action counters. */
+  actionCounts?: RunActionCounts;
 }
 
 export interface EvidenceOutcomeSummary {
@@ -319,7 +338,15 @@ export interface AshlrConfig {
   /** Map of integration name -> resolved executable path (entire, aw, claude, ...). */
   tools: Record<string, string>;
   /** Optional Phantom secrets integration toggle. */
-  phantom?: { enabled: boolean };
+  phantom?: {
+    enabled: boolean;
+    /** Count-only `phantom agent report --json` rollup. Default off. */
+    agentReportRollup?: {
+      enabled?: boolean;
+      timeoutMs?: number;
+      cacheTtlMs?: number;
+    };
+  };
   /**
    * Shared-memory / genome settings (M7). Controls recall limits and whether
    * the orchestrator injects recall hits into sub-agent prompts.
@@ -1328,6 +1355,17 @@ export interface PhantomCapabilitySnapshot {
   };
 }
 
+export interface PhantomAgentReportRollup {
+  valuesHidden: true;
+  scannedRepos: number;
+  validReports: number;
+  failedReports: number;
+  statusCounts: Record<string, number>;
+  riskCounts: Record<string, number>;
+  severityCounts: Record<string, number>;
+  requiresApprovalCount: number;
+}
+
 export interface PhantomStatus {
   /** Whether the `phantom` binary is on PATH. */
   installed: boolean;
@@ -1339,6 +1377,8 @@ export interface PhantomStatus {
   secretNames: string[];
   /** Values-free capability summary for readiness and fleet surfaces. */
   capability: PhantomCapabilitySnapshot;
+  /** Aggregate-only agent report rollup, present only when explicitly requested and safely supported. */
+  agentReport?: PhantomAgentReportRollup;
   /** Error message when status could not be fully determined, else absent. */
   error?: string;
 }

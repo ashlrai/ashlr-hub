@@ -152,6 +152,11 @@ describe('M349 secret safety invariants', () => {
         proposalCreated: true,
         diffFiles: 1,
         diffLines: 2,
+        actionCounts: {
+          proposalCreated: 1,
+          [`count token=${SECRET_VALUES[8]}`]: 7,
+          unknownCounter: 9,
+        } as never,
       },
       evidenceOutcome: {
         target: `main token=${SECRET_VALUES[4]}`,
@@ -211,6 +216,16 @@ describe('M349 secret safety invariants', () => {
         backend: 'codex',
         tier: 'frontier',
         reason: `route action ${SECRET_BUNDLE}`,
+      },
+      runEventSummary: {
+        runId: 'run-m349',
+        status: 'done',
+        actionCounts: {
+          sandboxCreated: 1,
+          proposalCreated: 1,
+          [`count token=${SECRET_VALUES[8]}`]: 7,
+          unknownCounter: 9,
+        } as never,
       },
     });
 
@@ -273,6 +288,11 @@ describe('M349 secret safety invariants', () => {
       labelBasis: 'judge-verdict',
       routerPolicyVersion: 'fleet-router-v1',
       learningEpoch: '2026-07-09',
+    });
+    expect(readBack.decisions[0]?.runEventSummary?.actionCounts).toEqual({ proposalCreated: 1 });
+    expect(readBack.actions[0]?.runEventSummary?.actionCounts).toEqual({
+      sandboxCreated: 1,
+      proposalCreated: 1,
     });
   });
 });

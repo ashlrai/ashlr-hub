@@ -46,6 +46,7 @@ import type {
   EngineId,
   EngineTier,
   Proposal,
+  RunEventSummary,
   RunProposalOutcome,
   WorkItem,
 } from '../types.js';
@@ -432,6 +433,7 @@ function productionOutcomeFromRunProposalOutcome(kind: RunProposalOutcome['kind'
 function dispatchProductionFromProposalOutcome(
   outcome: RunProposalOutcome | undefined,
   runId?: string,
+  summary?: RunEventSummary,
 ): DaemonDispatchProduction | undefined {
   if (!outcome) return undefined;
   const diffLines =
@@ -442,6 +444,7 @@ function dispatchProductionFromProposalOutcome(
     outcome: productionOutcomeFromRunProposalOutcome(outcome.kind),
     ...(outcome.proposalId ? { proposalId: outcome.proposalId } : {}),
     ...(runId ? { runId } : {}),
+    ...(summary ? { runEventSummary: summary } : {}),
     ...(outcome.reason ? { reason: boundedText(outcome.reason, 220) } : {}),
     ...(typeof outcome.files === 'number' ? { diffFiles: outcome.files } : {}),
     ...(typeof diffLines === 'number' ? { diffLines } : {}),
@@ -709,6 +712,7 @@ function dispatchTrace(
     reason: fields.reason,
   });
   const summary = runEventSummary({
+    ...(fields.production?.runEventSummary ?? {}),
     runId: fields.production?.runId,
     status: fields.dispatched ? 'done' : 'skipped',
     outcome: fields.production?.outcome ?? (fields.dispatched ? 'unknown' : 'skipped'),
@@ -2356,7 +2360,7 @@ export async function tick(
             delegationScope,
           });
         }
-        dispatchProduction = dispatchProductionFromProposalOutcome(runState.proposalOutcome, runState.id);
+        dispatchProduction = dispatchProductionFromProposalOutcome(runState.proposalOutcome, runState.id, runState.runEventSummary);
         dispatchSkipReason = noProposalProductionReason(dispatchProduction);
 
         // M80: subscription-tier runs are not dollar-billed — count $0 toward

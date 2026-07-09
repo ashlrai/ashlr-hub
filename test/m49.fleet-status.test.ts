@@ -939,6 +939,139 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(dispatchYieldAction?.detail ?? '').not.toContain('proposal-disabled');
   });
 
+  it('uses aggregate production reasons for diagnostics when dispatch samples are absent', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+
+    const recentTick: DaemonTick = {
+      ts: new Date().toISOString(),
+      itemsConsidered: 10,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'ok',
+      proposalProduction: {
+        selected: 10,
+        claimed: 10,
+        dispatched: 10,
+        skipped: 0,
+        errors: 0,
+        proposalsCreated: 0,
+        noProposalDispatches: 10,
+        reasons: [
+          { reason: 'proposal-disabled: proposal filing disabled for this sandboxed attempt', count: 7 },
+          { reason: 'empty-diff: engine "local-coder" completed without file changes', count: 3 },
+        ],
+      },
+      dispatches: [],
+    };
+    writeRunningDaemon(tmpHome, [recentTick]);
+    writeBacklogSnapshot(tmpHome, repo, [
+      makeBacklogItem(repo, 'repo:goal:fresh', 'Fresh eligible work', 5),
+    ], new Date().toISOString());
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.proposalProduction).toMatchObject({
+      noProposalDispatches: 10,
+      suppressedDispatches: 7,
+      diagnosticNoProposalDispatches: 3,
+      diagnosticTopReasons: [
+        { reason: 'empty-diff: engine "local-coder" completed without file changes', count: 3 },
+      ],
+    });
+    expect(s.proposalProduction?.topReasons[0]?.reason).toContain('proposal-disabled');
+    expect(s.autonomyEffectiveness?.summary).toContain('3 recent dispatch(es) produced no proposal');
+    expect(s.autonomyEffectiveness?.summary).toContain('empty-diff: engine "local-coder" completed without file changes');
+    expect(s.autonomyEffectiveness?.summary).not.toContain('proposal-disabled');
+    const productionAction = s.nextActions?.find((action) => action.id === 'inspect-proposal-production');
+    expect(productionAction?.detail).toContain('empty-diff: engine "local-coder" completed without file changes');
+    expect(productionAction?.detail).not.toContain('proposal-disabled');
+  });
+
+  it('keeps skipped not-attempted rows out of no-proposal diagnostics', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+
+    const recentTick: DaemonTick = {
+      ts: new Date().toISOString(),
+      itemsConsidered: 9,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'ok',
+      proposalProduction: {
+        selected: 9,
+        claimed: 9,
+        dispatched: 3,
+        skipped: 6,
+        errors: 0,
+        proposalsCreated: 0,
+        noProposalDispatches: 3,
+        reasons: [
+          { reason: 'not-attempted', count: 6 },
+          { reason: 'empty-diff: engine "local-coder" completed without file changes', count: 3 },
+        ],
+      },
+      dispatches: [
+        ...Array.from({ length: 6 }, (_, idx) => ({
+          itemId: `repo:goal:skip-${idx}`,
+          title: `Skipped ${idx}`,
+          repo,
+          source: 'goal' as const,
+          backend: null,
+          tier: null,
+          assignedBy: 'daemon',
+          reason: 'not-attempted',
+          dispatched: false,
+          spentUsd: 0,
+          skipReason: 'not-attempted',
+        })),
+        ...Array.from({ length: 3 }, (_, idx) => ({
+          itemId: `repo:goal:empty-${idx}`,
+          title: `Empty ${idx}`,
+          repo,
+          source: 'goal' as const,
+          backend: 'local-coder' as const,
+          tier: 'local' as const,
+          assignedBy: 'router',
+          reason: 'engine "local-coder" completed without file changes',
+          dispatched: true,
+          spentUsd: 0,
+          production: {
+            outcome: 'empty-diff' as const,
+            reason: 'engine "local-coder" completed without file changes',
+          },
+        })),
+      ],
+    };
+    writeRunningDaemon(tmpHome, [recentTick]);
+    writeBacklogSnapshot(tmpHome, repo, [
+      makeBacklogItem(repo, 'repo:goal:fresh', 'Fresh eligible work', 5),
+    ], new Date().toISOString());
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.proposalProduction?.topReasons[0]).toEqual({ reason: 'not-attempted', count: 6 });
+    expect(s.proposalProduction?.skipReasons[0]).toEqual({ reason: 'not-attempted', count: 6 });
+    expect(s.proposalProduction?.diagnosticTopReasons[0]).toEqual({
+      reason: 'empty-diff: engine "local-coder" completed without file changes',
+      count: 3,
+    });
+    expect(s.proposalProduction?.diagnosticTopReasons.map((reason) => reason.reason)).not.toContain('not-attempted');
+    expect(s.autonomyEffectiveness?.summary).toContain('3 recent dispatch(es) produced no proposal');
+    expect(s.autonomyEffectiveness?.summary).toContain('empty-diff: engine "local-coder" completed without file changes');
+
+    const skipAction = s.nextActions?.find((action) => action.id === 'inspect-dispatch-skips');
+    expect(skipAction?.detail).toContain('6 selected item(s) were not attempted');
+    expect(skipAction?.detail).toContain('top skip: not-attempted');
+    const productionAction = s.nextActions?.find((action) => action.id === 'inspect-proposal-production');
+    expect(productionAction?.detail).toContain('empty-diff: engine "local-coder" completed without file changes');
+    expect(productionAction?.detail).not.toContain('not-attempted');
+  });
+
   it('reports durable dispatch-production yield from the append-only ledger', async () => {
     const now = new Date().toISOString();
     const baseEvent: DispatchProductionEvent = {
@@ -1974,6 +2107,9 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         diagnosticTopReasons: [
           { reason: 'agent returned no diff', count: 2 },
           { reason: 'tool timeout', count: 1 },
+        ],
+        skipReasons: [
+          { reason: 'not-attempted', count: 1 },
         ],
         recentNoProposalDispatches: [
           {

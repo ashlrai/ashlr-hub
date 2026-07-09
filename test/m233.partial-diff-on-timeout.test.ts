@@ -121,6 +121,19 @@ describe('M233 partial-diff capture on timeout', () => {
         // Run must not throw and must return 'failed' state.
         expect(result.state.status).toBe('failed');
         expect(result.state.engine).toBe('claude');
+        expect(result.state.runEventSummary?.actionCounts).toMatchObject({
+          sandboxCreated: 1,
+          spawnAttempts: 1,
+          transientRetries: 0,
+          proposalCaptureAttempts: 1,
+          proposalCreated: 1,
+          proposalBlocked: 0,
+          proposalDisabled: 0,
+          modelSteps: 1,
+          totalSteps: 1,
+          diffFiles: 1,
+        });
+        expect(result.state.runEventSummary?.actionCounts?.diffLines).toBeGreaterThan(0);
 
         // A partial proposal MUST be created.
         expect(result.proposalId).toBeDefined();
@@ -151,7 +164,18 @@ describe('M233 partial-diff capture on timeout', () => {
           status: 'failed',
           outcome: 'filed',
           proposalCreated: true,
+          actionCounts: {
+            sandboxCreated: 1,
+            spawnAttempts: 1,
+            proposalCaptureAttempts: 1,
+            completenessGateRuns: 1,
+            proposalCreated: 1,
+            proposalBlocked: 0,
+            proposalDisabled: 0,
+            diffFiles: 1,
+          },
         });
+        expect(proposal!.runEventSummary?.actionCounts?.diffLines).toBeGreaterThan(0);
       } finally {
         if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
         else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
@@ -188,6 +212,16 @@ describe('M233 truly-empty diff on failure', () => {
 
         // Run fails.
         expect(result.state.status).toBe('failed');
+        expect(result.state.runEventSummary?.actionCounts).toMatchObject({
+          sandboxCreated: 1,
+          spawnAttempts: 1,
+          proposalCaptureAttempts: 1,
+          proposalCreated: 0,
+          proposalBlocked: 1,
+          proposalDisabled: 0,
+          diffFiles: 0,
+          diffLines: 0,
+        });
 
         // No proposal because diff was empty.
         expect(result.proposalId).toBeUndefined();

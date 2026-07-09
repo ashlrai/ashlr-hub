@@ -468,6 +468,7 @@ function formatBackendResource(resource: NonNullable<FleetStatus['backends'][num
 function formatFleetPhantom(phantom: NonNullable<FleetStatus['phantom']>): string {
   const version = phantom.version ? ` v${phantom.version}` : '';
   const known = phantom.knownFleetSecrets;
+  const agentReport = phantom.agentReport ? `, report ${formatPhantomAgentReport(phantom.agentReport)}` : '';
   return (
     `${phantom.state}${version}, ` +
     `${known.presentCount}/${known.total} known fleet secrets, ` +
@@ -475,9 +476,33 @@ function formatFleetPhantom(phantom: NonNullable<FleetStatus['phantom']>): strin
     `nim ${known.nimApiKeyPresent ? 'yes' : 'no'}, ` +
     `mcp ${phantom.mcp.configured ? 'yes' : 'no'}, ` +
     `agent ${phantom.commands.agentAvailable ? 'yes' : 'no'}, ` +
-    `injection ${phantom.config.fleetSecretInjectionEnabled ? 'enabled' : 'disabled'}, ` +
+    `injection ${phantom.config.fleetSecretInjectionEnabled ? 'enabled' : 'disabled'}` +
+    agentReport +
+    ', ' +
     'values hidden'
   );
+}
+
+function formatPhantomAgentReport(report: NonNullable<FleetStatus['phantom']>['agentReport']): string {
+  if (!report) return 'none';
+  return [
+    `repos=${report.scannedRepos}`,
+    `valid=${report.validReports}`,
+    `failed=${report.failedReports}`,
+    `approvals=${report.requiresApprovalCount}`,
+    `status=${formatPhantomAgentReportCounts(report.statusCounts)}`,
+    `risk=${formatPhantomAgentReportCounts(report.riskCounts)}`,
+    `severity=${formatPhantomAgentReportCounts(report.severityCounts)}`,
+  ].join(' ');
+}
+
+function formatPhantomAgentReportCounts(counts: Record<string, number>): string {
+  const parts = Object.entries(counts)
+    .filter(([, count]) => count > 0)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(0, 5)
+    .map(([key, count]) => `${key}=${count}`);
+  return parts.length > 0 ? parts.join('/') : 'none';
 }
 
 function formatReadinessBlocker(blocker: NonNullable<FleetStatus['autonomousShipReadiness']>['topBlocker']): string {
