@@ -621,4 +621,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused regression coverage for API-model success, partial failure capture, trivial/empty outcomes, and causal/provenance fields.
 - [x] Add default-on merge-contract backlog scanner work for repos with inferred verify commands but no explicit merge-grade `ashlr.verify.json`.
 - [x] Verify capture/scanner lanes with focused, adjacent, static, invariant, and full-CI gates.
-- [ ] Commit, push, and smoke the fleet again.
+- [x] Commit and push `79dae3b`, reload launchd daemon, resume fleet, and smoke FleetStatus with guard clear.
