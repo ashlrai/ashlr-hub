@@ -401,6 +401,28 @@ describe('routeTask — learned bias promotes high-ship engine', () => {
     expect(result.engine).toBe('claude');
   });
 
+  it(`keeps exactly ${LEARNED_ROUTING_MIN_SAMPLES} fresh samples deterministic when the route clock is delayed`, () => {
+    const fixedNow = 1_700_000_000_000;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(fixedNow));
+    writeDecisions(
+      judgedEntries(LEARNED_ROUTING_MIN_SAMPLES, 'claude', 'opus', 'todo', 'ship', fixedNow),
+    );
+    vi.setSystemTime(new Date(fixedNow + 1_000));
+
+    const scores = buildEngineScores('todo');
+    const claudeScore = scores.get('claude:opus');
+    expect(claudeScore).toBeDefined();
+    expect(claudeScore!.samples).toBe(LEARNED_ROUTING_MIN_SAMPLES);
+
+    const item = makeItem('todo', 4, 5);
+    const ctx = makeCtx(['claude', 'codex']);
+    const cfg = makeCfg({ learnedRouting: true, routingPolicy: 'balanced' });
+
+    const result = routeTask(item, cfg, ctx);
+    expect(result.engine).toBe('claude');
+  });
+
   it(`keeps ${LEARNED_ROUTING_MIN_SAMPLES - 1} fresh samples in the thin-sample guard through routing`, () => {
     const fixedNow = 1_700_000_000_000;
     vi.useFakeTimers();

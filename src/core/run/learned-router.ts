@@ -649,15 +649,18 @@ export function recoverWithinBudget(
  */
 export const LEARNED_ROUTING_MIN_SAMPLES = 5;
 
-// Covers sub-second read-after-write skew only: at the 5-sample floor with the
-// 7-day half-life, 1e-6 weighted sample units is about 175ms of decay.
-const LEARNED_ROUTING_SAMPLE_FLOOR_EPSILON = 1e-6;
-
 /**
  * M240: Recency half-life in milliseconds. Verdicts older than this are
  * down-weighted exponentially. Default: 7 days.
  */
 export const LEARNED_ROUTING_HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Covers short read-after-write skew only: at the 5-sample floor with the
+// 7-day half-life, a 5s delayed route read decays by ~0.000029 samples.
+const LEARNED_ROUTING_SAMPLE_FLOOR_DRIFT_MS = 5_000;
+const LEARNED_ROUTING_SAMPLE_FLOOR_EPSILON =
+  LEARNED_ROUTING_MIN_SAMPLES *
+  (1 - Math.pow(2, -(LEARNED_ROUTING_SAMPLE_FLOOR_DRIFT_MS / LEARNED_ROUTING_HALF_LIFE_MS)));
 
 /**
  * M240: Positive verdict labels — a 'judged' entry with one of these verdicts
