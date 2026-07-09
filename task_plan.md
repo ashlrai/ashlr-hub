@@ -921,4 +921,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve raw no-proposal counters while making operator surfaces prefer diagnostic no-proposal and split policy suppression explicitly.
 - [x] Add focused regressions for policy-disabled control flow, empty-diff diagnostics, failed/sandbox-failed non-diagnostics, privacy canaries, and status/API/web contracts.
 - [x] Finish focused, broad, invariant, and full-CI verification.
-- [ ] Commit, push, reload daemon, smoke live fleet status, and continue into the next highest-leverage overnight lane.
+- [x] Commit, push, reload daemon, smoke live fleet status, and continue into the next highest-leverage overnight lane.
