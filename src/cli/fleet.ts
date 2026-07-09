@@ -246,6 +246,34 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  // Context efficiency
+  const contextEfficiency = s.contextEfficiency;
+  lines.push('Context efficiency:');
+  if (!contextEfficiency) {
+    lines.push('  unavailable');
+  } else {
+    const signals = contextEfficiency.signals ?? {};
+    const risks = Array.isArray(contextEfficiency.risks) ? contextEfficiency.risks : [];
+    const recommendations = Array.isArray(contextEfficiency.recommendations) ? contextEfficiency.recommendations : [];
+    lines.push(`  posture:   ${contextEfficiency.posture} (${contextEfficiency.score}/100)`);
+    lines.push(`  summary:   ${contextEfficiency.summary}`);
+    lines.push(
+      `  memory:    ${signals.memoryEntries ?? 0} entries, retrieval ${signals.retrievalPosture ?? 'unknown'}, ` +
+        `last ${signals.lastMemoryAt ?? '—'}`,
+    );
+    lines.push(
+      `  attention: repos ${signals.activeRepos ?? 0}, top share ${formatNullablePercent(signals.topRepoShare)}, ` +
+        `bloat ${signals.contextBloatRisk ?? 'unknown'}, reflection ${signals.reflectionEvents ?? 0}`,
+    );
+    if (risks.length > 0) {
+      lines.push(`  risks:     ${risks.slice(0, 3).map(formatContextRisk).join('; ')}`);
+    }
+    if (recommendations.length > 0) {
+      lines.push(`  next:      ${recommendations[0]}`);
+    }
+  }
+  lines.push('');
+
   // Merges
   lines.push(`Merges:    ${s.merges.recent} auto-merge(s) in last 24h`);
   lines.push('');
@@ -437,6 +465,16 @@ function formatProductionReason(reason: NonNullable<FleetStatus['proposalProduct
 
 function formatPercent(rate: number): string {
   return `${Math.round(rate * 100)}%`;
+}
+
+function formatNullablePercent(rate: number | null | undefined): string {
+  return typeof rate === 'number' && Number.isFinite(rate) ? formatPercent(rate) : '—';
+}
+
+function formatContextRisk(
+  risk: NonNullable<FleetStatus['contextEfficiency']>['risks'][number],
+): string {
+  return `${risk.severity}:${risk.id}`;
 }
 
 function formatDispatchYieldBucket(

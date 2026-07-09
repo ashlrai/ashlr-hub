@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import type { AshlrConfig, DaemonTick, EngineId, WorkItem } from '../src/core/types.js';
 import { buildFleetStatus } from '../src/core/fleet/status.js';
 import { formatFleetStatus } from '../src/cli/fleet.js';
+import { buildContextEfficiencyStatus } from '../src/core/fleet/context-efficiency.js';
 import { recordUse } from '../src/core/fleet/quota.js';
 import { setKill } from '../src/core/sandbox/policy.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
@@ -859,6 +860,32 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
   it('reports durable global workspace action telemetry from the append-only ledger', async () => {
     const now = new Date().toISOString();
+    const genomeDir = join(tmpHome, '.ashlr', 'genome');
+    mkdirSync(genomeDir, { recursive: true });
+    writeFileSync(
+      join(genomeDir, 'hub.jsonl'),
+      [
+        {
+          id: 'ctx-one',
+          project: 'ashlr-hub',
+          source: 'hub',
+          title: 'Context telemetry',
+          text: 'Fleet context efficiency reads workspace attention without storing raw prompts.',
+          tags: ['context'],
+          ts: now,
+        },
+        {
+          id: 'ctx-two',
+          project: 'phantom-secrets',
+          source: 'hub',
+          title: 'Phantom boundary',
+          text: 'Phantom owns real keys while Hub consumes only metadata and scrubbed outputs.',
+          tags: ['phantom'],
+          ts: now,
+        },
+      ].map((entry) => JSON.stringify(entry)).join('\n') + '\n',
+      'utf8',
+    );
     const baseEvent: AgentActionEvent = {
       schemaVersion: 1,
       ts: now,
@@ -908,11 +935,67 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       ]),
     );
     expect(s.workspace?.recentActions[0]).toMatchObject({ proposalId: 'prop-c' });
+    expect(s.contextEfficiency).toMatchObject({
+      posture: 'watch',
+      signals: {
+        workspaceEvents: 3,
+        activeRepos: 1,
+        memoryEntries: 2,
+        hubMemoryEntries: 2,
+        retrievalPosture: 'available',
+        reflectionEvents: 0,
+        proposalRate: null,
+      },
+      risks: [
+        expect.objectContaining({ id: 'reflection-missing', severity: 'low' }),
+      ],
+    });
+    expect(s.contextEfficiency?.recommendations[0]).toContain('compression');
 
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('Global workspace:');
     expect(formatted).toContain('events:    3');
     expect(formatted).toContain('proposals 1, no-proposal 1');
+    expect(formatted).toContain('Context efficiency:');
+    expect(formatted).toContain('posture:   watch');
+    expect(formatted).toContain('memory:    2 entries');
+  });
+
+  it('does not report healthy context efficiency when genome health is unavailable', () => {
+    const now = new Date().toISOString();
+    const status = buildContextEfficiencyStatus(
+      {
+        workspace: {
+          generatedAt: now,
+          windowHours: 24,
+          eventCount: 2,
+          latestAt: now,
+          activeMachines: ['m49'],
+          spendUsd: 0,
+          proposalEvents: 0,
+          noProposalEvents: 0,
+          repoEventCount: 2,
+          repoDistinctCount: 1,
+          topRepoCount: 2,
+          attention: [],
+          byAction: [{ key: 'reflection', count: 1 }],
+          byOutcome: [],
+          byRepo: [{ key: '/repo/a', count: 2 }],
+          byBackend: [],
+          entropy: { action: 0, outcome: 0, repo: 0 },
+          recentActions: [],
+        },
+      },
+      undefined,
+      now,
+      24 * 60 * 60 * 1000,
+    );
+
+    expect(status.posture).toBe('watch');
+    expect(status.signals.retrievalPosture).toBe('unknown');
+    expect(status.risks).toEqual([
+      expect.objectContaining({ id: 'memory-unavailable', severity: 'medium' }),
+    ]);
   });
 
   it('promotes poor durable dispatch yield into next actions', async () => {

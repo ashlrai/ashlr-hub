@@ -251,6 +251,23 @@ describe('withPhantomSecrets — secret injected into child env', () => {
     }
   });
 
+  it('scrubs injected values even after the ephemeral env is cleared', async () => {
+    const oddSecret = 'plainvalue';
+    mockPhantomPresent({ CUSTOM_TOKEN: oddSecret });
+
+    const result = await withPhantomSecrets(
+      { cfg: cfgOn(), keys: ['CUSTOM_TOKEN'] },
+      async (env) => ({
+        output: `token=${env['CUSTOM_TOKEN']}`,
+        nested: [env['CUSTOM_TOKEN']],
+      }),
+    );
+
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain(oddSecret);
+    expect(serialized).toContain('[REDACTED]');
+  });
+
   it('injects multiple keys independently', async () => {
     mockPhantomPresent({
       ANTHROPIC_API_KEY: FAKE_SECRET_VALUE,

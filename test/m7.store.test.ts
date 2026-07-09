@@ -57,6 +57,8 @@ let appendHubEntry: (input: LearnInput) => GenomeEntry;
 let hubStorePath: () => string;
 // (lazy import below; type-import lint intentionally not applied)
 let genomeHealth: (cfg: AshlrConfig) => import('../src/core/types.js').GenomeHealth;
+// (lazy import below; type-import lint intentionally not applied)
+let genomeHubHealth: () => import('../src/core/types.js').GenomeHealth;
 
 // Modules are singletons in Node's ESM cache — imported once. The HOME trick
 // works when the module reads os.homedir() lazily (inside functions) rather
@@ -70,6 +72,7 @@ async function ensureImported(): Promise<void> {
     appendHubEntry = store.appendHubEntry;
     hubStorePath = store.hubStorePath;
     genomeHealth = store.genomeHealth;
+    genomeHubHealth = store.genomeHubHealth;
   }
 }
 
@@ -605,6 +608,35 @@ describe('genomeHealth — counts match reality', () => {
     ]);
     const health = genomeHealth(makeConfig());
     expect(health.hubEntries).toBe(3);
+  });
+
+  it('hub health only counts recallable hub entries', () => {
+    const storeDir = path.join(tmpHome, '.ashlr', 'genome');
+    fs.mkdirSync(storeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(storeDir, 'hub.jsonl'),
+      [
+        JSON.stringify({ ts: '2025-06-01T00:00:00.000Z' }),
+        JSON.stringify({ id: 'missing-text', title: 'Missing Text', ts: '2025-06-02T00:00:00.000Z' }),
+        JSON.stringify({
+          id: 'valid',
+          project: null,
+          source: 'hub',
+          title: 'Valid',
+          text: 'Recallable memory.',
+          tags: [],
+          ts: '2025-06-03T00:00:00.000Z',
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    expect(genomeHealth(makeConfig()).hubEntries).toBe(1);
+    expect(genomeHubHealth()).toMatchObject({
+      totalEntries: 1,
+      hubEntries: 1,
+      lastLearnedAt: '2025-06-03T00:00:00.000Z',
+    });
   });
 
   it('totalEntries >= hubEntries (project entries add to total)', () => {

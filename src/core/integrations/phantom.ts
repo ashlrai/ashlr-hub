@@ -138,8 +138,10 @@ export async function withPhantomSecrets<T>(
 
   // ── Run the function with the ephemeral env ───────────────────────────────
   let result: T;
+  let scrubValues: string[] = [];
   try {
     result = await runFn(injectedEnv);
+    scrubValues = injectedValues.slice();
   } finally {
     // Overwrite injected values in the env object before GC.
     for (const key of opts.keys) {
@@ -151,7 +153,11 @@ export async function withPhantomSecrets<T>(
   }
 
   // ── Scrub any accidental secret leakage from string output ───────────────
-  return scrubResultStrings(result, injectedValues);
+  try {
+    return scrubResultStrings(result, scrubValues);
+  } finally {
+    scrubValues.length = 0;
+  }
 }
 
 /**

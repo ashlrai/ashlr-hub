@@ -49,6 +49,10 @@ import {
   readAgentWorkspace,
   type AgentWorkspaceStatus,
 } from './agent-action-ledger.js';
+import {
+  buildContextEfficiencyStatus,
+  type FleetContextEfficiencyStatus,
+} from './context-efficiency.js';
 
 export interface FleetBackendResourceStatus {
   availability: BackendAvailability | 'not-sensed';
@@ -346,6 +350,8 @@ export interface FleetStatus {
   dispatchProduction?: DispatchProductionYieldSummary;
   /** Durable 24h agent-action global workspace summary from append-only telemetry. */
   workspace?: AgentWorkspaceStatus;
+  /** Read-only context discipline signal for long-running multi-agent work. */
+  contextEfficiency?: FleetContextEfficiencyStatus;
   /** True when the global kill switch is engaged (fleet paused). */
   killed: boolean;
 }
@@ -799,6 +805,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     });
   } catch {
     // Optional history/analytics surface only.
+  }
+  try {
+    const { genomeHubHealth } = await import('../genome/store.js');
+    status.contextEfficiency = buildContextEfficiencyStatus(status, genomeHubHealth(), generatedAt, RECENT_WINDOW_MS);
+  } catch {
+    status.contextEfficiency = buildContextEfficiencyStatus(status, undefined, generatedAt, RECENT_WINDOW_MS);
   }
 
   try {

@@ -481,3 +481,20 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Harvested agent findings and selected the smallest second lane: make FleetStatus cooldown/pending-aware so next actions only point at daemon-eligible backlog.
 - [x] Added raw/eligible/cooling/pending queue fields, eligible-only `queue.next`, wait-for-eligibility next action, CLI/Fleet/Mission Control visibility, and focused status regressions.
 - [x] Run final gates, commit, push, and production-check.
+
+## Current Continuation - Context Architecture From Grok Chat
+- [x] Rechecked branch/session state, recent commits, Entire resume, existing notes, and current in-flight diff before touching source.
+- [x] Kept the live fleet paused while editing after prior daemon/agent cleanup raced in-flight patches in the shared checkout.
+- [x] Deployed/read parallel agents across genome memory, scoped delegation, observability, cross-repo Phantom ownership, attention-eval strategy, status/UI audit, and next-lane architecture.
+- [x] Added metadata-only `FleetStatus.contextEfficiency` from workspace attention, proposal-production yield, queue breadth, and hub genome health.
+- [x] Surfaced context efficiency in CLI fleet status, Fleet, Mission Control, and Fleet Dashboard production panels.
+- [x] Made reflected genome memories outrank raw run/swarm captures when keyword relevance is otherwise equal.
+- [x] Fixed Phantom returned-output scrubbing so injected values remain available to the scrubber after the ephemeral env is cleared.
+- [x] Added focused regression coverage for context-efficiency FleetStatus/formatter output, recall tiering, and Phantom literal-value scrubbing.
+- [x] Run focused typecheck, JS syntax, and affected suites.
+- [x] Run final lint/build/audit/diff/full-CI gates.
+- [ ] Commit, push, resume/reinstall the live fleet, and verify production status.
+- [ ] Next lane: implement shared `DelegationScope` for context budgets, allowed files, memory mode, and result contracts.
+- [ ] Next lane: add `ashlr eval attention` with middle-drop and workflow-resolution gates.
+- [ ] Next lane: emit prompt utilization, retrieval hit-rate, and compression metadata into the causal trajectory graph.
+- [ ] Next lane: formalize cross-repo ownership where Phantom owns secrets, Pulse owns durable telemetry, executor repos own model behavior, and Hub coordinates policy/scheduling.

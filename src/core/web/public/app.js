@@ -2611,6 +2611,58 @@ function renderGlobalWorkspaceCard(workspace, cls = 'ctrl-card card') {
   return card;
 }
 
+function contextEfficiencyAccent(posture) {
+  const colors = {
+    healthy: '#4ade80',
+    watch: '#fbbf24',
+    strained: '#f97316',
+    unknown: '#94a3b8',
+  };
+  return colors[posture] ?? colors.unknown;
+}
+
+function renderContextEfficiencyCard(context, cls = 'ctrl-card card') {
+  if (!context) return null;
+  const signals = context.signals ?? {};
+  const score = Number.isFinite(Number(context.score)) ? Number(context.score) : 0;
+  const posture = context.posture ?? 'unknown';
+  const card = el('div', { cls });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Context Efficiency'),
+    el('span', {
+      cls: 'card-subtitle',
+      style: `color:${contextEfficiencyAccent(posture)}`,
+    }, `${posture} · ${score}/100`)
+  ));
+
+  const body = el('div', { cls: 'card-body' });
+  body.appendChild(infoGrid([
+    ['Window', proposalProductionWindowLabel(context)],
+    ['Workspace', signals.workspaceEvents ?? 0],
+    ['Memory', signals.memoryEntries ?? 0],
+    ['Retrieval', signals.retrievalPosture ?? 'unknown'],
+    ['Top repo', signals.topRepoShare == null ? '—' : formatFleetPercent(signals.topRepoShare)],
+    ['Bloat risk', signals.contextBloatRisk ?? 'unknown'],
+    ['Reflection', signals.reflectionEvents ?? 0],
+    ['Proposal yield', signals.proposalRate == null ? '—' : formatFleetPercent(signals.proposalRate)],
+  ]));
+
+  const risks = Array.isArray(context.risks) ? context.risks : [];
+  if (risks.length > 0) {
+    const risk = risks[0];
+    body.appendChild(el('p', { cls: 'hint' }, `Top risk: ${risk.severity ?? 'low'} ${risk.id ?? 'unknown'} — ${compactFleetReason(risk.detail ?? '')}`));
+  }
+  const next = Array.isArray(context.recommendations) ? context.recommendations[0] : null;
+  if (next) {
+    body.appendChild(el('p', { cls: 'hint' }, compactFleetReason(next)));
+  } else if (context.summary) {
+    body.appendChild(el('p', { cls: 'hint' }, compactFleetReason(context.summary)));
+  }
+
+  card.appendChild(body);
+  return card;
+}
+
 function renderFleetNextActionsCard(nextActions, cls = 'ctrl-card card') {
   const actions = Array.isArray(nextActions) ? nextActions : [];
   if (actions.length === 0) return null;
@@ -2848,6 +2900,9 @@ function renderFleet() {
 
   const workspaceCard = renderGlobalWorkspaceCard(f.workspace, 'fleet-card card');
   if (workspaceCard) section.appendChild(workspaceCard);
+
+  const contextCard = renderContextEfficiencyCard(f.contextEfficiency, 'fleet-card card');
+  if (contextCard) section.appendChild(contextCard);
 
   const strategicFocusCard = renderStrategicFocusCard(f.queue, 'fleet-card card');
   if (strategicFocusCard) section.appendChild(strategicFocusCard);
@@ -3310,6 +3365,9 @@ function renderControl() {
 
   const missionWorkspaceCard = renderGlobalWorkspaceCard(workspace);
   if (missionWorkspaceCard) section.appendChild(missionWorkspaceCard);
+
+  const missionContextCard = renderContextEfficiencyCard(d.fleet?.contextEfficiency ?? fleet.contextEfficiency ?? null);
+  if (missionContextCard) section.appendChild(missionContextCard);
 
   const missionActionsCard = renderFleetNextActionsCard(d.fleet?.nextActions ?? fleet.nextActions ?? null);
   if (missionActionsCard) section.appendChild(missionActionsCard);
@@ -4298,12 +4356,14 @@ function fdRenderProductionPanel(snap) {
   const production = snap.fleet?.proposalProduction ?? snap.control?.fleet?.proposalProduction ?? null;
   const dispatchProduction = snap.fleet?.dispatchProduction ?? snap.control?.fleet?.dispatchProduction ?? null;
   const workspace = snap.fleet?.workspace ?? snap.control?.fleet?.workspace ?? null;
+  const contextEfficiency = snap.fleet?.contextEfficiency ?? snap.control?.fleet?.contextEfficiency ?? null;
   const workspaceHasEvents = Number(workspace?.eventCount ?? 0) > 0;
+  const hasProductionData = Boolean(prod || production || dispatchProduction || workspaceHasEvents);
   const body = el('div', { cls: 'fd-panel__body' });
 
-  if (!prod && !production && !dispatchProduction && !workspaceHasEvents) {
+  if (!hasProductionData) {
     body.appendChild(el('p', { cls: 'hint' }, 'Production data unavailable.'));
-    return body;
+    if (!contextEfficiency) return body;
   }
 
   if (production) {
@@ -4353,6 +4413,23 @@ function fdRenderProductionPanel(snap) {
     if (attention) {
       const topic = attention.kind === 'repo' ? basenameFromPath(attention.topic ?? '') : attention.topic;
       body.appendChild(el('p', { cls: 'hint' }, `Top attention: ${attention.kind}:${topic} (${attention.weight ?? 0})`));
+    }
+  }
+
+  if (contextEfficiency) {
+    const signals = contextEfficiency.signals ?? {};
+    body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Context efficiency'));
+    body.appendChild(infoGrid([
+      ['Posture', `${contextEfficiency.posture ?? 'unknown'} (${contextEfficiency.score ?? 0}/100)`],
+      ['Memory', signals.memoryEntries ?? 0],
+      ['Retrieval', signals.retrievalPosture ?? 'unknown'],
+      ['Top repo', signals.topRepoShare == null ? '—' : formatFleetPercent(signals.topRepoShare)],
+      ['Reflection', signals.reflectionEvents ?? 0],
+      ['Bloat risk', signals.contextBloatRisk ?? 'unknown'],
+    ]));
+    const risk = Array.isArray(contextEfficiency.risks) ? contextEfficiency.risks[0] : null;
+    if (risk) {
+      body.appendChild(el('p', { cls: 'hint' }, `Top risk: ${risk.severity ?? 'low'} ${risk.id ?? 'unknown'}`));
     }
   }
 

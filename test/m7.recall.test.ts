@@ -316,6 +316,38 @@ describe('recall — keyword path (offline, no fetch)', () => {
     expect(noiseHit).toBeUndefined();
   });
 
+  it('ranks reflected playbook memory above raw run captures with equal keyword overlap', async () => {
+    writeHubEntries(tmpHome, [
+      makeEntry({
+        id: 'raw-run',
+        title: 'Retry scheduler',
+        text: 'Retry scheduler with bounded backoff.',
+        tags: ['run'],
+      }),
+      makeEntry({
+        id: 'reflected-playbook',
+        title: 'Retry scheduler',
+        text: 'Retry scheduler with bounded backoff.',
+        tags: ['m26', 'playbook'],
+      }),
+      makeEntry({
+        id: 'raw-swarm',
+        title: 'Retry scheduler',
+        text: 'Retry scheduler with bounded backoff.',
+        tags: ['swarm'],
+      }),
+    ]);
+
+    const hits = await recall('retry scheduler bounded backoff', makeConfig(), { embeddings: false });
+
+    expect(hits.map((hit) => hit.entry.id)).toEqual([
+      'reflected-playbook',
+      'raw-run',
+      'raw-swarm',
+    ]);
+    expect(hits[0]?.score).toBeGreaterThan(hits[1]?.score ?? 0);
+  });
+
   it('uses method="keyword" on the keyword path', async () => {
     writeHubEntries(tmpHome, [
       makeEntry({ id: 'kw1', title: 'TypeScript', text: 'TypeScript patterns.' }),

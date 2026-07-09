@@ -210,6 +210,16 @@ function entryToEmbedText(entry: GenomeEntry): string {
   return parts.join(' ').slice(0, 2000);
 }
 
+function memoryTierMultiplier(entry: GenomeEntry): number {
+  const tags = new Set(entry.tags.map((tag) => tag.toLowerCase()));
+  if (tags.has('m26') && tags.has('playbook')) return 1.7;
+  if (tags.has('m243:skill')) return 1.55;
+  if (tags.has('m235:anti-playbook')) return 1.5;
+  if (tags.has('reflection') || tags.has('compaction')) return 1.35;
+  if (tags.has('run') || tags.has('swarm')) return 0.9;
+  return 1;
+}
+
 // ---------------------------------------------------------------------------
 // Main recall function
 // ---------------------------------------------------------------------------
@@ -248,11 +258,14 @@ export async function recall(
 
   // --- Step 1: keyword scoring ---
   const keywordHits: RecallHit[] = entries
-    .map((entry) => ({
-      entry,
-      score: keywordScore(query, entry),
-      method: 'keyword' as const,
-    }))
+    .map((entry) => {
+      const score = keywordScore(query, entry);
+      return {
+        entry,
+        score: score > MIN_SCORE ? score * memoryTierMultiplier(entry) : score,
+        method: 'keyword' as const,
+      };
+    })
     .filter((h) => h.score > MIN_SCORE)
     .sort((a, b) => b.score - a.score);
 

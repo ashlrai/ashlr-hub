@@ -238,6 +238,9 @@ describe('M343 agent action ledger', () => {
       noProposalEvents: 1,
     });
     expect(summary.spendUsd).toBeCloseTo(0.6);
+    expect(summary.repoEventCount).toBe(3);
+    expect(summary.repoDistinctCount).toBe(2);
+    expect(summary.topRepoCount).toBe(2);
     expect(summary.byRepo[0]).toMatchObject({ key: '/tmp/repo-a', count: 2 });
     expect(summary.byBackend[0]).toMatchObject({ key: 'codex', count: 2 });
     expect(summary.entropy.action).toBeGreaterThanOrEqual(0);

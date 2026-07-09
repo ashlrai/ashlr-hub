@@ -29,6 +29,9 @@ import type { AshlrConfig, GenomeEntry, GenomeHealth, LearnInput } from '../type
 /** Max entries to read from hub.jsonl (bounded read). */
 const HUB_MAX_ENTRIES = 2000;
 
+/** Max bytes to inspect for lightweight hub health checks. */
+const HUB_HEALTH_MAX_BYTES = 8 * 1024 * 1024;
+
 /** Max bytes to read from a single section file (cap long docs). */
 const SECTION_MAX_BYTES = 8000;
 
@@ -120,6 +123,17 @@ function safeParseJson(text: string): unknown {
   } catch {
     return null;
   }
+}
+
+function recallableHubEntryTimestamp(value: unknown): string | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const entry = value as Record<string, unknown>;
+  return typeof entry['id'] === 'string' &&
+    typeof entry['title'] === 'string' &&
+    typeof entry['text'] === 'string' &&
+    typeof entry['ts'] === 'string'
+    ? entry['ts']
+    : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -679,14 +693,13 @@ export function genomeHubHealth(): GenomeHealth {
     const storePath = hubStorePath();
     if (fs.existsSync(storePath)) {
       sizeBytes = fs.statSync(storePath).size;
-      const raw = fs.readFileSync(storePath, 'utf8');
+      const raw = safeReadFile(storePath, HUB_HEALTH_MAX_BYTES) ?? '';
       for (const line of raw.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed) continue;
         const parsed = safeParseJson(trimmed);
-        if (typeof parsed !== 'object' || parsed === null) continue;
-        const ts = (parsed as Record<string, unknown>)['ts'];
-        if (typeof ts !== 'string') continue;
+        const ts = recallableHubEntryTimestamp(parsed);
+        if (!ts) continue;
         hubEntries++;
         if (!lastLearnedAt || ts > lastLearnedAt) lastLearnedAt = ts;
       }
@@ -727,14 +740,13 @@ export function genomeHealth(cfg: AshlrConfig): GenomeHealth {
     if (fs.existsSync(storePath)) {
       sizeBytes = fs.statSync(storePath).size;
 
-      const raw = fs.readFileSync(storePath, 'utf8');
+      const raw = safeReadFile(storePath, HUB_HEALTH_MAX_BYTES) ?? '';
       for (const line of raw.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed) continue;
         const parsed = safeParseJson(trimmed);
-        if (typeof parsed !== 'object' || parsed === null) continue;
-        const ts = (parsed as Record<string, unknown>)['ts'];
-        if (typeof ts !== 'string') continue;
+        const ts = recallableHubEntryTimestamp(parsed);
+        if (!ts) continue;
         hubEntries++;
         if (!lastLearnedAt || ts > lastLearnedAt) {
           lastLearnedAt = ts;

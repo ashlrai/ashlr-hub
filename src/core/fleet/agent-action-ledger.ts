@@ -203,6 +203,9 @@ export interface AgentWorkspaceStatus {
   spendUsd: number;
   proposalEvents: number;
   noProposalEvents: number;
+  repoEventCount: number;
+  repoDistinctCount: number;
+  topRepoCount: number;
   attention: AgentWorkspaceAttention[];
   byAction: AgentActionCount[];
   byOutcome: AgentActionCount[];
@@ -528,6 +531,8 @@ export function summarizeAgentWorkspace(
   const repoRows = topCounts(byRepo, limit);
   const backendRows = topCounts(byBackend, limit);
   const sourceRows = topCounts(bySource, limit);
+  const repoEventCount = [...byRepo.values()].reduce((sum, count) => sum + count, 0);
+  const topRepoCount = [...byRepo.values()].reduce((max, count) => Math.max(max, count), 0);
 
   const attention = [
     ...attentionFromCounts('repo', repoRows, 'repo events', 3),
@@ -545,6 +550,9 @@ export function summarizeAgentWorkspace(
     spendUsd,
     proposalEvents,
     noProposalEvents,
+    repoEventCount,
+    repoDistinctCount: byRepo.size,
+    topRepoCount,
     attention,
     byAction: actionRows,
     byOutcome: outcomeRows,
