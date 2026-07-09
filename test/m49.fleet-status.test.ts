@@ -594,6 +594,17 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatFleetStatus(s)).toContain(
       'lane locks:    2 active, 1 stale, 1 handoff, 1 unverified, 2 visible locked',
     );
+    const action = s.nextActions?.find((candidate) => candidate.id === 'recover-stale-goal-lanes');
+    expect(action).toMatchObject({
+      priority: 'high',
+      label: 'Recover stale goal lanes',
+      target: repo,
+    });
+    expect(action?.commands?.map((command) => command.argv)).toEqual([
+      ['ashlr', 'goals', 'show', 'goal-lane-a', '--json'],
+      ['ashlr', 'goals', 'pause', 'goal-lane-a', 'goal-lane-a-m0'],
+      ['ashlr', 'goals', 'resume', 'goal-lane-a', 'goal-lane-a-m0'],
+    ]);
   });
 
   it('surfaces missing verify repo names, project kinds, and reasons', async () => {

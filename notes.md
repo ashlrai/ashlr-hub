@@ -1,5 +1,11 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Current Stale Goal Lane Recovery Action
+- Start state: clean pushed `master` at `0b22b7b`; live lane-lock smoke showed daemon running, guard clear, goal-focus `12/4`, lane locks `12 active / 1 stale / 0 handoff / 0 unverified`, and 13 backlog items / 11 eligible.
+- Implementation: `buildNextActions()` now adds `recover-stale-goal-lanes` when `FleetStatus.laneLocks.staleInProgress > 0`. The action stays control-plane/advisory: first inspect the goal, then optionally pause and resume the stale milestone to reset it to pending.
+- Safety decision: do not silently change `resumeMilestone()` semantics for in-progress milestones and do not auto-reset stale work in daemon selection. The action exposes existing `ashlr goals show`, `ashlr goals pause`, and `ashlr goals resume` commands so an operator or supervising agent can recover explicitly.
+- Verification passed: `npm run test:ci -- test/m49.fleet-status.test.ts` (45 tests), `npm run typecheck -- --pretty false`, `npm run lint` (existing 115-warning baseline, 0 errors), `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check`.
+
 ## Current Read-Only Lane Locks
 - Start state: clean pushed `master` at `f5e487b`; Entire remains not set up; daemon/fleet smoke before edits showed daemon running, guard clear, goal-focus active, 13 backlog items, 11 eligible, and `autonomyDirection.mode:"backlog-build"`.
 - Agent audits recommended a derived status-only lane-lock signal first, not a persisted lockfile, to avoid creating another stale-lock repair surface.

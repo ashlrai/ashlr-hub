@@ -244,6 +244,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused status, pure-helper, and formatter regression coverage.
 - [x] Run verification, commit, push, restart/resume daemon, and smoke live lane-lock status.
 
+## Current Continuation - Stale Goal Lane Recovery Action
+- [x] Rechecked clean state and live lane-lock signal after rollout.
+- [x] Mapped existing `nextActions` builder and `ashlr goals` recovery commands.
+- [x] Added a high-priority read-only/control-plane next action for stale in-progress goal lanes.
+- [x] Added focused `m49` coverage for inspect, pause, and resume command suggestions.
+- [ ] Run verification, commit, push, restart/resume daemon, and smoke live next action.
+
 ## Current Continuation - Remote Handoff Reconciliation
 - [x] Rechecked git status, recent commits, Entire state, task plan, and notes after the previous push.
 - [x] Deployed parallel agents for remote PR reconciliation, proposal unblockers, service progress health, active kill cancellation, repo contracts, and shared cooldown parity.

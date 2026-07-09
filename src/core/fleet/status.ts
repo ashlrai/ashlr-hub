@@ -2010,6 +2010,42 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   }
 
   const goalFocus = status.goalFocus;
+  const staleLane = status.laneLocks?.samples.find(
+    (sample) => sample.reason === 'stale-in-progress' && sample.goalId && sample.milestoneId,
+  );
+  if (status.laneLocks && status.laneLocks.staleInProgress > 0) {
+    const staleCount = status.laneLocks.staleInProgress;
+    add({
+      id: 'recover-stale-goal-lanes',
+      priority: 'high',
+      label: 'Recover stale goal lanes',
+      detail:
+        `${staleCount} in-progress goal milestone(s) are stale.` +
+        `${staleLane?.title ? ` First: ${staleLane.title}.` : ''}`,
+      ...(staleLane?.repo ? { target: staleLane.repo } : {}),
+      commands: [
+        ...(staleLane?.goalId
+          ? [nextActionCommand('Inspect goal', ['ashlr', 'goals', 'show', staleLane.goalId, '--json'], 'read-only')]
+          : [nextActionCommand('List goals', ['ashlr', 'goals', 'list', '--json'], 'read-only')]),
+        ...(staleLane?.goalId && staleLane.milestoneId
+          ? [
+              nextActionCommand(
+                'Pause stale milestone',
+                ['ashlr', 'goals', 'pause', staleLane.goalId, staleLane.milestoneId],
+                'control-plane',
+                { note: 'Goal-store only; use before resume to reset a stale in-progress milestone.' },
+              ),
+              nextActionCommand(
+                'Resume milestone',
+                ['ashlr', 'goals', 'resume', staleLane.goalId, staleLane.milestoneId],
+                'control-plane',
+                { note: 'Resets a paused milestone back to pending so it can be advanced again.' },
+              ),
+            ]
+          : []),
+      ],
+    });
+  }
   if (goalFocus?.deferredNewGoalWork) {
     add({
       id: 'close-active-goals',
