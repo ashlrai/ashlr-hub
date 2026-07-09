@@ -872,3 +872,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Run focused, broad, and invariant verification.
 - [x] Finish full CI.
 - [x] Commit `8c01966`, push, reload daemon, and smoke status.
+
+## Current Continuation - Production Velocity Stale Pending Unblock
+- [x] Rechecked clean pushed state after TITRR terminal-capture rollout.
+- [x] Deployed sidecar scouts for stale-pending mechanics, proposal-yield promotion, and explicit merge-contract rollout.
+- [x] Centralize production-velocity stale pending filtering for backlog coverage only.
+- [x] Keep proposal counts truthful while allowing TTL-stale pending proposals to stop suppressing matching queue work.
+- [x] Wire the shared filter through backlog dedup, FleetStatus eligibility, and daemon selection.
+- [x] Add focused regression coverage for helper, backlog, status, daemon selection, resource-strategy, and queue-drain behavior.
+- [x] Run focused, broad, and invariant verification.
+- [x] Finish full CI.
+- [ ] Commit, push, reload daemon, and smoke status.

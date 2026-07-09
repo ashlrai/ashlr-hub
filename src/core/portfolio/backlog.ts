@@ -18,7 +18,11 @@ import { audit } from '../sandbox/audit.js';
 import { isTrivialItem } from './value-filter.js';
 import { computeOutcomePriors, scoreAdjustment } from '../fleet/feedback.js';
 import { strategicRepoMultiplier } from '../ecosystem/focus.js';
-import { pendingProposalItemKeysForBacklog, workItemCoverageKey } from '../fleet/proposal-matching.js';
+import {
+  blockingPendingProposalsForBacklog,
+  pendingProposalItemKeysForBacklog,
+  workItemCoverageKey,
+} from '../fleet/proposal-matching.js';
 
 // ---------------------------------------------------------------------------
 // M133: normalized title for dedup matching
@@ -385,11 +389,12 @@ export async function buildBacklog(opts?: {
           }
         })();
 
-    if (pendingProposals.length > 0) {
-      const pendingItemKeys = pendingProposalItemKeysForBacklog(passed, pendingProposals);
+    const blockingPendingProposals = blockingPendingProposalsForBacklog(pendingProposals, cfg);
+    if (blockingPendingProposals.length > 0) {
+      const pendingItemKeys = pendingProposalItemKeysForBacklog(passed, blockingPendingProposals);
       const pendingGlobalNormTitles = new Set<string>();
       const pendingRepoNormTitles = new Set<string>();
-      for (const p of pendingProposals) {
+      for (const p of blockingPendingProposals) {
         const workItemId = typeof p.workItemId === 'string' ? p.workItemId.trim() : '';
         if (workItemId) continue;
         const normTitle = normalizeTitle(p.title);

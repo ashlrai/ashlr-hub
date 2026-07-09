@@ -119,7 +119,11 @@ import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
 // M220: verdict-feedback sweep — feed judge rejections back to the ledger so
 // re-clogging items (e.g. "CI is failing") are suppressed for the cooldown window.
 import { sweepJudgedProposals } from '../fleet/worked-ledger.js';
-import { pendingProposalItemKeysForBacklog, workItemCoverageKey } from '../fleet/proposal-matching.js';
+import {
+  blockingPendingProposalsForBacklog,
+  pendingProposalItemKeysForBacklog,
+  workItemCoverageKey,
+} from '../fleet/proposal-matching.js';
 import { loadConfig } from '../config.js';
 import { hostname as osHostname } from 'node:os';
 import {
@@ -1643,7 +1647,11 @@ export async function tick(
   // matching. Never throws.
   let pendingItemKeys = new Set<string>();
   try {
-    pendingItemKeys = pendingProposalItemKeysForBacklog(backlogItems, listProposals({ status: 'pending' }));
+    const blockingPendingProposals = blockingPendingProposalsForBacklog(
+      listProposals({ status: 'pending' }),
+      routingCfg,
+    );
+    pendingItemKeys = pendingProposalItemKeysForBacklog(backlogItems, blockingPendingProposals);
   } catch (err) {
     // Best-effort — never block selection on inbox read failure.
     console.warn('[ashlr] daemon:tick inbox pendingItemIds read failed:', (err as Error)?.message ?? err);

@@ -1809,6 +1809,49 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(dispatchedItemIds).toContain(items[2]!.id);
   });
 
+  it('A7c: stale pending proposals do not skip matching items under production velocity', async () => {
+    const { repo, items } = enrollWithItems(2);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-07-01T00:00:00.000Z'));
+      createProposal({
+        repo: repo.dir,
+        origin: 'swarm',
+        kind: 'patch',
+        title: `old pending for ${items[0]!.id}`,
+        summary: `covers ${items[0]!.id}`,
+        diff: 'diff --git a/x.ts b/x.ts\n',
+        workItemId: items[0]!.id,
+      });
+      vi.setSystemTime(new Date('2026-07-03T00:00:00.000Z'));
+
+      const dispatchedItemIds: string[] = [];
+      mockRunSwarm.mockImplementation(async (_goal: unknown, _cfg: unknown, opts: unknown) => {
+        const workItemId = (opts as Record<string, unknown>)?.workItemId as string | undefined;
+        if (workItemId) dispatchedItemIds.push(workItemId);
+        return { id: 'mock', status: 'done', goal: '', result: '', usage: { totalTokens: 10, estCostUsd: 0.001, steps: 1 } };
+      });
+
+      const result = await tick(
+        {
+          ...cfgBuiltin({ perTickItems: 2, parallel: 2 }),
+          foundry: {
+            autonomyControlLoop: false,
+            productionVelocity: { enabled: true, profile: 'resource-control', stalePendingTtlHours: 24 },
+          },
+        } as AshlrConfig,
+        { dryRun: false },
+      );
+
+      expect(result.reason).toBe('ok');
+      expect(mockRunSwarm).toHaveBeenCalledTimes(2);
+      expect(dispatchedItemIds).toContain(items[0]!.id);
+      expect(dispatchedItemIds).toContain(items[1]!.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('A7b: legacy pending proposals without workItemId still skip exact item-id matches', async () => {
     const { repo, items } = enrollWithItems(3);
     createProposal({

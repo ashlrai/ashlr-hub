@@ -9,7 +9,7 @@
  *   2. formatFleetStatus (src/cli/fleet.ts) — the pure no-color formatter.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -68,6 +68,16 @@ async function withTemporaryEnv<T>(entries: Record<string, string>, fn: () => Pr
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+  }
+}
+
+async function withFakeNow<T>(now: Date, fn: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers();
+  vi.setSystemTime(now);
+  try {
+    return await fn();
+  } finally {
+    vi.useRealTimers();
   }
 }
 
@@ -834,6 +844,44 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.nextActions).toContainEqual(expect.objectContaining({
       id: 'wait-for-backlog-eligibility',
       detail: expect.stringContaining('0 cooling, 1 pending'),
+    }));
+  });
+
+  it('keeps backlog eligible when matching pending proposals are stale under production velocity', async () => {
+    const repo = join(tmpHome, 'repo');
+    const item = makeBacklogItem(repo, 'repo:goal:stale-pending', 'Stale pending proposal work', 7);
+    const cfg = withFoundry({
+      productionVelocity: { enabled: true, profile: 'resource-control', stalePendingTtlHours: 24 },
+    });
+    writeRunningDaemon(tmpHome);
+    writeBacklogSnapshot(tmpHome, repo, [item]);
+    await withFakeNow(new Date('2026-07-01T00:00:00.000Z'), async () => {
+      createProposal(
+        {
+          repo,
+          origin: 'agent',
+          kind: 'patch',
+          title: 'Old proposal for pending queue work',
+          summary: 'This stale pending proposal covers the queued item.',
+          diff: docsDiff('stale pending'),
+          workItemId: item.id,
+        },
+        cfg,
+      );
+    });
+
+    const s = await withFakeNow(new Date('2026-07-03T00:00:00.000Z'), () => buildFleetStatus(cfg));
+
+    expect(s.proposals.pending).toBe(1);
+    expect(s.queue.backlogItems).toBe(1);
+    expect(s.queue.eligibleBacklogItems).toBe(1);
+    expect(s.queue.cooldownItems).toBe(0);
+    expect(s.queue.pendingItems).toBe(0);
+    expect(s.queue.next?.[0]).toMatchObject({ id: item.id, repo });
+    expect(s.nextActions).toContainEqual(expect.objectContaining({
+      id: 'build-backlog',
+      detail: `Start with ${item.title}`,
+      target: repo,
     }));
   });
 

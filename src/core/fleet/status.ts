@@ -52,7 +52,11 @@ import {
 import { engineInstalled } from '../run/engines.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import { DEFAULT_COOLDOWN_MS, isSuppressibleWorkedOutcome, loadWorkedLedger } from './worked-ledger.js';
-import { pendingProposalItemKeysForBacklog, workItemCoverageKey } from './proposal-matching.js';
+import {
+  blockingPendingProposalsForBacklog,
+  pendingProposalItemKeysForBacklog,
+  workItemCoverageKey,
+} from './proposal-matching.js';
 import {
   readDispatchProductionYield,
   type DispatchProductionYieldBucket,
@@ -629,7 +633,8 @@ function buildQueueEligibility(
     }
   }
 
-  const pendingItemKeys = pendingProposalItemKeysForBacklog(items, pendingProposals);
+  const blockingPendingProposals = blockingPendingProposalsForBacklog(pendingProposals, cfg);
+  const pendingItemKeys = pendingProposalItemKeysForBacklog(items, blockingPendingProposals);
   const eligibleItems: WorkItem[] = [];
   let cooldownItems = 0;
   let pendingItems = 0;

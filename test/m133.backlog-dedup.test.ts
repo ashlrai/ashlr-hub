@@ -123,6 +123,16 @@ function makeRgStub(rgOutput: string): ReturnType<typeof vi.fn> {
   });
 }
 
+async function withFakeNow<T>(now: Date, fn: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers();
+  vi.setSystemTime(now);
+  try {
+    return await fn();
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 /** Build a minimal tmp repo for buildBacklog integration tests. */
 function makeTmpRepo(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'm133-'));
@@ -138,6 +148,8 @@ function makePendingProposal(overrides: {
   summary?: string;
   repo?: string | null;
   workItemId?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }): Proposal {
   return {
     id: overrides.id ?? `prop-test-${Math.random().toString(36).slice(2)}`,
@@ -147,7 +159,8 @@ function makePendingProposal(overrides: {
     summary: overrides.summary ?? 'test proposal',
     status: 'pending',
     repo: overrides.repo ?? null,
-    createdAt: new Date().toISOString(),
+    createdAt: overrides.createdAt ?? new Date().toISOString(),
+    ...(overrides.updatedAt ? { updatedAt: overrides.updatedAt } : {}),
     ...(overrides.workItemId ? { workItemId: overrides.workItemId } : {}),
   } as Proposal;
 }
@@ -423,6 +436,39 @@ describe('M133 — buildBacklog: drops items with open pending proposals', () =>
     });
 
     expect(backlog.items.filter((i) => i.title.includes('src/auth.ts'))).toHaveLength(0);
+  });
+
+  it('keeps an item when its matching pending proposal is stale under production velocity', async () => {
+    const rgOutput = 'src/auth.ts:88:// TODO: implement refresh-token rotation with expiry check\n';
+    _execFileImpl = makeRgStub(rgOutput);
+
+    const [item] = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
+    expect(item).toBeDefined();
+
+    const pendingProposals = [
+      makePendingProposal({
+        title: 'Stale proposal for auth work',
+        repo: tmpDir,
+        workItemId: item!.id,
+        createdAt: '2026-07-01T00:00:00.000Z',
+      }),
+    ];
+
+    const backlog = await withFakeNow(new Date('2026-07-03T00:00:00.000Z'), () =>
+      buildBacklog({
+        repos: [tmpDir],
+        minItemValue: 2,
+        cfg: {
+          foundry: {
+            scanTodos: true,
+            productionVelocity: { enabled: true, profile: 'resource-control', stalePendingTtlHours: 24 },
+          },
+        },
+        listPendingProposals: () => pendingProposals,
+      }),
+    );
+
+    expect(backlog.items.filter((i) => i.title.includes('src/auth.ts'))).toHaveLength(1);
   });
 
   it('lets workItemId override stale proposal titles during pending dedup', async () => {

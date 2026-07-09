@@ -1,7 +1,15 @@
-import type { Proposal, WorkItem } from '../types.js';
+import type { AshlrConfig, Proposal, WorkItem } from '../types.js';
 import { resolve } from 'node:path';
+import { resolveProductionVelocityProfile } from '../fabric/production-velocity.js';
 
-type ProposalItemMatch = Pick<Proposal, 'id' | 'title' | 'summary' | 'workItemId' | 'repo'>;
+type ProposalItemMatch = Pick<Proposal, 'id' | 'title' | 'summary' | 'workItemId' | 'repo'> &
+  Partial<Pick<Proposal, 'createdAt' | 'status'>>;
+
+type PendingProposalConfig = Pick<AshlrConfig, 'foundry'> | undefined;
+
+export interface PendingProposalBlockingOptions {
+  now?: Date | number | string;
+}
 
 export function workItemCoverageKey(item: Pick<WorkItem, 'repo' | 'id'>): string {
   return `${resolve(item.repo)}\0${item.id}`;
@@ -14,6 +22,42 @@ function exactItemIdRegex(itemId: string): RegExp {
 
 function proposalRepoMatchesItem(proposal: Pick<Proposal, 'repo'>, item: Pick<WorkItem, 'repo'>): boolean {
   return proposal.repo === null || resolve(proposal.repo) === resolve(item.repo);
+}
+
+function nowToMs(now: Date | number | string | undefined): number {
+  if (now instanceof Date) return now.getTime();
+  if (typeof now === 'number') return now;
+  if (typeof now === 'string') {
+    const parsed = Date.parse(now);
+    return Number.isFinite(parsed) ? parsed : Date.now();
+  }
+  return Date.now();
+}
+
+export function pendingProposalIsStaleForProductionVelocity(
+  proposal: ProposalItemMatch,
+  cfg: PendingProposalConfig,
+  opts?: PendingProposalBlockingOptions,
+): boolean {
+  if (proposal.status !== undefined && proposal.status !== 'pending') return false;
+  const profile = resolveProductionVelocityProfile({ foundry: cfg?.foundry } as AshlrConfig);
+  if (!profile.enabled || !Number.isFinite(profile.stalePendingTtlHours)) return false;
+  const activityAt = proposal.createdAt;
+  if (!activityAt) return false;
+  const activityMs = Date.parse(activityAt);
+  if (!Number.isFinite(activityMs)) return false;
+  const ageMs = Math.max(0, nowToMs(opts?.now) - activityMs);
+  return ageMs >= profile.stalePendingTtlHours * 60 * 60 * 1000;
+}
+
+export function blockingPendingProposalsForBacklog<T extends ProposalItemMatch>(
+  pendingProposals: ReadonlyArray<T>,
+  cfg: PendingProposalConfig,
+  opts?: PendingProposalBlockingOptions,
+): T[] {
+  return pendingProposals.filter((proposal) =>
+    !pendingProposalIsStaleForProductionVelocity(proposal, cfg, opts),
+  );
 }
 
 export function proposalTextMentionsItemId(proposal: Pick<Proposal, 'id' | 'title' | 'summary'>, itemId: string): boolean {

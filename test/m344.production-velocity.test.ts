@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { AshlrConfig, EngineId } from '../src/core/types.js';
+import type { AshlrConfig, EngineId, Proposal } from '../src/core/types.js';
 import type { BackendAvailability, BackendResourceState, ResourceSnapshot } from '../src/core/fabric/resource-monitor.js';
 import {
   applyProductionVelocityProfile,
@@ -15,6 +15,7 @@ import {
   resolveProductionVelocityProfile,
 } from '../src/core/fabric/production-velocity.js';
 import { getBackendResourceState } from '../src/core/fabric/resource-monitor.js';
+import { blockingPendingProposalsForBacklog } from '../src/core/fleet/proposal-matching.js';
 
 function cfg(overrides: Partial<AshlrConfig> = {}): AshlrConfig {
   return {
@@ -56,6 +57,20 @@ function snapshot(backends: Array<{
       backoffUntilMs: null,
     })),
   };
+}
+
+function proposal(overrides: Partial<Proposal> = {}): Proposal {
+  return {
+    id: 'prop-test',
+    origin: 'agent',
+    kind: 'patch',
+    title: 'Pending proposal',
+    summary: 'metadata only',
+    status: 'pending',
+    repo: '/tmp/repo',
+    createdAt: '2026-07-01T00:00:00.000Z',
+    ...overrides,
+  } as Proposal;
 }
 
 describe('production velocity profile', () => {
@@ -173,5 +188,27 @@ describe('production velocity profile', () => {
       cap: 3,
       capUnit: 'concurrent',
     });
+  });
+
+  it('lets stale pending proposals stop blocking backlog only when production velocity is enabled', () => {
+    const stale = proposal({
+      id: 'prop-stale',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    const fresh = proposal({
+      id: 'prop-fresh',
+      createdAt: '2026-07-02T11:30:00.000Z',
+    });
+    const now = new Date('2026-07-02T12:00:00.000Z');
+    const enabled = cfg({
+      foundry: {
+        productionVelocity: { enabled: true, profile: 'resource-control', stalePendingTtlHours: 24 },
+      },
+    });
+
+    expect(blockingPendingProposalsForBacklog([stale, fresh], enabled, { now }).map((p) => p.id))
+      .toEqual(['prop-fresh']);
+    expect(blockingPendingProposalsForBacklog([stale], cfg(), { now }).map((p) => p.id))
+      .toEqual(['prop-stale']);
   });
 });
