@@ -2728,6 +2728,12 @@ function renderMissionBriefCard(brief, cls = 'ctrl-card card') {
   if (brief.whyNow) {
     body.appendChild(el('p', { cls: 'hint' }, compactFleetReason(brief.whyNow)));
   }
+  const actionDetail = action?.detail ? String(action.detail).trim() : '';
+  const whyNow = brief.whyNow ? String(brief.whyNow).trim() : '';
+  if (actionDetail && actionDetail !== whyNow) {
+    const target = action?.target ? ` (${basenameFromPath(action.target)})` : '';
+    body.appendChild(el('p', { cls: 'hint' }, `Next: ${compactFleetReason(actionDetail)}${target}`));
+  }
   card.appendChild(body);
   return card;
 }
@@ -4232,7 +4238,8 @@ function fdRenderReadinessRail(snap) {
   const directive = missionBrief?.directive ?? null;
   const actionLabel = primaryAction?.label ?? primaryAction?.id ?? 'none';
   const briefLabel = directive ?? actionLabel;
-  const actionDetail = missionBrief?.whyNow ?? primaryAction?.detail ?? actionLabel;
+  const briefDetail = missionBrief?.whyNow ?? primaryAction?.detail ?? actionLabel;
+  const actionDetail = primaryAction?.detail ?? briefDetail;
   const blockerLabel = topBlocker?.label ?? topBlocker?.id ?? 'none';
   const blockerDetail = topBlocker?.detail ?? blockerLabel;
   const queueMetric = queueEligibilityMetric(queue) ?? `${queue.backlogItems ?? 0} backlog`;
@@ -4250,7 +4257,7 @@ function fdRenderReadinessRail(snap) {
     el('span', { cls: 'fd-readiness-rail__loop' }, `Loop: ${loop}`)
   ));
   rail.appendChild(el('div', { cls: 'fd-readiness-strip' },
-    fdMetricPill('Brief', compactFleetReason(briefLabel, 54), actionDetail),
+    fdMetricPill('Brief', compactFleetReason(briefLabel, 54), briefDetail),
     fdMetricPill('Confidence', missionBrief?.confidence ?? readiness.confidence ?? 'unknown'),
     fdMetricPill('Action', compactFleetReason(actionLabel, 54), actionDetail),
     fdMetricPill('Data', fdReadinessDataText(readiness)),

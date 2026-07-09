@@ -1435,9 +1435,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       proposalsCreated: 0,
       policyDisabled: 0,
       primaryCandidate: {
-        scope: 'backend-model',
+        scope: 'backend-source',
         backend: 'local-coder',
-        model: 'qwen',
+        source: 'goal',
         diagnosticAttempts: 3,
         proposalsCreated: 0,
         verdict: 'actionable',
@@ -1454,7 +1454,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
           id: 'inspect-dispatch-yield',
           priority: 'medium',
           label: 'Inspect dispatch yield',
-          detail: expect.stringContaining('local-coder proposal yield 0/3 (0%)'),
+          detail: expect.stringContaining('local-coder/goal proposal yield 0/3 (0%)'),
           target: 'local-coder',
         }),
       ]),
@@ -1468,8 +1468,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('[medium] Inspect dispatch yield [local-coder]');
-    expect(formatted).toContain('local-coder proposal yield 0/3 (0%)');
-    expect(formatted).toContain('diagnosis: actionable · local-coder:qwen 0/3 0% · same-tier reroute');
+    expect(formatted).toContain('local-coder/goal proposal yield 0/3 (0%)');
+    expect(formatted).toContain('diagnosis: actionable · local-coder/goal 0/3 0% · same-tier reroute');
     expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 0, policy-off 0');
   });
 
@@ -1536,7 +1536,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const action = s.nextActions?.find((candidate) => candidate.id === 'inspect-dispatch-yield');
     expect(action).toMatchObject({
       target: 'local-coder',
-      detail: expect.stringContaining('local-coder proposal yield 0/3 (0%)'),
+      detail: expect.stringContaining('local-coder/goal proposal yield 0/3 (0%)'),
     });
     expect(action?.detail).toContain('top reason: agent returned no diff');
     expect(action?.detail).toContain('shape: no-diff 3, gate/capture 0, repairs 0, policy-off 0');
@@ -1658,16 +1658,16 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       diagnosticAttempts: 2,
       proposalsCreated: 0,
       primaryCandidate: {
-        scope: 'backend-model',
+        scope: 'backend-source',
         backend: 'local-coder',
-        model: 'qwen',
+        source: 'goal',
         diagnosticAttempts: 2,
         verdict: 'insufficient-sample',
       },
     });
     expect(s.dispatchYieldDiagnostics?.recommendation).toContain('Collect 1 more diagnostic attempt');
     expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-yield');
-    expect(formatFleetStatus(s)).toContain('diagnosis: insufficient-sample · local-coder:qwen 0/2 0% · collect more samples');
+    expect(formatFleetStatus(s)).toContain('diagnosis: insufficient-sample · local-coder/goal 0/2 0% · collect more samples');
   });
 
   it('includes queued self-heal work when the persisted backlog snapshot is stale', async () => {
@@ -2366,6 +2366,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         bySource: [],
         byRepo: [],
         byBackendModel: [],
+        byBackendSource: [],
       },
       merges: { recent: 2 },
       nextActions: [

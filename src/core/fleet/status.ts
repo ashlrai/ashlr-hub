@@ -386,9 +386,10 @@ export type FleetDispatchYieldDiagnosticAction =
   | 'keep-routing';
 
 export interface FleetDispatchYieldDiagnosticCandidate {
-  scope: 'fleet' | 'backend' | 'backend-model';
+  scope: 'fleet' | 'backend' | 'backend-model' | 'backend-source';
   key: string;
   backend?: EngineId | null;
+  source?: WorkItem['source'];
   model?: string | null;
   diagnosticAttempts: number;
   proposalsCreated: number;
@@ -1462,6 +1463,7 @@ function dispatchYieldCandidate(
     scope,
     key: bucket.key,
     ...(bucket.backend !== undefined ? { backend: bucket.backend } : {}),
+    ...(bucket.source !== undefined ? { source: bucket.source } : {}),
     ...(bucket.model !== undefined ? { model: bucket.model } : {}),
     diagnosticAttempts,
     proposalsCreated,
@@ -1477,6 +1479,7 @@ function dispatchYieldCandidate(
 }
 
 function dispatchYieldSubject(candidate: FleetDispatchYieldDiagnosticCandidate): string {
+  if (candidate.backend && candidate.source) return `${candidate.backend}/${candidate.source}`;
   if (candidate.backend) return candidate.backend;
   return candidate.key === 'fleet' ? 'dispatches' : candidate.key;
 }
@@ -1511,9 +1514,12 @@ function buildDispatchYieldDiagnostics(
   const proposalRate = diagnosticAttempts > 0 ? proposalsCreated / diagnosticAttempts : 0;
   const policyDisabled = diagnosticPolicyDisabled(dispatchProduction);
   const overallVerdict = dispatchYieldVerdict(diagnosticAttempts, proposalRate, policyDisabled, lowYieldRate);
-  const bucketSource = dispatchProduction.byBackendModel.length > 0
-    ? dispatchProduction.byBackendModel.map((bucket) => dispatchYieldCandidate(bucket, 'backend-model', lowYieldRate))
-    : dispatchProduction.byBackend.map((bucket) => dispatchYieldCandidate(bucket, 'backend', lowYieldRate));
+  const byBackendSource = dispatchProduction.byBackendSource ?? [];
+  const bucketSource = byBackendSource.length > 0
+    ? byBackendSource.map((bucket) => dispatchYieldCandidate(bucket, 'backend-source', lowYieldRate))
+    : dispatchProduction.byBackendModel.length > 0
+      ? dispatchProduction.byBackendModel.map((bucket) => dispatchYieldCandidate(bucket, 'backend-model', lowYieldRate))
+      : dispatchProduction.byBackend.map((bucket) => dispatchYieldCandidate(bucket, 'backend', lowYieldRate));
   const candidates = sortDispatchYieldCandidates(bucketSource).slice(0, 5);
   const fleetTopReason =
     dispatchProduction.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;

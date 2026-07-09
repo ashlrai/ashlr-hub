@@ -409,6 +409,7 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('function renderProposalProductionCard');
     expect(src).toContain('function renderDispatchProductionCard');
     expect(src).toContain('function renderMissionBriefCard');
+    expect(src).toContain('Next: ${compactFleetReason(actionDetail)}');
     expect(src).toContain('function formatAttemptShape');
     expect(src).toContain('gate/capture');
     expect(src).toContain('Dispatch yield data unavailable.');
@@ -442,6 +443,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("'Queue'");
     expect(src).toContain("'Leases'");
     expect(src).toContain("'Yield'");
+    expect(src).toContain('const briefDetail = missionBrief?.whyNow ?? primaryAction?.detail ?? actionLabel');
+    expect(src).toContain('const actionDetail = primaryAction?.detail ?? briefDetail');
     expect(css).toContain('.fd-readiness-rail');
     expect(css).toContain('.fd-readiness-strip');
     expect(css).toContain('grid-template-columns: repeat(2, minmax(0, 1fr))');

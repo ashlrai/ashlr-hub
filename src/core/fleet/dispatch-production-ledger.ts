@@ -121,6 +121,7 @@ export interface DispatchProductionYieldSummary {
   bySource: DispatchProductionYieldBucket[];
   byRepo: DispatchProductionYieldBucket[];
   byBackendModel: DispatchProductionYieldBucket[];
+  byBackendSource: DispatchProductionYieldBucket[];
 }
 
 export function dispatchProductionDir(): string {
@@ -524,6 +525,7 @@ export function summarizeDispatchProductionYield(
   const bySource = new Map<string, MutableYieldBucket>();
   const byRepo = new Map<string, MutableYieldBucket>();
   const byBackendModel = new Map<string, MutableYieldBucket>();
+  const byBackendSource = new Map<string, MutableYieldBucket>();
   const topReasons = new Map<string, number>();
   const overall = emptyOutcomeCounts();
   const actionCounts: RunActionCounts = {};
@@ -555,6 +557,12 @@ export function summarizeDispatchProductionYield(
 
     const modelKey = `${event.backend ?? 'unknown'}:${event.model ?? 'default'}`;
     addToBucket(touchBucket(byBackendModel, modelKey, { backend: event.backend, model: event.model ?? null }), event);
+
+    const backendSourceKey = `${event.backend ?? 'unknown'}:${event.source}`;
+    addToBucket(
+      touchBucket(byBackendSource, backendSourceKey, { backend: event.backend, source: event.source }),
+      event,
+    );
   }
 
   const total = events.length;
@@ -574,6 +582,7 @@ export function summarizeDispatchProductionYield(
     bySource: sortedBuckets(bySource, limit),
     byRepo: sortedBuckets(byRepo, limit),
     byBackendModel: sortedBuckets(byBackendModel, limit),
+    byBackendSource: sortedBuckets(byBackendSource, limit),
   };
 }
 

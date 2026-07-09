@@ -696,4 +696,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add first-class autonomous ship readiness source-quality badges and summaries so stale/missing/degraded sources do not look like healthy zeros.
 - [x] Focused verification passed: typecheck, `node --check` for the dashboard bundle, and status/service/control/dashboard focused suites.
 - [x] Broad gates passed: lint, build, audit, invariants, diff check, and full `npm run test:ci` (438 files, 9,005 passed, 7 skipped).
-- [ ] Commit, push, reload daemon, smoke production state, and continue with the next lane.
+- [x] Commit and push `b88fbff`, clear stale dead-owner spend guard, reload launchd daemon, and smoke production state with PID `26160`.
+
+## Current Continuation - Backend/Source Yield Granularity
+- [x] Rechecked clean pushed state after service recovery deployment and production smoke.
+- [x] Deployed fresh scouts for backend/source telemetry parity, conservative routing consumption, stale `ashlrcode` self-heal work, and Fleet OS UI actionability.
+- [x] Add `dispatchProduction.byBackendSource` buckets so proposal-yield diagnostics can match learned-router backend+work-source granularity without changing routing behavior.
+- [x] Prefer backend/source buckets in `dispatchYieldDiagnostics` while preserving policy-disabled filtering, sample gates, and same-tier-only advisory language.
+- [x] Promote existing Mission Brief action detail into Mission Control and Fleet Dashboard rail so the first screen shows the concrete next move.
+- [x] Focused verification passed: typecheck, dashboard JS syntax check, diff check, and `m342/m49/m210/m213` CI (96 tests).
+- [x] Broad lightweight gates passed: lint, build, audit, invariants, and diff check.
+- [ ] Commit, push, smoke production status, and continue.

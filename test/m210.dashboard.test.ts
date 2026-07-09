@@ -217,6 +217,7 @@ const FIXTURE_FLEET_STATUS = {
     bySource: [],
     byRepo: [],
     byBackendModel: [],
+    byBackendSource: [],
   },
   merges: { recent: 0 },
   missionBrief: {

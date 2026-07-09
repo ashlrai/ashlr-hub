@@ -256,6 +256,27 @@ describe('M342 dispatch production ledger', () => {
       },
     });
     expect(summary?.bySource.some((bucket) => bucket.source === 'goal' && bucket.proposalsCreated === 1)).toBe(true);
+    expect(summary?.byBackendSource.some((bucket) =>
+      bucket.key === 'local-coder:todo' &&
+      bucket.backend === 'local-coder' &&
+      bucket.source === 'todo' &&
+      bucket.attempts === 2 &&
+      bucket.proposalRate === 0
+    )).toBe(true);
+    expect(summary?.byBackendSource.some((bucket) =>
+      bucket.key === 'codex:goal' &&
+      bucket.backend === 'codex' &&
+      bucket.source === 'goal' &&
+      bucket.attempts === 1 &&
+      bucket.proposalRate === 1
+    )).toBe(true);
+    expect(summary?.byBackendSource.some((bucket) =>
+      bucket.key === 'codex:todo' &&
+      bucket.backend === 'codex' &&
+      bucket.source === 'todo' &&
+      bucket.attempts === 1 &&
+      bucket.outcomes.proposalDisabled === 1
+    )).toBe(true);
     expect(summary?.byBackend.some((bucket) =>
       bucket.backend === 'codex' &&
       bucket.attempts === 2 &&

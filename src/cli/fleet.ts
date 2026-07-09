@@ -591,7 +591,7 @@ function formatDispatchYieldDiagnostics(
 ): string {
   const candidate = diagnostic.primaryCandidate;
   const subject = candidate?.backend
-    ? `${candidate.backend}${candidate.model && candidate.model !== 'default' ? `:${candidate.model}` : ''}`
+    ? `${candidate.backend}${candidate.source ? `/${candidate.source}` : ''}${candidate.model && candidate.model !== 'default' ? `:${candidate.model}` : ''}`
     : candidate?.key ?? 'fleet';
   const attempts = candidate?.diagnosticAttempts ?? diagnostic.diagnosticAttempts;
   const proposals = candidate?.proposalsCreated ?? diagnostic.proposalsCreated;
