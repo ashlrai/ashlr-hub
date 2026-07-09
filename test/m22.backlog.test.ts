@@ -103,6 +103,26 @@ function makeRoundRobinStub(responses: string[]): Mock {
   });
 }
 
+function writeValidMergeContract(repo: string): void {
+  fs.writeFileSync(
+    path.join(repo, 'ashlr.verify.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      mode: 'augment-detected',
+      commands: [
+        {
+          id: 'test',
+          kind: 'test',
+          cmd: ['npm', 'test'],
+          profiles: ['merge'],
+          required: true,
+        },
+      ],
+    }),
+    'utf8',
+  );
+}
+
 // ---------------------------------------------------------------------------
 // beforeEach / afterEach
 // ---------------------------------------------------------------------------
@@ -379,6 +399,23 @@ describe('M22 buildBacklog — over an enrolled tmp repo', () => {
     expect(Array.isArray(bl['items'])).toBe(true);
   });
 
+  it('includes and persists the merge-contract rollout item', async () => {
+    const built = await buildBacklog();
+    const item = built.items.find((candidate) =>
+      candidate.tags.includes('merge-contract') &&
+      candidate.tags.includes('ashlr.verify.json'));
+
+    expect(item).toBeDefined();
+    expect(item!.source).toBe('test');
+    expect(item!.value).toBe(4);
+    expect(item!.effort).toBe(2);
+    expect(item!.detail).toContain('Add root ashlr.verify.json');
+
+    const loaded = loadBacklog();
+    expect(loaded).not.toBeNull();
+    expect(loaded!.items.some((candidate) => candidate.id === item!.id)).toBe(true);
+  });
+
   it('loadBacklog() returns the persisted Backlog after buildBacklog', async () => {
     const built = await buildBacklog();
     const loaded = loadBacklog();
@@ -466,6 +503,7 @@ describe('M22 buildBacklog — over an enrolled tmp repo', () => {
   });
 
   it('score on each WorkItem equals scoreItem(value, effort)', async () => {
+    writeValidMergeContract(tmpRepo);
     _execFileImpl = vi.fn((...args: unknown[]) => {
       const cb = args[args.length - 1] as ((err: Error | null, stdout: string, stderr: string) => void) | undefined;
       if (typeof cb !== 'function') return;

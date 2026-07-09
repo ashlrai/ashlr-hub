@@ -142,6 +142,12 @@ export interface CaptureSandboxedProposalOptions {
   forceGateBlockReason?: string;
   /** Human-readable source label used in proposal summaries. */
   sourceLabel?: string;
+  /** Producer usage to preserve in causal metadata when capture is delegated. */
+  usage?: RunUsage;
+  /** Producer wall-clock duration to preserve in causal metadata. */
+  durationMs?: number;
+  /** Producer terminal status to preserve in causal metadata. */
+  producerStatus?: RunState['status'];
   /** Optional advisory delegation contract for context/result expectations. */
   delegationScope?: DelegationScope;
 }
@@ -642,6 +648,7 @@ export async function captureSandboxedProposal(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const sb = opts.existingWorktree;
   const now = new Date().toISOString();
+  const producerStatus = opts.producerStatus ?? 'done';
   const delegationScope = opts.delegationScope
     ? normalizeDelegationScope(opts.delegationScope, {
         origin: 'run',
@@ -676,10 +683,10 @@ export async function captureSandboxedProposal(
       maxSteps: opts.budget?.maxSteps ?? 0,
       allowCloud: opts.budget?.allowCloud ?? false,
     },
-    usage: newUsage(),
+    usage: opts.usage ?? newUsage(),
     tasks: [],
     steps: [],
-    status: 'done',
+    status: producerStatus,
     ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
     ...over,
   });
@@ -786,7 +793,9 @@ export async function captureSandboxedProposal(
         workItemId: opts.workItemId,
         workSource: opts.workSource,
         outcome: filedOutcomeForMetadata,
-        status: 'done',
+        usage: opts.usage,
+        durationMs: opts.durationMs,
+        status: producerStatus,
       }),
       ...(opts.isPartial ? { isPartial: true } : {}),
     });
@@ -811,16 +820,18 @@ export async function captureSandboxedProposal(
           workSource: opts.workSource,
           proposalId: proposal.id,
           outcome,
-          status: 'done',
+          usage: opts.usage,
+          durationMs: opts.durationMs,
+          status: producerStatus,
         }),
         action: 'proposed',
         engine,
         model: engineModel,
-        costUsd: 0,
-        tokensIn: 0,
-        tokensOut: 0,
-        durationMs: 0,
-        cacheHit: true,
+        costUsd: opts.usage?.estCostUsd ?? 0,
+        tokensIn: opts.usage?.tokensIn ?? 0,
+        tokensOut: opts.usage?.tokensOut ?? 0,
+        durationMs: opts.durationMs ?? 0,
+        cacheHit: opts.usage ? opts.usage.tokensIn === 0 && opts.usage.estCostUsd === 0 : true,
       });
     } catch {
       // telemetry is best-effort — never fails proposal capture
@@ -1141,147 +1152,23 @@ export async function runEngineSandboxed(
       // A truly-empty diff (agent made no edits) is not filed — no-op run stays blocked.
       if (opts.propose !== false) {
         try {
-          const diff = wt.sandboxDiff(sb);
-          if (diff.files > 0 && diff.patch.trim().length > 0) {
-            const trivialOutcome = trivialProposalOutcomeForDiff(diff);
-            if (trivialOutcome) {
-              proposalOutcomeResult = trivialOutcome;
-            } else {
-              const scrubbed = scrubSecrets(diff.patch);
-              const diffHash = hashDiff(scrubbed);
-              const provenanceSig = signProvenance(engineModel, tier, diffHash);
-              // M275: completeness gate — partial runs are always blocked by default.
-              // Flag-off (completenessGate === false) → skip gate, preserve pre-M275 behavior.
-              if (cfg.foundry?.completenessGate !== false) {
-                const _gateResult = await runCompletenessGate({
-                  worktreePath: sb.worktreePath,
-                  diff,
-                  goal,
-                  cfg,
-                  isPartial: true,
-                });
-                if (!_gateResult.pass) {
-                  console.log(`[M275] completeness gate blocked partial proposal: ${_gateResult.reason}`);
-                  const blockedOutcome = proposalOutcome(
-                    'partial-completeness-gate',
-                    `partial completeness gate blocked proposal: ${_gateResult.reason ?? 'blocked'}`,
-                    diff,
-                  );
-                  const partialOutcomeForMetadata = proposalOutcome('filed', 'partial proposal filed with failing verification', diff);
-                  const proposal = selectInboxStore(cfg).create({
-                    repo: sb.sourceRepo,
-                    origin: 'agent',
-                    kind: 'patch',
-                    title: `[partial] ${engine} run: ${goal.slice(0, 78)}`,
-                    summary:
-                      `Partial ${engineModel} run (timed-out / non-zero exit) produced ` +
-                      `${diff.files} file(s) (+${diff.insertions}/-${diff.deletions}). ` +
-                      `Engine error: ${res.error ?? 'unknown'}. Review before applying.`,
-                    diff: scrubbed,
-                    diffHash,
-                    provenanceSig,
-                    sandboxId: sb.id,
-                    workItemId: opts.workItemId,
-                    workSource: opts.workSource,
-                    runId: id,
-                    engineModel,
-                    engineTier: tier,
-                    verifyResult: captureGateVerifyResult(blockedOutcome.reason),
-                    ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
-                    ...sandboxedProducerCausalMetadata({
-                      engine,
-                      engineModel,
-                      tier,
-                      runId: id,
-                      workItemId: opts.workItemId,
-                      workSource: opts.workSource,
-                      outcome: partialOutcomeForMetadata,
-                      usage,
-                      durationMs: _spawnDurationMs,
-                      status: 'failed',
-                    }),
-                    isPartial: true,
-                  });
-                  proposalId = proposal.id;
-                  proposalOutcomeResult = proposalOutcome('filed', 'partial proposal filed with failing verification', diff, proposal.id);
-                } else {
-                  const partialOutcomeForMetadata = proposalOutcome('filed', 'partial proposal filed', diff);
-                  const proposal = selectInboxStore(cfg).create({
-                    repo: sb.sourceRepo,
-                    origin: 'agent',
-                    kind: 'patch',
-                    title: `[partial] ${engine} run: ${goal.slice(0, 78)}`,
-                    summary:
-                      `Partial ${engineModel} run (timed-out / non-zero exit) produced ` +
-                      `${diff.files} file(s) (+${diff.insertions}/-${diff.deletions}). ` +
-                      `Engine error: ${res.error ?? 'unknown'}. Review before applying.`,
-                    diff: scrubbed,
-                    diffHash,
-                    provenanceSig,
-                    sandboxId: sb.id,
-                    workItemId: opts.workItemId,
-                    workSource: opts.workSource,
-                    runId: id,
-                    engineModel,
-                    engineTier: tier,
-                    ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
-                    ...sandboxedProducerCausalMetadata({
-                      engine,
-                      engineModel,
-                      tier,
-                      runId: id,
-                      workItemId: opts.workItemId,
-                      workSource: opts.workSource,
-                      outcome: partialOutcomeForMetadata,
-                      usage,
-                      durationMs: _spawnDurationMs,
-                      status: 'failed',
-                    }),
-                    isPartial: true,
-                  });
-                  proposalId = proposal.id;
-                  proposalOutcomeResult = proposalOutcome('filed', 'partial proposal filed', diff, proposal.id);
-                }
-              } else {
-                const partialOutcomeForMetadata = proposalOutcome('filed', 'partial proposal filed', diff);
-                const proposal = selectInboxStore(cfg).create({
-                  repo: sb.sourceRepo,
-                  origin: 'agent',
-                  kind: 'patch',
-                  title: `[partial] ${engine} run: ${goal.slice(0, 78)}`,
-                  summary:
-                    `Partial ${engineModel} run (timed-out / non-zero exit) produced ` +
-                    `${diff.files} file(s) (+${diff.insertions}/-${diff.deletions}). ` +
-                    `Engine error: ${res.error ?? 'unknown'}. Review before applying.`,
-                  diff: scrubbed,
-                  diffHash,
-                  provenanceSig,
-                  sandboxId: sb.id,
-                  workItemId: opts.workItemId,
-                  workSource: opts.workSource,
-                  runId: id,
-                  engineModel,
-                  engineTier: tier,
-                  ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
-                  ...sandboxedProducerCausalMetadata({
-                    engine,
-                    engineModel,
-                    tier,
-                    runId: id,
-                    workItemId: opts.workItemId,
-                    workSource: opts.workSource,
-                    outcome: partialOutcomeForMetadata,
-                    usage,
-                    durationMs: _spawnDurationMs,
-                    status: 'failed',
-                  }),
-                  isPartial: true,
-                });
-                proposalId = proposal.id;
-                proposalOutcomeResult = proposalOutcome('filed', 'partial proposal filed', diff, proposal.id);
-              }
-            }
-          } else {
+          const captured = await captureSandboxedProposal(engine, goal, cfg, {
+            sourceRepo: opts.sourceRepo,
+            model,
+            budget: opts.budget,
+            runId: id,
+            existingWorktree: sb,
+            workItemId: opts.workItemId,
+            workSource: opts.workSource,
+            delegationScope,
+            isPartial: true,
+            usage,
+            durationMs: _spawnDurationMs,
+            producerStatus: 'failed',
+          });
+          proposalId = captured.proposalId;
+          proposalOutcomeResult = captured.proposalOutcome;
+          if (proposalOutcomeResult?.kind === 'empty-diff') {
             proposalOutcomeResult = proposalOutcome(
               'engine-failed-no-diff',
               `engine "${engine}" failed before producing a diff: ${res.error ?? terminationReason ?? 'unknown error'}`,
@@ -1817,113 +1704,23 @@ export async function runApiModelSandboxed(
     // Capture worktree diff and file as PENDING proposal.
     if (opts.propose !== false) {
       try {
-        const diff = wt.sandboxDiff(sb);
-        if (diff.files > 0 && diff.patch.trim().length > 0) {
-          const trivialOutcome = trivialProposalOutcomeForDiff(diff);
-          if (trivialOutcome) {
-            proposalOutcomeResult = trivialOutcome;
-          } else {
-          const scrubbed = scrubSecrets(diff.patch);
-          const diffHash = hashDiff(scrubbed);
-          const provenanceSig = signProvenance(engineModel, tier, diffHash);
-          let shouldFile = true;
-          let reviewOnlyVerifyResult: ProposalVerifyResult | undefined;
-          if (cfg.foundry?.completenessGate !== false) {
-            const gateResult = await runCompletenessGate({
-              worktreePath: sb.worktreePath,
-              diff,
-              goal,
-              cfg,
-              ...(isPartialResult ? { isPartial: true } : {}),
-            });
-            if (!gateResult.pass) {
-              console.log(`[M275] completeness gate blocked api-model proposal: ${gateResult.reason}`);
-              proposalOutcomeResult = proposalOutcome(
-                isPartialResult ? 'partial-completeness-gate' : 'completeness-gate',
-                `${isPartialResult ? 'partial ' : ''}completeness gate blocked api-model proposal: ${gateResult.reason ?? 'blocked'}`,
-                diff,
-              );
-              if (isPartialResult) {
-                reviewOnlyVerifyResult = captureGateVerifyResult(proposalOutcomeResult.reason);
-              } else {
-                shouldFile = false;
-              }
-            }
-          }
-          if (!shouldFile) {
-            return {
-              state: withProposalOutcome(
-                mk({ status: 'done', result: task.result ?? '', usage: finalUsage, tasks: [task], steps }),
-                proposalOutcomeResult,
-              ),
-              proposalOutcome: proposalOutcomeResult,
-            };
-          }
-          const filedOutcomeForMetadata = proposalOutcome('filed', 'proposal filed', diff);
-          const proposal = selectInboxStore(cfg).create({
-            repo: sb.sourceRepo,
-            origin: 'agent',
-            kind: 'patch',
-            title: `${isPartialResult ? '[partial] ' : ''}${engine} run: ${goal.slice(0, 80)}`,
-            summary:
-              `In-process ${engineModel} run produced ${diff.files} file(s) ` +
-              `(+${diff.insertions}/-${diff.deletions}). Review before applying.`,
-            diff: scrubbed,
-            diffHash,
-            provenanceSig,
-            sandboxId: sb.id,
-            workItemId: opts.workItemId,
-            workSource: opts.workSource,
-            runId: id,
-            engineModel,
-            engineTier: tier,
-            ...(reviewOnlyVerifyResult ? { verifyResult: reviewOnlyVerifyResult } : {}),
-            ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
-            ...sandboxedProducerCausalMetadata({
-              engine,
-              engineModel,
-              tier,
-              runId: id,
-              workItemId: opts.workItemId,
-              workSource: opts.workSource,
-              outcome: filedOutcomeForMetadata,
-              usage: finalUsage,
-              status: 'done',
-            }),
-            ...(isPartialResult ? { isPartial: true } : {}),
-          });
-          proposalId = proposal.id;
-          proposalOutcomeResult = proposalOutcome('filed', 'proposal filed', diff, proposal.id);
-          try {
-            const { recordDecision } = await import('../fleet/decisions-ledger.js');
-            recordDecision({
-              ts: new Date().toISOString(),
-              proposalId: proposal.id,
-              ...sandboxedProducerCausalMetadata({
-                engine,
-                engineModel,
-                tier,
-                runId: id,
-                workItemId: opts.workItemId,
-                workSource: opts.workSource,
-                proposalId: proposal.id,
-                outcome: proposalOutcomeResult,
-                usage: finalUsage,
-                status: 'done',
-              }),
-              action: 'proposed',
-              engine,
-              model: engineModel,
-              costUsd: finalUsage.estCostUsd,
-              tokensIn: finalUsage.tokensIn,
-              tokensOut: finalUsage.tokensOut,
-              cacheHit: finalUsage.tokensIn === 0 && finalUsage.estCostUsd === 0,
-            });
-          } catch {
-            // telemetry is best-effort — never fails the run
-          }
-          }
-        } else {
+        const captured = await captureSandboxedProposal(engine, goal, cfg, {
+          sourceRepo: opts.sourceRepo,
+          model,
+          budget: opts.budget,
+          runId: id,
+          existingWorktree: sb,
+          workItemId: opts.workItemId,
+          workSource: opts.workSource,
+          delegationScope,
+          isPartial: isPartialResult,
+          sourceLabel: 'api-model',
+          usage: finalUsage,
+          producerStatus: 'done',
+        });
+        proposalId = captured.proposalId;
+        proposalOutcomeResult = captured.proposalOutcome;
+        if (proposalOutcomeResult?.kind === 'empty-diff') {
           proposalOutcomeResult = proposalOutcome('empty-diff', `api-model engine "${engine}" completed without file changes`);
         }
       } catch (err) {

@@ -90,6 +90,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 import {
   scanTodos,
   scanTests,
+  scanExplicitMergeVerifyContracts,
   scanDeps,
   scanDocs,
   scanSecurity,
@@ -907,6 +908,80 @@ describe('M22 scanTests — CI state heuristic, NO test suite execution', () => 
     const before = snapshotDir(tmpRepo);
     await scanTests(tmpRepo);
     assertUnchanged(tmpRepo, before);
+  });
+});
+
+// ===========================================================================
+// scanExplicitMergeVerifyContracts
+// ===========================================================================
+
+describe('M22 scanExplicitMergeVerifyContracts — merge-grade contract rollout', () => {
+  it('emits one item for detected commands and no contract', async () => {
+    fs.writeFileSync(
+      path.join(tmpRepo, 'package.json'),
+      JSON.stringify({ name: 'pkg', scripts: { test: 'vitest run' } }),
+      'utf8',
+    );
+
+    const before = snapshotDir(tmpRepo);
+    const items = await scanExplicitMergeVerifyContracts(tmpRepo);
+    assertUnchanged(tmpRepo, before);
+
+    expect(items).toHaveLength(1);
+    const item = items[0]!;
+    expect(item.source).toBe('test');
+    expect(item.value).toBe(4);
+    expect(item.effort).toBe(2);
+    expect(item.tags).toEqual(expect.arrayContaining([
+      'test',
+      'verification',
+      'merge-contract',
+      'ashlr.verify.json',
+    ]));
+    expect(item.detail).toContain('Add root ashlr.verify.json');
+    expect(item.detail).toContain('Preserve existing detected verifier intent');
+    expect(item.detail).toContain('mark required merge profile commands');
+    expect(item.detail).toContain('keep cwd inside repo');
+    expect(item.detail).toContain('avoid changing package scripts, lockfiles, or CI');
+  });
+
+  it('emits nothing for a valid required profiles:["merge"] contract', async () => {
+    fs.writeFileSync(
+      path.join(tmpRepo, 'package.json'),
+      JSON.stringify({ name: 'pkg', scripts: { test: 'vitest run' } }),
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(tmpRepo, 'ashlr.verify.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        mode: 'augment-detected',
+        commands: [
+          {
+            id: 'test',
+            kind: 'test',
+            cmd: ['npm', 'test'],
+            profiles: ['merge'],
+            required: true,
+          },
+        ],
+      }),
+      'utf8',
+    );
+
+    const before = snapshotDir(tmpRepo);
+    const items = await scanExplicitMergeVerifyContracts(tmpRepo);
+    assertUnchanged(tmpRepo, before);
+
+    expect(items).toEqual([]);
+  });
+
+  it('skips repos with no detected verify commands', async () => {
+    const before = snapshotDir(tmpRepo);
+    const items = await scanExplicitMergeVerifyContracts(tmpRepo);
+    assertUnchanged(tmpRepo, before);
+
+    expect(items).toEqual([]);
   });
 });
 

@@ -611,4 +611,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Filter proposal-disabled dispatch-production samples out of weak-yield next-action diagnostics while preserving raw ledger and status counts.
 - [x] Verify dispatch-yield diagnostics with focused FleetStatus/dispatch-ledger/intel tests, typecheck, build, audit, and diff check.
 - [x] Run lint/invariants/full regression gates for the diagnostic patch.
-- [ ] Commit, push, restart/resume the live fleet, and smoke live fleet status.
+- [x] Commit and push `8b1d5ff`; smoke live FleetStatus showing raw `proposalDisabled` still visible while `inspect-dispatch-yield` targets actionable local-coder no-diff output.
+- [ ] Restart/resume the live daemon after the active spend guard clears.
+
+## Current Continuation - Proposal Capture Centralization
+- [x] Rechecked clean `master`, recent commits, plan state, and scout recommendations after the dispatch-yield diagnostic deployment.
+- [x] Migrate API-model success capture through the shared sandboxed proposal-capture helper without losing run usage/tasks/provenance.
+- [x] Migrate failed/partial sandbox capture through the shared helper while preserving current fail-closed partial proposal semantics.
+- [x] Add focused regression coverage for API-model success, partial failure capture, trivial/empty outcomes, and causal/provenance fields.
+- [x] Add default-on merge-contract backlog scanner work for repos with inferred verify commands but no explicit merge-grade `ashlr.verify.json`.
+- [x] Verify capture/scanner lanes with focused, adjacent, static, invariant, and full-CI gates.
+- [ ] Commit, push, and smoke the fleet again.

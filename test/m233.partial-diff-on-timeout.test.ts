@@ -147,6 +147,11 @@ describe('M233 partial-diff capture on timeout', () => {
         expect(proposal!.engineTier).toBeDefined();
         expect(proposal!.diffHash).toBeDefined();
         expect(proposal!.provenanceSig).toBeDefined();
+        expect(proposal!.runEventSummary).toMatchObject({
+          status: 'failed',
+          outcome: 'filed',
+          proposalCreated: true,
+        });
       } finally {
         if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
         else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;

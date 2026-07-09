@@ -277,6 +277,18 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     expect(proposal['engineTier']).toBe('mid');
     expect(typeof proposal['diff']).toBe('string');
     expect((proposal['diff'] as string).length).toBeGreaterThan(0);
+    expect(proposal['diffHash']).toBe('hash-abc');
+    expect(proposal['provenanceSig']).toBe('sig-abc');
+    expect(proposal['runEventSummary']).toMatchObject({
+      runId: result.state.id,
+      status: 'done',
+      outcome: 'filed',
+      proposalCreated: true,
+      diffFiles: 1,
+      diffLines: 2,
+      tokensIn: 11,
+      tokensOut: 7,
+    });
 
     // Result is 'done' with proposalId
     expect(result.state.status).toBe('done');

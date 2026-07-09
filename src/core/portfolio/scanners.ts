@@ -24,6 +24,7 @@ import { isTrivialItem, isNonCodePath } from './value-filter.js';
 import { listGoals } from '../goals/store.js';
 import { expandGoalToMilestones } from '../strategy/goal-planner.js';
 import { loadQueuedAutonomyItemsForRepo } from './queued-autonomy.js';
+import { detectRepoExecutionProfile } from '../run/repo-profile.js';
 import {
   riskAtOrAbove,
   scanDependencyBump,
@@ -616,6 +617,35 @@ export async function scanTests(repo: string): Promise<WorkItem[]> {
     // item — it's transient status noise, not a problem to act on.
 
     return items;
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// scanExplicitMergeVerifyContracts — rollout lane for merge-grade verify policy
+// ---------------------------------------------------------------------------
+
+export async function scanExplicitMergeVerifyContracts(repo: string): Promise<WorkItem[]> {
+  try {
+    const profile = detectRepoExecutionProfile(repo);
+    if (profile.verifyContract?.mergeGradeExplicit === true) return [];
+    if (profile.detectedVerifyCommandCount === 0) return [];
+
+    return [
+      makeItem(
+        repo,
+        'test',
+        'test:merge-contract:ashlr.verify.json',
+        'Add explicit merge-grade ashlr.verify.json verification contract',
+        'Add root ashlr.verify.json. Preserve existing detected verifier intent; ' +
+          'mark required merge profile commands; keep cwd inside repo; avoid changing ' +
+          'package scripts, lockfiles, or CI.',
+        4,
+        2,
+        ['test', 'verification', 'merge-contract', 'ashlr.verify.json'],
+      ),
+    ];
   } catch {
     return [];
   }
@@ -1613,6 +1643,7 @@ export const SCANNERS: ReadonlyArray<(repo: string, cfg?: Pick<AshlrConfig, 'fou
   scanQueuedAutonomyWork, // self-heal/invent work persisted by prior autonomy cycles
   scanIssues,      // real GitHub issues — user-requested work
   scanSecurity,    // binshield findings — actionable security fixes
+  scanExplicitMergeVerifyContracts, // rollout explicit merge-grade verify contracts
   scanTests,       // failing CI / missing test script
   scanSelfImprove, // M54: the fleet's own backlog (self-gated to @ashlr/hub)
   scanGoals,       // M160: active goal next-step items (user-declared priorities)
