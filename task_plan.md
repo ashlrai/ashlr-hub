@@ -1108,3 +1108,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused local-context and api-model dispatch regression coverage.
 - [x] Re-run focused local-context/api-model, learning graph, attention, agent-loop, typecheck, and diff checks.
 - [x] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Native Grep Regex Reliability
+- [x] Inspect daemon stderr and identify repeated `parentheses not balanced` failures from agent grep patterns such as `it\\.skip\\(`.
+- [x] Reproduce default `git grep` basic-regex failure and confirm `git grep -E` accepts the JS-style escaped paren pattern.
+- [x] Switch the native engineer grep tool to extended regex mode for git-backed searches.
+- [x] Add regression coverage for `it\\.skip\\(` in the git-backed grep path.
+- [x] Run focused native engineer/cwd tests, typecheck, and diff checks.
+- [ ] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.

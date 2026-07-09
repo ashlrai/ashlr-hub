@@ -286,6 +286,21 @@ describe('glob + grep', () => {
     const g = await callEngineerTool('grep', { pattern: 'NEEDLE' }, fullCtx());
     expect(g).toContain('NEEDLE');
   });
+
+  it('grep accepts JS-style escaped parens in git-backed regex searches', async () => {
+    await callEngineerTool(
+      'write_file',
+      { path: 'test/skip.test.ts', content: 'it.skip(() => { expect(1).toBe(1); });\n' },
+      fullCtx(),
+    );
+
+    const g = await callEngineerTool('grep', { pattern: 'it\\.skip\\(', path: 'test' }, fullCtx());
+
+    expect(g).toContain('"engine": "git-grep"');
+    expect(g).toContain('skip.test.ts:1:');
+    expect(g).toContain('it.skip');
+    expect(g).not.toContain('parentheses not balanced');
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -667,7 +667,7 @@ async function handleGrep(
     try {
       const gitArgs = [
         '-C', base,
-        'grep', '-n', '-I',
+        'grep', '-n', '-I', '-E',
         '--no-color',
         '--untracked', // also search new files not yet committed (still skips .gitignored)
         '-e', pattern,
