@@ -589,4 +589,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] Later lane: evaluate the untracked triviality classifier as observe-only fleet telemetry after moving/hardening it.
 - [x] Add Fleet Dashboard first-panel readiness strip using existing autonomous ship readiness data.
 - [x] Verify dashboard readiness strip with JS syntax, dashboard/SSE/control/status suites, typecheck, build, lint, audit, and diff checks.
-- [ ] Next lane: normalize run-ledger causal metadata without ingesting raw run/proposal text.
+- [x] Normalize run-ledger causal metadata without ingesting raw run/proposal text.
+- [x] Verify run-ledger causal metadata with focused/adjacent/typecheck/build/lint/audit/invariant/full-CI gates.
+- [ ] Next lane: strengthen automerge test-weakening detection for equal-count assertion rewrites, skipped tests, and weakened verification scripts.
+- [ ] Next lane: add a values-free Phantom agent report rollup once the Phantom command surface is stable enough to feature-detect safely.

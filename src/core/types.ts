@@ -1638,6 +1638,8 @@ export interface RunState {
   routeSnapshot?: RouteSnapshot;
   /** Metadata-only run summary; never includes prompts, diffs, stdout, or stderr. */
   runEventSummary?: RunEventSummary;
+  /** Metadata-only autonomy evidence outcome associated with this run, when one exists. */
+  evidenceOutcome?: EvidenceOutcomeSummary;
   /** Bounded delegation constraints/expectations; never includes raw prompt/output text. */
   delegationScope?: DelegationScopeSummary;
   learningSource?: LearningSource;

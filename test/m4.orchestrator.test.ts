@@ -178,6 +178,52 @@ describe('saveRun / loadRun / listRuns — persistence round-trip', () => {
     expect(loaded!.usage.tokensIn).toBe(100);
   });
 
+  it('saveRun fills metadata-only causal learning fields without copying raw run text into summaries', () => {
+    const state = makeState('causal-fields', 'RAW_GOAL_SENTINEL prompt should stay out of summaries');
+    state.status = 'done';
+    state.result = 'RAW_RESULT_SENTINEL stdout diff --git a/raw b/raw should stay operational only';
+    state.usage = { tokensIn: 100, tokensOut: 50, steps: 3, estCostUsd: 0.0123 };
+    state.proposalOutcome = {
+      kind: 'filed',
+      reason: 'RAW_STDOUT_SENTINEL proposal filed',
+      proposalId: 'prop-run-causal',
+      files: 2,
+      insertions: 3,
+      deletions: 1,
+    };
+
+    saveRun(state);
+    const loaded = loadRun(state.id);
+    expect(loaded).toMatchObject({
+      trajectoryId: `run:${state.id}`,
+      learningSource: 'run-ledger',
+      labelBasis: 'dispatch-outcome',
+      routerPolicyVersion: 'fleet-router-v1',
+      runEventSummary: {
+        runId: state.id,
+        status: 'done',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+        proposalId: 'prop-run-causal',
+        diffFiles: 2,
+        diffLines: 4,
+        tokensIn: 100,
+        tokensOut: 50,
+        costUsd: 0.0123,
+      },
+    });
+    expect(loaded?.learningEpoch).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(loaded?.routeSnapshot).toMatchObject({
+      backend: 'builtin',
+      assignedBy: 'run-orchestrator',
+    });
+    const summary = JSON.stringify(loaded?.runEventSummary);
+    expect(summary).not.toContain('RAW_GOAL_SENTINEL');
+    expect(summary).not.toContain('RAW_RESULT_SENTINEL');
+    expect(summary).not.toContain('RAW_STDOUT_SENTINEL');
+    expect(summary).not.toContain('diff --git');
+  });
+
   it('listRuns includes saved runs (by unique id)', () => {
     const a = makeState('list-a');
     const b = makeState('list-b');
@@ -434,6 +480,16 @@ describe('runGoal — execution and dependency ordering', () => {
     const runsDir = path.join(os.homedir(), '.ashlr', 'runs');
     const expectedFile = path.join(runsDir, `${state.id}.json`);
     expect(fs.existsSync(expectedFile)).toBe(true);
+    const loaded = loadRun(state.id);
+    expect(state.trajectoryId).toBe(`run:${state.id}`);
+    expect(loaded?.trajectoryId).toBe(`run:${state.id}`);
+    expect(loaded?.learningSource).toBe('run-ledger');
+    expect(loaded?.runEventSummary).toMatchObject({
+      runId: state.id,
+      status: state.status,
+      tokensIn: state.usage.tokensIn,
+      tokensOut: state.usage.tokensOut,
+    });
   });
 });
 

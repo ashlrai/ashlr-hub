@@ -103,6 +103,7 @@ import {
 import { listNativeTools } from '../mcp-native.js';
 import { selectInboxStore } from '../seams/inbox.js';
 import { scrubSecrets } from '../knowledge/index.js';
+import { causalMetadata } from '../learning/causal.js';
 // M171: headless browser verification for web repos.
 import { isWebApp, verifyInBrowser } from './browser-verify.js';
 // NOTE: sandbox/worktree.js is imported DYNAMICALLY inside runGoal (matching the
@@ -197,6 +198,75 @@ export function listRuns(): RunState[] {
   }
 }
 
+function runDurationMs(state: RunState): number | undefined {
+  const start = Date.parse(state.createdAt);
+  const end = Date.parse(state.updatedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return undefined;
+  return end - start;
+}
+
+function runOutcomeLabel(state: RunState): string {
+  if (state.proposalOutcome?.kind === 'filed') return 'proposal-created';
+  return state.proposalOutcome?.kind ?? state.status;
+}
+
+function runMetadataSummary(state: RunState): NonNullable<RunState['runEventSummary']> {
+  const proposalOutcome = state.proposalOutcome;
+  const diffLines =
+    typeof proposalOutcome?.insertions === 'number' || typeof proposalOutcome?.deletions === 'number'
+      ? Math.max(0, proposalOutcome.insertions ?? 0) + Math.max(0, proposalOutcome.deletions ?? 0)
+      : state.runEventSummary?.diffLines;
+  return {
+    ...(state.runEventSummary ?? {}),
+    runId: state.id,
+    status: state.status,
+    outcome: runOutcomeLabel(state),
+    ...(proposalOutcome ? { proposalCreated: proposalOutcome.kind === 'filed' } : {}),
+    ...(proposalOutcome?.proposalId ? { proposalId: proposalOutcome.proposalId } : {}),
+    ...(typeof proposalOutcome?.files === 'number' ? { diffFiles: proposalOutcome.files } : {}),
+    ...(diffLines !== undefined ? { diffLines } : {}),
+    tokensIn: state.usage.tokensIn,
+    tokensOut: state.usage.tokensOut,
+    costUsd: state.usage.estCostUsd,
+    ...(runDurationMs(state) !== undefined ? { durationMs: runDurationMs(state) } : {}),
+  };
+}
+
+function runRouteSnapshot(state: RunState): NonNullable<RunState['routeSnapshot']> | undefined {
+  if (state.routeSnapshot) return state.routeSnapshot;
+  if (!state.engine && !state.engineModel && !state.engineTier && !state.provider) return undefined;
+  return {
+    backend: state.engine || state.provider || null,
+    tier: state.engineTier ?? null,
+    model: state.engineModel ?? null,
+    assignedBy: 'run-orchestrator',
+    reason: 'run persistence metadata',
+  };
+}
+
+function runLabelBasis(state: RunState): NonNullable<RunState['labelBasis']> {
+  return state.proposalOutcome ? 'dispatch-outcome' : 'unknown';
+}
+
+function normalizeRunStateForPersistence(state: RunState): RunState {
+  const meta = causalMetadata({
+    trajectoryId: state.trajectoryId,
+    runId: state.id,
+    routeSnapshot: runRouteSnapshot(state),
+    runEventSummary: runMetadataSummary(state),
+    evidenceOutcome: state.evidenceOutcome,
+    learningSource: state.learningSource ?? 'run-ledger',
+    labelBasis: state.labelBasis ?? runLabelBasis(state),
+    routerPolicyVersion: state.routerPolicyVersion,
+    learningEpoch: state.learningEpoch,
+    ts: state.updatedAt ?? state.createdAt,
+  });
+  return {
+    ...state,
+    ...meta,
+  };
+}
+
 /**
  * Atomically persist a RunState to ~/.ashlr/runs/<id>.json (write-then-rename).
  * ONLY writes under runsDir() — never touches repos or Desktop.
@@ -205,7 +275,9 @@ export function saveRun(s: RunState): void {
   ensureRunsDir();
   const dest = runFilePath(s.id);
   const tmp = dest + '.tmp';
-  const payload = JSON.stringify(s, null, 2);
+  const normalized = normalizeRunStateForPersistence(s);
+  Object.assign(s, normalized);
+  const payload = JSON.stringify(normalized, null, 2);
   fs.writeFileSync(tmp, payload, 'utf8');
   fs.renameSync(tmp, dest);
 }
