@@ -1062,4 +1062,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Emit metadata-only reflection telemetry for report and playbook runs.
 - [x] Add FleetStatus and reflect CLI regression coverage.
 - [x] Run focused tests, typecheck, lint, build, audit, and diff checks.
-- [ ] Commit, push, reload daemon, and smoke live status.
+- [x] Commit, push, reload daemon, and smoke live status.
