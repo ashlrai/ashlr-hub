@@ -893,3 +893,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Finish broad verification.
 - [x] Commit, push, reload daemon, and smoke status.
 - [ ] Next lane: make explicit merge-contract rollout repo-aware and visible enough to close missing contracts across enrolled repos.
+
+## Current Continuation - Repo-Aware Merge Contract Backlog
+- [x] Rechecked clean pushed state after dispatch-yield rollout and reviewed recent backlog/scanner commits.
+- [x] Deployed sidecar review for repo-aware backlog dedupe risks.
+- [x] Make first-pass backlog id/title dedupe repo-aware with full resolved repo paths.
+- [x] Preserve same-repo duplicate collapse while allowing identical rollout titles across different repos.
+- [x] Add focused backlog regressions for multi-repo merge-contract rollout items.
+- [x] Finish broad verification.
+- [ ] Commit, push, refresh backlog, reload daemon, and smoke live contract coverage.

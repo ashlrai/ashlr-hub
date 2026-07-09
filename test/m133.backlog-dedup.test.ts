@@ -619,6 +619,38 @@ describe('M133 — buildBacklog: deduplicates identical items within the backlog
     expect(authItems.length).toBeLessThanOrEqual(1);
   });
 
+  it('deduplicates identical titles per repo, not globally across repos', async () => {
+    const secondDir = makeTmpRepo();
+    try {
+      fs.writeFileSync(
+        path.join(tmpDir, 'package.json'),
+        JSON.stringify({ name: 'repo-a', version: '0.0.1', scripts: { test: 'vitest run' } }),
+        'utf8',
+      );
+      fs.writeFileSync(
+        path.join(secondDir, 'package.json'),
+        JSON.stringify({ name: 'repo-b', version: '0.0.1', scripts: { test: 'vitest run' } }),
+        'utf8',
+      );
+      _execFileImpl = makeRgStub('');
+
+      const backlog = await buildBacklog({
+        repos: [tmpDir, tmpDir, secondDir],
+        minItemValue: 2,
+        listPendingProposals: () => [],
+      });
+
+      const contractItems = backlog.items.filter((item) => item.tags.includes('merge-contract'));
+      expect(contractItems).toHaveLength(2);
+      expect(contractItems.filter((item) => item.repo === tmpDir)).toHaveLength(1);
+      expect(contractItems.filter((item) => item.repo === secondDir)).toHaveLength(1);
+      expect(new Set(contractItems.map((item) => item.title)).size).toBe(1);
+      expect(new Set(contractItems.map((item) => item.id)).size).toBe(2);
+    } finally {
+      fs.rmSync(secondDir, { recursive: true, force: true });
+    }
+  });
+
   it('substantive items from different files both pass through', async () => {
     // M136: scanTodos is default-off in buildBacklog. Verify at scanner level directly.
     const rgOutput = [

@@ -171,10 +171,11 @@ function dedupeItems(items: WorkItem[]): WorkItem[] {
   const seenTitle = new Set<string>();
   const out: WorkItem[] = [];
   for (const item of items) {
-    const normTitle = normalizeTitle(item.title);
-    if (!seenId.has(item.id) && !seenTitle.has(normTitle)) {
-      seenId.add(item.id);
-      seenTitle.add(normTitle);
+    const idKey = workItemCoverageKey(item);
+    const titleKey = `${resolve(item.repo)}\0${normalizeTitle(item.title)}`;
+    if (!seenId.has(idKey) && !seenTitle.has(titleKey)) {
+      seenId.add(idKey);
+      seenTitle.add(titleKey);
       out.push(item);
     }
   }

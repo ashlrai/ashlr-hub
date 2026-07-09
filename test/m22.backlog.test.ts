@@ -416,6 +416,37 @@ describe('M22 buildBacklog — over an enrolled tmp repo', () => {
     expect(loaded!.items.some((candidate) => candidate.id === item!.id)).toBe(true);
   });
 
+  it('keeps identical merge-contract rollout titles for different enrolled repos', async () => {
+    const secondRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m22-contract-second-'));
+    try {
+      initBareGitDir(secondRepo);
+      fs.writeFileSync(
+        path.join(secondRepo, 'package.json'),
+        JSON.stringify({ name: 'second-repo', version: '1.0.0', scripts: { test: 'vitest run' } }),
+        'utf8',
+      );
+      enroll(secondRepo);
+
+      const built = await buildBacklog();
+      const contractItems = built.items.filter((candidate) =>
+        candidate.tags.includes('merge-contract') &&
+        candidate.tags.includes('ashlr.verify.json'));
+
+      expect(contractItems).toHaveLength(2);
+      expect(new Set(contractItems.map((item) => item.title)).size).toBe(1);
+      expect(new Set(contractItems.map((item) => item.repo))).toEqual(new Set([tmpRepo, secondRepo]));
+      expect(new Set(contractItems.map((item) => item.id)).size).toBe(2);
+
+      const loaded = loadBacklog();
+      expect(loaded).not.toBeNull();
+      const persistedIds = new Set(loaded!.items.map((item) => item.id));
+      for (const item of contractItems) expect(persistedIds.has(item.id)).toBe(true);
+    } finally {
+      unenroll(secondRepo);
+      fs.rmSync(secondRepo, { recursive: true, force: true });
+    }
+  });
+
   it('loadBacklog() returns the persisted Backlog after buildBacklog', async () => {
     const built = await buildBacklog();
     const loaded = loadBacklog();
