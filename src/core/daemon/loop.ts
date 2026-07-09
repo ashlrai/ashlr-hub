@@ -1133,6 +1133,7 @@ export async function tick(
   let proposalRepairMaintenanceRan = false;
   let proposalRepairMaintenanceResult: ProposalRepairWorkResult | null = null;
   let skipInventAfterSelfHealRefill = false;
+  let producerMaintenanceBeforeSelection = false;
   let producerMaintenanceSkippedByCadence = false;
   let producerMaintenanceNextAfter: string | undefined;
   const producerMaintenanceSummary = (): DaemonTick['producerMaintenance'] | undefined => {
@@ -1258,6 +1259,8 @@ export async function tick(
       return [];
     }
   };
+  const hasPrunableSelfHealWork = (items: WorkItem[]): boolean =>
+    items.some((item) => item.source === 'self' && !item.tags.includes('proposal-repair'));
 
   // -------------------------------------------------------------------------
   // 1. Kill-switch check.
@@ -1419,6 +1422,7 @@ export async function tick(
     const merged = autoMergePassResult?.merged ?? 0;
 
     if (!opts.dryRun && shouldRunProducerMaintenance(state)) {
+      producerMaintenanceBeforeSelection = true;
       await runSelfHealMaintenance();
       backlogItems = await refreshBacklogForTick();
       if (backlogItems.length > 0) {
@@ -1445,6 +1449,58 @@ export async function tick(
         repo: null,
         sandboxId: null,
         summary: `tick skipped: backlog is empty for enrolled repos${
+          merged > 0 ? `; auto-merged ${merged} proposal(s)` : ''
+        }`,
+        result: 'ok',
+      });
+      return recordTick({
+        ts: now,
+        itemsConsidered: 0,
+        proposalsCreated: 0,
+        spentUsd: 0,
+        reason: 'no-backlog',
+        ...(directionMode ? { directionMode } : {}),
+        ...(directionPlan ? { directionReason: directionPlan.reason } : {}),
+        ...(autoMerge ? { autoMerge } : {}),
+        ...(remoteHandoff ? { remoteHandoff } : {}),
+        ...(producerMaintenanceSummary() ? { producerMaintenance: producerMaintenanceSummary() } : {}),
+        ...(merged > 0 ? { merged } : {}),
+      });
+    }
+  }
+
+  // M201: run producer maintenance before selecting live work even when the
+  // backlog was non-empty and contains self-heal work. Self-heal maintenance
+  // can prune generated repair items that were valid in the cached backlog
+  // moments earlier; the same tick must refresh and select from the
+  // post-maintenance view.
+  if (
+    backlogItems.length > 0 &&
+    !opts.dryRun &&
+    !selfHealMaintenanceRan &&
+    hasPrunableSelfHealWork(backlogItems) &&
+    shouldRunProducerMaintenance(state)
+  ) {
+    producerMaintenanceBeforeSelection = true;
+    await runSelfHealMaintenance();
+    backlogItems = await refreshBacklogForTick();
+    const invented = await runInventMaintenance();
+    if (invented) backlogItems = await refreshBacklogForTick();
+    await runAncillaryMaintenance();
+
+    if (backlogItems.length === 0) {
+      const autoMergePassResult = await runAutoMergeMaintenancePass();
+      preDispatchAutoMergePassResult = autoMergePassResult;
+      preDispatchAutoMergePassRan = true;
+      const autoMerge = autoMergeTickSummary(autoMergePassResult);
+      const merged = autoMergePassResult?.merged ?? 0;
+
+      saveDaemonState(state);
+      audit({
+        action: 'daemon:tick',
+        repo: null,
+        sandboxId: null,
+        summary: `tick skipped: backlog emptied after producer maintenance${
           merged > 0 ? `; auto-merged ${merged} proposal(s)` : ''
         }`,
         result: 'ok',
@@ -1652,7 +1708,7 @@ export async function tick(
   // M170/M186/M187/M189 live maintenance cadence. Keep it outside the spend
   // guard so queued work discovery and regression watches do not extend an
   // in-flight accounting guard for selected dispatches.
-  if (shouldRunProducerMaintenance(state)) {
+  if (!producerMaintenanceBeforeSelection && shouldRunProducerMaintenance(state)) {
     await runSelfHealMaintenance();
     await runInventMaintenance();
     await runAncillaryMaintenance();

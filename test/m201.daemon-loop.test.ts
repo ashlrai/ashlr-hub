@@ -592,6 +592,80 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
   });
 
+  it('A1a2c: non-empty backlog refreshes after self-heal maintenance before selection', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const [staleBase, freshItem] = makeItems(repo.dir, 2);
+    const staleSelfHeal = {
+      ...staleBase!,
+      id: `${repo.dir}:self-heal:stale-green-build`,
+      source: 'self' as const,
+      title: 'Fix broken build in ashlrcode: stale typecheck error',
+      detail: 'Stale self-heal item that should be pruned after verification is green.',
+      score: 9,
+      tags: ['self-heal', 'build', 'high-priority'],
+    };
+    const freshWork = {
+      ...freshItem!,
+      id: `${repo.dir}:todo:fresh-real-work`,
+      title: 'Fresh real work after stale self-heal pruning',
+      score: 3,
+    };
+    mockBuildBacklog
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [staleSelfHeal, freshWork] })
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [freshWork] });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(1);
+    expect(result.dispatches?.[0]).toMatchObject({
+      itemId: freshWork.id,
+      title: freshWork.title,
+    });
+    expect(result.dispatches?.[0]?.itemId).not.toBe(staleSelfHeal.id);
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(2);
+    expect(mockRunSelfHealCycle).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(result.producerMaintenance).toMatchObject({
+      selfHeal: true,
+      ancillary: true,
+    });
+  });
+
+  it('A1a2d: self-heal maintenance that empties a non-empty backlog still runs auto-merge drain', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const [staleBase] = makeItems(repo.dir, 1);
+    const staleSelfHeal = {
+      ...staleBase!,
+      id: `${repo.dir}:self-heal:stale-only-green-build`,
+      source: 'self' as const,
+      title: 'Fix broken build in ashlrcode: stale only item',
+      detail: 'Stale self-heal item that should be pruned with no replacement work.',
+      score: 9,
+      tags: ['self-heal', 'build', 'high-priority'],
+    };
+    mockBuildBacklog
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [staleSelfHeal] })
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [] });
+    mockRunAutoMergePass.mockResolvedValue({ merged: 1 });
+
+    const result = await tick(
+      { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autoMerge: { enabled: true } } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('no-backlog');
+    expect(result.itemsConsidered).toBe(0);
+    expect(result.merged).toBe(1);
+    expect(result.autoMerge).toMatchObject({ merged: 1 });
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(2);
+    expect(mockRunSelfHealCycle).toHaveBeenCalledTimes(1);
+    expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
   it('A1a3: empty backlog does not rerun producer maintenance inside the daemon interval', async () => {
     const repo = fx.makeRepo();
     repo.enroll();

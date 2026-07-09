@@ -646,3 +646,16 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Commit and push the current hub telemetry/Phantom/status batch as `e7548c7`.
 - [x] Reload the launchd daemon, resume the fleet, and verify production status.
 - [ ] Next lane: use action-count telemetry for sample-gated, same-tier proposal-yield diagnostics/routing without escalating risk.
+
+## Current Continuation - Overnight Autonomous Maintenance Loop
+- [x] Rechecked clean `master`, recent commits, Entire state, task plan, notes, and focused daemon-loop context after compaction.
+- [x] Deployed sidecar scouts for Phantom-specific leverage, metadata-only learning telemetry, and Fleet OS product critique.
+- [x] Fixed daemon selection ordering so prunable self-heal work is refreshed after producer maintenance before live item claims.
+- [x] Preserved ordinary non-empty backlog maintenance cadence and proposal-repair same-tick refill behavior.
+- [x] Added regression coverage proving stale self-heal work is not dispatched when maintenance refreshes it away.
+- [x] Focused verification passed: `npm run typecheck -- --pretty false`, `npm run test:ci -- test/m201.daemon-loop.test.ts test/m165.self-heal.test.ts test/m310.queued-autonomy-work.test.ts`, and `git diff --check`.
+- [x] Broader verification passed: adjacent daemon/status/auto-merge/control suites, lint, build, audit, invariants, and full `npm run test:ci` (438 files, 8,993 passed, 7 skipped).
+- [x] Added auto-merge drain coverage for the case where self-heal maintenance empties a previously non-empty backlog.
+- [x] Post-drain focused verification passed: typecheck, build, lint, audit, diff check, and `m201/m165/m310/m48/m49` focused CI.
+- [ ] Commit, push, reload daemon, and smoke live fleet state.
+- [ ] Integrate sidecar scout recommendations into the next implementation lane.
