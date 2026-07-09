@@ -313,6 +313,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'goals plan <id>',              desc: 'Decompose a goal into ordered milestones + author/link each milestone spec (LOCAL-FIRST; --allow-cloud to use cloud).', topic: 'autonomy' },
   { cmd: 'goals advance <id>',           desc: 'Advance the next actionable milestone via a SANDBOXED, proposal-only swarm (ENROLLED repos only; emits a PENDING proposal).', topic: 'autonomy' },
   { cmd: 'goals status [id]',            desc: 'Read-only roll-up of goal/milestone progress + linked swarm/proposal state (mutates nothing).', topic: 'autonomy' },
+  { cmd: 'goals recover-stale',           desc: 'Reset stale proposal-less in-progress goal lanes back to pending so the fleet can advance them again.', topic: 'autonomy' },
   { cmd: 'roadmap <run|resume|status>',  desc: 'Goal Loop: run a roadmap of milestone files, one FRESH agent process per milestone; resumable from state.json (LOCAL-FIRST; --allow-cloud for API engines).', topic: 'autonomy' },
   { cmd: 'setup',                        desc: 'First-run fleet wizard: detect providers/editors, install the daemon service, discover repos to enroll (idempotent).', topic: 'core' },
   { cmd: 'goal "<objective>"',           desc: 'The conductor: objective → milestones → sandboxed, proposal-only run (M55).', topic: 'autonomy' },

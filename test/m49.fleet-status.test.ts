@@ -111,6 +111,7 @@ function makeBacklogItem(
   title: string,
   score = 5,
   source: WorkItem['source'] = 'goal',
+  tags: string[] = ['test'],
 ): WorkItem {
   return {
     id,
@@ -121,7 +122,7 @@ function makeBacklogItem(
     value: 5,
     effort: 1,
     score,
-    tags: ['test'],
+    tags,
     ts: '2026-07-03T00:00:00.000Z',
   };
 }
@@ -573,7 +574,14 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     writeBacklogSnapshot(tmpHome, repo, [
       makeBacklogItem(repo, `goal:${staleGoal.id}:${staleGoal.milestones[0]!.id}`, 'Advance stale goal', 5, 'goal'),
-      makeBacklogItem(repo, `goal:${proposedGoal.id}:${proposedGoal.milestones[0]!.id}`, 'Advance proposed goal', 4, 'goal'),
+      makeBacklogItem(
+        repo,
+        'repo-lanes:goal:abcdef0123',
+        'Advance proposed goal',
+        4,
+        'goal',
+        ['goal', proposedGoal.id, proposedGoal.milestones[0]!.id],
+      ),
       makeBacklogItem(repo, 'invent:one', 'Invent unrelated thing', 3, 'invent'),
     ]);
     writeGoalRecords(tmpHome, [staleGoal, proposedGoal, outsideGoal]);
@@ -602,8 +610,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(action?.commands?.map((command) => command.argv)).toEqual([
       ['ashlr', 'goals', 'show', 'goal-lane-a', '--json'],
-      ['ashlr', 'goals', 'pause', 'goal-lane-a', 'goal-lane-a-m0'],
-      ['ashlr', 'goals', 'resume', 'goal-lane-a', 'goal-lane-a-m0'],
+      ['ashlr', 'goals', 'recover-stale'],
     ]);
   });
 

@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import type { Goal, Proposal, WorkItem } from '../types.js';
 import { proposalCompletesGoalMilestone } from '../goals/completion.js';
+import { DEFAULT_STALE_GOAL_MILESTONE_MS } from '../goals/store.js';
 
 export type FleetLaneLockReason =
   | 'active-goal'
@@ -40,7 +41,7 @@ export interface BuildFleetLaneLocksInput {
   sampleLimit?: number;
 }
 
-export const DEFAULT_LANE_LOCK_STALE_IN_PROGRESS_MS = 6 * 60 * 60 * 1000;
+export const DEFAULT_LANE_LOCK_STALE_IN_PROGRESS_MS = DEFAULT_STALE_GOAL_MILESTONE_MS;
 export const DEFAULT_LANE_LOCK_RECENT_APPLIED_MS = 7 * 24 * 60 * 60 * 1000;
 export const DEFAULT_LANE_LOCK_SAMPLE_LIMIT = 8;
 
@@ -69,10 +70,17 @@ function laneKey(repo: string | null, suffix: string): string {
 function goalItemIds(item: WorkItem): { goalId: string; milestoneId?: string } | null {
   if (item.source !== 'goal') return null;
   const match = /^goal:([^:]+)(?::([^:]+))?/.exec(item.id);
-  if (!match?.[1]) return null;
+  if (match?.[1]) {
+    return {
+      goalId: match[1],
+      ...(match[2] ? { milestoneId: match[2] } : {}),
+    };
+  }
+  const [kind, goalId, milestoneId] = item.tags;
+  if (kind !== 'goal' || !goalId) return null;
   return {
-    goalId: match[1],
-    ...(match[2] ? { milestoneId: match[2] } : {}),
+    goalId,
+    ...(milestoneId ? { milestoneId } : {}),
   };
 }
 

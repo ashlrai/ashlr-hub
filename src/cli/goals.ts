@@ -15,6 +15,7 @@
  *   ashlr goals plan <id> [--allow-cloud] [--max <n>]   # decompose + author specs
  *   ashlr goals advance <id>                            # sandboxed, proposal-only run of the NEXT milestone
  *   ashlr goals status [--json]                         # tracking dashboard
+ *   ashlr goals recover-stale [--dry-run] [--max <n>]    # reset stale in-progress lanes
  *   ashlr goals pause <id> [milestone]
  *   ashlr goals resume <id> [milestone]
  *   ashlr goals skip <id> <milestone>
@@ -88,6 +89,22 @@ type PlanMilestoneSpecFn = (
 type ReorderMilestonesFn = (goalId: string, orderedIds: string[]) => Goal | null;
 type ClearMilestonesFn = (goalId: string) => Goal | null;
 type DeleteGoalFn = (id: string) => void;
+type RecoverStaleGoalLanesFn = (opts?: {
+  limit?: number;
+  dryRun?: boolean;
+}) => {
+  generatedAt: string;
+  dryRun: boolean;
+  eligible: number;
+  recovered: number;
+  lanes: {
+    goalId: string;
+    milestoneId: string;
+    project: string | null;
+    title: string;
+    ageMs: number;
+  }[];
+};
 type AdvanceGoalFn = (
   goalId: string,
   cfg: AshlrConfig,
@@ -108,6 +125,7 @@ interface GoalsCore {
   reorderMilestones: ReorderMilestonesFn;
   clearMilestones: ClearMilestonesFn;
   deleteGoal: DeleteGoalFn;
+  recoverStaleGoalLanes: RecoverStaleGoalLanesFn;
   decomposeGoal: DecomposeGoalFn;
   planMilestoneSpec: PlanMilestoneSpecFn;
   advanceGoal: AdvanceGoalFn;
@@ -140,6 +158,7 @@ async function importCore(): Promise<GoalsCore | null> {
         reorderMilestones: store.reorderMilestones as ReorderMilestonesFn,
         clearMilestones: store.clearMilestones as ClearMilestonesFn,
         deleteGoal: store.deleteGoal as DeleteGoalFn,
+        recoverStaleGoalLanes: store.recoverStaleGoalLanes as RecoverStaleGoalLanesFn,
         decomposeGoal: planner.decomposeGoal as DecomposeGoalFn,
         planMilestoneSpec: planner.planMilestoneSpec as PlanMilestoneSpecFn,
         advanceGoal: advance.advanceGoal as AdvanceGoalFn,
@@ -163,6 +182,7 @@ type GoalsSub =
   | 'plan'
   | 'advance'
   | 'status'
+  | 'recover-stale'
   | 'pause'
   | 'resume'
   | 'skip'
@@ -176,6 +196,7 @@ const SUBS: readonly GoalsSub[] = [
   'plan',
   'advance',
   'status',
+  'recover-stale',
   'pause',
   'resume',
   'skip',
@@ -199,6 +220,8 @@ interface ParsedGoalsArgs {
   allowCloud: boolean;
   /** --replace clears an already-planned goal's milestones before re-planning. */
   replace: boolean;
+  /** --dry-run previews recover-stale without mutating goal records. */
+  dryRun: boolean;
   help: boolean;
   error: string | undefined;
 }
@@ -214,6 +237,7 @@ function parseGoalsArgs(args: string[]): ParsedGoalsArgs {
     json: false,
     allowCloud: false,
     replace: false,
+    dryRun: false,
     help: false,
     error: undefined,
   };
@@ -234,6 +258,8 @@ function parseGoalsArgs(args: string[]): ParsedGoalsArgs {
       parsed.allowCloud = true;
     } else if (a === '--replace') {
       parsed.replace = true;
+    } else if (a === '--dry-run') {
+      parsed.dryRun = true;
     } else if (a === '--project') {
       const val = args[++i];
       if (val === undefined) {
@@ -298,6 +324,7 @@ function printHelp(): void {
   out(`    ${cyan('ashlr goals plan <id>')} [--allow-cloud] [--max <n>] [--replace]`);
   out(`    ${cyan('ashlr goals advance <id>')}`);
   out(`    ${cyan('ashlr goals status')} [--json]`);
+  out(`    ${cyan('ashlr goals recover-stale')} [--dry-run] [--max <n>] [--json]`);
   out(`    ${cyan('ashlr goals pause <id>')} [milestone]`);
   out(`    ${cyan('ashlr goals resume <id>')} [milestone]`);
   out(`    ${cyan('ashlr goals skip <id> <milestone>')}`);
@@ -307,9 +334,10 @@ function printHelp(): void {
   out(bold('  Options'));
   const opts: [string, string][] = [
     ['--project <repo>', 'Bind a goal to an ENROLLED repo (required to advance).'],
-    ['--max <n>', 'Cap how many milestones `plan` produces (bounded; default 8, max 16).'],
+    ['--max <n>', 'Cap how many milestones `plan` produces or stale lanes `recover-stale` resets.'],
     ['--allow-cloud', 'Allow a CLOUD model for optional plan refinement + spec authoring. Off by default.'],
     ['--replace', 'On `plan`, clear an already-planned goal’s milestones before re-planning.'],
+    ['--dry-run', 'On `recover-stale`, preview eligible lanes without mutating goal records.'],
     ['--json', 'Machine-readable output on read paths (list/show/status).'],
     ['--help', 'Show this help.'],
   ];
@@ -705,6 +733,35 @@ export async function cmdGoals(args: string[]): Promise<number> {
         }
       }
       out('');
+      return 0;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    case 'recover-stale': {
+      const result = core.recoverStaleGoalLanes({
+        limit: parsed.max,
+        dryRun: parsed.dryRun,
+      });
+      if (parsed.json) {
+        out(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      if (result.lanes.length === 0) {
+        out(gray('  No stale proposal-less in-progress goal lanes found.'));
+        return 0;
+      }
+      if (result.dryRun) {
+        out(yellow('! ') + `would recover ${result.lanes.length}/${result.eligible} stale goal lane(s)`);
+      } else {
+        out(green('✓ ') + `recovered ${result.recovered}/${result.eligible} stale goal lane(s)`);
+      }
+      for (const lane of result.lanes) {
+        out(
+          `  ${cyan(lane.goalId)} ${dim(lane.milestoneId)} ` +
+            gray(`${Math.round(lane.ageMs / 60000)}m stale`) +
+            (lane.project ? gray(`  ${lane.project}`) : ''),
+        );
+      }
       return 0;
     }
 

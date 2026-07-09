@@ -335,6 +335,76 @@ describe('M28 goals store — milestone mutators', () => {
     expect(goalResumed!.status).toBe<GoalStatus>('active');
   });
 
+  it('recoverStaleGoalLanes resets only stale proposal-less in-progress milestones', () => {
+    const stale = store.createGoal('Stale lane', { project: '/abs/repo', now: T0 });
+    const staleWithM = store.addMilestone(stale.id, { title: 'Stale', detail: 'd' }, { now: T0 });
+    const staleM = staleWithM!.milestones[0]!.id;
+    store.updateMilestoneStatus(stale.id, staleM, 'in-progress', {
+      swarmId: 'old-swarm',
+      now: T0,
+    });
+
+    const linked = store.createGoal('Linked lane', { project: '/abs/repo', now: T0 });
+    const linkedWithM = store.addMilestone(linked.id, { title: 'Linked', detail: 'd' }, { now: T0 });
+    const linkedM = linkedWithM!.milestones[0]!.id;
+    store.updateMilestoneStatus(linked.id, linkedM, 'in-progress', {
+      swarmId: 'linked-swarm',
+      proposalId: 'prop-live',
+      now: T0,
+    });
+
+    const young = store.createGoal('Young lane', { project: '/abs/repo', now: T1 });
+    const youngWithM = store.addMilestone(young.id, { title: 'Young', detail: 'd' }, { now: T1 });
+    const youngM = youngWithM!.milestones[0]!.id;
+    store.updateMilestoneStatus(young.id, youngM, 'in-progress', { now: T1 });
+
+    const result = store.recoverStaleGoalLanes({ now: T2, staleMs: 36 * 60 * 60 * 1000, limit: 5 });
+
+    expect(result).toMatchObject({
+      dryRun: false,
+      scannedGoals: 3,
+      eligible: 1,
+      recovered: 1,
+    });
+    expect(result.lanes).toEqual([
+      expect.objectContaining({
+        goalId: stale.id,
+        milestoneId: staleM,
+        project: '/abs/repo',
+        title: 'Stale',
+        dryRun: false,
+      }),
+    ]);
+    const recovered = store.loadGoal(stale.id)!.milestones[0]!;
+    expect(recovered.status).toBe<MilestoneStatus>('pending');
+    expect(recovered.swarmId).toBeNull();
+    expect(recovered.proposalId).toBeNull();
+    expect(recovered.updatedAt).toBe(T2);
+
+    const stillLinked = store.loadGoal(linked.id)!.milestones[0]!;
+    expect(stillLinked.status).toBe<MilestoneStatus>('in-progress');
+    expect(stillLinked.proposalId).toBe('prop-live');
+    expect(store.loadGoal(young.id)!.milestones[0]!.status).toBe<MilestoneStatus>('in-progress');
+  });
+
+  it('recoverStaleGoalLanes dry-run reports lanes without mutating them', () => {
+    const g = store.createGoal('Dry run stale lane', { project: '/abs/repo', now: T0 });
+    const withM = store.addMilestone(g.id, { title: 'Dry', detail: 'd' }, { now: T0 });
+    const mId = withM!.milestones[0]!.id;
+    store.updateMilestoneStatus(g.id, mId, 'in-progress', { swarmId: 'old-swarm', now: T0 });
+
+    const result = store.recoverStaleGoalLanes({ now: T2, staleMs: 1, dryRun: true });
+
+    expect(result.recovered).toBe(0);
+    expect(result.eligible).toBe(1);
+    expect(result.lanes).toEqual([
+      expect.objectContaining({ goalId: g.id, milestoneId: mId, dryRun: true }),
+    ]);
+    const stillStale = store.loadGoal(g.id)!.milestones[0]!;
+    expect(stillStale.status).toBe<MilestoneStatus>('in-progress');
+    expect(stillStale.swarmId).toBe('old-swarm');
+  });
+
   it('skipMilestone marks skipped and excludes it from the done roll-up', () => {
     const g = store.createGoal('Skippable', { now: T0 });
     store.addMilestone(g.id, { title: 'A', detail: 'd' }, { now: T1 });

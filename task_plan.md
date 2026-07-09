@@ -781,3 +781,17 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused scanner/invent/status regression coverage.
 - [x] Verify focused and broad lightweight gates.
 - [x] Commit `34d4233`, push to `origin/master`, reload daemon, refresh backlog, clear stale dead-owner spend guard, and smoke live goal-focus state.
+
+## Current Continuation - Stale Lane Recovery And Fleet OS Truth
+- [x] Rechecked repo state, recent commits, Entire state, task plan, notes, and live FleetStatus.
+- [x] Deployed scouts for proposal capture, automerge evidence, Fleet OS data quality, and Phantom safe-delegation strategy.
+- [x] Used the new command rail manually to inspect and reset the stale Phantom team-vault lane from `in-progress` to `pending`.
+- [x] Confirmed live `laneLocks.staleInProgress` dropped from 1 to 0 and the recovery next action disappeared.
+- [x] Added `recoverStaleGoalLanes()` as a bounded, idempotent, goal-store-only primitive for stale proposal-less `in-progress` milestones.
+- [x] Added `ashlr goals recover-stale [--dry-run] [--max N] [--json]` and pointed FleetStatus next actions at that single recovery command.
+- [x] Fixed `laneLocks.lockedVisibleItems` false-zero by reading canonical scanner goal IDs from `WorkItem.tags`.
+- [x] Scoped the H8 cleanup meta-test to CONTRACT-reference diff lines so real code changes in swept files are not misclassified as comment-sweep violations.
+- [x] Focused verification passed: `m28.store`, `m28.cli`, `m49.fleet-status`, and `h8.cleanup-comment-only` (106 tests), plus typecheck and diff check.
+- [x] Broad gates passed: lint, build, audit, and invariants.
+- [ ] Commit, push, reload launchd daemon, and smoke live FleetStatus locked-lane counts.
+- [ ] Next lane: implement Best-of-N file-once proposal capture or remote protected-base freshness, whichever is more immediately tractable.

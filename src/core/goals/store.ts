@@ -42,6 +42,30 @@ export { goalsDir };
 // ---------------------------------------------------------------------------
 
 const MAX_LIST = 200;
+export const DEFAULT_STALE_GOAL_MILESTONE_MS = 6 * 60 * 60 * 1000;
+export const DEFAULT_STALE_GOAL_RECOVERY_LIMIT = 10;
+
+export interface RecoveredStaleGoalLane {
+  goalId: string;
+  milestoneId: string;
+  project: string | null;
+  title: string;
+  ageMs: number;
+  previousUpdatedAt: string;
+  recoveredAt: string;
+  dryRun: boolean;
+}
+
+export interface RecoverStaleGoalLanesResult {
+  generatedAt: string;
+  dryRun: boolean;
+  staleMs: number;
+  limit: number;
+  scannedGoals: number;
+  eligible: number;
+  recovered: number;
+  lanes: RecoveredStaleGoalLane[];
+}
 
 // ---------------------------------------------------------------------------
 // Injectable clock (test determinism)
@@ -54,6 +78,18 @@ const MAX_LIST = 200;
 /** Current ISO timestamp, or the explicit override when provided (test seam). */
 function nowIso(now?: string): string {
   return now ?? new Date().toISOString();
+}
+
+function parseTimeMs(value: string | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function staleMilestoneAgeMs(nowMs: number, goal: Goal, milestone: Milestone): number | null {
+  const updatedMs = parseTimeMs(milestone.updatedAt ?? goal.updatedAt ?? goal.createdAt);
+  if (updatedMs === null) return null;
+  return Math.max(0, nowMs - updatedMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -463,6 +499,78 @@ export function resumeMilestone(
   }
   saveGoal(goal, { now });
   return goal;
+}
+
+/**
+ * Reset stale, proposal-less in-progress milestones back to pending.
+ *
+ * This is an idempotent local recovery primitive for fleet lane locks. It
+ * intentionally refuses milestones with proposalId because those may represent
+ * real work awaiting review/merge elsewhere. It only edits goal JSON under
+ * ~/.ashlr/goals and never touches a user repo, proposal, branch, or remote.
+ */
+export function recoverStaleGoalLanes(opts?: {
+  now?: string;
+  staleMs?: number;
+  limit?: number;
+  dryRun?: boolean;
+}): RecoverStaleGoalLanesResult {
+  const generatedAt = nowIso(opts?.now);
+  const parsedNow = Date.parse(generatedAt);
+  const nowMs = Number.isNaN(parsedNow) ? Date.now() : parsedNow;
+  const staleMs = Math.max(1, opts?.staleMs ?? DEFAULT_STALE_GOAL_MILESTONE_MS);
+  const limit = Math.max(0, opts?.limit ?? DEFAULT_STALE_GOAL_RECOVERY_LIMIT);
+  const dryRun = Boolean(opts?.dryRun);
+  const goals = listGoals({ status: 'active' });
+
+  const candidates: RecoveredStaleGoalLane[] = [];
+  for (const goal of goals) {
+    for (const milestone of goal.milestones) {
+      if (milestone.status !== 'in-progress') continue;
+      if (milestone.proposalId) continue;
+      const ageMs = staleMilestoneAgeMs(nowMs, goal, milestone);
+      if (ageMs === null || ageMs <= staleMs) continue;
+      candidates.push({
+        goalId: goal.id,
+        milestoneId: milestone.id,
+        project: goal.project ?? null,
+        title: milestone.title,
+        ageMs,
+        previousUpdatedAt: milestone.updatedAt ?? goal.updatedAt ?? goal.createdAt,
+        recoveredAt: generatedAt,
+        dryRun,
+      });
+    }
+  }
+
+  candidates.sort((a, b) => b.ageMs - a.ageMs || a.goalId.localeCompare(b.goalId));
+  const selected = candidates.slice(0, limit);
+  const lanes: RecoveredStaleGoalLane[] = [];
+
+  for (const lane of selected) {
+    if (dryRun) {
+      lanes.push(lane);
+      continue;
+    }
+    const updated = updateMilestoneStatus(lane.goalId, lane.milestoneId, 'pending', {
+      swarmId: null,
+      proposalId: null,
+      now: generatedAt,
+    });
+    if (!updated) continue;
+    lanes.push({ ...lane, dryRun: false });
+  }
+
+  return {
+    generatedAt,
+    dryRun,
+    staleMs,
+    limit,
+    scannedGoals: goals.length,
+    eligible: candidates.length,
+    recovered: dryRun ? 0 : lanes.length,
+    lanes,
+  };
 }
 
 /**

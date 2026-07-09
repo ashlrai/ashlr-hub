@@ -2027,22 +2027,9 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         ...(staleLane?.goalId
           ? [nextActionCommand('Inspect goal', ['ashlr', 'goals', 'show', staleLane.goalId, '--json'], 'read-only')]
           : [nextActionCommand('List goals', ['ashlr', 'goals', 'list', '--json'], 'read-only')]),
-        ...(staleLane?.goalId && staleLane.milestoneId
-          ? [
-              nextActionCommand(
-                'Pause stale milestone',
-                ['ashlr', 'goals', 'pause', staleLane.goalId, staleLane.milestoneId],
-                'control-plane',
-                { note: 'Goal-store only; use before resume to reset a stale in-progress milestone.' },
-              ),
-              nextActionCommand(
-                'Resume milestone',
-                ['ashlr', 'goals', 'resume', staleLane.goalId, staleLane.milestoneId],
-                'control-plane',
-                { note: 'Resets a paused milestone back to pending so it can be advanced again.' },
-              ),
-            ]
-          : []),
+        nextActionCommand('Recover stale lanes', ['ashlr', 'goals', 'recover-stale'], 'control-plane', {
+          note: 'Goal-store only; resets stale proposal-less in-progress milestones back to pending.',
+        }),
       ],
     });
   }

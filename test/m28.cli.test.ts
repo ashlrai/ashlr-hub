@@ -424,6 +424,36 @@ describe('cmdGoals — steering', () => {
     goal = JSON.parse(fs.readFileSync(path.join(goalsDirPath(), `${id}.json`), 'utf8'));
     expect(goal.status).not.toBe('paused');
   });
+
+  it('recover-stale previews and resets stale proposal-less in-progress milestones', async () => {
+    enroll(tmpRepo);
+    captureIO();
+    await cmdGoals(['add', 'recover stale lane', '--project', tmpRepo]);
+    const id = extractGoalId();
+    await cmdGoals(['plan', id, '--json']);
+    const m0 = `${id}-m0`;
+    const store = await import('../src/core/goals/store.js');
+    store.updateMilestoneStatus(id, m0, 'in-progress', {
+      swarmId: 'old-swarm',
+      now: '2026-01-01T00:00:00.000Z',
+    });
+
+    stdout = '';
+    let code = await cmdGoals(['recover-stale', '--dry-run', '--json']);
+    expect(code).toBe(0);
+    let result = JSON.parse(stdout);
+    expect(result).toMatchObject({ dryRun: true, eligible: 1, recovered: 0 });
+    expect(store.loadGoal(id)!.milestones[0]!.status).toBe('in-progress');
+
+    stdout = '';
+    code = await cmdGoals(['recover-stale', '--json']);
+    expect(code).toBe(0);
+    result = JSON.parse(stdout);
+    expect(result).toMatchObject({ dryRun: false, eligible: 1, recovered: 1 });
+    const recovered = store.loadGoal(id)!.milestones[0]!;
+    expect(recovered.status).toBe('pending');
+    expect(recovered.swarmId).toBeNull();
+  });
 });
 
 describe('cmdGoals — plan idempotency (M28 regression)', () => {
