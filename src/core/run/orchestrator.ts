@@ -1397,6 +1397,37 @@ export async function runGoal(
           let titrrAnnotation = '';
           let lastR: Awaited<ReturnType<typeof runEngineSandboxed>> | null = null;
           let titrrGoal = goal;
+          const captureTitrrProposal = async (options: { isPartial?: boolean; forceGateBlockReason?: string } = {}) => {
+            const sandbox = titrrSandbox;
+            const producer = lastR;
+            if (!sandbox || !producer) return;
+            const propR = await captureSandboxedProposal(engineId, goal, cfg, {
+              sourceRepo: cwd,
+              model: modelEnv,
+              budget: opts.budget,
+              runId: producer.state.id,
+              existingWorktree: sandbox,
+              workItemId: opts.workItemId,
+              workSource: opts.workSource,
+              delegationScope,
+              ...(options.isPartial ? { isPartial: true } : {}),
+              ...(options.forceGateBlockReason ? { forceGateBlockReason: options.forceGateBlockReason } : {}),
+              sourceLabel: 'TITRR',
+              usage: producer.state.usage,
+              durationMs: runDurationMs(producer.state),
+              producerStatus: producer.state.status,
+              actionCounts: actionCountsForProposalCapture(producer.state),
+            });
+            const capturedState = propR.proposalOutcome
+              ? { ...propR.state, proposalOutcome: propR.proposalOutcome }
+              : propR.state;
+            lastR = {
+              ...producer,
+              proposalId: propR.proposalId,
+              proposalOutcome: propR.proposalOutcome,
+              state: withCapturedProposalMetadata(producer.state, capturedState),
+            };
+          };
 
           try {
             while (titrrAttempt < titrrMax) {
@@ -1442,76 +1473,20 @@ export async function runGoal(
               if (titrrResult === null) {
                 // No test command detected — annotate and stop early.
                 titrrAnnotation = 'tests: not detected (skipped)';
-                if (titrrSandbox) {
-                  const propR = await captureSandboxedProposal(engineId, goal, cfg, {
-                    sourceRepo: cwd,
-                    model: modelEnv,
-                    budget: opts.budget,
-                    runId: lastR.state.id,
-                    existingWorktree: titrrSandbox,
-                    workItemId: opts.workItemId,
-                    workSource: opts.workSource,
-                    delegationScope,
-                    sourceLabel: 'TITRR',
-                  });
-                  lastR = {
-                    ...lastR,
-                    proposalId: propR.proposalId,
-                    proposalOutcome: propR.proposalOutcome,
-                    state: { ...lastR.state, proposalOutcome: propR.proposalOutcome },
-                  };
-                }
+                await captureTitrrProposal();
                 break;
               }
 
               if (titrrResult.ok) {
                 titrrAnnotation = `tests: pass (attempt ${titrrAttempt})`;
-                if (titrrSandbox) {
-                  const propR = await captureSandboxedProposal(engineId, goal, cfg, {
-                    sourceRepo: cwd,
-                    model: modelEnv,
-                    budget: opts.budget,
-                    runId: lastR.state.id,
-                    existingWorktree: titrrSandbox,
-                    workItemId: opts.workItemId,
-                    workSource: opts.workSource,
-                    delegationScope,
-                    sourceLabel: 'TITRR',
-                  });
-                  lastR = {
-                    ...lastR,
-                    proposalId: propR.proposalId,
-                    proposalOutcome: propR.proposalOutcome,
-                    state: { ...lastR.state, proposalOutcome: propR.proposalOutcome },
-                  };
-                }
+                await captureTitrrProposal();
                 break;
               }
 
               // Tests failed. If this was the last attempt, annotate and exit.
               if (isLastAttempt) {
                 titrrAnnotation = `tests: still failing after ${titrrAttempt} attempt(s)`;
-                if (titrrSandbox) {
-                  const propR = await captureSandboxedProposal(engineId, goal, cfg, {
-                    sourceRepo: cwd,
-                    model: modelEnv,
-                    budget: opts.budget,
-                    runId: lastR.state.id,
-                    existingWorktree: titrrSandbox,
-                    workItemId: opts.workItemId,
-                    workSource: opts.workSource,
-                    delegationScope,
-                    isPartial: true,
-                    forceGateBlockReason: titrrAnnotation,
-                    sourceLabel: 'TITRR',
-                  });
-                  lastR = {
-                    ...lastR,
-                    proposalId: propR.proposalId,
-                    proposalOutcome: propR.proposalOutcome,
-                    state: { ...lastR.state, proposalOutcome: propR.proposalOutcome },
-                  };
-                }
+                await captureTitrrProposal({ isPartial: true, forceGateBlockReason: titrrAnnotation });
                 break;
               }
 
@@ -1528,6 +1503,7 @@ export async function runGoal(
                 allowCloud: opts.allowCloud ?? false,
               })) {
                 titrrAnnotation = `tests: still failing — budget exceeded after attempt ${titrrAttempt}`;
+                await captureTitrrProposal({ isPartial: true, forceGateBlockReason: titrrAnnotation });
                 break;
               }
 

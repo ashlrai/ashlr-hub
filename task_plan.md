@@ -862,3 +862,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add policy and remote-handoff regression coverage.
 - [x] Finish focused, broad, invariant, and full-CI verification.
 - [x] Commit `8a85909`, push, reload daemon, and smoke status.
+
+## Current Continuation - TITRR Terminal Capture Yield
+- [x] Rechecked clean pushed state after evidence binding rollout.
+- [x] Deployed sidecar scouts for TITRR budget control flow and downstream proposal-disabled semantics.
+- [x] Add final capture for budget-exhausted TITRR terminal runs from the existing shared sandbox.
+- [x] Reuse captured proposal metadata so stale producer `proposal-disabled` summaries cannot survive terminal capture.
+- [x] Strengthen TITRR regression coverage for budget-exhausted stale producer metadata becoming captured `empty-diff` metadata.
+- [x] Run focused, broad, and invariant verification.
+- [x] Finish full CI.
+- [ ] Commit, push, reload daemon, and smoke status.

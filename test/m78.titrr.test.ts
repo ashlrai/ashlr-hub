@@ -476,13 +476,85 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
 
   // ---- Test 5: budget exhausted mid-loop ----
   it('budget exhausted mid-loop → stops, annotation matches budget/still-failing', async () => {
-    engineMockFn.mockResolvedValue({
-      state: makeRunState({
+    const usage = { tokensIn: 100_000, tokensOut: 100_000, steps: 1, estCostUsd: 0 };
+    const staleDisabledOutcome = {
+      kind: 'proposal-disabled' as const,
+      reason: 'proposal filing disabled for this internal attempt',
+      files: 7,
+      insertions: 14,
+      deletions: 0,
+    };
+    const producerBase = makeRunState({
+      status: 'done',
+      result: 'engine ok',
+      usage,
+    });
+    const producerState = {
+      ...producerBase,
+      proposalOutcome: staleDisabledOutcome,
+      runEventSummary: {
+        runId: producerBase.id,
         status: 'done',
-        result: 'engine ok',
-        usage: { tokensIn: 100_000, tokensOut: 100_000, steps: 1, estCostUsd: 0 },
-      }),
-      proposalId: 'p5',
+        outcome: 'proposal-disabled',
+        diffFiles: 7,
+        diffLines: 14,
+        tokensIn: usage.tokensIn,
+        tokensOut: usage.tokensOut,
+        costUsd: usage.estCostUsd,
+        actionCounts: {
+          modelSteps: 1,
+          totalSteps: 1,
+          proposalCaptureAttempts: 0,
+          diffFiles: 7,
+          diffLines: 14,
+          proposalCreated: 0,
+          proposalBlocked: 0,
+          proposalDisabled: 1,
+        },
+      },
+    };
+    const emptyDiffOutcome = {
+      kind: 'empty-diff' as const,
+      reason: 'engine "claude" completed without file changes',
+      files: 0,
+      insertions: 0,
+      deletions: 0,
+    };
+    engineMockFn.mockResolvedValue({
+      state: producerState,
+      proposalOutcome: staleDisabledOutcome,
+    });
+    captureMockFn.mockImplementationOnce(async (_engine: unknown, _goal: unknown, _cfg: unknown, opts: { runId?: string }) => {
+      const runId = opts.runId ?? 'run-budget-capture';
+      return {
+        state: {
+          ...makeRunState({ status: 'done', result: 'empty diff captured', usage }),
+          id: runId,
+          proposalOutcome: emptyDiffOutcome,
+          runEventSummary: {
+            runId,
+            status: 'done',
+            outcome: 'empty-diff',
+            proposalCreated: false,
+            diffFiles: 0,
+            diffLines: 0,
+            tokensIn: usage.tokensIn,
+            tokensOut: usage.tokensOut,
+            costUsd: usage.estCostUsd,
+            actionCounts: {
+              modelSteps: 1,
+              totalSteps: 1,
+              proposalCaptureAttempts: 1,
+              diffFiles: 0,
+              diffLines: 0,
+              proposalCreated: 0,
+              proposalBlocked: 1,
+              proposalDisabled: 0,
+            },
+          },
+        },
+        proposalOutcome: emptyDiffOutcome,
+      };
     });
     detectVCMockFn.mockReturnValue([{ kind: 'test', cmd: ['npm', 'test'] }]);
     runVCMockFn.mockReturnValue({ ok: false, command: 'npm test', exitCode: 1, output: 'FAIL', timedOut: false });
@@ -498,5 +570,31 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
 
     expect(state.result).toMatch(/TITRR.*(budget exceeded|still failing)/);
     expect(engineMockFn.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    const captureOpts = captureMockFn.mock.calls[0]?.[3] as Record<string, unknown>;
+    expect(captureOpts?.['existingWorktree']).toMatchObject({ id: 'mock-sb' });
+    expect(captureOpts?.['isPartial']).toBe(true);
+    expect(captureOpts?.['forceGateBlockReason']).toMatch(/budget exceeded after attempt 1/);
+    expect(captureOpts?.['sourceLabel']).toBe('TITRR');
+    expect(captureOpts?.['usage']).toMatchObject(usage);
+    expect(captureOpts?.['producerStatus']).toBe('done');
+    expect(captureOpts?.['actionCounts']).toMatchObject({
+      proposalCaptureAttempts: 0,
+      proposalDisabled: 1,
+      diffFiles: 7,
+      diffLines: 14,
+    });
+    expect(state.proposalOutcome?.kind).toBe('empty-diff');
+    expect(state.runEventSummary).toMatchObject({
+      outcome: 'empty-diff',
+      diffFiles: 0,
+      diffLines: 0,
+    });
+    expect(state.runEventSummary?.actionCounts).toMatchObject({
+      proposalCaptureAttempts: 1,
+      proposalDisabled: 0,
+      diffFiles: 0,
+      diffLines: 0,
+    });
   });
 });
