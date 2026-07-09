@@ -242,7 +242,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Map current FleetStatus assembly, goal/proposal stores, and CLI/web formatter patterns.
 - [x] Implement derived read-only `FleetStatus.laneLocks` with bounded privacy-safe samples.
 - [x] Add focused status, pure-helper, and formatter regression coverage.
-- [ ] Run verification, commit, push, restart/resume daemon, and smoke live lane-lock status.
+- [x] Run verification, commit, push, restart/resume daemon, and smoke live lane-lock status.
 
 ## Current Continuation - Remote Handoff Reconciliation
 - [x] Rechecked git status, recent commits, Entire state, task plan, and notes after the previous push.

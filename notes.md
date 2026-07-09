@@ -8,6 +8,7 @@
 - Status/UI: `FleetStatus.laneLocks` now flows through `/api/fleet` and `/api/control`; CLI `ashlr fleet status`, Fleet, and Mission Control show compact lane-lock counts without changing daemon dispatch or queue eligibility.
 - Correctness refinements: goal lane derivation selects one effective current milestone per active goal, skips milestones whose linked proposal is `applied` with `verifyResult.passed === true`, and keeps old unverified applied proposals visible when they are linked from any goal milestone.
 - Verification passed: `npm run typecheck -- --pretty false`, `node --check src/core/web/public/app.js`, `npm run test:ci -- test/m49.fleet-status.test.ts` (45 tests), web/control CI (`m61`, `m90`, `m299`, `m14`, 79 tests), `npm run lint` (existing 115-warning baseline, 0 errors), `npm run build`, `npm audit --audit-level=moderate`, `npm run test:invariants` (41 files, 411 tests), and `git diff --check`.
+- Production push/reload: pushed `d48655d feat: Surface read-only fleet lane locks` and `f60fd3a fix: Scope lane locks to enrolled repos`, rebuilt the compiled CLI, reinstalled/resumed the launchd daemon, and live smoke showed daemon PID `87593`, guard clear, goal-focus 12/4 active, lane locks `12 active / 1 stale / 0 handoff / 0 unverified`, and 13 backlog items / 11 eligible.
 
 ## Current Merged Verified Goal Completion
 - Start state: clean `master` after the goal-focus rollout; Entire remains not set up.
