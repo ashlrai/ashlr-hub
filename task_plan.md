@@ -551,6 +551,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Commit `24e58c9`, push to `origin/master`, and continue review before deployment.
 - [x] Applied late review follow-up: preserve 40-char Git SHA-1s in scrubbed audit text, sanitize project genome entries as well as hub entries, and strengthen the canary so each store must write and redact.
 - [x] Follow-up verification passed: focused safety/genome/dispatch/audit suites, typecheck, diff check, lint, build, audit, and full `test:invariants`.
-- [ ] Commit and push the review follow-up, then deploy/restart the live daemon.
+- [x] Commit `65c7269`, push the review follow-up, resume/reinstall the live daemon, and verify guard health clear on pid `46963`.
 - [ ] Next lane: sanitize public inbox/proposal and dashboard/control read surfaces without erasing legitimate source diffs needed for review.
 - [ ] Next lane: split raw MCP specs from sanitized public MCP views and unify Phantom name-only parsing across Hub integration paths.
+
+## Current Continuation - Overnight Safety/Yield Loop
+- [x] Rechecked clean `master`, recent commits, Entire state, live daemon status, FleetStatus summary, task plan, and notes after secret-safety deployment.
+- [x] Deployed parallel scouts for proposal/inbox secrecy, public API sanitization, MCP safe views, production-yield recovery, and Phantom/Grok product strategy.
+- [ ] Land the safest high-leverage patch from the scout findings.
+- [ ] Run focused verification, update persistent notes, commit, push, and recheck live daemon/fleet health.
