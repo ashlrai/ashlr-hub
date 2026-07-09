@@ -954,3 +954,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Run focused and adjacent router/daemon/gateway/resource/status verification.
 - [x] Run broad verification.
 - [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Comparative Learned Routing Gate
+- [x] Rechecked clean state after epoch-gated routing rollout and safety-scout findings.
+- [x] Deploy sidecar scouts for resource-state follow-up and comparative test coverage.
+- [x] Require same-tier learned reroute candidates to have their own current-label eligible samples, meet the proposal-yield threshold, and beat the base backend by a margin.
+- [x] Preserve same-tier/allowed/installed/non-builtin constraints and metadata-only route reasons.
+- [x] Add focused regressions for no blind unknown alternate and positive comparative candidate yield.
+- [x] Run focused and adjacent router/daemon/gateway/resource/status verification.
+- [x] Run broad verification.
+- [ ] Commit, push, reload daemon, and smoke live status.

@@ -231,6 +231,14 @@ function makeLegacyDispatchProductionEvent(over: Partial<DispatchProductionEvent
   return event;
 }
 
+function comparativeCandidateEvents(backend: EngineId): DispatchProductionEvent[] {
+  return [
+    makeDispatchProductionEvent({ backend, outcome: 'proposal-created', proposalCreated: true }),
+    makeDispatchProductionEvent({ backend, outcome: 'proposal-created', proposalCreated: true }),
+    makeDispatchProductionEvent({ backend, outcome: 'empty-diff', proposalCreated: false }),
+  ];
+}
+
 /** Build a minimal CostForecast. */
 function makeForecast(projectedMonthlyUsd = 0): CostForecast {
   return {
@@ -620,6 +628,7 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
       makeDispatchProductionEvent({ backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
       makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
       makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
+      ...comparativeCandidateEvents(alternate),
     ];
 
     const rec = await recommendRoute(item, cfg, {
@@ -633,6 +642,64 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(rec.tier).toBe(base.tier);
     expect(rec.reason).toContain('recent proposal yield');
     expect(rec.reason).toContain('same-tier reroute');
+    expect(rec.reason).toContain('candidate yield 2/3');
+  });
+
+  it('low dispatch-production yield does not blindly reroute to an unknown alternative', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const dispatchProductionEvents = [
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
+    ];
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents,
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('recent proposal yield');
+    expect(rec.reason).not.toContain('same-tier reroute');
+  });
+
+  it('low dispatch-production yield keeps base when candidate lacks reroute margin', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const dispatchProductionEvents = [
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'proposal-created', proposalCreated: true }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: alternate, outcome: 'proposal-created', proposalCreated: true }),
+      makeDispatchProductionEvent({ backend: alternate, outcome: 'proposal-created', proposalCreated: true }),
+      makeDispatchProductionEvent({ backend: alternate, outcome: 'empty-diff', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: alternate, outcome: 'gate-blocked', proposalCreated: false }),
+    ];
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents,
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('same-tier reroute');
+    expect(rec.reason).not.toContain('candidate yield');
   });
 
   it('legacy unversioned dispatch-production yield cannot trigger route changes', async () => {
@@ -832,23 +899,27 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     }));
     const item = makeItem({ source: 'security', effort: 5, score: 10 });
     const base = routeBackend(item, cfg);
-    const dispatchProductionEvents = Array.from({ length: 3 }, () =>
-      makeDispatchProductionEvent({
-        backend: base.backend,
-        outcome: 'gate-blocked',
-        proposalCreated: false,
-        reason: 'completeness gate blocked partial diff',
-        runEventSummary: {
-          actionCounts: {
-            proposalCaptureAttempts: 1,
-            completenessGateRuns: 1,
-            proposalBlocked: 1,
-            diffFiles: 2,
-            diffLines: 20,
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const dispatchProductionEvents = [
+      ...Array.from({ length: 3 }, () =>
+        makeDispatchProductionEvent({
+          backend: base.backend,
+          outcome: 'gate-blocked',
+          proposalCreated: false,
+          reason: 'completeness gate blocked partial diff',
+          runEventSummary: {
+            actionCounts: {
+              proposalCaptureAttempts: 1,
+              completenessGateRuns: 1,
+              proposalBlocked: 1,
+              diffFiles: 2,
+              diffLines: 20,
+            },
           },
-        },
-      })
-    );
+        })
+      ),
+      ...comparativeCandidateEvents(alternate),
+    ];
 
     const rec = await recommendRoute(item, cfg, {
       estimate: makeEstimate(0.001, 10),
@@ -872,21 +943,24 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     const item = makeItem({ source: 'security', effort: 5, score: 10 });
     const base = routeBackend(item, cfg);
     const alternate = base.backend === 'claude' ? 'codex' : 'claude';
-    const dispatchProductionEvents = Array.from({ length: 3 }, () =>
-      makeDispatchProductionEvent({
-        backend: base.backend,
-        outcome: 'empty-diff',
-        proposalCreated: false,
-        reason: 'agent returned no diff',
-        runEventSummary: {
-          actionCounts: {
-            proposalCaptureAttempts: 1,
-            proposalBlocked: 1,
-            diffFiles: 0,
+    const dispatchProductionEvents = [
+      ...Array.from({ length: 3 }, () =>
+        makeDispatchProductionEvent({
+          backend: base.backend,
+          outcome: 'empty-diff',
+          proposalCreated: false,
+          reason: 'agent returned no diff',
+          runEventSummary: {
+            actionCounts: {
+              proposalCaptureAttempts: 1,
+              proposalBlocked: 1,
+              diffFiles: 0,
+            },
           },
-        },
-      })
-    );
+        })
+      ),
+      ...comparativeCandidateEvents(alternate),
+    ];
 
     const rec = await recommendRoute(item, cfg, {
       estimate: makeEstimate(0.001, 10),
@@ -1007,6 +1081,7 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
         makeDispatchProductionEvent({ backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
         makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
         makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
+        ...comparativeCandidateEvents(alternate),
       ],
     });
 

@@ -182,6 +182,7 @@ function backendForTier(
 /** The preferred frontier backend ordering (mirrors FRONTIER_PREFERENCE in router.ts). */
 const FRONTIER_PREFERENCE: readonly EngineId[] = ['claude', 'codex'];
 const MIN_DISPATCH_YIELD_SAMPLES = 3;
+const MIN_DISPATCH_YIELD_REROUTE_MARGIN = 0.2;
 const DEFAULT_DISPATCH_YIELD_WINDOW_HOURS = 24;
 
 // ---------------------------------------------------------------------------
@@ -381,20 +382,38 @@ function dispatchYieldForBackend(
   };
 }
 
-function installedSameTierAlternative(
+function comparativeSameTierAlternative(
   current: EngineId,
   tier: EngineTier,
+  source: WorkItem['source'],
+  events: DispatchProductionEvent[],
   allowed: Set<EngineId>,
   cfg: AshlrConfig,
-): EngineId | null {
+  basePrior: DispatchYieldPrior,
+  minProposalYieldRate: number,
+): { backend: EngineId; prior: DispatchYieldPrior } | null {
+  let best: { backend: EngineId; prior: DispatchYieldPrior } | null = null;
   for (const backend of allowed) {
     if (backend === current) continue;
     if (backend === 'builtin') continue;
     if (tierOf(backend, cfg) !== tier) continue;
     if (!engineInstalled(backend, cfg)) continue;
-    return backend;
+    const prior = dispatchYieldForBackend(events, backend, source);
+    if (prior.attempts < MIN_DISPATCH_YIELD_SAMPLES) continue;
+    if (prior.proposalRate < minProposalYieldRate) continue;
+    if (prior.proposalRate < basePrior.proposalRate + MIN_DISPATCH_YIELD_REROUTE_MARGIN) continue;
+    if (
+      best === null ||
+      prior.proposalRate > best.prior.proposalRate ||
+      (
+        prior.proposalRate === best.prior.proposalRate &&
+        prior.attempts > best.prior.attempts
+      )
+    ) {
+      best = { backend, prior };
+    }
   }
-  return null;
+  return best;
 }
 
 // ---------------------------------------------------------------------------
@@ -566,17 +585,27 @@ export async function recommendRoute(
         confidence: Math.min(0.6 + (yieldPrior.attempts / 20) * 0.2, 0.8),
       };
     }
-    const alternate = installedSameTierAlternative(base.backend, base.tier, allowed, cfg);
+    const alternate = comparativeSameTierAlternative(
+      base.backend,
+      base.tier,
+      item.source,
+      dispatchEvents,
+      allowed,
+      cfg,
+      yieldPrior,
+      minProposalYieldRate,
+    );
     if (alternate !== null) {
       return {
-        backend: alternate,
+        backend: alternate.backend,
         tier: base.tier,
         reason:
           `learned-router: recent proposal yield for ${base.backend} ` +
           `${yieldPrior.proposalsCreated}/${yieldPrior.attempts} ` +
           `< threshold ${(minProposalYieldRate * 100).toFixed(0)}% — ` +
           `${yieldPrior.actionShape?.signal ? `action signal: ${yieldPrior.actionShape.signal}; ` : ''}` +
-          `same-tier reroute to ${alternate}`,
+          `same-tier reroute to ${alternate.backend} ` +
+          `(candidate yield ${alternate.prior.proposalsCreated}/${alternate.prior.attempts})`,
         confidence: Math.min(0.55 + (yieldPrior.attempts / 20) * 0.35, 0.9),
       };
     }
