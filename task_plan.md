@@ -739,3 +739,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add privacy/join regression coverage, including derived trajectory, worked-ledger time, aggregate ref, and raw execution canaries.
 - [x] Verify focused gates and broad lightweight gates.
 - [x] Commit and push `a0cc3d2`, reload launchd daemon, and smoke attempt coverage live in FleetStatus.
+
+## Current Continuation - Capture-Gate Repair Queue
+- [x] Rechecked clean pushed state, daemon/fleet smoke, and existing proposal-repair maintenance path.
+- [x] Deploy sidecar agents for repair queue privacy, daemon integration tests, and live-yield product risk.
+- [x] Add metadata-only repair work from recent self capture-gate dispatch-production failures.
+- [x] Wire repair result counts through existing daemon maintenance without new merge authority.
+- [x] Add focused queue/daemon/privacy tests.
+- [x] Verify focused and broad lightweight gates.
+- [ ] Commit, push, reload/smoke, and continue.

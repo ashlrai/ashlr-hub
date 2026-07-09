@@ -573,6 +573,10 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       eligible: 1,
       queued: 1,
       failed: 0,
+      dispatchCaptureScanned: 1,
+      dispatchCaptureEligible: 1,
+      dispatchCaptureQueued: 1,
+      dispatchCaptureFailed: 0,
     });
     mockBuildBacklog
       .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [] })
@@ -586,6 +590,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.reason).toBe('ok');
     expect(result.itemsConsidered).toBe(1);
     expect(mockQueueProposalRepairWorkForPendingProposals).toHaveBeenCalledTimes(1);
+    expect(mockQueueProposalRepairWorkForPendingProposals.mock.calls[0]).toEqual([]);
     expect(mockBuildBacklog).toHaveBeenCalledTimes(2);
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
     expect(result.producerMaintenance).toMatchObject({
@@ -593,7 +598,30 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       proposalRepairEligible: 1,
       proposalRepairQueued: 1,
       proposalRepairFailed: 0,
+      dispatchCaptureRepairScanned: 1,
+      dispatchCaptureRepairEligible: 1,
+      dispatchCaptureRepairQueued: 1,
+      dispatchCaptureRepairFailed: 0,
     });
+    expect(result.dispatches?.[0]?.itemId).toBe(repairItems[0]!.id);
+  });
+
+  it('A1a2b2: foundry.proposalRepair=false disables repair maintenance', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [],
+    });
+
+    const result = await tick(
+      { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autonomyControlLoop: false, proposalRepair: false } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('no-backlog');
+    expect(mockQueueProposalRepairWorkForPendingProposals).not.toHaveBeenCalled();
   });
 
   it('A1a2c: non-empty backlog refreshes after self-heal maintenance before selection', async () => {

@@ -1156,6 +1156,18 @@ export async function tick(
           proposalRepairEligible: proposalRepairMaintenanceResult.eligible,
           proposalRepairQueued: proposalRepairMaintenanceResult.queued,
           proposalRepairFailed: proposalRepairMaintenanceResult.failed,
+          ...(proposalRepairMaintenanceResult.dispatchCaptureScanned !== undefined
+            ? { dispatchCaptureRepairScanned: proposalRepairMaintenanceResult.dispatchCaptureScanned }
+            : {}),
+          ...(proposalRepairMaintenanceResult.dispatchCaptureEligible !== undefined
+            ? { dispatchCaptureRepairEligible: proposalRepairMaintenanceResult.dispatchCaptureEligible }
+            : {}),
+          ...(proposalRepairMaintenanceResult.dispatchCaptureQueued !== undefined
+            ? { dispatchCaptureRepairQueued: proposalRepairMaintenanceResult.dispatchCaptureQueued }
+            : {}),
+          ...(proposalRepairMaintenanceResult.dispatchCaptureFailed !== undefined
+            ? { dispatchCaptureRepairFailed: proposalRepairMaintenanceResult.dispatchCaptureFailed }
+            : {}),
         }
         : {}),
       ...(producerMaintenanceSkippedByCadence ? { skippedByCadence: true } : {}),

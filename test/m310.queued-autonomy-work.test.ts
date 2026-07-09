@@ -7,6 +7,7 @@ import { buildBacklog } from '../src/core/portfolio/backlog.js';
 import { scanQueuedAutonomyWork } from '../src/core/portfolio/scanners.js';
 import { queueProposalRepairWorkForPendingProposals } from '../src/core/fleet/proposal-repair-work.js';
 import type { Proposal, WorkItem } from '../src/core/types.js';
+import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 
 let fx: H1Fixture;
 
@@ -58,6 +59,29 @@ function partialProposal(repo: string, overrides: Partial<Proposal> = {}): Propo
       detail: 'capture gate blocked proposal after test failure in src/app.ts:12: expected ready state',
       source: 'capture-gate',
     },
+    ...overrides,
+  };
+}
+
+function captureFailure(repo: string, overrides: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
+  return {
+    schemaVersion: 1,
+    ts: '2026-07-09T12:00:00.000Z',
+    machineId: 'm310',
+    itemId: 'repo:self:original-capture',
+    source: 'self',
+    repo,
+    title: 'Self improvement capture failure with useful work',
+    backend: 'local-coder',
+    tier: 'local',
+    model: 'qwen',
+    assignedBy: 'daemon',
+    routeReason: 'self-improvement local route',
+    outcome: 'gate-blocked',
+    proposalCreated: false,
+    spentUsd: 0,
+    reason: 'gate-blocked: completeness gate blocked proposal after test failure',
+    basis: 'run-proposal-outcome',
     ...overrides,
   };
 }
@@ -202,6 +226,151 @@ describe('queued autonomy work scanner', () => {
     expect(found[0]!.detail).not.toContain('DO_NOT_COPY_DIFF');
     expect(found[0]!.detail).not.toContain('github_pat_1234567890abcdefghijklmnop');
     expect(found[0]!.detail).toContain('[REDACTED]');
+  });
+
+  it('queues metadata-only repair work for self capture-gate failures idempotently', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date();
+    const recent = new Date(now.getTime() - 60_000).toISOString();
+    const older = new Date(now.getTime() - 120_000).toISOString();
+    const event = captureFailure(repo.dir, {
+      ts: recent,
+      runId: 'run-capture-new',
+      reason: 'proposal-capture-error: failed after stdout=DO_NOT_COPY_STDOUT; src/app.ts:12 expected ready state token=github_pat_1234567890abcdefghijklmnop',
+      outcome: 'proposal-capture-error',
+      diffFiles: 3,
+      diffLines: 44,
+    });
+    const duplicateOlderEvent = captureFailure(repo.dir, {
+      ts: older,
+      runId: 'run-capture-old',
+      reason: 'proposal-capture-error: src/old.ts:5 expected stale state',
+      outcome: 'proposal-capture-error',
+      diffFiles: 1,
+      diffLines: 9,
+    });
+    const gateEvent = captureFailure(repo.dir, {
+      ts: recent,
+      itemId: 'repo:self:gate-capture',
+      runId: 'run-gate-capture',
+      outcome: 'gate-blocked',
+      reason: 'completeness gate blocked proposal: src/gate.ts:9 expected ready state',
+      runEventSummary: {
+        actionCounts: {
+          completenessGateRuns: 1,
+          proposalBlocked: 1,
+          diffFiles: 1,
+          diffLines: 6,
+        },
+      },
+    });
+
+    const first = queueProposalRepairWorkForPendingProposals(undefined, now, {
+      dispatchEvents: [duplicateOlderEvent, event, gateEvent],
+    });
+    const second = queueProposalRepairWorkForPendingProposals(undefined, now, {
+      dispatchEvents: [duplicateOlderEvent, event, gateEvent],
+    });
+    const rawQueue = JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[];
+    const found = await scanQueuedAutonomyWork(repo.dir);
+    const captureRepair = found.find((item) => item.detail.includes(event.itemId));
+    const gateRepair = found.find((item) => item.detail.includes(gateEvent.itemId));
+
+    expect(first).toMatchObject({
+      scanned: 3,
+      eligible: 2,
+      queued: 2,
+      failed: 0,
+      dispatchCaptureScanned: 3,
+      dispatchCaptureEligible: 2,
+      dispatchCaptureQueued: 2,
+      dispatchCaptureFailed: 0,
+    });
+    expect(second).toMatchObject({ scanned: 3, eligible: 2, queued: 2, failed: 0 });
+    expect(rawQueue).toHaveLength(2);
+    expect(found).toHaveLength(2);
+    expect(captureRepair).toMatchObject({
+      repo: repo.dir,
+      source: 'self',
+      tags: expect.arrayContaining(['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate', 'verify', 'high-priority']),
+    });
+    expect(captureRepair!.id).toContain(':proposal-repair-capture:');
+    expect(captureRepair!.id).not.toContain(event.reason!);
+    expect(captureRepair!.detail).toContain(event.itemId);
+    expect(captureRepair!.detail).toContain('run-capture-new');
+    expect(captureRepair!.detail).not.toContain('run-capture-old');
+    expect(captureRepair!.detail).toContain('proposal-capture-error');
+    expect(captureRepair!.detail).not.toContain('DO_NOT_COPY_STDOUT');
+    expect(captureRepair!.detail).not.toContain('github_pat_1234567890abcdefghijklmnop');
+    expect(captureRepair!.detail).toContain('stdout=[omitted]');
+    expect(gateRepair).toBeDefined();
+    expect(gateRepair!.detail).toContain('gate-blocked');
+  });
+
+  it('does not queue capture-gate repair for non-self, empty, disabled, or successful dispatches', async () => {
+    const repo = fx.makeRepo();
+    const otherRepo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date();
+    const recent = new Date(now.getTime() - 60_000).toISOString();
+    const events: DispatchProductionEvent[] = [
+      captureFailure(repo.dir, { ts: recent, itemId: 'todo-gate', source: 'todo' }),
+      captureFailure(repo.dir, { ts: recent, itemId: 'self-empty', outcome: 'empty-diff' }),
+      captureFailure(repo.dir, { ts: recent, itemId: 'self-disabled', outcome: 'proposal-disabled' }),
+      captureFailure(repo.dir, {
+        ts: recent,
+        itemId: 'self-success',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+        proposalId: 'prop-created',
+      }),
+      captureFailure(repo.dir, {
+        ts: recent,
+        itemId: 'self-generic-capture',
+        outcome: 'proposal-capture-error',
+        reason: 'proposal-capture-error: capture failed without source failure evidence',
+      }),
+      captureFailure(repo.dir, {
+        ts: recent,
+        itemId: 'self-generic-gate',
+        outcome: 'gate-blocked',
+        routeReason: 'local route',
+        reason: 'tests still failing after 2 attempt(s)',
+      }),
+      captureFailure(repo.dir, {
+        ts: new Date(now.getTime() - 25 * 60 * 60 * 1000).toISOString(),
+        itemId: 'self-old-capture',
+        outcome: 'proposal-capture-error',
+        reason: 'proposal-capture-error: src/old.ts:5 expected old state',
+      }),
+      captureFailure(repo.dir, {
+        ts: new Date(now.getTime() + 60_000).toISOString(),
+        itemId: 'self-future-capture',
+        outcome: 'proposal-capture-error',
+        reason: 'proposal-capture-error: src/future.ts:5 expected future state',
+      }),
+      captureFailure(repo.dir, {
+        ts: recent,
+        itemId: 'repo:proposal-repair:existing',
+        outcome: 'proposal-capture-error',
+        reason: 'proposal-capture-error: src/repair.ts:5 expected repair state',
+      }),
+      captureFailure(otherRepo.dir, {
+        ts: recent,
+        itemId: 'other-unenrolled',
+        outcome: 'proposal-capture-error',
+        reason: 'proposal-capture-error: src/other.ts:5 expected other state',
+      }),
+    ];
+
+    const result = queueProposalRepairWorkForPendingProposals(undefined, now, {
+      dispatchEvents: events,
+    });
+    const found = await scanQueuedAutonomyWork(repo.dir);
+
+    expect(result).toMatchObject({ scanned: events.length, eligible: 0, queued: 0, failed: 0 });
+    expect(found).toEqual([]);
   });
 
   it('does not queue repair work for clean pending proposals', async () => {

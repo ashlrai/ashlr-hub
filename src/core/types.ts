@@ -3744,6 +3744,10 @@ export interface DaemonTick {
     proposalRepairEligible?: number;
     proposalRepairQueued?: number;
     proposalRepairFailed?: number;
+    dispatchCaptureRepairScanned?: number;
+    dispatchCaptureRepairEligible?: number;
+    dispatchCaptureRepairQueued?: number;
+    dispatchCaptureRepairFailed?: number;
     skippedByCadence?: boolean;
     nextAfter?: string;
   };

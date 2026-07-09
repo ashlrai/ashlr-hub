@@ -1,23 +1,55 @@
 import { createHash } from 'node:crypto';
 import { basename, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 import type { Proposal, WorkItem } from '../types.js';
 import { listProposals } from '../inbox/store.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { queueSelfHealItem } from './self-heal.js';
+import { isActionableSelfHealItem } from './self-heal-trust.js';
+import {
+  readDispatchProductionEvents,
+  type DispatchProductionEvent,
+} from './dispatch-production-ledger.js';
+import { listEnrolled } from '../sandbox/policy.js';
 
 const MAX_TITLE = 140;
 const MAX_REASON = 260;
+const DISPATCH_CAPTURE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const DISPATCH_CAPTURE_LIMIT = 100;
+const DISPATCH_CAPTURE_MAX_QUEUED = 5;
 
 export interface ProposalRepairWorkResult {
   scanned: number;
   eligible: number;
   queued: number;
   failed: number;
+  proposalEligible?: number;
+  proposalQueued?: number;
+  proposalFailed?: number;
+  dispatchCaptureScanned?: number;
+  dispatchCaptureEligible?: number;
+  dispatchCaptureQueued?: number;
+  dispatchCaptureFailed?: number;
+}
+
+export interface ProposalRepairWorkOptions {
+  dispatchEvents?: DispatchProductionEvent[];
+  includeDispatchCaptureFailures?: boolean;
+  dispatchWindowMs?: number;
+  maxDispatchCaptureQueued?: number;
 }
 
 function bounded(value: unknown, max: number): string {
   const text = scrubSecrets(String(value ?? '')).replace(/\s+/g, ' ').trim();
   return text.length > max ? `${text.slice(0, Math.max(0, max - 3))}...` : text;
+}
+
+function boundedRepairReason(value: unknown, max: number): string {
+  const stripped = scrubSecrets(String(value ?? ''))
+    .replace(/\b(stdout|stderr|diff|prompt|env|argv)\s*[:=]\s*[^;,\n]+/gi, '$1=[omitted]')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return stripped.length > max ? `${stripped.slice(0, Math.max(0, max - 3))}...` : stripped;
 }
 
 function repairId(repo: string, proposalId: string): string {
@@ -26,6 +58,14 @@ function repairId(repo: string, proposalId: string): string {
     .digest('hex')
     .slice(0, 12);
   return `${basename(repo)}:proposal-repair:${hash}`;
+}
+
+function captureRepairId(repo: string, itemId: string): string {
+  const hash = createHash('sha1')
+    .update(`${resolve(repo)}\0${itemId}\0dispatch-capture-gate-repair`)
+    .digest('hex')
+    .slice(0, 12);
+  return `${basename(repo)}:proposal-repair-capture:${hash}`;
 }
 
 function proposalNeedsRepair(proposal: Proposal): boolean {
@@ -46,7 +86,22 @@ function repairReason(proposal: Proposal): string {
     (proposal.isPartial === true
       ? 'partial proposal capture needs a complete verified repair'
       : 'verification failed');
-  return bounded(raw, MAX_REASON);
+  return boundedRepairReason(raw, MAX_REASON);
+}
+
+function isRepairableCaptureFailure(event: DispatchProductionEvent): boolean {
+  if (event.source !== 'self') return false;
+  if (event.basis !== 'run-proposal-outcome') return false;
+  if (event.proposalCreated !== false) return false;
+  if (event.proposalId) return false;
+  if (!event.repo || !event.itemId) return false;
+  if (/\b(?:proposal-repair|dispatch-capture-repair|proposal-repair-capture)\b/i.test(`${event.itemId}\n${event.title}`)) {
+    return false;
+  }
+  if (event.outcome === 'proposal-capture-error') return true;
+  if (event.outcome !== 'gate-blocked') return false;
+  if ((event.runEventSummary?.actionCounts?.completenessGateRuns ?? 0) > 0) return true;
+  return /\b(?:capture|completeness|gate)\b/i.test(`${event.reason ?? ''}\n${event.routeReason ?? ''}`);
 }
 
 export function proposalRepairWorkItem(proposal: Proposal, now = new Date()): WorkItem | null {
@@ -77,9 +132,99 @@ export function proposalRepairWorkItem(proposal: Proposal, now = new Date()): Wo
   };
 }
 
+export function captureGateRepairWorkItem(
+  event: DispatchProductionEvent,
+  now = new Date(),
+): WorkItem | null {
+  if (!isRepairableCaptureFailure(event)) return null;
+  const eventMs = Date.parse(event.ts);
+  const nowMs = now.getTime();
+  if (!Number.isFinite(eventMs) || eventMs > nowMs || nowMs - eventMs > DISPATCH_CAPTURE_WINDOW_MS) {
+    return null;
+  }
+  const repo = canonicalEnrolledExistingRepo(event.repo);
+  if (!repo) return null;
+
+  const reason = boundedRepairReason(event.reason ?? event.routeReason ?? event.outcome, MAX_REASON) || event.outcome;
+  const itemId = bounded(event.itemId, 120) || 'unknown';
+  const outcome = event.outcome;
+  const value = 5;
+  const effort = 1;
+  const runId = bounded(event.runId, 120);
+  const diffFacts = [
+    typeof event.diffFiles === 'number' ? `files=${Math.max(0, Math.trunc(event.diffFiles))}` : undefined,
+    typeof event.diffLines === 'number' ? `lines=${Math.max(0, Math.trunc(event.diffLines))}` : undefined,
+  ].filter(Boolean).join(', ');
+
+  const item: WorkItem = {
+    id: captureRepairId(repo, itemId),
+    repo,
+    source: 'self',
+    title: `Repair dispatch capture failure for ${bounded(basename(repo), 80) || 'repo'} item ${itemId}`,
+    detail:
+      `Dispatch capture repair: a self-improvement dispatch produced repairable work but no proposal.\n` +
+      `Original work item: ${itemId}\n` +
+      (runId ? `Run: ${runId}\n` : '') +
+      `Dispatch outcome: ${outcome}\n` +
+      (diffFacts ? `Diff metadata: ${diffFacts}\n` : '') +
+      `Failure: ${reason}\n` +
+      `Produce a fresh complete fix, rerun merge-grade verification, and do not copy any old partial diff or tool output.`,
+    value,
+    effort,
+    score: value / effort,
+    tags: ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate', 'verify', 'high-priority'],
+    ts: new Date(eventMs).toISOString(),
+  };
+  return isActionableSelfHealItem(item, { nowMs }) ? item : null;
+}
+
+function readRecentCaptureFailures(now: Date, opts?: ProposalRepairWorkOptions): DispatchProductionEvent[] {
+  if (opts?.dispatchEvents) return opts.dispatchEvents;
+  if (opts?.includeDispatchCaptureFailures === false) return [];
+  const windowMs = opts?.dispatchWindowMs && opts.dispatchWindowMs > 0
+    ? opts.dispatchWindowMs
+    : DISPATCH_CAPTURE_WINDOW_MS;
+  try {
+    return readDispatchProductionEvents({
+      sinceMs: now.getTime() - windowMs,
+      limit: DISPATCH_CAPTURE_LIMIT,
+      maxFiles: Math.max(1, Math.ceil(windowMs / (24 * 60 * 60 * 1000)) + 1),
+    });
+  } catch {
+    return [];
+  }
+}
+
+function canonicalEnrolledExistingRepo(repo: string): string | null {
+  let repoKey: string;
+  try {
+    repoKey = resolve(repo);
+  } catch {
+    return null;
+  }
+  for (const enrolled of listEnrolled()) {
+    try {
+      if (resolve(enrolled) !== repoKey) continue;
+      return existsSync(enrolled) ? enrolled : null;
+    } catch {
+      // Ignore malformed enrollment rows.
+    }
+  }
+  return null;
+}
+
+function byNewestEvent(a: DispatchProductionEvent, b: DispatchProductionEvent): number {
+  const ams = Date.parse(a.ts);
+  const bms = Date.parse(b.ts);
+  const safeA = Number.isFinite(ams) ? ams : 0;
+  const safeB = Number.isFinite(bms) ? bms : 0;
+  return safeB - safeA;
+}
+
 export function queueProposalRepairWorkForPendingProposals(
   proposals?: Proposal[],
   now = new Date(),
+  opts?: ProposalRepairWorkOptions,
 ): ProposalRepairWorkResult {
   let pending: Proposal[];
   try {
@@ -92,20 +237,57 @@ export function queueProposalRepairWorkForPendingProposals(
       failed: 1,
     };
   }
+  const captureFailures = (proposals === undefined ? readRecentCaptureFailures(now, opts) : (opts?.dispatchEvents ?? []))
+    .slice()
+    .sort(byNewestEvent);
+  const maxCaptureQueued = Math.max(
+    0,
+    Math.min(DISPATCH_CAPTURE_MAX_QUEUED, Math.floor(opts?.maxDispatchCaptureQueued ?? DISPATCH_CAPTURE_MAX_QUEUED)),
+  );
 
   const result: ProposalRepairWorkResult = {
-    scanned: pending.length,
+    scanned: pending.length + captureFailures.length,
     eligible: 0,
     queued: 0,
     failed: 0,
+    proposalEligible: 0,
+    proposalQueued: 0,
+    proposalFailed: 0,
+    dispatchCaptureScanned: captureFailures.length,
+    dispatchCaptureEligible: 0,
+    dispatchCaptureQueued: 0,
+    dispatchCaptureFailed: 0,
   };
 
   for (const proposal of pending) {
     const item = proposalRepairWorkItem(proposal, now);
     if (!item) continue;
     result.eligible++;
-    if (queueSelfHealItem(item)) result.queued++;
-    else result.failed++;
+    result.proposalEligible!++;
+    if (queueSelfHealItem(item)) {
+      result.queued++;
+      result.proposalQueued!++;
+    } else {
+      result.failed++;
+      result.proposalFailed!++;
+    }
+  }
+  const seenCaptureIds = new Set<string>();
+  for (const event of captureFailures) {
+    if ((result.dispatchCaptureQueued ?? 0) >= maxCaptureQueued) break;
+    const item = captureGateRepairWorkItem(event, now);
+    if (!item) continue;
+    if (seenCaptureIds.has(item.id)) continue;
+    seenCaptureIds.add(item.id);
+    result.eligible++;
+    result.dispatchCaptureEligible!++;
+    if (queueSelfHealItem(item)) {
+      result.queued++;
+      result.dispatchCaptureQueued!++;
+    } else {
+      result.failed++;
+      result.dispatchCaptureFailed!++;
+    }
   }
 
   return result;
