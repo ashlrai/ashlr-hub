@@ -418,6 +418,38 @@ describe('M301 autonomy evidence pack persistence', () => {
     expect(raw).not.toContain('+evidence');
   });
 
+  it('captures delete-only diff files without storing deleted content', () => {
+    const deleteOnlyDiff = [
+      'diff --git a/docs/obsolete.md b/docs/obsolete.md',
+      'deleted file mode 100644',
+      '--- a/docs/obsolete.md',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-DELETE_ONLY_SECRET',
+      '',
+    ].join('\n');
+    const pack = goodPack({
+      proposal: proposal({
+        id: 'prop-delete-only',
+        diff: deleteOnlyDiff,
+      }),
+    });
+    pack.policy = evaluateAutonomyPolicy(pack, cfg());
+
+    expect(pack.diff.files).toEqual(['docs/obsolete.md']);
+    expect(pack.diff.changedLines).toBe(1);
+    expect(pack.policy).toMatchObject({
+      action: 'merge-main',
+      allowed: true,
+    });
+    expect(persistAutonomyEvidencePack(pack)).toBe(true);
+
+    const raw = fs.readFileSync(evidencePath(pack.proposal.id), 'utf8');
+    expect(raw).toContain('docs/obsolete.md');
+    expect(raw).not.toContain('diff --git');
+    expect(raw).not.toContain('DELETE_ONLY_SECRET');
+  });
+
   it('reads a single evidence pack by proposal id', () => {
     const pack = packFor('prop-read', '2026-07-01T00:00:00.000Z');
     expect(persistAutonomyEvidencePack(pack)).toBe(true);

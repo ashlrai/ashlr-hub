@@ -128,23 +128,53 @@ export function evidencePath(proposalId: string): string {
 
 export function summarizeDiff(diff: string | undefined): AutonomyDiffEvidence {
   const body = diff ?? '';
-  const files: string[] = [];
+  const files = new Set<string>();
   let changedLines = 0;
+  const addPath = (raw: string): void => {
+    let p = raw.trim().split('\t')[0];
+    if (p === '/dev/null') return;
+    if (p.startsWith('b/') || p.startsWith('a/')) p = p.slice(2);
+    if (p) files.add(p);
+  };
+  const addDiffGitPaths = (line: string): void => {
+    const rest = line.slice('diff --git '.length).trim();
+    const bIndex = rest.lastIndexOf(' b/');
+    if (rest.startsWith('a/') && bIndex > 0) {
+      addPath(rest.slice(0, bIndex));
+      addPath(rest.slice(bIndex + 1));
+      return;
+    }
+    const [left, ...right] = rest.split(/\s+/);
+    if (left) addPath(left);
+    if (right.length > 0) addPath(right.join(' '));
+  };
 
   for (const line of body.split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      addDiffGitPaths(line);
+      continue;
+    }
     if (line.startsWith('+++ ')) {
-      let p = line.slice(4).trim().split('\t')[0];
-      if (p === '/dev/null') continue;
-      if (p.startsWith('b/')) p = p.slice(2);
-      if (p.startsWith('a/')) p = p.slice(2);
-      if (p) files.push(p);
+      addPath(line.slice(4));
+      continue;
+    }
+    if (line.startsWith('--- ')) {
+      addPath(line.slice(4));
+      continue;
+    }
+    if (line.startsWith('rename from ')) {
+      addPath(line.slice('rename from '.length));
+      continue;
+    }
+    if (line.startsWith('rename to ')) {
+      addPath(line.slice('rename to '.length));
       continue;
     }
     if (line.startsWith('+++') || line.startsWith('---')) continue;
     if (line.startsWith('+') || line.startsWith('-')) changedLines++;
   }
 
-  return { files, changedLines };
+  return { files: [...files], changedLines };
 }
 
 export function buildAutonomyEvidencePack(input: BuildAutonomyEvidenceInput): AutonomyEvidencePack {

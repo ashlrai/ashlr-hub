@@ -1027,6 +1027,12 @@
   - Deployed as `6288847` on `origin/master`, reinstalled/resumed/kickstarted launchd, and smoked live status. Daemon PID `46793`, guard clear, kill switch off, tick in progress with fresh heartbeat; Mission Brief now says `Drain diagnostic reslices`, primary next action is `drain-diagnostic-reslices`, and the first queued reslice is `ashlr-hub:proposal-repair-nodiff:143e0ec26bbd`.
   - Next queued lanes from scouts: instrument metadata-only `runEventSummary.contextSummary` in the local api-model path to clear `no-context-summary-events`, and fix delete-only autonomy evidence packs so removed files are still represented in `pack.diff.files`.
 
+- Current delete-only evidence pack pass:
+  - Scout finding: `summarizeDiff()` only collected paths from `+++` lines, so delete-only diffs with `+++ /dev/null` could produce evidence packs with `diff.files: []` even though the proposal removed a real file. That made the durable evidence misleading and could cause policy to reject real delete-only changes as empty/unparsable.
+  - Implementation: diff evidence now collects changed paths from `diff --git`, `---`, `+++`, `rename from`, and `rename to` headers through a `Set`, skips `/dev/null`, and still stores only metadata (`files`, `changedLines`, optional hash) rather than raw diff text or deleted content.
+  - Regression coverage: `m301` now builds a delete-only diff, asserts `pack.diff.files === ['docs/obsolete.md']`, `changedLines === 1`, policy allows the otherwise-good pack, and persisted JSON excludes both `diff --git` and deleted content.
+  - Verification passed so far: `npm run test:ci -- test/m301.autonomy-policy.test.ts` (16 tests), `npm run typecheck -- --pretty false`, and `git diff --check`.
+
 - Current epoch-gated learned routing pass:
   - Purpose: allow the existing dispatch-yield learned reroute to use the new label foundation, but only for current, authoritative, metadata-only samples.
   - Implementation: `dispatchYieldForBackend()` now ignores rows unless `learningLabel` sanitizes as authoritative, the label is not policy-suppressed, top-level `routerPolicyVersion` equals `ROUTER_POLICY_VERSION`, optional `routeSnapshot.routerPolicyVersion` agrees with the top-level policy, and `learningEpoch` matches `learningEpochFromTimestamp(event.ts)`.
