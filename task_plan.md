@@ -922,3 +922,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused regressions for policy-disabled control flow, empty-diff diagnostics, failed/sandbox-failed non-diagnostics, privacy canaries, and status/API/web contracts.
 - [x] Finish focused, broad, invariant, and full-CI verification.
 - [x] Commit, push, reload daemon, smoke live fleet status, and continue into the next highest-leverage overnight lane.
+
+## Current Continuation - Explicit Merge Contract Wave 1
+- [x] Rechecked Hub, BinShield, and Pulse git states and repo instructions.
+- [x] Add explicit merge-grade `ashlr.verify.json` to clean core-fleet repos `binshield` and `ashlr-pulse`.
+- [x] Keep the slice manifest-only: no package scripts, lockfiles, CI, or app code changes.
+- [x] Verify BinShield `pnpm run typecheck`, `pnpm run lint`, and `pnpm run test`.
+- [x] Verify Pulse server `bun run typecheck` and `bun run test`.
+- [x] Verify Pulse agent `cargo check` and deterministic `cargo test -- --test-threads=1`.
+- [x] Run Hub repo-profile/backlog/status/merge regression coverage.
+- [x] Commit and push both sibling repo manifests, refresh Hub backlog, and smoke live contract coverage.
