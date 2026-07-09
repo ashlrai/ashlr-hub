@@ -23,6 +23,7 @@ import type {
   DaemonDispatchTrace,
   DaemonTick,
   EngineId,
+  EngineTier,
   PhantomAgentReportRollup,
   Proposal,
   WorkItem,
@@ -48,6 +49,8 @@ import {
   type RepoPackageManager,
   type RepoProjectKind,
 } from '../run/repo-profile.js';
+import { engineInstalled } from '../run/engines.js';
+import { engineTierOf } from '../run/sandboxed-engine.js';
 import { DEFAULT_COOLDOWN_MS, isSuppressibleWorkedOutcome, loadWorkedLedger } from './worked-ledger.js';
 import { pendingProposalItemKeysForBacklog, workItemCoverageKey } from './proposal-matching.js';
 import {
@@ -437,6 +440,7 @@ export interface FleetDispatchYieldDiagnosticCandidate {
   policyDisabled: number;
   verdict: FleetDispatchYieldDiagnosticVerdict;
   action: FleetDispatchYieldDiagnosticAction;
+  actionReason?: string;
   sameTierOnly: boolean;
   topReason?: string;
   attemptShape?: DispatchProductionYieldSummary['attemptShape'];
@@ -452,6 +456,7 @@ export interface FleetDispatchYieldDiagnostics {
   policyDisabled: number;
   verdict: FleetDispatchYieldDiagnosticVerdict;
   action: FleetDispatchYieldDiagnosticAction;
+  actionReason?: string;
   sameTierOnly: boolean;
   recommendation: string;
   topReason?: string;
@@ -1049,7 +1054,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     });
     if (dispatchProduction) {
       status.dispatchProduction = dispatchProduction;
-      status.dispatchYieldDiagnostics = buildDispatchYieldDiagnostics(dispatchProduction, cfg);
+      status.dispatchYieldDiagnostics = buildDispatchYieldDiagnostics(dispatchProduction, cfg, backends);
     }
   } catch {
     // Optional history/analytics surface only. Fleet status must stay read-only
@@ -1558,6 +1563,64 @@ function dispatchYieldActionFor(
     : 'tighten-context-or-reslice';
 }
 
+function dispatchYieldHasTrustedCapacity(backend: FleetBackendStatus): boolean {
+  const availability = backend.resource?.availability;
+  return availability === 'open';
+}
+
+function dispatchYieldInstalledForStatus(backend: FleetBackendStatus, cfg: AshlrConfig): boolean {
+  if (backend.backend === 'builtin') return false;
+  if (backend.backend === 'local-coder' && dispatchYieldHasTrustedCapacity(backend)) {
+    return true;
+  }
+  try {
+    return engineInstalled(backend.backend, cfg);
+  } catch {
+    return false;
+  }
+}
+
+function hasDispatchYieldSameTierAlternative(
+  candidate: FleetDispatchYieldDiagnosticCandidate,
+  cfg: AshlrConfig,
+  backends: FleetBackendStatus[],
+): boolean {
+  if (!candidate.backend) return false;
+  let currentTier: EngineTier;
+  try {
+    currentTier = engineTierOf(candidate.backend, cfg);
+  } catch {
+    return false;
+  }
+  for (const backend of backends) {
+    if (backend.backend === candidate.backend) continue;
+    if (backend.backend === 'builtin') continue;
+    if (!dispatchYieldHasTrustedCapacity(backend)) continue;
+    try {
+      if (engineTierOf(backend.backend, cfg) !== currentTier) continue;
+    } catch {
+      continue;
+    }
+    if (!dispatchYieldInstalledForStatus(backend, cfg)) continue;
+    return true;
+  }
+  return false;
+}
+
+function effectiveDispatchYieldCandidate(
+  candidate: FleetDispatchYieldDiagnosticCandidate,
+  cfg: AshlrConfig,
+  backends: FleetBackendStatus[],
+): FleetDispatchYieldDiagnosticCandidate {
+  if (candidate.action !== 'route-same-tier-alternative') return candidate;
+  if (hasDispatchYieldSameTierAlternative(candidate, cfg, backends)) return candidate;
+  return {
+    ...candidate,
+    action: 'tighten-context-or-reslice',
+    actionReason: 'no open installed same-tier alternative is available',
+  };
+}
+
 function dispatchYieldCandidate(
   bucket: DispatchProductionYieldBucket,
   scope: FleetDispatchYieldDiagnosticCandidate['scope'],
@@ -1616,6 +1679,7 @@ function sortDispatchYieldCandidates(
 function buildDispatchYieldDiagnostics(
   dispatchProduction: DispatchProductionYieldSummary,
   cfg: AshlrConfig,
+  backends: FleetBackendStatus[],
 ): FleetDispatchYieldDiagnostics {
   const lowYieldRate = configuredLowDispatchYieldRate(cfg);
   const diagnosticAttempts = diagnosticAttemptsForDispatchSummary(dispatchProduction);
@@ -1629,10 +1693,12 @@ function buildDispatchYieldDiagnostics(
     : dispatchProduction.byBackendModel.length > 0
       ? dispatchProduction.byBackendModel.map((bucket) => dispatchYieldCandidate(bucket, 'backend-model', lowYieldRate))
       : dispatchProduction.byBackend.map((bucket) => dispatchYieldCandidate(bucket, 'backend', lowYieldRate));
-  const candidates = sortDispatchYieldCandidates(bucketSource).slice(0, 5);
+  const candidates = sortDispatchYieldCandidates(
+    bucketSource.map((candidate) => effectiveDispatchYieldCandidate(candidate, cfg, backends)),
+  ).slice(0, 5);
   const fleetTopReason =
     dispatchProduction.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;
-  const fleetCandidate: FleetDispatchYieldDiagnosticCandidate = {
+  const fleetCandidate = effectiveDispatchYieldCandidate({
     scope: 'fleet',
     key: 'fleet',
     diagnosticAttempts,
@@ -1645,7 +1711,7 @@ function buildDispatchYieldDiagnostics(
     sameTierOnly: true,
     ...(fleetTopReason ? { topReason: fleetTopReason } : {}),
     ...(dispatchProduction.attemptShape ? { attemptShape: dispatchProduction.attemptShape } : {}),
-  };
+  }, cfg, backends);
   const actionableCandidate = candidates.find((candidate) => candidate.verdict === 'actionable');
   const primaryCandidate = actionableCandidate ??
     (overallVerdict === 'healthy' || overallVerdict === 'policy-suppressed'
@@ -1657,6 +1723,7 @@ function buildDispatchYieldDiagnostics(
     : dispatchYieldActionFor(verdict, dispatchProduction.attemptShape);
   const topReason = primaryCandidate?.topReason ??
     dispatchProduction.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;
+  const actionReason = primaryCandidate?.actionReason;
   return {
     windowHours: dispatchProduction.windowHours,
     minAttempts: MIN_DISPATCH_YIELD_ACTION_ATTEMPTS,
@@ -1667,10 +1734,12 @@ function buildDispatchYieldDiagnostics(
     policyDisabled,
     verdict,
     action,
+    ...(actionReason ? { actionReason } : {}),
     sameTierOnly: true,
     recommendation: dispatchYieldRecommendation({
       verdict,
       action,
+      actionReason,
       diagnosticAttempts,
       proposalRate,
       policyDisabled,
@@ -1686,6 +1755,7 @@ function buildDispatchYieldDiagnostics(
 function dispatchYieldRecommendation(input: {
   verdict: FleetDispatchYieldDiagnosticVerdict;
   action: FleetDispatchYieldDiagnosticAction;
+  actionReason?: string;
   diagnosticAttempts: number;
   proposalRate: number;
   policyDisabled: number;
@@ -1705,6 +1775,9 @@ function dispatchYieldRecommendation(input: {
   if (input.action === 'route-same-tier-alternative') {
     return `Inspect ${subject} with same-tier alternatives only; avoid tier escalation until deterministic evidence supports it.`;
   }
+  if (input.actionReason) {
+    return `Tighten context or reslice ${subject}; ${input.actionReason}.`;
+  }
   return `Tighten context or reslice ${subject}; capture/gate blocking dominates the low-yield sample.`;
 }
 
@@ -1718,15 +1791,17 @@ function formatDispatchYieldDiagnosticDetail(
   const rate = candidate?.proposalRate ?? diagnostic.proposalRate;
   const topReason = candidate?.topReason ?? diagnostic.topReason;
   const reason = topReason ? `; top reason: ${topReason}` : '';
+  const actionReason = candidate?.actionReason ?? diagnostic.actionReason;
+  const actionReasonDetail = actionReason ? `; action reason: ${actionReason}` : '';
   const shape = formatAttemptShapeDetail(candidate?.attemptShape ?? diagnostic.attemptShape);
   const action = diagnostic.action === 'route-same-tier-alternative'
     ? 'same-tier reroute'
     : diagnostic.action === 'tighten-context-or-reslice'
       ? 'tighten context/reslice'
       : diagnostic.action === 'collect-more-samples'
-        ? 'collect more samples'
-        : 'keep routing';
-  return `${subject} proposal yield ${proposals}/${attempts} (${formatActionPercent(rate)}); sample-gated action: ${action}${reason}${shape}`;
+      ? 'collect more samples'
+      : 'keep routing';
+  return `${subject} proposal yield ${proposals}/${attempts} (${formatActionPercent(rate)}); sample-gated action: ${action}${reason}${actionReasonDetail}${shape}`;
 }
 
 function dispatchYieldNextAction(diagnostic: FleetDispatchYieldDiagnostics): DiagnosticDispatchYieldAction | null {

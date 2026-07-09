@@ -828,3 +828,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Adjacent verification passed: manager, judge-trace, Best-of-N, taste critic, model ROI/stats, automerge, and verification-gate suite (217 tests).
 - [x] Broad gates passed: lint, build, audit, invariants, diff check, and full CI (439 files, 9,047 passed tests, 7 skipped).
 - [x] Commit and push `9bbd42f`, reload launchd daemon, and smoke live FleetStatus.
+
+## Current Continuation - Resource-Feasible Dispatch Yield Status
+- [x] Rechecked clean pushed state, Entire state, task plan, notes, and recent fleet status.
+- [x] Deployed scouts for dispatch-yield routing/status, learning ledger causality, Fleet OS readiness UI, and Phantom safe-delegation rollups.
+- [x] Keep runtime routing unchanged while making FleetStatus dispatch-yield actions resource-feasible.
+- [x] Add regression coverage for open installed same-tier alternatives and blocked alternatives.
+- [x] Run broad verification.
+- [ ] Commit, push, reload daemon, and smoke live FleetStatus.

@@ -55,6 +55,22 @@ function withFoundry(foundry: NonNullable<AshlrConfig['foundry']>): AshlrConfig 
   return { ...baseConfig(), foundry };
 }
 
+async function withTemporaryEnv<T>(entries: Record<string, string>, fn: () => Promise<T>): Promise<T> {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(entries)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 function makeEvidencePack(id: string, generatedAt: string) {
   const proposal: Proposal = {
     id,
@@ -1709,11 +1725,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       source: 'goal',
       repo,
       title: 'Improve low-yield dispatch',
-      backend: 'local-coder',
+      backend: 'nim',
       tier: 'mid',
-      model: 'qwen',
+      model: 'meta/llama-3.1-70b-instruct',
       assignedBy: 'daemon',
-      routeReason: 'local-mid bulk',
+      routeReason: 'nim-mid bulk',
       outcome: 'empty-diff',
       proposalCreated: false,
       spentUsd: 0.001,
@@ -1726,7 +1742,20 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       { ...baseEvent, itemId: 'item-c', outcome: 'engine-failed', reason: 'engine exited without diff' },
     ]);
 
-    const s = await buildFleetStatus(baseConfig());
+    const cfg = withFoundry({
+      allowedBackends: ['builtin', 'nim', 'kimi'],
+      resourceOverrides: {
+        nim: { availability: 'open', reason: 'nim test open' },
+        kimi: { availability: 'open', reason: 'kimi test open' },
+      },
+    });
+    const s = await withTemporaryEnv(
+      {
+        NVIDIA_NIM_API_KEY: 'test-nim-key',
+        MOONSHOT_API_KEY: 'test-kimi-key',
+      },
+      () => buildFleetStatus(cfg),
+    );
 
     expect(s.dispatchProduction).toMatchObject({
       attempts: 3,
@@ -1742,7 +1771,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       policyDisabled: 0,
       primaryCandidate: {
         scope: 'backend-source',
-        backend: 'local-coder',
+        backend: 'nim',
         source: 'goal',
         diagnosticAttempts: 3,
         proposalsCreated: 0,
@@ -1760,8 +1789,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
           id: 'inspect-dispatch-yield',
           priority: 'medium',
           label: 'Inspect dispatch yield',
-          detail: expect.stringContaining('local-coder/goal proposal yield 0/3 (0%)'),
-          target: 'local-coder',
+          detail: expect.stringContaining('nim/goal proposal yield 0/3 (0%)'),
+          target: 'nim',
         }),
       ]),
     );
@@ -1781,11 +1810,91 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       ]));
 
     const formatted = formatFleetStatus(s);
-    expect(formatted).toContain('[medium] Inspect dispatch yield [local-coder]');
+    expect(formatted).toContain('[medium] Inspect dispatch yield [nim]');
     expect(formatted).toContain('cmd: Inspect fleet status: ashlr fleet status --json (read-only)');
-    expect(formatted).toContain('local-coder/goal proposal yield 0/3 (0%)');
-    expect(formatted).toContain('diagnosis: actionable · local-coder/goal 0/3 0% · same-tier reroute');
+    expect(formatted).toContain('nim/goal proposal yield 0/3 (0%)');
+    expect(formatted).toContain('diagnosis: actionable · nim/goal 0/3 0% · same-tier reroute');
     expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 0, policy-off 0');
+  });
+
+  it('does not recommend same-tier reroute when no open installed alternative is available', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome);
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: new Date().toISOString(),
+        repos: [repo],
+        items: [makeBacklogItem(repo, 'repo:goal:no-alt', 'Improve no-alt yield', 5)],
+      }),
+      'utf8',
+    );
+    const now = new Date().toISOString();
+    const baseEvent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'item-no-alt-a',
+      source: 'goal',
+      repo,
+      title: 'Improve no-alt yield',
+      backend: 'nim',
+      tier: 'mid',
+      model: 'meta/llama-3.1-70b-instruct',
+      assignedBy: 'daemon',
+      routeReason: 'nim-mid bulk',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0.001,
+      reason: 'agent returned no diff',
+      basis: 'run-proposal-outcome',
+    };
+    recordDispatchProduction([
+      baseEvent,
+      { ...baseEvent, itemId: 'item-no-alt-b' },
+      { ...baseEvent, itemId: 'item-no-alt-c' },
+    ]);
+
+    const cfg = withFoundry({
+      allowedBackends: ['builtin', 'nim', 'kimi'],
+      resourceOverrides: {
+        nim: { availability: 'open', reason: 'nim test open' },
+        kimi: { availability: 'throttled', reason: 'kimi test throttled' },
+      },
+    });
+    const s = await withTemporaryEnv(
+      {
+        NVIDIA_NIM_API_KEY: 'test-nim-key',
+        MOONSHOT_API_KEY: 'test-kimi-key',
+      },
+      () => buildFleetStatus(cfg),
+    );
+
+    expect(s.dispatchYieldDiagnostics).toMatchObject({
+      verdict: 'actionable',
+      action: 'tighten-context-or-reslice',
+      actionReason: 'no open installed same-tier alternative is available',
+      primaryCandidate: {
+        scope: 'backend-source',
+        backend: 'nim',
+        source: 'goal',
+        diagnosticAttempts: 3,
+        proposalsCreated: 0,
+        verdict: 'actionable',
+        action: 'tighten-context-or-reslice',
+        actionReason: 'no open installed same-tier alternative is available',
+      },
+    });
+    expect(s.dispatchYieldDiagnostics?.recommendation)
+      .toContain('no open installed same-tier alternative is available');
+    const action = s.nextActions?.find((candidate) => candidate.id === 'inspect-dispatch-yield');
+    expect(action?.detail).toContain('sample-gated action: tighten context/reslice');
+    expect(action?.detail).toContain('action reason: no open installed same-tier alternative is available');
+    expect(formatFleetStatus(s)).toContain('diagnosis: actionable · nim/goal 0/3 0% · tighten context/reslice');
   });
 
   it('excludes proposal-disabled dispatch-production from weak-yield next action', async () => {
