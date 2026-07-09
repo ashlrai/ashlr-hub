@@ -548,6 +548,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Added `test/m349.secret-safety-invariants.test.ts`, a cross-store fake-secret canary that drives synthetic provider-shaped values through audit, decisions, dispatch-production, agent-actions, judge traces, genome hub, and raw on-disk `.ashlr` bytes.
 - [x] Focused verification passed: new canary, dispatch ledger, learning graph, judge trace, audit, genome capture/store, typecheck, and diff check.
 - [x] Wider verification passed: adjacent quality/dashboard/phantom/attention suites, lint, build, audit, and full `test:invariants`.
-- [ ] Commit, push to `origin/master`, and continue into the next safety/product lane.
+- [x] Commit `24e58c9`, push to `origin/master`, and continue review before deployment.
+- [x] Applied late review follow-up: preserve 40-char Git SHA-1s in scrubbed audit text, sanitize project genome entries as well as hub entries, and strengthen the canary so each store must write and redact.
+- [x] Follow-up verification passed: focused safety/genome/dispatch/audit suites, typecheck, diff check, lint, build, audit, and full `test:invariants`.
+- [ ] Commit and push the review follow-up, then deploy/restart the live daemon.
 - [ ] Next lane: sanitize public inbox/proposal and dashboard/control read surfaces without erasing legitimate source diffs needed for review.
 - [ ] Next lane: split raw MCP specs from sanitized public MCP views and unify Phantom name-only parsing across Hub integration paths.

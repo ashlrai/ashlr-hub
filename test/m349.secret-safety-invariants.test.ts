@@ -8,6 +8,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -17,7 +18,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { appendHubEntry } from '../src/core/genome/store.js';
+import { appendHubEntry, loadGenome } from '../src/core/genome/store.js';
 import { recordDecision, readDecisions } from '../src/core/fleet/decisions-ledger.js';
 import {
   recordDispatchProduction,
@@ -27,7 +28,9 @@ import { recordAgentAction, readAgentActions } from '../src/core/fleet/agent-act
 import { recordJudgeTrace, readJudgeTraces } from '../src/core/fleet/judge-trace.js';
 import { audit, readAudit } from '../src/core/sandbox/audit.js';
 import { scrubSecrets } from '../src/core/util/scrub.js';
+import type { AshlrConfig } from '../src/core/types.js';
 
+const SAFE_COMMIT_SHA = 'deadbeefcafef00ddeadbeefcafef00ddeadbeef';
 const SECRET_VALUES = [
   'sk-testvalue-verysecret00000000',
   'github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99II00JJ',
@@ -56,6 +59,7 @@ let prevUserProfile: string | undefined;
 let prevAshlrHome: string | undefined;
 
 function allPersistedText(root: string): string {
+  if (!existsSync(root)) return '';
   const chunks: string[] = [];
   const visit = (dir: string): void => {
     for (const name of readdirSync(dir)) {
@@ -83,6 +87,12 @@ function assertNoSecretValues(value: unknown): void {
   }
 }
 
+function expectRedacted(label: string, value: unknown): void {
+  const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+  expect(serialized, label).toContain('[REDACTED]');
+  assertNoSecretValues(serialized);
+}
+
 beforeEach(() => {
   prevHome = process.env.HOME;
   prevUserProfile = process.env.USERPROFILE;
@@ -105,10 +115,11 @@ afterEach(() => {
 
 describe('M349 secret safety invariants', () => {
   it('redacts a shared provider-token canary corpus', () => {
-    const scrubbed = scrubSecrets(SECRET_BUNDLE);
+    const scrubbed = scrubSecrets(`${SECRET_BUNDLE} commit ${SAFE_COMMIT_SHA}`);
 
     assertNoSecretValues(scrubbed);
     expect(scrubbed).toContain('[REDACTED]');
+    expect(scrubbed).toContain(SAFE_COMMIT_SHA);
   });
 
   it('keeps action, dispatch, decision, audit, judge, and genome stores metadata-only for fake secrets', () => {
@@ -219,6 +230,7 @@ describe('M349 secret safety invariants', () => {
       tags: [`tag token=${SECRET_VALUES[1]}`],
       hubOnly: true,
     });
+    const genomeConfig = { version: 1, roots: [] } as AshlrConfig;
 
     const readBack = {
       audit: readAudit(),
@@ -226,12 +238,35 @@ describe('M349 secret safety invariants', () => {
       dispatch: readDispatchProductionEvents(),
       actions: readAgentActions(),
       judge: readJudgeTraces({ proposalId: 'prop-m349' }),
-      genome: entry,
+      genomeEntry: entry,
+      genomeLoaded: loadGenome(genomeConfig),
       files: allPersistedText(join(tmpHome, '.ashlr')),
     };
 
+    expect(readBack.audit).toHaveLength(1);
+    expect(readBack.decisions).toHaveLength(1);
+    expect(readBack.dispatch).toHaveLength(1);
+    expect(readBack.actions).toHaveLength(1);
+    expect(readBack.judge).toHaveLength(1);
+    expect(readBack.genomeLoaded.some((row) => row.id === entry.id)).toBe(true);
+
+    expectRedacted('audit record', readBack.audit[0]);
+    expectRedacted('decision record', readBack.decisions[0]);
+    expectRedacted('dispatch record', readBack.dispatch[0]);
+    expectRedacted('agent-action record', readBack.actions[0]);
+    expectRedacted('judge trace record', readBack.judge[0]);
+    expectRedacted('genome returned entry', readBack.genomeEntry);
+    expectRedacted('genome loaded entry', readBack.genomeLoaded.find((row) => row.id === entry.id));
+
+    const root = join(tmpHome, '.ashlr');
+    expectRedacted('audit raw bytes', allPersistedText(join(root, 'audit')));
+    expectRedacted('decisions raw bytes', allPersistedText(join(root, 'decisions')));
+    expectRedacted('dispatch raw bytes', allPersistedText(join(root, 'dispatch-production')));
+    expectRedacted('agent-actions raw bytes', allPersistedText(join(root, 'agent-actions')));
+    expectRedacted('judge raw bytes', allPersistedText(join(root, 'judge-traces')));
+    expectRedacted('genome raw bytes', allPersistedText(join(root, 'genome')));
+
     assertNoSecretValues(readBack);
-    expect(JSON.stringify(readBack)).toContain('[REDACTED]');
     expect(readBack.decisions[0]).toMatchObject({
       proposalId: 'prop-m349',
       learningSource: 'decision-ledger',

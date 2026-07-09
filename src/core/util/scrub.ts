@@ -26,6 +26,13 @@
  * PURITY: no I/O, no side-effects. Pure string transform.
  */
 
+function scrubLongBase64Like(match: string): string {
+  // Preserve ordinary Git SHA-1 commit ids for forensic audit trails. The
+  // explicit hex-64 rule above still redacts longer raw-key shapes.
+  if (/^[0-9a-fA-F]{40}$/.test(match)) return match;
+  return '[REDACTED]';
+}
+
 /**
  * Scrub recognised secret patterns from `text`.
  * Returns the scrubbed string with secrets replaced by `[REDACTED]`.
@@ -65,7 +72,7 @@ export function scrubSecrets(text: string): string {
       .replace(/\bAIza[0-9A-Za-z_-]{35}\b/g, '[REDACTED]')
       // 10. URL passwords and long base64-ish blobs.
       .replace(/(:\/\/[^:\s/@]+:)[^@\s]{8,}(@)/g, '$1[REDACTED]$2')
-      .replace(/(?<![/\w])[A-Za-z0-9+/]{40,}={0,2}(?![/\w])/g, '[REDACTED]');
+      .replace(/(?<![/\w])[A-Za-z0-9+/]{40,}={0,2}(?![/\w])/g, scrubLongBase64Like);
   } catch {
     // Never throws — return original text on unexpected error.
     return text;

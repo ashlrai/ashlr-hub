@@ -267,6 +267,38 @@ describe('loadGenome — project .ashlrcode/genome/ source', () => {
     expect(projectNames.some(n => n === 'my-project' || n?.includes('my-project'))).toBe(true);
   });
 
+  it('scrubs secret-shaped values from project genome entries', () => {
+    const base = path.join(tmpHome, 'repos');
+    const repoDir = path.join(base, 'secret-project');
+    const genomeDir = path.join(repoDir, '.ashlrcode', 'genome');
+    fs.mkdirSync(genomeDir, { recursive: true });
+    const secret = 'github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99II00JJ';
+
+    fs.writeFileSync(
+      path.join(genomeDir, 'manifest.json'),
+      JSON.stringify({
+        version: 1,
+        project: `project token=${secret}`,
+        sections: [
+          {
+            path: 'secret.md',
+            title: `title token=${secret}`,
+            tags: [`tag token=${secret}`],
+            updatedAt: '2026-07-09T00:00:00.000Z',
+          },
+        ],
+      }),
+    );
+    fs.writeFileSync(path.join(genomeDir, 'secret.md'), `Body token=${secret}\n`);
+
+    const entries = loadGenome(makeConfigWithRoots(base)).filter(e => e.source === 'project');
+    const serialized = JSON.stringify(entries);
+
+    expect(entries).toHaveLength(1);
+    expect(serialized).not.toContain(secret);
+    expect(serialized).toContain('[REDACTED]');
+  });
+
   it('returns empty array when no repos with genome dirs exist', () => {
     const base = path.join(tmpHome, 'empty-repos');
     fs.mkdirSync(base);

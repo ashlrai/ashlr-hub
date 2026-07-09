@@ -169,6 +169,17 @@ function manifestProjectName(manifest: unknown, dirBasename: string): string {
   return dirBasename;
 }
 
+function sanitizeGenomeEntry(entry: GenomeEntry): GenomeEntry {
+  return {
+    ...entry,
+    id: scrubSecrets(entry.id),
+    project: entry.project ? scrubSecrets(entry.project) : null,
+    title: scrubSecrets(entry.title),
+    text: scrubSecrets(entry.text),
+    tags: entry.tags.map((tag) => scrubSecrets(tag)),
+  };
+}
+
 /**
  * Load GenomeEntry records from <repo>/.ashlrcode/genome/.
  *
@@ -227,7 +238,7 @@ function loadProjectGenome(repoPath: string): GenomeEntry[] {
 
     seenRelPaths.add(normRel);
 
-    entries.push({
+    entries.push(sanitizeGenomeEntry({
       id: makeId(`${projectName}:${normRel}`),
       project: projectName,
       source: 'project',
@@ -235,7 +246,7 @@ function loadProjectGenome(repoPath: string): GenomeEntry[] {
       text: text.trim().slice(0, SECTION_MAX_BYTES),
       tags,
       ts,
-    });
+    }));
   }
 
   // --- Pass 2: un-manifested .md/.json files ---
@@ -290,7 +301,7 @@ function collectGenomeFiles(
     const title = path.basename(dirent.name, ext).replace(/[-_]/g, ' ');
     const ts = safeMtime(absPath, new Date().toISOString());
 
-    entries.push({
+    entries.push(sanitizeGenomeEntry({
       id: makeId(`${projectName}:${relPath}`),
       project: projectName,
       source: 'project',
@@ -298,7 +309,7 @@ function collectGenomeFiles(
       text: text.trim().slice(0, SECTION_MAX_BYTES),
       tags: [],
       ts,
-    });
+    }));
   }
 }
 
@@ -338,7 +349,7 @@ function loadHubEntries(): GenomeEntry[] {
         continue;
       }
 
-      entries.push({
+      entries.push(sanitizeGenomeEntry({
         id: e['id'] as string,
         project: typeof e['project'] === 'string' ? scrubSecrets(e['project']) : null,
         source: 'hub',
@@ -350,7 +361,7 @@ function loadHubEntries(): GenomeEntry[] {
               .map((t) => scrubSecrets(t))
           : [],
         ts: e['ts'] as string,
-      });
+      }));
     }
   } catch {
     // Any error: return whatever we parsed so far.
@@ -545,7 +556,7 @@ export function appendHubEntry(input: LearnInput): GenomeEntry {
   // Id: stable slug from title + timestamp (unique per call).
   const id = makeId(`hub:${title}:${now}`);
 
-  const entry: GenomeEntry = {
+  const entry: GenomeEntry = sanitizeGenomeEntry({
     id,
     project,
     source: 'hub',
@@ -553,7 +564,7 @@ export function appendHubEntry(input: LearnInput): GenomeEntry {
     text,
     tags,
     ts: now,
-  };
+  });
 
   // Ensure hub store directory exists.
   try {
