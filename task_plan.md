@@ -882,4 +882,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused regression coverage for helper, backlog, status, daemon selection, resource-strategy, and queue-drain behavior.
 - [x] Run focused, broad, and invariant verification.
 - [x] Finish full CI.
-- [ ] Commit, push, reload daemon, and smoke status.
+- [x] Commit `0238939`, push, reload daemon, and smoke status.
