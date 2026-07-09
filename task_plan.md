@@ -535,4 +535,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Added focused tests for parser safety, readiness name/value/path privacy, FleetStatus formatter/dashboard pass-through, cached status behavior, and doctor fixtures.
 - [x] Verification passed: typecheck, focused Phantom/readiness/FleetStatus/dashboard/control suites, lint, build, audit, diff check, invariants, built CLI smoke, and privacy greps.
 - [x] Full `npm run test:ci` passed 434/435 files with 8,908 passing tests and 7 skipped; the sole failure was an order-sensitive `test/m78.titrr.test.ts` mock assertion that passed immediately in direct rerun and in a mixed Phantom/Fleet/TITRR subset.
-- [ ] Commit, push, reinstall/restart the daemon, and verify live fleet status.
+- [x] Commit `a576d9c`, push to `origin/master`, reinstall/restart the daemon, and verify live fleet status.
