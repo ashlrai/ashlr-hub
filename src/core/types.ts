@@ -3671,6 +3671,20 @@ export type HealthDimension =
 /** A letter grade derived deterministically from a 0..100 score. */
 export type HealthGrade = 'A' | 'B' | 'C' | 'D' | 'F';
 
+/** Typed scoring error emitted when health math produces a non-finite score. */
+export interface HealthScoreError {
+  code: 'invalid-health-score';
+  context: string;
+  raw: string;
+  detail: string;
+}
+
+/** Result of normalizing an internal health score candidate to the public 0..100 range. */
+export interface ClampedHealthScore {
+  score: number;
+  error?: HealthScoreError;
+}
+
 /**
  * M27: a single read-only project-standards probe result for one repo.
  * Produced by conventions.ts via pure FS reads (presence/size checks). Carries
@@ -3703,6 +3717,8 @@ export interface HealthDimensionScore {
   findingCount: number;
   /** Short, deterministic human-readable summary line (no secrets). */
   summary: string;
+  /** Present when invalid score math was coerced to a valid 0..100 score. */
+  error?: HealthScoreError;
 }
 
 /**
@@ -3728,6 +3744,8 @@ export interface HealthScore {
   worstOffenders: WorkItem[];
   /** ISO timestamp this score was computed. */
   ts: string;
+  /** Present when any underlying health score path had to coerce invalid math. */
+  errors?: HealthScoreError[];
 }
 
 /**
@@ -3762,6 +3780,8 @@ export interface HealthReport {
   narrative?: string;
   /** True when `narrative` was produced by a LOCAL model; absent when no narrative. */
   narrativeLocal?: boolean;
+  /** Present when any underlying health score path had to coerce invalid math. */
+  errors?: HealthScoreError[];
 }
 
 /**

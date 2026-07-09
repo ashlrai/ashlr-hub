@@ -423,4 +423,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Hardened browser and CLI surfaces for empty workspace data, partial stale status objects, and Windows-style repo paths.
 - [x] Added focused regression tests for append/read/window limits, fallback paths, secret scrubbing, poisoned legacy dimensions, non-finite numbers, summaries, FleetStatus, dashboard snapshots, and agent-readable API output.
 - [x] Production verification passed: JS syntax, typecheck, focused affected suites, adjacent daemon/control suites, build, lint, audit, diff check, and full `npm run test:ci` (428 files, 8,811 passed, 7 skipped).
-- [ ] Commit only this pass's files, push to `origin/master`, and restart/verify the live daemon.
+- [x] Commit only this pass's files, push to `origin/master`, and restart/verify the live daemon.
+
+## Current Continuation - Score Stability And Routing Contract Hygiene
+- [x] Rechecked branch state, recent commits, Entire state, dirty worktree, task plan, and notes.
+- [x] Deployed parallel agents for health-score leakage, invent ambition contract safety, learned-router sample-floor coverage, live telemetry, and final verification planning.
+- [x] Preserved richer invent impact/confidence/effort ambition signals while mapping emitted `WorkItem.value`, `effort`, and `score` back to the stable backlog contract.
+- [x] Added malformed numeric fallback, clamped ambition metadata, high-impact/low-effort, and contract-safe frontier ambition regression tests.
+- [x] Hardened health score math and report output so non-finite dimension scores and worst-offender fields cannot leak `NaN` or `Infinity`, while typed errors remain visible.
+- [x] Tightened learned-routing sample-floor stabilization and added exact-floor route/model selection coverage for both engine and producer scores.
+- [x] Run focused health, invent, learned-routing, and model-granular routing verification.
+- [x] Run final typecheck, adjacent suites, lint, build, audit, diff checks, and full CI.
+- [x] Commit, push to `origin/master`, rebuild/restart daemon, and verify live fleet status.

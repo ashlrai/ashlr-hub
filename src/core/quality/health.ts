@@ -25,11 +25,13 @@
 import { resolve } from 'node:path';
 
 import type {
+  ClampedHealthScore,
   ConventionFinding,
   HealthDimension,
   HealthDimensionScore,
   HealthOptions,
   HealthReport,
+  HealthScoreError,
   HealthScore,
   WorkItem,
   WorkSource,
@@ -124,15 +126,109 @@ function conventionPenalty(weight: number): number {
 // Grade derivation (deterministic)
 // ---------------------------------------------------------------------------
 
+function rawScoreLabel(raw: unknown): string {
+  if (typeof raw === 'number') {
+    if (Number.isNaN(raw)) return 'NaN';
+    if (raw === Infinity) return 'Infinity';
+    if (raw === -Infinity) return '-Infinity';
+  }
+  if (raw === null) return 'null';
+  if (raw === undefined) return 'undefined';
+  return String(raw);
+}
+
+export function clampScore(raw: unknown, context = 'health-score'): ClampedHealthScore {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+    return {
+      score: 0,
+      error: {
+        code: 'invalid-health-score',
+        context,
+        raw: rawScoreLabel(raw),
+        detail: 'health score candidate was not a finite number; coerced to 0/100',
+      },
+    };
+  }
+
+  return { score: Math.max(0, Math.min(100, raw)) };
+}
+
+function healthScoreError(context: string, raw: unknown, detail: string): HealthScoreError {
+  return {
+    code: 'invalid-health-score',
+    context,
+    raw: rawScoreLabel(raw),
+    detail,
+  };
+}
+
+function finiteWorkItemNumber(
+  raw: unknown,
+  fallback: number,
+  context: string,
+  errors: HealthScoreError[],
+): number {
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  errors.push(healthScoreError(
+    context,
+    raw,
+    'work item numeric field was not finite; coerced for health report output',
+  ));
+  return fallback;
+}
+
+function finiteWorkItemScale(
+  raw: unknown,
+  fallback: number,
+  context: string,
+  errors: HealthScoreError[],
+): number {
+  const n = finiteWorkItemNumber(raw, fallback, context, errors);
+  return Math.max(1, Math.min(5, Math.round(n)));
+}
+
+function sanitizeWorstOffender(item: WorkItem, errors: HealthScoreError[]): WorkItem {
+  return {
+    ...item,
+    value: finiteWorkItemScale(item.value, 1, `worst-offender:${item.id}:value`, errors),
+    effort: finiteWorkItemScale(item.effort, 1, `worst-offender:${item.id}:effort`, errors),
+    score: finiteWorkItemNumber(item.score, 0, `worst-offender:${item.id}:score`, errors),
+  };
+}
+
+function sanitizeConventionFinding(
+  finding: ConventionFinding,
+  errors: HealthScoreError[],
+): ConventionFinding {
+  if (typeof finding.weight === 'number' && Number.isFinite(finding.weight)) {
+    return {
+      ...finding,
+      weight: Math.max(1, Math.min(5, Math.round(finding.weight))),
+    };
+  }
+
+  errors.push(healthScoreError(
+    `convention:${finding.key}:weight`,
+    finding.weight,
+    'convention weight was not finite; coerced for health report output',
+  ));
+
+  return {
+    ...finding,
+    weight: 1,
+  };
+}
+
 /**
  * Map a 0..100 score to a letter grade: A>=90, B>=80, C>=70, D>=60, else F.
  * Exported so the report layer derives the average grade with the same rule.
  */
 export function gradeFor(score: number): HealthScore['grade'] {
-  if (score >= 90) return 'A';
-  if (score >= 80) return 'B';
-  if (score >= 70) return 'C';
-  if (score >= 60) return 'D';
+  const clamped = clampScore(score, 'grade');
+  if (clamped.score >= 90) return 'A';
+  if (clamped.score >= 80) return 'B';
+  if (clamped.score >= 70) return 'C';
+  if (clamped.score >= 60) return 'D';
   return 'F';
 }
 
@@ -198,13 +294,16 @@ function scoreDimension(
   // not a perfect score (we can't prove the dimension is clean).
   if (failed) penalty += 10;
 
-  const score = Math.max(0, Math.min(100, 100 - penalty));
+  const clamped = clampScore(100 - penalty, `dimension:${dimension}`);
+  const score = clamped.score;
   // The `conventions` dimension is fed by probeConventions (not WorkItems), so
   // its finding count is the failed-probe count, not items.length (which is 0).
   const findingCount = dimension === 'conventions' ? conventionGapCount : items.length;
 
   let summary: string;
-  if (failed) {
+  if (clamped.error) {
+    summary = `score error — ${clamped.error.detail}`;
+  } else if (failed) {
     summary = `scanner unavailable — scored conservatively (${score}/100)`;
   } else if (findingCount === 0 && conventionPenaltyTotal === 0) {
     summary = 'no findings — healthy';
@@ -214,7 +313,9 @@ function scoreDimension(
     summary = `${findingCount} finding(s) — ${score}/100`;
   }
 
-  return { dimension, score, weight, findingCount, summary };
+  const result: HealthDimensionScore = { dimension, score, weight, findingCount, summary };
+  if (clamped.error) result.error = clamped.error;
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -254,12 +355,15 @@ export async function computeHealth(repo: string): Promise<HealthScore> {
   // Read-only scanner sweep + convention probe (both never-throw-guarded).
   const { items, failedSources } = await runScanners(abs);
 
-  let conventions: ConventionFinding[];
+  let rawConventions: ConventionFinding[];
   try {
-    conventions = probeConventions(abs);
+    rawConventions = probeConventions(abs);
   } catch {
-    conventions = [];
+    rawConventions = [];
   }
+  const conventionErrors: HealthScoreError[] = [];
+  const conventions = rawConventions.map((finding) =>
+    sanitizeConventionFinding(finding, conventionErrors));
 
   // Bucket WorkItems by their feeding dimension.
   const byDimension = new Map<HealthDimension, WorkItem[]>();
@@ -274,7 +378,7 @@ export async function computeHealth(repo: string): Promise<HealthScore> {
   // The `conventions` dimension penalty + gap count: derived from failed probes.
   let conventionPenaltyTotal = 0;
   let conventionGapCount = 0;
-  for (const finding of conventions) {
+  for (const finding of rawConventions) {
     if (!finding.ok) {
       conventionPenaltyTotal += conventionPenalty(finding.weight);
       conventionGapCount += 1;
@@ -297,14 +401,26 @@ export async function computeHealth(repo: string): Promise<HealthScore> {
   // Weighted roll-up into the overall 0..100 (weights normalized at compute time).
   const totalWeight = dimensions.reduce((acc, d) => acc + d.weight, 0);
   const weightedSum = dimensions.reduce((acc, d) => acc + d.score * d.weight, 0);
-  const overall = totalWeight > 0 ? Math.round(weightedSum / totalWeight) : 0;
+  const overallClamp = clampScore(
+    totalWeight > 0 ? Math.round(weightedSum / totalWeight) : 0,
+    'repo-overall',
+  );
+  const overall = overallClamp.score;
+  const offenderErrors: HealthScoreError[] = [];
 
   // Worst offenders: highest WorkItem.score first; deterministic tiebreak by id.
-  const worstOffenders: WorkItem[] = [...items]
+  const worstOffenders: WorkItem[] = items
+    .map((it) => sanitizeWorstOffender(it, offenderErrors))
     .sort((a, b) => (b.score - a.score) || a.id.localeCompare(b.id))
     .slice(0, MAX_WORST_OFFENDERS);
+  const errors = collectScoreErrors([
+    ...dimensions.map((d) => d.error),
+    overallClamp.error,
+    ...offenderErrors,
+    ...conventionErrors,
+  ]);
 
-  return {
+  const result: HealthScore = {
     repo: abs,
     score: overall,
     grade: gradeFor(overall),
@@ -313,6 +429,12 @@ export async function computeHealth(repo: string): Promise<HealthScore> {
     worstOffenders,
     ts: new Date().toISOString(),
   };
+  if (errors.length > 0) result.errors = errors;
+  return result;
+}
+
+function collectScoreErrors(errors: Array<HealthScoreError | undefined>): HealthScoreError[] {
+  return errors.filter((err): err is HealthScoreError => err !== undefined);
 }
 
 /**
@@ -389,14 +511,26 @@ export async function computeReport(opts?: HealthOptions): Promise<HealthReport>
   }
 
   // Rank worst-first (ascending overall score); deterministic tiebreak by path.
-  scores.sort((a, b) => (a.score - b.score) || a.repo.localeCompare(b.repo));
+  scores.sort((a, b) =>
+    (clampScore(a.score, `repo-sort:${a.repo}`).score - clampScore(b.score, `repo-sort:${b.repo}`).score) ||
+    a.repo.localeCompare(b.repo),
+  );
 
-  const averageScore =
-    scores.length > 0
-      ? Math.round(scores.reduce((acc, s) => acc + s.score, 0) / scores.length)
-      : 0;
+  const scoreClamps = scores.map((s) => clampScore(s.score, `repo-score:${s.repo}`));
+  const averageClamp = clampScore(
+    scoreClamps.length > 0
+      ? Math.round(scoreClamps.reduce((acc, s) => acc + s.score, 0) / scoreClamps.length)
+      : 0,
+    'portfolio-average',
+  );
+  const averageScore = averageClamp.score;
+  const errors = collectScoreErrors([
+    ...scores.flatMap((s) => s.errors ?? []),
+    ...scoreClamps.map((s) => s.error),
+    averageClamp.error,
+  ]);
 
-  return {
+  const report: HealthReport = {
     generatedAt: new Date().toISOString(),
     repos: scoped,
     scores,
@@ -404,4 +538,6 @@ export async function computeReport(opts?: HealthOptions): Promise<HealthReport>
     averageGrade: gradeFor(averageScore),
     delta: {},
   };
+  if (errors.length > 0) report.errors = errors;
+  return report;
 }

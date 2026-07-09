@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import type { AshlrConfig, WorkItem } from '../types.js';
 import { resolveFrontierJudgeClient } from '../fleet/manager.js';
 import { ecosystemSummary, northStarDocSummary } from '../ecosystem/map.js';
+import { scoreItem } from '../portfolio/backlog.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -140,8 +141,8 @@ function buildInventComplete(cfg: AshlrConfig): CompleteFn | null {
 
 // M231: Lazily-evaluated NORTH-STAR distillation injected into the system prompt.
 // Called once per process (northStarDocSummary caches internally).
-// M270: updated to request per-item self-scored value+effort so bold items
-// naturally clear isFrontierItem thresholds (effort≥4 or score≥8) in the router.
+// M270+: request per-item ambition inputs. The fleet preserves them as learning
+// metadata while mapping emitted WorkItems back onto the stable 1..5 contract.
 function buildSystemPrompt(): string {
   const northStarSection = northStarDocSummary();
   const nsBlock = northStarSection
@@ -158,9 +159,10 @@ RULES — you MUST follow these absolutely:
 6. Output ONLY valid JSON — no markdown fences, no prose outside the JSON.
 
 SCORING — for each item, self-score honestly:
-- value (1–10): impact on the grand vision. 8+ means frontier-class (architecturally novel, compounds capabilities across the fleet). 5–7 is solid. ≤4 is incremental.
-- effort (1–5): engineering work required. 4–5 means a skilled engineer needs multiple days of focused work (architectural). 1–2 is a simple addition. 3 is a medium feature.
-GUIDE: Bold architectural items should have value≥7 AND effort≥4. Simple additions: value≤5, effort≤2. Be honest — the router uses these scores to assign work to the right engine tier.
+- impact (1–10): impact on the grand vision. 8+ means frontier-class (architecturally novel, compounds capabilities across the fleet). 5–7 is solid. ≤4 is incremental.
+- confidence (0–1): calibrated confidence that this idea is technically feasible, strategically aligned, and likely to create the stated impact. Use decimals like 0.7, not percentages.
+- effort (1–10): engineering work required. 8–10 means a skilled engineer needs multiple days or architectural changes. 1–3 is a simple addition. 4–7 is a medium feature.
+GUIDE: Expected value is impact × confidence × effort⁻¹. Bold architectural items should have impact≥7 AND effort≥4. Simple additions: impact≤5, effort≤3. Be honest — the fleet uses these ambition signals for routing, prioritization, and learning.
 
 Output format (JSON array, exactly):
 [
@@ -169,8 +171,9 @@ Output format (JSON array, exactly):
     "rationale": "Why this is high-leverage and what capability gap it closes (2-3 sentences)",
     "boldness": "What makes this ambitious / non-obvious",
     "sketch": "Rough build sketch: key files/APIs/approaches (2-4 sentences)",
-    "value": 8,
-    "effort": 4
+    "impact": 8,
+    "confidence": 0.8,
+    "effort": 6
   }
 ]`;
 }
@@ -206,10 +209,17 @@ interface RawInventedItem {
   why?: unknown;       // Opus sometimes returns "why" instead of "rationale"
   boldness?: unknown;
   sketch?: unknown;
-  // M270: model-reported self-scores. When present, used instead of flat defaults.
+  // Model-reported expected-value inputs, normalized by extractJsonArray().
+  impact?: number;
+  confidence?: number;
+  effort?: number;
+  // Legacy M270 field. Accepted as a compatibility fallback for impact.
   value?: unknown;
-  effort?: unknown;
 }
+
+const DEFAULT_IMPACT = 4;
+const DEFAULT_CONFIDENCE = 0.7;
+const DEFAULT_EFFORT = 3;
 
 // Phrases that indicate a maintenance item slipped through the prompt filter.
 const MAINTENANCE_PATTERNS: RegExp[] = [
@@ -231,19 +241,77 @@ export function isMaintenanceItem(title: string, rationale: string): boolean {
   return MAINTENANCE_PATTERNS.some((re) => re.test(combined));
 }
 
+function finiteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  const n = finiteNumber(value) ?? fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function clampWholeNumber(value: unknown, min: number, max: number, fallback: number): number {
+  return Math.round(clampNumber(value, min, max, fallback));
+}
+
+function firstFiniteNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    const n = finiteNumber(value);
+    if (n !== null) return n;
+  }
+  return null;
+}
+
+function scaleImpactToWorkValue(impact: number): number {
+  return Math.max(1, Math.min(5, Math.ceil(impact / 2)));
+}
+
+function scaleAmbitionEffortToWorkEffort(effort: number): number {
+  return Math.max(1, Math.min(5, effort));
+}
+
+function expectedValue(impact: number, confidence: number, effort: number): number {
+  return Math.round((impact * confidence) / Math.max(1, effort) * 10) / 10;
+}
+
+function normalizeRawInventedItem(item: unknown): RawInventedItem | null {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+  const raw = item as Record<string, unknown>;
+  return {
+    ...raw,
+    impact: clampWholeNumber(firstFiniteNumber(raw.impact, raw.value), 1, 10, DEFAULT_IMPACT),
+    confidence: clampNumber(raw.confidence, 0, 1, DEFAULT_CONFIDENCE),
+    effort: clampWholeNumber(raw.effort, 1, 10, DEFAULT_EFFORT),
+  };
+}
+
+function normalizeRawInventedItems(parsed: unknown): RawInventedItem[] {
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .map((item) => normalizeRawInventedItem(item))
+    .filter((item): item is RawInventedItem => item !== null);
+}
+
 export function extractJsonArray(raw: string): RawInventedItem[] {
   // Strip markdown fences if present
   const stripped = raw.replace(/^```[a-z]*\n?/m, '').replace(/\n?```$/m, '').trim();
   try {
     const parsed = JSON.parse(stripped);
-    if (Array.isArray(parsed)) return parsed as RawInventedItem[];
+    if (Array.isArray(parsed)) return normalizeRawInventedItems(parsed);
   } catch { /* fall through */ }
   // Try to find a JSON array anywhere in the response
   const match = raw.match(/\[[\s\S]*\]/);
   if (match) {
     try {
       const parsed = JSON.parse(match[0]);
-      if (Array.isArray(parsed)) return parsed as RawInventedItem[];
+      if (Array.isArray(parsed)) return normalizeRawInventedItems(parsed);
     } catch { /* give up */ }
   }
   return [];
@@ -343,25 +411,28 @@ export async function inventWorkItems(
         continue;
       }
 
+      // Use model-reported expected-value inputs normalized by extractJsonArray().
+      // WorkItem.value/effort remain contract-safe 1..5 fields; ambition inputs
+      // are preserved in detail/tags so downstream learning can still inspect
+      // model confidence without poisoning backlog ranking contracts.
+      const impact = ri.impact ?? DEFAULT_IMPACT;
+      const confidence = ri.confidence ?? DEFAULT_CONFIDENCE;
+      const ambitionEffort = ri.effort ?? DEFAULT_EFFORT;
+      const ambitionExpectedValue = expectedValue(impact, confidence, ambitionEffort);
+      const value = scaleImpactToWorkValue(impact);
+      const effort = scaleAmbitionEffortToWorkEffort(ambitionEffort);
+      const score = scoreItem(value, effort);
+
       const detail = scrubSecrets(
         [
           rationale,
           boldness ? `Boldness: ${boldness}` : '',
           sketch ? `Sketch: ${sketch}` : '',
+          `Ambition: impact ${impact}/10, confidence ${confidence.toFixed(2)}, effort ${ambitionEffort}/10, expectedValue ${ambitionExpectedValue}`,
         ]
           .filter(Boolean)
           .join('\n'),
       );
-
-      // M270: use model-reported self-scores when present; fall back to defaults.
-      // Clamped to valid ranges: value 1–10, effort 1–5.
-      // Bold items (value≥8, effort≥4) naturally clear isFrontierItem thresholds
-      // (effort≥4 or score≥8) so they route to frontier engines automatically.
-      const rawValue = typeof ri.value === 'number' ? ri.value : 4;
-      const rawEffort = typeof ri.effort === 'number' ? ri.effort : 3;
-      const value = Math.max(1, Math.min(10, Math.round(rawValue)));
-      const effort = Math.max(1, Math.min(5, Math.round(rawEffort)));
-      const score = Math.round((value * 2) / effort * 10) / 10;
 
       const workItem: WorkItem = {
         id: `${repo}:invent:${hash}`,
@@ -372,7 +443,15 @@ export async function inventWorkItems(
         value,
         effort,
         score,
-        tags: ['generative', 'bold', 'net-new'],
+        tags: [
+          'generative',
+          'bold',
+          'net-new',
+          `impact:${impact}`,
+          `confidence:${confidence.toFixed(2)}`,
+          `ambition-effort:${ambitionEffort}`,
+          `expected-value:${ambitionExpectedValue}`,
+        ],
         ts: now,
       };
 

@@ -644,6 +644,10 @@ export function recoverWithinBudget(
  */
 export const LEARNED_ROUTING_MIN_SAMPLES = 5;
 
+// Covers sub-second read-after-write skew only: at the 5-sample floor with the
+// 7-day half-life, 1e-6 weighted sample units is about 175ms of decay.
+const LEARNED_ROUTING_SAMPLE_FLOOR_EPSILON = 1e-6;
+
 /**
  * M240: Recency half-life in milliseconds. Verdicts older than this are
  * down-weighted exponentially. Default: 7 days.
@@ -665,7 +669,9 @@ const REJECT_VERDICTS = new Set(['noise', 'review', 'harmful', 'decline', 'rejec
 /**
  * M240: A single (engine, model, taskClass) score derived from historical judge
  * outcomes. `score` is in [0, 1]: higher = more "ship" outcomes. `samples` is
- * the total recency-weighted sample count (may be fractional).
+ * the recency-weighted sample count (may be fractional), snapped to
+ * LEARNED_ROUTING_MIN_SAMPLES only when it is within the tiny clock-drift
+ * epsilon described above.
  */
 export interface EngineScore {
   /** Composite engine key: `<engine>:<model>` (e.g. 'claude:opus'). */
@@ -681,8 +687,9 @@ export interface EngineScore {
    */
   score: number;
   /**
-   * Recency-weighted sample count. When < LEARNED_ROUTING_MIN_SAMPLES the
-   * score is 0.5 (neutral) regardless of raw ship/reject counts.
+   * Recency-weighted sample count. A value microscopically below
+   * LEARNED_ROUTING_MIN_SAMPLES can be snapped to the threshold to avoid
+   * immediate-read clock drift; below that, score is 0.5 (neutral).
    */
   samples: number;
 }
@@ -717,6 +724,23 @@ function taskClassFromDecisionEntry(entry: {
   );
 }
 
+function stableLearnedSampleCount(weightedTotal: number): number {
+  const missing = LEARNED_ROUTING_MIN_SAMPLES - weightedTotal;
+  return missing > 0 && missing <= LEARNED_ROUTING_SAMPLE_FLOOR_EPSILON
+    ? LEARNED_ROUTING_MIN_SAMPLES
+    : weightedTotal;
+}
+
+function scoreFromWeightedCounts(ship: number, reject: number): { samples: number; score: number } {
+  const weightedTotal = ship + reject;
+  const samples = stableLearnedSampleCount(weightedTotal);
+  const score =
+    samples >= LEARNED_ROUTING_MIN_SAMPLES && weightedTotal > 0
+      ? ship / weightedTotal
+      : 0.5;
+  return { samples, score };
+}
+
 /**
  * M240: Build a score map for a given `taskClass` from the decisions ledger.
  *
@@ -728,7 +752,7 @@ function taskClassFromDecisionEntry(entry: {
  *  4. Apply recency weight: w = 2^(-(age_ms / HALF_LIFE_MS)).
  *  5. Accumulate weighted ship/reject counts per (engine:model, taskClass) key.
  *  6. ship_rate = weightedShip / (weightedShip + weightedReject); neutral 0.5
- *     when totalWeight < LEARNED_ROUTING_MIN_SAMPLES.
+ *     when stabilized totalWeight < LEARNED_ROUTING_MIN_SAMPLES.
  *
  * PURE: reads ledger files but never mutates them. Never throws.
  * Cold-start (empty ledger or no matching entries) → returns an empty map
@@ -786,11 +810,8 @@ export function buildEngineScores(
 
     // Convert accumulators to EngineScore
     for (const [key, { engine, model, ship, reject }] of acc) {
-      const total = ship + reject;
-      const score = total >= LEARNED_ROUTING_MIN_SAMPLES
-        ? ship / total
-        : 0.5; // neutral — not enough data
-      map.set(key, { key, engine, model, score, samples: total });
+      const { samples, score } = scoreFromWeightedCounts(ship, reject);
+      map.set(key, { key, engine, model, score, samples });
     }
   } catch {
     // Never throw — cold-start fallback is an empty map.
@@ -961,9 +982,8 @@ export function buildProducerScores(
     }
 
     for (const [key, { engine, model, ship, reject }] of acc) {
-      const total = ship + reject;
-      const score = total >= LEARNED_ROUTING_MIN_SAMPLES ? ship / total : 0.5;
-      map.set(key, { key, engine, model, score, samples: total });
+      const { samples, score } = scoreFromWeightedCounts(ship, reject);
+      map.set(key, { key, engine, model, score, samples });
     }
   } catch {
     // Never throw — cold-start fallback is an empty map.

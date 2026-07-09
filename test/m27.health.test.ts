@@ -94,6 +94,7 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
 // ---------------------------------------------------------------------------
 
 import {
+  clampScore,
   gradeFor,
   computeHealth,
   computeReport,
@@ -169,6 +170,30 @@ describe('M27 gradeFor — letter-grade boundaries', () => {
       expect(order).toContain(g);
       expect(order.indexOf(g)).toBeGreaterThanOrEqual(last);
       last = order.indexOf(g);
+    }
+  });
+});
+
+// ===========================================================================
+// clampScore — no NaN / Infinity leakage
+// ===========================================================================
+
+describe('M27 clampScore — invalid health math is explicit', () => {
+  it('clamps finite scores into the public 0..100 range', () => {
+    expect(clampScore(-5).score).toBe(0);
+    expect(clampScore(42).score).toBe(42);
+    expect(clampScore(105).score).toBe(100);
+    expect(clampScore(42).error).toBeUndefined();
+  });
+
+  it('coerces NaN, Infinity, and null to 0 with a typed error', () => {
+    for (const raw of [Number.NaN, Infinity, null]) {
+      const result = clampScore(raw, 'test-context');
+      expect(result.score).toBe(0);
+      expect(result.error).toMatchObject({
+        code: 'invalid-health-score',
+        context: 'test-context',
+      });
     }
   });
 });
@@ -304,6 +329,27 @@ describe('M27 computeHealth — worst offenders', () => {
     const scores = score.worstOffenders.map((w) => w.score);
     expect(scores).toEqual([8, 7, 6, 5, 4]);
   });
+
+  it('sanitizes non-finite WorkItem fields before returning worst offenders', async () => {
+    const repo = path.resolve('/tmp/offenders-nan-repo');
+    const bad = item(repo, 'todo', 5, Number.NaN);
+    bad.effort = Infinity;
+    scanTodos.mockResolvedValue([bad]);
+
+    const score = await computeHealth(repo);
+    const offender = score.worstOffenders[0]!;
+
+    expect(Number.isFinite(offender.value)).toBe(true);
+    expect(Number.isFinite(offender.effort)).toBe(true);
+    expect(Number.isFinite(offender.score)).toBe(true);
+    expect(offender.value).toBe(5);
+    expect(offender.effort).toBe(1);
+    expect(offender.score).toBe(0);
+    expect(score.errors?.map((err) => err.context)).toEqual(expect.arrayContaining([
+      `worst-offender:${bad.id}:effort`,
+      `worst-offender:${bad.id}:score`,
+    ]));
+  });
 });
 
 // ===========================================================================
@@ -324,6 +370,39 @@ describe('M27 computeHealth — never throws on a scanner failure', () => {
     // Failed scanner => not perfect, with a conservative note.
     expect(sec!.score).toBeLessThan(100);
     expect(sec!.summary).toMatch(/scanner unavailable/i);
+  });
+
+  it('never returns NaN when a scanner emits a non-finite finding value', async () => {
+    const repo = path.resolve('/tmp/nan-score-repo');
+    scanTodos.mockResolvedValue([item(repo, 'todo', Number.NaN)]);
+
+    const score = await computeHealth(repo);
+    const codeDebt = score.dimensions.find((d) => d.dimension === 'codeDebt');
+
+    expect(Number.isFinite(score.score)).toBe(true);
+    expect(score.score).toBeGreaterThanOrEqual(0);
+    expect(score.score).toBeLessThanOrEqual(100);
+    expect(codeDebt!.score).toBe(0);
+    expect(codeDebt!.error?.code).toBe('invalid-health-score');
+    expect(score.errors?.map((err) => err.context)).toContain('dimension:codeDebt');
+  });
+
+  it('never returns NaN when a convention emits a non-finite weight', async () => {
+    const repo = path.resolve('/tmp/nan-convention-repo');
+    probeConventions.mockReturnValue([
+      { key: 'license', label: 'LICENSE file', ok: false, weight: Number.NaN, detail: 'bad weight' },
+    ]);
+
+    const score = await computeHealth(repo);
+    const conventions = score.dimensions.find((d) => d.dimension === 'conventions');
+
+    expect(Number.isFinite(score.score)).toBe(true);
+    expect(Number.isFinite(conventions!.score)).toBe(true);
+    expect(conventions!.score).toBe(0);
+    expect(conventions!.error?.code).toBe('invalid-health-score');
+    expect(score.errors?.map((err) => err.context)).toContain('dimension:conventions');
+    expect(score.errors?.map((err) => err.context)).toContain('convention:license:weight');
+    expect(Number.isFinite(score.conventions[0]!.weight)).toBe(true);
   });
 });
 
@@ -417,6 +496,18 @@ describe('M27 computeReport — ENROLLMENT-SCOPED: explicit repos', () => {
     expect(report.scores).toHaveLength(1);
     expect(report.scores[0]!.repo).toBe(repo);
     expect(report.scores[0]!.score).toBe(100); // healthy by default
+  });
+
+  it('propagates per-repo invalid score errors to the portfolio report', async () => {
+    const repo = path.resolve('/tmp/report-error-repo');
+    isEnrolled.mockImplementation((r: string) => r === repo);
+    scanTodos.mockResolvedValue([item(repo, 'todo', Number.NaN)]);
+
+    const report = await computeReport({ repos: [repo] });
+
+    expect(report.scores[0]!.errors?.map((err) => err.context)).toContain('dimension:codeDebt');
+    expect(report.errors?.map((err) => err.context)).toContain('dimension:codeDebt');
+    expect(Number.isFinite(report.averageScore)).toBe(true);
   });
 });
 

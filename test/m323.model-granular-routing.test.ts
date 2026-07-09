@@ -12,7 +12,7 @@
  *    byte-identical to the static M321 decisions.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
 // Mocks — hoisted before module imports
@@ -107,6 +107,38 @@ function chains(
   return out;
 }
 
+/** N fresh proposed+judged chains for exact sample-floor tests. */
+function freshChains(
+  idPrefix: string,
+  model: string,
+  verdicts: string[],
+  tsMs: number,
+  source = 'issue',
+): Record<string, unknown>[] {
+  const stamp = new Date(tsMs).toISOString();
+  const out: Record<string, unknown>[] = [];
+  verdicts.forEach((verdict, i) => {
+    const pid = `${idPrefix}-${i}`;
+    out.push({
+      ts: stamp,
+      proposalId: pid,
+      action: 'judged',
+      engine: 'claude-fable-5',
+      model: 'claude-fable-5',
+      verdict,
+    });
+    out.push({
+      ts: stamp,
+      proposalId: pid,
+      action: 'proposed',
+      engine: 'claude',
+      model,
+      workSource: source,
+    });
+  });
+  return out;
+}
+
 /** sonnet-5 ships badly (1/6), opus ships perfectly (6/6). */
 const SONNET_BAD_OPUS_GOOD = [
   ...chains('s5', 'claude:claude-sonnet-5', ['ship', 'rejected', 'rejected', 'rejected', 'rejected', 'rejected']),
@@ -165,6 +197,10 @@ beforeEach(() => {
   fixture = [];
 });
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 // ---------------------------------------------------------------------------
 // buildProducerScores
 // ---------------------------------------------------------------------------
@@ -192,6 +228,21 @@ describe('M323 buildProducerScores', () => {
   it('cold start → empty map', () => {
     fixture = [];
     expect(buildProducerScores('issue', NOW).size).toBe(0);
+  });
+
+  it(`keeps exactly ${LEARNED_ROUTING_MIN_SAMPLES} fresh producer samples above the weighted floor`, () => {
+    const fixedNow = 1_700_000_000_000;
+    fixture = freshChains(
+      'op-fresh',
+      'claude:claude-opus-4-8',
+      Array.from({ length: LEARNED_ROUTING_MIN_SAMPLES }, () => 'ship'),
+      fixedNow,
+    );
+    const scores = buildProducerScores('issue', fixedNow + 1);
+    const opus = scores.get('claude:opus');
+    expect(opus).toBeDefined();
+    expect(opus!.samples).toBe(LEARNED_ROUTING_MIN_SAMPLES);
+    expect(opus!.score).toBeGreaterThan(0.5);
   });
 });
 
@@ -237,6 +288,21 @@ describe('M323 selectCostAwareModel', () => {
   it('thin samples → null (static fallback)', () => {
     fixture = THIN;
     const scores = buildProducerScores('issue', NOW);
+    expect(selectCostAwareModel(claudeLarge, scores, { minShipRate: 0.6 })).toBeNull();
+  });
+
+  it(`keeps ${LEARNED_ROUTING_MIN_SAMPLES - 1} fresh producer samples thin for model selection`, () => {
+    const fixedNow = 1_700_000_000_000;
+    fixture = freshChains(
+      'op-thin',
+      'claude:claude-opus-4-8',
+      Array.from({ length: LEARNED_ROUTING_MIN_SAMPLES - 1 }, () => 'ship'),
+      fixedNow,
+    );
+    const scores = buildProducerScores('issue', fixedNow + 1);
+    const opus = scores.get('claude:opus');
+    expect(opus).toBeDefined();
+    expect(opus!.samples).toBeLessThan(LEARNED_ROUTING_MIN_SAMPLES);
     expect(selectCostAwareModel(claudeLarge, scores, { minShipRate: 0.6 })).toBeNull();
   });
 });
@@ -285,6 +351,42 @@ describe('M323 routeTask integration', () => {
 
   it('flag ON + thin samples: static decision preserved', () => {
     fixture = THIN;
+    const item = makeItem({ source: 'issue' });
+    const result = routeTask(item, cfgWith(flagOn), CLAUDE_CTX);
+    expect(result.model).toBe('claude-sonnet-5');
+    expect(result.reason).not.toContain('M323');
+  });
+
+  it(`flag ON + exactly ${LEARNED_ROUTING_MIN_SAMPLES} fresh producer samples can override the static model`, () => {
+    const fixedNow = 1_700_000_000_000;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(fixedNow));
+    fixture = freshChains(
+      'op-route',
+      'claude:claude-opus-4-8',
+      Array.from({ length: LEARNED_ROUTING_MIN_SAMPLES }, () => 'ship'),
+      fixedNow,
+    );
+    vi.setSystemTime(new Date(fixedNow + 1));
+
+    const item = makeItem({ source: 'issue' });
+    const result = routeTask(item, cfgWith(flagOn), CLAUDE_CTX);
+    expect(result.catalogEntry?.id).toBe('claude:opus');
+    expect(result.reason).toContain('M323 learned');
+  });
+
+  it(`flag ON + ${LEARNED_ROUTING_MIN_SAMPLES - 1} fresh producer samples preserves the static model`, () => {
+    const fixedNow = 1_700_000_000_000;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(fixedNow));
+    fixture = freshChains(
+      'op-route-thin',
+      'claude:claude-opus-4-8',
+      Array.from({ length: LEARNED_ROUTING_MIN_SAMPLES - 1 }, () => 'ship'),
+      fixedNow,
+    );
+    vi.setSystemTime(new Date(fixedNow + 1));
+
     const item = makeItem({ source: 'issue' });
     const result = routeTask(item, cfgWith(flagOn), CLAUDE_CTX);
     expect(result.model).toBe('claude-sonnet-5');

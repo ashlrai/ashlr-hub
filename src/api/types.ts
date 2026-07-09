@@ -34,6 +34,8 @@ export type {
   HealthScore,
   HealthReport,
   HealthDimensionScore,
+  HealthScoreError,
+  ClampedHealthScore,
   AskResult,
   ImpactResult,
   KnowledgeGraph,

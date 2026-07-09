@@ -58,6 +58,9 @@ function makeBoldItems(n = 3): object[] {
     rationale: `This closes the critical gap between propose and review. Engineers waste 40% of review time context-switching. Inline diff with AST-aware coloring eliminates the round-trip.`,
     boldness: `No existing AI fleet tool does this. It turns the fleet into a collaborative editing partner, not just a patch machine.`,
     sketch: `Add TUI component in src/tui/diff-view.tsx. Wire to proposal.diff. Use tree-sitter for AST coloring. Stream from backlog tick event.`,
+    impact: 8,
+    confidence: 0.8,
+    effort: 5,
   }));
 }
 

@@ -19,7 +19,7 @@
  * ~/.ashlr/decisions directory and never write to it.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -41,6 +41,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   if (origHome !== undefined) process.env['HOME'] = origHome;
   else delete process.env['HOME'];
   if (origAshlrHome !== undefined) process.env['ASHLR_HOME'] = origAshlrHome;
@@ -201,6 +202,19 @@ describe('buildEngineScores — sample floor', () => {
     expect(s).toBeDefined();
     expect(s!.score).toBe(0.5);
     expect(s!.samples).toBeLessThan(LEARNED_ROUTING_MIN_SAMPLES);
+  });
+
+  it(`keeps exactly ${LEARNED_ROUTING_MIN_SAMPLES} fresh samples above the weighted floor`, () => {
+    const fixedNow = 1_700_000_000_000;
+    const routeNow = fixedNow + 1;
+    writeDecisions(
+      judgedEntries(LEARNED_ROUTING_MIN_SAMPLES, 'claude', 'opus', 'issue', 'ship', fixedNow),
+    );
+    const scores = buildEngineScores('issue', routeNow);
+    const s = scores.get('claude:opus');
+    expect(s).toBeDefined();
+    expect(s!.samples).toBe(LEARNED_ROUTING_MIN_SAMPLES);
+    expect(s!.score).toBeGreaterThan(0.5);
   });
 
   it(`score reflects actual ratio when sample count > ${LEARNED_ROUTING_MIN_SAMPLES}`, () => {
@@ -370,6 +384,40 @@ describe('routeTask — flag-off parity', () => {
 // ---------------------------------------------------------------------------
 
 describe('routeTask — learned bias promotes high-ship engine', () => {
+  it(`routes on exactly ${LEARNED_ROUTING_MIN_SAMPLES} fresh samples through the real sort path`, () => {
+    const fixedNow = 1_700_000_000_000;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(fixedNow));
+    writeDecisions(
+      judgedEntries(LEARNED_ROUTING_MIN_SAMPLES, 'claude', 'opus', 'todo', 'ship', fixedNow),
+    );
+    vi.setSystemTime(new Date(fixedNow + 1));
+
+    const item = makeItem('todo', 4, 5);
+    const ctx = makeCtx(['claude', 'codex']);
+    const cfg = makeCfg({ learnedRouting: true, routingPolicy: 'balanced' });
+
+    const result = routeTask(item, cfg, ctx);
+    expect(result.engine).toBe('claude');
+  });
+
+  it(`keeps ${LEARNED_ROUTING_MIN_SAMPLES - 1} fresh samples in the thin-sample guard through routing`, () => {
+    const fixedNow = 1_700_000_000_000;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(fixedNow));
+    writeDecisions(
+      judgedEntries(LEARNED_ROUTING_MIN_SAMPLES - 1, 'claude', 'opus', 'todo', 'ship', fixedNow),
+    );
+    vi.setSystemTime(new Date(fixedNow + 1));
+
+    const item = makeItem('todo', 4, 5);
+    const ctx = makeCtx(['claude', 'codex']);
+    const cfg = makeCfg({ learnedRouting: true, routingPolicy: 'balanced' });
+
+    const result = routeTask(item, cfg, ctx);
+    expect(result.engine).toBe('codex');
+  });
+
   it('routes to high-ship-rate engine for a task-class with sufficient history', () => {
     // Give codex a terrible reject rate and claude a great ship rate for 'issue'
     writeDecisions([

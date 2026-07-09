@@ -6,9 +6,9 @@
  *     cfg.foundry.kimi.tier = 'frontier'; default (absent config) keeps tier 'mid'.
  *  2. DYNAMIC FRONTIER TRIO — resolveFrontierEngines includes kimi when it is
  *     frontier-promoted AND in allowedBackends; excludes it when not promoted.
- *  3. INVENT SELF-SCORING — model-reported value/effort replace flat defaults;
- *     bold items (value≥7, effort≥4) clear isFrontierItem thresholds; incremental
- *     items (value≤5, effort≤2) do not reach frontier threshold.
+ *  3. INVENT SELF-SCORING — model-reported impact/confidence/effort replace
+ *     flat defaults; emitted WorkItems keep contract-safe value/effort/score
+ *     while preserving ambition metadata for learning.
  *  4. MILESTONE AMBITION — decomposeWithFrontier prompt contains the ambition
  *     directive; trivial milestones are filtered; effort/scope fields are accepted.
  *  CRITICAL — MERGE AUTHORITY UNCHANGED:
@@ -378,31 +378,42 @@ describe('M270 — dynamic frontier trio: kimi in rotation when promoted', () =>
 });
 
 // ---------------------------------------------------------------------------
-// 3. INVENT SELF-SCORING — bold items clear isFrontierItem threshold
+// 3. INVENT SELF-SCORING — ambition metadata with contract-safe WorkItems
 // ---------------------------------------------------------------------------
 
-describe('M270 — invent self-scoring: value/effort drive routing', () => {
-  it('extractJsonArray parses model-reported value+effort fields', () => {
+describe('M270 — invent self-scoring: ambition inputs preserve WorkItem contract', () => {
+  it('extractJsonArray parses and clamps model-reported impact/confidence/effort fields', () => {
     const raw = JSON.stringify([
-      { title: 'Build inference fabric', rationale: 'architectural', boldness: 'bold', sketch: 'sketch', value: 9, effort: 5 },
-      { title: 'Add CLI flag --verbose', rationale: 'incremental', boldness: 'simple', sketch: 'sketch', value: 3, effort: 1 },
+      { title: 'Build inference fabric', rationale: 'architectural', boldness: 'bold', sketch: 'sketch', impact: 9, confidence: 0.82, effort: 5 },
+      { title: 'Add CLI flag --verbose', rationale: 'incremental', boldness: 'simple', sketch: 'sketch', impact: 15, confidence: 2, effort: 0 },
+      { title: 'Legacy value fallback', rationale: 'legacy', boldness: 'compat', sketch: 'sketch', value: 6 },
+      { title: 'Malformed impact fallback', rationale: 'legacy', boldness: 'compat', sketch: 'sketch', impact: 'high', value: 8 },
     ]);
     const items = extractJsonArray(raw);
-    expect(items).toHaveLength(2);
-    expect((items[0] as any).value).toBe(9);
+    expect(items).toHaveLength(4);
+    expect((items[0] as any).impact).toBe(9);
+    expect((items[0] as any).confidence).toBe(0.82);
     expect((items[0] as any).effort).toBe(5);
-    expect((items[1] as any).value).toBe(3);
+    expect((items[1] as any).impact).toBe(10);
+    expect((items[1] as any).confidence).toBe(1);
     expect((items[1] as any).effort).toBe(1);
+    expect((items[2] as any).impact).toBe(6);
+    expect((items[2] as any).confidence).toBe(0.7);
+    expect((items[2] as any).effort).toBe(3);
+    expect((items[3] as any).impact).toBe(8);
+    expect((items[3] as any).confidence).toBe(0.7);
+    expect((items[3] as any).effort).toBe(3);
   });
 
-  it('inventWorkItems uses model-reported scores for bold item (value=9, effort=5)', async () => {
+  it('inventWorkItems uses model-reported expected-value inputs for bold item', async () => {
     const mockComplete = vi.fn().mockResolvedValue(JSON.stringify([
       {
         title: 'Build streaming inference fabric with embedding cache',
         rationale: 'Architecturally novel — replaces the ad-hoc recall with a real vector store.',
         boldness: 'Compounds all three pillars simultaneously.',
         sketch: 'New module: src/core/fabric/inference.ts. Wire into genome recall path.',
-        value: 9,
+        impact: 9,
+        confidence: 0.8,
         effort: 5,
       },
     ]));
@@ -416,23 +427,30 @@ describe('M270 — invent self-scoring: value/effort drive routing', () => {
 
     expect(items).toHaveLength(1);
     const item = items[0]!;
-    // Model-reported scores used (not flat defaults)
-    expect(item.value).toBe(9);
+    // Model-reported expected-value inputs used, while WorkItem remains 1..5.
+    expect(item.value).toBe(5);
     expect(item.effort).toBe(5);
-    // score = round((9*2)/5 * 10)/10 = round(3.6*10)/10 = 3.6
-    expect(item.score).toBe(3.6);
+    expect(item.score).toBe(1);
+    expect(item.detail).toContain('Ambition: impact 9/10, confidence 0.80, effort 5/10, expectedValue 1.4');
+    expect(item.tags).toEqual(expect.arrayContaining([
+      'impact:9',
+      'confidence:0.80',
+      'ambition-effort:5',
+      'expected-value:1.4',
+    ]));
     // effort=5 clears isFrontierItem threshold (effort >= 4)
     expect(item.effort).toBeGreaterThanOrEqual(4);
   });
 
-  it('inventWorkItems uses model-reported scores for incremental item (value=3, effort=1)', async () => {
+  it('inventWorkItems uses model-reported expected-value inputs for incremental item', async () => {
     const mockComplete = vi.fn().mockResolvedValue(JSON.stringify([
       {
         title: 'Add --verbose flag to CLI',
         rationale: 'Small improvement for debuggability.',
         boldness: 'Not bold.',
         sketch: 'Edit src/cli/index.ts.',
-        value: 3,
+        impact: 3,
+        confidence: 0.5,
         effort: 1,
       },
     ]));
@@ -446,21 +464,28 @@ describe('M270 — invent self-scoring: value/effort drive routing', () => {
 
     expect(items).toHaveLength(1);
     const item = items[0]!;
-    expect(item.value).toBe(3);
+    expect(item.value).toBe(2);
     expect(item.effort).toBe(1);
+    expect(item.score).toBe(2);
+    expect(item.tags).toEqual(expect.arrayContaining([
+      'impact:3',
+      'confidence:0.50',
+      'ambition-effort:1',
+      'expected-value:1.5',
+    ]));
     // Does NOT clear isFrontierItem thresholds: effort < 4 AND score < 8
     expect(item.effort).toBeLessThan(4);
     expect(item.score).toBeLessThan(8);
   });
 
-  it('falls back to default value=4/effort=3 when model omits scores', async () => {
+  it('falls back to default impact=4/confidence=0.7/effort=3 when model omits scores', async () => {
     const mockComplete = vi.fn().mockResolvedValue(JSON.stringify([
       {
         title: 'Feature without scores',
         rationale: 'Some rationale.',
         boldness: 'Bold somehow.',
         sketch: 'Sketch.',
-        // no value/effort fields
+        // no impact/confidence/effort fields
       },
     ]));
 
@@ -474,13 +499,20 @@ describe('M270 — invent self-scoring: value/effort drive routing', () => {
     expect(items).toHaveLength(1);
     const item = items[0]!;
     // Falls back to defaults
-    expect(item.value).toBe(4);
+    expect(item.value).toBe(2);
     expect(item.effort).toBe(3);
+    expect(item.score).toBeCloseTo(2 / 3);
+    expect(item.tags).toEqual(expect.arrayContaining([
+      'impact:4',
+      'confidence:0.70',
+      'ambition-effort:3',
+      'expected-value:0.9',
+    ]));
   });
 
-  it('value is clamped to 1–10 range', async () => {
+  it('impact/confidence/effort are clamped to valid ranges', async () => {
     const mockComplete = vi.fn().mockResolvedValue(JSON.stringify([
-      { title: 'Test clamping', rationale: 'r', boldness: 'b', sketch: 's', value: 15, effort: 0 },
+      { title: 'Test clamping', rationale: 'r', boldness: 'b', sketch: 's', impact: 15, confidence: 2, effort: 0 },
     ]));
     const cfg = baseConfig();
     const items = await inventWorkItems(
@@ -488,15 +520,53 @@ describe('M270 — invent self-scoring: value/effort drive routing', () => {
       { cfg },
       { skipDedup: true, _testComplete: mockComplete },
     );
-    expect(items[0]!.value).toBe(10);   // clamped to 10
-    expect(items[0]!.effort).toBe(1);   // 0 → clamped to 1
+    expect(items[0]!.value).toBe(5);    // impact 15 -> 10 -> WorkItem value 5
+    expect(items[0]!.effort).toBe(1);   // 0 -> clamped to ambition effort 1
+    expect(items[0]!.score).toBe(5);    // scoreItem(5, 1)
+    expect(items[0]!.tags).toEqual(expect.arrayContaining([
+      'impact:10',
+      'confidence:1.00',
+      'ambition-effort:1',
+      'expected-value:10',
+    ]));
+  });
+
+  it('falls back to legacy value through full inventWorkItems when impact is malformed', async () => {
+    const mockComplete = vi.fn().mockResolvedValue(JSON.stringify([
+      {
+        title: 'Build recursive fleet memory map',
+        rationale: 'A serious compounding capability for agent learning.',
+        boldness: 'Connects agent traces into reusable operating memory.',
+        sketch: 'Add a memory-map writer and status surface.',
+        impact: 'high',
+        value: 8,
+        confidence: '0.6',
+        effort: '4',
+      },
+    ]));
+    const cfg = baseConfig();
+    const items = await inventWorkItems(
+      { repo: '/tmp/test-repo', repoState: 'cs', direction: 'ns' },
+      { cfg },
+      { skipDedup: true, _testComplete: mockComplete },
+    );
+
+    expect(items[0]!.value).toBe(4);
+    expect(items[0]!.effort).toBe(4);
+    expect(items[0]!.score).toBe(1);
+    expect(items[0]!.tags).toEqual(expect.arrayContaining([
+      'impact:8',
+      'confidence:0.60',
+      'ambition-effort:4',
+      'expected-value:1.2',
+    ]));
   });
 
   it('bold item clears isFrontierItem threshold (effort >= 4)', async () => {
     // Verify the threshold logic: effort >= 4 OR score >= 8
-    // A bold item with value=8, effort=4 should clear this
+    // A bold item with effort=6 should clear this even after confidence adjustment.
     const mockComplete = vi.fn().mockResolvedValue(JSON.stringify([
-      { title: 'Fleet-wide OTLP observability pipeline', rationale: 'r', boldness: 'b', sketch: 's', value: 8, effort: 4 },
+      { title: 'Fleet-wide OTLP observability pipeline', rationale: 'r', boldness: 'b', sketch: 's', impact: 8, confidence: 0.75, effort: 6 },
     ]));
     const cfg = baseConfig();
     const items = await inventWorkItems(
@@ -510,14 +580,41 @@ describe('M270 — invent self-scoring: value/effort drive routing', () => {
     expect(isFrontier).toBe(true);
   });
 
-  it('system prompt contains SCORING section with value/effort guidance', () => {
+  it('high impact alone does not bypass the frontier effort threshold', async () => {
+    const mockComplete = vi.fn().mockResolvedValue(JSON.stringify([
+      { title: 'Tiny high-impact insight widget', rationale: 'r', boldness: 'b', sketch: 's', impact: 10, confidence: 1, effort: 3 },
+    ]));
+    const cfg = baseConfig();
+    const items = await inventWorkItems(
+      { repo: '/tmp/test-repo', repoState: 'cs', direction: 'ns' },
+      { cfg },
+      { skipDedup: true, _testComplete: mockComplete },
+    );
+
+    const item = items[0]!;
+    expect(item.value).toBe(5);
+    expect(item.effort).toBe(3);
+    expect(item.score).toBeCloseTo(5 / 3);
+    expect(item.effort >= 4 || item.score >= 8).toBe(false);
+    expect(item.tags).toEqual(expect.arrayContaining([
+      'impact:10',
+      'confidence:1.00',
+      'ambition-effort:3',
+      'expected-value:3.3',
+    ]));
+  });
+
+  it('system prompt contains SCORING section with expected-value guidance', () => {
     // SYSTEM_PROMPT is the module-level constant built by buildSystemPrompt() at load time.
     expect(SYSTEM_PROMPT).toContain('SCORING');
-    expect(SYSTEM_PROMPT).toContain('value (1–10)');
-    expect(SYSTEM_PROMPT).toContain('effort (1–5)');
+    expect(SYSTEM_PROMPT).toContain('impact (1–10)');
+    expect(SYSTEM_PROMPT).toContain('confidence (0–1)');
+    expect(SYSTEM_PROMPT).toContain('effort (1–10)');
+    expect(SYSTEM_PROMPT).toContain('impact × confidence × effort⁻¹');
     expect(SYSTEM_PROMPT).toContain('frontier-class');
-    expect(SYSTEM_PROMPT).toContain('"value": 8');
-    expect(SYSTEM_PROMPT).toContain('"effort": 4');
+    expect(SYSTEM_PROMPT).toContain('"impact": 8');
+    expect(SYSTEM_PROMPT).toContain('"confidence": 0.8');
+    expect(SYSTEM_PROMPT).toContain('"effort": 6');
   });
 });
 
