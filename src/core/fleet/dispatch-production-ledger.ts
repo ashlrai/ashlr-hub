@@ -103,6 +103,7 @@ export interface DispatchProductionYieldBucket {
   actionCounts?: RunActionCounts;
   attemptShape?: ProductionAttemptShape;
   topReasons: DispatchProductionReasonCount[];
+  diagnosticTopReasons?: DispatchProductionReasonCount[];
 }
 
 export interface DispatchProductionYieldSummary {
@@ -117,6 +118,7 @@ export interface DispatchProductionYieldSummary {
   actionCounts?: RunActionCounts;
   attemptShape?: ProductionAttemptShape;
   topReasons: DispatchProductionReasonCount[];
+  diagnosticTopReasons?: DispatchProductionReasonCount[];
   byBackend: DispatchProductionYieldBucket[];
   bySource: DispatchProductionYieldBucket[];
   byRepo: DispatchProductionYieldBucket[];
@@ -422,6 +424,21 @@ function sortedReasons(reasons: Map<string, number>, limit: number): DispatchPro
     .map(([reason, count]) => ({ reason, count }));
 }
 
+function isSuppressedDispatchProductionReason(reason: string | undefined): boolean {
+  const normalized = String(reason ?? '').trim().toLowerCase();
+  return normalized.startsWith('proposal-disabled') ||
+    normalized.includes('proposal filing disabled');
+}
+
+function sortedDiagnosticReasons(reasons: Map<string, number>, limit: number): DispatchProductionReasonCount[] {
+  const diagnostic = new Map<string, number>();
+  for (const [reason, count] of reasons.entries()) {
+    if (isSuppressedDispatchProductionReason(reason)) continue;
+    diagnostic.set(reason, (diagnostic.get(reason) ?? 0) + count);
+  }
+  return sortedReasons(diagnostic, limit);
+}
+
 interface MutableYieldBucket {
   key: string;
   backend?: EngineId | null;
@@ -493,6 +510,7 @@ function finalizeBucket(bucket: MutableYieldBucket): DispatchProductionYieldBuck
     ...(hasRunActionCounts(bucket.actionCounts) ? { actionCounts: bucket.actionCounts } : {}),
     ...(hasProductionAttemptShape(bucket.attemptShape) ? { attemptShape: bucket.attemptShape } : {}),
     topReasons: sortedReasons(bucket.reasons, 5),
+    diagnosticTopReasons: sortedDiagnosticReasons(bucket.reasons, 5),
   };
 }
 
@@ -578,6 +596,7 @@ export function summarizeDispatchProductionYield(
     ...(hasRunActionCounts(actionCounts) ? { actionCounts } : {}),
     ...(hasProductionAttemptShape(attemptShape) ? { attemptShape } : {}),
     topReasons: sortedReasons(topReasons, limit),
+    diagnosticTopReasons: sortedDiagnosticReasons(topReasons, limit),
     byBackend: sortedBuckets(byBackend, limit),
     bySource: sortedBuckets(bySource, limit),
     byRepo: sortedBuckets(byRepo, limit),

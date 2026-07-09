@@ -901,4 +901,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve same-repo duplicate collapse while allowing identical rollout titles across different repos.
 - [x] Add focused backlog regressions for multi-repo merge-contract rollout items.
 - [x] Finish broad verification.
-- [ ] Commit, push, refresh backlog, reload daemon, and smoke live contract coverage.
+- [x] Commit, push, refresh backlog, reload daemon, and smoke live contract coverage.
+
+## Current Continuation - Operator Diagnostic Reason Hygiene
+- [x] Rechecked live backlog/service state after repo-aware merge-contract rollout.
+- [x] Deployed sidecar audits for CLI/status paths, web/dashboard paths, and next learning telemetry lane.
+- [x] Preserve raw dispatch-production reasons while adding diagnostic-only reason summaries for operator surfaces.
+- [x] Suppress all `proposal filing disabled` control-flow variants, including API-model wording, from proposal/dispatch diagnostics.
+- [x] Update CLI, Mission Control, Fleet, and Fleet Dashboard production surfaces to treat empty diagnostic reason arrays as authoritative.
+- [x] Add focused regressions for raw-vs-diagnostic dispatch reasons, all-suppressed proposal windows, and dashboard source contracts.
+- [x] Finish focused, broad, invariant, and full-CI verification.
+- [ ] Commit, push, reload daemon, smoke live diagnostic output, and continue into diagnostic/learnable attempt classification.

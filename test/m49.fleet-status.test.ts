@@ -1110,20 +1110,21 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     mkdirSync(repo, { recursive: true });
     const recentTick: DaemonTick = {
       ts: new Date().toISOString(),
-      itemsConsidered: 3,
+      itemsConsidered: 4,
       proposalsCreated: 0,
       spentUsd: 0,
       reason: 'ok',
       proposalProduction: {
-        selected: 3,
-        claimed: 3,
-        dispatched: 3,
+        selected: 4,
+        claimed: 4,
+        dispatched: 4,
         skipped: 0,
         errors: 0,
         proposalsCreated: 0,
-        noProposalDispatches: 3,
+        noProposalDispatches: 4,
         reasons: [
           { reason: 'proposal-disabled: proposal filing disabled for this sandboxed attempt', count: 2 },
+          { reason: 'proposal-disabled: proposal filing disabled for this api-model attempt', count: 1 },
           { reason: 'empty-diff: agent returned no diff', count: 1 },
         ],
       },
@@ -1161,6 +1162,22 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
           },
         },
         {
+          itemId: 'repo:goal:suppressed-api',
+          title: 'Suppressed api model',
+          repo,
+          source: 'goal',
+          backend: 'local-coder',
+          tier: 'mid',
+          assignedBy: 'router',
+          reason: 'proposal-disabled: proposal filing disabled for this api-model attempt',
+          dispatched: true,
+          spentUsd: 0,
+          production: {
+            outcome: 'proposal-disabled',
+            reason: 'proposal filing disabled for this api-model attempt',
+          },
+        },
+        {
           itemId: 'repo:goal:empty',
           title: 'Empty diff',
           repo,
@@ -1188,13 +1205,16 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     }));
 
     expect(s.proposalProduction).toMatchObject({
-      noProposalDispatches: 3,
-      suppressedDispatches: 2,
+      noProposalDispatches: 4,
+      suppressedDispatches: 3,
       diagnosticNoProposalDispatches: 1,
       diagnosticTopReasons: [{ reason: 'empty-diff: agent returned no diff', count: 1 }],
     });
     expect(s.proposalProduction?.topReasons[0]?.reason).toContain('proposal-disabled');
-    expect(s.proposalProduction?.recentNoProposalDispatches).toHaveLength(3);
+    expect(s.proposalProduction?.topReasons.map((reason) => reason.reason)).toContain(
+      'proposal-disabled: proposal filing disabled for this api-model attempt',
+    );
+    expect(s.proposalProduction?.recentNoProposalDispatches).toHaveLength(4);
     expect(s.proposalProduction?.recentDiagnosticNoProposalDispatches).toHaveLength(1);
     expect(s.proposalProduction?.recentDiagnosticNoProposalDispatches[0]).toMatchObject({
       itemId: 'repo:goal:empty',
@@ -1203,7 +1223,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomyEffectiveness?.summary).toContain('1 recent dispatch(es) produced no proposal');
     expect(s.autonomyEffectiveness?.summary).toContain('top reason: empty-diff: agent returned no diff');
     expect(s.autonomyEffectiveness?.summary).not.toContain('proposal-disabled');
-    expect(s.contextEfficiency?.signals.suppressedNoProposalDispatches).toBe(2);
+    expect(s.contextEfficiency?.signals.suppressedNoProposalDispatches).toBe(3);
     expect(s.contextEfficiency?.risks.map((risk) => risk.id)).not.toContain('proposal-yield-low');
     expect(s.contextEfficiency?.recommendations.join('\n')).not.toContain('Reslice low-yield backlog items');
     const inspectAction = s.nextActions?.find((action) => action.id === 'inspect-proposal-production');
@@ -1211,6 +1231,93 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(inspectAction?.detail).not.toContain('proposal-disabled');
     const dispatchYieldAction = s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield');
     expect(dispatchYieldAction?.detail ?? '').not.toContain('proposal-disabled');
+  });
+
+  it('keeps all-suppressed proposal-production windows out of operator reason text', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    const recentTick: DaemonTick = {
+      ts: new Date().toISOString(),
+      itemsConsidered: 2,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'ok',
+      proposalProduction: {
+        selected: 2,
+        claimed: 2,
+        dispatched: 2,
+        skipped: 0,
+        errors: 0,
+        proposalsCreated: 0,
+        noProposalDispatches: 2,
+        reasons: [
+          { reason: 'proposal-disabled: proposal filing disabled for this sandboxed attempt', count: 1 },
+          { reason: 'proposal-disabled: proposal filing disabled for this api-model attempt', count: 1 },
+        ],
+      },
+      dispatches: [
+        {
+          itemId: 'repo:goal:suppressed-sandbox',
+          title: 'Suppressed sandbox',
+          repo,
+          source: 'goal',
+          backend: 'codex',
+          tier: 'frontier',
+          assignedBy: 'router',
+          reason: 'proposal-disabled: proposal filing disabled for this sandboxed attempt',
+          dispatched: true,
+          spentUsd: 0,
+          production: {
+            outcome: 'proposal-disabled',
+            reason: 'proposal filing disabled for this sandboxed attempt',
+          },
+        },
+        {
+          itemId: 'repo:goal:suppressed-api',
+          title: 'Suppressed api model',
+          repo,
+          source: 'goal',
+          backend: 'local-coder',
+          tier: 'mid',
+          assignedBy: 'router',
+          reason: 'proposal-disabled: proposal filing disabled for this api-model attempt',
+          dispatched: true,
+          spentUsd: 0,
+          production: {
+            outcome: 'proposal-disabled',
+            reason: 'proposal filing disabled for this api-model attempt',
+          },
+        },
+      ],
+    };
+    writeRunningDaemon(tmpHome, [recentTick]);
+    writeBacklogSnapshot(tmpHome, repo, [
+      makeBacklogItem(repo, 'repo:goal:fresh', 'Fresh eligible work', 5),
+    ], new Date().toISOString());
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.proposalProduction).toMatchObject({
+      noProposalDispatches: 2,
+      suppressedDispatches: 2,
+      diagnosticNoProposalDispatches: 0,
+      diagnosticTopReasons: [],
+      recentDiagnosticNoProposalDispatches: [],
+    });
+    expect(s.proposalProduction?.topReasons.map((reason) => reason.reason)).toEqual([
+      'proposal-disabled: proposal filing disabled for this api-model attempt',
+      'proposal-disabled: proposal filing disabled for this sandboxed attempt',
+    ]);
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('no-proposal 0, suppressed 2');
+    expect(formatted).not.toContain('proposal-disabled');
+    expect(formatted).not.toContain('proposal filing disabled');
+    expect(s.autonomyEffectiveness?.summary).not.toContain('proposal-disabled');
+    expect(s.autonomyEffectiveness?.summary).not.toContain('proposal filing disabled');
+    expect(JSON.stringify(s.nextActions ?? [])).not.toContain('proposal filing disabled');
+    expect(s.missionBrief?.whyNow ?? '').not.toContain('proposal filing disabled');
   });
 
   it('uses aggregate production reasons for diagnostics when dispatch samples are absent', async () => {
@@ -2022,6 +2129,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const s = await buildFleetStatus(baseConfig());
 
+    expect(s.dispatchProduction?.topReasons[0]?.reason).toContain('proposal filing disabled');
+    expect(s.dispatchProduction?.diagnosticTopReasons?.[0]).toEqual({
+      reason: 'agent returned no diff',
+      count: 3,
+    });
     expect(s.dispatchProduction?.byBackend[0]).toMatchObject({
       backend: 'codex',
       attempts: 16,
@@ -2037,6 +2149,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(action?.detail).toContain('top reason: agent returned no diff');
     expect(action?.detail).toContain('shape: no-diff 3, gate/capture 0, repairs 0, policy-off 0');
     expect(action?.detail).not.toContain('proposal filing disabled');
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('reasons:   3x agent returned no diff');
+    expect(formatted).not.toContain('reasons:   16x proposal filing disabled');
   });
 
   it('does not create weak-yield next action when every dispatch-production sample is proposal-disabled', async () => {
@@ -2103,7 +2218,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(s.dispatchYieldDiagnostics?.recommendation).toContain('do not treat them as backend weakness');
     expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-yield');
-    expect(formatFleetStatus(s)).toContain('diagnosis: policy-suppressed · fleet 0/0 0% · keep routing');
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('diagnosis: policy-suppressed · fleet 0/0 0% · keep routing');
+    expect(formatted).not.toContain('proposal filing disabled');
   });
 
   it('marks low dispatch-yield samples as insufficient before routing action', async () => {
@@ -2733,6 +2850,63 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       'lane locks:    2 active, 1 stale, 1 handoff, 1 unverified, 2 visible locked',
     );
     expect(out).toContain('lock sample:   stale-in-progress a /repo/a#goal:goal-lane-a');
+  });
+
+  it('renders dispatch-yield diagnostic reasons without falling back to raw policy-disabled reasons', () => {
+    const base = {
+      generatedAt: '2026-06-17T00:00:00.000Z',
+      daemon: { running: true, lastTickAt: '2026-06-17T00:00:00.000Z', todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      killed: false,
+    };
+    const dispatchProduction = {
+      windowHours: 24,
+      attempts: 4,
+      events: 4,
+      proposalsCreated: 0,
+      noProposal: 4,
+      proposalRate: 0,
+      spentUsd: 0,
+      outcomes: {
+        proposalCreated: 0,
+        emptyDiff: 1,
+        gateBlocked: 0,
+        engineFailed: 0,
+        sandboxFailed: 0,
+        proposalCaptureError: 0,
+        proposalDisabled: 3,
+        unknown: 0,
+      },
+      topReasons: [
+        { reason: 'proposal filing disabled for this api-model attempt', count: 3 },
+        { reason: 'engine "local-coder" completed without file changes', count: 1 },
+      ],
+      diagnosticTopReasons: [
+        { reason: 'engine "local-coder" completed without file changes', count: 1 },
+      ],
+      byBackend: [],
+      bySource: [],
+      byRepo: [],
+      byBackendModel: [],
+      byBackendSource: [],
+    };
+
+    const out = formatFleetStatus({ ...base, dispatchProduction });
+    expect(out).toContain('reasons:   1x engine "local-coder" completed without file changes');
+    expect(out).not.toContain('proposal filing disabled');
+
+    const emptyDiagnosticOut = formatFleetStatus({
+      ...base,
+      dispatchProduction: {
+        ...dispatchProduction,
+        diagnosticTopReasons: [],
+      },
+    });
+    expect(emptyDiagnosticOut).not.toContain('reasons:');
+    expect(emptyDiagnosticOut).not.toContain('proposal filing disabled');
   });
 
   it('renders all sections and flags the paused banner when killed', () => {

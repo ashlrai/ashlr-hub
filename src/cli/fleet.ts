@@ -237,13 +237,13 @@ export function formatFleetStatus(s: FleetStatus): string {
         `no-proposal ${production.diagnosticNoProposalDispatches ?? production.noProposalDispatches}, ` +
         `suppressed ${production.suppressedDispatches ?? 0}, errors ${production.errors}`,
     );
-    const topReasons = production.diagnosticTopReasons?.length
+    const topReasons = production.diagnosticTopReasons !== undefined
       ? production.diagnosticTopReasons
       : production.topReasons;
     if (topReasons.length > 0) {
       lines.push(`  reasons:   ${topReasons.slice(0, 3).map(formatProductionReason).join('; ')}`);
     }
-    const recentNoProposal = production.recentDiagnosticNoProposalDispatches?.length
+    const recentNoProposal = production.recentDiagnosticNoProposalDispatches !== undefined
       ? production.recentDiagnosticNoProposalDispatches
       : production.recentNoProposalDispatches;
     for (const dispatch of recentNoProposal.slice(0, 3)) {
@@ -281,8 +281,11 @@ export function formatFleetStatus(s: FleetStatus): string {
         `  sources:   ${dispatchProduction.bySource.slice(0, 3).map(formatDispatchYieldBucket).join('; ')}`,
       );
     }
-    if (dispatchProduction.topReasons.length > 0) {
-      lines.push(`  reasons:   ${dispatchProduction.topReasons.slice(0, 3).map(formatProductionReason).join('; ')}`);
+    const topReasons = dispatchProduction.diagnosticTopReasons !== undefined
+      ? dispatchProduction.diagnosticTopReasons
+      : dispatchProduction.topReasons;
+    if (topReasons.length > 0) {
+      lines.push(`  reasons:   ${topReasons.slice(0, 3).map(formatProductionReason).join('; ')}`);
     }
   }
   lines.push('');

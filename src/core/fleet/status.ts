@@ -1423,7 +1423,7 @@ function buildProposalProductionStatus(ticks: DaemonTick[]): FleetProposalProduc
 function isSuppressedProposalProductionReason(reason: string | undefined): boolean {
   const normalized = String(reason ?? '').toLowerCase();
   return normalized.startsWith('proposal-disabled') ||
-    normalized.includes('proposal filing disabled for this sandboxed attempt');
+    normalized.includes('proposal filing disabled');
 }
 
 function isSkippedProposalProductionReason(reason: string | undefined): boolean {
@@ -1464,7 +1464,11 @@ function proposalProductionDispatchSummary(
 
 function proposalProductionDiagnosis(production: FleetProposalProductionStatus): string {
   const diagnosticTopReason = production.diagnosticTopReasons[0];
-  const topReason = diagnosticTopReason ?? production.topReasons[0];
+  const topReason = diagnosticTopReason ??
+    production.topReasons.find((reason) =>
+      !isSuppressedProposalProductionReason(reason.reason) &&
+      !isSkippedProposalProductionReason(reason.reason)
+    );
   const diagnosticNoProposalDispatches = production.diagnosticNoProposalDispatches ?? production.noProposalDispatches;
   if (production.errors > 0) {
     return `recent production saw ${production.errors} error(s)${topReason ? `; top reason: ${topReason.reason}` : ''}`;
@@ -1525,7 +1529,17 @@ function diagnosticAttemptsForDispatchSummary(summary: DispatchProductionYieldSu
 }
 
 function diagnosticTopReason(bucket: DispatchProductionYieldBucket): string | undefined {
+  if (bucket.diagnosticTopReasons !== undefined) {
+    return bucket.diagnosticTopReasons[0]?.reason;
+  }
   return bucket.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;
+}
+
+function diagnosticTopReasonForDispatchSummary(summary: DispatchProductionYieldSummary): string | undefined {
+  if (summary.diagnosticTopReasons !== undefined) {
+    return summary.diagnosticTopReasons[0]?.reason;
+  }
+  return summary.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;
 }
 
 function formatAttemptShapeDetail(shape: DispatchProductionYieldSummary['attemptShape']): string {
@@ -1701,8 +1715,7 @@ function buildDispatchYieldDiagnostics(
   const candidates = sortDispatchYieldCandidates(
     bucketSource.map((candidate) => effectiveDispatchYieldCandidate(candidate, cfg, backends)),
   ).slice(0, 5);
-  const fleetTopReason =
-    dispatchProduction.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;
+  const fleetTopReason = diagnosticTopReasonForDispatchSummary(dispatchProduction);
   const fleetCandidate = effectiveDispatchYieldCandidate({
     scope: 'fleet',
     key: 'fleet',
@@ -1726,8 +1739,7 @@ function buildDispatchYieldDiagnostics(
   const action = primaryCandidate?.verdict === 'actionable'
     ? primaryCandidate.action
     : dispatchYieldActionFor(verdict, dispatchProduction.attemptShape);
-  const topReason = primaryCandidate?.topReason ??
-    dispatchProduction.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;
+  const topReason = primaryCandidate?.topReason ?? diagnosticTopReasonForDispatchSummary(dispatchProduction);
   const actionReason = primaryCandidate?.actionReason;
   return {
     windowHours: dispatchProduction.windowHours,

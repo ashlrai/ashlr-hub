@@ -294,6 +294,47 @@ describe('M342 dispatch production ledger', () => {
     )).toBe(true);
   });
 
+  it('keeps raw proposal-disabled reasons while exposing diagnostic reasons for operators', () => {
+    const summary = summarizeDispatchProductionYield([
+      makeEvent({
+        itemId: 'sandbox-policy',
+        backend: 'codex',
+        outcome: 'proposal-disabled',
+        proposalCreated: false,
+        reason: 'proposal filing disabled for this sandboxed attempt',
+      }),
+      makeEvent({
+        itemId: 'api-policy',
+        backend: 'codex',
+        outcome: 'proposal-disabled',
+        proposalCreated: false,
+        reason: 'proposal filing disabled for this api-model attempt',
+      }),
+      makeEvent({
+        itemId: 'empty-diff',
+        backend: 'local-coder',
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        reason: 'engine "local-coder" completed without file changes',
+      }),
+    ]);
+
+    expect(summary?.topReasons.map((row) => row.reason)).toEqual([
+      'engine "local-coder" completed without file changes',
+      'proposal filing disabled for this api-model attempt',
+      'proposal filing disabled for this sandboxed attempt',
+    ]);
+    expect(summary?.diagnosticTopReasons).toEqual([
+      { reason: 'engine "local-coder" completed without file changes', count: 1 },
+    ]);
+    const codex = summary?.byBackend.find((bucket) => bucket.backend === 'codex');
+    expect(codex?.topReasons.map((row) => row.reason)).toEqual([
+      'proposal filing disabled for this api-model attempt',
+      'proposal filing disabled for this sandboxed attempt',
+    ]);
+    expect(codex?.diagnosticTopReasons).toEqual([]);
+  });
+
   it('reads a bounded durable yield window from disk', () => {
     recordDispatchProduction([
       makeEvent({ itemId: 'old', ts: '2026-07-07T00:00:00.000Z' }),

@@ -2440,7 +2440,7 @@ function proposalProductionWindowLabel(production) {
 }
 
 function proposalProductionReasons(production, limit = 3) {
-  const reasons = Array.isArray(production?.diagnosticTopReasons) && production.diagnosticTopReasons.length > 0
+  const reasons = Array.isArray(production?.diagnosticTopReasons)
     ? production.diagnosticTopReasons
     : Array.isArray(production?.topReasons) ? production.topReasons : [];
   return reasons
@@ -2454,14 +2454,11 @@ function renderProposalProductionCard(production, cls = 'ctrl-card card') {
   const suppressed = production.suppressedDispatches ?? 0;
   const errors = production.errors ?? 0;
   const reasons = proposalProductionReasons(production);
-  const diagnosticExamples = Array.isArray(production.recentDiagnosticNoProposalDispatches)
-    ? production.recentDiagnosticNoProposalDispatches
-    : [];
-  const examples = diagnosticExamples.length > 0
-    ? diagnosticExamples.slice(0, 4)
+  const examples = Array.isArray(production.recentDiagnosticNoProposalDispatches)
+    ? production.recentDiagnosticNoProposalDispatches.slice(0, 4)
     : Array.isArray(production.recentNoProposalDispatches)
       ? production.recentNoProposalDispatches.slice(0, 4)
-    : [];
+      : [];
 
   const card = el('div', { cls });
   card.appendChild(el('div', { cls: 'card-header' },
@@ -2536,6 +2533,21 @@ function dispatchProductionBucketLabel(bucket) {
   return String(bucket.key ?? 'unknown');
 }
 
+function dispatchProductionPolicyDisabledCount(bucket) {
+  if (!bucket || typeof bucket !== 'object') return 0;
+  const outcomeDisabled = Number(bucket.outcomes?.proposalDisabled ?? 0);
+  const shapeDisabled = Number(bucket.attemptShape?.policyDisabled ?? 0);
+  const safeOutcome = Number.isFinite(outcomeDisabled) && outcomeDisabled > 0 ? Math.trunc(outcomeDisabled) : 0;
+  const safeShape = Number.isFinite(shapeDisabled) && shapeDisabled > 0 ? Math.trunc(shapeDisabled) : 0;
+  return Math.max(safeOutcome, safeShape);
+}
+
+function dispatchProductionDiagnosticAttempts(bucket) {
+  const attempts = Number(bucket?.attempts ?? 0);
+  const safeAttempts = Number.isFinite(attempts) && attempts > 0 ? Math.trunc(attempts) : 0;
+  return Math.max(0, safeAttempts - dispatchProductionPolicyDisabledCount(bucket));
+}
+
 function renderDispatchProductionCard(dispatchProduction, cls = 'ctrl-card card') {
   const card = el('div', { cls });
   if (!dispatchProduction) {
@@ -2573,7 +2585,10 @@ function renderDispatchProductionCard(dispatchProduction, cls = 'ctrl-card card'
   if (backends.length > 0) {
     const list = el('div', { cls: 'ctrl-backend-list' });
     for (const bucket of backends) {
-      list.appendChild(el('div', { cls: 'ctrl-backend-row', title: bucket.topReasons?.[0]?.reason ?? '' },
+      const bucketReasons = Array.isArray(bucket.diagnosticTopReasons)
+        ? bucket.diagnosticTopReasons
+        : Array.isArray(bucket.topReasons) ? bucket.topReasons : [];
+      list.appendChild(el('div', { cls: 'ctrl-backend-row', title: bucketReasons[0]?.reason ?? '' },
         el('span', { cls: 'ctrl-backend-name' }, dispatchProductionBucketLabel(bucket)),
         el('span', { cls: 'ctrl-backend-dispatches' },
           `${bucket.proposalsCreated ?? 0}/${bucket.attempts ?? 0} · ${formatFleetPercent(bucket.proposalRate)}`
@@ -3374,7 +3389,8 @@ function renderControl() {
     heroMetrics.appendChild(controlMetric('Loop State', formatEffectivenessPhase(effectiveness.phase), effectivenessAccent(effectiveness.phase)));
   }
   if (production) {
-    heroMetrics.appendChild(controlMetric('No-prop 24h', production.noProposalDispatches ?? 0, production.noProposalDispatches > 0 ? '#f97316' : '#4ade80'));
+    const noProposal = production.diagnosticNoProposalDispatches ?? production.noProposalDispatches ?? 0;
+    heroMetrics.appendChild(controlMetric('No-prop 24h', noProposal, noProposal > 0 ? '#f97316' : '#4ade80'));
   }
   if (dispatchProduction) {
     heroMetrics.appendChild(controlMetric('Yield 24h', formatFleetPercent(dispatchProduction.proposalRate), dispatchProduction.proposalRate > 0 ? '#4ade80' : '#f97316'));
@@ -4624,13 +4640,16 @@ function fdRenderProductionPanel(snap) {
   }
 
   if (production) {
+    const noProposal = production.diagnosticNoProposalDispatches ?? production.noProposalDispatches ?? 0;
+    const suppressed = production.suppressedDispatches ?? 0;
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Proposal production'));
     body.appendChild(infoGrid([
       ['Window', proposalProductionWindowLabel(production)],
       ['Selected', production.selected ?? 0],
       ['Dispatched', production.dispatched ?? 0],
       ['Proposals', production.proposalsCreated ?? 0],
-      ['No-proposal', production.noProposalDispatches ?? 0],
+      ['No-proposal', noProposal],
+      ['Suppressed', suppressed],
       ['Errors', production.errors ?? 0],
     ]));
     const reasons = proposalProductionReasons(production, 2);
@@ -4651,10 +4670,15 @@ function fdRenderProductionPanel(snap) {
     ]));
     const shape = formatAttemptShape(dispatchProduction.attemptShape);
     if (shape) body.appendChild(el('p', { cls: 'hint' }, shape));
-    const backend = Array.isArray(dispatchProduction.byBackend) ? dispatchProduction.byBackend[0] : null;
+    const backends = Array.isArray(dispatchProduction.byBackend) ? dispatchProduction.byBackend : [];
+    const backend = backends.find((candidate) => dispatchProductionDiagnosticAttempts(candidate) > 0) ?? backends[0] ?? null;
     if (backend) {
+      const diagnosticAttempts = dispatchProductionDiagnosticAttempts(backend);
+      const attempts = diagnosticAttempts > 0 ? diagnosticAttempts : backend.attempts ?? 0;
+      const proposals = backend.proposalsCreated ?? 0;
+      const rate = attempts > 0 ? proposals / attempts : 0;
       body.appendChild(el('p', { cls: 'hint' },
-        `Weakest backend: ${dispatchProductionBucketLabel(backend)} ${backend.proposalsCreated ?? 0}/${backend.attempts ?? 0} (${formatFleetPercent(backend.proposalRate)})`
+        `Weakest backend: ${dispatchProductionBucketLabel(backend)} ${proposals}/${attempts} (${formatFleetPercent(rate)})`
       ));
     }
   }

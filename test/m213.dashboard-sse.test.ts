@@ -408,6 +408,7 @@ describe('M213 Dashboard SSE — /api/events', () => {
     );
     expect(src).toContain('function renderProposalProductionCard');
     expect(src).toContain('function renderDispatchProductionCard');
+    expect(src).toContain('function dispatchProductionDiagnosticAttempts');
     expect(src).toContain('function renderMissionBriefCard');
     expect(src).toContain('function renderNextActionCommand');
     expect(src).toContain('fleet-command-rail');
@@ -422,11 +423,14 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("renderDispatchProductionCard(f.dispatchProduction, 'fleet-card card')");
     expect(src).toContain('renderProposalProductionCard(production)');
     expect(src).toContain("controlMetric('No-prop 24h'");
+    expect(src).toContain('production.diagnosticNoProposalDispatches ?? production.noProposalDispatches');
     expect(src).toContain("controlMetric('Yield 24h'");
     expect(src).toContain("snap.fleet?.proposalProduction ?? snap.control?.fleet?.proposalProduction");
     expect(src).toContain("snap.fleet?.dispatchProduction ?? snap.control?.fleet?.dispatchProduction");
     expect(src).toContain("'Proposal production'");
     expect(src).toContain("'Dispatch yield'");
+    expect(src).toContain("['Suppressed', suppressed]");
+    expect(src).toContain('backends.find((candidate) => dispatchProductionDiagnosticAttempts(candidate) > 0)');
   });
 
   it('app.js renders Fleet Dashboard readiness rail from existing fleet snapshots', () => {
