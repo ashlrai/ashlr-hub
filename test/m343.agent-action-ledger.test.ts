@@ -101,6 +101,39 @@ describe('M343 agent action ledger', () => {
     expect(Number.isFinite(Date.parse(event!.ts))).toBe(true);
   });
 
+  it('preserves started and verification lifecycle outcomes', () => {
+    recordAgentAction([
+      makeEvent({
+        action: 'daemon:tick-start',
+        kind: 'tick',
+        outcome: 'started',
+        summary: 'start: budget $1.00, perTick 4, parallel 3',
+      }),
+      makeEvent({
+        action: 'auto-merge:verify-before-judge-finish',
+        actor: 'verifier',
+        kind: 'verification',
+        outcome: 'verified',
+        proposalId: 'prop-verified',
+        summary: 'verify-before-judge passed for Proposal',
+      }),
+    ]);
+
+    const events = readAgentActions();
+
+    expect(events.map((event) => event.outcome)).toEqual(['verified', 'started']);
+    expect(events[0]).toMatchObject({
+      actor: 'verifier',
+      kind: 'verification',
+      action: 'auto-merge:verify-before-judge-finish',
+    });
+    expect(events[1]).toMatchObject({
+      actor: 'daemon',
+      kind: 'tick',
+      action: 'daemon:tick-start',
+    });
+  });
+
   it('skips malformed lines and scrubs secret-shaped text before persistence', () => {
     const dir = agentActionsDir();
     mkdirSync(dir, { recursive: true });

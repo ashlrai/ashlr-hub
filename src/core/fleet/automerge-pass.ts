@@ -59,6 +59,7 @@ import { estCostUsd } from '../run/budget.js';
 import { learnFromRejection } from './self-improve.js';
 // M243: skill-library write-back (fire-and-forget, gated cfg.foundry.skillLibrary, default ON)
 import { learnFromApplied } from './skill-library.js';
+import { recordAgentAction } from './agent-action-ledger.js';
 
 export interface AutoMergePassResult {
   /** Proposals the gate was run against this pass (frontier + branch-eligible mid). */
@@ -115,6 +116,41 @@ export interface AutoMergePassResult {
 const JUDGE_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour — mirrors Gate 7 staleness window
 const JUDGE_ESTIMATE_TOKENS_IN = 4_000;
 const JUDGE_ESTIMATE_TOKENS_OUT = 1_000;
+
+function recordAutoMergeVerificationAgentAction(fields: {
+  proposal: Proposal;
+  check: string;
+  phase: 'start' | 'finish';
+  ok?: boolean;
+  detail?: string;
+  durationMs?: number;
+  ranCount?: number;
+}): void {
+  const status =
+    fields.phase === 'start'
+      ? 'started'
+      : fields.ok === true
+        ? 'passed'
+        : 'failed';
+  recordAgentAction({
+    schemaVersion: 1,
+    ts: new Date().toISOString(),
+    actor: 'verifier',
+    kind: 'verification',
+    outcome: fields.phase === 'start' ? 'unknown' : fields.ok === true ? 'verified' : 'failed',
+    action: `auto-merge:${fields.check}-${fields.phase}`,
+    summary: `${fields.check} ${status} for ${fields.proposal.title ?? fields.proposal.id}`,
+    ...(typeof fields.proposal.repo === 'string' && fields.proposal.repo ? { repo: fields.proposal.repo } : {}),
+    proposalId: fields.proposal.id,
+    ...(fields.proposal.workSource ? { source: fields.proposal.workSource } : {}),
+    reason: fields.detail ?? fields.check,
+    durationMs: fields.durationMs,
+    tags: ['auto-merge', fields.check, fields.phase],
+    counts: {
+      ...(typeof fields.ranCount === 'number' ? { commands: fields.ranCount } : {}),
+    },
+  });
+}
 
 /**
  * Return true when the decisions ledger already contains a recent frontier
@@ -467,7 +503,35 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
         verifyBeforeJudgeUsed++;
         out.verifyBeforeJudgeRan++;
 
-        const verify = await verifyProposal(p, cfg);
+        const verifyStartedAt = Date.now();
+        recordAutoMergeVerificationAgentAction({
+          proposal: p,
+          check: verifyCheck,
+          phase: 'start',
+        });
+        let verify: Awaited<ReturnType<typeof verifyProposal>>;
+        try {
+          verify = await verifyProposal(p, cfg);
+        } catch (err) {
+          recordAutoMergeVerificationAgentAction({
+            proposal: p,
+            check: verifyCheck,
+            phase: 'finish',
+            ok: false,
+            detail: (err as Error)?.message ?? String(err),
+            durationMs: Date.now() - verifyStartedAt,
+          });
+          throw err;
+        }
+        recordAutoMergeVerificationAgentAction({
+          proposal: p,
+          check: verifyCheck,
+          phase: 'finish',
+          ok: verify.ok,
+          detail: verify.detail,
+          durationMs: Date.now() - verifyStartedAt,
+          ranCount: verify.ran.length,
+        });
         const verifyResult = verifyResultFromProposalResult(
           verify,
           'auto-merge-preflight',

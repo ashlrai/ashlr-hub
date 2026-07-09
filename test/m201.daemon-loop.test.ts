@@ -222,6 +222,7 @@ import {
   pendingCount,
 } from '../src/core/inbox/store.js';
 import { readDispatchProductionEvents } from '../src/core/fleet/dispatch-production-ledger.js';
+import { readAgentActions } from '../src/core/fleet/agent-action-ledger.js';
 import { loadWorkedLedger } from '../src/core/fleet/worked-ledger.js';
 import {
   makeFixture,
@@ -456,6 +457,46 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSelfHealCycle).toHaveBeenCalledTimes(1);
     expect(mockRunInventCycle).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1-start: live tick writes start and terminal agent actions without extra daemon ticks', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [],
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 4, parallel: 3 }), { dryRun: false });
+
+    const actions = readAgentActions();
+    const start = actions.find((event) => event.action === 'daemon:tick-start');
+    const terminal = actions.find((event) => event.action === 'daemon:tick');
+    const state = loadDaemonState();
+
+    expect(result.reason).toBe('no-backlog');
+    expect(state.ticks).toHaveLength(1);
+    expect(state.ticks[0]!.reason).toBe('no-backlog');
+    expect(start).toMatchObject({
+      actor: 'daemon',
+      kind: 'tick',
+      outcome: 'started',
+      action: 'daemon:tick-start',
+      counts: { perTickItems: 4, parallel: 3 },
+    });
+    expect(start?.tags).toEqual(expect.arrayContaining(['tick-start', 'live']));
+    expect(start?.repo).toBeUndefined();
+    expect(start?.itemId).toBeUndefined();
+    expect(start?.proposalId).toBeUndefined();
+    expect(start?.runId).toBeUndefined();
+    expect(terminal).toMatchObject({
+      actor: 'daemon',
+      kind: 'tick',
+      outcome: 'skipped',
+      action: 'daemon:tick',
+      reason: 'no-backlog',
+    });
   });
 
   it('A1a: empty backlog runs self-heal, rebuilds, and dispatches refilled work in the same tick', async () => {

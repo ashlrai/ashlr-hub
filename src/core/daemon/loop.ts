@@ -604,6 +604,39 @@ function recordTickAgentAction(tick: DaemonTick, machineId?: string): void {
   });
 }
 
+function recordTickStartAgentAction(fields: {
+  ts: string;
+  dryRun: boolean;
+  dailyBudgetUsd: number;
+  perTickItems: number;
+  parallel: number;
+  mode?: string;
+  machineId?: string;
+}): void {
+  recordAgentAction({
+    schemaVersion: 1,
+    ts: fields.ts,
+    machineId: fields.machineId ?? osHostname(),
+    actor: 'daemon',
+    kind: 'tick',
+    outcome: 'started',
+    action: 'daemon:tick-start',
+    summary:
+      `start: budget $${fields.dailyBudgetUsd.toFixed(2)}, ` +
+      `perTick ${fields.perTickItems}, parallel ${fields.parallel}`,
+    reason: fields.dryRun ? 'dry-run' : 'live',
+    tags: [
+      'tick-start',
+      fields.dryRun ? 'dry-run' : 'live',
+      ...(fields.mode ? [fields.mode] : []),
+    ],
+    counts: {
+      perTickItems: fields.perTickItems,
+      parallel: fields.parallel,
+    },
+  });
+}
+
 function dispatchTrace(
   item: WorkItem,
   fields: {
@@ -927,6 +960,14 @@ export async function tick(
   // wall-clock here covers all of them — the stage-2 soak compares tick
   // p50/p95 before/after enabling concurrent dispatch.
   const _tickStartMs = Date.now();
+  recordTickStartAgentAction({
+    ts: now,
+    dryRun: opts.dryRun,
+    dailyBudgetUsd: dcfg.dailyBudgetUsd,
+    perTickItems: dcfg.perTickItems,
+    parallel: dcfg.parallel,
+    mode: dcfg.mode,
+  });
   const recordTick = (t: DaemonTick): DaemonTick => {
     const tick: DaemonTick = {
       ...(opts.dryRun ? { ...t, dryRun: true } : t),

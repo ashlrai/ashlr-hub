@@ -435,3 +435,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Run focused health, invent, learned-routing, and model-granular routing verification.
 - [x] Run final typecheck, adjacent suites, lint, build, audit, diff checks, and full CI.
 - [x] Commit, push to `origin/master`, rebuild/restart daemon, and verify live fleet status.
+
+## Current Continuation - In-Progress Global Workspace Telemetry
+- [x] Rechecked clean `master`, recent commits, Entire resume state, task plan, and notes.
+- [x] Deployed parallel explorer agents across daemon tick lifecycle, verification lifecycle, sandboxed action counts, tests, operations, and next product bottlenecks.
+- [x] Re-read Anthropic's July 6, 2026 global-workspace writeup and translated it into Ashlr's software-level shared telemetry channel: record intent/start/finish metadata early enough for other systems to use it.
+- [x] Added `started` as a first-class `AgentActionOutcome` so in-flight events do not collapse into `unknown`.
+- [x] Added metadata-only `daemon:tick-start` events at tick entry with dry-run/live mode and dispatch capacity counts while keeping durable daemon tick history terminal-only.
+- [x] Added auto-merge verifier lifecycle events around evidence-backed preflight verification: `auto-merge:verify-before-merge-start/finish` and `auto-merge:verify-before-judge-start/finish`.
+- [x] Added focused ledger, daemon-loop, and auto-merge regression coverage for started outcomes, terminal tick preservation, verifier pass/fail telemetry, and no raw diff/stdout/stderr leakage.
+- [x] Focused verification passed: `npm run test:ci -- test/m343.agent-action-ledger.test.ts test/m201.daemon-loop.test.ts test/m48.automerge-pass.test.ts test/m49.fleet-status.test.ts` (114 tests).
+- [x] Run final typecheck, build, lint, audit, diff checks, and full CI.
+- [ ] Commit, push to `origin/master`, restart/reverify the live daemon, and record next telemetry lanes.

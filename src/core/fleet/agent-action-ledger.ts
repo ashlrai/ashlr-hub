@@ -39,6 +39,7 @@ export type AgentActionKind =
   | 'reflection';
 
 export type AgentActionOutcome =
+  | 'started'
   | 'ok'
   | 'skipped'
   | 'blocked'
@@ -100,6 +101,7 @@ const AGENT_ACTION_KINDS = new Set<AgentActionKind>([
 ]);
 
 const AGENT_ACTION_OUTCOMES = new Set<AgentActionOutcome>([
+  'started',
   'ok',
   'skipped',
   'blocked',
