@@ -159,6 +159,7 @@ export type FleetAutonomyEffectivenessPhase =
   | 'verification-needed'
   | 'merge-blocked'
   | 'proposal-starved'
+  | 'cooldown-gated'
   | 'idle';
 
 export interface FleetAutonomyEffectivenessStatus {
@@ -171,6 +172,7 @@ export interface FleetAutonomyEffectivenessStatus {
     | 'verification'
     | 'merge-gate'
     | 'proposal-production'
+    | 'cooldown'
     | 'none';
   summary: string;
   counts: {
@@ -257,8 +259,12 @@ export interface FleetProposalProductionStatus {
   errors: number;
   proposalsCreated: number;
   noProposalDispatches: number;
+  suppressedDispatches: number;
+  diagnosticNoProposalDispatches: number;
   topReasons: FleetProposalProductionReasonSummary[];
+  diagnosticTopReasons: FleetProposalProductionReasonSummary[];
   recentNoProposalDispatches: FleetProposalProductionDispatchSummary[];
+  recentDiagnosticNoProposalDispatches: FleetProposalProductionDispatchSummary[];
 }
 
 export interface FleetQueueNextItem {
@@ -834,7 +840,9 @@ function buildProposalProductionStatus(ticks: DaemonTick[]): FleetProposalProduc
   if (recent.length === 0) return undefined;
 
   const reasons = new Map<string, number>();
+  const diagnosticReasons = new Map<string, number>();
   const recentNoProposalDispatches: FleetProposalProductionDispatchSummary[] = [];
+  const recentDiagnosticNoProposalDispatches: FleetProposalProductionDispatchSummary[] = [];
   let selected = 0;
   let claimed = 0;
   let dispatched = 0;
@@ -842,10 +850,14 @@ function buildProposalProductionStatus(ticks: DaemonTick[]): FleetProposalProduc
   let errors = 0;
   let proposalsCreated = 0;
   let noProposalDispatches = 0;
+  let suppressedDispatches = 0;
 
   const addReason = (reason: string, count = 1): void => {
     const key = reason.trim() || 'unknown';
     reasons.set(key, (reasons.get(key) ?? 0) + count);
+    if (!isSuppressedProposalProductionReason(key)) {
+      diagnosticReasons.set(key, (diagnosticReasons.get(key) ?? 0) + count);
+    }
   };
 
   for (const tick of recent) {
@@ -867,16 +879,40 @@ function buildProposalProductionStatus(ticks: DaemonTick[]): FleetProposalProduc
         dispatch.production !== undefined &&
         dispatch.production.outcome !== 'proposal-created',
       );
+      let suppressedByReason = 0;
+      for (const reason of production.reasons ?? []) {
+        if (isSuppressedProposalProductionReason(reason.reason)) {
+          suppressedByReason += reason.count;
+        }
+      }
+      const suppressedByDispatch = knownNoProposalDispatches
+        .filter(isSuppressedProposalProductionDispatch)
+        .length;
+      suppressedDispatches += Math.max(suppressedByReason, suppressedByDispatch);
       const sample = knownNoProposalDispatches.length > 0
         ? knownNoProposalDispatches
         : (tick.dispatches ?? []).filter((dispatch) => dispatch.dispatched).slice(0, production.noProposalDispatches);
       for (const dispatch of sample) {
         if (recentNoProposalDispatches.length >= 8) break;
-        recentNoProposalDispatches.push(proposalProductionDispatchSummary(tick.ts, dispatch));
+        const summary = proposalProductionDispatchSummary(tick.ts, dispatch);
+        recentNoProposalDispatches.push(summary);
+        if (isSuppressedProposalProductionDispatch(dispatch)) {
+          continue;
+        }
+        if (recentDiagnosticNoProposalDispatches.length < 8) {
+          recentDiagnosticNoProposalDispatches.push(summary);
+        }
+      }
+    } else {
+      for (const reason of production.reasons ?? []) {
+        if (isSuppressedProposalProductionReason(reason.reason)) {
+          suppressedDispatches += reason.count;
+        }
       }
     }
   }
 
+  const diagnosticNoProposalDispatches = Math.max(0, noProposalDispatches - suppressedDispatches);
   return {
     windowHours: RECENT_WINDOW_MS / (60 * 60 * 1000),
     selected,
@@ -886,12 +922,31 @@ function buildProposalProductionStatus(ticks: DaemonTick[]): FleetProposalProduc
     errors,
     proposalsCreated,
     noProposalDispatches,
+    suppressedDispatches,
+    diagnosticNoProposalDispatches,
     topReasons: [...reasons.entries()]
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .slice(0, 8)
       .map(([reason, count]) => ({ reason, count })),
+    diagnosticTopReasons: [...diagnosticReasons.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 8)
+      .map(([reason, count]) => ({ reason, count })),
     recentNoProposalDispatches,
+    recentDiagnosticNoProposalDispatches,
   };
+}
+
+function isSuppressedProposalProductionReason(reason: string | undefined): boolean {
+  const normalized = String(reason ?? '').toLowerCase();
+  return normalized.startsWith('proposal-disabled') ||
+    normalized.includes('proposal filing disabled for this sandboxed attempt');
+}
+
+function isSuppressedProposalProductionDispatch(dispatch: DaemonDispatchTrace): boolean {
+  return dispatch.production?.outcome === 'proposal-disabled' ||
+    isSuppressedProposalProductionReason(dispatch.production?.reason) ||
+    isSuppressedProposalProductionReason(dispatch.reason);
 }
 
 function proposalProductionDispatchSummary(
@@ -911,12 +966,17 @@ function proposalProductionDispatchSummary(
 }
 
 function proposalProductionDiagnosis(production: FleetProposalProductionStatus): string {
-  const topReason = production.topReasons[0];
+  const topReasons = production.diagnosticTopReasons.length > 0 ? production.diagnosticTopReasons : production.topReasons;
+  const topReason = topReasons[0];
+  const diagnosticNoProposalDispatches = production.diagnosticNoProposalDispatches ?? production.noProposalDispatches;
   if (production.errors > 0) {
     return `recent production saw ${production.errors} error(s)${topReason ? `; top reason: ${topReason.reason}` : ''}`;
   }
-  if (production.noProposalDispatches > 0) {
-    return `${production.noProposalDispatches} recent dispatch(es) produced no proposal${topReason ? `; top reason: ${topReason.reason}` : ''}`;
+  if (diagnosticNoProposalDispatches > 0) {
+    return `${diagnosticNoProposalDispatches} recent dispatch(es) produced no proposal${topReason ? `; top reason: ${topReason.reason}` : ''}`;
+  }
+  if (production.suppressedDispatches > 0) {
+    return `${production.suppressedDispatches} recent dispatch(es) were suppressed by internal proposal filing policy`;
   }
   if (production.selected > 0 && production.dispatched === 0) {
     return `${production.selected} item(s) were selected but none dispatched${topReason ? `; top reason: ${topReason.reason}` : ''}`;
@@ -1041,13 +1101,21 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
       counts,
     };
   }
+  if (counts.pendingProposals === 0 && counts.backlogItems > 0 && eligibleBacklogItems === 0) {
+    const nextEligible = counts.nextEligibleAt ? ` Next eligible at ${counts.nextEligibleAt}.` : '';
+    return {
+      phase: 'cooldown-gated',
+      canAutoMergeNow: false,
+      bottleneck: 'cooldown',
+      summary: `No eligible backlog work is visible; ${counts.cooldownItems ?? 0} item(s) are cooling and ${counts.pendingItems ?? 0} already have pending proposals.${nextEligible}`,
+      counts,
+    };
+  }
   return {
     phase: 'idle',
     canAutoMergeNow: false,
     bottleneck: 'none',
-    summary: counts.backlogItems > 0 && eligibleBacklogItems === 0
-      ? `No eligible backlog work is visible; ${counts.cooldownItems ?? 0} item(s) are cooling and ${counts.pendingItems ?? 0} already have pending proposals.`
-      : counts.recentMerges > 0
+    summary: counts.recentMerges > 0
       ? `No pending merge work is visible; ${counts.recentMerges} auto-merge(s) landed in the last 24h.`
       : 'No pending proposals or backlog work are visible.',
     counts,
@@ -1169,7 +1237,8 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       });
     }
     const production = status.proposalProduction;
-    if (production && (production.errors > 0 || production.noProposalDispatches > 0 || (production.selected > 0 && production.dispatched === 0))) {
+    const diagnosticNoProposalDispatches = production?.diagnosticNoProposalDispatches ?? production?.noProposalDispatches ?? 0;
+    if (production && (production.errors > 0 || diagnosticNoProposalDispatches > 0 || (production.selected > 0 && production.dispatched === 0))) {
       add({
         id: 'inspect-proposal-production',
         priority: production.errors > 0 ? 'high' : 'medium',
@@ -1191,6 +1260,16 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     const cooling = status.queue.cooldownItems ?? 0;
     const pending = status.queue.pendingItems ?? 0;
     const nextEligible = status.queue.nextEligibleAt;
+    if (cooling > 0 && eligibleBacklogItems === 0) {
+      add({
+        id: 'cooldown-gated-backlog',
+        priority: 'medium',
+        label: 'Review cooldown gate',
+        detail: nextEligible
+          ? `${status.queue.backlogItems} backlog item(s) are cooling; next eligible at ${nextEligible}. Decide whether to wait, lower cooldown policy, or dispatch a targeted high-value item.`
+          : `${status.queue.backlogItems} backlog item(s) are visible but none are eligible. Decide whether to wait, inspect worked-ledger cooldowns, or dispatch a targeted high-value item.`,
+      });
+    }
     add({
       id: 'wait-for-backlog-eligibility',
       priority: 'low',
@@ -1612,6 +1691,19 @@ function chooseReadinessBlocker(
       'queue',
     );
   }
+  const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
+  if (status.queue.backlogItems > 0 && eligibleBacklogItems === 0 && status.proposals.pending === 0) {
+    const cooling = status.queue.cooldownItems ?? 0;
+    const pending = status.queue.pendingItems ?? 0;
+    const nextEligible = status.queue.nextEligibleAt ? ` Next eligible at ${status.queue.nextEligibleAt}.` : '';
+    return readinessBlocker(
+      'backlog-cooldown-gated',
+      'Backlog cooling',
+      `Backlog exists, but no items are currently daemon-eligible (${cooling} cooling, ${pending} already covered by pending proposals).${nextEligible}`,
+      'medium',
+      'queue',
+    );
+  }
   const resourceSource = sources.find((source) => source.id === 'resources');
   if (resourceSource?.status === 'blocked' || resourceSource?.status === 'unavailable') {
     return readinessBlocker(
@@ -1622,7 +1714,7 @@ function chooseReadinessBlocker(
       'resources',
     );
   }
-  if ((status.queue.eligibleBacklogItems ?? status.queue.backlogItems) > 0 && status.proposals.pending === 0) {
+  if (eligibleBacklogItems > 0 && status.proposals.pending === 0) {
     return readinessBlocker(
       'proposal-production-needed',
       'Proposal production needed',

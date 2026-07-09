@@ -1,5 +1,15 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Current Fleet Usefulness Continuation
+- Start state: clean `master...origin/master` at `08b0fd5`; Entire still not set up.
+- Live fleet summary after the previous deploy: daemon running, guard clear, 24/24 enrolled repos with verification commands, 21 backlog items, 0 eligible items, 21 cooling items, 0 pending proposals, auto-merge enabled with no pending work, Claude throttled at the protection threshold, production velocity profile off.
+- Product smell: `autonomyEffectiveness.phase` reports `idle` with `bottleneck:"none"` even when all visible backlog is suppressed by cooldown and no pending proposals exist. Fleet OS should not collapse "temporarily blocked by freshness/cooldown policy" into a healthy idle state.
+- Current implementation target: make cooldown-only stasis explicit in effectiveness/readiness/next-actions so operators and future agents can choose whether to wait, inspect cooldown policy, or enable a velocity profile.
+- Scout recommendation alignment: FleetStatus/readiness scout independently ranked `cooldown-gated` as the smallest high-signal usefulness patch, then recommended a dashboard label/accent so Mission Control does not treat the new state as unknown.
+- Strategy scout's hard questions: define one fleet success function, decide when autonomy recommendations become executable behavior, and treat low/no-proposal dispatch yield as a product signal rather than ambient telemetry.
+- Proposal-production refinement: preserve raw `proposal-disabled` counts for learning, but filter those internal policy suppressions out of operator-facing diagnostics, top reasons, recent examples, and next actions so actual agent failures like empty diffs remain visible.
+- Causal learning scout's next lane: add compact metadata-only attempt-shape and feature summaries so the fleet can learn from no-proposal attempts without persisting raw prompts, diffs, stdout/stderr, env, or file contents.
+
 ## Current Autonomous Fleet Foundation Batch
 - Branch: `codex/autonomous-fleet-foundation`
 - Start state: clean worktree on `master...origin/master`; latest commit `53e518d fix: align fleet learning and queue eligibility`.

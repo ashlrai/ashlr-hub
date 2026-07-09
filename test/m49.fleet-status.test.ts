@@ -442,12 +442,18 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       makeBacklogItem(repo, 'repo:goal:cooling-one', 'Cooling one', 9),
       makeBacklogItem(repo, 'repo:goal:cooling-two', 'Cooling two', 5),
     ];
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'verification',
+      },
+    });
     writeRunningDaemon(tmpHome);
     writeBacklogSnapshot(tmpHome, repo, items);
     recordOutcome('repo:goal:cooling-one', 'empty', new Date().toISOString());
     recordOutcome('repo:goal:cooling-two', 'judged-review', new Date().toISOString());
 
-    const s = await buildFleetStatus(baseConfig());
+    const s = await buildFleetStatus(cfg);
 
     expect(s.queue.backlogItems).toBe(2);
     expect(s.queue.eligibleBacklogItems).toBe(0);
@@ -456,16 +462,33 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.queue.nextEligibleAt).toMatch(/T/);
     expect(s.queue.next).toBeUndefined();
     expect(s.nextActions?.map((action) => action.id)).not.toContain('build-backlog');
+    expect(s.nextActions?.[0]).toMatchObject({
+      id: 'cooldown-gated-backlog',
+      priority: 'medium',
+      label: 'Review cooldown gate',
+    });
     expect(s.nextActions).toContainEqual(expect.objectContaining({
       id: 'wait-for-backlog-eligibility',
       detail: expect.stringContaining('next eligible at'),
     }));
     expect(s.autonomyEffectiveness).toMatchObject({
-      phase: 'idle',
+      phase: 'cooldown-gated',
+      bottleneck: 'cooldown',
       counts: {
         backlogItems: 2,
         eligibleBacklogItems: 0,
         cooldownItems: 2,
+      },
+    });
+    expect(s.autonomyEffectiveness?.summary).toContain('Next eligible at');
+    expect(s.autonomousShipReadiness).toMatchObject({
+      verdict: 'degraded',
+      topBlocker: {
+        id: 'backlog-cooldown-gated',
+        source: 'queue',
+      },
+      primaryAction: {
+        id: 'cooldown-gated-backlog',
       },
     });
   });
@@ -661,6 +684,111 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         }),
       ]),
     );
+  });
+
+  it('keeps proposal-disabled attempts out of operator production diagnosis', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    const recentTick: DaemonTick = {
+      ts: new Date().toISOString(),
+      itemsConsidered: 3,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'ok',
+      proposalProduction: {
+        selected: 3,
+        claimed: 3,
+        dispatched: 3,
+        skipped: 0,
+        errors: 0,
+        proposalsCreated: 0,
+        noProposalDispatches: 3,
+        reasons: [
+          { reason: 'proposal-disabled: proposal filing disabled for this sandboxed attempt', count: 2 },
+          { reason: 'empty-diff: agent returned no diff', count: 1 },
+        ],
+      },
+      dispatches: [
+        {
+          itemId: 'repo:goal:suppressed-one',
+          title: 'Suppressed one',
+          repo,
+          source: 'goal',
+          backend: 'codex',
+          tier: 'frontier',
+          assignedBy: 'router',
+          reason: 'proposal-disabled: proposal filing disabled for this sandboxed attempt',
+          dispatched: true,
+          spentUsd: 0,
+          production: {
+            outcome: 'proposal-disabled',
+            reason: 'proposal filing disabled for this sandboxed attempt',
+          },
+        },
+        {
+          itemId: 'repo:goal:suppressed-two',
+          title: 'Suppressed two',
+          repo,
+          source: 'goal',
+          backend: 'codex',
+          tier: 'frontier',
+          assignedBy: 'router',
+          reason: 'proposal-disabled: proposal filing disabled for this sandboxed attempt',
+          dispatched: true,
+          spentUsd: 0,
+          production: {
+            outcome: 'proposal-disabled',
+            reason: 'proposal filing disabled for this sandboxed attempt',
+          },
+        },
+        {
+          itemId: 'repo:goal:empty',
+          title: 'Empty diff',
+          repo,
+          source: 'goal',
+          backend: 'claude',
+          tier: 'frontier',
+          assignedBy: 'router',
+          reason: 'agent returned no diff',
+          dispatched: true,
+          spentUsd: 0,
+          production: {
+            outcome: 'empty-diff',
+            reason: 'agent returned no diff',
+          },
+        },
+      ],
+    };
+    writeRunningDaemon(tmpHome, [recentTick]);
+    writeBacklogSnapshot(tmpHome, repo, [
+      makeBacklogItem(repo, 'repo:goal:fresh', 'Fresh eligible work', 5),
+    ], new Date().toISOString());
+
+    const s = await buildFleetStatus(withFoundry({
+      autoMerge: { enabled: true, trustBasis: 'verification' },
+    }));
+
+    expect(s.proposalProduction).toMatchObject({
+      noProposalDispatches: 3,
+      suppressedDispatches: 2,
+      diagnosticNoProposalDispatches: 1,
+      diagnosticTopReasons: [{ reason: 'empty-diff: agent returned no diff', count: 1 }],
+    });
+    expect(s.proposalProduction?.topReasons[0]?.reason).toContain('proposal-disabled');
+    expect(s.proposalProduction?.recentNoProposalDispatches).toHaveLength(3);
+    expect(s.proposalProduction?.recentDiagnosticNoProposalDispatches).toHaveLength(1);
+    expect(s.proposalProduction?.recentDiagnosticNoProposalDispatches[0]).toMatchObject({
+      itemId: 'repo:goal:empty',
+      reason: 'agent returned no diff',
+    });
+    expect(s.autonomyEffectiveness?.summary).toContain('1 recent dispatch(es) produced no proposal');
+    expect(s.autonomyEffectiveness?.summary).toContain('top reason: empty-diff: agent returned no diff');
+    expect(s.autonomyEffectiveness?.summary).not.toContain('proposal-disabled');
+    const inspectAction = s.nextActions?.find((action) => action.id === 'inspect-proposal-production');
+    expect(inspectAction?.detail).toContain('agent returned no diff');
+    expect(inspectAction?.detail).not.toContain('proposal-disabled');
   });
 
   it('reports durable dispatch-production yield from the append-only ledger', async () => {
@@ -1414,11 +1542,28 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         errors: 1,
         proposalsCreated: 2,
         noProposalDispatches: 1,
+        suppressedDispatches: 0,
+        diagnosticNoProposalDispatches: 1,
         topReasons: [
           { reason: 'agent returned no diff', count: 2 },
           { reason: 'tool timeout', count: 1 },
         ],
+        diagnosticTopReasons: [
+          { reason: 'agent returned no diff', count: 2 },
+          { reason: 'tool timeout', count: 1 },
+        ],
         recentNoProposalDispatches: [
+          {
+            ts: '2026-06-17T00:03:00.000Z',
+            itemId: 'item-a',
+            title: 'Ship autonomy debugger',
+            repo: '/repo/a',
+            source: 'goal',
+            backend: 'builtin',
+            reason: 'agent returned no diff',
+          },
+        ],
+        recentDiagnosticNoProposalDispatches: [
           {
             ts: '2026-06-17T00:03:00.000Z',
             itemId: 'item-a',
@@ -1652,7 +1797,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('Proposal production:');
     expect(out).toContain('window:    24h');
     expect(out).toContain('queue:     selected 5, claimed 4, dispatched 3, skipped 1');
-    expect(out).toContain('output:    proposals 2, no-proposal 1, errors 1');
+    expect(out).toContain('output:    proposals 2, no-proposal 1, suppressed 0, errors 1');
     expect(out).toContain('2x agent returned no diff');
     expect(out).toContain('recent:    builtin a Ship autonomy debugger (agent returned no diff)');
     expect(out).toContain('Dispatch yield:');

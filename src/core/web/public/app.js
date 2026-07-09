@@ -2379,6 +2379,7 @@ function formatEffectivenessPhase(phase) {
     'verification-needed': 'Verification Needed',
     'merge-blocked': 'Merge Blocked',
     'proposal-starved': 'Proposal Starved',
+    'cooldown-gated': 'Cooldown Gated',
     idle: 'Idle',
   };
   return labels[phase] ?? String(phase ?? 'Unknown');
@@ -2390,6 +2391,7 @@ function effectivenessAccent(phase) {
     'merge-blocked': '#f97316',
     'verification-needed': '#fbbf24',
     'proposal-starved': '#a78bfa',
+    'cooldown-gated': '#60a5fa',
     'host-handoff': '#38bdf8',
     'merge-ready': '#4ade80',
     idle: '#94a3b8',
@@ -2433,7 +2435,9 @@ function proposalProductionWindowLabel(production) {
 }
 
 function proposalProductionReasons(production, limit = 3) {
-  const reasons = Array.isArray(production?.topReasons) ? production.topReasons : [];
+  const reasons = Array.isArray(production?.diagnosticTopReasons) && production.diagnosticTopReasons.length > 0
+    ? production.diagnosticTopReasons
+    : Array.isArray(production?.topReasons) ? production.topReasons : [];
   return reasons
     .slice(0, limit)
     .map((row) => `${row.count ?? 0}x ${compactFleetReason(row.reason ?? 'unknown')}`);
@@ -2441,11 +2445,17 @@ function proposalProductionReasons(production, limit = 3) {
 
 function renderProposalProductionCard(production, cls = 'ctrl-card card') {
   if (!production) return null;
-  const noProposal = production.noProposalDispatches ?? 0;
+  const noProposal = production.diagnosticNoProposalDispatches ?? production.noProposalDispatches ?? 0;
+  const suppressed = production.suppressedDispatches ?? 0;
   const errors = production.errors ?? 0;
   const reasons = proposalProductionReasons(production);
-  const examples = Array.isArray(production.recentNoProposalDispatches)
-    ? production.recentNoProposalDispatches.slice(0, 4)
+  const diagnosticExamples = Array.isArray(production.recentDiagnosticNoProposalDispatches)
+    ? production.recentDiagnosticNoProposalDispatches
+    : [];
+  const examples = diagnosticExamples.length > 0
+    ? diagnosticExamples.slice(0, 4)
+    : Array.isArray(production.recentNoProposalDispatches)
+      ? production.recentNoProposalDispatches.slice(0, 4)
     : [];
 
   const card = el('div', { cls });
@@ -2467,6 +2477,7 @@ function renderProposalProductionCard(production, cls = 'ctrl-card card') {
     ['Skipped', production.skipped ?? 0],
     ['Proposals', production.proposalsCreated ?? 0],
     ['No-proposal', noProposal],
+    ['Suppressed', suppressed],
     ['Errors', errors],
   ]));
 

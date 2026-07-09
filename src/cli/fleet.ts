@@ -164,12 +164,19 @@ export function formatFleetStatus(s: FleetStatus): string {
     );
     lines.push(
       `  output:    proposals ${production.proposalsCreated}, ` +
-        `no-proposal ${production.noProposalDispatches}, errors ${production.errors}`,
+        `no-proposal ${production.diagnosticNoProposalDispatches ?? production.noProposalDispatches}, ` +
+        `suppressed ${production.suppressedDispatches ?? 0}, errors ${production.errors}`,
     );
-    if (production.topReasons.length > 0) {
-      lines.push(`  reasons:   ${production.topReasons.slice(0, 3).map(formatProductionReason).join('; ')}`);
+    const topReasons = production.diagnosticTopReasons?.length
+      ? production.diagnosticTopReasons
+      : production.topReasons;
+    if (topReasons.length > 0) {
+      lines.push(`  reasons:   ${topReasons.slice(0, 3).map(formatProductionReason).join('; ')}`);
     }
-    for (const dispatch of production.recentNoProposalDispatches.slice(0, 3)) {
+    const recentNoProposal = production.recentDiagnosticNoProposalDispatches?.length
+      ? production.recentDiagnosticNoProposalDispatches
+      : production.recentNoProposalDispatches;
+    for (const dispatch of recentNoProposal.slice(0, 3)) {
       lines.push(
         `  recent:    ${dispatch.backend ?? 'unknown'} ${formatActionTarget(dispatch.repo)} ` +
           `${compactResourceReason(dispatch.title)} (${compactResourceReason(dispatch.reason)})`,
