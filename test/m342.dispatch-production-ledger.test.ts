@@ -137,20 +137,22 @@ describe('M342 dispatch production ledger', () => {
       makeEvent({ itemId: 'a', backend: 'local-coder', model: 'qwen', outcome: 'empty-diff', proposalCreated: false, reason: 'no diff' }),
       makeEvent({ itemId: 'b', backend: 'local-coder', model: 'qwen', outcome: 'gate-blocked', proposalCreated: false, reason: 'gate blocked' }),
       makeEvent({ itemId: 'c', backend: 'codex', model: 'gpt-5.5', outcome: 'proposal-created', proposalCreated: true, proposalId: 'prop-c', source: 'goal' }),
+      makeEvent({ itemId: 'd', backend: 'codex', model: 'gpt-5.5', outcome: 'proposal-disabled', proposalCreated: false, reason: 'proposal filing disabled for this sandboxed attempt' }),
     ];
 
     const summary = summarizeDispatchProductionYield(events, { windowHours: 24 });
 
     expect(summary).toMatchObject({
-      attempts: 3,
-      events: 3,
+      attempts: 4,
+      events: 4,
       proposalsCreated: 1,
-      noProposal: 2,
-      proposalRate: 1 / 3,
+      noProposal: 3,
+      proposalRate: 1 / 4,
       outcomes: {
         proposalCreated: 1,
         emptyDiff: 1,
         gateBlocked: 1,
+        proposalDisabled: 1,
       },
     });
     expect(summary?.byBackend[0]).toMatchObject({
@@ -165,7 +167,17 @@ describe('M342 dispatch production ledger', () => {
       },
     });
     expect(summary?.bySource.some((bucket) => bucket.source === 'goal' && bucket.proposalsCreated === 1)).toBe(true);
-    expect(summary?.byBackendModel.some((bucket) => bucket.key === 'codex:gpt-5.5' && bucket.proposalRate === 1)).toBe(true);
+    expect(summary?.byBackend.some((bucket) =>
+      bucket.backend === 'codex' &&
+      bucket.attempts === 2 &&
+      bucket.outcomes.proposalDisabled === 1
+    )).toBe(true);
+    expect(summary?.byBackendModel.some((bucket) =>
+      bucket.key === 'codex:gpt-5.5' &&
+      bucket.attempts === 2 &&
+      bucket.proposalRate === 0.5 &&
+      bucket.outcomes.proposalDisabled === 1
+    )).toBe(true);
   });
 
   it('reads a bounded durable yield window from disk', () => {

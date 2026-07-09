@@ -608,3 +608,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Surface Phantom command availability in readiness, FleetStatus, CLI status, and dashboard snapshots without raw help text or secret names/values.
 - [x] Verify command metadata with focused Phantom/readiness/FleetStatus/dashboard tests plus typecheck, lint, build, audit, invariants, and full CI.
 - [ ] Next lane: add a values-free Phantom agent report rollup only after the `agent` command is feature-detected as an actual command, never from prose.
+- [x] Filter proposal-disabled dispatch-production samples out of weak-yield next-action diagnostics while preserving raw ledger and status counts.
+- [x] Verify dispatch-yield diagnostics with focused FleetStatus/dispatch-ledger/intel tests, typecheck, build, audit, and diff check.
+- [x] Run lint/invariants/full regression gates for the diagnostic patch.
+- [ ] Commit, push, restart/resume the live fleet, and smoke live fleet status.

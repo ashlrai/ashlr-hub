@@ -44,6 +44,7 @@ import { DEFAULT_COOLDOWN_MS, isSuppressibleWorkedOutcome, loadWorkedLedger } fr
 import { pendingProposalItemKeysForBacklog, workItemCoverageKey } from './proposal-matching.js';
 import {
   readDispatchProductionYield,
+  type DispatchProductionYieldBucket,
   type DispatchProductionYieldSummary,
 } from './dispatch-production-ledger.js';
 import {
@@ -1171,21 +1172,65 @@ function formatActionPercent(rate: number): string {
   return `${Math.round(Math.max(0, Math.min(1, rate)) * 100)}%`;
 }
 
-function dispatchYieldNextActionDetail(dispatchProduction: DispatchProductionYieldSummary): string | null {
+interface DiagnosticDispatchYieldAction {
+  detail: string;
+  backend?: EngineId | null;
+}
+
+function diagnosticAttemptsForDispatchBucket(bucket: DispatchProductionYieldBucket): number {
+  return Math.max(0, bucket.attempts - bucket.outcomes.proposalDisabled);
+}
+
+function diagnosticTopReason(bucket: DispatchProductionYieldBucket): string | undefined {
+  return bucket.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;
+}
+
+function dispatchYieldNextAction(dispatchProduction: DispatchProductionYieldSummary): DiagnosticDispatchYieldAction | null {
+  const diagnosticAttempts = Math.max(
+    0,
+    dispatchProduction.attempts - dispatchProduction.outcomes.proposalDisabled,
+  );
+  const diagnosticProposalRate = diagnosticAttempts > 0
+    ? dispatchProduction.proposalsCreated / diagnosticAttempts
+    : 0;
   if (
-    dispatchProduction.attempts < MIN_DISPATCH_YIELD_ACTION_ATTEMPTS ||
-    dispatchProduction.proposalRate >= LOW_DISPATCH_YIELD_ACTION_RATE
+    diagnosticAttempts < MIN_DISPATCH_YIELD_ACTION_ATTEMPTS ||
+    diagnosticProposalRate >= LOW_DISPATCH_YIELD_ACTION_RATE
   ) {
     return null;
   }
-  const weakest = dispatchProduction.byBackend[0];
-  const subject = weakest?.backend ?? weakest?.key ?? 'dispatches';
-  const attempts = weakest?.attempts ?? dispatchProduction.attempts;
-  const proposals = weakest?.proposalsCreated ?? dispatchProduction.proposalsCreated;
-  const rate = weakest?.proposalRate ?? dispatchProduction.proposalRate;
-  const topReason = weakest?.topReasons[0] ?? dispatchProduction.topReasons[0];
-  const reason = topReason ? `; top reason: ${topReason.reason}` : '';
-  return `${subject} proposal yield ${proposals}/${attempts} (${formatActionPercent(rate)})${reason}`;
+  const candidates = dispatchProduction.byBackend
+    .map((bucket) => {
+      const attempts = diagnosticAttemptsForDispatchBucket(bucket);
+      const proposals = bucket.proposalsCreated;
+      return {
+        bucket,
+        attempts,
+        proposals,
+        noProposal: Math.max(0, attempts - proposals),
+        rate: attempts > 0 ? proposals / attempts : 0,
+      };
+    })
+    .filter((candidate) => candidate.attempts > 0)
+    .sort((a, b) =>
+      b.noProposal - a.noProposal ||
+      a.rate - b.rate ||
+      b.attempts - a.attempts ||
+      a.bucket.key.localeCompare(b.bucket.key),
+    );
+  const weakest = candidates.find((candidate) => candidate.attempts >= MIN_DISPATCH_YIELD_ACTION_ATTEMPTS);
+  const subject = weakest?.bucket.backend ?? weakest?.bucket.key ?? 'dispatches';
+  const attempts = weakest?.attempts ?? diagnosticAttempts;
+  const proposals = weakest?.proposals ?? dispatchProduction.proposalsCreated;
+  const rate = weakest?.rate ?? diagnosticProposalRate;
+  const topReason = weakest
+    ? diagnosticTopReason(weakest.bucket)
+    : dispatchProduction.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;
+  const reason = topReason ? `; top reason: ${topReason}` : '';
+  return {
+    detail: `${subject} proposal yield ${proposals}/${attempts} (${formatActionPercent(rate)})${reason}`,
+    ...(weakest?.bucket.backend ? { backend: weakest.bucket.backend } : {}),
+  };
 }
 
 function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffectivenessStatus {
@@ -1411,16 +1456,15 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
   if (eligibleBacklogItems > 0 && !controlBlocked) {
     const dispatchYieldDetail = status.dispatchProduction
-      ? dispatchYieldNextActionDetail(status.dispatchProduction)
+      ? dispatchYieldNextAction(status.dispatchProduction)
       : null;
     if (dispatchYieldDetail) {
-      const weakest = status.dispatchProduction?.byBackend[0];
       add({
         id: 'inspect-dispatch-yield',
         priority: 'medium',
         label: 'Inspect dispatch yield',
-        detail: dispatchYieldDetail,
-        ...(weakest?.backend ? { target: weakest.backend } : {}),
+        detail: dispatchYieldDetail.detail,
+        ...(dispatchYieldDetail.backend ? { target: dispatchYieldDetail.backend } : {}),
       });
     }
     const production = status.proposalProduction;

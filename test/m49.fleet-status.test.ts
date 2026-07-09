@@ -929,9 +929,14 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomyEffectiveness?.summary).toContain('1 recent dispatch(es) produced no proposal');
     expect(s.autonomyEffectiveness?.summary).toContain('top reason: empty-diff: agent returned no diff');
     expect(s.autonomyEffectiveness?.summary).not.toContain('proposal-disabled');
+    expect(s.contextEfficiency?.signals.suppressedNoProposalDispatches).toBe(2);
+    expect(s.contextEfficiency?.risks.map((risk) => risk.id)).not.toContain('proposal-yield-low');
+    expect(s.contextEfficiency?.recommendations.join('\n')).not.toContain('Reslice low-yield backlog items');
     const inspectAction = s.nextActions?.find((action) => action.id === 'inspect-proposal-production');
     expect(inspectAction?.detail).toContain('agent returned no diff');
     expect(inspectAction?.detail).not.toContain('proposal-disabled');
+    const dispatchYieldAction = s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield');
+    expect(dispatchYieldAction?.detail ?? '').not.toContain('proposal-disabled');
   });
 
   it('reports durable dispatch-production yield from the append-only ledger', async () => {
@@ -1275,6 +1280,125 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('[medium] Inspect dispatch yield [local-coder]');
     expect(formatted).toContain('local-coder proposal yield 0/3 (0%)');
+  });
+
+  it('excludes proposal-disabled dispatch-production from weak-yield next action', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome);
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: new Date().toISOString(),
+        repos: [repo],
+        items: [makeBacklogItem(repo, 'repo:goal:fresh', 'Fresh eligible work', 5)],
+      }),
+      'utf8',
+    );
+    const now = new Date().toISOString();
+    const baseEvent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'item-a',
+      source: 'goal',
+      repo,
+      title: 'Improve low-yield dispatch',
+      backend: 'codex',
+      tier: 'frontier',
+      assignedBy: 'daemon',
+      routeReason: 'frontier route',
+      outcome: 'proposal-disabled',
+      proposalCreated: false,
+      spentUsd: 0,
+      reason: 'proposal filing disabled for this sandboxed attempt',
+      basis: 'run-proposal-outcome',
+    };
+    const disabled = Array.from({ length: 16 }, (_, index) => ({
+      ...baseEvent,
+      itemId: `disabled-${index}`,
+    }));
+    const diagnostic = Array.from({ length: 3 }, (_, index) => ({
+      ...baseEvent,
+      itemId: `diagnostic-${index}`,
+      backend: 'local-coder' as const,
+      tier: 'mid' as const,
+      routeReason: 'local route',
+      outcome: 'empty-diff' as const,
+      reason: 'agent returned no diff',
+      spentUsd: 0.001,
+    }));
+    recordDispatchProduction([...disabled, ...diagnostic]);
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.dispatchProduction?.byBackend[0]).toMatchObject({
+      backend: 'codex',
+      attempts: 16,
+      outcomes: {
+        proposalDisabled: 16,
+      },
+    });
+    const action = s.nextActions?.find((candidate) => candidate.id === 'inspect-dispatch-yield');
+    expect(action).toMatchObject({
+      target: 'local-coder',
+      detail: expect.stringContaining('local-coder proposal yield 0/3 (0%)'),
+    });
+    expect(action?.detail).toContain('top reason: agent returned no diff');
+    expect(action?.detail).not.toContain('proposal filing disabled');
+  });
+
+  it('does not create weak-yield next action when every dispatch-production sample is proposal-disabled', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: new Date().toISOString(),
+        repos: [repo],
+        items: [makeBacklogItem(repo, 'repo:goal:fresh', 'Fresh eligible work', 5)],
+      }),
+      'utf8',
+    );
+    const baseEvent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: new Date().toISOString(),
+      machineId: 'm49',
+      itemId: 'disabled-a',
+      source: 'goal',
+      repo,
+      title: 'Proposal filing disabled sample',
+      backend: 'codex',
+      tier: 'frontier',
+      assignedBy: 'daemon',
+      routeReason: 'frontier route',
+      outcome: 'proposal-disabled',
+      proposalCreated: false,
+      spentUsd: 0,
+      reason: 'proposal filing disabled for this sandboxed attempt',
+      basis: 'run-proposal-outcome',
+    };
+    recordDispatchProduction(Array.from({ length: 4 }, (_, index) => ({
+      ...baseEvent,
+      itemId: `disabled-${index}`,
+    })));
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.dispatchProduction).toMatchObject({
+      attempts: 4,
+      proposalsCreated: 0,
+      outcomes: {
+        proposalDisabled: 4,
+      },
+    });
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-yield');
   });
 
   it('includes queued self-heal work when the persisted backlog snapshot is stale', async () => {
