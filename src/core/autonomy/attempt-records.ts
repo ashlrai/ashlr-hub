@@ -24,8 +24,9 @@ import { loadWorkedLedger } from '../fleet/worked-ledger.js';
 import { runEventSummary as sanitizeRunEventSummary } from '../learning/causal.js';
 import {
   addProductionAttemptShape,
-  classifyProductionAttemptForLearning,
+  classifyProductionAttemptForLearningWithLabel,
   emptyProductionAttemptShape,
+  sanitizeProductionAttemptLearningLabel,
   type ProductionAttemptLearningKind,
 } from '../learning/attempt-shape.js';
 import type { ProductionAttemptShape } from '../types.js';
@@ -67,6 +68,7 @@ export interface AttemptRecord {
   diagnosticNoProposal: boolean;
   diagnosticAttempt: boolean;
   learningKind: ProductionAttemptLearningKind;
+  labelAuthoritative: boolean;
   coverage: AttemptRecordCoverage;
 }
 
@@ -86,6 +88,7 @@ export interface AttemptCoverageStatus {
     learningKind?: ProductionAttemptLearningKind;
     diagnosticAttempt?: boolean;
     policySuppressed?: boolean;
+    labelAuthoritative?: boolean;
     coverage: AttemptRecordCoverage;
   }>;
   coverage: {
@@ -99,6 +102,8 @@ export interface AttemptCoverageStatus {
     attempts: number;
     proposalCreated: number;
     policySuppressed: number;
+    labelAuthoritativeAttempts: number;
+    legacyUnversionedAttempts: number;
     diagnosticAttempts: number;
     diagnosticNoProposal: number;
     diagnosticProposalRate: number | null;
@@ -355,11 +360,13 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
       const tier = event.tier === null ? null : bounded(event.tier, 40);
       const model = event.model === null ? null : bounded(event.model, 160);
       const actionCounts = sanitizeRunEventSummary(event.runEventSummary)?.actionCounts;
-      const classification = classifyProductionAttemptForLearning({
+      const learningLabel = sanitizeProductionAttemptLearningLabel(event.learningLabel);
+      const classification = classifyProductionAttemptForLearningWithLabel({
         outcome: event.outcome,
         proposalCreated: event.proposalCreated,
         actionCounts,
-      });
+      }, learningLabel);
+      const labelAuthoritative = Boolean(learningLabel?.authoritative);
       const coverage: AttemptRecordCoverage = {
         agentAction: hasAgentAction(event, actionMaps),
         outcomeRecord: hasOutcomeRecord(proposalId, outcomesByProposal, readProposal),
@@ -394,6 +401,7 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
         diagnosticNoProposal: classification.diagnosticNoProposal,
         diagnosticAttempt: classification.diagnosticAttempt,
         learningKind: classification.kind,
+        labelAuthoritative,
         coverage,
       };
     });
@@ -414,11 +422,13 @@ export function summarizeAttemptCoverage(
   const attemptShape = emptyProductionAttemptShape();
   let proposalCreated = 0;
   let policySuppressed = 0;
+  let labelAuthoritativeAttempts = 0;
   let diagnosticAttempts = 0;
   let diagnosticNoProposal = 0;
   for (const record of records) {
     if (record.proposalCreated) proposalCreated++;
     if (record.policySuppressed) policySuppressed++;
+    if (record.labelAuthoritative) labelAuthoritativeAttempts++;
     if (record.diagnosticAttempt) diagnosticAttempts++;
     if (record.diagnosticNoProposal) diagnosticNoProposal++;
     addProductionAttemptShape(attemptShape, record.attemptShape);
@@ -448,6 +458,7 @@ export function summarizeAttemptCoverage(
       learningKind: record.learningKind,
       diagnosticAttempt: record.diagnosticAttempt,
       policySuppressed: record.policySuppressed,
+      labelAuthoritative: record.labelAuthoritative,
       coverage: record.coverage,
     })),
     coverage,
@@ -455,6 +466,8 @@ export function summarizeAttemptCoverage(
       attempts: records.length,
       proposalCreated,
       policySuppressed,
+      labelAuthoritativeAttempts,
+      legacyUnversionedAttempts: Math.max(0, records.length - labelAuthoritativeAttempts),
       diagnosticAttempts,
       diagnosticNoProposal,
       diagnosticProposalRate: diagnosticAttempts > 0 ? proposalCreated / diagnosticAttempts : null,

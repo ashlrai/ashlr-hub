@@ -114,6 +114,7 @@ import {
   routeSnapshot,
   runEventSummary,
 } from '../learning/causal.js';
+import { productionAttemptLearningLabelFromSignals } from '../learning/attempt-shape.js';
 // worked-ledger is used transitively via LocalWorkQueueCoordinator (selectWorkQueueCoordinator).
 import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
 // M220: verdict-feedback sweep — feed judge rejections back to the ledger so
@@ -533,6 +534,11 @@ function dispatchProductionEventFromOutcome(
     diffLines: production?.diffLines ?? trace.runEventSummary?.diffLines,
     costUsd: value.spentUsd,
   });
+  const learningLabel = productionAttemptLearningLabelFromSignals({
+    outcome,
+    proposalCreated,
+    actionCounts: eventRunSummary?.actionCounts,
+  });
   return {
     schemaVersion: 1,
     ts,
@@ -557,6 +563,7 @@ function dispatchProductionEventFromOutcome(
     ...(trace.labelBasis ? { labelBasis: trace.labelBasis } : {}),
     ...(trace.routerPolicyVersion ? { routerPolicyVersion: trace.routerPolicyVersion } : {}),
     ...(trace.learningEpoch ? { learningEpoch: trace.learningEpoch } : {}),
+    learningLabel,
     spentUsd: value.spentUsd,
     ...(typeof production?.diffFiles === 'number' ? { diffFiles: production.diffFiles } : {}),
     ...(typeof production?.diffLines === 'number' ? { diffLines: production.diffLines } : {}),
@@ -607,6 +614,7 @@ function agentActionFromDispatchEvent(event: DispatchProductionEvent): AgentActi
     ...(event.labelBasis ? { labelBasis: event.labelBasis } : {}),
     ...(event.routerPolicyVersion ? { routerPolicyVersion: event.routerPolicyVersion } : {}),
     ...(event.learningEpoch ? { learningEpoch: event.learningEpoch } : {}),
+    ...(event.learningLabel ? { learningLabel: event.learningLabel } : {}),
     backend: event.backend,
     tier: event.tier,
     ...(event.model !== undefined ? { model: event.model } : {}),

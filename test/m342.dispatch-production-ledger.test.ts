@@ -122,6 +122,130 @@ describe('M342 dispatch production ledger', () => {
     expect(raw).toContain('[REDACTED]');
   });
 
+  it('persists authoritative versioned learning labels and drops hostile label payloads', () => {
+    const rawPromptCanary = 'RAW_PROMPT_ATTEMPT_LABEL_CANARY_M342';
+    const rawDiffCanary = 'RAW_DIFF_ATTEMPT_LABEL_CANARY_M342';
+    recordDispatchProduction(makeEvent({
+      itemId: 'policy-label',
+      outcome: 'proposal-disabled',
+      proposalCreated: false,
+      runEventSummary: {
+        outcome: 'proposal-disabled',
+        proposalCreated: false,
+        actionCounts: { proposalDisabled: 2, diffFiles: 0 },
+      },
+      learningLabel: {
+        schemaVersion: 1,
+        classifierVersion: 'attempt-shape-v1',
+        authoritative: true,
+        learningKind: 'diagnostic-no-proposal',
+        policySuppressed: false,
+        diagnosticNoProposal: true,
+        diagnosticAttempt: true,
+        attemptShape: {
+          backendNoDiff: 99,
+          captureOrGateBlocked: 99,
+          repairAttempts: 99,
+          policyDisabled: 0,
+        },
+        rawPrompt: rawPromptCanary,
+        rawDiff: rawDiffCanary,
+      } as never,
+      rawPrompt: rawPromptCanary,
+      rawDiff: rawDiffCanary,
+    } as never));
+
+    const event = readDispatchProductionEvents({ limit: 1 })[0];
+    expect(event?.learningLabel).toMatchObject({
+      schemaVersion: 1,
+      classifierVersion: 'attempt-shape-v1',
+      authoritative: true,
+      learningKind: 'policy-suppressed',
+      policySuppressed: true,
+      diagnosticNoProposal: false,
+      diagnosticAttempt: false,
+      attemptShape: {
+        backendNoDiff: 0,
+        captureOrGateBlocked: 0,
+        repairAttempts: 0,
+        policyDisabled: 2,
+      },
+    });
+
+    const raw = readFileSync(join(dispatchProductionDir(), '2026-07-08.jsonl'), 'utf8');
+    expect(raw).toContain('"learningLabel"');
+    expect(raw).toContain('"authoritative":true');
+    expect(raw).not.toContain(rawPromptCanary);
+    expect(raw).not.toContain(rawDiffCanary);
+    expect(JSON.stringify(event)).not.toContain(rawPromptCanary);
+    expect(JSON.stringify(event)).not.toContain(rawDiffCanary);
+  });
+
+  it('keeps legacy rows visible without inventing a durable learning label', () => {
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '2026-07-08.jsonl'), JSON.stringify(makeEvent({ itemId: 'legacy-row' })) + '\n', 'utf8');
+
+    const event = readDispatchProductionEvents({ limit: 1 })[0];
+    const summary = summarizeDispatchProductionYield(event ? [event] : []);
+
+    expect(event?.itemId).toBe('legacy-row');
+    expect(event?.learningLabel).toBeUndefined();
+    expect(summary).toMatchObject({
+      attempts: 1,
+      attemptShape: { backendNoDiff: 1 },
+    });
+  });
+
+  it('uses a valid durable learning label for attempt-shape aggregation when raw signals disagree', () => {
+    const event = makeEvent({
+      itemId: 'contradictory-label',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      reason: 'empty-diff from raw run',
+      runEventSummary: {
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        actionCounts: { diffFiles: 0 },
+      },
+      learningLabel: {
+        schemaVersion: 1,
+        classifierVersion: 'attempt-shape-v1',
+        authoritative: true,
+        learningKind: 'policy-suppressed',
+        policySuppressed: true,
+        diagnosticNoProposal: false,
+        diagnosticAttempt: false,
+        attemptShape: {
+          backendNoDiff: 0,
+          captureOrGateBlocked: 0,
+          repairAttempts: 0,
+          policyDisabled: 7,
+        },
+      },
+    });
+
+    const summary = summarizeDispatchProductionYield([event]);
+
+    expect(summary).toMatchObject({
+      attempts: 1,
+      outcomes: { emptyDiff: 1 },
+      attemptShape: {
+        backendNoDiff: 0,
+        captureOrGateBlocked: 0,
+        repairAttempts: 0,
+        policyDisabled: 7,
+      },
+      topReasons: [{ reason: 'empty-diff from raw run', count: 1 }],
+      diagnosticTopReasons: [],
+      byBackend: [{
+        key: 'local-coder',
+        topReasons: [{ reason: 'empty-diff from raw run', count: 1 }],
+        diagnosticTopReasons: [],
+      }],
+    });
+  });
+
   it('never throws when persistence is unavailable', () => {
     process.env.ASHLR_HOME = join(home, 'file-home');
     writeFileSync(process.env.ASHLR_HOME, 'not a directory', 'utf8');

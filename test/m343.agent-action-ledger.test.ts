@@ -331,6 +331,54 @@ describe('M343 agent action ledger', () => {
     });
   });
 
+  it('uses durable learning labels for workspace diagnostic counts when present', () => {
+    const summary = summarizeAgentWorkspace([
+      makeEvent({
+        action: 'labeled-policy',
+        outcome: 'no-proposal',
+        runEventSummary: {
+          outcome: 'empty-diff',
+          proposalCreated: false,
+          actionCounts: { diffFiles: 0 },
+        },
+        learningLabel: {
+          schemaVersion: 1,
+          classifierVersion: 'attempt-shape-v1',
+          authoritative: true,
+          learningKind: 'policy-suppressed',
+          policySuppressed: true,
+          diagnosticNoProposal: false,
+          diagnosticAttempt: false,
+          attemptShape: {
+            backendNoDiff: 0,
+            captureOrGateBlocked: 0,
+            repairAttempts: 0,
+            policyDisabled: 4,
+          },
+        },
+      }),
+      makeEvent({
+        action: 'proposal-created',
+        outcome: 'proposal-created',
+        proposalId: 'prop-created',
+        runEventSummary: {
+          outcome: 'proposal-created',
+          proposalCreated: true,
+          actionCounts: { proposalCreated: 1 },
+        },
+      }),
+    ]);
+
+    expect(summary).toMatchObject({
+      proposalEvents: 1,
+      noProposalEvents: 1,
+      diagnosticNoProposalEvents: 0,
+      policySuppressedEvents: 1,
+      diagnosticProposalRate: 1,
+      diagnosticNoProposalRate: 0,
+    });
+  });
+
   it('keeps failed proposal attempts out of diagnostic no-proposal workspace counts', () => {
     const summary = summarizeAgentWorkspace([
       makeEvent({

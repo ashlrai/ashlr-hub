@@ -173,12 +173,85 @@ describe('AttemptRecord coverage', () => {
       attempts: 1,
       proposalCreated: 1,
       policySuppressed: 0,
+      labelAuthoritativeAttempts: 0,
+      legacyUnversionedAttempts: 1,
       diagnosticAttempts: 1,
       diagnosticNoProposal: 0,
       diagnosticProposalRate: 1,
       diagnosticNoProposalRate: 0,
     });
     expect(summary.gaps).toEqual([]);
+  });
+
+  it('uses durable learning labels when present and marks them authoritative', () => {
+    const records = listAttemptRecords({
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          dispatch({
+            itemId: 'durable-policy-label',
+            outcome: 'empty-diff',
+            proposalCreated: false,
+            proposalId: undefined,
+            runEventSummary: {
+              outcome: 'empty-diff',
+              proposalCreated: false,
+              actionCounts: { diffFiles: 0 },
+            },
+            learningLabel: {
+              schemaVersion: 1,
+              classifierVersion: 'attempt-shape-v1',
+              authoritative: true,
+              learningKind: 'policy-suppressed',
+              policySuppressed: true,
+              diagnosticNoProposal: false,
+              diagnosticAttempt: false,
+              attemptShape: {
+                backendNoDiff: 0,
+                captureOrGateBlocked: 0,
+                repairAttempts: 0,
+                policyDisabled: 3,
+              },
+            },
+          }),
+        ],
+        readAgentActions: () => [],
+        listOutcomeRecords: () => [],
+        readDecisions: () => [],
+        listAutonomyEvidencePacks: () => [],
+        loadWorkedLedger: () => ({ events: [] }),
+      }),
+    });
+
+    expect(records[0]).toMatchObject({
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      learningKind: 'policy-suppressed',
+      labelAuthoritative: true,
+      diagnosticAttempt: false,
+      diagnosticNoProposal: false,
+      policySuppressed: true,
+      attemptShape: {
+        backendNoDiff: 0,
+        policyDisabled: 3,
+      },
+    });
+    expect(summarizeAttemptCoverage(records).production).toMatchObject({
+      attempts: 1,
+      proposalCreated: 0,
+      policySuppressed: 1,
+      labelAuthoritativeAttempts: 1,
+      legacyUnversionedAttempts: 0,
+      diagnosticAttempts: 0,
+      diagnosticNoProposal: 0,
+      diagnosticProposalRate: null,
+      diagnosticNoProposalRate: null,
+      attemptShape: {
+        backendNoDiff: 0,
+        captureOrGateBlocked: 0,
+        repairAttempts: 0,
+        policyDisabled: 3,
+      },
+    });
   });
 
   it('does not join by fuzzy title or repo when causal ids differ', () => {
@@ -359,6 +432,8 @@ describe('AttemptRecord coverage', () => {
       attempts: 3,
       proposalCreated: 1,
       policySuppressed: 1,
+      labelAuthoritativeAttempts: 0,
+      legacyUnversionedAttempts: 3,
       diagnosticAttempts: 2,
       diagnosticNoProposal: 1,
       diagnosticProposalRate: 0.5,

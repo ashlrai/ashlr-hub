@@ -174,6 +174,80 @@ describe('M346 eval attention', () => {
     });
   });
 
+  it('uses durable learning labels for diagnostic production yield when present', () => {
+    const events: AgentActionEvent[] = [
+      {
+        schemaVersion: 1,
+        ts: '2026-07-09T05:00:00.000Z',
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'proposal-created',
+        action: 'dispatch',
+        summary: 'proposal filed',
+        repo: '/tmp/repo-a',
+        runEventSummary: {
+          outcome: 'proposal-created',
+          proposalCreated: true,
+          actionCounts: { proposalCreated: 1 },
+        },
+      },
+      {
+        schemaVersion: 1,
+        ts: '2026-07-09T05:00:01.000Z',
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'no-proposal',
+        action: 'dispatch',
+        summary: 'legacy-looking empty diff with durable policy label',
+        repo: '/tmp/repo-a',
+        runEventSummary: {
+          outcome: 'empty-diff',
+          proposalCreated: false,
+          actionCounts: { diffFiles: 0 },
+        },
+        learningLabel: {
+          schemaVersion: 1,
+          classifierVersion: 'attempt-shape-v1',
+          authoritative: true,
+          learningKind: 'policy-suppressed',
+          policySuppressed: true,
+          diagnosticNoProposal: false,
+          diagnosticAttempt: false,
+          attemptShape: {
+            backendNoDiff: 0,
+            captureOrGateBlocked: 0,
+            repairAttempts: 0,
+            policyDisabled: 5,
+          },
+        },
+      },
+    ];
+
+    const report = buildAttentionEvalReport(events, {
+      window: '1d',
+      generatedAt: '2026-07-09T05:01:00.000Z',
+    });
+
+    expect(report.productionYield).toMatchObject({
+      attempts: 2,
+      proposalCreated: 1,
+      noProposal: 1,
+      policySuppressed: 1,
+      diagnosticAttempts: 1,
+      diagnosticNoProposal: 0,
+      proposalRate: 0.5,
+      noProposalRate: 0.5,
+      diagnosticProposalRate: 1,
+      diagnosticNoProposalRate: 0,
+      attemptShape: {
+        backendNoDiff: 0,
+        captureOrGateBlocked: 0,
+        repairAttempts: 0,
+        policyDisabled: 5,
+      },
+    });
+  });
+
   it('does not persist raw prompt, diff, stdout, stderr, summary, reason, detail, or full paths', () => {
     const report = buildAttentionEvalReport(fixtureEvents(), {
       generatedAt: '2026-07-09T05:01:00.000Z',

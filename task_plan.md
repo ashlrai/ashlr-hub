@@ -932,3 +932,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Verify Pulse agent `cargo check` and deterministic `cargo test -- --test-threads=1`.
 - [x] Run Hub repo-profile/backlog/status/merge regression coverage.
 - [x] Commit and push both sibling repo manifests, refresh Hub backlog, and smoke live contract coverage.
+
+## Current Continuation - Versioned Attempt Learning Labels
+- [x] Rechecked dirty Hub state, recent commits, Entire state, persistent plan/notes, and current attempt-label diff.
+- [x] Deployed sidecar scouts for label semantic risk, next high-leverage learning lane, and explicit contract rollout candidates.
+- [x] Persist authoritative versioned `learningLabel` metadata on new dispatch-production writes while preserving legacy rows without invented durable labels.
+- [x] Sanitize label payloads on read/write and drop raw prompt, diff, stdout, stderr, env, file contents, and hostile extra fields.
+- [x] Thread durable labels through dispatch-production summaries, agent-action workspace summaries, attempt coverage, attention eval, daemon dispatch traces, and agent-action terminal records.
+- [x] Preserve raw outcome/no-proposal counters while using labels for learning shape, policy suppression, diagnostic no-proposal, and diagnostic reason aggregation.
+- [x] Add focused regressions for hostile labels, legacy fallback, contradictory raw signals, workspace/eval/coverage counts, and secret-safety invariants.
+- [x] Finish final full CI.
+- [ ] Commit, push, reload daemon, and smoke live label readiness.
+- [ ] Next lane: epoch-gated learned routing from authoritative current-policy labels, or explicit contract wave 2 for clean Bun packages.

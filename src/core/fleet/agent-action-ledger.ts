@@ -22,7 +22,11 @@ import type {
 } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { causalMetadata } from '../learning/causal.js';
-import { classifyProductionAttemptForLearning } from '../learning/attempt-shape.js';
+import {
+  classifyProductionAttemptForLearningWithLabel,
+  sanitizeProductionAttemptLearningLabel,
+  type ProductionAttemptLearningLabel,
+} from '../learning/attempt-shape.js';
 import { listEnrolled } from '../sandbox/policy.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -86,6 +90,7 @@ export interface AgentActionEvent {
   labelBasis?: LabelBasis;
   routerPolicyVersion?: string;
   learningEpoch?: string;
+  learningLabel?: ProductionAttemptLearningLabel;
   backend?: EngineId | null;
   tier?: EngineTier | null;
   model?: string | null;
@@ -291,6 +296,7 @@ function sanitizeEvent(event: AgentActionEvent): AgentActionEvent {
   const counts = sanitizeCounts(event.counts);
   const durationMs = finiteNumber(event.durationMs);
   const spentUsd = finiteNumber(event.spentUsd);
+  const learningLabel = sanitizeProductionAttemptLearningLabel(event.learningLabel);
   const source = enumValue(event.source, WORK_SOURCES);
   const backend = event.backend === null ? null : enumValue(event.backend, ENGINE_IDS);
   const tier = event.tier === null ? null : enumValue(event.tier, ENGINE_TIERS);
@@ -331,6 +337,7 @@ function sanitizeEvent(event: AgentActionEvent): AgentActionEvent {
     ...(proposalId ? { proposalId } : {}),
     ...(runId ? { runId } : {}),
     ...causal,
+    ...(learningLabel ? { learningLabel } : {}),
     ...(backend !== undefined ? { backend } : {}),
     ...(tier !== undefined ? { tier } : {}),
     ...(model ? { model } : {}),
@@ -575,11 +582,11 @@ export function summarizeAgentWorkspace(
     if (event.outcome === 'proposal-created') proposalEvents++;
     if (event.outcome === 'no-proposal') noProposalEvents++;
     if (isAgentWorkspaceProductionEvent(event)) {
-      const classification = classifyProductionAttemptForLearning({
+      const classification = classifyProductionAttemptForLearningWithLabel({
         outcome: event.runEventSummary?.outcome ?? event.outcome,
         proposalCreated: proposalCreatedSignal(event),
         actionCounts: event.runEventSummary?.actionCounts,
-      });
+      }, event.learningLabel);
       if (classification.diagnosticNoProposal) diagnosticNoProposalEvents++;
       if (classification.policySuppressed) policySuppressedEvents++;
     }

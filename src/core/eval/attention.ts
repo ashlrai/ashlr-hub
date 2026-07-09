@@ -12,7 +12,7 @@ import type {
 } from '../types.js';
 import {
   addProductionAttemptShape,
-  classifyProductionAttemptForLearning,
+  classifyProductionAttemptForLearningWithLabel,
   emptyProductionAttemptShape,
 } from '../learning/attempt-shape.js';
 
@@ -298,11 +298,11 @@ export function buildAttentionEvalReport(
       else if (event.outcome === 'no-proposal' || run?.proposalCreated === false) noProposal++;
       else if (event.outcome === 'failed' || event.outcome === 'rejected') failed++;
       else if (event.outcome === 'blocked' || event.outcome === 'skipped') blocked++;
-      const classification = classifyProductionAttemptForLearning({
+      const classification = classifyProductionAttemptForLearningWithLabel({
         outcome: run?.outcome ?? event.outcome,
         proposalCreated: proposalCreatedSignal,
         actionCounts: run?.actionCounts,
-      });
+      }, event.learningLabel);
       if (classification.policySuppressed) policySuppressed++;
       if (classification.diagnosticNoProposal) diagnosticNoProposal++;
       if (classification.diagnosticAttempt) diagnosticAttempts++;

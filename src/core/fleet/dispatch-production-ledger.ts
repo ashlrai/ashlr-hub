@@ -25,9 +25,13 @@ import type {
 import { causalMetadata } from '../learning/causal.js';
 import {
   addProductionAttemptShape,
+  classifyProductionAttemptForLearningWithLabel,
   emptyProductionAttemptShape,
   hasProductionAttemptShape,
-  productionAttemptShapeFromSignals,
+  productionAttemptLearningLabelFromSignals,
+  sanitizeProductionAttemptLearningLabel,
+  type ProductionAttemptLearningClassification,
+  type ProductionAttemptLearningLabel,
 } from '../learning/attempt-shape.js';
 import { scrubSecrets } from '../util/scrub.js';
 
@@ -65,6 +69,7 @@ export interface DispatchProductionEvent {
   labelBasis?: LabelBasis;
   routerPolicyVersion?: string;
   learningEpoch?: string;
+  learningLabel?: ProductionAttemptLearningLabel;
   spentUsd: number;
   diffFiles?: number;
   diffLines?: number;
@@ -170,7 +175,10 @@ function finiteNonNegative(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : undefined;
 }
 
-function sanitizeEvent(event: DispatchProductionEvent): DispatchProductionEvent {
+function sanitizeEvent(
+  event: DispatchProductionEvent,
+  opts: { materializeLearningLabel?: boolean } = {},
+): DispatchProductionEvent {
   const ts = eventTimestamp(event.ts);
   const machineId = boundedOptionalText(event.machineId, 120);
   const itemId = boundedText(event.itemId, 240) || 'unknown';
@@ -207,6 +215,13 @@ function sanitizeEvent(event: DispatchProductionEvent): DispatchProductionEvent 
     routerPolicyVersion,
     learningEpoch,
   });
+  const learningLabel = opts.materializeLearningLabel
+    ? productionAttemptLearningLabelFromSignals({
+        outcome,
+        proposalCreated: Boolean(event.proposalCreated),
+        actionCounts: causal.runEventSummary?.actionCounts,
+      })
+    : sanitizeProductionAttemptLearningLabel(event.learningLabel);
   return {
     schemaVersion: 1,
     ts,
@@ -225,6 +240,7 @@ function sanitizeEvent(event: DispatchProductionEvent): DispatchProductionEvent 
     ...(proposalId ? { proposalId } : {}),
     ...(runId ? { runId } : {}),
     ...causal,
+    ...(learningLabel ? { learningLabel } : {}),
     spentUsd,
     ...(diffFiles !== undefined ? { diffFiles } : {}),
     ...(diffLines !== undefined ? { diffLines } : {}),
@@ -262,7 +278,7 @@ export function recordDispatchProduction(
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     for (const event of events) {
       try {
-        const record = sanitizeEvent(event);
+        const record = sanitizeEvent(event, { materializeLearningLabel: true });
         appendFileSync(join(dir, `${eventDateString(record.ts)}.jsonl`), JSON.stringify(record) + '\n', 'utf8');
       } catch {
         // Skip only this record; later records in the batch still get a chance.
@@ -430,13 +446,13 @@ function isSuppressedDispatchProductionReason(reason: string | undefined): boole
     normalized.includes('proposal filing disabled');
 }
 
-function sortedDiagnosticReasons(reasons: Map<string, number>, limit: number): DispatchProductionReasonCount[] {
-  const diagnostic = new Map<string, number>();
-  for (const [reason, count] of reasons.entries()) {
-    if (isSuppressedDispatchProductionReason(reason)) continue;
-    diagnostic.set(reason, (diagnostic.get(reason) ?? 0) + count);
-  }
-  return sortedReasons(diagnostic, limit);
+function addDiagnosticReason(
+  reasons: Map<string, number>,
+  reason: string,
+  classification: ProductionAttemptLearningClassification,
+): void {
+  if (classification.policySuppressed || isSuppressedDispatchProductionReason(reason)) return;
+  reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
 }
 
 interface MutableYieldBucket {
@@ -452,6 +468,7 @@ interface MutableYieldBucket {
   actionCounts: RunActionCounts;
   attemptShape: ProductionAttemptShape;
   reasons: Map<string, number>;
+  diagnosticReasons: Map<string, number>;
 }
 
 function touchBucket(
@@ -471,6 +488,7 @@ function touchBucket(
       actionCounts: {},
       attemptShape: emptyProductionAttemptShape(),
       reasons: new Map(),
+      diagnosticReasons: new Map(),
     };
     buckets.set(key, bucket);
   }
@@ -483,13 +501,15 @@ function addToBucket(bucket: MutableYieldBucket, event: DispatchProductionEvent)
   bucket.spentUsd += Number.isFinite(event.spentUsd) ? event.spentUsd : 0;
   incrementOutcome(bucket.outcomes, event.outcome);
   addRunActionCounts(bucket.actionCounts, event.runEventSummary?.actionCounts);
-  addProductionAttemptShape(bucket.attemptShape, productionAttemptShapeFromSignals({
+  const classification = classifyProductionAttemptForLearningWithLabel({
     outcome: event.outcome,
     proposalCreated: event.proposalCreated,
     actionCounts: event.runEventSummary?.actionCounts,
-  }));
+  }, event.learningLabel);
+  addProductionAttemptShape(bucket.attemptShape, classification.attemptShape);
   const reason = event.reason ?? event.routeReason ?? event.outcome;
   bucket.reasons.set(reason, (bucket.reasons.get(reason) ?? 0) + 1);
+  addDiagnosticReason(bucket.diagnosticReasons, reason, classification);
 }
 
 function finalizeBucket(bucket: MutableYieldBucket): DispatchProductionYieldBucket {
@@ -510,7 +530,7 @@ function finalizeBucket(bucket: MutableYieldBucket): DispatchProductionYieldBuck
     ...(hasRunActionCounts(bucket.actionCounts) ? { actionCounts: bucket.actionCounts } : {}),
     ...(hasProductionAttemptShape(bucket.attemptShape) ? { attemptShape: bucket.attemptShape } : {}),
     topReasons: sortedReasons(bucket.reasons, 5),
-    diagnosticTopReasons: sortedDiagnosticReasons(bucket.reasons, 5),
+    diagnosticTopReasons: sortedReasons(bucket.diagnosticReasons, 5),
   };
 }
 
@@ -550,19 +570,22 @@ export function summarizeDispatchProductionYield(
   const attemptShape = emptyProductionAttemptShape();
   let proposalsCreated = 0;
   let spentUsd = 0;
+  const diagnosticTopReasons = new Map<string, number>();
 
   for (const event of events) {
     if (event.proposalCreated) proposalsCreated++;
     spentUsd += Number.isFinite(event.spentUsd) ? event.spentUsd : 0;
     incrementOutcome(overall, event.outcome);
     addRunActionCounts(actionCounts, event.runEventSummary?.actionCounts);
-    addProductionAttemptShape(attemptShape, productionAttemptShapeFromSignals({
+    const classification = classifyProductionAttemptForLearningWithLabel({
       outcome: event.outcome,
       proposalCreated: event.proposalCreated,
       actionCounts: event.runEventSummary?.actionCounts,
-    }));
+    }, event.learningLabel);
+    addProductionAttemptShape(attemptShape, classification.attemptShape);
     const reason = event.reason ?? event.routeReason ?? event.outcome;
     topReasons.set(reason, (topReasons.get(reason) ?? 0) + 1);
+    addDiagnosticReason(diagnosticTopReasons, reason, classification);
 
     const backendKey = event.backend ?? 'unknown';
     addToBucket(touchBucket(byBackend, backendKey, { backend: event.backend }), event);
@@ -596,7 +619,7 @@ export function summarizeDispatchProductionYield(
     ...(hasRunActionCounts(actionCounts) ? { actionCounts } : {}),
     ...(hasProductionAttemptShape(attemptShape) ? { attemptShape } : {}),
     topReasons: sortedReasons(topReasons, limit),
-    diagnosticTopReasons: sortedDiagnosticReasons(topReasons, limit),
+    diagnosticTopReasons: sortedReasons(diagnosticTopReasons, limit),
     byBackend: sortedBuckets(byBackend, limit),
     bySource: sortedBuckets(bySource, limit),
     byRepo: sortedBuckets(byRepo, limit),
