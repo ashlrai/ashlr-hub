@@ -65,6 +65,11 @@ import type {
 } from '../src/core/types.js';
 import type { CostForecast } from '../src/core/types.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
+import {
+  learningEpochFromTimestamp,
+  ROUTER_POLICY_VERSION,
+} from '../src/core/learning/causal.js';
+import { productionAttemptLearningLabelFromSignals } from '../src/core/learning/attempt-shape.js';
 
 import {
   recommendRoute,
@@ -186,7 +191,7 @@ function makeEstimate(medianCost: number, sampleSize = 10): RunEstimate {
 }
 
 function makeDispatchProductionEvent(over: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
-  return {
+  const event: DispatchProductionEvent = {
     schemaVersion: 1,
     ts: new Date().toISOString(),
     machineId: 'm53',
@@ -206,6 +211,24 @@ function makeDispatchProductionEvent(over: Partial<DispatchProductionEvent> = {}
     basis: 'run-proposal-outcome',
     ...over,
   };
+  if (event.routerPolicyVersion === undefined) event.routerPolicyVersion = ROUTER_POLICY_VERSION;
+  if (event.learningEpoch === undefined) event.learningEpoch = learningEpochFromTimestamp(event.ts);
+  if (event.learningLabel === undefined) {
+    event.learningLabel = productionAttemptLearningLabelFromSignals({
+      outcome: event.outcome,
+      proposalCreated: event.proposalCreated,
+      actionCounts: event.runEventSummary?.actionCounts,
+    });
+  }
+  return event;
+}
+
+function makeLegacyDispatchProductionEvent(over: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
+  const event = makeDispatchProductionEvent(over);
+  delete event.learningLabel;
+  delete event.routerPolicyVersion;
+  delete event.learningEpoch;
+  return event;
 }
 
 /** Build a minimal CostForecast. */
@@ -610,6 +633,196 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(rec.tier).toBe(base.tier);
     expect(rec.reason).toContain('recent proposal yield');
     expect(rec.reason).toContain('same-tier reroute');
+  });
+
+  it('legacy unversioned dispatch-production yield cannot trigger route changes', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const dispatchProductionEvents = [
+      makeLegacyDispatchProductionEvent({ backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
+      makeLegacyDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
+      makeLegacyDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
+    ];
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents,
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('recent proposal yield');
+  });
+
+  it('dispatch-production yield from an old router policy cannot trigger route changes', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const dispatchProductionEvents = Array.from({ length: 3 }, () =>
+      makeDispatchProductionEvent({
+        backend: base.backend,
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        routerPolicyVersion: 'fleet-router-v0',
+      })
+    );
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents,
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('recent proposal yield');
+  });
+
+  it('dispatch-production yield with invalid classifier labels cannot trigger route changes', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const dispatchProductionEvents = Array.from({ length: 3 }, () =>
+      makeDispatchProductionEvent({
+        backend: base.backend,
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        learningLabel: {
+          schemaVersion: 1,
+          classifierVersion: 'attempt-shape-v0',
+          authoritative: true,
+          learningKind: 'diagnostic-no-proposal',
+          policySuppressed: false,
+          diagnosticNoProposal: true,
+          diagnosticAttempt: true,
+          attemptShape: {
+            backendNoDiff: 1,
+            captureOrGateBlocked: 0,
+            repairAttempts: 0,
+            policyDisabled: 0,
+          },
+        } as never,
+      })
+    );
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents,
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('recent proposal yield');
+  });
+
+  it('dispatch-production yield with mismatched learning epochs cannot trigger route changes', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const dispatchProductionEvents = Array.from({ length: 3 }, () =>
+      makeDispatchProductionEvent({
+        backend: base.backend,
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        learningEpoch: '2026-01-01',
+      })
+    );
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents,
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('recent proposal yield');
+  });
+
+  it('policy-suppressed authoritative labels cannot trigger route changes', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const dispatchProductionEvents = Array.from({ length: 3 }, () =>
+      makeDispatchProductionEvent({
+        backend: base.backend,
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        runEventSummary: {
+          actionCounts: {
+            proposalDisabled: 1,
+            diffFiles: 0,
+          },
+        },
+      })
+    );
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents,
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('recent proposal yield');
+  });
+
+  it('routeSnapshot policy disagreement cannot trigger route changes', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const dispatchProductionEvents = Array.from({ length: 3 }, () =>
+      makeDispatchProductionEvent({
+        backend: base.backend,
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        routeSnapshot: {
+          backend: base.backend,
+          tier: base.tier,
+          assignedBy: 'daemon',
+          reason: 'old snapshot policy',
+          routerPolicyVersion: 'fleet-router-v0',
+        },
+      })
+    );
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents,
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('recent proposal yield');
   });
 
   it('gate-dominant action counts keep the same backend for capture repair', async () => {

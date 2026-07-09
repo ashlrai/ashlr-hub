@@ -175,6 +175,10 @@ describe('M342 dispatch production ledger', () => {
     const raw = readFileSync(join(dispatchProductionDir(), '2026-07-08.jsonl'), 'utf8');
     expect(raw).toContain('"learningLabel"');
     expect(raw).toContain('"authoritative":true');
+    expect(raw).toContain('"routerPolicyVersion":"fleet-router-v1"');
+    expect(raw).toContain('"learningEpoch":"2026-07-08"');
+    expect(event?.routerPolicyVersion).toBe('fleet-router-v1');
+    expect(event?.learningEpoch).toBe('2026-07-08');
     expect(raw).not.toContain(rawPromptCanary);
     expect(raw).not.toContain(rawDiffCanary);
     expect(JSON.stringify(event)).not.toContain(rawPromptCanary);

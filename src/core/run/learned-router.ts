@@ -40,6 +40,11 @@ import {
   readDispatchProductionEvents,
   type DispatchProductionEvent,
 } from '../fleet/dispatch-production-ledger.js';
+import {
+  learningEpochFromTimestamp,
+  ROUTER_POLICY_VERSION,
+} from '../learning/causal.js';
+import { sanitizeProductionAttemptLearningLabel } from '../learning/attempt-shape.js';
 
 // ---------------------------------------------------------------------------
 // M155: Re-export cascade routing API from router.ts for discoverability.
@@ -231,7 +236,6 @@ interface DispatchYieldPrior {
   attempts: number;
   proposalsCreated: number;
   proposalRate: number;
-  topReason?: string;
   actionShape?: DispatchYieldActionShape;
 }
 
@@ -272,6 +276,20 @@ function isProposalDisabledDispatchEvent(event: DispatchProductionEvent): boolea
     (nonNegativeInteger(event.runEventSummary?.actionCounts?.proposalDisabled) ?? 0) > 0;
 }
 
+function hasCurrentAuthoritativeAttemptLabel(event: DispatchProductionEvent): boolean {
+  const label = sanitizeProductionAttemptLearningLabel(event.learningLabel);
+  if (!label?.authoritative) return false;
+  if (label.policySuppressed || label.learningKind === 'policy-suppressed') return false;
+  if (event.routerPolicyVersion !== ROUTER_POLICY_VERSION) return false;
+  if (
+    event.routeSnapshot?.routerPolicyVersion !== undefined &&
+    event.routeSnapshot.routerPolicyVersion !== event.routerPolicyVersion
+  ) {
+    return false;
+  }
+  return event.learningEpoch === learningEpochFromTimestamp(event.ts);
+}
+
 function loadDispatchYieldEvents(
   intel: FoundryIntelligenceCfg,
   eventsOverride?: DispatchProductionEvent[],
@@ -297,7 +315,6 @@ function dispatchYieldForBackend(
   backend: EngineId,
   source: WorkItem['source'],
 ): DispatchYieldPrior {
-  const reasons = new Map<string, number>();
   let attempts = 0;
   let proposalsCreated = 0;
   let actionSamples = 0;
@@ -310,6 +327,7 @@ function dispatchYieldForBackend(
   for (const event of events) {
     if (event.backend !== backend) continue;
     if (event.source !== source) continue;
+    if (!hasCurrentAuthoritativeAttemptLabel(event)) continue;
     // `proposal-disabled` is a control-flow/capture-policy outcome (for
     // example non-final TITRR attempts with propose:false), not a backend
     // quality signal. Counting it as a failed proposal attempt makes the
@@ -330,11 +348,7 @@ function dispatchYieldForBackend(
       verifyRepairAttempts += nonNegativeInteger(counts.verifyRepairAttempts) ?? 0;
       proposalBlocked += nonNegativeInteger(counts.proposalBlocked) ?? 0;
     }
-    const reason = event.reason ?? event.routeReason ?? event.outcome;
-    reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
   }
-  const topReason = [...reasons.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
   const avgDiffFiles = diffFileSamples > 0 ? diffFilesTotal / diffFileSamples : 0;
   const gateDominant =
     actionSamples >= MIN_DISPATCH_YIELD_SAMPLES &&
@@ -363,7 +377,6 @@ function dispatchYieldForBackend(
     attempts,
     proposalsCreated,
     proposalRate: attempts > 0 ? proposalsCreated / attempts : 1,
-    ...(topReason ? { topReason } : {}),
     ...(actionShape ? { actionShape } : {}),
   };
 }
@@ -561,8 +574,7 @@ export async function recommendRoute(
         reason:
           `learned-router: recent proposal yield for ${base.backend} ` +
           `${yieldPrior.proposalsCreated}/${yieldPrior.attempts} ` +
-          `< threshold ${(minProposalYieldRate * 100).toFixed(0)}%` +
-          `${yieldPrior.topReason ? ` (top: ${yieldPrior.topReason})` : ''} — ` +
+          `< threshold ${(minProposalYieldRate * 100).toFixed(0)}% — ` +
           `${yieldPrior.actionShape?.signal ? `action signal: ${yieldPrior.actionShape.signal}; ` : ''}` +
           `same-tier reroute to ${alternate}`,
         confidence: Math.min(0.55 + (yieldPrior.attempts / 20) * 0.35, 0.9),

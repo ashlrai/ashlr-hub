@@ -944,3 +944,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Finish final full CI.
 - [x] Commit, push, reload daemon, and smoke live label readiness.
 - [ ] Next lane: epoch-gated learned routing from authoritative current-policy labels, or explicit contract wave 2 for clean Bun packages.
+
+## Current Continuation - Epoch-Gated Learned Routing
+- [x] Rechecked clean pushed state, Entire state, live FleetStatus, and learned-router tests.
+- [x] Deployed sidecar scouts for learned-router mapping and safety constraints.
+- [x] Require dispatch-yield route mutation to use valid authoritative attempt labels, current router policy version, matching learning epoch, and no routeSnapshot policy disagreement.
+- [x] Exclude policy-suppressed labels and stop using freeform dispatch reasons in route-changing learned-yield decisions.
+- [x] Add focused regressions for legacy rows, old policy rows, invalid classifier labels, stale epochs, policy-suppressed labels, and policy-version disagreement.
+- [x] Run focused and adjacent router/daemon/gateway/resource/status verification.
+- [x] Run broad verification.
+- [ ] Commit, push, reload daemon, and smoke live status.
