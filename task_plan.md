@@ -562,4 +562,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Fix the live proposal-production starvation bug where `proposal-disabled` dispatches fell through to `empty` worked-ledger cooldown.
 - [x] Tighten long-base64 scrubbing so ordinary absolute temp paths are preserved while compact blobs still redact.
 - [x] Run focused web/control/dashboard/inbox/safety, daemon/fleet/scrub, typecheck, lint, build, audit, and diff verification for the two slices.
-- [ ] Commit and push the cooldown/scrub fix, then recheck live daemon/fleet health.
+- [x] Commit `98b89f0`, push the cooldown/scrub fix, archive stale dead-owner spend guard, reinstall launchd daemon, and verify guard health clear on pid `36972`.
+- [ ] Next lane: filter live attention/workspace summaries to enrolled existing repos by default so test fixture telemetry cannot train the loop.
