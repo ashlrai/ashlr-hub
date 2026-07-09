@@ -409,6 +409,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('function renderProposalProductionCard');
     expect(src).toContain('function renderDispatchProductionCard');
     expect(src).toContain('function renderAttemptCoverageCard');
+    expect(src).toContain('function renderPhantomAgentReportCard');
+    expect(src).toContain('function formatCountMap');
     expect(src).toContain('function dispatchProductionDiagnosticAttempts');
     expect(src).toContain('function generatedWorkMetric');
     expect(src).toContain('diagnosticReslices');
@@ -428,6 +430,11 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("['Generated work', generatedWorkMetric(f.queue?.generatedWork) ?? '—']");
     expect(src).toContain('renderProposalProductionCard(production)');
     expect(src).toContain('renderAttemptCoverageCard(attemptCoverage)');
+    expect(src).toContain('renderPhantomAgentReportCard(f.phantom');
+    expect(src).toContain('renderPhantomAgentReportCard(d.fleet?.phantom');
+    expect(src).toContain('delegationSafety');
+    expect(src).toContain("'Delegation unsafe'");
+    expect(src).toContain("'Phantom delegation'");
     expect(src).toContain('attemptCoverage.causalCoverage');
     expect(src).toContain("'Attempt coverage'");
     expect(src).toContain("'Current labels'");

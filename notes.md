@@ -1010,6 +1010,14 @@
   - Deployed as `f882e55` on `origin/master`, reinstalled/resumed/kickstarted launchd, and smoked live status. Daemon PID `65316`, guard clear, kill switch off, tick in progress with fresh heartbeat, mission still `Recover dispatch yield`.
   - Live causal coverage now shows the intended second-order learning blocker: `47` attempts, route snapshots and run summaries `35/47` (`74%`), router policy and epoch current `47/47`, authoritative labels `0/47`, and next action `inspect-attempt-causal-coverage` ranked behind `inspect-dispatch-yield`.
 
+- Current Phantom delegation safety counts pass:
+  - Purpose: make Phantom's agent report rollup more useful for fleet delegation decisions without exposing per-repo audit rows, secret names/values, commands, prompts, stdout/stderr, env, or file contents.
+  - Implementation: `PhantomAgentReportRollup` now has optional `delegationSafety` with exact `safe|unsafe|unknown` safety counts plus allowlisted delegation status and primary-action count maps.
+  - Parser: aggregate fields (`safetyCounts`, `delegationSafetyCounts`, `bySafety`, delegation status/action count maps) and per-record fields (`safeToDelegate`, `delegationSafe`, `delegationStatus`, `safetyStatus`, `primaryAction`, `recommendedAction`) normalize only to bounded count keys.
+  - Fleet OS: `sanitizeFleetPhantomAgentReport()` drops non-allowlisted nested keys, and `review-phantom-audit` now includes unsafe, blocked, and review delegation aggregate signals.
+  - CLI/UI: `ashlr fleet status` renders `safety=...`, `delegation-status=...`, and `actions=...` segments. Fleet, Mission Control, and Fleet Dashboard render a compact Phantom card/meta row with values hidden.
+  - Verification passed: `npm run typecheck -- --pretty false`; focused `npm run test:ci -- test/m2.phantom.test.ts test/m348.fleet-phantom.test.ts test/m213.dashboard-sse.test.ts` (72 tests); adjacent dashboard suite `npm run test:ci -- test/m210.dashboard.test.ts test/m2.phantom.test.ts test/m348.fleet-phantom.test.ts test/m213.dashboard-sse.test.ts` (96 tests); `node --check src/core/web/public/app.js`; `npm run lint` (known 115-warning baseline, 0 errors); `npm run build`; `npm audit --audit-level=moderate`; and `git diff --check`.
+
 - Current epoch-gated learned routing pass:
   - Purpose: allow the existing dispatch-yield learned reroute to use the new label foundation, but only for current, authoritative, metadata-only samples.
   - Implementation: `dispatchYieldForBackend()` now ignores rows unless `learningLabel` sanitizes as authoritative, the label is not policy-suppressed, top-level `routerPolicyVersion` equals `ROUTER_POLICY_VERSION`, optional `routeSnapshot.routerPolicyVersion` agrees with the top-level policy, and `learningEpoch` matches `learningEpochFromTimestamp(event.ts)`.

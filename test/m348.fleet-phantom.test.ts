@@ -239,6 +239,26 @@ describe('M348 FleetStatus Phantom capability', () => {
           'raw finding TOKEN=abc123': 1,
         },
         requiresApprovalCount: 1,
+        delegationSafety: {
+          safetyCounts: {
+            safe: 2,
+            unsafe: 1,
+            unknown: 1,
+            '/Users/masonwyatt/private/repo': 9,
+          },
+          statusCounts: {
+            review: 1,
+            blocked: 1,
+            'requires-approval': 1,
+            'phantom reveal SECRET': 1,
+          },
+          primaryActionCounts: {
+            delegate: 2,
+            review: 1,
+            block: 1,
+            'raw finding TOKEN=abc123': 1,
+          },
+        },
         repoPath: '/Users/masonwyatt/private/repo',
         command: 'phantom reveal SECRET',
         findings: [{ message: 'raw finding TOKEN=abc123', path: '/Users/masonwyatt/private/repo/.env' }],
@@ -285,6 +305,23 @@ describe('M348 FleetStatus Phantom capability', () => {
           info: 1,
         },
         requiresApprovalCount: 1,
+        delegationSafety: {
+          safetyCounts: {
+            safe: 2,
+            unsafe: 1,
+            unknown: 1,
+          },
+          statusCounts: {
+            review: 1,
+            blocked: 1,
+            'requires-approval': 1,
+          },
+          primaryActionCounts: {
+            delegate: 2,
+            review: 1,
+            block: 1,
+          },
+        },
       });
       expect(serialized).not.toContain('ANTHROPIC_API_KEY');
       expect(serialized).not.toContain('ASHLR_PULSE_TOKEN');
@@ -304,6 +341,9 @@ describe('M348 FleetStatus Phantom capability', () => {
       expect(action?.detail).toContain('1 failed report');
       expect(action?.detail).toContain('2 high/critical risk signals');
       expect(action?.detail).toContain('2 high/critical severity signals');
+      expect(action?.detail).toContain('1 unsafe delegation');
+      expect(action?.detail).toContain('1 blocked delegation');
+      expect(action?.detail).toContain('4 delegation review signals');
       expect(action?.detail).toContain('Values hidden');
       expect(JSON.stringify(action)).not.toContain('phantom reveal SECRET');
       expect(JSON.stringify(action)).not.toContain('raw finding TOKEN=abc123');
@@ -315,6 +355,9 @@ describe('M348 FleetStatus Phantom capability', () => {
       expect(rendered).toContain('status=failed=1/ok=1/requires-approval=1');
       expect(rendered).toContain('risk=critical=1/high=1/low=1');
       expect(rendered).toContain('severity=critical=1/high=1/info=1');
+      expect(rendered).toContain('safety=safe=2/unknown=1/unsafe=1');
+      expect(rendered).toContain('delegation-status=blocked=1/requires-approval=1/review=1');
+      expect(rendered).toContain('actions=block=1/delegate=2/review=1');
       expect(rendered).toContain('values hidden');
       expect(rendered).not.toContain('ANTHROPIC_API_KEY');
       expect(rendered).not.toContain('ASHLR_PULSE_TOKEN');

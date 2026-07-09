@@ -610,7 +610,7 @@ function formatFleetPhantom(phantom: NonNullable<FleetStatus['phantom']>): strin
 
 function formatPhantomAgentReport(report: NonNullable<FleetStatus['phantom']>['agentReport']): string {
   if (!report) return 'none';
-  return [
+  const parts = [
     `repos=${report.scannedRepos}`,
     `valid=${report.validReports}`,
     `failed=${report.failedReports}`,
@@ -618,7 +618,13 @@ function formatPhantomAgentReport(report: NonNullable<FleetStatus['phantom']>['a
     `status=${formatPhantomAgentReportCounts(report.statusCounts)}`,
     `risk=${formatPhantomAgentReportCounts(report.riskCounts)}`,
     `severity=${formatPhantomAgentReportCounts(report.severityCounts)}`,
-  ].join(' ');
+  ];
+  if (report.delegationSafety) {
+    parts.push(`safety=${formatPhantomAgentReportCounts(report.delegationSafety.safetyCounts)}`);
+    parts.push(`delegation-status=${formatPhantomAgentReportCounts(report.delegationSafety.statusCounts)}`);
+    parts.push(`actions=${formatPhantomAgentReportCounts(report.delegationSafety.primaryActionCounts)}`);
+  }
+  return parts.join(' ');
 }
 
 function formatPhantomAgentReportCounts(counts: Record<string, number>): string {

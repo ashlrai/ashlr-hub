@@ -1381,6 +1381,15 @@ export interface PhantomAgentReportRollup {
   riskCounts: Record<string, number>;
   severityCounts: Record<string, number>;
   requiresApprovalCount: number;
+  delegationSafety?: {
+    safetyCounts: {
+      safe: number;
+      unsafe: number;
+      unknown: number;
+    };
+    statusCounts: Record<string, number>;
+    primaryActionCounts: Record<string, number>;
+  };
 }
 
 export interface PhantomStatus {

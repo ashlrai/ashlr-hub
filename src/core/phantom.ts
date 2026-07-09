@@ -29,7 +29,7 @@ const UNKNOWN_PHANTOM_COMMANDS: PhantomCapabilitySnapshot['commands'] = {
 const AGENT_REPORT_COUNT_MAX = Number.MAX_SAFE_INTEGER;
 const AGENT_REPORT_ARRAY_MAX = 10_000;
 
-type CountKind = 'status' | 'risk' | 'severity';
+type CountKind = 'status' | 'risk' | 'severity' | 'safety' | 'action';
 
 interface PhantomStatusOptions {
   timeoutMs?: number;
@@ -451,6 +451,15 @@ function applyAgentReportAggregateFields(
     statusCounts: { ...input.statusCounts },
     riskCounts: { ...input.riskCounts },
     severityCounts: { ...input.severityCounts },
+    ...(input.delegationSafety
+      ? {
+          delegationSafety: {
+            safetyCounts: { ...input.delegationSafety.safetyCounts },
+            statusCounts: { ...input.delegationSafety.statusCounts },
+            primaryActionCounts: { ...input.delegationSafety.primaryActionCounts },
+          },
+        }
+      : {}),
   };
   let sawAggregate = false;
 
@@ -507,7 +516,115 @@ function applyAgentReportAggregateFields(
     sawAggregate = true;
   }
 
+  const safetyCounts = readCountObject(source, [
+    'safetyCounts',
+    'safety_counts',
+    'delegationSafetyCounts',
+    'delegation_safety_counts',
+    'bySafety',
+    'by_safety',
+  ], 'safety');
+  if (safetyCounts !== undefined) {
+    ensureDelegationSafety(rollup).safetyCounts = exactSafetyCounts(safetyCounts);
+    sawAggregate = true;
+  }
+
+  const nestedDelegationSafety = source['delegationSafety'];
+  if (
+    nestedDelegationSafety !== null &&
+    typeof nestedDelegationSafety === 'object' &&
+    !Array.isArray(nestedDelegationSafety)
+  ) {
+    const nested = nestedDelegationSafety as Record<string, unknown>;
+    const nestedSafetyCounts = readCountObject(nested, [
+      'safetyCounts',
+      'safety_counts',
+      'delegationSafetyCounts',
+      'delegation_safety_counts',
+      'bySafety',
+      'by_safety',
+    ], 'safety');
+    const nestedStatusCounts = readCountObject(nested, [
+      'statusCounts',
+      'status_counts',
+      'delegationStatusCounts',
+      'delegation_status_counts',
+      'byStatus',
+      'by_status',
+    ], 'status');
+    const nestedActionCounts = readCountObject(nested, [
+      'primaryActionCounts',
+      'primary_action_counts',
+      'recommendedActionCounts',
+      'recommended_action_counts',
+      'byPrimaryAction',
+      'by_primary_action',
+    ], 'action');
+    const delegation = ensureDelegationSafety(rollup);
+    if (nestedSafetyCounts !== undefined) {
+      delegation.safetyCounts = exactSafetyCounts(nestedSafetyCounts);
+      sawAggregate = true;
+    }
+    if (nestedStatusCounts !== undefined) {
+      delegation.statusCounts = nestedStatusCounts;
+      sawAggregate = true;
+    }
+    if (nestedActionCounts !== undefined) {
+      delegation.primaryActionCounts = nestedActionCounts;
+      sawAggregate = true;
+    }
+  }
+
+  const delegationStatusCounts = readCountObject(source, [
+    'delegationStatusCounts',
+    'delegation_status_counts',
+    'delegationStatuses',
+    'delegation_statuses',
+    'byDelegationStatus',
+    'by_delegation_status',
+  ], 'status');
+  if (delegationStatusCounts !== undefined) {
+    ensureDelegationSafety(rollup).statusCounts = delegationStatusCounts;
+    sawAggregate = true;
+  }
+
+  const primaryActionCounts = readCountObject(source, [
+    'primaryActionCounts',
+    'primary_action_counts',
+    'recommendedActionCounts',
+    'recommended_action_counts',
+    'byPrimaryAction',
+    'by_primary_action',
+    'byRecommendedAction',
+    'by_recommended_action',
+  ], 'action');
+  if (primaryActionCounts !== undefined) {
+    ensureDelegationSafety(rollup).primaryActionCounts = primaryActionCounts;
+    sawAggregate = true;
+  }
+
   return { rollup, sawAggregate };
+}
+
+function ensureDelegationSafety(
+  rollup: PhantomAgentReportRollup,
+): NonNullable<PhantomAgentReportRollup['delegationSafety']> {
+  if (!rollup.delegationSafety) {
+    rollup.delegationSafety = {
+      safetyCounts: { safe: 0, unsafe: 0, unknown: 0 },
+      statusCounts: {},
+      primaryActionCounts: {},
+    };
+  }
+  return rollup.delegationSafety;
+}
+
+function exactSafetyCounts(counts: Record<string, number>): NonNullable<PhantomAgentReportRollup['delegationSafety']>['safetyCounts'] {
+  return {
+    safe: counts.safe ?? 0,
+    unsafe: counts.unsafe ?? 0,
+    unknown: counts.unknown ?? 0,
+  };
 }
 
 function extractAgentReportRecords(parsed: unknown): Record<string, unknown>[] {
@@ -553,9 +670,28 @@ function aggregateAgentReportRecords(records: Record<string, unknown>[]): Phanto
     } else {
       addRiskSeverityCounts(rollup, record);
     }
+
+    addDelegationSafetyCounts(rollup, record);
   }
 
   return rollup;
+}
+
+function addDelegationSafetyCounts(rollup: PhantomAgentReportRollup, record: Record<string, unknown>): void {
+  const safety = readDelegationSafety(record);
+  const status = readStringField(record, ['delegationStatus', 'delegation_status']);
+  const action = readStringField(record, [
+    'primaryAction',
+    'primary_action',
+    'recommendedAction',
+    'recommended_action',
+  ]);
+  if (!safety && !status && !action) return;
+
+  const delegation = ensureDelegationSafety(rollup);
+  if (safety) delegation.safetyCounts[safety] += 1;
+  if (status) addCount(delegation.statusCounts, normalizeAgentReportCountKey('status', status), 1);
+  if (action) addCount(delegation.primaryActionCounts, normalizeAgentReportCountKey('action', action), 1);
 }
 
 function addRiskSeverityCounts(rollup: PhantomAgentReportRollup, source: Record<string, unknown>): void {
@@ -632,6 +768,30 @@ function readBooleanField(source: Record<string, unknown>, keys: string[]): bool
   return undefined;
 }
 
+function readDelegationSafety(record: Record<string, unknown>): 'safe' | 'unsafe' | 'unknown' | undefined {
+  const bool = readBooleanField(record, [
+    'safeToDelegate',
+    'safe_to_delegate',
+    'delegationSafe',
+    'delegation_safe',
+  ]);
+  if (bool === true) return 'safe';
+  if (bool === false) return 'unsafe';
+
+  const raw = readStringField(record, [
+    'delegationSafety',
+    'delegation_safety',
+    'safety',
+    'safetyStatus',
+    'safety_status',
+  ]);
+  if (!raw) return undefined;
+  const normalized = normalizeAgentReportCountKey('safety', raw);
+  return normalized === 'safe' || normalized === 'unsafe' || normalized === 'unknown'
+    ? normalized
+    : 'unknown';
+}
+
 function coerceCount(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
   return Math.min(Math.floor(value), AGENT_REPORT_COUNT_MAX);
@@ -660,6 +820,25 @@ function normalizeAgentReportCountKey(kind: CountKind, value: string): string {
     if (['low', 'medium', 'high', 'critical', 'unknown'].includes(key)) return key;
     if (key === 'med') return 'medium';
     if (key === 'crit') return 'critical';
+    return 'other';
+  }
+
+  if (kind === 'safety') {
+    if (['safe', 'ok', 'pass', 'passed', 'true', 'yes', 'clean', 'allowed'].includes(key)) return 'safe';
+    if (['unsafe', 'not-safe', 'fail', 'failed', 'false', 'no', 'blocked', 'danger'].includes(key)) return 'unsafe';
+    if (key === 'unknown') return 'unknown';
+    return 'unknown';
+  }
+
+  if (kind === 'action') {
+    if (['delegate', 'delegation', 'run', 'proceed'].includes(key)) return 'delegate';
+    if (['review', 'needs-review', 'human-review', 'requires-review'].includes(key)) return 'review';
+    if (['approve', 'approval', 'requires-approval', 'needs-approval'].includes(key)) return 'approve';
+    if (['block', 'blocked', 'deny', 'stop'].includes(key)) return 'block';
+    if (['initialize', 'init', 'setup'].includes(key)) return 'initialize';
+    if (['configure', 'config'].includes(key)) return 'configure';
+    if (['none', 'noop', 'no-op', 'skip'].includes(key)) return 'none';
+    if (key === 'unknown') return 'unknown';
     return 'other';
   }
 

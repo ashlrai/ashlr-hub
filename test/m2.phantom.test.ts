@@ -23,6 +23,7 @@ vi.mock('node:child_process', () => ({
 
 // Import module under test AFTER mock is registered.
 import {
+  aggregatePhantomAgentReport,
   phantomInstalled,
   getPhantomStatus,
   getCachedFleetPhantomStatus,
@@ -499,7 +500,11 @@ describe('getPhantomStatus — command support from help output', () => {
           {
             repoPath: '/Users/masonwyatt/private/repo-a',
             command: 'cat ~/.ssh/id_rsa',
+            prompt: 'delegate with RAW_PROMPT_SECRET',
             status: 'ok',
+            safeToDelegate: true,
+            delegationStatus: 'review',
+            primaryAction: 'delegate',
             findings: [
               {
                 message: 'raw finding with TOKEN=abc123',
@@ -513,6 +518,9 @@ describe('getPhantomStatus — command support from help output', () => {
             repo: '/Users/masonwyatt/private/repo-b',
             status: 'requires_approval',
             requiresApproval: true,
+            delegationSafe: false,
+            delegation_status: 'requires_approval',
+            recommendedAction: 'review',
             findings: [
               {
                 message: 'approval finding should not appear',
@@ -525,6 +533,8 @@ describe('getPhantomStatus — command support from help output', () => {
             cwd: '/Users/masonwyatt/private/repo-c',
             status: 'failed',
             error: 'fatal scan failure at /Users/masonwyatt/private/repo-c',
+            safetyStatus: 'unknown',
+            primary_action: 'block',
             findings: [
               {
                 command: 'phantom reveal SECRET',
@@ -561,16 +571,83 @@ describe('getPhantomStatus — command support from help output', () => {
         info: 1,
       },
       requiresApprovalCount: 1,
+      delegationSafety: {
+        safetyCounts: {
+          safe: 1,
+          unsafe: 1,
+          unknown: 1,
+        },
+        statusCounts: {
+          review: 1,
+          'requires-approval': 1,
+        },
+        primaryActionCounts: {
+          delegate: 1,
+          review: 1,
+          block: 1,
+        },
+      },
     });
     expect(serializedReport).not.toContain('/Users/masonwyatt');
     expect(serializedReport).not.toContain('cat ~/.ssh/id_rsa');
     expect(serializedReport).not.toContain('phantom reveal SECRET');
+    expect(serializedReport).not.toContain('RAW_PROMPT_SECRET');
     expect(serializedReport).not.toContain('raw stdout');
     expect(serializedReport).not.toContain('raw stderr');
     expect(serializedReport).not.toContain('LEAKED_SECRET_NAME');
     expect(serializedReport).not.toContain('raw finding');
     expect(serializedReport).not.toContain('Commands:');
     expect(serializedReport).not.toContain('fatal scan failure');
+  });
+
+  it('parses nested aggregate delegation safety without treating safety status as delegation status', () => {
+    const report = aggregatePhantomAgentReport(JSON.stringify({
+      delegationSafety: {
+        safetyCounts: {
+          safe: 4,
+          unsafe: 2,
+          mystery: 1,
+        },
+        statusCounts: {
+          review: 2,
+          blocked: 1,
+          'raw /Users/masonwyatt/path': 8,
+        },
+        primaryActionCounts: {
+          delegate: 3,
+          block: 1,
+          'cat ~/.ssh/id_rsa': 5,
+        },
+      },
+      reports: [
+        {
+          status: 'ok',
+          safetyStatus: 'unsafe',
+          primaryAction: 'review',
+        },
+      ],
+    }));
+
+    expect(report.delegationSafety).toEqual({
+      safetyCounts: {
+        safe: 4,
+        unsafe: 2,
+        unknown: 1,
+      },
+      statusCounts: {
+        review: 2,
+        blocked: 1,
+        other: 8,
+      },
+      primaryActionCounts: {
+        delegate: 3,
+        block: 1,
+        other: 5,
+      },
+    });
+    const serialized = JSON.stringify(report);
+    expect(serialized).not.toContain('/Users/masonwyatt');
+    expect(serialized).not.toContain('cat ~/.ssh/id_rsa');
   });
 
   it('reports unknown command support when help has no Commands block', () => {

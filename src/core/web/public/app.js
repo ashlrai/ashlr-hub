@@ -2707,6 +2707,53 @@ function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
   return card;
 }
 
+function formatCountMap(counts) {
+  const entries = Object.entries(counts ?? {})
+    .filter(([, count]) => Number(count) > 0)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(0, 5)
+    .map(([key, count]) => `${key}=${Number(count)}`);
+  return entries.length > 0 ? entries.join('/') : 'none';
+}
+
+function renderPhantomAgentReportCard(phantom, cls = 'ctrl-card card') {
+  if (!phantom) return null;
+  const report = phantom.agentReport ?? null;
+  const delegation = report?.delegationSafety ?? null;
+  const card = el('div', { cls });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Phantom'),
+    el('span', { cls: 'card-subtitle' }, `${phantom.state ?? 'unknown'} · values hidden`)
+  ));
+
+  const body = el('div', { cls: 'card-body' });
+  body.appendChild(infoGrid([
+    ['Initialized', phantom.initialized ? 'yes' : 'no'],
+    ['Agent command', phantom.commands?.agentAvailable ? 'yes' : 'no'],
+    ['Known secrets', `${phantom.knownFleetSecrets?.presentCount ?? 0}/${phantom.knownFleetSecrets?.total ?? 0}`],
+    ['Report repos', report?.scannedRepos ?? 0],
+    ['Report failures', report?.failedReports ?? 0],
+    ['Approvals', report?.requiresApprovalCount ?? 0],
+  ]));
+  if (report) {
+    body.appendChild(el('p', { cls: 'hint' },
+      `status ${formatCountMap(report.statusCounts)} · risk ${formatCountMap(report.riskCounts)} · severity ${formatCountMap(report.severityCounts)}`
+    ));
+  }
+  if (delegation) {
+    body.appendChild(infoGrid([
+      ['Delegation safe', delegation.safetyCounts?.safe ?? 0],
+      ['Delegation unsafe', delegation.safetyCounts?.unsafe ?? 0],
+      ['Delegation unknown', delegation.safetyCounts?.unknown ?? 0],
+      ['Delegation status', formatCountMap(delegation.statusCounts)],
+      ['Primary actions', formatCountMap(delegation.primaryActionCounts)],
+    ]));
+  }
+  body.appendChild(el('p', { cls: 'hint' }, 'Aggregate counts only; secret values, prompts, paths, commands, and output are hidden.'));
+  card.appendChild(body);
+  return card;
+}
+
 function contextEfficiencyAccent(posture) {
   const colors = {
     healthy: '#4ade80',
@@ -3044,6 +3091,9 @@ function renderFleet() {
 
   const missionBriefCard = renderMissionBriefCard(f.missionBrief, 'fleet-card card');
   if (missionBriefCard) section.appendChild(missionBriefCard);
+
+  const phantomCard = renderPhantomAgentReportCard(f.phantom, 'fleet-card card');
+  if (phantomCard) section.appendChild(phantomCard);
 
   const readinessCard = renderAutonomousShipReadinessCard(f.autonomousShipReadiness, 'fleet-card card');
   if (readinessCard) section.appendChild(readinessCard);
@@ -3501,6 +3551,9 @@ function renderControl() {
 
   const missionBriefCard = renderMissionBriefCard(missionBrief);
   if (missionBriefCard) section.appendChild(missionBriefCard);
+
+  const missionPhantomCard = renderPhantomAgentReportCard(d.fleet?.phantom ?? fleet.phantom ?? null);
+  if (missionPhantomCard) section.appendChild(missionPhantomCard);
 
   if (direction) {
     const directionCard = el('div', { cls: 'ctrl-card card' });
@@ -4477,6 +4530,7 @@ function fdRenderStatusPanel(snap) {
   const isKilled = snap.fleet?.killed ?? snap.control?.fleet?.killed ?? false;
   const sharedQueue = snap.fleet?.queue?.shared ?? snap.control?.fleet?.queue?.shared ?? null;
   const autonomy = snap.fleet?.autonomy ?? snap.control?.fleet?.autonomy ?? null;
+  const phantom = snap.fleet?.phantom ?? snap.control?.fleet?.phantom ?? null;
 
   const body = el('div', { cls: 'fd-panel__body' });
   const readinessRail = fdRenderReadinessRail(snap);
@@ -4518,6 +4572,12 @@ function fdRenderStatusPanel(snap) {
     grid.appendChild(mkMeta('Evidence packs', String(autonomy.evidencePacks ?? 0),
       autonomy.denied > 0 ? 'fd-meta-val--warn' : null));
     grid.appendChild(mkMeta('Autonomy latest', autonomy.latestAt ? fmtRelative(autonomy.latestAt) : '—'));
+  }
+  if (phantom?.agentReport?.delegationSafety) {
+    const safety = phantom.agentReport.delegationSafety.safetyCounts ?? {};
+    const unsafe = Number(safety.unsafe ?? 0);
+    grid.appendChild(mkMeta('Phantom delegation', `safe ${safety.safe ?? 0} / unsafe ${unsafe}`,
+      unsafe > 0 ? 'fd-meta-val--warn' : null));
   }
   body.appendChild(grid);
   const leaseBoard = fdRenderLeaseBoard(sharedQueue);

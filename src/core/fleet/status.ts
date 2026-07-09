@@ -1274,8 +1274,31 @@ const PHANTOM_AGENT_STATUS_COUNT_KEYS = new Set([
 ]);
 const PHANTOM_AGENT_RISK_COUNT_KEYS = new Set(['none', 'low', 'medium', 'high', 'critical', 'unknown', 'other']);
 const PHANTOM_AGENT_SEVERITY_COUNT_KEYS = new Set(['info', 'low', 'medium', 'high', 'critical', 'unknown', 'other']);
+const PHANTOM_AGENT_DELEGATION_STATUS_COUNT_KEYS = new Set([
+  'ok',
+  'warning',
+  'review',
+  'requires-approval',
+  'failed',
+  'blocked',
+  'skipped',
+  'unknown',
+  'other',
+]);
+const PHANTOM_AGENT_DELEGATION_ACTION_COUNT_KEYS = new Set([
+  'delegate',
+  'review',
+  'approve',
+  'block',
+  'initialize',
+  'configure',
+  'none',
+  'unknown',
+  'other',
+]);
 
 function sanitizeFleetPhantomAgentReport(report: PhantomAgentReportRollup): PhantomAgentReportRollup {
+  const delegationSafety = sanitizeFleetPhantomDelegationSafety(report.delegationSafety);
   return {
     valuesHidden: true,
     scannedRepos: safeFleetPhantomCount(report.scannedRepos),
@@ -1285,7 +1308,33 @@ function sanitizeFleetPhantomAgentReport(report: PhantomAgentReportRollup): Phan
     riskCounts: safeFleetPhantomCountMap(report.riskCounts, PHANTOM_AGENT_RISK_COUNT_KEYS),
     severityCounts: safeFleetPhantomCountMap(report.severityCounts, PHANTOM_AGENT_SEVERITY_COUNT_KEYS),
     requiresApprovalCount: safeFleetPhantomCount(report.requiresApprovalCount),
+    ...(delegationSafety ? { delegationSafety } : {}),
   };
+}
+
+function sanitizeFleetPhantomDelegationSafety(
+  input: PhantomAgentReportRollup['delegationSafety'],
+): PhantomAgentReportRollup['delegationSafety'] | undefined {
+  if (!input) return undefined;
+  const rawSafetyCounts = input.safetyCounts ?? { safe: 0, unsafe: 0, unknown: 0 };
+  const safetyCounts = {
+    safe: safeFleetPhantomCount(rawSafetyCounts.safe),
+    unsafe: safeFleetPhantomCount(rawSafetyCounts.unsafe),
+    unknown: safeFleetPhantomCount(rawSafetyCounts.unknown),
+  };
+  const statusCounts = safeFleetPhantomCountMap(
+    input.statusCounts,
+    PHANTOM_AGENT_DELEGATION_STATUS_COUNT_KEYS,
+  );
+  const primaryActionCounts = safeFleetPhantomCountMap(
+    input.primaryActionCounts,
+    PHANTOM_AGENT_DELEGATION_ACTION_COUNT_KEYS,
+  );
+  const hasSafety = safetyCounts.safe > 0 || safetyCounts.unsafe > 0 || safetyCounts.unknown > 0;
+  if (!hasSafety && Object.keys(statusCounts).length === 0 && Object.keys(primaryActionCounts).length === 0) {
+    return undefined;
+  }
+  return { safetyCounts, statusCounts, primaryActionCounts };
 }
 
 function safeFleetPhantomCount(value: unknown): number {
@@ -2372,12 +2421,26 @@ function phantomAuditNextAction(report: PhantomAgentReportRollup | undefined): F
   const failedReports = Math.max(report.failedReports, report.statusCounts.failed ?? 0);
   const highRiskSignals = (report.riskCounts.high ?? 0) + (report.riskCounts.critical ?? 0);
   const highSeveritySignals = (report.severityCounts.high ?? 0) + (report.severityCounts.critical ?? 0);
+  const delegation = report.delegationSafety;
+  const unsafeDelegations = delegation?.safetyCounts.unsafe ?? 0;
+  const blockedDelegations =
+    (delegation?.statusCounts.blocked ?? 0) +
+    (delegation?.statusCounts.failed ?? 0);
+  const reviewDelegations =
+    (delegation?.statusCounts.review ?? 0) +
+    (delegation?.statusCounts['requires-approval'] ?? 0) +
+    (delegation?.primaryActionCounts.review ?? 0) +
+    (delegation?.primaryActionCounts.approve ?? 0) +
+    (delegation?.primaryActionCounts.block ?? 0);
 
   const signals = [
     countSignal(approvalReports, 'approval-required report'),
     countSignal(failedReports, 'failed report'),
     countSignal(highRiskSignals, 'high/critical risk signal'),
     countSignal(highSeveritySignals, 'high/critical severity signal'),
+    countSignal(unsafeDelegations, 'unsafe delegation'),
+    countSignal(blockedDelegations, 'blocked delegation'),
+    countSignal(reviewDelegations, 'delegation review signal'),
   ].filter((signal): signal is string => signal !== null);
 
   if (signals.length === 0) return null;

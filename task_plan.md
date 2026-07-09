@@ -1073,3 +1073,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused attempt-record, FleetStatus, CLI, and web surface regression coverage.
 - [x] Run focused tests, typecheck, and browser JS syntax check.
 - [x] Run final lint, build, audit, diff, commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Phantom Delegation Safety Counts
+- [x] Deploy scout for Phantom delegation safety count-only surfacing.
+- [x] Extend Phantom agent report rollup with optional count-only delegation safety, status, and primary-action maps.
+- [x] Parse aggregate and per-record Phantom delegation fields without persisting raw repos, prompts, commands, stdout/stderr, env, secret names, or file contents.
+- [x] Sanitize delegation counts through FleetStatus allowlists and include unsafe/review signals in the Phantom audit next action.
+- [x] Render delegation safety counts in CLI, Fleet, Mission Control, and Fleet Dashboard status surfaces.
+- [x] Add focused Phantom parser, FleetStatus/CLI, and web surface regression coverage.
+- [x] Run focused tests, typecheck, node syntax check, lint, build, audit, and diff checks.
+- [ ] Commit, push, reload daemon, and smoke live status.
