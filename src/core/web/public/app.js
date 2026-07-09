@@ -4128,6 +4128,70 @@ async function loadFleetDashboard() {
 
 // ── Panel renderers ─────────────────────────────────────────────────────────
 
+function fdReadinessDataText(readiness) {
+  if (!readiness) return 'unknown';
+  const freshness = readiness.freshness?.overall ?? 'unknown';
+  const summary = readiness.sourceSummary ?? {};
+  const healthy = summary.healthy ?? 0;
+  const degraded = summary.degraded ?? 0;
+  const blocked = summary.blocked ?? 0;
+  return `${freshness} · ${healthy} healthy / ${degraded} degraded / ${blocked} blocked`;
+}
+
+function fdDispatchYieldText(dispatchProduction) {
+  if (!dispatchProduction) return 'unavailable';
+  const proposals = dispatchProduction.proposalsCreated ?? 0;
+  const attempts = dispatchProduction.events ?? dispatchProduction.attempts ?? 0;
+  return `${proposals}/${attempts} proposals (${formatFleetPercent(dispatchProduction.proposalRate)})`;
+}
+
+function fdMetricPill(label, value, title) {
+  return el('div', { cls: 'fd-readiness-pill', title: title ?? value },
+    el('span', { cls: 'fd-readiness-pill__label' }, label),
+    el('span', { cls: 'fd-readiness-pill__value' }, value)
+  );
+}
+
+function fdRenderReadinessRail(snap) {
+  const fleet = snap.fleet ?? snap.control?.fleet ?? null;
+  const readiness = snap.fleet?.autonomousShipReadiness ?? snap.control?.fleet?.autonomousShipReadiness ?? null;
+  if (!readiness) return null;
+
+  const queue = fleet?.queue ?? {};
+  const sharedQueue = queue.shared ?? null;
+  const dispatchProduction = fleet?.dispatchProduction ?? null;
+  const effectiveness = fleet?.autonomyEffectiveness ?? null;
+  const topBlocker = readiness.topBlocker ?? null;
+  const primaryAction = readiness.primaryAction ?? null;
+  const actionLabel = primaryAction?.label ?? primaryAction?.id ?? 'none';
+  const actionDetail = primaryAction?.detail ?? actionLabel;
+  const blockerLabel = topBlocker?.label ?? topBlocker?.id ?? 'none';
+  const blockerDetail = topBlocker?.detail ?? blockerLabel;
+  const queueMetric = queueEligibilityMetric(queue) ?? `${queue.backlogItems ?? 0} backlog`;
+  const leases = sharedQueue ? sharedQueueMetric(sharedQueue) : 'local only';
+  const loop = effectiveness?.phase ?? 'unknown';
+  const verdict = formatShipReadinessVerdict(readiness.verdict);
+
+  const rail = el('div', {
+    cls: `fd-readiness-rail fd-readiness-rail--${readiness.verdict ?? 'unknown'}`,
+    style: `--fd-readiness-accent:${shipReadinessAccent(readiness.verdict)}`,
+  });
+  rail.appendChild(el('div', { cls: 'fd-readiness-rail__head' },
+    el('span', { cls: 'fd-readiness-rail__label' }, 'Fleet OS'),
+    el('span', { cls: 'fd-readiness-rail__verdict' }, verdict),
+    el('span', { cls: 'fd-readiness-rail__loop' }, `Loop: ${loop}`)
+  ));
+  rail.appendChild(el('div', { cls: 'fd-readiness-strip' },
+    fdMetricPill('Action', compactFleetReason(actionLabel, 54), actionDetail),
+    fdMetricPill('Data', fdReadinessDataText(readiness)),
+    fdMetricPill('Blocker', compactFleetReason(blockerLabel, 54), blockerDetail),
+    fdMetricPill('Queue', queueMetric),
+    fdMetricPill('Leases', leases ?? 'local only'),
+    fdMetricPill('Yield', fdDispatchYieldText(dispatchProduction))
+  ));
+  return rail;
+}
+
 function fdRenderStatusPanel(snap) {
   const daemon = snap.daemon ?? {};
   const isRunning = daemon.running === true;
@@ -4136,6 +4200,8 @@ function fdRenderStatusPanel(snap) {
   const autonomy = snap.fleet?.autonomy ?? snap.control?.fleet?.autonomy ?? null;
 
   const body = el('div', { cls: 'fd-panel__body' });
+  const readinessRail = fdRenderReadinessRail(snap);
+  if (readinessRail) body.appendChild(readinessRail);
 
   // Big running indicator
   const dot = el('span', { cls: isRunning ? 'fd-daemon-dot fd-daemon-dot--running' : 'fd-daemon-dot' });

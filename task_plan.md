@@ -587,5 +587,6 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Treat `ashlr.verify.json` changes as build/CI/manifest changes that cannot self-certify through in-process verification.
 - [x] Surface explicit merge contract coverage and pending-proposal verifier-contract gaps in FleetStatus and CLI output.
 - [ ] Later lane: evaluate the untracked triviality classifier as observe-only fleet telemetry after moving/hardening it.
-- [ ] Next lane: add Fleet Dashboard first-panel readiness strip using existing autonomous ship readiness data.
+- [x] Add Fleet Dashboard first-panel readiness strip using existing autonomous ship readiness data.
+- [x] Verify dashboard readiness strip with JS syntax, dashboard/SSE/control/status suites, typecheck, build, lint, audit, and diff checks.
 - [ ] Next lane: normalize run-ledger causal metadata without ingesting raw run/proposal text.

@@ -15,8 +15,9 @@
  *  11. app.js snapshot SSE handler suppresses polling interval while SSE live
  *  12. app.js SSE error handler restores polling fallback
  *  13. app.js Fleet Dashboard wires the M262 visibility panel
- *  14. app.js inbox detail reads current proposal review fields
- *  15. SSE response has Cache-Control: no-cache + Connection: keep-alive
+ *  14. app.js Fleet Dashboard status panel renders readiness rail
+ *  15. app.js inbox detail reads current proposal review fields
+ *  16. SSE response has Cache-Control: no-cache + Connection: keep-alive
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -417,6 +418,24 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("snap.fleet?.dispatchProduction ?? snap.control?.fleet?.dispatchProduction");
     expect(src).toContain("'Proposal production'");
     expect(src).toContain("'Dispatch yield'");
+  });
+
+  it('app.js renders Fleet Dashboard readiness rail from existing fleet snapshots', () => {
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
+    const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+    const css = fs.readFileSync(path.join(root, 'styles.css'), 'utf8');
+    expect(src).toContain('function fdRenderReadinessRail');
+    expect(src).toContain('autonomousShipReadiness');
+    expect(src).toContain("'Fleet OS'");
+    expect(src).toContain("'Action'");
+    expect(src).toContain("'Data'");
+    expect(src).toContain("'Blocker'");
+    expect(src).toContain("'Queue'");
+    expect(src).toContain("'Leases'");
+    expect(src).toContain("'Yield'");
+    expect(css).toContain('.fd-readiness-rail');
+    expect(css).toContain('.fd-readiness-strip');
+    expect(css).toContain('grid-template-columns: repeat(2, minmax(0, 1fr))');
   });
 
   it('app.js inbox detail reads current proposal review fields', () => {
