@@ -24,6 +24,7 @@ import { execFileSync } from 'node:child_process';
 import {
   classifyRisk,
   evaluateMergeAuthority,
+  evaluateEvidenceAutoMergePreflight,
   defaultBranch,
   verifyProposal,
   autoMergeProposal,
@@ -824,5 +825,47 @@ describe('M47 remote merge safety', () => {
     const source = fs.readFileSync(path.resolve('src/core/inbox/merge.ts'), 'utf8');
     expect(source).not.toContain('--admin');
     expect(source).toContain("'--auto'");
+  });
+
+  it('evidence mode refuses local main-merge fallback before mutation', () => {
+    const diff = addFileDiff('docs/evidence-local.md', 'doc');
+    const diffHash = hashDiff(diff);
+    const p = makeProposal({
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('local:qwen3-coder', 'local', diffHash),
+      engineModel: 'local:qwen3-coder',
+      engineTier: 'local',
+      verifyResult: {
+        passed: true,
+        detail: 'command-bound verification',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        baseBranch: 'main',
+        baseHead: '0123456789abcdef0123456789abcdef01234567',
+        diffHash,
+      },
+    });
+
+    const r = evaluateEvidenceAutoMergePreflight(
+      p,
+      cfgWith({
+        mergeAuthority: [],
+        autoMerge: {
+          enabled: true,
+          trustBasis: 'evidence',
+          maxRisk: 'low',
+          allowWithoutVerification: false,
+          pushToRemote: false,
+          protectedRemote: {
+            branchProtection: true,
+            requiredChecks: ['ci/test'],
+          },
+        },
+      }),
+      { remoteAvailable: true },
+    );
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/pushToRemote=true is required|local merge fallback/);
   });
 });

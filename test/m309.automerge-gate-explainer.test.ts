@@ -133,12 +133,21 @@ describe('M309 explainAutoMergeGate', () => {
         verifyResult: {
           passed: true,
           detail: 'green',
+          ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
           baseBranch: 'main',
           baseHead: '0123456789abcdef0123456789abcdef01234567',
           diffHash: hashDiff(diff),
         },
       }),
-      cfg({ trustBasis: 'evidence' }),
+      cfg({
+        trustBasis: 'evidence',
+        allowWithoutVerification: false,
+        pushToRemote: true,
+        protectedRemote: {
+          branchProtection: true,
+          requiredChecks: ['ci/test'],
+        },
+      }),
       { decisionsForProposal: [] },
     );
 
@@ -146,6 +155,33 @@ describe('M309 explainAutoMergeGate', () => {
     expect(r.blockers).toEqual([]);
     expect(r.facts.trustBasis).toBe('evidence');
     expect(r.reason).toMatch(/satisfied by available read-only evidence/);
+  });
+
+  it('explains missing protected remote signal in evidence mode', () => {
+    const diff = docDiff;
+    const r = explainAutoMergeGate(
+      proposal({
+        diff,
+        verifyResult: {
+          passed: true,
+          detail: 'green',
+          ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+          baseBranch: 'main',
+          baseHead: '0123456789abcdef0123456789abcdef01234567',
+          diffHash: hashDiff(diff),
+        },
+      }),
+      cfg({
+        trustBasis: 'evidence',
+        allowWithoutVerification: false,
+        pushToRemote: true,
+      }),
+      { decisionsForProposal: [] },
+    );
+
+    expect(r.mergeable).toBe(false);
+    expect(r.blockers.some((b) => b.code === 'remote-protection')).toBe(true);
+    expect(r.reason).toMatch(/protected remote signal missing|branch-protection/i);
   });
 
   it('explains risk threshold blockers', () => {

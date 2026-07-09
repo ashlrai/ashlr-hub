@@ -16,6 +16,10 @@ import type {
 } from '../fabric/resource-monitor.js';
 import type { OutcomeRecord } from './outcome-records.js';
 import type { EcosystemDoctorCheck, EcosystemDoctorReport } from '../ecosystem/doctor.js';
+import {
+  resolveProductionVelocityProfile,
+  type EffectiveProductionVelocityProfile,
+} from '../fabric/production-velocity.js';
 
 export type AutonomousDirectionMode =
   | 'pause'
@@ -46,6 +50,8 @@ export interface ResourceStrategyOutcome {
   status: OutcomeRecord['proposal']['status'];
   title: string;
   lastActivityAt: string;
+  ageHours: number | null;
+  stalePending: boolean;
   verificationPassed: boolean | null;
   policyAllowed: boolean | null;
   policyAction: string | null;
@@ -101,6 +107,8 @@ export interface ResourceStrategyReport {
   };
   outcomes: {
     records: number;
+    pendingRecords: number;
+    stalePending: number;
     readyEvidence: number;
     verificationFailures: number;
     recent: ResourceStrategyOutcome[];
@@ -111,6 +119,7 @@ export interface ResourceStrategyReport {
     topChecks: Array<Pick<EcosystemDoctorCheck, 'id' | 'label' | 'status' | 'detail' | 'repo'>>;
   };
   budgets: ResourceStrategyBudgetSummary;
+  productionVelocity: EffectiveProductionVelocityProfile;
 }
 
 export interface ResourceStrategyReadDeps {
@@ -244,7 +253,20 @@ function resourcePosture(backends: ResourceStrategyBackend[]): ResourceStrategyR
   return { posture, constrained, depleted, backends };
 }
 
-function summarizeOutcomes(records: OutcomeRecord[], max: number): ResourceStrategyReport['outcomes'] {
+function hoursSince(iso: string, now: Date): number | null {
+  const ts = Date.parse(iso);
+  if (!Number.isFinite(ts)) return null;
+  return Math.max(0, (now.getTime() - ts) / (60 * 60 * 1000));
+}
+
+function summarizeOutcomes(
+  records: OutcomeRecord[],
+  max: number,
+  now: Date,
+  stalePendingTtlHours: number,
+): ResourceStrategyReport['outcomes'] {
+  let pendingRecords = 0;
+  let stalePending = 0;
   let readyEvidence = 0;
   let verificationFailures = 0;
   const recent = records.slice(0, max).map((record): ResourceStrategyOutcome => {
@@ -252,6 +274,14 @@ function summarizeOutcomes(records: OutcomeRecord[], max: number): ResourceStrat
     const verificationPassed = latestEvidence?.verification.passed ?? record.proposal.verifyResult?.passed ?? null;
     const policyAllowed = latestEvidence?.policy?.allowed ?? null;
     const policyAction = latestEvidence?.policy?.action ?? null;
+    const ageHours = hoursSince(record.lastActivityAt ?? record.proposal.createdAt, now);
+    const isStalePending =
+      record.proposal.status === 'pending' &&
+      Number.isFinite(stalePendingTtlHours) &&
+      ageHours !== null &&
+      ageHours >= stalePendingTtlHours;
+    if (record.proposal.status === 'pending') pendingRecords++;
+    if (isStalePending) stalePending++;
     if (
       record.proposal.status === 'pending' &&
       latestEvidence?.target === 'main' &&
@@ -268,6 +298,8 @@ function summarizeOutcomes(records: OutcomeRecord[], max: number): ResourceStrat
       status: record.proposal.status,
       title: record.proposal.title,
       lastActivityAt: record.lastActivityAt,
+      ageHours,
+      stalePending: isStalePending,
       verificationPassed,
       policyAllowed,
       policyAction,
@@ -277,6 +309,8 @@ function summarizeOutcomes(records: OutcomeRecord[], max: number): ResourceStrat
 
   return {
     records: records.length,
+    pendingRecords,
+    stalePending,
     readyEvidence,
     verificationFailures,
     recent,
@@ -333,6 +367,7 @@ function recommendMode(
   outcomes: ResourceStrategyReport['outcomes'],
   ecosystem: ResourceStrategyReport['ecosystem'],
   budgets: ResourceStrategyBudgetSummary,
+  productionVelocity: EffectiveProductionVelocityProfile,
 ): { mode: AutonomousDirectionMode; confidence: ReportConfidence; reasons: string[]; recommendedActions: string[] } {
   const reasons: string[] = [];
   const actions: string[] = [];
@@ -366,8 +401,22 @@ function recommendMode(
     return { mode: 'auto-merge-ready', confidence: 'medium', reasons, recommendedActions: actions };
   }
 
-  if (fleet.proposals.pending > 0 || outcomes.verificationFailures > 0 || ecosystem.posture === 'fail') {
-    if (fleet.proposals.pending > 0) reasons.push(`${fleet.proposals.pending} pending proposal(s) need verification or review`);
+  const stalePendingOnly =
+    productionVelocity.enabled &&
+    fleet.queue.backlogItems > 0 &&
+    fleet.proposals.pending > 0 &&
+    outcomes.stalePending >= fleet.proposals.pending &&
+    outcomes.verificationFailures === 0 &&
+    ecosystem.posture !== 'fail';
+
+  if (
+    (fleet.proposals.pending > 0 && !stalePendingOnly) ||
+    outcomes.verificationFailures > 0 ||
+    ecosystem.posture === 'fail'
+  ) {
+    if (fleet.proposals.pending > 0) {
+      reasons.push(`${fleet.proposals.pending} pending proposal(s) need verification or review`);
+    }
     if (outcomes.verificationFailures > 0) reasons.push(`${outcomes.verificationFailures} recent outcome record(s) failed verification`);
     if (ecosystem.posture === 'fail') reasons.push('ecosystem doctor reports failing checks');
     actions.push('focus on verification, triage, and repair before generating more proposals');
@@ -375,6 +424,10 @@ function recommendMode(
   }
 
   if (fleet.queue.backlogItems > 0) {
+    if (stalePendingOnly) {
+      reasons.push(`${outcomes.stalePending} stale pending proposal(s) are past the production velocity TTL and will not starve new dispatch`);
+      actions.push('archive, reject, or refresh stale pending proposals while keeping proposal production moving');
+    }
     reasons.push(`${fleet.queue.backlogItems} backlog item(s) are available and no hard stop is active`);
     actions.push('build backlog proposals within configured caps');
     actions.push('keep report read-only until dispatch policy explicitly consumes it');
@@ -453,7 +506,8 @@ export async function buildResourceStrategyReport(
 
   const joinedBackends = joinBackends(fleet, resources, 12);
   const resourceSummary = resourcePosture(joinedBackends);
-  const outcomeSummary = summarizeOutcomes(records, maxOutcomes);
+  const productionVelocity = resolveProductionVelocityProfile(cfg);
+  const outcomeSummary = summarizeOutcomes(records, maxOutcomes, now, productionVelocity.stalePendingTtlHours);
   const ecosystemSummary = summarizeEcosystem(doctor, maxChecks);
   const budgetSummary = summarizeBudgets(cfg, fleet);
   const recommendation = recommendMode(
@@ -464,6 +518,7 @@ export async function buildResourceStrategyReport(
     outcomeSummary,
     ecosystemSummary,
     budgetSummary,
+    productionVelocity,
   );
 
   return {
@@ -497,6 +552,7 @@ export async function buildResourceStrategyReport(
     outcomes: outcomeSummary,
     ecosystem: ecosystemSummary,
     budgets: budgetSummary,
+    productionVelocity,
   };
 }
 

@@ -106,6 +106,7 @@ vi.mock('../src/core/run/provider-client.js', () => ({
 
 import {
   autoMergeProposal,
+  evaluateEvidenceAutoMergePreflight,
   evaluateEvidenceGate,
   evaluateVerificationGate,
   isFrontierJudge,
@@ -184,7 +185,7 @@ function longLineDiff(): string {
 interface PatchOpts {
   engineTier?: 'local' | 'mid' | 'frontier';
   engineModel?: string;
-  verifyResult?: { passed: boolean; failed?: string[] };
+  verifyResult?: Proposal['verifyResult'];
 }
 
 /** Create a signed patch proposal with controllable tier/model/verifyResult. */
@@ -251,8 +252,13 @@ function evidenceCfg(over: Record<string, unknown> = {}): AshlrConfig {
       autoMerge: {
         enabled: true,
         maxRisk: 'low',
-        allowWithoutVerification: true,
+        allowWithoutVerification: false,
         managerGate: false,
+        pushToRemote: true,
+        protectedRemote: {
+          branchProtection: true,
+          requiredChecks: ['ci/test'],
+        },
         trustBasis: 'evidence',
         ...over,
       },
@@ -659,6 +665,7 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
       verifyResult: {
         passed: true,
         detail: 'all checks passed',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
         baseBranch: 'main',
         baseHead: '0123456789abcdef0123456789abcdef01234567',
         diffHash,
@@ -694,6 +701,7 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
       verifyResult: {
         passed: true,
         detail: 'old checks passed',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
         baseBranch: 'main',
         baseHead: '0123456789abcdef0123456789abcdef01234567',
         diffHash: hashDiff(docsDiff('docs/old.md')),
@@ -720,6 +728,92 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
 
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/build\/CI\/manifest/);
+  });
+
+  it('[E4] no-command verification evidence is refused', () => {
+    const p: Proposal = {
+      ...evidenceProposal('e4'),
+      verifyResult: {
+        passed: true,
+        detail: 'no commands detected',
+        ran: [],
+        baseBranch: 'main',
+        baseHead: '0123456789abcdef0123456789abcdef01234567',
+        diffHash: hashDiff(docsDiff('docs/evidence.md')),
+      },
+    };
+    const r = evaluateEvidenceGate(p, evidenceCfg(), []);
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/no verification command evidence|no-command/i);
+  });
+
+  it('[E5] allowWithoutVerification cannot activate evidence mode', () => {
+    const r = evaluateEvidenceGate(evidenceProposal('e5'), evidenceCfg({ allowWithoutVerification: true }), []);
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/allowWithoutVerification=true is not permitted/);
+  });
+
+  it('[E6] missing protected remote branch/check signal is refused', () => {
+    const r = evaluateEvidenceGate(evidenceProposal('e6'), evidenceCfg({ protectedRemote: undefined }), []);
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/protected remote signal missing|branch-protection/i);
+  });
+
+  it('[E7] unsigned evidence is refused before deterministic authority', () => {
+    const p: Proposal = { ...evidenceProposal('e7'), provenanceSig: undefined };
+    const r = evaluateEvidenceGate(p, evidenceCfg(), []);
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/signed provenance is required|provenance/);
+  });
+
+  it('[E8] partial captures and test-weakening changes are refused by evidence preflight', () => {
+    const partial = evaluateEvidenceAutoMergePreflight(
+      { ...evidenceProposal('e8-partial'), isPartial: true },
+      evidenceCfg(),
+      { remoteAvailable: true },
+    );
+    expect(partial.authorized).toBe(false);
+    expect(partial.reason).toMatch(/partial/);
+
+    const weakeningDiff = [
+      'diff --git a/test/h1.safety.test.ts b/test/h1.safety.test.ts',
+      '--- a/test/h1.safety.test.ts',
+      '+++ b/test/h1.safety.test.ts',
+      '@@ -1 +0,0 @@',
+      '-expect(true).toBe(true);',
+      '',
+    ].join('\n');
+    const diffHash = hashDiff(weakeningDiff);
+    const weakening = evidenceProposal('e8-weakening', weakeningDiff);
+    weakening.diffHash = diffHash;
+    weakening.provenanceSig = signProvenance('local:qwen3-coder', 'local', diffHash);
+    weakening.verifyResult = {
+      passed: true,
+      detail: 'all checks passed',
+      ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+      baseBranch: 'main',
+      baseHead: '0123456789abcdef0123456789abcdef01234567',
+      diffHash,
+    };
+
+    const r = evaluateEvidenceAutoMergePreflight(weakening, evidenceCfg(), { remoteAvailable: true });
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/test-weakening|safety\/invariant/);
+  });
+
+  it('[E9] evidence mode refuses self-target activation even when allowSelfMerge is true', () => {
+    const r = evaluateEvidenceAutoMergePreflight(
+      evidenceProposal('e9'),
+      evidenceCfg({ allowSelfMerge: true }),
+      { selfTarget: true, remoteAvailable: true },
+    );
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/self-target.*evidence mode never self-merges/i);
   });
 });
 
@@ -1098,7 +1192,7 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
 // ===========================================================================
 
 describe("M342 autoMergeProposal trustBasis='evidence'", () => {
-  it('[E4] local producer + deterministic evidence merges without a judged ledger entry', async () => {
+  it('[E10] local producer + deterministic evidence refuses local fallback', async () => {
     initRepo(tmpRepo, 'main');
     attachOrigin(tmpRepo, 'main');
     git(tmpRepo, ['checkout', '-b', 'work']);
@@ -1108,17 +1202,26 @@ describe("M342 autoMergeProposal trustBasis='evidence'", () => {
     const p = makePatch(diff, {
       engineTier: 'local',
       engineModel: 'local:qwen3-coder',
+      verifyResult: {
+        passed: true,
+        detail: 'preverified command-bound evidence',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        baseBranch: 'main',
+        baseHead: git(tmpRepo, ['rev-parse', 'main']),
+        diffHash: hashDiff(diff),
+      },
     });
     mockReadDecisions.mockReturnValue([]);
     const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
 
-    const r = await autoMergeProposal(p.id, evidenceCfg());
+    const r = await autoMergeProposal(p.id, evidenceCfg({ pushToRemote: false }));
 
-    expect(r.ok).toBe(true);
-    expect(r.merged).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.merged).toBe(false);
+    expect(r.reason).toMatch(/pushToRemote=true is required|local merge fallback/);
     expect(mockJudgeProposal).not.toHaveBeenCalled();
-    expect(git(tmpRepo, ['rev-parse', 'main'])).not.toBe(mainBefore);
-    expect(loadProposal(p.id)?.status).toBe('applied');
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(mainBefore);
+    expect(loadProposal(p.id)?.status).toBe('pending');
     expect(loadProposal(p.id)?.verifyResult).toMatchObject({
       passed: true,
       baseBranch: 'main',
@@ -1126,7 +1229,7 @@ describe("M342 autoMergeProposal trustBasis='evidence'", () => {
     });
   });
 
-  it('[E5] evidence mode still refuses high-risk changes before merge', async () => {
+  it('[E11] evidence mode still refuses high-risk changes before merge', async () => {
     initRepo(tmpRepo, 'main');
     fs.mkdirSync(path.join(tmpRepo, 'src'), { recursive: true });
     fs.writeFileSync(path.join(tmpRepo, 'src/a.ts'), 'old\n', 'utf8');
@@ -1153,11 +1256,19 @@ describe("M342 autoMergeProposal trustBasis='evidence'", () => {
     const p = makePatch(diff, {
       engineTier: 'local',
       engineModel: 'local:qwen3-coder',
+      verifyResult: {
+        passed: true,
+        detail: 'preverified command-bound evidence',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        baseBranch: 'main',
+        baseHead: '0123456789abcdef0123456789abcdef01234567',
+        diffHash: hashDiff(diff),
+      },
     });
 
-    const r = await autoMergeProposal(p.id, evidenceCfg());
+    const r = evaluateEvidenceGate(loadProposal(p.id)!, evidenceCfg(), []);
 
-    expect(r.ok).toBe(false);
+    expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/risk/);
     expect(mockJudgeProposal).not.toHaveBeenCalled();
     expect(loadProposal(p.id)?.status).toBe('pending');

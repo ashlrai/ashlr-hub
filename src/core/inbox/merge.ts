@@ -139,6 +139,7 @@ import {
   type AutonomyGateEvidence,
 } from '../autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../autonomy/policy.js';
+import { causalMetadataFromProposal, evidenceOutcomeSummary } from '../learning/causal.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -646,6 +647,15 @@ export function evaluateAutoMergeReadinessPreflight(
       advisories.push('verification result absent; autoMergeProposal may run verify before the full gate');
     }
 
+    if (trustBasis === 'evidence') {
+      const evidencePreflight = evaluateEvidenceAutoMergePreflight(proposal, cfg, {
+        requireVerificationEvidence: false,
+      });
+      if (!evidencePreflight.authorized) {
+        return block(evidencePreflight.reason, advisories);
+      }
+    }
+
     if (trustBasis === 'tier') {
       const target = mergeTargetForTier(proposal.engineTier);
       const authority =
@@ -693,6 +703,8 @@ export type AutoMergeGateCheckCode =
   | 'missing-verification-evidence'
   | 'missing-edv-evidence'
   | 'provenance'
+  | 'evidence-preflight'
+  | 'remote-protection'
   | 'risk-threshold'
   | 'scope-cap'
   | 'self-target-safety'
@@ -770,6 +782,10 @@ function configuredScopeCaps(cfg: AshlrConfig): { maxFiles: number; maxLines: nu
   };
 }
 
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 function countDiffScope(diff: string): { files: number; lines: number } {
   let files = 0;
   let lines = 0;
@@ -785,7 +801,149 @@ function countDiffScope(diff: string): { files: number; lines: number } {
   return { files, lines };
 }
 
+export interface EvidenceRemoteProtectionSignal {
+  ok: boolean;
+  detail: string;
+  requiredChecks: string[];
+}
+
+export interface EvidenceAutoMergePreflightOptions {
+  /** Whether the proposal targets Ashlr Hub's own source. */
+  selfTarget?: boolean;
+  /** Pass false when the caller already knows there is no GitHub remote. */
+  remoteAvailable?: boolean;
+  /**
+   * When false, skip verification-result checks so daemon preflight can still
+   * run verification later. The mutating merge gate uses the default true.
+   */
+  requireVerificationEvidence?: boolean;
+}
+
+export function evaluateEvidenceRemoteProtectionSignal(cfg: AshlrConfig): EvidenceRemoteProtectionSignal {
+  const signal = autoMergeConfigValue(cfg, 'protectedRemote');
+  if (!isObjectRecord(signal)) {
+    return {
+      ok: false,
+      detail: 'missing foundry.autoMerge.protectedRemote branch-protection evidence',
+      requiredChecks: [],
+    };
+  }
+  const requiredChecks = Array.isArray(signal['requiredChecks'])
+    ? signal['requiredChecks'].filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    : [];
+  if (signal['branchProtection'] !== true) {
+    return {
+      ok: false,
+      detail: 'branch protection is not confirmed for the remote default branch',
+      requiredChecks,
+    };
+  }
+  if (requiredChecks.length === 0) {
+    return {
+      ok: false,
+      detail: 'required remote checks are not declared for the protected default branch',
+      requiredChecks,
+    };
+  }
+  return {
+    ok: true,
+    detail: `protected remote confirmed with required checks: ${requiredChecks.join(', ')}`,
+    requiredChecks,
+  };
+}
+
+/**
+ * Evidence-mode activation contract. This helper is intentionally stricter
+ * than the generic merge gates because trustBasis:"evidence" skips the judge:
+ * it requires signed, command-bound verification and a protected remote PR
+ * handoff instead of local main mutation.
+ */
+export function evaluateEvidenceAutoMergePreflight(
+  proposal: Proposal,
+  cfg: AshlrConfig,
+  options: EvidenceAutoMergePreflightOptions = {},
+): VerificationGateVerdict {
+  const refuse = (reason: string): VerificationGateVerdict => ({
+    authorized: false,
+    reason: `evidence preflight: ${reason}`,
+  });
+
+  if (configuredTrustBasis(cfg) !== 'evidence') {
+    return {
+      authorized: true,
+      reason: 'evidence preflight skipped: trustBasis is not evidence',
+    };
+  }
+
+  if (cfg.foundry?.autoMerge?.allowWithoutVerification === true) {
+    return refuse('allowWithoutVerification=true is not permitted in evidence mode');
+  }
+  if (cfg.foundry?.autoMerge?.pushToRemote !== true) {
+    return refuse('pushToRemote=true is required; local merge fallback is not permitted in evidence mode');
+  }
+  if (options.remoteAvailable === false) {
+    return refuse('a GitHub remote is required for protected remote PR handoff');
+  }
+
+  const remoteProtection = evaluateEvidenceRemoteProtectionSignal(cfg);
+  if (!remoteProtection.ok) {
+    return refuse(`protected remote signal missing: ${remoteProtection.detail}`);
+  }
+
+  if (options.selfTarget === true) {
+    return refuse('self-target merges require judge or human review; evidence mode never self-merges');
+  }
+  if (proposal.isPartial === true) {
+    return refuse('partial/timeout-captured proposals require judge or human review');
+  }
+
+  const guard = guardSafetyTests(proposal.diff ?? '');
+  if (guard.weakened) {
+    return refuse(`test-weakening change refused: ${guard.reason}`);
+  }
+
+  const provenance = verifyProvenance(proposal);
+  if (!provenance.ok) {
+    return refuse(`signed provenance is required: ${provenance.reason}`);
+  }
+
+  if (options.requireVerificationEvidence === false) {
+    return {
+      authorized: true,
+      reason: `evidence preflight cleared before verification: ${remoteProtection.detail}`,
+    };
+  }
+
+  if (!hasVerifiedBaseBinding(proposal.verifyResult)) {
+    if (proposal.verifyResult?.passed === true) {
+      return refuse('base-bound verification is missing — reverify required');
+    }
+    return refuse(
+      `proposal.verifyResult.passed is ${
+        proposal.verifyResult === undefined ? 'absent' : 'false'
+      } — deterministic merge requires suite green`,
+    );
+  }
+  if (!hasVerifiedDiffBinding(proposal)) {
+    return refuse('verification diff binding is missing or stale — reverify required');
+  }
+  if (!proposal.verifyResult.ran || proposal.verifyResult.ran.length === 0) {
+    return refuse('no verification command evidence recorded; no-command verification is not eligible');
+  }
+
+  return {
+    authorized: true,
+    reason: `evidence preflight cleared: command-bound verification and ${remoteProtection.detail}`,
+  };
+}
+
 function verificationBlockerCode(reason: string): AutoMergeGateCheckCode {
+  if (reason.includes('protected remote') || reason.includes('pushToRemote') || reason.includes('GitHub remote')) {
+    return 'remote-protection';
+  }
+  if (reason.includes('evidence preflight') || reason.includes('allowWithoutVerification')) {
+    return 'evidence-preflight';
+  }
   if (reason.includes("no 'judged' decision") || reason.includes('judge attestation invalid')) {
     return 'missing-judge-evidence';
   }
@@ -1245,6 +1403,9 @@ export function evaluateEvidenceGate(
   decisionsForProposal: DecisionEntry[],
 ): VerificationGateVerdict {
   const refuse = (reason: string): VerificationGateVerdict => ({ authorized: false, reason });
+
+  const activation = evaluateEvidenceAutoMergePreflight(proposal, cfg);
+  if (!activation.authorized) return activation;
 
   if (proposal.isPartial === true) {
     return refuse('evidence gate: partial/timeout-captured proposals require judge or human review');
@@ -1898,6 +2059,18 @@ export async function autoMergeProposal(
 
     let toMain: boolean;
     let authority: { authorized: boolean; reason: string };
+    let evidenceRemoteProtection: AutonomyGateEvidence | undefined;
+
+    if (trustBasis === 'evidence') {
+      const activation = evaluateEvidenceAutoMergePreflight(proposal, cfg, {
+        selfTarget: isSelfTargetProposal(proposal, cfg),
+        remoteAvailable: getRemoteOrg(repo).org !== null,
+        requireVerificationEvidence: false,
+      });
+      if (!activation.authorized) {
+        return refuse(`merge authority denied: ${activation.reason}`, repo);
+      }
+    }
 
     if (trustBasis === 'verification' || trustBasis === 'evidence') {
       // M261: in verification mode, run verifyProposal() BEFORE calling
@@ -1957,6 +2130,20 @@ export async function autoMergeProposal(
       // Evidence-backed modes load decisions for this proposal now. Verification
       // mode needs judged + EDV entries; evidence mode needs EDV entries only.
       const allDecisions = readDecisions({ proposalId: id });
+      if (trustBasis === 'evidence') {
+        const activation = evaluateEvidenceAutoMergePreflight(proposal, cfg, {
+          selfTarget: isSelfTargetProposal(proposal, cfg),
+          remoteAvailable: getRemoteOrg(repo).org !== null,
+        });
+        if (!activation.authorized) {
+          return refuse(`merge authority denied: ${activation.reason}`, repo);
+        }
+        const remoteProtection = evaluateEvidenceRemoteProtectionSignal(cfg);
+        evidenceRemoteProtection = {
+          ok: true,
+          detail: remoteProtection.detail,
+        };
+      }
       authority = trustBasis === 'verification'
         ? evaluateVerificationGate(proposal, cfg, allDecisions)
         : evaluateEvidenceGate(proposal, cfg, allDecisions);
@@ -2278,9 +2465,15 @@ export async function autoMergeProposal(
             summary: `Gate 7: manager judge unavailable — fail closed, leaving PENDING`,
             result: 'refused',
           });
+          const ts = new Date().toISOString();
           recordDecision({
-            ts: new Date().toISOString(),
+            ts,
             proposalId: id,
+            ...causalMetadataFromProposal(proposal, {
+              ts,
+              learningSource: 'decision-ledger',
+              labelBasis: 'merge-gate',
+            }),
             action: 'escalated',
             reason: 'manager judge unavailable — gate 7 fail closed',
           });
@@ -2302,9 +2495,15 @@ export async function autoMergeProposal(
           }
           // M153: record inlineJudgeEngine (the real model string) so that
           // evaluateVerificationGate criterion 1 can verify the judge was frontier.
+          const ts = new Date().toISOString();
           recordDecision({
-            ts: new Date().toISOString(),
+            ts,
             proposalId: id,
+            ...causalMetadataFromProposal(proposal, {
+              ts,
+              learningSource: 'decision-ledger',
+              labelBasis: 'judge-verdict',
+            }),
             action: 'judged',
             engine: inlineJudgeEngine,
             model: inlineJudgeEngine,
@@ -2344,9 +2543,15 @@ export async function autoMergeProposal(
           summary: `Gate 7 held: ${gateReason}`,
           result: 'refused',
         });
+        const ts = new Date().toISOString();
         recordDecision({
-          ts: new Date().toISOString(),
+          ts,
           proposalId: id,
+          ...causalMetadataFromProposal(proposal, {
+            ts,
+            learningSource: 'decision-ledger',
+            labelBasis: 'merge-gate',
+          }),
           action: 'escalated',
           reason: gateReason,
           detail: 'gate-held',
@@ -2373,9 +2578,15 @@ export async function autoMergeProposal(
             summary: `Gate 7.5: self-target escalation — leaving PENDING for human (allowSelfMerge=false)`,
             result: 'refused',
           });
+          const ts = new Date().toISOString();
           recordDecision({
-            ts: new Date().toISOString(),
+            ts,
             proposalId: id,
+            ...causalMetadataFromProposal(proposal, {
+              ts,
+              learningSource: 'decision-ledger',
+              labelBasis: 'merge-gate',
+            }),
             action: 'escalated',
             reason: 'self-target: auto-merge of own code requires allowSelfMerge=true',
             detail: 'gate-held',
@@ -2392,9 +2603,15 @@ export async function autoMergeProposal(
         ok: true,
         detail: `manager verdict '${managerVerdict.verdict}' with wouldMerge=true`,
       };
+      const ts = new Date().toISOString();
       recordDecision({
-        ts: new Date().toISOString(),
+        ts,
         proposalId: id,
+        ...causalMetadataFromProposal(proposal, {
+          ts,
+          learningSource: 'decision-ledger',
+          labelBasis: 'merge-gate',
+        }),
         action: 'merged',
         reason: `gate 7 passed: verdict=${managerVerdict.verdict}, ${managerVerdict.rationale}`,
       });
@@ -2433,6 +2650,7 @@ export async function autoMergeProposal(
         detail: `${scopeFilesForEvidence} file(s), ${scopeLinesForEvidence} changed line(s) within caps ${maxFilesForEvidence}/${maxLinesForEvidence}`,
       },
       ...(managerGateEvidence ? { manager: managerGateEvidence } : {}),
+      ...(evidenceRemoteProtection ? { remoteProtection: evidenceRemoteProtection } : {}),
       ...(selfTarget
         ? {
             selfTarget: {
@@ -2446,6 +2664,12 @@ export async function autoMergeProposal(
     });
     const policy = evaluateAutonomyPolicy(evidencePack, cfg);
     evidencePack.policy = policy;
+    evidencePack.evidenceOutcome = evidenceOutcomeSummary({
+      ...(evidencePack.evidenceOutcome ?? {}),
+      policyAllowed: policy.allowed,
+      policyAction: policy.action,
+      policyTier: policy.tier,
+    });
     if (!persistAutonomyEvidencePack(evidencePack)) {
       return refuse('autonomy evidence pack could not be persisted — fail closed', repo);
     }

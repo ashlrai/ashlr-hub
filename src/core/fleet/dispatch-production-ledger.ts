@@ -13,8 +13,14 @@ import type {
   DaemonDispatchProductionOutcome,
   EngineId,
   EngineTier,
+  EvidenceOutcomeSummary,
+  LabelBasis,
+  LearningSource,
+  RouteSnapshot,
+  RunEventSummary,
   WorkItem,
 } from '../types.js';
+import { causalMetadata } from '../learning/causal.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
@@ -42,6 +48,14 @@ export interface DispatchProductionEvent {
   proposalCreated: boolean;
   proposalId?: string;
   runId?: string;
+  trajectoryId?: string;
+  routeSnapshot?: RouteSnapshot;
+  runEventSummary?: RunEventSummary;
+  evidenceOutcome?: EvidenceOutcomeSummary;
+  learningSource?: LearningSource;
+  labelBasis?: LabelBasis;
+  routerPolicyVersion?: string;
+  learningEpoch?: string;
   spentUsd: number;
   diffFiles?: number;
   diffLines?: number;
@@ -140,13 +154,29 @@ function boundedText(value: string, max: number): string {
 }
 
 function sanitizeEvent(event: DispatchProductionEvent): DispatchProductionEvent {
+  const ts = eventTimestamp(event.ts);
+  const causal = causalMetadata({
+    ts,
+    itemId: event.itemId,
+    proposalId: event.proposalId,
+    runId: event.runId,
+    trajectoryId: event.trajectoryId,
+    routeSnapshot: event.routeSnapshot,
+    runEventSummary: event.runEventSummary,
+    evidenceOutcome: event.evidenceOutcome,
+    learningSource: event.learningSource ?? 'daemon-dispatch',
+    labelBasis: event.labelBasis ?? 'dispatch-outcome',
+    routerPolicyVersion: event.routerPolicyVersion,
+    learningEpoch: event.learningEpoch,
+  });
   return {
     ...event,
-    ts: eventTimestamp(event.ts),
+    ts,
     title: boundedText(event.title, 160),
     repo: boundedText(event.repo, 500),
     routeReason: boundedText(event.routeReason, 240),
     ...(event.reason ? { reason: boundedText(event.reason, 240) } : {}),
+    ...causal,
   };
 }
 

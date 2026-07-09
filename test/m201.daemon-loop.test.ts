@@ -419,7 +419,7 @@ function cfgBuiltin(daemon: { dailyBudgetUsd?: number; perTickItems?: number; pa
 // ===========================================================================
 
 describe('M201 — Group A: backlog build + top-K selection', () => {
-  it('A0: dispatch production maps proposal-created to diff and no-proposal outcomes to empty', () => {
+  it('A0: dispatch production maps proposal-created to diff, no-proposal outcomes to empty, and proposal-disabled to neutral', () => {
     expect(workedOutcomeFromDispatchProduction(undefined)).toBeUndefined();
     expect(workedOutcomeFromDispatchProduction({
       outcome: 'proposal-created',
@@ -433,11 +433,14 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       'engine-failed',
       'sandbox-failed',
       'proposal-capture-error',
-      'proposal-disabled',
       'unknown',
     ] as const) {
       expect(workedOutcomeFromDispatchProduction({ outcome, runId: `run-${outcome}` })).toBe('empty');
     }
+    expect(workedOutcomeFromDispatchProduction({
+      outcome: 'proposal-disabled',
+      runId: 'run-proposal-disabled',
+    })).toBeUndefined();
   });
 
   it('A1: empty backlog → reason no-backlog, proposalsCreated=0, runSwarm not called', async () => {
@@ -695,6 +698,40 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
+  it('A1e2: production velocity supplies pending outcome records to the daemon strategy', async () => {
+    const { items } = enrollWithItems(1);
+    const proposal = createProposal({
+      repo: items[0]!.repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: `Pending ${items[0]!.id}`,
+      summary: 'pending proposal for production velocity strategy',
+      diff: 'diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-old\n+new\n',
+      workItemId: items[0]!.id,
+      workSource: items[0]!.source,
+    });
+    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'pause', reasons: ['mock guard block'] });
+
+    const result = await tick(
+      {
+        ...cfgBuiltin(),
+        foundry: {
+          autonomyControlLoop: true,
+          productionVelocity: { enabled: true, profile: 'resource-control' },
+        },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('pause');
+    const strategyOpts = mockBuildResourceStrategyReport.mock.calls[0]?.[1] as {
+      deps?: { listOutcomeRecords?: (opts?: { limit?: number }) => Array<{ proposal?: { id?: string } }> };
+    };
+    const records = strategyOpts.deps?.listOutcomeRecords?.({ limit: 6 }) ?? [];
+    expect(records.some((record) => record.proposal?.id === proposal.id)).toBe(true);
+    expect(mockBuildBacklog).not.toHaveBeenCalled();
+  });
+
   it('A1f: autonomy control verify-only builds strategy snapshot and runs merge maintenance only', async () => {
     enrollWithItems(1);
     mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'verify-only', reasons: ['pending proposals need verification'] });
@@ -933,8 +970,10 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(loadDaemonState().ticks.at(-1)?.dispatches?.[0]?.production).toMatchObject({
       outcome: 'empty-diff',
       runId: 'run-empty-diff',
+      trajectoryId: 'run:run-empty-diff',
     });
-    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+    const productionEvent = readDispatchProductionEvents({ limit: 1 })[0];
+    expect(productionEvent).toMatchObject({
       itemId: items[0]!.id,
       source: 'todo',
       repo: items[0]!.repo,
@@ -946,9 +985,32 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       outcome: 'empty-diff',
       proposalCreated: false,
       runId: 'run-empty-diff',
+      trajectoryId: 'run:run-empty-diff',
+      routeSnapshot: {
+        backend: 'local-coder',
+        tier: 'mid',
+        assignedBy: 'router',
+        reason: 'mock local-coder',
+      },
+      runEventSummary: {
+        runId: 'run-empty-diff',
+        status: 'done',
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        costUsd: 0.004,
+      },
+      learningSource: 'daemon-dispatch',
+      labelBasis: 'dispatch-outcome',
       spentUsd: 0.004,
       reason: 'engine "local-coder" completed without file changes',
       basis: 'run-proposal-outcome',
+    });
+    const dispatchAction = readAgentActions({ limit: 10 }).find((event) => event.action === 'daemon:dispatch');
+    expect(dispatchAction).toMatchObject({
+      itemId: items[0]!.id,
+      outcome: 'no-proposal',
+      trajectoryId: productionEvent?.trajectoryId,
+      runEventSummary: productionEvent?.runEventSummary,
     });
   });
 

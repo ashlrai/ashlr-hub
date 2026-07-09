@@ -87,6 +87,18 @@ vi.mock('../src/core/fleet/skill-library.js', () => ({
 import { runAutoMergePass } from '../src/core/fleet/automerge-pass.js';
 
 function cfg(over: Record<string, unknown> = {}): AshlrConfig {
+  const autoMerge =
+    over['trustBasis'] === 'evidence'
+      ? {
+          allowWithoutVerification: false,
+          pushToRemote: true,
+          protectedRemote: {
+            branchProtection: true,
+            requiredChecks: ['ci/test'],
+          },
+          ...over,
+        }
+      : over;
   return {
     version: 1,
     foundry: {
@@ -98,7 +110,7 @@ function cfg(over: Record<string, unknown> = {}): AshlrConfig {
         maxRisk: 'low',
         maxAutomergeFiles: 4,
         maxAutomergeLines: 150,
-        ...over,
+        ...autoMerge,
       },
     },
   } as unknown as AshlrConfig;

@@ -113,16 +113,27 @@ describe('titrrTestRun — unit (real detectVerifyCommands)', () => {
 describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
   // Mock factories — rebuilt per test via vi.doMock.
   let engineMockFn: ReturnType<typeof vi.fn>;
+  let captureMockFn: ReturnType<typeof vi.fn>;
   let detectVCMockFn: ReturnType<typeof vi.fn>;
   let runVCMockFn: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     engineMockFn = vi.fn();
+    captureMockFn = vi.fn(async () => ({
+      state: makeRunState({ result: 'proposal captured' }),
+      proposalId: 'p-captured',
+      proposalOutcome: {
+        kind: 'filed',
+        reason: 'proposal filed',
+        proposalId: 'p-captured',
+      },
+    }));
     detectVCMockFn = vi.fn();
     runVCMockFn = vi.fn();
 
     vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
       runEngineSandboxed: engineMockFn,
+      captureSandboxedProposal: captureMockFn,
       // M300 routes api-model engines through runApiModelSandboxed; alias it to
       // the same mock so the module's exports are complete regardless of path.
       runApiModelSandboxed: engineMockFn,

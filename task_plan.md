@@ -171,7 +171,16 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Current live-config/resource pass makes `runDaemon` reload the complete config before every tick in once/continuous/batch modes, adds regression coverage for live Foundry policy reloads, and extends backend status/API/CLI with resource availability including `not-sensed` for allowed unsensed backends.
 
 ## Status
-**Current batch verified** - Live dead-owner spend guard was repaired, low dispatch yield now becomes a shared next action, queued self-heal work is trust-filtered, and focused/adjacent gates pass.
+**Current batch complete** - Implemented the Ashlr Hub Autonomous Fleet Plan foundation: proposal factory, repo verification contracts, causal learning telemetry, evidence-bound judge-free auto-merge, Fleet OS readiness, and production velocity controls on branch `codex/autonomous-fleet-foundation`.
+
+## Current Continuation - Autonomous Fleet Foundation
+- [x] Rechecked git status, recent commits, Entire state, task plan, notes, and autonomy plan.
+- [x] Deploy parallel agents across verification, telemetry, auto-merge safety, Fleet OS, and velocity lanes.
+- [x] Implement proposal-production critical-path fixes locally.
+- [x] Integrate agent patches for verification contracts, learning graph, evidence preflight, Fleet OS readiness, and velocity controls.
+- [x] Add focused regression coverage for proposal-disabled cooldown, verify manifests, evidence mode safety, telemetry causality, and status/UI readiness.
+- [x] Run focused and broad verification gates.
+- [x] Commit, push, and leave daemon/fleet state verified.
 
 ## Current Continuation - Visual Grounding Foundation
 - [x] Rechecked git status, recent commits, Entire state, daemon status, task plan, notes, and relevant code.
@@ -229,6 +238,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Rechecked git/daemon/fleet state after the previous push.
 - [x] Deployed fresh explorer agents on daemon refill, fleet/backlog persistence, and cross-repo discovery.
 - [x] Found live fleet status showing zero backlog because persisted `backlog.json` was a stale temp-test snapshot while real self-heal work lived in `~/.ashlr/self-heal-queue.json`.
+
+## Current Continuation - Fleet OS Readiness Lane
+- [x] Rechecked branch/worktree, Entire state, current planning files, and recent commits.
+- [x] Mapped `FleetStatus`, CLI `fleet status`, Mission Control/Fleet app.js renderers, and focused tests.
+- [x] Add additive read-only Autonomous Ship Readiness status to `FleetStatus`.
+- [x] Render readiness in CLI Fleet status and Mission Control/Fleet web surfaces.
+- [x] Add focused readiness regression coverage and run targeted gates.
+- [ ] Resolve unrelated current typecheck failure in `src/core/run/sandboxed-engine.ts` if this branch owner wants a full TypeScript gate.
 - [x] Added a shared read-only queued-autonomy reader and wired it into `fleet status`, daemon cached backlog counts, and the queued autonomy scanner.
 - [x] Prevented daemon verification commands from writing into production `HOME`/`~/.ashlr` by giving each verify subprocess an isolated temp HOME.
 - [x] Prevented explicit subset/temp `buildBacklog({ repos })` scans from clobbering the global fleet backlog snapshot unless the caller opts into `persist:true`.

@@ -10,8 +10,18 @@
 import { existsSync, mkdirSync, appendFileSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { EngineId, EngineTier, WorkSource } from '../types.js';
+import type {
+  EngineId,
+  EngineTier,
+  EvidenceOutcomeSummary,
+  LabelBasis,
+  LearningSource,
+  RouteSnapshot,
+  RunEventSummary,
+  WorkSource,
+} from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { causalMetadata } from '../learning/causal.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
@@ -66,6 +76,14 @@ export interface AgentActionEvent {
   source?: WorkSource;
   proposalId?: string;
   runId?: string;
+  trajectoryId?: string;
+  routeSnapshot?: RouteSnapshot;
+  runEventSummary?: RunEventSummary;
+  evidenceOutcome?: EvidenceOutcomeSummary;
+  learningSource?: LearningSource;
+  labelBasis?: LabelBasis;
+  routerPolicyVersion?: string;
+  learningEpoch?: string;
   backend?: EngineId | null;
   tier?: EngineTier | null;
   model?: string | null;
@@ -169,6 +187,9 @@ export interface AgentWorkspaceRecentAction {
   itemId?: string;
   proposalId?: string;
   runId?: string;
+  trajectoryId?: string;
+  learningSource?: LearningSource;
+  labelBasis?: LabelBasis;
   backend?: EngineId | null;
   model?: string | null;
 }
@@ -254,6 +275,7 @@ function sanitizeTags(tags: unknown): string[] | undefined {
 }
 
 function sanitizeEvent(event: AgentActionEvent): AgentActionEvent {
+  const ts = eventTimestamp(event.ts);
   const tags = sanitizeTags(event.tags);
   const counts = sanitizeCounts(event.counts);
   const durationMs = finiteNumber(event.durationMs);
@@ -268,10 +290,24 @@ function sanitizeEvent(event: AgentActionEvent): AgentActionEvent {
   const runId = boundedOptionalText(event.runId, 160);
   const model = boundedOptionalText(event.model, 160);
   const reason = boundedOptionalText(event.reason, 240);
+  const causal = causalMetadata({
+    ts,
+    itemId,
+    proposalId,
+    runId,
+    trajectoryId: event.trajectoryId,
+    routeSnapshot: event.routeSnapshot,
+    runEventSummary: event.runEventSummary,
+    evidenceOutcome: event.evidenceOutcome,
+    learningSource: event.learningSource ?? 'agent-action',
+    labelBasis: event.labelBasis ?? (event.kind === 'dispatch' ? 'dispatch-outcome' : 'unknown'),
+    routerPolicyVersion: event.routerPolicyVersion,
+    learningEpoch: event.learningEpoch,
+  });
 
   return {
     schemaVersion: 1,
-    ts: eventTimestamp(event.ts),
+    ts,
     actor: enumValue(event.actor, AGENT_ACTION_ACTORS) ?? 'system',
     kind: enumValue(event.kind, AGENT_ACTION_KINDS) ?? 'reflection',
     outcome: enumValue(event.outcome, AGENT_ACTION_OUTCOMES) ?? 'unknown',
@@ -283,6 +319,7 @@ function sanitizeEvent(event: AgentActionEvent): AgentActionEvent {
     ...(source ? { source } : {}),
     ...(proposalId ? { proposalId } : {}),
     ...(runId ? { runId } : {}),
+    ...causal,
     ...(backend !== undefined ? { backend } : {}),
     ...(tier !== undefined ? { tier } : {}),
     ...(model ? { model } : {}),
@@ -426,6 +463,9 @@ function recentAction(event: AgentActionEvent): AgentWorkspaceRecentAction {
     ...(event.itemId ? { itemId: event.itemId } : {}),
     ...(event.proposalId ? { proposalId: event.proposalId } : {}),
     ...(event.runId ? { runId: event.runId } : {}),
+    ...(event.trajectoryId ? { trajectoryId: event.trajectoryId } : {}),
+    ...(event.learningSource ? { learningSource: event.learningSource } : {}),
+    ...(event.labelBasis ? { labelBasis: event.labelBasis } : {}),
     ...(event.backend !== undefined ? { backend: event.backend } : {}),
     ...(event.model !== undefined ? { model: event.model } : {}),
   };

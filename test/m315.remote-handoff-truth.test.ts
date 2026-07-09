@@ -92,6 +92,25 @@ function cfg(): AshlrConfig {
   } as unknown as AshlrConfig;
 }
 
+function evidenceCfg(): AshlrConfig {
+  return {
+    foundry: {
+      mergeAuthority: [],
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'evidence',
+        maxRisk: 'low',
+        allowWithoutVerification: false,
+        pushToRemote: true,
+        protectedRemote: {
+          branchProtection: true,
+          requiredChecks: ['ci/test'],
+        },
+      },
+    },
+  } as unknown as AshlrConfig;
+}
+
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-home-'));
   tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-repo-'));
@@ -172,6 +191,50 @@ describe('M315 remote PR handoff truth', () => {
 
     const decisions = readDecisions({ proposalId: proposal.id });
     expect(decisions.some((d) => d.action === 'handoff')).toBe(true);
+  });
+
+  it('evidence mode opens a protected remote handoff only with command-bound evidence', async () => {
+    const diff = addFileDiff('docs/evidence-handoff.md', 'protected evidence handoff');
+    const diffHash = hashDiff(diff);
+    const baseHead = git(tmpRepo, ['rev-parse', 'main']);
+    const proposal = createProposal({
+      repo: tmpRepo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'evidence remote handoff',
+      summary: 'Open a protected PR from deterministic evidence.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('local:qwen3-coder', 'local', diffHash),
+      engineModel: 'local:qwen3-coder',
+      engineTier: 'local',
+      verifyResult: {
+        passed: true,
+        detail: 'command-bound verification passed',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        baseBranch: 'main',
+        baseHead,
+        diffHash,
+      },
+    });
+    setStatus(proposal.id, 'pending');
+
+    const result = await autoMergeProposal(proposal.id, evidenceCfg());
+
+    expect(result).toMatchObject({
+      ok: true,
+      merged: false,
+      handoff: true,
+      prUrl: 'https://github.com/ashlrai/fixture/pull/123',
+    });
+    expect(createPrMock).toHaveBeenCalledTimes(1);
+    const loaded = loadProposal(proposal.id);
+    expect(loaded?.status).toBe('awaiting-host-merge');
+    expect(loaded?.remoteHandoff).toMatchObject({
+      provider: 'github',
+      state: 'awaiting-host-merge',
+      base: 'main',
+    });
   });
 
   it('reconciles a host-merged PR to applied only with positive merge evidence', async () => {

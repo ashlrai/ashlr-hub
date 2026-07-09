@@ -239,6 +239,44 @@ describe('detectVerifyCommands', () => {
     }
   });
 
+  it('detects root ashlr.verify.json commands as argv arrays', () => {
+    const dir = makeFixture();
+    try {
+      writePkg(dir, { scripts: { test: 'vitest' } });
+      writeFileSync(
+        join(dir, 'ashlr.verify.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          mode: 'replace-detected',
+          commands: [
+            {
+              id: 'merge-check',
+              kind: 'test',
+              cmd: ['node', 'scripts/merge-check.js'],
+              timeoutMs: 30_000,
+              required: true,
+              profiles: ['merge'],
+            },
+          ],
+        }),
+        'utf8',
+      );
+
+      expect(detectVerifyCommands(dir)).toEqual([
+        {
+          id: 'merge-check',
+          kind: 'test',
+          cmd: ['node', 'scripts/merge-check.js'],
+          timeoutMs: 30_000,
+          required: true,
+          profiles: ['merge'],
+        },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('returns [] for an empty dir', () => {
     const dir = makeFixture();
     try {
@@ -345,6 +383,18 @@ describe('runVerifyCommand', () => {
     const res = runVerifyCommand(vc, workdir, cfg);
     expect(res.ok).toBe(false);
     expect(res.failureCategory).toBe('invalid-command');
+  });
+
+  it('honors per-command timeoutMs when no caller override is supplied', () => {
+    const vc: VerifyCommand = {
+      kind: 'test',
+      cmd: ['node', '-e', 'setTimeout(() => {}, 5000)'],
+      timeoutMs: 120,
+    };
+    const res = runVerifyCommand(vc, workdir, cfg);
+    expect(res.ok).toBe(false);
+    expect(res.timedOut).toBe(true);
+    expect(res.failureCategory).toBe('timeout');
   });
 
   it('times out and terminates child processes, not just the direct command', async () => {

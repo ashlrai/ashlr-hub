@@ -153,6 +153,70 @@ describe('M301 evaluateAutonomyPolicy', () => {
       allowed: true,
     });
   });
+
+  it('refuses evidence-mode main merge when only local fallback evidence exists', () => {
+    const verdict = evaluateAutonomyPolicy(
+      goodPack({
+        trustBasis: 'evidence',
+        remotePreferred: false,
+      }),
+      cfg(),
+    );
+
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.reason).toMatch(/protected remote PR handoff|local merge fallback/i);
+  });
+
+  it('refuses evidence-mode main merge without remote protection or command evidence', () => {
+    const missingRemote = evaluateAutonomyPolicy(
+      goodPack({
+        trustBasis: 'evidence',
+        remotePreferred: true,
+      }),
+      cfg(),
+    );
+    expect(missingRemote.allowed).toBe(false);
+    expect(missingRemote.reason).toMatch(/remote protection gate failed/i);
+
+    const noCommands = evaluateAutonomyPolicy(
+      goodPack({
+        trustBasis: 'evidence',
+        remotePreferred: true,
+        remoteProtection: {
+          ok: true,
+          detail: 'protected remote confirmed with required checks: ci/test',
+        },
+        verification: {
+          passed: true,
+          detail: 'green but no command manifest',
+          commandKinds: [],
+        },
+      }),
+      cfg(),
+    );
+    expect(noCommands.allowed).toBe(false);
+    expect(noCommands.reason).toMatch(/real verification command/i);
+  });
+
+  it('authorizes evidence-mode main merge only for protected remote command-bound evidence', () => {
+    const verdict = evaluateAutonomyPolicy(
+      goodPack({
+        trustBasis: 'evidence',
+        remotePreferred: true,
+        remoteProtection: {
+          ok: true,
+          detail: 'protected remote confirmed with required checks: ci/test',
+        },
+      }),
+      cfg(),
+    );
+
+    expect(verdict).toMatchObject({
+      tier: 'T4',
+      action: 'merge-main',
+      allowed: true,
+    });
+  });
 });
 
 describe('M301 autonomy evidence pack persistence', () => {

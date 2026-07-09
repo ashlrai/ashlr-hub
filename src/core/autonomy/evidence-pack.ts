@@ -12,10 +12,16 @@ import { join } from 'node:path';
 import type {
   AutoMergeTrustBasis,
   EngineTier,
+  EvidenceOutcomeSummary,
+  LabelBasis,
+  LearningSource,
+  RouteSnapshot,
+  RunEventSummary,
   Proposal,
   ProposalBrowserVerifyEvidence,
   VisualGroundingEvidence,
 } from '../types.js';
+import { causalMetadata } from '../learning/causal.js';
 
 export type AutonomyTarget = 'proposal' | 'branch' | 'main' | 'preview' | 'production';
 
@@ -67,6 +73,7 @@ export interface AutonomyEvidencePack {
     manager?: AutonomyGateEvidence;
     selfTarget?: AutonomyGateEvidence;
     edv?: AutonomyGateEvidence;
+    remoteProtection?: AutonomyGateEvidence;
   };
   verification: AutonomyVerificationEvidence;
   policy?: {
@@ -75,6 +82,14 @@ export interface AutonomyEvidencePack {
     allowed: boolean;
     reason: string;
   };
+  trajectoryId?: string;
+  routeSnapshot?: RouteSnapshot;
+  runEventSummary?: RunEventSummary;
+  evidenceOutcome?: EvidenceOutcomeSummary;
+  learningSource?: LearningSource;
+  labelBasis?: LabelBasis;
+  routerPolicyVersion?: string;
+  learningEpoch?: string;
 }
 
 export interface BuildAutonomyEvidenceInput {
@@ -91,6 +106,7 @@ export interface BuildAutonomyEvidenceInput {
   manager?: AutonomyGateEvidence;
   selfTarget?: AutonomyGateEvidence;
   edv?: AutonomyGateEvidence;
+  remoteProtection?: AutonomyGateEvidence;
 }
 
 export function evidenceDir(): string {
@@ -128,6 +144,37 @@ export function summarizeDiff(diff: string | undefined): AutonomyDiffEvidence {
 export function buildAutonomyEvidencePack(input: BuildAutonomyEvidenceInput): AutonomyEvidencePack {
   const { proposal } = input;
   const diff = summarizeDiff(proposal.diff);
+  const evidenceOutcome: EvidenceOutcomeSummary = {
+    target: input.target,
+    trustBasis: input.trustBasis,
+    riskClass: input.riskClass,
+    verificationPassed: input.verification.passed,
+    gateCount: Object.values({
+      authority: input.authority,
+      provenance: input.provenance,
+      verification: input.verification,
+      risk: input.risk,
+      scope: input.scope,
+      manager: input.manager,
+      selfTarget: input.selfTarget,
+      edv: input.edv,
+      remoteProtection: input.remoteProtection,
+    }).filter(Boolean).length,
+  };
+  const causal = causalMetadata({
+    proposalId: proposal.id,
+    workItemId: proposal.workItemId,
+    runId: proposal.runId,
+    trajectoryId: proposal.trajectoryId,
+    routeSnapshot: proposal.routeSnapshot,
+    runEventSummary: proposal.runEventSummary,
+    evidenceOutcome,
+    learningSource: 'autonomy-evidence',
+    labelBasis: 'evidence-policy',
+    routerPolicyVersion: proposal.routerPolicyVersion,
+    learningEpoch: proposal.learningEpoch,
+    ts: proposal.createdAt,
+  });
   return {
     version: 1,
     generatedAt: new Date().toISOString(),
@@ -161,8 +208,10 @@ export function buildAutonomyEvidencePack(input: BuildAutonomyEvidenceInput): Au
       ...(input.manager ? { manager: input.manager } : {}),
       ...(input.selfTarget ? { selfTarget: input.selfTarget } : {}),
       ...(input.edv ? { edv: input.edv } : {}),
+      ...(input.remoteProtection ? { remoteProtection: input.remoteProtection } : {}),
     },
     verification: copyVerificationEvidence(input.verification),
+    ...causal,
   };
 }
 

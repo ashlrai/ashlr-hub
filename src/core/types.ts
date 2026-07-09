@@ -49,6 +49,62 @@ export interface ProposalBrowserVerifyEvidence {
 
 export type AutoMergeTrustBasis = 'tier' | 'verification' | 'evidence';
 
+export type LearningSource =
+  | 'proposal'
+  | 'decision-ledger'
+  | 'daemon-dispatch'
+  | 'agent-action'
+  | 'autonomy-evidence'
+  | 'outcome-record'
+  | 'worked-ledger'
+  | string;
+
+export type LabelBasis =
+  | 'proposal-status'
+  | 'dispatch-outcome'
+  | 'judge-verdict'
+  | 'merge-gate'
+  | 'autonomy-policy'
+  | 'evidence-policy'
+  | 'manual-decision'
+  | 'unknown'
+  | string;
+
+export interface RouteSnapshot {
+  backend?: EngineId | string | null;
+  tier?: EngineTier | string | null;
+  model?: string | null;
+  assignedBy?: string;
+  reason?: string;
+  routerPolicyVersion?: string;
+}
+
+export interface RunEventSummary {
+  runId?: string;
+  status?: string;
+  outcome?: string;
+  proposalCreated?: boolean;
+  proposalId?: string;
+  diffFiles?: number;
+  diffLines?: number;
+  tokensIn?: number;
+  tokensOut?: number;
+  costUsd?: number;
+  durationMs?: number;
+  cacheHit?: boolean;
+}
+
+export interface EvidenceOutcomeSummary {
+  target?: string;
+  trustBasis?: AutoMergeTrustBasis | string;
+  riskClass?: string;
+  verificationPassed?: boolean;
+  policyAllowed?: boolean;
+  policyAction?: string;
+  policyTier?: string;
+  gateCount?: number;
+}
+
 /** Persisted configuration for the hub. Lives at ~/.ashlr/config.json. */
 export interface AshlrConfig {
   /** Schema/config version for forward migration. */
@@ -327,6 +383,23 @@ export interface AshlrConfig {
        * This is the single switch that promotes 'nim' into the frontier rotation.
        */
       tier?: EngineTier;
+      /**
+       * Explicit concurrent request cap used by resource-aware concurrent
+       * dispatch. NIM has no proactive quota signal, so this cap is the
+       * operator's local governor; 429/backoff signals still win.
+       */
+      maxConcurrent?: number;
+      /** Optional cost estimate for resource/status displays. */
+      costPerMTokenOut?: number;
+    };
+    /**
+     * Kimi/Moonshot resource hints. Kimi is normally defined via
+     * `foundry.engines.kimi`; this block only supplies explicit resource caps
+     * to the ResourceMonitor and concurrent dispatcher.
+     */
+    kimi?: {
+      maxConcurrent?: number;
+      costPerMTokenOut?: number;
     };
     /**
      * M248: guarantee fleet sandboxed engines inherit ashlr-plugin MCP tools.
@@ -663,6 +736,16 @@ export interface AshlrConfig {
       /** Also merge/push on the remote (gh pr merge) when applying (default false). */
       pushToRemote?: boolean;
       /**
+       * Evidence-mode remote safety signal. `trustBasis:"evidence"` requires
+       * pushToRemote plus an explicit protected-remote signal so deterministic
+       * main merges only hand off through a host PR guarded by branch protection
+       * and required checks. Tier/verification modes ignore this field.
+       */
+      protectedRemote?: {
+        branchProtection: boolean;
+        requiredChecks: string[];
+      };
+      /**
        * M56 (v5): permit MID-tier (strong open model) proposals to auto-apply
        * to a BRANCH / PR — never to `main`. Separate, DEFAULT-OFF sub-flag, so
        * enabling main auto-merge does not implicitly enable the branch path.
@@ -776,6 +859,27 @@ export interface AshlrConfig {
        * DEFAULT false → byte-identical to pre-M256. Requires concurrentDispatch=true.
        */
       workhorseDispatch?: boolean;
+    };
+    /**
+     * Production velocity profile. DEFAULT OFF. When true, or when configured
+     * as `{ "profile": "resource-control", "enabled": true }`, the daemon
+     * materializes the resource-control lane as normal Fabric flags: gateway,
+     * resourceAware, concurrentDispatch, and workhorseDispatch. It also makes
+     * local/NIM/Kimi concurrent caps explicit and lets queue selection fill all
+     * currently available resource slots.
+     *
+     * This grants no merge/push/apply authority; proposal-first gates remain
+     * unchanged.
+     */
+    productionVelocity?: boolean | {
+      enabled?: boolean;
+      profile?: 'off' | 'resource-control';
+      fillQueueToSlots?: boolean;
+      stalePendingTtlHours?: number;
+      maxSlotsPerBackend?: number;
+      localMaxConcurrent?: number;
+      nimMaxConcurrent?: number;
+      kimiMaxConcurrent?: number;
     };
     /**
      * M250 Resource Control Plane: per-backend weekly message/token caps.
@@ -1359,6 +1463,16 @@ export interface RunState {
   result?: string;
   /** Metadata-only reason a sandboxed autonomous run did or did not file a proposal. */
   proposalOutcome?: RunProposalOutcome;
+  /** Stable attempt/work trajectory id for joining runs, proposals, and ledgers. */
+  trajectoryId?: string;
+  /** Metadata-only route snapshot; never includes prompts or engine output. */
+  routeSnapshot?: RouteSnapshot;
+  /** Metadata-only run summary; never includes prompts, diffs, stdout, or stderr. */
+  runEventSummary?: RunEventSummary;
+  learningSource?: LearningSource;
+  labelBasis?: LabelBasis;
+  routerPolicyVersion?: string;
+  learningEpoch?: string;
   /**
    * M236: why a stall-terminated run was stopped.
    * Set only when the run was terminated by the stall monitor (run-monitor.ts).
@@ -3031,6 +3145,22 @@ export interface Proposal {
   workSource?: WorkSource;
   /** Optional run/swarm id that produced this proposal. */
   runId?: string;
+  /** Stable attempt/work trajectory id used to join proposal, dispatch, and decisions. */
+  trajectoryId?: string;
+  /** Metadata-only route snapshot for the producer path; never includes prompts or diffs. */
+  routeSnapshot?: RouteSnapshot;
+  /** Metadata-only run summary; never includes prompts, diffs, stdout, or stderr. */
+  runEventSummary?: RunEventSummary;
+  /** Metadata-only evidence/policy outcome summary for learning joins. */
+  evidenceOutcome?: EvidenceOutcomeSummary;
+  /** Where this row should be treated as learning input from. */
+  learningSource?: LearningSource;
+  /** Which signal made this row a label for learning. */
+  labelBasis?: LabelBasis;
+  /** Version of the router policy/snapshot format that produced this row. */
+  routerPolicyVersion?: string;
+  /** Coarse learning epoch, currently an ISO day string. */
+  learningEpoch?: string;
   /**
    * M45: provenance — backend + model that produced this proposal's diff
    * (e.g. 'codex:gpt-5.5'). A later merge-authority gate requires
@@ -3251,6 +3381,16 @@ export interface DaemonDispatchTrace {
   dispatched: boolean;
   /** Estimated USD spent by this item dispatch. */
   spentUsd: number;
+  /** Stable attempt/work trajectory id for joining dispatch, proposal, and decision rows. */
+  trajectoryId?: string;
+  /** Metadata-only route snapshot; never includes prompts or engine output. */
+  routeSnapshot?: RouteSnapshot;
+  /** Metadata-only run summary; never includes prompts, diffs, stdout, or stderr. */
+  runEventSummary?: RunEventSummary;
+  learningSource?: LearningSource;
+  labelBasis?: LabelBasis;
+  routerPolicyVersion?: string;
+  learningEpoch?: string;
   /** Skip/error reason when no engine was invoked or dispatch failed. */
   skipReason?: string;
   /** Terminal proposal-production outcome for dispatched work, when known. */
@@ -3271,6 +3411,13 @@ export interface DaemonDispatchProduction {
   outcome: DaemonDispatchProductionOutcome;
   proposalId?: string;
   runId?: string;
+  trajectoryId?: string;
+  runEventSummary?: RunEventSummary;
+  evidenceOutcome?: EvidenceOutcomeSummary;
+  learningSource?: LearningSource;
+  labelBasis?: LabelBasis;
+  routerPolicyVersion?: string;
+  learningEpoch?: string;
   reason?: string;
   diffFiles?: number;
   diffLines?: number;
@@ -4357,6 +4504,22 @@ export interface DecisionEntry {
   workSource?: WorkSource;
   /** Optional run/swarm id that produced the proposal. */
   runId?: string;
+  /** Stable attempt/work trajectory id used to join proposal, dispatch, and decisions. */
+  trajectoryId?: string;
+  /** Metadata-only route snapshot for producer/dispatch decisions. */
+  routeSnapshot?: RouteSnapshot;
+  /** Metadata-only run summary; never includes prompts, diffs, stdout, or stderr. */
+  runEventSummary?: RunEventSummary;
+  /** Metadata-only evidence/policy outcome summary for learning joins. */
+  evidenceOutcome?: EvidenceOutcomeSummary;
+  /** Where this row should be treated as learning input from. */
+  learningSource?: LearningSource;
+  /** Which signal made this row a label for learning. */
+  labelBasis?: LabelBasis;
+  /** Version of the router policy/snapshot format that produced this row. */
+  routerPolicyVersion?: string;
+  /** Coarse learning epoch, currently an ISO day string. */
+  learningEpoch?: string;
   /** Lifecycle action. */
   action: 'proposed' | 'verified' | 'judged' | 'merged' | 'handoff' | 'rejected' | 'escalated';
   /** Engine id (e.g. 'codex', 'claude'). */

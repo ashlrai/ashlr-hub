@@ -58,12 +58,23 @@ const ASYNC_STREAM_TRUNCATION_MARK = '\n[ashlr: verify output stream truncated]\
 // ---------------------------------------------------------------------------
 
 /** A single verification command to run, classified by what it checks. */
+export type VerifyCommandKind = 'typecheck' | 'test' | 'lint';
+export type VerifyCommandProfile = 'quick' | 'merge' | 'deep';
+
 export interface VerifyCommand {
-  kind: 'typecheck' | 'test' | 'lint';
+  /** Stable identifier when declared by ashlr.verify.json. */
+  id?: string;
+  kind: VerifyCommandKind;
   /** Exact argv (executable + args). NEVER passed through a shell. */
   cmd: string[];
   /** Optional project root to run from when the repo has nested packages. */
   cwd?: string;
+  /** Optional per-command timeout declared by a repo verification contract. */
+  timeoutMs?: number;
+  /** Whether the command is required for its declared verification profile. */
+  required?: boolean;
+  /** Verification profiles this command participates in. */
+  profiles?: VerifyCommandProfile[];
 }
 
 export type VerifyFailureCategory =
@@ -311,7 +322,7 @@ export function runVerifyCommand(
   const commandRoot = commandRootFor(vc, workspaceRoot);
   const timeout = Math.min(
     MAX_TIMEOUT_MS,
-    Math.max(1, opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    Math.max(1, opts?.timeoutMs ?? vc.timeoutMs ?? DEFAULT_TIMEOUT_MS),
   );
 
   const bin = vc.cmd[0];
@@ -449,7 +460,7 @@ export async function runVerifyCommandAsync(
   const commandRoot = commandRootFor(vc, workspaceRoot);
   const timeout = Math.min(
     MAX_TIMEOUT_MS,
-    Math.max(1, opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    Math.max(1, opts?.timeoutMs ?? vc.timeoutMs ?? DEFAULT_TIMEOUT_MS),
   );
 
   const bin = vc.cmd[0];

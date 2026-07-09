@@ -16,7 +16,7 @@
 
 import { existsSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import type {
   AshlrConfig,
   AutoMergeTrustBasis,
@@ -35,7 +35,11 @@ import type { BackendAvailability, BackendResourceState } from '../fabric/resour
 import { strategicTierOfRepo, type StrategicTier } from '../ecosystem/focus.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import { loadQueuedAutonomyItems } from '../portfolio/queued-autonomy.js';
-import { detectRepoExecutionProfile, type RepoPackageManager } from '../run/repo-profile.js';
+import {
+  detectRepoExecutionProfile,
+  type RepoPackageManager,
+  type RepoProjectKind,
+} from '../run/repo-profile.js';
 import { DEFAULT_COOLDOWN_MS, isSuppressibleWorkedOutcome, loadWorkedLedger } from './worked-ledger.js';
 import {
   readDispatchProductionYield,
@@ -112,6 +116,10 @@ export interface FleetAutonomyDirectionSummary {
     blocks: number;
   };
   budgets: Pick<ResourceStrategyReport['budgets'], 'daemonBudgetLevel' | 'daemonSpentTodayUsd'>;
+  productionVelocity: Pick<
+    ResourceStrategyReport['productionVelocity'],
+    'enabled' | 'profile' | 'fillQueueToSlots' | 'stalePendingTtlHours' | 'maxSlotsPerBackend' | 'caps' | 'flags'
+  >;
 }
 
 export type FleetAutonomyControlMode = 'disabled' | 'advisory' | 'executable';
@@ -182,6 +190,48 @@ export interface FleetAutonomyEffectivenessStatus {
   };
 }
 
+export type FleetAutonomousShipReadinessVerdict = 'ready' | 'blocked' | 'degraded' | 'idle' | 'unknown';
+export type FleetAutonomousShipReadinessConfidence = 'high' | 'medium' | 'low';
+export type FleetReadinessSourceStatus = 'healthy' | 'degraded' | 'blocked' | 'unavailable' | 'unknown';
+export type FleetReadinessFreshness = 'fresh' | 'stale' | 'unknown' | 'not-applicable';
+
+export interface FleetReadinessSourceHealth {
+  id: 'daemon' | 'guard' | 'auto-merge' | 'queue' | 'resources' | 'direction';
+  label: string;
+  status: FleetReadinessSourceStatus;
+  badge: 'healthy' | 'degraded' | 'blocked' | 'unavailable' | 'unknown';
+  freshness: FleetReadinessFreshness;
+  observedAt: string | null;
+  ageMs: number | null;
+  detail: string;
+}
+
+export interface FleetAutonomousShipReadinessBlocker {
+  id: string;
+  label: string;
+  detail: string;
+  severity: FleetNextAction['priority'];
+  source: FleetReadinessSourceHealth['id'] | 'fleet';
+}
+
+export interface FleetAutonomousShipReadinessStatus {
+  verdict: FleetAutonomousShipReadinessVerdict;
+  confidence: FleetAutonomousShipReadinessConfidence;
+  freshness: {
+    generatedAt: string;
+    overall: Exclude<FleetReadinessFreshness, 'not-applicable'>;
+    freshestAt: string | null;
+    stalestAt: string | null;
+    maxAgeMs: number | null;
+    staleSources: number;
+    unknownSources: number;
+  };
+  topBlocker: FleetAutonomousShipReadinessBlocker | null;
+  primaryAction: FleetNextAction | null;
+  sources: FleetReadinessSourceHealth[];
+  sourceSummary: Record<FleetReadinessSourceStatus, number>;
+}
+
 export interface FleetProposalProductionReasonSummary {
   reason: string;
   count: number;
@@ -228,6 +278,12 @@ export interface FleetQueueRepoCoverage {
     reposWithProjects: number;
     reposWithVerifyCommands: number;
     reposMissingVerifyCommands: number;
+    missingVerifyCommands?: Array<{
+      repo: string;
+      name: string;
+      projectKinds: RepoProjectKind[];
+      reason: string;
+    }>;
     packageManagers: Array<{ manager: RepoPackageManager; repos: number }>;
   };
   top: Array<{ repo: string; items: number }>;
@@ -276,6 +332,8 @@ export interface FleetStatus {
   nextActions?: FleetNextAction[];
   /** Read-only explanation of whether the autonomous loop can merge right now. */
   autonomyEffectiveness?: FleetAutonomyEffectivenessStatus;
+  /** Read-only Fleet OS verdict for whether autonomous shipping is ready now. */
+  autonomousShipReadiness?: FleetAutonomousShipReadinessStatus;
   /** Read-only diagnosis of recent proposal production from daemon ticks. */
   proposalProduction?: FleetProposalProductionStatus;
   /** Durable 24h dispatch-production yield summary from the append-only ledger. */
@@ -442,6 +500,9 @@ async function attachBackendResources(backends: FleetBackendStatus[], cfg: Ashlr
  */
 export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   const generatedAt = new Date().toISOString();
+  let queueSnapshotAt: string | null = null;
+  let queueSourceStatus: FleetReadinessSourceStatus = 'unknown';
+  let queueSourceDetail = 'backlog snapshot has not been read yet';
 
   // ── daemon ────────────────────────────────────────────────────────────────
   let daemon: FleetStatus['daemon'] = {
@@ -509,6 +570,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     // Read the last persisted snapshot only; the daemon/backlog CLI owns refresh.
     const { loadBacklog } = await import('../portfolio/backlog.js');
     const backlog = loadBacklog();
+    queueSnapshotAt = typeof backlog?.generatedAt === 'string' ? backlog.generatedAt : null;
     const enrolledRaw = (() => {
       try {
         return listEnrolled().map((repo) => resolve(repo));
@@ -517,13 +579,24 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       }
     })();
     const enrolledRepos = new Set(enrolledRaw.filter((repo) => existsSync(repo)));
+    const queuedAutonomyItems = loadQueuedAutonomyItems();
     const items = mergeVisibleQueueItems(
       [
         ...(Array.isArray(backlog?.items) ? backlog.items : []),
-        ...loadQueuedAutonomyItems(),
+        ...queuedAutonomyItems,
       ],
       enrolledRepos,
     );
+    if (backlog) {
+      queueSourceStatus = 'healthy';
+      queueSourceDetail = `${items.length} visible cached queue item(s) from persisted backlog snapshot`;
+    } else if (queuedAutonomyItems.length > 0) {
+      queueSourceStatus = 'degraded';
+      queueSourceDetail = 'persisted backlog snapshot unavailable; using queued self-heal/invent work only';
+    } else {
+      queueSourceStatus = 'unknown';
+      queueSourceDetail = 'no persisted backlog snapshot or queued autonomy work is available';
+    }
     visibleQueueItems = items;
     backlogItems = items.length;
     const byRepo = new Map<string, number>();
@@ -557,6 +630,9 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     backlogItems = 0;
     visibleQueueItems = [];
     nextQueueItems = [];
+    queueSnapshotAt = null;
+    queueSourceStatus = 'unavailable';
+    queueSourceDetail = 'queue source could not be read';
   }
 
   let sharedQueue: FleetSharedQueueStatus | undefined;
@@ -738,6 +814,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
 
   status.autonomyEffectiveness = buildAutonomyEffectiveness(status);
   status.nextActions = buildNextActions(status);
+  status.autonomousShipReadiness = buildAutonomousShipReadiness(status, {
+    generatedAt,
+    queueSnapshotAt,
+    queueSourceStatus,
+    queueSourceDetail,
+  });
 
   return status;
 }
@@ -1121,11 +1203,13 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
 
   const missingVerify = status.queue.repos?.executionProfiles?.reposMissingVerifyCommands ?? 0;
   if (missingVerify > 0) {
+    const missingRepos = status.queue.repos?.executionProfiles?.missingVerifyCommands ?? [];
+    const sample = missingRepos.slice(0, 3).map((row) => row.name).join(', ');
     add({
       id: 'add-repo-verify-contracts',
       priority: 'low',
       label: 'Add repo verify contracts',
-      detail: `${missingVerify} enrolled repo(s) have no detected verify commands.`,
+      detail: `${missingVerify} enrolled repo(s) have no detected verify commands.${sample ? ` First: ${sample}.` : ''}`,
     });
   }
 
@@ -1147,6 +1231,453 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   return actions
     .sort((a, b) => priorityRank[a.priority] - priorityRank[b.priority] || a.id.localeCompare(b.id))
     .slice(0, 6);
+}
+
+interface AutonomousShipReadinessInputs {
+  generatedAt: string;
+  queueSnapshotAt: string | null;
+  queueSourceStatus: FleetReadinessSourceStatus;
+  queueSourceDetail: string;
+}
+
+const READINESS_DAEMON_STALE_MS = 30 * 60 * 1000;
+const READINESS_QUEUE_STALE_MS = 24 * 60 * 60 * 1000;
+const READINESS_STATUS_STALE_MS = 30 * 60 * 1000;
+
+function readinessPriorityRank(priority: FleetNextAction['priority']): number {
+  switch (priority) {
+    case 'critical': return 0;
+    case 'high': return 1;
+    case 'medium': return 2;
+    case 'low': return 3;
+  }
+}
+
+function readinessFreshness(
+  observedAt: string | null,
+  staleMs: number,
+): { freshness: FleetReadinessFreshness; ageMs: number | null } {
+  if (!observedAt) return { freshness: 'unknown', ageMs: null };
+  const parsed = Date.parse(observedAt);
+  if (!Number.isFinite(parsed)) return { freshness: 'unknown', ageMs: null };
+  const ageMs = Math.max(0, Date.now() - parsed);
+  return { freshness: ageMs > staleMs ? 'stale' : 'fresh', ageMs };
+}
+
+function readinessBadge(status: FleetReadinessSourceStatus): FleetReadinessSourceHealth['badge'] {
+  return status;
+}
+
+function readinessSource(
+  id: FleetReadinessSourceHealth['id'],
+  label: string,
+  status: FleetReadinessSourceStatus,
+  observedAt: string | null,
+  staleMs: number,
+  detail: string,
+  opts?: { freshness?: FleetReadinessFreshness },
+): FleetReadinessSourceHealth {
+  const measured = opts?.freshness
+    ? { freshness: opts.freshness, ageMs: null }
+    : readinessFreshness(observedAt, staleMs);
+  let effectiveStatus = status;
+  if (measured.freshness === 'stale' && effectiveStatus === 'healthy') {
+    effectiveStatus = 'degraded';
+  } else if (measured.freshness === 'unknown' && effectiveStatus === 'healthy') {
+    effectiveStatus = 'unknown';
+  }
+  return {
+    id,
+    label,
+    status: effectiveStatus,
+    badge: readinessBadge(effectiveStatus),
+    freshness: measured.freshness,
+    observedAt,
+    ageMs: measured.ageMs,
+    detail,
+  };
+}
+
+function readinessBlocker(
+  id: string,
+  label: string,
+  detail: string,
+  severity: FleetNextAction['priority'],
+  source: FleetAutonomousShipReadinessBlocker['source'],
+): FleetAutonomousShipReadinessBlocker {
+  return { id, label, detail, severity, source };
+}
+
+function resourceReadinessSource(status: FleetStatus, generatedAt: string): FleetReadinessSourceHealth {
+  const backends = Array.isArray(status.backends) ? status.backends : [];
+  if (backends.length === 0) {
+    return readinessSource(
+      'resources',
+      'Resource Signals',
+      'unavailable',
+      null,
+      READINESS_STATUS_STALE_MS,
+      'no allowed backends are visible in fleet status',
+    );
+  }
+
+  const unavailable = new Set(['exhausted', 'throttled', 'unreachable']);
+  const resources = backends.map((backend) => backend.resource).filter(Boolean);
+  const hardBlocked = backends.filter((backend) => unavailable.has(String(backend.resource?.availability ?? 'unknown')));
+  const notSensed = backends.filter((backend) => backend.resource?.availability === 'not-sensed');
+  const unknown = backends.filter((backend) => backend.resource?.availability === 'unknown' || !backend.resource);
+  const openish = backends.filter((backend) =>
+    backend.resource?.availability === 'open' || backend.resource?.availability === 'near',
+  );
+  const latestObservedAt = resources
+    .map((resource) => resource?.snapshotAt ?? null)
+    .filter((ts): ts is string => typeof ts === 'string')
+    .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? generatedAt;
+
+  if (hardBlocked.length === backends.length) {
+    return readinessSource(
+      'resources',
+      'Resource Signals',
+      'blocked',
+      latestObservedAt,
+      READINESS_STATUS_STALE_MS,
+      `all ${backends.length} backend resource signal(s) are constrained`,
+    );
+  }
+  if (hardBlocked.length > 0) {
+    return readinessSource(
+      'resources',
+      'Resource Signals',
+      'degraded',
+      latestObservedAt,
+      READINESS_STATUS_STALE_MS,
+      `${hardBlocked.length}/${backends.length} backend resource signal(s) are constrained`,
+    );
+  }
+  if (openish.length === 0 && (notSensed.length > 0 || unknown.length > 0)) {
+    return readinessSource(
+      'resources',
+      'Resource Signals',
+      'unknown',
+      latestObservedAt,
+      READINESS_STATUS_STALE_MS,
+      'backend capacity exists but no sensed open resource signal is available',
+    );
+  }
+  if (notSensed.length > 0 || unknown.length > 0) {
+    return readinessSource(
+      'resources',
+      'Resource Signals',
+      'degraded',
+      latestObservedAt,
+      READINESS_STATUS_STALE_MS,
+      `${notSensed.length + unknown.length}/${backends.length} backend resource signal(s) are unsensed or unknown`,
+    );
+  }
+  return readinessSource(
+    'resources',
+    'Resource Signals',
+    'healthy',
+    latestObservedAt,
+    READINESS_STATUS_STALE_MS,
+    `${openish.length}/${backends.length} backend resource signal(s) are open or near capacity`,
+  );
+}
+
+function shipReadinessSources(
+  status: FleetStatus,
+  inputs: AutonomousShipReadinessInputs,
+): FleetReadinessSourceHealth[] {
+  const daemonDetail = status.daemon.running
+    ? `daemon running; last tick ${status.daemon.lastTickAt ?? 'unknown'}`
+    : 'daemon is stopped';
+  const daemonSource = readinessSource(
+    'daemon',
+    'Daemon',
+    status.daemon.running ? 'healthy' : 'blocked',
+    status.daemon.lastTickAt,
+    READINESS_DAEMON_STALE_MS,
+    daemonDetail,
+  );
+
+  const guardHealth = status.guardHealth;
+  const guardSource = guardHealth
+    ? readinessSource(
+        'guard',
+        'Guard Health',
+        guardHealth.blocks.length > 0 ? 'blocked' : 'healthy',
+        guardHealth.generatedAt,
+        READINESS_STATUS_STALE_MS,
+        guardHealth.blocks.length > 0
+          ? guardHealth.blocks[0]?.detail ?? 'guard health is blocking autonomous work'
+          : 'guard health is clear',
+      )
+    : readinessSource(
+        'guard',
+        'Guard Health',
+        'unknown',
+        null,
+        READINESS_STATUS_STALE_MS,
+        'guard health diagnosis is unavailable',
+      );
+
+  const readiness = status.autoMergeReadiness;
+  const autoMergeSource = readiness
+    ? readinessSource(
+        'auto-merge',
+        'Auto-Merge Gate',
+        readiness.enabled ? 'healthy' : 'blocked',
+        inputs.generatedAt,
+        READINESS_STATUS_STALE_MS,
+        readiness.enabled
+          ? `${readiness.preflightReady} ready, ${readiness.needsVerification} need verification, ${readiness.blocked} blocked`
+          : 'auto-merge is disabled',
+      )
+    : readinessSource(
+        'auto-merge',
+        'Auto-Merge Gate',
+        'unavailable',
+        null,
+        READINESS_STATUS_STALE_MS,
+        'auto-merge readiness source is unavailable',
+      );
+
+  const queueSource = readinessSource(
+    'queue',
+    'Queue Snapshot',
+    inputs.queueSourceStatus,
+    inputs.queueSnapshotAt,
+    READINESS_QUEUE_STALE_MS,
+    inputs.queueSourceDetail,
+  );
+
+  const resourcesSource = resourceReadinessSource(status, inputs.generatedAt);
+
+  const direction = status.autonomyDirection;
+  const directionSource = direction
+    ? readinessSource(
+        'direction',
+        'Autonomy Direction',
+        'healthy',
+        direction.generatedAt,
+        READINESS_STATUS_STALE_MS,
+        `${direction.mode} recommendation with ${direction.confidence} confidence`,
+      )
+    : readinessSource(
+        'direction',
+        'Autonomy Direction',
+        'unknown',
+        null,
+        READINESS_STATUS_STALE_MS,
+        'autonomy direction summary is unavailable',
+      );
+
+  return [daemonSource, guardSource, autoMergeSource, queueSource, resourcesSource, directionSource];
+}
+
+function readinessSourceSummary(sources: FleetReadinessSourceHealth[]): Record<FleetReadinessSourceStatus, number> {
+  const summary: Record<FleetReadinessSourceStatus, number> = {
+    healthy: 0,
+    degraded: 0,
+    blocked: 0,
+    unavailable: 0,
+    unknown: 0,
+  };
+  for (const source of sources) summary[source.status]++;
+  return summary;
+}
+
+function readinessFreshnessSummary(
+  generatedAt: string,
+  sources: FleetReadinessSourceHealth[],
+): FleetAutonomousShipReadinessStatus['freshness'] {
+  const observed = sources
+    .map((source) => source.observedAt)
+    .filter((ts): ts is string => typeof ts === 'string' && Number.isFinite(Date.parse(ts)))
+    .sort((a, b) => Date.parse(a) - Date.parse(b));
+  const ageValues = sources
+    .map((source) => source.ageMs)
+    .filter((age): age is number => typeof age === 'number' && Number.isFinite(age));
+  const staleSources = sources.filter((source) => source.freshness === 'stale').length;
+  const unknownSources = sources.filter((source) => source.freshness === 'unknown').length;
+  return {
+    generatedAt,
+    overall: staleSources > 0 ? 'stale' : unknownSources > 0 ? 'unknown' : 'fresh',
+    freshestAt: observed.length > 0 ? observed[observed.length - 1]! : null,
+    stalestAt: observed.length > 0 ? observed[0]! : null,
+    maxAgeMs: ageValues.length > 0 ? Math.max(...ageValues) : null,
+    staleSources,
+    unknownSources,
+  };
+}
+
+function chooseReadinessBlocker(
+  status: FleetStatus,
+  sources: FleetReadinessSourceHealth[],
+): FleetAutonomousShipReadinessBlocker | null {
+  if (status.killed) {
+    return readinessBlocker(
+      'kill-switch',
+      'Fleet paused',
+      'The global kill switch is engaged, so autonomous shipping is paused.',
+      'critical',
+      'fleet',
+    );
+  }
+  if (!status.daemon.running) {
+    return readinessBlocker(
+      'daemon-stopped',
+      'Daemon stopped',
+      'The daemon is stopped; no autonomous dispatch or merge drain can run.',
+      'critical',
+      'daemon',
+    );
+  }
+  const guardBlock = status.guardHealth?.blocks?.[0];
+  if (guardBlock) {
+    return readinessBlocker('guard-block', 'Guard block', guardBlock.detail, 'critical', 'guard');
+  }
+  const readiness = status.autoMergeReadiness;
+  if (!readiness) {
+    return readinessBlocker(
+      'auto-merge-readiness-unavailable',
+      'Auto-merge status unavailable',
+      'The auto-merge readiness source could not be read.',
+      'high',
+      'auto-merge',
+    );
+  }
+  if (!readiness.enabled) {
+    return readinessBlocker(
+      'auto-merge-disabled',
+      'Auto-merge disabled',
+      'Autonomous shipping cannot drain proposals while auto-merge is disabled.',
+      'high',
+      'auto-merge',
+    );
+  }
+  if ((status.proposals.awaitingHostMerge ?? 0) > 0) {
+    return readinessBlocker(
+      'host-handoff',
+      'Host PR handoff',
+      `${status.proposals.awaitingHostMerge} proposal(s) are waiting for host merge reconciliation.`,
+      'high',
+      'auto-merge',
+    );
+  }
+  if (readiness.preflightReady > 0) {
+    return null;
+  }
+  if (readiness.needsVerification > 0) {
+    return readinessBlocker(
+      'verification-needed',
+      'Verification needed',
+      `${readiness.needsVerification} proposal(s) need verification before autonomous ship can proceed.`,
+      'high',
+      'auto-merge',
+    );
+  }
+  if (readiness.knownVerificationFailed > 0) {
+    return readinessBlocker(
+      'verification-failed',
+      'Verification failed',
+      `${readiness.knownVerificationFailed} proposal(s) have known verification failures.`,
+      'medium',
+      'auto-merge',
+    );
+  }
+  if (readiness.blocked > 0) {
+    const topReason = Object.entries(readiness.byReason)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
+    return readinessBlocker(
+      'merge-gate-blocked',
+      'Merge gate blocked',
+      topReason ? `${topReason[1]}x ${topReason[0]}` : `${readiness.blocked} proposal(s) are blocked.`,
+      'medium',
+      'auto-merge',
+    );
+  }
+  const queueSource = sources.find((source) => source.id === 'queue');
+  if (
+    status.queue.backlogItems === 0 &&
+    status.proposals.pending === 0 &&
+    queueSource &&
+    (queueSource.status === 'unknown' || queueSource.status === 'unavailable')
+  ) {
+    return readinessBlocker(
+      'queue-source-unavailable',
+      'Queue source unavailable',
+      queueSource.detail,
+      'medium',
+      'queue',
+    );
+  }
+  const resourceSource = sources.find((source) => source.id === 'resources');
+  if (resourceSource?.status === 'blocked' || resourceSource?.status === 'unavailable') {
+    return readinessBlocker(
+      'resources-blocked',
+      'Resources blocked',
+      resourceSource.detail,
+      'medium',
+      'resources',
+    );
+  }
+  if ((status.queue.eligibleBacklogItems ?? status.queue.backlogItems) > 0 && status.proposals.pending === 0) {
+    return readinessBlocker(
+      'proposal-production-needed',
+      'Proposal production needed',
+      'Backlog work is visible, but there are no pending proposals ready to ship.',
+      'medium',
+      'queue',
+    );
+  }
+  return null;
+}
+
+function readinessConfidence(summary: Record<FleetReadinessSourceStatus, number>): FleetAutonomousShipReadinessConfidence {
+  if (summary.unavailable > 0 || summary.unknown > 0) return 'low';
+  if (summary.degraded > 0) return 'medium';
+  return 'high';
+}
+
+function readinessVerdict(
+  status: FleetStatus,
+  summary: Record<FleetReadinessSourceStatus, number>,
+  topBlocker: FleetAutonomousShipReadinessBlocker | null,
+): FleetAutonomousShipReadinessVerdict {
+  if (topBlocker && readinessPriorityRank(topBlocker.severity) <= readinessPriorityRank('high')) {
+    return 'blocked';
+  }
+  if (status.autoMergeReadiness?.preflightReady && status.autoMergeReadiness.preflightReady > 0) {
+    return summary.degraded > 0 || summary.unavailable > 0 || summary.unknown > 0 ? 'degraded' : 'ready';
+  }
+  if (
+    status.queue.backlogItems === 0 &&
+    status.proposals.pending === 0 &&
+    (status.proposals.awaitingHostMerge ?? 0) === 0
+  ) {
+    return summary.degraded > 0 || summary.unavailable > 0 || summary.unknown > 0 ? 'unknown' : 'idle';
+  }
+  return 'degraded';
+}
+
+function buildAutonomousShipReadiness(
+  status: FleetStatus,
+  inputs: AutonomousShipReadinessInputs,
+): FleetAutonomousShipReadinessStatus {
+  const sources = shipReadinessSources(status, inputs);
+  const sourceSummary = readinessSourceSummary(sources);
+  const topBlocker = chooseReadinessBlocker(status, sources);
+  const primaryAction = (status.nextActions ?? [])[0] ?? null;
+  return {
+    verdict: readinessVerdict(status, sourceSummary, topBlocker),
+    confidence: readinessConfidence(sourceSummary),
+    freshness: readinessFreshnessSummary(inputs.generatedAt, sources),
+    topBlocker,
+    primaryAction,
+    sources,
+    sourceSummary,
+  };
 }
 
 async function buildAutoMergeReadinessStatus(
@@ -1343,6 +1874,7 @@ function buildAutonomyDirectionSummary(report: ResourceStrategyReport): FleetAut
       daemonBudgetLevel: report.budgets.daemonBudgetLevel,
       daemonSpentTodayUsd: report.budgets.daemonSpentTodayUsd,
     },
+    productionVelocity: report.productionVelocity,
   };
 }
 
@@ -1436,12 +1968,21 @@ function buildRepoExecutionCoverage(enrolledRepos: ReadonlySet<string>): NonNull
   let reposWithProjects = 0;
   let reposWithVerifyCommands = 0;
   const packageManagers = new Map<RepoPackageManager, Set<string>>();
+  const missingVerifyCommands: NonNullable<NonNullable<FleetQueueRepoCoverage['executionProfiles']>['missingVerifyCommands']> = [];
 
   for (const repo of enrolledRepos) {
     try {
       const profile = detectRepoExecutionProfile(repo);
       if (profile.projects.length > 0) reposWithProjects++;
       if (profile.verifyCommands.length > 0) reposWithVerifyCommands++;
+      else {
+        missingVerifyCommands.push({
+          repo,
+          name: basename(repo),
+          projectKinds: [...new Set(profile.projects.map((project) => project.kind))].sort(),
+          reason: profile.noVerifyReason ?? 'no detected verify commands',
+        });
+      }
       for (const project of profile.projects) {
         const repos = packageManagers.get(project.packageManager) ?? new Set<string>();
         repos.add(repo);
@@ -1449,10 +1990,16 @@ function buildRepoExecutionCoverage(enrolledRepos: ReadonlySet<string>): NonNull
       }
     } catch {
       // Read-only observability only; a broken profile scan should not hide queue status.
+      missingVerifyCommands.push({
+        repo,
+        name: basename(repo),
+        projectKinds: [],
+        reason: 'repo execution profile detection failed',
+      });
     }
   }
 
-  return {
+  const result: NonNullable<FleetQueueRepoCoverage['executionProfiles']> = {
     reposWithProjects,
     reposWithVerifyCommands,
     reposMissingVerifyCommands: Math.max(0, enrolledRepos.size - reposWithVerifyCommands),
@@ -1460,6 +2007,10 @@ function buildRepoExecutionCoverage(enrolledRepos: ReadonlySet<string>): NonNull
       .map(([manager, repos]) => ({ manager, repos: repos.size }))
       .sort((a, b) => b.repos - a.repos || a.manager.localeCompare(b.manager)),
   };
+  if (missingVerifyCommands.length > 0) {
+    result.missingVerifyCommands = missingVerifyCommands.sort((a, b) => a.name.localeCompare(b.name));
+  }
+  return result;
 }
 
 function configCooldownMs(cfg: AshlrConfig): number | undefined {

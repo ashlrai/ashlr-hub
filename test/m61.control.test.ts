@@ -123,6 +123,12 @@ describe('buildControlSnapshot — full shape (M61)', () => {
     expect(snap.fleet).toHaveProperty('proposals');
     expect(snap.fleet).toHaveProperty('merges');
     expect(snap.fleet).toHaveProperty('killed');
+    expect(snap.fleet.autonomousShipReadiness).toMatchObject({
+      verdict: expect.any(String),
+      confidence: expect.any(String),
+      freshness: expect.any(Object),
+      sourceSummary: expect.any(Object),
+    });
     expect(snap.fleet.autonomyDirection).toMatchObject({
       mode: expect.any(String),
       confidence: expect.any(String),

@@ -1093,7 +1093,7 @@ export async function runGoal(
           );
           emit(sink, { kind: 'log', text: `api-model engine "${engine}" — in-process sandboxed run` });
 
-          const { runApiModelSandboxed } = await import('./sandboxed-engine.js');
+          const { captureSandboxedProposal, runApiModelSandboxed } = await import('./sandboxed-engine.js');
           const titrrMax = Math.max(1, (opts as RunOptions & { titrrMaxAttempts?: number }).titrrMaxAttempts ?? TITRR_MAX_ATTEMPTS);
 
           const wtMod = await import('../sandbox/worktree.js');
@@ -1117,7 +1117,7 @@ export async function runGoal(
                   sourceRepo: cwd,
                   model: modelEnv,
                   budget: opts.budget,
-                  propose: isLastAttempt,
+                  propose: false,
                   existingWorktree: titrrSandbox,
                   workItemId: opts.workItemId,
                   workSource: opts.workSource,
@@ -1132,22 +1132,46 @@ export async function runGoal(
                 const realTestLoop = (cfg.foundry as any)?.realTestLoop ?? true;
                 const titrrResult = realTestLoop ? await titrrTestRun(titrrSandbox.worktreePath, cfg) : null;
                 if (!titrrResult || titrrResult.ok) {
-                  if (!isLastAttempt) {
-                    const propR = await runApiModelSandboxed(engineId, apiGoal, cfg, {
-                      sourceRepo: cwd,
-                      model: modelEnv,
-                      budget: opts.budget,
-                      propose: true,
-                      existingWorktree: titrrSandbox,
-                      workItemId: opts.workItemId,
-                      workSource: opts.workSource,
-                    });
-                    lastApiR = propR;
-                  }
+                  const propR = await captureSandboxedProposal(engineId, goal, cfg, {
+                    sourceRepo: cwd,
+                    model: modelEnv,
+                    budget: opts.budget,
+                    runId: lastApiR.state.id,
+                    existingWorktree: titrrSandbox,
+                    workItemId: opts.workItemId,
+                    workSource: opts.workSource,
+                    sourceLabel: 'TITRR api-model',
+                  });
+                  lastApiR = {
+                    ...lastApiR,
+                    proposalId: propR.proposalId,
+                    proposalOutcome: propR.proposalOutcome,
+                    state: { ...lastApiR.state, proposalOutcome: propR.proposalOutcome },
+                  };
                   break;
                 }
 
-                if (isLastAttempt) break;
+                if (isLastAttempt) {
+                  const propR = await captureSandboxedProposal(engineId, goal, cfg, {
+                    sourceRepo: cwd,
+                    model: modelEnv,
+                    budget: opts.budget,
+                    runId: lastApiR.state.id,
+                    existingWorktree: titrrSandbox,
+                    workItemId: opts.workItemId,
+                    workSource: opts.workSource,
+                    isPartial: true,
+                    forceGateBlockReason: `tests: still failing after ${titrrAttempt} attempt(s)`,
+                    sourceLabel: 'TITRR api-model',
+                  });
+                  lastApiR = {
+                    ...lastApiR,
+                    proposalId: propR.proposalId,
+                    proposalOutcome: propR.proposalOutcome,
+                    state: { ...lastApiR.state, proposalOutcome: propR.proposalOutcome },
+                  };
+                  break;
+                }
                 apiGoal = `${goal}\n\n[REPAIR] Tests failed:\n${titrrResult.output.slice(0, 2000)}`;
               }
             } finally {
@@ -1190,7 +1214,7 @@ export async function runGoal(
         // annotated with the TITRR outcome. Degrades gracefully when no test command
         // is detected (no-test-command repo → behavior identical to pre-M78).
         if (opts.sandboxEngine === true || foundryWantsSandbox(cfg, engineId)) {
-          const { runEngineSandboxed } = await import('./sandboxed-engine.js');
+          const { captureSandboxedProposal, runEngineSandboxed } = await import('./sandboxed-engine.js');
           const titrrMax = Math.max(1, (opts as RunOptions & { titrrMaxAttempts?: number }).titrrMaxAttempts ?? TITRR_MAX_ATTEMPTS);
 
           // Create one shared sandbox worktree for all TITRR attempts so the engine
@@ -1213,13 +1237,15 @@ export async function runGoal(
             while (titrrAttempt < titrrMax) {
               titrrAttempt++;
 
-              // propose:false on all but the final attempt so only one proposal is filed.
+              // Run every TITRR model attempt without filing. Once tests pass
+              // (or no test command exists), capture the already-verified
+              // sandbox diff exactly once without invoking the model again.
               const isLastAttempt = titrrAttempt === titrrMax;
               const r = await runEngineSandboxed(engineId, titrrGoal, cfg, {
                 sourceRepo: cwd,
                 model: modelEnv,
                 budget: opts.budget,
-                propose: isLastAttempt,
+                propose: false,
                 existingWorktree: titrrSandbox ?? undefined,
                 workItemId: opts.workItemId,
                 workSource: opts.workSource,
@@ -1250,36 +1276,46 @@ export async function runGoal(
               if (titrrResult === null) {
                 // No test command detected — annotate and stop early.
                 titrrAnnotation = 'tests: not detected (skipped)';
-                // If we didn't propose yet, do so now.
-                if (!isLastAttempt) {
-                  const propR = await runEngineSandboxed(engineId, titrrGoal, cfg, {
+                if (titrrSandbox) {
+                  const propR = await captureSandboxedProposal(engineId, goal, cfg, {
                     sourceRepo: cwd,
                     model: modelEnv,
                     budget: opts.budget,
-                    propose: true,
-                    existingWorktree: titrrSandbox ?? undefined,
+                    runId: lastR.state.id,
+                    existingWorktree: titrrSandbox,
                     workItemId: opts.workItemId,
                     workSource: opts.workSource,
+                    sourceLabel: 'TITRR',
                   });
-                  lastR = propR;
+                  lastR = {
+                    ...lastR,
+                    proposalId: propR.proposalId,
+                    proposalOutcome: propR.proposalOutcome,
+                    state: { ...lastR.state, proposalOutcome: propR.proposalOutcome },
+                  };
                 }
                 break;
               }
 
               if (titrrResult.ok) {
                 titrrAnnotation = `tests: pass (attempt ${titrrAttempt})`;
-                // If we didn't propose yet (tests passed before last attempt), propose now.
-                if (!isLastAttempt) {
-                  const propR = await runEngineSandboxed(engineId, titrrGoal, cfg, {
+                if (titrrSandbox) {
+                  const propR = await captureSandboxedProposal(engineId, goal, cfg, {
                     sourceRepo: cwd,
                     model: modelEnv,
                     budget: opts.budget,
-                    propose: true,
-                    existingWorktree: titrrSandbox ?? undefined,
+                    runId: lastR.state.id,
+                    existingWorktree: titrrSandbox,
                     workItemId: opts.workItemId,
                     workSource: opts.workSource,
+                    sourceLabel: 'TITRR',
                   });
-                  lastR = propR;
+                  lastR = {
+                    ...lastR,
+                    proposalId: propR.proposalId,
+                    proposalOutcome: propR.proposalOutcome,
+                    state: { ...lastR.state, proposalOutcome: propR.proposalOutcome },
+                  };
                 }
                 break;
               }
@@ -1287,6 +1323,26 @@ export async function runGoal(
               // Tests failed. If this was the last attempt, annotate and exit.
               if (isLastAttempt) {
                 titrrAnnotation = `tests: still failing after ${titrrAttempt} attempt(s)`;
+                if (titrrSandbox) {
+                  const propR = await captureSandboxedProposal(engineId, goal, cfg, {
+                    sourceRepo: cwd,
+                    model: modelEnv,
+                    budget: opts.budget,
+                    runId: lastR.state.id,
+                    existingWorktree: titrrSandbox,
+                    workItemId: opts.workItemId,
+                    workSource: opts.workSource,
+                    isPartial: true,
+                    forceGateBlockReason: titrrAnnotation,
+                    sourceLabel: 'TITRR',
+                  });
+                  lastR = {
+                    ...lastR,
+                    proposalId: propR.proposalId,
+                    proposalOutcome: propR.proposalOutcome,
+                    state: { ...lastR.state, proposalOutcome: propR.proposalOutcome },
+                  };
+                }
                 break;
               }
 

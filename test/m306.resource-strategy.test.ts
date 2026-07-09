@@ -262,6 +262,80 @@ describe('buildResourceStrategyReport', () => {
     expect(report.reasons.join(' ')).toContain('pending proposal');
   });
 
+  it('does not let stale pending proposals force verify-only under production velocity', async () => {
+    const staleA = outcome({
+      proposal: {
+        ...outcome().proposal,
+        id: 'prop-stale-a',
+        title: 'Stale proposal A',
+      },
+      lastActivityAt: '2026-06-30T00:00:00.000Z',
+    });
+    const staleB = outcome({
+      proposal: {
+        ...outcome().proposal,
+        id: 'prop-stale-b',
+        title: 'Stale proposal B',
+      },
+      lastActivityAt: '2026-06-30T01:00:00.000Z',
+    });
+
+    const report = await buildResourceStrategyReport(
+      cfg({
+        foundry: {
+          productionVelocity: { enabled: true, profile: 'resource-control', stalePendingTtlHours: 24 },
+        } as NonNullable<AshlrConfig['foundry']>,
+      }),
+      {
+        now: new Date('2026-07-02T12:00:00.000Z'),
+        deps: deps({
+          buildFleetStatus: async () => fleet({
+            queue: { backlogItems: 4 },
+            proposals: { pending: 2, frontierPending: 0, applied: 0 },
+          }),
+          listOutcomeRecords: () => [staleA, staleB],
+        }),
+      },
+    );
+
+    expect(report.mode).toBe('backlog-build');
+    expect(report.outcomes.stalePending).toBe(2);
+    expect(report.reasons.join(' ')).toContain('will not starve new dispatch');
+  });
+
+  it('keeps fresh pending proposals in verify-only under production velocity', async () => {
+    const fresh = outcome({
+      proposal: {
+        ...outcome().proposal,
+        id: 'prop-fresh',
+        title: 'Fresh proposal',
+      },
+      lastActivityAt: '2026-07-02T11:30:00.000Z',
+    });
+
+    const report = await buildResourceStrategyReport(
+      cfg({
+        foundry: {
+          productionVelocity: { enabled: true, profile: 'resource-control', stalePendingTtlHours: 24 },
+        } as NonNullable<AshlrConfig['foundry']>,
+      }),
+      {
+        now: new Date('2026-07-02T12:00:00.000Z'),
+        deps: deps({
+          buildFleetStatus: async () => fleet({
+            queue: { backlogItems: 4 },
+            proposals: { pending: 1, frontierPending: 0, applied: 0 },
+          }),
+          listOutcomeRecords: () => [fresh],
+        }),
+      },
+    );
+
+    expect(report.mode).toBe('verify-only');
+    expect(report.outcomes.stalePending).toBe(0);
+    expect(report.reasons.join(' ')).toContain('pending proposal');
+  });
+
   it('ignores verification failures after proposals are no longer pending', async () => {
     const rejected = outcome({
       proposal: {

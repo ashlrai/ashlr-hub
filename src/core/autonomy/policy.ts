@@ -96,6 +96,17 @@ export function evaluateAutonomyPolicy(
       : allow('T2', 'apply-local-branch', 'branch-target evidence passed; stage a local review branch');
   }
   if (pack.target === 'main') {
+    if (pack.trustBasis === 'evidence') {
+      if (!pack.remotePreferred) {
+        return refuse('evidence main merge requires protected remote PR handoff; local merge fallback is not permitted');
+      }
+      if (!pack.gates.remoteProtection?.ok) {
+        return refuse(`remote protection gate failed: ${pack.gates.remoteProtection?.detail ?? 'missing protected remote evidence'}`);
+      }
+      if (pack.verification.commandKinds.length === 0) {
+        return refuse('evidence main merge requires at least one real verification command');
+      }
+    }
     return allow(
       'T4',
       'merge-main',

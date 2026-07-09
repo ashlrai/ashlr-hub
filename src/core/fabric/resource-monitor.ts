@@ -215,7 +215,8 @@ interface ResourceCfgShape {
   claude?: ClaudeResourceCfg;
   overrides?: Record<string, ResourceOverrideCfg>;
   protectPct?: number;
-  nim?: { costPerMTokenOut?: number };
+  nim?: { costPerMTokenOut?: number; maxConcurrent?: number };
+  kimi?: { costPerMTokenOut?: number; maxConcurrent?: number };
   local?: { maxConcurrent?: number; baseUrl?: string };
 }
 
@@ -307,6 +308,7 @@ function extractResourceCfg(cfg: unknown): ResourceCfgShape {
       overrides: parseResourceOverrides(f['resourceOverrides']),
       protectPct,
       nim: (f['nim'] as Record<string, unknown> | undefined) as ResourceCfgShape['nim'],
+      kimi: (f['kimi'] as Record<string, unknown> | undefined) as ResourceCfgShape['kimi'],
       local: (f['local'] as Record<string, unknown> | undefined) as ResourceCfgShape['local'],
     };
   } catch {
@@ -322,6 +324,7 @@ function resourceSnapshotCacheKey(cfg: unknown, backends: EngineId[]): string {
     overrides: rcfg.overrides ?? null,
     protectPct: rcfg.protectPct ?? null,
     nim: rcfg.nim ?? null,
+    kimi: rcfg.kimi ?? null,
     local: rcfg.local ?? null,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? null,
   });
@@ -1024,18 +1027,29 @@ function senseCodexState(): BackendResourceState {
   }
 }
 
-function senseNimState(rcfg: ResourceCfgShape): BackendResourceState {
+function positiveConcurrentCap(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.max(1, Math.floor(value))
+    : null;
+}
+
+function senseReactiveApiState(
+  backend: EngineId,
+  cfg: { costPerMTokenOut?: number; maxConcurrent?: number } | undefined,
+  defaults: { costPerMTokenOut: number; label: string },
+): BackendResourceState {
   const now = new Date().toISOString();
-  const backoff = backoffStore.get('nim');
-  const costPerMTokenOut = rcfg.nim?.costPerMTokenOut ?? 0.42;
+  const backoff = backoffStore.get(backend);
+  const costPerMTokenOut = cfg?.costPerMTokenOut ?? defaults.costPerMTokenOut;
+  const maxConcurrent = positiveConcurrentCap(cfg?.maxConcurrent);
 
   if (backoff && backoff.until > Date.now()) {
     return {
-      backend: 'nim',
+      backend,
       availability: backoff.until - Date.now() > 60_000 ? 'exhausted' : 'throttled',
       usedPct: null,
-      cap: null,
-      capUnit: null,
+      cap: maxConcurrent,
+      capUnit: maxConcurrent !== null ? 'concurrent' : null,
       capWindow: null,
       resetsAt: Math.floor(backoff.until / 1000),
       costPerMTokenOut,
@@ -1047,19 +1061,29 @@ function senseNimState(rcfg: ResourceCfgShape): BackendResourceState {
   }
 
   return {
-    backend: 'nim',
+    backend,
     availability: 'open',
     usedPct: null,
-    cap: null,
-    capUnit: null,
+    cap: maxConcurrent,
+    capUnit: maxConcurrent !== null ? 'concurrent' : null,
     capWindow: null,
     resetsAt: null,
     costPerMTokenOut,
     p50LatencyMs: null,
     snapshotAt: now,
-    reason: 'nim: no proactive signal available — treating as open',
+    reason: maxConcurrent !== null
+      ? `${defaults.label}: no proactive quota signal; explicit maxConcurrent=${maxConcurrent}`
+      : `${defaults.label}: no proactive signal available — treating as open`,
     backoffUntilMs: null,
   };
+}
+
+function senseNimState(rcfg: ResourceCfgShape): BackendResourceState {
+  return senseReactiveApiState('nim', rcfg.nim, { costPerMTokenOut: 0.42, label: 'nim' });
+}
+
+function senseKimiState(rcfg: ResourceCfgShape): BackendResourceState {
+  return senseReactiveApiState('kimi', rcfg.kimi, { costPerMTokenOut: 0.7, label: 'kimi' });
 }
 
 /** Ping Ollama /api/ps with a 2-second timeout. Returns null on timeout/error. */
@@ -1219,6 +1243,7 @@ export async function getBackendResourceState(
       case 'claude':    return await senseClaudeState(rcfg);
       case 'codex':     return senseCodexState();
       case 'nim':       return senseNimState(rcfg);
+      case 'kimi':      return senseKimiState(rcfg);
       case 'builtin':   return builtinState('builtin');
       case 'local-coder': return await senseOllamaState('local-coder', rcfg);
       default:          return builtinState(backend);
@@ -1269,7 +1294,7 @@ export async function getResourceSnapshot(cfg: unknown): Promise<ResourceSnapsho
     const now = Date.now();
 
     // Determine which backends to sense (based on allowedBackends config)
-    const backendsToSense: EngineId[] = ['claude', 'codex', 'nim', 'local-coder', 'builtin'];
+    const backendsToSense: EngineId[] = ['claude', 'codex', 'nim', 'kimi', 'local-coder', 'builtin'];
     try {
       if (typeof cfg === 'object' && cfg !== null) {
         const foundry = (cfg as Record<string, unknown>)['foundry'];
@@ -1279,13 +1304,13 @@ export async function getResourceSnapshot(cfg: unknown): Promise<ResourceSnapsho
             // Sense only configured backends + builtin (always)
             const configuredSet = new Set<EngineId>(
               (allowed as string[]).filter((b): b is EngineId =>
-                ['builtin', 'local-coder', 'claude', 'codex', 'nim', 'ashlrcode', 'aw', 'hermes', 'opencode'].includes(b)
+                ['builtin', 'local-coder', 'claude', 'codex', 'nim', 'kimi', 'ashlrcode', 'aw', 'hermes', 'opencode'].includes(b)
               )
             );
             configuredSet.add('builtin');
             // Replace with configured set but keep all unique
             backendsToSense.splice(0, backendsToSense.length,
-              ...(['claude', 'codex', 'nim', 'local-coder', 'builtin'] as EngineId[]).filter(b => configuredSet.has(b))
+              ...(['claude', 'codex', 'nim', 'kimi', 'local-coder', 'builtin'] as EngineId[]).filter(b => configuredSet.has(b))
             );
           }
         }

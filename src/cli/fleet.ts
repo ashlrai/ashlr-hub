@@ -114,6 +114,19 @@ export function formatFleetStatus(s: FleetStatus): string {
         `  verify roots:   ${profile.reposWithVerifyCommands}/${repoCoverage.existing} repos ` +
           `(${profile.reposMissingVerifyCommands} missing${managers ? `; ${managers}` : ''})`,
       );
+      if (profile.missingVerifyCommands && profile.missingVerifyCommands.length > 0) {
+        const missing = profile.missingVerifyCommands
+          .slice(0, 3)
+          .map((row) => {
+            const kind = row.projectKinds.length > 0 ? row.projectKinds.join('+') : 'unknown';
+            return `${row.name} [${kind}: ${row.reason}]`;
+          })
+          .join('; ');
+        const more = profile.missingVerifyCommands.length > 3
+          ? ` (+${profile.missingVerifyCommands.length - 3} more)`
+          : '';
+        lines.push(`  missing verify: ${missing}${more}`);
+      }
     }
   }
   if (Array.isArray(s.queue.next) && s.queue.next.length > 0) {
@@ -261,6 +274,22 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  // Autonomous ship readiness
+  const shipReadiness = s.autonomousShipReadiness;
+  lines.push('Autonomous ship readiness:');
+  if (!shipReadiness) {
+    lines.push('  unavailable');
+  } else {
+    lines.push(
+      `  verdict:    ${shipReadiness.verdict} ` +
+        `(${shipReadiness.confidence} confidence, ${shipReadiness.freshness.overall} sources)`,
+    );
+    lines.push(`  top block:  ${formatReadinessBlocker(shipReadiness.topBlocker)}`);
+    lines.push(`  action:     ${formatReadinessAction(shipReadiness.primaryAction)}`);
+    lines.push(`  sources:    ${formatReadinessSources(shipReadiness.sources)}`);
+  }
+  lines.push('');
+
   // Guard health
   const guardHealth = s.guardHealth;
   lines.push('Guard health:');
@@ -336,6 +365,10 @@ export function formatFleetStatus(s: FleetStatus): string {
     );
     lines.push(`  guards:     ${direction.guardHealth.blocked ? `${direction.guardHealth.blocks} block(s)` : 'ok'}`);
     lines.push(`  budget:     ${direction.budgets.daemonBudgetLevel}`);
+    lines.push(
+      `  velocity:   ${direction.productionVelocity.enabled ? direction.productionVelocity.profile : 'off'} ` +
+        `(slots=${direction.productionVelocity.maxSlotsPerBackend}, fill=${direction.productionVelocity.fillQueueToSlots ? 'yes' : 'no'})`,
+    );
     if (direction.reasons.length > 0) {
       lines.push(`  reason:     ${direction.reasons[0]}`);
     }
@@ -359,6 +392,27 @@ function formatBackendResource(resource: NonNullable<FleetStatus['backends'][num
     parts.push(`reason=${compactResourceReason(resource.reason)}`);
   }
   return parts.join(' ');
+}
+
+function formatReadinessBlocker(blocker: NonNullable<FleetStatus['autonomousShipReadiness']>['topBlocker']): string {
+  if (!blocker) return 'none';
+  return `${blocker.label} (${blocker.severity}): ${compactResourceReason(blocker.detail)}`;
+}
+
+function formatReadinessAction(action: NonNullable<FleetStatus['autonomousShipReadiness']>['primaryAction']): string {
+  if (!action) return 'none';
+  const target = action.target ? ` [${formatActionTarget(action.target)}]` : '';
+  return `${action.label}${target}: ${compactResourceReason(action.detail)}`;
+}
+
+function formatReadinessSources(
+  sources: NonNullable<FleetStatus['autonomousShipReadiness']>['sources'],
+): string {
+  if (!Array.isArray(sources) || sources.length === 0) return 'unavailable';
+  return sources
+    .slice(0, 8)
+    .map((source) => `${source.id}:${source.badge}`)
+    .join(', ');
 }
 
 function compactResourceReason(reason: string): string {
@@ -430,6 +484,21 @@ export function formatResourceStrategyReport(report: ResourceStrategyReport): st
   lines.push(`  outcomes:    ${report.outcomes.records} record(s), ${report.outcomes.readyEvidence} ready, ${report.outcomes.verificationFailures} failed verification`);
   lines.push(`  ecosystem:   ${report.ecosystem.posture} (${report.ecosystem.summary.fail} fail, ${report.ecosystem.summary.warn} warn)`);
   lines.push(`  budget:      daemon ${report.budgets.daemonBudgetLevel} $${report.budgets.daemonSpentTodayUsd.toFixed(4)} spent today`);
+  lines.push(
+    `  velocity:    ${report.productionVelocity.enabled ? report.productionVelocity.profile : 'off'} ` +
+      `(gateway=${report.productionVelocity.flags.gateway ? 'on' : 'off'}, ` +
+      `resource=${report.productionVelocity.flags.resourceAware ? 'on' : 'off'}, ` +
+      `concurrent=${report.productionVelocity.flags.concurrentDispatch ? 'on' : 'off'}, ` +
+      `workhorse=${report.productionVelocity.flags.workhorseDispatch ? 'on' : 'off'})`,
+  );
+  if (report.productionVelocity.enabled) {
+    const caps = report.productionVelocity.caps;
+    lines.push(
+      `  caps:        local=${caps.localMaxConcurrent ?? 'unset'} ` +
+        `nim=${caps.nimMaxConcurrent ?? 'unset'} kimi=${caps.kimiMaxConcurrent ?? 'unset'} ` +
+        `slots/backend=${report.productionVelocity.maxSlotsPerBackend}`,
+    );
+  }
 
   if (report.resources.backends.length > 0) {
     lines.push('');

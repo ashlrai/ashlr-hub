@@ -8,11 +8,40 @@
  */
 
 import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
-import { basename, join, relative, resolve } from 'node:path';
-import type { VerifyCommand } from './verify-commands.js';
+import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import type { VerifyCommand, VerifyCommandProfile } from './verify-commands.js';
 
-export type RepoPackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun' | 'cargo' | 'make' | 'just' | 'bats';
-export type RepoProjectKind = 'node' | 'rust' | 'make' | 'just' | 'bats';
+export type RepoPackageManager =
+  | 'npm'
+  | 'pnpm'
+  | 'yarn'
+  | 'bun'
+  | 'cargo'
+  | 'make'
+  | 'just'
+  | 'bats'
+  | 'python'
+  | 'brew'
+  | 'custom';
+export type RepoProjectKind =
+  | 'node'
+  | 'rust'
+  | 'python'
+  | 'homebrew-formula'
+  | 'make'
+  | 'just'
+  | 'bats'
+  | 'verify-contract';
+export type RepoVerifyContractMode = 'replace-detected' | 'augment-detected';
+
+export interface RepoVerifyContractSummary {
+  present: boolean;
+  valid: boolean;
+  schemaVersion?: 1;
+  mode?: RepoVerifyContractMode;
+  commandCount: number;
+  errors: string[];
+}
 
 export interface RepoProjectProfile {
   root: string;
@@ -29,6 +58,8 @@ export interface RepoExecutionProfile {
   projects: RepoProjectProfile[];
   primaryProject: RepoProjectProfile | null;
   verifyCommands: VerifyCommand[];
+  verifyContract?: RepoVerifyContractSummary;
+  noVerifyReason: string | null;
 }
 
 interface PackageJsonSubset {
@@ -49,6 +80,12 @@ const SKIP_DIRS = new Set([
   'node_modules',
   'target',
 ]);
+
+const VERIFY_CONTRACT_FILE = 'ashlr.verify.json';
+const CONTRACT_MAX_TIMEOUT_MS = 600_000;
+const VERIFY_COMMAND_KINDS = new Set<VerifyCommand['kind']>(['typecheck', 'test', 'lint']);
+const VERIFY_CONTRACT_MODES = new Set<RepoVerifyContractMode>(['replace-detected', 'augment-detected']);
+const VERIFY_COMMAND_PROFILES = new Set<VerifyCommandProfile>(['quick', 'merge', 'deep']);
 
 function readPackageJson(root: string): PackageJsonSubset | null {
   try {
@@ -86,6 +123,190 @@ function hasConfigFile(root: string, prefix: string): boolean {
 
 function hasFile(root: string, name: string): boolean {
   return existsSync(join(root, name));
+}
+
+function readText(root: string, name: string): string | null {
+  try {
+    return readFileSync(join(root, name), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function hasTomlTool(root: string, tool: string): boolean {
+  const raw = readText(root, 'pyproject.toml');
+  if (!raw) return false;
+  return new RegExp(`^\\s*\\[tool\\.${tool}(?:\\.|\\])`, 'm').test(raw);
+}
+
+function hasIniSection(root: string, fileName: string, section: string): boolean {
+  const raw = readText(root, fileName);
+  if (!raw) return false;
+  return new RegExp(`^\\s*\\[${section}\\]`, 'm').test(raw);
+}
+
+function safeRelative(root: string, child: string): string | null {
+  const rel = relative(resolve(root), resolve(child));
+  return rel === '' || rel.startsWith('..') || isAbsolute(rel) ? null : rel.replace(/\\/g, '/');
+}
+
+function safeContractCwd(repoRoot: string, cwd: unknown, errors: string[], label: string): string | null {
+  if (cwd === undefined) return resolve(repoRoot);
+  if (typeof cwd !== 'string' || cwd.trim().length === 0) {
+    errors.push(`${label}.cwd must be a non-empty string when provided`);
+    return null;
+  }
+  const resolved = resolve(repoRoot, cwd);
+  const rel = relative(resolve(repoRoot), resolved);
+  if (rel !== '' && (rel.startsWith('..') || isAbsolute(rel))) {
+    errors.push(`${label}.cwd must stay inside the repo`);
+    return null;
+  }
+  return resolved;
+}
+
+function parseContractProfiles(raw: unknown, errors: string[], label: string): VerifyCommandProfile[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    errors.push(`${label}.profiles must be an array`);
+    return undefined;
+  }
+  const profiles: VerifyCommandProfile[] = [];
+  for (const [index, value] of raw.entries()) {
+    if (typeof value !== 'string' || !VERIFY_COMMAND_PROFILES.has(value as VerifyCommandProfile)) {
+      errors.push(`${label}.profiles[${index}] must be quick, merge, or deep`);
+      continue;
+    }
+    profiles.push(value as VerifyCommandProfile);
+  }
+  return profiles.length > 0 ? [...new Set(profiles)] : undefined;
+}
+
+interface ParsedVerifyContract {
+  mode: RepoVerifyContractMode;
+  commands: VerifyCommand[];
+  summary: RepoVerifyContractSummary;
+}
+
+function parseVerifyContract(repoRoot: string): ParsedVerifyContract | null {
+  const path = join(repoRoot, VERIFY_CONTRACT_FILE);
+  if (!existsSync(path)) return null;
+
+  const errors: string[] = [];
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      mode: 'augment-detected',
+      commands: [],
+      summary: {
+        present: true,
+        valid: false,
+        commandCount: 0,
+        errors: [`invalid JSON: ${msg}`],
+      },
+    };
+  }
+
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    errors.push('contract root must be an object');
+  }
+  const obj = raw as Record<string, unknown>;
+  if (obj['schemaVersion'] !== 1) {
+    errors.push('schemaVersion must be 1');
+  }
+  const mode = obj['mode'];
+  if (typeof mode !== 'string' || !VERIFY_CONTRACT_MODES.has(mode as RepoVerifyContractMode)) {
+    errors.push('mode must be replace-detected or augment-detected');
+  }
+
+  const commandsRaw = obj['commands'];
+  if (!Array.isArray(commandsRaw) || commandsRaw.length === 0) {
+    errors.push('commands must be a non-empty array');
+  }
+
+  const commands: VerifyCommand[] = [];
+  if (Array.isArray(commandsRaw)) {
+    for (const [index, commandRaw] of commandsRaw.entries()) {
+      const label = `commands[${index}]`;
+      if (!commandRaw || typeof commandRaw !== 'object' || Array.isArray(commandRaw)) {
+        errors.push(`${label} must be an object`);
+        continue;
+      }
+      const command = commandRaw as Record<string, unknown>;
+      const id = command['id'];
+      const kind = command['kind'];
+      const cmd = command['cmd'];
+
+      if (typeof id !== 'string' || id.trim().length === 0) {
+        errors.push(`${label}.id must be a non-empty string`);
+        continue;
+      }
+      if (typeof kind !== 'string' || !VERIFY_COMMAND_KINDS.has(kind as VerifyCommand['kind'])) {
+        errors.push(`${label}.kind must be typecheck, test, or lint`);
+        continue;
+      }
+      if (!Array.isArray(cmd) || cmd.length === 0 || !cmd.every((part) => typeof part === 'string' && part.length > 0)) {
+        errors.push(`${label}.cmd must be a non-empty argv array of strings`);
+        continue;
+      }
+
+      const cwd = safeContractCwd(repoRoot, command['cwd'], errors, label);
+      if (!cwd) continue;
+
+      const timeoutRaw = command['timeoutMs'];
+      let timeoutMs: number | undefined;
+      if (timeoutRaw !== undefined) {
+        if (
+          typeof timeoutRaw !== 'number' ||
+          !Number.isFinite(timeoutRaw) ||
+          timeoutRaw <= 0 ||
+          timeoutRaw > CONTRACT_MAX_TIMEOUT_MS
+        ) {
+          errors.push(`${label}.timeoutMs must be a positive number at or below ${CONTRACT_MAX_TIMEOUT_MS}`);
+          continue;
+        }
+        timeoutMs = Math.floor(timeoutRaw);
+      }
+
+      const requiredRaw = command['required'];
+      if (requiredRaw !== undefined && typeof requiredRaw !== 'boolean') {
+        errors.push(`${label}.required must be a boolean when provided`);
+        continue;
+      }
+      const profiles = parseContractProfiles(command['profiles'], errors, label);
+      const vc: VerifyCommand = {
+        id,
+        kind: kind as VerifyCommand['kind'],
+        cmd: [...cmd] as string[],
+      };
+      const rel = safeRelative(repoRoot, cwd);
+      if (rel !== null) vc.cwd = cwd;
+      if (timeoutMs !== undefined) vc.timeoutMs = timeoutMs;
+      if (typeof requiredRaw === 'boolean') vc.required = requiredRaw;
+      if (profiles) vc.profiles = profiles;
+      commands.push(vc);
+    }
+  }
+
+  const valid = errors.length === 0;
+  const contractMode = VERIFY_CONTRACT_MODES.has(mode as RepoVerifyContractMode)
+    ? mode as RepoVerifyContractMode
+    : 'augment-detected';
+  return {
+    mode: contractMode,
+    commands: valid ? commands : [],
+    summary: {
+      present: true,
+      valid,
+      ...(obj['schemaVersion'] === 1 ? { schemaVersion: 1 as const } : {}),
+      ...(VERIFY_CONTRACT_MODES.has(mode as RepoVerifyContractMode) ? { mode: contractMode } : {}),
+      commandCount: valid ? commands.length : 0,
+      errors,
+    },
+  };
 }
 
 export function detectPackageManager(root: string): RepoPackageManager {
@@ -196,6 +417,107 @@ function rustProject(repoRoot: string, root: string): RepoProjectProfile | null 
   };
 }
 
+function pythonTestFiles(root: string): string[] {
+  try {
+    const testsDir = join(root, 'tests');
+    if (!safeDir(testsDir)) return [];
+    return readdirSync(testsDir)
+      .filter((file) => /^test_.*\.py$/.test(file))
+      .sort()
+      .map((file) => join('tests', file));
+  } catch {
+    return [];
+  }
+}
+
+function hasRuffConfig(root: string): boolean {
+  return hasFile(root, 'ruff.toml') || hasFile(root, '.ruff.toml') || hasTomlTool(root, 'ruff');
+}
+
+function hasMypyConfig(root: string): boolean {
+  return (
+    hasFile(root, 'mypy.ini') ||
+    hasFile(root, '.mypy.ini') ||
+    hasIniSection(root, 'setup.cfg', 'mypy') ||
+    hasTomlTool(root, 'mypy')
+  );
+}
+
+function pythonProject(repoRoot: string, root: string): RepoProjectProfile | null {
+  const hasPyproject = hasFile(root, 'pyproject.toml');
+  const hasPytestIni = hasFile(root, 'pytest.ini');
+  const hasToxIni = hasFile(root, 'tox.ini');
+  const testFiles = pythonTestFiles(root);
+  const ruffConfigured = hasRuffConfig(root);
+  const mypyConfigured = hasMypyConfig(root);
+  const hasPytestSignal = hasPyproject || hasPytestIni || hasToxIni || testFiles.length > 0;
+
+  if (!hasPytestSignal && !ruffConfigured && !mypyConfigured) return null;
+
+  const commands: VerifyCommand[] = [];
+  if (mypyConfigured) commands.push(commandWithCwd(repoRoot, root, 'typecheck', ['python', '-m', 'mypy', '.']));
+  if (hasPytestSignal) commands.push(commandWithCwd(repoRoot, root, 'test', ['python', '-m', 'pytest', '-q']));
+  if (ruffConfigured) commands.push(commandWithCwd(repoRoot, root, 'lint', ['python', '-m', 'ruff', 'check', '.']));
+
+  return {
+    root,
+    relativeRoot: relative(repoRoot, root).replace(/\\/g, '/') || '.',
+    kind: 'python',
+    packageManager: 'python',
+    scripts: [
+      ...(mypyConfigured ? ['mypy'] : []),
+      ...(hasPytestSignal ? ['pytest'] : []),
+      ...(ruffConfigured ? ['ruff'] : []),
+    ],
+    manifests: [
+      ...(hasPyproject ? ['pyproject.toml'] : []),
+      ...(hasPytestIni ? ['pytest.ini'] : []),
+      ...(hasToxIni ? ['tox.ini'] : []),
+      ...(hasFile(root, 'ruff.toml') ? ['ruff.toml'] : []),
+      ...(hasFile(root, '.ruff.toml') ? ['.ruff.toml'] : []),
+      ...(hasFile(root, 'mypy.ini') ? ['mypy.ini'] : []),
+      ...(hasFile(root, '.mypy.ini') ? ['.mypy.ini'] : []),
+      ...(hasFile(root, 'setup.cfg') ? ['setup.cfg'] : []),
+      ...testFiles,
+    ],
+    verifyCommands: commands,
+  };
+}
+
+function formulaFiles(root: string): string[] {
+  try {
+    const formulaDir = join(root, 'Formula');
+    if (!safeDir(formulaDir)) return [];
+    return readdirSync(formulaDir)
+      .filter((file) => file.endsWith('.rb'))
+      .sort()
+      .map((file) => join('Formula', file));
+  } catch {
+    return [];
+  }
+}
+
+function homebrewFormulaProject(repoRoot: string, root: string): RepoProjectProfile | null {
+  const formulas = formulaFiles(root);
+  if (formulas.length === 0) return null;
+
+  const commands: VerifyCommand[] = [];
+  for (const formula of formulas) {
+    commands.push(commandWithCwd(repoRoot, root, 'typecheck', ['ruby', '-c', formula]));
+    commands.push(commandWithCwd(repoRoot, root, 'lint', ['brew', 'audit', '--strict', '--formula', formula]));
+  }
+
+  return {
+    root,
+    relativeRoot: relative(repoRoot, root).replace(/\\/g, '/') || '.',
+    kind: 'homebrew-formula',
+    packageManager: 'brew',
+    scripts: ['ruby-syntax', 'brew-audit'],
+    manifests: formulas,
+    verifyCommands: commands,
+  };
+}
+
 function fileHasTarget(root: string, fileName: string, target: string): boolean {
   try {
     const raw = readFileSync(join(root, fileName), 'utf8');
@@ -270,8 +592,42 @@ function shellProject(repoRoot: string, root: string): RepoProjectProfile | null
   };
 }
 
+function verifyContractProject(repoRoot: string, commands: VerifyCommand[]): RepoProjectProfile {
+  return {
+    root: repoRoot,
+    relativeRoot: '.',
+    kind: 'verify-contract',
+    packageManager: 'custom',
+    scripts: commands.map((command) => command.id ?? command.kind).sort(),
+    manifests: [VERIFY_CONTRACT_FILE],
+    verifyCommands: commands,
+  };
+}
+
+function projectWithVerifyContract(project: RepoProjectProfile, commands: VerifyCommand[]): RepoProjectProfile {
+  return {
+    ...project,
+    manifests: [...new Set([...project.manifests, VERIFY_CONTRACT_FILE])],
+    verifyCommands: [...project.verifyCommands, ...commands],
+  };
+}
+
+function projectWithReplacedVerifyCommands(project: RepoProjectProfile, commands: VerifyCommand[]): RepoProjectProfile {
+  return {
+    ...project,
+    manifests: [...new Set([...project.manifests, VERIFY_CONTRACT_FILE])],
+    verifyCommands: commands,
+  };
+}
+
 function projectAt(repoRoot: string, root: string): RepoProjectProfile | null {
-  return nodeProject(repoRoot, root) ?? rustProject(repoRoot, root) ?? shellProject(repoRoot, root);
+  return (
+    nodeProject(repoRoot, root) ??
+    rustProject(repoRoot, root) ??
+    pythonProject(repoRoot, root) ??
+    homebrewFormulaProject(repoRoot, root) ??
+    shellProject(repoRoot, root)
+  );
 }
 
 function safeDir(path: string): boolean {
@@ -316,23 +672,60 @@ export function detectRepoExecutionProfile(
   const root = resolve(repoRoot);
   const maxDepth = Math.max(0, Math.min(3, opts?.maxDepth ?? 2));
   const projectRoots = discoverProjectRoots(root, maxDepth);
-  const projects = projectRoots
+  let projects = projectRoots
     .map((projectRoot) => projectAt(root, projectRoot))
     .filter((project): project is RepoProjectProfile => project !== null)
     .sort((a, b) => a.relativeRoot.localeCompare(b.relativeRoot));
 
-  const primaryProject = projects.find((project) => project.root === root) ?? projects[0] ?? null;
-  const rootCommands = primaryProject?.root === root ? primaryProject.verifyCommands : [];
-  const fallbackCommands = rootCommands.length > 0
+  const detectedPrimaryProject = projects.find((project) => project.root === root) ?? projects[0] ?? null;
+  const rootCommands = detectedPrimaryProject?.root === root ? detectedPrimaryProject.verifyCommands : [];
+  const detectedCommands = rootCommands.length > 0
     ? rootCommands
     : projects.flatMap((project) => project.verifyCommands);
+  const contract = parseVerifyContract(root);
+  let verifyCommands = detectedCommands;
+
+  if (contract?.summary.valid) {
+    const rootIndex = projects.findIndex((project) => project.root === root);
+    if (contract.mode === 'replace-detected') {
+      verifyCommands = contract.commands;
+      if (rootIndex >= 0) projects[rootIndex] = projectWithReplacedVerifyCommands(projects[rootIndex], contract.commands);
+      else projects = [verifyContractProject(root, contract.commands), ...projects];
+    } else {
+      verifyCommands = [...detectedCommands, ...contract.commands];
+      if (rootIndex >= 0) projects[rootIndex] = projectWithVerifyContract(projects[rootIndex], contract.commands);
+      else projects = [verifyContractProject(root, contract.commands), ...projects];
+    }
+    projects = projects.sort((a, b) => a.relativeRoot.localeCompare(b.relativeRoot));
+  } else if (contract?.summary.present && projects.length === 0) {
+    projects = [verifyContractProject(root, [])];
+  }
+
+  const primaryProject = projects.find((project) => project.root === root) ?? projects[0] ?? null;
 
   return {
     repoRoot: root,
     projects,
     primaryProject,
-    verifyCommands: fallbackCommands,
+    verifyCommands,
+    ...(contract ? { verifyContract: contract.summary } : {}),
+    noVerifyReason: describeNoVerifyCommandReason(projects, verifyCommands, contract?.summary),
   };
+}
+
+function describeNoVerifyCommandReason(
+  projects: RepoProjectProfile[],
+  commands: VerifyCommand[],
+  contract?: RepoVerifyContractSummary,
+): string | null {
+  if (commands.length > 0) return null;
+  if (contract?.present && !contract.valid) {
+    const detail = contract.errors[0] ?? 'contract validation failed';
+    return `invalid ${VERIFY_CONTRACT_FILE}: ${detail}`;
+  }
+  if (projects.length === 0) return `no recognized project manifests or ${VERIFY_CONTRACT_FILE}`;
+  const kinds = [...new Set(projects.map((project) => project.kind))].sort();
+  return `detected ${kinds.join(', ')} project(s), but no verify command is configured`;
 }
 
 export function summarizeRepoExecutionProfile(profile: RepoExecutionProfile): {

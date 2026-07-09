@@ -33,6 +33,7 @@ import { recordDecision } from '../fleet/decisions-ledger.js';
 import { linkOutcome } from '../fleet/judge-trace.js';
 // M158: destructive-diff pre-judge guard — additive, DEFAULT ON, never-throws.
 import { isDestructiveDiff } from '../run/diff-safety.js';
+import { causalMetadata, causalMetadataFromProposal } from '../learning/causal.js';
 // M228: goal-milestone outcome wiring — additive, best-effort, never-throws.
 // Imported here (not goals/advance.ts) because inbox/store does NOT import from
 // goals/* anywhere, so this import creates no cycle. goals/advance.ts imports
@@ -335,15 +336,34 @@ export function createProposal(
     }
   }
 
-  const proposal: Proposal = {
+  const proposalId = generateId();
+  const createdAt = new Date().toISOString();
+  const baseProposal: Proposal = {
     ...p,
     ...(owner !== undefined ? { owner } : {}),
-    id: generateId(),
+    id: proposalId,
     status: initialStatus,
-    createdAt: new Date().toISOString(),
+    createdAt,
     ...(diffSafetyRejectionReason !== undefined
       ? { decisionReason: diffSafetyRejectionReason, decidedAt: new Date().toISOString() }
       : {}),
+  };
+  const proposal: Proposal = {
+    ...baseProposal,
+    ...causalMetadata({
+      proposalId,
+      workItemId: baseProposal.workItemId,
+      runId: baseProposal.runId,
+      trajectoryId: baseProposal.trajectoryId,
+      routeSnapshot: baseProposal.routeSnapshot,
+      runEventSummary: baseProposal.runEventSummary,
+      evidenceOutcome: baseProposal.evidenceOutcome,
+      learningSource: baseProposal.learningSource ?? 'proposal',
+      labelBasis: baseProposal.labelBasis ?? 'proposal-status',
+      routerPolicyVersion: baseProposal.routerPolicyVersion,
+      learningEpoch: baseProposal.learningEpoch,
+      ts: createdAt,
+    }),
   };
 
   try {
@@ -366,12 +386,18 @@ export function createProposal(
   // M158: emit decisions-ledger entry for auto-rejected proposals.
   if (initialStatus === 'rejected' && diffSafetyRejectionReason !== undefined) {
     try {
+      const ts = new Date().toISOString();
       recordDecision({
-        ts: new Date().toISOString(),
+        ts,
         proposalId: proposal.id,
         ...(proposal.workItemId ? { workItemId: proposal.workItemId } : {}),
         ...(proposal.workSource ? { workSource: proposal.workSource } : {}),
         ...(proposal.runId ? { runId: proposal.runId } : {}),
+        ...causalMetadataFromProposal(proposal, {
+          ts,
+          learningSource: 'decision-ledger',
+          labelBasis: 'proposal-status',
+        }),
         action: 'rejected',
         verdict: 'rejected',
         reason: diffSafetyRejectionReason,
@@ -530,12 +556,18 @@ export function setStatus(
       // Derive the engine id from the model string (segment before ':').
       const engineModel = updated.engineModel;
       const engineId = engineModel ? engineModel.split(':')[0] : undefined;
+      const ts = new Date().toISOString();
       recordDecision({
-        ts: new Date().toISOString(),
+        ts,
         proposalId: id,
         ...(updated.workItemId ? { workItemId: updated.workItemId } : {}),
         ...(updated.workSource ? { workSource: updated.workSource } : {}),
         ...(updated.runId ? { runId: updated.runId } : {}),
+        ...causalMetadataFromProposal(updated, {
+          ts,
+          learningSource: 'decision-ledger',
+          labelBasis: 'proposal-status',
+        }),
         action: ledgerAction,
         ...(engineId ? { engine: engineId } : {}),
         ...(engineModel ? { model: engineModel } : {}),

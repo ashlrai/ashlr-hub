@@ -1,5 +1,23 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Current Autonomous Fleet Foundation Batch
+- Branch: `codex/autonomous-fleet-foundation`
+- Start state: clean worktree on `master...origin/master`; latest commit `53e518d fix: align fleet learning and queue eligibility`.
+- Entire state: not set up in this repo (`entire status` returned "not set up").
+- User direction: implement the full autonomous fleet plan with all three north stars: proposal factory, judge-free evidence merge engine, and Fleet OS.
+- Implementation strategy: land the critical proposal-production and verification-contract foundation first, while parallel agents work on disjoint telemetry, safety, Fleet OS, and velocity lanes.
+- Proposal-production fix: `proposal-disabled` is now neutral for worked-ledger cooldown instead of mapping to suppressing `empty`.
+- TITRR fix: external and API-model TITRR attempts now run with `propose:false` and file once by capturing the tested sandbox diff; final failed-test diffs become gate-style outcomes instead of accidental proposal-disabled cooling.
+- API-model failure fix: failed local/API-model runs now inspect sandbox diffs and route partial diffs through the shared completeness/provenance capture helper before falling back to `api-model-task-failed`.
+- Focused verification: `npm run typecheck -- --pretty false` passed; `npm run test:ci -- test/m201.daemon-loop.test.ts test/m140.engine-verify.test.ts` passed 93 tests.
+- Verification-contract foundation: added repo-owned `ashlr.verify.json` support with safe argv/cwd validation, profile-aware command metadata, replace/augment modes, Python detection, Homebrew/Ruby formula detection, richer no-command reasons, and fleet status coverage for missing verifier repos.
+- Causal learning foundation: threaded metadata-only `trajectoryId`, route snapshots, bounded run summaries, evidence outcomes, learning source/label basis, router policy version, and learning epoch across run, dispatch-production, proposal, decision, evidence, outcome, and agent-action paths.
+- Evidence-bound judge-free auto-merge: evidence trust mode now refuses no-command verification, local merge fallback, missing protected remote evidence, stale base/diff, unsigned or partial evidence, self-target merges, missing branch protection, and safety-test weakening changes.
+- Fleet OS readiness: added a shared `autonomousShipReadiness` verdict/action/source-health model and rendered it through CLI fleet status, `/api/fleet`, `/api/control`, Mission Control, Fleet, and web dashboard surfaces.
+- Production velocity profile: added configurable gateway/resource-aware/concurrent/workhorse routing defaults, queue-to-slot filling, explicit local/NIM/Kimi caps, Claude/Codex reservation semantics, and stale pending mitigation.
+- Regression coverage: added and updated suites for verify manifests, Python/Homebrew detection, no-command auto-merge fail-closed behavior, causal trajectory reconstruction, evidence preflight failures, Fleet OS readiness, production velocity, TITRR single-capture, and proposal-disabled neutral cooldown behavior.
+- Release verification passed: `git diff --check`, `node --check src/core/web/public/app.js`, `npm audit --audit-level=moderate` (0 vulnerabilities), `npm run typecheck -- --pretty false`, `npm run lint` (existing 117-warning baseline, 0 errors), `npm run build`, `npm run test:invariants` (41 files, 411 passed), and full `npm run test:ci` (430 files, 8867 passed, 7 skipped).
+
 ## Current State
 - Hub repo: `/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub`
 - Branch: `master`

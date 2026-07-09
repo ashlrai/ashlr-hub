@@ -123,7 +123,12 @@ function makeBacklogItem(
   };
 }
 
-function writeBacklogSnapshot(home: string, repo: string, items: WorkItem[]): void {
+function writeBacklogSnapshot(
+  home: string,
+  repo: string,
+  items: WorkItem[],
+  generatedAt = '2026-07-03T00:00:00.000Z',
+): void {
   const ashlrDir = join(home, '.ashlr');
   mkdirSync(ashlrDir, { recursive: true });
   mkdirSync(repo, { recursive: true });
@@ -131,7 +136,7 @@ function writeBacklogSnapshot(home: string, repo: string, items: WorkItem[]): vo
   writeFileSync(
     join(ashlrDir, 'backlog.json'),
     JSON.stringify({
-      generatedAt: '2026-07-03T00:00:00.000Z',
+      generatedAt,
       repos: [repo],
       items,
     }),
@@ -170,7 +175,7 @@ function createSignedProposal(
   );
 }
 
-function writeRunningDaemon(home: string, ticks: DaemonTick[] = []): void {
+function writeRunningDaemon(home: string, ticks: DaemonTick[] = [], lastTickAt = '2026-07-03T00:05:00.000Z'): void {
   const ashlrDir = join(home, '.ashlr');
   mkdirSync(ashlrDir, { recursive: true });
   writeFileSync(
@@ -179,8 +184,8 @@ function writeRunningDaemon(home: string, ticks: DaemonTick[] = []): void {
       running: true,
       pid: process.pid,
       startedAt: '2026-07-03T00:00:00.000Z',
-      lastTickAt: '2026-07-03T00:05:00.000Z',
-      todayDate: '2026-07-03',
+      lastTickAt,
+      todayDate: lastTickAt.slice(0, 10),
       todaySpentUsd: 0,
       itemsProcessed: 1,
       ticks,
@@ -265,6 +270,17 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         preflightReady: 0,
       },
     });
+    expect(s.autonomousShipReadiness).toMatchObject({
+      verdict: 'blocked',
+      confidence: 'low',
+      topBlocker: { id: 'daemon-stopped' },
+      sourceSummary: expect.objectContaining({
+        blocked: expect.any(Number),
+        unknown: expect.any(Number),
+      }),
+    });
+    expect(s.autonomousShipReadiness?.sourceSummary.healthy)
+      .toBeLessThan(s.autonomousShipReadiness?.sources.length ?? 0);
     expect(s.autonomy).toMatchObject({
       evidencePacks: 0,
       latestAt: null,
@@ -349,6 +365,14 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         reposWithProjects: 0,
         reposWithVerifyCommands: 0,
         reposMissingVerifyCommands: 1,
+        missingVerifyCommands: [
+          {
+            repo,
+            name: 'repo',
+            projectKinds: [],
+            reason: 'no recognized project manifests or ashlr.verify.json',
+          },
+        ],
         packageManagers: [],
       },
       byTier: [{ tier: 'inventory', repos: 1, items: 2 }],
@@ -379,6 +403,37 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     expect(existsSync(join(tmpHome, '.ashlr', 'audit'))).toBe(false);
+  });
+
+  it('surfaces missing verify repo names, project kinds, and reasons', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'make-repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(repo, 'Makefile'), 'build:\n\t@true\n', 'utf8');
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({ generatedAt: '2026-07-03T00:00:00.000Z', repos: [repo], items: [] }),
+      'utf8',
+    );
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.queue.repos?.executionProfiles).toMatchObject({
+      reposWithProjects: 1,
+      reposWithVerifyCommands: 0,
+      reposMissingVerifyCommands: 1,
+      missingVerifyCommands: [
+        {
+          repo,
+          name: 'make-repo',
+          projectKinds: ['make'],
+          reason: 'detected make project(s), but no verify command is configured',
+        },
+      ],
+    });
+    expect(s.nextActions?.some((action) => action.detail.includes('make-repo'))).toBe(true);
   });
 
   it('does not suggest building backlog when all visible items are cooling', async () => {
@@ -1093,12 +1148,88 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
   });
 
+  it('marks autonomous ship readiness ready when fresh control, queue, and merge evidence agree', async () => {
+    const repo = join(tmpHome, 'repo');
+    writeBacklogSnapshot(tmpHome, repo, [], new Date().toISOString());
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'verification',
+        maxRisk: 'low',
+      },
+    });
+    createSignedProposal(cfg, {
+      title: 'Ready docs change',
+      diff: docsDiff('ready ship readiness'),
+      verifyResult: { passed: true, source: 'manual' },
+    });
+
+    const s = await buildFleetStatus(cfg);
+
+    expect(s.autonomousShipReadiness).toMatchObject({
+      verdict: 'ready',
+      confidence: 'high',
+      topBlocker: null,
+      freshness: { overall: 'fresh' },
+      sourceSummary: {
+        healthy: 6,
+        degraded: 0,
+        blocked: 0,
+        unavailable: 0,
+        unknown: 0,
+      },
+    });
+    expect(s.autonomousShipReadiness?.primaryAction).toMatchObject({
+      id: 'drain-ready-auto-merges',
+    });
+  });
+
+  it('degrades autonomous ship readiness when ready work depends on a stale source', async () => {
+    const repo = join(tmpHome, 'repo');
+    writeBacklogSnapshot(tmpHome, repo, []);
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'verification',
+        maxRisk: 'low',
+      },
+    });
+    createSignedProposal(cfg, {
+      title: 'Ready docs change with stale queue',
+      diff: docsDiff('stale queue readiness'),
+      verifyResult: { passed: true, source: 'manual' },
+    });
+
+    const s = await buildFleetStatus(cfg);
+    const queueSource = s.autonomousShipReadiness?.sources.find((source) => source.id === 'queue');
+
+    expect(s.autonomousShipReadiness).toMatchObject({
+      verdict: 'degraded',
+      confidence: 'medium',
+      topBlocker: null,
+      freshness: { overall: 'stale', staleSources: 1 },
+    });
+    expect(queueSource).toMatchObject({
+      status: 'degraded',
+      badge: 'degraded',
+      freshness: 'stale',
+    });
+    expect(s.autonomousShipReadiness?.sourceSummary.degraded).toBeGreaterThan(0);
+  });
+
   it('surfaces evidence trust basis in auto-merge readiness', async () => {
     const cfg = withFoundry({
       autoMerge: {
         enabled: true,
         trustBasis: 'evidence',
         maxRisk: 'low',
+        pushToRemote: true,
+        protectedRemote: {
+          branchProtection: true,
+          requiredChecks: ['ci/test'],
+        },
       },
     });
     const diff = docsDiff('evidence');
@@ -1132,6 +1263,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         enabled: true,
         trustBasis: 'evidence',
         maxRisk: 'low',
+        pushToRemote: true,
+        protectedRemote: {
+          branchProtection: true,
+          requiredChecks: ['ci/test'],
+        },
       },
     });
     createSignedProposal(cfg, {
@@ -1214,6 +1350,14 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
             reposWithProjects: 3,
             reposWithVerifyCommands: 2,
             reposMissingVerifyCommands: 1,
+            missingVerifyCommands: [
+              {
+                repo: '/repo/c',
+                name: 'c',
+                projectKinds: ['python'],
+                reason: 'detected python project(s), but no verify command is configured',
+              },
+            ],
             packageManagers: [
               { manager: 'bun', repos: 1 },
               { manager: 'cargo', repos: 1 },
@@ -1386,6 +1530,55 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
           recentMerges: 2,
         },
       },
+      autonomousShipReadiness: {
+        verdict: 'ready',
+        confidence: 'high',
+        freshness: {
+          generatedAt: '2026-06-17T00:02:00.000Z',
+          overall: 'fresh',
+          freshestAt: '2026-06-17T00:02:00.000Z',
+          stalestAt: '2026-06-17T00:00:00.000Z',
+          maxAgeMs: 120_000,
+          staleSources: 0,
+          unknownSources: 0,
+        },
+        topBlocker: null,
+        primaryAction: {
+          id: 'drain-ready-auto-merges',
+          priority: 'high',
+          label: 'Drain ready auto-merges',
+          detail: '1 pending proposal has cheap preflight-ready evidence.',
+        },
+        sources: [
+          {
+            id: 'daemon',
+            label: 'Daemon',
+            status: 'healthy',
+            badge: 'healthy',
+            freshness: 'fresh',
+            observedAt: '2026-06-17T00:00:00.000Z',
+            ageMs: 120_000,
+            detail: 'daemon running',
+          },
+          {
+            id: 'auto-merge',
+            label: 'Auto-Merge Gate',
+            status: 'healthy',
+            badge: 'healthy',
+            freshness: 'fresh',
+            observedAt: '2026-06-17T00:02:00.000Z',
+            ageMs: 0,
+            detail: '1 ready',
+          },
+        ],
+        sourceSummary: {
+          healthy: 2,
+          degraded: 0,
+          blocked: 0,
+          unavailable: 0,
+          unknown: 0,
+        },
+      },
       autonomy: {
         evidencePacks: 3,
         latestAt: '2026-06-17T00:01:00.000Z',
@@ -1418,6 +1611,15 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
         resources: { posture: 'constrained', constrained: 1, depleted: 0 },
         guardHealth: { blocked: false, blocks: 0 },
         budgets: { daemonBudgetLevel: 'near', daemonSpentTodayUsd: 1.2345 },
+        productionVelocity: {
+          enabled: false,
+          profile: 'off',
+          fillQueueToSlots: false,
+          stalePendingTtlHours: Number.POSITIVE_INFINITY,
+          maxSlotsPerBackend: 3,
+          caps: { localMaxConcurrent: null, nimMaxConcurrent: null, kimiMaxConcurrent: null },
+          flags: { gateway: false, resourceAware: false, concurrentDispatch: false, workhorseDispatch: false },
+        },
       },
       killed: true,
     });
@@ -1440,6 +1642,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('top repos:     a:5, b:2');
     expect(out).toContain('focus tiers:   core-fleet:1r/5i, supporting:1r/2i');
     expect(out).toContain('verify roots:   2/3 repos (1 missing; bun:1, cargo:1)');
+    expect(out).toContain('missing verify: c [python: detected python project(s), but no verify command is configured]');
     expect(out).toContain('next:          Ship autonomy debugger (goal, score 5)');
     expect(out).toContain('shared:        ok / 2 active / 1 owned / 1 reclaimable / 2 cooling / stale lock');
     expect(out).toContain('machine-A:1');
@@ -1464,6 +1667,11 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('bottleneck: merge-drain');
     expect(out).toContain('merge now:  yes');
     expect(out).toContain('counts:     backlog 7, pending 3, ready 1, verify 1, blocked 2, host 0');
+    expect(out).toContain('Autonomous ship readiness:');
+    expect(out).toContain('verdict:    ready (high confidence, fresh sources)');
+    expect(out).toContain('top block:  none');
+    expect(out).toContain('action:     Drain ready auto-merges: 1 pending proposal has cheap preflight-ready evidence.');
+    expect(out).toContain('sources:    daemon:healthy, auto-merge:healthy');
     expect(out).toContain('Autonomy evidence:');
     expect(out).toContain('packs:     3');
     expect(out).toContain('denied:    1');

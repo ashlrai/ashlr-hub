@@ -103,6 +103,11 @@ import {
   type AgentActionEvent,
   type AgentActionOutcome,
 } from '../fleet/agent-action-ledger.js';
+import {
+  causalMetadata,
+  routeSnapshot,
+  runEventSummary,
+} from '../learning/causal.js';
 // worked-ledger is used transitively via LocalWorkQueueCoordinator (selectWorkQueueCoordinator).
 import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
 // M220: verdict-feedback sweep — feed judge rejections back to the ledger so
@@ -116,7 +121,13 @@ import {
   type AutonomousDirectionMode,
   type ResourceStrategyDaemonPlan,
 } from '../autonomy/resource-strategy.js';
-import { listReadyEvidenceOutcomeRecords } from '../autonomy/outcome-records.js';
+import {
+  applyProductionVelocityProfile,
+  availableSlotsForResourceSnapshot,
+  daemonQueueSelectionLimit,
+  resolveProductionVelocityProfile,
+} from '../fabric/production-velocity.js';
+import { listOutcomeRecords, listReadyEvidenceOutcomeRecords } from '../autonomy/outcome-records.js';
 import { compareReposByStrategicFocus } from '../ecosystem/focus.js';
 
 // ---------------------------------------------------------------------------
@@ -299,6 +310,7 @@ async function buildDaemonStrategyPlan(
 ): Promise<ResourceStrategyDaemonPlan> {
   const { diagnoseGuardHealth } = await import('./guard-health.js');
   const guardHealth = diagnoseGuardHealth();
+  const productionVelocity = resolveProductionVelocityProfile(cfg);
   const report = await buildResourceStrategyReport(cfg, {
 	    maxOutcomes: 6,
 	    maxChecks: 1,
@@ -308,6 +320,11 @@ async function buildDaemonStrategyPlan(
       diagnoseGuardHealth: () => guardHealth,
       listOutcomeRecords: cfg.foundry?.autoMerge?.enabled === true
         ? (opts) => listReadyEvidenceOutcomeRecords({ limit: Math.min(opts?.limit ?? 6, 6) })
+        : productionVelocity.enabled
+          ? (opts) => listOutcomeRecords({
+              limit: Math.min(opts?.limit ?? 6, 6),
+              deps: { loadWorkedLedger: () => ({ events: [] }) },
+            })
         : () => [],
     },
   });
@@ -428,6 +445,7 @@ export function workedOutcomeFromDispatchProduction(
   production: DaemonDispatchProduction | undefined,
 ): 'diff' | 'empty' | undefined {
   if (!production) return undefined;
+  if (production.outcome === 'proposal-disabled') return undefined;
   return production.outcome === 'proposal-created' ? 'diff' : 'empty';
 }
 
@@ -491,6 +509,16 @@ function dispatchProductionEventFromOutcome(
   const proposalId = production?.proposalId ?? (allowProposalFallback ? proposal?.id : undefined);
   const runId = production?.runId ?? (allowProposalFallback ? proposal?.runId : undefined);
   const proposalCreated = outcome === 'proposal-created';
+  const eventRunSummary = runEventSummary({
+    ...(trace.runEventSummary ?? {}),
+    runId,
+    outcome,
+    proposalCreated,
+    proposalId,
+    diffFiles: production?.diffFiles ?? trace.runEventSummary?.diffFiles,
+    diffLines: production?.diffLines ?? trace.runEventSummary?.diffLines,
+    costUsd: value.spentUsd,
+  });
   return {
     schemaVersion: 1,
     ts,
@@ -508,6 +536,13 @@ function dispatchProductionEventFromOutcome(
     proposalCreated,
     ...(proposalId ? { proposalId } : {}),
     ...(runId ? { runId } : {}),
+    ...(trace.trajectoryId ? { trajectoryId: trace.trajectoryId } : {}),
+    ...(trace.routeSnapshot ? { routeSnapshot: trace.routeSnapshot } : {}),
+    ...(eventRunSummary ? { runEventSummary: eventRunSummary } : {}),
+    ...(trace.learningSource ? { learningSource: trace.learningSource } : {}),
+    ...(trace.labelBasis ? { labelBasis: trace.labelBasis } : {}),
+    ...(trace.routerPolicyVersion ? { routerPolicyVersion: trace.routerPolicyVersion } : {}),
+    ...(trace.learningEpoch ? { learningEpoch: trace.learningEpoch } : {}),
     spentUsd: value.spentUsd,
     ...(typeof production?.diffFiles === 'number' ? { diffFiles: production.diffFiles } : {}),
     ...(typeof production?.diffLines === 'number' ? { diffLines: production.diffLines } : {}),
@@ -550,6 +585,14 @@ function agentActionFromDispatchEvent(event: DispatchProductionEvent): AgentActi
     source: event.source,
     ...(event.proposalId ? { proposalId: event.proposalId } : {}),
     ...(event.runId ? { runId: event.runId } : {}),
+    ...(event.trajectoryId ? { trajectoryId: event.trajectoryId } : {}),
+    ...(event.routeSnapshot ? { routeSnapshot: event.routeSnapshot } : {}),
+    ...(event.runEventSummary ? { runEventSummary: event.runEventSummary } : {}),
+    ...(event.evidenceOutcome ? { evidenceOutcome: event.evidenceOutcome } : {}),
+    ...(event.learningSource ? { learningSource: event.learningSource } : {}),
+    ...(event.labelBasis ? { labelBasis: event.labelBasis } : {}),
+    ...(event.routerPolicyVersion ? { routerPolicyVersion: event.routerPolicyVersion } : {}),
+    ...(event.learningEpoch ? { learningEpoch: event.learningEpoch } : {}),
     backend: event.backend,
     tier: event.tier,
     ...(event.model !== undefined ? { model: event.model } : {}),
@@ -651,6 +694,32 @@ function dispatchTrace(
     production?: DaemonDispatchProduction;
   },
 ): DaemonDispatchTrace {
+  const rs = routeSnapshot({
+    backend: fields.backend ?? null,
+    tier: fields.tier ?? null,
+    model: fields.model,
+    assignedBy: fields.assignedBy,
+    reason: fields.reason,
+  });
+  const summary = runEventSummary({
+    runId: fields.production?.runId,
+    status: fields.dispatched ? 'done' : 'skipped',
+    outcome: fields.production?.outcome ?? (fields.dispatched ? 'unknown' : 'skipped'),
+    proposalCreated: fields.production?.outcome === 'proposal-created',
+    proposalId: fields.production?.proposalId,
+    diffFiles: fields.production?.diffFiles,
+    diffLines: fields.production?.diffLines,
+    costUsd: fields.spentUsd ?? 0,
+  });
+  const causal = causalMetadata({
+    itemId: item.id,
+    proposalId: fields.production?.proposalId,
+    runId: fields.production?.runId,
+    routeSnapshot: rs,
+    runEventSummary: summary,
+    learningSource: 'daemon-dispatch',
+    labelBasis: 'dispatch-outcome',
+  });
   return {
     itemId: item.id,
     title: boundedText(item.title, 120),
@@ -663,11 +732,18 @@ function dispatchTrace(
     reason: boundedText(fields.reason),
     dispatched: fields.dispatched,
     spentUsd: fields.spentUsd ?? 0,
+    ...causal,
     ...(fields.skipReason ? { skipReason: boundedText(fields.skipReason, 160) } : {}),
     ...(fields.production
       ? {
           production: {
             ...fields.production,
+            trajectoryId: causal.trajectoryId,
+            runEventSummary: summary,
+            learningSource: 'daemon-dispatch',
+            labelBasis: 'dispatch-outcome',
+            routerPolicyVersion: causal.routerPolicyVersion,
+            learningEpoch: causal.learningEpoch,
             ...(fields.production.reason ? { reason: boundedText(fields.production.reason, 220) } : {}),
           },
         }
@@ -947,7 +1023,7 @@ export async function tick(
   // before each tick and passes the fresh cfg in here), so on-disk daemon tuning
   // (budget/parallel/interval/cooldown) still takes effect without a restart
   // WITHOUT this function clobbering an explicitly-supplied cfg.
-  const liveCfg = cfg;
+  const liveCfg = applyProductionVelocityProfile(cfg);
   const dcfg = resolveCfg(liveCfg);
   let routingCfg = liveCfg;
   let directionPlan: ResourceStrategyDaemonPlan | null = null;
@@ -1368,8 +1444,30 @@ export async function tick(
   //    daily USD budget, (c) the swarm's own internal token budget.
   // -------------------------------------------------------------------------
   const MIN_PER_ITEM_USD = 0.01; // floor on a per-item slice for selection math
-  const maxByBudget = Math.max(1, Math.floor(remainingBudget / MIN_PER_ITEM_USD));
-  const selectCount = Math.min(dcfg.perTickItems, maxByBudget, backlogItems.length);
+  const productionVelocity = resolveProductionVelocityProfile(routingCfg);
+  let selectionResourceSnapshot: Awaited<ReturnType<typeof getResourceSnapshot>> | null = null;
+  let availableSlotsForSelection: number | null = null;
+  if (
+    productionVelocity.enabled &&
+    productionVelocity.fillQueueToSlots &&
+    routingCfg.foundry?.fabric?.concurrentDispatch === true
+  ) {
+    selectionResourceSnapshot = await getResourceSnapshot(routingCfg).catch(() => null);
+    if (selectionResourceSnapshot) {
+      availableSlotsForSelection = availableSlotsForResourceSnapshot(
+        selectionResourceSnapshot,
+        productionVelocity.maxSlotsPerBackend,
+      );
+    }
+  }
+  const selectCount = daemonQueueSelectionLimit({
+    perTickItems: dcfg.perTickItems,
+    remainingBudgetUsd: remainingBudget,
+    backlogItems: backlogItems.length,
+    fillQueueToSlots: productionVelocity.fillQueueToSlots,
+    availableSlots: availableSlotsForSelection,
+    minPerItemUsd: MIN_PER_ITEM_USD,
+  });
 
   // M85: read the cooldown window from liveCfg defensively (no types.ts change).
   const cooldownMs: number =
@@ -2354,10 +2452,10 @@ export async function tick(
   try {
   if (useConcurrentDispatch) {
     // Re-sense headroom before planning (cached 30s; no extra cost in practice).
-    const concurrentSnap = await getResourceSnapshot(routingCfg).catch(() => ({
+    const concurrentSnap = selectionResourceSnapshot ?? (await getResourceSnapshot(routingCfg).catch(() => ({
       generatedAt: new Date().toISOString(),
       backends: [{ backend: 'builtin' as const, availability: 'open' as const, usedPct: null, cap: null, capUnit: null, capWindow: null, resetsAt: null, costPerMTokenOut: 0, p50LatencyMs: null, snapshotAt: new Date().toISOString(), reason: 'snapshot-failed', backoffUntilMs: null }],
-    }));
+    })));
 
     const maxSlotsPerBackend: number =
       typeof (routingCfg.foundry?.fabric as Record<string, unknown> | undefined)?.['maxSlotsPerBackend'] === 'number'

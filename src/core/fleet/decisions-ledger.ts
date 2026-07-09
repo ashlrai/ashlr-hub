@@ -20,6 +20,7 @@ import {
   readFileSync,
 } from 'node:fs';
 import type { DecisionEntry } from '../types.js';
+import { normalizeDecisionLearningFields } from '../learning/causal.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -73,11 +74,11 @@ export function recordDecision(entry: DecisionEntry): void {
       mkdirSync(dir, { recursive: true });
     }
 
-    const record: DecisionEntry = {
+    const record: DecisionEntry = normalizeDecisionLearningFields({
       ...entry,
       ts: entry.ts || new Date().toISOString(),
       ...(entry.detail !== undefined ? { detail: stripSecrets(entry.detail) } : {}),
-    };
+    });
 
     const line = JSON.stringify(record) + '\n';
     const filePath = join(dir, `${todayDateString()}.jsonl`);

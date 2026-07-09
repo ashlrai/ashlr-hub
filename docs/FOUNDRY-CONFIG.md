@@ -136,6 +136,48 @@ actions until they become selectable again.
 
 ---
 
+### `productionVelocity` (resource-control lane)
+
+```json
+"productionVelocity": {
+  "enabled": true,
+  "profile": "resource-control",
+  "fillQueueToSlots": true,
+  "stalePendingTtlHours": 24,
+  "maxSlotsPerBackend": 3,
+  "localMaxConcurrent": 1,
+  "nimMaxConcurrent": 2,
+  "kimiMaxConcurrent": 2
+}
+```
+
+Opt-in production lane for proposal throughput. It materializes the existing
+Fabric controls as effective config:
+
+- `fabric.gateway: true`
+- `fabric.resourceAware: true`
+- `fabric.concurrentDispatch: true`
+- `fabric.workhorseDispatch: true`
+- `fabric.maxSlotsPerBackend`
+- `local.maxConcurrent`, `nim.maxConcurrent`, and `kimi.maxConcurrent`
+
+`fillQueueToSlots` lets the daemon select enough queue items to occupy the
+currently available resource slots instead of stopping at `daemon.perTickItems`.
+Budget, kill switch, enrollment, sandboxing, cooldown, and proposal-first gates
+still apply.
+
+`stalePendingTtlHours` prevents stale pending proposals from forcing permanent
+`verify-only` starvation. When every pending proposal visible in the outcome
+records is older than the TTL and backlog is available, the resource strategy
+recommends `backlog-build` while telling the operator to archive/reject/refresh
+the stale proposals. Fresh pending proposals and verification failures still
+recommend `verify-only`.
+
+This profile does not grant merge authority, does not touch proposal capture
+internals, and does not bypass auto-merge gates.
+
+---
+
 ### `modelGranularRouting` (M323)
 
 ```json

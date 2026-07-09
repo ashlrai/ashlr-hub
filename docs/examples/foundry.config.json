@@ -1,11 +1,23 @@
 {
   "foundry": {
-    "allowedBackends": ["builtin", "claude", "codex", "local-coder", "nim", "hermes"],
+    "allowedBackends": ["builtin", "claude", "codex", "local-coder", "nim", "kimi", "hermes"],
 
     "models": {
       "claude": "claude-sonnet-5",
       "codex": "gpt-5.5",
+      "kimi": "kimi-k2-0711-preview",
       "hermes": "hermes-3-llama-3.1-70b"
+    },
+
+    "productionVelocity": {
+      "enabled": true,
+      "profile": "resource-control",
+      "fillQueueToSlots": true,
+      "stalePendingTtlHours": 24,
+      "maxSlotsPerBackend": 3,
+      "localMaxConcurrent": 1,
+      "nimMaxConcurrent": 2,
+      "kimiMaxConcurrent": 2
     },
 
     "intelligence": {
@@ -70,6 +82,14 @@
 
     "local": {
       "maxConcurrent": 1
+    },
+
+    "nim": {
+      "maxConcurrent": 2
+    },
+
+    "kimi": {
+      "maxConcurrent": 2
     },
 
     "confinement": {

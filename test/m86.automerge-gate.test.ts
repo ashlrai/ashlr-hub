@@ -50,6 +50,7 @@ import { execFileSync } from 'node:child_process';
 import {
   autoMergeProposal,
   classifyRisk,
+  evaluateEvidenceAutoMergePreflight,
 } from '../src/core/inbox/merge.js';
 import { createProposal, setStatus, loadProposal } from '../src/core/inbox/store.js';
 import { enroll, setKill } from '../src/core/sandbox/policy.js';
@@ -679,6 +680,58 @@ describe('M86 PURE — classifyRisk consistency with scope cap', () => {
     expect(classifyRisk({ diff: multiFileDiff(1, 150) } as any)).toBe('low');
     // And confirm what would push to non-low
     expect(classifyRisk({ diff: addFileDiff('src/x.ts', 'x') } as any)).toBe('medium');
+  });
+});
+
+describe('M86 PURE — evidence safety lane', () => {
+  it('refuses no-command verification even when the diff is low-risk and in scope', () => {
+    const diff = addFileDiff('docs/evidence-no-command.md', 'doc');
+    const diffHash = hashDiff(diff);
+    const p: Proposal = {
+      id: 'm86-evidence-no-command',
+      repo: tmpRepo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'evidence no command',
+      summary: 'test',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('local:qwen3-coder', 'local', diffHash),
+      engineModel: 'local:qwen3-coder',
+      engineTier: 'local',
+      verifyResult: {
+        passed: true,
+        detail: 'no commands detected',
+        ran: [],
+        baseBranch: 'main',
+        baseHead: '0123456789abcdef0123456789abcdef01234567',
+        diffHash,
+      },
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+    const r = evaluateEvidenceAutoMergePreflight(
+      p,
+      {
+        foundry: {
+          autoMerge: {
+            enabled: true,
+            trustBasis: 'evidence',
+            maxRisk: 'low',
+            allowWithoutVerification: false,
+            pushToRemote: true,
+            protectedRemote: {
+              branchProtection: true,
+              requiredChecks: ['ci/test'],
+            },
+          },
+        },
+      } as unknown as AshlrConfig,
+      { remoteAvailable: true },
+    );
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/no verification command evidence|no-command/i);
   });
 });
 

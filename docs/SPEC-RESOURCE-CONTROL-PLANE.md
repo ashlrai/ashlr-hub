@@ -65,6 +65,24 @@ This section is the spec's honest foundation. Do NOT implement sensing that isn'
 
 **Conclusion for NIM:** Reactive sensing only. Parse rate-limit headers from 429 responses and store in the ResourceMonitor's `lastLimitSignal`. No proactive polling.
 
+**Production velocity cap:** because NIM/Kimi do not expose proactive quota
+headroom, the production resource-control lane uses explicit concurrent caps:
+
+```json
+"productionVelocity": {
+  "enabled": true,
+  "profile": "resource-control",
+  "nimMaxConcurrent": 2,
+  "kimiMaxConcurrent": 2
+},
+"nim": { "maxConcurrent": 2 },
+"kimi": { "maxConcurrent": 2 }
+```
+
+The ResourceMonitor reports these as `capUnit:"concurrent"` so the concurrent
+dispatcher can fill slots without over-assigning opaque API backends. 429/backoff
+signals still override the configured cap and drop available slots to zero.
+
 ### 2.4 Local / Ollama
 
 | Signal | Sensable? | Source |
@@ -239,9 +257,51 @@ Step 2b — ResourceAware demote (NEW, flag-gated):
 4. builtin as last resort for bulk items only
 ```
 
+### 4.3 Production Velocity Runbook
+
+Enable the resource-control lane when the fleet should keep proposal production
+moving across available workhorse capacity:
+
+```json
+"productionVelocity": {
+  "enabled": true,
+  "profile": "resource-control",
+  "fillQueueToSlots": true,
+  "stalePendingTtlHours": 24,
+  "maxSlotsPerBackend": 3,
+  "localMaxConcurrent": 1,
+  "nimMaxConcurrent": 2,
+  "kimiMaxConcurrent": 2
+}
+```
+
+Effective behavior:
+
+- Turns on `fabric.gateway`, `fabric.resourceAware`, `fabric.concurrentDispatch`,
+  and `fabric.workhorseDispatch`.
+- Sets explicit local/NIM/Kimi concurrent caps unless already configured.
+- Sizes daemon queue selection to currently available resource slots, still
+  bounded by daily budget, enrollment, cooldowns, sandboxing, and proposal-first
+  capture.
+- Keeps fresh pending proposals and verification failures in `verify-only`.
+- Treats all-visible pending proposals older than `stalePendingTtlHours` as a
+  stale drain problem instead of a reason to starve new dispatch forever.
+
+Operator checks:
+
+```bash
+ashlr resources
+ashlr fleet direction
+ashlr fleet status
+```
+
+`ashlr fleet direction` shows the effective velocity profile and caps; `ashlr
+resources` shows whether local/NIM/Kimi caps are being converted into available
+slots.
+
 **Hard invariant:** A hard/escalation item (effort >= 4 or source='escalation') is NEVER silently demoted to local-coder/builtin. It is either paused (queued for retry) or routed to a non-exhausted frontier. This preserves merge authority semantics.
 
-### 4.3 Gateway Trace Extension
+### 4.4 Gateway Trace Extension
 
 `GatewayDecision` gains two new optional fields (backward-compatible):
 

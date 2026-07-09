@@ -2659,6 +2659,93 @@ function controlModeAccent(mode) {
   return colors[mode] ?? '#94a3b8';
 }
 
+function formatShipReadinessVerdict(verdict) {
+  const labels = {
+    ready: 'Ready',
+    blocked: 'Blocked',
+    degraded: 'Degraded',
+    idle: 'Idle',
+    unknown: 'Unknown',
+  };
+  return labels[verdict] ?? String(verdict ?? 'Unknown');
+}
+
+function shipReadinessAccent(verdict) {
+  const colors = {
+    ready: '#4ade80',
+    blocked: '#f87171',
+    degraded: '#f97316',
+    idle: '#94a3b8',
+    unknown: '#fbbf24',
+  };
+  return colors[verdict] ?? '#94a3b8';
+}
+
+function sourceStatusAccent(status) {
+  const colors = {
+    healthy: '#4ade80',
+    degraded: '#f97316',
+    blocked: '#f87171',
+    unavailable: '#f87171',
+    unknown: '#fbbf24',
+  };
+  return colors[status] ?? '#94a3b8';
+}
+
+function renderAutonomousShipReadinessCard(readiness, cls = 'ctrl-card card') {
+  if (!readiness) return null;
+  const topBlocker = readiness.topBlocker ?? null;
+  const primaryAction = readiness.primaryAction ?? null;
+  const freshness = readiness.freshness ?? {};
+  const sources = Array.isArray(readiness.sources) ? readiness.sources : [];
+  const card = el('div', { cls });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Autonomous Ship Readiness'),
+    el('span', {
+      cls: 'card-subtitle',
+      style: `color:${shipReadinessAccent(readiness.verdict)}`,
+    }, `${formatShipReadinessVerdict(readiness.verdict)} · ${readiness.confidence ?? 'unknown'} confidence`)
+  ));
+  const body = el('div', { cls: 'card-body' });
+  body.appendChild(infoGrid([
+    ['Verdict', formatShipReadinessVerdict(readiness.verdict)],
+    ['Confidence', readiness.confidence ?? 'unknown'],
+    ['Freshness', freshness.overall ?? 'unknown'],
+    ['Stale sources', freshness.staleSources ?? 0],
+    ['Unknown sources', freshness.unknownSources ?? 0],
+    ['Top blocker', topBlocker ? topBlocker.label ?? topBlocker.id : 'none'],
+    ['Primary action', primaryAction ? primaryAction.label ?? primaryAction.id : 'none'],
+  ]));
+
+  const detail = topBlocker?.detail ?? primaryAction?.detail ?? null;
+  if (detail) {
+    body.appendChild(el('p', { cls: 'hint' }, compactFleetReason(detail)));
+  }
+
+  if (sources.length > 0) {
+    const list = el('div', { cls: cls.includes('fleet-card') ? 'fleet-backends' : 'ctrl-backend-list' });
+    for (const source of sources.slice(0, 6)) {
+      list.appendChild(el('div', {
+        cls: cls.includes('fleet-card') ? 'fleet-backend-row' : 'ctrl-backend-row',
+        title: source.detail ?? '',
+      },
+        el('span', { cls: cls.includes('fleet-card') ? 'fleet-backend-name' : 'ctrl-backend-name' }, source.label ?? source.id),
+        el('span', { cls: cls.includes('fleet-card') ? 'fleet-backend-dispatches' : 'ctrl-backend-dispatches' },
+          `${source.freshness ?? 'unknown'}${source.ageMs != null ? ` · ${Math.round(source.ageMs / 60000)}m` : ''}`
+        ),
+        el('span', {
+          cls: 'fleet-quota',
+          style: `color:${sourceStatusAccent(source.status)}`,
+        }, source.badge ?? source.status ?? 'unknown')
+      ));
+    }
+    body.appendChild(list);
+  }
+
+  card.appendChild(body);
+  return card;
+}
+
 function autonomyRecentRows(autonomy) {
   const rows = [];
   const recent = Array.isArray(autonomy?.recent) ? autonomy.recent : [];
@@ -2730,8 +2817,14 @@ function renderFleet() {
     summaryRows.push(['Owned leases', sharedQueue.ownedClaims ?? 0]);
     summaryRows.push(['Cooldown items', sharedQueue.cooldownItems ?? 0]);
   }
+  if (f.autonomousShipReadiness) {
+    summaryRows.push(['Ship readiness', formatShipReadinessVerdict(f.autonomousShipReadiness.verdict)]);
+  }
   summary.appendChild(infoGrid(summaryRows));
   section.appendChild(summary);
+
+  const readinessCard = renderAutonomousShipReadinessCard(f.autonomousShipReadiness, 'fleet-card card');
+  if (readinessCard) section.appendChild(readinessCard);
 
   const effectivenessCard = renderAutonomyEffectivenessCard(f.autonomyEffectiveness, 'fleet-card card');
   if (effectivenessCard) section.appendChild(effectivenessCard);
@@ -3108,9 +3201,17 @@ function renderControl() {
   heroMetrics.appendChild(controlMetric('Merges (24h)', merges.recent ?? '—', '#4ade80'));
   heroMetrics.appendChild(controlMetric('Evidence', autonomy?.evidencePacks ?? 0, autonomy?.denied > 0 ? '#f87171' : '#38bdf8'));
   const effectiveness = d.fleet?.autonomyEffectiveness ?? fleet.autonomyEffectiveness ?? null;
+  const shipReadiness = d.fleet?.autonomousShipReadiness ?? fleet.autonomousShipReadiness ?? null;
   const production = d.fleet?.proposalProduction ?? fleet.proposalProduction ?? null;
   const dispatchProduction = d.fleet?.dispatchProduction ?? fleet.dispatchProduction ?? null;
   const workspace = d.fleet?.workspace ?? fleet.workspace ?? null;
+  if (shipReadiness) {
+    heroMetrics.appendChild(controlMetric(
+      'Ship Ready',
+      formatShipReadinessVerdict(shipReadiness.verdict),
+      shipReadinessAccent(shipReadiness.verdict)
+    ));
+  }
   if (effectiveness) {
     heroMetrics.appendChild(controlMetric('Loop State', formatEffectivenessPhase(effectiveness.phase), effectivenessAccent(effectiveness.phase)));
   }
@@ -3186,6 +3287,9 @@ function renderControl() {
     directionCard.appendChild(directionBody);
     section.appendChild(directionCard);
   }
+
+  const missionReadinessCard = renderAutonomousShipReadinessCard(shipReadiness);
+  if (missionReadinessCard) section.appendChild(missionReadinessCard);
 
   const missionEffectivenessCard = renderAutonomyEffectivenessCard(effectiveness);
   if (missionEffectivenessCard) section.appendChild(missionEffectivenessCard);

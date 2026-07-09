@@ -38,6 +38,14 @@ export interface OutcomeRecordProposal {
   workItemId?: string;
   workSource?: Proposal['workSource'];
   runId?: string;
+  trajectoryId?: string;
+  routeSnapshot?: Proposal['routeSnapshot'];
+  runEventSummary?: Proposal['runEventSummary'];
+  evidenceOutcome?: Proposal['evidenceOutcome'];
+  learningSource?: Proposal['learningSource'];
+  labelBasis?: Proposal['labelBasis'];
+  routerPolicyVersion?: string;
+  learningEpoch?: string;
 }
 
 export interface OutcomeRecordDecision {
@@ -46,6 +54,14 @@ export interface OutcomeRecordDecision {
   workItemId?: string;
   workSource?: DecisionEntry['workSource'];
   runId?: string;
+  trajectoryId?: string;
+  routeSnapshot?: DecisionEntry['routeSnapshot'];
+  runEventSummary?: DecisionEntry['runEventSummary'];
+  evidenceOutcome?: DecisionEntry['evidenceOutcome'];
+  learningSource?: DecisionEntry['learningSource'];
+  labelBasis?: DecisionEntry['labelBasis'];
+  routerPolicyVersion?: string;
+  learningEpoch?: string;
   verdict?: string;
   reason?: string;
   engine?: string;
@@ -69,6 +85,14 @@ export interface OutcomeRecordEvidence {
   policy?: AutonomyEvidencePack['policy'];
   gates: AutonomyEvidencePack['gates'];
   verification: AutonomyEvidencePack['verification'];
+  trajectoryId?: string;
+  routeSnapshot?: AutonomyEvidencePack['routeSnapshot'];
+  runEventSummary?: AutonomyEvidencePack['runEventSummary'];
+  evidenceOutcome?: AutonomyEvidencePack['evidenceOutcome'];
+  learningSource?: AutonomyEvidencePack['learningSource'];
+  labelBasis?: AutonomyEvidencePack['labelBasis'];
+  routerPolicyVersion?: string;
+  learningEpoch?: string;
 }
 
 export interface OutcomeRecordWorkedEvent {
@@ -167,6 +191,14 @@ function proposalSnapshot(proposal: Proposal): OutcomeRecordProposal {
     ...(proposal.workItemId ? { workItemId: proposal.workItemId } : {}),
     ...(proposal.workSource ? { workSource: proposal.workSource } : {}),
     ...(proposal.runId ? { runId: proposal.runId } : {}),
+    ...(proposal.trajectoryId ? { trajectoryId: proposal.trajectoryId } : {}),
+    ...(proposal.routeSnapshot ? { routeSnapshot: proposal.routeSnapshot } : {}),
+    ...(proposal.runEventSummary ? { runEventSummary: proposal.runEventSummary } : {}),
+    ...(proposal.evidenceOutcome ? { evidenceOutcome: proposal.evidenceOutcome } : {}),
+    ...(proposal.learningSource ? { learningSource: proposal.learningSource } : {}),
+    ...(proposal.labelBasis ? { labelBasis: proposal.labelBasis } : {}),
+    ...(proposal.routerPolicyVersion ? { routerPolicyVersion: proposal.routerPolicyVersion } : {}),
+    ...(proposal.learningEpoch ? { learningEpoch: proposal.learningEpoch } : {}),
   };
 }
 
@@ -177,6 +209,14 @@ function decisionSnapshot(decision: DecisionEntry): OutcomeRecordDecision {
     ...(decision.workItemId ? { workItemId: decision.workItemId } : {}),
     ...(decision.workSource ? { workSource: decision.workSource } : {}),
     ...(decision.runId ? { runId: decision.runId } : {}),
+    ...(decision.trajectoryId ? { trajectoryId: decision.trajectoryId } : {}),
+    ...(decision.routeSnapshot ? { routeSnapshot: decision.routeSnapshot } : {}),
+    ...(decision.runEventSummary ? { runEventSummary: decision.runEventSummary } : {}),
+    ...(decision.evidenceOutcome ? { evidenceOutcome: decision.evidenceOutcome } : {}),
+    ...(decision.learningSource ? { learningSource: decision.learningSource } : {}),
+    ...(decision.labelBasis ? { labelBasis: decision.labelBasis } : {}),
+    ...(decision.routerPolicyVersion ? { routerPolicyVersion: decision.routerPolicyVersion } : {}),
+    ...(decision.learningEpoch ? { learningEpoch: decision.learningEpoch } : {}),
     ...(decision.verdict ? { verdict: decision.verdict } : {}),
     ...(decision.reason ? { reason: decision.reason } : {}),
     ...(decision.engine ? { engine: decision.engine } : {}),
@@ -204,6 +244,14 @@ function evidenceSnapshot(pack: AutonomyEvidencePack): OutcomeRecordEvidence {
     ...(pack.policy ? { policy: pack.policy } : {}),
     gates: pack.gates,
     verification: pack.verification,
+    ...(pack.trajectoryId ? { trajectoryId: pack.trajectoryId } : {}),
+    ...(pack.routeSnapshot ? { routeSnapshot: pack.routeSnapshot } : {}),
+    ...(pack.runEventSummary ? { runEventSummary: pack.runEventSummary } : {}),
+    ...(pack.evidenceOutcome ? { evidenceOutcome: pack.evidenceOutcome } : {}),
+    ...(pack.learningSource ? { learningSource: pack.learningSource } : {}),
+    ...(pack.labelBasis ? { labelBasis: pack.labelBasis } : {}),
+    ...(pack.routerPolicyVersion ? { routerPolicyVersion: pack.routerPolicyVersion } : {}),
+    ...(pack.learningEpoch ? { learningEpoch: pack.learningEpoch } : {}),
   };
 }
 
