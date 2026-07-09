@@ -267,7 +267,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Mapped trivial outcomes to gate-blocked dispatch production so the fleet learns no-proposal quality signals and cools down repeated tiny churn.
 - [x] Added focused classifier, sandbox, api-model, and daemon regression tests.
 - [x] Run broad verification.
-- [ ] Commit, push, restart/resume daemon, and verify live fleet state.
+- [x] Commit, push, restart/resume daemon, and verify live fleet state.
 - [x] Verified focused/backlog/scanner suites, typecheck, lint, build, audit, and diff checks.
 - [ ] Commit, push, restart launchd daemon, and verify live service after restart.
 
