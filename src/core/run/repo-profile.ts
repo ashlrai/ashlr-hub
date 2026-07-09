@@ -562,7 +562,6 @@ function homebrewFormulaProject(repoRoot: string, root: string): RepoProjectProf
   const commands: VerifyCommand[] = [];
   for (const formula of formulas) {
     commands.push(commandWithCwd(repoRoot, root, 'typecheck', ['ruby', '-c', formula]));
-    commands.push(commandWithCwd(repoRoot, root, 'lint', ['brew', 'audit', '--strict', '--formula', formula]));
   }
 
   return {
@@ -570,7 +569,7 @@ function homebrewFormulaProject(repoRoot: string, root: string): RepoProjectProf
     relativeRoot: relative(repoRoot, root).replace(/\\/g, '/') || '.',
     kind: 'homebrew-formula',
     packageManager: 'brew',
-    scripts: ['ruby-syntax', 'brew-audit'],
+    scripts: ['ruby-syntax'],
     manifests: formulas,
     verifyCommands: commands,
   };

@@ -996,3 +996,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Committed the manifest wave locally in each sibling repo.
 - [x] Refreshed Hub backlog/profile cache and confirmed explicit merge contracts increased from 3/24 to 8/24.
 - [x] Record and commit the rollout notes in Hub.
+
+## Current Continuation - Explicit Merge Contract Wave 3
+- [x] Audited remaining repos and skipped dirty app repos to avoid trampling in-progress work.
+- [x] Found and fixed stale Homebrew detection: current `brew audit` refuses path arguments and name audit depends on trusted taps, so inferred Homebrew verification now uses deterministic `ruby -c` syntax checks only.
+- [x] Added explicit merge contracts to clean repos `homebrew-ashlr`, `homebrew-phantom`, and `openclaw-setup`.
+- [x] Verified Homebrew formulas with `ruby -c` and `openclaw-setup` with `python -m pytest -q`.
+- [x] Pushed `homebrew-phantom`; kept `homebrew-ashlr` local because no remote is configured and kept `openclaw-setup` local because it had pre-existing unpushed work.
+- [x] Refreshed Hub backlog/profile cache and confirmed explicit merge contracts increased from 8/24 to 11/24.
+- [x] Commit and push the Hub detector/rollout notes.

@@ -306,7 +306,7 @@ describe('repo execution profile', () => {
     }
   });
 
-  it('detects Homebrew formula syntax and safe audit commands', () => {
+  it('detects Homebrew formula syntax without tap-trust-dependent audit commands', () => {
     const dir = makeFixture();
     try {
       mkdirSync(join(dir, 'Formula'), { recursive: true });
@@ -317,11 +317,10 @@ describe('repo execution profile', () => {
       expect(profile.projects[0]).toMatchObject({
         kind: 'homebrew-formula',
         packageManager: 'brew',
-        scripts: ['ruby-syntax', 'brew-audit'],
+        scripts: ['ruby-syntax'],
       });
       expect(profile.verifyCommands).toEqual([
         { kind: 'typecheck', cmd: ['ruby', '-c', join('Formula', 'ashlr.rb')] },
-        { kind: 'lint', cmd: ['brew', 'audit', '--strict', '--formula', join('Formula', 'ashlr.rb')] },
       ]);
     } finally {
       rmSync(dir, { recursive: true, force: true });

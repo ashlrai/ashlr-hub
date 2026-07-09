@@ -16,6 +16,14 @@
 - Commits: local sibling commits are `ashlr-auth` `042316c`, `ashlr-cli-common` `d8709b3`, `ashlr-config` `6081945`, `ashlr-cost` `5c9021a`, and `ashlr-mcp-kit` `316dc14`. These repos currently have no Git remote configured, so there was no remote push target.
 - Fleet coverage: after `bin/ashlr backlog refresh --json`, FleetStatus moved from 3/24 to 8/24 `reposWithExplicitMergeContracts`; 16 enrolled repos remain without explicit contracts.
 
+## Current Explicit Merge Contract Wave 3
+- Homebrew detector bug: Hub was emitting `brew audit --strict --formula Formula/*.rb`, but current Homebrew refuses path arguments (`Calling brew audit [path ...] is disabled`) and name/tap audit can fail on untrusted taps. The safe inferred Homebrew verifier is now deterministic Ruby syntax checking (`ruby -c Formula/*.rb`); stronger audit commands should be explicit, opt-in, and trust-aware.
+- Implementation: updated `homebrewFormulaProject()` and `m314` coverage so Homebrew detection no longer emits trust/path-sensitive audit commands.
+- Manifests: added root `ashlr.verify.json` to `homebrew-ashlr` (three `ruby -c` formula checks), `homebrew-phantom` (one `ruby -c` formula check), and `openclaw-setup` (`python -m pytest -q`).
+- Verification: focused Hub tests `m314/m49/m22/m43` passed (149 tests); Hub `typecheck`, `lint` (existing 115-warning baseline), `build`, `audit`, and `git diff --check` passed. Sibling checks passed: all Homebrew formula `ruby -c` checks and `openclaw-setup` pytest (2 tests).
+- Commits: local sibling commits are `homebrew-ashlr` `8b71f9a`, `homebrew-phantom` `1ee78a5` (pushed to `origin/main`), and `openclaw-setup` `4c357b9`. `homebrew-ashlr` has no remote configured; `openclaw-setup` already had a pre-existing unpushed commit, so I did not push unrelated work.
+- Fleet coverage: after `bin/ashlr backlog refresh --json`, FleetStatus moved from 8/24 to 11/24 `reposWithExplicitMergeContracts`; remaining contract backlog names are `phantom-secrets`, `stack`, `ashlr-plugin`, `ashlrcode`, `ashlr-workbench`, `ashlr-md`, `morphkit`, `webfetch`, `ashlr-core-efficiency`, `prompt-trackr`, `10:4`, `ashlr WM`, and `ashlr sales pipeline`.
+
 ## Current Resource-Aware Learned Target Gate
 - Start state: dirty Hub WIP after comparative learned routing rollout; Entire remains not set up for `master`.
 - Implementation: `recommendRoute()` now accepts optional metadata-only `resourceStates` and filters comparative same-tier learned reroute candidates to `open` or `near` availability when provided. Missing candidates are blocked only in explicit resource-aware calls; direct/legacy learned-router callers without `resourceStates` preserve previous behavior.
