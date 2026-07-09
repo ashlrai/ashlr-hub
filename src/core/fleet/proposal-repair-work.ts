@@ -17,6 +17,7 @@ const MAX_REASON = 260;
 const DISPATCH_CAPTURE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const DISPATCH_CAPTURE_LIMIT = 100;
 const DISPATCH_CAPTURE_MAX_QUEUED = 5;
+const DISPATCH_NO_DIFF_MAX_QUEUED = 5;
 
 export interface ProposalRepairWorkResult {
   scanned: number;
@@ -30,13 +31,19 @@ export interface ProposalRepairWorkResult {
   dispatchCaptureEligible?: number;
   dispatchCaptureQueued?: number;
   dispatchCaptureFailed?: number;
+  dispatchNoDiffScanned?: number;
+  dispatchNoDiffEligible?: number;
+  dispatchNoDiffQueued?: number;
+  dispatchNoDiffFailed?: number;
 }
 
 export interface ProposalRepairWorkOptions {
   dispatchEvents?: DispatchProductionEvent[];
   includeDispatchCaptureFailures?: boolean;
+  includeDispatchNoDiffReslices?: boolean;
   dispatchWindowMs?: number;
   maxDispatchCaptureQueued?: number;
+  maxDispatchNoDiffQueued?: number;
 }
 
 function bounded(value: unknown, max: number): string {
@@ -66,6 +73,14 @@ function captureRepairId(repo: string, itemId: string): string {
     .digest('hex')
     .slice(0, 12);
   return `${basename(repo)}:proposal-repair-capture:${hash}`;
+}
+
+function noDiffResliceId(repo: string, itemId: string): string {
+  const hash = createHash('sha1')
+    .update(`${resolve(repo)}\0${itemId}\0dispatch-no-diff-reslice`)
+    .digest('hex')
+    .slice(0, 12);
+  return `${basename(repo)}:proposal-repair-nodiff:${hash}`;
 }
 
 function proposalNeedsRepair(proposal: Proposal): boolean {
@@ -102,6 +117,19 @@ function isRepairableCaptureFailure(event: DispatchProductionEvent): boolean {
   if (event.outcome !== 'gate-blocked') return false;
   if ((event.runEventSummary?.actionCounts?.completenessGateRuns ?? 0) > 0) return true;
   return /\b(?:capture|completeness|gate)\b/i.test(`${event.reason ?? ''}\n${event.routeReason ?? ''}`);
+}
+
+function isDiagnosticNoDiffEvent(event: DispatchProductionEvent): boolean {
+  if (event.basis !== 'run-proposal-outcome') return false;
+  if (event.outcome !== 'empty-diff') return false;
+  if (event.proposalCreated !== false) return false;
+  if (event.proposalId) return false;
+  if (!event.repo || !event.itemId) return false;
+  if (/\b(?:proposal-repair|dispatch-capture-repair|proposal-repair-capture|proposal-repair-nodiff|diagnostic-reslice|no-diff-reslice)\b/i.test(`${event.itemId}\n${event.title}`)) {
+    return false;
+  }
+  if (event.learningLabel && event.learningLabel.learningKind !== 'diagnostic-no-proposal') return false;
+  return true;
 }
 
 export function proposalRepairWorkItem(proposal: Proposal, now = new Date()): WorkItem | null {
@@ -178,9 +206,55 @@ export function captureGateRepairWorkItem(
   return isActionableSelfHealItem(item, { nowMs }) ? item : null;
 }
 
-function readRecentCaptureFailures(now: Date, opts?: ProposalRepairWorkOptions): DispatchProductionEvent[] {
+export function noDiffResliceWorkItem(
+  event: DispatchProductionEvent,
+  now = new Date(),
+): WorkItem | null {
+  if (!isDiagnosticNoDiffEvent(event)) return null;
+  const eventMs = Date.parse(event.ts);
+  const nowMs = now.getTime();
+  if (!Number.isFinite(eventMs) || eventMs > nowMs || nowMs - eventMs > DISPATCH_CAPTURE_WINDOW_MS) {
+    return null;
+  }
+  const repo = canonicalEnrolledExistingRepo(event.repo);
+  if (!repo) return null;
+
+  const reason = boundedRepairReason(event.reason ?? event.routeReason ?? event.outcome, MAX_REASON) || event.outcome;
+  const itemId = bounded(event.itemId, 120) || 'unknown';
+  const backend = bounded(event.backend ?? 'unknown', 80) || 'unknown';
+  const source = bounded(event.source, 80) || 'unknown';
+  const routeReason = boundedRepairReason(event.routeReason, MAX_REASON);
+  const runId = bounded(event.runId, 120);
+  const value = 4;
+  const effort = 1;
+
+  const item: WorkItem = {
+    id: noDiffResliceId(repo, itemId),
+    repo,
+    source: 'self',
+    title: `Reslice no-diff dispatch for ${bounded(basename(repo), 80) || 'repo'} item ${itemId}`,
+    detail:
+      `Diagnostic reslice: a dispatch completed without file changes, so the task likely needs tighter scope and retrieved context.\n` +
+      `Original work item: ${itemId}\n` +
+      (runId ? `Run: ${runId}\n` : '') +
+      `Original source: ${source}\n` +
+      `Backend: ${backend}\n` +
+      (routeReason ? `Route: ${routeReason}\n` : '') +
+      `Dispatch outcome: empty-diff\n` +
+      `Failure: ${reason}\n` +
+      `Action: reslice the work into a smaller concrete edit, retrieve the relevant repo context, produce a fresh complete patch, and run merge-grade verification. Do not copy raw prompts, stdout, stderr, env, file contents, or prior diff output.`,
+    value,
+    effort,
+    score: value / effort,
+    tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice', 'no-diff', 'verify', 'high-priority'],
+    ts: new Date(eventMs).toISOString(),
+  };
+  return isActionableSelfHealItem(item, { nowMs }) ? item : null;
+}
+
+function readRecentDispatchEvents(now: Date, opts?: ProposalRepairWorkOptions): DispatchProductionEvent[] {
   if (opts?.dispatchEvents) return opts.dispatchEvents;
-  if (opts?.includeDispatchCaptureFailures === false) return [];
+  if (opts?.includeDispatchCaptureFailures === false && opts?.includeDispatchNoDiffReslices === false) return [];
   const windowMs = opts?.dispatchWindowMs && opts.dispatchWindowMs > 0
     ? opts.dispatchWindowMs
     : DISPATCH_CAPTURE_WINDOW_MS;
@@ -237,26 +311,38 @@ export function queueProposalRepairWorkForPendingProposals(
       failed: 1,
     };
   }
-  const captureFailures = (proposals === undefined ? readRecentCaptureFailures(now, opts) : (opts?.dispatchEvents ?? []))
+  const includeCaptureRepairs = opts?.includeDispatchCaptureFailures !== false;
+  const includeNoDiffReslices = opts?.includeDispatchNoDiffReslices !== false;
+  const dispatchEvents = (includeCaptureRepairs || includeNoDiffReslices
+    ? (proposals === undefined ? readRecentDispatchEvents(now, opts) : (opts?.dispatchEvents ?? []))
+    : [])
     .slice()
     .sort(byNewestEvent);
   const maxCaptureQueued = Math.max(
     0,
     Math.min(DISPATCH_CAPTURE_MAX_QUEUED, Math.floor(opts?.maxDispatchCaptureQueued ?? DISPATCH_CAPTURE_MAX_QUEUED)),
   );
+  const maxNoDiffQueued = Math.max(
+    0,
+    Math.min(DISPATCH_NO_DIFF_MAX_QUEUED, Math.floor(opts?.maxDispatchNoDiffQueued ?? DISPATCH_NO_DIFF_MAX_QUEUED)),
+  );
 
   const result: ProposalRepairWorkResult = {
-    scanned: pending.length + captureFailures.length,
+    scanned: pending.length + dispatchEvents.length,
     eligible: 0,
     queued: 0,
     failed: 0,
     proposalEligible: 0,
     proposalQueued: 0,
     proposalFailed: 0,
-    dispatchCaptureScanned: captureFailures.length,
+    dispatchCaptureScanned: includeCaptureRepairs ? dispatchEvents.length : 0,
     dispatchCaptureEligible: 0,
     dispatchCaptureQueued: 0,
     dispatchCaptureFailed: 0,
+    dispatchNoDiffScanned: includeNoDiffReslices ? dispatchEvents.length : 0,
+    dispatchNoDiffEligible: 0,
+    dispatchNoDiffQueued: 0,
+    dispatchNoDiffFailed: 0,
   };
 
   for (const proposal of pending) {
@@ -273,7 +359,7 @@ export function queueProposalRepairWorkForPendingProposals(
     }
   }
   const seenCaptureIds = new Set<string>();
-  for (const event of captureFailures) {
+  if (includeCaptureRepairs) for (const event of dispatchEvents) {
     if ((result.dispatchCaptureQueued ?? 0) >= maxCaptureQueued) break;
     const item = captureGateRepairWorkItem(event, now);
     if (!item) continue;
@@ -287,6 +373,23 @@ export function queueProposalRepairWorkForPendingProposals(
     } else {
       result.failed++;
       result.dispatchCaptureFailed!++;
+    }
+  }
+  const seenNoDiffIds = new Set<string>();
+  if (includeNoDiffReslices) for (const event of dispatchEvents) {
+    if ((result.dispatchNoDiffQueued ?? 0) >= maxNoDiffQueued) break;
+    const item = noDiffResliceWorkItem(event, now);
+    if (!item) continue;
+    if (seenNoDiffIds.has(item.id)) continue;
+    seenNoDiffIds.add(item.id);
+    result.eligible++;
+    result.dispatchNoDiffEligible!++;
+    if (queueSelfHealItem(item)) {
+      result.queued++;
+      result.dispatchNoDiffQueued!++;
+    } else {
+      result.failed++;
+      result.dispatchNoDiffFailed!++;
     }
   }
 

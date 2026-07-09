@@ -36,6 +36,18 @@ function ageOk(ts: string, nowMs: number, maxAgeMs: number): boolean {
   return parsed <= nowMs && nowMs - parsed <= maxAgeMs;
 }
 
+function isTrustedDiagnosticResliceItem(item: WorkItem): boolean {
+  if (!/^[^:]+:proposal-repair-nodiff:[0-9a-f]{12}$/i.test(item.id)) return false;
+  if (!item.tags.includes('proposal-repair')) return false;
+  if (!item.tags.includes('diagnostic-reslice')) return false;
+  if (!item.tags.includes('dispatch-no-diff-reslice')) return false;
+  const text = textFromItem(item);
+  return /\bDiagnostic reslice:/i.test(text) &&
+    /\bOriginal work item:/i.test(text) &&
+    /\bDispatch outcome:\s*empty-diff\b/i.test(text) &&
+    /\bAction:\s*reslice\b/i.test(text);
+}
+
 export function isActionableSelfHealFailureText(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
@@ -54,5 +66,6 @@ export function isActionableSelfHealItem(
   const nowMs = opts?.nowMs ?? Date.now();
   const maxAgeMs = opts?.maxAgeMs ?? SELF_HEAL_ITEM_MAX_AGE_MS;
   if (!ageOk(item.ts, nowMs, maxAgeMs)) return false;
+  if (isTrustedDiagnosticResliceItem(item)) return true;
   return isActionableSelfHealFailureText(textFromItem(item));
 }

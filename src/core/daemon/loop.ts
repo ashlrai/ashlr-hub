@@ -1180,6 +1180,18 @@ export async function tick(
           ...(proposalRepairMaintenanceResult.dispatchCaptureFailed !== undefined
             ? { dispatchCaptureRepairFailed: proposalRepairMaintenanceResult.dispatchCaptureFailed }
             : {}),
+          ...(proposalRepairMaintenanceResult.dispatchNoDiffScanned !== undefined
+            ? { dispatchNoDiffResliceScanned: proposalRepairMaintenanceResult.dispatchNoDiffScanned }
+            : {}),
+          ...(proposalRepairMaintenanceResult.dispatchNoDiffEligible !== undefined
+            ? { dispatchNoDiffResliceEligible: proposalRepairMaintenanceResult.dispatchNoDiffEligible }
+            : {}),
+          ...(proposalRepairMaintenanceResult.dispatchNoDiffQueued !== undefined
+            ? { dispatchNoDiffResliceQueued: proposalRepairMaintenanceResult.dispatchNoDiffQueued }
+            : {}),
+          ...(proposalRepairMaintenanceResult.dispatchNoDiffFailed !== undefined
+            ? { dispatchNoDiffResliceFailed: proposalRepairMaintenanceResult.dispatchNoDiffFailed }
+            : {}),
         }
         : {}),
       ...(producerMaintenanceSkippedByCadence ? { skippedByCadence: true } : {}),

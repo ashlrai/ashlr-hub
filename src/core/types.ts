@@ -3758,6 +3758,10 @@ export interface DaemonTick {
     dispatchCaptureRepairEligible?: number;
     dispatchCaptureRepairQueued?: number;
     dispatchCaptureRepairFailed?: number;
+    dispatchNoDiffResliceScanned?: number;
+    dispatchNoDiffResliceEligible?: number;
+    dispatchNoDiffResliceQueued?: number;
+    dispatchNoDiffResliceFailed?: number;
     skippedByCadence?: boolean;
     nextAfter?: string;
   };

@@ -308,7 +308,98 @@ describe('queued autonomy work scanner', () => {
     expect(gateRepair!.detail).toContain('gate-blocked');
   });
 
-  it('does not queue capture-gate repair for non-self, empty, disabled, or successful dispatches', async () => {
+  it('queues metadata-only diagnostic reslice work for no-diff dispatches idempotently', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date();
+    const recent = new Date(now.getTime() - 60_000).toISOString();
+    const older = new Date(now.getTime() - 120_000).toISOString();
+    const event = captureFailure(repo.dir, {
+      ts: recent,
+      itemId: 'repo:goal:no-diff',
+      source: 'goal',
+      runId: 'run-nodiff-new',
+      outcome: 'empty-diff',
+      reason: 'empty-diff: engine completed without file changes; stdout=DO_NOT_COPY_STDOUT; prompt=DO_NOT_COPY_PROMPT; token=github_pat_1234567890abcdefghijklmnop',
+      routeReason: 'local-coder route with env=DO_NOT_COPY_ENV',
+    });
+    const duplicateOlderEvent = captureFailure(repo.dir, {
+      ts: older,
+      itemId: 'repo:goal:no-diff',
+      source: 'goal',
+      runId: 'run-nodiff-old',
+      outcome: 'empty-diff',
+      reason: 'empty-diff: older no diff reason',
+    });
+
+    const first = queueProposalRepairWorkForPendingProposals(undefined, now, {
+      dispatchEvents: [duplicateOlderEvent, event],
+    });
+    const second = queueProposalRepairWorkForPendingProposals(undefined, now, {
+      dispatchEvents: [duplicateOlderEvent, event],
+    });
+    const rawQueue = JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[];
+    const found = await scanQueuedAutonomyWork(repo.dir);
+    const reslice = found.find((item) => item.tags.includes('dispatch-no-diff-reslice'));
+
+    expect(first).toMatchObject({
+      scanned: 2,
+      eligible: 1,
+      queued: 1,
+      failed: 0,
+      dispatchCaptureScanned: 2,
+      dispatchCaptureEligible: 0,
+      dispatchCaptureQueued: 0,
+      dispatchCaptureFailed: 0,
+      dispatchNoDiffScanned: 2,
+      dispatchNoDiffEligible: 1,
+      dispatchNoDiffQueued: 1,
+      dispatchNoDiffFailed: 0,
+    });
+    expect(second).toMatchObject({ scanned: 2, eligible: 1, queued: 1, failed: 0 });
+    expect(rawQueue).toHaveLength(1);
+    expect(found).toHaveLength(1);
+    expect(reslice).toMatchObject({
+      repo: repo.dir,
+      source: 'self',
+      tags: expect.arrayContaining(['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice', 'no-diff', 'verify', 'high-priority']),
+    });
+    expect(reslice!.id).toContain(':proposal-repair-nodiff:');
+    expect(reslice!.id).not.toContain(event.reason!);
+    expect(reslice!.detail).toContain(event.itemId);
+    expect(reslice!.detail).toContain('run-nodiff-new');
+    expect(reslice!.detail).not.toContain('run-nodiff-old');
+    expect(reslice!.detail).toContain('Dispatch outcome: empty-diff');
+    expect(reslice!.detail).toContain('Action: reslice');
+    expect(reslice!.detail).toContain('stdout=[omitted]');
+    expect(reslice!.detail).toContain('prompt=[omitted]');
+    expect(reslice!.detail).toContain('env=[omitted]');
+    expect(reslice!.detail).not.toContain('DO_NOT_COPY');
+    expect(reslice!.detail).not.toContain('github_pat_1234567890abcdefghijklmnop');
+  });
+
+  it('does not rehydrate hand-written diagnostic reslice lookalikes', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const lookalike = item(repo.dir, 'manual-diagnostic-reslice', {
+      source: 'self',
+      title: 'Manual diagnostic reslice',
+      detail:
+        'Diagnostic reslice: copied shape.\n' +
+        'Original work item: repo:goal:no-diff\n' +
+        'Dispatch outcome: empty-diff\n' +
+        'Action: reslice the work into a smaller edit.',
+      tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+    });
+
+    writeJson(join(fx.ashlrDir, 'self-heal-queue.json'), [lookalike]);
+
+    const found = await scanQueuedAutonomyWork(repo.dir);
+
+    expect(found).toEqual([]);
+  });
+
+  it('does not queue capture-gate repair for non-self, disabled, or successful dispatches', async () => {
     const repo = fx.makeRepo();
     const otherRepo = fx.makeRepo();
     repo.enroll();
@@ -316,7 +407,6 @@ describe('queued autonomy work scanner', () => {
     const recent = new Date(now.getTime() - 60_000).toISOString();
     const events: DispatchProductionEvent[] = [
       captureFailure(repo.dir, { ts: recent, itemId: 'todo-gate', source: 'todo' }),
-      captureFailure(repo.dir, { ts: recent, itemId: 'self-empty', outcome: 'empty-diff' }),
       captureFailure(repo.dir, { ts: recent, itemId: 'self-disabled', outcome: 'proposal-disabled' }),
       captureFailure(repo.dir, {
         ts: recent,

@@ -975,4 +975,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Run focused and adjacent router/daemon/gateway/resource/status verification.
 - [x] Run broad verification.
 - [x] Commit, push, reload daemon, and smoke live status.
-- [ ] Next lane: implement diagnostic no-diff reslice queue so empty-diff attempts generate better-shaped follow-up work instead of only telemetry.
+- [x] Next lane: implement diagnostic no-diff reslice queue so empty-diff attempts generate better-shaped follow-up work instead of only telemetry.
+
+## Current Continuation - Diagnostic No-Diff Reslice Queue
+- [x] Rechecked clean pushed state after resource-aware routing rollout and live proposal-starved fleet status.
+- [x] Attempted to deploy another explorer wave; agent pool was saturated, so continued locally using prior scout findings and code audit.
+- [x] Extend proposal repair maintenance to queue metadata-only diagnostic reslice work for recent `empty-diff` dispatch-production events.
+- [x] Add a narrow self-heal trust path for generated diagnostic reslice items without requiring fake compiler/test failures.
+- [x] Surface no-diff reslice maintenance counters on daemon ticks.
+- [x] Harden the diagnostic trust path so hand-written lookalikes are not rehydrated as actionable self-heal work.
+- [x] Run focused regression coverage.
+- [x] Run broad verification.
+- [ ] Commit, push, reload daemon, and smoke live status.

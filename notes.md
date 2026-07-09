@@ -1,5 +1,13 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Current Diagnostic No-Diff Reslice Queue
+- Start state: clean pushed `master` at `04c366f`; daemon PID `64076`, guard clear, queue `33` backlog / `31` eligible / `0` pending, readiness degraded by `dispatch-yield-actionable`, and autonomy effectiveness `proposal-starved`.
+- Agent pool was saturated for a new explorer wave, so implementation proceeded locally using prior scout findings plus direct audit of `proposal-repair-work`, queued autonomy, self-heal trust, daemon producer maintenance, and existing m310/m201 regressions.
+- Implementation: proposal repair maintenance now scans recent dispatch-production `empty-diff` rows and writes metadata-only `diagnostic-reslice` self-heal items with stable `proposal-repair-nodiff` ids. Items include original item id, source, backend, route reason, outcome, sanitized reason, and an action to reslice with retrieved context; they do not persist raw prompts, diffs, stdout, stderr, env, or file contents.
+- Safety/trust: `isActionableSelfHealItem()` has a narrow explicit path for generated `proposal-repair + diagnostic-reslice + dispatch-no-diff-reslice` items, requiring expected detail markers plus the deterministic `:proposal-repair-nodiff:<hash>` id shape. The first focused run caught an over-strict colon word-boundary regex; fixed by matching the markers without requiring a word boundary after `:`.
+- Daemon telemetry: `producerMaintenance` now exposes `dispatchNoDiffResliceScanned/Eligible/Queued/Failed` alongside proposal and capture-gate repair counts.
+- Verification passed: `npm run typecheck -- --pretty false`, `git diff --check`, focused `m310/m201/m49/m342/m346/m349` before hardening (162 tests), adjacent `m165/m352/m343/m255/m256` (113 tests), full `npm run test:ci` before final hardening (439 files, 9,090 passed, 7 skipped), focused `m310/m201/m49/m342/m346/m349` after hardening (163 tests), `npm run test:invariants` (41 files, 411 tests), final `npm run typecheck -- --pretty false`, `npm run lint` (existing 115-warning baseline, 0 errors), `npm run build`, `npm audit --audit-level=moderate` (0 vulnerabilities), and `git diff --check`.
+
 ## Current Resource-Aware Learned Target Gate
 - Start state: dirty Hub WIP after comparative learned routing rollout; Entire remains not set up for `master`.
 - Implementation: `recommendRoute()` now accepts optional metadata-only `resourceStates` and filters comparative same-tier learned reroute candidates to `open` or `near` availability when provided. Missing candidates are blocked only in explicit resource-aware calls; direct/legacy learned-router callers without `resourceStates` preserve previous behavior.

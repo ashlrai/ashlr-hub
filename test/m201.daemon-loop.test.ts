@@ -570,13 +570,17 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     }));
     mockQueueProposalRepairWorkForPendingProposals.mockReturnValue({
       scanned: 1,
-      eligible: 1,
-      queued: 1,
+      eligible: 2,
+      queued: 2,
       failed: 0,
       dispatchCaptureScanned: 1,
       dispatchCaptureEligible: 1,
       dispatchCaptureQueued: 1,
       dispatchCaptureFailed: 0,
+      dispatchNoDiffScanned: 1,
+      dispatchNoDiffEligible: 1,
+      dispatchNoDiffQueued: 1,
+      dispatchNoDiffFailed: 0,
     });
     mockBuildBacklog
       .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [] })
@@ -595,13 +599,17 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
     expect(result.producerMaintenance).toMatchObject({
       proposalRepair: true,
-      proposalRepairEligible: 1,
-      proposalRepairQueued: 1,
+      proposalRepairEligible: 2,
+      proposalRepairQueued: 2,
       proposalRepairFailed: 0,
       dispatchCaptureRepairScanned: 1,
       dispatchCaptureRepairEligible: 1,
       dispatchCaptureRepairQueued: 1,
       dispatchCaptureRepairFailed: 0,
+      dispatchNoDiffResliceScanned: 1,
+      dispatchNoDiffResliceEligible: 1,
+      dispatchNoDiffResliceQueued: 1,
+      dispatchNoDiffResliceFailed: 0,
     });
     expect(result.dispatches?.[0]?.itemId).toBe(repairItems[0]!.id);
   });
