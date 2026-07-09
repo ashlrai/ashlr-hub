@@ -963,4 +963,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused regressions for no blind unknown alternate and positive comparative candidate yield.
 - [x] Run focused and adjacent router/daemon/gateway/resource/status verification.
 - [x] Run broad verification.
-- [ ] Commit, push, reload daemon, and smoke live status.
+- [x] Commit, push, reload daemon, and smoke live status.
