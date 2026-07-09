@@ -1163,4 +1163,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Implement conservative implicit diagnostic-reslice drain selection for live executable backlog-build ticks.
 - [x] Add focused daemon-loop regressions for auto-drain priority, local-only preservation, pending/cooldown fallback, malformed lookalikes, status, router trust, and web telemetry.
 - [x] Run focused and broad local verification gates.
-- [ ] Commit, push, reload daemon, and smoke live status.
+- [x] Commit, push, reload daemon, and smoke live status.
