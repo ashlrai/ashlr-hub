@@ -1013,5 +1013,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Render generated queue counts in `ashlr fleet status` so operators can see whether repair work is actually queued.
 - [x] Add focused FleetStatus/CLI formatter regression coverage.
 - [x] Run focused and broad verification.
+- [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Generated Work Web Visibility
+- [x] Rechecked clean pushed state after generated queue status rollout.
+- [x] Used Fleet OS sidecar findings to confirm the shared `FleetStatus` contract already feeds API/SSE/snapshot surfaces.
+- [x] Render generated repair/no-diff work in Fleet summary, Mission Control hero metrics, and Fleet Dashboard readiness rail.
+- [x] Add static web-surface and dashboard snapshot regression coverage.
+- [x] Run focused web/status verification.
+- [x] Run final gates.
 - [ ] Commit, push, reload daemon, and smoke live status.
-- [ ] Select and implement the next highest-leverage scout-backed patch.
+- [ ] Implement proposal-yield routing fix for generated no-diff reslices.

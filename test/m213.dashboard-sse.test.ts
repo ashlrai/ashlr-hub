@@ -409,6 +409,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('function renderProposalProductionCard');
     expect(src).toContain('function renderDispatchProductionCard');
     expect(src).toContain('function dispatchProductionDiagnosticAttempts');
+    expect(src).toContain('function generatedWorkMetric');
+    expect(src).toContain('diagnosticReslices');
     expect(src).toContain('function renderMissionBriefCard');
     expect(src).toContain('function renderNextActionCommand');
     expect(src).toContain('fleet-command-rail');
@@ -421,8 +423,11 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('missionBrief');
     expect(src).toContain("renderProposalProductionCard(f.proposalProduction, 'fleet-card card')");
     expect(src).toContain("renderDispatchProductionCard(f.dispatchProduction, 'fleet-card card')");
+    expect(src).toContain("['Generated work', generatedWorkMetric(f.queue?.generatedWork) ?? '—']");
     expect(src).toContain('renderProposalProductionCard(production)');
     expect(src).toContain("controlMetric('No-prop 24h'");
+    expect(src).toContain('queue.generatedWork.total ?? 0');
+    expect(src).toContain("fdMetricPill('Generated'");
     expect(src).toContain('production.diagnosticNoProposalDispatches ?? production.noProposalDispatches');
     expect(src).toContain("controlMetric('Yield 24h'");
     expect(src).toContain("snap.fleet?.proposalProduction ?? snap.control?.fleet?.proposalProduction");

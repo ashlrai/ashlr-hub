@@ -31,6 +31,12 @@
 - Regression coverage: `m49.fleet-status` proves stale persisted self-heal queue snapshots produce generated work counts and the CLI formatter renders the compact generated queue line.
 - Verification passed: `npm run typecheck -- --pretty false`; focused `npm run test:ci -- test/m49.fleet-status.test.ts` (50 tests); `git diff --check`; `npm run lint` (known 115-warning baseline, 0 errors); `npm run build`; and `npm audit --audit-level=moderate` (0 vulnerabilities).
 
+## Current Generated Work Web Visibility
+- Scout finding: no new API contract is needed because `queue.generatedWork` already flows through `/api/fleet`, `/api/control`, Dashboard snapshots, and SSE snapshot payloads. The gap was operator visibility in the browser.
+- Implementation: added `generatedWorkMetric()` to the web app and rendered generated repair/no-diff work in Fleet summary rows, Mission Control hero metrics, and the Fleet Dashboard readiness rail.
+- Dashboard truth: the M210 fixture now carries `queue.generatedWork` so snapshot propagation is covered alongside shared queue health.
+- Verification passed: `node --check src/core/web/public/app.js`; focused `npm run test:ci -- test/m213.dashboard-sse.test.ts test/m210.dashboard.test.ts test/m49.fleet-status.test.ts` (96 tests); `npm run typecheck -- --pretty false`; `git diff --check`; `npm run lint` (known 115-warning baseline, 0 errors); `npm run build`; and `npm audit --audit-level=moderate` (0 vulnerabilities).
+
 ## Current Resource-Aware Learned Target Gate
 - Start state: dirty Hub WIP after comparative learned routing rollout; Entire remains not set up for `master`.
 - Implementation: `recommendRoute()` now accepts optional metadata-only `resourceStates` and filters comparative same-tier learned reroute candidates to `open` or `near` availability when provided. Missing candidates are blocked only in explicit resource-aware calls; direct/legacy learned-router callers without `resourceStates` preserve previous behavior.

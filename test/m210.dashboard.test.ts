@@ -100,6 +100,13 @@ const FIXTURE_FLEET_STATUS = {
   backends: [],
   queue: {
     backlogItems: 4,
+    generatedWork: {
+      total: 2,
+      selfHeal: 2,
+      proposalRepair: 1,
+      diagnosticReslices: 1,
+      invent: 0,
+    },
     shared: {
       enabled: true,
       mode: 'filesystem' as const,
@@ -350,6 +357,13 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
   it('fleet status is embedded for Fleet Dashboard queue health', async () => {
     const snap = await buildSnapshot(makeConfig());
     expect(snap.fleet?.queue.backlogItems).toBe(4);
+    expect(snap.fleet?.queue.generatedWork).toMatchObject({
+      total: 2,
+      selfHeal: 2,
+      proposalRepair: 1,
+      diagnosticReslices: 1,
+      invent: 0,
+    });
     expect(snap.fleet?.queue.shared?.activeClaims).toBe(2);
     expect(snap.fleet?.queue.shared?.ownedClaims).toBe(1);
     expect(snap.fleet?.queue.shared?.reclaimableClaims).toBe(1);

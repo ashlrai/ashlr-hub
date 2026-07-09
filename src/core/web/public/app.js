@@ -2290,6 +2290,16 @@ function queueEligibilityMetric(queue) {
   return `${queue.eligibleBacklogItems} eligible / ${queue.cooldownItems ?? 0} cooling / ${queue.pendingItems ?? 0} pending`;
 }
 
+function generatedWorkMetric(generatedWork) {
+  if (!generatedWork || typeof generatedWork.total !== 'number' || generatedWork.total <= 0) return null;
+  const parts = [`${generatedWork.total} generated`];
+  if ((generatedWork.diagnosticReslices ?? 0) > 0) parts.push(`${generatedWork.diagnosticReslices} no-diff reslice`);
+  if ((generatedWork.proposalRepair ?? 0) > 0) parts.push(`${generatedWork.proposalRepair} proposal-repair`);
+  if ((generatedWork.selfHeal ?? 0) > 0) parts.push(`${generatedWork.selfHeal} self-heal`);
+  if ((generatedWork.invent ?? 0) > 0) parts.push(`${generatedWork.invent} invent`);
+  return parts.join(' / ');
+}
+
 function laneLocksMetric(laneLocks) {
   if (!laneLocks) return null;
   return `${laneLocks.active ?? 0} active / ${laneLocks.staleInProgress ?? 0} stale / ${laneLocks.awaitingHostMerge ?? 0} handoff / ${laneLocks.unverifiedApplied ?? 0} unverified`;
@@ -2976,6 +2986,7 @@ function renderFleet() {
     ['Spend today', f.daemon.todaySpentUsd != null ? `$${f.daemon.todaySpentUsd.toFixed(4)}` : '—'],
     ['Backlog queue', f.queue?.backlogItems ?? '—'],
     ['Eligible queue', queueEligibilityMetric(f.queue) ?? '—'],
+    ['Generated work', generatedWorkMetric(f.queue?.generatedWork) ?? '—'],
     ['Lane locks', laneLocksMetric(f.laneLocks) ?? '—'],
     ['Merges (24h)', f.merges?.recent ?? '—'],
     ['Autonomy evidence', autonomyEvidenceMetric(f.autonomy)],
@@ -3367,6 +3378,13 @@ function renderControl() {
   heroMetrics.appendChild(controlMetric('Spend today', daemon.todaySpentUsd != null ? `$${daemon.todaySpentUsd.toFixed(4)}` : '—', '#fbbf24'));
   heroMetrics.appendChild(controlMetric('Queue depth', queue.backlogItems ?? '—', '#60a5fa'));
   heroMetrics.appendChild(controlMetric('Eligible', queue.eligibleBacklogItems ?? queue.backlogItems ?? '—', '#38bdf8'));
+  if (queue.generatedWork) {
+    heroMetrics.appendChild(controlMetric(
+      'Generated',
+      queue.generatedWork.total ?? 0,
+      (queue.generatedWork.diagnosticReslices ?? 0) > 0 ? '#f97316' : '#38bdf8'
+    ));
+  }
   const laneLocks = d.fleet?.laneLocks ?? fleet.laneLocks ?? null;
   if (laneLocks) {
     const laneLocksWarn = (laneLocks.staleInProgress ?? 0) > 0 || (laneLocks.unverifiedApplied ?? 0) > 0 || (laneLocks.awaitingHostMerge ?? 0) > 0;
@@ -4378,6 +4396,7 @@ function fdRenderReadinessRail(snap) {
   const blockerLabel = topBlocker?.label ?? topBlocker?.id ?? 'none';
   const blockerDetail = topBlocker?.detail ?? blockerLabel;
   const queueMetric = queueEligibilityMetric(queue) ?? `${queue.backlogItems ?? 0} backlog`;
+  const generatedMetric = generatedWorkMetric(queue.generatedWork);
   const leases = sharedQueue ? sharedQueueMetric(sharedQueue) : 'local only';
   const loop = effectiveness?.phase ?? 'unknown';
   const verdict = formatShipReadinessVerdict(readiness.verdict);
@@ -4398,6 +4417,7 @@ function fdRenderReadinessRail(snap) {
     fdMetricPill('Data', fdReadinessDataText(readiness)),
     fdMetricPill('Blocker', compactFleetReason(blockerLabel, 54), blockerDetail),
     fdMetricPill('Queue', queueMetric),
+    generatedMetric ? fdMetricPill('Generated', generatedMetric) : null,
     fdMetricPill('Leases', leases ?? 'local only'),
     fdMetricPill('Yield', fdDispatchYieldText(dispatchProduction))
   ));
