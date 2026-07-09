@@ -31,6 +31,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AshlrConfig, Backlog, WorkItem } from '../types.js';
+import { listGoals } from '../goals/store.js';
+import { goalFocusSnapshot } from '../goals/focus.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import { inventWorkItems } from './invent.js';
 
@@ -244,6 +246,13 @@ export interface InventCycleResult {
   invented: number;
   /** Items actually enqueued into the backlog (after cap + cycle-ledger dedup). */
   enqueued: number;
+  /** True when new invention is intentionally held behind active-goal closure. */
+  deferredByGoalFocus?: boolean;
+  /** Bounded reason metadata for observability/tests; no raw goal text. */
+  goalFocus?: {
+    activeThreshold: number;
+    actionableActiveGoalCount: number;
+  };
 }
 
 export interface InventCycleOptions {
@@ -284,6 +293,19 @@ export async function runInventCycle(
     const repos = listEnrolled().slice(0, MAX_REPOS_PER_CYCLE);
     if (repos.length === 0) {
       return { invented: 0, enqueued: 0 };
+    }
+
+    const focus = goalFocusSnapshot(listGoals({ status: 'active' }), cfg, { repos });
+    if (focus.shouldDeferNewGoalWork) {
+      return {
+        invented: 0,
+        enqueued: 0,
+        deferredByGoalFocus: true,
+        goalFocus: {
+          activeThreshold: focus.activeThreshold,
+          actionableActiveGoalCount: focus.actionableActiveGoalCount,
+        },
+      };
     }
 
     const direction = await resolveDirection();

@@ -418,6 +418,11 @@ export function defaultConfig(): AshlrConfig {
     //   "foundry": { "minItemValue": 3 }   ← raise the bar further
     //   "foundry": { "minItemValue": 1 }   ← disable (allow all values)
     //
+    // Goal focus mode is default-on: when 4+ repo-bound active goals already
+    // have concrete pending/in-progress milestones, autonomous producers defer
+    // new planning/invent expansion until existing goals close. Opt out with:
+    //   "foundry": { "goalFocusMode": false }
+    //
     // M115: local-coder (Ollama) fleet engine — FREE, unlimited, mid-tier.
     // Activate on any machine running Ollama by adding to ~/.ashlr/config.json:
     //

@@ -748,3 +748,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused queue/daemon/privacy tests.
 - [x] Verify focused and broad lightweight gates.
 - [x] Commit and push `abb7a18`, reload launchd daemon, run live repair scan/backlog refresh, and smoke fleet health.
+
+## Current Continuation - Goal Focus Mode
+- [x] Rechecked clean pushed state and current live goal/backlog pressure before editing.
+- [x] Deployed sidecar agents for scanner flow, test targets, live state, and createGoal boundary analysis.
+- [x] Add a reusable goal-focus detector for repo-bound active goals with pending/in-progress milestones.
+- [x] Suppress planning-goal expansion and generative invent enqueue while active goal work is already in flight.
+- [x] Surface read-only goal-focus state in FleetStatus and CLI next actions.
+- [x] Add focused scanner/invent/status regression coverage.
+- [x] Verify focused and broad lightweight gates.
+- [ ] Commit, push, reload daemon, refresh/smoke live backlog state.

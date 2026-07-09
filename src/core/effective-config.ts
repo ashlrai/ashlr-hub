@@ -262,7 +262,7 @@ const KNOWN_FOUNDRY_KEYS: ReadonlySet<string> = new Set([
   'counterfactual', 'counterfactualSampleCap', 'diffSafety', 'dispatchRetries',
   'edvUnverifiedWeight', 'edvVerify', 'engineFallbackOrder', 'engines',
   'eventBus', 'fabric', 'feedbackEnabled', 'fleetMcp', 'generative',
-  'goalPlanning', 'grok', 'intelligence', 'inventPerCycle',
+  'goalFocusActiveThreshold', 'goalFocusMode', 'goalPlanning', 'grok', 'intelligence', 'inventPerCycle',
   'judgeAllowedBackends', 'judgePerPass', 'killSwitch', 'kimi',
   'learnedRouting', 'limits', 'local', 'localContext', 'localModel',
   'managerJudgeEngine', 'managerJudgeModel', 'mergeAuthority', 'minItemValue',

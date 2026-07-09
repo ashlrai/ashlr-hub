@@ -18,10 +18,15 @@ import { existsSync, statSync, readFileSync, readdirSync } from 'node:fs';
 import { join, basename, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
-import type { WorkItem, WorkSource, AshlrConfig } from '../types.js';
+import type { WorkItem, WorkSource, AshlrConfig, Goal, Milestone } from '../types.js';
 import { listIssues, githubStatus } from '../integrations/github.js';
 import { isTrivialItem, isNonCodePath } from './value-filter.js';
 import { listGoals } from '../goals/store.js';
+import {
+  compareGoalFocusCandidates,
+  goalFocusSnapshot,
+  nextActionableGoalMilestone,
+} from '../goals/focus.js';
 import { expandGoalToMilestones } from '../strategy/goal-planner.js';
 import { loadQueuedAutonomyItemsForRepo } from './queued-autonomy.js';
 import { detectRepoExecutionProfile } from '../run/repo-profile.js';
@@ -1583,7 +1588,9 @@ export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'
     const allGoals = [...active, ...planning.filter((g) => !seenIds.has(g.id))];
     if (allGoals.length === 0) return [];
 
-    const items: WorkItem[] = [];
+    const focus = goalFocusSnapshot(allGoals, _cfg, { repo });
+    const candidates: Array<{ goal: Goal; milestone: Milestone; item: WorkItem }> = [];
+    let zeroMilestoneExpansions = 0;
     for (let goal of allGoals) {
       if (!goal.project || resolve(goal.project) !== resolve(repo)) {
         continue;
@@ -1595,14 +1602,15 @@ export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'
       // M223: planning-status goals (zero milestones) are now included above so
       // this branch fires for newly-created goals that haven't been expanded yet.
       if (goal.milestones.length === 0 && _cfg) {
+        if (focus.shouldDeferNewGoalWork) continue;
+        if (focus.enabled && zeroMilestoneExpansions >= 1) continue;
         goal = await expandGoalToMilestones(goal, _cfg, repo);
+        zeroMilestoneExpansions++;
       }
 
       // Find the next actionable milestone: first pending or in-progress milestone
       // in order (sortMilestones has already sorted by `order` ascending).
-      const next = goal.milestones.find(
-        (m) => m.status === 'pending' || m.status === 'in-progress',
-      );
+      const next = nextActionableGoalMilestone(goal);
       if (!next) continue;
 
       // Scope the work item to the milestone's concrete detail when available,
@@ -1616,8 +1624,10 @@ export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'
             `Implement this milestone concretely in ${basename(repo)}. Do not tackle the whole goal. ` +
             `Stop after the smallest focused change that advances this milestone.`;
 
-      items.push(
-        makeItem(
+      candidates.push({
+        goal,
+        milestone: next,
+        item: makeItem(
           repo,
           'goal',
           `goal:${goal.id}:${next.id}`,
@@ -1627,9 +1637,13 @@ export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'
           2,
           ['goal', goal.id, next.id],
         ),
-      );
+      });
     }
-    return items;
+    if (focus.shouldDeferNewGoalWork && candidates.length > 1) {
+      candidates.sort(compareGoalFocusCandidates);
+      return [candidates[0]!.item];
+    }
+    return candidates.map((candidate) => candidate.item);
   } catch {
     return [];
   }

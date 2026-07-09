@@ -417,6 +417,37 @@ describe('M160 — scanGoals: goal-derived work items', () => {
     expect(items).toHaveLength(2);
   });
 
+  it('goal focus mode caps active goal fan-out once the threshold is reached', async () => {
+    const goals = [
+      makeActiveGoal('goal-a', 'Goal A', 'Pending A'),
+      makeActiveGoal('goal-b', 'Goal B', 'Pending B'),
+      makeActiveGoal('goal-c', 'Goal C', 'Pending C'),
+      makeActiveGoal('goal-d', 'Goal D', 'In progress D'),
+    ];
+    goals[3]!.milestones[0]!.status = 'in-progress';
+    goals[3]!.milestones[0]!.updatedAt = '2026-01-02T00:00:00.000Z';
+    _listGoalsImpl = vi.fn(() => goals);
+
+    const items = await scanGoals(tmpDir, makeCfg({ goalFocusActiveThreshold: 4 }));
+
+    expect(items).toHaveLength(1);
+    expect(items[0]!.tags).toContain('goal-d');
+    expect(items[0]!.title).toContain('In progress D');
+  });
+
+  it('goal focus mode can be disabled to preserve broad active-goal fan-out', async () => {
+    _listGoalsImpl = vi.fn(() => [
+      makeActiveGoal('goal-a', 'Goal A', 'Pending A'),
+      makeActiveGoal('goal-b', 'Goal B', 'Pending B'),
+      makeActiveGoal('goal-c', 'Goal C', 'Pending C'),
+      makeActiveGoal('goal-d', 'Goal D', 'Pending D'),
+    ]);
+
+    const items = await scanGoals(tmpDir, makeCfg({ goalFocusMode: false }));
+
+    expect(items).toHaveLength(4);
+  });
+
   it('emitted item has source:"goal"', async () => {
     _listGoalsImpl = vi.fn(() => [
       makeActiveGoal('goal-abc123', 'Ship the new auth flow', 'Add JWT middleware'),

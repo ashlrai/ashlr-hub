@@ -30,6 +30,8 @@ import type {
 import type { SharedQueueHealth } from './shared-store.js';
 import type { AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
 import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
+import { goalFocusSnapshot } from '../goals/focus.js';
+import { listGoals } from '../goals/store.js';
 import {
   listAttemptRecords,
   summarizeAttemptCoverage,
@@ -83,6 +85,18 @@ export interface FleetBackendStatus {
   quota: 'ok' | 'warn' | 'over' | 'unlimited';
   /** Resource availability for the allowed backend, when sensed or explicitly unsensed. */
   resource?: FleetBackendResourceStatus;
+}
+
+export interface FleetGoalFocusStatus {
+  enabled: boolean;
+  activeThreshold: number;
+  activeGoalCount: number;
+  actionableActiveGoalCount: number;
+  planningGoalCount: number;
+  deferredNewGoalWork: boolean;
+  reason: 'disabled' | 'below-threshold' | 'active-goal-work-in-flight';
+  visibleGoalBacklogItems: number;
+  visibleInventBacklogItems: number;
 }
 
 /** Shared filesystem queue health, when multi-machine queueing is enabled. */
@@ -526,6 +540,8 @@ export interface FleetStatus {
   guardHealth?: GuardHealthDiagnosis;
   /** Ranked read-only operator/agent actions derived from the snapshot. */
   nextActions?: FleetNextAction[];
+  /** Read-only focus policy summary for active goal closure over queue widening. */
+  goalFocus?: FleetGoalFocusStatus;
   /** Read-only explanation of whether the autonomous loop can merge right now. */
   autonomyEffectiveness?: FleetAutonomyEffectivenessStatus;
   /** Read-only Fleet OS verdict for whether autonomous shipping is ready now. */
@@ -755,6 +771,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let pendingItems = 0;
   let nextEligibleAt: string | null = null;
   let queueRepos: FleetQueueRepoCoverage | undefined;
+  let enrolledExistingRepos: string[] = [];
   try {
     // Status must be observational. A full buildBacklog() refresh can run
     // scanners, expand planning goals, persist ~/.ashlr/backlog.json, and audit.
@@ -770,6 +787,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       }
     })();
     const enrolledRepos = new Set(enrolledRaw.filter((repo) => existsSync(repo)));
+    enrolledExistingRepos = [...enrolledRepos];
     const queuedAutonomyItems = loadQueuedAutonomyItems();
     const items = mergeVisibleQueueItems(
       [
@@ -940,6 +958,31 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     autoMergeReadiness = undefined;
   }
 
+  let goalFocus: FleetGoalFocusStatus | undefined;
+  try {
+    const activeGoals = listGoals({ status: 'active' });
+    const planningGoals = listGoals({ status: 'planning' });
+    const seen = new Set(activeGoals.map((goal) => goal.id));
+    const goals = [
+      ...activeGoals,
+      ...planningGoals.filter((goal) => !seen.has(goal.id)),
+    ];
+    const snapshot = goalFocusSnapshot(goals, cfg, { repos: enrolledExistingRepos });
+    goalFocus = {
+      enabled: snapshot.enabled,
+      activeThreshold: snapshot.activeThreshold,
+      activeGoalCount: snapshot.activeGoalCount,
+      actionableActiveGoalCount: snapshot.actionableActiveGoalCount,
+      planningGoalCount: snapshot.planningGoalCount,
+      deferredNewGoalWork: snapshot.shouldDeferNewGoalWork,
+      reason: snapshot.reason,
+      visibleGoalBacklogItems: visibleQueueItems.filter((item) => item.source === 'goal').length,
+      visibleInventBacklogItems: visibleQueueItems.filter((item) => item.source === 'invent').length,
+    };
+  } catch {
+    goalFocus = undefined;
+  }
+
   const phantom = await buildFleetPhantomStatus(cfg);
 
   const status: FleetStatus = {
@@ -963,6 +1006,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     autonomyControlMode: resolveAutonomyControlMode(cfg),
     ...(autoMergeReadiness !== undefined ? { autoMergeReadiness } : {}),
     ...(guardHealth !== undefined ? { guardHealth } : {}),
+    ...(goalFocus !== undefined ? { goalFocus } : {}),
     killed,
   };
   const proposalProduction = buildProposalProductionStatus(recentTicks);
@@ -1930,6 +1974,23 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       detail: contextRisk?.detail ?? contextEfficiency.recommendations[0] ?? 'Context efficiency is degraded; inspect reflection, retrieval, and proposal-yield signals.',
       commands: [
         nextActionCommand('Evaluate attention', ['ashlr', 'eval-attention', '--json'], 'read-only'),
+        nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+      ],
+    });
+  }
+
+  const goalFocus = status.goalFocus;
+  if (goalFocus?.deferredNewGoalWork) {
+    add({
+      id: 'close-active-goals',
+      priority: 'medium',
+      label: 'Close active goals',
+      detail:
+        `Goal focus is holding new planning/invent work: ` +
+        `${goalFocus.actionableActiveGoalCount}/${goalFocus.activeThreshold} active goal(s) have actionable milestones. ` +
+        `Cached queue has ${goalFocus.visibleGoalBacklogItems} goal item(s) and ${goalFocus.visibleInventBacklogItems} invent item(s).`,
+      commands: [
+        nextActionCommand('List goals', ['ashlr', 'goals', 'list', '--json'], 'read-only'),
         nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
       ],
     });

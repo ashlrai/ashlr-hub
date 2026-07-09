@@ -178,6 +178,19 @@ export function formatFleetStatus(s: FleetStatus): string {
       lines.push(`  next:          ${item.title} (${item.source}, score ${item.score})`);
     }
   }
+  if (s.goalFocus) {
+    const focus = s.goalFocus;
+    const state = focus.deferredNewGoalWork
+      ? 'closing active goals'
+      : focus.enabled
+        ? 'watching'
+        : 'disabled';
+    lines.push(
+      `  goal focus:    ${state} ` +
+        `(${focus.actionableActiveGoalCount}/${focus.activeThreshold} actionable active, ` +
+        `${focus.planningGoalCount} planning)`,
+    );
+  }
   if (s.queue.shared) {
     const shared = s.queue.shared;
     lines.push(`  shared:        ${formatSharedQueueSummary(shared)}`);

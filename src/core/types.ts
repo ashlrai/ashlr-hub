@@ -641,6 +641,16 @@ export interface AshlrConfig {
      */
     goalPlanning?: boolean;
     /**
+     * Goal focus mode. DEFAULT true. When at least goalFocusActiveThreshold
+     * repo-bound active goals already have pending/in-progress milestones, the
+     * fleet defers new planning-goal expansion and generative invention so it
+     * can close existing work before widening the queue. Set false to restore
+     * broader exploration.
+     */
+    goalFocusMode?: boolean;
+    /** Active actionable-goal threshold for goalFocusMode. Default 4. */
+    goalFocusActiveThreshold?: number;
+    /**
      * M167: headless browser verification of web-app renders after a diff.
      * DEFAULT false (opt-in — doubles verify time for UI repos). When true,
      * `verifyInBrowser` starts the dev server, navigates a headless browser,

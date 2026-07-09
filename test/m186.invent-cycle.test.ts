@@ -24,7 +24,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { AshlrConfig, Backlog, WorkItem } from '../src/core/types.js';
+import type { AshlrConfig, Backlog, Goal, WorkItem } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
 // HOME isolation — set before any module import resolves homedir()
@@ -51,6 +51,11 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
 const mockLoadLatestBriefing = vi.fn(() => null);
 vi.mock('../src/core/vision/strategist.js', () => ({
   loadLatestBriefing: (...args: unknown[]) => mockLoadLatestBriefing(...args),
+}));
+
+const mockListGoals = vi.fn((_filter?: { status?: string }) => [] as Goal[]);
+vi.mock('../src/core/goals/store.js', () => ({
+  listGoals: (...args: unknown[]) => mockListGoals(...args),
 }));
 
 // ---------------------------------------------------------------------------
@@ -88,6 +93,31 @@ function makeItem(repo: string, title?: string): WorkItem {
   };
 }
 
+function makeActiveGoal(repo: string, id: string): Goal {
+  return {
+    id,
+    objective: `Close ${id}`,
+    project: repo,
+    status: 'active',
+    milestones: [
+      {
+        id: `${id}-m0`,
+        title: 'Ship focused milestone',
+        detail: 'Implement the focused milestone.',
+        order: 0,
+        status: 'pending',
+        specId: null,
+        swarmId: null,
+        proposalId: null,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+    ],
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+}
+
 function readBacklog(): Backlog | null {
   const p = path.join(tmpHome, '.ashlr', 'backlog.json');
   if (!fs.existsSync(p)) return null;
@@ -103,6 +133,7 @@ beforeEach(() => {
   process.env.HOME = tmpHome;
   vi.clearAllMocks();
   mockLoadLatestBriefing.mockReturnValue(null);
+  mockListGoals.mockReturnValue([]);
   titleCounter = 0;
 });
 
@@ -209,6 +240,70 @@ describe('runInventCycle — invents for active repos and enqueues', () => {
     const result = await runInventCycle(makeCfg({ generative: true }));
     expect(result).toEqual({ invented: 0, enqueued: 0 });
     expect(mockInventWorkItems).not.toHaveBeenCalled();
+  });
+
+  it('defers invention when active goal focus pressure is high', async () => {
+    mockListEnrolled.mockReturnValue(['/tmp/repo-a']);
+    mockListGoals.mockReturnValue([
+      makeActiveGoal('/tmp/repo-a', 'goal-a'),
+      makeActiveGoal('/tmp/repo-a', 'goal-b'),
+      makeActiveGoal('/tmp/repo-a', 'goal-c'),
+      makeActiveGoal('/tmp/repo-a', 'goal-d'),
+    ]);
+
+    const result = await runInventCycle(makeCfg({ generative: true, goalFocusActiveThreshold: 4 }));
+
+    expect(result).toEqual({
+      invented: 0,
+      enqueued: 0,
+      deferredByGoalFocus: true,
+      goalFocus: {
+        activeThreshold: 4,
+        actionableActiveGoalCount: 4,
+      },
+    });
+    expect(mockInventWorkItems).not.toHaveBeenCalled();
+    expect(readBacklog()).toBeNull();
+  });
+
+  it('goal focus deferral can be disabled for deliberate broad invention', async () => {
+    mockListEnrolled.mockReturnValue(['/tmp/repo-a']);
+    mockListGoals.mockReturnValue([
+      makeActiveGoal('/tmp/repo-a', 'goal-a'),
+      makeActiveGoal('/tmp/repo-a', 'goal-b'),
+      makeActiveGoal('/tmp/repo-a', 'goal-c'),
+      makeActiveGoal('/tmp/repo-a', 'goal-d'),
+    ]);
+    mockInventWorkItems.mockResolvedValue([makeItem('/tmp/repo-a', 'New broad idea')]);
+
+    const result = await runInventCycle(makeCfg({
+      generative: true,
+      goalFocusMode: false,
+      goalFocusActiveThreshold: 4,
+    }));
+
+    expect(result.invented).toBe(1);
+    expect(result.enqueued).toBe(1);
+    expect(mockInventWorkItems).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not defer invention for done, paused, or projectless goals', async () => {
+    const done = makeActiveGoal('/tmp/repo-a', 'goal-done');
+    done.status = 'done';
+    done.milestones[0]!.status = 'done';
+    const paused = makeActiveGoal('/tmp/repo-a', 'goal-paused');
+    paused.status = 'paused';
+    paused.milestones[0]!.status = 'paused';
+    const projectless = makeActiveGoal('/tmp/repo-a', 'goal-projectless');
+    projectless.project = null;
+    mockListEnrolled.mockReturnValue(['/tmp/repo-a']);
+    mockListGoals.mockReturnValue([done, paused, projectless]);
+    mockInventWorkItems.mockResolvedValue([makeItem('/tmp/repo-a', 'Still invent')]);
+
+    const result = await runInventCycle(makeCfg({ generative: true, goalFocusActiveThreshold: 1 }));
+
+    expect(result.deferredByGoalFocus).toBeUndefined();
+    expect(result.enqueued).toBe(1);
   });
 });
 

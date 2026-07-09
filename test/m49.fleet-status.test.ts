@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { AshlrConfig, DaemonTick, EngineId, WorkItem } from '../src/core/types.js';
+import type { AshlrConfig, DaemonTick, EngineId, Goal, WorkItem } from '../src/core/types.js';
 import { buildFleetStatus } from '../src/core/fleet/status.js';
 import { formatFleetStatus } from '../src/cli/fleet.js';
 import { buildContextEfficiencyStatus } from '../src/core/fleet/context-efficiency.js';
@@ -123,6 +123,46 @@ function makeBacklogItem(
     tags: ['test'],
     ts: '2026-07-03T00:00:00.000Z',
   };
+}
+
+function makeGoalRecord(
+  repo: string | null,
+  id: string,
+  status: Goal['status'] = 'active',
+  milestoneStatus: Goal['milestones'][number]['status'] = 'pending',
+): Goal {
+  return {
+    id,
+    objective: `Close ${id}`,
+    project: repo,
+    status,
+    milestones: status === 'planning'
+      ? []
+      : [
+          {
+            id: `${id}-m0`,
+            title: 'Ship focused milestone',
+            detail: 'Implement the focused milestone.',
+            order: 0,
+            status: milestoneStatus,
+            specId: null,
+            swarmId: null,
+            proposalId: null,
+            createdAt: '2026-07-03T00:00:00.000Z',
+            updatedAt: '2026-07-03T00:00:00.000Z',
+          },
+        ],
+    createdAt: '2026-07-03T00:00:00.000Z',
+    updatedAt: '2026-07-03T00:00:00.000Z',
+  };
+}
+
+function writeGoalRecords(home: string, goals: Goal[]): void {
+  const dir = join(home, '.ashlr', 'goals');
+  mkdirSync(dir, { recursive: true });
+  for (const goal of goals) {
+    writeFileSync(join(dir, `${goal.id}.json`), JSON.stringify(goal, null, 2), 'utf8');
+  }
 }
 
 function writeBacklogSnapshot(
@@ -442,6 +482,44 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         pendingProposals: 0,
       },
     });
+    expect(existsSync(join(tmpHome, '.ashlr', 'audit'))).toBe(false);
+  });
+
+  it('surfaces goal focus mode without refreshing or expanding backlog', async () => {
+    const repo = join(tmpHome, 'repo-focus');
+    writeBacklogSnapshot(tmpHome, repo, [
+      makeBacklogItem(repo, 'repo-focus:goal:one', 'Advance active goal', 5, 'goal'),
+      makeBacklogItem(repo, 'repo-focus:invent:one', 'Invent broad feature', 4, 'invent'),
+    ]);
+    writeGoalRecords(tmpHome, [
+      makeGoalRecord(repo, 'goal-focus-a'),
+      makeGoalRecord(repo, 'goal-focus-b'),
+      makeGoalRecord(repo, 'goal-focus-c'),
+      makeGoalRecord(repo, 'goal-focus-d', 'active', 'in-progress'),
+      makeGoalRecord(repo, 'goal-focus-planning', 'planning'),
+    ]);
+
+    const s = await buildFleetStatus(withFoundry({ goalFocusActiveThreshold: 4 }));
+
+    expect(s.goalFocus).toMatchObject({
+      enabled: true,
+      activeThreshold: 4,
+      activeGoalCount: 4,
+      actionableActiveGoalCount: 4,
+      planningGoalCount: 1,
+      deferredNewGoalWork: true,
+      reason: 'active-goal-work-in-flight',
+      visibleGoalBacklogItems: 1,
+      visibleInventBacklogItems: 1,
+    });
+    expect(s.nextActions).toContainEqual(expect.objectContaining({
+      id: 'close-active-goals',
+      label: 'Close active goals',
+      detail: expect.stringContaining('holding new planning/invent work'),
+    }));
+    expect(formatFleetStatus(s)).toContain(
+      'goal focus:    closing active goals (4/4 actionable active, 1 planning)',
+    );
     expect(existsSync(join(tmpHome, '.ashlr', 'audit'))).toBe(false);
   });
 

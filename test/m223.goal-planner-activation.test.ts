@@ -142,6 +142,36 @@ function makeActiveGoalNoMilestones(id: string, objective: string, project: stri
   };
 }
 
+function makeActiveGoalWithMilestone(
+  id: string,
+  objective: string,
+  title = 'Existing milestone',
+  project: string | null = tmpDir,
+): Goal {
+  return {
+    id,
+    objective,
+    project,
+    status: 'active',
+    milestones: [
+      {
+        id: `${id}-m0`,
+        title,
+        detail: `Implement ${title} concretely.`,
+        order: 0,
+        status: 'pending',
+        specId: null,
+        swarmId: null,
+        proposalId: null,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+    ],
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+}
+
 const MOCK_4_MILESTONE_RESPONSE = `
 1. Add rate-limiter middleware — implement src/middleware/rate-limit.ts with sliding-window algorithm; wire into Express router; add unit tests covering burst rejection.
 2. Implement JWT refresh tokens — extend src/auth/jwt.ts with refreshToken(oldToken) -> newToken; add integration tests; update token expiry config.
@@ -211,6 +241,38 @@ describe('M223 — scanGoals expands planning-status goals', () => {
     const result = await expandGoalToMilestones(goal, makeCfg(), tmpDir);
     expect(result.status).toBe('active');
     expect(result.milestones.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('defers planning-goal expansion when active goal focus pressure is already high', async () => {
+    _activeGoals = [
+      makeActiveGoalWithMilestone('goal-active-1', 'Close active goal 1'),
+      makeActiveGoalWithMilestone('goal-active-2', 'Close active goal 2'),
+      makeActiveGoalWithMilestone('goal-active-3', 'Close active goal 3'),
+      makeActiveGoalWithMilestone('goal-active-4', 'Close active goal 4'),
+    ];
+    const planning = makePlanningGoal('goal-plan-pressure', 'Do not widen yet');
+    _planningGoals = [planning];
+    _savedGoals.set(planning.id, structuredClone(planning));
+
+    const items = await scanGoals(tmpDir, makeCfg({ goalFocusActiveThreshold: 4 }));
+
+    expect(_completeImpl).not.toHaveBeenCalled();
+    expect(items).toHaveLength(1);
+    expect(items[0]!.tags).toContain('goal-active-1');
+  });
+
+  it('expands one planning goal per scan when no active focus pressure exists', async () => {
+    const first = makePlanningGoal('goal-plan-one', 'Plan first');
+    const second = makePlanningGoal('goal-plan-two', 'Plan second');
+    _planningGoals = [first, second];
+    _savedGoals.set(first.id, structuredClone(first));
+    _savedGoals.set(second.id, structuredClone(second));
+
+    const items = await scanGoals(tmpDir, makeCfg());
+
+    expect(_completeImpl).toHaveBeenCalledTimes(1);
+    expect(items).toHaveLength(1);
+    expect(items[0]!.tags).toContain('goal-plan-one');
   });
 });
 
