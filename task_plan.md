@@ -987,3 +987,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Run focused regression coverage.
 - [x] Run broad verification.
 - [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Explicit Merge Contract Wave 2
+- [x] Rechecked live FleetStatus and selected clean sibling repos without in-progress dirty work.
+- [x] Added root `ashlr.verify.json` manifests to `ashlr-auth`, `ashlr-cli-common`, `ashlr-config`, `ashlr-cost`, and `ashlr-mcp-kit`.
+- [x] Verified each package with `bun run typecheck`, `bun run test`, and `bun run build`.
+- [x] Corrected manifest command kinds to the current Hub schema (`typecheck|test|lint`) after parser validation rejected `kind:"build"`.
+- [x] Committed the manifest wave locally in each sibling repo.
+- [x] Refreshed Hub backlog/profile cache and confirmed explicit merge contracts increased from 3/24 to 8/24.
+- [ ] Record and commit the rollout notes in Hub.
