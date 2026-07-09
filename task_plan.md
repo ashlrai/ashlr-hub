@@ -1181,3 +1181,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused regression coverage for manifest build commands, detected build scripts, runtime ordering, and native build failures.
 - [x] Run verification gates for the native build verification kind slice.
 - [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Clean Repo Build Contract Migration
+- [x] Rechecked sibling repo contract/status state after Hub build-kind rollout.
+- [x] Deploy read-only validator for clean sibling contract migration.
+- [x] Update clean sibling `ashlr.verify.json` build commands from `kind:"typecheck"` to `kind:"build"`.
+- [x] Validate contracts and commit each clean repo; no remotes were configured to push.
