@@ -1015,7 +1015,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
   });
 
   it('A1h3: routed model is passed into the normal sandboxed runGoal path', async () => {
-    enrollWithItems(1);
+    const { items } = enrollWithItems(1);
     mockRouteBackend.mockReturnValue({
       backend: 'local-coder',
       tier: 'mid',
@@ -1041,6 +1041,21 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       model: 'qwen-routed-model',
       sandboxEngine: true,
       requireSandbox: true,
+      delegationScope: {
+        origin: 'daemon',
+        sourceRepo: items[0]!.repo,
+        workItemId: items[0]!.id,
+        workSource: items[0]!.source,
+        objective: items[0]!.title,
+        resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+        backend: {
+          engine: 'local-coder',
+          model: 'qwen-routed-model',
+          tier: 'mid',
+          assignedBy: 'router',
+          reason: 'mock local-coder model route',
+        },
+      },
     });
     expect(result.dispatches?.[0]).toMatchObject({
       backend: 'local-coder',
@@ -1305,6 +1320,25 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     );
 
     expect(result.reason).toBe('ok');
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
+      workItemId: items[0]!.id,
+      workSource: items[0]!.source,
+      delegationScope: {
+        origin: 'daemon',
+        sourceRepo: items[0]!.repo,
+        workItemId: items[0]!.id,
+        workSource: items[0]!.source,
+        objective: items[0]!.title,
+        resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+        backend: {
+          engine: 'builtin',
+          model: null,
+          tier: 'local',
+          assignedBy: 'router',
+          reason: 'test route',
+        },
+      },
+    });
     expect(result.dispatches?.[0]).toMatchObject({
       itemId: items[0]!.id,
       backend: 'builtin',

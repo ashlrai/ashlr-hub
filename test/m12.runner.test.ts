@@ -1047,6 +1047,66 @@ describe('runSwarm — structural no-outward guard (engine forced to builtin)', 
       expect(o.cwd).toBe(projectDir);
     }
   });
+
+  it('threads bounded delegation scope into every swarm task run', async () => {
+    const projectDir = path.join(tmpHome, 'scoped-project');
+    fs.mkdirSync(projectDir, { recursive: true });
+    const capturedOpts: Array<{ delegationScope?: Record<string, unknown> }> = [];
+    mockRunGoal.mockImplementation(
+      async (goal: string, _cfg: AshlrConfig, opts: { delegationScope?: Record<string, unknown> }) => {
+        capturedOpts.push(opts);
+        return {
+          id: `run-${Math.random().toString(36).slice(2)}`,
+          goal, status: 'done' as const, result: `done: ${goal}`,
+          usage: { tokensIn: 10, tokensOut: 5, steps: 1, estCostUsd: 0 },
+          tasks: [], steps: [], engine: 'builtin', provider: 'ollama',
+          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          budget: { maxTokens: 50_000, maxSteps: 100, allowCloud: false },
+        } as RunState;
+      },
+    );
+    mockPlanSwarm.mockResolvedValueOnce(minimalPlan('scoped swarm'));
+
+    await runSwarm(
+      { goal: 'scoped swarm' },
+      makeConfig(),
+      {
+        budget: { maxTokens: 1_000_000, maxSteps: 1000 },
+        parallel: 1,
+        project: projectDir,
+        workItemId: 'work-123',
+        workSource: 'manual',
+        delegationScope: {
+          origin: 'daemon',
+          sourceRepo: projectDir,
+          allowedFiles: { include: ['src/focus.ts'] },
+          memoryMode: 'bounded',
+          resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+        },
+      },
+      nullSink,
+    );
+
+    expect(capturedOpts.length).toBeGreaterThan(0);
+    expect(capturedOpts[0]?.delegationScope).toMatchObject({
+      origin: 'swarm',
+      sourceRepo: projectDir,
+      executionRoot: projectDir,
+      workItemId: 'work-123',
+      workSource: 'manual',
+      taskId: 'scaffold-1',
+      objective: 'Init',
+      memoryMode: 'bounded',
+      allowedFiles: { include: ['src/focus.ts'] },
+      resultContract: { kind: 'text' },
+    });
+    expect(capturedOpts[0]?.delegationScope?.['swarmId']).toEqual(expect.any(String));
+    expect(capturedOpts[0]?.delegationScope?.['budget']).toMatchObject({
+      maxTokens: expect.any(Number),
+      maxSteps: expect.any(Number),
+      allowCloud: false,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

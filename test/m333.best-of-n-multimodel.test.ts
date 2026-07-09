@@ -46,10 +46,12 @@ function makeConfig(): import('../src/core/types.js').AshlrConfig {
 function makeSandboxMock(costUsd: number, label: string) {
   let n = 0;
   const calls: Array<{ engine: string; model?: string }> = [];
+  const options: Array<Record<string, unknown>> = [];
   const fn = vi.fn(
     async (engine: unknown, _goal: unknown, _cfg: unknown, runOpts: Record<string, unknown>) => {
       const idx = n++;
       calls.push({ engine: String(engine), model: runOpts['model'] as string | undefined });
+      options.push(runOpts);
       return {
         state: {
           id: `run-${label}-${idx}`,
@@ -61,7 +63,7 @@ function makeSandboxMock(costUsd: number, label: string) {
       };
     },
   );
-  return { fn, calls };
+  return { fn, calls, options };
 }
 
 function judgeMockWithScores(scoreOrder: number[]) {
@@ -154,6 +156,36 @@ describe('M333 — candidate specs', () => {
     expect(cli.calls[0]).toEqual({ engine: 'claude', model: 'claude-sonnet-5' });
     expect(api.calls[0]).toEqual({ engine: 'local-coder', model: 'qwen3-coder-next' });
     expect(cli.calls[1]).toEqual({ engine: 'claude', model: undefined });
+    expect(cli.options[0]?.['delegationScope']).toMatchObject({
+      origin: 'best-of-n',
+      sourceRepo: MOCK_REPO,
+      workItemId: 'item-1',
+      workSource: 'manual',
+      taskId: 'candidate-0',
+      backend: {
+        engine: 'claude',
+        model: 'claude-sonnet-5',
+        assignedBy: 'best-of-n',
+      },
+      resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+    });
+    expect(api.options[0]?.['delegationScope']).toMatchObject({
+      origin: 'best-of-n',
+      taskId: 'candidate-1',
+      backend: {
+        engine: 'local-coder',
+        model: 'qwen3-coder-next',
+      },
+    });
+    expect(cli.options[1]?.['delegationScope']).toMatchObject({
+      origin: 'best-of-n',
+      taskId: 'candidate-2',
+      backend: {
+        engine: 'claude',
+        model: null,
+      },
+    });
+    expect((cli.options[0]?.['delegationScope'] as Record<string, unknown>)?.['runId']).toEqual(expect.any(String));
 
     expect(result.candidates.map((c) => c.engine)).toEqual(['claude', 'local-coder', 'claude']);
     expect(result.candidates.map((c) => c.model)).toEqual([

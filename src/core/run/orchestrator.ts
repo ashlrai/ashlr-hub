@@ -88,6 +88,7 @@ import type { StreamSink } from './streaming.js';
 import { withRetry } from './retry.js';
 import { verifyTaskStructured } from './verify.js';
 import { detectVerifyCommands, runVerifyCommandAsync } from './verify-commands.js';
+import { normalizeDelegationScope, summarizeDelegationScope } from './delegation-scope.js';
 import { withHeal, defaultHealPolicy } from './self-heal.js';
 import type { HealEvent, Sandbox } from '../types.js';
 import { PLANNER_ROLE, SYNTHESIZER_ROLE } from './prompts/roles.js';
@@ -981,9 +982,21 @@ export async function runGoal(
   // per task (and one verify-driven retry) under the global budget.
   const verifyModel = opts.verifyModel === true;
 
+  const delegationScope = opts.delegationScope
+    ? normalizeDelegationScope(opts.delegationScope, {
+        origin: 'run',
+        sourceRepo: opts.cwd ?? process.cwd(),
+        objective: goal,
+        budget: opts.budget,
+      })
+    : undefined;
+  const delegationScopeSummary = summarizeDelegationScope(delegationScope);
+
   // M7: read noMemory from opts. Not yet typed in RunOptions (avoid editing
   // types.ts) — read as an extended property, same pattern as __onStep above.
-  const noMemory = (opts as RunOptions & { noMemory?: boolean }).noMemory === true;
+  const noMemory =
+    (opts as RunOptions & { noMemory?: boolean }).noMemory === true ||
+    delegationScope?.memoryMode === 'none';
 
   // -- Resume short-circuit (M10 fix: must run BEFORE engine delegation) -------
   // When --resume is requested we must NEVER delegate to an external engine —
@@ -1121,6 +1134,7 @@ export async function runGoal(
                   existingWorktree: titrrSandbox,
                   workItemId: opts.workItemId,
                   workSource: opts.workSource,
+                  delegationScope,
                 });
                 lastApiR = apiR;
 
@@ -1140,6 +1154,7 @@ export async function runGoal(
                     existingWorktree: titrrSandbox,
                     workItemId: opts.workItemId,
                     workSource: opts.workSource,
+                    delegationScope,
                     sourceLabel: 'TITRR api-model',
                   });
                   lastApiR = {
@@ -1160,6 +1175,7 @@ export async function runGoal(
                     existingWorktree: titrrSandbox,
                     workItemId: opts.workItemId,
                     workSource: opts.workSource,
+                    delegationScope,
                     isPartial: true,
                     forceGateBlockReason: `tests: still failing after ${titrrAttempt} attempt(s)`,
                     sourceLabel: 'TITRR api-model',
@@ -1249,6 +1265,7 @@ export async function runGoal(
                 existingWorktree: titrrSandbox ?? undefined,
                 workItemId: opts.workItemId,
                 workSource: opts.workSource,
+                delegationScope,
               });
               lastR = r;
 
@@ -1285,6 +1302,7 @@ export async function runGoal(
                     existingWorktree: titrrSandbox,
                     workItemId: opts.workItemId,
                     workSource: opts.workSource,
+                    delegationScope,
                     sourceLabel: 'TITRR',
                   });
                   lastR = {
@@ -1308,6 +1326,7 @@ export async function runGoal(
                     existingWorktree: titrrSandbox,
                     workItemId: opts.workItemId,
                     workSource: opts.workSource,
+                    delegationScope,
                     sourceLabel: 'TITRR',
                   });
                   lastR = {
@@ -1332,6 +1351,7 @@ export async function runGoal(
                     existingWorktree: titrrSandbox,
                     workItemId: opts.workItemId,
                     workSource: opts.workSource,
+                    delegationScope,
                     isPartial: true,
                     forceGateBlockReason: titrrAnnotation,
                     sourceLabel: 'TITRR',
@@ -1418,6 +1438,7 @@ export async function runGoal(
           tasks: [],
           steps: [],
           status: 'running',
+          ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
         };
 
         // spawnEngine: applies withToolEnv(cfg) + phantom-exec when enabled.
@@ -1481,6 +1502,7 @@ export async function runGoal(
       steps: [],
       status: 'failed',
       result: govBlock,
+      ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
     };
     process.stderr.write(`[ashlr run] ${govBlock}\n`);
     return blockState;
@@ -1570,6 +1592,7 @@ export async function runGoal(
       tasks: [],
       steps: [],
       status: 'running',
+      ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
     };
     saveRun(state);
   }
@@ -1665,6 +1688,19 @@ export async function runGoal(
       const diff = wt.sandboxDiff(sb);
       if (diff.files > 0 && diff.patch.trim().length > 0) {
         try {
+          const proposalDelegationScope = summarizeDelegationScope(
+            normalizeDelegationScope(
+              {
+                ...delegationScope,
+                origin: delegationScope?.origin ?? 'run',
+                sourceRepo: sb.sourceRepo,
+                executionRoot: sb.worktreePath,
+                runId: state.id,
+                resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+              },
+              { objective: goal, budget },
+            ),
+          );
           const proposal = selectInboxStore(cfg).create({
             repo: sb.sourceRepo,
             origin: 'agent',
@@ -1675,6 +1711,10 @@ export async function runGoal(
               `(+${diff.insertions}/-${diff.deletions}). Review before applying.`,
             diff: scrubSecrets(diff.patch),
             sandboxId: sb.id,
+            workItemId: opts.workItemId,
+            workSource: opts.workSource,
+            runId: state.id,
+            ...(proposalDelegationScope ? { delegationScope: proposalDelegationScope } : {}),
           });
           process.stderr.write(
             `[ashlr run] engineer diff → inbox proposal ${proposal.id} ` +

@@ -231,9 +231,9 @@ describe('M170 — best-of-N dispatch: bestOfN > 1 routes through runBestOfN', (
     await tick(cfg, { dryRun: false });
 
     const [passedItem, passedCfg, passedOpts] = mockRunBestOfN.mock.calls[0] as [
-      { id: string; source: string },
+      { id: string; repo: string; source: string; title: string },
       unknown,
-      { n: number; engine: string; model?: string | null; workItemId: string; workSource: string },
+      { n: number; engine: string; model?: string | null; workItemId: string; workSource: string; delegationScope?: unknown },
     ];
     expect(typeof passedItem).toBe('object');
     expect(passedCfg).toBe(cfg);
@@ -242,6 +242,21 @@ describe('M170 — best-of-N dispatch: bestOfN > 1 routes through runBestOfN', (
       engine: 'claude',
       workItemId: passedItem.id,
       workSource: passedItem.source,
+      delegationScope: {
+        origin: 'daemon',
+        sourceRepo: passedItem.repo,
+        workItemId: passedItem.id,
+        workSource: passedItem.source,
+        objective: passedItem.title,
+        resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+        backend: {
+          engine: 'claude',
+          model: null,
+          tier: 'cloud',
+          assignedBy: 'router',
+          reason: 'mock',
+        },
+      },
     });
   });
 

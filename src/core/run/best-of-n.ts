@@ -11,10 +11,11 @@
  * Flag-off parity: cfg.foundry.bestOfN defaults to 1 → identical to a single run.
  */
 
-import type { AshlrConfig, WorkItem, Proposal, WorkSource, EngineId, RunProposalOutcome, RunState } from '../types.js';
+import type { AshlrConfig, WorkItem, Proposal, WorkSource, EngineId, RunProposalOutcome, RunState, DelegationScope } from '../types.js';
 import type { ManagerVerdict } from '../fleet/manager.js';
 import type { TasteScore } from '../fleet/taste-critic.js';
 import { resolveEngineSpec } from './engine-registry.js';
+import { mergeDelegationScope, scopeFromWorkItem } from './delegation-scope.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -200,6 +201,7 @@ export async function runBestOfN(
     workSource?: WorkSource;
     engine?: EngineId;
     model?: string | null;
+    delegationScope?: DelegationScope;
     /**
      * M333: per-candidate engine/model specs. Candidate i runs on
      * specs[i % specs.length] — one candidate per spec when n matches the
@@ -303,6 +305,16 @@ export async function runBestOfN(
       : 'cli-agent sandbox runner unavailable';
 
   const sourceRepo = item.repo ?? process.cwd();
+  const parentDelegationScope =
+    opts?.delegationScope ??
+    scopeFromWorkItem(item, {
+      backend: {
+        engine: defaultEngine,
+        model: opts?.model ?? null,
+        assignedBy: 'best-of-n',
+        reason: `best-of-${n} default scope`,
+      },
+    });
 
   // ── 5. Generate N candidates in parallel ────────────────────────────────
   const candidatePromises = Array.from({ length: n }, async (_, i): Promise<CandidateResult> => {
@@ -321,13 +333,30 @@ export async function runBestOfN(
 
     const t0 = Date.now();
     try {
+      const runId = `best-of-n-${i}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      const delegationScope = mergeDelegationScope(parentDelegationScope, {
+        origin: 'best-of-n',
+        runId,
+        taskId: `candidate-${i}`,
+        sourceRepo,
+        executionRoot: sourceRepo,
+        objective: item.title,
+        backend: {
+          engine: cEngine,
+          model: cModel,
+          assignedBy: 'best-of-n',
+          reason: `candidate ${i + 1}/${n}`,
+        },
+        resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+      });
       const result = await runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
         ...(typeof cModel === 'string' ? { model: cModel } : {}),
         sourceRepo,
         propose: true,
-        runId: `best-of-n-${i}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        runId,
         workItemId: opts?.workItemId ?? item.id,
         workSource: opts?.workSource ?? item.source,
+        ...(delegationScope ? { delegationScope } : {}),
       });
 
       const diff = (result.state as unknown as Record<string, unknown>)['result'] as string ?? '';

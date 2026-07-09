@@ -506,6 +506,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Deployed parallel agents for `DelegationScope`, attention evals, trajectory metadata, cross-repo ownership, and live fleet status.
 - [x] Implemented a bounded first slice: shared `DelegationScope` contract/helpers, sandboxed scope propagation, causal `contextSummary`, and context-efficiency next action.
 - [x] Ran focused verification for delegation scope, learning graph, fleet status, learned routing, typecheck, and diff checks.
-- [ ] Next heartbeat: wire daemon/swarm/best-of-N producers to create `DelegationScope` by default.
+- [x] Second heartbeat: wired daemon/swarm/best-of-N/runGoal producers to create and propagate `DelegationScope` by default.
+- [x] Added regression coverage for daemon default scope on builtin, single-run, and best-of-N paths; best-of-N candidate child scopes; swarm task scopes; and TITRR attempt/capture pass-through.
+- [x] Focused verification passed: producer-scope suite, typecheck, and lint. Full suite passed except `h8.cleanup-comment-only`, which intentionally fails while `src/core/swarm/runner.ts` has an uncommitted code diff because that invariant diffs swept files against `HEAD`.
 - [ ] Next heartbeat: implement `ashlr eval attention` with middle-drop and workflow-resolution fixtures.
 - [ ] Next heartbeat: formalize ecosystem ownership boundaries in docs/index and surface read-only doctor checks.
+- [ ] Next heartbeat: after commit, rerun the full suite against clean `HEAD` so the H8 diff-only invariant can pass.

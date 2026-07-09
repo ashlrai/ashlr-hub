@@ -72,6 +72,7 @@ import type { DaemonLock } from './state.js';
 import { nullSink } from '../run/streaming.js';
 import { runSwarm } from '../swarm/runner.js';
 import { runGoal } from '../run/orchestrator.js';
+import { scopeFromWorkItem } from '../run/delegation-scope.js';
 import { routeBackend } from '../fleet/router.js';
 import { withinLimit, recordUse } from '../fleet/quota.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
@@ -2153,6 +2154,16 @@ export async function tick(
       }
       const goal = buildItemGoal(item);
       const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
+      const delegationScope = scopeFromWorkItem(item, {
+        budget: itemBudget,
+        backend: {
+          engine: backend,
+          model: selectedModel ?? null,
+          tier: backendTier,
+          assignedBy,
+          reason: assignmentReason,
+        },
+      });
 
     // Snapshot ASHLR_IN_SWARM and restore it after the call. The swarm runner
     // sets ASHLR_IN_SWARM=1 on THIS (long-lived) process and does not unwind it;
@@ -2182,6 +2193,7 @@ export async function tick(
             noCapture: true,
             workItemId: item.id,
             workSource: item.source,
+            delegationScope,
           },
           sink,
         );
@@ -2271,6 +2283,7 @@ export async function tick(
               : {}),
             workItemId: item.id,
             workSource: item.source,
+            delegationScope,
           });
           bonBillable = bonResult.critique.billableCostUsd ?? 0;
           if (!bonResult.winner) {
@@ -2319,6 +2332,7 @@ export async function tick(
             ...(selectedModel ? { model: selectedModel } : {}),
             workItemId: item.id,
             workSource: item.source,
+            delegationScope,
           });
         }
         dispatchProduction = dispatchProductionFromProposalOutcome(runState.proposalOutcome, runState.id);

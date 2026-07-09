@@ -219,12 +219,42 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     const state = await runGoal('fix a bug', sandboxCfg(), {
       engine: 'claude',
       sandboxEngine: true,
-      budget: { maxTokens: 1_000_000, maxSteps: 100 },
-      tools: false,
-    });
+        budget: { maxTokens: 1_000_000, maxSteps: 100 },
+        tools: false,
+        workItemId: 'work-titrr',
+        workSource: 'manual',
+        delegationScope: {
+          origin: 'daemon',
+          sourceRepo: '/mock/repo',
+          workItemId: 'work-titrr',
+          workSource: 'manual',
+          allowedFiles: { include: ['src/fix.ts'] },
+          memoryMode: 'bounded',
+          resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+        },
+      });
 
     expect(state.result).toMatch(/TITRR.*tests: pass \(attempt 1\)/);
     expect(engineMockFn).toHaveBeenCalled();
+    const attemptOpts = engineMockFn.mock.calls[0]?.[3] as Record<string, unknown>;
+    expect(attemptOpts).toMatchObject({ propose: false });
+    expect(attemptOpts['delegationScope']).toMatchObject({
+      origin: 'daemon',
+      sourceRepo: '/mock/repo',
+      workItemId: 'work-titrr',
+      workSource: 'manual',
+      allowedFiles: { include: ['src/fix.ts'] },
+      memoryMode: 'bounded',
+    });
+    const captureOpts = captureMockFn.mock.calls[0]?.[3] as Record<string, unknown>;
+    expect(captureOpts['delegationScope']).toMatchObject({
+      origin: 'daemon',
+      sourceRepo: '/mock/repo',
+      workItemId: 'work-titrr',
+      workSource: 'manual',
+      allowedFiles: { include: ['src/fix.ts'] },
+      memoryMode: 'bounded',
+    });
   });
 
   // ---- Test 2: fail then pass → engine re-invoked ----

@@ -52,6 +52,7 @@ import type {
   EscalationReasonKind,
   Sandbox,
   SandboxDiff,
+  DelegationScope,
 } from '../types.js';
 import type { StreamSink } from '../run/streaming.js';
 import { newUsage, addUsage, overBudget } from '../run/budget.js';
@@ -59,6 +60,7 @@ import { planSwarm } from './planner.js';
 import { saveSwarm, loadSwarm } from './store.js';
 import { runGoal } from '../run/orchestrator.js';
 import { scrubSecrets } from '../knowledge/index.js';
+import { mergeDelegationScope, summarizeDelegationScope } from '../run/delegation-scope.js';
 
 // ---------------------------------------------------------------------------
 // M17: lazy-load sign / gate / rollback helpers. Each import is best-effort:
@@ -444,6 +446,18 @@ async function executeTask(
     persist(run);
     return 'continue';
   }
+  const taskDelegationScope = mergeDelegationScope(opts.delegationScope, {
+    origin: 'swarm',
+    sourceRepo: run.project ?? undefined,
+    executionRoot: sandboxCwd ?? run.project ?? undefined,
+    workItemId: opts.workItemId,
+    workSource: opts.workSource,
+    swarmId: run.id,
+    taskId,
+    objective: goal,
+    budget: taskBudget,
+    resultContract: { kind: 'text' },
+  });
 
   // -------------------------------------------------------------------------
   // M17: verify dependency signatures BEFORE consuming their outputs.
@@ -560,6 +574,7 @@ async function executeTask(
       // subprocess. That single assignment is the load-bearing guard; this task
       // sets nothing per-call.
       noMemory: false,
+      ...(taskDelegationScope ? { delegationScope: taskDelegationScope } : {}),
     });
 
     // Accumulate usage into swarm totals.
@@ -920,7 +935,11 @@ function captureSandboxAndCleanup(
   sink: StreamSink,
   propose = false,
   cfg?: import('../types.js').AshlrConfig,
-  causal?: { workItemId?: string; workSource?: import('../types.js').WorkSource },
+  causal?: {
+    workItemId?: string;
+    workSource?: import('../types.js').WorkSource;
+    delegationScope?: DelegationScope;
+  },
 ): void {
   // Capture diff (read-only; never mutates source tree).
   let diff: SandboxDiff | null = null;
@@ -994,6 +1013,19 @@ function captureSandboxAndCleanup(
           }
         }
 
+        const proposalDelegationScope = summarizeDelegationScope(
+          mergeDelegationScope(causal?.delegationScope, {
+            origin: 'swarm',
+            sourceRepo: sb.sourceRepo,
+            executionRoot: sb.worktreePath,
+            workItemId: causal?.workItemId,
+            workSource: causal?.workSource,
+            swarmId: run.id,
+            objective: run.goal,
+            budget: run.budget,
+            resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+          }),
+        );
         const created = _createProposal({
           repo: sb.sourceRepo,
           origin: 'swarm',
@@ -1009,6 +1041,7 @@ function captureSandboxAndCleanup(
           workItemId: causal?.workItemId,
           workSource: causal?.workSource,
           runId: run.id,
+          ...(proposalDelegationScope ? { delegationScope: proposalDelegationScope } : {}),
         });
         emitLog(sink, `[M24] PENDING proposal recorded for swarm ${run.id}`);
         // M32: unattended path (daemon-dispatched swarm) — fire opt-in desktop/
@@ -1148,7 +1181,11 @@ export async function runSwarm(
   );
   const budget = buildBudget(opts);
   const project = opts.project ?? null;
-  const causal = { workItemId: opts.workItemId, workSource: opts.workSource };
+  const causal = {
+    workItemId: opts.workItemId,
+    workSource: opts.workSource,
+    delegationScope: opts.delegationScope,
+  };
 
   // -------------------------------------------------------------------------
   // M21 SANDBOX SEAM: when opts.sandbox is true AND project is set AND the
