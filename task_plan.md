@@ -631,6 +631,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Added default-off, values-free Phantom `agent report --json` rollup gated by actual top-level `agent` command detection.
 - [x] Split skipped/not-attempted dispatch rows from actionable no-proposal diagnostics so FleetStatus can distinguish selection skips from backend/capture yield failures.
 - [x] Repaired sibling `ashlrcode` TypeScript/test compatibility and pushed commit `3065031` to `origin/main`.
-- [x] Verify current hub batch with typecheck, focused Vitest, Phantom reruns, lint, build, audit, invariants, and CI-wrapper affected suites.
-- [ ] Commit and push the current hub telemetry/Phantom/status batch.
+- [x] Verify current hub batch with typecheck, focused Vitest, Phantom reruns, lint, build, audit, invariants, CI-wrapper affected suites, and full `test:ci`.
+- [x] Commit and push the current hub telemetry/Phantom/status batch as `e7548c7`.
+- [x] Reload the launchd daemon, resume the fleet, and verify production status.
 - [ ] Next lane: use action-count telemetry for sample-gated, same-tier proposal-yield diagnostics/routing without escalating risk.
