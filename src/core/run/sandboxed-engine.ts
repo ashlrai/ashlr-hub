@@ -37,6 +37,7 @@ import type {
   DelegationScope,
   EngineId,
   EngineTier,
+  ProposalVerifyResult,
   RunProposalOutcome,
   RunBudget,
   RunState,
@@ -136,7 +137,7 @@ export interface CaptureSandboxedProposalOptions {
   workSource?: WorkSource;
   /** Mark the proposal partial and run the partial completeness gate. */
   isPartial?: boolean;
-  /** Capture the diff but force a gate-style block instead of filing. */
+  /** Capture the diff with a known gate-style failure reason. */
   forceGateBlockReason?: string;
   /** Human-readable source label used in proposal summaries. */
   sourceLabel?: string;
@@ -204,6 +205,15 @@ function proposalOutcome(
           deletions: diff.deletions,
         }
       : {}),
+  };
+}
+
+function captureGateVerifyResult(reason: string): ProposalVerifyResult {
+  return {
+    passed: false,
+    failed: [reason],
+    detail: reason,
+    source: 'capture-gate',
   };
 }
 
@@ -667,21 +677,25 @@ export async function captureSandboxedProposal(
       };
     }
 
+    let reviewOnlyVerifyResult: ProposalVerifyResult | undefined;
     if (opts.forceGateBlockReason) {
       const outcome = proposalOutcome(
         opts.isPartial ? 'partial-completeness-gate' : 'completeness-gate',
         opts.forceGateBlockReason,
         diff,
       );
-      return {
-        state: withProposalOutcome(mk({ result: outcome.reason }), outcome),
-        proposalOutcome: outcome,
-      };
+      if (!opts.isPartial) {
+        return {
+          state: withProposalOutcome(mk({ result: outcome.reason }), outcome),
+          proposalOutcome: outcome,
+        };
+      }
+      reviewOnlyVerifyResult = captureGateVerifyResult(outcome.reason);
     }
 
     let shouldFile = true;
     let blockedOutcome: RunProposalOutcome | undefined;
-    if (cfg.foundry?.completenessGate !== false) {
+    if (reviewOnlyVerifyResult === undefined && cfg.foundry?.completenessGate !== false) {
       const gateResult = await runCompletenessGate({
         worktreePath: sb.worktreePath,
         diff,
@@ -695,7 +709,11 @@ export async function captureSandboxedProposal(
           `${opts.isPartial ? 'partial ' : ''}completeness gate blocked proposal: ${gateResult.reason ?? 'blocked'}`,
           diff,
         );
-        shouldFile = false;
+        if (opts.isPartial) {
+          reviewOnlyVerifyResult = captureGateVerifyResult(blockedOutcome.reason);
+        } else {
+          shouldFile = false;
+        }
       }
     }
 
@@ -732,6 +750,7 @@ export async function captureSandboxedProposal(
       runId: id,
       engineModel,
       engineTier: tier,
+      ...(reviewOnlyVerifyResult ? { verifyResult: reviewOnlyVerifyResult } : {}),
       ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
       ...sandboxedProducerCausalMetadata({
         engine,
@@ -1113,12 +1132,48 @@ export async function runEngineSandboxed(
               });
               if (!_gateResult.pass) {
                 console.log(`[M275] completeness gate blocked partial proposal: ${_gateResult.reason}`);
-                proposalOutcomeResult = proposalOutcome(
+                const blockedOutcome = proposalOutcome(
                   'partial-completeness-gate',
                   `partial completeness gate blocked proposal: ${_gateResult.reason ?? 'blocked'}`,
                   diff,
                 );
-                // Partial run with blocked gate — do not file as proposal.
+                const partialOutcomeForMetadata = proposalOutcome('filed', 'partial proposal filed with failing verification', diff);
+                const proposal = selectInboxStore(cfg).create({
+                  repo: sb.sourceRepo,
+                  origin: 'agent',
+                  kind: 'patch',
+                  title: `[partial] ${engine} run: ${goal.slice(0, 78)}`,
+                  summary:
+                    `Partial ${engineModel} run (timed-out / non-zero exit) produced ` +
+                    `${diff.files} file(s) (+${diff.insertions}/-${diff.deletions}). ` +
+                    `Engine error: ${res.error ?? 'unknown'}. Review before applying.`,
+                  diff: scrubbed,
+                  diffHash,
+                  provenanceSig,
+                  sandboxId: sb.id,
+                  workItemId: opts.workItemId,
+                  workSource: opts.workSource,
+                  runId: id,
+                  engineModel,
+                  engineTier: tier,
+                  verifyResult: captureGateVerifyResult(blockedOutcome.reason),
+                  ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
+                  ...sandboxedProducerCausalMetadata({
+                    engine,
+                    engineModel,
+                    tier,
+                    runId: id,
+                    workItemId: opts.workItemId,
+                    workSource: opts.workSource,
+                    outcome: partialOutcomeForMetadata,
+                    usage,
+                    durationMs: _spawnDurationMs,
+                    status: 'failed',
+                  }),
+                  isPartial: true,
+                });
+                proposalId = proposal.id;
+                proposalOutcomeResult = proposalOutcome('filed', 'partial proposal filed with failing verification', diff, proposal.id);
               } else {
                 const partialOutcomeForMetadata = proposalOutcome('filed', 'partial proposal filed', diff);
                 const proposal = selectInboxStore(cfg).create({
@@ -1732,6 +1787,7 @@ export async function runApiModelSandboxed(
           const diffHash = hashDiff(scrubbed);
           const provenanceSig = signProvenance(engineModel, tier, diffHash);
           let shouldFile = true;
+          let reviewOnlyVerifyResult: ProposalVerifyResult | undefined;
           if (cfg.foundry?.completenessGate !== false) {
             const gateResult = await runCompletenessGate({
               worktreePath: sb.worktreePath,
@@ -1747,7 +1803,11 @@ export async function runApiModelSandboxed(
                 `${isPartialResult ? 'partial ' : ''}completeness gate blocked api-model proposal: ${gateResult.reason ?? 'blocked'}`,
                 diff,
               );
-              shouldFile = false;
+              if (isPartialResult) {
+                reviewOnlyVerifyResult = captureGateVerifyResult(proposalOutcomeResult.reason);
+              } else {
+                shouldFile = false;
+              }
             }
           }
           if (!shouldFile) {
@@ -1777,6 +1837,7 @@ export async function runApiModelSandboxed(
             runId: id,
             engineModel,
             engineTier: tier,
+            ...(reviewOnlyVerifyResult ? { verifyResult: reviewOnlyVerifyResult } : {}),
             ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
             ...sandboxedProducerCausalMetadata({
               engine,

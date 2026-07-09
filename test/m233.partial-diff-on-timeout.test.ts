@@ -113,9 +113,7 @@ describe('M233 partial-diff capture on timeout', () => {
           },
         );
 
-        // M275: partial-diff-on-timeout capture is tested with completenessGate OFF
-        // (flag-off preserves the pre-M275 behavior of filing partial proposals).
-        const result = await runEngineSandboxed('claude', 'Add confidence scoring core', makeConfig({ foundry: { completenessGate: false } }), {
+        const result = await runEngineSandboxed('claude', 'Add confidence scoring core', makeConfig(), {
           sourceRepo: repo.dir,
           propose: true,
         });
@@ -137,8 +135,14 @@ describe('M233 partial-diff capture on timeout', () => {
         expect(proposal!.title).toContain('[partial]');
         expect(proposal!.diff).toBeTruthy();
         expect(proposal!.diff!.length).toBeGreaterThan(0);
+        expect(proposal!.verifyResult).toMatchObject({
+          passed: false,
+          source: 'capture-gate',
+          failed: [expect.stringContaining('[partial] run')],
+        });
 
-        // Safety: full trust fields are still populated (judge gate still applies).
+        // Safety: provenance remains bound to the review diff, while the failed
+        // verifyResult + isPartial marker keep auto-merge fail-closed.
         expect(proposal!.engineModel).toBeDefined();
         expect(proposal!.engineTier).toBeDefined();
         expect(proposal!.diffHash).toBeDefined();

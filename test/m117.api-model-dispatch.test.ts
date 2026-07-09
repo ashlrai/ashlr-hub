@@ -327,7 +327,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
       selectInboxStore: () => ({
         create: (args: unknown) => {
           capturedProposalArgs.push(args);
-          return { id: 'should-not-file' };
+          return { id: 'partial-review-prop' };
         },
       }),
     }));
@@ -363,19 +363,27 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
 
     expect(capturedGateArgs).toHaveLength(1);
     expect(capturedGateArgs[0]).toMatchObject({ isPartial: true });
-    expect(capturedProposalArgs).toHaveLength(0);
+    expect(capturedProposalArgs).toHaveLength(1);
+    expect(capturedProposalArgs[0]).toMatchObject({
+      isPartial: true,
+      verifyResult: {
+        passed: false,
+        source: 'capture-gate',
+        failed: [expect.stringContaining('typecheck failed')],
+      },
+    });
     expect(result.state.status).toBe('done');
-    expect(result.proposalId).toBeUndefined();
+    expect(result.proposalId).toBe('partial-review-prop');
     expect(result.proposalOutcome).toMatchObject({
-      kind: 'partial-completeness-gate',
-      reason: expect.stringContaining('typecheck failed'),
+      kind: 'filed',
+      proposalId: 'partial-review-prop',
       files: 1,
       insertions: 1,
       deletions: 1,
     });
     expect(result.state.proposalOutcome).toMatchObject({
-      kind: 'partial-completeness-gate',
-      reason: expect.stringContaining('typecheck failed'),
+      kind: 'filed',
+      proposalId: 'partial-review-prop',
     });
 
     vi.resetModules();

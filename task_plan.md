@@ -571,5 +571,6 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Sanitize inbox/proposal persistence on write/read without erasing legitimate source diff review context.
 - [x] Preserve provenance when only non-diff text redacts, and drop `diffHash`/`provenanceSig` when diff redaction changes signed bytes.
 - [x] Verification passed: focused inbox/API suite, secret-safety/API scrub canaries, typecheck, lint, build, audit, and diff check.
-- [ ] Next lane: file non-empty partial/TITRR diffs as safe review-only proposals with failed verification metadata instead of discarding them.
+- [x] File non-empty partial/TITRR/API-model diffs as safe review-only proposals with failed verification metadata instead of discarding them.
+- [x] Verify partial proposals stay fail-closed through `isPartial:true`, `verifyResult.passed:false`, and existing auto-merge/verification gates.
 - [ ] Next lane: update daemon/status pending matching to prefer `workItemId` so stale/pending proposal blockers are item-accurate.
