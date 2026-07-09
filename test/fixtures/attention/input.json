@@ -41,6 +41,12 @@
       "outcome": "proposal-created",
       "proposalCreated": true,
       "proposalId": "prop-attention-a",
+      "actionCounts": {
+        "proposalCaptureAttempts": 1,
+        "diffFiles": 2,
+        "diffLines": 12,
+        "proposalCreated": 1
+      },
       "tokensIn": 1000,
       "tokensOut": 240,
       "costUsd": 0.012345,
@@ -105,6 +111,11 @@
       "status": "done",
       "outcome": "empty-diff",
       "proposalCreated": false,
+      "actionCounts": {
+        "proposalCaptureAttempts": 1,
+        "diffFiles": 0,
+        "proposalBlocked": 1
+      },
       "tokensIn": 500,
       "tokensOut": 50,
       "durationMs": 900,

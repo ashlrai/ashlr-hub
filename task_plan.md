@@ -259,6 +259,17 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Fixed daemon singleton lock recovery so a dead-owner lock with a fresh heartbeat does not block service restart.
 - [x] Verified live patched `bin/ashlr fleet status --json` now reports 13 backlog items across 9 repos and `autonomyDirection.mode:"backlog-build"` instead of an empty queue.
 
+## Current Continuation - Overnight Learning Loop
+- [x] Rechecked worktree, recent plan/notes, and the partially applied action-count routing patch.
+- [x] Collected parallel scout findings for dispatch-production action counts and FleetStatus/eval attempt-shape diagnostics.
+- [x] Added metadata-only dispatch `actionCounts` rollups and compact `attemptShape` counters.
+- [x] Kept policy-disabled samples neutral by outcome and by `actionCounts.proposalDisabled`.
+- [x] Added gate-dominant routing guard so low proposal yield caused by capture/completeness gates does not trigger same-tier backend churn.
+- [x] Rendered dispatch attempt shape in CLI Fleet status, Mission Control/Fleet web dispatch cards, and attention eval reports.
+- [x] Focused verification passed: typecheck, diff check, and 145 tests across dispatch-production, learned routing, fleet status, eval attention, and dashboard suites.
+- [x] Broad verification passed: adjacent learning/router suites, build, lint, audit, invariants, and full `npm run test:ci` (438 files, 8992 passed, 7 skipped).
+- [ ] Commit, push, reload daemon, and continue to the next autonomous lane.
+
 ## Current Continuation - Overnight Proposal Quality Gate
 - [x] Rechecked git, Entire, planning files, recent commits, and live fleet status after the automerge safety push.
 - [x] Deployed parallel scouts for trivial proposal gating, outcome plumbing, and Phantom readiness integration.

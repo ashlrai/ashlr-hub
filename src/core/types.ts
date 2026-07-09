@@ -143,6 +143,13 @@ export interface RunActionCounts {
   proposalDisabled?: number;
 }
 
+export interface ProductionAttemptShape {
+  backendNoDiff: number;
+  captureOrGateBlocked: number;
+  repairAttempts: number;
+  policyDisabled: number;
+}
+
 export interface RunEventSummary {
   runId?: string;
   status?: string;

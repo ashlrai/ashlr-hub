@@ -134,10 +134,69 @@ describe('M342 dispatch production ledger', () => {
 
   it('summarizes proposal yield by backend, source, repo, and model', () => {
     const events = [
-      makeEvent({ itemId: 'a', backend: 'local-coder', model: 'qwen', outcome: 'empty-diff', proposalCreated: false, reason: 'no diff' }),
-      makeEvent({ itemId: 'b', backend: 'local-coder', model: 'qwen', outcome: 'gate-blocked', proposalCreated: false, reason: 'gate blocked' }),
-      makeEvent({ itemId: 'c', backend: 'codex', model: 'gpt-5.5', outcome: 'proposal-created', proposalCreated: true, proposalId: 'prop-c', source: 'goal' }),
-      makeEvent({ itemId: 'd', backend: 'codex', model: 'gpt-5.5', outcome: 'proposal-disabled', proposalCreated: false, reason: 'proposal filing disabled for this sandboxed attempt' }),
+      makeEvent({
+        itemId: 'a',
+        backend: 'local-coder',
+        model: 'qwen',
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        reason: 'no diff',
+        runEventSummary: {
+          actionCounts: {
+            proposalCaptureAttempts: 1,
+            diffFiles: 0,
+            proposalBlocked: 1,
+          },
+        },
+      }),
+      makeEvent({
+        itemId: 'b',
+        backend: 'local-coder',
+        model: 'qwen',
+        outcome: 'gate-blocked',
+        proposalCreated: false,
+        reason: 'gate blocked',
+        runEventSummary: {
+          actionCounts: {
+            proposalCaptureAttempts: 1,
+            completenessGateRuns: 1,
+            verifyRepairAttempts: 1,
+            diffFiles: 2,
+            diffLines: 15,
+            proposalBlocked: 1,
+          },
+        },
+      }),
+      makeEvent({
+        itemId: 'c',
+        backend: 'codex',
+        model: 'gpt-5.5',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+        proposalId: 'prop-c',
+        source: 'goal',
+        runEventSummary: {
+          actionCounts: {
+            proposalCaptureAttempts: 1,
+            diffFiles: 1,
+            diffLines: 5,
+            proposalCreated: 1,
+          },
+        },
+      }),
+      makeEvent({
+        itemId: 'd',
+        backend: 'codex',
+        model: 'gpt-5.5',
+        outcome: 'proposal-disabled',
+        proposalCreated: false,
+        reason: 'proposal filing disabled for this sandboxed attempt',
+        runEventSummary: {
+          actionCounts: {
+            proposalDisabled: 1,
+          },
+        },
+      }),
     ];
 
     const summary = summarizeDispatchProductionYield(events, { windowHours: 24 });
@@ -154,6 +213,22 @@ describe('M342 dispatch production ledger', () => {
         gateBlocked: 1,
         proposalDisabled: 1,
       },
+      actionCounts: {
+        proposalCaptureAttempts: 3,
+        completenessGateRuns: 1,
+        verifyRepairAttempts: 1,
+        diffFiles: 3,
+        diffLines: 20,
+        proposalCreated: 1,
+        proposalBlocked: 2,
+        proposalDisabled: 1,
+      },
+      attemptShape: {
+        backendNoDiff: 1,
+        captureOrGateBlocked: 1,
+        repairAttempts: 1,
+        policyDisabled: 1,
+      },
     });
     expect(summary?.byBackend[0]).toMatchObject({
       backend: 'local-coder',
@@ -165,18 +240,36 @@ describe('M342 dispatch production ledger', () => {
         emptyDiff: 1,
         gateBlocked: 1,
       },
+      actionCounts: {
+        proposalCaptureAttempts: 2,
+        completenessGateRuns: 1,
+        verifyRepairAttempts: 1,
+        diffFiles: 2,
+        diffLines: 15,
+        proposalBlocked: 2,
+      },
+      attemptShape: {
+        backendNoDiff: 1,
+        captureOrGateBlocked: 1,
+        repairAttempts: 1,
+        policyDisabled: 0,
+      },
     });
     expect(summary?.bySource.some((bucket) => bucket.source === 'goal' && bucket.proposalsCreated === 1)).toBe(true);
     expect(summary?.byBackend.some((bucket) =>
       bucket.backend === 'codex' &&
       bucket.attempts === 2 &&
-      bucket.outcomes.proposalDisabled === 1
+      bucket.outcomes.proposalDisabled === 1 &&
+      bucket.actionCounts?.proposalCreated === 1 &&
+      bucket.actionCounts?.proposalDisabled === 1
     )).toBe(true);
     expect(summary?.byBackendModel.some((bucket) =>
       bucket.key === 'codex:gpt-5.5' &&
       bucket.attempts === 2 &&
       bucket.proposalRate === 0.5 &&
-      bucket.outcomes.proposalDisabled === 1
+      bucket.outcomes.proposalDisabled === 1 &&
+      bucket.actionCounts?.diffFiles === 1 &&
+      bucket.actionCounts?.diffLines === 5
     )).toBe(true);
   });
 

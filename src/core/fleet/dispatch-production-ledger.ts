@@ -16,11 +16,19 @@ import type {
   EvidenceOutcomeSummary,
   LabelBasis,
   LearningSource,
+  ProductionAttemptShape,
+  RunActionCounts,
   RouteSnapshot,
   RunEventSummary,
   WorkItem,
 } from '../types.js';
 import { causalMetadata } from '../learning/causal.js';
+import {
+  addProductionAttemptShape,
+  emptyProductionAttemptShape,
+  hasProductionAttemptShape,
+  productionAttemptShapeFromSignals,
+} from '../learning/attempt-shape.js';
 import { scrubSecrets } from '../util/scrub.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -92,6 +100,8 @@ export interface DispatchProductionYieldBucket {
   proposalRate: number;
   spentUsd: number;
   outcomes: DispatchProductionOutcomeCounts;
+  actionCounts?: RunActionCounts;
+  attemptShape?: ProductionAttemptShape;
   topReasons: DispatchProductionReasonCount[];
 }
 
@@ -104,6 +114,8 @@ export interface DispatchProductionYieldSummary {
   proposalRate: number;
   spentUsd: number;
   outcomes: DispatchProductionOutcomeCounts;
+  actionCounts?: RunActionCounts;
+  attemptShape?: ProductionAttemptShape;
   topReasons: DispatchProductionReasonCount[];
   byBackend: DispatchProductionYieldBucket[];
   bySource: DispatchProductionYieldBucket[];
@@ -334,6 +346,42 @@ function emptyOutcomeCounts(): DispatchProductionOutcomeCounts {
   };
 }
 
+const RUN_ACTION_COUNT_KEYS = [
+  'sandboxCreated',
+  'spawnAttempts',
+  'transientRetries',
+  'proposalCaptureAttempts',
+  'completenessGateRuns',
+  'verifyRepairAttempts',
+  'modelSteps',
+  'toolSteps',
+  'totalSteps',
+  'diffFiles',
+  'diffLines',
+  'proposalCreated',
+  'proposalBlocked',
+  'proposalDisabled',
+] as const satisfies readonly (keyof RunActionCounts)[];
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(value));
+}
+
+function addRunActionCounts(target: RunActionCounts, source: RunActionCounts | undefined): void {
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return;
+  const record = source as Record<string, unknown>;
+  for (const key of RUN_ACTION_COUNT_KEYS) {
+    const value = nonNegativeInteger(record[key]);
+    if (value === undefined || value <= 0) continue;
+    target[key] = Math.min((target[key] ?? 0) + value, Number.MAX_SAFE_INTEGER);
+  }
+}
+
+function hasRunActionCounts(counts: RunActionCounts): boolean {
+  return RUN_ACTION_COUNT_KEYS.some((key) => (counts[key] ?? 0) > 0);
+}
+
 function incrementOutcome(
   counts: DispatchProductionOutcomeCounts,
   outcome: DaemonDispatchProductionOutcome,
@@ -383,6 +431,8 @@ interface MutableYieldBucket {
   proposalsCreated: number;
   spentUsd: number;
   outcomes: DispatchProductionOutcomeCounts;
+  actionCounts: RunActionCounts;
+  attemptShape: ProductionAttemptShape;
   reasons: Map<string, number>;
 }
 
@@ -400,6 +450,8 @@ function touchBucket(
       proposalsCreated: 0,
       spentUsd: 0,
       outcomes: emptyOutcomeCounts(),
+      actionCounts: {},
+      attemptShape: emptyProductionAttemptShape(),
       reasons: new Map(),
     };
     buckets.set(key, bucket);
@@ -412,6 +464,12 @@ function addToBucket(bucket: MutableYieldBucket, event: DispatchProductionEvent)
   if (event.proposalCreated) bucket.proposalsCreated++;
   bucket.spentUsd += Number.isFinite(event.spentUsd) ? event.spentUsd : 0;
   incrementOutcome(bucket.outcomes, event.outcome);
+  addRunActionCounts(bucket.actionCounts, event.runEventSummary?.actionCounts);
+  addProductionAttemptShape(bucket.attemptShape, productionAttemptShapeFromSignals({
+    outcome: event.outcome,
+    proposalCreated: event.proposalCreated,
+    actionCounts: event.runEventSummary?.actionCounts,
+  }));
   const reason = event.reason ?? event.routeReason ?? event.outcome;
   bucket.reasons.set(reason, (bucket.reasons.get(reason) ?? 0) + 1);
 }
@@ -431,6 +489,8 @@ function finalizeBucket(bucket: MutableYieldBucket): DispatchProductionYieldBuck
     proposalRate: attempts > 0 ? proposalsCreated / attempts : 0,
     spentUsd: bucket.spentUsd,
     outcomes: bucket.outcomes,
+    ...(hasRunActionCounts(bucket.actionCounts) ? { actionCounts: bucket.actionCounts } : {}),
+    ...(hasProductionAttemptShape(bucket.attemptShape) ? { attemptShape: bucket.attemptShape } : {}),
     topReasons: sortedReasons(bucket.reasons, 5),
   };
 }
@@ -466,6 +526,8 @@ export function summarizeDispatchProductionYield(
   const byBackendModel = new Map<string, MutableYieldBucket>();
   const topReasons = new Map<string, number>();
   const overall = emptyOutcomeCounts();
+  const actionCounts: RunActionCounts = {};
+  const attemptShape = emptyProductionAttemptShape();
   let proposalsCreated = 0;
   let spentUsd = 0;
 
@@ -473,6 +535,12 @@ export function summarizeDispatchProductionYield(
     if (event.proposalCreated) proposalsCreated++;
     spentUsd += Number.isFinite(event.spentUsd) ? event.spentUsd : 0;
     incrementOutcome(overall, event.outcome);
+    addRunActionCounts(actionCounts, event.runEventSummary?.actionCounts);
+    addProductionAttemptShape(attemptShape, productionAttemptShapeFromSignals({
+      outcome: event.outcome,
+      proposalCreated: event.proposalCreated,
+      actionCounts: event.runEventSummary?.actionCounts,
+    }));
     const reason = event.reason ?? event.routeReason ?? event.outcome;
     topReasons.set(reason, (topReasons.get(reason) ?? 0) + 1);
 
@@ -499,6 +567,8 @@ export function summarizeDispatchProductionYield(
     proposalRate: total > 0 ? proposalsCreated / total : 0,
     spentUsd,
     outcomes: overall,
+    ...(hasRunActionCounts(actionCounts) ? { actionCounts } : {}),
+    ...(hasProductionAttemptShape(attemptShape) ? { attemptShape } : {}),
     topReasons: sortedReasons(topReasons, limit),
     byBackend: sortedBuckets(byBackend, limit),
     bySource: sortedBuckets(bySource, limit),

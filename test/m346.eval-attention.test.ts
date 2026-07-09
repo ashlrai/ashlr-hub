@@ -38,6 +38,12 @@ describe('M346 eval attention', () => {
         proposalCreated: 1,
         noProposal: 1,
         proposalRate: 0.5,
+        attemptShape: {
+          backendNoDiff: 1,
+          captureOrGateBlocked: 0,
+          repairAttempts: 0,
+          policyDisabled: 0,
+        },
       },
       contextPressure: {
         samples: 2,

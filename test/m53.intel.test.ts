@@ -612,6 +612,82 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(rec.reason).toContain('same-tier reroute');
   });
 
+  it('gate-dominant action counts keep the same backend for capture repair', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const dispatchProductionEvents = Array.from({ length: 3 }, () =>
+      makeDispatchProductionEvent({
+        backend: base.backend,
+        outcome: 'gate-blocked',
+        proposalCreated: false,
+        reason: 'completeness gate blocked partial diff',
+        runEventSummary: {
+          actionCounts: {
+            proposalCaptureAttempts: 1,
+            completenessGateRuns: 1,
+            proposalBlocked: 1,
+            diffFiles: 2,
+            diffLines: 20,
+          },
+        },
+      })
+    );
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents,
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).toContain('gate-dominant');
+    expect(rec.reason).toContain('verification/capture repair');
+    expect(rec.reason).not.toContain('same-tier reroute');
+  });
+
+  it('empty-diff action counts remain learnable and annotate same-tier reroutes', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const dispatchProductionEvents = Array.from({ length: 3 }, () =>
+      makeDispatchProductionEvent({
+        backend: base.backend,
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        reason: 'agent returned no diff',
+        runEventSummary: {
+          actionCounts: {
+            proposalCaptureAttempts: 1,
+            proposalBlocked: 1,
+            diffFiles: 0,
+          },
+        },
+      })
+    );
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents,
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(alternate);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).toContain('same-tier reroute');
+    expect(rec.reason).toContain('action signal: no-diff');
+  });
+
   it('dispatch-production yield sample floor keeps routing byte-identical', async () => {
     const cfg = withIntelligence({
       allowedBackends: ['builtin', 'claude', 'codex'],
@@ -659,6 +735,37 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
           reason: 'proposal filing disabled for this sandboxed attempt',
         }),
       ],
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('recent proposal yield');
+  });
+
+  it('action-count-only proposal-disabled rows do not poison backend yield learning', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.9,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents: Array.from({ length: 3 }, () =>
+        makeDispatchProductionEvent({
+          backend: base.backend,
+          outcome: 'empty-diff',
+          reason: 'legacy row carried policy-disabled only in action counts',
+          runEventSummary: {
+            actionCounts: {
+              proposalDisabled: 1,
+              diffFiles: 0,
+            },
+          },
+        })
+      ),
     });
 
     expect(base.tier).toBe('frontier');

@@ -1240,17 +1240,34 @@ interface DiagnosticDispatchYieldAction {
 }
 
 function diagnosticAttemptsForDispatchBucket(bucket: DispatchProductionYieldBucket): number {
-  return Math.max(0, bucket.attempts - bucket.outcomes.proposalDisabled);
+  return Math.max(0, bucket.attempts - Math.max(
+    bucket.outcomes.proposalDisabled,
+    bucket.attemptShape?.policyDisabled ?? 0,
+  ));
 }
 
 function diagnosticTopReason(bucket: DispatchProductionYieldBucket): string | undefined {
   return bucket.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;
 }
 
+function formatAttemptShapeDetail(shape: DispatchProductionYieldSummary['attemptShape']): string {
+  if (!shape) return '';
+  const total =
+    (shape.backendNoDiff ?? 0) +
+    (shape.captureOrGateBlocked ?? 0) +
+    (shape.repairAttempts ?? 0) +
+    (shape.policyDisabled ?? 0);
+  if (total <= 0) return '';
+  return `; shape: no-diff ${shape.backendNoDiff ?? 0}, gate/capture ${shape.captureOrGateBlocked ?? 0}, repairs ${shape.repairAttempts ?? 0}, policy-off ${shape.policyDisabled ?? 0}`;
+}
+
 function dispatchYieldNextAction(dispatchProduction: DispatchProductionYieldSummary): DiagnosticDispatchYieldAction | null {
   const diagnosticAttempts = Math.max(
     0,
-    dispatchProduction.attempts - dispatchProduction.outcomes.proposalDisabled,
+    dispatchProduction.attempts - Math.max(
+      dispatchProduction.outcomes.proposalDisabled,
+      dispatchProduction.attemptShape?.policyDisabled ?? 0,
+    ),
   );
   const diagnosticProposalRate = diagnosticAttempts > 0
     ? dispatchProduction.proposalsCreated / diagnosticAttempts
@@ -1289,8 +1306,9 @@ function dispatchYieldNextAction(dispatchProduction: DispatchProductionYieldSumm
     ? diagnosticTopReason(weakest.bucket)
     : dispatchProduction.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;
   const reason = topReason ? `; top reason: ${topReason}` : '';
+  const shape = formatAttemptShapeDetail(weakest?.bucket.attemptShape ?? dispatchProduction.attemptShape);
   return {
-    detail: `${subject} proposal yield ${proposals}/${attempts} (${formatActionPercent(rate)})${reason}`,
+    detail: `${subject} proposal yield ${proposals}/${attempts} (${formatActionPercent(rate)})${reason}${shape}`,
     ...(weakest?.bucket.backend ? { backend: weakest.bucket.backend } : {}),
   };
 }

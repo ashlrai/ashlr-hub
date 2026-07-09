@@ -218,6 +218,8 @@ export function formatFleetStatus(s: FleetStatus): string {
       `  output:    proposals ${dispatchProduction.proposalsCreated}/${dispatchProduction.events} ` +
         `(${formatPercent(dispatchProduction.proposalRate)}), no-proposal ${dispatchProduction.noProposal}`,
     );
+    const attemptShape = formatAttemptShape(dispatchProduction.attemptShape);
+    if (attemptShape) lines.push(`  shape:     ${attemptShape}`);
     if (dispatchProduction.byBackend.length > 0) {
       lines.push(
         `  backends:  ${dispatchProduction.byBackend.slice(0, 3).map(formatDispatchYieldBucket).join('; ')}`,
@@ -545,6 +547,18 @@ function formatPercent(rate: number): string {
 
 function formatNullablePercent(rate: number | null | undefined): string {
   return typeof rate === 'number' && Number.isFinite(rate) ? formatPercent(rate) : '—';
+}
+
+function formatAttemptShape(shape: NonNullable<FleetStatus['dispatchProduction']>['attemptShape']): string {
+  if (!shape) return '';
+  const total =
+    (shape.backendNoDiff ?? 0) +
+    (shape.captureOrGateBlocked ?? 0) +
+    (shape.repairAttempts ?? 0) +
+    (shape.policyDisabled ?? 0);
+  if (total <= 0) return '';
+  return `no-diff ${shape.backendNoDiff ?? 0}, gate/capture ${shape.captureOrGateBlocked ?? 0}, ` +
+    `repairs ${shape.repairAttempts ?? 0}, policy-off ${shape.policyDisabled ?? 0}`;
 }
 
 function formatContextRisk(

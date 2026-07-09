@@ -28,7 +28,7 @@
  * avoid importing from merge.ts (daemon-no-primitive invariant).
  */
 
-import type { AshlrConfig, EngineId, EngineTier, RunEstimate, WorkItem } from '../types.js';
+import type { AshlrConfig, EngineId, EngineTier, RunActionCounts, RunEstimate, WorkItem } from '../types.js';
 import { routeBackend, type RouteDecision } from '../fleet/router.js';
 import type { CostForecast } from '../types.js';
 import { readDecisions } from '../fleet/decisions-ledger.js';
@@ -232,12 +232,44 @@ interface DispatchYieldPrior {
   proposalsCreated: number;
   proposalRate: number;
   topReason?: string;
+  actionShape?: DispatchYieldActionShape;
+}
+
+interface DispatchYieldActionShape {
+  samples: number;
+  noDiffAttempts: number;
+  completenessGateRuns: number;
+  verifyRepairAttempts: number;
+  proposalBlocked: number;
+  avgDiffFiles: number;
+  gateDominant: boolean;
+  signal?: string;
 }
 
 function clampRate(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value)
     ? Math.max(0, Math.min(1, value))
     : fallback;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(value));
+}
+
+function hasActionCountSignal(counts: RunActionCounts | undefined): counts is RunActionCounts {
+  if (!counts || typeof counts !== 'object' || Array.isArray(counts)) return false;
+  return [
+    counts.diffFiles,
+    counts.completenessGateRuns,
+    counts.verifyRepairAttempts,
+    counts.proposalBlocked,
+  ].some((value) => nonNegativeInteger(value) !== undefined);
+}
+
+function isProposalDisabledDispatchEvent(event: DispatchProductionEvent): boolean {
+  return event.outcome === 'proposal-disabled' ||
+    (nonNegativeInteger(event.runEventSummary?.actionCounts?.proposalDisabled) ?? 0) > 0;
 }
 
 function loadDispatchYieldEvents(
@@ -268,6 +300,13 @@ function dispatchYieldForBackend(
   const reasons = new Map<string, number>();
   let attempts = 0;
   let proposalsCreated = 0;
+  let actionSamples = 0;
+  let noDiffAttempts = 0;
+  let completenessGateRuns = 0;
+  let verifyRepairAttempts = 0;
+  let proposalBlocked = 0;
+  let diffFileSamples = 0;
+  let diffFilesTotal = 0;
   for (const event of events) {
     if (event.backend !== backend) continue;
     if (event.source !== source) continue;
@@ -275,19 +314,57 @@ function dispatchYieldForBackend(
     // example non-final TITRR attempts with propose:false), not a backend
     // quality signal. Counting it as a failed proposal attempt makes the
     // router learn against the wrong thing.
-    if (event.outcome === 'proposal-disabled') continue;
+    if (isProposalDisabledDispatchEvent(event)) continue;
     attempts++;
     if (event.proposalCreated) proposalsCreated++;
+    const counts = event.runEventSummary?.actionCounts;
+    if (hasActionCountSignal(counts)) {
+      actionSamples++;
+      const diffFiles = nonNegativeInteger(counts.diffFiles);
+      if (diffFiles !== undefined) {
+        diffFileSamples++;
+        diffFilesTotal += diffFiles;
+        if (diffFiles === 0 && event.outcome === 'empty-diff') noDiffAttempts++;
+      }
+      completenessGateRuns += nonNegativeInteger(counts.completenessGateRuns) ?? 0;
+      verifyRepairAttempts += nonNegativeInteger(counts.verifyRepairAttempts) ?? 0;
+      proposalBlocked += nonNegativeInteger(counts.proposalBlocked) ?? 0;
+    }
     const reason = event.reason ?? event.routeReason ?? event.outcome;
     reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
   }
   const topReason = [...reasons.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
+  const avgDiffFiles = diffFileSamples > 0 ? diffFilesTotal / diffFileSamples : 0;
+  const gateDominant =
+    actionSamples >= MIN_DISPATCH_YIELD_SAMPLES &&
+    completenessGateRuns >= MIN_DISPATCH_YIELD_SAMPLES &&
+    proposalBlocked >= MIN_DISPATCH_YIELD_SAMPLES &&
+    noDiffAttempts === 0;
+  const actionShape: DispatchYieldActionShape | undefined = actionSamples > 0
+    ? {
+        samples: actionSamples,
+        noDiffAttempts,
+        completenessGateRuns,
+        verifyRepairAttempts,
+        proposalBlocked,
+        avgDiffFiles,
+        gateDominant,
+        ...(gateDominant
+          ? { signal: `gate-dominant (${completenessGateRuns} gate run(s), avg diff files ${avgDiffFiles.toFixed(1)})` }
+          : noDiffAttempts >= MIN_DISPATCH_YIELD_SAMPLES
+            ? { signal: `no-diff (${noDiffAttempts}/${actionSamples} action-count sample(s))` }
+            : verifyRepairAttempts > 0
+              ? { signal: `repair-attempted (${verifyRepairAttempts} repair attempt(s))` }
+              : {}),
+      }
+    : undefined;
   return {
     attempts,
     proposalsCreated,
     proposalRate: attempts > 0 ? proposalsCreated / attempts : 1,
     ...(topReason ? { topReason } : {}),
+    ...(actionShape ? { actionShape } : {}),
   };
 }
 
@@ -464,6 +541,18 @@ export async function recommendRoute(
     yieldPrior.attempts >= MIN_DISPATCH_YIELD_SAMPLES &&
     yieldPrior.proposalRate < minProposalYieldRate
   ) {
+    if (yieldPrior.actionShape?.gateDominant) {
+      return {
+        backend: base.backend,
+        tier: base.tier,
+        reason:
+          `learned-router: recent proposal yield for ${base.backend} ` +
+          `${yieldPrior.proposalsCreated}/${yieldPrior.attempts} ` +
+          `< threshold ${(minProposalYieldRate * 100).toFixed(0)}%, but action counts are ` +
+          `${yieldPrior.actionShape.signal ?? 'gate-dominant'} — keeping same-tier backend for verification/capture repair`,
+        confidence: Math.min(0.6 + (yieldPrior.attempts / 20) * 0.2, 0.8),
+      };
+    }
     const alternate = installedSameTierAlternative(base.backend, base.tier, allowed, cfg);
     if (alternate !== null) {
       return {
@@ -474,6 +563,7 @@ export async function recommendRoute(
           `${yieldPrior.proposalsCreated}/${yieldPrior.attempts} ` +
           `< threshold ${(minProposalYieldRate * 100).toFixed(0)}%` +
           `${yieldPrior.topReason ? ` (top: ${yieldPrior.topReason})` : ''} — ` +
+          `${yieldPrior.actionShape?.signal ? `action signal: ${yieldPrior.actionShape.signal}; ` : ''}` +
           `same-tier reroute to ${alternate}`,
         confidence: Math.min(0.55 + (yieldPrior.attempts / 20) * 0.35, 0.9),
       };

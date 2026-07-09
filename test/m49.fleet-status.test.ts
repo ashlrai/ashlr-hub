@@ -1134,6 +1134,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('Dispatch yield:');
     expect(formatted).toContain('proposals 1/3');
+    expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 0, policy-off 0');
     expect(formatted).toContain('local-coder 0/2 0%');
     expect(formatted).toContain('codex 1/1 100%');
   });
@@ -1409,10 +1410,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     );
     expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
       .toContain('top reason: agent returned no diff');
+    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
+      .toContain('shape: no-diff 1, gate/capture 1, repairs 0, policy-off 0');
 
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('[medium] Inspect dispatch yield [local-coder]');
     expect(formatted).toContain('local-coder proposal yield 0/3 (0%)');
+    expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 0, policy-off 0');
   });
 
   it('excludes proposal-disabled dispatch-production from weak-yield next action', async () => {
@@ -1481,6 +1485,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       detail: expect.stringContaining('local-coder proposal yield 0/3 (0%)'),
     });
     expect(action?.detail).toContain('top reason: agent returned no diff');
+    expect(action?.detail).toContain('shape: no-diff 3, gate/capture 0, repairs 0, policy-off 0');
     expect(action?.detail).not.toContain('proposal filing disabled');
   });
 
@@ -2151,6 +2156,12 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
           proposalCaptureError: 0,
           proposalDisabled: 0,
           unknown: 0,
+        },
+        attemptShape: {
+          backendNoDiff: 1,
+          captureOrGateBlocked: 1,
+          repairAttempts: 0,
+          policyDisabled: 0,
         },
         topReasons: [
           { reason: 'agent returned no diff', count: 2 },

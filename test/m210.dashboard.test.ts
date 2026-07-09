@@ -185,6 +185,12 @@ const FIXTURE_FLEET_STATUS = {
       proposalDisabled: 0,
       unknown: 0,
     },
+    attemptShape: {
+      backendNoDiff: 1,
+      captureOrGateBlocked: 0,
+      repairAttempts: 0,
+      policyDisabled: 0,
+    },
     topReasons: [{ reason: 'agent returned no diff', count: 1 }],
     byBackend: [
       {

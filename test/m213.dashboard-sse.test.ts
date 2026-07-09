@@ -408,6 +408,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     );
     expect(src).toContain('function renderProposalProductionCard');
     expect(src).toContain('function renderDispatchProductionCard');
+    expect(src).toContain('function formatAttemptShape');
+    expect(src).toContain('gate/capture');
     expect(src).toContain('Dispatch yield data unavailable.');
     expect(src).toContain("renderProposalProductionCard(f.proposalProduction, 'fleet-card card')");
     expect(src).toContain("renderDispatchProductionCard(f.dispatchProduction, 'fleet-card card')");

@@ -2506,6 +2506,23 @@ function formatFleetPercent(rate) {
   return `${Math.round(Math.max(0, Math.min(1, n)) * 100)}%`;
 }
 
+function formatAttemptShape(shape) {
+  if (!shape || typeof shape !== 'object') return '';
+  const noDiff = Number(shape.backendNoDiff ?? 0);
+  const gate = Number(shape.captureOrGateBlocked ?? 0);
+  const repairs = Number(shape.repairAttempts ?? 0);
+  const policy = Number(shape.policyDisabled ?? 0);
+  const safe = (value) => Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+  const parts = {
+    noDiff: safe(noDiff),
+    gate: safe(gate),
+    repairs: safe(repairs),
+    policy: safe(policy),
+  };
+  if (parts.noDiff + parts.gate + parts.repairs + parts.policy <= 0) return '';
+  return `shape: no-diff ${parts.noDiff}, gate/capture ${parts.gate}, repairs ${parts.repairs}, policy-off ${parts.policy}`;
+}
+
 function dispatchProductionBucketLabel(bucket) {
   if (!bucket || typeof bucket !== 'object') return 'unknown';
   if (bucket.backend) return String(bucket.backend);
@@ -2542,6 +2559,8 @@ function renderDispatchProductionCard(dispatchProduction, cls = 'ctrl-card card'
     ['No-proposal', dispatchProduction.noProposal ?? 0],
     ['Spend', `$${Number(dispatchProduction.spentUsd ?? 0).toFixed(4)}`],
   ]));
+  const shape = formatAttemptShape(dispatchProduction.attemptShape);
+  if (shape) body.appendChild(el('p', { cls: 'hint' }, shape));
 
   const backends = Array.isArray(dispatchProduction.byBackend)
     ? dispatchProduction.byBackend.slice(0, 4)
@@ -4458,6 +4477,8 @@ function fdRenderProductionPanel(snap) {
       ['No-proposal', dispatchProduction.noProposal ?? 0],
       ['Spend', `$${Number(dispatchProduction.spentUsd ?? 0).toFixed(4)}`],
     ]));
+    const shape = formatAttemptShape(dispatchProduction.attemptShape);
+    if (shape) body.appendChild(el('p', { cls: 'hint' }, shape));
     const backend = Array.isArray(dispatchProduction.byBackend) ? dispatchProduction.byBackend[0] : null;
     if (backend) {
       body.appendChild(el('p', { cls: 'hint' },

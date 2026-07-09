@@ -4,11 +4,17 @@ import type { AgentActionEvent, AgentActionRepoScope } from '../fleet/agent-acti
 import type {
   CompressionContextSummary,
   EvidenceOutcomeSummary,
+  ProductionAttemptShape,
   PromptContextSummary,
   RetrievalContextSummary,
   RouteSnapshot,
   RunEventSummary,
 } from '../types.js';
+import {
+  addProductionAttemptShape,
+  emptyProductionAttemptShape,
+  productionAttemptShapeFromSignals,
+} from '../learning/attempt-shape.js';
 
 export type AttentionEvalWindow = '1d' | '7d' | '30d';
 
@@ -82,6 +88,7 @@ export interface AttentionEvalReport {
     blocked: number;
     proposalRate: number | null;
     noProposalRate: number | null;
+    attemptShape: ProductionAttemptShape;
   };
   routingCost: {
     spendUsd: number;
@@ -188,6 +195,7 @@ export function buildAttentionEvalReport(
   let noProposal = 0;
   let failed = 0;
   let blocked = 0;
+  const attemptShape = emptyProductionAttemptShape();
   let spendUsd = 0;
   let tokensIn = 0;
   let tokensOut = 0;
@@ -273,6 +281,11 @@ export function buildAttentionEvalReport(
       else if (event.outcome === 'no-proposal' || run?.proposalCreated === false) noProposal++;
       else if (event.outcome === 'failed' || event.outcome === 'rejected') failed++;
       else if (event.outcome === 'blocked' || event.outcome === 'skipped') blocked++;
+      addProductionAttemptShape(attemptShape, productionAttemptShapeFromSignals({
+        outcome: run?.outcome ?? event.outcome,
+        proposalCreated: produced,
+        actionCounts: run?.actionCounts,
+      }));
     }
 
     if (evidence) {
@@ -360,6 +373,7 @@ export function buildAttentionEvalReport(
       blocked,
       proposalRate: attempts > 0 ? roundRatio(proposalCreated / attempts) : null,
       noProposalRate: attempts > 0 ? roundRatio(noProposal / attempts) : null,
+      attemptShape,
     },
     routingCost: {
       spendUsd: roundMoney(spendUsd),
