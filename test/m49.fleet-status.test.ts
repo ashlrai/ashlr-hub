@@ -551,18 +551,32 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       cfg,
     );
     setStatus(handoff.id, 'awaiting-host-merge');
+    const outsideRepo = join(tmpHome, 'outside-repo');
+    const outsideApplied = createProposal(
+      {
+        repo: outsideRepo,
+        origin: 'agent',
+        kind: 'patch',
+        title: 'Outside unverified applied',
+        summary: 'outside repo',
+        diff: docsDiff('outside'),
+      },
+      cfg,
+    );
+    setStatus(outsideApplied.id, 'applied');
 
     const staleGoal = makeGoalRecord(repo, 'goal-lane-a', 'active', 'in-progress');
     staleGoal.milestones[0]!.updatedAt = '2026-07-03T00:00:00.000Z';
     const proposedGoal = makeGoalRecord(repo, 'goal-lane-b', 'active', 'proposed');
     proposedGoal.milestones[0]!.proposalId = applied.id;
+    const outsideGoal = makeGoalRecord(outsideRepo, 'goal-outside', 'active', 'pending');
 
     writeBacklogSnapshot(tmpHome, repo, [
       makeBacklogItem(repo, `goal:${staleGoal.id}:${staleGoal.milestones[0]!.id}`, 'Advance stale goal', 5, 'goal'),
       makeBacklogItem(repo, `goal:${proposedGoal.id}:${proposedGoal.milestones[0]!.id}`, 'Advance proposed goal', 4, 'goal'),
       makeBacklogItem(repo, 'invent:one', 'Invent unrelated thing', 3, 'invent'),
     ]);
-    writeGoalRecords(tmpHome, [staleGoal, proposedGoal]);
+    writeGoalRecords(tmpHome, [staleGoal, proposedGoal, outsideGoal]);
 
     const s = await buildFleetStatus(cfg);
 

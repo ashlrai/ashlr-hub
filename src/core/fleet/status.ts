@@ -995,9 +995,16 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     if (goalLaneCandidates.length === 0) {
       goalLaneCandidates = listGoals({ status: 'active' });
     }
+    const enrolledRepoSet = new Set(enrolledExistingRepos);
+    const laneGoals = goalLaneCandidates.filter(
+      (goal) => goal.project !== null && enrolledRepoSet.has(resolve(goal.project)),
+    );
+    const laneProposals = allProposals.filter(
+      (proposal) => proposal.repo === null || enrolledRepoSet.has(resolve(proposal.repo)),
+    );
     laneLocks = buildFleetLaneLocks({
-      goals: goalLaneCandidates,
-      proposals: allProposals,
+      goals: laneGoals,
+      proposals: laneProposals,
       visibleQueueItems,
       generatedAt,
     });
