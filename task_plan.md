@@ -1138,4 +1138,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Surface latest targeted diagnostic drain result in FleetStatus and CLI status even when generated work is empty.
 - [x] Add focused daemon/status/CLI regression coverage.
 - [x] Run full verification suite for bounded diagnostic drain status.
-- [ ] Commit, push, reload daemon, and smoke live status.
+- [x] Commit, push, reload daemon, and smoke live status.
