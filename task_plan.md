@@ -218,6 +218,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Full gates passed: `npm run typecheck`, focused profile/resource/status/service suites, `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, `node --check src/core/web/public/app.js`, `npm run test:invariants`, full `npm run test:ci` (412 files, 8548 passed, 7 skipped), and `git diff --check`.
 - [x] Commit, push to `origin/master`, resume/restart launchd daemon, and verify live autonomous status.
 
+## Current Continuation - Verification Contract Coverage Visibility
+- [x] Rechecked git, Entire, recent commits, task plan, notes, and existing FleetStatus coverage.
+- [x] Deployed sidecar scouts for explicit contract rollout, Phantom integration, and next Hub autonomy gaps.
+- [x] Make missing merge-contract status/action samples include project kind and reason.
+- [x] Promote explicit merge-contract rollout from low-priority hygiene to medium-priority ship-readiness work.
+- [x] Run focused verification.
+- [ ] Commit, push, reload/smoke production daemon, and choose the next overnight lane.
+
 ## Current Continuation - Next Actions And Judge Trust
 - [x] Deployed a broader explorer wave for auto-merge trust, daemon reliability, cross-repo coordination, command-center UI, and market/open-source leverage.
 - [x] Added `FleetStatus.nextActions`, a ranked read-only action list derived from daemon state, guard health, host PR handoffs, auto-merge readiness, backend resource state, backlog, and repo verify coverage.

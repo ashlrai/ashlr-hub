@@ -700,6 +700,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.nextActions?.some((action) => action.detail.includes('make-repo'))).toBe(true);
     expect(s.nextActions?.some((action) => action.id === 'add-explicit-merge-verify-contracts')).toBe(true);
     const mergeContractAction = s.nextActions?.find((action) => action.id === 'add-explicit-merge-verify-contracts');
+    expect(mergeContractAction?.priority).toBe('medium');
+    expect(mergeContractAction?.detail).toContain(
+      'make-repo [make: missing ashlr.verify.json merge-profile contract]',
+    );
     expect(mergeContractAction?.commands).toEqual(expect.arrayContaining([
       expect.objectContaining({
         label: 'Inspect merge contracts',
@@ -4224,7 +4228,10 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('verify roots:   2/3 repos (1 missing; bun:1, cargo:1)');
     expect(out).toContain('merge verify:   1/3 explicit (2 missing)');
     expect(out).toContain('missing verify: c [python: detected python project(s), but no verify command is configured]');
-    expect(out).toContain('missing merge:  b: missing ashlr.verify.json merge-profile contract; c: detected python project(s), but no verify command is configured');
+    expect(out).toContain(
+      'missing merge:  b [rust: missing ashlr.verify.json merge-profile contract]; ' +
+        'c [python: detected python project(s), but no verify command is configured]',
+    );
     expect(out).toContain('next:          Ship autonomy debugger (goal, score 5)');
     expect(out).toContain('shared:        ok / 2 active / 1 owned / 1 reclaimable / 2 cooling / stale lock');
     expect(out).toContain('machine-A:1');

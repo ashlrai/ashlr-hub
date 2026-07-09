@@ -2488,7 +2488,7 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   const missingVerify = status.queue.repos?.executionProfiles?.reposMissingVerifyCommands ?? 0;
   if (missingVerify > 0) {
     const missingRepos = status.queue.repos?.executionProfiles?.missingVerifyCommands ?? [];
-    const sample = missingRepos.slice(0, 3).map((row) => row.name).join(', ');
+    const sample = missingRepos.slice(0, 3).map(formatExecutionProfileSample).join(', ');
     add({
       id: 'add-repo-verify-contracts',
       priority: 'low',
@@ -2503,10 +2503,10 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     status.queue.repos?.executionProfiles?.reposMissingExplicitMergeContracts ?? 0;
   if (missingExplicitMergeContracts > 0) {
     const missingRepos = status.queue.repos?.executionProfiles?.missingExplicitMergeContracts ?? [];
-    const sample = missingRepos.slice(0, 3).map((row) => row.name).join(', ');
+    const sample = missingRepos.slice(0, 3).map(formatExecutionProfileSample).join(', ');
     add({
       id: 'add-explicit-merge-verify-contracts',
-      priority: 'low',
+      priority: 'medium',
       label: 'Add explicit merge verify contracts',
       detail:
         `${missingExplicitMergeContracts} enrolled repo(s) rely on inferred or non-merge verification.` +
@@ -2545,6 +2545,7 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     if (action.id === 'drain-diagnostic-reslices' && (status.autoMergeReadiness?.knownVerificationFailed ?? 0) === 0) return -1.2;
     if (action.id === 'inspect-dispatch-yield') return -1;
     if (action.id === 'inspect-attempt-causal-coverage') return -0.5;
+    if (action.id === 'add-explicit-merge-verify-contracts') return 0.5;
     return 0;
   };
   return actions
@@ -2554,6 +2555,15 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       a.id.localeCompare(b.id),
     )
     .slice(0, 6);
+}
+
+function formatExecutionProfileSample(row: {
+  name: string;
+  projectKinds: RepoProjectKind[];
+  reason: string;
+}): string {
+  const kind = row.projectKinds.length > 0 ? row.projectKinds.join('+') : 'unknown';
+  return `${row.name} [${kind}: ${row.reason}]`;
 }
 
 function phantomAuditNextAction(report: PhantomAgentReportRollup | undefined): FleetNextAction | null {

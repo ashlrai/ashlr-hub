@@ -194,7 +194,10 @@ export function formatFleetStatus(s: FleetStatus): string {
       if (profile.missingExplicitMergeContracts && profile.missingExplicitMergeContracts.length > 0) {
         const missing = profile.missingExplicitMergeContracts
           .slice(0, 3)
-          .map((row) => `${row.name}: ${row.reason}`)
+          .map((row) => {
+            const kind = row.projectKinds.length > 0 ? row.projectKinds.join('+') : 'unknown';
+            return `${row.name} [${kind}: ${row.reason}]`;
+          })
           .join('; ');
         const more = profile.missingExplicitMergeContracts.length > 3
           ? ` (+${profile.missingExplicitMergeContracts.length - 3} more)`
