@@ -79,6 +79,53 @@ export interface RouteSnapshot {
   routerPolicyVersion?: string;
 }
 
+export interface PromptContextSummary {
+  role?: 'planner' | 'executor' | 'synthesizer' | 'judge';
+  profileId?: string;
+  contextWindowTokens?: number;
+  providerPromptTokens?: number;
+  estimatedPromptTokens?: number;
+  promptCharCap?: number;
+  assembledSystemChars?: number;
+  promptBudgetRatio?: number;
+  contextWindowRatio?: number;
+  layersIncluded?: Array<'base' | 'tool' | 'output' | 'role' | 'memory'>;
+  toolCount?: number;
+  cacheHit?: boolean;
+}
+
+export interface RetrievalContextSummary {
+  source?: 'genome' | 'playbook' | 'local-context' | 'repo-map' | 'localize';
+  requestedLimit?: number;
+  corpusEntries?: number;
+  candidateCount?: number;
+  hitCount: number;
+  injectedHitCount?: number;
+  limitHitRate?: number;
+  candidateHitRate?: number;
+  methodCounts?: { keyword?: number; embedding?: number };
+  topScore?: number;
+  injectedChars?: number;
+}
+
+export interface CompressionContextSummary {
+  source?: 'prompt-budget' | 'playbook' | 'local-context' | 'reflection';
+  strategy?: 'truncate' | 'drop-layer' | 'synthesize' | 'fallback-summary';
+  inputChars?: number;
+  outputChars?: number;
+  maxChars?: number;
+  droppedChars?: number;
+  compressionRatio?: number;
+  truncated?: boolean;
+  droppedLayers?: string[];
+}
+
+export interface RunContextSummary {
+  prompt?: PromptContextSummary;
+  retrieval?: RetrievalContextSummary;
+  compression?: CompressionContextSummary;
+}
+
 export interface RunEventSummary {
   runId?: string;
   status?: string;
@@ -92,6 +139,8 @@ export interface RunEventSummary {
   costUsd?: number;
   durationMs?: number;
   cacheHit?: boolean;
+  /** Metadata-only context utilization/retrieval/compression signals. */
+  contextSummary?: RunContextSummary;
 }
 
 export interface EvidenceOutcomeSummary {
@@ -103,6 +152,101 @@ export interface EvidenceOutcomeSummary {
   policyAction?: string;
   policyTier?: string;
   gateCount?: number;
+}
+
+export type DelegationOrigin = 'run' | 'swarm' | 'daemon' | 'best-of-n' | 'manager' | string;
+
+export type DelegationMemoryMode = 'inherit' | 'none' | 'bounded' | 'repo-only' | 'full';
+
+export type DelegationResultKind =
+  | 'text'
+  | 'diff'
+  | 'proposal'
+  | 'verified-proposal'
+  | 'analysis-only'
+  | 'diagnostic';
+
+export interface DelegationAllowedFiles {
+  /** Repo-relative globs or path prefixes the delegate should focus on. */
+  include?: string[];
+  /** Repo-relative globs or path prefixes the delegate should avoid. */
+  exclude?: string[];
+  /** Advisory in this slice; hard write enforcement is a later gate. */
+  enforceWrites?: boolean;
+}
+
+export interface DelegationContextBudget {
+  maxPromptChars?: number;
+  repoMapTokens?: number;
+  localizationTokens?: number;
+  memoryChars?: number;
+  resultChars?: number;
+}
+
+export interface DelegationResultContract {
+  kind: DelegationResultKind;
+  requireDiff?: boolean;
+  requireProposal?: boolean;
+  requireVerification?: boolean;
+  maxChangedFiles?: number;
+  maxChangedLines?: number;
+}
+
+export interface DelegationBackendSnapshot {
+  engine?: EngineId;
+  model?: string | null;
+  tier?: EngineTier | string | null;
+  assignedBy?: string;
+  reason?: string;
+}
+
+/**
+ * Optional advisory contract handed to a delegated run/agent. Raw prompts,
+ * diffs, stdout/stderr, env, and file contents must not be stored here.
+ */
+export interface DelegationScope {
+  schemaVersion?: 1;
+  origin?: DelegationOrigin;
+  sourceRepo?: string;
+  executionRoot?: string;
+  workItemId?: string;
+  workSource?: WorkSource;
+  runId?: string;
+  swarmId?: string;
+  taskId?: string;
+  objective?: string;
+  allowedFiles?: DelegationAllowedFiles;
+  budget?: Partial<RunBudget>;
+  contextBudget?: DelegationContextBudget;
+  memoryMode?: DelegationMemoryMode;
+  resultContract?: DelegationResultContract;
+  backend?: DelegationBackendSnapshot;
+}
+
+/** Bounded, scrubbed form safe to persist on runs/proposals. */
+export interface DelegationScopeSummary {
+  schemaVersion: 1;
+  origin?: DelegationOrigin;
+  sourceRepo?: string;
+  executionRoot?: string;
+  workItemId?: string;
+  workSource?: WorkSource;
+  runId?: string;
+  swarmId?: string;
+  taskId?: string;
+  objective?: string;
+  allowedFiles?: {
+    includeCount: number;
+    excludeCount: number;
+    includeSamples?: string[];
+    excludeSamples?: string[];
+    enforceWrites?: boolean;
+  };
+  budget?: Partial<RunBudget>;
+  contextBudget?: DelegationContextBudget;
+  memoryMode: DelegationMemoryMode;
+  resultContract?: DelegationResultContract;
+  backend?: DelegationBackendSnapshot;
 }
 
 /** Persisted configuration for the hub. Lives at ~/.ashlr/config.json. */
@@ -1469,6 +1613,8 @@ export interface RunState {
   routeSnapshot?: RouteSnapshot;
   /** Metadata-only run summary; never includes prompts, diffs, stdout, or stderr. */
   runEventSummary?: RunEventSummary;
+  /** Bounded delegation constraints/expectations; never includes raw prompt/output text. */
+  delegationScope?: DelegationScopeSummary;
   learningSource?: LearningSource;
   labelBasis?: LabelBasis;
   routerPolicyVersion?: string;
@@ -1507,6 +1653,8 @@ export interface RunOptions {
   cwd?: string;
   /** Existing run id to resume from cache. */
   resumeId?: string;
+  /** Optional advisory delegation contract for spawned/sandboxed agents. */
+  delegationScope?: DelegationScope;
   /** Emit machine-readable JSON instead of human output. */
   json?: boolean;
   /** Disable genome recall injection into the sub-agent system prompt (M7). */
@@ -2264,6 +2412,8 @@ export interface SwarmOptions {
   background?: boolean;
   /** Existing swarm id to resume from persisted state. */
   resumeId?: string;
+  /** Optional advisory delegation contract inherited by swarm tasks. */
+  delegationScope?: DelegationScope;
   /** Plan only — produce the SwarmPlan without executing any task. */
   dryRun?: boolean;
   /** Permit cloud providers for tasks (default false = local-first). */
@@ -3153,6 +3303,8 @@ export interface Proposal {
   runEventSummary?: RunEventSummary;
   /** Metadata-only evidence/policy outcome summary for learning joins. */
   evidenceOutcome?: EvidenceOutcomeSummary;
+  /** Bounded delegation constraints/expectations; never includes raw prompt/output text. */
+  delegationScope?: DelegationScopeSummary;
   /** Where this row should be treated as learning input from. */
   learningSource?: LearningSource;
   /** Which signal made this row a label for learning. */

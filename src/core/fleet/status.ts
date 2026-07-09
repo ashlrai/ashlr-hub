@@ -1233,6 +1233,17 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     });
   }
 
+  const contextEfficiency = status.contextEfficiency;
+  const contextRisk = contextEfficiency?.risks.find((risk) => risk.severity === 'high' || risk.severity === 'medium');
+  if (contextEfficiency && (contextEfficiency.posture === 'strained' || contextRisk)) {
+    add({
+      id: 'improve-context-efficiency',
+      priority: 'medium',
+      label: 'Improve context efficiency',
+      detail: contextRisk?.detail ?? contextEfficiency.recommendations[0] ?? 'Context efficiency is degraded; inspect reflection, retrieval, and proposal-yield signals.',
+    });
+  }
+
   const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
   if (eligibleBacklogItems > 0 && !controlBlocked) {
     const dispatchYieldDetail = status.dispatchProduction

@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 
 import { buildAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import { recordDecision, readDecisions } from '../src/core/fleet/decisions-ledger.js';
+import { causalMetadata } from '../src/core/learning/causal.js';
 import type { Proposal } from '../src/core/types.js';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 
@@ -123,5 +124,83 @@ describe('M338 learning graph metadata summaries', () => {
       if (prevHome === undefined) delete process.env.ASHLR_HOME;
       else process.env.ASHLR_HOME = prevHome;
     }
+  });
+
+  it('preserves bounded context summaries without raw prompt or output payloads', () => {
+    const meta = causalMetadata({
+      runId: 'run-context-summary',
+      runEventSummary: {
+        runId: 'run-context-summary',
+        status: 'done',
+        contextSummary: {
+          prompt: {
+            role: 'executor',
+            profileId: 'adaptive-v1',
+            contextWindowTokens: 200_000,
+            estimatedPromptTokens: 40_000,
+            promptBudgetRatio: 1.2,
+            contextWindowRatio: 0.25,
+            layersIncluded: ['base', 'tool', 'memory'],
+            toolCount: 7,
+            cacheHit: false,
+            rawPrompt: 'RAW_PROMPT_SENTINEL',
+          } as never,
+          retrieval: {
+            source: 'local-context',
+            requestedLimit: 10,
+            candidateCount: 50,
+            hitCount: 6,
+            injectedHitCount: 4,
+            limitHitRate: 0.6,
+            candidateHitRate: 0.12,
+            methodCounts: { keyword: 4, embedding: 2 },
+            topScore: 0.98765,
+            injectedChars: 3200,
+            rawEntryText: 'RAW_DIFF_SENTINEL',
+          } as never,
+          compression: {
+            source: 'prompt-budget',
+            strategy: 'truncate',
+            inputChars: 10000,
+            outputChars: 6000,
+            compressionRatio: 0.6,
+            truncated: true,
+            droppedLayers: ['output'],
+            stdout: 'RAW_STDOUT_SENTINEL',
+          } as never,
+        },
+      },
+    });
+
+    expect(meta.runEventSummary?.contextSummary).toMatchObject({
+      prompt: {
+        role: 'executor',
+        profileId: 'adaptive-v1',
+        promptBudgetRatio: 1,
+        contextWindowRatio: 0.25,
+        layersIncluded: ['base', 'tool', 'memory'],
+        toolCount: 7,
+        cacheHit: false,
+      },
+      retrieval: {
+        source: 'local-context',
+        hitCount: 6,
+        limitHitRate: 0.6,
+        candidateHitRate: 0.12,
+        methodCounts: { keyword: 4, embedding: 2 },
+        topScore: 0.988,
+      },
+      compression: {
+        source: 'prompt-budget',
+        strategy: 'truncate',
+        compressionRatio: 0.6,
+        truncated: true,
+        droppedLayers: ['output'],
+      },
+    });
+    const serialized = JSON.stringify(meta.runEventSummary?.contextSummary);
+    expect(serialized).not.toContain('RAW_PROMPT_SENTINEL');
+    expect(serialized).not.toContain('RAW_DIFF_SENTINEL');
+    expect(serialized).not.toContain('RAW_STDOUT_SENTINEL');
   });
 });

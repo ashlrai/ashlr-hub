@@ -998,6 +998,44 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ]);
   });
 
+  it('promotes degraded context efficiency into next actions', async () => {
+    const now = new Date().toISOString();
+    writeRunningDaemon(tmpHome, [], now);
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      actor: 'daemon',
+      kind: 'dispatch',
+      outcome: 'no-proposal',
+      action: 'daemon:dispatch',
+      summary: 'local-coder empty-diff for Improve context',
+      repo: '/repo/a',
+      itemId: 'item-a',
+      source: 'todo',
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      reason: 'agent returned no diff',
+    });
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.contextEfficiency).toMatchObject({
+      posture: 'strained',
+      risks: [
+        expect.objectContaining({ id: 'memory-empty', severity: 'high' }),
+        expect.objectContaining({ id: 'reflection-missing', severity: 'low' }),
+      ],
+    });
+    expect(s.nextActions).toContainEqual(expect.objectContaining({
+      id: 'improve-context-efficiency',
+      priority: 'medium',
+      label: 'Improve context efficiency',
+      detail: expect.stringContaining('No hub genome memories'),
+    }));
+  });
+
   it('promotes poor durable dispatch yield into next actions', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');

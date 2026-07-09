@@ -34,6 +34,7 @@ import { localize, renderLocalization } from './localize.js';
 
 import type {
   AshlrConfig,
+  DelegationScope,
   EngineId,
   EngineTier,
   RunProposalOutcome,
@@ -45,6 +46,12 @@ import type {
   SandboxDiff,
   WorkSource,
 } from '../types.js';
+import {
+  normalizeDelegationScope,
+  renderDelegationScopeForPrompt,
+  scopeHintFiles,
+  summarizeDelegationScope,
+} from './delegation-scope.js';
 import { buildEngineCommand, spawnEngine } from './engines.js';
 import { iterateToGreen } from './verify-to-green.js';
 import type { TerminationReason } from './run-monitor.js';
@@ -108,6 +115,8 @@ export interface RunEngineSandboxedOptions {
   workItemId?: string;
   /** Optional originating backlog scanner/source for causal tracing. */
   workSource?: WorkSource;
+  /** Optional advisory delegation contract for context/result expectations. */
+  delegationScope?: DelegationScope;
 }
 
 export interface CaptureSandboxedProposalOptions {
@@ -131,6 +140,8 @@ export interface CaptureSandboxedProposalOptions {
   forceGateBlockReason?: string;
   /** Human-readable source label used in proposal summaries. */
   sourceLabel?: string;
+  /** Optional advisory delegation contract for context/result expectations. */
+  delegationScope?: DelegationScope;
 }
 
 type SpawnEngineResult = {
@@ -603,6 +614,26 @@ export async function captureSandboxedProposal(
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const sb = opts.existingWorktree;
   const now = new Date().toISOString();
+  const delegationScope = opts.delegationScope
+    ? normalizeDelegationScope(opts.delegationScope, {
+        origin: 'run',
+        sourceRepo: opts.sourceRepo,
+        executionRoot: sb.worktreePath,
+        objective: goal,
+        runId: id,
+        workItemId: opts.workItemId,
+        workSource: opts.workSource,
+        budget: opts.budget,
+        backend: {
+          engine,
+          model: engineModel,
+          tier,
+          assignedBy: 'sandboxed-engine',
+          reason: opts.isPartial ? 'partial proposal capture' : 'proposal capture',
+        },
+      })
+    : undefined;
+  const delegationScopeSummary = summarizeDelegationScope(delegationScope);
   const mk = (over: Partial<RunState>): RunState => ({
     id,
     goal,
@@ -621,6 +652,7 @@ export async function captureSandboxedProposal(
     tasks: [],
     steps: [],
     status: 'done',
+    ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
     ...over,
   });
 
@@ -700,6 +732,7 @@ export async function captureSandboxedProposal(
       runId: id,
       engineModel,
       engineTier: tier,
+      ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
       ...sandboxedProducerCausalMetadata({
         engine,
         engineModel,
@@ -780,6 +813,25 @@ export async function runEngineSandboxed(
   const tier = engineTierOf(engine, cfg);
   const id =
     opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  let delegationScope = opts.delegationScope
+    ? normalizeDelegationScope(opts.delegationScope, {
+        origin: 'run',
+        sourceRepo: opts.sourceRepo,
+        objective: goal,
+        runId: id,
+        workItemId: opts.workItemId,
+        workSource: opts.workSource,
+        budget: opts.budget,
+        backend: {
+          engine,
+          model: engineModel,
+          tier,
+          assignedBy: 'sandboxed-engine',
+          reason: 'sandboxed autonomous producer',
+        },
+      })
+    : undefined;
+  let delegationScopeSummary = summarizeDelegationScope(delegationScope);
 
   const mk = (over: Partial<RunState>): RunState => ({
     id,
@@ -799,6 +851,7 @@ export async function runEngineSandboxed(
     tasks: [],
     steps: [],
     status: 'running',
+    ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
     ...over,
   });
 
@@ -832,6 +885,26 @@ export async function runEngineSandboxed(
       };
     }
   }
+  if (opts.delegationScope) {
+    delegationScope = normalizeDelegationScope(opts.delegationScope, {
+      origin: 'run',
+      sourceRepo: opts.sourceRepo,
+      executionRoot: sb.worktreePath,
+      objective: goal,
+      runId: id,
+      workItemId: opts.workItemId,
+      workSource: opts.workSource,
+      budget: opts.budget,
+      backend: {
+        engine,
+        model: engineModel,
+        tier,
+        assignedBy: 'sandboxed-engine',
+        reason: 'sandboxed autonomous producer',
+      },
+    });
+    delegationScopeSummary = summarizeDelegationScope(delegationScope);
+  }
 
   const hooksDir = installPrePushBlocker();
   const env = buildContainedEnv(cfg, hooksDir);
@@ -853,8 +926,8 @@ export async function runEngineSandboxed(
 
   // M154: prepend repo-map + localization context to goal when flags are ON.
   // Flag-OFF → contextPrefix is '' → goalWithContext === goal (byte-identical).
-  const contextPrefix = buildM154ContextPrefix(goal, opts.sourceRepo, cfg);
-  const goalWithContext = contextPrefix ? contextPrefix + goal : goal;
+  const contextPrefix = buildM154ContextPrefix(goal, opts.sourceRepo, cfg, scopeHintFiles(delegationScope));
+  const goalWithContext = `${renderDelegationScopeForPrompt(delegationScope)}${contextPrefix ? contextPrefix + goal : goal}`;
 
   try {
     let cmd = buildEngineCommand(engine, goalWithContext, cfg, {
@@ -1066,6 +1139,7 @@ export async function runEngineSandboxed(
                   runId: id,
                   engineModel,
                   engineTier: tier,
+                  ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
                   ...sandboxedProducerCausalMetadata({
                     engine,
                     engineModel,
@@ -1103,6 +1177,7 @@ export async function runEngineSandboxed(
                 runId: id,
                 engineModel,
                 engineTier: tier,
+                ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
                 ...sandboxedProducerCausalMetadata({
                   engine,
                   engineModel,
@@ -1268,6 +1343,7 @@ export async function runEngineSandboxed(
             runId: id,
             engineModel,
             engineTier: tier,
+            ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
             ...sandboxedProducerCausalMetadata({
               engine,
               engineModel,
@@ -1436,6 +1512,25 @@ export async function runApiModelSandboxed(
   const engineModel = `${engine}:${resolveConcreteModel(engine, cfg, model || undefined)}`;
   const tier = engineTierOf(engine, cfg);
   const id = opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  let delegationScope = opts.delegationScope
+    ? normalizeDelegationScope(opts.delegationScope, {
+        origin: 'run',
+        sourceRepo: opts.sourceRepo,
+        objective: goal,
+        runId: id,
+        workItemId: opts.workItemId,
+        workSource: opts.workSource,
+        budget: opts.budget,
+        backend: {
+          engine,
+          model: engineModel,
+          tier,
+          assignedBy: 'sandboxed-engine',
+          reason: 'api-model sandboxed producer',
+        },
+      })
+    : undefined;
+  let delegationScopeSummary = summarizeDelegationScope(delegationScope);
 
   const mk = (over: Partial<RunState>): RunState => ({
     id,
@@ -1455,6 +1550,7 @@ export async function runApiModelSandboxed(
     tasks: [],
     steps: [],
     status: 'running',
+    ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
     ...over,
   });
 
@@ -1479,6 +1575,26 @@ export async function runApiModelSandboxed(
         proposalOutcome: outcome,
       };
     }
+  }
+  if (opts.delegationScope) {
+    delegationScope = normalizeDelegationScope(opts.delegationScope, {
+      origin: 'run',
+      sourceRepo: opts.sourceRepo,
+      executionRoot: sb.worktreePath,
+      objective: goal,
+      runId: id,
+      workItemId: opts.workItemId,
+      workSource: opts.workSource,
+      budget: opts.budget,
+      backend: {
+        engine,
+        model: engineModel,
+        tier,
+        assignedBy: 'sandboxed-engine',
+        reason: 'api-model sandboxed producer',
+      },
+    });
+    delegationScopeSummary = summarizeDelegationScope(delegationScope);
   }
 
   let proposalId: string | undefined;
@@ -1520,8 +1636,8 @@ export async function runApiModelSandboxed(
 
     // M154: prepend repo-map + localization context to goal when flags are ON.
     // Flag-OFF → contextPrefix2 is '' → task.goal === goal (byte-identical).
-    const contextPrefix2 = buildM154ContextPrefix(goal, opts.sourceRepo, cfg);
-    const goalWithContext2 = contextPrefix2 ? contextPrefix2 + goal : goal;
+    const contextPrefix2 = buildM154ContextPrefix(goal, opts.sourceRepo, cfg, scopeHintFiles(delegationScope));
+    const goalWithContext2 = `${renderDelegationScopeForPrompt(delegationScope)}${contextPrefix2 ? contextPrefix2 + goal : goal}`;
 
     const task: RunTask = {
       id: 't1',
@@ -1534,7 +1650,7 @@ export async function runApiModelSandboxed(
     // Frontier engines are excluded by isLocalContextEnabled. Flag-off → systemPrefix
     // is undefined → runTask system prompt is byte-identical to pre-M264.
     let m264SystemPrefix: string | undefined;
-    if (isLocalContextEnabled(engine, cfg)) {
+    if (isLocalContextEnabled(engine, cfg) && delegationScope?.memoryMode !== 'none') {
       try {
         const bundle = await buildLocalContextBundle(goal, sb.worktreePath, cfg);
         const rendered = renderLocalContextBundle(bundle);
@@ -1579,6 +1695,7 @@ export async function runApiModelSandboxed(
           existingWorktree: sb,
           workItemId: opts.workItemId,
           workSource: opts.workSource,
+          delegationScope,
           isPartial: true,
           sourceLabel: 'api-model',
         });
@@ -1660,6 +1777,7 @@ export async function runApiModelSandboxed(
             runId: id,
             engineModel,
             engineTier: tier,
+            ...(delegationScopeSummary ? { delegationScope: delegationScopeSummary } : {}),
             ...sandboxedProducerCausalMetadata({
               engine,
               engineModel,

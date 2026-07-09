@@ -1,10 +1,14 @@
 import type {
+  CompressionContextSummary,
   DecisionEntry,
   EvidenceOutcomeSummary,
   LabelBasis,
   LearningSource,
   Proposal,
+  PromptContextSummary,
+  RetrievalContextSummary,
   RouteSnapshot,
+  RunContextSummary,
   RunEventSummary,
 } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
@@ -46,6 +50,110 @@ function finiteNumber(value: unknown): number | undefined {
 
 function optionalBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
+}
+
+function nonNegativeNumber(value: unknown): number | undefined {
+  const n = finiteNumber(value);
+  return n !== undefined && n >= 0 ? n : undefined;
+}
+
+function ratio(value: unknown): number | undefined {
+  const n = finiteNumber(value);
+  if (n === undefined) return undefined;
+  return Math.max(0, Math.min(1, Math.round(n * 1_000) / 1_000));
+}
+
+function textList(value: unknown, maxItems: number, maxChars: number): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const text = boundedText(item, maxChars);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+    if (out.length >= maxItems) break;
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function promptContextSummary(input: PromptContextSummary | undefined): PromptContextSummary | undefined {
+  if (!input) return undefined;
+  const role = boundedText(input.role, 40) as PromptContextSummary['role'] | undefined;
+  const profileId = boundedText(input.profileId, 80);
+  const layersIncluded = textList(input.layersIncluded, 8, 24) as PromptContextSummary['layersIncluded'] | undefined;
+  const out: PromptContextSummary = {
+    ...(role ? { role } : {}),
+    ...(profileId ? { profileId } : {}),
+    ...(nonNegativeNumber(input.contextWindowTokens) !== undefined ? { contextWindowTokens: nonNegativeNumber(input.contextWindowTokens) } : {}),
+    ...(nonNegativeNumber(input.providerPromptTokens) !== undefined ? { providerPromptTokens: nonNegativeNumber(input.providerPromptTokens) } : {}),
+    ...(nonNegativeNumber(input.estimatedPromptTokens) !== undefined ? { estimatedPromptTokens: nonNegativeNumber(input.estimatedPromptTokens) } : {}),
+    ...(nonNegativeNumber(input.promptCharCap) !== undefined ? { promptCharCap: nonNegativeNumber(input.promptCharCap) } : {}),
+    ...(nonNegativeNumber(input.assembledSystemChars) !== undefined ? { assembledSystemChars: nonNegativeNumber(input.assembledSystemChars) } : {}),
+    ...(ratio(input.promptBudgetRatio) !== undefined ? { promptBudgetRatio: ratio(input.promptBudgetRatio) } : {}),
+    ...(ratio(input.contextWindowRatio) !== undefined ? { contextWindowRatio: ratio(input.contextWindowRatio) } : {}),
+    ...(layersIncluded ? { layersIncluded } : {}),
+    ...(nonNegativeNumber(input.toolCount) !== undefined ? { toolCount: nonNegativeNumber(input.toolCount) } : {}),
+    ...(optionalBoolean(input.cacheHit) !== undefined ? { cacheHit: optionalBoolean(input.cacheHit) } : {}),
+  };
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function retrievalContextSummary(input: RetrievalContextSummary | undefined): RetrievalContextSummary | undefined {
+  if (!input) return undefined;
+  const source = boundedText(input.source, 40) as RetrievalContextSummary['source'] | undefined;
+  const methodCounts = input.methodCounts
+    ? {
+        ...(nonNegativeNumber(input.methodCounts.keyword) !== undefined ? { keyword: nonNegativeNumber(input.methodCounts.keyword) } : {}),
+        ...(nonNegativeNumber(input.methodCounts.embedding) !== undefined ? { embedding: nonNegativeNumber(input.methodCounts.embedding) } : {}),
+      }
+    : undefined;
+  const out: RetrievalContextSummary = {
+    ...(source ? { source } : {}),
+    ...(nonNegativeNumber(input.requestedLimit) !== undefined ? { requestedLimit: nonNegativeNumber(input.requestedLimit) } : {}),
+    ...(nonNegativeNumber(input.corpusEntries) !== undefined ? { corpusEntries: nonNegativeNumber(input.corpusEntries) } : {}),
+    ...(nonNegativeNumber(input.candidateCount) !== undefined ? { candidateCount: nonNegativeNumber(input.candidateCount) } : {}),
+    hitCount: nonNegativeNumber(input.hitCount) ?? 0,
+    ...(nonNegativeNumber(input.injectedHitCount) !== undefined ? { injectedHitCount: nonNegativeNumber(input.injectedHitCount) } : {}),
+    ...(ratio(input.limitHitRate) !== undefined ? { limitHitRate: ratio(input.limitHitRate) } : {}),
+    ...(ratio(input.candidateHitRate) !== undefined ? { candidateHitRate: ratio(input.candidateHitRate) } : {}),
+    ...(methodCounts && Object.keys(methodCounts).length > 0 ? { methodCounts } : {}),
+    ...(nonNegativeNumber(input.topScore) !== undefined ? { topScore: Math.round(nonNegativeNumber(input.topScore)! * 1_000) / 1_000 } : {}),
+    ...(nonNegativeNumber(input.injectedChars) !== undefined ? { injectedChars: nonNegativeNumber(input.injectedChars) } : {}),
+  };
+  return out;
+}
+
+function compressionContextSummary(input: CompressionContextSummary | undefined): CompressionContextSummary | undefined {
+  if (!input) return undefined;
+  const source = boundedText(input.source, 40) as CompressionContextSummary['source'] | undefined;
+  const strategy = boundedText(input.strategy, 40) as CompressionContextSummary['strategy'] | undefined;
+  const droppedLayers = textList(input.droppedLayers, 8, 40);
+  const out: CompressionContextSummary = {
+    ...(source ? { source } : {}),
+    ...(strategy ? { strategy } : {}),
+    ...(nonNegativeNumber(input.inputChars) !== undefined ? { inputChars: nonNegativeNumber(input.inputChars) } : {}),
+    ...(nonNegativeNumber(input.outputChars) !== undefined ? { outputChars: nonNegativeNumber(input.outputChars) } : {}),
+    ...(nonNegativeNumber(input.maxChars) !== undefined ? { maxChars: nonNegativeNumber(input.maxChars) } : {}),
+    ...(nonNegativeNumber(input.droppedChars) !== undefined ? { droppedChars: nonNegativeNumber(input.droppedChars) } : {}),
+    ...(ratio(input.compressionRatio) !== undefined ? { compressionRatio: ratio(input.compressionRatio) } : {}),
+    ...(optionalBoolean(input.truncated) !== undefined ? { truncated: optionalBoolean(input.truncated) } : {}),
+    ...(droppedLayers ? { droppedLayers } : {}),
+  };
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function runContextSummary(input: RunContextSummary | undefined): RunContextSummary | undefined {
+  if (!input) return undefined;
+  const prompt = promptContextSummary(input.prompt);
+  const retrieval = retrievalContextSummary(input.retrieval);
+  const compression = compressionContextSummary(input.compression);
+  if (!prompt && !retrieval && !compression) return undefined;
+  return {
+    ...(prompt ? { prompt } : {}),
+    ...(retrieval ? { retrieval } : {}),
+    ...(compression ? { compression } : {}),
+  };
 }
 
 export function learningEpochFromTimestamp(ts?: string): string {
@@ -97,6 +205,7 @@ export function runEventSummary(input: RunEventSummary | undefined): RunEventSum
   const durationMs = finiteNumber(input.durationMs);
   const proposalCreated = optionalBoolean(input.proposalCreated);
   const cacheHit = optionalBoolean(input.cacheHit);
+  const contextSummary = runContextSummary(input.contextSummary);
   return {
     ...(runId ? { runId } : {}),
     ...(status ? { status } : {}),
@@ -110,6 +219,7 @@ export function runEventSummary(input: RunEventSummary | undefined): RunEventSum
     ...(costUsd !== undefined ? { costUsd } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
     ...(cacheHit !== undefined ? { cacheHit } : {}),
+    ...(contextSummary ? { contextSummary } : {}),
   };
 }
 
