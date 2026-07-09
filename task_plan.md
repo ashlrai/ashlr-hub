@@ -794,4 +794,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Focused verification passed: `m28.store`, `m28.cli`, `m49.fleet-status`, and `h8.cleanup-comment-only` (106 tests), plus typecheck and diff check.
 - [x] Broad gates passed: lint, build, audit, and invariants.
 - [x] Commit and push `529e155`, reload launchd daemon, and smoke live FleetStatus locked-lane counts.
-- [ ] Next lane: implement Best-of-N file-once proposal capture or remote protected-base freshness, whichever is more immediately tractable.
+- [x] Next lane: implement remote protected-base freshness.
+
+## Current Continuation - Evidence Remote Base Freshness
+- [x] Rechecked clean pushed state after stale-lane recovery.
+- [x] Deployed a Best-of-N file-once scout while implementing the smaller evidence-mode mutation guard locally.
+- [x] Added read-only `git ls-remote --heads origin <base>` protected-remote head resolution before evidence-mode PR handoff.
+- [x] Fail closed when the protected remote branch moved after verification, even if local `main` and `origin/main` refs are stale.
+- [x] Added regression coverage that advances the bare remote from another clone without fetching and proves no PR is opened.
+- [x] Focused verification passed: `m315.remote-handoff-truth`, `m153.verification-gate`, `m307.verify-before-judge`, and `m48.automerge-pass` (89 tests), plus typecheck and diff check.
+- [x] Broad gates passed: lint, build, audit, and invariants.
+- [ ] Commit, push, reload launchd daemon, and smoke live FleetStatus.
+- [ ] Next lane: Best-of-N file-once proposal capture.

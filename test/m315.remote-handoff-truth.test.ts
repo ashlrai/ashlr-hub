@@ -78,6 +78,22 @@ function addFileDiff(filename: string, content: string): string {
   ].join('\n');
 }
 
+function advanceRemoteMainWithoutFetching(filename: string, content: string): void {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m315-remote-'));
+  const clone = path.join(parent, 'clone');
+  try {
+    execFileSync('git', ['clone', '--branch', 'main', bareRepo, clone], { stdio: 'pipe' });
+    git(clone, ['config', 'user.email', 'remote@ashlr.test']);
+    git(clone, ['config', 'user.name', 'Remote Writer']);
+    fs.writeFileSync(path.join(clone, filename), content, 'utf8');
+    git(clone, ['add', filename]);
+    git(clone, ['commit', '-m', 'advance remote main']);
+    git(clone, ['push', 'origin', 'main']);
+  } finally {
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+}
+
 function cfg(): AshlrConfig {
   return {
     foundry: {
@@ -235,6 +251,48 @@ describe('M315 remote PR handoff truth', () => {
       state: 'awaiting-host-merge',
       base: 'main',
     });
+  });
+
+  it('evidence mode refuses handoff when protected remote base advanced without local fetch', async () => {
+    const diff = addFileDiff('docs/stale-remote-evidence.md', 'stale remote evidence handoff');
+    const diffHash = hashDiff(diff);
+    const baseHead = git(tmpRepo, ['rev-parse', 'main']);
+    const proposal = createProposal({
+      repo: tmpRepo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'stale remote evidence handoff',
+      summary: 'Refuse when origin/main moved after verification.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('local:qwen3-coder', 'local', diffHash),
+      engineModel: 'local:qwen3-coder',
+      engineTier: 'local',
+      verifyResult: {
+        passed: true,
+        detail: 'command-bound verification passed before remote advanced',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        baseBranch: 'main',
+        baseHead,
+        diffHash,
+      },
+    });
+    setStatus(proposal.id, 'pending');
+
+    advanceRemoteMainWithoutFetching('REMOTE.md', 'remote changed after verification\n');
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(baseHead);
+    expect(git(tmpRepo, ['rev-parse', 'origin/main'])).toBe(baseHead);
+
+    const result = await autoMergeProposal(proposal.id, evidenceCfg());
+
+    expect(result.ok).toBe(false);
+    expect(result.merged).toBe(false);
+    expect(result.handoff).toBeUndefined();
+    expect(result.reason).toMatch(/protected remote branch 'main' moved since verification/);
+    expect(createPrMock).not.toHaveBeenCalled();
+    const loaded = loadProposal(proposal.id);
+    expect(loaded?.status).toBe('pending');
+    expect(loaded?.remoteHandoff).toBeUndefined();
   });
 
   it('reconciles a host-merged PR to applied only with positive merge evidence', async () => {

@@ -183,6 +183,16 @@ function resolveDefaultBranchHead(repo: string, base: string): string | null {
   );
 }
 
+/** Resolve the protected remote branch head without fetching or mutating refs. */
+function resolveRemoteBranchHead(repo: string, base: string): string | null {
+  const out = gitTry(repo, ['ls-remote', '--heads', 'origin', base]);
+  if (!out) return null;
+  const first = out.split('\n').find((line) => line.trim().length > 0);
+  if (!first) return null;
+  const [sha] = first.trim().split(/\s+/);
+  return /^[0-9a-f]{40}$/i.test(sha ?? '') ? sha! : null;
+}
+
 /** Write `content` to a temp file under ~/.ashlr/tmp; caller cleans it up. */
 function writeTmpFile(content: string): string {
   const dir = join(homedir(), '.ashlr', 'tmp');
@@ -2744,6 +2754,21 @@ export async function autoMergeProposal(
           `default branch '${base}' moved since verification — refusing remote handoff; branch '${branch}' left for manual reverify`,
           repo,
         );
+      }
+      if (configuredTrustBasis(cfg) === 'evidence') {
+        const remoteBaseHeadBeforePush = resolveRemoteBranchHead(repo, base);
+        if (!remoteBaseHeadBeforePush) {
+          return refuse(
+            `could not resolve protected remote branch '${base}' before evidence handoff — branch '${branch}' left for manual reverify`,
+            repo,
+          );
+        }
+        if (remoteBaseHeadBeforePush !== verify.baseHead) {
+          return refuse(
+            `protected remote branch '${base}' moved since verification (verified ${verify.baseHead.slice(0, 8)}, remote ${remoteBaseHeadBeforePush.slice(0, 8)}) — refusing evidence handoff; branch '${branch}' left for manual reverify`,
+            repo,
+          );
+        }
       }
       // H4: PUSH the staging branch to origin BEFORE opening the PR. createPr
       // points the PR head at `branch`, which the host cannot see unless we push
