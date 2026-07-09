@@ -48,6 +48,7 @@
 - Implementation: FleetStatus now carries additive daemon fields: `startedAt`, `lockHeartbeatAt`, and `tickInProgress`. The readiness daemon source uses a matching live lock heartbeat as the observed freshness timestamp and explains when a tick is in progress, while preserving the last completed tick timestamp.
 - CLI: `ashlr fleet status` now prints daemon started time, active tick state, and heartbeat when available.
 - Verification passed: `npm run typecheck -- --pretty false`; focused `npm run test:ci -- test/m49.fleet-status.test.ts test/m61.control.test.ts test/m210.dashboard.test.ts` (100 tests); `git diff --check`; `npm run lint` (known 115-warning baseline, 0 errors); `npm run build`; and `npm audit --audit-level=moderate` (0 vulnerabilities).
+- Deployed as `13a6049` on `origin/master`, reinstalled/resumed/kickstarted launchd, and re-smoked live status. Settled JSON showed daemon `running:true`, fresh `lockHeartbeatAt`, `tickInProgress:true`, daemon readiness source `healthy/fresh`, and overall readiness freshness `fresh` while mission remained `Recover dispatch yield`.
 
 ## Current Resource-Aware Learned Target Gate
 - Start state: dirty Hub WIP after comparative learned routing rollout; Entire remains not set up for `master`.

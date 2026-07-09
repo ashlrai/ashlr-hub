@@ -1041,4 +1041,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Render daemon start, active tick, and heartbeat in CLI fleet status.
 - [x] Add focused FleetStatus and formatter regression coverage.
 - [x] Run final gates.
-- [ ] Commit, push, reload daemon, and smoke live status.
+- [x] Commit, push, reload daemon, and smoke live status.
