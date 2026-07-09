@@ -883,3 +883,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Run focused, broad, and invariant verification.
 - [x] Finish full CI.
 - [x] Commit `0238939`, push, reload daemon, and smoke status.
+
+## Current Continuation - Dispatch Yield Readiness Promotion
+- [x] Rechecked clean pushed state after stale-pending rollout and resumed local notes.
+- [x] Deployed sidecar scouts for dispatch-yield promotion, explicit merge-contract rollout, and proposal-disabled operator diagnostics.
+- [x] Promote actionable dispatch-yield diagnostics above the generic proposal-production-needed readiness blocker.
+- [x] Sort `inspect-dispatch-yield` ahead of generic `build-backlog` when both are medium-priority next actions.
+- [x] Add FleetStatus regression coverage for next-action ordering, Autonomous Ship Readiness blocker, and Mission Brief directive.
+- [x] Finish broad verification.
+- [ ] Commit, push, reload daemon, and smoke status.
+- [ ] Next lane: make explicit merge-contract rollout repo-aware and visible enough to close missing contracts across enrolled repos.

@@ -1791,6 +1791,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ]);
 
     const cfg = withFoundry({
+      autoMerge: { enabled: true, trustBasis: 'verification' },
       allowedBackends: ['builtin', 'nim', 'kimi'],
       resourceOverrides: {
         nim: { availability: 'open', reason: 'nim test open' },
@@ -1856,6 +1857,29 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
           safety: 'read-only',
         }),
       ]));
+    const actionIds = s.nextActions?.map((action) => action.id) ?? [];
+    expect(actionIds[0]).toBe('inspect-dispatch-yield');
+    expect(actionIds.indexOf('inspect-dispatch-yield')).toBeLessThan(actionIds.indexOf('build-backlog'));
+    expect(s.autonomousShipReadiness).toMatchObject({
+      verdict: 'degraded',
+      topBlocker: {
+        id: 'dispatch-yield-actionable',
+        source: 'queue',
+        detail: expect.stringContaining('nim/goal proposal yield 0/3 (0%)'),
+      },
+      primaryAction: {
+        id: 'inspect-dispatch-yield',
+      },
+    });
+    expect(s.missionBrief).toMatchObject({
+      directive: 'Recover dispatch yield',
+      blocker: {
+        id: 'dispatch-yield-actionable',
+      },
+      action: {
+        id: 'inspect-dispatch-yield',
+      },
+    });
 
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('[medium] Inspect dispatch yield [nim]');

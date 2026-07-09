@@ -2275,8 +2275,16 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     medium: 2,
     low: 3,
   };
+  const actionRank = (action: FleetNextAction): number => {
+    if (action.id === 'inspect-dispatch-yield') return -1;
+    return 0;
+  };
   return actions
-    .sort((a, b) => priorityRank[a.priority] - priorityRank[b.priority] || a.id.localeCompare(b.id))
+    .sort((a, b) =>
+      priorityRank[a.priority] - priorityRank[b.priority] ||
+      actionRank(a) - actionRank(b) ||
+      a.id.localeCompare(b.id),
+    )
     .slice(0, 6);
 }
 
@@ -2810,6 +2818,19 @@ function chooseReadinessBlocker(
       resourceSource.detail,
       'medium',
       'resources',
+    );
+  }
+  if (
+    eligibleBacklogItems > 0 &&
+    status.proposals.pending === 0 &&
+    status.dispatchYieldDiagnostics?.verdict === 'actionable'
+  ) {
+    return readinessBlocker(
+      'dispatch-yield-actionable',
+      'Dispatch yield needs attention',
+      formatDispatchYieldDiagnosticDetail(status.dispatchYieldDiagnostics),
+      'medium',
+      'queue',
     );
   }
   if (eligibleBacklogItems > 0 && status.proposals.pending === 0) {
