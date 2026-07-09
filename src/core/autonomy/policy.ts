@@ -50,6 +50,33 @@ function maxRisk(cfg: AshlrConfig): 'low' | 'medium' | 'high' {
   return value === 'medium' || value === 'high' ? value : 'low';
 }
 
+function hasBaseBoundVerificationMetadata(pack: AutonomyEvidencePack): boolean {
+  return (
+    typeof pack.verification.baseBranch === 'string' &&
+    pack.verification.baseBranch.length > 0 &&
+    typeof pack.verification.baseHead === 'string' &&
+    pack.verification.baseHead.length > 0
+  );
+}
+
+function hasDiffBoundVerificationMetadata(pack: AutonomyEvidencePack): boolean {
+  return (
+    typeof pack.diff.hash === 'string' &&
+    pack.diff.hash.length > 0 &&
+    typeof pack.verification.diffHash === 'string' &&
+    pack.verification.diffHash.length > 0
+  );
+}
+
+function hasVerificationFreshnessMetadata(pack: AutonomyEvidencePack): boolean {
+  return (
+    typeof pack.verification.verifiedAt === 'string' &&
+    Number.isFinite(Date.parse(pack.verification.verifiedAt)) &&
+    typeof pack.verification.source === 'string' &&
+    pack.verification.source.length > 0
+  );
+}
+
 export function evaluateAutonomyPolicy(
   pack: AutonomyEvidencePack,
   cfg: AshlrConfig,
@@ -103,8 +130,20 @@ export function evaluateAutonomyPolicy(
       if (!pack.gates.remoteProtection?.ok) {
         return refuse(`remote protection gate failed: ${pack.gates.remoteProtection?.detail ?? 'missing protected remote evidence'}`);
       }
-      if (pack.verification.commandKinds.length === 0) {
+      if (!Array.isArray(pack.verification.commandKinds) || pack.verification.commandKinds.length === 0) {
         return refuse('evidence main merge requires at least one real verification command');
+      }
+      if (!hasBaseBoundVerificationMetadata(pack)) {
+        return refuse('evidence main merge requires base-bound verification metadata');
+      }
+      if (!hasDiffBoundVerificationMetadata(pack)) {
+        return refuse('evidence main merge requires diff-bound verification metadata');
+      }
+      if (pack.verification.diffHash !== pack.diff.hash) {
+        return refuse('evidence main merge verification diff hash does not match evidence diff hash');
+      }
+      if (!hasVerificationFreshnessMetadata(pack)) {
+        return refuse('evidence main merge requires verification freshness metadata');
       }
     }
     return allow(

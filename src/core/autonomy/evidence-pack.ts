@@ -19,6 +19,7 @@ import type {
   RunEventSummary,
   Proposal,
   ProposalBrowserVerifyEvidence,
+  ProposalVerifyResult,
   VisualGroundingEvidence,
 } from '../types.js';
 import { causalMetadata } from '../learning/causal.js';
@@ -40,6 +41,11 @@ export interface AutonomyVerificationEvidence {
   passed: boolean;
   detail: string;
   commandKinds: string[];
+  baseBranch?: string;
+  baseHead?: string;
+  diffHash?: string;
+  verifiedAt?: string;
+  source?: ProposalVerifyResult['source'];
   browser?: ProposalBrowserVerifyEvidence;
 }
 
@@ -257,6 +263,11 @@ function copyVerificationEvidence(input: AutonomyVerificationEvidence): Autonomy
     passed: input.passed,
     detail: input.detail,
     commandKinds: [...input.commandKinds],
+    ...(input.baseBranch ? { baseBranch: input.baseBranch } : {}),
+    ...(input.baseHead ? { baseHead: input.baseHead } : {}),
+    ...(input.diffHash ? { diffHash: input.diffHash } : {}),
+    ...(input.verifiedAt ? { verifiedAt: input.verifiedAt } : {}),
+    ...(input.source ? { source: input.source } : {}),
     ...(input.browser ? { browser: copyBrowserEvidence(input.browser) } : {}),
   };
 }

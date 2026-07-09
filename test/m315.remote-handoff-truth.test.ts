@@ -38,6 +38,7 @@ vi.mock('../src/core/integrations/github.js', async (importOriginal) => {
 });
 
 import { autoMergeProposal } from '../src/core/inbox/merge.js';
+import { readAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import { reconcileRemoteHandoffs } from '../src/core/inbox/remote-handoff.js';
 import { createProposal, listProposals, loadProposal, setStatus, updateProposalField } from '../src/core/inbox/store.js';
 import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
@@ -231,6 +232,8 @@ describe('M315 remote PR handoff truth', () => {
         baseBranch: 'main',
         baseHead,
         diffHash,
+        verifiedAt: '2026-07-03T00:00:00.000Z',
+        source: 'auto-merge-preflight',
       },
     });
     setStatus(proposal.id, 'pending');
@@ -250,6 +253,63 @@ describe('M315 remote PR handoff truth', () => {
       provider: 'github',
       state: 'awaiting-host-merge',
       base: 'main',
+    });
+    const pack = readAutonomyEvidencePack(proposal.id);
+    expect(pack?.diff.hash).toBe(diffHash);
+    expect(pack?.verification).toMatchObject({
+      baseBranch: 'main',
+      baseHead,
+      diffHash,
+      verifiedAt: '2026-07-03T00:00:00.000Z',
+      source: 'auto-merge-preflight',
+      commandKinds: ['test'],
+    });
+    expect(pack?.policy).toMatchObject({
+      action: 'merge-main',
+      allowed: true,
+    });
+  });
+
+  it('evidence mode refuses handoff when stored verification lacks freshness metadata', async () => {
+    const diff = addFileDiff('docs/evidence-legacy.md', 'legacy evidence without freshness');
+    const diffHash = hashDiff(diff);
+    const baseHead = git(tmpRepo, ['rev-parse', 'main']);
+    const proposal = createProposal({
+      repo: tmpRepo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'legacy evidence handoff',
+      summary: 'Refuse evidence handoff when verification source/timestamp is missing.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('local:qwen3-coder', 'local', diffHash),
+      engineModel: 'local:qwen3-coder',
+      engineTier: 'local',
+      verifyResult: {
+        passed: true,
+        detail: 'legacy command-bound verification passed',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        baseBranch: 'main',
+        baseHead,
+        diffHash,
+      },
+    });
+    setStatus(proposal.id, 'pending');
+
+    const result = await autoMergeProposal(proposal.id, evidenceCfg());
+
+    expect(result.ok).toBe(false);
+    expect(result.merged).toBe(false);
+    expect(result.handoff).toBeUndefined();
+    expect(result.reason).toMatch(/verification freshness metadata/);
+    expect(createPrMock).not.toHaveBeenCalled();
+    const loaded = loadProposal(proposal.id);
+    expect(loaded?.status).toBe('pending');
+    expect(loaded?.remoteHandoff).toBeUndefined();
+    const pack = readAutonomyEvidencePack(proposal.id);
+    expect(pack?.policy).toMatchObject({
+      action: 'escalate-human',
+      allowed: false,
     });
   });
 
@@ -293,6 +353,7 @@ describe('M315 remote PR handoff truth', () => {
     const loaded = loadProposal(proposal.id);
     expect(loaded?.status).toBe('pending');
     expect(loaded?.remoteHandoff).toBeUndefined();
+    expect(readAutonomyEvidencePack(proposal.id)).toBeNull();
   });
 
   it('reconciles a host-merged PR to applied only with positive merge evidence', async () => {

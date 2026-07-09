@@ -2673,6 +2673,48 @@ export async function autoMergeProposal(
       ((cfg.foundry as Record<string, unknown> | undefined)?.['autoMerge'] as Record<string, unknown> | undefined)?.[
         'allowSelfMerge'
       ] === true;
+    if (trustBasis === 'evidence' && toMain) {
+      const base = verify.baseBranch;
+      const verifiedBaseHead = verify.baseHead;
+      if (!base || !verifiedBaseHead) {
+        return refuse('verification did not record a default-branch base head — reverify required', repo);
+      }
+      const currentDefaultBranch = defaultBranch(repo);
+      if (currentDefaultBranch !== base) {
+        return refuse(
+          `default branch changed since verification (verified '${base}', current '${currentDefaultBranch}') — reverify required`,
+          repo,
+        );
+      }
+      const localBaseHeadBeforeEvidence = resolveDefaultBranchHead(repo, base);
+      if (!localBaseHeadBeforeEvidence || localBaseHeadBeforeEvidence !== verifiedBaseHead) {
+        return refuse(
+          `default branch '${base}' moved since verification — refusing evidence pack; reverify required`,
+          repo,
+        );
+      }
+      if (wantRemote && hasGithub) {
+        const remoteBaseHeadBeforeEvidence = resolveRemoteBranchHead(repo, base);
+        if (!remoteBaseHeadBeforeEvidence) {
+          return refuse(
+            `could not resolve protected remote branch '${base}' before evidence pack — reverify required`,
+            repo,
+          );
+        }
+        if (remoteBaseHeadBeforeEvidence !== verifiedBaseHead) {
+          return refuse(
+            `protected remote branch '${base}' moved since verification (verified ${verifiedBaseHead.slice(0, 8)}, remote ${remoteBaseHeadBeforeEvidence.slice(0, 8)}) — refusing evidence pack; reverify required`,
+            repo,
+          );
+        }
+        if (evidenceRemoteProtection) {
+          evidenceRemoteProtection = {
+            ok: evidenceRemoteProtection.ok,
+            detail: `${evidenceRemoteProtection.detail}; remote base ${base}@${remoteBaseHeadBeforeEvidence.slice(0, 8)} matches verification`,
+          };
+        }
+      }
+    }
     const evidencePack = buildAutonomyEvidencePack({
       proposal,
       target: toMain ? 'main' : 'branch',
@@ -2685,6 +2727,11 @@ export async function autoMergeProposal(
         passed: verify.ok,
         detail: verify.detail,
         commandKinds: verify.ran.map((cmd) => cmd.kind),
+        ...(verify.baseBranch ? { baseBranch: verify.baseBranch } : {}),
+        ...(verify.baseHead ? { baseHead: verify.baseHead } : {}),
+        ...(proposal.verifyResult?.diffHash ? { diffHash: proposal.verifyResult.diffHash } : {}),
+        ...(proposal.verifyResult?.verifiedAt ? { verifiedAt: proposal.verifyResult.verifiedAt } : {}),
+        ...(proposal.verifyResult?.source ? { source: proposal.verifyResult.source } : {}),
         ...(verify.browser ? { browser: verify.browser } : {}),
       },
       risk: { ok: true, detail: `risk '${risk}' within maxRisk '${maxRisk}'` },

@@ -81,6 +81,11 @@ function goodPack(over: Partial<Parameters<typeof buildAutonomyEvidencePack>[0]>
       passed: true,
       detail: 'all verify commands passed',
       commandKinds: ['test', 'typecheck'],
+      baseBranch: 'main',
+      baseHead: 'a'.repeat(40),
+      diffHash: 'sha256:test',
+      verifiedAt: '2026-07-01T00:01:00.000Z',
+      source: 'auto-merge',
     },
     risk: { ok: true, detail: "risk 'low' within maxRisk 'low'" },
     scope: { ok: true, detail: '1 file, 1 line within caps' },
@@ -190,12 +195,136 @@ describe('M301 evaluateAutonomyPolicy', () => {
           passed: true,
           detail: 'green but no command manifest',
           commandKinds: [],
+          baseBranch: 'main',
+          baseHead: 'a'.repeat(40),
+          diffHash: 'sha256:test',
         },
       }),
       cfg(),
     );
     expect(noCommands.allowed).toBe(false);
     expect(noCommands.reason).toMatch(/real verification command/i);
+  });
+
+  it('refuses evidence-mode main merge without base-bound verification metadata', () => {
+    const verdict = evaluateAutonomyPolicy(
+      goodPack({
+        trustBasis: 'evidence',
+        remotePreferred: true,
+        remoteProtection: {
+          ok: true,
+          detail: 'protected remote confirmed with required checks: ci/test',
+        },
+        verification: {
+          passed: true,
+          detail: 'green but legacy pack omitted base metadata',
+          commandKinds: ['test'],
+          diffHash: 'sha256:test',
+        },
+      }),
+      cfg(),
+    );
+
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.reason).toMatch(/base-bound verification metadata/i);
+  });
+
+  it('refuses evidence-mode main merge without diff-bound verification metadata', () => {
+    const verdict = evaluateAutonomyPolicy(
+      goodPack({
+        trustBasis: 'evidence',
+        remotePreferred: true,
+        remoteProtection: {
+          ok: true,
+          detail: 'protected remote confirmed with required checks: ci/test',
+        },
+        verification: {
+          passed: true,
+          detail: 'green but legacy pack omitted diff metadata',
+          commandKinds: ['test'],
+          baseBranch: 'main',
+          baseHead: 'a'.repeat(40),
+        },
+      }),
+      cfg(),
+    );
+
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.reason).toMatch(/diff-bound verification metadata/i);
+  });
+
+  it('refuses evidence-mode main merge when verification diff hash mismatches evidence diff hash', () => {
+    const verdict = evaluateAutonomyPolicy(
+      goodPack({
+        trustBasis: 'evidence',
+        remotePreferred: true,
+        remoteProtection: {
+          ok: true,
+          detail: 'protected remote confirmed with required checks: ci/test',
+        },
+        verification: {
+          passed: true,
+          detail: 'green but stale diff binding',
+          commandKinds: ['test'],
+          baseBranch: 'main',
+          baseHead: 'a'.repeat(40),
+          diffHash: 'sha256:stale',
+        },
+      }),
+      cfg(),
+    );
+
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.reason).toMatch(/diff hash does not match/i);
+  });
+
+  it('refuses evidence-mode main merge without verification freshness metadata', () => {
+    const missingSource = evaluateAutonomyPolicy(
+      goodPack({
+        trustBasis: 'evidence',
+        remotePreferred: true,
+        remoteProtection: {
+          ok: true,
+          detail: 'protected remote confirmed with required checks: ci/test',
+        },
+        verification: {
+          passed: true,
+          detail: 'green but source is missing',
+          commandKinds: ['test'],
+          baseBranch: 'main',
+          baseHead: 'a'.repeat(40),
+          diffHash: 'sha256:test',
+          verifiedAt: '2026-07-01T00:01:00.000Z',
+        },
+      }),
+      cfg(),
+    );
+    expect(missingSource.allowed).toBe(false);
+    expect(missingSource.reason).toMatch(/verification freshness metadata/i);
+
+    const malformedTimestamp = evaluateAutonomyPolicy(
+      goodPack({
+        trustBasis: 'evidence',
+        remotePreferred: true,
+        remoteProtection: {
+          ok: true,
+          detail: 'protected remote confirmed with required checks: ci/test',
+        },
+        verification: {
+          passed: true,
+          detail: 'green but timestamp is malformed',
+          commandKinds: ['test'],
+          baseBranch: 'main',
+          baseHead: 'a'.repeat(40),
+          diffHash: 'sha256:test',
+          verifiedAt: 'not-a-date',
+          source: 'auto-merge',
+        },
+      }),
+      cfg(),
+    );
+    expect(malformedTimestamp.allowed).toBe(false);
+    expect(malformedTimestamp.reason).toMatch(/verification freshness metadata/i);
   });
 
   it('authorizes evidence-mode main merge only for protected remote command-bound evidence', () => {
@@ -280,6 +409,11 @@ describe('M301 autonomy evidence pack persistence', () => {
     const raw = fs.readFileSync(evidencePath(pack.proposal.id), 'utf8');
     expect(raw).toContain('"policy"');
     expect(raw).toContain('"merge-main"');
+    expect(raw).toContain('"baseBranch"');
+    expect(raw).toContain('"baseHead"');
+    expect(raw).toContain('"diffHash"');
+    expect(raw).toContain('"verifiedAt"');
+    expect(raw).toContain('"source"');
     expect(raw).not.toContain('diff --git');
     expect(raw).not.toContain('+evidence');
   });

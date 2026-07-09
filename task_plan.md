@@ -852,3 +852,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add static UI and snapshot contract coverage for per-machine lease fields.
 - [x] Run focused, broad, and invariant verification.
 - [x] Commit `884efa8`, push, reload daemon, and smoke status.
+
+## Current Continuation - Evidence Pack Base/Diff Binding
+- [x] Rechecked clean pushed state after Lease Board rollout.
+- [x] Deployed sidecar scouts for stale pending TTL, evidence binding, and proposal-production yield.
+- [x] Persist verification base, diff, freshness, and source metadata into autonomy evidence packs.
+- [x] Fail closed for evidence-mode main policy when persisted evidence lacks command, base, diff, timestamp, source, or matching diff-hash metadata.
+- [x] Refuse stale protected remote base before persisting an allowed evidence pack.
+- [x] Add policy and remote-handoff regression coverage.
+- [x] Finish focused, broad, invariant, and full-CI verification.
+- [ ] Commit, push, reload daemon, and smoke status.
