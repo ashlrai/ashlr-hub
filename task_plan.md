@@ -871,4 +871,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Strengthen TITRR regression coverage for budget-exhausted stale producer metadata becoming captured `empty-diff` metadata.
 - [x] Run focused, broad, and invariant verification.
 - [x] Finish full CI.
-- [ ] Commit, push, reload daemon, and smoke status.
+- [x] Commit `8c01966`, push, reload daemon, and smoke status.
