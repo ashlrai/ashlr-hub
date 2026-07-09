@@ -943,7 +943,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused regressions for hostile labels, legacy fallback, contradictory raw signals, workspace/eval/coverage counts, and secret-safety invariants.
 - [x] Finish final full CI.
 - [x] Commit, push, reload daemon, and smoke live label readiness.
-- [ ] Next lane: epoch-gated learned routing from authoritative current-policy labels, or explicit contract wave 2 for clean Bun packages.
+- [x] Next lane selected: epoch-gated learned routing from authoritative current-policy labels.
 
 ## Current Continuation - Epoch-Gated Learned Routing
 - [x] Rechecked clean pushed state, Entire state, live FleetStatus, and learned-router tests.
@@ -953,4 +953,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused regressions for legacy rows, old policy rows, invalid classifier labels, stale epochs, policy-suppressed labels, and policy-version disagreement.
 - [x] Run focused and adjacent router/daemon/gateway/resource/status verification.
 - [x] Run broad verification.
-- [ ] Commit, push, reload daemon, and smoke live status.
+- [x] Commit, push, reload daemon, and smoke live status.
