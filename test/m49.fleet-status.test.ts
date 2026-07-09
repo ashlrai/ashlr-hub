@@ -1961,6 +1961,94 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ]));
   });
 
+  it('uses the reflection-and-reslice mission directive when low yield is the primary action', async () => {
+    const now = new Date().toISOString();
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo-a');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeRunningDaemon(tmpHome, [
+      {
+        ts: now,
+        itemsConsidered: 3,
+        proposalsCreated: 0,
+        backend: 'local-coder',
+        tier: 'mid',
+        model: 'qwen',
+        reason: 'engine completed without file changes',
+        spentUsd: 0,
+        proposalProduction: {
+          selected: 3,
+          claimed: 3,
+          dispatched: 3,
+          skipped: 0,
+          errors: 0,
+          proposalsCreated: 0,
+          noProposalDispatches: 3,
+          reasons: [
+            { reason: 'empty-diff: engine completed without file changes', count: 3 },
+          ],
+        },
+        dispatches: [
+          {
+            itemId: 'item-a',
+            title: 'Improve context A',
+            repo,
+            source: 'todo',
+            backend: 'local-coder',
+            tier: 'mid',
+            model: 'qwen',
+            assignedBy: 'router',
+            reason: 'engine completed without file changes',
+            dispatched: true,
+            spentUsd: 0,
+            production: { outcome: 'empty-diff', reason: 'engine completed without file changes' },
+          },
+          {
+            itemId: 'item-b',
+            title: 'Improve context B',
+            repo,
+            source: 'todo',
+            backend: 'local-coder',
+            tier: 'mid',
+            model: 'qwen',
+            assignedBy: 'router',
+            reason: 'engine completed without file changes',
+            dispatched: true,
+            spentUsd: 0,
+            production: { outcome: 'empty-diff', reason: 'engine completed without file changes' },
+          },
+          {
+            itemId: 'item-c',
+            title: 'Improve context C',
+            repo,
+            source: 'todo',
+            backend: 'local-coder',
+            tier: 'mid',
+            model: 'qwen',
+            assignedBy: 'router',
+            reason: 'engine completed without file changes',
+            dispatched: true,
+            spentUsd: 0,
+            production: { outcome: 'empty-diff', reason: 'engine completed without file changes' },
+          },
+        ],
+      },
+    ], now);
+
+    const s = await buildFleetStatus(baseConfig());
+    const action = s.nextActions?.find((candidate) => candidate.id === 'improve-context-efficiency');
+
+    expect(action?.commands?.map((command) => command.label)).toContain('Drain reslice queue');
+    expect(s.missionBrief).toMatchObject({
+      directive: 'Run context reflection and reslice',
+      action: {
+        id: 'improve-context-efficiency',
+      },
+    });
+  });
+
   it('promotes poor durable dispatch yield into next actions', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');

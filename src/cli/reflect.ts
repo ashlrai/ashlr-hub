@@ -391,12 +391,14 @@ export async function cmdReflect(args: string[]): Promise<number> {
         allowCloud: parsed.allowCloud,
         persist: parsed.persist, // report-only unless the user passes --persist
       });
-      recordReflectionTelemetry({
-        mode: 'playbooks',
-        playbooks: result.playbooks.length,
-        persisted: result.persisted.length,
-        didPersist: result.didPersist,
-      });
+      if (parsed.persist) {
+        recordReflectionTelemetry({
+          mode: 'playbooks',
+          playbooks: result.playbooks.length,
+          persisted: result.persisted.length,
+          didPersist: result.didPersist,
+        });
+      }
     } catch (err) {
       process.stderr.write(red('error: ') + (err instanceof Error ? err.message : String(err)) + '\n');
       return 1;

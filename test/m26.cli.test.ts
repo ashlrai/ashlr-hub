@@ -348,6 +348,7 @@ describe('reflect playbooks — report-only default + --persist gate', () => {
     expect(code).toBe(0);
     expect(out).toContain('report-only');
     expect(fs.existsSync(hubPath())).toBe(false);
+    expect(readAgentActions()).toEqual([]);
   });
 
   it('--persist: writes the distilled playbook to the genome hub', async () => {
@@ -408,6 +409,7 @@ describe('reflect playbooks — report-only default + --persist gate', () => {
     expect(res.didPersist).toBe(false);
     expect(res.persisted).toEqual([]);
     expect(fs.existsSync(hubPath())).toBe(false);
+    expect(readAgentActions()).toEqual([]);
   });
 });
 
