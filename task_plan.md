@@ -851,4 +851,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add an inline Fleet Dashboard Lease Board from existing shared queue per-machine health.
 - [x] Add static UI and snapshot contract coverage for per-machine lease fields.
 - [x] Run focused, broad, and invariant verification.
-- [ ] Commit, push, reload daemon, and smoke status.
+- [x] Commit `884efa8`, push, reload daemon, and smoke status.
