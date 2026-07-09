@@ -676,4 +676,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Surfaced the brief in `ashlr fleet status`, Fleet view, Mission Control, and the Fleet Dashboard readiness rail without adding new persistence or raw data.
 - [x] Added focused status/control/dashboard/formatter/API coverage for blocked and ready mission states.
 - [x] Verification passed: typecheck, JS syntax check, focused `m49/m61/m210/m213/m299` CI, lint, build, audit, invariants, and diff check.
-- [ ] Commit, push, reload daemon, and continue with the next high-leverage lane.
+- [x] Commit `41d9241`, push to `origin/master`, reload launchd daemon, resume fleet, and smoke live FleetStatus mission brief.
+
+## Current Continuation - Evidence Command Reuse Gate
+- [x] Implement evidence-mode verification reuse guard so cached `passed:true` results with no command evidence (`ran: []`) are treated as needing reverify.
+- [x] Apply the same command-evidence rule to both daemon auto-merge pass preflight and direct `autoMergeProposal()` reuse paths.
+- [x] Add focused regression coverage proving evidence mode reverifies current base/diff cached no-command evidence before merge attempt and skips judge spend.
+- [x] Integrate API-model TITRR capture-state metadata propagation so filed proposals no longer retain stale `proposal-disabled` run summaries.
+- [x] Add Phantom agent-report actionability from existing count-only rollups plus JSON schema support for `phantom.agentReportRollup`.
+- [x] Focused verification passed: typecheck plus combined `m78/m307/m48/m153/m86/m348/m2/m49` suites.
+- [x] Broader smoke passed: lint, build, audit, invariants, schema parse/diff check, and full `npm run test:ci` (438 files, 8,999 passed, 7 skipped).
+- [ ] Commit, push, reload daemon, smoke production FleetStatus, and continue.

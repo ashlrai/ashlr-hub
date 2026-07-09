@@ -215,6 +215,34 @@ describe('M348 FleetStatus Phantom capability', () => {
   it('surfaces and renders only aggregate Phantom agent report counts', async () => {
     await withFleetMocks(() => {
       const base = phantomStatus();
+      const agentReport = {
+        valuesHidden: true,
+        scannedRepos: 3,
+        validReports: 2,
+        failedReports: 1,
+        statusCounts: {
+          ok: 1,
+          'requires-approval': 1,
+          failed: 1,
+          '/Users/masonwyatt/private/repo': 1,
+        },
+        riskCounts: {
+          critical: 1,
+          high: 1,
+          low: 1,
+          'phantom reveal SECRET': 1,
+        },
+        severityCounts: {
+          critical: 1,
+          high: 1,
+          info: 1,
+          'raw finding TOKEN=abc123': 1,
+        },
+        requiresApprovalCount: 1,
+        repoPath: '/Users/masonwyatt/private/repo',
+        command: 'phantom reveal SECRET',
+        findings: [{ message: 'raw finding TOKEN=abc123', path: '/Users/masonwyatt/private/repo/.env' }],
+      } as unknown as NonNullable<PhantomStatus['agentReport']>;
       return {
         ...base,
         capability: {
@@ -224,28 +252,7 @@ describe('M348 FleetStatus Phantom capability', () => {
             agentAvailable: true,
           },
         },
-        agentReport: {
-          valuesHidden: true,
-          scannedRepos: 3,
-          validReports: 2,
-          failedReports: 1,
-          statusCounts: {
-            ok: 1,
-            'requires-approval': 1,
-            failed: 1,
-          },
-          riskCounts: {
-            critical: 1,
-            high: 1,
-            low: 1,
-          },
-          severityCounts: {
-            critical: 1,
-            high: 1,
-            info: 1,
-          },
-          requiresApprovalCount: 1,
-        },
+        agentReport,
       };
     }, async ({ buildFleetStatus, formatFleetStatus }) => {
       const cfg = baseConfig();
@@ -255,6 +262,7 @@ describe('M348 FleetStatus Phantom capability', () => {
       };
       const status = await buildFleetStatus(cfg);
       const serialized = JSON.stringify(status.phantom);
+      const serializedStatus = JSON.stringify(status);
 
       expect(status.phantom?.agentReport).toEqual({
         valuesHidden: true,
@@ -282,6 +290,24 @@ describe('M348 FleetStatus Phantom capability', () => {
       expect(serialized).not.toContain('ASHLR_PULSE_TOKEN');
       expect(serialized).not.toContain('/Users/masonwyatt');
       expect(serialized).not.toContain('agent report --json');
+      expect(serializedStatus).not.toContain('phantom reveal SECRET');
+      expect(serializedStatus).not.toContain('raw finding TOKEN=abc123');
+      expect(serializedStatus).not.toContain('/Users/masonwyatt/private/repo');
+
+      const action = status.nextActions?.find((candidate) => candidate.id === 'review-phantom-audit');
+      expect(action).toMatchObject({
+        priority: 'high',
+        label: 'Review Phantom audit',
+      });
+      expect(action?.detail).toContain('3 scanned repos');
+      expect(action?.detail).toContain('1 approval-required report');
+      expect(action?.detail).toContain('1 failed report');
+      expect(action?.detail).toContain('2 high/critical risk signals');
+      expect(action?.detail).toContain('2 high/critical severity signals');
+      expect(action?.detail).toContain('Values hidden');
+      expect(JSON.stringify(action)).not.toContain('phantom reveal SECRET');
+      expect(JSON.stringify(action)).not.toContain('raw finding TOKEN=abc123');
+      expect(JSON.stringify(action)).not.toContain('/Users/masonwyatt/private/repo');
 
       const rendered = formatFleetStatus(status);
       expect(rendered).toContain('agent yes');
@@ -294,6 +320,45 @@ describe('M348 FleetStatus Phantom capability', () => {
       expect(rendered).not.toContain('ASHLR_PULSE_TOKEN');
       expect(rendered).not.toContain('/Users/masonwyatt');
       expect(rendered).not.toContain('agent report --json');
+      expect(rendered).toContain('[high] Review Phantom audit');
+      expect(rendered).not.toContain('phantom reveal SECRET');
+      expect(rendered).not.toContain('raw finding TOKEN=abc123');
+    });
+  });
+
+  it('does not add a Phantom audit action for clean aggregate counts', async () => {
+    await withFleetMocks(() => {
+      const base = phantomStatus();
+      return {
+        ...base,
+        capability: {
+          ...base.capability,
+          commands: {
+            ...base.capability.commands,
+            agentAvailable: true,
+          },
+        },
+        agentReport: {
+          valuesHidden: true,
+          scannedRepos: 2,
+          validReports: 2,
+          failedReports: 0,
+          statusCounts: { ok: 2 },
+          riskCounts: { low: 2 },
+          severityCounts: { info: 2 },
+          requiresApprovalCount: 0,
+        },
+      };
+    }, async ({ buildFleetStatus }) => {
+      const cfg = baseConfig();
+      cfg.phantom = {
+        enabled: true,
+        agentReportRollup: { enabled: true },
+      };
+      const status = await buildFleetStatus(cfg);
+
+      expect(status.phantom?.agentReport?.failedReports).toBe(0);
+      expect(status.nextActions?.map((action) => action.id)).not.toContain('review-phantom-audit');
     });
   });
 

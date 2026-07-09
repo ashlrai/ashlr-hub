@@ -950,6 +950,9 @@ async function buildFleetPhantomStatus(cfg: AshlrConfig): Promise<FleetPhantomSt
         : !status.initialized
           ? 'not-initialized'
           : 'ready';
+    const agentReport = status.capability.commands.agentAvailable && status.agentReport
+      ? sanitizeFleetPhantomAgentReport(status.agentReport)
+      : undefined;
     return {
       observedAt,
       state,
@@ -974,7 +977,7 @@ async function buildFleetPhantomStatus(cfg: AshlrConfig): Promise<FleetPhantomSt
       mcp: {
         configured: await phantomMcpConfigured(),
       },
-      ...(status.capability.commands.agentAvailable && status.agentReport ? { agentReport: status.agentReport } : {}),
+      ...(agentReport ? { agentReport } : {}),
       ...(status.error ? { error: sanitizeFleetPhantomError(status.error) } : {}),
     };
   } catch (err) {
@@ -1015,6 +1018,51 @@ async function buildFleetPhantomStatus(cfg: AshlrConfig): Promise<FleetPhantomSt
       error: sanitizeFleetPhantomError(message),
     };
   }
+}
+
+const PHANTOM_AGENT_STATUS_COUNT_KEYS = new Set([
+  'ok',
+  'warning',
+  'review',
+  'requires-approval',
+  'failed',
+  'blocked',
+  'skipped',
+  'unknown',
+  'other',
+]);
+const PHANTOM_AGENT_RISK_COUNT_KEYS = new Set(['none', 'low', 'medium', 'high', 'critical', 'unknown', 'other']);
+const PHANTOM_AGENT_SEVERITY_COUNT_KEYS = new Set(['info', 'low', 'medium', 'high', 'critical', 'unknown', 'other']);
+
+function sanitizeFleetPhantomAgentReport(report: PhantomAgentReportRollup): PhantomAgentReportRollup {
+  return {
+    valuesHidden: true,
+    scannedRepos: safeFleetPhantomCount(report.scannedRepos),
+    validReports: safeFleetPhantomCount(report.validReports),
+    failedReports: safeFleetPhantomCount(report.failedReports),
+    statusCounts: safeFleetPhantomCountMap(report.statusCounts, PHANTOM_AGENT_STATUS_COUNT_KEYS),
+    riskCounts: safeFleetPhantomCountMap(report.riskCounts, PHANTOM_AGENT_RISK_COUNT_KEYS),
+    severityCounts: safeFleetPhantomCountMap(report.severityCounts, PHANTOM_AGENT_SEVERITY_COUNT_KEYS),
+    requiresApprovalCount: safeFleetPhantomCount(report.requiresApprovalCount),
+  };
+}
+
+function safeFleetPhantomCount(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(Math.min(value, Number.MAX_SAFE_INTEGER));
+}
+
+function safeFleetPhantomCountMap(
+  counts: Record<string, number> | undefined,
+  allowedKeys: Set<string>,
+): Record<string, number> {
+  const safe: Record<string, number> = {};
+  for (const [key, value] of Object.entries(counts ?? {})) {
+    if (!allowedKeys.has(key)) continue;
+    const count = safeFleetPhantomCount(value);
+    if (count > 0) safe[key] = count;
+  }
+  return safe;
 }
 
 async function phantomMcpConfigured(): Promise<boolean> {
@@ -1485,6 +1533,9 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   }
   const controlBlocked = status.killed || !status.daemon.running || Boolean(firstGuardBlock);
 
+  const phantomAuditAction = phantomAuditNextAction(status.phantom?.agentReport);
+  if (phantomAuditAction) add(phantomAuditAction);
+
   const awaitingHostMerge = status.proposals.awaitingHostMerge ?? 0;
   if (awaitingHostMerge > 0) {
     add({
@@ -1669,6 +1720,40 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   return actions
     .sort((a, b) => priorityRank[a.priority] - priorityRank[b.priority] || a.id.localeCompare(b.id))
     .slice(0, 6);
+}
+
+function phantomAuditNextAction(report: PhantomAgentReportRollup | undefined): FleetNextAction | null {
+  if (!report) return null;
+
+  const approvalReports = Math.max(report.requiresApprovalCount, report.statusCounts['requires-approval'] ?? 0);
+  const failedReports = Math.max(report.failedReports, report.statusCounts.failed ?? 0);
+  const highRiskSignals = (report.riskCounts.high ?? 0) + (report.riskCounts.critical ?? 0);
+  const highSeveritySignals = (report.severityCounts.high ?? 0) + (report.severityCounts.critical ?? 0);
+
+  const signals = [
+    countSignal(approvalReports, 'approval-required report'),
+    countSignal(failedReports, 'failed report'),
+    countSignal(highRiskSignals, 'high/critical risk signal'),
+    countSignal(highSeveritySignals, 'high/critical severity signal'),
+  ].filter((signal): signal is string => signal !== null);
+
+  if (signals.length === 0) return null;
+
+  const scope = report.scannedRepos > 0 ? ` across ${countPhrase(report.scannedRepos, 'scanned repo')}` : '';
+  return {
+    id: 'review-phantom-audit',
+    priority: 'high',
+    label: 'Review Phantom audit',
+    detail: `Phantom audit rollup needs review${scope}: ${signals.join(', ')}. Values hidden; only aggregate counts are shown.`,
+  };
+}
+
+function countSignal(count: number, singular: string): string | null {
+  return count > 0 ? countPhrase(count, singular) : null;
+}
+
+function countPhrase(count: number, singular: string): string {
+  return `${count} ${singular}${count === 1 ? '' : 's'}`;
 }
 
 interface AutonomousShipReadinessInputs {
@@ -2187,6 +2272,8 @@ function missionDirective(
       return 'Inspect dispatch skips';
     case 'inspect-proposal-production':
       return 'Recover proposal production';
+    case 'review-phantom-audit':
+      return 'Review Phantom audit';
     case 'build-backlog':
       return 'Build the highest-value backlog proposal';
     case 'cooldown-gated-backlog':
@@ -2225,6 +2312,7 @@ function missionWhyNow(
   action: FleetNextAction | null,
   effectiveness: FleetAutonomyEffectivenessStatus | null,
 ): string {
+  if (action?.id === 'review-phantom-audit' && action.detail) return action.detail;
   if (blocker?.detail) return blocker.detail;
   if (effectiveness?.summary) return effectiveness.summary;
   if (action?.detail) return action.detail;

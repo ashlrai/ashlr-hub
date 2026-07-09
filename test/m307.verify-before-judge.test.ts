@@ -231,6 +231,43 @@ describe('M307 verify-before-judge', () => {
     expect(r.verifyBeforeJudgeRan).toBe(1);
   });
 
+  it('evidence mode re-verifies cached no-command evidence before merge attempt', async () => {
+    mockListProposals.mockReturnValue([
+      proposal({
+        verifyResult: {
+          passed: true,
+          source: 'manual',
+          detail: 'cached no-command verification',
+          ran: [],
+          baseBranch: 'main',
+          baseHead: '0123456789abcdef0123456789abcdef01234567',
+          diffHash: hashDiff(docDiff),
+        },
+      }),
+    ]);
+
+    const r = await runAutoMergePass(cfg({ trustBasis: 'evidence' }));
+
+    expect(mockVerifyProposal).toHaveBeenCalledTimes(1);
+    expect(mockResolveFrontierJudgeClient).not.toHaveBeenCalled();
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).toHaveBeenCalledWith('m307-prop', expect.any(Object));
+    expect(mockUpdateProposalField).toHaveBeenCalledWith(
+      'm307-prop',
+      expect.objectContaining({
+        verifyResult: expect.objectContaining({
+          passed: true,
+          source: 'auto-merge-preflight',
+          ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+          diffHash: hashDiff(docDiff),
+        }),
+      }),
+    );
+    expect(r.verifyBeforeJudgeRan).toBe(1);
+    expect(r.attempted).toBe(1);
+    expect(r.merged).toBe(1);
+  });
+
   it('uses a cached passing verifyResult without re-running verification', async () => {
     mockListProposals.mockReturnValue([
       proposal({ verifyResult: { passed: true, source: 'auto-merge-preflight' } }),

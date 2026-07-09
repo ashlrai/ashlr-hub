@@ -61,6 +61,10 @@ import { learnFromRejection } from './self-improve.js';
 import { learnFromApplied } from './skill-library.js';
 import { recordAgentAction } from './agent-action-ledger.js';
 
+function hasVerificationCommandEvidence(result: Proposal['verifyResult']): boolean {
+  return Array.isArray(result?.ran) && result.ran.length > 0;
+}
+
 export interface AutoMergePassResult {
   /** Proposals the gate was run against this pass (frontier + branch-eligible mid). */
   attempted: number;
@@ -482,7 +486,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
             p.verifyResult.baseBranch.length > 0 &&
             typeof p.verifyResult.baseHead === 'string' &&
             p.verifyResult.baseHead.length > 0 &&
-            p.verifyResult.diffHash === hashDiff(p.diff ?? '')
+            p.verifyResult.diffHash === hashDiff(p.diff ?? '') &&
+            hasVerificationCommandEvidence(p.verifyResult)
           )
         );
       if (p.verifyResult?.passed === false) {

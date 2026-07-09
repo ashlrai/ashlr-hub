@@ -130,6 +130,27 @@
       "properties": {
         "enabled": {
           "type": "boolean"
+        },
+        "agentReportRollup": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Optional count-only Phantom agent audit rollup for FleetStatus. Values and raw findings remain hidden.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "When true, FleetStatus may include aggregate-only Phantom agent report counts."
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Optional timeout for collecting the count-only rollup."
+            },
+            "cacheTtlMs": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Optional cache TTL for the count-only rollup."
+            }
+          }
         }
       }
     },

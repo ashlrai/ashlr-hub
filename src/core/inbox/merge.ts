@@ -1553,6 +1553,10 @@ function hasVerifiedDiffBinding(
   );
 }
 
+function hasVerificationCommandEvidence(result: ProposalVerifyResult | undefined): boolean {
+  return Array.isArray(result?.ran) && result.ran.length > 0;
+}
+
 function verifyResultFromStored(result: ProposalVerifyResult): VerifyProposalResult {
   return {
     ok: result.passed,
@@ -2120,7 +2124,7 @@ export async function autoMergeProposal(
       // failure (verify.ok===false) short-circuits here before Gate 4 so no
       // merge can proceed on a failing diff.
       const verifiedForCurrentDiff = trustBasis === 'evidence'
-        ? hasVerifiedDiffBinding(proposal)
+        ? hasVerifiedDiffBinding(proposal) && hasVerificationCommandEvidence(proposal.verifyResult)
         : hasVerifiedBaseBinding(proposal.verifyResult);
       if (proposal.verifyResult?.passed !== true || !verifiedForCurrentDiff) {
         // If verifyResult is already present and explicitly false, skip the
@@ -2300,7 +2304,7 @@ export async function autoMergeProposal(
     let verify: VerifyProposalResult;
     const canReuseStoredVerify =
       (trustBasis === 'verification' && hasVerifiedBaseBinding(proposal.verifyResult)) ||
-      (trustBasis === 'evidence' && hasVerifiedDiffBinding(proposal));
+      (trustBasis === 'evidence' && hasVerifiedDiffBinding(proposal) && hasVerificationCommandEvidence(proposal.verifyResult));
     if (canReuseStoredVerify && proposal.verifyResult) {
       // Already verified pre-Gate-4 and passed — skip re-run.
       verify = verifyResultFromStored(proposal.verifyResult);

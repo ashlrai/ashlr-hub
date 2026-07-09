@@ -261,6 +261,141 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     });
   });
 
+  it('api-model TITRR capture returns filed metadata instead of stale proposal-disabled metadata', async () => {
+    const usage = { tokensIn: 11, tokensOut: 7, steps: 2, estCostUsd: 0 };
+    const disabledOutcome = {
+      kind: 'proposal-disabled' as const,
+      reason: 'proposal filing disabled for this api-model attempt',
+      files: 1,
+      insertions: 4,
+      deletions: 0,
+    };
+    const producerBase = makeRunState({ status: 'done', result: 'api model ok', usage });
+    const apiProducerState = {
+      ...producerBase,
+      engine: 'local-coder' as const,
+      provider: 'openai-compat',
+      engineModel: 'local-coder:qwen',
+      engineTier: 'mid' as const,
+      proposalOutcome: disabledOutcome,
+      runEventSummary: {
+        runId: producerBase.id,
+        status: 'done',
+        outcome: 'proposal-disabled',
+        diffFiles: 1,
+        diffLines: 4,
+        tokensIn: usage.tokensIn,
+        tokensOut: usage.tokensOut,
+        costUsd: usage.estCostUsd,
+        actionCounts: {
+          modelSteps: 1,
+          totalSteps: 2,
+          diffFiles: 1,
+          diffLines: 4,
+          proposalCreated: 0,
+          proposalBlocked: 0,
+          proposalDisabled: 1,
+        },
+      },
+    };
+    const filedOutcome = {
+      kind: 'filed' as const,
+      reason: 'proposal filed',
+      proposalId: 'p-api',
+      files: 2,
+      insertions: 10,
+      deletions: 3,
+    };
+
+    engineMockFn.mockResolvedValue({
+      state: apiProducerState,
+      proposalOutcome: disabledOutcome,
+    });
+    captureMockFn.mockImplementationOnce(async (_engine: unknown, _goal: unknown, _cfg: unknown, opts: { runId?: string }) => {
+      const runId = opts.runId ?? 'run-api-capture';
+      return {
+        state: {
+          ...makeRunState({ status: 'done', result: 'proposal filed', usage }),
+          id: runId,
+          engine: 'local-coder' as const,
+          provider: 'external',
+          engineModel: 'local-coder:qwen',
+          engineTier: 'mid' as const,
+          proposalOutcome: filedOutcome,
+          runEventSummary: {
+            runId,
+            status: 'done',
+            outcome: 'proposal-created',
+            proposalCreated: true,
+            proposalId: 'p-api',
+            diffFiles: 2,
+            diffLines: 13,
+            tokensIn: usage.tokensIn,
+            tokensOut: usage.tokensOut,
+            costUsd: usage.estCostUsd,
+            actionCounts: {
+              modelSteps: 1,
+              totalSteps: 2,
+              proposalCaptureAttempts: 1,
+              diffFiles: 2,
+              diffLines: 13,
+              proposalCreated: 1,
+              proposalBlocked: 0,
+              proposalDisabled: 0,
+            },
+          },
+        },
+        proposalId: 'p-api',
+        proposalOutcome: filedOutcome,
+      };
+    });
+    detectVCMockFn.mockReturnValue([{ kind: 'test', cmd: ['npm', 'test'] }]);
+    runVCMockFn.mockReturnValue({ ok: true, command: 'npm test', exitCode: 0, output: 'All pass', timedOut: false });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'local-coder',
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+    });
+
+    const attemptOpts = engineMockFn.mock.calls[0]?.[3] as Record<string, unknown>;
+    expect(attemptOpts).toMatchObject({ propose: false });
+    const captureOpts = captureMockFn.mock.calls[0]?.[3] as Record<string, unknown>;
+    expect(captureOpts).toMatchObject({
+      runId: apiProducerState.id,
+      sourceLabel: 'TITRR api-model',
+      producerStatus: 'done',
+      usage,
+    });
+    expect(captureOpts['actionCounts']).toMatchObject({
+      modelSteps: 1,
+      totalSteps: 2,
+      proposalDisabled: 1,
+    });
+
+    expect(state.id).toBe(apiProducerState.id);
+    expect(state.result).toBe('api model ok');
+    expect(state.proposalOutcome).toMatchObject({ kind: 'filed', proposalId: 'p-api' });
+    expect(state.runEventSummary).toMatchObject({
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: 'p-api',
+      diffFiles: 2,
+      diffLines: 13,
+    });
+    expect(state.runEventSummary?.actionCounts).toMatchObject({
+      modelSteps: 1,
+      totalSteps: 2,
+      proposalCaptureAttempts: 1,
+      proposalCreated: 1,
+      proposalDisabled: 0,
+      diffFiles: 2,
+      diffLines: 13,
+    });
+  });
+
   // ---- Test 2: fail then pass → engine re-invoked ----
   it('fail then pass → re-invokes engine, annotates "tests: pass (attempt 2)"', async () => {
     engineMockFn.mockResolvedValue({

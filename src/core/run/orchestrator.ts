@@ -316,6 +316,26 @@ function normalizeRunStateForPersistence(state: RunState): RunState {
   };
 }
 
+function actionCountsForProposalCapture(state: RunState): RunActionCounts | undefined {
+  const counts = state.runEventSummary?.actionCounts;
+  return counts ? { ...counts } : undefined;
+}
+
+function withCapturedProposalMetadata(producerState: RunState, capturedState: RunState): RunState {
+  return {
+    ...producerState,
+    ...(capturedState.proposalOutcome ? { proposalOutcome: capturedState.proposalOutcome } : {}),
+    ...(capturedState.runEventSummary ? { runEventSummary: capturedState.runEventSummary } : {}),
+    ...(capturedState.trajectoryId ? { trajectoryId: capturedState.trajectoryId } : {}),
+    ...(capturedState.routeSnapshot ? { routeSnapshot: capturedState.routeSnapshot } : {}),
+    ...(capturedState.evidenceOutcome ? { evidenceOutcome: capturedState.evidenceOutcome } : {}),
+    ...(capturedState.learningSource ? { learningSource: capturedState.learningSource } : {}),
+    ...(capturedState.labelBasis ? { labelBasis: capturedState.labelBasis } : {}),
+    ...(capturedState.routerPolicyVersion ? { routerPolicyVersion: capturedState.routerPolicyVersion } : {}),
+    ...(capturedState.learningEpoch ? { learningEpoch: capturedState.learningEpoch } : {}),
+  };
+}
+
 /**
  * Atomically persist a RunState to ~/.ashlr/runs/<id>.json (write-then-rename).
  * ONLY writes under runsDir() — never touches repos or Desktop.
@@ -1277,12 +1297,16 @@ export async function runGoal(
                     workSource: opts.workSource,
                     delegationScope,
                     sourceLabel: 'TITRR api-model',
+                    usage: lastApiR.state.usage,
+                    durationMs: runDurationMs(lastApiR.state),
+                    producerStatus: lastApiR.state.status,
+                    actionCounts: actionCountsForProposalCapture(lastApiR.state),
                   });
                   lastApiR = {
                     ...lastApiR,
                     proposalId: propR.proposalId,
                     proposalOutcome: propR.proposalOutcome,
-                    state: { ...lastApiR.state, proposalOutcome: propR.proposalOutcome },
+                    state: withCapturedProposalMetadata(lastApiR.state, propR.state),
                   };
                   break;
                 }
@@ -1300,12 +1324,16 @@ export async function runGoal(
                     isPartial: true,
                     forceGateBlockReason: `tests: still failing after ${titrrAttempt} attempt(s)`,
                     sourceLabel: 'TITRR api-model',
+                    usage: lastApiR.state.usage,
+                    durationMs: runDurationMs(lastApiR.state),
+                    producerStatus: lastApiR.state.status,
+                    actionCounts: actionCountsForProposalCapture(lastApiR.state),
                   });
                   lastApiR = {
                     ...lastApiR,
                     proposalId: propR.proposalId,
                     proposalOutcome: propR.proposalOutcome,
-                    state: { ...lastApiR.state, proposalOutcome: propR.proposalOutcome },
+                    state: withCapturedProposalMetadata(lastApiR.state, propR.state),
                   };
                   break;
                 }
