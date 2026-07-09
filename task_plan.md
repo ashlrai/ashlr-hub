@@ -1107,4 +1107,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Thread `RunContextSummary` through api-model sandbox proposal capture, run state, decision metadata, and agent-action telemetry.
 - [x] Add focused local-context and api-model dispatch regression coverage.
 - [x] Re-run focused local-context/api-model, learning graph, attention, agent-loop, typecheck, and diff checks.
-- [ ] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.
+- [x] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.
