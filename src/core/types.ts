@@ -3607,6 +3607,14 @@ export interface DaemonConfig {
    * before re-checking. Default 5 000 ms. Only used in continuous mode.
    */
   idleBackoffMs?: number;
+  /**
+   * Lane-specific one-shot drain caps. These bound repair drains separately
+   * from normal production velocity so targeted maintenance cannot consume every
+   * available worker slot just because the machine has capacity.
+   */
+  drainLimits?: {
+    diagnosticReslices?: number;
+  };
 }
 
 /**
@@ -3706,6 +3714,8 @@ export interface DaemonProposalProductionSummary {
 
 export type DaemonDrainMode = 'diagnostic-reslices';
 
+export const DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT = 3;
+
 export interface DaemonDrainSummary {
   /** Targeted drain lane requested for this tick. */
   mode: DaemonDrainMode;
@@ -3713,6 +3723,10 @@ export interface DaemonDrainSummary {
   available: number;
   /** Matching lane items selected/claimed for this tick. */
   selected: number;
+  /** Effective lane cap applied after normal daemon budget/resource caps. */
+  limit?: number;
+  /** True when visible lane work exceeded the effective lane cap. */
+  capped?: boolean;
   /** Bounded selected work ids, used to prove the drain lane actually ran. */
   selectedItemIds?: string[];
   /** True when the lane had visible work but selected nothing. */

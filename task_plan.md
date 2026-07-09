@@ -137,6 +137,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Entire is not set up for this repo; `entire resume master` has no checkpoint.
 - Full serial Vitest can hang after many tests with one worker alive; mitigated with `scripts/test-ci.mjs` watchdog for CI/publish gates.
 - Full CI initially exposed two stale auto-merge test expectations: default tier frontier proposals no longer get a pass-level judge, and evidence-mode explainer fixtures now need a diff-bound verification hash. Updated tests and reran affected suites plus full CI.
+- Bounded diagnostic drain status test initially used a fixed `2026-07-03` tick outside the recent-window cutoff on July 9; switched it to the current test timestamp and reran focused M201/M49 tests.
 
 ## Agent Findings From Follow-Up Audit
 - Shared queue leases are not renewed during long runs; dry-run shared claims should release immediately.
@@ -1126,4 +1127,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Point Fleet OS drain commands at the targeted mode and surface `diagnosticResliceDrainStalled` / `reslice-drain-stalled`.
 - [x] Integrate read-time legacy route/run fallback worker patch for dispatch-production attempt coverage without materializing legacy labels.
 - [x] Run focused daemon/status/ledger/attempt/CLI-service tests, typecheck, lint, build, audit, and diff checks.
-- [ ] Commit, push, reload daemon, and smoke live targeted drain/status.
+- [x] Commit, push, reload daemon, and smoke live targeted drain/status.
+
+## Current Continuation - Bounded Diagnostic Drain Status
+- [x] Rechecked clean pushed state after executable targeted drain rollout.
+- [x] Kept the live targeted one-shot daemon running as a production probe while working on non-overlapping code.
+- [x] Closed completed scouts and redeployed sidecar agents for drain caps/status, live queue telemetry, and Phantom/MCP argv secret exposure.
+- [x] Add a drain-only selection cap with default safe limit and optional explicit `--limit`.
+- [x] Persist drain limit/capped metadata in daemon tick and agent-action telemetry.
+- [x] Surface latest targeted diagnostic drain result in FleetStatus and CLI status even when generated work is empty.
+- [x] Add focused daemon/status/CLI regression coverage.
+- [x] Run full verification suite for bounded diagnostic drain status.
+- [ ] Commit, push, reload daemon, and smoke live status.

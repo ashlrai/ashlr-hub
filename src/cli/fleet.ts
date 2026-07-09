@@ -129,6 +129,19 @@ export function formatFleetStatus(s: FleetStatus): string {
         `${g.proposalRepair} proposal-repair, ${g.diagnosticReslices} no-diff reslice, ${g.invent} invent`,
     );
   }
+  if (s.queue.diagnosticResliceDrain) {
+    const d = s.queue.diagnosticResliceDrain;
+    const limitText = typeof d.limit === 'number' ? `/${d.limit}` : '';
+    const state = [
+      d.capped ? 'capped' : '',
+      d.stalled ? 'stalled' : '',
+    ].filter(Boolean);
+    lines.push(
+      `  diag drain:    selected ${d.selected}${limitText}, available ${d.available}, ` +
+        `proposals ${d.proposalsCreated}, no-proposal ${d.noProposalDispatches}` +
+        `${state.length ? ` (${state.join(', ')})` : ''}`,
+    );
+  }
   if (s.queue.repos) {
     const repoCoverage = s.queue.repos;
     lines.push(

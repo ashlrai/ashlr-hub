@@ -17,6 +17,7 @@
 import { existsSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, resolve } from 'node:path';
+import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../types.js';
 import type {
   AshlrConfig,
   AutoMergeTrustBasis,
@@ -486,6 +487,23 @@ export interface FleetQueueGeneratedWorkStatus {
   invent: number;
 }
 
+export interface FleetDiagnosticResliceDrainStatus {
+  mode: 'diagnostic-reslices';
+  latestAt: string;
+  available: number;
+  selected: number;
+  limit?: number;
+  capped?: boolean;
+  selectedItemIds?: string[];
+  stalled?: boolean;
+  dispatched: number;
+  skipped: number;
+  errors: number;
+  proposalsCreated: number;
+  noProposalDispatches: number;
+  topReasons?: Array<{ reason: string; count: number }>;
+}
+
 export interface FleetQueueRepoCoverage {
   enrolled: number;
   existing: number;
@@ -540,6 +558,7 @@ export interface FleetStatus {
     next?: FleetQueueNextItem[];
     shared?: FleetSharedQueueStatus;
     generatedWork?: FleetQueueGeneratedWorkStatus;
+    diagnosticResliceDrain?: FleetDiagnosticResliceDrainStatus;
   };
   proposals: {
     pending: number;
@@ -631,7 +650,7 @@ function buildQueueGeneratedWorkStatus(items: WorkItem[]): FleetQueueGeneratedWo
   return { total, selfHeal, proposalRepair, diagnosticReslices, invent };
 }
 
-function hasRecentDiagnosticResliceDrainStall(ticks: DaemonTick[], nowMs = Date.now()): boolean {
+function latestRecentDiagnosticResliceDrainTick(ticks: DaemonTick[], nowMs = Date.now()): DaemonTick | null {
   const cutoff = nowMs - RECENT_WINDOW_MS;
   let latestTargeted: DaemonTick | null = null;
   let latestTargetedMs = Number.NEGATIVE_INFINITY;
@@ -645,8 +664,37 @@ function hasRecentDiagnosticResliceDrainStall(ticks: DaemonTick[], nowMs = Date.
       latestTargetedMs = safeTs;
     }
   }
-  if (!latestTargeted?.drain) return false;
-  return latestTargeted.drain.available > 0 && latestTargeted.drain.selected === 0;
+  return latestTargeted;
+}
+
+function buildDiagnosticResliceDrainStatus(
+  ticks: DaemonTick[],
+  nowMs = Date.now(),
+): FleetDiagnosticResliceDrainStatus | undefined {
+  const latest = latestRecentDiagnosticResliceDrainTick(ticks, nowMs);
+  const drain = latest?.drain;
+  if (!latest || drain?.mode !== 'diagnostic-reslices') return undefined;
+  const production = latest.proposalProduction;
+  const topReasons = production?.reasons
+    ?.filter((reason) => reason.count > 0)
+    .slice(0, 5)
+    .map((reason) => ({ reason: reason.reason, count: reason.count }));
+  return {
+    mode: drain.mode,
+    latestAt: latest.ts,
+    available: drain.available,
+    selected: drain.selected,
+    ...(typeof drain.limit === 'number' ? { limit: drain.limit } : {}),
+    ...(drain.capped ? { capped: true } : {}),
+    ...(drain.selectedItemIds?.length ? { selectedItemIds: drain.selectedItemIds.slice(0, 12) } : {}),
+    ...(drain.stalled || (drain.available > 0 && drain.selected === 0) ? { stalled: true } : {}),
+    dispatched: production?.dispatched ?? 0,
+    skipped: production?.skipped ?? 0,
+    errors: production?.errors ?? 0,
+    proposalsCreated: production?.proposalsCreated ?? latest.proposalsCreated ?? 0,
+    noProposalDispatches: production?.noProposalDispatches ?? 0,
+    ...(topReasons && topReasons.length > 0 ? { topReasons } : {}),
+  };
 }
 
 interface FleetQueueEligibility {
@@ -812,6 +860,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   } catch {
     // leave fallback
   }
+  const diagnosticResliceDrain = buildDiagnosticResliceDrainStatus(recentTicks);
 
   // ── backends ────────────────────────────────────────────────────────────────
   const allowed: EngineId[] = cfg.foundry?.allowedBackends ?? ['builtin'];
@@ -894,7 +943,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     if (
       generatedWork &&
       generatedWork.diagnosticReslices > 0 &&
-      hasRecentDiagnosticResliceDrainStall(recentTicks)
+      diagnosticResliceDrain?.stalled === true
     ) {
       generatedWork = { ...generatedWork, diagnosticResliceDrainStalled: true };
     }
@@ -1115,6 +1164,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ...(nextQueueItems.length > 0 ? { next: nextQueueItems } : {}),
       ...(sharedQueue !== undefined ? { shared: sharedQueue } : {}),
       ...(generatedWork !== undefined ? { generatedWork } : {}),
+      ...(diagnosticResliceDrain !== undefined ? { diagnosticResliceDrain } : {}),
     },
     proposals: { pending, frontierPending, ...(awaitingHostMerge > 0 ? { awaitingHostMerge } : {}), applied },
     merges: { recent: mergesRecent },
@@ -1978,7 +2028,8 @@ function diagnosticResliceDrainNextAction(status: FleetStatus): FleetNextAction 
   const diagnosticDetail = formatDispatchYieldDiagnosticDetail(diagnostic);
   const target = topReslice?.repo ?? diagnostic.primaryCandidate?.backend;
   const first = topReslice ? ` First: ${topReslice.title}.` : '';
-  const stalled = status.queue.generatedWork?.diagnosticResliceDrainStalled
+  const stalled = status.queue.diagnosticResliceDrain?.stalled === true ||
+    status.queue.generatedWork?.diagnosticResliceDrainStalled === true
     ? ' reslice-drain-stalled: the latest targeted drain tick selected none.'
     : '';
   return {
@@ -1990,7 +2041,16 @@ function diagnosticResliceDrainNextAction(status: FleetStatus): FleetNextAction 
       `${diagnosticDetail}.${first}${stalled}`,
     ...(target ? { target } : {}),
     commands: [
-      nextActionCommand('Drain diagnostic reslices', ['ashlr', 'daemon', 'start', '--once', '--drain', 'diagnostic-reslices'], 'autonomous-dispatch', {
+      nextActionCommand('Drain diagnostic reslices', [
+        'ashlr',
+        'daemon',
+        'start',
+        '--once',
+        '--drain',
+        'diagnostic-reslices',
+        '--limit',
+        String(DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT),
+      ], 'autonomous-dispatch', {
         note: 'Runs one guarded daemon tick targeted at already-queued diagnostic no-diff reslices.',
       }),
       nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
@@ -2270,7 +2330,16 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         }),
         nextActionCommand('Evaluate attention', ['ashlr', 'eval', 'attention', '--json'], 'read-only'),
         ...(shouldDrainReslices
-          ? [nextActionCommand('Drain reslice queue', ['ashlr', 'daemon', 'start', '--once', '--drain', 'diagnostic-reslices'], 'autonomous-dispatch', {
+          ? [nextActionCommand('Drain reslice queue', [
+              'ashlr',
+              'daemon',
+              'start',
+              '--once',
+              '--drain',
+              'diagnostic-reslices',
+              '--limit',
+              String(DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT),
+            ], 'autonomous-dispatch', {
               note: 'Runs one guarded daemon tick targeted at already-queued diagnostic reslices.',
             })]
           : []),

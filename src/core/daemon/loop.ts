@@ -35,6 +35,7 @@
 
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../types.js';
 import type {
   AshlrConfig,
   DaemonConfig,
@@ -159,11 +160,13 @@ const DEFAULTS: DaemonConfig = {
 const LOCAL_ONLY_BACKENDS = new Set<EngineId>(['builtin', 'local-coder', 'ashlrcode', 'aw']);
 const DRAIN_MODE_TAG_PREFIX = 'drain:';
 const MAX_DRAIN_SELECTED_IDS = 12;
+const MAX_DIAGNOSTIC_RESLICE_DRAIN_LIMIT = 50;
 type TickItemOutcome = { item: WorkItem; spentUsd: number; dispatched: boolean; dispatch?: DaemonDispatchTrace };
 type BestOfNRunResult = Awaited<ReturnType<typeof runBestOfN>>;
 interface TickOptions {
   dryRun: boolean;
   drain?: DaemonDrainMode;
+  drainLimit?: number;
 }
 interface DaemonRunOptions extends TickOptions {
   once: boolean;
@@ -432,18 +435,43 @@ function isDrainCandidate(item: WorkItem, mode: DaemonDrainMode): boolean {
   }
 }
 
+function normalizeDrainLimit(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.max(1, Math.min(MAX_DIAGNOSTIC_RESLICE_DRAIN_LIMIT, Math.floor(value)));
+}
+
+function resolveDrainLimit(
+  cfg: AshlrConfig,
+  mode: DaemonDrainMode | undefined,
+  explicitLimit?: number,
+): number | undefined {
+  if (!mode) return undefined;
+  const explicit = normalizeDrainLimit(explicitLimit);
+  if (explicit !== undefined) return explicit;
+  switch (mode) {
+    case 'diagnostic-reslices': {
+      const configured = normalizeDrainLimit(cfg.daemon?.drainLimits?.diagnosticReslices);
+      return configured ?? DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT;
+    }
+  }
+}
+
 function drainSummary(
   mode: DaemonDrainMode,
   availableItems: WorkItem[],
   selectedItems: WorkItem[],
+  limit?: number,
 ): DaemonDrainSummary {
   const selectedItemIds = selectedItems
     .map((item) => boundedText(item.id, 120))
     .slice(0, MAX_DRAIN_SELECTED_IDS);
+  const capped = typeof limit === 'number' && availableItems.length > selectedItems.length && selectedItems.length >= limit;
   return {
     mode,
     available: availableItems.length,
     selected: selectedItems.length,
+    ...(typeof limit === 'number' ? { limit } : {}),
+    ...(capped ? { capped: true } : {}),
     ...(selectedItemIds.length > 0 ? { selectedItemIds } : {}),
     ...(availableItems.length > 0 && selectedItems.length === 0 ? { stalled: true } : {}),
   };
@@ -454,6 +482,8 @@ function recordDrainSelectionAgentAction(fields: {
   mode: DaemonDrainMode;
   available: number;
   selectedItems: WorkItem[];
+  limit?: number;
+  capped?: boolean;
   machineId: string;
   dryRun: boolean;
 }): void {
@@ -461,6 +491,7 @@ function recordDrainSelectionAgentAction(fields: {
   const selectedSummary = selectedIds.length > 0
     ? ` ids=${selectedIds.slice(0, MAX_DRAIN_SELECTED_IDS).join(',')}`
     : '';
+  const limitSummary = typeof fields.limit === 'number' ? ` limit=${fields.limit}` : '';
   recordAgentAction({
     schemaVersion: 1,
     ts: fields.ts,
@@ -471,18 +502,21 @@ function recordDrainSelectionAgentAction(fields: {
     action: 'daemon:drain-select',
     summary:
       `drain ${fields.mode}: selected ${fields.selectedItems.length}/` +
-      `${fields.available}${selectedSummary}`,
+      `${fields.available}${limitSummary}${selectedSummary}`,
     reason: fields.dryRun ? 'dry-run' : 'live',
     ...(selectedIds[0] ? { itemId: selectedIds[0] } : {}),
     tags: [
       'drain-select',
       drainTag(fields.mode),
       fields.selectedItems.length > 0 ? 'selected' : 'none-selected',
+      ...(fields.capped ? ['capped'] : []),
       ...(fields.dryRun ? ['dry-run'] : []),
     ],
     counts: {
       available: fields.available,
       selected: fields.selectedItems.length,
+      ...(typeof fields.limit === 'number' ? { limit: fields.limit } : {}),
+      ...(fields.capped ? { capped: 1 } : {}),
     },
   });
 }
@@ -1728,7 +1762,7 @@ export async function tick(
     ? backlogItems.filter((item) => isDrainCandidate(item, drainMode))
     : [];
   const selectionItems = drainMode ? drainAvailableItems : backlogItems;
-  const selectCount = daemonQueueSelectionLimit({
+  const rawSelectCount = daemonQueueSelectionLimit({
     perTickItems: dcfg.perTickItems,
     remainingBudgetUsd: remainingBudget,
     backlogItems: selectionItems.length,
@@ -1736,6 +1770,10 @@ export async function tick(
     availableSlots: availableSlotsForSelection,
     minPerItemUsd: MIN_PER_ITEM_USD,
   });
+  const drainLimit = resolveDrainLimit(liveCfg, drainMode, opts.drainLimit);
+  const selectCount = typeof drainLimit === 'number'
+    ? Math.min(rawSelectCount, drainLimit)
+    : rawSelectCount;
 
   // M85: read the cooldown window from liveCfg defensively (no types.ts change).
   const cooldownMs: number =
@@ -1856,13 +1894,15 @@ export async function tick(
   const drainSelectedItems = drainMode
     ? workedSet.filter((item) => isDrainCandidate(item, drainMode))
     : [];
-  const drain = drainMode ? drainSummary(drainMode, drainAvailableItems, drainSelectedItems) : undefined;
+  const drain = drainMode ? drainSummary(drainMode, drainAvailableItems, drainSelectedItems, drainLimit) : undefined;
   if (drainMode) {
     recordDrainSelectionAgentAction({
       ts: now,
       mode: drainMode,
       available: drainAvailableItems.length,
       selectedItems: drainSelectedItems,
+      ...(typeof drainLimit === 'number' ? { limit: drainLimit } : {}),
+      ...(drain?.capped ? { capped: true } : {}),
       machineId,
       dryRun: opts.dryRun,
     });
@@ -3306,7 +3346,8 @@ export async function runDaemon(
     sandboxId: null,
     summary:
       `daemon started: once=${opts.once}, dryRun=${opts.dryRun}, budget=$${dcfg.dailyBudgetUsd}, ` +
-      `intervalMs=${dcfg.intervalMs}${opts.drain ? `, drain=${opts.drain}` : ''}`,
+      `intervalMs=${dcfg.intervalMs}${opts.drain ? `, drain=${opts.drain}` : ''}` +
+      `${opts.drainLimit ? `, drainLimit=${opts.drainLimit}` : ''}`,
     result: 'ok',
   });
 
@@ -3370,7 +3411,11 @@ export async function runDaemon(
       // Single-tick mode — reload full config so a manual tick picks up disk changes.
       const liveCfg = reloadLiveConfigForDaemon(cfg);
       if (heartbeatDaemonLock(daemonLock)) {
-        await tick(liveCfg, { dryRun: opts.dryRun, ...(opts.drain ? { drain: opts.drain } : {}) });
+        await tick(liveCfg, {
+          dryRun: opts.dryRun,
+          ...(opts.drain ? { drain: opts.drain } : {}),
+          ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
+        });
       }
     } else {
       // M85/M116/M309: choose loop strategy from live config every iteration.
@@ -3395,7 +3440,11 @@ export async function runDaemon(
           });
           break;
         }
-        const tickResult = await tick(liveCfg, { dryRun: opts.dryRun, ...(opts.drain ? { drain: opts.drain } : {}) });
+        const tickResult = await tick(liveCfg, {
+          dryRun: opts.dryRun,
+          ...(opts.drain ? { drain: opts.drain } : {}),
+          ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
+        });
 
         // Dry-run is inherently a one-shot PLAN: it records spentUsd:0 forever,
         // so the budget break can never fire. Terminate after a single iteration

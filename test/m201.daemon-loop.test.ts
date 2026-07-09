@@ -557,14 +557,81 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       mode: 'diagnostic-reslices',
       available: 1,
       selected: 1,
+      limit: 3,
       selectedItemIds: [reslice.id],
     });
     expect(selection).toMatchObject({
       action: 'daemon:drain-select',
       itemId: reslice.id,
-      counts: { available: 1, selected: 1 },
+      counts: { available: 1, selected: 1, limit: 3 },
     });
     expect(selection?.tags).toEqual(expect.arrayContaining(['drain-select', 'drain:diagnostic-reslices']));
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1-drain-cap: targeted diagnostic-reslices mode defaults to a bounded drain cap', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const reslices = Array.from({ length: 5 }, (_unused, i) =>
+      makeDiagnosticResliceItem(repo.dir, `abcdef12345${i}`, 10 - i),
+    );
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: reslices,
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 10, parallel: 1 }), {
+      dryRun: true,
+      drain: 'diagnostic-reslices',
+    });
+    const selection = readAgentActions().find((event) => event.action === 'daemon:drain-select');
+
+    expect(result.reason).toBe('dry-run');
+    expect(result.itemsConsidered).toBe(3);
+    expect(result.drain).toMatchObject({
+      mode: 'diagnostic-reslices',
+      available: 5,
+      selected: 3,
+      limit: 3,
+      capped: true,
+    });
+    expect(result.drain?.selectedItemIds).toHaveLength(3);
+    expect(selection).toMatchObject({
+      counts: { available: 5, selected: 3, limit: 3, capped: 1 },
+    });
+    expect(selection?.tags).toEqual(expect.arrayContaining(['capped']));
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1-drain-limit: targeted diagnostic-reslices mode accepts an explicit smaller drain cap', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const reslices = Array.from({ length: 3 }, (_unused, i) =>
+      makeDiagnosticResliceItem(repo.dir, `fedcba98765${i}`, 10 - i),
+    );
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: reslices,
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 10, parallel: 1 }), {
+      dryRun: true,
+      drain: 'diagnostic-reslices',
+      drainLimit: 1,
+    });
+
+    expect(result.reason).toBe('dry-run');
+    expect(result.itemsConsidered).toBe(1);
+    expect(result.drain).toMatchObject({
+      mode: 'diagnostic-reslices',
+      available: 3,
+      selected: 1,
+      limit: 1,
+      capped: true,
+    });
+    expect(result.drain?.selectedItemIds).toHaveLength(1);
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
