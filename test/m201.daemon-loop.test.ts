@@ -103,6 +103,11 @@ vi.mock('../src/core/fleet/self-heal.js', () => ({
   runSelfHealCycle: (...args: unknown[]) => mockRunSelfHealCycle(...args),
 }));
 
+const mockQueueProposalRepairWorkForPendingProposals = vi.fn();
+vi.mock('../src/core/fleet/proposal-repair-work.js', () => ({
+  queueProposalRepairWorkForPendingProposals: (...args: unknown[]) => mockQueueProposalRepairWorkForPendingProposals(...args),
+}));
+
 const mockRunViaAshlrcode = vi.fn();
 vi.mock('../src/core/run/ashlrcode-engine.js', () => ({
   runViaAshlrcode: (...args: unknown[]) => mockRunViaAshlrcode(...args),
@@ -244,6 +249,7 @@ beforeEach(() => {
   mockRunGoal.mockReset();
   mockRunBestOfN.mockReset();
   mockRunSelfHealCycle.mockReset();
+  mockQueueProposalRepairWorkForPendingProposals.mockReset();
   mockRunViaAshlrcode.mockReset();
   mockRunInventCycle.mockReset();
   mockRunCounterfactualReplay.mockReset();
@@ -264,6 +270,7 @@ beforeEach(() => {
 
   // Default benign implementations.
   mockRunSelfHealCycle.mockResolvedValue({ checked: 0, broken: [], healItems: [] });
+  mockQueueProposalRepairWorkForPendingProposals.mockReturnValue({ scanned: 0, eligible: 0, queued: 0, failed: 0 });
   mockRunGoal.mockResolvedValue({
     id: `mock-rungoal-${Date.now()}`,
     status: 'done',
@@ -544,6 +551,45 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSelfHealCycle).toHaveBeenCalledTimes(1);
     expect(mockRunInventCycle).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+  });
+
+  it('A1a2b: proposal repair maintenance can refill backlog before selection', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repairItems = makeItems(repo.dir, 1).map((item) => ({
+      ...item,
+      id: `${repo.dir}:proposal-repair:abc123`,
+      source: 'self' as const,
+      title: 'Repair proposal prop-partial: test failure in src/app.ts:12',
+      detail: 'Proposal repair: test failure in src/app.ts:12 expected ready state.',
+      tags: ['self-heal', 'proposal-repair', 'verify'],
+    }));
+    mockQueueProposalRepairWorkForPendingProposals.mockReturnValue({
+      scanned: 1,
+      eligible: 1,
+      queued: 1,
+      failed: 0,
+    });
+    mockBuildBacklog
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [] })
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: repairItems });
+
+    const result = await tick(
+      { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autonomyControlLoop: false } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(1);
+    expect(mockQueueProposalRepairWorkForPendingProposals).toHaveBeenCalledTimes(1);
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(2);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(result.producerMaintenance).toMatchObject({
+      proposalRepair: true,
+      proposalRepairEligible: 1,
+      proposalRepairQueued: 1,
+      proposalRepairFailed: 0,
+    });
   });
 
   it('A1a3: empty backlog does not rerun producer maintenance inside the daemon interval', async () => {

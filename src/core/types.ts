@@ -3681,6 +3681,10 @@ export interface DaemonTick {
     selfHeal: boolean;
     invent: boolean;
     ancillary: boolean;
+    proposalRepair?: boolean;
+    proposalRepairEligible?: number;
+    proposalRepairQueued?: number;
+    proposalRepairFailed?: number;
     skippedByCadence?: boolean;
     nextAfter?: string;
   };

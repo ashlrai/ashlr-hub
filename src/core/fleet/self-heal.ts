@@ -379,7 +379,7 @@ function pruneInvalidSelfHealItems(repos: string[]): number {
  * Queue a heal item to disk so the fleet daemon picks it up on the next tick
  * ahead of other work. Best-effort — failure here must never abort the cycle.
  */
-function persistHealItem(item: WorkItem): void {
+export function queueSelfHealItem(item: WorkItem): boolean {
   try {
     const qPath = selfHealQueuePath();
     const dir = join(homedir(), '.ashlr');
@@ -392,9 +392,15 @@ function persistHealItem(item: WorkItem): void {
     filtered.unshift(item); // high-priority: front of queue
 
     writeJsonAtomic(qPath, filtered);
+    return true;
   } catch {
     // Best-effort — never propagate
+    return false;
   }
+}
+
+function persistHealItem(item: WorkItem): void {
+  queueSelfHealItem(item);
 }
 
 /**

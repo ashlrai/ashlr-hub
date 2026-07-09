@@ -85,6 +85,10 @@ import { estimateRun } from '../observability/estimate.js';
 import { buildForecast } from '../observability/forecast.js';
 import { emitTuningProposals } from '../learn/tuning.js';
 import { runAutoMergePass, type AutoMergePassResult } from '../fleet/automerge-pass.js';
+import {
+  queueProposalRepairWorkForPendingProposals,
+  type ProposalRepairWorkResult,
+} from '../fleet/proposal-repair-work.js';
 import { reconcileRemoteHandoffs, type RemoteHandoffReconcileResult } from '../inbox/remote-handoff.js';
 import { runBestOfN } from '../run/best-of-n.js';
 import { runSelfHealCycle } from '../fleet/self-heal.js';
@@ -1121,6 +1125,8 @@ export async function tick(
   let selfHealMaintenanceRan = false;
   let inventMaintenanceRan = false;
   let ancillaryMaintenanceRan = false;
+  let proposalRepairMaintenanceRan = false;
+  let proposalRepairMaintenanceResult: ProposalRepairWorkResult | null = null;
   let skipInventAfterSelfHealRefill = false;
   let producerMaintenanceSkippedByCadence = false;
   let producerMaintenanceNextAfter: string | undefined;
@@ -1129,6 +1135,7 @@ export async function tick(
       !selfHealMaintenanceRan &&
       !inventMaintenanceRan &&
       !ancillaryMaintenanceRan &&
+      !proposalRepairMaintenanceRan &&
       !producerMaintenanceSkippedByCadence
     ) {
       return undefined;
@@ -1137,6 +1144,14 @@ export async function tick(
       selfHeal: selfHealMaintenanceRan,
       invent: inventMaintenanceRan,
       ancillary: ancillaryMaintenanceRan,
+      proposalRepair: proposalRepairMaintenanceRan,
+      ...(proposalRepairMaintenanceResult
+        ? {
+          proposalRepairEligible: proposalRepairMaintenanceResult.eligible,
+          proposalRepairQueued: proposalRepairMaintenanceResult.queued,
+          proposalRepairFailed: proposalRepairMaintenanceResult.failed,
+        }
+        : {}),
       ...(producerMaintenanceSkippedByCadence ? { skippedByCadence: true } : {}),
       ...(producerMaintenanceNextAfter ? { nextAfter: producerMaintenanceNextAfter } : {}),
     };
@@ -1159,6 +1174,19 @@ export async function tick(
     } catch (err) {
       // Best-effort — self-heal must never crash the tick.
       console.warn('[ashlr] daemon:tick runSelfHealCycle failed:', (err as Error)?.message ?? err);
+    }
+  };
+  const runProposalRepairMaintenance = async (): Promise<ProposalRepairWorkResult | null> => {
+    if (opts.dryRun || proposalRepairMaintenanceRan) return proposalRepairMaintenanceResult;
+    if ((liveCfg.foundry as Record<string, unknown> | undefined)?.['proposalRepair'] === false) return null;
+    proposalRepairMaintenanceRan = true;
+    try {
+      proposalRepairMaintenanceResult = queueProposalRepairWorkForPendingProposals();
+      return proposalRepairMaintenanceResult;
+    } catch (err) {
+      proposalRepairMaintenanceResult = { scanned: 0, eligible: 0, queued: 0, failed: 1 };
+      console.warn('[ashlr] daemon:tick proposal repair queue failed:', (err as Error)?.message ?? err);
+      return proposalRepairMaintenanceResult;
     }
   };
   const runInventMaintenance = async (): Promise<boolean> => {
@@ -1373,6 +1401,10 @@ export async function tick(
   // 5. Build / refresh backlog for ENROLLED repos only.
   // -------------------------------------------------------------------------
   let backlogItems: WorkItem[] = await refreshBacklogForTick();
+  const proposalRepairResult = await runProposalRepairMaintenance();
+  if ((proposalRepairResult?.queued ?? 0) > 0) {
+    backlogItems = await refreshBacklogForTick();
+  }
 
   if (backlogItems.length === 0) {
     const autoMergePassResult = await runAutoMergeMaintenancePass();

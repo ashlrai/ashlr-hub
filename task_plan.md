@@ -578,6 +578,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Repair adjacent public-read and scrub regressions uncovered by broad CI: enrolled-existing workspace fixtures, orient path-scrub expectations, MCP audit `keys=`, and long-diff truncation markers.
 - [x] Harden the order-sensitive TITRR worktree mock fixture so full CI no longer depends on incidental module cache order.
 - [x] Verify pending matching and public/scrub fixes with focused, adjacent, typecheck, lint, build, audit, broad affected suites, and full `npm run test:ci` (437 files, 8,933 passed, 7 skipped).
-- [ ] Next lane: connect review-only partial proposals to a repair/verify work queue so useful partial diffs compound into merge-grade patches.
+- [x] Connect review-only partial/failed-verify proposals to a metadata-only repair/verify work queue.
+- [x] Queue proposal-repair work through the self-heal queue with stable ids, scrubbed bounded failure context, and no raw diff/stdout/stderr/prompt/file content.
+- [x] Refresh daemon backlog after proposal-repair maintenance so repair work can be selected in the same tick.
+- [x] Verify proposal repair with focused/adjacent gates and full `npm run test:ci` (437 files, 8,937 passed, 7 skipped).
 - [ ] Next lane: make merge-grade verification explicit in status by separating inferred command coverage from repo-owned contracts.
 - [ ] Later lane: evaluate the untracked triviality classifier as observe-only fleet telemetry after moving/hardening it.

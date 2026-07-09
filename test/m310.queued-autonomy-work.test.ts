@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 import { buildBacklog } from '../src/core/portfolio/backlog.js';
 import { scanQueuedAutonomyWork } from '../src/core/portfolio/scanners.js';
-import type { WorkItem } from '../src/core/types.js';
+import { queueProposalRepairWorkForPendingProposals } from '../src/core/fleet/proposal-repair-work.js';
+import type { Proposal, WorkItem } from '../src/core/types.js';
 
 let fx: H1Fixture;
 
@@ -37,6 +38,28 @@ function item(repo: string, id: string, overrides: Partial<WorkItem> = {}): Work
 function writeJson(path: string, data: unknown): void {
   mkdirSync(fx.ashlrDir, { recursive: true });
   writeFileSync(path, JSON.stringify(data, null, 2), 'utf8');
+}
+
+function partialProposal(repo: string, overrides: Partial<Proposal> = {}): Proposal {
+  return {
+    id: 'prop-partial-repair',
+    repo,
+    origin: 'swarm',
+    kind: 'patch',
+    title: 'Partial proposal with useful work',
+    summary: 'A sandbox produced partial work that needs repair.',
+    status: 'pending',
+    createdAt: new Date().toISOString(),
+    diff: 'diff --git a/src/secret.ts b/src/secret.ts\n+const leaked = "DO_NOT_COPY_DIFF";\n',
+    workItemId: 'repo:goal:original',
+    isPartial: true,
+    verifyResult: {
+      passed: false,
+      detail: 'capture gate blocked proposal after test failure in src/app.ts:12: expected ready state',
+      source: 'capture-gate',
+    },
+    ...overrides,
+  };
 }
 
 describe('queued autonomy work scanner', () => {
@@ -147,5 +170,69 @@ describe('queued autonomy work scanner', () => {
     const found = await scanQueuedAutonomyWork(repo.dir);
 
     expect(found.map((x) => x.id)).toEqual(['heal-actionable']);
+  });
+
+  it('queues metadata-only repair work for partial or failed-verify proposals idempotently', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const proposal = partialProposal(repo.dir, {
+      verifyResult: {
+        passed: false,
+        detail: 'capture gate blocked proposal after test failure in src/app.ts:12: expected github_pat_1234567890abcdefghijklmnop to be absent',
+        source: 'capture-gate',
+      },
+    });
+
+    const first = queueProposalRepairWorkForPendingProposals([proposal]);
+    const second = queueProposalRepairWorkForPendingProposals([proposal]);
+    const rawQueue = JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[];
+    const found = await scanQueuedAutonomyWork(repo.dir);
+
+    expect(first).toMatchObject({ scanned: 1, eligible: 1, queued: 1, failed: 0 });
+    expect(second).toMatchObject({ scanned: 1, eligible: 1, queued: 1, failed: 0 });
+    expect(rawQueue).toHaveLength(1);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({
+      repo: repo.dir,
+      source: 'self',
+      tags: expect.arrayContaining(['self-heal', 'proposal-repair', 'partial', 'verify']),
+    });
+    expect(found[0]!.detail).toContain(proposal.id);
+    expect(found[0]!.detail).toContain(proposal.workItemId);
+    expect(found[0]!.detail).not.toContain('DO_NOT_COPY_DIFF');
+    expect(found[0]!.detail).not.toContain('github_pat_1234567890abcdefghijklmnop');
+    expect(found[0]!.detail).toContain('[REDACTED]');
+  });
+
+  it('does not queue repair work for clean pending proposals', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const proposal = partialProposal(repo.dir, {
+      isPartial: false,
+      verifyResult: { passed: true, detail: 'verified', source: 'manual' },
+    });
+
+    const result = queueProposalRepairWorkForPendingProposals([proposal]);
+    const found = await scanQueuedAutonomyWork(repo.dir);
+
+    expect(result).toMatchObject({ scanned: 1, eligible: 0, queued: 0, failed: 0 });
+    expect(found).toEqual([]);
+  });
+
+  it('keeps proposal repair work eligible even when the original item is pending-covered', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const proposal = partialProposal(repo.dir);
+    queueProposalRepairWorkForPendingProposals([proposal]);
+
+    const backlog = await buildBacklog({
+      repos: [repo.dir],
+      minItemValue: 2,
+      cfg: { foundry: { feedbackEnabled: false } },
+      listPendingProposals: () => [proposal],
+    });
+
+    expect(backlog.items.some((x) => x.tags.includes('proposal-repair'))).toBe(true);
+    expect(backlog.items.find((x) => x.tags.includes('proposal-repair'))?.id).not.toBe(proposal.workItemId);
   });
 });
