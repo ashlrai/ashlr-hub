@@ -77,6 +77,7 @@ import {
   p50Cost,
   anomalyRatio,
   type LearnedRoute,
+  type LearnedRouteResourceState,
 } from '../src/core/run/learned-router.js';
 import { routeBackend } from '../src/core/fleet/router.js';
 import { p50CostFromEstimate, anomalyRatioFromEstimate } from '../src/core/observability/estimate.js';
@@ -237,6 +238,12 @@ function comparativeCandidateEvents(backend: EngineId): DispatchProductionEvent[
     makeDispatchProductionEvent({ backend, outcome: 'proposal-created', proposalCreated: true }),
     makeDispatchProductionEvent({ backend, outcome: 'empty-diff', proposalCreated: false }),
   ];
+}
+
+function learnedResourceStates(
+  entries: Array<Pick<LearnedRouteResourceState, 'backend' | 'availability'>>,
+): LearnedRouteResourceState[] {
+  return entries.map((entry) => ({ backend: entry.backend, availability: entry.availability }));
 }
 
 /** Build a minimal CostForecast. */
@@ -700,6 +707,96 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(rec.tier).toBe(base.tier);
     expect(rec.reason).not.toContain('same-tier reroute');
     expect(rec.reason).not.toContain('candidate yield');
+  });
+
+  it('resource-aware learned target gate allows open or near same-tier candidates', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const dispatchProductionEvents = [
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
+      ...comparativeCandidateEvents(alternate),
+    ];
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents,
+      resourceStates: learnedResourceStates([
+        { backend: base.backend, availability: 'open' },
+        { backend: alternate, availability: 'near' },
+      ]),
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(alternate);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).toContain('same-tier reroute');
+  });
+
+  it('resource-aware learned target gate blocks unavailable candidates', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const dispatchProductionEvents = [
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
+      ...comparativeCandidateEvents(alternate),
+    ];
+
+    for (const availability of ['throttled', 'exhausted', 'unreachable', 'unknown'] as const) {
+      const rec = await recommendRoute(item, cfg, {
+        estimate: makeEstimate(0.001, 10),
+        prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+        dispatchProductionEvents,
+        resourceStates: learnedResourceStates([
+          { backend: base.backend, availability: 'open' },
+          { backend: alternate, availability },
+        ]),
+      });
+
+      expect(rec.backend).toBe(base.backend);
+      expect(rec.tier).toBe(base.tier);
+      expect(rec.reason).not.toContain('same-tier reroute');
+    }
+  });
+
+  it('resource-aware learned target gate blocks candidates missing from the snapshot', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const dispatchProductionEvents = [
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
+      ...comparativeCandidateEvents(alternate),
+    ];
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents,
+      resourceStates: learnedResourceStates([{ backend: base.backend, availability: 'open' }]),
+    });
+
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('same-tier reroute');
   });
 
   it('legacy unversioned dispatch-production yield cannot trigger route changes', async () => {

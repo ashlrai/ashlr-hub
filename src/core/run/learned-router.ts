@@ -84,6 +84,11 @@ export interface LearnedRoute {
   confidence: number;
 }
 
+export interface LearnedRouteResourceState {
+  backend: EngineId;
+  availability: 'open' | 'near' | 'throttled' | 'exhausted' | 'unreachable' | 'unknown';
+}
+
 /** The outcome of recoverWithinBudget — either a cascaded decision or a pause. */
 export type BudgetRecovery =
   | { action: 'cascade'; decision: RouteDecision; reason: string }
@@ -391,6 +396,7 @@ function comparativeSameTierAlternative(
   cfg: AshlrConfig,
   basePrior: DispatchYieldPrior,
   minProposalYieldRate: number,
+  resourceStates?: readonly LearnedRouteResourceState[],
 ): { backend: EngineId; prior: DispatchYieldPrior } | null {
   let best: { backend: EngineId; prior: DispatchYieldPrior } | null = null;
   for (const backend of allowed) {
@@ -398,6 +404,7 @@ function comparativeSameTierAlternative(
     if (backend === 'builtin') continue;
     if (tierOf(backend, cfg) !== tier) continue;
     if (!engineInstalled(backend, cfg)) continue;
+    if (!resourceAllowsLearnedTarget(backend, resourceStates)) continue;
     const prior = dispatchYieldForBackend(events, backend, source);
     if (prior.attempts < MIN_DISPATCH_YIELD_SAMPLES) continue;
     if (prior.proposalRate < minProposalYieldRate) continue;
@@ -414,6 +421,15 @@ function comparativeSameTierAlternative(
     }
   }
   return best;
+}
+
+function resourceAllowsLearnedTarget(
+  backend: EngineId,
+  resourceStates: readonly LearnedRouteResourceState[] | undefined,
+): boolean {
+  if (resourceStates === undefined) return true;
+  const state = resourceStates.find((item) => item.backend === backend);
+  return state?.availability === 'open' || state?.availability === 'near';
 }
 
 // ---------------------------------------------------------------------------
@@ -462,6 +478,7 @@ export async function recommendRoute(
     estimate?: RunEstimate;
     prior?: OutcomePrior;
     dispatchProductionEvents?: DispatchProductionEvent[];
+    resourceStates?: readonly LearnedRouteResourceState[];
   },
 ): Promise<LearnedRoute> {
   // ── FLAG-OFF: absent intelligence config ⇒ defer to routeBackend exactly ──
@@ -594,6 +611,7 @@ export async function recommendRoute(
       cfg,
       yieldPrior,
       minProposalYieldRate,
+      opts?.resourceStates,
     );
     if (alternate !== null) {
       return {

@@ -36,7 +36,7 @@ import { withinLimit } from '../fleet/quota.js';
 import { subscriptionAllows, isSubscriptionEngine } from '../fleet/subscription-usage.js';
 import { recommendRoute, recoverWithinBudget } from '../run/learned-router.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
-import { getResourceSnapshot, type BackendResourceState } from './resource-monitor.js';
+import { getResourceSnapshot, type BackendResourceState, type ResourceSnapshot } from './resource-monitor.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -170,6 +170,7 @@ export async function decide(
     let current: { backend: EngineId; tier: EngineTier; model?: string | null; reason: string };
     let demotedFrom: EngineId | undefined;
     let resourceState: GatewayDecision['resourceState'];
+    let resourceSnapshot: ResourceSnapshot | undefined;
     if (isWorkItem(input)) {
       const d = routeBackend(input, cfg);
       current = { backend: d.backend, tier: d.tier, model: d.model, reason: d.reason };
@@ -189,7 +190,8 @@ export async function decide(
     // capable+available backend. Hard items (effort>=4 or source=escalation)
     // are paused, never silently downgraded to builtin. Flag-OFF: zero impact.
     if (cfg.foundry?.fabric?.resourceAware === true) {
-      const resourceDemote = await _resourceAwareDemote(input, current, cfg, trace);
+      resourceSnapshot = await getResourceSnapshot(cfg);
+      const resourceDemote = await _resourceAwareDemote(input, current, cfg, trace, resourceSnapshot);
       if (resourceDemote !== null) {
         if (resourceDemote.pause) {
           return {
@@ -245,7 +247,7 @@ export async function decide(
     if (isWorkItem(input)) {
       const intelRaw = cfg.foundry?.intelligence;
       if (intelRaw !== undefined && intelRaw !== null) {
-        const nudge = await recommendRoute(input, cfg, {});
+        const nudge = await recommendRoute(input, cfg, { resourceStates: resourceSnapshot?.backends });
         // Only override when the nudge doesn't escalate a local decision.
         if (current.tier !== 'local' || nudge.tier === 'local') {
           if (nudge.backend !== current.backend) {
@@ -418,9 +420,10 @@ async function _resourceAwareDemote(
   current: { backend: EngineId; tier: EngineTier; model?: string | null; reason: string },
   cfg: AshlrConfig,
   _trace: GatewayTraceStep[],
+  snapshotOverride?: ResourceSnapshot,
 ): Promise<ResourceDemoteResult | null> {
   try {
-    const snapshot = await getResourceSnapshot(cfg);
+    const snapshot = snapshotOverride ?? await getResourceSnapshot(cfg);
     const state = snapshot.backends.find(b => b.backend === current.backend);
 
     if (!state) return null; // no state for this backend — permissive

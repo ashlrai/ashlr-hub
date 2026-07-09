@@ -964,3 +964,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Run focused and adjacent router/daemon/gateway/resource/status verification.
 - [x] Run broad verification.
 - [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Resource-Aware Learned Target Gate
+- [x] Rechecked dirty Hub state, recent commits, Entire state, task plan, notes, and current resource-aware routing diff.
+- [x] Deployed sidecar scouts for learned-router safety, gateway integration coverage, and next high-leverage fleet lanes.
+- [x] Pass resource snapshots into learned routing as explicit input so same-tier learned reroutes only target `open` or `near` backends when resource-aware gateway mode is active.
+- [x] Preserve direct `recommendRoute()` callers by keeping missing resource state permissive unless a caller explicitly provides a snapshot.
+- [x] Keep final gateway resource demotion fresh after learned/budget routing so `recordBackoff()` cache invalidations during routing are observed before dispatch.
+- [x] Add pure learned-router and gateway integration regressions for open/near, unavailable, missing-snapshot, and mid-decision backoff cases.
+- [x] Run focused and adjacent router/daemon/gateway/resource/status verification.
+- [x] Run broad verification.
+- [ ] Commit, push, reload daemon, and smoke live status.
+- [ ] Next lane: implement diagnostic no-diff reslice queue so empty-diff attempts generate better-shaped follow-up work instead of only telemetry.

@@ -78,6 +78,12 @@ function writeStatsCache(
 }
 
 import type { AshlrConfig, EngineId, WorkItem, WorkSource } from '../src/core/types.js';
+import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
+import {
+  learningEpochFromTimestamp,
+  ROUTER_POLICY_VERSION,
+} from '../src/core/learning/causal.js';
+import { productionAttemptLearningLabelFromSignals } from '../src/core/learning/attempt-shape.js';
 
 function baseCfg(): AshlrConfig {
   return {
@@ -116,6 +122,50 @@ function makeItem(source: WorkSource, over: Partial<WorkItem> = {}): WorkItem {
     ts: FIXED_TS,
     ...over,
   };
+}
+
+function makeDispatchProductionEvent(over: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
+  const event: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts: FIXED_TS,
+    machineId: 'm250',
+    itemId: 'repo:security:item',
+    source: 'security',
+    repo: '/repo',
+    title: 'security item',
+    backend: 'claude',
+    tier: 'frontier',
+    model: 'test-model',
+    assignedBy: 'daemon',
+    routeReason: 'frontier',
+    outcome: 'empty-diff',
+    proposalCreated: false,
+    spentUsd: 0,
+    reason: 'agent returned no diff',
+    basis: 'run-proposal-outcome',
+    ...over,
+  };
+  if (event.routerPolicyVersion === undefined) event.routerPolicyVersion = ROUTER_POLICY_VERSION;
+  if (event.learningEpoch === undefined) event.learningEpoch = learningEpochFromTimestamp(event.ts);
+  if (event.learningLabel === undefined) {
+    event.learningLabel = productionAttemptLearningLabelFromSignals({
+      outcome: event.outcome,
+      proposalCreated: event.proposalCreated,
+      actionCounts: event.runEventSummary?.actionCounts,
+    });
+  }
+  return event;
+}
+
+function learnedRerouteEvents(base: EngineId, alternate: EngineId): DispatchProductionEvent[] {
+  return [
+    makeDispatchProductionEvent({ backend: base, outcome: 'empty-diff', proposalCreated: false }),
+    makeDispatchProductionEvent({ backend: base, outcome: 'gate-blocked', proposalCreated: false }),
+    makeDispatchProductionEvent({ backend: base, outcome: 'engine-failed', proposalCreated: false }),
+    makeDispatchProductionEvent({ backend: alternate, outcome: 'proposal-created', proposalCreated: true }),
+    makeDispatchProductionEvent({ backend: alternate, outcome: 'proposal-created', proposalCreated: true }),
+    makeDispatchProductionEvent({ backend: alternate, outcome: 'empty-diff', proposalCreated: false }),
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -780,6 +830,138 @@ describe('M252 Gateway — resource-aware demote', () => {
     expect(decision.backend).toBe('local-coder');
     expect(decision.demotedFrom).toBe('claude');
     expect(decision.reason).toMatch(/resourceDemote: claude→local-coder/i);
+  });
+
+  it('resource-aware learned target gate allows open or near m53 nudges', async () => {
+    let dispatchProductionEvents: DispatchProductionEvent[] = [];
+    vi.doMock('../src/core/fleet/dispatch-production-ledger.js', () => ({
+      readDispatchProductionEvents: vi.fn(() => dispatchProductionEvents),
+    }));
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue(null),
+    }));
+    vi.doMock('../src/core/run/engines.js', async () => ({
+      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
+        '../src/core/run/engines.js',
+      )),
+      engineInstalled: () => true,
+    }));
+
+    const { decide } = await import('../src/core/fabric/gateway.js');
+    const { routeBackend } = await import('../src/core/fleet/router.js');
+    const cfg = withFoundry({
+      allowedBackends: ['builtin', 'claude', 'codex'] as EngineId[],
+      fabric: { gateway: true, resourceAware: true },
+      intelligence: { minProposalYieldRate: 0.5 },
+      resourceOverrides: {},
+    });
+    const item = makeItem('security', { effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate: EngineId = base.backend === 'claude' ? 'codex' : 'claude';
+    cfg.foundry!.resourceOverrides = {
+      [base.backend]: { availability: 'open', reason: 'test base capacity open' },
+      [alternate]: { availability: 'near', reason: 'test learned target near capacity' },
+    };
+    dispatchProductionEvents = learnedRerouteEvents(base.backend, alternate);
+
+    const decision = await decide(item, cfg);
+
+    expect(base.tier).toBe('frontier');
+    expect(decision.backend).toBe(alternate);
+    expect(decision.trace.some(t => t.stage === 'm53Nudge')).toBe(true);
+    expect(decision.trace.some(t => t.stage === 'finalResourceDemote')).toBe(false);
+  });
+
+  it('resource-aware learned target gate blocks unavailable m53 nudges', async () => {
+    let dispatchProductionEvents: DispatchProductionEvent[] = [];
+    vi.doMock('../src/core/fleet/dispatch-production-ledger.js', () => ({
+      readDispatchProductionEvents: vi.fn(() => dispatchProductionEvents),
+    }));
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue(null),
+    }));
+    vi.doMock('../src/core/run/engines.js', async () => ({
+      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
+        '../src/core/run/engines.js',
+      )),
+      engineInstalled: () => true,
+    }));
+
+    const { decide } = await import('../src/core/fabric/gateway.js');
+    const { routeBackend } = await import('../src/core/fleet/router.js');
+    const cfg = withFoundry({
+      allowedBackends: ['builtin', 'claude', 'codex'] as EngineId[],
+      fabric: { gateway: true, resourceAware: true },
+      intelligence: { minProposalYieldRate: 0.5 },
+      resourceOverrides: {},
+    });
+    const item = makeItem('security', { effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate: EngineId = base.backend === 'claude' ? 'codex' : 'claude';
+    cfg.foundry!.resourceOverrides = {
+      [base.backend]: { availability: 'open', reason: 'test base capacity open' },
+      [alternate]: { availability: 'throttled', reason: 'test learned target throttled' },
+    };
+    dispatchProductionEvents = learnedRerouteEvents(base.backend, alternate);
+
+    const decision = await decide(item, cfg);
+
+    expect(base.tier).toBe('frontier');
+    expect(decision.backend).toBe(base.backend);
+    expect(decision.trace.some(t => t.stage === 'm53Nudge')).toBe(false);
+    expect(decision.reason).not.toMatch(/resourceDemote:|resource-pause:/i);
+  });
+
+  it('final resource guard re-senses after m53 invalidates resource cache', async () => {
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue({
+        primary: { usedPercent: 20, windowMinutes: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 },
+      }),
+    }));
+    vi.doMock('../src/core/run/engines.js', async () => ({
+      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
+        '../src/core/run/engines.js',
+      )),
+      engineInstalled: () => true,
+    }));
+    vi.doMock('../src/core/run/learned-router.js', async () => {
+      const actual = await vi.importActual<typeof import('../src/core/run/learned-router.js')>(
+        '../src/core/run/learned-router.js',
+      );
+      return {
+        ...actual,
+        recommendRoute: vi.fn(async () => {
+          const { recordBackoff } = await import('../src/core/fabric/resource-monitor.js');
+          recordBackoff('codex', 60_000, 'test backoff during learned routing');
+          return {
+            backend: 'codex',
+            tier: 'frontier',
+            reason: 'same-tier reroute to codex from test',
+            confidence: 0.9,
+          };
+        }),
+      };
+    });
+
+    const { decide } = await import('../src/core/fabric/gateway.js');
+    const cfg = withFoundry({
+      allowedBackends: ['builtin', 'claude', 'codex'] as EngineId[],
+      fabric: { gateway: true, resourceAware: true },
+      intelligence: { minProposalYieldRate: 0.5 },
+      claudeResource: { weeklyMessageCap: 2000, protectPct: 85 },
+      resourceOverrides: {
+        claude: { availability: 'open', reason: 'test claude capacity open' },
+      },
+    });
+    const item = makeItem('security', { effort: 5, score: 10 });
+
+    const decision = await decide(item, cfg);
+
+    expect(decision.trace.some(t => t.stage === 'm53Nudge')).toBe(true);
+    expect(decision.trace.some(t => t.stage === 'finalResourceDemote')).toBe(true);
+    expect(decision.backend).toBe('claude');
+    expect(decision.demotedFrom).toBe('codex');
+    expect(decision.reason).toMatch(/resourceDemote: codex→claude/i);
   });
 
   it('never throws with resourceAware=true and corrupt cfg', async () => {

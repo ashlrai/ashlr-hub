@@ -1,5 +1,14 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Current Resource-Aware Learned Target Gate
+- Start state: dirty Hub WIP after comparative learned routing rollout; Entire remains not set up for `master`.
+- Implementation: `recommendRoute()` now accepts optional metadata-only `resourceStates` and filters comparative same-tier learned reroute candidates to `open` or `near` availability when provided. Missing candidates are blocked only in explicit resource-aware calls; direct/legacy learned-router callers without `resourceStates` preserve previous behavior.
+- Gateway integration: resource-aware `decide()` captures one resource snapshot before M53 and passes it to learned routing so learned target choice is based on the same capacity evidence as the initial route guard.
+- Safety refinement from Popper scout: the final gateway resource demotion intentionally re-senses instead of reusing the initial snapshot, so a mid-decision `recordBackoff()` invalidation is observed before dispatch. This keeps learned routing efficient while preserving the final fail-safe.
+- Regression coverage: `m53` covers open/near, throttled/exhausted/unreachable/unknown, and missing-snapshot learned target gates. `m250` covers gateway `m53Nudge` allowed/blocked traces and the mid-decision backoff re-sense path.
+- Verification passed: `npm run typecheck -- --pretty false`, `git diff --check`, focused `m53/m250/m247` (171 tests), adjacent daemon/status/resource suites `m201/m255/m256/m49/m306` (179 tests), `npm run lint` (existing 115-warning baseline, 0 errors), `npm run build`, `npm audit --audit-level=moderate` (0 vulnerabilities), `npm run test:invariants` (41 files, 411 tests), and full `npm run test:ci` (439 files, 9,089 passed, 7 skipped).
+- Agent next-lane ranking: highest leverage after this slice is a diagnostic no-diff reslice queue; live bottleneck remains proposal starvation (`empty-diff`/diagnostic no-proposal) more than UI or Phantom-side changes.
+
 ## Current Stale Goal Lane Recovery Action
 - Start state: clean pushed `master` at `0b22b7b`; live lane-lock smoke showed daemon running, guard clear, goal-focus `12/4`, lane locks `12 active / 1 stale / 0 handoff / 0 unverified`, and 13 backlog items / 11 eligible.
 - Implementation: `buildNextActions()` now adds `recover-stale-goal-lanes` when `FleetStatus.laneLocks.staleInProgress > 0`. The action stays control-plane/advisory: first inspect the goal, then optionally pause and resume the stale milestone to reset it to pending.
