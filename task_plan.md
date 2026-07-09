@@ -1099,4 +1099,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Make diff evidence collect files from `diff --git`, old/new headers, and rename headers while skipping `/dev/null`.
 - [x] Add delete-only regression proving removed files are represented and deleted content/raw diff text is not persisted.
 - [x] Run focused M301 autonomy policy tests, typecheck, and diff checks.
-- [ ] Run final lint, build, audit, commit, push, and continue to next lane.
+- [x] Run final lint, build, audit, commit, push, and continue to next lane.

@@ -1031,7 +1031,8 @@
   - Scout finding: `summarizeDiff()` only collected paths from `+++` lines, so delete-only diffs with `+++ /dev/null` could produce evidence packs with `diff.files: []` even though the proposal removed a real file. That made the durable evidence misleading and could cause policy to reject real delete-only changes as empty/unparsable.
   - Implementation: diff evidence now collects changed paths from `diff --git`, `---`, `+++`, `rename from`, and `rename to` headers through a `Set`, skips `/dev/null`, and still stores only metadata (`files`, `changedLines`, optional hash) rather than raw diff text or deleted content.
   - Regression coverage: `m301` now builds a delete-only diff, asserts `pack.diff.files === ['docs/obsolete.md']`, `changedLines === 1`, policy allows the otherwise-good pack, and persisted JSON excludes both `diff --git` and deleted content.
-  - Verification passed so far: `npm run test:ci -- test/m301.autonomy-policy.test.ts` (16 tests), `npm run typecheck -- --pretty false`, and `git diff --check`.
+  - Verification passed: `npm run test:ci -- test/m301.autonomy-policy.test.ts` (16 tests), `npm run typecheck -- --pretty false`, `npm run lint` (known 115-warning baseline, 0 errors), `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check`.
+  - Deployed as `f25f4e5` on `origin/master`, reinstalled/resumed/kickstarted launchd, and smoked live status. Daemon PID `41348`, guard clear, kill switch off, tick in progress, Mission Brief still prioritizes `Drain diagnostic reslices`.
 
 - Current epoch-gated learned routing pass:
   - Purpose: allow the existing dispatch-yield learned reroute to use the new label foundation, but only for current, authoritative, metadata-only samples.
