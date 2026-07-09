@@ -1046,7 +1046,8 @@
   - Live finding: daemon stderr repeatedly showed `fatal: -e option, 'it\\.skip\\(': parentheses not balanced` from agent grep attempts. This is not the self-improve scanner; it is the native engineer `grep` tool using default `git grep` basic regex semantics, where `\\(` opens a group instead of matching a literal parenthesis.
   - Implementation: git-backed native engineer grep now passes `-E`, aligning the fast path with JS-style/extended regex patterns that agents naturally emit. Existing JS fallback remains unchanged for invalid regexes or non-git workspaces.
   - Regression coverage: `m42` now writes an untracked `it.skip(() => ...)` test file and verifies `callEngineerTool('grep', { pattern:'it\\\\.skip\\\\(', path:'test' })` succeeds through the `git-grep` engine without the "parentheses not balanced" error. Adjacent `m225` cwd regression still passes.
-  - Verification passed so far: `npm run test:ci -- test/m42.engineer-tools.test.ts test/m225.sandbox-cwd.test.ts` (54 tests), `npm run typecheck -- --pretty false`, and `git diff --check`.
+  - Verification passed: `npm run test:ci -- test/m42.engineer-tools.test.ts test/m225.sandbox-cwd.test.ts` (54 tests), `npm run typecheck -- --pretty false`, `npm run lint` (known 115-warning baseline, 0 errors), `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check`.
+  - Deployed as `295027e` on `origin/master`, reinstalled/resumed/kickstarted launchd, and smoked live status. Daemon PID `1141`, guard clear, kill switch off, tick in progress, Mission Brief still prioritizes `Drain diagnostic reslices`.
 
 - Current epoch-gated learned routing pass:
   - Purpose: allow the existing dispatch-yield learned reroute to use the new label foundation, but only for current, authoritative, metadata-only samples.

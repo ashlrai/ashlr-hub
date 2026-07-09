@@ -1115,4 +1115,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Switch the native engineer grep tool to extended regex mode for git-backed searches.
 - [x] Add regression coverage for `it\\.skip\\(` in the git-backed grep path.
 - [x] Run focused native engineer/cwd tests, typecheck, and diff checks.
-- [ ] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.
+- [x] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.
