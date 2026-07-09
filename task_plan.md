@@ -911,4 +911,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Update CLI, Mission Control, Fleet, and Fleet Dashboard production surfaces to treat empty diagnostic reason arrays as authoritative.
 - [x] Add focused regressions for raw-vs-diagnostic dispatch reasons, all-suppressed proposal windows, and dashboard source contracts.
 - [x] Finish focused, broad, invariant, and full-CI verification.
-- [ ] Commit, push, reload daemon, smoke live diagnostic output, and continue into diagnostic/learnable attempt classification.
+- [x] Commit, push, reload daemon, smoke live diagnostic output, and continue into diagnostic/learnable attempt classification.
