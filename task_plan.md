@@ -974,5 +974,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add pure learned-router and gateway integration regressions for open/near, unavailable, missing-snapshot, and mid-decision backoff cases.
 - [x] Run focused and adjacent router/daemon/gateway/resource/status verification.
 - [x] Run broad verification.
-- [ ] Commit, push, reload daemon, and smoke live status.
+- [x] Commit, push, reload daemon, and smoke live status.
 - [ ] Next lane: implement diagnostic no-diff reslice queue so empty-diff attempts generate better-shaped follow-up work instead of only telemetry.
