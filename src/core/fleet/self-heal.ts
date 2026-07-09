@@ -509,6 +509,8 @@ async function runSelfHealCycleForRepoList(
         persistHealItem(item);
       } else if (result.verified === true) {
         pruneStaleSelfHealItems(repo);
+      } else if (result.clearedKinds && result.clearedKinds.length > 0) {
+        pruneStaleSelfHealItems(repo, result.clearedKinds);
       }
     } catch {
       // Per-repo errors never abort the cycle.

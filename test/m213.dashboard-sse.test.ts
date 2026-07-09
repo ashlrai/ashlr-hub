@@ -409,6 +409,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('function renderProposalProductionCard');
     expect(src).toContain('function renderDispatchProductionCard');
     expect(src).toContain('function renderMissionBriefCard');
+    expect(src).toContain('function renderNextActionCommand');
+    expect(src).toContain('fleet-command-rail');
     expect(src).toContain('Next: ${compactFleetReason(actionDetail)}');
     expect(src).toContain('function formatAttemptShape');
     expect(src).toContain('gate/capture');
@@ -447,6 +449,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('const actionDetail = primaryAction?.detail ?? briefDetail');
     expect(css).toContain('.fd-readiness-rail');
     expect(css).toContain('.fd-readiness-strip');
+    expect(css).toContain('.fleet-command-rail');
+    expect(css).toContain('.fleet-command-safety--autonomous-dispatch');
     expect(css).toContain('grid-template-columns: repeat(2, minmax(0, 1fr))');
   });
 

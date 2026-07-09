@@ -336,6 +336,8 @@ export function formatFleetStatus(s: FleetStatus): string {
     for (const action of nextActions.slice(0, 6)) {
       const target = action.target ? ` [${formatActionTarget(action.target)}]` : '';
       lines.push(`  [${action.priority}] ${action.label}${target}: ${action.detail}`);
+      const command = action.commands?.[0];
+      if (command) lines.push(`      cmd: ${formatNextActionCommand(command)}`);
     }
   }
   lines.push('');
@@ -541,6 +543,16 @@ function formatReadinessAction(action: NonNullable<FleetStatus['autonomousShipRe
   if (!action) return 'none';
   const target = action.target ? ` [${formatActionTarget(action.target)}]` : '';
   return `${action.label}${target}: ${compactResourceReason(action.detail)}`;
+}
+
+type FleetActionCommand = NonNullable<NonNullable<FleetStatus['nextActions']>[number]['commands']>[number];
+
+function formatNextActionCommand(command: FleetActionCommand): string {
+  const scope = command.cwd ? ` @ ${formatActionTarget(command.cwd)}` : '';
+  const endpoint = command.endpointPath
+    ? ` · ${command.endpointMethod ?? 'POST'} ${command.endpointPath}${command.tokenRequired ? ' token' : ''}`
+    : '';
+  return `${command.label}: ${command.shell}${scope} (${command.safety}${endpoint})`;
 }
 
 function formatReadinessSources(

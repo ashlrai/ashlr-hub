@@ -719,4 +719,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Commit and push `c01e058`.
 - [x] Apply scout-found corrective hardening so only tagged self-heal work triggers targeted pre-selection maintenance, targeted invalid cleanup stays repo-scoped, and target paths canonicalize to enrolled repo paths.
 - [x] Corrective verification passed: typecheck, diff check, focused `m165/m201` CI (118 tests), lint, build, audit, and invariants.
-- [ ] Push corrective hardening, smoke production status, and continue.
+- [x] Push corrective hardening, reload launchd daemon, clear stale dead-owner spend guard, and smoke production status.
+
+## Current Continuation - Fleet OS Command Rail
+- [x] Rechecked clean production state after `f587104`: daemon PID `78743`, launchd running, guard clear, one verification-failed pending proposal, and 21 backlog items.
+- [x] Deployed sidecar scouts for command-rail implementation, live merge-blocker diagnosis, and next attempt-record learning slice.
+- [x] Add metadata-safe command rail to `FleetStatus.nextActions`.
+- [x] Render command rail in CLI and Fleet OS web surfaces without adding unsafe web mutations.
+- [x] Add focused status/UI regression coverage.
+- [x] Add cleared-kind self-heal pruning so stale build rows clear after build commands pass even when later verification is untrusted.
+- [x] Verify focused gates, broad lightweight gates, and live command-rail/backlog state.
+- [ ] Commit, push, reload/smoke, and continue.

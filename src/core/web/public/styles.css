@@ -2163,6 +2163,92 @@ a:hover {
   overflow-wrap: anywhere;
 }
 
+/* ── Fleet command rail ─────────────────────────────────────────────────── */
+.fleet-backends {
+  display: grid;
+  gap: var(--space-2);
+}
+.fleet-backend-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(0, 2fr) auto;
+  gap: var(--space-3);
+  align-items: start;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.fleet-backend-row:last-child {
+  border-bottom: 0;
+}
+.fleet-backend-name {
+  min-width: 0;
+  color: var(--text-primary);
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-backend-dispatches {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.fleet-quota {
+  justify-self: end;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+}
+.fleet-command-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+  min-width: 0;
+}
+.fleet-command-shell {
+  min-width: 0;
+  max-width: 100%;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.fleet-command-safety {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+.fleet-command-safety--read-only {
+  color: var(--status-done);
+}
+.fleet-command-safety--control-plane {
+  color: var(--phase-build);
+}
+.fleet-command-safety--autonomous-dispatch {
+  color: var(--status-aborted);
+}
+.fleet-command-meta {
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 720px) {
+  .fleet-backend-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .fleet-quota {
+    justify-self: start;
+  }
+}
+
 /* ── Banners ─────────────────────────────────────────────────────────────── */
 .ctrl-banner {
   padding: var(--space-3) var(--space-4);

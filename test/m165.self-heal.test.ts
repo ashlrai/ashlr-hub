@@ -811,6 +811,59 @@ describe('runSelfHealCycle', () => {
     expect(queue.map((item) => item.id)).toEqual([staleA.id]);
   });
 
+  it('prunes stale self-heal items for kinds proven green before an untrusted verify result', async () => {
+    const repoA = path.join(tmpHome, 'repo-a');
+    fs.mkdirSync(repoA, { recursive: true });
+    const ashlrDir = path.join(tmpHome, '.ashlr');
+    fs.mkdirSync(ashlrDir, { recursive: true });
+    const staleBuild = proposeHeal(repoA, {
+      broken: true,
+      kind: 'build',
+      detail: 'old TypeScript error',
+    });
+    const staleTest = proposeHeal(repoA, {
+      broken: true,
+      kind: 'test',
+      detail: 'old test failure',
+    });
+    fs.writeFileSync(
+      path.join(ashlrDir, 'self-heal-queue.json'),
+      JSON.stringify([staleBuild, staleTest], null, 2),
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: '2026-07-02T00:00:00.000Z',
+        repos: [repoA],
+        items: [staleBuild, staleTest],
+      }, null, 2),
+      'utf8',
+    );
+
+    mockListEnrolled.mockReturnValue([repoA]);
+    mockDetectVerifyCommands.mockReturnValue([BUILD_VC, GREEN_VC]);
+    mockRunVerifyCommand
+      .mockReturnValueOnce(OK_RESULT)
+      .mockReturnValueOnce(TOOL_FAIL_RESULT);
+
+    const result = await runSelfHealCycleForRepos([repoA], makeCfg());
+
+    expect(result.checked).toBe(1);
+    expect(result.broken).toEqual([]);
+    expect(result.healItems).toEqual([]);
+
+    const queue = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'self-heal-queue.json'), 'utf8'),
+    ) as WorkItem[];
+    expect(queue.map((item) => item.id)).toEqual([staleTest.id]);
+
+    const backlog = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'backlog.json'), 'utf8'),
+    ) as { items: WorkItem[] };
+    expect(backlog.items.map((item) => item.id)).toEqual([staleTest.id]);
+  });
+
   it('keeps existing self-heal items when no verify commands are detected', async () => {
     const repoA = path.join(tmpHome, 'repo-a');
     fs.mkdirSync(repoA, { recursive: true });

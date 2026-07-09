@@ -2690,14 +2690,34 @@ function renderFleetNextActionsCard(nextActions, cls = 'ctrl-card card') {
   const list = el('div', { cls: 'fleet-backends' });
   for (const action of actions.slice(0, 6)) {
     const title = [action.detail, action.target ? `Target: ${action.target}` : ''].filter(Boolean).join(' | ');
+    const command = Array.isArray(action.commands) ? action.commands[0] : null;
+    const detail = el('span', { cls: 'fleet-backend-dispatches' },
+      el('span', {}, compactFleetReason(action.detail ?? ''))
+    );
+    if (command) detail.appendChild(renderNextActionCommand(command));
     list.appendChild(el('div', { cls: 'fleet-backend-row', title },
       el('span', { cls: 'fleet-backend-name' }, action.label ?? action.id ?? 'Action'),
-      el('span', { cls: 'fleet-backend-dispatches' }, compactFleetReason(action.detail ?? '')),
+      detail,
       el('span', { cls: 'fleet-quota' }, action.priority ?? 'low')
     ));
   }
   card.appendChild(list);
   return card;
+}
+
+function renderNextActionCommand(command) {
+  const endpoint = command.endpointPath
+    ? ` · ${command.endpointMethod ?? 'POST'} ${command.endpointPath}${command.tokenRequired ? ' token' : ''}`
+    : '';
+  const scope = command.cwd ? ` @ ${basenameFromPath(command.cwd)}` : '';
+  const note = command.note ? ` · ${compactFleetReason(command.note)}` : '';
+  return el('span', { cls: 'fleet-command-rail', title: command.note ?? '' },
+    el('span', { cls: 'fleet-command-shell' }, command.shell ?? ''),
+    el('span', { cls: `fleet-command-safety fleet-command-safety--${command.safety ?? 'manual'}` },
+      command.safety ?? 'manual'
+    ),
+    endpoint || scope || note ? el('span', { cls: 'fleet-command-meta' }, `${scope}${endpoint}${note}`) : null
+  );
 }
 
 function renderMissionBriefCard(brief, cls = 'ctrl-card card') {

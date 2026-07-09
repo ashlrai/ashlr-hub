@@ -210,12 +210,31 @@ export interface FleetAutoMergeReadinessStatus {
   verifierContracts?: FleetAutoMergeVerifierContractStatus;
 }
 
+export type FleetNextActionCommandSafety =
+  | 'read-only'
+  | 'control-plane'
+  | 'autonomous-dispatch'
+  | 'manual';
+
+export interface FleetNextActionCommand {
+  label: string;
+  argv: string[];
+  shell: string;
+  safety: FleetNextActionCommandSafety;
+  cwd?: string;
+  endpointMethod?: 'GET' | 'POST';
+  endpointPath?: string;
+  tokenRequired?: boolean;
+  note?: string;
+}
+
 export interface FleetNextAction {
   id: string;
   priority: 'critical' | 'high' | 'medium' | 'low';
   label: string;
   detail: string;
   target?: string;
+  commands?: FleetNextActionCommand[];
 }
 
 export type FleetAutonomyEffectivenessPhase =
@@ -1752,6 +1771,13 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       priority: 'critical',
       label: 'Resume fleet',
       detail: 'The global kill switch is engaged, so no autonomous dispatch can run.',
+      commands: [
+        nextActionCommand('Resume fleet', ['ashlr', 'fleet', 'resume'], 'control-plane', {
+          endpointMethod: 'POST',
+          endpointPath: '/api/fleet/resume',
+          tokenRequired: true,
+        }),
+      ],
     });
   }
 
@@ -1761,6 +1787,14 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       priority: 'critical',
       label: 'Start daemon',
       detail: 'The daemon is stopped; the fleet cannot drain backlog or proposals.',
+      commands: [
+        nextActionCommand('Start daemon', ['ashlr', 'daemon', 'start'], 'autonomous-dispatch'),
+        nextActionCommand('Repair service', ['ashlr', 'daemon', 'install'], 'control-plane', {
+          endpointMethod: 'POST',
+          endpointPath: '/api/daemon/service/repair',
+          tokenRequired: true,
+        }),
+      ],
     });
   }
 
@@ -1772,6 +1806,11 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       label: 'Repair guard block',
       detail: firstGuardBlock.detail,
       target: firstGuardBlock.path,
+      commands: [
+        nextActionCommand('Inspect guard', ['ashlr', 'daemon', 'status'], 'read-only', {
+          note: 'Repair commands are exposed on guardHealth.blocks[].repairCommands.',
+        }),
+      ],
     });
   }
   const controlBlocked = status.killed || !status.daemon.running || Boolean(firstGuardBlock);
@@ -1786,6 +1825,10 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       priority: 'high',
       label: 'Reconcile host PRs',
       detail: `${awaitingHostMerge} proposal(s) are waiting for GitHub/host merge confirmation.`,
+      commands: [
+        nextActionCommand('Run reconciliation pass', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch'),
+        nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
+      ],
     });
   }
 
@@ -1797,6 +1840,10 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         priority: 'high',
         label: 'Drain ready auto-merges',
         detail: `${readiness.preflightReady} pending proposal(s) have cheap preflight-ready evidence.`,
+        commands: [
+          nextActionCommand('Run auto-merge pass', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch'),
+          nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
+        ],
       });
     }
     if (readiness.needsVerification > 0) {
@@ -1805,6 +1852,10 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         priority: 'high',
         label: 'Verify pending proposals',
         detail: `${readiness.needsVerification} proposal(s) need verification before judge or merge spend.`,
+        commands: [
+          nextActionCommand('Run verify pass', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch'),
+          nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
+        ],
       });
     }
     if (readiness.knownVerificationFailed > 0) {
@@ -1813,6 +1864,10 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         priority: 'medium',
         label: 'Repair failed proposals',
         detail: `${readiness.knownVerificationFailed} proposal(s) have known verification failures.`,
+        commands: [
+          nextActionCommand('Inspect failed proposals', ['ashlr', 'inbox', '--json'], 'read-only'),
+          nextActionCommand('Run repair cycle', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch'),
+        ],
       });
     }
     if (readiness.blocked > 0 && readiness.preflightReady === 0 && readiness.needsVerification === 0) {
@@ -1823,6 +1878,10 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         priority: 'medium',
         label: 'Inspect merge blockers',
         detail: topReason ? `${topReason[1]}x ${topReason[0]}` : `${readiness.blocked} proposal(s) are blocked.`,
+        commands: [
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+          nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
+        ],
       });
     }
   }
@@ -1838,6 +1897,10 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       label: `Route around ${constrained.backend}`,
       detail: constrained.resource.reason,
       target: constrained.backend,
+      commands: [
+        nextActionCommand('Inspect resources', ['ashlr', 'resources', '--json'], 'read-only'),
+        nextActionCommand('Inspect direction', ['ashlr', 'fleet', 'direction', '--json'], 'read-only'),
+      ],
     });
   }
 
@@ -1849,6 +1912,10 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       priority: 'medium',
       label: 'Improve context efficiency',
       detail: contextRisk?.detail ?? contextEfficiency.recommendations[0] ?? 'Context efficiency is degraded; inspect reflection, retrieval, and proposal-yield signals.',
+      commands: [
+        nextActionCommand('Evaluate attention', ['ashlr', 'eval-attention', '--json'], 'read-only'),
+        nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+      ],
     });
   }
 
@@ -1864,6 +1931,10 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         label: 'Inspect dispatch yield',
         detail: dispatchYieldDetail.detail,
         ...(dispatchYieldDetail.backend ? { target: dispatchYieldDetail.backend } : {}),
+        commands: [
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+          nextActionCommand('Inspect direction', ['ashlr', 'fleet', 'direction', '--json'], 'read-only'),
+        ],
       });
     }
     const production = status.proposalProduction;
@@ -1875,6 +1946,9 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         priority: 'medium',
         label: 'Inspect dispatch skips',
         detail: `${production.skipped} selected item(s) were not attempted${topSkip ? `; top skip: ${topSkip.reason}` : ''}`,
+        commands: [
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+        ],
       });
     }
     if (production && (production.errors > 0 || diagnosticNoProposalDispatches > 0)) {
@@ -1883,6 +1957,10 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         priority: production.errors > 0 ? 'high' : 'medium',
         label: 'Inspect proposal production',
         detail: proposalProductionDiagnosis(production),
+        commands: [
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+          nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
+        ],
       });
     }
     const top = status.queue.next?.[0];
@@ -1894,6 +1972,12 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         ? `Start with ${top.title}`
         : `${eligibleBacklogItems} backlog item(s) are eligible.`,
       ...(top?.repo ? { target: top.repo } : {}),
+      commands: [
+        nextActionCommand('Run one proposal cycle', ['ashlr', 'loop'], 'autonomous-dispatch', {
+          ...(top?.repo ? { cwd: top.repo } : {}),
+          note: 'Proposal-only; respects daemon singleton, kill switch, enrollment, and budget guards.',
+        }),
+      ],
     });
   } else if (status.queue.backlogItems > 0 && !controlBlocked) {
     const cooling = status.queue.cooldownItems ?? 0;
@@ -1907,6 +1991,10 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         detail: nextEligible
           ? `${status.queue.backlogItems} backlog item(s) are cooling; next eligible at ${nextEligible}. Decide whether to wait, lower cooldown policy, or dispatch a targeted high-value item.`
           : `${status.queue.backlogItems} backlog item(s) are visible but none are eligible. Decide whether to wait, inspect worked-ledger cooldowns, or dispatch a targeted high-value item.`,
+        commands: [
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+          nextActionCommand('Dry-run loop', ['ashlr', 'loop', '--dry-run'], 'read-only'),
+        ],
       });
     }
     add({
@@ -1916,6 +2004,9 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       detail: nextEligible
         ? `${status.queue.backlogItems} backlog item(s) are present, but ${cooling} are cooling and ${pending} already have pending proposals; next eligible at ${nextEligible}.`
         : `${status.queue.backlogItems} backlog item(s) are present, but none are currently eligible (${cooling} cooling, ${pending} pending).`,
+      commands: [
+        nextActionCommand('Watch fleet', ['ashlr', 'fleet', 'watch'], 'read-only'),
+      ],
     });
   }
 
@@ -1928,6 +2019,9 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       priority: 'low',
       label: 'Add repo verify contracts',
       detail: `${missingVerify} enrolled repo(s) have no detected verify commands.${sample ? ` First: ${sample}.` : ''}`,
+      commands: [
+        nextActionCommand('Inspect missing verifiers', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+      ],
     });
   }
   const missingExplicitMergeContracts =
@@ -1942,6 +2036,13 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       detail:
         `${missingExplicitMergeContracts} enrolled repo(s) rely on inferred or non-merge verification.` +
         `${sample ? ` First: ${sample}.` : ''}`,
+      commands: [
+        nextActionCommand('Inspect merge contracts', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+        nextActionCommand('Edit verify contract', ['vi', 'ashlr.verify.json'], 'manual', {
+          ...(missingRepos[0]?.repo && existsSync(missingRepos[0].repo) ? { cwd: missingRepos[0].repo } : {}),
+          note: 'Create a required merge-profile repo-owned verification contract.',
+        }),
+      ],
     });
   }
 
@@ -1951,6 +2052,10 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       priority: 'low',
       label: 'Refresh backlog',
       detail: 'No immediate blockers or ready work are visible in the current snapshot.',
+      commands: [
+        nextActionCommand('Refresh backlog', ['ashlr', 'backlog', 'refresh'], 'control-plane'),
+        nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+      ],
     });
   }
 
@@ -3077,6 +3182,28 @@ function configCooldownMs(cfg: AshlrConfig): number | undefined {
   const daemon = (cfg as { daemon?: Record<string, unknown> }).daemon;
   const value = daemon?.['cooldownMs'];
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function commandShell(argv: string[]): string {
+  return argv.map((part) => {
+    if (/^[A-Za-z0-9_./:=@+-]+$/.test(part)) return part;
+    return `'${part.replace(/'/g, `'\\''`)}'`;
+  }).join(' ');
+}
+
+function nextActionCommand(
+  label: string,
+  argv: string[],
+  safety: FleetNextActionCommandSafety,
+  extras: Omit<FleetNextActionCommand, 'label' | 'argv' | 'shell' | 'safety'> = {},
+): FleetNextActionCommand {
+  return {
+    label,
+    argv,
+    shell: commandShell(argv),
+    safety,
+    ...extras,
+  };
 }
 
 /**

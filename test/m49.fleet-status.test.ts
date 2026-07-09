@@ -296,6 +296,18 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     expect(s.missionBrief?.whyNow).toContain('daemon is stopped');
+    const startDaemon = s.nextActions?.find((action) => action.id === 'start-daemon');
+    expect(startDaemon?.commands?.[0]).toMatchObject({
+      label: 'Start daemon',
+      argv: ['ashlr', 'daemon', 'start'],
+      shell: 'ashlr daemon start',
+      safety: 'autonomous-dispatch',
+    });
+    expect(startDaemon?.commands?.[1]).toMatchObject({
+      endpointPath: '/api/daemon/service/repair',
+      tokenRequired: true,
+      safety: 'control-plane',
+    });
     expect(s.autonomy).toMatchObject({
       evidencePacks: 0,
       latestAt: null,
@@ -474,6 +486,20 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(s.nextActions?.some((action) => action.detail.includes('make-repo'))).toBe(true);
     expect(s.nextActions?.some((action) => action.id === 'add-explicit-merge-verify-contracts')).toBe(true);
+    const mergeContractAction = s.nextActions?.find((action) => action.id === 'add-explicit-merge-verify-contracts');
+    expect(mergeContractAction?.commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        label: 'Inspect merge contracts',
+        argv: ['ashlr', 'fleet', 'status', '--json'],
+        safety: 'read-only',
+      }),
+      expect.objectContaining({
+        label: 'Edit verify contract',
+        argv: ['vi', 'ashlr.verify.json'],
+        cwd: repo,
+        safety: 'manual',
+      }),
+    ]));
   });
 
   it('separates inferred verify commands from explicit merge-grade contracts', async () => {
@@ -1465,9 +1491,18 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       .toContain('shape: no-diff 1, gate/capture 1, repairs 0, policy-off 0');
     expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
       .toContain('sample-gated action: same-tier reroute');
+    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.commands)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          label: 'Inspect fleet status',
+          argv: ['ashlr', 'fleet', 'status', '--json'],
+          safety: 'read-only',
+        }),
+      ]));
 
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('[medium] Inspect dispatch yield [local-coder]');
+    expect(formatted).toContain('cmd: Inspect fleet status: ashlr fleet status --json (read-only)');
     expect(formatted).toContain('local-coder/goal proposal yield 0/3 (0%)');
     expect(formatted).toContain('diagnosis: actionable · local-coder/goal 0/3 0% · same-tier reroute');
     expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 0, policy-off 0');
@@ -2375,6 +2410,12 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
           priority: 'high',
           label: 'Drain ready auto-merges',
           detail: '1 pending proposal has cheap preflight-ready evidence.',
+          commands: [{
+            label: 'Run auto-merge pass',
+            argv: ['ashlr', 'daemon', 'start', '--once'],
+            shell: 'ashlr daemon start --once',
+            safety: 'autonomous-dispatch',
+          }],
         },
         {
           id: 'build-backlog',
@@ -2382,6 +2423,13 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
           label: 'Build backlog proposals',
           detail: 'Start with Ship autonomy debugger',
           target: '/repo/a',
+          commands: [{
+            label: 'Run one proposal cycle',
+            argv: ['ashlr', 'loop'],
+            shell: 'ashlr loop',
+            safety: 'autonomous-dispatch',
+            cwd: '/repo/a',
+          }],
         },
       ],
       autonomyEffectiveness: {
@@ -2603,7 +2651,9 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('evidence:   verdict ready, phase merge-ready, backlog 5/7, pending 3, ready 1');
     expect(out).toContain('Next actions:');
     expect(out).toContain('[high] Drain ready auto-merges');
+    expect(out).toContain('cmd: Run auto-merge pass: ashlr daemon start --once (autonomous-dispatch)');
     expect(out).toContain('[medium] Build backlog proposals [a]: Start with Ship autonomy debugger');
+    expect(out).toContain('cmd: Run one proposal cycle: ashlr loop @ a (autonomous-dispatch)');
     expect(out).toContain('Autonomy effectiveness:');
     expect(out).toContain('phase:      merge-ready');
     expect(out).toContain('bottleneck: merge-drain');
