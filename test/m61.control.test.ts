@@ -129,6 +129,18 @@ describe('buildControlSnapshot — full shape (M61)', () => {
       freshness: expect.any(Object),
       sourceSummary: expect.any(Object),
     });
+    expect(snap.fleet.missionBrief).toMatchObject({
+      generatedAt: expect.any(String),
+      directive: expect.any(String),
+      confidence: expect.any(String),
+      operatingMode: expect.any(String),
+      evidence: expect.objectContaining({
+        queueBacklogItems: expect.any(Number),
+        pendingProposals: expect.any(Number),
+        preflightReady: expect.any(Number),
+        guardBlocked: expect.any(Boolean),
+      }),
+    });
     expect(snap.fleet.autonomyDirection).toMatchObject({
       mode: expect.any(String),
       confidence: expect.any(String),

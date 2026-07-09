@@ -667,4 +667,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Updated type/module comments so operator trust labels match the actual signing boundary.
 - [x] Added focused regression tests for Phantom-enabled config still emitting local signatures and Phantom-labelled signatures failing closed.
 - [x] Verification passed: typecheck, focused signing/runner/secret-safety tests, lint, build, audit, invariants, and diff check.
+- [x] Commit, push, reload daemon, and continue with the next high-leverage lane.
+
+## Current Continuation - Fleet OS Mission Brief
+- [x] Rechecked clean `master`, recent commits, Entire state, and active overnight goal before editing.
+- [x] Deployed parallel scout agents for proposal capture, automerge evidence, Phantom actionability, dashboard coverage, and Fleet OS mission-brief shape.
+- [x] Added `FleetStatus.missionBrief` as a read-only single-command operating brief derived from ship readiness, autonomy effectiveness, and ranked next actions.
+- [x] Surfaced the brief in `ashlr fleet status`, Fleet view, Mission Control, and the Fleet Dashboard readiness rail without adding new persistence or raw data.
+- [x] Added focused status/control/dashboard/formatter/API coverage for blocked and ready mission states.
+- [x] Verification passed: typecheck, JS syntax check, focused `m49/m61/m210/m213/m299` CI, lint, build, audit, invariants, and diff check.
 - [ ] Commit, push, reload daemon, and continue with the next high-leverage lane.

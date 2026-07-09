@@ -154,6 +154,11 @@ describe('POST /api/fleet/pause|resume', () => {
       autonomyControlMode?: unknown;
       backends?: Array<{ resource?: { availability?: unknown } }>;
       autonomyDirection?: { mode?: unknown; resources?: unknown };
+      missionBrief?: {
+        directive?: unknown;
+        whyNow?: unknown;
+        evidence?: { readinessVerdict?: unknown };
+      };
     };
     expect(pausedFleet.killed).toBe(true);
     expect(['disabled', 'advisory', 'executable']).toContain(pausedFleet.autonomyControlMode);
@@ -161,6 +166,9 @@ describe('POST /api/fleet/pause|resume', () => {
       .toContain(pausedFleet.backends?.[0]?.resource?.availability);
     expect(typeof pausedFleet.autonomyDirection?.mode).toBe('string');
     expect(typeof pausedFleet.autonomyDirection?.resources).toBe('object');
+    expect(pausedFleet.missionBrief?.directive).toBe('Resume the fleet');
+    expect(pausedFleet.missionBrief?.evidence?.readinessVerdict).toBe('blocked');
+    expect(typeof pausedFleet.missionBrief?.whyNow).toBe('string');
 
     const resumed = await request(
       'POST',
@@ -179,10 +187,13 @@ describe('POST /api/fleet/pause|resume', () => {
       killed: boolean;
       autonomyControlMode?: unknown;
       autonomyDirection?: { mode?: unknown };
+      missionBrief?: { directive?: unknown; whyNow?: unknown };
     };
     expect(resumedFleet.killed).toBe(false);
     expect(['disabled', 'advisory', 'executable']).toContain(resumedFleet.autonomyControlMode);
     expect(typeof resumedFleet.autonomyDirection?.mode).toBe('string');
+    expect(typeof resumedFleet.missionBrief?.directive).toBe('string');
+    expect(typeof resumedFleet.missionBrief?.whyNow).toBe('string');
   });
 });
 

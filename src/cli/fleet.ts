@@ -58,6 +58,27 @@ export function formatFleetStatus(s: FleetStatus): string {
   lines.push(`  spend today:   $${s.daemon.todaySpentUsd.toFixed(4)}`);
   lines.push('');
 
+  // Mission brief
+  const missionBrief = s.missionBrief;
+  lines.push('Mission brief:');
+  if (!missionBrief) {
+    lines.push('  unavailable');
+  } else {
+    lines.push(`  directive:  ${missionBrief.directive}`);
+    lines.push(`  confidence: ${missionBrief.confidence}`);
+    lines.push(`  mode:       ${missionBrief.operatingMode}`);
+    lines.push(`  blocker:    ${formatReadinessBlocker(missionBrief.blocker)}`);
+    lines.push(`  action:     ${formatReadinessAction(missionBrief.action)}`);
+    lines.push(`  why now:    ${compactResourceReason(missionBrief.whyNow)}`);
+    lines.push(
+      `  evidence:   verdict ${missionBrief.evidence.readinessVerdict ?? 'unknown'}, ` +
+        `phase ${missionBrief.evidence.effectivenessPhase ?? 'unknown'}, ` +
+        `backlog ${missionBrief.evidence.eligibleBacklogItems}/${missionBrief.evidence.queueBacklogItems}, ` +
+        `pending ${missionBrief.evidence.pendingProposals}, ready ${missionBrief.evidence.preflightReady}`,
+    );
+  }
+  lines.push('');
+
   // Backends
   lines.push('Backends:');
   if (s.backends.length === 0) {

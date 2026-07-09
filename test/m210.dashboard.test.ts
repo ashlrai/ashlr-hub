@@ -219,6 +219,36 @@ const FIXTURE_FLEET_STATUS = {
     byBackendModel: [],
   },
   merges: { recent: 0 },
+  missionBrief: {
+    generatedAt: new Date().toISOString(),
+    directive: 'Build the highest-value backlog proposal',
+    confidence: 'medium' as const,
+    operatingMode: 'backlog-build',
+    blocker: {
+      id: 'proposal-production-needed',
+      label: 'Proposal production needed',
+      detail: 'Backlog work is visible, but there are no pending proposals ready to ship.',
+      severity: 'medium' as const,
+      source: 'queue' as const,
+    },
+    action: {
+      id: 'build-backlog',
+      priority: 'medium' as const,
+      label: 'Build backlog proposals',
+      detail: 'Start with the highest-value queue item.',
+    },
+    whyNow: '4 backlog item(s) are visible and 3 proposals are pending.',
+    evidence: {
+      readinessVerdict: 'degraded' as const,
+      effectivenessPhase: 'proposal-starved' as const,
+      bottleneck: 'proposal-production' as const,
+      queueBacklogItems: 4,
+      eligibleBacklogItems: 4,
+      pendingProposals: 3,
+      preflightReady: 0,
+      guardBlocked: false,
+    },
+  },
   killed: false,
 };
 
@@ -322,6 +352,11 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(snap.fleet?.proposalProduction?.topReasons[0]?.reason).toBe('agent returned no diff');
     expect(snap.fleet?.dispatchProduction?.proposalRate).toBe(0.5);
     expect(snap.fleet?.dispatchProduction?.byBackend[0]?.key).toBe('builtin');
+    expect(snap.fleet?.missionBrief).toMatchObject({
+      directive: 'Build the highest-value backlog proposal',
+      confidence: 'medium',
+      evidence: { queueBacklogItems: 4, guardBlocked: false },
+    });
     expect(snap.fleet?.phantom?.knownFleetSecrets.pulseCredentialPresent).toBe(true);
     expect(snap.fleet?.phantom?.commands).toMatchObject({
       commandsKnown: true,

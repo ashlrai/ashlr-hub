@@ -2700,6 +2700,38 @@ function renderFleetNextActionsCard(nextActions, cls = 'ctrl-card card') {
   return card;
 }
 
+function renderMissionBriefCard(brief, cls = 'ctrl-card card') {
+  if (!brief) return null;
+  const blocker = brief.blocker ?? null;
+  const action = brief.action ?? null;
+  const evidence = brief.evidence ?? {};
+  const card = el('div', { cls });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Mission Brief'),
+    el('span', {
+      cls: 'card-subtitle',
+      style: `color:${shipReadinessAccent(evidence.readinessVerdict)}`,
+    }, `${brief.confidence ?? 'unknown'} confidence`)
+  ));
+  const body = el('div', { cls: 'card-body' });
+  body.appendChild(infoGrid([
+    ['Directive', brief.directive ?? 'unknown'],
+    ['Mode', formatDirectionMode(brief.operatingMode ?? 'unknown')],
+    ['Blocker', blocker ? blocker.label ?? blocker.id : 'none'],
+    ['Action', action ? action.label ?? action.id : 'none'],
+    ['Queue', `${evidence.eligibleBacklogItems ?? 0}/${evidence.queueBacklogItems ?? 0} eligible`],
+    ['Ready', evidence.preflightReady ?? 0],
+    ['Pending', evidence.pendingProposals ?? 0],
+    ['Guard', evidence.guardBlocked ? 'blocked' : 'clear'],
+  ]));
+
+  if (brief.whyNow) {
+    body.appendChild(el('p', { cls: 'hint' }, compactFleetReason(brief.whyNow)));
+  }
+  card.appendChild(body);
+  return card;
+}
+
 function formatDirectionMode(mode) {
   const labels = {
     pause: 'Pause',
@@ -2904,6 +2936,9 @@ function renderFleet() {
   }
   summary.appendChild(infoGrid(summaryRows));
   section.appendChild(summary);
+
+  const missionBriefCard = renderMissionBriefCard(f.missionBrief, 'fleet-card card');
+  if (missionBriefCard) section.appendChild(missionBriefCard);
 
   const readinessCard = renderAutonomousShipReadinessCard(f.autonomousShipReadiness, 'fleet-card card');
   if (readinessCard) section.appendChild(readinessCard);
@@ -3287,6 +3322,7 @@ function renderControl() {
   heroMetrics.appendChild(controlMetric('Evidence', autonomy?.evidencePacks ?? 0, autonomy?.denied > 0 ? '#f87171' : '#38bdf8'));
   const effectiveness = d.fleet?.autonomyEffectiveness ?? fleet.autonomyEffectiveness ?? null;
   const shipReadiness = d.fleet?.autonomousShipReadiness ?? fleet.autonomousShipReadiness ?? null;
+  const missionBrief = d.fleet?.missionBrief ?? fleet.missionBrief ?? null;
   const production = d.fleet?.proposalProduction ?? fleet.proposalProduction ?? null;
   const dispatchProduction = d.fleet?.dispatchProduction ?? fleet.dispatchProduction ?? null;
   const workspace = d.fleet?.workspace ?? fleet.workspace ?? null;
@@ -3340,6 +3376,9 @@ function renderControl() {
   }
   serviceCard.appendChild(serviceBody);
   section.appendChild(serviceCard);
+
+  const missionBriefCard = renderMissionBriefCard(missionBrief);
+  if (missionBriefCard) section.appendChild(missionBriefCard);
 
   if (direction) {
     const directionCard = el('div', { cls: 'ctrl-card card' });
@@ -4176,14 +4215,17 @@ function fdRenderReadinessRail(snap) {
   const readiness = snap.fleet?.autonomousShipReadiness ?? snap.control?.fleet?.autonomousShipReadiness ?? null;
   if (!readiness) return null;
 
+  const missionBrief = fleet?.missionBrief ?? null;
   const queue = fleet?.queue ?? {};
   const sharedQueue = queue.shared ?? null;
   const dispatchProduction = fleet?.dispatchProduction ?? null;
   const effectiveness = fleet?.autonomyEffectiveness ?? null;
-  const topBlocker = readiness.topBlocker ?? null;
-  const primaryAction = readiness.primaryAction ?? null;
+  const topBlocker = missionBrief?.blocker ?? readiness.topBlocker ?? null;
+  const primaryAction = missionBrief?.action ?? readiness.primaryAction ?? null;
+  const directive = missionBrief?.directive ?? null;
   const actionLabel = primaryAction?.label ?? primaryAction?.id ?? 'none';
-  const actionDetail = primaryAction?.detail ?? actionLabel;
+  const briefLabel = directive ?? actionLabel;
+  const actionDetail = missionBrief?.whyNow ?? primaryAction?.detail ?? actionLabel;
   const blockerLabel = topBlocker?.label ?? topBlocker?.id ?? 'none';
   const blockerDetail = topBlocker?.detail ?? blockerLabel;
   const queueMetric = queueEligibilityMetric(queue) ?? `${queue.backlogItems ?? 0} backlog`;
@@ -4201,6 +4243,8 @@ function fdRenderReadinessRail(snap) {
     el('span', { cls: 'fd-readiness-rail__loop' }, `Loop: ${loop}`)
   ));
   rail.appendChild(el('div', { cls: 'fd-readiness-strip' },
+    fdMetricPill('Brief', compactFleetReason(briefLabel, 54), actionDetail),
+    fdMetricPill('Confidence', missionBrief?.confidence ?? readiness.confidence ?? 'unknown'),
     fdMetricPill('Action', compactFleetReason(actionLabel, 54), actionDetail),
     fdMetricPill('Data', fdReadinessDataText(readiness)),
     fdMetricPill('Blocker', compactFleetReason(blockerLabel, 54), blockerDetail),

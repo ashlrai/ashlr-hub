@@ -408,9 +408,13 @@ describe('M213 Dashboard SSE — /api/events', () => {
     );
     expect(src).toContain('function renderProposalProductionCard');
     expect(src).toContain('function renderDispatchProductionCard');
+    expect(src).toContain('function renderMissionBriefCard');
     expect(src).toContain('function formatAttemptShape');
     expect(src).toContain('gate/capture');
     expect(src).toContain('Dispatch yield data unavailable.');
+    expect(src).toContain("renderMissionBriefCard(f.missionBrief, 'fleet-card card')");
+    expect(src).toContain('renderMissionBriefCard(missionBrief)');
+    expect(src).toContain('missionBrief');
     expect(src).toContain("renderProposalProductionCard(f.proposalProduction, 'fleet-card card')");
     expect(src).toContain("renderDispatchProductionCard(f.dispatchProduction, 'fleet-card card')");
     expect(src).toContain('renderProposalProductionCard(production)');
@@ -428,7 +432,10 @@ describe('M213 Dashboard SSE — /api/events', () => {
     const css = fs.readFileSync(path.join(root, 'styles.css'), 'utf8');
     expect(src).toContain('function fdRenderReadinessRail');
     expect(src).toContain('autonomousShipReadiness');
+    expect(src).toContain('missionBrief');
     expect(src).toContain("'Fleet OS'");
+    expect(src).toContain("'Brief'");
+    expect(src).toContain("'Confidence'");
     expect(src).toContain("'Action'");
     expect(src).toContain("'Data'");
     expect(src).toContain("'Blocker'");

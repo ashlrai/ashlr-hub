@@ -300,6 +300,28 @@ export interface FleetAutonomousShipReadinessStatus {
   sourceSummary: Record<FleetReadinessSourceStatus, number>;
 }
 
+export interface FleetMissionBriefEvidence {
+  readinessVerdict: FleetAutonomousShipReadinessVerdict | null;
+  effectivenessPhase: FleetAutonomyEffectivenessPhase | null;
+  bottleneck: FleetAutonomyEffectivenessStatus['bottleneck'] | null;
+  queueBacklogItems: number;
+  eligibleBacklogItems: number;
+  pendingProposals: number;
+  preflightReady: number;
+  guardBlocked: boolean;
+}
+
+export interface FleetMissionBrief {
+  generatedAt: string;
+  directive: string;
+  confidence: FleetAutonomousShipReadinessConfidence;
+  operatingMode: string;
+  blocker: FleetAutonomousShipReadinessBlocker | null;
+  action: FleetNextAction | null;
+  whyNow: string;
+  evidence: FleetMissionBriefEvidence;
+}
+
 export interface FleetProposalProductionReasonSummary {
   reason: string;
   count: number;
@@ -419,6 +441,8 @@ export interface FleetStatus {
   autonomyEffectiveness?: FleetAutonomyEffectivenessStatus;
   /** Read-only Fleet OS verdict for whether autonomous shipping is ready now. */
   autonomousShipReadiness?: FleetAutonomousShipReadinessStatus;
+  /** Single-command operating brief derived from readiness, effectiveness, and next actions. */
+  missionBrief?: FleetMissionBrief;
   /** Read-only diagnosis of recent proposal production from daemon ticks. */
   proposalProduction?: FleetProposalProductionStatus;
   /** Durable 24h dispatch-production yield summary from the append-only ledger. */
@@ -903,6 +927,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     queueSourceStatus,
     queueSourceDetail,
   });
+  status.missionBrief = buildMissionBrief(status);
 
   return status;
 }
@@ -2104,6 +2129,110 @@ function buildAutonomousShipReadiness(
     sources,
     sourceSummary,
   };
+}
+
+function buildMissionBrief(status: FleetStatus): FleetMissionBrief {
+  const readiness = status.autonomousShipReadiness ?? null;
+  const effectiveness = status.autonomyEffectiveness ?? null;
+  const action = readiness?.primaryAction ?? (status.nextActions ?? [])[0] ?? null;
+  const blocker = readiness?.topBlocker ?? null;
+  const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
+  const preflightReady = status.autoMergeReadiness?.preflightReady ?? effectiveness?.counts.preflightReady ?? 0;
+  const guardBlocked = status.guardHealth?.blocked ?? (status.guardHealth?.blocks?.length ?? 0) > 0;
+
+  return {
+    generatedAt: status.generatedAt,
+    directive: missionDirective(status, action, effectiveness),
+    confidence: readiness?.confidence ?? 'low',
+    operatingMode: status.autonomyDirection?.mode ?? effectiveness?.phase ?? 'unknown',
+    blocker,
+    action,
+    whyNow: missionWhyNow(status, blocker, action, effectiveness),
+    evidence: {
+      readinessVerdict: readiness?.verdict ?? null,
+      effectivenessPhase: effectiveness?.phase ?? null,
+      bottleneck: effectiveness?.bottleneck ?? null,
+      queueBacklogItems: status.queue.backlogItems,
+      eligibleBacklogItems,
+      pendingProposals: status.proposals.pending,
+      preflightReady,
+      guardBlocked,
+    },
+  };
+}
+
+function missionDirective(
+  status: FleetStatus,
+  action: FleetNextAction | null,
+  effectiveness: FleetAutonomyEffectivenessStatus | null,
+): string {
+  if (status.killed) return 'Resume the fleet';
+  if (!status.daemon.running) return 'Start the daemon';
+  if (status.guardHealth?.blocked) return 'Repair the guard block';
+
+  switch (action?.id) {
+    case 'reconcile-host-prs':
+      return 'Reconcile host PRs';
+    case 'drain-ready-auto-merges':
+      return 'Drain ready auto-merges';
+    case 'verify-pending-proposals':
+      return 'Verify pending proposals';
+    case 'repair-verification-failures':
+      return 'Repair failed proposal verification';
+    case 'inspect-auto-merge-blockers':
+      return 'Inspect merge blockers';
+    case 'inspect-dispatch-yield':
+      return 'Recover dispatch yield';
+    case 'inspect-dispatch-skips':
+      return 'Inspect dispatch skips';
+    case 'inspect-proposal-production':
+      return 'Recover proposal production';
+    case 'build-backlog':
+      return 'Build the highest-value backlog proposal';
+    case 'cooldown-gated-backlog':
+      return 'Review the backlog cooldown gate';
+    case 'add-repo-verify-contracts':
+      return 'Add missing repo verification contracts';
+    case 'add-explicit-merge-verify-contracts':
+      return 'Add explicit merge verification contracts';
+  }
+
+  switch (effectiveness?.phase) {
+    case 'host-handoff':
+      return 'Reconcile host PRs';
+    case 'merge-ready':
+      return 'Drain ready auto-merges';
+    case 'verification-needed':
+      return 'Verify pending proposals';
+    case 'merge-blocked':
+      return 'Inspect merge blockers';
+    case 'proposal-starved':
+      return 'Convert eligible backlog into proposals';
+    case 'cooldown-gated':
+      return 'Wait for backlog eligibility';
+    case 'idle':
+      return status.merges.recent > 0 ? 'Refill the backlog after recent merges' : 'Discover high-value backlog work';
+    case 'control-blocked':
+      return 'Restore autonomous control';
+  }
+
+  return 'Refresh fleet status and backlog';
+}
+
+function missionWhyNow(
+  status: FleetStatus,
+  blocker: FleetAutonomousShipReadinessBlocker | null,
+  action: FleetNextAction | null,
+  effectiveness: FleetAutonomyEffectivenessStatus | null,
+): string {
+  if (blocker?.detail) return blocker.detail;
+  if (effectiveness?.summary) return effectiveness.summary;
+  if (action?.detail) return action.detail;
+  const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
+  if (eligibleBacklogItems > 0) {
+    return `${eligibleBacklogItems} eligible backlog item(s) are visible.`;
+  }
+  return 'No higher-confidence autonomous action is visible in the current snapshot.';
 }
 
 async function buildAutoMergeReadinessStatus(

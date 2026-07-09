@@ -282,6 +282,20 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(s.autonomousShipReadiness?.sourceSummary.healthy)
       .toBeLessThan(s.autonomousShipReadiness?.sources.length ?? 0);
+    expect(s.missionBrief).toMatchObject({
+      directive: 'Start the daemon',
+      confidence: 'low',
+      blocker: { id: 'daemon-stopped' },
+      action: { id: 'start-daemon' },
+      evidence: {
+        readinessVerdict: 'blocked',
+        effectivenessPhase: 'control-blocked',
+        queueBacklogItems: 0,
+        pendingProposals: 0,
+        preflightReady: 0,
+      },
+    });
+    expect(s.missionBrief?.whyNow).toContain('daemon is stopped');
     expect(s.autonomy).toMatchObject({
       evidencePacks: 0,
       latestAt: null,
@@ -1854,6 +1868,17 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomousShipReadiness?.primaryAction).toMatchObject({
       id: 'drain-ready-auto-merges',
     });
+    expect(s.missionBrief).toMatchObject({
+      directive: 'Drain ready auto-merges',
+      confidence: 'high',
+      blocker: null,
+      action: { id: 'drain-ready-auto-merges' },
+      evidence: {
+        readinessVerdict: 'ready',
+        effectivenessPhase: 'merge-ready',
+        preflightReady: 1,
+      },
+    });
   });
 
   it('degrades autonomous ship readiness when ready work depends on a stale source', async () => {
@@ -2294,6 +2319,30 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
           unknown: 0,
         },
       },
+      missionBrief: {
+        generatedAt: '2026-06-17T00:00:00.000Z',
+        directive: 'Drain ready auto-merges',
+        confidence: 'high',
+        operatingMode: 'local-only',
+        blocker: null,
+        action: {
+          id: 'drain-ready-auto-merges',
+          priority: 'high',
+          label: 'Drain ready auto-merges',
+          detail: '1 pending proposal has cheap preflight-ready evidence.',
+        },
+        whyNow: '1 proposal is preflight-ready for the auto-merge drain.',
+        evidence: {
+          readinessVerdict: 'ready',
+          effectivenessPhase: 'merge-ready',
+          bottleneck: 'merge-drain',
+          queueBacklogItems: 7,
+          eligibleBacklogItems: 5,
+          pendingProposals: 3,
+          preflightReady: 1,
+          guardBlocked: false,
+        },
+      },
       autonomy: {
         evidencePacks: 3,
         latestAt: '2026-06-17T00:01:00.000Z',
@@ -2392,6 +2441,13 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('output:    proposals 1/3 (33%), no-proposal 2');
     expect(out).toContain('backends:  local-coder 0/2 0%; codex 1/1 100%');
     expect(out).toContain('2 auto-merge(s)');
+    expect(out).toContain('Mission brief:');
+    expect(out).toContain('directive:  Drain ready auto-merges');
+    expect(out).toContain('confidence: high');
+    expect(out).toContain('blocker:    none');
+    expect(out).toContain('action:     Drain ready auto-merges: 1 pending proposal has cheap preflight-ready evidence.');
+    expect(out).toContain('why now:    1 proposal is preflight-ready for the auto-merge drain.');
+    expect(out).toContain('evidence:   verdict ready, phase merge-ready, backlog 5/7, pending 3, ready 1');
     expect(out).toContain('Next actions:');
     expect(out).toContain('[high] Drain ready auto-merges');
     expect(out).toContain('[medium] Build backlog proposals [a]: Start with Ship autonomy debugger');
