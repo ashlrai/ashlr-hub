@@ -843,4 +843,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Normalize legacy decision rows on read through the causal learning scrubber.
 - [x] Add regression coverage for trajectory/label/epoch backfill, secret scrubbing, raw-field dropping, and measurement preservation.
 - [x] Run broad verification.
-- [ ] Commit, push, and smoke status.
+- [x] Commit `b31bde5`, push, reload daemon, and smoke live FleetStatus.
