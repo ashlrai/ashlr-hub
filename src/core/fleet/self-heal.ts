@@ -375,6 +375,73 @@ function pruneInvalidSelfHealItems(repos: string[]): number {
   return removed;
 }
 
+function targetedInvalidSelfHealItem(
+  value: unknown,
+  targetRepoKeys: ReadonlySet<string>,
+  enrolledRepoKeys: ReadonlySet<string>,
+): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Partial<WorkItem>;
+  if (!Array.isArray(item.tags) || !item.tags.includes('self-heal')) return false;
+  if (typeof item.repo !== 'string') return false;
+  try {
+    if (!targetRepoKeys.has(resolve(item.repo))) return false;
+    return invalidSelfHealItem(value, enrolledRepoKeys);
+  } catch {
+    return false;
+  }
+}
+
+function pruneInvalidSelfHealItemsForRepos(targetRepos: string[], enrolled: string[]): number {
+  const targetRepoKeys = new Set<string>();
+  for (const repo of targetRepos) {
+    try { targetRepoKeys.add(resolve(repo)); } catch { /* ignore malformed target rows */ }
+  }
+  if (targetRepoKeys.size === 0) return 0;
+
+  const enrolledRepoKeys = new Set<string>();
+  for (const repo of enrolled) {
+    try { enrolledRepoKeys.add(resolve(repo)); } catch { /* ignore invalid registry entries */ }
+  }
+
+  let removed = 0;
+  try {
+    const qPath = selfHealQueuePath();
+    const existing = readWorkItemsArray(qPath);
+    if (existing.length > 0) {
+      const filtered = existing.filter((item) => !targetedInvalidSelfHealItem(item, targetRepoKeys, enrolledRepoKeys));
+      removed += existing.length - filtered.length;
+      if (filtered.length !== existing.length) writeJsonAtomic(qPath, filtered);
+    }
+  } catch {
+    // Best-effort only.
+  }
+
+  try {
+    const bPath = backlogPath();
+    if (!existsSync(bPath)) return removed;
+    const parsed = JSON.parse(readFileSync(bPath, 'utf8')) as unknown;
+    if (Array.isArray(parsed)) {
+      const filtered = parsed.filter((item) => !targetedInvalidSelfHealItem(item, targetRepoKeys, enrolledRepoKeys));
+      removed += parsed.length - filtered.length;
+      if (filtered.length !== parsed.length) writeJsonAtomic(bPath, filtered);
+    } else if (
+      parsed &&
+      typeof parsed === 'object' &&
+      Array.isArray((parsed as { items?: unknown }).items)
+    ) {
+      const envelope = parsed as { items: unknown[] };
+      const filtered = envelope.items.filter((item) => !targetedInvalidSelfHealItem(item, targetRepoKeys, enrolledRepoKeys));
+      removed += envelope.items.length - filtered.length;
+      if (filtered.length !== envelope.items.length) writeJsonAtomic(bPath, { ...parsed, items: filtered });
+    }
+  } catch {
+    // Best-effort only.
+  }
+
+  return removed;
+}
+
 /**
  * Queue a heal item to disk so the fleet daemon picks it up on the next tick
  * ahead of other work. Best-effort — failure here must never abort the cycle.
@@ -404,18 +471,19 @@ function persistHealItem(item: WorkItem): void {
 }
 
 function uniqueEnrolledTargets(repos: string[], enrolled: string[]): string[] {
-  const enrolledKeys = new Set<string>();
+  const enrolledByKey = new Map<string, string>();
   for (const repo of enrolled) {
-    try { enrolledKeys.add(resolve(repo)); } catch { /* ignore invalid enrollment rows */ }
+    try { enrolledByKey.set(resolve(repo), repo); } catch { /* ignore invalid enrollment rows */ }
   }
   const seen = new Set<string>();
   const out: string[] = [];
   for (const repo of repos) {
     try {
       const key = resolve(repo);
-      if (!enrolledKeys.has(key) || seen.has(key)) continue;
+      const enrolledRepo = enrolledByKey.get(key);
+      if (!enrolledRepo || seen.has(key)) continue;
       seen.add(key);
-      out.push(repo);
+      out.push(enrolledRepo);
     } catch {
       // Ignore malformed repo paths.
     }
@@ -459,9 +527,9 @@ export async function runSelfHealCycleForRepos(
     if (!enabled) return { checked: 0, broken: [], healItems: [] };
 
     const enrolled = listEnrolled();
-    pruneInvalidSelfHealItems(enrolled);
     const targets = uniqueEnrolledTargets(repos, enrolled);
     if (targets.length === 0) return { checked: 0, broken: [], healItems: [] };
+    pruneInvalidSelfHealItemsForRepos(targets, enrolled);
     return await runSelfHealCycleForRepoList(targets, cfg);
   } catch {
     return { checked: 0, broken: [], healItems: [] };

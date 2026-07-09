@@ -1267,7 +1267,11 @@ export async function tick(
     const seen = new Set<string>();
     const out: string[] = [];
     for (const item of items) {
-      if (item.source !== 'self' || item.tags.includes('proposal-repair')) continue;
+      if (
+        item.source !== 'self' ||
+        !item.tags.includes('self-heal') ||
+        item.tags.includes('proposal-repair')
+      ) continue;
       if (seen.has(item.repo)) continue;
       seen.add(item.repo);
       out.push(item.repo);

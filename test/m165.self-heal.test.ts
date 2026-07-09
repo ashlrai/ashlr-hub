@@ -532,6 +532,76 @@ describe('runSelfHealCycle', () => {
     expect(backlog.items.map((item) => item.id)).toEqual([staleB.id]);
   });
 
+  it('targeted self-heal maintenance preserves invalid self-heal rows outside requested repos', async () => {
+    const repoA = path.join(tmpHome, 'repo-a');
+    const repoB = path.join(tmpHome, 'repo-b');
+    fs.mkdirSync(repoA, { recursive: true });
+    fs.mkdirSync(repoB, { recursive: true });
+    const ashlrDir = path.join(tmpHome, '.ashlr');
+    fs.mkdirSync(ashlrDir, { recursive: true });
+
+    const staleA = proposeHeal(repoA, {
+      broken: true,
+      kind: 'build',
+      detail: 'old TypeScript error',
+    });
+    const unenrolledB = proposeHeal(repoB, {
+      broken: true,
+      kind: 'build',
+      detail: 'not enrolled',
+    });
+
+    fs.writeFileSync(
+      path.join(ashlrDir, 'self-heal-queue.json'),
+      JSON.stringify([staleA, unenrolledB], null, 2),
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: '2026-07-02T00:00:00.000Z',
+        repos: [repoA, repoB],
+        items: [staleA, unenrolledB],
+      }, null, 2),
+      'utf8',
+    );
+
+    mockListEnrolled.mockReturnValue([repoA]);
+    mockDetectVerifyCommands.mockReturnValue([GREEN_VC]);
+    mockRunVerifyCommand.mockReturnValue(OK_RESULT);
+
+    const result = await runSelfHealCycleForRepos([repoA], makeCfg());
+
+    expect(result.checked).toBe(1);
+    const queue = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'self-heal-queue.json'), 'utf8'),
+    ) as WorkItem[];
+    expect(queue.map((item) => item.id)).toEqual([unenrolledB.id]);
+
+    const backlog = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'backlog.json'), 'utf8'),
+    ) as { items: WorkItem[] };
+    expect(backlog.items.map((item) => item.id)).toEqual([unenrolledB.id]);
+  });
+
+  it('targeted self-heal maintenance uses enrolled canonical repo paths for relative targets', async () => {
+    const repoA = path.join(tmpHome, 'repo-a');
+    fs.mkdirSync(repoA, { recursive: true });
+
+    mockListEnrolled.mockReturnValue([repoA]);
+    mockDetectVerifyCommands.mockReturnValue([BUILD_VC]);
+    mockRunVerifyCommand.mockReturnValue({
+      ...FAIL_RESULT,
+      output: 'src/index.ts(12,5): error TS2345: Argument of type string is not assignable',
+    });
+
+    const result = await runSelfHealCycleForRepos([`${repoA}/.`], makeCfg());
+
+    expect(result.checked).toBe(1);
+    expect(result.broken).toEqual([repoA]);
+    expect(result.healItems[0]!.repo).toBe(repoA);
+  });
+
   it('targeted self-heal maintenance replaces stale failure text for the requested repo', async () => {
     const repoA = path.join(tmpHome, 'repo-a');
     fs.mkdirSync(repoA, { recursive: true });

@@ -716,4 +716,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Live-revalidate `ashlrcode` queue to replace the stale TypeScript self-heal with the current Ink raw-mode test failure, then refresh backlog.
 - [x] Focused verification passed: typecheck, diff check, and `m165/m201/m310/m49` CI (160 tests).
 - [x] Broad lightweight gates passed: typecheck, lint, build, audit, invariants, and diff check.
-- [ ] Commit, push, smoke production status, and continue.
+- [x] Commit and push `c01e058`.
+- [x] Apply scout-found corrective hardening so only tagged self-heal work triggers targeted pre-selection maintenance, targeted invalid cleanup stays repo-scoped, and target paths canonicalize to enrolled repo paths.
+- [x] Corrective verification passed: typecheck, diff check, focused `m165/m201` CI (118 tests), lint, build, audit, and invariants.
+- [ ] Push corrective hardening, smoke production status, and continue.

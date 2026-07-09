@@ -674,6 +674,34 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
+  it('A1a2e: ordinary self-improve backlog does not trigger self-heal maintenance', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const [base] = makeItems(repo.dir, 1);
+    const selfImproveItem = {
+      ...base!,
+      id: `${repo.dir}:self:skip-test-gap`,
+      source: 'self' as const,
+      title: 'Restore skipped test in fleet.test.ts:12',
+      detail: 'Bare skipped test that should be handled as ordinary self-improvement work.',
+      tags: ['self', 'test-gap'],
+    };
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [selfImproveItem],
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(1);
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(1);
+    expect(mockRunSelfHealCycleForRepos).not.toHaveBeenCalled();
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(result.dispatches?.[0]?.itemId).toBe(selfImproveItem.id);
+  });
+
   it('A1a3: empty backlog does not rerun producer maintenance inside the daemon interval', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
