@@ -2290,6 +2290,11 @@ function queueEligibilityMetric(queue) {
   return `${queue.eligibleBacklogItems} eligible / ${queue.cooldownItems ?? 0} cooling / ${queue.pendingItems ?? 0} pending`;
 }
 
+function laneLocksMetric(laneLocks) {
+  if (!laneLocks) return null;
+  return `${laneLocks.active ?? 0} active / ${laneLocks.staleInProgress ?? 0} stale / ${laneLocks.awaitingHostMerge ?? 0} handoff / ${laneLocks.unverifiedApplied ?? 0} unverified`;
+}
+
 function autonomyEvidenceMetric(autonomy) {
   if (!autonomy || !autonomy.evidencePacks) return '0 packs';
   return `${autonomy.evidencePacks} packs / ${autonomy.allowed ?? 0} allowed / ${autonomy.denied ?? 0} denied`;
@@ -2949,6 +2954,7 @@ function renderFleet() {
     ['Spend today', f.daemon.todaySpentUsd != null ? `$${f.daemon.todaySpentUsd.toFixed(4)}` : '—'],
     ['Backlog queue', f.queue?.backlogItems ?? '—'],
     ['Eligible queue', queueEligibilityMetric(f.queue) ?? '—'],
+    ['Lane locks', laneLocksMetric(f.laneLocks) ?? '—'],
     ['Merges (24h)', f.merges?.recent ?? '—'],
     ['Autonomy evidence', autonomyEvidenceMetric(f.autonomy)],
   ];
@@ -3339,6 +3345,11 @@ function renderControl() {
   heroMetrics.appendChild(controlMetric('Spend today', daemon.todaySpentUsd != null ? `$${daemon.todaySpentUsd.toFixed(4)}` : '—', '#fbbf24'));
   heroMetrics.appendChild(controlMetric('Queue depth', queue.backlogItems ?? '—', '#60a5fa'));
   heroMetrics.appendChild(controlMetric('Eligible', queue.eligibleBacklogItems ?? queue.backlogItems ?? '—', '#38bdf8'));
+  const laneLocks = d.fleet?.laneLocks ?? fleet.laneLocks ?? null;
+  if (laneLocks) {
+    const laneLocksWarn = (laneLocks.staleInProgress ?? 0) > 0 || (laneLocks.unverifiedApplied ?? 0) > 0 || (laneLocks.awaitingHostMerge ?? 0) > 0;
+    heroMetrics.appendChild(controlMetric('Lane Locks', laneLocks.active ?? 0, laneLocksWarn ? '#f97316' : '#38bdf8'));
+  }
   if (sharedQueue) {
     heroMetrics.appendChild(controlMetric('Shared leases', sharedQueue.activeClaims ?? '—', '#38bdf8'));
     heroMetrics.appendChild(controlMetric('Reclaimable', sharedQueue.reclaimableClaims ?? '—', sharedQueue.reclaimableClaims > 0 ? '#f97316' : '#4ade80'));

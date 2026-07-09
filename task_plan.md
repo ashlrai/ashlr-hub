@@ -236,6 +236,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused regression coverage for applied-but-unverified versus applied-and-verified goal milestones.
 - [x] Run verification, commit, push, restart/resume daemon, and smoke live goal-focus state.
 
+## Current Continuation - Read-Only Lane Locks
+- [x] Rechecked clean repo state, recent commits, Entire state, and live daemon/fleet status.
+- [x] Deploy/read parallel agents for lane-lock status shape, derivation semantics, and tests.
+- [x] Map current FleetStatus assembly, goal/proposal stores, and CLI/web formatter patterns.
+- [x] Implement derived read-only `FleetStatus.laneLocks` with bounded privacy-safe samples.
+- [x] Add focused status, pure-helper, and formatter regression coverage.
+- [ ] Run verification, commit, push, restart/resume daemon, and smoke live lane-lock status.
+
 ## Current Continuation - Remote Handoff Reconciliation
 - [x] Rechecked git status, recent commits, Entire state, task plan, and notes after the previous push.
 - [x] Deployed parallel agents for remote PR reconciliation, proposal unblockers, service progress health, active kill cancellation, repo contracts, and shared cooldown parity.

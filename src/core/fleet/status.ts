@@ -63,6 +63,7 @@ import {
   buildContextEfficiencyStatus,
   type FleetContextEfficiencyStatus,
 } from './context-efficiency.js';
+import { buildFleetLaneLocks, type FleetLaneLocksStatus } from './lane-lock.js';
 
 export interface FleetBackendResourceStatus {
   availability: BackendAvailability | 'not-sensed';
@@ -542,6 +543,8 @@ export interface FleetStatus {
   nextActions?: FleetNextAction[];
   /** Read-only focus policy summary for active goal closure over queue widening. */
   goalFocus?: FleetGoalFocusStatus;
+  /** Read-only derived view of occupied work lanes; does not affect dispatch. */
+  laneLocks?: FleetLaneLocksStatus;
   /** Read-only explanation of whether the autonomous loop can merge right now. */
   autonomyEffectiveness?: FleetAutonomyEffectivenessStatus;
   /** Read-only Fleet OS verdict for whether autonomous shipping is ready now. */
@@ -856,11 +859,13 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let frontierPending = 0;
   let awaitingHostMerge = 0;
   let applied = 0;
+  const allProposals: Proposal[] = [];
   const pendingProposals: Proposal[] = [];
   try {
     const { listProposals } = await import('../inbox/store.js');
     const all = listProposals();
     for (const p of all) {
+      allProposals.push(p);
       if (p.status === 'pending') {
         pending++;
         pendingProposals.push(p);
@@ -959,6 +964,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   }
 
   let goalFocus: FleetGoalFocusStatus | undefined;
+  let goalLaneCandidates: ReturnType<typeof listGoals> = [];
   try {
     const activeGoals = listGoals({ status: 'active' });
     const planningGoals = listGoals({ status: 'planning' });
@@ -967,6 +973,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ...activeGoals,
       ...planningGoals.filter((goal) => !seen.has(goal.id)),
     ];
+    goalLaneCandidates = goals;
     const snapshot = goalFocusSnapshot(goals, cfg, { repos: enrolledExistingRepos });
     goalFocus = {
       enabled: snapshot.enabled,
@@ -981,6 +988,21 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     };
   } catch {
     goalFocus = undefined;
+  }
+
+  let laneLocks: FleetLaneLocksStatus | undefined;
+  try {
+    if (goalLaneCandidates.length === 0) {
+      goalLaneCandidates = listGoals({ status: 'active' });
+    }
+    laneLocks = buildFleetLaneLocks({
+      goals: goalLaneCandidates,
+      proposals: allProposals,
+      visibleQueueItems,
+      generatedAt,
+    });
+  } catch {
+    laneLocks = undefined;
   }
 
   const phantom = await buildFleetPhantomStatus(cfg);
@@ -1007,6 +1029,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     ...(autoMergeReadiness !== undefined ? { autoMergeReadiness } : {}),
     ...(guardHealth !== undefined ? { guardHealth } : {}),
     ...(goalFocus !== undefined ? { goalFocus } : {}),
+    ...(laneLocks !== undefined ? { laneLocks } : {}),
     killed,
   };
   const proposalProduction = buildProposalProductionStatus(recentTicks);

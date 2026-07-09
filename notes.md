@@ -1,5 +1,14 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Current Read-Only Lane Locks
+- Start state: clean pushed `master` at `f5e487b`; Entire remains not set up; daemon/fleet smoke before edits showed daemon running, guard clear, goal-focus active, 13 backlog items, 11 eligible, and `autonomyDirection.mode:"backlog-build"`.
+- Agent audits recommended a derived status-only lane-lock signal first, not a persisted lockfile, to avoid creating another stale-lock repair surface.
+- Implementation: added `src/core/fleet/lane-lock.ts` with metadata-only `FleetLaneLocksStatus`, derived from active goals, proposal states, and visible cached queue items. It counts distinct active goal lanes, stale in-progress milestones, awaiting host handoffs, unverified applied proposals, and visible goal backlog items under active lanes.
+- Safety/privacy: lane-lock samples are bounded and contain repo/id/status/title/age metadata only. They never include raw diffs, summaries, decision reasons, stdout/stderr, env, file contents, or verification command output.
+- Status/UI: `FleetStatus.laneLocks` now flows through `/api/fleet` and `/api/control`; CLI `ashlr fleet status`, Fleet, and Mission Control show compact lane-lock counts without changing daemon dispatch or queue eligibility.
+- Correctness refinements: goal lane derivation selects one effective current milestone per active goal, skips milestones whose linked proposal is `applied` with `verifyResult.passed === true`, and keeps old unverified applied proposals visible when they are linked from any goal milestone.
+- Verification passed: `npm run typecheck -- --pretty false`, `node --check src/core/web/public/app.js`, `npm run test:ci -- test/m49.fleet-status.test.ts` (45 tests), web/control CI (`m61`, `m90`, `m299`, `m14`, 79 tests), `npm run lint` (existing 115-warning baseline, 0 errors), `npm run build`, `npm audit --audit-level=moderate`, `npm run test:invariants` (41 files, 411 tests), and `git diff --check`.
+
 ## Current Merged Verified Goal Completion
 - Start state: clean `master` after the goal-focus rollout; Entire remains not set up.
 - Live goal-focus state before this slice: 12 actionable active goals over the default threshold of 4, with new goal/invent work deferred until active work closes.

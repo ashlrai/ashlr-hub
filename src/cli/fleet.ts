@@ -191,6 +191,19 @@ export function formatFleetStatus(s: FleetStatus): string {
         `${focus.planningGoalCount} planning)`,
     );
   }
+  if (s.laneLocks) {
+    const locks = s.laneLocks;
+    lines.push(
+      `  lane locks:    ${locks.active} active, ${locks.staleInProgress} stale, ` +
+        `${locks.awaitingHostMerge} handoff, ${locks.unverifiedApplied} unverified, ` +
+        `${locks.lockedVisibleItems} visible locked`,
+    );
+    if (locks.samples.length > 0) {
+      const sample = locks.samples[0]!;
+      const repo = sample.repo ? sample.repo.split('/').pop() ?? sample.repo : 'unknown';
+      lines.push(`  lock sample:   ${sample.reason} ${repo} ${sample.lane}`);
+    }
+  }
   if (s.queue.shared) {
     const shared = s.queue.shared;
     lines.push(`  shared:        ${formatSharedQueueSummary(shared)}`);

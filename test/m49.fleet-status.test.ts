@@ -17,13 +17,14 @@ import { join } from 'node:path';
 import type { AshlrConfig, DaemonTick, EngineId, Goal, WorkItem } from '../src/core/types.js';
 import { buildFleetStatus } from '../src/core/fleet/status.js';
 import { formatFleetStatus } from '../src/cli/fleet.js';
+import { buildFleetLaneLocks } from '../src/core/fleet/lane-lock.js';
 import { buildContextEfficiencyStatus } from '../src/core/fleet/context-efficiency.js';
 import { recordUse } from '../src/core/fleet/quota.js';
 import { setKill } from '../src/core/sandbox/policy.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
 import { buildAutonomyEvidencePack, persistAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
-import { createProposal } from '../src/core/inbox/store.js';
+import { createProposal, setStatus } from '../src/core/inbox/store.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import { recordDispatchProduction, type DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import { recordAgentAction, type AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
@@ -521,6 +522,64 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       'goal focus:    closing active goals (4/4 actionable active, 1 planning)',
     );
     expect(existsSync(join(tmpHome, '.ashlr', 'audit'))).toBe(false);
+  });
+
+  it('surfaces read-only lane locks from active goals, host handoffs, and unverified applied proposals', async () => {
+    const repo = join(tmpHome, 'repo-lanes');
+    const cfg = baseConfig();
+    const applied = createProposal(
+      {
+        repo,
+        origin: 'agent',
+        kind: 'patch',
+        title: 'Applied without verification',
+        summary: 'applied without verification',
+        diff: docsDiff('unverified'),
+      },
+      cfg,
+    );
+    setStatus(applied.id, 'applied');
+    const handoff = createProposal(
+      {
+        repo,
+        origin: 'agent',
+        kind: 'patch',
+        title: 'Awaiting host merge',
+        summary: 'remote handoff',
+        diff: docsDiff('handoff'),
+      },
+      cfg,
+    );
+    setStatus(handoff.id, 'awaiting-host-merge');
+
+    const staleGoal = makeGoalRecord(repo, 'goal-lane-a', 'active', 'in-progress');
+    staleGoal.milestones[0]!.updatedAt = '2026-07-03T00:00:00.000Z';
+    const proposedGoal = makeGoalRecord(repo, 'goal-lane-b', 'active', 'proposed');
+    proposedGoal.milestones[0]!.proposalId = applied.id;
+
+    writeBacklogSnapshot(tmpHome, repo, [
+      makeBacklogItem(repo, `goal:${staleGoal.id}:${staleGoal.milestones[0]!.id}`, 'Advance stale goal', 5, 'goal'),
+      makeBacklogItem(repo, `goal:${proposedGoal.id}:${proposedGoal.milestones[0]!.id}`, 'Advance proposed goal', 4, 'goal'),
+      makeBacklogItem(repo, 'invent:one', 'Invent unrelated thing', 3, 'invent'),
+    ]);
+    writeGoalRecords(tmpHome, [staleGoal, proposedGoal]);
+
+    const s = await buildFleetStatus(cfg);
+
+    expect(s.laneLocks).toMatchObject({
+      active: 2,
+      staleInProgress: 1,
+      awaitingHostMerge: 1,
+      unverifiedApplied: 1,
+      lockedVisibleItems: 2,
+    });
+    expect(s.laneLocks?.samples.map((sample) => sample.reason)).toEqual(
+      expect.arrayContaining(['stale-in-progress', 'active-goal', 'awaiting-host-merge', 'unverified-applied']),
+    );
+    expect(s.laneLocks?.samples.every((sample) => !('diff' in sample))).toBe(true);
+    expect(formatFleetStatus(s)).toContain(
+      'lane locks:    2 active, 1 stale, 1 handoff, 1 unverified, 2 visible locked',
+    );
   });
 
   it('surfaces missing verify repo names, project kinds, and reasons', async () => {
@@ -2345,10 +2404,124 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Lane locks
+// ---------------------------------------------------------------------------
+
+describe('buildFleetLaneLocks — pure derived lane status', () => {
+  it('skips a linked milestone whose applied proposal has passing verification', () => {
+    const repo = '/tmp/repo-lanes';
+    const goal = makeGoalRecord(repo, 'goal-verified', 'active', 'proposed');
+    goal.milestones[0]!.proposalId = 'prop-verified';
+
+    const status = buildFleetLaneLocks({
+      generatedAt: '2026-07-03T12:00:00.000Z',
+      goals: [goal],
+      proposals: [{
+        id: 'prop-verified',
+        repo,
+        origin: 'agent',
+        kind: 'patch',
+        title: 'Verified applied',
+        summary: 'metadata only',
+        status: 'applied',
+        createdAt: '2026-07-03T00:00:00.000Z',
+        verifyResult: { passed: true },
+      }],
+      visibleQueueItems: [
+        makeBacklogItem(repo, `goal:${goal.id}:${goal.milestones[0]!.id}`, 'Advance verified goal', 5, 'goal'),
+      ],
+    });
+
+    expect(status).toMatchObject({
+      active: 0,
+      staleInProgress: 0,
+      unverifiedApplied: 0,
+      lockedVisibleItems: 0,
+      samples: [],
+    });
+  });
+
+  it('keeps old unverified applied proposals visible when they are linked from a goal', () => {
+    const repo = '/tmp/repo-lanes';
+    const goal = makeGoalRecord(repo, 'goal-linked-old', 'active', 'blocked');
+    goal.milestones[0]!.proposalId = 'prop-old';
+    goal.milestones.push({
+      id: `${goal.id}-m1`,
+      title: 'Next milestone',
+      detail: 'next',
+      order: 1,
+      status: 'pending',
+      specId: null,
+      swarmId: null,
+      proposalId: null,
+      createdAt: '2026-07-20T00:00:00.000Z',
+      updatedAt: '2026-07-20T00:00:00.000Z',
+    });
+
+    const status = buildFleetLaneLocks({
+      generatedAt: '2026-07-20T12:00:00.000Z',
+      goals: [goal],
+      proposals: [{
+        id: 'prop-old',
+        repo,
+        origin: 'agent',
+        kind: 'patch',
+        title: 'Old unverified applied',
+        summary: 'metadata only',
+        status: 'applied',
+        createdAt: '2026-07-03T00:00:00.000Z',
+      }],
+      visibleQueueItems: [],
+    });
+
+    expect(status.unverifiedApplied).toBe(1);
+    expect(status.samples).toContainEqual(expect.objectContaining({
+      reason: 'unverified-applied',
+      proposalId: 'prop-old',
+    }));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Pure formatter
 // ---------------------------------------------------------------------------
 
 describe('formatFleetStatus — pure formatter (M49)', () => {
+  it('renders lane lock counts and a bounded sample', () => {
+    const out = formatFleetStatus({
+      generatedAt: '2026-06-17T00:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 2 },
+      proposals: { pending: 0, frontierPending: 0, applied: 1 },
+      merges: { recent: 0 },
+      laneLocks: {
+        generatedAt: '2026-06-17T00:00:00.000Z',
+        active: 2,
+        staleInProgress: 1,
+        awaitingHostMerge: 1,
+        unverifiedApplied: 1,
+        lockedVisibleItems: 2,
+        samples: [{
+          lane: '/repo/a#goal:goal-lane-a',
+          repo: '/repo/a',
+          reason: 'stale-in-progress',
+          goalId: 'goal-lane-a',
+          milestoneId: 'goal-lane-a-m0',
+          status: 'in-progress',
+          title: 'Stale milestone',
+          ageMs: 1000,
+        }],
+      },
+      killed: false,
+    });
+
+    expect(out).toContain(
+      'lane locks:    2 active, 1 stale, 1 handoff, 1 unverified, 2 visible locked',
+    );
+    expect(out).toContain('lock sample:   stale-in-progress a /repo/a#goal:goal-lane-a');
+  });
+
   it('renders all sections and flags the paused banner when killed', () => {
     const out = formatFleetStatus({
       generatedAt: '2026-06-17T00:00:00.000Z',
