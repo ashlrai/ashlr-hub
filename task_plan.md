@@ -805,4 +805,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Focused verification passed: `m315.remote-handoff-truth`, `m153.verification-gate`, `m307.verify-before-judge`, and `m48.automerge-pass` (89 tests), plus typecheck and diff check.
 - [x] Broad gates passed: lint, build, audit, and invariants.
 - [x] Commit and push `5d9d367`, reload launchd daemon, and smoke live FleetStatus.
-- [ ] Next lane: Best-of-N file-once proposal capture.
+- [x] Next lane: Best-of-N file-once proposal capture.
+
+## Current Continuation - Best-of-N File-Once Proposal Capture
+- [x] Rechecked clean pushed state after remote-base freshness and resumed local notes.
+- [x] Used sidecar scouts to confirm the safe capture shape: hold per-candidate sandboxes, draft-capture diffs, score drafts, then file only the selected winner through `captureSandboxedProposal()`.
+- [x] Added `draftOnly` capture support so proposal-shaped drafts reuse the existing scrub, triviality, completeness, diff hash, and provenance pipeline without writing inbox rows or decision-ledger `proposed` entries.
+- [x] Changed Best-of-N candidate generation to run candidates with `propose:false` in retained sandboxes, judge draft proposals, final-capture the ranked winner synchronously, and clean up all candidate sandboxes in `finally`.
+- [x] Removed loser proposal rejection from Best-of-N; losers now remain metadata-only rows in the Best-of-N ledger with `proposalId:null`.
+- [x] Updated model-stats and Best-of-N regression coverage for winner-only filing and race-only loser visibility.
+- [x] Focused verification passed: Best-of-N/model-stats suite (26 tests), broader adjacent proposal-production suite (177 tests), and typecheck.
+- [x] Broad gates passed: diff check, lint, build, audit, invariants, and full CI (439 files, 9,046 passed tests, 7 skipped).
+- [ ] Commit, push, reload launchd daemon, and smoke live FleetStatus.

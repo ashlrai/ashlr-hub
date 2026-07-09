@@ -59,7 +59,7 @@ function seed(): void {
       candidates: [
         { index: 0, engine: 'claude', model: 'claude-sonnet-5', score: 16, proposalId: 'p1', won: true },
         // race-only loser — never a solo 'proposed' dispatch under this key
-        { index: 1, engine: 'local-coder', model: 'qwen3-coder-next', score: 8, proposalId: 'p-lose', won: false },
+        { index: 1, engine: 'local-coder', model: 'qwen3-coder-next', score: 8, proposalId: null, proposalOutcome: 'proposal-disabled', won: false },
       ],
     },
   ];

@@ -11,7 +11,17 @@
  * Flag-off parity: cfg.foundry.bestOfN defaults to 1 → identical to a single run.
  */
 
-import type { AshlrConfig, WorkItem, Proposal, WorkSource, EngineId, RunProposalOutcome, RunState, DelegationScope } from '../types.js';
+import type {
+  AshlrConfig,
+  WorkItem,
+  Proposal,
+  WorkSource,
+  EngineId,
+  RunProposalOutcome,
+  RunState,
+  DelegationScope,
+  Sandbox,
+} from '../types.js';
 import type { ManagerVerdict } from '../fleet/manager.js';
 import type { TasteScore } from '../fleet/taste-critic.js';
 import { resolveEngineSpec } from './engine-registry.js';
@@ -51,6 +61,14 @@ export interface CandidateResult {
   error?: string;
   /** Structured reason the sandbox run did or did not file a proposal. */
   proposalOutcome?: RunProposalOutcome;
+}
+
+interface InternalCandidateResult extends CandidateResult {
+  proposalDraft?: Proposal;
+  sandbox?: Sandbox;
+  runId?: string;
+  delegationScope?: DelegationScope;
+  state?: RunState;
 }
 
 export interface BestOfNResult {
@@ -143,10 +161,10 @@ function formatProposalOutcome(outcome?: RunProposalOutcome): string | undefined
 
 function candidateErrorFromState(
   state: RunState,
-  proposalId?: string,
+  hasProposalMaterial = false,
   outcome: RunProposalOutcome | undefined = state.proposalOutcome,
 ): string | undefined {
-  if (!proposalId) {
+  if (!hasProposalMaterial) {
     const proposalReason = formatProposalOutcome(outcome);
     if (proposalReason) return proposalReason;
   }
@@ -157,7 +175,7 @@ function candidateErrorFromState(
 
   // Most no-proposal success paths are just empty diffs. If a runner does return
   // an explicit gate/block reason in the existing RunState shape, surface it.
-  if (!proposalId) {
+  if (!hasProposalMaterial) {
     const msg = stateResultMessage(state);
     if (msg && /\b(blocked|gate|refused|denied)\b/i.test(msg)) return msg;
   }
@@ -168,7 +186,7 @@ function candidateErrorFromState(
 function summarizeNoProposalReasons(candidates: CandidateResult[]): Array<{ reason: string; count: number }> {
   const counts = new Map<string, number>();
   for (const c of candidates) {
-    if (c.proposalId) continue;
+    if (candidateHasProposalMaterial(c)) continue;
     const reason = c.error ?? formatProposalOutcome(c.proposalOutcome) ?? 'no proposal filed';
     counts.set(reason, (counts.get(reason) ?? 0) + 1);
   }
@@ -176,6 +194,51 @@ function summarizeNoProposalReasons(candidates: CandidateResult[]): Array<{ reas
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .slice(0, 8)
     .map(([reason, count]) => ({ reason, count }));
+}
+
+function candidateHasProposalMaterial(c: CandidateResult): boolean {
+  if (c.error) return false;
+  const draft = (c as InternalCandidateResult).proposalDraft;
+  return !!c.proposalId || !!draft;
+}
+
+function proposalForCandidate(item: WorkItem, c: InternalCandidateResult, loadProposal?: (id: string) => Proposal | null): Proposal {
+  if (c.proposalDraft) return c.proposalDraft;
+  if (c.proposalId) {
+    try {
+      const loaded = loadProposal?.(c.proposalId);
+      if (loaded) return loaded;
+    } catch {
+      // fall through to synthetic
+    }
+  }
+  return syntheticProposal(item, c.diff, c.index);
+}
+
+function publicCandidate(c: InternalCandidateResult): CandidateResult {
+  const {
+    proposalDraft: _proposalDraft,
+    sandbox: _sandbox,
+    runId: _runId,
+    delegationScope: _delegationScope,
+    ...rest
+  } = c;
+  return rest;
+}
+
+function cleanupCandidateSandboxes(candidates: InternalCandidateResult[], removeSandbox?: (sb: Sandbox) => void): void {
+  if (!removeSandbox) return;
+  const seen = new Set<string>();
+  for (const c of candidates) {
+    const sb = c.sandbox;
+    if (!sb || seen.has(sb.id)) continue;
+    seen.add(sb.id);
+    try {
+      removeSandbox(sb);
+    } catch {
+      // Best-of-N cleanup is best-effort; orphan sweeps reclaim stragglers.
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -219,14 +282,27 @@ export async function runBestOfN(
   // Import lazily so the module doesn't blow up when sandboxed-engine isn't
   // built yet (tests mock it).
   type SandboxedRunner = typeof import('./sandboxed-engine.js').runEngineSandboxed;
+  type CaptureSandboxedProposal = typeof import('./sandboxed-engine.js').captureSandboxedProposal;
   let runEngineSandboxed: SandboxedRunner | undefined;
   let runApiModelSandboxed: SandboxedRunner | undefined;
+  let captureSandboxedProposal: CaptureSandboxedProposal | undefined;
   try {
     const mod = await import('./sandboxed-engine.js');
     runEngineSandboxed = mod.runEngineSandboxed;
     runApiModelSandboxed = mod.runApiModelSandboxed;
+    captureSandboxedProposal = mod.captureSandboxedProposal;
   } catch {
     // sandboxed-engine unavailable — all candidates will error
+  }
+
+  let createSandbox: ((sourceRepo: string, opts?: { allowAnyRepo?: boolean }) => Sandbox) | undefined;
+  let removeSandbox: ((sb: Sandbox) => void) | undefined;
+  try {
+    const wt = await import('../sandbox/worktree.js');
+    createSandbox = wt.createSandbox;
+    removeSandbox = wt.removeSandbox;
+  } catch {
+    // sandbox worktree unavailable — candidates will use the legacy runner path.
   }
 
   // ── 2. Resolve judge ────────────────────────────────────────────────────
@@ -317,7 +393,7 @@ export async function runBestOfN(
     });
 
   // ── 5. Generate N candidates in parallel ────────────────────────────────
-  const candidatePromises = Array.from({ length: n }, async (_, i): Promise<CandidateResult> => {
+  const candidatePromises = Array.from({ length: n }, async (_, i): Promise<InternalCandidateResult> => {
     // Vary temperature and seed so candidates differ across calls.
     // We pass opts into the sandbox via model override naming conventions where
     // supported; the primary divergence comes from the engine's own stochasticity.
@@ -347,8 +423,73 @@ export async function runBestOfN(
           assignedBy: 'best-of-n',
           reason: `candidate ${i + 1}/${n}`,
         },
-        resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+        resultContract: { kind: 'proposal', requireDiff: true, requireProposal: false },
       });
+
+      if (captureSandboxedProposal && createSandbox) {
+        let sb: Sandbox;
+        try {
+          sb = createSandbox(sourceRepo, {
+            allowAnyRepo: process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1',
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return {
+            ...base,
+            latencyMs: Date.now() - t0,
+            error: `sandbox unavailable: ${msg}`,
+          };
+        }
+
+        const result = await runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
+          ...(typeof cModel === 'string' ? { model: cModel } : {}),
+          sourceRepo,
+          propose: false,
+          existingWorktree: sb,
+          runId,
+          workItemId: opts?.workItemId ?? item.id,
+          workSource: opts?.workSource ?? item.source,
+          ...(delegationScope ? { delegationScope } : {}),
+        });
+
+        const draft = await captureSandboxedProposal(cEngine, goal, cfg, {
+          sourceRepo,
+          existingWorktree: sb,
+          draftOnly: true,
+          ...(typeof cModel === 'string' ? { model: cModel } : {}),
+          runId,
+          workItemId: opts?.workItemId ?? item.id,
+          workSource: opts?.workSource ?? item.source,
+          ...(delegationScope ? { delegationScope } : {}),
+          sourceLabel: 'Best-of-N draft',
+          isPartial: result.state.status !== 'done',
+          usage: result.state.usage,
+          producerStatus: result.state.status,
+        });
+
+        const proposalOutcome = draft.proposalOutcome ?? result.proposalOutcome ?? result.state.proposalOutcome;
+        const proposalDraft = draft.proposalDraft;
+        const diff = proposalDraft?.diff ?? '';
+        const hasMaterial = !!proposalDraft || diff.trim().length > 0;
+        const stateForCandidate = proposalDraft ? result.state : draft.state;
+        const candidateError = candidateErrorFromState(stateForCandidate, hasMaterial, proposalOutcome);
+        return {
+          ...base,
+          diff,
+          ...(proposalDraft ? { proposalDraft } : {}),
+          ...(proposalOutcome ? { proposalOutcome } : {}),
+          latencyMs: Date.now() - t0,
+          ...(typeof result.state.usage?.estCostUsd === 'number'
+            ? { costUsd: result.state.usage.estCostUsd }
+            : {}),
+          ...(candidateError ? { error: candidateError } : {}),
+          sandbox: sb,
+          runId,
+          delegationScope,
+          state: stateForCandidate,
+        };
+      }
+
       const result = await runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
         ...(typeof cModel === 'string' ? { model: cModel } : {}),
         sourceRepo,
@@ -364,7 +505,8 @@ export async function runBestOfN(
       // engine's stdout. We'll use proposalId to fetch the diff from the inbox
       // if needed — but for scoring we work with what we have.
       const proposalOutcome = result.proposalOutcome ?? result.state.proposalOutcome;
-      const candidateError = candidateErrorFromState(result.state, result.proposalId, proposalOutcome);
+      const hasMaterial = !!result.proposalId;
+      const candidateError = candidateErrorFromState(result.state, hasMaterial, proposalOutcome);
       return {
         ...base,
         diff: typeof diff === 'string' ? diff : '',
@@ -376,7 +518,7 @@ export async function runBestOfN(
           : {}),
         ...(candidateError ? { error: candidateError } : {}),
         state: result.state,
-      } as CandidateResult & { state: unknown };
+      } as InternalCandidateResult;
     } catch (err) {
       return {
         ...base,
@@ -386,30 +528,28 @@ export async function runBestOfN(
     }
   });
 
-  const rawCandidates = await Promise.all(candidatePromises);
+  let rawCandidates: InternalCandidateResult[] = [];
+  let scored: InternalCandidateResult[] = [];
 
-  // ── 6. Filter empty diffs ───────────────────────────────────────────────
-  // A candidate is "non-empty" when it has a proposalId (meaning the sandbox
-  // captured a real diff and filed it). Candidates with only errors are kept
-  // in the result list but excluded from scoring/selection.
-  const withProposals = rawCandidates.filter(c => c.proposalId != null && !c.error);
+  try {
+    rawCandidates = await Promise.all(candidatePromises);
 
-  // ── 7. Score each non-empty candidate via the critic ────────────────────
-  const judgeClient = buildNullJudgeClient(); // fallback when no provider
-  const scored: CandidateResult[] = await Promise.all(
-    rawCandidates.map(async (c): Promise<CandidateResult> => {
-      if (!c.proposalId || c.error) return c;
+    // ── 6. Filter empty diffs ─────────────────────────────────────────────
+    // A candidate is "non-empty" when it produced proposal material. In the
+    // default file-once path that material is a draft captured from the live
+    // sandbox; legacy test/partial-build paths may still expose proposalId.
+    const withProposals = rawCandidates.filter(candidateHasProposalMaterial);
+
+    // ── 7. Score each non-empty candidate via the critic ──────────────────
+    const judgeClient = buildNullJudgeClient(); // fallback when no provider
+    scored = await Promise.all(
+      rawCandidates.map(async (c): Promise<InternalCandidateResult> => {
+        if (!candidateHasProposalMaterial(c)) return c;
 
       let verdict: ManagerVerdict | undefined;
       let score = 0;
       let testsPassed: boolean | undefined;
-      let proposalForCritic: Proposal | undefined;
-      try {
-        proposalForCritic = loadProposal?.(c.proposalId) ?? undefined;
-      } catch {
-        proposalForCritic = undefined;
-      }
-      const proposal = proposalForCritic ?? syntheticProposal(item, c.diff, c.index);
+      const proposal = proposalForCandidate(item, c, loadProposal);
 
       // Score via judge
       if (judgeProposal) {
@@ -434,7 +574,7 @@ export async function runBestOfN(
 
       // M183: taste scoring (flag-gated; only when tasteCritic enabled)
       let taste: TasteScore | undefined;
-      if (scoreTaste && c.proposalId) {
+      if (scoreTaste) {
         try {
           taste = await scoreTaste(
             proposal,
@@ -447,127 +587,167 @@ export async function runBestOfN(
       }
 
       return { ...c, diff: proposal.diff ?? c.diff, verdict, score, testsPassed, taste };
-    }),
-  );
+      }),
+    );
 
-  // ── 8. Pick winner ──────────────────────────────────────────────────────
-  // Among non-empty candidates, prefer those that passed tests, then highest score.
-  const eligible = scored.filter(c => c.proposalId != null && !c.error);
-  eligible.sort((a, b) => {
-    // Passing > non-passing.
-    // NOTE: testsPassed !== false intentionally treats undefined (tests not attempted /
-    // not available) as non-blocking — it is not a failure; only explicit false is penalised.
-    const aPass = a.testsPassed !== false ? 1 : 0;
-    const bPass = b.testsPassed !== false ? 1 : 0;
-    if (bPass !== aPass) return bPass - aPass;
+    // ── 8. Pick winner ────────────────────────────────────────────────────
+    // Among non-empty candidates, prefer those that passed tests, then highest score.
+    const eligible = scored.filter(candidateHasProposalMaterial);
+    eligible.sort((a, b) => {
+      // Passing > non-passing.
+      // NOTE: testsPassed !== false intentionally treats undefined (tests not attempted /
+      // not available) as non-blocking — it is not a failure; only explicit false is penalised.
+      const aPass = a.testsPassed !== false ? 1 : 0;
+      const bPass = b.testsPassed !== false ? 1 : 0;
+      if (bPass !== aPass) return bPass - aPass;
 
-    // M183: when tasteCritic is enabled, prefer highest taste overall score.
-    // Tie-break with existing correctness critic score (unchanged path when flag off).
-    if (tasteCriticEnabled) {
-      const aTaste = a.taste?.overall ?? 0;
-      const bTaste = b.taste?.overall ?? 0;
-      if (bTaste !== aTaste) return bTaste - aTaste;
-    }
-
-    return b.score - a.score;
-  });
-
-  const winner = eligible[0];
-
-  // ── M333: full-cost accounting across ALL candidates ────────────────
-  let isSubscription: ((e: string) => boolean) | undefined;
-  try {
-    const mod = await import('../fleet/subscription-usage.js');
-    isSubscription = mod.isSubscriptionEngine as (e: string) => boolean;
-  } catch {
-    // conservative fallback: treat every candidate as billable
-  }
-  const totalCostUsd = scored.reduce((s, c) => s + (c.costUsd ?? 0), 0);
-  const billableCostUsd = scored.reduce(
-    (s, c) =>
-      s + (isSubscription && c.engine && isSubscription(String(c.engine)) ? 0 : (c.costUsd ?? 0)),
-    0,
-  );
-  const noProposalReasons = summarizeNoProposalReasons(scored);
-
-  const critique: BestOfNResult['critique'] = {
-    n,
-    nonEmpty: withProposals.length,
-    judged: eligible.filter(c => c.verdict != null).length,
-    topScore: winner?.score ?? 0,
-    winnerIndex: winner?.index ?? -1,
-    totalCostUsd,
-    billableCostUsd,
-    ...(noProposalReasons.length > 0 ? { noProposalReasons } : {}),
-  };
-
-  // ── M333: exactly ONE pending proposal per work item ────────────────
-  // Losers are archived with a provenance reason. This is an explicit
-  // reason-tagged rejection, NOT a judge non-ship verdict — the M259/M271
-  // auto-archive counters key on judge verdicts and stay untouched.
-  const winnerPid = winner?.proposalId;
-  const losers = scored.filter((c) => c.proposalId && c.proposalId !== winnerPid);
-  if (losers.length > 0) {
-    try {
-      const { setStatus } = await import('../inbox/store.js');
-      for (const l of losers) {
-        try {
-          setStatus(
-            l.proposalId!,
-            'rejected',
-            undefined,
-            `best-of-n loser${winnerPid ? `: winner ${winnerPid}` : ' (no winner)'}`,
-          );
-        } catch {
-          // best-effort per loser
-        }
+      // M183: when tasteCritic is enabled, prefer highest taste overall score.
+      // Tie-break with existing correctness critic score (unchanged path when flag off).
+      if (tasteCriticEnabled) {
+        const aTaste = a.taste?.overall ?? 0;
+        const bTaste = b.taste?.overall ?? 0;
+        if (bTaste !== aTaste) return bTaste - aTaste;
       }
-    } catch {
-      // inbox unavailable (tests/partial builds)
-    }
-  }
 
-  // ── M333: per-candidate record stream (feeds M335 win-rates) ─────────
-  try {
-    const { recordBestOfN } = await import('../fleet/best-of-n-ledger.js');
-    recordBestOfN({
-      ts: new Date().toISOString(),
-      workItemId: opts?.workItemId ?? item.id,
-      source: String(item.source ?? ''),
-      repo: item.repo ?? null,
-      n,
-      winnerIndex: winner?.index ?? -1,
-      winnerProposalId: winnerPid ?? null,
-      totalCostUsd,
-      candidates: scored.map((c) => ({
-        index: c.index,
-        engine: String(c.engine ?? ''),
-        model: c.model ?? null,
-        score: c.score,
-        ...(c.testsPassed !== undefined ? { testsPassed: c.testsPassed } : {}),
-        ...(c.costUsd !== undefined ? { costUsd: c.costUsd } : {}),
-        ...(c.latencyMs !== undefined ? { latencyMs: c.latencyMs } : {}),
-        ...(c.error ? { error: c.error } : {}),
-        ...(c.proposalOutcome
-          ? {
-              proposalOutcome: c.proposalOutcome.kind,
-              proposalOutcomeReason: c.proposalOutcome.reason,
-            }
-          : {}),
-        proposalId: c.proposalId ?? null,
-        won: c.proposalId != null && c.proposalId === winnerPid,
-      })),
+      return b.score - a.score;
     });
-  } catch {
-    // ledger is best-effort
-  }
 
-  if (!winner) {
-    // All candidates empty or failing — caller skips proposing
-    return { winner: undefined, candidates: scored, critique };
-  }
+    let winner: InternalCandidateResult | undefined;
+    for (const c of eligible) {
+      if (c.proposalId) {
+        winner = c;
+        break;
+      }
 
-  return { winner, candidates: scored, critique };
+      if (!c.sandbox || !captureSandboxedProposal) {
+        scored[c.index] = {
+          ...c,
+          error: c.error ?? 'candidate sandbox unavailable for final proposal capture',
+        };
+        continue;
+      }
+
+      const cEngine = c.engine ?? defaultEngine;
+      const filed = await captureSandboxedProposal(cEngine, goal, cfg, {
+        sourceRepo,
+        existingWorktree: c.sandbox,
+        ...(typeof c.model === 'string' ? { model: c.model } : {}),
+        runId: c.runId,
+        workItemId: opts?.workItemId ?? item.id,
+        workSource: opts?.workSource ?? item.source,
+        ...(c.delegationScope ? { delegationScope: c.delegationScope } : {}),
+        sourceLabel: 'Best-of-N winner',
+        isPartial: c.proposalDraft?.isPartial === true || c.state?.status !== 'done',
+        usage: c.state?.usage,
+        durationMs: c.latencyMs,
+        producerStatus: c.state?.status ?? 'done',
+      });
+      const outcome = filed.proposalOutcome ?? filed.state.proposalOutcome;
+
+      if (filed.proposalId) {
+        let persisted: Proposal | undefined;
+        try {
+          persisted = loadProposal?.(filed.proposalId) ?? undefined;
+        } catch {
+          persisted = undefined;
+        }
+        winner = {
+          ...c,
+          proposalId: filed.proposalId,
+          ...(outcome ? { proposalOutcome: outcome } : {}),
+          diff: persisted?.diff ?? c.proposalDraft?.diff ?? c.diff,
+          state: filed.state,
+          error: undefined,
+        };
+        scored[c.index] = winner;
+        break;
+      }
+
+      const error = candidateErrorFromState(filed.state, false, outcome)
+        ?? 'final proposal capture did not file a proposal';
+      scored[c.index] = {
+        ...c,
+        ...(outcome ? { proposalOutcome: outcome } : {}),
+        state: filed.state,
+        error,
+      };
+    }
+
+    // ── M333: full-cost accounting across ALL candidates ──────────────
+    let isSubscription: ((e: string) => boolean) | undefined;
+    try {
+      const mod = await import('../fleet/subscription-usage.js');
+      isSubscription = mod.isSubscriptionEngine as (e: string) => boolean;
+    } catch {
+      // conservative fallback: treat every candidate as billable
+    }
+    const totalCostUsd = scored.reduce((s, c) => s + (c.costUsd ?? 0), 0);
+    const billableCostUsd = scored.reduce(
+      (s, c) =>
+        s + (isSubscription && c.engine && isSubscription(String(c.engine)) ? 0 : (c.costUsd ?? 0)),
+      0,
+    );
+    const noProposalReasons = summarizeNoProposalReasons(scored);
+    const winnerPid = winner?.proposalId;
+
+    const critique: BestOfNResult['critique'] = {
+      n,
+      nonEmpty: withProposals.length,
+      judged: eligible.filter(c => c.verdict != null).length,
+      topScore: winner?.score ?? 0,
+      winnerIndex: winner?.index ?? -1,
+      totalCostUsd,
+      billableCostUsd,
+      ...(noProposalReasons.length > 0 ? { noProposalReasons } : {}),
+    };
+
+    // ── M333: per-candidate record stream (feeds M335 win-rates) ───────
+    // Losers remain metadata-only rows here; they are never persisted as
+    // rejected inbox proposals in the file-once path.
+    try {
+      const { recordBestOfN } = await import('../fleet/best-of-n-ledger.js');
+      recordBestOfN({
+        ts: new Date().toISOString(),
+        workItemId: opts?.workItemId ?? item.id,
+        source: String(item.source ?? ''),
+        repo: item.repo ?? null,
+        n,
+        winnerIndex: winner?.index ?? -1,
+        winnerProposalId: winnerPid ?? null,
+        totalCostUsd,
+        candidates: scored.map((c) => ({
+          index: c.index,
+          engine: String(c.engine ?? ''),
+          model: c.model ?? null,
+          score: c.score,
+          ...(c.testsPassed !== undefined ? { testsPassed: c.testsPassed } : {}),
+          ...(c.costUsd !== undefined ? { costUsd: c.costUsd } : {}),
+          ...(c.latencyMs !== undefined ? { latencyMs: c.latencyMs } : {}),
+          ...(c.error ? { error: c.error } : {}),
+          ...(c.proposalOutcome
+            ? {
+                proposalOutcome: c.proposalOutcome.kind,
+                proposalOutcomeReason: c.proposalOutcome.reason,
+              }
+            : {}),
+          proposalId: c.proposalId && c.proposalId === winnerPid ? c.proposalId : null,
+          won: c.proposalId != null && c.proposalId === winnerPid,
+        })),
+      });
+    } catch {
+      // ledger is best-effort
+    }
+
+    const candidates = scored.map(publicCandidate);
+    if (!winner) {
+      // All candidates empty, failing, or blocked at final capture — caller skips proposing.
+      return { winner: undefined, candidates, critique };
+    }
+
+    return { winner: publicCandidate(winner), candidates, critique };
+  } finally {
+    cleanupCandidateSandboxes(rawCandidates, removeSandbox);
+  }
 }
 
 // ---------------------------------------------------------------------------

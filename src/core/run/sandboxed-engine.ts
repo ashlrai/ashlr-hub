@@ -38,6 +38,7 @@ import type {
   EngineId,
   EngineTier,
   ProposalVerifyResult,
+  Proposal,
   RunActionCounts,
   RunProposalOutcome,
   RunBudget,
@@ -98,6 +99,8 @@ export interface SandboxedEngineResult {
   state: RunState;
   /** Inbox proposal id when a non-empty diff was captured. */
   proposalId?: string;
+  /** Proposal-shaped candidate captured without persisting to the inbox. */
+  proposalDraft?: Proposal;
   /** Metadata-only explanation of whether proposal filing happened. */
   proposalOutcome?: RunProposalOutcome;
 }
@@ -128,6 +131,8 @@ export interface CaptureSandboxedProposalOptions {
   sourceRepo: string;
   /** Existing sandbox worktree whose diff should be captured. */
   existingWorktree: Sandbox;
+  /** Capture a Proposal-shaped draft without persisting or recording a decision. */
+  draftOnly?: boolean;
   /** Model id for the backend (else cfg.foundry.models[engine]). */
   model?: string;
   /** Budget/usage hints recorded on the synthetic capture state. */
@@ -991,7 +996,8 @@ export async function captureSandboxedProposal(
       opts.isPartial ? 'partial proposal filed' : 'proposal filed',
       diff,
     );
-    const proposal = selectInboxStore(cfg).create({
+    const draftId = `draft-${id}`;
+    const proposalInput = {
       repo: sb.sourceRepo,
       origin: 'agent',
       kind: 'patch',
@@ -1015,6 +1021,7 @@ export async function captureSandboxedProposal(
         engineModel,
         tier,
         runId: id,
+        proposalId: opts.draftOnly ? draftId : undefined,
         workItemId: opts.workItemId,
         workSource: opts.workSource,
         outcome: filedOutcomeForMetadata,
@@ -1024,7 +1031,22 @@ export async function captureSandboxedProposal(
         actionCounts: actionCountsWithOutcome(actionCounts, filedOutcomeForMetadata),
       }),
       ...(opts.isPartial ? { isPartial: true } : {}),
-    });
+    } satisfies Omit<Proposal, 'id' | 'status' | 'createdAt'>;
+
+    if (opts.draftOnly === true) {
+      const draft: Proposal = {
+        ...proposalInput,
+        id: draftId,
+        status: 'pending',
+        createdAt: now,
+      };
+      return {
+        state: mk({ result: opts.isPartial ? 'partial proposal draft captured' : 'proposal draft captured' }),
+        proposalDraft: draft,
+      };
+    }
+
+    const proposal = selectInboxStore(cfg).create(proposalInput);
     const outcome = proposalOutcome(
       'filed',
       opts.isPartial ? 'partial proposal filed' : 'proposal filed',
