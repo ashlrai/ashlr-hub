@@ -142,7 +142,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
       buildContainedEnv: vi.fn(() => ({})),
     }));
 
-    vi.doMock('../src/sandbox/worktree.js', () => ({
+    vi.doMock('../src/core/sandbox/worktree.js', () => ({
       createSandbox: vi.fn(() => ({
         id: 'mock-sb',
         worktreePath: '/mock/wt',
@@ -193,7 +193,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.doUnmock('../src/core/run/sandboxed-engine.js');
-    vi.doUnmock('../src/sandbox/worktree.js');
+    vi.doUnmock('../src/core/sandbox/worktree.js');
     vi.doUnmock('../src/core/run/verify-commands.js');
     vi.doUnmock('../src/core/run/provider-client.js');
     vi.doUnmock('../src/core/run/engines.js');
@@ -246,8 +246,12 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
       allowedFiles: { include: ['src/fix.ts'] },
       memoryMode: 'bounded',
     });
-    const captureOpts = captureMockFn.mock.calls[0]?.[3] as Record<string, unknown>;
-    expect(captureOpts['delegationScope']).toMatchObject({
+    const captureOpts = captureMockFn.mock.calls.find((call) => {
+      const opts = call[3] as Record<string, unknown> | undefined;
+      return Boolean(opts?.['delegationScope']);
+    })?.[3] as Record<string, unknown> | undefined;
+    expect(captureOpts).toBeDefined();
+    expect(captureOpts?.['delegationScope']).toMatchObject({
       origin: 'daemon',
       sourceRepo: '/mock/repo',
       workItemId: 'work-titrr',

@@ -41,6 +41,7 @@ import {
   type RepoProjectKind,
 } from '../run/repo-profile.js';
 import { DEFAULT_COOLDOWN_MS, isSuppressibleWorkedOutcome, loadWorkedLedger } from './worked-ledger.js';
+import { pendingProposalItemKeysForBacklog, workItemCoverageKey } from './proposal-matching.js';
 import {
   readDispatchProductionYield,
   type DispatchProductionYieldSummary,
@@ -428,19 +429,6 @@ function isoFromMs(ms: number | null): string | null {
   }
 }
 
-function pendingItemIdsForQueue(items: WorkItem[], pendingProposals: Proposal[]): Set<string> {
-  const pendingItemIds = new Set<string>();
-  for (const prop of pendingProposals) {
-    const haystack = `${prop.title} ${prop.summary}`;
-    for (const item of items) {
-      const escaped = item.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const re = new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`);
-      if (re.test(haystack)) pendingItemIds.add(item.id);
-    }
-  }
-  return pendingItemIds;
-}
-
 function buildQueueEligibility(
   items: WorkItem[],
   pendingProposals: Proposal[],
@@ -461,14 +449,14 @@ function buildQueueEligibility(
     }
   }
 
-  const pendingItemIds = pendingItemIdsForQueue(items, pendingProposals);
+  const pendingItemKeys = pendingProposalItemKeysForBacklog(items, pendingProposals);
   const eligibleItems: WorkItem[] = [];
   let cooldownItems = 0;
   let pendingItems = 0;
   let nextEligibleMs: number | null = null;
 
   for (const item of items) {
-    if (pendingItemIds.has(item.id)) {
+    if (pendingItemKeys.has(workItemCoverageKey(item))) {
       pendingItems++;
       continue;
     }

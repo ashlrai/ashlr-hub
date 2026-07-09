@@ -1530,21 +1530,22 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
   it('A7: items with a pending proposal are skipped during selection', async () => {
     const { repo, items } = enrollWithItems(3);
-    // Create a pending proposal whose title contains items[0].id so the skip logic fires.
+    // New proposals use workItemId as the source of truth; stale prose that
+    // mentions another item must not block that other item.
     createProposal({
       repo: repo.dir,
       origin: 'swarm',
       kind: 'patch',
-      title: `pending for ${items[0]!.id}`,
-      summary: `covers ${items[0]!.id}`,
+      title: `pending for ${items[1]!.id}`,
+      summary: `covers ${items[1]!.id}`,
       diff: 'diff --git a/x.ts b/x.ts\n',
+      workItemId: items[0]!.id,
     });
 
     const dispatchedItemIds: string[] = [];
     mockRunSwarm.mockImplementation(async (_goal: unknown, _cfg: unknown, opts: unknown) => {
-      const project = (opts as Record<string, unknown>)?.project as string | undefined;
-      // Track which item ids were dispatched by looking at what the tick selected
-      if (project) dispatchedItemIds.push(project);
+      const workItemId = (opts as Record<string, unknown>)?.workItemId as string | undefined;
+      if (workItemId) dispatchedItemIds.push(workItemId);
       return { id: 'mock', status: 'done', goal: '', result: '', usage: { totalTokens: 10, estCostUsd: 0.001, steps: 1 } };
     });
 
@@ -1553,6 +1554,36 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.reason).toBe('ok');
     // items[0] was skipped; only 2 items dispatched from the 3 available.
     expect(mockRunSwarm).toHaveBeenCalledTimes(2);
+    expect(dispatchedItemIds).not.toContain(items[0]!.id);
+    expect(dispatchedItemIds).toContain(items[1]!.id);
+    expect(dispatchedItemIds).toContain(items[2]!.id);
+  });
+
+  it('A7b: legacy pending proposals without workItemId still skip exact item-id matches', async () => {
+    const { repo, items } = enrollWithItems(3);
+    createProposal({
+      repo: repo.dir,
+      origin: 'swarm',
+      kind: 'patch',
+      title: `legacy pending for ${items[1]!.id}`,
+      summary: 'legacy proposal has no causal work item id',
+      diff: 'diff --git a/x.ts b/x.ts\n',
+    });
+
+    const dispatchedItemIds: string[] = [];
+    mockRunSwarm.mockImplementation(async (_goal: unknown, _cfg: unknown, opts: unknown) => {
+      const workItemId = (opts as Record<string, unknown>)?.workItemId as string | undefined;
+      if (workItemId) dispatchedItemIds.push(workItemId);
+      return { id: 'mock', status: 'done', goal: '', result: '', usage: { totalTokens: 10, estCostUsd: 0.001, steps: 1 } };
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 3, parallel: 3 }), { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(mockRunSwarm).toHaveBeenCalledTimes(2);
+    expect(dispatchedItemIds).toContain(items[0]!.id);
+    expect(dispatchedItemIds).not.toContain(items[1]!.id);
+    expect(dispatchedItemIds).toContain(items[2]!.id);
   });
 });
 

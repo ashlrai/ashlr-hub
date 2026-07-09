@@ -132,15 +132,21 @@ function makeTmpRepo(): string {
 }
 
 /** Build a minimal pending Proposal for dedup tests. */
-function makePendingProposal(overrides: { id?: string; title: string; workItemId?: string }): Proposal {
+function makePendingProposal(overrides: {
+  id?: string;
+  title: string;
+  summary?: string;
+  repo?: string | null;
+  workItemId?: string;
+}): Proposal {
   return {
     id: overrides.id ?? `prop-test-${Math.random().toString(36).slice(2)}`,
     origin: 'backlog',
     kind: 'patch',
     title: overrides.title,
-    summary: 'test proposal',
+    summary: overrides.summary ?? 'test proposal',
     status: 'pending',
-    repo: '/tmp/repo',
+    repo: overrides.repo ?? null,
     createdAt: new Date().toISOString(),
     ...(overrides.workItemId ? { workItemId: overrides.workItemId } : {}),
   } as Proposal;
@@ -386,6 +392,7 @@ describe('M133 — buildBacklog: drops items with open pending proposals', () =>
     const backlog = await buildBacklog({
       repos: [tmpDir],
       minItemValue: 2,
+      cfg: { foundry: { scanTodos: true } },
       listPendingProposals: () => pendingProposals,
     });
 
@@ -397,19 +404,80 @@ describe('M133 — buildBacklog: drops items with open pending proposals', () =>
     const rgOutput = 'src/auth.ts:88:// TODO: implement refresh-token rotation with expiry check\n';
     _execFileImpl = makeRgStub(rgOutput);
 
-    // We need to know the item id — derive the same way scanners do
-    // (it's a hash-based id, so we match by title instead)
+    const [item] = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
+    expect(item).toBeDefined();
+
     const pendingProposals = [
-      makePendingProposal({ title: '1 marker in src/auth.ts:88' }),
+      makePendingProposal({
+        title: 'Proposal title does not repeat the scanner title',
+        repo: tmpDir,
+        workItemId: item!.id,
+      }),
     ];
 
     const backlog = await buildBacklog({
       repos: [tmpDir],
       minItemValue: 2,
+      cfg: { foundry: { scanTodos: true } },
       listPendingProposals: () => pendingProposals,
     });
 
     expect(backlog.items.filter((i) => i.title.includes('src/auth.ts'))).toHaveLength(0);
+  });
+
+  it('lets workItemId override stale proposal titles during pending dedup', async () => {
+    const rgOutput = [
+      'src/auth.ts:88:// TODO: implement refresh-token rotation with expiry check',
+      'src/parser.ts:20:// TODO: implement AST validation with error recovery',
+    ].join('\n') + '\n';
+    _execFileImpl = makeRgStub(rgOutput);
+
+    const scanned = await scanTodos(tmpDir, { foundry: { scanTodos: true } });
+    const authItem = scanned.find((i) => i.title.includes('src/auth.ts'));
+    const parserItem = scanned.find((i) => i.title.includes('src/parser.ts'));
+    expect(authItem).toBeDefined();
+    expect(parserItem).toBeDefined();
+
+    const pendingProposals = [
+      makePendingProposal({
+        title: parserItem!.title,
+        summary: `Stale prose mentions ${parserItem!.id}`,
+        repo: tmpDir,
+        workItemId: authItem!.id,
+      }),
+    ];
+
+    const backlog = await buildBacklog({
+      repos: [tmpDir],
+      minItemValue: 2,
+      cfg: { foundry: { scanTodos: true } },
+      listPendingProposals: () => pendingProposals,
+    });
+
+    expect(backlog.items.filter((i) => i.title.includes('src/auth.ts'))).toHaveLength(0);
+    expect(backlog.items.filter((i) => i.title.includes('src/parser.ts'))).toHaveLength(1);
+  });
+
+  it('keeps legacy normalized-title pending dedup when workItemId is absent', async () => {
+    const rgOutput = [
+      'src/auth.ts:88:// TODO: implement refresh-token rotation with expiry check',
+      'src/parser.ts:20:// TODO: implement AST validation with error recovery',
+    ].join('\n') + '\n';
+    _execFileImpl = makeRgStub(rgOutput);
+
+    const pendingProposals = [
+      makePendingProposal({ title: '1 marker in src/parser.ts:20', repo: tmpDir }),
+    ];
+
+    const backlog = await buildBacklog({
+      repos: [tmpDir],
+      minItemValue: 2,
+      cfg: { foundry: { scanTodos: true } },
+      listPendingProposals: () => pendingProposals,
+    });
+
+    expect(backlog.items.filter((i) => i.title.includes('src/auth.ts'))).toHaveLength(1);
+    expect(backlog.items.filter((i) => i.title.includes('src/parser.ts'))).toHaveLength(0);
   });
 
   it('keeps an item when no pending proposal matches it', async () => {

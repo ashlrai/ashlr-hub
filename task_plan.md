@@ -573,4 +573,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Verification passed: focused inbox/API suite, secret-safety/API scrub canaries, typecheck, lint, build, audit, and diff check.
 - [x] File non-empty partial/TITRR/API-model diffs as safe review-only proposals with failed verification metadata instead of discarding them.
 - [x] Verify partial proposals stay fail-closed through `isPartial:true`, `verifyResult.passed:false`, and existing auto-merge/verification gates.
-- [ ] Next lane: update daemon/status pending matching to prefer `workItemId` so stale/pending proposal blockers are item-accurate.
+- [x] Update daemon/status/backlog pending matching to prefer repo-scoped `workItemId` so stale proposal prose cannot block unrelated work.
+- [x] Keep legacy no-`workItemId` pending coverage through same-repo exact item-id / normalized-title fallback.
+- [x] Repair adjacent public-read and scrub regressions uncovered by broad CI: enrolled-existing workspace fixtures, orient path-scrub expectations, MCP audit `keys=`, and long-diff truncation markers.
+- [x] Harden the order-sensitive TITRR worktree mock fixture so full CI no longer depends on incidental module cache order.
+- [x] Verify pending matching and public/scrub fixes with focused, adjacent, typecheck, lint, build, audit, broad affected suites, and full `npm run test:ci` (437 files, 8,933 passed, 7 skipped).
+- [ ] Next lane: connect review-only partial proposals to a repair/verify work queue so useful partial diffs compound into merge-grade patches.
+- [ ] Next lane: make merge-grade verification explicit in status by separating inferred command coverage from repo-owned contracts.
+- [ ] Later lane: evaluate the untracked triviality classifier as observe-only fleet telemetry after moving/hardening it.

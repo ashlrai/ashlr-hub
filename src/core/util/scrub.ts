@@ -30,6 +30,10 @@ function scrubLongBase64Like(match: string): string {
   // Preserve ordinary Git SHA-1 commit ids for forensic audit trails. The
   // explicit hex-64 rule above still redacts longer raw-key shapes.
   if (/^[0-9a-fA-F]{40}$/.test(match)) return match;
+  // Avoid erasing obvious low-entropy test/log filler such as xxxxx...; real
+  // token-like blobs still have mixed character content and are redacted below.
+  const repeatedCandidate = match.replace(/^\+/, '').replace(/=+$/, '');
+  if (/^(.)\1{39,}$/.test(repeatedCandidate)) return match;
   return '[REDACTED]';
 }
 
@@ -52,9 +56,11 @@ export function scrubSecrets(text: string): string {
       .replace(/\bgithub_pat_[A-Za-z0-9_]{22,}/g, '[REDACTED]')
       // 3. Bearer / Token / Authorization header values
       .replace(/\b(Bearer|Token|Authorization)\s+[A-Za-z0-9\-._~+/]+=*/gi, '$1 [REDACTED]')
-      // 4. Generic key=value secret patterns (covers ASHLR_* and common names)
+      // 4. Generic key=value secret patterns. ASHLR_* env vars are only
+      // redacted when they look like assignments, not plain audit metadata
+      // such as "keys=query".
       .replace(
-        /\b(api[_-]?key|api[_-]?token|secret|secret[_-]?key|token|password|passwd|pwd|auth|credential|client[_-]?secret|private[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|connection[_-]?string|conn[_-]?str|_?auth[_-]?token|ASHLR_[A-Z_]+)[=:\s]+["']?[^\s,;'"]{8,}["']?/gi,
+        /\b(api[_-]?key|api[_-]?token|secret|secret[_-]?key|token|password|passwd|pwd|auth|credential|client[_-]?secret|private[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|connection[_-]?string|conn[_-]?str|_?auth[_-]?token|ASHLR_[A-Z_]+)\s*[=:]\s*["']?[^\s,;'"]{8,}["']?/gi,
         '$1=[REDACTED]',
       )
       // 5. Slack tokens

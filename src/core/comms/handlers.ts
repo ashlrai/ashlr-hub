@@ -169,7 +169,7 @@ async function handleManagerApproval(req: CommsRequest, cfg: AshlrConfig): Promi
       const rawDiff = proposal.diff ?? '(no diff available)';
       const scrubbed = scrubSecrets(rawDiff);
       const truncated =
-        scrubbed.length > MAX_DIFF_SMS
+        rawDiff.length > MAX_DIFF_SMS || scrubbed.length > MAX_DIFF_SMS
           ? scrubbed.slice(0, MAX_DIFF_SMS) + '\n…[truncated]'
           : scrubbed;
 

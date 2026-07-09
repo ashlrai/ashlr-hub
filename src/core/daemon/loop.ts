@@ -114,6 +114,7 @@ import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
 // M220: verdict-feedback sweep — feed judge rejections back to the ledger so
 // re-clogging items (e.g. "CI is failing") are suppressed for the cooldown window.
 import { sweepJudgedProposals } from '../fleet/worked-ledger.js';
+import { pendingProposalItemKeysForBacklog, workItemCoverageKey } from '../fleet/proposal-matching.js';
 import { loadConfig } from '../config.js';
 import { hostname as osHostname } from 'node:os';
 import {
@@ -1513,26 +1514,13 @@ export async function tick(
     }
   }
 
-  // Build a set of item ids that already have an open PENDING proposal so we
-  // can skip duplicating work. Best-effort: match on item.id appearing in the
-  // proposal title or summary. Never throws.
-  const pendingItemIds = new Set<string>();
+  // Build a set of repo+item keys that already have an open PENDING proposal
+  // so we can skip duplicating work. New proposals use workItemId as the source
+  // of truth; legacy proposals without it fall back to exact item-id text
+  // matching. Never throws.
+  let pendingItemKeys = new Set<string>();
   try {
-    for (const prop of listProposals({ status: 'pending' })) {
-      const haystack = `${prop.title} ${prop.summary}`;
-      // Match item.id as an exact token (surrounded by non-word chars or
-      // start/end of string) to avoid substring false-positives where a short
-      // id like "fix-1" would incorrectly match "fix-10" or "fix-100".
-      for (const bi of backlogItems) {
-        // Escape any regex metacharacters in the id, then require word-boundary
-        // equivalents (non-word char or string edge) on both sides.
-        const escaped = bi.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const re = new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`);
-        if (re.test(haystack)) {
-          pendingItemIds.add(bi.id);
-        }
-      }
-    }
+    pendingItemKeys = pendingProposalItemKeysForBacklog(backlogItems, listProposals({ status: 'pending' }));
   } catch (err) {
     // Best-effort — never block selection on inbox read failure.
     console.warn('[ashlr] daemon:tick inbox pendingItemIds read failed:', (err as Error)?.message ?? err);
@@ -1570,7 +1558,7 @@ export async function tick(
         const candidate = group[advance]!;
         const skip =
           coordinator.shouldSkip(candidate.id, cooldownMs) ||
-          pendingItemIds.has(candidate.id);
+          pendingItemKeys.has(workItemCoverageKey(candidate));
         if (!skip) break;
         advance++;
       }

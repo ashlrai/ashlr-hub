@@ -249,6 +249,8 @@ describe('GET /api/fleet-state', () => {
     const { res, status, body } = makeRes();
     try {
       process.env.ASHLR_HOME = fx.ashlrDir;
+      const repo = fx.makeRepo();
+      repo.enroll();
       recordAgentAction({
         schemaVersion: 1,
         ts: new Date().toISOString(),
@@ -258,7 +260,7 @@ describe('GET /api/fleet-state', () => {
         outcome: 'proposal-created',
         action: 'daemon:dispatch',
         summary: 'codex proposal-created for API surface test',
-        repo: '/repo/alpha',
+        repo: repo.dir,
         itemId: 'item-a',
         source: 'goal',
         proposalId: 'prop-a',

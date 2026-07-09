@@ -504,9 +504,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         repo,
         origin: 'agent',
         kind: 'patch',
-        title: `Proposal for ${item.id}`,
-        summary: 'This pending proposal covers the queued item.',
+        title: 'Proposal for pending queue work',
+        summary: 'This pending proposal covers the queued item without repeating its id.',
         diff: docsDiff('pending'),
+        workItemId: item.id,
       },
       baseConfig(),
     );
@@ -523,6 +524,62 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       id: 'wait-for-backlog-eligibility',
       detail: expect.stringContaining('0 cooling, 1 pending'),
     }));
+  });
+
+  it('keeps unrelated backlog eligible when a workItemId proposal mentions another item', async () => {
+    const repo = join(tmpHome, 'repo');
+    const covered = makeBacklogItem(repo, 'repo:goal:covered', 'Covered proposal work', 7);
+    const mentioned = makeBacklogItem(repo, 'repo:goal:mentioned', 'Mentioned but fresh work', 6);
+    writeRunningDaemon(tmpHome);
+    writeBacklogSnapshot(tmpHome, repo, [covered, mentioned]);
+    createProposal(
+      {
+        repo,
+        origin: 'agent',
+        kind: 'patch',
+        title: `Proposal text mentions ${mentioned.id}`,
+        summary: `Stale context mentions ${mentioned.id}, but the causal work item is different.`,
+        diff: docsDiff('pending causal item'),
+        workItemId: covered.id,
+      },
+      baseConfig(),
+    );
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.queue.backlogItems).toBe(2);
+    expect(s.queue.eligibleBacklogItems).toBe(1);
+    expect(s.queue.pendingItems).toBe(1);
+    expect(s.queue.next?.[0]).toMatchObject({ id: mentioned.id, repo });
+    expect(s.nextActions).toContainEqual(expect.objectContaining({
+      id: 'build-backlog',
+      detail: `Start with ${mentioned.title}`,
+      target: repo,
+    }));
+  });
+
+  it('keeps legacy pending proposal matching for exact item-id mentions', async () => {
+    const repo = join(tmpHome, 'repo');
+    const item = makeBacklogItem(repo, 'repo:goal:legacy-pending', 'Legacy pending proposal work', 7);
+    writeRunningDaemon(tmpHome);
+    writeBacklogSnapshot(tmpHome, repo, [item]);
+    createProposal(
+      {
+        repo,
+        origin: 'agent',
+        kind: 'patch',
+        title: `Legacy proposal for ${item.id}`,
+        summary: 'Legacy proposal has no workItemId.',
+        diff: docsDiff('legacy pending'),
+      },
+      baseConfig(),
+    );
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.queue.eligibleBacklogItems).toBe(0);
+    expect(s.queue.pendingItems).toBe(1);
+    expect(s.queue.next).toBeUndefined();
   });
 
   it('builds queue.next and build-backlog from eligible items instead of higher-scored cooling items', async () => {

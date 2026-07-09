@@ -18,6 +18,7 @@ import { audit } from '../sandbox/audit.js';
 import { isTrivialItem } from './value-filter.js';
 import { computeOutcomePriors, scoreAdjustment } from '../fleet/feedback.js';
 import { strategicRepoMultiplier } from '../ecosystem/focus.js';
+import { pendingProposalItemKeysForBacklog, workItemCoverageKey } from '../fleet/proposal-matching.js';
 
 // ---------------------------------------------------------------------------
 // M133: normalized title for dedup matching
@@ -385,24 +386,28 @@ export async function buildBacklog(opts?: {
         })();
 
     if (pendingProposals.length > 0) {
-      // Build lookup sets for both matching strategies.
-      const pendingIds = new Set<string>();
-      const pendingNormTitles = new Set<string>();
+      const pendingItemKeys = pendingProposalItemKeysForBacklog(passed, pendingProposals);
+      const pendingGlobalNormTitles = new Set<string>();
+      const pendingRepoNormTitles = new Set<string>();
       for (const p of pendingProposals) {
-        // workItemId: optional field that directly links a proposal to its item
-        const pRec = p as unknown as Record<string, unknown>;
-        if (typeof pRec['workItemId'] === 'string') {
-          pendingIds.add(pRec['workItemId']);
-        }
-        pendingNormTitles.add(normalizeTitle(p.title));
+        const workItemId = typeof p.workItemId === 'string' ? p.workItemId.trim() : '';
+        if (workItemId) continue;
+        const normTitle = normalizeTitle(p.title);
+        if (!normTitle) continue;
+        if (p.repo) pendingRepoNormTitles.add(`${resolve(p.repo)}\0${normTitle}`);
+        else pendingGlobalNormTitles.add(normTitle);
       }
 
       passedAfterPendingDedup = passed.filter((item) => {
-        if (pendingIds.has(item.id)) {
+        if (pendingItemKeys.has(workItemCoverageKey(item))) {
           pendingDedupCount++;
           return false;
         }
-        if (pendingNormTitles.has(normalizeTitle(item.title))) {
+        const normTitle = normalizeTitle(item.title);
+        if (
+          pendingGlobalNormTitles.has(normTitle) ||
+          pendingRepoNormTitles.has(`${resolve(item.repo)}\0${normTitle}`)
+        ) {
           pendingDedupCount++;
           return false;
         }
