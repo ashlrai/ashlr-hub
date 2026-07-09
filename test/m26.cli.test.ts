@@ -148,6 +148,7 @@ describe('reflect — default report', () => {
     // 1 done / 2 analyzed => 50%
     expect(out).toContain('50%');
     expect(out).toContain('Top failure modes');
+    expect(readAgentActions()).toEqual([]);
   });
 
   it('--json emits a ReflectionReport with the documented shape', async () => {

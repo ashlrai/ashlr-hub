@@ -3028,7 +3028,9 @@ function missionDirective(
     case 'inspect-proposal-production':
       return 'Recover proposal production';
     case 'improve-context-efficiency':
-      return 'Run context reflection and reslice';
+      return action.commands?.some((command) => command.label === 'Drain reslice queue')
+        ? 'Run context reflection and reslice'
+        : 'Run context reflection';
     case 'review-phantom-audit':
       return 'Review Phantom audit';
     case 'build-backlog':

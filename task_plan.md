@@ -1059,7 +1059,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add `ashlr reflect playbooks --persist` as a control-plane next action with metadata-only safety note.
 - [x] Add guarded one-shot daemon drain command when proposal-yield-low or generated diagnostic reslices are present.
 - [x] Add mission directive for the context reflection/reslice action.
-- [x] Emit metadata-only reflection telemetry for report and playbook runs.
+- [x] Emit metadata-only reflection telemetry for executable playbook persist runs while preserving default report learn-only behavior.
 - [x] Add FleetStatus and reflect CLI regression coverage.
 - [x] Run focused tests, typecheck, lint, build, audit, and diff checks.
 - [x] Commit, push, reload daemon, and smoke live status.

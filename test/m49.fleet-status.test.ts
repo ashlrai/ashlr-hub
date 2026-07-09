@@ -1890,7 +1890,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ]));
     expect(action?.commands?.map((command) => command.label)).not.toContain('Drain reslice queue');
     expect(s.missionBrief).toMatchObject({
-      directive: 'Run context reflection and reslice',
+      directive: 'Run context reflection',
       action: {
         id: 'improve-context-efficiency',
       },

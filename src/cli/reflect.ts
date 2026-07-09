@@ -211,16 +211,13 @@ function printHelp(): void {
 // ─── Human-readable report output ────────────────────────────────────────────
 
 function recordReflectionTelemetry(input: {
-  mode: 'report' | 'playbooks';
+  mode: 'playbooks';
   outcome?: 'ok' | 'failed';
-  swarmsAnalyzed?: number;
   playbooks?: number;
   persisted?: number;
   didPersist?: boolean;
-  window?: string | null;
 }): void {
   const counts: Record<string, number> = {};
-  if (input.swarmsAnalyzed !== undefined) counts.swarmsAnalyzed = Math.max(0, Math.trunc(input.swarmsAnalyzed));
   if (input.playbooks !== undefined) counts.playbooks = Math.max(0, Math.trunc(input.playbooks));
   if (input.persisted !== undefined) counts.persisted = Math.max(0, Math.trunc(input.persisted));
   recordAgentAction({
@@ -230,11 +227,9 @@ function recordReflectionTelemetry(input: {
     actor: 'agent',
     kind: 'reflection',
     outcome: input.outcome ?? 'ok',
-    action: input.mode === 'playbooks' ? 'reflect:playbooks' : 'reflect:report',
-    summary: input.mode === 'playbooks'
-      ? `reflection playbooks distilled ${counts.playbooks ?? 0}, persisted ${counts.persisted ?? 0}`
-      : `reflection report analyzed ${counts.swarmsAnalyzed ?? 0} swarm(s)`,
-    reason: input.window ? `window:${input.window}` : 'window:default',
+    action: 'reflect:playbooks',
+    summary: `reflection playbooks distilled ${counts.playbooks ?? 0}, persisted ${counts.persisted ?? 0}`,
+    reason: 'playbooks:persist',
     tags: [
       'reflection',
       input.mode,
@@ -490,11 +485,6 @@ export async function cmdReflect(args: string[]): Promise<number> {
   // Persist a snapshot so deltas accumulate week-over-week. Best-effort: a
   // failed save never blocks the report (the store never throws and returns null).
   core.saveReport(report);
-  recordReflectionTelemetry({
-    mode: 'report',
-    swarmsAnalyzed: report.swarmsAnalyzed,
-    window: parsed.window,
-  });
 
   if (parsed.json) {
     process.stdout.write(JSON.stringify(report) + '\n');
