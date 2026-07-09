@@ -757,4 +757,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Surface read-only goal-focus state in FleetStatus and CLI next actions.
 - [x] Add focused scanner/invent/status regression coverage.
 - [x] Verify focused and broad lightweight gates.
-- [ ] Commit, push, reload daemon, refresh/smoke live backlog state.
+- [x] Commit `34d4233`, push to `origin/master`, reload daemon, refresh backlog, clear stale dead-owner spend guard, and smoke live goal-focus state.
