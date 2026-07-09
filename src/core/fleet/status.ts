@@ -30,6 +30,11 @@ import type {
 import type { SharedQueueHealth } from './shared-store.js';
 import type { AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
 import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
+import {
+  listAttemptRecords,
+  summarizeAttemptCoverage,
+  type AttemptCoverageStatus,
+} from '../autonomy/attempt-records.js';
 import type { GuardHealthDiagnosis } from '../daemon/guard-health.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import type { BackendAvailability, BackendResourceState } from '../fabric/resource-monitor.js';
@@ -535,6 +540,8 @@ export interface FleetStatus {
   dispatchYieldDiagnostics?: FleetDispatchYieldDiagnostics;
   /** Durable 24h agent-action global workspace summary from append-only telemetry. */
   workspace?: AgentWorkspaceStatus;
+  /** Read-only joined attempt coverage summary; metadata only, no raw prompts/diffs/output. */
+  attemptCoverage?: AttemptCoverageStatus;
   /** Read-only context discipline signal for long-running multi-agent work. */
   contextEfficiency?: FleetContextEfficiencyStatus;
   /** True when the global kill switch is engaged (fleet paused). */
@@ -983,6 +990,15 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     });
   } catch {
     // Optional history/analytics surface only.
+  }
+  try {
+    const attemptRecords = listAttemptRecords({
+      windowHours: RECENT_WINDOW_MS / (60 * 60 * 1000),
+      limit: 500,
+    });
+    status.attemptCoverage = summarizeAttemptCoverage(attemptRecords, RECENT_WINDOW_MS / (60 * 60 * 1000));
+  } catch {
+    // Optional learning coverage surface only.
   }
   try {
     const { genomeHubHealth } = await import('../genome/store.js');

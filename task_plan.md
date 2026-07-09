@@ -729,4 +729,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused status/UI regression coverage.
 - [x] Add cleared-kind self-heal pruning so stale build rows clear after build commands pass even when later verification is untrusted.
 - [x] Verify focused gates, broad lightweight gates, and live command-rail/backlog state.
+- [x] Commit and push `c4185d6`, reload launchd daemon, and smoke production status.
+
+## Current Continuation - Attempt Record Coverage
+- [x] Rechecked clean production state after command rail: daemon PID `4199`, guard clear, live command rail present.
+- [x] Deploy sidecar scout for exact reader APIs and privacy pitfalls.
+- [x] Add read-only non-persisted AttemptRecord builder rooted in dispatch-production rows.
+- [x] Surface bounded attempt coverage in FleetStatus and CLI.
+- [x] Add privacy/join regression coverage, including derived trajectory, worked-ledger time, aggregate ref, and raw execution canaries.
+- [x] Verify focused gates and broad lightweight gates.
 - [ ] Commit, push, reload/smoke, and continue.

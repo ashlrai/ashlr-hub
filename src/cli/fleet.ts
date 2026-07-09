@@ -295,6 +295,26 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  // Attempt coverage
+  const attemptCoverage = s.attemptCoverage;
+  lines.push('Attempt coverage:');
+  if (!attemptCoverage) {
+    lines.push('  unavailable');
+  } else {
+    lines.push(`  attempts:  ${attemptCoverage.attempts} in ${formatProductionWindow(attemptCoverage.windowHours)}`);
+    lines.push(
+      `  joins:     actions ${formatCoverageMetric(attemptCoverage.coverage.agentAction)}, ` +
+        `worked ${formatCoverageMetric(attemptCoverage.coverage.worked)}, ` +
+        `decisions ${formatCoverageMetric(attemptCoverage.coverage.decision)}, ` +
+        `evidence ${formatCoverageMetric(attemptCoverage.coverage.evidence)}`,
+    );
+    if (attemptCoverage.gaps.length > 0) {
+      const gap = attemptCoverage.gaps[0]!;
+      lines.push(`  top gap:   ${gap.kind} missing on ${gap.count} attempt(s)`);
+    }
+  }
+  lines.push('');
+
   // Context efficiency
   const contextEfficiency = s.contextEfficiency;
   lines.push('Context efficiency:');
@@ -580,6 +600,10 @@ function formatProductionReason(reason: NonNullable<FleetStatus['proposalProduct
 
 function formatPercent(rate: number): string {
   return `${Math.round(rate * 100)}%`;
+}
+
+function formatCoverageMetric(metric: { count: number; rate: number }): string {
+  return `${metric.count} (${formatPercent(metric.rate)})`;
 }
 
 function formatNullablePercent(rate: number | null | undefined): string {

@@ -27,6 +27,7 @@ import { createProposal } from '../src/core/inbox/store.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import { recordDispatchProduction, type DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import { recordAgentAction, type AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
+import { recordDecision } from '../src/core/fleet/decisions-ledger.js';
 import { recordOutcome } from '../src/core/fleet/worked-ledger.js';
 import type { Proposal } from '../src/core/types.js';
 
@@ -1309,6 +1310,116 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('Context efficiency:');
     expect(formatted).toContain('posture:   watch');
     expect(formatted).toContain('memory:    2 entries');
+  });
+
+  it('reports attempt coverage from joined metadata-only ledgers', async () => {
+    const now = new Date().toISOString();
+    const repo = join(tmpHome, 'repo-attempts');
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'verification',
+        maxRisk: 'low',
+      },
+    });
+    const itemId = 'repo-attempts:goal:coverage';
+    const proposal = createSignedProposal(cfg, {
+      title: 'Attempt coverage docs change',
+      diff: docsDiff('attempt coverage'),
+      verifyResult: { passed: true, source: 'manual' },
+    });
+
+    writeRunningDaemon(tmpHome, [], now);
+    writeBacklogSnapshot(tmpHome, repo, [], now);
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId,
+      source: 'goal',
+      repo,
+      title: 'Attempt coverage docs change',
+      backend: 'codex',
+      tier: 'frontier',
+      model: 'gpt-5.5',
+      assignedBy: 'daemon',
+      routeReason: 'resource-aware codex route',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: proposal.id,
+      runId: 'run-attempt-coverage',
+      trajectoryId: 'traj-attempt-coverage',
+      spentUsd: 0.002,
+      reason: 'proposal filed',
+      basis: 'run-proposal-outcome',
+    });
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      actor: 'daemon',
+      kind: 'dispatch',
+      outcome: 'proposal-created',
+      action: 'daemon:dispatch',
+      summary: 'codex proposal-created for Attempt coverage docs change',
+      repo,
+      itemId,
+      source: 'goal',
+      proposalId: proposal.id,
+      runId: 'run-attempt-coverage',
+      trajectoryId: 'traj-attempt-coverage',
+      backend: 'codex',
+      tier: 'frontier',
+      model: 'gpt-5.5',
+      reason: 'proposal filed',
+      spentUsd: 0.002,
+    });
+    recordDecision({
+      ts: now,
+      proposalId: proposal.id,
+      workItemId: itemId,
+      runId: 'run-attempt-coverage',
+      trajectoryId: 'traj-attempt-coverage',
+      action: 'judged',
+      verdict: 'ship',
+      reason: 'metadata-only approval',
+    });
+    expect(persistAutonomyEvidencePack(makeEvidencePack(proposal.id, now))).toBe(true);
+    recordOutcome(itemId, 'diff', now);
+
+    const s = await buildFleetStatus(cfg);
+
+    expect(s.attemptCoverage).toMatchObject({
+      windowHours: 24,
+      attempts: 1,
+      coverage: {
+        agentAction: { count: 1, rate: 1 },
+        outcomeRecord: { count: 1, rate: 1 },
+        decision: { count: 1, rate: 1 },
+        evidence: { count: 1, rate: 1 },
+        worked: { count: 1, rate: 1 },
+      },
+      gaps: [],
+    });
+    expect(s.attemptCoverage?.recent[0]).toMatchObject({
+      ref: expect.stringMatching(/^attempt:[a-f0-9]{12}$/),
+      outcome: 'proposal-created',
+      backend: 'codex',
+      coverage: {
+        agentAction: true,
+        outcomeRecord: true,
+        decision: true,
+        evidence: true,
+        worked: true,
+      },
+    });
+    expect(s.attemptCoverage?.recent[0]).not.toHaveProperty('repo');
+    expect(s.attemptCoverage?.recent[0]).not.toHaveProperty('itemId');
+    expect(s.attemptCoverage?.recent[0]).not.toHaveProperty('proposalId');
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('Attempt coverage:');
+    expect(formatted).toContain('attempts:  1 in 24h');
+    expect(formatted).toContain('joins:     actions 1 (100%), worked 1 (100%), decisions 1 (100%), evidence 1 (100%)');
   });
 
   it('does not report healthy context efficiency when genome health is unavailable', () => {

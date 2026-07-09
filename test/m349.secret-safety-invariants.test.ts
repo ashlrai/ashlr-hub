@@ -26,6 +26,7 @@ import {
 } from '../src/core/fleet/dispatch-production-ledger.js';
 import { recordAgentAction, readAgentActions } from '../src/core/fleet/agent-action-ledger.js';
 import { recordJudgeTrace, readJudgeTraces } from '../src/core/fleet/judge-trace.js';
+import { listAttemptRecords, summarizeAttemptCoverage } from '../src/core/autonomy/attempt-records.js';
 import { audit, readAudit } from '../src/core/sandbox/audit.js';
 import { scrubSecrets } from '../src/core/util/scrub.js';
 import type { AshlrConfig } from '../src/core/types.js';
@@ -52,6 +53,16 @@ const SECRET_BUNDLE = [
     'MIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n' +
     '-----END PRIVATE KEY-----',
 ].join(' ');
+
+const RAW_EXECUTION_CANARIES = [
+  'RAW_PROMPT_CANARY_DO_NOT_SERIALIZE_M349',
+  'RAW_DIFF_CANARY_DO_NOT_SERIALIZE_M349',
+  'RAW_STDOUT_CANARY_DO_NOT_SERIALIZE_M349',
+  'RAW_STDERR_CANARY_DO_NOT_SERIALIZE_M349',
+  'ASHLR_SECRET=RAW_ENV_CANARY_DO_NOT_SERIALIZE_M349',
+  'RAW_FILE_CONTENT_CANARY_DO_NOT_SERIALIZE_M349',
+  'RAW_ARGV_CANARY_DO_NOT_SERIALIZE_M349',
+] as const;
 
 let tmpHome: string;
 let prevHome: string | undefined;
@@ -91,6 +102,13 @@ function expectRedacted(label: string, value: unknown): void {
   const serialized = typeof value === 'string' ? value : JSON.stringify(value);
   expect(serialized, label).toContain('[REDACTED]');
   assertNoSecretValues(serialized);
+}
+
+function assertNoRawExecutionPayloads(label: string, value: unknown): void {
+  const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+  for (const canary of RAW_EXECUTION_CANARIES) {
+    expect(serialized, label).not.toContain(canary);
+  }
 }
 
 beforeEach(() => {
@@ -253,6 +271,8 @@ describe('M349 secret safety invariants', () => {
       dispatch: readDispatchProductionEvents(),
       actions: readAgentActions(),
       judge: readJudgeTraces({ proposalId: 'prop-m349' }),
+      attemptRecords: listAttemptRecords({ windowHours: 48 }),
+      attemptCoverage: summarizeAttemptCoverage(listAttemptRecords({ windowHours: 48 }), 48),
       genomeEntry: entry,
       genomeLoaded: loadGenome(genomeConfig),
       files: allPersistedText(join(tmpHome, '.ashlr')),
@@ -263,6 +283,7 @@ describe('M349 secret safety invariants', () => {
     expect(readBack.dispatch).toHaveLength(1);
     expect(readBack.actions).toHaveLength(1);
     expect(readBack.judge).toHaveLength(1);
+    expect(readBack.attemptRecords).toHaveLength(1);
     expect(readBack.genomeLoaded.some((row) => row.id === entry.id)).toBe(true);
 
     expectRedacted('audit record', readBack.audit[0]);
@@ -270,6 +291,7 @@ describe('M349 secret safety invariants', () => {
     expectRedacted('dispatch record', readBack.dispatch[0]);
     expectRedacted('agent-action record', readBack.actions[0]);
     expectRedacted('judge trace record', readBack.judge[0]);
+    expectRedacted('attempt record', readBack.attemptRecords[0]);
     expectRedacted('genome returned entry', readBack.genomeEntry);
     expectRedacted('genome loaded entry', readBack.genomeLoaded.find((row) => row.id === entry.id));
 
@@ -294,5 +316,138 @@ describe('M349 secret safety invariants', () => {
       sandboxCreated: 1,
       proposalCreated: 1,
     });
+  });
+
+  it('keeps attempt-record and fleet coverage surfaces metadata-only for raw execution payloads', () => {
+    const [
+      rawPrompt,
+      rawDiff,
+      rawStdout,
+      rawStderr,
+      rawEnv,
+      rawFileContents,
+      rawArgv,
+    ] = RAW_EXECUTION_CANARIES;
+    const records = listAttemptRecords({
+      deps: {
+        readDispatchProductionEvents: () => [{
+          schemaVersion: 1,
+          ts: '2026-07-09T06:00:03.000Z',
+          itemId: 'item-m349-attempt',
+          source: 'goal',
+          repo: '/tmp/repo',
+          title: 'safe attempt title',
+          backend: 'codex',
+          tier: 'frontier',
+          model: 'gpt-5.5',
+          assignedBy: 'm349',
+          routeReason: 'safe route',
+          outcome: 'proposal-created',
+          proposalCreated: true,
+          proposalId: 'prop-m349-attempt',
+          runId: 'run-m349-attempt',
+          trajectoryId: 'traj-m349-attempt',
+          spentUsd: 0,
+          basis: 'run-proposal-outcome',
+          runEventSummary: {
+            runId: 'run-m349-attempt',
+            status: 'done',
+            outcome: 'proposal-created',
+            proposalCreated: true,
+            proposalId: 'prop-m349-attempt',
+            diffFiles: 1,
+            diffLines: 2,
+            actionCounts: {
+              proposalCreated: 1,
+              diffFiles: 1,
+              diffLines: 2,
+              [`stdout:${rawStdout}`]: 1,
+              [`argv:${rawArgv}`]: 1,
+            } as never,
+          },
+          prompt: rawPrompt,
+          diff: `diff --git a/secret.ts b/secret.ts\n+${rawDiff}`,
+          stdout: rawStdout,
+          stderr: rawStderr,
+          env: { ASHLR_SECRET: rawEnv },
+          files: [{ path: 'src/secret.ts', content: `const secretFile = "${rawFileContents}";` }],
+          command: { argv: ['codex', 'exec', '--dangerously-allow-all', rawArgv] },
+        } as never],
+        readAgentActions: () => [{
+          schemaVersion: 1,
+          ts: '2026-07-09T06:00:04.000Z',
+          actor: 'daemon',
+          kind: 'dispatch',
+          outcome: 'proposal-created',
+          action: 'dispatch',
+          summary: rawStdout,
+          repo: '/tmp/repo',
+          itemId: 'item-m349-attempt',
+          proposalId: 'prop-m349-attempt',
+          runId: 'run-m349-attempt',
+          trajectoryId: 'traj-m349-attempt',
+          stdout: rawStdout,
+          stderr: rawStderr,
+          env: rawEnv,
+          argv: ['codex', 'exec', '--dangerously-allow-all', rawArgv],
+        } as never],
+        listOutcomeRecords: () => [{
+          version: 1,
+          proposal: {
+            id: 'prop-m349-attempt',
+            repo: '/tmp/repo',
+            origin: 'agent',
+            kind: 'patch',
+            status: 'pending',
+            title: 'safe proposal title',
+            summary: rawPrompt,
+            diff: `diff --git a/secret.ts b/secret.ts\n+${rawDiff}`,
+            createdAt: '2026-07-09T06:00:05.000Z',
+          },
+          lastActivityAt: '2026-07-09T06:00:05.000Z',
+          decisions: [{ detail: rawPrompt }],
+          judgeTraces: [],
+          evidencePacks: [],
+          workedEvents: [],
+        } as never],
+        readDecisions: () => [{
+          ts: '2026-07-09T06:00:06.000Z',
+          proposalId: 'prop-m349-attempt',
+          action: 'judged',
+          detail: `${rawPrompt}\ndiff --git a/secret.ts b/secret.ts\n+${rawDiff}`,
+        } as never],
+        listAutonomyEvidencePacks: () => [{
+          proposal: { id: 'prop-m349-attempt' },
+          gates: { verification: { detail: rawStderr } },
+          fileContents: rawFileContents,
+        } as never],
+        loadWorkedLedger: () => ({
+          events: [{
+            itemId: 'item-m349-attempt',
+            proposalId: 'prop-m349-attempt',
+            outcome: 'diff',
+            ts: '2026-07-09T06:00:07.000Z',
+            argv: rawArgv,
+          } as never],
+        }),
+      },
+    });
+    const fleetCoverage = summarizeAttemptCoverage(records);
+
+    expect(records).toHaveLength(1);
+    expect(records[0]?.coverage).toEqual({
+      agentAction: true,
+      outcomeRecord: true,
+      decision: true,
+      evidence: true,
+      worked: true,
+    });
+    expect(records[0]?.actionCounts).toEqual({
+      proposalCreated: 1,
+      diffFiles: 1,
+      diffLines: 2,
+    });
+    assertNoRawExecutionPayloads('attempt-record surface', records);
+    assertNoRawExecutionPayloads('fleet coverage surface', { attemptCoverage: fleetCoverage });
   });
 });
