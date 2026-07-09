@@ -133,6 +133,7 @@ export function formatFleetStatus(s: FleetStatus): string {
     const d = s.queue.diagnosticResliceDrain;
     const limitText = typeof d.limit === 'number' ? `/${d.limit}` : '';
     const state = [
+      d.automatic ? 'auto' : '',
       d.capped ? 'capped' : '',
       d.stalled ? 'stalled' : '',
     ].filter(Boolean);

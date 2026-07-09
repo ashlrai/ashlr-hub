@@ -230,7 +230,7 @@ import {
 } from '../src/core/inbox/store.js';
 import { readDispatchProductionEvents } from '../src/core/fleet/dispatch-production-ledger.js';
 import { readAgentActions } from '../src/core/fleet/agent-action-ledger.js';
-import { loadWorkedLedger } from '../src/core/fleet/worked-ledger.js';
+import { loadWorkedLedger, recordOutcome } from '../src/core/fleet/worked-ledger.js';
 import {
   makeFixture,
   makeCfg,
@@ -652,6 +652,190 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       selected: 0,
     });
     expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1-drain-auto: live backlog-build ticks auto-select trusted diagnostic reslices before generic work', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    generic.score = 100;
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'abcdef123456', 1);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [generic, reslice],
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+    const selection = readAgentActions().find((event) => event.action === 'daemon:drain-select');
+
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(1);
+    expect(result.drain).toMatchObject({
+      mode: 'diagnostic-reslices',
+      available: 1,
+      selected: 1,
+      limit: 3,
+      automatic: true,
+      selectedItemIds: [reslice.id],
+    });
+    expect(selection).toMatchObject({
+      action: 'daemon:drain-select',
+      itemId: reslice.id,
+      reason: 'auto-live',
+      counts: { available: 1, selected: 1, limit: 3, automatic: 1 },
+    });
+    expect(selection?.tags).toEqual(expect.arrayContaining(['drain-select', 'drain:diagnostic-reslices', 'auto-drain']));
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
+      workItemId: reslice.id,
+      delegationScope: {
+        workItemId: reslice.id,
+        objective: reslice.title,
+      },
+    });
+  });
+
+  it('A1-drain-auto-local-only: automatic diagnostic drains preserve local-only local-coder routing', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    generic.score = 100;
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'fedcba987654', 1);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [generic, reslice],
+    });
+    mockBuildResourceStrategyReport.mockResolvedValue({ mode: 'local-only', reasons: ['frontier budget constrained'] });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock local-coder' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: {
+          autonomyControlLoop: true,
+          allowedBackends: ['claude', 'local-coder', 'builtin'],
+        },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+    const selection = readAgentActions().find((event) => event.action === 'daemon:drain-select');
+
+    expect(result.reason).toBe('ok');
+    expect(result.directionMode).toBe('local-only');
+    expect(result.drain).toMatchObject({
+      mode: 'diagnostic-reslices',
+      available: 1,
+      selected: 1,
+      automatic: true,
+      selectedItemIds: [reslice.id],
+    });
+    expect(selection?.tags).toEqual(expect.arrayContaining(['auto-drain']));
+    expect(result.backends).toEqual({ 'local-coder': 1 });
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({
+      engine: 'local-coder',
+      workItemId: reslice.id,
+      delegationScope: {
+        workItemId: reslice.id,
+        resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+      },
+    });
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1-drain-auto-pending: automatic diagnostic drains do not starve generic work when reslices are already pending', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    generic.score = 100;
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'abcdef999999', 1);
+    createProposal({
+      repo: repo.dir,
+      origin: 'agent',
+      kind: 'patch',
+      title: `Pending ${reslice.id}`,
+      summary: 'already pending diagnostic reslice proposal',
+      diff: 'diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-old\n+new\n',
+      workItemId: reslice.id,
+      workSource: reslice.source,
+    });
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [reslice, generic],
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+    const selection = readAgentActions().find((event) => event.action === 'daemon:drain-select');
+
+    expect(result.reason).toBe('ok');
+    expect(result.drain).toBeUndefined();
+    expect(selection).toBeUndefined();
+    expect(result.itemsConsidered).toBe(1);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
+      workItemId: generic.id,
+      delegationScope: {
+        workItemId: generic.id,
+        objective: generic.title,
+      },
+    });
+  });
+
+  it('A1-drain-auto-cooldown: automatic diagnostic drains do not starve generic work when reslices are cooling down', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    generic.score = 100;
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'abcabc999999', 1);
+    recordOutcome(reslice.id, 'empty');
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [reslice, generic],
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+    const selection = readAgentActions().find((event) => event.action === 'daemon:drain-select');
+
+    expect(result.reason).toBe('ok');
+    expect(result.drain).toBeUndefined();
+    expect(selection).toBeUndefined();
+    expect(result.itemsConsidered).toBe(1);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
+      workItemId: generic.id,
+    });
+  });
+
+  it('A1-drain-auto-lookalike: automatic diagnostic drains ignore malformed tag-only reslices', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    generic.score = 100;
+    const lookalike: WorkItem = {
+      ...makeDiagnosticResliceItem(repo.dir, 'abcabc123456', 1),
+      id: `${basename(repo.dir)}:manual-diagnostic-reslice`,
+    };
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [generic, lookalike],
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+    const selection = readAgentActions().find((event) => event.action === 'daemon:drain-select');
+
+    expect(result.reason).toBe('ok');
+    expect(result.drain).toBeUndefined();
+    expect(selection).toBeUndefined();
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
+      workItemId: generic.id,
+    });
   });
 
   it('A1a: empty backlog runs self-heal, rebuilds, and dispatches refilled work in the same tick', async () => {

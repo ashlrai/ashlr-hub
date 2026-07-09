@@ -2300,6 +2300,18 @@ function generatedWorkMetric(generatedWork) {
   return parts.join(' / ');
 }
 
+function diagnosticResliceDrainMetric(drain) {
+  if (!drain || drain.mode !== 'diagnostic-reslices') return null;
+  const limit = typeof drain.limit === 'number' ? `/${drain.limit}` : '';
+  const state = [
+    drain.automatic ? 'auto' : null,
+    drain.capped ? 'capped' : null,
+    drain.stalled ? 'stalled' : null,
+  ].filter(Boolean);
+  return `${drain.selected ?? 0}${limit} selected / ${drain.available ?? 0} available` +
+    (state.length ? ` (${state.join(', ')})` : '');
+}
+
 function laneLocksMetric(laneLocks) {
   if (!laneLocks) return null;
   return `${laneLocks.active ?? 0} active / ${laneLocks.staleInProgress ?? 0} stale / ${laneLocks.awaitingHostMerge ?? 0} handoff / ${laneLocks.unverifiedApplied ?? 0} unverified`;
@@ -3074,6 +3086,7 @@ function renderFleet() {
     ['Backlog queue', f.queue?.backlogItems ?? '—'],
     ['Eligible queue', queueEligibilityMetric(f.queue) ?? '—'],
     ['Generated work', generatedWorkMetric(f.queue?.generatedWork) ?? '—'],
+    ['Diagnostic drain', diagnosticResliceDrainMetric(f.queue?.diagnosticResliceDrain) ?? '—'],
     ['Lane locks', laneLocksMetric(f.laneLocks) ?? '—'],
     ['Merges (24h)', f.merges?.recent ?? '—'],
     ['Autonomy evidence', autonomyEvidenceMetric(f.autonomy)],
@@ -3477,6 +3490,10 @@ function renderControl() {
       queue.generatedWork.total ?? 0,
       (queue.generatedWork.diagnosticReslices ?? 0) > 0 ? '#f97316' : '#38bdf8'
     ));
+  }
+  if (queue.diagnosticResliceDrain) {
+    const drainColor = queue.diagnosticResliceDrain.stalled ? '#ef4444' : '#f97316';
+    heroMetrics.appendChild(controlMetric('Diag Drain', queue.diagnosticResliceDrain.selected ?? 0, drainColor));
   }
   const laneLocks = d.fleet?.laneLocks ?? fleet.laneLocks ?? null;
   if (laneLocks) {
@@ -4497,6 +4514,7 @@ function fdRenderReadinessRail(snap) {
   const blockerDetail = topBlocker?.detail ?? blockerLabel;
   const queueMetric = queueEligibilityMetric(queue) ?? `${queue.backlogItems ?? 0} backlog`;
   const generatedMetric = generatedWorkMetric(queue.generatedWork);
+  const drainMetric = diagnosticResliceDrainMetric(queue.diagnosticResliceDrain);
   const leases = sharedQueue ? sharedQueueMetric(sharedQueue) : 'local only';
   const loop = effectiveness?.phase ?? 'unknown';
   const verdict = formatShipReadinessVerdict(readiness.verdict);
@@ -4518,6 +4536,7 @@ function fdRenderReadinessRail(snap) {
     fdMetricPill('Blocker', compactFleetReason(blockerLabel, 54), blockerDetail),
     fdMetricPill('Queue', queueMetric),
     generatedMetric ? fdMetricPill('Generated', generatedMetric) : null,
+    drainMetric ? fdMetricPill('Diag Drain', drainMetric) : null,
     fdMetricPill('Leases', leases ?? 'local only'),
     fdMetricPill('Yield', fdDispatchYieldText(dispatchProduction))
   ));

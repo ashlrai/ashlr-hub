@@ -59,6 +59,7 @@ import type { AshlrConfig, EngineId, EngineTier, WorkItem } from '../types.js';
 import { engineInstalled } from '../run/engines.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import { routeTask, isSubstantiveItem, SUBSTANTIVE_SOURCES, type RoutingContext } from '../run/router.js';
+import { isTrustedDiagnosticResliceItem } from './self-heal-trust.js';
 
 /** The outcome of routing a WorkItem to a backend + model. */
 export interface RouteDecision {
@@ -198,8 +199,7 @@ function isFrontierItem(item: WorkItem): boolean {
 }
 
 function isGeneratedNoDiffProposalRepair(item: WorkItem): boolean {
-  const tags = item.tags ?? [];
-  return tags.includes('proposal-repair') && tags.includes('dispatch-no-diff-reslice');
+  return isTrustedDiagnosticResliceItem(item);
 }
 
 /**

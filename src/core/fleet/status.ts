@@ -494,6 +494,7 @@ export interface FleetDiagnosticResliceDrainStatus {
   selected: number;
   limit?: number;
   capped?: boolean;
+  automatic?: boolean;
   selectedItemIds?: string[];
   stalled?: boolean;
   dispatched: number;
@@ -686,6 +687,7 @@ function buildDiagnosticResliceDrainStatus(
     selected: drain.selected,
     ...(typeof drain.limit === 'number' ? { limit: drain.limit } : {}),
     ...(drain.capped ? { capped: true } : {}),
+    ...(drain.automatic ? { automatic: true } : {}),
     ...(drain.selectedItemIds?.length ? { selectedItemIds: drain.selectedItemIds.slice(0, 12) } : {}),
     ...(drain.stalled || (drain.available > 0 && drain.selected === 0) ? { stalled: true } : {}),
     dispatched: production?.dispatched ?? 0,

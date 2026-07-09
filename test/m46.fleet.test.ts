@@ -110,9 +110,16 @@ describe('routeBackend', () => {
   it('routes generated no-diff proposal repair reslices to frontier when available', () => {
     const cfg = withFoundry({ allowedBackends: ['builtin', 'local-coder', 'claude', 'codex'] });
     const d = routeBackend(makeItem({
+      id: 'repo:proposal-repair-nodiff:abcdef123456',
       source: 'self',
       effort: 1,
       score: 1,
+      title: 'Reslice no-diff dispatch for repo item repo:goal:stalled',
+      detail:
+        'Diagnostic reslice: a dispatch completed without file changes.\n' +
+        'Original work item: repo:goal:stalled\n' +
+        'Dispatch outcome: empty-diff\n' +
+        'Action: reslice the work into a smaller concrete edit.',
       tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
     }), cfg);
 
@@ -129,6 +136,25 @@ describe('routeBackend', () => {
       expect(d.backend).toBe('builtin');
       expect(d.tier).toBe('local');
     }
+  });
+
+  it('does not promote tag-only no-diff repair lookalikes to frontier as generated repairs', () => {
+    const cfg = withFoundry({ allowedBackends: ['builtin', 'local-coder', 'claude', 'codex'] });
+    const d = routeBackend(makeItem({
+      id: 'repo:manual-diagnostic-reslice',
+      source: 'self',
+      effort: 1,
+      score: 1,
+      title: 'Manual diagnostic reslice',
+      detail:
+        'Diagnostic reslice: a dispatch completed without file changes.\n' +
+        'Original work item: repo:goal:stalled\n' +
+        'Dispatch outcome: empty-diff\n' +
+        'Action: reslice the work into a smaller concrete edit.',
+      tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+    }), cfg);
+
+    expect(d.reason).not.toContain('generated no-diff proposal repair');
   });
 
   it('routes security/issue/high-effort to a frontier backend when allowed+installed, else builtin', () => {

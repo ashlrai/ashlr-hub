@@ -456,11 +456,23 @@ function resolveDrainLimit(
   }
 }
 
+function canAutoDrainDiagnosticReslices(
+  opts: TickOptions,
+  plan: ResourceStrategyDaemonPlan | null,
+): boolean {
+  if (opts.drain !== undefined) return false;
+  if (opts.dryRun) return false;
+  if (!plan) return true;
+  if (!plan.allowDispatch) return false;
+  return plan.mode === 'backlog-build' || plan.mode === 'local-only';
+}
+
 function drainSummary(
   mode: DaemonDrainMode,
   availableItems: WorkItem[],
   selectedItems: WorkItem[],
   limit?: number,
+  automatic?: boolean,
 ): DaemonDrainSummary {
   const selectedItemIds = selectedItems
     .map((item) => boundedText(item.id, 120))
@@ -472,6 +484,7 @@ function drainSummary(
     selected: selectedItems.length,
     ...(typeof limit === 'number' ? { limit } : {}),
     ...(capped ? { capped: true } : {}),
+    ...(automatic ? { automatic: true } : {}),
     ...(selectedItemIds.length > 0 ? { selectedItemIds } : {}),
     ...(availableItems.length > 0 && selectedItems.length === 0 ? { stalled: true } : {}),
   };
@@ -486,6 +499,7 @@ function recordDrainSelectionAgentAction(fields: {
   capped?: boolean;
   machineId: string;
   dryRun: boolean;
+  automatic?: boolean;
 }): void {
   const selectedIds = fields.selectedItems.map((item) => boundedText(item.id, 120));
   const selectedSummary = selectedIds.length > 0
@@ -503,11 +517,12 @@ function recordDrainSelectionAgentAction(fields: {
     summary:
       `drain ${fields.mode}: selected ${fields.selectedItems.length}/` +
       `${fields.available}${limitSummary}${selectedSummary}`,
-    reason: fields.dryRun ? 'dry-run' : 'live',
+    reason: fields.dryRun ? 'dry-run' : fields.automatic ? 'auto-live' : 'live',
     ...(selectedIds[0] ? { itemId: selectedIds[0] } : {}),
     tags: [
       'drain-select',
       drainTag(fields.mode),
+      fields.automatic ? 'auto-drain' : 'explicit-drain',
       fields.selectedItems.length > 0 ? 'selected' : 'none-selected',
       ...(fields.capped ? ['capped'] : []),
       ...(fields.dryRun ? ['dry-run'] : []),
@@ -517,6 +532,7 @@ function recordDrainSelectionAgentAction(fields: {
       selected: fields.selectedItems.length,
       ...(typeof fields.limit === 'number' ? { limit: fields.limit } : {}),
       ...(fields.capped ? { capped: 1 } : {}),
+      ...(fields.automatic ? { automatic: 1 } : {}),
     },
   });
 }
@@ -1783,24 +1799,6 @@ export async function tick(
       );
     }
   }
-  const drainMode = opts.drain;
-  const drainAvailableItems = drainMode
-    ? backlogItems.filter((item) => isDrainCandidate(item, drainMode))
-    : [];
-  const selectionItems = drainMode ? drainAvailableItems : backlogItems;
-  const rawSelectCount = daemonQueueSelectionLimit({
-    perTickItems: dcfg.perTickItems,
-    remainingBudgetUsd: remainingBudget,
-    backlogItems: selectionItems.length,
-    fillQueueToSlots: productionVelocity.fillQueueToSlots,
-    availableSlots: availableSlotsForSelection,
-    minPerItemUsd: MIN_PER_ITEM_USD,
-  });
-  const drainLimit = resolveDrainLimit(liveCfg, drainMode, opts.drainLimit);
-  const selectCount = typeof drainLimit === 'number'
-    ? Math.min(rawSelectCount, drainLimit)
-    : rawSelectCount;
-
   // M85: read the cooldown window from liveCfg defensively (no types.ts change).
   const cooldownMs: number =
     typeof (liveCfg.daemon as Record<string, unknown> | undefined)?.['cooldownMs'] === 'number' &&
@@ -1860,67 +1858,121 @@ export async function tick(
     console.warn('[ashlr] daemon:tick inbox pendingItemIds read failed:', (err as Error)?.message ?? err);
   }
 
-  // Group selectable items by repo (score-sorted within each group by buildBacklog).
-  const byRepo = new Map<string, WorkItem[]>();
-  for (const item of selectionItems) {
-    let group = byRepo.get(item.repo);
-    if (!group) { group = []; byRepo.set(item.repo, group); }
-    group.push(item);
-  }
-  // Per-repo cursors (index into each repo's item array).
-  const repoCursors = new Map<string, number>();
-  for (const repo of byRepo.keys()) repoCursors.set(repo, 0);
-  const repoOrder = [...byRepo.keys()].sort(compareReposByStrategicFocus);
+  const isSelectionBlocked = (item: WorkItem): boolean =>
+    coordinator.shouldSkip(item.id, cooldownMs) ||
+    pendingItemKeys.has(workItemCoverageKey(item));
 
-  const selected: WorkItem[] = [];
-  // Guard: if no repos were grouped (shouldn't happen given backlogItems > 0,
-  // but belt-and-suspenders) skip the loop entirely.
-  if (repoOrder.length > 0) {
-    let rri = 0; // round-robin index
-    let scanned = 0; // safety: never loop more than total items
-    const totalItems = selectionItems.length;
-    while (selected.length < selectCount && scanned < totalItems * repoOrder.length + 1) {
-      scanned++;
-      const repo = repoOrder[rri % repoOrder.length];
-      if (repo === undefined) break;
-      rri++;
-      const group = byRepo.get(repo) ?? [];
-      const cursor = repoCursors.get(repo) ?? 0;
-      // Advance cursor past declined/pending items.
-      let advance = cursor;
-      while (advance < group.length) {
-        const candidate = group[advance]!;
-        const skip =
-          coordinator.shouldSkip(candidate.id, cooldownMs) ||
-          pendingItemKeys.has(workItemCoverageKey(candidate));
-        if (!skip) break;
-        advance++;
-      }
-      repoCursors.set(repo, advance);
-      if (advance < group.length) {
-        selected.push(group[advance]!);
-        repoCursors.set(repo, advance + 1);
-      }
-      // Check on EVERY iteration whether any repo still has selectable items;
-      // stop as soon as none do to avoid spinning through a fully-skipped backlog.
-      // (Previously only checked at modulo-repoOrder.length boundaries, which
-      // could miss exhaustion mid-pass and spin needlessly.)
-      let anyLeft = false;
-      for (const [r, g] of byRepo) {
-        const c = repoCursors.get(r) ?? 0;
-        if (c < g.length) { anyLeft = true; break; }
-      }
-      if (!anyLeft) break;
+  const explicitDrainMode = opts.drain;
+  const autoDrainMode: DaemonDrainMode | undefined =
+    canAutoDrainDiagnosticReslices(opts, directionPlan) ? 'diagnostic-reslices' : undefined;
+  const autoDrainAvailableItems = autoDrainMode
+    ? backlogItems.filter((item) => isDrainCandidate(item, autoDrainMode))
+    : [];
+  const autoDrainEligibleItems = autoDrainAvailableItems.filter((item) => !isSelectionBlocked(item));
+  const drainMode = explicitDrainMode ?? (autoDrainEligibleItems.length > 0 ? autoDrainMode : undefined);
+  const automaticDrain = explicitDrainMode === undefined && drainMode !== undefined;
+  const drainAvailableItems = drainMode
+    ? automaticDrain
+      ? autoDrainAvailableItems
+      : backlogItems.filter((item) => isDrainCandidate(item, drainMode))
+    : [];
+  const selectionItems = drainMode ? drainAvailableItems : backlogItems;
+  const rawSelectCount = daemonQueueSelectionLimit({
+    perTickItems: dcfg.perTickItems,
+    remainingBudgetUsd: remainingBudget,
+    backlogItems: selectionItems.length,
+    fillQueueToSlots: productionVelocity.fillQueueToSlots,
+    availableSlots: availableSlotsForSelection,
+    minPerItemUsd: MIN_PER_ITEM_USD,
+  });
+  const drainLimit = resolveDrainLimit(liveCfg, drainMode, opts.drainLimit);
+  const selectCount = typeof drainLimit === 'number'
+    ? Math.min(rawSelectCount, drainLimit)
+    : rawSelectCount;
+
+  const selectRoundRobinCandidates = (items: WorkItem[], count: number): WorkItem[] => {
+    // Group selectable items by repo (score-sorted within each group by buildBacklog).
+    const byRepo = new Map<string, WorkItem[]>();
+    for (const item of items) {
+      let group = byRepo.get(item.repo);
+      if (!group) { group = []; byRepo.set(item.repo, group); }
+      group.push(item);
     }
-  }
+    // Per-repo cursors (index into each repo's item array).
+    const repoCursors = new Map<string, number>();
+    for (const repo of byRepo.keys()) repoCursors.set(repo, 0);
+    const repoOrder = [...byRepo.keys()].sort(compareReposByStrategicFocus);
+
+    const out: WorkItem[] = [];
+    // Guard: if no repos were grouped (shouldn't happen given backlogItems > 0,
+    // but belt-and-suspenders) skip the loop entirely.
+    if (repoOrder.length > 0) {
+      let rri = 0; // round-robin index
+      let scanned = 0; // safety: never loop more than total items
+      const totalItems = items.length;
+      while (out.length < count && scanned < totalItems * repoOrder.length + 1) {
+        scanned++;
+        const repo = repoOrder[rri % repoOrder.length];
+        if (repo === undefined) break;
+        rri++;
+        const group = byRepo.get(repo) ?? [];
+        const cursor = repoCursors.get(repo) ?? 0;
+        // Advance cursor past declined/pending items.
+        let advance = cursor;
+        while (advance < group.length) {
+          const candidate = group[advance]!;
+          if (!isSelectionBlocked(candidate)) break;
+          advance++;
+        }
+        repoCursors.set(repo, advance);
+        if (advance < group.length) {
+          out.push(group[advance]!);
+          repoCursors.set(repo, advance + 1);
+        }
+        // Check on EVERY iteration whether any repo still has selectable items;
+        // stop as soon as none do to avoid spinning through a fully-skipped backlog.
+        // (Previously only checked at modulo-repoOrder.length boundaries, which
+        // could miss exhaustion mid-pass and spin needlessly.)
+        let anyLeft = false;
+        for (const [r, g] of byRepo) {
+          const c = repoCursors.get(r) ?? 0;
+          if (c < g.length) { anyLeft = true; break; }
+        }
+        if (!anyLeft) break;
+      }
+    }
+    return out;
+  };
+
+  let selected = selectRoundRobinCandidates(selectionItems, selectCount);
 
   // M113: claimItems — Local returns top-selectCount (identical to today's raw
   // slice); Shared atomically claims items so two machines get disjoint work.
-  const workedSet = coordinator.claimItems(selected, selectCount, machineId);
-  const drainSelectedItems = drainMode
+  let workedSet = coordinator.claimItems(selected, selectCount, machineId);
+  let drainSelectedItems = drainMode
     ? workedSet.filter((item) => isDrainCandidate(item, drainMode))
     : [];
-  const drain = drainMode ? drainSummary(drainMode, drainAvailableItems, drainSelectedItems, drainLimit) : undefined;
+  if (automaticDrain && drainMode && workedSet.length === 0) {
+    const fallbackItems = backlogItems.filter((item) => !isDrainCandidate(item, drainMode));
+    const fallbackSelectCount = daemonQueueSelectionLimit({
+      perTickItems: dcfg.perTickItems,
+      remainingBudgetUsd: remainingBudget,
+      backlogItems: fallbackItems.length,
+      fillQueueToSlots: productionVelocity.fillQueueToSlots,
+      availableSlots: availableSlotsForSelection,
+      minPerItemUsd: MIN_PER_ITEM_USD,
+    });
+    const fallbackSelected = selectRoundRobinCandidates(fallbackItems, fallbackSelectCount);
+    const fallbackWorkedSet = coordinator.claimItems(fallbackSelected, fallbackSelectCount, machineId);
+    if (fallbackWorkedSet.length > 0) {
+      selected = fallbackSelected;
+      workedSet = fallbackWorkedSet;
+      drainSelectedItems = [];
+    }
+  }
+  const drain = drainMode
+    ? drainSummary(drainMode, drainAvailableItems, drainSelectedItems, drainLimit, automaticDrain)
+    : undefined;
   if (drainMode) {
     recordDrainSelectionAgentAction({
       ts: now,
@@ -1931,6 +1983,7 @@ export async function tick(
       ...(drain?.capped ? { capped: true } : {}),
       machineId,
       dryRun: opts.dryRun,
+      automatic: automaticDrain,
     });
   }
 

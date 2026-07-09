@@ -107,6 +107,19 @@ const FIXTURE_FLEET_STATUS = {
       diagnosticReslices: 1,
       invent: 0,
     },
+    diagnosticResliceDrain: {
+      mode: 'diagnostic-reslices' as const,
+      latestAt: new Date().toISOString(),
+      available: 3,
+      selected: 2,
+      limit: 3,
+      automatic: true,
+      dispatched: 2,
+      skipped: 0,
+      errors: 0,
+      proposalsCreated: 1,
+      noProposalDispatches: 1,
+    },
     shared: {
       enabled: true,
       mode: 'filesystem' as const,
@@ -363,6 +376,13 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
       proposalRepair: 1,
       diagnosticReslices: 1,
       invent: 0,
+    });
+    expect(snap.fleet?.queue.diagnosticResliceDrain).toMatchObject({
+      mode: 'diagnostic-reslices',
+      available: 3,
+      selected: 2,
+      limit: 3,
+      automatic: true,
     });
     expect(snap.fleet?.queue.shared?.activeClaims).toBe(2);
     expect(snap.fleet?.queue.shared?.ownedClaims).toBe(1);

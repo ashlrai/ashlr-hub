@@ -2587,6 +2587,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
           selectedItemIds: ['reslice-a', 'reslice-b'],
           limit: 3,
           capped: true,
+          automatic: true,
         },
         proposalProduction: {
           selected: 2,
@@ -2612,6 +2613,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       selectedItemIds: ['reslice-a', 'reslice-b'],
       limit: 3,
       capped: true,
+      automatic: true,
       dispatched: 2,
       skipped: 0,
       errors: 0,
@@ -2619,7 +2621,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       noProposalDispatches: 1,
       topReasons: [{ reason: 'proposal-created', count: 1 }],
     });
-    expect(formatFleetStatus(s)).toContain('diag drain:    selected 2/3, available 5, proposals 1, no-proposal 1 (capped)');
+    expect(formatFleetStatus(s)).toContain('diag drain:    selected 2/3, available 5, proposals 1, no-proposal 1 (auto, capped)');
   });
 
   it('excludes proposal-disabled dispatch-production from weak-yield next action', async () => {

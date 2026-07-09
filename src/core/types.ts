@@ -3728,6 +3728,8 @@ export interface DaemonDrainSummary {
   limit?: number;
   /** True when visible lane work exceeded the effective lane cap. */
   capped?: boolean;
+  /** True when the daemon selected this lane automatically during a normal live tick. */
+  automatic?: boolean;
   /** Bounded selected work ids, used to prove the drain lane actually ran. */
   selectedItemIds?: string[];
   /** True when the lane had visible work but selected nothing. */

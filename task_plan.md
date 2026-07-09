@@ -1156,3 +1156,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add daemon loop regression for done run with diff but no filed proposal, including delegation contract, diff metadata, worked ledger, and learning label.
 - [x] Run focused/adjacent verification and broad local gates.
 - [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Automatic Diagnostic Reslice Drain
+- [x] Rechecked clean pushed done-diff baseline, live daemon guard state, Entire state, recent commits, and drain-related tests/code.
+- [x] Deploy parallel scouts for daemon selection flow, trusted reslice invariants, and FleetStatus telemetry.
+- [x] Implement conservative implicit diagnostic-reslice drain selection for live executable backlog-build ticks.
+- [x] Add focused daemon-loop regressions for auto-drain priority, local-only preservation, pending/cooldown fallback, malformed lookalikes, status, router trust, and web telemetry.
+- [x] Run focused and broad local verification gates.
+- [ ] Commit, push, reload daemon, and smoke live status.
