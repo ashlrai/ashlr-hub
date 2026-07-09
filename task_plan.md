@@ -861,4 +861,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Refuse stale protected remote base before persisting an allowed evidence pack.
 - [x] Add policy and remote-handoff regression coverage.
 - [x] Finish focused, broad, invariant, and full-CI verification.
-- [ ] Commit, push, reload daemon, and smoke status.
+- [x] Commit `8a85909`, push, reload daemon, and smoke status.
