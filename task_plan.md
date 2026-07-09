@@ -827,4 +827,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Focused verification passed: `m141`, `m333`, `m142`, and `m335` (62 tests), plus typecheck and diff check.
 - [x] Adjacent verification passed: manager, judge-trace, Best-of-N, taste critic, model ROI/stats, automerge, and verification-gate suite (217 tests).
 - [x] Broad gates passed: lint, build, audit, invariants, diff check, and full CI (439 files, 9,047 passed tests, 7 skipped).
-- [ ] Commit, push, reload daemon, and smoke live FleetStatus.
+- [x] Commit and push `9bbd42f`, reload launchd daemon, and smoke live FleetStatus.
