@@ -804,5 +804,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Added regression coverage that advances the bare remote from another clone without fetching and proves no PR is opened.
 - [x] Focused verification passed: `m315.remote-handoff-truth`, `m153.verification-gate`, `m307.verify-before-judge`, and `m48.automerge-pass` (89 tests), plus typecheck and diff check.
 - [x] Broad gates passed: lint, build, audit, and invariants.
-- [ ] Commit, push, reload launchd daemon, and smoke live FleetStatus.
+- [x] Commit and push `5d9d367`, reload launchd daemon, and smoke live FleetStatus.
 - [ ] Next lane: Best-of-N file-once proposal capture.
