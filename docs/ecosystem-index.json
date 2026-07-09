@@ -412,5 +412,82 @@
       "homebrew-phantom",
       "openclaw-setup"
     ]
+  },
+  "ownershipBoundaries": {
+    "principle": "Use ownership as a routing boundary: local Ashlr repos can receive proposal-only fleet work when enrolled, while standalone product surfaces and cofounder-owned candidates require explicit owner handoff instead of being treated as hub-owned internals.",
+    "boundaries": [
+      {
+        "id": "local-core-fleet-spine",
+        "label": "Local core fleet spine",
+        "owner": "mason",
+        "scope": "local-repositories",
+        "repoIds": [
+          "ashlr-hub",
+          "phantom-secrets",
+          "ashlr-plugin",
+          "binshield",
+          "ashlr-md",
+          "stack",
+          "ashlr-pulse",
+          "ashlrcode",
+          "ashlr-workbench"
+        ],
+        "externalRepoIds": [],
+        "directive": "Hub can coordinate proposal-only work across these repos when they are locally enrolled; keep human approval gates intact."
+      },
+      {
+        "id": "local-force-multipliers",
+        "label": "Local force multipliers",
+        "owner": "mason",
+        "scope": "local-repositories",
+        "repoIds": [
+          "ashlr-core-efficiency",
+          "morphkit",
+          "webfetch"
+        ],
+        "externalRepoIds": [],
+        "directive": "Develop as compounding capabilities for the fleet, not replacements for core orchestration ownership."
+      },
+      {
+        "id": "local-supporting-substrate",
+        "label": "Local supporting substrate and distribution",
+        "owner": "mason",
+        "scope": "local-repositories",
+        "repoIds": [
+          "ashlr-auth",
+          "ashlr-cli-common",
+          "ashlr-config",
+          "ashlr-cost",
+          "ashlr-mcp-kit",
+          "homebrew-ashlr",
+          "homebrew-phantom",
+          "openclaw-setup"
+        ],
+        "externalRepoIds": [],
+        "directive": "Maintain as enabling packages and taps; change them when they unblock or simplify the core fleet."
+      },
+      {
+        "id": "standalone-consumer-product",
+        "label": "Standalone consumer product",
+        "owner": "mason",
+        "scope": "local-repositories",
+        "repoIds": [
+          "prompt-trackr"
+        ],
+        "externalRepoIds": [],
+        "directive": "Keep architecturally independent from ashlr-hub and ashlr-plugin internals; compose through the public SDK/API and shared infrastructure."
+      },
+      {
+        "id": "external-core-adjacent-candidate",
+        "label": "External core-adjacent candidate",
+        "owner": "cofounder",
+        "scope": "external-repositories",
+        "repoIds": [],
+        "externalRepoIds": [
+          "ashlr-mux"
+        ],
+        "directive": "Do not count as local inventory or route fleet work to it until the owner shares and enrolls the repo; evaluate for core status once available."
+      }
+    ]
   }
 }

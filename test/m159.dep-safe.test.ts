@@ -120,28 +120,94 @@ function initBareGitDir(dir: string): void {
   );
 }
 
+function cleanBinshieldReport(packageName: string, version: string): string {
+  return JSON.stringify({
+    packageName,
+    version,
+    riskScore: 0,
+    riskLevel: 'none',
+    summary: 'Clean target version.',
+  });
+}
+
 /**
- * Stub execFile: first call returns outdated JSON (via error with exit code 1,
- * mirroring real npm outdated behaviour), second call returns empty audit JSON.
+ * Stub execFile by command: npm outdated returns JSON, binshield clears target
+ * versions, and npm audit returns no vulnerabilities.
  */
 function stubOutdated(outdatedJson: string): void {
-  let callCount = 0;
   _execFileImpl = vi.fn((...args: unknown[]) => {
+    const file = args[0] as string;
+    const cmdArgs = args[1] as string[] | undefined;
     const cb = args[args.length - 1] as (
       err: (Error & { stdout?: string; stderr?: string }) | null,
       stdout: string,
       stderr: string,
     ) => void;
     if (typeof cb !== 'function') return;
-    callCount++;
-    if (callCount === 1) {
+
+    if (file === 'npm' && cmdArgs?.[0] === 'outdated') {
       // npm outdated exits 1 when packages are outdated but stdout is valid JSON
       const err = Object.assign(new Error('outdated'), { code: 1, stdout: outdatedJson, stderr: '' });
       cb(err, outdatedJson, '');
-    } else {
-      // npm audit — return empty (no vulns)
-      cb(null, '{}', '');
+      return;
     }
+
+    if (file === 'binshield' && cmdArgs?.[0] === 'scan') {
+      cb(null, cleanBinshieldReport(cmdArgs[2] ?? 'pkg', cmdArgs[3] ?? 'latest'), '');
+      return;
+    }
+
+    if (file === 'npm' && cmdArgs?.[0] === 'audit') {
+      cb(null, '{}', '');
+      return;
+    }
+
+    cb(new Error(`unexpected execFile call: ${file} ${(cmdArgs ?? []).join(' ')}`), '', '');
+  });
+}
+
+function stubOutdatedWithBinshieldRisk(outdatedJson: string, report: { riskLevel?: string; riskScore?: number; summary?: string } | Error): void {
+  _execFileImpl = vi.fn((...args: unknown[]) => {
+    const file = args[0] as string;
+    const cmdArgs = args[1] as string[] | undefined;
+    const cb = args[args.length - 1] as (
+      err: (Error & { stdout?: string; stderr?: string }) | null,
+      stdout: string,
+      stderr: string,
+    ) => void;
+    if (typeof cb !== 'function') return;
+
+    if (file === 'npm' && cmdArgs?.[0] === 'outdated') {
+      const err = Object.assign(new Error('outdated'), { code: 1, stdout: outdatedJson, stderr: '' });
+      cb(err, outdatedJson, '');
+      return;
+    }
+
+    if (file === 'binshield' && cmdArgs?.[0] === 'scan') {
+      if (report instanceof Error) {
+        cb(report, '', '');
+      } else {
+        cb(
+          null,
+          JSON.stringify({
+            packageName: cmdArgs[2] ?? 'pkg',
+            version: cmdArgs[3] ?? 'latest',
+            riskScore: report.riskScore ?? 0,
+            riskLevel: report.riskLevel ?? 'none',
+            summary: report.summary ?? 'BinShield fixture.',
+          }),
+          '',
+        );
+      }
+      return;
+    }
+
+    if (file === 'npm' && cmdArgs?.[0] === 'audit') {
+      cb(null, '{}', '');
+      return;
+    }
+
+    cb(new Error(`unexpected execFile call: ${file} ${(cmdArgs ?? []).join(' ')}`), '', '');
   });
 }
 
@@ -293,6 +359,45 @@ describe('M159-A scanDeps — exact title format for patch and minor bumps', () 
     expect(expressItem).toBeDefined();
     expect(lodashItem!.title).toBe('bump lodash 4.17.20 → 4.17.21 in package.json (patch)');
     expect(expressItem!.title).toBe('bump express 4.17.0 → 4.18.2 in package.json (minor)');
+  });
+
+  it('adds BinShield pass evidence to dependency-bump WorkItems', async () => {
+    stubOutdated(JSON.stringify({
+      lodash: outdatedEntry({ current: '4.17.20', wanted: '4.17.21', latest: '4.17.21' }),
+    }));
+
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
+    const item = items.find(i => i.title.includes('lodash'));
+
+    expect(item).toBeDefined();
+    expect(item!.tags).toEqual(expect.arrayContaining(['binshield', 'binshield:none']));
+    expect(item!.detail).toContain('BinShield target-version scan passed (none; Clean target version.)');
+  });
+
+  it('does not emit dependency-bump WorkItems when BinShield reports high risk', async () => {
+    stubOutdatedWithBinshieldRisk(
+      JSON.stringify({
+        lodash: outdatedEntry({ current: '4.17.20', wanted: '4.17.21', latest: '4.17.21' }),
+      }),
+      { riskLevel: 'high', riskScore: 81, summary: 'Known risky target.' },
+    );
+
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
+
+    expect(items.some(i => i.tags.includes('outdated'))).toBe(false);
+  });
+
+  it('does not emit dependency-bump WorkItems when BinShield cannot scan', async () => {
+    stubOutdatedWithBinshieldRisk(
+      JSON.stringify({
+        lodash: outdatedEntry({ current: '4.17.20', wanted: '4.17.21', latest: '4.17.21' }),
+      }),
+      new Error('binshield unavailable'),
+    );
+
+    const items = await scanDeps(tmpRepo, { foundry: { scanDeps: true, scanDependencyBumps: true } });
+
+    expect(items.some(i => i.tags.includes('outdated'))).toBe(false);
   });
 });
 

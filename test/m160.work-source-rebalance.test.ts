@@ -217,24 +217,46 @@ describe('M160 — scanDeps: default-off behaviour', () => {
 
   it('runs and returns items when cfg.foundry.scanDeps is true (opt-in works)', async () => {
     // Stub npm outdated to return a patch-bump item
-    let callCount = 0;
     _execFileImpl = vi.fn((...args: unknown[]) => {
+      const file = args[0] as string;
+      const cmdArgs = args[1] as string[] | undefined;
       const cb = args[args.length - 1] as (
         err: (Error & { stdout?: string }) | null,
         stdout: string,
         stderr: string,
       ) => void;
       if (typeof cb !== 'function') return;
-      callCount++;
-      if (callCount === 1) {
+
+      if (file === 'npm' && cmdArgs?.[0] === 'outdated') {
         const json = JSON.stringify({
           lodash: { current: '4.17.20', wanted: '4.17.21', latest: '4.17.21', type: 'dependency' },
         });
         const err = Object.assign(new Error('outdated'), { code: 1, stdout: json, stderr: '' });
         cb(err, json, '');
-      } else {
-        cb(null, '{}', '');
+        return;
       }
+
+      if (file === 'binshield' && cmdArgs?.[0] === 'scan') {
+        cb(
+          null,
+          JSON.stringify({
+            packageName: 'lodash',
+            version: '4.17.21',
+            riskScore: 0,
+            riskLevel: 'none',
+            summary: 'Clean target version.',
+          }),
+          '',
+        );
+        return;
+      }
+
+      if (file === 'npm' && cmdArgs?.[0] === 'audit') {
+        cb(null, '{}', '');
+        return;
+      }
+
+      cb(new Error(`unexpected execFile call: ${file} ${(cmdArgs ?? []).join(' ')}`), '', '');
     });
     // M282: scanDeps requires BOTH scanDeps:true AND scanDependencyBumps:true
     // to emit outdated-package items. scanDependencyBumps is the second gate

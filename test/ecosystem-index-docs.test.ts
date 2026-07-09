@@ -18,6 +18,18 @@ interface EcosystemIndex {
     forceMultiplierRepos: string[];
     supportingRepos: string[];
   };
+  ownershipBoundaries: {
+    principle: string;
+    boundaries: Array<{
+      id: string;
+      label: string;
+      owner: string;
+      scope: 'local-repositories' | 'external-repositories';
+      repoIds: string[];
+      externalRepoIds: string[];
+      directive: string;
+    }>;
+  };
   repositories: Array<{
     id: string;
     directory: string;
@@ -33,6 +45,12 @@ function readIndex(): EcosystemIndex {
 
 function readMap(): string {
   return readFileSync(join(process.cwd(), 'docs', 'ECOSYSTEM-MAP.md'), 'utf8');
+}
+
+function displayNamesForBoundary(index: EcosystemIndex, boundary: EcosystemIndex['ownershipBoundaries']['boundaries'][number]): string {
+  const repoNamesById = new Map(index.repositories.map((repo) => [repo.id, repo.displayName]));
+  const localNames = boundary.repoIds.map((id) => repoNamesById.get(id) ?? id);
+  return [...localNames, ...boundary.externalRepoIds].join(', ');
 }
 
 describe('ecosystem docs inventory', () => {
@@ -126,5 +144,53 @@ describe('ecosystem docs inventory', () => {
     expect(map).toContain('### Strategic focus tiers');
     expect(map).toContain('| **Core fleet spine** | ashlr-hub, phantom-secrets, ashlr-plugin, binshield, ashlr-md, ashlr-stack, ashlr-pulse, ashlrcode, ashlr-workbench |');
     expect(map).toContain('| **Core-adjacent candidate** | ashlr-mux |');
+  });
+
+  it('keeps ownership boundaries complete, disjoint, and aligned with the Markdown map', () => {
+    const index = readIndex();
+    const map = readMap();
+    const repoIds = new Set(index.repositories.map((repo) => repo.id));
+    const externalCandidateIds = new Set(index.strategicFocus.externalCoreCandidates.map((candidate) => candidate.id));
+    const boundaryLocalRepoIds = index.ownershipBoundaries.boundaries.flatMap((boundary) => boundary.repoIds);
+    const boundaryExternalRepoIds = index.ownershipBoundaries.boundaries.flatMap((boundary) => boundary.externalRepoIds);
+
+    expect(index.ownershipBoundaries.principle).toContain('ownership');
+    expect(index.ownershipBoundaries.boundaries.map((boundary) => boundary.id)).toEqual([
+      'local-core-fleet-spine',
+      'local-force-multipliers',
+      'local-supporting-substrate',
+      'standalone-consumer-product',
+      'external-core-adjacent-candidate',
+    ]);
+
+    expect(new Set(boundaryLocalRepoIds).size).toBe(boundaryLocalRepoIds.length);
+    expect([...boundaryLocalRepoIds].sort()).toEqual([...repoIds].sort());
+    for (const externalRepoId of boundaryExternalRepoIds) {
+      expect(repoIds.has(externalRepoId), externalRepoId).toBe(false);
+      expect(externalCandidateIds.has(externalRepoId), externalRepoId).toBe(true);
+    }
+
+    expect(map).toContain('### Ownership boundaries');
+    expect(map).toContain('top-level `ownershipBoundaries` section');
+    for (const boundary of index.ownershipBoundaries.boundaries) {
+      expect(boundary.id).toMatch(/^[a-z0-9-]+$/);
+      expect(boundary.label.length, boundary.id).toBeGreaterThan(0);
+      expect(boundary.owner.length, boundary.id).toBeGreaterThan(0);
+      expect(boundary.directive.length, boundary.id).toBeGreaterThan(0);
+      expect(boundary.repoIds.length + boundary.externalRepoIds.length, boundary.id).toBeGreaterThan(0);
+
+      if (boundary.scope === 'local-repositories') {
+        expect(boundary.externalRepoIds, boundary.id).toEqual([]);
+      } else {
+        expect(boundary.repoIds, boundary.id).toEqual([]);
+      }
+
+      for (const repoId of boundary.repoIds) {
+        expect(repoIds.has(repoId), `${boundary.id}:${repoId}`).toBe(true);
+      }
+
+      const repos = displayNamesForBoundary(index, boundary);
+      expect(map).toContain(`| ${boundary.label} | ${boundary.owner} | ${repos} | ${boundary.directive} |`);
+    }
   });
 });

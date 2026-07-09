@@ -24,6 +24,11 @@ import { isTrivialItem, isNonCodePath } from './value-filter.js';
 import { listGoals } from '../goals/store.js';
 import { expandGoalToMilestones } from '../strategy/goal-planner.js';
 import { loadQueuedAutonomyItemsForRepo } from './queued-autonomy.js';
+import {
+  riskAtOrAbove,
+  scanDependencyBump,
+  type BinshieldRiskLevel,
+} from '../security/binshield-scan.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -37,6 +42,8 @@ const MAX_TODO_HITS = 200;
 const MAX_OUTDATED_ITEMS = 50;
 const MAX_VULN_ITEMS = 20;
 const MAX_QUEUED_AUTONOMY_ITEMS = 25;
+const MAX_BINSHIELD_DEP_BUMP_SCANS = 10;
+const BINSHIELD_DEP_BUMP_FAIL_ON: BinshieldRiskLevel = 'high';
 
 // ---------------------------------------------------------------------------
 // Shared ignore predicate — non-actionable / generated / vendored files
@@ -742,6 +749,7 @@ export async function scanDeps(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>)
 
     const items: WorkItem[] = [];
     let count = 0;
+    let binshieldDepBumpScans = 0;
 
     // 1. Outdated deps
     const allowDependencyBumps =
@@ -788,6 +796,24 @@ export async function scanDeps(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>)
         const targetVersion = wanted !== '?' && wanted !== current ? wanted : latest;
         const value = 2;
         const effort = 3;
+        let binshieldSummary = '';
+        let binshieldRisk: BinshieldRiskLevel = 'none';
+
+        if (binshieldDepBumpScans >= MAX_BINSHIELD_DEP_BUMP_SCANS) continue;
+        binshieldDepBumpScans++;
+
+        try {
+          const report = await scanDependencyBump(pkg, current, targetVersion);
+          binshieldRisk = report.riskLevel;
+          if (riskAtOrAbove(report.riskLevel, BINSHIELD_DEP_BUMP_FAIL_ON)) continue;
+          const cveSuffix = report.cves.length > 0
+            ? ` CVEs observed in scan output: ${report.cves.map((cve) => cve.id).slice(0, 5).join(', ')}.`
+            : '';
+          binshieldSummary =
+            ` BinShield target-version scan passed (${report.riskLevel}; ${report.summary}).${cveSuffix}`;
+        } catch {
+          continue;
+        }
 
         items.push(
           makeItem(
@@ -795,10 +821,10 @@ export async function scanDeps(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>)
             'dep',
             `dep:outdated:${pkg}`,
             `bump ${pkg} ${current} → ${targetVersion} in package.json (${bumpLabel})`,
-            `Update ${pkg} from ${current} to ${targetVersion} (${bumpLabel}). wanted: ${wanted}, latest: ${latest}, type: ${type}. Update the lockfile in the same proposal and run the configured test script before filing.`,
+            `Update ${pkg} from ${current} to ${targetVersion} (${bumpLabel}). wanted: ${wanted}, latest: ${latest}, type: ${type}. Update the lockfile in the same proposal and run the configured test script before filing.${binshieldSummary}`,
             value,
             effort,
-            ['dep', 'outdated', bumpLabel, type],
+            ['dep', 'outdated', bumpLabel, type, 'binshield', `binshield:${binshieldRisk}`],
           ),
         );
         count++;

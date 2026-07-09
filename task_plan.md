@@ -509,6 +509,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Second heartbeat: wired daemon/swarm/best-of-N/runGoal producers to create and propagate `DelegationScope` by default.
 - [x] Added regression coverage for daemon default scope on builtin, single-run, and best-of-N paths; best-of-N candidate child scopes; swarm task scopes; and TITRR attempt/capture pass-through.
 - [x] Focused verification passed: producer-scope suite, typecheck, and lint. Full suite passed except `h8.cleanup-comment-only`, which intentionally fails while `src/core/swarm/runner.ts` has an uncommitted code diff because that invariant diffs swept files against `HEAD`.
-- [ ] Next heartbeat: implement `ashlr eval attention` with middle-drop and workflow-resolution fixtures.
-- [ ] Next heartbeat: formalize ecosystem ownership boundaries in docs/index and surface read-only doctor checks.
-- [ ] Next heartbeat: after commit, rerun the full suite against clean `HEAD` so the H8 diff-only invariant can pass.
+- [x] Post-commit full suite passed against clean `HEAD`, then commit/push/relaunch verified the delegation-scope producer wiring in production.
+- [x] Audited unexpected untracked BinShield work from the live loop, deployed parallel agents, and found the proposed adapter targeted a non-existent `binshield dependency-bump` command.
+- [x] Corrected the adapter to the real `binshield scan npm <package> <version> --json` surface, made valid-but-unknown/error JSON fail closed, and preserved JSON stdout from non-zero risk exits.
+- [x] Wired scanner-time BinShield gating into opt-in npm dependency-bump backlog items: target-version scans must succeed, high/critical targets are suppressed, and passed items carry bounded BinShield evidence tags/detail.
+- [x] Formalized ecosystem ownership boundaries in the machine-readable ecosystem index and Markdown map with invariant tests for complete/disjoint local ownership plus external candidate handoff.
+- [x] Focused verification passed for BinShield adapter/dep scanners/ownership docs, typecheck, and diff checks.
+- [x] Run final lint/build/audit/full-suite gates for the BinShield + ownership-boundaries slice.
+- [ ] Commit, push to `origin/master`, relaunch/verify daemon, and continue the overnight loop.
+- [ ] Next heartbeat: implement `ashlr eval attention` with metadata-only middle-drop and workflow-resolution fixtures.

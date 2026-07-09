@@ -24,6 +24,18 @@ The whole inventory matters, but it should not receive equal attention. Ashlr wi
 | **Force multipliers** | @ashlr/core-efficiency, morphkit, webfetch, prompt-trackr | Develop when they compound the core fleet: cheaper context, product-building leverage, retrieval/building blocks, or prompt-quality feedback. |
 | **Supporting substrate + distribution** | ashlr-auth, ashlr-cli-common, ashlr-config, ashlr-cost, ashlr-mcp-kit, homebrew-ashlr, homebrew-phantom, openclaw-setup | Maintain quality, package boundaries, and distribution. Do not let these pull focus from the core spine unless they are blocking it. |
 
+### Ownership boundaries
+
+Ownership is the routing boundary for fleet work. Local Ashlr repos can receive proposal-only work when they are enrolled locally; standalone product surfaces and cofounder-owned candidates require owner handoff instead of being treated as hub-owned internals. The machine-readable source for this table is the top-level `ownershipBoundaries` section in [`docs/ecosystem-index.json`](./ecosystem-index.json).
+
+| Boundary | Owner | Repos | Operating directive |
+|---|---|---|---|
+| Local core fleet spine | mason | ashlr-hub, phantom-secrets, ashlr-plugin, binshield, ashlr-md, ashlr-stack, ashlr-pulse, ashlrcode, ashlr-workbench | Hub can coordinate proposal-only work across these repos when they are locally enrolled; keep human approval gates intact. |
+| Local force multipliers | mason | @ashlr/core-efficiency, morphkit, webfetch | Develop as compounding capabilities for the fleet, not replacements for core orchestration ownership. |
+| Local supporting substrate and distribution | mason | ashlr-auth, ashlr-cli-common, ashlr-config, ashlr-cost, ashlr-mcp-kit, homebrew-ashlr, homebrew-phantom, openclaw-setup | Maintain as enabling packages and taps; change them when they unblock or simplify the core fleet. |
+| Standalone consumer product | mason | prompt-trackr | Keep architecturally independent from ashlr-hub and ashlr-plugin internals; compose through the public SDK/API and shared infrastructure. |
+| External core-adjacent candidate | cofounder | ashlr-mux | Do not count as local inventory or route fleet work to it until the owner shares and enrolls the repo; evaluate for core status once available. |
+
 ### Inventory table
 
 | Repo | Strategic tier | Role | Profile state |
