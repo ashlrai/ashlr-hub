@@ -995,4 +995,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Corrected manifest command kinds to the current Hub schema (`typecheck|test|lint`) after parser validation rejected `kind:"build"`.
 - [x] Committed the manifest wave locally in each sibling repo.
 - [x] Refreshed Hub backlog/profile cache and confirmed explicit merge contracts increased from 3/24 to 8/24.
-- [ ] Record and commit the rollout notes in Hub.
+- [x] Record and commit the rollout notes in Hub.
