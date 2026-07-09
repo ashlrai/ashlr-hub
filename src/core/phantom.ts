@@ -18,6 +18,14 @@ const TIMEOUT_MS = 5_000;
 const FLEET_TIMEOUT_MS = 500;
 const FLEET_CACHE_TTL_MS = 30_000;
 
+const UNKNOWN_PHANTOM_COMMANDS: PhantomCapabilitySnapshot['commands'] = {
+  commandsKnown: false,
+  setupAvailable: false,
+  execAvailable: false,
+  mcpAvailable: false,
+  agentAvailable: false,
+};
+
 export const PHANTOM_KNOWN_FLEET_SECRET_NAMES = [
   'ANTHROPIC_API_KEY',
   'OPENAI_API_KEY',
@@ -174,11 +182,14 @@ export function getPhantomStatus(options: { timeoutMs?: number } = {}): PhantomS
     }
   }
 
+  const commands = detectPhantomCommandSupport({ timeoutMs });
+
   const base = {
     installed: true,
     version,
     initialized,
     secretNames,
+    commands,
   };
 
   const result: PhantomStatus = {
@@ -217,12 +228,15 @@ export function resetPhantomStatusCache(): void {
 }
 
 export function buildPhantomCapabilitySnapshot(
-  status: Pick<PhantomStatus, 'installed' | 'initialized' | 'secretNames'>,
+  status: Pick<PhantomStatus, 'installed' | 'initialized' | 'secretNames'> & {
+    commands?: PhantomCapabilitySnapshot['commands'];
+  },
 ): PhantomCapabilitySnapshot {
   const safeNames = [...new Set(status.secretNames.filter(isSafeSecretName))].sort();
   const known = [...PHANTOM_KNOWN_FLEET_SECRET_NAMES];
   const present = known.filter((name) => safeNames.includes(name));
   const missing = known.filter((name) => !safeNames.includes(name));
+  const commands = status.commands ?? UNKNOWN_PHANTOM_COMMANDS;
   return {
     valueMode: 'metadata-and-names-only',
     secretCount: safeNames.length,
@@ -240,6 +254,7 @@ export function buildPhantomCapabilitySnapshot(
       mcpServerAvailable: status.installed,
       mutationRequiresHumanApproval: status.installed,
     },
+    commands,
   };
 }
 
@@ -299,6 +314,44 @@ function parseInitializedFromJson(raw: string): boolean | null {
 
   // Unknown structured output is not enough proof of initialization.
   return false;
+}
+
+function detectPhantomCommandSupport(
+  options: { timeoutMs?: number } = {},
+): PhantomCapabilitySnapshot['commands'] {
+  const { stdout, stderr, status, error } = runPhantom(['--help'], options);
+  if (error !== undefined || status !== 0) return UNKNOWN_PHANTOM_COMMANDS;
+  return parsePhantomCommandHelp(`${stdout}\n${stderr}`);
+}
+
+function parsePhantomCommandHelp(raw: string): PhantomCapabilitySnapshot['commands'] {
+  const commandNames = new Set<string>();
+  let inCommandsBlock = false;
+  let sawCommandsBlock = false;
+
+  for (const rawLine of raw.split('\n')) {
+    const line = rawLine.trimEnd();
+    const trimmed = line.trim();
+    if (/^commands:\s*$/i.test(trimmed)) {
+      inCommandsBlock = true;
+      sawCommandsBlock = true;
+      continue;
+    }
+    if (!inCommandsBlock) continue;
+    if (!trimmed) break;
+    if (/^(?:usage|options|flags|global flags|examples):/i.test(trimmed)) break;
+
+    const match = trimmed.match(/^([a-z][a-z0-9_-]*)\b/i);
+    if (match?.[1]) commandNames.add(match[1].toLowerCase());
+  }
+
+  return {
+    commandsKnown: sawCommandsBlock,
+    setupAvailable: commandNames.has('setup'),
+    execAvailable: commandNames.has('exec'),
+    mcpAvailable: commandNames.has('mcp'),
+    agentAvailable: commandNames.has('agent'),
+  };
 }
 
 /**

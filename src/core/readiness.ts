@@ -72,6 +72,7 @@ export interface ReadinessPhantomSnapshot {
     pulseCredentialPresent: boolean;
   };
   capabilities: PhantomStatus['capability']['modes'];
+  commands: PhantomStatus['capability']['commands'];
   mcp: {
     configured: boolean;
     source: string | null;
@@ -319,6 +320,7 @@ function readinessPhantomSnapshot(status: PhantomStatus): ReadinessPhantomSnapsh
       pulseCredentialPresent: known.pulseCredentialPresent,
     },
     capabilities: status.capability.modes,
+    commands: status.capability.commands,
     mcp: phantomMcpRegistration(),
     ...(status.error ? { error: status.error } : {}),
   };
@@ -526,18 +528,20 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
         ? 'pulse credential present'
         : 'pulse credential missing';
       const mcp = phantom?.mcp.configured ? 'mcp configured' : 'mcp not configured';
+      const agent = status.capability.commands.agentAvailable ? 'agent command present' : 'agent command absent';
       info.push({
         id: 'phantom',
         severity: 'info',
         detail:
           `phantom ${status.version ?? 'unknown'} initialized; ` +
-          `${status.capability.secretCount} secret name(s); ${pulse}; ${mcp}; values hidden`,
+          `${status.capability.secretCount} secret name(s); ${pulse}; ${mcp}; ${agent}; values hidden`,
       });
     } else if (status?.installed) {
+      const agent = status.capability.commands.agentAvailable ? 'agent command present' : 'agent command absent';
       warnings.push({
         id: 'phantom',
         severity: 'warning',
-        detail: `phantom ${status.version ?? 'unknown'} installed but not initialized`,
+        detail: `phantom ${status.version ?? 'unknown'} installed but not initialized; ${agent}`,
         fix: 'Run `phantom init` to enable fleet secret resolution.',
       });
     } else {

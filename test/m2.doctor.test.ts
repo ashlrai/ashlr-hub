@@ -45,6 +45,13 @@ function makePhantomStatus(overrides: Partial<PhantomStatus> = {}): PhantomStatu
         mcpServerAvailable: installed,
         mutationRequiresHumanApproval: installed,
       },
+      commands: {
+        commandsKnown: installed,
+        setupAvailable: installed,
+        execAvailable: installed,
+        mcpAvailable: installed,
+        agentAvailable: false,
+      },
     },
     ...(overrides.error ? { error: overrides.error } : {}),
   };

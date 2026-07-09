@@ -142,6 +142,13 @@ const FIXTURE_FLEET_STATUS = {
       mcpServerAvailable: true,
       mutationRequiresHumanApproval: true,
     },
+    commands: {
+      commandsKnown: true,
+      setupAvailable: true,
+      execAvailable: true,
+      mcpAvailable: true,
+      agentAvailable: false,
+    },
     config: {
       phantomExecEnabled: true,
       fleetSecretInjectionEnabled: true,
@@ -310,7 +317,13 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(snap.fleet?.dispatchProduction?.proposalRate).toBe(0.5);
     expect(snap.fleet?.dispatchProduction?.byBackend[0]?.key).toBe('builtin');
     expect(snap.fleet?.phantom?.knownFleetSecrets.pulseCredentialPresent).toBe(true);
-    expect(JSON.stringify(snap.fleet?.phantom)).not.toContain('ASHLR_PULSE_TOKEN');
+    expect(snap.fleet?.phantom?.commands).toMatchObject({
+      commandsKnown: true,
+      agentAvailable: false,
+    });
+    const serialized = JSON.stringify(snap.fleet?.phantom);
+    expect(serialized).not.toContain('ASHLR_PULSE_TOKEN');
+    expect(serialized).not.toContain('command help text');
   });
 
   it('daemon degrades to zeroed fields when loadDaemonState throws', async () => {

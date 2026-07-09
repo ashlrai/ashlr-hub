@@ -68,6 +68,19 @@ function spawnVersion(version: string): SpawnSyncReturns<string> {
   return makeSpawnResult(`phantom ${version}\n`);
 }
 
+/** Simulate `phantom --help` returning a Commands block. */
+function spawnHelp(commands = ['setup', 'mcp', 'exec', 'status', 'list']): SpawnSyncReturns<string> {
+  return makeSpawnResult([
+    'Phantom keeps secrets away from the AI agent.',
+    '',
+    'Commands:',
+    ...commands.map((command) => `  ${command}    command help text`),
+    '',
+    'Options:',
+    '  --help',
+  ].join('\n'));
+}
+
 /** Simulate `phantom status` returning initialized status output. */
 function spawnStatusInitialized(): SpawnSyncReturns<string> {
   return makeSpawnResult('Phantom is initialized\nvault: ~/.phantom\n');
@@ -166,6 +179,17 @@ describe('getPhantomStatus — not installed', () => {
     const status = getPhantomStatus();
     expect(status.secretNames).toEqual([]);
   });
+
+  it('returns unknown command support when not installed', () => {
+    const status = getPhantomStatus();
+    expect(status.capability.commands).toEqual({
+      commandsKnown: false,
+      setupAvailable: false,
+      execAvailable: false,
+      mcpAvailable: false,
+      agentAvailable: false,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -176,12 +200,13 @@ describe('getPhantomStatus — installed and initialized', () => {
   const SECRET_NAMES = ['ANTHROPIC_API_KEY', 'GITHUB_TOKEN', 'OPENAI_API_KEY'];
 
   beforeEach(() => {
-    // Call order: installed probe → version → status → list
+    // Call order: installed probe -> version -> status -> list -> help
     setSpawnSequence([
       spawnVersion('0.6.0'),
       spawnVersion('0.6.0'),
       spawnStatusInitialized(),
       spawnListSecrets(SECRET_NAMES),
+      spawnHelp(),
     ]);
   });
 
@@ -254,6 +279,13 @@ describe('getPhantomStatus — installed and initialized', () => {
         mcpServerAvailable: true,
         mutationRequiresHumanApproval: true,
       },
+      commands: {
+        commandsKnown: true,
+        setupAvailable: true,
+        execAvailable: true,
+        mcpAvailable: true,
+        agentAvailable: false,
+      },
     });
     expect(status.capability.knownFleetSecrets.present).toEqual([
       'ANTHROPIC_API_KEY',
@@ -265,6 +297,79 @@ describe('getPhantomStatus — installed and initialized', () => {
   });
 });
 
+describe('getPhantomStatus — command support from help output', () => {
+  it('parses only the Commands block, so "AI agent" prose does not imply an agent command', () => {
+    const calls: string[][] = [];
+    const responses = [
+      spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
+      spawnStatusInitialized(),
+      spawnListSecrets(['ANTHROPIC_API_KEY']),
+      spawnHelp(['setup', 'mcp', 'exec', 'status', 'list']),
+    ];
+    let idx = 0;
+    _spawnSyncImpl = (_bin: unknown, args: unknown) => {
+      calls.push(Array.isArray(args) ? args.map(String) : []);
+      const res = responses[idx] ?? responses[responses.length - 1];
+      idx++;
+      return res;
+    };
+
+    const status = getPhantomStatus();
+
+    expect(status.capability.commands).toEqual({
+      commandsKnown: true,
+      setupAvailable: true,
+      execAvailable: true,
+      mcpAvailable: true,
+      agentAvailable: false,
+    });
+    const serialized = JSON.stringify(status);
+    expect(serialized).not.toContain('Phantom keeps secrets away from the AI agent.');
+    expect(serialized).not.toContain('command help text');
+    expect(calls).toContainEqual(['--help']);
+    expect(calls).not.toContainEqual(['agent']);
+    expect(calls).not.toContainEqual(['agent', '--help']);
+  });
+
+  it('reports agentAvailable only when agent is an actual command', () => {
+    setSpawnSequence([
+      spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
+      spawnStatusInitialized(),
+      spawnListSecrets(['ANTHROPIC_API_KEY']),
+      spawnHelp(['setup', 'mcp', 'exec', 'agent']),
+    ]);
+
+    const status = getPhantomStatus();
+
+    expect(status.capability.commands).toMatchObject({
+      commandsKnown: true,
+      agentAvailable: true,
+    });
+  });
+
+  it('reports unknown command support when help has no Commands block', () => {
+    setSpawnSequence([
+      spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
+      spawnStatusInitialized(),
+      spawnListSecrets(['ANTHROPIC_API_KEY']),
+      makeSpawnResult('legacy help without a command list\n'),
+    ]);
+
+    const status = getPhantomStatus();
+
+    expect(status.capability.commands).toEqual({
+      commandsKnown: false,
+      setupAvailable: false,
+      execAvailable: false,
+      mcpAvailable: false,
+      agentAvailable: false,
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // getPhantomStatus() — installed but not initialized
 // ---------------------------------------------------------------------------
@@ -273,7 +378,9 @@ describe('getPhantomStatus — installed but not initialized', () => {
   beforeEach(() => {
     setSpawnSequence([
       spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
       spawnStatusUninitialized(),
+      spawnHelp(),
     ]);
   });
 
@@ -290,6 +397,17 @@ describe('getPhantomStatus — installed but not initialized', () => {
   it('returns empty secretNames when not initialized', () => {
     const status = getPhantomStatus();
     expect(status.secretNames).toEqual([]);
+  });
+
+  it('still parses command support when the vault is not initialized', () => {
+    const status = getPhantomStatus();
+    expect(status.capability.commands).toEqual({
+      commandsKnown: true,
+      setupAvailable: true,
+      execAvailable: true,
+      mcpAvailable: true,
+      agentAvailable: false,
+    });
   });
 
   it('treats structured error JSON as not initialized', () => {
@@ -497,6 +615,7 @@ describe('getCachedFleetPhantomStatus — short fleet cache', () => {
       spawnVersion('0.6.0'),
       spawnStatusInitialized(),
       spawnListSecrets(['ANTHROPIC_API_KEY']),
+      spawnHelp(),
     ];
     let idx = 0;
     let calls = 0;
@@ -511,13 +630,13 @@ describe('getCachedFleetPhantomStatus — short fleet cache', () => {
     const second = getCachedFleetPhantomStatus({ nowMs: 2_000, ttlMs: 30_000 });
 
     expect(second).toBe(first);
-    expect(calls).toBe(4);
+    expect(calls).toBe(5);
 
     resetPhantomStatusCache();
     idx = 0;
     const third = getCachedFleetPhantomStatus({ nowMs: 3_000, ttlMs: 30_000 });
 
     expect(third).not.toBe(first);
-    expect(calls).toBe(8);
+    expect(calls).toBe(10);
   });
 });

@@ -1318,6 +1318,14 @@ export interface PhantomCapabilitySnapshot {
     mcpServerAvailable: boolean;
     mutationRequiresHumanApproval: boolean;
   };
+  /** Read-only command availability parsed from `phantom --help` only. */
+  commands: {
+    commandsKnown: boolean;
+    setupAvailable: boolean;
+    execAvailable: boolean;
+    mcpAvailable: boolean;
+    agentAvailable: boolean;
+  };
 }
 
 export interface PhantomStatus {

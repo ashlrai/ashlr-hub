@@ -108,6 +108,13 @@ export interface FleetPhantomStatus {
     mcpServerAvailable: boolean;
     mutationRequiresHumanApproval: boolean;
   };
+  commands: {
+    commandsKnown: boolean;
+    setupAvailable: boolean;
+    execAvailable: boolean;
+    mcpAvailable: boolean;
+    agentAvailable: boolean;
+  };
   config: {
     phantomExecEnabled: boolean;
     fleetSecretInjectionEnabled: boolean;
@@ -925,6 +932,7 @@ async function buildFleetPhantomStatus(cfg: AshlrConfig): Promise<FleetPhantomSt
         nimApiKeyPresent: known.present.includes('NVIDIA_NIM_API_KEY'),
       },
       capabilities: status.capability.modes,
+      commands: status.capability.commands,
       config: {
         phantomExecEnabled: cfg.phantom?.enabled === true,
         fleetSecretInjectionEnabled: cfg.foundry?.usePhantom === true,
@@ -956,6 +964,13 @@ async function buildFleetPhantomStatus(cfg: AshlrConfig): Promise<FleetPhantomSt
         childEnvInjectionAvailable: false,
         mcpServerAvailable: false,
         mutationRequiresHumanApproval: false,
+      },
+      commands: {
+        commandsKnown: false,
+        setupAvailable: false,
+        execAvailable: false,
+        mcpAvailable: false,
+        agentAvailable: false,
       },
       config: {
         phantomExecEnabled: cfg.phantom?.enabled === true,

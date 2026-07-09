@@ -603,4 +603,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Verify run-ledger causal metadata with focused/adjacent/typecheck/build/lint/audit/invariant/full-CI gates.
 - [x] Strengthen automerge test-weakening detection for equal-count assertion rewrites, skipped tests, and weakened verification scripts.
 - [x] Verify automerge safety hardening with focused/broad/full-CI gates.
-- [ ] Next lane: add a values-free Phantom agent report rollup once the Phantom command surface is stable enough to feature-detect safely.
+- [x] Adopt and deploy the trivial-proposal quality gate so tiny docs/comment/whitespace-only diffs do not create autonomous proposals.
+- [x] Add read-only Phantom command metadata parsed only from `phantom --help`'s `Commands:` block.
+- [x] Surface Phantom command availability in readiness, FleetStatus, CLI status, and dashboard snapshots without raw help text or secret names/values.
+- [x] Verify command metadata with focused Phantom/readiness/FleetStatus/dashboard tests plus typecheck, lint, build, audit, invariants, and full CI.
+- [ ] Next lane: add a values-free Phantom agent report rollup only after the `agent` command is feature-detected as an actual command, never from prose.

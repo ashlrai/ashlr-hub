@@ -474,6 +474,7 @@ function formatFleetPhantom(phantom: NonNullable<FleetStatus['phantom']>): strin
     `pulse ${known.pulseCredentialPresent ? 'yes' : 'no'}, ` +
     `nim ${known.nimApiKeyPresent ? 'yes' : 'no'}, ` +
     `mcp ${phantom.mcp.configured ? 'yes' : 'no'}, ` +
+    `agent ${phantom.commands.agentAvailable ? 'yes' : 'no'}, ` +
     `injection ${phantom.config.fleetSecretInjectionEnabled ? 'enabled' : 'disabled'}, ` +
     'values hidden'
   );

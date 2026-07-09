@@ -70,6 +70,13 @@ function phantomStatus(overrides: Partial<PhantomStatus> = {}): PhantomStatus {
         mcpServerAvailable: overrides.installed ?? true,
         mutationRequiresHumanApproval: overrides.installed ?? true,
       },
+      commands: {
+        commandsKnown: overrides.installed ?? true,
+        setupAvailable: overrides.installed ?? true,
+        execAvailable: overrides.installed ?? true,
+        mcpAvailable: overrides.installed ?? true,
+        agentAvailable: false,
+      },
     },
     ...overrides,
   };
@@ -98,6 +105,13 @@ describe('M347 readiness Phantom capability snapshot', () => {
           pulseTokenPresent: boolean;
           pulseCredentialPresent: boolean;
         };
+        commands: {
+          commandsKnown: boolean;
+          setupAvailable: boolean;
+          execAvailable: boolean;
+          mcpAvailable: boolean;
+          agentAvailable: boolean;
+        };
         mcp: { configured: boolean; source: string | null };
       };
       info: Array<{ id: string; detail: string }>;
@@ -115,6 +129,13 @@ describe('M347 readiness Phantom capability snapshot', () => {
         pulseTokenPresent: false,
         pulseCredentialPresent: true,
       },
+      commands: {
+        commandsKnown: true,
+        setupAvailable: true,
+        execAvailable: true,
+        mcpAvailable: true,
+        agentAvailable: false,
+      },
       mcp: {
         configured: true,
         source: '~/.ashlr/settings.json',
@@ -130,7 +151,35 @@ describe('M347 readiness Phantom capability snapshot', () => {
     expect(report.phantom?.knownFleetSecrets).not.toHaveProperty('names');
     expect(report.phantom?.knownFleetSecrets).not.toHaveProperty('present');
     expect(report.phantom?.knownFleetSecrets).not.toHaveProperty('missing');
-    expect(report.info.find((finding) => finding.id === 'phantom')?.detail).toContain('values hidden');
+    const detail = report.info.find((finding) => finding.id === 'phantom')?.detail;
+    expect(detail).toContain('agent command absent');
+    expect(detail).toContain('values hidden');
+  });
+
+  it('surfaces agent command presence without exposing help text', async () => {
+    const base = phantomStatus();
+    const report = await withReadinessMocks(
+      {
+        ...base,
+        capability: {
+          ...base.capability,
+          commands: {
+            ...base.capability.commands,
+            agentAvailable: true,
+          },
+        },
+      },
+      [],
+      async (buildReadiness) => buildReadiness(makeCfg({})),
+    ) as {
+      phantom?: { commands: { agentAvailable: boolean } };
+      info: Array<{ id: string; detail: string }>;
+    };
+
+    expect(report.phantom?.commands.agentAvailable).toBe(true);
+    const detail = report.info.find((finding) => finding.id === 'phantom')?.detail;
+    expect(detail).toContain('agent command present');
+    expect(JSON.stringify(report)).not.toContain('command help text');
   });
 
   it('warns when Phantom is installed but not initialized without exposing names or values', async () => {
@@ -159,9 +208,44 @@ describe('M347 readiness Phantom capability snapshot', () => {
     expect(report.phantom).toMatchObject({
       initialized: false,
       secretCount: 0,
+      commands: {
+        commandsKnown: true,
+        agentAvailable: false,
+      },
       mcp: { configured: false },
     });
+    const detail = report.warnings.find((finding) => finding.id === 'phantom')?.detail;
+    expect(detail).toContain('installed but not initialized');
+    expect(detail).toContain('agent command absent');
+  });
+
+  it('keeps a values-free all-false command snapshot when Phantom is not installed', async () => {
+    const status = phantomStatus({
+      installed: false,
+      version: null,
+      initialized: false,
+      secretNames: [],
+      capability: phantomStatus({ installed: false, secretNames: [] }).capability,
+    });
+
+    const report = await withReadinessMocks(status, [], async (buildReadiness) =>
+      buildReadiness(makeCfg({})),
+    ) as {
+      phantom?: { installed: boolean; commands: PhantomStatus['capability']['commands'] };
+      warnings: Array<{ id: string; detail: string }>;
+    };
+
+    expect(report.phantom).toMatchObject({
+      installed: false,
+      commands: {
+        commandsKnown: false,
+        setupAvailable: false,
+        execAvailable: false,
+        mcpAvailable: false,
+        agentAvailable: false,
+      },
+    });
     expect(report.warnings.find((finding) => finding.id === 'phantom')?.detail)
-      .toContain('installed but not initialized');
+      .toContain('phantom not installed');
   });
 });

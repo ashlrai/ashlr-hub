@@ -60,6 +60,13 @@ function phantomStatus(overrides: Partial<PhantomStatus> = {}): PhantomStatus {
         mcpServerAvailable: true,
         mutationRequiresHumanApproval: true,
       },
+      commands: {
+        commandsKnown: true,
+        setupAvailable: true,
+        execAvailable: true,
+        mcpAvailable: true,
+        agentAvailable: false,
+      },
     },
     ...overrides,
   };
@@ -146,6 +153,13 @@ describe('M348 FleetStatus Phantom capability', () => {
           phantomExecEnabled: true,
           fleetSecretInjectionEnabled: true,
         },
+        commands: {
+          commandsKnown: true,
+          setupAvailable: true,
+          execAvailable: true,
+          mcpAvailable: true,
+          agentAvailable: false,
+        },
         mcp: { configured: true },
       });
       expect(serialized).not.toContain('ANTHROPIC_API_KEY');
@@ -160,10 +174,103 @@ describe('M348 FleetStatus Phantom capability', () => {
       expect(rendered).toContain('pulse yes');
       expect(rendered).toContain('nim no');
       expect(rendered).toContain('mcp yes');
+      expect(rendered).toContain('agent no');
       expect(rendered).toContain('values hidden');
       expect(rendered).not.toContain('ANTHROPIC_API_KEY');
       expect(rendered).not.toContain('ASHLR_PULSE_TOKEN');
       expect(rendered).not.toContain('sk-should-never-surface');
+    });
+  });
+
+  it('renders agent yes only when Phantom reports an actual agent command', async () => {
+    await withFleetMocks(() => {
+      const base = phantomStatus();
+      return {
+        ...base,
+        capability: {
+          ...base.capability,
+          commands: {
+            ...base.capability.commands,
+            agentAvailable: true,
+          },
+        },
+      };
+    }, async ({ buildFleetStatus, formatFleetStatus }) => {
+      const status = await buildFleetStatus(baseConfig());
+      const rendered = formatFleetStatus(status);
+
+      expect(status.phantom?.commands.agentAvailable).toBe(true);
+      expect(rendered).toContain('agent yes');
+      expect(rendered).toContain('values hidden');
+    });
+  });
+
+  it('keeps command metadata for installed but uninitialized Phantom', async () => {
+    await withFleetMocks(() => {
+      const base = phantomStatus({ secretNames: [] });
+      return {
+        ...base,
+        initialized: false,
+        secretNames: [],
+        capability: {
+          ...base.capability,
+          secretCount: 0,
+          modes: {
+            ...base.capability.modes,
+            childEnvInjectionAvailable: false,
+          },
+        },
+      };
+    }, async ({ buildFleetStatus, formatFleetStatus }) => {
+      const status = await buildFleetStatus(baseConfig());
+
+      expect(status.phantom).toMatchObject({
+        state: 'not-initialized',
+        initialized: false,
+        secretCount: 0,
+        commands: {
+          commandsKnown: true,
+          agentAvailable: false,
+        },
+      });
+      expect(formatFleetStatus(status)).toContain('agent no');
+    });
+  });
+
+  it('keeps all command support false when Phantom is not installed', async () => {
+    await withFleetMocks(() => {
+      const base = phantomStatus({ installed: false, secretNames: [] });
+      return {
+        ...base,
+        version: null,
+        initialized: false,
+        secretNames: [],
+        capability: {
+          ...base.capability,
+          secretCount: 0,
+          commands: {
+            commandsKnown: false,
+            setupAvailable: false,
+            execAvailable: false,
+            mcpAvailable: false,
+            agentAvailable: false,
+          },
+        },
+      };
+    }, async ({ buildFleetStatus }) => {
+      const status = await buildFleetStatus(baseConfig());
+
+      expect(status.phantom).toMatchObject({
+        state: 'not-installed',
+        installed: false,
+        commands: {
+          commandsKnown: false,
+          setupAvailable: false,
+          execAvailable: false,
+          mcpAvailable: false,
+          agentAvailable: false,
+        },
+      });
     });
   });
 
@@ -178,6 +285,13 @@ describe('M348 FleetStatus Phantom capability', () => {
         installed: false,
         initialized: false,
         secretCount: 0,
+        commands: {
+          commandsKnown: false,
+          setupAvailable: false,
+          execAvailable: false,
+          mcpAvailable: false,
+          agentAvailable: false,
+        },
         mcp: { configured: false },
       });
       expect(status.phantom?.error).toContain('phantom probe failed');
