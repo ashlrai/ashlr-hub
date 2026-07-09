@@ -37,6 +37,12 @@
 - Dashboard truth: the M210 fixture now carries `queue.generatedWork` so snapshot propagation is covered alongside shared queue health.
 - Verification passed: `node --check src/core/web/public/app.js`; focused `npm run test:ci -- test/m213.dashboard-sse.test.ts test/m210.dashboard.test.ts test/m49.fleet-status.test.ts` (96 tests); `npm run typecheck -- --pretty false`; `git diff --check`; `npm run lint` (known 115-warning baseline, 0 errors); `npm run build`; and `npm audit --audit-level=moderate` (0 vulnerabilities).
 
+## Current Frontier Route No-Diff Reslices
+- Live bottleneck: FleetStatus is still proposal-starved with `28/30` eligible backlog items, no pending proposals, and five generated diagnostic no-diff reslices queued. Those reslices had `source:"self"` and modest scores, so the router could treat them as `local-mid bulk` and send them back to the same low-yield local path.
+- Implementation: `routeBackend()` now treats items tagged with both `proposal-repair` and `dispatch-no-diff-reslice` as frontier candidates when a frontier backend is allowed and installed. The route reason starts with `frontier:` so workhorse dispatch preserves the protected route instead of spreading it back to local bulk lanes.
+- Compatibility: if no frontier backend is available, existing mid/builtin fallback behavior remains unchanged. Ordinary self-heal or proposal-repair items without the diagnostic no-diff reslice tag are not promoted by this rule.
+- Verification passed: `npm run typecheck -- --pretty false`; focused `npm run test:ci -- test/m46.fleet.test.ts test/m255.concurrent-dispatch.test.ts test/m256.workhorse-dispatch.test.ts test/m250.resource-control.test.ts` (100 tests); `git diff --check`; `npm run lint` (known 115-warning baseline, 0 errors); `npm run build`; and `npm audit --audit-level=moderate` (0 vulnerabilities).
+
 ## Current Resource-Aware Learned Target Gate
 - Start state: dirty Hub WIP after comparative learned routing rollout; Entire remains not set up for `master`.
 - Implementation: `recommendRoute()` now accepts optional metadata-only `resourceStates` and filters comparative same-tier learned reroute candidates to `open` or `near` availability when provided. Missing candidates are blocked only in explicit resource-aware calls; direct/legacy learned-router callers without `resourceStates` preserve previous behavior.

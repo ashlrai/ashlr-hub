@@ -1022,5 +1022,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add static web-surface and dashboard snapshot regression coverage.
 - [x] Run focused web/status verification.
 - [x] Run final gates.
+- [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Frontier Route No-Diff Reslices
+- [x] Rechecked clean pushed state after generated-work web visibility.
+- [x] Used proposal-yield scout findings to identify generated no-diff repair reslices being routed as local-mid self-work.
+- [x] Add narrow router classification for generated `proposal-repair` + `dispatch-no-diff-reslice` work so frontier routes handle the reslice when available.
+- [x] Preserve normal workhorse routing for ordinary low-score self work and fallback behavior when no frontier backend is installed.
+- [x] Add route regression coverage and run adjacent concurrent/workhorse/resource dispatch suites.
+- [x] Run final gates.
 - [ ] Commit, push, reload daemon, and smoke live status.
-- [ ] Implement proposal-yield routing fix for generated no-diff reslices.

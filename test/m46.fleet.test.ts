@@ -107,6 +107,30 @@ describe('routeBackend', () => {
     }
   });
 
+  it('routes generated no-diff proposal repair reslices to frontier when available', () => {
+    const cfg = withFoundry({ allowedBackends: ['builtin', 'local-coder', 'claude', 'codex'] });
+    const d = routeBackend(makeItem({
+      source: 'self',
+      effort: 1,
+      score: 1,
+      tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+    }), cfg);
+
+    const anyFrontierAvailable = engineInstalled('claude') || engineInstalled('codex');
+    if (anyFrontierAvailable) {
+      expect(['claude', 'codex']).toContain(d.backend);
+      expect(d.tier).toBe('frontier');
+      expect(d.reason).toContain('frontier: generated no-diff proposal repair');
+      expect(d.reason).not.toContain('local-mid bulk');
+    } else if (engineInstalled('local-coder')) {
+      expect(d.backend).toBe('local-coder');
+      expect(d.tier).toBe(engineTierOf('local-coder', cfg));
+    } else {
+      expect(d.backend).toBe('builtin');
+      expect(d.tier).toBe('local');
+    }
+  });
+
   it('routes security/issue/high-effort to a frontier backend when allowed+installed, else builtin', () => {
     const cfg = withFoundry({ allowedBackends: ['builtin', 'claude', 'codex'] });
     const item = makeItem({ source: 'security', effort: 5, score: 10 });

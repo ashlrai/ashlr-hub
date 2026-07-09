@@ -197,6 +197,11 @@ function isFrontierItem(item: WorkItem): boolean {
   return effort >= FRONTIER_EFFORT_THRESHOLD || score >= FRONTIER_SCORE_THRESHOLD;
 }
 
+function isGeneratedNoDiffProposalRepair(item: WorkItem): boolean {
+  const tags = item.tags ?? [];
+  return tags.includes('proposal-repair') && tags.includes('dispatch-no-diff-reslice');
+}
+
 /**
  * Build a decision for a concrete backend, deriving its tier.
  * M195: thread cfg so a config-promoted backend (e.g. cfg.foundry.nim.tier=
@@ -249,15 +254,19 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
   // frontier AI to handle end-to-end. Under cost/absent policy the extra condition
   // is NOT evaluated (byte-identical parity with pre-M182 for those policies).
   const qualityPolicy = cfg.foundry?.routingPolicy === 'quality';
-  const isFrontierCandidate = isFrontierItem(item) || (qualityPolicy && isSubstantiveItem(item));
+  const isNoDiffRepair = isGeneratedNoDiffProposalRepair(item);
+  const isFrontierCandidate = isFrontierItem(item) || isNoDiffRepair || (qualityPolicy && isSubstantiveItem(item));
   if (isFrontierCandidate && frontiers.length > 0) {
     const chosen = pickFrom(frontiers, item)!;
     const effort = typeof item.effort === 'number' ? item.effort : 3;
     const score = typeof item.score === 'number' ? item.score : 3;
-    const substantiveReason = qualityPolicy && !isFrontierItem(item) && SUBSTANTIVE_SOURCES.has(item.source as string)
-      ? `frontier: quality policy substantive item (source=${item.source}) → ${chosen}`
-      : `frontier: hard/escalation item (source=${item.source}, effort=${effort}, score=${score}) → ${chosen}`;
-    const baseReason = substantiveReason;
+    let baseReason = `frontier: hard/escalation item (source=${item.source}, effort=${effort}, score=${score}) → ${chosen}`;
+    if (qualityPolicy && !isFrontierItem(item) && SUBSTANTIVE_SOURCES.has(item.source as string)) {
+      baseReason = `frontier: quality policy substantive item (source=${item.source}) → ${chosen}`;
+    }
+    if (isNoDiffRepair) {
+      baseReason = `frontier: generated no-diff proposal repair (source=${item.source}) → ${chosen}`;
+    }
 
     // M128: enrich with model selection
     const taskRoute = routeTask(item, cfg, { ...ctx, availableEngines: [chosen, ...ctx.availableEngines] });
