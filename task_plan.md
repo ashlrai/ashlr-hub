@@ -567,5 +567,6 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve raw metadata audit access with `readAgentActions()` and explicit `ashlr eval attention --all-repos`, while saved attention reports now record `source.repoScope`.
 - [x] Added focused regressions for workspace scoping, FleetStatus context-efficiency fixtures, and CLI default/all-repos attention behavior.
 - [x] Verification passed: focused workspace/eval/status suite, typecheck, lint, build, audit, and diff check.
+- [x] Commit `2c002b6`, push to `origin/master`, and smoke live attention/fleet status with scoped repo telemetry.
 - [ ] Next lane: sanitize inbox/proposal persistence on write/read without erasing legitimate source diff review context.
 - [ ] Next lane: integrate proposal-production bottleneck findings from the active scout and pick the next yield patch.
