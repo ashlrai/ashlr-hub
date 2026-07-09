@@ -19,6 +19,7 @@ import { buildFleetStatus } from '../src/core/fleet/status.js';
 import { formatFleetStatus } from '../src/cli/fleet.js';
 import { buildFleetLaneLocks } from '../src/core/fleet/lane-lock.js';
 import { buildContextEfficiencyStatus } from '../src/core/fleet/context-efficiency.js';
+import { ROUTER_POLICY_VERSION } from '../src/core/learning/causal.js';
 import { recordUse } from '../src/core/fleet/quota.js';
 import { setKill } from '../src/core/sandbox/policy.js';
 import { SharedStore } from '../src/core/fleet/shared-store.js';
@@ -1711,6 +1712,24 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       proposalId: proposal.id,
       runId: 'run-attempt-coverage',
       trajectoryId: 'traj-attempt-coverage',
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'frontier',
+        model: 'gpt-5.5',
+        assignedBy: 'daemon',
+        reason: 'resource-aware codex route',
+        routerPolicyVersion: ROUTER_POLICY_VERSION,
+      },
+      runEventSummary: {
+        runId: 'run-attempt-coverage',
+        status: 'done',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+        proposalId: proposal.id,
+        actionCounts: { proposalCreated: 1, diffFiles: 1 },
+      },
+      routerPolicyVersion: ROUTER_POLICY_VERSION,
+      learningEpoch: now.slice(0, 10),
       spentUsd: 0.002,
       reason: 'proposal filed',
       basis: 'run-proposal-outcome',
@@ -1761,6 +1780,20 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         evidence: { count: 1, rate: 1 },
         worked: { count: 1, rate: 1 },
       },
+      causalCoverage: {
+        trajectoryId: { count: 1, rate: 1 },
+        routeSnapshot: { count: 1, rate: 1 },
+        runEventSummary: { count: 1, rate: 1 },
+        routerPolicyVersion: { count: 1, rate: 1 },
+        currentRouterPolicyVersion: { count: 1, rate: 1 },
+        learningEpoch: { count: 1, rate: 1 },
+        currentLearningEpoch: { count: 1, rate: 1 },
+        labelAuthoritative: { count: 1, rate: 1 },
+        currentAuthoritativeLabel: { count: 1, rate: 1 },
+      },
+      causalWeak: {
+        weak: false,
+      },
       production: {
         attempts: 1,
         proposalCreated: 1,
@@ -1786,6 +1819,17 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         evidence: true,
         worked: true,
       },
+      causalCoverage: {
+        trajectoryId: true,
+        routeSnapshot: true,
+        runEventSummary: true,
+        routerPolicyVersion: true,
+        currentRouterPolicyVersion: true,
+        learningEpoch: true,
+        currentLearningEpoch: true,
+        labelAuthoritative: true,
+        currentAuthoritativeLabel: true,
+      },
     });
     expect(s.attemptCoverage?.recent[0]).not.toHaveProperty('repo');
     expect(s.attemptCoverage?.recent[0]).not.toHaveProperty('itemId');
@@ -1795,6 +1839,112 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('attempts:  1 in 24h');
     expect(formatted).toContain('learning:  diagnostic 1/1 (100%), no-proposal 0, policy-suppressed 0');
     expect(formatted).toContain('joins:     actions 1 (100%), worked 1 (100%), decisions 1 (100%), evidence 1 (100%)');
+    expect(formatted).toContain('metadata:  trajectory 1 (100%), route 1 (100%), run 1 (100%)');
+    expect(formatted).toContain('policy:    version 1 (100%), current 1 (100%), epoch 1 (100%), current epoch 1 (100%)');
+    expect(formatted).toContain('labels:    authoritative 1 (100%), current 1 (100%)');
+  });
+
+  it('promotes weak causal attempt coverage into next actions', async () => {
+    const now = new Date().toISOString();
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo-causal');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome, [], now);
+    writeBacklogSnapshot(tmpHome, repo, [], now);
+    recordDispatchProduction([
+      {
+        schemaVersion: 1,
+        ts: now,
+        machineId: 'm49',
+        itemId: 'item-causal-a',
+        source: 'goal',
+        repo,
+        title: 'Causal coverage A',
+        backend: 'local-coder',
+        tier: 'mid',
+        model: 'qwen',
+        assignedBy: 'daemon',
+        routeReason: 'local route missing snapshot',
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        runId: 'run-causal-a',
+        trajectoryId: 'traj-causal-a',
+        spentUsd: 0,
+        reason: 'engine completed without file changes',
+        basis: 'run-proposal-outcome',
+      },
+      {
+        schemaVersion: 1,
+        ts: now,
+        machineId: 'm49',
+        itemId: 'item-causal-b',
+        source: 'goal',
+        repo,
+        title: 'Causal coverage B',
+        backend: 'local-coder',
+        tier: 'mid',
+        model: 'qwen',
+        assignedBy: 'daemon',
+        routeReason: 'local route missing snapshot',
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        runId: 'run-causal-b',
+        trajectoryId: 'traj-causal-b',
+        spentUsd: 0,
+        reason: 'engine completed without file changes',
+        basis: 'run-proposal-outcome',
+      },
+      {
+        schemaVersion: 1,
+        ts: now,
+        machineId: 'm49',
+        itemId: 'item-causal-c',
+        source: 'goal',
+        repo,
+        title: 'Causal coverage C',
+        backend: 'local-coder',
+        tier: 'mid',
+        model: 'qwen',
+        assignedBy: 'daemon',
+        routeReason: 'local route missing snapshot',
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        runId: 'run-causal-c',
+        trajectoryId: 'traj-causal-c',
+        spentUsd: 0,
+        reason: 'engine completed without file changes',
+        basis: 'run-proposal-outcome',
+      },
+    ]);
+
+    const s = await buildFleetStatus(baseConfig());
+    const action = s.nextActions?.find((candidate) => candidate.id === 'inspect-attempt-causal-coverage');
+
+    expect(s.attemptCoverage?.causalWeak).toMatchObject({
+      weak: true,
+      reasons: expect.arrayContaining([
+        expect.objectContaining({ kind: 'routeSnapshot', count: 0, rate: 0 }),
+        expect.objectContaining({ kind: 'runEventSummary', count: 0, rate: 0 }),
+      ]),
+    });
+    expect(action).toMatchObject({
+      priority: 'medium',
+      label: 'Inspect causal coverage',
+      detail: expect.stringContaining('routeSnapshot 0/3 (0%)'),
+      commands: expect.arrayContaining([
+        expect.objectContaining({
+          label: 'Evaluate attention',
+          argv: ['ashlr', 'eval', 'attention', '--json'],
+          safety: 'read-only',
+        }),
+      ]),
+    });
+    expect(s.nextActions?.[0]?.id).toBe('inspect-attempt-causal-coverage');
+    expect(s.missionBrief).toMatchObject({
+      directive: 'Inspect causal learning coverage',
+      action: { id: 'inspect-attempt-causal-coverage' },
+    });
   });
 
   it('does not report healthy context efficiency when genome health is unavailable', () => {

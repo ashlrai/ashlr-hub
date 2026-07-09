@@ -2162,6 +2162,8 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       ],
     });
   }
+  const causalCoverageAction = causalCoverageNextAction(status.attemptCoverage);
+  if (causalCoverageAction) add(causalCoverageAction);
 
   const goalFocus = status.goalFocus;
   const staleLane = status.laneLocks?.samples.find(
@@ -2351,6 +2353,7 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   };
   const actionRank = (action: FleetNextAction): number => {
     if (action.id === 'inspect-dispatch-yield') return -1;
+    if (action.id === 'inspect-attempt-causal-coverage') return -0.5;
     return 0;
   };
   return actions
@@ -2385,6 +2388,25 @@ function phantomAuditNextAction(report: PhantomAgentReportRollup | undefined): F
     priority: 'high',
     label: 'Review Phantom audit',
     detail: `Phantom audit rollup needs review${scope}: ${signals.join(', ')}. Values hidden; only aggregate counts are shown.`,
+  };
+}
+
+function causalCoverageNextAction(status: AttemptCoverageStatus | undefined): FleetNextAction | null {
+  if (!status?.causalWeak.weak) return null;
+  const weak = status.causalWeak.reasons[0];
+  if (!weak) return null;
+  const percent = Math.round(weak.rate * 100);
+  return {
+    id: 'inspect-attempt-causal-coverage',
+    priority: 'medium',
+    label: 'Inspect causal coverage',
+    detail:
+      `Attempt causal metadata coverage is weak: ` +
+      `${weak.kind} ${weak.count}/${status.attempts} (${percent}%).`,
+    commands: [
+      nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+      nextActionCommand('Evaluate attention', ['ashlr', 'eval', 'attention', '--json'], 'read-only'),
+    ],
   };
 }
 
@@ -3033,6 +3055,8 @@ function missionDirective(
         : 'Run context reflection';
     case 'review-phantom-audit':
       return 'Review Phantom audit';
+    case 'inspect-attempt-causal-coverage':
+      return 'Inspect causal learning coverage';
     case 'build-backlog':
       return 'Build the highest-value backlog proposal';
     case 'cooldown-gated-backlog':

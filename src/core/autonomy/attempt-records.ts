@@ -21,7 +21,11 @@ import { listAutonomyEvidencePacks, readAutonomyEvidencePack, type AutonomyEvide
 import { loadProposal } from '../inbox/store.js';
 import type { WorkedEvent, WorkedLedger } from '../fleet/worked-ledger.js';
 import { loadWorkedLedger } from '../fleet/worked-ledger.js';
-import { runEventSummary as sanitizeRunEventSummary } from '../learning/causal.js';
+import {
+  ROUTER_POLICY_VERSION,
+  learningEpochFromTimestamp,
+  runEventSummary as sanitizeRunEventSummary,
+} from '../learning/causal.js';
 import {
   addProductionAttemptShape,
   classifyProductionAttemptForLearningWithLabel,
@@ -35,6 +39,9 @@ import { scrubSecrets } from '../util/scrub.js';
 const DEFAULT_WINDOW_HOURS = 24;
 const DEFAULT_LIMIT = 500;
 const JOIN_WINDOW_MS = 10 * 60 * 1000;
+const CAUSAL_WEAK_MIN_ATTEMPTS = 3;
+const CAUSAL_FOUNDATION_THRESHOLD = 0.95;
+const CAUSAL_LABEL_THRESHOLD = 0.8;
 
 export interface AttemptRecordCoverage {
   agentAction: boolean;
@@ -42,6 +49,18 @@ export interface AttemptRecordCoverage {
   decision: boolean;
   evidence: boolean;
   worked: boolean;
+}
+
+export interface AttemptCausalCoverage {
+  trajectoryId: boolean;
+  routeSnapshot: boolean;
+  runEventSummary: boolean;
+  routerPolicyVersion: boolean;
+  currentRouterPolicyVersion: boolean;
+  learningEpoch: boolean;
+  currentLearningEpoch: boolean;
+  labelAuthoritative: boolean;
+  currentAuthoritativeLabel: boolean;
 }
 
 export interface AttemptRecord {
@@ -70,6 +89,7 @@ export interface AttemptRecord {
   learningKind: ProductionAttemptLearningKind;
   labelAuthoritative: boolean;
   coverage: AttemptRecordCoverage;
+  causalCoverage: AttemptCausalCoverage;
 }
 
 export interface AttemptCoverageMetric {
@@ -90,6 +110,7 @@ export interface AttemptCoverageStatus {
     policySuppressed?: boolean;
     labelAuthoritative?: boolean;
     coverage: AttemptRecordCoverage;
+    causalCoverage: AttemptCausalCoverage;
   }>;
   coverage: {
     agentAction: AttemptCoverageMetric;
@@ -97,6 +118,30 @@ export interface AttemptCoverageStatus {
     decision: AttemptCoverageMetric;
     evidence: AttemptCoverageMetric;
     worked: AttemptCoverageMetric;
+  };
+  causalCoverage: {
+    trajectoryId: AttemptCoverageMetric;
+    routeSnapshot: AttemptCoverageMetric;
+    runEventSummary: AttemptCoverageMetric;
+    routerPolicyVersion: AttemptCoverageMetric;
+    currentRouterPolicyVersion: AttemptCoverageMetric;
+    learningEpoch: AttemptCoverageMetric;
+    currentLearningEpoch: AttemptCoverageMetric;
+    labelAuthoritative: AttemptCoverageMetric;
+    currentAuthoritativeLabel: AttemptCoverageMetric;
+  };
+  causalWeak: {
+    weak: boolean;
+    minAttempts: number;
+    threshold: number;
+    labelThreshold: number;
+    reasons: Array<{
+      kind: keyof AttemptCausalCoverage;
+      count: number;
+      rate: number;
+      threshold: number;
+      sampleRefs: string[];
+    }>;
   };
   production: {
     attempts: number;
@@ -111,6 +156,7 @@ export interface AttemptCoverageStatus {
     attemptShape: ProductionAttemptShape;
   };
   gaps: Array<{ kind: keyof AttemptRecordCoverage; count: number; sampleRefs: string[] }>;
+  causalGaps: Array<{ kind: keyof AttemptCausalCoverage; count: number; sampleRefs: string[] }>;
 }
 
 export interface AttemptRecordReadDeps {
@@ -313,6 +359,39 @@ function hasEvidence(
   return pack?.proposal.id === proposalId;
 }
 
+function hasUsableTrajectoryId(value: string | undefined): boolean {
+  return typeof value === 'string' && value.trim() !== '' && !isDerivedWorkTrajectory(value);
+}
+
+function hasRouteSnapshot(event: DispatchProductionEvent): boolean {
+  const route = event.routeSnapshot;
+  return Boolean(route && (
+    route.backend !== undefined ||
+    route.tier !== undefined ||
+    route.model !== undefined ||
+    route.assignedBy !== undefined ||
+    route.reason !== undefined
+  ));
+}
+
+function hasRouterPolicyVersion(event: DispatchProductionEvent): boolean {
+  return typeof event.routerPolicyVersion === 'string' && event.routerPolicyVersion.trim() !== '';
+}
+
+function hasCurrentRouterPolicyVersion(event: DispatchProductionEvent): boolean {
+  if (event.routerPolicyVersion !== ROUTER_POLICY_VERSION) return false;
+  const routePolicy = event.routeSnapshot?.routerPolicyVersion;
+  return routePolicy === undefined || routePolicy === ROUTER_POLICY_VERSION;
+}
+
+function hasLearningEpoch(event: DispatchProductionEvent): boolean {
+  return typeof event.learningEpoch === 'string' && event.learningEpoch.trim() !== '';
+}
+
+function hasCurrentLearningEpoch(event: DispatchProductionEvent): boolean {
+  return event.learningEpoch === learningEpochFromTimestamp(event.ts);
+}
+
 function attemptRef(record: AttemptRecord): string {
   const hash = createHash('sha256').update(record.id).digest('hex').slice(0, 12);
   return `attempt:${hash}`;
@@ -359,7 +438,8 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
       const backend = event.backend === null ? null : bounded(event.backend, 80);
       const tier = event.tier === null ? null : bounded(event.tier, 40);
       const model = event.model === null ? null : bounded(event.model, 160);
-      const actionCounts = sanitizeRunEventSummary(event.runEventSummary)?.actionCounts;
+      const runSummary = sanitizeRunEventSummary(event.runEventSummary);
+      const actionCounts = runSummary?.actionCounts;
       const learningLabel = sanitizeProductionAttemptLearningLabel(event.learningLabel);
       const classification = classifyProductionAttemptForLearningWithLabel({
         outcome: event.outcome,
@@ -375,8 +455,26 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
         evidence: hasEvidence(proposalId, evidenceByProposal, readEvidence),
         worked: Boolean(
           (proposalId && workedBy.byProposal.has(proposalId)) ||
-            hasTimedWorkedFallback(event, itemId, workedBy.byItem),
+          hasTimedWorkedFallback(event, itemId, workedBy.byItem),
         ),
+      };
+      const currentRouterPolicyVersion = hasCurrentRouterPolicyVersion(event);
+      const currentLearningEpoch = hasCurrentLearningEpoch(event);
+      const currentAuthoritativeLabel =
+        labelAuthoritative &&
+        !classification.policySuppressed &&
+        currentRouterPolicyVersion &&
+        currentLearningEpoch;
+      const causalCoverage: AttemptCausalCoverage = {
+        trajectoryId: hasUsableTrajectoryId(event.trajectoryId),
+        routeSnapshot: hasRouteSnapshot(event),
+        runEventSummary: runSummary !== undefined,
+        routerPolicyVersion: hasRouterPolicyVersion(event),
+        currentRouterPolicyVersion,
+        learningEpoch: hasLearningEpoch(event),
+        currentLearningEpoch,
+        labelAuthoritative,
+        currentAuthoritativeLabel,
       };
       return {
         version: 1,
@@ -404,6 +502,7 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
         learningKind: classification.kind,
         labelAuthoritative,
         coverage,
+        causalCoverage,
       };
     });
 }
@@ -441,6 +540,17 @@ export function summarizeAttemptCoverage(
     evidence: metric(records, (record) => record.coverage.evidence),
     worked: metric(records, (record) => record.coverage.worked),
   };
+  const causalCoverage = {
+    trajectoryId: metric(records, (record) => record.causalCoverage.trajectoryId),
+    routeSnapshot: metric(records, (record) => record.causalCoverage.routeSnapshot),
+    runEventSummary: metric(records, (record) => record.causalCoverage.runEventSummary),
+    routerPolicyVersion: metric(records, (record) => record.causalCoverage.routerPolicyVersion),
+    currentRouterPolicyVersion: metric(records, (record) => record.causalCoverage.currentRouterPolicyVersion),
+    learningEpoch: metric(records, (record) => record.causalCoverage.learningEpoch),
+    currentLearningEpoch: metric(records, (record) => record.causalCoverage.currentLearningEpoch),
+    labelAuthoritative: metric(records, (record) => record.causalCoverage.labelAuthoritative),
+    currentAuthoritativeLabel: metric(records, (record) => record.causalCoverage.currentAuthoritativeLabel),
+  };
   const gaps = (Object.keys(coverage) as Array<keyof AttemptRecordCoverage>)
     .map((kind) => {
       const missing = records.filter((record) => !record.coverage[kind]);
@@ -448,6 +558,39 @@ export function summarizeAttemptCoverage(
     })
     .filter((gap) => gap.count > 0)
     .sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind));
+  const causalGaps = (Object.keys(causalCoverage) as Array<keyof AttemptCausalCoverage>)
+    .map((kind) => {
+      const missing = records.filter((record) => !record.causalCoverage[kind]);
+      return { kind, count: missing.length, sampleRefs: missing.slice(0, 5).map(attemptRef) };
+    })
+    .filter((gap) => gap.count > 0)
+    .sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind));
+  const weakKinds: Array<{ kind: keyof AttemptCausalCoverage; threshold: number }> = [
+    { kind: 'trajectoryId', threshold: CAUSAL_FOUNDATION_THRESHOLD },
+    { kind: 'routeSnapshot', threshold: CAUSAL_FOUNDATION_THRESHOLD },
+    { kind: 'runEventSummary', threshold: CAUSAL_FOUNDATION_THRESHOLD },
+    { kind: 'routerPolicyVersion', threshold: CAUSAL_FOUNDATION_THRESHOLD },
+    { kind: 'currentRouterPolicyVersion', threshold: CAUSAL_FOUNDATION_THRESHOLD },
+    { kind: 'learningEpoch', threshold: CAUSAL_FOUNDATION_THRESHOLD },
+    { kind: 'currentLearningEpoch', threshold: CAUSAL_FOUNDATION_THRESHOLD },
+    { kind: 'labelAuthoritative', threshold: CAUSAL_LABEL_THRESHOLD },
+    { kind: 'currentAuthoritativeLabel', threshold: CAUSAL_LABEL_THRESHOLD },
+  ];
+  const weakReasons = records.length >= CAUSAL_WEAK_MIN_ATTEMPTS
+    ? weakKinds
+        .map(({ kind, threshold }) => {
+          const metricValue = causalCoverage[kind];
+          const gap = causalGaps.find((candidate) => candidate.kind === kind);
+          return {
+            kind,
+            count: metricValue.count,
+            rate: metricValue.rate,
+            threshold,
+            sampleRefs: gap?.sampleRefs ?? [],
+          };
+        })
+        .filter((reason) => reason.rate < reason.threshold)
+    : [];
   return {
     windowHours,
     attempts: records.length,
@@ -461,8 +604,17 @@ export function summarizeAttemptCoverage(
       policySuppressed: record.policySuppressed,
       labelAuthoritative: record.labelAuthoritative,
       coverage: record.coverage,
+      causalCoverage: record.causalCoverage,
     })),
     coverage,
+    causalCoverage,
+    causalWeak: {
+      weak: weakReasons.length > 0,
+      minAttempts: CAUSAL_WEAK_MIN_ATTEMPTS,
+      threshold: CAUSAL_FOUNDATION_THRESHOLD,
+      labelThreshold: CAUSAL_LABEL_THRESHOLD,
+      reasons: weakReasons,
+    },
     production: {
       attempts: records.length,
       proposalCreated,
@@ -476,5 +628,6 @@ export function summarizeAttemptCoverage(
       attemptShape,
     },
     gaps,
+    causalGaps,
   };
 }

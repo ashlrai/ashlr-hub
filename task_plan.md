@@ -1063,3 +1063,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add FleetStatus and reflect CLI regression coverage.
 - [x] Run focused tests, typecheck, lint, build, audit, and diff checks.
 - [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Causal Attempt Coverage
+- [x] Deploy/read scout for causal attempt coverage, route/run metadata, and Fleet OS surfacing.
+- [x] Add read-only causal coverage booleans for trajectory, route snapshot, run summary, router policy, learning epoch, and authoritative labels.
+- [x] Add weak causal coverage summary with sample-gated thresholds and hashed sample refs only.
+- [x] Surface weak causal coverage as a read-only next action and Mission Brief directive.
+- [x] Render causal coverage in CLI, Fleet, Mission Control, and Fleet Dashboard production panels.
+- [x] Add focused attempt-record, FleetStatus, CLI, and web surface regression coverage.
+- [x] Run focused tests, typecheck, and browser JS syntax check.
+- [ ] Run final lint, build, audit, diff, commit, push, reload daemon, and smoke live status.

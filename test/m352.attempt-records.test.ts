@@ -14,6 +14,7 @@ import type { OutcomeRecord } from '../src/core/autonomy/outcome-records.js';
 import type { AutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import type { DecisionEntry } from '../src/core/types.js';
 import type { WorkedLedger } from '../src/core/fleet/worked-ledger.js';
+import { ROUTER_POLICY_VERSION } from '../src/core/learning/causal.js';
 
 const TS = '2026-07-09T12:00:00.000Z';
 const REPO = '/tmp/repo';
@@ -122,6 +123,50 @@ function evidence(proposalId = 'prop-1'): AutonomyEvidencePack {
     },
     verification: { passed: true, ranCommands: 1 },
   } as AutonomyEvidencePack;
+}
+
+function learningLabel(overrides: Record<string, unknown> = {}) {
+  return {
+    schemaVersion: 1,
+    classifierVersion: 'attempt-shape-v1',
+    authoritative: true,
+    learningKind: 'proposal-created',
+    policySuppressed: false,
+    diagnosticNoProposal: false,
+    diagnosticAttempt: true,
+    attemptShape: {
+      backendNoDiff: 0,
+      captureOrGateBlocked: 0,
+      repairAttempts: 0,
+      policyDisabled: 0,
+    },
+    ...overrides,
+  };
+}
+
+function causalDispatch(overrides: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
+  const base = dispatch({
+    routeSnapshot: {
+      backend: 'local-coder',
+      tier: 'local',
+      model: 'qwen',
+      assignedBy: 'test',
+      reason: 'metadata-only route',
+      routerPolicyVersion: ROUTER_POLICY_VERSION,
+    },
+    runEventSummary: {
+      runId: 'run-1',
+      status: 'done',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: 'prop-1',
+      actionCounts: { proposalCreated: 1, diffFiles: 1 },
+    },
+    routerPolicyVersion: ROUTER_POLICY_VERSION,
+    learningEpoch: '2026-07-09',
+    learningLabel: learningLabel(),
+  });
+  return { ...base, ...overrides };
 }
 
 function deps(overrides: Partial<AttemptRecordReadDeps> = {}): AttemptRecordReadDeps {
@@ -252,6 +297,134 @@ describe('AttemptRecord coverage', () => {
         policyDisabled: 3,
       },
     });
+  });
+
+  it('summarizes causal metadata coverage and weak current-label readiness', () => {
+    const records = listAttemptRecords({
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          causalDispatch({
+            itemId: 'complete',
+            runId: 'run-complete',
+            trajectoryId: 'traj-complete',
+            proposalId: 'prop-complete',
+            runEventSummary: {
+              runId: 'run-complete',
+              outcome: 'proposal-created',
+              proposalCreated: true,
+              proposalId: 'prop-complete',
+              actionCounts: { proposalCreated: 1 },
+            },
+          }),
+          causalDispatch({
+            itemId: 'stale-policy',
+            runId: 'run-stale-policy',
+            trajectoryId: 'traj-stale-policy',
+            proposalId: 'prop-stale-policy',
+            routerPolicyVersion: 'old-router',
+            routeSnapshot: {
+              backend: 'local-coder',
+              tier: 'local',
+              model: 'qwen',
+              assignedBy: 'test',
+              reason: 'old route',
+              routerPolicyVersion: 'old-router',
+            },
+            runEventSummary: {
+              runId: 'run-stale-policy',
+              outcome: 'proposal-created',
+              proposalCreated: true,
+              proposalId: 'prop-stale-policy',
+              actionCounts: { proposalCreated: 1 },
+            },
+          }),
+          causalDispatch({
+            itemId: 'stale-epoch',
+            runId: 'run-stale-epoch',
+            trajectoryId: 'traj-stale-epoch',
+            proposalId: 'prop-stale-epoch',
+            learningEpoch: '2026-07-08',
+            runEventSummary: {
+              runId: 'run-stale-epoch',
+              outcome: 'proposal-created',
+              proposalCreated: true,
+              proposalId: 'prop-stale-epoch',
+              actionCounts: { proposalCreated: 1 },
+            },
+          }),
+          dispatch({
+            itemId: 'missing-causal',
+            runId: undefined,
+            trajectoryId: undefined,
+            proposalId: undefined,
+            routeSnapshot: undefined,
+            runEventSummary: undefined,
+            routerPolicyVersion: undefined,
+            learningEpoch: undefined,
+            learningLabel: undefined,
+            outcome: 'empty-diff',
+            proposalCreated: false,
+          }),
+        ],
+        readAgentActions: () => [],
+        listOutcomeRecords: () => [],
+        readDecisions: () => [],
+        listAutonomyEvidencePacks: () => [],
+        loadWorkedLedger: () => ({ events: [] }),
+      }),
+    });
+
+    expect(records[0]?.causalCoverage).toMatchObject({
+      trajectoryId: true,
+      routeSnapshot: true,
+      runEventSummary: true,
+      routerPolicyVersion: true,
+      currentRouterPolicyVersion: true,
+      learningEpoch: true,
+      currentLearningEpoch: true,
+      labelAuthoritative: true,
+      currentAuthoritativeLabel: true,
+    });
+    expect(records[1]?.causalCoverage.currentRouterPolicyVersion).toBe(false);
+    expect(records[1]?.causalCoverage.currentAuthoritativeLabel).toBe(false);
+    expect(records[2]?.causalCoverage.currentLearningEpoch).toBe(false);
+    expect(records[2]?.causalCoverage.currentAuthoritativeLabel).toBe(false);
+    expect(records[3]?.causalCoverage).toMatchObject({
+      trajectoryId: false,
+      routeSnapshot: false,
+      runEventSummary: false,
+      routerPolicyVersion: false,
+      learningEpoch: false,
+      labelAuthoritative: false,
+      currentAuthoritativeLabel: false,
+    });
+
+    const summary = summarizeAttemptCoverage(records);
+    expect(summary.causalCoverage).toMatchObject({
+      trajectoryId: { count: 3, rate: 0.75 },
+      routeSnapshot: { count: 3, rate: 0.75 },
+      runEventSummary: { count: 3, rate: 0.75 },
+      routerPolicyVersion: { count: 3, rate: 0.75 },
+      currentRouterPolicyVersion: { count: 2, rate: 0.5 },
+      learningEpoch: { count: 3, rate: 0.75 },
+      currentLearningEpoch: { count: 2, rate: 0.5 },
+      labelAuthoritative: { count: 3, rate: 0.75 },
+      currentAuthoritativeLabel: { count: 1, rate: 0.25 },
+    });
+    expect(summary.causalWeak).toMatchObject({
+      weak: true,
+      minAttempts: 3,
+      threshold: 0.95,
+      labelThreshold: 0.8,
+      reasons: expect.arrayContaining([
+        expect.objectContaining({ kind: 'routeSnapshot', count: 3, rate: 0.75, threshold: 0.95 }),
+        expect.objectContaining({ kind: 'currentAuthoritativeLabel', count: 1, rate: 0.25, threshold: 0.8 }),
+      ]),
+    });
+    expect(summary.causalGaps[0]?.sampleRefs[0]).toMatch(/^attempt:[a-f0-9]{12}$/);
+    expect(JSON.stringify(summary)).not.toContain('traj-complete');
+    expect(JSON.stringify(summary)).not.toContain('prop-complete');
+    expect(JSON.stringify(summary)).not.toContain('old route');
   });
 
   it('does not join by fuzzy title or repo when causal ids differ', () => {
@@ -563,6 +736,7 @@ describe('AttemptRecord coverage', () => {
 
     expect(summary.recent[0]?.ref).toMatch(/^attempt:[a-f0-9]{12}$/);
     expect(summary.gaps[0]?.sampleRefs[0]).toMatch(/^attempt:[a-f0-9]{12}$/);
+    expect(summary.causalGaps[0]?.sampleRefs[0]).toMatch(/^attempt:[a-f0-9]{12}$/);
     expect(serialized).not.toContain(REPO);
     expect(serialized).not.toContain('item-1');
     expect(serialized).not.toContain('prop-1');

@@ -408,6 +408,7 @@ describe('M213 Dashboard SSE — /api/events', () => {
     );
     expect(src).toContain('function renderProposalProductionCard');
     expect(src).toContain('function renderDispatchProductionCard');
+    expect(src).toContain('function renderAttemptCoverageCard');
     expect(src).toContain('function dispatchProductionDiagnosticAttempts');
     expect(src).toContain('function generatedWorkMetric');
     expect(src).toContain('diagnosticReslices');
@@ -423,8 +424,13 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('missionBrief');
     expect(src).toContain("renderProposalProductionCard(f.proposalProduction, 'fleet-card card')");
     expect(src).toContain("renderDispatchProductionCard(f.dispatchProduction, 'fleet-card card')");
+    expect(src).toContain("renderAttemptCoverageCard(f.attemptCoverage, 'fleet-card card')");
     expect(src).toContain("['Generated work', generatedWorkMetric(f.queue?.generatedWork) ?? '—']");
     expect(src).toContain('renderProposalProductionCard(production)');
+    expect(src).toContain('renderAttemptCoverageCard(attemptCoverage)');
+    expect(src).toContain('attemptCoverage.causalCoverage');
+    expect(src).toContain("'Attempt coverage'");
+    expect(src).toContain("'Current labels'");
     expect(src).toContain("controlMetric('No-prop 24h'");
     expect(src).toContain('queue.generatedWork.total ?? 0');
     expect(src).toContain("fdMetricPill('Generated'");
@@ -432,6 +438,7 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("controlMetric('Yield 24h'");
     expect(src).toContain("snap.fleet?.proposalProduction ?? snap.control?.fleet?.proposalProduction");
     expect(src).toContain("snap.fleet?.dispatchProduction ?? snap.control?.fleet?.dispatchProduction");
+    expect(src).toContain("snap.fleet?.attemptCoverage ?? snap.control?.fleet?.attemptCoverage");
     expect(src).toContain("'Proposal production'");
     expect(src).toContain("'Dispatch yield'");
     expect(src).toContain("['Suppressed', suppressed]");

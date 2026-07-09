@@ -2667,6 +2667,46 @@ function renderGlobalWorkspaceCard(workspace, cls = 'ctrl-card card') {
   return card;
 }
 
+function formatCoverageMetric(metric) {
+  if (!metric || typeof metric !== 'object') return '0 (0%)';
+  return `${Number(metric.count ?? 0)} (${formatFleetPercent(metric.rate)})`;
+}
+
+function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
+  if (!attemptCoverage) return null;
+  const attempts = attemptCoverage.attempts ?? 0;
+  const causal = attemptCoverage.causalCoverage ?? {};
+  const joins = attemptCoverage.coverage ?? {};
+  const weak = attemptCoverage.causalWeak ?? {};
+  const topWeak = Array.isArray(weak.reasons) ? weak.reasons[0] : null;
+  const card = el('div', { cls });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Attempt Coverage'),
+    el('span', { cls: 'card-subtitle' }, `${attempts} attempt${attempts === 1 ? '' : 's'} · ${proposalProductionWindowLabel(attemptCoverage)}`)
+  ));
+
+  const body = el('div', { cls: 'card-body' });
+  body.appendChild(infoGrid([
+    ['Actions', formatCoverageMetric(joins.agentAction)],
+    ['Worked', formatCoverageMetric(joins.worked)],
+    ['Decisions', formatCoverageMetric(joins.decision)],
+    ['Evidence', formatCoverageMetric(joins.evidence)],
+    ['Trajectory', formatCoverageMetric(causal.trajectoryId)],
+    ['Route', formatCoverageMetric(causal.routeSnapshot)],
+    ['Run summary', formatCoverageMetric(causal.runEventSummary)],
+    ['Policy', formatCoverageMetric(causal.currentRouterPolicyVersion)],
+    ['Epoch', formatCoverageMetric(causal.currentLearningEpoch)],
+    ['Labels', formatCoverageMetric(causal.currentAuthoritativeLabel)],
+  ]));
+  if (topWeak) {
+    body.appendChild(el('p', { cls: 'hint' },
+      `Weak causal signal: ${topWeak.kind} ${topWeak.count ?? 0}/${attempts} (${formatFleetPercent(topWeak.rate)})`
+    ));
+  }
+  card.appendChild(body);
+  return card;
+}
+
 function contextEfficiencyAccent(posture) {
   const colors = {
     healthy: '#4ade80',
@@ -3019,6 +3059,9 @@ function renderFleet() {
 
   const workspaceCard = renderGlobalWorkspaceCard(f.workspace, 'fleet-card card');
   if (workspaceCard) section.appendChild(workspaceCard);
+
+  const attemptCoverageCard = renderAttemptCoverageCard(f.attemptCoverage, 'fleet-card card');
+  if (attemptCoverageCard) section.appendChild(attemptCoverageCard);
 
   const contextCard = renderContextEfficiencyCard(f.contextEfficiency, 'fleet-card card');
   if (contextCard) section.appendChild(contextCard);
@@ -3403,6 +3446,7 @@ function renderControl() {
   const production = d.fleet?.proposalProduction ?? fleet.proposalProduction ?? null;
   const dispatchProduction = d.fleet?.dispatchProduction ?? fleet.dispatchProduction ?? null;
   const workspace = d.fleet?.workspace ?? fleet.workspace ?? null;
+  const attemptCoverage = d.fleet?.attemptCoverage ?? fleet.attemptCoverage ?? null;
   if (shipReadiness) {
     heroMetrics.appendChild(controlMetric(
       'Ship Ready',
@@ -3501,6 +3545,9 @@ function renderControl() {
 
   const missionWorkspaceCard = renderGlobalWorkspaceCard(workspace);
   if (missionWorkspaceCard) section.appendChild(missionWorkspaceCard);
+
+  const missionAttemptCoverageCard = renderAttemptCoverageCard(attemptCoverage);
+  if (missionAttemptCoverageCard) section.appendChild(missionAttemptCoverageCard);
 
   const missionContextCard = renderContextEfficiencyCard(d.fleet?.contextEfficiency ?? fleet.contextEfficiency ?? null);
   if (missionContextCard) section.appendChild(missionContextCard);
@@ -4656,9 +4703,10 @@ function fdRenderProductionPanel(snap) {
   const production = snap.fleet?.proposalProduction ?? snap.control?.fleet?.proposalProduction ?? null;
   const dispatchProduction = snap.fleet?.dispatchProduction ?? snap.control?.fleet?.dispatchProduction ?? null;
   const workspace = snap.fleet?.workspace ?? snap.control?.fleet?.workspace ?? null;
+  const attemptCoverage = snap.fleet?.attemptCoverage ?? snap.control?.fleet?.attemptCoverage ?? null;
   const contextEfficiency = snap.fleet?.contextEfficiency ?? snap.control?.fleet?.contextEfficiency ?? null;
   const workspaceHasEvents = Number(workspace?.eventCount ?? 0) > 0;
-  const hasProductionData = Boolean(prod || production || dispatchProduction || workspaceHasEvents);
+  const hasProductionData = Boolean(prod || production || dispatchProduction || workspaceHasEvents || attemptCoverage);
   const body = el('div', { cls: 'fd-panel__body' });
 
   if (!hasProductionData) {
@@ -4730,6 +4778,27 @@ function fdRenderProductionPanel(snap) {
     if (attention) {
       const topic = attention.kind === 'repo' ? basenameFromPath(attention.topic ?? '') : attention.topic;
       body.appendChild(el('p', { cls: 'hint' }, `Top attention: ${attention.kind}:${topic} (${attention.weight ?? 0})`));
+    }
+  }
+
+  if (attemptCoverage) {
+    const causal = attemptCoverage.causalCoverage ?? {};
+    const weak = attemptCoverage.causalWeak ?? {};
+    const topWeak = Array.isArray(weak.reasons) ? weak.reasons[0] : null;
+    body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Attempt coverage'));
+    body.appendChild(infoGrid([
+      ['Attempts', attemptCoverage.attempts ?? 0],
+      ['Trajectory', formatCoverageMetric(causal.trajectoryId)],
+      ['Route', formatCoverageMetric(causal.routeSnapshot)],
+      ['Run summary', formatCoverageMetric(causal.runEventSummary)],
+      ['Current policy', formatCoverageMetric(causal.currentRouterPolicyVersion)],
+      ['Current epoch', formatCoverageMetric(causal.currentLearningEpoch)],
+      ['Current labels', formatCoverageMetric(causal.currentAuthoritativeLabel)],
+    ]));
+    if (topWeak) {
+      body.appendChild(el('p', { cls: 'hint' },
+        `Top causal gap: ${topWeak.kind} ${topWeak.count ?? 0}/${attemptCoverage.attempts ?? 0} (${formatFleetPercent(topWeak.rate)})`
+      ));
     }
   }
 

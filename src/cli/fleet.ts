@@ -365,9 +365,28 @@ export function formatFleetStatus(s: FleetStatus): string {
         `decisions ${formatCoverageMetric(attemptCoverage.coverage.decision)}, ` +
         `evidence ${formatCoverageMetric(attemptCoverage.coverage.evidence)}`,
     );
+    lines.push(
+      `  metadata:  trajectory ${formatCoverageMetric(attemptCoverage.causalCoverage.trajectoryId)}, ` +
+        `route ${formatCoverageMetric(attemptCoverage.causalCoverage.routeSnapshot)}, ` +
+        `run ${formatCoverageMetric(attemptCoverage.causalCoverage.runEventSummary)}`,
+    );
+    lines.push(
+      `  policy:    version ${formatCoverageMetric(attemptCoverage.causalCoverage.routerPolicyVersion)}, ` +
+        `current ${formatCoverageMetric(attemptCoverage.causalCoverage.currentRouterPolicyVersion)}, ` +
+        `epoch ${formatCoverageMetric(attemptCoverage.causalCoverage.learningEpoch)}, ` +
+        `current epoch ${formatCoverageMetric(attemptCoverage.causalCoverage.currentLearningEpoch)}`,
+    );
+    lines.push(
+      `  labels:    authoritative ${formatCoverageMetric(attemptCoverage.causalCoverage.labelAuthoritative)}, ` +
+        `current ${formatCoverageMetric(attemptCoverage.causalCoverage.currentAuthoritativeLabel)}`,
+    );
     if (attemptCoverage.gaps.length > 0) {
       const gap = attemptCoverage.gaps[0]!;
       lines.push(`  top gap:   ${gap.kind} missing on ${gap.count} attempt(s)`);
+    }
+    if (attemptCoverage.causalWeak.weak && attemptCoverage.causalWeak.reasons.length > 0) {
+      const reason = attemptCoverage.causalWeak.reasons[0]!;
+      lines.push(`  causal gap:${reason.kind} ${reason.count}/${attemptCoverage.attempts} (${formatPercent(reason.rate)})`);
     }
   }
   lines.push('');
