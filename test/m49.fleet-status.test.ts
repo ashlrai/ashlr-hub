@@ -2354,6 +2354,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const s = await buildFleetStatus(baseConfig());
 
     expect(s.queue.backlogItems).toBe(1);
+    expect(s.queue.generatedWork).toMatchObject({
+      total: 1,
+      selfHeal: 1,
+      proposalRepair: 0,
+      diagnosticReslices: 0,
+      invent: 0,
+    });
     expect(s.queue.repos).toMatchObject({
       enrolled: 1,
       existing: 1,
@@ -2889,6 +2896,32 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       'lane locks:    2 active, 1 stale, 1 handoff, 1 unverified, 2 visible locked',
     );
     expect(out).toContain('lock sample:   stale-in-progress a /repo/a#goal:goal-lane-a');
+  });
+
+  it('renders generated queue work counts compactly', () => {
+    const out = formatFleetStatus({
+      generatedAt: '2026-06-17T00:00:00.000Z',
+      daemon: { running: true, lastTickAt: '2026-06-17T00:00:00.000Z', todaySpentUsd: 0 },
+      backends: [],
+      queue: {
+        backlogItems: 5,
+        eligibleBacklogItems: 4,
+        cooldownItems: 1,
+        pendingItems: 0,
+        generatedWork: {
+          total: 3,
+          selfHeal: 2,
+          proposalRepair: 2,
+          diagnosticReslices: 1,
+          invent: 1,
+        },
+      },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      killed: false,
+    });
+
+    expect(out).toContain('generated:     3 total, 2 self-heal, 2 proposal-repair, 1 no-diff reslice, 1 invent');
   });
 
   it('renders dispatch-yield diagnostic reasons without falling back to raw policy-disabled reasons', () => {

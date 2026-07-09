@@ -24,6 +24,13 @@
 - Commits: local sibling commits are `homebrew-ashlr` `8b71f9a`, `homebrew-phantom` `1ee78a5` (pushed to `origin/main`), and `openclaw-setup` `4c357b9`. `homebrew-ashlr` has no remote configured; `openclaw-setup` already had a pre-existing unpushed commit, so I did not push unrelated work.
 - Fleet coverage: after `bin/ashlr backlog refresh --json`, FleetStatus moved from 8/24 to 11/24 `reposWithExplicitMergeContracts`; remaining contract backlog names are `phantom-secrets`, `stack`, `ashlr-plugin`, `ashlrcode`, `ashlr-workbench`, `ashlr-md`, `morphkit`, `webfetch`, `ashlr-core-efficiency`, `prompt-trackr`, `10:4`, `ashlr WM`, and `ashlr sales pipeline`.
 
+## Current Generated Queue Work Visibility
+- Purpose: the fleet now generates proposal-repair and diagnostic no-diff reslice work, but operators could only infer that by reading individual queue items. FleetStatus now exposes a compact `queue.generatedWork` summary so the command rail can distinguish ordinary backlog from generated repair/invent work.
+- Implementation: `buildFleetStatus()` computes read-only generated work counts from the already-loaded persisted queue snapshot. Counts are metadata-only and grouped by `source:"invent"`, `self-heal`, `proposal-repair`, and `dispatch-no-diff-reslice` tags.
+- CLI: `ashlr fleet status` renders a single generated line with total, self-heal, proposal-repair, no-diff reslice, and invent counts.
+- Regression coverage: `m49.fleet-status` proves stale persisted self-heal queue snapshots produce generated work counts and the CLI formatter renders the compact generated queue line.
+- Verification passed: `npm run typecheck -- --pretty false`; focused `npm run test:ci -- test/m49.fleet-status.test.ts` (50 tests); `git diff --check`; `npm run lint` (known 115-warning baseline, 0 errors); `npm run build`; and `npm audit --audit-level=moderate` (0 vulnerabilities).
+
 ## Current Resource-Aware Learned Target Gate
 - Start state: dirty Hub WIP after comparative learned routing rollout; Entire remains not set up for `master`.
 - Implementation: `recommendRoute()` now accepts optional metadata-only `resourceStates` and filters comparative same-tier learned reroute candidates to `open` or `near` availability when provided. Missing candidates are blocked only in explicit resource-aware calls; direct/legacy learned-router callers without `resourceStates` preserve previous behavior.

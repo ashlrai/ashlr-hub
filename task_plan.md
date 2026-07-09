@@ -1005,3 +1005,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Pushed `homebrew-phantom`; kept `homebrew-ashlr` local because no remote is configured and kept `openclaw-setup` local because it had pre-existing unpushed work.
 - [x] Refreshed Hub backlog/profile cache and confirmed explicit merge contracts increased from 8/24 to 11/24.
 - [x] Commit and push the Hub detector/rollout notes.
+
+## Current Continuation - Generated Queue Work Visibility
+- [x] Rechecked dirty Hub state after merge-contract wave 3 and resumed from the generated-work observability WIP.
+- [x] Cleared completed sidecar agents and redeployed fresh scouts for proposal-yield readiness, merge-contract rollout, Phantom opportunities, and Fleet OS visibility.
+- [x] Add read-only FleetStatus `queue.generatedWork` counts for self-heal, proposal-repair, diagnostic no-diff reslice, and invent work.
+- [x] Render generated queue counts in `ashlr fleet status` so operators can see whether repair work is actually queued.
+- [x] Add focused FleetStatus/CLI formatter regression coverage.
+- [x] Run focused and broad verification.
+- [ ] Commit, push, reload daemon, and smoke live status.
+- [ ] Select and implement the next highest-leverage scout-backed patch.

@@ -113,6 +113,13 @@ export function formatFleetStatus(s: FleetStatus): string {
       lines.push(`  next eligible: ${s.queue.nextEligibleAt}`);
     }
   }
+  if (s.queue.generatedWork) {
+    const g = s.queue.generatedWork;
+    lines.push(
+      `  generated:     ${g.total} total, ${g.selfHeal} self-heal, ` +
+        `${g.proposalRepair} proposal-repair, ${g.diagnosticReslices} no-diff reslice, ${g.invent} invent`,
+    );
+  }
   if (s.queue.repos) {
     const repoCoverage = s.queue.repos;
     lines.push(

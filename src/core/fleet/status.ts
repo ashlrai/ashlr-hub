@@ -477,6 +477,14 @@ export interface FleetQueueNextItem {
   score: number;
 }
 
+export interface FleetQueueGeneratedWorkStatus {
+  total: number;
+  selfHeal: number;
+  proposalRepair: number;
+  diagnosticReslices: number;
+  invent: number;
+}
+
 export interface FleetQueueRepoCoverage {
   enrolled: number;
   existing: number;
@@ -527,6 +535,7 @@ export interface FleetStatus {
     repos?: FleetQueueRepoCoverage;
     next?: FleetQueueNextItem[];
     shared?: FleetSharedQueueStatus;
+    generatedWork?: FleetQueueGeneratedWorkStatus;
   };
   proposals: {
     pending: number;
@@ -595,6 +604,27 @@ function mergeVisibleQueueItems(items: WorkItem[], enrolledRepos: Set<string>): 
     merged.push(item);
   }
   return merged;
+}
+
+function buildQueueGeneratedWorkStatus(items: WorkItem[]): FleetQueueGeneratedWorkStatus | undefined {
+  let selfHeal = 0;
+  let proposalRepair = 0;
+  let diagnosticReslices = 0;
+  let invent = 0;
+  for (const item of items) {
+    if (item.source === 'invent') invent++;
+    if (item.tags.includes('self-heal')) selfHeal++;
+    if (item.tags.includes('proposal-repair')) proposalRepair++;
+    if (item.tags.includes('dispatch-no-diff-reslice')) diagnosticReslices++;
+  }
+  const total = items.filter((item) =>
+    item.source === 'invent' ||
+    item.tags.includes('self-heal') ||
+    item.tags.includes('proposal-repair') ||
+    item.tags.includes('dispatch-no-diff-reslice')
+  ).length;
+  if (total === 0) return undefined;
+  return { total, selfHeal, proposalRepair, diagnosticReslices, invent };
 }
 
 interface FleetQueueEligibility {
@@ -784,6 +814,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let pendingItems = 0;
   let nextEligibleAt: string | null = null;
   let queueRepos: FleetQueueRepoCoverage | undefined;
+  let generatedWork: FleetQueueGeneratedWorkStatus | undefined;
   let enrolledExistingRepos: string[] = [];
   try {
     // Status must be observational. A full buildBacklog() refresh can run
@@ -821,6 +852,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     }
     visibleQueueItems = items;
     backlogItems = items.length;
+    generatedWork = buildQueueGeneratedWorkStatus(items);
     const byRepo = new Map<string, number>();
     const byTier = new Map<StrategicTier, { repos: Set<string>; items: number }>();
     for (const item of items) {
@@ -1037,6 +1069,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ...(queueRepos !== undefined ? { repos: queueRepos } : {}),
       ...(nextQueueItems.length > 0 ? { next: nextQueueItems } : {}),
       ...(sharedQueue !== undefined ? { shared: sharedQueue } : {}),
+      ...(generatedWork !== undefined ? { generatedWork } : {}),
     },
     proposals: { pending, frontierPending, ...(awaitingHostMerge > 0 ? { awaitingHostMerge } : {}), applied },
     merges: { recent: mergesRecent },
