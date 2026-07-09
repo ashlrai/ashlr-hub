@@ -1072,4 +1072,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Render causal coverage in CLI, Fleet, Mission Control, and Fleet Dashboard production panels.
 - [x] Add focused attempt-record, FleetStatus, CLI, and web surface regression coverage.
 - [x] Run focused tests, typecheck, and browser JS syntax check.
-- [ ] Run final lint, build, audit, diff, commit, push, reload daemon, and smoke live status.
+- [x] Run final lint, build, audit, diff, commit, push, reload daemon, and smoke live status.
