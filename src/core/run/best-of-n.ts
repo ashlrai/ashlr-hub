@@ -554,7 +554,7 @@ export async function runBestOfN(
       // Score via judge
       if (judgeProposal) {
         try {
-          verdict = await judgeProposal(proposal, cfg, judgeClient);
+          verdict = await judgeProposal(proposal, cfg, judgeClient, { recordTrace: false });
           score = scoreVerdict(verdict);
         } catch {
           // Judge failure — candidate stays with score 0

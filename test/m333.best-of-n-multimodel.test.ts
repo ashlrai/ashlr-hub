@@ -98,6 +98,7 @@ interface Harness {
   captureSandboxedProposal?: ReturnType<typeof vi.fn>;
   createSandbox?: ReturnType<typeof vi.fn>;
   removeSandbox?: ReturnType<typeof vi.fn>;
+  judgeProposal: ReturnType<typeof vi.fn>;
   filedProposals?: Map<string, import('../src/core/types.js').Proposal>;
 }
 
@@ -199,8 +200,9 @@ async function harness(opts: {
       removeSandbox,
     }));
   }
+  const judgeProposal = judgeMockWithScores(opts.judgeScores ?? [4, 4, 4]);
   vi.doMock('../src/core/fleet/manager.js', () => ({
-    judgeProposal: judgeMockWithScores(opts.judgeScores ?? [4, 4, 4]),
+    judgeProposal,
   }));
   const setStatus = vi.fn();
   vi.doMock('../src/core/inbox/store.js', () => ({
@@ -223,6 +225,7 @@ async function harness(opts: {
     runBestOfN: mod.runBestOfN,
     setStatus,
     recordBestOfN,
+    judgeProposal,
     ...(opts.draftMode ? { captureSandboxedProposal, createSandbox, removeSandbox, filedProposals } : {}),
   };
 }
@@ -416,6 +419,11 @@ describe('M333 — file-once proposal capture', () => {
     expect(h.captureSandboxedProposal).toHaveBeenCalledTimes(4);
     expect(h.captureSandboxedProposal?.mock.calls.filter((call) => call[3]?.['draftOnly'] === true)).toHaveLength(3);
     expect(h.captureSandboxedProposal?.mock.calls.filter((call) => call[3]?.['draftOnly'] !== true)).toHaveLength(1);
+    expect(h.judgeProposal.mock.calls.map((call) => call[3])).toEqual([
+      { recordTrace: false },
+      { recordTrace: false },
+      { recordTrace: false },
+    ]);
     expect(h.filedProposals?.size).toBe(1);
     expect(h.filedProposals?.get(winnerPid)?.diff).toBe('DRAFT_DIFF_1');
     expect(h.setStatus).not.toHaveBeenCalled();

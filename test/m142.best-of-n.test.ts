@@ -486,6 +486,7 @@ describe('M142 — daemon routing alignment', () => {
       expect.objectContaining({ diff: 'REAL_PROPOSAL_DIFF' }),
       expect.any(Object),
       expect.any(Object),
+      { recordTrace: false },
     );
     expect(result.winner?.diff).toBe('REAL_PROPOSAL_DIFF');
   });

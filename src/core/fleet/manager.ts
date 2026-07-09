@@ -55,6 +55,15 @@ export interface ManagerVerdict {
   wouldMerge: boolean;
 }
 
+/** Optional controls for callers that use the judge as ephemeral selection signal. */
+export interface JudgeProposalOptions {
+  /**
+   * When false, suppress the durable judge trace. Use only for candidate
+   * selection where no real proposal/outcome will ever exist.
+   */
+  recordTrace?: boolean;
+}
+
 /** Full oversight report produced by runManager. */
 export interface ManagerReport {
   /** ISO timestamp. */
@@ -483,6 +492,7 @@ export async function judgeProposal(
   proposal: Proposal,
   cfg: AshlrConfig,
   client: { complete: (system: string, user: string) => Promise<string> },
+  options: JudgeProposalOptions = {},
 ): Promise<ManagerVerdict> {
   const fallback = (): ManagerVerdict => ({
     proposalId: proposal.id,
@@ -578,15 +588,19 @@ export async function judgeProposal(
   }
 
 
-  // M141: Record full judge trace for calibration / distillation.
-  recordJudgeTrace({
-    proposalId: proposal.id,
-    judgeEngine: (client as { model?: string }).model ?? 'unknown',
-    verdict,
-    scores: { value, correctness, scope, alignment },
-    fullReasoning,
-    promptContext: `${proposal.title} | ${proposal.kind} | engine:${proposal.engineModel ?? 'unknown'}${specCtx ? ' | vision:true' : ''}`,
-  });
+  // M141: Record full judge trace for calibration / distillation. Best-of-N
+  // draft candidates opt out because their proposal ids are intentionally
+  // ephemeral and will never receive real-world outcomes.
+  if (options.recordTrace !== false) {
+    recordJudgeTrace({
+      proposalId: proposal.id,
+      judgeEngine: (client as { model?: string }).model ?? 'unknown',
+      verdict,
+      scores: { value, correctness, scope, alignment },
+      fullReasoning,
+      promptContext: `${proposal.title} | ${proposal.kind} | engine:${proposal.engineModel ?? 'unknown'}${specCtx ? ' | vision:true' : ''}`,
+    });
+  }
 
   return { proposalId: proposal.id, verdict, value, correctness, scope, alignment, rationale, wouldMerge };
 }

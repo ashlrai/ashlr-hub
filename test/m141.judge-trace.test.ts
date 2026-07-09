@@ -655,6 +655,23 @@ describe('m141 — reasoning-before-verdict: verdict JSON still parseable', () =
     expect(verdict.rationale).toBe('Standard review.');
   });
 
+  it('judgeProposal can suppress durable trace recording for ephemeral candidate scoring', async () => {
+    const client = {
+      model: 'test-ephemeral-judge',
+      complete: vi.fn().mockResolvedValue(
+        '{"value":4,"correctness":4,"scope":2,"alignment":4,"verdict":"review","rationale":"Selection-only score."}',
+      ),
+    };
+
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const { readJudgeTraces } = await import('../src/core/fleet/judge-trace.js');
+    const proposal = makeProposal({ id: 'draft-selection-only' });
+    const verdict = await judgeProposal(proposal, {} as never, client, { recordTrace: false });
+
+    expect(verdict.verdict).toBe('review');
+    expect(readJudgeTraces({ proposalId: proposal.id })).toHaveLength(0);
+  });
+
   it('reasoning in JSON-embedded prose is still correctly extracted by extractJson', async () => {
     // Model emits prose + reasoning block + JSON (in that order)
     const rawResponse = [

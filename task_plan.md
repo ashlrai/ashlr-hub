@@ -817,3 +817,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Focused verification passed: Best-of-N/model-stats suite (26 tests), broader adjacent proposal-production suite (177 tests), and typecheck.
 - [x] Broad gates passed: diff check, lint, build, audit, invariants, and full CI (439 files, 9,046 passed tests, 7 skipped).
 - [x] Commit and push `ea3701f`, reload launchd daemon, and smoke live FleetStatus.
+
+## Current Continuation - Ephemeral Best-of-N Judge Traces
+- [x] Rechecked clean pushed state after Best-of-N file-once rollout and confirmed live daemon/fleet health.
+- [x] Deployed sidecar scouts for durable judge/taste side effects and downstream learning/model-stat joins.
+- [x] Added an explicit `JudgeProposalOptions.recordTrace` switch so selection-only judging can opt out of durable judge traces.
+- [x] Routed Best-of-N candidate scoring through `recordTrace:false`, keeping real manager/automerge proposal judging durable by default.
+- [x] Added regression coverage that ephemeral judging leaves no judge-trace row and Best-of-N candidate scoring passes the trace-suppression option.
+- [x] Focused verification passed: `m141`, `m333`, `m142`, and `m335` (62 tests), plus typecheck and diff check.
+- [x] Adjacent verification passed: manager, judge-trace, Best-of-N, taste critic, model ROI/stats, automerge, and verification-gate suite (217 tests).
+- [x] Broad gates passed: lint, build, audit, invariants, diff check, and full CI (439 files, 9,047 passed tests, 7 skipped).
+- [ ] Commit, push, reload daemon, and smoke live FleetStatus.
