@@ -2850,7 +2850,7 @@ function renderAutonomousShipReadinessCard(readiness, cls = 'ctrl-card card') {
         el('span', {
           cls: 'fleet-quota',
           style: `color:${sourceStatusAccent(source.status)}`,
-        }, source.badge ?? source.status ?? 'unknown')
+        }, source.sourceQuality?.badge ?? source.badge ?? source.status ?? 'unknown')
       ));
     }
     body.appendChild(list);
@@ -4189,6 +4189,13 @@ async function loadFleetDashboard() {
 function fdReadinessDataText(readiness) {
   if (!readiness) return 'unknown';
   const freshness = readiness.freshness?.overall ?? 'unknown';
+  const quality = readiness.sourceQualitySummary ?? {};
+  if (Object.keys(quality).length > 0) {
+    const zero = quality['healthy-zero'] ?? 0;
+    const stale = quality['stale-source'] ?? 0;
+    const missing = quality['missing-source'] ?? 0;
+    return `${freshness} · ${zero} healthy-zero / ${stale} stale / ${missing} missing`;
+  }
   const summary = readiness.sourceSummary ?? {};
   const healthy = summary.healthy ?? 0;
   const degraded = summary.degraded ?? 0;

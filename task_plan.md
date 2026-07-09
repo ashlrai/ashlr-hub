@@ -686,4 +686,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add Phantom agent-report actionability from existing count-only rollups plus JSON schema support for `phantom.agentReportRollup`.
 - [x] Focused verification passed: typecheck plus combined `m78/m307/m48/m153/m86/m348/m2/m49` suites.
 - [x] Broader smoke passed: lint, build, audit, invariants, schema parse/diff check, and full `npm run test:ci` (438 files, 8,999 passed, 7 skipped).
-- [ ] Commit, push, reload daemon, smoke production FleetStatus, and continue.
+- [x] Commit and push `6d26a6d`, reload/kickstart launchd daemon, and smoke production FleetStatus.
+
+## Current Continuation - Sample-Gated Yield And Service Recovery
+- [x] Deployed parallel scouts for sample-gated yield diagnostics, FleetStatus data-quality badges, and daemon service recovery.
+- [x] Add structured `dispatchYieldDiagnostics` with sample gating, policy-disabled separation, same-tier-only recommendations, and config-aware low-yield threshold.
+- [x] Surface dispatch-yield diagnosis in CLI status and keep weak-yield next actions tied to actionable samples only.
+- [x] Add daemon service `ensureRunning()` and wire daemon install, fleet resume, web service repair, and web fleet resume through best-effort OS-service activation.
+- [x] Add first-class autonomous ship readiness source-quality badges and summaries so stale/missing/degraded sources do not look like healthy zeros.
+- [x] Focused verification passed: typecheck, `node --check` for the dashboard bundle, and status/service/control/dashboard focused suites.
+- [x] Broad gates passed: lint, build, audit, invariants, diff check, and full `npm run test:ci` (438 files, 9,005 passed, 7 skipped).
+- [ ] Commit, push, reload daemon, smoke production state, and continue with the next lane.

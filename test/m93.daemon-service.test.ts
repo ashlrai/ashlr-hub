@@ -15,8 +15,7 @@
  *    are stubbed in install/uninstall tests to prevent disk side effects.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as os from 'node:os';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 
@@ -43,6 +42,7 @@ vi.mock('node:fs', async (importOriginal) => {
 
 import * as cp from 'node:child_process';
 import {
+  ensureRunning,
   generateServiceDefinition,
   install,
   uninstall,
@@ -525,5 +525,99 @@ describe('serviceStatus() — mocked OS query output', () => {
     expect(() => serviceStatus(baseOpts('darwin'))).not.toThrow();
     expect(() => serviceStatus(baseOpts('linux'))).not.toThrow();
     expect(() => serviceStatus(baseOpts('win32'))).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. ensureRunning() — installed service activation without reinstalling
+// ---------------------------------------------------------------------------
+
+describe('ensureRunning() — mocked OS activation', () => {
+  const spawnSyncMock = cp.spawnSync as ReturnType<typeof vi.fn>;
+  const existsSyncMock = fs.existsSync as ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    existsSyncMock.mockReturnValue(true);
+  });
+
+  it('darwin: kickstarts an installed launchd job that has no PID', async () => {
+    spawnSyncMock
+      .mockReturnValueOnce({
+        status: 0,
+        stdout: '{\n\t"Label" = "ai.ashlr.daemon";\n\t"LastExitStatus" = 0;\n}',
+        stderr: '',
+      })
+      .mockReturnValueOnce({ status: 0, stdout: '', stderr: '' })
+      .mockReturnValueOnce({
+        status: 0,
+        stdout: '{\n\t"PID" = 12345;\n\t"Label" = "ai.ashlr.daemon";\n}',
+        stderr: '',
+      });
+
+    const status = await ensureRunning(baseOpts('darwin'));
+
+    expect(status.running).toBe(true);
+    expect(spawnSyncMock).toHaveBeenCalledWith(
+      'launchctl',
+      ['kickstart', '-k', expect.stringMatching(/^gui\/\d+\/ai\.ashlr\.daemon$/)],
+      expect.objectContaining({ encoding: 'utf8', timeout: 15_000 }),
+    );
+  });
+
+  it('darwin: does not kickstart when launchd already has a PID', async () => {
+    spawnSyncMock.mockReturnValueOnce({
+      status: 0,
+      stdout: '{\n\t"PID" = 12345;\n\t"Label" = "ai.ashlr.daemon";\n}',
+      stderr: '',
+    });
+
+    const status = await ensureRunning(baseOpts('darwin'));
+
+    expect(status.running).toBe(true);
+    expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('linux: starts an inactive installed user unit', async () => {
+    spawnSyncMock
+      .mockReturnValueOnce({ status: 3, stdout: 'inactive\n', stderr: '' })
+      .mockReturnValueOnce({ status: 0, stdout: '', stderr: '' })
+      .mockReturnValueOnce({ status: 0, stdout: 'active\n', stderr: '' });
+
+    const status = await ensureRunning(baseOpts('linux'));
+
+    expect(status.running).toBe(true);
+    expect(spawnSyncMock).toHaveBeenCalledWith(
+      'systemctl',
+      ['--user', 'start', 'ashlr-daemon'],
+      expect.objectContaining({ encoding: 'utf8', timeout: 15_000 }),
+    );
+  });
+
+  it('win32: runs an installed scheduled task when stopped', async () => {
+    spawnSyncMock
+      .mockReturnValueOnce({ status: 1, stdout: '', stderr: 'not running' })
+      .mockReturnValueOnce({ status: 0, stdout: '', stderr: '' })
+      .mockReturnValueOnce({ status: 0, stdout: '"AshlrDaemon","Ready","N/A"\r\n', stderr: '' });
+
+    const status = await ensureRunning(baseOpts('win32'));
+
+    expect(status.running).toBe(true);
+    expect(spawnSyncMock).toHaveBeenCalledWith(
+      'schtasks',
+      ['/Run', '/TN', 'AshlrDaemon'],
+      expect.objectContaining({ encoding: 'utf8', timeout: 15_000 }),
+    );
+  });
+
+  it('does not start when the service is not installed', async () => {
+    existsSyncMock.mockReturnValue(false);
+    spawnSyncMock.mockReturnValueOnce({ status: 1, stdout: '', stderr: 'Could not find service' });
+
+    const status = await ensureRunning(baseOpts('darwin'));
+
+    expect(status.installed).toBe(false);
+    expect(status.running).toBe(false);
+    expect(spawnSyncMock).toHaveBeenCalledTimes(1);
   });
 });

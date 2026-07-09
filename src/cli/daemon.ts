@@ -443,11 +443,17 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
 async function importServiceManager(): Promise<{
   install: (opts: ServiceInstallOptions) => Promise<void>;
   uninstall: (opts: ServiceInstallOptions) => Promise<void>;
+  ensureRunning: (opts: ServiceInstallOptions) => Promise<ServiceStatusResult>;
   serviceStatus: (opts: ServiceInstallOptions) => ServiceStatusResult;
 } | null> {
   try {
     const mod = await import('../core/daemon/service.js');
-    return { install: mod.install, uninstall: mod.uninstall, serviceStatus: mod.serviceStatus };
+    return {
+      install: mod.install,
+      uninstall: mod.uninstall,
+      ensureRunning: mod.ensureRunning,
+      serviceStatus: mod.serviceStatus,
+    };
   } catch {
     return null;
   }
@@ -488,7 +494,7 @@ async function cmdDaemonInstall(args: string[]): Promise<number> {
     return 1;
   }
 
-  const status = svcMod.serviceStatus(opts);
+  const status = autostart ? await svcMod.ensureRunning(opts) : svcMod.serviceStatus(opts);
   console.log('');
   console.log(col.green('  ✓ daemon service installed') + col.dim(` [${status.platformSpec}]`));
   if (status.serviceFilePath) {
@@ -496,6 +502,7 @@ async function cmdDaemonInstall(args: string[]): Promise<number> {
   }
   if (autostart) {
     console.log(col.dim('  auto-start on login: enabled'));
+    console.log(col.dim(`  service state: ${status.running ? 'running' : 'installed but stopped'}`));
   }
   console.log(col.dim('  Use `ashlr daemon service-status` to verify the OS service state.'));
   console.log('');

@@ -73,6 +73,10 @@ interface CachedServiceStatusEntry {
 
 let cachedServiceStatus: CachedServiceStatusEntry | null = null;
 
+function clearServiceStatusCache(): void {
+  cachedServiceStatus = null;
+}
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -382,6 +386,7 @@ export async function install(opts: ServiceInstallOptions = {}): Promise<void> {
       );
     }
   }
+  clearServiceStatusCache();
 }
 
 /**
@@ -402,6 +407,32 @@ export async function uninstall(opts: ServiceInstallOptions = {}): Promise<void>
   if (fs.existsSync(def.filePath)) {
     fs.unlinkSync(def.filePath);
   }
+  clearServiceStatusCache();
+}
+
+/**
+ * Best-effort service activation for already-installed daemon services.
+ *
+ * This intentionally does not install a missing service and does not change the
+ * daemon kill switch. It closes the common gap where a service was loaded while
+ * the fleet was paused, exited cleanly, and then needed a kick after resume.
+ */
+export async function ensureRunning(opts: ServiceInstallOptions = {}): Promise<ServiceStatusResult> {
+  const before = serviceStatus(opts);
+  if (!before.installed || before.running) return before;
+
+  const platform = (opts.platform ?? process.platform) as Platform;
+  if (platform === 'darwin') {
+    const uid = typeof process.getuid === 'function' ? process.getuid() : os.userInfo().uid;
+    runCmd(['launchctl', 'kickstart', '-k', `gui/${uid}/ai.ashlr.daemon`]);
+  } else if (platform === 'linux') {
+    runCmd(['systemctl', '--user', 'start', 'ashlr-daemon']);
+  } else if (platform === 'win32') {
+    runCmd(['schtasks', '/Run', '/TN', 'AshlrDaemon']);
+  }
+
+  clearServiceStatusCache();
+  return serviceStatus(opts);
 }
 
 /**

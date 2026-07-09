@@ -72,7 +72,7 @@ import { recall } from '../genome/recall.js';
 import { listProposals, loadProposal, setStatus } from '../inbox/store.js';
 // M24: read-only daemon state endpoint.
 import { loadDaemonState } from '../daemon/state.js';
-import { install as installDaemonService, serviceStatus } from '../daemon/service.js';
+import { ensureRunning as ensureDaemonServiceRunning, install as installDaemonService, serviceStatus } from '../daemon/service.js';
 import { daemonServiceInstallOptions } from '../daemon/service-config.js';
 import { buildFleetStatus } from '../fleet/status.js';
 // M61: Mission Control aggregator.
@@ -818,7 +818,7 @@ export async function handleApi(
       try {
         const opts = daemonServiceInstallOptions(cfg, { autostart: true });
         await installDaemonService(opts);
-        const service = serviceStatus(opts);
+        const service = await ensureDaemonServiceRunning(opts);
         sendJson(res, 200, { ok: true, action: 'repair', service });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -843,10 +843,19 @@ export async function handleApi(
 
       const paused = path.endsWith('/pause');
       setKill(paused);
+      let service: ReturnType<typeof serviceStatus> | undefined;
+      if (!paused) {
+        try {
+          service = await ensureDaemonServiceRunning(daemonServiceInstallOptions(cfg, { autostart: true }));
+        } catch {
+          service = undefined;
+        }
+      }
       const fleet = await buildFleetStatus(cfg);
       sendJson(res, 200, {
         ok: true,
         action: paused ? 'pause' : 'resume',
+        ...(service ? { service } : {}),
         fleet,
       });
       return true;

@@ -32,6 +32,7 @@ import type { AshlrConfig } from '../core/types.js';
 import type { AuditEntry } from '../core/types.js';
 import type { FleetStatus } from '../core/fleet/status.js';
 import type { ResourceStrategyReport } from '../core/autonomy/resource-strategy.js';
+import { daemonServiceInstallOptions } from '../core/daemon/service-config.js';
 import { makeColors, isTty } from './ui.js';
 
 const { bold, dim, green, red, yellow, cyan } = makeColors(isTty());
@@ -241,6 +242,9 @@ export function formatFleetStatus(s: FleetStatus): string {
     );
     const attemptShape = formatAttemptShape(dispatchProduction.attemptShape);
     if (attemptShape) lines.push(`  shape:     ${attemptShape}`);
+    if (s.dispatchYieldDiagnostics) {
+      lines.push(`  diagnosis: ${formatDispatchYieldDiagnostics(s.dispatchYieldDiagnostics)}`);
+    }
     if (dispatchProduction.byBackend.length > 0) {
       lines.push(
         `  backends:  ${dispatchProduction.byBackend.slice(0, 3).map(formatDispatchYieldBucket).join('; ')}`,
@@ -545,7 +549,7 @@ function formatReadinessSources(
   if (!Array.isArray(sources) || sources.length === 0) return 'unavailable';
   return sources
     .slice(0, 8)
-    .map((source) => `${source.id}:${source.badge}`)
+    .map((source) => `${source.id}:${source.sourceQuality?.badge ?? source.badge}`)
     .join(', ');
 }
 
@@ -580,6 +584,26 @@ function formatAttemptShape(shape: NonNullable<FleetStatus['dispatchProduction']
   if (total <= 0) return '';
   return `no-diff ${shape.backendNoDiff ?? 0}, gate/capture ${shape.captureOrGateBlocked ?? 0}, ` +
     `repairs ${shape.repairAttempts ?? 0}, policy-off ${shape.policyDisabled ?? 0}`;
+}
+
+function formatDispatchYieldDiagnostics(
+  diagnostic: NonNullable<FleetStatus['dispatchYieldDiagnostics']>,
+): string {
+  const candidate = diagnostic.primaryCandidate;
+  const subject = candidate?.backend
+    ? `${candidate.backend}${candidate.model && candidate.model !== 'default' ? `:${candidate.model}` : ''}`
+    : candidate?.key ?? 'fleet';
+  const attempts = candidate?.diagnosticAttempts ?? diagnostic.diagnosticAttempts;
+  const proposals = candidate?.proposalsCreated ?? diagnostic.proposalsCreated;
+  const rate = candidate?.proposalRate ?? diagnostic.proposalRate;
+  const action = diagnostic.action === 'route-same-tier-alternative'
+    ? 'same-tier reroute'
+    : diagnostic.action === 'tighten-context-or-reslice'
+      ? 'tighten context/reslice'
+      : diagnostic.action === 'collect-more-samples'
+        ? 'collect more samples'
+        : 'keep routing';
+  return `${diagnostic.verdict} · ${subject} ${proposals}/${attempts} ${formatPercent(rate)} · ${action}`;
 }
 
 function formatContextRisk(
@@ -920,6 +944,7 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
 // ---------------------------------------------------------------------------
 
 async function setKillSwitch(on: boolean): Promise<number> {
+  let serviceState: string | null = null;
   try {
     const { setKill } = await import('../core/sandbox/policy.js');
     setKill(on);
@@ -931,6 +956,23 @@ async function setKillSwitch(on: boolean): Promise<number> {
     return 1;
   }
 
+  if (!on) {
+    try {
+      const cfg = await loadCfg();
+      if (cfg) {
+        const { ensureRunning } = await import('../core/daemon/service.js');
+        const service = await ensureRunning(daemonServiceInstallOptions(cfg, { autostart: true }));
+        serviceState = service.installed
+          ? service.running
+            ? `${service.platformSpec} running`
+            : `${service.platformSpec} installed but stopped`
+          : 'service not installed';
+      }
+    } catch {
+      serviceState = null;
+    }
+  }
+
   console.log('');
   if (on) {
     console.log(green('  ✓ fleet paused') + dim(' — kill switch engaged.'));
@@ -939,6 +981,7 @@ async function setKillSwitch(on: boolean): Promise<number> {
   } else {
     console.log(green('  ✓ fleet resumed') + dim(' — kill switch released.'));
     console.log(dim('  The daemon may dispatch again on its next tick (if running).'));
+    if (serviceState) console.log(dim(`  daemon service: ${serviceState}`));
   }
   console.log('');
   return 0;

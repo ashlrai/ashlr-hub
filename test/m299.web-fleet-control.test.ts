@@ -14,11 +14,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as http from 'node:http';
 
 const serviceMocks = vi.hoisted(() => ({
+  ensureRunning: vi.fn(),
   install: vi.fn(),
   serviceStatus: vi.fn(),
 }));
 
 vi.mock('../src/core/daemon/service.js', () => ({
+  ensureRunning: serviceMocks.ensureRunning,
   install: serviceMocks.install,
   serviceStatus: serviceMocks.serviceStatus,
   serviceStatusCached: serviceMocks.serviceStatus,
@@ -36,8 +38,15 @@ beforeEach(() => {
   expect.hasAssertions();
   fx = makeFixture();
   openHandles = [];
+  serviceMocks.ensureRunning.mockReset();
   serviceMocks.install.mockReset();
   serviceMocks.serviceStatus.mockReset();
+  serviceMocks.ensureRunning.mockResolvedValue({
+    installed: true,
+    running: true,
+    platformSpec: 'launchd',
+    serviceFilePath: '/tmp/ai.ashlr.daemon.plist',
+  });
   serviceMocks.serviceStatus.mockReturnValue({
     installed: true,
     running: true,
@@ -146,6 +155,7 @@ describe('POST /api/fleet/pause|resume', () => {
     expect(paused.statusCode).toBe(200);
     expect(killSwitchOn()).toBe(true);
     expect((JSON.parse(paused.body) as { ok: boolean; fleet: { killed: boolean } }).fleet.killed).toBe(true);
+    expect(serviceMocks.ensureRunning).not.toHaveBeenCalled();
 
     const fleetPaused = await request('GET', `${h.url}/api/fleet`, h.port);
     expect(fleetPaused.statusCode).toBe(200);
@@ -179,7 +189,19 @@ describe('POST /api/fleet/pause|resume', () => {
     );
     expect(resumed.statusCode).toBe(200);
     expect(killSwitchOn()).toBe(false);
-    expect((JSON.parse(resumed.body) as { ok: boolean; fleet: { killed: boolean } }).fleet.killed).toBe(false);
+    const resumedBody = JSON.parse(resumed.body) as {
+      ok: boolean;
+      service?: { installed: boolean; running: boolean };
+      fleet: { killed: boolean };
+    };
+    expect(resumedBody.fleet.killed).toBe(false);
+    expect(resumedBody.service).toMatchObject({ installed: true, running: true });
+    expect(serviceMocks.ensureRunning).toHaveBeenCalledWith({
+      budget: 1,
+      intervalMs: 100,
+      parallel: 2,
+      autostart: true,
+    });
 
     const fleetResumed = await request('GET', `${h.url}/api/fleet`, h.port);
     expect(fleetResumed.statusCode).toBe(200);
@@ -289,6 +311,12 @@ describe('GET/POST /api/daemon/service', () => {
 
     expect(res.statusCode).toBe(200);
     expect(serviceMocks.install).toHaveBeenCalledWith({
+      budget: 7,
+      intervalMs: 900_000,
+      parallel: 3,
+      autostart: true,
+    });
+    expect(serviceMocks.ensureRunning).toHaveBeenCalledWith({
       budget: 7,
       intervalMs: 900_000,
       parallel: 3,

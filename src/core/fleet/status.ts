@@ -262,6 +262,21 @@ export type FleetAutonomousShipReadinessVerdict = 'ready' | 'blocked' | 'degrade
 export type FleetAutonomousShipReadinessConfidence = 'high' | 'medium' | 'low';
 export type FleetReadinessSourceStatus = 'healthy' | 'degraded' | 'blocked' | 'unavailable' | 'unknown';
 export type FleetReadinessFreshness = 'fresh' | 'stale' | 'unknown' | 'not-applicable';
+export type FleetReadinessSourceQualityBadge =
+  | 'healthy-source'
+  | 'healthy-zero'
+  | 'degraded-source'
+  | 'missing-source'
+  | 'stale-source'
+  | 'unknown-source';
+
+export interface FleetReadinessSourceQuality {
+  badge: FleetReadinessSourceQualityBadge;
+  label: string;
+  empty: boolean;
+  sourcePresent: boolean;
+  detail: string;
+}
 
 export interface FleetReadinessSourceHealth {
   id: 'daemon' | 'guard' | 'auto-merge' | 'queue' | 'resources' | 'direction';
@@ -272,6 +287,7 @@ export interface FleetReadinessSourceHealth {
   observedAt: string | null;
   ageMs: number | null;
   detail: string;
+  sourceQuality?: FleetReadinessSourceQuality;
 }
 
 export interface FleetAutonomousShipReadinessBlocker {
@@ -298,6 +314,7 @@ export interface FleetAutonomousShipReadinessStatus {
   primaryAction: FleetNextAction | null;
   sources: FleetReadinessSourceHealth[];
   sourceSummary: Record<FleetReadinessSourceStatus, number>;
+  sourceQualitySummary?: Record<FleetReadinessSourceQualityBadge, number>;
 }
 
 export interface FleetMissionBriefEvidence {
@@ -354,6 +371,53 @@ export interface FleetProposalProductionStatus {
   skipReasons: FleetProposalProductionReasonSummary[];
   recentNoProposalDispatches: FleetProposalProductionDispatchSummary[];
   recentDiagnosticNoProposalDispatches: FleetProposalProductionDispatchSummary[];
+}
+
+export type FleetDispatchYieldDiagnosticVerdict =
+  | 'actionable'
+  | 'healthy'
+  | 'insufficient-sample'
+  | 'policy-suppressed';
+
+export type FleetDispatchYieldDiagnosticAction =
+  | 'route-same-tier-alternative'
+  | 'tighten-context-or-reslice'
+  | 'collect-more-samples'
+  | 'keep-routing';
+
+export interface FleetDispatchYieldDiagnosticCandidate {
+  scope: 'fleet' | 'backend' | 'backend-model';
+  key: string;
+  backend?: EngineId | null;
+  model?: string | null;
+  diagnosticAttempts: number;
+  proposalsCreated: number;
+  noProposal: number;
+  proposalRate: number;
+  policyDisabled: number;
+  verdict: FleetDispatchYieldDiagnosticVerdict;
+  action: FleetDispatchYieldDiagnosticAction;
+  sameTierOnly: boolean;
+  topReason?: string;
+  attemptShape?: DispatchProductionYieldSummary['attemptShape'];
+}
+
+export interface FleetDispatchYieldDiagnostics {
+  windowHours: number;
+  minAttempts: number;
+  lowYieldRate: number;
+  diagnosticAttempts: number;
+  proposalsCreated: number;
+  proposalRate: number;
+  policyDisabled: number;
+  verdict: FleetDispatchYieldDiagnosticVerdict;
+  action: FleetDispatchYieldDiagnosticAction;
+  sameTierOnly: boolean;
+  recommendation: string;
+  topReason?: string;
+  attemptShape?: DispatchProductionYieldSummary['attemptShape'];
+  primaryCandidate?: FleetDispatchYieldDiagnosticCandidate;
+  candidates: FleetDispatchYieldDiagnosticCandidate[];
 }
 
 export interface FleetQueueNextItem {
@@ -447,6 +511,8 @@ export interface FleetStatus {
   proposalProduction?: FleetProposalProductionStatus;
   /** Durable 24h dispatch-production yield summary from the append-only ledger. */
   dispatchProduction?: DispatchProductionYieldSummary;
+  /** Sample-gated diagnosis of dispatch-production yield; no raw prompts/diffs/stdout. */
+  dispatchYieldDiagnostics?: FleetDispatchYieldDiagnostics;
   /** Durable 24h agent-action global workspace summary from append-only telemetry. */
   workspace?: AgentWorkspaceStatus;
   /** Read-only context discipline signal for long-running multi-agent work. */
@@ -880,7 +946,10 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       limit: 1200,
       limitPerDimension: 8,
     });
-    if (dispatchProduction) status.dispatchProduction = dispatchProduction;
+    if (dispatchProduction) {
+      status.dispatchProduction = dispatchProduction;
+      status.dispatchYieldDiagnostics = buildDispatchYieldDiagnostics(dispatchProduction, cfg);
+    }
   } catch {
     // Optional history/analytics surface only. Fleet status must stay read-only
     // and available even when the append-only ledger is absent or corrupt.
@@ -1302,6 +1371,12 @@ function proposalProductionDiagnosis(production: FleetProposalProductionStatus):
 const MIN_DISPATCH_YIELD_ACTION_ATTEMPTS = 3;
 const LOW_DISPATCH_YIELD_ACTION_RATE = 0.2;
 
+function configuredLowDispatchYieldRate(cfg: AshlrConfig): number {
+  const raw = cfg.foundry?.intelligence?.minProposalYieldRate;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return LOW_DISPATCH_YIELD_ACTION_RATE;
+  return Math.max(0, Math.min(1, raw));
+}
+
 function formatActionPercent(rate: number): string {
   if (!Number.isFinite(rate)) return '0%';
   return `${Math.round(Math.max(0, Math.min(1, rate)) * 100)}%`;
@@ -1312,11 +1387,21 @@ interface DiagnosticDispatchYieldAction {
   backend?: EngineId | null;
 }
 
+function diagnosticPolicyDisabled(
+  value: Pick<DispatchProductionYieldSummary, 'outcomes' | 'attemptShape'>,
+): number {
+  return Math.max(
+    value.outcomes.proposalDisabled,
+    value.attemptShape?.policyDisabled ?? 0,
+  );
+}
+
 function diagnosticAttemptsForDispatchBucket(bucket: DispatchProductionYieldBucket): number {
-  return Math.max(0, bucket.attempts - Math.max(
-    bucket.outcomes.proposalDisabled,
-    bucket.attemptShape?.policyDisabled ?? 0,
-  ));
+  return Math.max(0, bucket.attempts - diagnosticPolicyDisabled(bucket));
+}
+
+function diagnosticAttemptsForDispatchSummary(summary: DispatchProductionYieldSummary): number {
+  return Math.max(0, summary.attempts - diagnosticPolicyDisabled(summary));
 }
 
 function diagnosticTopReason(bucket: DispatchProductionYieldBucket): string | undefined {
@@ -1334,55 +1419,207 @@ function formatAttemptShapeDetail(shape: DispatchProductionYieldSummary['attempt
   return `; shape: no-diff ${shape.backendNoDiff ?? 0}, gate/capture ${shape.captureOrGateBlocked ?? 0}, repairs ${shape.repairAttempts ?? 0}, policy-off ${shape.policyDisabled ?? 0}`;
 }
 
-function dispatchYieldNextAction(dispatchProduction: DispatchProductionYieldSummary): DiagnosticDispatchYieldAction | null {
-  const diagnosticAttempts = Math.max(
-    0,
-    dispatchProduction.attempts - Math.max(
-      dispatchProduction.outcomes.proposalDisabled,
-      dispatchProduction.attemptShape?.policyDisabled ?? 0,
-    ),
-  );
-  const diagnosticProposalRate = diagnosticAttempts > 0
-    ? dispatchProduction.proposalsCreated / diagnosticAttempts
-    : 0;
+function dispatchYieldVerdict(
+  diagnosticAttempts: number,
+  proposalRate: number,
+  policyDisabled: number,
+  lowYieldRate: number,
+): FleetDispatchYieldDiagnosticVerdict {
+  if (diagnosticAttempts === 0 && policyDisabled > 0) return 'policy-suppressed';
   if (
     diagnosticAttempts < MIN_DISPATCH_YIELD_ACTION_ATTEMPTS ||
-    diagnosticProposalRate >= LOW_DISPATCH_YIELD_ACTION_RATE
+    !Number.isFinite(proposalRate)
   ) {
-    return null;
+    return 'insufficient-sample';
   }
-  const candidates = dispatchProduction.byBackend
-    .map((bucket) => {
-      const attempts = diagnosticAttemptsForDispatchBucket(bucket);
-      const proposals = bucket.proposalsCreated;
-      return {
-        bucket,
-        attempts,
-        proposals,
-        noProposal: Math.max(0, attempts - proposals),
-        rate: attempts > 0 ? proposals / attempts : 0,
-      };
-    })
-    .filter((candidate) => candidate.attempts > 0)
-    .sort((a, b) =>
-      b.noProposal - a.noProposal ||
-      a.rate - b.rate ||
-      b.attempts - a.attempts ||
-      a.bucket.key.localeCompare(b.bucket.key),
-    );
-  const weakest = candidates.find((candidate) => candidate.attempts >= MIN_DISPATCH_YIELD_ACTION_ATTEMPTS);
-  const subject = weakest?.bucket.backend ?? weakest?.bucket.key ?? 'dispatches';
-  const attempts = weakest?.attempts ?? diagnosticAttempts;
-  const proposals = weakest?.proposals ?? dispatchProduction.proposalsCreated;
-  const rate = weakest?.rate ?? diagnosticProposalRate;
-  const topReason = weakest
-    ? diagnosticTopReason(weakest.bucket)
-    : dispatchProduction.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;
-  const reason = topReason ? `; top reason: ${topReason}` : '';
-  const shape = formatAttemptShapeDetail(weakest?.bucket.attemptShape ?? dispatchProduction.attemptShape);
+  return proposalRate < lowYieldRate ? 'actionable' : 'healthy';
+}
+
+function dispatchYieldActionFor(
+  verdict: FleetDispatchYieldDiagnosticVerdict,
+  shape: DispatchProductionYieldSummary['attemptShape'],
+): FleetDispatchYieldDiagnosticAction {
+  if (verdict === 'insufficient-sample') return 'collect-more-samples';
+  if (verdict !== 'actionable') return 'keep-routing';
+  const noDiff = shape?.backendNoDiff ?? 0;
+  const gate = shape?.captureOrGateBlocked ?? 0;
+  return noDiff > 0 && noDiff >= gate
+    ? 'route-same-tier-alternative'
+    : 'tighten-context-or-reslice';
+}
+
+function dispatchYieldCandidate(
+  bucket: DispatchProductionYieldBucket,
+  scope: FleetDispatchYieldDiagnosticCandidate['scope'],
+  lowYieldRate: number,
+): FleetDispatchYieldDiagnosticCandidate {
+  const diagnosticAttempts = diagnosticAttemptsForDispatchBucket(bucket);
+  const proposalsCreated = bucket.proposalsCreated;
+  const proposalRate = diagnosticAttempts > 0 ? proposalsCreated / diagnosticAttempts : 0;
+  const policyDisabled = diagnosticPolicyDisabled(bucket);
+  const verdict = dispatchYieldVerdict(diagnosticAttempts, proposalRate, policyDisabled, lowYieldRate);
   return {
-    detail: `${subject} proposal yield ${proposals}/${attempts} (${formatActionPercent(rate)})${reason}${shape}`,
-    ...(weakest?.bucket.backend ? { backend: weakest.bucket.backend } : {}),
+    scope,
+    key: bucket.key,
+    ...(bucket.backend !== undefined ? { backend: bucket.backend } : {}),
+    ...(bucket.model !== undefined ? { model: bucket.model } : {}),
+    diagnosticAttempts,
+    proposalsCreated,
+    noProposal: Math.max(0, diagnosticAttempts - proposalsCreated),
+    proposalRate,
+    policyDisabled,
+    verdict,
+    action: dispatchYieldActionFor(verdict, bucket.attemptShape),
+    sameTierOnly: true,
+    ...(diagnosticTopReason(bucket) ? { topReason: diagnosticTopReason(bucket) } : {}),
+    ...(bucket.attemptShape ? { attemptShape: bucket.attemptShape } : {}),
+  };
+}
+
+function dispatchYieldSubject(candidate: FleetDispatchYieldDiagnosticCandidate): string {
+  if (candidate.backend) return candidate.backend;
+  return candidate.key === 'fleet' ? 'dispatches' : candidate.key;
+}
+
+function sortDispatchYieldCandidates(
+  candidates: FleetDispatchYieldDiagnosticCandidate[],
+): FleetDispatchYieldDiagnosticCandidate[] {
+  const verdictRank: Record<FleetDispatchYieldDiagnosticVerdict, number> = {
+    actionable: 0,
+    'insufficient-sample': 1,
+    healthy: 2,
+    'policy-suppressed': 3,
+  };
+  return candidates
+    .slice()
+    .sort((a, b) =>
+      verdictRank[a.verdict] - verdictRank[b.verdict] ||
+      b.noProposal - a.noProposal ||
+      a.proposalRate - b.proposalRate ||
+      b.diagnosticAttempts - a.diagnosticAttempts ||
+      a.key.localeCompare(b.key),
+    );
+}
+
+function buildDispatchYieldDiagnostics(
+  dispatchProduction: DispatchProductionYieldSummary,
+  cfg: AshlrConfig,
+): FleetDispatchYieldDiagnostics {
+  const lowYieldRate = configuredLowDispatchYieldRate(cfg);
+  const diagnosticAttempts = diagnosticAttemptsForDispatchSummary(dispatchProduction);
+  const proposalsCreated = dispatchProduction.proposalsCreated;
+  const proposalRate = diagnosticAttempts > 0 ? proposalsCreated / diagnosticAttempts : 0;
+  const policyDisabled = diagnosticPolicyDisabled(dispatchProduction);
+  const overallVerdict = dispatchYieldVerdict(diagnosticAttempts, proposalRate, policyDisabled, lowYieldRate);
+  const bucketSource = dispatchProduction.byBackendModel.length > 0
+    ? dispatchProduction.byBackendModel.map((bucket) => dispatchYieldCandidate(bucket, 'backend-model', lowYieldRate))
+    : dispatchProduction.byBackend.map((bucket) => dispatchYieldCandidate(bucket, 'backend', lowYieldRate));
+  const candidates = sortDispatchYieldCandidates(bucketSource).slice(0, 5);
+  const fleetTopReason =
+    dispatchProduction.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;
+  const fleetCandidate: FleetDispatchYieldDiagnosticCandidate = {
+    scope: 'fleet',
+    key: 'fleet',
+    diagnosticAttempts,
+    proposalsCreated,
+    noProposal: Math.max(0, diagnosticAttempts - proposalsCreated),
+    proposalRate,
+    policyDisabled,
+    verdict: overallVerdict,
+    action: dispatchYieldActionFor(overallVerdict, dispatchProduction.attemptShape),
+    sameTierOnly: true,
+    ...(fleetTopReason ? { topReason: fleetTopReason } : {}),
+    ...(dispatchProduction.attemptShape ? { attemptShape: dispatchProduction.attemptShape } : {}),
+  };
+  const actionableCandidate = candidates.find((candidate) => candidate.verdict === 'actionable');
+  const primaryCandidate = actionableCandidate ??
+    (overallVerdict === 'healthy' || overallVerdict === 'policy-suppressed'
+      ? fleetCandidate
+      : candidates.find((candidate) => candidate.verdict === overallVerdict) ?? fleetCandidate);
+  const verdict = primaryCandidate?.verdict === 'actionable' ? 'actionable' : overallVerdict;
+  const action = primaryCandidate?.verdict === 'actionable'
+    ? primaryCandidate.action
+    : dispatchYieldActionFor(verdict, dispatchProduction.attemptShape);
+  const topReason = primaryCandidate?.topReason ??
+    dispatchProduction.topReasons.find((reason) => !isSuppressedProposalProductionReason(reason.reason))?.reason;
+  return {
+    windowHours: dispatchProduction.windowHours,
+    minAttempts: MIN_DISPATCH_YIELD_ACTION_ATTEMPTS,
+    lowYieldRate,
+    diagnosticAttempts,
+    proposalsCreated,
+    proposalRate,
+    policyDisabled,
+    verdict,
+    action,
+    sameTierOnly: true,
+    recommendation: dispatchYieldRecommendation({
+      verdict,
+      action,
+      diagnosticAttempts,
+      proposalRate,
+      policyDisabled,
+      primaryCandidate,
+    }),
+    ...(topReason ? { topReason } : {}),
+    ...(dispatchProduction.attemptShape ? { attemptShape: dispatchProduction.attemptShape } : {}),
+    ...(primaryCandidate ? { primaryCandidate } : {}),
+    candidates,
+  };
+}
+
+function dispatchYieldRecommendation(input: {
+  verdict: FleetDispatchYieldDiagnosticVerdict;
+  action: FleetDispatchYieldDiagnosticAction;
+  diagnosticAttempts: number;
+  proposalRate: number;
+  policyDisabled: number;
+  primaryCandidate?: FleetDispatchYieldDiagnosticCandidate;
+}): string {
+  if (input.verdict === 'policy-suppressed') {
+    return `${input.policyDisabled} attempt(s) were proposal-disabled by policy; do not treat them as backend weakness.`;
+  }
+  if (input.verdict === 'insufficient-sample') {
+    const needed = Math.max(0, MIN_DISPATCH_YIELD_ACTION_ATTEMPTS - input.diagnosticAttempts);
+    return `Collect ${needed} more diagnostic attempt(s) before changing routing.`;
+  }
+  if (input.verdict === 'healthy') {
+    return `Keep current routing; diagnostic proposal yield is ${formatActionPercent(input.proposalRate)}.`;
+  }
+  const subject = input.primaryCandidate ? dispatchYieldSubject(input.primaryCandidate) : 'dispatches';
+  if (input.action === 'route-same-tier-alternative') {
+    return `Inspect ${subject} with same-tier alternatives only; avoid tier escalation until deterministic evidence supports it.`;
+  }
+  return `Tighten context or reslice ${subject}; capture/gate blocking dominates the low-yield sample.`;
+}
+
+function formatDispatchYieldDiagnosticDetail(
+  diagnostic: FleetDispatchYieldDiagnostics,
+): string {
+  const candidate = diagnostic.primaryCandidate;
+  const subject = candidate ? dispatchYieldSubject(candidate) : 'dispatches';
+  const attempts = candidate?.diagnosticAttempts ?? diagnostic.diagnosticAttempts;
+  const proposals = candidate?.proposalsCreated ?? diagnostic.proposalsCreated;
+  const rate = candidate?.proposalRate ?? diagnostic.proposalRate;
+  const topReason = candidate?.topReason ?? diagnostic.topReason;
+  const reason = topReason ? `; top reason: ${topReason}` : '';
+  const shape = formatAttemptShapeDetail(candidate?.attemptShape ?? diagnostic.attemptShape);
+  const action = diagnostic.action === 'route-same-tier-alternative'
+    ? 'same-tier reroute'
+    : diagnostic.action === 'tighten-context-or-reslice'
+      ? 'tighten context/reslice'
+      : diagnostic.action === 'collect-more-samples'
+        ? 'collect more samples'
+        : 'keep routing';
+  return `${subject} proposal yield ${proposals}/${attempts} (${formatActionPercent(rate)}); sample-gated action: ${action}${reason}${shape}`;
+}
+
+function dispatchYieldNextAction(diagnostic: FleetDispatchYieldDiagnostics): DiagnosticDispatchYieldAction | null {
+  if (diagnostic.verdict !== 'actionable') return null;
+  const candidate = diagnostic.primaryCandidate;
+  return {
+    detail: formatDispatchYieldDiagnosticDetail(diagnostic),
+    ...(candidate?.backend ? { backend: candidate.backend } : {}),
   };
 }
 
@@ -1611,8 +1848,8 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
 
   const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
   if (eligibleBacklogItems > 0 && !controlBlocked) {
-    const dispatchYieldDetail = status.dispatchProduction
-      ? dispatchYieldNextAction(status.dispatchProduction)
+    const dispatchYieldDetail = status.dispatchYieldDiagnostics
+      ? dispatchYieldNextAction(status.dispatchYieldDiagnostics)
       : null;
     if (dispatchYieldDetail) {
       add({
@@ -1791,6 +2028,46 @@ function readinessBadge(status: FleetReadinessSourceStatus): FleetReadinessSourc
   return status;
 }
 
+const READINESS_SOURCE_QUALITY_LABELS: Record<FleetReadinessSourceQualityBadge, string> = {
+  'healthy-source': 'healthy source',
+  'healthy-zero': 'healthy zero',
+  'degraded-source': 'degraded source',
+  'missing-source': 'missing source',
+  'stale-source': 'stale source',
+  'unknown-source': 'unknown source',
+};
+
+function readinessSourceQuality(input: {
+  status: FleetReadinessSourceStatus;
+  freshness: FleetReadinessFreshness;
+  empty: boolean;
+  sourcePresent: boolean;
+  sourceDegraded: boolean;
+  detail: string;
+}): FleetReadinessSourceQuality {
+  let badge: FleetReadinessSourceQualityBadge;
+  if (!input.sourcePresent || input.status === 'unavailable') {
+    badge = 'missing-source';
+  } else if (input.freshness === 'stale') {
+    badge = 'stale-source';
+  } else if (input.freshness === 'unknown') {
+    badge = 'unknown-source';
+  } else if (input.sourceDegraded || input.status === 'degraded') {
+    badge = 'degraded-source';
+  } else if (input.empty) {
+    badge = 'healthy-zero';
+  } else {
+    badge = 'healthy-source';
+  }
+  return {
+    badge,
+    label: READINESS_SOURCE_QUALITY_LABELS[badge],
+    empty: input.empty,
+    sourcePresent: input.sourcePresent,
+    detail: input.detail,
+  };
+}
+
 function readinessSource(
   id: FleetReadinessSourceHealth['id'],
   label: string,
@@ -1798,7 +2075,12 @@ function readinessSource(
   observedAt: string | null,
   staleMs: number,
   detail: string,
-  opts?: { freshness?: FleetReadinessFreshness },
+  opts?: {
+    freshness?: FleetReadinessFreshness;
+    empty?: boolean;
+    sourcePresent?: boolean;
+    sourceDegraded?: boolean;
+  },
 ): FleetReadinessSourceHealth {
   const measured = opts?.freshness
     ? { freshness: opts.freshness, ageMs: null }
@@ -1818,6 +2100,14 @@ function readinessSource(
     observedAt,
     ageMs: measured.ageMs,
     detail,
+    sourceQuality: readinessSourceQuality({
+      status: effectiveStatus,
+      freshness: measured.freshness,
+      empty: opts?.empty === true,
+      sourcePresent: opts?.sourcePresent ?? status !== 'unavailable',
+      sourceDegraded: opts?.sourceDegraded === true,
+      detail,
+    }),
   };
 }
 
@@ -1841,6 +2131,7 @@ function resourceReadinessSource(status: FleetStatus, generatedAt: string): Flee
       null,
       READINESS_STATUS_STALE_MS,
       'no allowed backends are visible in fleet status',
+      { empty: true, sourcePresent: false },
     );
   }
 
@@ -1865,6 +2156,7 @@ function resourceReadinessSource(status: FleetStatus, generatedAt: string): Flee
       latestObservedAt,
       READINESS_STATUS_STALE_MS,
       `all ${backends.length} backend resource signal(s) are constrained`,
+      { sourcePresent: true },
     );
   }
   if (hardBlocked.length > 0) {
@@ -1875,6 +2167,7 @@ function resourceReadinessSource(status: FleetStatus, generatedAt: string): Flee
       latestObservedAt,
       READINESS_STATUS_STALE_MS,
       `${hardBlocked.length}/${backends.length} backend resource signal(s) are constrained`,
+      { sourcePresent: true, sourceDegraded: true },
     );
   }
   if (openish.length === 0 && (notSensed.length > 0 || unknown.length > 0)) {
@@ -1885,6 +2178,7 @@ function resourceReadinessSource(status: FleetStatus, generatedAt: string): Flee
       latestObservedAt,
       READINESS_STATUS_STALE_MS,
       'backend capacity exists but no sensed open resource signal is available',
+      { sourcePresent: true },
     );
   }
   if (notSensed.length > 0 || unknown.length > 0) {
@@ -1895,6 +2189,7 @@ function resourceReadinessSource(status: FleetStatus, generatedAt: string): Flee
       latestObservedAt,
       READINESS_STATUS_STALE_MS,
       `${notSensed.length + unknown.length}/${backends.length} backend resource signal(s) are unsensed or unknown`,
+      { sourcePresent: true, sourceDegraded: true },
     );
   }
   return readinessSource(
@@ -1904,6 +2199,7 @@ function resourceReadinessSource(status: FleetStatus, generatedAt: string): Flee
     latestObservedAt,
     READINESS_STATUS_STALE_MS,
     `${openish.length}/${backends.length} backend resource signal(s) are open or near capacity`,
+    { sourcePresent: true },
   );
 }
 
@@ -1931,9 +2227,10 @@ function shipReadinessSources(
         guardHealth.blocks.length > 0 ? 'blocked' : 'healthy',
         guardHealth.generatedAt,
         READINESS_STATUS_STALE_MS,
-        guardHealth.blocks.length > 0
-          ? guardHealth.blocks[0]?.detail ?? 'guard health is blocking autonomous work'
-          : 'guard health is clear',
+      guardHealth.blocks.length > 0
+        ? guardHealth.blocks[0]?.detail ?? 'guard health is blocking autonomous work'
+        : 'guard health is clear',
+      { empty: guardHealth.blocks.length === 0, sourcePresent: true },
       )
     : readinessSource(
         'guard',
@@ -1942,6 +2239,7 @@ function shipReadinessSources(
         null,
         READINESS_STATUS_STALE_MS,
         'guard health diagnosis is unavailable',
+        { sourcePresent: false },
       );
 
   const readiness = status.autoMergeReadiness;
@@ -1955,6 +2253,15 @@ function shipReadinessSources(
         readiness.enabled
           ? `${readiness.preflightReady} ready, ${readiness.needsVerification} need verification, ${readiness.blocked} blocked`
           : 'auto-merge is disabled',
+        {
+          empty:
+            readiness.pending === 0 &&
+            readiness.preflightReady === 0 &&
+            readiness.needsVerification === 0 &&
+            readiness.blocked === 0 &&
+            readiness.knownVerificationFailed === 0,
+          sourcePresent: true,
+        },
       )
     : readinessSource(
         'auto-merge',
@@ -1963,6 +2270,7 @@ function shipReadinessSources(
         null,
         READINESS_STATUS_STALE_MS,
         'auto-merge readiness source is unavailable',
+        { sourcePresent: false },
       );
 
   const queueSource = readinessSource(
@@ -1972,6 +2280,11 @@ function shipReadinessSources(
     inputs.queueSnapshotAt,
     READINESS_QUEUE_STALE_MS,
     inputs.queueSourceDetail,
+    {
+      empty: status.queue.backlogItems === 0,
+      sourcePresent: inputs.queueSourceStatus !== 'unavailable' && inputs.queueSourceStatus !== 'unknown',
+      sourceDegraded: inputs.queueSourceStatus === 'degraded',
+    },
   );
 
   const resourcesSource = resourceReadinessSource(status, inputs.generatedAt);
@@ -1985,6 +2298,7 @@ function shipReadinessSources(
         direction.generatedAt,
         READINESS_STATUS_STALE_MS,
         `${direction.mode} recommendation with ${direction.confidence} confidence`,
+        { sourcePresent: true },
       )
     : readinessSource(
         'direction',
@@ -1993,6 +2307,7 @@ function shipReadinessSources(
         null,
         READINESS_STATUS_STALE_MS,
         'autonomy direction summary is unavailable',
+        { sourcePresent: false },
       );
 
   return [daemonSource, guardSource, autoMergeSource, queueSource, resourcesSource, directionSource];
@@ -2007,6 +2322,24 @@ function readinessSourceSummary(sources: FleetReadinessSourceHealth[]): Record<F
     unknown: 0,
   };
   for (const source of sources) summary[source.status]++;
+  return summary;
+}
+
+function readinessSourceQualitySummary(
+  sources: FleetReadinessSourceHealth[],
+): Record<FleetReadinessSourceQualityBadge, number> {
+  const summary: Record<FleetReadinessSourceQualityBadge, number> = {
+    'healthy-source': 0,
+    'healthy-zero': 0,
+    'degraded-source': 0,
+    'missing-source': 0,
+    'stale-source': 0,
+    'unknown-source': 0,
+  };
+  for (const source of sources) {
+    const badge = source.sourceQuality?.badge ?? 'unknown-source';
+    summary[badge]++;
+  }
   return summary;
 }
 
@@ -2203,6 +2536,7 @@ function buildAutonomousShipReadiness(
 ): FleetAutonomousShipReadinessStatus {
   const sources = shipReadinessSources(status, inputs);
   const sourceSummary = readinessSourceSummary(sources);
+  const sourceQualitySummary = readinessSourceQualitySummary(sources);
   const topBlocker = chooseReadinessBlocker(status, sources);
   const primaryAction = (status.nextActions ?? [])[0] ?? null;
   return {
@@ -2213,6 +2547,7 @@ function buildAutonomousShipReadiness(
     primaryAction,
     sources,
     sourceSummary,
+    sourceQualitySummary,
   };
 }
 

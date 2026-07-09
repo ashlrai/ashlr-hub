@@ -1144,11 +1144,27 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       proposalsCreated: 0,
       proposalRate: 0,
     });
+    expect(s.dispatchYieldDiagnostics).toMatchObject({
+      verdict: 'healthy',
+      action: 'keep-routing',
+      sameTierOnly: true,
+      minAttempts: 3,
+      lowYieldRate: 0.2,
+      diagnosticAttempts: 3,
+      proposalsCreated: 1,
+      primaryCandidate: {
+        scope: 'fleet',
+        key: 'fleet',
+        diagnosticAttempts: 3,
+        proposalsCreated: 1,
+      },
+    });
 
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('Dispatch yield:');
     expect(formatted).toContain('proposals 1/3');
     expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 0, policy-off 0');
+    expect(formatted).toContain('diagnosis: healthy · fleet 1/3 33% · keep routing');
     expect(formatted).toContain('local-coder 0/2 0%');
     expect(formatted).toContain('codex 1/1 100%');
   });
@@ -1411,6 +1427,27 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       proposalsCreated: 0,
       proposalRate: 0,
     });
+    expect(s.dispatchYieldDiagnostics).toMatchObject({
+      verdict: 'actionable',
+      action: 'route-same-tier-alternative',
+      sameTierOnly: true,
+      diagnosticAttempts: 3,
+      proposalsCreated: 0,
+      policyDisabled: 0,
+      primaryCandidate: {
+        scope: 'backend-model',
+        backend: 'local-coder',
+        model: 'qwen',
+        diagnosticAttempts: 3,
+        proposalsCreated: 0,
+        verdict: 'actionable',
+        action: 'route-same-tier-alternative',
+        sameTierOnly: true,
+        topReason: 'agent returned no diff',
+      },
+    });
+    expect(s.dispatchYieldDiagnostics?.recommendation).toContain('same-tier alternatives only');
+    expect(s.dispatchYieldDiagnostics?.recommendation).toContain('avoid tier escalation');
     expect(s.nextActions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1426,10 +1463,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       .toContain('top reason: agent returned no diff');
     expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
       .toContain('shape: no-diff 1, gate/capture 1, repairs 0, policy-off 0');
+    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
+      .toContain('sample-gated action: same-tier reroute');
 
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('[medium] Inspect dispatch yield [local-coder]');
     expect(formatted).toContain('local-coder proposal yield 0/3 (0%)');
+    expect(formatted).toContain('diagnosis: actionable · local-coder:qwen 0/3 0% · same-tier reroute');
     expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 0, policy-off 0');
   });
 
@@ -1550,7 +1590,84 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         proposalDisabled: 4,
       },
     });
+    expect(s.dispatchYieldDiagnostics).toMatchObject({
+      verdict: 'policy-suppressed',
+      action: 'keep-routing',
+      sameTierOnly: true,
+      diagnosticAttempts: 0,
+      proposalsCreated: 0,
+      policyDisabled: 4,
+      primaryCandidate: {
+        scope: 'fleet',
+        key: 'fleet',
+        diagnosticAttempts: 0,
+        policyDisabled: 4,
+        verdict: 'policy-suppressed',
+      },
+    });
+    expect(s.dispatchYieldDiagnostics?.recommendation).toContain('do not treat them as backend weakness');
     expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-yield');
+    expect(formatFleetStatus(s)).toContain('diagnosis: policy-suppressed · fleet 0/0 0% · keep routing');
+  });
+
+  it('marks low dispatch-yield samples as insufficient before routing action', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: new Date().toISOString(),
+        repos: [repo],
+        items: [makeBacklogItem(repo, 'repo:goal:fresh', 'Fresh eligible work', 5)],
+      }),
+      'utf8',
+    );
+    const baseEvent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: new Date().toISOString(),
+      machineId: 'm49',
+      itemId: 'sample-a',
+      source: 'goal',
+      repo,
+      title: 'Tiny low-yield sample',
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0.001,
+      reason: 'agent returned no diff',
+      basis: 'run-proposal-outcome',
+    };
+    recordDispatchProduction([
+      baseEvent,
+      { ...baseEvent, itemId: 'sample-b' },
+    ]);
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.dispatchYieldDiagnostics).toMatchObject({
+      verdict: 'insufficient-sample',
+      action: 'collect-more-samples',
+      sameTierOnly: true,
+      diagnosticAttempts: 2,
+      proposalsCreated: 0,
+      primaryCandidate: {
+        scope: 'backend-model',
+        backend: 'local-coder',
+        model: 'qwen',
+        diagnosticAttempts: 2,
+        verdict: 'insufficient-sample',
+      },
+    });
+    expect(s.dispatchYieldDiagnostics?.recommendation).toContain('Collect 1 more diagnostic attempt');
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-yield');
+    expect(formatFleetStatus(s)).toContain('diagnosis: insufficient-sample · local-coder:qwen 0/2 0% · collect more samples');
   });
 
   it('includes queued self-heal work when the persisted backlog snapshot is stale', async () => {
@@ -1851,6 +1968,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
 
     const s = await buildFleetStatus(cfg);
+    const queueSource = s.autonomousShipReadiness?.sources.find((source) => source.id === 'queue');
 
     expect(s.autonomousShipReadiness).toMatchObject({
       verdict: 'ready',
@@ -1865,6 +1983,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         unknown: 0,
       },
     });
+    expect(queueSource?.sourceQuality).toMatchObject({
+      badge: 'healthy-zero',
+      empty: true,
+      sourcePresent: true,
+    });
+    expect(s.autonomousShipReadiness?.sourceQualitySummary?.['healthy-zero']).toBeGreaterThan(0);
     expect(s.autonomousShipReadiness?.primaryAction).toMatchObject({
       id: 'drain-ready-auto-merges',
     });
@@ -1911,8 +2035,14 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       status: 'degraded',
       badge: 'degraded',
       freshness: 'stale',
+      sourceQuality: {
+        badge: 'stale-source',
+        empty: true,
+        sourcePresent: true,
+      },
     });
     expect(s.autonomousShipReadiness?.sourceSummary.degraded).toBeGreaterThan(0);
+    expect(s.autonomousShipReadiness?.sourceQualitySummary?.['stale-source']).toBeGreaterThan(0);
   });
 
   it('surfaces evidence trust basis in auto-merge readiness', async () => {
@@ -2299,6 +2429,13 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
             observedAt: '2026-06-17T00:00:00.000Z',
             ageMs: 120_000,
             detail: 'daemon running',
+            sourceQuality: {
+              badge: 'healthy-source',
+              label: 'healthy source',
+              empty: false,
+              sourcePresent: true,
+              detail: 'daemon running',
+            },
           },
           {
             id: 'auto-merge',
@@ -2309,6 +2446,13 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
             observedAt: '2026-06-17T00:02:00.000Z',
             ageMs: 0,
             detail: '1 ready',
+            sourceQuality: {
+              badge: 'healthy-zero',
+              label: 'healthy zero',
+              empty: true,
+              sourcePresent: true,
+              detail: '1 ready',
+            },
           },
         ],
         sourceSummary: {
@@ -2317,6 +2461,14 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
           blocked: 0,
           unavailable: 0,
           unknown: 0,
+        },
+        sourceQualitySummary: {
+          'healthy-source': 1,
+          'healthy-zero': 1,
+          'degraded-source': 0,
+          'missing-source': 0,
+          'stale-source': 0,
+          'unknown-source': 0,
         },
       },
       missionBrief: {
@@ -2460,7 +2612,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('verdict:    ready (high confidence, fresh sources)');
     expect(out).toContain('top block:  none');
     expect(out).toContain('action:     Drain ready auto-merges: 1 pending proposal has cheap preflight-ready evidence.');
-    expect(out).toContain('sources:    daemon:healthy, auto-merge:healthy');
+    expect(out).toContain('sources:    daemon:healthy-source, auto-merge:healthy-zero');
     expect(out).toContain('Autonomy evidence:');
     expect(out).toContain('packs:     3');
     expect(out).toContain('denied:    1');
