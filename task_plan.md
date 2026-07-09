@@ -1091,4 +1091,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Make Mission Brief use `Drain diagnostic reslices` when that action is primary.
 - [x] Add focused FleetStatus/CLI regression coverage.
 - [x] Run focused M49 status tests, typecheck, and diff checks.
-- [ ] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.
+- [x] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.
