@@ -1,0 +1,163 @@
+[
+  {
+    "schemaVersion": 1,
+    "ts": "2026-07-09T04:58:00.000Z",
+    "actor": "agent",
+    "kind": "dispatch",
+    "outcome": "proposal-created",
+    "action": "daemon:proposal-created",
+    "summary": "RAW_SUMMARY_SENTINEL prompt RAW_PROMPT_SENTINEL",
+    "repo": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub",
+    "backend": "codex",
+    "tier": "frontier",
+    "model": "gpt-5.5",
+    "reason": "RAW_REASON_SENTINEL stdout RAW_STDOUT_SENTINEL",
+    "trajectoryId": "run:attention-a",
+    "routerPolicyVersion": "fleet-router-v1",
+    "learningSource": "agent-action",
+    "labelBasis": "dispatch-outcome",
+    "learningEpoch": "2026-07-09",
+    "spentUsd": 0.012345,
+    "durationMs": 1200,
+    "goal": "RAW_GOAL_SENTINEL",
+    "prompt": "RAW_PROMPT_SENTINEL",
+    "content": "RAW_CONTENT_SENTINEL",
+    "message": "RAW_MESSAGE_SENTINEL",
+    "diff": "diff --git a/raw.ts b/raw.ts\nRAW_DIFF_SENTINEL",
+    "stdout": "RAW_STDOUT_SENTINEL",
+    "stderr": "RAW_STDERR_SENTINEL",
+    "detail": "RAW_DETAIL_SENTINEL",
+    "routeSnapshot": {
+      "backend": "codex",
+      "tier": "frontier",
+      "model": "gpt-5.5",
+      "assignedBy": "gateway",
+      "reason": "RAW_ROUTE_REASON_SENTINEL",
+      "routerPolicyVersion": "fleet-router-v1"
+    },
+    "runEventSummary": {
+      "runId": "attention-a",
+      "status": "done",
+      "outcome": "proposal-created",
+      "proposalCreated": true,
+      "proposalId": "prop-attention-a",
+      "tokensIn": 1000,
+      "tokensOut": 240,
+      "costUsd": 0.012345,
+      "durationMs": 1200,
+      "contextSummary": {
+        "prompt": {
+          "role": "executor",
+          "profileId": "adaptive-v1",
+          "promptBudgetRatio": 0.9,
+          "contextWindowRatio": 0.35,
+          "cacheHit": false,
+          "rawPrompt": "RAW_PROMPT_SENTINEL"
+        },
+        "retrieval": {
+          "source": "local-context",
+          "hitCount": 6,
+          "injectedHitCount": 4,
+          "limitHitRate": 0.6,
+          "candidateHitRate": 0.12,
+          "topScore": 0.98,
+          "injectedChars": 3200,
+          "rawEntryText": "RAW_DIFF_SENTINEL"
+        },
+        "compression": {
+          "source": "prompt-budget",
+          "strategy": "truncate",
+          "truncated": true,
+          "droppedLayers": ["output", "memory"],
+          "stdout": "RAW_STDOUT_SENTINEL"
+        }
+      }
+    },
+    "evidenceOutcome": {
+      "target": "main",
+      "trustBasis": "evidence",
+      "riskClass": "low",
+      "verificationPassed": true,
+      "policyAllowed": true,
+      "gateCount": 2
+    }
+  },
+  {
+    "schemaVersion": 1,
+    "ts": "2026-07-09T04:59:00.000Z",
+    "actor": "agent",
+    "kind": "dispatch",
+    "outcome": "no-proposal",
+    "action": "daemon:no-proposal",
+    "summary": "RAW_SUMMARY_SENTINEL",
+    "repo": "/Users/masonwyatt/Desktop/github/security/phantom-secrets",
+    "backend": "local-coder",
+    "tier": "mid",
+    "model": "qwen",
+    "trajectoryId": "run:attention-b",
+    "learningSource": "daemon-dispatch",
+    "labelBasis": "dispatch-outcome",
+    "learningEpoch": "2026-07-09",
+    "spentUsd": 0,
+    "durationMs": 900,
+    "runEventSummary": {
+      "runId": "attention-b",
+      "status": "done",
+      "outcome": "empty-diff",
+      "proposalCreated": false,
+      "tokensIn": 500,
+      "tokensOut": 50,
+      "durationMs": 900,
+      "contextSummary": {
+        "prompt": {
+          "role": "executor",
+          "profileId": "adaptive-v1",
+          "promptBudgetRatio": 0.8,
+          "contextWindowRatio": 0.25,
+          "cacheHit": true
+        },
+        "retrieval": {
+          "source": "repo-map",
+          "hitCount": 2,
+          "injectedHitCount": 1,
+          "limitHitRate": 0.2,
+          "candidateHitRate": 0.05,
+          "topScore": 0.7,
+          "injectedChars": 800
+        },
+        "compression": {
+          "source": "prompt-budget",
+          "strategy": "drop-layer",
+          "truncated": false,
+          "droppedLayers": ["tool"]
+        }
+      }
+    }
+  },
+  {
+    "schemaVersion": 1,
+    "ts": "2026-07-09T05:00:00.000Z",
+    "actor": "verifier",
+    "kind": "verification",
+    "outcome": "verified",
+    "action": "auto-merge:verify-before-merge-finish",
+    "summary": "RAW_STDOUT_SENTINEL",
+    "repo": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub",
+    "backend": "codex",
+    "tier": "frontier",
+    "model": "gpt-5.5",
+    "trajectoryId": "run:attention-a",
+    "learningSource": "autonomy-evidence",
+    "labelBasis": "evidence-policy",
+    "learningEpoch": "2026-07-09",
+    "durationMs": 300,
+    "evidenceOutcome": {
+      "target": "main",
+      "trustBasis": "evidence",
+      "riskClass": "low",
+      "verificationPassed": true,
+      "policyAllowed": true,
+      "gateCount": 1
+    }
+  }
+]

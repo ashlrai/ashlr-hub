@@ -245,6 +245,12 @@ async function evalFixture(
 // ---------------------------------------------------------------------------
 
 export async function cmdEval(args: string[]): Promise<number> {
+  // M346: metadata-only fleet attention evaluation.
+  if (args[0] === 'attention') {
+    const { cmdEvalAttention } = await import('./eval-attention.js');
+    return cmdEvalAttention(args.slice(1));
+  }
+
   // M143: dispatch swe-bench subcommand to its own handler.
   if (args[0] === 'swe-bench') {
     const { cmdSweBench } = await import('./eval-swe-bench.js');
@@ -352,6 +358,8 @@ function printEvalHelp(): void {
   console.log('  ' + bold('Usage:'));
   console.log('');
   console.log(`    ashlr eval [--budget N] [--limit N] [--json]`);
+  console.log(`    ashlr eval attention [--window 1d|7d|30d] [--limit N] [--json] [--save]`);
+  console.log(`    ashlr eval swe-bench [--fixtures] [--dataset <path>] [--engine <id>]`);
   console.log('');
   console.log('  ' + bold('Options:'));
   console.log('');
@@ -370,5 +378,6 @@ function printEvalHelp(): void {
   console.log(`    ${gray('Runs a fixed fixture set through the agent loop twice each —')}`);
   console.log(`    ${gray('adaptive prompts OFF then ON — and reports steps/done/tokens.')}`);
   console.log(`    ${gray('Needs a local model (Ollama / LM Studio); skips cleanly if none.')}`);
+  console.log(`    ${gray('Use `ashlr eval attention` for metadata-only fleet context/yield signals.')}`);
   console.log('');
 }

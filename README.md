@@ -313,6 +313,7 @@ next actions point at work the daemon can select now instead of phantom backlog.
 | `ashlr serve [--open]` | Web dashboard (Mission Control) at 127.0.0.1:7777 |
 | `ashlr pulse` | Rolling activity + spend analytics |
 | `ashlr eval` | Local agent eval harness (adaptive-prompts A/B) |
+| `ashlr eval attention` | Metadata-only fleet attention report (context, retrieval, yield, routing, traces) |
 | `ashlr verify-safety` | Run the safety invariant suite |
 | `ashlr doctor` | One-glance health check |
 | `ashlr models` | List + manage model backends |

@@ -517,4 +517,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Focused verification passed for BinShield adapter/dep scanners/ownership docs, typecheck, and diff checks.
 - [x] Run final lint/build/audit/full-suite gates for the BinShield + ownership-boundaries slice.
 - [x] Commit `d6c804c`, push to `origin/master`, relaunch/verify daemon, repair stale guard from replaced daemon pid, and continue the overnight loop.
-- [ ] Next heartbeat: implement `ashlr eval attention` with metadata-only middle-drop and workflow-resolution fixtures.
+- [x] Implement `ashlr eval attention` v1 as a metadata-only fleet attention report over the agent-action ledger.
+- [x] Add a dedicated attention report store under `$ASHLR_HOME/eval/attention/reports` with atomic temp-write/rename persistence.
+- [x] Add adversarial attention fixtures and tests proving raw prompt/diff/stdout/stderr/summary/reason/detail fields and full paths do not persist.
+- [x] Focused verification passed for attention eval, root eval helpers, agent-action ledger, and typecheck; live CLI smoke passed.
+- [x] Final verification passed: diff check, lint, audit, build, invariants, and full clean-state test suite.
+- [ ] Run final gates, commit, push, relaunch daemon, and continue the overnight loop.
+- [ ] Next heartbeat: use attention-eval output to drive context-summary instrumentation gaps and Phantom capability snapshot work.
