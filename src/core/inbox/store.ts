@@ -35,6 +35,7 @@ import { linkOutcome } from '../fleet/judge-trace.js';
 import { isDestructiveDiff } from '../run/diff-safety.js';
 import { causalMetadata, causalMetadataFromProposal } from '../learning/causal.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { proposalCompletesGoalMilestone } from '../goals/completion.js';
 // M228: goal-milestone outcome wiring — additive, best-effort, never-throws.
 // Imported here (not goals/advance.ts) because inbox/store does NOT import from
 // goals/* anywhere, so this import creates no cycle. goals/advance.ts imports
@@ -351,11 +352,11 @@ function emitProposalSpan(
 // ---------------------------------------------------------------------------
 
 /**
- * When a proposal resolves (applied → done; rejected → pending/blocked),
+ * When a proposal resolves (verified applied → done; rejected → pending/blocked),
  * find the goal milestone that holds this proposalId and update its status
  * to reflect the terminal outcome.
  *
- * - 'applied'  → milestone 'done'   (the work landed)
+ * - verified 'applied' → milestone 'done' (the work landed and passed verification)
  * - 'rejected' → milestone 'pending' if it previously had no swarmId hint of
  *                a hard failure; otherwise 'blocked' so a human must steer it.
  *                NOTE: a milestone with proposalId set is currently 'proposed'
@@ -721,8 +722,8 @@ export function setStatus(
     } catch { /* never disrupts the proposal flow */ }
 
     // M228: update any goal milestone linked to this proposal so milestones
-    // actually progress when their proposal is applied/rejected. Best-effort.
-    if (status === 'applied') linkMilestoneOutcome(id, 'applied');
+    // progress only when applied work also has passing verification evidence.
+    if (status === 'applied' && proposalCompletesGoalMilestone(updated)) linkMilestoneOutcome(id, 'applied');
     else if (status === 'rejected') linkMilestoneOutcome(id, 'rejected');
 
     // Pulse Map: mirror the lifecycle transition. approved/applied → 'merge',
@@ -759,6 +760,9 @@ export function updateProposalField(
     const updated: Proposal = sanitizeProposalForStore({ ...existing, ...patch });
     try {
       persistProposal(updated);
+      if (patch.verifyResult !== undefined && proposalCompletesGoalMilestone(updated)) {
+        linkMilestoneOutcome(id, 'applied');
+      }
     } catch {
       // Persistence failure — swallow; best-effort.
     }

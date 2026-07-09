@@ -1,5 +1,13 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Current Merged Verified Goal Completion
+- Start state: clean `master` after the goal-focus rollout; Entire remains not set up.
+- Live goal-focus state before this slice: 12 actionable active goals over the default threshold of 4, with new goal/invent work deferred until active work closes.
+- Agent audits converged on the same gap: `progressOf()` and `setStatus('applied')` treated a linked proposal's bare `applied` status as enough to close a milestone, while verification evidence is enforced later in merge gates rather than goal progress.
+- Implementation: added a shared `proposalCompletesGoalMilestone()` predicate and routed both read-only progress reconciliation and best-effort milestone linkage through it. A proposal now closes a goal milestone only when `status === 'applied'` and `verifyResult.passed === true`.
+- Delayed evidence repair: `updateProposalField()` now links a milestone to `done` when passing verification is later persisted onto an already applied proposal, while failing/missing verification leaves the milestone incomplete.
+- Regression coverage: `m28.advance` now proves applied-without-verification stays incomplete; `m228.milestone-proposal-link` now covers passing verification, missing verification, failing verification, and delayed verification updates.
+
 ## Current Fleet Usefulness Continuation
 - Start state: clean `master...origin/master` at `08b0fd5`; Entire still not set up.
 - Live fleet summary after the previous deploy: daemon running, guard clear, 24/24 enrolled repos with verification commands, 21 backlog items, 0 eligible items, 21 cooling items, 0 pending proposals, auto-merge enabled with no pending work, Claude throttled at the protection threshold, production velocity profile off.

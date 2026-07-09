@@ -455,11 +455,11 @@ describe('progressOf — READ-ONLY tracking', () => {
     expect(p.nextActionableId).toBe('m3');
   });
 
-  it('reconciles a "proposed" milestone whose proposal was applied out-of-band to done (read-only)', () => {
+  it('reconciles a "proposed" milestone whose proposal was applied and verified out-of-band to done (read-only)', () => {
     const goal = makeGoal({
       milestones: [makeMilestone({ id: 'm0', status: 'proposed', proposalId: 'p1' })],
     });
-    mockLoadProposal.mockReturnValue(makeProposal({ id: 'p1', status: 'applied' }));
+    mockLoadProposal.mockReturnValue(makeProposal({ id: 'p1', status: 'applied', verifyResult: { passed: true } }));
 
     const p = progressOf(goal);
     expect(p.done).toBe(1);
@@ -467,15 +467,27 @@ describe('progressOf — READ-ONLY tracking', () => {
     expect(p.fractionDone).toBe(1);
   });
 
-  it('reconciles a "blocked" milestone whose linked proposal was applied to done (M28 regression)', () => {
+  it('reconciles a "blocked" milestone whose linked proposal was applied and verified to done (M28 regression)', () => {
     const goal = makeGoal({
       milestones: [makeMilestone({ id: 'm0', status: 'blocked', proposalId: 'p1' })],
     });
-    mockLoadProposal.mockReturnValue(makeProposal({ id: 'p1', status: 'applied' }));
+    mockLoadProposal.mockReturnValue(makeProposal({ id: 'p1', status: 'applied', verifyResult: { passed: true } }));
 
     const p = progressOf(goal);
     expect(p.done).toBe(1);
     expect(p.fractionDone).toBe(1);
+  });
+
+  it('does not count an applied linked proposal as done without passing verification', () => {
+    const goal = makeGoal({
+      milestones: [makeMilestone({ id: 'm0', status: 'proposed', proposalId: 'p1' })],
+    });
+    mockLoadProposal.mockReturnValue(makeProposal({ id: 'p1', status: 'applied' }));
+
+    const p = progressOf(goal);
+    expect(p.done).toBe(0);
+    expect(p.proposed).toBe(1);
+    expect(p.fractionDone).toBe(0);
   });
 
   it('returns fractionDone 0 when every milestone is skipped (no denom blowup)', () => {
@@ -490,7 +502,7 @@ describe('progressOf — READ-ONLY tracking', () => {
     const goal = makeGoal({
       milestones: [makeMilestone({ id: 'm0', status: 'proposed', proposalId: 'p1' })],
     });
-    mockLoadProposal.mockReturnValue(makeProposal({ id: 'p1', status: 'applied' }));
+    mockLoadProposal.mockReturnValue(makeProposal({ id: 'p1', status: 'applied', verifyResult: { passed: true } }));
     const before = JSON.stringify(goal);
     progressOf(goal);
     expect(JSON.stringify(goal)).toBe(before);

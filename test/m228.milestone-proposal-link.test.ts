@@ -4,7 +4,7 @@
  * Three contracts verified:
  *  1. advanceGoal sets proposalId + 'proposed' status after a successful swarm
  *     (regression-guard: if this breaks, milestones never leave 'blocked').
- *  2. When a proposal is applied (setStatus → 'applied'), the linked goal
+ *  2. When a proposal is applied with passing verification, the linked goal
  *     milestone advances to 'done'.
  *  3. When a proposal is rejected (setStatus → 'rejected'), the linked goal
  *     milestone resets to 'pending' so the conductor can retry.
@@ -73,7 +73,7 @@ vi.mock('../src/core/run/diff-safety.js', () => ({
 // Lazy imports AFTER mocks are registered.
 // ---------------------------------------------------------------------------
 
-import { setStatus } from '../src/core/inbox/store.js';
+import { setStatus, updateProposalField } from '../src/core/inbox/store.js';
 
 // Advance-side imports — for contract 1 we rely on m28.advance.test.ts, but
 // we re-assert the core linkage here with a minimal smoke test.
@@ -243,7 +243,7 @@ describe('M228 Contract 1 — advanceGoal sets proposalId + proposed status', ()
 // Contract 2 & 3 — setStatus('applied'/'rejected') updates linked milestone
 // ---------------------------------------------------------------------------
 
-describe('M228 Contract 2 — proposal applied → linked milestone becomes done', () => {
+describe('M228 Contract 2 — verified proposal applied → linked milestone becomes done', () => {
   beforeEach(() => {
     mockListGoals.mockReset();
     mockUpdateMilestoneStatusFromGoals.mockReset();
@@ -256,8 +256,8 @@ describe('M228 Contract 2 — proposal applied → linked milestone becomes done
     mockUpdateMilestoneStatusFromGoals.mockImplementation(() => null);
   });
 
-  it('milestone with matching proposalId is updated to "done" when proposal is applied', () => {
-    const proposal = makeProposal({ status: 'approved' }); // must be approved to accept setStatus
+  it('milestone with matching proposalId is updated to "done" when proposal is applied with passing verification', () => {
+    const proposal = makeProposal({ status: 'approved', verifyResult: { passed: true } });
     stubExistingProposal(proposal);
 
     const goal = makeGoal(); // milestone has proposalId: 'prop-target'
@@ -272,8 +272,60 @@ describe('M228 Contract 2 — proposal applied → linked milestone becomes done
     );
   });
 
-  it('no milestone updated when no goal has a matching proposalId', () => {
+  it('does not update the milestone to "done" when applied proposal lacks passing verification', () => {
     const proposal = makeProposal({ status: 'approved' });
+    stubExistingProposal(proposal);
+
+    const goal = makeGoal();
+    mockListGoals.mockReturnValue([goal]);
+
+    setStatus('prop-target', 'applied');
+
+    expect(mockUpdateMilestoneStatusFromGoals).not.toHaveBeenCalled();
+  });
+
+  it('does not update the milestone to "done" when applied proposal has failing verification', () => {
+    const proposal = makeProposal({ status: 'approved', verifyResult: { passed: false } });
+    stubExistingProposal(proposal);
+
+    const goal = makeGoal();
+    mockListGoals.mockReturnValue([goal]);
+
+    setStatus('prop-target', 'applied');
+
+    expect(mockUpdateMilestoneStatusFromGoals).not.toHaveBeenCalled();
+  });
+
+  it('updates the milestone when passing verification is later recorded on an already applied proposal', () => {
+    const proposal = makeProposal({ status: 'applied' });
+    stubExistingProposal(proposal);
+
+    const goal = makeGoal();
+    mockListGoals.mockReturnValue([goal]);
+
+    updateProposalField('prop-target', { verifyResult: { passed: true } });
+
+    expect(mockUpdateMilestoneStatusFromGoals).toHaveBeenCalledWith(
+      'goal-1',
+      'g1-m0',
+      'done',
+    );
+  });
+
+  it('does not update the milestone when failing verification is later recorded on an applied proposal', () => {
+    const proposal = makeProposal({ status: 'applied' });
+    stubExistingProposal(proposal);
+
+    const goal = makeGoal();
+    mockListGoals.mockReturnValue([goal]);
+
+    updateProposalField('prop-target', { verifyResult: { passed: false } });
+
+    expect(mockUpdateMilestoneStatusFromGoals).not.toHaveBeenCalled();
+  });
+
+  it('no milestone updated when no goal has a matching proposalId', () => {
+    const proposal = makeProposal({ status: 'approved', verifyResult: { passed: true } });
     stubExistingProposal(proposal);
 
     // Goal milestone has a DIFFERENT proposalId
@@ -286,7 +338,7 @@ describe('M228 Contract 2 — proposal applied → linked milestone becomes done
   });
 
   it('never throws when listGoals throws (best-effort — proposal flow unaffected)', () => {
-    const proposal = makeProposal({ status: 'approved' });
+    const proposal = makeProposal({ status: 'approved', verifyResult: { passed: true } });
     stubExistingProposal(proposal);
 
     mockListGoals.mockImplementation(() => { throw new Error('disk error'); });
@@ -296,7 +348,7 @@ describe('M228 Contract 2 — proposal applied → linked milestone becomes done
   });
 
   it('never throws when updateMilestoneStatus throws (best-effort)', () => {
-    const proposal = makeProposal({ status: 'approved' });
+    const proposal = makeProposal({ status: 'approved', verifyResult: { passed: true } });
     stubExistingProposal(proposal);
 
     const goal = makeGoal();

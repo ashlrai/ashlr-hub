@@ -228,6 +228,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Full gates passed: `npm run typecheck`, `node --check src/core/web/public/app.js`, focused trust/status/daemon suites (12 files, 338 tests), `npm run lint`, `npm run build`, `npm audit --audit-level=moderate`, `npm run test:invariants` (41 files, 411 tests), full `npm run test:ci` (412 files, 8552 passed, 7 skipped), and `git diff --check`.
 - [x] Committed and pushed to `origin/master`; live daemon/fleet checks passed after launchd reinstall/reload and `fleet resume`.
 
+## Current Continuation - Merged Verified Goal Completion
+- [x] Rechecked clean repo state, recent commits, Entire state, task plan, and notes.
+- [x] Deploy/read parallel agents for goal completion semantics, regression targets, and lane-lock design.
+- [x] Map current goal progress/proposal status behavior locally.
+- [x] Implement the smallest safe merged+verified completion signal or repair path.
+- [x] Add focused regression coverage for applied-but-unverified versus applied-and-verified goal milestones.
+- [ ] Run verification, commit, push, restart/resume daemon, and smoke live goal-focus state.
+
 ## Current Continuation - Remote Handoff Reconciliation
 - [x] Rechecked git status, recent commits, Entire state, task plan, and notes after the previous push.
 - [x] Deployed parallel agents for remote PR reconciliation, proposal unblockers, service progress health, active kill cancellation, repo contracts, and shared cooldown parity.

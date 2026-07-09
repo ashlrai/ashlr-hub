@@ -56,6 +56,7 @@ import { runSwarm } from '../swarm/runner.js';
 import { loadSwarm } from '../swarm/store.js';
 import { loadProposal, listProposals } from '../inbox/store.js';
 import { loadGoal, updateMilestoneStatus, resumeMilestone } from './store.js';
+import { proposalCompletesGoalMilestone } from './completion.js';
 // M270: dynamic frontier trio reads the resolved registry so kimi joins when configured.
 import { engineTierOf } from '../run/sandboxed-engine.js';
 
@@ -627,9 +628,9 @@ function findProposalForSwarm(swarmId: string, repo: string): string | null {
  * proposed/done totals, fractionDone, and the next actionable milestone id.
  *
  * Pure analysis over the Goal record, with an optional read-only reconcile of a
- * 'proposed' milestone to 'done' when its linked proposal was applied OUT OF
- * BAND (loadProposal — never mutates the proposal). Mutates NOTHING. Never
- * throws.
+ * 'proposed' milestone to 'done' when its linked proposal was applied and has
+ * passing verification evidence (loadProposal — never mutates the proposal).
+ * Mutates NOTHING. Never throws.
  */
 export function progressOf(goal: Goal): GoalProgress {
   const byStatus: Partial<Record<MilestoneStatus, number>> = {};
@@ -639,11 +640,10 @@ export function progressOf(goal: Goal): GoalProgress {
 
   for (const m of goal.milestones) {
     // Read-only reconcile: any milestone carrying a linked proposalId whose
-    // proposal was applied OUT OF BAND counts as done — including a 'blocked'
-    // or still 'in-progress' milestone (advance links proposalId on the blocked
-    // branch when a 'needs-approval' run produced one), not only 'proposed'.
-    // Without this a goal could under-report completion and never roll to 'done'
-    // after its proposal was applied. We NEVER mutate the proposal or the goal.
+    // proposal was applied OUT OF BAND and verified counts as done — including
+    // a 'blocked' or still 'in-progress' milestone (advance links proposalId on
+    // the blocked branch when a 'needs-approval' run produced one), not only
+    // 'proposed'. We NEVER mutate the proposal or the goal.
     let effective: MilestoneStatus = m.status;
     if (
       (m.status === 'proposed' || m.status === 'blocked' || m.status === 'in-progress') &&
@@ -651,7 +651,7 @@ export function progressOf(goal: Goal): GoalProgress {
     ) {
       try {
         const p = loadProposal(m.proposalId);
-        if (p && p.status === 'applied') effective = 'done';
+        if (proposalCompletesGoalMilestone(p)) effective = 'done';
       } catch {
         /* read-only best-effort */
       }
