@@ -657,5 +657,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Broader verification passed: adjacent daemon/status/auto-merge/control suites, lint, build, audit, invariants, and full `npm run test:ci` (438 files, 8,993 passed, 7 skipped).
 - [x] Added auto-merge drain coverage for the case where self-heal maintenance empties a previously non-empty backlog.
 - [x] Post-drain focused verification passed: typecheck, build, lint, audit, diff check, and `m201/m165/m310/m48/m49` focused CI.
-- [ ] Commit, push, reload daemon, and smoke live fleet state.
+- [x] Commit, push, reload daemon, and smoke live fleet state.
 - [ ] Integrate sidecar scout recommendations into the next implementation lane.
+
+## Current Continuation - Phantom Signing Trust Boundary
+- [x] Followed the Phantom scout recommendation to inspect Hub-only signing before touching Phantom's dirty `docs/accuracy-fixes` worktree.
+- [x] Removed the metadata-derived Phantom signing path that hashed secret names/version text and emitted `alg:"phantom"`.
+- [x] Kept local HMAC signing unchanged and made legacy/future `alg:"phantom"` signatures fail closed until a real Phantom-held signer exists.
+- [x] Updated type/module comments so operator trust labels match the actual signing boundary.
+- [x] Added focused regression tests for Phantom-enabled config still emitting local signatures and Phantom-labelled signatures failing closed.
+- [x] Verification passed: typecheck, focused signing/runner/secret-safety tests, lint, build, audit, invariants, and diff check.
+- [ ] Commit, push, reload daemon, and continue with the next high-leverage lane.

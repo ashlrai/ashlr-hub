@@ -257,6 +257,36 @@ describe('OutputSignature — structure and no-secrets invariants', () => {
     expect(sig.signer).toBe('local');
   });
 
+  it('does not emit phantom signatures from metadata when phantom is enabled', async () => {
+    const { signOutput, verifyOutput } = await getSignModule();
+    const cfg = {
+      ...makeConfig(),
+      phantom: { enabled: true },
+    };
+
+    const sig = signOutput('content', cfg);
+
+    expect(sig.alg).toBe('hmac-sha256');
+    expect(sig.signer).toBe('local');
+    expect(verifyOutput('content', sig, cfg)).toBe(true);
+  });
+
+  it('legacy phantom-labelled signatures fail closed without a real phantom signer', async () => {
+    const { signOutput, verifyOutput } = await getSignModule();
+    const cfg = {
+      ...makeConfig(),
+      phantom: { enabled: true },
+    };
+    const localSig = signOutput('content', cfg);
+    const legacyPhantomSig = {
+      ...localSig,
+      alg: 'phantom',
+      signer: 'phantom:metadata-derived',
+    };
+
+    expect(verifyOutput('content', legacyPhantomSig, cfg)).toBe(false);
+  });
+
   it('ts is a valid ISO string', async () => {
     const { signOutput } = await getSignModule();
     const sig = signOutput('content', makeConfig());

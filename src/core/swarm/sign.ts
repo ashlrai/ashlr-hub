@@ -5,10 +5,9 @@
  *  - The local key is generated with crypto.randomBytes(32), stored at mode
  *    0600 under ~/.ashlr/keys/swarm.key. It is NEVER logged, printed, or
  *    committed. Only its file path is returned to callers.
- *  - Phantom path: best-effort only. If phantom is enabled+installed, we derive
- *    an HMAC key from a phantom-sourced value via a one-way sha256 so the
- *    phantom secret itself never appears in memory beyond the derivation step.
- *    On ANY failure we fall back silently to the local key.
+ *  - Phantom path: reserved for a future Phantom-held signing primitive only.
+ *    Metadata such as secret names, versions, or vault status is NOT key
+ *    material and must never be labelled as a Phantom-backed signature.
  *  - Signatures carry only hashes (hex digests) — never payload content, never
  *    key material, never any secret value.
  *  - verifyOutput never throws. signOutput degrades gracefully on all errors.
@@ -19,7 +18,6 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { spawnSync } from 'node:child_process';
 
 import type { AshlrConfig, OutputSignature } from '../types.js';
 
@@ -29,8 +27,6 @@ import type { AshlrConfig, OutputSignature } from '../types.js';
 
 const KEYS_DIR = path.join(os.homedir(), '.ashlr', 'keys');
 const KEY_FILE = path.join(KEYS_DIR, 'swarm.key');
-const PHANTOM_BIN = 'phantom';
-const PHANTOM_TIMEOUT_MS = 5_000;
 
 // ---------------------------------------------------------------------------
 // ensureLocalKey
@@ -82,165 +78,19 @@ function readLocalKeyBytes(): Buffer {
 }
 
 /**
- * Best-effort: derive a signing key from phantom.
+ * Reserved Phantom signing hook.
  *
- * Strategy: invoke `phantom env --json` (or `phantom list --json`) to retrieve
- * a deterministic identifier that is available only when phantom is initialized,
- * then derive an HMAC key via sha256(phantomValue + 'ashlr-swarm-sign-v1') so
- * the raw phantom secret never escapes this function.
+ * Deliberately returns null until Phantom exposes a dedicated signing/HMAC
+ * primitive that keeps secret material inside Phantom. Older code derived a
+ * key from metadata such as secret names and version text, then labelled the
+ * result `alg:"phantom"`. That overstated the trust boundary: metadata is not
+ * secret-backed signing material.
  *
- * Returns { keyBytes, signerId } on success, null on any failure (binary
- * missing, not initialized, unexpected output format, etc.).
- *
- * IMPORTANT: this function must NEVER return or expose the raw phantom secret
- * value. Only the derived key bytes (a one-way hash) are returned.
+ * Future implementation rule: do not use `phantom reveal`, `phantom list`,
+ * secret names, vault status, or version strings to mint signing keys here.
  */
-function derivePhantomKey(cfg: AshlrConfig): { keyBytes: Buffer; signerId: string } | null {
-  // Quick guard: phantom must be configured as enabled.
-  if (!cfg.phantom?.enabled) return null;
-
-  try {
-    // Check binary is present.
-    const versionResult = spawnSync(PHANTOM_BIN, ['--version'], {
-      encoding: 'utf8',
-      timeout: PHANTOM_TIMEOUT_MS,
-      env: { ...process.env, PHANTOM_NO_UPDATE_CHECK: '1' },
-    });
-    if (versionResult.error || versionResult.status !== 0) return null;
-
-    // Retrieve status to confirm initialization.
-    const statusResult = spawnSync(PHANTOM_BIN, ['status', '--json'], {
-      encoding: 'utf8',
-      timeout: PHANTOM_TIMEOUT_MS,
-      env: { ...process.env, PHANTOM_NO_UPDATE_CHECK: '1' },
-    });
-    if (statusResult.error) return null;
-
-    const statusText = (statusResult.stdout ?? '') + (statusResult.stderr ?? '');
-    if (!isPhantomInitialized(statusText)) return null;
-
-    // Retrieve secret names only — we never read values here.
-    // We use the list of secret names as a stable identifier for the vault
-    // identity (combined with the version), then derive key material from
-    // the vault's own signing identity via `phantom env --json` for one key.
-    //
-    // Approach: use `phantom env --json` to get a deterministic vault fingerprint.
-    // We look for a known, stable field (vault id, version, or the sorted names
-    // list) and hash it — the value itself is never stored or returned.
-    const listResult = spawnSync(PHANTOM_BIN, ['list', '--json'], {
-      encoding: 'utf8',
-      timeout: PHANTOM_TIMEOUT_MS,
-      env: { ...process.env, PHANTOM_NO_UPDATE_CHECK: '1' },
-    });
-
-    if (listResult.error || listResult.status !== 0) return null;
-
-    const listText = (listResult.stdout ?? '').trim();
-    if (!listText) return null;
-
-    // Extract only the secret NAMES (not values) from the list output.
-    // We sort them to get a stable fingerprint regardless of list order.
-    const names = extractSecretNames(listText);
-    if (names.length === 0) return null;
-
-    // Derive key material: sha256(sorted-names-joined + version-string).
-    // This is a one-way hash of metadata only — no secret values are used.
-    const versionText = (versionResult.stdout ?? '').trim();
-    const fingerprint = names.sort().join(',') + '|' + versionText + '|ashlr-swarm-sign-v1';
-    const keyBytes = crypto.createHash('sha256').update(fingerprint, 'utf8').digest();
-
-    // Signer id: a SEPARATE one-way hash of the key bytes (NOT the key bytes
-    // themselves). The signer is persisted and printed by the CLI, so exposing
-    // raw bytes of the live HMAC key (even 6 of 32 bytes) would violate the
-    // "signatures/identity carry no key material" invariant. Hashing the key
-    // with a distinct domain-separation tag yields a stable, opaque identifier
-    // that reveals nothing about the key.
-    const signerId =
-      'phantom:' +
-      crypto
-        .createHash('sha256')
-        .update('ashlr-swarm-signer-id-v1|')
-        .update(keyBytes)
-        .digest('hex')
-        .slice(0, 12);
-
-    return { keyBytes, signerId };
-  } catch {
-    // Any unexpected error → fall back to local key.
-    return null;
-  }
-}
-
-/**
- * Heuristic: determine whether phantom is initialized from its status output.
- * Mirrors the logic in core/phantom.ts (parseInitializedFromJson + text fallback).
- */
-function isPhantomInitialized(raw: string): boolean {
-  const trimmed = raw.trim();
-  // Try JSON parse first.
-  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-    try {
-      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-      if (typeof parsed['initialized'] === 'boolean') return parsed['initialized'];
-      const vault = parsed['vault'];
-      if (vault !== null && typeof vault === 'object') {
-        const v = (vault as Record<string, unknown>)['initialized'];
-        if (typeof v === 'boolean') return v;
-      }
-      for (const key of ['secretCount', 'secrets', 'mapped', 'count']) {
-        if (typeof parsed[key] === 'number') return true;
-      }
-      // Parseable JSON but no recognized field → treat as initialized.
-      return true;
-    } catch {
-      // Fall through to text heuristic.
-    }
-  }
-  // Text heuristic.
-  const lc = trimmed.toLowerCase();
-  return !lc.includes('not initialized') && !lc.includes('run phantom init');
-}
-
-/**
- * Extract secret NAMES (not values) from `phantom list --json` output.
- * Returns an empty array if the output is unrecognized. Mirrors parseSecretNames
- * in core/phantom.ts.
- */
-function extractSecretNames(raw: string): string[] {
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (Array.isArray(parsed)) {
-      const names: string[] = [];
-      for (const item of parsed) {
-        if (item !== null && typeof item === 'object') {
-          const obj = item as Record<string, unknown>;
-          if (typeof obj['name'] === 'string') names.push(obj['name']);
-          else if (typeof obj['key'] === 'string') names.push(obj['key']);
-        } else if (typeof item === 'string') {
-          names.push(item);
-        }
-      }
-      return names;
-    }
-    if (parsed !== null && typeof parsed === 'object') {
-      const obj = parsed as Record<string, unknown>;
-      for (const key of ['secrets', 'keys', 'names']) {
-        if (Array.isArray(obj[key])) return extractSecretNames(JSON.stringify(obj[key]));
-      }
-    }
-    return [];
-  } catch {
-    // Line-based fallback for plain-text output.
-    const ENV_VAR_RE = /^[A-Z_][A-Z0-9_]{0,127}$/;
-    const names: string[] = [];
-    for (const raw_line of raw.split('\n')) {
-      const token = raw_line.trim().split(/\s+/)[0];
-      if (token && ENV_VAR_RE.test(token) && token !== 'NAME' && token !== 'KEY') {
-        names.push(token);
-      }
-    }
-    return names;
-  }
+function derivePhantomKey(_cfg: AshlrConfig): { keyBytes: Buffer; signerId: string } | null {
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -252,17 +102,18 @@ function extractSecretNames(raw: string): string[] {
  *
  * Output fields:
  *   hash — sha256 hex of the raw content (content digest only, no secrets).
- *   sig  — HMAC-SHA256 hex of the content, keyed by the signing key.
- *   alg  — 'phantom' when a phantom-derived key was used, else 'hmac-sha256'.
- *   signer — opaque identity ('local' or 'phantom:<12-hex-chars>'), no secrets.
+ *   sig  — HMAC-SHA256 hex of the content, keyed by the local signing key.
+ *   alg  — currently always 'hmac-sha256'. 'phantom' is reserved for a future
+ *          Phantom-held signing primitive and legacy records fail closed.
+ *   signer — opaque identity ('local'), no secrets.
  *   ts   — ISO timestamp.
  *
- * Key selection (best-effort phantom, fall back to local):
- *   1. If cfg.phantom.enabled and phantom is installed+initialized → phantom key.
- *   2. Otherwise → local key (~/.ashlr/keys/swarm.key, auto-created 0600).
+ * Key selection:
+ *   1. Phantom signing is not emitted until Phantom provides a real signer.
+ *   2. Local key (~/.ashlr/keys/swarm.key, auto-created 0600).
  *
  * THROWS only when the local key cannot be created/read (e.g. read-only
- * filesystem) AND no phantom key is available. This is deliberate: rather than
+ * filesystem). This is deliberate: rather than
  * emit a forgeable all-zero-key signature that LOOKS trusted, signing fails so
  * the caller leaves the output unsigned. The runner calls this best-effort
  * (try/catch) and treats a thrown error / absent signature as "skip downstream
@@ -319,8 +170,8 @@ export function signOutput(content: string, cfg: AshlrConfig): OutputSignature {
  *   - Hash or HMAC mismatch (tamper detected).
  *   - Any unexpected exception.
  *
- * Key selection mirrors signOutput: attempt phantom if sig.alg === 'phantom'
- * and phantom is enabled+installed; otherwise use the local key.
+ * Key selection mirrors signOutput. Legacy/future `alg:"phantom"` signatures
+ * are fail-closed until a real Phantom-held signing primitive exists.
  */
 export function verifyOutput(
   content: string,

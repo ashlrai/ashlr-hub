@@ -2323,9 +2323,10 @@ export interface SpecArtifact {
 /**
  * Tamper-evident signature over a swarm task's output.
  * Contains ONLY hashes — never any payload secret. `hash` is a content digest
- * of the signed text; `sig` is the keyed signature (HMAC or phantom-derived).
- * `alg` records how it was produced; 'phantom' uses a phantom-sourced key
- * best-effort, 'hmac-sha256' uses the local auto-generated key.
+ * of the signed text; `sig` is the keyed signature. `hmac-sha256` uses the
+ * local auto-generated key. `phantom` is reserved for legacy/future records
+ * backed by a real Phantom-held signing primitive and must fail closed unless
+ * that primitive is available.
  */
 export interface OutputSignature {
   /** Signing algorithm / key source. */
