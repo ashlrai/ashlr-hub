@@ -1172,4 +1172,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused FleetStatus regression for verify-only plus queued diagnostic reslices.
 - [x] Persist terminal stuck-pass count before rejecting permanent auto-merge blockers.
 - [x] Run production gates for the verify-only action ranking slice.
-- [ ] Commit, push, reload daemon, and smoke live status.
+- [x] Commit, push, reload daemon, and smoke live status.
