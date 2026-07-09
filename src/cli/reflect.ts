@@ -28,7 +28,9 @@
  * Exit codes: 0 success, 1 runtime error, 2 bad usage.
  */
 
+import { hostname } from 'node:os';
 import { pad, makeColors, isTty } from './ui.js';
+import { recordAgentAction } from '../core/fleet/agent-action-ledger.js';
 import type {
   AshlrConfig,
   ReflectionOptions,
@@ -208,6 +210,40 @@ function printHelp(): void {
 
 // ─── Human-readable report output ────────────────────────────────────────────
 
+function recordReflectionTelemetry(input: {
+  mode: 'report' | 'playbooks';
+  outcome?: 'ok' | 'failed';
+  swarmsAnalyzed?: number;
+  playbooks?: number;
+  persisted?: number;
+  didPersist?: boolean;
+  window?: string | null;
+}): void {
+  const counts: Record<string, number> = {};
+  if (input.swarmsAnalyzed !== undefined) counts.swarmsAnalyzed = Math.max(0, Math.trunc(input.swarmsAnalyzed));
+  if (input.playbooks !== undefined) counts.playbooks = Math.max(0, Math.trunc(input.playbooks));
+  if (input.persisted !== undefined) counts.persisted = Math.max(0, Math.trunc(input.persisted));
+  recordAgentAction({
+    schemaVersion: 1,
+    ts: new Date().toISOString(),
+    machineId: hostname(),
+    actor: 'agent',
+    kind: 'reflection',
+    outcome: input.outcome ?? 'ok',
+    action: input.mode === 'playbooks' ? 'reflect:playbooks' : 'reflect:report',
+    summary: input.mode === 'playbooks'
+      ? `reflection playbooks distilled ${counts.playbooks ?? 0}, persisted ${counts.persisted ?? 0}`
+      : `reflection report analyzed ${counts.swarmsAnalyzed ?? 0} swarm(s)`,
+    reason: input.window ? `window:${input.window}` : 'window:default',
+    tags: [
+      'reflection',
+      input.mode,
+      input.didPersist ? 'persisted' : 'metadata-only',
+    ],
+    ...(Object.keys(counts).length > 0 ? { counts } : {}),
+  });
+}
+
 /** Format a 0..1 ratio as a whole-percentage string. */
 function pct(n: number): string {
   return `${(n * 100).toFixed(0)}%`;
@@ -360,6 +396,12 @@ export async function cmdReflect(args: string[]): Promise<number> {
         allowCloud: parsed.allowCloud,
         persist: parsed.persist, // report-only unless the user passes --persist
       });
+      recordReflectionTelemetry({
+        mode: 'playbooks',
+        playbooks: result.playbooks.length,
+        persisted: result.persisted.length,
+        didPersist: result.didPersist,
+      });
     } catch (err) {
       process.stderr.write(red('error: ') + (err instanceof Error ? err.message : String(err)) + '\n');
       return 1;
@@ -448,6 +490,11 @@ export async function cmdReflect(args: string[]): Promise<number> {
   // Persist a snapshot so deltas accumulate week-over-week. Best-effort: a
   // failed save never blocks the report (the store never throws and returns null).
   core.saveReport(report);
+  recordReflectionTelemetry({
+    mode: 'report',
+    swarmsAnalyzed: report.swarmsAnalyzed,
+    window: parsed.window,
+  });
 
   if (parsed.json) {
     process.stdout.write(JSON.stringify(report) + '\n');

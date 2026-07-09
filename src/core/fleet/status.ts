@@ -2141,13 +2141,23 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   const contextEfficiency = status.contextEfficiency;
   const contextRisk = contextEfficiency?.risks.find((risk) => risk.severity === 'high' || risk.severity === 'medium');
   if (contextEfficiency && (contextEfficiency.posture === 'strained' || contextRisk)) {
+    const shouldDrainReslices = contextEfficiency.risks.some((risk) => risk.id === 'proposal-yield-low') ||
+      (status.queue.generatedWork?.diagnosticReslices ?? 0) > 0;
     add({
       id: 'improve-context-efficiency',
       priority: 'medium',
       label: 'Improve context efficiency',
       detail: contextRisk?.detail ?? contextEfficiency.recommendations[0] ?? 'Context efficiency is degraded; inspect reflection, retrieval, and proposal-yield signals.',
       commands: [
-        nextActionCommand('Evaluate attention', ['ashlr', 'eval-attention', '--json'], 'read-only'),
+        nextActionCommand('Run reflection', ['ashlr', 'reflect', 'playbooks', '--persist'], 'control-plane', {
+          note: 'Writes only metadata-derived playbooks under the Ashlr genome hub; no repo source, merge, or network authority.',
+        }),
+        nextActionCommand('Evaluate attention', ['ashlr', 'eval', 'attention', '--json'], 'read-only'),
+        ...(shouldDrainReslices
+          ? [nextActionCommand('Drain reslice queue', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch', {
+              note: 'Runs the existing guarded daemon path to drain already-queued diagnostic reslices.',
+            })]
+          : []),
         nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
       ],
     });
@@ -3017,6 +3027,8 @@ function missionDirective(
       return 'Inspect dispatch skips';
     case 'inspect-proposal-production':
       return 'Recover proposal production';
+    case 'improve-context-efficiency':
+      return 'Run context reflection and reslice';
     case 'review-phantom-audit':
       return 'Review Phantom audit';
     case 'build-backlog':

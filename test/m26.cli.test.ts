@@ -20,6 +20,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { readAgentActions } from '../src/core/fleet/agent-action-ledger.js';
 
 // ---------------------------------------------------------------------------
 // HOME isolation — every ~/.ashlr write is redirected to a tmp dir
@@ -358,6 +359,31 @@ describe('reflect playbooks — report-only default + --persist gate', () => {
     expect(fs.existsSync(hubPath())).toBe(true);
     const lines = fs.readFileSync(hubPath(), 'utf8').split('\n').filter(Boolean);
     expect(lines.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('--persist records metadata-only reflection telemetry without raw swarm goals', async () => {
+    const rawGoal = 'RAW_SWARM_GOAL_SENTINEL_M26';
+    seedSwarm({ id: 'p1', goal: `${rawGoal} implement dashboard feature`, status: 'done', createdAt: '2026-06-01T00:00:00.000Z' });
+    seedSwarm({ id: 'p2', goal: `${rawGoal} implement billing feature`, status: 'done', createdAt: '2026-06-02T00:00:00.000Z' });
+
+    const { code } = await captureStdout(() => cmdReflect(['playbooks', '--persist']));
+
+    expect(code).toBe(0);
+    const event = readAgentActions().find((row) => row.action === 'reflect:playbooks');
+    expect(event).toMatchObject({
+      actor: 'agent',
+      kind: 'reflection',
+      outcome: 'ok',
+      summary: expect.stringContaining('reflection playbooks distilled'),
+      tags: expect.arrayContaining(['reflection', 'playbooks', 'persisted']),
+      counts: {
+        persisted: expect.any(Number),
+        playbooks: expect.any(Number),
+      },
+    });
+    expect(event?.counts?.persisted).toBeGreaterThanOrEqual(1);
+    expect(JSON.stringify(event)).not.toContain(rawGoal);
+    expect(JSON.stringify(readAgentActions())).not.toContain(rawGoal);
   });
 
   it('--persist --json reports didPersist=true', async () => {

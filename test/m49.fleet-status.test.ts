@@ -1875,6 +1875,90 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       label: 'Improve context efficiency',
       detail: expect.stringContaining('No hub genome memories'),
     }));
+    const action = s.nextActions?.find((candidate) => candidate.id === 'improve-context-efficiency');
+    expect(action?.commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        label: 'Run reflection',
+        argv: ['ashlr', 'reflect', 'playbooks', '--persist'],
+        safety: 'control-plane',
+      }),
+      expect.objectContaining({
+        label: 'Evaluate attention',
+        argv: ['ashlr', 'eval', 'attention', '--json'],
+        safety: 'read-only',
+      }),
+    ]));
+    expect(action?.commands?.map((command) => command.label)).not.toContain('Drain reslice queue');
+    expect(s.missionBrief).toMatchObject({
+      directive: 'Run context reflection and reslice',
+      action: {
+        id: 'improve-context-efficiency',
+      },
+    });
+  });
+
+  it('adds a guarded reslice drain command to context-efficiency action when generated reslices are queued', async () => {
+    const now = new Date().toISOString();
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo-a');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeRunningDaemon(tmpHome, [], now);
+    writeFileSync(
+      join(ashlrDir, 'self-heal-queue.json'),
+      JSON.stringify([
+        {
+          id: 'repo:proposal-repair-nodiff:123456789abc',
+          repo,
+          source: 'self',
+          title: 'Reslice no-diff dispatch for repo item repo:goal:one',
+          detail:
+            'Diagnostic reslice: a dispatch completed without file changes.\n' +
+            'Original work item: repo:goal:one\n' +
+            'Dispatch outcome: empty-diff\n' +
+            'Action: reslice the work into a smaller concrete edit.',
+          value: 5,
+          effort: 1,
+          score: 5,
+          tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+          ts: now,
+        },
+      ]),
+      'utf8',
+    );
+    recordAgentAction({
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      actor: 'daemon',
+      kind: 'dispatch',
+      outcome: 'no-proposal',
+      action: 'daemon:dispatch',
+      summary: 'local-coder empty-diff for Improve context',
+      repo,
+      itemId: 'item-a',
+      source: 'todo',
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      reason: 'agent returned no diff',
+    });
+
+    const s = await buildFleetStatus(baseConfig());
+    const action = s.nextActions?.find((candidate) => candidate.id === 'improve-context-efficiency');
+
+    expect(s.queue.generatedWork).toMatchObject({
+      diagnosticReslices: 1,
+      proposalRepair: 1,
+    });
+    expect(action?.commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        label: 'Drain reslice queue',
+        argv: ['ashlr', 'daemon', 'start', '--once'],
+        safety: 'autonomous-dispatch',
+      }),
+    ]));
   });
 
   it('promotes poor durable dispatch yield into next actions', async () => {

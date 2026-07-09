@@ -991,6 +991,14 @@
   - Regression coverage: daemon loop proves capture-missing records an `empty` worked outcome and diagnostic dispatch-production label; dispatch-production ledger proves diagnostic reasons survive despite raw disabled counts; FleetStatus proves weak-yield next actions and attempt coverage are diagnostic rather than policy-suppressed.
   - Verification passed: `npm run typecheck -- --pretty false`; `npm run test:ci -- test/m201.daemon-loop.test.ts test/m342.dispatch-production-ledger.test.ts test/m49.fleet-status.test.ts test/m53.intel.test.ts test/m352.attempt-records.test.ts` (215 tests); `npm run lint` (known 115-warning baseline, 0 errors); `npm run build`; `npm audit --audit-level=moderate`; and `git diff --check`.
 
+- Current context-efficiency executable action pass:
+  - Scout audit found the FleetStatus context-efficiency next action was inspection-only and used stale CLI syntax (`ashlr eval-attention --json`), so it could not directly close the live `reflection-missing` risk.
+  - Implementation: `improve-context-efficiency` now offers executable commands: `ashlr reflect playbooks --persist` as a `control-plane` action, corrected `ashlr eval attention --json`, and a guarded `ashlr daemon start --once` drain command when diagnostic reslices are queued or proposal-yield-low is present.
+  - Mission brief now has an explicit directive for this action: `Run context reflection and reslice`.
+  - Reflection telemetry: successful `ashlr reflect` report and playbook runs now write metadata-only `agent-actions` rows with `kind:"reflection"` and count fields only. The row stores mode/count/window tags and avoids raw swarm goals, playbook text, reports, prompts, diffs, stdout/stderr, env, and file contents.
+  - Regression coverage: `m49.fleet-status` checks the corrected action command contract, optional reslice drain, and mission directive. `m26.cli` proves `reflect playbooks --persist` writes metadata-only reflection telemetry without leaking seeded raw goal text.
+  - Verification passed: `npm run typecheck -- --pretty false`; `npm run test:ci -- test/m49.fleet-status.test.ts test/m26.cli.test.ts test/m346.eval-attention.test.ts test/m310.queued-autonomy-work.test.ts` (92 tests); `npm run lint` (known 115-warning baseline, 0 errors); `npm run build`; `npm audit --audit-level=moderate`; and `git diff --check`.
+
 - Current epoch-gated learned routing pass:
   - Purpose: allow the existing dispatch-yield learned reroute to use the new label foundation, but only for current, authoritative, metadata-only samples.
   - Implementation: `dispatchYieldForBackend()` now ignores rows unless `learningLabel` sanitizes as authoritative, the label is not policy-suppressed, top-level `routerPolicyVersion` equals `ROUTER_POLICY_VERSION`, optional `routeSnapshot.routerPolicyVersion` agrees with the top-level policy, and `learningEpoch` matches `learningEpochFromTimestamp(event.ts)`.

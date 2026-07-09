@@ -1052,3 +1052,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add daemon, dispatch-ledger, and FleetStatus regression coverage.
 - [x] Run focused learning/daemon/status verification plus typecheck, lint, build, audit, and diff checks.
 - [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Context-Efficiency Executable Action
+- [x] Deploy scouts for context-efficiency and Phantom delegation follow-up lanes.
+- [x] Fix context-efficiency next action to use `ashlr eval attention --json`.
+- [x] Add `ashlr reflect playbooks --persist` as a control-plane next action with metadata-only safety note.
+- [x] Add guarded one-shot daemon drain command when proposal-yield-low or generated diagnostic reslices are present.
+- [x] Add mission directive for the context reflection/reslice action.
+- [x] Emit metadata-only reflection telemetry for report and playbook runs.
+- [x] Add FleetStatus and reflect CLI regression coverage.
+- [x] Run focused tests, typecheck, lint, build, audit, and diff checks.
+- [ ] Commit, push, reload daemon, and smoke live status.
