@@ -33,6 +33,8 @@ import { loadConfig } from './config.js';
 import { withToolEnv } from './env-bridge.js';
 import { withHeal, defaultHealPolicy } from './run/self-heal.js';
 import { listNativeTools, isNativeTool, callNativeTool } from './mcp-native.js';
+import { hasSecretLikeArgv, redactedCommand } from './mcp-argv-safety.js';
+import { scrubSecrets } from './util/scrub.js';
 
 // ---------------------------------------------------------------------------
 // M105: Browser MCP probe + tool-call helpers
@@ -222,12 +224,22 @@ function timeout<T>(ms: number, label: string): Promise<T> {
   });
 }
 
+function safeErrorMessage(err: unknown): string {
+  return scrubSecrets(err instanceof Error ? err.message : String(err));
+}
+
 /**
  * Build a connected SDK Client for one downstream spec, racing the connect
  * against a timeout. The caller owns closing the returned client.
  * Throws on failure (caller wraps).
  */
 async function connectDownstream(spec: McpServerSpec, timeoutMs: number, cfg?: ReturnType<typeof loadConfig>): Promise<Client> {
+  if (hasSecretLikeArgv(spec.args)) {
+    throw new Error(
+      `unsafe MCP argv refused for "${spec.name}": ${redactedCommand(spec.command, spec.args)} ` +
+      '(move credentials to env, Phantom, or a wrapper/config file)',
+    );
+  }
   const transport = new StdioClientTransport({
     command: spec.command,
     args: spec.args,
@@ -309,7 +321,7 @@ export async function probeServer(
       tools,
     };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = safeErrorMessage(err);
     return {
       name: spec.name,
       ok: false,
@@ -363,7 +375,7 @@ export async function startGateway(
   const aggregable = registry.servers.filter((spec) => {
     if (isSelfGateway(spec)) {
       process.stderr.write(
-        `[ashlr mcp] skipping self "${spec.name}" (${spec.command} ${spec.args.join(' ')}) — would recurse\n`,
+        `[ashlr mcp] skipping self "${spec.name}" (${redactedCommand(spec.command, spec.args)}) — would recurse\n`,
       );
       return false;
     }
@@ -417,8 +429,7 @@ export async function startGateway(
         `[ashlr mcp] connected "${name}" (${result.value.toolNames.size} tools)\n`,
       );
     } else {
-      const reason =
-        result.reason instanceof Error ? result.reason.message : String(result.reason);
+      const reason = safeErrorMessage(result.reason);
       process.stderr.write(`[ashlr mcp] WARN skipping "${name}": ${reason}\n`);
     }
   });

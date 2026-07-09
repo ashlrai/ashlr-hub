@@ -1,16 +1,16 @@
 /**
- * M283 — fleet-written .mcp.json must NEVER appear in a proposal diff.
+ * M283 — fleet-written MCP sidecar must NEVER appear in a proposal diff.
  *
  * Tests:
- *   1. writeMcpConfigIfAvailable writes .mcp.json AND registers it in the
+ *   1. writeMcpConfigIfAvailable writes the fleet sidecar AND registers it in the
  *      worktree's git/info/exclude file (layer 1).
- *   2. sandboxDiff excludes a fleet-written .mcp.json from the patch and
+ *   2. sandboxDiff excludes fleet-written MCP infra from the patch and
  *      numstat, but INCLUDES the agent's real file change (layer 2).
  *   3. A pre-existing .mcp.json (in source repo before the run) is NOT
- *      clobbered by writeMcpConfigIfAvailable (returns null, no exclude
- *      registered), AND the agent's edit to it IS captured in the diff.
+ *      clobbered by writeMcpConfigIfAvailable, AND the agent's edit to it IS
+ *      captured in the diff.
  *   4. writeMcpConfigIfAvailable is idempotent: calling twice on a worktree
- *      that already has .mcp.json returns null on the second call.
+ *      that already has a sidecar returns the same fleet-owned path.
  *
  * Hermetic: real git repos via tmp dirs + `git init`. No engine spawning.
  * Uses vi.fn where needed; all values are fixed/deterministic.
@@ -29,7 +29,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { writeMcpConfigIfAvailable } from '../src/core/run/sandboxed-engine.js';
+import { FLEET_MCP_CONFIG_FILENAME, writeMcpConfigIfAvailable } from '../src/core/run/sandboxed-engine.js';
 import { sandboxDiff } from '../src/core/sandbox/worktree.js';
 import type { Sandbox } from '../src/core/types.js';
 
@@ -99,11 +99,11 @@ function makeSandbox(sourceRepo: string, worktreePath: string, branch: string): 
 }
 
 // ---------------------------------------------------------------------------
-// 1. writeMcpConfigIfAvailable registers .mcp.json in git/info/exclude (layer 1)
+// 1. writeMcpConfigIfAvailable registers the fleet sidecar in git/info/exclude (layer 1)
 // ---------------------------------------------------------------------------
 
 describe('M283 layer-1: writeMcpConfigIfAvailable registers git exclude', () => {
-  it('writes .mcp.json AND adds it to the worktree gitdir info/exclude', () => {
+  it('writes the fleet sidecar AND adds it to the worktree gitdir info/exclude', () => {
     const sourceRepo = initRepo('m283-l1-src-');
     const worktreePath = mkTmp('m283-l1-wt-');
     addWorktree(sourceRepo, 'ashlr/sandbox/m283-l1', worktreePath);
@@ -115,7 +115,7 @@ describe('M283 layer-1: writeMcpConfigIfAvailable registers git exclude', () => 
       return;
     }
 
-    expect(result).toBe(join(worktreePath, '.mcp.json'));
+    expect(result).toBe(join(worktreePath, FLEET_MCP_CONFIG_FILENAME));
     expect(existsSync(result)).toBe(true);
 
     // Resolve the worktree's own gitdir
@@ -131,10 +131,10 @@ describe('M283 layer-1: writeMcpConfigIfAvailable registers git exclude', () => 
 
     expect(existsSync(excludePath)).toBe(true);
     const content = readFileSync(excludePath, 'utf8');
-    expect(content).toContain('.mcp.json');
+    expect(content).toContain(FLEET_MCP_CONFIG_FILENAME);
   });
 
-  it('returns null and does NOT register exclude when .mcp.json already exists (pre-existing guard)', () => {
+  it('preserves a repo-owned .mcp.json while still writing the fleet sidecar', () => {
     const sourceRepo = initRepo('m283-l1-preexist-src-');
     const worktreePath = mkTmp('m283-l1-preexist-wt-');
     addWorktree(sourceRepo, 'ashlr/sandbox/m283-l1-pre', worktreePath);
@@ -144,15 +144,15 @@ describe('M283 layer-1: writeMcpConfigIfAvailable registers git exclude', () => 
 
     const result = writeMcpConfigIfAvailable(worktreePath);
 
-    // Must return null — fleet must not overwrite a pre-existing .mcp.json
-    expect(result).toBeNull();
+    if (result === null) return;
+    expect(result).toBe(join(worktreePath, FLEET_MCP_CONFIG_FILENAME));
 
     // The file content must be unchanged (fleet did not clobber it)
     const content = readFileSync(join(worktreePath, '.mcp.json'), 'utf8');
     expect(content).toBe('{"mcpServers":{}}');
   });
 
-  it('is idempotent: second call on a worktree that already has .mcp.json returns null', () => {
+  it('is idempotent: second call returns the same fleet-owned sidecar path', () => {
     const sourceRepo = initRepo('m283-l1-idem-src-');
     const worktreePath = mkTmp('m283-l1-idem-wt-');
     addWorktree(sourceRepo, 'ashlr/sandbox/m283-l1-idem', worktreePath);
@@ -161,18 +161,17 @@ describe('M283 layer-1: writeMcpConfigIfAvailable registers git exclude', () => 
     // Skip if ashlr not on PATH
     if (result1 === null) return;
 
-    // Second call: .mcp.json now exists → pre-existing guard fires → null
     const result2 = writeMcpConfigIfAvailable(worktreePath);
-    expect(result2).toBeNull();
+    expect(result2).toBe(result1);
   });
 });
 
 // ---------------------------------------------------------------------------
-// 2. sandboxDiff excludes fleet-written .mcp.json, keeps real changes (layer 2)
+// 2. sandboxDiff excludes fleet-written MCP infra, keeps real changes (layer 2)
 // ---------------------------------------------------------------------------
 
-describe('M283 layer-2: sandboxDiff excludes fleet-written .mcp.json', () => {
-  it('real change IS in diff, fleet .mcp.json is NOT', () => {
+describe('M283 layer-2: sandboxDiff excludes fleet-written MCP infra', () => {
+  it('real change IS in diff, legacy fleet .mcp.json is NOT', () => {
     const sourceRepo = initRepo('m283-l2-src-');
     const worktreePath = mkTmp('m283-l2-wt-');
     addWorktree(sourceRepo, 'ashlr/sandbox/m283-l2', worktreePath);
@@ -243,6 +242,22 @@ describe('M283 layer-2: sandboxDiff excludes fleet-written .mcp.json', () => {
     expect(diff.insertions).toBe(0);
     expect(diff.deletions).toBe(0);
   });
+
+  it('empty diff when only the fleet sidecar was written (no real changes)', () => {
+    const sourceRepo = initRepo('m283-l2-empty-sidecar-src-');
+    const worktreePath = mkTmp('m283-l2-empty-sidecar-wt-');
+    addWorktree(sourceRepo, 'ashlr/sandbox/m283-l2-empty-sidecar', worktreePath);
+    const sb = makeSandbox(sourceRepo, worktreePath, 'ashlr/sandbox/m283-l2-empty-sidecar');
+
+    writeFileSync(join(worktreePath, FLEET_MCP_CONFIG_FILENAME), '{"mcpServers":{"ashlr":{"command":"/usr/bin/ashlr","args":["mcp"]}}}', 'utf8');
+
+    const diff = sandboxDiff(sb);
+
+    expect(diff.files).toBe(0);
+    expect(diff.patch.trim()).toBe('');
+    expect(diff.insertions).toBe(0);
+    expect(diff.deletions).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -269,7 +284,7 @@ describe('M283 end-to-end: write infra file then capture diff', () => {
     expect(diff.files).toBeGreaterThanOrEqual(1);
 
     // Fleet file absent
-    expect(diff.patch).not.toContain('.mcp.json');
+    expect(diff.patch).not.toContain(FLEET_MCP_CONFIG_FILENAME);
     expect(diff.patch).not.toContain('mcpServers');
   });
 });

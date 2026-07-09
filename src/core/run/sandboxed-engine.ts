@@ -769,19 +769,19 @@ function resolveAshlrBin(): string | null {
   }
 }
 
+export const FLEET_MCP_CONFIG_FILENAME = '.ashlr-fleet.mcp.json';
+
 /**
- * Write a minimal `.mcp.json` into the worktree so the fleet's claude instance
+ * Write a minimal sidecar MCP config into the worktree so the fleet's claude instance
  * always has ashlr__ MCP tools regardless of the user's global settings.
  *
  * GUARD: only writes when `ashlr` is on PATH — CI/CD environments without the
  * plugin are completely unaffected (returns null → caller skips --mcp-config).
  *
- * M283 PRE-EXISTING GUARD: if `.mcp.json` already exists in the worktree before
- * the fleet writes it, we skip writing entirely and return null. This means the
- * agent can legitimately edit a pre-existing `.mcp.json` (it is NOT fleet-written)
- * and that edit will appear in the proposal diff as expected.
+ * M283 PRE-EXISTING GUARD: this writes a fleet-owned sidecar instead of `.mcp.json`,
+ * so a repo-owned `.mcp.json` can be edited by the agent and captured normally.
  *
- * M283 DIFF EXCLUSION: after writing, registers `.mcp.json` in the worktree's
+ * M283 DIFF EXCLUSION: after writing, registers the sidecar in the worktree's
  * `.git/info/exclude` file so `git add -A` never stages the fleet-written file.
  * This guarantees the fleet-infra file NEVER leaks into any proposal diff, which
  * previously caused the judge to return 'review' instead of 'ship' (M283).
@@ -796,14 +796,9 @@ export function writeMcpConfigIfAvailable(worktreePath: string): string | null {
     const ashlrBin = resolveAshlrBin();
     if (!ashlrBin) return null;
 
-    const mcpConfigPath = join(worktreePath, '.mcp.json');
+    const mcpConfigPath = join(worktreePath, FLEET_MCP_CONFIG_FILENAME);
     // Only write if the worktree path exists (sanity check).
     if (!existsSync(worktreePath)) return null;
-
-    // M283: if .mcp.json already exists (the target repo has its own), skip
-    // writing — the agent may legitimately edit it, and we must not clobber it
-    // or add an exclude entry that would suppress that legitimate edit.
-    if (existsSync(mcpConfigPath)) return null;
 
     const mcpConfig = {
       mcpServers: {
@@ -820,7 +815,7 @@ export function writeMcpConfigIfAvailable(worktreePath: string): string | null {
     };
     writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
 
-    // M283: register .mcp.json in the worktree's git exclude file so `git add -A`
+    // M283: register the fleet sidecar in the worktree's git exclude file so `git add -A`
     // never stages the fleet-written infra file. The worktree's gitdir is found via
     // `git rev-parse --git-dir` run inside the worktree — for a linked worktree this
     // resolves to the per-worktree gitdir (e.g. <source>/.git/worktrees/<id>), NOT
@@ -844,8 +839,12 @@ export function writeMcpConfigIfAvailable(worktreePath: string): string | null {
         const existing = existsSync(excludePath)
           ? readFileSync(excludePath, 'utf8')
           : '';
-        if (!existing.split('\n').some((l) => l.trim() === '.mcp.json')) {
-          appendFileSync(excludePath, '\n# ashlr M283: fleet-infra file — excluded from proposal diff\n.mcp.json\n', 'utf8');
+        if (!existing.split('\n').some((l) => l.trim() === FLEET_MCP_CONFIG_FILENAME)) {
+          appendFileSync(
+            excludePath,
+            `\n# ashlr M283: fleet-infra file — excluded from proposal diff\n${FLEET_MCP_CONFIG_FILENAME}\n`,
+            'utf8',
+          );
         }
       }
     } catch {
@@ -1260,7 +1259,7 @@ export async function runEngineSandboxed(
   let proposalId: string | undefined;
   let proposalOutcomeResult: RunProposalOutcome | undefined;
 
-  // M248: write .mcp.json to worktree (guarded: only when ashlr is on PATH).
+  // M248: write a fleet-owned MCP sidecar to the worktree (guarded: only when ashlr is on PATH).
   // fleetMcp defaults to true (on) — set cfg.foundry.fleetMcp = false to opt out.
   const fleetMcpEnabled = (cfg.foundry as Record<string, unknown> | undefined)?.['fleetMcp'] !== false;
   let mcpConfigPath: string | null = null;
@@ -1280,11 +1279,12 @@ export async function runEngineSandboxed(
       autonomous: true,
     });
 
-    // M248: inject --mcp-config into the claude argv when .mcp.json was written.
+    // M248/MCP safety: inject the worktree MCP config strictly for Claude so
+    // daemon runs get only the sandbox-local ashlr MCP server, not global MCPs.
     // Codex does not support --mcp-config (no equivalent flag) — skip silently.
     // Any other cli-agent: skip (safe no-op fallback).
     if (cmd && mcpConfigPath && engine === 'claude') {
-      cmd = { ...cmd, args: [...cmd.args, '--mcp-config', mcpConfigPath] };
+      cmd = { ...cmd, args: [...cmd.args, '--mcp-config', mcpConfigPath, '--strict-mcp-config'] };
     }
     if (!cmd) {
       proposalOutcomeResult = proposalOutcome('engine-command-missing', `no command for engine "${engine}"`);

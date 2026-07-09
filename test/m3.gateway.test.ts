@@ -158,6 +158,23 @@ describe('probeServer — nonexistent command', () => {
 });
 
 // ---------------------------------------------------------------------------
+// probeServer — unsafe argv refusal (no secret-bearing child process)
+// ---------------------------------------------------------------------------
+
+describe('probeServer — unsafe MCP argv', () => {
+  it('refuses secret-like argv before launch and redacts the error', async () => {
+    const health = await probeServer(
+      makeSpec({ args: [FIXTURE_PATH, '--access-token', 'sbp_5bf63c2c9911'] }),
+    );
+
+    expect(health.ok).toBe(false);
+    expect(health.error).toContain('unsafe MCP argv refused');
+    expect(health.error).toContain('<redacted>');
+    expect(health.error).not.toContain('sbp_5bf63c2c9911');
+  }, 10_000);
+});
+
+// ---------------------------------------------------------------------------
 // probeServer — timeout (server that never responds)
 // ---------------------------------------------------------------------------
 

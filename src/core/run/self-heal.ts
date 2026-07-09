@@ -29,6 +29,7 @@ import { withRetry } from './retry.js';
 function isMcpRestartable(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const msg = err.message.toLowerCase();
+  if (msg.includes('unsafe mcp argv refused')) return false;
   return (
     msg.includes('spawn') ||
     msg.includes('econnrefused') ||

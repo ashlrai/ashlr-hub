@@ -1139,3 +1139,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused daemon/status/CLI regression coverage.
 - [x] Run full verification suite for bounded diagnostic drain status.
 - [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - MCP Argv Safety
+- [x] Rechecked clean pushed baseline and current MCP hardening diff.
+- [x] Deployed sidecar scouts for MCP safety gaps, the next fleet autonomy lane, and Phantom/Ashlr opportunity synthesis.
+- [x] Add a shared core MCP argv redaction and fail-closed launch-safety helper.
+- [x] Refuse secret-like MCP argv before spawning downstream MCP child processes and redact refusal text.
+- [x] Force daemon-launched Claude MCP config into strict mode so global MCP servers are not inherited.
+- [x] Run focused MCP/Fleet MCP verification, typecheck, lint/build/audit gates, commit, push, reload daemon, and smoke live status.

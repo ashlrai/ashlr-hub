@@ -505,16 +505,12 @@ export function createSandbox(
 //
 // IMPORTANT: these exclusions apply ONLY to fleet-written files (ones that did not
 // exist in the source repo before the run). A repo that already has its own
-// `.mcp.json` will not have had writeMcpConfigIfAvailable write/exclude it
-// (the pre-existing guard in that function returns null before writing), so the
-// agent's edits to it will still appear in the diff via normal staging. The
-// pathspec `:(exclude).mcp.json` in layer 2 would suppress that legitimate edit —
-// therefore layer 2 also checks whether the file appeared in the base commit; if
-// it did NOT exist at baseHead it is suppressed (fleet-written), if it DID exist
-// it is allowed through. This check is implemented by passing the pathspec only
-// when the file is untracked (not in baseHead).
+// `.mcp.json` is a legacy fleet-infra filename, while `.ashlr-fleet.mcp.json`
+// is the current sidecar. If a repo has a legitimate tracked file with either
+// name, the baseHead check below allows that edit through; otherwise new
+// fleet-written infra is suppressed from the proposal diff.
 // ---------------------------------------------------------------------------
-const SANDBOX_INFRA_FILES = ['.mcp.json', 'node_modules'] as const;
+const SANDBOX_INFRA_FILES = ['.mcp.json', '.ashlr-fleet.mcp.json', 'node_modules'] as const;
 
 /**
  * Capture the git diff of the sandbox worktree vs its base HEAD. Read-only —

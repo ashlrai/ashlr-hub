@@ -2,9 +2,9 @@
  * M248 fleet-MCP tests — guarantee ashlr-plugin is wired into sandboxed engines.
  *
  * Tests:
- *   1. writeMcpConfigIfAvailable writes .mcp.json with correct server entry
+ *   1. writeMcpConfigIfAvailable writes fleet sidecar config with correct server entry
  *      when the plugin binary is present (real PATH includes ashlr on this machine).
- *   2. --mcp-config injected into claude autonomous argv when .mcp.json written.
+ *   2. --mcp-config injected into claude autonomous argv when sidecar config is written.
  *   3. which-guard: when ashlr absent (PATH manipulated) → returns null, argv unchanged.
  *   4. CLAUDE_SESSION_ID set to ashlr-fleet-<runId> in the contained env.
  *   5. fleetMcp: false disables injection; absent/true enables it.
@@ -19,6 +19,7 @@ import { join } from 'node:path';
 
 import type { AshlrConfig } from '../src/core/types.js';
 import {
+  FLEET_MCP_CONFIG_FILENAME,
   writeMcpConfigIfAvailable,
   buildContainedEnv,
 } from '../src/core/run/sandboxed-engine.js';
@@ -65,11 +66,11 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// 1. writeMcpConfigIfAvailable — plugin present → writes correct .mcp.json
+// 1. writeMcpConfigIfAvailable — plugin present → writes correct fleet sidecar
 // ---------------------------------------------------------------------------
 
 describe('M248 writeMcpConfigIfAvailable — plugin present', () => {
-  it('writes .mcp.json with ashlr server entry when ashlr is on PATH', () => {
+  it('writes fleet sidecar config with ashlr server entry when ashlr is on PATH', () => {
     // ashlr is installed at /Users/masonwyatt/.local/bin/ashlr on this machine.
     // If it's not present, the function returns null and the test is skipped.
     const worktree = mkTmp('ashlr-m248-present-');
@@ -78,12 +79,12 @@ describe('M248 writeMcpConfigIfAvailable — plugin present', () => {
 
     if (result === null) {
       // ashlr not installed on this machine — skip structural assertions
-      // but confirm no .mcp.json was created (silent skip, not a failure).
-      expect(existsSync(join(worktree, '.mcp.json'))).toBe(false);
+      // but confirm no sidecar was created (silent skip, not a failure).
+      expect(existsSync(join(worktree, FLEET_MCP_CONFIG_FILENAME))).toBe(false);
       return;
     }
 
-    expect(result).toBe(join(worktree, '.mcp.json'));
+    expect(result).toBe(join(worktree, FLEET_MCP_CONFIG_FILENAME));
     expect(existsSync(result)).toBe(true);
 
     const parsed = JSON.parse(readFileSync(result, 'utf8'));
@@ -103,6 +104,20 @@ describe('M248 writeMcpConfigIfAvailable — plugin present', () => {
       },
     });
   });
+
+  it('does not clobber a repo-owned .mcp.json and still writes the fleet sidecar', () => {
+    const worktree = mkTmp('ashlr-m248-preexisting-');
+    writeFileSync(join(worktree, '.mcp.json'), '{"mcpServers":{"repo":{"command":"repo-mcp"}}}', 'utf8');
+
+    const result = writeMcpConfigIfAvailable(worktree);
+    if (result === null) return;
+
+    expect(result).toBe(join(worktree, FLEET_MCP_CONFIG_FILENAME));
+    expect(readFileSync(join(worktree, '.mcp.json'), 'utf8')).toBe(
+      '{"mcpServers":{"repo":{"command":"repo-mcp"}}}',
+    );
+    expect(existsSync(result)).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -121,7 +136,7 @@ describe('M248 writeMcpConfigIfAvailable — plugin absent (which-guard)', () =>
     try {
       const result = writeMcpConfigIfAvailable(worktree);
       expect(result).toBeNull();
-      expect(existsSync(join(worktree, '.mcp.json'))).toBe(false);
+      expect(existsSync(join(worktree, FLEET_MCP_CONFIG_FILENAME))).toBe(false);
     } finally {
       process.env.PATH = prevPath;
     }
@@ -135,15 +150,15 @@ describe('M248 writeMcpConfigIfAvailable — plugin absent (which-guard)', () =>
 });
 
 // ---------------------------------------------------------------------------
-// 3. --mcp-config injection logic (pure argv manipulation, no spawn)
+// 3. strict --mcp-config injection logic (pure argv manipulation, no spawn)
 //    Mirrors the exact production code path in sandboxed-engine.ts.
 // ---------------------------------------------------------------------------
 
-describe('M248 --mcp-config injection logic', () => {
+describe('M248 strict --mcp-config injection logic', () => {
   const CWD = '/tmp/ashlr-m248-cwd';
 
   it('injects --mcp-config <path> after autonomous flags (plugin present)', () => {
-    const mcpPath = join(CWD, '.mcp.json');
+    const mcpPath = join(CWD, FLEET_MCP_CONFIG_FILENAME);
     const cfg = makeConfig();
     const cmd = buildEngineCommand('claude', 'do work', cfg, {
       cwd: CWD,
@@ -156,14 +171,15 @@ describe('M248 --mcp-config injection logic', () => {
     const mcpConfigPath: string | null = mcpPath;
     const finalCmd =
       cmd && mcpConfigPath && 'claude' === 'claude'
-        ? { ...cmd, args: [...cmd.args, '--mcp-config', mcpConfigPath] }
+        ? { ...cmd, args: [...cmd.args, '--mcp-config', mcpConfigPath, '--strict-mcp-config'] }
         : cmd;
 
     const idx = finalCmd!.args.indexOf('--mcp-config');
     expect(idx).toBeGreaterThan(-1);
     expect(finalCmd!.args[idx + 1]).toBe(mcpPath);
+    expect(finalCmd!.args[idx + 2]).toBe('--strict-mcp-config');
 
-    // Autonomous flags still present AND appear before --mcp-config
+    // Autonomous flags still present AND appear before strict --mcp-config.
     expect(finalCmd!.args).toContain('--dangerously-skip-permissions');
     expect(finalCmd!.args).toContain('--add-dir');
     const autoIdx = finalCmd!.args.indexOf('--dangerously-skip-permissions');
@@ -183,11 +199,12 @@ describe('M248 --mcp-config injection logic', () => {
     const mcpConfigPath: string | null = null;
     const finalCmd =
       cmd && mcpConfigPath && 'claude' === 'claude'
-        ? { ...cmd, args: [...cmd.args, '--mcp-config', mcpConfigPath] }
+        ? { ...cmd, args: [...cmd.args, '--mcp-config', mcpConfigPath, '--strict-mcp-config'] }
         : cmd;
 
     expect(finalCmd!.args).toEqual(cmd!.args);
     expect(finalCmd!.args).not.toContain('--mcp-config');
+    expect(finalCmd!.args).not.toContain('--strict-mcp-config');
   });
 
   it('--mcp-config is NOT injected for codex (unsupported — engine !== claude)', () => {
@@ -203,10 +220,11 @@ describe('M248 --mcp-config injection logic', () => {
     const mcpConfigPath: string | null = join(CWD, '.mcp.json');
     const finalCmd =
       cmd && mcpConfigPath && 'codex' === 'claude'
-        ? { ...cmd, args: [...cmd.args, '--mcp-config', mcpConfigPath] }
+        ? { ...cmd, args: [...cmd.args, '--mcp-config', mcpConfigPath, '--strict-mcp-config'] }
         : cmd;
 
     expect(finalCmd!.args).not.toContain('--mcp-config');
+    expect(finalCmd!.args).not.toContain('--strict-mcp-config');
     expect(finalCmd!.args).toEqual(cmd!.args);
   });
 });
@@ -281,7 +299,7 @@ describe('M248 fleetMcp config flag', () => {
     expect(fleetMcpEnabled).toBe(true);
   });
 
-  it('fleetMcp: false prevents .mcp.json being written to worktree', () => {
+  it('fleetMcp: false prevents fleet sidecar config being written to worktree', () => {
     const worktree = mkTmp('ashlr-m248-disabled-');
     const cfg = makeConfig({ fleetMcp: false });
 
@@ -295,6 +313,6 @@ describe('M248 fleetMcp config flag', () => {
     }
 
     expect(result).toBeNull();
-    expect(existsSync(join(worktree, '.mcp.json'))).toBe(false);
+    expect(existsSync(join(worktree, FLEET_MCP_CONFIG_FILENAME))).toBe(false);
   });
 });

@@ -17,13 +17,15 @@ import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 
-import type { McpServerSpec, McpServerHealth } from '../core/types.js';
+import type { McpRegistry, McpServerSpec, McpServerHealth } from '../core/types.js';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers
 // ---------------------------------------------------------------------------
 
 import { pad, makeColors, isTty } from './ui.js';
+import { redactArgs } from '../core/mcp-argv-safety.js';
+export { redactArgs } from '../core/mcp-argv-safety.js';
 
 const { bold, dim, red, green, yellow, cyan, gray, magenta } = makeColors(isTty());
 
@@ -67,26 +69,6 @@ function redactEnv(env: Record<string, string> | undefined): Record<string, stri
   return result;
 }
 
-// Secrets are frequently passed as CLI args (e.g. `--access-token sbp_…`,
-// `--api-key=sk_test_…`), not just env. Redact them before any display so
-// `mcp list` / `--json` never surface real credentials.
-const SENSITIVE_FLAG = /(?:^|[-_])(?:token|key|secret|password|passwd|auth|credential|api[-_]?key|access[-_]?token|bearer|dsn)$/i;
-const SECRET_TOKEN = /(?:sk-|sk_live_|sk_test_|rk_live_|rk_test_|sbp_|pk_live_|ghp_|gho_|ghu_|ghs_|github_pat_|xox[baprs]-|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{10,}|eyJ[A-Za-z0-9_-]{10,})/;
-
-export function redactArgs(args: string[]): string[] {
-  const out: string[] = [];
-  let redactNext = false;
-  for (const arg of args) {
-    if (redactNext) { out.push('<redacted>'); redactNext = false; continue; }
-    const eq = arg.match(/^(--?[A-Za-z0-9][\w-]*)=(.+)$/);
-    if (eq && SENSITIVE_FLAG.test(eq[1])) { out.push(`${eq[1]}=<redacted>`); continue; }
-    if (/^--?[A-Za-z]/.test(arg) && SENSITIVE_FLAG.test(arg.replace(/^--?/, ''))) { out.push(arg); redactNext = true; continue; }
-    if (SECRET_TOKEN.test(arg)) { out.push('<redacted>'); continue; }
-    out.push(arg);
-  }
-  return out;
-}
-
 // ---------------------------------------------------------------------------
 // Resolve the absolute path to the bin/ashlr executable
 // ---------------------------------------------------------------------------
@@ -109,6 +91,19 @@ const DEFAULT_TARGETS: Record<string, string> = {
   ashlrcode:  join(homedir(), '.ashlrcode', 'settings.json'),
 };
 
+const FLEET_ENGINE_MCP_HOST = 'ashlr-fleet-engine';
+
+function fleetEngineMcpIsolationEnabled(): boolean {
+  return process.env['ASHLR_MCP_HOST'] === FLEET_ENGINE_MCP_HOST;
+}
+
+function discoverRegistryForMcpHost(discoverMcpServers: () => McpRegistry): McpRegistry {
+  // The sandboxed fleet's strict Claude MCP config launches only `ashlr mcp`.
+  // That nested gateway must not re-scan the user's global/home MCP configs.
+  if (fleetEngineMcpIsolationEnabled()) return { servers: [] };
+  return discoverMcpServers();
+}
+
 // ---------------------------------------------------------------------------
 // Subcommand: run (default)
 // ---------------------------------------------------------------------------
@@ -118,7 +113,7 @@ async function cmdMcpRun(): Promise<number> {
   try {
     const { discoverMcpServers } = await importRegistry();
     const { startGateway } = await importGateway();
-    const registry = discoverMcpServers();
+    const registry = discoverRegistryForMcpHost(discoverMcpServers);
     process.stderr.write(`[ashlr mcp] starting gateway with ${registry.servers.length} discovered server(s)\n`);
     await startGateway(registry);
     return 0;
@@ -139,7 +134,7 @@ async function cmdMcpList(args: string[]): Promise<number> {
   const { discoverMcpServers } = await importRegistry();
   const { getToolsRegistry } = await importToolsRegistry();
 
-  const registry = discoverMcpServers();
+  const registry = discoverRegistryForMcpHost(discoverMcpServers);
   const toolsReg = getToolsRegistry();
 
   // M31: native ashlr tools served by the gateway itself (no probe needed).
@@ -260,7 +255,7 @@ async function cmdMcpDoctor(args: string[]): Promise<number> {
   const { discoverMcpServers } = await importRegistry();
   const { probeServer } = await importGateway();
 
-  const registry = discoverMcpServers();
+  const registry = discoverRegistryForMcpHost(discoverMcpServers);
 
   if (!jsonMode) {
     console.log('');

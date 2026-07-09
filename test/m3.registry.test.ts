@@ -35,6 +35,7 @@ vi.mock('../src/core/mcp-registry.js', async (importOriginal) => {
 });
 
 import { discoverMcpServers, knownConfigPaths, redactEnv } from '../src/core/mcp-registry.js';
+import { cmdMcp } from '../src/cli/mcp.js';
 import type { McpServerSpec } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -71,6 +72,21 @@ afterEach(() => {
   tmpFiles.length = 0;
   _overridePaths = [];
 });
+
+async function captureStdout(fn: () => Promise<number>): Promise<{ code: number; stdout: string }> {
+  const chunks: string[] = [];
+  const originalWrite = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+    chunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    const code = await fn();
+    return { code, stdout: chunks.join('') };
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // knownConfigPaths — override works
@@ -456,6 +472,39 @@ describe('redactEnv — exported helper hides every value', () => {
   it('returns the spec unchanged when there is no env', () => {
     const spec: McpServerSpec = { name: 's', command: 'c', args: [], source: 'test' };
     expect(redactEnv(spec)).toEqual(spec);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fleet-engine MCP host — no global downstream aggregation
+// ---------------------------------------------------------------------------
+
+describe('cmdMcp list — fleet-engine host isolation', () => {
+  it('ignores discovered global MCP servers when ASHLR_MCP_HOST=ashlr-fleet-engine', async () => {
+    const p = mkTmp(
+      makeConfig({
+        globalSecretServer: {
+          command: 'node',
+          args: ['global-mcp.js'],
+        },
+      }),
+      'fleet-host-isolation',
+    );
+    _overridePaths = [p];
+
+    const prev = process.env.ASHLR_MCP_HOST;
+    process.env.ASHLR_MCP_HOST = 'ashlr-fleet-engine';
+    try {
+      const { code, stdout } = await captureStdout(() => cmdMcp(['list', '--json']));
+      expect(code).toBe(0);
+      const parsed = JSON.parse(stdout) as { servers: McpServerSpec[] };
+      expect(parsed.servers).toEqual([]);
+      expect(stdout).not.toContain('globalSecretServer');
+      expect(stdout).not.toContain('global-mcp.js');
+    } finally {
+      if (prev === undefined) delete process.env.ASHLR_MCP_HOST;
+      else process.env.ASHLR_MCP_HOST = prev;
+    }
   });
 });
 
