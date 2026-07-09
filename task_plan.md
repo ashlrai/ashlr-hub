@@ -738,4 +738,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Surface bounded attempt coverage in FleetStatus and CLI.
 - [x] Add privacy/join regression coverage, including derived trajectory, worked-ledger time, aggregate ref, and raw execution canaries.
 - [x] Verify focused gates and broad lightweight gates.
-- [ ] Commit, push, reload/smoke, and continue.
+- [x] Commit and push `a0cc3d2`, reload launchd daemon, and smoke attempt coverage live in FleetStatus.
