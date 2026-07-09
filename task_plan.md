@@ -582,5 +582,10 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Queue proposal-repair work through the self-heal queue with stable ids, scrubbed bounded failure context, and no raw diff/stdout/stderr/prompt/file content.
 - [x] Refresh daemon backlog after proposal-repair maintenance so repair work can be selected in the same tick.
 - [x] Verify proposal repair with focused/adjacent gates and full `npm run test:ci` (437 files, 8,937 passed, 7 skipped).
-- [ ] Next lane: make merge-grade verification explicit in status by separating inferred command coverage from repo-owned contracts.
+- [x] Make merge-grade verification explicit in status by separating inferred command coverage from repo-owned contracts.
+- [x] Add root `ashlr.verify.json` with required merge-profile typecheck, lint, and full CI commands.
+- [x] Treat `ashlr.verify.json` changes as build/CI/manifest changes that cannot self-certify through in-process verification.
+- [x] Surface explicit merge contract coverage and pending-proposal verifier-contract gaps in FleetStatus and CLI output.
 - [ ] Later lane: evaluate the untracked triviality classifier as observe-only fleet telemetry after moving/hardening it.
+- [ ] Next lane: add Fleet Dashboard first-panel readiness strip using existing autonomous ship readiness data.
+- [ ] Next lane: normalize run-ledger causal metadata without ingesting raw run/proposal text.

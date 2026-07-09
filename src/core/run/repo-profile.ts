@@ -40,6 +40,12 @@ export interface RepoVerifyContractSummary {
   schemaVersion?: 1;
   mode?: RepoVerifyContractMode;
   commandCount: number;
+  requiredCount: number;
+  profileCounts: Partial<Record<VerifyCommandProfile, number>>;
+  mergeProfileCommandCount: number;
+  requiredMergeProfileCommandCount: number;
+  mergeGradeExplicit: boolean;
+  mergeGradeReason: string;
   errors: string[];
 }
 
@@ -58,6 +64,9 @@ export interface RepoExecutionProfile {
   projects: RepoProjectProfile[];
   primaryProject: RepoProjectProfile | null;
   verifyCommands: VerifyCommand[];
+  verifyCommandSource: 'none' | 'detected' | 'contract' | 'mixed';
+  detectedVerifyCommandCount: number;
+  contractVerifyCommandCount: number;
   verifyContract?: RepoVerifyContractSummary;
   noVerifyReason: string | null;
 }
@@ -188,6 +197,55 @@ interface ParsedVerifyContract {
   summary: RepoVerifyContractSummary;
 }
 
+function summarizeVerifyContract(
+  opts: {
+    present: boolean;
+    valid: boolean;
+    schemaVersion?: 1;
+    mode?: RepoVerifyContractMode;
+    commands: VerifyCommand[];
+    errors: string[];
+  },
+): RepoVerifyContractSummary {
+  const requiredCount = opts.commands.filter((command) => command.required !== false).length;
+  const profileCounts: Partial<Record<VerifyCommandProfile, number>> = {};
+  for (const command of opts.commands) {
+    for (const profile of command.profiles ?? []) {
+      profileCounts[profile] = (profileCounts[profile] ?? 0) + 1;
+    }
+  }
+  const mergeProfileCommandCount = opts.commands.filter((command) => command.profiles?.includes('merge')).length;
+  const requiredMergeProfileCommandCount = opts.commands.filter(
+    (command) => command.required !== false && command.profiles?.includes('merge'),
+  ).length;
+  const mergeGradeExplicit = opts.valid && requiredMergeProfileCommandCount > 0;
+  let mergeGradeReason = `${requiredMergeProfileCommandCount} required merge-profile command(s)`;
+  if (!opts.valid) {
+    mergeGradeReason = `invalid ${VERIFY_CONTRACT_FILE}: ${opts.errors[0] ?? 'contract validation failed'}`;
+  } else if (opts.commands.length === 0) {
+    mergeGradeReason = 'contract has no commands';
+  } else if (mergeProfileCommandCount === 0) {
+    mergeGradeReason = 'no command declares the merge profile';
+  } else if (requiredMergeProfileCommandCount === 0) {
+    mergeGradeReason = 'merge-profile commands are optional';
+  }
+
+  return {
+    present: opts.present,
+    valid: opts.valid,
+    ...(opts.schemaVersion === 1 ? { schemaVersion: 1 as const } : {}),
+    ...(opts.mode ? { mode: opts.mode } : {}),
+    commandCount: opts.commands.length,
+    requiredCount,
+    profileCounts,
+    mergeProfileCommandCount,
+    requiredMergeProfileCommandCount,
+    mergeGradeExplicit,
+    mergeGradeReason,
+    errors: opts.errors,
+  };
+}
+
 function parseVerifyContract(repoRoot: string): ParsedVerifyContract | null {
   const path = join(repoRoot, VERIFY_CONTRACT_FILE);
   if (!existsSync(path)) return null;
@@ -201,12 +259,12 @@ function parseVerifyContract(repoRoot: string): ParsedVerifyContract | null {
     return {
       mode: 'augment-detected',
       commands: [],
-      summary: {
+      summary: summarizeVerifyContract({
         present: true,
         valid: false,
-        commandCount: 0,
+        commands: [],
         errors: [`invalid JSON: ${msg}`],
-      },
+      }),
     };
   }
 
@@ -298,14 +356,14 @@ function parseVerifyContract(repoRoot: string): ParsedVerifyContract | null {
   return {
     mode: contractMode,
     commands: valid ? commands : [],
-    summary: {
+    summary: summarizeVerifyContract({
       present: true,
       valid,
       ...(obj['schemaVersion'] === 1 ? { schemaVersion: 1 as const } : {}),
       ...(VERIFY_CONTRACT_MODES.has(mode as RepoVerifyContractMode) ? { mode: contractMode } : {}),
-      commandCount: valid ? commands.length : 0,
+      commands: valid ? commands : [],
       errors,
-    },
+    }),
   };
 }
 
@@ -684,15 +742,20 @@ export function detectRepoExecutionProfile(
     : projects.flatMap((project) => project.verifyCommands);
   const contract = parseVerifyContract(root);
   let verifyCommands = detectedCommands;
+  let effectiveDetectedVerifyCommandCount = detectedCommands.length;
+  let effectiveContractVerifyCommandCount = 0;
 
   if (contract?.summary.valid) {
     const rootIndex = projects.findIndex((project) => project.root === root);
     if (contract.mode === 'replace-detected') {
       verifyCommands = contract.commands;
+      effectiveDetectedVerifyCommandCount = 0;
+      effectiveContractVerifyCommandCount = contract.commands.length;
       if (rootIndex >= 0) projects[rootIndex] = projectWithReplacedVerifyCommands(projects[rootIndex], contract.commands);
       else projects = [verifyContractProject(root, contract.commands), ...projects];
     } else {
       verifyCommands = [...detectedCommands, ...contract.commands];
+      effectiveContractVerifyCommandCount = contract.commands.length;
       if (rootIndex >= 0) projects[rootIndex] = projectWithVerifyContract(projects[rootIndex], contract.commands);
       else projects = [verifyContractProject(root, contract.commands), ...projects];
     }
@@ -702,12 +765,23 @@ export function detectRepoExecutionProfile(
   }
 
   const primaryProject = projects.find((project) => project.root === root) ?? projects[0] ?? null;
+  const verifyCommandSource =
+    effectiveDetectedVerifyCommandCount > 0 && effectiveContractVerifyCommandCount > 0
+      ? 'mixed'
+      : effectiveContractVerifyCommandCount > 0
+        ? 'contract'
+        : effectiveDetectedVerifyCommandCount > 0
+          ? 'detected'
+          : 'none';
 
   return {
     repoRoot: root,
     projects,
     primaryProject,
     verifyCommands,
+    verifyCommandSource,
+    detectedVerifyCommandCount: detectedCommands.length,
+    contractVerifyCommandCount: contract?.summary.valid ? contract.commands.length : 0,
     ...(contract ? { verifyContract: contract.summary } : {}),
     noVerifyReason: describeNoVerifyCommandReason(projects, verifyCommands, contract?.summary),
   };

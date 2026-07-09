@@ -170,6 +170,23 @@ export interface FleetAutoMergeBlockerSummary {
   riskClass: string | null;
 }
 
+export interface FleetAutoMergeVerifierContractGap {
+  proposalId: string;
+  title: string;
+  repo: string;
+  name: string;
+  withoutVerifyCommands: boolean;
+  withoutExplicitMergeContract: boolean;
+  reason: string;
+}
+
+export interface FleetAutoMergeVerifierContractStatus {
+  pendingNeedingVerification: number;
+  withoutVerifyCommands: number;
+  withoutExplicitMergeContract: number;
+  recentGaps: FleetAutoMergeVerifierContractGap[];
+}
+
 export interface FleetAutoMergeReadinessStatus {
   enabled: boolean;
   trustBasis: AutoMergeTrustBasis;
@@ -180,6 +197,7 @@ export interface FleetAutoMergeReadinessStatus {
   blocked: number;
   byReason: Record<string, number>;
   recentBlockers: FleetAutoMergeBlockerSummary[];
+  verifierContracts?: FleetAutoMergeVerifierContractStatus;
 }
 
 export interface FleetNextAction {
@@ -322,7 +340,17 @@ export interface FleetQueueRepoCoverage {
     reposWithProjects: number;
     reposWithVerifyCommands: number;
     reposMissingVerifyCommands: number;
+    reposWithVerifyContracts: number;
+    reposWithValidVerifyContracts: number;
+    reposWithExplicitMergeContracts: number;
+    reposMissingExplicitMergeContracts: number;
     missingVerifyCommands?: Array<{
+      repo: string;
+      name: string;
+      projectKinds: RepoProjectKind[];
+      reason: string;
+    }>;
+    missingExplicitMergeContracts?: Array<{
       repo: string;
       name: string;
       projectKinds: RepoProjectKind[];
@@ -1435,6 +1463,20 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       detail: `${missingVerify} enrolled repo(s) have no detected verify commands.${sample ? ` First: ${sample}.` : ''}`,
     });
   }
+  const missingExplicitMergeContracts =
+    status.queue.repos?.executionProfiles?.reposMissingExplicitMergeContracts ?? 0;
+  if (missingExplicitMergeContracts > 0) {
+    const missingRepos = status.queue.repos?.executionProfiles?.missingExplicitMergeContracts ?? [];
+    const sample = missingRepos.slice(0, 3).map((row) => row.name).join(', ');
+    add({
+      id: 'add-explicit-merge-verify-contracts',
+      priority: 'low',
+      label: 'Add explicit merge verify contracts',
+      detail:
+        `${missingExplicitMergeContracts} enrolled repo(s) rely on inferred or non-merge verification.` +
+        `${sample ? ` First: ${sample}.` : ''}`,
+    });
+  }
 
   if (actions.length === 0) {
     add({
@@ -1934,6 +1976,13 @@ async function buildAutoMergeReadinessStatus(
   let needsVerification = 0;
   let knownVerificationFailed = 0;
   let blocked = 0;
+  const verifierContracts: FleetAutoMergeVerifierContractStatus = {
+    pendingNeedingVerification: 0,
+    withoutVerifyCommands: 0,
+    withoutExplicitMergeContract: 0,
+    recentGaps: [],
+  };
+  const profileCache = new Map<string, ReturnType<typeof detectRepoExecutionProfile> | null>();
 
   const {
     classifyRisk,
@@ -1955,6 +2004,43 @@ async function buildAutoMergeReadinessStatus(
         tier: proposal.engineTier ?? null,
         reason,
         riskClass,
+      });
+    }
+  };
+  const profileForRepo = (repo: string): ReturnType<typeof detectRepoExecutionProfile> | null => {
+    const key = resolve(repo);
+    if (profileCache.has(key)) return profileCache.get(key) ?? null;
+    try {
+      const profile = detectRepoExecutionProfile(repo);
+      profileCache.set(key, profile);
+      return profile;
+    } catch {
+      profileCache.set(key, null);
+      return null;
+    }
+  };
+  const noteVerifierContractGap = (proposal: Proposal): void => {
+    if (trustBasis !== 'verification' && trustBasis !== 'evidence') return;
+    if (!proposal.repo) return;
+    verifierContracts.pendingNeedingVerification++;
+    const profile = profileForRepo(proposal.repo);
+    const withoutVerifyCommands = !profile || profile.verifyCommands.length === 0;
+    const withoutExplicitMergeContract = profile?.verifyContract?.mergeGradeExplicit !== true;
+    if (!withoutVerifyCommands && !withoutExplicitMergeContract) return;
+    if (withoutVerifyCommands) verifierContracts.withoutVerifyCommands++;
+    if (withoutExplicitMergeContract) verifierContracts.withoutExplicitMergeContract++;
+    if (verifierContracts.recentGaps.length < 8) {
+      verifierContracts.recentGaps.push({
+        proposalId: proposal.id,
+        title: proposal.title,
+        repo: proposal.repo,
+        name: basename(proposal.repo),
+        withoutVerifyCommands,
+        withoutExplicitMergeContract,
+        reason:
+          profile?.noVerifyReason ??
+          profile?.verifyContract?.mergeGradeReason ??
+          'missing explicit merge-profile verification contract',
       });
     }
   };
@@ -2037,6 +2123,7 @@ async function buildAutoMergeReadinessStatus(
     }
 
     if (trustBasis === 'verification' && proposal.verifyResult?.passed !== true) {
+      noteVerifierContractGap(proposal);
       needsVerification++;
       continue;
     }
@@ -2054,6 +2141,7 @@ async function buildAutoMergeReadinessStatus(
         typeof verify.diffHash === 'string' &&
         verify.diffHash === hashDiff(proposal.diff);
       if (!hasCurrentDiffBinding) {
+        noteVerifierContractGap(proposal);
         needsVerification++;
         continue;
       }
@@ -2072,6 +2160,7 @@ async function buildAutoMergeReadinessStatus(
     blocked,
     byReason,
     recentBlockers,
+    verifierContracts,
   };
 }
 
@@ -2203,20 +2292,36 @@ async function buildSharedQueueStatus(cfg: AshlrConfig): Promise<FleetSharedQueu
 function buildRepoExecutionCoverage(enrolledRepos: ReadonlySet<string>): NonNullable<FleetQueueRepoCoverage['executionProfiles']> {
   let reposWithProjects = 0;
   let reposWithVerifyCommands = 0;
+  let reposWithVerifyContracts = 0;
+  let reposWithValidVerifyContracts = 0;
+  let reposWithExplicitMergeContracts = 0;
   const packageManagers = new Map<RepoPackageManager, Set<string>>();
   const missingVerifyCommands: NonNullable<NonNullable<FleetQueueRepoCoverage['executionProfiles']>['missingVerifyCommands']> = [];
+  const missingExplicitMergeContracts: NonNullable<NonNullable<FleetQueueRepoCoverage['executionProfiles']>['missingExplicitMergeContracts']> = [];
 
   for (const repo of enrolledRepos) {
     try {
       const profile = detectRepoExecutionProfile(repo);
       if (profile.projects.length > 0) reposWithProjects++;
+      const projectKinds = [...new Set(profile.projects.map((project) => project.kind))].sort();
       if (profile.verifyCommands.length > 0) reposWithVerifyCommands++;
       else {
         missingVerifyCommands.push({
           repo,
           name: basename(repo),
-          projectKinds: [...new Set(profile.projects.map((project) => project.kind))].sort(),
+          projectKinds,
           reason: profile.noVerifyReason ?? 'no detected verify commands',
+        });
+      }
+      if (profile.verifyContract?.present) reposWithVerifyContracts++;
+      if (profile.verifyContract?.valid) reposWithValidVerifyContracts++;
+      if (profile.verifyContract?.mergeGradeExplicit) reposWithExplicitMergeContracts++;
+      else {
+        missingExplicitMergeContracts.push({
+          repo,
+          name: basename(repo),
+          projectKinds,
+          reason: profile.verifyContract?.mergeGradeReason ?? 'missing ashlr.verify.json merge-profile contract',
         });
       }
       for (const project of profile.projects) {
@@ -2232,6 +2337,12 @@ function buildRepoExecutionCoverage(enrolledRepos: ReadonlySet<string>): NonNull
         projectKinds: [],
         reason: 'repo execution profile detection failed',
       });
+      missingExplicitMergeContracts.push({
+        repo,
+        name: basename(repo),
+        projectKinds: [],
+        reason: 'repo execution profile detection failed',
+      });
     }
   }
 
@@ -2239,12 +2350,19 @@ function buildRepoExecutionCoverage(enrolledRepos: ReadonlySet<string>): NonNull
     reposWithProjects,
     reposWithVerifyCommands,
     reposMissingVerifyCommands: Math.max(0, enrolledRepos.size - reposWithVerifyCommands),
+    reposWithVerifyContracts,
+    reposWithValidVerifyContracts,
+    reposWithExplicitMergeContracts,
+    reposMissingExplicitMergeContracts: Math.max(0, enrolledRepos.size - reposWithExplicitMergeContracts),
     packageManagers: [...packageManagers.entries()]
       .map(([manager, repos]) => ({ manager, repos: repos.size }))
       .sort((a, b) => b.repos - a.repos || a.manager.localeCompare(b.manager)),
   };
   if (missingVerifyCommands.length > 0) {
     result.missingVerifyCommands = missingVerifyCommands.sort((a, b) => a.name.localeCompare(b.name));
+  }
+  if (missingExplicitMergeContracts.length > 0) {
+    result.missingExplicitMergeContracts = missingExplicitMergeContracts.sort((a, b) => a.name.localeCompare(b.name));
   }
   return result;
 }

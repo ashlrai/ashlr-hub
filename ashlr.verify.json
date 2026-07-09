@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "mode": "replace-detected",
+  "commands": [
+    {
+      "id": "typecheck",
+      "kind": "typecheck",
+      "cmd": ["npm", "run", "typecheck"],
+      "cwd": ".",
+      "timeoutMs": 180000,
+      "required": true,
+      "profiles": ["quick", "merge"]
+    },
+    {
+      "id": "lint",
+      "kind": "lint",
+      "cmd": ["npm", "run", "lint"],
+      "cwd": ".",
+      "timeoutMs": 300000,
+      "required": true,
+      "profiles": ["merge"]
+    },
+    {
+      "id": "test-ci",
+      "kind": "test",
+      "cmd": ["npm", "run", "test:ci"],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "required": true,
+      "profiles": ["merge"]
+    }
+  ]
+}

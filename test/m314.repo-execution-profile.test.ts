@@ -123,7 +123,16 @@ describe('repo execution profile', () => {
         schemaVersion: 1,
         mode: 'replace-detected',
         commandCount: 1,
+        requiredCount: 1,
+        profileCounts: { quick: 1, merge: 1 },
+        mergeProfileCommandCount: 1,
+        requiredMergeProfileCommandCount: 1,
+        mergeGradeExplicit: true,
       });
+      expect(profile.verifyContract?.mergeGradeReason).toContain('1 required merge-profile');
+      expect(profile.verifyCommandSource).toBe('contract');
+      expect(profile.detectedVerifyCommandCount).toBe(1);
+      expect(profile.contractVerifyCommandCount).toBe(1);
       expect(profile.noVerifyReason).toBeNull();
       expect(profile.projects[0]?.manifests).toContain('ashlr.verify.json');
       expect(profile.verifyCommands).toEqual([
@@ -137,6 +146,44 @@ describe('repo execution profile', () => {
           profiles: ['quick', 'merge'],
         },
       ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('distinguishes valid contracts from explicit merge-grade contracts', () => {
+    const dir = makeFixture();
+    try {
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [
+          {
+            id: 'quick-only',
+            kind: 'test',
+            cmd: ['node', 'verify.js'],
+            required: true,
+            profiles: ['quick'],
+          },
+        ],
+      });
+
+      const profile = detectRepoExecutionProfile(dir);
+
+      expect(profile.verifyCommands).toEqual([
+        { id: 'quick-only', kind: 'test', cmd: ['node', 'verify.js'], required: true, profiles: ['quick'] },
+      ]);
+      expect(profile.verifyContract).toMatchObject({
+        present: true,
+        valid: true,
+        commandCount: 1,
+        requiredCount: 1,
+        profileCounts: { quick: 1 },
+        mergeProfileCommandCount: 0,
+        requiredMergeProfileCommandCount: 0,
+        mergeGradeExplicit: false,
+        mergeGradeReason: 'no command declares the merge profile',
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -161,6 +208,9 @@ describe('repo execution profile', () => {
 
       const profile = detectRepoExecutionProfile(dir);
 
+      expect(profile.verifyCommandSource).toBe('mixed');
+      expect(profile.detectedVerifyCommandCount).toBe(1);
+      expect(profile.contractVerifyCommandCount).toBe(1);
       expect(profile.verifyCommands).toEqual([
         { kind: 'typecheck', cmd: ['npm', 'run', 'typecheck'] },
         { id: 'deep-lint', kind: 'lint', cmd: ['node', 'scripts/lint.js'], profiles: ['deep'] },
@@ -192,7 +242,13 @@ describe('repo execution profile', () => {
       expect(profile.verifyContract).toMatchObject({
         present: true,
         valid: false,
+        commandCount: 0,
+        requiredCount: 0,
+        mergeProfileCommandCount: 0,
+        requiredMergeProfileCommandCount: 0,
+        mergeGradeExplicit: false,
       });
+      expect(profile.verifyContract?.mergeGradeReason).toContain('invalid ashlr.verify.json');
       expect(profile.verifyContract?.errors.join('\n')).toContain('cwd must stay inside the repo');
       expect(profile.projects[0]).toMatchObject({ kind: 'verify-contract', relativeRoot: '.' });
       expect(profile.noVerifyReason).toContain('invalid ashlr.verify.json');

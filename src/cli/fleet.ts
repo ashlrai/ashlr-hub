@@ -120,6 +120,12 @@ export function formatFleetStatus(s: FleetStatus): string {
         `  verify roots:   ${profile.reposWithVerifyCommands}/${repoCoverage.existing} repos ` +
           `(${profile.reposMissingVerifyCommands} missing${managers ? `; ${managers}` : ''})`,
       );
+      if (typeof profile.reposWithExplicitMergeContracts === 'number') {
+        lines.push(
+          `  merge verify:   ${profile.reposWithExplicitMergeContracts}/${repoCoverage.existing} explicit ` +
+            `(${profile.reposMissingExplicitMergeContracts ?? 0} missing)`,
+        );
+      }
       if (profile.missingVerifyCommands && profile.missingVerifyCommands.length > 0) {
         const missing = profile.missingVerifyCommands
           .slice(0, 3)
@@ -132,6 +138,16 @@ export function formatFleetStatus(s: FleetStatus): string {
           ? ` (+${profile.missingVerifyCommands.length - 3} more)`
           : '';
         lines.push(`  missing verify: ${missing}${more}`);
+      }
+      if (profile.missingExplicitMergeContracts && profile.missingExplicitMergeContracts.length > 0) {
+        const missing = profile.missingExplicitMergeContracts
+          .slice(0, 3)
+          .map((row) => `${row.name}: ${row.reason}`)
+          .join('; ');
+        const more = profile.missingExplicitMergeContracts.length > 3
+          ? ` (+${profile.missingExplicitMergeContracts.length - 3} more)`
+          : '';
+        lines.push(`  missing merge:  ${missing}${more}`);
       }
     }
   }
@@ -380,6 +396,20 @@ export function formatFleetStatus(s: FleetStatus): string {
     );
     if (readiness.knownVerificationFailed > 0) {
       lines.push(`  failed:    ${readiness.knownVerificationFailed} known verification failure(s)`);
+    }
+    if (readiness.verifierContracts && readiness.verifierContracts.pendingNeedingVerification > 0) {
+      const contracts = readiness.verifierContracts;
+      lines.push(
+        `  verifiers: ${contracts.pendingNeedingVerification} need verification ` +
+          `(${contracts.withoutVerifyCommands} no commands, ${contracts.withoutExplicitMergeContract} no merge contract)`,
+      );
+      if (contracts.recentGaps.length > 0) {
+        const gaps = contracts.recentGaps
+          .slice(0, 3)
+          .map((gap) => `${gap.name}: ${gap.reason}`)
+          .join('; ');
+        lines.push(`  verifier gaps: ${gaps}`);
+      }
     }
     const reasons = Object.entries(readiness.byReason)
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))

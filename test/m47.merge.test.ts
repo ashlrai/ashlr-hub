@@ -453,10 +453,10 @@ describe('M47 verifyProposal', () => {
     expect(res.detail).toMatch(/build\/CI\/manifest|manual review/i);
   });
 
-  it('H1b: diff touching a lockfile / .github/ is refused', async () => {
+  it('H1b: diff touching a lockfile / .github/ / verifier contract is refused', async () => {
     initRepo(tmpRepo);
     const cfg = cfgWith({ autoMerge: { enabled: true, allowWithoutVerification: true } });
-    for (const f of ['package-lock.json', '.github/workflows/ci.yml', 'Dockerfile']) {
+    for (const f of ['package-lock.json', '.github/workflows/ci.yml', 'Dockerfile', 'ashlr.verify.json']) {
       const p = makeProposal({ diff: addFileDiff(f, 'x') });
       const res = await verifyProposal(p, cfg);
       expect(res.ok).toBe(false);

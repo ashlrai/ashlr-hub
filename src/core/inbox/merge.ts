@@ -327,6 +327,7 @@ function isBuildOrCiOrManifest(p: string): boolean {
   // Top-level CI / manifest / tooling configs.
   if (
     b === 'package.json' ||
+    b === 'ashlr.verify.json' ||
     b === 'package-lock.json' ||
     b === 'pnpm-lock.yaml' ||
     b === 'yarn.lock' ||

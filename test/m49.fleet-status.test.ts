@@ -366,12 +366,24 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         reposWithProjects: 0,
         reposWithVerifyCommands: 0,
         reposMissingVerifyCommands: 1,
+        reposWithVerifyContracts: 0,
+        reposWithValidVerifyContracts: 0,
+        reposWithExplicitMergeContracts: 0,
+        reposMissingExplicitMergeContracts: 1,
         missingVerifyCommands: [
           {
             repo,
             name: 'repo',
             projectKinds: [],
             reason: 'no recognized project manifests or ashlr.verify.json',
+          },
+        ],
+        missingExplicitMergeContracts: [
+          {
+            repo,
+            name: 'repo',
+            projectKinds: [],
+            reason: 'missing ashlr.verify.json merge-profile contract',
           },
         ],
         packageManagers: [],
@@ -425,6 +437,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       reposWithProjects: 1,
       reposWithVerifyCommands: 0,
       reposMissingVerifyCommands: 1,
+      reposWithVerifyContracts: 0,
+      reposWithValidVerifyContracts: 0,
+      reposWithExplicitMergeContracts: 0,
+      reposMissingExplicitMergeContracts: 1,
       missingVerifyCommands: [
         {
           repo,
@@ -433,8 +449,77 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
           reason: 'detected make project(s), but no verify command is configured',
         },
       ],
+      missingExplicitMergeContracts: [
+        {
+          repo,
+          name: 'make-repo',
+          projectKinds: ['make'],
+          reason: 'missing ashlr.verify.json merge-profile contract',
+        },
+      ],
     });
     expect(s.nextActions?.some((action) => action.detail.includes('make-repo'))).toBe(true);
+    expect(s.nextActions?.some((action) => action.id === 'add-explicit-merge-verify-contracts')).toBe(true);
+  });
+
+  it('separates inferred verify commands from explicit merge-grade contracts', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const inferredRepo = join(tmpHome, 'inferred-repo');
+    const contractRepo = join(tmpHome, 'contract-repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(inferredRepo, { recursive: true });
+    mkdirSync(contractRepo, { recursive: true });
+    writeFileSync(
+      join(inferredRepo, 'package.json'),
+      JSON.stringify({ scripts: { test: 'vitest run' } }),
+      'utf8',
+    );
+    writeFileSync(
+      join(contractRepo, 'ashlr.verify.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [
+          {
+            id: 'merge-test',
+            kind: 'test',
+            cmd: ['npm', 'run', 'test'],
+            required: true,
+            profiles: ['merge'],
+          },
+        ],
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      join(ashlrDir, 'enrollment.json'),
+      JSON.stringify({ repos: [inferredRepo, contractRepo] }),
+      'utf8',
+    );
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({ generatedAt: '2026-07-03T00:00:00.000Z', repos: [inferredRepo, contractRepo], items: [] }),
+      'utf8',
+    );
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.queue.repos?.executionProfiles).toMatchObject({
+      reposWithVerifyCommands: 2,
+      reposMissingVerifyCommands: 0,
+      reposWithVerifyContracts: 1,
+      reposWithValidVerifyContracts: 1,
+      reposWithExplicitMergeContracts: 1,
+      reposMissingExplicitMergeContracts: 1,
+      missingExplicitMergeContracts: [
+        {
+          repo: inferredRepo,
+          name: 'inferred-repo',
+          projectKinds: ['node'],
+          reason: 'missing ashlr.verify.json merge-profile contract',
+        },
+      ],
+    });
   });
 
   it('does not suggest building backlog when all visible items are cooling', async () => {
@@ -1674,7 +1759,25 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
             reposWithProjects: 3,
             reposWithVerifyCommands: 2,
             reposMissingVerifyCommands: 1,
+            reposWithVerifyContracts: 1,
+            reposWithValidVerifyContracts: 1,
+            reposWithExplicitMergeContracts: 1,
+            reposMissingExplicitMergeContracts: 2,
             missingVerifyCommands: [
+              {
+                repo: '/repo/c',
+                name: 'c',
+                projectKinds: ['python'],
+                reason: 'detected python project(s), but no verify command is configured',
+              },
+            ],
+            missingExplicitMergeContracts: [
+              {
+                repo: '/repo/b',
+                name: 'b',
+                projectKinds: ['rust'],
+                reason: 'missing ashlr.verify.json merge-profile contract',
+              },
               {
                 repo: '/repo/c',
                 name: 'c',
@@ -1942,6 +2045,22 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
           'provenance check failed: missing diffHash': 1,
         },
         recentBlockers: [],
+        verifierContracts: {
+          pendingNeedingVerification: 1,
+          withoutVerifyCommands: 1,
+          withoutExplicitMergeContract: 1,
+          recentGaps: [
+            {
+              proposalId: 'prop-verify',
+              title: 'Needs verification',
+              repo: '/repo/c',
+              name: 'c',
+              withoutVerifyCommands: true,
+              withoutExplicitMergeContract: true,
+              reason: 'detected python project(s), but no verify command is configured',
+            },
+          ],
+        },
       },
       autonomyDirection: {
         generatedAt: '2026-06-17T00:02:00.000Z',
@@ -1983,7 +2102,9 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('top repos:     a:5, b:2');
     expect(out).toContain('focus tiers:   core-fleet:1r/5i, supporting:1r/2i');
     expect(out).toContain('verify roots:   2/3 repos (1 missing; bun:1, cargo:1)');
+    expect(out).toContain('merge verify:   1/3 explicit (2 missing)');
     expect(out).toContain('missing verify: c [python: detected python project(s), but no verify command is configured]');
+    expect(out).toContain('missing merge:  b: missing ashlr.verify.json merge-profile contract; c: detected python project(s), but no verify command is configured');
     expect(out).toContain('next:          Ship autonomy debugger (goal, score 5)');
     expect(out).toContain('shared:        ok / 2 active / 1 owned / 1 reclaimable / 2 cooling / stale lock');
     expect(out).toContain('machine-A:1');
@@ -2022,6 +2143,8 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('trust:     verification');
     expect(out).toContain('pending:   4 (preflight 1, verify 1, blocked 2)');
     expect(out).toContain('failed:    1 known verification failure(s)');
+    expect(out).toContain('verifiers: 1 need verification (1 no commands, 1 no merge contract)');
+    expect(out).toContain('verifier gaps: c: detected python project(s), but no verify command is configured');
     expect(out).toContain('1x known verification failure: npm test');
     expect(out).toContain('Autonomy direction:');
     expect(out).toContain('control:    executable');
