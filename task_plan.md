@@ -1100,3 +1100,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add delete-only regression proving removed files are represented and deleted content/raw diff text is not persisted.
 - [x] Run focused M301 autonomy policy tests, typecheck, and diff checks.
 - [x] Run final lint, build, audit, commit, push, and continue to next lane.
+
+## Current Continuation - Context Summary Telemetry
+- [x] Review worker patch for metadata-only local context summaries.
+- [x] Add local context bundle summary helper with prompt, retrieval, and compression counts/ratios only.
+- [x] Thread `RunContextSummary` through api-model sandbox proposal capture, run state, decision metadata, and agent-action telemetry.
+- [x] Add focused local-context and api-model dispatch regression coverage.
+- [x] Re-run focused local-context/api-model, learning graph, attention, agent-loop, typecheck, and diff checks.
+- [ ] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.

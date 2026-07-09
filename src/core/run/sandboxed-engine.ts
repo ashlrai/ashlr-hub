@@ -40,6 +40,7 @@ import type {
   ProposalVerifyResult,
   Proposal,
   RunActionCounts,
+  RunContextSummary,
   RunProposalOutcome,
   RunBudget,
   RunState,
@@ -90,6 +91,7 @@ import {
   buildLocalContextBundle,
   renderLocalContextBundle,
   isLocalContextEnabled,
+  summarizeLocalContextBundle,
 } from './local-context.js';
 import { causalMetadata, runEventSummary, routeSnapshot } from '../learning/causal.js';
 import { classifyDiff, isTrivialProposal } from '../../planning/triviality.js';
@@ -159,6 +161,8 @@ export interface CaptureSandboxedProposalOptions {
   delegationScope?: DelegationScope;
   /** Optional mutable metadata-only counter bag for enclosing sandbox run telemetry. */
   actionCounts?: RunActionCounts;
+  /** Optional metadata-only context summary from the producing run. */
+  contextSummary?: RunContextSummary;
 }
 
 type SpawnEngineResult = {
@@ -333,6 +337,7 @@ function withProposalOutcome(
   state: RunState,
   outcome: RunProposalOutcome | undefined,
   counts?: RunActionCounts,
+  contextSummary?: RunContextSummary,
 ): RunState {
   if (!outcome && !counts) return state;
   const actionCounts = counts ? sanitizedRunActionCounts(actionCountsWithOutcome(counts, outcome)) : undefined;
@@ -349,6 +354,7 @@ function withProposalOutcome(
     tokensIn: state.usage.tokensIn,
     tokensOut: state.usage.tokensOut,
     costUsd: state.usage.estCostUsd,
+    contextSummary: contextSummary ?? state.runEventSummary?.contextSummary,
     ...(actionCounts ? { actionCounts } : {}),
   });
   return {
@@ -405,6 +411,7 @@ function recordSandboxedRunAgentAction(fields: {
   usage?: RunUsage;
   durationMs?: number;
   actionCounts: RunActionCounts;
+  contextSummary?: RunContextSummary;
 }): void {
   try {
     const counts = sanitizedRunActionCounts(actionCountsWithOutcome(fields.actionCounts, fields.outcome));
@@ -423,6 +430,7 @@ function recordSandboxedRunAgentAction(fields: {
       tokensOut: fields.usage?.tokensOut,
       costUsd: fields.usage?.estCostUsd,
       durationMs: fields.durationMs,
+      contextSummary: fields.contextSummary,
       ...(counts ? { actionCounts: counts } : {}),
     });
     recordAgentAction({
@@ -492,6 +500,7 @@ function sandboxedProducerCausalMetadata(fields: {
   durationMs?: number;
   status?: string;
   actionCounts?: RunActionCounts;
+  contextSummary?: RunContextSummary;
 }) {
   const rs = routeSnapshot({
     backend: fields.engine,
@@ -512,6 +521,7 @@ function sandboxedProducerCausalMetadata(fields: {
     tokensOut: fields.usage?.tokensOut,
     costUsd: fields.usage?.estCostUsd,
     durationMs: fields.durationMs,
+    contextSummary: fields.contextSummary,
     actionCounts: fields.actionCounts,
   });
   return {
@@ -926,7 +936,7 @@ export async function captureSandboxedProposal(
     if (diff.files <= 0 || diff.patch.trim().length === 0) {
       const outcome = proposalOutcome('empty-diff', `engine "${engine}" completed without file changes`);
       return {
-        state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts),
+        state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
         proposalOutcome: outcome,
       };
     }
@@ -934,7 +944,7 @@ export async function captureSandboxedProposal(
     const trivialOutcome = trivialProposalOutcomeForDiff(diff);
     if (trivialOutcome) {
       return {
-        state: withProposalOutcome(mk({ result: trivialOutcome.reason }), trivialOutcome, actionCounts),
+        state: withProposalOutcome(mk({ result: trivialOutcome.reason }), trivialOutcome, actionCounts, opts.contextSummary),
         proposalOutcome: trivialOutcome,
       };
     }
@@ -948,7 +958,7 @@ export async function captureSandboxedProposal(
       );
       if (!opts.isPartial) {
         return {
-          state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts),
+          state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
           proposalOutcome: outcome,
         };
       }
@@ -982,7 +992,7 @@ export async function captureSandboxedProposal(
 
     if (!shouldFile && blockedOutcome) {
       return {
-        state: withProposalOutcome(mk({ result: blockedOutcome.reason }), blockedOutcome, actionCounts),
+        state: withProposalOutcome(mk({ result: blockedOutcome.reason }), blockedOutcome, actionCounts, opts.contextSummary),
         proposalOutcome: blockedOutcome,
       };
     }
@@ -1029,6 +1039,7 @@ export async function captureSandboxedProposal(
         durationMs: opts.durationMs,
         status: producerStatus,
         actionCounts: actionCountsWithOutcome(actionCounts, filedOutcomeForMetadata),
+        contextSummary: opts.contextSummary,
       }),
       ...(opts.isPartial ? { isPartial: true } : {}),
     } satisfies Omit<Proposal, 'id' | 'status' | 'createdAt'>;
@@ -1072,6 +1083,7 @@ export async function captureSandboxedProposal(
           durationMs: opts.durationMs,
           status: producerStatus,
           actionCounts: actionCountsWithOutcome(actionCounts, outcome),
+          contextSummary: opts.contextSummary,
         }),
         action: 'proposed',
         engine,
@@ -1087,7 +1099,7 @@ export async function captureSandboxedProposal(
     }
 
     return {
-      state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts),
+      state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
       proposalId: proposal.id,
       proposalOutcome: outcome,
     };
@@ -1095,7 +1107,7 @@ export async function captureSandboxedProposal(
     const msg = err instanceof Error ? err.message : String(err);
     const outcome = proposalOutcome('proposal-capture-error', `proposal capture failed: ${msg}`);
     return {
-      state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
+      state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
       proposalOutcome: outcome,
     };
   }
@@ -1994,9 +2006,11 @@ export async function runApiModelSandboxed(
     // Frontier engines are excluded by isLocalContextEnabled. Flag-off → systemPrefix
     // is undefined → runTask system prompt is byte-identical to pre-M264.
     let m264SystemPrefix: string | undefined;
+    let m264ContextSummary: RunContextSummary | undefined;
     if (isLocalContextEnabled(engine, cfg) && delegationScope?.memoryMode !== 'none') {
       try {
         const bundle = await buildLocalContextBundle(goal, sb.worktreePath, cfg);
+        m264ContextSummary = summarizeLocalContextBundle(bundle, { toolCount: tools.length });
         const rendered = renderLocalContextBundle(bundle);
         if (rendered.length > 0) m264SystemPrefix = rendered;
       } catch {
@@ -2050,6 +2064,7 @@ export async function runApiModelSandboxed(
           durationMs,
           producerStatus: 'failed',
           actionCounts,
+          contextSummary: m264ContextSummary,
         });
         proposalId = captured.proposalId;
         proposalOutcomeResult =
@@ -2074,6 +2089,7 @@ export async function runApiModelSandboxed(
         usage: finalUsage,
         durationMs,
         actionCounts,
+        contextSummary: m264ContextSummary,
       });
       return {
         state: withProposalOutcome(
@@ -2086,6 +2102,7 @@ export async function runApiModelSandboxed(
           }),
           proposalOutcomeResult,
           actionCounts,
+          m264ContextSummary,
         ),
         proposalId,
         proposalOutcome: proposalOutcomeResult,
@@ -2110,6 +2127,7 @@ export async function runApiModelSandboxed(
           durationMs,
           producerStatus: 'done',
           actionCounts,
+          contextSummary: m264ContextSummary,
         });
         proposalId = captured.proposalId;
         proposalOutcomeResult = captured.proposalOutcome;
@@ -2140,12 +2158,14 @@ export async function runApiModelSandboxed(
       usage: finalUsage,
       durationMs,
       actionCounts,
+      contextSummary: m264ContextSummary,
     });
     return {
       state: withProposalOutcome(
         mk({ status: 'done', result: task.result ?? '', usage: finalUsage, tasks: [task], steps }),
         proposalOutcomeResult,
         actionCounts,
+        m264ContextSummary,
       ),
       proposalId,
       proposalOutcome: proposalOutcomeResult,

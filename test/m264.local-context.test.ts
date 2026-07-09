@@ -39,6 +39,7 @@ vi.mock('../src/core/ecosystem/map.js', () => ({
 import {
   buildLocalContextBundle,
   renderLocalContextBundle,
+  summarizeLocalContextBundle,
   isLocalContextEnabled,
 } from '../src/core/run/local-context.js';
 import type { AshlrConfig } from '../src/core/types.js';
@@ -259,6 +260,76 @@ describe('M264 renderLocalContextBundle — length-bounded', () => {
     };
     const rendered = renderLocalContextBundle(bundle);
     expect(rendered.length).toBeLessThanOrEqual(MAX_BUNDLE_CHARS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3b. summarizeLocalContextBundle — metadata only
+// ---------------------------------------------------------------------------
+
+describe('M264 summarizeLocalContextBundle — metadata-only telemetry', () => {
+  it('emits counts and ratios without raw prompt, diff, stdout, or file contents', () => {
+    const bundle = {
+      northStar: '=== NORTH ===\nRAW_PROMPT_SENTINEL secret strategy text',
+      ecosystem: '=== ECO ===\ndiff --git a/src/private.ts b/src/private.ts',
+      genome: [
+        '=== GENOME RECALL (prior work relevant to this goal) ===',
+        '- [secret] stdout RAW_STDOUT_SENTINEL',
+        '- [diff] file contents should not persist',
+      ].join('\n'),
+      repoTree: '=== REPO ORIENTATION ===\nsrc/private.ts',
+    };
+
+    const summary = summarizeLocalContextBundle(bundle, { toolCount: 3 });
+
+    expect(summary).toMatchObject({
+      prompt: {
+        role: 'executor',
+        profileId: 'local-context-v1',
+        toolCount: 3,
+        layersIncluded: ['base', 'tool', 'memory'],
+      },
+      retrieval: {
+        source: 'local-context',
+        requestedLimit: 4,
+        hitCount: 2,
+        injectedHitCount: 2,
+        methodCounts: { keyword: 2 },
+      },
+      compression: {
+        source: 'local-context',
+        strategy: 'truncate',
+        maxChars: 2_400,
+        truncated: false,
+      },
+    });
+
+    const serialized = JSON.stringify(summary);
+    expect(serialized).not.toContain('RAW_PROMPT_SENTINEL');
+    expect(serialized).not.toContain('RAW_STDOUT_SENTINEL');
+    expect(serialized).not.toContain('diff --git');
+    expect(serialized).not.toContain('src/private.ts');
+    expect(serialized).not.toContain('file contents');
+  });
+
+  it('still records a zero-hit local-context attempt when all sections are empty', () => {
+    const summary = summarizeLocalContextBundle(
+      { northStar: '', ecosystem: '', genome: '', repoTree: '' },
+      { toolCount: 0 },
+    );
+
+    expect(summary.prompt).toMatchObject({
+      role: 'executor',
+      assembledSystemChars: 0,
+      promptBudgetRatio: 0,
+      layersIncluded: ['base'],
+      toolCount: 0,
+    });
+    expect(summary.retrieval).toMatchObject({
+      source: 'local-context',
+      hitCount: 0,
+      injectedChars: 0,
+    });
   });
 });
 

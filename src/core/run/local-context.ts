@@ -21,7 +21,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import type { AshlrConfig } from '../types.js';
+import type { AshlrConfig, PromptContextSummary, RunContextSummary } from '../types.js';
 import {
   northStarDocSummary,
   ecosystemSummary,
@@ -143,6 +143,10 @@ export interface LocalContextBundle {
   repoTree: string;
 }
 
+export interface LocalContextSummaryOptions {
+  toolCount?: number;
+}
+
 /**
  * Assemble the four context sections for a local model run.
  * Always resolves (never rejects). Any absent/erroring section is ''.
@@ -165,6 +169,93 @@ export async function buildLocalContextBundle(
   return { northStar, ecosystem, genome, repoTree };
 }
 
+function localContextParts(bundle: LocalContextBundle): string[] {
+  const parts: string[] = [];
+
+  if (bundle.northStar) {
+    parts.push(bundle.northStar);
+  }
+
+  if (bundle.ecosystem) {
+    parts.push(bundle.ecosystem);
+  }
+
+  if (bundle.genome) {
+    parts.push(bundle.genome);
+  }
+
+  if (bundle.repoTree) {
+    parts.push(bundle.repoTree);
+  }
+
+  return parts;
+}
+
+function countGenomeHits(genome: string): number {
+  if (!genome) return 0;
+  const hitLines = genome
+    .split('\n')
+    .filter((line) => line.trimStart().startsWith('- '));
+  return Math.min(GENOME_TOP_K, hitLines.length);
+}
+
+function ratio(numerator: number, denominator: number): number {
+  if (denominator <= 0) return 0;
+  return Math.max(0, Math.min(1, Math.round((numerator / denominator) * 1_000) / 1_000));
+}
+
+/**
+ * Summarize local context injection without persisting any prompt section text,
+ * file paths, diffs, model output, tool arguments, or stdout/stderr.
+ */
+export function summarizeLocalContextBundle(
+  bundle: LocalContextBundle,
+  opts: LocalContextSummaryOptions = {},
+): RunContextSummary {
+  const parts = localContextParts(bundle);
+  const unbounded = parts.join('\n\n');
+  const renderedChars = Math.min(unbounded.length, MAX_BUNDLE_CHARS);
+  const genomeHits = countGenomeHits(bundle.genome);
+  const toolCount = typeof opts.toolCount === 'number' && Number.isFinite(opts.toolCount)
+    ? Math.max(0, Math.trunc(opts.toolCount))
+    : undefined;
+  const layersIncluded: NonNullable<PromptContextSummary['layersIncluded']> = ['base'];
+  if ((toolCount ?? 0) > 0) layersIncluded.push('tool');
+  if (renderedChars > 0) layersIncluded.push('memory');
+
+  return {
+    prompt: {
+      role: 'executor',
+      profileId: 'local-context-v1',
+      estimatedPromptTokens: Math.ceil(renderedChars / 4),
+      promptCharCap: MAX_BUNDLE_CHARS,
+      assembledSystemChars: renderedChars,
+      promptBudgetRatio: ratio(renderedChars, MAX_BUNDLE_CHARS),
+      layersIncluded,
+      ...(toolCount !== undefined ? { toolCount } : {}),
+    },
+    retrieval: {
+      source: 'local-context',
+      requestedLimit: GENOME_TOP_K,
+      hitCount: genomeHits,
+      injectedHitCount: genomeHits,
+      limitHitRate: ratio(genomeHits, GENOME_TOP_K),
+      ...(genomeHits > 0 ? { methodCounts: { keyword: genomeHits } } : {}),
+      injectedChars: renderedChars,
+    },
+    compression: {
+      source: 'local-context',
+      strategy: 'truncate',
+      inputChars: unbounded.length,
+      outputChars: renderedChars,
+      maxChars: MAX_BUNDLE_CHARS,
+      droppedChars: Math.max(0, unbounded.length - renderedChars),
+      compressionRatio: ratio(renderedChars, unbounded.length),
+      truncated: unbounded.length > MAX_BUNDLE_CHARS,
+    },
+  };
+}
+
 /**
  * Render the bundle as a system-prompt prefix.
  *
@@ -184,23 +275,7 @@ export async function buildLocalContextBundle(
  * Total length bounded at MAX_BUNDLE_CHARS.
  */
 export function renderLocalContextBundle(bundle: LocalContextBundle): string {
-  const parts: string[] = [];
-
-  if (bundle.northStar) {
-    parts.push(bundle.northStar);
-  }
-
-  if (bundle.ecosystem) {
-    parts.push(bundle.ecosystem);
-  }
-
-  if (bundle.genome) {
-    parts.push(bundle.genome);
-  }
-
-  if (bundle.repoTree) {
-    parts.push(bundle.repoTree);
-  }
+  const parts = localContextParts(bundle);
 
   if (parts.length === 0) return '';
 

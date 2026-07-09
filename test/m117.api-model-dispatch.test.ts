@@ -289,6 +289,32 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
       tokensIn: 11,
       tokensOut: 7,
     });
+    expect(proposal['runEventSummary']).toMatchObject({
+      contextSummary: {
+        prompt: {
+          role: 'executor',
+          profileId: 'local-context-v1',
+          toolCount: 2,
+        },
+        retrieval: {
+          source: 'local-context',
+        },
+        compression: {
+          source: 'local-context',
+          strategy: 'truncate',
+          maxChars: 2_400,
+        },
+      },
+    });
+    expect(result.state.runEventSummary?.contextSummary).toMatchObject(
+      (proposal['runEventSummary'] as { contextSummary?: unknown }).contextSummary,
+    );
+    const contextSummaryJson = JSON.stringify(
+      (proposal['runEventSummary'] as { contextSummary?: unknown }).contextSummary,
+    );
+    expect(contextSummaryJson).not.toContain('--- a/hello.ts');
+    expect(contextSummaryJson).not.toContain('+++ b/hello.ts');
+    expect(contextSummaryJson).not.toContain('changed hello.ts');
 
     // Result is 'done' with proposalId
     expect(result.state.status).toBe('done');

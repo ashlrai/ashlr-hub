@@ -1034,6 +1034,13 @@
   - Verification passed: `npm run test:ci -- test/m301.autonomy-policy.test.ts` (16 tests), `npm run typecheck -- --pretty false`, `npm run lint` (known 115-warning baseline, 0 errors), `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check`.
   - Deployed as `f25f4e5` on `origin/master`, reinstalled/resumed/kickstarted launchd, and smoked live status. Daemon PID `41348`, guard clear, kill switch off, tick in progress, Mission Brief still prioritizes `Drain diagnostic reslices`.
 
+- Current context-summary telemetry pass:
+  - Scout finding: the learning schema already accepts `runEventSummary.contextSummary`, but live attention eval reports `no-context-summary-events`; api-model/local-coder runs build real context locally and are the smallest high-leverage producer to instrument first.
+  - Worker implementation: `summarizeLocalContextBundle()` emits metadata-only prompt/retrieval/compression signals: role/profile, char caps, prompt budget ratio, included layer names, tool count, genome hit counts, injected chars, truncation/compression ratios, and dropped char counts. It deliberately excludes raw prompts, diffs, stdout/stderr, file paths, tool args, and section text.
+  - Producer path: `runApiModelSandboxed()` now creates that summary beside the rendered local context prefix and threads it through `captureSandboxedProposal()`, `withProposalOutcome()`, `sandboxedProducerCausalMetadata()`, run state, decision metadata, and agent-action telemetry.
+  - Regression coverage: `m264` verifies summary privacy and zero-hit summaries; `m117` verifies api-model proposals and returned run state carry `runEventSummary.contextSummary` without diff text.
+  - Verification passed so far: `npm run test:ci -- test/m264.local-context.test.ts test/m117.api-model-dispatch.test.ts` (42 passed, 1 skipped), `npm run test:ci -- test/m338.learning-graph.test.ts test/m346.eval-attention.test.ts` (12 tests), `npm run test:ci -- test/m4.agent-loop.test.ts` (23 tests), `npm run typecheck -- --pretty false`, and `git diff --check`.
+
 - Current epoch-gated learned routing pass:
   - Purpose: allow the existing dispatch-yield learned reroute to use the new label foundation, but only for current, authoritative, metadata-only samples.
   - Implementation: `dispatchYieldForBackend()` now ignores rows unless `learningLabel` sanitizes as authoritative, the label is not policy-suppressed, top-level `routerPolicyVersion` equals `ROUTER_POLICY_VERSION`, optional `routeSnapshot.routerPolicyVersion` agrees with the top-level policy, and `learningEpoch` matches `learningEpochFromTimestamp(event.ts)`.
