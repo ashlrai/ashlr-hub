@@ -891,5 +891,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Sort `inspect-dispatch-yield` ahead of generic `build-backlog` when both are medium-priority next actions.
 - [x] Add FleetStatus regression coverage for next-action ordering, Autonomous Ship Readiness blocker, and Mission Brief directive.
 - [x] Finish broad verification.
-- [ ] Commit, push, reload daemon, and smoke status.
+- [x] Commit, push, reload daemon, and smoke status.
 - [ ] Next lane: make explicit merge-contract rollout repo-aware and visible enough to close missing contracts across enrolled repos.
