@@ -1051,4 +1051,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Thread reason-aware classification through dispatch-production, agent-action workspace, attention eval, attempt records, and learned-router filtering.
 - [x] Add daemon, dispatch-ledger, and FleetStatus regression coverage.
 - [x] Run focused learning/daemon/status verification plus typecheck, lint, build, audit, and diff checks.
-- [ ] Commit, push, reload daemon, and smoke live status.
+- [x] Commit, push, reload daemon, and smoke live status.
