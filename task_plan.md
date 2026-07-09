@@ -446,4 +446,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Added focused ledger, daemon-loop, and auto-merge regression coverage for started outcomes, terminal tick preservation, verifier pass/fail telemetry, and no raw diff/stdout/stderr leakage.
 - [x] Focused verification passed: `npm run test:ci -- test/m343.agent-action-ledger.test.ts test/m201.daemon-loop.test.ts test/m48.automerge-pass.test.ts test/m49.fleet-status.test.ts` (114 tests).
 - [x] Run final typecheck, build, lint, audit, diff checks, and full CI.
-- [ ] Commit, push to `origin/master`, restart/reverify the live daemon, and record next telemetry lanes.
+- [x] Commit, push to `origin/master`, restart/reverify the live daemon, and record next telemetry lanes.
