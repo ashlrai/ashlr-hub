@@ -816,4 +816,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Updated model-stats and Best-of-N regression coverage for winner-only filing and race-only loser visibility.
 - [x] Focused verification passed: Best-of-N/model-stats suite (26 tests), broader adjacent proposal-production suite (177 tests), and typecheck.
 - [x] Broad gates passed: diff check, lint, build, audit, invariants, and full CI (439 files, 9,046 passed tests, 7 skipped).
-- [ ] Commit, push, reload launchd daemon, and smoke live FleetStatus.
+- [x] Commit and push `ea3701f`, reload launchd daemon, and smoke live FleetStatus.
