@@ -1180,4 +1180,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add first-class `build` verification command kind across contracts, results, sandbox test ordering, and self-heal classification.
 - [x] Add focused regression coverage for manifest build commands, detected build scripts, runtime ordering, and native build failures.
 - [x] Run verification gates for the native build verification kind slice.
-- [ ] Commit, push, reload daemon, and smoke live status.
+- [x] Commit, push, reload daemon, and smoke live status.
