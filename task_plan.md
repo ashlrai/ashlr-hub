@@ -516,5 +516,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Formalized ecosystem ownership boundaries in the machine-readable ecosystem index and Markdown map with invariant tests for complete/disjoint local ownership plus external candidate handoff.
 - [x] Focused verification passed for BinShield adapter/dep scanners/ownership docs, typecheck, and diff checks.
 - [x] Run final lint/build/audit/full-suite gates for the BinShield + ownership-boundaries slice.
-- [ ] Commit, push to `origin/master`, relaunch/verify daemon, and continue the overnight loop.
+- [x] Commit `d6c804c`, push to `origin/master`, relaunch/verify daemon, repair stale guard from replaced daemon pid, and continue the overnight loop.
 - [ ] Next heartbeat: implement `ashlr eval attention` with metadata-only middle-drop and workflow-resolution fixtures.
