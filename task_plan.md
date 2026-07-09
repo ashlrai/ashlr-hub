@@ -986,4 +986,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Harden the diagnostic trust path so hand-written lookalikes are not rehydrated as actionable self-heal work.
 - [x] Run focused regression coverage.
 - [x] Run broad verification.
-- [ ] Commit, push, reload daemon, and smoke live status.
+- [x] Commit, push, reload daemon, and smoke live status.
