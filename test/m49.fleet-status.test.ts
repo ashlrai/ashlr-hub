@@ -1617,6 +1617,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       eventCount: 3,
       proposalEvents: 1,
       noProposalEvents: 1,
+      diagnosticNoProposalEvents: 1,
+      policySuppressedEvents: 0,
+      diagnosticProposalRate: 0.5,
+      diagnosticNoProposalRate: 0.5,
       activeMachines: ['m49'],
     });
     expect(s.workspace?.byAction).toEqual(
@@ -1645,6 +1649,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('Global workspace:');
+    expect(formatted).toContain('outcomes:  proposals 1, no-proposal 1, policy-suppressed 0');
+    expect(formatted).toContain('learning:  diagnostic proposal rate 50%');
     expect(formatted).toContain('events:    3');
     expect(formatted).toContain('proposals 1, no-proposal 1');
     expect(formatted).toContain('Context efficiency:');
@@ -1739,12 +1745,24 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         evidence: { count: 1, rate: 1 },
         worked: { count: 1, rate: 1 },
       },
+      production: {
+        attempts: 1,
+        proposalCreated: 1,
+        policySuppressed: 0,
+        diagnosticAttempts: 1,
+        diagnosticNoProposal: 0,
+        diagnosticProposalRate: 1,
+        diagnosticNoProposalRate: 0,
+      },
       gaps: [],
     });
     expect(s.attemptCoverage?.recent[0]).toMatchObject({
       ref: expect.stringMatching(/^attempt:[a-f0-9]{12}$/),
       outcome: 'proposal-created',
       backend: 'codex',
+      learningKind: 'proposal-created',
+      diagnosticAttempt: true,
+      policySuppressed: false,
       coverage: {
         agentAction: true,
         outcomeRecord: true,
@@ -1759,6 +1777,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('Attempt coverage:');
     expect(formatted).toContain('attempts:  1 in 24h');
+    expect(formatted).toContain('learning:  diagnostic 1/1 (100%), no-proposal 0, policy-suppressed 0');
     expect(formatted).toContain('joins:     actions 1 (100%), worked 1 (100%), decisions 1 (100%), evidence 1 (100%)');
   });
 
@@ -2109,6 +2128,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       proposalCreated: false,
       spentUsd: 0,
       reason: 'proposal filing disabled for this sandboxed attempt',
+      runEventSummary: {
+        outcome: 'proposal-disabled',
+        proposalCreated: false,
+        actionCounts: { proposalDisabled: 1 },
+      },
       basis: 'run-proposal-outcome',
     };
     const disabled = Array.from({ length: 16 }, (_, index) => ({
@@ -2124,6 +2148,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       outcome: 'empty-diff' as const,
       reason: 'agent returned no diff',
       spentUsd: 0.001,
+      runEventSummary: {
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        actionCounts: { diffFiles: 0 },
+      },
     }));
     recordDispatchProduction([...disabled, ...diagnostic]);
 
@@ -2218,8 +2247,18 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(s.dispatchYieldDiagnostics?.recommendation).toContain('do not treat them as backend weakness');
     expect(s.nextActions?.map((action) => action.id)).not.toContain('inspect-dispatch-yield');
+    expect(s.attemptCoverage?.production).toMatchObject({
+      attempts: 4,
+      proposalCreated: 0,
+      policySuppressed: 4,
+      diagnosticAttempts: 0,
+      diagnosticNoProposal: 0,
+      diagnosticProposalRate: null,
+      diagnosticNoProposalRate: null,
+    });
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('diagnosis: policy-suppressed · fleet 0/0 0% · keep routing');
+    expect(formatted).toContain('learning:  diagnostic 0/0 (—), no-proposal 0, policy-suppressed 4');
     expect(formatted).not.toContain('proposal filing disabled');
   });
 

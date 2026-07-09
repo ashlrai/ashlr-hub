@@ -275,6 +275,10 @@ describe('M343 agent action ledger', () => {
       eventCount: 3,
       proposalEvents: 1,
       noProposalEvents: 1,
+      diagnosticNoProposalEvents: 1,
+      policySuppressedEvents: 0,
+      diagnosticProposalRate: 0.5,
+      diagnosticNoProposalRate: 0.5,
     });
     expect(summary.spendUsd).toBeCloseTo(0.6);
     expect(summary.repoEventCount).toBe(3);
@@ -284,6 +288,88 @@ describe('M343 agent action ledger', () => {
     expect(summary.byBackend[0]).toMatchObject({ key: 'codex', count: 2 });
     expect(summary.entropy.action).toBeGreaterThanOrEqual(0);
     expect(summary.attention.some((row) => row.kind === 'repo' && row.topic === '/tmp/repo-a')).toBe(true);
+  });
+
+  it('separates policy-suppressed proposal attempts from diagnostic workspace no-proposal events', () => {
+    const summary = summarizeAgentWorkspace([
+      makeEvent({
+        outcome: 'no-proposal',
+        runEventSummary: {
+          outcome: 'proposal-disabled',
+          proposalCreated: false,
+          actionCounts: { proposalDisabled: 1 },
+        },
+      }),
+      makeEvent({
+        action: 'empty-diff',
+        outcome: 'no-proposal',
+        runEventSummary: {
+          outcome: 'empty-diff',
+          proposalCreated: false,
+          actionCounts: { diffFiles: 0 },
+        },
+      }),
+      makeEvent({
+        action: 'proposal-created',
+        outcome: 'proposal-created',
+        proposalId: 'prop-created',
+        runEventSummary: {
+          outcome: 'proposal-created',
+          proposalCreated: true,
+          actionCounts: { proposalCreated: 1 },
+        },
+      }),
+    ]);
+
+    expect(summary).toMatchObject({
+      proposalEvents: 1,
+      noProposalEvents: 2,
+      diagnosticNoProposalEvents: 1,
+      policySuppressedEvents: 1,
+      diagnosticProposalRate: 0.5,
+      diagnosticNoProposalRate: 0.5,
+    });
+  });
+
+  it('keeps failed proposal attempts out of diagnostic no-proposal workspace counts', () => {
+    const summary = summarizeAgentWorkspace([
+      makeEvent({
+        action: 'engine-failed',
+        outcome: 'failed',
+        runEventSummary: {
+          outcome: 'engine-failed',
+          proposalCreated: false,
+          actionCounts: { diffFiles: 0 },
+        },
+      }),
+      makeEvent({
+        action: 'sandbox-failed',
+        outcome: 'failed',
+        runEventSummary: {
+          outcome: 'sandbox-failed',
+          proposalCreated: false,
+          actionCounts: { diffFiles: 0 },
+        },
+      }),
+      makeEvent({
+        action: 'empty-diff',
+        outcome: 'no-proposal',
+        runEventSummary: {
+          outcome: 'empty-diff',
+          proposalCreated: false,
+          actionCounts: { diffFiles: 0 },
+        },
+      }),
+    ]);
+
+    expect(summary).toMatchObject({
+      proposalEvents: 0,
+      noProposalEvents: 1,
+      diagnosticNoProposalEvents: 1,
+      policySuppressedEvents: 0,
+      diagnosticProposalRate: 0,
+      diagnosticNoProposalRate: 1,
+    });
   });
 
   it('reads a bounded durable workspace window from disk', () => {
@@ -324,6 +410,8 @@ describe('M343 agent action ledger', () => {
     expect(filtered.map((event) => event.action)).toEqual(['kept-system', 'kept-enrolled']);
     expect(scoped.eventCount).toBe(2);
     expect(scoped.proposalEvents).toBe(1);
+    expect(scoped.diagnosticNoProposalEvents).toBe(0);
+    expect(scoped.policySuppressedEvents).toBe(0);
     expect(scoped.byRepo).toEqual([expect.objectContaining({ key: repo, count: 1 })]);
     expect(scoped.recentActions.map((event) => event.action)).not.toContain('dropped-missing');
     expect(all.eventCount).toBe(3);

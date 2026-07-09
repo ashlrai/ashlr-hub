@@ -303,14 +303,20 @@ export function formatFleetStatus(s: FleetStatus): string {
     const spendUsd = typeof workspace.spendUsd === 'number' && Number.isFinite(workspace.spendUsd)
       ? workspace.spendUsd
       : 0;
+    const diagnosticNoProposal = workspace.diagnosticNoProposalEvents ?? workspace.noProposalEvents ?? 0;
+    const policySuppressed = workspace.policySuppressedEvents ?? 0;
     lines.push(`  window:    ${formatProductionWindow(workspace.windowHours)}`);
     lines.push(`  events:    ${workspace.eventCount ?? 0}`);
     lines.push(`  latest:    ${workspace.latestAt ?? '—'}`);
     lines.push(`  machines:  ${activeMachines.length > 0 ? activeMachines.join(', ') : '—'}`);
     lines.push(
-      `  outcomes:  proposals ${workspace.proposalEvents ?? 0}, no-proposal ${workspace.noProposalEvents ?? 0}, ` +
+      `  outcomes:  proposals ${workspace.proposalEvents ?? 0}, no-proposal ${diagnosticNoProposal}, ` +
+        `policy-suppressed ${policySuppressed}, ` +
         `spend $${spendUsd.toFixed(4)}`,
     );
+    if (workspace.diagnosticProposalRate !== undefined) {
+      lines.push(`  learning:  diagnostic proposal rate ${formatNullablePercent(workspace.diagnosticProposalRate)}`);
+    }
     if (attention.length > 0) {
       lines.push(`  attention: ${attention.slice(0, 4).map(formatWorkspaceAttention).join('; ')}`);
     }
@@ -331,6 +337,12 @@ export function formatFleetStatus(s: FleetStatus): string {
     lines.push('  unavailable');
   } else {
     lines.push(`  attempts:  ${attemptCoverage.attempts} in ${formatProductionWindow(attemptCoverage.windowHours)}`);
+    lines.push(
+      `  learning:  diagnostic ${attemptCoverage.production.proposalCreated}/${attemptCoverage.production.diagnosticAttempts} ` +
+        `(${formatNullablePercent(attemptCoverage.production.diagnosticProposalRate)}), ` +
+        `no-proposal ${attemptCoverage.production.diagnosticNoProposal}, ` +
+        `policy-suppressed ${attemptCoverage.production.policySuppressed}`,
+    );
     lines.push(
       `  joins:     actions ${formatCoverageMetric(attemptCoverage.coverage.agentAction)}, ` +
         `worked ${formatCoverageMetric(attemptCoverage.coverage.worked)}, ` +

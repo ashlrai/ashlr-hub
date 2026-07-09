@@ -912,3 +912,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused regressions for raw-vs-diagnostic dispatch reasons, all-suppressed proposal windows, and dashboard source contracts.
 - [x] Finish focused, broad, invariant, and full-CI verification.
 - [x] Commit, push, reload daemon, smoke live diagnostic output, and continue into diagnostic/learnable attempt classification.
+
+## Current Continuation - Diagnostic Attempt Learning Classification
+- [x] Rechecked dirty worktree, recent commits, Entire state, task plan, notes, and current diagnostic classification diff.
+- [x] Integrated scout audits for attention eval, attempt records, workspace summaries, and Fleet OS operator surfaces.
+- [x] Add shared metadata-only attempt learning classification with policy-suppressed, diagnostic no-proposal, failed, blocked, and proposal-created kinds.
+- [x] Thread diagnostic learning fields through attention eval, agent workspace summaries, attempt coverage, CLI status, API payloads, Mission Control, Fleet, and Fleet Dashboard.
+- [x] Preserve raw no-proposal counters while making operator surfaces prefer diagnostic no-proposal and split policy suppression explicitly.
+- [x] Add focused regressions for policy-disabled control flow, empty-diff diagnostics, failed/sandbox-failed non-diagnostics, privacy canaries, and status/API/web contracts.
+- [x] Finish focused, broad, invariant, and full-CI verification.
+- [ ] Commit, push, reload daemon, smoke live fleet status, and continue into the next highest-leverage overnight lane.

@@ -22,6 +22,13 @@ import { loadProposal } from '../inbox/store.js';
 import type { WorkedEvent, WorkedLedger } from '../fleet/worked-ledger.js';
 import { loadWorkedLedger } from '../fleet/worked-ledger.js';
 import { runEventSummary as sanitizeRunEventSummary } from '../learning/causal.js';
+import {
+  addProductionAttemptShape,
+  classifyProductionAttemptForLearning,
+  emptyProductionAttemptShape,
+  type ProductionAttemptLearningKind,
+} from '../learning/attempt-shape.js';
+import type { ProductionAttemptShape } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
 
 const DEFAULT_WINDOW_HOURS = 24;
@@ -55,6 +62,11 @@ export interface AttemptRecord {
   routeReason: string;
   reason?: string;
   actionCounts?: RunActionCounts;
+  attemptShape: ProductionAttemptShape;
+  policySuppressed: boolean;
+  diagnosticNoProposal: boolean;
+  diagnosticAttempt: boolean;
+  learningKind: ProductionAttemptLearningKind;
   coverage: AttemptRecordCoverage;
 }
 
@@ -71,6 +83,9 @@ export interface AttemptCoverageStatus {
     ts: string;
     outcome: string;
     backend?: EngineId | null;
+    learningKind?: ProductionAttemptLearningKind;
+    diagnosticAttempt?: boolean;
+    policySuppressed?: boolean;
     coverage: AttemptRecordCoverage;
   }>;
   coverage: {
@@ -79,6 +94,16 @@ export interface AttemptCoverageStatus {
     decision: AttemptCoverageMetric;
     evidence: AttemptCoverageMetric;
     worked: AttemptCoverageMetric;
+  };
+  production: {
+    attempts: number;
+    proposalCreated: number;
+    policySuppressed: number;
+    diagnosticAttempts: number;
+    diagnosticNoProposal: number;
+    diagnosticProposalRate: number | null;
+    diagnosticNoProposalRate: number | null;
+    attemptShape: ProductionAttemptShape;
   };
   gaps: Array<{ kind: keyof AttemptRecordCoverage; count: number; sampleRefs: string[] }>;
 }
@@ -330,6 +355,11 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
       const tier = event.tier === null ? null : bounded(event.tier, 40);
       const model = event.model === null ? null : bounded(event.model, 160);
       const actionCounts = sanitizeRunEventSummary(event.runEventSummary)?.actionCounts;
+      const classification = classifyProductionAttemptForLearning({
+        outcome: event.outcome,
+        proposalCreated: event.proposalCreated,
+        actionCounts,
+      });
       const coverage: AttemptRecordCoverage = {
         agentAction: hasAgentAction(event, actionMaps),
         outcomeRecord: hasOutcomeRecord(proposalId, outcomesByProposal, readProposal),
@@ -359,6 +389,11 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
         routeReason: bounded(event.routeReason, 160, 'unknown'),
         ...(event.reason ? { reason: bounded(event.reason, 160) } : {}),
         ...(actionCounts ? { actionCounts } : {}),
+        attemptShape: classification.attemptShape,
+        policySuppressed: classification.policySuppressed,
+        diagnosticNoProposal: classification.diagnosticNoProposal,
+        diagnosticAttempt: classification.diagnosticAttempt,
+        learningKind: classification.kind,
         coverage,
       };
     });
@@ -376,6 +411,18 @@ export function summarizeAttemptCoverage(
   records: AttemptRecord[],
   windowHours = DEFAULT_WINDOW_HOURS,
 ): AttemptCoverageStatus {
+  const attemptShape = emptyProductionAttemptShape();
+  let proposalCreated = 0;
+  let policySuppressed = 0;
+  let diagnosticAttempts = 0;
+  let diagnosticNoProposal = 0;
+  for (const record of records) {
+    if (record.proposalCreated) proposalCreated++;
+    if (record.policySuppressed) policySuppressed++;
+    if (record.diagnosticAttempt) diagnosticAttempts++;
+    if (record.diagnosticNoProposal) diagnosticNoProposal++;
+    addProductionAttemptShape(attemptShape, record.attemptShape);
+  }
   const coverage = {
     agentAction: metric(records, (record) => record.coverage.agentAction),
     outcomeRecord: metric(records, (record) => record.coverage.outcomeRecord),
@@ -398,9 +445,22 @@ export function summarizeAttemptCoverage(
       ts: record.ts,
       outcome: record.outcome,
       backend: record.backend ?? null,
+      learningKind: record.learningKind,
+      diagnosticAttempt: record.diagnosticAttempt,
+      policySuppressed: record.policySuppressed,
       coverage: record.coverage,
     })),
     coverage,
+    production: {
+      attempts: records.length,
+      proposalCreated,
+      policySuppressed,
+      diagnosticAttempts,
+      diagnosticNoProposal,
+      diagnosticProposalRate: diagnosticAttempts > 0 ? proposalCreated / diagnosticAttempts : null,
+      diagnosticNoProposalRate: diagnosticAttempts > 0 ? diagnosticNoProposal / diagnosticAttempts : null,
+      attemptShape,
+    },
     gaps,
   };
 }

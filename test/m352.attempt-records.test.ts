@@ -148,6 +148,16 @@ describe('AttemptRecord coverage', () => {
       proposalId: 'prop-1',
       runId: 'run-1',
       trajectoryId: 'traj-1',
+      learningKind: 'proposal-created',
+      diagnosticAttempt: true,
+      policySuppressed: false,
+      diagnosticNoProposal: false,
+      attemptShape: {
+        backendNoDiff: 0,
+        captureOrGateBlocked: 0,
+        repairAttempts: 0,
+        policyDisabled: 0,
+      },
       coverage: {
         agentAction: true,
         outcomeRecord: true,
@@ -159,6 +169,15 @@ describe('AttemptRecord coverage', () => {
 
     const summary = summarizeAttemptCoverage(records);
     expect(summary.coverage.agentAction).toEqual({ count: 1, rate: 1 });
+    expect(summary.production).toMatchObject({
+      attempts: 1,
+      proposalCreated: 1,
+      policySuppressed: 0,
+      diagnosticAttempts: 1,
+      diagnosticNoProposal: 0,
+      diagnosticProposalRate: 1,
+      diagnosticNoProposalRate: 0,
+    });
     expect(summary.gaps).toEqual([]);
   });
 
@@ -254,12 +273,156 @@ describe('AttemptRecord coverage', () => {
     });
 
     expect(records[0]?.proposalId).toBeUndefined();
+    expect(records[0]).toMatchObject({
+      learningKind: 'diagnostic-no-proposal',
+      diagnosticAttempt: true,
+      diagnosticNoProposal: true,
+      policySuppressed: false,
+      attemptShape: {
+        backendNoDiff: 1,
+        policyDisabled: 0,
+      },
+    });
     expect(records[0]?.coverage).toMatchObject({
       agentAction: true,
       outcomeRecord: false,
       decision: false,
       evidence: false,
       worked: true,
+    });
+  });
+
+  it('classifies policy-disabled attempts separately from diagnostic no-proposal attempts', () => {
+    const records = listAttemptRecords({
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          dispatch({
+            itemId: 'policy-disabled',
+            outcome: 'proposal-disabled',
+            proposalCreated: false,
+            proposalId: undefined,
+            runEventSummary: {
+              outcome: 'proposal-disabled',
+              proposalCreated: false,
+              actionCounts: { proposalDisabled: 1 },
+            },
+          }),
+          dispatch({
+            itemId: 'empty-diff',
+            outcome: 'empty-diff',
+            proposalCreated: false,
+            proposalId: undefined,
+            runEventSummary: {
+              outcome: 'empty-diff',
+              proposalCreated: false,
+              actionCounts: { diffFiles: 0 },
+            },
+          }),
+          dispatch({
+            itemId: 'created',
+            outcome: 'proposal-created',
+            proposalCreated: true,
+            proposalId: 'prop-created',
+            runEventSummary: {
+              outcome: 'proposal-created',
+              proposalCreated: true,
+              actionCounts: { proposalCreated: 1 },
+            },
+          }),
+        ],
+        listOutcomeRecords: () => [],
+        readDecisions: () => [],
+        listAutonomyEvidencePacks: () => [],
+        loadWorkedLedger: () => ({ events: [] }),
+      }),
+    });
+
+    expect(records.map((record) => record.learningKind)).toEqual([
+      'policy-suppressed',
+      'diagnostic-no-proposal',
+      'proposal-created',
+    ]);
+    expect(records[0]).toMatchObject({
+      policySuppressed: true,
+      diagnosticAttempt: false,
+      diagnosticNoProposal: false,
+      attemptShape: { policyDisabled: 1 },
+    });
+    expect(records[1]).toMatchObject({
+      policySuppressed: false,
+      diagnosticAttempt: true,
+      diagnosticNoProposal: true,
+      attemptShape: { backendNoDiff: 1 },
+    });
+    const summary = summarizeAttemptCoverage(records);
+    expect(summary.production).toMatchObject({
+      attempts: 3,
+      proposalCreated: 1,
+      policySuppressed: 1,
+      diagnosticAttempts: 2,
+      diagnosticNoProposal: 1,
+      diagnosticProposalRate: 0.5,
+      diagnosticNoProposalRate: 0.5,
+      attemptShape: {
+        backendNoDiff: 1,
+        captureOrGateBlocked: 0,
+        repairAttempts: 0,
+        policyDisabled: 1,
+      },
+    });
+    expect(summary.recent.map((record) => record.learningKind)).toEqual([
+      'policy-suppressed',
+      'diagnostic-no-proposal',
+      'proposal-created',
+    ]);
+  });
+
+  it('keeps all policy-suppressed attempts out of diagnostic attempt denominators', () => {
+    const records = listAttemptRecords({
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          dispatch({
+            itemId: 'policy-disabled',
+            outcome: 'proposal-disabled',
+            proposalCreated: false,
+            proposalId: undefined,
+            runEventSummary: {
+              outcome: 'proposal-disabled',
+              proposalCreated: false,
+              actionCounts: { proposalDisabled: 1 },
+            },
+          }),
+        ],
+        readAgentActions: () => [],
+        listOutcomeRecords: () => [],
+        readDecisions: () => [],
+        listAutonomyEvidencePacks: () => [],
+        loadWorkedLedger: () => ({ events: [] }),
+      }),
+    });
+
+    const summary = summarizeAttemptCoverage(records);
+
+    expect(records[0]).toMatchObject({
+      learningKind: 'policy-suppressed',
+      diagnosticAttempt: false,
+      diagnosticNoProposal: false,
+      policySuppressed: true,
+    });
+    expect(summary.production).toMatchObject({
+      attempts: 1,
+      proposalCreated: 0,
+      policySuppressed: 1,
+      diagnosticAttempts: 0,
+      diagnosticNoProposal: 0,
+      diagnosticProposalRate: null,
+      diagnosticNoProposalRate: null,
+      attemptShape: {
+        backendNoDiff: 0,
+        captureOrGateBlocked: 0,
+        repairAttempts: 0,
+        policyDisabled: 1,
+      },
     });
   });
 

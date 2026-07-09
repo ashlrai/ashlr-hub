@@ -62,6 +62,8 @@ const RAW_EXECUTION_CANARIES = [
   'ASHLR_SECRET=RAW_ENV_CANARY_DO_NOT_SERIALIZE_M349',
   'RAW_FILE_CONTENT_CANARY_DO_NOT_SERIALIZE_M349',
   'RAW_ARGV_CANARY_DO_NOT_SERIALIZE_M349',
+  'RAW_POLICY_SUPPRESSION_CANARY_DO_NOT_SERIALIZE_M349',
+  'RAW_ATTEMPT_CLASSIFICATION_CANARY_DO_NOT_SERIALIZE_M349',
 ] as const;
 
 let tmpHome: string;
@@ -327,6 +329,8 @@ describe('M349 secret safety invariants', () => {
       rawEnv,
       rawFileContents,
       rawArgv,
+      rawPolicySuppression,
+      rawAttemptClassification,
     ] = RAW_EXECUTION_CANARIES;
     const records = listAttemptRecords({
       deps: {
@@ -341,13 +345,14 @@ describe('M349 secret safety invariants', () => {
           tier: 'frontier',
           model: 'gpt-5.5',
           assignedBy: 'm349',
-          routeReason: 'safe route',
+          routeReason: `safe route ${rawPolicySuppression}`,
           outcome: 'proposal-created',
           proposalCreated: true,
           proposalId: 'prop-m349-attempt',
           runId: 'run-m349-attempt',
           trajectoryId: 'traj-m349-attempt',
           spentUsd: 0,
+          reason: rawAttemptClassification,
           basis: 'run-proposal-outcome',
           runEventSummary: {
             runId: 'run-m349-attempt',
@@ -363,6 +368,8 @@ describe('M349 secret safety invariants', () => {
               diffLines: 2,
               [`stdout:${rawStdout}`]: 1,
               [`argv:${rawArgv}`]: 1,
+              [`policy:${rawPolicySuppression}`]: 1,
+              [`classification:${rawAttemptClassification}`]: 1,
             } as never,
           },
           prompt: rawPrompt,
@@ -446,6 +453,26 @@ describe('M349 secret safety invariants', () => {
       proposalCreated: 1,
       diffFiles: 1,
       diffLines: 2,
+    });
+    expect(records[0]).toMatchObject({
+      learningKind: 'proposal-created',
+      diagnosticAttempt: true,
+      diagnosticNoProposal: false,
+      policySuppressed: false,
+      attemptShape: {
+        backendNoDiff: 0,
+        captureOrGateBlocked: 0,
+        repairAttempts: 0,
+        policyDisabled: 0,
+      },
+    });
+    expect(fleetCoverage.production).toMatchObject({
+      attempts: 1,
+      proposalCreated: 1,
+      policySuppressed: 0,
+      diagnosticAttempts: 1,
+      diagnosticNoProposal: 0,
+      diagnosticProposalRate: 1,
     });
     assertNoRawExecutionPayloads('attempt-record surface', records);
     assertNoRawExecutionPayloads('fleet coverage surface', { attemptCoverage: fleetCoverage });

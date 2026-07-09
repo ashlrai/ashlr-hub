@@ -2610,6 +2610,11 @@ function renderDispatchProductionCard(dispatchProduction, cls = 'ctrl-card card'
 function renderGlobalWorkspaceCard(workspace, cls = 'ctrl-card card') {
   if (!workspace) return null;
   const eventCount = workspace.eventCount ?? 0;
+  const diagnosticNoProposal = workspace.diagnosticNoProposalEvents ?? workspace.noProposalEvents ?? 0;
+  const policySuppressed = workspace.policySuppressedEvents ?? 0;
+  const diagnosticProposalRate = typeof workspace.diagnosticProposalRate === 'number'
+    ? formatFleetPercent(workspace.diagnosticProposalRate)
+    : '—';
   const card = el('div', { cls });
   card.appendChild(el('div', { cls: 'card-header' },
     el('span', { cls: 'card-title' }, 'Global Workspace'),
@@ -2621,7 +2626,9 @@ function renderGlobalWorkspaceCard(workspace, cls = 'ctrl-card card') {
     ['Latest', workspace.latestAt ? fmtRelative(workspace.latestAt) : '—'],
     ['Machines', Array.isArray(workspace.activeMachines) ? workspace.activeMachines.length : 0],
     ['Proposals', workspace.proposalEvents ?? 0],
-    ['No-proposal', workspace.noProposalEvents ?? 0],
+    ['No-proposal', diagnosticNoProposal],
+    ['Policy-suppressed', policySuppressed],
+    ['Diagnostic rate', diagnosticProposalRate],
     ['Spend', `$${Number(workspace.spendUsd ?? 0).toFixed(4)}`],
     ['Action entropy', workspace.entropy?.action ?? 0],
   ]));
@@ -4684,12 +4691,19 @@ function fdRenderProductionPanel(snap) {
   }
 
   if (workspaceHasEvents) {
+    const diagnosticNoProposal = workspace.diagnosticNoProposalEvents ?? workspace.noProposalEvents ?? 0;
+    const policySuppressed = workspace.policySuppressedEvents ?? 0;
+    const diagnosticProposalRate = typeof workspace.diagnosticProposalRate === 'number'
+      ? formatFleetPercent(workspace.diagnosticProposalRate)
+      : '—';
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Global workspace'));
     body.appendChild(infoGrid([
       ['Window', proposalProductionWindowLabel(workspace)],
       ['Events', workspace.eventCount ?? 0],
       ['Proposals', workspace.proposalEvents ?? 0],
-      ['No-proposal', workspace.noProposalEvents ?? 0],
+      ['No-proposal', diagnosticNoProposal],
+      ['Policy-suppressed', policySuppressed],
+      ['Diagnostic rate', diagnosticProposalRate],
       ['Action entropy', workspace.entropy?.action ?? 0],
     ]));
     const attention = Array.isArray(workspace.attention) ? workspace.attention[0] : null;

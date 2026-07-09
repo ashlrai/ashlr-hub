@@ -37,7 +37,12 @@ describe('M346 eval attention', () => {
         attempts: 2,
         proposalCreated: 1,
         noProposal: 1,
+        policySuppressed: 0,
+        diagnosticAttempts: 2,
+        diagnosticNoProposal: 1,
         proposalRate: 0.5,
+        diagnosticProposalRate: 0.5,
+        diagnosticNoProposalRate: 0.5,
         attemptShape: {
           backendNoDiff: 1,
           captureOrGateBlocked: 0,
@@ -78,6 +83,95 @@ describe('M346 eval attention', () => {
       share: 0.667,
     });
     expect(report.repoAttention.topRepos[0]?.repoKey).toMatch(/^[a-f0-9]{12}$/);
+  });
+
+  it('counts policy-disabled production attempts separately from diagnostic no-proposal attempts', () => {
+    const events: AgentActionEvent[] = [
+      {
+        schemaVersion: 1,
+        ts: '2026-07-09T05:00:00.000Z',
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'proposal-created',
+        action: 'dispatch',
+        summary: 'proposal filed',
+        repo: '/tmp/repo-a',
+        runEventSummary: {
+          outcome: 'proposal-created',
+          proposalCreated: true,
+          actionCounts: { proposalCreated: 1 },
+        },
+      },
+      {
+        schemaVersion: 1,
+        ts: '2026-07-09T05:00:01.000Z',
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'no-proposal',
+        action: 'dispatch',
+        summary: 'policy-disabled control flow',
+        repo: '/tmp/repo-a',
+        runEventSummary: {
+          outcome: 'proposal-disabled',
+          proposalCreated: false,
+          actionCounts: { proposalDisabled: 1 },
+        },
+      },
+      {
+        schemaVersion: 1,
+        ts: '2026-07-09T05:00:02.000Z',
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'no-proposal',
+        action: 'dispatch',
+        summary: 'policy-disabled action count',
+        repo: '/tmp/repo-a',
+        runEventSummary: {
+          outcome: 'no-proposal',
+          proposalCreated: false,
+          actionCounts: { proposalDisabled: 1 },
+        },
+      },
+      {
+        schemaVersion: 1,
+        ts: '2026-07-09T05:00:03.000Z',
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'no-proposal',
+        action: 'dispatch',
+        summary: 'empty diff',
+        repo: '/tmp/repo-a',
+        runEventSummary: {
+          outcome: 'empty-diff',
+          proposalCreated: false,
+          actionCounts: { diffFiles: 0 },
+        },
+      },
+    ];
+
+    const report = buildAttentionEvalReport(events, {
+      window: '1d',
+      generatedAt: '2026-07-09T05:01:00.000Z',
+    });
+
+    expect(report.productionYield).toMatchObject({
+      attempts: 4,
+      proposalCreated: 1,
+      noProposal: 3,
+      policySuppressed: 2,
+      diagnosticAttempts: 2,
+      diagnosticNoProposal: 1,
+      proposalRate: 0.25,
+      noProposalRate: 0.75,
+      diagnosticProposalRate: 0.5,
+      diagnosticNoProposalRate: 0.5,
+      attemptShape: {
+        backendNoDiff: 1,
+        captureOrGateBlocked: 0,
+        repairAttempts: 0,
+        policyDisabled: 2,
+      },
+    });
   });
 
   it('does not persist raw prompt, diff, stdout, stderr, summary, reason, detail, or full paths', () => {

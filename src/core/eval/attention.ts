@@ -12,8 +12,8 @@ import type {
 } from '../types.js';
 import {
   addProductionAttemptShape,
+  classifyProductionAttemptForLearning,
   emptyProductionAttemptShape,
-  productionAttemptShapeFromSignals,
 } from '../learning/attempt-shape.js';
 
 export type AttentionEvalWindow = '1d' | '7d' | '30d';
@@ -86,8 +86,13 @@ export interface AttentionEvalReport {
     noProposal: number;
     failed: number;
     blocked: number;
+    policySuppressed: number;
+    diagnosticAttempts: number;
+    diagnosticNoProposal: number;
     proposalRate: number | null;
     noProposalRate: number | null;
+    diagnosticProposalRate: number | null;
+    diagnosticNoProposalRate: number | null;
     attemptShape: ProductionAttemptShape;
   };
   routingCost: {
@@ -195,6 +200,9 @@ export function buildAttentionEvalReport(
   let noProposal = 0;
   let failed = 0;
   let blocked = 0;
+  let policySuppressed = 0;
+  let diagnosticAttempts = 0;
+  let diagnosticNoProposal = 0;
   const attemptShape = emptyProductionAttemptShape();
   let spendUsd = 0;
   let tokensIn = 0;
@@ -276,16 +284,29 @@ export function buildAttentionEvalReport(
     }
 
     if (isProductionAttempt(event.kind)) {
-      const produced = event.outcome === 'proposal-created' || run?.proposalCreated === true;
+      const proposalCreatedSignal = run?.proposalCreated === true
+        ? true
+        : run?.proposalCreated === false
+          ? false
+          : event.outcome === 'proposal-created'
+            ? true
+            : event.outcome === 'no-proposal'
+              ? false
+              : undefined;
+      const produced = proposalCreatedSignal === true;
       if (produced) proposalCreated++;
       else if (event.outcome === 'no-proposal' || run?.proposalCreated === false) noProposal++;
       else if (event.outcome === 'failed' || event.outcome === 'rejected') failed++;
       else if (event.outcome === 'blocked' || event.outcome === 'skipped') blocked++;
-      addProductionAttemptShape(attemptShape, productionAttemptShapeFromSignals({
+      const classification = classifyProductionAttemptForLearning({
         outcome: run?.outcome ?? event.outcome,
-        proposalCreated: produced,
+        proposalCreated: proposalCreatedSignal,
         actionCounts: run?.actionCounts,
-      }));
+      });
+      if (classification.policySuppressed) policySuppressed++;
+      if (classification.diagnosticNoProposal) diagnosticNoProposal++;
+      if (classification.diagnosticAttempt) diagnosticAttempts++;
+      addProductionAttemptShape(attemptShape, classification.attemptShape);
     }
 
     if (evidence) {
@@ -371,8 +392,13 @@ export function buildAttentionEvalReport(
       noProposal,
       failed,
       blocked,
+      policySuppressed,
+      diagnosticAttempts,
+      diagnosticNoProposal,
       proposalRate: attempts > 0 ? roundRatio(proposalCreated / attempts) : null,
       noProposalRate: attempts > 0 ? roundRatio(noProposal / attempts) : null,
+      diagnosticProposalRate: diagnosticAttempts > 0 ? roundRatio(proposalCreated / diagnosticAttempts) : null,
+      diagnosticNoProposalRate: diagnosticAttempts > 0 ? roundRatio(diagnosticNoProposal / diagnosticAttempts) : null,
       attemptShape,
     },
     routingCost: {

@@ -285,8 +285,19 @@ describe('GET /api/fleet-state', () => {
     expect('oversight' in payload).toBe(true);
     expect('routing' in payload).toBe(true);
     expect('workspace' in payload).toBe(true);
-    const workspace = payload['workspace'] as { eventCount?: number; recentActions?: unknown[] };
+    const workspace = payload['workspace'] as {
+      eventCount?: number;
+      proposalEvents?: number;
+      diagnosticNoProposalEvents?: number;
+      policySuppressedEvents?: number;
+      diagnosticProposalRate?: number | null;
+      recentActions?: unknown[];
+    };
     expect(workspace.eventCount).toBe(1);
+    expect(workspace.proposalEvents).toBe(1);
+    expect(workspace.diagnosticNoProposalEvents).toBe(0);
+    expect(workspace.policySuppressedEvents).toBe(0);
+    expect(workspace.diagnosticProposalRate).toBe(1);
     expect(Array.isArray(workspace.recentActions)).toBe(true);
   });
 

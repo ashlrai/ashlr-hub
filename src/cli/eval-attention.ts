@@ -220,7 +220,9 @@ function retrievalLine(report: AttentionEvalReport): string {
 }
 
 function yieldLine(report: AttentionEvalReport): string {
-  return `${report.productionYield.proposalCreated}/${report.productionYield.attempts} proposals (${pct(report.productionYield.proposalRate)}), no-proposal ${pct(report.productionYield.noProposalRate)}`;
+  return `${report.productionYield.proposalCreated}/${report.productionYield.attempts} proposals (${pct(report.productionYield.proposalRate)}), ` +
+    `diagnostic ${report.productionYield.proposalCreated}/${report.productionYield.diagnosticAttempts} (${pct(report.productionYield.diagnosticProposalRate)}), ` +
+    `no-proposal ${pct(report.productionYield.noProposalRate)}, policy-suppressed ${report.productionYield.policySuppressed}`;
 }
 
 function routeLine(report: AttentionEvalReport): string {

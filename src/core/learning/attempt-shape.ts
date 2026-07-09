@@ -6,6 +6,22 @@ export interface ProductionAttemptShapeSignals {
   actionCounts?: RunActionCounts;
 }
 
+export type ProductionAttemptLearningKind =
+  | 'proposal-created'
+  | 'diagnostic-no-proposal'
+  | 'policy-suppressed'
+  | 'failed'
+  | 'blocked'
+  | 'unknown';
+
+export interface ProductionAttemptLearningClassification {
+  attemptShape: ProductionAttemptShape;
+  policySuppressed: boolean;
+  diagnosticNoProposal: boolean;
+  diagnosticAttempt: boolean;
+  kind: ProductionAttemptLearningKind;
+}
+
 export function emptyProductionAttemptShape(): ProductionAttemptShape {
   return {
     backendNoDiff: 0,
@@ -65,6 +81,44 @@ export function productionAttemptShapeFromSignals(
   return shape;
 }
 
+export function classifyProductionAttemptForLearning(
+  signals: ProductionAttemptShapeSignals,
+): ProductionAttemptLearningClassification {
+  const attemptShape = productionAttemptShapeFromSignals(signals);
+  const outcome = normalizeOutcome(signals.outcome);
+  const produced = signals.proposalCreated === true || outcome === 'proposal-created';
+  const policySuppressed = attemptShape.policyDisabled > 0;
+  const failed = isFailedOutcome(outcome);
+  const blocked = isBlockedOutcome(outcome);
+  const diagnosticNoProposal = !produced && !policySuppressed && !failed && !blocked && (
+    signals.proposalCreated === false ||
+    outcome === 'no-proposal' ||
+    outcome === 'empty-diff' ||
+    outcome === 'gate-blocked' ||
+    outcome === 'proposal-capture-error' ||
+    attemptShape.backendNoDiff > 0 ||
+    attemptShape.captureOrGateBlocked > 0
+  );
+  const kind: ProductionAttemptLearningKind = produced
+    ? 'proposal-created'
+    : policySuppressed
+      ? 'policy-suppressed'
+      : diagnosticNoProposal
+        ? 'diagnostic-no-proposal'
+        : failed
+          ? 'failed'
+          : blocked
+            ? 'blocked'
+            : 'unknown';
+  return {
+    attemptShape,
+    policySuppressed,
+    diagnosticNoProposal,
+    diagnosticAttempt: kind !== 'policy-suppressed' && kind !== 'unknown',
+    kind,
+  };
+}
+
 function actionCountsRecord(counts: RunActionCounts | undefined): Record<string, unknown> | undefined {
   return counts && typeof counts === 'object' && !Array.isArray(counts)
     ? counts as Record<string, unknown>
@@ -86,4 +140,15 @@ function safeAdd(left: number, right: number): number {
   const a = nonNegativeInteger(left) ?? 0;
   const b = nonNegativeInteger(right) ?? 0;
   return Math.min(a + b, Number.MAX_SAFE_INTEGER);
+}
+
+function isFailedOutcome(outcome: string | undefined): boolean {
+  return outcome === 'failed' ||
+    outcome === 'rejected' ||
+    outcome === 'engine-failed' ||
+    outcome === 'sandbox-failed';
+}
+
+function isBlockedOutcome(outcome: string | undefined): boolean {
+  return outcome === 'blocked' || outcome === 'skipped';
 }

@@ -22,6 +22,7 @@ import type {
 } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { causalMetadata } from '../learning/causal.js';
+import { classifyProductionAttemptForLearning } from '../learning/attempt-shape.js';
 import { listEnrolled } from '../sandbox/policy.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -204,6 +205,10 @@ export interface AgentWorkspaceStatus {
   spendUsd: number;
   proposalEvents: number;
   noProposalEvents: number;
+  diagnosticNoProposalEvents?: number;
+  policySuppressedEvents?: number;
+  diagnosticProposalRate?: number | null;
+  diagnosticNoProposalRate?: number | null;
   repoEventCount: number;
   repoDistinctCount: number;
   topRepoCount: number;
@@ -503,6 +508,21 @@ function recentAction(event: AgentActionEvent): AgentWorkspaceRecentAction {
   };
 }
 
+function isAgentWorkspaceProductionEvent(event: AgentActionEvent): boolean {
+  return event.kind === 'dispatch' ||
+    event.kind === 'proposal' ||
+    event.outcome === 'proposal-created' ||
+    event.outcome === 'no-proposal';
+}
+
+function proposalCreatedSignal(event: AgentActionEvent): boolean | undefined {
+  if (event.runEventSummary?.proposalCreated === true) return true;
+  if (event.runEventSummary?.proposalCreated === false) return false;
+  if (event.outcome === 'proposal-created') return true;
+  if (event.outcome === 'no-proposal') return false;
+  return undefined;
+}
+
 function attentionFromCounts(
   kind: AgentWorkspaceAttention['kind'],
   rows: AgentActionCount[],
@@ -540,6 +560,8 @@ export function summarizeAgentWorkspace(
   let spendUsd = 0;
   let proposalEvents = 0;
   let noProposalEvents = 0;
+  let diagnosticNoProposalEvents = 0;
+  let policySuppressedEvents = 0;
   let latestAt: string | null = null;
 
   for (const event of events) {
@@ -552,6 +574,15 @@ export function summarizeAgentWorkspace(
     spendUsd += finiteNumber(event.spentUsd) ?? 0;
     if (event.outcome === 'proposal-created') proposalEvents++;
     if (event.outcome === 'no-proposal') noProposalEvents++;
+    if (isAgentWorkspaceProductionEvent(event)) {
+      const classification = classifyProductionAttemptForLearning({
+        outcome: event.runEventSummary?.outcome ?? event.outcome,
+        proposalCreated: proposalCreatedSignal(event),
+        actionCounts: event.runEventSummary?.actionCounts,
+      });
+      if (classification.diagnosticNoProposal) diagnosticNoProposalEvents++;
+      if (classification.policySuppressed) policySuppressedEvents++;
+    }
     if (!latestAt || Date.parse(event.ts) > Date.parse(latestAt)) latestAt = event.ts;
   }
 
@@ -562,6 +593,7 @@ export function summarizeAgentWorkspace(
   const sourceRows = topCounts(bySource, limit);
   const repoEventCount = [...byRepo.values()].reduce((sum, count) => sum + count, 0);
   const topRepoCount = [...byRepo.values()].reduce((max, count) => Math.max(max, count), 0);
+  const diagnosticProposalDenominator = proposalEvents + diagnosticNoProposalEvents;
 
   const attention = [
     ...attentionFromCounts('repo', repoRows, 'repo events', 3),
@@ -579,6 +611,14 @@ export function summarizeAgentWorkspace(
     spendUsd,
     proposalEvents,
     noProposalEvents,
+    diagnosticNoProposalEvents,
+    policySuppressedEvents,
+    diagnosticProposalRate: diagnosticProposalDenominator > 0
+      ? proposalEvents / diagnosticProposalDenominator
+      : null,
+    diagnosticNoProposalRate: diagnosticProposalDenominator > 0
+      ? diagnosticNoProposalEvents / diagnosticProposalDenominator
+      : null,
     repoEventCount,
     repoDistinctCount: byRepo.size,
     topRepoCount,
