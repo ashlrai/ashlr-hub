@@ -747,4 +747,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Wire repair result counts through existing daemon maintenance without new merge authority.
 - [x] Add focused queue/daemon/privacy tests.
 - [x] Verify focused and broad lightweight gates.
-- [ ] Commit, push, reload/smoke, and continue.
+- [x] Commit and push `abb7a18`, reload launchd daemon, run live repair scan/backlog refresh, and smoke fleet health.
