@@ -11,7 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { AshlrConfig, DaemonTick, EngineId, Goal, WorkItem } from '../src/core/types.js';
@@ -259,6 +259,22 @@ function writeRunningDaemon(home: string, ticks: DaemonTick[] = [], lastTickAt =
       todaySpentUsd: 0,
       itemsProcessed: 1,
       ticks,
+    }),
+    'utf8',
+  );
+}
+
+function writeDaemonLock(home: string, heartbeatAt: string, pid = process.pid): void {
+  const ashlrDir = join(home, '.ashlr');
+  mkdirSync(ashlrDir, { recursive: true });
+  writeFileSync(
+    join(ashlrDir, 'daemon.lock'),
+    JSON.stringify({
+      pid,
+      token: 'test-token',
+      hostname: hostname(),
+      acquiredAt: '2026-07-03T00:00:00.000Z',
+      heartbeatAt,
     }),
     'utf8',
   );
@@ -2664,6 +2680,34 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
   });
 
+  it('uses a live daemon heartbeat as fresh readiness evidence while a tick is in progress', async () => {
+    await withFakeNow(new Date('2026-07-03T00:01:00.000Z'), async () => {
+      writeRunningDaemon(tmpHome, [], '2026-07-02T23:55:00.000Z');
+      writeDaemonLock(tmpHome, '2026-07-03T00:01:00.000Z');
+
+      const s = await buildFleetStatus(baseConfig());
+      const daemonSource = s.autonomousShipReadiness?.sources.find((source) => source.id === 'daemon');
+
+      expect(s.daemon).toMatchObject({
+        running: true,
+        startedAt: '2026-07-03T00:00:00.000Z',
+        lastTickAt: '2026-07-02T23:55:00.000Z',
+        lockHeartbeatAt: '2026-07-03T00:01:00.000Z',
+        tickInProgress: true,
+      });
+      expect(daemonSource).toMatchObject({
+        status: 'healthy',
+        freshness: 'fresh',
+        observedAt: '2026-07-03T00:01:00.000Z',
+        detail: 'daemon running; tick in progress since 2026-07-03T00:00:00.000Z; last completed tick 2026-07-02T23:55:00.000Z',
+        sourceQuality: {
+          badge: 'healthy-source',
+          sourcePresent: true,
+        },
+      });
+    });
+  });
+
   it('degrades autonomous ship readiness when ready work depends on a stale source', async () => {
     const repo = join(tmpHome, 'repo');
     writeBacklogSnapshot(tmpHome, repo, []);
@@ -2922,6 +2966,30 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     });
 
     expect(out).toContain('generated:     3 total, 2 self-heal, 2 proposal-repair, 1 no-diff reslice, 1 invent');
+  });
+
+  it('renders live daemon heartbeat and active tick state', () => {
+    const out = formatFleetStatus({
+      generatedAt: '2026-06-17T00:00:00.000Z',
+      daemon: {
+        running: true,
+        startedAt: '2026-06-17T00:01:00.000Z',
+        lastTickAt: '2026-06-17T00:00:00.000Z',
+        lockHeartbeatAt: '2026-06-17T00:02:00.000Z',
+        tickInProgress: true,
+        todaySpentUsd: 0,
+      },
+      backends: [],
+      queue: { backlogItems: 0, eligibleBacklogItems: 0, cooldownItems: 0, pendingItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      killed: false,
+    });
+
+    expect(out).toContain('started:       2026-06-17T00:01:00.000Z');
+    expect(out).toContain('last tick:     2026-06-17T00:00:00.000Z');
+    expect(out).toContain('current tick:  in progress');
+    expect(out).toContain('heartbeat:     2026-06-17T00:02:00.000Z');
   });
 
   it('renders dispatch-yield diagnostic reasons without falling back to raw policy-disabled reasons', () => {

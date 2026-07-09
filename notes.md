@@ -43,6 +43,12 @@
 - Compatibility: if no frontier backend is available, existing mid/builtin fallback behavior remains unchanged. Ordinary self-heal or proposal-repair items without the diagnostic no-diff reslice tag are not promoted by this rule.
 - Verification passed: `npm run typecheck -- --pretty false`; focused `npm run test:ci -- test/m46.fleet.test.ts test/m255.concurrent-dispatch.test.ts test/m256.workhorse-dispatch.test.ts test/m250.resource-control.test.ts` (100 tests); `git diff --check`; `npm run lint` (known 115-warning baseline, 0 errors); `npm run build`; and `npm audit --audit-level=moderate` (0 vulnerabilities).
 
+## Current Daemon Active Tick Freshness
+- Live finding: after launchd kickstart, the daemon process owned a fresh singleton lock and launchd stderr showed active engine runs, but `FleetStatus.daemon.lastTickAt` stayed stale because it only records completed ticks. Autonomous Ship Readiness therefore marked the daemon source stale during productive long-running ticks.
+- Implementation: FleetStatus now carries additive daemon fields: `startedAt`, `lockHeartbeatAt`, and `tickInProgress`. The readiness daemon source uses a matching live lock heartbeat as the observed freshness timestamp and explains when a tick is in progress, while preserving the last completed tick timestamp.
+- CLI: `ashlr fleet status` now prints daemon started time, active tick state, and heartbeat when available.
+- Verification passed: `npm run typecheck -- --pretty false`; focused `npm run test:ci -- test/m49.fleet-status.test.ts test/m61.control.test.ts test/m210.dashboard.test.ts` (100 tests); `git diff --check`; `npm run lint` (known 115-warning baseline, 0 errors); `npm run build`; and `npm audit --audit-level=moderate` (0 vulnerabilities).
+
 ## Current Resource-Aware Learned Target Gate
 - Start state: dirty Hub WIP after comparative learned routing rollout; Entire remains not set up for `master`.
 - Implementation: `recommendRoute()` now accepts optional metadata-only `resourceStates` and filters comparative same-tier learned reroute candidates to `open` or `near` availability when provided. Missing candidates are blocked only in explicit resource-aware calls; direct/legacy learned-router callers without `resourceStates` preserve previous behavior.

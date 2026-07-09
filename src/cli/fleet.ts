@@ -55,7 +55,16 @@ export function formatFleetStatus(s: FleetStatus): string {
 
   // Daemon
   lines.push(`Daemon:    ${s.daemon.running ? 'running' : 'stopped'}`);
+  if (s.daemon.startedAt) {
+    lines.push(`  started:       ${s.daemon.startedAt}`);
+  }
   lines.push(`  last tick:     ${s.daemon.lastTickAt ?? '—'}`);
+  if (s.daemon.tickInProgress) {
+    lines.push('  current tick:  in progress');
+  }
+  if (s.daemon.lockHeartbeatAt) {
+    lines.push(`  heartbeat:     ${s.daemon.lockHeartbeatAt}`);
+  }
   lines.push(`  spend today:   $${s.daemon.todaySpentUsd.toFixed(4)}`);
   lines.push('');
 
@@ -979,6 +988,7 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
       fs.autonomy ? `evidence ${fs.autonomy.evidencePacks}` : null,
       fs.workspace ? `workspace ${fs.workspace.eventCount}` : null,
       `spent today $${fs.daemon.todaySpentUsd.toFixed(2)}`,
+      fs.daemon.tickInProgress ? 'tick active' : null,
       `last tick ${relTime(fs.daemon.lastTickAt)}`,
     ].filter(Boolean).join(' · ');
     if (fs.killed) {

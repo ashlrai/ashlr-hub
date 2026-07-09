@@ -522,7 +522,10 @@ export interface FleetStatus {
   generatedAt: string;
   daemon: {
     running: boolean;
+    startedAt?: string | null;
     lastTickAt: string | null;
+    lockHeartbeatAt?: string | null;
+    tickInProgress?: boolean;
     todaySpentUsd: number;
   };
   backends: FleetBackendStatus[];
@@ -757,17 +760,33 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   // ── daemon ────────────────────────────────────────────────────────────────
   let daemon: FleetStatus['daemon'] = {
     running: false,
+    startedAt: null,
     lastTickAt: null,
     todaySpentUsd: 0,
   };
   // Recent ticks are reused for merge counting below.
   let recentTicks: DaemonTick[] = [];
   try {
-    const { loadDaemonState } = await import('../daemon/state.js');
+    const { loadDaemonState, readDaemonLockOwner } = await import('../daemon/state.js');
     const ds = loadDaemonState();
+    const startedAt = ds.startedAt ?? null;
+    const lastTickAt = ds.lastTickAt ?? null;
+    const startedMs = startedAt ? Date.parse(startedAt) : NaN;
+    const lastTickMs = lastTickAt ? Date.parse(lastTickAt) : NaN;
+    const lockOwner = readDaemonLockOwner();
+    const lockHeartbeatAt = ds.running === true && lockOwner?.pid === ds.pid
+      ? lockOwner.heartbeatAt
+      : null;
+    const tickInProgress = ds.running === true &&
+      typeof startedAt === 'string' &&
+      Number.isFinite(startedMs) &&
+      (!Number.isFinite(lastTickMs) || startedMs > lastTickMs);
     daemon = {
       running: ds.running === true,
-      lastTickAt: ds.lastTickAt ?? null,
+      startedAt,
+      lastTickAt,
+      ...(lockHeartbeatAt ? { lockHeartbeatAt } : {}),
+      ...(tickInProgress ? { tickInProgress } : {}),
       todaySpentUsd: typeof ds.todaySpentUsd === 'number' ? ds.todaySpentUsd : 0,
     };
     recentTicks = Array.isArray(ds.ticks) ? ds.ticks : [];
@@ -2581,14 +2600,18 @@ function shipReadinessSources(
   status: FleetStatus,
   inputs: AutonomousShipReadinessInputs,
 ): FleetReadinessSourceHealth[] {
+  const daemonObservedAt = status.daemon.lockHeartbeatAt ??
+    (status.daemon.tickInProgress ? status.daemon.startedAt ?? null : status.daemon.lastTickAt);
   const daemonDetail = status.daemon.running
-    ? `daemon running; last tick ${status.daemon.lastTickAt ?? 'unknown'}`
+    ? status.daemon.tickInProgress
+      ? `daemon running; tick in progress since ${status.daemon.startedAt ?? 'unknown'}; last completed tick ${status.daemon.lastTickAt ?? 'never'}`
+      : `daemon running; last tick ${status.daemon.lastTickAt ?? 'unknown'}`
     : 'daemon is stopped';
   const daemonSource = readinessSource(
     'daemon',
     'Daemon',
     status.daemon.running ? 'healthy' : 'blocked',
-    status.daemon.lastTickAt,
+    daemonObservedAt,
     READINESS_DAEMON_STALE_MS,
     daemonDetail,
   );

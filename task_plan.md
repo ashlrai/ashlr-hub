@@ -1031,4 +1031,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve normal workhorse routing for ordinary low-score self work and fallback behavior when no frontier backend is installed.
 - [x] Add route regression coverage and run adjacent concurrent/workhorse/resource dispatch suites.
 - [x] Run final gates.
+- [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Daemon Active Tick Freshness
+- [x] Investigate stale daemon tick after launchd kickstart.
+- [x] Confirmed launchd process was alive and heartbeating while engines were running, but `lastTickAt` only records completed ticks.
+- [x] Extend FleetStatus daemon state with `startedAt`, `lockHeartbeatAt`, and first-tick `tickInProgress`.
+- [x] Make Autonomous Ship Readiness use the live daemon heartbeat as freshness evidence while preserving the last completed tick detail.
+- [x] Render daemon start, active tick, and heartbeat in CLI fleet status.
+- [x] Add focused FleetStatus and formatter regression coverage.
+- [x] Run final gates.
 - [ ] Commit, push, reload daemon, and smoke live status.
