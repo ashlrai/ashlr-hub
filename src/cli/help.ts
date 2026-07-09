@@ -303,6 +303,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'inbox --json',                 desc: 'Emit raw JSON for inbox list / show / approve result.', topic: 'autonomy' },
   { cmd: 'daemon start --once',          desc: 'Autonomous operator: one tick — propose-only, sandboxed, enrolled repos.', topic: 'autonomy' },
   { cmd: 'daemon start --once --dry-run', desc: 'Plan only: which backlog items WOULD be worked (no swarm/proposal).', topic: 'autonomy' },
+  { cmd: 'daemon start --once --drain diagnostic-reslices', desc: 'Target one guarded tick at queued no-diff diagnostic reslices.', topic: 'autonomy' },
   { cmd: 'daemon stop',                  desc: 'Halt the daemon: set kill switch + clear running state.', topic: 'autonomy' },
   { cmd: 'daemon status',                desc: "Daemon roll-up: running?, today's spend vs cap, pending proposals.", topic: 'autonomy' },
   { cmd: 'fleet status [--json]',        desc: 'Read-only fleet snapshot: daemon, per-backend dispatches+quota, queue, proposals, merges, paused state.', topic: 'autonomy' },
@@ -401,6 +402,7 @@ const TOPIC_EXAMPLES: Partial<Record<HelpTopic, string[]>> = {
   autonomy: [
     'ashlr enroll add ~/code/my-repo && ashlr backlog refresh',
     'ashlr daemon start --once --dry-run                  # plan only',
+    'ashlr daemon start --once --drain diagnostic-reslices # drain no-diff reslices',
     'ashlr fleet direction --json                         # resource-aware mode recommendation',
     'ashlr inbox && ashlr inbox approve <id>',
   ],

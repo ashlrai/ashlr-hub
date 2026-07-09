@@ -38,6 +38,8 @@ import { resolve } from 'node:path';
 import type {
   AshlrConfig,
   DaemonConfig,
+  DaemonDrainMode,
+  DaemonDrainSummary,
   DaemonDispatchProduction,
   DaemonDispatchProductionOutcome,
   DaemonDispatchTrace,
@@ -141,6 +143,7 @@ import {
 } from '../fabric/production-velocity.js';
 import { listOutcomeRecords, listReadyEvidenceOutcomeRecords } from '../autonomy/outcome-records.js';
 import { compareReposByStrategicFocus } from '../ecosystem/focus.js';
+import { isTrustedDiagnosticResliceItem } from '../fleet/self-heal-trust.js';
 
 // ---------------------------------------------------------------------------
 // DaemonConfig defaults (conservative)
@@ -154,8 +157,18 @@ const DEFAULTS: DaemonConfig = {
 };
 
 const LOCAL_ONLY_BACKENDS = new Set<EngineId>(['builtin', 'local-coder', 'ashlrcode', 'aw']);
+const DRAIN_MODE_TAG_PREFIX = 'drain:';
+const MAX_DRAIN_SELECTED_IDS = 12;
 type TickItemOutcome = { item: WorkItem; spentUsd: number; dispatched: boolean; dispatch?: DaemonDispatchTrace };
 type BestOfNRunResult = Awaited<ReturnType<typeof runBestOfN>>;
+interface TickOptions {
+  dryRun: boolean;
+  drain?: DaemonDrainMode;
+}
+interface DaemonRunOptions extends TickOptions {
+  once: boolean;
+  maxCycles?: number;
+}
 
 function autonomyControlEnabled(cfg: AshlrConfig): boolean {
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
@@ -406,6 +419,72 @@ function remoteHandoffTickSummary(
 
 function boundedText(value: string, max = 220): string {
   return value.length > max ? `${value.slice(0, max - 3)}...` : value;
+}
+
+function drainTag(mode: DaemonDrainMode): string {
+  return `${DRAIN_MODE_TAG_PREFIX}${mode}`;
+}
+
+function isDrainCandidate(item: WorkItem, mode: DaemonDrainMode): boolean {
+  switch (mode) {
+    case 'diagnostic-reslices':
+      return isTrustedDiagnosticResliceItem(item);
+  }
+}
+
+function drainSummary(
+  mode: DaemonDrainMode,
+  availableItems: WorkItem[],
+  selectedItems: WorkItem[],
+): DaemonDrainSummary {
+  const selectedItemIds = selectedItems
+    .map((item) => boundedText(item.id, 120))
+    .slice(0, MAX_DRAIN_SELECTED_IDS);
+  return {
+    mode,
+    available: availableItems.length,
+    selected: selectedItems.length,
+    ...(selectedItemIds.length > 0 ? { selectedItemIds } : {}),
+    ...(availableItems.length > 0 && selectedItems.length === 0 ? { stalled: true } : {}),
+  };
+}
+
+function recordDrainSelectionAgentAction(fields: {
+  ts: string;
+  mode: DaemonDrainMode;
+  available: number;
+  selectedItems: WorkItem[];
+  machineId: string;
+  dryRun: boolean;
+}): void {
+  const selectedIds = fields.selectedItems.map((item) => boundedText(item.id, 120));
+  const selectedSummary = selectedIds.length > 0
+    ? ` ids=${selectedIds.slice(0, MAX_DRAIN_SELECTED_IDS).join(',')}`
+    : '';
+  recordAgentAction({
+    schemaVersion: 1,
+    ts: fields.ts,
+    machineId: fields.machineId,
+    actor: 'daemon',
+    kind: 'dispatch',
+    outcome: fields.selectedItems.length > 0 ? 'ok' : 'skipped',
+    action: 'daemon:drain-select',
+    summary:
+      `drain ${fields.mode}: selected ${fields.selectedItems.length}/` +
+      `${fields.available}${selectedSummary}`,
+    reason: fields.dryRun ? 'dry-run' : 'live',
+    ...(selectedIds[0] ? { itemId: selectedIds[0] } : {}),
+    tags: [
+      'drain-select',
+      drainTag(fields.mode),
+      fields.selectedItems.length > 0 ? 'selected' : 'none-selected',
+      ...(fields.dryRun ? ['dry-run'] : []),
+    ],
+    counts: {
+      available: fields.available,
+      selected: fields.selectedItems.length,
+    },
+  });
 }
 
 function productionOutcomeFromRunProposalOutcome(kind: RunProposalOutcome['kind']): DaemonDispatchProductionOutcome {
@@ -686,6 +765,8 @@ function recordTickAgentAction(tick: DaemonTick, machineId?: string): void {
       tick.reason,
       ...(tick.directionMode ? [tick.directionMode] : []),
       ...(tick.dryRun ? ['dry-run'] : []),
+      ...(tick.drain ? [drainTag(tick.drain.mode)] : []),
+      ...(tick.drain?.stalled ? ['drain-stalled'] : []),
     ],
     counts: {
       itemsConsidered: tick.itemsConsidered,
@@ -693,6 +774,7 @@ function recordTickAgentAction(tick: DaemonTick, machineId?: string): void {
       ...(typeof tick.merged === 'number' ? { merged: tick.merged } : {}),
       ...(tick.proposalProduction ? { dispatched: tick.proposalProduction.dispatched } : {}),
       ...(tick.proposalProduction ? { noProposal: tick.proposalProduction.noProposalDispatches } : {}),
+      ...(tick.drain ? { drainAvailable: tick.drain.available, drainSelected: tick.drain.selected } : {}),
     },
   });
 }
@@ -704,6 +786,7 @@ function recordTickStartAgentAction(fields: {
   perTickItems: number;
   parallel: number;
   mode?: string;
+  drain?: DaemonDrainMode;
   machineId?: string;
 }): void {
   recordAgentAction({
@@ -722,10 +805,12 @@ function recordTickStartAgentAction(fields: {
       'tick-start',
       fields.dryRun ? 'dry-run' : 'live',
       ...(fields.mode ? [fields.mode] : []),
+      ...(fields.drain ? [drainTag(fields.drain)] : []),
     ],
     counts: {
       perTickItems: fields.perTickItems,
       parallel: fields.parallel,
+      ...(fields.drain ? { drainRequested: 1 } : {}),
     },
   });
 }
@@ -1066,7 +1151,7 @@ async function tieredBounded<T>(
  */
 export async function tick(
   cfg: AshlrConfig,
-  opts: { dryRun: boolean },
+  opts: TickOptions,
 ): Promise<DaemonTick> {
   const now = new Date().toISOString();
   // tick() respects the cfg it is GIVEN — tests and callers inject it directly.
@@ -1094,6 +1179,7 @@ export async function tick(
     perTickItems: dcfg.perTickItems,
     parallel: dcfg.parallel,
     mode: dcfg.mode,
+    ...(opts.drain ? { drain: opts.drain } : {}),
   });
   const recordTick = (t: DaemonTick): DaemonTick => {
     const tick: DaemonTick = {
@@ -1637,10 +1723,15 @@ export async function tick(
       );
     }
   }
+  const drainMode = opts.drain;
+  const drainAvailableItems = drainMode
+    ? backlogItems.filter((item) => isDrainCandidate(item, drainMode))
+    : [];
+  const selectionItems = drainMode ? drainAvailableItems : backlogItems;
   const selectCount = daemonQueueSelectionLimit({
     perTickItems: dcfg.perTickItems,
     remainingBudgetUsd: remainingBudget,
-    backlogItems: backlogItems.length,
+    backlogItems: selectionItems.length,
     fillQueueToSlots: productionVelocity.fillQueueToSlots,
     availableSlots: availableSlotsForSelection,
     minPerItemUsd: MIN_PER_ITEM_USD,
@@ -1705,9 +1796,9 @@ export async function tick(
     console.warn('[ashlr] daemon:tick inbox pendingItemIds read failed:', (err as Error)?.message ?? err);
   }
 
-  // Group backlog items by repo (score-sorted within each group by buildBacklog).
+  // Group selectable items by repo (score-sorted within each group by buildBacklog).
   const byRepo = new Map<string, WorkItem[]>();
-  for (const item of backlogItems) {
+  for (const item of selectionItems) {
     let group = byRepo.get(item.repo);
     if (!group) { group = []; byRepo.set(item.repo, group); }
     group.push(item);
@@ -1723,7 +1814,7 @@ export async function tick(
   if (repoOrder.length > 0) {
     let rri = 0; // round-robin index
     let scanned = 0; // safety: never loop more than total items
-    const totalItems = backlogItems.length;
+    const totalItems = selectionItems.length;
     while (selected.length < selectCount && scanned < totalItems * repoOrder.length + 1) {
       scanned++;
       const repo = repoOrder[rri % repoOrder.length];
@@ -1762,6 +1853,20 @@ export async function tick(
   // M113: claimItems — Local returns top-selectCount (identical to today's raw
   // slice); Shared atomically claims items so two machines get disjoint work.
   const workedSet = coordinator.claimItems(selected, selectCount, machineId);
+  const drainSelectedItems = drainMode
+    ? workedSet.filter((item) => isDrainCandidate(item, drainMode))
+    : [];
+  const drain = drainMode ? drainSummary(drainMode, drainAvailableItems, drainSelectedItems) : undefined;
+  if (drainMode) {
+    recordDrainSelectionAgentAction({
+      ts: now,
+      mode: drainMode,
+      available: drainAvailableItems.length,
+      selectedItems: drainSelectedItems,
+      machineId,
+      dryRun: opts.dryRun,
+    });
+  }
 
   // -------------------------------------------------------------------------
   // 6a. Dry-run mode: report what WOULD be worked; NO swarms, NO proposals.
@@ -1788,6 +1893,7 @@ export async function tick(
       spentUsd: 0,
       reason: 'dry-run',
       ...(directionMode ? { directionMode } : {}),
+      ...(drain ? { drain } : {}),
     });
   }
 
@@ -2913,6 +3019,7 @@ export async function tick(
 	      ...(remoteHandoff ? { remoteHandoff } : {}),
 	      ...(producerMaintenance ? { producerMaintenance } : {}),
 	      ...(proposalProduction ? { proposalProduction } : {}),
+	      ...(drain ? { drain } : {}),
 	      ...(dispatches ? { dispatches } : {}),
 	      ...(merged > 0 ? { merged } : {}),
 	    };
@@ -2945,6 +3052,7 @@ export async function tick(
 	    ...(remoteHandoff ? { remoteHandoff } : {}),
 	    ...(producerMaintenance ? { producerMaintenance } : {}),
 	    ...(proposalProduction ? { proposalProduction } : {}),
+	    ...(drain ? { drain } : {}),
 	    ...(dispatches ? { dispatches } : {}),
 	    ...(merged > 0 ? { merged } : {}),
 	  };
@@ -3109,7 +3217,7 @@ export async function tick(
  */
 export async function runDaemon(
   cfg: AshlrConfig,
-  opts: { once: boolean; dryRun: boolean; maxCycles?: number },
+  opts: DaemonRunOptions,
 ): Promise<DaemonState> {
   // -------------------------------------------------------------------------
   // RE-ENTRANCY GUARD — must be the very first check.
@@ -3196,7 +3304,9 @@ export async function runDaemon(
     action: 'daemon:start',
     repo: null,
     sandboxId: null,
-    summary: `daemon started: once=${opts.once}, dryRun=${opts.dryRun}, budget=$${dcfg.dailyBudgetUsd}, intervalMs=${dcfg.intervalMs}`,
+    summary:
+      `daemon started: once=${opts.once}, dryRun=${opts.dryRun}, budget=$${dcfg.dailyBudgetUsd}, ` +
+      `intervalMs=${dcfg.intervalMs}${opts.drain ? `, drain=${opts.drain}` : ''}`,
     result: 'ok',
   });
 
@@ -3260,7 +3370,7 @@ export async function runDaemon(
       // Single-tick mode — reload full config so a manual tick picks up disk changes.
       const liveCfg = reloadLiveConfigForDaemon(cfg);
       if (heartbeatDaemonLock(daemonLock)) {
-        await tick(liveCfg, { dryRun: opts.dryRun });
+        await tick(liveCfg, { dryRun: opts.dryRun, ...(opts.drain ? { drain: opts.drain } : {}) });
       }
     } else {
       // M85/M116/M309: choose loop strategy from live config every iteration.
@@ -3285,7 +3395,7 @@ export async function runDaemon(
           });
           break;
         }
-        const tickResult = await tick(liveCfg, { dryRun: opts.dryRun });
+        const tickResult = await tick(liveCfg, { dryRun: opts.dryRun, ...(opts.drain ? { drain: opts.drain } : {}) });
 
         // Dry-run is inherently a one-shot PLAN: it records spentUsd:0 forever,
         // so the budget break can never fire. Terminate after a single iteration

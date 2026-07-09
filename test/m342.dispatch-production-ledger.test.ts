@@ -194,11 +194,28 @@ describe('M342 dispatch production ledger', () => {
     const summary = summarizeDispatchProductionYield(event ? [event] : []);
 
     expect(event?.itemId).toBe('legacy-row');
+    expect(event?.routeSnapshot).toMatchObject({
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      reason: 'local-mid bulk: local-coder',
+    });
+    expect(event?.runEventSummary).toMatchObject({
+      runId: 'run-a',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      costUsd: 0.001,
+    });
     expect(event?.learningLabel).toBeUndefined();
     expect(summary).toMatchObject({
       attempts: 1,
       attemptShape: { backendNoDiff: 1 },
     });
+    const raw = readFileSync(join(dir, '2026-07-08.jsonl'), 'utf8');
+    expect(raw).not.toContain('"routeSnapshot"');
+    expect(raw).not.toContain('"runEventSummary"');
+    expect(raw).not.toContain('"learningLabel"');
   });
 
   it('uses a valid durable learning label for attempt-shape aggregation when raw signals disagree', () => {

@@ -64,8 +64,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
-import { join } from 'node:path';
-import type { AshlrConfig, DaemonTick } from '../src/core/types.js';
+import { basename, join } from 'node:path';
+import type { AshlrConfig, DaemonTick, WorkItem } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
 // Core mocks — MUST be declared before lazy imports.
@@ -400,6 +400,25 @@ function makeItems(repoDir: string, count: number) {
   }));
 }
 
+function makeDiagnosticResliceItem(repoDir: string, hash = 'abcdef123456', score = 1): WorkItem {
+  return {
+    id: `${basename(repoDir)}:proposal-repair-nodiff:${hash}`,
+    repo: repoDir,
+    source: 'self',
+    title: `Reslice no-diff dispatch for ${basename(repoDir)} item repo:goal:stalled`,
+    detail:
+      `Diagnostic reslice: a dispatch completed without file changes.\n` +
+      `Original work item: repo:goal:stalled\n` +
+      `Dispatch outcome: empty-diff\n` +
+      `Action: reslice the work into a smaller concrete edit.`,
+    value: 5,
+    effort: 1,
+    score,
+    tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice', 'no-diff', 'verify', 'high-priority'],
+    ts: new Date().toISOString(),
+  };
+}
+
 /** Enroll a repo and seed buildBacklog with N items. */
 function enrollWithItems(count: number) {
   const repo = fx.makeRepo();
@@ -511,6 +530,61 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       action: 'daemon:tick',
       reason: 'no-backlog',
     });
+  });
+
+  it('A1-drain: targeted diagnostic-reslices mode selects trusted reslices before generic backlog work', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    generic.score = 100;
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'abcdef123456', 1);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [generic, reslice],
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), {
+      dryRun: true,
+      drain: 'diagnostic-reslices',
+    });
+    const actions = readAgentActions();
+    const selection = actions.find((event) => event.action === 'daemon:drain-select');
+
+    expect(result.reason).toBe('dry-run');
+    expect(result.itemsConsidered).toBe(1);
+    expect(result.drain).toMatchObject({
+      mode: 'diagnostic-reslices',
+      available: 1,
+      selected: 1,
+      selectedItemIds: [reslice.id],
+    });
+    expect(selection).toMatchObject({
+      action: 'daemon:drain-select',
+      itemId: reslice.id,
+      counts: { available: 1, selected: 1 },
+    });
+    expect(selection?.tags).toEqual(expect.arrayContaining(['drain-select', 'drain:diagnostic-reslices']));
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1-drain-none: targeted diagnostic-reslices mode does not fall back to generic work', async () => {
+    const { items } = enrollWithItems(3);
+    items[0]!.score = 100;
+
+    const result = await tick(cfgBuiltin({ perTickItems: 2, parallel: 1 }), {
+      dryRun: true,
+      drain: 'diagnostic-reslices',
+    });
+
+    expect(result.reason).toBe('dry-run');
+    expect(result.itemsConsidered).toBe(0);
+    expect(result.drain).toMatchObject({
+      mode: 'diagnostic-reslices',
+      available: 0,
+      selected: 0,
+    });
+    expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
   it('A1a: empty backlog runs self-heal, rebuilds, and dispatches refilled work in the same tick', async () => {

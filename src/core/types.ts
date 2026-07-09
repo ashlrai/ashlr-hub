@@ -3704,6 +3704,21 @@ export interface DaemonProposalProductionSummary {
   reasons?: DaemonProposalProductionReason[];
 }
 
+export type DaemonDrainMode = 'diagnostic-reslices';
+
+export interface DaemonDrainSummary {
+  /** Targeted drain lane requested for this tick. */
+  mode: DaemonDrainMode;
+  /** Matching lane items visible before cooldown/pending/claim gates. */
+  available: number;
+  /** Matching lane items selected/claimed for this tick. */
+  selected: number;
+  /** Bounded selected work ids, used to prove the drain lane actually ran. */
+  selectedItemIds?: string[];
+  /** True when the lane had visible work but selected nothing. */
+  stalled?: boolean;
+}
+
 export interface DaemonTick {
   /** ISO timestamp the tick ran. */
   ts: string;
@@ -3776,6 +3791,8 @@ export interface DaemonTick {
   };
   /** M314: machine-readable proposal production accounting for this tick. */
   proposalProduction?: DaemonProposalProductionSummary;
+  /** Targeted drain accounting for lane-specific daemon ticks. */
+  drain?: DaemonDrainSummary;
   /** Bounded per-item backend assignment traces for this tick. */
   dispatches?: DaemonDispatchTrace[];
   /** M48: proposals auto-merged this tick via the M47 gate (omitted/0 when disabled). */

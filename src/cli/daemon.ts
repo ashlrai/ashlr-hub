@@ -7,8 +7,8 @@
  * path to apply / push / PR / deploy / mutate.
  *
  * Subcommands:
- *   daemon start [--once] [--dry-run] [--budget <usd>] [--interval <ms>]
- *                [--parallel <n>]
+ *   daemon start [--once] [--dry-run] [--drain diagnostic-reslices]
+ *                [--budget <usd>] [--interval <ms>] [--parallel <n>]
  *       Load cfg, merge flags over cfg.daemon defaults into a DaemonConfig,
  *       call runDaemon. --dry-run => plan only (which items WOULD be worked;
  *       NO swarm/proposal). REFUSES (nonzero, clear message) when
@@ -25,7 +25,7 @@
  */
 
 import { makeColors } from './ui.js';
-import type { AshlrConfig, DaemonConfig, DaemonState } from '../core/types.js';
+import type { AshlrConfig, DaemonConfig, DaemonDrainMode, DaemonState } from '../core/types.js';
 import type { ServiceInstallOptions, ServiceStatusResult } from '../core/daemon/service.js';
 import { daemonServiceInstallOptions } from '../core/daemon/service-config.js';
 
@@ -35,7 +35,7 @@ import { daemonServiceInstallOptions } from '../core/daemon/service-config.js';
 
 type RunDaemonFn = (
   cfg: AshlrConfig,
-  opts: { once: boolean; dryRun: boolean },
+  opts: { once: boolean; dryRun: boolean; drain?: DaemonDrainMode },
 ) => Promise<DaemonState>;
 type StopDaemonFn = () => void;
 type LoadDaemonStateFn = () => DaemonState;
@@ -108,6 +108,7 @@ async function importGuardHealth(): Promise<DiagnoseGuardHealthFn | null> {
 interface StartFlags {
   once: boolean;
   dryRun: boolean;
+  drain?: DaemonDrainMode;
   budgetUsd?: number;
   intervalMs?: number;
   parallel?: number;
@@ -131,6 +132,14 @@ function parseStartFlags(args: string[]): { flags: StartFlags; err?: string } {
       case '--dry-run':
         flags.dryRun = true;
         break;
+      case '--drain': {
+        const v = args[++i];
+        if (v !== 'diagnostic-reslices') {
+          return { flags, err: '--drain requires one of: diagnostic-reslices' };
+        }
+        flags.drain = v;
+        break;
+      }
       case '--budget': {
         const v = parseNum(args[++i]);
         if (v === undefined) return { flags, err: '--budget requires a positive number (USD)' };
@@ -215,7 +224,7 @@ async function cmdDaemonStart(args: string[]): Promise<number> {
     console.error(col.red('error: ') + err);
     console.error(
       col.dim(
-        'Usage: ashlr daemon start [--once] [--dry-run] [--budget <usd>] [--interval <ms>] [--parallel <n>]',
+        'Usage: ashlr daemon start [--once] [--dry-run] [--drain diagnostic-reslices] [--budget <usd>] [--interval <ms>] [--parallel <n>]',
       ),
     );
     return 2;
@@ -255,13 +264,20 @@ async function cmdDaemonStart(args: string[]): Promise<number> {
   if (flags.budgetUsd !== undefined) {
     console.log(col.dim(`  daily budget cap: $${flags.budgetUsd}`));
   }
+  if (flags.drain !== undefined) {
+    console.log(col.dim(`  targeted drain: ${flags.drain}`));
+  }
   console.log(col.dim('  proposal-only · sandboxed · enrollment-only'));
   console.log('');
 
   // runDaemon never throws by contract; it REFUSES on re-entrancy (handled
   // above) and stops on kill switch / budget exhaustion. It ONLY produces
   // PENDING inbox proposals — never applies/pushes/PRs/deploys/mutates.
-  const finalState = await loop.runDaemon(merged, { once: flags.once, dryRun: flags.dryRun });
+  const finalState = await loop.runDaemon(merged, {
+    once: flags.once,
+    dryRun: flags.dryRun,
+    ...(flags.drain ? { drain: flags.drain } : {}),
+  });
 
   // Summarize the most-recent tick (if any) for human feedback.
   const lastTick = finalState.ticks[finalState.ticks.length - 1];

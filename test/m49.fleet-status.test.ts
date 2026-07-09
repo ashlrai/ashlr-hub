@@ -1872,7 +1872,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         trajectoryId: 'traj-causal-a',
         spentUsd: 0,
         reason: 'engine completed without file changes',
-        basis: 'run-proposal-outcome',
+        basis: 'unknown',
       },
       {
         schemaVersion: 1,
@@ -1893,7 +1893,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         trajectoryId: 'traj-causal-b',
         spentUsd: 0,
         reason: 'engine completed without file changes',
-        basis: 'run-proposal-outcome',
+        basis: 'unknown',
       },
       {
         schemaVersion: 1,
@@ -1914,7 +1914,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         trajectoryId: 'traj-causal-c',
         spentUsd: 0,
         reason: 'engine completed without file changes',
-        basis: 'run-proposal-outcome',
+        basis: 'unknown',
       },
     ]);
 
@@ -2105,7 +2105,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(action?.commands).toEqual(expect.arrayContaining([
       expect.objectContaining({
         label: 'Drain reslice queue',
-        argv: ['ashlr', 'daemon', 'start', '--once'],
+        argv: ['ashlr', 'daemon', 'start', '--once', '--drain', 'diagnostic-reslices'],
         safety: 'autonomous-dispatch',
       }),
     ]));
@@ -2510,7 +2510,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       commands: [
         expect.objectContaining({
           label: 'Drain diagnostic reslices',
-          argv: ['ashlr', 'daemon', 'start', '--once'],
+          argv: ['ashlr', 'daemon', 'start', '--once', '--drain', 'diagnostic-reslices'],
           safety: 'autonomous-dispatch',
         }),
         expect.objectContaining({
@@ -2535,7 +2535,30 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('[high] Drain diagnostic reslices');
-    expect(formatted).toContain('cmd: Drain diagnostic reslices: ashlr daemon start --once (autonomous-dispatch)');
+    expect(formatted).toContain('cmd: Drain diagnostic reslices: ashlr daemon start --once --drain diagnostic-reslices (autonomous-dispatch)');
+
+    writeRunningDaemon(tmpHome, [
+      {
+        ts: now,
+        itemsConsidered: 0,
+        proposalsCreated: 0,
+        spentUsd: 0,
+        reason: 'ok',
+        drain: {
+          mode: 'diagnostic-reslices',
+          available: 1,
+          selected: 0,
+          stalled: true,
+        },
+      },
+    ], now);
+    const stalledStatus = await buildFleetStatus(baseConfig());
+    const stalledDrainAction = stalledStatus.nextActions?.find((candidate) => candidate.id === 'drain-diagnostic-reslices');
+    expect(stalledStatus.queue.generatedWork).toMatchObject({
+      diagnosticReslices: 1,
+      diagnosticResliceDrainStalled: true,
+    });
+    expect(stalledDrainAction?.detail).toContain('reslice-drain-stalled');
   });
 
   it('excludes proposal-disabled dispatch-production from weak-yield next action', async () => {

@@ -3,12 +3,19 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   listAttemptRecords,
   summarizeAttemptCoverage,
   type AttemptRecordReadDeps,
 } from '../src/core/autonomy/attempt-records.js';
-import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
+import {
+  dispatchProductionDir,
+  readDispatchProductionEvents,
+  type DispatchProductionEvent,
+} from '../src/core/fleet/dispatch-production-ledger.js';
 import type { AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
 import type { OutcomeRecord } from '../src/core/autonomy/outcome-records.js';
 import type { AutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
@@ -425,6 +432,74 @@ describe('AttemptRecord coverage', () => {
     expect(JSON.stringify(summary)).not.toContain('traj-complete');
     expect(JSON.stringify(summary)).not.toContain('prop-complete');
     expect(JSON.stringify(summary)).not.toContain('old route');
+  });
+
+  it('counts read-time legacy run-outcome causal fallbacks without materializing a label', () => {
+    const previousAshlrHome = process.env.ASHLR_HOME;
+    const home = mkdtempSync(join(tmpdir(), 'ashlr-m352-legacy-causal-'));
+    try {
+      process.env.ASHLR_HOME = home;
+      const dir = dispatchProductionDir();
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, '2026-07-09.jsonl'),
+        JSON.stringify(dispatch({
+          itemId: 'legacy-top-level',
+          trajectoryId: undefined,
+          routeSnapshot: undefined,
+          runEventSummary: undefined,
+          routerPolicyVersion: undefined,
+          learningEpoch: undefined,
+          learningLabel: undefined,
+          outcome: 'empty-diff',
+          proposalCreated: false,
+          proposalId: undefined,
+          diffFiles: 0,
+          diffLines: 0,
+          spentUsd: 0.25,
+        })) + '\n',
+        'utf8',
+      );
+
+      const legacyEvent = readDispatchProductionEvents({ limit: 1 })[0]!;
+      const records = listAttemptRecords({
+        deps: deps({
+          readDispatchProductionEvents: () => [legacyEvent],
+          readAgentActions: () => [],
+          listOutcomeRecords: () => [],
+          readDecisions: () => [],
+          listAutonomyEvidencePacks: () => [],
+          loadWorkedLedger: () => ({ events: [] }),
+        }),
+      });
+      const summary = summarizeAttemptCoverage(records);
+
+      expect(legacyEvent.learningLabel).toBeUndefined();
+      expect(records[0]).toMatchObject({
+        itemId: 'legacy-top-level',
+        labelAuthoritative: false,
+        causalCoverage: {
+          routeSnapshot: true,
+          runEventSummary: true,
+          labelAuthoritative: false,
+          currentAuthoritativeLabel: false,
+        },
+      });
+      expect(summary.causalCoverage).toMatchObject({
+        routeSnapshot: { count: 1, rate: 1 },
+        runEventSummary: { count: 1, rate: 1 },
+        labelAuthoritative: { count: 0, rate: 0 },
+      });
+      expect(summary.production).toMatchObject({
+        attempts: 1,
+        labelAuthoritativeAttempts: 0,
+        legacyUnversionedAttempts: 1,
+      });
+    } finally {
+      if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
+      else process.env.ASHLR_HOME = previousAshlrHome;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('does not join by fuzzy title or repo when causal ids differ', () => {

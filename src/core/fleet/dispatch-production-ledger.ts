@@ -177,7 +177,7 @@ function finiteNonNegative(value: unknown): number | undefined {
 
 function sanitizeEvent(
   event: DispatchProductionEvent,
-  opts: { materializeLearningLabel?: boolean } = {},
+  opts: { materializeLearningLabel?: boolean; deriveLegacyRunOutcomeCausal?: boolean } = {},
 ): DispatchProductionEvent {
   const ts = eventTimestamp(event.ts);
   const machineId = boundedOptionalText(event.machineId, 120);
@@ -201,14 +201,31 @@ function sanitizeEvent(
   const diffFiles = finiteNonNegative(event.diffFiles);
   const diffLines = finiteNonNegative(event.diffLines);
   const spentUsd = finiteNonNegative(event.spentUsd) ?? 0;
+  const legacyCausal =
+    opts.deriveLegacyRunOutcomeCausal && basis === 'run-proposal-outcome'
+      ? legacyRunOutcomeCausalFallback({
+          backend,
+          tier,
+          model,
+          assignedBy: boundedOptionalText(event.assignedBy, 80),
+          routeReason: boundedOptionalText(event.routeReason, 240),
+          runId,
+          outcome,
+          proposalCreated: Boolean(event.proposalCreated),
+          proposalId,
+          diffFiles,
+          diffLines,
+          spentUsd: finiteNonNegative(event.spentUsd),
+        })
+      : {};
   const causal = causalMetadata({
     ts,
     itemId,
     proposalId,
     runId,
     trajectoryId,
-    routeSnapshot: event.routeSnapshot,
-    runEventSummary: event.runEventSummary,
+    routeSnapshot: event.routeSnapshot ?? legacyCausal.routeSnapshot,
+    runEventSummary: event.runEventSummary ?? legacyCausal.runEventSummary,
     evidenceOutcome: event.evidenceOutcome,
     learningSource: event.learningSource ?? 'daemon-dispatch',
     labelBasis: event.labelBasis ?? 'dispatch-outcome',
@@ -247,6 +264,42 @@ function sanitizeEvent(
     ...(diffLines !== undefined ? { diffLines } : {}),
     ...(reason ? { reason } : {}),
     basis,
+  };
+}
+
+function legacyRunOutcomeCausalFallback(input: {
+  backend?: EngineId | null;
+  tier?: EngineTier | null;
+  model?: string | null;
+  assignedBy?: string;
+  routeReason?: string;
+  runId?: string;
+  outcome?: DaemonDispatchProductionOutcome;
+  proposalCreated?: boolean;
+  proposalId?: string;
+  diffFiles?: number;
+  diffLines?: number;
+  spentUsd?: number;
+}): { routeSnapshot?: RouteSnapshot; runEventSummary?: RunEventSummary } {
+  const routeSnapshot: RouteSnapshot = {
+    ...(input.backend !== undefined ? { backend: input.backend } : {}),
+    ...(input.tier !== undefined ? { tier: input.tier } : {}),
+    ...(input.model !== undefined ? { model: input.model } : {}),
+    ...(input.assignedBy ? { assignedBy: input.assignedBy } : {}),
+    ...(input.routeReason ? { reason: input.routeReason } : {}),
+  };
+  const runEventSummary: RunEventSummary = {
+    ...(input.runId ? { runId: input.runId } : {}),
+    ...(input.outcome ? { outcome: input.outcome } : {}),
+    ...(input.proposalCreated !== undefined ? { proposalCreated: input.proposalCreated } : {}),
+    ...(input.proposalId ? { proposalId: input.proposalId } : {}),
+    ...(input.diffFiles !== undefined ? { diffFiles: input.diffFiles } : {}),
+    ...(input.diffLines !== undefined ? { diffLines: input.diffLines } : {}),
+    ...(input.spentUsd !== undefined ? { costUsd: input.spentUsd } : {}),
+  };
+  return {
+    ...(Object.keys(routeSnapshot).length > 0 ? { routeSnapshot } : {}),
+    ...(Object.keys(runEventSummary).length > 0 ? { runEventSummary } : {}),
   };
 }
 
@@ -334,7 +387,7 @@ export function readDispatchProductionEvents(opts?: {
             const eventMs = Date.parse(parsed.ts);
             if (Number.isFinite(eventMs) && eventMs < opts.sinceMs) continue;
           }
-          out.push(sanitizeEvent(parsed));
+          out.push(sanitizeEvent(parsed, { deriveLegacyRunOutcomeCausal: true }));
         } catch {
           // Malformed lines are skipped.
         }

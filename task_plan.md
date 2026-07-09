@@ -1116,3 +1116,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add regression coverage for `it\\.skip\\(` in the git-backed grep path.
 - [x] Run focused native engineer/cwd tests, typecheck, and diff checks.
 - [x] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Executable Diagnostic Reslice Drain
+- [x] Close scout agents and pick the live reslice-drain stall as the next daemon control-path blocker.
+- [x] Export the existing trusted diagnostic no-diff reslice predicate instead of adding a looser selector.
+- [x] Add `ashlr daemon start --once --drain diagnostic-reslices` as a targeted, proposal-only scheduler mode.
+- [x] Filter targeted ticks to trusted diagnostic reslice items before normal round-robin selection while preserving coordinator claims, cooldowns, pending-proposal dedupe, budgets, dry-run, and sandboxed dispatch.
+- [x] Persist drain request/selection metadata in tick and agent-action telemetry, including bounded selected ids and stalled counts.
+- [x] Point Fleet OS drain commands at the targeted mode and surface `diagnosticResliceDrainStalled` / `reslice-drain-stalled`.
+- [x] Integrate read-time legacy route/run fallback worker patch for dispatch-production attempt coverage without materializing legacy labels.
+- [x] Run focused daemon/status/ledger/attempt/CLI-service tests, typecheck, lint, build, audit, and diff checks.
+- [ ] Commit, push, reload daemon, and smoke live targeted drain/status.

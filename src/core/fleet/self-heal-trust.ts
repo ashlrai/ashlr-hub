@@ -36,7 +36,7 @@ function ageOk(ts: string, nowMs: number, maxAgeMs: number): boolean {
   return parsed <= nowMs && nowMs - parsed <= maxAgeMs;
 }
 
-function isTrustedDiagnosticResliceItem(item: WorkItem): boolean {
+export function isTrustedDiagnosticResliceItem(item: WorkItem): boolean {
   if (!/^[^:]+:proposal-repair-nodiff:[0-9a-f]{12}$/i.test(item.id)) return false;
   if (!item.tags.includes('proposal-repair')) return false;
   if (!item.tags.includes('diagnostic-reslice')) return false;

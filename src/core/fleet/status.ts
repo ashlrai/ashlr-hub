@@ -482,6 +482,7 @@ export interface FleetQueueGeneratedWorkStatus {
   selfHeal: number;
   proposalRepair: number;
   diagnosticReslices: number;
+  diagnosticResliceDrainStalled?: boolean;
   invent: number;
 }
 
@@ -628,6 +629,24 @@ function buildQueueGeneratedWorkStatus(items: WorkItem[]): FleetQueueGeneratedWo
   ).length;
   if (total === 0) return undefined;
   return { total, selfHeal, proposalRepair, diagnosticReslices, invent };
+}
+
+function hasRecentDiagnosticResliceDrainStall(ticks: DaemonTick[], nowMs = Date.now()): boolean {
+  const cutoff = nowMs - RECENT_WINDOW_MS;
+  let latestTargeted: DaemonTick | null = null;
+  let latestTargetedMs = Number.NEGATIVE_INFINITY;
+  for (const tick of ticks) {
+    if (tick.drain?.mode !== 'diagnostic-reslices') continue;
+    const ts = Date.parse(tick.ts);
+    if (Number.isFinite(ts) && ts < cutoff) continue;
+    const safeTs = Number.isFinite(ts) ? ts : nowMs;
+    if (!latestTargeted || safeTs >= latestTargetedMs) {
+      latestTargeted = tick;
+      latestTargetedMs = safeTs;
+    }
+  }
+  if (!latestTargeted?.drain) return false;
+  return latestTargeted.drain.available > 0 && latestTargeted.drain.selected === 0;
 }
 
 interface FleetQueueEligibility {
@@ -872,6 +891,13 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     visibleQueueItems = items;
     backlogItems = items.length;
     generatedWork = buildQueueGeneratedWorkStatus(items);
+    if (
+      generatedWork &&
+      generatedWork.diagnosticReslices > 0 &&
+      hasRecentDiagnosticResliceDrainStall(recentTicks)
+    ) {
+      generatedWork = { ...generatedWork, diagnosticResliceDrainStalled: true };
+    }
     const byRepo = new Map<string, number>();
     const byTier = new Map<StrategicTier, { repos: Set<string>; items: number }>();
     for (const item of items) {
@@ -1952,17 +1978,20 @@ function diagnosticResliceDrainNextAction(status: FleetStatus): FleetNextAction 
   const diagnosticDetail = formatDispatchYieldDiagnosticDetail(diagnostic);
   const target = topReslice?.repo ?? diagnostic.primaryCandidate?.backend;
   const first = topReslice ? ` First: ${topReslice.title}.` : '';
+  const stalled = status.queue.generatedWork?.diagnosticResliceDrainStalled
+    ? ' reslice-drain-stalled: the latest targeted drain tick selected none.'
+    : '';
   return {
     id: 'drain-diagnostic-reslices',
     priority: 'high',
     label: 'Drain diagnostic reslices',
     detail:
       `${resliceCount} diagnostic no-diff reslice item(s) are queued while dispatch yield is actionable: ` +
-      `${diagnosticDetail}.${first}`,
+      `${diagnosticDetail}.${first}${stalled}`,
     ...(target ? { target } : {}),
     commands: [
-      nextActionCommand('Drain diagnostic reslices', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch', {
-        note: 'Runs the existing guarded daemon path to drain already-queued diagnostic no-diff reslices.',
+      nextActionCommand('Drain diagnostic reslices', ['ashlr', 'daemon', 'start', '--once', '--drain', 'diagnostic-reslices'], 'autonomous-dispatch', {
+        note: 'Runs one guarded daemon tick targeted at already-queued diagnostic no-diff reslices.',
       }),
       nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
     ],
@@ -2241,8 +2270,8 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
         }),
         nextActionCommand('Evaluate attention', ['ashlr', 'eval', 'attention', '--json'], 'read-only'),
         ...(shouldDrainReslices
-          ? [nextActionCommand('Drain reslice queue', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch', {
-              note: 'Runs the existing guarded daemon path to drain already-queued diagnostic reslices.',
+          ? [nextActionCommand('Drain reslice queue', ['ashlr', 'daemon', 'start', '--once', '--drain', 'diagnostic-reslices'], 'autonomous-dispatch', {
+              note: 'Runs one guarded daemon tick targeted at already-queued diagnostic reslices.',
             })]
           : []),
         nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
