@@ -34,6 +34,7 @@ import { linkOutcome } from '../fleet/judge-trace.js';
 // M158: destructive-diff pre-judge guard — additive, DEFAULT ON, never-throws.
 import { isDestructiveDiff } from '../run/diff-safety.js';
 import { causalMetadata, causalMetadataFromProposal } from '../learning/causal.js';
+import { scrubSecrets } from '../util/scrub.js';
 // M228: goal-milestone outcome wiring — additive, best-effort, never-throws.
 // Imported here (not goals/advance.ts) because inbox/store does NOT import from
 // goals/* anywhere, so this import creates no cycle. goals/advance.ts imports
@@ -98,15 +99,148 @@ function generateId(): string {
 // Atomic write helper
 // ---------------------------------------------------------------------------
 
+function scrubProposalText(text: string): string {
+  try {
+    return scrubSecrets(text);
+  } catch {
+    return text;
+  }
+}
+
+/**
+ * Store-boundary secret scrub for human-readable proposal fields.
+ *
+ * Diffs are scrubbed in-place so reviewers still see file paths, hunks, and
+ * surrounding context. When the diff changes, any trust tuple bound to the old
+ * bytes is dropped fail-closed; scrubbing non-diff text does not invalidate it.
+ */
+function sanitizeProposalForStore<T extends Partial<Proposal> & Pick<Proposal, 'title' | 'summary'>>(
+  proposal: T,
+): T {
+  const next: Partial<Proposal> = { ...proposal };
+  let changed = false;
+
+  const scrubTopLevel = (key: 'title' | 'summary' | 'result' | 'decisionReason'): void => {
+    const value = next[key];
+    if (typeof value !== 'string') return;
+    const scrubbed = scrubProposalText(value);
+    if (scrubbed !== value) {
+      next[key] = scrubbed;
+      changed = true;
+    }
+  };
+
+  scrubTopLevel('title');
+  scrubTopLevel('summary');
+  scrubTopLevel('result');
+  scrubTopLevel('decisionReason');
+
+  if (typeof next.diff === 'string') {
+    const scrubbedDiff = scrubProposalText(next.diff);
+    if (scrubbedDiff !== next.diff) {
+      next.diff = scrubbedDiff;
+      delete next.diffHash;
+      delete next.provenanceSig;
+      changed = true;
+    }
+  }
+
+  if (next.action?.type === 'browser-task') {
+    const action = next.action;
+    const scrubbedInstructions = scrubProposalText(action.instructions);
+    const scrubbedUrl = typeof action.url === 'string' ? scrubProposalText(action.url) : action.url;
+    if (scrubbedInstructions !== action.instructions || scrubbedUrl !== action.url) {
+      next.action = {
+        ...action,
+        instructions: scrubbedInstructions,
+        ...(scrubbedUrl !== undefined ? { url: scrubbedUrl } : {}),
+      };
+      changed = true;
+    }
+  }
+
+  if (next.verifyResult !== undefined) {
+    const verify: NonNullable<Proposal['verifyResult']> = next.verifyResult;
+    let updatedVerify: NonNullable<Proposal['verifyResult']> = verify;
+
+    const ensureVerify = (): NonNullable<Proposal['verifyResult']> => {
+      if (updatedVerify === verify) updatedVerify = { ...verify };
+      return updatedVerify;
+    };
+
+    if (typeof verify.detail === 'string') {
+      const scrubbed = scrubProposalText(verify.detail);
+      if (scrubbed !== verify.detail) {
+        ensureVerify().detail = scrubbed;
+      }
+    }
+
+    if (Array.isArray(verify.failed)) {
+      const failed = verify.failed.map((item) => scrubProposalText(item));
+      if (failed.some((item, idx) => item !== verify.failed![idx])) {
+        ensureVerify().failed = failed;
+      }
+    }
+
+    if (verify.browser !== undefined) {
+      let browser = verify.browser;
+      const scrubbedDetail = scrubProposalText(browser.detail);
+      if (scrubbedDetail !== browser.detail) {
+        browser = { ...browser, detail: scrubbedDetail };
+      }
+      if (browser.visualGrounding !== undefined) {
+        const visual = browser.visualGrounding;
+        const scrubbedVisualDetail = scrubProposalText(visual.detail);
+        if (scrubbedVisualDetail !== visual.detail) {
+          browser = { ...browser, visualGrounding: { ...visual, detail: scrubbedVisualDetail } };
+        }
+      }
+      if (browser !== verify.browser) {
+        ensureVerify().browser = browser;
+      }
+    }
+
+    if (updatedVerify !== verify) {
+      next.verifyResult = updatedVerify;
+      changed = true;
+    }
+  }
+
+  if (next.remoteHandoff !== undefined) {
+    const handoff = next.remoteHandoff;
+    const scrubbedDetail = typeof handoff.detail === 'string' ? scrubProposalText(handoff.detail) : handoff.detail;
+    const scrubbedPrUrl = typeof handoff.prUrl === 'string' ? scrubProposalText(handoff.prUrl) : handoff.prUrl;
+    if (scrubbedDetail !== handoff.detail || scrubbedPrUrl !== handoff.prUrl) {
+      next.remoteHandoff = {
+        ...handoff,
+        ...(scrubbedDetail !== undefined ? { detail: scrubbedDetail } : {}),
+        ...(scrubbedPrUrl !== undefined ? { prUrl: scrubbedPrUrl } : {}),
+      };
+      changed = true;
+    }
+  }
+
+  if (next.taste !== undefined) {
+    const scrubbedRationale = scrubProposalText(next.taste.rationale);
+    if (scrubbedRationale !== next.taste.rationale) {
+      next.taste = { ...next.taste, rationale: scrubbedRationale };
+      changed = true;
+    }
+  }
+
+  return changed ? (next as T) : proposal;
+}
+
 /** Persist a proposal atomically (tmp-write + rename, POSIX-atomic). */
 function persistProposal(proposal: Proposal): void {
+  const safeProposal = sanitizeProposalForStore(proposal);
   const dir = inboxDir();
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
-  const dest = proposalPath(proposal.id);
+  const dest = proposalPath(safeProposal.id);
   const tmp = dest + '.tmp';
-  writeFileSync(tmp, JSON.stringify(proposal, null, 2) + '\n', 'utf8');
+  writeFileSync(tmp, JSON.stringify(safeProposal, null, 2) + '\n', 'utf8');
   renameSync(tmp, dest);
 }
 
@@ -279,17 +413,18 @@ export function createProposal(
   p: Omit<Proposal, 'id' | 'status' | 'createdAt'>,
   cfg?: Pick<AshlrConfig, 'user' | 'foundry'>,
 ): Proposal {
+  const input = sanitizeProposalForStore(p);
   // M109: stamp owner from cfg.user when not already set by the caller.
-  const owner = p.owner ?? cfg?.user?.id ?? cfg?.user?.name;
+  const owner = input.owner ?? cfg?.user?.id ?? cfg?.user?.name;
 
   // M158: destructive-diff guard — default ON (cfg.foundry?.diffSafety !== false).
   // Applied before status is set so a destructive proposal never enters 'pending'.
   const diffSafetyEnabled = cfg?.foundry?.diffSafety !== false;
   let initialStatus: Proposal['status'] = 'pending';
   let diffSafetyRejectionReason: string | undefined;
-  if (diffSafetyEnabled && p.diff) {
+  if (diffSafetyEnabled && input.diff) {
     try {
-      const guard = isDestructiveDiff(p.diff);
+      const guard = isDestructiveDiff(input.diff);
       if (guard.destructive) {
         initialStatus = 'rejected';
         diffSafetyRejectionReason = `destructive diff auto-rejected: ${guard.reason ?? 'destructive pattern detected'}`;
@@ -304,11 +439,11 @@ export function createProposal(
   // Only skips when the incoming proposal has a diffHash AND a pending proposal
   // with the same diffHash already exists. Safe: never rejects distinct diffs.
   // No-op when diffHash is absent (no dedup check).
-  if (initialStatus === 'pending' && p.diffHash) {
+  if (initialStatus === 'pending' && input.diffHash) {
     try {
       const existingPending = listProposals({ status: 'pending' });
       const duplicate = existingPending.find(
-        (ep) => ep.diffHash === p.diffHash,
+        (ep) => ep.diffHash === input.diffHash,
       );
       if (duplicate) {
         // Return a synthetic rejected record (never persisted) so the caller
@@ -316,13 +451,13 @@ export function createProposal(
         // The real proposal (duplicate.id) is still live — we just skip the new one.
         audit({
           action: 'inbox:proposal-rejected',
-          repo: (p.repo as string | null) ?? null,
-          sandboxId: (p.sandboxId as string | undefined) ?? null,
-          summary: `proposal skipped (diffHash dedup): [${p.kind}] ${p.title} — duplicate of ${duplicate.id}`,
+          repo: (input.repo as string | null) ?? null,
+          sandboxId: (input.sandboxId as string | undefined) ?? null,
+          summary: `proposal skipped (diffHash dedup): [${input.kind}] ${input.title} — duplicate of ${duplicate.id}`,
           result: 'ok',
         });
         return {
-          ...p,
+          ...input,
           ...(owner !== undefined ? { owner } : {}),
           id: duplicate.id, // caller receives the existing proposal's id
           status: 'rejected' as const,
@@ -339,7 +474,7 @@ export function createProposal(
   const proposalId = generateId();
   const createdAt = new Date().toISOString();
   const baseProposal: Proposal = {
-    ...p,
+    ...input,
     ...(owner !== undefined ? { owner } : {}),
     id: proposalId,
     status: initialStatus,
@@ -444,7 +579,7 @@ export function listProposals(filter?: { status?: ProposalStatus }): Proposal[] 
         const raw = readFileSync(join(dir, file), 'utf8');
         const parsed: unknown = JSON.parse(raw);
         if (isValidProposal(parsed)) {
-          proposals.push(parsed);
+          proposals.push(sanitizeProposalForStore(parsed));
         }
       } catch {
         // Unreadable or malformed — skip silently.
@@ -485,7 +620,7 @@ export function loadProposal(id: string): Proposal | null {
     if (!existsSync(p)) return null;
     const raw = readFileSync(p, 'utf8');
     const parsed: unknown = JSON.parse(raw);
-    if (isValidProposal(parsed)) return parsed;
+    if (isValidProposal(parsed)) return sanitizeProposalForStore(parsed);
     return null;
   } catch {
     return null;
@@ -516,7 +651,7 @@ export function setStatus(
     if (existing === null) return;
 
     const decidedStatuses: ProposalStatus[] = ['approved', 'rejected'];
-    const updated: Proposal = {
+    const updated: Proposal = sanitizeProposalForStore({
       ...existing,
       status,
       ...(result !== undefined ? { result } : {}),
@@ -525,7 +660,7 @@ export function setStatus(
       ...(decidedStatuses.includes(status)
         ? { decidedAt: new Date().toISOString() }
         : {}),
-    };
+    });
 
     try {
       persistProposal(updated);
@@ -621,7 +756,7 @@ export function updateProposalField(
   try {
     const existing = loadProposal(id);
     if (existing === null) return;
-    const updated: Proposal = { ...existing, ...patch };
+    const updated: Proposal = sanitizeProposalForStore({ ...existing, ...patch });
     try {
       persistProposal(updated);
     } catch {

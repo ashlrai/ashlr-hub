@@ -52,6 +52,7 @@ import {
   pendingCount,
 } from '../src/core/inbox/store.js';
 import { readDecisions } from '../src/core/fleet/decisions-ledger.js';
+import { hashDiff, signProvenance, verifyProvenance } from '../src/core/foundry/provenance.js';
 import type { Proposal } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,32 @@ function makeInput(overrides?: Partial<Omit<Proposal, 'id' | 'status' | 'created
     summary: 'A test summary',
     ...overrides,
   };
+}
+
+const SECRET_VALUE = 'abcdefghijklmnopqrstuvwxyz1234567890';
+const SECRET_ASSIGNMENT = `secret_key = "${SECRET_VALUE}"`;
+
+function diffWithSecret(): string {
+  return [
+    'diff --git a/app.ts b/app.ts',
+    '--- a/app.ts',
+    '+++ b/app.ts',
+    '@@ -1 +1 @@',
+    `+const ${SECRET_ASSIGNMENT};`,
+    '+console.log("review context survives");',
+    '',
+  ].join('\n');
+}
+
+function safeDiff(): string {
+  return [
+    'diff --git a/app.ts b/app.ts',
+    '--- a/app.ts',
+    '+++ b/app.ts',
+    '@@ -1 +1 @@',
+    '+console.log("safe review context");',
+    '',
+  ].join('\n');
 }
 
 // ===========================================================================
@@ -161,6 +188,62 @@ describe('M23 createProposal — persistence + initial state', () => {
     expect(p.workItemId).toBe(input.workItemId);
     expect(p.workSource).toBe(input.workSource);
     expect(p.runId).toBe(input.runId);
+  });
+
+  it('scrubs proposal text and diffs on write while preserving diff review context', () => {
+    const rawDiff = diffWithSecret();
+    const diffHash = hashDiff(rawDiff);
+    const provenanceSig = signProvenance('codex:gpt-5.5', 'frontier', diffHash);
+
+    const p = createProposal(makeInput({
+      title: `Rotate leaked ${SECRET_ASSIGNMENT}`,
+      summary: `Remove password = "swordfish" from the config`,
+      diff: rawDiff,
+      diffHash,
+      provenanceSig,
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+    }));
+
+    expect(p.title).toContain('[REDACTED]');
+    expect(p.summary).toContain('[REDACTED]');
+    expect(p.diff).toContain('diff --git a/app.ts b/app.ts');
+    expect(p.diff).toContain('review context survives');
+    expect(p.diff).toContain('[REDACTED]');
+    expect(p.diff).not.toContain(SECRET_VALUE);
+    expect(p.diffHash).toBeUndefined();
+    expect(p.provenanceSig).toBeUndefined();
+
+    const raw = fs.readFileSync(path.join(inboxDir(), `${p.id}.json`), 'utf8');
+    expect(raw).not.toContain(SECRET_VALUE);
+    expect(raw).not.toContain('swordfish');
+    const loaded = loadProposal(p.id);
+    expect(loaded!.diff).toContain('review context survives');
+    expect(loaded!.diff).toContain('[REDACTED]');
+    expect(loaded!.diffHash).toBeUndefined();
+    expect(listProposals().find((item) => item.id === p.id)!.diff).toContain('[REDACTED]');
+  });
+
+  it('keeps diffHash and provenanceSig when only non-diff text is redacted', () => {
+    const diff = safeDiff();
+    const diffHash = hashDiff(diff);
+    const provenanceSig = signProvenance('codex:gpt-5.5', 'frontier', diffHash);
+
+    const p = createProposal(makeInput({
+      title: `Document ${SECRET_ASSIGNMENT}`,
+      summary: 'Safe summary',
+      diff,
+      diffHash,
+      provenanceSig,
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+    }));
+
+    expect(p.title).toContain('[REDACTED]');
+    expect(p.diff).toBe(diff);
+    expect(p.diffHash).toBe(diffHash);
+    expect(p.provenanceSig).toBe(provenanceSig);
+    expect(verifyProvenance(p).ok).toBe(true);
   });
 
   it('does NOT set decidedAt on creation (pending)', () => {
@@ -301,6 +384,44 @@ describe('M23 loadProposal — by id', () => {
     expect(loaded!.status).toBe('pending');
   });
 
+  it('scrubs legacy on-disk proposal text and diffs on load and list', () => {
+    const p = createProposal(makeInput({ title: 'Legacy shell' }));
+    const rawDiff = diffWithSecret();
+    const diffHash = hashDiff(rawDiff);
+    const provenanceSig = signProvenance('codex:gpt-5.5', 'frontier', diffHash);
+    const legacy: Proposal = {
+      ...p,
+      title: `Legacy ${SECRET_ASSIGNMENT}`,
+      summary: `Legacy password = "swordfish"`,
+      diff: rawDiff,
+      diffHash,
+      provenanceSig,
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+    };
+    const filePath = path.join(inboxDir(), `${p.id}.json`);
+    const legacyRaw = JSON.stringify(legacy, null, 2) + '\n';
+    fs.writeFileSync(filePath, legacyRaw, 'utf8');
+
+    const loaded = loadProposal(p.id);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.title).toContain('[REDACTED]');
+    expect(loaded!.summary).toContain('[REDACTED]');
+    expect(loaded!.diff).toContain('diff --git a/app.ts b/app.ts');
+    expect(loaded!.diff).toContain('review context survives');
+    expect(loaded!.diff).not.toContain(SECRET_VALUE);
+    expect(loaded!.diffHash).toBeUndefined();
+    expect(loaded!.provenanceSig).toBeUndefined();
+
+    const listed = listProposals().find((item) => item.id === p.id);
+    expect(listed).toBeDefined();
+    expect(listed!.title).toContain('[REDACTED]');
+    expect(listed!.diff).not.toContain(SECRET_VALUE);
+    expect(listed!.diffHash).toBeUndefined();
+    expect(listed!.provenanceSig).toBeUndefined();
+    expect(fs.readFileSync(filePath, 'utf8')).toBe(legacyRaw);
+  });
+
   it('returns null for unknown id', () => {
     const loaded = loadProposal('nonexistent-id-xyz');
     expect(loaded).toBeNull();
@@ -390,6 +511,27 @@ describe('M23 setStatus — persistence only, no application', () => {
     setStatus(p.id, 'failed', 'branch creation failed');
     const loaded = loadProposal(p.id);
     expect(loaded!.result).toBe('branch creation failed');
+  });
+
+  it('scrubs status result and decision reason on write', () => {
+    const p = createProposal(makeInput());
+
+    setStatus(
+      p.id,
+      'rejected',
+      `apply failed with ${SECRET_ASSIGNMENT}`,
+      `blocked because password = "swordfish"`,
+    );
+
+    const loaded = loadProposal(p.id);
+    expect(loaded!.result).toContain('[REDACTED]');
+    expect(loaded!.decisionReason).toContain('[REDACTED]');
+    expect(loaded!.result).not.toContain(SECRET_VALUE);
+    expect(loaded!.decisionReason).not.toContain('swordfish');
+
+    const raw = fs.readFileSync(path.join(inboxDir(), `${p.id}.json`), 'utf8');
+    expect(raw).not.toContain(SECRET_VALUE);
+    expect(raw).not.toContain('swordfish');
   });
 
   it('is a no-op for unknown ids (does not throw)', () => {

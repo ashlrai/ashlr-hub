@@ -568,5 +568,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Added focused regressions for workspace scoping, FleetStatus context-efficiency fixtures, and CLI default/all-repos attention behavior.
 - [x] Verification passed: focused workspace/eval/status suite, typecheck, lint, build, audit, and diff check.
 - [x] Commit `2c002b6`, push to `origin/master`, and smoke live attention/fleet status with scoped repo telemetry.
-- [ ] Next lane: sanitize inbox/proposal persistence on write/read without erasing legitimate source diff review context.
-- [ ] Next lane: integrate proposal-production bottleneck findings from the active scout and pick the next yield patch.
+- [x] Sanitize inbox/proposal persistence on write/read without erasing legitimate source diff review context.
+- [x] Preserve provenance when only non-diff text redacts, and drop `diffHash`/`provenanceSig` when diff redaction changes signed bytes.
+- [x] Verification passed: focused inbox/API suite, secret-safety/API scrub canaries, typecheck, lint, build, audit, and diff check.
+- [ ] Next lane: file non-empty partial/TITRR diffs as safe review-only proposals with failed verification metadata instead of discarding them.
+- [ ] Next lane: update daemon/status pending matching to prefer `workItemId` so stale/pending proposal blockers are item-accurate.

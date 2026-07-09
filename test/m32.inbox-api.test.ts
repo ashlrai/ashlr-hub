@@ -18,6 +18,7 @@ import * as http from 'node:http';
 import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
 import { startServer } from '../src/core/web/server.js';
 import { createProposal, loadProposal } from '../src/core/inbox/store.js';
+import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import type { WebServerOptions } from '../src/core/types.js';
 
 let fx: H1Fixture;
@@ -77,6 +78,39 @@ function makeNote(title = 'web approval test'): string {
     kind: 'note',
     title,
     summary: 'created by m32 inbox-api test',
+  }).id;
+}
+
+const SECRET_VALUE = 'abcdefghijklmnopqrstuvwxyz1234567890';
+const SECRET_ASSIGNMENT = `secret_key = "${SECRET_VALUE}"`;
+
+function makeSecretDiff(): string {
+  return [
+    'diff --git a/web.ts b/web.ts',
+    '--- a/web.ts',
+    '+++ b/web.ts',
+    '@@ -1 +1 @@',
+    `+const ${SECRET_ASSIGNMENT};`,
+    '+console.log("api review context survives");',
+    '',
+  ].join('\n');
+}
+
+function makeSecretPatch(title = `api detail ${SECRET_ASSIGNMENT}`): string {
+  const repo = fx.makeRepo();
+  const diff = makeSecretDiff();
+  const diffHash = hashDiff(diff);
+  return createProposal({
+    repo: repo.dir,
+    origin: 'manual',
+    kind: 'patch',
+    title,
+    summary: `created with password = "swordfish"`,
+    diff,
+    diffHash,
+    provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', diffHash),
+    engineModel: 'codex:gpt-5.5',
+    engineTier: 'frontier',
   }).id;
 }
 
@@ -179,6 +213,43 @@ describe('detail route + snapshot flag', () => {
 
     const missing = await request('GET', `${h.url}/api/inbox/nope-123`, h.port);
     expect(missing.statusCode).toBe(404);
+  });
+
+  it('GET inbox routes return scrubbed proposal text and reviewable redacted diffs', async () => {
+    const id = makeSecretPatch();
+    const h = await startServer(makeCfg(), makeOpts());
+    openHandles.push(h);
+
+    const detail = await request('GET', `${h.url}/api/inbox/${id}`, h.port);
+    expect(detail.statusCode).toBe(200);
+    expect(detail.body).not.toContain(SECRET_VALUE);
+    expect(detail.body).not.toContain('swordfish');
+
+    const proposal = JSON.parse(detail.body) as {
+      title: string;
+      summary: string;
+      diff: string;
+      diffHash?: string;
+      provenanceSig?: string;
+    };
+    expect(proposal.title).toContain('[REDACTED]');
+    expect(proposal.summary).toContain('[REDACTED]');
+    expect(proposal.diff).toContain('diff --git a/web.ts b/web.ts');
+    expect(proposal.diff).toContain('api review context survives');
+    expect(proposal.diff).toContain('[REDACTED]');
+    expect(proposal.diffHash).toBeUndefined();
+    expect(proposal.provenanceSig).toBeUndefined();
+
+    const list = await request('GET', `${h.url}/api/inbox`, h.port);
+    expect(list.statusCode).toBe(200);
+    expect(list.body).not.toContain(SECRET_VALUE);
+    expect(list.body).not.toContain('swordfish');
+    const listed = (JSON.parse(list.body) as { proposals: Array<{ id: string; diff?: string; diffHash?: string }> })
+      .proposals.find((item) => item.id === id);
+    expect(listed).toBeDefined();
+    expect(listed!.diff).toContain('api review context survives');
+    expect(listed!.diff).toContain('[REDACTED]');
+    expect(listed!.diffHash).toBeUndefined();
   });
 
   it('snapshot reports dispatchEnabled truthfully', async () => {

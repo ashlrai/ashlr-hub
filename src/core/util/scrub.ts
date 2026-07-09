@@ -54,7 +54,7 @@ export function scrubSecrets(text: string): string {
       .replace(/\b(Bearer|Token|Authorization)\s+[A-Za-z0-9\-._~+/]+=*/gi, '$1 [REDACTED]')
       // 4. Generic key=value secret patterns (covers ASHLR_* and common names)
       .replace(
-        /\b(api[_-]?key|api[_-]?token|secret|secret[_-]?key|token|password|passwd|pwd|auth|credential|client[_-]?secret|private[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|connection[_-]?string|conn[_-]?str|_?auth[_-]?token|ASHLR_[A-Z_]+)[=:\s]+[^\s,;'"]{8,}/gi,
+        /\b(api[_-]?key|api[_-]?token|secret|secret[_-]?key|token|password|passwd|pwd|auth|credential|client[_-]?secret|private[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|connection[_-]?string|conn[_-]?str|_?auth[_-]?token|ASHLR_[A-Z_]+)[=:\s]+["']?[^\s,;'"]{8,}["']?/gi,
         '$1=[REDACTED]',
       )
       // 5. Slack tokens
