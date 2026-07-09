@@ -224,6 +224,54 @@ describe('saveRun / loadRun / listRuns — persistence round-trip', () => {
     expect(summary).not.toContain('diff --git');
   });
 
+  it('saveRun uses the first valid run timestamp for causal learning epochs', () => {
+    const state = makeState('causal-timestamp');
+    state.createdAt = '2026-01-02T03:04:05.000Z';
+    state.updatedAt = 'not-a-date';
+
+    saveRun(state);
+
+    const loaded = loadRun(state.id);
+    expect(loaded?.learningEpoch).toBe('2026-01-02');
+  });
+
+  it('saveRun does not mutate caller state when persistence fails', () => {
+    const state = makeState('failed-persist');
+    const tmpPath = path.join(os.homedir(), '.ashlr', 'runs', `${state.id}.json.tmp`);
+    fs.mkdirSync(path.dirname(tmpPath), { recursive: true });
+    fs.mkdirSync(tmpPath, { recursive: true });
+
+    try {
+      expect(() => saveRun(state)).toThrow();
+      expect(state.trajectoryId).toBeUndefined();
+      expect(state.runEventSummary).toBeUndefined();
+    } finally {
+      fs.rmSync(tmpPath, { recursive: true, force: true });
+    }
+  });
+
+  it('saveRun bounds malformed proposal outcome metadata before summarizing it', () => {
+    const state = makeState('causal-bounds');
+    state.status = 'running';
+    state.proposalOutcome = {
+      kind: 'unexpected-kind' as never,
+      reason: 'malformed runtime payload',
+      files: -7,
+      insertions: Number.POSITIVE_INFINITY,
+      deletions: 2.9,
+    };
+
+    saveRun(state);
+
+    const loaded = loadRun(state.id);
+    expect(loaded?.runEventSummary).toMatchObject({
+      outcome: 'running',
+      proposalCreated: false,
+      diffFiles: 0,
+      diffLines: 2,
+    });
+  });
+
   it('listRuns includes saved runs (by unique id)', () => {
     const a = makeState('list-a');
     const b = makeState('list-b');

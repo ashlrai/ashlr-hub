@@ -205,17 +205,49 @@ function runDurationMs(state: RunState): number | undefined {
   return end - start;
 }
 
+const RUN_PROPOSAL_OUTCOME_KINDS = new Set<string>([
+  'filed',
+  'empty-diff',
+  'completeness-gate',
+  'partial-completeness-gate',
+  'engine-failed-no-diff',
+  'api-model-task-failed',
+  'sandbox-unavailable',
+  'engine-command-missing',
+  'engine-unsupported',
+  'kill-switch',
+  'proposal-disabled',
+  'proposal-capture-error',
+]);
+
+function nonNegativeCount(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  return Math.max(0, Math.trunc(value));
+}
+
+function runCausalTimestamp(state: RunState): string | undefined {
+  for (const candidate of [state.updatedAt, state.createdAt]) {
+    if (typeof candidate === 'string' && Number.isFinite(Date.parse(candidate))) return candidate;
+  }
+  return undefined;
+}
+
 function runOutcomeLabel(state: RunState): string {
-  if (state.proposalOutcome?.kind === 'filed') return 'proposal-created';
-  return state.proposalOutcome?.kind ?? state.status;
+  const kind = state.proposalOutcome?.kind;
+  if (kind === 'filed') return 'proposal-created';
+  return kind && RUN_PROPOSAL_OUTCOME_KINDS.has(kind) ? kind : state.status;
 }
 
 function runMetadataSummary(state: RunState): NonNullable<RunState['runEventSummary']> {
   const proposalOutcome = state.proposalOutcome;
+  const insertions = nonNegativeCount(proposalOutcome?.insertions);
+  const deletions = nonNegativeCount(proposalOutcome?.deletions);
+  const files = nonNegativeCount(proposalOutcome?.files);
   const diffLines =
-    typeof proposalOutcome?.insertions === 'number' || typeof proposalOutcome?.deletions === 'number'
-      ? Math.max(0, proposalOutcome.insertions ?? 0) + Math.max(0, proposalOutcome.deletions ?? 0)
+    insertions !== undefined || deletions !== undefined
+      ? (insertions ?? 0) + (deletions ?? 0)
       : state.runEventSummary?.diffLines;
+  const durationMs = runDurationMs(state);
   return {
     ...(state.runEventSummary ?? {}),
     runId: state.id,
@@ -223,12 +255,12 @@ function runMetadataSummary(state: RunState): NonNullable<RunState['runEventSumm
     outcome: runOutcomeLabel(state),
     ...(proposalOutcome ? { proposalCreated: proposalOutcome.kind === 'filed' } : {}),
     ...(proposalOutcome?.proposalId ? { proposalId: proposalOutcome.proposalId } : {}),
-    ...(typeof proposalOutcome?.files === 'number' ? { diffFiles: proposalOutcome.files } : {}),
+    ...(files !== undefined ? { diffFiles: files } : {}),
     ...(diffLines !== undefined ? { diffLines } : {}),
     tokensIn: state.usage.tokensIn,
     tokensOut: state.usage.tokensOut,
     costUsd: state.usage.estCostUsd,
-    ...(runDurationMs(state) !== undefined ? { durationMs: runDurationMs(state) } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
   };
 }
 
@@ -259,7 +291,7 @@ function normalizeRunStateForPersistence(state: RunState): RunState {
     labelBasis: state.labelBasis ?? runLabelBasis(state),
     routerPolicyVersion: state.routerPolicyVersion,
     learningEpoch: state.learningEpoch,
-    ts: state.updatedAt ?? state.createdAt,
+    ts: runCausalTimestamp(state),
   });
   return {
     ...state,
@@ -276,10 +308,10 @@ export function saveRun(s: RunState): void {
   const dest = runFilePath(s.id);
   const tmp = dest + '.tmp';
   const normalized = normalizeRunStateForPersistence(s);
-  Object.assign(s, normalized);
   const payload = JSON.stringify(normalized, null, 2);
   fs.writeFileSync(tmp, payload, 'utf8');
   fs.renameSync(tmp, dest);
+  Object.assign(s, normalized);
 }
 
 // ---------------------------------------------------------------------------
