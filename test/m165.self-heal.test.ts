@@ -54,7 +54,7 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
 // Lazy imports (after mocks)
 // ---------------------------------------------------------------------------
 
-const { detectBreakage, proposeHeal, runSelfHealCycle } = await import(
+const { detectBreakage, proposeHeal, runSelfHealCycle, runSelfHealCycleForRepos } = await import(
   '../src/core/fleet/self-heal.js'
 );
 const { isActionableSelfHealFailureText } = await import(
@@ -474,6 +474,112 @@ describe('runSelfHealCycle', () => {
       fs.readFileSync(path.join(ashlrDir, 'backlog.json'), 'utf8'),
     ) as { items: WorkItem[] };
     expect(backlog.items.map((item) => item.id)).toEqual([inventA.id]);
+  });
+
+  it('targeted self-heal maintenance prunes only requested enrolled repos', async () => {
+    const repoA = path.join(tmpHome, 'repo-a');
+    const repoB = path.join(tmpHome, 'repo-b');
+    fs.mkdirSync(repoA, { recursive: true });
+    fs.mkdirSync(repoB, { recursive: true });
+    const ashlrDir = path.join(tmpHome, '.ashlr');
+    fs.mkdirSync(ashlrDir, { recursive: true });
+
+    const staleA = proposeHeal(repoA, {
+      broken: true,
+      kind: 'build',
+      detail: 'old TypeScript error',
+    });
+    const staleB = proposeHeal(repoB, {
+      broken: true,
+      kind: 'test',
+      detail: 'FAIL src/other.test.ts: expected true to be false',
+    });
+
+    fs.writeFileSync(
+      path.join(ashlrDir, 'self-heal-queue.json'),
+      JSON.stringify([staleA, staleB], null, 2),
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: '2026-07-02T00:00:00.000Z',
+        repos: [repoA, repoB],
+        items: [staleA, staleB],
+      }, null, 2),
+      'utf8',
+    );
+
+    mockListEnrolled.mockReturnValue([repoA, repoB]);
+    mockDetectVerifyCommands.mockReturnValue([GREEN_VC]);
+    mockRunVerifyCommand.mockReturnValue(OK_RESULT);
+
+    const result = await runSelfHealCycleForRepos([repoA, repoA, path.join(tmpHome, 'unenrolled')], makeCfg());
+
+    expect(result.checked).toBe(1);
+    expect(result.broken).toEqual([]);
+    expect(result.healItems).toEqual([]);
+    expect(mockRunVerifyCommand).toHaveBeenCalledTimes(1);
+
+    const queue = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'self-heal-queue.json'), 'utf8'),
+    ) as WorkItem[];
+    expect(queue.map((item) => item.id)).toEqual([staleB.id]);
+
+    const backlog = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'backlog.json'), 'utf8'),
+    ) as { items: WorkItem[] };
+    expect(backlog.items.map((item) => item.id)).toEqual([staleB.id]);
+  });
+
+  it('targeted self-heal maintenance replaces stale failure text for the requested repo', async () => {
+    const repoA = path.join(tmpHome, 'repo-a');
+    fs.mkdirSync(repoA, { recursive: true });
+    const ashlrDir = path.join(tmpHome, '.ashlr');
+    fs.mkdirSync(ashlrDir, { recursive: true });
+
+    const staleBuild = proposeHeal(repoA, {
+      broken: true,
+      kind: 'build',
+      detail: 'old TypeScript error',
+    });
+    fs.writeFileSync(
+      path.join(ashlrDir, 'self-heal-queue.json'),
+      JSON.stringify([staleBuild], null, 2),
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: '2026-07-02T00:00:00.000Z',
+        repos: [repoA],
+        items: [staleBuild],
+      }, null, 2),
+      'utf8',
+    );
+
+    mockListEnrolled.mockReturnValue([repoA]);
+    mockDetectVerifyCommands.mockReturnValue([BUILD_VC, GREEN_VC]);
+    mockRunVerifyCommand
+      .mockReturnValueOnce(OK_RESULT)
+      .mockReturnValueOnce({
+        ...FAIL_RESULT,
+        output: 'ERROR Raw mode is not supported on the current process.stdin, which Ink uses',
+      });
+
+    const result = await runSelfHealCycleForRepos([repoA], makeCfg());
+
+    expect(result.checked).toBe(1);
+    expect(result.broken).toEqual([repoA]);
+    expect(result.healItems).toHaveLength(1);
+    expect(result.healItems[0]!.id).not.toBe(staleBuild.id);
+    expect(result.healItems[0]!.title).toContain('Raw mode is not supported');
+
+    const queue = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'self-heal-queue.json'), 'utf8'),
+    ) as WorkItem[];
+    expect(queue.map((item) => item.id)).toEqual([result.healItems[0]!.id]);
+    expect(queue[0]!.title).toContain('Raw mode is not supported');
   });
 
   it('replaces stale prior-kind self-heal items with the current first failure', async () => {

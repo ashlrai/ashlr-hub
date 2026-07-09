@@ -92,7 +92,7 @@ import {
 } from '../fleet/proposal-repair-work.js';
 import { reconcileRemoteHandoffs, type RemoteHandoffReconcileResult } from '../inbox/remote-handoff.js';
 import { runBestOfN } from '../run/best-of-n.js';
-import { runSelfHealCycle } from '../fleet/self-heal.js';
+import { runSelfHealCycle, runSelfHealCycleForRepos } from '../fleet/self-heal.js';
 import { runInventCycle } from '../generative/invent-cycle.js'; // M186
 import { runCounterfactualReplay } from '../fleet/counterfactual.js'; // M187
 import { detectRegression, bisectAndRevert } from '../fleet/regression-sentinel.js'; // M189
@@ -1172,11 +1172,15 @@ export async function tick(
     producerMaintenanceNextAfter = new Date(nextRunAt).toISOString();
     return false;
   };
-  const runSelfHealMaintenance = async (): Promise<void> => {
+  const runSelfHealMaintenance = async (targetRepos?: string[]): Promise<void> => {
     if (opts.dryRun || selfHealMaintenanceRan) return;
     selfHealMaintenanceRan = true;
     try {
-      await runSelfHealCycle(liveCfg);
+      if (targetRepos && targetRepos.length > 0) {
+        await runSelfHealCycleForRepos(targetRepos, liveCfg);
+      } else {
+        await runSelfHealCycle(liveCfg);
+      }
     } catch (err) {
       // Best-effort — self-heal must never crash the tick.
       console.warn('[ashlr] daemon:tick runSelfHealCycle failed:', (err as Error)?.message ?? err);
@@ -1259,8 +1263,17 @@ export async function tick(
       return [];
     }
   };
-  const hasPrunableSelfHealWork = (items: WorkItem[]): boolean =>
-    items.some((item) => item.source === 'self' && !item.tags.includes('proposal-repair'));
+  const prunableSelfHealRepos = (items: WorkItem[]): string[] => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of items) {
+      if (item.source !== 'self' || item.tags.includes('proposal-repair')) continue;
+      if (seen.has(item.repo)) continue;
+      seen.add(item.repo);
+      out.push(item.repo);
+    }
+    return out;
+  };
 
   // -------------------------------------------------------------------------
   // 1. Kill-switch check.
@@ -1474,15 +1487,16 @@ export async function tick(
   // can prune generated repair items that were valid in the cached backlog
   // moments earlier; the same tick must refresh and select from the
   // post-maintenance view.
+  const selfHealReposBeforeSelection = prunableSelfHealRepos(backlogItems);
   if (
     backlogItems.length > 0 &&
     !opts.dryRun &&
     !selfHealMaintenanceRan &&
-    hasPrunableSelfHealWork(backlogItems) &&
+    selfHealReposBeforeSelection.length > 0 &&
     shouldRunProducerMaintenance(state)
   ) {
     producerMaintenanceBeforeSelection = true;
-    await runSelfHealMaintenance();
+    await runSelfHealMaintenance(selfHealReposBeforeSelection);
     backlogItems = await refreshBacklogForTick();
     const invented = await runInventMaintenance();
     if (invented) backlogItems = await refreshBacklogForTick();

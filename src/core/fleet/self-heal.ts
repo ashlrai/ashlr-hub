@@ -403,6 +403,71 @@ function persistHealItem(item: WorkItem): void {
   queueSelfHealItem(item);
 }
 
+function uniqueEnrolledTargets(repos: string[], enrolled: string[]): string[] {
+  const enrolledKeys = new Set<string>();
+  for (const repo of enrolled) {
+    try { enrolledKeys.add(resolve(repo)); } catch { /* ignore invalid enrollment rows */ }
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const repo of repos) {
+    try {
+      const key = resolve(repo);
+      if (!enrolledKeys.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      out.push(repo);
+    } catch {
+      // Ignore malformed repo paths.
+    }
+  }
+  return out;
+}
+
+async function runSelfHealCycleForRepoList(
+  repos: string[],
+  cfg?: Pick<AshlrConfig, 'foundry'>,
+): Promise<SelfHealCycleResult> {
+  const broken: string[] = [];
+  const healItems: WorkItem[] = [];
+
+  for (const repo of repos) {
+    try {
+      const result = await detectBreakage(repo, cfg);
+      if (result.broken) {
+        pruneStaleSelfHealItems(repo);
+        broken.push(repo);
+        const item = proposeHeal(repo, result, cfg);
+        healItems.push(item);
+        persistHealItem(item);
+      } else if (result.verified === true) {
+        pruneStaleSelfHealItems(repo);
+      }
+    } catch {
+      // Per-repo errors never abort the cycle.
+    }
+  }
+
+  return { checked: repos.length, broken, healItems };
+}
+
+export async function runSelfHealCycleForRepos(
+  repos: string[],
+  cfg?: Pick<AshlrConfig, 'foundry'>,
+): Promise<SelfHealCycleResult> {
+  try {
+    const enabled = (cfg?.foundry as Record<string, unknown> | undefined)?.selfHeal !== false;
+    if (!enabled) return { checked: 0, broken: [], healItems: [] };
+
+    const enrolled = listEnrolled();
+    pruneInvalidSelfHealItems(enrolled);
+    const targets = uniqueEnrolledTargets(repos, enrolled);
+    if (targets.length === 0) return { checked: 0, broken: [], healItems: [] };
+    return await runSelfHealCycleForRepoList(targets, cfg);
+  } catch {
+    return { checked: 0, broken: [], healItems: [] };
+  }
+}
+
 /**
  * Iterate every enrolled repo, detect breakage, propose heals for broken ones,
  * and queue them for the next fleet tick.
@@ -424,27 +489,7 @@ export async function runSelfHealCycle(
 
     const repos = listEnrolled();
     pruneInvalidSelfHealItems(repos);
-    const broken: string[] = [];
-    const healItems: WorkItem[] = [];
-
-    for (const repo of repos) {
-      try {
-        const result = await detectBreakage(repo, cfg);
-        if (result.broken) {
-          pruneStaleSelfHealItems(repo);
-          broken.push(repo);
-          const item = proposeHeal(repo, result, cfg);
-          healItems.push(item);
-          persistHealItem(item);
-        } else if (result.verified === true) {
-          pruneStaleSelfHealItems(repo);
-        }
-      } catch {
-        // Per-repo errors never abort the cycle
-      }
-    }
-
-    return { checked: repos.length, broken, healItems };
+    return await runSelfHealCycleForRepoList(repos, cfg);
   } catch {
     return { checked: 0, broken: [], healItems: [] };
   }

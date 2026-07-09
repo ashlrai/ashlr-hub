@@ -706,4 +706,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Promote existing Mission Brief action detail into Mission Control and Fleet Dashboard rail so the first screen shows the concrete next move.
 - [x] Focused verification passed: typecheck, dashboard JS syntax check, diff check, and `m342/m49/m210/m213` CI (96 tests).
 - [x] Broad lightweight gates passed: lint, build, audit, invariants, and diff check.
+- [x] Commit and push `ce89b22`, smoke production status, and continue.
+
+## Current Continuation - Targeted Self-Heal Maintenance
+- [x] Confirm live `ashlrcode` TypeScript blocker is stale, then reproduce Ashlr's actual self-heal detector showing the current failure is an Ink raw-mode test error.
+- [x] Add targeted `runSelfHealCycleForRepos()` so non-empty backlog self-heal maintenance can revalidate only repos represented by queued self-heal work instead of sweeping every enrolled repo.
+- [x] Wire daemon pre-selection self-heal refresh through the targeted helper while preserving full self-heal sweep for empty/periodic maintenance.
+- [x] Add focused self-heal and daemon-loop regression coverage.
+- [x] Live-revalidate `ashlrcode` queue to replace the stale TypeScript self-heal with the current Ink raw-mode test failure, then refresh backlog.
+- [x] Focused verification passed: typecheck, diff check, and `m165/m201/m310/m49` CI (160 tests).
+- [x] Broad lightweight gates passed: typecheck, lint, build, audit, invariants, and diff check.
 - [ ] Commit, push, smoke production status, and continue.

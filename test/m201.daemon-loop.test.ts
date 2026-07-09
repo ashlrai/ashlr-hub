@@ -99,8 +99,10 @@ vi.mock('../src/core/run/best-of-n.js', () => ({
 }));
 
 const mockRunSelfHealCycle = vi.fn();
+const mockRunSelfHealCycleForRepos = vi.fn();
 vi.mock('../src/core/fleet/self-heal.js', () => ({
   runSelfHealCycle: (...args: unknown[]) => mockRunSelfHealCycle(...args),
+  runSelfHealCycleForRepos: (...args: unknown[]) => mockRunSelfHealCycleForRepos(...args),
 }));
 
 const mockQueueProposalRepairWorkForPendingProposals = vi.fn();
@@ -249,6 +251,7 @@ beforeEach(() => {
   mockRunGoal.mockReset();
   mockRunBestOfN.mockReset();
   mockRunSelfHealCycle.mockReset();
+  mockRunSelfHealCycleForRepos.mockReset();
   mockQueueProposalRepairWorkForPendingProposals.mockReset();
   mockRunViaAshlrcode.mockReset();
   mockRunInventCycle.mockReset();
@@ -270,6 +273,7 @@ beforeEach(() => {
 
   // Default benign implementations.
   mockRunSelfHealCycle.mockResolvedValue({ checked: 0, broken: [], healItems: [] });
+  mockRunSelfHealCycleForRepos.mockResolvedValue({ checked: 0, broken: [], healItems: [] });
   mockQueueProposalRepairWorkForPendingProposals.mockReturnValue({ scanned: 0, eligible: 0, queued: 0, failed: 0 });
   mockRunGoal.mockResolvedValue({
     id: `mock-rungoal-${Date.now()}`,
@@ -625,7 +629,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     expect(result.dispatches?.[0]?.itemId).not.toBe(staleSelfHeal.id);
     expect(mockBuildBacklog).toHaveBeenCalledTimes(2);
-    expect(mockRunSelfHealCycle).toHaveBeenCalledTimes(1);
+    expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
+    expect(mockRunSelfHealCycleForRepos).toHaveBeenCalledTimes(1);
+    expect(mockRunSelfHealCycleForRepos).toHaveBeenCalledWith([repo.dir], expect.any(Object));
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
     expect(result.producerMaintenance).toMatchObject({
       selfHeal: true,
@@ -661,7 +667,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.merged).toBe(1);
     expect(result.autoMerge).toMatchObject({ merged: 1 });
     expect(mockBuildBacklog).toHaveBeenCalledTimes(2);
-    expect(mockRunSelfHealCycle).toHaveBeenCalledTimes(1);
+    expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
+    expect(mockRunSelfHealCycleForRepos).toHaveBeenCalledTimes(1);
+    expect(mockRunSelfHealCycleForRepos).toHaveBeenCalledWith([repo.dir], expect.any(Object));
     expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
