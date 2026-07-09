@@ -1218,6 +1218,52 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
   });
 
+  it('A1h5b: proposal-disabled production does not record empty cooldown', async () => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock proposal disabled' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-proposal-disabled',
+      status: 'done',
+      usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+      proposalOutcome: {
+        kind: 'proposal-disabled',
+        reason: 'proposal filing disabled for this sandboxed attempt',
+      },
+    });
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: {
+          allowedBackends: ['local-coder'],
+        },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.proposalsCreated).toBe(0);
+    expect(result.dispatches?.[0]).toMatchObject({
+      itemId: items[0]!.id,
+      backend: 'local-coder',
+      dispatched: true,
+      production: {
+        outcome: 'proposal-disabled',
+        runId: 'run-proposal-disabled',
+        reason: 'proposal filing disabled for this sandboxed attempt',
+      },
+    });
+    expect(loadWorkedLedger().events.filter((event) => event.itemId === items[0]!.id)).toEqual([]);
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      itemId: items[0]!.id,
+      outcome: 'proposal-disabled',
+      proposalCreated: false,
+      runId: 'run-proposal-disabled',
+      basis: 'run-proposal-outcome',
+    });
+  });
+
   it('A1h6: non-proposal production does not inherit proposal ids from the pending delta', async () => {
     const { items } = enrollWithItems(1);
     mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock empty with side proposal' });

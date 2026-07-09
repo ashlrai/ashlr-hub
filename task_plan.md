@@ -558,5 +558,8 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 ## Current Continuation - Overnight Safety/Yield Loop
 - [x] Rechecked clean `master`, recent commits, Entire state, live daemon status, FleetStatus summary, task plan, and notes after secret-safety deployment.
 - [x] Deployed parallel scouts for proposal/inbox secrecy, public API sanitization, MCP safe views, production-yield recovery, and Phantom/Grok product strategy.
-- [ ] Land the safest high-leverage patch from the scout findings.
-- [ ] Run focused verification, update persistent notes, commit, push, and recheck live daemon/fleet health.
+- [x] Land and push `0af1b81`, a public web JSON/SSE safe-view boundary that scrubs secret-shaped strings and home paths without erasing review structure.
+- [x] Fix the live proposal-production starvation bug where `proposal-disabled` dispatches fell through to `empty` worked-ledger cooldown.
+- [x] Tighten long-base64 scrubbing so ordinary absolute temp paths are preserved while compact blobs still redact.
+- [x] Run focused web/control/dashboard/inbox/safety, daemon/fleet/scrub, typecheck, lint, build, audit, and diff verification for the two slices.
+- [ ] Commit and push the cooldown/scrub fix, then recheck live daemon/fleet health.

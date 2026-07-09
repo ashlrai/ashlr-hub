@@ -215,6 +215,18 @@ describe('scrubSecrets (shared util) — comprehensive redaction', () => {
     expect(scrubSecrets(`key=${hex64}`)).not.toContain(hex64);
   });
 
+  it('preserves ordinary absolute paths that contain long temp directory names', async () => {
+    const { scrubSecrets } = await import('../src/core/util/scrub.js');
+    const p = '/var/folders/mm/kgqr1v8166dfg1rbpqq7vp6h0000gn/T/ashlr-h1-repo-CeqCFa:m201-item-0';
+    expect(scrubSecrets(p)).toBe(p);
+  });
+
+  it('scrubs compact long base64-like blobs without path separators', async () => {
+    const { scrubSecrets } = await import('../src/core/util/scrub.js');
+    const blob = 'QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5';
+    expect(scrubSecrets(`blob=${blob}`)).not.toContain(blob);
+  });
+
   it('never throws', async () => {
     const { scrubSecrets } = await import('../src/core/util/scrub.js');
     expect(() => scrubSecrets('')).not.toThrow();

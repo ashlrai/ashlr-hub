@@ -2665,6 +2665,9 @@ export async function tick(
       }
       for (const outcome of outcomes) {
         if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
+          if (outcome.value.dispatch?.production?.outcome === 'proposal-disabled') {
+            continue;
+          }
           const outcomeLabel =
             workedOutcomeFromDispatchProduction(outcome.value.dispatch?.production) ??
             (proposalItemIds.has(outcome.value.item.id) ? 'diff' : 'empty');
