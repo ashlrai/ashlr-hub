@@ -591,5 +591,6 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Verify dashboard readiness strip with JS syntax, dashboard/SSE/control/status suites, typecheck, build, lint, audit, and diff checks.
 - [x] Normalize run-ledger causal metadata without ingesting raw run/proposal text.
 - [x] Verify run-ledger causal metadata with focused/adjacent/typecheck/build/lint/audit/invariant/full-CI gates.
-- [ ] Next lane: strengthen automerge test-weakening detection for equal-count assertion rewrites, skipped tests, and weakened verification scripts.
+- [x] Strengthen automerge test-weakening detection for equal-count assertion rewrites, skipped tests, and weakened verification scripts.
+- [x] Verify automerge safety hardening with focused/broad/full-CI gates.
 - [ ] Next lane: add a values-free Phantom agent report rollup once the Phantom command surface is stable enough to feature-detect safely.

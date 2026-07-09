@@ -226,25 +226,48 @@ export type RiskClass = 'low' | 'medium' | 'high';
 /** Total ordering for risk comparison: low < medium < high. */
 const RISK_ORDER: Record<RiskClass, number> = { low: 0, medium: 1, high: 2 };
 
+function normalizeDiffPath(raw: string): string | undefined {
+  let p = raw.trim();
+  const tab = p.indexOf('\t');
+  if (tab >= 0) p = p.slice(0, tab);
+  if ((p.startsWith('"') && p.endsWith('"')) || (p.startsWith("'") && p.endsWith("'"))) {
+    p = p.slice(1, -1);
+  }
+  if (!p || p === '/dev/null') return undefined;
+  if (p.startsWith('a/') || p.startsWith('b/')) p = p.slice(2);
+  return p || undefined;
+}
+
 /**
- * Extract the changed file paths from a unified diff by reading every
- * `+++ b/<path>` header. Strips the `b/` prefix and ignores `/dev/null`
- * (deletions). Returns an empty array when no headers are present.
+ * Extract the changed file paths from a unified diff. Includes both old and new
+ * paths so deletion-only and rename diffs still trigger build/CI/manifest guards.
  */
 function changedFilesFromDiff(diff: string): string[] {
-  const files: string[] = [];
+  const files = new Set<string>();
+  const add = (raw: string): void => {
+    const p = normalizeDiffPath(raw);
+    if (p) files.add(p);
+  };
   for (const line of diff.split('\n')) {
-    if (!line.startsWith('+++ ')) continue;
-    let p = line.slice(4).trim();
-    // Strip a trailing tab-timestamp some tools emit: "+++ b/x\t2026-..."
-    const tab = p.indexOf('\t');
-    if (tab >= 0) p = p.slice(0, tab);
-    if (p === '/dev/null') continue;
-    if (p.startsWith('b/')) p = p.slice(2);
-    if (p.startsWith('a/')) p = p.slice(2);
-    if (p) files.push(p);
+    const gitHeader = line.match(/^diff --git (a\/.+?) (b\/.+)$/);
+    if (gitHeader) {
+      add(gitHeader[1]!);
+      add(gitHeader[2]!);
+      continue;
+    }
+    if (line.startsWith('--- ') || line.startsWith('+++ ')) {
+      add(line.slice(4));
+      continue;
+    }
+    if (line.startsWith('rename from ')) {
+      add(line.slice('rename from '.length));
+      continue;
+    }
+    if (line.startsWith('rename to ')) {
+      add(line.slice('rename to '.length));
+    }
   }
-  return files;
+  return [...files];
 }
 
 /** Lowercase basename of a path (no directory). */
@@ -896,6 +919,11 @@ export function evaluateEvidenceAutoMergePreflight(
   }
   if (proposal.isPartial === true) {
     return refuse('partial/timeout-captured proposals require judge or human review');
+  }
+
+  const changedFiles = changedFilesFromDiff(proposal.diff ?? '');
+  if (changedFiles.some(isBuildOrCiOrManifest)) {
+    return refuse('diff touches build/CI/manifest files — judge or human review required');
   }
 
   const guard = guardSafetyTests(proposal.diff ?? '');

@@ -803,6 +803,80 @@ describe('M342 evaluateEvidenceGate — pure, no judge evidence required', () =>
     const r = evaluateEvidenceAutoMergePreflight(weakening, evidenceCfg(), { remoteAvailable: true });
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/test-weakening|safety\/invariant/);
+
+    const equalCountDiff = [
+      'diff --git a/test/m54.self-guard.test.ts b/test/m54.self-guard.test.ts',
+      '--- a/test/m54.self-guard.test.ts',
+      '+++ b/test/m54.self-guard.test.ts',
+      '@@ -1 +1 @@',
+      '-expect(realGate).toBe(true);',
+      '+expect(true).toBe(true);',
+      '',
+    ].join('\n');
+    const equalCount = evidenceProposal('e8-equal-count', equalCountDiff);
+    expect(
+      evaluateEvidenceAutoMergePreflight(equalCount, evidenceCfg(), { remoteAvailable: true }).reason,
+    ).toMatch(/test-weakening|removes \d+ assertion/);
+
+    const skipDiff = [
+      'diff --git a/test/m54.self-guard.test.ts b/test/m54.self-guard.test.ts',
+      '--- a/test/m54.self-guard.test.ts',
+      '+++ b/test/m54.self-guard.test.ts',
+      '@@ -1 +1 @@',
+      "-it('guards safety', () => {",
+      "+it.skip('guards safety', () => {",
+      '',
+    ].join('\n');
+    const skipped = evidenceProposal('e8-skipped', skipDiff);
+    expect(
+      evaluateEvidenceAutoMergePreflight(skipped, evidenceCfg(), { remoteAvailable: true }).reason,
+    ).toMatch(/skipped\/focused/);
+  });
+
+  it('[E8b] weakened verification scripts are refused by evidence preflight', () => {
+    const diff = [
+      'diff --git a/package.json b/package.json',
+      '--- a/package.json',
+      '+++ b/package.json',
+      '@@ -1 +1 @@',
+      '-{"scripts":{"test":"vitest run"}}',
+      '+{"scripts":{"test":"exit 0"}}',
+      '',
+    ].join('\n');
+    const r = evaluateEvidenceAutoMergePreflight(evidenceProposal('e8b', diff), evidenceCfg(), {
+      remoteAvailable: true,
+    });
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/build\/CI\/manifest/);
+
+    const deletedCi = [
+      'diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml',
+      'deleted file mode 100644',
+      '--- a/.github/workflows/ci.yml',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-name: ci',
+      '',
+    ].join('\n');
+    const renameContract = [
+      'diff --git a/ashlr.verify.json b/ashlr.verify.json.disabled',
+      'similarity index 100%',
+      'rename from ashlr.verify.json',
+      'rename to ashlr.verify.json.disabled',
+      '',
+    ].join('\n');
+
+    expect(
+      evaluateEvidenceAutoMergePreflight(evidenceProposal('e8b-delete-ci', deletedCi), evidenceCfg(), {
+        remoteAvailable: true,
+      }).reason,
+    ).toMatch(/build\/CI\/manifest/);
+    expect(
+      evaluateEvidenceAutoMergePreflight(evidenceProposal('e8b-rename-contract', renameContract), evidenceCfg(), {
+        remoteAvailable: true,
+      }).reason,
+    ).toMatch(/build\/CI\/manifest/);
   });
 
   it('[E9] evidence mode refuses self-target activation even when allowSelfMerge is true', () => {

@@ -54,7 +54,39 @@ describe('M54 — guardSafetyTests (the never-weaken guard)', () => {
     const diff = `diff --git a/test/m45.foundry.test.ts b/test/m45.foundry.test.ts\n--- a/test/m45.foundry.test.ts\n+++ b/test/m45.foundry.test.ts\n@@ -10,8 +10,4 @@\n-  it('blocks push', () => {\n-    expect(pushBlocked).toBe(true);\n-  });\n-  expect(scrubbed).toContain('REDACTED');\n+  // removed for "speed"\n`;
     const v = guardSafetyTests(diff);
     expect(v.weakened).toBe(true);
-    expect(v.reason).toMatch(/net assertion/);
+    expect(v.reason).toMatch(/removes \d+ assertion/);
+  });
+
+  it('REFUSES an equal-count assertion rewrite in a safety test', () => {
+    const diff = `diff --git a/test/m54.self-guard.test.ts b/test/m54.self-guard.test.ts\n--- a/test/m54.self-guard.test.ts\n+++ b/test/m54.self-guard.test.ts\n@@ -10,5 +10,5 @@\n-  expect(realGate).toBe(true);\n+  expect(true).toBe(true);\n`;
+    const v = guardSafetyTests(diff);
+    expect(v.weakened).toBe(true);
+    expect(v.reason).toMatch(/removes \d+ assertion/);
+  });
+
+  it('REFUSES assertion rewrites using await expect and matcher-chain lines', () => {
+    const awaitDiff = `diff --git a/test/m51.trust.test.ts b/test/m51.trust.test.ts\n--- a/test/m51.trust.test.ts\n+++ b/test/m51.trust.test.ts\n@@ -10,5 +10,5 @@\n-  await expect(runGate()).resolves.toBe(true);\n+  await expect(runGate()).resolves.toBe(false);\n`;
+    const matcherTailDiff = `diff --git a/test/m51.trust.test.ts b/test/m51.trust.test.ts\n--- a/test/m51.trust.test.ts\n+++ b/test/m51.trust.test.ts\n@@ -10,5 +10,5 @@\n-    ).toBe(true);\n+    ).toBe(false);\n`;
+
+    expect(guardSafetyTests(awaitDiff).weakened).toBe(true);
+    expect(guardSafetyTests(matcherTailDiff).weakened).toBe(true);
+  });
+
+  it('REFUSES skipped or focused safety tests', () => {
+    const skipDiff = `diff --git a/test/m54.self-guard.test.ts b/test/m54.self-guard.test.ts\n--- a/test/m54.self-guard.test.ts\n+++ b/test/m54.self-guard.test.ts\n@@ -10,4 +10,4 @@\n-  it('checks the guard', () => {\n+  it.skip('checks the guard', () => {\n     expect(realGate).toBe(true);\n   });\n`;
+    const onlyDiff = `diff --git a/test/m54.self-guard.test.ts b/test/m54.self-guard.test.ts\n--- a/test/m54.self-guard.test.ts\n+++ b/test/m54.self-guard.test.ts\n@@ -10,3 +10,6 @@\n+  describe.only('focused safety suite', () => {\n+    expect(realGate).toBe(true);\n+  });\n`;
+
+    expect(guardSafetyTests(skipDiff).weakened).toBe(true);
+    expect(guardSafetyTests(skipDiff).reason).toMatch(/skipped\/focused/);
+    expect(guardSafetyTests(onlyDiff).weakened).toBe(true);
+    expect(guardSafetyTests(onlyDiff).reason).toMatch(/skipped\/focused/);
+  });
+
+  it('REFUSES conditional skip wrappers in safety tests', () => {
+    const diff = `diff --git a/test/h7.preflight.test.ts b/test/h7.preflight.test.ts\n--- a/test/h7.preflight.test.ts\n+++ b/test/h7.preflight.test.ts\n@@ -10,3 +10,6 @@\n+  describe.skipIf(true)('disabled safety suite', () => {\n+    expect(realGate).toBe(true);\n+  });\n`;
+    const v = guardSafetyTests(diff);
+    expect(v.weakened).toBe(true);
+    expect(v.reason).toMatch(/skipped\/focused/);
   });
 
   it('ALLOWS a diff that ADDS assertions to a safety test', () => {

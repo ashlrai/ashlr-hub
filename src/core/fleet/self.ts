@@ -6,9 +6,9 @@
  *
  *   1. `guardSafetyTests(diff)` — the never-weaken guard. Refuses, BY CONSTRUCTION
  *      and BEFORE any verification runs, any diff that deletes a safety/invariant
- *      test file or removes net assertions from one. A self-authored change can
- *      fix bugs and add tests, but can never disarm the gates that keep the fleet
- *      safe.
+ *      test file, removes assertions from one, or focuses/skips safety tests. A
+ *      self-authored change can fix bugs and add tests, but can never disarm the
+ *      gates that keep the fleet safe.
  *   2. `selfEvalParity(runSuite)` — the self-eval harness contract: a self-target
  *      change is only eligible when the invariant suite is green with the foundry
  *      flag OFF *and* ON. Higher-order + pure so it is unit-testable with a stub
@@ -79,7 +79,10 @@ export function isSafetyTestFile(path: string): boolean {
 }
 
 /** Lines that represent a test assertion or block — the protected substance. */
-const ASSERTION_RE = /^\s*(it|test|describe|expect|assert|toBe|toEqual|toThrow|toMatch)\b/;
+const ASSERTION_RE =
+  /^\s*(?:(?:await|return|void)\s+)?(?:it|test|describe|expect|assert)\b|^\s*(?:\)|\.)\s*\.(?:not|resolves|rejects|to[A-Z]\w*)\b|^\s*(?:toBe|toEqual|toThrow|toMatch)\b/;
+const SKIPPED_OR_ONLY_TEST_RE =
+  /^\s*(?:describe|it|test)(?:\.\w+)*\.(?:skip|only|skipIf)\b|^\s*skipIf\s*\(/;
 
 export interface SafetyGuardVerdict {
   /** True ⇒ the diff weakens a safety guarantee and MUST be refused. */
@@ -94,6 +97,8 @@ interface FileDiff {
   deleted: boolean;
   addedAssertions: number;
   removedAssertions: number;
+  removedAssertionLines: string[];
+  addedSkippedOrOnlyTests: string[];
 }
 
 /** Split a unified diff into per-file sections and tally assertion deltas. */
@@ -105,7 +110,14 @@ function parseDiff(diff: string): FileDiff[] {
       if (cur) files.push(cur);
       // `diff --git a/<path> b/<path>` — take the b/ path.
       const m = line.match(/ b\/(.+)$/);
-      cur = { path: m ? m[1]! : '', deleted: false, addedAssertions: 0, removedAssertions: 0 };
+      cur = {
+        path: m ? m[1]! : '',
+        deleted: false,
+        addedAssertions: 0,
+        removedAssertions: 0,
+        removedAssertionLines: [],
+        addedSkippedOrOnlyTests: [],
+      };
       continue;
     }
     if (!cur) continue;
@@ -123,8 +135,17 @@ function parseDiff(diff: string): FileDiff[] {
       continue;
     }
     if (line.startsWith('---') || line.startsWith('+++')) continue;
-    if (line.startsWith('+') && ASSERTION_RE.test(line.slice(1))) cur.addedAssertions++;
-    else if (line.startsWith('-') && ASSERTION_RE.test(line.slice(1))) cur.removedAssertions++;
+    if (line.startsWith('+')) {
+      const content = line.slice(1);
+      if (ASSERTION_RE.test(content)) cur.addedAssertions++;
+      if (SKIPPED_OR_ONLY_TEST_RE.test(content)) cur.addedSkippedOrOnlyTests.push(content.trim());
+    } else if (line.startsWith('-')) {
+      const content = line.slice(1);
+      if (ASSERTION_RE.test(content)) {
+        cur.removedAssertions++;
+        cur.removedAssertionLines.push(content.trim());
+      }
+    }
   }
   if (cur) files.push(cur);
   return files;
@@ -133,9 +154,11 @@ function parseDiff(diff: string): FileDiff[] {
 /**
  * The never-weaken guard. Refuses (weakened:true) when the diff:
  *   - deletes a safety/invariant test file, OR
- *   - removes more assertions than it adds from a safety/invariant test file.
- * Conservative by design: a diff that touches a safety file and nets out
- * assertions is refused even if it also adds unrelated code. PURE; never throws.
+ *   - removes assertions from a safety/invariant test file, OR
+ *   - adds focused/skipped test declarations in a safety/invariant test file.
+ * Conservative by design: a diff that touches a safety file and removes
+ * protected assertion substance is refused even if it also adds unrelated code.
+ * PURE; never throws.
  */
 export function guardSafetyTests(diff: string): SafetyGuardVerdict {
   const touched: string[] = [];
@@ -157,10 +180,17 @@ export function guardSafetyTests(diff: string): SafetyGuardVerdict {
         files: touched,
       };
     }
-    if (f.removedAssertions > f.addedAssertions) {
+    if (f.addedSkippedOrOnlyTests.length > 0) {
       return {
         weakened: true,
-        reason: `diff removes ${f.removedAssertions - f.addedAssertions} net assertion(s) from safety test '${f.path}' — refused`,
+        reason: `diff adds skipped/focused safety test declaration in '${f.path}' — refused`,
+        files: touched,
+      };
+    }
+    if (f.removedAssertions > 0) {
+      return {
+        weakened: true,
+        reason: `diff removes ${f.removedAssertions} assertion(s) from safety test '${f.path}' — refused`,
         files: touched,
       };
     }

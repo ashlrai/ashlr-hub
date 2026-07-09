@@ -684,15 +684,30 @@ describe('M86 PURE — classifyRisk consistency with scope cap', () => {
 });
 
 describe('M86 PURE — evidence safety lane', () => {
-  it('refuses no-command verification even when the diff is low-risk and in scope', () => {
-    const diff = addFileDiff('docs/evidence-no-command.md', 'doc');
+  const evidenceCfg = (): AshlrConfig => ({
+    foundry: {
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'evidence',
+        maxRisk: 'low',
+        allowWithoutVerification: false,
+        pushToRemote: true,
+        protectedRemote: {
+          branchProtection: true,
+          requiredChecks: ['ci/test'],
+        },
+      },
+    },
+  }) as unknown as AshlrConfig;
+
+  function evidencePatch(id: string, diff: string): Proposal {
     const diffHash = hashDiff(diff);
-    const p: Proposal = {
-      id: 'm86-evidence-no-command',
+    return {
+      id,
       repo: tmpRepo,
       origin: 'agent',
       kind: 'patch',
-      title: 'evidence no command',
+      title: 'evidence candidate',
       summary: 'test',
       diff,
       diffHash,
@@ -701,8 +716,8 @@ describe('M86 PURE — evidence safety lane', () => {
       engineTier: 'local',
       verifyResult: {
         passed: true,
-        detail: 'no commands detected',
-        ran: [],
+        detail: 'all checks passed',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
         baseBranch: 'main',
         baseHead: '0123456789abcdef0123456789abcdef01234567',
         diffHash,
@@ -710,28 +725,113 @@ describe('M86 PURE — evidence safety lane', () => {
       status: 'pending',
       createdAt: new Date().toISOString(),
     };
-    const r = evaluateEvidenceAutoMergePreflight(
-      p,
-      {
-        foundry: {
-          autoMerge: {
-            enabled: true,
-            trustBasis: 'evidence',
-            maxRisk: 'low',
-            allowWithoutVerification: false,
-            pushToRemote: true,
-            protectedRemote: {
-              branchProtection: true,
-              requiredChecks: ['ci/test'],
-            },
-          },
-        },
-      } as unknown as AshlrConfig,
-      { remoteAvailable: true },
-    );
+  }
+
+  it('refuses no-command verification even when the diff is low-risk and in scope', () => {
+    const diff = addFileDiff('docs/evidence-no-command.md', 'doc');
+    const p = evidencePatch('m86-evidence-no-command', diff);
+    p.verifyResult = { ...p.verifyResult!, detail: 'no commands detected', ran: [] };
+    const r = evaluateEvidenceAutoMergePreflight(p, evidenceCfg(), { remoteAvailable: true });
 
     expect(r.authorized).toBe(false);
     expect(r.reason).toMatch(/no verification command evidence|no-command/i);
+  });
+
+  it('refuses equal-count assertion rewrites in safety tests before evidence activation', () => {
+    const diff = [
+      'diff --git a/test/m54.self-guard.test.ts b/test/m54.self-guard.test.ts',
+      '--- a/test/m54.self-guard.test.ts',
+      '+++ b/test/m54.self-guard.test.ts',
+      '@@ -1 +1 @@',
+      '-expect(realGate).toBe(true);',
+      '+expect(true).toBe(true);',
+      '',
+    ].join('\n');
+    const r = evaluateEvidenceAutoMergePreflight(evidencePatch('m86-evidence-equal-count', diff), evidenceCfg(), {
+      remoteAvailable: true,
+    });
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/test-weakening|removes \d+ assertion/);
+  });
+
+  it('refuses skipped or focused safety tests before evidence activation', () => {
+    const skipDiff = [
+      'diff --git a/test/m54.self-guard.test.ts b/test/m54.self-guard.test.ts',
+      '--- a/test/m54.self-guard.test.ts',
+      '+++ b/test/m54.self-guard.test.ts',
+      '@@ -1 +1 @@',
+      "-it('guards safety', () => {",
+      "+it.skip('guards safety', () => {",
+      '',
+    ].join('\n');
+    const onlyDiff = [
+      'diff --git a/test/m54.self-guard.test.ts b/test/m54.self-guard.test.ts',
+      '--- a/test/m54.self-guard.test.ts',
+      '+++ b/test/m54.self-guard.test.ts',
+      '@@ -1 +1 @@',
+      "+describe.only('focused safety', () => {",
+      '',
+    ].join('\n');
+
+    expect(
+      evaluateEvidenceAutoMergePreflight(evidencePatch('m86-evidence-skip', skipDiff), evidenceCfg(), {
+        remoteAvailable: true,
+      }).authorized,
+    ).toBe(false);
+    expect(
+      evaluateEvidenceAutoMergePreflight(evidencePatch('m86-evidence-only', onlyDiff), evidenceCfg(), {
+        remoteAvailable: true,
+      }).reason,
+    ).toMatch(/skipped\/focused/);
+  });
+
+  it('refuses verification script changes before evidence activation', () => {
+    const diff = [
+      'diff --git a/package.json b/package.json',
+      '--- a/package.json',
+      '+++ b/package.json',
+      '@@ -1 +1 @@',
+      '-{"scripts":{"test":"vitest run"}}',
+      '+{"scripts":{"test":"exit 0"}}',
+      '',
+    ].join('\n');
+    const r = evaluateEvidenceAutoMergePreflight(evidencePatch('m86-evidence-manifest', diff), evidenceCfg(), {
+      remoteAvailable: true,
+    });
+
+    expect(r.authorized).toBe(false);
+    expect(r.reason).toMatch(/build\/CI\/manifest/);
+  });
+
+  it('refuses deleted or renamed verifier-control files before evidence activation', () => {
+    const deletedCi = [
+      'diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml',
+      'deleted file mode 100644',
+      '--- a/.github/workflows/ci.yml',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-name: ci',
+      '',
+    ].join('\n');
+    const renamedContract = [
+      'diff --git a/ashlr.verify.json b/ashlr.verify.json.bak',
+      'similarity index 100%',
+      'rename from ashlr.verify.json',
+      'rename to ashlr.verify.json.bak',
+      '',
+    ].join('\n');
+
+    expect(
+      evaluateEvidenceAutoMergePreflight(evidencePatch('m86-evidence-delete-ci', deletedCi), evidenceCfg(), {
+        remoteAvailable: true,
+      }).reason,
+    ).toMatch(/build\/CI\/manifest/);
+    expect(
+      evaluateEvidenceAutoMergePreflight(evidencePatch('m86-evidence-rename-contract', renamedContract), evidenceCfg(), {
+        remoteAvailable: true,
+      }).reason,
+    ).toMatch(/build\/CI\/manifest/);
   });
 });
 
