@@ -121,6 +121,33 @@ const FIXTURE_FLEET_STATUS = {
     },
   },
   proposals: { pending: 3, frontierPending: 1, applied: 0 },
+  phantom: {
+    observedAt: new Date().toISOString(),
+    state: 'ready' as const,
+    installed: true,
+    initialized: true,
+    version: '0.6.0',
+    valueMode: 'metadata-and-names-only' as const,
+    secretCount: 2,
+    knownFleetSecrets: {
+      total: 6,
+      presentCount: 2,
+      missingCount: 4,
+      pulseCredentialPresent: true,
+      nimApiKeyPresent: false,
+    },
+    capabilities: {
+      metadataStatus: true,
+      childEnvInjectionAvailable: true,
+      mcpServerAvailable: true,
+      mutationRequiresHumanApproval: true,
+    },
+    config: {
+      phantomExecEnabled: true,
+      fleetSecretInjectionEnabled: true,
+    },
+    mcp: { configured: true },
+  },
   proposalProduction: {
     windowHours: 24,
     selected: 3,
@@ -282,6 +309,8 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(snap.fleet?.proposalProduction?.topReasons[0]?.reason).toBe('agent returned no diff');
     expect(snap.fleet?.dispatchProduction?.proposalRate).toBe(0.5);
     expect(snap.fleet?.dispatchProduction?.byBackend[0]?.key).toBe('builtin');
+    expect(snap.fleet?.phantom?.knownFleetSecrets.pulseCredentialPresent).toBe(true);
+    expect(JSON.stringify(snap.fleet?.phantom)).not.toContain('ASHLR_PULSE_TOKEN');
   });
 
   it('daemon degrades to zeroed fields when loadDaemonState throws', async () => {

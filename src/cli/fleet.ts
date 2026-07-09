@@ -72,6 +72,12 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  // Phantom
+  if (s.phantom) {
+    lines.push(`Phantom:   ${formatFleetPhantom(s.phantom)}`);
+    lines.push('');
+  }
+
   // Queue
   lines.push(`Queue:     ${s.queue.backlogItems} backlog item(s)`);
   if (typeof s.queue.eligibleBacklogItems === 'number') {
@@ -427,6 +433,20 @@ function formatBackendResource(resource: NonNullable<FleetStatus['backends'][num
     parts.push(`reason=${compactResourceReason(resource.reason)}`);
   }
   return parts.join(' ');
+}
+
+function formatFleetPhantom(phantom: NonNullable<FleetStatus['phantom']>): string {
+  const version = phantom.version ? ` v${phantom.version}` : '';
+  const known = phantom.knownFleetSecrets;
+  return (
+    `${phantom.state}${version}, ` +
+    `${known.presentCount}/${known.total} known fleet secrets, ` +
+    `pulse ${known.pulseCredentialPresent ? 'yes' : 'no'}, ` +
+    `nim ${known.nimApiKeyPresent ? 'yes' : 'no'}, ` +
+    `mcp ${phantom.mcp.configured ? 'yes' : 'no'}, ` +
+    `injection ${phantom.config.fleetSecretInjectionEnabled ? 'enabled' : 'disabled'}, ` +
+    'values hidden'
+  );
 }
 
 function formatReadinessBlocker(blocker: NonNullable<FleetStatus['autonomousShipReadiness']>['topBlocker']): string {

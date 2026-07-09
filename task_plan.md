@@ -523,4 +523,16 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Focused verification passed for attention eval, root eval helpers, agent-action ledger, and typecheck; live CLI smoke passed.
 - [x] Final verification passed: diff check, lint, audit, build, invariants, and full clean-state test suite.
 - [x] Commit `5447577`, push to `origin/master`, relaunch launchd daemon, verify guard health clear, and smoke `bin/ashlr eval attention`.
-- [ ] Next heartbeat: use attention-eval output to drive context-summary instrumentation gaps and Phantom capability snapshot work.
+- [x] Next heartbeat: use attention-eval output to drive context-summary instrumentation gaps and Phantom capability snapshot work.
+
+## Current Continuation - Values-Free Phantom Capability Plane
+- [x] Rechecked current worktree, recent commits, Entire state, persistent plan/notes, and in-progress Phantom/readiness changes.
+- [x] Deployed parallel agents for Phantom safety review, FleetStatus/dashboard mapping, and Phantom/Ashlr product backlog synthesis.
+- [x] Added a values-free Phantom capability snapshot to `PhantomStatus` with known fleet secret counts, Pulse PAT/token credential booleans, metadata mode, injection availability, MCP availability, and mutation-approval posture.
+- [x] Hardened Phantom parsing so JSON and plain-text paths use a strict env-name allowlist, value-shaped token families are filtered, and unknown/error structured status fails closed as not initialized.
+- [x] Added readiness/preflight Phantom snapshot output with counts/booleans only, home-relative MCP source display, and values-hidden operator findings.
+- [x] Added cached FleetStatus Phantom capability with short CLI timeouts, config-aware injection flags, MCP configured boolean, and a compact CLI `Phantom:` line that says values hidden.
+- [x] Added focused tests for parser safety, readiness name/value/path privacy, FleetStatus formatter/dashboard pass-through, cached status behavior, and doctor fixtures.
+- [x] Verification passed: typecheck, focused Phantom/readiness/FleetStatus/dashboard/control suites, lint, build, audit, diff check, invariants, built CLI smoke, and privacy greps.
+- [x] Full `npm run test:ci` passed 434/435 files with 8,908 passing tests and 7 skipped; the sole failure was an order-sensitive `test/m78.titrr.test.ts` mock assertion that passed immediately in direct rerun and in a mixed Phantom/Fleet/TITRR subset.
+- [ ] Commit, push, reinstall/restart the daemon, and verify live fleet status.

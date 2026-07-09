@@ -1297,6 +1297,29 @@ export interface ProviderRegistry {
 }
 
 /** Read-only status of the Phantom secrets CLI. NEVER carries secret values. */
+export interface PhantomCapabilitySnapshot {
+  /** Status surfaces only ever expose metadata and secret names, never values. */
+  valueMode: 'metadata-and-names-only';
+  /** Count of safe secret names visible to the CLI. */
+  secretCount: number;
+  /** Known fleet secret identifiers, compared by name only. */
+  knownFleetSecrets: {
+    names: string[];
+    present: string[];
+    missing: string[];
+    pulsePatPresent: boolean;
+    pulseTokenPresent: boolean;
+    pulseCredentialPresent: boolean;
+  };
+  /** Capability modes inferred without revealing secret values. */
+  modes: {
+    metadataStatus: boolean;
+    childEnvInjectionAvailable: boolean;
+    mcpServerAvailable: boolean;
+    mutationRequiresHumanApproval: boolean;
+  };
+}
+
 export interface PhantomStatus {
   /** Whether the `phantom` binary is on PATH. */
   installed: boolean;
@@ -1306,6 +1329,8 @@ export interface PhantomStatus {
   initialized: boolean;
   /** Secret NAMES only (never values). Empty when uninitialized/unavailable. */
   secretNames: string[];
+  /** Values-free capability summary for readiness and fleet surfaces. */
+  capability: PhantomCapabilitySnapshot;
   /** Error message when status could not be fully determined, else absent. */
   error?: string;
 }

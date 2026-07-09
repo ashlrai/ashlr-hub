@@ -22,7 +22,16 @@ vi.mock('node:child_process', () => ({
 }));
 
 // Import module under test AFTER mock is registered.
-import { phantomInstalled, getPhantomStatus } from '../src/core/phantom.js';
+import {
+  phantomInstalled,
+  getPhantomStatus,
+  getCachedFleetPhantomStatus,
+  resetPhantomStatusCache,
+} from '../src/core/phantom.js';
+
+beforeEach(() => {
+  resetPhantomStatusCache();
+});
 
 // ---------------------------------------------------------------------------
 // spawnSync response builders
@@ -167,8 +176,9 @@ describe('getPhantomStatus — installed and initialized', () => {
   const SECRET_NAMES = ['ANTHROPIC_API_KEY', 'GITHUB_TOKEN', 'OPENAI_API_KEY'];
 
   beforeEach(() => {
-    // Call order: version → status → list
+    // Call order: installed probe → version → status → list
     setSpawnSequence([
+      spawnVersion('0.6.0'),
       spawnVersion('0.6.0'),
       spawnStatusInitialized(),
       spawnListSecrets(SECRET_NAMES),
@@ -228,6 +238,31 @@ describe('getPhantomStatus — installed and initialized', () => {
     const status = getPhantomStatus();
     expect(status.error).toBeUndefined();
   });
+
+  it('returns a values-free capability summary for known fleet secrets', () => {
+    const status = getPhantomStatus();
+
+    expect(status.capability).toMatchObject({
+      valueMode: 'metadata-and-names-only',
+      secretCount: 3,
+      knownFleetSecrets: {
+        pulsePatPresent: false,
+      },
+      modes: {
+        metadataStatus: true,
+        childEnvInjectionAvailable: true,
+        mcpServerAvailable: true,
+        mutationRequiresHumanApproval: true,
+      },
+    });
+    expect(status.capability.knownFleetSecrets.present).toEqual([
+      'ANTHROPIC_API_KEY',
+      'OPENAI_API_KEY',
+      'GITHUB_TOKEN',
+    ]);
+    expect(status.capability.knownFleetSecrets.missing).toContain('ASHLR_PULSE_PAT');
+    expect(status.capability.knownFleetSecrets.missing).toContain('ASHLR_PULSE_TOKEN');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -256,6 +291,31 @@ describe('getPhantomStatus — installed but not initialized', () => {
     const status = getPhantomStatus();
     expect(status.secretNames).toEqual([]);
   });
+
+  it('treats structured error JSON as not initialized', () => {
+    setSpawnSequence([
+      spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
+      makeSpawnResult(JSON.stringify({ error: 'not initialized; run phantom init' }) + '\n'),
+    ]);
+
+    const status = getPhantomStatus();
+    expect(status.initialized).toBe(false);
+    expect(status.secretNames).toEqual([]);
+    expect(status.capability.modes.childEnvInjectionAvailable).toBe(false);
+  });
+
+  it('treats unknown structured status JSON as not initialized', () => {
+    setSpawnSequence([
+      spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
+      makeSpawnResult(JSON.stringify({ ok: true }) + '\n'),
+    ]);
+
+    const status = getPhantomStatus();
+    expect(status.initialized).toBe(false);
+    expect(status.secretNames).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -265,6 +325,7 @@ describe('getPhantomStatus — installed but not initialized', () => {
 describe('getPhantomStatus — installed, initialized, but no secrets', () => {
   beforeEach(() => {
     setSpawnSequence([
+      spawnVersion('0.6.0'),
       spawnVersion('0.6.0'),
       spawnStatusInitialized(),
       spawnListSecrets([]),
@@ -321,6 +382,7 @@ describe('getPhantomStatus — safety: JSON output never leaks values', () => {
   beforeEach(() => {
     setSpawnSequence([
       spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
       spawnStatusInitialized(),
       // Simulate a rogue/extended JSON shape that includes value fields.
       makeSpawnResult(JSON.stringify([
@@ -348,5 +410,114 @@ describe('getPhantomStatus — safety: JSON output never leaks values', () => {
     const json = JSON.stringify(status);
     expect(json).not.toContain('sk-abc123verylongsecretvalue');
     expect(json).not.toContain('ghp_supersecrettoken12345678');
+  });
+
+  it('filters value-shaped strings from flat string arrays before returning names', () => {
+    setSpawnSequence([
+      spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
+      spawnStatusInitialized(),
+      makeSpawnResult(JSON.stringify([
+        'ANTHROPIC_API_KEY',
+        'sk-abc123verylongsecretvalue',
+        'ghp_supersecrettoken12345678',
+        'ASHLR_PULSE_PAT',
+      ]) + '\n'),
+    ]);
+
+    const status = getPhantomStatus();
+    const serialized = JSON.stringify(status);
+
+    expect(status.secretNames).toEqual(['ANTHROPIC_API_KEY', 'ASHLR_PULSE_PAT']);
+    expect(status.capability.knownFleetSecrets.pulsePatPresent).toBe(true);
+    expect(status.capability.knownFleetSecrets.pulseCredentialPresent).toBe(true);
+    expect(serialized).not.toContain('sk-abc123verylongsecretvalue');
+    expect(serialized).not.toContain('ghp_supersecrettoken12345678');
+  });
+
+  it('filters value-shaped tokens from non-JSON plain-text fallback output', () => {
+    setSpawnSequence([
+      spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
+      spawnStatusInitialized(),
+      makeSpawnResult([
+        'NAME PROTECTED',
+        'ANTHROPIC_API_KEY yes',
+        'AKIAABCDEFGHIJKLMNOP no',
+        'ASHLR_PULSE_TOKEN yes',
+        'GITHUB_TOKEN yes',
+        'KEY ignored',
+      ].join('\n')),
+    ]);
+
+    const status = getPhantomStatus();
+    const serialized = JSON.stringify(status);
+
+    expect(status.secretNames).toEqual(['ANTHROPIC_API_KEY', 'ASHLR_PULSE_TOKEN', 'GITHUB_TOKEN']);
+    expect(status.capability.knownFleetSecrets.pulsePatPresent).toBe(false);
+    expect(status.capability.knownFleetSecrets.pulseTokenPresent).toBe(true);
+    expect(status.capability.knownFleetSecrets.pulseCredentialPresent).toBe(true);
+    expect(serialized).not.toContain('AKIAABCDEFGHIJKLMNOP');
+  });
+
+  it('uses an allowlist so non-env-name token families cannot masquerade as names', () => {
+    setSpawnSequence([
+      spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
+      spawnStatusInitialized(),
+      makeSpawnResult(JSON.stringify([
+        { name: 'ANTHROPIC_API_KEY' },
+        { name: 'github_pat_1234567890abcdef1234567890abcdef1234567890abcdef' },
+        { key: 'glpat-1234567890abcdef1234' },
+        { name: 'hf_abcdefghijklmnopqrstuvwxyz123456' },
+        { key: 'npm_abcdefghijklmnopqrstuvwxyz123456' },
+        { name: 'AIzaabcdefghijklmnopqrstuvwxyz123456' },
+        { name: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' },
+        'OPENAI_API_KEY',
+      ]) + '\n'),
+    ]);
+
+    const status = getPhantomStatus();
+    const serialized = JSON.stringify(status);
+
+    expect(status.secretNames).toEqual(['ANTHROPIC_API_KEY', 'OPENAI_API_KEY']);
+    expect(serialized).not.toContain('github_pat_');
+    expect(serialized).not.toContain('glpat-');
+    expect(serialized).not.toContain('hf_');
+    expect(serialized).not.toContain('npm_');
+    expect(serialized).not.toContain('AIza');
+    expect(serialized).not.toContain('0123456789abcdef0123456789abcdef');
+  });
+});
+
+describe('getCachedFleetPhantomStatus — short fleet cache', () => {
+  it('reuses the cached metadata snapshot within the TTL and resets on demand', () => {
+    const responses = [
+      spawnVersion('0.6.0'),
+      spawnVersion('0.6.0'),
+      spawnStatusInitialized(),
+      spawnListSecrets(['ANTHROPIC_API_KEY']),
+    ];
+    let idx = 0;
+    let calls = 0;
+    _spawnSyncImpl = () => {
+      calls++;
+      const res = responses[idx] ?? responses[responses.length - 1];
+      idx++;
+      return res;
+    };
+
+    const first = getCachedFleetPhantomStatus({ nowMs: 1_000, ttlMs: 30_000 });
+    const second = getCachedFleetPhantomStatus({ nowMs: 2_000, ttlMs: 30_000 });
+
+    expect(second).toBe(first);
+    expect(calls).toBe(4);
+
+    resetPhantomStatusCache();
+    idx = 0;
+    const third = getCachedFleetPhantomStatus({ nowMs: 3_000, ttlMs: 30_000 });
+
+    expect(third).not.toBe(first);
+    expect(calls).toBe(8);
   });
 });

@@ -17,12 +17,40 @@ import { tmpdir } from 'node:os';
 // Mock phantom.ts and providers.ts BEFORE importing doctor.
 // ---------------------------------------------------------------------------
 
-let _phantomStatus: PhantomStatus = {
-  installed: true,
-  version: '0.6.0',
-  initialized: true,
-  secretNames: ['ANTHROPIC_API_KEY'],
-};
+function makePhantomStatus(overrides: Partial<PhantomStatus> = {}): PhantomStatus {
+  const installed = overrides.installed ?? true;
+  const initialized = overrides.initialized ?? true;
+  const secretNames = overrides.secretNames ?? ['ANTHROPIC_API_KEY'];
+  const known = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GITHUB_TOKEN', 'ASHLR_PULSE_PAT', 'ASHLR_PULSE_TOKEN', 'NVIDIA_NIM_API_KEY'];
+  const present = known.filter((name) => secretNames.includes(name));
+  return {
+    installed,
+    version: overrides.version ?? (installed ? '0.6.0' : null),
+    initialized,
+    secretNames,
+    capability: {
+      valueMode: 'metadata-and-names-only',
+      secretCount: secretNames.length,
+      knownFleetSecrets: {
+        names: known,
+        present,
+        missing: known.filter((name) => !secretNames.includes(name)),
+        pulsePatPresent: present.includes('ASHLR_PULSE_PAT'),
+        pulseTokenPresent: present.includes('ASHLR_PULSE_TOKEN'),
+        pulseCredentialPresent: present.includes('ASHLR_PULSE_PAT') || present.includes('ASHLR_PULSE_TOKEN'),
+      },
+      modes: {
+        metadataStatus: true,
+        childEnvInjectionAvailable: installed && initialized,
+        mcpServerAvailable: installed,
+        mutationRequiresHumanApproval: installed,
+      },
+    },
+    ...(overrides.error ? { error: overrides.error } : {}),
+  };
+}
+
+let _phantomStatus: PhantomStatus = makePhantomStatus();
 
 let _providerRegistry: ProviderRegistry = {
   providers: [
@@ -126,12 +154,7 @@ beforeEach(() => {
   installAshlrShim(tmpHome);
 
   // Reset to healthy defaults before each test.
-  _phantomStatus = {
-    installed: true,
-    version: '0.6.0',
-    initialized: true,
-    secretNames: ['ANTHROPIC_API_KEY'],
-  };
+  _phantomStatus = makePhantomStatus();
 
   _providerRegistry = {
     providers: [
@@ -264,12 +287,12 @@ describe('runDoctor — no local provider up', () => {
 
 describe('runDoctor — phantom not installed', () => {
   beforeEach(() => {
-    _phantomStatus = {
+    _phantomStatus = makePhantomStatus({
       installed: false,
       version: null,
       initialized: false,
       secretNames: [],
-    };
+    });
   });
 
   it('produces a warn or fail check for phantom when not installed', async () => {
@@ -288,12 +311,12 @@ describe('runDoctor — phantom not installed', () => {
 
 describe('runDoctor — phantom installed but not initialized', () => {
   beforeEach(() => {
-    _phantomStatus = {
+    _phantomStatus = makePhantomStatus({
       installed: true,
       version: '0.6.0',
       initialized: false,
       secretNames: [],
-    };
+    });
   });
 
   it('produces a warn or fail for phantom when not initialized', async () => {
@@ -332,12 +355,12 @@ describe('runDoctor — config check', () => {
 
 describe('runDoctor — fix hints', () => {
   beforeEach(() => {
-    _phantomStatus = {
+    _phantomStatus = makePhantomStatus({
       installed: false,
       version: null,
       initialized: false,
       secretNames: [],
-    };
+    });
   });
 
   it('provides a fix hint for phantom not installed', async () => {
@@ -358,13 +381,13 @@ describe('runDoctor — fix hints', () => {
 
 describe('runDoctor — never throws', () => {
   it('completes without throwing when providers are down and phantom is absent', async () => {
-    _phantomStatus = {
+    _phantomStatus = makePhantomStatus({
       installed: false,
       version: null,
       initialized: false,
       secretNames: [],
       error: 'not found',
-    };
+    });
     _providerRegistry = {
       providers: [],
       activeProvider: null,

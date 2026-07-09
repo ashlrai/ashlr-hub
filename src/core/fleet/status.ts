@@ -15,7 +15,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { hostname } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { basename, resolve } from 'node:path';
 import type {
   AshlrConfig,
@@ -82,6 +82,39 @@ export interface FleetSharedQueueStatus extends SharedQueueHealth {
   enabled: boolean;
   mode: 'filesystem';
   machineId: string;
+}
+
+export type FleetPhantomState = 'ready' | 'not-installed' | 'not-initialized' | 'degraded';
+
+export interface FleetPhantomStatus {
+  observedAt: string;
+  state: FleetPhantomState;
+  installed: boolean;
+  initialized: boolean;
+  version: string | null;
+  valueMode: 'metadata-and-names-only';
+  secretCount: number;
+  knownFleetSecrets: {
+    total: number;
+    presentCount: number;
+    missingCount: number;
+    pulseCredentialPresent: boolean;
+    nimApiKeyPresent: boolean;
+  };
+  capabilities: {
+    metadataStatus: boolean;
+    childEnvInjectionAvailable: boolean;
+    mcpServerAvailable: boolean;
+    mutationRequiresHumanApproval: boolean;
+  };
+  config: {
+    phantomExecEnabled: boolean;
+    fleetSecretInjectionEnabled: boolean;
+  };
+  mcp: {
+    configured: boolean;
+  };
+  error?: string;
 }
 
 export interface FleetAutonomyEvidenceSummary {
@@ -329,6 +362,8 @@ export interface FleetStatus {
   merges: {
     recent: number;
   };
+  /** Values-free Phantom readiness for fleet secret operations. */
+  phantom?: FleetPhantomStatus;
   autonomy?: FleetAutonomyStatus;
   /** Effective autonomy control authority for daemon dispatch decisions. */
   autonomyControlMode: FleetAutonomyControlMode;
@@ -761,6 +796,8 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     autoMergeReadiness = undefined;
   }
 
+  const phantom = await buildFleetPhantomStatus(cfg);
+
   const status: FleetStatus = {
     generatedAt,
     daemon,
@@ -777,6 +814,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     },
     proposals: { pending, frontierPending, ...(awaitingHostMerge > 0 ? { awaitingHostMerge } : {}), applied },
     merges: { recent: mergesRecent },
+    ...(phantom !== undefined ? { phantom } : {}),
     autonomy,
     autonomyControlMode: resolveAutonomyControlMode(cfg),
     ...(autoMergeReadiness !== undefined ? { autoMergeReadiness } : {}),
@@ -840,6 +878,101 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   });
 
   return status;
+}
+
+async function buildFleetPhantomStatus(cfg: AshlrConfig): Promise<FleetPhantomStatus | undefined> {
+  const observedAt = new Date().toISOString();
+  try {
+    const { getCachedFleetPhantomStatus } = await import('../phantom.js');
+    const status = getCachedFleetPhantomStatus();
+    const known = status.capability.knownFleetSecrets;
+    const state: FleetPhantomState = status.error
+      ? 'degraded'
+      : !status.installed
+        ? 'not-installed'
+        : !status.initialized
+          ? 'not-initialized'
+          : 'ready';
+    return {
+      observedAt,
+      state,
+      installed: status.installed,
+      initialized: status.initialized,
+      version: status.version,
+      valueMode: status.capability.valueMode,
+      secretCount: status.capability.secretCount,
+      knownFleetSecrets: {
+        total: known.names.length,
+        presentCount: known.present.length,
+        missingCount: known.missing.length,
+        pulseCredentialPresent: known.pulseCredentialPresent,
+        nimApiKeyPresent: known.present.includes('NVIDIA_NIM_API_KEY'),
+      },
+      capabilities: status.capability.modes,
+      config: {
+        phantomExecEnabled: cfg.phantom?.enabled === true,
+        fleetSecretInjectionEnabled: cfg.foundry?.usePhantom === true,
+      },
+      mcp: {
+        configured: await phantomMcpConfigured(),
+      },
+      ...(status.error ? { error: sanitizeFleetPhantomError(status.error) } : {}),
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      observedAt,
+      state: 'degraded',
+      installed: false,
+      initialized: false,
+      version: null,
+      valueMode: 'metadata-and-names-only',
+      secretCount: 0,
+      knownFleetSecrets: {
+        total: 0,
+        presentCount: 0,
+        missingCount: 0,
+        pulseCredentialPresent: false,
+        nimApiKeyPresent: false,
+      },
+      capabilities: {
+        metadataStatus: false,
+        childEnvInjectionAvailable: false,
+        mcpServerAvailable: false,
+        mutationRequiresHumanApproval: false,
+      },
+      config: {
+        phantomExecEnabled: cfg.phantom?.enabled === true,
+        fleetSecretInjectionEnabled: cfg.foundry?.usePhantom === true,
+      },
+      mcp: { configured: false },
+      error: sanitizeFleetPhantomError(message),
+    };
+  }
+}
+
+async function phantomMcpConfigured(): Promise<boolean> {
+  try {
+    const { discoverMcpServers } = await import('../mcp-registry.js');
+    const registry = discoverMcpServers();
+    return registry.servers.some((candidate) =>
+      candidate.name === 'phantom-secrets' ||
+      (candidate.command === 'phantom' && candidate.args[0] === 'mcp')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeFleetPhantomError(error: string): string {
+  const home = homedir();
+  const clean = error
+    .replaceAll(home, '~')
+    .replace(/\/Users\/[^/\s]+/g, '~')
+    .replace(/\/home\/[^/\s]+/g, '~')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return clean.length > 180 ? `${clean.slice(0, 177)}...` : clean;
 }
 
 function buildProposalProductionStatus(ticks: DaemonTick[]): FleetProposalProductionStatus | undefined {

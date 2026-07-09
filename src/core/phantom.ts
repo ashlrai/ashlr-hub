@@ -7,7 +7,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import type { PhantomStatus } from './types.js';
+import type { PhantomCapabilitySnapshot, PhantomStatus } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -15,6 +15,17 @@ import type { PhantomStatus } from './types.js';
 
 const PHANTOM_BIN = 'phantom';
 const TIMEOUT_MS = 5_000;
+const FLEET_TIMEOUT_MS = 500;
+const FLEET_CACHE_TTL_MS = 30_000;
+
+export const PHANTOM_KNOWN_FLEET_SECRET_NAMES = [
+  'ANTHROPIC_API_KEY',
+  'OPENAI_API_KEY',
+  'GITHUB_TOKEN',
+  'ASHLR_PULSE_PAT',
+  'ASHLR_PULSE_TOKEN',
+  'NVIDIA_NIM_API_KEY',
+] as const;
 
 /**
  * Run a phantom sub-command synchronously.
@@ -23,12 +34,12 @@ const TIMEOUT_MS = 5_000;
  */
 function runPhantom(
   args: string[],
-  options: { cwd?: string } = {},
+  options: { cwd?: string; timeoutMs?: number } = {},
 ): { stdout: string; stderr: string; status: number | null; error?: string } {
   try {
     const result = spawnSync(PHANTOM_BIN, args, {
       encoding: 'utf8',
-      timeout: TIMEOUT_MS,
+      timeout: options.timeoutMs ?? TIMEOUT_MS,
       cwd: options.cwd,
       // Do NOT inherit env vars that could trigger interactive prompts.
       env: { ...process.env, PHANTOM_NO_UPDATE_CHECK: '1' },
@@ -53,12 +64,22 @@ function runPhantom(
 // Public API
 // ---------------------------------------------------------------------------
 
+let cachedFleetStatus: { key: string; expiresAt: number; status: PhantomStatus } | null = null;
+
+function phantomCacheKey(): string {
+  return JSON.stringify({
+    home: process.env.HOME ?? '',
+    userProfile: process.env.USERPROFILE ?? '',
+    path: process.env.PATH ?? '',
+  });
+}
+
 /**
  * Returns true when the `phantom` binary is resolvable and executes without a
  * fatal error.  Uses `phantom --version` as the probe (fast, side-effect-free).
  */
-export function phantomInstalled(): boolean {
-  const { status, error } = runPhantom(['--version']);
+export function phantomInstalled(options: { timeoutMs?: number } = {}): boolean {
+  const { status, error } = runPhantom(['--version'], options);
   // spawnSync returns null status when the binary could not be found/launched.
   return error === undefined && status !== null && status === 0;
 }
@@ -72,21 +93,27 @@ export function phantomInstalled(): boolean {
  *  - Degrades gracefully when phantom is absent, uninitialized, or returns
  *    an unexpected format.
  */
-export function getPhantomStatus(): PhantomStatus {
+export function getPhantomStatus(options: { timeoutMs?: number } = {}): PhantomStatus {
+  const timeoutMs = options.timeoutMs;
   // ── 1. Binary presence ──────────────────────────────────────────────────
-  if (!phantomInstalled()) {
+  if (!phantomInstalled({ timeoutMs })) {
     return {
       installed: false,
       version: null,
       initialized: false,
       secretNames: [],
+      capability: buildPhantomCapabilitySnapshot({
+        installed: false,
+        initialized: false,
+        secretNames: [],
+      }),
     };
   }
 
   // ── 2. Version ──────────────────────────────────────────────────────────
   let version: string | null = null;
   {
-    const { stdout, status } = runPhantom(['--version']);
+    const { stdout, status } = runPhantom(['--version'], { timeoutMs });
     if (status === 0) {
       // Expected format: "phantom 0.6.0"
       const match = stdout.trim().match(/\d+\.\d+(?:\.\d+)?/);
@@ -112,7 +139,7 @@ export function getPhantomStatus(): PhantomStatus {
   let initialized = false;
   let statusError: string | undefined;
   {
-    const { stdout, stderr, status, error } = runPhantom(['status', '--json']);
+    const { stdout, stderr, status, error } = runPhantom(['status', '--json'], { timeoutMs });
     if (error !== undefined) {
       // Genuine spawn failure (could not launch the binary).
       statusError = error;
@@ -141,17 +168,22 @@ export function getPhantomStatus(): PhantomStatus {
   // risk accidentally surfacing values.
   let secretNames: string[] = [];
   if (initialized) {
-    const { stdout, status, error } = runPhantom(['list', '--json']);
+    const { stdout, status, error } = runPhantom(['list', '--json'], { timeoutMs });
     if (error === undefined && status === 0 && stdout.trim().length > 0) {
       secretNames = parseSecretNames(stdout);
     }
   }
 
-  const result: PhantomStatus = {
+  const base = {
     installed: true,
     version,
     initialized,
     secretNames,
+  };
+
+  const result: PhantomStatus = {
+    ...base,
+    capability: buildPhantomCapabilitySnapshot(base),
   };
 
   if (statusError !== undefined) {
@@ -159,6 +191,56 @@ export function getPhantomStatus(): PhantomStatus {
   }
 
   return result;
+}
+
+export function getCachedFleetPhantomStatus(options: {
+  ttlMs?: number;
+  timeoutMs?: number;
+  nowMs?: number;
+} = {}): PhantomStatus {
+  const nowMs = options.nowMs ?? Date.now();
+  const key = phantomCacheKey();
+  if (cachedFleetStatus && cachedFleetStatus.key === key && cachedFleetStatus.expiresAt > nowMs) {
+    return cachedFleetStatus.status;
+  }
+  const status = getPhantomStatus({ timeoutMs: options.timeoutMs ?? FLEET_TIMEOUT_MS });
+  cachedFleetStatus = {
+    key,
+    expiresAt: nowMs + (options.ttlMs ?? FLEET_CACHE_TTL_MS),
+    status,
+  };
+  return status;
+}
+
+export function resetPhantomStatusCache(): void {
+  cachedFleetStatus = null;
+}
+
+export function buildPhantomCapabilitySnapshot(
+  status: Pick<PhantomStatus, 'installed' | 'initialized' | 'secretNames'>,
+): PhantomCapabilitySnapshot {
+  const safeNames = [...new Set(status.secretNames.filter(isSafeSecretName))].sort();
+  const known = [...PHANTOM_KNOWN_FLEET_SECRET_NAMES];
+  const present = known.filter((name) => safeNames.includes(name));
+  const missing = known.filter((name) => !safeNames.includes(name));
+  return {
+    valueMode: 'metadata-and-names-only',
+    secretCount: safeNames.length,
+    knownFleetSecrets: {
+      names: known,
+      present,
+      missing,
+      pulsePatPresent: present.includes('ASHLR_PULSE_PAT'),
+      pulseTokenPresent: present.includes('ASHLR_PULSE_TOKEN'),
+      pulseCredentialPresent: present.includes('ASHLR_PULSE_PAT') || present.includes('ASHLR_PULSE_TOKEN'),
+    },
+    modes: {
+      metadataStatus: true,
+      childEnvInjectionAvailable: status.installed && status.initialized,
+      mcpServerAvailable: status.installed,
+      mutationRequiresHumanApproval: status.installed,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -170,8 +252,8 @@ export function getPhantomStatus(): PhantomStatus {
  *
  * Returns:
  *   - true / false when a structured boolean field can be determined
- *   - null when the output is not parseable JSON (caller should fall back to
- *     the human-text heuristic)
+ *   - null when the output is not JSON (caller should fall back to the
+ *     human-text heuristic)
  *
  * Recognised shapes (defensive — phantom's exact schema may evolve):
  *   { "initialized": true, ... }
@@ -189,6 +271,7 @@ function parseInitializedFromJson(raw: string): boolean | null {
     return null;
   }
   if (parsed === null || typeof parsed !== 'object') return null;
+  if (Array.isArray(parsed)) return false;
   const obj = parsed as Record<string, unknown>;
 
   // Direct boolean field
@@ -206,9 +289,16 @@ function parseInitializedFromJson(raw: string): boolean | null {
     if (typeof obj[key] === 'number') return true;
   }
 
-  // Parseable JSON but no recognised field — treat as initialized (a vault
-  // that emits structured status is, by definition, set up).
-  return true;
+  for (const key of ['error', 'message', 'status', 'detail']) {
+    const value = obj[key];
+    if (typeof value !== 'string') continue;
+    const lc = value.toLowerCase();
+    if (lc.includes('not initialized') || lc.includes('run phantom init')) return false;
+    if (lc === 'initialized' || lc === 'ready') return true;
+  }
+
+  // Unknown structured output is not enough proof of initialization.
+  return false;
 }
 
 /**
@@ -232,18 +322,21 @@ function parseSecretNames(raw: string): string[] {
         if (item !== null && typeof item === 'object') {
           const obj = item as Record<string, unknown>;
           // Prefer "name", fall back to "key" — both are safe identifier fields.
-          if (typeof obj['name'] === 'string') {
-            names.push(obj['name']);
-          } else if (typeof obj['key'] === 'string') {
-            names.push(obj['key']);
+          const name = typeof obj['name'] === 'string'
+            ? obj['name']
+            : typeof obj['key'] === 'string'
+              ? obj['key']
+              : undefined;
+          if (name && isSafeSecretName(name)) {
+            names.push(name.trim());
           }
           // Deliberately skip any other field to avoid leaking values.
         } else if (typeof item === 'string') {
           // Some CLIs emit a flat string array of names.
-          names.push(item);
+          if (isSafeSecretName(item)) names.push(item.trim());
         }
       }
-      return names;
+      return [...new Set(names)].sort();
     }
 
     // ── Object with a "secrets" or "keys" array at the top level
@@ -262,6 +355,20 @@ function parseSecretNames(raw: string): string[] {
     // JSON parse failed — fall back to line-based extraction.
     return parseSecretNamesFromText(raw);
   }
+}
+
+function isSafeSecretName(value: string): boolean {
+  const name = value.trim();
+  if (!name || name.length > 120) return false;
+  if (!/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(name)) return false;
+  if (/\s|=/.test(name)) return false;
+  if (/^sk-[A-Za-z0-9_-]{8,}/.test(name)) return false;
+  if (/^gh[poursa]_[A-Za-z0-9]{8,}/.test(name)) return false;
+  if (/^xox[baprs]-[A-Za-z0-9-]{8,}/i.test(name)) return false;
+  if (/^Bearer\s+/i.test(name)) return false;
+  if (/^AKIA[0-9A-Z]{16}$/.test(name)) return false;
+  if (/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(name)) return false;
+  return true;
 }
 
 /**
@@ -288,10 +395,10 @@ function parseSecretNamesFromText(text: string): string[] {
     const token = line.split(/\s+/)[0];
     // Skip header lines ("NAME", "KEY", etc.) implicitly — they pass the
     // same regex but are single-word and won't look like multi-word values.
-    if (token && ENV_VAR_RE.test(token) && token !== 'NAME' && token !== 'KEY') {
+    if (token && ENV_VAR_RE.test(token) && token !== 'NAME' && token !== 'KEY' && isSafeSecretName(token)) {
       names.push(token);
     }
   }
 
-  return names;
+  return [...new Set(names)].sort();
 }

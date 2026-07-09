@@ -34,6 +34,8 @@ import { listEnrolled, killSwitchOn } from './sandbox/policy.js';
 import { loadDaemonState, daemonStatePath } from './daemon/state.js';
 import { listSandboxes, ORPHAN_STALE_MS } from './sandbox/worktree.js';
 import { getPhantomStatus } from './phantom.js';
+import { discoverMcpServers } from './mcp-registry.js';
+import type { PhantomStatus } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -55,6 +57,28 @@ export interface ReadinessFinding {
   fix?: string;
 }
 
+export interface ReadinessPhantomSnapshot {
+  installed: boolean;
+  version: string | null;
+  initialized: boolean;
+  secretCount: number;
+  valueMode: PhantomStatus['capability']['valueMode'];
+  knownFleetSecrets: {
+    total: number;
+    presentCount: number;
+    missingCount: number;
+    pulsePatPresent: boolean;
+    pulseTokenPresent: boolean;
+    pulseCredentialPresent: boolean;
+  };
+  capabilities: PhantomStatus['capability']['modes'];
+  mcp: {
+    configured: boolean;
+    source: string | null;
+  };
+  error?: string;
+}
+
 /** Full readiness report. `ready` is true iff there are zero 'blocker' findings. */
 export interface ReadinessReport {
   /** True iff no finding has severity 'blocker'. */
@@ -65,6 +89,8 @@ export interface ReadinessReport {
   warnings: ReadinessFinding[];
   /** Informational notes (e.g. empty-enrollment on a fresh install — fine). */
   info: ReadinessFinding[];
+  /** Values-free Phantom capability snapshot, if the facet could be evaluated. */
+  phantom?: ReadinessPhantomSnapshot;
   /** ISO timestamp the report was built. */
   generatedAt: string;
 }
@@ -250,6 +276,52 @@ function gitPresent(): boolean {
   } catch {
     return false;
   }
+}
+
+function phantomMcpRegistration(): ReadinessPhantomSnapshot['mcp'] {
+  try {
+    const registry = discoverMcpServers();
+    const server = registry.servers.find((candidate) =>
+      candidate.name === 'phantom-secrets' ||
+      (candidate.command === 'phantom' && candidate.args[0] === 'mcp')
+    );
+    return {
+      configured: server !== undefined,
+      source: normalizeMcpSourceForDisplay(server?.source),
+    };
+  } catch {
+    return { configured: false, source: null };
+  }
+}
+
+function normalizeMcpSourceForDisplay(source: string | undefined): string | null {
+  if (!source) return null;
+  const home = homedir();
+  return source === home || source.startsWith(`${home}/`)
+    ? `~${source.slice(home.length)}`
+    : source;
+}
+
+function readinessPhantomSnapshot(status: PhantomStatus): ReadinessPhantomSnapshot {
+  const known = status.capability.knownFleetSecrets;
+  return {
+    installed: status.installed,
+    version: status.version,
+    initialized: status.initialized,
+    secretCount: status.capability.secretCount,
+    valueMode: status.capability.valueMode,
+    knownFleetSecrets: {
+      total: known.names.length,
+      presentCount: known.present.length,
+      missingCount: known.missing.length,
+      pulsePatPresent: known.pulsePatPresent,
+      pulseTokenPresent: known.pulseTokenPresent,
+      pulseCredentialPresent: known.pulseCredentialPresent,
+    },
+    capabilities: status.capability.modes,
+    mcp: phantomMcpRegistration(),
+    ...(status.error ? { error: status.error } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -439,15 +511,35 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
   }
 
   // -- phantom present (optional; absent => warning) --------------------------
+  let phantom: ReadinessPhantomSnapshot | undefined;
   {
-    let installed = false;
+    let status: PhantomStatus | undefined;
     try {
-      installed = getPhantomStatus().installed;
+      status = getPhantomStatus();
+      phantom = readinessPhantomSnapshot(status);
     } catch {
-      installed = false;
+      status = undefined;
+      phantom = undefined;
     }
-    if (installed) {
-      info.push({ id: 'phantom', severity: 'info', detail: 'phantom is installed' });
+    if (status?.installed && status.initialized) {
+      const pulse = status.capability.knownFleetSecrets.pulseCredentialPresent
+        ? 'pulse credential present'
+        : 'pulse credential missing';
+      const mcp = phantom?.mcp.configured ? 'mcp configured' : 'mcp not configured';
+      info.push({
+        id: 'phantom',
+        severity: 'info',
+        detail:
+          `phantom ${status.version ?? 'unknown'} initialized; ` +
+          `${status.capability.secretCount} secret name(s); ${pulse}; ${mcp}; values hidden`,
+      });
+    } else if (status?.installed) {
+      warnings.push({
+        id: 'phantom',
+        severity: 'warning',
+        detail: `phantom ${status.version ?? 'unknown'} installed but not initialized`,
+        fix: 'Run `phantom init` to enable fleet secret resolution.',
+      });
     } else {
       warnings.push({
         id: 'phantom',
@@ -462,6 +554,7 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
     blockers,
     warnings,
     info,
+    ...(phantom ? { phantom } : {}),
     generatedAt: new Date().toISOString(),
   };
 }
