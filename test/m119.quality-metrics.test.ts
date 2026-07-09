@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { hashDiff, signJudgeAttestation } from '../src/core/foundry/provenance.js';
 import type { Proposal } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -357,6 +358,64 @@ describe('m119 decisions-ledger', () => {
     expect(() => { entries = readDecisions(); }).not.toThrow();
     expect(entries.length).toBe(1);
     expect(entries[0]!.proposalId).toBe('prop-ok');
+  });
+
+  it('normalizes and scrubs legacy decision rows on read', async () => {
+    const { readDecisions, decisionsDir } = await import('../src/core/fleet/decisions-ledger.js');
+
+    const proposalId = 'prop-legacy-decision';
+    const judgeEngine = 'claude-opus-4-5';
+    const attestation = signJudgeAttestation({
+      proposalId,
+      judgeEngine,
+      verdict: 'ship',
+      diffHash: hashDiff('legacy diff'),
+    });
+    const dir = decisionsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(
+      path.join(dir, '2026-07-08.jsonl'),
+      JSON.stringify({
+        ts: '2026-07-08T12:30:00.000Z',
+        proposalId,
+        workItemId: 'repo:test:legacy-decision',
+        runId: 'run-legacy-decision',
+        action: 'judged',
+        engine: judgeEngine,
+        verdict: 'ship',
+        reason: 'token=sk-abcdefghijklmnopqrstuvwxyz1234567890 should be hidden',
+        detail: 'raw detail with sk-abcdefghijklmnopqrstuvwxyz1234567890',
+        judgeAttestation: attestation,
+        costUsd: 0.42,
+        tokensIn: 12,
+        tokensOut: 34,
+        durationMs: 56,
+        cacheHit: true,
+        rawPrompt: 'RAW_PROMPT_SENTINEL',
+      }) + '\n',
+      'utf8',
+    );
+
+    const [entry] = readDecisions({ proposalId });
+
+    expect(entry).toMatchObject({
+      proposalId,
+      trajectoryId: 'run:run-legacy-decision',
+      learningSource: 'decision-ledger',
+      labelBasis: 'judge-verdict',
+      routerPolicyVersion: 'fleet-router-v1',
+      learningEpoch: '2026-07-08',
+      costUsd: 0.42,
+      tokensIn: 12,
+      tokensOut: 34,
+      durationMs: 56,
+      cacheHit: true,
+    });
+    expect(entry?.judgeAttestation).toBe(attestation);
+    expect(entry?.reason).toContain('[REDACTED]');
+    expect(entry?.detail).toContain('[REDACTED]');
+    expect(JSON.stringify(entry)).not.toContain('sk-abcdefghijklmnopqrstuvwxyz');
+    expect(JSON.stringify(entry)).not.toContain('RAW_PROMPT_SENTINEL');
   });
 
   it('recordDecision never throws on invalid input', async () => {

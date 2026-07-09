@@ -45,6 +45,70 @@ function stripSecrets(s: string): string {
   return scrubSecrets(s);
 }
 
+const DECISION_ACTIONS = new Set<DecisionEntry['action']>([
+  'proposed',
+  'verified',
+  'judged',
+  'merged',
+  'handoff',
+  'rejected',
+  'escalated',
+]);
+
+function isDecisionAction(value: unknown): value is DecisionEntry['action'] {
+  return typeof value === 'string' && DECISION_ACTIONS.has(value as DecisionEntry['action']);
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function optionalScrubbedText(value: unknown): string | undefined {
+  return typeof value === 'string' ? stripSecrets(value) : undefined;
+}
+
+function optionalJudgeAttestation(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (/^[0-9a-fA-F]{64}$/.test(trimmed)) return trimmed;
+  return stripSecrets(value);
+}
+
+function sanitizeDecisionEntry(entry: DecisionEntry): DecisionEntry {
+  const clean: DecisionEntry = {
+    ts: stripSecrets(entry.ts || new Date().toISOString()),
+    proposalId: stripSecrets(entry.proposalId),
+    action: entry.action,
+    ...(optionalScrubbedText(entry.workItemId) !== undefined ? { workItemId: optionalScrubbedText(entry.workItemId) } : {}),
+    ...(optionalScrubbedText(entry.workSource) !== undefined ? { workSource: optionalScrubbedText(entry.workSource) as DecisionEntry['workSource'] } : {}),
+    ...(optionalScrubbedText(entry.runId) !== undefined ? { runId: optionalScrubbedText(entry.runId) } : {}),
+    ...(optionalScrubbedText(entry.trajectoryId) !== undefined ? { trajectoryId: optionalScrubbedText(entry.trajectoryId) } : {}),
+    ...(entry.routeSnapshot !== undefined ? { routeSnapshot: entry.routeSnapshot } : {}),
+    ...(entry.runEventSummary !== undefined ? { runEventSummary: entry.runEventSummary } : {}),
+    ...(entry.evidenceOutcome !== undefined ? { evidenceOutcome: entry.evidenceOutcome } : {}),
+    ...(optionalScrubbedText(entry.learningSource) !== undefined ? { learningSource: optionalScrubbedText(entry.learningSource) as DecisionEntry['learningSource'] } : {}),
+    ...(optionalScrubbedText(entry.labelBasis) !== undefined ? { labelBasis: optionalScrubbedText(entry.labelBasis) as DecisionEntry['labelBasis'] } : {}),
+    ...(optionalScrubbedText(entry.routerPolicyVersion) !== undefined ? { routerPolicyVersion: optionalScrubbedText(entry.routerPolicyVersion) } : {}),
+    ...(optionalScrubbedText(entry.learningEpoch) !== undefined ? { learningEpoch: optionalScrubbedText(entry.learningEpoch) } : {}),
+    ...(optionalScrubbedText(entry.engine) !== undefined ? { engine: optionalScrubbedText(entry.engine) } : {}),
+    ...(optionalScrubbedText(entry.model) !== undefined ? { model: optionalScrubbedText(entry.model) } : {}),
+    ...(optionalScrubbedText(entry.verdict) !== undefined ? { verdict: optionalScrubbedText(entry.verdict) } : {}),
+    ...(optionalScrubbedText(entry.reason) !== undefined ? { reason: optionalScrubbedText(entry.reason) } : {}),
+    ...(optionalScrubbedText(entry.detail) !== undefined ? { detail: optionalScrubbedText(entry.detail) } : {}),
+    ...(optionalJudgeAttestation(entry.judgeAttestation) !== undefined ? { judgeAttestation: optionalJudgeAttestation(entry.judgeAttestation) } : {}),
+    ...(finiteNumber(entry.costUsd) !== undefined ? { costUsd: finiteNumber(entry.costUsd) } : {}),
+    ...(finiteNumber(entry.tokensIn) !== undefined ? { tokensIn: finiteNumber(entry.tokensIn) } : {}),
+    ...(finiteNumber(entry.tokensOut) !== undefined ? { tokensOut: finiteNumber(entry.tokensOut) } : {}),
+    ...(finiteNumber(entry.durationMs) !== undefined ? { durationMs: finiteNumber(entry.durationMs) } : {}),
+    ...(optionalBoolean(entry.cacheHit) !== undefined ? { cacheHit: optionalBoolean(entry.cacheHit) } : {}),
+  };
+  return normalizeDecisionLearningFields(clean);
+}
+
 // ---------------------------------------------------------------------------
 // Public: recordDecision()
 // ---------------------------------------------------------------------------
@@ -62,18 +126,7 @@ export function recordDecision(entry: DecisionEntry): void {
       mkdirSync(dir, { recursive: true });
     }
 
-    const record: DecisionEntry = normalizeDecisionLearningFields({
-      ...entry,
-      ts: entry.ts || new Date().toISOString(),
-      proposalId: stripSecrets(entry.proposalId),
-      ...(entry.workItemId !== undefined ? { workItemId: stripSecrets(entry.workItemId) } : {}),
-      ...(entry.runId !== undefined ? { runId: stripSecrets(entry.runId) } : {}),
-      ...(entry.engine !== undefined ? { engine: stripSecrets(entry.engine) } : {}),
-      ...(entry.model !== undefined ? { model: stripSecrets(entry.model) } : {}),
-      ...(entry.verdict !== undefined ? { verdict: stripSecrets(entry.verdict) } : {}),
-      ...(entry.reason !== undefined ? { reason: stripSecrets(entry.reason) } : {}),
-      ...(entry.detail !== undefined ? { detail: stripSecrets(entry.detail) } : {}),
-    });
+    const record = sanitizeDecisionEntry(entry);
 
     const line = JSON.stringify(record) + '\n';
     const filePath = join(dir, `${todayDateString()}.jsonl`);
@@ -146,15 +199,17 @@ export function readDecisions(opts?: {
               typeof obj['proposalId'] === 'string' &&
               typeof obj['action'] === 'string'
             ) {
+              if (!isDecisionAction(obj['action'])) continue;
+              const record = sanitizeDecisionEntry(obj as unknown as DecisionEntry);
               // Window filter
               if (sinceMs !== undefined) {
-                const entryMs = Date.parse(obj['ts'] as string);
+                const entryMs = Date.parse(record.ts);
                 if (!isNaN(entryMs) && entryMs < sinceMs) continue;
               }
               // Proposal filter
-              if (pid !== undefined && obj['proposalId'] !== pid) continue;
+              if (pid !== undefined && record.proposalId !== pid) continue;
 
-              entries.push(obj as unknown as DecisionEntry);
+              entries.push(record);
             }
           }
         } catch {

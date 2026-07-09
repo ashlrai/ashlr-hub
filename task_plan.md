@@ -836,3 +836,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add regression coverage for open installed same-tier alternatives and blocked alternatives.
 - [x] Run broad verification.
 - [x] Commit `c8ea6ab`, push, reload daemon, and smoke live FleetStatus.
+
+## Current Continuation - Decision Ledger Learning Backfill
+- [x] Rechecked clean pushed state after resource-feasible yield rollout.
+- [x] Deployed sidecar scouts for Lease Board UI and Phantom fleet rollup readiness.
+- [x] Normalize legacy decision rows on read through the causal learning scrubber.
+- [x] Add regression coverage for trajectory/label/epoch backfill, secret scrubbing, raw-field dropping, and measurement preservation.
+- [x] Run broad verification.
+- [ ] Commit, push, and smoke status.
