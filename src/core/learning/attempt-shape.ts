@@ -4,6 +4,7 @@ export interface ProductionAttemptShapeSignals {
   outcome?: string | null;
   proposalCreated?: boolean | null;
   actionCounts?: RunActionCounts;
+  reason?: string | null;
 }
 
 export type ProductionAttemptLearningKind =
@@ -77,6 +78,7 @@ export function productionAttemptShapeFromSignals(
 ): ProductionAttemptShape {
   const shape = emptyProductionAttemptShape();
   const outcome = normalizeOutcome(signals.outcome);
+  const captureMissing = isCaptureMissingSignal(signals);
   const counts = actionCountsRecord(signals.actionCounts);
   const diffFiles = nonNegativeInteger(counts?.diffFiles);
   const proposalBlocked = nonNegativeInteger(counts?.proposalBlocked) ?? 0;
@@ -84,8 +86,8 @@ export function productionAttemptShapeFromSignals(
   const completenessGateRuns = nonNegativeInteger(counts?.completenessGateRuns) ?? 0;
   const verifyRepairAttempts = nonNegativeInteger(counts?.verifyRepairAttempts) ?? 0;
   const produced = signals.proposalCreated === true || outcome === 'proposal-created';
-  const policyDisabled = outcome === 'proposal-disabled' || proposalDisabled > 0;
-  const gateish = outcome === 'gate-blocked' || outcome === 'proposal-capture-error';
+  const policyDisabled = !captureMissing && (outcome === 'proposal-disabled' || proposalDisabled > 0);
+  const gateish = captureMissing || outcome === 'gate-blocked' || outcome === 'proposal-capture-error';
   const backendNoDiff =
     !policyDisabled &&
     !produced &&
@@ -233,6 +235,17 @@ function normalizeOutcome(value: string | null | undefined): string | undefined 
   if (typeof value !== 'string') return undefined;
   const normalized = value.trim().toLowerCase();
   return normalized || undefined;
+}
+
+function normalizeReason(value: string | null | undefined): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  return normalized || undefined;
+}
+
+function isCaptureMissingSignal(signals: ProductionAttemptShapeSignals): boolean {
+  const reason = normalizeReason(signals.reason);
+  return reason?.includes('capture-missing') === true;
 }
 
 function nonNegativeInteger(value: unknown): number | undefined {

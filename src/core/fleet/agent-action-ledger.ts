@@ -586,6 +586,7 @@ export function summarizeAgentWorkspace(
         outcome: event.runEventSummary?.outcome ?? event.outcome,
         proposalCreated: proposalCreatedSignal(event),
         actionCounts: event.runEventSummary?.actionCounts,
+        reason: event.reason,
       }, event.learningLabel);
       if (classification.diagnosticNoProposal) diagnosticNoProposalEvents++;
       if (classification.policySuppressed) policySuppressedEvents++;

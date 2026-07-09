@@ -463,6 +463,61 @@ describe('M342 dispatch production ledger', () => {
     expect(codex?.diagnosticTopReasons).toEqual([]);
   });
 
+  it('treats capture-missing proposal-disabled telemetry as diagnostic, not policy-suppressed', () => {
+    recordDispatchProduction(makeEvent({
+      itemId: 'capture-missing',
+      outcome: 'proposal-capture-error',
+      proposalCreated: false,
+      reason: 'capture-missing: required proposal dispatch ended before final capture',
+      runEventSummary: {
+        status: 'failed',
+        outcome: 'proposal-disabled',
+        proposalCreated: false,
+        actionCounts: {
+          proposalDisabled: 1,
+          proposalCaptureAttempts: 0,
+        },
+      },
+    }));
+
+    const event = readDispatchProductionEvents({ limit: 1 })[0];
+    expect(event?.learningLabel).toMatchObject({
+      learningKind: 'diagnostic-no-proposal',
+      policySuppressed: false,
+      diagnosticNoProposal: true,
+      diagnosticAttempt: true,
+      attemptShape: {
+        backendNoDiff: 0,
+        captureOrGateBlocked: 1,
+        policyDisabled: 0,
+      },
+    });
+
+    const summary = summarizeDispatchProductionYield([event!]);
+    expect(summary).toMatchObject({
+      attempts: 1,
+      proposalsCreated: 0,
+      outcomes: {
+        proposalCaptureError: 1,
+        proposalDisabled: 0,
+      },
+      actionCounts: {
+        proposalDisabled: 1,
+      },
+      attemptShape: {
+        backendNoDiff: 0,
+        captureOrGateBlocked: 1,
+        policyDisabled: 0,
+      },
+      diagnosticTopReasons: [
+        {
+          reason: 'capture-missing: required proposal dispatch ended before final capture',
+          count: 1,
+        },
+      ],
+    });
+  });
+
   it('reads a bounded durable yield window from disk', () => {
     recordDispatchProduction([
       makeEvent({ itemId: 'old', ts: '2026-07-07T00:00:00.000Z' }),

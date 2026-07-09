@@ -2204,6 +2204,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const repo = join(tmpHome, 'repo');
     mkdirSync(ashlrDir, { recursive: true });
     mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome);
     writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
     writeFileSync(
       join(ashlrDir, 'backlog.json'),
@@ -2276,6 +2277,106 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('diagnosis: policy-suppressed · fleet 0/0 0% · keep routing');
     expect(formatted).toContain('learning:  diagnostic 0/0 (—), no-proposal 0, policy-suppressed 4');
     expect(formatted).not.toContain('proposal filing disabled');
+  });
+
+  it('keeps daemon capture-missing rows diagnostic even with raw proposal-disabled counts', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome);
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: new Date().toISOString(),
+        repos: [repo],
+        items: [makeBacklogItem(repo, 'repo:goal:fresh', 'Fresh eligible work', 5)],
+      }),
+      'utf8',
+    );
+    const baseEvent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: new Date().toISOString(),
+      machineId: 'm49',
+      itemId: 'capture-missing-a',
+      source: 'goal',
+      repo,
+      title: 'Capture missing sample',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local route',
+      outcome: 'proposal-capture-error',
+      proposalCreated: false,
+      spentUsd: 0.001,
+      reason: 'capture-missing: required proposal dispatch ended before final capture',
+      runEventSummary: {
+        status: 'failed',
+        outcome: 'proposal-disabled',
+        proposalCreated: false,
+        actionCounts: {
+          proposalDisabled: 1,
+          proposalCaptureAttempts: 0,
+        },
+      },
+      basis: 'run-proposal-outcome',
+    };
+    recordDispatchProduction(Array.from({ length: 3 }, (_, index) => ({
+      ...baseEvent,
+      itemId: `capture-missing-${index}`,
+    })));
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.dispatchProduction).toMatchObject({
+      attempts: 3,
+      proposalsCreated: 0,
+      outcomes: {
+        proposalCaptureError: 3,
+        proposalDisabled: 0,
+      },
+      actionCounts: {
+        proposalDisabled: 3,
+      },
+      attemptShape: {
+        backendNoDiff: 0,
+        captureOrGateBlocked: 3,
+        policyDisabled: 0,
+      },
+      diagnosticTopReasons: [
+        {
+          reason: 'capture-missing: required proposal dispatch ended before final capture',
+          count: 3,
+        },
+      ],
+    });
+    expect(s.dispatchYieldDiagnostics).toMatchObject({
+      verdict: 'actionable',
+      action: 'tighten-context-or-reslice',
+      diagnosticAttempts: 3,
+      proposalsCreated: 0,
+      policyDisabled: 0,
+      primaryCandidate: {
+        scope: 'backend-source',
+        backend: 'local-coder',
+        source: 'goal',
+        diagnosticAttempts: 3,
+        verdict: 'actionable',
+      },
+    });
+    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
+      .toContain('top reason: capture-missing: required proposal dispatch ended before final capture');
+    expect(s.nextActions?.find((action) => action.id === 'inspect-dispatch-yield')?.detail)
+      .toContain('shape: no-diff 0, gate/capture 3, repairs 0, policy-off 0');
+    expect(s.attemptCoverage?.production).toMatchObject({
+      attempts: 3,
+      proposalCreated: 0,
+      policySuppressed: 0,
+      diagnosticAttempts: 3,
+      diagnosticNoProposal: 3,
+    });
+    expect(formatFleetStatus(s)).toContain('diagnosis: actionable · local-coder/goal 0/3 0% · tighten context/reslice');
   });
 
   it('marks low dispatch-yield samples as insufficient before routing action', async () => {

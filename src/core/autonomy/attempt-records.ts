@@ -365,6 +365,7 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
         outcome: event.outcome,
         proposalCreated: event.proposalCreated,
         actionCounts,
+        reason: event.reason ?? event.routeReason,
       }, learningLabel);
       const labelAuthoritative = Boolean(learningLabel?.authoritative);
       const coverage: AttemptRecordCoverage = {

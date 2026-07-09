@@ -302,6 +302,7 @@ export function buildAttentionEvalReport(
         outcome: run?.outcome ?? event.outcome,
         proposalCreated: proposalCreatedSignal,
         actionCounts: run?.actionCounts,
+        reason: event.reason,
       }, event.learningLabel);
       if (classification.policySuppressed) policySuppressed++;
       if (classification.diagnosticNoProposal) diagnosticNoProposal++;

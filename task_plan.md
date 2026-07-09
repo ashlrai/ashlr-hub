@@ -1042,3 +1042,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused FleetStatus and formatter regression coverage.
 - [x] Run final gates.
 - [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Capture-Missing Learning Signal
+- [x] Rechecked clean pushed state and deployed/read three scout agents for proposal-disabled, Phantom, and context-efficiency lanes.
+- [x] Trace daemon-required TITRR failure path where internal `propose:false` attempts can end before final proposal capture.
+- [x] Reclassify only required terminal capture-missing dispatches from `proposal-disabled` to `proposal-capture-error`.
+- [x] Extend attempt-shape classification with reason metadata so `capture-missing` is diagnostic while normal `proposal-disabled` remains policy-suppressed.
+- [x] Thread reason-aware classification through dispatch-production, agent-action workspace, attention eval, attempt records, and learned-router filtering.
+- [x] Add daemon, dispatch-ledger, and FleetStatus regression coverage.
+- [x] Run focused learning/daemon/status verification plus typecheck, lint, build, audit, and diff checks.
+- [ ] Commit, push, reload daemon, and smoke live status.

@@ -278,8 +278,15 @@ function hasActionCountSignal(counts: RunActionCounts | undefined): counts is Ru
 }
 
 function isProposalDisabledDispatchEvent(event: DispatchProductionEvent): boolean {
+  if (isCaptureMissingDispatchEvent(event)) return false;
   return event.outcome === 'proposal-disabled' ||
     (nonNegativeInteger(event.runEventSummary?.actionCounts?.proposalDisabled) ?? 0) > 0;
+}
+
+function isCaptureMissingDispatchEvent(event: DispatchProductionEvent): boolean {
+  if (event.outcome !== 'proposal-capture-error') return false;
+  const reason = String(event.reason ?? event.routeReason ?? '').toLowerCase();
+  return reason.includes('capture-missing');
 }
 
 function hasCurrentAuthoritativeAttemptLabel(event: DispatchProductionEvent): boolean {

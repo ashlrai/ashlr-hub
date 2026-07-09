@@ -220,6 +220,7 @@ function sanitizeEvent(
         outcome,
         proposalCreated: Boolean(event.proposalCreated),
         actionCounts: causal.runEventSummary?.actionCounts,
+        reason,
       })
     : sanitizeProductionAttemptLearningLabel(event.learningLabel);
   return {
@@ -505,6 +506,7 @@ function addToBucket(bucket: MutableYieldBucket, event: DispatchProductionEvent)
     outcome: event.outcome,
     proposalCreated: event.proposalCreated,
     actionCounts: event.runEventSummary?.actionCounts,
+    reason: event.reason ?? event.routeReason,
   }, event.learningLabel);
   addProductionAttemptShape(bucket.attemptShape, classification.attemptShape);
   const reason = event.reason ?? event.routeReason ?? event.outcome;
@@ -581,6 +583,7 @@ export function summarizeDispatchProductionYield(
       outcome: event.outcome,
       proposalCreated: event.proposalCreated,
       actionCounts: event.runEventSummary?.actionCounts,
+      reason: event.reason ?? event.routeReason,
     }, event.learningLabel);
     addProductionAttemptShape(attemptShape, classification.attemptShape);
     const reason = event.reason ?? event.routeReason ?? event.outcome;

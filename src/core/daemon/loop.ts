@@ -439,21 +439,48 @@ function dispatchProductionFromProposalOutcome(
   outcome: RunProposalOutcome | undefined,
   runId?: string,
   summary?: RunEventSummary,
+  options: { proposalRequired?: boolean } = {},
 ): DaemonDispatchProduction | undefined {
   if (!outcome) return undefined;
   const diffLines =
     typeof outcome.insertions === 'number' || typeof outcome.deletions === 'number'
       ? (outcome.insertions ?? 0) + (outcome.deletions ?? 0)
       : undefined;
+  const captureMissing = isRequiredProposalCaptureMissing(outcome, summary, options);
+  const productionOutcome: DaemonDispatchProductionOutcome = captureMissing
+    ? 'proposal-capture-error'
+    : productionOutcomeFromRunProposalOutcome(outcome.kind);
+  const reason = captureMissing
+    ? 'capture-missing: required proposal dispatch ended before final capture'
+    : outcome.reason;
   return {
-    outcome: productionOutcomeFromRunProposalOutcome(outcome.kind),
+    outcome: productionOutcome,
     ...(outcome.proposalId ? { proposalId: outcome.proposalId } : {}),
     ...(runId ? { runId } : {}),
     ...(summary ? { runEventSummary: summary } : {}),
-    ...(outcome.reason ? { reason: boundedText(outcome.reason, 220) } : {}),
+    ...(reason ? { reason: boundedText(reason, 220) } : {}),
     ...(typeof outcome.files === 'number' ? { diffFiles: outcome.files } : {}),
     ...(typeof diffLines === 'number' ? { diffLines } : {}),
   };
+}
+
+function isRequiredProposalCaptureMissing(
+  outcome: RunProposalOutcome,
+  summary: RunEventSummary | undefined,
+  options: { proposalRequired?: boolean },
+): boolean {
+  if (options.proposalRequired !== true) return false;
+  if (outcome.kind !== 'proposal-disabled') return false;
+  const counts = summary?.actionCounts;
+  const proposalDisabled = typeof counts?.proposalDisabled === 'number' && Number.isFinite(counts.proposalDisabled)
+    ? Math.max(0, Math.trunc(counts.proposalDisabled))
+    : 0;
+  const captureAttempts = typeof counts?.proposalCaptureAttempts === 'number' && Number.isFinite(counts.proposalCaptureAttempts)
+    ? Math.max(0, Math.trunc(counts.proposalCaptureAttempts))
+    : 0;
+  if (proposalDisabled <= 0 || captureAttempts > 0) return false;
+  if (summary?.proposalCreated === true) return false;
+  return summary?.status !== undefined && summary.status !== 'done';
 }
 
 export function workedOutcomeFromDispatchProduction(
@@ -538,6 +565,7 @@ function dispatchProductionEventFromOutcome(
     outcome,
     proposalCreated,
     actionCounts: eventRunSummary?.actionCounts,
+    reason: production?.reason ?? trace.skipReason,
   });
   return {
     schemaVersion: 1,
@@ -2474,7 +2502,7 @@ export async function tick(
             delegationScope,
           });
         }
-        dispatchProduction = dispatchProductionFromProposalOutcome(runState.proposalOutcome, runState.id, runState.runEventSummary);
+        dispatchProduction = dispatchProductionFromProposalOutcome(runState.proposalOutcome, runState.id, runState.runEventSummary, { proposalRequired: true });
         dispatchSkipReason = noProposalProductionReason(dispatchProduction);
 
         // M80: subscription-tier runs are not dollar-billed — count $0 toward
