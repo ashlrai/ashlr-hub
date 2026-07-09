@@ -793,5 +793,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Scoped the H8 cleanup meta-test to CONTRACT-reference diff lines so real code changes in swept files are not misclassified as comment-sweep violations.
 - [x] Focused verification passed: `m28.store`, `m28.cli`, `m49.fleet-status`, and `h8.cleanup-comment-only` (106 tests), plus typecheck and diff check.
 - [x] Broad gates passed: lint, build, audit, and invariants.
-- [ ] Commit, push, reload launchd daemon, and smoke live FleetStatus locked-lane counts.
+- [x] Commit and push `529e155`, reload launchd daemon, and smoke live FleetStatus locked-lane counts.
 - [ ] Next lane: implement Best-of-N file-once proposal capture or remote protected-base freshness, whichever is more immediately tractable.
