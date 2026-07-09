@@ -835,4 +835,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Keep runtime routing unchanged while making FleetStatus dispatch-yield actions resource-feasible.
 - [x] Add regression coverage for open installed same-tier alternatives and blocked alternatives.
 - [x] Run broad verification.
-- [ ] Commit, push, reload daemon, and smoke live FleetStatus.
+- [x] Commit `c8ea6ab`, push, reload daemon, and smoke live FleetStatus.
