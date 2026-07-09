@@ -1155,4 +1155,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve failed-before-capture behavior and add a distinct done-with-diff diagnostic reason.
 - [x] Add daemon loop regression for done run with diff but no filed proposal, including delegation contract, diff metadata, worked ledger, and learning label.
 - [x] Run focused/adjacent verification and broad local gates.
-- [ ] Commit, push, reload daemon, and smoke live status.
+- [x] Commit, push, reload daemon, and smoke live status.
