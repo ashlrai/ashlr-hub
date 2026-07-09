@@ -1577,6 +1577,7 @@ export interface RunStep {
 export type RunProposalOutcomeKind =
   | 'filed'
   | 'empty-diff'
+  | 'trivial-proposal'
   | 'completeness-gate'
   | 'partial-completeness-gate'
   | 'engine-failed-no-diff'

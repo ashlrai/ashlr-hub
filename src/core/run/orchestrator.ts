@@ -208,6 +208,7 @@ function runDurationMs(state: RunState): number | undefined {
 const RUN_PROPOSAL_OUTCOME_KINDS = new Set<string>([
   'filed',
   'empty-diff',
+  'trivial-proposal',
   'completeness-gate',
   'partial-completeness-gate',
   'engine-failed-no-diff',

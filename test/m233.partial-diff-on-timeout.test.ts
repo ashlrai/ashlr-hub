@@ -242,6 +242,90 @@ describe('M233 successful run still produces a clean proposal', () => {
       }
     });
   });
+
+  it('ok:true + tiny docs-only diff → typed no-proposal outcome', async () => {
+    await withTmpHome(async (fx) => {
+      const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+
+      try {
+        const repo = fx.makeRepo();
+        repo.enroll();
+
+        spawnEngineMock.mockImplementationOnce(
+          (cmd: { cwd?: string }, _cfg: unknown, _opts: unknown) => {
+            if (cmd?.cwd && existsSync(cmd.cwd)) {
+              writeFileSync(join(cmd.cwd, 'README.md'), '# Notes\n\nTiny clarification.\n', 'utf8');
+            }
+            return { ok: true, output: '{}', usage: { tokensIn: 10, tokensOut: 5 } };
+          },
+        );
+
+        const result = await runEngineSandboxed('claude', 'Clarify docs', makeConfig(), {
+          sourceRepo: repo.dir,
+          propose: true,
+        });
+
+        expect(result.state.status).toBe('done');
+        expect(result.proposalId).toBeUndefined();
+        expect(result.proposalOutcome).toMatchObject({
+          kind: 'trivial-proposal',
+          files: 1,
+          insertions: expect.any(Number),
+          deletions: expect.any(Number),
+        });
+        expect(listProposals()).toEqual([]);
+      } finally {
+        if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
+      }
+    });
+  });
+});
+
+describe('M350 trivial partial diff capture', () => {
+  it('failed run + tiny docs-only diff → no partial proposal filed', async () => {
+    await withTmpHome(async (fx) => {
+      const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+
+      try {
+        const repo = fx.makeRepo();
+        repo.enroll();
+
+        spawnEngineMock.mockImplementationOnce(
+          (cmd: { cwd?: string }, _cfg: unknown, _opts: unknown) => {
+            if (cmd?.cwd && existsSync(cmd.cwd)) {
+              writeFileSync(join(cmd.cwd, 'README.md'), '# Notes\n\nTiny clarification.\n', 'utf8');
+            }
+            return {
+              ok: false,
+              output: '',
+              error: 'spawnSync claude ETIMEDOUT',
+            };
+          },
+        );
+
+        const result = await runEngineSandboxed('claude', 'Clarify docs', makeConfig(), {
+          sourceRepo: repo.dir,
+          propose: true,
+        });
+
+        expect(result.state.status).toBe('failed');
+        expect(result.proposalId).toBeUndefined();
+        expect(result.proposalOutcome).toMatchObject({
+          kind: 'trivial-proposal',
+          files: 1,
+          insertions: expect.any(Number),
+          deletions: expect.any(Number),
+        });
+        expect(listProposals()).toEqual([]);
+      } finally {
+        if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
+      }
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

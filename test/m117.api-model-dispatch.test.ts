@@ -388,6 +388,96 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
 
     vi.resetModules();
   });
+
+  it('blocks tiny docs-only api-model diffs before filing', async () => {
+    const capturedProposalArgs: unknown[] = [];
+    const capturedGateArgs: unknown[] = [];
+
+    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+      createSandbox: (repo: string) => ({
+        id: 'sb-test',
+        worktreePath: tmpRepo,
+        sourceRepo: repo,
+        branch: 'ashlr-sandbox-test',
+      }),
+      removeSandbox: () => {},
+      sandboxDiff: () => ({
+        files: 1,
+        patch: [
+          'diff --git a/README.md b/README.md',
+          '--- a/README.md',
+          '+++ b/README.md',
+          '@@ -0,0 +1,2 @@',
+          '+# Notes',
+          '+Tiny clarification.',
+        ].join('\n'),
+        insertions: 2,
+        deletions: 0,
+      }),
+    }));
+
+    vi.doMock('../src/core/run/provider-client.js', () => ({
+      buildOpenAICompatibleClient: () => ({ id: 'openai-compat', model: 'local', supportsTools: true }),
+    }));
+
+    vi.doMock('../src/core/run/agent-loop.js', () => ({
+      runTask: async (task: { status: string; result?: string }) => {
+        task.status = 'done';
+        task.result = 'Made docs change.';
+        return task;
+      },
+    }));
+
+    vi.doMock('../src/core/mcp-native-engineer.js', () => ({
+      buildEngineerToolSpecs: () => [{ name: 'write_file', fn: async () => 'ok' }],
+    }));
+
+    vi.doMock('../src/core/seams/inbox.js', () => ({
+      selectInboxStore: () => ({
+        create: (args: unknown) => {
+          capturedProposalArgs.push(args);
+          return { id: 'should-not-file' };
+        },
+      }),
+    }));
+
+    vi.doMock('../src/core/knowledge/index.js', () => ({
+      scrubSecrets: (s: string) => s,
+    }));
+
+    vi.doMock('../src/core/run/completeness-gate.js', () => ({
+      runCompletenessGate: async (args: unknown) => {
+        capturedGateArgs.push(args);
+        return { pass: true };
+      },
+    }));
+
+    const { runApiModelSandboxed } = await import(
+      '../src/core/run/sandboxed-engine.js?bust=' + randomUUID()
+    ) as typeof import('../src/core/run/sandboxed-engine.js');
+
+    const result = await runApiModelSandboxed('local-coder', 'clarify docs', {
+      foundry: {
+        models: { 'local-coder': 'qwen2.5:72b-instruct-q4_K_M' },
+      },
+    } as never, {
+      sourceRepo: tmpRepo,
+      propose: true,
+    });
+
+    expect(capturedGateArgs).toHaveLength(0);
+    expect(capturedProposalArgs).toHaveLength(0);
+    expect(result.proposalId).toBeUndefined();
+    expect(result.proposalOutcome).toMatchObject({
+      kind: 'trivial-proposal',
+      files: 1,
+      insertions: 2,
+      deletions: 0,
+    });
+    expect(result.state.proposalOutcome).toMatchObject({ kind: 'trivial-proposal' });
+
+    vi.resetModules();
+  });
 });
 
 // ---------------------------------------------------------------------------

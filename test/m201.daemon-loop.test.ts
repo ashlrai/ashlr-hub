@@ -1060,6 +1060,72 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
   });
 
+  it('A1h2b: trivial proposal outcomes persist as gate-blocked no-proposal production', async () => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock local-coder trivial' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-trivial-proposal',
+      status: 'done',
+      usage: { totalTokens: 100, estCostUsd: 0.003, steps: 1 },
+      proposalOutcome: {
+        kind: 'trivial-proposal',
+        reason: 'trivial proposal blocked: 2 changed line(s) in docs only',
+        files: 1,
+        insertions: 1,
+        deletions: 1,
+      },
+    });
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: {
+          allowedBackends: ['local-coder'],
+        },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.proposalsCreated).toBe(0);
+    expect(result.dispatches?.[0]).toMatchObject({
+      itemId: items[0]!.id,
+      backend: 'local-coder',
+      dispatched: true,
+      skipReason: 'gate-blocked: trivial proposal blocked: 2 changed line(s) in docs only',
+      production: {
+        outcome: 'gate-blocked',
+        runId: 'run-trivial-proposal',
+        reason: 'trivial proposal blocked: 2 changed line(s) in docs only',
+        diffFiles: 1,
+        diffLines: 2,
+      },
+    });
+    expect(result.proposalProduction?.reasons?.[0]).toEqual({
+      reason: 'gate-blocked: trivial proposal blocked: 2 changed line(s) in docs only',
+      count: 1,
+    });
+    expect(loadWorkedLedger().events.filter((event) => event.itemId === items[0]!.id)).toEqual([
+      expect.objectContaining({ itemId: items[0]!.id, outcome: 'empty' }),
+    ]);
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      itemId: items[0]!.id,
+      outcome: 'gate-blocked',
+      proposalCreated: false,
+      runId: 'run-trivial-proposal',
+      reason: 'trivial proposal blocked: 2 changed line(s) in docs only',
+      diffFiles: 1,
+      diffLines: 2,
+      basis: 'run-proposal-outcome',
+    });
+    expect(readAgentActions({ limit: 10 }).find((event) => event.action === 'daemon:dispatch')).toMatchObject({
+      itemId: items[0]!.id,
+      outcome: 'no-proposal',
+      runId: 'run-trivial-proposal',
+    });
+  });
+
   it('A1h3: routed model is passed into the normal sandboxed runGoal path', async () => {
     const { items } = enrollWithItems(1);
     mockRouteBackend.mockReturnValue({

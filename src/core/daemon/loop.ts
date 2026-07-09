@@ -408,6 +408,7 @@ function productionOutcomeFromRunProposalOutcome(kind: RunProposalOutcome['kind'
       return 'proposal-created';
     case 'empty-diff':
       return 'empty-diff';
+    case 'trivial-proposal':
     case 'completeness-gate':
     case 'partial-completeness-gate':
       return 'gate-blocked';
@@ -468,7 +469,7 @@ function noProposalProductionReason(production: DaemonDispatchProduction | undef
 
 function noProposalOutcomeFromReason(reason: string): DaemonDispatchProductionOutcome {
   if (/\bempty-diff\b/i.test(reason)) return 'empty-diff';
-  if (/\b(completeness-gate|gate-blocked|gate)\b/i.test(reason)) return 'gate-blocked';
+  if (/\b(trivial-proposal|trivial|completeness-gate|gate-blocked|gate)\b/i.test(reason)) return 'gate-blocked';
   if (/\b(sandbox-unavailable|sandbox)\b/i.test(reason)) return 'sandbox-failed';
   if (/\b(proposal-capture-error|capture)\b/i.test(reason)) return 'proposal-capture-error';
   if (/\b(proposal-disabled)\b/i.test(reason)) return 'proposal-disabled';
