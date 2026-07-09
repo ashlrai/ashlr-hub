@@ -14,7 +14,11 @@ import {
   type AttentionEvalWindow,
 } from '../core/eval/attention.js';
 import { saveAttentionReport } from '../core/eval/attention-store.js';
-import { readAgentActions } from '../core/fleet/agent-action-ledger.js';
+import {
+  filterAgentActionsByRepoScope,
+  readAgentActions,
+  type AgentActionRepoScope,
+} from '../core/fleet/agent-action-ledger.js';
 import { makeColors, isTty, pad } from './ui.js';
 
 const { bold, dim, cyan, red, green, yellow, gray } = makeColors(isTty());
@@ -24,12 +28,14 @@ interface ParsedArgs {
   limit: number;
   json: boolean;
   save: boolean;
+  allRepos: boolean;
   usageError?: string;
 }
 
 export interface AttentionEvalCliDeps {
   now?: () => Date;
   readEvents?: typeof readAgentActions;
+  listEnrolledRepos?: () => string[];
   saveReport?: typeof saveAttentionReport;
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
@@ -39,7 +45,7 @@ const DEFAULT_LIMIT = 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function parseArgs(args: string[]): ParsedArgs {
-  const parsed: ParsedArgs = { window: '1d', limit: DEFAULT_LIMIT, json: false, save: false };
+  const parsed: ParsedArgs = { window: '1d', limit: DEFAULT_LIMIT, json: false, save: false, allRepos: false };
   let i = 0;
   while (i < args.length) {
     const arg = args[i]!;
@@ -64,6 +70,9 @@ function parseArgs(args: string[]): ParsedArgs {
       i++;
     } else if (arg === '--save') {
       parsed.save = true;
+      i++;
+    } else if (arg === '--all-repos' || arg === '--all') {
+      parsed.allRepos = true;
       i++;
     } else if (arg === '--help' || arg === '-h' || arg === 'help') {
       parsed.usageError = 'help';
@@ -97,15 +106,23 @@ export async function cmdEvalAttention(
   const windowMs = attentionWindowMs(parsed.window);
   const sinceMs = now.getTime() - windowMs;
   const maxFiles = Math.max(1, Math.ceil(windowMs / DAY_MS) + 1);
-  const events = (deps.readEvents ?? readAgentActions)({
+  const rawEvents = (deps.readEvents ?? readAgentActions)({
     sinceMs,
     limit: parsed.limit,
     maxFiles,
   });
+  const repoScope: AgentActionRepoScope = parsed.allRepos ? 'all' : 'enrolled-existing';
+  const events = parsed.allRepos
+    ? rawEvents
+    : filterAgentActionsByRepoScope(rawEvents, {
+      repoScope,
+      enrolledRepos: safeListEnrolledRepos(deps),
+    });
   const report = buildAttentionEvalReport(events, {
     window: parsed.window,
     generatedAt: now,
     limit: parsed.limit,
+    repoScope,
   });
 
   let savedPath: string | undefined;
@@ -149,6 +166,7 @@ function renderHelp(): string {
     ['--limit N', `Maximum events to read (default: ${DEFAULT_LIMIT}).`],
     ['--json', 'Emit JSON { report, savedPath }.'],
     ['--save', 'Persist the report under ~/.ashlr/eval/attention/reports/.'],
+    ['--all-repos', 'Include every metadata event, including unenrolled or missing repos.'],
   ];
   const width = Math.max(...opts.map(([flag]) => flag.length));
   const lines: string[] = [];
@@ -157,7 +175,7 @@ function renderHelp(): string {
   lines.push('');
   lines.push('  ' + bold('Usage:'));
   lines.push('');
-  lines.push('    ashlr eval attention [--window 1d|7d|30d] [--limit N] [--json] [--save]');
+  lines.push('    ashlr eval attention [--window 1d|7d|30d] [--limit N] [--json] [--save] [--all-repos]');
   lines.push('');
   lines.push('  ' + bold('Options:'));
   lines.push('');
@@ -179,6 +197,15 @@ function repoLine(report: AttentionEvalReport): string {
     ? yellow(report.repoAttention.verdict)
     : green(report.repoAttention.verdict);
   return `${report.repoAttention.activeRepos} active, top ${top?.repoLabel ?? 'none'} ${share}, entropy ${report.repoAttention.entropy} (${verdict})`;
+}
+
+function safeListEnrolledRepos(deps: AttentionEvalCliDeps): string[] | undefined {
+  if (!deps.listEnrolledRepos) return undefined;
+  try {
+    return deps.listEnrolledRepos();
+  } catch {
+    return [];
+  }
 }
 
 function contextLine(report: AttentionEvalReport): string {

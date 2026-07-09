@@ -563,4 +563,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Tighten long-base64 scrubbing so ordinary absolute temp paths are preserved while compact blobs still redact.
 - [x] Run focused web/control/dashboard/inbox/safety, daemon/fleet/scrub, typecheck, lint, build, audit, and diff verification for the two slices.
 - [x] Commit `98b89f0`, push the cooldown/scrub fix, archive stale dead-owner spend guard, reinstall launchd daemon, and verify guard health clear on pid `36972`.
-- [ ] Next lane: filter live attention/workspace summaries to enrolled existing repos by default so test fixture telemetry cannot train the loop.
+- [x] Filter live attention/workspace summaries to enrolled existing repos by default so stale fixture telemetry cannot shape FleetStatus, web workspace views, or attention evals.
+- [x] Preserve raw metadata audit access with `readAgentActions()` and explicit `ashlr eval attention --all-repos`, while saved attention reports now record `source.repoScope`.
+- [x] Added focused regressions for workspace scoping, FleetStatus context-efficiency fixtures, and CLI default/all-repos attention behavior.
+- [x] Verification passed: focused workspace/eval/status suite, typecheck, lint, build, audit, and diff check.
+- [ ] Next lane: sanitize inbox/proposal persistence on write/read without erasing legitimate source diff review context.
+- [ ] Next lane: integrate proposal-production bottleneck findings from the active scout and pick the next yield patch.

@@ -9,7 +9,7 @@
 
 import { existsSync, mkdirSync, appendFileSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type {
   EngineId,
   EngineTier,
@@ -22,6 +22,7 @@ import type {
 } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { causalMetadata } from '../learning/causal.js';
+import { listEnrolled } from '../sandbox/policy.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
@@ -218,6 +219,8 @@ export interface AgentWorkspaceStatus {
   };
   recentActions: AgentWorkspaceRecentAction[];
 }
+
+export type AgentActionRepoScope = 'enrolled-existing' | 'all';
 
 export function agentActionsDir(): string {
   const configuredHome = process.env.ASHLR_HOME;
@@ -425,6 +428,32 @@ export function readAgentActions(opts?: {
   }
 }
 
+function enrolledExistingRepos(repos?: readonly string[]): Set<string> {
+  const candidates = repos ?? listEnrolled();
+  const out = new Set<string>();
+  for (const repo of candidates) {
+    if (typeof repo !== 'string' || repo.trim() === '') continue;
+    const abs = resolve(repo);
+    if (existsSync(abs)) out.add(abs);
+  }
+  return out;
+}
+
+export function filterAgentActionsByRepoScope(
+  events: readonly AgentActionEvent[],
+  opts?: {
+    repoScope?: AgentActionRepoScope;
+    enrolledRepos?: readonly string[];
+  },
+): AgentActionEvent[] {
+  if (opts?.repoScope === 'all') return [...events];
+  const allowed = enrolledExistingRepos(opts?.enrolledRepos);
+  return events.filter((event) => {
+    if (!event.repo) return true;
+    return allowed.has(resolve(event.repo));
+  });
+}
+
 function fileMayContainSince(file: string, sinceMs: number): boolean {
   const match = DATE_LEDGER_FILE_RE.exec(file);
   if (!match) return true;
@@ -572,14 +601,20 @@ export function readAgentWorkspace(opts?: {
   limit?: number;
   limitPerDimension?: number;
   recentLimit?: number;
+  repoScope?: AgentActionRepoScope;
+  enrolledRepos?: readonly string[];
 }): AgentWorkspaceStatus {
   const windowMs = opts?.windowMs ?? 24 * 60 * 60 * 1000;
   const sinceMs = Date.now() - windowMs;
   const maxFiles = Math.max(1, Math.ceil(windowMs / DAY_MS) + 1);
-  const events = readAgentActions({
+  const rawEvents = readAgentActions({
     sinceMs,
     limit: opts?.limit ?? 1000,
     maxFiles,
+  });
+  const events = filterAgentActionsByRepoScope(rawEvents, {
+    repoScope: opts?.repoScope,
+    enrolledRepos: opts?.enrolledRepos,
   });
   return summarizeAgentWorkspace(events, {
     windowHours: windowMs / (60 * 60 * 1000),

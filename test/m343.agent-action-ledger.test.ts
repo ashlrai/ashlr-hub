@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   agentActionsDir,
+  filterAgentActionsByRepoScope,
   readAgentActions,
   readAgentWorkspace,
   recordAgentAction,
@@ -42,6 +43,12 @@ function makeEvent(overrides: Partial<AgentActionEvent> = {}): AgentActionEvent 
     counts: { diffFiles: 0, diffLines: 0 },
     ...overrides,
   };
+}
+
+function writeEnrollment(repos: string[]): void {
+  const ashlrDir = join(home, '.ashlr');
+  mkdirSync(ashlrDir, { recursive: true });
+  writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos }), 'utf8');
 }
 
 beforeEach(() => {
@@ -248,9 +255,12 @@ describe('M343 agent action ledger', () => {
   });
 
   it('reads a bounded durable workspace window from disk', () => {
+    const repo = join(home, 'repo-a');
+    mkdirSync(repo, { recursive: true });
+    writeEnrollment([repo]);
     recordAgentAction([
       makeEvent({ action: 'old', ts: '2026-07-07T00:00:00.000Z' }),
-      makeEvent({ action: 'new', ts: new Date().toISOString(), outcome: 'proposal-created', proposalId: 'p-new' }),
+      makeEvent({ action: 'new', ts: new Date().toISOString(), repo, outcome: 'proposal-created', proposalId: 'p-new' }),
     ]);
 
     const summary = readAgentWorkspace({ windowMs: 60 * 60 * 1000, limit: 20 });
@@ -258,6 +268,39 @@ describe('M343 agent action ledger', () => {
     expect(summary.eventCount).toBe(1);
     expect(summary.proposalEvents).toBe(1);
     expect(summary.recentActions[0]).toMatchObject({ action: 'new', proposalId: 'p-new' });
+  });
+
+  it('filters workspace summaries to enrolled existing repos while keeping repo-less system events', () => {
+    const repo = join(home, 'repo-a');
+    const missingRepo = join(home, 'deleted-fixture');
+    mkdirSync(repo, { recursive: true });
+    writeEnrollment([repo, missingRepo]);
+    const now = new Date().toISOString();
+    recordAgentAction([
+      makeEvent({ action: 'kept-enrolled', ts: now, repo, outcome: 'proposal-created', proposalId: 'p-kept' }),
+      makeEvent({ action: 'dropped-missing', ts: now, repo: missingRepo, outcome: 'failed' }),
+      makeEvent({ action: 'kept-system', ts: now, repo: undefined, kind: 'tick', outcome: 'ok' }),
+    ]);
+
+    const filtered = filterAgentActionsByRepoScope(readAgentActions({ limit: 10 }), {
+      repoScope: 'enrolled-existing',
+      enrolledRepos: [repo, missingRepo],
+    });
+    const scoped = readAgentWorkspace({ windowMs: 60 * 60 * 1000, limit: 10 });
+    const all = readAgentWorkspace({ windowMs: 60 * 60 * 1000, limit: 10, repoScope: 'all' });
+
+    expect(filtered.map((event) => event.action)).toEqual(['kept-system', 'kept-enrolled']);
+    expect(scoped.eventCount).toBe(2);
+    expect(scoped.proposalEvents).toBe(1);
+    expect(scoped.byRepo).toEqual([expect.objectContaining({ key: repo, count: 1 })]);
+    expect(scoped.recentActions.map((event) => event.action)).not.toContain('dropped-missing');
+    expect(all.eventCount).toBe(3);
+    expect(all.byRepo).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: repo, count: 1 }),
+        expect.objectContaining({ key: missingRepo, count: 1 }),
+      ]),
+    );
   });
 
   it('falls back to HOME when ASHLR_HOME is unset or empty', () => {

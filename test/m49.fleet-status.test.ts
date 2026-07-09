@@ -860,6 +860,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
   it('reports durable global workspace action telemetry from the append-only ledger', async () => {
     const now = new Date().toISOString();
+    const repo = join(tmpHome, 'repo-a');
+    const staleFixtureRepo = join(tmpHome, 'deleted-fixture');
+    mkdirSync(repo, { recursive: true });
+    mkdirSync(join(tmpHome, '.ashlr'), { recursive: true });
+    writeFileSync(join(tmpHome, '.ashlr', 'enrollment.json'), JSON.stringify({ repos: [repo, staleFixtureRepo] }), 'utf8');
     const genomeDir = join(tmpHome, '.ashlr', 'genome');
     mkdirSync(genomeDir, { recursive: true });
     writeFileSync(
@@ -895,7 +900,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       outcome: 'no-proposal',
       action: 'daemon:dispatch',
       summary: 'local-coder empty-diff for Improve proposal yield',
-      repo: '/repo/a',
+      repo,
       itemId: 'item-a',
       source: 'todo',
       backend: 'local-coder',
@@ -917,6 +922,14 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         tier: 'frontier',
         model: 'gpt-5.5',
         summary: 'codex proposal-created for Improve proposal yield',
+      },
+      {
+        ...baseEvent,
+        repo: staleFixtureRepo,
+        itemId: 'item-stale',
+        outcome: 'failed',
+        action: 'daemon:dispatch',
+        summary: 'stale fixture repo should not shape fleet workspace attention',
       },
     ]);
 
@@ -1000,6 +1013,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
   it('promotes degraded context efficiency into next actions', async () => {
     const now = new Date().toISOString();
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo-a');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
     writeRunningDaemon(tmpHome, [], now);
     recordAgentAction({
       schemaVersion: 1,
@@ -1010,7 +1028,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       outcome: 'no-proposal',
       action: 'daemon:dispatch',
       summary: 'local-coder empty-diff for Improve context',
-      repo: '/repo/a',
+      repo,
       itemId: 'item-a',
       source: 'todo',
       backend: 'local-coder',

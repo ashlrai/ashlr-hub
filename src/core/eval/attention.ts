@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import * as path from 'node:path';
-import type { AgentActionEvent } from '../fleet/agent-action-ledger.js';
+import type { AgentActionEvent, AgentActionRepoScope } from '../fleet/agent-action-ledger.js';
 import type {
   CompressionContextSummary,
   EvidenceOutcomeSummary,
@@ -44,6 +44,7 @@ export interface AttentionEvalReport {
     ledgers: ['agent-actions'];
     limit: number;
     since: string;
+    repoScope: AgentActionRepoScope;
     metadataOnly: true;
   };
   repoAttention: {
@@ -122,6 +123,7 @@ export interface BuildAttentionEvalReportOptions {
   window?: AttentionEvalWindow;
   generatedAt?: Date | string;
   limit?: number;
+  repoScope?: AgentActionRepoScope;
 }
 
 const DEFAULT_WINDOW: AttentionEvalWindow = '1d';
@@ -320,6 +322,7 @@ export function buildAttentionEvalReport(
       ledgers: ['agent-actions'],
       limit,
       since: new Date(sinceMs).toISOString(),
+      repoScope: opts.repoScope ?? 'enrolled-existing',
       metadataOnly: true,
     },
     repoAttention: {

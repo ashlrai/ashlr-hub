@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { buildAttentionEvalReport, type AttentionEvalReport } from '../src/core/eval/attention.js';
@@ -8,6 +8,7 @@ import {
   saveAttentionReport,
 } from '../src/core/eval/attention-store.js';
 import { cmdEvalAttention } from '../src/cli/eval-attention.js';
+import type { AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
 
 const FIXTURE = resolve('test/fixtures/attention/input.json');
 
@@ -140,7 +141,7 @@ describe('M346 eval attention', () => {
     let capturedReadOpts: { sinceMs?: number; limit?: number; maxFiles?: number } | undefined;
     let saved: AttentionEvalReport | undefined;
 
-    const code = await cmdEvalAttention(['--window', '7d', '--limit', '2', '--json', '--save'], {
+    const code = await cmdEvalAttention(['--window', '7d', '--limit', '2', '--json', '--save', '--all-repos'], {
       now: () => new Date('2026-07-09T05:01:00.000Z'),
       readEvents: (opts) => {
         capturedReadOpts = opts;
@@ -166,6 +167,69 @@ describe('M346 eval attention', () => {
     expect(parsed.savedPath).toBe('/tmp/attention-report.json');
     expect(parsed.report.eventCount).toBe(2);
     expect(parsed.report.source.limit).toBe(2);
+    expect(parsed.report.source.repoScope).toBe('all');
+  });
+
+  it('filters CLI reports to enrolled existing repos by default and supports all-repos mode', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-m346-attention-scope-'));
+    try {
+      const repo = join(root, 'repo-a');
+      const missingRepo = join(root, 'deleted-fixture');
+      mkdirSync(repo, { recursive: true });
+      const events: AgentActionEvent[] = [
+        {
+          ...(fixtureEvents()[0] as AgentActionEvent),
+          repo,
+          action: 'kept-enrolled',
+        },
+        {
+          ...(fixtureEvents()[1] as AgentActionEvent),
+          repo: missingRepo,
+          action: 'dropped-missing',
+        },
+        {
+          ...(fixtureEvents()[2] as AgentActionEvent),
+          repo: undefined,
+          action: 'kept-system',
+        },
+      ];
+      const baseDeps = {
+        now: () => new Date('2026-07-09T05:01:00.000Z'),
+        readEvents: () => events,
+        listEnrolledRepos: () => [repo, missingRepo],
+      };
+      let scopedOutput = '';
+      const scopedCode = await cmdEvalAttention(['--json'], {
+        ...baseDeps,
+        stdout: (text) => {
+          scopedOutput += text;
+        },
+      });
+      let allOutput = '';
+      const allCode = await cmdEvalAttention(['--json', '--all-repos'], {
+        ...baseDeps,
+        stdout: (text) => {
+          allOutput += text;
+        },
+      });
+
+      expect(scopedCode).toBe(0);
+      expect(allCode).toBe(0);
+      const scoped = JSON.parse(scopedOutput) as { report: AttentionEvalReport };
+      const all = JSON.parse(allOutput) as { report: AttentionEvalReport };
+      expect(scoped.report.eventCount).toBe(2);
+      expect(scoped.report.repoAttention.activeRepos).toBe(1);
+      expect(scoped.report.source.repoScope).toBe('enrolled-existing');
+      expect(scoped.report.repoAttention.topRepos.map((row) => row.repoLabel)).toEqual(['repo-a']);
+      expect(all.report.eventCount).toBe(3);
+      expect(all.report.repoAttention.activeRepos).toBe(2);
+      expect(all.report.source.repoScope).toBe('all');
+      expect(all.report.repoAttention.topRepos.map((row) => row.repoLabel)).toEqual(
+        expect.arrayContaining(['repo-a', 'deleted-fixture']),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('returns usage errors for invalid CLI flags without reading ledgers', async () => {
