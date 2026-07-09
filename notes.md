@@ -5,6 +5,7 @@
 - Implementation: `buildNextActions()` now adds `recover-stale-goal-lanes` when `FleetStatus.laneLocks.staleInProgress > 0`. The action stays control-plane/advisory: first inspect the goal, then optionally pause and resume the stale milestone to reset it to pending.
 - Safety decision: do not silently change `resumeMilestone()` semantics for in-progress milestones and do not auto-reset stale work in daemon selection. The action exposes existing `ashlr goals show`, `ashlr goals pause`, and `ashlr goals resume` commands so an operator or supervising agent can recover explicitly.
 - Verification passed: `npm run test:ci -- test/m49.fleet-status.test.ts` (45 tests), `npm run typecheck -- --pretty false`, `npm run lint` (existing 115-warning baseline, 0 errors), `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check`.
+- Production push/reload: pushed `77388cb feat: Add stale goal lane recovery action`, rebuilt `dist`, reinstalled/resumed the launchd daemon, and live smoke showed daemon PID `46918`, guard clear, `recover-stale-goal-lanes` as the top next action/Mission Brief action for the stale Phantom milestone, and lane locks `12 active / 1 stale / 0 handoff / 0 unverified`.
 
 ## Current Read-Only Lane Locks
 - Start state: clean pushed `master` at `f5e487b`; Entire remains not set up; daemon/fleet smoke before edits showed daemon running, guard clear, goal-focus active, 13 backlog items, 11 eligible, and `autonomyDirection.mode:"backlog-build"`.
