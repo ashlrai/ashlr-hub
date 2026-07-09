@@ -36,6 +36,7 @@ import { strategicTierOfRepo, type StrategicTier } from '../ecosystem/focus.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import { loadQueuedAutonomyItems } from '../portfolio/queued-autonomy.js';
 import { detectRepoExecutionProfile, type RepoPackageManager } from '../run/repo-profile.js';
+import { DEFAULT_COOLDOWN_MS, isSuppressibleWorkedOutcome, loadWorkedLedger } from './worked-ledger.js';
 import {
   readDispatchProductionYield,
   type DispatchProductionYieldSummary,
@@ -166,6 +167,10 @@ export interface FleetAutonomyEffectivenessStatus {
   summary: string;
   counts: {
     backlogItems: number;
+    eligibleBacklogItems?: number;
+    cooldownItems?: number;
+    pendingItems?: number;
+    nextEligibleAt?: string | null;
     pendingProposals: number;
     frontierPending: number;
     awaitingHostMerge: number;
@@ -241,6 +246,10 @@ export interface FleetStatus {
   backends: FleetBackendStatus[];
   queue: {
     backlogItems: number;
+    eligibleBacklogItems?: number;
+    cooldownItems?: number;
+    pendingItems?: number;
+    nextEligibleAt?: string | null;
     repos?: FleetQueueRepoCoverage;
     next?: FleetQueueNextItem[];
     shared?: FleetSharedQueueStatus;
@@ -296,6 +305,86 @@ function mergeVisibleQueueItems(items: WorkItem[], enrolledRepos: Set<string>): 
     merged.push(item);
   }
   return merged;
+}
+
+interface FleetQueueEligibility {
+  eligibleItems: WorkItem[];
+  cooldownItems: number;
+  pendingItems: number;
+  nextEligibleAt: string | null;
+}
+
+function isoFromMs(ms: number | null): string | null {
+  if (ms === null || !Number.isFinite(ms)) return null;
+  try {
+    return new Date(ms).toISOString();
+  } catch {
+    return null;
+  }
+}
+
+function pendingItemIdsForQueue(items: WorkItem[], pendingProposals: Proposal[]): Set<string> {
+  const pendingItemIds = new Set<string>();
+  for (const prop of pendingProposals) {
+    const haystack = `${prop.title} ${prop.summary}`;
+    for (const item of items) {
+      const escaped = item.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`);
+      if (re.test(haystack)) pendingItemIds.add(item.id);
+    }
+  }
+  return pendingItemIds;
+}
+
+function buildQueueEligibility(
+  items: WorkItem[],
+  pendingProposals: Proposal[],
+  cfg: AshlrConfig,
+): FleetQueueEligibility {
+  const cooldownMs = configCooldownMs(cfg) ?? DEFAULT_COOLDOWN_MS;
+  const nowMs = Date.now();
+  const latestByItem = new Map<string, { tsMs: number; suppressible: boolean }>();
+  for (const event of loadWorkedLedger().events) {
+    const eventMs = Date.parse(event.ts);
+    if (Number.isNaN(eventMs)) continue;
+    const prior = latestByItem.get(event.itemId);
+    if (prior === undefined || eventMs > prior.tsMs) {
+      latestByItem.set(event.itemId, {
+        tsMs: eventMs,
+        suppressible: isSuppressibleWorkedOutcome(event.outcome),
+      });
+    }
+  }
+
+  const pendingItemIds = pendingItemIdsForQueue(items, pendingProposals);
+  const eligibleItems: WorkItem[] = [];
+  let cooldownItems = 0;
+  let pendingItems = 0;
+  let nextEligibleMs: number | null = null;
+
+  for (const item of items) {
+    if (pendingItemIds.has(item.id)) {
+      pendingItems++;
+      continue;
+    }
+    const last = latestByItem.get(item.id);
+    const cooldownUntil = last && last.suppressible ? last.tsMs + cooldownMs : null;
+    if (cooldownUntil !== null && cooldownUntil > nowMs) {
+      cooldownItems++;
+      if (nextEligibleMs === null || cooldownUntil < nextEligibleMs) {
+        nextEligibleMs = cooldownUntil;
+      }
+      continue;
+    }
+    eligibleItems.push(item);
+  }
+
+  return {
+    eligibleItems,
+    cooldownItems,
+    pendingItems,
+    nextEligibleAt: isoFromMs(nextEligibleMs),
+  };
 }
 
 export function resolveAutonomyControlMode(cfg: AshlrConfig): FleetAutonomyControlMode {
@@ -407,7 +496,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
 
   // ── queue (backlog size) ──────────────────────────────────────────────────
   let backlogItems = 0;
+  let visibleQueueItems: WorkItem[] = [];
   let nextQueueItems: FleetQueueNextItem[] = [];
+  let eligibleBacklogItems = 0;
+  let cooldownItems = 0;
+  let pendingItems = 0;
+  let nextEligibleAt: string | null = null;
   let queueRepos: FleetQueueRepoCoverage | undefined;
   try {
     // Status must be observational. A full buildBacklog() refresh can run
@@ -430,6 +524,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ],
       enrolledRepos,
     );
+    visibleQueueItems = items;
     backlogItems = items.length;
     const byRepo = new Map<string, number>();
     const byTier = new Map<StrategicTier, { repos: Set<string>; items: number }>();
@@ -458,19 +553,9 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
         .slice(0, 8)
         .map(([repo, itemCount]) => ({ repo, items: itemCount })),
     };
-    nextQueueItems = items
-      .slice()
-      .sort((a, b) => b.score - a.score || a.title.localeCompare(b.title))
-      .slice(0, 5)
-      .map((item) => ({
-        id: item.id,
-        title: item.title,
-        repo: item.repo,
-        source: item.source,
-        score: item.score,
-      }));
   } catch {
     backlogItems = 0;
+    visibleQueueItems = [];
     nextQueueItems = [];
   }
 
@@ -506,6 +591,30 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     frontierPending = 0;
     awaitingHostMerge = 0;
     applied = 0;
+  }
+
+  try {
+    const eligibility = buildQueueEligibility(visibleQueueItems, pendingProposals, cfg);
+    eligibleBacklogItems = eligibility.eligibleItems.length;
+    cooldownItems = eligibility.cooldownItems;
+    pendingItems = eligibility.pendingItems;
+    nextEligibleAt = eligibility.nextEligibleAt;
+    nextQueueItems = eligibility.eligibleItems
+      .slice()
+      .sort((a, b) => b.score - a.score || a.title.localeCompare(b.title))
+      .slice(0, 5)
+      .map((item) => ({
+        id: item.id,
+        title: item.title,
+        repo: item.repo,
+        source: item.source,
+        score: item.score,
+      }));
+  } catch {
+    eligibleBacklogItems = backlogItems;
+    cooldownItems = 0;
+    pendingItems = 0;
+    nextEligibleAt = null;
   }
 
   // ── merges (recent auto-merges across recent ticks) ───────────────────────
@@ -570,6 +679,10 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     backends,
     queue: {
       backlogItems,
+      eligibleBacklogItems,
+      cooldownItems,
+      pendingItems,
+      nextEligibleAt,
       ...(queueRepos !== undefined ? { repos: queueRepos } : {}),
       ...(nextQueueItems.length > 0 ? { next: nextQueueItems } : {}),
       ...(sharedQueue !== undefined ? { shared: sharedQueue } : {}),
@@ -759,8 +872,13 @@ function dispatchYieldNextActionDetail(dispatchProduction: DispatchProductionYie
 
 function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffectivenessStatus {
   const readiness = status.autoMergeReadiness;
+  const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
   const counts: FleetAutonomyEffectivenessStatus['counts'] = {
     backlogItems: status.queue.backlogItems,
+    eligibleBacklogItems,
+    cooldownItems: status.queue.cooldownItems ?? 0,
+    pendingItems: status.queue.pendingItems ?? 0,
+    nextEligibleAt: status.queue.nextEligibleAt ?? null,
     pendingProposals: status.proposals.pending,
     frontierPending: status.proposals.frontierPending,
     awaitingHostMerge: status.proposals.awaitingHostMerge ?? 0,
@@ -825,16 +943,19 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
       counts,
     };
   }
-  if (counts.pendingProposals === 0 && counts.backlogItems > 0) {
+  if (counts.pendingProposals === 0 && eligibleBacklogItems > 0) {
     const production = status.proposalProduction;
     const productionDetail = production ? proposalProductionDiagnosis(production) : null;
+    const backlogDetail = eligibleBacklogItems === counts.backlogItems
+      ? `${counts.backlogItems} backlog item(s) are available`
+      : `${eligibleBacklogItems}/${counts.backlogItems} backlog item(s) are eligible now`;
     return {
       phase: 'proposal-starved',
       canAutoMergeNow: false,
       bottleneck: 'proposal-production',
       summary: productionDetail
-        ? `${counts.backlogItems} backlog item(s) are available, but there are no pending proposals for auto-merge; ${productionDetail}.`
-        : `${counts.backlogItems} backlog item(s) are available, but there are no pending proposals for auto-merge.`,
+        ? `${backlogDetail}, but there are no pending proposals for auto-merge; ${productionDetail}.`
+        : `${backlogDetail}, but there are no pending proposals for auto-merge.`,
       counts,
     };
   }
@@ -842,7 +963,9 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
     phase: 'idle',
     canAutoMergeNow: false,
     bottleneck: 'none',
-    summary: counts.recentMerges > 0
+    summary: counts.backlogItems > 0 && eligibleBacklogItems === 0
+      ? `No eligible backlog work is visible; ${counts.cooldownItems ?? 0} item(s) are cooling and ${counts.pendingItems ?? 0} already have pending proposals.`
+      : counts.recentMerges > 0
       ? `No pending merge work is visible; ${counts.recentMerges} auto-merge(s) landed in the last 24h.`
       : 'No pending proposals or backlog work are visible.',
     counts,
@@ -948,7 +1071,8 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     });
   }
 
-  if (status.queue.backlogItems > 0 && !controlBlocked) {
+  const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
+  if (eligibleBacklogItems > 0 && !controlBlocked) {
     const dispatchYieldDetail = status.dispatchProduction
       ? dispatchYieldNextActionDetail(status.dispatchProduction)
       : null;
@@ -978,8 +1102,20 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
       label: 'Build backlog proposals',
       detail: top
         ? `Start with ${top.title}`
-        : `${status.queue.backlogItems} backlog item(s) are available.`,
+        : `${eligibleBacklogItems} backlog item(s) are eligible.`,
       ...(top?.repo ? { target: top.repo } : {}),
+    });
+  } else if (status.queue.backlogItems > 0 && !controlBlocked) {
+    const cooling = status.queue.cooldownItems ?? 0;
+    const pending = status.queue.pendingItems ?? 0;
+    const nextEligible = status.queue.nextEligibleAt;
+    add({
+      id: 'wait-for-backlog-eligibility',
+      priority: 'low',
+      label: 'Wait for backlog eligibility',
+      detail: nextEligible
+        ? `${status.queue.backlogItems} backlog item(s) are present, but ${cooling} are cooling and ${pending} already have pending proposals; next eligible at ${nextEligible}.`
+        : `${status.queue.backlogItems} backlog item(s) are present, but none are currently eligible (${cooling} cooling, ${pending} pending).`,
     });
   }
 

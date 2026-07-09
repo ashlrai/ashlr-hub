@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { AshlrConfig, DaemonTick, EngineId } from '../src/core/types.js';
+import type { AshlrConfig, DaemonTick, EngineId, WorkItem } from '../src/core/types.js';
 import { buildFleetStatus } from '../src/core/fleet/status.js';
 import { formatFleetStatus } from '../src/cli/fleet.js';
 import { recordUse } from '../src/core/fleet/quota.js';
@@ -26,6 +26,7 @@ import { createProposal } from '../src/core/inbox/store.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import { recordDispatchProduction, type DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import { recordAgentAction, type AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
+import { recordOutcome } from '../src/core/fleet/worked-ledger.js';
 import type { Proposal } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -99,6 +100,43 @@ function docsDiff(body: string): string {
     `+${body}`,
     '',
   ].join('\n');
+}
+
+function makeBacklogItem(
+  repo: string,
+  id: string,
+  title: string,
+  score = 5,
+  source: WorkItem['source'] = 'goal',
+): WorkItem {
+  return {
+    id,
+    repo,
+    source,
+    title,
+    detail: 'detail',
+    value: 5,
+    effort: 1,
+    score,
+    tags: ['test'],
+    ts: '2026-07-03T00:00:00.000Z',
+  };
+}
+
+function writeBacklogSnapshot(home: string, repo: string, items: WorkItem[]): void {
+  const ashlrDir = join(home, '.ashlr');
+  mkdirSync(ashlrDir, { recursive: true });
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+  writeFileSync(
+    join(ashlrDir, 'backlog.json'),
+    JSON.stringify({
+      generatedAt: '2026-07-03T00:00:00.000Z',
+      repos: [repo],
+      items,
+    }),
+    'utf8',
+  );
 }
 
 function createSignedProposal(
@@ -298,6 +336,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const s = await buildFleetStatus(baseConfig());
 
     expect(s.queue.backlogItems).toBe(2);
+    expect(s.queue.eligibleBacklogItems).toBe(2);
+    expect(s.queue.cooldownItems).toBe(0);
+    expect(s.queue.pendingItems).toBe(0);
+    expect(s.queue.nextEligibleAt).toBeNull();
     expect(s.queue.repos).toEqual({
       enrolled: 1,
       existing: 1,
@@ -337,6 +379,96 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     expect(existsSync(join(tmpHome, '.ashlr', 'audit'))).toBe(false);
+  });
+
+  it('does not suggest building backlog when all visible items are cooling', async () => {
+    const repo = join(tmpHome, 'repo');
+    const items = [
+      makeBacklogItem(repo, 'repo:goal:cooling-one', 'Cooling one', 9),
+      makeBacklogItem(repo, 'repo:goal:cooling-two', 'Cooling two', 5),
+    ];
+    writeRunningDaemon(tmpHome);
+    writeBacklogSnapshot(tmpHome, repo, items);
+    recordOutcome('repo:goal:cooling-one', 'empty', new Date().toISOString());
+    recordOutcome('repo:goal:cooling-two', 'judged-review', new Date().toISOString());
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.queue.backlogItems).toBe(2);
+    expect(s.queue.eligibleBacklogItems).toBe(0);
+    expect(s.queue.cooldownItems).toBe(2);
+    expect(s.queue.pendingItems).toBe(0);
+    expect(s.queue.nextEligibleAt).toMatch(/T/);
+    expect(s.queue.next).toBeUndefined();
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('build-backlog');
+    expect(s.nextActions).toContainEqual(expect.objectContaining({
+      id: 'wait-for-backlog-eligibility',
+      detail: expect.stringContaining('next eligible at'),
+    }));
+    expect(s.autonomyEffectiveness).toMatchObject({
+      phase: 'idle',
+      counts: {
+        backlogItems: 2,
+        eligibleBacklogItems: 0,
+        cooldownItems: 2,
+      },
+    });
+  });
+
+  it('does not suggest building backlog when visible items already have pending proposals', async () => {
+    const repo = join(tmpHome, 'repo');
+    const item = makeBacklogItem(repo, 'repo:goal:pending', 'Pending proposal work', 7);
+    writeRunningDaemon(tmpHome);
+    writeBacklogSnapshot(tmpHome, repo, [item]);
+    createProposal(
+      {
+        repo,
+        origin: 'agent',
+        kind: 'patch',
+        title: `Proposal for ${item.id}`,
+        summary: 'This pending proposal covers the queued item.',
+        diff: docsDiff('pending'),
+      },
+      baseConfig(),
+    );
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.queue.backlogItems).toBe(1);
+    expect(s.queue.eligibleBacklogItems).toBe(0);
+    expect(s.queue.cooldownItems).toBe(0);
+    expect(s.queue.pendingItems).toBe(1);
+    expect(s.queue.next).toBeUndefined();
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('build-backlog');
+    expect(s.nextActions).toContainEqual(expect.objectContaining({
+      id: 'wait-for-backlog-eligibility',
+      detail: expect.stringContaining('0 cooling, 1 pending'),
+    }));
+  });
+
+  it('builds queue.next and build-backlog from eligible items instead of higher-scored cooling items', async () => {
+    const repo = join(tmpHome, 'repo');
+    const cooled = makeBacklogItem(repo, 'repo:goal:cooled', 'High score but cooling', 10);
+    const fresh = makeBacklogItem(repo, 'repo:goal:fresh', 'Fresh eligible work', 2);
+    writeRunningDaemon(tmpHome);
+    writeBacklogSnapshot(tmpHome, repo, [cooled, fresh]);
+    recordOutcome(cooled.id, 'empty', new Date().toISOString());
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.queue.backlogItems).toBe(2);
+    expect(s.queue.eligibleBacklogItems).toBe(1);
+    expect(s.queue.cooldownItems).toBe(1);
+    expect(s.queue.next?.[0]).toMatchObject({
+      id: fresh.id,
+      title: fresh.title,
+      repo,
+    });
+    expect(s.nextActions).toContainEqual(expect.objectContaining({
+      id: 'build-backlog',
+      detail: `Start with ${fresh.title}`,
+      target: repo,
+    }));
   });
 
   it('summarizes proposal starvation when the daemon is running with backlog but no proposals', async () => {
@@ -1069,6 +1201,10 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       ],
       queue: {
         backlogItems: 7,
+        eligibleBacklogItems: 5,
+        cooldownItems: 1,
+        pendingItems: 1,
+        nextEligibleAt: '2026-06-17T01:00:00.000Z',
         repos: {
           enrolled: 3,
           existing: 3,
@@ -1298,6 +1434,8 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
     expect(out).toContain('reason=builtin backend is always available');
     expect(out).toContain('resource=not-sensed');
     expect(out).toContain('7 backlog item(s)');
+    expect(out).toContain('eligibility:   5 eligible, 1 cooling, 1 pending');
+    expect(out).toContain('next eligible: 2026-06-17T01:00:00.000Z');
     expect(out).toContain('repos:         2/3 active (3 enrolled, 1 silent)');
     expect(out).toContain('top repos:     a:5, b:2');
     expect(out).toContain('focus tiers:   core-fleet:1r/5i, supporting:1r/2i');

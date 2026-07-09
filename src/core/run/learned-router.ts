@@ -271,6 +271,11 @@ function dispatchYieldForBackend(
   for (const event of events) {
     if (event.backend !== backend) continue;
     if (event.source !== source) continue;
+    // `proposal-disabled` is a control-flow/capture-policy outcome (for
+    // example non-final TITRR attempts with propose:false), not a backend
+    // quality signal. Counting it as a failed proposal attempt makes the
+    // router learn against the wrong thing.
+    if (event.outcome === 'proposal-disabled') continue;
     attempts++;
     if (event.proposalCreated) proposalsCreated++;
     const reason = event.reason ?? event.routeReason ?? event.outcome;

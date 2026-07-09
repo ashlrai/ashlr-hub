@@ -632,6 +632,72 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(rec.tier).toBe(base.tier);
   });
 
+  it('proposal-disabled dispatch outcomes do not poison backend yield learning', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.9,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents: [
+        makeDispatchProductionEvent({
+          backend: base.backend,
+          outcome: 'proposal-disabled',
+          reason: 'proposal filing disabled for this sandboxed attempt',
+        }),
+        makeDispatchProductionEvent({
+          backend: base.backend,
+          outcome: 'proposal-disabled',
+          reason: 'proposal filing disabled for this sandboxed attempt',
+        }),
+        makeDispatchProductionEvent({
+          backend: base.backend,
+          outcome: 'proposal-disabled',
+          reason: 'proposal filing disabled for this sandboxed attempt',
+        }),
+      ],
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('recent proposal yield');
+  });
+
+  it('real non-proposal dispatch outcomes remain learnable after proposal-disabled rows are ignored', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+      dispatchProductionEvents: [
+        makeDispatchProductionEvent({
+          backend: base.backend,
+          outcome: 'proposal-disabled',
+          reason: 'proposal filing disabled for this sandboxed attempt',
+        }),
+        makeDispatchProductionEvent({ backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
+        makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
+        makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
+      ],
+    });
+
+    expect(base.tier).toBe('frontier');
+    expect(rec.backend).toBe(alternate);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).toContain('recent proposal yield');
+    expect(rec.reason).toContain('0/3');
+    expect(rec.reason).not.toContain('proposal-disabled');
+  });
+
   it('dispatch-production yield is isolated by work source', async () => {
     const cfg = withInstalledFrontierEngines(withIntelligence({
       allowedBackends: ['builtin', 'claude', 'codex'],

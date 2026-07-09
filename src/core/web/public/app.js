@@ -2285,6 +2285,11 @@ function sharedQueueMetric(shared) {
   return `${shared.activeClaims ?? 0} active / ${shared.reclaimableClaims ?? 0} reclaimable${suffix}`;
 }
 
+function queueEligibilityMetric(queue) {
+  if (!queue || typeof queue.eligibleBacklogItems !== 'number') return null;
+  return `${queue.eligibleBacklogItems} eligible / ${queue.cooldownItems ?? 0} cooling / ${queue.pendingItems ?? 0} pending`;
+}
+
 function autonomyEvidenceMetric(autonomy) {
   if (!autonomy || !autonomy.evidencePacks) return '0 packs';
   return `${autonomy.evidencePacks} packs / ${autonomy.allowed ?? 0} allowed / ${autonomy.denied ?? 0} denied`;
@@ -2406,6 +2411,7 @@ function renderAutonomyEffectivenessCard(effectiveness, cls = 'ctrl-card card') 
     ['Bottleneck', effectiveness.bottleneck ?? 'unknown'],
     ['Merge now', effectiveness.canAutoMergeNow ? 'yes' : 'no'],
     ['Backlog', counts.backlogItems ?? 0],
+    ['Eligible', counts.eligibleBacklogItems ?? counts.backlogItems ?? 0],
     ['Pending', counts.pendingProposals ?? 0],
     ['Ready', counts.preflightReady ?? 0],
     ['Verify', counts.needsVerification ?? 0],
@@ -2715,6 +2721,7 @@ function renderFleet() {
     ['Last tick', f.daemon.lastTickAt ? fmtRelative(f.daemon.lastTickAt) : '—'],
     ['Spend today', f.daemon.todaySpentUsd != null ? `$${f.daemon.todaySpentUsd.toFixed(4)}` : '—'],
     ['Backlog queue', f.queue?.backlogItems ?? '—'],
+    ['Eligible queue', queueEligibilityMetric(f.queue) ?? '—'],
     ['Merges (24h)', f.merges?.recent ?? '—'],
     ['Autonomy evidence', autonomyEvidenceMetric(f.autonomy)],
   ];
@@ -3092,6 +3099,7 @@ function renderControl() {
   const sharedQueue = queue.shared;
   heroMetrics.appendChild(controlMetric('Spend today', daemon.todaySpentUsd != null ? `$${daemon.todaySpentUsd.toFixed(4)}` : '—', '#fbbf24'));
   heroMetrics.appendChild(controlMetric('Queue depth', queue.backlogItems ?? '—', '#60a5fa'));
+  heroMetrics.appendChild(controlMetric('Eligible', queue.eligibleBacklogItems ?? queue.backlogItems ?? '—', '#38bdf8'));
   if (sharedQueue) {
     heroMetrics.appendChild(controlMetric('Shared leases', sharedQueue.activeClaims ?? '—', '#38bdf8'));
     heroMetrics.appendChild(controlMetric('Reclaimable', sharedQueue.reclaimableClaims ?? '—', sharedQueue.reclaimableClaims > 0 ? '#f97316' : '#4ade80'));

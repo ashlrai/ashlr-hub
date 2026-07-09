@@ -275,7 +275,13 @@ ashlr audit                # append-only confinement + action audit log
 `~/.ashlr/dispatch-production/YYYY-MM-DD.jsonl` and reports
 `proposalRate = proposalsCreated / dispatch attempts`, plus no-proposal reasons
 grouped by backend/source in the human view and by backend, source, repo, and
-backend+model in JSON/API output.
+backend+model in JSON/API output. Learned routing uses this ledger too, but
+excludes non-learnable control-flow outcomes such as `proposal-disabled` so
+intentional capture staging does not count as backend quality failure.
+
+Queue status reports raw backlog plus daemon-eligible work: items cooling in the
+worked ledger or already covered by pending proposals are counted separately, so
+next actions point at work the daemon can select now instead of phantom backlog.
 
 ---
 

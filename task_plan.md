@@ -447,3 +447,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Focused verification passed: `npm run test:ci -- test/m343.agent-action-ledger.test.ts test/m201.daemon-loop.test.ts test/m48.automerge-pass.test.ts test/m49.fleet-status.test.ts` (114 tests).
 - [x] Run final typecheck, build, lint, audit, diff checks, and full CI.
 - [x] Commit, push to `origin/master`, restart/reverify the live daemon, and record next telemetry lanes.
+
+## Current Continuation - Critical Autonomy Throughput Audit
+- [x] Rechecked clean `master`, recent commits, Entire resume state, daemon health, fleet status, task plan, and notes.
+- [x] Deployed parallel agents for proposal-disabled/TITRR capture semantics, dispatch-yield learning truth, cooldown-aware status, sandboxed action counts, and route trace persistence.
+- [x] Identified live critical bottleneck: daemon/service healthy and guard clear, but proposal production is starved (1/12 recent dispatches produced proposals; 7/12 were `proposal-disabled`).
+- [x] Prevented `proposal-disabled` control-flow rows from poisoning backend/source yield learning while preserving them in operator-visible dispatch-production status.
+- [x] Added focused routing tests proving disabled proposal-filing samples do not reroute, while real empty/gate/engine failures remain learnable.
+- [x] Harvested agent findings and selected the smallest second lane: make FleetStatus cooldown/pending-aware so next actions only point at daemon-eligible backlog.
+- [x] Added raw/eligible/cooling/pending queue fields, eligible-only `queue.next`, wait-for-eligibility next action, CLI/Fleet/Mission Control visibility, and focused status regressions.
+- [x] Run final gates, commit, push, and production-check.

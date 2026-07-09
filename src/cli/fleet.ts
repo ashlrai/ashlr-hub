@@ -74,6 +74,17 @@ export function formatFleetStatus(s: FleetStatus): string {
 
   // Queue
   lines.push(`Queue:     ${s.queue.backlogItems} backlog item(s)`);
+  if (typeof s.queue.eligibleBacklogItems === 'number') {
+    const queueParts = [
+      `${s.queue.eligibleBacklogItems} eligible`,
+      `${s.queue.cooldownItems ?? 0} cooling`,
+      `${s.queue.pendingItems ?? 0} pending`,
+    ];
+    lines.push(`  eligibility:   ${queueParts.join(', ')}`);
+    if (s.queue.nextEligibleAt) {
+      lines.push(`  next eligible: ${s.queue.nextEligibleAt}`);
+    }
+  }
   if (s.queue.repos) {
     const repoCoverage = s.queue.repos;
     lines.push(

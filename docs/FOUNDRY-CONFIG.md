@@ -120,13 +120,19 @@ conservative nudges only:
   success is thin.
 - `minProposalYieldRate` uses durable dispatch-production yield to prefer an
   installed same-tier alternative after at least three recent attempts. It never
-  escalates tier and defaults to `0.2`.
+  escalates tier, defaults to `0.2`, and excludes non-learnable control-flow
+  outcomes such as `proposal-disabled`.
 - `dispatchYieldWindowHours` controls the metadata-only yield window read from
   `~/.ashlr/dispatch-production/YYYY-MM-DD.jsonl` (default `24`).
 
 `dispatch yield` is distinct from judged ship rate: it measures whether
 dispatches create proposals at all, grouped by backend/source/repo/model, and is
 also visible in `ashlr fleet status` and Mission Control.
+
+`ashlr fleet status` also reports daemon-eligible backlog separately from raw
+backlog. Items still inside the worked-ledger cooldown window or already covered
+by pending proposals are excluded from `queue.next` and build-backlog next
+actions until they become selectable again.
 
 ---
 
