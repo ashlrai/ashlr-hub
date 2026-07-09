@@ -844,3 +844,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add regression coverage for trajectory/label/epoch backfill, secret scrubbing, raw-field dropping, and measurement preservation.
 - [x] Run broad verification.
 - [x] Commit `b31bde5`, push, reload daemon, and smoke live FleetStatus.
+
+## Current Continuation - Fleet OS Lease Board
+- [x] Rechecked clean pushed state after decision-ledger rollout.
+- [x] Deployed sidecar scouts for stale pending production-velocity and evidence-pack base/diff binding.
+- [x] Add an inline Fleet Dashboard Lease Board from existing shared queue per-machine health.
+- [x] Add static UI and snapshot contract coverage for per-machine lease fields.
+- [x] Run focused, broad, and invariant verification.
+- [ ] Commit, push, reload daemon, and smoke status.

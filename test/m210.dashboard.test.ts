@@ -109,15 +109,18 @@ const FIXTURE_FLEET_STATUS = {
       readable: true,
       activeClaims: 2,
       ownedClaims: 1,
-      expiredClaims: 0,
-      reclaimableClaims: 0,
-      claimsByMachine: [{ machineId: 'machine-A', active: 2, expired: 0 }],
-      nextLeaseExpiryAt: null,
-      oldestExpiredMs: null,
-      workedEvents: 0,
-      cooldownItems: 0,
-      usageEntries: 0,
-      lock: { present: false, ageMs: null, stale: false },
+      expiredClaims: 1,
+      reclaimableClaims: 1,
+      claimsByMachine: [
+        { machineId: 'machine-A', active: 2, expired: 0 },
+        { machineId: 'machine-B-with-a-long-operator-hostname', active: 0, expired: 1 },
+      ],
+      nextLeaseExpiryAt: '2026-07-09T16:00:00.000Z',
+      oldestExpiredMs: 125_000,
+      workedEvents: 7,
+      cooldownItems: 3,
+      usageEntries: 4,
+      lock: { present: true, ageMs: 125_000, stale: true },
     },
   },
   proposals: { pending: 3, frontierPending: 1, applied: 0 },
@@ -349,6 +352,17 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(snap.fleet?.queue.backlogItems).toBe(4);
     expect(snap.fleet?.queue.shared?.activeClaims).toBe(2);
     expect(snap.fleet?.queue.shared?.ownedClaims).toBe(1);
+    expect(snap.fleet?.queue.shared?.reclaimableClaims).toBe(1);
+    expect(snap.fleet?.queue.shared?.claimsByMachine).toEqual([
+      { machineId: 'machine-A', active: 2, expired: 0 },
+      { machineId: 'machine-B-with-a-long-operator-hostname', active: 0, expired: 1 },
+    ]);
+    expect(snap.fleet?.queue.shared?.nextLeaseExpiryAt).toBe('2026-07-09T16:00:00.000Z');
+    expect(snap.fleet?.queue.shared?.oldestExpiredMs).toBe(125_000);
+    expect(snap.fleet?.queue.shared?.workedEvents).toBe(7);
+    expect(snap.fleet?.queue.shared?.cooldownItems).toBe(3);
+    expect(snap.fleet?.queue.shared?.usageEntries).toBe(4);
+    expect(snap.fleet?.queue.shared?.lock?.stale).toBe(true);
     expect(snap.fleet?.proposalProduction?.noProposalDispatches).toBe(1);
     expect(snap.fleet?.proposalProduction?.topReasons[0]?.reason).toBe('agent returned no diff');
     expect(snap.fleet?.dispatchProduction?.proposalRate).toBe(0.5);

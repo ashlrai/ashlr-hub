@@ -454,6 +454,25 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(css).toContain('grid-template-columns: repeat(2, minmax(0, 1fr))');
   });
 
+  it('app.js renders Fleet Dashboard lease board from shared queue machine health', () => {
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
+    const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+    const css = fs.readFileSync(path.join(root, 'styles.css'), 'utf8');
+    expect(src).toContain('function fdRenderLeaseBoard');
+    expect(src).toContain("'Lease Board'");
+    expect(src).toContain('claimsByMachine');
+    expect(src).toContain('nextLeaseExpiryAt');
+    expect(src).toContain('oldestExpiredMs');
+    expect(src).toContain('fdRenderLeaseBoard(sharedQueue)');
+    expect(src).toContain('claimsByMachine.slice(0, 6)');
+    expect(src).toContain('sharedQueue.machineId');
+    expect(src).toContain('Machine claims unavailable.');
+    expect(css).toContain('.fd-lease-board');
+    expect(css).toContain('.fd-lease-metrics');
+    expect(css).toContain('.fd-lease-machine__id');
+    expect(css).toContain('text-overflow: ellipsis');
+  });
+
   it('app.js inbox detail reads current proposal review fields', () => {
     const src = fs.readFileSync(
       path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),

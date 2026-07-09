@@ -4254,6 +4254,87 @@ function fdMetricPill(label, value, title) {
   );
 }
 
+function fdFormatDurationMs(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—';
+  if (ms < 60_000) return '<1m';
+  const mins = Math.floor(ms / 60_000);
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 48) return `${hrs}h`;
+  return `${Math.floor(hrs / 24)}d`;
+}
+
+function fdRenderLeaseMetric(label, value, tone, title) {
+  return el('div', { cls: 'fd-lease-metric', title: title ?? value },
+    el('span', { cls: 'fd-lease-metric__label' }, label),
+    el('span', { cls: tone ? `fd-lease-metric__value fd-lease-metric__value--${tone}` : 'fd-lease-metric__value' }, value)
+  );
+}
+
+function fdRenderLeaseBoard(sharedQueue) {
+  if (!sharedQueue) return null;
+  const claimsByMachine = Array.isArray(sharedQueue.claimsByMachine) ? sharedQueue.claimsByMachine : [];
+  const visibleClaims = claimsByMachine.slice(0, 6);
+  const unreadable = sharedQueue.readable === false;
+  const staleLock = sharedQueue.lock?.stale === true;
+  const reclaimable = sharedQueue.reclaimableClaims ?? 0;
+  const active = sharedQueue.activeClaims ?? 0;
+  const owned = sharedQueue.ownedClaims ?? 0;
+  const statusText = unreadable
+    ? 'Unreadable'
+    : staleLock
+      ? 'Stale lock'
+      : reclaimable > 0
+        ? 'Reclaimable'
+        : 'Healthy';
+  const statusTone = unreadable || staleLock || reclaimable > 0 ? 'warn' : 'ok';
+  const mode = sharedQueue.mode ?? (sharedQueue.enabled ? 'shared' : 'local');
+  const nextExpiryTitle = sharedQueue.nextLeaseExpiryAt ? fmtDate(sharedQueue.nextLeaseExpiryAt) : 'No active lease expiry';
+  const nextExpiry = sharedQueue.nextLeaseExpiryAt ? fmtRelative(sharedQueue.nextLeaseExpiryAt) : '—';
+  const expiredAge = fdFormatDurationMs(sharedQueue.oldestExpiredMs);
+
+  const board = el('div', {
+    cls: `fd-lease-board${statusTone === 'warn' ? ' fd-lease-board--warn' : ''}`,
+  });
+  board.appendChild(el('div', { cls: 'fd-lease-board__head' },
+    el('div', { cls: 'fd-lease-board__title' },
+      el('span', { cls: 'fd-lease-board__eyebrow' }, 'Lease Board'),
+      el('span', { cls: 'fd-lease-board__mode' }, mode)
+    ),
+    el('span', { cls: `fd-lease-board__state fd-lease-board__state--${statusTone}` }, statusText)
+  ));
+
+  const metrics = el('div', { cls: 'fd-lease-metrics' },
+    fdRenderLeaseMetric('This machine', compactFleetReason(sharedQueue.machineId ?? 'unknown', 34), null, sharedQueue.machineId ?? 'unknown'),
+    fdRenderLeaseMetric('Active / owned', `${active} / ${owned}`),
+    fdRenderLeaseMetric('Reclaimable', String(reclaimable), reclaimable > 0 ? 'warn' : null),
+    fdRenderLeaseMetric('Next expiry', nextExpiry, null, nextExpiryTitle),
+    fdRenderLeaseMetric('Expired age', expiredAge, expiredAge !== '—' ? 'warn' : null),
+    fdRenderLeaseMetric('Cooldown / worked / usage', `${sharedQueue.cooldownItems ?? 0} / ${sharedQueue.workedEvents ?? 0} / ${sharedQueue.usageEntries ?? 0}`)
+  );
+  board.appendChild(metrics);
+
+  const machines = el('div', { cls: 'fd-lease-machines' });
+  if (visibleClaims.length === 0) {
+    machines.appendChild(el('div', { cls: 'fd-lease-empty' }, unreadable ? 'Machine claims unavailable.' : 'No machine claims.'));
+  } else {
+    for (const claim of visibleClaims) {
+      const machineId = claim?.machineId ?? 'unknown';
+      const claimActive = claim?.active ?? 0;
+      const claimExpired = claim?.expired ?? 0;
+      machines.appendChild(el('div', { cls: 'fd-lease-machine', title: machineId },
+        el('span', { cls: 'fd-lease-machine__id' }, machineId),
+        el('span', { cls: 'fd-lease-machine__counts' }, `${claimActive} active / ${claimExpired} expired`)
+      ));
+    }
+    if (claimsByMachine.length > visibleClaims.length) {
+      machines.appendChild(el('div', { cls: 'fd-lease-more' }, `+${claimsByMachine.length - visibleClaims.length} more machine(s)`));
+    }
+  }
+  board.appendChild(machines);
+  return board;
+}
+
 function fdRenderReadinessRail(snap) {
   const fleet = snap.fleet ?? snap.control?.fleet ?? null;
   const readiness = snap.fleet?.autonomousShipReadiness ?? snap.control?.fleet?.autonomousShipReadiness ?? null;
@@ -4349,6 +4430,8 @@ function fdRenderStatusPanel(snap) {
     grid.appendChild(mkMeta('Autonomy latest', autonomy.latestAt ? fmtRelative(autonomy.latestAt) : '—'));
   }
   body.appendChild(grid);
+  const leaseBoard = fdRenderLeaseBoard(sharedQueue);
+  if (leaseBoard) body.appendChild(leaseBoard);
 
   // Kill-switch banner
   if (isKilled) {
