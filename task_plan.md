@@ -493,7 +493,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Added focused regression coverage for context-efficiency FleetStatus/formatter output, recall tiering, and Phantom literal-value scrubbing.
 - [x] Run focused typecheck, JS syntax, and affected suites.
 - [x] Run final lint/build/audit/diff/full-CI gates.
-- [ ] Commit, push, resume/reinstall the live fleet, and verify production status.
+- [x] Commit, push, resume/reinstall the live fleet, and verify production status.
 - [ ] Next lane: implement shared `DelegationScope` for context budgets, allowed files, memory mode, and result contracts.
 - [ ] Next lane: add `ashlr eval attention` with middle-drop and workflow-resolution gates.
 - [ ] Next lane: emit prompt utilization, retrieval hit-rate, and compression metadata into the causal trajectory graph.
