@@ -71,6 +71,7 @@ function makeCfg(overrides?: Partial<AshlrConfig['foundry']>): Pick<AshlrConfig,
 
 const GREEN_VC = { kind: 'test' as const, cmd: ['npx', 'vitest', 'run'] };
 const BUILD_VC = { kind: 'typecheck' as const, cmd: ['npx', 'tsc', '--noEmit'] };
+const NATIVE_BUILD_VC = { kind: 'build' as const, cmd: ['npm', 'run', 'build'] };
 
 const OK_RESULT = {
   ok: true,
@@ -164,6 +165,16 @@ describe('detectBreakage', () => {
 
   it('returns broken:true with kind=build when typecheck fails', async () => {
     mockDetectVerifyCommands.mockReturnValue([BUILD_VC]);
+    mockRunVerifyCommand.mockReturnValue(BUILD_FAIL_RESULT);
+    const result = await detectBreakage('/tmp/fake-repo', makeCfg());
+    expect(result.broken).toBe(true);
+    expect(result.verified).toBe(true);
+    expect(result.kind).toBe('build');
+    expect(result.detail).toMatch(/error|Error|FAIL/i);
+  });
+
+  it('returns broken:true with kind=build when native build fails', async () => {
+    mockDetectVerifyCommands.mockReturnValue([NATIVE_BUILD_VC]);
     mockRunVerifyCommand.mockReturnValue(BUILD_FAIL_RESULT);
     const result = await detectBreakage('/tmp/fake-repo', makeCfg());
     expect(result.broken).toBe(true);

@@ -1782,7 +1782,7 @@ export interface RunOptions {
   allowBash?: boolean;
   /**
    * M43: max verify→repair iterations per task on a failing structured verify
-   * (typecheck/test/lint). Default 2; 0 disables the repair loop. Each iteration
+   * (typecheck/lint/build/test). Default 2; 0 disables the repair loop. Each iteration
    * is bounded by the per-task step cap and the global budget.
    */
   maxRepairs?: number;
@@ -3336,7 +3336,7 @@ export interface ProposalVerifyResult {
   passed: boolean;
   failed?: string[];
   detail?: string;
-  ran?: Array<{ kind: 'typecheck' | 'test' | 'lint'; cmd: string[] }>;
+  ran?: Array<{ kind: 'typecheck' | 'lint' | 'build' | 'test'; cmd: string[] }>;
   browser?: ProposalBrowserVerifyEvidence;
   baseBranch?: string;
   baseHead?: string;

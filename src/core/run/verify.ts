@@ -240,7 +240,7 @@ export async function verifyTask(
 }
 
 // ---------------------------------------------------------------------------
-// M43: Structured verification (typecheck/test/lint) + verdict wrapper
+// M43: Structured verification (typecheck/lint/build/test) + verdict wrapper
 // ---------------------------------------------------------------------------
 
 /** Tail of a command's output to surface in a failure verdict (~2KB). */

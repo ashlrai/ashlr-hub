@@ -11,7 +11,7 @@
  * Flow: loadProposal → createSandbox (policy-gated, kill-switch aware) →
  * `git apply` the diff → detectRepoExecutionProfile INSIDE the worktree (so a
  * diff that adds a test script counts) → run verify commands cheap-first
- * (typecheck → lint → test) → removeSandbox.
+ * (typecheck → lint → build → test) → removeSandbox.
  *
  * Semantics: absence of verification (no proposal, no diff, no commands,
  * sandbox unavailable) is NEUTRAL (passed: true, skipped set) — a candidate
@@ -53,8 +53,8 @@ export interface TestRunResult {
   skipped?: 'no-proposal' | 'no-diff' | 'sandbox-failed' | 'apply-failed' | 'no-commands';
 }
 
-/** Cheap-first ordering: typecheck → lint → test. */
-const KIND_RANK: Record<VerifyCommand['kind'], number> = { typecheck: 0, lint: 1, test: 2 };
+/** Cheap-first ordering: typecheck → lint → build → test. */
+const KIND_RANK: Record<VerifyCommand['kind'], number> = { typecheck: 0, lint: 1, build: 2, test: 3 };
 
 const PER_COMMAND_TIMEOUT_MS = 180_000;
 

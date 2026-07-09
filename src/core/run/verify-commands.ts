@@ -1,8 +1,8 @@
 /**
- * M43: Structured verification primitives — detect & run typecheck/test/lint.
+ * M43: Structured verification primitives — detect & run typecheck/lint/build/test.
  *
  * The hub runs local-model tasks (`runTask`). After a task completes, M43 runs a
- * STRUCTURED verification (typecheck/test/lint). This module provides the two
+ * STRUCTURED verification (typecheck/lint/build/test). This module provides the two
  * low-level halves the orchestrator's repair loop wires together:
  *
  *   detectVerifyCommands() — READ-ONLY introspection of a workspace to decide
@@ -58,7 +58,7 @@ const ASYNC_STREAM_TRUNCATION_MARK = '\n[ashlr: verify output stream truncated]\
 // ---------------------------------------------------------------------------
 
 /** A single verification command to run, classified by what it checks. */
-export type VerifyCommandKind = 'typecheck' | 'test' | 'lint';
+export type VerifyCommandKind = 'typecheck' | 'lint' | 'build' | 'test';
 export type VerifyCommandProfile = 'quick' | 'merge' | 'deep';
 
 export interface VerifyCommand {

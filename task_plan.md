@@ -1173,3 +1173,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Persist terminal stuck-pass count before rejecting permanent auto-merge blockers.
 - [x] Run production gates for the verify-only action ranking slice.
 - [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Native Build Verification Kind
+- [x] Rechecked clean pushed permanent-blocker baseline, recent commits, and verification-contract files.
+- [x] Deploy focused scout for verification kind schema and ordering.
+- [x] Add first-class `build` verification command kind across contracts, results, sandbox test ordering, and self-heal classification.
+- [x] Add focused regression coverage for manifest build commands, detected build scripts, runtime ordering, and native build failures.
+- [x] Run verification gates for the native build verification kind slice.
+- [ ] Commit, push, reload daemon, and smoke live status.

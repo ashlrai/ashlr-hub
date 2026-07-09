@@ -92,7 +92,7 @@ const SKIP_DIRS = new Set([
 
 const VERIFY_CONTRACT_FILE = 'ashlr.verify.json';
 const CONTRACT_MAX_TIMEOUT_MS = 600_000;
-const VERIFY_COMMAND_KINDS = new Set<VerifyCommand['kind']>(['typecheck', 'test', 'lint']);
+const VERIFY_COMMAND_KINDS = new Set<VerifyCommand['kind']>(['typecheck', 'lint', 'build', 'test']);
 const VERIFY_CONTRACT_MODES = new Set<RepoVerifyContractMode>(['replace-detected', 'augment-detected']);
 const VERIFY_COMMAND_PROFILES = new Set<VerifyCommandProfile>(['quick', 'merge', 'deep']);
 
@@ -303,7 +303,7 @@ function parseVerifyContract(repoRoot: string): ParsedVerifyContract | null {
         continue;
       }
       if (typeof kind !== 'string' || !VERIFY_COMMAND_KINDS.has(kind as VerifyCommand['kind'])) {
-        errors.push(`${label}.kind must be typecheck, test, or lint`);
+        errors.push(`${label}.kind must be typecheck, lint, build, or test`);
         continue;
       }
       if (!Array.isArray(cmd) || cmd.length === 0 || !cmd.every((part) => typeof part === 'string' && part.length > 0)) {
@@ -428,20 +428,22 @@ function nodeProject(repoRoot: string, root: string): RepoProjectProfile | null 
     commands.push(commandWithCwd(repoRoot, root, 'typecheck', runScriptArgv(pm, 'typecheck')));
   } else if (scripts.check) {
     commands.push(commandWithCwd(repoRoot, root, 'typecheck', runScriptArgv(pm, 'check')));
-  } else if (scripts.build) {
-    commands.push(commandWithCwd(repoRoot, root, 'typecheck', runScriptArgv(pm, 'build')));
   } else if (hasTsconfig) {
     commands.push(commandWithCwd(repoRoot, root, 'typecheck', ['npx', 'tsc', '--noEmit']));
+  }
+
+  if (scripts.lint) {
+    commands.push(commandWithCwd(repoRoot, root, 'lint', runScriptArgv(pm, 'lint')));
+  }
+
+  if (scripts.build) {
+    commands.push(commandWithCwd(repoRoot, root, 'build', runScriptArgv(pm, 'build')));
   }
 
   if (scripts.test) {
     commands.push(commandWithCwd(repoRoot, root, 'test', runScriptArgv(pm, 'test')));
   } else if (hasDep(pkg, 'vitest') || hasVitestConfig) {
     commands.push(commandWithCwd(repoRoot, root, 'test', ['npx', 'vitest', 'run']));
-  }
-
-  if (scripts.lint) {
-    commands.push(commandWithCwd(repoRoot, root, 'lint', runScriptArgv(pm, 'lint')));
   }
 
   return {

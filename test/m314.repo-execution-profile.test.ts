@@ -189,6 +189,43 @@ describe('repo execution profile', () => {
     }
   });
 
+  it('accepts native build commands in root verification contracts', () => {
+    const dir = makeFixture();
+    try {
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [
+          {
+            id: 'build',
+            kind: 'build',
+            cmd: ['npm', 'run', 'build'],
+            required: true,
+            profiles: ['merge'],
+          },
+        ],
+      });
+
+      const profile = detectRepoExecutionProfile(dir);
+
+      expect(profile.verifyCommands).toEqual([
+        { id: 'build', kind: 'build', cmd: ['npm', 'run', 'build'], required: true, profiles: ['merge'] },
+      ]);
+      expect(profile.verifyContract).toMatchObject({
+        present: true,
+        valid: true,
+        commandCount: 1,
+        requiredCount: 1,
+        mergeProfileCommandCount: 1,
+        requiredMergeProfileCommandCount: 1,
+        mergeGradeExplicit: true,
+      });
+      expect(profile.noVerifyReason).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('augments detected commands with root verification contract commands', () => {
     const dir = makeFixture();
     try {

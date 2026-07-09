@@ -73,8 +73,7 @@ function firstFailureLine(output: string): string {
 
 /** Map VerifyCommand kind to 'build' | 'test'. */
 function kindOf(vcKind: string): 'build' | 'test' {
-  if (vcKind === 'typecheck' || vcKind === 'lint') return 'build';
-  return 'test';
+  return vcKind === 'test' ? 'test' : 'build';
 }
 
 /** Stable deterministic id for a self-heal WorkItem. */
@@ -93,7 +92,7 @@ function selfHealId(repo: string, breakageKind: string): string {
 /**
  * Run the repo's build + test commands and detect whether any are RED.
  *
- * - Uses detectVerifyCommands to find commands (typecheck / test / lint).
+ * - Uses detectVerifyCommands to find commands (typecheck / lint / build / test).
  * - Degrades gracefully: if no commands are detected, returns { broken: false }.
  * - Time-boxed per command (default 90 s; short to keep the cycle snappy).
  * - Never throws.

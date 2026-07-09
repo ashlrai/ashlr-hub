@@ -47,7 +47,7 @@ vi.mock('../src/core/inbox/merge.js', () => ({
   autoMergeProposal: (...args: unknown[]) => mockAutoMergeProposal(...args),
   verifyProposal: (...args: unknown[]) => mockVerifyProposal(...args),
   verifyResultFromProposalResult: (
-    result: { ok: boolean; ran: Array<{ kind: 'typecheck' | 'test' | 'lint'; cmd: string[] }>; detail: string; baseBranch?: string; baseHead?: string },
+    result: { ok: boolean; ran: Array<{ kind: 'typecheck' | 'lint' | 'build' | 'test'; cmd: string[] }>; detail: string; baseBranch?: string; baseHead?: string },
     source = 'auto-merge',
     verifiedAt = new Date().toISOString(),
     diffHash?: string,

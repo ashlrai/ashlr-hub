@@ -138,6 +138,27 @@ describe('M331 runTestsDetailed', () => {
     expect(await runTests('p2', cfg)).toBe(false);
   }, 30_000);
 
+  it('runs detected commands cheap-first with build before test', async () => {
+    repoWith(
+      {
+        name: 'fx',
+        version: '1.0.0',
+        scripts: {
+          typecheck: 'node -e "process.exit(0)"',
+          lint: 'node -e "process.exit(0)"',
+          build: 'node -e "process.exit(0)"',
+          test: 'node -e "process.exit(0)"',
+        },
+      },
+      ADD_FILE_DIFF,
+    );
+
+    const r = await runTestsDetailed('p-build-order', cfg);
+
+    expect(r.passed).toBe(true);
+    expect(r.commands.map((command) => command.kind)).toEqual(['typecheck', 'lint', 'build', 'test']);
+  }, 30_000);
+
   it('unapplicable diff → real negative (apply-failed)', async () => {
     repoWith(
       { name: 'fx', version: '1.0.0', scripts: { test: 'node -e "process.exit(0)"' } },

@@ -141,13 +141,33 @@ describe('detectVerifyCommands', () => {
     }
   });
 
-  it('uses check/build scripts as typecheck fallbacks', () => {
+  it('uses check scripts as typecheck fallbacks', () => {
     const dir = makeFixture();
     try {
       writePkg(dir, { scripts: { check: 'biome check .', test: 'bun test' } });
       const cmds = detectVerifyCommands(dir);
       const tc = cmds.find((c) => c.kind === 'typecheck');
       expect(tc?.cmd).toEqual(['npm', 'run', 'check']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('detects build scripts as native build commands', () => {
+    const dir = makeFixture();
+    try {
+      writePkg(dir, {
+        scripts: {
+          typecheck: 'tsc --noEmit',
+          lint: 'eslint .',
+          build: 'vite build',
+          test: 'vitest',
+        },
+      });
+      const cmds = detectVerifyCommands(dir);
+
+      expect(cmds.map((c) => c.kind)).toEqual(['typecheck', 'lint', 'build', 'test']);
+      expect(cmds.find((c) => c.kind === 'build')?.cmd).toEqual(['npm', 'run', 'build']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
