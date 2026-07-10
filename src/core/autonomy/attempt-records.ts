@@ -117,6 +117,7 @@ export interface AttemptCausalGapGroup {
 export interface AttemptCausalGapDiagnostics {
   blockedCurrentLabels: number;
   causes: Array<{ cause: AttemptCausalGapCause; count: number; sampleRefs: string[] }>;
+  actionableCauses: Array<{ cause: AttemptCausalGapCause; count: number; sampleRefs: string[] }>;
   bySource: AttemptCausalGapGroup[];
   byBackend: AttemptCausalGapGroup[];
   byLearningSource: AttemptCausalGapGroup[];
@@ -482,6 +483,21 @@ const CAUSAL_GAP_CAUSE_PRIORITY: Record<AttemptCausalGapCause, number> = {
   'missing-trajectory-id': 11,
 };
 
+const ACTIONABLE_CAUSAL_GAP_CAUSE_PRIORITY: Record<AttemptCausalGapCause, number> = {
+  'current-writer-unlabeled-attempt': 0,
+  'stale-router-policy-version': 1,
+  'stale-learning-epoch': 2,
+  'missing-authoritative-label': 3,
+  'stale-authoritative-label': 4,
+  'missing-router-policy-version': 5,
+  'missing-learning-epoch': 6,
+  'missing-route-snapshot': 7,
+  'missing-run-summary': 8,
+  'missing-trajectory-id': 9,
+  'legacy-unlabeled-attempt': 10,
+  'policy-suppressed': 99,
+};
+
 function addGapGroup(map: Map<string, AttemptCausalGapGroup>, key: string, record: AttemptRecord): void {
   const safeKey = safeGroupKey(key);
   const existing = map.get(safeKey);
@@ -537,6 +553,14 @@ function buildCausalGapDiagnostics(records: AttemptRecord[]): AttemptCausalGapDi
         a.cause.localeCompare(b.cause),
       )
       .slice(0, 8),
+    actionableCauses: [...causeMap.values()]
+      .filter((cause) => cause.cause !== 'policy-suppressed')
+      .sort((a, b) =>
+        ACTIONABLE_CAUSAL_GAP_CAUSE_PRIORITY[a.cause] - ACTIONABLE_CAUSAL_GAP_CAUSE_PRIORITY[b.cause] ||
+        b.count - a.count ||
+        a.cause.localeCompare(b.cause),
+      )
+      .slice(0, 5),
     bySource: sortedGapGroups(bySource),
     byBackend: sortedGapGroups(byBackend),
     byLearningSource: sortedGapGroups(byLearningSource),

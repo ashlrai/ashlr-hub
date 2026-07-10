@@ -234,6 +234,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused regression coverage.
 - [x] Verify implementation with focused, adjacent, invariant, and full CI gates.
 - [x] Commit, push, and reload/smoke production daemon.
+- [x] Refine causal diagnostics with policy-suppressed-aware actionable causes.
 
 ## Current Continuation - Next Actions And Judge Trust
 - [x] Deployed a broader explorer wave for auto-merge trust, daemon reliability, cross-repo coordination, command-center UI, and market/open-source leverage.

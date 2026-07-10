@@ -2693,6 +2693,7 @@ function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
   const topWeak = Array.isArray(weak.reasons) ? weak.reasons[0] : null;
   const diagnostics = attemptCoverage.causalGapDiagnostics ?? {};
   const topCause = Array.isArray(diagnostics.causes) ? diagnostics.causes[0] : null;
+  const actionableCause = Array.isArray(diagnostics.actionableCauses) ? diagnostics.actionableCauses[0] : null;
   const card = el('div', { cls });
   card.appendChild(el('div', { cls: 'card-header' },
     el('span', { cls: 'card-title' }, 'Attempt Coverage'),
@@ -2720,6 +2721,11 @@ function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
   if (topCause) {
     body.appendChild(el('p', { cls: 'hint' },
       `Top cause: ${topCause.cause} on ${topCause.count ?? 0} attempt${topCause.count === 1 ? '' : 's'}`
+    ));
+  }
+  if (actionableCause && actionableCause.cause !== topCause?.cause) {
+    body.appendChild(el('p', { cls: 'hint' },
+      `Actionable: ${actionableCause.cause} on ${actionableCause.count ?? 0} attempt${actionableCause.count === 1 ? '' : 's'}`
     ));
   }
   card.appendChild(body);
@@ -4873,6 +4879,7 @@ function fdRenderProductionPanel(snap) {
     const topWeak = Array.isArray(weak.reasons) ? weak.reasons[0] : null;
     const diagnostics = attemptCoverage.causalGapDiagnostics ?? {};
     const topCause = Array.isArray(diagnostics.causes) ? diagnostics.causes[0] : null;
+    const actionableCause = Array.isArray(diagnostics.actionableCauses) ? diagnostics.actionableCauses[0] : null;
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Attempt coverage'));
     body.appendChild(infoGrid([
       ['Attempts', attemptCoverage.attempts ?? 0],
@@ -4891,6 +4898,11 @@ function fdRenderProductionPanel(snap) {
     if (topCause) {
       body.appendChild(el('p', { cls: 'hint' },
         `Top cause: ${topCause.cause} on ${topCause.count ?? 0} attempt${topCause.count === 1 ? '' : 's'}`
+      ));
+    }
+    if (actionableCause && actionableCause.cause !== topCause?.cause) {
+      body.appendChild(el('p', { cls: 'hint' },
+        `Actionable: ${actionableCause.cause} on ${actionableCause.count ?? 0} attempt${actionableCause.count === 1 ? '' : 's'}`
       ));
     }
   }

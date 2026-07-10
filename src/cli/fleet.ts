@@ -407,9 +407,13 @@ export function formatFleetStatus(s: FleetStatus): string {
     }
     const topCause = attemptCoverage.causalGapDiagnostics?.causes?.[0];
     if (topCause) {
+      const actionableCause = attemptCoverage.causalGapDiagnostics?.actionableCauses?.[0];
       const topBasis = attemptCoverage.causalGapDiagnostics?.byLabelBasis?.[0];
       const topSource = attemptCoverage.causalGapDiagnostics?.byLearningSource?.[0];
       const groups = [
+        actionableCause && actionableCause.cause !== topCause.cause
+          ? `actionable ${actionableCause.cause}:${actionableCause.count}`
+          : null,
         topBasis ? `basis ${topBasis.key}:${topBasis.count}` : null,
         topSource ? `learning ${topSource.key}:${topSource.count}` : null,
       ].filter((group): group is string => group !== null);

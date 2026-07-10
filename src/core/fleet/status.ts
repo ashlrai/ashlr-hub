@@ -2612,10 +2612,14 @@ function causalCoverageNextAction(status: AttemptCoverageStatus | undefined): Fl
   if (!weak) return null;
   const percent = Math.round(weak.rate * 100);
   const topCause = status.causalGapDiagnostics.causes[0];
+  const actionableCause = status.causalGapDiagnostics.actionableCauses[0];
   const topBasis = status.causalGapDiagnostics.byLabelBasis[0];
   const topSource = status.causalGapDiagnostics.byLearningSource[0];
   const diagnostics = [
     topCause ? `top cause: ${topCause.cause} on ${countPhrase(topCause.count, 'attempt')}` : null,
+    actionableCause && actionableCause.cause !== topCause?.cause
+      ? `actionable cause: ${actionableCause.cause} on ${countPhrase(actionableCause.count, 'attempt')}`
+      : null,
     topBasis ? `basis ${topBasis.key}:${topBasis.count}` : null,
     topSource ? `learning ${topSource.key}:${topSource.count}` : null,
   ].filter((part): part is string => part !== null);

@@ -539,6 +539,13 @@ describe('AttemptRecord coverage', () => {
         expect.objectContaining({ cause: 'stale-router-policy-version', count: 1 }),
         expect.objectContaining({ cause: 'policy-suppressed', count: 1 }),
       ]),
+      actionableCauses: [
+        expect.objectContaining({ cause: 'current-writer-unlabeled-attempt', count: 1 }),
+        expect.objectContaining({ cause: 'stale-router-policy-version', count: 1 }),
+        expect.objectContaining({ cause: 'stale-authoritative-label', count: 1 }),
+        expect.objectContaining({ cause: 'missing-router-policy-version', count: 1 }),
+        expect.objectContaining({ cause: 'missing-learning-epoch', count: 1 }),
+      ],
       byBackend: [expect.objectContaining({ key: 'local-coder', count: 4 })],
       bySource: [expect.objectContaining({ key: 'goal', count: 4 })],
       byLearningSource: expect.arrayContaining([
