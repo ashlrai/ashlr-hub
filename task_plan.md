@@ -1232,3 +1232,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Identify colon-in-path PATH splitting as the cause of failed `npm run` verifier commands.
 - [x] Add root `ashlr.verify.json` in `/Users/masonwyatt/Desktop/10:4` using `replace-detected` plus direct node TypeScript/Vitest entrypoints.
 - [x] Validate Hub profile detection and commit locally; push remains blocked because the repo has no configured remote.
+
+## Current Continuation - No-Diff Reslice Yield
+- [x] Inspect the live `dispatch-yield-actionable` blocker and no-diff diagnostic reslice work item creation.
+- [x] Add sanitized original-title metadata to no-diff reslice work items.
+- [x] Strengthen reslice instructions to require a concrete file/subsystem target and a fresh file diff or explicit capture-gate failure.
+- [x] Preserve the metadata-only/privacy boundary: no raw prompts, stdout, stderr, env, file contents, or prior diff output.
+- [x] Run focused queue/daemon/status tests, typecheck, and diff checks.
+- [ ] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.

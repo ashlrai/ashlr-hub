@@ -221,6 +221,7 @@ export function noDiffResliceWorkItem(
 
   const reason = boundedRepairReason(event.reason ?? event.routeReason ?? event.outcome, MAX_REASON) || event.outcome;
   const itemId = bounded(event.itemId, 120) || 'unknown';
+  const title = bounded(event.title, MAX_TITLE);
   const backend = bounded(event.backend ?? 'unknown', 80) || 'unknown';
   const source = bounded(event.source, 80) || 'unknown';
   const routeReason = boundedRepairReason(event.routeReason, MAX_REASON);
@@ -236,13 +237,15 @@ export function noDiffResliceWorkItem(
     detail:
       `Diagnostic reslice: a dispatch completed without file changes, so the task likely needs tighter scope and retrieved context.\n` +
       `Original work item: ${itemId}\n` +
+      (title ? `Original title: ${title}\n` : '') +
       (runId ? `Run: ${runId}\n` : '') +
       `Original source: ${source}\n` +
       `Backend: ${backend}\n` +
       (routeReason ? `Route: ${routeReason}\n` : '') +
       `Dispatch outcome: empty-diff\n` +
       `Failure: ${reason}\n` +
-      `Action: reslice the work into a smaller concrete edit, retrieve the relevant repo context, produce a fresh complete patch, and run merge-grade verification. Do not copy raw prompts, stdout, stderr, env, file contents, or prior diff output.`,
+      `Action: reslice the work into a smaller concrete edit, name the target file or subsystem before editing, produce a fresh complete file diff, and run merge-grade verification.\n` +
+      `Constraint: the next attempt must change repository files or explicitly fail the capture gate; do not return explanation-only work. Do not copy raw prompts, stdout, stderr, env, file contents, or prior diff output.`,
     value,
     effort,
     score: value / effort,

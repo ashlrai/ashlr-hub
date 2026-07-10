@@ -367,10 +367,13 @@ describe('queued autonomy work scanner', () => {
     expect(reslice!.id).toContain(':proposal-repair-nodiff:');
     expect(reslice!.id).not.toContain(event.reason!);
     expect(reslice!.detail).toContain(event.itemId);
+    expect(reslice!.detail).toContain('Original title: Self improvement capture failure with useful work');
     expect(reslice!.detail).toContain('run-nodiff-new');
     expect(reslice!.detail).not.toContain('run-nodiff-old');
     expect(reslice!.detail).toContain('Dispatch outcome: empty-diff');
-    expect(reslice!.detail).toContain('Action: reslice');
+    expect(reslice!.detail).toContain('Action: reslice the work into a smaller concrete edit');
+    expect(reslice!.detail).toContain('produce a fresh complete file diff');
+    expect(reslice!.detail).toContain('must change repository files or explicitly fail the capture gate');
     expect(reslice!.detail).toContain('stdout=[omitted]');
     expect(reslice!.detail).toContain('prompt=[omitted]');
     expect(reslice!.detail).toContain('env=[omitted]');
