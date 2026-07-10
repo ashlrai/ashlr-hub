@@ -1299,3 +1299,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add router, resource-aware gateway, workhorse dispatch, and queued-autonomy regressions.
 - [x] Run focused, adjacent, typecheck, lint, build, audit, JS syntax, and diff gates.
 - [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Generated Repair Yield Telemetry
+- [x] Resume from the protected capture-repair routing baseline and recheck git, Entire, daemon, and fleet state.
+- [x] Use repair-telemetry scout findings to choose a metadata-only generated repair yield surface.
+- [x] Add fixed-enum generated repair classification for capture repairs, no-diff reslices, and proposal repairs.
+- [x] Count generated repair attempts and conversion rates in dispatch-production yield and attempt coverage.
+- [x] Render repair-yield aggregates in `ashlr fleet status` without exposing raw titles, prompts, diffs, stdout/stderr, env, argv, or file contents.
+- [x] Add focused dispatch-ledger, attempt-coverage, and FleetStatus regressions for counts, conversion rates, and privacy boundaries.
+- [x] Run focused, adjacent, typecheck, lint, build, audit, JS syntax, and diff gates.
+- [x] Commit, push, reload daemon, clear stale dead-owner spend guard, and smoke live status.
