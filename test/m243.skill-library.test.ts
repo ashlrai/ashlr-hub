@@ -24,7 +24,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { AutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
-import { hashDiff } from '../src/core/foundry/provenance.js';
+import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // HOME isolation — override before any module resolves homedir()
@@ -64,9 +64,13 @@ vi.mock('../src/core/autonomy/evidence-pack.js', () => ({
 }));
 
 const mockRecordSkillCard = vi.fn();
-vi.mock('../src/core/fleet/skill-records.js', () => ({
-  recordSkillCard: (...args: unknown[]) => mockRecordSkillCard(...args),
-}));
+vi.mock('../src/core/fleet/skill-records.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/fleet/skill-records.js')>();
+  return {
+    ...actual,
+    recordSkillCard: (...args: unknown[]) => mockRecordSkillCard(...args),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Lazy import — after mocks
@@ -89,7 +93,7 @@ const DEFAULT_DIFF = '--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -1,3 +1,4 @@\n+if
 function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
   const diff = overrides.diff ?? DEFAULT_DIFF;
   const diffHash = hashDiff(diff);
-  return {
+  const proposal = {
     id: 'prop-m243-001',
     repo: '/home/user/myrepo',
     origin: 'swarm',
@@ -113,6 +117,14 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
     },
     ...overrides,
   } as Proposal;
+  if (!Object.prototype.hasOwnProperty.call(overrides, 'provenanceSig')) {
+    proposal.provenanceSig = signProvenance(
+      proposal.engineModel ?? '',
+      proposal.engineTier ?? '',
+      proposal.diffHash ?? '',
+    );
+  }
+  return proposal;
 }
 
 function makeEvidence(
@@ -400,6 +412,8 @@ describe('M243 learnFromApplied — applied+ship writes skill to genome', () => 
         policyAllowed: true,
       },
     });
+    expect(card['contentHash']).toMatch(/^[a-f0-9]{64}$/);
+    expect(card['attestation']).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(card)).not.toContain(p.diff);
   });
 
@@ -436,6 +450,23 @@ describe('M243 learnFromApplied — applied+ship writes skill to genome', () => 
     expect((card['summary'] as string).length).toBeLessThanOrEqual(400);
   });
 
+  it('derives structured retrieval text from controlled metadata, not free-form proposal text', () => {
+    const unlabelledCanary = 'CUSTOMER_SOURCE_FRAGMENT_DO_NOT_RETAIN';
+    const p = makeProposal({
+      title: `Fix parser ${unlabelledCanary}`,
+      summary: `The implementation included ${unlabelledCanary}`,
+    });
+    learnVerified(p, makeCfg());
+
+    const [card] = mockRecordSkillCard.mock.calls[0] as [Record<string, unknown>];
+    expect(card).toMatchObject({
+      name: 'Verified bug-fix workflow',
+      summary: 'Evidence-bound bug-fix workflow verified with test commands at low risk.',
+      taskKinds: ['bug-fix'],
+    });
+    expect(JSON.stringify(card)).not.toContain(unlabelledCanary);
+  });
+
   it('writes normally when skillLibrary flag is absent (default ON)', () => {
     learnVerified(makeProposal(), makeCfgNoFlag());
     expect(mockAppendHubEntry).toHaveBeenCalledOnce();
@@ -456,6 +487,34 @@ describe('M243 learnFromApplied — applied+ship writes skill to genome', () => 
 // ===========================================================================
 
 describe('M243 learnFromApplied — verified distillation gates fail closed', () => {
+  it('does not write when authoritative proposal provenance is missing', () => {
+    const p = makeProposal({ provenanceSig: undefined });
+    primeAuthoritativeState(p);
+
+    learnFromApplied(p, makeCfg());
+
+    expectNoWrites();
+  });
+
+  it('does not write when authoritative proposal provenance is forged', () => {
+    const p = makeProposal({ provenanceSig: '0'.repeat(64) });
+    primeAuthoritativeState(p);
+
+    learnFromApplied(p, makeCfg());
+
+    expectNoWrites();
+  });
+
+  it('does not write when signed authoritative provenance metadata was tampered', () => {
+    const signed = makeProposal();
+    const tampered = { ...signed, engineModel: 'claude:forged-model' } as Proposal;
+    primeAuthoritativeState(tampered);
+
+    learnFromApplied(signed, makeCfg());
+
+    expectNoWrites();
+  });
+
   it('does not write when authoritative autonomy evidence is missing', () => {
     const p = makeProposal();
     primeAuthoritativeState(p, null);

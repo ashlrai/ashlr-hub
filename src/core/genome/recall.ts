@@ -210,10 +210,25 @@ function entryToEmbedText(entry: GenomeEntry): string {
   return parts.join(' ').slice(0, 2000);
 }
 
+/** Match the stable footprint emitted by learnFromApplied; the tag alone is untrusted. */
+function isLegacyInternalSkill(entry: GenomeEntry, tags: Set<string>): boolean {
+  if (!tags.has('m243:skill') || entry.source !== 'hub') return false;
+
+  const hasEngine = entry.tags.some((tag) => /^engine:\S+$/i.test(tag.trim()));
+  const hasProposal = entry.tags.some((tag) => /^proposal:\S+$/i.test(tag.trim()));
+  return (
+    hasEngine &&
+    hasProposal &&
+    entry.title.startsWith('Skill: ') &&
+    entry.text.startsWith('Skill: proven workflow for "') &&
+    entry.text.includes('Pattern (plan→do→verify):')
+  );
+}
+
 function memoryTierMultiplier(entry: GenomeEntry): number {
-  const tags = new Set(entry.tags.map((tag) => tag.toLowerCase()));
+  const tags = new Set(entry.tags.map((tag) => tag.trim().toLowerCase()));
   if (tags.has('m26') && tags.has('playbook')) return 1.7;
-  if (tags.has('m243:skill')) return 1.55;
+  if (isLegacyInternalSkill(entry, tags)) return 1.55;
   if (tags.has('m235:anti-playbook')) return 1.5;
   if (tags.has('reflection') || tags.has('compaction')) return 1.35;
   if (tags.has('run') || tags.has('swarm')) return 0.9;

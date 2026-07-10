@@ -20,7 +20,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { AshlrConfig } from '../src/core/types.js';
+import type { AshlrConfig, SkillCard } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -29,6 +29,8 @@ import type { AshlrConfig } from '../src/core/types.js';
 let traces: Record<string, unknown>[] = [];
 const linked: Array<[string, string]> = [];
 let proposalRepo = '';
+let skillCards: SkillCard[] = [];
+const recordedSkillCards: SkillCard[] = [];
 
 vi.mock('../src/core/fleet/judge-trace.js', () => ({
   readJudgeTraces: vi.fn(() => traces),
@@ -41,6 +43,30 @@ vi.mock('../src/core/inbox/store.js', () => ({
   loadProposal: vi.fn(() => (proposalRepo ? { repo: proposalRepo } : null)),
 }));
 
+vi.mock('../src/core/fleet/skill-records.js', () => ({
+  readSkillCards: vi.fn(() => skillCards),
+  sanitizeSkillCard: vi.fn((card: SkillCard) => {
+    const sanitized = { ...card };
+    if (!sanitized.contentHash) delete sanitized.contentHash;
+    if (!sanitized.attestation) delete sanitized.attestation;
+    return sanitized;
+  }),
+  recordSkillCard: vi.fn((input: SkillCard | SkillCard[]) => {
+    const cards = Array.isArray(input) ? input : [input];
+    recordedSkillCards.push(...cards);
+    skillCards = [...cards].reverse().concat(skillCards);
+  }),
+}));
+
+vi.mock('../src/core/fleet/skill-attestation.js', () => ({
+  verifyAttestedSkillCard: vi.fn((card: SkillCard) => card.attestation !== 'invalid'),
+  attestSkillCard: vi.fn((card: SkillCard) => ({
+    ...card,
+    contentHash: 'c'.repeat(64),
+    attestation: 'a'.repeat(64),
+  })),
+}));
+
 let ledger: Record<string, unknown>[] = [];
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: vi.fn(() => ledger),
@@ -51,6 +77,8 @@ import { scanRealWorldOutcomes } from '../src/core/fleet/outcome-watcher.js';
 import { outcomeToIntent } from '../src/core/fleet/judge-calibration.js';
 import { buildProducerScores } from '../src/core/run/learned-router.js';
 import { readJudgeTraces } from '../src/core/fleet/judge-trace.js';
+import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
+import { sanitizeSkillCard } from '../src/core/fleet/skill-records.js';
 
 // ---------------------------------------------------------------------------
 // Git fixture helpers
@@ -101,6 +129,30 @@ function mergedTrace(pid: string): Record<string, unknown> {
   };
 }
 
+function verifiedCard(pid: string, overrides: Partial<SkillCard> = {}): SkillCard {
+  return {
+    schemaVersion: 1,
+    skillId: `skill.proposal.${pid}`,
+    revision: 1,
+    ts: '2026-07-10T12:00:00.000Z',
+    name: 'Verified workflow',
+    summary: 'Metadata-only verified workflow.',
+    status: 'verified',
+    source: 'verified-proposal',
+    tags: ['verification'],
+    commandKinds: ['test'],
+    verification: {
+      passed: true,
+      diffHash: 'd'.repeat(64),
+      evidenceCount: 2,
+    },
+    proposalId: pid,
+    learningSource: 'verified-proposal',
+    labelBasis: 'evidence-policy',
+    ...overrides,
+  };
+}
+
 const cfg = { version: 1, foundry: {} } as unknown as AshlrConfig;
 let stateFile = '';
 
@@ -109,6 +161,8 @@ beforeEach(() => {
   ledger = [];
   linked.length = 0;
   proposalRepo = '';
+  skillCards = [];
+  recordedSkillCards.length = 0;
   const stateDir = mkdtempSync(join(tmpdir(), 'ashlr-m332-state-'));
   dirs.push(stateDir);
   stateFile = join(stateDir, 'watch.json');
@@ -135,10 +189,31 @@ describe('M332 scanRealWorldOutcomes', () => {
     const mergeSha = g(proposalRepo, ['rev-parse', 'HEAD']).trim();
     g(proposalRepo, ['revert', '--no-edit', mergeSha]);
     traces = [mergedTrace('p-rev')];
+    skillCards = [{
+      ...verifiedCard('p-rev'),
+      contentHash: 'e'.repeat(64),
+      attestation: 'f'.repeat(64),
+    }];
 
-    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+    const nowMs = Date.parse('2026-07-10T14:00:00.000Z');
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile, nowMs });
     expect(scan.reverts).toBe(1);
     expect(linked).toContainEqual(['p-rev', 'reverted']);
+    expect(recordedSkillCards).toEqual([
+      expect.objectContaining({
+        skillId: 'skill.proposal.p-rev',
+        revision: 2,
+        ts: '2026-07-10T14:00:00.000Z',
+        status: 'revoked',
+        verification: { passed: true, diffHash: 'd'.repeat(64), evidenceCount: 2 },
+        contentHash: 'c'.repeat(64),
+        attestation: 'a'.repeat(64),
+      }),
+    ]);
+    expect(recordedSkillCards[0]?.contentHash).not.toBe('e'.repeat(64));
+    expect(recordedSkillCards[0]?.attestation).not.toBe('f'.repeat(64));
+    expect(sanitizeSkillCard).toHaveBeenCalledOnce();
+    expect(attestSkillCard).toHaveBeenCalledOnce();
   }, 30_000);
 
   it('detects a near-term fix commit touching the same file', async () => {
@@ -147,10 +222,97 @@ describe('M332 scanRealWorldOutcomes', () => {
     g(proposalRepo, ['add', '-A']);
     g(proposalRepo, ['commit', '--quiet', '-m', 'fix: repair the merged change']);
     traces = [mergedTrace('p-fix')];
+    skillCards = [verifiedCard('p-fix')];
 
     const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
     expect(scan.followUps).toBe(1);
     expect(linked).toContainEqual(['p-fix', 'followed-up']);
+    expect(recordedSkillCards).toEqual([
+      expect.objectContaining({
+        skillId: 'skill.proposal.p-fix',
+        revision: 2,
+        status: 'deprecated',
+      }),
+    ]);
+  }, 30_000);
+
+  it('appends only one lifecycle revision across repeated forced scans', async () => {
+    proposalRepo = repoWithMerge('p-repeat');
+    const mergeSha = g(proposalRepo, ['rev-parse', 'HEAD']).trim();
+    g(proposalRepo, ['revert', '--no-edit', mergeSha]);
+    traces = [mergedTrace('p-repeat')];
+    skillCards = [verifiedCard('p-repeat')];
+
+    await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+    await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+
+    expect(recordedSkillCards).toHaveLength(1);
+    expect(recordedSkillCards[0]).toMatchObject({ revision: 2, status: 'revoked' });
+  }, 30_000);
+
+  it('does not create a card when the detected proposal has no verified skill', async () => {
+    proposalRepo = repoWithMerge('p-absent');
+    const mergeSha = g(proposalRepo, ['rev-parse', 'HEAD']).trim();
+    g(proposalRepo, ['revert', '--no-edit', mergeSha]);
+    traces = [mergedTrace('p-absent')];
+    skillCards = [
+      verifiedCard('another-proposal'),
+      verifiedCard('p-absent', { attestation: 'invalid' }),
+    ];
+
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+
+    expect(scan.reverts).toBe(1);
+    expect(recordedSkillCards).toEqual([]);
+  }, 30_000);
+
+  it('does not append an unsigned lifecycle row when attestation fails', async () => {
+    proposalRepo = repoWithMerge('p-attestation-fails');
+    const mergeSha = g(proposalRepo, ['rev-parse', 'HEAD']).trim();
+    g(proposalRepo, ['revert', '--no-edit', mergeSha]);
+    traces = [mergedTrace('p-attestation-fails')];
+    skillCards = [verifiedCard('p-attestation-fails')];
+    vi.mocked(attestSkillCard).mockReturnValueOnce(null);
+
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+
+    expect(scan.reverts).toBe(1);
+    expect(recordedSkillCards).toEqual([]);
+  }, 30_000);
+
+  it('never downgrades an already-revoked skill after a follow-up fix', async () => {
+    proposalRepo = repoWithMerge('p-terminal');
+    writeFileSync(join(proposalRepo, 'file.ts'), 'fixed after revocation\n');
+    g(proposalRepo, ['add', '-A']);
+    g(proposalRepo, ['commit', '--quiet', '-m', 'fix: follow up on revoked workflow']);
+    traces = [mergedTrace('p-terminal')];
+    skillCards = [
+      verifiedCard('p-terminal', { revision: 2, status: 'revoked' }),
+      verifiedCard('p-terminal'),
+    ];
+
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+
+    expect(scan.followUps).toBe(1);
+    expect(recordedSkillCards).toEqual([]);
+  }, 30_000);
+
+  it('upgrades a deprecated skill when a later authoritative revert lands', async () => {
+    proposalRepo = repoWithMerge('p-lifecycle-upgrade');
+    const mergeSha = g(proposalRepo, ['rev-parse', 'HEAD']).trim();
+    g(proposalRepo, ['revert', '--no-edit', mergeSha]);
+    traces = [{ ...mergedTrace('p-lifecycle-upgrade'), outcome: 'followed-up' }];
+    skillCards = [
+      verifiedCard('p-lifecycle-upgrade', { revision: 2, status: 'deprecated' }),
+      verifiedCard('p-lifecycle-upgrade'),
+    ];
+
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+
+    expect(scan.reverts).toBe(1);
+    expect(recordedSkillCards).toEqual([
+      expect.objectContaining({ revision: 3, status: 'revoked' }),
+    ]);
   }, 30_000);
 
   it('unrelated later commits produce NO link (no false positives)', async () => {

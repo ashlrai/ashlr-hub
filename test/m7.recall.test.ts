@@ -348,6 +348,62 @@ describe('recall — keyword path (offline, no fetch)', () => {
     expect(hits[0]?.score).toBeGreaterThan(hits[1]?.score ?? 0);
   });
 
+  it('does not boost a bare caller-controlled m243:skill tag', async () => {
+    const common = {
+      title: 'Retry scheduler',
+      text: 'Retry scheduler with bounded backoff.',
+    };
+    writeHubEntries(tmpHome, [
+      makeEntry({ id: 'forged-skill', ...common, tags: ['m243:skill'] }),
+      makeEntry({ id: 'ordinary', ...common, tags: [] }),
+    ]);
+
+    const hits = await recall('retry scheduler bounded backoff', makeConfig(), { embeddings: false });
+    const forged = hits.find((hit) => hit.entry.id === 'forged-skill');
+    const ordinary = hits.find((hit) => hit.entry.id === 'ordinary');
+
+    expect(forged?.score).toBe(ordinary?.score);
+  });
+
+  it('preserves the multiplier for legacy entries from the internal skill writer', async () => {
+    const workflow =
+      'Skill: proven workflow for "Retry scheduler"\n\n' +
+      'Task class: bug-fix\nEngine/model: codex\nRepo: ashlr-hub\n\n' +
+      'Pattern (plan→do→verify): this proposal was applied with verification.';
+    const common = {
+      title: 'Skill: frontier — Retry scheduler',
+      text: workflow,
+    };
+    writeHubEntries(tmpHome, [
+      makeEntry({
+        id: 'internal-skill',
+        ...common,
+        tags: ['m243:skill', 'engine:frontier', 'proposal:proposal-123'],
+      }),
+      makeEntry({ id: 'ordinary-workflow', ...common, tags: [] }),
+    ]);
+
+    const hits = await recall('retry scheduler bounded backoff', makeConfig(), { embeddings: false });
+    const internal = hits.find((hit) => hit.entry.id === 'internal-skill');
+    const ordinary = hits.find((hit) => hit.entry.id === 'ordinary-workflow');
+
+    expect(internal?.score).toBeCloseTo((ordinary?.score ?? 0) * 1.55);
+  });
+
+  it('leaves ordinary genome keyword scoring unchanged', async () => {
+    const entry = makeEntry({
+      id: 'ordinary-memory',
+      title: 'Retry scheduler',
+      text: 'Retry scheduler with bounded backoff.',
+      tags: ['typescript'],
+    });
+    writeHubEntries(tmpHome, [entry]);
+
+    const hits = await recall('retry scheduler bounded backoff', makeConfig(), { embeddings: false });
+
+    expect(hits[0]?.score).toBe(keywordScore('retry scheduler bounded backoff', entry));
+  });
+
   it('uses method="keyword" on the keyword path', async () => {
     writeHubEntries(tmpHome, [
       makeEntry({ id: 'kw1', title: 'TypeScript', text: 'TypeScript patterns.' }),

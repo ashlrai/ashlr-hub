@@ -24,8 +24,10 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 
-import type { AshlrConfig } from '../types.js';
+import type { AshlrConfig, SkillCard } from '../types.js';
 import { readJudgeTraces, linkOutcome } from './judge-trace.js';
+import { attestSkillCard, verifyAttestedSkillCard } from './skill-attestation.js';
+import { readSkillCards, recordSkillCard, sanitizeSkillCard } from './skill-records.js';
 
 export interface OutcomeScan {
   /** Merged traces examined this pass. */
@@ -59,6 +61,70 @@ function git(repo: string, args: string[]): string {
 function filesOf(repo: string, sha: string): Set<string> {
   const out = git(repo, ['show', '--name-only', '--format=', sha]);
   return new Set(out.split('\n').map((l) => l.trim()).filter((l) => l.length > 0));
+}
+
+/**
+ * Build a sanitized, newly attested lifecycle revision. Existing attestation
+ * fields are never carried across changed revision/status content.
+ */
+export function buildSkillLifecycleRevision(
+  current: SkillCard,
+  status: 'deprecated' | 'revoked',
+  nowMs: number,
+): SkillCard | null {
+  try {
+    const revision = sanitizeSkillCard({
+      ...current,
+      revision: current.revision + 1,
+      ts: new Date(nowMs).toISOString(),
+      status,
+      contentHash: undefined,
+      attestation: undefined,
+    });
+    return attestSkillCard(revision);
+  } catch {
+    return null;
+  }
+}
+
+function invalidateVerifiedSkills(
+  proposalId: string,
+  status: 'deprecated' | 'revoked',
+  nowMs: number,
+): void {
+  try {
+    const cards = readSkillCards({ limit: 1_000, maxFiles: 31 });
+    const histories = new Map<string, typeof cards>();
+    for (const card of cards) {
+      if (!verifyAttestedSkillCard(card)) continue;
+      const history = histories.get(card.skillId) ?? [];
+      history.push(card);
+      histories.set(card.skillId, history);
+    }
+
+    const invalidations: SkillCard[] = [];
+    for (const history of histories.values()) {
+      // Revocation is terminal even if a malformed later revision attempts to
+      // revive the skill. Conflicting latest revisions also fail closed.
+      if (history.some((card) => card.status === 'revoked')) continue;
+      const latestRevision = Math.max(...history.map((card) => card.revision));
+      if (!Number.isSafeInteger(latestRevision) || latestRevision >= Number.MAX_SAFE_INTEGER) continue;
+      const latest = history.filter((card) => card.revision === latestRevision);
+      if (latest.length === 0) continue;
+      const current = latest[0]!;
+      const fingerprint = JSON.stringify(current);
+      if (latest.some((card) => JSON.stringify(card) !== fingerprint)) continue;
+      if (current.proposalId !== proposalId) continue;
+      const canInvalidate = current.status === 'verified'
+        || (status === 'revoked' && current.status === 'deprecated');
+      if (!canInvalidate) continue;
+      const invalidation = buildSkillLifecycleRevision(current, status, nowMs);
+      if (invalidation) invalidations.push(invalidation);
+    }
+    if (invalidations.length > 0) recordSkillCard(invalidations);
+  } catch {
+    // Skill lifecycle history is best-effort and must never disrupt scanning.
+  }
 }
 
 /**
@@ -177,6 +243,7 @@ export async function scanRealWorldOutcomes(
         ]).trim();
         if (revertSha) {
           linkOutcome(trace.proposalId, 'reverted');
+          invalidateVerifiedSkills(trace.proposalId, 'revoked', now);
           scan.reverts++;
           continue;
         }
@@ -220,6 +287,7 @@ export async function scanRealWorldOutcomes(
           const overlaps = [...touched].some((f) => mergedFiles.has(f));
           if (overlaps) {
             linkOutcome(trace.proposalId, 'followed-up');
+            invalidateVerifiedSkills(trace.proposalId, 'deprecated', now);
             scan.followUps++;
             break;
           }

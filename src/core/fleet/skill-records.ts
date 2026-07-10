@@ -8,13 +8,17 @@
 
 import {
   appendFileSync,
+  chmodSync,
   closeSync,
+  constants as fsConstants,
   existsSync,
+  fchmodSync,
+  fstatSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readSync,
   readdirSync,
-  statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -38,6 +42,10 @@ const DEFAULT_MAX_FILES = 14;
 const MAX_READ_FILES = 31;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_LIST_ITEMS = 16;
+const PRIVATE_DIR_MODE = 0o700;
+const PRIVATE_FILE_MODE = 0o600;
+const MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000;
+const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
 
 const CARD_STATUSES = new Set<SkillCardStatus>(['candidate', 'verified', 'deprecated', 'revoked']);
 const CARD_SOURCES = new Set<SkillCardSource>(['verified-proposal', 'manual', 'imported']);
@@ -110,6 +118,7 @@ export const skillsDir = skillRecordsDir;
 function eventTimestamp(value: unknown): string {
   const parsed = typeof value === 'string' ? Date.parse(value) : NaN;
   if (!Number.isFinite(parsed)) throw new Error('invalid skill record timestamp');
+  if (parsed > Date.now() + MAX_FUTURE_SKEW_MS) throw new Error('future-dated skill record timestamp');
   return new Date(parsed).toISOString();
 }
 
@@ -154,6 +163,12 @@ function boundedText(value: unknown, max: number, fallback = ''): string {
 function boundedOptionalText(value: unknown, max: number): string | undefined {
   const text = boundedText(value, max);
   return text || undefined;
+}
+
+function canonicalDigest(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const digest = value.trim().toLowerCase();
+  return SHA256_HEX_RE.test(digest) ? digest : undefined;
 }
 
 function requiredText(value: unknown, max: number, field: string): string {
@@ -227,7 +242,7 @@ function sanitizeVerification(value: unknown): SkillCardVerification | undefined
   const input = value as Record<string, unknown>;
   const verifiedAt = optionalTimestamp(input['verifiedAt']);
   const commandKinds = boundedTextList(input['commandKinds'], 12, MAX_TEXT.kind);
-  const diffHash = boundedOptionalText(input['diffHash'], MAX_TEXT.hash);
+  const diffHash = canonicalDigest(input['diffHash']);
   const riskClass = boundedOptionalText(input['riskClass'], MAX_TEXT.risk);
   const evidenceCount = optionalNonNegativeInteger(input['evidenceCount']);
   return {
@@ -274,6 +289,8 @@ export function sanitizeSkillCard(card: SkillCard): SkillCard {
   const taskKinds = boundedTextList(card.taskKinds, MAX_LIST_ITEMS, MAX_TEXT.kind);
   const commandKinds = boundedTextList(card.commandKinds, 12, MAX_TEXT.kind);
   const verification = sanitizeVerification(card.verification);
+  const contentHash = canonicalDigest(card.contentHash);
+  const attestation = canonicalDigest(card.attestation);
   return {
     schemaVersion: 1,
     skillId: requiredText(card.skillId, MAX_TEXT.id, 'skillId'),
@@ -287,6 +304,8 @@ export function sanitizeSkillCard(card: SkillCard): SkillCard {
     ...(taskKinds ? { taskKinds } : {}),
     ...(commandKinds ? { commandKinds } : {}),
     ...(verification ? { verification } : {}),
+    ...(contentHash ? { contentHash } : {}),
+    ...(attestation ? { attestation } : {}),
     ...(proposalId ? { proposalId } : {}),
     ...(runId ? { runId } : {}),
     ...sanitizedCausal(card),
@@ -363,21 +382,62 @@ function appendRecords<T extends { ts: string }>(
       }
     }
     if (records.length === 0) return;
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    ensurePrivateSkillDirectory(dir);
     const byDate = new Map<string, T[]>();
     for (const record of records) {
       const date = eventDateString(record.ts);
       byDate.set(date, [...(byDate.get(date) ?? []), record]);
     }
     for (const [date, rows] of byDate) {
-      appendFileSync(
+      appendPrivateFile(
         join(dir, `${date}.jsonl`),
         rows.map((row) => JSON.stringify(row)).join('\n') + '\n',
-        'utf8',
       );
     }
   } catch {
     // Skill history must never disrupt the caller.
+  }
+}
+
+function ownedByCurrentUser(uid: number): boolean {
+  return typeof process.getuid !== 'function' || uid === process.getuid();
+}
+
+function permissionsArePrivate(mode: number): boolean {
+  return process.platform === 'win32' || (mode & 0o077) === 0;
+}
+
+function ensurePrivateSkillDirectory(dir: string): void {
+  for (const candidate of [skillRecordsDir(), dir]) {
+    if (!existsSync(candidate)) mkdirSync(candidate, { recursive: true, mode: PRIVATE_DIR_MODE });
+    const stat = lstatSync(candidate);
+    if (stat.isSymbolicLink() || !stat.isDirectory() || !ownedByCurrentUser(stat.uid)) {
+      throw new Error('unsafe skill ledger directory');
+    }
+    chmodSync(candidate, PRIVATE_DIR_MODE);
+  }
+}
+
+function appendPrivateFile(filePath: string, contents: string): void {
+  let fd: number | undefined;
+  try {
+    if (existsSync(filePath)) {
+      const before = lstatSync(filePath);
+      if (before.isSymbolicLink() || !before.isFile() || !ownedByCurrentUser(before.uid)) {
+        throw new Error('unsafe skill ledger file');
+      }
+    }
+    fd = openSync(
+      filePath,
+      fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+      PRIVATE_FILE_MODE,
+    );
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || !ownedByCurrentUser(opened.uid)) throw new Error('unsafe skill ledger file');
+    fchmodSync(fd, PRIVATE_FILE_MODE);
+    appendFileSync(fd, contents, 'utf8');
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -402,12 +462,21 @@ function boundedOption(value: number | undefined, fallback: number, max: number)
 function readFileTail(filePath: string): string | null {
   let fd: number | undefined;
   try {
-    const size = statSync(filePath).size;
+    const before = lstatSync(filePath);
+    if (
+      before.isSymbolicLink() ||
+      !before.isFile() ||
+      !ownedByCurrentUser(before.uid) ||
+      !permissionsArePrivate(before.mode)
+    ) return null;
+    const size = before.size;
     if (size <= 0) return '';
     const bytes = Math.min(size, MAX_FILE_BYTES);
     const start = Math.max(0, size - bytes);
     const buffer = Buffer.alloc(bytes);
-    fd = openSync(filePath, 'r');
+    fd = openSync(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || !ownedByCurrentUser(opened.uid) || !permissionsArePrivate(opened.mode)) return null;
     const read = readSync(fd, buffer, 0, bytes, start);
     let text = buffer.subarray(0, read).toString('utf8');
     if (start > 0) {
@@ -435,6 +504,13 @@ function fileMayContainSince(file: string, sinceMs: number): boolean {
   return !Number.isFinite(endOfDayMs) || endOfDayMs >= sinceMs;
 }
 
+function fileIsNotFutureDated(file: string): boolean {
+  const match = DATE_LEDGER_FILE_RE.exec(file);
+  if (!match) return false;
+  const startOfDayMs = Date.parse(`${match[1]}T00:00:00.000Z`);
+  return Number.isFinite(startOfDayMs) && startOfDayMs <= Date.now() + MAX_FUTURE_SKEW_MS;
+}
+
 function readRecords<T>(
   dir: string,
   guard: (value: unknown) => value is T,
@@ -448,8 +524,15 @@ function readRecords<T>(
     : undefined;
   try {
     if (!existsSync(dir)) return [];
+    const dirStat = lstatSync(dir);
+    if (
+      dirStat.isSymbolicLink() ||
+      !dirStat.isDirectory() ||
+      !ownedByCurrentUser(dirStat.uid) ||
+      !permissionsArePrivate(dirStat.mode)
+    ) return [];
     const files = readdirSync(dir)
-      .filter((file) => DATE_LEDGER_FILE_RE.test(file))
+      .filter((file) => DATE_LEDGER_FILE_RE.test(file) && fileIsNotFutureDated(file))
       .sort()
       .reverse()
       .slice(0, maxFiles);

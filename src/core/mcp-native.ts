@@ -60,6 +60,16 @@ const MAX_DIFF_CHARS = 4 * 1024;
 /** Marker inserted where output was truncated. */
 const TRUNCATION_MARK = '\n…[ashlr: output truncated]…\n';
 
+/** Internal privilege tags that external MCP callers may not persist. */
+const RESERVED_LEARN_TAGS = new Set(['m243:skill']);
+
+function externalLearnTags(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value
+    .map(String)
+    .filter((tag) => !RESERVED_LEARN_TAGS.has(tag.trim().toLowerCase()));
+}
+
 // ---------------------------------------------------------------------------
 // Routing data derivation (M131)
 // ---------------------------------------------------------------------------
@@ -244,7 +254,7 @@ const TOOLS: NativeToolImpl[] = [
         text: String(args['text']),
         title: typeof args['title'] === 'string' ? args['title'] : undefined,
         project: typeof args['project'] === 'string' ? args['project'] : undefined,
-        tags: Array.isArray(args['tags']) ? args['tags'].map(String) : undefined,
+        tags: externalLearnTags(args['tags']),
         hubOnly: true,
       });
       return { stored: true, id: entry.id, title: entry.title };

@@ -170,6 +170,18 @@ describe('invariant 4 — ashlr_learn is append-only + hub-only', () => {
     expect(existsSync(join(repo.dir, '.ashlrcode'))).toBe(false);
     expect(hubLineCount()).toBe(1);
   });
+
+  it('strips the reserved skill privilege tag while preserving ordinary tags', async () => {
+    const r = await callNativeTool('ashlr_learn', {
+      text: 'external learning with attempted privilege tags',
+      tags: ['useful', 'm243:skill', ' M243:SKILL '],
+    });
+
+    expect(r.isError).toBeUndefined();
+    const line = readFileSync(hubStorePath(), 'utf8').trim();
+    const entry = JSON.parse(line) as { tags: string[] };
+    expect(entry.tags).toEqual(['useful']);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -1361,3 +1361,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Make NIM resource availability fail closed when the executor cannot resolve its configured credential.
 - [x] Run focused privacy/dashboard/learning tests and final repository gates.
 - [x] Update durable notes, commit, push, reload the daemon if runtime code changed, and smoke live status.
+
+## Current Overnight Cycle - Shadow Skill Retrieval
+- [x] Rehydrate the clean production baseline, Entire state, live skill store, and prior rollout notes.
+- [x] Deploy parallel lanes for deterministic retrieval, routing integration mapping, trajectory correlation, and adversarial review.
+- [x] Audit retrieval readiness adversarially and stop production wiring when the card ledger fails the canonical trust-boundary bar.
+- [x] Require authoritative proposal provenance before distilling either a legacy workflow or structured skill card.
+- [x] Harden skill ledger ownership, permissions, symlink handling, and bounded reads.
+- [x] Add latest-revision-wins canonical eligibility with revocation/deprecation suppression and conflict quarantine.
+- [x] Remove caller-controlled legacy `m243:skill` privilege from MCP learning and tag-only recall boosts.
+- [x] Keep shadow retrieval observe-only and unwired while signing, lifecycle, and privilege boundaries settle in production.
+- [ ] Run focused and repository verification gates, update notes, commit, push, reload, and smoke production.

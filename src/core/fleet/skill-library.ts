@@ -38,11 +38,12 @@
 
 import { appendHubEntry } from '../genome/store.js';
 import { readAutonomyEvidencePack, type AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
-import { hashDiff } from '../foundry/provenance.js';
+import { hashDiff, verifyProvenance } from '../foundry/provenance.js';
 import { loadProposal } from '../inbox/store.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { recordDecision } from './decisions-ledger.js';
-import { recordSkillCard } from './skill-records.js';
+import { attestSkillCard } from './skill-attestation.js';
+import { recordSkillCard, sanitizeSkillCard } from './skill-records.js';
 import type { AshlrConfig, GenomeEntry, Proposal, SkillCard } from '../types.js';
 
 // ---------------------------------------------------------------------------
@@ -162,6 +163,7 @@ function verifiedSkillInput(proposalId: string): VerifiedSkillInput | null {
     const proposal = loadProposal(proposalId);
     if (!proposal || proposal.id !== proposalId || proposal.status !== 'applied') return null;
     if (typeof proposal.diff !== 'string' || proposal.diff.length === 0) return null;
+    if (!verifyProvenance(proposal).ok) return null;
 
     const commandKinds = commandKindsFromVerification(proposal);
     const currentDiffHash = hashDiff(proposal.diff);
@@ -193,11 +195,11 @@ function verifiedSkillInput(proposalId: string): VerifiedSkillInput | null {
 
 function skillCardFromVerified(input: VerifiedSkillInput, ts: string): SkillCard {
   const { proposal, evidence, diffHash, commandKinds } = input;
-  const safeTitle = boundedMetadataText(proposal.title, 100, 'Untitled verified workflow');
+  const taskClass = deriveTaskClass(boundedMetadataText(proposal.title, 100, 'verified workflow'));
+  const safeTitle = `Verified ${taskClass} workflow`;
   const safeSummary = boundedMetadataText(
-    proposal.summary,
+    `Evidence-bound ${taskClass} workflow verified with ${commandKinds.join(', ')} commands at ${evidence.riskClass} risk.`,
     400,
-    `Verified ${deriveTaskClass(safeTitle)} workflow.`,
   );
   const gateCount = Object.values(evidence.gates).length;
   return {
@@ -210,7 +212,7 @@ function skillCardFromVerified(input: VerifiedSkillInput, ts: string): SkillCard
     status: 'verified',
     source: 'verified-proposal',
     tags: [TAG, `engine:${proposal.engineTier}`, `proposal:${boundedMetadataText(proposal.id, 24, 'unknown')}`],
-    taskKinds: [deriveTaskClass(safeTitle)],
+    taskKinds: [taskClass],
     commandKinds,
     verification: {
       passed: true,
@@ -310,6 +312,8 @@ export function learnFromApplied(proposal: Proposal, cfg: AshlrConfig): void {
 
   const authoritative = verified.proposal;
   const now = new Date().toISOString();
+  const structuredCard = attestSkillCard(sanitizeSkillCard(skillCardFromVerified(verified, now)));
+  if (!structuredCard) return;
 
   // Preserve the legacy genome note for compatibility.
   try {
@@ -333,7 +337,7 @@ export function learnFromApplied(proposal: Proposal, cfg: AshlrConfig): void {
 
   // Structured skill history is append-only and independently best-effort.
   try {
-    recordSkillCard(skillCardFromVerified(verified, now));
+    recordSkillCard(structuredCard);
   } catch {
     // Skill history must never disrupt the applied proposal path.
   }

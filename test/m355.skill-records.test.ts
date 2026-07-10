@@ -9,6 +9,8 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -44,7 +46,7 @@ function card(overrides: Partial<SkillCard> = {}): SkillCard {
       passed: true,
       verifiedAt: '2026-07-10T11:59:00.000Z',
       commandKinds: ['test', 'typecheck'],
-      diffHash: 'sha256:fixture-diff',
+      diffHash: 'a'.repeat(64),
       riskClass: 'low',
       evidenceCount: 2,
     },
@@ -175,7 +177,7 @@ describe('M355 skill records', () => {
   });
 
   it('skips malformed rows without hiding later valid history', () => {
-    mkdirSync(skillCardsDir(), { recursive: true });
+    mkdirSync(skillCardsDir(), { recursive: true, mode: 0o700 });
     writeFileSync(
       join(skillCardsDir(), '2026-07-10.jsonl'),
       [
@@ -185,7 +187,7 @@ describe('M355 skill records', () => {
         JSON.stringify(card({ skillId: 'valid-manual-row' })),
         '{"schemaVersion":1,"skillId":',
       ].join('\n') + '\n',
-      'utf8',
+      { encoding: 'utf8', mode: 0o600 },
     );
 
     const hostile = new Proxy(card({ skillId: 'hostile-row' }), {
@@ -203,7 +205,30 @@ describe('M355 skill records', () => {
     expect(readSkillCards().map((entry) => entry.skillId)).toEqual(['batch-survivor', 'valid-manual-row']);
   });
 
+  it('creates private ledgers and refuses symlinked files', () => {
+    recordSkillCard(card());
+    recordSkillUseEvent(useEvent());
+
+    const cardFile = join(skillCardsDir(), '2026-07-10.jsonl');
+    const useFile = join(skillUseEventsDir(), '2026-07-10.jsonl');
+    expect(statSync(skillRecordsDir()).mode & 0o777).toBe(0o700);
+    expect(statSync(skillCardsDir()).mode & 0o777).toBe(0o700);
+    expect(statSync(skillUseEventsDir()).mode & 0o777).toBe(0o700);
+    expect(statSync(cardFile).mode & 0o777).toBe(0o600);
+    expect(statSync(useFile).mode & 0o777).toBe(0o600);
+
+    const target = join(home, 'outside-skill-ledger.jsonl');
+    writeFileSync(target, 'outside\n', { encoding: 'utf8', mode: 0o600 });
+    rmSync(cardFile);
+    symlinkSync(target, cardFile);
+
+    recordSkillCard(card({ skillId: 'must-not-follow-symlink' }));
+    expect(readFileSync(target, 'utf8')).toBe('outside\n');
+    expect(readSkillCards()).toEqual([]);
+  });
+
   it('bounds row, date, file, list, and numeric metadata', () => {
+    const farFuture = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
     recordSkillUseEvent([
       useEvent({ eventId: 'old-file', ts: '2026-07-08T00:00:00.000Z' }),
       useEvent({ eventId: 'middle', ts: '2026-07-09T00:00:00.000Z' }),
@@ -214,6 +239,7 @@ describe('M355 skill records', () => {
         score: 7,
       }),
       useEvent({ eventId: 'new-b', ts: '2026-07-10T00:01:00.000Z' }),
+      useEvent({ eventId: 'future-poison', ts: farFuture }),
     ]);
 
     expect(readSkillUseEvents({ limit: 2 }).map((entry) => entry.eventId)).toEqual(['new-b', 'new-a']);
@@ -221,6 +247,7 @@ describe('M355 skill records', () => {
     expect(readSkillUseEvents({ sinceMs: Date.parse('2026-07-09T12:00:00.000Z') }).map((entry) => entry.eventId))
       .toEqual(['new-b', 'new-a']);
     expect(readSkillUseEvents({ limit: 2 })[1]).toMatchObject({ rank: 0, score: 1 });
+    expect(readSkillUseEvents().map((entry) => entry.eventId)).not.toContain('future-poison');
   });
 
   it('scrubs every allowed string before write and again on read', () => {

@@ -53,7 +53,7 @@ import * as path from 'node:path';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { AutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import { persistAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
-import { hashDiff } from '../src/core/foundry/provenance.js';
+import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import { LEARNED_ROUTING_MIN_SAMPLES } from '../src/core/run/learned-router.js';
 
 // ---------------------------------------------------------------------------
@@ -244,7 +244,7 @@ function makeProposal(
 ): Proposal {
   const diff = '--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ -1 +1 @@\n+// fix';
   const diffHash = hashDiff(diff);
-  return {
+  const proposal = {
     id,
     repo,
     origin: 'swarm',
@@ -265,6 +265,12 @@ function makeProposal(
       source: 'auto-merge',
     },
   } as Proposal;
+  proposal.provenanceSig = signProvenance(
+    proposal.engineModel ?? '',
+    proposal.engineTier ?? '',
+    diffHash,
+  );
+  return proposal;
 }
 
 /** Persist the authoritative applied proposal and matching evidence pack. */

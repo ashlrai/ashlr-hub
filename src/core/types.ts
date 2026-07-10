@@ -227,6 +227,10 @@ export interface SkillCard {
   taskKinds?: string[];
   commandKinds?: string[];
   verification?: SkillCardVerification;
+  /** SHA-256 of the canonical immutable card payload (excluding attestation fields). */
+  contentHash?: string;
+  /** Domain-separated host-local HMAC binding this card revision to its proposal evidence. */
+  attestation?: string;
   proposalId?: string;
   runId?: string;
   trajectoryId?: string;

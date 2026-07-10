@@ -230,6 +230,138 @@ export function verifyJudgeAttestation(
 }
 
 // ---------------------------------------------------------------------------
+// Skill-card attestation - immutable payload binding
+// ---------------------------------------------------------------------------
+
+const SKILL_CARD_ATTESTATION_DOMAIN = 'ashlr.skill-card-attestation.v1';
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
+export interface SkillCardAttestationParams {
+  /** Caller-computed canonical SHA-256 hash of the complete immutable card. */
+  contentHash: string;
+  skillId: string;
+  revision: number;
+  proposalId: string;
+  diffHash: string;
+}
+
+export interface SkillCardAttestationVerdict {
+  ok: boolean;
+  reason?: string;
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+function skillCardAttestationInputError(
+  params: SkillCardAttestationParams | null | undefined,
+): string | undefined {
+  if (!params || typeof params !== 'object') {
+    return 'missing skill card attestation parameters';
+  }
+
+  for (const [name, value] of [
+    ['skillId', params.skillId],
+    ['proposalId', params.proposalId],
+  ] as const) {
+    if (typeof value !== 'string' || value.length === 0) return `missing ${name}`;
+    if (value.trim() !== value || hasControlCharacter(value)) return `malformed ${name}`;
+  }
+
+  if (!Number.isSafeInteger(params.revision) || params.revision < 1) {
+    return 'malformed revision';
+  }
+
+  for (const [name, value] of [
+    ['contentHash', params.contentHash],
+    ['diffHash', params.diffHash],
+  ] as const) {
+    if (typeof value !== 'string' || value.length === 0) return `missing ${name}`;
+    if (!SHA256_HEX_RE.test(value)) return `malformed ${name}`;
+  }
+
+  return undefined;
+}
+
+/**
+ * Encode a versioned, domain-separated tuple without the `|` delimiter used by
+ * proposal provenance and judge attestations. Base64url framing keeps that
+ * delimiter out even when an id itself contains `|`, preventing a legacy
+ * proposal signature from being replayed as a skill-card signature.
+ */
+function skillCardAttestationPayload(params: SkillCardAttestationParams): string {
+  const tuple = [
+    params.contentHash,
+    params.skillId,
+    String(params.revision),
+    params.proposalId,
+    params.diffHash,
+  ];
+  const encodedTuple = tuple
+    .map((value) => Buffer.from(value, 'utf8').toString('base64url'))
+    .join('.');
+  return `${SKILL_CARD_ATTESTATION_DOMAIN}\n${encodedTuple}`;
+}
+
+function computeSkillCardAttestation(params: SkillCardAttestationParams): string {
+  return createHmac('sha256', loadOrCreateKey())
+    .update(skillCardAttestationPayload(params), 'utf8')
+    .digest('hex');
+}
+
+/**
+ * Sign an immutable skill-card payload using the protected provenance key.
+ * Returns an empty string instead of minting an ambiguous signature when the
+ * caller supplies a missing/malformed tuple or the protected key is unusable.
+ */
+export function signSkillCardAttestation(params: SkillCardAttestationParams): string {
+  try {
+    if (skillCardAttestationInputError(params)) return '';
+    return computeSkillCardAttestation(params);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Verify an immutable skill-card attestation. Every tuple member is required,
+ * both hashes and the MAC must be canonical lowercase SHA-256 hex, and all
+ * failures are returned as `ok:false`.
+ */
+export function verifySkillCardAttestation(
+  attestation: string | undefined,
+  params: SkillCardAttestationParams,
+): SkillCardAttestationVerdict {
+  try {
+    if (typeof attestation !== 'string' || attestation.length === 0) {
+      return { ok: false, reason: 'missing skill card attestation' };
+    }
+    if (!SHA256_HEX_RE.test(attestation)) {
+      return { ok: false, reason: 'malformed skill card attestation' };
+    }
+
+    const inputError = skillCardAttestationInputError(params);
+    if (inputError) return { ok: false, reason: inputError };
+
+    const expected = computeSkillCardAttestation(params);
+    if (!constantTimeEqual(expected, attestation)) {
+      return { ok: false, reason: 'skill card attestation HMAC mismatch - forged or stale attestation' };
+    }
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `skill card attestation verify error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Verification (fail-closed)
 // ---------------------------------------------------------------------------
 
