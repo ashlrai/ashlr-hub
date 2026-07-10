@@ -27,6 +27,7 @@ import {
   isTransientAbort,
   runEngineSandboxed,
 } from '../src/core/run/sandboxed-engine.js';
+import { agentDiagnosticRunRef, agentDiagnosticsDir } from '../src/core/run/agent-diagnostics.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -199,28 +200,47 @@ afterEach(() => {
 // Windows (real shims there are .cmd). The retry logic itself is covered by
 // the in-process unit tests above, which run on every platform.
 describe.skipIf(process.platform === 'win32')('M297 runEngineSandboxed retry integration', () => {
+  let diagnosticsHome: string;
+  let previousAshlrHome: string | undefined;
+
+  beforeEach(() => {
+    previousAshlrHome = process.env.ASHLR_HOME;
+    diagnosticsHome = mkdtempSync(join(tmpdir(), 'ashlr-m297-diagnostics-'));
+    _cleanupDirs.push(diagnosticsHome);
+    process.env.ASHLR_HOME = join(diagnosticsHome, '.ashlr');
+  });
+
+  afterEach(() => {
+    if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
+    else process.env.ASHLR_HOME = previousAshlrHome;
+  });
+
   it('appends repeated invocations with the same run id instead of overwriting logs', async () => {
+    const promptCanary = 'RAW_PROMPT_M297_CANARY';
+    const outputCanary = 'RAW_STDOUT_M297_CANARY';
     const counterFile = join(tmpdir(), `m297-ctr-${Date.now()}-logs.txt`);
-    const stubDir = makeStub('codex', 0, 'done', counterFile);
+    const stubDir = makeStub('codex', 0, outputCanary, counterFile);
     const srcRepo = makeSourceRepo();
-    const testHome = mkdtempSync(join(tmpdir(), 'ashlr-m297-home-'));
-    const previousHome = process.env.HOME;
     _cleanupFiles.push(counterFile);
-    _cleanupDirs.push(stubDir, srcRepo, testHome);
+    _cleanupDirs.push(stubDir, srcRepo);
     const prevPath = process.env.PATH;
     process.env.PATH = `${stubDir}:${prevPath ?? ''}`;
-    process.env.HOME = testHome;
     const runId = 'attempt-018f6d2e-7c50-4f15-8a2c-6efc97fb87a1';
     try {
       const cfg = makeConfig({ dispatchRetries: 0 });
-      await runEngineSandboxed('codex', 'first invocation', cfg, { sourceRepo: srcRepo, propose: false, runId });
-      await runEngineSandboxed('codex', 'second invocation', cfg, { sourceRepo: srcRepo, propose: false, runId });
-      const log = readFileSync(join(testHome, '.ashlr', 'agent-logs', `${runId}.log`), 'utf8');
-      expect(log.match(/=== invocation /g)).toHaveLength(2);
+      await runEngineSandboxed('codex', `${promptCanary} first invocation`, cfg, { sourceRepo: srcRepo, propose: false, runId });
+      await runEngineSandboxed('codex', `${promptCanary} second invocation`, cfg, { sourceRepo: srcRepo, propose: false, runId });
+      const log = readFileSync(join(agentDiagnosticsDir(), `${agentDiagnosticRunRef(runId)!}.jsonl`), 'utf8');
+      const rows = log.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(rows).toHaveLength(2);
+      expect(rows.map((row) => row['attempt'])).toEqual([1, 1]);
+      expect(rows.every((row) => row['schemaVersion'] === 1)).toBe(true);
+      expect(log).not.toContain(promptCanary);
+      expect(log).not.toContain(outputCanary);
+      expect(log).not.toContain(srcRepo);
+      expect(rows.every((row) => (row['output'] as { present?: boolean }).present === true)).toBe(true);
     } finally {
       process.env.PATH = prevPath;
-      if (previousHome === undefined) delete process.env.HOME;
-      else process.env.HOME = previousHome;
     }
   });
 
@@ -264,6 +284,23 @@ describe.skipIf(process.platform === 'win32')('M297 runEngineSandboxed retry int
       });
       expect(result.state.status).toBe('failed');
       expect(countInvocations(counterFile)).toBe(3);
+      const runRef = agentDiagnosticRunRef(result.state.id)!;
+      const log = readFileSync(join(agentDiagnosticsDir(), `${runRef}.jsonl`), 'utf8');
+      const rows = log.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(rows).toHaveLength(3);
+      expect(rows.map((row) => row['attempt'])).toEqual([1, 2, 3]);
+      expect(rows[2]).toMatchObject({
+        schemaVersion: 1,
+        runRef,
+        engine: 'codex',
+        ok: false,
+        attempt: 3,
+        maxAttempts: 3,
+        errorClass: 'execution',
+        output: { present: true },
+        error: { present: true },
+      });
+      expect(log).not.toContain('aborted_streaming');
     } finally {
       process.env.PATH = prevPath;
     }

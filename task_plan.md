@@ -1455,3 +1455,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove partial captures remain non-terminal repair evidence and do not weaken merge or lifecycle authority.
 - [x] Run focused/full gates and independent adversarial review on the final source.
 - [x] Update durable notes, commit, push, reload, and production smoke.
+
+## Current Overnight Cycle - Metadata-Only Agent Diagnostics
+- [x] Rehydrate the deployed partial-capture baseline, live diagnostics store, Entire state, and privacy boundary.
+- [x] Deploy disjoint privacy, filesystem, retry-evidence, and adversarial-review lanes.
+- [x] Replace future raw external-agent logs with a fixed-schema metadata-only diagnostic record.
+- [x] Hash execution identity and preserve one bounded row for every actual retry attempt.
+- [x] Fail closed on unsafe ownership, symlinks, malformed tails, unsupported Windows storage, and retention overflow.
+- [x] Preserve legacy bytes while hardening their directory and file permissions in place.
+- [x] Serialize concurrent processes with bounded lock acquisition and prove no loss under a 16-writer burst.
+- [x] Run full repository gates and final independent review.
+- [ ] Update durable notes, commit, push, reload, harden the live store, and smoke production.

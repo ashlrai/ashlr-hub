@@ -59,6 +59,11 @@ import {
 import { buildEngineCommand, spawnEngine } from './engines.js';
 import { iterateToGreen } from './verify-to-green.js';
 import type { TerminationReason } from './run-monitor.js';
+import {
+  classifyAgentDiagnosticError,
+  measureAgentDiagnosticText,
+  recordAgentDiagnostic,
+} from './agent-diagnostics.js';
 import { resolveEngineSpec } from './engine-registry.js';
 import { buildOpenAICompatibleClient } from './provider-client.js';
 import { runTask } from './agent-loop.js';
@@ -1447,7 +1452,29 @@ export async function runEngineSandboxed(
         launcher: launcher ?? undefined,
       });
       if (res.configRecoveryAttempts) incrementRunActionCount(actionCounts, 'spawnAttempts');
-      _spawnDurationMs += Date.now() - _spawnStart;
+      const invocationDurationMs = Date.now() - _spawnStart;
+      _spawnDurationMs += invocationDurationMs;
+
+      // Persist one fixed-schema row per actual retry attempt. Raw prompt/argv,
+      // output/error, paths, diffs, environment, and file content never cross
+      // this boundary.
+      recordAgentDiagnostic({
+        runId: id,
+        engine,
+        ok: res.ok,
+        ...(res.terminationReason ? { terminationReason: res.terminationReason } : {}),
+        errorClass: classifyAgentDiagnosticError(res.error),
+        durationMs: invocationDurationMs,
+        attempt,
+        maxAttempts,
+        ...(res.configRecoveryAttempts !== undefined
+          ? { configRecoveryAttempts: res.configRecoveryAttempts }
+          : {}),
+        ...(res.usage?.tokensIn !== undefined ? { tokensIn: res.usage.tokensIn } : {}),
+        ...(res.usage?.tokensOut !== undefined ? { tokensOut: res.usage.tokensOut } : {}),
+        output: measureAgentDiagnosticText(res.output),
+        error: measureAgentDiagnosticText(res.error),
+      });
 
       if (res.ok) break;
 
@@ -1468,28 +1495,6 @@ export async function runEngineSandboxed(
     }
 
     const terminationReason: TerminationReason | undefined = res.terminationReason;
-
-    // M288: DISPATCH OBSERVABILITY — persist the agent's stdout + outcome to a
-    // durable per-run log (survives sandbox cleanup) so empty-diff dispatches are
-    // debuggable. Previously res.output was discarded (only kept transiently as the
-    // RunState.result), making it impossible to see WHY an agent produced no edits.
-    // Best-effort, never-throws, additive — does not affect run behavior.
-    try {
-      const _logDir = join(process.env.HOME ?? process.env.USERPROFILE ?? tmpdir(), '.ashlr', 'agent-logs');
-      mkdirSync(_logDir, { recursive: true });
-      appendFileSync(
-        join(_logDir, `${id}.log`),
-        `\n=== invocation ${new Date().toISOString()} ${engine} (${engineModel}) sandbox=${sb.id} worktree=${sb.worktreePath} ===\n` +
-          `ok=${res.ok} terminationReason=${terminationReason ?? '-'} durationMs=${_spawnDurationMs}\n` +
-          `error=${res.error ?? '-'}\n` +
-          `tokensIn=${res.usage?.tokensIn ?? '?'} tokensOut=${res.usage?.tokensOut ?? '?'}\n` +
-          `cmd=${cmd.bin} ${cmd.args.join(' ').slice(0, 400)}\n` +
-          `--- agent output (truncated 40k) ---\n${String(res.output ?? '').slice(0, 40_000)}\n`,
-        'utf8',
-      );
-    } catch {
-      // observability is best-effort — never affects the run
-    }
 
     const _resUsage = res.usage;
     const _computedCost = _resUsage
