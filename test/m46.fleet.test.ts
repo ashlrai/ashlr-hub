@@ -69,6 +69,7 @@ function makeItem(over: Partial<WorkItem> & { source: WorkSource }): WorkItem {
     score: over.score ?? 3,
     tags: over.tags ?? [],
     ts: over.ts ?? new Date().toISOString(),
+    ...over,
   };
 }
 
@@ -107,8 +108,9 @@ describe('routeBackend', () => {
     }
   });
 
-  it('routes generated no-diff proposal repair reslices to frontier when available', () => {
+  it('keeps generated no-diff proposal repair reslices on the parent tier', () => {
     const cfg = withFoundry({ allowedBackends: ['builtin', 'local-coder', 'claude', 'codex'] });
+    const parentTier = engineTierOf('local-coder', cfg);
     const d = routeBackend(makeItem({
       id: 'repo:proposal-repair-nodiff:abcdef123456',
       source: 'self',
@@ -121,21 +123,38 @@ describe('routeBackend', () => {
         'Dispatch outcome: empty-diff\n' +
         'Action: reslice the work into a smaller concrete edit.',
       tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+      repairParentItemId: 'repo:goal:stalled',
+      repairParentSource: 'goal',
+      repairParentBackend: 'local-coder',
+      repairParentTier: parentTier,
     }), cfg);
 
-    const anyFrontierAvailable = engineInstalled('claude') || engineInstalled('codex');
-    if (anyFrontierAvailable) {
-      expect(['claude', 'codex']).toContain(d.backend);
-      expect(d.tier).toBe('frontier');
-      expect(d.reason).toContain('frontier: generated no-diff proposal repair');
-      expect(d.reason).not.toContain('local-mid bulk');
-    } else if (engineInstalled('local-coder')) {
+    if (engineInstalled('local-coder')) {
       expect(d.backend).toBe('local-coder');
-      expect(d.tier).toBe(engineTierOf('local-coder', cfg));
+      expect(d.tier).toBe(parentTier);
+      expect(d.reason).toContain('repair-tier-preserved');
     } else {
       expect(d.backend).toBe('builtin');
-      expect(d.tier).toBe('local');
+      expect(d.reason).toContain('repair-tier-unavailable');
     }
+  });
+
+  it('fails closed when a diagnostic reslice has no durable parent tier', () => {
+    const cfg = withFoundry({ allowedBackends: ['builtin', 'local-coder', 'claude', 'codex'] });
+    const d = routeBackend(makeItem({
+      id: 'repo:proposal-repair-nodiff:abcdef123456',
+      source: 'self',
+      title: 'Reslice no-diff dispatch for repo item repo:goal:legacy',
+      detail:
+        'Diagnostic reslice: legacy.\n' +
+        'Original work item: repo:goal:legacy\n' +
+        'Dispatch outcome: empty-diff\n' +
+        'Action: reslice the work into a smaller concrete edit.',
+      tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+    }), cfg);
+
+    expect(d.backend).toBe('builtin');
+    expect(d.reason).toContain('repair-provenance-missing');
   });
 
   it('routes generated capture proposal repairs to frontier when available', () => {

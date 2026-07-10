@@ -502,6 +502,42 @@ describe('M247 InferenceGateway', () => {
 
   // ── 6. Flag-ON trace records steps ───────────────────────────────────────
   describe('flag-ON decision trace', () => {
+    it('preserves the parent tier for trusted diagnostic reslices', async () => {
+      const cfg: AshlrConfig = {
+        ...withFoundry({
+          allowedBackends: ['builtin', 'local-coder', 'claude'] as EngineId[],
+          fabric: { gateway: true },
+        }),
+        foundry: {
+          allowedBackends: ['builtin', 'local-coder', 'claude'] as EngineId[],
+          fabric: { gateway: true },
+          intelligence: {},
+        },
+      };
+      const item = makeItem('self', {
+        id: 'repo:proposal-repair-nodiff:abcdef123456',
+        title: 'Reslice no-diff dispatch for repo item parent',
+        detail:
+          'Diagnostic reslice: retry the current parent.\n' +
+          'Original work item: parent\n' +
+          'Dispatch outcome: empty-diff\n' +
+          'Action: reslice the work into a smaller concrete edit.',
+        tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+        repairParentItemId: 'parent',
+        repairParentSource: 'issue',
+        repairParentBackend: 'local-coder',
+        repairParentTier: 'mid',
+        effort: 9,
+        score: 9,
+      });
+
+      const gd = await decide(item, cfg);
+
+      expect(gd.tier).toBe('mid');
+      expect(gd.backend).toBe('local-coder');
+      expect(gd.trace.at(-1)?.tier).toBe('mid');
+    });
+
     it('flag-ON with no overrides: trace has at least routeBackend step', async () => {
       const cfg: AshlrConfig = {
         ...withFoundry({

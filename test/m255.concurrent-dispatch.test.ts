@@ -108,6 +108,10 @@ function makeTrustedDiagnosticReslice(): WorkItem {
       'Action: reslice the work into a smaller concrete edit.',
     tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
     ts: new Date().toISOString(),
+    repairParentItemId: 'repo:self-heal:123',
+    repairParentSource: 'self',
+    repairParentBackend: 'local-coder',
+    repairParentTier: 'mid',
   });
 }
 
@@ -225,6 +229,34 @@ describe('planConcurrentDispatch', () => {
 
     expect(plan.assignments).toEqual([{ item: spoofed, backend: 'builtin' }]);
     expect(plan.unassigned).toEqual([trusted]);
+  });
+
+  it('does not spill a parent-tier repair to frontier when its preferred tier is saturated', () => {
+    const repair = makeTrustedDiagnosticReslice();
+    const snap = makeSnapshot([
+      { backend: 'local-coder', availability: 'exhausted' },
+      { backend: 'codex', availability: 'open' },
+      { backend: 'builtin', availability: 'open' },
+    ]);
+
+    const plan = planConcurrentDispatch([repair], snap, defaultCfg, () => 'local-coder');
+
+    expect(plan.assignments).toEqual([]);
+    expect(plan.unassigned).toEqual([repair]);
+  });
+
+  it('uses an available same-tier substitute for a saturated repair backend', () => {
+    const repair = makeTrustedDiagnosticReslice();
+    const snap = makeSnapshot([
+      { backend: 'local-coder', availability: 'exhausted' },
+      { backend: 'kimi', availability: 'open' },
+      { backend: 'claude', availability: 'open' },
+    ]);
+
+    const plan = planConcurrentDispatch([repair], snap, defaultCfg, () => 'local-coder');
+
+    expect(plan.assignments).toEqual([{ item: repair, backend: 'kimi' }]);
+    expect(plan.unassigned).toEqual([]);
   });
 
   it('preserves repair exclusion in the never-throws gateway fallback', async () => {

@@ -7,6 +7,7 @@ import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-product
 import { recordDispatchProduction } from '../src/core/fleet/dispatch-production-ledger.js';
 import {
   compactRepairHandoffs,
+  dispatchEventFromRepairHandoff,
   readRepairHandoffs,
   recordRepairHandoffs,
   repairHandoffFromDispatchEvent,
@@ -58,7 +59,7 @@ function event(repo: string, overrides: Partial<DispatchProductionEvent> = {}): 
 }
 
 describe('M362 durable repair handoff journal', () => {
-  it('records only repairable self outcomes and persists no free-form execution text', () => {
+  it('persists fixed routing provenance while excluding free-form execution text', () => {
     const repo = fx.makeRepo();
     const input = event(repo.dir);
 
@@ -69,7 +70,60 @@ describe('M362 durable repair handoff journal', () => {
     expect(raw).not.toContain('DO_NOT_PERSIST_ROUTE_REASON');
     expect(raw).not.toContain('DO_NOT_PERSIST_STDOUT');
     expect(raw).not.toContain('github_pat_');
-    expect(readRepairHandoffs()).toMatchObject({ sourceState: 'healthy', invalidRows: 0, conflictingIds: 0 });
+    const read = readRepairHandoffs();
+    expect(read).toMatchObject({ sourceState: 'healthy', invalidRows: 0, conflictingIds: 0 });
+    expect(read.observations[0]).toMatchObject({
+      parentSource: 'self',
+      parentBackend: 'local-coder',
+      parentTier: 'local',
+    });
+    expect(dispatchEventFromRepairHandoff(read.observations[0]!)).toMatchObject({
+      source: 'self',
+      backend: 'local-coder',
+      tier: 'local',
+    });
+  });
+
+  it('accepts legacy rows and reconstructs their historical routing defaults', () => {
+    const repo = fx.makeRepo();
+    const observation = repairHandoffFromDispatchEvent(event(repo.dir))!;
+    const legacy = { ...observation };
+    delete legacy.parentSource;
+    delete legacy.parentBackend;
+    delete legacy.parentTier;
+    mkdirSync(dirname(repairHandoffJournalPath()), { recursive: true });
+    writeFileSync(repairHandoffJournalPath(), `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+
+    const read = readRepairHandoffs();
+    expect(read).toMatchObject({ sourceState: 'healthy', invalidRows: 0, conflictingIds: 0 });
+    expect(read.observations).toHaveLength(1);
+    expect(dispatchEventFromRepairHandoff(read.observations[0]!)).toMatchObject({
+      source: 'self',
+      backend: null,
+      tier: null,
+    });
+  });
+
+  it('treats an enriched replay as a compatible upgrade of a legacy row', () => {
+    const repo = fx.makeRepo();
+    const eventValue = event(repo.dir);
+    const observation = repairHandoffFromDispatchEvent(eventValue)!;
+    const legacy = { ...observation };
+    delete legacy.parentSource;
+    delete legacy.parentBackend;
+    delete legacy.parentTier;
+    mkdirSync(dirname(repairHandoffJournalPath()), { recursive: true });
+    writeFileSync(repairHandoffJournalPath(), `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+
+    expect(recordRepairHandoffs(eventValue)).toMatchObject({ recorded: 1, failed: 0 });
+    const read = readRepairHandoffs();
+    expect(read).toMatchObject({ sourceState: 'healthy', conflictingIds: 0 });
+    expect(read.observations).toHaveLength(1);
+    expect(read.observations[0]).toMatchObject({
+      parentSource: eventValue.source,
+      parentBackend: eventValue.backend,
+      parentTier: eventValue.tier,
+    });
   });
 
   it('keeps recursive repairs and incompatible learning labels out of the authority journal', () => {
@@ -118,12 +172,12 @@ describe('M362 durable repair handoff journal', () => {
     expect(await scanQueuedAutonomyWork(repo.dir)).toEqual([]);
   });
 
-  it('deduplicates exact replay and quarantines conflicting event ids', () => {
+  it('deduplicates exact replay and quarantines conflicting routing provenance', () => {
     const repo = fx.makeRepo();
     const observation = repairHandoffFromDispatchEvent(event(repo.dir))!;
     recordRepairHandoffs([event(repo.dir), event(repo.dir)]);
     const path = repairHandoffJournalPath();
-    const conflict = { ...observation, parentRunId: 'attempt-conflicting-replay' };
+    const conflict = { ...observation, parentTier: 'frontier' as const };
     writeFileSync(path, `${JSON.stringify(conflict)}\n`, { encoding: 'utf8', flag: 'a' });
 
     const read = readRepairHandoffs();

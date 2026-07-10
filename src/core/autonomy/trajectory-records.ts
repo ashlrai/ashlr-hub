@@ -958,6 +958,7 @@ export function summarizeTrajectoryLearning(
     agentAction: metric(coverageCounts.agentAction, denominator),
     skillUse: metric(coverageCounts.skillUse, denominator),
   };
+  const dispatchDenominator = coverageCounts.dispatch;
   const gaps = (Object.keys(coverageCounts) as Array<keyof TrajectoryRecordCoverage>)
     .filter((kind) => kind !== 'skillUse')
     .map((kind) => ({
@@ -1014,9 +1015,9 @@ export function summarizeTrajectoryLearning(
       ? coverage
       : publishedCoverage,
     routeSpine: {
-      dispatchToDecision: metric(dispatchToDecision, denominator),
-      dispatchToEvidence: metric(dispatchToEvidence, denominator),
-      dispatchToMerge: metric(dispatchToMerge, denominator),
+      dispatchToDecision: metric(dispatchToDecision, dispatchDenominator),
+      dispatchToEvidence: metric(dispatchToEvidence, dispatchDenominator),
+      dispatchToMerge: metric(dispatchToMerge, dispatchDenominator),
     },
     skillObservation: publishSkillMetrics
       ? {

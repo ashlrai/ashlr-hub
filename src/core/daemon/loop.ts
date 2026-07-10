@@ -95,6 +95,7 @@ import { emitTuningProposals } from '../learn/tuning.js';
 import { runAutoMergePass, type AutoMergePassResult } from '../fleet/automerge-pass.js';
 import {
   queueProposalRepairWorkForPendingProposals,
+  resolveDiagnosticResliceParents,
   type ProposalRepairWorkResult,
 } from '../fleet/proposal-repair-work.js';
 import { reconcileRemoteHandoffs, type RemoteHandoffReconcileResult } from '../inbox/remote-handoff.js';
@@ -1672,6 +1673,8 @@ export async function tick(
     liveCfg.fleet?.sharedQueue?.mode !== 'filesystem';
   const blockedRepairKeys = new Set<string>();
   let repairHandoffControlAvailable = true;
+  let diagnosticResliceParentsResolved = 0;
+  let diagnosticResliceParentsMissing = 0;
   const filterGeneratedRepairDispatch = (items: WorkItem[]): WorkItem[] => items.filter((item) => {
     if (!item.tags.includes('proposal-repair')) return true;
     if (!generatedRepairDispatchEnabled) return false;
@@ -1766,6 +1769,8 @@ export async function tick(
         : {}),
       ...(producerMaintenanceSkippedByCadence ? { skippedByCadence: true } : {}),
       ...(producerMaintenanceNextAfter ? { nextAfter: producerMaintenanceNextAfter } : {}),
+      diagnosticResliceParentsResolved,
+      diagnosticResliceParentsMissing,
     };
   };
   const shouldRunProducerMaintenance = (currentState: DaemonState): boolean => {
@@ -1866,7 +1871,10 @@ export async function tick(
   const refreshBacklogForTick = async (): Promise<WorkItem[]> => {
     try {
       const backlog = await buildBacklog({ repos: enrolled });
-      return filterGeneratedRepairDispatch(backlog.items);
+      const resolution = resolveDiagnosticResliceParents(backlog.items);
+      diagnosticResliceParentsResolved = resolution.resolved;
+      diagnosticResliceParentsMissing = resolution.missing;
+      return filterGeneratedRepairDispatch(resolution.dispatchable);
     } catch (err) {
       // buildBacklog never throws by contract; extra guard
       console.warn('[ashlr] daemon:tick buildBacklog guard caught:', (err as Error)?.message ?? err);
@@ -3005,6 +3013,30 @@ export async function tick(
         backendTier = engineTierOf(backend, routingCfg);
         selectedModel = null;
       }
+      if (isTrustedDiagnosticResliceItem(item)) {
+        const requiredTier = item.repairParentTier;
+        if (!requiredTier || backendTier !== requiredTier) {
+          const reason = requiredTier
+            ? `repair-tier-unavailable: required ${requiredTier}, resolved ${backendTier ?? 'unknown'} via ${backend}`
+            : 'repair-provenance-missing: durable parent tier unavailable';
+          return {
+            item,
+            spentUsd: 0,
+            dispatched: false,
+            dispatch: dispatchTrace(item, {
+              backend,
+              tier: backendTier,
+              model: selectedModel,
+              assignedBy: 'repair-tier-guard',
+              reason,
+              dispatched: false,
+              runId: attemptId,
+              trajectoryId: `run:${attemptId}`,
+              skipReason: requiredTier ? 'repair-tier-unavailable' : 'repair-provenance-missing',
+            }),
+          };
+        }
+      }
       if (isSubscriptionEngine(backend)) {
         const rawPct = (routingCfg.foundry as Record<string, unknown> | undefined
           )?.['subscriptionMaxPercent'];
@@ -3167,6 +3199,7 @@ export async function tick(
           (routingCfg.foundry as Record<string, unknown>)?.['ashlrcodeExecutor'] === true &&
           ashlrcodeExecutorAllowed &&
           backend !== 'ashlrcode' &&
+          !(isTrustedDiagnosticResliceItem(item) && item.repairParentTier != null) &&
           poolTierOf(engineTierOf(backend, routingCfg)) === 'local'
         ) {
           const previousBackend = backend;
@@ -3209,6 +3242,10 @@ export async function tick(
                 !!c && typeof c.engine === 'string')
               .filter((c) =>
                 ((routingCfg.foundry?.allowedBackends ?? []) as string[]).includes(c.engine))
+              .filter((c) =>
+                !isTrustedDiagnosticResliceItem(item) ||
+                item.repairParentTier == null ||
+                engineTierOf(c.engine as EngineId, routingCfg) === item.repairParentTier)
           : undefined;
         const fanOut =
           bestOfN > 1 &&

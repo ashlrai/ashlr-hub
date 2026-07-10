@@ -381,19 +381,19 @@ describe('M170 — best-of-N dispatch: bestOfN absent/1 → single-run path unch
     const repo = fx.makeRepo();
     repo.enroll();
     const repair: WorkItem = {
-      id: 'repo:proposal-repair-nodiff:abcdef123456',
+      id: 'repo:proposal-repair:abcdef123456',
       repo: repo.dir,
       source: 'self',
-      title: 'Reslice no-diff dispatch for repo item repo:goal:stalled',
+      title: 'Proposal repair for repo item repo:goal:stalled',
       detail:
-        'Diagnostic reslice: a dispatch completed without file changes.\n' +
+        'Proposal repair: recover a complete proposal from a prior attempt.\n' +
+        'Proposal: prop-stalled\n' +
         'Original work item: repo:goal:stalled\n' +
-        'Dispatch outcome: empty-diff\n' +
-        'Action: reslice the work into a smaller concrete edit.',
+        'Produce a fresh complete fix and run merge-grade verification.',
       value: 5,
       effort: 1,
       score: 5,
-      tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+      tags: ['self-heal', 'proposal-repair', 'verify', 'high-priority'],
       ts: new Date().toISOString(),
     };
     mockBuildBacklog.mockResolvedValue({

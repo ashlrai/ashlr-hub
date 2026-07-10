@@ -32,6 +32,7 @@
 
 import type { AshlrConfig, EngineId, EngineTier, WorkItem, CostForecast } from '../types.js';
 import { routeBackend } from '../fleet/router.js';
+import { isTrustedDiagnosticResliceItem } from '../fleet/self-heal-trust.js';
 import { withinLimit } from '../fleet/quota.js';
 import { subscriptionAllows, isSubscriptionEngine } from '../fleet/subscription-usage.js';
 import { recommendRoute, recoverWithinBudget } from '../run/learned-router.js';
@@ -345,6 +346,31 @@ export async function decide(
           ...(demotedFrom ? { demotedFrom } : {}),
         };
       }
+    }
+
+    if (
+      isWorkItem(input) &&
+      isTrustedDiagnosticResliceItem(input) &&
+      input.repairParentTier != null &&
+      current.tier !== input.repairParentTier
+    ) {
+      const preserved = routeBackend(input, cfg);
+      const capacityBlocked = trace.some(step =>
+        step.stage === 'quotaGuard' ||
+        step.stage === 'resourceDemote' ||
+        step.stage === 'finalResourceDemote' ||
+        step.stage === 'finalQuotaGuard',
+      );
+      const reason = capacityBlocked
+        ? `resource-pause: repair tier ${input.repairParentTier} has no verified capacity`
+        : `repair-tier-restored: ${preserved.reason}`;
+      current = {
+        backend: preserved.backend,
+        tier: preserved.tier,
+        model: preserved.model,
+        reason,
+      };
+      trace.push({ stage: 'repairTierGuard', backend: current.backend, tier: current.tier, reason: current.reason });
     }
 
     return {

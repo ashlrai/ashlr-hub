@@ -852,6 +852,44 @@ describe('Trajectory records', () => {
     expect(JSON.stringify(summary)).not.toContain(REPO);
   });
 
+  it('excludes action-only trajectories from route-spine denominators without changing coverage', () => {
+    const records = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readAgentActions: () => [
+          action(),
+          action({
+            itemId: 'item-action-only',
+            proposalId: 'prop-action-only',
+            runId: 'run-action-only',
+            trajectoryId: 'traj-action-only',
+          }),
+        ],
+      }),
+    });
+
+    expect(records).toHaveLength(2);
+    expect(records).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        trajectoryId: 'traj-action-only',
+        coverage: expect.objectContaining({ dispatch: false, agentAction: true }),
+      }),
+    ]));
+
+    const summary = summarizeTrajectoryLearning(records, 24);
+    expect(summary.coverage).toMatchObject({
+      dispatch: { count: 1, rate: 0.5 },
+      evidence: { count: 1, rate: 0.5 },
+      decision: { count: 1, rate: 0.5 },
+      agentAction: { count: 2, rate: 1 },
+    });
+    expect(summary.routeSpine).toEqual({
+      dispatchToDecision: { count: 1, rate: 1 },
+      dispatchToEvidence: { count: 1, rate: 1 },
+      dispatchToMerge: { count: 1, rate: 1 },
+    });
+  });
+
   it('suppresses every exact skill metric when the observation source is degraded', () => {
     const records = listTrajectoryRecords({
       windowHours: 1000,

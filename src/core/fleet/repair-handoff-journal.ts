@@ -19,6 +19,7 @@ import {
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import type { DispatchProductionEvent } from './dispatch-production-ledger.js';
+import type { EngineId, EngineTier, WorkSource } from '../types.js';
 import { isSafeExecutionIdentity } from './attempt-identity.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 
@@ -26,6 +27,13 @@ const MAX_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_RECORDS = 100_000;
 const MAX_ROW_BYTES = 2_048;
 const SHA256_RE = /^[a-f0-9]{64}$/;
+const WORK_SOURCES = new Set<WorkSource>([
+  'issue', 'todo', 'test', 'dep', 'doc', 'security', 'plugin', 'self', 'lint', 'goal', 'hygiene', 'invent',
+]);
+const ENGINE_IDS = new Set<EngineId>([
+  'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'kimi', 'nim', 'opencode', 'grok',
+]);
+const ENGINE_TIERS = new Set<EngineTier>(['local', 'mid', 'frontier']);
 
 export type RepairHandoffKind = 'capture-repair' | 'no-diff-reslice';
 
@@ -40,6 +48,9 @@ export interface RepairHandoffObservation {
   parentItemId: string;
   parentOutcome: 'proposal-capture-error' | 'gate-blocked' | 'empty-diff';
   parentAttemptId: string;
+  parentSource?: WorkSource;
+  parentBackend?: EngineId | null;
+  parentTier?: EngineTier | null;
   parentRunId?: string;
   parentTrajectoryId?: string;
   diffFiles?: number;
@@ -194,6 +205,9 @@ export function repairHandoffFromDispatchEvent(
     parentItemId: semantic.parentItemId,
     parentOutcome: semantic.parentOutcome,
     parentAttemptId,
+    parentSource: event.source,
+    parentBackend: event.backend,
+    parentTier: event.tier,
     ...(event.runId ? { parentRunId: event.runId } : {}),
     ...(event.trajectoryId ? { parentTrajectoryId: event.trajectoryId } : {}),
     ...(count(event.diffFiles) !== undefined ? { diffFiles: count(event.diffFiles) } : {}),
@@ -218,6 +232,18 @@ function validObservation(value: unknown): value is RepairHandoffObservation {
   ) return false;
   if (row['kind'] === 'no-diff-reslice' && row['parentOutcome'] !== 'empty-diff') return false;
   if (row['kind'] === 'capture-repair' && row['parentOutcome'] === 'empty-diff') return false;
+  const parentProvenanceFields = ['parentSource', 'parentBackend', 'parentTier'] as const;
+  const parentProvenanceCount = parentProvenanceFields.filter((key) => row[key] !== undefined).length;
+  if (parentProvenanceCount !== 0 && parentProvenanceCount !== parentProvenanceFields.length) return false;
+  if (row['parentSource'] !== undefined && !WORK_SOURCES.has(row['parentSource'] as WorkSource)) return false;
+  if (
+    row['parentBackend'] !== undefined && row['parentBackend'] !== null &&
+    !ENGINE_IDS.has(row['parentBackend'] as EngineId)
+  ) return false;
+  if (
+    row['parentTier'] !== undefined && row['parentTier'] !== null &&
+    !ENGINE_TIERS.has(row['parentTier'] as EngineTier)
+  ) return false;
   for (const key of ['parentRunId', 'parentTrajectoryId'] as const) {
     const field = row[key];
     if (field !== undefined && (typeof field !== 'string' || !validIdentity(field))) return false;
@@ -246,6 +272,16 @@ function observationFingerprint(row: RepairHandoffObservation): string {
     row.parentRunId ?? null,
     row.parentTrajectoryId ?? null,
   ]);
+}
+
+function hasParentProvenance(row: RepairHandoffObservation): boolean {
+  return row.parentSource !== undefined || row.parentBackend !== undefined || row.parentTier !== undefined;
+}
+
+function sameParentProvenance(left: RepairHandoffObservation, right: RepairHandoffObservation): boolean {
+  return left.parentSource === right.parentSource &&
+    left.parentBackend === right.parentBackend &&
+    left.parentTier === right.parentTier;
 }
 
 function ensurePrivatePath(path: string): Stats {
@@ -358,6 +394,12 @@ export function readRepairHandoffs(): RepairHandoffReadResult {
         const existing = byId.get(parsed.eventId);
         if (!existing) byId.set(parsed.eventId, { fingerprint, row: parsed, conflict: false });
         else if (existing.fingerprint !== fingerprint) existing.conflict = true;
+        else if (hasParentProvenance(existing.row) && hasParentProvenance(parsed)) {
+          if (!sameParentProvenance(existing.row, parsed)) existing.conflict = true;
+        } else if (!hasParentProvenance(existing.row) && hasParentProvenance(parsed)) {
+          // A replay after the provenance upgrade enriches the legacy row.
+          existing.row = parsed;
+        }
       } catch { invalidRows += 1; }
     }
     const conflictingIds = [...byId.values()].filter((entry) => entry.conflict).length;
@@ -451,11 +493,11 @@ export function dispatchEventFromRepairHandoff(
     schemaVersion: 1,
     ts: observation.ts,
     itemId: observation.parentItemId,
-    source: 'self',
+    source: observation.parentSource ?? 'self',
     repo: observation.repo,
     title: '',
-    backend: null,
-    tier: null,
+    backend: observation.parentBackend ?? null,
+    tier: observation.parentTier ?? null,
     assignedBy: 'repair-handoff-journal',
     routeReason: 'durable-parent-handoff',
     outcome: observation.kind === 'capture-repair' ? 'proposal-capture-error' : 'empty-diff',

@@ -250,6 +250,41 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
   const frontiers = availableFrontier(cfg);
   const mids = availableMid(cfg);
   const ctx = buildRoutingContext(frontiers, mids);
+  const isNoDiffRepair = isGeneratedNoDiffProposalRepair(item);
+
+  if (isNoDiffRepair && !item.repairParentTier) {
+    return {
+      ...decide('builtin', 'repair-provenance-missing: durable parent tier unavailable', cfg),
+      model: null,
+    };
+  }
+
+  if (isNoDiffRepair && item.repairParentTier) {
+    const sameTier = [...frontiers, ...mids].filter(
+      (backend) => engineTierOf(backend, cfg) === item.repairParentTier,
+    );
+    const preferred = item.repairParentBackend && sameTier.includes(item.repairParentBackend)
+      ? item.repairParentBackend
+      : pickFrom(sameTier, item);
+    if (preferred) {
+      return {
+        ...decide(
+          preferred,
+          `repair-tier-preserved: generated no-diff repair remains ${item.repairParentTier} (parent=${item.repairParentBackend ?? 'unknown'})`,
+          cfg,
+        ),
+        model: null,
+      };
+    }
+    return {
+      ...decide(
+        'builtin',
+        `repair-tier-unavailable: no installed ${item.repairParentTier} backend for generated no-diff repair`,
+        cfg,
+      ),
+      model: null,
+    };
+  }
 
   // ── 1. Frontier for hard/escalation items (+ substantive under quality policy) ─
   //
@@ -258,7 +293,6 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
   // frontier AI to handle end-to-end. Under cost/absent policy the extra condition
   // is NOT evaluated (byte-identical parity with pre-M182 for those policies).
   const qualityPolicy = cfg.foundry?.routingPolicy === 'quality';
-  const isNoDiffRepair = isGeneratedNoDiffProposalRepair(item);
   const isCaptureRepair = isGeneratedCaptureProposalRepair(item);
   const isFrontierCandidate =
     isFrontierItem(item) ||

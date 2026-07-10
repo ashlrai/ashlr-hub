@@ -413,19 +413,19 @@ describe('H2 swarm resume — resume of a crashed swarm that had a real sandbox'
     const pendingBefore = pendingCount();
     const id = 'attempt-42345678-1234-4123-8123-123456789abc';
     const repair: WorkItem = {
-      id: `${basename(repo.dir)}:proposal-repair-nodiff:abcdef123456`,
+      id: `${basename(repo.dir)}:proposal-repair:abcdef123456`,
       repo: repo.dir,
       source: 'self',
-      title: `Reslice no-diff dispatch for ${basename(repo.dir)} item repo:goal:resume-generation`,
+      title: `Proposal repair for ${basename(repo.dir)} item repo:goal:resume-generation`,
       detail:
-        'Diagnostic reslice: a dispatch completed without file changes.\n' +
+        'Proposal repair: recover a complete proposal from a prior attempt.\n' +
+        'Proposal: prop-resume-generation\n' +
         'Original work item: repo:goal:resume-generation\n' +
-        'Dispatch outcome: empty-diff\n' +
-        'Action: reslice the work into a smaller concrete edit.',
+        'Produce a fresh complete fix and run merge-grade verification.',
       value: 5,
       effort: 1,
       score: 5,
-      tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+      tags: ['self-heal', 'proposal-repair', 'verify', 'high-priority'],
       ts: '2026-07-10T16:00:00.000Z',
     };
     const workItemGenerationId = generatedRepairGenerationId(repair)!;

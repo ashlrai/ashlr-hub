@@ -5,7 +5,10 @@ import { dirname, join } from 'node:path';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 import { buildBacklog } from '../src/core/portfolio/backlog.js';
 import { scanQueuedAutonomyWork } from '../src/core/portfolio/scanners.js';
-import { queueProposalRepairWorkForPendingProposals } from '../src/core/fleet/proposal-repair-work.js';
+import {
+  queueProposalRepairWorkForPendingProposals,
+  resolveDiagnosticResliceParents,
+} from '../src/core/fleet/proposal-repair-work.js';
 import type { Proposal, WorkItem } from '../src/core/types.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import {
@@ -443,6 +446,10 @@ describe('queued autonomy work scanner', () => {
     expect(reslice).toMatchObject({
       repo: repo.dir,
       source: 'self',
+      repairParentItemId: event.itemId,
+      repairParentSource: 'goal',
+      repairParentBackend: 'local-coder',
+      repairParentTier: 'local',
       tags: expect.arrayContaining(['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice', 'no-diff', 'verify', 'high-priority']),
     });
     expect(reslice!.id).toContain(':proposal-repair-nodiff:');
@@ -453,13 +460,90 @@ describe('queued autonomy work scanner', () => {
     expect(reslice!.detail).not.toContain('run-nodiff-old');
     expect(reslice!.detail).toContain('Dispatch outcome: empty-diff');
     expect(reslice!.detail).toContain('Action: reslice the work into a smaller concrete edit');
-    expect(reslice!.detail).toContain('produce a fresh complete file diff');
-    expect(reslice!.detail).toContain('must change repository files or explicitly fail the capture gate');
+    expect(reslice!.detail).toContain('produce the smallest complete change');
+    expect(reslice!.detail).toContain('without forcing an edit');
+    expect(reslice!.detail).not.toContain('must change repository files');
     expect(reslice!.detail).toContain('stdout=[omitted]');
     expect(reslice!.detail).toContain('prompt=[omitted]');
     expect(reslice!.detail).toContain('env=[omitted]');
     expect(reslice!.detail).not.toContain('DO_NOT_COPY');
     expect(reslice!.detail).not.toContain('github_pat_1234567890abcdefghijklmnop');
+  });
+
+  it('resolves diagnostic children from fresh parent context without mutating durable work', () => {
+    const repo = fx.makeRepo();
+    const parent = item(repo.dir, 'repo:goal:current-parent', {
+      source: 'goal',
+      title: 'Implement the current scheduler recovery path',
+      detail: 'Update src/scheduler.ts so abandoned leases are reclaimed safely.',
+      tags: ['scheduler', 'reliability'],
+    });
+    const child = {
+      id: 'repo:proposal-repair-nodiff:abcdef123456',
+      repo: repo.dir,
+      source: 'self' as const,
+      title: 'Reslice stale historical title',
+      detail:
+        'Diagnostic reslice: stale context.\n' +
+        `Original work item: ${parent.id}\n` +
+        'Dispatch outcome: empty-diff\n' +
+        'Action: reslice the work into a smaller concrete edit.\n' +
+        'Constraint: the next attempt must change repository files.',
+      value: 4,
+      effort: 1,
+      score: 4,
+      tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+      ts: new Date().toISOString(),
+      repairParentItemId: parent.id,
+      repairParentSource: 'goal' as const,
+      repairParentBackend: 'local-coder' as const,
+      repairParentTier: 'mid' as const,
+    };
+    const before = JSON.stringify([parent, child]);
+
+    const result = resolveDiagnosticResliceParents([parent, child]);
+    const resolved = result.dispatchable.find((candidate) => candidate.id === child.id)!;
+
+    expect(result).toMatchObject({ resolved: 1, missing: 0, quarantined: [] });
+    expect(resolved).toMatchObject({
+      repairParentItemId: parent.id,
+      repairParentSource: 'goal',
+      repairParentBackend: 'local-coder',
+      repairParentTier: 'mid',
+    });
+    expect(resolved.detail).toContain(parent.title);
+    expect(resolved.detail).toContain(parent.detail);
+    expect(resolved.detail).not.toContain('stale context');
+    expect(resolved.detail).not.toContain('must change repository files');
+    expect(resolved.detail).toContain('without forcing a cosmetic change');
+    expect(JSON.stringify([parent, child])).toBe(before);
+  });
+
+  it('quarantines missing and provenance-less parents without deleting the child', () => {
+    const repo = fx.makeRepo();
+    const child = item(repo.dir, 'repo:proposal-repair-nodiff:123456abcdef', {
+      source: 'self',
+      title: 'Reslice missing parent',
+      detail:
+        'Diagnostic reslice: missing parent.\n' +
+        'Original work item: repo:goal:missing\n' +
+        'Dispatch outcome: empty-diff\n' +
+        'Action: reslice the work into a smaller concrete edit.',
+      tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+      repairParentItemId: 'repo:goal:missing',
+      repairParentSource: 'goal',
+      repairParentTier: 'mid',
+    });
+    const missing = resolveDiagnosticResliceParents([child]);
+    expect(missing.dispatchable).toEqual([]);
+    expect(missing.quarantined).toEqual([{ itemId: child.id, reason: 'parent-missing' }]);
+
+    const parent = item(repo.dir, 'repo:goal:missing', { source: 'goal' });
+    const legacy = { ...child, repairParentTier: null };
+    const unknown = resolveDiagnosticResliceParents([parent, legacy]);
+    expect(unknown.dispatchable).toEqual([parent]);
+    expect(unknown.quarantined).toEqual([{ itemId: child.id, reason: 'parent-provenance-missing' }]);
+    expect(legacy).toMatchObject({ repairParentTier: null });
   });
 
   it('prunes exhausted repair generations while preserving unrelated queued work', async () => {

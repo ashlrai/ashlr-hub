@@ -189,6 +189,39 @@ describe('M256 workhorseDispatch', () => {
     expect(plan.unassigned).toHaveLength(0);
   });
 
+  it('PRODUCTION-HELPER: workhorseDispatch preserves diagnostic parent-tier hints', () => {
+    const snap = makeSnapshot([
+      { backend: 'local-coder', availability: 'open' },
+      { backend: 'codex', availability: 'open' },
+      { backend: 'nim', availability: 'open' },
+      { backend: 'builtin', availability: 'open' },
+    ]);
+    const repair = makeItem({
+      id: 'repo:proposal-repair-nodiff:abcdef123456',
+      source: 'self',
+      title: 'Reslice no-diff dispatch for repo item repo:goal:stalled',
+      detail:
+        'Diagnostic reslice: retry current parent.\n' +
+        'Original work item: repo:goal:stalled\n' +
+        'Dispatch outcome: empty-diff\n' +
+        'Action: reslice the work into a smaller concrete edit.',
+      tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+      repairParentItemId: 'repo:goal:stalled',
+      repairParentSource: 'goal',
+      repairParentBackend: 'local-coder',
+      repairParentTier: 'mid',
+    });
+    const routeHints = new Map<string, EngineId>([[repair.id, 'local-coder']]);
+    const routeReasons = new Map<string, string>([[repair.id, 'repair-tier-preserved: mid']]);
+
+    const routeItem = buildConcurrentDispatchRouteItem(snap, dispatchCfg, cfgWorkhorse, routeHints, routeReasons);
+    const plan = planConcurrentDispatch([repair], snap, dispatchCfg, routeItem);
+
+    expect(routeItem(repair)).toBe('local-coder');
+    expect(plan.assignments).toEqual([{ item: repair, backend: 'local-coder' }]);
+    expect(plan.assignments.some((assignment) => assignment.backend === 'codex')).toBe(false);
+  });
+
   it('PRODUCTION-HELPER: workhorseDispatch preserves frontier route hints', () => {
     const snap = makeSnapshot([
       { backend: 'claude',      availability: 'open' },

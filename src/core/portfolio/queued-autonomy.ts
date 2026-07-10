@@ -9,9 +9,37 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import type { WorkItem } from '../types.js';
+import type { EngineId, EngineTier, WorkItem, WorkSource } from '../types.js';
 import { isActionableSelfHealItem } from '../fleet/self-heal-trust.js';
 import { generatedRepairGenerationId } from '../fleet/generated-repair-lifecycle.js';
+
+const WORK_SOURCES = new Set<WorkSource>([
+  'issue', 'todo', 'test', 'dep', 'doc', 'security', 'plugin', 'self', 'lint', 'goal', 'hygiene', 'invent',
+]);
+const ENGINE_IDS = new Set<EngineId>([
+  'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'kimi', 'nim', 'opencode', 'grok',
+]);
+const ENGINE_TIERS = new Set<EngineTier>(['local', 'mid', 'frontier']);
+
+function validRepairParentMetadata(item: Partial<WorkItem>): boolean {
+  const hasMetadata =
+    item.repairParentItemId !== undefined ||
+    item.repairParentSource !== undefined ||
+    item.repairParentBackend !== undefined ||
+    item.repairParentTier !== undefined;
+  if (!hasMetadata) return true;
+  return (
+    typeof item.repairParentItemId === 'string' &&
+    item.repairParentItemId.length > 0 &&
+    item.repairParentItemId.length <= 180 &&
+    typeof item.repairParentSource === 'string' &&
+    WORK_SOURCES.has(item.repairParentSource as WorkSource) &&
+    (item.repairParentBackend === null ||
+      (typeof item.repairParentBackend === 'string' && ENGINE_IDS.has(item.repairParentBackend as EngineId))) &&
+    (item.repairParentTier === null ||
+      (typeof item.repairParentTier === 'string' && ENGINE_TIERS.has(item.repairParentTier as EngineTier)))
+  );
+}
 
 function isWorkItemLike(value: unknown): value is WorkItem {
   if (!value || typeof value !== 'object') return false;
@@ -27,7 +55,8 @@ function isWorkItemLike(value: unknown): value is WorkItem {
     typeof item.score === 'number' &&
     Array.isArray(item.tags) &&
     item.tags.every((tag) => typeof tag === 'string') &&
-    typeof item.ts === 'string'
+    typeof item.ts === 'string' &&
+    validRepairParentMetadata(item)
   );
 }
 

@@ -7,6 +7,7 @@ import { scrubSecrets } from '../util/scrub.js';
 import { pruneQueuedSelfHealItems, queueSelfHealItem, queueSelfHealItemDetailed } from './self-heal.js';
 import {
   isActionableSelfHealItem,
+  isTrustedDiagnosticResliceItem,
   isTrustedGeneratedRepairItem,
 } from './self-heal-trust.js';
 import type { DispatchProductionEvent } from './dispatch-production-ledger.js';
@@ -28,6 +29,7 @@ const MAX_REASON = 260;
 const DISPATCH_CAPTURE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const DISPATCH_CAPTURE_MAX_QUEUED = 5;
 const DISPATCH_NO_DIFF_MAX_QUEUED = 5;
+const MAX_PARENT_CONTEXT = 1_600;
 
 export interface ProposalRepairWorkResult {
   scanned: number;
@@ -72,6 +74,16 @@ export interface ProposalRepairWorkOptions {
   lifecycleProposals?: Proposal[];
 }
 
+export interface DiagnosticResliceParentResolution {
+  dispatchable: WorkItem[];
+  quarantined: Array<{
+    itemId: string;
+    reason: 'parent-missing' | 'parent-provenance-missing';
+  }>;
+  resolved: number;
+  missing: number;
+}
+
 function bounded(value: unknown, max: number): string {
   const text = scrubSecrets(String(value ?? '')).replace(/\s+/g, ' ').trim();
   return text.length > max ? `${text.slice(0, Math.max(0, max - 3))}...` : text;
@@ -107,6 +119,86 @@ function noDiffResliceId(repo: string, itemId: string): string {
     .digest('hex')
     .slice(0, 12);
   return `${basename(repo)}:proposal-repair-nodiff:${hash}`;
+}
+
+function repairParentItemId(item: WorkItem): string | null {
+  if (typeof item.repairParentItemId === 'string' && item.repairParentItemId.trim()) {
+    return item.repairParentItemId.trim();
+  }
+  const match = item.detail.match(/^Original work item:\s*(.+)$/mi);
+  const parsed = match?.[1]?.trim();
+  return parsed && parsed.length <= 180 ? parsed : null;
+}
+
+function parentKey(repo: string, itemId: string): string | null {
+  try { return `${resolve(repo)}\0${itemId}`; } catch { return null; }
+}
+
+function resolvedResliceDetail(parent: WorkItem): string {
+  const title = bounded(parent.title, MAX_TITLE) || parent.id;
+  const detail = bounded(parent.detail, MAX_PARENT_CONTEXT);
+  return (
+    `Diagnostic reslice: retry a currently actionable work item after an earlier dispatch produced no file changes.\n` +
+    `Original work item: ${parent.id}\n` +
+    `Current objective: ${title}\n` +
+    (detail && detail !== title ? `Current context: ${detail}\n` : '') +
+    `Original source: ${parent.source}\n` +
+    `Dispatch outcome: empty-diff\n` +
+    `Action: reslice by inspecting the current target and making the smallest complete edit if it remains actionable. ` +
+    `If the current repository already satisfies the objective or a safe edit requires a product decision, report that evidence without forcing a cosmetic change.`
+  );
+}
+
+/**
+ * Resolve durable diagnostic children against the current scanner backlog.
+ * Missing parents are quarantined for this selection pass only; queue and
+ * lifecycle authority remain untouched so a later recurrence can recover.
+ */
+export function resolveDiagnosticResliceParents(items: WorkItem[]): DiagnosticResliceParentResolution {
+  const parents = new Map<string, WorkItem>();
+  for (const item of items) {
+    if (item.tags.includes('proposal-repair')) continue;
+    const key = parentKey(item.repo, item.id);
+    if (key) parents.set(key, item);
+  }
+
+  const dispatchable: WorkItem[] = [];
+  const quarantined: DiagnosticResliceParentResolution['quarantined'] = [];
+  let resolved = 0;
+  let missing = 0;
+
+  for (const item of items) {
+    if (!isTrustedDiagnosticResliceItem(item)) {
+      dispatchable.push(item);
+      continue;
+    }
+    const parentId = repairParentItemId(item);
+    const key = parentId ? parentKey(item.repo, parentId) : null;
+    const parent = key ? parents.get(key) : undefined;
+    if (!parent) {
+      missing += 1;
+      quarantined.push({ itemId: item.id, reason: 'parent-missing' });
+      continue;
+    }
+    if (
+      item.repairParentTier == null ||
+      item.repairParentSource !== parent.source ||
+      generatedRepairGenerationId(item) === null
+    ) {
+      missing += 1;
+      quarantined.push({ itemId: item.id, reason: 'parent-provenance-missing' });
+      continue;
+    }
+    resolved += 1;
+    dispatchable.push({
+      ...item,
+      detail: resolvedResliceDetail(parent),
+      repairParentItemId: parent.id,
+      repairParentSource: item.repairParentSource ?? parent.source,
+    });
+  }
+
+  return { dispatchable, quarantined, resolved, missing };
 }
 
 function proposalNeedsRepair(proposal: Proposal): boolean {
@@ -290,8 +382,10 @@ export function noDiffResliceWorkItem(
       (routeReason ? `Route: ${routeReason}\n` : '') +
       `Dispatch outcome: empty-diff\n` +
       `Failure: ${reason}\n` +
-      `Action: reslice the work into a smaller concrete edit, name the target file or subsystem before editing, produce a fresh complete file diff, and run merge-grade verification.\n` +
-      `Constraint: the next attempt must change repository files or explicitly fail the capture gate; do not return explanation-only work. Do not copy raw prompts, stdout, stderr, env, file contents, or prior diff output.`,
+      `Action: reslice the work into a smaller concrete edit and name the target file or subsystem before editing. ` +
+      `If the task remains actionable, produce the smallest complete change and run merge-grade verification. ` +
+      `If it is already satisfied or not safely actionable, report that evidence without forcing an edit. ` +
+      `Do not copy raw prompts, stdout, stderr, env, file contents, or prior diff output.`,
     value,
     effort,
     score: value / effort,
@@ -299,6 +393,10 @@ export function noDiffResliceWorkItem(
     ts: new Date(eventMs).toISOString(),
     ...(event.repairHandoffId ? { repairHandoffId: event.repairHandoffId } : {}),
     ...(event.repairGenerationId ? { repairGenerationId: event.repairGenerationId } : {}),
+    repairParentItemId: itemId,
+    repairParentSource: event.source,
+    repairParentBackend: event.backend,
+    repairParentTier: event.tier,
   };
   return isActionableSelfHealItem(item, {
     nowMs,
@@ -465,7 +563,14 @@ export function queueProposalRepairWorkForPendingProposals(
     return 'terminal';
   };
   const prune = terminalLifecycleEnabled
-    ? pruneQueuedSelfHealItems((item) => observeLifecycle(item) === 'terminal')
+    ? pruneQueuedSelfHealItems((item) => {
+        if (
+          isTrustedDiagnosticResliceItem(item) &&
+          ((item.repairHandoffId === undefined && item.repairParentTier == null) ||
+            (item.repairHandoffId !== undefined && generatedRepairGenerationId(item) === null))
+        ) return true;
+        return observeLifecycle(item) === 'terminal';
+      })
     : { scanned: 0, removed: 0, failed: false };
   result.dispatchRepairPruned = prune.removed;
   result.dispatchRepairPruneFailed = prune.failed ? 1 : 0;

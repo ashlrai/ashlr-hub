@@ -19,7 +19,7 @@ import {
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { isOuterAttemptIdentity, isSafeExecutionIdentity } from './attempt-identity.js';
-import { isTrustedGeneratedRepairItem } from './self-heal-trust.js';
+import { isTrustedDiagnosticResliceItem, isTrustedGeneratedRepairItem } from './self-heal-trust.js';
 import type { WorkItem } from '../types.js';
 import {
   readRepairHandoffs,
@@ -107,6 +107,18 @@ export function generatedRepairGenerationId(item: WorkItem): string | null {
     const handoff = handoffAuthorityByEventId().get(item.repairHandoffId);
     if (!handoff || handoff.generationId !== item.repairGenerationId || handoff.childItemId !== item.id) return null;
     try { if (resolve(handoff.repo) !== resolve(item.repo)) return null; } catch { return null; }
+    if (isTrustedDiagnosticResliceItem(item)) {
+      if (
+        handoff.kind !== 'no-diff-reslice' ||
+        handoff.parentSource === undefined ||
+        handoff.parentBackend === undefined ||
+        handoff.parentTier === undefined ||
+        item.repairParentItemId !== handoff.parentItemId ||
+        item.repairParentSource !== handoff.parentSource ||
+        item.repairParentBackend !== handoff.parentBackend ||
+        item.repairParentTier !== handoff.parentTier
+      ) return null;
+    }
     return item.repairGenerationId;
   }
   let repo: string;

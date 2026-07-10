@@ -53,9 +53,10 @@
  */
 
 import type { EngineId, WorkItem, AshlrConfig } from '../types.js';
-import { isTrustedGeneratedRepairItem } from '../fleet/self-heal-trust.js';
+import { isTrustedDiagnosticResliceItem, isTrustedGeneratedRepairItem } from '../fleet/self-heal-trust.js';
 import type { BackendAvailability, BackendResourceState, ResourceSnapshot } from './resource-monitor.js';
 import { decide as gatewayDecide } from './gateway.js';
+import { engineTierOf } from '../run/sandboxed-engine.js';
 
 // ---------------------------------------------------------------------------
 // M256: Workhorse backend set
@@ -259,6 +260,7 @@ export function planConcurrentDispatch(
 
   for (const item of items) {
     const requiresEditingBackend = isTrustedGeneratedRepairItem(item);
+    const requiresParentTier = isTrustedDiagnosticResliceItem(item) && item.repairParentTier != null;
 
     // 1. Try preferred backend first.
     const preferred = routeItem(item);
@@ -266,6 +268,24 @@ export function planConcurrentDispatch(
     if (prefRem > 0 && (!requiresEditingBackend || preferred !== 'builtin')) {
       assignments.push({ item, backend: preferred });
       remaining.set(preferred, prefRem - 1);
+      continue;
+    }
+
+    // A diagnostic retry may substitute within its parent tier, but the pure
+    // planner cannot prove arbitrary fallback backend tiers. Leave it queued
+    // when its pre-resolved same-tier preference has no capacity.
+    if (requiresParentTier) {
+      const substitute = eligibleBackends.find(candidate =>
+        candidate !== 'builtin' &&
+        (remaining.get(candidate) ?? 0) > 0 &&
+        engineTierOf(candidate) === item.repairParentTier,
+      );
+      if (substitute) {
+        assignments.push({ item, backend: substitute });
+        remaining.set(substitute, (remaining.get(substitute) ?? 0) - 1);
+        continue;
+      }
+      unassigned.push(item);
       continue;
     }
 
@@ -521,6 +541,9 @@ export function buildConcurrentDispatchRouteItem(
     return (item: WorkItem): EngineId => {
       const hinted = routeHints.get(item.id);
       const reason = routeReasons?.get(item.id);
+      if (isTrustedDiagnosticResliceItem(item) && item.repairParentTier != null) {
+        return hinted ?? 'builtin';
+      }
       if (hinted !== undefined && shouldPreserveWorkhorseRouteHint(hinted, reason)) {
         return hinted;
       }

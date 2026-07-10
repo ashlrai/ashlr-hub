@@ -1506,5 +1506,16 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add crash, replay, conflict, truncation, concurrency, recurrence, stale-lock, and privacy coverage.
 - [x] Run focused/full gates and final independent adversarial review.
 - [x] Update durable notes, commit, push, reload, and smoke production.
+
+## Current Overnight Cycle - Parent-Resolved Diagnostic Reslices
+- [x] Rehydrate the deployed required-diff baseline, live queue, service health, Entire state, and repository blockers.
+- [x] Deploy parallel parent-authority, tier-preservation, trajectory-metrics, live-queue, test-design, and adversarial-review lanes.
+- [x] Resolve diagnostic retries only from fresh scanner-owned parent work and quarantine missing or provenance-mismatched parents.
+- [x] Bind parent source, backend, and tier to the durable repair handoff journal and accept compatible enriched legacy replay.
+- [x] Preserve exact parent tier through router, gateway, concurrent, workhorse, serial, Best-of-N, and executor paths.
+- [x] Use available same-tier capacity without spilling repairs across tiers; pause when verified same-tier capacity is unavailable.
+- [x] Retire pre-authority queue-only diagnostic rows instead of leaving permanently inert work in lifecycle storage.
+- [x] Correct route-spine trajectory coverage to use dispatch-rooted denominators and add count-only parent-resolution telemetry.
+- [x] Run focused/full gates, independent adversarial review, durable notes, commit, push, reload, and production smoke.
 - Error encountered: full-history agent forks cannot override `agent_type`; relaunched scoped explorers without history forks.
 - Error encountered: one `rg` expression used an unsupported backreference escape; reran the search with literal patterns.

@@ -122,8 +122,10 @@ vi.mock('../src/core/fleet/self-heal.js', () => ({
 }));
 
 const mockQueueProposalRepairWorkForPendingProposals = vi.fn();
+const mockResolveDiagnosticResliceParents = vi.fn();
 vi.mock('../src/core/fleet/proposal-repair-work.js', () => ({
   queueProposalRepairWorkForPendingProposals: (...args: unknown[]) => mockQueueProposalRepairWorkForPendingProposals(...args),
+  resolveDiagnosticResliceParents: (...args: unknown[]) => mockResolveDiagnosticResliceParents(...args),
 }));
 
 const mockRunViaAshlrcode = vi.fn();
@@ -277,6 +279,13 @@ beforeEach(() => {
   mockRunSwarm.mockReset();
   mockBuildBacklog.mockReset();
   mockRunGoal.mockReset();
+  mockResolveDiagnosticResliceParents.mockReset();
+  mockResolveDiagnosticResliceParents.mockImplementation((items: WorkItem[]) => ({
+    dispatchable: items,
+    quarantined: [],
+    resolved: 0,
+    missing: 0,
+  }));
   mockRunConcurrentDispatch.mockReset();
   mockRunBestOfN.mockReset();
   mockRunSelfHealCycle.mockReset();
@@ -429,7 +438,12 @@ function makeItems(repoDir: string, count: number) {
   }));
 }
 
-function makeDiagnosticResliceItem(repoDir: string, hash = 'abcdef123456', score = 1): WorkItem {
+function makeDiagnosticResliceItem(
+  repoDir: string,
+  hash = 'abcdef123456',
+  score = 1,
+  parentTier: EngineTier = 'local',
+): WorkItem {
   return {
     id: `${basename(repoDir)}:proposal-repair-nodiff:${hash}`,
     repo: repoDir,
@@ -445,6 +459,10 @@ function makeDiagnosticResliceItem(repoDir: string, hash = 'abcdef123456', score
     score,
     tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice', 'no-diff', 'verify', 'high-priority'],
     ts: new Date().toISOString(),
+    repairParentItemId: 'repo:goal:stalled',
+    repairParentSource: 'goal',
+    repairParentBackend: parentTier === 'mid' ? 'local-coder' : 'builtin',
+    repairParentTier: parentTier,
   };
 }
 
@@ -747,6 +765,34 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
+  it('A1-reslice-parent-missing: quarantined reslices do not block ordinary work', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    const reslice = makeDiagnosticResliceItem(repo.dir, '112233aabbcc', 10);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [reslice, generic],
+    });
+    mockResolveDiagnosticResliceParents.mockImplementation((items: WorkItem[]) => ({
+      dispatchable: items.filter((item) => item.id !== reslice.id),
+      quarantined: [{ itemId: reslice.id, reason: 'parent-missing' }],
+      resolved: 0,
+      missing: 1,
+    }));
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({ workItemId: generic.id });
+    expect(result.producerMaintenance).toMatchObject({
+      diagnosticResliceParentsResolved: 0,
+      diagnosticResliceParentsMissing: 1,
+    });
+  });
+
   it('A1-drain-auto: live backlog-build ticks auto-select trusted diagnostic reslices before generic work', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -794,7 +840,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     repo.enroll();
     const generic = makeItems(repo.dir, 1)[0]!;
     generic.score = 100;
-    const reslice = makeDiagnosticResliceItem(repo.dir, 'fedcba987654', 1);
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'fedcba987654', 1, 'mid');
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
       repos: [repo.dir],
@@ -2673,7 +2719,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
   it('A1h5b1: generated repair success becomes terminal only when its proposal exists durably', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
-    const repair = makeDiagnosticResliceItem(repo.dir, 'abcdef123456', 10);
+    const repair = makeDiagnosticResliceItem(repo.dir, 'abcdef123456', 10, 'mid');
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
       repos: [repo.dir],
@@ -2730,7 +2776,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
   it('A1h5b2: claimed proposal metadata without a durable inbox proposal is not lifecycle authority', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
-    const repair = makeDiagnosticResliceItem(repo.dir, 'fedcba123456', 10);
+    const repair = makeDiagnosticResliceItem(repo.dir, 'fedcba123456', 10, 'mid');
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
       repos: [repo.dir],
@@ -2768,7 +2814,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
   it('A1h5b3: aggregate Best-of-N empty summaries are not lifecycle exhaustion evidence', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
-    const repair = makeDiagnosticResliceItem(repo.dir, 'aaaaaa123456', 10);
+    const repair = makeDiagnosticResliceItem(repo.dir, 'aaaaaa123456', 10, 'mid');
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
       repos: [repo.dir],
@@ -2815,7 +2861,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
   it('A1h5b4: failed partial proposals do not retire generated repair work', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
-    const repair = makeDiagnosticResliceItem(repo.dir, 'bbbbbb123456', 10);
+    const repair = makeDiagnosticResliceItem(repo.dir, 'bbbbbb123456', 10, 'mid');
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
       repos: [repo.dir],

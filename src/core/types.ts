@@ -3469,6 +3469,14 @@ export interface WorkItem {
   repairHandoffId?: string;
   /** Stable generation identity derived from the parent attempt, independent of queue replay time. */
   repairGenerationId?: string;
+  /** Original work item retried by this generated repair. */
+  repairParentItemId?: string;
+  /** Original scanner source. The generated child remains source=self for control-plane trust. */
+  repairParentSource?: WorkSource;
+  /** Backend used by the parent attempt, when durably observed. */
+  repairParentBackend?: EngineId | null;
+  /** Engine tier used by the parent attempt, when durably observed. */
+  repairParentTier?: EngineTier | null;
 }
 
 /**
@@ -4016,6 +4024,8 @@ export interface DaemonTick {
     repairHandoffCompacted?: number;
     repairHandoffCompactionUnavailable?: number;
     proposalRepairInboxAvailable?: boolean;
+    diagnosticResliceParentsResolved?: number;
+    diagnosticResliceParentsMissing?: number;
     skippedByCadence?: boolean;
     nextAfter?: string;
   };
