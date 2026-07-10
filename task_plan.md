@@ -1404,4 +1404,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Keep preflight/throttle/budget/resource skips free of false start events while preserving their attempt identity.
 - [x] Add typed builtin swarm production outcomes for proposal, empty, blocked, failed, and unknown terminal states.
 - [x] Prove serial, concurrent, workhorse, failure, and builtin parity without changing execution arguments or merge authority.
-- [ ] Run repository gates, independent review, durable notes, commit, push, reload, and production smoke.
+- [x] Run repository gates, independent review, durable notes, commit, push, reload, and production smoke.
