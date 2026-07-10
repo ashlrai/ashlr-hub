@@ -1465,4 +1465,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve legacy bytes while hardening their directory and file permissions in place.
 - [x] Serialize concurrent processes with bounded lock acquisition and prove no loss under a 16-writer burst.
 - [x] Run full repository gates and final independent review.
-- [ ] Update durable notes, commit, push, reload, harden the live store, and smoke production.
+- [x] Update durable notes, commit, push, reload, harden the live store, and smoke production.
