@@ -747,12 +747,17 @@ function dispatchProductionFromProposalOutcome(
       ? Math.max(0, Math.trunc((outcome.insertions ?? 0) + (outcome.deletions ?? 0)))
       : nonNegativeCount(summary?.diffLines) ?? nonNegativeCount(summary?.actionCounts?.diffLines);
   const captureMissingReason = requiredProposalCaptureMissingReason(outcome, summary, options);
+  const failedPartialArtifact = outcome.kind === 'filed' && outcome.isPartial === true;
   const productionOutcome: DaemonDispatchProductionOutcome = captureMissingReason
     ? 'proposal-capture-error'
-    : productionOutcomeFromRunProposalOutcome(outcome.kind);
+    : failedPartialArtifact
+      ? 'gate-blocked'
+      : productionOutcomeFromRunProposalOutcome(outcome.kind);
   const reason = captureMissingReason
     ? captureMissingReason
-    : outcome.reason;
+    : failedPartialArtifact
+      ? `partial artifact filed after ${summary?.status ?? 'unknown'} producer: ${outcome.reason}`
+      : outcome.reason;
   const evidence = evidenceOutcomeSummary(options.evidenceOutcome);
   return {
     outcome: productionOutcome,

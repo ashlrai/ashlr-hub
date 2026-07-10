@@ -116,20 +116,38 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
   let captureMockFn: ReturnType<typeof vi.fn>;
   let detectVCMockFn: ReturnType<typeof vi.fn>;
   let runVCMockFn: ReturnType<typeof vi.fn>;
+  let createSandboxMockFn: ReturnType<typeof vi.fn>;
+  let removeSandboxMockFn: ReturnType<typeof vi.fn>;
+  let tmpHome: string;
+  let previousHome: string | undefined;
 
   beforeEach(() => {
+    previousHome = process.env.HOME;
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m78-home-'));
+    process.env.HOME = tmpHome;
     engineMockFn = vi.fn();
-    captureMockFn = vi.fn(async () => ({
-      state: makeRunState({ result: 'proposal captured' }),
-      proposalId: 'p-captured',
-      proposalOutcome: {
-        kind: 'filed',
-        reason: 'proposal filed',
+    captureMockFn = vi.fn(async (...args: unknown[]) => {
+      const captureOptions = (args[3] ?? {}) as { isPartial?: boolean };
+      return {
+        state: makeRunState({ result: 'proposal captured' }),
         proposalId: 'p-captured',
-      },
-    }));
+        proposalOutcome: {
+          kind: 'filed',
+          reason: captureOptions.isPartial ? 'partial proposal filed' : 'proposal filed',
+          ...(captureOptions.isPartial ? { isPartial: true } : {}),
+          proposalId: 'p-captured',
+        },
+      };
+    });
     detectVCMockFn = vi.fn();
     runVCMockFn = vi.fn();
+    createSandboxMockFn = vi.fn(() => ({
+      id: 'mock-sb',
+      worktreePath: '/mock/wt',
+      sourceRepo: '/mock/repo',
+      branch: 'scratch/mock',
+    }));
+    removeSandboxMockFn = vi.fn();
 
     vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
       runEngineSandboxed: engineMockFn,
@@ -143,13 +161,8 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     }));
 
     vi.doMock('../src/core/sandbox/worktree.js', () => ({
-      createSandbox: vi.fn(() => ({
-        id: 'mock-sb',
-        worktreePath: '/mock/wt',
-        sourceRepo: '/mock/repo',
-        branch: 'scratch/mock',
-      })),
-      removeSandbox: vi.fn(),
+      createSandbox: createSandboxMockFn,
+      removeSandbox: removeSandboxMockFn,
       sandboxDiff: vi.fn(() => ({ files: 0, patch: '', insertions: 0, deletions: 0 })),
     }));
 
@@ -198,6 +211,9 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     vi.doUnmock('../src/core/run/provider-client.js');
     vi.doUnmock('../src/core/run/engines.js');
     vi.resetModules();
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
   });
 
   // Lazy-load runGoal after doMock+resetModules so it picks up the fresh mocks.
@@ -396,6 +412,245 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     });
   });
 
+  it('api-model step-cap output remains partial when TITRR owns capture', async () => {
+    const partialDisabledOutcome = {
+      kind: 'proposal-disabled' as const,
+      reason: 'proposal filing disabled for this api-model attempt',
+      isPartial: true,
+    };
+    const producer = {
+      ...makeRunState({ status: 'done', result: '[step cap reached — partial result]' }),
+      engine: 'local-coder' as const,
+      engineModel: 'local-coder:qwen',
+      engineTier: 'mid' as const,
+      proposalOutcome: partialDisabledOutcome,
+    };
+    engineMockFn.mockResolvedValue({ state: producer, proposalOutcome: partialDisabledOutcome });
+    detectVCMockFn.mockReturnValue([]);
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'local-coder',
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+    });
+
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn.mock.calls[0]?.[3]).toMatchObject({
+      runId: producer.id,
+      isPartial: true,
+      producerStatus: 'done',
+    });
+    expect(state.proposalOutcome).toMatchObject({
+      kind: 'filed',
+      isPartial: true,
+      proposalId: 'p-captured',
+    });
+  });
+
+  it('failed CLI producer captures one partial proposal before sandbox cleanup', async () => {
+    const failedState = makeRunState({ status: 'failed', result: 'engine failed after editing' });
+    engineMockFn.mockResolvedValue({ state: failedState });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'claude',
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+      workItemId: 'repair-cli-failed',
+      workItemGenerationId: 'a'.repeat(64),
+      workSource: 'self',
+    });
+
+    expect(engineMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn.mock.calls[0]?.[3]).toMatchObject({
+      runId: failedState.id,
+      isPartial: true,
+      sourceLabel: 'TITRR',
+      producerStatus: 'failed',
+      workItemId: 'repair-cli-failed',
+      workItemGenerationId: 'a'.repeat(64),
+      workSource: 'self',
+    });
+    expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn.mock.invocationCallOrder[0]).toBeLessThan(removeSandboxMockFn.mock.invocationCallOrder[0]!);
+    expect(state.status).toBe('failed');
+    expect(state.proposalOutcome).toMatchObject({ kind: 'filed', isPartial: true, proposalId: 'p-captured' });
+    expect(state.result).toMatch(/producer failed; partial capture attempted/);
+    expect(runVCMockFn).not.toHaveBeenCalled();
+    const { loadRun } = await import('../src/core/run/orchestrator.js');
+    expect(loadRun(state.id)).toMatchObject({
+      status: 'failed',
+      proposalOutcome: { kind: 'filed', isPartial: true },
+      runEventSummary: { outcome: 'gate-blocked', proposalCreated: false },
+    });
+  });
+
+  it('failed CLI producer with an empty sandbox files no proposal and still cleans up', async () => {
+    const failedState = makeRunState({ status: 'failed', result: 'engine failed before editing' });
+    const emptyOutcome = {
+      kind: 'empty-diff' as const,
+      reason: 'engine "claude" completed without file changes',
+      files: 0,
+      insertions: 0,
+      deletions: 0,
+    };
+    engineMockFn.mockResolvedValue({ state: failedState });
+    captureMockFn.mockResolvedValueOnce({
+      state: { ...makeRunState({ status: 'failed' }), id: failedState.id, proposalOutcome: emptyOutcome },
+      proposalOutcome: emptyOutcome,
+    });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'claude',
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+    });
+
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
+    expect(state.status).toBe('failed');
+    expect(state.proposalOutcome).toMatchObject({ kind: 'engine-failed-no-diff' });
+    expect(state.proposalOutcome?.proposalId).toBeUndefined();
+    const { loadRun } = await import('../src/core/run/orchestrator.js');
+    expect(loadRun(state.id)?.proposalOutcome).toMatchObject({ kind: 'engine-failed-no-diff' });
+  });
+
+  it('failed API-model producer uses the same partial capture boundary', async () => {
+    const failedState = {
+      ...makeRunState({ status: 'failed', result: 'api model failed after editing' }),
+      engine: 'local-coder' as const,
+      engineModel: 'local-coder:qwen',
+      engineTier: 'mid' as const,
+    };
+    engineMockFn.mockResolvedValue({ state: failedState });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'local-coder',
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+      workItemId: 'repair-api-failed',
+      workItemGenerationId: 'b'.repeat(64),
+      workSource: 'self',
+    });
+
+    expect(engineMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn.mock.calls[0]?.[3]).toMatchObject({
+      runId: failedState.id,
+      isPartial: true,
+      sourceLabel: 'TITRR api-model failed producer',
+      producerStatus: 'failed',
+      workItemId: 'repair-api-failed',
+      workItemGenerationId: 'b'.repeat(64),
+      workSource: 'self',
+    });
+    expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn.mock.invocationCallOrder[0]).toBeLessThan(removeSandboxMockFn.mock.invocationCallOrder[0]!);
+    expect(state.status).toBe('failed');
+    expect(state.proposalOutcome).toMatchObject({ kind: 'filed', isPartial: true, proposalId: 'p-captured' });
+    expect(runVCMockFn).not.toHaveBeenCalled();
+    const { loadRun } = await import('../src/core/run/orchestrator.js');
+    expect(loadRun(state.id)).toMatchObject({
+      status: 'failed',
+      proposalOutcome: { kind: 'filed', isPartial: true },
+      runEventSummary: { outcome: 'gate-blocked', proposalCreated: false },
+    });
+  });
+
+  it('failed API-model producer with an empty sandbox preserves failure typing', async () => {
+    const failedState = {
+      ...makeRunState({ status: 'failed', result: 'api model failed before editing' }),
+      engine: 'local-coder' as const,
+      engineModel: 'local-coder:qwen',
+      engineTier: 'mid' as const,
+    };
+    const emptyOutcome = {
+      kind: 'empty-diff' as const,
+      reason: 'engine "local-coder" completed without file changes',
+      files: 0,
+      insertions: 0,
+      deletions: 0,
+    };
+    engineMockFn.mockResolvedValue({ state: failedState });
+    captureMockFn.mockResolvedValueOnce({
+      state: { ...makeRunState({ status: 'failed' }), id: failedState.id, proposalOutcome: emptyOutcome },
+      proposalOutcome: emptyOutcome,
+    });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'local-coder',
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+    });
+
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
+    expect(state.status).toBe('failed');
+    expect(state.proposalOutcome).toMatchObject({ kind: 'api-model-task-failed' });
+    expect(state.proposalOutcome?.proposalId).toBeUndefined();
+    const { loadRun } = await import('../src/core/run/orchestrator.js');
+    expect(loadRun(state.id)?.proposalOutcome).toMatchObject({ kind: 'api-model-task-failed' });
+  });
+
+  it('shared sandbox creation failure uses one self-capturing fallback attempt', async () => {
+    createSandboxMockFn.mockImplementationOnce(() => { throw new Error('shared sandbox unavailable'); });
+    engineMockFn.mockResolvedValue({ state: makeRunState({ status: 'failed', result: 'fallback failed' }) });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'claude',
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+      workItemGenerationId: 'c'.repeat(64),
+    });
+
+    expect(engineMockFn).toHaveBeenCalledTimes(1);
+    expect(engineMockFn.mock.calls[0]?.[3]).toMatchObject({
+      propose: true,
+      workItemGenerationId: 'c'.repeat(64),
+    });
+    expect((engineMockFn.mock.calls[0]?.[3] as Record<string, unknown>)['existingWorktree']).toBeUndefined();
+    expect(captureMockFn).not.toHaveBeenCalled();
+    expect(removeSandboxMockFn).not.toHaveBeenCalled();
+    expect(state.status).toBe('failed');
+  });
+
+  it.each([
+    ['claude', 'claude'],
+    ['local-coder', 'local-coder'],
+  ] as const)('%s capture failure still removes the shared sandbox', async (engine, stateEngine) => {
+    const producer = {
+      ...makeRunState({ status: 'done', result: 'producer completed' }),
+      engine: stateEngine,
+    };
+    engineMockFn.mockResolvedValue({ state: producer });
+    captureMockFn.mockRejectedValueOnce(new Error('capture exploded'));
+    detectVCMockFn.mockReturnValue([]);
+
+    const runGoal = await loadRunGoal();
+    await expect(runGoal('fix a bug', sandboxCfg(), {
+      engine,
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+    })).rejects.toThrow('capture exploded');
+
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn.mock.invocationCallOrder[0]).toBeLessThan(removeSandboxMockFn.mock.invocationCallOrder[0]!);
+  });
+
   // ---- Test 2: fail then pass → engine re-invoked ----
   it('fail then pass → re-invokes engine, annotates "tests: pass (attempt 2)"', async () => {
     const runId = 'attempt-018f6d2e-7c50-4f15-8a2c-6efc97fb87a1';
@@ -419,8 +674,37 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     } as Parameters<typeof runGoal>[2] & { titrrMaxAttempts: number });
 
     expect(state.result).toMatch(/TITRR.*tests: pass \(attempt 2\)/);
-    expect(engineMockFn.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(engineMockFn).toHaveBeenCalledTimes(2);
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
     expect(engineMockFn.mock.calls.every((call) => call[3]?.runId === runId)).toBe(true);
+  });
+
+  it('api-model fail then pass captures exactly once after the retry boundary', async () => {
+    engineMockFn.mockResolvedValue({
+      state: {
+        ...makeRunState({ status: 'done', result: 'api model ok' }),
+        engine: 'local-coder' as const,
+        engineModel: 'local-coder:qwen',
+        engineTier: 'mid' as const,
+      },
+    });
+    detectVCMockFn.mockReturnValue([{ kind: 'test', cmd: ['npm', 'test'] }]);
+    runVCMockFn
+      .mockReturnValueOnce({ ok: false, command: 'npm test', exitCode: 1, output: 'FAIL', timedOut: false })
+      .mockReturnValueOnce({ ok: true, command: 'npm test', exitCode: 0, output: 'pass', timedOut: false });
+
+    const runGoal = await loadRunGoal();
+    await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'local-coder',
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+      titrrMaxAttempts: 2,
+    } as Parameters<typeof runGoal>[2] & { titrrMaxAttempts: number });
+
+    expect(engineMockFn).toHaveBeenCalledTimes(2);
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
   });
 
   // ---- Test 3: exhausted maxAttempts ----

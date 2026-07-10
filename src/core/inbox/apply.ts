@@ -310,6 +310,21 @@ export async function applyProposal(
     };
   }
 
+  if (proposal.isPartial === true) {
+    audit({
+      action: 'inbox:apply',
+      repo: proposal.repo,
+      sandboxId: id,
+      summary: `refused: proposal ${id} is a partial review artifact`,
+      result: 'refused',
+    });
+    return {
+      ok: false,
+      status: 'approved',
+      detail: 'partial proposals are review evidence and cannot be applied',
+    };
+  }
+
   // ── Gate 3: must be explicitly confirmed ─────────────────────────────────
   if (!opts.confirmed) {
     audit({

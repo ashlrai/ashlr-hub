@@ -651,6 +651,22 @@ export function setStatus(
     const existing = loadProposal(id);
     if (existing === null) return;
 
+    // Partial captures are immutable review evidence. They may be rejected or
+    // repaired, but no status transition may grant apply/merge authority.
+    if (
+      existing.isPartial === true &&
+      (status === 'approved' || status === 'awaiting-host-merge' || status === 'applied')
+    ) {
+      audit({
+        action: 'inbox:proposal-transition-refused',
+        repo: existing.repo ?? null,
+        sandboxId: existing.sandboxId ?? null,
+        summary: `partial proposal authority transition refused: ${status} (id=${id})`,
+        result: 'refused',
+      });
+      return;
+    }
+
     const decidedStatuses: ProposalStatus[] = ['approved', 'rejected'];
     const updated: Proposal = sanitizeProposalForStore({
       ...existing,

@@ -219,11 +219,13 @@ function proposalOutcome(
   reason: string,
   diff?: { files: number; insertions: number; deletions: number },
   proposalId?: string,
+  isPartial = false,
 ): RunProposalOutcome {
   return {
     kind,
     reason: reason.length > 240 ? reason.slice(0, 237) + '...' : reason,
     ...(proposalId ? { proposalId } : {}),
+    ...(isPartial ? { isPartial: true } : {}),
     ...(diff
       ? {
           files: diff.files,
@@ -323,7 +325,7 @@ function trySetRunDiffActionCounts(counts: RunActionCounts, readDiff: () => Sand
 }
 
 function isProposalBlockedOutcome(outcome: RunProposalOutcome | undefined): boolean {
-  return !!outcome && outcome.kind !== 'filed' && outcome.kind !== 'proposal-disabled';
+  return !!outcome && (outcome.isPartial === true || (outcome.kind !== 'filed' && outcome.kind !== 'proposal-disabled'));
 }
 
 function actionCountsWithOutcome(
@@ -333,7 +335,7 @@ function actionCountsWithOutcome(
   const out: RunActionCounts = completeRunActionCounts(counts);
   setRunActionCount(out, 'diffFiles', outcome?.files);
   setRunActionCount(out, 'diffLines', diffLineCount(outcome));
-  setRunActionCount(out, 'proposalCreated', outcome?.kind === 'filed' ? 1 : 0);
+  setRunActionCount(out, 'proposalCreated', outcome?.kind === 'filed' && outcome.isPartial !== true ? 1 : 0);
   setRunActionCount(out, 'proposalBlocked', isProposalBlockedOutcome(outcome) ? 1 : 0);
   setRunActionCount(out, 'proposalDisabled', outcome?.kind === 'proposal-disabled' ? 1 : 0);
   return out;
@@ -352,7 +354,7 @@ function withProposalOutcome(
     ...(state.runEventSummary ?? {}),
     runId: state.id,
     status: state.status,
-    ...(outcome ? { outcome: outcome.kind === 'filed' ? 'proposal-created' : outcome.kind } : {}),
+    ...(outcome ? { outcome: outcome.kind === 'filed' && outcome.isPartial !== true ? 'proposal-created' : outcome.isPartial ? 'gate-blocked' : outcome.kind } : {}),
     ...(proposalCreated !== undefined ? { proposalCreated } : {}),
     proposalId: outcome?.proposalId,
     diffFiles: outcome?.files ?? actionCounts?.diffFiles,
@@ -372,7 +374,7 @@ function withProposalOutcome(
 
 function proposalCreatedForRunEvent(outcome: RunProposalOutcome | undefined): boolean | undefined {
   if (!outcome || outcome.kind === 'proposal-disabled') return undefined;
-  return outcome.kind === 'filed';
+  return outcome.kind === 'filed' && outcome.isPartial !== true;
 }
 
 function sandboxAgentOutcome(
@@ -381,7 +383,7 @@ function sandboxAgentOutcome(
 ): AgentActionOutcome {
   switch (outcome?.kind) {
     case 'filed':
-      return 'ok';
+      return outcome.isPartial === true ? 'blocked' : 'ok';
     case 'proposal-disabled':
       return 'ok';
     case 'empty-diff':
@@ -427,7 +429,11 @@ function recordSandboxedRunAgentAction(fields: {
     const summary = runEventSummary({
       runId: fields.runId,
       status: fields.status,
-      outcome: fields.outcome?.kind === 'filed' ? 'proposal-created' : outcomeLabel,
+      outcome: fields.outcome?.kind === 'filed' && fields.outcome.isPartial !== true
+        ? 'proposal-created'
+        : fields.outcome?.isPartial
+          ? 'gate-blocked'
+          : outcomeLabel,
       ...(proposalCreated !== undefined ? { proposalCreated } : {}),
       proposalId,
       diffFiles: fields.outcome?.files,
@@ -518,8 +524,8 @@ function sandboxedProducerCausalMetadata(fields: {
   const summary = runEventSummary({
     runId: fields.runId,
     status: fields.status,
-    outcome: fields.outcome?.kind,
-    proposalCreated: fields.outcome?.kind === 'filed',
+    outcome: fields.outcome?.isPartial === true ? 'gate-blocked' : fields.outcome?.kind,
+    proposalCreated: fields.outcome?.kind === 'filed' && fields.outcome.isPartial !== true,
     proposalId: fields.proposalId ?? fields.outcome?.proposalId,
     diffFiles: fields.outcome?.files,
     diffLines: diffLineCount(fields.outcome),
@@ -1011,6 +1017,8 @@ export async function captureSandboxedProposal(
       'filed',
       opts.isPartial ? 'partial proposal filed' : 'proposal filed',
       diff,
+      undefined,
+      opts.isPartial === true,
     );
     const draftId = `draft-${id}`;
     const proposalInput = {
@@ -1064,12 +1072,48 @@ export async function captureSandboxedProposal(
       };
     }
 
-    const proposal = selectInboxStore(cfg).create(proposalInput);
+    const inbox = selectInboxStore(cfg);
+    const proposal = inbox.create(proposalInput);
+    const persisted = inbox.load(proposal.id);
+    const durablePending =
+      proposal.status === 'pending' &&
+      persisted?.status === 'pending' &&
+      persisted.id === proposal.id &&
+      persisted.repo === sb.sourceRepo &&
+      persisted.runId === id &&
+      persisted.trajectoryId === `run:${id}` &&
+      persisted.workItemId === opts.workItemId &&
+      persisted.workItemGenerationId === opts.workItemGenerationId &&
+      persisted.diffHash === diffHash &&
+      persisted.provenanceSig === provenanceSig &&
+      (persisted.isPartial === true) === (opts.isPartial === true) &&
+      typeof persisted.diff === 'string' &&
+      persisted.diff.trim().length > 0;
+    if (!durablePending) {
+      if (
+        proposal.status === 'pending' &&
+        persisted?.status === 'pending' &&
+        persisted.id === proposal.id &&
+        persisted.runId === id
+      ) {
+        inbox.setStatus(proposal.id, 'rejected', 'proposal persistence verification failed');
+      }
+      const outcome = proposalOutcome(
+        'proposal-capture-error',
+        'proposal was not durably persisted with matching capture metadata',
+        diff,
+      );
+      return {
+        state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
+        proposalOutcome: outcome,
+      };
+    }
     const outcome = proposalOutcome(
       'filed',
       opts.isPartial ? 'partial proposal filed' : 'proposal filed',
       diff,
       proposal.id,
+      opts.isPartial === true,
     );
 
     try {
@@ -2157,7 +2201,13 @@ export async function runApiModelSandboxed(
       }
     } else {
       trySetRunDiffActionCounts(actionCounts, () => wt.sandboxDiff(sb));
-      proposalOutcomeResult = proposalOutcome('proposal-disabled', 'proposal filing disabled for this api-model attempt');
+      proposalOutcomeResult = proposalOutcome(
+        'proposal-disabled',
+        'proposal filing disabled for this api-model attempt',
+        undefined,
+        undefined,
+        isPartialResult,
+      );
     }
 
     recordSandboxedRunAgentAction({

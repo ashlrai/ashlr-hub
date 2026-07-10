@@ -273,6 +273,20 @@ describe('M23 createProposal — persistence + initial state', () => {
     });
   });
 
+  it('partial review evidence cannot gain authority or emit a merged decision', () => {
+    const p = createProposal(makeInput({
+      isPartial: true,
+      diff: '--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n',
+    }));
+
+    setStatus(p.id, 'approved', 'must be refused');
+    setStatus(p.id, 'awaiting-host-merge', 'must be refused');
+    setStatus(p.id, 'applied', 'must be refused');
+
+    expect(loadProposal(p.id)?.status).toBe('pending');
+    expect(readDecisions({ proposalId: p.id }).some((decision) => decision.action === 'merged')).toBe(false);
+  });
+
   it('does NOT apply anything — repo is unchanged', () => {
     // createProposal must be pure persistence: no repo mutation
     const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m23-noop-repo-'));

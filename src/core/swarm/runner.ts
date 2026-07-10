@@ -136,12 +136,20 @@ type AuditFn         = (entry: Omit<import('../types.js').AuditEntry, 'ts'>) => 
 type CreateProposalFn = (
   p: Omit<import('../types.js').Proposal, 'id' | 'status' | 'createdAt'>,
 ) => import('../types.js').Proposal;
+type LoadProposalFn = (id: string) => import('../types.js').Proposal | null;
+type SetProposalStatusFn = (
+  id: string,
+  status: import('../types.js').ProposalStatus,
+  result?: string,
+) => void;
 
 let _createSandbox:  CreateSandboxFn  | null = null;
 let _sandboxDiff:    SandboxDiffFn    | null = null;
 let _removeSandbox:  RemoveSandboxFn  | null = null;
 let _audit:          AuditFn          | null = null;
 let _createProposal: CreateProposalFn | null = null;
+let _loadProposal:   LoadProposalFn   | null = null;
+let _setProposalStatus: SetProposalStatusFn | null = null;
 let _m21Loaded = false;
 
 async function loadM21(): Promise<void> {
@@ -173,8 +181,14 @@ async function loadM21(): Promise<void> {
   try {
     // M24: the inbox proposal sink — used ONLY when opts.propose is set.
     const ibSpec = '../inbox/store.js';
-    const ib = await import(/* @vite-ignore */ ibSpec) as { createProposal: CreateProposalFn };
+    const ib = await import(/* @vite-ignore */ ibSpec) as {
+      createProposal: CreateProposalFn;
+      loadProposal: LoadProposalFn;
+      setStatus: SetProposalStatusFn;
+    };
     _createProposal = ib.createProposal;
+    _loadProposal = ib.loadProposal;
+    _setProposalStatus = ib.setStatus;
   } catch {
     // inbox/store.ts not built yet — propose degrades to no-op
   }
@@ -981,6 +995,7 @@ function captureSandboxAndCleanup(
       deletions: Math.max(0, diff.deletions),
     };
     const hasMaterialDiff = diff.files > 0 && diff.patch.trim().length > 0;
+    const isPartialCapture = run.status === 'failed' || run.status === 'aborted';
     const scrubbedPatch = diff.patch
       ? scrubSensitiveText(scrubSecrets(diff.patch))
       : undefined;
@@ -1068,7 +1083,7 @@ function captureSandboxAndCleanup(
             repo: sb.sourceRepo,
             origin: 'swarm',
             kind: 'patch',
-            title: (run.goal || `swarm ${run.id}`).slice(0, 120),
+            title: `${isPartialCapture ? '[partial] ' : ''}${run.goal || `swarm ${run.id}`}`.slice(0, 120),
             summary: [
               `Autonomous swarm proposal (swarm=${run.id}, status=${run.status})`,
               `repo: ${sb.sourceRepo}`,
@@ -1083,41 +1098,81 @@ function captureSandboxAndCleanup(
             workSource: causal?.workSource,
             runId: run.id,
             trajectoryId: `run:${run.id}`,
+            ...(isPartialCapture ? {
+              isPartial: true,
+              verifyResult: {
+                passed: false,
+                source: 'capture-gate' as const,
+                failed: [`partial swarm capture: producer ${run.status}`],
+              },
+            } : {}),
             runEventSummary: runEventSummary({
               runId: run.id,
               status: run.status,
-              outcome: 'proposal-created',
-              proposalCreated: true,
+              outcome: isPartialCapture ? 'gate-blocked' : 'proposal-created',
+              proposalCreated: !isPartialCapture,
               diffFiles: diff.files,
               diffLines: diff.insertions + diff.deletions,
             }),
             ...(proposalDelegationScope ? { delegationScope: proposalDelegationScope } : {}),
           });
-          outcome = {
-            kind: 'filed',
-            reason: 'builtin swarm proposal filed',
-            proposalId: created.id,
-            ...diffCounts,
-          };
-          emitLog(sink, `[M24] PENDING proposal recorded for swarm ${run.id}`);
-          // M32: unattended path (daemon-dispatched swarm) — fire opt-in desktop/
-          // webhook notification. Fire-and-forget; metadata only; never blocks.
-          void (async () => {
+          const persisted = _loadProposal?.(created.id) ?? null;
+          const durablePending =
+            created.status === 'pending' &&
+            persisted?.status === 'pending' &&
+            persisted.id === created.id &&
+            persisted.repo === sb.sourceRepo &&
+            persisted.runId === run.id &&
+            persisted.trajectoryId === `run:${run.id}` &&
+            persisted.workItemId === causal?.workItemId &&
+            persisted.workItemGenerationId === causal?.workItemGenerationId &&
+            (persisted.isPartial === true) === isPartialCapture &&
+            persisted.diff === scrubbedPatch;
+          if (!durablePending) {
+            if (
+              created.status === 'pending' &&
+              persisted?.status === 'pending' &&
+              persisted.id === created.id &&
+              persisted.runId === run.id
+            ) {
+              _setProposalStatus?.(created.id, 'rejected', 'proposal persistence verification failed');
+            }
+            outcome = {
+              kind: 'proposal-capture-error',
+              reason: 'builtin swarm proposal was not durably persisted with matching capture metadata',
+              ...diffCounts,
+            };
+            emitLog(sink, `[M24] Proposal ${created.id} failed durable persistence verification`);
+          } else {
+            outcome = {
+              kind: 'filed',
+              reason: isPartialCapture
+                ? `builtin swarm partial proposal filed after ${run.status} producer`
+                : 'builtin swarm proposal filed',
+              ...(isPartialCapture ? { isPartial: true } : {}),
+              proposalId: created.id,
+              ...diffCounts,
+            };
+            emitLog(sink, `[M24] PENDING proposal recorded for swarm ${run.id}`);
+            // M32: unattended path (daemon-dispatched swarm) — fire opt-in desktop/
+            // webhook notification. Fire-and-forget; metadata only; never blocks.
+            void (async () => {
+              try {
+                const { loadConfig } = await import('../config.js');
+                const { notifyNewProposal } = await import('../inbox/notify-proposal.js');
+                await notifyNewProposal(persisted, loadConfig());
+              } catch { /* notification is best-effort */ }
+            })();
             try {
-              const { loadConfig } = await import('../config.js');
-              const { notifyNewProposal } = await import('../inbox/notify-proposal.js');
-              await notifyNewProposal(created, loadConfig());
-            } catch { /* notification is best-effort */ }
-          })();
-          try {
-            _audit?.({
-              action: 'inbox:proposal-created',
-              repo: sb.sourceRepo,
-              sandboxId: sb.id,
-              summary: `daemon swarm ${run.id} -> PENDING proposal (${diff.files} file(s))`,
-              result: 'ok',
-            });
-          } catch { /* audit best-effort */ }
+              _audit?.({
+                action: 'inbox:proposal-created',
+                repo: sb.sourceRepo,
+                sandboxId: sb.id,
+                summary: `daemon swarm ${run.id} -> PENDING proposal (${diff.files} file(s))`,
+                result: 'ok',
+              });
+            } catch { /* audit best-effort */ }
+          }
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

@@ -1761,6 +1761,8 @@ export type RunProposalOutcomeKind =
 export interface RunProposalOutcome {
   kind: RunProposalOutcomeKind;
   reason: string;
+  /** True when the persisted proposal is incomplete review evidence, never ship authority. */
+  isPartial?: boolean;
   proposalId?: string;
   files?: number;
   insertions?: number;

@@ -126,8 +126,8 @@ describe('M233 partial-diff capture on timeout', () => {
           spawnAttempts: 1,
           transientRetries: 0,
           proposalCaptureAttempts: 1,
-          proposalCreated: 1,
-          proposalBlocked: 0,
+          proposalCreated: 0,
+          proposalBlocked: 1,
           proposalDisabled: 0,
           modelSteps: 1,
           totalSteps: 1,
@@ -162,20 +162,21 @@ describe('M233 partial-diff capture on timeout', () => {
         expect(proposal!.provenanceSig).toBeDefined();
         expect(proposal!.runEventSummary).toMatchObject({
           status: 'failed',
-          outcome: 'filed',
-          proposalCreated: true,
+          outcome: 'gate-blocked',
+          proposalCreated: false,
           actionCounts: {
             sandboxCreated: 1,
             spawnAttempts: 1,
             proposalCaptureAttempts: 1,
             completenessGateRuns: 1,
-            proposalCreated: 1,
-            proposalBlocked: 0,
+            proposalCreated: 0,
+            proposalBlocked: 1,
             proposalDisabled: 0,
             diffFiles: 1,
           },
         });
         expect(proposal!.runEventSummary?.actionCounts?.diffLines).toBeGreaterThan(0);
+        expect(result.proposalOutcome).toMatchObject({ kind: 'filed', isPartial: true });
       } finally {
         if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
         else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;

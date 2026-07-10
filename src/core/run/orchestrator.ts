@@ -71,6 +71,7 @@ import type {
   RunOptions,
   RunStep,
   RunStreamEvent,
+  RunProposalOutcome,
   ProviderClient,
   ChatMessage,
   RouteDecision,
@@ -237,7 +238,7 @@ function runCausalTimestamp(state: RunState): string | undefined {
 
 function runOutcomeLabel(state: RunState): string {
   const kind = state.proposalOutcome?.kind;
-  if (kind === 'filed') return 'proposal-created';
+  if (kind === 'filed') return state.proposalOutcome?.isPartial === true ? 'gate-blocked' : 'proposal-created';
   return kind && RUN_PROPOSAL_OUTCOME_KINDS.has(kind) ? kind : state.status;
 }
 
@@ -258,8 +259,8 @@ function runMetadataSummary(state: RunState): NonNullable<RunState['runEventSumm
         ...(diffLines !== undefined ? { diffLines } : {}),
         ...(proposalOutcome
           ? {
-              proposalCreated: proposalOutcome.kind === 'filed' ? 1 : 0,
-              proposalBlocked: proposalOutcome.kind !== 'filed' && proposalOutcome.kind !== 'proposal-disabled' ? 1 : 0,
+              proposalCreated: proposalOutcome.kind === 'filed' && proposalOutcome.isPartial !== true ? 1 : 0,
+              proposalBlocked: proposalOutcome.isPartial === true || (proposalOutcome.kind !== 'filed' && proposalOutcome.kind !== 'proposal-disabled') ? 1 : 0,
               proposalDisabled: proposalOutcome.kind === 'proposal-disabled' ? 1 : 0,
             }
           : {}),
@@ -270,7 +271,7 @@ function runMetadataSummary(state: RunState): NonNullable<RunState['runEventSumm
     runId: state.id,
     status: state.status,
     outcome: runOutcomeLabel(state),
-    ...(proposalOutcome ? { proposalCreated: proposalOutcome.kind === 'filed' } : {}),
+    ...(proposalOutcome ? { proposalCreated: proposalOutcome.kind === 'filed' && proposalOutcome.isPartial !== true } : {}),
     ...(proposalOutcome?.proposalId ? { proposalId: proposalOutcome.proposalId } : {}),
     ...(files !== undefined ? { diffFiles: files } : {}),
     ...(diffLines !== undefined ? { diffLines } : {}),
@@ -334,6 +335,22 @@ function withCapturedProposalMetadata(producerState: RunState, capturedState: Ru
     ...(capturedState.labelBasis ? { labelBasis: capturedState.labelBasis } : {}),
     ...(capturedState.routerPolicyVersion ? { routerPolicyVersion: capturedState.routerPolicyVersion } : {}),
     ...(capturedState.learningEpoch ? { learningEpoch: capturedState.learningEpoch } : {}),
+  };
+}
+
+function failedCaptureOutcome(
+  producerState: RunState,
+  capturedOutcome: RunProposalOutcome | undefined,
+  kind: 'engine-failed-no-diff' | 'api-model-task-failed',
+): RunProposalOutcome | undefined {
+  if (capturedOutcome?.kind !== 'empty-diff') return capturedOutcome;
+  if (producerState.proposalOutcome?.kind === kind) return producerState.proposalOutcome;
+  return {
+    ...capturedOutcome,
+    kind,
+    reason: kind === 'api-model-task-failed'
+      ? 'api-model producer failed without a material diff'
+      : `engine "${producerState.engine}" failed without a material diff`,
   };
 }
 
@@ -1288,7 +1305,43 @@ export async function runGoal(
                 });
                 lastApiR = apiR;
 
-                if (apiR.state.status !== 'done') break;
+                if (apiR.state.status !== 'done') {
+                  const propR = await captureSandboxedProposal(engineId, goal, cfg, {
+                    sourceRepo: cwd,
+                    model: modelEnv,
+                    budget: opts.budget,
+                    runId: apiR.state.id,
+                    existingWorktree: titrrSandbox,
+                    workItemId: opts.workItemId,
+                    workItemGenerationId: opts.workItemGenerationId,
+                    workSource: opts.workSource,
+                    delegationScope,
+                    isPartial: true,
+                    sourceLabel: 'TITRR api-model failed producer',
+                    usage: apiR.state.usage,
+                    durationMs: runDurationMs(apiR.state),
+                    producerStatus: apiR.state.status,
+                    actionCounts: actionCountsForProposalCapture(apiR.state),
+                    contextSummary: apiR.state.runEventSummary?.contextSummary,
+                  });
+                  const captureOutcome = failedCaptureOutcome(
+                    apiR.state,
+                    propR.proposalOutcome,
+                    'api-model-task-failed',
+                  );
+                  lastApiR = {
+                    ...apiR,
+                    proposalId: propR.proposalId,
+                    proposalOutcome: captureOutcome,
+                    state: withCapturedProposalMetadata(
+                      apiR.state,
+                      captureOutcome
+                        ? { ...propR.state, proposalOutcome: captureOutcome }
+                        : propR.state,
+                    ),
+                  };
+                  break;
+                }
 
                 // M140: realTestLoop flag (default true). When false, skip test execution
                 // and treat as if no test command was found (propose immediately).
@@ -1306,17 +1359,24 @@ export async function runGoal(
                     workItemGenerationId: opts.workItemGenerationId,
                     workSource: opts.workSource,
                     delegationScope,
+                    ...(lastApiR.proposalOutcome?.isPartial === true ? { isPartial: true } : {}),
                     sourceLabel: 'TITRR api-model',
                     usage: lastApiR.state.usage,
                     durationMs: runDurationMs(lastApiR.state),
                     producerStatus: lastApiR.state.status,
                     actionCounts: actionCountsForProposalCapture(lastApiR.state),
+                    contextSummary: lastApiR.state.runEventSummary?.contextSummary,
                   });
                   lastApiR = {
                     ...lastApiR,
                     proposalId: propR.proposalId,
                     proposalOutcome: propR.proposalOutcome,
-                    state: withCapturedProposalMetadata(lastApiR.state, propR.state),
+                    state: withCapturedProposalMetadata(
+                      lastApiR.state,
+                      propR.proposalOutcome
+                        ? { ...propR.state, proposalOutcome: propR.proposalOutcome }
+                        : propR.state,
+                    ),
                   };
                   break;
                 }
@@ -1339,12 +1399,18 @@ export async function runGoal(
                     durationMs: runDurationMs(lastApiR.state),
                     producerStatus: lastApiR.state.status,
                     actionCounts: actionCountsForProposalCapture(lastApiR.state),
+                    contextSummary: lastApiR.state.runEventSummary?.contextSummary,
                   });
                   lastApiR = {
                     ...lastApiR,
                     proposalId: propR.proposalId,
                     proposalOutcome: propR.proposalOutcome,
-                    state: withCapturedProposalMetadata(lastApiR.state, propR.state),
+                    state: withCapturedProposalMetadata(
+                      lastApiR.state,
+                      propR.proposalOutcome
+                        ? { ...propR.state, proposalOutcome: propR.proposalOutcome }
+                        : propR.state,
+                    ),
                   };
                   break;
                 }
@@ -1361,6 +1427,7 @@ export async function runGoal(
                   ? `api-model engine "${engine}" → inbox proposal ${lastApiR.proposalId}`
                   : `api-model engine "${engine}" → no diff produced`,
               });
+              saveRun(lastApiR.state);
               return lastApiR.state;
             }
           }
@@ -1403,6 +1470,22 @@ export async function runGoal(
             // Sandbox creation failed — fall back to the original single-attempt path.
           }
 
+          if (!titrrSandbox) {
+            const fallback = await runEngineSandboxed(engineId, goal, cfg, {
+              sourceRepo: cwd,
+              model: modelEnv,
+              budget: opts.budget,
+              propose: true,
+              workItemId: opts.workItemId,
+              workItemGenerationId: opts.workItemGenerationId,
+              workSource: opts.workSource,
+              delegationScope,
+              ...(opts.runId ? { runId: opts.runId } : {}),
+            });
+            saveRun(fallback.state);
+            return fallback.state;
+          }
+
           let titrrAttempt = 0;
           let titrrResult: { ok: boolean; output: string } | null = null;
           let titrrAnnotation = '';
@@ -1429,6 +1512,7 @@ export async function runGoal(
               durationMs: runDurationMs(producer.state),
               producerStatus: producer.state.status,
               actionCounts: actionCountsForProposalCapture(producer.state),
+              contextSummary: producer.state.runEventSummary?.contextSummary,
             });
             const capturedState = propR.proposalOutcome
               ? { ...propR.state, proposalOutcome: propR.proposalOutcome }
@@ -1464,7 +1548,21 @@ export async function runGoal(
               lastR = r;
 
               if (r.state.status !== 'done') {
-                // Engine itself failed — stop loop, surface failure.
+                // Preserve useful partial work before the shared sandbox is removed.
+                titrrAnnotation = `producer ${r.state.status}; partial capture attempted`;
+                await captureTitrrProposal({ isPartial: true });
+                const captureOutcome = failedCaptureOutcome(
+                  r.state,
+                  lastR?.proposalOutcome,
+                  'engine-failed-no-diff',
+                );
+                if (lastR && captureOutcome) {
+                  lastR = {
+                    ...lastR,
+                    proposalOutcome: captureOutcome,
+                    state: { ...lastR.state, proposalOutcome: captureOutcome },
+                  };
+                }
                 break;
               }
 

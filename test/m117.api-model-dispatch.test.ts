@@ -39,6 +39,47 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import type { InboxStore } from '../src/core/seams/inbox.js';
+import type { Proposal } from '../src/core/types.js';
+
+function durableInboxStore(
+  proposalId: string,
+  capturedProposalArgs: unknown[],
+): InboxStore {
+  const proposals = new Map<string, Proposal>();
+
+  return {
+    list: (filter) => [...proposals.values()]
+      .filter((proposal) => filter?.status === undefined || proposal.status === filter.status)
+      .map((proposal) => structuredClone(proposal)),
+    create: (input) => {
+      capturedProposalArgs.push(input);
+      const proposal: Proposal = {
+        ...input,
+        id: proposalId,
+        status: 'pending',
+        createdAt: new Date().toISOString(),
+      };
+      proposals.set(proposal.id, structuredClone(proposal));
+      return structuredClone(proposal);
+    },
+    load: (id) => {
+      const proposal = proposals.get(id);
+      return proposal ? structuredClone(proposal) : null;
+    },
+    setStatus: (id, status, result) => {
+      const proposal = proposals.get(id);
+      if (!proposal) return;
+      proposals.set(id, {
+        ...proposal,
+        status,
+        ...(result !== undefined ? { result } : {}),
+      });
+    },
+    pendingCount: () => [...proposals.values()]
+      .filter((proposal) => proposal.status === 'pending').length,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // 1. KNOWN_ENGINE_IDS — local-coder must be in the set
@@ -222,12 +263,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     }));
 
     vi.doMock('../src/core/seams/inbox.js', () => ({
-      selectInboxStore: () => ({
-        create: (args: unknown) => {
-          capturedProposalArgs.push(args);
-          return { id: fakeProposalId };
-        },
-      }),
+      selectInboxStore: () => durableInboxStore(fakeProposalId, capturedProposalArgs),
     }));
 
     vi.doMock('../src/core/knowledge/index.js', () => ({
@@ -362,12 +398,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     }));
 
     vi.doMock('../src/core/seams/inbox.js', () => ({
-      selectInboxStore: () => ({
-        create: (args: unknown) => {
-          capturedProposalArgs.push(args);
-          return { id: 'partial-review-prop' };
-        },
-      }),
+      selectInboxStore: () => durableInboxStore('partial-review-prop', capturedProposalArgs),
     }));
 
     vi.doMock('../src/core/knowledge/index.js', () => ({
@@ -414,6 +445,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     expect(result.proposalId).toBe('partial-review-prop');
     expect(result.proposalOutcome).toMatchObject({
       kind: 'filed',
+      isPartial: true,
       proposalId: 'partial-review-prop',
       files: 1,
       insertions: 1,
@@ -421,8 +453,89 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     });
     expect(result.state.proposalOutcome).toMatchObject({
       kind: 'filed',
+      isPartial: true,
       proposalId: 'partial-review-prop',
     });
+
+    vi.resetModules();
+  });
+
+  it('fails closed when an optimistic pending proposal is not durably loadable', async () => {
+    const capturedProposalArgs: unknown[] = [];
+    const setStatus = vi.fn();
+
+    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+      sandboxDiff: () => ({
+        files: 1,
+        patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
+        insertions: 1,
+        deletions: 1,
+      }),
+    }));
+
+    vi.doMock('../src/core/seams/inbox.js', () => ({
+      selectInboxStore: () => ({
+        create: (input: Record<string, unknown>) => {
+          capturedProposalArgs.push(input);
+          return {
+            ...input,
+            id: 'optimistic-only-prop',
+            status: 'pending',
+            createdAt: new Date().toISOString(),
+            isPartial: input['isPartial'] === true,
+          };
+        },
+        load: () => null,
+        setStatus,
+      }),
+    }));
+
+    vi.doMock('../src/core/knowledge/index.js', () => ({
+      scrubSecrets: (s: string) => s,
+    }));
+
+    vi.doMock('../src/core/foundry/provenance.js', () => ({
+      hashDiff: () => 'hash-abc',
+      signProvenance: () => 'sig-abc',
+    }));
+
+    vi.doMock('../src/core/run/completeness-gate.js', () => ({
+      runCompletenessGate: async () => ({ pass: true }),
+    }));
+
+    const { captureSandboxedProposal } = await import(
+      '../src/core/run/sandboxed-engine.js?bust=' + randomUUID()
+    ) as typeof import('../src/core/run/sandboxed-engine.js');
+
+    const result = await captureSandboxedProposal('local-coder', 'increment x', {
+      foundry: {
+        models: { 'local-coder': 'qwen2.5:72b-instruct-q4_K_M' },
+      },
+    } as never, {
+      sourceRepo: tmpRepo,
+      existingWorktree: {
+        id: 'sb-test',
+        worktreePath: tmpRepo,
+        sourceRepo: tmpRepo,
+        branch: 'ashlr-sandbox-test',
+      },
+      runId: 'run-m117-durable-missing',
+    });
+
+    expect(capturedProposalArgs).toHaveLength(1);
+    expect(setStatus).not.toHaveBeenCalled();
+    expect(result.proposalId).toBeUndefined();
+    expect(result.proposalOutcome).toMatchObject({
+      kind: 'proposal-capture-error',
+      reason: 'proposal was not durably persisted with matching capture metadata',
+      files: 1,
+      insertions: 1,
+      deletions: 1,
+    });
+    expect(result.state.proposalOutcome).toMatchObject({
+      kind: 'proposal-capture-error',
+    });
+    expect(result.state.proposalId).toBeUndefined();
 
     vi.resetModules();
   });

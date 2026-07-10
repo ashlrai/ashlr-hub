@@ -560,6 +560,16 @@ async function cmdInboxApprove(id: string, yes: boolean, jsonMode: boolean): Pro
     return p.status === 'applied' ? 0 : 1;
   }
 
+  if (p.isPartial === true) {
+    const msg = `Proposal ${p.id.slice(0, 12)} is partial review evidence and cannot be approved or applied.`;
+    if (jsonMode) {
+      console.log(JSON.stringify({ ok: false, error: msg, status: p.status }));
+    } else {
+      console.error(col.yellow('warning: ') + msg);
+    }
+    return 1;
+  }
+
   // ── Confirm gate ──────────────────────────────────────────────────────────
   if (!jsonMode) {
     const kindColor = KIND_COLORS[p.kind] ?? 'cyan';

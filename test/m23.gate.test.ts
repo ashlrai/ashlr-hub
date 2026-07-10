@@ -367,6 +367,23 @@ describe('M23 gate — CLI approve + --yes is the ONLY apply trigger', () => {
     // If not called (CLI may pre-check status), that's also acceptable
   });
 
+  it('partial review evidence cannot be approved or routed to applyProposal', async () => {
+    const p = createProposal(makeInput({
+      title: 'Incomplete capture',
+      isPartial: true,
+      diff: '--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n',
+    }));
+
+    setStatus(p.id, 'approved');
+    expect(loadProposal(p.id)?.status).toBe('pending');
+
+    const code = await cmdInbox(['approve', p.id, '--yes']);
+
+    expect(code).toBe(1);
+    expect(applyProposalSpy).not.toHaveBeenCalled();
+    expect(loadProposal(p.id)?.status).toBe('pending');
+  });
+
   it('approving a nonexistent proposal with --yes does NOT call applyProposal', async () => {
     applyProposalSpy.mockClear();
 

@@ -369,6 +369,28 @@ describe('M23 applyProposal — REFUSE: kill switch', () => {
   });
 });
 
+describe('M23 applyProposal — REFUSE: partial review artifact', () => {
+  it('REFUSES approval and application of a partial proposal without mutating its repo', async () => {
+    initRealGitRepo(tmpRepo);
+    enroll(tmpRepo);
+    const branchBefore = getCurrentBranch(tmpRepo);
+    const branchesBefore = listBranches(tmpRepo);
+    const p = createProposal(makeInput({
+      diff: makeSimpleDiff('partial-output.txt', 'unfinished work\n'),
+      isPartial: true,
+    }));
+    setStatus(p.id, 'approved');
+
+    const result = await applyProposal(p.id, { confirmed: true });
+
+    expect(result).toMatchObject({ ok: false, status: 'pending' });
+    expect(loadProposal(p.id)?.status).toBe('pending');
+    expect(getCurrentBranch(tmpRepo)).toBe(branchBefore);
+    expect(listBranches(tmpRepo)).toEqual(branchesBefore);
+    expect(fs.existsSync(path.join(tmpRepo, 'partial-output.txt'))).toBe(false);
+  });
+});
+
 // ===========================================================================
 // 'patch' kind — approved+confirmed+enrolled — applies on NEW branch
 // ===========================================================================

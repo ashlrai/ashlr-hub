@@ -554,6 +554,62 @@ describe('H2 swarm resume — resume of a crashed swarm that had a real sandbox'
     expect(listSandboxes().every((sandbox) => sandboxesBefore.has(sandbox.id))).toBe(true);
   });
 
+  it('captures failed builtin swarm edits only as non-authoritative partial evidence', async () => {
+    await ensureImported();
+    repo.enroll();
+    const id = 'h2-resume-failed-with-diff';
+    crashMidSwarm({
+      id,
+      goal: 'fail after changing a file',
+      project: repo.dir,
+      taskIds: ['build-fails-after-edit'],
+      doneTaskIds: [],
+      phase: 'build',
+    });
+    mockRunGoal.mockImplementationOnce(async (_goal, _cfg, opts) => {
+      if (opts?.cwd) {
+        writeFileSync(join(opts.cwd, 'partial.ts'), 'export const partial = true;\n', 'utf8');
+      }
+      throw new Error('synthetic task failure after edit');
+    });
+
+    const result = await runSwarm(
+      { goal: 'fail after changing a file' },
+      cfg,
+      {
+        resumeId: id,
+        project: repo.dir,
+        sandbox: true,
+        requireSandbox: true,
+        propose: true,
+        noCapture: true,
+        parallel: 1,
+      },
+      nullSink(),
+    );
+
+    expect(result.status).toBe('failed');
+    expect(result.proposalOutcome).toMatchObject({
+      kind: 'filed',
+      isPartial: true,
+      files: 1,
+    });
+    const proposal = loadProposal(result.proposalOutcome!.proposalId!)!;
+    expect(proposal).toMatchObject({
+      status: 'pending',
+      isPartial: true,
+      runEventSummary: {
+        status: 'failed',
+        outcome: 'gate-blocked',
+        proposalCreated: false,
+      },
+      verifyResult: {
+        passed: false,
+        source: 'capture-gate',
+      },
+    });
+  });
+
   it('keeps a failed sandboxed dry-run out of the swarm store and removes its sandbox', async () => {
     await ensureImported();
     repo.enroll();

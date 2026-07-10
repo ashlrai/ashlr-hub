@@ -2064,7 +2064,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(Date.parse(productionEvent!.ts)).toBeGreaterThanOrEqual(Date.parse(startEvent!.ts));
   });
 
-  it('A1h2d: builtin partial proposal preserves aborted execution status and filed capture truth', async () => {
+  it('A1h2d: builtin partial proposal preserves aborted execution status and filed artifact telemetry', async () => {
     const { items } = enrollWithItems(1);
     const pendingBefore = pendingCount();
 
@@ -2076,6 +2076,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       proposalOutcome: {
         kind: 'filed',
         reason: 'builtin swarm partial proposal filed',
+        isPartial: true,
         proposalId: 'prop-partial-builtin',
         files: 2,
         insertions: 7,
@@ -2087,29 +2088,72 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
     expect(pendingCount()).toBe(pendingBefore);
     // Tick aggregate remains the independently observed inbox delta. The typed
-    // production record preserves the runner's filed truth even if that source
-    // and the queue observation temporarily disagree.
+    // production record blocks failed partial evidence while retaining its
+    // artifact telemetry for diagnosis.
     expect(result.proposalsCreated).toBe(0);
     expect(result.dispatches?.[0]?.production).toMatchObject({
-      outcome: 'proposal-created',
+      outcome: 'gate-blocked',
       proposalId: 'prop-partial-builtin',
+      reason: 'partial artifact filed after aborted producer: builtin swarm partial proposal filed',
       diffFiles: 2,
       diffLines: 10,
       runEventSummary: {
         status: 'aborted',
-        outcome: 'proposal-created',
-        proposalCreated: true,
+        outcome: 'gate-blocked',
+        proposalCreated: false,
         proposalId: 'prop-partial-builtin',
       },
     });
     expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
-      outcome: 'proposal-created',
-      proposalCreated: true,
+      outcome: 'gate-blocked',
+      proposalCreated: false,
       proposalId: 'prop-partial-builtin',
+      reason: 'partial artifact filed after aborted producer: builtin swarm partial proposal filed',
+      diffFiles: 2,
+      diffLines: 10,
       runEventSummary: {
         status: 'aborted',
-        outcome: 'proposal-created',
+        outcome: 'gate-blocked',
+        proposalCreated: false,
+        proposalId: 'prop-partial-builtin',
       },
+    });
+  });
+
+  it('A1h2d2: done producer partial evidence remains gate-blocked', async () => {
+    const { items } = enrollWithItems(1);
+    mockRunSwarm.mockImplementationOnce(async (_input, _cfg, opts) => ({
+      id: (opts as { runId: string }).runId,
+      status: 'done',
+      goal: items[0]!.title,
+      usage: { tokensIn: 200, tokensOut: 50, estCostUsd: 0.006, steps: 2 },
+      proposalOutcome: {
+        kind: 'filed',
+        reason: 'tests still failing after final attempt',
+        isPartial: true,
+        proposalId: 'prop-partial-done',
+        files: 1,
+        insertions: 4,
+        deletions: 1,
+      },
+    }));
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1 }), { dryRun: false });
+
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'gate-blocked',
+      proposalId: 'prop-partial-done',
+      reason: 'partial artifact filed after done producer: tests still failing after final attempt',
+      runEventSummary: {
+        status: 'done',
+        outcome: 'gate-blocked',
+        proposalCreated: false,
+      },
+    });
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      outcome: 'gate-blocked',
+      proposalCreated: false,
+      proposalId: 'prop-partial-done',
     });
   });
 
