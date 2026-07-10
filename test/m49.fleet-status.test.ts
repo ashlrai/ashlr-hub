@@ -28,6 +28,7 @@ import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
 import { createProposal, setStatus } from '../src/core/inbox/store.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import { recordDispatchProduction, type DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
+import { recordDispatchManifest } from '../src/core/fleet/dispatch-manifest.js';
 import { recordAgentAction, type AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
 import { recordDecision } from '../src/core/fleet/decisions-ledger.js';
 import { recordOutcome } from '../src/core/fleet/worked-ledger.js';
@@ -1635,6 +1636,59 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('diagnosis: healthy · fleet 1/3 33% · keep routing');
     expect(formatted).toContain('local-coder 0/2 0%');
     expect(formatted).toContain('codex 1/1 100%');
+  });
+
+  it('reports recent concurrent dispatch manifests from the append-only ledger', async () => {
+    recordDispatchManifest({
+      schemaVersion: 1,
+      manifestId: 'dm-test-1',
+      ts: '2026-07-10T00:00:00.000Z',
+      machineId: 'machine-A',
+      mode: 'concurrent',
+      dryRun: false,
+      claimedItemIds: ['item-a', 'item-b', 'item-c'],
+      assignments: [
+        {
+          itemId: 'item-a',
+          source: 'todo',
+          repo: '/repo/a',
+          title: 'First task',
+          backend: 'codex',
+        },
+        {
+          itemId: 'item-b',
+          source: 'todo',
+          repo: '/repo/a',
+          title: 'Second task',
+          backend: 'codex',
+        },
+      ],
+      unassigned: [{ itemId: 'item-c', reason: 'no-slots' }],
+      slots: { codex: 2 },
+      backendCounts: { codex: 2 },
+      resourceSnapshotAt: '2026-07-10T00:00:00.000Z',
+      counts: { claimed: 3, assigned: 2, unassigned: 1 },
+    });
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.dispatchManifests).toMatchObject({
+      events: 1,
+      latestAt: '2026-07-10T00:00:00.000Z',
+      assigned: 2,
+      unassigned: 1,
+      byBackend: [{ backend: 'codex', assignments: 2 }],
+    });
+    expect(s.dispatchManifests?.recent[0]).toMatchObject({
+      manifestId: 'dm-test-1',
+      assigned: 2,
+      unassigned: 1,
+      backends: { codex: 2 },
+    });
+
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('manifests: 1 event(s), assigned 2, unassigned 1');
+    expect(formatted).toContain('manifest backends: codex:2');
   });
 
   it('reports durable global workspace action telemetry from the append-only ledger', async () => {

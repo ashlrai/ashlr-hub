@@ -478,6 +478,24 @@ export interface FleetDispatchYieldDiagnostics {
   candidates: FleetDispatchYieldDiagnosticCandidate[];
 }
 
+export interface FleetDispatchManifestRecent {
+  manifestId: string;
+  ts: string;
+  assigned: number;
+  unassigned: number;
+  backends: Record<string, number>;
+  resourceSnapshotAt?: string;
+}
+
+export interface FleetDispatchManifestStatus {
+  events: number;
+  latestAt: string | null;
+  assigned: number;
+  unassigned: number;
+  byBackend: Array<{ backend: string; assignments: number }>;
+  recent: FleetDispatchManifestRecent[];
+}
+
 export interface FleetQueueNextItem {
   id: string;
   title: string;
@@ -621,6 +639,8 @@ export interface FleetStatus {
   proposalProduction?: FleetProposalProductionStatus;
   /** Durable 24h dispatch-production yield summary from the append-only ledger. */
   dispatchProduction?: DispatchProductionYieldSummary;
+  /** Recent forensic concurrent dispatch intent summaries from the append-only manifest ledger. */
+  dispatchManifests?: FleetDispatchManifestStatus;
   /** Sample-gated diagnosis of dispatch-production yield; no raw prompts/diffs/stdout. */
   dispatchYieldDiagnostics?: FleetDispatchYieldDiagnostics;
   /** Durable 24h agent-action global workspace summary from append-only telemetry. */
@@ -1261,6 +1281,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     // and available even when the append-only ledger is absent or corrupt.
   }
   try {
+    const dispatchManifests = await buildDispatchManifestStatus();
+    if (dispatchManifests) status.dispatchManifests = dispatchManifests;
+  } catch {
+    // Optional forensic manifest surface only.
+  }
+  try {
     status.workspace = readAgentWorkspace({
       windowMs: RECENT_WINDOW_MS,
       limit: 1200,
@@ -1314,6 +1340,44 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   status.missionBrief = buildMissionBrief(status);
 
   return status;
+}
+
+async function buildDispatchManifestStatus(): Promise<FleetDispatchManifestStatus | undefined> {
+  const { readDispatchManifestEvents } = await import('./dispatch-manifest.js');
+  const events = readDispatchManifestEvents({ limit: 50 });
+  if (events.length === 0) return undefined;
+
+  const byBackend = new Map<string, number>();
+  let assigned = 0;
+  let unassigned = 0;
+  let latestAt: string | null = null;
+  for (const event of events) {
+    assigned += event.counts.assigned;
+    unassigned += event.counts.unassigned;
+    if (!latestAt || Date.parse(event.ts) > Date.parse(latestAt)) latestAt = event.ts;
+    for (const [backend, count] of Object.entries(event.backendCounts)) {
+      byBackend.set(backend, (byBackend.get(backend) ?? 0) + count);
+    }
+  }
+
+  return {
+    events: events.length,
+    latestAt,
+    assigned,
+    unassigned,
+    byBackend: [...byBackend.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 8)
+      .map(([backend, assignments]) => ({ backend, assignments })),
+    recent: events.slice(0, 8).map((event) => ({
+      manifestId: event.manifestId,
+      ts: event.ts,
+      assigned: event.counts.assigned,
+      unassigned: event.counts.unassigned,
+      backends: event.backendCounts,
+      ...(event.resourceSnapshotAt ? { resourceSnapshotAt: event.resourceSnapshotAt } : {}),
+    })),
+  };
 }
 
 async function buildFleetPhantomStatus(cfg: AshlrConfig): Promise<FleetPhantomStatus | undefined> {

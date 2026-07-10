@@ -1,5 +1,12 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Current Dispatch Manifest Status
+- Context: the previous commit began recording metadata-only concurrent dispatch manifests before `runConcurrentDispatch()`. The follow-up gap was operator visibility: the ledger existed, but `FleetStatus` and CLI output could not yet answer "what concurrent plan did the daemon intend to run?"
+- Implementation: `FleetStatus.dispatchManifests` now reads the append-only manifest ledger fail-soft, bounded to recent events, and aggregates event count, latest timestamp, assigned/unassigned totals, backend assignment counts, and a bounded recent sample. `ashlr fleet status` renders the same manifest summary under Dispatch yield.
+- Safety boundary: this is read-only forensic observability, not a queue, lease, retry source, or merge gate. The surface uses manifest ids, timestamps, counts, backend names, and bounded metadata only; it does not persist or render raw prompts, diffs, stdout, stderr, env, file contents, command output, or secrets.
+- Verification passed: focused `npm run test:ci -- test/m49.fleet-status.test.ts test/m353.dispatch-manifest.test.ts` (70 tests), `npm run typecheck -- --pretty false`, `git diff --check`, `node --check src/core/web/public/app.js`, `npm run lint` (known 114-warning baseline, 0 errors), `npm run build`, and `npm audit --audit-level=moderate`.
+- Sibling verifier progress: `webfetch` now has a pushed `ashlr.verify.json` on `codex/webfetch-verify-manifest` after `bun run typecheck` and `bun test` passed. `stack` now has a pushed `ashlr.verify.json` on `codex/stack-verify-manifest` after `bun run typecheck`, `bun test`, `bun run build`, CLI smokes, and Hub profile detection passed. Both workers left pre-existing dirty/unrelated work untouched.
+
 ## Current Prompt-Trackr Merge Contract
 - Selection: verifier scout ranked `prompt-trackr` as the safest next explicit contract because its branch `codex/prompt-trackr-agent-docs` was synced to `origin`, had a real remote, and only one pre-existing dirty tracked test file. `ashlrcode` and `ashlr-plugin` are better handled after dirty WIP is isolated.
 - Implementation: added root `ashlr.verify.json` in `/Users/masonwyatt/Desktop/github/dev-tools/prompt-trackr` with `mode:"replace-detected"` and required merge-profile commands for `npm run typecheck`, `npm run build`, and `npm run test`.

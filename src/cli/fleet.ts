@@ -336,6 +336,17 @@ export function formatFleetStatus(s: FleetStatus): string {
       lines.push(`  reasons:   ${topReasons.slice(0, 3).map(formatProductionReason).join('; ')}`);
     }
   }
+  if (s.dispatchManifests) {
+    const manifests = s.dispatchManifests;
+    lines.push(
+      `  manifests: ${manifests.events} event(s), assigned ${manifests.assigned}, ` +
+        `unassigned ${manifests.unassigned}, latest ${manifests.latestAt ?? '—'}`,
+    );
+    if (manifests.byBackend.length > 0) {
+      const backends = manifests.byBackend.slice(0, 4).map(formatDispatchManifestBackend).join(', ');
+      lines.push(`  manifest backends: ${backends}`);
+    }
+  }
   lines.push('');
 
   // Global workspace
@@ -808,6 +819,12 @@ function formatDispatchYieldBucket(
 ): string {
   const label = bucket.backend ?? bucket.source ?? (bucket.repo ? formatActionTarget(bucket.repo) : bucket.key);
   return `${label} ${bucket.proposalsCreated}/${bucket.attempts} ${formatPercent(bucket.proposalRate)}`;
+}
+
+function formatDispatchManifestBackend(
+  row: NonNullable<FleetStatus['dispatchManifests']>['byBackend'][number],
+): string {
+  return `${row.backend}:${row.assignments}`;
 }
 
 function formatWorkspaceCount(row: NonNullable<FleetStatus['workspace']>['byAction'][number]): string {

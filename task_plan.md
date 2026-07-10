@@ -1321,3 +1321,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add live-shaped FleetStatus regression coverage for 4/5 generated repair conversion with local-coder/self still sample-gated.
 - [x] Run focused, adjacent, typecheck, lint, build, audit, JS syntax, and diff gates.
 - [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Dispatch Manifest Status
+- [x] Resume from the concurrent dispatch manifest baseline and recheck git, plan, notes, and active sibling agents.
+- [x] Surface recent append-only dispatch manifests in FleetStatus as bounded forensic metadata.
+- [x] Render manifest event, assignment, unassigned, latest, and backend-count summaries in `ashlr fleet status`.
+- [x] Add M49 regression coverage proving status aggregation and CLI output.
+- [x] Run focused manifest/status tests, typecheck, lint, build, audit, JS syntax, and diff gates.
+- [ ] Commit, push, refresh live fleet status, and continue sibling verifier/research lanes.
