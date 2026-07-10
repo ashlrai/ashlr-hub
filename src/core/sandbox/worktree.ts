@@ -20,21 +20,42 @@
  *  - No new runtime deps; node builtins only.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fchmodSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
   mkdirSync,
+  openSync,
+  readSync,
   readdirSync,
   readFileSync,
-  writeFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   appendFileSync,
+  unlinkSync,
+  writeSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
+import { performance } from 'node:perf_hooks';
 import { join, resolve, sep } from 'node:path';
-import { randomBytes } from 'node:crypto';
-import type { Sandbox, SandboxDiff } from '../types.js';
+import { createHash, randomBytes } from 'node:crypto';
+import type {
+  Sandbox,
+  SandboxCleanupEvidence,
+  SandboxCleanupFailureClass,
+  SandboxCleanupPostcondition,
+  SandboxCleanupResult,
+  SandboxDiff,
+  SandboxInventory,
+  SandboxSweepResult,
+} from '../types.js';
 import { isRepo } from '../git.js';
 import { assertMayMutate } from './policy.js';
 import { audit } from './audit.js';
@@ -46,6 +67,9 @@ import { audit } from './audit.js';
 const GIT_TIMEOUT = 30_000; // ms — generous; worktree add can touch many files
 const BRANCH_PREFIX = 'ashlr/sandbox/';
 const META_FILE = 'sandbox.json';
+const CLEANUP_LOCK_WAIT_MS = 2_000;
+const CLEANUP_LOCK_INIT_MS = 1_000;
+const cleanupLockSleep = new Int32Array(new SharedArrayBuffer(4));
 
 // ---------------------------------------------------------------------------
 // H5 — bounded sandbox lifecycle (LOCAL-ONLY resource guards)
@@ -126,8 +150,8 @@ function ownerAlive(sb: Sandbox): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
 }
 
@@ -258,18 +282,153 @@ function symlinkNodeModules(sourceRepo: string, worktreePath: string): void {
 
 function writeMeta(sb: Sandbox): void {
   const home = sandboxHome(sb.id);
+  const root = sandboxesDir();
   if (!existsSync(home)) {
-    mkdirSync(home, { recursive: true });
+    mkdirSync(home, { recursive: true, mode: 0o700 });
   }
-  writeFileSync(metaPath(sb.id), JSON.stringify(sb, null, 2) + '\n', 'utf8');
+  const expectedDirs = new Map<string, { dev: number; ino: number }>();
+  for (const dir of [root, home]) {
+    const stat = lstatSync(dir);
+    if (stat.isSymbolicLink() || !stat.isDirectory() ||
+      (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+      throw new Error('unsafe sandbox metadata directory');
+    }
+    chmodSync(dir, 0o700);
+    expectedDirs.set(dir, { dev: stat.dev, ino: stat.ino });
+  }
+  const target = metaPath(sb.id);
+  if (existsSync(target)) {
+    const current = lstatSync(target);
+    if (current.isSymbolicLink() || !current.isFile() ||
+      (typeof process.getuid === 'function' && current.uid !== process.getuid())) {
+      throw new Error('unsafe sandbox metadata file');
+    }
+  }
+  const temp = join(home, `.sandbox.json.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
+  let fd: number | undefined;
+  try {
+    fd = openSync(
+      temp,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    const bytes = Buffer.from(JSON.stringify(sb, null, 2) + '\n', 'utf8');
+    if (writeSync(fd, bytes) !== bytes.length) throw new Error('short sandbox metadata write');
+    fchmodSync(fd, 0o600);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    for (const dir of [root, home]) {
+      const expected = expectedDirs.get(dir)!;
+      const current = lstatSync(dir);
+      if (current.isSymbolicLink() || !current.isDirectory() ||
+        current.dev !== expected.dev || current.ino !== expected.ino) {
+        throw new Error('sandbox metadata directory changed during write');
+      }
+    }
+    renameSync(temp, target);
+    const persisted = lstatSync(target);
+    if (persisted.isSymbolicLink() || !persisted.isFile()) throw new Error('invalid sandbox metadata replacement');
+    chmodSync(target, 0o600);
+    let dirFd: number | undefined;
+    try {
+      dirFd = openSync(home, fsConstants.O_RDONLY);
+      fsyncSync(dirFd);
+    } catch {
+      // Some platforms/filesystems do not support fsync on directories. The
+      // atomically renamed, fsynced file remains valid; directory durability is
+      // a best-effort power-loss enhancement, not a sandbox availability gate.
+    } finally {
+      if (dirFd !== undefined) { try { closeSync(dirFd); } catch { /* best effort */ } }
+    }
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
+    try { unlinkSync(temp); } catch { /* renamed or absent */ }
+  }
+}
+
+function rollbackUnpersistedSandbox(sb: Sandbox): void {
+  const safeBranch = `${BRANCH_PREFIX}${sb.id}`;
+  const safeWorktree = worktreePathFor(sb.id);
+  if (sb.branch !== safeBranch || resolve(sb.worktreePath) !== resolve(safeWorktree) || !isRepo(sb.sourceRepo)) return;
+  gitTry(sb.sourceRepo, ['worktree', 'remove', '--force', safeWorktree]);
+  gitTry(sb.sourceRepo, ['worktree', 'prune']);
+  gitTry(sb.sourceRepo, ['branch', '-D', safeBranch]);
+  const registration = registrationState(sb.sourceRepo, safeWorktree);
+  const branch = branchState(sb.sourceRepo, safeBranch);
+  if (registration === 'absent' && branch === 'absent') {
+    try { rmSync(sandboxHome(sb.id), { recursive: true, force: true }); } catch { /* surfaced by inventory */ }
+  }
+  const home = sandboxHomeState(sandboxHome(sb.id));
+  const complete = registration === 'absent' && branch === 'absent' && home === 'absent';
+  audit({
+    action: 'sandbox:remove',
+    repo: sb.sourceRepo,
+    sandboxId: sb.id,
+    summary: `creation rollback registration=${registration} branch=${branch} home=${home}`,
+    result: complete ? 'ok' : 'error',
+  });
+}
+
+function parseCleanupEvidence(value: unknown): SandboxCleanupEvidence | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const o = value as Record<string, unknown>;
+  const p = o['postconditions'];
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return undefined;
+  const post = p as Record<string, unknown>;
+  const states = new Set<SandboxCleanupPostcondition>(['absent', 'present', 'unknown', 'unsafe']);
+  const failures = new Set<SandboxCleanupFailureClass>([
+    'cleanup-locked', 'unsafe-metadata', 'source-repo-unavailable', 'worktree-remaining',
+    'branch-remaining', 'postcondition-unavailable', 'home-remove-failed',
+  ]);
+  if (
+    o['schemaVersion'] !== 1 ||
+    typeof o['attemptedAt'] !== 'string' ||
+    o['attemptedAt'].length > 32 ||
+    Number.isNaN(Date.parse(o['attemptedAt'])) ||
+    typeof o['attempt'] !== 'number' ||
+    !Number.isInteger(o['attempt']) ||
+    o['attempt'] < 1 ||
+    o['attempt'] > 1_000 ||
+    (o['status'] !== 'residual' && o['status'] !== 'refused' && o['status'] !== 'unavailable') ||
+    typeof o['retryable'] !== 'boolean' ||
+    !Array.isArray(o['failureClasses']) ||
+    !o['failureClasses'].every((v) => failures.has(v as SandboxCleanupFailureClass)) ||
+    !states.has(post['registration'] as SandboxCleanupPostcondition) ||
+    !states.has(post['branch'] as SandboxCleanupPostcondition) ||
+    !states.has(post['home'] as SandboxCleanupPostcondition)
+  ) return undefined;
+  return {
+    schemaVersion: 1,
+    attemptedAt: o['attemptedAt'],
+    attempt: o['attempt'],
+    status: o['status'],
+    postconditions: {
+      registration: post['registration'] as SandboxCleanupPostcondition,
+      branch: post['branch'] as SandboxCleanupPostcondition,
+      home: post['home'] as SandboxCleanupPostcondition,
+    },
+    failureClasses: [...new Set(o['failureClasses'] as SandboxCleanupFailureClass[])].slice(0, 8),
+    retryable: o['retryable'],
+  };
 }
 
 /** Read + validate one sandbox's metadata. Returns null on missing/malformed. */
 function readMeta(id: string): Sandbox | null {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) return null;
   const p = metaPath(id);
   if (!existsSync(p)) return null;
+  let fd: number | undefined;
   try {
-    const parsed = JSON.parse(readFileSync(p, 'utf8')) as unknown;
+    const before = lstatSync(p);
+    if (before.isSymbolicLink() || !before.isFile() || before.size > 64 * 1024 ||
+      (typeof process.getuid === 'function' && before.uid !== process.getuid())) return null;
+    fd = openSync(p, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    if (opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size) return null;
+    const bytes = Buffer.alloc(opened.size);
+    if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return null;
+    const parsed = JSON.parse(bytes.toString('utf8')) as unknown;
     if (
       parsed !== null &&
       typeof parsed === 'object' &&
@@ -278,6 +437,7 @@ function readMeta(id: string): Sandbox | null {
       const o = parsed as Record<string, unknown>;
       if (
         typeof o['id'] === 'string' &&
+        o['id'] === id &&
         typeof o['sourceRepo'] === 'string' &&
         typeof o['worktreePath'] === 'string' &&
         typeof o['branch'] === 'string' &&
@@ -292,6 +452,7 @@ function readMeta(id: string): Sandbox | null {
           typeof rawPid === 'number' && Number.isInteger(rawPid) && rawPid > 0
             ? rawPid
             : undefined;
+        const cleanup = parseCleanupEvidence(o['cleanup']);
         return {
           id: o['id'],
           sourceRepo: o['sourceRepo'],
@@ -300,11 +461,14 @@ function readMeta(id: string): Sandbox | null {
           baseHead: o['baseHead'],
           createdAt: o['createdAt'],
           ...(ownerPid !== undefined ? { ownerPid } : {}),
+          ...(cleanup ? { cleanup } : {}),
         };
       }
     }
   } catch {
     // malformed — treat as absent
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
   }
   return null;
 }
@@ -386,33 +550,34 @@ export function createSandbox(
   // and opens no outward capability — it only bounds on-disk worktree growth so a
   // pathological crash/restart loop can never fill the disk. The cap is resolved
   // at call time (env-overridable; conservative default) — see maxSandboxes().
-  const cap = maxSandboxes();
-  if (listSandboxes().length >= cap) {
-    // Reclaim genuine crash leftovers first (stale-guarded — a live sandbox is
-    // skipped). A healthy install with a transient burst self-heals here.
-    sweepOrphanSandboxes({ staleMs: ORPHAN_STALE_MS });
-    if (listSandboxes().length >= cap) {
-      audit({
-        action: 'sandbox:create',
-        repo: sourceRepo,
-        sandboxId: null,
-        summary: `sandbox cap reached (MAX_SANDBOXES=${cap})`,
-        result: 'refused',
-      });
-      throw new Error(`sandbox cap reached (MAX_SANDBOXES=${cap})`);
+  const creationLock = acquireCleanupLock('creation');
+  if (!creationLock) throw new Error('sandbox creation lock unavailable');
+  let id: string;
+  let branch: string;
+  let worktreePath: string;
+  let home: string;
+  try {
+    const cap = maxSandboxes();
+    if (sandboxInventory().totalHomes >= cap) {
+      sweepOrphanSandboxes({ staleMs: ORPHAN_STALE_MS });
+      if (sandboxInventory().totalHomes >= cap) {
+        audit({
+          action: 'sandbox:create', repo: sourceRepo, sandboxId: null,
+          summary: `sandbox cap reached (MAX_SANDBOXES=${cap})`, result: 'refused',
+        });
+        throw new Error(`sandbox cap reached (MAX_SANDBOXES=${cap})`);
+      }
     }
-  }
 
-  // Generate a unique id; the scratch branch contains it.
-  const id = randomBytes(6).toString('hex');
-  const branch = `${BRANCH_PREFIX}${id}`;
-  const worktreePath = worktreePathFor(id);
-
-  // Ensure the per-sandbox home exists (parent of the worktree). The worktree
-  // dir itself must NOT pre-exist — git worktree add creates it.
-  const home = sandboxHome(id);
-  if (!existsSync(home)) {
-    mkdirSync(home, { recursive: true });
+    // Reserve the home while holding the cross-process lock. Inventory counts
+    // the reservation immediately, so another creator cannot pass the same cap.
+    id = randomBytes(6).toString('hex');
+    branch = `${BRANCH_PREFIX}${id}`;
+    worktreePath = worktreePathFor(id);
+    home = sandboxHome(id);
+    mkdirSync(home, { recursive: false, mode: 0o700 });
+  } finally {
+    releaseCleanupLock(creationLock);
   }
 
   // Add the isolated worktree on a NEW scratch branch off baseHead, run IN the
@@ -428,22 +593,13 @@ export function createSandbox(
       baseHead,
     ]);
   } catch (err) {
-    // Best-effort cleanup of the partially-created sandbox home, then audit.
-    // A partial `worktree add` (ref created, then checkout failed) can leave an
-    // orphan scratch branch and/or a dangling worktree registration in the
-    // SOURCE repo. Both are namespaced/harmless, but the sandbox invariant is
-    // "created, used, then discarded — bounded", so we prune them defensively.
-    // Guarded by the BRANCH_PREFIX assertion so we can NEVER `branch -D` a user
-    // branch even if `branch` were somehow corrupted.
-    try {
-      rmSync(home, { recursive: true, force: true });
-    } catch {
-      /* ignore */
-    }
-    gitTry(sourceRepo, ['worktree', 'prune']);
-    if (branch.startsWith(BRANCH_PREFIX)) {
-      gitTry(sourceRepo, ['branch', '-D', branch]);
-    }
+    // A partial add can leave either registration or branch behind. The same
+    // narrowly scoped rollback used for metadata failures verifies all three
+    // postconditions and retains a malformed home if operator recovery is needed.
+    rollbackUnpersistedSandbox({
+      id, sourceRepo, worktreePath, branch, baseHead,
+      createdAt: new Date().toISOString(), ownerPid: process.pid,
+    });
     audit({
       action: 'sandbox:create',
       repo: sourceRepo,
@@ -472,7 +628,12 @@ export function createSandbox(
     ownerPid: process.pid,
   };
 
-  writeMeta(sb);
+  try {
+    writeMeta(sb);
+  } catch (err) {
+    rollbackUnpersistedSandbox(sb);
+    throw err;
+  }
 
   audit({
     action: 'sandbox:create',
@@ -600,8 +761,194 @@ export function sandboxDiff(sb: Sandbox): SandboxDiff {
  * branches. Idempotent — tolerates an already-removed worktree, never throws
  * on a missing dir.
  */
-export function removeSandbox(sb: Sandbox): void {
+function sandboxHomeState(home: string): SandboxCleanupPostcondition {
+  if (!existsSync(home)) return 'absent';
+  try {
+    const stat = lstatSync(home);
+    return stat.isSymbolicLink() || !stat.isDirectory() ? 'unsafe' : 'present';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function registrationState(repo: string, worktreePath: string): SandboxCleanupPostcondition {
+  const raw = gitTry(repo, ['worktree', 'list', '--porcelain']);
+  if (raw === null) return 'unknown';
+  const registered = raw.split('\n')
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => resolve(line.slice('worktree '.length)))
+    .includes(resolve(worktreePath));
+  return registered ? 'present' : 'absent';
+}
+
+function branchState(repo: string, branch: string): SandboxCleanupPostcondition {
+  try {
+    gitRun(repo, ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]);
+    return 'present';
+  } catch (error) {
+    return (error as { status?: unknown }).status === 1 ? 'absent' : 'unknown';
+  }
+}
+
+function worktreeBelongsToRepo(repo: string, worktreePath: string): boolean {
+  if (!existsSync(worktreePath)) return false;
+  const worktreeCommon = gitTry(worktreePath, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  const repoCommon = gitTry(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  return worktreeCommon !== null && repoCommon !== null && resolve(worktreeCommon) === resolve(repoCommon);
+}
+
+function processStartRef(pid: number): string | undefined {
+  try {
+    const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8', timeout: 1_000, maxBuffer: 1_024,
+    });
+    const value = result.status === 0 && typeof result.stdout === 'string' ? result.stdout.trim() : '';
+    return value && value.length <= 128 ? createHash('sha256').update(value).digest('hex') : undefined;
+  } catch { return undefined; }
+}
+
+let ownStartRef: string | undefined;
+function currentStartRef(): string | undefined {
+  ownStartRef ??= processStartRef(process.pid) ?? createHash('sha256')
+    .update(`${process.pid}:${Date.now() - performance.now()}`)
+    .digest('hex');
+  return ownStartRef;
+}
+
+function safelyUnlinkLock(path: string, expected: { dev: number; ino: number }): boolean {
+  try {
+    const current = lstatSync(path);
+    if (current.isSymbolicLink() || !current.isFile() ||
+      current.dev !== expected.dev || current.ino !== expected.ino ||
+      (typeof process.getuid === 'function' && current.uid !== process.getuid())) return false;
+    unlinkSync(path);
+    return true;
+  } catch { return false; }
+}
+
+function cleanupLockOwnerState(
+  path: string,
+  expected: { dev: number; ino: number },
+): 'alive' | 'dead' | 'unknown' {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    if (opened.dev !== expected.dev || opened.ino !== expected.ino || opened.size < 1 || opened.size > 160) {
+      return 'unknown';
+    }
+    const bytes = Buffer.alloc(opened.size);
+    if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return 'unknown';
+    const owner = JSON.parse(bytes.toString('utf8')) as { pid?: unknown; startRef?: unknown };
+    if (!Number.isInteger(owner.pid) || Number(owner.pid) < 1 ||
+      typeof owner.startRef !== 'string' || !/^[a-f0-9]{64}$/.test(owner.startRef)) return 'unknown';
+    const pid = Number(owner.pid);
+    try { process.kill(pid, 0); }
+    catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH' ? 'dead' : 'alive'; }
+    const observed = pid === process.pid ? currentStartRef() : processStartRef(pid);
+    if (observed && observed !== owner.startRef) {
+      const confirmed = processStartRef(pid);
+      if (confirmed && confirmed !== owner.startRef) return 'dead';
+    }
+    return 'alive';
+  } catch { return 'unknown'; }
+  finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } } }
+}
+
+function acquireCleanupLock(id: string): { fd: number; path: string } | null {
+  const root = sandboxesDir();
+  const dir = join(root, '.cleanup-locks');
+  try {
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    for (const candidate of [root, dir]) {
+      const stat = lstatSync(candidate);
+      if (stat.isSymbolicLink() || !stat.isDirectory() ||
+        (typeof process.getuid === 'function' && stat.uid !== process.getuid())) return null;
+      chmodSync(candidate, 0o700);
+    }
+  } catch { return null; }
+  const path = join(dir, `${id}.lock`);
+  const deadline = performance.now() + CLEANUP_LOCK_WAIT_MS;
+  let unknown: { dev: number; ino: number; seenAt: number } | undefined;
+  let attempt = 0;
+  while (true) {
+    try {
+      const fd = openSync(
+        path,
+        fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+        0o600,
+      );
+      const stat = fstatSync(fd);
+      if (!stat.isFile()) { closeSync(fd); return null; }
+      const startRef = currentStartRef();
+      if (!startRef) { closeSync(fd); safelyUnlinkLock(path, stat); return null; }
+      try {
+        const owner = Buffer.from(`${JSON.stringify({ pid: process.pid, startRef })}\n`, 'utf8');
+        if (writeSync(fd, owner) !== owner.length) throw new Error('short cleanup lock write');
+        fchmodSync(fd, 0o600);
+        fsyncSync(fd);
+      } catch {
+        try { closeSync(fd); } catch { /* best effort */ }
+        safelyUnlinkLock(path, stat);
+        return null;
+      }
+      return { fd, path };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return null;
+      try {
+        const stat = lstatSync(path);
+        if (stat.isSymbolicLink() || !stat.isFile()) return null;
+        const state = cleanupLockOwnerState(path, stat);
+        const now = performance.now();
+        if (state === 'dead') {
+          if (!safelyUnlinkLock(path, stat)) return null;
+          unknown = undefined;
+          continue;
+        }
+        if (state === 'unknown') {
+          if (!unknown || unknown.dev !== stat.dev || unknown.ino !== stat.ino) {
+            unknown = { dev: stat.dev, ino: stat.ino, seenAt: now };
+          }
+          if (now - unknown.seenAt >= CLEANUP_LOCK_INIT_MS) {
+            if (!safelyUnlinkLock(path, stat)) return null;
+            unknown = undefined;
+            continue;
+          }
+        } else {
+          unknown = undefined;
+        }
+      } catch { /* pathname changed; retry within the monotonic deadline */ }
+      if (performance.now() >= deadline) return null;
+      const remaining = deadline - performance.now();
+      Atomics.wait(cleanupLockSleep, 0, 0, Math.min(remaining, 10 + (attempt % 7) * 5));
+      attempt += 1;
+    }
+  }
+}
+
+function releaseCleanupLock(lock: { fd: number; path: string } | null | undefined): void {
+  if (!lock) return;
+  let snapshot: { dev: number; ino: number } | undefined;
+  try { const stat = fstatSync(lock.fd); snapshot = { dev: stat.dev, ino: stat.ino }; } catch { /* best effort */ }
+  try { closeSync(lock.fd); } catch { /* best effort */ }
+  if (snapshot) safelyUnlinkLock(lock.path, snapshot);
+}
+
+function persistCleanupEvidence(sb: Sandbox, evidence: SandboxCleanupEvidence): boolean {
+  try {
+    const canonical = readMeta(sb.id);
+    if (!canonical || sandboxHomeState(sandboxHome(sb.id)) !== 'present') return false;
+    const { ownerPid: _ownerPid, ...rest } = canonical;
+    writeMeta({ ...rest, cleanup: evidence });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function removeSandbox(sb: Sandbox): SandboxCleanupResult {
   const home = sandboxHome(sb.id);
+  const attempt = Math.min(1_000, (sb.cleanup?.attempt ?? 0) + 1);
 
   // ---- Defense-in-depth: NEVER trust on-disk metadata to drive a destructive
   // git op. Metadata can be tampered/corrupted/future-format, so before ANY
@@ -609,9 +956,8 @@ export function removeSandbox(sb: Sandbox): void {
   // sandbox id, (b) require the stored values to match those safe values, and
   // (c) require the branch to be inside our namespace and the worktree path to
   // be contained under sandboxesDir(). A trip on any guard refuses the git ops
-  // (audited result:'refused') and falls through to local-dir cleanup only —
-  // we still rmSync the sandbox home, but we NEVER run `branch -D` / `worktree
-  // remove` against an arbitrary branch/path in an arbitrary repo.
+  // (audited result:'refused') and preserves the recovery home. We NEVER run
+  // `branch -D` / `worktree remove` against an arbitrary branch/path/repo.
   const safeBranch = `${BRANCH_PREFIX}${sb.id}`;
   const safeWorktree = worktreePathFor(sb.id);
   const sandboxesRoot = sandboxesDir() + sep;
@@ -622,24 +968,77 @@ export function removeSandbox(sb: Sandbox): void {
     resolve(sb.worktreePath).startsWith(sandboxesRoot) &&
     resolve(sb.worktreePath) === resolve(safeWorktree);
 
-  const guardsPass = branchInNamespace && branchMatches && worktreeContained;
+  const rootState = sandboxHomeState(sandboxesDir());
+  const homeBefore = sandboxHomeState(home);
+  const canonical = homeBefore === 'present' ? readMeta(sb.id) : null;
+  const canonicalMatches = (
+    canonical !== null &&
+    canonical.id === sb.id &&
+    canonical.sourceRepo === sb.sourceRepo &&
+    canonical.worktreePath === sb.worktreePath &&
+    canonical.branch === sb.branch &&
+    canonical.baseHead === sb.baseHead
+  );
+  const worktreeSymlink = (() => {
+    try { return lstatSync(safeWorktree).isSymbolicLink(); }
+    catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? false : true; }
+  })();
+  const sourceRepoAvailable = isRepo(sb.sourceRepo);
+  const registrationBefore = sourceRepoAvailable ? registrationState(sb.sourceRepo, safeWorktree) : 'unknown';
+  const branchBefore = sourceRepoAvailable ? branchState(sb.sourceRepo, safeBranch) : 'unknown';
+  const repoAuthority = existsSync(safeWorktree)
+    ? worktreeBelongsToRepo(sb.sourceRepo, safeWorktree)
+    : registrationBefore === 'present';
+  const guardsPass = branchInNamespace && branchMatches && worktreeContained &&
+    rootState === 'present' && homeBefore === 'present' && canonicalMatches &&
+    !worktreeSymlink && (!sourceRepoAvailable || repoAuthority);
+  const lock = guardsPass ? acquireCleanupLock(sb.id) : undefined;
+  let result: SandboxCleanupResult;
 
-  if (!guardsPass) {
-    audit({
-      action: 'sandbox:remove',
-      repo: sb.sourceRepo,
-      sandboxId: sb.id,
-      summary:
-        'refused git cleanup: metadata failed branch-prefix/containment guard',
-      result: 'refused',
-    });
-  }
+  if (homeBefore === 'absent' && branchInNamespace && branchMatches && worktreeContained &&
+    rootState === 'present' && sourceRepoAvailable &&
+    registrationBefore === 'absent' && branchBefore === 'absent') {
+    result = {
+      status: 'complete',
+      postconditions: { registration: registrationBefore, branch: branchBefore, home: 'absent' },
+      failureClasses: [],
+      retryable: false,
+      attempt,
+      evidencePersisted: false,
+    };
+  } else if (!guardsPass) {
+    result = {
+      status: 'refused',
+      postconditions: { registration: 'unknown', branch: 'unknown', home: homeBefore },
+      failureClasses: ['unsafe-metadata'],
+      retryable: false,
+      attempt,
+      evidencePersisted: false,
+    };
+  } else if (lock === null) {
+    result = {
+      status: 'unavailable',
+      postconditions: { registration: 'unknown', branch: 'unknown', home: homeBefore },
+      failureClasses: ['cleanup-locked'],
+      retryable: true,
+      attempt,
+      evidencePersisted: false,
+    };
+  } else if (!sourceRepoAvailable) {
+    result = {
+      status: 'unavailable',
+      postconditions: { registration: 'unknown', branch: 'unknown', home: homeBefore },
+      failureClasses: ['source-repo-unavailable'],
+      retryable: true,
+      attempt,
+      evidencePersisted: false,
+    };
+  } else {
 
   // 1. Remove the worktree registration from the source repo (best-effort).
   //    --force handles a dirty / committed-in worktree. Only attempted when the
   //    source repo still exists as a git repo AND the guards passed. We target
   //    the RE-DERIVED safe values, not the raw metadata.
-  if (guardsPass && isRepo(sb.sourceRepo)) {
     // `git worktree remove` also deletes the worktree directory. If the dir is
     // already gone, prune first so git's bookkeeping is consistent, then ignore.
     gitTry(sb.sourceRepo, ['worktree', 'remove', '--force', safeWorktree]);
@@ -648,25 +1047,77 @@ export function removeSandbox(sb: Sandbox): void {
     // 2. Delete the scratch branch (a sandbox-only ref — never a user branch).
     //    safeBranch is guaranteed to start with BRANCH_PREFIX.
     gitTry(sb.sourceRepo, ['branch', '-D', safeBranch]);
+    const registration = registrationState(sb.sourceRepo, safeWorktree);
+    const branch = branchState(sb.sourceRepo, safeBranch);
+    const failureClasses: SandboxCleanupFailureClass[] = [];
+    if (registration === 'present') failureClasses.push('worktree-remaining');
+    if (branch === 'present') failureClasses.push('branch-remaining');
+    if (registration === 'unknown' || branch === 'unknown') failureClasses.push('postcondition-unavailable');
+
+    if (registration === 'absent' && branch === 'absent') {
+      try { rmSync(home, { recursive: true, force: true }); } catch { /* verified below */ }
+    }
+    const homeAfter = sandboxHomeState(home);
+    if (homeAfter !== 'absent') failureClasses.push('home-remove-failed');
+    const complete = registration === 'absent' && branch === 'absent' && homeAfter === 'absent';
+    const retryable = !complete && (registration !== 'absent' || existsSync(safeWorktree));
+    result = {
+      status: complete ? 'complete' : (registration === 'unknown' || branch === 'unknown' ? 'unavailable' : 'residual'),
+      postconditions: { registration, branch, home: homeAfter },
+      failureClasses: [...new Set(failureClasses)],
+      retryable,
+      attempt,
+      evidencePersisted: false,
+    };
   }
 
-  // 3. Clean up the per-sandbox home (worktree leftovers + metadata).
-  //    rmSync with force never throws on a missing path.
-  try {
-    rmSync(home, { recursive: true, force: true });
-  } catch {
-    // already gone / unremovable — idempotent cleanup, never throw
+  if (
+    result.status !== 'complete' &&
+    !result.failureClasses.includes('cleanup-locked') &&
+    !result.failureClasses.includes('unsafe-metadata')
+  ) {
+    const evidence: SandboxCleanupEvidence = {
+      schemaVersion: 1,
+      attemptedAt: new Date().toISOString(),
+      attempt,
+      status: result.status,
+      postconditions: result.postconditions,
+      failureClasses: result.failureClasses,
+      retryable: result.retryable,
+    };
+    result.evidencePersisted = persistCleanupEvidence(sb, evidence);
   }
 
   audit({
     action: 'sandbox:remove',
     repo: sb.sourceRepo,
     sandboxId: sb.id,
-    summary: guardsPass
-      ? `removed worktree + branch ${safeBranch}`
-      : `local cleanup only (git ops refused) for ${sb.id}`,
-    result: 'ok',
+    summary: result.status === 'complete'
+      ? `removed worktree + branch ${safeBranch}; postconditions verified`
+      : result.status === 'refused'
+        ? 'refused git cleanup: metadata failed branch-prefix/containment guard'
+        : `cleanup status=${result.status} failures=${result.failureClasses.join(',') || 'none'}`,
+    result: result.status === 'complete' ? 'ok' : result.status === 'refused' ? 'refused' : 'error',
   });
+  releaseCleanupLock(lock);
+  return result;
+}
+
+export function sandboxInventory(): SandboxInventory {
+  const root = sandboxesDir();
+  const inventory: SandboxInventory = { totalHomes: 0, validHomes: 0, malformedHomes: 0, unsafeEntries: 0 };
+  if (!existsSync(root)) return inventory;
+  try {
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (entry.name === '.cleanup-locks') continue;
+      if (entry.name.startsWith('.')) { inventory.unsafeEntries += 1; continue; }
+      if (!entry.isDirectory()) { inventory.unsafeEntries += 1; continue; }
+      inventory.totalHomes += 1;
+      if (readMeta(entry.name)) inventory.validHomes += 1;
+      else inventory.malformedHomes += 1;
+    }
+  } catch { inventory.unsafeEntries += 1; }
+  return inventory;
 }
 
 // ---------------------------------------------------------------------------
@@ -751,18 +1202,20 @@ export function listSandboxes(): Sandbox[] {
  * ORPHAN_STALE_MS), the disk-cap pre-sweep above, and `ashlr sandbox gc` — every
  * caller passes a staleMs and is additionally protected by the age-independent
  * ownerAlive() guard, so no LIVE worktree is ever force-removed. Idempotent
- * and never throws — a removal failure on one id is swallowed so the sweep always
- * makes maximal progress. Returns the ids it swept so a caller / test can assert
- * what was reclaimed.
+ * and never throws — an unexpected removal exception is recorded so callers
+ * cannot report a false-green sweep while cleanup continues for other ids.
  *
  * @param opts.staleMs Optional age guard (ms). Skip any sandbox whose `createdAt`
  *   is younger than this — a conservative liveness proxy so a concurrently-live
  *   sandbox is never force-removed. Omit to sweep all listed sandboxes.
  */
-export function sweepOrphanSandboxes(opts?: { staleMs?: number }): string[] {
+export function sweepOrphanSandboxesDetailed(opts?: { staleMs?: number }): SandboxSweepResult {
   const staleMs = opts?.staleMs;
   const now = Date.now();
-  const swept: string[] = [];
+  const result: SandboxSweepResult = {
+    completed: [], residual: [], refused: [], unavailable: [],
+    inventory: sandboxInventory(), unexpectedErrors: [],
+  };
   for (const sb of listSandboxes()) {
     // GUARD 1 — POSITIVE liveness (age-independent): never reclaim a worktree
     // whose owning process is still alive, even if it is older than staleMs.
@@ -785,14 +1238,19 @@ export function sweepOrphanSandboxes(opts?: { staleMs?: number }): string[] {
       }
     }
     try {
-      removeSandbox(sb);
-      swept.push(sb.id);
+      const cleanup = removeSandbox(sb);
+      result[cleanup.status === 'complete' ? 'completed' : cleanup.status].push(sb.id);
     } catch {
       // removeSandbox is already best-effort/idempotent and should not throw;
       // guard anyway so one bad entry never aborts the whole restart sweep.
+      result.unexpectedErrors.push(sb.id);
     }
   }
-  return swept;
+  return result;
+}
+
+export function sweepOrphanSandboxes(opts?: { staleMs?: number }): string[] {
+  return sweepOrphanSandboxesDetailed(opts).completed;
 }
 
 // ---------------------------------------------------------------------------
@@ -823,14 +1281,17 @@ export function sweepOrphanSandboxes(opts?: { staleMs?: number }): string[] {
  *
  * LOCAL-ONLY by construction: adds NO outward capability (inward cleanup only —
  * removes only ashlr/sandbox/* worktrees + scratch refs), weakens NO guard.
- * Idempotent; never throws — a failure on one id is swallowed so the sweep makes
- * maximal progress. Returns the ids it reclaimed.
+ * Idempotent; never throws — unexpected failures are surfaced in the detailed
+ * result while the sweep continues making progress on other ids.
  *
  * @param repo The source repo whose sandboxes to reclaim (resolved internally).
  */
-export function sweepRepoSandboxes(repo: string): string[] {
+export function sweepRepoSandboxesDetailed(repo: string): SandboxSweepResult {
   const target = resolve(repo);
-  const swept: string[] = [];
+  const result: SandboxSweepResult = {
+    completed: [], residual: [], refused: [], unavailable: [],
+    inventory: sandboxInventory(), unexpectedErrors: [],
+  };
   for (const sb of listSandboxes()) {
     // SCOPE: only this repo's sandboxes.
     if (resolve(sb.sourceRepo) !== target) {
@@ -845,12 +1306,17 @@ export function sweepRepoSandboxes(repo: string): string[] {
       continue;
     }
     try {
-      removeSandbox(sb);
-      swept.push(sb.id);
+      const cleanup = removeSandbox(sb);
+      result[cleanup.status === 'complete' ? 'completed' : cleanup.status].push(sb.id);
     } catch {
       // removeSandbox is best-effort/idempotent; guard so one bad entry never
       // aborts the whole scoped sweep.
+      result.unexpectedErrors.push(sb.id);
     }
   }
-  return swept;
+  return result;
+}
+
+export function sweepRepoSandboxes(repo: string): string[] {
+  return sweepRepoSandboxesDetailed(repo).completed;
 }

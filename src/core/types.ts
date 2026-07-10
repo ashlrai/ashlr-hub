@@ -3328,6 +3328,59 @@ export interface Sandbox {
    * staleMs guard governs reclaim instead.
    */
   ownerPid?: number;
+  /** Last bounded cleanup attempt retained only while recovery is incomplete. */
+  cleanup?: SandboxCleanupEvidence;
+}
+
+export type SandboxCleanupPostcondition = 'absent' | 'present' | 'unknown' | 'unsafe';
+export type SandboxCleanupFailureClass =
+  | 'cleanup-locked'
+  | 'unsafe-metadata'
+  | 'source-repo-unavailable'
+  | 'worktree-remaining'
+  | 'branch-remaining'
+  | 'postcondition-unavailable'
+  | 'home-remove-failed';
+
+export interface SandboxCleanupEvidence {
+  schemaVersion: 1;
+  attemptedAt: string;
+  attempt: number;
+  status: 'residual' | 'refused' | 'unavailable';
+  postconditions: {
+    registration: SandboxCleanupPostcondition;
+    branch: SandboxCleanupPostcondition;
+    home: SandboxCleanupPostcondition;
+  };
+  failureClasses: SandboxCleanupFailureClass[];
+  retryable: boolean;
+}
+
+export interface SandboxCleanupResult {
+  status: 'complete' | 'residual' | 'refused' | 'unavailable';
+  postconditions: SandboxCleanupEvidence['postconditions'];
+  failureClasses: SandboxCleanupFailureClass[];
+  retryable: boolean;
+  attempt: number;
+  evidencePersisted: boolean;
+}
+
+export interface SandboxInventory {
+  totalHomes: number;
+  validHomes: number;
+  malformedHomes: number;
+  unsafeEntries: number;
+}
+
+export interface SandboxSweepResult {
+  completed: string[];
+  residual: string[];
+  refused: string[];
+  unavailable: string[];
+  /** Raw on-disk state, including homes that could not be safely classified. */
+  inventory: SandboxInventory;
+  /** Valid sandbox ids whose cleanup unexpectedly threw. */
+  unexpectedErrors: string[];
 }
 
 /**

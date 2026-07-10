@@ -191,18 +191,16 @@ describe('H4 · CONTAINMENT · removeSandbox re-derives safe values', () => {
     expect(rec?.summary).toContain(`removed worktree + branch ${sb.branch}`);
   });
 
-  it('7.3 a refusal still does LOCAL dir cleanup (rmSync home) and audits "refused"', () => {
+  it('7.3 a refusal preserves its recovery home and audits "refused"', () => {
     const sb = createSandbox(repo.dir, { allowAnyRepo: true });
     const home = join(sandboxesDir(), sb.id);
     expect(existsSync(home)).toBe(true);
 
-    // Trip a guard (non-namespaced branch). removeSandbox must STILL rmSync the
-    // home (local cleanup is unconditional) while refusing the git ops.
+    // Trip a guard (non-namespaced branch). The recovery home must survive.
     const tampered: Sandbox = { ...sb, branch: 'feature/not-ours' };
     removeSandbox(tampered);
 
-    // Local home cleaned up despite the refusal.
-    expect(existsSync(home)).toBe(false);
+    expect(existsSync(home)).toBe(true);
 
     // Audited as refused with the containment-guard summary. (removeSandbox
     // emits one 'refused' record then a final 'ok' for the local cleanup; the
@@ -255,8 +253,7 @@ describe('H4 · CONTAINMENT · each guard fails in isolation', () => {
     const refused = refusedRemoveAudit(sb.id);
     expect(refused?.summary).toMatch(/branch-prefix\/containment guard/);
 
-    // Local home still cleaned up.
-    expect(existsSync(join(sandboxesDir(), sb.id))).toBe(false);
+    expect(existsSync(join(sandboxesDir(), sb.id))).toBe(true);
 
     // Reclaim the genuine scratch ref the refusal deliberately left behind.
     removeSandbox(sb);
@@ -290,7 +287,7 @@ describe('H4 · CONTAINMENT · each guard fails in isolation', () => {
 
     const refused = refusedRemoveAudit(sb.id);
     expect(refused?.summary).toMatch(/branch-prefix\/containment guard/);
-    expect(existsSync(join(sandboxesDir(), sb.id))).toBe(false);
+    expect(existsSync(join(sandboxesDir(), sb.id))).toBe(true);
 
     // Reclaim the genuine ref + the decoy for hygiene.
     removeSandbox(sb);
@@ -322,7 +319,7 @@ describe('H4 · CONTAINMENT · each guard fails in isolation', () => {
 
     const refused = refusedRemoveAudit(sb.id);
     expect(refused?.summary).toMatch(/branch-prefix\/containment guard/);
-    expect(existsSync(join(sandboxesDir(), sb.id))).toBe(false);
+    expect(existsSync(join(sandboxesDir(), sb.id))).toBe(true);
 
     removeSandbox(sb);
     expect(repo.branches()).not.toContain(genuineScratch);
@@ -467,20 +464,12 @@ describe('H4 · CONTAINMENT · robustness', () => {
     const refused = refusedRemoveAudit(sb.id);
     expect(refused?.summary).toMatch(/branch-prefix\/containment guard/);
 
-    // FINDING (surfaced, not silently fixed): the containment guard uses
-    // path.resolve(), which is PURELY LEXICAL — it normalizes `.`/`..` but does
-    // NOT follow symlinks (realpathSync would). The escape above is caught
-    // because the tampered worktreePath STRING is itself outside sandboxesDir().
-    // But a symlink placed AT the honest in-namespace path (e.g.
-    // <sandboxesDir>/<id>/worktree → /etc) would have a CONTAINED lexical path
-    // and resolve() would NOT catch it. The remaining (and sufficient) defense
-    // in that case is that git ops target the RE-DERIVED safeWorktree path and
-    // `git worktree remove` only removes a path it tracks as a registered
-    // worktree. We pin BOTH facts:
-    //   (i)  resolve() is lexical-only (≠ realpath), and
-    //   (ii) git ops never use the raw tampered worktreePath — only safeWorktree.
+    // resolve() remains lexical-only, but cleanup now also lstat-refuses a
+    // symlink installed at the canonical path. Git ops still use only the
+    // re-derived safeWorktree, never the caller-controlled raw path.
     expect(resolve(link)).not.toBe(resolve(escapeTarget)); // resolve() ≠ realpath
     const src = worktreeSource();
+    expect(src).toContain('lstatSync(safeWorktree).isSymbolicLink()');
     expect(src).toContain("'remove', '--force', safeWorktree");
     expect(src).not.toMatch(/'remove',\s*'--force',\s*sb\.worktreePath/);
 

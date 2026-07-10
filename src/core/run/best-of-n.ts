@@ -451,6 +451,7 @@ export async function runBestOfN(
     }
 
     const t0 = Date.now();
+    let ownedSandbox: Sandbox | undefined;
     try {
       const observeExecutedCandidate = (state: RunState, proposalOutcome?: RunProposalOutcome): void => {
         const actionCounts = state.runEventSummary?.actionCounts;
@@ -525,6 +526,7 @@ export async function runBestOfN(
           sb = createSandbox(sourceRepo, {
             allowAnyRepo: process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1',
           });
+          ownedSandbox = sb;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           return {
@@ -628,6 +630,7 @@ export async function runBestOfN(
         ...base,
         latencyMs: Date.now() - t0,
         error: err instanceof Error ? err.message : String(err),
+        ...(ownedSandbox ? { sandbox: ownedSandbox } : {}),
       };
     }
   });

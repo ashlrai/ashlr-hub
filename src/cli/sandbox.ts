@@ -18,7 +18,13 @@
  */
 
 import { pad, makeColors, isTty } from './ui.js';
-import type { Sandbox, SandboxDiff } from '../core/types.js';
+import type {
+  Sandbox,
+  SandboxCleanupResult,
+  SandboxDiff,
+  SandboxInventory,
+  SandboxSweepResult,
+} from '../core/types.js';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers (non-TTY safe)
@@ -32,14 +38,18 @@ const { bold, dim, red, green, yellow, cyan, gray } = makeColors(isTty());
 
 type ListSandboxesFn = () => Sandbox[];
 type SandboxDiffFn   = (sb: Sandbox) => SandboxDiff;
-type RemoveSandboxFn = (sb: Sandbox) => void;
+type RemoveSandboxFn = (sb: Sandbox) => SandboxCleanupResult;
+type SandboxInventoryFn = () => SandboxInventory;
 // H5 CHANGE 1 — explicit human repair surface for the orphan sweep.
 type SweepOrphanSandboxesFn = (opts?: { staleMs?: number }) => string[];
+type SweepOrphanSandboxesDetailedFn = (opts?: { staleMs?: number }) => SandboxSweepResult;
 
 let _listSandboxes: ListSandboxesFn | null | undefined = undefined;
 let _sandboxDiff:   SandboxDiffFn   | null | undefined = undefined;
 let _removeSandbox: RemoveSandboxFn | null | undefined = undefined;
+let _sandboxInventory: SandboxInventoryFn | null | undefined = undefined;
 let _sweepOrphans:  SweepOrphanSandboxesFn | null | undefined = undefined;
+let _sweepOrphansDetailed: SweepOrphanSandboxesDetailedFn | null | undefined = undefined;
 // H5 CHANGE 1 — reuse worktree's single-source-of-truth staleness threshold so
 // `sandbox gc` and the daemon-start sweep can NEVER drift apart.
 let _orphanStaleMs: number | null | undefined = undefined;
@@ -48,7 +58,9 @@ async function loadWorktree(): Promise<{
   listSandboxes: ListSandboxesFn;
   sandboxDiff:   SandboxDiffFn;
   removeSandbox: RemoveSandboxFn;
+  sandboxInventory: SandboxInventoryFn;
   sweepOrphanSandboxes: SweepOrphanSandboxesFn;
+  sweepOrphanSandboxesDetailed: SweepOrphanSandboxesDetailedFn;
   orphanStaleMs: number;
 } | null> {
   if (_listSandboxes === undefined) {
@@ -57,19 +69,25 @@ async function loadWorktree(): Promise<{
         listSandboxes: ListSandboxesFn;
         sandboxDiff:   SandboxDiffFn;
         removeSandbox: RemoveSandboxFn;
+        sandboxInventory: SandboxInventoryFn;
         sweepOrphanSandboxes: SweepOrphanSandboxesFn;
+        sweepOrphanSandboxesDetailed: SweepOrphanSandboxesDetailedFn;
         ORPHAN_STALE_MS: number;
       };
       _listSandboxes = mod.listSandboxes;
       _sandboxDiff   = mod.sandboxDiff;
       _removeSandbox = mod.removeSandbox;
+      _sandboxInventory = mod.sandboxInventory;
       _sweepOrphans  = mod.sweepOrphanSandboxes;
+      _sweepOrphansDetailed = mod.sweepOrphanSandboxesDetailed;
       _orphanStaleMs = mod.ORPHAN_STALE_MS;
     } catch {
       _listSandboxes = null;
       _sandboxDiff   = null;
       _removeSandbox = null;
+      _sandboxInventory = null;
       _sweepOrphans  = null;
+      _sweepOrphansDetailed = null;
       _orphanStaleMs = null;
     }
   }
@@ -78,7 +96,9 @@ async function loadWorktree(): Promise<{
     listSandboxes: _listSandboxes!,
     sandboxDiff:   _sandboxDiff!,
     removeSandbox: _removeSandbox!,
+    sandboxInventory: _sandboxInventory!,
     sweepOrphanSandboxes: _sweepOrphans!,
+    sweepOrphanSandboxesDetailed: _sweepOrphansDetailed!,
     orphanStaleMs: _orphanStaleMs!,
   };
 }
@@ -192,6 +212,12 @@ export async function cmdSandbox(args: string[]): Promise<number> {
     if (!wt) { moduleNotBuilt('sandbox list'); return 1; }
     const sandboxes = wt.listSandboxes();
     printSandboxList(sandboxes);
+    const inventory = wt.sandboxInventory();
+    if (inventory.malformedHomes > 0 || inventory.unsafeEntries > 0) {
+      console.error(yellow('warning: ') +
+        `${inventory.malformedHomes} malformed sandbox home(s), ` +
+        `${inventory.unsafeEntries} unsafe entry/entries require operator inspection.`);
+    }
     return 0;
   }
 
@@ -246,9 +272,15 @@ export async function cmdSandbox(args: string[]): Promise<number> {
       return 1;
     }
     try {
-      wt.removeSandbox(sb);
-      console.log(green('✓') + ` Sandbox ${cyan(id)} removed.`);
-      return 0;
+      const cleanup = wt.removeSandbox(sb);
+      if (cleanup.status === 'complete') {
+        console.log(green('✓') + ` Sandbox ${cyan(id)} removed.`);
+        return 0;
+      }
+      console.error(red('error: ') + (cleanup.retryable
+        ? `Sandbox cleanup ${cleanup.status}; retry with \`ashlr sandbox cleanup ${id}\`.`
+        : `Sandbox cleanup ${cleanup.status}; metadata requires operator inspection.`));
+      return 1;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(red('error: ') + msg);
@@ -260,21 +292,32 @@ export async function cmdSandbox(args: string[]): Promise<number> {
     // H5 CHANGE 1 — explicit human repair surface for the orphan sweep.
     // Sweeps STALE orphan sandboxes (crash leftovers) via the reclaim primitive,
     // which inherits removeSandbox's containment guards verbatim (a tampered/out-
-    // of-namespace entry is refused git ops and falls through to local-dir cleanup
-    // only). Conservative staleMs (worktree's exported ORPHAN_STALE_MS, > max swarm
+    // of-namespace entry is refused and retained for operator recovery).
+    // Conservative staleMs (worktree's exported ORPHAN_STALE_MS, > max swarm
     // wall-clock) so a LIVE in-flight worktree is NEVER reclaimed. Inward cleanup
     // only; pushes nothing, opens no PR, applies no proposal.
     const wt = await loadWorktree();
     if (!wt) { moduleNotBuilt('sandbox gc'); return 1; }
     try {
-      const swept = wt.sweepOrphanSandboxes({ staleMs: wt.orphanStaleMs });
-      if (swept.length === 0) {
+      const sweep = wt.sweepOrphanSandboxesDetailed({ staleMs: wt.orphanStaleMs });
+      const unclassified = sweep.inventory.malformedHomes + sweep.inventory.unsafeEntries;
+      const failed = sweep.residual.length + sweep.refused.length + sweep.unavailable.length +
+        sweep.unexpectedErrors.length + unclassified;
+      if (sweep.completed.length === 0 && failed === 0) {
         console.log(dim('No stale orphan sandboxes to reclaim.'));
       } else {
-        console.log(green('✓') + ` Reclaimed ${cyan(String(swept.length))} stale orphan sandbox(es).`);
-        for (const id of swept) console.log(`    ${cyan('•')} ${id}`);
+        if (sweep.completed.length > 0) {
+          console.log(green('✓') + ` Reclaimed ${cyan(String(sweep.completed.length))} stale orphan sandbox(es).`);
+          for (const id of sweep.completed) console.log(`    ${cyan('•')} ${id}`);
+        }
+        if (failed > 0) {
+          console.error(yellow('warning: ') + `${failed} stale sandbox cleanup(s) remain incomplete.`);
+          if (unclassified > 0) {
+            console.error(yellow('warning: ') + `${unclassified} sandbox filesystem entry(s) require operator inspection.`);
+          }
+        }
       }
-      return 0;
+      return failed > 0 ? 1 : 0;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(red('error: ') + msg);

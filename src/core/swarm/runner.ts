@@ -52,6 +52,7 @@ import type {
   EscalationEvent,
   EscalationReasonKind,
   Sandbox,
+  SandboxCleanupResult,
   SandboxDiff,
   DelegationScope,
 } from '../types.js';
@@ -129,7 +130,7 @@ async function loadM17(): Promise<void> {
 
 type CreateSandboxFn = (sourceRepo: string, opts?: { allowAnyRepo?: boolean }) => Sandbox;
 type SandboxDiffFn   = (sb: Sandbox) => SandboxDiff;
-type RemoveSandboxFn = (sb: Sandbox) => void;
+type RemoveSandboxFn = (sb: Sandbox) => SandboxCleanupResult | void;
 type AuditFn         = (entry: Omit<import('../types.js').AuditEntry, 'ts'>) => void;
 // M24: lazy proposal sink — when opts.propose is set the captured sandbox diff
 // is recorded as a PENDING inbox proposal (applied LATER only by a human).
@@ -1204,15 +1205,21 @@ function captureSandboxAndCleanup(
   // Always remove sandbox (worktree + scratch branch). Never touches source tree.
   if (_removeSandbox !== null) {
     try {
-      _removeSandbox(sb);
-      emitLog(sink, `[M21] Sandbox ${sb.id} removed`);
+      const cleanup = _removeSandbox(sb);
+      const cleanupComplete = cleanup?.status === 'complete';
+      const cleanupStatus = cleanup?.status ?? 'unavailable';
+      emitLog(sink, cleanupComplete
+        ? `[M21] Sandbox ${sb.id} removed`
+        : `[M21] Sandbox cleanup ${cleanupStatus}; recovery status unavailable`);
       try {
         _audit?.({
           action: 'sandbox:remove',
           repo: sb.sourceRepo,
           sandboxId: sb.id,
-          summary: `Swarm ${run.id} sandbox removed`,
-          result: 'ok',
+          summary: cleanupComplete
+            ? `Swarm ${run.id} sandbox removed`
+            : `Swarm sandbox cleanup ${cleanupStatus}`,
+          result: cleanupComplete ? 'ok' : 'error',
         });
       } catch { /* audit best-effort */ }
     } catch (err) {
@@ -1434,51 +1441,6 @@ export async function runSwarm(
     return aborted;
   };
 
-  if (opts.sandbox === true && project !== null && _createSandbox !== null) {
-    try {
-      activeSandbox = _createSandbox(project);
-      sandboxCwd = activeSandbox.worktreePath;
-      emitLog(sink, `[M21] Sandbox created: ${activeSandbox.id} at ${sandboxCwd}`);
-      try {
-        _audit?.({
-          action: 'sandbox:create',
-          repo: project,
-          sandboxId: activeSandbox.id,
-          summary: `Sandbox created for goal: ${input.goal.slice(0, 120)}`,
-          result: 'ok',
-        });
-      } catch { /* audit is best-effort */ }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // M24: when the sandbox is MANDATORY, a creation failure aborts the run —
-      // NEVER fall back to the user's working tree.
-      if (requireSandbox) {
-        return abortNoSandbox(`createSandbox failed: ${msg}`);
-      }
-      // Legacy (non-strict) behavior: fall back to non-sandbox mode rather than
-      // crashing the swarm. Log the failure and proceed with source tree.
-      emitLog(sink, `[M21] Sandbox creation failed (running without sandbox): ${msg}`);
-      try {
-        _audit?.({
-          action: 'sandbox:create',
-          repo: project,
-          sandboxId: null,
-          summary: `Sandbox creation failed: ${msg.slice(0, 120)}`,
-          result: 'error',
-        });
-      } catch { /* audit is best-effort */ }
-      activeSandbox = null;
-      sandboxCwd = null;
-    }
-  } else if (requireSandbox) {
-    // Sandbox demanded but a precondition is missing: no project to sandbox, or
-    // the worktree module is absent. Abort — do NOT run against run.project.
-    if (project === null) {
-      return abortNoSandbox('no project specified for a mandatory sandbox');
-    }
-    return abortNoSandbox('sandbox worktree module unavailable');
-  }
-
   // -------------------------------------------------------------------------
   // M19: Spend governance check (advisory; block only when govAction==='block').
   // Read --over-budget as an extended property (same pattern as noCapture).
@@ -1668,6 +1630,43 @@ export async function runSwarm(
     touch(run);
     emitLog(sink, run.result);
     return run;
+  }
+
+  // Acquire the sandbox only once the run will execute. Governance, resume,
+  // background, planning-failure, and dry-run exits above create no worktree.
+  if (opts.sandbox === true && project !== null && _createSandbox !== null) {
+    try {
+      activeSandbox = _createSandbox(project);
+      sandboxCwd = activeSandbox.worktreePath;
+      emitLog(sink, `[M21] Sandbox created: ${activeSandbox.id} at ${sandboxCwd}`);
+      try {
+        _audit?.({
+          action: 'sandbox:create',
+          repo: project,
+          sandboxId: activeSandbox.id,
+          summary: `Sandbox created for goal: ${input.goal.slice(0, 120)}`,
+          result: 'ok',
+        });
+      } catch { /* audit is best-effort */ }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (requireSandbox) return abortNoSandbox(`createSandbox failed: ${msg}`);
+      emitLog(sink, `[M21] Sandbox creation failed (running without sandbox): ${msg}`);
+      try {
+        _audit?.({
+          action: 'sandbox:create',
+          repo: project,
+          sandboxId: null,
+          summary: `Sandbox creation failed: ${msg.slice(0, 120)}`,
+          result: 'error',
+        });
+      } catch { /* audit is best-effort */ }
+      activeSandbox = null;
+      sandboxCwd = null;
+    }
+  } else if (requireSandbox) {
+    if (project === null) return abortNoSandbox('no project specified for a mandatory sandbox');
+    return abortNoSandbox('sandbox worktree module unavailable');
   }
 
   // -------------------------------------------------------------------------

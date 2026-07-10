@@ -38,6 +38,7 @@ import {
   engineTierOf,
 } from '../src/core/run/sandboxed-engine.js';
 import { listSandboxes } from '../src/core/sandbox/worktree.js';
+import { loadProposal } from '../src/core/inbox/store.js';
 import { withTmpHome } from './helpers/h1-fixture.js';
 
 // ---------------------------------------------------------------------------
@@ -426,6 +427,49 @@ describe('M45 runEngineSandboxed — absent/failing engine is contained', () => 
         // worktrees are removed in the finally block).
         const after = listSandboxes().length;
         expect(after).toBe(before);
+      } finally {
+        if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+        else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;
+        if (prevPath === undefined) delete process.env.PATH;
+        else process.env.PATH = prevPath;
+      }
+    });
+  });
+
+  it('persists the generated-repair generation on a successful CLI proposal', async () => {
+    await withTmpHome(async (fx) => {
+      const prevAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      const prevPath = process.env.PATH;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      const stubBin = mkTmp('ashlr-m45-success-bin-');
+      writeFileSync(
+        join(stubBin, 'codex'),
+        '#!/bin/sh\n' +
+          'cwd=""\n' +
+          'while [ "$#" -gt 0 ]; do\n' +
+          '  if [ "$1" = "--cd" ]; then shift; cwd="$1"; fi\n' +
+          '  shift\n' +
+          'done\n' +
+          'printf "export const generated = true;\\n" > "$cwd/generated.ts"\n' +
+          'printf "done"\n',
+        { mode: 0o755 },
+      );
+      process.env.PATH = `${stubBin}:${prevPath ?? ''}`;
+      try {
+        const repo = fx.makeRepo();
+        repo.enroll();
+        const generation = 'a'.repeat(64);
+        const result = await runEngineSandboxed('codex', 'add generated file', makeConfig(), {
+          sourceRepo: repo.dir,
+          propose: true,
+          workItemId: 'repair:item',
+          workItemGenerationId: generation,
+          workSource: 'self',
+        });
+
+        expect(result.proposalId).toBeDefined();
+        expect(loadProposal(result.proposalId!)?.workItemGenerationId).toBe(generation);
+        expect(listSandboxes()).toEqual([]);
       } finally {
         if (prevAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
         else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllow;

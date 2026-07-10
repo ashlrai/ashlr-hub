@@ -360,7 +360,7 @@ function manualAction(checkId: string, label: string, fix?: string): FixAction {
  * sandbox worktrees (the same primitive the daemon runs at start + `sandbox gc`
  * exposes). LOCAL + non-destructive: sweepOrphanSandboxes routes every removal
  * through removeSandbox's containment guards (re-derived safe path + branch; a
- * tampered/out-of-namespace entry is refused git ops, local-dir cleanup only)
+ * tampered/out-of-namespace entry is refused and retained for operator recovery)
  * and the conservative ORPHAN_STALE_MS guard means a LIVE in-flight worktree is
  * NEVER reclaimed — only genuine crash leftovers. Pushes nothing, opens no PR,
  * applies no proposal. Lazy-imports the build-optional worktree module and never
@@ -371,14 +371,19 @@ async function fixSandboxOrphans(): Promise<FixAction> {
   const label = 'Reclaim stale orphan sandboxes';
   try {
     const wt = await import('./sandbox/worktree.js');
-    const swept = wt.sweepOrphanSandboxes({ staleMs: wt.ORPHAN_STALE_MS });
+    const sweep = wt.sweepOrphanSandboxesDetailed({ staleMs: wt.ORPHAN_STALE_MS });
+    const swept = sweep.completed;
+    const incomplete = sweep.residual.length + sweep.refused.length + sweep.unavailable.length +
+      sweep.unexpectedErrors.length + sweep.inventory.malformedHomes + sweep.inventory.unsafeEntries;
     return {
       checkId,
       label,
       applied: swept.length > 0,
-      manual: false,
+      manual: incomplete > 0,
       detail:
-        swept.length === 0
+        incomplete > 0
+          ? `Reclaimed ${swept.length} sandbox(es); ${incomplete} entry/entries require operator inspection. Try: ashlr sandbox gc`
+          : swept.length === 0
           ? 'No stale orphan sandboxes to reclaim.'
           : `Reclaimed ${swept.length} stale orphan sandbox(es): ${swept.join(', ')}`,
     };

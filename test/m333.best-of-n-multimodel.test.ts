@@ -552,6 +552,20 @@ describe('M333 — file-once proposal capture', () => {
     expect(rec.candidates[0]?.proposalOutcome).toBe('proposal-disabled');
     expect(rec.candidates[1]?.proposalOutcome).toBe('filed');
   });
+
+  it('retains the sandbox handle for cleanup when draft capture throws', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const h = await harness({ cli: cli.fn, api: cli.fn, judgeScores: [1], draftMode: true });
+    h.captureSandboxedProposal?.mockRejectedValueOnce(new Error('draft capture failed'));
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 1,
+      candidates: [{ engine: 'claude' as never }],
+    });
+
+    expect(result.candidates[0]?.error).toContain('draft capture failed');
+    expect(h.removeSandbox).toHaveBeenCalledTimes(1);
+  });
 });
 
 // ---------------------------------------------------------------------------

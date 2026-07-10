@@ -1466,3 +1466,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Serialize concurrent processes with bounded lock acquisition and prove no loss under a 16-writer burst.
 - [x] Run full repository gates and final independent review.
 - [x] Update durable notes, commit, push, reload, harden the live store, and smoke production.
+
+## Current Overnight Cycle - Verified Sandbox Cleanup
+- [x] Rehydrate the deployed diagnostics baseline, live service, Entire state, and recorded next-lane boundary.
+- [x] Map cleanup ownership, failure windows, parent-child repair handoff, and reusable recovery ledgers in parallel.
+- [x] Define a typed cleanup postcondition that distinguishes complete, residual, refused, and unavailable outcomes.
+- [x] Persist bounded metadata-only recovery evidence for incomplete cleanup without weakening containment.
+- [x] Propagate cleanup truth through CLI/API/TITRR/Best-of-N terminal paths without changing proposal or merge authority.
+- [x] Add adversarial coverage for worktree, scratch-branch, metadata-home, crash, retry, symlink, and concurrent cleanup cases.
+- [x] Run focused/full gates and final independent review.
+- [x] Update durable notes, commit, push, reload, and smoke production.

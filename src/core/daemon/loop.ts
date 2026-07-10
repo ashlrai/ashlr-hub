@@ -4160,13 +4160,15 @@ export async function runDaemon(
   } else {
     try {
       const wt = await import('../sandbox/worktree.js');
-      const swept = wt.sweepOrphanSandboxes({ staleMs: wt.ORPHAN_STALE_MS });
+      const sweep = wt.sweepOrphanSandboxesDetailed({ staleMs: wt.ORPHAN_STALE_MS });
+      const incomplete = sweep.residual.length + sweep.refused.length + sweep.unavailable.length +
+        sweep.unexpectedErrors.length + sweep.inventory.malformedHomes + sweep.inventory.unsafeEntries;
       audit({
         action: 'daemon:start',
         repo: null,
         sandboxId: null,
-        summary: `orphan sweep reclaimed ${swept.length} sandbox(es)${swept.length ? `: ${swept.join(', ')}` : ''}`,
-        result: 'ok',
+        summary: `orphan sweep complete=${sweep.completed.length} incomplete=${incomplete}`,
+        result: incomplete === 0 ? 'ok' : 'error',
       });
     } catch {
       // Best-effort: a sweep failure must never crash daemon start.

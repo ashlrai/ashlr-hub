@@ -29,7 +29,7 @@ import type { ReadinessReport } from '../core/readiness.js';
 import { enroll, unenroll, setKill, listEnrolled } from '../core/sandbox/policy.js';
 import { tick } from '../core/daemon/loop.js';
 import { loadBacklog, buildBacklog } from '../core/portfolio/backlog.js';
-import { sweepRepoSandboxes } from '../core/sandbox/worktree.js';
+import { sweepRepoSandboxesDetailed } from '../core/sandbox/worktree.js';
 import { makeColors, isTty } from './ui.js';
 import type { AshlrConfig, WorkItem } from '../core/types.js';
 import { stackInstalled, stackStatus, stackProjectConfigured } from '../core/integrations/stack.js';
@@ -182,10 +182,15 @@ export async function rollback(repo: string, opts: { kill: boolean }): Promise<n
   //    force-removes a LIVE in-flight worktree; each removal inherits
   //    removeSandbox's full containment guards.
   let swept: string[] = [];
+  let incomplete = 0;
   try {
-    swept = sweepRepoSandboxes(abs);
+    const sweep = sweepRepoSandboxesDetailed(abs);
+    swept = sweep.completed;
+    incomplete = sweep.residual.length + sweep.refused.length + sweep.unavailable.length +
+      sweep.unexpectedErrors.length + sweep.inventory.malformedHomes + sweep.inventory.unsafeEntries;
   } catch {
     swept = [];
+    incomplete = 1;
   }
 
   // 3. Opt-in: pause ALL autonomy in the same step (H6-audited kill:on).
@@ -199,13 +204,16 @@ export async function rollback(repo: string, opts: { kill: boolean }): Promise<n
     `  ${green('✓')} swept ${swept.length} leftover sandbox(es) for this repo ` +
       dim('(a live in-flight worktree is never reclaimed)'),
   );
+  if (incomplete > 0) {
+    console.log(`  ${yellow('!')} ${incomplete} sandbox cleanup(s) remain incomplete`);
+  }
   if (opts.kill) {
     console.log(`  ${yellow('!')} kill switch ON ${dim('— all autonomy paused')}`);
   }
   console.log('');
   console.log(`  ${dim('Re-enable any time with')} ${cyan('ashlr onboard')}.`);
   console.log('');
-  return 0;
+  return incomplete > 0 ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------

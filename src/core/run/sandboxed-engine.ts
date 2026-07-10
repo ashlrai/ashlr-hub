@@ -1708,6 +1708,7 @@ export async function runEngineSandboxed(
             provenanceSig,
             sandboxId: sb.id,
             workItemId: opts.workItemId,
+            ...(opts.workItemGenerationId ? { workItemGenerationId: opts.workItemGenerationId } : {}),
             workSource: opts.workSource,
             runId: id,
             engineModel,

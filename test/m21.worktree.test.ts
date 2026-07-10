@@ -35,6 +35,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import type { Sandbox } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -155,6 +156,11 @@ function listBranches(repoDir: string): string[] {
     cwd: repoDir, stdio: 'pipe', encoding: 'utf8',
   }).trim();
   return out ? out.split('\n').map(b => b.trim()).filter(Boolean) : [];
+}
+
+function currentCleanupLockOwner(): string {
+  const started = execFileSync('ps', ['-o', 'lstart=', '-p', String(process.pid)], { encoding: 'utf8' }).trim();
+  return `${JSON.stringify({ pid: process.pid, startRef: createHash('sha256').update(started).digest('hex') })}\n`;
 }
 
 // ---------------------------------------------------------------------------
@@ -638,7 +644,11 @@ describe('M21 worktree — removeSandbox cleanup', () => {
       sb = wt.createSandbox(repo, { allowAnyRepo: true });
       const wtPath = sb.worktreePath;
       expect(fs.existsSync(wtPath)).toBe(true);
-      wt.removeSandbox(sb);
+      expect(wt.removeSandbox(sb)).toMatchObject({
+        status: 'complete',
+        postconditions: { registration: 'absent', branch: 'absent', home: 'absent' },
+        evidencePersisted: false,
+      });
       expect(fs.existsSync(wtPath)).toBe(false);
     } finally {
       fs.rmSync(repo, { recursive: true, force: true });
@@ -653,7 +663,7 @@ describe('M21 worktree — removeSandbox cleanup', () => {
       sb = wt.createSandbox(repo, { allowAnyRepo: true });
       const branch = sb.branch;
       expect(listBranches(repo)).toContain(branch);
-      wt.removeSandbox(sb);
+      expect(wt.removeSandbox(sb).status).toBe('complete');
       expect(listBranches(repo)).not.toContain(branch);
     } finally {
       fs.rmSync(repo, { recursive: true, force: true });
@@ -721,10 +731,96 @@ describe('M21 worktree — removeSandbox cleanup', () => {
     let sb: Sandbox | null = null;
     try {
       sb = wt.createSandbox(repo, { allowAnyRepo: true });
-      wt.removeSandbox(sb);
+      expect(wt.removeSandbox(sb).status).toBe('complete');
       // Second call must not throw (already cleaned up)
-      expect(() => wt.removeSandbox(sb!)).not.toThrow();
+      expect(wt.removeSandbox(sb!).status).toBe('complete');
     } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('retains bounded recovery metadata while the source repo is unavailable', async () => {
+    const wt = await worktree();
+    const repo = makeTmpRepo('remove-source-unavailable');
+    const moved = `${repo}-moved`;
+    let sb: Sandbox | null = null;
+    try {
+      sb = wt.createSandbox(repo, { allowAnyRepo: true });
+      fs.renameSync(repo, moved);
+      const result = wt.removeSandbox(sb);
+      expect(result).toMatchObject({
+        status: 'unavailable',
+        failureClasses: ['source-repo-unavailable'],
+        retryable: true,
+        evidencePersisted: true,
+      });
+      expect(fs.existsSync(path.dirname(sb.worktreePath))).toBe(true);
+      const retained = wt.listSandboxes().find((entry) => entry.id === sb!.id);
+      expect(retained?.ownerPid).toBeUndefined();
+      expect(retained?.cleanup).toMatchObject({ status: 'unavailable', attempt: 1 });
+
+      fs.renameSync(moved, repo);
+      expect(wt.removeSandbox(retained!).status).toBe('complete');
+      sb = null;
+    } finally {
+      if (fs.existsSync(moved) && !fs.existsSync(repo)) fs.renameSync(moved, repo);
+      if (sb) { try { wt.removeSandbox(sb); } catch { /* best effort */ } }
+      fs.rmSync(repo, { recursive: true, force: true });
+      fs.rmSync(moved, { recursive: true, force: true });
+    }
+  });
+
+  it('retains recovery metadata when a scratch branch remains checked out elsewhere', async () => {
+    const wt = await worktree();
+    const repo = makeTmpRepo('remove-branch-residual');
+    const holder = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m21-holder-'));
+    fs.rmSync(holder, { recursive: true, force: true });
+    let sb: Sandbox | null = null;
+    try {
+      sb = wt.createSandbox(repo, { allowAnyRepo: true });
+      execFileSync('git', ['worktree', 'add', '--force', '--force', holder, sb.branch], { cwd: repo, stdio: 'pipe' });
+      const result = wt.removeSandbox(sb);
+      expect(result.status).toBe('residual');
+      expect(result.postconditions).toMatchObject({ registration: 'absent', branch: 'present', home: 'present' });
+      expect(result.failureClasses).toContain('branch-remaining');
+      expect(result.retryable).toBe(false);
+      expect(result.evidencePersisted).toBe(true);
+
+      execFileSync('git', ['worktree', 'remove', '--force', holder], { cwd: repo, stdio: 'pipe' });
+      const retained = wt.listSandboxes().find((entry) => entry.id === sb!.id);
+      expect(wt.removeSandbox(retained!).status).toBe('refused');
+      execFileSync('git', ['branch', '-D', sb.branch], { cwd: repo, stdio: 'pipe' });
+      expect(wt.removeSandbox(retained!).status).toBe('refused');
+      fs.rmSync(path.dirname(sb.worktreePath), { recursive: true, force: true });
+      expect(wt.removeSandbox(retained!).status).toBe('complete');
+      sb = null;
+    } finally {
+      try { execFileSync('git', ['worktree', 'remove', '--force', holder], { cwd: repo, stdio: 'pipe' }); } catch { /* gone */ }
+      if (sb) { try { wt.removeSandbox(sb); } catch { /* best effort */ } }
+      fs.rmSync(holder, { recursive: true, force: true });
+      fs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when another process owns the per-sandbox cleanup lock', async () => {
+    const wt = await worktree();
+    const repo = makeTmpRepo('remove-locked');
+    let sb: Sandbox | null = null;
+    try {
+      sb = wt.createSandbox(repo, { allowAnyRepo: true });
+      const lockDir = path.join(wt.sandboxesDir(), '.cleanup-locks');
+      fs.mkdirSync(lockDir, { recursive: true, mode: 0o700 });
+      const lockPath = path.join(lockDir, `${sb.id}.lock`);
+      fs.writeFileSync(lockPath, currentCleanupLockOwner(), { mode: 0o600 });
+      const result = wt.removeSandbox(sb);
+      expect(result).toMatchObject({ status: 'unavailable', failureClasses: ['cleanup-locked'], retryable: true });
+      expect(fs.existsSync(sb.worktreePath)).toBe(true);
+      expect(listBranches(repo)).toContain(sb.branch);
+      fs.rmSync(lockPath, { force: true });
+      expect(wt.removeSandbox(wt.listSandboxes().find((entry) => entry.id === sb!.id)!).status).toBe('complete');
+      sb = null;
+    } finally {
+      if (sb) { try { wt.removeSandbox(sb); } catch { /* best effort */ } }
       fs.rmSync(repo, { recursive: true, force: true });
     }
   });
@@ -782,6 +878,106 @@ describe('M21 worktree — removeSandbox refuses tampered metadata', () => {
         try { wt.removeSandbox(sb); } catch { /* ok */ }
       }
       fs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('does not report complete when sourceRepo points at a different valid repository', async () => {
+    const wt = await worktree();
+    const repo = makeTmpRepo('tamper-source');
+    const other = makeTmpRepo('tamper-source-other');
+    let sb: Sandbox | null = null;
+    try {
+      sb = wt.createSandbox(repo, { allowAnyRepo: true });
+      const result = wt.removeSandbox({ ...sb, sourceRepo: other });
+      expect(result.status).toBe('refused');
+      expect(fs.existsSync(sb.worktreePath)).toBe(true);
+      expect(listBranches(repo)).toContain(sb.branch);
+      expect(wt.removeSandbox(sb).status).toBe('complete');
+      sb = null;
+    } finally {
+      if (sb) { try { wt.removeSandbox(sb); } catch { /* best effort */ } }
+      fs.rmSync(repo, { recursive: true, force: true });
+      fs.rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a symlinked sandbox.json without reading or rewriting its target', async () => {
+    const wt = await worktree();
+    const repo = makeTmpRepo('tamper-meta-symlink');
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m21-meta-target-'));
+    let sb: Sandbox | null = null;
+    try {
+      sb = wt.createSandbox(repo, { allowAnyRepo: true });
+      const meta = path.join(path.dirname(sb.worktreePath), 'sandbox.json');
+      const canonical = fs.readFileSync(meta, 'utf8');
+      const target = path.join(outside, 'target.json');
+      fs.writeFileSync(target, canonical, 'utf8');
+      fs.rmSync(meta);
+      fs.symlinkSync(target, meta);
+
+      expect(wt.removeSandbox(sb).status).toBe('refused');
+      expect(fs.readFileSync(target, 'utf8')).toBe(canonical);
+      expect(fs.existsSync(sb.worktreePath)).toBe(true);
+
+      fs.rmSync(meta);
+      fs.writeFileSync(meta, canonical, { mode: 0o600 });
+      expect(wt.removeSandbox(sb).status).toBe('complete');
+      sb = null;
+    } finally {
+      if (sb) { try { wt.removeSandbox(sb); } catch { /* best effort */ } }
+      fs.rmSync(outside, { recursive: true, force: true });
+      fs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an external symlink installed at the canonical worktree path', async () => {
+    const wt = await worktree();
+    const repo = makeTmpRepo('tamper-canonical-symlink');
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m21-worktree-target-'));
+    const sentinel = path.join(outside, 'sentinel');
+    fs.writeFileSync(sentinel, 'unchanged', 'utf8');
+    let sb: Sandbox | null = null;
+    try {
+      sb = wt.createSandbox(repo, { allowAnyRepo: true });
+      execFileSync('git', ['worktree', 'remove', '--force', sb.worktreePath], { cwd: repo, stdio: 'pipe' });
+      fs.symlinkSync(outside, sb.worktreePath, 'dir');
+
+      expect(wt.removeSandbox(sb).status).toBe('refused');
+      expect(fs.readFileSync(sentinel, 'utf8')).toBe('unchanged');
+      expect(listBranches(repo)).toContain(sb.branch);
+
+      fs.rmSync(sb.worktreePath);
+      expect(wt.removeSandbox(sb).status).toBe('refused');
+      expect(listBranches(repo)).toContain(sb.branch);
+      execFileSync('git', ['branch', '-D', sb.branch], { cwd: repo, stdio: 'pipe' });
+      expect(wt.removeSandbox(sb).status).toBe('refused');
+      fs.rmSync(path.dirname(sb.worktreePath), { recursive: true, force: true });
+      expect(wt.removeSandbox(sb).status).toBe('complete');
+      sb = null;
+    } finally {
+      if (sb) { try { wt.removeSandbox(sb); } catch { /* best effort */ } }
+      fs.rmSync(outside, { recursive: true, force: true });
+      fs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('does not delete a namespaced branch in another repo when the metadata home is absent', async () => {
+    const wt = await worktree();
+    const repo = makeTmpRepo('absent-home-source');
+    const other = makeTmpRepo('absent-home-other');
+    let sb: Sandbox | null = null;
+    try {
+      sb = wt.createSandbox(repo, { allowAnyRepo: true });
+      expect(wt.removeSandbox(sb).status).toBe('complete');
+      execFileSync('git', ['branch', sb.branch], { cwd: other, stdio: 'pipe' });
+
+      const forged = { ...sb, sourceRepo: other };
+      expect(wt.removeSandbox(forged).status).toBe('refused');
+      expect(listBranches(other)).toContain(sb.branch);
+      sb = null;
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+      fs.rmSync(other, { recursive: true, force: true });
     }
   });
 });
@@ -896,5 +1092,20 @@ describe('M21 worktree — listSandboxes()', () => {
   it('listSandboxes() never throws even if metadata dir does not exist', async () => {
     const wt = await worktree();
     expect(() => wt.listSandboxes()).not.toThrow();
+  });
+
+  it('inventory counts malformed homes that listSandboxes cannot trust', async () => {
+    const wt = await worktree();
+    const malformed = path.join(wt.sandboxesDir(), 'malformed-home');
+    fs.mkdirSync(malformed, { recursive: true });
+    fs.writeFileSync(path.join(malformed, 'sandbox.json'), '{not-json', 'utf8');
+
+    expect(wt.listSandboxes()).toEqual([]);
+    expect(wt.sandboxInventory()).toMatchObject({
+      totalHomes: 1,
+      validHomes: 0,
+      malformedHomes: 1,
+      unsafeEntries: 0,
+    });
   });
 });

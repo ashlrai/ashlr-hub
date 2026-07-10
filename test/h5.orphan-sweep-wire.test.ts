@@ -21,10 +21,11 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   sweepOrphanSandboxes,
+  sweepOrphanSandboxesDetailed,
   sandboxesDir,
   ORPHAN_STALE_MS,
   createSandbox,
@@ -253,10 +254,24 @@ describe('H5 · orphan sweep wiring · GC-REPORTS (ashlr sandbox gc)', () => {
     expect(out).not.toContain(fresh.id);
     expect(sandboxHomeExists(fresh.id)).toBe(true);
   });
+
+  it('`sandbox gc` fails closed when malformed homes cannot be classified', async () => {
+    expect.hasAssertions();
+    setup();
+    const malformed = join(sandboxesDir(), 'malformed-recovery-home');
+    mkdirSync(malformed, { recursive: true });
+    writeFileSync(join(malformed, 'sandbox.json'), '{not-json', 'utf8');
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await cmdSandbox(['gc'])).toBe(1);
+    expect(logSpy.mock.calls.flat().join(' ')).not.toContain('No stale orphan sandboxes');
+    expect(errorSpy.mock.calls.flat().join(' ')).toContain('operator inspection');
+  });
 });
 
 describe('H5 · orphan sweep wiring · CONTAINMENT-HOLDS (inherits removeSandbox guards)', () => {
-  it('a tampered-metadata orphan does LOCAL cleanup only; source tree + branches intact', () => {
+  it('a tampered-metadata orphan is refused and remains visible for recovery', async () => {
     expect.hasAssertions();
     setup();
     const treeBefore = repo.shasumTree();
@@ -276,10 +291,15 @@ describe('H5 · orphan sweep wiring · CONTAINMENT-HOLDS (inherits removeSandbox
     meta['createdAt'] = new Date(Date.now() - STALE_MS * 2).toISOString();
     writeFileSync(metaFile, JSON.stringify(meta, null, 2) + '\n', 'utf8');
 
-    // The sweep must still complete (never throw) and reclaim the local dir...
-    const swept = sweepOrphanSandboxes({ staleMs: STALE_MS });
-    expect(swept).toContain(orphan.id);
-    expect(sandboxHomeExists(orphan.id)).toBe(false);
+    // Refusal is not reclamation: preserve the only recovery handle.
+    const sweep = sweepOrphanSandboxesDetailed({ staleMs: STALE_MS });
+    expect(sweep.completed).not.toContain(orphan.id);
+    expect(sweep.refused).toContain(orphan.id);
+    expect(sandboxHomeExists(orphan.id)).toBe(true);
+    const retained = JSON.parse(readFileSync(metaFile, 'utf8')) as Record<string, unknown>;
+    expect(retained['cleanup']).toBeUndefined();
+    expect(retained['branch']).toBe(headBefore);
+    expect(await cmdSandbox(['gc'])).toBe(1);
 
     // ...but the containment guard prevented any git op against the user branch:
     // the source repo's working tree, status, HEAD, and user-branch set are all
@@ -291,5 +311,9 @@ describe('H5 · orphan sweep wiring · CONTAINMENT-HOLDS (inherits removeSandbox
     expect(
       repo.branches().filter((b) => !b.startsWith('ashlr/sandbox/')),
     ).toEqual(userBranchesBefore);
+
+    // Restore canonical metadata so suite cleanup can safely reclaim the fixture.
+    meta['branch'] = orphan.branch;
+    writeFileSync(metaFile, JSON.stringify(meta, null, 2) + '\n', 'utf8');
   });
 });

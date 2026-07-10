@@ -299,12 +299,13 @@ describe('H5 · leak-containment · (c) removeSandbox containment refuses a tamp
     expect(repo.shasumTree()).toBe(treeBefore);
     expect(repo.gitStatus()).toBe('');
 
-    // Local dir cleanup still happened despite the refusal.
-    expect(existsSync(join(sandboxesDir(), sb.id))).toBe(false);
+    // Refusal preserves the recovery home instead of claiming cleanup succeeded.
+    expect(existsSync(join(sandboxesDir(), sb.id))).toBe(true);
 
     // Reclaim the genuine scratch ref via an HONEST remove so the test leaves no
     // residue (the honest meta passes every guard).
     removeSandbox(sb);
+    expect(existsSync(join(sandboxesDir(), sb.id))).toBe(false);
     expect(repo.branches()).not.toContain(genuineRef);
     expect(sandboxBranches(repo)).toEqual([]);
   });
