@@ -449,6 +449,7 @@ export interface FleetDispatchYieldDiagnosticCandidate {
   sameTierOnly: boolean;
   topReason?: string;
   attemptShape?: DispatchProductionYieldSummary['attemptShape'];
+  generatedRepairAttempts?: DispatchProductionYieldSummary['generatedRepairAttempts'];
 }
 
 export interface FleetDispatchYieldDiagnostics {
@@ -466,6 +467,7 @@ export interface FleetDispatchYieldDiagnostics {
   recommendation: string;
   topReason?: string;
   attemptShape?: DispatchProductionYieldSummary['attemptShape'];
+  generatedRepairAttempts?: DispatchProductionYieldSummary['generatedRepairAttempts'];
   primaryCandidate?: FleetDispatchYieldDiagnosticCandidate;
   candidates: FleetDispatchYieldDiagnosticCandidate[];
 }
@@ -1694,6 +1696,12 @@ interface DiagnosticDispatchYieldAction {
   backend?: EngineId | null;
 }
 
+interface GeneratedRepairRecoveryStatus {
+  active: boolean;
+  healthy: boolean;
+  detail: string;
+}
+
 function isDiagnosticResliceQueueItem(item: FleetQueueNextItem): boolean {
   return item.id.includes(':proposal-repair-nodiff:') ||
     item.title.toLowerCase().startsWith('reslice no-diff dispatch');
@@ -1702,6 +1710,13 @@ function isDiagnosticResliceQueueItem(item: FleetQueueNextItem): boolean {
 function isCaptureRepairQueueItem(item: FleetQueueNextItem): boolean {
   return item.id.includes(':proposal-repair-capture:') ||
     item.title.toLowerCase().startsWith('repair dispatch capture failure');
+}
+
+function isGeneratedRepairQueueItem(item: FleetQueueNextItem): boolean {
+  return isDiagnosticResliceQueueItem(item) ||
+    isCaptureRepairQueueItem(item) ||
+    item.id.includes(':proposal-repair:') ||
+    item.title.toLowerCase().startsWith('repair proposal ');
 }
 
 function diagnosticPolicyDisabled(
@@ -1744,6 +1759,33 @@ function formatAttemptShapeDetail(shape: DispatchProductionYieldSummary['attempt
     (shape.policyDisabled ?? 0);
   if (total <= 0) return '';
   return `; shape: no-diff ${shape.backendNoDiff ?? 0}, gate/capture ${shape.captureOrGateBlocked ?? 0}, repairs ${shape.repairAttempts ?? 0}, policy-off ${shape.policyDisabled ?? 0}`;
+}
+
+function formatGeneratedRepairRecoveryDetail(
+  generated: DispatchProductionYieldSummary['generatedRepairAttempts'],
+): string {
+  const summary = formatGeneratedRepairRecoverySummary(generated);
+  return summary ? `; repair recovery: ${summary}` : '';
+}
+
+function formatGeneratedRepairRecoverySummary(
+  generated: DispatchProductionYieldSummary['generatedRepairAttempts'],
+): string {
+  if (!generated || generated.attempts <= 0) return '';
+  const kinds = [
+    formatGeneratedRepairKindCount(generated.captureRepairs ?? 0, 'capture'),
+    formatGeneratedRepairKindCount(generated.diagnosticReslices ?? 0, 'no-diff'),
+    formatGeneratedRepairKindCount(generated.proposalRepairs ?? 0, 'proposal'),
+  ].filter((part): part is string => part !== null);
+  const kindDetail = kinds.length > 0 ? `; ${kinds.join(', ')}` : '';
+  const conversion = `${generated.proposalsCreated}/${generated.attempts}`;
+  const rate = formatActionPercent(generated.proposalRate ?? 0);
+  return `generated repairs ${conversion} converted (${rate}${kindDetail})`;
+}
+
+function formatGeneratedRepairKindCount(count: number, label: string): string | null {
+  if (count <= 0) return null;
+  return `${label} ${count}`;
 }
 
 function dispatchYieldVerdict(
@@ -1859,6 +1901,7 @@ function dispatchYieldCandidate(
     sameTierOnly: true,
     ...(diagnosticTopReason(bucket) ? { topReason: diagnosticTopReason(bucket) } : {}),
     ...(bucket.attemptShape ? { attemptShape: bucket.attemptShape } : {}),
+    ...(bucket.generatedRepairAttempts ? { generatedRepairAttempts: bucket.generatedRepairAttempts } : {}),
   };
 }
 
@@ -1922,6 +1965,9 @@ function buildDispatchYieldDiagnostics(
     sameTierOnly: true,
     ...(fleetTopReason ? { topReason: fleetTopReason } : {}),
     ...(dispatchProduction.attemptShape ? { attemptShape: dispatchProduction.attemptShape } : {}),
+    ...(dispatchProduction.generatedRepairAttempts
+      ? { generatedRepairAttempts: dispatchProduction.generatedRepairAttempts }
+      : {}),
   }, cfg, backends);
   const actionableCandidate = candidates.find((candidate) => candidate.verdict === 'actionable');
   const primaryCandidate = actionableCandidate ??
@@ -1957,6 +2003,9 @@ function buildDispatchYieldDiagnostics(
     }),
     ...(topReason ? { topReason } : {}),
     ...(dispatchProduction.attemptShape ? { attemptShape: dispatchProduction.attemptShape } : {}),
+    ...(dispatchProduction.generatedRepairAttempts
+      ? { generatedRepairAttempts: dispatchProduction.generatedRepairAttempts }
+      : {}),
     ...(primaryCandidate ? { primaryCandidate } : {}),
     candidates,
   };
@@ -2005,6 +2054,7 @@ function formatDispatchYieldDiagnosticDetail(
   const actionReason = candidate?.actionReason ?? diagnostic.actionReason;
   const actionReasonDetail = actionReason ? `; action reason: ${actionReason}` : '';
   const shape = formatAttemptShapeDetail(candidate?.attemptShape ?? diagnostic.attemptShape);
+  const repairRecovery = formatGeneratedRepairRecoveryDetail(diagnostic.generatedRepairAttempts);
   const action = diagnostic.action === 'route-same-tier-alternative'
     ? 'same-tier reroute'
     : diagnostic.action === 'tighten-context-or-reslice'
@@ -2013,7 +2063,8 @@ function formatDispatchYieldDiagnosticDetail(
       ? 'collect more samples'
       : 'keep routing';
   const repairCoverage = formatQueuedRepairCoverage(generatedWork);
-  return `${subject} proposal yield ${proposals}/${attempts} (${formatActionPercent(rate)}); sample-gated action: ${action}${reason}${actionReasonDetail}${shape}${repairCoverage}`;
+  return `${subject} proposal yield ${proposals}/${attempts} (${formatActionPercent(rate)}); ` +
+    `sample-gated action: ${action}${reason}${actionReasonDetail}${shape}${repairRecovery}${repairCoverage}`;
 }
 
 function formatQueuedRepairCoverage(generatedWork: FleetQueueGeneratedWorkStatus | undefined): string {
@@ -2038,6 +2089,28 @@ function dispatchYieldNextAction(status: FleetStatus): DiagnosticDispatchYieldAc
   return {
     detail: formatDispatchYieldDiagnosticDetail(diagnostic, status.queue.generatedWork),
     ...(candidate?.backend ? { backend: candidate.backend } : {}),
+  };
+}
+
+function generatedRepairRecoveryStatus(status: FleetStatus): GeneratedRepairRecoveryStatus | null {
+  const generated =
+    status.dispatchYieldDiagnostics?.generatedRepairAttempts ??
+    status.dispatchProduction?.generatedRepairAttempts ??
+    status.attemptCoverage?.production.generatedRepairAttempts;
+  const detail = formatGeneratedRepairRecoverySummary(generated);
+  if (!generated || generated.attempts <= 0 || !detail) return null;
+  const active =
+    (status.queue.generatedWork?.total ?? 0) > 0 ||
+    (status.queue.next?.some(isGeneratedRepairQueueItem) ?? false);
+  const enoughSamples = generated.attempts >= MIN_DISPATCH_YIELD_ACTION_ATTEMPTS;
+  const healthyRate = Math.max(
+    status.dispatchYieldDiagnostics?.lowYieldRate ?? LOW_DISPATCH_YIELD_ACTION_RATE,
+    0.5,
+  );
+  return {
+    active,
+    healthy: active && enoughSamples && (generated.proposalRate ?? 0) >= healthyRate,
+    detail,
   };
 }
 
@@ -2471,8 +2544,10 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     if (diagnosticResliceDrainAction) add(diagnosticResliceDrainAction);
     const captureRepairAction = captureRepairNextAction(status);
     if (captureRepairAction) add(captureRepairAction);
+    const repairRecovery = generatedRepairRecoveryStatus(status);
+    const repairMonitorActive = Boolean(diagnosticResliceDrainAction || captureRepairAction);
     const dispatchYieldDetail = dispatchYieldNextAction(status);
-    if (dispatchYieldDetail) {
+    if (dispatchYieldDetail && !(repairRecovery?.healthy && repairMonitorActive)) {
       add({
         id: 'inspect-dispatch-yield',
         priority: 'medium',
@@ -3298,6 +3373,16 @@ function chooseReadinessBlocker(
     status.proposals.pending === 0 &&
     status.dispatchYieldDiagnostics?.verdict === 'actionable'
   ) {
+    const repairRecovery = generatedRepairRecoveryStatus(status);
+    if (repairRecovery?.healthy) {
+      return readinessBlocker(
+        'generated-repair-recovery-active',
+        'Repair recovery active',
+        `${repairRecovery.detail}; dispatch yield is still sample-gated, but active generated repair work is converting above the recovery threshold.`,
+        'low',
+        'queue',
+      );
+    }
     return readinessBlocker(
       'dispatch-yield-actionable',
       'Dispatch yield needs attention',

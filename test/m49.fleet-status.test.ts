@@ -1555,6 +1555,15 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       lowYieldRate: 0.2,
       diagnosticAttempts: 3,
       proposalsCreated: 1,
+      generatedRepairAttempts: {
+        attempts: 1,
+        proposalsCreated: 1,
+        noProposal: 0,
+        proposalRate: 1,
+        captureRepairs: 1,
+        diagnosticReslices: 0,
+        proposalRepairs: 0,
+      },
       primaryCandidate: {
         scope: 'fleet',
         key: 'fleet',
@@ -2515,6 +2524,18 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       baseEvent,
       { ...baseEvent, itemId: 'item-capture-repair-b' },
       { ...baseEvent, itemId: 'item-capture-repair-c' },
+      {
+        ...baseEvent,
+        itemId: 'repo:proposal-repair-capture:abcdef123456',
+        title: 'Repair dispatch capture failure for repo item repo:self:gate',
+        backend: 'codex',
+        tier: 'frontier',
+        model: 'gpt-5.5',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+        proposalId: 'prop-capture-repair',
+        reason: 'proposal filed',
+      },
     ]);
 
     const s = await buildFleetStatus(baseConfig());
@@ -2556,9 +2577,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       ],
     });
     expect(repairAction?.detail).toContain('sample-gated action: tighten context/reslice');
+    expect(repairAction?.detail)
+      .toContain('repair recovery: generated repairs 1/1 converted (100%; capture 1)');
     expect(repairAction?.detail).toContain('queued repair coverage: 1 capture repair queued');
     expect(repairAction?.detail).toContain('First: Repair dispatch capture failure for repo item repo:self:gate.');
     expect(yieldAction?.detail).toContain('queued repair coverage: 1 capture repair queued');
+    expect(yieldAction?.detail)
+      .toContain('repair recovery: generated repairs 1/1 converted (100%; capture 1)');
     expect(s.autonomousShipReadiness).toMatchObject({
       primaryAction: {
         id: 'process-capture-repairs',
@@ -2574,6 +2599,96 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('[high] Monitor capture repairs');
     expect(formatted).toContain('cmd: Inspect fleet status: ashlr fleet status --json (read-only)');
     expect(repairAction?.commands?.map((command) => command.safety)).toEqual(['read-only', 'read-only']);
+  });
+
+  it('treats healthy generated repair conversion as active recovery', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    const now = new Date().toISOString();
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome, [], now);
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeBacklogSnapshot(tmpHome, repo, [
+      makeBacklogItem(
+        repo,
+        'repo:proposal-repair-capture:fedcba987654',
+        'Repair dispatch capture failure for repo item repo:self:active',
+        9,
+        'self',
+        ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate'],
+      ),
+    ], now);
+    const baseEvent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'local-fail-a',
+      source: 'self',
+      repo,
+      title: 'Local no-diff sample',
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      routeReason: 'local-coder bulk',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0.001,
+      reason: 'engine "local-coder" completed without file changes',
+      basis: 'run-proposal-outcome',
+    };
+    const generatedRepairEvents: DispatchProductionEvent[] = Array.from({ length: 5 }, (_, index) => ({
+      ...baseEvent,
+      itemId: `repo:proposal-repair-capture:abc123def45${index}`,
+      title: `Repair dispatch capture failure for repo item repo:self:active-${index}`,
+      backend: 'codex',
+      tier: 'frontier',
+      model: 'gpt-5.5',
+      outcome: index === 4 ? 'empty-diff' : 'proposal-created',
+      proposalCreated: index !== 4,
+      proposalId: index === 4 ? undefined : `prop-repair-${index}`,
+      reason: index === 4 ? 'engine "codex" completed without file changes' : 'proposal filed',
+    }));
+    recordDispatchProduction([
+      baseEvent,
+      { ...baseEvent, itemId: 'local-fail-b' },
+      { ...baseEvent, itemId: 'local-fail-c' },
+      { ...baseEvent, itemId: 'local-fail-d' },
+      ...generatedRepairEvents,
+    ]);
+
+    const s = await buildFleetStatus(withFoundry({ autoMerge: { enabled: true, trustBasis: 'verification' } }));
+    const actionIds = s.nextActions?.map((action) => action.id) ?? [];
+
+    expect(s.dispatchYieldDiagnostics).toMatchObject({
+      verdict: 'actionable',
+      primaryCandidate: {
+        backend: 'local-coder',
+        source: 'self',
+        proposalsCreated: 0,
+        diagnosticAttempts: 4,
+      },
+      generatedRepairAttempts: {
+        attempts: 5,
+        proposalsCreated: 4,
+        noProposal: 1,
+        proposalRate: 0.8,
+        captureRepairs: 5,
+      },
+    });
+    expect(s.autonomousShipReadiness?.topBlocker).toMatchObject({
+      id: 'generated-repair-recovery-active',
+      severity: 'low',
+      detail: expect.stringContaining('generated repairs 4/5 converted (80%; capture 5)'),
+    });
+    expect(s.autonomousShipReadiness?.topBlocker?.id).not.toBe('dispatch-yield-actionable');
+    expect(actionIds[0]).toBe('process-capture-repairs');
+    expect(actionIds).not.toContain('inspect-dispatch-yield');
+    expect(s.missionBrief).toMatchObject({
+      blocker: { id: 'generated-repair-recovery-active' },
+      action: { id: 'process-capture-repairs' },
+    });
   });
 
   it('does not promote capture repairs when queued repairs are cooling', async () => {
