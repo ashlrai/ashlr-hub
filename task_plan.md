@@ -1247,3 +1247,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add sanitized original-title metadata to capture-gate repair work items.
 - [x] Add focused M310 regression for generic gate-blocked reason plus diff evidence.
 - [x] Run focused and final gates, commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Queued Repair Coverage Visibility
+- [x] Rechecked live queue after gate-blocked repair rollout and confirmed 7 generated proposal-repair items: 2 capture repairs plus 5 no-diff reslices.
+- [x] Deploy read-only scouts for FleetStatus/web visibility and action/blocker wording.
+- [x] Add `queue.generatedWork.captureRepairs` and make the generated-work total resilient to the `dispatch-capture-repair` tag.
+- [x] Thread queued repair coverage into dispatch-yield action/readiness details as aggregate counts only.
+- [x] Render capture/no-diff generated repair counts in CLI and Mission Control/Fleet Dashboard metrics with readable plural labels.
+- [x] Add focused FleetStatus, dashboard snapshot, SSE/static, and queued-autonomy regression coverage.
+- [x] Run focused and final gates, commit, push, reload daemon, and smoke live status.
