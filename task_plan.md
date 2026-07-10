@@ -1395,4 +1395,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Propagate caller-supplied identity through run, swarm, sandbox, retry, and daemon dispatch paths without changing execution inputs.
 - [x] Preserve the identity on success, no-proposal, and failure telemetry so no-attempt learning rows can be joined reliably.
 - [x] Add focused serial, builtin, Best-of-N, retry, and error-path regression coverage.
-- [ ] Run repository gates, update durable notes, commit, push, reload, and smoke production telemetry.
+- [x] Run repository gates, update durable notes, commit, push, reload, and smoke production telemetry.
