@@ -233,7 +233,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Implement grouped causal label diagnostics in attempt coverage and Fleet OS action text.
 - [x] Add focused regression coverage.
 - [x] Verify implementation with focused, adjacent, invariant, and full CI gates.
-- [ ] Commit, push, and reload/smoke production daemon.
+- [x] Commit, push, and reload/smoke production daemon.
 
 ## Current Continuation - Next Actions And Judge Trust
 - [x] Deployed a broader explorer wave for auto-merge trust, daemon reliability, cross-repo coordination, command-center UI, and market/open-source leverage.
