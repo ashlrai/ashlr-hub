@@ -1396,6 +1396,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunAutoMergePass).not.toHaveBeenCalled();
     expect(mockReconcileRemoteHandoffs).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(readAgentActions().filter((event) => event.action === 'daemon:dispatch-start')).toHaveLength(0);
   });
 
   it('A1d: budget exhaustion blocks auto-merge maintenance', async () => {
@@ -1410,6 +1411,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunAutoMergePass).not.toHaveBeenCalled();
     expect(mockBuildBacklog).not.toHaveBeenCalled();
     expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(readAgentActions().filter((event) => event.action === 'daemon:dispatch-start')).toHaveLength(0);
   });
 
   it('A1e: autonomy control pause builds strategy snapshot and skips dispatch', async () => {
@@ -1443,6 +1445,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockReconcileRemoteHandoffs).not.toHaveBeenCalled();
     expect(result.remoteHandoff).toBeUndefined();
     expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(readAgentActions().filter((event) => event.action === 'daemon:dispatch-start')).toHaveLength(0);
   });
 
   it('A1e2: production velocity supplies pending outcome records to the daemon strategy', async () => {
@@ -1867,6 +1870,140 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       itemId: items[0]!.id,
       outcome: 'no-proposal',
       runId: 'run-trivial-proposal',
+    });
+  });
+
+  it('A1h2c: builtin swarm exposes typed empty-diff production without queue inference', async () => {
+    const { items } = enrollWithItems(1);
+    const pendingBefore = pendingCount();
+
+    mockRunSwarm.mockImplementationOnce(async (_input, _cfg, opts) => {
+      const runId = (opts as { runId: string }).runId;
+      expect(readAgentActions().find((event) => event.action === 'daemon:dispatch-start')).toMatchObject({
+        itemId: items[0]!.id,
+        runId,
+        outcome: 'started',
+      });
+      return {
+        id: runId,
+        status: 'done',
+        goal: items[0]!.title,
+        usage: { tokensIn: 80, tokensOut: 20, estCostUsd: 0.002, steps: 1 },
+        proposalOutcome: {
+          kind: 'empty-diff',
+          reason: 'builtin swarm completed without file changes',
+          files: 0,
+          insertions: 0,
+          deletions: 0,
+        },
+      };
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1 }), { dryRun: false });
+
+    expect(pendingCount()).toBe(pendingBefore);
+    expect(result.proposalsCreated).toBe(0);
+    expect(result.dispatches?.[0]).toMatchObject({
+      itemId: items[0]!.id,
+      backend: 'builtin',
+      skipReason: 'empty-diff: builtin swarm completed without file changes',
+      production: {
+        outcome: 'empty-diff',
+        reason: 'builtin swarm completed without file changes',
+        diffFiles: 0,
+        diffLines: 0,
+        runEventSummary: {
+          status: 'done',
+          outcome: 'empty-diff',
+          proposalCreated: false,
+        },
+      },
+    });
+    const productionEvent = readDispatchProductionEvents({ limit: 1 })[0];
+    expect(productionEvent).toMatchObject({
+      itemId: items[0]!.id,
+      backend: 'builtin',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      basis: 'run-proposal-outcome',
+    });
+    const startEvent = readAgentActions().find((event) => event.action === 'daemon:dispatch-start');
+    expect(Date.parse(productionEvent!.ts)).toBeGreaterThanOrEqual(Date.parse(startEvent!.ts));
+  });
+
+  it('A1h2d: builtin partial proposal preserves aborted execution status and filed capture truth', async () => {
+    const { items } = enrollWithItems(1);
+    const pendingBefore = pendingCount();
+
+    mockRunSwarm.mockImplementationOnce(async (_input, _cfg, opts) => ({
+      id: (opts as { runId: string }).runId,
+      status: 'aborted',
+      goal: items[0]!.title,
+      usage: { tokensIn: 200, tokensOut: 50, estCostUsd: 0.006, steps: 2 },
+      proposalOutcome: {
+        kind: 'filed',
+        reason: 'builtin swarm partial proposal filed',
+        proposalId: 'prop-partial-builtin',
+        files: 2,
+        insertions: 7,
+        deletions: 3,
+      },
+    }));
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1 }), { dryRun: false });
+
+    expect(pendingCount()).toBe(pendingBefore);
+    // Tick aggregate remains the independently observed inbox delta. The typed
+    // production record preserves the runner's filed truth even if that source
+    // and the queue observation temporarily disagree.
+    expect(result.proposalsCreated).toBe(0);
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'proposal-created',
+      proposalId: 'prop-partial-builtin',
+      diffFiles: 2,
+      diffLines: 10,
+      runEventSummary: {
+        status: 'aborted',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+        proposalId: 'prop-partial-builtin',
+      },
+    });
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: 'prop-partial-builtin',
+      runEventSummary: {
+        status: 'aborted',
+        outcome: 'proposal-created',
+      },
+    });
+  });
+
+  it('A1h2e: builtin governance suppression remains proposal-disabled and does not cool work', async () => {
+    const { items } = enrollWithItems(1);
+    mockRunSwarm.mockImplementationOnce(async (_input, _cfg, opts) => ({
+      id: (opts as { runId: string }).runId,
+      status: 'failed',
+      goal: items[0]!.title,
+      usage: { tokensIn: 0, tokensOut: 0, estCostUsd: 0, steps: 0 },
+      proposalOutcome: {
+        kind: 'proposal-disabled',
+        reason: 'spend governance blocked swarm execution',
+      },
+    }));
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1 }), { dryRun: false });
+
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'proposal-disabled',
+      reason: 'spend governance blocked swarm execution',
+      runEventSummary: { status: 'failed', outcome: 'proposal-disabled' },
+    });
+    expect(loadWorkedLedger().events.filter((event) => event.itemId === items[0]!.id)).toEqual([]);
+    expect(readDispatchProductionEvents({ limit: 1 })[0]).toMatchObject({
+      outcome: 'proposal-disabled',
+      proposalCreated: false,
     });
   });
 
@@ -2416,10 +2553,10 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       itemId: items[0]!.id,
       backend: 'local-coder',
       dispatched: true,
-      skipReason: 'dispatch-error: model process crashed',
+      skipReason: 'dispatch-error: executor threw',
       production: {
         outcome: 'engine-failed',
-        reason: 'dispatch-error: model process crashed',
+        reason: 'dispatch-error: executor threw',
       },
     });
     expect(loadWorkedLedger().events.filter((event) => event.itemId === items[0]!.id)).toEqual([
@@ -2429,7 +2566,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       itemId: items[0]!.id,
       outcome: 'engine-failed',
       proposalCreated: false,
-      reason: 'dispatch-error: model process crashed',
+      reason: 'dispatch-error: executor threw',
       basis: 'run-proposal-outcome',
     });
   });
@@ -2686,6 +2823,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     );
     expect(executorAttemptIds).toEqual(manifestAttemptIds);
     expect(new Set(result.dispatches?.map((dispatch) => dispatch.runId))).toEqual(manifestAttemptIds);
+    const starts = readAgentActions().filter((event) => event.action === 'daemon:dispatch-start');
+    expect(starts).toHaveLength(2);
+    expect(new Set(starts.map((event) => event.runId))).toEqual(manifestAttemptIds);
   });
 
   it('A7-selection-telemetry: records pending and cooldown blockers in the global workspace', async () => {
@@ -3060,6 +3200,9 @@ describe('M201 — Group C: per-item dispatch accounting', () => {
     expect(result.reason).toBe('ok');
     // Only the first item was dispatched; subsequent items saw kill=ON and skipped.
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    const starts = readAgentActions().filter((event) => event.action === 'daemon:dispatch-start');
+    expect(starts).toHaveLength(1);
+    expect(result.dispatches?.filter((dispatch) => !dispatch.dispatched)).toHaveLength(3);
   });
 });
 
@@ -3069,8 +3212,15 @@ describe('M201 — Group C: per-item dispatch accounting', () => {
 
 describe('M201 — Group D: observability — dispatch failure logging', () => {
   it('D1: runSwarm throws → daemon:swarm-error path taken; tick still returns reason ok', async () => {
-    enrollWithItems(1);
-    mockRunSwarm.mockRejectedValue(new Error('runSwarm exploded for D1'));
+    const { items } = enrollWithItems(1);
+    mockRunSwarm.mockImplementationOnce(async (_input, _cfg, opts) => {
+      expect(readAgentActions().find((event) => event.action === 'daemon:dispatch-start')).toMatchObject({
+        itemId: items[0]!.id,
+        runId: (opts as { runId: string }).runId,
+        outcome: 'started',
+      });
+      throw new Error('runSwarm exploded for D1');
+    });
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
@@ -3082,6 +3232,10 @@ describe('M201 — Group D: observability — dispatch failure logging', () => {
     expect(result.reason).toBe('ok');
     expect(typeof result.proposalsCreated).toBe('number');
     expect(typeof result.spentUsd).toBe('number');
+    expect(readAgentActions().find((event) => event.action === 'daemon:dispatch-start')).toMatchObject({
+      outcome: 'started',
+      runId: result.dispatches?.[0]?.runId,
+    });
   });
 
   it('D2: 3 items, middle one throws → other 2 dispatched, tick returns ok', async () => {

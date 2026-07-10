@@ -55,6 +55,7 @@ vi.mock('../src/core/fleet/self-heal.js', () => ({
 // ---------------------------------------------------------------------------
 
 import { tick } from '../src/core/daemon/loop.js';
+import { readAgentActions } from '../src/core/fleet/agent-action-ledger.js';
 import {
   makeFixture,
   makeCfg,
@@ -220,6 +221,7 @@ describe('M170 — best-of-N dispatch: bestOfN > 1 routes through runBestOfN', (
 
     expect(result.reason).toBe('ok');
     expect(mockRunBestOfN).toHaveBeenCalledTimes(1);
+    expect(readAgentActions().filter((event) => event.action === 'daemon:dispatch-start')).toHaveLength(1);
     // runGoal must NOT have been called (best-of-N replaced it)
     expect(mockRunGoal).not.toHaveBeenCalled();
   });
@@ -344,6 +346,12 @@ describe('M170 — best-of-N dispatch: bestOfN absent/1 → single-run path unch
     expect(result.dispatches?.[0]).toMatchObject({
       runId: swarmOpts.runId,
       trajectoryId: `run:${swarmOpts.runId}`,
+    });
+    expect(readAgentActions().find((event) => event.action === 'daemon:dispatch-start')).toMatchObject({
+      runId: swarmOpts.runId,
+      backend: 'builtin',
+      outcome: 'started',
+      tags: expect.arrayContaining(['dispatch-start', 'swarm']),
     });
   });
 });
@@ -479,6 +487,10 @@ describe('M170 — error resilience: neither hook breaks the tick', () => {
       runId: expect.stringMatching(/^attempt-[0-9a-f-]{36}$/),
       trajectoryId: expect.stringMatching(/^run:attempt-[0-9a-f-]{36}$/),
       production: { outcome: 'engine-failed' },
+    });
+    expect(readAgentActions().find((event) => event.action === 'daemon:dispatch-start')).toMatchObject({
+      runId: result.dispatches?.[0]?.runId,
+      outcome: 'started',
     });
   });
 

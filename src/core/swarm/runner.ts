@@ -48,6 +48,7 @@ import type {
   SwarmPhaseName,
   RunBudget,
   RunUsage,
+  RunProposalOutcome,
   EscalationEvent,
   EscalationReasonKind,
   Sandbox,
@@ -60,6 +61,7 @@ import { planSwarm } from './planner.js';
 import { saveSwarm, loadSwarm } from './store.js';
 import { runGoal } from '../run/orchestrator.js';
 import { scrubSecrets } from '../knowledge/index.js';
+import { scrubSecrets as scrubSensitiveText } from '../util/scrub.js';
 import { mergeDelegationScope, summarizeDelegationScope } from '../run/delegation-scope.js';
 import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
 
@@ -941,14 +943,17 @@ function captureSandboxAndCleanup(
     workSource?: import('../types.js').WorkSource;
     delegationScope?: DelegationScope;
   },
-): void {
+  persistOutcome = true,
+): RunProposalOutcome {
   // Capture diff (read-only; never mutates source tree).
   let diff: SandboxDiff | null = null;
+  let captureFailureReason = 'sandbox diff capture unavailable';
   if (_sandboxDiff !== null) {
     try {
       diff = _sandboxDiff(sb);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      captureFailureReason = 'sandbox diff capture failed';
       emitLog(sink, `[M21] Sandbox diff capture failed: ${msg}`);
       try {
         _audit?.({
@@ -962,13 +967,38 @@ function captureSandboxAndCleanup(
     }
   }
 
+  let outcome: RunProposalOutcome = {
+    kind: 'proposal-capture-error',
+    reason: captureFailureReason,
+  };
+
   if (diff !== null) {
+    const diffCounts = {
+      files: Math.max(0, diff.files),
+      insertions: Math.max(0, diff.insertions),
+      deletions: Math.max(0, diff.deletions),
+    };
+    const hasMaterialDiff = diff.files > 0 && diff.patch.trim().length > 0;
+    const scrubbedPatch = diff.patch
+      ? scrubSensitiveText(scrubSecrets(diff.patch))
+      : undefined;
+    outcome = run.status === 'failed' || run.status === 'aborted'
+      ? {
+          kind: 'engine-failed-no-diff',
+          reason: `builtin swarm ended ${run.status} without file changes`,
+          ...diffCounts,
+        }
+      : {
+          kind: 'empty-diff',
+          reason: 'builtin swarm completed without file changes',
+          ...diffCounts,
+        };
     // Append proposed diff summary to run.result without overwriting it.
     const proposal = [
       '',
       `[M21 sandbox proposal] id=${sb.id}`,
       `files=${diff.files} insertions=${diff.insertions} deletions=${diff.deletions}`,
-      diff.patch ? diff.patch.slice(0, 4000) : '(empty diff)',
+      scrubbedPatch ? scrubbedPatch.slice(0, 4000) : '(empty diff)',
     ].join('\n');
     run.result = (run.result ?? '') + proposal;
     emitLog(sink, `[M21] Sandbox diff captured: ${diff.files} file(s) changed`);
@@ -996,12 +1026,11 @@ function captureSandboxAndCleanup(
         // M107 (P0): scrub secrets from the diff BEFORE storing. Mirrors the
         // sandboxed-engine path (M47.1) — an agent-hardcoded token in a patch
         // must not persist to the inbox or surface via ashlr_inbox_list.
-        const scrubbedPatch = diff.patch ? scrubSecrets(diff.patch) : undefined;
-
         // M275 (sync): lockfile integrity check. Self-verify (typecheck/test)
         // runs only in the async sandboxed-engine path; here we validate that a
         // package.json change includes a lockfile update. Flag-off → skip.
         // NOTE: we do NOT import completeness-gate.ts here to keep runner.ts sync.
+        let captureBlocked = false;
         if (cfg?.foundry?.completenessGate !== false) {
           const _lockfiles = ['pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'package-lock.json'];
           const _patch = diff.patch ?? '';
@@ -1010,65 +1039,98 @@ function captureSandboxAndCleanup(
           const _repoHasLockfile = _lockfiles.some((lf) => existsSync(path.join(sb.sourceRepo, lf)));
           if (_hasPkgJson && _repoHasLockfile && !_patchHasLockfile) {
             emitLog(sink, `[M275] completeness gate blocked swarm proposal: dependency change (package.json) lacks corresponding lockfile update`);
-            return; // do not file — captureSandboxAndCleanup is void
+            outcome = {
+              kind: 'completeness-gate',
+              reason: 'dependency change (package.json) lacks corresponding lockfile update',
+              ...diffCounts,
+            };
+            captureBlocked = true;
           }
         }
 
-        const proposalDelegationScope = summarizeDelegationScope(
-          mergeDelegationScope(causal?.delegationScope, {
+        if (!captureBlocked) {
+          const proposalDelegationScope = summarizeDelegationScope(
+            mergeDelegationScope(causal?.delegationScope, {
+              origin: 'swarm',
+              sourceRepo: sb.sourceRepo,
+              executionRoot: sb.worktreePath,
+              workItemId: causal?.workItemId,
+              workSource: causal?.workSource,
+              swarmId: run.id,
+              objective: run.goal,
+              budget: run.budget,
+              resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+            }),
+          );
+          const created = _createProposal({
+            repo: sb.sourceRepo,
             origin: 'swarm',
-            sourceRepo: sb.sourceRepo,
-            executionRoot: sb.worktreePath,
+            kind: 'patch',
+            title: (run.goal || `swarm ${run.id}`).slice(0, 120),
+            summary: [
+              `Autonomous swarm proposal (swarm=${run.id}, status=${run.status})`,
+              `repo: ${sb.sourceRepo}`,
+              `diff: ${diff.files} file(s), +${diff.insertions} -${diff.deletions}`,
+            ].join('\n'),
+            diff: scrubbedPatch,
+            sandboxId: sb.id,
             workItemId: causal?.workItemId,
             workSource: causal?.workSource,
-            swarmId: run.id,
-            objective: run.goal,
-            budget: run.budget,
-            resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
-          }),
-        );
-        const created = _createProposal({
-          repo: sb.sourceRepo,
-          origin: 'swarm',
-          kind: 'patch',
-          title: (run.goal || `swarm ${run.id}`).slice(0, 120),
-          summary: [
-            `Autonomous swarm proposal (swarm=${run.id}, status=${run.status})`,
-            `repo: ${sb.sourceRepo}`,
-            `diff: ${diff.files} file(s), +${diff.insertions} -${diff.deletions}`,
-          ].join('\n'),
-          diff: scrubbedPatch,
-          sandboxId: sb.id,
-          workItemId: causal?.workItemId,
-          workSource: causal?.workSource,
-          runId: run.id,
-          ...(proposalDelegationScope ? { delegationScope: proposalDelegationScope } : {}),
-        });
-        emitLog(sink, `[M24] PENDING proposal recorded for swarm ${run.id}`);
-        // M32: unattended path (daemon-dispatched swarm) — fire opt-in desktop/
-        // webhook notification. Fire-and-forget; metadata only; never blocks.
-        void (async () => {
-          try {
-            const { loadConfig } = await import('../config.js');
-            const { notifyNewProposal } = await import('../inbox/notify-proposal.js');
-            await notifyNewProposal(created, loadConfig());
-          } catch { /* notification is best-effort */ }
-        })();
-        try {
-          _audit?.({
-            action: 'inbox:proposal-created',
-            repo: sb.sourceRepo,
-            sandboxId: sb.id,
-            summary: `daemon swarm ${run.id} -> PENDING proposal (${diff.files} file(s))`,
-            result: 'ok',
+            runId: run.id,
+            ...(proposalDelegationScope ? { delegationScope: proposalDelegationScope } : {}),
           });
-        } catch { /* audit best-effort */ }
+          outcome = {
+            kind: 'filed',
+            reason: 'builtin swarm proposal filed',
+            proposalId: created.id,
+            ...diffCounts,
+          };
+          emitLog(sink, `[M24] PENDING proposal recorded for swarm ${run.id}`);
+          // M32: unattended path (daemon-dispatched swarm) — fire opt-in desktop/
+          // webhook notification. Fire-and-forget; metadata only; never blocks.
+          void (async () => {
+            try {
+              const { loadConfig } = await import('../config.js');
+              const { notifyNewProposal } = await import('../inbox/notify-proposal.js');
+              await notifyNewProposal(created, loadConfig());
+            } catch { /* notification is best-effort */ }
+          })();
+          try {
+            _audit?.({
+              action: 'inbox:proposal-created',
+              repo: sb.sourceRepo,
+              sandboxId: sb.id,
+              summary: `daemon swarm ${run.id} -> PENDING proposal (${diff.files} file(s))`,
+              result: 'ok',
+            });
+          } catch { /* audit best-effort */ }
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         emitLog(sink, `[M24] Proposal creation failed: ${msg.slice(0, 120)}`);
+        outcome = {
+          kind: 'proposal-capture-error',
+          reason: 'builtin swarm proposal capture failed',
+          ...diffCounts,
+        };
       }
+    } else if (hasMaterialDiff) {
+      outcome = propose
+        ? {
+            kind: 'proposal-capture-error',
+            reason: 'builtin swarm proposal sink unavailable',
+            ...diffCounts,
+          }
+        : {
+            kind: 'proposal-disabled',
+            reason: 'builtin swarm proposal capture was not requested',
+            ...diffCounts,
+          };
     }
   }
+
+  run.proposalOutcome = outcome;
+  if (persistOutcome) persist(run);
 
   // Always remove sandbox (worktree + scratch branch). Never touches source tree.
   if (_removeSandbox !== null) {
@@ -1098,6 +1160,7 @@ function captureSandboxAndCleanup(
       } catch { /* audit best-effort */ }
     }
   }
+  return outcome;
 }
 
 // ---------------------------------------------------------------------------
@@ -1153,6 +1216,10 @@ export async function runSwarm(
       result:
         'Refused: nested swarm detected (ASHLR_IN_SWARM is set). ' +
         'A swarm task must not spawn another swarm.',
+      proposalOutcome: {
+        kind: 'engine-failed-no-diff',
+        reason: 'nested swarm execution was refused',
+      },
     };
     emitLog(sink, failedRun.result ?? '');
     return failedRun;
@@ -1174,6 +1241,10 @@ export async function runSwarm(
       plan: { specId: input.specId ?? null, goal: input.goal, tasks: [] },
       tasks: [],
       result: `Refused: ${reason}. No swarm work was executed.`,
+      proposalOutcome: {
+        kind: 'engine-failed-no-diff',
+        reason,
+      },
     };
     emitLog(sink, failed.result ?? '');
     return failed;
@@ -1259,6 +1330,10 @@ export async function runSwarm(
       result:
         `Refused: a mandatory sandbox could not be created (${reason}). ` +
         'No tasks were executed; the working tree was NOT touched.',
+      proposalOutcome: {
+        kind: 'sandbox-unavailable',
+        reason,
+      },
     };
     emitLog(sink, aborted.result ?? '');
     try {
@@ -1270,6 +1345,7 @@ export async function runSwarm(
         result: 'error',
       });
     } catch { /* audit is best-effort */ }
+    if (!opts.dryRun) persist(aborted);
     return aborted;
   };
 
@@ -1342,9 +1418,14 @@ export async function runSwarm(
         plan: { specId: input.specId ?? null, goal: input.goal, tasks: [] },
         tasks: [],
         result: govBlock,
+        proposalOutcome: {
+          kind: 'proposal-disabled',
+          reason: govBlock,
+        },
       };
       process.stderr.write(`[ashlr swarm] ${govBlock}\n`);
       emitLog(sink, govBlock);
+      if (!opts.dryRun) persist(blockedRun);
       return blockedRun;
     }
   }
@@ -1372,6 +1453,10 @@ export async function runSwarm(
         plan: { specId: input.specId ?? null, goal: input.goal, tasks: [] },
         tasks: [],
         result: `Resume failed: swarm "${opts.resumeId}" not found.`,
+        proposalOutcome: {
+          kind: 'engine-failed-no-diff',
+          reason: `swarm resume target "${opts.resumeId}" was not found`,
+        },
       };
       emitLog(sink, notFound.result ?? '');
       return notFound;
@@ -1471,7 +1556,7 @@ export async function runSwarm(
       maybePersist(run);
       emitLog(sink, run.result);
       // M21: clean up sandbox even on planning failure (no diff to capture yet).
-      if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal);
+      if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal, !opts.dryRun);
       await fireEmitSwarm(run, cfg);
       if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
       return run;
@@ -1518,7 +1603,7 @@ export async function runSwarm(
         persist(run);
         emitLog(sink, run.result);
         // M21: capture diff of work done so far, then remove sandbox.
-        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal);
+        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal, !opts.dryRun);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1531,7 +1616,7 @@ export async function runSwarm(
         // Stop cleanly — do NOT proceed to the next phase.
         emitLog(sink, `Swarm ${run.id} paused at phase "${phase}" — awaiting human approval.`);
         // M21: capture diff of partial work, then remove sandbox.
-        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal);
+        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal, !opts.dryRun);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1544,7 +1629,7 @@ export async function runSwarm(
         persist(run);
         emitLog(sink, run.result);
         // M21: capture diff of partial work, then remove sandbox.
-        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal);
+        if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal, !opts.dryRun);
         await fireEmitSwarm(run, cfg);
         if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
         return run;
@@ -1557,7 +1642,7 @@ export async function runSwarm(
     persist(run);
     emitLog(sink, run.result);
     // M21: capture diff of any partial work, then remove sandbox.
-    if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal);
+    if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal, !opts.dryRun);
     await fireEmitSwarm(run, cfg);
     if (!opts.noCapture) fireCaptureFromSwarm(run, cfg);
     return run;
@@ -1597,7 +1682,7 @@ export async function runSwarm(
   persist(run);
 
   // M21: capture full sandbox diff proposal, then remove sandbox.
-  if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal);
+  if (activeSandbox !== null) captureSandboxAndCleanup(activeSandbox, run, sink, opts.propose === true, cfg, causal, !opts.dryRun);
 
   emitLog(sink, `Swarm ${run.id} finished with status: ${run.status}`);
 

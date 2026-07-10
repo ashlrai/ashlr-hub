@@ -2589,6 +2589,8 @@ export interface SwarmRun {
   tasks: SwarmTaskRun[];
   /** Aggregated final result/summary, present when done. */
   result?: string;
+  /** Metadata-only reason the sandboxed swarm did or did not file a proposal. */
+  proposalOutcome?: RunProposalOutcome;
   /**
    * M17: ordered log of escalation gate trips. Each entry records why the swarm
    * paused (verify-failed, over-budget, tamper, risk, low-confidence). Append-only.

@@ -1396,3 +1396,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve the identity on success, no-proposal, and failure telemetry so no-attempt learning rows can be joined reliably.
 - [x] Add focused serial, builtin, Best-of-N, retry, and error-path regression coverage.
 - [x] Run repository gates, update durable notes, commit, push, reload, and smoke production telemetry.
+
+## Current Overnight Cycle - Attempt Start and Builtin Outcome Truth
+- [x] Rehydrate the clean pushed baseline, Entire state, live daemon, and rollout constraints.
+- [x] Deploy disjoint audits for crash-visible start events, builtin terminal semantics, shadow activation readiness, and a pure classifier.
+- [x] Record one metadata-only attempt-start event immediately before each real executor invocation.
+- [x] Keep preflight/throttle/budget/resource skips free of false start events while preserving their attempt identity.
+- [x] Add typed builtin swarm production outcomes for proposal, empty, blocked, failed, and unknown terminal states.
+- [x] Prove serial, concurrent, workhorse, failure, and builtin parity without changing execution arguments or merge authority.
+- [ ] Run repository gates, independent review, durable notes, commit, push, reload, and production smoke.

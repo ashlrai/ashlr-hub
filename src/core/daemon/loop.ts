@@ -1179,6 +1179,66 @@ function dispatchTrace(
   };
 }
 
+function recordDispatchStartAgentAction(
+  item: WorkItem,
+  fields: {
+    ts: string;
+    machineId: string;
+    runId: string;
+    backend: EngineId;
+    tier: EngineTier | null;
+    model?: string | null;
+    assignedBy: string;
+    reason: string;
+    mode: 'swarm' | 'single' | 'best-of-n';
+  },
+): void {
+  const rs = routeSnapshot({
+    backend: fields.backend,
+    tier: fields.tier,
+    model: fields.model,
+    assignedBy: fields.assignedBy,
+    reason: fields.reason,
+  });
+  const summary = runEventSummary({
+    runId: fields.runId,
+    status: 'running',
+    outcome: 'started',
+    costUsd: 0,
+  });
+  const causal = causalMetadata({
+    trajectoryId: `run:${fields.runId}`,
+    itemId: item.id,
+    runId: fields.runId,
+    routeSnapshot: rs,
+    runEventSummary: summary,
+    learningSource: 'agent-action',
+    labelBasis: 'unknown',
+    ts: fields.ts,
+  });
+  recordAgentAction({
+    schemaVersion: 1,
+    ts: fields.ts,
+    machineId: fields.machineId,
+    actor: 'daemon',
+    kind: 'dispatch',
+    outcome: 'started',
+    action: 'daemon:dispatch-start',
+    summary: `${fields.backend} ${fields.mode} dispatch started`,
+    repo: item.repo,
+    itemId: item.id,
+    source: item.source,
+    runId: fields.runId,
+    ...causal,
+    backend: fields.backend,
+    tier: fields.tier,
+    ...(fields.model !== undefined ? { model: fields.model } : {}),
+    reason: fields.reason,
+    tags: ['dispatch-start', fields.mode, item.source],
+    counts: { selected: 1, dispatched: 1 },
+  });
+}
+
 function dispatchesFromOutcomes(outcomes: PromiseSettledResult<TickItemOutcome>[]): DaemonDispatchTrace[] | undefined {
   const dispatches = outcomes.flatMap((outcome) =>
     outcome.status === 'fulfilled' && outcome.value.dispatch ? [outcome.value.dispatch] : [],
@@ -2913,6 +2973,17 @@ export async function tick(
       backendDispatch[backend] = (backendDispatch[backend] ?? 0) + 1;
 
       if (backend === 'builtin') {
+        recordDispatchStartAgentAction(item, {
+          ts: new Date().toISOString(),
+          machineId,
+          runId: attemptId,
+          backend,
+          tier: backendTier,
+          model: selectedModel,
+          assignedBy,
+          reason: assignmentReason,
+          mode: 'swarm',
+        });
         const swarmRun = await runSwarm(
           { goal },
           routingCfg,
@@ -2933,14 +3004,42 @@ export async function tick(
           sink,
         );
 
+        const swarmRunSummary = runEventSummary({
+          runId: swarmRun.id,
+          status: swarmRun.status,
+          outcome: swarmRun.proposalOutcome?.kind ?? swarmRun.status,
+          proposalCreated: swarmRun.proposalOutcome?.kind === 'filed',
+          proposalId: swarmRun.proposalOutcome?.proposalId,
+          diffFiles: swarmRun.proposalOutcome?.files,
+          diffLines:
+            typeof swarmRun.proposalOutcome?.insertions === 'number' ||
+            typeof swarmRun.proposalOutcome?.deletions === 'number'
+              ? (swarmRun.proposalOutcome?.insertions ?? 0) + (swarmRun.proposalOutcome?.deletions ?? 0)
+              : undefined,
+          tokensIn: swarmRun.usage?.tokensIn,
+          tokensOut: swarmRun.usage?.tokensOut,
+          costUsd: swarmRun.usage?.estCostUsd,
+        });
+        dispatchProduction = dispatchProductionFromProposalOutcome(
+          swarmRun.proposalOutcome,
+          swarmRun.id,
+          swarmRunSummary,
+          { proposalRequired: swarmRun.proposalOutcome?.kind !== 'proposal-disabled' },
+        );
+        dispatchSkipReason = noProposalProductionReason(dispatchProduction);
+
         swarmSpent = swarmRun.usage?.estCostUsd ?? 0;
         tickSpent += swarmSpent;
 
         audit({
-          action: 'daemon:proposal-created',
+          action: dispatchProduction?.outcome === 'proposal-created'
+            ? 'daemon:proposal-created'
+            : 'daemon:no-proposal',
           repo: item.repo,
           sandboxId: null,
-          summary: `swarm ${swarmRun.id} finished (status=${swarmRun.status}, spent=$${swarmSpent.toFixed(4)}) for "${item.title}"`,
+          summary:
+            `swarm ${swarmRun.id} finished (status=${swarmRun.status}, ` +
+            `production=${dispatchProduction?.outcome ?? 'unknown'}, spent=$${swarmSpent.toFixed(4)}) for "${item.title}"`,
           result: 'ok',
         });
       } else {
@@ -3009,6 +3108,17 @@ export async function tick(
           // Route through runBestOfN; use its winner's underlying runState.
           // runBestOfN never throws; if all candidates fail, winner is undefined
           // and we fall through to a zero-cost no-proposal outcome.
+          recordDispatchStartAgentAction(item, {
+            ts: new Date().toISOString(),
+            machineId,
+            runId: attemptId,
+            backend,
+            tier: backendTier,
+            model: selectedModel,
+            assignedBy,
+            reason: assignmentReason,
+            mode: 'best-of-n',
+          });
           const bonResult = await runBestOfN(item, routingCfg, {
             n: bestOfN,
             engine: backend,
@@ -3059,6 +3169,17 @@ export async function tick(
           runState = (bonResult.winner as unknown as { state: Awaited<ReturnType<typeof runGoal>> }).state
             ?? { id: bonResult.winner.proposalId ?? `bon-${Date.now()}`, status: 'done' as const, usage: undefined };
         } else {
+          recordDispatchStartAgentAction(item, {
+            ts: new Date().toISOString(),
+            machineId,
+            runId: attemptId,
+            backend,
+            tier: backendTier,
+            model: selectedModel,
+            assignedBy,
+            reason: assignmentReason,
+            mode: 'single',
+          });
           runState = await runGoal(goal, routingCfg, {
             engine: backend,
             sandboxEngine: true,
@@ -3104,7 +3225,7 @@ export async function tick(
       }
 		    } catch (err) {
 		      const msg = err instanceof Error ? err.message : String(err);
-		      const errorReason = `dispatch-error: ${msg.slice(0, 120)}`;
+		      const errorReason = 'dispatch-error: executor threw';
 		      dispatch = dispatchTrace(item, {
 		        backend: backend ?? null,
 		        tier: backendTier,
@@ -3442,13 +3563,14 @@ export async function tick(
 
   if (dispatchedCount > 0) {
     try {
+      const completedAt = new Date().toISOString();
       const productionEvents = outcomes.flatMap((outcome): DispatchProductionEvent[] => {
         if (outcome.status !== 'fulfilled' || !outcome.value.dispatched) return [];
         const event = dispatchProductionEventFromOutcome(
           outcome.value,
           newPendingProposalsByItemId.get(outcome.value.item.id),
           machineId,
-          now,
+          completedAt,
         );
         return event ? [event] : [];
       });
@@ -3459,9 +3581,10 @@ export async function tick(
     }
   }
   try {
+    const completedAt = new Date().toISOString();
     const skipActions = outcomes.flatMap((outcome): AgentActionEvent[] => {
       if (outcome.status !== 'fulfilled') return [];
-      const event = agentActionFromDispatchSkip(outcome.value, now, machineId);
+      const event = agentActionFromDispatchSkip(outcome.value, completedAt, machineId);
       return event ? [event] : [];
     });
     recordAgentAction(skipActions);

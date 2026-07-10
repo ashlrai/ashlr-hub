@@ -30,6 +30,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import type { AshlrConfig, RunState, RunUsage, SwarmRun } from '../src/core/types.js';
 import type { StreamSink } from '../src/core/run/streaming.js';
@@ -49,6 +51,7 @@ import {
   sweepOrphanSandboxes,
 } from '../src/core/sandbox/worktree.js';
 import { nullSink } from '../src/core/run/streaming.js';
+import { pendingCount } from '../src/core/inbox/store.js';
 
 // ---------------------------------------------------------------------------
 // Determinism: mock the ONLY model-touching surface (orchestrator.runGoal) and
@@ -64,9 +67,15 @@ import { nullSink } from '../src/core/run/streaming.js';
 const ZERO_USAGE: RunUsage = { tokensIn: 1, tokensOut: 1, steps: 1, estCostUsd: 0 };
 
 const runGoalGoals: string[] = [];
+let runGoalMutation: ((cwd: string) => void) | null = null;
 
-const mockRunGoal = vi.fn(async (goal: string): Promise<RunState> => {
+const mockRunGoal = vi.fn(async (
+  goal: string,
+  _cfg?: AshlrConfig,
+  opts?: { cwd?: string },
+): Promise<RunState> => {
   runGoalGoals.push(goal);
+  if (runGoalMutation !== null && opts?.cwd) runGoalMutation(opts.cwd);
   return {
     id: `mock-run-${runGoalGoals.length}`,
     goal,
@@ -138,6 +147,7 @@ beforeEach(() => {
   fx = makeFixture();
   cfg = makeCfg();
   runGoalGoals.length = 0;
+  runGoalMutation = null;
   mockRunGoal.mockClear();
   mockPlanSwarm.mockClear();
 });
@@ -388,6 +398,193 @@ describe('H2 swarm resume — resume of a crashed swarm that had a real sandbox'
     expect(
       repo.branches().filter((b) => !b.startsWith('ashlr/sandbox/')),
     ).toEqual(userBranchesBefore);
+  });
+
+  it('files one typed proposal from the sandbox diff and persists its capture outcome', async () => {
+    await ensureImported();
+    repo = fx.makeRepo({ files: { 'src/value.ts': 'export const value = 1;\n' } });
+    repo.enroll();
+    const treeBefore = repo.shasumTree();
+    const sandboxesBefore = new Set(listSandboxes().map((sandbox) => sandbox.id));
+    const pendingBefore = pendingCount();
+    const id = 'h2-resume-files-proposal';
+    const fakeSecret = 'sk-' + 'testvalueverysecret00000000';
+    crashMidSwarm({
+      id,
+      goal: 'change the sandboxed value',
+      project: repo.dir,
+      taskIds: ['build-value'],
+      doneTaskIds: [],
+      phase: 'build',
+    });
+    runGoalMutation = (cwd) => {
+      writeFileSync(
+        join(cwd, 'src/value.ts'),
+        `export const value = 2; // ${fakeSecret}\n`,
+        'utf8',
+      );
+    };
+
+    const result = await runSwarm(
+      { goal: 'change the sandboxed value' },
+      cfg,
+      {
+        resumeId: id,
+        project: repo.dir,
+        sandbox: true,
+        requireSandbox: true,
+        propose: true,
+        noCapture: true,
+        parallel: 1,
+      },
+      nullSink(),
+    );
+
+    expect(result.status).toBe('done');
+    expect(result.proposalOutcome).toMatchObject({
+      kind: 'filed',
+      files: 1,
+      insertions: 1,
+      deletions: 1,
+    });
+    expect(result.proposalOutcome?.proposalId).toMatch(/^prop-/);
+    expect(reloadSwarm(id)?.proposalOutcome).toEqual(result.proposalOutcome);
+    expect(JSON.stringify(reloadSwarm(id))).not.toContain(fakeSecret);
+    expect(result.result).not.toContain(fakeSecret);
+    expect(pendingCount()).toBe(pendingBefore + 1);
+    expect(repo.shasumTree()).toBe(treeBefore);
+    expect(repo.gitStatus()).toBe('');
+    expect(listSandboxes().every((sandbox) => sandboxesBefore.has(sandbox.id))).toBe(true);
+  });
+
+  it('classifies a failed no-edit sandbox run as engine failure rather than empty diff', async () => {
+    await ensureImported();
+    repo.enroll();
+    const treeBefore = repo.shasumTree();
+    const sandboxesBefore = new Set(listSandboxes().map((sandbox) => sandbox.id));
+    const id = 'h2-resume-failed-no-diff';
+    crashMidSwarm({
+      id,
+      goal: 'fail without changing files',
+      project: repo.dir,
+      taskIds: ['build-fails'],
+      doneTaskIds: [],
+      phase: 'build',
+    });
+    mockRunGoal.mockRejectedValueOnce(new Error('synthetic task failure'));
+
+    const result = await runSwarm(
+      { goal: 'fail without changing files' },
+      cfg,
+      {
+        resumeId: id,
+        project: repo.dir,
+        sandbox: true,
+        requireSandbox: true,
+        propose: true,
+        noCapture: true,
+        parallel: 1,
+      },
+      nullSink(),
+    );
+
+    expect(result.status).toBe('failed');
+    expect(result.proposalOutcome).toMatchObject({
+      kind: 'engine-failed-no-diff',
+      files: 0,
+      insertions: 0,
+      deletions: 0,
+    });
+    expect(reloadSwarm(id)?.proposalOutcome).toEqual(result.proposalOutcome);
+    expect(repo.shasumTree()).toBe(treeBefore);
+    expect(repo.gitStatus()).toBe('');
+    expect(listSandboxes().every((sandbox) => sandboxesBefore.has(sandbox.id))).toBe(true);
+  });
+
+  it('keeps a failed sandboxed dry-run out of the swarm store and removes its sandbox', async () => {
+    await ensureImported();
+    repo.enroll();
+    const runId = 'h2-dry-run-planning-failure';
+    const sandboxesBefore = new Set(listSandboxes().map((sandbox) => sandbox.id));
+    mockPlanSwarm.mockRejectedValueOnce(new Error('synthetic planning failure'));
+
+    const result = await runSwarm(
+      { goal: 'preview a failing plan' },
+      cfg,
+      {
+        runId,
+        project: repo.dir,
+        sandbox: true,
+        requireSandbox: true,
+        propose: false,
+        noCapture: true,
+        parallel: 1,
+        dryRun: true,
+      },
+      nullSink(),
+    );
+
+    expect(result.status).toBe('failed');
+    expect(reloadSwarm(runId)).toBeNull();
+    expect(listSandboxes().every((sandbox) => sandboxesBefore.has(sandbox.id))).toBe(true);
+    expect(repo.gitStatus()).toBe('');
+  });
+
+  it('reports completeness-gate truth and removes the blocked proposal sandbox', async () => {
+    await ensureImported();
+    repo = fx.makeRepo({
+      files: {
+        'package.json': '{"name":"fixture","dependencies":{}}\n',
+        'package-lock.json': '{"name":"fixture","lockfileVersion":3}\n',
+      },
+    });
+    repo.enroll();
+    const treeBefore = repo.shasumTree();
+    const sandboxesBefore = new Set(listSandboxes().map((sandbox) => sandbox.id));
+    const pendingBefore = pendingCount();
+    const id = 'h2-resume-completeness-block';
+    crashMidSwarm({
+      id,
+      goal: 'change a dependency without its lockfile',
+      project: repo.dir,
+      taskIds: ['build-dependency'],
+      doneTaskIds: [],
+      phase: 'build',
+    });
+    runGoalMutation = (cwd) => {
+      writeFileSync(
+        join(cwd, 'package.json'),
+        '{"name":"fixture","dependencies":{"left-pad":"1.3.0"}}\n',
+        'utf8',
+      );
+    };
+
+    const result = await runSwarm(
+      { goal: 'change a dependency without its lockfile' },
+      cfg,
+      {
+        resumeId: id,
+        project: repo.dir,
+        sandbox: true,
+        requireSandbox: true,
+        propose: true,
+        noCapture: true,
+        parallel: 1,
+      },
+      nullSink(),
+    );
+
+    expect(result.status).toBe('done');
+    expect(result.proposalOutcome).toMatchObject({
+      kind: 'completeness-gate',
+      reason: 'dependency change (package.json) lacks corresponding lockfile update',
+      files: 1,
+    });
+    expect(reloadSwarm(id)?.proposalOutcome).toEqual(result.proposalOutcome);
+    expect(pendingCount()).toBe(pendingBefore);
+    expect(repo.shasumTree()).toBe(treeBefore);
+    expect(repo.gitStatus()).toBe('');
+    expect(listSandboxes().every((sandbox) => sandboxesBefore.has(sandbox.id))).toBe(true);
   });
 });
 
