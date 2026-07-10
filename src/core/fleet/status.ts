@@ -2017,16 +2017,19 @@ function dispatchYieldNextAction(diagnostic: FleetDispatchYieldDiagnostics): Dia
 function diagnosticResliceDrainNextAction(status: FleetStatus): FleetNextAction | null {
   const diagnostic = status.dispatchYieldDiagnostics;
   const resliceCount = status.queue.generatedWork?.diagnosticReslices ?? 0;
+  const eligibleReslices = status.queue.next?.filter(isDiagnosticResliceQueueItem) ?? [];
+  const eligibleResliceCount = eligibleReslices.length;
   if (
     !diagnostic ||
     diagnostic.verdict !== 'actionable' ||
     diagnostic.action !== 'tighten-context-or-reslice' ||
-    resliceCount <= 0
+    resliceCount <= 0 ||
+    eligibleResliceCount <= 0
   ) {
     return null;
   }
 
-  const topReslice = status.queue.next?.find(isDiagnosticResliceQueueItem) ?? null;
+  const topReslice = eligibleReslices[0] ?? null;
   const diagnosticDetail = formatDispatchYieldDiagnosticDetail(diagnostic);
   const target = topReslice?.repo ?? diagnostic.primaryCandidate?.backend;
   const first = topReslice ? ` First: ${topReslice.title}.` : '';
@@ -2034,29 +2037,41 @@ function diagnosticResliceDrainNextAction(status: FleetStatus): FleetNextAction 
     status.queue.generatedWork?.diagnosticResliceDrainStalled === true
     ? ' reslice-drain-stalled: the latest targeted drain tick selected none.'
     : '';
+  const daemonRunning = status.daemon.running === true;
+  const label = daemonRunning ? 'Monitor diagnostic auto-drain' : 'Drain diagnostic reslices';
+  const countDetail = eligibleResliceCount === resliceCount
+    ? `${eligibleResliceCount} diagnostic no-diff reslice item(s) are eligible`
+    : `${eligibleResliceCount}/${resliceCount} diagnostic no-diff reslice item(s) are daemon-eligible`;
   return {
     id: 'drain-diagnostic-reslices',
     priority: 'high',
-    label: 'Drain diagnostic reslices',
+    label,
     detail:
-      `${resliceCount} diagnostic no-diff reslice item(s) are queued while dispatch yield is actionable: ` +
+      `${countDetail} while dispatch yield is actionable: ` +
       `${diagnosticDetail}.${first}${stalled}`,
     ...(target ? { target } : {}),
-    commands: [
-      nextActionCommand('Drain diagnostic reslices', [
-        'ashlr',
-        'daemon',
-        'start',
-        '--once',
-        '--drain',
-        'diagnostic-reslices',
-        '--limit',
-        String(DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT),
-      ], 'autonomous-dispatch', {
-        note: 'Runs one guarded daemon tick targeted at already-queued diagnostic no-diff reslices.',
-      }),
-      nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
-    ],
+    commands: daemonRunning
+      ? [
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only', {
+            note: 'Launchd daemon auto-drains eligible diagnostic reslices during normal live ticks.',
+          }),
+          nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status'], 'read-only'),
+        ]
+      : [
+          nextActionCommand('Drain diagnostic reslices', [
+            'ashlr',
+            'daemon',
+            'start',
+            '--once',
+            '--drain',
+            'diagnostic-reslices',
+            '--limit',
+            String(DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT),
+          ], 'autonomous-dispatch', {
+            note: 'Runs one guarded daemon tick targeted at already-queued diagnostic no-diff reslices.',
+          }),
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+        ],
   };
 }
 
@@ -2331,18 +2346,9 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
           note: 'Writes only metadata-derived playbooks under the Ashlr genome hub; no repo source, merge, or network authority.',
         }),
         nextActionCommand('Evaluate attention', ['ashlr', 'eval', 'attention', '--json'], 'read-only'),
-        ...(shouldDrainReslices
-          ? [nextActionCommand('Drain reslice queue', [
-              'ashlr',
-              'daemon',
-              'start',
-              '--once',
-              '--drain',
-              'diagnostic-reslices',
-              '--limit',
-              String(DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT),
-            ], 'autonomous-dispatch', {
-              note: 'Runs one guarded daemon tick targeted at already-queued diagnostic reslices.',
+        ...(shouldDrainReslices && status.daemon.running
+          ? [nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status'], 'read-only', {
+              note: 'Daemon auto-drains eligible diagnostic reslices during normal live ticks.',
             })]
           : []),
         nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
@@ -3346,7 +3352,9 @@ function missionDirective(
     case 'inspect-auto-merge-blockers':
       return 'Inspect merge blockers';
     case 'drain-diagnostic-reslices':
-      return 'Drain diagnostic reslices';
+      return action.label === 'Monitor diagnostic auto-drain'
+        ? 'Monitor diagnostic auto-drain'
+        : 'Drain diagnostic reslices';
     case 'inspect-dispatch-yield':
       return 'Recover dispatch yield';
     case 'inspect-dispatch-skips':
@@ -3354,9 +3362,7 @@ function missionDirective(
     case 'inspect-proposal-production':
       return 'Recover proposal production';
     case 'improve-context-efficiency':
-      return action.commands?.some((command) => command.label === 'Drain reslice queue')
-        ? 'Run context reflection and reslice'
-        : 'Run context reflection';
+      return 'Run context reflection';
     case 'review-phantom-audit':
       return 'Review Phantom audit';
     case 'inspect-attempt-causal-coverage':

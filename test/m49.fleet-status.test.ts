@@ -2060,7 +2060,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
   });
 
-  it('adds a guarded reslice drain command to context-efficiency action when generated reslices are queued', async () => {
+  it('adds a daemon monitor command to context-efficiency action when generated reslices are queued', async () => {
     const now = new Date().toISOString();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-a');
@@ -2117,14 +2117,15 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(action?.commands).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        label: 'Drain reslice queue',
-        argv: ['ashlr', 'daemon', 'start', '--once', '--drain', 'diagnostic-reslices', '--limit', '3'],
-        safety: 'autonomous-dispatch',
+        label: 'Inspect daemon status',
+        argv: ['ashlr', 'daemon', 'status'],
+        safety: 'read-only',
       }),
     ]));
+    expect(action?.commands?.map((command) => command.label)).not.toContain('Drain reslice queue');
   });
 
-  it('uses the reflection-and-reslice mission directive when low yield is the primary action', async () => {
+  it('uses the reflection mission directive when low yield is the primary action', async () => {
     const now = new Date().toISOString();
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo-a');
@@ -2203,9 +2204,10 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const s = await buildFleetStatus(baseConfig());
     const action = s.nextActions?.find((candidate) => candidate.id === 'improve-context-efficiency');
 
-    expect(action?.commands?.map((command) => command.label)).toContain('Drain reslice queue');
+    expect(action?.commands?.map((command) => command.label)).not.toContain('Drain reslice queue');
+    expect(action?.commands?.map((command) => command.label)).toContain('Inspect daemon status');
     expect(s.missionBrief).toMatchObject({
-      directive: 'Run context reflection and reslice',
+      directive: 'Run context reflection',
       action: {
         id: 'improve-context-efficiency',
       },
@@ -2518,17 +2520,17 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(actionIds).toContain('inspect-dispatch-yield');
     expect(drainAction).toMatchObject({
       priority: 'high',
-      label: 'Drain diagnostic reslices',
-      detail: expect.stringContaining('1 diagnostic no-diff reslice item(s) are queued'),
+      label: 'Monitor diagnostic auto-drain',
+      detail: expect.stringContaining('1 diagnostic no-diff reslice item(s) are eligible'),
       commands: [
-        expect.objectContaining({
-          label: 'Drain diagnostic reslices',
-          argv: ['ashlr', 'daemon', 'start', '--once', '--drain', 'diagnostic-reslices', '--limit', '3'],
-          safety: 'autonomous-dispatch',
-        }),
         expect.objectContaining({
           label: 'Inspect fleet status',
           argv: ['ashlr', 'fleet', 'status', '--json'],
+          safety: 'read-only',
+        }),
+        expect.objectContaining({
+          label: 'Inspect daemon status',
+          argv: ['ashlr', 'daemon', 'status'],
           safety: 'read-only',
         }),
       ],
@@ -2541,14 +2543,15 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       },
     });
     expect(s.missionBrief).toMatchObject({
-      directive: 'Drain diagnostic reslices',
+      directive: 'Monitor diagnostic auto-drain',
       action: {
         id: 'drain-diagnostic-reslices',
       },
     });
     const formatted = formatFleetStatus(s);
-    expect(formatted).toContain('[high] Drain diagnostic reslices');
-    expect(formatted).toContain('cmd: Drain diagnostic reslices: ashlr daemon start --once --drain diagnostic-reslices --limit 3 (autonomous-dispatch)');
+    expect(formatted).toContain('[high] Monitor diagnostic auto-drain');
+    expect(formatted).toContain('cmd: Inspect fleet status: ashlr fleet status --json (read-only)');
+    expect(formatted).not.toContain('cmd: Drain diagnostic reslices: ashlr daemon start --once --drain diagnostic-reslices --limit 3');
 
     writeRunningDaemon(tmpHome, [
       {
@@ -2582,6 +2585,67 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       noProposalDispatches: 0,
     });
     expect(stalledDrainAction?.detail).toContain('reslice-drain-stalled');
+  });
+
+  it('does not promote diagnostic drain when queued reslices are cooling', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    const now = new Date().toISOString();
+    const reslice = makeBacklogItem(
+      repo,
+      'repo:proposal-repair-nodiff:cooling123456',
+      'Reslice no-diff dispatch for repo item repo:goal:cooling',
+      9,
+      'self',
+      ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+    );
+    const fresh = makeBacklogItem(repo, 'repo:goal:fresh-generic', 'Fresh generic work', 2, 'goal');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome, [], now);
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeBacklogSnapshot(tmpHome, repo, [reslice, fresh], now);
+    recordOutcome(reslice.id, 'empty', now);
+    const baseEvent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'item-cooling-reslice-a',
+      source: 'goal',
+      repo,
+      title: 'Improve no-alt yield',
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      routeReason: 'local-coder bulk',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0.001,
+      reason: 'engine "local-coder" completed without file changes',
+      basis: 'run-proposal-outcome',
+    };
+    recordDispatchProduction([
+      baseEvent,
+      { ...baseEvent, itemId: 'item-cooling-reslice-b' },
+      { ...baseEvent, itemId: 'item-cooling-reslice-c' },
+    ]);
+
+    const s = await buildFleetStatus(baseConfig());
+    const actionIds = s.nextActions?.map((action) => action.id) ?? [];
+
+    expect(s.queue.generatedWork).toMatchObject({
+      diagnosticReslices: 1,
+      proposalRepair: 1,
+    });
+    expect(s.queue.eligibleBacklogItems).toBe(1);
+    expect(s.queue.cooldownItems).toBe(1);
+    expect(s.queue.next?.[0]).toMatchObject({
+      id: fresh.id,
+      title: fresh.title,
+    });
+    expect(actionIds).not.toContain('drain-diagnostic-reslices');
+    expect(actionIds[0]).toBe('inspect-dispatch-yield');
   });
 
   it('keeps verification failure repair ahead of diagnostic drain while merge gate is blocked', async () => {

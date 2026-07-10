@@ -1217,6 +1217,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Keep blocker/action/Mission Brief details metadata-only: bounded counts, no raw paths, secret names, commands, findings, stdout/stderr, env, or file contents.
 - [x] Add focused Phantom/FleetStatus regression coverage for blocked readiness and Mission Brief directive.
 - [x] Run focused `m348`/`m49`, typecheck, and diff checks.
+- [x] Run final lint, build, audit, commit, push, and smoke live status.
+
+## Current Continuation - Diagnostic Auto-Drain Command Rail
+- [x] Use scout/live status to identify stale manual targeted drain command while launchd daemon is already active and auto-draining.
+- [x] Gate diagnostic drain next action on eligible reslice items from `queue.next`, not total visible generated reslices.
+- [x] Change active-daemon action/directive copy to `Monitor diagnostic auto-drain` with read-only commands only.
+- [x] Convert context-efficiency secondary reslice command to read-only daemon inspection and keep Mission Brief at `Run context reflection`.
+- [x] Add M49 regressions for active-daemon monitoring and visible-but-cooling reslices.
 - [ ] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.
 
 ## Current Continuation - 10:4 Explicit Verification Contract

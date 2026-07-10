@@ -1185,3 +1185,10 @@
   - Direct node entrypoints pass: `node node_modules/typescript/bin/tsc --noEmit` and `node node_modules/vitest/vitest.mjs run` from `relay` both work; Vitest reports 48 passed tests.
   - Safe next step: add root `/Users/masonwyatt/Desktop/10:4/ashlr.verify.json` with `mode:"replace-detected"` and argv-only commands using `cwd:"relay"` plus direct `node node_modules/...` entrypoints. `augment-detected` is unsafe here because it would retain broken npm commands.
   - Push note: `/Users/masonwyatt/Desktop/10:4` has no remotes configured, so any contract commit there will be local-only until a remote/upstream is added.
+
+- Current diagnostic auto-drain command rail pass:
+  - Live/scout finding: daemon auto-drain already handles trusted diagnostic reslices during ordinary live ticks, and live status showed `diagnosticResliceDrain.automatic:true`; FleetStatus still made `drain-diagnostic-reslices` primary with `ashlr daemon start --once --drain diagnostic-reslices --limit 3`, which is stale while launchd is already active.
+  - Implementation: `diagnosticResliceDrainNextAction()` now gates on daemon-eligible diagnostic reslices from `queue.next`, not total visible generated reslices. When the daemon is running, the action label/directive becomes `Monitor diagnostic auto-drain` and commands are read-only status inspections. The explicit targeted drain CLI path remains available for manual/offline use but is not recommended from the active-daemon rail.
+  - Context-efficiency cleanup: secondary `Drain reslice queue` mutating command was converted to a read-only daemon inspection, and Mission Brief context copy now stays `Run context reflection`.
+  - Regression coverage: M49 covers active-daemon monitoring copy/commands, context-efficiency command conversion, and the cooling edge where diagnostic reslices are visible but not eligible, so `inspect-dispatch-yield` remains primary.
+  - Verification passed so far: focused M49 plus dashboard SSE (`m49`, `m213`, 82 tests), `npm run typecheck -- --pretty false`, `node --check src/core/web/public/app.js`, and `git diff --check`.
