@@ -60,6 +60,7 @@ import { learnFromRejection } from './self-improve.js';
 // M243: skill-library write-back (fire-and-forget, gated cfg.foundry.skillLibrary, default ON)
 import { learnFromApplied } from './skill-library.js';
 import { recordAgentAction } from './agent-action-ledger.js';
+import { causalMetadataFromProposal } from '../learning/causal.js';
 
 function hasVerificationCommandEvidence(result: Proposal['verifyResult']): boolean {
   return Array.isArray(result?.ran) && result.ran.length > 0;
@@ -136,17 +137,33 @@ function recordAutoMergeVerificationAgentAction(fields: {
       : fields.ok === true
         ? 'passed'
         : 'failed';
+  const ts = new Date().toISOString();
+  const causal = causalMetadataFromProposal(fields.proposal, {
+    ts,
+    learningSource: 'agent-action',
+    labelBasis: 'verification-outcome',
+  });
   recordAgentAction({
     schemaVersion: 1,
-    ts: new Date().toISOString(),
+    ts,
     actor: 'verifier',
     kind: 'verification',
     outcome: fields.phase === 'start' ? 'unknown' : fields.ok === true ? 'verified' : 'failed',
     action: `auto-merge:${fields.check}-${fields.phase}`,
     summary: `${fields.check} ${status} for ${fields.proposal.title ?? fields.proposal.id}`,
     ...(typeof fields.proposal.repo === 'string' && fields.proposal.repo ? { repo: fields.proposal.repo } : {}),
+    ...(causal.workItemId ? { itemId: causal.workItemId } : {}),
+    ...(causal.workSource ? { source: causal.workSource } : {}),
     proposalId: fields.proposal.id,
-    ...(fields.proposal.workSource ? { source: fields.proposal.workSource } : {}),
+    ...(causal.runId ? { runId: causal.runId } : {}),
+    ...(causal.trajectoryId ? { trajectoryId: causal.trajectoryId } : {}),
+    ...(causal.routeSnapshot ? { routeSnapshot: causal.routeSnapshot } : {}),
+    ...(causal.runEventSummary ? { runEventSummary: causal.runEventSummary } : {}),
+    ...(causal.evidenceOutcome ? { evidenceOutcome: causal.evidenceOutcome } : {}),
+    learningSource: causal.learningSource ?? 'agent-action',
+    labelBasis: causal.labelBasis ?? 'verification-outcome',
+    ...(causal.routerPolicyVersion ? { routerPolicyVersion: causal.routerPolicyVersion } : {}),
+    ...(causal.learningEpoch ? { learningEpoch: causal.learningEpoch } : {}),
     reason: fields.detail ?? fields.check,
     durationMs: fields.durationMs,
     tags: ['auto-merge', fields.check, fields.phase],
@@ -694,12 +711,15 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
               judgeAttestation = undefined;
             }
           }
+          const ts = new Date().toISOString();
           recordDecision({
-            ts: new Date().toISOString(),
+            ts,
             proposalId: p.id,
-            ...(p.workItemId ? { workItemId: p.workItemId } : {}),
-            ...(p.workSource ? { workSource: p.workSource } : {}),
-            ...(p.runId ? { runId: p.runId } : {}),
+            ...causalMetadataFromProposal(p, {
+              ts,
+              learningSource: 'decision-ledger',
+              labelBasis: 'judge-verdict',
+            }),
             action: 'judged',
             engine: judgeEngine,
             model: judgeEngine,

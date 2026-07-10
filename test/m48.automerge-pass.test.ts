@@ -297,6 +297,36 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
       workItemId: '/tmp/repo:issue:frontier-gpt',
       workSource: 'issue',
       runId: 'run-frontier-gpt',
+      trajectoryId: 'trajectory-frontier-gpt',
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'frontier',
+        model: 'gpt-5.5',
+        assignedBy: 'gateway',
+        reason: 'test route',
+        routerPolicyVersion: 'router-policy-test',
+      },
+      runEventSummary: {
+        runId: 'run-frontier-gpt',
+        status: 'done',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+        proposalId: 'frontier-gpt',
+        diffFiles: 1,
+        diffLines: 8,
+        actionCounts: { proposalCreated: 1, totalSteps: 3 },
+      },
+      evidenceOutcome: {
+        target: 'main',
+        trustBasis: 'verification',
+        riskClass: 'low',
+        verificationPassed: true,
+        policyAllowed: true,
+        policyAction: 'merge-main',
+        gateCount: 8,
+      },
+      routerPolicyVersion: 'router-policy-test',
+      learningEpoch: '2026-07-10',
     })];
     mockResolveFrontierJudgeClient.mockReturnValue({
       model: 'gpt-5.5',
@@ -316,13 +346,77 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
       workItemId: '/tmp/repo:issue:frontier-gpt',
       workSource: 'issue',
       runId: 'run-frontier-gpt',
+      trajectoryId: 'trajectory-frontier-gpt',
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'frontier',
+        model: 'gpt-5.5',
+        assignedBy: 'gateway',
+        reason: 'test route',
+        routerPolicyVersion: 'router-policy-test',
+      },
+      runEventSummary: {
+        runId: 'run-frontier-gpt',
+        status: 'done',
+        proposalCreated: true,
+        proposalId: 'frontier-gpt',
+        diffFiles: 1,
+        diffLines: 8,
+      },
+      evidenceOutcome: {
+        target: 'main',
+        trustBasis: 'verification',
+        riskClass: 'low',
+        verificationPassed: true,
+        policyAllowed: true,
+        policyAction: 'merge-main',
+        gateCount: 8,
+      },
+      learningSource: 'decision-ledger',
+      labelBasis: 'judge-verdict',
+      routerPolicyVersion: 'router-policy-test',
+      learningEpoch: '2026-07-10',
     });
     expect(typeof judgedCall?.[0]?.judgeAttestation).toBe('string');
     expect(judgedCall?.[0]?.judgeAttestation).toHaveLength(64);
   });
 
   it('records auto-merge verification lifecycle telemetry in evidence-backed mode', async () => {
-    pendingProposals = [makeProposal('evidence-verify', { engineTier: 'local' })];
+    pendingProposals = [makeProposal('evidence-verify', {
+      engineTier: 'local',
+      workItemId: '/tmp/repo:goal:evidence-verify',
+      workSource: 'goal',
+      runId: 'run-evidence-verify',
+      trajectoryId: 'trajectory-evidence-verify',
+      routeSnapshot: {
+        backend: 'local-coder',
+        tier: 'local',
+        model: 'qwen2.5-coder',
+        assignedBy: 'daemon',
+        reason: 'evidence mode local verification',
+        routerPolicyVersion: 'router-policy-test',
+      },
+      runEventSummary: {
+        runId: 'run-evidence-verify',
+        status: 'done',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+        proposalId: 'evidence-verify',
+        diffFiles: 1,
+        diffLines: 3,
+        actionCounts: { proposalCreated: 1, totalSteps: 2 },
+      },
+      evidenceOutcome: {
+        target: 'main',
+        trustBasis: 'evidence',
+        riskClass: 'low',
+        verificationPassed: true,
+        policyAllowed: true,
+        policyAction: 'merge-main',
+      },
+      routerPolicyVersion: 'router-policy-test',
+      learningEpoch: '2026-07-10',
+    })];
     mergeResults['evidence-verify'] = { ok: true, merged: true, reason: 'merged' };
     const cfg = evidenceCfg();
 
@@ -344,6 +438,38 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
       outcome: 'verified',
       proposalId: 'evidence-verify',
       repo: '/tmp/repo',
+      itemId: '/tmp/repo:goal:evidence-verify',
+      source: 'goal',
+      runId: 'run-evidence-verify',
+      trajectoryId: 'trajectory-evidence-verify',
+      routeSnapshot: {
+        backend: 'local-coder',
+        tier: 'local',
+        model: 'qwen2.5-coder',
+        assignedBy: 'daemon',
+        reason: 'evidence mode local verification',
+        routerPolicyVersion: 'router-policy-test',
+      },
+      runEventSummary: {
+        runId: 'run-evidence-verify',
+        status: 'done',
+        proposalCreated: true,
+        proposalId: 'evidence-verify',
+        diffFiles: 1,
+        diffLines: 3,
+      },
+      evidenceOutcome: {
+        target: 'main',
+        trustBasis: 'evidence',
+        riskClass: 'low',
+        verificationPassed: true,
+        policyAllowed: true,
+        policyAction: 'merge-main',
+      },
+      learningSource: 'agent-action',
+      labelBasis: 'verification-outcome',
+      routerPolicyVersion: 'router-policy-test',
+      learningEpoch: '2026-07-10',
       counts: { commands: 1 },
     });
     expect(events[1]).toMatchObject({
@@ -352,6 +478,12 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
       outcome: 'unknown',
       proposalId: 'evidence-verify',
       repo: '/tmp/repo',
+      itemId: '/tmp/repo:goal:evidence-verify',
+      source: 'goal',
+      runId: 'run-evidence-verify',
+      trajectoryId: 'trajectory-evidence-verify',
+      learningSource: 'agent-action',
+      labelBasis: 'verification-outcome',
     });
     const serialized = JSON.stringify(events);
     expect(serialized).not.toContain('diff --git');
