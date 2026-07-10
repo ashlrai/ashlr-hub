@@ -1,5 +1,13 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Current Prompt-Trackr Merge Contract
+- Selection: verifier scout ranked `prompt-trackr` as the safest next explicit contract because its branch `codex/prompt-trackr-agent-docs` was synced to `origin`, had a real remote, and only one pre-existing dirty tracked test file. `ashlrcode` and `ashlr-plugin` are better handled after dirty WIP is isolated.
+- Implementation: added root `ashlr.verify.json` in `/Users/masonwyatt/Desktop/github/dev-tools/prompt-trackr` with `mode:"replace-detected"` and required merge-profile commands for `npm run typecheck`, `npm run build`, and `npm run test`.
+- Validation: Hub profile detection reports `mergeGradeExplicit:true` with 3 required merge-profile commands. `npm run typecheck`, `npm run build`, and `npm run test` passed. `npm run lint` is intentionally not a required merge gate yet because the repo currently has a pre-existing lint backlog (`40` errors, `162` warnings) unrelated to the manifest.
+- Push: committed `d9fade5 chore: Add Ashlr verification contract` and pushed it to `origin/codex/prompt-trackr-agent-docs`. The pre-existing dirty file `src/app/api/__tests__/leaderboard-composite.test.ts` remained unstaged.
+- Fleet coverage: after `bin/ashlr backlog refresh --json`, FleetStatus moved to `14/24` explicit merge contracts, with 10 repos still missing explicit contracts. Remaining missing names: `ashlr sales pipeline`, `ashlr-core-efficiency`, `ashlr-md`, `ashlr-plugin`, `ashlr-workbench`, `ashlrcode`, `morphkit`, `phantom-secrets`, `stack`, and `webfetch`.
+- Follow-up risk: GitHub reported 3 default-branch Dependabot vulnerabilities for `prompt-trackr` during push. That is a separate security lane from the verifier manifest.
+
 ## Current Selection Workspace Telemetry
 - Research input: recent multi-agent and long-running-agent guidance converges on durable session/workspace logs, end-state checkpoints, artifact handoffs, and explicit monitoring. The Hub already had append-only action telemetry; the gap was that queue selection and non-dispatch skips were not fully broadcast into that workspace.
 - Implementation: daemon ticks now emit a metadata-only `daemon:selection` agent-action row after final selection/claim, with backlog, eligible, pending-blocked, cooldown-blocked, fast-repair-cooldown, selected, and claimed counts. This records why the fleet attended to a lane before any dispatch happens.

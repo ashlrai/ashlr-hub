@@ -68,6 +68,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Follow-up: Repair live dead-owner spend guard and filter noisy self-heal backlog
 - [x] Follow-up: Fast-track healthy generated repair recovery into queue selection and Fleet OS visibility
 - [x] Follow-up: Add selection-phase global workspace telemetry for recursive repair learning
+- [x] Follow-up: Add prompt-trackr explicit merge-grade verification contract
 - [ ] Follow-up: Set valid Raycast author account for publish validation
 
 ## Key Questions
