@@ -1156,3 +1156,8 @@
   - Follow-up refinement: added `actionableCauses` beside raw count-sorted causes so policy-suppressed rows cannot hide current writer unlabeled gaps. CLI and web cards now show the actionable cause when it differs from the top raw count.
   - Verification for refinement passed: focused `m352`/`m49` (74 tests), adjacent privacy/dashboard suites (`m349`, `m213`, `m210`, 49 tests), `npm run typecheck -- --pretty false`, `node --check src/core/web/public/app.js`, `npm run lint` (known warning-only baseline), `npm run build`, `npm audit --audit-level=moderate`, and `git diff --check`.
   - Production push/reload for refinement: pushed `51e9e59 feat: Surface actionable causal coverage gaps` to `origin/master`, reinstalled launchd, and smoked daemon PID `97408` with guard clear, current tick in progress, 29 backlog / 24 eligible / 0 pending proposals. Live FleetStatus now reports raw `policy-suppressed` as top cause while also surfacing actionable `current-writer-unlabeled-attempt:11` in CLI/JSON.
+
+- Current Fleet OS data-quality pill pass:
+  - Scout finding: Fleet Dashboard's `Data` pill could omit nonzero `degraded-source` and `unknown-source` counts from `sourceQualitySummary`, so a degraded snapshot could look like a clean fresh/zero state.
+  - Implementation: `fdReadinessDataText()` now renders nonzero degraded, unknown, stale, missing, and healthy-zero source-quality badges directly, with `healthy-zero` displayed as operator-readable `empty`.
+  - Verification passed: `node --check src/core/web/public/app.js`, focused dashboard CI (`m213`, `m210`, 46 tests), `npm run typecheck -- --pretty false`, `git diff --check`, `npm run lint` (known 114-warning baseline), `npm run build`, and `npm audit --audit-level=moderate`.

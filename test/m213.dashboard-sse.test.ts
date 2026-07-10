@@ -472,6 +472,10 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("'Queue'");
     expect(src).toContain("'Leases'");
     expect(src).toContain("'Yield'");
+    expect(src).toContain("['degraded-source', 'degraded']");
+    expect(src).toContain("['unknown-source', 'unknown']");
+    expect(src).toContain("['healthy-zero', 'empty']");
+    expect(src).toContain("qualityParts.length > 0 ? qualityParts.join(' / ') : 'healthy sources'");
     expect(src).toContain('const briefDetail = missionBrief?.whyNow ?? primaryAction?.detail ?? actionLabel');
     expect(src).toContain('const actionDetail = primaryAction?.detail ?? briefDetail');
     expect(css).toContain('.fd-readiness-rail');

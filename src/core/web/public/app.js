@@ -4399,10 +4399,17 @@ function fdReadinessDataText(readiness) {
   const freshness = readiness.freshness?.overall ?? 'unknown';
   const quality = readiness.sourceQualitySummary ?? {};
   if (Object.keys(quality).length > 0) {
-    const zero = quality['healthy-zero'] ?? 0;
-    const stale = quality['stale-source'] ?? 0;
-    const missing = quality['missing-source'] ?? 0;
-    return `${freshness} · ${zero} healthy-zero / ${stale} stale / ${missing} missing`;
+    const qualityParts = [
+      ['degraded-source', 'degraded'],
+      ['unknown-source', 'unknown'],
+      ['stale-source', 'stale'],
+      ['missing-source', 'missing'],
+      ['healthy-zero', 'empty'],
+    ]
+      .map(([key, label]) => [label, quality[key] ?? 0])
+      .filter(([, count]) => count > 0)
+      .map(([label, count]) => `${count} ${label}`);
+    return `${freshness} · ${qualityParts.length > 0 ? qualityParts.join(' / ') : 'healthy sources'}`;
   }
   const summary = readiness.sourceSummary ?? {};
   const healthy = summary.healthy ?? 0;
