@@ -185,7 +185,7 @@ describe('M342 dispatch production ledger', () => {
     expect(JSON.stringify(event)).not.toContain(rawDiffCanary);
   });
 
-  it('keeps legacy rows visible without inventing a durable learning label', () => {
+  it('keeps legacy rows visible with read-time labels but without durable rewrite', () => {
     const dir = dispatchProductionDir();
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, '2026-07-08.jsonl'), JSON.stringify(makeEvent({ itemId: 'legacy-row' })) + '\n', 'utf8');
@@ -207,7 +207,12 @@ describe('M342 dispatch production ledger', () => {
       proposalCreated: false,
       costUsd: 0.001,
     });
-    expect(event?.learningLabel).toBeUndefined();
+    expect(event?.learningLabel).toMatchObject({
+      authoritative: true,
+      learningKind: 'diagnostic-no-proposal',
+      diagnosticNoProposal: true,
+      attemptShape: { backendNoDiff: 1 },
+    });
     expect(summary).toMatchObject({
       attempts: 1,
       attemptShape: { backendNoDiff: 1 },

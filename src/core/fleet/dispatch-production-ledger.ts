@@ -387,7 +387,10 @@ export function readDispatchProductionEvents(opts?: {
             const eventMs = Date.parse(parsed.ts);
             if (Number.isFinite(eventMs) && eventMs < opts.sinceMs) continue;
           }
-          out.push(sanitizeEvent(parsed, { deriveLegacyRunOutcomeCausal: true }));
+          out.push(sanitizeEvent(parsed, {
+            deriveLegacyRunOutcomeCausal: true,
+            materializeLearningLabel: true,
+          }));
         } catch {
           // Malformed lines are skipped.
         }

@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -567,7 +567,7 @@ describe('AttemptRecord coverage', () => {
     expect(JSON.stringify(summary.causalGapDiagnostics)).not.toContain('stale policy route text');
   });
 
-  it('counts read-time legacy run-outcome causal fallbacks without materializing a label', () => {
+  it('derives read-time labels for legacy run-outcome causal fallbacks without rewriting ledgers', () => {
     const previousAshlrHome = process.env.ASHLR_HOME;
     const home = mkdtempSync(join(tmpdir(), 'ashlr-m352-legacy-causal-'));
     try {
@@ -595,6 +595,7 @@ describe('AttemptRecord coverage', () => {
       );
 
       const legacyEvent = readDispatchProductionEvents({ limit: 1 })[0]!;
+      const rawFile = join(dir, '2026-07-09.jsonl');
       const records = listAttemptRecords({
         deps: deps({
           readDispatchProductionEvents: () => [legacyEvent],
@@ -607,26 +608,36 @@ describe('AttemptRecord coverage', () => {
       });
       const summary = summarizeAttemptCoverage(records);
 
-      expect(legacyEvent.learningLabel).toBeUndefined();
+      expect(readFileSync(rawFile, 'utf8')).not.toContain('learningLabel');
+      expect(legacyEvent.learningLabel).toMatchObject({
+        authoritative: true,
+        learningKind: 'diagnostic-no-proposal',
+        diagnosticNoProposal: true,
+        attemptShape: {
+          backendNoDiff: 1,
+        },
+      });
       expect(records[0]).toMatchObject({
         itemId: 'legacy-top-level',
-        labelAuthoritative: false,
+        labelAuthoritative: true,
+        learningKind: 'diagnostic-no-proposal',
         causalCoverage: {
           routeSnapshot: true,
           runEventSummary: true,
-          labelAuthoritative: false,
-          currentAuthoritativeLabel: false,
+          labelAuthoritative: true,
+          currentAuthoritativeLabel: true,
         },
       });
       expect(summary.causalCoverage).toMatchObject({
         routeSnapshot: { count: 1, rate: 1 },
         runEventSummary: { count: 1, rate: 1 },
-        labelAuthoritative: { count: 0, rate: 0 },
+        labelAuthoritative: { count: 1, rate: 1 },
+        currentAuthoritativeLabel: { count: 1, rate: 1 },
       });
       expect(summary.production).toMatchObject({
         attempts: 1,
-        labelAuthoritativeAttempts: 0,
-        legacyUnversionedAttempts: 1,
+        labelAuthoritativeAttempts: 1,
+        legacyUnversionedAttempts: 0,
       });
     } finally {
       if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
