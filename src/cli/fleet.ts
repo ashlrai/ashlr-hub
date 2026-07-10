@@ -453,6 +453,38 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  // Trajectory learning
+  const trajectoryLearning = s.trajectoryLearning;
+  lines.push('Trajectory learning:');
+  if (!trajectoryLearning) {
+    lines.push('  unavailable');
+  } else {
+    const outcomes = trajectoryLearning.terminalOutcomes;
+    lines.push(`  trajectories: ${trajectoryLearning.trajectories} in ${formatProductionWindow(trajectoryLearning.windowHours)}`);
+    lines.push(
+      `  outcomes:     merged ${outcomes.merged}, pending ${outcomes.pending}, ` +
+        `no-proposal ${outcomes['no-proposal']}, failed ${outcomes.failed}`,
+    );
+    lines.push(
+      `  spine:        dispatch->decision ${formatCoverageMetric(trajectoryLearning.routeSpine.dispatchToDecision)}, ` +
+        `dispatch->evidence ${formatCoverageMetric(trajectoryLearning.routeSpine.dispatchToEvidence)}, ` +
+        `dispatch->merge ${formatCoverageMetric(trajectoryLearning.routeSpine.dispatchToMerge)}`,
+    );
+    lines.push(
+      `  coverage:     dispatch ${formatCoverageMetric(trajectoryLearning.coverage.dispatch)}, ` +
+        `proposal ${formatCoverageMetric(trajectoryLearning.coverage.proposal)}, ` +
+        `evidence ${formatCoverageMetric(trajectoryLearning.coverage.evidence)}, ` +
+        `decision ${formatCoverageMetric(trajectoryLearning.coverage.decision)}`,
+    );
+    const gap = trajectoryLearning.gaps[0];
+    if (gap) lines.push(`  top gap:      ${gap.kind} missing on ${gap.count} trajector${gap.count === 1 ? 'y' : 'ies'}`);
+    const recent = trajectoryLearning.recent[0];
+    if (recent) {
+      lines.push(`  recent:       ${recent.ref} ${recent.terminalOutcome} at ${recent.latestAt}`);
+    }
+  }
+  lines.push('');
+
   // Context efficiency
   const contextEfficiency = s.contextEfficiency;
   lines.push('Context efficiency:');

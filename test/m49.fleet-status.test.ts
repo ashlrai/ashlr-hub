@@ -1972,6 +1972,42 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.attemptCoverage?.recent[0]).not.toHaveProperty('repo');
     expect(s.attemptCoverage?.recent[0]).not.toHaveProperty('itemId');
     expect(s.attemptCoverage?.recent[0]).not.toHaveProperty('proposalId');
+    expect(s.trajectoryLearning).toMatchObject({
+      windowHours: 24,
+      trajectories: 1,
+      terminalOutcomes: {
+        pending: 1,
+      },
+      coverage: {
+        dispatch: { count: 1, rate: 1 },
+        proposal: { count: 1, rate: 1 },
+        evidence: { count: 1, rate: 1 },
+        decision: { count: 1, rate: 1 },
+        agentAction: { count: 1, rate: 1 },
+      },
+      routeSpine: {
+        dispatchToDecision: { count: 1, rate: 1 },
+        dispatchToEvidence: { count: 1, rate: 1 },
+        dispatchToMerge: { count: 0, rate: 0 },
+      },
+      gaps: [],
+    });
+    expect(s.trajectoryLearning?.recent[0]).toMatchObject({
+      ref: expect.stringMatching(/^trajectory:[a-f0-9]{12}$/),
+      terminalOutcome: 'pending',
+      backend: 'codex',
+      source: 'goal',
+      coverage: {
+        dispatch: true,
+        proposal: true,
+        evidence: true,
+        decision: true,
+        agentAction: true,
+      },
+    });
+    expect(JSON.stringify(s.trajectoryLearning)).not.toContain(repo);
+    expect(JSON.stringify(s.trajectoryLearning)).not.toContain(itemId);
+    expect(JSON.stringify(s.trajectoryLearning)).not.toContain(proposal.id);
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('Attempt coverage:');
     expect(formatted).toContain('attempts:  1 in 24h');
@@ -1980,6 +2016,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('metadata:  trajectory 1 (100%), route 1 (100%), run 1 (100%)');
     expect(formatted).toContain('policy:    version 1 (100%), current 1 (100%), epoch 1 (100%), current epoch 1 (100%)');
     expect(formatted).toContain('labels:    authoritative 1 (100%), current 1 (100%)');
+    expect(formatted).toContain('Trajectory learning:');
+    expect(formatted).toContain('trajectories: 1 in 24h');
+    expect(formatted).toContain('outcomes:     merged 0, pending 1, no-proposal 0, failed 0');
+    expect(formatted).toContain('spine:        dispatch->decision 1 (100%), dispatch->evidence 1 (100%), dispatch->merge 0 (0%)');
+    expect(formatted).toContain('coverage:     dispatch 1 (100%), proposal 1 (100%), evidence 1 (100%), decision 1 (100%)');
   });
 
   it('promotes weak causal attempt coverage into next actions', async () => {

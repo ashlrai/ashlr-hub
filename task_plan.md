@@ -1328,4 +1328,21 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Render manifest event, assignment, unassigned, latest, and backend-count summaries in `ashlr fleet status`.
 - [x] Add M49 regression coverage proving status aggregation and CLI output.
 - [x] Run focused manifest/status tests, typecheck, lint, build, audit, JS syntax, and diff gates.
-- [ ] Commit, push, refresh live fleet status, and continue sibling verifier/research lanes.
+- [x] Commit, push, refresh live fleet status, and continue sibling verifier/research lanes.
+
+## Current Continuation - Trajectory Learning Spine
+- [x] Rechecked current branch state, Entire state, active agents, and in-flight trajectory-records diff.
+- [x] Added a read-only `TrajectoryRecord` join across dispatch-production, proposals/outcome records, evidence, decisions, and agent actions.
+- [x] Kept the trajectory surface metadata-only with central scrubbing for reasons, route snapshots, run summaries, evidence summaries, and timeline events.
+- [x] Added `summarizeTrajectoryLearning()` with terminal outcomes, coverage, route-spine metrics, gap counts, and hashed recent refs.
+- [x] Surfaced trajectory learning in `FleetStatus` and `ashlr fleet status`.
+- [x] Added focused trajectory, privacy, attempt-coverage, and FleetStatus regression coverage.
+- [x] Run final lint/build/audit/diff gates, commit, push, and smoke live status.
+
+## Next Lane - Verified Skill Cards v1
+- [ ] Add `SkillCard` and `SkillUseEvent` schemas plus route-snapshot skill fields.
+- [ ] Persist append-only skill card/use events under `~/.ashlr/skills/` with secret scrubbing and malformed-row skips.
+- [ ] Distill structured skill cards from verified applied proposals while preserving the legacy genome note.
+- [ ] Add shadow-mode skill retrieval after gateway routing; do not change backend choice until same-tier active-mode safety tests pass.
+- [ ] Inject selected skill summaries into run context under a tight cap with verification checks and red flags, never raw diffs.
+- [ ] Correlate selected skill ids with trajectory learning so Ashlr can prove which skills improve verification/merge outcomes.

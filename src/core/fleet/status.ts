@@ -39,6 +39,11 @@ import {
   summarizeAttemptCoverage,
   type AttemptCoverageStatus,
 } from '../autonomy/attempt-records.js';
+import {
+  listTrajectoryRecords,
+  summarizeTrajectoryLearning,
+  type TrajectoryLearningStatus,
+} from '../autonomy/trajectory-records.js';
 import type { GuardHealthDiagnosis } from '../daemon/guard-health.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import type { BackendAvailability, BackendResourceState } from '../fabric/resource-monitor.js';
@@ -647,6 +652,8 @@ export interface FleetStatus {
   workspace?: AgentWorkspaceStatus;
   /** Read-only joined attempt coverage summary; metadata only, no raw prompts/diffs/output. */
   attemptCoverage?: AttemptCoverageStatus;
+  /** Read-only route-to-outcome trajectory reconstruction summary; metadata only. */
+  trajectoryLearning?: TrajectoryLearningStatus;
   /** Read-only context discipline signal for long-running multi-agent work. */
   contextEfficiency?: FleetContextEfficiencyStatus;
   /** True when the global kill switch is engaged (fleet paused). */
@@ -1304,6 +1311,16 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     status.attemptCoverage = summarizeAttemptCoverage(attemptRecords, RECENT_WINDOW_MS / (60 * 60 * 1000));
   } catch {
     // Optional learning coverage surface only.
+  }
+  try {
+    const windowHours = RECENT_WINDOW_MS / (60 * 60 * 1000);
+    const trajectoryRecords = listTrajectoryRecords({
+      windowHours,
+      limit: 500,
+    });
+    status.trajectoryLearning = summarizeTrajectoryLearning(trajectoryRecords, windowHours);
+  } catch {
+    // Optional route-to-outcome learning surface only.
   }
   try {
     const { genomeHubHealth } = await import('../genome/store.js');
