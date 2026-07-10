@@ -673,6 +673,15 @@ describe('M199 runGoal — happy path', () => {
     const state = await runGoal('goal', makeConfig(), makeOpts());
     expect(state.id).toMatch(/^run-\d+-[a-z0-9]+$/);
   });
+
+  it('uses a caller-preallocated opaque id for a fresh run', async () => {
+    const runId = 'attempt-018f6d2e-7c50-4f15-8a2c-6efc97fb87a1';
+    const state = await runGoal('goal', makeConfig(), makeOpts({ runId }));
+
+    expect(state.id).toBe(runId);
+    await expect(runGoal('duplicate', makeConfig(), makeOpts({ runId })))
+      .rejects.toThrow(`Run "${runId}" already exists`);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -926,7 +935,10 @@ describe('M199 runGoal — resume of already-done run is a no-op', () => {
     vi.mocked(runTask).mockClear();
 
     // Second: resume the completed run.
-    const second = await runGoal('irrelevant', makeConfig(), makeOpts({ resumeId: runId }));
+    const second = await runGoal('irrelevant', makeConfig(), makeOpts({
+      resumeId: runId,
+      runId: '../ignored-because-resume-wins',
+    }));
 
     // Resume of a done run is a no-op: tasks are NOT re-executed.
     expect(second.id).toBe(runId);

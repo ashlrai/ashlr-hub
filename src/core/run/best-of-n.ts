@@ -25,6 +25,10 @@ import type {
 import type { ManagerVerdict } from '../fleet/manager.js';
 import type { TasteScore } from '../fleet/taste-critic.js';
 import { resolveEngineSpec } from './engine-registry.js';
+import {
+  deriveCandidateAttemptIdentity,
+  type OuterAttemptIdentity,
+} from '../fleet/attempt-identity.js';
 import { mergeDelegationScope, scopeFromWorkItem } from './delegation-scope.js';
 
 // ---------------------------------------------------------------------------
@@ -38,6 +42,8 @@ export interface CandidateResult {
   diff: string;
   /** The inbox proposal id, if one was created. */
   proposalId?: string;
+  /** Opaque execution id for joining this candidate, including losers. */
+  runId?: string;
   /** Verdict from the critic judge. undefined when judging failed. */
   verdict?: ManagerVerdict;
   /** Score derived from verdict dimensions (value+correctness+scope+alignment). */
@@ -66,7 +72,6 @@ export interface CandidateResult {
 interface InternalCandidateResult extends CandidateResult {
   proposalDraft?: Proposal;
   sandbox?: Sandbox;
-  runId?: string;
   delegationScope?: DelegationScope;
   state?: RunState;
 }
@@ -219,7 +224,6 @@ function publicCandidate(c: InternalCandidateResult): CandidateResult {
   const {
     proposalDraft: _proposalDraft,
     sandbox: _sandbox,
-    runId: _runId,
     delegationScope: _delegationScope,
     ...rest
   } = c;
@@ -265,6 +269,8 @@ export async function runBestOfN(
     engine?: EngineId;
     model?: string | null;
     delegationScope?: DelegationScope;
+    /** Opaque outer dispatch identity used to derive stable candidate run ids. */
+    attemptId?: OuterAttemptIdentity;
     /**
      * M333: per-candidate engine/model specs. Candidate i runs on
      * specs[i % specs.length] — one candidate per spec when n matches the
@@ -400,7 +406,22 @@ export async function runBestOfN(
     const spec = specs[i % specs.length]!;
     const cEngine = spec.engine;
     const cModel = spec.model ?? null;
-    const base: CandidateResult = { index: i, diff: '', score: 0, engine: cEngine, model: cModel };
+    let runId: string;
+    try {
+      runId = opts?.attemptId
+        ? deriveCandidateAttemptIdentity(opts.attemptId, i)
+        : `best-of-n-${i}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    } catch (err) {
+      return {
+        index: i,
+        diff: '',
+        score: 0,
+        engine: cEngine,
+        model: cModel,
+        error: err instanceof Error ? err.message : 'invalid attempt identity',
+      };
+    }
+    const base: CandidateResult = { index: i, diff: '', score: 0, engine: cEngine, model: cModel, runId };
     const runSandboxed = runnerFor(cEngine);
 
     if (!runSandboxed) {
@@ -409,7 +430,6 @@ export async function runBestOfN(
 
     const t0 = Date.now();
     try {
-      const runId = `best-of-n-${i}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
       const delegationScope = mergeDelegationScope(parentDelegationScope, {
         origin: 'best-of-n',
         runId,
@@ -708,6 +728,7 @@ export async function runBestOfN(
       const { recordBestOfN } = await import('../fleet/best-of-n-ledger.js');
       recordBestOfN({
         ts: new Date().toISOString(),
+        ...(opts?.attemptId ? { attemptId: opts.attemptId } : {}),
         workItemId: opts?.workItemId ?? item.id,
         source: String(item.source ?? ''),
         repo: item.repo ?? null,
@@ -717,6 +738,7 @@ export async function runBestOfN(
         totalCostUsd,
         candidates: scored.map((c) => ({
           index: c.index,
+          ...(c.runId ? { runId: c.runId } : {}),
           engine: String(c.engine ?? ''),
           model: c.model ?? null,
           score: c.score,

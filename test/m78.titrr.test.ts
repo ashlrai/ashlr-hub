@@ -398,6 +398,7 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
 
   // ---- Test 2: fail then pass → engine re-invoked ----
   it('fail then pass → re-invokes engine, annotates "tests: pass (attempt 2)"', async () => {
+    const runId = 'attempt-018f6d2e-7c50-4f15-8a2c-6efc97fb87a1';
     engineMockFn.mockResolvedValue({
       state: makeRunState({ status: 'done', result: 'engine ok' }),
       proposalId: 'p2',
@@ -413,11 +414,13 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
       sandboxEngine: true,
       budget: { maxTokens: 1_000_000, maxSteps: 100 },
       tools: false,
+      runId,
       titrrMaxAttempts: 2,
     } as Parameters<typeof runGoal>[2] & { titrrMaxAttempts: number });
 
     expect(state.result).toMatch(/TITRR.*tests: pass \(attempt 2\)/);
     expect(engineMockFn.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(engineMockFn.mock.calls.every((call) => call[3]?.runId === runId)).toBe(true);
   });
 
   // ---- Test 3: exhausted maxAttempts ----

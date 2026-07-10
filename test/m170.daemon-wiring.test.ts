@@ -233,7 +233,7 @@ describe('M170 — best-of-N dispatch: bestOfN > 1 routes through runBestOfN', (
     const [passedItem, passedCfg, passedOpts] = mockRunBestOfN.mock.calls[0] as [
       { id: string; repo: string; source: string; title: string },
       unknown,
-      { n: number; engine: string; model?: string | null; workItemId: string; workSource: string; delegationScope?: unknown },
+      { n: number; engine: string; model?: string | null; workItemId: string; workSource: string; attemptId: string; delegationScope?: unknown },
     ];
     expect(typeof passedItem).toBe('object');
     expect(passedCfg).toBe(cfg);
@@ -258,6 +258,8 @@ describe('M170 — best-of-N dispatch: bestOfN > 1 routes through runBestOfN', (
         },
       },
     });
+    expect(passedOpts.attemptId).toMatch(/^attempt-[0-9a-f-]{36}$/);
+    expect((passedOpts.delegationScope as { runId?: string }).runId).toBe(passedOpts.attemptId);
   });
 
   it('tick completes successfully when runBestOfN returns a winner', async () => {
@@ -281,6 +283,11 @@ describe('M170 — best-of-N dispatch: bestOfN > 1 routes through runBestOfN', (
     const result = await tick(cfg, { dryRun: false });
     expect(result.reason).toBe('ok');
     expect(mockRunGoal).not.toHaveBeenCalled();
+    const attemptId = (mockRunBestOfN.mock.calls[0]?.[2] as { attemptId: string }).attemptId;
+    expect(result.dispatches?.[0]).toMatchObject({
+      runId: attemptId,
+      trajectoryId: `run:${attemptId}`,
+    });
   });
 });
 
@@ -293,13 +300,19 @@ describe('M170 — best-of-N dispatch: bestOfN absent/1 → single-run path unch
     enrollRepo();
     const cfg = makeFrontierCfg(); // no bestOfN
 
-    await tick(cfg, { dryRun: false });
+    const result = await tick(cfg, { dryRun: false });
 
     expect(mockRunBestOfN).not.toHaveBeenCalled();
     expect(mockRunGoal).toHaveBeenCalledTimes(1);
-    const [_goal, _cfg, opts] = mockRunGoal.mock.calls[0] as [string, unknown, { workItemId?: string; workSource?: string }];
+    const [_goal, _cfg, opts] = mockRunGoal.mock.calls[0] as [string, unknown, { runId?: string; workItemId?: string; workSource?: string; delegationScope?: { runId?: string } }];
     expect(opts.workItemId).toMatch(/:m170-item-0$/);
     expect(opts.workSource).toBe('todo');
+    expect(opts.runId).toMatch(/^attempt-[0-9a-f-]{36}$/);
+    expect(opts.delegationScope?.runId).toBe(opts.runId);
+    expect(result.dispatches?.[0]).toMatchObject({
+      runId: opts.runId,
+      trajectoryId: `run:${opts.runId}`,
+    });
   });
 
   it('does NOT call runBestOfN when bestOfN === 1', async () => {
@@ -318,14 +331,20 @@ describe('M170 — best-of-N dispatch: bestOfN absent/1 → single-run path unch
     mockRouteBackend.mockReturnValue({ backend: 'builtin', tier: 'cloud', reason: 'mock' });
     const cfg = makeCfg({});
 
-    await tick(cfg, { dryRun: false });
+    const result = await tick(cfg, { dryRun: false });
 
     expect(mockRunBestOfN).not.toHaveBeenCalled();
     expect(mockRunGoal).not.toHaveBeenCalled();
     expect(mockRunSwarm).toHaveBeenCalled();
-    const [_input, _cfg, swarmOpts] = mockRunSwarm.mock.calls[0] as [unknown, unknown, { workItemId?: string; workSource?: string }];
+    const [_input, _cfg, swarmOpts] = mockRunSwarm.mock.calls[0] as [unknown, unknown, { runId?: string; workItemId?: string; workSource?: string; delegationScope?: { runId?: string } }];
     expect(swarmOpts.workItemId).toMatch(/:m170-item-0$/);
     expect(swarmOpts.workSource).toBe('todo');
+    expect(swarmOpts.runId).toMatch(/^attempt-[0-9a-f-]{36}$/);
+    expect(swarmOpts.delegationScope?.runId).toBe(swarmOpts.runId);
+    expect(result.dispatches?.[0]).toMatchObject({
+      runId: swarmOpts.runId,
+      trajectoryId: `run:${swarmOpts.runId}`,
+    });
   });
 });
 
@@ -456,6 +475,11 @@ describe('M170 — error resilience: neither hook breaks the tick', () => {
     const result = await tick(cfg, { dryRun: false });
     // Tick may return 'ok' with 0 proposals (dispatched but errored).
     expect(['ok', 'no-backlog', 'no-enrolled-repos']).toContain(result.reason);
+    expect(result.dispatches?.[0]).toMatchObject({
+      runId: expect.stringMatching(/^attempt-[0-9a-f-]{36}$/),
+      trajectoryId: expect.stringMatching(/^run:attempt-[0-9a-f-]{36}$/),
+      production: { outcome: 'engine-failed' },
+    });
   });
 
   it('h-series invariant: tick still returns a valid DaemonTick on any hook error', async () => {

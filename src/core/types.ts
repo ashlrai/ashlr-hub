@@ -1850,6 +1850,8 @@ export interface RunOptions {
   cwd?: string;
   /** Existing run id to resume from cache. */
   resumeId?: string;
+  /** Caller-preallocated opaque id for a fresh run; ignored when resumeId is set. */
+  runId?: string;
   /** Optional advisory delegation contract for spawned/sandboxed agents. */
   delegationScope?: DelegationScope;
   /** Emit machine-readable JSON instead of human output. */
@@ -2610,6 +2612,8 @@ export interface SwarmOptions {
   background?: boolean;
   /** Existing swarm id to resume from persisted state. */
   resumeId?: string;
+  /** Caller-preallocated opaque id for a fresh swarm; ignored when resumeId is set. */
+  runId?: string;
   /** Optional advisory delegation contract inherited by swarm tasks. */
   delegationScope?: DelegationScope;
   /** Plan only — produce the SwarmPlan without executing any task. */
@@ -3739,6 +3743,8 @@ export interface DaemonDispatchTrace {
   dispatched: boolean;
   /** Estimated USD spent by this item dispatch. */
   spentUsd: number;
+  /** Opaque run/swarm id allocated before execution, including terminal failures. */
+  runId?: string;
   /** Stable attempt/work trajectory id for joining dispatch, proposal, and decision rows. */
   trajectoryId?: string;
   /** Metadata-only route snapshot; never includes prompts or engine output. */

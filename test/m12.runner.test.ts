@@ -621,6 +621,43 @@ describe('runSwarm — HARD total budget abort', () => {
 // ---------------------------------------------------------------------------
 
 describe('runSwarm — persists state after each step', () => {
+  it('fails closed without throwing for an invalid caller-preallocated id', async () => {
+    const result = await runSwarm(
+      { goal: 'invalid id' },
+      makeConfig(),
+      { runId: '../escape' },
+      nullSink,
+    );
+
+    expect(result.status).toBe('failed');
+    expect(result.result).toMatch(/run id is invalid/i);
+    expect(runGoalCalls).toHaveLength(0);
+  });
+
+  it('refuses a duplicate fresh id without overwriting the existing swarm', async () => {
+    const runId = 'attempt-018f6d2e-7c50-4f15-8a2c-6efc97fb87a1';
+    mockPlanSwarm.mockResolvedValueOnce(minimalPlan('first owner'));
+    const first = await runSwarm(
+      { goal: 'first owner' },
+      makeConfig(),
+      { runId, budget: { maxTokens: 1_000_000, maxSteps: 1000 }, parallel: 1 },
+      nullSink,
+    );
+    delete process.env.ASHLR_IN_SWARM;
+
+    const second = await runSwarm(
+      { goal: 'duplicate owner' },
+      makeConfig(),
+      { runId },
+      nullSink,
+    );
+
+    expect(first.id).toBe(runId);
+    expect(second.status).toBe('failed');
+    expect(second.result).toMatch(/already exists/i);
+    expect(loadSwarm(runId)?.goal).toBe('first owner');
+  });
+
   it('swarm file exists on disk after runSwarm completes', async () => {
     mockPlanSwarm.mockResolvedValueOnce(minimalPlan('persist test'));
     const result = await runSwarm(

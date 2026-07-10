@@ -75,6 +75,7 @@ import {
 } from './state.js';
 import type { DaemonLock } from './state.js';
 import { nullSink } from '../run/streaming.js';
+import { createOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 import { runSwarm } from '../swarm/runner.js';
 import { runGoal } from '../run/orchestrator.js';
 import { scopeFromWorkItem } from '../run/delegation-scope.js';
@@ -864,7 +865,7 @@ function dispatchProductionEventFromOutcome(
     production?.outcome ?? (proposal ? 'proposal-created' : 'unknown');
   const allowProposalFallback = !production || production.outcome === 'proposal-created';
   const proposalId = production?.proposalId ?? (allowProposalFallback ? proposal?.id : undefined);
-  const runId = production?.runId ?? (allowProposalFallback ? proposal?.runId : undefined);
+  const runId = production?.runId ?? (allowProposalFallback ? proposal?.runId : undefined) ?? trace.runId;
   const proposalCreated = outcome === 'proposal-created';
   const eventRunSummary = runEventSummary({
     ...(trace.runEventSummary ?? {}),
@@ -1111,6 +1112,8 @@ function dispatchTrace(
     reason: string;
     dispatched: boolean;
     spentUsd?: number;
+    runId?: string;
+    trajectoryId?: string;
     skipReason?: string;
     production?: DaemonDispatchProduction;
   },
@@ -1122,9 +1125,10 @@ function dispatchTrace(
     assignedBy: fields.assignedBy,
     reason: fields.reason,
   });
+  const runId = fields.production?.runId ?? fields.runId;
   const summary = runEventSummary({
     ...(fields.production?.runEventSummary ?? {}),
-    runId: fields.production?.runId,
+    runId,
     status: fields.production?.runEventSummary?.status ?? (fields.dispatched ? 'done' : 'skipped'),
     outcome: fields.production?.outcome ?? (fields.dispatched ? 'unknown' : 'skipped'),
     proposalCreated: fields.production?.outcome === 'proposal-created',
@@ -1134,9 +1138,10 @@ function dispatchTrace(
     costUsd: fields.spentUsd ?? 0,
   });
   const causal = causalMetadata({
+    trajectoryId: fields.trajectoryId,
     itemId: item.id,
     proposalId: fields.production?.proposalId,
-    runId: fields.production?.runId,
+    runId,
     routeSnapshot: rs,
     runEventSummary: summary,
     learningSource: 'daemon-dispatch',
@@ -1154,6 +1159,7 @@ function dispatchTrace(
     reason: boundedText(fields.reason),
     dispatched: fields.dispatched,
     spentUsd: fields.spentUsd ?? 0,
+    ...(runId ? { runId } : {}),
     ...causal,
     ...(fields.skipReason ? { skipReason: boundedText(fields.skipReason, 160) } : {}),
     ...(fields.production
@@ -2449,7 +2455,10 @@ export async function tick(
     return poolTierOf(engineTier);
   });
 
-  const tasks: Array<{ tier: 'local' | 'cloud'; run: (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null) => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => ({
+  const attemptIds = new Map(workedSet.map((item) => [item.id, createOuterAttemptIdentity()] as const));
+  const tasks: Array<{ tier: 'local' | 'cloud'; run: (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null) => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => {
+    const attemptId = attemptIds.get(item.id)!;
+    return ({
     tier: itemTiers[_taskIdx] ?? 'local',
     run: async (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null): Promise<ItemOutcome> => {
       // Re-check kill switch before each item dispatch.
@@ -2462,6 +2471,8 @@ export async function tick(
             assignedBy: 'preflight',
             reason: 'kill switch is ON',
             dispatched: false,
+            runId: attemptId,
+            trajectoryId: `run:${attemptId}`,
             skipReason: 'kill-switch',
           }),
         };
@@ -2477,6 +2488,8 @@ export async function tick(
             assignedBy: 'preflight',
             reason: `in-tick budget cap reached ($${tickSpent.toFixed(4)} >= $${remainingBudget.toFixed(4)})`,
             dispatched: false,
+            runId: attemptId,
+            trajectoryId: `run:${attemptId}`,
             skipReason: 'budget-cap',
           }),
         };
@@ -2565,6 +2578,8 @@ export async function tick(
               assignedBy: 'concurrent-planner',
               reason: assignedReason,
               dispatched: false,
+              runId: attemptId,
+              trajectoryId: `run:${attemptId}`,
               skipReason: assignedReason.split(':')[0] ?? 'concurrent-skip',
             }),
           };
@@ -2587,6 +2602,8 @@ export async function tick(
               assignedBy: 'concurrent-planner',
               reason: assignedReason,
               dispatched: false,
+              runId: attemptId,
+              trajectoryId: `run:${attemptId}`,
               skipReason: 'budget-pause',
             }),
           };
@@ -2622,6 +2639,8 @@ export async function tick(
               assignedBy: 'gateway',
               reason: gd.reason,
               dispatched: false,
+              runId: attemptId,
+              trajectoryId: `run:${attemptId}`,
               skipReason: 'throttled',
             }),
           };
@@ -2646,6 +2665,8 @@ export async function tick(
               assignedBy: 'gateway',
               reason: gd.reason,
               dispatched: false,
+              runId: attemptId,
+              trajectoryId: `run:${attemptId}`,
               skipReason: 'budget-pause',
             }),
           };
@@ -2669,6 +2690,8 @@ export async function tick(
               assignedBy: 'gateway',
               reason: gd.reason,
               dispatched: false,
+              runId: attemptId,
+              trajectoryId: `run:${attemptId}`,
               skipReason: 'resource-pause',
             }),
           };
@@ -2739,6 +2762,8 @@ export async function tick(
                 assignedBy: 'subscription-throttle',
                 reason: `throttled: ${backend} subscription window — ${subCheck.reason}`,
                 dispatched: false,
+                runId: attemptId,
+                trajectoryId: `run:${attemptId}`,
                 skipReason: 'subscription-throttle',
               }),
             };
@@ -2793,6 +2818,8 @@ export async function tick(
                   assignedBy: 'budget-cascade',
                   reason: recovery.reason,
                   dispatched: false,
+                  runId: attemptId,
+                  trajectoryId: `run:${attemptId}`,
                   skipReason: 'budget-pause',
                 }),
               };
@@ -2851,6 +2878,8 @@ export async function tick(
               assignedBy: 'subscription-throttle',
               reason: `throttled: ${backend} subscription window — ${subCheck.reason}`,
               dispatched: false,
+              runId: attemptId,
+              trajectoryId: `run:${attemptId}`,
               skipReason: 'subscription-throttle',
             }),
           };
@@ -2859,6 +2888,7 @@ export async function tick(
       const goal = buildItemGoal(item);
       const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
       const delegationScope = scopeFromWorkItem(item, {
+        runId: attemptId,
         budget: itemBudget,
         backend: {
           engine: backend,
@@ -2895,6 +2925,7 @@ export async function tick(
             parallel: 1,
             dryRun: false,
             noCapture: true,
+            runId: attemptId,
             workItemId: item.id,
             workSource: item.source,
             delegationScope,
@@ -2988,6 +3019,7 @@ export async function tick(
             workItemId: item.id,
             workSource: item.source,
             delegationScope,
+            attemptId,
           });
           bonBillable = bonResult.critique.billableCostUsd ?? 0;
           if (!bonResult.winner) {
@@ -3015,6 +3047,8 @@ export async function tick(
                 reason: `${assignmentReason}; best-of-${bestOfN}: all candidates empty`,
                 dispatched: true,
                 spentUsd: swarmSpent,
+                runId: attemptId,
+                trajectoryId: `run:${attemptId}`,
                 skipReason: noProposalProductionReason(production) ?? 'empty-best-of-n',
                 production,
               }),
@@ -3033,6 +3067,7 @@ export async function tick(
             budget: itemBudget,
             tools: true,
             noMemory: false,
+            runId: attemptId,
             ...(selectedModel ? { model: selectedModel } : {}),
             workItemId: item.id,
             workSource: item.source,
@@ -3078,6 +3113,8 @@ export async function tick(
 		        reason: assignmentReason,
 		        dispatched,
 		        spentUsd: swarmSpent,
+		        runId: attemptId,
+		        trajectoryId: `run:${attemptId}`,
 		        skipReason: errorReason,
 		        production: {
 		          outcome: 'engine-failed',
@@ -3104,6 +3141,8 @@ export async function tick(
 	      reason: assignmentReason,
 	      dispatched,
 	      spentUsd: swarmSpent,
+	      runId: attemptId,
+	      trajectoryId: `run:${attemptId}`,
 	      ...(dispatchSkipReason ? { skipReason: dispatchSkipReason } : {}),
 	      ...(dispatchProduction ? { production: dispatchProduction } : {}),
 	    });
@@ -3152,7 +3191,8 @@ export async function tick(
 
 	    return { item, spentUsd: swarmSpent, dispatched, dispatch };
     }, // end run:
-  }));  // end tasks.map
+    });
+  });  // end tasks.map
 
   // M255: Concurrent Multi-Backend Dispatcher — flag-gated.
   // When fabric.concurrentDispatch === true, replace the serial per-item loop
@@ -3223,6 +3263,7 @@ export async function tick(
       plan: concurrentPlan,
       routeReasons,
       routeModels,
+      attemptIds,
       resourceSnapshotAt: concurrentSnap.generatedAt,
       dryRun: false,
     });

@@ -94,6 +94,7 @@ import {
   summarizeLocalContextBundle,
 } from './local-context.js';
 import { causalMetadata, runEventSummary, routeSnapshot } from '../learning/causal.js';
+import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
 import { classifyDiff, isTrivialProposal } from '../../planning/triviality.js';
 
 export interface SandboxedEngineResult {
@@ -879,8 +880,9 @@ export async function captureSandboxedProposal(
   const model = opts.model ?? cfg.foundry?.models?.[engine];
   const engineModel = `${engine}:${resolveConcreteModel(engine, cfg, model)}`;
   const tier = engineTierOf(engine, cfg);
-  const id =
-    opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const id = assertSafeExecutionIdentity(
+    opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+  );
   const sb = opts.existingWorktree;
   const now = new Date().toISOString();
   const producerStatus = opts.producerStatus ?? 'done';
@@ -1127,8 +1129,9 @@ export async function runEngineSandboxed(
   const model = opts.model ?? cfg.foundry?.models?.[engine];
   const engineModel = `${engine}:${resolveConcreteModel(engine, cfg, model)}`;
   const tier = engineTierOf(engine, cfg);
-  const id =
-    opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const id = assertSafeExecutionIdentity(
+    opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+  );
   let delegationScope = opts.delegationScope
     ? normalizeDelegationScope(opts.delegationScope, {
         origin: 'run',
@@ -1423,9 +1426,9 @@ export async function runEngineSandboxed(
     try {
       const _logDir = join(process.env.HOME ?? process.env.USERPROFILE ?? tmpdir(), '.ashlr', 'agent-logs');
       mkdirSync(_logDir, { recursive: true });
-      writeFileSync(
+      appendFileSync(
         join(_logDir, `${id}.log`),
-        `=== ${engine} (${engineModel}) sandbox=${sb.id} worktree=${sb.worktreePath} ===\n` +
+        `\n=== invocation ${new Date().toISOString()} ${engine} (${engineModel}) sandbox=${sb.id} worktree=${sb.worktreePath} ===\n` +
           `ok=${res.ok} terminationReason=${terminationReason ?? '-'} durationMs=${_spawnDurationMs}\n` +
           `error=${res.error ?? '-'}\n` +
           `tokensIn=${res.usage?.tokensIn ?? '?'} tokensOut=${res.usage?.tokensOut ?? '?'}\n` +
@@ -1852,7 +1855,9 @@ export async function runApiModelSandboxed(
   const model = modelFromCfg || (spec.api.defaultModel ?? '');
   const engineModel = `${engine}:${resolveConcreteModel(engine, cfg, model || undefined)}`;
   const tier = engineTierOf(engine, cfg);
-  const id = opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const id = assertSafeExecutionIdentity(
+    opts.runId ?? `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+  );
   let delegationScope = opts.delegationScope
     ? normalizeDelegationScope(opts.delegationScope, {
         origin: 'run',

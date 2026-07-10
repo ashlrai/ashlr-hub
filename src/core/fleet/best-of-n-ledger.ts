@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, appendFileSync, readdirSync, readFileSync } from
 
 export interface BestOfNCandidateRecord {
   index: number;
+  runId?: string;
   engine: string;
   model: string | null;
   score: number;
@@ -32,6 +33,7 @@ export interface BestOfNCandidateRecord {
 
 export interface BestOfNRecord {
   ts: string;
+  attemptId?: string;
   workItemId?: string;
   source: string;
   repo: string | null;

@@ -1734,10 +1734,12 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       reason: 'empty-diff: engine "local-coder" completed without file changes',
       count: 1,
     });
+    const trajectoryId = result.dispatches?.[0]?.trajectoryId;
+    expect(trajectoryId).toMatch(/^run:attempt-/);
     expect(loadDaemonState().ticks.at(-1)?.dispatches?.[0]?.production).toMatchObject({
       outcome: 'empty-diff',
       runId: 'run-empty-diff',
-      trajectoryId: 'run:run-empty-diff',
+      trajectoryId,
       evidenceOutcome: {
         target: 'main',
         trustBasis: 'verification',
@@ -1762,7 +1764,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       outcome: 'empty-diff',
       proposalCreated: false,
       runId: 'run-empty-diff',
-      trajectoryId: 'run:run-empty-diff',
+      trajectoryId,
       routeSnapshot: {
         backend: 'local-coder',
         tier: 'mid',
@@ -2674,10 +2676,16 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       manifestId: result.dispatchManifest?.manifestId,
       counts: { claimed: 2, assigned: 2, unassigned: 0 },
       assignments: [
-        expect.objectContaining({ itemId: items[0]!.id, backend: 'builtin' }),
-        expect.objectContaining({ itemId: items[1]!.id, backend: 'builtin' }),
+        expect.objectContaining({ itemId: items[0]!.id, backend: 'builtin', attemptId: expect.stringMatching(/^attempt-/) }),
+        expect.objectContaining({ itemId: items[1]!.id, backend: 'builtin', attemptId: expect.stringMatching(/^attempt-/) }),
       ],
     });
+    const manifestAttemptIds = new Set(manifests[0]!.assignments.map((assignment) => assignment.attemptId));
+    const executorAttemptIds = new Set(
+      mockRunSwarm.mock.calls.map((call) => (call[2] as { runId?: string }).runId),
+    );
+    expect(executorAttemptIds).toEqual(manifestAttemptIds);
+    expect(new Set(result.dispatches?.map((dispatch) => dispatch.runId))).toEqual(manifestAttemptIds);
   });
 
   it('A7-selection-telemetry: records pending and cooldown blockers in the global workspace', async () => {

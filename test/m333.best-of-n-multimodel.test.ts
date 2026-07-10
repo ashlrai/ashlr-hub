@@ -17,6 +17,7 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
+import { deriveCandidateAttemptIdentity } from '../src/core/fleet/attempt-identity.js';
 
 const MOCK_REPO = '/tmp/fake-repo';
 
@@ -245,6 +246,54 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('M333 — candidate specs', () => {
+  it('returns candidate errors instead of throwing for a malformed outer attempt id', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const api = makeSandboxMock(0.0, 'api');
+    const h = await harness({ cli: cli.fn, api: api.fn });
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      attemptId: 'attempt-invalid' as never,
+      candidates: [{ engine: 'claude' as never }, { engine: 'local-coder' as never }],
+    });
+
+    expect(result.winner).toBeUndefined();
+    expect(result.candidates).toHaveLength(2);
+    expect(result.candidates.every((candidate) => candidate.error?.includes('valid generated attempt id'))).toBe(true);
+    expect(cli.fn).not.toHaveBeenCalled();
+    expect(api.fn).not.toHaveBeenCalled();
+  });
+
+  it('derives stable candidate run ids from the preallocated outer attempt', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const api = makeSandboxMock(0.0, 'api');
+    const h = await harness({ cli: cli.fn, api: api.fn });
+    const attemptId = 'attempt-018f6d2e-7c50-4f15-8a2c-6efc97fb87a1' as const;
+
+    const result = await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      attemptId,
+      candidates: [
+        { engine: 'claude' as never },
+        { engine: 'local-coder' as never },
+      ],
+    });
+
+    expect(cli.options[0]?.['runId']).toBe(deriveCandidateAttemptIdentity(attemptId, 0));
+    expect(api.options[0]?.['runId']).toBe(deriveCandidateAttemptIdentity(attemptId, 1));
+    expect(result.candidates.map((candidate) => candidate.runId)).toEqual([
+      deriveCandidateAttemptIdentity(attemptId, 0),
+      deriveCandidateAttemptIdentity(attemptId, 1),
+    ]);
+    expect(h.recordBestOfN).toHaveBeenCalledWith(expect.objectContaining({
+      attemptId,
+      candidates: [
+        expect.objectContaining({ runId: deriveCandidateAttemptIdentity(attemptId, 0) }),
+        expect.objectContaining({ runId: deriveCandidateAttemptIdentity(attemptId, 1) }),
+      ],
+    }));
+  });
+
   it('routes each candidate to its OWN engine + model with the right runner kind', async () => {
     const cli = makeSandboxMock(1.0, 'cli'); // claude → cli-agent runner
     const api = makeSandboxMock(0.0, 'api'); // local-coder → api-model runner

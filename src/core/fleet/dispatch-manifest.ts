@@ -26,6 +26,7 @@ const MAX_TEXT = {
 
 export interface DispatchManifestAssignment {
   itemId: string;
+  attemptId?: string;
   source: WorkItem['source'];
   repo: string;
   title: string;
@@ -65,6 +66,7 @@ export interface BuildDispatchManifestEventInput {
   plan: DispatchPlan;
   routeReasons?: ReadonlyMap<string, string>;
   routeModels?: ReadonlyMap<string, string | null>;
+  attemptIds?: ReadonlyMap<string, string>;
   resourceSnapshotAt?: string;
   dryRun?: boolean;
 }
@@ -153,8 +155,10 @@ export function buildDispatchManifestEvent(input: BuildDispatchManifestEventInpu
     const item = assignment.item;
     const routeReason = boundedOptionalText(input.routeReasons?.get(item.id), MAX_TEXT.reason);
     const model = boundedNullableText(input.routeModels?.get(item.id), MAX_TEXT.model);
+    const attemptId = boundedOptionalText(input.attemptIds?.get(item.id), 160);
     return {
       itemId: boundedText(item.id, MAX_TEXT.itemId, 'unknown'),
+      ...(attemptId ? { attemptId } : {}),
       source: boundedText(item.source, 80, 'unknown') as WorkItem['source'],
       repo: boundedText(item.repo, MAX_TEXT.repo, 'unknown'),
       title: boundedText(item.title ?? item.id, MAX_TEXT.title, 'untitled'),
@@ -199,6 +203,9 @@ export function sanitizeDispatchManifestEvent(event: DispatchManifestEvent): Dis
   const assignments = Array.isArray(event.assignments)
     ? event.assignments.slice(0, MAX_ITEMS).map((assignment) => ({
         itemId: boundedText(assignment.itemId, MAX_TEXT.itemId, 'unknown'),
+        ...(boundedOptionalText(assignment.attemptId, 160)
+          ? { attemptId: boundedOptionalText(assignment.attemptId, 160) }
+          : {}),
         source: boundedText(assignment.source, 80, 'unknown') as WorkItem['source'],
         repo: boundedText(assignment.repo, MAX_TEXT.repo, 'unknown'),
         title: boundedText(assignment.title, MAX_TEXT.title, 'untitled'),

@@ -1381,9 +1381,18 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add deterministic strong-identity event construction that rejects work-only/path-like identities and persists no card/query text.
 - [x] Make use-event reads replay-idempotent, quarantine conflicting event ids, and recover after crash-truncated ledger tails.
 - [ ] Select signed verified cards only after the final executable route and read the corpus once per tick.
-- [ ] Preallocate and propagate a durable attempt identity through serial, concurrent, failure, retry, builtin, and Best-of-N execution.
+- [x] Preallocate and propagate a durable attempt identity through serial, concurrent, failure, retry, builtin, and Best-of-N execution.
 - [ ] Persist replay-idempotent metadata-only selection events after strong trajectory identity exists.
 - [ ] Correlate skill-use observations into aggregate-only trajectory learning without claiming causality.
 - [ ] Prove zero changes to backend, tier, model, goal/prompt, budget, delegation, retries, Best-of-N, or merge authority.
 - [x] Keep active skill injection impossible and preserve current production routing as an exact no-producer behavioral no-op.
 - [x] Run focused/full gates, update durable notes, commit, push, reload, and smoke production telemetry.
+
+## Current Overnight Cycle - Durable Attempt Identity
+- [x] Rehydrate the clean pushed baseline, Entire state, runtime health, and persistent rollout constraints.
+- [x] Deploy disjoint audits for run propagation, Best-of-N candidate semantics, terminal-path coverage, and the identity primitive.
+- [x] Add a privacy-safe preallocated attempt identity with deterministic Best-of-N child identities.
+- [x] Propagate caller-supplied identity through run, swarm, sandbox, retry, and daemon dispatch paths without changing execution inputs.
+- [x] Preserve the identity on success, no-proposal, and failure telemetry so no-attempt learning rows can be joined reliably.
+- [x] Add focused serial, builtin, Best-of-N, retry, and error-path regression coverage.
+- [ ] Run repository gates, update durable notes, commit, push, reload, and smoke production telemetry.

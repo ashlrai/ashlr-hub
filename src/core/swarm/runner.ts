@@ -61,6 +61,7 @@ import { saveSwarm, loadSwarm } from './store.js';
 import { runGoal } from '../run/orchestrator.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { mergeDelegationScope, summarizeDelegationScope } from '../run/delegation-scope.js';
+import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
 
 // ---------------------------------------------------------------------------
 // M17: lazy-load sign / gate / rollback helpers. Each import is best-effort:
@@ -1157,6 +1158,40 @@ export async function runSwarm(
     return failedRun;
   }
 
+  const refuseFreshIdentity = (reason: string): SwarmRun => {
+    const now = new Date().toISOString();
+    const failed: SwarmRun = {
+      id: makeId(),
+      goal: input.goal,
+      specId: input.specId ?? null,
+      project: opts.project ?? null,
+      createdAt: now,
+      updatedAt: now,
+      budget: buildBudget(opts),
+      usage: newUsage(),
+      parallel: Math.min(Math.max(1, opts.parallel ?? DEFAULT_PARALLEL), MAX_PARALLEL),
+      status: 'failed',
+      plan: { specId: input.specId ?? null, goal: input.goal, tasks: [] },
+      tasks: [],
+      result: `Refused: ${reason}. No swarm work was executed.`,
+    };
+    emitLog(sink, failed.result ?? '');
+    return failed;
+  };
+  if (opts.resumeId && opts.runId) opts = { ...opts, runId: undefined };
+  if (opts.runId) {
+    let runId: string;
+    try {
+      runId = assertSafeExecutionIdentity(opts.runId);
+    } catch {
+      return refuseFreshIdentity('caller-supplied run id is invalid');
+    }
+    if (loadSwarm(runId)) {
+      return refuseFreshIdentity(`swarm "${runId}" already exists; use resumeId to continue it`);
+    }
+    opts = { ...opts, runId };
+  }
+
   // -------------------------------------------------------------------------
   // Set ASHLR_IN_SWARM=1 on THIS process so all child engine spawns inherit it.
   // This prevents any task (via runGoal → spawnEngine) from recursively
@@ -1209,7 +1244,7 @@ export async function runSwarm(
   const abortNoSandbox = (reason: string): SwarmRun => {
     const ts = new Date().toISOString();
     const aborted: SwarmRun = {
-      id: makeId(),
+      id: opts.runId ?? makeId(),
       goal: input.goal,
       specId: input.specId ?? null,
       project,
@@ -1294,7 +1329,7 @@ export async function runSwarm(
     if (govBlock !== null) {
       const now = new Date().toISOString();
       const blockedRun: SwarmRun = {
-        id: makeId(),
+        id: opts.runId ?? makeId(),
         goal: input.goal,
         specId: input.specId ?? null,
         project,
@@ -1372,7 +1407,7 @@ export async function runSwarm(
   } else {
     // Fresh swarm — generate id.
     run = initSwarmRun(
-      makeId(),
+      opts.runId ?? makeId(),
       input.goal,
       input.specId ?? null,
       // Plan is populated below; use empty placeholder until then.

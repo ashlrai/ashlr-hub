@@ -105,6 +105,7 @@ import { listNativeTools } from '../mcp-native.js';
 import { selectInboxStore } from '../seams/inbox.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { causalMetadata } from '../learning/causal.js';
+import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
 // M171: headless browser verification for web repos.
 import { isWebApp, verifyInBrowser } from './browser-verify.js';
 // NOTE: sandbox/worktree.js is imported DYNAMICALLY inside runGoal (matching the
@@ -1094,6 +1095,12 @@ export async function runGoal(
   cfg: AshlrConfig,
   opts: RunOptions,
 ): Promise<RunState> {
+  if (opts.resumeId && opts.runId) opts = { ...opts, runId: undefined };
+  if (opts.runId) {
+    const runId = assertSafeExecutionIdentity(opts.runId);
+    if (loadRun(runId)) throw new Error(`Run "${runId}" already exists; use resumeId to continue it`);
+    opts = { ...opts, runId };
+  }
   // Optional CLI progress hook. The CLI (src/cli/run.ts) attaches a non-typed
   // __onStep property to opts to receive live per-step progress. We read it off
   // here and invoke it after each persisted step (model/plan/synthesize). It is
@@ -1276,6 +1283,7 @@ export async function runGoal(
                   workItemId: opts.workItemId,
                   workSource: opts.workSource,
                   delegationScope,
+                  ...(opts.runId ? { runId: opts.runId } : {}),
                 });
                 lastApiR = apiR;
 
@@ -1446,6 +1454,7 @@ export async function runGoal(
                 workItemId: opts.workItemId,
                 workSource: opts.workSource,
                 delegationScope,
+                ...(opts.runId ? { runId: opts.runId } : {}),
               });
               lastR = r;
 
@@ -1545,7 +1554,7 @@ export async function runGoal(
           return finalR.state;
         }
 
-        const id = generateRunId();
+        const id = opts.runId ?? generateRunId();
         const now = new Date().toISOString();
         const delegatedState: RunState = {
           id,
@@ -1611,7 +1620,7 @@ export async function runGoal(
   if (govBlock !== null) {
     const now = new Date().toISOString();
     const blockState: RunState = {
-      id: generateRunId(),
+      id: opts.runId ?? generateRunId(),
       goal,
       engine: 'builtin',
       provider: 'none',
@@ -1703,7 +1712,7 @@ export async function runGoal(
     saveRun(state);
     process.stderr.write(`[ashlr run] resumed run ${state.id} (${state.tasks.length} tasks)\n`);
   } else {
-    const id = generateRunId();
+    const id = opts.runId ?? generateRunId();
     const now = new Date().toISOString();
     state = {
       id,

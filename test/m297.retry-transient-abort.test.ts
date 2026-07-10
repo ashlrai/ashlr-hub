@@ -199,6 +199,31 @@ afterEach(() => {
 // Windows (real shims there are .cmd). The retry logic itself is covered by
 // the in-process unit tests above, which run on every platform.
 describe.skipIf(process.platform === 'win32')('M297 runEngineSandboxed retry integration', () => {
+  it('appends repeated invocations with the same run id instead of overwriting logs', async () => {
+    const counterFile = join(tmpdir(), `m297-ctr-${Date.now()}-logs.txt`);
+    const stubDir = makeStub('codex', 0, 'done', counterFile);
+    const srcRepo = makeSourceRepo();
+    const testHome = mkdtempSync(join(tmpdir(), 'ashlr-m297-home-'));
+    const previousHome = process.env.HOME;
+    _cleanupFiles.push(counterFile);
+    _cleanupDirs.push(stubDir, srcRepo, testHome);
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${prevPath ?? ''}`;
+    process.env.HOME = testHome;
+    const runId = 'attempt-018f6d2e-7c50-4f15-8a2c-6efc97fb87a1';
+    try {
+      const cfg = makeConfig({ dispatchRetries: 0 });
+      await runEngineSandboxed('codex', 'first invocation', cfg, { sourceRepo: srcRepo, propose: false, runId });
+      await runEngineSandboxed('codex', 'second invocation', cfg, { sourceRepo: srcRepo, propose: false, runId });
+      const log = readFileSync(join(testHome, '.ashlr', 'agent-logs', `${runId}.log`), 'utf8');
+      expect(log.match(/=== invocation /g)).toHaveLength(2);
+    } finally {
+      process.env.PATH = prevPath;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
   it('success on attempt 1 → exactly 1 spawn, no retry', async () => {
     const counterFile = join(tmpdir(), `m297-ctr-${Date.now()}-a.txt`);
     _cleanupFiles.push(counterFile);
