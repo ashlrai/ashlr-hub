@@ -733,6 +733,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
           : record.terminalOutcome,
       };
     })
+    .filter((record) => eventMs(record.latestAt) >= sinceMs)
     .sort((a, b) => eventMs(b.latestAt) - eventMs(a.latestAt) || a.id.localeCompare(b.id))
     .slice(0, limit);
 }

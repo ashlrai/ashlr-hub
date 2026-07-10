@@ -141,6 +141,9 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - Full serial Vitest can hang after many tests with one worker alive; mitigated with `scripts/test-ci.mjs` watchdog for CI/publish gates.
 - Full CI initially exposed two stale auto-merge test expectations: default tier frontier proposals no longer get a pass-level judge, and evidence-mode explainer fixtures now need a diff-bound verification hash. Updated tests and reran affected suites plus full CI.
 - Bounded diagnostic drain status test initially used a fixed `2026-07-03` tick outside the recent-window cutoff on July 9; switched it to the current test timestamp and reran focused M201/M49 tests.
+- Source smoke initially used top-level await in `tsx -e`, which emits CommonJS; reran with an async IIFE.
+- Direct `buildFleetStatus()` smoke initially omitted its required config; reran with `loadConfig()` and confirmed the corrected live 24-hour trajectory denominator is 129.
+- Full CI exposed seven legacy M245 integration fixtures that bypassed the new authoritative proposal/evidence gate plus one credential-free NIM expectation in M344. Updated the fixtures to persist matching applied proposals/evidence and provide a scoped fake NIM credential; affected suites pass 75/75.
 
 ## Agent Findings From Follow-Up Audit
 - Shared queue leases are not renewed during long runs; dry-run shared claims should release immediately.
@@ -1340,9 +1343,21 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Run final lint/build/audit/diff gates, commit, push, and smoke live status.
 
 ## Next Lane - Verified Skill Cards v1
-- [ ] Add `SkillCard` and `SkillUseEvent` schemas plus route-snapshot skill fields.
-- [ ] Persist append-only skill card/use events under `~/.ashlr/skills/` with secret scrubbing and malformed-row skips.
-- [ ] Distill structured skill cards from verified applied proposals while preserving the legacy genome note.
+- [x] Add `SkillCard` and `SkillUseEvent` schemas plus route-snapshot skill fields.
+- [x] Persist append-only skill card/use events under `~/.ashlr/skills/` with secret scrubbing and malformed-row skips.
+- [x] Distill structured skill cards from verified applied proposals while preserving the legacy genome note.
 - [ ] Add shadow-mode skill retrieval after gateway routing; do not change backend choice until same-tier active-mode safety tests pass.
 - [ ] Inject selected skill summaries into run context under a tight cap with verification checks and red flags, never raw diffs.
 - [ ] Correlate selected skill ids with trajectory learning so Ashlr can prove which skills improve verification/merge outcomes.
+
+## Current Overnight Cycle - Skill Learning Foundation and Data Truth
+- [x] Rehydrate clean pushed baseline, Entire state, live FleetStatus, persistent notes, and prior agent findings.
+- [x] Deploy disjoint worker lanes for the metadata-only skill ledger and Fleet Dashboard data-quality rendering.
+- [x] Deploy read-only scouts for the live evidence-coverage gap and the two-commit skill retrieval/injection rollout.
+- [x] Review and integrate the skill-card ledger foundation.
+- [x] Prove degraded/unknown readiness rendering with executable regression coverage and surface trajectory learning in Fleet OS.
+- [x] Resolve the live trajectory evidence gap: preserve true zero evidence while removing historical records from the 24-hour denominator.
+- [x] Prevent overlapping SSE snapshot builds from stalling Fleet Dashboard and verify both learning surfaces in the browser.
+- [x] Make NIM resource availability fail closed when the executor cannot resolve its configured credential.
+- [x] Run focused privacy/dashboard/learning tests and final repository gates.
+- [ ] Update durable notes, commit, push, reload the daemon if runtime code changed, and smoke live status.

@@ -364,51 +364,61 @@ function handleSseEvents(
     }
   }
 
+  // A slow snapshot must not let the interval accumulate concurrent full
+  // fleet reads. One connection gets at most one in-flight update.
+  let updateInFlight = false;
+
   // Emit one full update (runs, swarms, inbox, daemon slices).
   async function emitUpdate(): Promise<void> {
-    sendNamed('runs', sseRunsPayload());
-    sendNamed('swarms', sseSwarmsPayload());
-    // M32: live inbox + daemon state for the web command center. Metadata
-    // only — the inbox event carries id/title/kind, never diffs.
+    if (updateInFlight) return;
+    updateInFlight = true;
     try {
-      const pending = listProposals({ status: 'pending' });
-      sendNamed('inbox', {
-        pending: pending.length,
-        proposals: pending.slice(0, 20).map((p) => ({
-          id: p.id,
-          title: p.title,
-          kind: p.kind,
-          repo: p.repo,
-          origin: p.origin,
-          createdAt: p.createdAt,
-        })),
-      });
-    } catch { /* inbox slice is best-effort */ }
-    try {
-      sendNamed('daemon', loadDaemonState());
-    } catch { /* daemon slice is best-effort */ }
-    // M90: fleet-activity liveness pulse — carry daemon tick count so the
-    // Fleet Activity tab can update its "last tick" indicator in real-time
-    // without a full /api/fleet-activity poll.
-    try {
-      const ds = loadDaemonState();
-      const ticks = Array.isArray(ds.ticks) ? ds.ticks : [];
-      sendNamed('fleet-activity-ping', {
-        running: ds.running,
-        lastTickAt: ds.lastTickAt,
-        tickCount: ticks.length,
-      });
-    } catch { /* fleet-activity ping is best-effort */ }
-    // M213: dashboard snapshot push — lets fleet-dashboard update without polling.
-    try {
-      const snap = await buildSnapshot(cfg);
-      sendNamed('snapshot', { ...snap, dispatchEnabled: allowDispatch });
-    } catch { /* snapshot is best-effort */ }
+      sendNamed('runs', sseRunsPayload());
+      sendNamed('swarms', sseSwarmsPayload());
+      // M32: live inbox + daemon state for the web command center. Metadata
+      // only — the inbox event carries id/title/kind, never diffs.
+      try {
+        const pending = listProposals({ status: 'pending' });
+        sendNamed('inbox', {
+          pending: pending.length,
+          proposals: pending.slice(0, 20).map((p) => ({
+            id: p.id,
+            title: p.title,
+            kind: p.kind,
+            repo: p.repo,
+            origin: p.origin,
+            createdAt: p.createdAt,
+          })),
+        });
+      } catch { /* inbox slice is best-effort */ }
+      try {
+        sendNamed('daemon', loadDaemonState());
+      } catch { /* daemon slice is best-effort */ }
+      // M90: fleet-activity liveness pulse — carry daemon tick count so the
+      // Fleet Activity tab can update its "last tick" indicator in real-time
+      // without a full /api/fleet-activity poll.
+      try {
+        const ds = loadDaemonState();
+        const ticks = Array.isArray(ds.ticks) ? ds.ticks : [];
+        sendNamed('fleet-activity-ping', {
+          running: ds.running,
+          lastTickAt: ds.lastTickAt,
+          tickCount: ticks.length,
+        });
+      } catch { /* fleet-activity ping is best-effort */ }
+      // M213: dashboard snapshot push — lets fleet-dashboard update without polling.
+      try {
+        const snap = await buildSnapshot(cfg);
+        sendNamed('snapshot', { ...snap, dispatchEnabled: allowDispatch });
+      } catch { /* snapshot is best-effort */ }
+    } finally {
+      updateInFlight = false;
+    }
   }
 
   // Send an initial snapshot immediately.
   try {
-    emitUpdate();
+    void emitUpdate();
   } catch {
     // If the initial read fails, the client gets no data until the next tick.
   }
@@ -416,7 +426,7 @@ function handleSseEvents(
   // Poll on a bounded interval.
   const intervalId = setInterval(() => {
     try {
-      emitUpdate();
+      void emitUpdate();
     } catch {
       // Socket may be gone; 'close' event will clean up.
     }

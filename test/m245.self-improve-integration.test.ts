@@ -51,6 +51,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
+import type { AutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
+import { persistAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
+import { hashDiff } from '../src/core/foundry/provenance.js';
 import { LEARNED_ROUTING_MIN_SAMPLES } from '../src/core/run/learned-router.js';
 
 // ---------------------------------------------------------------------------
@@ -239,6 +242,8 @@ function makeProposal(
   engineModel: string,
   repo = '/home/agent/test-repo',
 ): Proposal {
+  const diff = '--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ -1 +1 @@\n+// fix';
+  const diffHash = hashDiff(diff);
   return {
     id,
     repo,
@@ -246,12 +251,82 @@ function makeProposal(
     kind: 'patch',
     title,
     summary: `Successfully completed: ${title}`,
-    status: 'pending',
+    status: 'applied',
     createdAt: FIXED_ISO,
     engineTier: 'frontier',
     engineModel,
-    diff: '--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ -1 +1 @@\n+// fix',
+    diff,
+    diffHash,
+    verifyResult: {
+      passed: true,
+      ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+      diffHash,
+      verifiedAt: FIXED_ISO,
+      source: 'auto-merge',
+    },
   } as Proposal;
+}
+
+/** Persist the authoritative applied proposal and matching evidence pack. */
+function persistVerifiedAppliedProposal(proposal: Proposal): void {
+  const inboxDir = path.join(tmpHome, '.ashlr', 'inbox');
+  fs.mkdirSync(inboxDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(inboxDir, `${proposal.id}.json`),
+    JSON.stringify(proposal, null, 2) + '\n',
+    'utf8',
+  );
+
+  const diffHash = hashDiff(proposal.diff ?? '');
+  const evidence: AutonomyEvidencePack = {
+    version: 1,
+    generatedAt: FIXED_ISO,
+    proposal: {
+      id: proposal.id,
+      repo: proposal.repo,
+      kind: proposal.kind,
+      status: proposal.status,
+      origin: proposal.origin,
+      title: proposal.title,
+      createdAt: proposal.createdAt,
+    },
+    producer: {
+      engineModel: proposal.engineModel,
+      engineTier: proposal.engineTier,
+    },
+    diff: { hash: diffHash, files: ['src/foo.ts'], changedLines: 1 },
+    target: 'main',
+    trustBasis: 'verification',
+    remotePreferred: false,
+    riskClass: 'low',
+    gates: {
+      authority: { ok: true, detail: 'authority passed' },
+      provenance: { ok: true, detail: 'provenance passed' },
+      verification: { ok: true, detail: 'verification passed' },
+      risk: { ok: true, detail: 'risk passed' },
+      scope: { ok: true, detail: 'scope passed' },
+    },
+    verification: {
+      passed: true,
+      detail: 'verification passed',
+      commandKinds: ['test'],
+      diffHash,
+      verifiedAt: FIXED_ISO,
+      source: 'auto-merge',
+    },
+    policy: {
+      tier: 'verified-source',
+      action: 'merge-main',
+      allowed: true,
+      reason: 'verified evidence passed',
+    },
+  };
+  expect(persistAutonomyEvidencePack(evidence)).toBe(true);
+}
+
+function learnVerifiedApplied(proposal: Proposal, cfg: AshlrConfig): void {
+  persistVerifiedAppliedProposal(proposal);
+  learnFromApplied(proposal, cfg);
 }
 
 /**
@@ -481,7 +556,7 @@ describe('INTEGRATION S3: M243 learnFromApplied → skills in genome', () => {
     ];
 
     for (const p of proposals) {
-      learnFromApplied(p, cfg);
+      learnVerifiedApplied(p, cfg);
     }
 
     const entries = readHubEntries();
@@ -508,7 +583,7 @@ describe('INTEGRATION S3: M243 learnFromApplied → skills in genome', () => {
 
   it('skill text contains the proposal title and engine info', () => {
     const p = makeProposal('prop-applied-detail', 'Fix crash in parser', 'claude:claude-opus-4-5');
-    learnFromApplied(p, cfg);
+    learnVerifiedApplied(p, cfg);
 
     const entries = readHubEntries();
     const skills = entries.filter(
@@ -523,7 +598,7 @@ describe('INTEGRATION S3: M243 learnFromApplied → skills in genome', () => {
 
   it('skill also writes a decisions-ledger telemetry entry', () => {
     const p = makeProposal('prop-skill-ledger-01', 'Add rate limiting', 'claude:claude-opus-4-5');
-    learnFromApplied(p, cfg);
+    learnVerifiedApplied(p, cfg);
 
     const today = new Date(FIXED_MS).toISOString().slice(0, 10);
     const ledgerFile = path.join(tmpHome, '.ashlr', 'decisions', `${today}.jsonl`);
@@ -559,8 +634,8 @@ describe('INTEGRATION S4: full loop — genome contains both anti-playbooks and 
     learnFromRejection('loop-rej-002', 'Drop table users', 'harmful', 'deletes prod data', cfg);
 
     // Successes → skills
-    learnFromApplied(makeProposal('loop-app-001', 'Fix null pointer', 'claude:claude-opus-4-5'), cfg);
-    learnFromApplied(makeProposal('loop-app-002', 'Add rate limit', 'codex:gpt-5.5'), cfg);
+    learnVerifiedApplied(makeProposal('loop-app-001', 'Fix null pointer', 'claude:claude-opus-4-5'), cfg);
+    learnVerifiedApplied(makeProposal('loop-app-002', 'Add rate limit', 'codex:gpt-5.5'), cfg);
 
     const entries = readHubEntries();
     const allTags = entries.flatMap((e) => (Array.isArray(e['tags']) ? (e['tags'] as string[]) : []));
@@ -690,8 +765,8 @@ describe('INTEGRATION S6: COMPOUNDING — written entries are recallable for fut
   it('curateSkills returns the skills the loop wrote', async () => {
     const cfg = makeCfg();
 
-    learnFromApplied(makeProposal('recall-app-001', 'Fix null pointer in auth', 'claude:claude-opus-4-5'), cfg);
-    learnFromApplied(makeProposal('recall-app-002', 'Add rate limiting', 'codex:gpt-5.5'), cfg);
+    learnVerifiedApplied(makeProposal('recall-app-001', 'Fix null pointer in auth', 'claude:claude-opus-4-5'), cfg);
+    learnVerifiedApplied(makeProposal('recall-app-002', 'Add rate limiting', 'codex:gpt-5.5'), cfg);
 
     // Simulate the injectOnRun recall path
     const hubEntries = readHubEntries().map((e) => ({
@@ -726,7 +801,7 @@ describe('INTEGRATION S6: COMPOUNDING — written entries are recallable for fut
 
     // Write mixed outcomes — exactly what a fleet loop cycle produces
     learnFromRejection('compound-rej-001', 'Trivial rename', 'noise', 'too trivial', cfg);
-    learnFromApplied(makeProposal('compound-app-001', 'Fix null pointer', 'claude:claude-opus-4-5'), cfg);
+    learnVerifiedApplied(makeProposal('compound-app-001', 'Fix null pointer', 'claude:claude-opus-4-5'), cfg);
 
     const hubEntries = readHubEntries().map((e) => ({
       id: String(e['id']),
@@ -801,8 +876,8 @@ describe('INTEGRATION S7: full self-improvement loop smoke test', () => {
     learnFromRejection('smoke-rej-002', 'Dangerous drop', 'harmful', 'deletes prod data', cfg);
 
     // ─── Step 4: M243 writes skills for successes ────────────────────────────
-    learnFromApplied(makeProposal('smoke-app-001', 'Fix null pointer in auth', 'claude:claude-opus-4-5'), cfg);
-    learnFromApplied(makeProposal('smoke-app-002', 'Add rate limiting to API', 'codex:gpt-5.5'), cfg);
+    learnVerifiedApplied(makeProposal('smoke-app-001', 'Fix null pointer in auth', 'claude:claude-opus-4-5'), cfg);
+    learnVerifiedApplied(makeProposal('smoke-app-002', 'Add rate limiting to API', 'codex:gpt-5.5'), cfg);
 
     // ─── Step 5: genome has both anti-playbooks AND skills ───────────────────
     const rawHub = readHubEntries();

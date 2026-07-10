@@ -1,25 +1,28 @@
 /**
  * skill-library.ts — M243: positive skill-library write-back.
  *
- * Closes the learning loop on the SUCCESS path: when a proposal is applied
- * AND the judge verdict was 'ship' AND tests green, extract a reusable
- * WORKFLOW recipe from the proposal and persist it as a genome hub entry so
- * FUTURE agent runs have positive grounding for proven patterns.
+ * Closes the learning loop on the SUCCESS path: when the authoritative inbox
+ * proposal is applied and its persisted verification/evidence remains bound to
+ * the current diff, extract a reusable workflow and persist both the legacy
+ * genome note and a structured verified SkillCard.
  *
  * Mirrors M235 (self-improve.ts) structurally — same safety invariants, same
  * fire-and-forget contract, complementary polarity (success vs. rejection).
  *
  * SAFETY INVARIANTS:
- *  - WRITE TARGET: genome hub + decisions ledger ONLY. Never touches
- *    merge.ts gate logic, sandbox confinement, scope-cap, M54, or any
- *    policy file.
+ *  - WRITE TARGET: genome hub + skill-card ledger + decisions ledger ONLY.
+ *    Never touches merge.ts gate logic, sandbox confinement, scope-cap, M54,
+ *    or any policy file.
  *  - FIRE-AND-FORGET: learnFromApplied() never throws, never awaits
  *    anything on the critical path. All I/O is wrapped in try/catch.
  *  - GATED: every code path checks cfg.foundry?.skillLibrary !== false
  *    (default ON). When the flag is explicitly false the function returns
  *    immediately — byte-identical to having no call at all.
- *  - SHIP-ONLY: only 'ship' verdict + applied+merged proposals write a skill.
- *    Non-ship verdicts use M235 (self-improve.ts). Explicit false-flag = no-op.
+ *  - VERIFIED-ONLY: caller state is never authoritative. The live proposal and
+ *    autonomy evidence pack must prove applied status, current verification,
+ *    passing gates/policy, matching hashes, and a known producer tier.
+ *  - NO SKILL CHAINS: proposals whose authoritative route/evidence snapshot
+ *    contains selectedSkillIds are not distilled into another skill.
  *  - ADDITIVE: the genome entry is informational grounding for future runs.
  *    It is NOT an execution directive; it does not alter the merge gate,
  *    the judge, or any safety policy.
@@ -34,8 +37,13 @@
  */
 
 import { appendHubEntry } from '../genome/store.js';
+import { readAutonomyEvidencePack, type AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
+import { hashDiff } from '../foundry/provenance.js';
+import { loadProposal } from '../inbox/store.js';
+import { scrubSecrets } from '../util/scrub.js';
 import { recordDecision } from './decisions-ledger.js';
-import type { AshlrConfig, GenomeEntry, Proposal } from '../types.js';
+import { recordSkillCard } from './skill-records.js';
+import type { AshlrConfig, GenomeEntry, Proposal, SkillCard } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -50,6 +58,22 @@ export const SKILL_INJECT_CAP = 800;
 
 /** Tag prefix for all genome entries written by this module. */
 const TAG = 'm243:skill';
+
+const RAW_PAYLOAD_MARKER = /\bRAW_[A-Z0-9_]*(?:PROMPT|DIFF|STDOUT|STDERR|ENV|FILE_CONTENTS?|ARGV|COMMAND_OUTPUT)[A-Z0-9_]*\b/g;
+const DIFF_PAYLOAD_START = /(?:^|\n)(?:diff --git |--- [ab]\/|\+\+\+ [ab]\/|@@ )/m;
+
+function boundedMetadataText(value: unknown, max: number, fallback = ''): string {
+  try {
+    if (typeof value !== 'string') return fallback;
+    let text = scrubSecrets(value).replace(RAW_PAYLOAD_MARKER, '[REDACTED]');
+    const diffStart = text.search(DIFF_PAYLOAD_START);
+    if (diffStart >= 0) text = `${text.slice(0, diffStart)} [REDACTED]`;
+    text = text.replace(/\s+/g, ' ').trim() || fallback;
+    return text.length > max ? text.slice(0, max) : text;
+  } catch {
+    return fallback;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Workflow distillation (pure, deterministic, no LLM)
@@ -66,10 +90,10 @@ const TAG = 'm243:skill';
  * Pure; never throws.
  */
 export function distillWorkflow(proposal: Proposal): string {
-  const safeTitle = (proposal.title ?? '').replace(/\s+/g, ' ').trim().slice(0, 80) || '(untitled)';
-  const safeSummary = (proposal.summary ?? '').replace(/\s+/g, ' ').trim().slice(0, 400);
-  const engine = (proposal.engineModel ?? proposal.engineTier ?? 'unknown').toString().slice(0, 40);
-  const repo = (proposal.repo ?? '').toString().slice(0, 60) || '(no repo)';
+  const safeTitle = boundedMetadataText(proposal.title, 80, '(untitled)');
+  const safeSummary = boundedMetadataText(proposal.summary, 400);
+  const engine = boundedMetadataText(proposal.engineModel ?? proposal.engineTier, 40, 'unknown');
+  const repo = boundedMetadataText(proposal.repo, 60, '(no repo)');
 
   // Derive a task-class label from the proposal title heuristically.
   const taskClass = deriveTaskClass(safeTitle);
@@ -84,10 +108,148 @@ export function distillWorkflow(proposal: Proposal): string {
     `Engine/model: ${engine}\n` +
     `Repo: ${repo}` +
     summaryPart +
-    `\n\nPattern (plan→do→verify): this proposal was judged 'ship', applied, ` +
-    `and passed verification. Future agents: if your task matches this pattern, ` +
+    `\n\nPattern (plan→do→verify): this proposal was applied with current, ` +
+    `diff-bound verification and allowed autonomy evidence. Future agents: if your task matches this pattern, ` +
     `this recipe is a proven baseline — adapt, don't just copy the diff.`
   );
+}
+
+interface VerifiedSkillInput {
+  proposal: Proposal;
+  evidence: AutonomyEvidencePack;
+  diffHash: string;
+  commandKinds: string[];
+}
+
+function commandKindsFromVerification(proposal: Proposal): string[] {
+  if (!Array.isArray(proposal.verifyResult?.ran)) return [];
+  const kinds = new Set<string>();
+  for (const command of proposal.verifyResult.ran) {
+    if (
+      !command ||
+      !Array.isArray(command.cmd) ||
+      !command.cmd.some((part) => typeof part === 'string' && part.trim() !== '')
+    ) continue;
+    const kind = boundedMetadataText(command.kind, 80);
+    if (kind) kinds.add(kind);
+  }
+  return [...kinds].slice(0, 12);
+}
+
+function routeHasSkillSelection(route: Proposal['routeSnapshot']): boolean {
+  return route?.selectedSkillIds !== undefined;
+}
+
+function evidenceGatesPassed(evidence: AutonomyEvidencePack): boolean {
+  try {
+    const required = [
+      evidence.gates.authority,
+      evidence.gates.provenance,
+      evidence.gates.verification,
+      evidence.gates.risk,
+      evidence.gates.scope,
+    ];
+    if (!required.every((gate) => gate?.ok === true)) return false;
+    return Object.values(evidence.gates).every((gate) => gate?.ok === true);
+  } catch {
+    return false;
+  }
+}
+
+/** Load and validate the authoritative state used for skill distillation. */
+function verifiedSkillInput(proposalId: string): VerifiedSkillInput | null {
+  try {
+    const proposal = loadProposal(proposalId);
+    if (!proposal || proposal.id !== proposalId || proposal.status !== 'applied') return null;
+    if (typeof proposal.diff !== 'string' || proposal.diff.length === 0) return null;
+
+    const commandKinds = commandKindsFromVerification(proposal);
+    const currentDiffHash = hashDiff(proposal.diff);
+    if (
+      proposal.verifyResult?.passed !== true ||
+      commandKinds.length === 0 ||
+      proposal.diffHash !== currentDiffHash ||
+      proposal.verifyResult.diffHash !== currentDiffHash
+    ) return null;
+
+    const evidence = readAutonomyEvidencePack(proposalId);
+    if (!evidence || evidence.proposal.id !== proposalId) return null;
+    if (
+      evidence.diff.hash !== currentDiffHash ||
+      evidence.verification.diffHash !== currentDiffHash ||
+      evidence.verification.passed !== true ||
+      !Array.isArray(evidence.verification.commandKinds) ||
+      !evidence.verification.commandKinds.some((kind) => typeof kind === 'string' && kind.trim() !== '')
+    ) return null;
+    if (!evidenceGatesPassed(evidence) || evidence.policy?.allowed !== true) return null;
+    if (!proposal.engineTier || evidence.producer.engineTier !== proposal.engineTier) return null;
+    if (routeHasSkillSelection(proposal.routeSnapshot) || routeHasSkillSelection(evidence.routeSnapshot)) return null;
+
+    return { proposal, evidence, diffHash: currentDiffHash, commandKinds };
+  } catch {
+    return null;
+  }
+}
+
+function skillCardFromVerified(input: VerifiedSkillInput, ts: string): SkillCard {
+  const { proposal, evidence, diffHash, commandKinds } = input;
+  const safeTitle = boundedMetadataText(proposal.title, 100, 'Untitled verified workflow');
+  const safeSummary = boundedMetadataText(
+    proposal.summary,
+    400,
+    `Verified ${deriveTaskClass(safeTitle)} workflow.`,
+  );
+  const gateCount = Object.values(evidence.gates).length;
+  return {
+    schemaVersion: 1,
+    skillId: `skill.proposal.${boundedMetadataText(proposal.id, 200, 'unknown')}`,
+    revision: 1,
+    ts,
+    name: safeTitle,
+    summary: safeSummary,
+    status: 'verified',
+    source: 'verified-proposal',
+    tags: [TAG, `engine:${proposal.engineTier}`, `proposal:${boundedMetadataText(proposal.id, 24, 'unknown')}`],
+    taskKinds: [deriveTaskClass(safeTitle)],
+    commandKinds,
+    verification: {
+      passed: true,
+      ...(proposal.verifyResult?.verifiedAt || evidence.verification.verifiedAt
+        ? { verifiedAt: proposal.verifyResult?.verifiedAt ?? evidence.verification.verifiedAt }
+        : {}),
+      commandKinds,
+      diffHash,
+      riskClass: evidence.riskClass,
+      evidenceCount: gateCount + 1,
+    },
+    proposalId: proposal.id,
+    ...(proposal.runId ? { runId: proposal.runId } : {}),
+    ...(proposal.trajectoryId ?? evidence.trajectoryId
+      ? { trajectoryId: proposal.trajectoryId ?? evidence.trajectoryId }
+      : {}),
+    ...(proposal.routeSnapshot ?? evidence.routeSnapshot
+      ? { routeSnapshot: proposal.routeSnapshot ?? evidence.routeSnapshot }
+      : {}),
+    ...(proposal.runEventSummary ?? evidence.runEventSummary
+      ? { runEventSummary: proposal.runEventSummary ?? evidence.runEventSummary }
+      : {}),
+    evidenceOutcome: {
+      target: evidence.target,
+      trustBasis: evidence.trustBasis,
+      riskClass: evidence.riskClass,
+      verificationPassed: true,
+      policyAllowed: true,
+      policyAction: evidence.policy?.action,
+      policyTier: evidence.policy?.tier,
+      gateCount,
+    },
+    learningSource: 'verified-proposal',
+    labelBasis: 'evidence-policy',
+    ...(proposal.routerPolicyVersion ?? evidence.routerPolicyVersion
+      ? { routerPolicyVersion: proposal.routerPolicyVersion ?? evidence.routerPolicyVersion }
+      : {}),
+    learningEpoch: ts.slice(0, 10),
+  };
 }
 
 /**
@@ -118,12 +280,13 @@ function deriveTaskClass(title: string): string {
  * Called AFTER a proposal is successfully merged (in automerge-pass.ts, after
  * res.merged++ in the success branch). Writes:
  *   1. A genome hub entry (skill workflow) tagged 'm243:skill'.
- *   2. A decisions-ledger entry for telemetry/observability.
+ *   2. A structured, append-only verified SkillCard.
+ *   3. A decisions-ledger entry for telemetry/observability.
  *
- * NEVER THROWS. NEVER BLOCKS (all I/O is synchronous JSONL append behind
- * try/catch). Gated on cfg.foundry?.skillLibrary !== false (default ON).
+ * NEVER THROWS. All reads and writes are synchronous and guarded by try/catch.
+ * Gated on cfg.foundry?.skillLibrary !== false (default ON).
  *
- * @param proposal  The applied Proposal (must have verdict 'ship' and be merged).
+ * @param proposal  A proposal lookup hint; persisted state is authoritative.
  * @param cfg  Fleet config.
  */
 export function learnFromApplied(proposal: Proposal, cfg: AshlrConfig): void {
@@ -135,31 +298,55 @@ export function learnFromApplied(proposal: Proposal, cfg: AshlrConfig): void {
     return;
   }
 
-  // Derive and write the workflow skill.
+  // Caller fields (including status, verification, route, and tier) are only a
+  // lookup hint. Every authority-bearing field comes from the persisted state.
+  let verified: VerifiedSkillInput | null;
   try {
-    const workflow = distillWorkflow(proposal);
-    const safeTitle = (proposal.title ?? '').slice(0, 60) || 'untitled';
-    const title = `Skill: ${(proposal.engineTier ?? 'unknown')} — ${safeTitle}`;
+    verified = verifiedSkillInput(proposal.id);
+  } catch {
+    return;
+  }
+  if (!verified) return;
+
+  const authoritative = verified.proposal;
+  const now = new Date().toISOString();
+
+  // Preserve the legacy genome note for compatibility.
+  try {
+    const workflow = distillWorkflow(authoritative);
+    const safeTitle = boundedMetadataText(authoritative.title, 60, 'untitled');
+    const title = `Skill: ${authoritative.engineTier} — ${safeTitle}`;
 
     appendHubEntry({
       title,
       text: workflow,
-      tags: [TAG, `engine:${(proposal.engineTier ?? 'unknown').toString().slice(0, 24)}`, `proposal:${proposal.id.slice(0, 24)}`],
+      tags: [
+        TAG,
+        `engine:${boundedMetadataText(authoritative.engineTier, 24, 'unknown')}`,
+        `proposal:${boundedMetadataText(authoritative.id, 24, 'unknown')}`,
+      ],
       hubOnly: true,
     });
   } catch {
     // appendHubEntry never throws by contract; guard defensively.
   }
 
+  // Structured skill history is append-only and independently best-effort.
+  try {
+    recordSkillCard(skillCardFromVerified(verified, now));
+  } catch {
+    // Skill history must never disrupt the applied proposal path.
+  }
+
   // Telemetry: record to decisions ledger (action 'skill-library:written').
   try {
     recordDecision({
       ts: new Date().toISOString(),
-      proposalId: proposal.id,
+      proposalId: authoritative.id,
       action: 'skill-library:written' as Parameters<typeof recordDecision>[0]['action'],
-      detail: `engine=${(proposal.engineTier ?? 'unknown')}`,
-      repo: proposal.repo ?? '',
-      engine: proposal.engineModel ?? '',
+      detail: `engine=${authoritative.engineTier}`,
+      repo: authoritative.repo ?? '',
+      engine: authoritative.engineModel ?? '',
       model: '',
     } as Parameters<typeof recordDecision>[0]);
   } catch {

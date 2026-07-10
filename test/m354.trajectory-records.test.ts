@@ -336,6 +336,42 @@ describe('Trajectory records', () => {
     });
   });
 
+  it('excludes historical proposal-only records outside the requested window', () => {
+    const recentAt = new Date(Date.now() - 60_000).toISOString();
+    const historicalAt = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    const proposalOnlyRecord = (id: string, createdAt: string): OutcomeRecord => {
+      const base = outcomeRecord();
+      return {
+        ...base,
+        proposal: {
+          ...base.proposal,
+          id,
+          createdAt,
+          runId: undefined,
+          trajectoryId: undefined,
+        },
+        lastActivityAt: createdAt,
+        evidencePacks: [],
+        decisions: [],
+      };
+    };
+
+    const records = listTrajectoryRecords({
+      windowHours: 24,
+      deps: deps({
+        readDispatchProductionEvents: () => [],
+        listOutcomeRecords: () => [
+          proposalOnlyRecord('prop-recent-window', recentAt),
+          proposalOnlyRecord('prop-historical-window', historicalAt),
+        ],
+        readAgentActions: () => [],
+      }),
+    });
+
+    expect(records.map((record) => record.proposalId)).toEqual(['prop-recent-window']);
+    expect(records[0]?.latestAt).toBe(recentAt);
+  });
+
   it('summarizes trajectory reconstruction without leaking direct ids', () => {
     const records = listTrajectoryRecords({
       windowHours: 1000,

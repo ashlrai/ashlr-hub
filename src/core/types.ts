@@ -77,6 +77,12 @@ export interface RouteSnapshot {
   assignedBy?: string;
   reason?: string;
   routerPolicyVersion?: string;
+  /** Metadata-only ids selected by the skill policy for this route. */
+  selectedSkillIds?: string[];
+  /** Version of the skill selection policy that produced the selection. */
+  skillPolicyVersion?: string;
+  /** Whether selected skills were observed, applied, or disabled. */
+  skillMode?: 'shadow' | 'active' | 'disabled';
 }
 
 export interface PromptContextSummary {
@@ -178,6 +184,84 @@ export interface EvidenceOutcomeSummary {
   policyAction?: string;
   policyTier?: string;
   gateCount?: number;
+}
+
+export type SkillCardStatus = 'candidate' | 'verified' | 'deprecated' | 'revoked';
+export type SkillCardSource = 'verified-proposal' | 'manual' | 'imported';
+export type SkillUseMode = 'shadow' | 'active' | 'disabled';
+export type SkillUseStage = 'selected' | 'injected' | 'applied' | 'outcome';
+export type SkillUseOutcome =
+  | 'unknown'
+  | 'verified'
+  | 'merged'
+  | 'rejected'
+  | 'reverted'
+  | 'followed-up'
+  | 'failed'
+  | 'skipped';
+
+/** Fixed-key verification metadata for a skill card revision. */
+export interface SkillCardVerification {
+  passed: boolean;
+  verifiedAt?: string;
+  commandKinds?: string[];
+  diffHash?: string;
+  riskClass?: string;
+  evidenceCount?: number;
+}
+
+/**
+ * A bounded, metadata-only skill revision. Raw prompts, diffs, process output,
+ * environment values, file contents, argv, and command output are forbidden.
+ */
+export interface SkillCard {
+  schemaVersion: 1;
+  skillId: string;
+  revision: number;
+  ts: string;
+  name: string;
+  summary: string;
+  status: SkillCardStatus;
+  source: SkillCardSource;
+  tags?: string[];
+  taskKinds?: string[];
+  commandKinds?: string[];
+  verification?: SkillCardVerification;
+  proposalId?: string;
+  runId?: string;
+  trajectoryId?: string;
+  routeSnapshot?: RouteSnapshot;
+  runEventSummary?: RunEventSummary;
+  evidenceOutcome?: EvidenceOutcomeSummary;
+  learningSource?: LearningSource;
+  labelBasis?: LabelBasis;
+  routerPolicyVersion?: string;
+  learningEpoch?: string;
+}
+
+/** Append-only metadata describing selection and outcomes for one skill use. */
+export interface SkillUseEvent {
+  schemaVersion: 1;
+  eventId: string;
+  ts: string;
+  skillId: string;
+  skillRevision: number;
+  mode: SkillUseMode;
+  stage: SkillUseStage;
+  outcome?: SkillUseOutcome;
+  rank?: number;
+  score?: number;
+  reason?: string;
+  proposalId?: string;
+  runId?: string;
+  trajectoryId?: string;
+  routeSnapshot?: RouteSnapshot;
+  runEventSummary?: RunEventSummary;
+  evidenceOutcome?: EvidenceOutcomeSummary;
+  learningSource?: LearningSource;
+  labelBasis?: LabelBasis;
+  routerPolicyVersion?: string;
+  learningEpoch?: string;
 }
 
 export type DelegationOrigin = 'run' | 'swarm' | 'daemon' | 'best-of-n' | 'manager' | string;

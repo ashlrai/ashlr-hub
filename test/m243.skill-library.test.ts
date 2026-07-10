@@ -2,12 +2,13 @@
  * test/m243.skill-library.test.ts — M243: skill-library positive write-back.
  *
  * Verifies the key properties of the skill-library module:
- *  1. applied+ship → genome appendHubEntry called with workflow tagged 'm243:skill';
- *     decisions ledger records 'skill-library:written'.
+ *  1. authoritative applied+verified evidence writes both the legacy genome
+ *     workflow and a forced verified-proposal SkillCard.
  *  2. flag-off (skillLibrary: false) → absolute no-op (byte-identical).
  *  3. genome-write-throw → swallowed, learnFromApplied never throws.
  *  4. distillWorkflow produces an abstracted workflow, NOT the raw diff verbatim.
- *  5. curateSkills: stale-archive cap (90d) + char cap (SKILL_INJECT_CAP).
+ *  5. stale/missing/denied/skill-assisted evidence fails closed.
+ *  6. curateSkills: stale-archive cap (90d) + char cap (SKILL_INJECT_CAP).
  *
  * HERMETICITY:
  *  - HOME overridden to a fresh tmp dir per test — no real ~/.ashlr touched.
@@ -22,6 +23,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
+import type { AutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
+import { hashDiff } from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // HOME isolation — override before any module resolves homedir()
@@ -50,6 +53,21 @@ vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   decisionsDir: vi.fn(() => ''),
 }));
 
+const mockLoadProposal = vi.fn();
+vi.mock('../src/core/inbox/store.js', () => ({
+  loadProposal: (...args: unknown[]) => mockLoadProposal(...args),
+}));
+
+const mockReadAutonomyEvidencePack = vi.fn();
+vi.mock('../src/core/autonomy/evidence-pack.js', () => ({
+  readAutonomyEvidencePack: (...args: unknown[]) => mockReadAutonomyEvidencePack(...args),
+}));
+
+const mockRecordSkillCard = vi.fn();
+vi.mock('../src/core/fleet/skill-records.js', () => ({
+  recordSkillCard: (...args: unknown[]) => mockRecordSkillCard(...args),
+}));
+
 // ---------------------------------------------------------------------------
 // Lazy import — after mocks
 // ---------------------------------------------------------------------------
@@ -66,8 +84,11 @@ import {
 // ---------------------------------------------------------------------------
 
 const FIXED_TS = new Date('2026-01-15T12:00:00.000Z');
+const DEFAULT_DIFF = '--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -1,3 +1,4 @@\n+if (!user) return;\n const tok = user.token;';
 
 function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
+  const diff = overrides.diff ?? DEFAULT_DIFF;
+  const diffHash = hashDiff(diff);
   return {
     id: 'prop-m243-001',
     repo: '/home/user/myrepo',
@@ -75,13 +96,95 @@ function makeProposal(overrides: Partial<Proposal> = {}): Proposal {
     kind: 'patch',
     title: 'Fix null pointer in auth module',
     summary: 'Added null check before accessing user.token to prevent crash',
-    status: 'pending',
+    status: 'applied',
     createdAt: FIXED_TS.toISOString(),
     engineTier: 'frontier',
     engineModel: 'claude:claude-opus-4-5',
-    diff: '--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -1,3 +1,4 @@\n+if (!user) return;\n const tok = user.token;',
+    diff,
+    diffHash,
+    verifyResult: {
+      passed: true,
+      ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+      baseBranch: 'master',
+      baseHead: 'abc123',
+      diffHash,
+      verifiedAt: FIXED_TS.toISOString(),
+      source: 'auto-merge',
+    },
     ...overrides,
   } as Proposal;
+}
+
+function makeEvidence(
+  proposal: Proposal,
+  overrides: Partial<AutonomyEvidencePack> = {},
+): AutonomyEvidencePack {
+  const diffHash = hashDiff(proposal.diff ?? '');
+  return {
+    version: 1,
+    generatedAt: FIXED_TS.toISOString(),
+    proposal: {
+      id: proposal.id,
+      repo: proposal.repo,
+      kind: proposal.kind,
+      status: proposal.status,
+      origin: proposal.origin,
+      title: proposal.title,
+      createdAt: proposal.createdAt,
+    },
+    producer: {
+      engineModel: proposal.engineModel,
+      engineTier: proposal.engineTier,
+    },
+    diff: { hash: diffHash, files: ['src/auth.ts'], changedLines: 1 },
+    target: 'main',
+    trustBasis: 'verification',
+    remotePreferred: false,
+    riskClass: 'low',
+    gates: {
+      authority: { ok: true, detail: 'authority passed' },
+      provenance: { ok: true, detail: 'provenance passed' },
+      verification: { ok: true, detail: 'verification passed' },
+      risk: { ok: true, detail: 'risk passed' },
+      scope: { ok: true, detail: 'scope passed' },
+    },
+    verification: {
+      passed: true,
+      detail: 'verification passed',
+      commandKinds: ['test'],
+      baseBranch: 'master',
+      baseHead: 'abc123',
+      diffHash,
+      verifiedAt: FIXED_TS.toISOString(),
+      source: 'auto-merge',
+    },
+    policy: {
+      tier: 'T4',
+      action: 'merge-main',
+      allowed: true,
+      reason: 'verified evidence passed',
+    },
+    ...overrides,
+  };
+}
+
+function primeAuthoritativeState(
+  proposal: Proposal,
+  evidence: AutonomyEvidencePack | null = makeEvidence(proposal),
+): void {
+  mockLoadProposal.mockReturnValue(proposal);
+  mockReadAutonomyEvidencePack.mockReturnValue(evidence);
+}
+
+function learnVerified(proposal: Proposal, cfg: AshlrConfig): void {
+  primeAuthoritativeState(proposal);
+  learnFromApplied(proposal, cfg);
+}
+
+function expectNoWrites(): void {
+  expect(mockAppendHubEntry).not.toHaveBeenCalled();
+  expect(mockRecordSkillCard).not.toHaveBeenCalled();
+  expect(mockRecordDecision).not.toHaveBeenCalled();
 }
 
 function makeCfg(overrides?: Partial<AshlrConfig>): AshlrConfig {
@@ -125,9 +228,13 @@ beforeEach(() => {
 
   mockAppendHubEntry.mockReset();
   mockRecordDecision.mockReset();
+  mockLoadProposal.mockReset();
+  mockReadAutonomyEvidencePack.mockReset();
+  mockRecordSkillCard.mockReset();
 
   mockAppendHubEntry.mockReturnValue(undefined);
   mockRecordDecision.mockReturnValue(undefined);
+  mockRecordSkillCard.mockReturnValue(undefined);
 });
 
 afterEach(() => {
@@ -191,12 +298,12 @@ describe('M243 distillWorkflow — pure function', () => {
     expect(distillWorkflow(refactorP)).toContain('refactor');
   });
 
-  it('truncates extremely long titles to 80 chars in the workflow text', () => {
-    const longTitle = 'B'.repeat(200);
+  it('truncates extremely long non-secret titles to 80 chars in the workflow text', () => {
+    const longTitle = 'Z'.repeat(200);
     const p = makeProposal({ title: longTitle });
     const workflow = distillWorkflow(p);
-    expect(workflow).toContain('B'.repeat(80));
-    expect(workflow).not.toContain('B'.repeat(81));
+    expect(workflow).toContain('Z'.repeat(80));
+    expect(workflow).not.toContain('Z'.repeat(81));
   });
 
   it('falls back gracefully when title is empty', () => {
@@ -219,7 +326,7 @@ describe('M243 distillWorkflow — pure function', () => {
 describe('M243 learnFromApplied — applied+ship writes skill to genome', () => {
   it('calls appendHubEntry once with workflow tagged m243:skill', () => {
     const p = makeProposal();
-    learnFromApplied(p, makeCfg());
+    learnVerified(p, makeCfg());
 
     expect(mockAppendHubEntry).toHaveBeenCalledOnce();
     const [input] = mockAppendHubEntry.mock.calls[0] as [Record<string, unknown>];
@@ -240,7 +347,7 @@ describe('M243 learnFromApplied — applied+ship writes skill to genome', () => 
     const p = makeProposal({
       diff: '--- a/foo.ts\n+++ b/foo.ts\n@@ -1 +1 @@\n+const x = 1;',
     });
-    learnFromApplied(p, makeCfg());
+    learnVerified(p, makeCfg());
 
     const [input] = mockAppendHubEntry.mock.calls[0] as [Record<string, unknown>];
     const text = input['text'] as string;
@@ -251,7 +358,7 @@ describe('M243 learnFromApplied — applied+ship writes skill to genome', () => 
   it('tags include the first 24 chars of proposalId in the proposal: tag', () => {
     const longId = 'abcdefghijklmnopqrstuvwxyz1234567890';
     const p = makeProposal({ id: longId });
-    learnFromApplied(p, makeCfg());
+    learnVerified(p, makeCfg());
 
     const [input] = mockAppendHubEntry.mock.calls[0] as [Record<string, unknown>];
     const tags = input['tags'] as string[];
@@ -262,7 +369,7 @@ describe('M243 learnFromApplied — applied+ship writes skill to genome', () => 
 
   it('records a decisions-ledger entry with action "skill-library:written"', () => {
     const p = makeProposal();
-    learnFromApplied(p, makeCfg());
+    learnVerified(p, makeCfg());
 
     expect(mockRecordDecision).toHaveBeenCalledOnce();
     const [entry] = mockRecordDecision.mock.calls[0] as [Record<string, unknown>];
@@ -271,21 +378,180 @@ describe('M243 learnFromApplied — applied+ship writes skill to genome', () => 
     expect(entry['detail']).toContain('engine=');
   });
 
-  it('writes normally when skillLibrary flag is absent (default ON)', () => {
-    learnFromApplied(makeProposal(), makeCfgNoFlag());
+  it('writes a forced verified-proposal SkillCard from authoritative state', () => {
+    const p = makeProposal();
+    learnVerified(p, makeCfg());
+
+    expect(mockRecordSkillCard).toHaveBeenCalledOnce();
+    const [card] = mockRecordSkillCard.mock.calls[0] as [Record<string, unknown>];
+    expect(card).toMatchObject({
+      schemaVersion: 1,
+      status: 'verified',
+      source: 'verified-proposal',
+      proposalId: p.id,
+      commandKinds: ['test'],
+      verification: {
+        passed: true,
+        diffHash: p.diffHash,
+        commandKinds: ['test'],
+      },
+      evidenceOutcome: {
+        verificationPassed: true,
+        policyAllowed: true,
+      },
+    });
+    expect(JSON.stringify(card)).not.toContain(p.diff);
+  });
+
+  it('uses the reloaded applied proposal instead of caller-provided status or tier', () => {
+    const authoritative = makeProposal({ status: 'applied', engineTier: 'frontier' });
+    const caller = {
+      ...authoritative,
+      status: 'pending',
+      engineTier: 'local',
+      verifyResult: { passed: false },
+    } as Proposal;
+    primeAuthoritativeState(authoritative);
+
+    learnFromApplied(caller, makeCfg());
+
     expect(mockAppendHubEntry).toHaveBeenCalledOnce();
+    const [card] = mockRecordSkillCard.mock.calls[0] as [Record<string, unknown>];
+    expect(card['status']).toBe('verified');
+    expect((card['tags'] as string[])).toContain('engine:frontier');
+  });
+
+  it('bounds and scrubs summary metadata without persisting raw payloads', () => {
+    const p = makeProposal({
+      summary: `stdout contained RAW_STDOUT_SKILL_CANARY ${'x'.repeat(600)}\ndiff --git a/secret.ts b/secret.ts\n+RAW_DIFF_SKILL_CANARY`,
+    });
+    learnVerified(p, makeCfg());
+
+    const [legacy] = mockAppendHubEntry.mock.calls[0] as [Record<string, unknown>];
+    const [card] = mockRecordSkillCard.mock.calls[0] as [Record<string, unknown>];
+    const persisted = `${JSON.stringify(legacy)}\n${JSON.stringify(card)}`;
+    expect(persisted).not.toContain('RAW_STDOUT_SKILL_CANARY');
+    expect(persisted).not.toContain('RAW_DIFF_SKILL_CANARY');
+    expect(persisted).not.toContain('diff --git');
+    expect((card['summary'] as string).length).toBeLessThanOrEqual(400);
+  });
+
+  it('writes normally when skillLibrary flag is absent (default ON)', () => {
+    learnVerified(makeProposal(), makeCfgNoFlag());
+    expect(mockAppendHubEntry).toHaveBeenCalledOnce();
+    expect(mockRecordSkillCard).toHaveBeenCalledOnce();
     expect(mockRecordDecision).toHaveBeenCalledOnce();
   });
 
   it('writes normally when skillLibrary is explicitly true', () => {
-    learnFromApplied(makeProposal(), makeCfgWithSkillLibrary(true));
+    learnVerified(makeProposal(), makeCfgWithSkillLibrary(true));
     expect(mockAppendHubEntry).toHaveBeenCalledOnce();
+    expect(mockRecordSkillCard).toHaveBeenCalledOnce();
     expect(mockRecordDecision).toHaveBeenCalledOnce();
   });
 });
 
 // ===========================================================================
-// 3. learnFromApplied — flag-off is a byte-identical no-op
+// 3. learnFromApplied — authoritative verification/evidence refusals
+// ===========================================================================
+
+describe('M243 learnFromApplied — verified distillation gates fail closed', () => {
+  it('does not write when authoritative autonomy evidence is missing', () => {
+    const p = makeProposal();
+    primeAuthoritativeState(p, null);
+
+    learnFromApplied(p, makeCfg());
+
+    expectNoWrites();
+  });
+
+  it('does not write when the live diff changed after verification', () => {
+    const caller = makeProposal();
+    const live = { ...caller, diff: `${caller.diff}\n+const later = true;` } as Proposal;
+    primeAuthoritativeState(live, makeEvidence(caller));
+
+    learnFromApplied(caller, makeCfg());
+
+    expectNoWrites();
+  });
+
+  it('does not write when autonomy evidence is bound to an older diff', () => {
+    const oldProposal = makeProposal();
+    const live = makeProposal({ diff: `${DEFAULT_DIFF}\n+const current = true;` });
+    primeAuthoritativeState(live, makeEvidence(oldProposal));
+
+    learnFromApplied(live, makeCfg());
+
+    expectNoWrites();
+  });
+
+  it('does not write when an autonomy evidence gate failed', () => {
+    const p = makeProposal();
+    const evidence = makeEvidence(p);
+    evidence.gates.scope = { ok: false, detail: 'scope exceeded' };
+    primeAuthoritativeState(p, evidence);
+
+    learnFromApplied(p, makeCfg());
+
+    expectNoWrites();
+  });
+
+  it('does not write when autonomy policy denied the action', () => {
+    const p = makeProposal();
+    const evidence = makeEvidence(p, {
+      policy: { tier: 'T0', action: 'escalate-human', allowed: false, reason: 'denied' },
+    });
+    primeAuthoritativeState(p, evidence);
+
+    learnFromApplied(p, makeCfg());
+
+    expectNoWrites();
+  });
+
+  it('does not trust an applied caller when the live proposal is not applied', () => {
+    const caller = makeProposal({ status: 'applied' });
+    const live = { ...caller, status: 'approved' } as Proposal;
+    primeAuthoritativeState(live, makeEvidence(caller));
+
+    learnFromApplied(caller, makeCfg());
+
+    expectNoWrites();
+  });
+
+  it('prevents skill-assisted proposals from distilling another skill', () => {
+    const p = makeProposal({
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'frontier',
+        selectedSkillIds: ['skill.verify-focused-tests'],
+        skillMode: 'shadow',
+      },
+    });
+    primeAuthoritativeState(p);
+
+    learnFromApplied(p, makeCfg());
+
+    expectNoWrites();
+  });
+
+  it('requires nonempty verification commands and an authoritative producer tier', () => {
+    const noCommands = makeProposal({
+      verifyResult: { passed: true, ran: [], diffHash: hashDiff(DEFAULT_DIFF) },
+    });
+    primeAuthoritativeState(noCommands);
+    learnFromApplied(noCommands, makeCfg());
+    expectNoWrites();
+
+    const p = makeProposal();
+    const evidence = makeEvidence(p, { producer: {} });
+    primeAuthoritativeState(p, evidence);
+    learnFromApplied(p, makeCfg());
+    expectNoWrites();
+  });
+});
+
+// ===========================================================================
+// 4. learnFromApplied — flag-off is a byte-identical no-op
 // ===========================================================================
 
 describe('M243 learnFromApplied — flag-off (skillLibrary: false) is a no-op', () => {
@@ -303,16 +569,18 @@ describe('M243 learnFromApplied — flag-off (skillLibrary: false) is a no-op', 
     const cfg = makeCfgWithSkillLibrary(false);
     for (const title of ['Fix bug', 'Add feature', 'Refactor module', 'Update deps']) {
       mockAppendHubEntry.mockReset();
+      mockRecordSkillCard.mockReset();
       mockRecordDecision.mockReset();
       learnFromApplied(makeProposal({ title }), cfg);
       expect(mockAppendHubEntry).not.toHaveBeenCalled();
+      expect(mockRecordSkillCard).not.toHaveBeenCalled();
       expect(mockRecordDecision).not.toHaveBeenCalled();
     }
   });
 });
 
 // ===========================================================================
-// 4. learnFromApplied — never throws (store-write failures are swallowed)
+// 5. learnFromApplied — never throws (store-write failures are swallowed)
 // ===========================================================================
 
 describe('M243 learnFromApplied — never throws', () => {
@@ -321,7 +589,7 @@ describe('M243 learnFromApplied — never throws', () => {
       throw new Error('disk full');
     });
 
-    expect(() => learnFromApplied(makeProposal(), makeCfg())).not.toThrow();
+    expect(() => learnVerified(makeProposal(), makeCfg())).not.toThrow();
   });
 
   it('does not throw when recordDecision throws', () => {
@@ -329,7 +597,7 @@ describe('M243 learnFromApplied — never throws', () => {
       throw new Error('EACCES: permission denied');
     });
 
-    expect(() => learnFromApplied(makeProposal(), makeCfg())).not.toThrow();
+    expect(() => learnVerified(makeProposal(), makeCfg())).not.toThrow();
   });
 
   it('does not throw when BOTH stores throw simultaneously', () => {
@@ -340,14 +608,23 @@ describe('M243 learnFromApplied — never throws', () => {
       throw new Error('ledger unavailable');
     });
 
-    expect(() => learnFromApplied(makeProposal(), makeCfg())).not.toThrow();
+    expect(() => learnVerified(makeProposal(), makeCfg())).not.toThrow();
+  });
+
+  it('does not throw when recordSkillCard throws', () => {
+    mockRecordSkillCard.mockImplementation(() => {
+      throw new Error('skill ledger unavailable');
+    });
+
+    expect(() => learnVerified(makeProposal(), makeCfg())).not.toThrow();
   });
 
   it('does not throw when cfg.foundry is undefined', () => {
     const cfg = makeCfg({ foundry: undefined });
-    expect(() => learnFromApplied(makeProposal(), cfg)).not.toThrow();
+    expect(() => learnVerified(makeProposal(), cfg)).not.toThrow();
     // Default ON: writes should have been attempted
     expect(mockAppendHubEntry).toHaveBeenCalledOnce();
+    expect(mockRecordSkillCard).toHaveBeenCalledOnce();
   });
 
   it('does not throw when cfg.foundry getter throws', () => {
@@ -366,7 +643,7 @@ describe('M243 learnFromApplied — never throws', () => {
 });
 
 // ===========================================================================
-// 5. curateSkills — pure curation
+// 6. curateSkills — pure curation
 // ===========================================================================
 
 describe('M243 curateSkills — pure curation', () => {

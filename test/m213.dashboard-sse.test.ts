@@ -200,6 +200,7 @@ function makeJsonRes() {
 // ---------------------------------------------------------------------------
 
 import { handleApi, drainSseConnections } from '../src/core/web/api.js';
+import { buildSnapshot } from '../src/core/dashboard.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -292,6 +293,27 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(match).not.toBeNull();
     const payload = JSON.parse(match![1]);
     expect(payload.dispatchEnabled).toBe(true);
+  });
+
+  it('does not overlap full snapshot builds when an SSE update is still in flight', async () => {
+    vi.useFakeTimers();
+    const mockedBuildSnapshot = vi.mocked(buildSnapshot);
+    mockedBuildSnapshot.mockClear();
+    let resolveSnapshot!: (value: any) => void;
+    mockedBuildSnapshot.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveSnapshot = resolve;
+    }));
+
+    const req = makeReq('/api/events');
+    const res = makeSseRes();
+    await handleApi(req, res as unknown as ServerResponse, makeConfig() as any, BASE_CTX);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(mockedBuildSnapshot).toHaveBeenCalledTimes(1);
+
+    resolveSnapshot({ generatedAt: new Date().toISOString() });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    mockedBuildSnapshot.mockResolvedValue({ generatedAt: new Date().toISOString() } as any);
   });
 
   // ── 7a–e. Existing named events still emitted ────────────────────────────
@@ -464,6 +486,53 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('backends.find((candidate) => dispatchProductionDiagnosticAttempts(candidate) > 0)');
   });
 
+  it('app.js surfaces aggregate-only trajectory learning in Mission Control and Fleet Dashboard', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+
+    expect(src).toContain('function renderTrajectoryLearningCard');
+    expect(src).toContain("const trajectoryLearning = d.fleet?.trajectoryLearning ?? fleet.trajectoryLearning ?? null");
+    expect(src).toContain('renderTrajectoryLearningCard(trajectoryLearning)');
+    expect(src).toContain('snap.fleet?.trajectoryLearning ?? snap.control?.fleet?.trajectoryLearning');
+    expect(src).toContain("['Trajectories', trajectoryLearning?.trajectories ?? 0]");
+    expect(src).toContain("['Dispatch -> decision', formatCoverageMetric(routeSpine.dispatchToDecision)]");
+    expect(src).toContain("['Dispatch -> evidence', formatCoverageMetric(routeSpine.dispatchToEvidence)]");
+    expect(src).toContain("['Dispatch -> merge', formatCoverageMetric(routeSpine.dispatchToMerge)]");
+    expect(src).toContain("['Merged', terminal.merged ?? 0]");
+    expect(src).toContain("['No-proposal', terminal['no-proposal'] ?? 0]");
+    expect(src).toContain("['Failed', terminal.failed ?? 0]");
+    expect(src).toContain("['Top gap', formatTrajectoryLearningGap(trajectoryLearning)]");
+
+    const formatStart = src.indexOf('function formatTrajectoryLearningGap(trajectoryLearning)');
+    const rowsStart = src.indexOf('\nfunction trajectoryLearningRows', formatStart);
+    const rendererEnd = src.indexOf('\nfunction formatCountMap', rowsStart);
+    expect(formatStart).toBeGreaterThanOrEqual(0);
+    expect(rowsStart).toBeGreaterThan(formatStart);
+    expect(rendererEnd).toBeGreaterThan(rowsStart);
+
+    const formatterSource = src.slice(formatStart, rowsStart);
+    const formatter = new Function(`${formatterSource}\nreturn formatTrajectoryLearningGap;`)() as (
+      trajectoryLearning: Record<string, any>,
+    ) => string;
+    const renderedGap = formatter({
+      gaps: [
+        { kind: 'repo:/private/ashlr', count: 99, sampleRefs: ['item-secret'] },
+        { kind: 'evidence', count: 3, sampleRefs: ['trajectory:abc123', 'proposal-secret'] },
+      ],
+    });
+    expect(renderedGap).toBe('Evidence 3 missing');
+    expect(renderedGap).not.toContain('ashlr');
+    expect(renderedGap).not.toContain('secret');
+    expect(renderedGap).not.toContain('trajectory:');
+
+    const trajectoryUiSource = src.slice(formatStart, rendererEnd);
+    for (const identityField of ['sampleRefs', '.recent', '.ref', 'repo', 'itemId', 'proposalId', 'runId', 'trajectoryId']) {
+      expect(trajectoryUiSource).not.toContain(identityField);
+    }
+  });
+
   it('app.js renders Fleet Dashboard readiness rail from existing fleet snapshots', () => {
     const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
     const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
@@ -482,6 +551,8 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("'Yield'");
     expect(src).toContain("['degraded-source', 'degraded']");
     expect(src).toContain("['unknown-source', 'unknown']");
+    expect(src).toContain("['stale-source', 'stale']");
+    expect(src).toContain("['missing-source', 'missing']");
     expect(src).toContain("['healthy-zero', 'empty']");
     expect(src).toContain('const sources = Array.isArray(readiness.sources) ? readiness.sources : []');
     expect(src).toContain('source?.sourceQuality?.badge === badge');
@@ -495,6 +566,47 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(css).toContain('.fleet-command-rail');
     expect(css).toContain('.fleet-command-safety--autonomous-dispatch');
     expect(css).toContain('grid-template-columns: repeat(2, minmax(0, 1fr))');
+  });
+
+  it('app.js keeps readiness data-quality counts distinct from healthy zero', () => {
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
+    const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+    const start = src.indexOf('function fdReadinessDataText(readiness)');
+    const end = src.indexOf('\nfunction fdReadinessDataTitle', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+
+    const formatterSource = src.slice(start, end);
+    const formatter = new Function(`${formatterSource}\nreturn fdReadinessDataText;`)() as (
+      readiness: Record<string, any>,
+    ) => string;
+
+    expect(formatter({
+      freshness: { overall: 'stale' },
+      sourceQualitySummary: {
+        'degraded-source': 2,
+        'unknown-source': 1,
+        'stale-source': 3,
+        'missing-source': 4,
+        'healthy-zero': 5,
+      },
+      sources: [],
+    })).toBe('stale · 2 degraded / 1 unknown / 3 stale / 4 missing / 5 empty');
+
+    const degradedAndUnknown = formatter({
+      freshness: { overall: 'fresh' },
+      sourceQualitySummary: {
+        'degraded-source': 1,
+        'unknown-source': 2,
+        'stale-source': 0,
+        'missing-source': 0,
+        'healthy-zero': 0,
+      },
+      sources: [],
+    });
+    expect(degradedAndUnknown).toBe('fresh · 1 degraded / 2 unknown');
+    expect(degradedAndUnknown).not.toContain('empty');
+    expect(degradedAndUnknown).not.toContain('healthy sources');
   });
 
   it('app.js renders Fleet Dashboard lease board from shared queue machine health', () => {

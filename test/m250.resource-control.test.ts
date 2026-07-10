@@ -9,8 +9,8 @@
  *  2. CODEX DELEGATION: senseResources delegates to readCodexRateLimits() and
  *     maps primary/secondary usedPercent → availability correctly.
  *
- *  3. NIM BACKOFF: recordBackoff sets the backoff store; getBackendResourceState
- *     returns 'throttled'/'exhausted' while backed off; clearBackoff resets it.
+ *  3. NIM CREDENTIAL + BACKOFF: missing executor-resolvable credentials make
+ *     NIM unreachable; with a credential, backoff and clearBackoff are intact.
  *
  *  4. OLLAMA HEALTH: resource-monitor wraps http; never throws on any error.
  *
@@ -39,13 +39,18 @@ import { join } from 'node:path';
 
 let tmpHome: string;
 let origHome: string | undefined;
+let origNimApiKey: string | undefined;
+
+const FAKE_NIM_API_KEY = 'm250-fake-nim-credential';
 
 beforeEach(() => {
   tmpHome = mkdtempSync(join(tmpdir(), 'ashlr-m250-'));
   mkdirSync(join(tmpHome, '.ashlr', 'fleet'), { recursive: true });
   mkdirSync(join(tmpHome, '.claude'), { recursive: true });
   origHome = process.env['HOME'];
+  origNimApiKey = process.env['NVIDIA_NIM_API_KEY'];
   process.env['HOME'] = tmpHome;
+  delete process.env['NVIDIA_NIM_API_KEY'];
   // Reset module registry so each test gets a fresh resource-monitor
   // (clears the in-memory snapshot cache and backoff store).
   vi.resetModules();
@@ -53,6 +58,8 @@ beforeEach(() => {
 
 afterEach(() => {
   process.env['HOME'] = origHome;
+  if (origNimApiKey === undefined) delete process.env['NVIDIA_NIM_API_KEY'];
+  else process.env['NVIDIA_NIM_API_KEY'] = origNimApiKey;
   rmSync(tmpHome, { recursive: true, force: true });
   vi.restoreAllMocks();
   vi.resetModules();
@@ -459,7 +466,23 @@ describe('M250 ResourceMonitor — Codex delegation', () => {
 // ---------------------------------------------------------------------------
 
 describe('M250 ResourceMonitor — NIM backoff store', () => {
-  it('nim is open with no backoff', async () => {
+  it('nim is unreachable when the executor cannot resolve its credential', async () => {
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue(null),
+    }));
+
+    const { getBackendResourceState } = await import('../src/core/fabric/resource-monitor.js');
+
+    const state = await getBackendResourceState('nim', baseCfg());
+    expect(state.backend).toBe('nim');
+    expect(state.availability).toBe('unreachable');
+    expect(state.reason).toContain('NVIDIA_NIM_API_KEY');
+    expect(state.reason).not.toContain(FAKE_NIM_API_KEY);
+    expect(state.backoffUntilMs).toBeNull();
+  });
+
+  it('nim is open with a fake credential and no backoff', async () => {
+    process.env['NVIDIA_NIM_API_KEY'] = FAKE_NIM_API_KEY;
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),
     }));
@@ -469,10 +492,25 @@ describe('M250 ResourceMonitor — NIM backoff store', () => {
     const state = await getBackendResourceState('nim', baseCfg());
     expect(state.backend).toBe('nim');
     expect(state.availability).toBe('open');
+    expect(state.reason).not.toContain(FAKE_NIM_API_KEY);
     expect(state.backoffUntilMs).toBeNull();
   });
 
+  it('nim rejects a Phantom placeholder just like the executor', async () => {
+    process.env['NVIDIA_NIM_API_KEY'] = 'phm_placeholder_token';
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue(null),
+    }));
+
+    const { getBackendResourceState } = await import('../src/core/fabric/resource-monitor.js');
+
+    const state = await getBackendResourceState('nim', baseCfg());
+    expect(state.availability).toBe('unreachable');
+    expect(state.reason).not.toContain('phm_placeholder_token');
+  });
+
   it('recordBackoff marks nim as throttled or exhausted', async () => {
+    process.env['NVIDIA_NIM_API_KEY'] = FAKE_NIM_API_KEY;
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),
     }));
@@ -487,6 +525,7 @@ describe('M250 ResourceMonitor — NIM backoff store', () => {
   });
 
   it('clearBackoff restores nim to open', async () => {
+    process.env['NVIDIA_NIM_API_KEY'] = FAKE_NIM_API_KEY;
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),
     }));
@@ -501,6 +540,7 @@ describe('M250 ResourceMonitor — NIM backoff store', () => {
   });
 
   it('expired backoff is treated as open', async () => {
+    process.env['NVIDIA_NIM_API_KEY'] = FAKE_NIM_API_KEY;
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),
     }));
@@ -659,6 +699,7 @@ describe('M250 ResourceMonitor — graceful degradation when all sources fail', 
   });
 
   it('recordBackoff invalidates the cache', async () => {
+    process.env['NVIDIA_NIM_API_KEY'] = FAKE_NIM_API_KEY;
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),
     }));
@@ -880,6 +921,29 @@ describe('M252 Gateway — resource-aware demote', () => {
     expect(decision.backend).toBe('local-coder');
     expect(decision.demotedFrom).toBe('claude');
     expect(decision.reason).toMatch(/resourceDemote: claude→local-coder/i);
+  });
+
+  it('resourceAware=true skips credential-unavailable nim during demotion', async () => {
+    const { getResourceSnapshot } = await import('../src/core/fabric/resource-monitor.js');
+    const { decide } = await import('../src/core/fabric/gateway.js');
+    const cfg = withFoundry({
+      allowedBackends: ['claude', 'nim', 'builtin'] as EngineId[],
+      fabric: { gateway: true, resourceAware: true },
+      resourceOverrides: {
+        claude: { availability: 'exhausted', reason: 'test claude exhausted' },
+        nim: { availability: 'open', reason: 'must not bypass missing credential' },
+      },
+    });
+
+    const snapshot = await getResourceSnapshot(cfg);
+    expect(snapshot.backends.find((b) => b.backend === 'nim')?.availability).toBe('unreachable');
+
+    const decision = await decide({ goal: 'implement routine fix', repo: tmpHome }, cfg);
+
+    expect(decision.backend).toBe('builtin');
+    expect(decision.backend).not.toBe('nim');
+    expect(decision.demotedFrom).toBe('claude');
+    expect(decision.reason).toMatch(/resourceDemote: claude→builtin/i);
   });
 
   it('resource-aware learned target gate allows open or near m53 nudges', async () => {

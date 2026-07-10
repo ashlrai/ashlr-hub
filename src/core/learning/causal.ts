@@ -37,6 +37,8 @@ type CausalMetadataInput = CausalSource & {
 
 const MAX_ID = 240;
 const MAX_REASON = 240;
+const MAX_SELECTED_SKILLS = 8;
+const MAX_SKILL_ID = 160;
 const RUN_ACTION_COUNT_KEYS = [
   'sandboxCreated',
   'spawnAttempts',
@@ -215,6 +217,12 @@ export function routeSnapshot(input: RouteSnapshot | undefined): RouteSnapshot |
   const assignedBy = boundedText(input.assignedBy, 80);
   const reason = boundedText(input.reason, MAX_REASON);
   const routerPolicyVersion = boundedText(input.routerPolicyVersion, 80) ?? ROUTER_POLICY_VERSION;
+  const selectedSkillIds = textList(input.selectedSkillIds, MAX_SELECTED_SKILLS, MAX_SKILL_ID);
+  const skillPolicyVersion = boundedText(input.skillPolicyVersion, 80);
+  const skillMode =
+    input.skillMode === 'shadow' || input.skillMode === 'active' || input.skillMode === 'disabled'
+      ? input.skillMode
+      : undefined;
   return {
     ...(backend !== undefined ? { backend } : {}),
     ...(tier !== undefined ? { tier } : {}),
@@ -222,6 +230,9 @@ export function routeSnapshot(input: RouteSnapshot | undefined): RouteSnapshot |
     ...(assignedBy ? { assignedBy } : {}),
     ...(reason ? { reason } : {}),
     routerPolicyVersion,
+    ...(selectedSkillIds ? { selectedSkillIds } : {}),
+    ...(skillPolicyVersion ? { skillPolicyVersion } : {}),
+    ...(skillMode ? { skillMode } : {}),
   };
 }
 

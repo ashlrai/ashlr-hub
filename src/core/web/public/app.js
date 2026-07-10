@@ -2783,6 +2783,47 @@ function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
   return card;
 }
 
+function formatTrajectoryLearningGap(trajectoryLearning) {
+  const labels = {
+    dispatch: 'Dispatch',
+    proposal: 'Proposal',
+    evidence: 'Evidence',
+    decision: 'Decision',
+    agentAction: 'Agent action',
+  };
+  const gaps = Array.isArray(trajectoryLearning?.gaps) ? trajectoryLearning.gaps : [];
+  const top = gaps.find((gap) => labels[gap?.kind] && Number(gap?.count) > 0);
+  if (!top) return 'none';
+  return `${labels[top.kind]} ${Math.trunc(Number(top.count))} missing`;
+}
+
+function trajectoryLearningRows(trajectoryLearning) {
+  const routeSpine = trajectoryLearning?.routeSpine ?? {};
+  const terminal = trajectoryLearning?.terminalOutcomes ?? {};
+  return [
+    ['Trajectories', trajectoryLearning?.trajectories ?? 0],
+    ['Dispatch -> decision', formatCoverageMetric(routeSpine.dispatchToDecision)],
+    ['Dispatch -> evidence', formatCoverageMetric(routeSpine.dispatchToEvidence)],
+    ['Dispatch -> merge', formatCoverageMetric(routeSpine.dispatchToMerge)],
+    ['Merged', terminal.merged ?? 0],
+    ['No-proposal', terminal['no-proposal'] ?? 0],
+    ['Failed', terminal.failed ?? 0],
+    ['Top gap', formatTrajectoryLearningGap(trajectoryLearning)],
+  ];
+}
+
+function renderTrajectoryLearningCard(trajectoryLearning, cls = 'ctrl-card card') {
+  if (!trajectoryLearning) return null;
+  const trajectories = trajectoryLearning.trajectories ?? 0;
+  const card = el('div', { cls });
+  card.appendChild(el('div', { cls: 'card-header' },
+    el('span', { cls: 'card-title' }, 'Trajectory Learning'),
+    el('span', { cls: 'card-subtitle' }, `${trajectories} trajector${trajectories === 1 ? 'y' : 'ies'} · ${proposalProductionWindowLabel(trajectoryLearning)}`)
+  ));
+  card.appendChild(el('div', { cls: 'card-body' }, infoGrid(trajectoryLearningRows(trajectoryLearning))));
+  return card;
+}
+
 function formatCountMap(counts) {
   const entries = Object.entries(counts ?? {})
     .filter(([, count]) => Number(count) > 0)
@@ -3590,6 +3631,7 @@ function renderControl() {
   const isRepairRecoveryActive = fleetRepairRecoveryActive(shipReadiness, missionBrief);
   const workspace = d.fleet?.workspace ?? fleet.workspace ?? null;
   const attemptCoverage = d.fleet?.attemptCoverage ?? fleet.attemptCoverage ?? null;
+  const trajectoryLearning = d.fleet?.trajectoryLearning ?? fleet.trajectoryLearning ?? null;
   if (shipReadiness) {
     heroMetrics.appendChild(controlMetric(
       'Ship Ready',
@@ -3701,6 +3743,9 @@ function renderControl() {
 
   const missionAttemptCoverageCard = renderAttemptCoverageCard(attemptCoverage);
   if (missionAttemptCoverageCard) section.appendChild(missionAttemptCoverageCard);
+
+  const missionTrajectoryLearningCard = renderTrajectoryLearningCard(trajectoryLearning);
+  if (missionTrajectoryLearningCard) section.appendChild(missionTrajectoryLearningCard);
 
   const missionContextCard = renderContextEfficiencyCard(d.fleet?.contextEfficiency ?? fleet.contextEfficiency ?? null);
   if (missionContextCard) section.appendChild(missionContextCard);
@@ -4953,9 +4998,10 @@ function fdRenderProductionPanel(snap) {
   const dispatchProduction = snap.fleet?.dispatchProduction ?? snap.control?.fleet?.dispatchProduction ?? null;
   const workspace = snap.fleet?.workspace ?? snap.control?.fleet?.workspace ?? null;
   const attemptCoverage = snap.fleet?.attemptCoverage ?? snap.control?.fleet?.attemptCoverage ?? null;
+  const trajectoryLearning = snap.fleet?.trajectoryLearning ?? snap.control?.fleet?.trajectoryLearning ?? null;
   const contextEfficiency = snap.fleet?.contextEfficiency ?? snap.control?.fleet?.contextEfficiency ?? null;
   const workspaceHasEvents = Number(workspace?.eventCount ?? 0) > 0;
-  const hasProductionData = Boolean(prod || production || dispatchProduction || workspaceHasEvents || attemptCoverage);
+  const hasProductionData = Boolean(prod || production || dispatchProduction || workspaceHasEvents || attemptCoverage || trajectoryLearning);
   const body = el('div', { cls: 'fd-panel__body' });
 
   if (!hasProductionData) {
@@ -5010,6 +5056,11 @@ function fdRenderProductionPanel(snap) {
         `Weakest backend: ${dispatchProductionBucketLabel(backend)} ${proposals}/${attempts} (${formatFleetPercent(rate)})`
       ));
     }
+  }
+
+  if (trajectoryLearning) {
+    body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Trajectory learning'));
+    body.appendChild(infoGrid(trajectoryLearningRows(trajectoryLearning)));
   }
 
   if (workspaceHasEvents) {

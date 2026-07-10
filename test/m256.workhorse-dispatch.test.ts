@@ -242,6 +242,30 @@ describe('M256 workhorseDispatch', () => {
     expect(plan.unassigned).toHaveLength(0);
   });
 
+  it('PRODUCTION-HELPER: unreachable nim receives no workhorse assignment', () => {
+    const snap = makeSnapshot([
+      { backend: 'local-coder', availability: 'open' },
+      { backend: 'codex',       availability: 'open' },
+      { backend: 'nim',         availability: 'unreachable' },
+      { backend: 'builtin',     availability: 'open' },
+    ]);
+    const items = Array.from({ length: 6 }, makeItem);
+    const routeHints = new Map<string, EngineId>();
+    const routeReasons = new Map<string, string>();
+    for (const item of items) {
+      routeHints.set(item.id, 'local-coder');
+      routeReasons.set(item.id, `local-mid bulk: local-coder (source=${item.source}, effort=${item.effort})`);
+    }
+
+    const routeItem = buildConcurrentDispatchRouteItem(snap, dispatchCfg, cfgWorkhorse, routeHints, routeReasons);
+    const plan = planConcurrentDispatch(items, snap, dispatchCfg, routeItem);
+
+    expect(plan.assignments.filter((a) => a.backend === 'nim')).toHaveLength(0);
+    expect(plan.assignments.filter((a) => a.backend === 'local-coder')).toHaveLength(3);
+    expect(plan.assignments.filter((a) => a.backend === 'codex')).toHaveLength(3);
+    expect(plan.unassigned).toHaveLength(0);
+  });
+
   // 1a. WORKHORSE-SPREAD: codex gets a fair share when all three workhorses are open
   it('WORKHORSE-SPREAD: bulk items spread across local-coder + codex + nim (codex > 0)', () => {
     const snap = makeSnapshot([

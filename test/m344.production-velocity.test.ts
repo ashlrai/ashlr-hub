@@ -176,18 +176,25 @@ describe('production velocity profile', () => {
       },
     }));
 
-    await expect(getBackendResourceState('nim', effective)).resolves.toMatchObject({
-      backend: 'nim',
-      availability: 'open',
-      cap: 4,
-      capUnit: 'concurrent',
-    });
-    await expect(getBackendResourceState('kimi', effective)).resolves.toMatchObject({
-      backend: 'kimi',
-      availability: 'open',
-      cap: 3,
-      capUnit: 'concurrent',
-    });
+    const previousNimKey = process.env['NVIDIA_NIM_API_KEY'];
+    process.env['NVIDIA_NIM_API_KEY'] = 'm344-fake-nim-credential';
+    try {
+      await expect(getBackendResourceState('nim', effective)).resolves.toMatchObject({
+        backend: 'nim',
+        availability: 'open',
+        cap: 4,
+        capUnit: 'concurrent',
+      });
+      await expect(getBackendResourceState('kimi', effective)).resolves.toMatchObject({
+        backend: 'kimi',
+        availability: 'open',
+        cap: 3,
+        capUnit: 'concurrent',
+      });
+    } finally {
+      if (previousNimKey === undefined) delete process.env['NVIDIA_NIM_API_KEY'];
+      else process.env['NVIDIA_NIM_API_KEY'] = previousNimKey;
+    }
   });
 
   it('lets stale pending proposals stop blocking backlog only when production velocity is enabled', () => {

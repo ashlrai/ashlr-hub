@@ -204,6 +204,43 @@ describe('M338 learning graph metadata summaries', () => {
     expect(serialized).not.toContain('RAW_STDOUT_SENTINEL');
   });
 
+  it('bounds and sanitizes selected skill metadata in route snapshots', () => {
+    const meta = causalMetadata({
+      runId: 'run-skill-route',
+      routeSnapshot: {
+        backend: 'codex',
+        tier: 'frontier',
+        selectedSkillIds: [
+          'skill:test-repair',
+          'skill:test-repair',
+          'skill:secret-sk-testvalue-verysecret00000000',
+          ...Array.from({ length: 12 }, (_, index) => `skill:bounded-${index}`),
+        ],
+        skillPolicyVersion: 'verified-skills-v1',
+        skillMode: 'shadow',
+      },
+    });
+
+    expect(meta.routeSnapshot).toMatchObject({
+      backend: 'codex',
+      tier: 'frontier',
+      selectedSkillIds: [
+        'skill:test-repair',
+        'skill:secret-[REDACTED]',
+        'skill:bounded-0',
+        'skill:bounded-1',
+        'skill:bounded-2',
+        'skill:bounded-3',
+        'skill:bounded-4',
+        'skill:bounded-5',
+      ],
+      skillPolicyVersion: 'verified-skills-v1',
+      skillMode: 'shadow',
+    });
+    expect(meta.routeSnapshot?.selectedSkillIds).toHaveLength(8);
+    expect(JSON.stringify(meta.routeSnapshot)).not.toContain('sk-testvalue-verysecret00000000');
+  });
+
   it('sanitizes fixed run action counts and drops unknown secret-shaped keys', () => {
     const secretKey = 'OPENAI_API_KEY=sk-testvalue-verysecret00000000';
     const meta = causalMetadata({

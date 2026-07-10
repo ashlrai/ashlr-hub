@@ -21,7 +21,8 @@
  *    is used ONLY as a weak fallback when its lastComputedDate is within the
  *    window AND the new ledger-based budget fields are absent.
  *  - Codex sensing delegates entirely to readCodexRateLimits() — real data.
- *  - NIM sensing is reactive-only: reads the in-memory backoff store.
+ *  - NIM sensing first verifies that the executor can resolve its configured
+ *    credential, then reactively reads the in-memory backoff store.
  *  - Local/Ollama sensing: GET /api/ps with 2s timeout.
  *  - Builtin: always available, no sensing needed.
  *
@@ -37,9 +38,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as http from 'http';
-import type { EngineId } from '../types.js';
+import type { AshlrConfig, EngineId } from '../types.js';
 import { readCodexRateLimits } from '../observability/codex-source.js';
 import { readDecisions } from '../fleet/decisions-ledger.js';
+import { resolveProviderKey } from '../integrations/secrets.js';
+import { resolveEngineRegistry } from '../run/engine-registry.js';
 import {
   readClaudeUsage,
   DEFAULT_5H_MESSAGE_CAP_PRO,
@@ -1078,7 +1081,58 @@ function senseReactiveApiState(
   };
 }
 
-function senseNimState(rcfg: ResourceCfgShape): BackendResourceState {
+function senseNimState(cfg: unknown, rcfg: ResourceCfgShape): BackendResourceState {
+  const now = new Date().toISOString();
+  const typedCfg = cfg as AshlrConfig;
+
+  try {
+    const spec = resolveEngineRegistry(typedCfg)['nim'];
+    const envKey = spec?.kind === 'api-model' ? spec.api?.envKey : undefined;
+    const credentialAvailable = typeof envKey === 'string' && envKey.length > 0
+      ? Boolean(resolveProviderKey(envKey, typedCfg)?.trim())
+      : false;
+
+    if (!credentialAvailable) {
+      const credentialName = typeof envKey === 'string' && envKey.length > 0
+        ? envKey
+        : 'NVIDIA_NIM_API_KEY';
+      const maxConcurrent = positiveConcurrentCap(rcfg.nim?.maxConcurrent);
+      return {
+        backend: 'nim',
+        availability: 'unreachable',
+        usedPct: null,
+        cap: maxConcurrent,
+        capUnit: maxConcurrent !== null ? 'concurrent' : null,
+        capWindow: null,
+        resetsAt: null,
+        costPerMTokenOut: rcfg.nim?.costPerMTokenOut ?? 0.42,
+        p50LatencyMs: null,
+        snapshotAt: now,
+        reason: `nim credential unavailable: ${credentialName} could not be resolved`,
+        backoffUntilMs: null,
+      };
+    }
+
+    const override = overrideState('nim', rcfg.overrides?.['nim']);
+    if (override) return override;
+  } catch {
+    const maxConcurrent = positiveConcurrentCap(rcfg.nim?.maxConcurrent);
+    return {
+      backend: 'nim',
+      availability: 'unreachable',
+      usedPct: null,
+      cap: maxConcurrent,
+      capUnit: maxConcurrent !== null ? 'concurrent' : null,
+      capWindow: null,
+      resetsAt: null,
+      costPerMTokenOut: rcfg.nim?.costPerMTokenOut ?? 0.42,
+      p50LatencyMs: null,
+      snapshotAt: now,
+      reason: 'nim credential unavailable: credential resolution failed',
+      backoffUntilMs: null,
+    };
+  }
+
   return senseReactiveApiState('nim', rcfg.nim, { costPerMTokenOut: 0.42, label: 'nim' });
 }
 
@@ -1236,13 +1290,17 @@ export async function getBackendResourceState(
 ): Promise<BackendResourceState> {
   try {
     const rcfg = extractResourceCfg(cfg);
+    // NIM credentials are a hard dispatch prerequisite. Check them before an
+    // operator override so an "open" override cannot manufacture auth that the
+    // executor would be unable to supply.
+    if (backend === 'nim') return senseNimState(cfg, rcfg);
+
     const override = overrideState(backend, rcfg.overrides?.[backend]);
     if (override) return override;
 
     switch (backend) {
       case 'claude':    return await senseClaudeState(rcfg);
       case 'codex':     return senseCodexState();
-      case 'nim':       return senseNimState(rcfg);
       case 'kimi':      return senseKimiState(rcfg);
       case 'builtin':   return builtinState('builtin');
       case 'local-coder': return await senseOllamaState('local-coder', rcfg);
