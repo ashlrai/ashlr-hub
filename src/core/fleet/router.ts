@@ -59,7 +59,7 @@ import type { AshlrConfig, EngineId, EngineTier, WorkItem } from '../types.js';
 import { engineInstalled } from '../run/engines.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import { routeTask, isSubstantiveItem, SUBSTANTIVE_SOURCES, type RoutingContext } from '../run/router.js';
-import { isTrustedDiagnosticResliceItem } from './self-heal-trust.js';
+import { isTrustedCaptureRepairItem, isTrustedDiagnosticResliceItem } from './self-heal-trust.js';
 
 /** The outcome of routing a WorkItem to a backend + model. */
 export interface RouteDecision {
@@ -202,6 +202,10 @@ function isGeneratedNoDiffProposalRepair(item: WorkItem): boolean {
   return isTrustedDiagnosticResliceItem(item);
 }
 
+function isGeneratedCaptureProposalRepair(item: WorkItem): boolean {
+  return isTrustedCaptureRepairItem(item);
+}
+
 /**
  * Build a decision for a concrete backend, deriving its tier.
  * M195: thread cfg so a config-promoted backend (e.g. cfg.foundry.nim.tier=
@@ -255,7 +259,12 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
   // is NOT evaluated (byte-identical parity with pre-M182 for those policies).
   const qualityPolicy = cfg.foundry?.routingPolicy === 'quality';
   const isNoDiffRepair = isGeneratedNoDiffProposalRepair(item);
-  const isFrontierCandidate = isFrontierItem(item) || isNoDiffRepair || (qualityPolicy && isSubstantiveItem(item));
+  const isCaptureRepair = isGeneratedCaptureProposalRepair(item);
+  const isFrontierCandidate =
+    isFrontierItem(item) ||
+    isNoDiffRepair ||
+    isCaptureRepair ||
+    (qualityPolicy && isSubstantiveItem(item));
   if (isFrontierCandidate && frontiers.length > 0) {
     const chosen = pickFrom(frontiers, item)!;
     const effort = typeof item.effort === 'number' ? item.effort : 3;
@@ -266,6 +275,9 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
     }
     if (isNoDiffRepair) {
       baseReason = `frontier: generated no-diff proposal repair (source=${item.source}) → ${chosen}`;
+    }
+    if (isCaptureRepair) {
+      baseReason = `frontier: generated capture proposal repair (source=${item.source}) → ${chosen}`;
     }
 
     // M128: enrich with model selection

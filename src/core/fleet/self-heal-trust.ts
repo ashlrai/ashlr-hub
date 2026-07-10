@@ -30,6 +30,10 @@ function textFromItem(item: WorkItem): string {
   return `${item.title}\n${item.detail}`;
 }
 
+function tagsFromItem(item: WorkItem): string[] {
+  return Array.isArray(item.tags) ? item.tags : [];
+}
+
 function ageOk(ts: string, nowMs: number, maxAgeMs: number): boolean {
   const parsed = Date.parse(ts);
   if (!Number.isFinite(parsed)) return false;
@@ -38,14 +42,31 @@ function ageOk(ts: string, nowMs: number, maxAgeMs: number): boolean {
 
 export function isTrustedDiagnosticResliceItem(item: WorkItem): boolean {
   if (!/^[^:]+:proposal-repair-nodiff:[0-9a-f]{12}$/i.test(item.id)) return false;
-  if (!item.tags.includes('proposal-repair')) return false;
-  if (!item.tags.includes('diagnostic-reslice')) return false;
-  if (!item.tags.includes('dispatch-no-diff-reslice')) return false;
+  const tags = tagsFromItem(item);
+  if (!tags.includes('proposal-repair')) return false;
+  if (!tags.includes('diagnostic-reslice')) return false;
+  if (!tags.includes('dispatch-no-diff-reslice')) return false;
   const text = textFromItem(item);
   return /\bDiagnostic reslice:/i.test(text) &&
     /\bOriginal work item:/i.test(text) &&
     /\bDispatch outcome:\s*empty-diff\b/i.test(text) &&
     /\bAction:\s*reslice\b/i.test(text);
+}
+
+export function isTrustedCaptureRepairItem(item: WorkItem): boolean {
+  if (!/^[^:]+:proposal-repair-capture:[0-9a-f]{12}$/i.test(item.id)) return false;
+  const tags = tagsFromItem(item);
+  if (!tags.includes('self-heal')) return false;
+  if (!tags.includes('proposal-repair')) return false;
+  if (!tags.includes('dispatch-capture-repair')) return false;
+  if (!tags.includes('capture-gate')) return false;
+  const text = textFromItem(item);
+  return /\bDispatch capture repair:/i.test(text) &&
+    /\bOriginal work item:/i.test(text) &&
+    /\bDispatch outcome:\s*(?:proposal-capture-error|gate-blocked)\b/i.test(text) &&
+    (/\bDiff metadata:\s*(?:files|lines)=\d+/i.test(text) || isActionableSelfHealFailureText(text)) &&
+    /\bFailure:/i.test(text) &&
+    /\bProduce a fresh complete fix\b/i.test(text);
 }
 
 export function isActionableSelfHealFailureText(text: string): boolean {
@@ -62,10 +83,11 @@ export function isActionableSelfHealItem(
     maxAgeMs?: number;
   },
 ): boolean {
-  if (!item.tags.includes('self-heal')) return false;
+  if (!tagsFromItem(item).includes('self-heal')) return false;
   const nowMs = opts?.nowMs ?? Date.now();
   const maxAgeMs = opts?.maxAgeMs ?? SELF_HEAL_ITEM_MAX_AGE_MS;
   if (!ageOk(item.ts, nowMs, maxAgeMs)) return false;
   if (isTrustedDiagnosticResliceItem(item)) return true;
+  if (isTrustedCaptureRepairItem(item)) return true;
   return isActionableSelfHealFailureText(textFromItem(item));
 }

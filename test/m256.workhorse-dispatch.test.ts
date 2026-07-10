@@ -172,6 +172,33 @@ describe('M256 workhorseDispatch', () => {
     expect(plan.unassigned).toHaveLength(0);
   });
 
+  it('PRODUCTION-HELPER: workhorseDispatch preserves generated capture repair frontier hints', () => {
+    const snap = makeSnapshot([
+      { backend: 'claude',      availability: 'exhausted' },
+      { backend: 'local-coder', availability: 'open' },
+      { backend: 'codex',       availability: 'open' },
+      { backend: 'nim',         availability: 'open' },
+      { backend: 'builtin',     availability: 'open' },
+    ]);
+    const item = makeItem({
+      id: 'repo:proposal-repair-capture:abcdef123456',
+      source: 'self',
+      tags: ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate'],
+    });
+    const routeHints = new Map<string, EngineId>([[item.id, 'codex']]);
+    const routeReasons = new Map<string, string>([[
+      item.id,
+      'frontier: generated capture proposal repair (source=self) -> codex',
+    ]]);
+
+    const routeItem = buildConcurrentDispatchRouteItem(snap, dispatchCfg, cfgWorkhorse, routeHints, routeReasons);
+    const plan = planConcurrentDispatch([item], snap, dispatchCfg, routeItem);
+
+    expect(plan.assignments).toEqual([{ item, backend: 'codex' }]);
+    expect(plan.assignments.some((a) => a.backend === 'local-coder')).toBe(false);
+    expect(plan.unassigned).toHaveLength(0);
+  });
+
   it('PRODUCTION-HELPER: workhorseDispatch preserves pause route hints for skip semantics', () => {
     const snap = makeSnapshot([
       { backend: 'codex',       availability: 'open' },

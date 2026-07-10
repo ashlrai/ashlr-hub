@@ -138,6 +138,84 @@ describe('routeBackend', () => {
     }
   });
 
+  it('routes generated capture proposal repairs to frontier when available', () => {
+    const cfg = withFoundry({ allowedBackends: ['builtin', 'local-coder', 'claude', 'codex'] });
+    const d = routeBackend(makeItem({
+      id: 'repo:proposal-repair-capture:abcdef123456',
+      source: 'self',
+      effort: 1,
+      score: 1,
+      title: 'Repair dispatch capture failure for repo item repo:self-heal:stalled',
+      detail:
+        'Dispatch capture repair: a self-improvement dispatch produced repairable work but no proposal.\n' +
+        'Original work item: repo:self-heal:stalled\n' +
+        'Dispatch outcome: gate-blocked\n' +
+        'Diff metadata: files=1, lines=12\n' +
+        'Failure: completeness gate blocked proposal capture\n' +
+        'Produce a fresh complete fix, rerun merge-grade verification, and do not copy any old partial diff or tool output.',
+      tags: ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate', 'verify', 'high-priority'],
+    }), cfg);
+
+    const anyFrontierAvailable = engineInstalled('claude') || engineInstalled('codex');
+    if (anyFrontierAvailable) {
+      expect(['claude', 'codex']).toContain(d.backend);
+      expect(d.tier).toBe('frontier');
+      expect(d.reason).toContain('frontier: generated capture proposal repair');
+      expect(d.reason).not.toContain('local-mid bulk');
+    } else if (engineInstalled('local-coder')) {
+      expect(d.backend).toBe('local-coder');
+      expect(d.tier).toBe(engineTierOf('local-coder', cfg));
+    } else {
+      expect(d.backend).toBe('builtin');
+      expect(d.tier).toBe('local');
+    }
+  });
+
+  it('does not promote tag-only capture repair lookalikes to frontier as generated repairs', () => {
+    const cfg = withFoundry({ allowedBackends: ['builtin', 'local-coder', 'claude', 'codex'] });
+    const d = routeBackend(makeItem({
+      id: 'repo:manual-capture-repair',
+      source: 'self',
+      effort: 1,
+      score: 1,
+      title: 'Manual capture repair',
+      detail:
+        'Dispatch capture repair: a self-improvement dispatch produced repairable work but no proposal.\n' +
+        'Original work item: repo:self-heal:stalled\n' +
+        'Dispatch outcome: gate-blocked\n' +
+        'Diff metadata: files=1, lines=12\n' +
+        'Failure: completeness gate blocked proposal capture\n' +
+        'Produce a fresh complete fix, rerun merge-grade verification, and do not copy any old partial diff or tool output.',
+      tags: ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate'],
+    }), cfg);
+
+    expect(d.reason).not.toContain('generated capture proposal repair');
+  });
+
+  it('fails closed for capture repair samples without tags', () => {
+    const cfg = withFoundry({ allowedBackends: ['builtin', 'local-coder', 'claude', 'codex'] });
+    const item = makeItem({
+      id: 'repo:proposal-repair-capture:abcdef123456',
+      source: 'self',
+      effort: 1,
+      score: 1,
+      title: 'Repair dispatch capture failure for repo item repo:self-heal:stalled',
+      detail:
+        'Dispatch capture repair: a self-improvement dispatch produced repairable work but no proposal.\n' +
+        'Original work item: repo:self-heal:stalled\n' +
+        'Dispatch outcome: gate-blocked\n' +
+        'Diff metadata: files=1, lines=12\n' +
+        'Failure: completeness gate blocked proposal capture\n' +
+        'Produce a fresh complete fix, rerun merge-grade verification, and do not copy any old partial diff or tool output.',
+      tags: ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate'],
+    });
+    delete (item as Partial<WorkItem>).tags;
+
+    const d = routeBackend(item, cfg);
+
+    expect(d.reason).not.toContain('generated capture proposal repair');
+  });
+
   it('does not promote tag-only no-diff repair lookalikes to frontier as generated repairs', () => {
     const cfg = withFoundry({ allowedBackends: ['builtin', 'local-coder', 'claude', 'codex'] });
     const d = routeBackend(makeItem({

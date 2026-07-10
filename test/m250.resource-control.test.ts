@@ -793,6 +793,56 @@ describe('M252 Gateway — resource-aware demote', () => {
     expect(decision.reason).toMatch(/resourceDemote: claude→codex/i);
   });
 
+  it('resourceAware=true routes generated capture repairs around exhausted frontier capacity', async () => {
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue(null),
+    }));
+    vi.doMock('../src/core/run/engines.js', async () => ({
+      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
+        '../src/core/run/engines.js',
+      )),
+      engineInstalled: () => true,
+    }));
+
+    const { decide } = await import('../src/core/fabric/gateway.js');
+    const { routeBackend } = await import('../src/core/fleet/router.js');
+    const cfg = withFoundry({
+      allowedBackends: ['claude', 'codex', 'builtin'] as EngineId[],
+      fabric: { gateway: true, resourceAware: true },
+      resourceOverrides: {},
+    });
+    const item = makeItem('self', {
+      id: 'repo:proposal-repair-capture:abcdef123456',
+      effort: 1,
+      score: 1,
+      title: 'Repair dispatch capture failure for repo item repo:self-heal:stalled',
+      detail:
+        'Dispatch capture repair: a self-improvement dispatch produced repairable work but no proposal.\n' +
+        'Original work item: repo:self-heal:stalled\n' +
+        'Dispatch outcome: gate-blocked\n' +
+        'Diff metadata: files=1, lines=12\n' +
+        'Failure: completeness gate blocked proposal capture\n' +
+        'Produce a fresh complete fix, rerun merge-grade verification, and do not copy any old partial diff or tool output.',
+      tags: ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate', 'verify', 'high-priority'],
+    });
+
+    const base = routeBackend(item, cfg);
+    const alternate: EngineId = base.backend === 'claude' ? 'codex' : 'claude';
+    cfg.foundry!.resourceOverrides = {
+      [base.backend]: { availability: 'exhausted', reason: 'test selected frontier exhausted' },
+      [alternate]: { availability: 'open', reason: 'test alternate frontier open' },
+    };
+
+    const decision = await decide(item, cfg);
+
+    expect(base.tier).toBe('frontier');
+    expect(base.reason).toContain('frontier: generated capture proposal repair');
+    expect(decision.backend).toBe(alternate);
+    expect(decision.demotedFrom).toBe(base.backend);
+    expect(decision.reason).toMatch(/resourceDemote:/i);
+    expect(decision.trace[0]?.reason).toContain('frontier: generated capture proposal repair');
+  });
+
   it('resourceAware=true can demote exhausted claude to open local-coder before builtin', async () => {
     writeFileSync(
       join(tmpHome, '.claude', 'stats-cache.json'),
@@ -855,7 +905,7 @@ describe('M252 Gateway — resource-aware demote', () => {
       intelligence: { minProposalYieldRate: 0.5 },
       resourceOverrides: {},
     });
-    const item = makeItem('security', { effort: 5, score: 10 });
+    const item = makeItem('security', { id: 'fixed-security-1', effort: 5, score: 10 });
     const base = routeBackend(item, cfg);
     const alternate: EngineId = base.backend === 'claude' ? 'codex' : 'claude';
     cfg.foundry!.resourceOverrides = {
@@ -895,7 +945,7 @@ describe('M252 Gateway — resource-aware demote', () => {
       intelligence: { minProposalYieldRate: 0.5 },
       resourceOverrides: {},
     });
-    const item = makeItem('security', { effort: 5, score: 10 });
+    const item = makeItem('security', { id: 'fixed-security-1', effort: 5, score: 10 });
     const base = routeBackend(item, cfg);
     const alternate: EngineId = base.backend === 'claude' ? 'codex' : 'claude';
     cfg.foundry!.resourceOverrides = {
@@ -953,7 +1003,7 @@ describe('M252 Gateway — resource-aware demote', () => {
         claude: { availability: 'open', reason: 'test claude capacity open' },
       },
     });
-    const item = makeItem('security', { effort: 5, score: 10 });
+    const item = makeItem('security', { id: 'fixed-security-1', effort: 5, score: 10 });
 
     const decision = await decide(item, cfg);
 
