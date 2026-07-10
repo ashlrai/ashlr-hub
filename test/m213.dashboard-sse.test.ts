@@ -414,6 +414,7 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('function dispatchProductionDiagnosticAttempts');
     expect(src).toContain('function generatedWorkMetric');
     expect(src).toContain('function diagnosticResliceDrainMetric');
+    expect(src).toContain('captureRepairs');
     expect(src).toContain('diagnosticReslices');
     expect(src).toContain('function renderMissionBriefCard');
     expect(src).toContain('function renderNextActionCommand');

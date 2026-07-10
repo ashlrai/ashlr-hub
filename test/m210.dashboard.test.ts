@@ -104,6 +104,7 @@ const FIXTURE_FLEET_STATUS = {
       total: 2,
       selfHeal: 2,
       proposalRepair: 1,
+      captureRepairs: 1,
       diagnosticReslices: 1,
       invent: 0,
     },
@@ -374,6 +375,7 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
       total: 2,
       selfHeal: 2,
       proposalRepair: 1,
+      captureRepairs: 1,
       diagnosticReslices: 1,
       invent: 0,
     });

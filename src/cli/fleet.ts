@@ -125,8 +125,11 @@ export function formatFleetStatus(s: FleetStatus): string {
   if (s.queue.generatedWork) {
     const g = s.queue.generatedWork;
     lines.push(
-      `  generated:     ${g.total} total, ${g.selfHeal} self-heal, ` +
-        `${g.proposalRepair} proposal-repair, ${g.diagnosticReslices} no-diff reslice, ${g.invent} invent`,
+      `  generated:     ${g.total} total, ${formatGeneratedWorkCount(g.selfHeal, 'self-heal item')}, ` +
+        `${formatGeneratedWorkCount(g.proposalRepair, 'proposal-repair item')}, ` +
+        `${formatGeneratedWorkCount(g.captureRepairs ?? 0, 'capture repair')}, ` +
+        `${formatGeneratedWorkCount(g.diagnosticReslices, 'no-diff reslice')}, ` +
+        `${formatGeneratedWorkCount(g.invent, 'invent item')}`,
     );
   }
   if (s.queue.diagnosticResliceDrain) {
@@ -622,6 +625,10 @@ function formatBackendResource(resource: NonNullable<FleetStatus['backends'][num
     parts.push(`reason=${compactResourceReason(resource.reason)}`);
   }
   return parts.join(' ');
+}
+
+function formatGeneratedWorkCount(count: number, singularLabel: string, pluralLabel = `${singularLabel}s`): string {
+  return `${count} ${count === 1 ? singularLabel : pluralLabel}`;
 }
 
 function formatFleetPhantom(phantom: NonNullable<FleetStatus['phantom']>): string {

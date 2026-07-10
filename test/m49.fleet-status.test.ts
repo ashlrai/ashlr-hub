@@ -2448,6 +2448,78 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatFleetStatus(s)).toContain('diagnosis: actionable · nim/goal 0/3 0% · tighten context/reslice');
   });
 
+  it('includes queued capture repair coverage in dispatch-yield action details', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    const now = new Date().toISOString();
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome, [], now);
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeFileSync(
+      join(ashlrDir, 'backlog.json'),
+      JSON.stringify({
+        generatedAt: now,
+        repos: [repo],
+        items: [
+          makeBacklogItem(
+            repo,
+            'repo:proposal-repair-capture:abcdef123456',
+            'Repair dispatch capture failure for repo item repo:self:gate',
+            9,
+            'self',
+            ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate'],
+          ),
+        ],
+      }),
+      'utf8',
+    );
+    const baseEvent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'item-capture-repair-a',
+      source: 'self',
+      repo,
+      title: 'Repair capture failure',
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      routeReason: 'local-coder bulk',
+      outcome: 'gate-blocked',
+      proposalCreated: false,
+      spentUsd: 0.001,
+      reason: 'tests: still failing after 2 attempt(s)',
+      diffFiles: 1,
+      diffLines: 12,
+      basis: 'run-proposal-outcome',
+    };
+    recordDispatchProduction([
+      baseEvent,
+      { ...baseEvent, itemId: 'item-capture-repair-b' },
+      { ...baseEvent, itemId: 'item-capture-repair-c' },
+    ]);
+
+    const s = await buildFleetStatus(baseConfig());
+    const action = s.nextActions?.find((candidate) => candidate.id === 'inspect-dispatch-yield');
+
+    expect(s.queue.generatedWork).toMatchObject({
+      captureRepairs: 1,
+      diagnosticReslices: 0,
+      proposalRepair: 1,
+    });
+    expect(s.dispatchYieldDiagnostics).toMatchObject({
+      verdict: 'actionable',
+      action: 'tighten-context-or-reslice',
+      primaryCandidate: {
+        backend: 'local-coder',
+        source: 'self',
+      },
+    });
+    expect(action?.detail).toContain('queued repair coverage: 1 capture repair queued');
+  });
+
   it('promotes queued no-diff diagnostic reslices ahead of dispatch-yield inspection', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');
@@ -2506,6 +2578,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.queue.generatedWork).toMatchObject({
       diagnosticReslices: 1,
       proposalRepair: 1,
+      captureRepairs: 0,
     });
     expect(s.dispatchYieldDiagnostics).toMatchObject({
       verdict: 'actionable',
@@ -2536,6 +2609,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       ],
     });
     expect(drainAction?.detail).toContain('sample-gated action: tighten context/reslice');
+    expect(drainAction?.detail).toContain('queued repair coverage: 1 no-diff reslice queued');
     expect(drainAction?.detail).toContain('First: Reslice no-diff dispatch for repo item repo:goal:no-alt.');
     expect(s.autonomousShipReadiness).toMatchObject({
       primaryAction: {
@@ -2637,6 +2711,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.queue.generatedWork).toMatchObject({
       diagnosticReslices: 1,
       proposalRepair: 1,
+      captureRepairs: 0,
     });
     expect(s.queue.eligibleBacklogItems).toBe(1);
     expect(s.queue.cooldownItems).toBe(1);
@@ -3161,6 +3236,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       total: 1,
       selfHeal: 1,
       proposalRepair: 0,
+      captureRepairs: 0,
       diagnosticReslices: 0,
       invent: 0,
     });
@@ -3743,6 +3819,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
           total: 3,
           selfHeal: 2,
           proposalRepair: 2,
+          captureRepairs: 1,
           diagnosticReslices: 1,
           invent: 1,
         },
@@ -3752,7 +3829,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       killed: false,
     });
 
-    expect(out).toContain('generated:     3 total, 2 self-heal, 2 proposal-repair, 1 no-diff reslice, 1 invent');
+    expect(out).toContain('generated:     3 total, 2 self-heal items, 2 proposal-repair items, 1 capture repair, 1 no-diff reslice, 1 invent item');
   });
 
   it('renders live daemon heartbeat and active tick state', () => {

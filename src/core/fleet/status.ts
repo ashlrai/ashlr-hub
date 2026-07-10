@@ -482,6 +482,7 @@ export interface FleetQueueGeneratedWorkStatus {
   total: number;
   selfHeal: number;
   proposalRepair: number;
+  captureRepairs: number;
   diagnosticReslices: number;
   diagnosticResliceDrainStalled?: boolean;
   invent: number;
@@ -633,22 +634,25 @@ function mergeVisibleQueueItems(items: WorkItem[], enrolledRepos: Set<string>): 
 function buildQueueGeneratedWorkStatus(items: WorkItem[]): FleetQueueGeneratedWorkStatus | undefined {
   let selfHeal = 0;
   let proposalRepair = 0;
+  let captureRepairs = 0;
   let diagnosticReslices = 0;
   let invent = 0;
   for (const item of items) {
     if (item.source === 'invent') invent++;
     if (item.tags.includes('self-heal')) selfHeal++;
     if (item.tags.includes('proposal-repair')) proposalRepair++;
+    if (item.tags.includes('dispatch-capture-repair')) captureRepairs++;
     if (item.tags.includes('dispatch-no-diff-reslice')) diagnosticReslices++;
   }
   const total = items.filter((item) =>
     item.source === 'invent' ||
     item.tags.includes('self-heal') ||
     item.tags.includes('proposal-repair') ||
+    item.tags.includes('dispatch-capture-repair') ||
     item.tags.includes('dispatch-no-diff-reslice')
   ).length;
   if (total === 0) return undefined;
-  return { total, selfHeal, proposalRepair, diagnosticReslices, invent };
+  return { total, selfHeal, proposalRepair, captureRepairs, diagnosticReslices, invent };
 }
 
 function latestRecentDiagnosticResliceDrainTick(ticks: DaemonTick[], nowMs = Date.now()): DaemonTick | null {
@@ -1984,6 +1988,7 @@ function dispatchYieldRecommendation(input: {
 
 function formatDispatchYieldDiagnosticDetail(
   diagnostic: FleetDispatchYieldDiagnostics,
+  generatedWork?: FleetQueueGeneratedWorkStatus,
 ): string {
   const candidate = diagnostic.primaryCandidate;
   const subject = candidate ? dispatchYieldSubject(candidate) : 'dispatches';
@@ -2002,14 +2007,31 @@ function formatDispatchYieldDiagnosticDetail(
       : diagnostic.action === 'collect-more-samples'
       ? 'collect more samples'
       : 'keep routing';
-  return `${subject} proposal yield ${proposals}/${attempts} (${formatActionPercent(rate)}); sample-gated action: ${action}${reason}${actionReasonDetail}${shape}`;
+  const repairCoverage = formatQueuedRepairCoverage(generatedWork);
+  return `${subject} proposal yield ${proposals}/${attempts} (${formatActionPercent(rate)}); sample-gated action: ${action}${reason}${actionReasonDetail}${shape}${repairCoverage}`;
 }
 
-function dispatchYieldNextAction(diagnostic: FleetDispatchYieldDiagnostics): DiagnosticDispatchYieldAction | null {
+function formatQueuedRepairCoverage(generatedWork: FleetQueueGeneratedWorkStatus | undefined): string {
+  if (!generatedWork) return '';
+  const parts = [
+    formatQueuedRepairCount(generatedWork.captureRepairs ?? 0, 'capture repair'),
+    formatQueuedRepairCount(generatedWork.diagnosticReslices ?? 0, 'no-diff reslice'),
+  ].filter((part): part is string => part !== null);
+  return parts.length > 0 ? `; queued repair coverage: ${parts.join(', ')}` : '';
+}
+
+function formatQueuedRepairCount(count: number, label: string): string | null {
+  if (count <= 0) return null;
+  return `${count} ${label}${count === 1 ? '' : 's'} queued`;
+}
+
+function dispatchYieldNextAction(status: FleetStatus): DiagnosticDispatchYieldAction | null {
+  const diagnostic = status.dispatchYieldDiagnostics;
+  if (!diagnostic) return null;
   if (diagnostic.verdict !== 'actionable') return null;
   const candidate = diagnostic.primaryCandidate;
   return {
-    detail: formatDispatchYieldDiagnosticDetail(diagnostic),
+    detail: formatDispatchYieldDiagnosticDetail(diagnostic, status.queue.generatedWork),
     ...(candidate?.backend ? { backend: candidate.backend } : {}),
   };
 }
@@ -2030,7 +2052,7 @@ function diagnosticResliceDrainNextAction(status: FleetStatus): FleetNextAction 
   }
 
   const topReslice = eligibleReslices[0] ?? null;
-  const diagnosticDetail = formatDispatchYieldDiagnosticDetail(diagnostic);
+  const diagnosticDetail = formatDispatchYieldDiagnosticDetail(diagnostic, status.queue.generatedWork);
   const target = topReslice?.repo ?? diagnostic.primaryCandidate?.backend;
   const first = topReslice ? ` First: ${topReslice.title}.` : '';
   const stalled = status.queue.diagnosticResliceDrain?.stalled === true ||
@@ -2402,9 +2424,7 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   if (eligibleBacklogItems > 0 && !controlBlocked) {
     const diagnosticResliceDrainAction = diagnosticResliceDrainNextAction(status);
     if (diagnosticResliceDrainAction) add(diagnosticResliceDrainAction);
-    const dispatchYieldDetail = status.dispatchYieldDiagnostics
-      ? dispatchYieldNextAction(status.dispatchYieldDiagnostics)
-      : null;
+    const dispatchYieldDetail = dispatchYieldNextAction(status);
     if (dispatchYieldDetail) {
       add({
         id: 'inspect-dispatch-yield',
@@ -3232,7 +3252,7 @@ function chooseReadinessBlocker(
     return readinessBlocker(
       'dispatch-yield-actionable',
       'Dispatch yield needs attention',
-      formatDispatchYieldDiagnosticDetail(status.dispatchYieldDiagnostics),
+      formatDispatchYieldDiagnosticDetail(status.dispatchYieldDiagnostics, status.queue.generatedWork),
       'medium',
       'queue',
     );

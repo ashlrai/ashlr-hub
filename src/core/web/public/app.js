@@ -2293,11 +2293,16 @@ function queueEligibilityMetric(queue) {
 function generatedWorkMetric(generatedWork) {
   if (!generatedWork || typeof generatedWork.total !== 'number' || generatedWork.total <= 0) return null;
   const parts = [`${generatedWork.total} generated`];
-  if ((generatedWork.diagnosticReslices ?? 0) > 0) parts.push(`${generatedWork.diagnosticReslices} no-diff reslice`);
-  if ((generatedWork.proposalRepair ?? 0) > 0) parts.push(`${generatedWork.proposalRepair} proposal-repair`);
-  if ((generatedWork.selfHeal ?? 0) > 0) parts.push(`${generatedWork.selfHeal} self-heal`);
-  if ((generatedWork.invent ?? 0) > 0) parts.push(`${generatedWork.invent} invent`);
+  if ((generatedWork.captureRepairs ?? 0) > 0) parts.push(formatGeneratedWorkCount(generatedWork.captureRepairs, 'capture repair'));
+  if ((generatedWork.diagnosticReslices ?? 0) > 0) parts.push(formatGeneratedWorkCount(generatedWork.diagnosticReslices, 'no-diff reslice'));
+  if ((generatedWork.proposalRepair ?? 0) > 0) parts.push(formatGeneratedWorkCount(generatedWork.proposalRepair, 'proposal-repair item'));
+  if ((generatedWork.selfHeal ?? 0) > 0) parts.push(formatGeneratedWorkCount(generatedWork.selfHeal, 'self-heal item'));
+  if ((generatedWork.invent ?? 0) > 0) parts.push(formatGeneratedWorkCount(generatedWork.invent, 'invent item'));
   return parts.join(' / ');
+}
+
+function formatGeneratedWorkCount(count, singularLabel, pluralLabel = `${singularLabel}s`) {
+  return `${count} ${count === 1 ? singularLabel : pluralLabel}`;
 }
 
 function diagnosticResliceDrainMetric(drain) {
@@ -3501,7 +3506,9 @@ function renderControl() {
     heroMetrics.appendChild(controlMetric(
       'Generated',
       queue.generatedWork.total ?? 0,
-      (queue.generatedWork.diagnosticReslices ?? 0) > 0 ? '#f97316' : '#38bdf8'
+      ((queue.generatedWork.diagnosticReslices ?? 0) > 0 || (queue.generatedWork.captureRepairs ?? 0) > 0)
+        ? '#f97316'
+        : '#38bdf8'
     ));
   }
   if (queue.diagnosticResliceDrain) {
