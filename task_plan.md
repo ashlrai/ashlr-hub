@@ -93,7 +93,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Audit empty-diff production, diagnostic reslicing, routing, red verifier baselines, and causal-data gaps in parallel.
 - [x] Treat an explicitly required but known-empty diff as a bounded TITRR retry condition.
 - [x] Preserve budget, sandbox, capture, provenance, and merge authority while recording truthful terminal outcomes.
-- [x] Run focused/full verification and adversarial review; commit, push, reload, and production smoke remain in progress.
+- [x] Run focused/full verification, adversarial review, commit, push, reload, and production smoke.
 
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
