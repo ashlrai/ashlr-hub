@@ -1386,4 +1386,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [ ] Correlate skill-use observations into aggregate-only trajectory learning without claiming causality.
 - [ ] Prove zero changes to backend, tier, model, goal/prompt, budget, delegation, retries, Best-of-N, or merge authority.
 - [x] Keep active skill injection impossible and preserve current production routing as an exact no-producer behavioral no-op.
-- [ ] Run focused/full gates, update durable notes, commit, push, reload, and smoke production telemetry.
+- [x] Run focused/full gates, update durable notes, commit, push, reload, and smoke production telemetry.
