@@ -48,6 +48,7 @@ import type {
   DaemonTick,
   EngineId,
   EngineTier,
+  EvidenceOutcomeSummary,
   Proposal,
   RunEventSummary,
   RunProposalOutcome,
@@ -114,6 +115,7 @@ import {
 } from '../fleet/agent-action-ledger.js';
 import {
   causalMetadata,
+  evidenceOutcomeSummary,
   routeSnapshot,
   runEventSummary,
 } from '../learning/causal.js';
@@ -568,7 +570,7 @@ function dispatchProductionFromProposalOutcome(
   outcome: RunProposalOutcome | undefined,
   runId?: string,
   summary?: RunEventSummary,
-  options: { proposalRequired?: boolean } = {},
+  options: { proposalRequired?: boolean; evidenceOutcome?: EvidenceOutcomeSummary } = {},
 ): DaemonDispatchProduction | undefined {
   if (!outcome) return undefined;
   const diffFiles =
@@ -586,11 +588,13 @@ function dispatchProductionFromProposalOutcome(
   const reason = captureMissingReason
     ? captureMissingReason
     : outcome.reason;
+  const evidence = evidenceOutcomeSummary(options.evidenceOutcome);
   return {
     outcome: productionOutcome,
     ...(outcome.proposalId ? { proposalId: outcome.proposalId } : {}),
     ...(runId ? { runId } : {}),
     ...(summary ? { runEventSummary: summary } : {}),
+    ...(evidence ? { evidenceOutcome: evidence } : {}),
     ...(reason ? { reason: boundedText(reason, 220) } : {}),
     ...(typeof diffFiles === 'number' ? { diffFiles } : {}),
     ...(typeof diffLines === 'number' ? { diffLines } : {}),
@@ -742,6 +746,7 @@ function dispatchProductionEventFromOutcome(
     ...(trace.trajectoryId ? { trajectoryId: trace.trajectoryId } : {}),
     ...(trace.routeSnapshot ? { routeSnapshot: trace.routeSnapshot } : {}),
     ...(eventRunSummary ? { runEventSummary: eventRunSummary } : {}),
+    ...(production?.evidenceOutcome ? { evidenceOutcome: production.evidenceOutcome } : {}),
     ...(trace.learningSource ? { learningSource: trace.learningSource } : {}),
     ...(trace.labelBasis ? { labelBasis: trace.labelBasis } : {}),
     ...(trace.routerPolicyVersion ? { routerPolicyVersion: trace.routerPolicyVersion } : {}),
@@ -2727,7 +2732,10 @@ export async function tick(
             delegationScope,
           });
         }
-        dispatchProduction = dispatchProductionFromProposalOutcome(runState.proposalOutcome, runState.id, runState.runEventSummary, { proposalRequired: true });
+        dispatchProduction = dispatchProductionFromProposalOutcome(runState.proposalOutcome, runState.id, runState.runEventSummary, {
+          proposalRequired: true,
+          evidenceOutcome: runState.evidenceOutcome,
+        });
         dispatchSkipReason = noProposalProductionReason(dispatchProduction);
 
         // M80: subscription-tier runs are not dollar-billed — count $0 toward

@@ -1452,6 +1452,16 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       id: 'run-empty-diff',
       status: 'done',
       usage: { totalTokens: 100, estCostUsd: 0.004, steps: 1 },
+      evidenceOutcome: {
+        target: 'main',
+        trustBasis: 'verification',
+        riskClass: 'low',
+        verificationPassed: true,
+        policyAllowed: true,
+        policyAction: 'allow',
+        policyTier: 'docs',
+        gateCount: 3,
+      },
       proposalOutcome: {
         kind: 'empty-diff',
         reason: 'engine "local-coder" completed without file changes',
@@ -1478,6 +1488,16 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         outcome: 'empty-diff',
         runId: 'run-empty-diff',
         reason: 'engine "local-coder" completed without file changes',
+        evidenceOutcome: {
+          target: 'main',
+          trustBasis: 'verification',
+          riskClass: 'low',
+          verificationPassed: true,
+          policyAllowed: true,
+          policyAction: 'allow',
+          policyTier: 'docs',
+          gateCount: 3,
+        },
       },
     });
     expect(result.proposalProduction?.reasons?.[0]).toEqual({
@@ -1488,6 +1508,16 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       outcome: 'empty-diff',
       runId: 'run-empty-diff',
       trajectoryId: 'run:run-empty-diff',
+      evidenceOutcome: {
+        target: 'main',
+        trustBasis: 'verification',
+        riskClass: 'low',
+        verificationPassed: true,
+        policyAllowed: true,
+        policyAction: 'allow',
+        policyTier: 'docs',
+        gateCount: 3,
+      },
     });
     const productionEvent = readDispatchProductionEvents({ limit: 1 })[0];
     expect(productionEvent).toMatchObject({
@@ -1516,6 +1546,16 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         proposalCreated: false,
         costUsd: 0.004,
       },
+      evidenceOutcome: {
+        target: 'main',
+        trustBasis: 'verification',
+        riskClass: 'low',
+        verificationPassed: true,
+        policyAllowed: true,
+        policyAction: 'allow',
+        policyTier: 'docs',
+        gateCount: 3,
+      },
       learningSource: 'daemon-dispatch',
       labelBasis: 'dispatch-outcome',
       spentUsd: 0.004,
@@ -1528,6 +1568,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       outcome: 'no-proposal',
       trajectoryId: productionEvent?.trajectoryId,
       runEventSummary: productionEvent?.runEventSummary,
+      evidenceOutcome: productionEvent?.evidenceOutcome,
     });
   });
 
