@@ -68,11 +68,15 @@ export function buildShadowSkillUseEvent(
     const { key: identityKey, ...eventIdentity } = identity;
     const eventId = `skill-use:${createHash('sha256').update(JSON.stringify([
       identityKey,
+      eventIdentity.trajectoryId ?? null,
+      eventIdentity.runId ?? null,
+      eventIdentity.proposalId ?? null,
       skillId,
       input.skill.revision,
       input.skill.contentHash,
       policyVersion,
       'selected',
+      selectedAt,
     ])).digest('hex').slice(0, 32)}`;
     const snapshot = routeSnapshot({
       backend: input.route.backend,

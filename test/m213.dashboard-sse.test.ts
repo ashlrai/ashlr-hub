@@ -531,6 +531,18 @@ describe('M213 Dashboard SSE — /api/events', () => {
     for (const identityField of ['sampleRefs', '.recent', '.ref', 'repo', 'itemId', 'proposalId', 'runId', 'trajectoryId']) {
       expect(trajectoryUiSource).not.toContain(identityField);
     }
+
+    const rows = new Function(
+      'formatCoverageMetric',
+      `${trajectoryUiSource}\nreturn trajectoryLearningRows;`,
+    )(() => 'coverage')({
+      trajectories: 2,
+      skillObservation: { sampleState: 'insufficient-sample' },
+    }) as Array<[string, string | number]>;
+    const values = Object.fromEntries(rows);
+    expect(values['Skill-observed trajectories']).toBe('withheld (<3)');
+    expect(values['Observed selections']).toBe('withheld');
+    expect(values['Observation join gaps']).toBe('withheld');
   });
 
   it('app.js renders Fleet Dashboard readiness rail from existing fleet snapshots', () => {

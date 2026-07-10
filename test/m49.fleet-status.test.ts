@@ -32,6 +32,7 @@ import { recordDispatchManifest } from '../src/core/fleet/dispatch-manifest.js';
 import { recordAgentAction, type AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
 import { recordDecision } from '../src/core/fleet/decisions-ledger.js';
 import { recordOutcome } from '../src/core/fleet/worked-ledger.js';
+import { readSkillUseEvents, recordSkillUseEvent } from '../src/core/fleet/skill-records.js';
 import { armDaemonSpendGuard, clearDaemonSpendGuard } from '../src/core/daemon/state.js';
 import type { Proposal } from '../src/core/types.js';
 
@@ -1905,6 +1906,26 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(persistAutonomyEvidencePack(makeEvidencePack(proposal.id, now))).toBe(true);
     recordOutcome(itemId, 'diff', now);
+    recordSkillUseEvent({
+      schemaVersion: 1,
+      eventId: 'skill-use:attempt-coverage-private',
+      ts: now,
+      skillId: 'skill.private.attempt-coverage',
+      skillRevision: 1,
+      contentHash: 'a'.repeat(64),
+      selectedAt: now,
+      skillPolicyVersion: 'verified-skills-v1',
+      mode: 'shadow',
+      stage: 'selected',
+      outcome: 'unknown',
+      rank: 0,
+      score: 1,
+      reason: 'private observe-only selection',
+      proposalId: proposal.id,
+      runId: 'run-attempt-coverage',
+      trajectoryId: 'traj-attempt-coverage',
+    });
+    expect(readSkillUseEvents({ limit: 10 })).toHaveLength(1);
 
     const s = await buildFleetStatus(cfg);
 
@@ -1991,7 +2012,17 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         dispatchToMerge: { count: 0, rate: 0 },
       },
       gaps: [],
+      skillObservation: {
+        sampleState: 'insufficient-sample',
+      },
     });
+    expect(s.trajectoryLearning?.coverage).not.toHaveProperty('skillUse');
+    expect(s.trajectoryLearning?.skillObservation).not.toHaveProperty('joined');
+    expect(s.trajectoryLearning?.skillObservation).not.toHaveProperty('unjoined');
+    expect(s.trajectoryLearning?.skillObservation).not.toHaveProperty('conflicting');
+    expect(s.trajectoryLearning?.skillObservation).not.toHaveProperty('observedTrajectoryCoverage');
+    expect(s.trajectoryLearning?.skillObservation).not.toHaveProperty('modeCounts');
+    expect(s.trajectoryLearning?.skillObservation).not.toHaveProperty('stageCounts');
     expect(s.trajectoryLearning?.recent[0]).toMatchObject({
       ref: expect.stringMatching(/^trajectory:[a-f0-9]{12}$/),
       terminalOutcome: 'pending',
@@ -2005,6 +2036,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         agentAction: true,
       },
     });
+    expect(s.trajectoryLearning?.recent[0]?.coverage).not.toHaveProperty('skillUse');
     expect(JSON.stringify(s.trajectoryLearning)).not.toContain(repo);
     expect(JSON.stringify(s.trajectoryLearning)).not.toContain(itemId);
     expect(JSON.stringify(s.trajectoryLearning)).not.toContain(proposal.id);
@@ -2021,6 +2053,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('outcomes:     merged 0, pending 1, no-proposal 0, failed 0');
     expect(formatted).toContain('spine:        dispatch->decision 1 (100%), dispatch->evidence 1 (100%), dispatch->merge 0 (0%)');
     expect(formatted).toContain('coverage:     dispatch 1 (100%), proposal 1 (100%), evidence 1 (100%), decision 1 (100%)');
+    expect(formatted).toContain('skill observations:');
+    expect(formatted).not.toContain('skill shadow:');
   });
 
   it('promotes weak causal attempt coverage into next actions', async () => {

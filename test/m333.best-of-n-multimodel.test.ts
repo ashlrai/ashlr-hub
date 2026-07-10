@@ -101,6 +101,7 @@ interface Harness {
   removeSandbox?: ReturnType<typeof vi.fn>;
   judgeProposal: ReturnType<typeof vi.fn>;
   filedProposals?: Map<string, import('../src/core/types.js').Proposal>;
+  observeShadowSkills: ReturnType<typeof vi.fn>;
 }
 
 async function harness(opts: {
@@ -221,12 +222,25 @@ async function harness(opts: {
     subscriptionAllows: vi.fn(() => ({ allowed: true, reason: 'mock' })),
     subscriptionUsage: vi.fn(() => null),
   }));
+  const observeShadowSkills = vi.fn(() => ({
+    selection: {
+      mode: 'shadow',
+      policyVersion: 'verified-skills-v1',
+      consideredCount: 1,
+      eligibleCount: 1,
+      selectedSkillIds: ['skill.test'],
+      selected: [],
+    },
+    events: [],
+  }));
+  vi.doMock('../src/core/fleet/skill-shadow-observer.js', () => ({ observeShadowSkills }));
   const mod = await import('../src/core/run/best-of-n.js?m333=' + randomUUID());
   return {
     runBestOfN: mod.runBestOfN,
     setStatus,
     recordBestOfN,
     judgeProposal,
+    observeShadowSkills,
     ...(opts.draftMode ? { captureSandboxedProposal, createSandbox, removeSandbox, filedProposals } : {}),
   };
 }
@@ -238,6 +252,7 @@ afterEach(() => {
   vi.doUnmock('../src/core/inbox/store.js');
   vi.doUnmock('../src/core/fleet/best-of-n-ledger.js');
   vi.doUnmock('../src/core/fleet/subscription-usage.js');
+  vi.doUnmock('../src/core/fleet/skill-shadow-observer.js');
   vi.resetModules();
 });
 
@@ -246,6 +261,47 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('M333 — candidate specs', () => {
+  it('observes signed cards per candidate with child identity and final engine/model', async () => {
+    const cli = makeSandboxMock(0.1, 'cli');
+    const api = makeSandboxMock(0.1, 'api');
+    const h = await harness({ cli: cli.fn, api: api.fn });
+    const attemptId = 'attempt-11111111-1111-4111-8111-111111111111' as const;
+
+    await h.runBestOfN(makeItem(), makeConfig(), {
+      n: 2,
+      attemptId,
+      shadowSkillSelectedAt: '2026-07-10T12:00:00.000Z',
+      shadowSkillCards: [{} as import('../src/core/types.js').SkillCard],
+      candidates: [
+        { engine: 'claude' as never, model: 'claude-sonnet-5' },
+        { engine: 'local-coder' as never, model: 'qwen3-coder-next' },
+      ],
+    });
+
+    expect(h.observeShadowSkills).toHaveBeenCalledTimes(2);
+    expect(h.observeShadowSkills.mock.calls.map((call) => call[0])).toEqual([
+      expect.objectContaining({
+        identity: {
+          trajectoryId: `run:${attemptId}`,
+          runId: deriveCandidateAttemptIdentity(attemptId, 0),
+        },
+        route: { backend: 'claude', tier: 'frontier', model: 'claude-sonnet-5' },
+      }),
+      expect.objectContaining({
+        identity: {
+          trajectoryId: `run:${attemptId}`,
+          runId: deriveCandidateAttemptIdentity(attemptId, 1),
+        },
+        route: { backend: 'local-coder', tier: 'mid', model: 'qwen3-coder-next' },
+      }),
+    ]);
+    for (const options of [...cli.options, ...api.options]) {
+      expect(options).not.toHaveProperty('selectedSkillIds');
+      expect(options).not.toHaveProperty('skills');
+      expect(options).not.toHaveProperty('skillContext');
+    }
+  });
+
   it('returns candidate errors instead of throwing for a malformed outer attempt id', async () => {
     const cli = makeSandboxMock(0.1, 'cli');
     const api = makeSandboxMock(0.0, 'api');
@@ -348,7 +404,7 @@ describe('M333 — candidate specs', () => {
     expect(result.candidates.map((c) => c.model)).toEqual([
       'claude-sonnet-5',
       'qwen3-coder-next',
-      null,
+      'claude-opus-4-8',
     ]);
     expect(result.winner).toBeDefined();
   });

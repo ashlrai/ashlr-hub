@@ -235,6 +235,12 @@ import {
 } from '../src/core/fleet/dispatch-production-ledger.js';
 import { readDispatchManifestEvents } from '../src/core/fleet/dispatch-manifest.js';
 import { readAgentActions } from '../src/core/fleet/agent-action-ledger.js';
+import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
+import {
+  readSkillUseEvents,
+  recordSkillCard,
+  sanitizeSkillCard,
+} from '../src/core/fleet/skill-records.js';
 import { loadWorkedLedger, recordOutcome } from '../src/core/fleet/worked-ledger.js';
 import {
   makeFixture,
@@ -322,13 +328,13 @@ beforeEach(() => {
   // Default: local engine tier.
   mockEngineTierOf.mockReturnValue('local');
   // Default runSwarm: success, $0.001 cost.
-  mockRunSwarm.mockResolvedValue({
-    id: `mock-swarm-${Date.now()}`,
+  mockRunSwarm.mockImplementation(async (_input, _cfg, opts) => ({
+    id: (opts as { runId?: string } | undefined)?.runId ?? `mock-swarm-${Date.now()}`,
     status: 'done',
     goal: 'mock goal',
     result: 'mock result',
     usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
-  });
+  }));
 });
 
 afterEach(() => {
@@ -486,6 +492,31 @@ function cfgBuiltin(daemon: { dailyBudgetUsd?: number; perTickItems?: number; pa
       intervalMs: 50,
     },
   });
+}
+
+function recordM201ShadowSkill(overrides: { skillId?: string; summary?: string } = {}): void {
+  const skill = attestSkillCard(sanitizeSkillCard({
+    schemaVersion: 1,
+    skillId: overrides.skillId ?? 'skill.m201-execution-order',
+    revision: 1,
+    ts: new Date().toISOString(),
+    name: 'M201 execution order',
+    summary: overrides.summary ?? 'Repair and verify an M201 item.',
+    status: 'verified',
+    source: 'verified-proposal',
+    tags: ['m201', 'repair'],
+    taskKinds: ['m201-item'],
+    commandKinds: ['test'],
+    verification: {
+      passed: true,
+      commandKinds: ['test'],
+      diffHash: 'c'.repeat(64),
+      evidenceCount: 1,
+    },
+    proposalId: 'proposal-m201-execution-order',
+  }));
+  expect(skill).not.toBeNull();
+  recordSkillCard(skill!);
 }
 
 // ===========================================================================
@@ -2005,6 +2036,189 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       outcome: 'proposal-disabled',
       proposalCreated: false,
     });
+  });
+
+  it('A1h2f: live builtin dispatch records signed shadow selections without changing swarm inputs', async () => {
+    const { items } = enrollWithItems(2);
+    const skill = attestSkillCard(sanitizeSkillCard({
+      schemaVersion: 1,
+      skillId: 'skill.m201-focused-repair',
+      revision: 1,
+      ts: new Date().toISOString(),
+      name: 'M201 focused repair',
+      summary: 'Run focused verification for an M201 repair.',
+      status: 'verified',
+      source: 'verified-proposal',
+      tags: ['m201', 'repair'],
+      taskKinds: ['m201-item'],
+      commandKinds: ['typecheck', 'test'],
+      verification: {
+        passed: true,
+        commandKinds: ['typecheck', 'test'],
+        diffHash: 'a'.repeat(64),
+        evidenceCount: 2,
+      },
+      proposalId: 'proposal-m201-shadow-fixture',
+    }));
+    expect(skill).not.toBeNull();
+    recordSkillCard(skill!);
+
+    const result = await tick(cfgBuiltin({ perTickItems: 2, parallel: 1 }), { dryRun: false });
+
+    expect(result.dispatches).toHaveLength(2);
+    const events = readSkillUseEvents();
+    expect(events).toHaveLength(2);
+    expect(new Set(events.map((event) => event.eventId)).size).toBe(2);
+    expect(new Set(events.map((event) => event.runId))).toEqual(
+      new Set(result.dispatches?.map((dispatch) => dispatch.runId)),
+    );
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        skillId: 'skill.m201-focused-repair',
+        mode: 'shadow',
+        stage: 'selected',
+        outcome: 'unknown',
+        routeSnapshot: expect.objectContaining({ backend: 'builtin', skillMode: 'shadow' }),
+      }),
+    ]));
+    for (const call of mockRunSwarm.mock.calls) {
+      expect(call[2]).not.toHaveProperty('selectedSkillIds');
+      expect(call[2]).not.toHaveProperty('skills');
+      expect(call[2]).not.toHaveProperty('skillContext');
+    }
+    const persisted = JSON.stringify(events);
+    expect(persisted).not.toContain(items[0]!.title);
+    expect(persisted).not.toContain(items[1]!.title);
+  });
+
+  it('A1h2g: final external route is observed in shadow mode without changing runGoal options', async () => {
+    enrollWithItems(1);
+    const skill = attestSkillCard(sanitizeSkillCard({
+      schemaVersion: 1,
+      skillId: 'skill.external-m201-repair',
+      revision: 1,
+      ts: new Date().toISOString(),
+      name: 'External M201 item repair',
+      summary: 'Verify M201 repairs made by a local coding engine.',
+      status: 'verified',
+      source: 'verified-proposal',
+      tags: ['m201', 'repair'],
+      taskKinds: ['m201-item'],
+      commandKinds: ['test'],
+      verification: {
+        passed: true,
+        commandKinds: ['test'],
+        diffHash: 'b'.repeat(64),
+        evidenceCount: 1,
+      },
+      proposalId: 'proposal-external-shadow-fixture',
+    }));
+    expect(skill).not.toBeNull();
+    recordSkillCard(skill!);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', model: 'qwen-shadow', reason: 'final route' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockRunGoal.mockImplementationOnce(async (_goal, _cfg, opts) => ({
+      id: (opts as { runId: string }).runId,
+      status: 'done',
+      engine: 'local-coder',
+      engineTier: 'mid',
+      engineModel: 'local-coder:qwen-shadow',
+      usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
+    }));
+
+    await tick(
+      { ...cfgBuiltin({ perTickItems: 1 }), foundry: { allowedBackends: ['local-coder'] } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(readSkillUseEvents({ limit: 1 })[0]).toMatchObject({
+      skillId: 'skill.external-m201-repair',
+      mode: 'shadow',
+      routeSnapshot: { backend: 'local-coder', tier: 'mid', model: 'qwen-shadow' },
+    });
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({
+      engine: 'local-coder',
+      model: 'qwen-shadow',
+    });
+    expect(mockRunGoal.mock.calls[0]?.[2]).not.toHaveProperty('selectedSkillIds');
+  });
+
+  it('A1h2g1: shadow selection waits for execution and records the actual fallback route', async () => {
+    enrollWithItems(1);
+    recordM201ShadowSkill({ skillId: 'skill.m201-fallback-route' });
+    mockRouteBackend.mockReturnValue({
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen-requested',
+      reason: 'requested external route',
+    });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockRunGoal.mockImplementationOnce(async (_goal, _cfg, opts) => {
+      expect(readSkillUseEvents()).toEqual([]);
+      return {
+        id: (opts as { runId: string }).runId,
+        status: 'done',
+        engine: 'builtin',
+        engineTier: 'local',
+        engineModel: 'builtin:llama-fallback',
+        usage: { totalTokens: 100, estCostUsd: 0.001, steps: 1 },
+      };
+    });
+
+    await tick(
+      { ...cfgBuiltin({ perTickItems: 1 }), foundry: { allowedBackends: ['local-coder'] } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(readSkillUseEvents()).toEqual([
+      expect.objectContaining({
+        skillId: 'skill.m201-fallback-route',
+        routeSnapshot: expect.objectContaining({
+          backend: 'builtin',
+          tier: 'local',
+          model: null,
+          selectedSkillIds: ['skill.m201-fallback-route'],
+          skillMode: 'shadow',
+          skillPolicyVersion: expect.any(String),
+        }),
+      }),
+    ]);
+  });
+
+  it('A1h2g2: kill-switch outcomes do not emit shadow selection events', async () => {
+    const { items } = enrollWithItems(1);
+    recordM201ShadowSkill({ skillId: 'skill.m201-kill-switch' });
+    mockRunSwarm.mockImplementationOnce(async (_input, _cfg, opts) => {
+      expect(readSkillUseEvents()).toEqual([]);
+      return {
+        id: (opts as { runId: string }).runId,
+        status: 'failed',
+        goal: items[0]!.title,
+        usage: { tokensIn: 0, tokensOut: 0, estCostUsd: 0, steps: 0 },
+        proposalOutcome: {
+          kind: 'kill-switch',
+          reason: 'kill switch prevented sandbox execution',
+        },
+      };
+    });
+
+    await tick(cfgBuiltin({ perTickItems: 1 }), { dryRun: false });
+
+    expect(readSkillUseEvents()).toEqual([]);
+  });
+
+  it('A1h2g3: skillLibrary false leaves dispatch behavior intact and writes no skill events', async () => {
+    enrollWithItems(1);
+    recordM201ShadowSkill({ skillId: 'skill.m201-disabled-library' });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1 }),
+      foundry: { allowedBackends: ['builtin'], skillLibrary: false },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(readSkillUseEvents()).toEqual([]);
   });
 
   it('A1h3: routed model is passed into the normal sandboxed runGoal path', async () => {

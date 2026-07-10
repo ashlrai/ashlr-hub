@@ -19,6 +19,7 @@ import type {
   EngineId,
   RunProposalOutcome,
   RunState,
+  SkillCard,
   DelegationScope,
   Sandbox,
 } from '../types.js';
@@ -30,6 +31,7 @@ import {
   type OuterAttemptIdentity,
 } from '../fleet/attempt-identity.js';
 import { mergeDelegationScope, scopeFromWorkItem } from './delegation-scope.js';
+import { observeShadowSkills } from '../fleet/skill-shadow-observer.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -70,6 +72,7 @@ export interface CandidateResult {
 }
 
 interface InternalCandidateResult extends CandidateResult {
+  requestedModel?: string | null;
   proposalDraft?: Proposal;
   sandbox?: Sandbox;
   delegationScope?: DelegationScope;
@@ -271,6 +274,10 @@ export async function runBestOfN(
     delegationScope?: DelegationScope;
     /** Opaque outer dispatch identity used to derive stable candidate run ids. */
     attemptId?: OuterAttemptIdentity;
+    /** Immutable signed-card snapshot read once by the daemon tick. */
+    shadowSkillCards?: readonly SkillCard[];
+    /** Stable timestamp associated with the daemon's signed-card snapshot. */
+    shadowSkillSelectedAt?: string;
     /**
      * M333: per-candidate engine/model specs. Candidate i runs on
      * specs[i % specs.length] — one candidate per spec when n matches the
@@ -405,7 +412,13 @@ export async function runBestOfN(
     // supported; the primary divergence comes from the engine's own stochasticity.
     const spec = specs[i % specs.length]!;
     const cEngine = spec.engine;
-    const cModel = spec.model ?? null;
+    const requestedModel = spec.model ?? null;
+    const engineSpec = resolveEngineSpec(cEngine, cfg);
+    const cModel = requestedModel
+      ?? cfg.foundry?.models?.[cEngine]
+      ?? engineSpec?.defaultModel
+      ?? engineSpec?.api?.defaultModel
+      ?? 'default';
     let runId: string;
     try {
       runId = opts?.attemptId
@@ -421,7 +434,15 @@ export async function runBestOfN(
         error: err instanceof Error ? err.message : 'invalid attempt identity',
       };
     }
-    const base: CandidateResult = { index: i, diff: '', score: 0, engine: cEngine, model: cModel, runId };
+    const base: InternalCandidateResult = {
+      index: i,
+      diff: '',
+      score: 0,
+      engine: cEngine,
+      model: cModel,
+      runId,
+      requestedModel,
+    };
     const runSandboxed = runnerFor(cEngine);
 
     if (!runSandboxed) {
@@ -430,6 +451,57 @@ export async function runBestOfN(
 
     const t0 = Date.now();
     try {
+      const observeExecutedCandidate = (state: RunState, proposalOutcome?: RunProposalOutcome): void => {
+        const actionCounts = state.runEventSummary?.actionCounts;
+        const executed = state.status === 'done' || [
+          actionCounts?.spawnAttempts,
+          actionCounts?.modelSteps,
+          actionCounts?.toolSteps,
+          actionCounts?.totalSteps,
+        ].some((count) => typeof count === 'number' && count > 0);
+        if (
+          !executed ||
+          proposalOutcome?.kind === 'kill-switch' ||
+          !opts?.attemptId ||
+          !opts.shadowSkillSelectedAt ||
+          !opts.shadowSkillCards?.length
+        ) return;
+        const executedBackend = state.engine || cEngine;
+        const engineModelPrefix = `${executedBackend}:`;
+        const reportedModel = state.engineModel?.startsWith(engineModelPrefix)
+          ? state.engineModel.slice(engineModelPrefix.length)
+          : cModel;
+        const allowedModels = new Set([
+          requestedModel,
+          cfg.foundry?.models?.[cEngine],
+          engineSpec?.defaultModel,
+          engineSpec?.api?.defaultModel,
+        ].filter((model): model is string => typeof model === 'string' && model.length > 0));
+        const executedModel = allowedModels.has(reportedModel) ? reportedModel : null;
+        const executedTier = state.engineTier ?? engineSpec?.tier ?? null;
+        observeShadowSkills({
+          cards: opts.shadowSkillCards,
+          query: {
+            title: item.title,
+            detail: item.detail,
+            source: item.source,
+            tags: item.tags,
+            route: {
+              backend: executedBackend,
+              tier: executedTier,
+              model: executedModel,
+              reason: `best-of-${n} candidate ${i + 1}`,
+            },
+          },
+          identity: { trajectoryId: `run:${opts.attemptId}`, runId },
+          selectedAt: opts.shadowSkillSelectedAt,
+          route: {
+            backend: executedBackend,
+            tier: executedTier,
+            model: executedModel,
+          },
+        });
+      };
       const delegationScope = mergeDelegationScope(parentDelegationScope, {
         origin: 'best-of-n',
         runId,
@@ -439,7 +511,7 @@ export async function runBestOfN(
         objective: item.title,
         backend: {
           engine: cEngine,
-          model: cModel,
+          model: requestedModel,
           assignedBy: 'best-of-n',
           reason: `candidate ${i + 1}/${n}`,
         },
@@ -462,7 +534,7 @@ export async function runBestOfN(
         }
 
         const result = await runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
-          ...(typeof cModel === 'string' ? { model: cModel } : {}),
+          ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
           sourceRepo,
           propose: false,
           existingWorktree: sb,
@@ -471,12 +543,16 @@ export async function runBestOfN(
           workSource: opts?.workSource ?? item.source,
           ...(delegationScope ? { delegationScope } : {}),
         });
+        observeExecutedCandidate(
+          result.state,
+          result.proposalOutcome ?? result.state.proposalOutcome,
+        );
 
         const draft = await captureSandboxedProposal(cEngine, goal, cfg, {
           sourceRepo,
           existingWorktree: sb,
           draftOnly: true,
-          ...(typeof cModel === 'string' ? { model: cModel } : {}),
+          ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
           runId,
           workItemId: opts?.workItemId ?? item.id,
           workSource: opts?.workSource ?? item.source,
@@ -511,7 +587,7 @@ export async function runBestOfN(
       }
 
       const result = await runSandboxed(cEngine as import('../types.js').EngineId, goal, cfg, {
-        ...(typeof cModel === 'string' ? { model: cModel } : {}),
+        ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
         sourceRepo,
         propose: true,
         runId,
@@ -519,6 +595,10 @@ export async function runBestOfN(
         workSource: opts?.workSource ?? item.source,
         ...(delegationScope ? { delegationScope } : {}),
       });
+      observeExecutedCandidate(
+        result.state,
+        result.proposalOutcome ?? result.state.proposalOutcome,
+      );
 
       const diff = (result.state as unknown as Record<string, unknown>)['result'] as string ?? '';
       // The actual diff patch lives in the proposal; the state.result is the
@@ -651,7 +731,7 @@ export async function runBestOfN(
       const filed = await captureSandboxedProposal(cEngine, goal, cfg, {
         sourceRepo,
         existingWorktree: c.sandbox,
-        ...(typeof c.model === 'string' ? { model: c.model } : {}),
+        ...(typeof c.requestedModel === 'string' ? { model: c.requestedModel } : {}),
         runId: c.runId,
         workItemId: opts?.workItemId ?? item.id,
         workSource: opts?.workSource ?? item.source,

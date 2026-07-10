@@ -2800,6 +2800,8 @@ function formatTrajectoryLearningGap(trajectoryLearning) {
 function trajectoryLearningRows(trajectoryLearning) {
   const routeSpine = trajectoryLearning?.routeSpine ?? {};
   const terminal = trajectoryLearning?.terminalOutcomes ?? {};
+  const skill = trajectoryLearning?.skillObservation ?? {};
+  const skillObserved = skill.sampleState === 'observed';
   return [
     ['Trajectories', trajectoryLearning?.trajectories ?? 0],
     ['Dispatch -> decision', formatCoverageMetric(routeSpine.dispatchToDecision)],
@@ -2808,6 +2810,10 @@ function trajectoryLearningRows(trajectoryLearning) {
     ['Merged', terminal.merged ?? 0],
     ['No-proposal', terminal['no-proposal'] ?? 0],
     ['Failed', terminal.failed ?? 0],
+    ['Skill-observed trajectories', skillObserved ? formatCoverageMetric(skill.observedTrajectoryCoverage) : 'withheld (<3)'],
+    ['Observation sample', skill.sampleState ?? 'unavailable'],
+    ['Observed selections', skillObserved ? (skill.joined ?? 0) : 'withheld'],
+    ['Observation join gaps', skillObserved ? (skill.unjoined ?? 0) + (skill.conflicting ?? 0) : 'withheld'],
     ['Top gap', formatTrajectoryLearningGap(trajectoryLearning)],
   ];
 }

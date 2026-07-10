@@ -1405,3 +1405,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add typed builtin swarm production outcomes for proposal, empty, blocked, failed, and unknown terminal states.
 - [x] Prove serial, concurrent, workhorse, failure, and builtin parity without changing execution arguments or merge authority.
 - [x] Run repository gates, independent review, durable notes, commit, push, reload, and production smoke.
+
+## Current Overnight Cycle - Observe-Only Skill Selection
+- [x] Rehydrate the clean pushed lifecycle baseline, live telemetry, Entire state, and shadow rollout constraints.
+- [x] Deploy parallel final-route, trajectory-join, adversarial, and test-equivalence lanes.
+- [x] Read the signed card corpus once per live tick and select only attested verified-proposal revisions.
+- [x] Record metadata-only selections only after an executor demonstrably ran, using the final executable route.
+- [x] Use candidate-local identities/routes for Best-of-N and suppress outer, skipped, and missing-runner observations.
+- [x] Join skill-use rows into aggregate trajectory observation coverage without assigning causal outcomes.
+- [x] Prove zero changes to route, model, prompt, options, budget, retries, fanout, winner, proposal, and merge authority.
+- [x] Run focused/full gates and independent adversarial review.
+- [ ] Update notes, commit, push, reload, and production smoke.

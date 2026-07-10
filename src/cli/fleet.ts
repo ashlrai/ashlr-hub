@@ -476,6 +476,18 @@ export function formatFleetStatus(s: FleetStatus): string {
         `evidence ${formatCoverageMetric(trajectoryLearning.coverage.evidence)}, ` +
         `decision ${formatCoverageMetric(trajectoryLearning.coverage.decision)}`,
     );
+    const skillObservation = trajectoryLearning.skillObservation;
+    if (skillObservation) {
+      if (skillObservation.sampleState === 'observed') {
+        lines.push(
+          `  skill observations: ${formatCoverageMetric(skillObservation.observedTrajectoryCoverage ?? { count: 0, rate: 0 })} trajectories, ` +
+            `${skillObservation.joined ?? 0} event(s), ${skillObservation.unjoined ?? 0} unjoined, ` +
+            `${skillObservation.conflicting ?? 0} conflicting (observed)`,
+        );
+      } else {
+        lines.push('  skill observations: insufficient sample (<3 trajectories; exact counts withheld)');
+      }
+    }
     const gap = trajectoryLearning.gaps[0];
     if (gap) lines.push(`  top gap:      ${gap.kind} missing on ${gap.count} trajector${gap.count === 1 ? 'y' : 'ies'}`);
     const recent = trajectoryLearning.recent[0];

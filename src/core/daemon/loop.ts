@@ -52,6 +52,7 @@ import type {
   Proposal,
   RunEventSummary,
   RunProposalOutcome,
+  SkillCard,
   WorkItem,
 } from '../types.js';
 import { resolveAutonomyControlMode, type FleetStatus } from '../fleet/status.js';
@@ -82,6 +83,7 @@ import { scopeFromWorkItem } from '../run/delegation-scope.js';
 import { routeBackend } from '../fleet/router.js';
 import { withinLimit, recordUse } from '../fleet/quota.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
+import { resolveEngineSpec } from '../run/engine-registry.js';
 import { subscriptionAllows, isSubscriptionEngine } from '../fleet/subscription-usage.js'; // M80
 import { recommendRoute, recoverWithinBudget } from '../run/learned-router.js';
 import { decide as gatewayDecide } from '../fabric/gateway.js'; // M247: InferenceGateway
@@ -123,6 +125,8 @@ import {
   runEventSummary,
 } from '../learning/causal.js';
 import { productionAttemptLearningLabelFromSignals } from '../learning/attempt-shape.js';
+import { readSkillCards } from '../fleet/skill-records.js';
+import { observeShadowSkills } from '../fleet/skill-shadow-observer.js';
 // worked-ledger is used transitively via LocalWorkQueueCoordinator (selectWorkQueueCoordinator).
 import { selectWorkQueueCoordinator, type WorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
 // M220: verdict-feedback sweep — feed judge rejections back to the ledger so
@@ -2437,6 +2441,16 @@ export async function tick(
   };
   startLeaseRenewer();
 
+  const shadowSkillSelectedAt = new Date().toISOString();
+  let shadowSkillCards: readonly SkillCard[] = [];
+  if (routingCfg.foundry?.skillLibrary !== false) {
+    try {
+      shadowSkillCards = Object.freeze([...readSkillCards({ complete: true })]);
+    } catch {
+      shadowSkillCards = [];
+    }
+  }
+
   // -------------------------------------------------------------------------
   // 6b. Live mode: for each selected item (bounded concurrency), run a
   //     sandboxed swarm that records a PENDING inbox proposal.
@@ -3004,6 +3018,23 @@ export async function tick(
           sink,
         );
 
+        const swarmExecuted = swarmRun.status === 'done';
+        if (swarmExecuted && swarmRun.proposalOutcome?.kind !== 'kill-switch') {
+          observeShadowSkills({
+            cards: shadowSkillCards,
+            query: {
+              title: item.title,
+              detail: item.detail,
+              source: item.source,
+              tags: item.tags,
+              route: { backend, tier: backendTier, model: selectedModel, reason: assignmentReason },
+            },
+            identity: { trajectoryId: `run:${attemptId}`, runId: attemptId },
+            selectedAt: shadowSkillSelectedAt,
+            route: { backend, tier: backendTier, model: selectedModel },
+          });
+        }
+
         const swarmRunSummary = runEventSummary({
           runId: swarmRun.id,
           status: swarmRun.status,
@@ -3130,6 +3161,8 @@ export async function tick(
             workSource: item.source,
             delegationScope,
             attemptId,
+            shadowSkillCards,
+            shadowSkillSelectedAt,
           });
           bonBillable = bonResult.critique.billableCostUsd ?? 0;
           if (!bonResult.winner) {
@@ -3194,6 +3227,54 @@ export async function tick(
             workSource: item.source,
             delegationScope,
           });
+          const runActionCounts = runState.runEventSummary?.actionCounts;
+          const runExecuted = runState.status === 'done' || [
+            runActionCounts?.spawnAttempts,
+            runActionCounts?.modelSteps,
+            runActionCounts?.toolSteps,
+            runActionCounts?.totalSteps,
+          ].some((count) => typeof count === 'number' && count > 0);
+          if (runExecuted && runState.proposalOutcome?.kind !== 'kill-switch') {
+            const executedBackend = runState.engine || backend;
+            const engineModelPrefix = `${executedBackend}:`;
+            const reportedModel = runState.engineModel?.startsWith(engineModelPrefix)
+              ? runState.engineModel.slice(engineModelPrefix.length)
+              : executedBackend === backend ? selectedModel : null;
+            const executedSpec = resolveEngineSpec(executedBackend, routingCfg);
+            const allowedModels = new Set([
+              executedBackend === backend ? selectedModel : null,
+              routingCfg.foundry?.models?.[executedBackend as EngineId],
+              executedSpec?.defaultModel,
+              executedSpec?.api?.defaultModel,
+            ].filter((model): model is string => typeof model === 'string' && model.length > 0));
+            const executedModel = reportedModel && allowedModels.has(reportedModel)
+              ? reportedModel
+              : null;
+            const executedTier = runState.engineTier
+              ?? (executedBackend === backend ? backendTier : null);
+            observeShadowSkills({
+              cards: shadowSkillCards,
+              query: {
+                title: item.title,
+                detail: item.detail,
+                source: item.source,
+                tags: item.tags,
+                route: {
+                  backend: executedBackend,
+                  tier: executedTier,
+                  model: executedModel,
+                  reason: assignmentReason,
+                },
+              },
+              identity: { trajectoryId: `run:${attemptId}`, runId: runState.id },
+              selectedAt: shadowSkillSelectedAt,
+              route: {
+                backend: executedBackend,
+                tier: executedTier,
+                model: executedModel,
+              },
+            });
+          }
         }
         dispatchProduction = dispatchProductionFromProposalOutcome(runState.proposalOutcome, runState.id, runState.runEventSummary, {
           proposalRequired: true,

@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { buildShadowSkillUseEvent } from '../src/core/fleet/skill-use-identity.js';
+import { readSkillUseEvents, recordSkillUseEvent } from '../src/core/fleet/skill-records.js';
 
 const selectedAt = '2026-07-10T12:00:00.000Z';
 const base = {
@@ -15,12 +19,21 @@ const base = {
   route: { backend: 'codex', tier: 'frontier', model: 'gpt-5.5' },
 } as const;
 
+let previousAshlrHome: string | undefined;
+let home: string;
+
 beforeEach(() => {
+  previousAshlrHome = process.env.ASHLR_HOME;
+  home = mkdtempSync(join(tmpdir(), 'ashlr-m358-skill-use-identity-'));
+  process.env.ASHLR_HOME = home;
   vi.useFakeTimers();
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  if (previousAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = previousAshlrHome;
+  rmSync(home, { recursive: true, force: true });
 });
 
 describe('M358 strong skill-use identity', () => {
@@ -62,6 +75,44 @@ describe('M358 strong skill-use identity', () => {
     ];
     expect(variants.map((variant) => buildShadowSkillUseEvent(variant)?.eventId))
       .not.toContain(id);
+  });
+
+  it('keeps Best-of-N candidates distinct under one outer trajectory', () => {
+    vi.setSystemTime('2026-07-10T12:01:00.000Z');
+    const outerTrajectory = 'run:attempt-11111111-1111-4111-8111-111111111111';
+    const first = buildShadowSkillUseEvent({
+      ...base,
+      identity: { trajectoryId: outerTrajectory, runId: 'attempt-candidate-a' },
+    });
+    const second = buildShadowSkillUseEvent({
+      ...base,
+      identity: { trajectoryId: outerTrajectory, runId: 'attempt-candidate-b' },
+    });
+
+    expect(first?.eventId).not.toBe(second?.eventId);
+    expect(first).toMatchObject({ trajectoryId: outerTrajectory, runId: 'attempt-candidate-a' });
+    expect(second).toMatchObject({ trajectoryId: outerTrajectory, runId: 'attempt-candidate-b' });
+  });
+
+  it('keeps separate selected-at snapshots distinct and non-conflicting on readback', () => {
+    vi.setSystemTime('2026-07-10T12:02:00.000Z');
+    const first = buildShadowSkillUseEvent(base);
+    const second = buildShadowSkillUseEvent({
+      ...base,
+      selectedAt: '2026-07-10T12:01:00.000Z',
+    });
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(first?.eventId).not.toBe(second?.eventId);
+
+    recordSkillUseEvent([first!, second!]);
+    expect(readSkillUseEvents().map((event) => ({
+      eventId: event.eventId,
+      selectedAt: event.selectedAt,
+    }))).toEqual([
+      { eventId: second!.eventId, selectedAt: '2026-07-10T12:01:00.000Z' },
+      { eventId: first!.eventId, selectedAt },
+    ]);
   });
 
   it('rejects weak, path-like, malformed, future, and unsigned identities', () => {

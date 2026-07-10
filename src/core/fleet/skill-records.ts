@@ -16,6 +16,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readSync,
   readdirSync,
   writeSync,
@@ -37,7 +38,7 @@ import { scrubSecrets } from '../util/scrub.js';
 
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
 const DEFAULT_READ_LIMIT = 100;
-const MAX_READ_LIMIT = 1000;
+const MAX_READ_LIMIT = 10_000;
 const DEFAULT_MAX_FILES = 14;
 const MAX_READ_FILES = 31;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
@@ -78,6 +79,8 @@ export interface ReadSkillRecordsOptions {
   sinceMs?: number;
   limit?: number;
   maxFiles?: number;
+  /** Scan every private date partition so lifecycle rows cannot age out. */
+  complete?: boolean;
 }
 
 type SkillCausalInput = Pick<
@@ -516,6 +519,33 @@ function readFileTail(filePath: string): string | null {
   }
 }
 
+function readFileComplete(filePath: string): string | null {
+  let fd: number | undefined;
+  try {
+    const before = lstatSync(filePath);
+    if (
+      before.isSymbolicLink() ||
+      !before.isFile() ||
+      !ownedByCurrentUser(before.uid) ||
+      !permissionsArePrivate(before.mode)
+    ) return null;
+    fd = openSync(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || !ownedByCurrentUser(opened.uid) || !permissionsArePrivate(opened.mode)) return null;
+    return readFileSync(fd, 'utf8');
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Ignore close failures on best-effort reads.
+      }
+    }
+  }
+}
+
 function fileMayContainSince(file: string, sinceMs: number): boolean {
   const match = DATE_LEDGER_FILE_RE.exec(file);
   if (!match) return false;
@@ -536,8 +566,9 @@ function readRecords<T>(
   sanitize: (record: T) => T,
   opts: ReadSkillRecordsOptions,
 ): T[] {
-  const limit = boundedOption(opts.limit, DEFAULT_READ_LIMIT, MAX_READ_LIMIT);
-  const maxFiles = boundedOption(opts.maxFiles, DEFAULT_MAX_FILES, MAX_READ_FILES);
+  const complete = opts.complete === true;
+  const limit = complete ? Number.POSITIVE_INFINITY : boundedOption(opts.limit, DEFAULT_READ_LIMIT, MAX_READ_LIMIT);
+  const maxFiles = complete ? Number.POSITIVE_INFINITY : boundedOption(opts.maxFiles, DEFAULT_MAX_FILES, MAX_READ_FILES);
   const sinceMs = typeof opts.sinceMs === 'number' && Number.isFinite(opts.sinceMs)
     ? opts.sinceMs
     : undefined;
@@ -559,8 +590,13 @@ function readRecords<T>(
     for (const file of files) {
       if (out.length >= limit) break;
       if (sinceMs !== undefined && !fileMayContainSince(file, sinceMs)) continue;
-      const raw = readFileTail(join(dir, file));
-      if (raw === null) continue;
+      const raw = complete ? readFileComplete(join(dir, file)) : readFileTail(join(dir, file));
+      // A complete lifecycle read fails closed rather than selecting from a
+      // corpus that may have lost a revocation or deprecation row.
+      if (raw === null) {
+        if (complete) return [];
+        continue;
+      }
       for (const line of raw.split('\n').reverse()) {
         if (out.length >= limit) break;
         if (!line.trim()) continue;

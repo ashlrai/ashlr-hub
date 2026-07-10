@@ -19,6 +19,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 import type { AshlrConfig } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -213,6 +214,14 @@ function enrollRepo() {
 // ===========================================================================
 
 describe('M170 — best-of-N dispatch: bestOfN > 1 routes through runBestOfN', () => {
+  it('reads the signed skill corpus once per live tick before task construction', () => {
+    const source = readFileSync(new URL('../src/core/daemon/loop.ts', import.meta.url), 'utf8');
+    const reads = source.match(/readSkillCards\(/g) ?? [];
+
+    expect(reads).toHaveLength(1);
+    expect(source.indexOf('readSkillCards(')).toBeLessThan(source.indexOf('const tasks: Array<'));
+  });
+
   it('calls runBestOfN when cfg.foundry.bestOfN > 1', async () => {
     enrollRepo();
     const cfg = makeFrontierCfg({ bestOfN: 3 } as unknown as Partial<AshlrConfig['foundry']>);

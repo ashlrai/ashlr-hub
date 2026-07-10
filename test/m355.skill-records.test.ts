@@ -5,6 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   appendFileSync,
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -16,15 +17,18 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SkillCard, SkillUseEvent } from '../src/core/types.js';
+import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import {
   readSkillCards,
   readSkillUseEvents,
   recordSkillCard,
   recordSkillUseEvent,
+  sanitizeSkillCard,
   skillCardsDir,
   skillRecordsDir,
   skillUseEventsDir,
 } from '../src/core/fleet/skill-records.js';
+import { selectVerifiedSkills } from '../src/core/fleet/skill-retrieval.js';
 
 let previousAshlrHome: string | undefined;
 let home: string;
@@ -251,6 +255,140 @@ describe('M355 skill records', () => {
       .toEqual(['new-b', 'new-a']);
     expect(readSkillUseEvents({ limit: 2 })[1]).toMatchObject({ rank: 0, score: 1 });
     expect(readSkillUseEvents().map((entry) => entry.eventId)).not.toContain('future-poison');
+  });
+
+  it('complete card reads preserve long-lived skills and lifecycle suppression across date partitions', () => {
+    const daysAgo = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const signed = (overrides: Partial<SkillCard>): SkillCard => {
+      const result = attestSkillCard(sanitizeSkillCard(card({
+        ...overrides,
+        routeSnapshot: undefined,
+      })));
+      expect(result).not.toBeNull();
+      return result!;
+    };
+
+    recordSkillCard([
+      signed({
+        skillId: 'skill.long-lived',
+        ts: daysAgo(8),
+        tags: ['long-lived'],
+        taskKinds: ['long-lived-repair'],
+      }),
+      signed({
+        skillId: 'skill.eventually-revoked',
+        ts: daysAgo(8),
+        tags: ['long-lived'],
+        taskKinds: ['long-lived-repair'],
+      }),
+      ...Array.from({ length: 5 }, (_, index) => signed({
+        skillId: `skill.partition-filler-${index}`,
+        ts: daysAgo(7 - index),
+        tags: ['unrelated'],
+        taskKinds: ['unrelated-task'],
+      })),
+      signed({
+        skillId: 'skill.eventually-revoked',
+        revision: 2,
+        status: 'revoked',
+        ts: daysAgo(1),
+        tags: ['long-lived'],
+        taskKinds: ['long-lived-repair'],
+      }),
+    ]);
+
+    const complete = readSkillCards({ complete: true });
+    expect(new Set(complete.map((entry) => entry.ts.slice(0, 10))).size).toBeGreaterThan(3);
+    expect(complete).toEqual(expect.arrayContaining([
+      expect.objectContaining({ skillId: 'skill.long-lived', revision: 1, status: 'verified' }),
+      expect.objectContaining({ skillId: 'skill.eventually-revoked', revision: 1, status: 'verified' }),
+      expect.objectContaining({ skillId: 'skill.eventually-revoked', revision: 2, status: 'revoked' }),
+    ]));
+
+    const selection = selectVerifiedSkills(complete, {
+      title: 'Repair a long-lived workflow',
+      tags: ['long-lived'],
+    });
+    expect(selection.selectedSkillIds).toContain('skill.long-lived');
+    expect(selection.selectedSkillIds).not.toContain('skill.eventually-revoked');
+  });
+
+  it('complete card reads preserve lifecycle rows beyond a 4 MiB daily partition tail', () => {
+    const signed = (overrides: Partial<SkillCard>): SkillCard => {
+      const result = attestSkillCard(sanitizeSkillCard(card({
+        ...overrides,
+        routeSnapshot: undefined,
+      })));
+      expect(result).not.toBeNull();
+      return result!;
+    };
+    const revoked = signed({
+      skillId: 'skill.large-partition-lifecycle',
+      revision: 2,
+      status: 'revoked',
+      ts: '2026-07-10T00:00:00.000Z',
+      tags: ['large-partition'],
+      taskKinds: ['large-partition-repair'],
+    });
+    const filler = signed({
+      skillId: 'skill.large-partition-filler',
+      ts: '2026-07-10T06:00:00.000Z',
+      summary: 'x'.repeat(2_000),
+      tags: ['unrelated'],
+      taskKinds: ['unrelated-task'],
+    });
+    const oldVerified = signed({
+      skillId: 'skill.large-partition-lifecycle',
+      revision: 1,
+      status: 'verified',
+      ts: '2026-07-10T12:00:00.000Z',
+      tags: ['large-partition'],
+      taskKinds: ['large-partition-repair'],
+    });
+    const revokedLine = `${JSON.stringify(revoked)}\n`;
+    const fillerLine = `${JSON.stringify(filler)}\n`;
+    const oldVerifiedLine = `${JSON.stringify(oldVerified)}\n`;
+    const fillerCount = Math.ceil((4 * 1024 * 1024 + revokedLine.length) / fillerLine.length) + 2;
+
+    mkdirSync(skillCardsDir(), { recursive: true, mode: 0o700 });
+    const partition = join(skillCardsDir(), '2026-07-10.jsonl');
+    writeFileSync(
+      partition,
+      revokedLine + fillerLine.repeat(fillerCount) + oldVerifiedLine,
+      { encoding: 'utf8', mode: 0o600 },
+    );
+    expect(statSync(partition).size).toBeGreaterThan(4 * 1024 * 1024);
+
+    const complete = readSkillCards({ complete: true });
+    expect(complete).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        skillId: 'skill.large-partition-lifecycle',
+        revision: 2,
+        status: 'revoked',
+      }),
+      expect.objectContaining({
+        skillId: 'skill.large-partition-lifecycle',
+        revision: 1,
+        status: 'verified',
+      }),
+    ]));
+    expect(selectVerifiedSkills(complete, {
+      title: 'Repair a large partition workflow',
+      tags: ['large-partition'],
+    }).selectedSkillIds).not.toContain('skill.large-partition-lifecycle');
+  });
+
+  it('fails closed when any complete lifecycle partition is unreadable', () => {
+    recordSkillCard(card({ skillId: 'skill.partial-history', ts: '2026-07-09T12:00:00.000Z' }));
+    mkdirSync(skillCardsDir(), { recursive: true, mode: 0o700 });
+    const unreadable = join(skillCardsDir(), '2026-07-10.jsonl');
+    writeFileSync(unreadable, `${JSON.stringify(card({ skillId: 'skill.hidden-lifecycle' }))}\n`, {
+      encoding: 'utf8',
+      mode: 0o200,
+    });
+    chmodSync(unreadable, 0o200);
+
+    expect(readSkillCards({ complete: true })).toEqual([]);
   });
 
   it('deduplicates exact replays and quarantines conflicting event ids', () => {

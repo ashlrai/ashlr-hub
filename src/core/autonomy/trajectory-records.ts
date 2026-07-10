@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { readAgentActions } from '../fleet/agent-action-ledger.js';
 import type { DispatchProductionEvent } from '../fleet/dispatch-production-ledger.js';
 import { readDispatchProductionEvents } from '../fleet/dispatch-production-ledger.js';
+import { readSkillUseEvents } from '../fleet/skill-records.js';
 import type { OutcomeRecord, OutcomeRecordDecision, OutcomeRecordEvidence } from './outcome-records.js';
 import { listOutcomeRecords } from './outcome-records.js';
 import type {
@@ -21,6 +22,9 @@ import type {
   LearningSource,
   RouteSnapshot,
   RunEventSummary,
+  SkillUseEvent,
+  SkillUseMode,
+  SkillUseStage,
   WorkSource,
 } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
@@ -44,6 +48,7 @@ export interface TrajectoryRecordCoverage {
   evidence: boolean;
   decision: boolean;
   agentAction: boolean;
+  skillUse: boolean;
 }
 
 export interface TrajectoryTimelineEvent {
@@ -124,17 +129,34 @@ export interface TrajectoryCoverageMetric {
   rate: number;
 }
 
+export interface TrajectorySkillObservationSummary {
+  sampleState: 'insufficient-sample' | 'observed';
+  joined?: number;
+  unjoined?: number;
+  conflicting?: number;
+  observedTrajectoryCoverage?: TrajectoryCoverageMetric;
+  modeCounts?: Record<SkillUseMode, number>;
+  stageCounts?: Record<SkillUseStage, number>;
+}
+
+type PublishedTrajectoryCoverage = Omit<TrajectoryRecordCoverage, 'skillUse'> & { skillUse?: boolean };
+type PublishedCoverageMetrics = Omit<
+  Record<keyof TrajectoryRecordCoverage, TrajectoryCoverageMetric>,
+  'skillUse'
+> & { skillUse?: TrajectoryCoverageMetric };
+
 export interface TrajectoryLearningStatus {
   version: 1;
   windowHours: number;
   trajectories: number;
   terminalOutcomes: Record<TrajectoryTerminalOutcome, number>;
-  coverage: Record<keyof TrajectoryRecordCoverage, TrajectoryCoverageMetric>;
+  coverage: PublishedCoverageMetrics;
   routeSpine: {
     dispatchToDecision: TrajectoryCoverageMetric;
     dispatchToEvidence: TrajectoryCoverageMetric;
     dispatchToMerge: TrajectoryCoverageMetric;
   };
+  skillObservation: TrajectorySkillObservationSummary;
   gaps: Array<{ kind: keyof TrajectoryRecordCoverage; count: number; sampleRefs: string[] }>;
   recent: Array<{
     ref: string;
@@ -142,13 +164,14 @@ export interface TrajectoryLearningStatus {
     terminalOutcome: TrajectoryTerminalOutcome;
     backend?: EngineId | string | null;
     source?: WorkSource;
-    coverage: TrajectoryRecordCoverage;
+    coverage: PublishedTrajectoryCoverage;
   }>;
 }
 
 export interface TrajectoryRecordReadDeps {
   readDispatchProductionEvents?: typeof readDispatchProductionEvents;
   readAgentActions?: typeof readAgentActions;
+  readSkillUseEvents?: typeof readSkillUseEvents;
   listOutcomeRecords?: (opts?: { limit?: number }) => OutcomeRecord[];
 }
 
@@ -162,6 +185,21 @@ interface MutableTrajectoryRecord extends Omit<TrajectoryRecord, 'timeline'> {
   aliases: Set<string>;
   timeline: TrajectoryTimelineEvent[];
 }
+
+interface SkillObservationCounts {
+  joined: number;
+  unjoined: number;
+  conflicting: number;
+  modeCounts: Record<SkillUseMode, number>;
+  stageCounts: Record<SkillUseStage, number>;
+}
+
+const skillObservationByRecords = new WeakMap<TrajectoryRecord[], SkillObservationCounts>();
+const skillObservationByRecord = new WeakMap<TrajectoryRecord, SkillObservationCounts>();
+const skillObservationDiagnosticsByRecord = new WeakMap<
+  TrajectoryRecord,
+  Pick<SkillObservationCounts, 'unjoined' | 'conflicting'>
+>();
 
 function scrubLearningText(value: string): string {
   return scrubSecrets(value)
@@ -252,6 +290,27 @@ function aliasesFromIds(input: {
     alias('run', input.runId),
     alias('proposal', input.proposalId),
   ].filter((value): value is string => Boolean(value));
+}
+
+function emptySkillObservationCounts(): SkillObservationCounts {
+  return {
+    joined: 0,
+    unjoined: 0,
+    conflicting: 0,
+    modeCounts: { shadow: 0, active: 0, disabled: 0 },
+    stageCounts: { selected: 0, injected: 0, applied: 0, outcome: 0 },
+  };
+}
+
+function skillSelectionIdentity(event: SkillUseEvent): string {
+  return JSON.stringify([
+    event.runId ?? '',
+    event.stage,
+    event.skillId,
+    event.skillRevision,
+    event.contentHash ?? '',
+    event.skillPolicyVersion ?? '',
+  ]);
 }
 
 function fallbackTrajectoryKey(input: {
@@ -356,6 +415,7 @@ function makeRecord(id: string, key: string, ts: string): MutableTrajectoryRecor
       evidence: false,
       decision: false,
       agentAction: false,
+      skillUse: false,
     },
     aliases: new Set([key]),
     timeline: [],
@@ -368,15 +428,24 @@ function findOrCreateRecord(
   aliases: string[],
   fallbackKey: string,
   ts: string,
-): MutableTrajectoryRecord {
-  const existingId = aliases.map((candidate) => aliasToRecord.get(candidate)).find(Boolean);
+): MutableTrajectoryRecord | undefined {
+  const existingIds = new Set(
+    aliases
+      .map((candidate) => aliasToRecord.get(candidate))
+      .filter((recordId): recordId is string => Boolean(recordId)),
+  );
+  // A bridge across established trajectories is contradictory evidence. Keep
+  // both mappings intact so later joins can detect and quarantine the conflict.
+  if (existingIds.size > 1) return undefined;
+  const [existingId] = existingIds;
   const id = existingId ?? (aliases[0] ?? fallbackKey);
   let record = records.get(id);
   if (!record) {
     record = makeRecord(id, aliases[0] ?? fallbackKey, ts);
     records.set(id, record);
   }
-  for (const candidate of [fallbackKey, ...aliases]) {
+  const candidates = aliases.length > 0 ? aliases : [fallbackKey];
+  for (const candidate of candidates) {
     record.aliases.add(candidate);
     aliasToRecord.set(candidate, record.id);
   }
@@ -412,14 +481,6 @@ function fillRecordMetadata(
   if (!record.labelBasis && meta.labelBasis) record.labelBasis = meta.labelBasis;
   if (!record.routerPolicyVersion && meta.routerPolicyVersion) record.routerPolicyVersion = bounded(meta.routerPolicyVersion, 120);
   if (!record.learningEpoch && meta.learningEpoch) record.learningEpoch = bounded(meta.learningEpoch, 120);
-}
-
-function proposalAliases(record: OutcomeRecord): string[] {
-  return aliasesFromIds({
-    trajectoryId: record.proposal.trajectoryId,
-    runId: record.proposal.runId,
-    proposalId: record.proposal.id,
-  });
 }
 
 function evidenceEvent(evidence: OutcomeRecordEvidence, proposalId: string, tsFallback: string): TrajectoryTimelineEvent {
@@ -476,11 +537,18 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       maxFiles: 3,
     }),
   );
+  const skillUses = safeArray(() =>
+    (deps.readSkillUseEvents ?? readSkillUseEvents)({
+      sinceMs,
+      limit: Math.max(limit * 8, 400),
+      maxFiles: 3,
+    }),
+  );
 
   const records = new Map<string, MutableTrajectoryRecord>();
   const aliasToRecord = new Map<string, string>();
 
-  for (const event of dispatches) {
+  const processDispatch = (event: DispatchProductionEvent): void => {
     const proposalId = cleanId(event.proposalId, 160);
     const runId = cleanId(event.runId, 160);
     const trajectoryId = cleanId(event.trajectoryId, 240);
@@ -502,6 +570,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       fallbackKey,
       event.ts,
     );
+    if (!record) return;
     fillRecordMetadata(record, {
       repo,
       itemId,
@@ -544,13 +613,18 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       ...(event.routerPolicyVersion ? { routerPolicyVersion: event.routerPolicyVersion } : {}),
       ...(event.learningEpoch ? { learningEpoch: event.learningEpoch } : {}),
     });
-  }
+  };
 
-  for (const outcome of outcomes) {
+  const processOutcome = (outcome: OutcomeRecord): void => {
     const proposal = outcome.proposal;
-    const aliases = proposalAliases(outcome);
+    const aliases = aliasesFromIds({
+      trajectoryId: proposal.trajectoryId,
+      runId: proposal.runId,
+      proposalId: proposal.id,
+    });
     const fallbackKey = alias('proposal', proposal.id) ?? `proposal:${proposal.id}`;
     const record = findOrCreateRecord(records, aliasToRecord, aliases, fallbackKey, proposal.createdAt);
+    if (!record) return;
     fillRecordMetadata(record, {
       repo: proposal.repo ?? undefined,
       itemId: proposal.workItemId,
@@ -653,14 +727,14 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
         ...(decision.learningEpoch ? { learningEpoch: decision.learningEpoch } : {}),
       });
     }
-  }
+  };
 
-  for (const action of actions) {
+  const processAction = (action: ReturnType<typeof readAgentActions>[number]): void => {
     const proposalId = cleanId(action.proposalId, 160);
     const runId = cleanId(action.runId, 160);
     const trajectoryId = cleanId(action.trajectoryId, 240);
     const aliases = aliasesFromIds({ trajectoryId, runId, proposalId });
-    if (aliases.length === 0) continue;
+    if (aliases.length === 0) return;
     const fallbackKey = fallbackTrajectoryKey({
       ts: action.ts,
       repo: action.repo,
@@ -671,6 +745,7 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       backend: action.backend,
     });
     const record = findOrCreateRecord(records, aliasToRecord, aliases, fallbackKey, action.ts);
+    if (!record) return;
     fillRecordMetadata(record, {
       repo: action.repo,
       itemId: action.itemId,
@@ -713,9 +788,71 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
       routerPolicyVersion: action.routerPolicyVersion,
       learningEpoch: action.learningEpoch,
     });
+  };
+
+  // The ledgers are independently newest-first. Replay one global causal
+  // stream so cross-ledger bridges cannot change meaning with read order.
+  const causalEvents = [
+    ...dispatches.map((event) => ({ ts: event.ts, rank: 0, apply: () => processDispatch(event) })),
+    ...outcomes.map((outcome) => ({
+      ts: outcome.proposal.createdAt,
+      rank: 1,
+      apply: () => processOutcome(outcome),
+    })),
+    ...actions.map((action) => ({ ts: action.ts, rank: 2, apply: () => processAction(action) })),
+  ].sort((a, b) => eventMs(a.ts) - eventMs(b.ts) || a.rank - b.rank);
+  for (const event of causalEvents) event.apply();
+
+  const includedRecords = [...records.values()]
+    .filter((record) => eventMs(record.latestAt) >= sinceMs)
+    .sort((a, b) => eventMs(b.latestAt) - eventMs(a.latestAt) || a.id.localeCompare(b.id))
+    .slice(0, limit);
+  const includedRecordIds = new Set(includedRecords.map((record) => record.id));
+  const skillObservation = emptySkillObservationCounts();
+  const selectionKeysByRecord = new Map<string, Set<string>>();
+  const skillObservationByRecordId = new Map<string, SkillObservationCounts>();
+  for (const event of skillUses) {
+    const aliases = aliasesFromIds({
+      trajectoryId: cleanId(event.trajectoryId, 240),
+      runId: cleanId(event.runId, 160),
+      proposalId: cleanId(event.proposalId, 160),
+    });
+    const resolvedRecordIds = new Set(
+      aliases
+        .map((candidate) => aliasToRecord.get(candidate))
+        .filter((recordId): recordId is string => Boolean(recordId)),
+    );
+    if (resolvedRecordIds.size === 0) {
+      skillObservation.unjoined++;
+      continue;
+    }
+    if (resolvedRecordIds.size !== 1) {
+      skillObservation.conflicting++;
+      continue;
+    }
+    const [recordId] = resolvedRecordIds;
+    const record = recordId && includedRecordIds.has(recordId) ? records.get(recordId) : undefined;
+    if (!record) {
+      skillObservation.unjoined++;
+      continue;
+    }
+    const selectionIdentity = skillSelectionIdentity(event);
+    const selectionKeys = selectionKeysByRecord.get(record.id) ?? new Set<string>();
+    if (selectionKeys.has(selectionIdentity)) continue;
+    selectionKeys.add(selectionIdentity);
+    selectionKeysByRecord.set(record.id, selectionKeys);
+    record.coverage.skillUse = true;
+    skillObservation.joined++;
+    skillObservation.modeCounts[event.mode]++;
+    skillObservation.stageCounts[event.stage]++;
+    const recordObservation = skillObservationByRecordId.get(record.id) ?? emptySkillObservationCounts();
+    recordObservation.joined++;
+    recordObservation.modeCounts[event.mode]++;
+    recordObservation.stageCounts[event.stage]++;
+    skillObservationByRecordId.set(record.id, recordObservation);
   }
 
-  return [...records.values()]
+  const result = includedRecords
     .map((record): TrajectoryRecord => {
       const timeline = record.timeline
         .sort((a, b) => {
@@ -725,17 +862,25 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
         })
         .slice(0, 40);
       const { aliases: _aliases, ...publicRecord } = record;
-      return {
+      const resultRecord: TrajectoryRecord = {
         ...publicRecord,
         timeline,
         terminalOutcome: record.terminalOutcome === 'unknown' && record.coverage.proposal
           ? 'pending'
           : record.terminalOutcome,
       };
-    })
-    .filter((record) => eventMs(record.latestAt) >= sinceMs)
-    .sort((a, b) => eventMs(b.latestAt) - eventMs(a.latestAt) || a.id.localeCompare(b.id))
-    .slice(0, limit);
+      skillObservationByRecord.set(
+        resultRecord,
+        skillObservationByRecordId.get(record.id) ?? emptySkillObservationCounts(),
+      );
+      skillObservationDiagnosticsByRecord.set(resultRecord, {
+        unjoined: skillObservation.unjoined,
+        conflicting: skillObservation.conflicting,
+      });
+      return resultRecord;
+    });
+  skillObservationByRecords.set(result, skillObservation);
+  return result;
 }
 
 export function summarizeTrajectoryLearning(
@@ -758,6 +903,7 @@ export function summarizeTrajectoryLearning(
     evidence: 0,
     decision: 0,
     agentAction: 0,
+    skillUse: 0,
   };
   const gapSamples: Record<keyof TrajectoryRecordCoverage, string[]> = {
     dispatch: [],
@@ -765,6 +911,7 @@ export function summarizeTrajectoryLearning(
     evidence: [],
     decision: [],
     agentAction: [],
+    skillUse: [],
   };
   let dispatchToDecision = 0;
   let dispatchToEvidence = 0;
@@ -790,8 +937,10 @@ export function summarizeTrajectoryLearning(
     evidence: metric(coverageCounts.evidence, denominator),
     decision: metric(coverageCounts.decision, denominator),
     agentAction: metric(coverageCounts.agentAction, denominator),
+    skillUse: metric(coverageCounts.skillUse, denominator),
   };
   const gaps = (Object.keys(coverageCounts) as Array<keyof TrajectoryRecordCoverage>)
+    .filter((kind) => kind !== 'skillUse')
     .map((kind) => ({
       kind,
       count: denominator - coverageCounts[kind],
@@ -799,18 +948,61 @@ export function summarizeTrajectoryLearning(
     }))
     .filter((gap) => gap.count > 0)
     .sort((a, b) => b.count - a.count || a.kind.localeCompare(b.kind));
+  const batchObservation = skillObservationByRecords.get(records);
+  const recordDiagnostics = records
+    .map((record) => skillObservationDiagnosticsByRecord.get(record))
+    .find((diagnostics) => diagnostics !== undefined);
+  const recordObservations = records
+    .map((record) => skillObservationByRecord.get(record))
+    .filter((observation): observation is SkillObservationCounts => Boolean(observation));
+  const skillObservation = recordObservations.length > 0
+    ? recordObservations.reduce((total, observation) => {
+        total.joined += observation.joined;
+        for (const mode of Object.keys(total.modeCounts) as SkillUseMode[]) {
+          total.modeCounts[mode] += observation.modeCounts[mode];
+        }
+        for (const stage of Object.keys(total.stageCounts) as SkillUseStage[]) {
+          total.stageCounts[stage] += observation.stageCounts[stage];
+        }
+        return total;
+      }, {
+        ...emptySkillObservationCounts(),
+        unjoined: batchObservation?.unjoined ?? recordDiagnostics?.unjoined ?? 0,
+        conflicting: batchObservation?.conflicting ?? recordDiagnostics?.conflicting ?? 0,
+      })
+    : (batchObservation ?? emptySkillObservationCounts());
+  const rawObservedTrajectoryCoverage = metric(coverageCounts.skillUse, denominator);
+  const sampleState = rawObservedTrajectoryCoverage.count < 3 ? 'insufficient-sample' : 'observed';
+  const publishSkillMetrics = sampleState === 'observed';
+  const observedTrajectoryCoverage = publishSkillMetrics
+    ? rawObservedTrajectoryCoverage
+    : metric(0, denominator);
+  const { skillUse: _privateSkillCoverage, ...publishedCoverage } = coverage;
 
   return {
     version: 1,
     windowHours,
     trajectories: denominator,
     terminalOutcomes,
-    coverage,
+    coverage: publishSkillMetrics
+      ? coverage
+      : publishedCoverage,
     routeSpine: {
       dispatchToDecision: metric(dispatchToDecision, denominator),
       dispatchToEvidence: metric(dispatchToEvidence, denominator),
       dispatchToMerge: metric(dispatchToMerge, denominator),
     },
+    skillObservation: publishSkillMetrics
+      ? {
+          joined: skillObservation.joined,
+          unjoined: skillObservation.unjoined,
+          conflicting: skillObservation.conflicting,
+          observedTrajectoryCoverage,
+          modeCounts: { ...skillObservation.modeCounts },
+          stageCounts: { ...skillObservation.stageCounts },
+          sampleState,
+        }
+      : { sampleState },
     gaps,
     recent: records.slice(0, 8).map((record) => ({
       ref: trajectoryRef(record),
@@ -818,7 +1010,9 @@ export function summarizeTrajectoryLearning(
       terminalOutcome: record.terminalOutcome,
       ...(record.backend !== undefined ? { backend: record.backend } : {}),
       ...(record.source ? { source: record.source } : {}),
-      coverage: record.coverage,
+      coverage: publishSkillMetrics
+        ? record.coverage
+        : (({ skillUse: _skillUse, ...publicCoverage }) => publicCoverage)(record.coverage),
     })),
   };
 }
