@@ -1230,5 +1230,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 ## Current Continuation - 10:4 Explicit Verification Contract
 - [x] Deploy read-only verifier scout to reconcile nested `relay` detection and failing npm commands.
 - [x] Identify colon-in-path PATH splitting as the cause of failed `npm run` verifier commands.
-- [ ] Add root `ashlr.verify.json` in `/Users/masonwyatt/Desktop/10:4` using `replace-detected` plus direct node TypeScript/Vitest entrypoints.
-- [ ] Validate Hub profile detection and commit locally; push remains blocked because the repo has no configured remote.
+- [x] Add root `ashlr.verify.json` in `/Users/masonwyatt/Desktop/10:4` using `replace-detected` plus direct node TypeScript/Vitest entrypoints.
+- [x] Validate Hub profile detection and commit locally; push remains blocked because the repo has no configured remote.
