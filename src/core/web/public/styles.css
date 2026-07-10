@@ -3181,13 +3181,55 @@ a:hover {
   font-size: 11px;
   color: var(--text-muted);
 }
+.fd-lease-samples {
+  display: grid;
+  gap: 5px;
+  margin-top: 10px;
+}
+.fd-lease-sample {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  padding: 3px 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 64%, transparent);
+}
+.fd-lease-sample__id {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.fd-lease-sample__meta,
+.fd-lease-active-ids {
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.fd-lease-active-ids {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fd-lease-sample--reclaimable .fd-lease-sample__meta {
+  color: var(--status-warn, #f5a623);
+}
 @media (max-width: 720px) {
   .fd-lease-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .fd-lease-machine {
+  .fd-lease-machine,
+  .fd-lease-sample {
     grid-template-columns: 1fr;
     gap: 2px;
+  }
+  .fd-lease-sample__meta,
+  .fd-lease-active-ids {
+    white-space: normal;
   }
 }
 

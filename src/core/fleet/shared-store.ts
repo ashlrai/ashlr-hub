@@ -76,6 +76,15 @@ export interface SharedQueueMachineHealth {
   expired: number;
 }
 
+/** Bounded item-level lease sample for read-only operator/debug surfaces. */
+export interface SharedQueueClaimSample {
+  itemId: string;
+  machineId: string;
+  leaseUntil: string | null;
+  state: 'active' | 'reclaimable';
+  owned: boolean;
+}
+
 /** Read-only health summary of the shared filesystem queue. */
 export interface SharedQueueHealth {
   /** Shared directory path backing the queue. */
@@ -94,6 +103,8 @@ export interface SharedQueueHealth {
   reclaimableClaims: number;
   /** Claim counts grouped by machine id. */
   claimsByMachine: SharedQueueMachineHealth[];
+  /** Bounded item-level lease samples; metadata only, never item prompts/details. */
+  claimSamples: SharedQueueClaimSample[];
   /** ISO timestamp of the soonest active lease expiry, or null when none. */
   nextLeaseExpiryAt: string | null;
   /** Age in ms of the oldest expired claim, or null when none. */
@@ -119,6 +130,7 @@ export interface SharedQueueHealth {
 const QUEUE_FILENAME = 'ashlr-fleet-queue.json';
 const LOCK_FILENAME  = 'ashlr-fleet-queue.json.lock';
 const MAX_WORKED     = 2000;
+const MAX_CLAIM_SAMPLES = 12;
 /** How long (ms) a lock file may be held before it is considered stale. */
 const STALE_LOCK_MULTIPLIER = 2;
 const DEFAULT_LEASE_MS = 5 * 60 * 1000; // 5 min
@@ -179,6 +191,10 @@ function safeIso(ms: number | null): string | null {
   } catch {
     return null;
   }
+}
+
+function compactMetadata(value: string, max = 160): string {
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
 }
 
 // ---------------------------------------------------------------------------
@@ -522,13 +538,16 @@ export class SharedStore {
       let nextLeaseMs: number | null = null;
       let oldestExpiredMs: number | null = null;
       const byMachine = new Map<string, { active: number; expired: number }>();
+      const claimSamples: SharedQueueClaimSample[] = [];
 
-      for (const claim of Object.values(queue.claims)) {
+      for (const [itemId, claim] of Object.entries(queue.claims)) {
         const entry = byMachine.get(claim.machineId) ?? { active: 0, expired: 0 };
-        if (claim.leaseUntil > now) {
+        const active = claim.leaseUntil > now;
+        const owned = owner ? claim.machineId === owner : false;
+        if (active) {
           activeClaims++;
           entry.active++;
-          if (owner && claim.machineId === owner) ownedClaims++;
+          if (owned) ownedClaims++;
           if (nextLeaseMs === null || claim.leaseUntil < nextLeaseMs) {
             nextLeaseMs = claim.leaseUntil;
           }
@@ -541,6 +560,13 @@ export class SharedStore {
           }
         }
         byMachine.set(claim.machineId, entry);
+        claimSamples.push({
+          itemId: compactMetadata(itemId),
+          machineId: compactMetadata(claim.machineId, 120),
+          leaseUntil: safeIso(claim.leaseUntil),
+          state: active ? 'active' : 'reclaimable',
+          owned,
+        });
       }
 
       const cooldownItemIds = new Set<string>();
@@ -585,6 +611,15 @@ export class SharedStore {
         claimsByMachine: Array.from(byMachine.entries())
           .map(([machineId, counts]) => ({ machineId, ...counts }))
           .sort((a, b) => a.machineId.localeCompare(b.machineId)),
+        claimSamples: claimSamples
+          .sort((a, b) => {
+            const stateOrder = (a.state === 'active' ? 0 : 1) - (b.state === 'active' ? 0 : 1);
+            if (stateOrder !== 0) return stateOrder;
+            const ownerOrder = (a.owned === b.owned) ? 0 : a.owned ? -1 : 1;
+            if (ownerOrder !== 0) return ownerOrder;
+            return a.machineId.localeCompare(b.machineId) || a.itemId.localeCompare(b.itemId);
+          })
+          .slice(0, MAX_CLAIM_SAMPLES),
         nextLeaseExpiryAt: safeIso(nextLeaseMs),
         oldestExpiredMs,
         workedEvents: queue.worked.length,
@@ -602,6 +637,7 @@ export class SharedStore {
         expiredClaims: 0,
         reclaimableClaims: 0,
         claimsByMachine: [],
+        claimSamples: [],
         nextLeaseExpiryAt: null,
         oldestExpiredMs: null,
         workedEvents: 0,

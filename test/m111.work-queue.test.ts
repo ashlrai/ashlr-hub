@@ -269,6 +269,7 @@ describe('M111 SharedStore health snapshot', () => {
     expect(health.ownedClaims).toBe(0);
     expect(health.reclaimableClaims).toBe(0);
     expect(health.claimsByMachine).toEqual([]);
+    expect(health.claimSamples).toEqual([]);
     expect(health.lock.present).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, 'ashlr-fleet-queue.json'))).toBe(false);
   });
@@ -312,6 +313,29 @@ describe('M111 SharedStore health snapshot', () => {
       { machineId: 'machine-A', active: 1, expired: 1 },
       { machineId: 'machine-B', active: 1, expired: 0 },
     ]);
+    expect(health.claimSamples).toEqual([
+      {
+        itemId: 'owned-1',
+        machineId: 'machine-A',
+        leaseUntil: new Date(now + 1_000).toISOString(),
+        state: 'active',
+        owned: true,
+      },
+      {
+        itemId: 'other-1',
+        machineId: 'machine-B',
+        leaseUntil: new Date(now + 5_000).toISOString(),
+        state: 'active',
+        owned: false,
+      },
+      {
+        itemId: 'owned-2',
+        machineId: 'machine-A',
+        leaseUntil: new Date(now - 2_000).toISOString(),
+        state: 'reclaimable',
+        owned: true,
+      },
+    ]);
     expect(health.lock).toEqual({ present: true, ageMs: 30_000, stale: true });
   });
 
@@ -321,6 +345,7 @@ describe('M111 SharedStore health snapshot', () => {
     expect(health.readable).toBe(false);
     expect(health.activeClaims).toBe(0);
     expect(health.claimsByMachine).toEqual([]);
+    expect(health.claimSamples).toEqual([]);
   });
 });
 

@@ -3143,6 +3143,7 @@ function renderFleet() {
   // Daemon + queue + merges summary card
   const summary = el('div', { cls: 'fleet-card card' });
   const sharedQueue = f.queue?.shared;
+  const activeWork = f.queue?.activeWork;
   const summaryRows = [
     ['Daemon', f.daemon.running ? 'running' : 'stopped'],
     ['Last tick', f.daemon.lastTickAt ? fmtRelative(f.daemon.lastTickAt) : '—'],
@@ -3159,6 +3160,9 @@ function renderFleet() {
     summaryRows.push(['Shared queue', sharedQueueMetric(sharedQueue)]);
     summaryRows.push(['Owned leases', sharedQueue.ownedClaims ?? 0]);
     summaryRows.push(['Cooldown items', sharedQueue.cooldownItems ?? 0]);
+  }
+  if (activeWork) {
+    summaryRows.push(['Active work', fdActiveWorkValue(activeWork)]);
   }
   if (f.autonomousShipReadiness) {
     summaryRows.push(['Ship readiness', formatShipReadinessVerdict(f.autonomousShipReadiness.verdict)]);
@@ -3569,6 +3573,10 @@ function renderControl() {
   if (sharedQueue) {
     heroMetrics.appendChild(controlMetric('Shared leases', sharedQueue.activeClaims ?? '—', '#38bdf8'));
     heroMetrics.appendChild(controlMetric('Reclaimable', sharedQueue.reclaimableClaims ?? '—', sharedQueue.reclaimableClaims > 0 ? '#f97316' : '#4ade80'));
+  }
+  const activeWork = d.fleet?.queue?.activeWork ?? fleet.queue?.activeWork ?? null;
+  if (activeWork) {
+    heroMetrics.appendChild(controlMetric('Active work', activeWork.itemCount ?? '—', activeWork.malformed ? '#f97316' : '#38bdf8'));
   }
   heroMetrics.appendChild(controlMetric('Proposals', props.pending ?? 0, '#a78bfa'));
   heroMetrics.appendChild(controlMetric('Merges (24h)', merges.recent ?? '—', '#4ade80'));
@@ -4536,27 +4544,52 @@ function fdRenderLeaseMetric(label, value, tone, title) {
   );
 }
 
-function fdRenderLeaseBoard(sharedQueue) {
-  if (!sharedQueue) return null;
-  const claimsByMachine = Array.isArray(sharedQueue.claimsByMachine) ? sharedQueue.claimsByMachine : [];
+function fdActiveWorkTitle(activeWork) {
+  if (!activeWork) return 'No active daemon spend guard';
+  const owner = [activeWork.hostname, activeWork.pid != null ? `pid ${activeWork.pid}` : null]
+    .filter(Boolean)
+    .join(' ');
+  const age = fdFormatDurationMs(activeWork.ageMs);
+  const armed = activeWork.armedAt ? fmtDate(activeWork.armedAt) : 'unknown';
+  return `${activeWork.malformed ? 'Malformed' : 'Armed'} · ${activeWork.itemCount ?? 0} item(s) · age ${age} · ${owner || 'unknown owner'} · armed ${armed}`;
+}
+
+function fdActiveWorkValue(activeWork) {
+  if (!activeWork) return '—';
+  const state = activeWork.malformed ? 'malformed' : 'armed';
+  return `${activeWork.itemCount ?? 0} ${state}`;
+}
+
+function fdRenderLeaseBoard(sharedQueue, activeWork) {
+  if (!sharedQueue && !activeWork) return null;
+  const claimsByMachine = Array.isArray(sharedQueue?.claimsByMachine) ? sharedQueue.claimsByMachine : [];
+  const claimSamples = Array.isArray(sharedQueue?.claimSamples) ? sharedQueue.claimSamples : [];
+  const activeItemIds = Array.isArray(activeWork?.itemIds) ? activeWork.itemIds : [];
   const visibleClaims = claimsByMachine.slice(0, 6);
-  const unreadable = sharedQueue.readable === false;
-  const staleLock = sharedQueue.lock?.stale === true;
-  const reclaimable = sharedQueue.reclaimableClaims ?? 0;
-  const active = sharedQueue.activeClaims ?? 0;
-  const owned = sharedQueue.ownedClaims ?? 0;
+  const visibleClaimSamples = claimSamples.slice(0, 6);
+  const unreadable = sharedQueue?.readable === false;
+  const staleLock = sharedQueue?.lock?.stale === true;
+  const malformedActiveWork = activeWork?.malformed === true;
+  const reclaimable = sharedQueue?.reclaimableClaims ?? 0;
+  const active = sharedQueue?.activeClaims ?? 0;
+  const owned = sharedQueue?.ownedClaims ?? 0;
   const statusText = unreadable
     ? 'Unreadable'
+    : malformedActiveWork
+      ? 'Guard malformed'
     : staleLock
       ? 'Stale lock'
       : reclaimable > 0
         ? 'Reclaimable'
+        : activeWork && !sharedQueue
+          ? 'Active work'
         : 'Healthy';
-  const statusTone = unreadable || staleLock || reclaimable > 0 ? 'warn' : 'ok';
-  const mode = sharedQueue.mode ?? (sharedQueue.enabled ? 'shared' : 'local');
-  const nextExpiryTitle = sharedQueue.nextLeaseExpiryAt ? fmtDate(sharedQueue.nextLeaseExpiryAt) : 'No active lease expiry';
-  const nextExpiry = sharedQueue.nextLeaseExpiryAt ? fmtRelative(sharedQueue.nextLeaseExpiryAt) : '—';
-  const expiredAge = fdFormatDurationMs(sharedQueue.oldestExpiredMs);
+  const statusTone = unreadable || staleLock || reclaimable > 0 || malformedActiveWork ? 'warn' : 'ok';
+  const mode = sharedQueue?.mode ?? (sharedQueue?.enabled ? 'shared' : 'local');
+  const machineLabel = sharedQueue?.machineId ?? activeWork?.hostname ?? 'unknown';
+  const nextExpiryTitle = sharedQueue?.nextLeaseExpiryAt ? fmtDate(sharedQueue.nextLeaseExpiryAt) : 'No active lease expiry';
+  const nextExpiry = sharedQueue?.nextLeaseExpiryAt ? fmtRelative(sharedQueue.nextLeaseExpiryAt) : '—';
+  const expiredAge = fdFormatDurationMs(sharedQueue?.oldestExpiredMs);
 
   const board = el('div', {
     cls: `fd-lease-board${statusTone === 'warn' ? ' fd-lease-board--warn' : ''}`,
@@ -4570,12 +4603,13 @@ function fdRenderLeaseBoard(sharedQueue) {
   ));
 
   const metrics = el('div', { cls: 'fd-lease-metrics' },
-    fdRenderLeaseMetric('This machine', compactFleetReason(sharedQueue.machineId ?? 'unknown', 34), null, sharedQueue.machineId ?? 'unknown'),
+    fdRenderLeaseMetric('This machine', compactFleetReason(machineLabel, 34), null, machineLabel),
     fdRenderLeaseMetric('Active / owned', `${active} / ${owned}`),
     fdRenderLeaseMetric('Reclaimable', String(reclaimable), reclaimable > 0 ? 'warn' : null),
     fdRenderLeaseMetric('Next expiry', nextExpiry, null, nextExpiryTitle),
     fdRenderLeaseMetric('Expired age', expiredAge, expiredAge !== '—' ? 'warn' : null),
-    fdRenderLeaseMetric('Cooldown / worked / usage', `${sharedQueue.cooldownItems ?? 0} / ${sharedQueue.workedEvents ?? 0} / ${sharedQueue.usageEntries ?? 0}`)
+    fdRenderLeaseMetric('Cooldown / worked / usage', `${sharedQueue?.cooldownItems ?? 0} / ${sharedQueue?.workedEvents ?? 0} / ${sharedQueue?.usageEntries ?? 0}`),
+    activeWork ? fdRenderLeaseMetric('Active work', fdActiveWorkValue(activeWork), malformedActiveWork ? 'warn' : 'ok', fdActiveWorkTitle(activeWork)) : null
   );
   board.appendChild(metrics);
 
@@ -4597,6 +4631,26 @@ function fdRenderLeaseBoard(sharedQueue) {
     }
   }
   board.appendChild(machines);
+
+  if (visibleClaimSamples.length > 0 || activeItemIds.length > 0) {
+    const samples = el('div', { cls: 'fd-lease-samples' });
+    for (const sample of visibleClaimSamples) {
+      const itemId = sample?.itemId ?? 'unknown';
+      const owner = sample?.owned ? 'owned' : (sample?.machineId ?? 'unknown');
+      const state = sample?.state ?? 'unknown';
+      const title = `${itemId} · ${state} · ${owner}${sample?.leaseUntil ? ` · ${fmtDate(sample.leaseUntil)}` : ''}`;
+      samples.appendChild(el('div', { cls: `fd-lease-sample fd-lease-sample--${state}`, title },
+        el('span', { cls: 'fd-lease-sample__id' }, compactFleetReason(itemId, 48)),
+        el('span', { cls: 'fd-lease-sample__meta' }, `${state} / ${compactFleetReason(owner, 28)}`)
+      ));
+    }
+    if (activeItemIds.length > 0) {
+      samples.appendChild(el('div', { cls: 'fd-lease-active-ids', title: activeItemIds.join(', ') },
+        `active ids: ${activeItemIds.slice(0, 4).map((id) => compactFleetReason(id, 30)).join(', ')}`
+      ));
+    }
+    board.appendChild(samples);
+  }
   return board;
 }
 
@@ -4657,7 +4711,9 @@ function fdRenderStatusPanel(snap) {
   const daemon = snap.daemon ?? {};
   const isRunning = daemon.running === true;
   const isKilled = snap.fleet?.killed ?? snap.control?.fleet?.killed ?? false;
-  const sharedQueue = snap.fleet?.queue?.shared ?? snap.control?.fleet?.queue?.shared ?? null;
+  const queue = snap.fleet?.queue ?? snap.control?.fleet?.queue ?? {};
+  const sharedQueue = queue.shared ?? null;
+  const activeWork = queue.activeWork ?? null;
   const autonomy = snap.fleet?.autonomy ?? snap.control?.fleet?.autonomy ?? null;
   const phantom = snap.fleet?.phantom ?? snap.control?.fleet?.phantom ?? null;
 
@@ -4697,6 +4753,10 @@ function fdRenderStatusPanel(snap) {
       !sharedQueue.readable || sharedQueue.reclaimableClaims > 0 || sharedQueue.lock?.stale ? 'fd-meta-val--warn' : null));
     grid.appendChild(mkMeta('Owned leases', String(sharedQueue.ownedClaims ?? 0)));
   }
+  if (activeWork) {
+    grid.appendChild(mkMeta('Active work', fdActiveWorkValue(activeWork),
+      activeWork.malformed ? 'fd-meta-val--warn' : null));
+  }
   if (autonomy) {
     grid.appendChild(mkMeta('Evidence packs', String(autonomy.evidencePacks ?? 0),
       autonomy.denied > 0 ? 'fd-meta-val--warn' : null));
@@ -4709,7 +4769,7 @@ function fdRenderStatusPanel(snap) {
       unsafe > 0 ? 'fd-meta-val--warn' : null));
   }
   body.appendChild(grid);
-  const leaseBoard = fdRenderLeaseBoard(sharedQueue);
+  const leaseBoard = fdRenderLeaseBoard(sharedQueue, activeWork);
   if (leaseBoard) body.appendChild(leaseBoard);
 
   // Kill-switch banner

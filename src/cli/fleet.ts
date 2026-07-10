@@ -246,7 +246,17 @@ export function formatFleetStatus(s: FleetStatus): string {
     if (shared.claimsByMachine.length > 0) {
       lines.push(`  machines:      ${formatSharedQueueMachines(shared.claimsByMachine)}`);
     }
+    const claimSamples = Array.isArray(shared.claimSamples) ? shared.claimSamples : [];
+    if (claimSamples.length > 0) {
+      lines.push(`  claim sample:  ${formatSharedQueueClaimSamples(claimSamples)}`);
+    }
     lines.push(`  next expiry:   ${shared.nextLeaseExpiryAt ?? '—'}`);
+  }
+  if (s.queue.activeWork) {
+    lines.push(`  active work:   ${formatActiveWorkSummary(s.queue.activeWork)}`);
+    if (s.queue.activeWork.itemIds.length > 0) {
+      lines.push(`  active ids:    ${s.queue.activeWork.itemIds.slice(0, 4).join(', ')}`);
+    }
   }
   lines.push('');
 
@@ -897,6 +907,37 @@ function formatSharedQueueMachines(
     .join(', ');
 }
 
+function formatSharedQueueClaimSamples(
+  samples: NonNullable<FleetStatus['queue']['shared']>['claimSamples'],
+): string {
+  return samples
+    .slice(0, 4)
+    .map((sample) => {
+      const owner = sample.owned ? 'owned' : sample.machineId;
+      return `${sample.itemId}:${sample.state}/${owner}`;
+    })
+    .join(', ');
+}
+
+function formatActiveWorkSummary(activeWork: NonNullable<FleetStatus['queue']['activeWork']>): string {
+  const state = activeWork.malformed ? 'malformed' : 'armed';
+  const age = formatShortDuration(activeWork.ageMs);
+  const owner = [activeWork.hostname, activeWork.pid !== null ? `pid ${activeWork.pid}` : null]
+    .filter((part): part is string => typeof part === 'string' && part.length > 0)
+    .join(' ');
+  return `${state} / ${activeWork.itemCount} item(s) / age ${age}${owner ? ` / ${owner}` : ''}`;
+}
+
+function formatShortDuration(ms: number | null | undefined): string {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—';
+  if (ms < 60_000) return '<1m';
+  const mins = Math.floor(ms / 60_000);
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 48) return `${hrs}h`;
+  return `${Math.floor(hrs / 24)}d`;
+}
+
 // ---------------------------------------------------------------------------
 // Config loader (lazy, graceful)
 // ---------------------------------------------------------------------------
@@ -1071,6 +1112,9 @@ export async function cmdFleetWatch(jsonMode: boolean): Promise<number> {
       `queue ${fs.queue.backlogItems}`,
       fs.queue.shared
         ? `shared ${fs.queue.shared.activeClaims}/${fs.queue.shared.reclaimableClaims}`
+        : null,
+      fs.queue.activeWork
+        ? `work ${fs.queue.activeWork.itemCount} ${fs.queue.activeWork.malformed ? 'malformed' : 'active'}`
         : null,
       `pending ${fs.proposals.pending}`,
       fs.autonomy ? `evidence ${fs.autonomy.evidencePacks}` : null,

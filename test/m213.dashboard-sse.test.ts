@@ -502,17 +502,23 @@ describe('M213 Dashboard SSE — /api/events', () => {
     const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
     const css = fs.readFileSync(path.join(root, 'styles.css'), 'utf8');
     expect(src).toContain('function fdRenderLeaseBoard');
+    expect(src).toContain('function fdActiveWorkValue');
+    expect(src).toContain("'Active work'");
     expect(src).toContain("'Lease Board'");
     expect(src).toContain('claimsByMachine');
+    expect(src).toContain('claimSamples');
     expect(src).toContain('nextLeaseExpiryAt');
     expect(src).toContain('oldestExpiredMs');
-    expect(src).toContain('fdRenderLeaseBoard(sharedQueue)');
+    expect(src).toContain('fdRenderLeaseBoard(sharedQueue, activeWork)');
     expect(src).toContain('claimsByMachine.slice(0, 6)');
-    expect(src).toContain('sharedQueue.machineId');
+    expect(src).toContain('claimSamples.slice(0, 6)');
+    expect(src).toContain("activeWork?.hostname");
     expect(src).toContain('Machine claims unavailable.');
     expect(css).toContain('.fd-lease-board');
     expect(css).toContain('.fd-lease-metrics');
     expect(css).toContain('.fd-lease-machine__id');
+    expect(css).toContain('.fd-lease-samples');
+    expect(css).toContain('.fd-lease-active-ids');
     expect(css).toContain('text-overflow: ellipsis');
   });
 

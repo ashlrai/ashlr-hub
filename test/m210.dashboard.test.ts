@@ -136,12 +136,40 @@ const FIXTURE_FLEET_STATUS = {
         { machineId: 'machine-A', active: 2, expired: 0 },
         { machineId: 'machine-B-with-a-long-operator-hostname', active: 0, expired: 1 },
       ],
+      claimSamples: [
+        {
+          itemId: 'item-owned',
+          machineId: 'machine-A',
+          leaseUntil: '2026-07-09T16:00:00.000Z',
+          state: 'active' as const,
+          owned: true,
+        },
+        {
+          itemId: 'item-reclaimable',
+          machineId: 'machine-B-with-a-long-operator-hostname',
+          leaseUntil: '2026-07-09T15:00:00.000Z',
+          state: 'reclaimable' as const,
+          owned: false,
+        },
+      ],
       nextLeaseExpiryAt: '2026-07-09T16:00:00.000Z',
       oldestExpiredMs: 125_000,
       workedEvents: 7,
       cooldownItems: 3,
       usageEntries: 4,
       lock: { present: true, ageMs: 125_000, stale: true },
+    },
+    activeWork: {
+      source: 'daemon-spend-guard' as const,
+      path: '/tmp/.ashlr/daemon.spend-guard.json',
+      exists: true,
+      malformed: false,
+      pid: 1234,
+      hostname: 'machine-A',
+      armedAt: '2026-07-09T15:58:00.000Z',
+      ageMs: 120_000,
+      itemCount: 2,
+      itemIds: ['item-owned', 'item-other'],
     },
   },
   proposals: { pending: 3, frontierPending: 1, applied: 0 },
@@ -456,6 +484,16 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
       { machineId: 'machine-A', active: 2, expired: 0 },
       { machineId: 'machine-B-with-a-long-operator-hostname', active: 0, expired: 1 },
     ]);
+    expect(snap.fleet?.queue.shared?.claimSamples).toEqual([
+      expect.objectContaining({ itemId: 'item-owned', state: 'active', owned: true }),
+      expect.objectContaining({ itemId: 'item-reclaimable', state: 'reclaimable', owned: false }),
+    ]);
+    expect(snap.fleet?.queue.activeWork).toMatchObject({
+      source: 'daemon-spend-guard',
+      malformed: false,
+      itemCount: 2,
+      itemIds: ['item-owned', 'item-other'],
+    });
     expect(snap.fleet?.queue.shared?.nextLeaseExpiryAt).toBe('2026-07-09T16:00:00.000Z');
     expect(snap.fleet?.queue.shared?.oldestExpiredMs).toBe(125_000);
     expect(snap.fleet?.queue.shared?.workedEvents).toBe(7);

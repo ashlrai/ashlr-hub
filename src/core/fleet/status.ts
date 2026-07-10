@@ -496,6 +496,20 @@ export interface FleetQueueGeneratedWorkStatus {
   invent: number;
 }
 
+export interface FleetActiveWorkStatus {
+  source: 'daemon-spend-guard';
+  path: string;
+  exists: true;
+  malformed: boolean;
+  pid: number | null;
+  hostname: string | null;
+  armedAt: string | null;
+  ageMs: number | null;
+  itemCount: number;
+  itemIds: string[];
+  error?: string;
+}
+
 export interface FleetDiagnosticResliceDrainStatus {
   mode: 'diagnostic-reslices';
   latestAt: string;
@@ -567,6 +581,7 @@ export interface FleetStatus {
     repos?: FleetQueueRepoCoverage;
     next?: FleetQueueNextItem[];
     shared?: FleetSharedQueueStatus;
+    activeWork?: FleetActiveWorkStatus;
     generatedWork?: FleetQueueGeneratedWorkStatus;
     diagnosticResliceDrain?: FleetDiagnosticResliceDrainStatus;
   };
@@ -911,6 +926,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     // leave fallback
   }
   const diagnosticResliceDrain = buildDiagnosticResliceDrainStatus(recentTicks);
+  const activeWork = await buildActiveWorkStatus();
 
   // ── backends ────────────────────────────────────────────────────────────────
   const allowed: EngineId[] = cfg.foundry?.allowedBackends ?? ['builtin'];
@@ -1213,6 +1229,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ...(queueRepos !== undefined ? { repos: queueRepos } : {}),
       ...(nextQueueItems.length > 0 ? { next: nextQueueItems } : {}),
       ...(sharedQueue !== undefined ? { shared: sharedQueue } : {}),
+      ...(activeWork !== undefined ? { activeWork } : {}),
       ...(generatedWork !== undefined ? { generatedWork } : {}),
       ...(diagnosticResliceDrain !== undefined ? { diagnosticResliceDrain } : {}),
     },
@@ -3935,6 +3952,7 @@ async function buildSharedQueueStatus(cfg: AshlrConfig): Promise<FleetSharedQueu
       expiredClaims: 0,
       reclaimableClaims: 0,
       claimsByMachine: [],
+      claimSamples: [],
       nextLeaseExpiryAt: null,
       oldestExpiredMs: null,
       workedEvents: 0,
@@ -3942,6 +3960,43 @@ async function buildSharedQueueStatus(cfg: AshlrConfig): Promise<FleetSharedQueu
       usageEntries: 0,
       lock: { present: false, ageMs: null, stale: false },
     };
+  }
+}
+
+function compactStatusMetadata(value: string, max = 160): string {
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+}
+
+async function buildActiveWorkStatus(): Promise<FleetActiveWorkStatus | undefined> {
+  try {
+    const { readDaemonSpendGuard } = await import('../daemon/state.js');
+    const result = readDaemonSpendGuard();
+    if (!result.exists) return undefined;
+
+    const guard = result.guard;
+    const armedMs = guard?.armedAt ? Date.parse(guard.armedAt) : NaN;
+    const ageMs = Number.isFinite(armedMs) ? Math.max(0, Date.now() - armedMs) : null;
+    const itemIds = Array.isArray(guard?.itemIds)
+      ? guard.itemIds
+          .filter((itemId): itemId is string => typeof itemId === 'string' && itemId.length > 0)
+          .map((itemId) => compactStatusMetadata(itemId))
+      : [];
+
+    return {
+      source: 'daemon-spend-guard',
+      path: result.path,
+      exists: true,
+      malformed: result.malformed,
+      pid: typeof guard?.pid === 'number' ? guard.pid : null,
+      hostname: typeof guard?.hostname === 'string' ? compactStatusMetadata(guard.hostname, 120) : null,
+      armedAt: typeof guard?.armedAt === 'string' ? guard.armedAt : null,
+      ageMs,
+      itemCount: itemIds.length,
+      itemIds: itemIds.slice(0, 12),
+      ...(result.error ? { error: compactStatusMetadata(result.error, 240) } : {}),
+    };
+  } catch {
+    return undefined;
   }
 }
 

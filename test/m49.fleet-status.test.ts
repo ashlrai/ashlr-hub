@@ -31,6 +31,7 @@ import { recordDispatchProduction, type DispatchProductionEvent } from '../src/c
 import { recordAgentAction, type AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
 import { recordDecision } from '../src/core/fleet/decisions-ledger.js';
 import { recordOutcome } from '../src/core/fleet/worked-ledger.js';
+import { armDaemonSpendGuard, clearDaemonSpendGuard } from '../src/core/daemon/state.js';
 import type { Proposal } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -3731,6 +3732,53 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       { machineId: 'machine-A', active: 1, expired: 0 },
       { machineId: 'machine-B', active: 1, expired: 0 },
     ]);
+    expect(s.queue.shared?.claimSamples).toEqual([
+      expect.objectContaining({
+        itemId: 'owned',
+        machineId: 'machine-A',
+        state: 'active',
+        owned: true,
+      }),
+      expect.objectContaining({
+        itemId: 'other',
+        machineId: 'machine-B',
+        state: 'active',
+        owned: false,
+      }),
+    ]);
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('claim sample:');
+    expect(formatted).toContain('owned:active/owned');
+    expect(formatted).toContain('other:active/machine-B');
+  });
+
+  it('surfaces daemon spend guard active work without exposing the guard token', async () => {
+    await withFakeNow(new Date('2026-07-03T00:10:00.000Z'), async () => {
+      const armed = armDaemonSpendGuard(['active-item-a', 'active-item-b']);
+      expect(armed.ok).toBe(true);
+      if (!armed.ok) return;
+      vi.setSystemTime(new Date('2026-07-03T00:12:30.000Z'));
+
+      const s = await buildFleetStatus(baseConfig());
+
+      expect(s.queue.activeWork).toMatchObject({
+        source: 'daemon-spend-guard',
+        exists: true,
+        malformed: false,
+        pid: process.pid,
+        hostname: hostname(),
+        armedAt: '2026-07-03T00:10:00.000Z',
+        ageMs: 150_000,
+        itemCount: 2,
+        itemIds: ['active-item-a', 'active-item-b'],
+      });
+      expect(JSON.stringify(s.queue.activeWork)).not.toContain(armed.guard.token);
+      const formatted = formatFleetStatus(s);
+      expect(formatted).toContain('active work:');
+      expect(formatted).toContain('armed / 2 item(s) / age 2m');
+      expect(formatted).toContain('active ids:    active-item-a, active-item-b');
+      expect(clearDaemonSpendGuard(armed.guard.token).ok).toBe(true);
+    });
   });
 
   it('includes autonomy evidence summary when packs exist', async () => {
