@@ -1476,3 +1476,16 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add adversarial coverage for worktree, scratch-branch, metadata-home, crash, retry, symlink, and concurrent cleanup cases.
 - [x] Run focused/full gates and final independent review.
 - [x] Update durable notes, commit, push, reload, and smoke production.
+
+## Current Overnight Cycle - Durable Repair Handoff Journal
+- [x] Rehydrate the clean deployed cleanup baseline, live service, Entire state, and recorded handoff risks.
+- [x] Map parent outcome authority, repair derivation, queue mutation, lifecycle projection, and crash windows in parallel.
+- [x] Define a bounded metadata-only generation-aware handoff journal with replay and conflict semantics.
+- [x] Persist parent observations before acknowledgement and reconstruct missing queue projections without capped-ledger loss.
+- [x] Serialize queue projection and add stale-lock recovery without enabling generated repairs in shared mode.
+- [x] Preserve exact parent-to-child lineage through child attempts and proposals without granting terminal or merge authority.
+- [x] Add crash, replay, conflict, truncation, concurrency, recurrence, stale-lock, and privacy coverage.
+- [x] Run focused/full gates and final independent adversarial review.
+- [x] Update durable notes, commit, push, reload, and smoke production.
+- Error encountered: full-history agent forks cannot override `agent_type`; relaunched scoped explorers without history forks.
+- Error encountered: one `rg` expression used an unsupported backreference escape; reran the search with literal patterns.
