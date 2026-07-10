@@ -1444,4 +1444,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Block local repair dispatch while lifecycle state is unavailable, fence shared mode, and reconcile crash-persisted proposals before retrying work.
 - [x] Prove ordinary work, spoofed records, duplicate events, recurrence, queue persistence, lock contention, write failure, and daemon refresh behavior remain safe.
 - [x] Run focused/full repository gates and independent adversarial review on the final source.
-- [ ] Update durable notes, commit, push, reload, and production smoke.
+- [x] Update durable notes, commit, push, reload, and production smoke.
