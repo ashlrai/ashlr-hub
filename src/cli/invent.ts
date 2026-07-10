@@ -8,11 +8,11 @@
  * things worth building.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import type { AshlrConfig, WorkItem, Backlog } from '../core/types.js';
+import type { AshlrConfig, WorkItem } from '../core/types.js';
 import { inventWorkItems } from '../core/generative/invent.js';
+import { enqueueBacklogItemsDetailed } from '../core/portfolio/backlog.js';
 
 // ---------------------------------------------------------------------------
 // Config loader (best-effort, never throws)
@@ -90,43 +90,20 @@ async function buildRepoState(repo: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Emit to backlog (append invented items to persisted backlog.json)
-// persistBacklog is not exported from backlog.ts, so we write directly.
+// Emit to backlog through the shared queue/backlog serialization boundary.
 // ---------------------------------------------------------------------------
 
-function backlogFilePath(): string {
-  return join(homedir(), '.ashlr', 'backlog.json');
-}
-
-function emitToBacklog(items: WorkItem[]): void {
+function emitToBacklog(items: WorkItem[]): number {
   try {
-    const bPath = backlogFilePath();
-    let existing: Backlog | null = null;
-    try {
-      const raw = readFileSync(bPath, 'utf8');
-      existing = JSON.parse(raw) as Backlog;
-    } catch { /* absent or corrupt — start fresh */ }
-
-    const existingItems = existing?.items ?? [];
-    const existingIds = new Set(existingItems.map((x) => x.id));
-    const fresh = items.filter((i) => !existingIds.has(i.id));
-    if (fresh.length === 0) return;
-
-    const merged = [...existingItems, ...fresh];
-    const backlog: Backlog = {
-      generatedAt: new Date().toISOString(),
-      repos: [...new Set(merged.map((i) => i.repo))],
-      items: merged,
-    };
-
-    const dir = join(homedir(), '.ashlr');
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(bPath, JSON.stringify(backlog, null, 2), 'utf8');
+    const result = enqueueBacklogItemsDetailed(items);
+    if (!result.ok) throw new Error('backlog persistence lock unavailable');
+    return result.enqueued;
   } catch (err) {
     console.error(
       '[invent --emit] failed to write backlog:',
       err instanceof Error ? err.message : String(err),
     );
+    return 0;
   }
 }
 
@@ -271,8 +248,8 @@ export async function cmdInvent(args: string[]): Promise<number> {
   }
 
   if (emit && items.length > 0) {
-    emitToBacklog(items);
-    console.log(`[invent] filed ${items.length} item(s) into backlog.`);
+    const filed = emitToBacklog(items);
+    console.log(`[invent] filed ${filed} item(s) into backlog.`);
   }
 
   return 0;

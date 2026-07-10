@@ -4,15 +4,12 @@ import { existsSync } from 'node:fs';
 import type { Proposal, WorkItem } from '../types.js';
 import { listProposals } from '../inbox/store.js';
 import { scrubSecrets } from '../util/scrub.js';
-import { pruneQueuedSelfHealItems, queueSelfHealItem } from './self-heal.js';
+import { pruneQueuedSelfHealItems, queueSelfHealItem, queueSelfHealItemDetailed } from './self-heal.js';
 import {
   isActionableSelfHealItem,
   isTrustedGeneratedRepairItem,
 } from './self-heal-trust.js';
-import {
-  readDispatchProductionEvents,
-  type DispatchProductionEvent,
-} from './dispatch-production-ledger.js';
+import type { DispatchProductionEvent } from './dispatch-production-ledger.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import {
   generatedRepairGenerationId,
@@ -20,11 +17,15 @@ import {
   readGeneratedRepairLifecycle,
 } from './generated-repair-lifecycle.js';
 import { workItemCoverageKey } from './proposal-matching.js';
+import {
+  compactRepairHandoffs,
+  dispatchEventFromRepairHandoff,
+  readRepairHandoffs,
+} from './repair-handoff-journal.js';
 
 const MAX_TITLE = 140;
 const MAX_REASON = 260;
 const DISPATCH_CAPTURE_WINDOW_MS = 24 * 60 * 60 * 1000;
-const DISPATCH_CAPTURE_LIMIT = 100;
 const DISPATCH_CAPTURE_MAX_QUEUED = 5;
 const DISPATCH_NO_DIFF_MAX_QUEUED = 5;
 
@@ -51,6 +52,13 @@ export interface ProposalRepairWorkResult {
   dispatchRepairLifecycleUnavailable?: number;
   /** Internal selection guard; never persisted by producer-maintenance summaries. */
   blockedItemKeys?: string[];
+  handoffObservations?: number;
+  handoffInvalidRows?: number;
+  handoffConflictingIds?: number;
+  handoffSourceState?: 'missing' | 'healthy' | 'degraded';
+  handoffCompacted?: number;
+  handoffCompactionUnavailable?: number;
+  proposalInboxAvailable?: boolean;
 }
 
 export interface ProposalRepairWorkOptions {
@@ -196,7 +204,8 @@ export function captureGateRepairWorkItem(
   if (!isRepairableCaptureFailure(event)) return null;
   const eventMs = Date.parse(event.ts);
   const nowMs = now.getTime();
-  if (!Number.isFinite(eventMs) || eventMs > nowMs || nowMs - eventMs > DISPATCH_CAPTURE_WINDOW_MS) {
+  const durableHandoff = event.assignedBy === 'repair-handoff-journal';
+  if (!Number.isFinite(eventMs) || eventMs > nowMs || (!durableHandoff && nowMs - eventMs > DISPATCH_CAPTURE_WINDOW_MS)) {
     return null;
   }
   const repo = canonicalEnrolledExistingRepo(event.repo);
@@ -233,8 +242,13 @@ export function captureGateRepairWorkItem(
     score: value / effort,
     tags: ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate', 'verify', 'high-priority'],
     ts: new Date(eventMs).toISOString(),
+    ...(event.repairHandoffId ? { repairHandoffId: event.repairHandoffId } : {}),
+    ...(event.repairGenerationId ? { repairGenerationId: event.repairGenerationId } : {}),
   };
-  return isActionableSelfHealItem(item, { nowMs }) ? item : null;
+  return isActionableSelfHealItem(item, {
+    nowMs,
+    ...(durableHandoff ? { maxAgeMs: Number.MAX_SAFE_INTEGER } : {}),
+  }) ? item : null;
 }
 
 export function noDiffResliceWorkItem(
@@ -244,7 +258,8 @@ export function noDiffResliceWorkItem(
   if (!isDiagnosticNoDiffEvent(event)) return null;
   const eventMs = Date.parse(event.ts);
   const nowMs = now.getTime();
-  if (!Number.isFinite(eventMs) || eventMs > nowMs || nowMs - eventMs > DISPATCH_CAPTURE_WINDOW_MS) {
+  const durableHandoff = event.assignedBy === 'repair-handoff-journal';
+  if (!Number.isFinite(eventMs) || eventMs > nowMs || (!durableHandoff && nowMs - eventMs > DISPATCH_CAPTURE_WINDOW_MS)) {
     return null;
   }
   const repo = canonicalEnrolledExistingRepo(event.repo);
@@ -282,22 +297,21 @@ export function noDiffResliceWorkItem(
     score: value / effort,
     tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice', 'no-diff', 'verify', 'high-priority'],
     ts: new Date(eventMs).toISOString(),
+    ...(event.repairHandoffId ? { repairHandoffId: event.repairHandoffId } : {}),
+    ...(event.repairGenerationId ? { repairGenerationId: event.repairGenerationId } : {}),
   };
-  return isActionableSelfHealItem(item, { nowMs }) ? item : null;
+  return isActionableSelfHealItem(item, {
+    nowMs,
+    ...(durableHandoff ? { maxAgeMs: Number.MAX_SAFE_INTEGER } : {}),
+  }) ? item : null;
 }
 
-function readRecentDispatchEvents(now: Date, opts?: ProposalRepairWorkOptions): DispatchProductionEvent[] {
+function readRecentDispatchEvents(_now: Date, opts?: ProposalRepairWorkOptions): DispatchProductionEvent[] {
   if (opts?.dispatchEvents) return opts.dispatchEvents;
   if (opts?.includeDispatchCaptureFailures === false && opts?.includeDispatchNoDiffReslices === false) return [];
-  const windowMs = opts?.dispatchWindowMs && opts.dispatchWindowMs > 0
-    ? opts.dispatchWindowMs
-    : DISPATCH_CAPTURE_WINDOW_MS;
   try {
-    return readDispatchProductionEvents({
-      sinceMs: now.getTime() - windowMs,
-      limit: DISPATCH_CAPTURE_LIMIT,
-      maxFiles: Math.max(1, Math.ceil(windowMs / (24 * 60 * 60 * 1000)) + 1),
-    });
+    const handoffs = readRepairHandoffs().observations.map(dispatchEventFromRepairHandoff);
+    return handoffs;
   } catch {
     return [];
   }
@@ -334,6 +348,7 @@ export function queueProposalRepairWorkForPendingProposals(
   now = new Date(),
   opts?: ProposalRepairWorkOptions,
 ): ProposalRepairWorkResult {
+  const handoffs = proposals === undefined && !opts?.dispatchEvents ? readRepairHandoffs() : undefined;
   let pending: Proposal[];
   try {
     pending = proposals ?? listProposals({ status: 'pending' });
@@ -343,6 +358,13 @@ export function queueProposalRepairWorkForPendingProposals(
       eligible: 0,
       queued: 0,
       failed: 1,
+      proposalInboxAvailable: false,
+      ...(handoffs ? {
+        handoffObservations: handoffs.observations.length,
+        handoffInvalidRows: handoffs.invalidRows,
+        handoffConflictingIds: handoffs.conflictingIds,
+        handoffSourceState: handoffs.sourceState,
+      } : {}),
     };
   }
   let lifecycleProposals: Proposal[] = [];
@@ -391,7 +413,14 @@ export function queueProposalRepairWorkForPendingProposals(
     dispatchRepairPruneFailed: 0,
     dispatchRepairLifecycleUnavailable: 0,
     blockedItemKeys: [],
+    proposalInboxAvailable: true,
   };
+  if (handoffs) {
+    result.handoffObservations = handoffs.observations.length;
+    result.handoffInvalidRows = handoffs.invalidRows;
+    result.handoffConflictingIds = handoffs.conflictingIds;
+    result.handoffSourceState = handoffs.sourceState;
+  }
 
   const terminalLifecycleEnabled = opts?.terminalLifecycleEnabled !== false;
   const terminalByKey = new Map<string, 'retired' | 'exhausted'>();
@@ -457,8 +486,9 @@ export function queueProposalRepairWorkForPendingProposals(
     }
   }
   const seenCaptureIds = new Set<string>();
+  let captureMutations = 0;
   if (terminalLifecycleEnabled && includeCaptureRepairs) for (const event of dispatchEvents) {
-    if ((result.dispatchCaptureQueued ?? 0) >= maxCaptureQueued) break;
+    if (captureMutations >= maxCaptureQueued) break;
     const item = captureGateRepairWorkItem(event, now);
     if (!item) continue;
     if (seenCaptureIds.has(item.id)) continue;
@@ -467,17 +497,21 @@ export function queueProposalRepairWorkForPendingProposals(
     if (lifecycle === 'terminal' || lifecycle === 'unavailable') continue;
     result.eligible++;
     result.dispatchCaptureEligible!++;
-    if (queueSelfHealItem(item)) {
+    const queued = queueSelfHealItemDetailed(item);
+    if (queued.ok) {
       result.queued++;
       result.dispatchCaptureQueued!++;
+      if (queued.changed) captureMutations++;
     } else {
       result.failed++;
       result.dispatchCaptureFailed!++;
+      break;
     }
   }
   const seenNoDiffIds = new Set<string>();
+  let noDiffMutations = 0;
   if (terminalLifecycleEnabled && includeNoDiffReslices) for (const event of dispatchEvents) {
-    if ((result.dispatchNoDiffQueued ?? 0) >= maxNoDiffQueued) break;
+    if (noDiffMutations >= maxNoDiffQueued) break;
     const item = noDiffResliceWorkItem(event, now);
     if (!item) continue;
     if (seenNoDiffIds.has(item.id)) continue;
@@ -486,12 +520,15 @@ export function queueProposalRepairWorkForPendingProposals(
     if (lifecycle === 'terminal' || lifecycle === 'unavailable') continue;
     result.eligible++;
     result.dispatchNoDiffEligible!++;
-    if (queueSelfHealItem(item)) {
+    const queued = queueSelfHealItemDetailed(item);
+    if (queued.ok) {
       result.queued++;
       result.dispatchNoDiffQueued!++;
+      if (queued.changed) noDiffMutations++;
     } else {
       result.failed++;
       result.dispatchNoDiffFailed!++;
+      break;
     }
   }
 
@@ -499,6 +536,17 @@ export function queueProposalRepairWorkForPendingProposals(
   result.dispatchRepairExhausted = [...terminalByKey.values()].filter((value) => value === 'exhausted').length;
   result.dispatchRepairLifecycleUnavailable = lifecycleUnavailableKeys.size;
   result.blockedItemKeys = [...blockedItemKeys];
+  if (
+    proposals === undefined &&
+    !opts?.dispatchEvents &&
+    result.failed === 0 &&
+    result.dispatchRepairPruneFailed === 0 &&
+    result.dispatchRepairLifecycleUnavailable === 0
+  ) {
+    const compacted = compactRepairHandoffs();
+    result.handoffCompacted = compacted.removed;
+    result.handoffCompactionUnavailable = compacted.available ? 0 : 1;
+  }
 
   return result;
 }

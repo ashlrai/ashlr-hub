@@ -11,6 +11,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { WorkItem } from '../types.js';
 import { isActionableSelfHealItem } from '../fleet/self-heal-trust.js';
+import { generatedRepairGenerationId } from '../fleet/generated-repair-lifecycle.js';
 
 function isWorkItemLike(value: unknown): value is WorkItem {
   if (!value || typeof value !== 'object') return false;
@@ -51,7 +52,11 @@ function readWorkItemsFile(filePath: string): WorkItem[] {
 function isQueuedAutonomyItem(item: WorkItem): boolean {
   if (item.source === 'invent') return true;
   if (!item.tags.includes('self-heal')) return false;
-  return isActionableSelfHealItem(item);
+  const generationId = generatedRepairGenerationId(item);
+  if ((item.repairHandoffId !== undefined || item.repairGenerationId !== undefined) && !generationId) return false;
+  return isActionableSelfHealItem(item, generationId
+    ? { maxAgeMs: Number.MAX_SAFE_INTEGER }
+    : undefined);
 }
 
 /** Return all queued self-heal/invent items without mutating any state. */

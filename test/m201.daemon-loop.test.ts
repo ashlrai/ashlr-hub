@@ -1247,6 +1247,43 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(JSON.stringify(result.producerMaintenance)).not.toContain(terminal.id);
   });
 
+  it('A1a2b1b: later producer refresh cannot reintroduce a blocked repair', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const terminal = makeDiagnosticResliceItem(repo.dir, 'abcdef123457', 10);
+    const ordinaryHeal: WorkItem = {
+      ...makeItems(repo.dir, 1)[0]!,
+      id: `${basename(repo.dir)}:self-heal:ordinary`,
+      source: 'self',
+      tags: ['self-heal', 'verify'],
+    };
+    const generic = makeItems(repo.dir, 1)[0]!;
+    mockQueueProposalRepairWorkForPendingProposals.mockReturnValue({
+      scanned: 1,
+      eligible: 0,
+      queued: 0,
+      failed: 0,
+      dispatchRepairPruned: 1,
+      dispatchRepairPruneFailed: 0,
+      blockedItemKeys: [workItemCoverageKey(terminal)],
+    });
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [terminal, ordinaryHeal, generic],
+    });
+
+    const result = await tick(
+      { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autonomyControlLoop: false } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(3);
+    expect(result.dispatches?.[0]?.itemId).not.toBe(terminal.id);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).not.toMatchObject({ workItemId: terminal.id });
+  });
+
   it('A1a2b2: foundry.proposalRepair=false disables repair maintenance', async () => {
     const repo = fx.makeRepo();
     repo.enroll();

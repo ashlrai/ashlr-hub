@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
   generatedRepairLifecyclePath,
@@ -164,6 +164,20 @@ describe('generated repair lifecycle store', () => {
     expect(readGeneratedRepairLifecycle(item).disposition).toBe('active');
   });
 
+  it('rejects caller-shaped handoff generation fields that are not cryptographically bound', () => {
+    const forged = repairItem({
+      repairHandoffId: 'a'.repeat(64),
+      repairGenerationId: 'b'.repeat(64),
+    });
+    const transition = recordGeneratedRepairLifecycle(forged, {
+      kind: 'empty-diff',
+      attemptId: ATTEMPT_ONE,
+    });
+
+    expect(transition).toMatchObject({ available: false, recorded: false });
+    expect(readGeneratedRepairLifecycle(forged).available).toBe(false);
+  });
+
   it('reports corrupt state unavailable without inventing terminal evidence', () => {
     const path = generatedRepairLifecyclePath();
     mkdirSync(dirname(path), { recursive: true });
@@ -180,11 +194,11 @@ describe('generated repair lifecycle store', () => {
     }).recorded).toBe(false);
   });
 
-  it('reports writer contention unavailable until the operator clears uncertain state', () => {
+  it('reports live writer contention unavailable without poisoning later reads', () => {
     const item = repairItem();
     const lockPath = `${generatedRepairLifecyclePath()}.lock`;
     mkdirSync(dirname(lockPath), { recursive: true });
-    writeFileSync(lockPath, 'other-owner\n', { encoding: 'utf8', mode: 0o600 });
+    writeFileSync(lockPath, JSON.stringify({ token: 'other-owner', pid: process.pid }), { encoding: 'utf8', mode: 0o600 });
 
     expect(readGeneratedRepairLifecycle(item).available).toBe(false);
     expect(recordGeneratedRepairLifecycle(item, {
@@ -193,18 +207,38 @@ describe('generated repair lifecycle store', () => {
     }).recorded).toBe(false);
 
     rmSync(lockPath);
-    rmSync(`${generatedRepairLifecyclePath()}.failed`);
+    expect(() => readFileSync(`${generatedRepairLifecyclePath()}.failed`)).toThrow();
     expect(recordGeneratedRepairLifecycle(item, {
       kind: 'empty-diff',
       attemptId: ATTEMPT_ONE,
     })).toMatchObject({ recorded: true, authoritativeEmptyRuns: 1 });
   });
 
-  it('persists a fail-closed marker when an atomic lifecycle write fails', () => {
+  it('recovers a lifecycle lock left by a dead owner', () => {
+    const item = repairItem();
+    const lockPath = `${generatedRepairLifecyclePath()}.lock`;
+    mkdirSync(dirname(lockPath), { recursive: true });
+    writeFileSync(lockPath, JSON.stringify({
+      token: 'dead-owner',
+      pid: 2_147_483_647,
+      startRef: 'a'.repeat(64),
+      startRefVerified: true,
+    }), { encoding: 'utf8', mode: 0o600 });
+
+    expect(recordGeneratedRepairLifecycle(item, {
+      kind: 'empty-diff',
+      attemptId: ATTEMPT_ONE,
+    })).toMatchObject({ available: true, recorded: true, authoritativeEmptyRuns: 1 });
+    expect(readGeneratedRepairLifecycle(item).available).toBe(true);
+  });
+
+  it('rejects a symlink ledger without mutating its target and recovers after repair', () => {
     const item = repairItem();
     const path = generatedRepairLifecyclePath();
     mkdirSync(dirname(path), { recursive: true });
-    mkdirSync(`${path}.tmp`);
+    const target = `${path}.target`;
+    writeFileSync(target, 'do-not-mutate\n', { mode: 0o600 });
+    symlinkSync(target, path);
 
     expect(recordGeneratedRepairLifecycle(item, {
       kind: 'empty-diff',
@@ -216,8 +250,9 @@ describe('generated repair lifecycle store', () => {
       recorded: false,
     });
     expect(readGeneratedRepairLifecycle(item).available).toBe(false);
+    expect(readFileSync(target, 'utf8')).toBe('do-not-mutate\n');
 
-    rmSync(`${path}.tmp`, { recursive: true });
+    rmSync(path);
     expect(recordGeneratedRepairLifecycle(item, {
       kind: 'empty-diff',
       attemptId: ATTEMPT_ONE,

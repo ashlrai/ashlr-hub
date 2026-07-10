@@ -16,8 +16,14 @@
  *    is applied or merged here.
  */
 
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import type { AshlrConfig, WorkItem } from '../types.js';
@@ -30,6 +36,7 @@ import {
   isActionableSelfHealFailureText,
   isActionableSelfHealItem,
 } from './self-heal-trust.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -233,9 +240,23 @@ function readWorkItemsArrayStrict(
 }
 
 function writeJsonAtomic(filePath: string, value: unknown): void {
-  const tmp = filePath + '.tmp';
-  writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8');
+  const tmp = `${filePath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  writeFileSync(tmp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   renameSync(tmp, filePath);
+}
+
+function queueLockPath(): string {
+  return join(homedir(), '.ashlr', '.self-heal-queue.lock');
+}
+
+export function withSelfHealQueueLock<T>(fn: () => T): { ok: true; value: T } | { ok: false } {
+  const lock = acquireLocalStoreLock(queueLockPath());
+  if (!lock) return { ok: false };
+  try {
+    return { ok: true, value: fn() };
+  } finally {
+    releaseLocalStoreLock(lock);
+  }
 }
 
 function isSelfHealItemForRepo(
@@ -334,10 +355,12 @@ function pruneSelfHealItemsFromBacklog(repoDir: string, kinds?: ReadonlySet<'bui
 
 function pruneStaleSelfHealItems(repoDir: string, kinds?: Array<'build' | 'test'>): number {
   const kindSet = kinds && kinds.length > 0 ? new Set(kinds) : undefined;
-  return pruneSelfHealItemsFromQueue(repoDir, kindSet) + pruneSelfHealItemsFromBacklog(repoDir, kindSet);
+  const locked = withSelfHealQueueLock(() =>
+    pruneSelfHealItemsFromQueue(repoDir, kindSet) + pruneSelfHealItemsFromBacklog(repoDir, kindSet));
+  return locked.ok ? locked.value : 0;
 }
 
-function pruneInvalidSelfHealItems(repos: string[]): number {
+function pruneInvalidSelfHealItemsUnlocked(repos: string[]): number {
   const enrolledRepoKeys = new Set<string>();
   for (const repo of repos) {
     try { enrolledRepoKeys.add(resolve(repo)); } catch { /* ignore invalid registry entries */ }
@@ -383,6 +406,11 @@ function pruneInvalidSelfHealItems(repos: string[]): number {
   return removed;
 }
 
+function pruneInvalidSelfHealItems(repos: string[]): number {
+  const locked = withSelfHealQueueLock(() => pruneInvalidSelfHealItemsUnlocked(repos));
+  return locked.ok ? locked.value : 0;
+}
+
 function targetedInvalidSelfHealItem(
   value: unknown,
   targetRepoKeys: ReadonlySet<string>,
@@ -400,7 +428,7 @@ function targetedInvalidSelfHealItem(
   }
 }
 
-function pruneInvalidSelfHealItemsForRepos(targetRepos: string[], enrolled: string[]): number {
+function pruneInvalidSelfHealItemsForReposUnlocked(targetRepos: string[], enrolled: string[]): number {
   const targetRepoKeys = new Set<string>();
   for (const repo of targetRepos) {
     try { targetRepoKeys.add(resolve(repo)); } catch { /* ignore malformed target rows */ }
@@ -452,11 +480,27 @@ function pruneInvalidSelfHealItemsForRepos(targetRepos: string[], enrolled: stri
   return removed;
 }
 
+function pruneInvalidSelfHealItemsForRepos(targetRepos: string[], enrolled: string[]): number {
+  const locked = withSelfHealQueueLock(() => pruneInvalidSelfHealItemsForReposUnlocked(targetRepos, enrolled));
+  return locked.ok ? locked.value : 0;
+}
+
 /**
  * Queue a heal item to disk so the fleet daemon picks it up on the next tick
  * ahead of other work. Best-effort — failure here must never abort the cycle.
  */
 export function queueSelfHealItem(item: WorkItem): boolean {
+  return queueSelfHealItemDetailed(item).ok;
+}
+
+export interface QueueSelfHealItemResult {
+  ok: boolean;
+  changed: boolean;
+}
+
+export function queueSelfHealItemDetailed(item: WorkItem): QueueSelfHealItemResult {
+  const lock = acquireLocalStoreLock(queueLockPath());
+  if (!lock) return { ok: false, changed: false };
   try {
     const qPath = selfHealQueuePath();
     const dir = join(homedir(), '.ashlr');
@@ -465,16 +509,22 @@ export function queueSelfHealItem(item: WorkItem): boolean {
     const read = readWorkItemsArrayStrict(qPath);
     if (!read.ok) throw new Error('self-heal queue is malformed');
     const existing = read.items;
+    const current = existing.find((candidate) => candidate.id === item.id);
+    if (current && JSON.stringify(current) === JSON.stringify(item)) {
+      return { ok: true, changed: false };
+    }
 
     // Replace existing entry for same id (idempotent)
     const filtered = existing.filter(i => i.id !== item.id);
     filtered.unshift(item); // high-priority: front of queue
 
     writeJsonAtomic(qPath, filtered);
-    return true;
+    return { ok: true, changed: true };
   } catch {
     // Best-effort — never propagate
-    return false;
+    return { ok: false, changed: false };
+  } finally {
+    releaseLocalStoreLock(lock);
   }
 }
 
@@ -488,6 +538,8 @@ export interface PruneQueuedSelfHealItemsResult {
 export function pruneQueuedSelfHealItems(
   shouldRemove: (item: WorkItem) => boolean,
 ): PruneQueuedSelfHealItemsResult {
+  const lock = acquireLocalStoreLock(queueLockPath());
+  if (!lock) return { scanned: 0, removed: 0, failed: true };
   let scanned = 0;
   let removed = 0;
   let failed = false;
@@ -530,6 +582,7 @@ export function pruneQueuedSelfHealItems(
   } catch {
     failed = true;
   }
+  releaseLocalStoreLock(lock);
   return { scanned, removed, failed };
 }
 

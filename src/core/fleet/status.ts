@@ -39,6 +39,8 @@ import {
   summarizeAttemptCoverage,
   type AttemptCoverageStatus,
 } from '../autonomy/attempt-records.js';
+import { generatedRepairCooldownKey } from './generated-repair-lifecycle.js';
+import { readRepairHandoffs } from './repair-handoff-journal.js';
 import {
   listTrajectoryRecords,
   MIN_SKILL_OBSERVED_TRAJECTORIES,
@@ -756,6 +758,7 @@ export interface FleetStatus {
     eligibleBacklogItems?: number;
     cooldownItems?: number;
     pendingItems?: number;
+    repairControlBlockedItems?: number;
     nextEligibleAt?: string | null;
     repos?: FleetQueueRepoCoverage;
     next?: FleetQueueNextItem[];
@@ -915,6 +918,7 @@ interface FleetQueueEligibility {
   eligibleItems: WorkItem[];
   cooldownItems: number;
   pendingItems: number;
+  repairControlBlockedItems: number;
   nextEligibleAt: string | null;
 }
 
@@ -954,14 +958,20 @@ function buildQueueEligibility(
   const eligibleItems: WorkItem[] = [];
   let cooldownItems = 0;
   let pendingItems = 0;
+  let repairControlBlockedItems = 0;
   let nextEligibleMs: number | null = null;
+  const repairControlAvailable = readRepairHandoffs().sourceState !== 'degraded';
 
   for (const item of items) {
+    if (!repairControlAvailable && item.tags.includes('proposal-repair')) {
+      repairControlBlockedItems++;
+      continue;
+    }
     if (pendingItemKeys.has(workItemCoverageKey(item))) {
       pendingItems++;
       continue;
     }
-    const last = latestByItem.get(item.id);
+    const last = latestByItem.get(generatedRepairCooldownKey(item));
     const itemCooldownMs = cooldownMsForWorkItem(item, cooldownMs, repairRecoveryHealthy, last?.event);
     const cooldownUntil = last && last.suppressible ? last.tsMs + itemCooldownMs : null;
     if (cooldownUntil !== null && cooldownUntil > nowMs) {
@@ -978,6 +988,7 @@ function buildQueueEligibility(
     eligibleItems,
     cooldownItems,
     pendingItems,
+    repairControlBlockedItems,
     nextEligibleAt: isoFromMs(nextEligibleMs),
   };
 }
@@ -1150,6 +1161,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let eligibleBacklogItems = 0;
   let cooldownItems = 0;
   let pendingItems = 0;
+  let repairControlBlockedItems = 0;
   let nextEligibleAt: string | null = null;
   let queueRepos: FleetQueueRepoCoverage | undefined;
   let generatedWork: FleetQueueGeneratedWorkStatus | undefined;
@@ -1275,6 +1287,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     eligibleBacklogItems = eligibility.eligibleItems.length;
     cooldownItems = eligibility.cooldownItems;
     pendingItems = eligibility.pendingItems;
+    repairControlBlockedItems = eligibility.repairControlBlockedItems;
     nextEligibleAt = eligibility.nextEligibleAt;
     nextQueueItems = eligibility.eligibleItems
       .slice()
@@ -1410,6 +1423,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       eligibleBacklogItems,
       cooldownItems,
       pendingItems,
+      ...(repairControlBlockedItems > 0 ? { repairControlBlockedItems } : {}),
       nextEligibleAt,
       ...(queueRepos !== undefined ? { repos: queueRepos } : {}),
       ...(nextQueueItems.length > 0 ? { next: nextQueueItems } : {}),

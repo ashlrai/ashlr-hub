@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { resolveProductionVelocityProfile } from '../fabric/production-velocity.js';
 
 type ProposalItemMatch = Pick<Proposal, 'id' | 'title' | 'summary' | 'workItemId' | 'repo'> &
-  Partial<Pick<Proposal, 'createdAt' | 'status'>>;
+  Partial<Pick<Proposal, 'createdAt' | 'status' | 'workItemGenerationId'>>;
 
 type PendingProposalConfig = Pick<AshlrConfig, 'foundry'> | undefined;
 
@@ -11,8 +11,8 @@ export interface PendingProposalBlockingOptions {
   now?: Date | number | string;
 }
 
-export function workItemCoverageKey(item: Pick<WorkItem, 'repo' | 'id'>): string {
-  return `${resolve(item.repo)}\0${item.id}`;
+export function workItemCoverageKey(item: Pick<WorkItem, 'repo' | 'id' | 'repairGenerationId'>): string {
+  return `${resolve(item.repo)}\0${item.id}\0${item.repairGenerationId ?? ''}`;
 }
 
 function exactItemIdRegex(itemId: string): RegExp {
@@ -81,12 +81,20 @@ export function pendingProposalItemKeysForBacklog(
     const workItemId = proposal.workItemId?.trim();
     if (workItemId) {
       for (const item of itemsById.get(workItemId) ?? []) {
-        if (proposalRepoMatchesItem(proposal, item)) pendingItemKeys.add(workItemCoverageKey(item));
+        const generationMatches = !item.repairGenerationId ||
+          proposal.workItemGenerationId === item.repairGenerationId;
+        if (proposalRepoMatchesItem(proposal, item) && generationMatches) {
+          pendingItemKeys.add(workItemCoverageKey(item));
+        }
       }
       continue;
     }
 
     for (const item of items) {
+      // Legacy text-only proposals carry no generation authority. They may
+      // suppress ordinary work for compatibility, but never a newer durable
+      // repair generation that intentionally reuses a stable child item id.
+      if (item.repairGenerationId) continue;
       if (proposalRepoMatchesItem(proposal, item) && proposalTextMentionsItemId(proposal, item.id)) {
         pendingItemKeys.add(workItemCoverageKey(item));
       }

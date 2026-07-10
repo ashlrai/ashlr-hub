@@ -23,6 +23,7 @@ import {
   pendingProposalItemKeysForBacklog,
   workItemCoverageKey,
 } from '../fleet/proposal-matching.js';
+import { withSelfHealQueueLock } from '../fleet/self-heal.js';
 
 // ---------------------------------------------------------------------------
 // M133: normalized title for dedup matching
@@ -149,16 +150,55 @@ export function loadBacklog(): Backlog | null {
 
 /** Persist the backlog atomically (write + sync approach for node builtins). */
 function persistBacklog(backlog: Backlog): void {
+  const persisted = withSelfHealQueueLock(() => {
+    const current = loadBacklog();
+    const currentMs = Date.parse(current?.generatedAt ?? '');
+    const snapshotMs = Date.parse(backlog.generatedAt);
+    if (current && Number.isFinite(currentMs) && Number.isFinite(snapshotMs) && currentMs >= snapshotMs) {
+      const ids = new Set(backlog.items.map((item) => item.id));
+      const concurrent = current.items.filter((item) => !ids.has(item.id));
+      persistBacklogUnlocked({
+        generatedAt: current.generatedAt,
+        repos: [...new Set([...backlog.repos, ...current.repos])],
+        items: [...backlog.items, ...concurrent],
+      });
+      return;
+    }
+    persistBacklogUnlocked(backlog);
+  });
+  if (!persisted.ok) throw new Error('backlog persistence lock unavailable');
+}
+
+/** Append work under the same lock used by queue pruning and backlog persistence. */
+export function enqueueBacklogItems(items: WorkItem[]): number {
+  const result = enqueueBacklogItemsDetailed(items);
+  return result.ok ? result.enqueued : 0;
+}
+
+export function enqueueBacklogItemsDetailed(items: WorkItem[]): { ok: boolean; enqueued: number } {
+  if (items.length === 0) return { ok: true, enqueued: 0 };
+  const persisted = withSelfHealQueueLock(() => {
+    const existing = loadBacklog();
+    const existingItems = existing?.items ?? [];
+    const existingIds = new Set(existingItems.map((item) => item.id));
+    const fresh = items.filter((item) => !existingIds.has(item.id));
+    if (fresh.length === 0) return 0;
+    persistBacklogUnlocked({
+      generatedAt: new Date().toISOString(),
+      repos: [...new Set([...existingItems, ...fresh].map((item) => item.repo))],
+      items: [...existingItems, ...fresh],
+    });
+    return fresh.length;
+  });
+  return persisted.ok ? { ok: true, enqueued: persisted.value } : { ok: false, enqueued: 0 };
+}
+
+function persistBacklogUnlocked(backlog: Backlog): void {
   const p = backlogPath();
   const dir = join(homedir(), '.ashlr');
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
-  // Atomic write: write to a temp file then rename. Node's fs.renameSync is
-  // atomic on POSIX within the same filesystem.
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const tmp = p + '.tmp';
   writeFileSync(tmp, JSON.stringify(backlog, null, 2) + '\n', 'utf8');
-  // Atomic rename: node:fs renameSync is atomic on POSIX within one filesystem.
   renameSync(tmp, p);
 }
 
@@ -410,6 +450,7 @@ export async function buildBacklog(opts?: {
           return false;
         }
         const normTitle = normalizeTitle(item.title);
+        if (item.repairGenerationId) return true;
         if (
           pendingGlobalNormTitles.has(normTitle) ||
           pendingRepoNormTitles.has(`${resolve(item.repo)}\0${normTitle}`)

@@ -1,27 +1,37 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
-  accessSync,
+  chmodSync,
   closeSync,
-  constants,
+  constants as fsConstants,
   existsSync,
+  fchmodSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
+  readSync,
   renameSync,
   unlinkSync,
-  writeFileSync,
+  writeSync,
+  type Stats,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { isOuterAttemptIdentity, isSafeExecutionIdentity } from './attempt-identity.js';
 import { isTrustedGeneratedRepairItem } from './self-heal-trust.js';
 import type { WorkItem } from '../types.js';
+import {
+  readRepairHandoffs,
+  repairGenerationIdFromHandoffId,
+  repairHandoffJournalPath,
+  type RepairHandoffObservation,
+} from './repair-handoff-journal.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 
-const MAX_RECORDS = 2_000;
+const MAX_RECORDS = 100_000;
+const MAX_LEDGER_BYTES = 32 * 1024 * 1024;
 const SHA256_RE = /^[a-f0-9]{64}$/;
-const LOCK_CONTENTION_WAIT_MS = 250;
-const LOCK_CONTENTION_POLL_MS = 5;
-const LOCK_WAIT_ARRAY = new Int32Array(new SharedArrayBuffer(4));
 
 export type GeneratedRepairDisposition = 'active' | 'retired' | 'exhausted';
 
@@ -35,6 +45,18 @@ interface GeneratedRepairLifecycleRecord {
 interface GeneratedRepairLifecycleLedger {
   schemaVersion: 1;
   records: GeneratedRepairLifecycleRecord[];
+}
+
+let lifecycleLedgerCache: { fingerprint: string; ledger: GeneratedRepairLifecycleLedger } | undefined;
+
+function cloneLedger(ledger: GeneratedRepairLifecycleLedger): GeneratedRepairLifecycleLedger {
+  return {
+    schemaVersion: 1,
+    records: ledger.records.map((record) => ({
+      ...record,
+      emptyAttemptHashes: record.emptyAttemptHashes.slice(),
+    })),
+  };
 }
 
 export interface GeneratedRepairLifecycleResult {
@@ -56,8 +78,37 @@ export function generatedRepairLifecyclePath(): string {
   return join(homedir(), '.ashlr', 'fleet', 'generated-repair-lifecycle.json');
 }
 
+let handoffAuthorityCache: {
+  fingerprint: string;
+  byEventId: Map<string, RepairHandoffObservation>;
+} | undefined;
+
+function handoffAuthorityByEventId(): Map<string, RepairHandoffObservation> {
+  const path = repairHandoffJournalPath();
+  let fingerprint = `${path}:missing`;
+  try {
+    const stat = lstatSync(path);
+    fingerprint = `${path}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+  } catch { /* missing or unsafe state is represented by the reader */ }
+  if (handoffAuthorityCache?.fingerprint === fingerprint) return handoffAuthorityCache.byEventId;
+  const byEventId = new Map(readRepairHandoffs().observations.map((entry) => [entry.eventId, entry]));
+  handoffAuthorityCache = { fingerprint, byEventId };
+  return byEventId;
+}
+
 export function generatedRepairGenerationId(item: WorkItem): string | null {
   if (!isTrustedGeneratedRepairItem(item)) return null;
+  if (item.repairHandoffId !== undefined || item.repairGenerationId !== undefined) {
+    if (
+      typeof item.repairHandoffId !== 'string' ||
+      typeof item.repairGenerationId !== 'string' ||
+      repairGenerationIdFromHandoffId(item.repairHandoffId) !== item.repairGenerationId
+    ) return null;
+    const handoff = handoffAuthorityByEventId().get(item.repairHandoffId);
+    if (!handoff || handoff.generationId !== item.repairGenerationId || handoff.childItemId !== item.id) return null;
+    try { if (resolve(handoff.repo) !== resolve(item.repo)) return null; } catch { return null; }
+    return item.repairGenerationId;
+  }
   let repo: string;
   try {
     repo = resolve(item.repo);
@@ -73,6 +124,12 @@ export function generatedRepairGenerationId(item: WorkItem): string | null {
     item.source,
     new Date(ts).toISOString(),
   ])).digest('hex');
+}
+
+export function generatedRepairCooldownKey(item: WorkItem): string {
+  if (item.repairHandoffId === undefined && item.repairGenerationId === undefined) return item.id;
+  const generationId = generatedRepairGenerationId(item);
+  return generationId ? `${item.id}::generation:${generationId}` : item.id;
 }
 
 function attemptHash(attemptId: string): string {
@@ -109,24 +166,49 @@ function validRecord(value: unknown): value is GeneratedRepairLifecycleRecord {
 
 function loadLedger(): { ok: true; ledger: GeneratedRepairLifecycleLedger } | { ok: false } {
   const path = generatedRepairLifecyclePath();
-  if (!existsSync(path)) return { ok: true, ledger: { schemaVersion: 1, records: [] } };
+  if (!existsSync(path)) {
+    const fingerprint = `${path}:missing`;
+    if (lifecycleLedgerCache?.fingerprint === fingerprint) {
+      return { ok: true, ledger: cloneLedger(lifecycleLedgerCache.ledger) };
+    }
+    const ledger: GeneratedRepairLifecycleLedger = { schemaVersion: 1, records: [] };
+    lifecycleLedgerCache = { fingerprint, ledger };
+    return { ok: true, ledger: cloneLedger(ledger) };
+  }
+  let fd: number | undefined;
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    const before = lstatSync(path);
+    if (!safeStoreFile(before) || before.size > MAX_LEDGER_BYTES) return { ok: false };
+    const fingerprint = `${path}:${before.dev}:${before.ino}:${before.size}:${before.mtimeMs}:${before.ctimeMs}`;
+    if (lifecycleLedgerCache?.fingerprint === fingerprint) {
+      return { ok: true, ledger: cloneLedger(lifecycleLedgerCache.ledger) };
+    }
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const opened = fstatSync(fd);
+    if (!safeStoreFile(opened) || opened.dev !== before.dev || opened.ino !== before.ino || opened.size > MAX_LEDGER_BYTES) {
+      return { ok: false };
+    }
+    const bytes = Buffer.alloc(opened.size);
+    if (opened.size > 0 && readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) return { ok: false };
+    const after = fstatSync(fd);
+    if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size) return { ok: false };
+    const parsed = JSON.parse(bytes.toString('utf8')) as unknown;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false };
     const value = parsed as Record<string, unknown>;
     if (value['schemaVersion'] !== 1 || !Array.isArray(value['records'])) return { ok: false };
     if (!value['records'].every(validRecord)) return { ok: false };
     const records = value['records'] as GeneratedRepairLifecycleRecord[];
     if (new Set(records.map((record) => record.generationId)).size !== records.length) return { ok: false };
-    return {
-      ok: true,
-      ledger: {
-        schemaVersion: 1,
-        records: records.slice(-MAX_RECORDS),
-      },
+    const ledger: GeneratedRepairLifecycleLedger = {
+      schemaVersion: 1,
+      records: records.slice(-MAX_RECORDS),
     };
+    lifecycleLedgerCache = { fingerprint, ledger };
+    return { ok: true, ledger: cloneLedger(ledger) };
   } catch {
     return { ok: false };
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
   }
 }
 
@@ -138,9 +220,63 @@ function lifecycleFailurePath(): string {
   return `${generatedRepairLifecyclePath()}.failed`;
 }
 
+function ownedByCurrentUser(uid: number): boolean {
+  return typeof process.getuid !== 'function' || uid === process.getuid();
+}
+
+function safeStoreFile(stat: Stats): boolean {
+  return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && ownedByCurrentUser(stat.uid) &&
+    (process.platform === 'win32' || (stat.mode & 0o077) === 0);
+}
+
+function ensureLifecycleDirectory(): string {
+  const dir = dirname(generatedRepairLifecyclePath());
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const stat = lstatSync(dir);
+  if (stat.isSymbolicLink() || !stat.isDirectory() || !ownedByCurrentUser(stat.uid)) {
+    throw new Error('unsafe generated repair lifecycle directory');
+  }
+  if (process.platform !== 'win32' && (stat.mode & 0o300) !== 0o300) {
+    throw new Error('generated repair lifecycle directory is not owner-writable');
+  }
+  chmodSync(dir, 0o700);
+  return dir;
+}
+
+function fsyncDirectory(dir: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(dir, fsConstants.O_RDONLY);
+    fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function atomicPrivateWrite(path: string, bytes: Buffer): void {
+  const dir = ensureLifecycleDirectory();
+  const tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  let fd: number | undefined;
+  try {
+    fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    const opened = fstatSync(fd);
+    if (!safeStoreFile(opened)) throw new Error('unsafe generated repair lifecycle temporary file');
+    if (writeSync(fd, bytes) !== bytes.length) throw new Error('short generated repair lifecycle write');
+    fchmodSync(fd, 0o600);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(tmp, path);
+    fsyncDirectory(dir);
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
+    try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* best effort */ }
+  }
+}
+
 function markLifecycleWriteFailure(): void {
   try {
-    writeFileSync(lifecycleFailurePath(), 'lifecycle write failed\n', { encoding: 'utf8', mode: 0o600 });
+    atomicPrivateWrite(lifecycleFailurePath(), Buffer.from('lifecycle write failed\n', 'utf8'));
   } catch {
     // The transition still returns unavailable; no false success is reported.
   }
@@ -149,47 +285,14 @@ function markLifecycleWriteFailure(): void {
 function clearLifecycleWriteFailure(): void {
   try {
     const path = lifecycleFailurePath();
-    if (existsSync(path)) unlinkSync(path);
+    if (!existsSync(path)) return;
+    const stat = lstatSync(path);
+    if (!safeStoreFile(stat)) return;
+    unlinkSync(path);
+    fsyncDirectory(dirname(path));
   } catch {
     // A lingering marker is fail-closed and can be cleared by a later success.
   }
-}
-
-function acquireLifecycleLock(): string | null {
-  const token = randomUUID();
-  let fd: number | undefined;
-  try {
-    const dir = join(homedir(), '.ashlr', 'fleet');
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const path = lifecycleLockPath();
-    fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-    writeFileSync(fd, `${token}\n`, 'utf8');
-    closeSync(fd);
-    fd = undefined;
-    return token;
-  } catch {
-    if (fd !== undefined) {
-      try { closeSync(fd); } catch { /* best-effort */ }
-    }
-    return null;
-  }
-}
-
-function releaseLifecycleLock(token: string): void {
-  try {
-    const path = lifecycleLockPath();
-    if (existsSync(path) && readFileSync(path, 'utf8').trim() === token) unlinkSync(path);
-  } catch {
-    // Best-effort; an uncertain lock remains fail-closed.
-  }
-}
-
-function markContentionAfterWriter(): void {
-  const deadline = Date.now() + LOCK_CONTENTION_WAIT_MS;
-  while (existsSync(lifecycleLockPath()) && Date.now() < deadline) {
-    Atomics.wait(LOCK_WAIT_ARRAY, 0, 0, LOCK_CONTENTION_POLL_MS);
-  }
-  markLifecycleWriteFailure();
 }
 
 function lifecycleWriteInProgress(): boolean {
@@ -202,23 +305,17 @@ function lifecycleWriteInProgress(): boolean {
 
 function lifecycleStorageAvailable(): boolean {
   try {
-    if (existsSync(lifecycleFailurePath())) return false;
+    const failure = lifecycleFailurePath();
+    if (existsSync(failure)) {
+      if (!safeStoreFile(lstatSync(failure))) return false;
+      return false;
+    }
     const path = generatedRepairLifecyclePath();
-    const dir = dirname(path);
     if (existsSync(path)) {
-      accessSync(path, constants.R_OK);
+      const stat = lstatSync(path);
+      if (!safeStoreFile(stat) || stat.size > MAX_LEDGER_BYTES) return false;
     }
-    if (existsSync(dir)) {
-      accessSync(dir, constants.W_OK | constants.X_OK);
-      return true;
-    }
-    let parent = dirname(dir);
-    while (!existsSync(parent)) {
-      const next = dirname(parent);
-      if (next === parent) return false;
-      parent = next;
-    }
-    accessSync(parent, constants.W_OK | constants.X_OK);
+    ensureLifecycleDirectory();
     return true;
   } catch {
     return false;
@@ -228,20 +325,37 @@ function lifecycleStorageAvailable(): boolean {
 function saveLedger(ledger: GeneratedRepairLifecycleLedger): boolean {
   try {
     const path = generatedRepairLifecyclePath();
-    const dir = join(homedir(), '.ashlr', 'fleet');
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const tmp = `${path}.tmp`;
-    writeFileSync(tmp, JSON.stringify({
-      schemaVersion: 1,
-      records: ledger.records.slice(-MAX_RECORDS),
-    }, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
-    renameSync(tmp, path);
+    if (existsSync(path) && !safeStoreFile(lstatSync(path))) throw new Error('unsafe generated repair lifecycle ledger');
+    const bytes = serializeLedger(ledger.records);
+    atomicPrivateWrite(path, bytes);
     clearLifecycleWriteFailure();
     return true;
   } catch {
     markLifecycleWriteFailure();
     return false;
   }
+}
+
+function serializeLedger(records: GeneratedRepairLifecycleRecord[]): Buffer {
+  const bounded = records.slice(-MAX_RECORDS);
+  const encode = (count: number): Buffer => Buffer.from(JSON.stringify({
+    schemaVersion: 1,
+    records: bounded.slice(-count),
+  }, null, 2) + '\n', 'utf8');
+  let low = 0;
+  let high = bounded.length;
+  let best = encode(0);
+  while (low <= high) {
+    const count = Math.floor((low + high) / 2);
+    const candidate = encode(count);
+    if (candidate.length <= MAX_LEDGER_BYTES) {
+      best = candidate;
+      low = count + 1;
+    } else {
+      high = count - 1;
+    }
+  }
+  return best;
 }
 
 function resultFromRecord(
@@ -294,15 +408,14 @@ export function recordGeneratedRepairLifecycle(
   if (evidence.kind === 'proposal-created' && !isSafeExecutionIdentity(evidence.proposalId)) {
     return { available: false, disposition: 'active', authoritativeEmptyRuns: 0, recorded: false };
   }
-  const lockToken = acquireLifecycleLock();
-  if (!lockToken) {
-    markContentionAfterWriter();
+  const lock = acquireLocalStoreLock(lifecycleLockPath(), 250);
+  if (!lock) {
     return { available: false, disposition: 'active', authoritativeEmptyRuns: 0, recorded: false };
   }
   try {
     return recordGeneratedRepairLifecycleUnlocked(id, evidence);
   } finally {
-    releaseLifecycleLock(lockToken);
+    releaseLocalStoreLock(lock);
   }
 }
 

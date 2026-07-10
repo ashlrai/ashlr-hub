@@ -3465,6 +3465,10 @@ export interface WorkItem {
   tags: string[];
   /** ISO timestamp this item was generated. */
   ts: string;
+  /** Durable parent-handoff observation that authorizes this generated repair projection. */
+  repairHandoffId?: string;
+  /** Stable generation identity derived from the parent attempt, independent of queue replay time. */
+  repairGenerationId?: string;
 }
 
 /**
@@ -3997,6 +4001,13 @@ export interface DaemonTick {
     dispatchRepairPruned?: number;
     dispatchRepairPruneFailed?: number;
     dispatchRepairLifecycleUnavailable?: number;
+    repairHandoffObservations?: number;
+    repairHandoffInvalidRows?: number;
+    repairHandoffConflictingIds?: number;
+    repairHandoffSourceState?: 'missing' | 'healthy' | 'degraded';
+    repairHandoffCompacted?: number;
+    repairHandoffCompactionUnavailable?: number;
+    proposalRepairInboxAvailable?: boolean;
     skippedByCadence?: boolean;
     nextAfter?: string;
   };

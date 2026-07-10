@@ -77,6 +77,9 @@ export interface DispatchProductionEvent {
   diffLines?: number;
   reason?: string;
   basis: DispatchProductionBasis;
+  /** Control-plane lineage on synthetic durable repair-handoff replay only. */
+  repairHandoffId?: string;
+  repairGenerationId?: string;
 }
 
 export interface DispatchProductionReasonCount {

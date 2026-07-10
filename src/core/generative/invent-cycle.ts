@@ -30,7 +30,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { AshlrConfig, Backlog, WorkItem } from '../types.js';
+import type { AshlrConfig, WorkItem } from '../types.js';
+import { enqueueBacklogItemsDetailed } from '../portfolio/backlog.js';
 import { listGoals } from '../goals/store.js';
 import { goalFocusSnapshot } from '../goals/focus.js';
 import { listEnrolled } from '../sandbox/policy.js';
@@ -194,47 +195,12 @@ async function buildRepoState(repo: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Enqueue — append fresh WorkItems to the persisted backlog (~/.ashlr/backlog.json).
-// Mirrors emitToBacklog() in src/cli/invent.ts. Atomic tmp+rename. Never throws.
+// Enqueue fresh WorkItems through the shared queue/backlog lock.
 // Returns the number of items actually enqueued (existing ids are skipped).
 // ---------------------------------------------------------------------------
 
-function backlogPath(): string {
-  return join(homedir(), '.ashlr', 'backlog.json');
-}
-
-function enqueueToBacklog(items: WorkItem[]): number {
-  if (items.length === 0) return 0;
-  try {
-    const bPath = backlogPath();
-    let existing: Backlog | null = null;
-    try {
-      existing = JSON.parse(readFileSync(bPath, 'utf8')) as Backlog;
-    } catch {
-      /* absent or corrupt — start fresh */
-    }
-
-    const existingItems = Array.isArray(existing?.items) ? existing!.items : [];
-    const existingIds = new Set(existingItems.map((x) => x.id));
-    const fresh = items.filter((i) => !existingIds.has(i.id));
-    if (fresh.length === 0) return 0;
-
-    const merged = [...existingItems, ...fresh];
-    const backlog: Backlog = {
-      generatedAt: new Date().toISOString(),
-      repos: [...new Set(merged.map((i) => i.repo))],
-      items: merged,
-    };
-
-    const dir = join(homedir(), '.ashlr');
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const tmp = bPath + '.tmp';
-    writeFileSync(tmp, JSON.stringify(backlog, null, 2), 'utf8');
-    renameSync(tmp, bPath);
-    return fresh.length;
-  } catch {
-    return 0;
-  }
+function enqueueToBacklog(items: WorkItem[]): { ok: boolean; enqueued: number } {
+  return enqueueBacklogItemsDetailed(items);
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +279,7 @@ export async function runInventCycle(
 
     let invented = 0;
     let enqueued = 0;
+    let ledgerChanged = false;
 
     for (const repo of repos) {
       if (enqueued >= cap) break;
@@ -335,17 +302,21 @@ export async function runInventCycle(
           const hash = cycleHash(repo, item.title);
           if (!opts.skipDedup && isRecentlyEnqueued(ledger, hash)) continue;
           fresh.push(item);
-          if (!opts.skipDedup) recordEnqueued(ledger, repo, item.title);
         }
 
         invented += fresh.length;
-        enqueued += enqueueToBacklog(fresh);
+        const persisted = enqueueToBacklog(fresh);
+        enqueued += persisted.enqueued;
+        if (persisted.ok && !opts.skipDedup) {
+          for (const item of fresh) recordEnqueued(ledger, repo, item.title);
+          ledgerChanged ||= fresh.length > 0;
+        }
       } catch {
         // Per-repo errors never abort the cycle.
       }
     }
 
-    if (!opts.skipDedup && invented > 0) {
+    if (!opts.skipDedup && ledgerChanged) {
       saveLedger(ledger);
     }
 

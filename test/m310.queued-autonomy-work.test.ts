@@ -531,7 +531,7 @@ describe('queued autonomy work scanner', () => {
       proposalId: 'prop-prune-failure',
     });
     const queuePath = join(fx.ashlrDir, 'self-heal-queue.json');
-    mkdirSync(`${queuePath}.tmp`);
+    mkdirSync(join(fx.ashlrDir, '.self-heal-queue.lock'));
 
     const result = queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
     const persisted = JSON.parse(readFileSync(queuePath, 'utf8')) as WorkItem[];
