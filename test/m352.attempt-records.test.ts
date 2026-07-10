@@ -567,6 +567,90 @@ describe('AttemptRecord coverage', () => {
     expect(JSON.stringify(summary.causalGapDiagnostics)).not.toContain('stale policy route text');
   });
 
+  it('does not mark causal coverage weak when only policy-suppressed attempts lack current labels', () => {
+    const records = listAttemptRecords({
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          causalDispatch({
+            itemId: 'learnable-current',
+            runId: 'run-learnable-current',
+            trajectoryId: 'traj-learnable-current',
+            proposalId: 'prop-learnable-current',
+            learningLabel: learningLabel(),
+          }),
+          causalDispatch({
+            itemId: 'policy-suppressed-a',
+            runId: 'run-policy-suppressed-a',
+            trajectoryId: 'traj-policy-suppressed-a',
+            proposalId: undefined,
+            outcome: 'proposal-disabled',
+            proposalCreated: false,
+            runEventSummary: {
+              runId: 'run-policy-suppressed-a',
+              outcome: 'proposal-disabled',
+              proposalCreated: false,
+              actionCounts: { proposalDisabled: 1 },
+            },
+            learningLabel: learningLabel({
+              learningKind: 'policy-suppressed',
+              policySuppressed: true,
+              diagnosticAttempt: false,
+              attemptShape: {
+                backendNoDiff: 0,
+                captureOrGateBlocked: 0,
+                repairAttempts: 0,
+                policyDisabled: 1,
+              },
+            }),
+          }),
+          causalDispatch({
+            itemId: 'policy-suppressed-b',
+            runId: 'run-policy-suppressed-b',
+            trajectoryId: 'traj-policy-suppressed-b',
+            proposalId: undefined,
+            outcome: 'proposal-disabled',
+            proposalCreated: false,
+            runEventSummary: {
+              runId: 'run-policy-suppressed-b',
+              outcome: 'proposal-disabled',
+              proposalCreated: false,
+              actionCounts: { proposalDisabled: 1 },
+            },
+            learningLabel: learningLabel({
+              learningKind: 'policy-suppressed',
+              policySuppressed: true,
+              diagnosticAttempt: false,
+              attemptShape: {
+                backendNoDiff: 0,
+                captureOrGateBlocked: 0,
+                repairAttempts: 0,
+                policyDisabled: 1,
+              },
+            }),
+          }),
+        ],
+        readAgentActions: () => [],
+        listOutcomeRecords: () => [],
+        readDecisions: () => [],
+        listAutonomyEvidencePacks: () => [],
+        loadWorkedLedger: () => ({ events: [] }),
+      }),
+    });
+
+    const summary = summarizeAttemptCoverage(records);
+
+    expect(summary.causalCoverage.currentAuthoritativeLabel).toEqual({ count: 1, rate: 1 / 3 });
+    expect(summary.causalWeak).toMatchObject({
+      weak: false,
+      reasons: [],
+    });
+    expect(summary.causalGapDiagnostics).toMatchObject({
+      blockedCurrentLabels: 2,
+      causes: [expect.objectContaining({ cause: 'policy-suppressed', count: 2 })],
+      actionableCauses: [],
+    });
+  });
+
   it('derives read-time labels for legacy run-outcome causal fallbacks without rewriting ledgers', () => {
     const previousAshlrHome = process.env.ASHLR_HOME;
     const home = mkdtempSync(join(tmpdir(), 'ashlr-m352-legacy-causal-'));

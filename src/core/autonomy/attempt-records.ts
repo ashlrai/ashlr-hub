@@ -173,6 +173,7 @@ export interface AttemptCoverageStatus {
       count: number;
       rate: number;
       threshold: number;
+      denominator?: number;
       sampleRefs: string[];
     }>;
   };
@@ -755,14 +756,31 @@ export function summarizeAttemptCoverage(
   const weakReasons = records.length >= CAUSAL_WEAK_MIN_ATTEMPTS
     ? weakKinds
         .map(({ kind, threshold }) => {
-          const metricValue = causalCoverage[kind];
+          const learnableCurrentLabelRecords = kind === 'currentAuthoritativeLabel'
+            ? records.filter((record) => !record.policySuppressed)
+            : null;
+          const metricValue = learnableCurrentLabelRecords
+            ? {
+                count: learnableCurrentLabelRecords.filter((record) => record.causalCoverage.currentAuthoritativeLabel).length,
+                rate: learnableCurrentLabelRecords.length > 0
+                  ? learnableCurrentLabelRecords.filter((record) => record.causalCoverage.currentAuthoritativeLabel).length / learnableCurrentLabelRecords.length
+                  : 1,
+              }
+            : causalCoverage[kind];
           const gap = causalGaps.find((candidate) => candidate.kind === kind);
+          const sampleRefs = learnableCurrentLabelRecords
+            ? learnableCurrentLabelRecords
+                .filter((record) => !record.causalCoverage.currentAuthoritativeLabel)
+                .slice(0, 5)
+                .map(attemptRef)
+            : gap?.sampleRefs ?? [];
           return {
             kind,
             count: metricValue.count,
             rate: metricValue.rate,
             threshold,
-            sampleRefs: gap?.sampleRefs ?? [],
+            ...(learnableCurrentLabelRecords ? { denominator: learnableCurrentLabelRecords.length } : {}),
+            sampleRefs,
           };
         })
         .filter((reason) => reason.rate < reason.threshold)

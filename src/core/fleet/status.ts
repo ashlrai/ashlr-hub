@@ -2733,6 +2733,7 @@ function causalCoverageNextAction(status: AttemptCoverageStatus | undefined): Fl
   const weak = status.causalWeak.reasons[0];
   if (!weak) return null;
   const percent = Math.round(weak.rate * 100);
+  const denominator = weak.denominator ?? status.attempts;
   const topCause = status.causalGapDiagnostics.causes[0];
   const actionableCause = status.causalGapDiagnostics.actionableCauses[0];
   const topBasis = status.causalGapDiagnostics.byLabelBasis[0];
@@ -2751,7 +2752,7 @@ function causalCoverageNextAction(status: AttemptCoverageStatus | undefined): Fl
     label: 'Inspect causal coverage',
     detail:
       `Attempt causal metadata coverage is weak: ` +
-      `${weak.kind} ${weak.count}/${status.attempts} (${percent}%).` +
+      `${weak.kind} ${weak.count}/${denominator} (${percent}%).` +
       `${diagnostics.length > 0 ? ` ${diagnostics.join('; ')}.` : ''}`,
     commands: [
       nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
