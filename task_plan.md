@@ -1290,3 +1290,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add regression coverage for policy-suppressed attempts lacking current labels.
 - [x] Run focused, typecheck, lint, build, audit, JS syntax, and diff gates.
 - [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Protected Capture Repair Routing
+- [x] Use live FleetStatus and scout recommendations to select generated capture repairs as the next dispatch-yield lane.
+- [x] Add a strict `isTrustedCaptureRepairItem()` predicate with deterministic id, generated tags/detail text, and diff/actionable-failure evidence.
+- [x] Route trusted capture repairs as protected frontier candidates with a `frontier:` reason so workhorse dispatch preserves the hint.
+- [x] Keep malformed/sanitized repair-shaped samples fail-closed instead of throwing or promoting.
+- [x] Add router, resource-aware gateway, workhorse dispatch, and queued-autonomy regressions.
+- [x] Run focused, adjacent, typecheck, lint, build, audit, JS syntax, and diff gates.
+- [x] Commit, push, reload daemon, and smoke live status.
