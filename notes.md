@@ -1173,3 +1173,15 @@
   - Scout finding: in-process API-model provider calls should never use Phantom placeholder env values (`phm_...`) as bearer/API keys when a vault reveal is unavailable, because those values are intentionally worthless tokens.
   - Implementation: `resolveProviderKey()` now treats `phm_` placeholder-shaped values from both `phantom reveal` and raw `process.env` fallback as missing, returning `undefined` without logging or exposing the token.
   - Verification passed: focused secret/auth suite (`m65`, `m230`, `m11`, 65 tests), `npm run typecheck -- --pretty false`, `git diff --check`, `npm run lint` (known 114-warning baseline), `npm run build`, and `npm audit --audit-level=moderate`.
+
+- Current Phantom audit readiness blocker pass:
+  - Scout finding: Phantom agent-report rollups already carry values-free aggregate risk/severity/delegation counts, but Fleet OS only exposed them as a next action. A serious Phantom audit finding could therefore sit beside readiness instead of becoming the active autonomous shipping blocker.
+  - Implementation: `phantomAuditSignalSummary()` now centralizes the values-free aggregate signals, `review-phantom-audit` ranks ahead of diagnostic reslices, and Autonomous Ship Readiness emits top blocker `phantom-audit-risk` with Mission Brief directive `Review Phantom audit` once daemon and auto-merge control preconditions are healthy. Phantom is now an optional first-class readiness source: clean reports add healthy evidence, risky reports add a blocked source with degraded-source quality.
+  - Safety boundary: blocker/action detail uses only bounded aggregate counts and the existing values-hidden copy. Regression coverage proves raw secret names, repo paths, commands, findings, and unsafe map keys do not enter FleetStatus, Mission Brief, next actions, or formatted CLI output.
+  - Verification passed so far: focused Phantom/FleetStatus suite (`m348`, `m49`, 66 tests), `npm run typecheck -- --pretty false`, and `git diff --check`.
+
+- Current 10:4 verification contract scout finding:
+  - The Hub detector is already nested-cwd aware for `/Users/masonwyatt/Desktop/10:4/relay`, but detected `npm run check` and `npm run test` fail because the parent repo path contains `:`, which is the POSIX `PATH` separator. NPM injects `/Users/.../10:4/relay/node_modules/.bin` into PATH, and the shell splits it at the colon.
+  - Direct node entrypoints pass: `node node_modules/typescript/bin/tsc --noEmit` and `node node_modules/vitest/vitest.mjs run` from `relay` both work; Vitest reports 48 passed tests.
+  - Safe next step: add root `/Users/masonwyatt/Desktop/10:4/ashlr.verify.json` with `mode:"replace-detected"` and argv-only commands using `cwd:"relay"` plus direct `node node_modules/...` entrypoints. `augment-detected` is unsafe here because it would retain broken npm commands.
+  - Push note: `/Users/masonwyatt/Desktop/10:4` has no remotes configured, so any contract commit there will be local-only until a remote/upstream is added.

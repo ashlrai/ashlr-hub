@@ -3,7 +3,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AshlrConfig, PhantomStatus } from '../src/core/types.js';
@@ -70,6 +70,30 @@ function phantomStatus(overrides: Partial<PhantomStatus> = {}): PhantomStatus {
     },
     ...overrides,
   };
+}
+
+function writeRunningDaemonState(lastTickAt = new Date().toISOString()): void {
+  const ashlrHome = process.env.ASHLR_HOME;
+  if (!ashlrHome) throw new Error('ASHLR_HOME must be set before writing daemon state');
+  mkdirSync(ashlrHome, { recursive: true });
+  writeFileSync(
+    join(ashlrHome, 'daemon.json'),
+    JSON.stringify(
+      {
+        running: true,
+        pid: process.pid,
+        startedAt: lastTickAt,
+        lastTickAt,
+        todayDate: lastTickAt.slice(0, 10),
+        todaySpentUsd: 0,
+        itemsProcessed: 1,
+        ticks: [],
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
 }
 
 async function withFleetMocks<T>(
@@ -275,10 +299,19 @@ describe('M348 FleetStatus Phantom capability', () => {
         agentReport,
       };
     }, async ({ buildFleetStatus, formatFleetStatus }) => {
+      writeRunningDaemonState();
       const cfg = baseConfig();
       cfg.phantom = {
         enabled: true,
         agentReportRollup: { enabled: true },
+      };
+      cfg.foundry = {
+        ...cfg.foundry,
+        autoMerge: {
+          enabled: true,
+          trustBasis: 'verification',
+          maxRisk: 'low',
+        },
       };
       const status = await buildFleetStatus(cfg);
       const serialized = JSON.stringify(status.phantom);
@@ -348,6 +381,40 @@ describe('M348 FleetStatus Phantom capability', () => {
       expect(JSON.stringify(action)).not.toContain('phantom reveal SECRET');
       expect(JSON.stringify(action)).not.toContain('raw finding TOKEN=abc123');
       expect(JSON.stringify(action)).not.toContain('/Users/masonwyatt/private/repo');
+      expect(status.autonomousShipReadiness).toMatchObject({
+        verdict: 'blocked',
+        topBlocker: {
+          id: 'phantom-audit-risk',
+          label: 'Phantom audit needs review',
+          severity: 'high',
+          source: 'phantom',
+        },
+        primaryAction: {
+          id: 'review-phantom-audit',
+        },
+      });
+      expect(status.autonomousShipReadiness?.topBlocker?.detail).toContain('2 high/critical risk signals');
+      expect(status.autonomousShipReadiness?.sources.find((source) => source.id === 'phantom')).toMatchObject({
+        label: 'Phantom Audit',
+        status: 'blocked',
+        sourceQuality: {
+          badge: 'degraded-source',
+          sourcePresent: true,
+        },
+      });
+      expect(status.missionBrief).toMatchObject({
+        directive: 'Review Phantom audit',
+        blocker: {
+          id: 'phantom-audit-risk',
+        },
+        action: {
+          id: 'review-phantom-audit',
+        },
+        evidence: {
+          readinessVerdict: 'blocked',
+        },
+      });
+      expect(status.missionBrief?.whyNow).toContain('Phantom audit rollup needs review');
 
       const rendered = formatFleetStatus(status);
       expect(rendered).toContain('agent yes');
@@ -402,6 +469,16 @@ describe('M348 FleetStatus Phantom capability', () => {
 
       expect(status.phantom?.agentReport?.failedReports).toBe(0);
       expect(status.nextActions?.map((action) => action.id)).not.toContain('review-phantom-audit');
+      expect(status.autonomousShipReadiness?.topBlocker?.id).not.toBe('phantom-audit-risk');
+      expect(status.autonomousShipReadiness?.sources.find((source) => source.id === 'phantom')).toMatchObject({
+        label: 'Phantom Audit',
+        status: 'healthy',
+        detail: 'Phantom audit rollup is clear across 2 scanned repos. Values hidden; only aggregate counts are shown.',
+        sourceQuality: {
+          badge: 'healthy-source',
+          sourcePresent: true,
+        },
+      });
     });
   });
 

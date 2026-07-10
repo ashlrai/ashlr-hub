@@ -326,7 +326,7 @@ export interface FleetReadinessSourceQuality {
 }
 
 export interface FleetReadinessSourceHealth {
-  id: 'daemon' | 'guard' | 'auto-merge' | 'queue' | 'resources' | 'direction';
+  id: 'daemon' | 'guard' | 'auto-merge' | 'queue' | 'resources' | 'direction' | 'phantom';
   label: string;
   status: FleetReadinessSourceStatus;
   badge: 'healthy' | 'degraded' | 'blocked' | 'unavailable' | 'unknown';
@@ -2542,6 +2542,7 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   };
   const actionRank = (action: FleetNextAction): number => {
     if (action.id === 'repair-verification-failures' && (status.autoMergeReadiness?.knownVerificationFailed ?? 0) > 0) return -1.4;
+    if (action.id === 'review-phantom-audit') return -1.3;
     if (action.id === 'drain-diagnostic-reslices' && (status.autoMergeReadiness?.knownVerificationFailed ?? 0) === 0) return -1.2;
     if (action.id === 'inspect-dispatch-yield') return -1;
     if (action.id === 'inspect-attempt-causal-coverage') return -0.5;
@@ -2566,7 +2567,12 @@ function formatExecutionProfileSample(row: {
   return `${row.name} [${kind}: ${row.reason}]`;
 }
 
-function phantomAuditNextAction(report: PhantomAgentReportRollup | undefined): FleetNextAction | null {
+interface PhantomAuditSignalSummary {
+  detail: string;
+  signals: string[];
+}
+
+function phantomAuditSignalSummary(report: PhantomAgentReportRollup | undefined): PhantomAuditSignalSummary | null {
   if (!report) return null;
 
   const approvalReports = Math.max(report.requiresApprovalCount, report.statusCounts['requires-approval'] ?? 0);
@@ -2599,11 +2605,53 @@ function phantomAuditNextAction(report: PhantomAgentReportRollup | undefined): F
 
   const scope = report.scannedRepos > 0 ? ` across ${countPhrase(report.scannedRepos, 'scanned repo')}` : '';
   return {
+    signals,
+    detail: `Phantom audit rollup needs review${scope}: ${signals.join(', ')}. Values hidden; only aggregate counts are shown.`,
+  };
+}
+
+function phantomAuditNextAction(report: PhantomAgentReportRollup | undefined): FleetNextAction | null {
+  const summary = phantomAuditSignalSummary(report);
+  if (!summary) return null;
+
+  return {
     id: 'review-phantom-audit',
     priority: 'high',
     label: 'Review Phantom audit',
-    detail: `Phantom audit rollup needs review${scope}: ${signals.join(', ')}. Values hidden; only aggregate counts are shown.`,
+    detail: summary.detail,
   };
+}
+
+function phantomAuditReadinessSource(
+  report: PhantomAgentReportRollup,
+  generatedAt: string,
+): FleetReadinessSourceHealth {
+  const summary = phantomAuditSignalSummary(report);
+  if (summary) {
+    return readinessSource(
+      'phantom',
+      'Phantom Audit',
+      'blocked',
+      generatedAt,
+      READINESS_STATUS_STALE_MS,
+      summary.detail,
+      { sourcePresent: true, sourceDegraded: true },
+    );
+  }
+
+  const scope = report.scannedRepos > 0 ? ` across ${countPhrase(report.scannedRepos, 'scanned repo')}` : '';
+  return readinessSource(
+    'phantom',
+    'Phantom Audit',
+    'healthy',
+    generatedAt,
+    READINESS_STATUS_STALE_MS,
+    `Phantom audit rollup is clear${scope}. Values hidden; only aggregate counts are shown.`,
+    {
+      empty: report.scannedRepos === 0 && report.validReports === 0 && report.failedReports === 0,
+      sourcePresent: true,
+    },
+  );
 }
 
 function causalCoverageNextAction(status: AttemptCoverageStatus | undefined): FleetNextAction | null {
@@ -2967,7 +3015,19 @@ function shipReadinessSources(
         { sourcePresent: false },
       );
 
-  return [daemonSource, guardSource, autoMergeSource, queueSource, resourcesSource, directionSource];
+  const phantomSource = status.phantom?.agentReport
+    ? phantomAuditReadinessSource(status.phantom.agentReport, inputs.generatedAt)
+    : null;
+
+  return [
+    daemonSource,
+    guardSource,
+    autoMergeSource,
+    queueSource,
+    resourcesSource,
+    directionSource,
+    ...(phantomSource ? [phantomSource] : []),
+  ];
 }
 
 function readinessSourceSummary(sources: FleetReadinessSourceHealth[]): Record<FleetReadinessSourceStatus, number> {
@@ -3076,6 +3136,16 @@ function chooseReadinessBlocker(
       `${status.proposals.awaitingHostMerge} proposal(s) are waiting for host merge reconciliation.`,
       'high',
       'auto-merge',
+    );
+  }
+  const phantomAudit = phantomAuditSignalSummary(status.phantom?.agentReport);
+  if (phantomAudit) {
+    return readinessBlocker(
+      'phantom-audit-risk',
+      'Phantom audit needs review',
+      phantomAudit.detail,
+      'high',
+      'phantom',
     );
   }
   if (readiness.preflightReady > 0) {
@@ -3208,7 +3278,11 @@ function buildAutonomousShipReadiness(
   const sourceSummary = readinessSourceSummary(sources);
   const sourceQualitySummary = readinessSourceQualitySummary(sources);
   const topBlocker = chooseReadinessBlocker(status, sources);
-  const primaryAction = (status.nextActions ?? [])[0] ?? null;
+  const nextActions = status.nextActions ?? [];
+  const primaryAction =
+    topBlocker?.id === 'phantom-audit-risk'
+      ? nextActions.find((action) => action.id === 'review-phantom-audit') ?? nextActions[0] ?? null
+      : nextActions[0] ?? null;
   return {
     verdict: readinessVerdict(status, sourceSummary, topBlocker),
     confidence: readinessConfidence(sourceSummary),

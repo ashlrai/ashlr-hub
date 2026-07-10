@@ -1210,3 +1210,17 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Deploy read-only validator for clean sibling contract migration.
 - [x] Update clean sibling `ashlr.verify.json` build commands from `kind:"typecheck"` to `kind:"build"`.
 - [x] Validate contracts and commit each clean repo; no remotes were configured to push.
+
+## Current Continuation - Phantom Audit Readiness Blocker
+- [x] Resume from clean pushed Phantom provider-key baseline and inspect the in-progress Phantom readiness diff.
+- [x] Promote aggregate Phantom audit risk from values-free next action to Autonomous Ship Readiness top blocker once daemon and auto-merge preconditions are healthy.
+- [x] Keep blocker/action/Mission Brief details metadata-only: bounded counts, no raw paths, secret names, commands, findings, stdout/stderr, env, or file contents.
+- [x] Add focused Phantom/FleetStatus regression coverage for blocked readiness and Mission Brief directive.
+- [x] Run focused `m348`/`m49`, typecheck, and diff checks.
+- [ ] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - 10:4 Explicit Verification Contract
+- [x] Deploy read-only verifier scout to reconcile nested `relay` detection and failing npm commands.
+- [x] Identify colon-in-path PATH splitting as the cause of failed `npm run` verifier commands.
+- [ ] Add root `ashlr.verify.json` in `/Users/masonwyatt/Desktop/10:4` using `replace-detected` plus direct node TypeScript/Vitest entrypoints.
+- [ ] Validate Hub profile detection and commit locally; push remains blocked because the repo has no configured remote.
