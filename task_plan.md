@@ -1239,4 +1239,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Strengthen reslice instructions to require a concrete file/subsystem target and a fresh file diff or explicit capture-gate failure.
 - [x] Preserve the metadata-only/privacy boundary: no raw prompts, stdout, stderr, env, file contents, or prior diff output.
 - [x] Run focused queue/daemon/status tests, typecheck, and diff checks.
-- [ ] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.
+- [x] Run final lint, build, audit, commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Gate-Blocked Diff Repair
+- [x] Receive scout diagnosis that live `local-coder/self` blocker includes `gate-blocked` rows with diff metadata but generic reason text.
+- [x] Queue capture repair work for self `gate-blocked` dispatches when diff metadata proves changed files.
+- [x] Add sanitized original-title metadata to capture-gate repair work items.
+- [x] Add focused M310 regression for generic gate-blocked reason plus diff evidence.
+- [x] Run focused and final gates, commit, push, reload daemon, and smoke live status.

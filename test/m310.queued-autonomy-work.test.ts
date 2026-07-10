@@ -308,6 +308,55 @@ describe('queued autonomy work scanner', () => {
     expect(gateRepair!.detail).toContain('gate-blocked');
   });
 
+  it('queues capture repair for generic gate-blocked self dispatches with diff evidence', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date();
+    const recent = new Date(now.getTime() - 60_000).toISOString();
+    const event = captureFailure(repo.dir, {
+      ts: recent,
+      itemId: 'repo:self:generic-gate-blocked',
+      runId: 'run-generic-gate',
+      outcome: 'gate-blocked',
+      reason: 'tests: still failing after 2 attempt(s); stdout=DO_NOT_COPY_STDOUT; token=github_pat_1234567890abcdefghijklmnop',
+      title: 'Repair changed-files test failure with github_pat_1234567890abcdefghijklmnop',
+      diffFiles: 1,
+      diffLines: 53,
+    });
+
+    const first = queueProposalRepairWorkForPendingProposals(undefined, now, {
+      dispatchEvents: [event],
+    });
+    const rawQueue = JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[];
+    const found = await scanQueuedAutonomyWork(repo.dir);
+
+    expect(first).toMatchObject({
+      scanned: 1,
+      eligible: 1,
+      queued: 1,
+      failed: 0,
+      dispatchCaptureScanned: 1,
+      dispatchCaptureEligible: 1,
+      dispatchCaptureQueued: 1,
+      dispatchCaptureFailed: 0,
+    });
+    expect(rawQueue).toHaveLength(1);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({
+      repo: repo.dir,
+      source: 'self',
+      tags: expect.arrayContaining(['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate', 'verify', 'high-priority']),
+    });
+    expect(found[0]!.detail).toContain('Original work item: repo:self:generic-gate-blocked');
+    expect(found[0]!.detail).toContain('Original title: Repair changed-files test failure with [REDACTED]');
+    expect(found[0]!.detail).toContain('Run: run-generic-gate');
+    expect(found[0]!.detail).toContain('Dispatch outcome: gate-blocked');
+    expect(found[0]!.detail).toContain('Diff metadata: files=1, lines=53');
+    expect(found[0]!.detail).toContain('stdout=[omitted]');
+    expect(found[0]!.detail).not.toContain('DO_NOT_COPY_STDOUT');
+    expect(found[0]!.detail).not.toContain('github_pat_1234567890abcdefghijklmnop');
+  });
+
   it('queues metadata-only diagnostic reslice work for no-diff dispatches idempotently', async () => {
     const repo = fx.makeRepo();
     repo.enroll();

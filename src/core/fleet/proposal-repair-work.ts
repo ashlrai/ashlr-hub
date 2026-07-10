@@ -116,7 +116,18 @@ function isRepairableCaptureFailure(event: DispatchProductionEvent): boolean {
   if (event.outcome === 'proposal-capture-error') return true;
   if (event.outcome !== 'gate-blocked') return false;
   if ((event.runEventSummary?.actionCounts?.completenessGateRuns ?? 0) > 0) return true;
+  if (hasChangedFileEvidence(event)) return true;
   return /\b(?:capture|completeness|gate)\b/i.test(`${event.reason ?? ''}\n${event.routeReason ?? ''}`);
+}
+
+function hasChangedFileEvidence(event: DispatchProductionEvent): boolean {
+  return positiveCount(event.diffFiles) > 0 ||
+    positiveCount(event.runEventSummary?.actionCounts?.diffFiles) > 0;
+}
+
+function positiveCount(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.trunc(value));
 }
 
 function isDiagnosticNoDiffEvent(event: DispatchProductionEvent): boolean {
@@ -175,6 +186,7 @@ export function captureGateRepairWorkItem(
 
   const reason = boundedRepairReason(event.reason ?? event.routeReason ?? event.outcome, MAX_REASON) || event.outcome;
   const itemId = bounded(event.itemId, 120) || 'unknown';
+  const title = bounded(event.title, MAX_TITLE);
   const outcome = event.outcome;
   const value = 5;
   const effort = 1;
@@ -192,6 +204,7 @@ export function captureGateRepairWorkItem(
     detail:
       `Dispatch capture repair: a self-improvement dispatch produced repairable work but no proposal.\n` +
       `Original work item: ${itemId}\n` +
+      (title ? `Original title: ${title}\n` : '') +
       (runId ? `Run: ${runId}\n` : '') +
       `Dispatch outcome: ${outcome}\n` +
       (diffFacts ? `Diff metadata: ${diffFacts}\n` : '') +
