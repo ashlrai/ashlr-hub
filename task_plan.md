@@ -1415,4 +1415,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Join skill-use rows into aggregate trajectory observation coverage without assigning causal outcomes.
 - [x] Prove zero changes to route, model, prompt, options, budget, retries, fanout, winner, proposal, and merge authority.
 - [x] Run focused/full gates and independent adversarial review.
-- [ ] Update notes, commit, push, reload, and production smoke.
+- [x] Update notes, commit, push, reload, and production smoke.
