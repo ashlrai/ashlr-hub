@@ -122,7 +122,7 @@ import {
 } from '../learning/causal.js';
 import { productionAttemptLearningLabelFromSignals } from '../learning/attempt-shape.js';
 // worked-ledger is used transitively via LocalWorkQueueCoordinator (selectWorkQueueCoordinator).
-import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
+import { selectWorkQueueCoordinator, type WorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
 // M220: verdict-feedback sweep — feed judge rejections back to the ledger so
 // re-clogging items (e.g. "CI is failing") are suppressed for the cooldown window.
 import {
@@ -158,6 +158,7 @@ import {
 const GENERATED_REPAIR_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS = 3;
 const GENERATED_REPAIR_EMPTY_FAST_COOLDOWN_MS = 30 * 60 * 1000;
+const MAX_GENERATED_REPAIR_DECISION_EVENTS = 20;
 
 // ---------------------------------------------------------------------------
 // DaemonConfig defaults (conservative)
@@ -550,6 +551,149 @@ function recordDrainSelectionAgentAction(fields: {
   });
 }
 
+function recordQueueSelectionAgentAction(fields: {
+  ts: string;
+  machineId: string;
+  dryRun: boolean;
+  drainMode?: DaemonDrainMode;
+  automaticDrain: boolean;
+  backlogItems: number;
+  eligibleItems: number;
+  pendingBlocked: number;
+  cooldownBlocked: number;
+  fastRepairCooldown: number;
+  rawSelectCount: number;
+  selectCount: number;
+  selectedItems: WorkItem[];
+  claimedItems: WorkItem[];
+}): void {
+  const first = fields.claimedItems[0] ?? fields.selectedItems[0];
+  const lane = fields.drainMode ? `drain ${fields.drainMode}` : 'normal';
+  recordAgentAction({
+    schemaVersion: 1,
+    ts: fields.ts,
+    machineId: fields.machineId,
+    actor: 'daemon',
+    kind: 'selection',
+    outcome: fields.claimedItems.length > 0
+      ? 'ok'
+      : fields.eligibleItems > 0
+        ? 'blocked'
+        : 'skipped',
+    action: 'daemon:selection',
+    summary:
+      `${lane}: claimed ${fields.claimedItems.length}/${fields.selectedItems.length} ` +
+      `from ${fields.eligibleItems}/${fields.backlogItems} eligible; ` +
+      `cooldown ${fields.cooldownBlocked}, pending ${fields.pendingBlocked}`,
+    reason: fields.dryRun ? 'dry-run' : fields.claimedItems.length > 0 ? 'selected' : 'no-claim',
+    ...(first?.repo ? { repo: first.repo } : {}),
+    ...(first?.id ? { itemId: boundedText(first.id, 120) } : {}),
+    ...(first?.source ? { source: first.source } : {}),
+    tags: [
+      'selection',
+      fields.drainMode ? drainTag(fields.drainMode) : 'normal-selection',
+      fields.automaticDrain ? 'auto-drain' : 'regular',
+      fields.dryRun ? 'dry-run' : 'live',
+      fields.claimedItems.length > 0 ? 'claimed' : 'none-claimed',
+      fields.fastRepairCooldown > 0 ? 'fast-repair-cooldown' : 'standard-cooldown',
+    ],
+    counts: {
+      backlogItems: fields.backlogItems,
+      eligibleItems: fields.eligibleItems,
+      pendingBlocked: fields.pendingBlocked,
+      cooldownBlocked: fields.cooldownBlocked,
+      fastRepairCooldown: fields.fastRepairCooldown,
+      rawSelectCount: fields.rawSelectCount,
+      selectCount: fields.selectCount,
+      selected: fields.selectedItems.length,
+      claimed: fields.claimedItems.length,
+    },
+  });
+}
+
+function recordGeneratedRepairDecisionAgentActions(fields: {
+  ts: string;
+  machineId: string;
+  dryRun: boolean;
+  items: WorkItem[];
+  selectedItems: WorkItem[];
+  claimedItems: WorkItem[];
+  pendingItemKeys: Set<string>;
+  coordinator: WorkQueueCoordinator;
+  baseCooldownMs: number;
+  repairRecoveryHealthy: boolean;
+}): void {
+  const selectedIds = new Set(fields.selectedItems.map((item) => item.id));
+  const claimedIds = new Set(fields.claimedItems.map((item) => item.id));
+  const generatedItems = fields.items
+    .filter((item) => isTrustedGeneratedRepairItem(item))
+    .slice(0, MAX_GENERATED_REPAIR_DECISION_EVENTS);
+  if (generatedItems.length === 0) return;
+  recordAgentAction(generatedItems.map((item): AgentActionEvent => {
+    const pendingBlocked = fields.pendingItemKeys.has(workItemCoverageKey(item));
+    const effectiveCooldownMs = cooldownMsForSelectionItem(
+      item,
+      fields.baseCooldownMs,
+      fields.repairRecoveryHealthy,
+    );
+    const cooldownBlocked = fields.coordinator.shouldSkip(item.id, effectiveCooldownMs);
+    const selected = selectedIds.has(item.id);
+    const claimed = claimedIds.has(item.id);
+    const latest = latestWorkedEvent(item.id);
+    const fastRepairCooldown = effectiveCooldownMs < fields.baseCooldownMs;
+    const reason = claimed
+      ? 'claimed'
+      : selected
+        ? 'claim-missed'
+        : pendingBlocked
+          ? 'pending-proposal'
+          : cooldownBlocked
+            ? `cooldown: latest=${latest?.outcome ?? 'unknown'}`
+            : 'not-selected';
+    const outcome: AgentActionOutcome = claimed
+      ? 'ok'
+      : (selected || pendingBlocked || cooldownBlocked)
+        ? 'blocked'
+        : 'skipped';
+    return {
+      schemaVersion: 1,
+      ts: fields.ts,
+      machineId: fields.machineId,
+      actor: 'daemon',
+      kind: 'selection',
+      outcome,
+      action: 'daemon:generated-repair-decision',
+      summary:
+        `generated repair ${reason}; selected ${selected ? 1 : 0}, ` +
+        `claimed ${claimed ? 1 : 0}, pending ${pendingBlocked ? 1 : 0}, ` +
+        `cooldown ${cooldownBlocked ? 1 : 0}`,
+      reason,
+      repo: item.repo,
+      itemId: boundedText(item.id, 120),
+      source: item.source,
+      tags: [
+        'generated-repair-decision',
+        selected ? 'selected' : 'not-selected',
+        claimed ? 'claimed' : 'not-claimed',
+        pendingBlocked ? 'pending-blocked' : 'pending-clear',
+        cooldownBlocked ? 'cooldown-blocked' : 'cooldown-clear',
+        fastRepairCooldown ? 'fast-repair-cooldown' : 'standard-cooldown',
+        fields.dryRun ? 'dry-run' : 'live',
+        ...(latest?.outcome ? [`latest-${latest.outcome}`] : ['latest-none']),
+      ],
+      counts: {
+        baseCooldownMs: fields.baseCooldownMs,
+        effectiveCooldownMs,
+        fastRepairCooldown: fastRepairCooldown ? 1 : 0,
+        pendingBlocked: pendingBlocked ? 1 : 0,
+        cooldownBlocked: cooldownBlocked ? 1 : 0,
+        selected: selected ? 1 : 0,
+        claimed: claimed ? 1 : 0,
+      },
+    };
+  }));
+}
+
 function productionOutcomeFromRunProposalOutcome(kind: RunProposalOutcome['kind']): DaemonDispatchProductionOutcome {
   switch (kind) {
     case 'filed':
@@ -827,6 +971,52 @@ function agentActionFromDispatchEvent(event: DispatchProductionEvent): AgentActi
       ...(typeof event.diffFiles === 'number' ? { diffFiles: event.diffFiles } : {}),
       ...(typeof event.diffLines === 'number' ? { diffLines: event.diffLines } : {}),
       proposalCreated: event.proposalCreated ? 1 : 0,
+    },
+  };
+}
+
+function agentActionFromDispatchSkip(
+  value: TickItemOutcome,
+  ts: string,
+  machineId: string,
+): AgentActionEvent | null {
+  if (value.dispatched) return null;
+  const trace = value.dispatch;
+  if (!trace) return null;
+  const skipReason = trace.skipReason ?? trace.reason ?? 'skipped-before-dispatch';
+  return {
+    schemaVersion: 1,
+    ts,
+    machineId,
+    actor: 'daemon',
+    kind: 'dispatch',
+    outcome: 'skipped',
+    action: 'daemon:dispatch-skip',
+    summary: `dispatch skipped: ${boundedText(skipReason, 120)}`,
+    repo: value.item.repo,
+    itemId: value.item.id,
+    source: value.item.source,
+    ...(trace.trajectoryId ? { trajectoryId: trace.trajectoryId } : {}),
+    ...(trace.routeSnapshot ? { routeSnapshot: trace.routeSnapshot } : {}),
+    ...(trace.runEventSummary ? { runEventSummary: trace.runEventSummary } : {}),
+    ...(trace.learningSource ? { learningSource: trace.learningSource } : {}),
+    ...(trace.labelBasis ? { labelBasis: trace.labelBasis } : {}),
+    ...(trace.routerPolicyVersion ? { routerPolicyVersion: trace.routerPolicyVersion } : {}),
+    ...(trace.learningEpoch ? { learningEpoch: trace.learningEpoch } : {}),
+    backend: trace.backend,
+    tier: trace.tier,
+    ...(trace.model !== undefined ? { model: trace.model } : {}),
+    reason: skipReason,
+    spentUsd: 0,
+    tags: [
+      'dispatch-skip',
+      value.item.source,
+      boundedText(skipReason, 48),
+      ...(isTrustedGeneratedRepairItem(value.item) ? ['generated-repair'] : []),
+    ],
+    counts: {
+      dispatched: 0,
+      selected: 1,
     },
   };
 }
@@ -1949,6 +2139,28 @@ export async function tick(
   const selectCount = typeof drainLimit === 'number'
     ? Math.min(rawSelectCount, drainLimit)
     : rawSelectCount;
+  const summarizeSelectionBlockers = (items: WorkItem[]) => {
+    let eligibleItems = 0;
+    let pendingBlocked = 0;
+    let cooldownBlocked = 0;
+    let fastRepairCooldown = 0;
+    for (const item of items) {
+      const pending = pendingItemKeys.has(workItemCoverageKey(item));
+      const itemCooldownMs = cooldownMsForSelectionItem(item, cooldownMs, repairRecoveryHealthy);
+      const cooling = coordinator.shouldSkip(item.id, itemCooldownMs);
+      if (pending) pendingBlocked++;
+      if (cooling) cooldownBlocked++;
+      if (!pending && !cooling) eligibleItems++;
+      if (
+        repairRecoveryHealthy &&
+        itemCooldownMs < cooldownMs &&
+        isTrustedGeneratedRepairItem(item)
+      ) {
+        fastRepairCooldown++;
+      }
+    }
+    return { eligibleItems, pendingBlocked, cooldownBlocked, fastRepairCooldown };
+  };
 
   const selectRoundRobinCandidates = (items: WorkItem[], count: number): WorkItem[] => {
     // Group selectable items by repo (score-sorted within each group by buildBacklog).
@@ -2005,6 +2217,11 @@ export async function tick(
   };
 
   let selected = selectRoundRobinCandidates(selectionItems, selectCount);
+  let selectionTelemetryItems = selectionItems;
+  let selectionTelemetryRawSelectCount = rawSelectCount;
+  let selectionTelemetrySelectCount = selectCount;
+  let selectionTelemetryDrainMode = drainMode;
+  let selectionTelemetryAutomaticDrain = automaticDrain;
 
   // M113: claimItems — Local returns top-selectCount (identical to today's raw
   // slice); Shared atomically claims items so two machines get disjoint work.
@@ -2028,8 +2245,42 @@ export async function tick(
       selected = fallbackSelected;
       workedSet = fallbackWorkedSet;
       drainSelectedItems = [];
+      selectionTelemetryItems = fallbackItems;
+      selectionTelemetryRawSelectCount = fallbackSelectCount;
+      selectionTelemetrySelectCount = fallbackSelectCount;
+      selectionTelemetryDrainMode = undefined;
+      selectionTelemetryAutomaticDrain = false;
     }
   }
+  const selectionBlockers = summarizeSelectionBlockers(selectionTelemetryItems);
+  recordQueueSelectionAgentAction({
+    ts: now,
+    machineId,
+    dryRun: opts.dryRun,
+    ...(selectionTelemetryDrainMode ? { drainMode: selectionTelemetryDrainMode } : {}),
+    automaticDrain: selectionTelemetryAutomaticDrain,
+    backlogItems: selectionTelemetryItems.length,
+    eligibleItems: selectionBlockers.eligibleItems,
+    pendingBlocked: selectionBlockers.pendingBlocked,
+    cooldownBlocked: selectionBlockers.cooldownBlocked,
+    fastRepairCooldown: selectionBlockers.fastRepairCooldown,
+    rawSelectCount: selectionTelemetryRawSelectCount,
+    selectCount: selectionTelemetrySelectCount,
+    selectedItems: selected,
+    claimedItems: workedSet,
+  });
+  recordGeneratedRepairDecisionAgentActions({
+    ts: now,
+    machineId,
+    dryRun: opts.dryRun,
+    items: backlogItems,
+    selectedItems: selected,
+    claimedItems: workedSet,
+    pendingItemKeys,
+    coordinator,
+    baseCooldownMs: cooldownMs,
+    repairRecoveryHealthy,
+  });
   const drain = drainMode
     ? drainSummary(drainMode, drainAvailableItems, drainSelectedItems, drainLimit, automaticDrain)
     : undefined;
@@ -3153,6 +3404,16 @@ export async function tick(
     } catch (err) {
       console.warn('[ashlr] daemon:tick dispatch production ledger failed:', (err as Error)?.message ?? err);
     }
+  }
+  try {
+    const skipActions = outcomes.flatMap((outcome): AgentActionEvent[] => {
+      if (outcome.status !== 'fulfilled') return [];
+      const event = agentActionFromDispatchSkip(outcome.value, now, machineId);
+      return event ? [event] : [];
+    });
+    recordAgentAction(skipActions);
+  } catch (err) {
+    console.warn('[ashlr] daemon:tick dispatch skip ledger failed:', (err as Error)?.message ?? err);
   }
 
   // M113: release any claimed-but-not-dispatched items so they're free for

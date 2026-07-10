@@ -812,11 +812,29 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
 
     const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
-    const selection = readAgentActions().find((event) => event.action === 'daemon:drain-select');
+    const actions = readAgentActions();
+    const selection = actions.find((event) => event.action === 'daemon:drain-select');
+    const repairDecision = actions.find((event) =>
+      event.action === 'daemon:generated-repair-decision' && event.itemId === reslice.id,
+    );
 
     expect(result.reason).toBe('ok');
     expect(result.drain).toBeUndefined();
     expect(selection).toBeUndefined();
+    expect(repairDecision).toMatchObject({
+      kind: 'selection',
+      outcome: 'blocked',
+      action: 'daemon:generated-repair-decision',
+      itemId: reslice.id,
+      reason: 'pending-proposal',
+      counts: {
+        pendingBlocked: 1,
+        cooldownBlocked: 0,
+        selected: 0,
+        claimed: 0,
+      },
+    });
+    expect(repairDecision?.tags).toEqual(expect.arrayContaining(['generated-repair-decision', 'pending-blocked']));
     expect(result.itemsConsidered).toBe(1);
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
@@ -842,11 +860,30 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
 
     const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
-    const selection = readAgentActions().find((event) => event.action === 'daemon:drain-select');
+    const actions = readAgentActions();
+    const selection = actions.find((event) => event.action === 'daemon:drain-select');
+    const repairDecision = actions.find((event) =>
+      event.action === 'daemon:generated-repair-decision' && event.itemId === reslice.id,
+    );
 
     expect(result.reason).toBe('ok');
     expect(result.drain).toBeUndefined();
     expect(selection).toBeUndefined();
+    expect(repairDecision).toMatchObject({
+      kind: 'selection',
+      outcome: 'blocked',
+      action: 'daemon:generated-repair-decision',
+      itemId: reslice.id,
+      reason: 'cooldown: latest=empty',
+      counts: {
+        pendingBlocked: 0,
+        cooldownBlocked: 1,
+        fastRepairCooldown: 0,
+        selected: 0,
+        claimed: 0,
+      },
+    });
+    expect(repairDecision?.tags).toEqual(expect.arrayContaining(['cooldown-blocked', 'standard-cooldown', 'latest-empty']));
     expect(result.itemsConsidered).toBe(1);
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
@@ -869,7 +906,11 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
 
     const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
-    const selection = readAgentActions().find((event) => event.action === 'daemon:drain-select');
+    const actions = readAgentActions();
+    const selection = actions.find((event) => event.action === 'daemon:drain-select');
+    const repairDecision = actions.find((event) =>
+      event.action === 'daemon:generated-repair-decision' && event.itemId === reslice.id,
+    );
 
     expect(result.reason).toBe('ok');
     expect(result.drain).toMatchObject({
@@ -884,6 +925,23 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       itemId: reslice.id,
       reason: 'auto-live',
     });
+    expect(repairDecision).toMatchObject({
+      kind: 'selection',
+      outcome: 'ok',
+      action: 'daemon:generated-repair-decision',
+      itemId: reslice.id,
+      reason: 'claimed',
+      counts: {
+        baseCooldownMs: 6 * 60 * 60 * 1000,
+        effectiveCooldownMs: 30 * 60 * 1000,
+        fastRepairCooldown: 1,
+        pendingBlocked: 0,
+        cooldownBlocked: 0,
+        selected: 1,
+        claimed: 1,
+      },
+    });
+    expect(repairDecision?.tags).toEqual(expect.arrayContaining(['fast-repair-cooldown', 'latest-empty', 'claimed']));
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
       workItemId: reslice.id,
@@ -905,15 +963,81 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
 
     const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
-    const selection = readAgentActions().find((event) => event.action === 'daemon:drain-select');
+    const actions = readAgentActions();
+    const selection = actions.find((event) => event.action === 'daemon:drain-select');
+    const repairDecision = actions.find((event) =>
+      event.action === 'daemon:generated-repair-decision' && event.itemId === reslice.id,
+    );
 
     expect(result.reason).toBe('ok');
     expect(result.drain).toBeUndefined();
     expect(selection).toBeUndefined();
+    expect(repairDecision).toMatchObject({
+      kind: 'selection',
+      outcome: 'blocked',
+      action: 'daemon:generated-repair-decision',
+      itemId: reslice.id,
+      reason: 'cooldown: latest=judged-decline',
+      counts: {
+        baseCooldownMs: 6 * 60 * 60 * 1000,
+        effectiveCooldownMs: 6 * 60 * 60 * 1000,
+        fastRepairCooldown: 0,
+        cooldownBlocked: 1,
+        selected: 0,
+        claimed: 0,
+      },
+    });
+    expect(repairDecision?.tags).toEqual(expect.arrayContaining(['standard-cooldown', 'latest-judged-decline']));
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
       workItemId: generic.id,
     });
+  });
+
+  it('A1-generated-repair-dispatch-skip: selected generated repairs skipped by budget are append-only workspace events only', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const resliceA = makeDiagnosticResliceItem(repo.dir, 'abcabc666660', 10);
+    const resliceB = makeDiagnosticResliceItem(repo.dir, 'abcabc666661', 9);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [resliceA, resliceB],
+    });
+    mockRunSwarm.mockResolvedValue({
+      id: 'budget-drain-swarm',
+      status: 'done',
+      goal: 'mock goal',
+      result: 'mock result',
+      usage: { totalTokens: 100, estCostUsd: 0.02, steps: 1 },
+    });
+
+    const result = await tick(cfgBuiltin({ dailyBudgetUsd: 0.02, perTickItems: 2, parallel: 1 }), { dryRun: false });
+    const actions = readAgentActions();
+    const skipped = actions.find((event) =>
+      event.action === 'daemon:dispatch-skip' && event.itemId === resliceB.id,
+    );
+    const decisions = actions.filter((event) => event.action === 'daemon:generated-repair-decision');
+
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(2);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(skipped).toMatchObject({
+      kind: 'dispatch',
+      outcome: 'skipped',
+      action: 'daemon:dispatch-skip',
+      itemId: resliceB.id,
+      reason: 'budget-cap',
+      counts: { dispatched: 0, selected: 1 },
+    });
+    expect(skipped?.summary).toContain('dispatch skipped: budget-cap');
+    expect(skipped?.summary).not.toContain(resliceB.title);
+    expect(skipped?.tags).toEqual(expect.arrayContaining(['dispatch-skip', 'generated-repair', 'budget-cap']));
+    expect(decisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ itemId: resliceA.id, reason: 'claimed' }),
+      expect.objectContaining({ itemId: resliceB.id, reason: 'claimed' }),
+    ]));
+    expect(readDispatchProductionEvents().some((event) => event.itemId === resliceB.id)).toBe(false);
   });
 
   it('A1-drain-auto-lookalike: automatic diagnostic drains ignore malformed tag-only reslices', async () => {
@@ -2508,6 +2632,54 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(dispatchedItemIds).not.toContain(items[0]!.id);
     expect(dispatchedItemIds).toContain(items[1]!.id);
     expect(dispatchedItemIds).toContain(items[2]!.id);
+  });
+
+  it('A7-selection-telemetry: records pending and cooldown blockers in the global workspace', async () => {
+    const { repo, items } = enrollWithItems(3);
+    createProposal({
+      repo: repo.dir,
+      origin: 'swarm',
+      kind: 'patch',
+      title: `pending for ${items[0]!.id}`,
+      summary: `covers ${items[0]!.id}`,
+      diff: 'diff --git a/x.ts b/x.ts\n',
+      workItemId: items[0]!.id,
+    });
+    recordOutcome(items[1]!.id, 'empty');
+
+    const result = await tick(cfgBuiltin({ perTickItems: 3, parallel: 3 }), { dryRun: true });
+    const selection = readAgentActions().find((event) => event.action === 'daemon:selection');
+
+    expect(result.reason).toBe('dry-run');
+    expect(result.itemsConsidered).toBe(1);
+    expect(selection).toMatchObject({
+      actor: 'daemon',
+      kind: 'selection',
+      outcome: 'ok',
+      action: 'daemon:selection',
+      repo: repo.dir,
+      itemId: items[2]!.id,
+      source: 'todo',
+      reason: 'dry-run',
+      counts: {
+        backlogItems: 3,
+        eligibleItems: 1,
+        pendingBlocked: 1,
+        cooldownBlocked: 1,
+        fastRepairCooldown: 0,
+        rawSelectCount: 3,
+        selectCount: 3,
+        selected: 1,
+        claimed: 1,
+      },
+    });
+    expect(selection?.summary).toContain('normal: claimed 1/1 from 1/3 eligible');
+    expect(selection?.summary).toContain('cooldown 1, pending 1');
+    expect(selection?.summary).not.toContain(items[0]!.id);
+    expect(selection?.summary).not.toContain(items[1]!.id);
+    expect(selection?.summary).not.toContain(items[2]!.id);
+    expect(selection?.tags).toEqual(expect.arrayContaining(['selection', 'normal-selection', 'dry-run', 'claimed']));
+    expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
   it('A7c: stale pending proposals do not skip matching items under production velocity', async () => {
