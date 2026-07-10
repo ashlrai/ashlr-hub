@@ -237,6 +237,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Refine causal diagnostics with policy-suppressed-aware actionable causes.
 - [x] Push actionable-cause refinement and confirm live FleetStatus surfaces current-writer unlabeled gaps.
 - [x] Surface degraded/unknown Fleet Dashboard data-quality sources in the Data pill.
+- [x] Name affected readiness sources in the Fleet Dashboard Data pill and tooltip.
 
 ## Current Continuation - Next Actions And Judge Trust
 - [x] Deployed a broader explorer wave for auto-merge trust, daemon reliability, cross-repo coordination, command-center UI, and market/open-source leverage.

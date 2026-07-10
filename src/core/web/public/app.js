@@ -4398,6 +4398,16 @@ function fdReadinessDataText(readiness) {
   if (!readiness) return 'unknown';
   const freshness = readiness.freshness?.overall ?? 'unknown';
   const quality = readiness.sourceQualitySummary ?? {};
+  const sources = Array.isArray(readiness.sources) ? readiness.sources : [];
+  const sourceNamesForBadge = (badge) => {
+    const names = sources
+      .filter((source) => source?.sourceQuality?.badge === badge)
+      .map((source) => source.label ?? source.id ?? 'source')
+      .filter(Boolean);
+    if (names.length === 0) return '';
+    const visible = names.slice(0, 2).join(', ');
+    return names.length > 2 ? `${visible}, +${names.length - 2}` : visible;
+  };
   if (Object.keys(quality).length > 0) {
     const qualityParts = [
       ['degraded-source', 'degraded'],
@@ -4406,9 +4416,12 @@ function fdReadinessDataText(readiness) {
       ['missing-source', 'missing'],
       ['healthy-zero', 'empty'],
     ]
-      .map(([key, label]) => [label, quality[key] ?? 0])
-      .filter(([, count]) => count > 0)
-      .map(([label, count]) => `${count} ${label}`);
+      .map(([key, label]) => [key, label, quality[key] ?? 0])
+      .filter(([, , count]) => count > 0)
+      .map(([key, label, count]) => {
+        const sourceNames = sourceNamesForBadge(key);
+        return `${count} ${label}${sourceNames ? ` (${sourceNames})` : ''}`;
+      });
     return `${freshness} · ${qualityParts.length > 0 ? qualityParts.join(' / ') : 'healthy sources'}`;
   }
   const summary = readiness.sourceSummary ?? {};
@@ -4416,6 +4429,18 @@ function fdReadinessDataText(readiness) {
   const degraded = summary.degraded ?? 0;
   const blocked = summary.blocked ?? 0;
   return `${freshness} · ${healthy} healthy / ${degraded} degraded / ${blocked} blocked`;
+}
+
+function fdReadinessDataTitle(readiness) {
+  if (!readiness) return 'Readiness data unavailable';
+  const sources = Array.isArray(readiness.sources) ? readiness.sources : [];
+  if (sources.length === 0) return fdReadinessDataText(readiness);
+  return sources.map((source) => {
+    const label = source.label ?? source.id ?? 'source';
+    const badge = source.sourceQuality?.badge ?? source.badge ?? source.status ?? 'unknown';
+    const detail = source.sourceQuality?.detail ?? source.detail ?? '';
+    return detail ? `${label}: ${badge} - ${detail}` : `${label}: ${badge}`;
+  }).join('\n');
 }
 
 function fdDispatchYieldText(dispatchProduction) {
@@ -4552,7 +4577,7 @@ function fdRenderReadinessRail(snap) {
     fdMetricPill('Brief', compactFleetReason(briefLabel, 54), briefDetail),
     fdMetricPill('Confidence', missionBrief?.confidence ?? readiness.confidence ?? 'unknown'),
     fdMetricPill('Action', compactFleetReason(actionLabel, 54), actionDetail),
-    fdMetricPill('Data', fdReadinessDataText(readiness)),
+    fdMetricPill('Data', fdReadinessDataText(readiness), fdReadinessDataTitle(readiness)),
     fdMetricPill('Blocker', compactFleetReason(blockerLabel, 54), blockerDetail),
     fdMetricPill('Queue', queueMetric),
     generatedMetric ? fdMetricPill('Generated', generatedMetric) : null,

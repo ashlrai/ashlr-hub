@@ -475,6 +475,10 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("['degraded-source', 'degraded']");
     expect(src).toContain("['unknown-source', 'unknown']");
     expect(src).toContain("['healthy-zero', 'empty']");
+    expect(src).toContain('const sources = Array.isArray(readiness.sources) ? readiness.sources : []');
+    expect(src).toContain('source?.sourceQuality?.badge === badge');
+    expect(src).toContain('function fdReadinessDataTitle');
+    expect(src).toContain("fdMetricPill('Data', fdReadinessDataText(readiness), fdReadinessDataTitle(readiness))");
     expect(src).toContain("qualityParts.length > 0 ? qualityParts.join(' / ') : 'healthy sources'");
     expect(src).toContain('const briefDetail = missionBrief?.whyNow ?? primaryAction?.detail ?? actionLabel');
     expect(src).toContain('const actionDetail = primaryAction?.detail ?? briefDetail');

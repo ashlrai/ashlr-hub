@@ -1160,4 +1160,5 @@
 - Current Fleet OS data-quality pill pass:
   - Scout finding: Fleet Dashboard's `Data` pill could omit nonzero `degraded-source` and `unknown-source` counts from `sourceQualitySummary`, so a degraded snapshot could look like a clean fresh/zero state.
   - Implementation: `fdReadinessDataText()` now renders nonzero degraded, unknown, stale, missing, and healthy-zero source-quality badges directly, with `healthy-zero` displayed as operator-readable `empty`.
+  - Follow-up refinement: the `Data` pill now names the affected readiness sources for each nonzero badge and uses a tooltip with full per-source quality detail, so operators can tell whether daemon, queue, resources, direction, guard, or auto-merge data is stale/degraded/empty.
   - Verification passed: `node --check src/core/web/public/app.js`, focused dashboard CI (`m213`, `m210`, 46 tests), `npm run typecheck -- --pretty false`, `git diff --check`, `npm run lint` (known 114-warning baseline), `npm run build`, and `npm audit --audit-level=moderate`.
