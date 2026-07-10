@@ -1445,3 +1445,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove ordinary work, spoofed records, duplicate events, recurrence, queue persistence, lock contention, write failure, and daemon refresh behavior remain safe.
 - [x] Run focused/full repository gates and independent adversarial review on the final source.
 - [x] Update durable notes, commit, push, reload, and production smoke.
+
+## Current Overnight Cycle - Failed TITRR Partial Capture
+- [x] Rehydrate the clean deployed lifecycle baseline, live daemon, Entire state, and recorded next-lane boundary.
+- [x] Deploy disjoint audits for CLI TITRR cleanup ordering, API-model parity, regression coverage, and capture authority.
+- [x] Capture one scrubbed partial proposal from a failed producer sandbox before cleanup only when material diff exists.
+- [x] Preserve failed producer status, exact run/trajectory/generation provenance, and partial completeness-gate truth.
+- [x] Keep empty failures proposal-free, prevent duplicate filing across retries, and guarantee sandbox cleanup on every capture outcome.
+- [x] Prove partial captures remain non-terminal repair evidence and do not weaken merge or lifecycle authority.
+- [x] Run focused/full gates and independent adversarial review on the final source.
+- [x] Update durable notes, commit, push, reload, and production smoke.
