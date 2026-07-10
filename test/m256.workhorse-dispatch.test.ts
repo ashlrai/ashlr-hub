@@ -126,6 +126,47 @@ const cfgWorkhorse = {
 // ---------------------------------------------------------------------------
 
 describe('M256 workhorseDispatch', () => {
+  it('queues excess trusted repairs instead of spilling them to builtin', () => {
+    const snap = makeSnapshot([
+      { backend: 'local-coder', availability: 'open', usedPct: 0, cap: 1, capUnit: 'concurrent' },
+      { backend: 'codex', availability: 'exhausted' },
+      { backend: 'nim', availability: 'unreachable' },
+      { backend: 'builtin', availability: 'open' },
+    ]);
+    const items = Array.from({ length: 3 }, (_, index) => makeItem({
+      id: `repo:proposal-repair-capture:abcdef12345${index}`,
+      source: 'self',
+      title: `Repair dispatch capture failure ${index}`,
+      detail:
+        'Dispatch capture repair: repairable work produced no proposal.\n' +
+        `Original work item: repo:self-heal:${index}\n` +
+        'Dispatch outcome: gate-blocked\n' +
+        'Diff metadata: files=1, lines=3\n' +
+        'Failure: tests still failing\n' +
+        'Produce a fresh complete fix and rerun merge-grade verification.',
+      tags: ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate'],
+      ts: new Date().toISOString(),
+    }));
+    const routeHints = new Map(items.map((item) => [item.id, 'local-coder'] as const));
+    const routeReasons = new Map(items.map((item) => [
+      item.id,
+      'frontier-fallback: generated capture proposal repair -> local-coder',
+    ] as const));
+
+    const routeItem = buildConcurrentDispatchRouteItem(
+      snap,
+      { maxSlotsPerBackend: 3 },
+      cfgWorkhorse,
+      routeHints,
+      routeReasons,
+    );
+    const plan = planConcurrentDispatch(items, snap, { maxSlotsPerBackend: 3 }, routeItem);
+
+    expect(plan.assignments).toEqual([{ item: items[0], backend: 'local-coder' }]);
+    expect(plan.unassigned).toEqual([items[1], items[2]]);
+    expect(plan.assignments.some((assignment) => assignment.backend === 'builtin')).toBe(false);
+  });
+
   it('PRODUCTION-HELPER: workhorseDispatch spreads local-mid bulk route hints', () => {
     const snap = makeSnapshot([
       { backend: 'local-coder', availability: 'open' },

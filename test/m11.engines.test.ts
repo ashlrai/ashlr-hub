@@ -426,6 +426,143 @@ describe('spawnEngine — never throws on failure', () => {
     expect(result.error).toBeDefined();
   });
 
+  it('retries Codex once with a supported effort after an incompatible global preference', async () => {
+    const { spawn } = await import('node:child_process');
+    const controls: FakeChildControl[] = [];
+    vi.mocked(spawn).mockImplementation((_bin, _args, _opts) => {
+      const control = makeFakeSpawnControl();
+      controls.push(control);
+      _spawnControl = control;
+      return control.child as ReturnType<typeof spawn>;
+    });
+    const cmd: EngineCommand = {
+      bin: 'codex',
+      args: ['exec', '--model', 'gpt-5.5', '--cd', CWD, '--json', GOAL],
+      cwd: CWD,
+    };
+
+    const pending = spawnEngine(cmd, makeConfig());
+    controls[0]!.resolve(
+      1,
+      null,
+      '',
+      'Error loading config.toml: unknown variant `ultra` for model_reasoning_effort',
+    );
+    await vi.waitFor(() => expect(controls).toHaveLength(2));
+    const retryArgs = vi.mocked(spawn).mock.calls[1]![1] as string[];
+    expect(retryArgs).toContain('model_reasoning_effort="xhigh"');
+    controls[1]!.resolve(0, null, '{"type":"done"}\n');
+
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    await expect(pending).resolves.toMatchObject({ configRecoveryAttempts: 1 });
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(2);
+    expect(cmd.args).not.toContain('-c');
+  });
+
+  it('does not retry unrelated Codex failures', async () => {
+    const { spawn } = await import('node:child_process');
+    const cmd: EngineCommand = { bin: 'codex', args: ['exec', '--json', GOAL] };
+    const pending = spawnEngine(cmd, makeConfig());
+    getSpawnControl().resolve(1, null, '', 'authentication failed');
+
+    await expect(pending).resolves.toMatchObject({ ok: false });
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses a broadly supported effort when recovering an unknown Codex model', async () => {
+    const { spawn } = await import('node:child_process');
+    const controls: FakeChildControl[] = [];
+    vi.mocked(spawn).mockImplementation((_bin, _args, _opts) => {
+      const control = makeFakeSpawnControl();
+      controls.push(control);
+      _spawnControl = control;
+      return control.child as ReturnType<typeof spawn>;
+    });
+    const pending = spawnEngine({
+      bin: 'codex',
+      args: ['exec', '--model', 'custom-codex-model', '--json', GOAL],
+    }, makeConfig());
+
+    controls[0]!.resolve(1, null, '', 'unknown variant `ultra` for model_reasoning_effort; expected one of');
+    await vi.waitFor(() => expect(controls).toHaveLength(2));
+    const retryArgs = vi.mocked(spawn).mock.calls[1]![1] as string[];
+    expect(retryArgs).toContain('model_reasoning_effort="medium"');
+    controls[1]!.resolve(0, null, 'ok\n');
+
+    await expect(pending).resolves.toMatchObject({ ok: true });
+  });
+
+  it('uses medium when Codex recovery cannot prove the effective model', async () => {
+    const { spawn } = await import('node:child_process');
+    const controls: FakeChildControl[] = [];
+    vi.mocked(spawn).mockImplementation((_bin, _args, _opts) => {
+      const control = makeFakeSpawnControl();
+      controls.push(control);
+      _spawnControl = control;
+      return control.child as ReturnType<typeof spawn>;
+    });
+    const pending = spawnEngine({ bin: 'codex', args: ['exec', '--json', GOAL] }, makeConfig());
+
+    controls[0]!.resolve(1, null, '', 'unknown variant `ultra` for model_reasoning_effort');
+    await vi.waitFor(() => expect(controls).toHaveLength(2));
+    expect(vi.mocked(spawn).mock.calls[1]![1]).toContain('model_reasoning_effort="medium"');
+    controls[1]!.resolve(0, null, 'ok\n');
+
+    await expect(pending).resolves.toMatchObject({ ok: true });
+  });
+
+  it('does not replay Codex after any stdout proves execution started', async () => {
+    const { spawn } = await import('node:child_process');
+    const cmd: EngineCommand = { bin: 'codex', args: ['exec', '--json', GOAL] };
+    const pending = spawnEngine(cmd, makeConfig());
+    getSpawnControl().resolve(
+      1,
+      null,
+      '{"type":"tool_call","name":"shell"}\n',
+      'unknown variant `ultra` for model_reasoning_effort',
+    );
+
+    await expect(pending).resolves.toMatchObject({ ok: false });
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not mistake prompt text for an existing Codex config override', async () => {
+    const { spawn } = await import('node:child_process');
+    const controls: FakeChildControl[] = [];
+    vi.mocked(spawn).mockImplementation((_bin, _args, _opts) => {
+      const control = makeFakeSpawnControl();
+      controls.push(control);
+      _spawnControl = control;
+      return control.child as ReturnType<typeof spawn>;
+    });
+    const pending = spawnEngine({
+      bin: 'codex',
+      args: ['exec', '--model', 'gpt-5.5', '--json', 'Fix model_reasoning_effort handling'],
+    }, makeConfig());
+
+    controls[0]!.resolve(1, null, '', 'unknown variant `ultra` for model_reasoning_effort');
+    await vi.waitFor(() => expect(controls).toHaveLength(2));
+    controls[1]!.resolve(0, null, 'ok\n');
+
+    await expect(pending).resolves.toMatchObject({ ok: true, configRecoveryAttempts: 1 });
+  });
+
+  it.each([
+    '-cmodel_reasoning_effort="low"',
+    '-c=model_reasoning_effort="low"',
+    '--config=model_reasoning_effort="low"',
+  ])('respects compact Codex config override %s', async (override) => {
+    const { spawn } = await import('node:child_process');
+    const pending = spawnEngine({
+      bin: 'codex',
+      args: ['exec', override, '--json', GOAL],
+    }, makeConfig());
+    getSpawnControl().resolve(1, null, '', 'unknown variant `ultra` for model_reasoning_effort');
+
+    await expect(pending).resolves.toMatchObject({ ok: false });
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1);
+  });
+
   it('returns { ok: false } when spawn emits an error — does not throw', async () => {
     const cmd: EngineCommand = { bin: 'nonexistent-tool', args: [] };
     const p = spawnEngine(cmd, makeConfig());

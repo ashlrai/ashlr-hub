@@ -23,6 +23,7 @@ import {
   slotsForAvailability,
   slotsForBackendState,
   planConcurrentDispatch,
+  buildGatewayDispatchPlan,
   runConcurrentDispatch,
   type ConcurrentDispatchCfg,
   type DispatchPlan,
@@ -77,6 +78,38 @@ function makeSnapshot(
 }
 
 const defaultCfg: ConcurrentDispatchCfg = { maxSlotsPerBackend: 3 };
+
+function makeTrustedCaptureRepair(): WorkItem {
+  return makeItem({
+    id: 'repo:proposal-repair-capture:abcdef123456',
+    source: 'self',
+    title: 'Repair dispatch capture failure for repo item repo:self-heal:123',
+    detail:
+      'Dispatch capture repair: a self-improvement dispatch produced repairable work but no proposal.\n' +
+      'Original work item: repo:self-heal:123\n' +
+      'Dispatch outcome: gate-blocked\n' +
+      'Diff metadata: files=1, lines=3\n' +
+      'Failure: tests still failing\n' +
+      'Produce a fresh complete fix, rerun merge-grade verification.',
+    tags: ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate'],
+    ts: new Date().toISOString(),
+  });
+}
+
+function makeTrustedDiagnosticReslice(): WorkItem {
+  return makeItem({
+    id: 'repo:proposal-repair-nodiff:abcdef123456',
+    source: 'self',
+    title: 'Reslice no-diff dispatch for repo item repo:self-heal:123',
+    detail:
+      'Diagnostic reslice: a dispatch completed without file changes.\n' +
+      'Original work item: repo:self-heal:123\n' +
+      'Dispatch outcome: empty-diff\n' +
+      'Action: reslice the work into a smaller concrete edit.',
+    tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+    ts: new Date().toISOString(),
+  });
+}
 
 // ---------------------------------------------------------------------------
 // 1–4: slotsForAvailability
@@ -156,6 +189,73 @@ describe('slotsForAvailability', () => {
 // ---------------------------------------------------------------------------
 
 describe('planConcurrentDispatch', () => {
+  it('keeps trusted generated repairs unassigned when only builtin has capacity', () => {
+    const item = makeTrustedCaptureRepair();
+    const snap = makeSnapshot([
+      { backend: 'codex', availability: 'exhausted' },
+      { backend: 'local-coder', availability: 'exhausted' },
+      { backend: 'builtin', availability: 'open' },
+    ]);
+
+    const plan = planConcurrentDispatch([item], snap, defaultCfg, () => 'codex');
+
+    expect(plan.assignments).toEqual([]);
+    expect(plan.unassigned).toEqual([item]);
+  });
+
+  it('preserves builtin fallback for ordinary work', () => {
+    const item = makeItem();
+    const snap = makeSnapshot([
+      { backend: 'codex', availability: 'exhausted' },
+      { backend: 'builtin', availability: 'open' },
+    ]);
+
+    const plan = planConcurrentDispatch([item], snap, defaultCfg, () => 'codex');
+
+    expect(plan.assignments).toEqual([{ item, backend: 'builtin' }]);
+    expect(plan.unassigned).toEqual([]);
+  });
+
+  it('keeps trusted diagnostic reslices off builtin while rejecting spoofed sources', () => {
+    const trusted = makeTrustedDiagnosticReslice();
+    const spoofed = { ...makeTrustedDiagnosticReslice(), id: 'repo:proposal-repair-nodiff:123456abcdef', source: 'backlog' as WorkSource };
+    const snap = makeSnapshot([{ backend: 'builtin', availability: 'open' }]);
+
+    const plan = planConcurrentDispatch([trusted, spoofed], snap, defaultCfg, () => 'builtin');
+
+    expect(plan.assignments).toEqual([{ item: spoofed, backend: 'builtin' }]);
+    expect(plan.unassigned).toEqual([trusted]);
+  });
+
+  it('preserves repair exclusion in the never-throws gateway fallback', async () => {
+    const ordinary = makeItem();
+    const repair = makeTrustedCaptureRepair();
+    const plan = await buildGatewayDispatchPlan(
+      [ordinary, repair],
+      null as unknown as ResourceSnapshot,
+      {} as import('../src/core/types.js').AshlrConfig,
+      defaultCfg,
+    );
+
+    expect(plan.assignments).toEqual([{ item: ordinary, backend: 'builtin' }]);
+    expect(plan.unassigned).toEqual([repair]);
+  });
+
+  it('keeps every fallback input exactly once while enforcing builtin capacity', async () => {
+    const repair = makeTrustedCaptureRepair();
+    const sameIdOrdinary = { ...makeItem(), id: repair.id };
+    const overflow = makeItem();
+    const plan = await buildGatewayDispatchPlan(
+      [sameIdOrdinary, repair, overflow],
+      null as unknown as ResourceSnapshot,
+      {} as import('../src/core/types.js').AshlrConfig,
+      { maxSlotsPerBackend: 1 },
+    );
+
+    expect(plan.assignments).toEqual([{ item: sameIdOrdinary, backend: 'builtin' }]);
+    expect(plan.unassigned).toEqual([repair, overflow]);
+    expect(plan.assignments.length + plan.unassigned.length).toBe(3);
+  });
   it('assigns items to open backend (full slots)', () => {
     const snap = makeSnapshot([{ backend: 'claude', availability: 'open' }]);
     const items = [makeItem(), makeItem()];

@@ -364,13 +364,71 @@ export async function spawnEngine(
     /** M236 test hook: grace period (ms) between SIGINT and SIGKILL in stall-stop. */
     _stallGraceMs?: number;
   },
-): Promise<{ ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string; terminationReason?: TerminationReason }> {
+): Promise<{ ok: boolean; output: string; usage?: { tokensIn: number; tokensOut: number }; error?: string; terminationReason?: TerminationReason; configRecoveryAttempts?: number }> {
   // CONTRACT: spawnEngine NEVER throws. Any failure is reported as { ok:false, error }.
   try {
-    return await spawnEngineInner(cmd, cfg, opts);
+    const first = await spawnEngineInner(cmd, cfg, opts);
+    const recovery = codexReasoningConfigRecovery(cmd, first);
+    if (!recovery) return first;
+    const recovered = await spawnEngineInner(recovery, cfg, opts);
+    return { ...recovered, configRecoveryAttempts: 1 };
   } catch (err) {
     return { ok: false, output: '', error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+function codexReasoningConfigRecovery(
+  cmd: EngineCommand,
+  result: {
+    ok: boolean;
+    output: string;
+    usage?: { tokensIn: number; tokensOut: number };
+    error?: string;
+    terminationReason?: TerminationReason;
+  },
+): EngineCommand | null {
+  if (result.ok || !result.error) return null;
+  if (result.output.trim() || result.usage || result.terminationReason) return null;
+  const bin = basename(cmd.bin).toLowerCase();
+  if (bin !== 'codex' && bin !== 'codex.exe') return null;
+  if (!/model_reasoning_effort/i.test(result.error)) return null;
+  if (!/(?:unknown variant|expected one of|error loading config)/i.test(result.error)) return null;
+  if (hasCodexConfigKey(cmd.args, 'model_reasoning_effort')) return null;
+
+  const modelIndex = cmd.args.findIndex((arg) => arg === '--model' || arg === '-m');
+  const modelArg = cmd.args.find((arg) => /^--model=/.test(arg));
+  const model = (
+    modelIndex >= 0 ? cmd.args[modelIndex + 1] : modelArg?.slice('--model='.length)
+  )?.trim().toLowerCase();
+  const supportsXHigh = model !== undefined && /^gpt-5\.(?:4|5|6)(?:$|[-.])/.test(model);
+  const effort = supportsXHigh ? 'xhigh' : 'medium';
+  const execIndex = cmd.args.indexOf('exec');
+  const insertAt = execIndex >= 0 ? execIndex + 1 : 0;
+  const args = [...cmd.args];
+  args.splice(insertAt, 0, '-c', `model_reasoning_effort="${effort}"`);
+  return { ...cmd, args };
+}
+
+function hasCodexConfigKey(args: string[], expectedKey: string): boolean {
+  const assignments: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === '-c' || arg === '--config') {
+      assignments.push(args[i + 1] ?? '');
+      i++;
+    } else if (arg.startsWith('--config=')) {
+      assignments.push(arg.slice('--config='.length));
+    } else if (arg.startsWith('-c=')) {
+      assignments.push(arg.slice('-c='.length));
+    } else if (arg.startsWith('-c') && arg.length > 2) {
+      assignments.push(arg.slice(2));
+    }
+  }
+  return assignments.some((assignment) => {
+    const separator = assignment.indexOf('=');
+    if (separator < 0) return false;
+    return assignment.slice(0, separator).trim() === expectedKey;
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ function ageOk(ts: string, nowMs: number, maxAgeMs: number): boolean {
 }
 
 export function isTrustedDiagnosticResliceItem(item: WorkItem): boolean {
+  if (item.source !== 'self') return false;
   if (!/^[^:]+:proposal-repair-nodiff:[0-9a-f]{12}$/i.test(item.id)) return false;
   const tags = tagsFromItem(item);
   if (!tags.includes('proposal-repair')) return false;
@@ -54,6 +55,7 @@ export function isTrustedDiagnosticResliceItem(item: WorkItem): boolean {
 }
 
 export function isTrustedCaptureRepairItem(item: WorkItem): boolean {
+  if (item.source !== 'self') return false;
   if (!/^[^:]+:proposal-repair-capture:[0-9a-f]{12}$/i.test(item.id)) return false;
   const tags = tagsFromItem(item);
   if (!tags.includes('self-heal')) return false;

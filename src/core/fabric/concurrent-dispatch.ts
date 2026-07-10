@@ -43,14 +43,17 @@
  *   - Kill switch halts before/within each wave item.
  *   - Each item still flows through the full gate in dispatchFn
  *     (judge / scope-cap / sandbox / tests-green / provenance).
- *   - builtin is always available as a fallback — but ONLY if the snapshot
- *     doesn't mark it exhausted/unreachable/throttled (monitor wins).
+ *   - builtin is available as a fallback for ordinary work — but ONLY if the
+ *     snapshot doesn't mark it exhausted/unreachable/throttled (monitor wins).
+ *     Trusted generated repairs require an editing backend and wait unassigned
+ *     rather than consuming a planning-only builtin slot.
  *   - Flag-off (fabric.concurrentDispatch !== true) → loop.ts uses the existing
  *     serial/tieredBounded path unchanged; this module is only imported on the
  *     flag-ON path.
  */
 
 import type { EngineId, WorkItem, AshlrConfig } from '../types.js';
+import { isTrustedGeneratedRepairItem } from '../fleet/self-heal-trust.js';
 import type { BackendAvailability, BackendResourceState, ResourceSnapshot } from './resource-monitor.js';
 import { decide as gatewayDecide } from './gateway.js';
 
@@ -85,7 +88,7 @@ export interface DispatchAssignment {
 export interface DispatchPlan {
   /** Items assigned to a backend (backend had headroom at plan time). */
   assignments: DispatchAssignment[];
-  /** Items that could NOT be assigned (all backends at 0 slots). */
+  /** Items that could not be assigned to an eligible backend. */
   unassigned: WorkItem[];
   /**
    * Per-backend slot count at plan time (for observability / test assertions).
@@ -255,10 +258,12 @@ export function planConcurrentDispatch(
   let rrCursor = 0;
 
   for (const item of items) {
+    const requiresEditingBackend = isTrustedGeneratedRepairItem(item);
+
     // 1. Try preferred backend first.
     const preferred = routeItem(item);
     const prefRem = remaining.get(preferred) ?? 0;
-    if (prefRem > 0) {
+    if (prefRem > 0 && (!requiresEditingBackend || preferred !== 'builtin')) {
       assignments.push({ item, backend: preferred });
       remaining.set(preferred, prefRem - 1);
       continue;
@@ -270,6 +275,7 @@ export function planConcurrentDispatch(
     for (let attempt = 0; attempt < n; attempt++) {
       const idx = (rrCursor + attempt) % n;
       const candidate = eligibleBackends[idx]!;
+      if (requiresEditingBackend && candidate === 'builtin') continue;
       const rem = remaining.get(candidate) ?? 0;
       if (rem > 0) {
         assignments.push({ item, backend: candidate });
@@ -467,12 +473,22 @@ export async function buildGatewayDispatchPlan(
     const routeItem = buildConcurrentDispatchRouteItem(snapshot, dispatchCfg, cfg, routeHints, routeReasons);
     return planConcurrentDispatch(items, snapshot, dispatchCfg, routeItem);
   } catch {
-    // Never-throws: safe fallback assigns everything to builtin
+    // Never-throws fallback: ordinary work may use builtin, but trusted
+    // generated repairs still wait for a real editing backend.
     const fallbackSlots = Math.max(1, dispatchCfg.maxSlotsPerBackend ?? 3);
     const slotsMap = new Map<EngineId, number>([['builtin', fallbackSlots]]);
+    const assignments: DispatchAssignment[] = [];
+    const unassigned: WorkItem[] = [];
+    for (const item of items) {
+      if (isTrustedGeneratedRepairItem(item) || assignments.length >= fallbackSlots) {
+        unassigned.push(item);
+      } else {
+        assignments.push({ item, backend: 'builtin' });
+      }
+    }
     return {
-      assignments: items.map((item) => ({ item, backend: 'builtin' as EngineId })),
-      unassigned: [],
+      assignments,
+      unassigned,
       slotsMap,
     };
   }

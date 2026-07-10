@@ -223,14 +223,23 @@ describe('M170 — best-of-N dispatch: bestOfN > 1 routes through runBestOfN', (
   });
 
   it('calls runBestOfN when cfg.foundry.bestOfN > 1', async () => {
-    enrollRepo();
+    const repo = enrollRepo();
     const cfg = makeFrontierCfg({ bestOfN: 3 } as unknown as Partial<AshlrConfig['foundry']>);
 
     const result = await tick(cfg, { dryRun: false });
 
     expect(result.reason).toBe('ok');
     expect(mockRunBestOfN).toHaveBeenCalledTimes(1);
-    expect(readAgentActions().filter((event) => event.action === 'daemon:dispatch-start')).toHaveLength(1);
+    const attemptId = (mockRunBestOfN.mock.calls[0]?.[2] as { attemptId?: string } | undefined)?.attemptId;
+    expect(attemptId).toBeTruthy();
+    const startsForItem = readAgentActions().filter(
+      (event) =>
+        event.action === 'daemon:dispatch-start' &&
+        event.repo === repo.dir &&
+        event.itemId === `${repo.dir}:m170-item-0`,
+    );
+    expect(startsForItem).toHaveLength(1);
+    expect(startsForItem[0]?.runId).toBe(attemptId);
     // runGoal must NOT have been called (best-of-N replaced it)
     expect(mockRunGoal).not.toHaveBeenCalled();
   });

@@ -172,6 +172,7 @@ type SpawnEngineResult = {
   usage?: { tokensIn: number; tokensOut: number };
   error?: string;
   terminationReason?: TerminationReason;
+  configRecoveryAttempts?: number;
 };
 
 /**
@@ -1387,7 +1388,7 @@ export async function runEngineSandboxed(
     let res: SpawnEngineResult = { ok: false, output: '', error: 'engine did not run' };
     let _spawnDurationMs = 0;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      setRunActionCount(actionCounts, 'spawnAttempts', attempt);
+      incrementRunActionCount(actionCounts, 'spawnAttempts');
       setRunActionCount(actionCounts, 'modelSteps', attempt);
       setRunActionCount(actionCounts, 'totalSteps', attempt);
       const _spawnStart = Date.now();
@@ -1396,6 +1397,7 @@ export async function runEngineSandboxed(
         timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         launcher: launcher ?? undefined,
       });
+      if (res.configRecoveryAttempts) incrementRunActionCount(actionCounts, 'spawnAttempts');
       _spawnDurationMs += Date.now() - _spawnStart;
 
       if (res.ok) break;
@@ -1597,6 +1599,7 @@ export async function runEngineSandboxed(
                     timeoutMs: _v2g.perRunTimeoutMs ?? 180_000,
                     launcher: launcher ?? undefined,
                   });
+                  if (r.configRecoveryAttempts) incrementRunActionCount(actionCounts, 'spawnAttempts');
                   if (r.usage) {
                     _v2gRepair.tokensIn += r.usage.tokensIn;
                     _v2gRepair.tokensOut += r.usage.tokensOut;

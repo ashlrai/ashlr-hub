@@ -1424,3 +1424,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Implement the safest high-leverage cold-start slice supported by authoritative evidence: bounded, fail-closed corpus diagnostics rather than unsafe historical backfill.
 - [x] Prove no active prompt injection, route changes, causal overclaim, or merge-authority changes.
 - [x] Run focused/full gates, independent review, notes, commit, push, reload, and production smoke.
+
+## Current Overnight Cycle - Generated Repair Dispatch Reliability
+- [x] Rehydrate the clean deployed baseline, Entire state, live queue, and proposal-yield telemetry.
+- [x] Deploy disjoint audits for no-diff repair conversion, capture recovery, queue hygiene, and verifier coverage.
+- [x] Trace repeated repair attempts to the concrete headless Codex startup failure.
+- [x] Recover once from unsupported desktop reasoning preferences using a model-compatible CLI value without overriding valid operator configuration.
+- [x] Keep trusted generated repairs off the planning-only builtin backend, including exceptional fallbacks and slot overflow.
+- [x] Add retry, provenance, diagnostic-reslice, fallback, capacity, duplicate-id, and parallel-test-isolation coverage.
+- [x] Run focused/full repository gates and independent adversarial review.
+- [ ] Update durable notes, commit, push, reload, and production smoke.
