@@ -212,8 +212,17 @@ const FIXTURE_FLEET_STATUS = {
     attemptShape: {
       backendNoDiff: 1,
       captureOrGateBlocked: 0,
-      repairAttempts: 0,
+      repairAttempts: 2,
       policyDisabled: 0,
+    },
+    generatedRepairAttempts: {
+      attempts: 5,
+      proposalsCreated: 4,
+      noProposal: 1,
+      proposalRate: 0.8,
+      captureRepairs: 2,
+      diagnosticReslices: 3,
+      proposalRepairs: 0,
     },
     topReasons: [{ reason: 'agent returned no diff', count: 1 }],
     byBackend: [
@@ -244,16 +253,39 @@ const FIXTURE_FLEET_STATUS = {
     byBackendSource: [],
   },
   merges: { recent: 0 },
+  dispatchYieldDiagnostics: {
+    windowHours: 24,
+    minAttempts: 3,
+    lowYieldRate: 0.2,
+    diagnosticAttempts: 6,
+    proposalsCreated: 4,
+    proposalRate: 4 / 6,
+    policyDisabled: 0,
+    verdict: 'actionable' as const,
+    action: 'tighten-context-or-reslice' as const,
+    sameTierOnly: true,
+    recommendation: 'Repair recovery is active.',
+    generatedRepairAttempts: {
+      attempts: 5,
+      proposalsCreated: 4,
+      noProposal: 1,
+      proposalRate: 0.8,
+      captureRepairs: 2,
+      diagnosticReslices: 3,
+      proposalRepairs: 0,
+    },
+    candidates: [],
+  },
   missionBrief: {
     generatedAt: new Date().toISOString(),
     directive: 'Build the highest-value backlog proposal',
     confidence: 'medium' as const,
     operatingMode: 'backlog-build',
     blocker: {
-      id: 'proposal-production-needed',
-      label: 'Proposal production needed',
-      detail: 'Backlog work is visible, but there are no pending proposals ready to ship.',
-      severity: 'medium' as const,
+      id: 'generated-repair-recovery-active',
+      label: 'Repair recovery active',
+      detail: 'generated repairs 4/5 converted (80%; capture 2, no-diff 3)',
+      severity: 'low' as const,
       source: 'queue' as const,
     },
     action: {
@@ -275,6 +307,37 @@ const FIXTURE_FLEET_STATUS = {
     },
   },
   killed: false,
+  autonomousShipReadiness: {
+    verdict: 'degraded' as const,
+    confidence: 'medium' as const,
+    freshness: {
+      generatedAt: new Date().toISOString(),
+      overall: 'fresh' as const,
+      freshestAt: new Date().toISOString(),
+      stalestAt: new Date().toISOString(),
+      maxAgeMs: 0,
+      staleSources: 0,
+      unknownSources: 0,
+    },
+    topBlocker: {
+      id: 'generated-repair-recovery-active',
+      label: 'Repair recovery active',
+      detail: 'generated repairs 4/5 converted (80%; capture 2, no-diff 3)',
+      severity: 'low' as const,
+      source: 'queue' as const,
+    },
+    primaryAction: null,
+    sources: [],
+    sourceSummary: { healthy: 0, degraded: 0, blocked: 0, unavailable: 0, unknown: 0 },
+    sourceQualitySummary: {
+      'healthy-source': 0,
+      'healthy-zero': 0,
+      'degraded-source': 0,
+      'missing-source': 0,
+      'stale-source': 0,
+      'unknown-source': 0,
+    },
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -402,6 +465,15 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(snap.fleet?.proposalProduction?.noProposalDispatches).toBe(1);
     expect(snap.fleet?.proposalProduction?.topReasons[0]?.reason).toBe('agent returned no diff');
     expect(snap.fleet?.dispatchProduction?.proposalRate).toBe(0.5);
+    expect(snap.fleet?.dispatchProduction?.generatedRepairAttempts).toMatchObject({
+      attempts: 5,
+      proposalsCreated: 4,
+      proposalRate: 0.8,
+      captureRepairs: 2,
+      diagnosticReslices: 3,
+    });
+    expect(snap.fleet?.dispatchYieldDiagnostics?.generatedRepairAttempts?.attempts).toBe(5);
+    expect(snap.fleet?.autonomousShipReadiness?.topBlocker?.id).toBe('generated-repair-recovery-active');
     expect(snap.fleet?.dispatchProduction?.byBackend[0]?.key).toBe('builtin');
     expect(snap.fleet?.missionBrief).toMatchObject({
       directive: 'Build the highest-value backlog proposal',

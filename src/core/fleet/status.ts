@@ -52,7 +52,12 @@ import {
 } from '../run/repo-profile.js';
 import { engineInstalled } from '../run/engines.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
-import { DEFAULT_COOLDOWN_MS, isSuppressibleWorkedOutcome, loadWorkedLedger } from './worked-ledger.js';
+import {
+  DEFAULT_COOLDOWN_MS,
+  isSuppressibleWorkedOutcome,
+  loadWorkedLedger,
+  type WorkedEvent,
+} from './worked-ledger.js';
 import {
   blockingPendingProposalsForBacklog,
   pendingProposalItemKeysForBacklog,
@@ -72,6 +77,7 @@ import {
   type FleetContextEfficiencyStatus,
 } from './context-efficiency.js';
 import { buildFleetLaneLocks, type FleetLaneLocksStatus } from './lane-lock.js';
+import { isTrustedGeneratedRepairItem } from './self-heal-trust.js';
 
 export interface FleetBackendResourceStatus {
   availability: BackendAvailability | 'not-sensed';
@@ -728,13 +734,15 @@ function buildQueueEligibility(
 ): FleetQueueEligibility {
   const cooldownMs = configCooldownMs(cfg) ?? DEFAULT_COOLDOWN_MS;
   const nowMs = Date.now();
-  const latestByItem = new Map<string, { tsMs: number; suppressible: boolean }>();
+  const repairRecoveryHealthy = healthyGeneratedRepairRecovery(cfg);
+  const latestByItem = new Map<string, { event: WorkedEvent; tsMs: number; suppressible: boolean }>();
   for (const event of loadWorkedLedger().events) {
     const eventMs = Date.parse(event.ts);
     if (Number.isNaN(eventMs)) continue;
     const prior = latestByItem.get(event.itemId);
     if (prior === undefined || eventMs > prior.tsMs) {
       latestByItem.set(event.itemId, {
+        event,
         tsMs: eventMs,
         suppressible: isSuppressibleWorkedOutcome(event.outcome),
       });
@@ -754,7 +762,8 @@ function buildQueueEligibility(
       continue;
     }
     const last = latestByItem.get(item.id);
-    const cooldownUntil = last && last.suppressible ? last.tsMs + cooldownMs : null;
+    const itemCooldownMs = cooldownMsForWorkItem(item, cooldownMs, repairRecoveryHealthy, last?.event);
+    const cooldownUntil = last && last.suppressible ? last.tsMs + itemCooldownMs : null;
     if (cooldownUntil !== null && cooldownUntil > nowMs) {
       cooldownItems++;
       if (nextEligibleMs === null || cooldownUntil < nextEligibleMs) {
@@ -771,6 +780,39 @@ function buildQueueEligibility(
     pendingItems,
     nextEligibleAt: isoFromMs(nextEligibleMs),
   };
+}
+
+const GENERATED_REPAIR_EMPTY_FAST_COOLDOWN_MS = 30 * 60 * 1000;
+
+function cooldownMsForWorkItem(
+  item: WorkItem,
+  baseCooldownMs: number,
+  repairRecoveryHealthy: boolean,
+  latestEvent?: WorkedEvent,
+): number {
+  if (
+    repairRecoveryHealthy &&
+    latestEvent?.outcome === 'empty' &&
+    isTrustedGeneratedRepairItem(item)
+  ) {
+    return Math.min(baseCooldownMs, GENERATED_REPAIR_EMPTY_FAST_COOLDOWN_MS);
+  }
+  return baseCooldownMs;
+}
+
+function healthyGeneratedRepairRecovery(cfg: AshlrConfig): boolean {
+  try {
+    const yieldSummary = readDispatchProductionYield({
+      windowMs: RECENT_WINDOW_MS,
+      limit: 1200,
+      limitPerDimension: 1,
+    });
+    const generated = yieldSummary?.generatedRepairAttempts;
+    if (!generated || generated.attempts < MIN_DISPATCH_YIELD_ACTION_ATTEMPTS) return false;
+    return generated.proposalRate >= Math.max(configuredLowDispatchYieldRate(cfg), 0.5);
+  } catch {
+    return false;
+  }
 }
 
 export function resolveAutonomyControlMode(cfg: AshlrConfig): FleetAutonomyControlMode {

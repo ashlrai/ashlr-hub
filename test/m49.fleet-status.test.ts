@@ -154,6 +154,60 @@ function makeBacklogItem(
   };
 }
 
+function makeTrustedDiagnosticResliceItem(repo: string, hash = 'abcdef123456', score = 9): WorkItem {
+  return {
+    id: `repo:proposal-repair-nodiff:${hash}`,
+    repo,
+    source: 'self',
+    title: 'Reslice no-diff dispatch for repo item repo:goal:stalled',
+    detail:
+      `Diagnostic reslice: a dispatch completed without file changes.\n` +
+      `Original work item: repo:goal:stalled\n` +
+      `Dispatch outcome: empty-diff\n` +
+      `Action: reslice the work into a smaller concrete edit.`,
+    value: 5,
+    effort: 1,
+    score,
+    tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice', 'no-diff'],
+    ts: '2026-07-03T00:00:00.000Z',
+  };
+}
+
+function seedHealthyRepairRecoveryEvents(repo: string, now: string): void {
+  const base: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts: now,
+    machineId: 'm49',
+    itemId: 'repo:proposal-repair-nodiff:111111111111',
+    source: 'self',
+    repo,
+    title: 'Reslice no-diff dispatch for repo item repo:goal:stalled',
+    backend: 'codex',
+    tier: 'frontier',
+    model: 'gpt-5.5',
+    assignedBy: 'daemon',
+    routeReason: 'frontier: generated diagnostic no-diff reslice',
+    outcome: 'proposal-created',
+    proposalCreated: true,
+    proposalId: 'prop-repair-1',
+    spentUsd: 0,
+    reason: 'proposal filed',
+    basis: 'run-proposal-outcome',
+  };
+  recordDispatchProduction([
+    base,
+    { ...base, itemId: 'repo:proposal-repair-nodiff:222222222222', proposalId: 'prop-repair-2' },
+    {
+      ...base,
+      itemId: 'repo:proposal-repair-nodiff:333333333333',
+      proposalCreated: false,
+      proposalId: undefined,
+      outcome: 'empty-diff',
+      reason: 'engine "codex" completed without file changes',
+    },
+  ]);
+}
+
 function makeGoalRecord(
   repo: string | null,
   id: string,
@@ -2752,6 +2806,87 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
     expect(actionIds).not.toContain('process-capture-repairs');
     expect(actionIds[0]).toBe('inspect-dispatch-yield');
+  });
+
+  it('shortens cooldown for trusted empty generated repairs when recovery is healthy', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    const now = new Date().toISOString();
+    const repair = makeTrustedDiagnosticResliceItem(repo, '444444444444', 9);
+    const fresh = makeBacklogItem(repo, 'repo:goal:fresh-generic', 'Fresh generic work', 2, 'goal');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome, [], now);
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeBacklogSnapshot(tmpHome, repo, [repair, fresh], now);
+    seedHealthyRepairRecoveryEvents(repo, now);
+    const localFailure: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'local-empty-a',
+      source: 'self',
+      repo,
+      title: 'Local no-diff sample',
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      routeReason: 'local-coder bulk',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0,
+      reason: 'engine "local-coder" completed without file changes',
+      basis: 'run-proposal-outcome',
+    };
+    recordDispatchProduction([
+      localFailure,
+      { ...localFailure, itemId: 'local-empty-b' },
+      { ...localFailure, itemId: 'local-empty-c' },
+    ]);
+    recordOutcome(repair.id, 'empty', new Date(Date.now() - 31 * 60 * 1000).toISOString());
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.dispatchYieldDiagnostics).toMatchObject({
+      verdict: 'actionable',
+      primaryCandidate: {
+        backend: 'local-coder',
+        source: 'self',
+      },
+    });
+    expect(s.queue.eligibleBacklogItems).toBe(2);
+    expect(s.queue.cooldownItems).toBe(0);
+    expect(s.queue.next?.[0]).toMatchObject({
+      id: repair.id,
+      title: repair.title,
+    });
+    expect(s.nextActions?.map((action) => action.id)).toContain('drain-diagnostic-reslices');
+  });
+
+  it('keeps judged generated repairs on the full cooldown even when recovery is healthy', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    const now = new Date().toISOString();
+    const repair = makeTrustedDiagnosticResliceItem(repo, '555555555555', 9);
+    const fresh = makeBacklogItem(repo, 'repo:goal:fresh-generic', 'Fresh generic work', 2, 'goal');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome, [], now);
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeBacklogSnapshot(tmpHome, repo, [repair, fresh], now);
+    seedHealthyRepairRecoveryEvents(repo, now);
+    recordOutcome(repair.id, 'judged-decline', new Date(Date.now() - 31 * 60 * 1000).toISOString());
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.queue.eligibleBacklogItems).toBe(1);
+    expect(s.queue.cooldownItems).toBe(1);
+    expect(s.queue.next?.[0]).toMatchObject({
+      id: fresh.id,
+      title: fresh.title,
+    });
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('drain-diagnostic-reslices');
   });
 
   it('promotes queued no-diff diagnostic reslices ahead of dispatch-yield inspection', async () => {

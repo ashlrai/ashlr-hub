@@ -105,6 +105,7 @@ import { notifyFleetEvent } from '../comms/events.js';
 import { pendingCount, listProposals } from '../inbox/store.js';
 import {
   recordDispatchProduction,
+  readDispatchProductionYield,
   type DispatchProductionBasis,
   type DispatchProductionEvent,
 } from '../fleet/dispatch-production-ledger.js';
@@ -124,7 +125,10 @@ import { productionAttemptLearningLabelFromSignals } from '../learning/attempt-s
 import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
 // M220: verdict-feedback sweep — feed judge rejections back to the ledger so
 // re-clogging items (e.g. "CI is failing") are suppressed for the cooldown window.
-import { sweepJudgedProposals } from '../fleet/worked-ledger.js';
+import {
+  latestWorkedEvent,
+  sweepJudgedProposals,
+} from '../fleet/worked-ledger.js';
 import {
   blockingPendingProposalsForBacklog,
   pendingProposalItemKeysForBacklog,
@@ -146,7 +150,14 @@ import {
 } from '../fabric/production-velocity.js';
 import { listOutcomeRecords, listReadyEvidenceOutcomeRecords } from '../autonomy/outcome-records.js';
 import { compareReposByStrategicFocus } from '../ecosystem/focus.js';
-import { isTrustedDiagnosticResliceItem } from '../fleet/self-heal-trust.js';
+import {
+  isTrustedDiagnosticResliceItem,
+  isTrustedGeneratedRepairItem,
+} from '../fleet/self-heal-trust.js';
+
+const GENERATED_REPAIR_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
+const GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS = 3;
+const GENERATED_REPAIR_EMPTY_FAST_COOLDOWN_MS = 30 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // DaemonConfig defaults (conservative)
@@ -1217,6 +1228,43 @@ async function tieredBounded<T>(
 // tick — one operator cycle
 // ---------------------------------------------------------------------------
 
+function configuredLowRepairYieldRate(cfg: AshlrConfig): number {
+  const raw = cfg.foundry?.intelligence?.minProposalYieldRate;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return 0.2;
+  return Math.max(0, Math.min(1, raw));
+}
+
+function generatedRepairRecoveryHealthy(cfg: AshlrConfig): boolean {
+  try {
+    const yieldSummary = readDispatchProductionYield({
+      windowMs: GENERATED_REPAIR_RECOVERY_WINDOW_MS,
+      limit: 1200,
+      limitPerDimension: 1,
+    });
+    const generated = yieldSummary?.generatedRepairAttempts;
+    if (!generated || generated.attempts < GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS) return false;
+    return generated.proposalRate >= Math.max(configuredLowRepairYieldRate(cfg), 0.5);
+  } catch {
+    return false;
+  }
+}
+
+function cooldownMsForSelectionItem(
+  item: WorkItem,
+  baseCooldownMs: number,
+  repairRecoveryHealthy: boolean,
+): number {
+  const latest = latestWorkedEvent(item.id);
+  if (
+    repairRecoveryHealthy &&
+    latest?.outcome === 'empty' &&
+    isTrustedGeneratedRepairItem(item)
+  ) {
+    return Math.min(baseCooldownMs, GENERATED_REPAIR_EMPTY_FAST_COOLDOWN_MS);
+  }
+  return baseCooldownMs;
+}
+
 /**
  * One operator cycle. In order:
  *  1. Kill-switch check.
@@ -1866,8 +1914,12 @@ export async function tick(
     console.warn('[ashlr] daemon:tick inbox pendingItemIds read failed:', (err as Error)?.message ?? err);
   }
 
+  const repairRecoveryHealthy = generatedRepairRecoveryHealthy(liveCfg);
   const isSelectionBlocked = (item: WorkItem): boolean =>
-    coordinator.shouldSkip(item.id, cooldownMs) ||
+    coordinator.shouldSkip(
+      item.id,
+      cooldownMsForSelectionItem(item, cooldownMs, repairRecoveryHealthy),
+    ) ||
     pendingItemKeys.has(workItemCoverageKey(item));
 
   const explicitDrainMode = opts.drain;

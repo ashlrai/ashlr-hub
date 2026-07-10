@@ -414,6 +414,13 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('function dispatchProductionDiagnosticAttempts');
     expect(src).toContain('function generatedWorkMetric');
     expect(src).toContain('function diagnosticResliceDrainMetric');
+    expect(src).toContain('function generatedRepairRecoveryMetric');
+    expect(src).toContain('function fleetRepairRecoveryMetric');
+    expect(src).toContain('generated-repair-recovery-active');
+    expect(src).toContain('repair recovery -> learning');
+    expect(src).toContain("'Repair Loop'");
+    expect(src).toContain('fdMetricPill(\'Repair Loop\'');
+    expect(src).toContain('Repair recovery');
     expect(src).toContain('captureRepairs');
     expect(src).toContain('diagnosticReslices');
     expect(src).toContain('function renderMissionBriefCard');

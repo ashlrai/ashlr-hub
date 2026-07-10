@@ -291,6 +291,19 @@ export function recentlyDeclined(
   }
 }
 
+export function latestWorkedEvent(itemId: string): WorkedEvent | undefined {
+  try {
+    const l = loadWorkedLedger();
+    for (let i = l.events.length - 1; i >= 0; i--) {
+      const event = l.events[i]!;
+      if (event.itemId === itemId) return event;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // M220: Judge-verdict feedback — recordVerdict + sweepJudgedProposals
 // ---------------------------------------------------------------------------

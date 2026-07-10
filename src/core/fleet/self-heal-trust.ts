@@ -69,6 +69,10 @@ export function isTrustedCaptureRepairItem(item: WorkItem): boolean {
     /\bProduce a fresh complete fix\b/i.test(text);
 }
 
+export function isTrustedGeneratedRepairItem(item: WorkItem): boolean {
+  return isTrustedDiagnosticResliceItem(item) || isTrustedCaptureRepairItem(item);
+}
+
 export function isActionableSelfHealFailureText(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;

@@ -2552,6 +2552,47 @@ function formatAttemptShape(shape) {
   return `shape: no-diff ${parts.noDiff}, gate/capture ${parts.gate}, repairs ${parts.repairs}, policy-off ${parts.policy}`;
 }
 
+function generatedRepairRecoveryMetric(generated) {
+  if (!generated || Number(generated.attempts ?? 0) <= 0) return null;
+  const safe = (value) => Number.isFinite(Number(value)) && Number(value) > 0
+    ? Math.trunc(Number(value))
+    : 0;
+  const attempts = safe(generated.attempts);
+  if (attempts <= 0) return null;
+  const proposals = safe(generated.proposalsCreated);
+  const rate = typeof generated.proposalRate === 'number'
+    ? generated.proposalRate
+    : proposals / attempts;
+  const capture = safe(generated.captureRepairs);
+  const noDiff = safe(generated.diagnosticReslices);
+  const proposal = safe(generated.proposalRepairs);
+  const kinds = [
+    capture > 0 ? `${capture} capture` : null,
+    noDiff > 0 ? `${noDiff} no-diff` : null,
+    proposal > 0 ? `${proposal} proposal` : null,
+  ].filter(Boolean);
+  const value = `${proposals}/${attempts} converted (${formatFleetPercent(rate)})`;
+  return {
+    attempts,
+    proposals,
+    rate,
+    value,
+    detail: `generated repairs ${value}${kinds.length ? `; ${kinds.join(', ')}` : ''}`,
+  };
+}
+
+function fleetRepairRecoveryMetric(fleet) {
+  return generatedRepairRecoveryMetric(
+    fleet?.dispatchYieldDiagnostics?.generatedRepairAttempts ??
+    fleet?.dispatchProduction?.generatedRepairAttempts ??
+    fleet?.attemptCoverage?.production?.generatedRepairAttempts
+  );
+}
+
+function fleetRepairRecoveryActive(readiness, brief) {
+  return (brief?.blocker?.id ?? readiness?.topBlocker?.id) === 'generated-repair-recovery-active';
+}
+
 function dispatchProductionBucketLabel(bucket) {
   if (!bucket || typeof bucket !== 'object') return 'unknown';
   if (bucket.backend) return String(bucket.backend);
@@ -2595,16 +2636,21 @@ function renderDispatchProductionCard(dispatchProduction, cls = 'ctrl-card card'
   ));
 
   const body = el('div', { cls: 'card-body' });
+  const repairRecovery = generatedRepairRecoveryMetric(dispatchProduction.generatedRepairAttempts);
   body.appendChild(infoGrid([
     ['Window', proposalProductionWindowLabel(dispatchProduction)],
     ['Attempts', dispatchProduction.events ?? 0],
     ['Proposals', dispatchProduction.proposalsCreated ?? 0],
     ['Yield', proposalRate],
+    ['Repair recovery', repairRecovery?.value ?? '—'],
     ['No-proposal', dispatchProduction.noProposal ?? 0],
     ['Spend', `$${Number(dispatchProduction.spentUsd ?? 0).toFixed(4)}`],
   ]));
   const shape = formatAttemptShape(dispatchProduction.attemptShape);
   if (shape) body.appendChild(el('p', { cls: 'hint' }, shape));
+  if (repairRecovery) {
+    body.appendChild(el('p', { cls: 'hint' }, `Repair loop: ${repairRecovery.detail}`));
+  }
 
   const backends = Array.isArray(dispatchProduction.byBackend)
     ? dispatchProduction.byBackend.slice(0, 4)
@@ -3532,6 +3578,8 @@ function renderControl() {
   const missionBrief = d.fleet?.missionBrief ?? fleet.missionBrief ?? null;
   const production = d.fleet?.proposalProduction ?? fleet.proposalProduction ?? null;
   const dispatchProduction = d.fleet?.dispatchProduction ?? fleet.dispatchProduction ?? null;
+  const repairRecovery = fleetRepairRecoveryMetric(d.fleet ?? fleet);
+  const isRepairRecoveryActive = fleetRepairRecoveryActive(shipReadiness, missionBrief);
   const workspace = d.fleet?.workspace ?? fleet.workspace ?? null;
   const attemptCoverage = d.fleet?.attemptCoverage ?? fleet.attemptCoverage ?? null;
   if (shipReadiness) {
@@ -3550,6 +3598,13 @@ function renderControl() {
   }
   if (dispatchProduction) {
     heroMetrics.appendChild(controlMetric('Yield 24h', formatFleetPercent(dispatchProduction.proposalRate), dispatchProduction.proposalRate > 0 ? '#4ade80' : '#f97316'));
+  }
+  if (repairRecovery) {
+    heroMetrics.appendChild(controlMetric(
+      'Repair Loop',
+      `${repairRecovery.proposals}/${repairRecovery.attempts} ${formatFleetPercent(repairRecovery.rate)}`,
+      isRepairRecoveryActive || repairRecovery.rate >= 0.5 ? '#4ade80' : '#f97316'
+    ));
   }
   if (workspace) {
     heroMetrics.appendChild(controlMetric('Workspace', workspace.eventCount ?? 0, workspace.eventCount > 0 ? '#38bdf8' : '#64748b'));
@@ -4567,8 +4622,10 @@ function fdRenderReadinessRail(snap) {
   const queueMetric = queueEligibilityMetric(queue) ?? `${queue.backlogItems ?? 0} backlog`;
   const generatedMetric = generatedWorkMetric(queue.generatedWork);
   const drainMetric = diagnosticResliceDrainMetric(queue.diagnosticResliceDrain);
+  const repairRecovery = fleetRepairRecoveryMetric(fleet);
+  const isRepairRecoveryActive = fleetRepairRecoveryActive(readiness, missionBrief);
   const leases = sharedQueue ? sharedQueueMetric(sharedQueue) : 'local only';
-  const loop = effectiveness?.phase ?? 'unknown';
+  const loop = isRepairRecoveryActive ? 'repair recovery -> learning' : effectiveness?.phase ?? 'unknown';
   const verdict = formatShipReadinessVerdict(readiness.verdict);
 
   const rail = el('div', {
@@ -4588,6 +4645,7 @@ function fdRenderReadinessRail(snap) {
     fdMetricPill('Blocker', compactFleetReason(blockerLabel, 54), blockerDetail),
     fdMetricPill('Queue', queueMetric),
     generatedMetric ? fdMetricPill('Generated', generatedMetric) : null,
+    repairRecovery ? fdMetricPill('Repair Loop', repairRecovery.value, repairRecovery.detail) : null,
     drainMetric ? fdMetricPill('Diag Drain', drainMetric) : null,
     fdMetricPill('Leases', leases ?? 'local only'),
     fdMetricPill('Yield', fdDispatchYieldText(dispatchProduction))
@@ -4865,17 +4923,22 @@ function fdRenderProductionPanel(snap) {
   }
 
   if (dispatchProduction) {
+    const repairRecovery = generatedRepairRecoveryMetric(dispatchProduction.generatedRepairAttempts);
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Dispatch yield'));
     body.appendChild(infoGrid([
       ['Window', proposalProductionWindowLabel(dispatchProduction)],
       ['Attempts', dispatchProduction.events ?? 0],
       ['Proposals', dispatchProduction.proposalsCreated ?? 0],
       ['Yield', formatFleetPercent(dispatchProduction.proposalRate)],
+      ['Repair recovery', repairRecovery?.value ?? '—'],
       ['No-proposal', dispatchProduction.noProposal ?? 0],
       ['Spend', `$${Number(dispatchProduction.spentUsd ?? 0).toFixed(4)}`],
     ]));
     const shape = formatAttemptShape(dispatchProduction.attemptShape);
     if (shape) body.appendChild(el('p', { cls: 'hint' }, shape));
+    if (repairRecovery) {
+      body.appendChild(el('p', { cls: 'hint' }, `Repair loop: ${repairRecovery.detail}`));
+    }
     const backends = Array.isArray(dispatchProduction.byBackend) ? dispatchProduction.byBackend : [];
     const backend = backends.find((candidate) => dispatchProductionDiagnosticAttempts(candidate) > 0) ?? backends[0] ?? null;
     if (backend) {

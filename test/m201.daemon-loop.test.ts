@@ -228,7 +228,11 @@ import {
   createProposal,
   pendingCount,
 } from '../src/core/inbox/store.js';
-import { readDispatchProductionEvents } from '../src/core/fleet/dispatch-production-ledger.js';
+import {
+  readDispatchProductionEvents,
+  recordDispatchProduction,
+  type DispatchProductionEvent,
+} from '../src/core/fleet/dispatch-production-ledger.js';
 import { readAgentActions } from '../src/core/fleet/agent-action-ledger.js';
 import { loadWorkedLedger, recordOutcome } from '../src/core/fleet/worked-ledger.js';
 import {
@@ -417,6 +421,45 @@ function makeDiagnosticResliceItem(repoDir: string, hash = 'abcdef123456', score
     tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice', 'no-diff', 'verify', 'high-priority'],
     ts: new Date().toISOString(),
   };
+}
+
+function seedHealthyGeneratedRepairYield(repoDir: string): void {
+  const now = new Date().toISOString();
+  const base: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts: now,
+    machineId: 'm201',
+    itemId: `${basename(repoDir)}:proposal-repair-nodiff:abc123def450`,
+    source: 'self',
+    repo: repoDir,
+    title: 'Reslice no-diff dispatch for repo item repo:goal:stalled',
+    backend: 'codex',
+    tier: 'frontier',
+    assignedBy: 'daemon',
+    routeReason: 'frontier: generated diagnostic no-diff reslice',
+    outcome: 'proposal-created',
+    proposalCreated: true,
+    proposalId: 'prop-repair-0',
+    spentUsd: 0,
+    reason: 'proposal filed',
+    basis: 'run-proposal-outcome',
+  };
+  recordDispatchProduction([
+    base,
+    {
+      ...base,
+      itemId: `${basename(repoDir)}:proposal-repair-nodiff:abc123def451`,
+      proposalId: 'prop-repair-1',
+    },
+    {
+      ...base,
+      itemId: `${basename(repoDir)}:proposal-repair-nodiff:abc123def452`,
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      proposalId: undefined,
+      reason: 'engine "codex" completed without file changes',
+    },
+  ]);
 }
 
 /** Enroll a repo and seed buildBacklog with N items. */
@@ -805,6 +848,68 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.drain).toBeUndefined();
     expect(selection).toBeUndefined();
     expect(result.itemsConsidered).toBe(1);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
+      workItemId: generic.id,
+    });
+  });
+
+  it('A1-drain-auto-fast-repair-cooldown: healthy repair recovery retries trusted empty repairs after 30 minutes', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    generic.score = 100;
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'abcabc888888', 1);
+    seedHealthyGeneratedRepairYield(repo.dir);
+    recordOutcome(reslice.id, 'empty', new Date(Date.now() - 31 * 60 * 1000).toISOString());
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [reslice, generic],
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+    const selection = readAgentActions().find((event) => event.action === 'daemon:drain-select');
+
+    expect(result.reason).toBe('ok');
+    expect(result.drain).toMatchObject({
+      mode: 'diagnostic-reslices',
+      available: 1,
+      selected: 1,
+      automatic: true,
+      selectedItemIds: [reslice.id],
+    });
+    expect(selection).toMatchObject({
+      action: 'daemon:drain-select',
+      itemId: reslice.id,
+      reason: 'auto-live',
+    });
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
+      workItemId: reslice.id,
+    });
+  });
+
+  it('A1-drain-auto-fast-repair-cooldown: judged repair outcomes keep the full cooldown', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    generic.score = 100;
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'abcabc777777', 1);
+    seedHealthyGeneratedRepairYield(repo.dir);
+    recordOutcome(reslice.id, 'judged-decline', new Date(Date.now() - 31 * 60 * 1000).toISOString());
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [reslice, generic],
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+    const selection = readAgentActions().find((event) => event.action === 'daemon:drain-select');
+
+    expect(result.reason).toBe('ok');
+    expect(result.drain).toBeUndefined();
+    expect(selection).toBeUndefined();
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
       workItemId: generic.id,
