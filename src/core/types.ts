@@ -3512,7 +3512,15 @@ export interface ProposalVerifyResult {
   passed: boolean;
   failed?: string[];
   detail?: string;
-  ran?: Array<{ kind: 'typecheck' | 'lint' | 'build' | 'test'; cmd: string[] }>;
+  ran?: Array<{
+    id?: string;
+    kind: 'typecheck' | 'lint' | 'build' | 'test';
+    cmd: string[];
+    cwd?: string;
+    timeoutMs?: number;
+    required?: boolean;
+    profiles?: Array<'quick' | 'merge' | 'deep'>;
+  }>;
   browser?: ProposalBrowserVerifyEvidence;
   baseBranch?: string;
   baseHead?: string;

@@ -290,7 +290,7 @@ export async function verifyTaskStructured(
     if (commands.length > 0) {
       for (const vc of commands) {
         const res = await runVerifyCommandAsync(vc, workspaceRoot, cfg);
-        if (!res.ok) {
+        if (!res.ok && vc.required !== false) {
           return {
             ok: false,
             method: 'command',

@@ -372,17 +372,13 @@ describe('M47 verifyProposal', () => {
     }));
   });
 
-  it('pre-existing failing test script (baseline fails) → ok:true (M281 delta-aware: no new failure introduced)', async () => {
-    // M281: baseline already fails (exit 1 exists before the diff). The diff
-    // adds docs/y.md — it did NOT introduce the failure. Delta logic: both
-    // baseline and after fail with no parseable IDs → treat as pre-existing →
-    // tolerate → ok:true. This is the core M281 scenario (prevents false-blocking
-    // on environmental/pre-existing failures while still blocking new regressions).
+  it('fails closed when an opaque pre-existing test failure cannot prove non-regression', async () => {
     initRepo(tmpRepo);
     writePackageJson(tmpRepo, 'exit 1');
     const p = makeProposal({ diff: addFileDiff('docs/y.md', 'doc') });
     const res = await verifyProposal(p, cfgWith());
-    expect(res.ok).toBe(true);
+    expect(res.ok).toBe(false);
+    expect(res.detail).toMatch(/non-regression could not be proven/i);
   });
 
   it('regression detected: baseline passes, after fails → ok:false (M281 regression protection intact)', async () => {
@@ -419,6 +415,37 @@ describe('M47 verifyProposal', () => {
     expect(res.detail).toMatch(/regression detected|test.*failed/i);
   });
 
+  it('keeps monorepo baselines distinct when commands share argv', async () => {
+    initRepo(tmpRepo);
+    for (const name of ['a', 'b']) {
+      const dir = path.join(tmpRepo, 'packages', name);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, 'package.json'),
+        JSON.stringify({ name, scripts: { test: 'node check.js' } }),
+        'utf8',
+      );
+      fs.writeFileSync(
+        path.join(dir, 'check.js'),
+        "process.exit(require('fs').existsSync('sentinel') ? 0 : 1);\n",
+        'utf8',
+      );
+    }
+    fs.writeFileSync(path.join(tmpRepo, 'packages', 'a', 'sentinel'), 'ok\n', 'utf8');
+    git(tmpRepo, ['add', 'packages']);
+    git(tmpRepo, ['commit', '-m', 'add package checks']);
+
+    git(tmpRepo, ['rm', 'packages/a/sentinel']);
+    const diff = git(tmpRepo, ['diff', '--cached']);
+    git(tmpRepo, ['reset', 'HEAD', 'packages/a/sentinel']);
+    git(tmpRepo, ['checkout', '--', 'packages/a/sentinel']);
+
+    const result = await verifyProposal(makeProposal({ diff }), cfgWith());
+
+    expect(result.ok).toBe(false);
+    expect(result.detail).toMatch(/regression detected/i);
+  });
+
   it('no verify commands + allowWithoutVerification false → ok:false (fail-closed)', async () => {
     initRepo(tmpRepo);
     const p = makeProposal({ diff: addFileDiff('docs/z.md', 'doc') });
@@ -433,6 +460,79 @@ describe('M47 verifyProposal', () => {
     const cfg = cfgWith({ autoMerge: { enabled: true, allowWithoutVerification: true } });
     const res = await verifyProposal(p, cfg);
     expect(res.ok).toBe(true);
+  });
+
+  it('uses only merge-profile commands for merge evidence', async () => {
+    initRepo(tmpRepo);
+    fs.writeFileSync(
+      path.join(tmpRepo, 'ashlr.verify.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [
+          {
+            id: 'merge-advisory-fails',
+            kind: 'typecheck',
+            cmd: ['node', '-e', 'process.exit(1)'],
+            required: false,
+            profiles: ['merge'],
+          },
+          {
+            id: 'quick-fails',
+            kind: 'test',
+            cmd: ['node', '-e', 'process.exit(1)'],
+            required: true,
+            profiles: ['quick'],
+          },
+          {
+            id: 'merge-passes',
+            kind: 'test',
+            cmd: ['node', '-e', 'process.exit(0)'],
+            required: true,
+            profiles: ['merge'],
+          },
+        ],
+      }),
+      'utf8',
+    );
+    git(tmpRepo, ['add', 'ashlr.verify.json']);
+    git(tmpRepo, ['commit', '-m', 'add verifier contract']);
+
+    const proposal = makeProposal({ diff: addFileDiff('docs/profiled.md', 'doc') });
+    const result = await verifyProposal(proposal, cfgWith());
+
+    expect(result.ok).toBe(true);
+  });
+
+  it('refuses advisory-only merge evidence', async () => {
+    initRepo(tmpRepo);
+    fs.writeFileSync(
+      path.join(tmpRepo, 'ashlr.verify.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [
+          {
+            id: 'advisory',
+            kind: 'test',
+            cmd: ['node', '-e', 'process.exit(0)'],
+            required: false,
+            profiles: ['merge'],
+          },
+        ],
+      }),
+      'utf8',
+    );
+    git(tmpRepo, ['add', 'ashlr.verify.json']);
+    git(tmpRepo, ['commit', '-m', 'add advisory verifier']);
+
+    const result = await verifyProposal(
+      makeProposal({ diff: addFileDiff('docs/advisory.md', 'doc') }),
+      cfgWith(),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.detail).toMatch(/only advisory commands|required verification/i);
   });
 
   it('leaves no leftover worktree / verify branch', async () => {

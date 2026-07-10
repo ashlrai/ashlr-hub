@@ -146,11 +146,13 @@ function firstFailureLine(output: string): string {
 /** Default signal: run the repo's verify commands on HEAD; RED on first failure. */
 async function defaultRunSuite(repoDir: string, timeoutMs: number): Promise<SuiteRun> {
   try {
-    const commands = detectVerifyCommands(repoDir);
+    const commands = detectVerifyCommands(repoDir, 'merge');
     if (commands.length === 0) return { red: false };
     for (const vc of commands) {
       const result = await runVerifyCommandAsync(vc, repoDir, {} as AshlrConfig, { timeoutMs });
-      if (!result.ok) return { red: true, detail: firstFailureLine(result.output) };
+      if (!result.ok && vc.required !== false) {
+        return { red: true, detail: firstFailureLine(result.output) };
+      }
     }
     return { red: false };
   } catch {

@@ -329,7 +329,11 @@ export async function runBestOfN(
   }
 
   // ── 3. Resolve test runner (M140 — tolerate absence) ───────────────────
-  type RunTestsFn = (proposalId: string, cfg: AshlrConfig) => Promise<boolean>;
+  type RunTestsFn = (
+    proposalId: string,
+    cfg: AshlrConfig,
+    profile?: 'quick' | 'merge' | 'deep',
+  ) => Promise<boolean>;
   let runTests: RunTestsFn | undefined;
   try {
     // Dynamic import so absence is graceful — runTests may not exist yet
@@ -671,7 +675,7 @@ export async function runBestOfN(
       // Real test filter (M140 — optional)
       if (runTests && c.proposalId) {
         try {
-          testsPassed = await runTests(c.proposalId, cfg);
+          testsPassed = await runTests(c.proposalId, cfg, 'quick');
           // If tests failed, penalise score strongly so passing candidates win
           if (!testsPassed) score = score * 0.1;
         } catch {

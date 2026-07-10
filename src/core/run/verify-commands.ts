@@ -174,8 +174,21 @@ function verifyFailureCategory(
  * fallbacks run through `npx`. Returns [] when nothing is detected — the caller
  * treats an empty list as a no-op.
  */
-export function detectVerifyCommands(workspaceRoot: string): VerifyCommand[] {
-  return detectRepoExecutionProfile(workspaceRoot).verifyCommands;
+export function filterVerifyCommandsForProfile(
+  commands: VerifyCommand[],
+  profile: VerifyCommandProfile,
+): VerifyCommand[] {
+  return commands.filter(
+    (command) => !command.profiles || command.profiles.includes(profile),
+  );
+}
+
+export function detectVerifyCommands(
+  workspaceRoot: string,
+  profile?: VerifyCommandProfile,
+): VerifyCommand[] {
+  const commands = detectRepoExecutionProfile(workspaceRoot).verifyCommands;
+  return profile ? filterVerifyCommandsForProfile(commands, profile) : commands;
 }
 
 // ---------------------------------------------------------------------------

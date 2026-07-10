@@ -64,10 +64,13 @@ const GIT_ENV = {
   GIT_COMMITTER_EMAIL: 'm331@test',
 };
 
-function makeRepo(pkg: Record<string, unknown>): string {
+function makeRepo(pkg: Record<string, unknown>, verifyContract?: Record<string, unknown>): string {
   const dir = mkdtempSync(join(tmpdir(), 'ashlr-m331-repo-'));
   execFileSync('git', ['init', '--quiet', dir], { stdio: 'pipe' });
   writeFileSync(join(dir, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');
+  if (verifyContract) {
+    writeFileSync(join(dir, 'ashlr.verify.json'), JSON.stringify(verifyContract, null, 2) + '\n');
+  }
   execFileSync('git', ['add', '-A'], { cwd: dir, stdio: 'pipe' });
   execFileSync('git', ['commit', '--quiet', '-m', 'init'], {
     cwd: dir,
@@ -117,6 +120,15 @@ function repoWith(pkg: Record<string, unknown>, diff: string): void {
   fixtureProposal = { repo: fixtureRepo, diff };
 }
 
+function repoWithContract(commands: Array<Record<string, unknown>>, diff = ADD_FILE_DIFF): void {
+  fixtureRepo = makeRepo(
+    { name: 'fx', version: '1.0.0' },
+    { schemaVersion: 1, mode: 'replace-detected', commands },
+  );
+  created.push(fixtureRepo);
+  fixtureProposal = { repo: fixtureRepo, diff };
+}
+
 // ---------------------------------------------------------------------------
 // runTestsDetailed
 // ---------------------------------------------------------------------------
@@ -157,6 +169,94 @@ describe('M331 runTestsDetailed', () => {
 
     expect(r.passed).toBe(true);
     expect(r.commands.map((command) => command.kind)).toEqual(['typecheck', 'lint', 'build', 'test']);
+  }, 30_000);
+
+  it('runs only commands in the requested profile while preserving unprofiled commands', async () => {
+    repoWithContract([
+      {
+        id: 'always',
+        kind: 'typecheck',
+        cmd: ['node', '-e', 'process.exit(0)'],
+        required: true,
+      },
+      {
+        id: 'quick-only',
+        kind: 'lint',
+        cmd: ['node', '-e', 'process.exit(0)'],
+        required: true,
+        profiles: ['quick'],
+      },
+      {
+        id: 'merge-only',
+        kind: 'test',
+        cmd: ['node', '-e', 'process.exit(1)'],
+        required: true,
+        profiles: ['merge'],
+      },
+      {
+        id: 'deep-only',
+        kind: 'build',
+        cmd: ['node', '-e', 'process.exit(0)'],
+        required: true,
+        profiles: ['deep'],
+      },
+    ]);
+
+    const quick = await runTestsDetailed('p-profile-quick', cfg, 'quick');
+    const merge = await runTestsDetailed('p-profile-merge', cfg, 'merge');
+    const deep = await runTestsDetailed('p-profile-deep', cfg, 'deep');
+
+    expect(quick.passed).toBe(true);
+    expect(quick.commands.map((command) => command.kind)).toEqual(['typecheck', 'lint']);
+    expect(merge.passed).toBe(false);
+    expect(merge.commands.map((command) => command.kind)).toEqual(['typecheck', 'test']);
+    expect(deep.passed).toBe(true);
+    expect(deep.commands.map((command) => command.kind)).toEqual(['typecheck', 'build']);
+    expect(await runTests('p-profile-merge', cfg)).toBe(merge.passed);
+  }, 30_000);
+
+  it('records an optional command failure without failing the profile', async () => {
+    repoWithContract([
+      {
+        id: 'advisory',
+        kind: 'lint',
+        cmd: ['node', '-e', 'process.exit(1)'],
+        required: false,
+        profiles: ['merge'],
+      },
+      {
+        id: 'required',
+        kind: 'test',
+        cmd: ['node', '-e', 'process.exit(0)'],
+        required: true,
+        profiles: ['merge'],
+      },
+    ]);
+
+    const result = await runTestsDetailed('p-profile-optional', cfg);
+
+    expect(result.passed).toBe(true);
+    expect(result.commands.map((command) => command.ok)).toEqual([false, true]);
+  }, 30_000);
+
+  it('honors a repository-declared per-command timeout', async () => {
+    repoWithContract([
+      {
+        id: 'bounded',
+        kind: 'test',
+        cmd: ['node', '-e', 'setTimeout(() => process.exit(0), 500)'],
+        timeoutMs: 25,
+        required: true,
+        profiles: ['merge'],
+      },
+    ]);
+
+    const result = await runTestsDetailed('p-profile-timeout', cfg, 'merge');
+
+    expect(result.passed).toBe(false);
+    expect(result.commands).toHaveLength(1);
+    expect(result.commands[0]?.timedOut).toBe(true);
+    expect(result.commands[0]?.failureCategory).toBe('timeout');
   }, 30_000);
 
   it('unapplicable diff → real negative (apply-failed)', async () => {

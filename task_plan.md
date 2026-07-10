@@ -78,6 +78,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 4. What risks would make 24/7 autonomy dangerous, expensive, noisy, or untrustworthy?
 5. What can be improved immediately in this repo without destabilizing the pushed baseline?
 6. How can Ashlr continuously choose the highest-value safe work without Mason as the bottleneck?
+
+## Current Overnight Cycle - Fleetwide Merge Contracts
+- [x] Rehydrate the deployed Hub, daemon, guard, queue, and verifier-coverage state.
+- [x] Audit the five remaining repositories without explicit merge contracts in parallel.
+- [x] Enforce `quick|merge|deep` command profiles and repo-declared timeouts in the sandbox verifier.
+- [x] Add repo-owned merge contracts to sales pipeline, ashlr-md, ashlr-plugin, ashlrcode, and morphkit.
+- [x] Run focused repository gates plus Hub profile/status regression coverage.
+- [ ] Commit and push only cycle-owned files, deploy Hub changes, and record live coverage truth.
 7. How can Ashlr spend scarce judge/frontier/model resources only after cheap facts say a candidate is mergeable?
 
 ## Decisions Made

@@ -969,6 +969,9 @@ export function evaluateEvidenceAutoMergePreflight(
   if (!proposal.verifyResult.ran || proposal.verifyResult.ran.length === 0) {
     return refuse('no verification command evidence recorded; no-command verification is not eligible');
   }
+  if (!hasRequiredVerificationCommandEvidence(proposal.verifyResult)) {
+    return refuse('no required verification command evidence recorded; advisory-only verification is not eligible');
+  }
 
   return {
     authorized: true,
@@ -1567,6 +1570,14 @@ function hasVerificationCommandEvidence(result: ProposalVerifyResult | undefined
   return Array.isArray(result?.ran) && result.ran.length > 0;
 }
 
+function hasRequiredVerificationCommandEvidence(result: ProposalVerifyResult | undefined): boolean {
+  return Array.isArray(result?.ran) && result.ran.some((command) => command.required !== false);
+}
+
+function verifyCommandIdentity(command: VerifyCommand): string {
+  return JSON.stringify([command.id ?? null, command.cwd ?? '.', command.cmd]);
+}
+
 function verifyResultFromStored(result: ProposalVerifyResult): VerifyProposalResult {
   return {
     ok: result.passed,
@@ -1689,7 +1700,7 @@ export async function verifyProposal(
     // manifest guard above already refuses package.json/lockfile/CI changes, but
     // base-tree detection is the defense-in-depth that makes self-certification
     // structurally impossible regardless of which files the diff touches.
-    const commands = detectVerifyCommands(tmpDir);
+    const commands = detectVerifyCommands(tmpDir, 'merge');
     if (commands.length === 0) {
       const allow = cfg.foundry?.autoMerge?.allowWithoutVerification === true;
       return {
@@ -1698,6 +1709,15 @@ export async function verifyProposal(
         detail: allow
           ? 'no verify commands detected; allowWithoutVerification=true → passing'
           : 'no verify commands detected and allowWithoutVerification=false → fail-closed',
+        baseBranch: base,
+        baseHead,
+      };
+    }
+    if (!commands.some((command) => command.required !== false)) {
+      return {
+        ok: false,
+        ran: [],
+        detail: 'merge profile has only advisory commands; required verification is fail-closed',
         baseBranch: base,
         baseHead,
       };
@@ -1713,10 +1733,10 @@ export async function verifyProposal(
       // debt (hundreds of errors) that is NOT a correctness signal; a clean, typed,
       // tested change must not be blocked by lint debt it did not introduce. Baseline
       // lint and tolerate pre-existing failures (block only a clean→failing regression).
-      if (vc.kind === 'test' || vc.kind === 'lint') {
+      if (vc.id === undefined && vc.required === undefined && (vc.kind === 'test' || vc.kind === 'lint')) {
         const baseRes = await runVerifyCommandAsync(vc, tmpDir, cfg);
         if (!baseRes.timedOut) {
-          const key = Array.isArray(vc.cmd) ? vc.cmd.join(' ') : vc.kind;
+          const key = verifyCommandIdentity(vc);
           baselineResults.set(key, {
             ok: baseRes.ok,
             ids: vc.kind === 'test' ? parseFailedTestIds(baseRes.output ?? '') : new Set<string>(),
@@ -1746,9 +1766,19 @@ export async function verifyProposal(
       const res = await runVerifyCommandAsync(vc, tmpDir, cfg);
 
       if (!res.ok) {
+        if (vc.required === false) continue;
+        if (vc.id !== undefined || vc.required === true) {
+          return {
+            ok: false,
+            ran,
+            detail: `required verify '${vc.kind}' failed (exit ${res.exitCode}): ${res.command}`,
+            baseBranch: base,
+            baseHead,
+          };
+        }
         // M281: for test commands, only block if NEW failures were introduced.
         if (vc.kind === 'test') {
-          const cmdKey = Array.isArray(vc.cmd) ? vc.cmd.join(' ') : vc.kind;
+          const cmdKey = verifyCommandIdentity(vc);
           const baseline = baselineResults.get(cmdKey);
           if (baseline !== undefined) {
             const afterIds = parseFailedTestIds(res.output ?? '');
@@ -1782,8 +1812,13 @@ export async function verifyProposal(
                   baseHead,
                 };
               }
-              // Baseline also failed (pre-existing) — tolerate
-              continue;
+              return {
+                ok: false,
+                ran,
+                detail: `verify 'test' failed and non-regression could not be proven from opaque baseline output`,
+                baseBranch: base,
+                baseHead,
+              };
             }
           }
           // No baseline (timed out) — fall through to original fail behaviour
@@ -1791,7 +1826,7 @@ export async function verifyProposal(
         // M293: lint is delta-aware — tolerate pre-existing lint debt, block only a
         // clean→failing regression caused by this change.
         if (vc.kind === 'lint') {
-          const cmdKey = Array.isArray(vc.cmd) ? vc.cmd.join(' ') : vc.kind;
+          const cmdKey = verifyCommandIdentity(vc);
           const baseline = baselineResults.get(cmdKey);
           if (baseline !== undefined) {
             if (baseline.ok) {
@@ -2405,7 +2440,7 @@ export async function autoMergeProposal(
           return res.ok;
         }
         // Fallback: no targeted script — run all detected verify commands.
-        const cmds = detectVerifyCommands(repo);
+        const cmds = detectVerifyCommands(repo, 'merge');
         if (cmds.length === 0) {
           // No commands → parity is vacuously true (verify already passed in
           // the worktree; flag-sensitivity cannot be tested without a suite).
@@ -2413,7 +2448,7 @@ export async function autoMergeProposal(
         }
         for (const vc of cmds) {
           const res = await runVerifyCommandAsync(vc, repo, parityCfg);
-          if (!res.ok) return false;
+          if (!res.ok && vc.required !== false) return false;
         }
         return true;
       });

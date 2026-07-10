@@ -215,6 +215,23 @@ describe('detectBreakage', () => {
     expect(mockRunVerifyCommand).toHaveBeenCalledTimes(1);
   });
 
+  it('uses the quick profile and ignores advisory failures', async () => {
+    mockDetectVerifyCommands.mockReturnValue([
+      { ...BUILD_VC, required: false },
+      GREEN_VC,
+    ]);
+    mockRunVerifyCommand
+      .mockReturnValueOnce(BUILD_FAIL_RESULT)
+      .mockReturnValueOnce(OK_RESULT);
+
+    const result = await detectBreakage('/tmp/fake-repo', makeCfg());
+
+    expect(mockDetectVerifyCommands).toHaveBeenCalledWith('/tmp/fake-repo', 'quick');
+    expect(mockRunVerifyCommand).toHaveBeenCalledTimes(2);
+    expect(result.broken).toBe(false);
+    expect(result.verified).toBe(true);
+  });
+
   it('returns broken:false when repo dir does not exist (detectVerifyCommands returns [])', async () => {
     // detectVerifyCommands returns [] for a nonexistent dir — real behavior.
     // Mirror that in the mock so the test is self-consistent.

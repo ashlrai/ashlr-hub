@@ -297,6 +297,37 @@ describe('detectVerifyCommands', () => {
     }
   });
 
+  it('filters contract commands by profile while retaining legacy commands', () => {
+    const dir = makeFixture();
+    try {
+      writeFileSync(
+        join(dir, 'ashlr.verify.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          mode: 'replace-detected',
+          commands: [
+            { id: 'always', kind: 'typecheck', cmd: ['node', 'always.js'] },
+            { id: 'quick', kind: 'test', cmd: ['node', 'quick.js'], profiles: ['quick'] },
+            { id: 'merge', kind: 'test', cmd: ['node', 'merge.js'], profiles: ['merge'] },
+            { id: 'deep', kind: 'test', cmd: ['node', 'deep.js'], profiles: ['deep'] },
+          ],
+        }),
+        'utf8',
+      );
+
+      expect(detectVerifyCommands(dir, 'merge').map((command) => command.id)).toEqual([
+        'always',
+        'merge',
+      ]);
+      expect(detectVerifyCommands(dir, 'quick').map((command) => command.id)).toEqual([
+        'always',
+        'quick',
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('returns [] for an empty dir', () => {
     const dir = makeFixture();
     try {

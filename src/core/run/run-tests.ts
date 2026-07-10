@@ -31,7 +31,13 @@ import { createSandbox, removeSandbox } from '../sandbox/worktree.js';
 
 type Sandbox = ReturnType<typeof createSandbox>;
 import { detectRepoExecutionProfile } from './repo-profile.js';
-import { runVerifyCommandAsync, type VerifyCommand } from './verify-commands.js';
+import {
+  filterVerifyCommandsForProfile,
+  runVerifyCommandAsync,
+  type VerifyCommand,
+  type VerifyFailureCategory,
+  type VerifyCommandProfile,
+} from './verify-commands.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -42,6 +48,8 @@ export interface TestRunCommandResult {
   command: string;
   exitCode: number;
   ok: boolean;
+  timedOut: boolean;
+  failureCategory?: VerifyFailureCategory;
   /** Combined stdout+stderr tail (scrubbed + capped by verify-commands). */
   outputTail: string;
 }
@@ -66,8 +74,12 @@ const PER_COMMAND_TIMEOUT_MS = 180_000;
  * The exact shape best-of-n.ts imports (M170 contract). True on green OR
  * neutral skip; false when the diff fails to apply or a check fails.
  */
-export async function runTests(proposalId: string, cfg: AshlrConfig): Promise<boolean> {
-  const detailed = await runTestsDetailed(proposalId, cfg);
+export async function runTests(
+  proposalId: string,
+  cfg: AshlrConfig,
+  profile: VerifyCommandProfile = 'merge',
+): Promise<boolean> {
+  const detailed = await runTestsDetailed(proposalId, cfg, profile);
   return detailed.passed;
 }
 
@@ -75,6 +87,7 @@ export async function runTests(proposalId: string, cfg: AshlrConfig): Promise<bo
 export async function runTestsDetailed(
   proposalId: string,
   cfg: AshlrConfig,
+  profile: VerifyCommandProfile = 'merge',
 ): Promise<TestRunResult> {
   let sb: Sandbox | null = null;
   try {
@@ -125,8 +138,11 @@ export async function runTestsDetailed(
     }
 
     // 4. Detect verification commands INSIDE the patched worktree.
-    const profile = detectRepoExecutionProfile(sb.worktreePath);
-    const commands = [...profile.verifyCommands].sort(
+    const executionProfile = detectRepoExecutionProfile(sb.worktreePath);
+    const commands = filterVerifyCommandsForProfile(
+      executionProfile.verifyCommands,
+      profile,
+    ).sort(
       (a, b) => KIND_RANK[a.kind] - KIND_RANK[b.kind],
     );
     if (commands.length === 0) return { passed: true, commands: [], skipped: 'no-commands' };
@@ -135,16 +151,18 @@ export async function runTestsDetailed(
     const results: TestRunCommandResult[] = [];
     for (const vc of commands) {
       const r = await runVerifyCommandAsync(vc, sb.worktreePath, cfg, {
-        timeoutMs: PER_COMMAND_TIMEOUT_MS,
+        timeoutMs: vc.timeoutMs ?? PER_COMMAND_TIMEOUT_MS,
       });
       results.push({
         kind: vc.kind,
         command: r.command,
         exitCode: r.exitCode,
         ok: r.ok,
+        timedOut: r.timedOut,
+        ...(r.failureCategory ? { failureCategory: r.failureCategory } : {}),
         outputTail: r.output.slice(-4_096),
       });
-      if (!r.ok) return { passed: false, commands: results };
+      if (!r.ok && vc.required !== false) return { passed: false, commands: results };
     }
     return { passed: true, commands: results };
   } catch {

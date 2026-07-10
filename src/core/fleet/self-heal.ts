@@ -109,7 +109,7 @@ export async function detectBreakage(
   cfg?: Pick<AshlrConfig, 'foundry'>,
 ): Promise<BreakageResult> {
   try {
-    const commands = detectVerifyCommands(repoDir);
+    const commands = detectVerifyCommands(repoDir, 'quick');
     if (commands.length === 0) {
       return { broken: false, verified: false, reason: 'no-verify-commands' };
     }
@@ -126,6 +126,7 @@ export async function detectBreakage(
       const kind = kindOf(vc.kind);
       const result = await runVerifyCommandAsync(vc, repoDir, cfg as AshlrConfig ?? {} as AshlrConfig, { timeoutMs });
       if (!result.ok) {
+        if (vc.required === false) continue;
         const failureCategory = result.failureCategory ?? 'code';
         if (failureCategory !== 'code') {
           return {

@@ -179,8 +179,25 @@ describe('detectRegression', () => {
     // minConsecutive=1 so one default-signal RED suffices to fire.
     const r = await detectRegression(onCfg({ minConsecutive: 1 }), REPO, { git });
     expect(r.regressed).toBe(true);
-    expect(mockDetectVerifyCommands).toHaveBeenCalled();
+    expect(mockDetectVerifyCommands).toHaveBeenCalledWith(REPO, 'merge');
     expect(mockRunVerifyCommand).toHaveBeenCalled();
+  });
+
+  it('ignores advisory failures in the default merge-profile signal', async () => {
+    mockDetectVerifyCommands.mockReturnValue([
+      { kind: 'lint', cmd: ['npm', 'run', 'lint'], required: false },
+      { kind: 'test', cmd: ['npm', 'test'], required: true },
+    ]);
+    mockRunVerifyCommand
+      .mockReturnValueOnce({ ok: false, output: 'advisory', exitCode: 1, timedOut: false, command: 'lint' })
+      .mockReturnValueOnce({ ok: true, output: '', exitCode: 0, timedOut: false, command: 'test' });
+
+    const result = await detectRegression(onCfg({ minConsecutive: 1 }), REPO, {
+      git: fakeGit(() => 'HEAD_A'),
+    });
+
+    expect(result.regressed).toBe(false);
+    expect(mockRunVerifyCommand).toHaveBeenCalledTimes(2);
   });
 
   it('never throws when the suite runner throws', async () => {
