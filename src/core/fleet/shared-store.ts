@@ -194,7 +194,7 @@ function safeIso(ms: number | null): string | null {
 }
 
 function compactMetadata(value: string, max = 160): string {
-  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+  return value.length <= max ? value : `${value.slice(0, Math.max(0, max - 3))}...`;
 }
 
 // ---------------------------------------------------------------------------

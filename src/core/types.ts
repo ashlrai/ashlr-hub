@@ -3713,6 +3713,19 @@ export interface DaemonProposalProductionSummary {
   reasons?: DaemonProposalProductionReason[];
 }
 
+export interface DaemonDispatchManifestSummary {
+  schemaVersion: 1;
+  manifestId: string;
+  ts: string;
+  mode: 'concurrent';
+  recorded: boolean;
+  claimed: number;
+  assigned: number;
+  unassigned: number;
+  backends: Record<string, number>;
+  resourceSnapshotAt?: string;
+}
+
 export type DaemonDrainMode = 'diagnostic-reslices';
 
 export const DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT = 3;
@@ -3808,6 +3821,8 @@ export interface DaemonTick {
   };
   /** M314: machine-readable proposal production accounting for this tick. */
   proposalProduction?: DaemonProposalProductionSummary;
+  /** Forensic dispatch intent recorded before concurrent execution starts. */
+  dispatchManifest?: DaemonDispatchManifestSummary;
   /** Targeted drain accounting for lane-specific daemon ticks. */
   drain?: DaemonDrainSummary;
   /** Bounded per-item backend assignment traces for this tick. */

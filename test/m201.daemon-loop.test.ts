@@ -233,6 +233,7 @@ import {
   recordDispatchProduction,
   type DispatchProductionEvent,
 } from '../src/core/fleet/dispatch-production-ledger.js';
+import { readDispatchManifestEvents } from '../src/core/fleet/dispatch-manifest.js';
 import { readAgentActions } from '../src/core/fleet/agent-action-ledger.js';
 import { loadWorkedLedger, recordOutcome } from '../src/core/fleet/worked-ledger.js';
 import {
@@ -2632,6 +2633,51 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(dispatchedItemIds).not.toContain(items[0]!.id);
     expect(dispatchedItemIds).toContain(items[1]!.id);
     expect(dispatchedItemIds).toContain(items[2]!.id);
+  });
+
+  it('A8: concurrent dispatch records a forensic manifest before execution', async () => {
+    const { items } = enrollWithItems(2);
+    const cfg = makeCfg({
+      daemon: {
+        dailyBudgetUsd: 1.0,
+        perTickItems: 2,
+        parallel: 2,
+        intervalMs: 50,
+      },
+      foundry: {
+        allowedBackends: ['builtin'],
+        fabric: {
+          concurrentDispatch: true,
+          maxSlotsPerBackend: 2,
+        },
+      },
+    });
+
+    const result = await tick(cfg, { dryRun: false });
+    const manifests = readDispatchManifestEvents({ limit: 5 });
+    const state = loadDaemonState();
+
+    expect(result.reason).toBe('ok');
+    expect(mockRunSwarm).toHaveBeenCalledTimes(2);
+    expect(result.dispatchManifest).toMatchObject({
+      schemaVersion: 1,
+      mode: 'concurrent',
+      recorded: true,
+      claimed: 2,
+      assigned: 2,
+      unassigned: 0,
+      backends: { builtin: 2 },
+    });
+    expect(result.dispatchManifest?.manifestId).toMatch(/^dm-/);
+    expect(state.ticks.at(-1)?.dispatchManifest?.manifestId).toBe(result.dispatchManifest?.manifestId);
+    expect(manifests[0]).toMatchObject({
+      manifestId: result.dispatchManifest?.manifestId,
+      counts: { claimed: 2, assigned: 2, unassigned: 0 },
+      assignments: [
+        expect.objectContaining({ itemId: items[0]!.id, backend: 'builtin' }),
+        expect.objectContaining({ itemId: items[1]!.id, backend: 'builtin' }),
+      ],
+    });
   });
 
   it('A7-selection-telemetry: records pending and cooldown blockers in the global workspace', async () => {

@@ -3964,7 +3964,7 @@ async function buildSharedQueueStatus(cfg: AshlrConfig): Promise<FleetSharedQueu
 }
 
 function compactStatusMetadata(value: string, max = 160): string {
-  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+  return value.length <= max ? value : `${value.slice(0, Math.max(0, max - 3))}...`;
 }
 
 async function buildActiveWorkStatus(): Promise<FleetActiveWorkStatus | undefined> {

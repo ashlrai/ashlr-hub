@@ -109,6 +109,7 @@ import {
   type DispatchProductionBasis,
   type DispatchProductionEvent,
 } from '../fleet/dispatch-production-ledger.js';
+import { buildDispatchManifestEvent, recordDispatchManifest } from '../fleet/dispatch-manifest.js';
 import {
   recordAgentAction,
   type AgentActionEvent,
@@ -3168,6 +3169,7 @@ export async function tick(
   const useConcurrentDispatch = routingCfg.foundry?.fabric?.concurrentDispatch === true;
 
   let outcomes: PromiseSettledResult<ItemOutcome>[];
+  let dispatchManifest: DaemonTick['dispatchManifest'] | undefined;
 
   try {
   if (useConcurrentDispatch) {
@@ -3215,6 +3217,16 @@ export async function tick(
       concurrentCfg,
       routeItem,
     );
+    const dispatchManifestEvent = buildDispatchManifestEvent({
+      ts: now,
+      machineId,
+      plan: concurrentPlan,
+      routeReasons,
+      routeModels,
+      resourceSnapshotAt: concurrentSnap.generatedAt,
+      dryRun: false,
+    });
+    dispatchManifest = recordDispatchManifest(dispatchManifestEvent);
 
     // runConcurrentDispatch: executes plan with full cross-backend parallelism.
     const concurrentResults = await runConcurrentDispatch(
@@ -3462,6 +3474,7 @@ export async function tick(
 	      ...(remoteHandoff ? { remoteHandoff } : {}),
 	      ...(producerMaintenance ? { producerMaintenance } : {}),
 	      ...(proposalProduction ? { proposalProduction } : {}),
+	      ...(dispatchManifest ? { dispatchManifest } : {}),
 	      ...(drain ? { drain } : {}),
 	      ...(dispatches ? { dispatches } : {}),
 	      ...(merged > 0 ? { merged } : {}),
@@ -3495,6 +3508,7 @@ export async function tick(
 	    ...(remoteHandoff ? { remoteHandoff } : {}),
 	    ...(producerMaintenance ? { producerMaintenance } : {}),
 	    ...(proposalProduction ? { proposalProduction } : {}),
+	    ...(dispatchManifest ? { dispatchManifest } : {}),
 	    ...(drain ? { drain } : {}),
 	    ...(dispatches ? { dispatches } : {}),
 	    ...(merged > 0 ? { merged } : {}),

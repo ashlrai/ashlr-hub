@@ -4551,7 +4551,7 @@ function fdActiveWorkTitle(activeWork) {
     .join(' ');
   const age = fdFormatDurationMs(activeWork.ageMs);
   const armed = activeWork.armedAt ? fmtDate(activeWork.armedAt) : 'unknown';
-  return `${activeWork.malformed ? 'Malformed' : 'Armed'} · ${activeWork.itemCount ?? 0} item(s) · age ${age} · ${owner || 'unknown owner'} · armed ${armed}`;
+  return `${activeWork.malformed ? 'Malformed' : 'Armed'} / ${activeWork.itemCount ?? 0} item(s) / age ${age} / ${owner || 'unknown owner'} / armed ${armed}`;
 }
 
 function fdActiveWorkValue(activeWork) {
@@ -4638,7 +4638,7 @@ function fdRenderLeaseBoard(sharedQueue, activeWork) {
       const itemId = sample?.itemId ?? 'unknown';
       const owner = sample?.owned ? 'owned' : (sample?.machineId ?? 'unknown');
       const state = sample?.state ?? 'unknown';
-      const title = `${itemId} · ${state} · ${owner}${sample?.leaseUntil ? ` · ${fmtDate(sample.leaseUntil)}` : ''}`;
+      const title = `${itemId} / ${state} / ${owner}${sample?.leaseUntil ? ` / ${fmtDate(sample.leaseUntil)}` : ''}`;
       samples.appendChild(el('div', { cls: `fd-lease-sample fd-lease-sample--${state}`, title },
         el('span', { cls: 'fd-lease-sample__id' }, compactFleetReason(itemId, 48)),
         el('span', { cls: 'fd-lease-sample__meta' }, `${state} / ${compactFleetReason(owner, 28)}`)
