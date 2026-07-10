@@ -1273,3 +1273,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Update ledger and attempt-record regressions for read-time labels plus no durable rewrite.
 - [x] Run focused privacy/learning/fleet/dashboard gates and final lint/build/audit gates.
 - [x] Commit, push, reload daemon, and smoke live causal coverage.
+
+## Current Continuation - Dispatch Evidence Outcome Pass-Through
+- [x] Use scout finding to identify `runState.evidenceOutcome` as an existing metadata source that was not reaching dispatch-production telemetry.
+- [x] Thread sanitized `evidenceOutcome` through `DaemonDispatchProduction`, dispatch-production events, and derived daemon agent actions.
+- [x] Keep evidence metadata pass-through only: no synthetic evidence outcome, no judge, no raw evidence detail.
+- [x] Add daemon-loop regression for trace, state, dispatch-production ledger, and agent-action propagation.
+- [x] Run focused daemon/learning/privacy gates plus final lint/build/audit gates.
+- [x] Commit, push, reload daemon, and smoke live status.
