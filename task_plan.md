@@ -1360,4 +1360,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prevent overlapping SSE snapshot builds from stalling Fleet Dashboard and verify both learning surfaces in the browser.
 - [x] Make NIM resource availability fail closed when the executor cannot resolve its configured credential.
 - [x] Run focused privacy/dashboard/learning tests and final repository gates.
-- [ ] Update durable notes, commit, push, reload the daemon if runtime code changed, and smoke live status.
+- [x] Update durable notes, commit, push, reload the daemon if runtime code changed, and smoke live status.
