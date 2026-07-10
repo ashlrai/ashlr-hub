@@ -1256,3 +1256,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Render capture/no-diff generated repair counts in CLI and Mission Control/Fleet Dashboard metrics with readable plural labels.
 - [x] Add focused FleetStatus, dashboard snapshot, SSE/static, and queued-autonomy regression coverage.
 - [x] Run focused and final gates, commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Capture Repair Action Rail
+- [x] Use live status and scouts to confirm queued capture repairs are normal daemon-selected work, not a targeted drain mode.
+- [x] Add a high-priority `process-capture-repairs` action only when capture repairs are visible in `queue.next` and dispatch yield is actionable.
+- [x] Keep active-daemon commands read-only (`fleet status` and `daemon status`) so launchd remains the single dispatcher.
+- [x] Preserve cooling/pending gates: generated capture-repair counts do not create an action unless the repair is daemon-eligible.
+- [x] Update Mission Brief directive/action ranking to prefer concrete capture-repair monitoring over passive dispatch-yield inspection.
+- [x] Add focused M49 coverage for eligible and cooling capture-repair cases.
+- [x] Run focused and final gates, commit, push, reload daemon, and smoke live status.
