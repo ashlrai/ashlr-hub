@@ -76,6 +76,7 @@ describe('M356 verified skill retrieval', () => {
       eligibleCount: 3,
     });
     expect(result.selected).toHaveLength(MAX_SELECTED_SKILLS);
+    expect(result.selected[0]?.contentHash).toMatch(/^[a-f0-9]{64}$/);
     expect(result.selectedSkillIds).toEqual(['skill.z', 'skill.a']);
     expect(result.selected.every((entry) => (
       entry.status === 'verified' && entry.source === 'verified-proposal'

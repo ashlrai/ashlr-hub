@@ -72,6 +72,7 @@ export type SkillMatchField = keyof typeof CARD_FIELD_WEIGHTS;
 export interface ShadowSkillSummary {
   skillId: string;
   revision: number;
+  contentHash: string;
   rank: number;
   score: number;
   name: string;
@@ -99,6 +100,7 @@ interface SafeText {
 interface ParsedCard {
   skillId: string;
   revision: number;
+  contentHash: string;
   ts: string;
   name: string;
   summary: string;
@@ -202,9 +204,17 @@ function parseCard(value: unknown): ParsedCard | null {
     const ts = new Date(rawTs).toISOString();
 
     const skillId = safeText(value['skillId'], MAX_ID_CHARS);
+    const contentHash = value['contentHash'];
     const name = safeText(value['name'], MAX_NAME_CHARS);
     const summary = safeText(value['summary'], MAX_SUMMARY_CHARS);
-    if (!skillId.value || skillId.tainted || skillId.truncated || !name.value) return null;
+    if (
+      !skillId.value ||
+      skillId.tainted ||
+      skillId.truncated ||
+      typeof contentHash !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(contentHash) ||
+      !name.value
+    ) return null;
     if (typeof value['summary'] !== 'string') return null;
 
     const status = value['status'];
@@ -263,6 +273,7 @@ function parseCard(value: unknown): ParsedCard | null {
     const parsed = {
       skillId: skillId.value,
       revision: revision as number,
+      contentHash,
       ts,
       name: name.value,
       summary: summary.value,
@@ -437,6 +448,7 @@ export function selectVerifiedSkills(
     const selected = scored.map<ShadowSkillSummary>((entry, index) => ({
       skillId: entry.card.skillId,
       revision: entry.card.revision,
+      contentHash: entry.card.contentHash,
       rank: index + 1,
       score: entry.score,
       name: entry.card.name,

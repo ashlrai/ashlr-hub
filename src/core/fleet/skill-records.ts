@@ -7,7 +7,6 @@
  */
 
 import {
-  appendFileSync,
   chmodSync,
   closeSync,
   constants as fsConstants,
@@ -19,6 +18,7 @@ import {
   openSync,
   readSync,
   readdirSync,
+  writeSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -320,12 +320,27 @@ export function sanitizeSkillUseEvent(event: SkillUseEvent): SkillUseEvent {
   const rank = optionalNonNegativeInteger(event.rank);
   const score = optionalScore(event.score);
   const reason = boundedOptionalText(event.reason, MAX_TEXT.reason);
+  const contentHash = canonicalDigest(event.contentHash);
+  const selectedAt = event.selectedAt ? eventTimestamp(event.selectedAt) : undefined;
+  const skillPolicyVersion = boundedOptionalText(event.skillPolicyVersion, MAX_TEXT.version);
+  const trajectoryId = boundedOptionalText(event.trajectoryId, MAX_TEXT.id);
+  const hasStrongIdentity = Boolean(
+    proposalId ||
+    runId ||
+    (trajectoryId && !trajectoryId.startsWith('work:')),
+  );
+  if (!contentHash || !selectedAt || !skillPolicyVersion || !hasStrongIdentity) {
+    throw new Error('skill use event lacks signed snapshot or strong attempt identity');
+  }
   return {
     schemaVersion: 1,
     eventId: requiredText(event.eventId, MAX_TEXT.id, 'eventId'),
     ts,
     skillId: requiredText(event.skillId, MAX_TEXT.id, 'skillId'),
     skillRevision: Math.max(1, nonNegativeInteger(event.skillRevision, 1)),
+    ...(contentHash ? { contentHash } : {}),
+    ...(selectedAt ? { selectedAt } : {}),
+    ...(skillPolicyVersion ? { skillPolicyVersion } : {}),
     mode: enumValue(event.mode, USE_MODES, 'disabled'),
     stage: enumValue(event.stage, USE_STAGES, 'selected'),
     ...(outcome ? { outcome } : {}),
@@ -389,10 +404,9 @@ function appendRecords<T extends { ts: string }>(
       byDate.set(date, [...(byDate.get(date) ?? []), record]);
     }
     for (const [date, rows] of byDate) {
-      appendPrivateFile(
-        join(dir, `${date}.jsonl`),
-        rows.map((row) => JSON.stringify(row)).join('\n') + '\n',
-      );
+      for (const row of rows) {
+        appendPrivateFile(join(dir, `${date}.jsonl`), `${JSON.stringify(row)}\n`);
+      }
     }
   } catch {
     // Skill history must never disrupt the caller.
@@ -429,13 +443,18 @@ function appendPrivateFile(filePath: string, contents: string): void {
     }
     fd = openSync(
       filePath,
-      fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+      fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
       PRIVATE_FILE_MODE,
     );
     const opened = fstatSync(fd);
     if (!opened.isFile() || !ownedByCurrentUser(opened.uid)) throw new Error('unsafe skill ledger file');
     fchmodSync(fd, PRIVATE_FILE_MODE);
-    appendFileSync(fd, contents, 'utf8');
+    if (opened.size > 0) {
+      const tail = Buffer.alloc(1);
+      const read = readSync(fd, tail, 0, 1, opened.size - 1);
+      if (read === 1 && tail[0] !== 0x0a) writeSync(fd, '\n', undefined, 'utf8');
+    }
+    writeSync(fd, contents, undefined, 'utf8');
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -570,5 +589,27 @@ export function readSkillCards(opts: ReadSkillRecordsOptions = {}): SkillCard[] 
 }
 
 export function readSkillUseEvents(opts: ReadSkillRecordsOptions = {}): SkillUseEvent[] {
-  return readRecords(skillUseEventsDir(), isSkillUseEvent, sanitizeSkillUseEvent, opts);
+  const requested = boundedOption(opts.limit, DEFAULT_READ_LIMIT, MAX_READ_LIMIT);
+  const scanned = readRecords(skillUseEventsDir(), isSkillUseEvent, sanitizeSkillUseEvent, {
+    ...opts,
+    limit: Math.min(MAX_READ_LIMIT, Math.max(requested, requested * 4)),
+  });
+  const byEventId = new Map<string, {
+    fingerprint: string;
+    event: SkillUseEvent;
+    conflict: boolean;
+  }>();
+  for (const event of scanned) {
+    const fingerprint = JSON.stringify(event);
+    const existing = byEventId.get(event.eventId);
+    if (!existing) {
+      byEventId.set(event.eventId, { fingerprint, event, conflict: false });
+    } else if (existing.fingerprint !== fingerprint) {
+      existing.conflict = true;
+    }
+  }
+  return [...byEventId.values()]
+    .filter((entry) => !entry.conflict)
+    .map((entry) => entry.event)
+    .slice(0, requested);
 }

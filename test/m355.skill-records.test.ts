@@ -94,6 +94,9 @@ function useEvent(overrides: Partial<SkillUseEvent> = {}): SkillUseEvent {
     ts: '2026-07-10T12:01:00.000Z',
     skillId: 'skill.verify-focused-tests',
     skillRevision: 1,
+    contentHash: 'b'.repeat(64),
+    selectedAt: '2026-07-10T12:01:00.000Z',
+    skillPolicyVersion: 'verified-skills-v1',
     mode: 'shadow',
     stage: 'selected',
     outcome: 'unknown',
@@ -248,6 +251,47 @@ describe('M355 skill records', () => {
       .toEqual(['new-b', 'new-a']);
     expect(readSkillUseEvents({ limit: 2 })[1]).toMatchObject({ rank: 0, score: 1 });
     expect(readSkillUseEvents().map((entry) => entry.eventId)).not.toContain('future-poison');
+  });
+
+  it('deduplicates exact replays and quarantines conflicting event ids', () => {
+    const replay = useEvent({ eventId: 'stable-replay' });
+    recordSkillUseEvent([
+      replay,
+      replay,
+      useEvent({ eventId: 'conflicted-event', skillRevision: 1 }),
+      useEvent({ eventId: 'conflicted-event', skillRevision: 2 }),
+    ]);
+
+    expect(readSkillUseEvents().map((event) => event.eventId)).toEqual(['stable-replay']);
+  });
+
+  it('refuses use events without a signed snapshot and strong attempt identity', () => {
+    recordSkillUseEvent([
+      useEvent({ eventId: 'missing-hash', contentHash: undefined }),
+      useEvent({ eventId: 'missing-selection-time', selectedAt: undefined }),
+      useEvent({ eventId: 'missing-policy', skillPolicyVersion: undefined }),
+      useEvent({
+        eventId: 'weak-work-only',
+        proposalId: undefined,
+        runId: undefined,
+        trajectoryId: 'work:item-reused-across-attempts',
+      }),
+    ]);
+
+    expect(readSkillUseEvents()).toEqual([]);
+  });
+
+  it('recovers after a crash-truncated tail without hiding later events', () => {
+    recordSkillUseEvent(useEvent({ eventId: 'before-partial' }));
+    const file = join(skillUseEventsDir(), '2026-07-10.jsonl');
+    appendFileSync(file, '{"schemaVersion":1,"eventId":"partial-tail"', 'utf8');
+
+    recordSkillUseEvent(useEvent({ eventId: 'after-partial', ts: '2026-07-10T12:02:00.000Z' }));
+
+    expect(readSkillUseEvents().map((event) => event.eventId)).toEqual([
+      'after-partial',
+      'before-partial',
+    ]);
   });
 
   it('scrubs every allowed string before write and again on read', () => {

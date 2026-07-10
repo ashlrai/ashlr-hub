@@ -250,6 +250,12 @@ export interface SkillUseEvent {
   ts: string;
   skillId: string;
   skillRevision: number;
+  /** Signed card content hash observed at selection time. */
+  contentHash?: string;
+  /** Stable time at which the signed corpus snapshot was selected. */
+  selectedAt?: string;
+  /** Selection policy version, independent of the fleet router policy. */
+  skillPolicyVersion?: string;
   mode: SkillUseMode;
   stage: SkillUseStage;
   outcome?: SkillUseOutcome;

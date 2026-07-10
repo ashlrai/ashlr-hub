@@ -1372,3 +1372,18 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Remove caller-controlled legacy `m243:skill` privilege from MCP learning and tag-only recall boosts.
 - [x] Keep shadow retrieval observe-only and unwired while signing, lifecycle, and privilege boundaries settle in production.
 - [x] Run focused and repository verification gates, update notes, commit, push, reload, and smoke production.
+
+## Current Overnight Cycle - Shadow Route Equivalence
+- [x] Rehydrate the signed trust-boundary baseline, Entire state, empty live skill store, and rollout constraints.
+- [x] Deploy disjoint daemon-integration, trajectory-correlation, equivalence-matrix, and adversarial-review lanes.
+- [x] Re-audit the proposed producer path and keep daemon routing/correlation unwired when strong attempt identity is unavailable.
+- [x] Bind candidate summaries and use-event schemas to the exact signed card content hash and selection policy/time.
+- [x] Add deterministic strong-identity event construction that rejects work-only/path-like identities and persists no card/query text.
+- [x] Make use-event reads replay-idempotent, quarantine conflicting event ids, and recover after crash-truncated ledger tails.
+- [ ] Select signed verified cards only after the final executable route and read the corpus once per tick.
+- [ ] Preallocate and propagate a durable attempt identity through serial, concurrent, failure, retry, builtin, and Best-of-N execution.
+- [ ] Persist replay-idempotent metadata-only selection events after strong trajectory identity exists.
+- [ ] Correlate skill-use observations into aggregate-only trajectory learning without claiming causality.
+- [ ] Prove zero changes to backend, tier, model, goal/prompt, budget, delegation, retries, Best-of-N, or merge authority.
+- [x] Keep active skill injection impossible and preserve current production routing as an exact no-producer behavioral no-op.
+- [ ] Run focused/full gates, update durable notes, commit, push, reload, and smoke production telemetry.
