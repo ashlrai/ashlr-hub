@@ -1281,3 +1281,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add daemon-loop regression for trace, state, dispatch-production ledger, and agent-action propagation.
 - [x] Run focused daemon/learning/privacy gates plus final lint/build/audit gates.
 - [x] Commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Policy-Suppressed Label Weak Gate
+- [x] Rechecked the in-progress patch, persistent plan/notes, and live FleetStatus after dispatch evidence telemetry.
+- [x] Treat `currentAuthoritativeLabel` weak gating as a learnable-attempt metric while preserving the raw all-attempt coverage count.
+- [x] Keep policy-suppressed attempts visible in causal diagnostics without turning them into a false actionable causal-coverage blocker.
+- [x] Update FleetStatus next-action detail formatting to use the weak reason denominator when it differs from total attempts.
+- [x] Add regression coverage for policy-suppressed attempts lacking current labels.
+- [x] Run focused, typecheck, lint, build, audit, JS syntax, and diff gates.
+- [x] Commit, push, reload daemon, and smoke live status.

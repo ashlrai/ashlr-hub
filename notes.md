@@ -1,5 +1,13 @@
 # Notes: Ashlr Autonomous Fleet Ambition Push
 
+## Current Policy-Suppressed Label Weak Gate
+- Start state: live FleetStatus had `causalCoverage.currentAuthoritativeLabel` at `14/38`, but the remaining current-label gaps were policy-suppressed attempts rather than learnable production attempts. That created an `inspect-attempt-causal-coverage` style weak signal even though `causalGapDiagnostics.actionableCauses` was empty.
+- Implementation: `summarizeAttemptCoverage()` now evaluates the `currentAuthoritativeLabel` weak gate against non-policy-suppressed records only, while preserving the raw all-attempt `causalCoverage.currentAuthoritativeLabel` count/rate for transparency. Policy-suppressed rows still appear in causal diagnostics and blocked-current-label counts.
+- Status polish: weak reasons can carry an explicit denominator, and `FleetStatus` next-action detail uses it so learnable-only weak metrics do not display against total attempts.
+- Regression coverage: `m352` now proves one learnable current label plus two policy-suppressed unlabeled attempts keeps `causalWeak.weak:false` while diagnostics still report the two policy-suppressed blocked labels.
+- Verification passed: focused `npm run test:ci -- test/m352.attempt-records.test.ts test/m49.fleet-status.test.ts test/m213.dashboard-sse.test.ts` (100 tests), `npm run typecheck -- --pretty false`, `git diff --check`, final `npm run lint` (known 114-warning baseline, 0 errors), `npm run build`, `npm audit --audit-level=moderate`, and `node --check src/core/web/public/app.js`.
+- Production push/reload: pushed `9c6fadb fix: Ignore policy-suppressed label gaps`, reinstalled/kickstarted launchd, and live smoke showed daemon PID `72221`, guard clear, `causalWeak.weak:false`, `currentAuthoritativeLabel 14/38`, no actionable causal causes, primary action `process-capture-repairs`, and readiness still degraded by `dispatch-yield-actionable` with queued repair coverage.
+
 ## Current Diagnostic No-Diff Reslice Queue
 - Start state: clean pushed `master` at `04c366f`; daemon PID `64076`, guard clear, queue `33` backlog / `31` eligible / `0` pending, readiness degraded by `dispatch-yield-actionable`, and autonomy effectiveness `proposal-starved`.
 - Agent pool was saturated for a new explorer wave, so implementation proceeded locally using prior scout findings plus direct audit of `proposal-repair-work`, queued autonomy, self-heal trust, daemon producer maintenance, and existing m310/m201 regressions.
