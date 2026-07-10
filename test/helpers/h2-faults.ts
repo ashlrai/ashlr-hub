@@ -112,6 +112,11 @@ export interface CrashMidSwarmOptions {
    * shape). Pass 'needs-approval' to model a paused swarm awaiting approval.
    */
   status?: SwarmRun['status'];
+  /** Optional durable causal identity left by the crashed producer. */
+  workItemId?: string;
+  workItemGenerationId?: string;
+  workSource?: SwarmRun['workSource'];
+  resumeOptions?: SwarmRun['resumeOptions'];
 }
 
 /**
@@ -152,6 +157,10 @@ export function crashMidSwarm(opts: CrashMidSwarmOptions): SwarmRun {
     goal: opts.goal,
     specId: null,
     project: opts.project,
+    ...(opts.workItemId ? { workItemId: opts.workItemId } : {}),
+    ...(opts.workItemGenerationId ? { workItemGenerationId: opts.workItemGenerationId } : {}),
+    ...(opts.workSource ? { workSource: opts.workSource } : {}),
+    ...(opts.resumeOptions ? { resumeOptions: opts.resumeOptions } : {}),
     createdAt: now,
     updatedAt: now,
     budget: localBudget(),

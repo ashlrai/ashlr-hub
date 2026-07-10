@@ -64,6 +64,9 @@ vi.mock('../src/core/run/best-of-n.js', () => ({
 const mockRunSelfHealCycle = vi.fn();
 vi.mock('../src/core/fleet/self-heal.js', () => ({
   runSelfHealCycle: (...args: unknown[]) => mockRunSelfHealCycle(...args),
+  runSelfHealCycleForRepos: (...args: unknown[]) => mockRunSelfHealCycle(...args),
+  queueSelfHealItem: () => true,
+  pruneQueuedSelfHealItems: () => ({ scanned: 0, removed: 0, failed: false }),
 }));
 
 // ---------------------------------------------------------------------------

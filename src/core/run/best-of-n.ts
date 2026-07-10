@@ -268,6 +268,7 @@ export async function runBestOfN(
   opts?: {
     n?: number;
     workItemId?: string;
+    workItemGenerationId?: string;
     workSource?: WorkSource;
     engine?: EngineId;
     model?: string | null;
@@ -540,6 +541,7 @@ export async function runBestOfN(
           existingWorktree: sb,
           runId,
           workItemId: opts?.workItemId ?? item.id,
+          workItemGenerationId: opts?.workItemGenerationId,
           workSource: opts?.workSource ?? item.source,
           ...(delegationScope ? { delegationScope } : {}),
         });
@@ -555,6 +557,7 @@ export async function runBestOfN(
           ...(typeof requestedModel === 'string' ? { model: requestedModel } : {}),
           runId,
           workItemId: opts?.workItemId ?? item.id,
+          workItemGenerationId: opts?.workItemGenerationId,
           workSource: opts?.workSource ?? item.source,
           ...(delegationScope ? { delegationScope } : {}),
           sourceLabel: 'Best-of-N draft',
@@ -592,6 +595,7 @@ export async function runBestOfN(
         propose: true,
         runId,
         workItemId: opts?.workItemId ?? item.id,
+        workItemGenerationId: opts?.workItemGenerationId,
         workSource: opts?.workSource ?? item.source,
         ...(delegationScope ? { delegationScope } : {}),
       });
@@ -734,6 +738,7 @@ export async function runBestOfN(
         ...(typeof c.requestedModel === 'string' ? { model: c.requestedModel } : {}),
         runId: c.runId,
         workItemId: opts?.workItemId ?? item.id,
+        workItemGenerationId: opts?.workItemGenerationId,
         workSource: opts?.workSource ?? item.source,
         ...(c.delegationScope ? { delegationScope: c.delegationScope } : {}),
         sourceLabel: 'Best-of-N winner',

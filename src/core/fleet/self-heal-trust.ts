@@ -71,8 +71,24 @@ export function isTrustedCaptureRepairItem(item: WorkItem): boolean {
     /\bProduce a fresh complete fix\b/i.test(text);
 }
 
+export function isTrustedProposalRepairItem(item: WorkItem): boolean {
+  if (item.source !== 'self') return false;
+  if (!/^[^:]+:proposal-repair:[0-9a-f]{12}$/i.test(item.id)) return false;
+  const tags = tagsFromItem(item);
+  if (!tags.includes('self-heal')) return false;
+  if (!tags.includes('proposal-repair')) return false;
+  if (!tags.includes('verify')) return false;
+  const text = textFromItem(item);
+  return /\bProposal repair:/i.test(text) &&
+    /\bProposal:/i.test(text) &&
+    /\bOriginal work item:/i.test(text) &&
+    /\bProduce a fresh complete fix\b/i.test(text);
+}
+
 export function isTrustedGeneratedRepairItem(item: WorkItem): boolean {
-  return isTrustedDiagnosticResliceItem(item) || isTrustedCaptureRepairItem(item);
+  return isTrustedDiagnosticResliceItem(item) ||
+    isTrustedCaptureRepairItem(item) ||
+    isTrustedProposalRepairItem(item);
 }
 
 export function isActionableSelfHealFailureText(text: string): boolean {

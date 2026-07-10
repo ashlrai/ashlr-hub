@@ -123,6 +123,8 @@ export interface RunEngineSandboxedOptions {
   runId?: string;
   /** Optional originating backlog/work item id for causal tracing. */
   workItemId?: string;
+  /** Optional immutable generated-repair generation hash. */
+  workItemGenerationId?: string;
   /** Optional originating backlog scanner/source for causal tracing. */
   workSource?: WorkSource;
   /** Optional advisory delegation contract for context/result expectations. */
@@ -144,6 +146,8 @@ export interface CaptureSandboxedProposalOptions {
   runId?: string;
   /** Optional originating backlog/work item id for causal tracing. */
   workItemId?: string;
+  /** Optional immutable generated-repair generation hash. */
+  workItemGenerationId?: string;
   /** Optional originating backlog scanner/source for causal tracing. */
   workSource?: WorkSource;
   /** Mark the proposal partial and run the partial completeness gate. */
@@ -1022,6 +1026,7 @@ export async function captureSandboxedProposal(
       provenanceSig,
       sandboxId: sb.id,
       workItemId: opts.workItemId,
+      ...(opts.workItemGenerationId ? { workItemGenerationId: opts.workItemGenerationId } : {}),
       workSource: opts.workSource,
       runId: id,
       engineModel,
@@ -1469,6 +1474,7 @@ export async function runEngineSandboxed(
             runId: id,
             existingWorktree: sb,
             workItemId: opts.workItemId,
+            workItemGenerationId: opts.workItemGenerationId,
             workSource: opts.workSource,
             delegationScope,
             isPartial: true,
@@ -2064,6 +2070,7 @@ export async function runApiModelSandboxed(
           runId: id,
           existingWorktree: sb,
           workItemId: opts.workItemId,
+          workItemGenerationId: opts.workItemGenerationId,
           workSource: opts.workSource,
           delegationScope,
           isPartial: true,
@@ -2127,6 +2134,7 @@ export async function runApiModelSandboxed(
           runId: id,
           existingWorktree: sb,
           workItemId: opts.workItemId,
+          workItemGenerationId: opts.workItemGenerationId,
           workSource: opts.workSource,
           delegationScope,
           isPartial: isPartialResult,

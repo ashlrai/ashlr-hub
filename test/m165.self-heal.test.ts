@@ -543,6 +543,58 @@ describe('runSelfHealCycle', () => {
     expect(backlog.items.map((item) => item.id)).toEqual([staleB.id]);
   });
 
+  it('green self-heal maintenance preserves active generated proposal repairs', async () => {
+    const repo = path.join(tmpHome, 'repo-active-repair');
+    fs.mkdirSync(repo, { recursive: true });
+    const ashlrDir = path.join(tmpHome, '.ashlr');
+    fs.mkdirSync(ashlrDir, { recursive: true });
+    const stale = proposeHeal(repo, {
+      broken: true,
+      kind: 'build',
+      detail: 'old TypeScript error',
+    });
+    const repair: WorkItem = {
+      id: 'repo-active-repair:proposal-repair-nodiff:abcdef123456',
+      repo,
+      source: 'self',
+      title: 'Reslice no-diff dispatch for repo-active-repair item repo:goal:stalled',
+      detail:
+        'Diagnostic reslice: a dispatch completed without file changes.\n' +
+        'Original work item: repo:goal:stalled\n' +
+        'Dispatch outcome: empty-diff\n' +
+        'Action: reslice the work into a smaller concrete edit.',
+      value: 4,
+      effort: 1,
+      score: 4,
+      tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+      ts: new Date().toISOString(),
+    };
+    fs.writeFileSync(
+      path.join(ashlrDir, 'self-heal-queue.json'),
+      JSON.stringify([stale, repair], null, 2),
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(ashlrDir, 'backlog.json'),
+      JSON.stringify({ generatedAt: new Date().toISOString(), repos: [repo], items: [stale, repair] }, null, 2),
+      'utf8',
+    );
+    mockListEnrolled.mockReturnValue([repo]);
+    mockDetectVerifyCommands.mockReturnValue([GREEN_VC]);
+    mockRunVerifyCommand.mockReturnValue(OK_RESULT);
+
+    await runSelfHealCycle(makeCfg());
+
+    const queue = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'self-heal-queue.json'), 'utf8'),
+    ) as WorkItem[];
+    const backlog = JSON.parse(
+      fs.readFileSync(path.join(ashlrDir, 'backlog.json'), 'utf8'),
+    ) as { items: WorkItem[] };
+    expect(queue.map((item) => item.id)).toEqual([repair.id]);
+    expect(backlog.items.map((item) => item.id)).toEqual([repair.id]);
+  });
+
   it('targeted self-heal maintenance preserves invalid self-heal rows outside requested repos', async () => {
     const repoA = path.join(tmpHome, 'repo-a');
     const repoB = path.join(tmpHome, 'repo-b');

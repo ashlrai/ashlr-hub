@@ -66,6 +66,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import { basename, join } from 'node:path';
 import type { AshlrConfig, DaemonTick, WorkItem } from '../src/core/types.js';
+import { workItemCoverageKey } from '../src/core/fleet/proposal-matching.js';
 
 // ---------------------------------------------------------------------------
 // Core mocks — MUST be declared before lazy imports.
@@ -242,6 +243,7 @@ import {
   sanitizeSkillCard,
 } from '../src/core/fleet/skill-records.js';
 import { loadWorkedLedger, recordOutcome } from '../src/core/fleet/worked-ledger.js';
+import { readGeneratedRepairLifecycle } from '../src/core/fleet/generated-repair-lifecycle.js';
 import {
   makeFixture,
   makeCfg,
@@ -1180,7 +1182,11 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.reason).toBe('ok');
     expect(result.itemsConsidered).toBe(1);
     expect(mockQueueProposalRepairWorkForPendingProposals).toHaveBeenCalledTimes(1);
-    expect(mockQueueProposalRepairWorkForPendingProposals.mock.calls[0]).toEqual([]);
+    expect(mockQueueProposalRepairWorkForPendingProposals.mock.calls[0]).toEqual([
+      undefined,
+      expect.any(Date),
+      { terminalLifecycleEnabled: true },
+    ]);
     expect(mockBuildBacklog).toHaveBeenCalledTimes(2);
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
     expect(result.producerMaintenance).toMatchObject({
@@ -1200,6 +1206,47 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(result.dispatches?.[0]?.itemId).toBe(repairItems[0]!.id);
   });
 
+  it('A1a2b1: terminal repair maintenance refreshes and filters the same tick before dispatch', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const terminal = makeDiagnosticResliceItem(repo.dir, 'abcdef123456', 10);
+    const generic = makeItems(repo.dir, 1)[0]!;
+    mockQueueProposalRepairWorkForPendingProposals.mockReturnValue({
+      scanned: 1,
+      eligible: 0,
+      queued: 0,
+      failed: 0,
+      dispatchRepairRetired: 1,
+      dispatchRepairExhausted: 0,
+      dispatchRepairPruned: 1,
+      dispatchRepairPruneFailed: 0,
+      blockedItemKeys: [workItemCoverageKey(terminal)],
+    });
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [terminal, generic],
+    });
+
+    const result = await tick(
+      { ...cfgBuiltin({ perTickItems: 1, parallel: 1 }), foundry: { autonomyControlLoop: false } } as AshlrConfig,
+      { dryRun: false },
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(2);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({ workItemId: generic.id });
+    expect(result.dispatches?.map((dispatch) => dispatch.itemId)).toEqual([generic.id]);
+    expect(result.producerMaintenance).toMatchObject({
+      dispatchRepairRetired: 1,
+      dispatchRepairExhausted: 0,
+      dispatchRepairPruned: 1,
+      dispatchRepairPruneFailed: 0,
+    });
+    expect(JSON.stringify(result.producerMaintenance)).not.toContain(terminal.id);
+  });
+
   it('A1a2b2: foundry.proposalRepair=false disables repair maintenance', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -1216,6 +1263,61 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
     expect(result.reason).toBe('no-backlog');
     expect(mockQueueProposalRepairWorkForPendingProposals).not.toHaveBeenCalled();
+  });
+
+  it('A1a2b3: shared queue mode disables local terminal lifecycle projection', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [],
+    });
+
+    await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { autonomyControlLoop: false },
+      fleet: { sharedQueue: { mode: 'filesystem', path: fx.ashlrDir } },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(mockQueueProposalRepairWorkForPendingProposals).toHaveBeenCalledWith(
+      undefined,
+      expect.any(Date),
+      { terminalLifecycleEnabled: false },
+    );
+  });
+
+  it('A1a2b4: shared queue mode blocks generated repair dispatch without fenced lifecycle state', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'abcdef654321', 10);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock shared repair' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-shared-repair-empty',
+      status: 'done',
+      usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+      proposalOutcome: { kind: 'empty-diff', reason: 'no file changes' },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { autonomyControlLoop: false, allowedBackends: ['local-coder'] },
+      fleet: { sharedQueue: { mode: 'filesystem', path: fx.ashlrDir, machineId: 'm201-shared' } },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.reason).toBe('no-backlog');
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(readGeneratedRepairLifecycle(repair)).toEqual({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
+    });
   });
 
   it('A1a2c: non-empty backlog refreshes after self-heal maintenance before selection', async () => {
@@ -2468,6 +2570,206 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       proposalCreated: false,
       runId: 'run-proposal-disabled',
       basis: 'run-proposal-outcome',
+    });
+  });
+
+  it('A1h5b1: generated repair success becomes terminal only when its proposal exists durably', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'abcdef123456', 10);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock repair success' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunGoal.mockImplementationOnce(async (_goal: unknown, _cfg: unknown, options: unknown) => {
+      const { runId: attemptId, workItemGenerationId } = options as {
+        runId: string;
+        workItemGenerationId: string;
+      };
+      const proposal = createProposal({
+        repo: repo.dir,
+        origin: 'agent',
+        kind: 'patch',
+        title: 'Generated repair proposal',
+        summary: 'A complete generated repair.',
+        diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
+        workItemId: repair.id,
+        workItemGenerationId,
+        workSource: repair.source,
+        runId: attemptId,
+        trajectoryId: `run:${attemptId}`,
+        runEventSummary: { runId: attemptId, status: 'done', outcome: 'proposal-created', proposalCreated: true },
+      });
+      return {
+        id: attemptId,
+        status: 'done',
+        usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+        proposalOutcome: {
+          kind: 'filed',
+          proposalId: proposal.id,
+          reason: 'proposal filed',
+          files: 1,
+          insertions: 1,
+          deletions: 1,
+        },
+      };
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.proposalsCreated).toBe(1);
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'retired',
+    });
+  });
+
+  it('A1h5b2: claimed proposal metadata without a durable inbox proposal is not lifecycle authority', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'fedcba123456', 10);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock unbacked success' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-unbacked-repair-success',
+      status: 'done',
+      usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+      proposalOutcome: {
+        kind: 'filed',
+        proposalId: 'prop-missing-from-inbox',
+        reason: 'claimed proposal filed',
+        files: 1,
+        insertions: 1,
+        deletions: 0,
+      },
+    });
+
+    await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(pendingCount()).toBe(0);
+    expect(readGeneratedRepairLifecycle(repair)).toEqual({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
+    });
+  });
+
+  it('A1h5b3: aggregate Best-of-N empty summaries are not lifecycle exhaustion evidence', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'aaaaaa123456', 10);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock mixed best-of-n' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunBestOfN.mockResolvedValueOnce({
+      winner: undefined,
+      candidates: [],
+      critique: {
+        n: 2,
+        nonEmpty: 0,
+        judged: 0,
+        topScore: 0,
+        billableCostUsd: 0.002,
+        noProposalReasons: [
+          { reason: 'empty-diff: one candidate made no changes', count: 1 },
+          { reason: 'engine-failed: one candidate never executed', count: 1 },
+        ],
+      },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: {
+        autonomyControlLoop: false,
+        allowedBackends: ['local-coder'],
+        bestOfN: 2,
+      },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'empty-diff',
+      reason: expect.stringContaining('best-of-2'),
+    });
+    expect(readGeneratedRepairLifecycle(repair)).toEqual({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
+    });
+  });
+
+  it('A1h5b4: failed partial proposals do not retire generated repair work', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'bbbbbb123456', 10);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock partial repair' });
+    mockEngineTierOf.mockReturnValue('mid');
+    mockRunGoal.mockImplementationOnce(async (_goal: unknown, _cfg: unknown, options: unknown) => {
+      const { runId, workItemGenerationId } = options as {
+        runId: string;
+        workItemGenerationId: string;
+      };
+      const proposal = createProposal({
+        repo: repo.dir,
+        origin: 'agent',
+        kind: 'patch',
+        title: 'Partial generated repair proposal',
+        summary: 'A failed attempt left useful but incomplete material.',
+        diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+partial\n',
+        workItemId: repair.id,
+        workItemGenerationId,
+        workSource: repair.source,
+        runId,
+        trajectoryId: `run:${runId}`,
+        runEventSummary: { runId, status: 'failed', outcome: 'proposal-created', proposalCreated: true },
+        isPartial: true,
+      });
+      return {
+        id: runId,
+        status: 'failed',
+        usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+        proposalOutcome: {
+          kind: 'filed',
+          proposalId: proposal.id,
+          reason: 'partial proposal filed',
+          files: 1,
+          insertions: 1,
+          deletions: 1,
+        },
+      };
+    });
+
+    await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(pendingCount()).toBe(1);
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'active',
     });
   });
 

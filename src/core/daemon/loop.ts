@@ -160,6 +160,10 @@ import {
   isTrustedDiagnosticResliceItem,
   isTrustedGeneratedRepairItem,
 } from '../fleet/self-heal-trust.js';
+import {
+  generatedRepairGenerationId,
+  recordGeneratedRepairLifecycle,
+} from '../fleet/generated-repair-lifecycle.js';
 
 const GENERATED_REPAIR_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS = 3;
@@ -1655,6 +1659,19 @@ export async function tick(
   let producerMaintenanceBeforeSelection = false;
   let producerMaintenanceSkippedByCadence = false;
   let producerMaintenanceNextAfter: string | undefined;
+  const generatedRepairDispatchEnabled =
+    (liveCfg.foundry as Record<string, unknown> | undefined)?.['proposalRepair'] !== false &&
+    liveCfg.fleet?.sharedQueue?.mode !== 'filesystem';
+  const blockedRepairKeys = new Set<string>();
+  const filterGeneratedRepairDispatch = (items: WorkItem[]): WorkItem[] => items.filter((item) => {
+    if (!item.tags.includes('proposal-repair')) return true;
+    if (!generatedRepairDispatchEnabled) return false;
+    try {
+      return !blockedRepairKeys.has(workItemCoverageKey(item));
+    } catch {
+      return false;
+    }
+  });
   const producerMaintenanceSummary = (): DaemonTick['producerMaintenance'] | undefined => {
     if (
       !selfHealMaintenanceRan &&
@@ -1699,6 +1716,21 @@ export async function tick(
           ...(proposalRepairMaintenanceResult.dispatchNoDiffFailed !== undefined
             ? { dispatchNoDiffResliceFailed: proposalRepairMaintenanceResult.dispatchNoDiffFailed }
             : {}),
+          ...(proposalRepairMaintenanceResult.dispatchRepairRetired !== undefined
+            ? { dispatchRepairRetired: proposalRepairMaintenanceResult.dispatchRepairRetired }
+            : {}),
+          ...(proposalRepairMaintenanceResult.dispatchRepairExhausted !== undefined
+            ? { dispatchRepairExhausted: proposalRepairMaintenanceResult.dispatchRepairExhausted }
+            : {}),
+          ...(proposalRepairMaintenanceResult.dispatchRepairPruned !== undefined
+            ? { dispatchRepairPruned: proposalRepairMaintenanceResult.dispatchRepairPruned }
+            : {}),
+          ...(proposalRepairMaintenanceResult.dispatchRepairPruneFailed !== undefined
+            ? { dispatchRepairPruneFailed: proposalRepairMaintenanceResult.dispatchRepairPruneFailed }
+            : {}),
+          ...(proposalRepairMaintenanceResult.dispatchRepairLifecycleUnavailable !== undefined
+            ? { dispatchRepairLifecycleUnavailable: proposalRepairMaintenanceResult.dispatchRepairLifecycleUnavailable }
+            : {}),
         }
         : {}),
       ...(producerMaintenanceSkippedByCadence ? { skippedByCadence: true } : {}),
@@ -1734,7 +1766,11 @@ export async function tick(
     if ((liveCfg.foundry as Record<string, unknown> | undefined)?.['proposalRepair'] === false) return null;
     proposalRepairMaintenanceRan = true;
     try {
-      proposalRepairMaintenanceResult = queueProposalRepairWorkForPendingProposals();
+      proposalRepairMaintenanceResult = queueProposalRepairWorkForPendingProposals(
+        undefined,
+        new Date(now),
+        { terminalLifecycleEnabled: liveCfg.fleet?.sharedQueue?.mode !== 'filesystem' },
+      );
       return proposalRepairMaintenanceResult;
     } catch (err) {
       proposalRepairMaintenanceResult = { scanned: 0, eligible: 0, queued: 0, failed: 1 };
@@ -1799,7 +1835,7 @@ export async function tick(
   const refreshBacklogForTick = async (): Promise<WorkItem[]> => {
     try {
       const backlog = await buildBacklog({ repos: enrolled });
-      return backlog.items;
+      return filterGeneratedRepairDispatch(backlog.items);
     } catch (err) {
       // buildBacklog never throws by contract; extra guard
       console.warn('[ashlr] daemon:tick buildBacklog guard caught:', (err as Error)?.message ?? err);
@@ -1970,9 +2006,14 @@ export async function tick(
   // -------------------------------------------------------------------------
   let backlogItems: WorkItem[] = await refreshBacklogForTick();
   const proposalRepairResult = await runProposalRepairMaintenance();
-  if ((proposalRepairResult?.queued ?? 0) > 0) {
+  if (
+    (proposalRepairResult?.queued ?? 0) > 0 ||
+    (proposalRepairResult?.dispatchRepairPruned ?? 0) > 0
+  ) {
     backlogItems = await refreshBacklogForTick();
   }
+  for (const key of proposalRepairResult?.blockedItemKeys ?? []) blockedRepairKeys.add(key);
+  backlogItems = filterGeneratedRepairDispatch(backlogItems);
 
   if (backlogItems.length === 0) {
     const autoMergePassResult = await runAutoMergeMaintenancePass();
@@ -2961,6 +3002,7 @@ export async function tick(
       }
       const goal = buildItemGoal(item);
       const itemBudget = { maxTokens: perItemMaxTokens, maxSteps: 100, allowCloud: false };
+      const workItemGenerationId = generatedRepairGenerationId(item) ?? undefined;
       const delegationScope = scopeFromWorkItem(item, {
         runId: attemptId,
         budget: itemBudget,
@@ -3012,6 +3054,7 @@ export async function tick(
             noCapture: true,
             runId: attemptId,
             workItemId: item.id,
+            workItemGenerationId,
             workSource: item.source,
             delegationScope,
           },
@@ -3158,6 +3201,7 @@ export async function tick(
               ? { candidates: _bonCandidates as never }
               : {}),
             workItemId: item.id,
+            workItemGenerationId,
             workSource: item.source,
             delegationScope,
             attemptId,
@@ -3224,6 +3268,7 @@ export async function tick(
             runId: attemptId,
             ...(selectedModel ? { model: selectedModel } : {}),
             workItemId: item.id,
+            workItemGenerationId,
             workSource: item.source,
             delegationScope,
           });
@@ -3639,6 +3684,61 @@ export async function tick(
     } catch (err) {
       // Ledger recording must never crash the tick.
       console.warn('[ashlr] daemon:tick ledger recordOutcome failed:', (err as Error)?.message ?? err);
+    }
+  }
+
+  // Generated-repair lifecycle is a local, atomic control store. Shared-queue
+  // mode stays fail-closed until claim fencing can bind late outcomes safely.
+  if (dispatchedCount > 0 && liveCfg.fleet?.sharedQueue?.mode !== 'filesystem') {
+    try {
+      for (const outcome of outcomes) {
+        if (
+          outcome.status !== 'fulfilled' ||
+          !outcome.value.dispatched ||
+          !isTrustedGeneratedRepairItem(outcome.value.item)
+        ) continue;
+        const trace = outcome.value.dispatch;
+        const production = trace?.production;
+        const attemptId = trace?.trajectoryId ?? trace?.runId ?? production?.runId;
+        if (!production || !attemptId) continue;
+        if (
+          production.outcome === 'empty-diff' &&
+          !production.reason?.startsWith('best-of-')
+        ) {
+          recordGeneratedRepairLifecycle(outcome.value.item, {
+            kind: 'empty-diff',
+            attemptId,
+          });
+          continue;
+        }
+        if (production.outcome !== 'proposal-created') continue;
+        const proposal = newPendingProposalsByItemId.get(outcome.value.item.id);
+        if (
+          !proposal ||
+          proposal.status !== 'pending' ||
+          proposal.workItemId !== outcome.value.item.id ||
+          proposal.workItemGenerationId !== generatedRepairGenerationId(outcome.value.item) ||
+          !proposal.repo ||
+          resolve(proposal.repo) !== resolve(outcome.value.item.repo) ||
+          !production.proposalId ||
+          production.proposalId !== proposal.id ||
+          !production.runId ||
+          !proposal.runId ||
+          production.runId !== proposal.runId ||
+          proposal.runEventSummary?.status !== 'done' ||
+          proposal.isPartial === true ||
+          !trace?.trajectoryId ||
+          !proposal.trajectoryId ||
+          trace.trajectoryId !== proposal.trajectoryId
+        ) continue;
+        recordGeneratedRepairLifecycle(outcome.value.item, {
+          kind: 'proposal-created',
+          attemptId,
+          proposalId: proposal.id,
+        });
+      }
+    } catch (err) {
+      console.warn('[ashlr] daemon:tick generated repair lifecycle failed:', (err as Error)?.message ?? err);
     }
   }
 

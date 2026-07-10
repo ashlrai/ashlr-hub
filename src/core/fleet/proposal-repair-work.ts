@@ -4,13 +4,22 @@ import { existsSync } from 'node:fs';
 import type { Proposal, WorkItem } from '../types.js';
 import { listProposals } from '../inbox/store.js';
 import { scrubSecrets } from '../util/scrub.js';
-import { queueSelfHealItem } from './self-heal.js';
-import { isActionableSelfHealItem } from './self-heal-trust.js';
+import { pruneQueuedSelfHealItems, queueSelfHealItem } from './self-heal.js';
+import {
+  isActionableSelfHealItem,
+  isTrustedGeneratedRepairItem,
+} from './self-heal-trust.js';
 import {
   readDispatchProductionEvents,
   type DispatchProductionEvent,
 } from './dispatch-production-ledger.js';
 import { listEnrolled } from '../sandbox/policy.js';
+import {
+  generatedRepairGenerationId,
+  recordGeneratedRepairLifecycle,
+  readGeneratedRepairLifecycle,
+} from './generated-repair-lifecycle.js';
+import { workItemCoverageKey } from './proposal-matching.js';
 
 const MAX_TITLE = 140;
 const MAX_REASON = 260;
@@ -35,6 +44,13 @@ export interface ProposalRepairWorkResult {
   dispatchNoDiffEligible?: number;
   dispatchNoDiffQueued?: number;
   dispatchNoDiffFailed?: number;
+  dispatchRepairRetired?: number;
+  dispatchRepairExhausted?: number;
+  dispatchRepairPruned?: number;
+  dispatchRepairPruneFailed?: number;
+  dispatchRepairLifecycleUnavailable?: number;
+  /** Internal selection guard; never persisted by producer-maintenance summaries. */
+  blockedItemKeys?: string[];
 }
 
 export interface ProposalRepairWorkOptions {
@@ -44,6 +60,8 @@ export interface ProposalRepairWorkOptions {
   dispatchWindowMs?: number;
   maxDispatchCaptureQueued?: number;
   maxDispatchNoDiffQueued?: number;
+  terminalLifecycleEnabled?: boolean;
+  lifecycleProposals?: Proposal[];
 }
 
 function bounded(value: unknown, max: number): string {
@@ -167,7 +185,7 @@ export function proposalRepairWorkItem(proposal: Proposal, now = new Date()): Wo
     effort,
     score: value / effort,
     tags: ['self-heal', 'proposal-repair', repairKind, 'verify', 'high-priority'],
-    ts: now.toISOString(),
+    ts: Number.isFinite(Date.parse(proposal.createdAt)) ? new Date(proposal.createdAt).toISOString() : now.toISOString(),
   };
 }
 
@@ -327,6 +345,14 @@ export function queueProposalRepairWorkForPendingProposals(
       failed: 1,
     };
   }
+  let lifecycleProposals: Proposal[] = [];
+  if (opts?.terminalLifecycleEnabled !== false) {
+    try {
+      lifecycleProposals = opts?.lifecycleProposals ?? (proposals === undefined ? listProposals() : proposals);
+    } catch {
+      lifecycleProposals = [];
+    }
+  }
   const includeCaptureRepairs = opts?.includeDispatchCaptureFailures !== false;
   const includeNoDiffReslices = opts?.includeDispatchNoDiffReslices !== false;
   const dispatchEvents = (includeCaptureRepairs || includeNoDiffReslices
@@ -359,11 +385,67 @@ export function queueProposalRepairWorkForPendingProposals(
     dispatchNoDiffEligible: 0,
     dispatchNoDiffQueued: 0,
     dispatchNoDiffFailed: 0,
+    dispatchRepairRetired: 0,
+    dispatchRepairExhausted: 0,
+    dispatchRepairPruned: 0,
+    dispatchRepairPruneFailed: 0,
+    dispatchRepairLifecycleUnavailable: 0,
+    blockedItemKeys: [],
   };
 
-  for (const proposal of pending) {
+  const terminalLifecycleEnabled = opts?.terminalLifecycleEnabled !== false;
+  const terminalByKey = new Map<string, 'retired' | 'exhausted'>();
+  const blockedItemKeys = new Set<string>();
+  const lifecycleUnavailableKeys = new Set<string>();
+  const observeLifecycle = (
+    item: WorkItem,
+  ): 'not-generated' | 'active' | 'terminal' | 'unavailable' => {
+    if (!terminalLifecycleEnabled) return 'not-generated';
+    if (!isTrustedGeneratedRepairItem(item)) return 'not-generated';
+    let key: string;
+    try {
+      key = workItemCoverageKey(item);
+    } catch {
+      return 'unavailable';
+    }
+    const durableProposal = lifecycleProposals
+      .filter((proposal) => durableGeneratedRepairProposal(item, proposal))
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0];
+    if (durableProposal?.trajectoryId) {
+      recordGeneratedRepairLifecycle(item, {
+        kind: 'proposal-created',
+        attemptId: durableProposal.trajectoryId,
+        proposalId: durableProposal.id,
+        ts: durableProposal.createdAt,
+      });
+    }
+    const lifecycle = readGeneratedRepairLifecycle(item);
+    if (!lifecycle.available) {
+      terminalByKey.delete(key);
+      blockedItemKeys.add(key);
+      lifecycleUnavailableKeys.add(key);
+      return 'unavailable';
+    }
+    if (lifecycle.disposition === 'active') {
+      terminalByKey.delete(key);
+      blockedItemKeys.delete(key);
+      return 'active';
+    }
+    terminalByKey.set(key, lifecycle.disposition);
+    blockedItemKeys.add(key);
+    return 'terminal';
+  };
+  const prune = terminalLifecycleEnabled
+    ? pruneQueuedSelfHealItems((item) => observeLifecycle(item) === 'terminal')
+    : { scanned: 0, removed: 0, failed: false };
+  result.dispatchRepairPruned = prune.removed;
+  result.dispatchRepairPruneFailed = prune.failed ? 1 : 0;
+
+  if (terminalLifecycleEnabled) for (const proposal of pending) {
     const item = proposalRepairWorkItem(proposal, now);
     if (!item) continue;
+    const lifecycle = observeLifecycle(item);
+    if (lifecycle === 'terminal' || lifecycle === 'unavailable') continue;
     result.eligible++;
     result.proposalEligible!++;
     if (queueSelfHealItem(item)) {
@@ -375,12 +457,14 @@ export function queueProposalRepairWorkForPendingProposals(
     }
   }
   const seenCaptureIds = new Set<string>();
-  if (includeCaptureRepairs) for (const event of dispatchEvents) {
+  if (terminalLifecycleEnabled && includeCaptureRepairs) for (const event of dispatchEvents) {
     if ((result.dispatchCaptureQueued ?? 0) >= maxCaptureQueued) break;
     const item = captureGateRepairWorkItem(event, now);
     if (!item) continue;
     if (seenCaptureIds.has(item.id)) continue;
     seenCaptureIds.add(item.id);
+    const lifecycle = observeLifecycle(item);
+    if (lifecycle === 'terminal' || lifecycle === 'unavailable') continue;
     result.eligible++;
     result.dispatchCaptureEligible!++;
     if (queueSelfHealItem(item)) {
@@ -392,12 +476,14 @@ export function queueProposalRepairWorkForPendingProposals(
     }
   }
   const seenNoDiffIds = new Set<string>();
-  if (includeNoDiffReslices) for (const event of dispatchEvents) {
+  if (terminalLifecycleEnabled && includeNoDiffReslices) for (const event of dispatchEvents) {
     if ((result.dispatchNoDiffQueued ?? 0) >= maxNoDiffQueued) break;
     const item = noDiffResliceWorkItem(event, now);
     if (!item) continue;
     if (seenNoDiffIds.has(item.id)) continue;
     seenNoDiffIds.add(item.id);
+    const lifecycle = observeLifecycle(item);
+    if (lifecycle === 'terminal' || lifecycle === 'unavailable') continue;
     result.eligible++;
     result.dispatchNoDiffEligible!++;
     if (queueSelfHealItem(item)) {
@@ -409,5 +495,36 @@ export function queueProposalRepairWorkForPendingProposals(
     }
   }
 
+  result.dispatchRepairRetired = [...terminalByKey.values()].filter((value) => value === 'retired').length;
+  result.dispatchRepairExhausted = [...terminalByKey.values()].filter((value) => value === 'exhausted').length;
+  result.dispatchRepairLifecycleUnavailable = lifecycleUnavailableKeys.size;
+  result.blockedItemKeys = [...blockedItemKeys];
+
   return result;
+}
+
+function durableGeneratedRepairProposal(item: WorkItem, proposal: Proposal): boolean {
+  if (
+    proposal.status !== 'pending' &&
+    proposal.status !== 'approved' &&
+    proposal.status !== 'awaiting-host-merge' &&
+    proposal.status !== 'applied'
+  ) return false;
+  if (proposal.workItemId !== item.id || proposal.workSource !== 'self') return false;
+  const itemGenerationId = generatedRepairGenerationId(item);
+  if (!itemGenerationId || proposal.workItemGenerationId !== itemGenerationId) return false;
+  if (proposal.origin !== 'agent' && proposal.origin !== 'swarm') return false;
+  if (proposal.kind !== 'patch' && proposal.kind !== 'pr') return false;
+  if (!proposal.diff || !proposal.repo || !proposal.runId || !proposal.trajectoryId) return false;
+  if (proposal.trajectoryId !== `run:${proposal.runId}`) return false;
+  if (proposal.runEventSummary?.runId !== proposal.runId) return false;
+  if (proposal.runEventSummary.status !== 'done' || proposal.isPartial === true) return false;
+  const itemMs = Date.parse(item.ts);
+  const proposalMs = Date.parse(proposal.createdAt);
+  if (!Number.isFinite(itemMs) || !Number.isFinite(proposalMs) || proposalMs < itemMs) return false;
+  try {
+    return resolve(proposal.repo) === resolve(item.repo);
+  } catch {
+    return false;
+  }
 }

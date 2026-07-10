@@ -64,6 +64,7 @@ import { scrubSecrets } from '../knowledge/index.js';
 import { scrubSecrets as scrubSensitiveText } from '../util/scrub.js';
 import { mergeDelegationScope, summarizeDelegationScope } from '../run/delegation-scope.js';
 import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
+import { runEventSummary } from '../learning/causal.js';
 
 // ---------------------------------------------------------------------------
 // M17: lazy-load sign / gate / rollback helpers. Each import is best-effort:
@@ -940,6 +941,7 @@ function captureSandboxAndCleanup(
   cfg?: import('../types.js').AshlrConfig,
   causal?: {
     workItemId?: string;
+    workItemGenerationId?: string;
     workSource?: import('../types.js').WorkSource;
     delegationScope?: DelegationScope;
   },
@@ -1075,8 +1077,20 @@ function captureSandboxAndCleanup(
             diff: scrubbedPatch,
             sandboxId: sb.id,
             workItemId: causal?.workItemId,
+            ...(causal?.workItemGenerationId
+              ? { workItemGenerationId: causal.workItemGenerationId }
+              : {}),
             workSource: causal?.workSource,
             runId: run.id,
+            trajectoryId: `run:${run.id}`,
+            runEventSummary: runEventSummary({
+              runId: run.id,
+              status: run.status,
+              outcome: 'proposal-created',
+              proposalCreated: true,
+              diffFiles: diff.files,
+              diffLines: diff.insertions + diff.deletions,
+            }),
             ...(proposalDelegationScope ? { delegationScope: proposalDelegationScope } : {}),
           });
           outcome = {
@@ -1263,6 +1277,21 @@ export async function runSwarm(
     opts = { ...opts, runId };
   }
 
+  const resumeSnapshot = opts.resumeId ? loadSwarm(opts.resumeId) : null;
+  if (resumeSnapshot) {
+    opts = {
+      ...opts,
+      project: resumeSnapshot.project ?? opts.project,
+      workItemId: resumeSnapshot.workItemId ?? opts.workItemId,
+      workItemGenerationId: resumeSnapshot.workItemGenerationId ?? opts.workItemGenerationId,
+      workSource: resumeSnapshot.workSource ?? opts.workSource,
+      sandbox: resumeSnapshot.resumeOptions?.sandbox ?? opts.sandbox,
+      requireSandbox: resumeSnapshot.resumeOptions?.requireSandbox ?? opts.requireSandbox,
+      propose: resumeSnapshot.resumeOptions?.propose ?? opts.propose,
+      noCapture: resumeSnapshot.resumeOptions?.noCapture ?? opts.noCapture,
+    };
+  }
+
   // -------------------------------------------------------------------------
   // Set ASHLR_IN_SWARM=1 on THIS process so all child engine spawns inherit it.
   // This prevents any task (via runGoal → spawnEngine) from recursively
@@ -1289,6 +1318,7 @@ export async function runSwarm(
   const project = opts.project ?? null;
   const causal = {
     workItemId: opts.workItemId,
+    workItemGenerationId: opts.workItemGenerationId,
     workSource: opts.workSource,
     delegationScope: opts.delegationScope,
   };
@@ -1436,7 +1466,7 @@ export async function runSwarm(
   let run: SwarmRun;
 
   if (opts.resumeId) {
-    const existing = loadSwarm(opts.resumeId);
+    const existing = resumeSnapshot;
     if (!existing) {
       const now = new Date().toISOString();
       const notFound: SwarmRun = {
@@ -1501,6 +1531,16 @@ export async function runSwarm(
       parallel,
       project,
     );
+    if (opts.workItemId) run.workItemId = opts.workItemId;
+    if (opts.workItemGenerationId) run.workItemGenerationId = opts.workItemGenerationId;
+    if (opts.workSource) run.workSource = opts.workSource;
+    const resumeOptions: NonNullable<SwarmRun['resumeOptions']> = {
+      ...(opts.sandbox === true ? { sandbox: true } : {}),
+      ...(opts.requireSandbox === true ? { requireSandbox: true } : {}),
+      ...(opts.propose === true ? { propose: true } : {}),
+      ...(opts.noCapture === true ? { noCapture: true } : {}),
+    };
+    if (Object.keys(resumeOptions).length > 0) run.resumeOptions = resumeOptions;
   }
 
   // -------------------------------------------------------------------------

@@ -1434,3 +1434,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add retry, provenance, diagnostic-reslice, fallback, capacity, duplicate-id, and parallel-test-isolation coverage.
 - [x] Run focused/full repository gates and independent adversarial review.
 - [x] Update durable notes, commit, push, reload, and production smoke.
+
+## Current Overnight Cycle - Terminal Generated Repair Lifecycle
+- [x] Rehydrate the clean deployed repair-routing baseline, live queue growth, Entire state, and durable rollout evidence.
+- [x] Deploy disjoint audits for lifecycle authority, queue retirement, adversarial suppression risks, and TITRR partial capture.
+- [x] Add a versioned fail-closed generated-repair lifecycle using exact repo/item/generation identity and metadata-only terminal evidence.
+- [x] Retire only from an exact durable proposal, exhaust only after two distinct typed empty-diff attempts, and keep infrastructure/capture failures retryable.
+- [x] Prune terminal repairs from the durable queue and backlog before selection and expose count-only maintenance outcomes without raw task data.
+- [x] Block local repair dispatch while lifecycle state is unavailable, fence shared mode, and reconcile crash-persisted proposals before retrying work.
+- [x] Prove ordinary work, spoofed records, duplicate events, recurrence, queue persistence, lock contention, write failure, and daemon refresh behavior remain safe.
+- [x] Run focused/full repository gates and independent adversarial review on the final source.
+- [ ] Update durable notes, commit, push, reload, and production smoke.

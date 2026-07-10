@@ -135,6 +135,31 @@ describe('runSwarm — --background spawns the worker correctly', () => {
     expect(result.status).not.toBe('done');
   });
 
+  it('persists causal identity and resume flags for the detached worker', async () => {
+    const workItemGenerationId = 'b'.repeat(64);
+    const result = await runSwarm(
+      { goal: 'bg repair' },
+      makeConfig(),
+      {
+        budget: { maxTokens: 50_000, maxSteps: 100 },
+        parallel: 1,
+        background: true,
+        propose: true,
+        workItemId: 'repo:proposal-repair-nodiff:bg-generation',
+        workItemGenerationId,
+        workSource: 'self',
+      },
+      nullSink,
+    );
+
+    expect(loadSwarm(result.id)).toMatchObject({
+      workItemId: 'repo:proposal-repair-nodiff:bg-generation',
+      workItemGenerationId,
+      workSource: 'self',
+      resumeOptions: { propose: true },
+    });
+  });
+
   it('spawns the worker as `swarm --resume <id> --_worker`', async () => {
     const result = await runSwarm(
       { goal: 'bg goal' },

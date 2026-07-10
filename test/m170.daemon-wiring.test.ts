@@ -20,7 +20,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
-import type { AshlrConfig } from '../src/core/types.js';
+import type { AshlrConfig, WorkItem } from '../src/core/types.js';
+import { generatedRepairGenerationId } from '../src/core/fleet/generated-repair-lifecycle.js';
 
 // ---------------------------------------------------------------------------
 // Mocks — declared BEFORE lazy imports so the daemon module binds to them.
@@ -49,6 +50,9 @@ vi.mock('../src/core/run/best-of-n.js', () => ({
 const mockRunSelfHealCycle = vi.fn();
 vi.mock('../src/core/fleet/self-heal.js', () => ({
   runSelfHealCycle: (...args: unknown[]) => mockRunSelfHealCycle(...args),
+  runSelfHealCycleForRepos: (...args: unknown[]) => mockRunSelfHealCycle(...args),
+  queueSelfHealItem: () => true,
+  pruneQueuedSelfHealItems: () => ({ scanned: 0, removed: 0, failed: false }),
 }));
 
 // ---------------------------------------------------------------------------
@@ -371,6 +375,38 @@ describe('M170 — best-of-N dispatch: bestOfN absent/1 → single-run path unch
       outcome: 'started',
       tags: expect.arrayContaining(['dispatch-start', 'swarm']),
     });
+  });
+
+  it('binds builtin fallback options to the exact generated repair generation', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair: WorkItem = {
+      id: 'repo:proposal-repair-nodiff:abcdef123456',
+      repo: repo.dir,
+      source: 'self',
+      title: 'Reslice no-diff dispatch for repo item repo:goal:stalled',
+      detail:
+        'Diagnostic reslice: a dispatch completed without file changes.\n' +
+        'Original work item: repo:goal:stalled\n' +
+        'Dispatch outcome: empty-diff\n' +
+        'Action: reslice the work into a smaller concrete edit.',
+      value: 5,
+      effort: 1,
+      score: 5,
+      tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+      ts: new Date().toISOString(),
+    };
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: repair.ts,
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'builtin', tier: 'cloud', reason: 'mock fallback' });
+
+    await tick(makeCfg({}), { dryRun: false });
+
+    const swarmOpts = mockRunSwarm.mock.calls[0]?.[2] as { workItemGenerationId?: string } | undefined;
+    expect(swarmOpts?.workItemGenerationId).toBe(generatedRepairGenerationId(repair));
   });
 });
 

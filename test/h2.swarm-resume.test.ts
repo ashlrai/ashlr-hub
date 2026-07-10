@@ -31,9 +31,9 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
-import type { AshlrConfig, RunState, RunUsage, SwarmRun } from '../src/core/types.js';
+import type { AshlrConfig, RunState, RunUsage, SwarmRun, WorkItem } from '../src/core/types.js';
 import type { StreamSink } from '../src/core/run/streaming.js';
 import {
   makeFixture,
@@ -51,7 +51,11 @@ import {
   sweepOrphanSandboxes,
 } from '../src/core/sandbox/worktree.js';
 import { nullSink } from '../src/core/run/streaming.js';
-import { pendingCount } from '../src/core/inbox/store.js';
+import { loadProposal, pendingCount } from '../src/core/inbox/store.js';
+import {
+  generatedRepairGenerationId,
+  readGeneratedRepairLifecycle,
+} from '../src/core/fleet/generated-repair-lifecycle.js';
 
 // ---------------------------------------------------------------------------
 // Determinism: mock the ONLY model-touching surface (orchestrator.runGoal) and
@@ -407,7 +411,24 @@ describe('H2 swarm resume — resume of a crashed swarm that had a real sandbox'
     const treeBefore = repo.shasumTree();
     const sandboxesBefore = new Set(listSandboxes().map((sandbox) => sandbox.id));
     const pendingBefore = pendingCount();
-    const id = 'h2-resume-files-proposal';
+    const id = 'attempt-42345678-1234-4123-8123-123456789abc';
+    const repair: WorkItem = {
+      id: `${basename(repo.dir)}:proposal-repair-nodiff:abcdef123456`,
+      repo: repo.dir,
+      source: 'self',
+      title: `Reslice no-diff dispatch for ${basename(repo.dir)} item repo:goal:resume-generation`,
+      detail:
+        'Diagnostic reslice: a dispatch completed without file changes.\n' +
+        'Original work item: repo:goal:resume-generation\n' +
+        'Dispatch outcome: empty-diff\n' +
+        'Action: reslice the work into a smaller concrete edit.',
+      value: 5,
+      effort: 1,
+      score: 5,
+      tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+      ts: '2026-07-10T16:00:00.000Z',
+    };
+    const workItemGenerationId = generatedRepairGenerationId(repair)!;
     const fakeSecret = 'sk-' + 'testvalueverysecret00000000';
     crashMidSwarm({
       id,
@@ -416,6 +437,15 @@ describe('H2 swarm resume — resume of a crashed swarm that had a real sandbox'
       taskIds: ['build-value'],
       doneTaskIds: [],
       phase: 'build',
+      workItemId: repair.id,
+      workItemGenerationId,
+      workSource: 'self',
+      resumeOptions: {
+        sandbox: true,
+        requireSandbox: true,
+        propose: true,
+        noCapture: true,
+      },
     });
     runGoalMutation = (cwd) => {
       writeFileSync(
@@ -430,12 +460,13 @@ describe('H2 swarm resume — resume of a crashed swarm that had a real sandbox'
       cfg,
       {
         resumeId: id,
-        project: repo.dir,
-        sandbox: true,
-        requireSandbox: true,
-        propose: true,
-        noCapture: true,
         parallel: 1,
+        workItemId: 'caller-must-not-replace-durable-item',
+        workItemGenerationId: 'c'.repeat(64),
+        workSource: 'manual',
+        sandbox: false,
+        requireSandbox: false,
+        propose: false,
       },
       nullSink(),
     );
@@ -448,6 +479,28 @@ describe('H2 swarm resume — resume of a crashed swarm that had a real sandbox'
       deletions: 1,
     });
     expect(result.proposalOutcome?.proposalId).toMatch(/^prop-/);
+    const proposal = loadProposal(result.proposalOutcome!.proposalId!)!;
+    expect(proposal).toMatchObject({
+      workItemId: repair.id,
+      workItemGenerationId,
+      workSource: 'self',
+      runId: id,
+      trajectoryId: `run:${id}`,
+      runEventSummary: { runId: id, proposalCreated: true },
+    });
+    const { queueSelfHealItem } = await import('../src/core/fleet/self-heal.js');
+    const { queueProposalRepairWorkForPendingProposals } = await import(
+      '../src/core/fleet/proposal-repair-work.js'
+    );
+    expect(queueSelfHealItem(repair)).toBe(true);
+    expect(queueProposalRepairWorkForPendingProposals(undefined, new Date(), {
+      dispatchEvents: [],
+      lifecycleProposals: [proposal],
+    })).toMatchObject({ dispatchRepairRetired: 1, dispatchRepairPruned: 1 });
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'retired',
+    });
     expect(reloadSwarm(id)?.proposalOutcome).toEqual(result.proposalOutcome);
     expect(JSON.stringify(reloadSwarm(id))).not.toContain(fakeSecret);
     expect(result.result).not.toContain(fakeSecret);

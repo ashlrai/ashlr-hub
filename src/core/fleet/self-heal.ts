@@ -219,14 +219,16 @@ function backlogPath(): string {
   return join(homedir(), '.ashlr', 'backlog.json');
 }
 
-function readWorkItemsArray(filePath: string): WorkItem[] {
+function readWorkItemsArrayStrict(
+  filePath: string,
+): { ok: true; items: WorkItem[] } | { ok: false } {
   try {
-    if (!existsSync(filePath)) return [];
+    if (!existsSync(filePath)) return { ok: true, items: [] };
     const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed as WorkItem[];
+    if (!Array.isArray(parsed)) return { ok: false };
+    return { ok: true, items: parsed as WorkItem[] };
   } catch {
-    return [];
+    return { ok: false };
   }
 }
 
@@ -245,6 +247,9 @@ function isSelfHealItemForRepo(
   const item = value as Partial<WorkItem>;
   if (typeof item.repo !== 'string') return false;
   if (!Array.isArray(item.tags) || !item.tags.includes('self-heal')) return false;
+  // Proposal-repair work has its own generation-aware terminal lifecycle.
+  // A green repository must not erase a still-active repair attempt.
+  if (item.tags.includes('proposal-repair')) return false;
   if (kinds && !item.tags.some((tag) => kinds.has(tag as 'build' | 'test'))) return false;
   try {
     return resolve(item.repo) === repoKey;
@@ -281,7 +286,9 @@ function invalidSelfHealItem(value: unknown, enrolledRepoKeys: ReadonlySet<strin
 function pruneSelfHealItemsFromQueue(repoDir: string, kinds?: ReadonlySet<'build' | 'test'>): number {
   try {
     const qPath = selfHealQueuePath();
-    const existing = readWorkItemsArray(qPath);
+    const read = readWorkItemsArrayStrict(qPath);
+    if (!read.ok) return 0;
+    const existing = read.items;
     if (existing.length === 0) return 0;
     const repoKey = resolve(repoDir);
     const filtered = existing.filter((item) => !isSelfHealItemForRepo(item, repoKey, kinds));
@@ -339,7 +346,9 @@ function pruneInvalidSelfHealItems(repos: string[]): number {
   let removed = 0;
   try {
     const qPath = selfHealQueuePath();
-    const existing = readWorkItemsArray(qPath);
+    const read = readWorkItemsArrayStrict(qPath);
+    if (!read.ok) throw new Error('self-heal queue is malformed');
+    const existing = read.items;
     if (existing.length > 0) {
       const filtered = existing.filter((item) => !invalidSelfHealItem(item, enrolledRepoKeys));
       removed += existing.length - filtered.length;
@@ -406,7 +415,9 @@ function pruneInvalidSelfHealItemsForRepos(targetRepos: string[], enrolled: stri
   let removed = 0;
   try {
     const qPath = selfHealQueuePath();
-    const existing = readWorkItemsArray(qPath);
+    const read = readWorkItemsArrayStrict(qPath);
+    if (!read.ok) return 0;
+    const existing = read.items;
     if (existing.length > 0) {
       const filtered = existing.filter((item) => !targetedInvalidSelfHealItem(item, targetRepoKeys, enrolledRepoKeys));
       removed += existing.length - filtered.length;
@@ -451,7 +462,9 @@ export function queueSelfHealItem(item: WorkItem): boolean {
     const dir = join(homedir(), '.ashlr');
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
-    const existing = readWorkItemsArray(qPath);
+    const read = readWorkItemsArrayStrict(qPath);
+    if (!read.ok) throw new Error('self-heal queue is malformed');
+    const existing = read.items;
 
     // Replace existing entry for same id (idempotent)
     const filtered = existing.filter(i => i.id !== item.id);
@@ -463,6 +476,61 @@ export function queueSelfHealItem(item: WorkItem): boolean {
     // Best-effort — never propagate
     return false;
   }
+}
+
+export interface PruneQueuedSelfHealItemsResult {
+  scanned: number;
+  removed: number;
+  failed: boolean;
+}
+
+/** Remove selected generated rows from both mutable queue projections. */
+export function pruneQueuedSelfHealItems(
+  shouldRemove: (item: WorkItem) => boolean,
+): PruneQueuedSelfHealItemsResult {
+  let scanned = 0;
+  let removed = 0;
+  let failed = false;
+  try {
+    const qPath = selfHealQueuePath();
+    const read = readWorkItemsArrayStrict(qPath);
+    if (!read.ok) throw new Error('self-heal queue is malformed');
+    const existing = read.items;
+    scanned += existing.length;
+    const filtered = existing.filter((item) => !shouldRemove(item));
+    const queueRemoved = existing.length - filtered.length;
+    if (queueRemoved > 0) writeJsonAtomic(qPath, filtered);
+    removed += queueRemoved;
+  } catch {
+    failed = true;
+  }
+  try {
+    const path = backlogPath();
+    if (existsSync(path)) {
+      const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+      if (Array.isArray(parsed)) {
+        scanned += parsed.length;
+        const filtered = parsed.filter((item) => !shouldRemove(item as WorkItem));
+        const backlogRemoved = parsed.length - filtered.length;
+        if (backlogRemoved > 0) writeJsonAtomic(path, filtered);
+        removed += backlogRemoved;
+      } else if (
+        parsed &&
+        typeof parsed === 'object' &&
+        Array.isArray((parsed as { items?: unknown }).items)
+      ) {
+        const envelope = parsed as { items: unknown[] };
+        scanned += envelope.items.length;
+        const filtered = envelope.items.filter((item) => !shouldRemove(item as WorkItem));
+        const backlogRemoved = envelope.items.length - filtered.length;
+        if (backlogRemoved > 0) writeJsonAtomic(path, { ...parsed, items: filtered });
+        removed += backlogRemoved;
+      }
+    }
+  } catch {
+    failed = true;
+  }
+  return { scanned, removed, failed };
 }
 
 function persistHealItem(item: WorkItem): void {

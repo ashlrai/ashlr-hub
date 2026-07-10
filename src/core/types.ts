@@ -1892,6 +1892,8 @@ export interface RunOptions {
   requireSandbox?: boolean;
   /** Optional originating backlog/work item id for causal tracing. */
   workItemId?: string;
+  /** Hash binding generated repair proposals to one immutable source generation. */
+  workItemGenerationId?: string;
   /** Optional originating backlog scanner/source for causal tracing. */
   workSource?: WorkSource;
 }
@@ -2568,6 +2570,19 @@ export interface SwarmRun {
   specId: string | null;
   /** Absolute project path the swarm operates in, or null. */
   project: string | null;
+  /** Durable causal item identity restored across worker and CLI resume boundaries. */
+  workItemId?: string;
+  /** Immutable generated-repair generation hash restored on resume. */
+  workItemGenerationId?: string;
+  /** Durable scanner/source identity restored on resume. */
+  workSource?: WorkSource;
+  /** Execution flags required to resume a sandboxed proposal run faithfully. */
+  resumeOptions?: {
+    sandbox?: true;
+    requireSandbox?: true;
+    propose?: true;
+    noCapture?: true;
+  };
   /** ISO timestamp the swarm was created. */
   createdAt: string;
   /** ISO timestamp of the last update (written after each step). */
@@ -2657,6 +2672,8 @@ export interface SwarmOptions {
   requireSandbox?: boolean;
   /** Optional originating backlog/work item id for causal tracing. */
   workItemId?: string;
+  /** Hash binding generated repair proposals to one immutable source generation. */
+  workItemGenerationId?: string;
   /** Optional originating backlog scanner/source for causal tracing. */
   workSource?: WorkSource;
 }
@@ -3495,6 +3512,8 @@ export interface Proposal {
   sandboxId?: string;
   /** Optional originating backlog/work item id. Enables exact dedup and learning. */
   workItemId?: string;
+  /** Hash binding a generated repair proposal to one immutable source generation. */
+  workItemGenerationId?: string;
   /** Optional originating backlog scanner/source. */
   workSource?: WorkSource;
   /** Optional run/swarm id that produced this proposal. */
@@ -3918,6 +3937,11 @@ export interface DaemonTick {
     dispatchNoDiffResliceEligible?: number;
     dispatchNoDiffResliceQueued?: number;
     dispatchNoDiffResliceFailed?: number;
+    dispatchRepairRetired?: number;
+    dispatchRepairExhausted?: number;
+    dispatchRepairPruned?: number;
+    dispatchRepairPruneFailed?: number;
+    dispatchRepairLifecycleUnavailable?: number;
     skippedByCadence?: boolean;
     nextAfter?: string;
   };
