@@ -240,8 +240,8 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     }));
 
     vi.doMock('../src/core/run/agent-loop.js', () => ({
-      runTask: async (task: { status: string; result?: string }, _client: unknown, ctx: { tools?: unknown[]; onStep?: (step: unknown) => void }) => {
-        capturedTaskArgs.push(ctx.tools);
+      runTask: async (task: { status: string; result?: string }, _client: unknown, ctx: { tools?: unknown[]; adaptivePrompts?: boolean; onStep?: (step: unknown) => void }) => {
+        capturedTaskArgs.push(ctx);
         ctx.onStep?.({
           ts: new Date().toISOString(),
           taskId: 't1',
@@ -287,6 +287,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     ) as typeof import('../src/core/run/sandboxed-engine.js');
 
     const cfg = {
+      models: { adaptivePrompts: true },
       foundry: {
         models: { 'local-coder': 'qwen2.5:72b-instruct-q4_K_M' },
       },
@@ -302,8 +303,10 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     expect(capturedClientArgs[2]).toBe('qwen2.5:72b-instruct-q4_K_M');
 
     // runTask called with engineer tools
-    expect(Array.isArray(capturedTaskArgs[0])).toBe(true);
-    expect((capturedTaskArgs[0] as unknown[]).length).toBeGreaterThan(0);
+    const taskContext = capturedTaskArgs[0] as { tools?: unknown[]; adaptivePrompts?: boolean };
+    expect(Array.isArray(taskContext.tools)).toBe(true);
+    expect(taskContext.tools!.length).toBeGreaterThan(0);
+    expect(taskContext.adaptivePrompts).toBe(true);
 
     // Proposal filed with correct fields
     expect(capturedGateArgs.length).toBe(1);

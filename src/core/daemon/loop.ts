@@ -3607,6 +3607,7 @@ export async function tick(
       const inner = r.settled?.status === 'fulfilled'
         ? (r.settled.value as ItemOutcome | undefined)
         : undefined;
+	      const attemptId = attemptIds.get(r.item.id);
 	      return {
 	        status: 'fulfilled',
 	        value: inner ?? {
@@ -3620,6 +3621,7 @@ export async function tick(
 	            reason: 'concurrent dispatch result missing inner outcome',
 	            dispatched: r.attempted,
 	            skipReason: r.attempted ? 'missing-outcome' : 'not-attempted',
+	            ...(attemptId ? { runId: attemptId, trajectoryId: `run:${attemptId}` } : {}),
 	          }),
 	        },
 	      };

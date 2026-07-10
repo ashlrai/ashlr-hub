@@ -70,6 +70,38 @@ function makeRunState(overrides: { status?: string; result?: string; usage?: Rec
   };
 }
 
+function makeKnownDiffState(files: number) {
+  const base = makeRunState({ status: 'done', result: files > 0 ? 'edited' : 'no edits' });
+  const lines = files > 0 ? 4 : 0;
+  return {
+    ...base,
+    proposalOutcome: {
+      kind: 'proposal-disabled' as const,
+      reason: 'proposal filing disabled for this internal attempt',
+      files,
+      insertions: lines,
+      deletions: 0,
+    },
+    runEventSummary: {
+      runId: base.id,
+      status: 'done' as const,
+      outcome: 'proposal-disabled',
+      proposalCreated: false,
+      diffFiles: files,
+      diffLines: lines,
+      actionCounts: {
+        modelSteps: 1,
+        toolSteps: files > 0 ? 1 : 0,
+        totalSteps: files > 0 ? 2 : 1,
+        proposalCaptureAttempts: 0,
+        proposalDisabled: 1,
+        diffFiles: files,
+        diffLines: lines,
+      },
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // titrrTestRun — pure unit tests (real detectVerifyCommands, no process spawn)
 // These do NOT mock verify-commands — they exercise the real detection logic.
@@ -705,6 +737,198 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     expect(engineMockFn).toHaveBeenCalledTimes(2);
     expect(captureMockFn).toHaveBeenCalledTimes(1);
     expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('api-model test repair stops at the cumulative budget ceiling', async () => {
+    const exhausted = makeKnownDiffState(1);
+    exhausted.usage = { tokensIn: 5, tokensOut: 5, steps: 1, estCostUsd: 0 };
+    engineMockFn.mockResolvedValue({ state: exhausted });
+    detectVCMockFn.mockReturnValue([{ kind: 'test', cmd: ['npm', 'test'] }]);
+    runVCMockFn.mockReturnValue({
+      ok: false,
+      command: 'npm test',
+      exitCode: 1,
+      output: 'FAIL',
+      timedOut: false,
+    });
+
+    const runGoal = await loadRunGoal();
+    await runGoal('fix a bug', sandboxCfg(), {
+      engine: 'local-coder',
+      sandboxEngine: true,
+      budget: { maxTokens: 10, maxSteps: 100 },
+      tools: false,
+      titrrMaxAttempts: 2,
+    } as Parameters<typeof runGoal>[2] & { titrrMaxAttempts: number });
+
+    expect(engineMockFn).toHaveBeenCalledTimes(1);
+    expect(runVCMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn.mock.calls[0]?.[3]).toMatchObject({
+      isPartial: true,
+      forceGateBlockReason: 'tests: still failing - budget exceeded after attempt 1',
+      usage: exhausted.usage,
+    });
+    expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { engine: 'claude' as const, label: 'CLI' },
+    { engine: 'local-coder' as const, label: 'API-model' },
+  ])('$label required-diff run retries one known-empty attempt before testing', async ({ engine }) => {
+    engineMockFn
+      .mockResolvedValueOnce({ state: makeKnownDiffState(0) })
+      .mockResolvedValueOnce({ state: makeKnownDiffState(1) });
+    detectVCMockFn.mockReturnValue([{ kind: 'test', cmd: ['npm', 'test'] }]);
+    runVCMockFn.mockReturnValue({
+      ok: true,
+      command: 'npm test',
+      exitCode: 0,
+      output: 'pass',
+      timedOut: false,
+    });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine,
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+      titrrMaxAttempts: 2,
+      delegationScope: {
+        origin: 'daemon',
+        sourceRepo: '/mock/repo',
+        resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+      },
+    } as Parameters<typeof runGoal>[2] & { titrrMaxAttempts: number });
+
+    expect(engineMockFn).toHaveBeenCalledTimes(2);
+    expect(String(engineMockFn.mock.calls[1]?.[1])).toMatch(/required-diff retry/);
+    expect(String(engineMockFn.mock.calls[1]?.[1])).toMatch(/do not make a cosmetic edit/);
+    expect(engineMockFn.mock.calls[1]?.[3]).toMatchObject({
+      budget: { maxTokens: 999_998, maxSteps: 99, allowCloud: false },
+    });
+    expect(state.usage).toEqual({ tokensIn: 2, tokensOut: 2, steps: 2, estCostUsd: 0 });
+    expect(state.runEventSummary?.actionCounts).toMatchObject({
+      modelSteps: 2,
+      toolSteps: 1,
+      totalSteps: 3,
+    });
+    expect(runVCMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn.mock.calls[0]?.[3]).toMatchObject({
+      usage: { tokensIn: 2, tokensOut: 2, steps: 2, estCostUsd: 0 },
+      actionCounts: { modelSteps: 2, toolSteps: 1, totalSteps: 3 },
+    });
+    expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { engine: 'claude' as const, label: 'CLI' },
+    { engine: 'local-coder' as const, label: 'API-model' },
+  ])('$label required-diff run captures once after two empty attempts', async ({ engine }) => {
+    engineMockFn.mockResolvedValue({ state: makeKnownDiffState(0) });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine,
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+      titrrMaxAttempts: 2,
+      delegationScope: {
+        origin: 'daemon',
+        sourceRepo: '/mock/repo',
+        resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+      },
+    } as Parameters<typeof runGoal>[2] & { titrrMaxAttempts: number });
+
+    expect(engineMockFn).toHaveBeenCalledTimes(2);
+    expect(runVCMockFn).not.toHaveBeenCalled();
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    expect(state.usage).toEqual({ tokensIn: 2, tokensOut: 2, steps: 2, estCostUsd: 0 });
+    expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { engine: 'claude' as const, label: 'CLI' },
+    { engine: 'local-coder' as const, label: 'API-model' },
+  ])('$label required-diff run does not retry after exhausting its budget', async ({ engine }) => {
+    const exhausted = makeKnownDiffState(0);
+    exhausted.usage = { tokensIn: 5, tokensOut: 5, steps: 1, estCostUsd: 0 };
+    engineMockFn.mockResolvedValue({ state: exhausted });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine,
+      sandboxEngine: true,
+      budget: { maxTokens: 10, maxSteps: 100 },
+      tools: false,
+      titrrMaxAttempts: 2,
+      delegationScope: {
+        origin: 'daemon',
+        sourceRepo: '/mock/repo',
+        resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+      },
+    } as Parameters<typeof runGoal>[2] & { titrrMaxAttempts: number });
+
+    expect(engineMockFn).toHaveBeenCalledTimes(1);
+    expect(runVCMockFn).not.toHaveBeenCalled();
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    expect(state.usage).toEqual(exhausted.usage);
+    expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { engine: 'claude' as const, label: 'CLI' },
+    { engine: 'local-coder' as const, label: 'API-model' },
+  ])('$label missing usage still consumes one TITRR step', async ({ engine }) => {
+    const unknownUsage = makeKnownDiffState(0);
+    unknownUsage.usage = { tokensIn: 0, tokensOut: 0, steps: 0, estCostUsd: 0 };
+    engineMockFn.mockResolvedValue({ state: unknownUsage });
+
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('fix a bug', sandboxCfg(), {
+      engine,
+      sandboxEngine: true,
+      budget: { maxTokens: 100, maxSteps: 1 },
+      tools: false,
+      titrrMaxAttempts: 2,
+      delegationScope: {
+        origin: 'daemon',
+        sourceRepo: '/mock/repo',
+        resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true },
+      },
+    } as Parameters<typeof runGoal>[2] & { titrrMaxAttempts: number });
+
+    expect(engineMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    expect(state.usage).toMatchObject({ tokensIn: 0, tokensOut: 0, steps: 1 });
+  });
+
+  it('does not retry a known-empty run when the result contract does not require a diff', async () => {
+    engineMockFn.mockResolvedValue({ state: makeKnownDiffState(0) });
+    detectVCMockFn.mockReturnValue([{ kind: 'test', cmd: ['npm', 'test'] }]);
+    runVCMockFn.mockReturnValue({
+      ok: true,
+      command: 'npm test',
+      exitCode: 0,
+      output: 'pass',
+      timedOut: false,
+    });
+
+    const runGoal = await loadRunGoal();
+    await runGoal('inspect a bug', sandboxCfg(), {
+      engine: 'local-coder',
+      sandboxEngine: true,
+      budget: { maxTokens: 1_000_000, maxSteps: 100 },
+      tools: false,
+      titrrMaxAttempts: 2,
+    } as Parameters<typeof runGoal>[2] & { titrrMaxAttempts: number });
+
+    expect(engineMockFn).toHaveBeenCalledTimes(1);
+    expect(runVCMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
   });
 
   // ---- Test 3: exhausted maxAttempts ----

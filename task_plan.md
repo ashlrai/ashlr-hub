@@ -88,9 +88,20 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Run focused repository gates plus Hub profile/status regression coverage.
 - [x] Commit and push only cycle-owned files, deploy Hub changes, and record live coverage truth.
 
+## Current Overnight Cycle - Required Diff Recovery
+- [x] Rehydrate the deployed 24/24 contract baseline, daemon, queue, yield telemetry, and Entire state.
+- [x] Audit empty-diff production, diagnostic reslicing, routing, red verifier baselines, and causal-data gaps in parallel.
+- [x] Treat an explicitly required but known-empty diff as a bounded TITRR retry condition.
+- [x] Preserve budget, sandbox, capture, provenance, and merge authority while recording truthful terminal outcomes.
+- [x] Run focused/full verification and adversarial review; commit, push, reload, and production smoke remain in progress.
+
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
 - Keep current hub `master` clean and synced as baseline; new work should be incremental and verified before pushing.
+- Empty-diff recovery stays in the same sandbox/backend/model and shares one cumulative token/step budget; missing usage consumes a conservative fallback step.
+- Adaptive prompts must reach sandboxed API-model executors so production local coders receive the existing diff-quality role contract.
+- Generated no-diff reslices need parent-context/tier preservation before broader frontier routing; stale reslices must not be coerced into cosmetic edits.
+- Morphkit and Ashlr MD are not merge-green despite valid contracts: both have frozen-lock CI failures, and their dirty local worktrees remain untouched pending dedicated repair lanes.
 - Audit the ecosystem from local repos first, then use GitHub/official docs only where current external state matters.
 - Bound the CI/publish test gate with a hermetic wrapper instead of letting leaked handles freeze autonomous delivery indefinitely.
 - Land small operational patches now: service restart delay and inbox review fields.

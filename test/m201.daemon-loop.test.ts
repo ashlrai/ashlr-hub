@@ -66,6 +66,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import { basename, join } from 'node:path';
 import type { AshlrConfig, DaemonTick, WorkItem } from '../src/core/types.js';
+import type { DispatchPlan } from '../src/core/fabric/concurrent-dispatch.js';
 import { workItemCoverageKey } from '../src/core/fleet/proposal-matching.js';
 
 // ---------------------------------------------------------------------------
@@ -93,6 +94,20 @@ const mockRunGoal = vi.fn();
 vi.mock('../src/core/run/orchestrator.js', () => ({
   runGoal: (...args: unknown[]) => mockRunGoal(...args),
 }));
+
+const mockRunConcurrentDispatch = vi.fn();
+vi.mock('../src/core/fabric/concurrent-dispatch.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/fabric/concurrent-dispatch.js')>();
+  return {
+    ...actual,
+    runConcurrentDispatch: (...args: Parameters<typeof actual.runConcurrentDispatch>) => {
+      const override = mockRunConcurrentDispatch.getMockImplementation();
+      return override
+        ? mockRunConcurrentDispatch(...args)
+        : actual.runConcurrentDispatch(...args);
+    },
+  };
+});
 
 const mockRunBestOfN = vi.fn();
 vi.mock('../src/core/run/best-of-n.js', () => ({
@@ -262,6 +277,7 @@ beforeEach(() => {
   mockRunSwarm.mockReset();
   mockBuildBacklog.mockReset();
   mockRunGoal.mockReset();
+  mockRunConcurrentDispatch.mockReset();
   mockRunBestOfN.mockReset();
   mockRunSelfHealCycle.mockReset();
   mockRunSelfHealCycleForRepos.mockReset();
@@ -3423,6 +3439,58 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     const starts = readAgentActions().filter((event) => event.action === 'daemon:dispatch-start');
     expect(starts).toHaveLength(2);
     expect(new Set(starts.map((event) => event.runId))).toEqual(manifestAttemptIds);
+  });
+
+  it('A8b: concurrent missing-inner fallback preserves the allocated causal identity', async () => {
+    const { items } = enrollWithItems(1);
+    mockRunConcurrentDispatch.mockImplementationOnce(async (plan: DispatchPlan) => {
+      const assignment = plan.assignments[0]!;
+      return [
+        {
+          item: assignment.item,
+          backend: assignment.backend,
+          attempted: true,
+          settled: { status: 'fulfilled', value: undefined },
+        },
+        {
+          item: { ...assignment.item, id: 'unallocated-result-item' },
+          backend: assignment.backend,
+          attempted: false,
+          settled: null,
+        },
+      ];
+    });
+    const cfg = makeCfg({
+      daemon: {
+        dailyBudgetUsd: 1.0,
+        perTickItems: 1,
+        parallel: 1,
+        intervalMs: 50,
+      },
+      foundry: {
+        allowedBackends: ['builtin'],
+        fabric: { concurrentDispatch: true, maxSlotsPerBackend: 1 },
+      },
+    });
+
+    const result = await tick(cfg, { dryRun: false });
+    const manifestAttemptId = readDispatchManifestEvents({ limit: 1 })[0]?.assignments[0]?.attemptId;
+
+    expect(manifestAttemptId).toMatch(/^attempt-/);
+    expect(result.dispatches?.[0]).toMatchObject({
+      itemId: items[0]!.id,
+      runId: manifestAttemptId,
+      trajectoryId: `run:${manifestAttemptId}`,
+      dispatched: true,
+      skipReason: 'missing-outcome',
+    });
+    expect(result.dispatches?.[1]).toMatchObject({
+      itemId: 'unallocated-result-item',
+      trajectoryId: 'work:unallocated-result-item',
+      dispatched: false,
+      skipReason: 'not-attempted',
+    });
+    expect(result.dispatches?.[1]?.runId).toBeUndefined();
   });
 
   it('A7-selection-telemetry: records pending and cooldown blockers in the global workspace', async () => {

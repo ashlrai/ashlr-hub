@@ -67,6 +67,7 @@ import {
 import { resolveEngineSpec } from './engine-registry.js';
 import { buildOpenAICompatibleClient } from './provider-client.js';
 import { runTask } from './agent-loop.js';
+import { adaptivePromptsEnabled } from './model-profile.js';
 import {
   buildEngineerToolSpecs,
   type EngineerContext,
@@ -2086,6 +2087,7 @@ export async function runApiModelSandboxed(
       tools,
       budget,
       usage,
+      adaptivePrompts: adaptivePromptsEnabled(cfg),
       onStep: (step) => {
         steps.push(step);
         if (step.usage) {

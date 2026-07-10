@@ -77,10 +77,12 @@ import type {
   RouteDecision,
   EscalationReason,
   RunActionCounts,
+  RunBudget,
+  RunUsage,
 } from '../types.js';
 
 import { getActiveClient } from './provider-client.js';
-import { newUsage, overBudget, estCostUsd } from './budget.js';
+import { addUsage, newUsage, overBudget, estCostUsd } from './budget.js';
 import { runTask } from './agent-loop.js';
 import { withToolEnv } from '../env-bridge.js';
 import { buildEngineCommand, engineInstalled, spawnEngine } from './engines.js';
@@ -202,6 +204,10 @@ export function listRuns(): RunState[] {
 }
 
 function runDurationMs(state: RunState): number | undefined {
+  const summarized = state.runEventSummary?.durationMs;
+  if (typeof summarized === 'number' && Number.isFinite(summarized) && summarized >= 0) {
+    return summarized;
+  }
   const start = Date.parse(state.createdAt);
   const end = Date.parse(state.updatedAt);
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return undefined;
@@ -351,6 +357,105 @@ function failedCaptureOutcome(
     reason: kind === 'api-model-task-failed'
       ? 'api-model producer failed without a material diff'
       : `engine "${producerState.engine}" failed without a material diff`,
+  };
+}
+
+function runStateHasKnownEmptyDiff(state: RunState): boolean {
+  const summary = state.runEventSummary;
+  const counts = summary?.actionCounts;
+  const observed = [
+    summary?.diffFiles,
+    summary?.diffLines,
+    counts?.diffFiles,
+    counts?.diffLines,
+    state.proposalOutcome?.files,
+    state.proposalOutcome?.insertions,
+    state.proposalOutcome?.deletions,
+  ].filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  if (observed.length === 0) return state.proposalOutcome?.kind === 'empty-diff';
+  return observed.every((value) => value <= 0);
+}
+
+function requiredDiffRetryGoal(goal: string, attempt: number, maxAttempts: number): string {
+  return (
+    `${goal}\n\n[TITRR required-diff retry ${attempt}/${maxAttempts - 1}]\n` +
+    'The prior attempt completed without changing any files. Re-inspect the relevant repository code with the available tools. ' +
+    'If the task remains actionable, use an edit tool and make the smallest complete change that satisfies it. ' +
+    'If inspection proves the task is already satisfied or not safely actionable, do not make a cosmetic edit; report that evidence concisely.'
+  );
+}
+
+function resolveTitrrBudget(budget: Partial<RunBudget> | undefined, allowCloud: boolean | undefined): RunBudget {
+  return {
+    maxTokens: budget?.maxTokens ?? DEFAULT_MAX_TOKENS,
+    maxSteps: budget?.maxSteps ?? DEFAULT_MAX_STEPS,
+    allowCloud: allowCloud ?? budget?.allowCloud ?? false,
+  };
+}
+
+function remainingTitrrBudget(budget: RunBudget, usage: RunUsage): RunBudget {
+  return {
+    maxTokens: Math.max(1, budget.maxTokens - usage.tokensIn - usage.tokensOut),
+    maxSteps: Math.max(1, budget.maxSteps - usage.steps),
+    allowCloud: budget.allowCloud,
+  };
+}
+
+function accountedTitrrAttemptUsage(usage: RunUsage): RunUsage {
+  return usage.steps > 0 ? usage : { ...usage, steps: 1 };
+}
+
+const TITRR_CUMULATIVE_ACTION_KEYS = [
+  'sandboxCreated',
+  'spawnAttempts',
+  'transientRetries',
+  'proposalCaptureAttempts',
+  'completenessGateRuns',
+  'verifyRepairAttempts',
+  'modelSteps',
+  'toolSteps',
+  'totalSteps',
+  'proposalDisabled',
+] as const satisfies readonly (keyof RunActionCounts)[];
+
+function addTitrrActionCounts(total: RunActionCounts, attempt: RunActionCounts | undefined): RunActionCounts {
+  const next = { ...total };
+  for (const key of TITRR_CUMULATIVE_ACTION_KEYS) {
+    const value = attempt?.[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      next[key] = value > 0
+        ? Math.min(Number.MAX_SAFE_INTEGER, (next[key] ?? 0) + Math.trunc(value))
+        : (next[key] ?? 0);
+    }
+  }
+  for (const key of ['diffFiles', 'diffLines', 'proposalCreated', 'proposalBlocked'] as const) {
+    const value = attempt?.[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) next[key] = Math.trunc(value);
+  }
+  return next;
+}
+
+function withCumulativeUsage(
+  state: RunState,
+  usage: RunUsage,
+  budget: RunBudget,
+  actionCounts: RunActionCounts,
+  durationMs: number,
+): RunState {
+  return {
+    ...state,
+    budget,
+    usage,
+    runEventSummary: {
+      ...(state.runEventSummary ?? {}),
+      runId: state.id,
+      status: state.status,
+      tokensIn: usage.tokensIn,
+      tokensOut: usage.tokensOut,
+      costUsd: usage.estCostUsd,
+      durationMs,
+      actionCounts,
+    },
   };
 }
 
@@ -1286,15 +1391,19 @@ export async function runGoal(
             let titrrAttempt = 0;
             let lastApiR: Awaited<ReturnType<typeof runApiModelSandboxed>> | null = null;
             let apiGoal = goal;
+            const titrrBudget = resolveTitrrBudget(opts.budget, opts.allowCloud);
+            let titrrUsage = newUsage();
+            let titrrActionCounts: RunActionCounts = {};
+            let titrrDurationMs = 0;
 
             try {
               while (titrrAttempt < titrrMax) {
                 titrrAttempt++;
                 const isLastAttempt = titrrAttempt === titrrMax;
-                const apiR = await runApiModelSandboxed(engineId, apiGoal, cfg, {
+                const rawApiR = await runApiModelSandboxed(engineId, apiGoal, cfg, {
                   sourceRepo: cwd,
                   model: modelEnv,
-                  budget: opts.budget,
+                  budget: remainingTitrrBudget(titrrBudget, titrrUsage),
                   propose: false,
                   existingWorktree: titrrSandbox,
                   workItemId: opts.workItemId,
@@ -1303,6 +1412,22 @@ export async function runGoal(
                   delegationScope,
                   ...(opts.runId ? { runId: opts.runId } : {}),
                 });
+                titrrUsage = addUsage(titrrUsage, accountedTitrrAttemptUsage(rawApiR.state.usage));
+                titrrActionCounts = addTitrrActionCounts(
+                  titrrActionCounts,
+                  rawApiR.state.runEventSummary?.actionCounts,
+                );
+                titrrDurationMs += runDurationMs(rawApiR.state) ?? 0;
+                const apiR = {
+                  ...rawApiR,
+                  state: withCumulativeUsage(
+                    rawApiR.state,
+                    titrrUsage,
+                    titrrBudget,
+                    titrrActionCounts,
+                    titrrDurationMs,
+                  ),
+                };
                 lastApiR = apiR;
 
                 if (apiR.state.status !== 'done') {
@@ -1341,6 +1466,53 @@ export async function runGoal(
                     ),
                   };
                   break;
+                }
+
+                if (
+                  delegationScope?.resultContract?.requireDiff === true &&
+                  runStateHasKnownEmptyDiff(apiR.state)
+                ) {
+                  const retryBudgetExceeded = overBudget(
+                    titrrUsage,
+                    titrrBudget,
+                  );
+                  if (isLastAttempt || retryBudgetExceeded) {
+                    const propR = await captureSandboxedProposal(engineId, goal, cfg, {
+                      sourceRepo: cwd,
+                      model: modelEnv,
+                      budget: opts.budget,
+                      runId: apiR.state.id,
+                      existingWorktree: titrrSandbox,
+                      workItemId: opts.workItemId,
+                      workItemGenerationId: opts.workItemGenerationId,
+                      workSource: opts.workSource,
+                      delegationScope,
+                      sourceLabel: 'TITRR api-model required-diff',
+                      usage: apiR.state.usage,
+                      durationMs: runDurationMs(apiR.state),
+                      producerStatus: apiR.state.status,
+                      actionCounts: actionCountsForProposalCapture(apiR.state),
+                      contextSummary: apiR.state.runEventSummary?.contextSummary,
+                    });
+                    lastApiR = {
+                      ...apiR,
+                      proposalId: propR.proposalId,
+                      proposalOutcome: propR.proposalOutcome,
+                      state: withCapturedProposalMetadata(
+                        apiR.state,
+                        propR.proposalOutcome
+                          ? { ...propR.state, proposalOutcome: propR.proposalOutcome }
+                          : propR.state,
+                      ),
+                    };
+                    break;
+                  }
+                  apiGoal = requiredDiffRetryGoal(goal, titrrAttempt, titrrMax);
+                  emit(sink, {
+                    kind: 'retry',
+                    text: `[TITRR] required diff missing - retry attempt ${titrrAttempt + 1}/${titrrMax}`,
+                  });
+                  continue;
                 }
 
                 // M140: realTestLoop flag (default true). When false, skip test execution
@@ -1394,6 +1566,40 @@ export async function runGoal(
                     delegationScope,
                     isPartial: true,
                     forceGateBlockReason: `tests: still failing after ${titrrAttempt} attempt(s)`,
+                    sourceLabel: 'TITRR api-model',
+                    usage: lastApiR.state.usage,
+                    durationMs: runDurationMs(lastApiR.state),
+                    producerStatus: lastApiR.state.status,
+                    actionCounts: actionCountsForProposalCapture(lastApiR.state),
+                    contextSummary: lastApiR.state.runEventSummary?.contextSummary,
+                  });
+                  lastApiR = {
+                    ...lastApiR,
+                    proposalId: propR.proposalId,
+                    proposalOutcome: propR.proposalOutcome,
+                    state: withCapturedProposalMetadata(
+                      lastApiR.state,
+                      propR.proposalOutcome
+                        ? { ...propR.state, proposalOutcome: propR.proposalOutcome }
+                        : propR.state,
+                    ),
+                  };
+                  break;
+                }
+                if (overBudget(titrrUsage, titrrBudget)) {
+                  const forceGateBlockReason = `tests: still failing - budget exceeded after attempt ${titrrAttempt}`;
+                  const propR = await captureSandboxedProposal(engineId, goal, cfg, {
+                    sourceRepo: cwd,
+                    model: modelEnv,
+                    budget: opts.budget,
+                    runId: lastApiR.state.id,
+                    existingWorktree: titrrSandbox,
+                    workItemId: opts.workItemId,
+                    workItemGenerationId: opts.workItemGenerationId,
+                    workSource: opts.workSource,
+                    delegationScope,
+                    isPartial: true,
+                    forceGateBlockReason,
                     sourceLabel: 'TITRR api-model',
                     usage: lastApiR.state.usage,
                     durationMs: runDurationMs(lastApiR.state),
@@ -1491,6 +1697,10 @@ export async function runGoal(
           let titrrAnnotation = '';
           let lastR: Awaited<ReturnType<typeof runEngineSandboxed>> | null = null;
           let titrrGoal = goal;
+          const titrrBudget = resolveTitrrBudget(opts.budget, opts.allowCloud);
+          let titrrUsage = newUsage();
+          let titrrActionCounts: RunActionCounts = {};
+          let titrrDurationMs = 0;
           const captureTitrrProposal = async (options: { isPartial?: boolean; forceGateBlockReason?: string } = {}) => {
             const sandbox = titrrSandbox;
             const producer = lastR;
@@ -1533,10 +1743,10 @@ export async function runGoal(
               // (or no test command exists), capture the already-verified
               // sandbox diff exactly once without invoking the model again.
               const isLastAttempt = titrrAttempt === titrrMax;
-              const r = await runEngineSandboxed(engineId, titrrGoal, cfg, {
+              const rawR = await runEngineSandboxed(engineId, titrrGoal, cfg, {
                 sourceRepo: cwd,
                 model: modelEnv,
-                budget: opts.budget,
+                budget: remainingTitrrBudget(titrrBudget, titrrUsage),
                 propose: false,
                 existingWorktree: titrrSandbox ?? undefined,
                 workItemId: opts.workItemId,
@@ -1545,6 +1755,22 @@ export async function runGoal(
                 delegationScope,
                 ...(opts.runId ? { runId: opts.runId } : {}),
               });
+              titrrUsage = addUsage(titrrUsage, accountedTitrrAttemptUsage(rawR.state.usage));
+              titrrActionCounts = addTitrrActionCounts(
+                titrrActionCounts,
+                rawR.state.runEventSummary?.actionCounts,
+              );
+              titrrDurationMs += runDurationMs(rawR.state) ?? 0;
+              const r = {
+                ...rawR,
+                state: withCumulativeUsage(
+                  rawR.state,
+                  titrrUsage,
+                  titrrBudget,
+                  titrrActionCounts,
+                  titrrDurationMs,
+                ),
+              };
               lastR = r;
 
               if (r.state.status !== 'done') {
@@ -1564,6 +1790,29 @@ export async function runGoal(
                   };
                 }
                 break;
+              }
+
+              if (
+                delegationScope?.resultContract?.requireDiff === true &&
+                runStateHasKnownEmptyDiff(r.state)
+              ) {
+                const retryBudgetExceeded = overBudget(
+                  titrrUsage,
+                  titrrBudget,
+                );
+                if (isLastAttempt || retryBudgetExceeded) {
+                  titrrAnnotation = retryBudgetExceeded
+                    ? `required diff missing - budget exceeded after attempt ${titrrAttempt}`
+                    : `required diff missing after ${titrrAttempt} attempt(s)`;
+                  await captureTitrrProposal();
+                  break;
+                }
+                titrrGoal = requiredDiffRetryGoal(goal, titrrAttempt, titrrMax);
+                emit(sink, {
+                  kind: 'retry',
+                  text: `[TITRR] required diff missing - retry attempt ${titrrAttempt + 1}/${titrrMax}`,
+                });
+                continue;
               }
 
               // Run the repo's test command inside the shared sandbox worktree.
@@ -1603,17 +1852,7 @@ export async function runGoal(
               }
 
               // Budget check before re-invoking.
-              const budgetUsed = {
-                tokensIn: lastR.state.usage.tokensIn,
-                tokensOut: lastR.state.usage.tokensOut,
-                steps: lastR.state.usage.steps,
-                estCostUsd: lastR.state.usage.estCostUsd,
-              };
-              if (overBudget(budgetUsed, {
-                maxTokens: opts.budget?.maxTokens ?? DEFAULT_MAX_TOKENS,
-                maxSteps: opts.budget?.maxSteps ?? DEFAULT_MAX_STEPS,
-                allowCloud: opts.allowCloud ?? false,
-              })) {
+              if (overBudget(titrrUsage, titrrBudget)) {
                 titrrAnnotation = `tests: still failing — budget exceeded after attempt ${titrrAttempt}`;
                 await captureTitrrProposal({ isPartial: true, forceGateBlockReason: titrrAnnotation });
                 break;
