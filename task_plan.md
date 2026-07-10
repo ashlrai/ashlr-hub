@@ -1371,4 +1371,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add latest-revision-wins canonical eligibility with revocation/deprecation suppression and conflict quarantine.
 - [x] Remove caller-controlled legacy `m243:skill` privilege from MCP learning and tag-only recall boosts.
 - [x] Keep shadow retrieval observe-only and unwired while signing, lifecycle, and privilege boundaries settle in production.
-- [ ] Run focused and repository verification gates, update notes, commit, push, reload, and smoke production.
+- [x] Run focused and repository verification gates, update notes, commit, push, reload, and smoke production.
