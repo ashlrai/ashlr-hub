@@ -40,6 +40,16 @@ describe('M65 — resolveProviderKey', () => {
     expect(resolveProviderKey(KEY, cfg(true))).toBe('env-fallback');
   });
 
+  it('phantom OFF + env contains phantom placeholder token → undefined', () => {
+    process.env[KEY] = 'phm_placeholder_token_for_test';
+    expect(resolveProviderKey(KEY, cfg(false))).toBeUndefined();
+  });
+
+  it('phantom ON + vault absent + env contains phantom placeholder token → undefined', () => {
+    process.env[KEY] = ' phm_placeholder_token_for_test ';
+    expect(resolveProviderKey(KEY, cfg(true))).toBeUndefined();
+  });
+
   it('phantom ON, nothing anywhere → undefined', () => {
     expect(resolveProviderKey(KEY, cfg(true))).toBeUndefined();
   });

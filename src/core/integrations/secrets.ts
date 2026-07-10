@@ -27,6 +27,11 @@ import { phantomInstalled } from '../phantom.js';
 const PHANTOM_BIN = 'phantom';
 const TIMEOUT_MS = 5_000;
 
+function isPhantomPlaceholderToken(value: string | undefined | null): boolean {
+  const trimmed = value?.trim();
+  return typeof trimmed === 'string' && /^phm_[A-Za-z0-9_-]+$/.test(trimmed);
+}
+
 /**
  * Reveal a phantom-vault secret value for in-process use. Returns null when
  * phantom can't provide it (not installed, name not in the vault, non-zero exit,
@@ -60,8 +65,8 @@ export function resolveProviderKey(envKey: string, cfg: AshlrConfig): string | u
   if (!envKey) return undefined;
   if (cfg.phantom?.enabled && phantomInstalled()) {
     const fromVault = revealSecret(envKey);
-    if (fromVault) return fromVault;
+    if (fromVault && !isPhantomPlaceholderToken(fromVault)) return fromVault;
   }
   const fromEnv = process.env[envKey];
-  return fromEnv && fromEnv.trim().length > 0 ? fromEnv : undefined;
+  return fromEnv && fromEnv.trim().length > 0 && !isPhantomPlaceholderToken(fromEnv) ? fromEnv : undefined;
 }

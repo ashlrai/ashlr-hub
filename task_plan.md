@@ -239,6 +239,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Surface degraded/unknown Fleet Dashboard data-quality sources in the Data pill.
 - [x] Name affected readiness sources in the Fleet Dashboard Data pill and tooltip.
 - [x] Add proposal-derived causal metadata to auto-merge judge decisions and verification lifecycle actions.
+- [x] Fail closed on Phantom placeholder tokens in in-process provider key resolution.
 
 ## Current Continuation - Next Actions And Judge Trust
 - [x] Deployed a broader explorer wave for auto-merge trust, daemon reliability, cross-repo coordination, command-center UI, and market/open-source leverage.
