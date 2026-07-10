@@ -91,6 +91,13 @@ export interface ShadowSkillSelection {
   selected: ShadowSkillSummary[];
 }
 
+export interface VerifiedSkillCorpusInspection {
+  considered: number;
+  current: number;
+  eligible: number;
+  conflicting: number;
+}
+
 interface SafeText {
   value: string;
   tainted: boolean;
@@ -390,26 +397,60 @@ function scoreCard(card: ParsedCard, terms: ReadonlyMap<string, number>): Scored
   };
 }
 
-function latestUnambiguousCards(cards: readonly unknown[]): { consideredCount: number; cards: ParsedCard[] } {
+interface CurrentCardInspection extends VerifiedSkillCorpusInspection {
+  cards: ParsedCard[];
+}
+
+function isEligibleCard(card: ParsedCard): boolean {
+  return card.status === 'verified'
+    && card.source === 'verified-proposal'
+    && card.verificationEligible
+    && !card.tainted;
+}
+
+function inspectCurrentCards(cards: readonly unknown[]): CurrentCardInspection {
   const bySkill = new Map<string, ParsedCard[]>();
-  let consideredCount = 0;
+  let considered = 0;
   for (const rawCard of cards) {
     const card = parseCard(rawCard);
     if (!card) continue;
-    consideredCount += 1;
+    considered += 1;
     const revisions = bySkill.get(card.skillId);
     if (revisions) revisions.push(card);
     else bySkill.set(card.skillId, [card]);
   }
 
   const latest: ParsedCard[] = [];
+  let conflicting = 0;
   for (const revisions of bySkill.values()) {
     const maxRevision = Math.max(...revisions.map((card) => card.revision));
     const current = revisions.filter((card) => card.revision === maxRevision);
-    if (new Set(current.map((card) => card.fingerprint)).size !== 1) continue;
+    if (new Set(current.map((card) => card.fingerprint)).size !== 1) {
+      conflicting += 1;
+      continue;
+    }
     latest.push(current[0]!);
   }
-  return { consideredCount, cards: latest };
+  return {
+    considered,
+    current: latest.length,
+    eligible: latest.filter(isEligibleCard).length,
+    conflicting,
+    cards: latest,
+  };
+}
+
+/** Query-independent aggregate readiness for the signed card lifecycle. */
+export function inspectVerifiedSkillCorpus(
+  cards: readonly SkillCard[] | readonly unknown[] | null | undefined,
+): VerifiedSkillCorpusInspection {
+  if (!Array.isArray(cards)) return { considered: 0, current: 0, eligible: 0, conflicting: 0 };
+  try {
+    const { considered, current, eligible, conflicting } = inspectCurrentCards(cards);
+    return { considered, current, eligible, conflicting };
+  } catch {
+    return { considered: 0, current: 0, eligible: 0, conflicting: 0 };
+  }
 }
 
 /**
@@ -426,15 +467,10 @@ export function selectVerifiedSkills(
   if (!Array.isArray(cards)) return emptySelection();
   try {
     const terms = queryTerms(query);
-    const latest = latestUnambiguousCards(cards);
-    if (terms.size === 0) return emptySelection(latest.consideredCount);
+    const latest = inspectCurrentCards(cards);
+    if (terms.size === 0) return emptySelection(latest.considered);
 
-    const eligible = latest.cards.filter((card) => (
-      card.status === 'verified'
-      && card.source === 'verified-proposal'
-      && card.verificationEligible
-      && !card.tainted
-    ));
+    const eligible = latest.cards.filter(isEligibleCard);
     const scored = eligible
       .map((card) => scoreCard(card, terms))
       .filter((card): card is ScoredCard => card !== null)
@@ -460,7 +496,7 @@ export function selectVerifiedSkills(
     return {
       mode: 'shadow',
       policyVersion: SKILL_RETRIEVAL_POLICY_VERSION,
-      consideredCount: latest.consideredCount,
+      consideredCount: latest.considered,
       eligibleCount: eligible.length,
       selectedSkillIds: selected.map((card) => card.skillId),
       selected,

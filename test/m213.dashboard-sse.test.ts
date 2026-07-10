@@ -494,8 +494,12 @@ describe('M213 Dashboard SSE — /api/events', () => {
 
     expect(src).toContain('function renderTrajectoryLearningCard');
     expect(src).toContain("const trajectoryLearning = d.fleet?.trajectoryLearning ?? fleet.trajectoryLearning ?? null");
-    expect(src).toContain('renderTrajectoryLearningCard(trajectoryLearning)');
+    expect(src).toContain("const skillCorpusReadiness = d.fleet?.skillCorpusReadiness ?? fleet.skillCorpusReadiness ?? null");
+    expect(src).toContain('renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness)');
+    expect(src).toContain("trajectoryLearning ? 'Trajectory Learning' : 'Skill Learning'");
+    expect(src).toContain("trajectoryLearning || skillCorpusReadiness");
     expect(src).toContain('snap.fleet?.trajectoryLearning ?? snap.control?.fleet?.trajectoryLearning');
+    expect(src).toContain('snap.fleet?.skillCorpusReadiness ?? snap.control?.fleet?.skillCorpusReadiness');
     expect(src).toContain("['Trajectories', trajectoryLearning?.trajectories ?? 0]");
     expect(src).toContain("['Dispatch -> decision', formatCoverageMetric(routeSpine.dispatchToDecision)]");
     expect(src).toContain("['Dispatch -> evidence', formatCoverageMetric(routeSpine.dispatchToEvidence)]");
@@ -543,6 +547,137 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(values['Skill-observed trajectories']).toBe('withheld (<3)');
     expect(values['Observed selections']).toBe('withheld');
     expect(values['Observation join gaps']).toBe('withheld');
+  });
+
+  it('app.js renders categorical skill corpus readiness without exposing sub-k details', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    const formatStart = src.indexOf('function formatTrajectoryLearningGap(trajectoryLearning)');
+    const rendererEnd = src.indexOf('\nfunction formatCountMap', formatStart);
+    const trajectoryUiSource = src.slice(formatStart, rendererEnd);
+    const rowsFor = new Function(
+      'formatCoverageMetric',
+      `${trajectoryUiSource}\nreturn trajectoryLearningRows;`,
+    )((metric?: { count?: number }) => `coverage:${metric?.count ?? 0}`) as (
+      trajectoryLearning: Record<string, any>,
+      readiness?: Record<string, any>,
+    ) => Array<[string, string | number]>;
+
+    const readiness = {
+      corpus: {
+        state: 'ready',
+        sourceQuality: { badge: 'healthy-source', detail: 'private corpus detail' },
+      },
+      eligibleSignedCards: 'available',
+      selectedObservations: 'present',
+      learning: {
+        state: 'k-gated',
+        minimumObservedTrajectories: 5,
+        sampleState: 'insufficient-sample',
+        observedTrajectoryCoverage: { count: 2, rate: 1 },
+      },
+      cardIds: ['skill-secret'],
+      queryText: 'private query text',
+    };
+    const values = Object.fromEntries(rowsFor({
+      trajectories: 2,
+      skillObservation: { sampleState: 'insufficient-sample', joined: 2, unjoined: 1 },
+    }, readiness));
+
+    expect(values['Skill corpus']).toBe('ready');
+    expect(values['Corpus source']).toBe('healthy');
+    expect(values['Eligible cards']).toBe('available');
+    expect(values['Skill observations']).toBe('present');
+    expect(values['Learning gate']).toBe('sample gated');
+    expect(values['Observation threshold']).toBe('5 trajectories');
+    expect(values['Skill-observed trajectories']).toBe('withheld (<5)');
+    expect(values['Observed selections']).toBe('withheld');
+    expect(values['Observation join gaps']).toBe('withheld');
+    expect(values).not.toHaveProperty('Observed coverage');
+    expect(JSON.stringify(values)).not.toContain('private');
+    expect(JSON.stringify(values)).not.toContain('skill-secret');
+
+    const observed = Object.fromEntries(rowsFor({
+      trajectories: 5,
+      skillObservation: { sampleState: 'observed', joined: 5, unjoined: 0, conflicting: 0 },
+    }, {
+      ...readiness,
+      learning: {
+        ...readiness.learning,
+        state: 'observable',
+        sampleState: 'observed',
+        observedTrajectoryCoverage: { count: 5, rate: 1 },
+      },
+    }));
+    expect(observed['Learning gate']).toBe('observable');
+    expect(observed['Observed coverage']).toBe('coverage:5');
+  });
+
+  it('app.js keeps legacy trajectory snapshots renderable without corpus readiness', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    const formatStart = src.indexOf('function formatTrajectoryLearningGap(trajectoryLearning)');
+    const rendererEnd = src.indexOf('\nfunction formatCountMap', formatStart);
+    const trajectoryUiSource = src.slice(formatStart, rendererEnd);
+    const rows = new Function(
+      'formatCoverageMetric',
+      `${trajectoryUiSource}\nreturn trajectoryLearningRows;`,
+    )(() => 'coverage')({ trajectories: 0 }) as Array<[string, string | number]>;
+    const values = Object.fromEntries(rows);
+
+    expect(values.Trajectories).toBe(0);
+    expect(values['Skill-observed trajectories']).toBe('withheld (<3)');
+    expect(values).not.toHaveProperty('Skill corpus');
+    expect(values).not.toHaveProperty('Observed coverage');
+  });
+
+  it('app.js renders a zero-observation sample as none rather than withheld', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    const formatStart = src.indexOf('function formatTrajectoryLearningGap(trajectoryLearning)');
+    const rendererEnd = src.indexOf('\nfunction formatCountMap', formatStart);
+    const trajectoryUiSource = src.slice(formatStart, rendererEnd);
+    const rows = new Function(
+      'formatCoverageMetric',
+      `${trajectoryUiSource}\nreturn trajectoryLearningRows;`,
+    )(() => 'coverage')({
+      trajectories: 4,
+      skillObservation: { sampleState: 'none' },
+    }) as Array<[string, string | number]>;
+    const values = Object.fromEntries(rows);
+
+    expect(values['Skill-observed trajectories']).toBe('none');
+    expect(values['Observed selections']).toBe('none');
+    expect(values['Observation join gaps']).toBe('not applicable');
+  });
+
+  it('app.js reports orphaned observation presence without exposing its count', () => {
+    const src = fs.readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public/app.js'),
+      'utf8',
+    );
+    const formatStart = src.indexOf('function formatTrajectoryLearningGap(trajectoryLearning)');
+    const rendererEnd = src.indexOf('\nfunction formatCountMap', formatStart);
+    const trajectoryUiSource = src.slice(formatStart, rendererEnd);
+    const rows = new Function(
+      'formatCoverageMetric',
+      `${trajectoryUiSource}\nreturn trajectoryLearningRows;`,
+    )(() => 'coverage')({
+      trajectories: 4,
+      skillObservation: { eventState: 'present', sampleState: 'none' },
+    }) as Array<[string, string | number]>;
+    const values = Object.fromEntries(rows);
+
+    expect(values['Observation sample']).toBe('no joined sample');
+    expect(values['Observed selections']).toBe('present; counts withheld');
+    expect(values['Observation join gaps']).toBe('present; counts withheld');
+    expect(JSON.stringify(values)).not.toMatch(/orphan|conflict|\b[1-2]\b/);
   });
 
   it('app.js renders Fleet Dashboard readiness rail from existing fleet snapshots', () => {

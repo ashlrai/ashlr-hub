@@ -2797,11 +2797,70 @@ function formatTrajectoryLearningGap(trajectoryLearning) {
   return `${labels[top.kind]} ${Math.trunc(Number(top.count))} missing`;
 }
 
-function trajectoryLearningRows(trajectoryLearning) {
+function formatSkillCorpusValue(value, labels) {
+  return typeof value === 'string' && labels[value] ? labels[value] : 'unavailable';
+}
+
+function skillCorpusReadinessRows(skillCorpusReadiness) {
+  if (!skillCorpusReadiness) return [];
+  const corpus = skillCorpusReadiness.corpus ?? {};
+  const learning = skillCorpusReadiness.learning ?? {};
+  const sourceQuality = typeof corpus.sourceQuality === 'string'
+    ? corpus.sourceQuality
+    : corpus.sourceQuality?.badge;
+  const rows = [
+    ['Skill corpus', formatSkillCorpusValue(corpus.state, {
+      'no-cards': 'no cards',
+      degraded: 'degraded',
+      ready: 'ready',
+    })],
+    ['Corpus source', formatSkillCorpusValue(sourceQuality, {
+      'healthy-source': 'healthy',
+      'healthy-zero': 'healthy zero',
+      'degraded-source': 'degraded',
+      'unknown-source': 'unknown',
+      'stale-source': 'stale',
+      'missing-source': 'missing',
+    })],
+    ['Eligible cards', formatSkillCorpusValue(skillCorpusReadiness.eligibleSignedCards, {
+      none: 'none',
+      available: 'available',
+    })],
+    ['Skill observations', formatSkillCorpusValue(skillCorpusReadiness.selectedObservations, {
+      none: 'none',
+      present: 'present',
+      degraded: 'degraded',
+    })],
+    ['Learning gate', formatSkillCorpusValue(learning.state, {
+      'blocked-no-cards': 'blocked: no cards',
+      'blocked-corpus-degraded': 'blocked: corpus degraded',
+      'blocked-observation-degraded': 'blocked: observations degraded',
+      'awaiting-eligible-cards': 'awaiting eligible cards',
+      'awaiting-selection': 'awaiting selection',
+      'k-gated': 'sample gated',
+      observable: 'observable',
+    })],
+  ];
+  const threshold = Number(learning.minimumObservedTrajectories);
+  if (Number.isSafeInteger(threshold) && threshold > 0) {
+    rows.push(['Observation threshold', `${threshold} trajectories`]);
+  }
+  if (learning.sampleState === 'observed' && learning.observedTrajectoryCoverage) {
+    rows.push(['Observed coverage', formatCoverageMetric(learning.observedTrajectoryCoverage)]);
+  }
+  return rows;
+}
+
+function trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness = null) {
   const routeSpine = trajectoryLearning?.routeSpine ?? {};
   const terminal = trajectoryLearning?.terminalOutcomes ?? {};
   const skill = trajectoryLearning?.skillObservation ?? {};
   const skillObserved = skill.sampleState === 'observed';
+  const skillEventsPresent = skill.eventState === 'present';
+  const skillNone = skill.sampleState === 'none' && !skillEventsPresent;
+  const skillAwaitingJoin = skill.sampleState === 'none' && skillEventsPresent;
+  const threshold = Number(skillCorpusReadiness?.learning?.minimumObservedTrajectories);
+  const withheldLabel = Number.isSafeInteger(threshold) && threshold > 0 ? `withheld (<${threshold})` : 'withheld (<3)';
   return [
     ['Trajectories', trajectoryLearning?.trajectories ?? 0],
     ['Dispatch -> decision', formatCoverageMetric(routeSpine.dispatchToDecision)],
@@ -2810,23 +2869,29 @@ function trajectoryLearningRows(trajectoryLearning) {
     ['Merged', terminal.merged ?? 0],
     ['No-proposal', terminal['no-proposal'] ?? 0],
     ['Failed', terminal.failed ?? 0],
-    ['Skill-observed trajectories', skillObserved ? formatCoverageMetric(skill.observedTrajectoryCoverage) : 'withheld (<3)'],
-    ['Observation sample', skill.sampleState ?? 'unavailable'],
-    ['Observed selections', skillObserved ? (skill.joined ?? 0) : 'withheld'],
-    ['Observation join gaps', skillObserved ? (skill.unjoined ?? 0) + (skill.conflicting ?? 0) : 'withheld'],
+    ['Skill-observed trajectories', skillObserved ? formatCoverageMetric(skill.observedTrajectoryCoverage) : skillNone ? 'none' : withheldLabel],
+    ['Observation sample', skillEventsPresent && skill.sampleState === 'none' ? 'no joined sample' : skill.sampleState ?? 'unavailable'],
+    ['Observed selections', skillObserved ? (skill.joined ?? 0) : skillNone ? 'none' : skillAwaitingJoin ? 'present; counts withheld' : 'withheld'],
+    ['Observation join gaps', skillObserved ? (skill.unjoined ?? 0) + (skill.conflicting ?? 0) : skillNone ? 'not applicable' : skillAwaitingJoin ? 'present; counts withheld' : 'withheld'],
+    ...skillCorpusReadinessRows(skillCorpusReadiness),
     ['Top gap', formatTrajectoryLearningGap(trajectoryLearning)],
   ];
 }
 
-function renderTrajectoryLearningCard(trajectoryLearning, cls = 'ctrl-card card') {
-  if (!trajectoryLearning) return null;
-  const trajectories = trajectoryLearning.trajectories ?? 0;
+function renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness = null, cls = 'ctrl-card card') {
+  if (!trajectoryLearning && !skillCorpusReadiness) return null;
+  const trajectories = trajectoryLearning?.trajectories ?? 0;
+  const rows = trajectoryLearning
+    ? trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness)
+    : skillCorpusReadinessRows(skillCorpusReadiness);
   const card = el('div', { cls });
   card.appendChild(el('div', { cls: 'card-header' },
-    el('span', { cls: 'card-title' }, 'Trajectory Learning'),
-    el('span', { cls: 'card-subtitle' }, `${trajectories} trajector${trajectories === 1 ? 'y' : 'ies'} · ${proposalProductionWindowLabel(trajectoryLearning)}`)
+    el('span', { cls: 'card-title' }, trajectoryLearning ? 'Trajectory Learning' : 'Skill Learning'),
+    el('span', { cls: 'card-subtitle' }, trajectoryLearning
+      ? `${trajectories} trajector${trajectories === 1 ? 'y' : 'ies'} · ${proposalProductionWindowLabel(trajectoryLearning)}`
+      : 'observe-only readiness')
   ));
-  card.appendChild(el('div', { cls: 'card-body' }, infoGrid(trajectoryLearningRows(trajectoryLearning))));
+  card.appendChild(el('div', { cls: 'card-body' }, infoGrid(rows)));
   return card;
 }
 
@@ -3638,6 +3703,7 @@ function renderControl() {
   const workspace = d.fleet?.workspace ?? fleet.workspace ?? null;
   const attemptCoverage = d.fleet?.attemptCoverage ?? fleet.attemptCoverage ?? null;
   const trajectoryLearning = d.fleet?.trajectoryLearning ?? fleet.trajectoryLearning ?? null;
+  const skillCorpusReadiness = d.fleet?.skillCorpusReadiness ?? fleet.skillCorpusReadiness ?? null;
   if (shipReadiness) {
     heroMetrics.appendChild(controlMetric(
       'Ship Ready',
@@ -3750,7 +3816,7 @@ function renderControl() {
   const missionAttemptCoverageCard = renderAttemptCoverageCard(attemptCoverage);
   if (missionAttemptCoverageCard) section.appendChild(missionAttemptCoverageCard);
 
-  const missionTrajectoryLearningCard = renderTrajectoryLearningCard(trajectoryLearning);
+  const missionTrajectoryLearningCard = renderTrajectoryLearningCard(trajectoryLearning, skillCorpusReadiness);
   if (missionTrajectoryLearningCard) section.appendChild(missionTrajectoryLearningCard);
 
   const missionContextCard = renderContextEfficiencyCard(d.fleet?.contextEfficiency ?? fleet.contextEfficiency ?? null);
@@ -5005,9 +5071,10 @@ function fdRenderProductionPanel(snap) {
   const workspace = snap.fleet?.workspace ?? snap.control?.fleet?.workspace ?? null;
   const attemptCoverage = snap.fleet?.attemptCoverage ?? snap.control?.fleet?.attemptCoverage ?? null;
   const trajectoryLearning = snap.fleet?.trajectoryLearning ?? snap.control?.fleet?.trajectoryLearning ?? null;
+  const skillCorpusReadiness = snap.fleet?.skillCorpusReadiness ?? snap.control?.fleet?.skillCorpusReadiness ?? null;
   const contextEfficiency = snap.fleet?.contextEfficiency ?? snap.control?.fleet?.contextEfficiency ?? null;
   const workspaceHasEvents = Number(workspace?.eventCount ?? 0) > 0;
-  const hasProductionData = Boolean(prod || production || dispatchProduction || workspaceHasEvents || attemptCoverage || trajectoryLearning);
+  const hasProductionData = Boolean(prod || production || dispatchProduction || workspaceHasEvents || attemptCoverage || trajectoryLearning || skillCorpusReadiness);
   const body = el('div', { cls: 'fd-panel__body' });
 
   if (!hasProductionData) {
@@ -5066,7 +5133,10 @@ function fdRenderProductionPanel(snap) {
 
   if (trajectoryLearning) {
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Trajectory learning'));
-    body.appendChild(infoGrid(trajectoryLearningRows(trajectoryLearning)));
+    body.appendChild(infoGrid(trajectoryLearningRows(trajectoryLearning, skillCorpusReadiness)));
+  } else if (skillCorpusReadiness) {
+    body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Skill learning'));
+    body.appendChild(infoGrid(skillCorpusReadinessRows(skillCorpusReadiness)));
   }
 
   if (workspaceHasEvents) {

@@ -169,6 +169,13 @@ describe('M357 skill-card attestation fails closed', () => {
     expect(fs.existsSync(provenanceKeyPath())).toBe(false);
   });
 
+  it('does not create signing authority while verifying a well-formed forgery', () => {
+    const verdict = verifySkillCardAttestation('a'.repeat(64), params);
+
+    expect(verdict).toMatchObject({ ok: false, reason: expect.stringMatching(/missing.*key/i) });
+    expect(fs.existsSync(provenanceKeyPath())).toBe(false);
+  });
+
   it.runIf(process.platform !== 'win32')('refuses to sign or verify with an exposed key', () => {
     expect(signSkillCardAttestation(params)).toMatch(/^[0-9a-f]{64}$/);
     fs.chmodSync(provenanceKeyPath(), 0o644);

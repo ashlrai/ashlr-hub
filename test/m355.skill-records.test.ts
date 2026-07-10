@@ -19,8 +19,10 @@ import { join } from 'node:path';
 import type { SkillCard, SkillUseEvent } from '../src/core/types.js';
 import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import {
+  readSkillCardCorpus,
   readSkillCards,
   readSkillUseEvents,
+  readSkillUseEventsWithDiagnostics,
   recordSkillCard,
   recordSkillUseEvent,
   sanitizeSkillCard,
@@ -137,6 +139,64 @@ afterEach(() => {
 });
 
 describe('M355 skill records', () => {
+  it('distinguishes an absent corpus from a healthy readable corpus', () => {
+    expect(readSkillCardCorpus()).toEqual({
+      cards: [],
+      sourceState: 'missing',
+      sourcePresent: false,
+      filesScanned: 0,
+      unreadableFiles: 0,
+      invalidRows: 0,
+      bytesScanned: 0,
+      limitExceeded: false,
+    });
+
+    recordSkillCard(card({ skillId: 'skill.corpus-ready' }));
+    const corpus = readSkillCardCorpus();
+    expect(corpus).toMatchObject({
+      sourceState: 'healthy',
+      sourcePresent: true,
+      filesScanned: 1,
+      unreadableFiles: 0,
+    });
+    expect(corpus.cards.map((entry) => entry.skillId)).toEqual(['skill.corpus-ready']);
+  });
+
+  it('reports unsafe and unreadable sources without exposing partial complete history', () => {
+    mkdirSync(skillCardsDir(), { recursive: true, mode: 0o700 });
+    chmodSync(skillCardsDir(), 0o755);
+    expect(readSkillCardCorpus()).toEqual({
+      cards: [],
+      sourceState: 'degraded',
+      sourcePresent: true,
+      filesScanned: 0,
+      unreadableFiles: 0,
+      invalidRows: 0,
+      bytesScanned: 0,
+      limitExceeded: false,
+    });
+
+    chmodSync(skillCardsDir(), 0o700);
+    recordSkillCard(card({ skillId: 'skill.readable', ts: '2026-07-09T12:00:00.000Z' }));
+    const unreadable = join(skillCardsDir(), '2026-07-10.jsonl');
+    writeFileSync(unreadable, `${JSON.stringify(card({ skillId: 'skill.unreadable' }))}\n`, {
+      encoding: 'utf8',
+      mode: 0o200,
+    });
+    chmodSync(unreadable, 0o200);
+
+    expect(readSkillCardCorpus()).toMatchObject({
+      cards: [],
+      sourceState: 'degraded',
+      sourcePresent: true,
+      filesScanned: 2,
+      unreadableFiles: 1,
+      invalidRows: 0,
+      limitExceeded: false,
+    });
+    expect(readSkillCards({ complete: true })).toEqual([]);
+  });
+
   it('appends cards and use events to separate streams and reads newest first', () => {
     recordSkillCard([
       card({ skillId: 'skill-old', ts: '2026-07-09T23:59:00.000Z' }),
@@ -210,6 +270,101 @@ describe('M355 skill records', () => {
     ]);
 
     expect(readSkillCards().map((entry) => entry.skillId)).toEqual(['batch-survivor', 'valid-manual-row']);
+  });
+
+  it('fails complete corpus reads closed on malformed lifecycle rows', () => {
+    mkdirSync(skillCardsDir(), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(skillCardsDir(), '2026-07-10.jsonl'),
+      `${JSON.stringify(card({ skillId: 'skill.valid-before-malformed' }))}\nnot-json\n`,
+      { encoding: 'utf8', mode: 0o600 },
+    );
+
+    expect(readSkillCardCorpus()).toMatchObject({
+      cards: [],
+      sourceState: 'degraded',
+      sourcePresent: true,
+      filesScanned: 1,
+      unreadableFiles: 0,
+      invalidRows: 1,
+      limitExceeded: false,
+    });
+    expect(readSkillCards()).toEqual([expect.objectContaining({ skillId: 'skill.valid-before-malformed' })]);
+  });
+
+  it.each([
+    ['future-dated', '2099-01-01.jsonl'],
+    ['malformed-date', 'not-a-date.jsonl'],
+    ['calendar-invalid', '2026-02-31.jsonl'],
+  ])('degrades complete corpus reads for %s lifecycle partitions', (_label, fileName) => {
+    mkdirSync(skillCardsDir(), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(skillCardsDir(), fileName),
+      `${JSON.stringify(card({ skillId: 'skill.hidden-lifecycle' }))}\n`,
+      { encoding: 'utf8', mode: 0o600 },
+    );
+
+    expect(readSkillCardCorpus()).toMatchObject({
+      cards: [],
+      sourceState: 'degraded',
+      sourcePresent: true,
+      filesScanned: 0,
+      invalidRows: 1,
+    });
+  });
+
+  it('bounds complete corpus partition enumeration before reading payloads', () => {
+    mkdirSync(skillCardsDir(), { recursive: true, mode: 0o700 });
+    const start = Date.parse('2025-01-01T00:00:00.000Z');
+    for (let index = 0; index < 513; index += 1) {
+      const date = new Date(start - index * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      writeFileSync(join(skillCardsDir(), `${date}.jsonl`), '', { encoding: 'utf8', mode: 0o600 });
+    }
+
+    expect(readSkillCardCorpus()).toMatchObject({
+      cards: [],
+      sourceState: 'degraded',
+      sourcePresent: true,
+      filesScanned: 0,
+      limitExceeded: true,
+    });
+  });
+
+  it('bounds complete corpus bytes and exposes only a degraded diagnostic', () => {
+    mkdirSync(skillCardsDir(), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(skillCardsDir(), '2026-07-10.jsonl'),
+      'x'.repeat(16 * 1024 * 1024 + 1),
+      { encoding: 'utf8', mode: 0o600 },
+    );
+
+    expect(readSkillCardCorpus()).toMatchObject({
+      cards: [],
+      sourceState: 'degraded',
+      sourcePresent: true,
+      filesScanned: 1,
+      invalidRows: 0,
+      bytesScanned: 0,
+      limitExceeded: true,
+    });
+  });
+
+  it('rejects an intermediate symlink even when the cards target is private', () => {
+    const outside = join(home, 'outside-skills');
+    mkdirSync(join(outside, 'cards'), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(outside, 'cards', '2026-07-10.jsonl'),
+      `${JSON.stringify(card({ skillId: 'skill.outside' }))}\n`,
+      { encoding: 'utf8', mode: 0o600 },
+    );
+    symlinkSync(outside, skillRecordsDir());
+
+    expect(readSkillCardCorpus()).toMatchObject({
+      cards: [],
+      sourceState: 'degraded',
+      sourcePresent: true,
+      filesScanned: 0,
+    });
   });
 
   it('creates private ledgers and refuses symlinked files', () => {
@@ -401,6 +556,28 @@ describe('M355 skill records', () => {
     ]);
 
     expect(readSkillUseEvents().map((event) => event.eventId)).toEqual(['stable-replay']);
+    expect(readSkillUseEventsWithDiagnostics()).toMatchObject({
+      sourceState: 'degraded',
+      sourcePresent: true,
+      eventState: 'degraded',
+      events: [expect.objectContaining({ eventId: 'stable-replay' })],
+    });
+  });
+
+  it('reports malformed use-event sources as degraded without returning raw rows', () => {
+    mkdirSync(skillUseEventsDir(), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(skillUseEventsDir(), '2026-07-10.jsonl'),
+      `${JSON.stringify(useEvent({ eventId: 'valid-use' }))}\nnot-json\n`,
+      { encoding: 'utf8', mode: 0o600 },
+    );
+
+    expect(readSkillUseEventsWithDiagnostics()).toMatchObject({
+      sourceState: 'degraded',
+      sourcePresent: true,
+      eventState: 'degraded',
+      events: [expect.objectContaining({ eventId: 'valid-use' })],
+    });
   });
 
   it('refuses use events without a signed snapshot and strong attempt identity', () => {

@@ -15,7 +15,11 @@ import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { AshlrConfig, DaemonTick, EngineId, Goal, WorkItem } from '../src/core/types.js';
-import { buildFleetStatus } from '../src/core/fleet/status.js';
+import {
+  buildFleetStatus,
+  buildSkillCorpusReadiness,
+  type FleetReadinessSourceQuality,
+} from '../src/core/fleet/status.js';
 import { formatFleetStatus } from '../src/cli/fleet.js';
 import { buildFleetLaneLocks } from '../src/core/fleet/lane-lock.js';
 import { buildContextEfficiencyStatus } from '../src/core/fleet/context-efficiency.js';
@@ -32,7 +36,13 @@ import { recordDispatchManifest } from '../src/core/fleet/dispatch-manifest.js';
 import { recordAgentAction, type AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
 import { recordDecision } from '../src/core/fleet/decisions-ledger.js';
 import { recordOutcome } from '../src/core/fleet/worked-ledger.js';
-import { readSkillUseEvents, recordSkillUseEvent } from '../src/core/fleet/skill-records.js';
+import {
+  readSkillUseEvents,
+  recordSkillCard,
+  recordSkillUseEvent,
+  sanitizeSkillCard,
+} from '../src/core/fleet/skill-records.js';
+import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import { armDaemonSpendGuard, clearDaemonSpendGuard } from '../src/core/daemon/state.js';
 import type { Proposal } from '../src/core/types.js';
 
@@ -4314,6 +4324,225 @@ describe('buildFleetLaneLocks — pure derived lane status', () => {
 // ---------------------------------------------------------------------------
 // Pure formatter
 // ---------------------------------------------------------------------------
+
+describe('skill corpus readiness projection', () => {
+  const quality = (
+    badge: FleetReadinessSourceQuality['badge'],
+  ): FleetReadinessSourceQuality => ({
+    badge,
+    label: badge,
+    empty: badge === 'healthy-zero',
+    sourcePresent: true,
+    detail: 'metadata-only corpus diagnostic',
+  });
+
+  it('maps an absent corpus to an honest missing source', async () => {
+    const isolatedHome = mkdtempSync(join(tmpdir(), 'ashlr-m49-skill-corpus-'));
+    const status = await withTemporaryEnv(
+      { ASHLR_HOME: join(isolatedHome, '.ashlr') },
+      () => buildFleetStatus(baseConfig()),
+    );
+    rmSync(isolatedHome, { recursive: true, force: true });
+
+    expect(status.skillCorpusReadiness).toMatchObject({
+      version: 1,
+      mode: 'shadow',
+      corpus: {
+        state: 'no-cards',
+        sourceQuality: {
+          badge: 'missing-source',
+          empty: true,
+          sourcePresent: false,
+        },
+      },
+      eligibleSignedCards: 'none',
+      selectedObservations: 'none',
+      learning: {
+        state: 'blocked-no-cards',
+        minimumObservedTrajectories: 3,
+        sampleState: 'none',
+      },
+    });
+    expect(status.skillCorpusReadiness?.learning).not.toHaveProperty('observedTrajectoryCoverage');
+  });
+
+  it('quarantines conflicting latest signed revisions as a degraded corpus', async () => {
+    const isolatedHome = mkdtempSync(join(tmpdir(), 'ashlr-m49-skill-conflict-'));
+    try {
+      await withTemporaryEnv({ ASHLR_HOME: join(isolatedHome, '.ashlr') }, async () => {
+        const makeCard = (name: string) => attestSkillCard(sanitizeSkillCard({
+          schemaVersion: 1,
+          skillId: 'skill.conflicting-latest',
+          revision: 1,
+          ts: '2026-07-10T12:00:00.000Z',
+          name,
+          summary: 'Metadata-only conflicting revision fixture.',
+          status: 'verified',
+          source: 'verified-proposal',
+          taskKinds: ['typescript-change'],
+          commandKinds: ['test'],
+          verification: {
+            passed: true,
+            verifiedAt: '2026-07-10T11:59:00.000Z',
+            commandKinds: ['test'],
+            diffHash: 'a'.repeat(64),
+            evidenceCount: 1,
+          },
+          proposalId: 'proposal-skill-conflict',
+          learningEpoch: '2026-07-10',
+        }));
+        const first = makeCard('First signed payload');
+        const second = makeCard('Second signed payload');
+        expect(first).not.toBeNull();
+        expect(second).not.toBeNull();
+        recordSkillCard([first!, second!]);
+
+        const status = await buildFleetStatus(baseConfig());
+        expect(status.skillCorpusReadiness).toMatchObject({
+          corpus: {
+            state: 'degraded',
+            sourceQuality: {
+              badge: 'degraded-source',
+              sourcePresent: true,
+            },
+          },
+          eligibleSignedCards: 'none',
+          learning: { state: 'blocked-corpus-degraded' },
+        });
+        expect(status.skillCorpusReadiness?.corpus.sourceQuality.detail).toContain('conflicting current revisions');
+      });
+    } finally {
+      rmSync(isolatedHome, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      name: 'degraded corpus takes precedence',
+      corpusState: 'degraded' as const,
+      sourceQuality: quality('degraded-source'),
+      eligibleSignedCards: 'available' as const,
+      observation: { sampleState: 'observed' as const, observedTrajectoryCoverage: { count: 3, rate: 1 } },
+      expected: 'blocked-corpus-degraded',
+    },
+    {
+      name: 'empty corpus blocks learning',
+      corpusState: 'no-cards' as const,
+      sourceQuality: quality('healthy-zero'),
+      eligibleSignedCards: 'none' as const,
+      observation: { sampleState: 'none' as const },
+      expected: 'blocked-no-cards',
+    },
+    {
+      name: 'ineligible corpus awaits verified cards',
+      corpusState: 'ready' as const,
+      sourceQuality: quality('healthy-source'),
+      eligibleSignedCards: 'none' as const,
+      observation: { sampleState: 'none' as const },
+      expected: 'awaiting-eligible-cards',
+    },
+    {
+      name: 'eligible corpus awaits selection',
+      corpusState: 'ready' as const,
+      sourceQuality: quality('healthy-source'),
+      eligibleSignedCards: 'available' as const,
+      observation: { sampleState: 'none' as const },
+      expected: 'awaiting-selection',
+    },
+    {
+      name: 'private sample remains gated',
+      corpusState: 'ready' as const,
+      sourceQuality: quality('healthy-source'),
+      eligibleSignedCards: 'available' as const,
+      observation: { sampleState: 'insufficient-sample' as const },
+      expected: 'k-gated',
+    },
+    {
+      name: 'threshold sample becomes observable',
+      corpusState: 'ready' as const,
+      sourceQuality: quality('healthy-source'),
+      eligibleSignedCards: 'available' as const,
+      observation: { sampleState: 'observed' as const, observedTrajectoryCoverage: { count: 3, rate: 0.75 } },
+      expected: 'observable',
+    },
+  ])('$name', ({ corpusState, sourceQuality, eligibleSignedCards, observation, expected }) => {
+    const result = buildSkillCorpusReadiness({
+      corpusState,
+      corpusSourceQuality: sourceQuality,
+      eligibleSignedCards,
+      skillObservation: observation,
+    });
+
+    expect(result.learning.state).toBe(expected);
+    expect(result.learning.minimumObservedTrajectories).toBe(3);
+    expect(result.corpus.sourceQuality).toBe(sourceQuality);
+    if (observation.sampleState === 'observed') {
+      expect(result.learning.observedTrajectoryCoverage).toEqual(observation.observedTrajectoryCoverage);
+    } else {
+      expect(result.learning).not.toHaveProperty('observedTrajectoryCoverage');
+    }
+  });
+
+  it('withholds exact sub-threshold observations in CLI output', () => {
+    const skillCorpusReadiness = buildSkillCorpusReadiness({
+      corpusState: 'ready',
+      corpusSourceQuality: quality('healthy-source'),
+      eligibleSignedCards: 'available',
+      skillObservation: { sampleState: 'insufficient-sample' },
+    });
+    const out = formatFleetStatus({
+      generatedAt: '2026-07-10T13:00:00.000Z',
+      daemon: { running: true, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      skillCorpusReadiness,
+      killed: false,
+    });
+
+    expect(out).toContain('Skill corpus:');
+    expect(out).toContain('corpus:       ready (healthy-source)');
+    expect(out).toContain('eligible:     available');
+    expect(out).toContain('observations: present');
+    expect(out).toContain('learning:     k-gated (<3 trajectories; exact counts withheld)');
+    expect(out).not.toMatch(/observations:.*\d/);
+    expect(out).not.toContain('(0%)');
+  });
+
+  it('blocks learning categorically when the observation source is degraded', () => {
+    const result = buildSkillCorpusReadiness({
+      corpusState: 'ready',
+      corpusSourceQuality: quality('healthy-source'),
+      eligibleSignedCards: 'available',
+      skillObservation: { eventState: 'present', sampleState: 'none' },
+      observationState: 'degraded',
+    });
+
+    expect(result).toMatchObject({
+      selectedObservations: 'degraded',
+      learning: {
+        state: 'blocked-observation-degraded',
+        sampleState: 'unavailable',
+      },
+    });
+    expect(result.learning).not.toHaveProperty('observedTrajectoryCoverage');
+  });
+
+  it('keeps legacy FleetStatus formatter inputs compatible', () => {
+    const out = formatFleetStatus({
+      generatedAt: '2026-07-10T13:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      killed: false,
+    });
+
+    expect(out).not.toContain('Skill corpus:');
+  });
+});
 
 describe('formatFleetStatus — pure formatter (M49)', () => {
   it('renders lane lock counts and a bounded sample', () => {

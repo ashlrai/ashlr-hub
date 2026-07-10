@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import type { SkillCard } from '../src/core/types.js';
 import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import {
+  inspectVerifiedSkillCorpus,
   MAX_SELECTED_SKILLS,
   SKILL_RETRIEVAL_POLICY_VERSION,
   selectVerifiedSkills,
@@ -55,6 +56,46 @@ function card(overrides: Partial<SkillCard> = {}): SkillCard {
 }
 
 describe('M356 verified skill retrieval', () => {
+  it('inspects signed lifecycle eligibility without query or card text', () => {
+    const inspection = inspectVerifiedSkillCorpus([
+      card({ skillId: 'skill.eligible' }),
+      card({ skillId: 'skill.revoked', revision: 1 }),
+      card({ skillId: 'skill.revoked', revision: 2, status: 'revoked' }),
+      card({ skillId: 'skill.manual', source: 'manual' }),
+      card({ skillId: 'skill.candidate', status: 'candidate' }),
+      { ...card({ skillId: 'skill.tampered' }), summary: 'tampered after attestation' },
+    ]);
+
+    expect(inspection).toEqual({ considered: 5, current: 4, eligible: 1, conflicting: 0 });
+    expect(Object.keys(inspection).sort()).toEqual(['conflicting', 'considered', 'current', 'eligible']);
+    expect(JSON.stringify(inspection)).not.toContain('skill.');
+  });
+
+  it('quarantines conflicting latest revisions while preserving exact replays', () => {
+    const exact = card({ skillId: 'skill.exact', revision: 3 });
+    const inspection = inspectVerifiedSkillCorpus([
+      card({ skillId: 'skill.conflict', revision: 1 }),
+      card({ skillId: 'skill.conflict', revision: 2, name: 'First current value' }),
+      card({ skillId: 'skill.conflict', revision: 2, name: 'Second current value' }),
+      exact,
+      exact,
+    ]);
+
+    expect(inspection).toEqual({ considered: 5, current: 1, eligible: 1, conflicting: 1 });
+  });
+
+  it('fails closed for absent and hostile corpus inputs', () => {
+    const hostile = new Proxy(card(), {
+      get() {
+        throw new Error('hostile getter');
+      },
+    });
+    const empty = { considered: 0, current: 0, eligible: 0, conflicting: 0 };
+
+    expect(inspectVerifiedSkillCorpus(undefined)).toEqual(empty);
+    expect(inspectVerifiedSkillCorpus([hostile])).toEqual(empty);
+  });
+
   it('selects at most two relevant verified-proposal cards in shadow mode', () => {
     const result = selectVerifiedSkills([
       card({ skillId: 'skill.z', name: 'TypeScript test workflow' }),

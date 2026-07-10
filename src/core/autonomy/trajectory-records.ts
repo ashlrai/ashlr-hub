@@ -31,6 +31,7 @@ import { scrubSecrets } from '../util/scrub.js';
 
 const DEFAULT_WINDOW_HOURS = 24;
 const DEFAULT_LIMIT = 200;
+export const MIN_SKILL_OBSERVED_TRAJECTORIES = 3;
 
 export type TrajectoryTimelineKind = 'dispatch' | 'proposal' | 'evidence' | 'decision' | 'agent-action';
 export type TrajectoryTerminalOutcome =
@@ -130,13 +131,31 @@ export interface TrajectoryCoverageMetric {
 }
 
 export interface TrajectorySkillObservationSummary {
-  sampleState: 'insufficient-sample' | 'observed';
+  eventState: 'none' | 'present';
+  sampleState: 'none' | 'unavailable' | 'insufficient-sample' | 'observed';
   joined?: number;
   unjoined?: number;
   conflicting?: number;
   observedTrajectoryCoverage?: TrajectoryCoverageMetric;
   modeCounts?: Record<SkillUseMode, number>;
   stageCounts?: Record<SkillUseStage, number>;
+}
+
+/** Remove all exact skill metrics when the observation ledger is degraded. */
+export function suppressDegradedSkillObservation(
+  status: TrajectoryLearningStatus,
+  eventState: 'none' | 'present',
+): TrajectoryLearningStatus {
+  const { skillUse: _skillUseCoverage, ...coverage } = status.coverage;
+  return {
+    ...status,
+    coverage,
+    skillObservation: { eventState, sampleState: 'unavailable' },
+    recent: status.recent.map((record) => {
+      const { skillUse: _skillUse, ...publicCoverage } = record.coverage;
+      return { ...record, coverage: publicCoverage };
+    }),
+  };
 }
 
 type PublishedTrajectoryCoverage = Omit<TrajectoryRecordCoverage, 'skillUse'> & { skillUse?: boolean };
@@ -972,7 +991,14 @@ export function summarizeTrajectoryLearning(
       })
     : (batchObservation ?? emptySkillObservationCounts());
   const rawObservedTrajectoryCoverage = metric(coverageCounts.skillUse, denominator);
-  const sampleState = rawObservedTrajectoryCoverage.count < 3 ? 'insufficient-sample' : 'observed';
+  const eventState = skillObservation.joined + skillObservation.unjoined + skillObservation.conflicting > 0
+    ? 'present'
+    : 'none';
+  const sampleState = rawObservedTrajectoryCoverage.count === 0
+    ? 'none'
+    : rawObservedTrajectoryCoverage.count < MIN_SKILL_OBSERVED_TRAJECTORIES
+      ? 'insufficient-sample'
+      : 'observed';
   const publishSkillMetrics = sampleState === 'observed';
   const observedTrajectoryCoverage = publishSkillMetrics
     ? rawObservedTrajectoryCoverage
@@ -1000,9 +1026,10 @@ export function summarizeTrajectoryLearning(
           observedTrajectoryCoverage,
           modeCounts: { ...skillObservation.modeCounts },
           stageCounts: { ...skillObservation.stageCounts },
+          eventState,
           sampleState,
         }
-      : { sampleState },
+      : { eventState, sampleState },
     gaps,
     recent: records.slice(0, 8).map((record) => ({
       ref: trajectoryRef(record),

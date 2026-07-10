@@ -5,7 +5,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   listTrajectoryRecords,
+  MIN_SKILL_OBSERVED_TRAJECTORIES,
   summarizeTrajectoryLearning,
+  suppressDegradedSkillObservation,
   type TrajectoryRecordReadDeps,
 } from '../src/core/autonomy/trajectory-records.js';
 import type { OutcomeRecord } from '../src/core/autonomy/outcome-records.js';
@@ -454,6 +456,7 @@ describe('Trajectory records', () => {
     const summary = summarizeTrajectoryLearning(records, 24);
     expect(summary.coverage.skillUse).toEqual({ count: 3, rate: 1 });
     expect(summary.skillObservation).toEqual({
+      eventState: 'present',
       joined: 5,
       unjoined: 0,
       conflicting: 0,
@@ -498,6 +501,22 @@ describe('Trajectory records', () => {
             stage: 'outcome',
             outcome: 'merged',
           }),
+          skillUse({
+            eventId: 'skill-use:orphan',
+            skillId: 'skill.orphan',
+            contentHash: 'd'.repeat(64),
+            proposalId: undefined,
+            runId: 'run-orphan',
+            trajectoryId: 'traj-orphan',
+          }),
+          skillUse({
+            eventId: 'skill-use:conflicting',
+            skillId: 'skill.conflicting',
+            contentHash: 'e'.repeat(64),
+            proposalId: undefined,
+            runId: 'run-b',
+            trajectoryId: 'traj-a',
+          }),
         ],
       }),
     });
@@ -508,6 +527,8 @@ describe('Trajectory records', () => {
     expect(copied).toEqual(original);
     expect(copied).toMatchObject({
       joined: 3,
+      unjoined: 1,
+      conflicting: 1,
       modeCounts: { shadow: 1, active: 1, disabled: 1 },
       stageCounts: { selected: 1, injected: 1, applied: 0, outcome: 1 },
       sampleState: 'observed',
@@ -543,7 +564,8 @@ describe('Trajectory records', () => {
         unknown: 0,
       },
       skillObservation: {
-        sampleState: 'insufficient-sample',
+        eventState: 'present',
+        sampleState: 'none',
       },
     });
     expect(summary.coverage).not.toHaveProperty('skillUse');
@@ -580,7 +602,8 @@ describe('Trajectory records', () => {
     expect(records.every((record) => !record.coverage.skillUse)).toBe(true);
     const summary = summarizeTrajectoryLearning(records);
     expect(summary.skillObservation).toMatchObject({
-      sampleState: 'insufficient-sample',
+      eventState: 'present',
+      sampleState: 'none',
     });
     expect(summary.coverage).not.toHaveProperty('skillUse');
     expect(summary.skillObservation).not.toHaveProperty('joined');
@@ -663,6 +686,7 @@ describe('Trajectory records', () => {
       trajectories: 3,
       dispatchesPerTrajectory: [1, 1, 1],
       skillObservation: {
+        eventState: 'present',
         joined: 3,
         unjoined: 0,
         conflicting: 1,
@@ -674,18 +698,28 @@ describe('Trajectory records', () => {
     });
   });
 
-  it('withholds exact skill observations and per-trajectory flags below the sample gate', () => {
+  it('withholds exact skill observations and per-trajectory flags at k-1', () => {
     const records = listTrajectoryRecords({
       windowHours: 1000,
       deps: deps({
-        readDispatchProductionEvents: () => [dispatch({ proposalId: undefined })],
+        readDispatchProductionEvents: () => [
+          dispatch({ proposalId: undefined, runId: 'run-a', trajectoryId: 'traj-a' }),
+          dispatch({ ts: TS1, itemId: 'item-b', proposalId: undefined, runId: 'run-b', trajectoryId: 'traj-b' }),
+        ],
         listOutcomeRecords: () => [],
         readAgentActions: () => [],
-        readSkillUseEvents: () => [skillUse({ proposalId: undefined })],
+        readSkillUseEvents: () => [
+          skillUse({ eventId: 'skill-use:a', proposalId: undefined, runId: 'run-a', trajectoryId: 'traj-a' }),
+          skillUse({ eventId: 'skill-use:b', proposalId: undefined, runId: 'run-b', trajectoryId: 'traj-b' }),
+        ],
       }),
     });
     const summary = summarizeTrajectoryLearning(records);
 
+    expect(MIN_SKILL_OBSERVED_TRAJECTORIES).toBe(3);
+    expect(records.filter((record) => record.coverage.skillUse)).toHaveLength(
+      MIN_SKILL_OBSERVED_TRAJECTORIES - 1,
+    );
     expect(summary.skillObservation).toMatchObject({ sampleState: 'insufficient-sample' });
     for (const exactField of ['joined', 'unjoined', 'conflicting', 'observedTrajectoryCoverage', 'modeCounts', 'stageCounts']) {
       expect(summary.skillObservation).not.toHaveProperty(exactField);
@@ -731,7 +765,11 @@ describe('Trajectory records', () => {
     const observation = summarizeTrajectoryLearning(records).skillObservation;
     const json = JSON.stringify(observation);
 
+    expect(records.filter((record) => record.coverage.skillUse)).toHaveLength(
+      MIN_SKILL_OBSERVED_TRAJECTORIES,
+    );
     expect(observation).toEqual({
+      eventState: 'present',
       joined: 3,
       unjoined: 0,
       conflicting: 0,
@@ -812,5 +850,34 @@ describe('Trajectory records', () => {
     expect(JSON.stringify(summary)).not.toContain('prop-1');
     expect(JSON.stringify(summary)).not.toContain('item-1');
     expect(JSON.stringify(summary)).not.toContain(REPO);
+  });
+
+  it('suppresses every exact skill metric when the observation source is degraded', () => {
+    const records = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          dispatch({ proposalId: undefined, runId: 'run-a', trajectoryId: 'traj-a' }),
+          dispatch({ ts: TS1, itemId: 'item-b', proposalId: undefined, runId: 'run-b', trajectoryId: 'traj-b' }),
+          dispatch({ ts: TS2, itemId: 'item-c', proposalId: undefined, runId: 'run-c', trajectoryId: 'traj-c' }),
+        ],
+        listOutcomeRecords: () => [],
+        readAgentActions: () => [],
+        readSkillUseEvents: () => [
+          skillUse({ eventId: 'use-a', runId: 'run-a', trajectoryId: 'traj-a' }),
+          skillUse({ eventId: 'use-b', runId: 'run-b', trajectoryId: 'traj-b' }),
+          skillUse({ eventId: 'use-c', runId: 'run-c', trajectoryId: 'traj-c' }),
+        ],
+      }),
+    });
+    const published = summarizeTrajectoryLearning(records);
+    expect(published.skillObservation.sampleState).toBe('observed');
+
+    const suppressed = suppressDegradedSkillObservation(published, 'present');
+    expect(suppressed.skillObservation).toEqual({ eventState: 'present', sampleState: 'unavailable' });
+    expect(suppressed.coverage).not.toHaveProperty('skillUse');
+    expect(suppressed.recent.every((record) => !('skillUse' in record.coverage))).toBe(true);
+    expect(JSON.stringify(suppressed)).not.toContain('modeCounts');
+    expect(JSON.stringify(suppressed)).not.toContain('stageCounts');
   });
 });

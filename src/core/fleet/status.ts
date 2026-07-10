@@ -41,9 +41,16 @@ import {
 } from '../autonomy/attempt-records.js';
 import {
   listTrajectoryRecords,
+  MIN_SKILL_OBSERVED_TRAJECTORIES,
+  suppressDegradedSkillObservation,
   summarizeTrajectoryLearning,
   type TrajectoryLearningStatus,
 } from '../autonomy/trajectory-records.js';
+import {
+  inspectVerifiedSkillCorpus,
+  SKILL_RETRIEVAL_POLICY_VERSION,
+} from './skill-retrieval.js';
+import { readSkillCardCorpus, readSkillUseEventsWithDiagnostics } from './skill-records.js';
 import type { GuardHealthDiagnosis } from '../daemon/guard-health.js';
 import type { EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import type { BackendAvailability, BackendResourceState } from '../fabric/resource-monitor.js';
@@ -334,6 +341,155 @@ export interface FleetReadinessSourceQuality {
   empty: boolean;
   sourcePresent: boolean;
   detail: string;
+}
+
+export interface FleetSkillCorpusReadiness {
+  version: 1;
+  mode: 'shadow';
+  policyVersion: string;
+  corpus: {
+    state: 'no-cards' | 'degraded' | 'ready';
+    sourceQuality: FleetReadinessSourceQuality;
+  };
+  eligibleSignedCards: 'none' | 'available';
+  selectedObservations: 'none' | 'present' | 'degraded';
+  learning: {
+    state:
+      | 'blocked-no-cards'
+      | 'blocked-corpus-degraded'
+      | 'blocked-observation-degraded'
+      | 'awaiting-eligible-cards'
+      | 'awaiting-selection'
+      | 'k-gated'
+      | 'observable';
+    minimumObservedTrajectories: number;
+    sampleState: 'none' | 'unavailable' | 'insufficient-sample' | 'observed';
+    observedTrajectoryCoverage?: { count: number; rate: number };
+  };
+}
+
+export interface FleetSkillCorpusReadinessInput {
+  corpusState: FleetSkillCorpusReadiness['corpus']['state'];
+  corpusSourceQuality: FleetReadinessSourceQuality;
+  eligibleSignedCards: FleetSkillCorpusReadiness['eligibleSignedCards'];
+  skillObservation?: TrajectoryLearningStatus['skillObservation'];
+  observationState?: 'none' | 'present' | 'degraded';
+  policyVersion?: string;
+}
+
+export function buildSkillCorpusReadiness(
+  input: FleetSkillCorpusReadinessInput,
+): FleetSkillCorpusReadiness {
+  const observedCoverage = input.skillObservation?.observedTrajectoryCoverage;
+  const selectedObservations = input.observationState === 'degraded'
+    ? 'degraded'
+    : input.observationState === 'present' || input.skillObservation?.eventState === 'present'
+      ? 'present'
+      : input.skillObservation?.sampleState === 'none' || input.skillObservation === undefined
+        ? 'none'
+        : 'present';
+  const sampleState = selectedObservations === 'degraded'
+    ? 'unavailable'
+    : selectedObservations === 'none'
+      ? 'none'
+      : input.skillObservation?.sampleState === 'observed'
+        ? 'observed'
+        : 'insufficient-sample';
+  const state: FleetSkillCorpusReadiness['learning']['state'] =
+    input.corpusState === 'degraded'
+      ? 'blocked-corpus-degraded'
+      : selectedObservations === 'degraded'
+        ? 'blocked-observation-degraded'
+        : input.corpusState === 'no-cards'
+          ? 'blocked-no-cards'
+          : input.eligibleSignedCards === 'none'
+            ? 'awaiting-eligible-cards'
+            : selectedObservations === 'none'
+              ? 'awaiting-selection'
+              : sampleState === 'observed'
+                ? 'observable'
+                : 'k-gated';
+
+  return {
+    version: 1,
+    mode: 'shadow',
+    policyVersion: input.policyVersion ?? SKILL_RETRIEVAL_POLICY_VERSION,
+    corpus: {
+      state: input.corpusState,
+      sourceQuality: input.corpusSourceQuality,
+    },
+    eligibleSignedCards: input.eligibleSignedCards,
+    selectedObservations,
+    learning: {
+      state,
+      minimumObservedTrajectories: MIN_SKILL_OBSERVED_TRAJECTORIES,
+      sampleState,
+      ...(sampleState === 'observed' && observedCoverage
+        ? { observedTrajectoryCoverage: observedCoverage }
+        : {}),
+    },
+  };
+}
+
+async function readSkillCorpusReadiness(
+  skillObservation: TrajectoryLearningStatus['skillObservation'] | undefined,
+  observationState: 'none' | 'present' | 'degraded',
+): Promise<FleetSkillCorpusReadiness> {
+  try {
+    const corpusResult = readSkillCardCorpus();
+    const inspection = inspectVerifiedSkillCorpus(corpusResult.cards);
+    const degraded = corpusResult.sourceState === 'degraded' || inspection.conflicting > 0;
+    const corpusState: FleetSkillCorpusReadiness['corpus']['state'] = degraded
+      ? 'degraded'
+      : corpusResult.cards.length === 0
+        ? 'no-cards'
+        : 'ready';
+    const detail = corpusState === 'degraded'
+      ? corpusResult.limitExceeded
+        ? 'signed skill corpus exceeds bounded read limits'
+        : inspection.conflicting > 0
+          ? 'signed skill corpus has conflicting current revisions'
+          : corpusResult.invalidRows > 0
+            ? 'signed skill corpus contains invalid lifecycle rows'
+            : `signed skill corpus is incomplete (${corpusResult.unreadableFiles} unreadable partition(s))`
+      : corpusState === 'no-cards'
+        ? corpusResult.sourceState === 'missing'
+          ? 'no signed skill card ledger exists yet'
+          : 'signed skill corpus is readable and contains no cards'
+        : 'signed skill corpus is readable';
+    const sourceQuality = readinessSourceQuality({
+      status: degraded ? 'degraded' : corpusResult.sourceState === 'missing' ? 'unavailable' : 'healthy',
+      freshness: 'fresh',
+      empty: corpusState === 'no-cards',
+      sourcePresent: corpusResult.sourcePresent,
+      sourceDegraded: degraded,
+      detail,
+    });
+
+    return buildSkillCorpusReadiness({
+      corpusState,
+      corpusSourceQuality: sourceQuality,
+      eligibleSignedCards: inspection.eligible > 0 ? 'available' : 'none',
+      skillObservation,
+      observationState,
+      policyVersion: SKILL_RETRIEVAL_POLICY_VERSION,
+    });
+  } catch {
+    return buildSkillCorpusReadiness({
+      corpusState: 'degraded',
+      corpusSourceQuality: readinessSourceQuality({
+        status: 'degraded',
+        freshness: 'fresh',
+        empty: false,
+        sourcePresent: true,
+        sourceDegraded: true,
+        detail: 'signed skill corpus diagnostics are unavailable',
+      }),
+      eligibleSignedCards: 'none',
+      skillObservation,
+      observationState: 'degraded',
+    });
+  }
 }
 
 export interface FleetReadinessSourceHealth {
@@ -654,6 +810,8 @@ export interface FleetStatus {
   attemptCoverage?: AttemptCoverageStatus;
   /** Read-only route-to-outcome trajectory reconstruction summary; metadata only. */
   trajectoryLearning?: TrajectoryLearningStatus;
+  /** Read-only signed skill-corpus health and privacy-gated observation state. */
+  skillCorpusReadiness?: FleetSkillCorpusReadiness;
   /** Read-only context discipline signal for long-running multi-agent work. */
   contextEfficiency?: FleetContextEfficiencyStatus;
   /** True when the global kill switch is engaged (fleet paused). */
@@ -1312,16 +1470,34 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   } catch {
     // Optional learning coverage surface only.
   }
+  const windowHours = RECENT_WINDOW_MS / (60 * 60 * 1000);
+  const skillUseSource = readSkillUseEventsWithDiagnostics({
+    sinceMs: Date.parse(generatedAt) - RECENT_WINDOW_MS,
+    limit: Math.max(500 * 8, 400),
+    maxFiles: 3,
+  });
   try {
-    const windowHours = RECENT_WINDOW_MS / (60 * 60 * 1000);
     const trajectoryRecords = listTrajectoryRecords({
       windowHours,
       limit: 500,
+      deps: {
+        readSkillUseEvents: () => skillUseSource.events,
+      },
     });
     status.trajectoryLearning = summarizeTrajectoryLearning(trajectoryRecords, windowHours);
   } catch {
     // Optional route-to-outcome learning surface only.
   }
+  if (status.trajectoryLearning && skillUseSource.eventState === 'degraded') {
+    status.trajectoryLearning = suppressDegradedSkillObservation(
+      status.trajectoryLearning,
+      skillUseSource.events.length > 0 ? 'present' : 'none',
+    );
+  }
+  status.skillCorpusReadiness = await readSkillCorpusReadiness(
+    status.trajectoryLearning?.skillObservation,
+    skillUseSource.eventState,
+  );
   try {
     const { genomeHubHealth } = await import('../genome/store.js');
     status.contextEfficiency = buildContextEfficiencyStatus(status, genomeHubHealth(), generatedAt, RECENT_WINDOW_MS);

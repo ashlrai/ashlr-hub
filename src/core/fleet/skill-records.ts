@@ -16,13 +16,14 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
+  opendirSync,
+  realpathSync,
   readSync,
-  readdirSync,
   writeSync,
 } from 'node:fs';
+import type { BigIntStats, Stats } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type {
   SkillCard,
   SkillCardSource,
@@ -42,6 +43,10 @@ const MAX_READ_LIMIT = 10_000;
 const DEFAULT_MAX_FILES = 14;
 const MAX_READ_FILES = 31;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
+const MAX_COMPLETE_CORPUS_BYTES = 16 * 1024 * 1024;
+const MAX_COMPLETE_CORPUS_FILES = 512;
+const MAX_COMPLETE_CORPUS_ROWS = 20_000;
+const MAX_COMPLETE_CORPUS_DIRECTORY_ENTRIES = 2_048;
 const MAX_LIST_ITEMS = 16;
 const PRIVATE_DIR_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
@@ -81,6 +86,35 @@ export interface ReadSkillRecordsOptions {
   maxFiles?: number;
   /** Scan every private date partition so lifecycle rows cannot age out. */
   complete?: boolean;
+}
+
+export interface SkillCardCorpusReadResult {
+  cards: SkillCard[];
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  filesScanned: number;
+  unreadableFiles: number;
+  invalidRows: number;
+  bytesScanned: number;
+  limitExceeded: boolean;
+}
+
+export interface SkillUseEventReadResult {
+  events: SkillUseEvent[];
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  eventState: 'none' | 'present' | 'degraded';
+}
+
+interface RecordsReadResult<T> {
+  records: T[];
+  sourceState: SkillCardCorpusReadResult['sourceState'];
+  sourcePresent: boolean;
+  filesScanned: number;
+  unreadableFiles: number;
+  invalidRows: number;
+  bytesScanned: number;
+  limitExceeded: boolean;
 }
 
 type SkillCausalInput = Pick<
@@ -519,22 +553,129 @@ function readFileTail(filePath: string): string | null {
   }
 }
 
-function readFileComplete(filePath: string): string | null {
+type CompleteFileRead =
+  | { state: 'ok'; text: string; bytes: number; snapshot: BigIntStats }
+  | { state: 'unreadable' }
+  | { state: 'limit-exceeded' };
+
+function sameFileIdentity(
+  left: { dev: number; ino: number },
+  right: { dev: number; ino: number },
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameDirectorySnapshot(
+  left: { dev: number; ino: number; mode: number; uid: number; gid: number; ctimeMs: number; mtimeMs: number },
+  right: { dev: number; ino: number; mode: number; uid: number; gid: number; ctimeMs: number; mtimeMs: number },
+): boolean {
+  return sameFileIdentity(left, right)
+    && left.mode === right.mode
+    && left.uid === right.uid
+    && left.gid === right.gid
+    && left.ctimeMs === right.ctimeMs
+    && left.mtimeMs === right.mtimeMs;
+}
+
+function snapshotDirectoryChain(dir: string, root: string): Array<{ path: string; snapshot: Stats }> {
+  const chain: Array<{ path: string; snapshot: Stats }> = [];
+  let current = dir;
+  while (true) {
+    const snapshot = lstatSync(current);
+    if (snapshot.isSymbolicLink() || !snapshot.isDirectory()) {
+      throw new Error('unsafe skill ledger ancestor');
+    }
+    chain.push({ path: current, snapshot });
+    if (current === root) break;
+    const parent = dirname(current);
+    if (parent === current) throw new Error('skill ledger escaped configured home');
+    current = parent;
+  }
+  return chain;
+}
+
+function listLedgerPartitions(
+  dir: string,
+  complete: boolean,
+): { files: string[]; invalidPartitions: number; limitExceeded: boolean } {
+  const files: string[] = [];
+  let invalidPartitions = 0;
+  let limitExceeded = false;
+  const directory = opendirSync(dir);
+  try {
+    let directoryEntries = 0;
+    for (let entry = directory.readSync(); entry !== null; entry = directory.readSync()) {
+      directoryEntries += 1;
+      if (directoryEntries > MAX_COMPLETE_CORPUS_DIRECTORY_ENTRIES) {
+        limitExceeded = true;
+        break;
+      }
+      if (!entry.name.endsWith('.jsonl')) continue;
+      if (!DATE_LEDGER_FILE_RE.test(entry.name) || !fileIsNotFutureDated(entry.name)) {
+        if (complete) invalidPartitions += 1;
+        continue;
+      }
+      files.push(entry.name);
+      if (complete && files.length > MAX_COMPLETE_CORPUS_FILES) {
+        limitExceeded = true;
+        break;
+      }
+    }
+  } finally {
+    directory.closeSync();
+  }
+  files.sort().reverse();
+  return { files, invalidPartitions, limitExceeded };
+}
+
+function sameCompleteFileSnapshot(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.uid === right.uid
+    && left.gid === right.gid
+    && left.size === right.size
+    && left.ctimeNs === right.ctimeNs
+    && left.mtimeNs === right.mtimeNs;
+}
+
+function readFileComplete(filePath: string, maxBytes: number): CompleteFileRead {
   let fd: number | undefined;
   try {
-    const before = lstatSync(filePath);
-    if (
-      before.isSymbolicLink() ||
-      !before.isFile() ||
-      !ownedByCurrentUser(before.uid) ||
-      !permissionsArePrivate(before.mode)
-    ) return null;
     fd = openSync(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || !ownedByCurrentUser(opened.uid) || !permissionsArePrivate(opened.mode)) return null;
-    return readFileSync(fd, 'utf8');
+    const openedBefore = fstatSync(fd, { bigint: true });
+    if (
+      !openedBefore.isFile()
+      || !ownedByCurrentUser(Number(openedBefore.uid))
+      || !permissionsArePrivate(Number(openedBefore.mode))
+    ) return { state: 'unreadable' };
+    if (openedBefore.size > BigInt(maxBytes)) return { state: 'limit-exceeded' };
+
+    const size = Number(openedBefore.size);
+    const buffer = Buffer.alloc(size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const bytesRead = readSync(fd, buffer, offset, buffer.length - offset, offset);
+      if (bytesRead <= 0) break;
+      offset += bytesRead;
+    }
+    const openedAfter = fstatSync(fd, { bigint: true });
+    const pathAfter = lstatSync(filePath, { bigint: true });
+    if (
+      offset !== size
+      || !sameCompleteFileSnapshot(openedBefore, openedAfter)
+      || pathAfter.isSymbolicLink()
+      || !pathAfter.isFile()
+      || !sameCompleteFileSnapshot(openedAfter, pathAfter)
+    ) return { state: 'unreadable' };
+    return {
+      state: 'ok',
+      text: buffer.subarray(0, offset).toString('utf8'),
+      bytes: size,
+      snapshot: openedAfter,
+    };
   } catch {
-    return null;
+    return { state: 'unreadable' };
   } finally {
     if (fd !== undefined) {
       try {
@@ -556,8 +697,184 @@ function fileMayContainSince(file: string, sinceMs: number): boolean {
 function fileIsNotFutureDated(file: string): boolean {
   const match = DATE_LEDGER_FILE_RE.exec(file);
   if (!match) return false;
-  const startOfDayMs = Date.parse(`${match[1]}T00:00:00.000Z`);
-  return Number.isFinite(startOfDayMs) && startOfDayMs <= Date.now() + MAX_FUTURE_SKEW_MS;
+  const date = match[1]!;
+  const startOfDayMs = Date.parse(`${date}T00:00:00.000Z`);
+  return Number.isFinite(startOfDayMs)
+    && new Date(startOfDayMs).toISOString().slice(0, 10) === date
+    && startOfDayMs <= Date.now() + MAX_FUTURE_SKEW_MS;
+}
+
+function readRecordsWithDiagnostics<T>(
+  dir: string,
+  guard: (value: unknown) => value is T,
+  sanitize: (record: T) => T,
+  opts: ReadSkillRecordsOptions,
+): RecordsReadResult<T> {
+  const complete = opts.complete === true;
+  const limit = complete ? Number.POSITIVE_INFINITY : boundedOption(opts.limit, DEFAULT_READ_LIMIT, MAX_READ_LIMIT);
+  const maxFiles = complete ? Number.POSITIVE_INFINITY : boundedOption(opts.maxFiles, DEFAULT_MAX_FILES, MAX_READ_FILES);
+  const sinceMs = !complete && typeof opts.sinceMs === 'number' && Number.isFinite(opts.sinceMs)
+    ? opts.sinceMs
+    : undefined;
+  let sourcePresent = false;
+  let filesScanned = 0;
+  let unreadableFiles = 0;
+  let invalidRows = 0;
+  let bytesScanned = 0;
+  let limitExceeded = false;
+  let rowsScanned = 0;
+  const result = (records: T[], sourceState: RecordsReadResult<T>['sourceState']): RecordsReadResult<T> => ({
+    records,
+    sourceState,
+    sourcePresent,
+    filesScanned,
+    unreadableFiles,
+    invalidRows,
+    bytesScanned,
+    limitExceeded,
+  });
+  try {
+    let dirStat;
+    try {
+      dirStat = lstatSync(dir);
+      sourcePresent = true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') return result([], 'degraded');
+      try {
+        const parentStat = lstatSync(dirname(dir));
+        if (
+          parentStat.isSymbolicLink() ||
+          !parentStat.isDirectory() ||
+          !ownedByCurrentUser(parentStat.uid) ||
+          !permissionsArePrivate(parentStat.mode)
+        ) return result([], 'degraded');
+      } catch (parentError) {
+        return result([], (parentError as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'degraded');
+      }
+      return result([], 'missing');
+    }
+    if (
+      dirStat.isSymbolicLink() ||
+      !dirStat.isDirectory() ||
+      !ownedByCurrentUser(dirStat.uid) ||
+      !permissionsArePrivate(dirStat.mode)
+    ) {
+      return result([], 'degraded');
+    }
+    const parentStat = lstatSync(dirname(dir));
+    if (
+      parentStat.isSymbolicLink() ||
+      !parentStat.isDirectory() ||
+      !ownedByCurrentUser(parentStat.uid) ||
+      !permissionsArePrivate(parentStat.mode)
+    ) {
+      return result([], 'degraded');
+    }
+    const canonicalDir = realpathSync(dir);
+    const canonicalParent = realpathSync(dirname(dir));
+    const canonicalRoot = realpathSync(dirname(skillRecordsDir()));
+    const directoryChain = snapshotDirectoryChain(canonicalDir, canonicalRoot);
+    const listing = listLedgerPartitions(canonicalDir, complete);
+    invalidRows += listing.invalidPartitions;
+    limitExceeded ||= listing.limitExceeded;
+    if (limitExceeded || (complete && invalidRows > 0)) return result([], 'degraded');
+    const completePartitionNames = complete ? [...listing.files] : undefined;
+    const files = listing.files;
+    if (!complete) files.splice(maxFiles);
+    const out: T[] = [];
+    const completeSnapshots: Array<{ filePath: string; snapshot: BigIntStats }> = [];
+    for (const file of files) {
+      if (out.length >= limit) break;
+      if (sinceMs !== undefined && !fileMayContainSince(file, sinceMs)) continue;
+      filesScanned += 1;
+      const filePath = join(canonicalDir, file);
+      let raw: string | null;
+      if (complete) {
+        const completeRead = readFileComplete(filePath, MAX_COMPLETE_CORPUS_BYTES - bytesScanned);
+        if (completeRead.state === 'limit-exceeded') {
+          limitExceeded = true;
+          break;
+        }
+        if (completeRead.state === 'unreadable') {
+          unreadableFiles += 1;
+          continue;
+        }
+        bytesScanned += completeRead.bytes;
+        completeSnapshots.push({ filePath, snapshot: completeRead.snapshot });
+        raw = completeRead.text;
+      } else {
+        raw = readFileTail(filePath);
+      }
+      // A complete lifecycle read fails closed rather than selecting from a
+      // corpus that may have lost a revocation or deprecation row.
+      if (raw === null) {
+        unreadableFiles += 1;
+        continue;
+      }
+      for (const line of raw.split('\n').reverse()) {
+        if (out.length >= limit) break;
+        if (!line.trim()) continue;
+        rowsScanned += 1;
+        if (complete && rowsScanned > MAX_COMPLETE_CORPUS_ROWS) {
+          limitExceeded = true;
+          break;
+        }
+        try {
+          const parsed: unknown = JSON.parse(line);
+          if (!guard(parsed)) {
+            invalidRows += 1;
+            continue;
+          }
+          const record = sanitize(parsed);
+          if (sinceMs !== undefined) {
+            const recordMs = Date.parse((record as { ts: string }).ts);
+            if (Number.isFinite(recordMs) && recordMs < sinceMs) continue;
+          }
+          out.push(record);
+        } catch {
+          invalidRows += 1;
+          // Malformed rows do not poison the remaining append-only history.
+        }
+      }
+      if (limitExceeded) break;
+    }
+    for (const entry of completeSnapshots) {
+      const current = lstatSync(entry.filePath, { bigint: true });
+      if (
+        current.isSymbolicLink()
+        || !current.isFile()
+        || !sameCompleteFileSnapshot(entry.snapshot, current)
+      ) return result([], 'degraded');
+    }
+    if (complete && completePartitionNames) {
+      const finalListing = listLedgerPartitions(canonicalDir, true);
+      if (
+        finalListing.limitExceeded
+        || finalListing.invalidPartitions > 0
+        || finalListing.files.length !== completePartitionNames.length
+        || finalListing.files.some((file, index) => file !== completePartitionNames[index])
+      ) return result([], 'degraded');
+    }
+    const dirAfter = lstatSync(dir);
+    const parentAfter = lstatSync(dirname(dir));
+    if (
+      realpathSync(dir) !== canonicalDir
+      || realpathSync(dirname(dir)) !== canonicalParent
+      || !sameDirectorySnapshot(dirStat, dirAfter)
+      || !sameDirectorySnapshot(parentStat, parentAfter)
+      || dirAfter.isSymbolicLink()
+      || parentAfter.isSymbolicLink()
+    ) return result([], 'degraded');
+    for (const entry of directoryChain) {
+      const current = lstatSync(entry.path);
+      if (!sameDirectorySnapshot(entry.snapshot, current)) return result([], 'degraded');
+    }
+    const degraded = unreadableFiles > 0 || invalidRows > 0 || limitExceeded;
+    return result(complete && degraded ? [] : out, degraded ? 'degraded' : 'healthy');
+  } catch {
+    return result([], 'degraded');
+  }
 }
 
 function readRecords<T>(
@@ -566,67 +883,39 @@ function readRecords<T>(
   sanitize: (record: T) => T,
   opts: ReadSkillRecordsOptions,
 ): T[] {
-  const complete = opts.complete === true;
-  const limit = complete ? Number.POSITIVE_INFINITY : boundedOption(opts.limit, DEFAULT_READ_LIMIT, MAX_READ_LIMIT);
-  const maxFiles = complete ? Number.POSITIVE_INFINITY : boundedOption(opts.maxFiles, DEFAULT_MAX_FILES, MAX_READ_FILES);
-  const sinceMs = typeof opts.sinceMs === 'number' && Number.isFinite(opts.sinceMs)
-    ? opts.sinceMs
-    : undefined;
-  try {
-    if (!existsSync(dir)) return [];
-    const dirStat = lstatSync(dir);
-    if (
-      dirStat.isSymbolicLink() ||
-      !dirStat.isDirectory() ||
-      !ownedByCurrentUser(dirStat.uid) ||
-      !permissionsArePrivate(dirStat.mode)
-    ) return [];
-    const files = readdirSync(dir)
-      .filter((file) => DATE_LEDGER_FILE_RE.test(file) && fileIsNotFutureDated(file))
-      .sort()
-      .reverse()
-      .slice(0, maxFiles);
-    const out: T[] = [];
-    for (const file of files) {
-      if (out.length >= limit) break;
-      if (sinceMs !== undefined && !fileMayContainSince(file, sinceMs)) continue;
-      const raw = complete ? readFileComplete(join(dir, file)) : readFileTail(join(dir, file));
-      // A complete lifecycle read fails closed rather than selecting from a
-      // corpus that may have lost a revocation or deprecation row.
-      if (raw === null) {
-        if (complete) return [];
-        continue;
-      }
-      for (const line of raw.split('\n').reverse()) {
-        if (out.length >= limit) break;
-        if (!line.trim()) continue;
-        try {
-          const parsed: unknown = JSON.parse(line);
-          if (!guard(parsed)) continue;
-          const record = sanitize(parsed);
-          if (sinceMs !== undefined) {
-            const recordMs = Date.parse((record as { ts: string }).ts);
-            if (Number.isFinite(recordMs) && recordMs < sinceMs) continue;
-          }
-          out.push(record);
-        } catch {
-          // Malformed rows do not poison the remaining append-only history.
-        }
-      }
-    }
-    return out;
-  } catch {
-    return [];
-  }
+  return readRecordsWithDiagnostics(dir, guard, sanitize, opts).records;
+}
+
+export function readSkillCardCorpus(): SkillCardCorpusReadResult {
+  const result = readRecordsWithDiagnostics(
+    skillCardsDir(),
+    isSkillCard,
+    sanitizeSkillCard,
+    { complete: true },
+  );
+  return {
+    cards: result.records,
+    sourceState: result.sourceState,
+    sourcePresent: result.sourcePresent,
+    filesScanned: result.filesScanned,
+    unreadableFiles: result.unreadableFiles,
+    invalidRows: result.invalidRows,
+    bytesScanned: result.bytesScanned,
+    limitExceeded: result.limitExceeded,
+  };
 }
 
 export function readSkillCards(opts: ReadSkillRecordsOptions = {}): SkillCard[] {
-  return readRecords(skillCardsDir(), isSkillCard, sanitizeSkillCard, opts);
+  return opts.complete === true
+    ? readSkillCardCorpus().cards
+    : readRecords(skillCardsDir(), isSkillCard, sanitizeSkillCard, opts);
 }
 
-export function readSkillUseEvents(opts: ReadSkillRecordsOptions = {}): SkillUseEvent[] {
+export function readSkillUseEventsWithDiagnostics(
+  opts: ReadSkillRecordsOptions = {},
+): SkillUseEventReadResult {
   const requested = boundedOption(opts.limit, DEFAULT_READ_LIMIT, MAX_READ_LIMIT);
-  const scanned = readRecords(skillUseEventsDir(), isSkillUseEvent, sanitizeSkillUseEvent, {
+  const scanned = readRecordsWithDiagnostics(skillUseEventsDir(), isSkillUseEvent, sanitizeSkillUseEvent, {
     ...opts,
     limit: Math.min(MAX_READ_LIMIT, Math.max(requested, requested * 4)),
   });
@@ -635,7 +924,7 @@ export function readSkillUseEvents(opts: ReadSkillRecordsOptions = {}): SkillUse
     event: SkillUseEvent;
     conflict: boolean;
   }>();
-  for (const event of scanned) {
+  for (const event of scanned.records) {
     const fingerprint = JSON.stringify(event);
     const existing = byEventId.get(event.eventId);
     if (!existing) {
@@ -644,8 +933,24 @@ export function readSkillUseEvents(opts: ReadSkillRecordsOptions = {}): SkillUse
       existing.conflict = true;
     }
   }
-  return [...byEventId.values()]
+  const conflict = [...byEventId.values()].some((entry) => entry.conflict);
+  const events = [...byEventId.values()]
     .filter((entry) => !entry.conflict)
     .map((entry) => entry.event)
     .slice(0, requested);
+  const degraded = scanned.sourceState === 'degraded' || conflict;
+  return {
+    events,
+    sourceState: degraded ? 'degraded' : scanned.sourceState,
+    sourcePresent: scanned.sourcePresent,
+    eventState: degraded
+      ? 'degraded'
+      : scanned.records.length > 0
+        ? 'present'
+        : 'none',
+  };
+}
+
+export function readSkillUseEvents(opts: ReadSkillRecordsOptions = {}): SkillUseEvent[] {
+  return readSkillUseEventsWithDiagnostics(opts).events;
 }

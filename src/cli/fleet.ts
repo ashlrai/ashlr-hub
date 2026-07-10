@@ -484,8 +484,14 @@ export function formatFleetStatus(s: FleetStatus): string {
             `${skillObservation.joined ?? 0} event(s), ${skillObservation.unjoined ?? 0} unjoined, ` +
             `${skillObservation.conflicting ?? 0} conflicting (observed)`,
         );
-      } else {
+      } else if (skillObservation.sampleState === 'unavailable') {
+        lines.push('  skill observations: source degraded (exact counts withheld)');
+      } else if (skillObservation.sampleState === 'insufficient-sample') {
         lines.push('  skill observations: insufficient sample (<3 trajectories; exact counts withheld)');
+      } else if (skillObservation.eventState === 'present') {
+        lines.push('  skill observations: present but unjoined (exact counts withheld)');
+      } else if (skillObservation.sampleState === 'none') {
+        lines.push('  skill observations: none');
       }
     }
     const gap = trajectoryLearning.gaps[0];
@@ -496,6 +502,35 @@ export function formatFleetStatus(s: FleetStatus): string {
     }
   }
   lines.push('');
+
+  const skillCorpus = s.skillCorpusReadiness;
+  if (skillCorpus) {
+    lines.push('Skill corpus:');
+    lines.push(
+      `  corpus:       ${skillCorpus.corpus.state} (${skillCorpus.corpus.sourceQuality.badge})`,
+    );
+    lines.push(`  eligible:     ${skillCorpus.eligibleSignedCards}`);
+    lines.push(`  observations: ${skillCorpus.selectedObservations}`);
+    if (
+      skillCorpus.learning.sampleState === 'observed'
+      && skillCorpus.learning.observedTrajectoryCoverage
+    ) {
+      lines.push(
+        `  learning:     ${skillCorpus.learning.state} ` +
+          `(${formatCoverageMetric(skillCorpus.learning.observedTrajectoryCoverage)} trajectories)`,
+      );
+    } else if (skillCorpus.learning.sampleState === 'unavailable') {
+      lines.push(`  learning:     ${skillCorpus.learning.state} (observation source degraded)`);
+    } else if (skillCorpus.learning.sampleState === 'insufficient-sample') {
+      lines.push(
+        `  learning:     ${skillCorpus.learning.state} ` +
+          `(<${skillCorpus.learning.minimumObservedTrajectories} trajectories; exact counts withheld)`,
+      );
+    } else {
+      lines.push(`  learning:     ${skillCorpus.learning.state}`);
+    }
+    lines.push('');
+  }
 
   // Context efficiency
   const contextEfficiency = s.contextEfficiency;

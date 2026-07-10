@@ -1416,3 +1416,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove zero changes to route, model, prompt, options, budget, retries, fanout, winner, proposal, and merge authority.
 - [x] Run focused/full gates and independent adversarial review.
 - [x] Update notes, commit, push, reload, and production smoke.
+
+## Current Overnight Cycle - Skill Corpus Cold Start
+- [x] Rehydrate the clean deployed baseline, live FleetStatus, Entire state, and persistent rollout constraints.
+- [x] Audit why the live verified-skill corpus is empty and map authoritative backfill options.
+- [x] Add an honest corpus-readiness/data-quality surface without exposing card or query text.
+- [x] Implement the safest high-leverage cold-start slice supported by authoritative evidence: bounded, fail-closed corpus diagnostics rather than unsafe historical backfill.
+- [x] Prove no active prompt injection, route changes, causal overclaim, or merge-authority changes.
+- [ ] Run focused/full gates, independent review, notes, commit, push, reload, and production smoke. (in progress)

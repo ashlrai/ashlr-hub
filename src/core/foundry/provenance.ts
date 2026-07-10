@@ -314,6 +314,26 @@ function computeSkillCardAttestation(params: SkillCardAttestationParams): string
     .digest('hex');
 }
 
+/** Read the existing protected key without creating signing authority. */
+function loadExistingKey(): Buffer | null {
+  const keyPath = provenanceKeyPath();
+  try {
+    if (!existsSync(keyPath)) return null;
+    const stat = statSync(keyPath);
+    if (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) {
+      throw new Error(
+        `provenance key at ${keyPath} has unsafe permissions (mode ${'0o' + (stat.mode & 0o777).toString(8)}); ` +
+        'expected 0600 - run: chmod 600 ' + keyPath,
+      );
+    }
+    const key = readFileSync(keyPath);
+    return key.length > 0 ? key : null;
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('provenance key at')) throw error;
+    return null;
+  }
+}
+
 /**
  * Sign an immutable skill-card payload using the protected provenance key.
  * Returns an empty string instead of minting an ambiguous signature when the
@@ -348,7 +368,11 @@ export function verifySkillCardAttestation(
     const inputError = skillCardAttestationInputError(params);
     if (inputError) return { ok: false, reason: inputError };
 
-    const expected = computeSkillCardAttestation(params);
+    const key = loadExistingKey();
+    if (!key) return { ok: false, reason: 'missing skill card attestation key' };
+    const expected = createHmac('sha256', key)
+      .update(skillCardAttestationPayload(params), 'utf8')
+      .digest('hex');
     if (!constantTimeEqual(expected, attestation)) {
       return { ok: false, reason: 'skill card attestation HMAC mismatch - forged or stale attestation' };
     }
