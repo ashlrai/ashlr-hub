@@ -1932,10 +1932,19 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         expect.objectContaining({ kind: 'runEventSummary', count: 0, rate: 0 }),
       ]),
     });
+    expect(s.attemptCoverage?.causalGapDiagnostics).toMatchObject({
+      blockedCurrentLabels: 0,
+      causes: expect.arrayContaining([
+        expect.objectContaining({ cause: 'missing-route-snapshot', count: 3 }),
+        expect.objectContaining({ cause: 'missing-run-summary', count: 3 }),
+      ]),
+      byLearningSource: [expect.objectContaining({ key: 'daemon-dispatch', count: 3 })],
+      byLabelBasis: [expect.objectContaining({ key: 'dispatch-outcome', count: 3 })],
+    });
     expect(action).toMatchObject({
       priority: 'medium',
       label: 'Inspect causal coverage',
-      detail: expect.stringContaining('routeSnapshot 0/3 (0%)'),
+      detail: expect.stringContaining('top cause: missing-route-snapshot on 3 attempts'),
       commands: expect.arrayContaining([
         expect.objectContaining({
           label: 'Evaluate attention',

@@ -2691,6 +2691,8 @@ function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
   const joins = attemptCoverage.coverage ?? {};
   const weak = attemptCoverage.causalWeak ?? {};
   const topWeak = Array.isArray(weak.reasons) ? weak.reasons[0] : null;
+  const diagnostics = attemptCoverage.causalGapDiagnostics ?? {};
+  const topCause = Array.isArray(diagnostics.causes) ? diagnostics.causes[0] : null;
   const card = el('div', { cls });
   card.appendChild(el('div', { cls: 'card-header' },
     el('span', { cls: 'card-title' }, 'Attempt Coverage'),
@@ -2713,6 +2715,11 @@ function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
   if (topWeak) {
     body.appendChild(el('p', { cls: 'hint' },
       `Weak causal signal: ${topWeak.kind} ${topWeak.count ?? 0}/${attempts} (${formatFleetPercent(topWeak.rate)})`
+    ));
+  }
+  if (topCause) {
+    body.appendChild(el('p', { cls: 'hint' },
+      `Top cause: ${topCause.cause} on ${topCause.count ?? 0} attempt${topCause.count === 1 ? '' : 's'}`
     ));
   }
   card.appendChild(body);
@@ -4864,6 +4871,8 @@ function fdRenderProductionPanel(snap) {
     const causal = attemptCoverage.causalCoverage ?? {};
     const weak = attemptCoverage.causalWeak ?? {};
     const topWeak = Array.isArray(weak.reasons) ? weak.reasons[0] : null;
+    const diagnostics = attemptCoverage.causalGapDiagnostics ?? {};
+    const topCause = Array.isArray(diagnostics.causes) ? diagnostics.causes[0] : null;
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Attempt coverage'));
     body.appendChild(infoGrid([
       ['Attempts', attemptCoverage.attempts ?? 0],
@@ -4877,6 +4886,11 @@ function fdRenderProductionPanel(snap) {
     if (topWeak) {
       body.appendChild(el('p', { cls: 'hint' },
         `Top causal gap: ${topWeak.kind} ${topWeak.count ?? 0}/${attemptCoverage.attempts ?? 0} (${formatFleetPercent(topWeak.rate)})`
+      ));
+    }
+    if (topCause) {
+      body.appendChild(el('p', { cls: 'hint' },
+        `Top cause: ${topCause.cause} on ${topCause.count ?? 0} attempt${topCause.count === 1 ? '' : 's'}`
       ));
     }
   }

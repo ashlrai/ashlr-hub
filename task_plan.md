@@ -224,7 +224,16 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Make missing merge-contract status/action samples include project kind and reason.
 - [x] Promote explicit merge-contract rollout from low-priority hygiene to medium-priority ship-readiness work.
 - [x] Run focused verification.
-- [ ] Commit, push, reload/smoke production daemon, and choose the next overnight lane.
+- [x] Commit, push, reload/smoke production daemon, and choose the next overnight lane.
+- [x] Add one validated clean-repo explicit contract in `ashlr WM` and record push blocker.
+
+## Current Continuation - Causal Label Gap Diagnostics
+- [x] Closed sidecar scouts and selected the next Hub autonomy/learning lane.
+- [x] Inspect attempt coverage schema/tests and design metadata-only gap groups.
+- [x] Implement grouped causal label diagnostics in attempt coverage and Fleet OS action text.
+- [x] Add focused regression coverage.
+- [x] Verify implementation with focused, adjacent, invariant, and full CI gates.
+- [ ] Commit, push, and reload/smoke production daemon.
 
 ## Current Continuation - Next Actions And Judge Trust
 - [x] Deployed a broader explorer wave for auto-merge trust, daemon reliability, cross-repo coordination, command-center UI, and market/open-source leverage.

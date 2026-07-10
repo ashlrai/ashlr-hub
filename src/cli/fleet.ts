@@ -405,6 +405,19 @@ export function formatFleetStatus(s: FleetStatus): string {
       const reason = attemptCoverage.causalWeak.reasons[0]!;
       lines.push(`  causal gap:${reason.kind} ${reason.count}/${attemptCoverage.attempts} (${formatPercent(reason.rate)})`);
     }
+    const topCause = attemptCoverage.causalGapDiagnostics?.causes?.[0];
+    if (topCause) {
+      const topBasis = attemptCoverage.causalGapDiagnostics?.byLabelBasis?.[0];
+      const topSource = attemptCoverage.causalGapDiagnostics?.byLearningSource?.[0];
+      const groups = [
+        topBasis ? `basis ${topBasis.key}:${topBasis.count}` : null,
+        topSource ? `learning ${topSource.key}:${topSource.count}` : null,
+      ].filter((group): group is string => group !== null);
+      lines.push(
+        `  cause:     ${topCause.cause} on ${topCause.count} attempt(s)` +
+          `${groups.length > 0 ? ` (${groups.join(', ')})` : ''}`,
+      );
+    }
   }
   lines.push('');
 

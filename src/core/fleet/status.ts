@@ -2611,13 +2611,22 @@ function causalCoverageNextAction(status: AttemptCoverageStatus | undefined): Fl
   const weak = status.causalWeak.reasons[0];
   if (!weak) return null;
   const percent = Math.round(weak.rate * 100);
+  const topCause = status.causalGapDiagnostics.causes[0];
+  const topBasis = status.causalGapDiagnostics.byLabelBasis[0];
+  const topSource = status.causalGapDiagnostics.byLearningSource[0];
+  const diagnostics = [
+    topCause ? `top cause: ${topCause.cause} on ${countPhrase(topCause.count, 'attempt')}` : null,
+    topBasis ? `basis ${topBasis.key}:${topBasis.count}` : null,
+    topSource ? `learning ${topSource.key}:${topSource.count}` : null,
+  ].filter((part): part is string => part !== null);
   return {
     id: 'inspect-attempt-causal-coverage',
     priority: 'medium',
     label: 'Inspect causal coverage',
     detail:
       `Attempt causal metadata coverage is weak: ` +
-      `${weak.kind} ${weak.count}/${status.attempts} (${percent}%).`,
+      `${weak.kind} ${weak.count}/${status.attempts} (${percent}%).` +
+      `${diagnostics.length > 0 ? ` ${diagnostics.join('; ')}.` : ''}`,
     commands: [
       nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
       nextActionCommand('Evaluate attention', ['ashlr', 'eval', 'attention', '--json'], 'read-only'),

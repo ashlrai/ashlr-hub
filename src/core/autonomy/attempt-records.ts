@@ -88,8 +88,40 @@ export interface AttemptRecord {
   diagnosticAttempt: boolean;
   learningKind: ProductionAttemptLearningKind;
   labelAuthoritative: boolean;
+  learningSource?: string;
+  labelBasis?: string;
   coverage: AttemptRecordCoverage;
   causalCoverage: AttemptCausalCoverage;
+}
+
+export type AttemptCausalGapCause =
+  | 'legacy-unlabeled-attempt'
+  | 'current-writer-unlabeled-attempt'
+  | 'missing-authoritative-label'
+  | 'policy-suppressed'
+  | 'stale-authoritative-label'
+  | 'missing-trajectory-id'
+  | 'missing-route-snapshot'
+  | 'missing-run-summary'
+  | 'missing-router-policy-version'
+  | 'stale-router-policy-version'
+  | 'missing-learning-epoch'
+  | 'stale-learning-epoch';
+
+export interface AttemptCausalGapGroup {
+  key: string;
+  count: number;
+  sampleRefs: string[];
+}
+
+export interface AttemptCausalGapDiagnostics {
+  blockedCurrentLabels: number;
+  causes: Array<{ cause: AttemptCausalGapCause; count: number; sampleRefs: string[] }>;
+  bySource: AttemptCausalGapGroup[];
+  byBackend: AttemptCausalGapGroup[];
+  byLearningSource: AttemptCausalGapGroup[];
+  byLabelBasis: AttemptCausalGapGroup[];
+  byLearningKind: AttemptCausalGapGroup[];
 }
 
 export interface AttemptCoverageMetric {
@@ -143,6 +175,7 @@ export interface AttemptCoverageStatus {
       sampleRefs: string[];
     }>;
   };
+  causalGapDiagnostics: AttemptCausalGapDiagnostics;
   production: {
     attempts: number;
     proposalCreated: number;
@@ -397,6 +430,121 @@ function attemptRef(record: AttemptRecord): string {
   return `attempt:${hash}`;
 }
 
+function safeGroupKey(value: unknown, fallback = 'unknown'): string {
+  return bounded(value, 80, fallback) || fallback;
+}
+
+function causalGapCauses(record: AttemptRecord): AttemptCausalGapCause[] {
+  const causes: AttemptCausalGapCause[] = [];
+  const coverage = record.causalCoverage;
+  if (!coverage.trajectoryId) causes.push('missing-trajectory-id');
+  if (!coverage.routeSnapshot) causes.push('missing-route-snapshot');
+  if (!coverage.runEventSummary) causes.push('missing-run-summary');
+  if (!coverage.routerPolicyVersion) causes.push('missing-router-policy-version');
+  else if (!coverage.currentRouterPolicyVersion) causes.push('stale-router-policy-version');
+  if (!coverage.learningEpoch) causes.push('missing-learning-epoch');
+  else if (!coverage.currentLearningEpoch) causes.push('stale-learning-epoch');
+
+  if (record.policySuppressed) {
+    causes.push('policy-suppressed');
+  } else if (!coverage.labelAuthoritative) {
+    if (!coverage.routerPolicyVersion && !coverage.learningEpoch && !coverage.runEventSummary) {
+      causes.push('legacy-unlabeled-attempt');
+    } else if (
+      coverage.currentRouterPolicyVersion &&
+      coverage.currentLearningEpoch &&
+      coverage.routeSnapshot &&
+      coverage.runEventSummary
+    ) {
+      causes.push('current-writer-unlabeled-attempt');
+    } else {
+      causes.push('missing-authoritative-label');
+    }
+  } else if (!coverage.currentAuthoritativeLabel) {
+    causes.push('stale-authoritative-label');
+  }
+
+  return causes;
+}
+
+const CAUSAL_GAP_CAUSE_PRIORITY: Record<AttemptCausalGapCause, number> = {
+  'legacy-unlabeled-attempt': 0,
+  'current-writer-unlabeled-attempt': 1,
+  'missing-authoritative-label': 2,
+  'policy-suppressed': 3,
+  'stale-router-policy-version': 4,
+  'stale-learning-epoch': 5,
+  'stale-authoritative-label': 6,
+  'missing-router-policy-version': 7,
+  'missing-learning-epoch': 8,
+  'missing-route-snapshot': 9,
+  'missing-run-summary': 10,
+  'missing-trajectory-id': 11,
+};
+
+function addGapGroup(map: Map<string, AttemptCausalGapGroup>, key: string, record: AttemptRecord): void {
+  const safeKey = safeGroupKey(key);
+  const existing = map.get(safeKey);
+  if (existing) {
+    existing.count++;
+    if (existing.sampleRefs.length < 5) existing.sampleRefs.push(attemptRef(record));
+    return;
+  }
+  map.set(safeKey, { key: safeKey, count: 1, sampleRefs: [attemptRef(record)] });
+}
+
+function sortedGapGroups(map: Map<string, AttemptCausalGapGroup>): AttemptCausalGapGroup[] {
+  return [...map.values()]
+    .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key))
+    .slice(0, 5);
+}
+
+function buildCausalGapDiagnostics(records: AttemptRecord[]): AttemptCausalGapDiagnostics {
+  const causeMap = new Map<AttemptCausalGapCause, { cause: AttemptCausalGapCause; count: number; sampleRefs: string[] }>();
+  const bySource = new Map<string, AttemptCausalGapGroup>();
+  const byBackend = new Map<string, AttemptCausalGapGroup>();
+  const byLearningSource = new Map<string, AttemptCausalGapGroup>();
+  const byLabelBasis = new Map<string, AttemptCausalGapGroup>();
+  const byLearningKind = new Map<string, AttemptCausalGapGroup>();
+  let blockedCurrentLabels = 0;
+
+  for (const record of records) {
+    const causes = causalGapCauses(record);
+    if (causes.length === 0) continue;
+    if (!record.causalCoverage.currentAuthoritativeLabel) blockedCurrentLabels++;
+    for (const cause of causes) {
+      const existing = causeMap.get(cause);
+      if (existing) {
+        existing.count++;
+        if (existing.sampleRefs.length < 5) existing.sampleRefs.push(attemptRef(record));
+      } else {
+        causeMap.set(cause, { cause, count: 1, sampleRefs: [attemptRef(record)] });
+      }
+    }
+    addGapGroup(bySource, record.source, record);
+    addGapGroup(byBackend, record.backend ?? 'unknown', record);
+    addGapGroup(byLearningSource, record.learningSource ?? 'unknown', record);
+    addGapGroup(byLabelBasis, record.labelBasis ?? 'unknown', record);
+    addGapGroup(byLearningKind, record.learningKind, record);
+  }
+
+  return {
+    blockedCurrentLabels,
+    causes: [...causeMap.values()]
+      .sort((a, b) =>
+        b.count - a.count ||
+        CAUSAL_GAP_CAUSE_PRIORITY[a.cause] - CAUSAL_GAP_CAUSE_PRIORITY[b.cause] ||
+        a.cause.localeCompare(b.cause),
+      )
+      .slice(0, 8),
+    bySource: sortedGapGroups(bySource),
+    byBackend: sortedGapGroups(byBackend),
+    byLearningSource: sortedGapGroups(byLearningSource),
+    byLabelBasis: sortedGapGroups(byLabelBasis),
+    byLearningKind: sortedGapGroups(byLearningKind),
+  };
+}
+
 export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptRecord[] {
   const windowHours = opts?.windowHours && opts.windowHours > 0 ? opts.windowHours : DEFAULT_WINDOW_HOURS;
   const limit = opts?.limit && opts.limit > 0 ? Math.floor(opts.limit) : DEFAULT_LIMIT;
@@ -438,6 +586,8 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
       const backend = event.backend === null ? null : bounded(event.backend, 80);
       const tier = event.tier === null ? null : bounded(event.tier, 40);
       const model = event.model === null ? null : bounded(event.model, 160);
+      const learningSource = bounded(event.learningSource, 80);
+      const labelBasis = bounded(event.labelBasis, 80);
       const runSummary = sanitizeRunEventSummary(event.runEventSummary);
       const actionCounts = runSummary?.actionCounts;
       const learningLabel = sanitizeProductionAttemptLearningLabel(event.learningLabel);
@@ -501,6 +651,8 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
         diagnosticAttempt: classification.diagnosticAttempt,
         learningKind: classification.kind,
         labelAuthoritative,
+        ...(learningSource ? { learningSource } : {}),
+        ...(labelBasis ? { labelBasis } : {}),
         coverage,
         causalCoverage,
       };
@@ -591,6 +743,7 @@ export function summarizeAttemptCoverage(
         })
         .filter((reason) => reason.rate < reason.threshold)
     : [];
+  const causalGapDiagnostics = buildCausalGapDiagnostics(records);
   return {
     windowHours,
     attempts: records.length,
@@ -615,6 +768,7 @@ export function summarizeAttemptCoverage(
       labelThreshold: CAUSAL_LABEL_THRESHOLD,
       reasons: weakReasons,
     },
+    causalGapDiagnostics,
     production: {
       attempts: records.length,
       proposalCreated,

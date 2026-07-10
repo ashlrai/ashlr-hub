@@ -429,9 +429,135 @@ describe('AttemptRecord coverage', () => {
       ]),
     });
     expect(summary.causalGaps[0]?.sampleRefs[0]).toMatch(/^attempt:[a-f0-9]{12}$/);
+    expect(summary.causalGapDiagnostics).toMatchObject({
+      blockedCurrentLabels: 3,
+      causes: expect.arrayContaining([
+        expect.objectContaining({ cause: 'legacy-unlabeled-attempt', count: 1 }),
+        expect.objectContaining({ cause: 'stale-router-policy-version', count: 1 }),
+        expect.objectContaining({ cause: 'stale-learning-epoch', count: 1 }),
+      ]),
+    });
     expect(JSON.stringify(summary)).not.toContain('traj-complete');
     expect(JSON.stringify(summary)).not.toContain('prop-complete');
     expect(JSON.stringify(summary)).not.toContain('old route');
+  });
+
+  it('groups causal label gaps without leaking raw attempt identifiers', () => {
+    const records = listAttemptRecords({
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          causalDispatch({
+            itemId: 'raw-current-item',
+            runId: 'run-current-unlabeled',
+            trajectoryId: 'traj-current-unlabeled',
+            proposalId: undefined,
+            outcome: 'empty-diff',
+            proposalCreated: false,
+            learningLabel: undefined,
+            learningSource: 'daemon-dispatch',
+            labelBasis: 'dispatch-outcome',
+            runEventSummary: {
+              runId: 'run-current-unlabeled',
+              outcome: 'empty-diff',
+              proposalCreated: false,
+              actionCounts: { diffFiles: 0 },
+            },
+          }),
+          dispatch({
+            itemId: 'raw-legacy-item',
+            runId: undefined,
+            trajectoryId: undefined,
+            proposalId: undefined,
+            routeSnapshot: undefined,
+            runEventSummary: undefined,
+            routerPolicyVersion: undefined,
+            learningEpoch: undefined,
+            learningLabel: undefined,
+            outcome: 'empty-diff',
+            proposalCreated: false,
+          }),
+          causalDispatch({
+            itemId: 'stale-policy',
+            runId: 'run-stale-policy-gap',
+            trajectoryId: 'traj-stale-policy-gap',
+            proposalId: 'prop-stale-policy',
+            routerPolicyVersion: 'old-router',
+            routeSnapshot: {
+              backend: 'local-coder',
+              tier: 'local',
+              model: 'qwen',
+              assignedBy: 'test',
+              reason: 'stale policy route text',
+              routerPolicyVersion: 'old-router',
+            },
+            learningSource: 'daemon-dispatch',
+            labelBasis: 'dispatch-outcome',
+          }),
+          causalDispatch({
+            itemId: 'policy-suppressed',
+            runId: 'run-policy-suppressed',
+            trajectoryId: 'traj-policy-suppressed',
+            proposalId: undefined,
+            outcome: 'proposal-disabled',
+            proposalCreated: false,
+            learningSource: 'daemon-dispatch',
+            labelBasis: 'dispatch-outcome',
+            runEventSummary: {
+              runId: 'run-policy-suppressed',
+              outcome: 'proposal-disabled',
+              proposalCreated: false,
+              actionCounts: { proposalDisabled: 1 },
+            },
+            learningLabel: learningLabel({
+              learningKind: 'policy-suppressed',
+              policySuppressed: true,
+              diagnosticAttempt: false,
+              attemptShape: {
+                backendNoDiff: 0,
+                captureOrGateBlocked: 0,
+                repairAttempts: 0,
+                policyDisabled: 1,
+              },
+            }),
+          }),
+        ],
+        readAgentActions: () => [],
+        listOutcomeRecords: () => [],
+        readDecisions: () => [],
+        listAutonomyEvidencePacks: () => [],
+        loadWorkedLedger: () => ({ events: [] }),
+      }),
+    });
+
+    const summary = summarizeAttemptCoverage(records);
+
+    expect(summary.causalGapDiagnostics).toMatchObject({
+      blockedCurrentLabels: 4,
+      causes: expect.arrayContaining([
+        expect.objectContaining({ cause: 'current-writer-unlabeled-attempt', count: 1 }),
+        expect.objectContaining({ cause: 'legacy-unlabeled-attempt', count: 1 }),
+        expect.objectContaining({ cause: 'stale-router-policy-version', count: 1 }),
+        expect.objectContaining({ cause: 'policy-suppressed', count: 1 }),
+      ]),
+      byBackend: [expect.objectContaining({ key: 'local-coder', count: 4 })],
+      bySource: [expect.objectContaining({ key: 'goal', count: 4 })],
+      byLearningSource: expect.arrayContaining([
+        expect.objectContaining({ key: 'daemon-dispatch', count: 3 }),
+        expect.objectContaining({ key: 'unknown', count: 1 }),
+      ]),
+      byLabelBasis: expect.arrayContaining([
+        expect.objectContaining({ key: 'dispatch-outcome', count: 3 }),
+        expect.objectContaining({ key: 'unknown', count: 1 }),
+      ]),
+      byLearningKind: expect.arrayContaining([
+        expect.objectContaining({ key: 'policy-suppressed', count: 1 }),
+        expect.objectContaining({ key: 'diagnostic-no-proposal', count: 2 }),
+      ]),
+    });
+    expect(summary.causalGapDiagnostics.causes[0]?.sampleRefs[0]).toMatch(/^attempt:[a-f0-9]{12}$/);
+    expect(JSON.stringify(summary.causalGapDiagnostics)).not.toContain('raw-current-item');
+    expect(JSON.stringify(summary.causalGapDiagnostics)).not.toContain('raw-legacy-item');
+    expect(JSON.stringify(summary.causalGapDiagnostics)).not.toContain('stale policy route text');
   });
 
   it('counts read-time legacy run-outcome causal fallbacks without materializing a label', () => {
