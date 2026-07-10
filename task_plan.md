@@ -1265,3 +1265,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Update Mission Brief directive/action ranking to prefer concrete capture-repair monitoring over passive dispatch-yield inspection.
 - [x] Add focused M49 coverage for eligible and cooling capture-repair cases.
 - [x] Run focused and final gates, commit, push, reload daemon, and smoke live status.
+
+## Current Continuation - Dispatch Learning Label Read Backfill
+- [x] Use live causal coverage and scout findings to locate current authoritative-label debt in legacy dispatch-production rows.
+- [x] Materialize deterministic `learningLabel` metadata on read for legacy dispatch-production rows using the same classifier already used on writes.
+- [x] Preserve append-only behavior: legacy JSONL files are not rewritten and raw prompts/diffs/stdout/stderr/env/file contents remain absent.
+- [x] Update ledger and attempt-record regressions for read-time labels plus no durable rewrite.
+- [x] Run focused privacy/learning/fleet/dashboard gates and final lint/build/audit gates.
+- [x] Commit, push, reload daemon, and smoke live causal coverage.
