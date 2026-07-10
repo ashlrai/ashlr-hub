@@ -2448,7 +2448,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatFleetStatus(s)).toContain('diagnosis: actionable · nim/goal 0/3 0% · tighten context/reslice');
   });
 
-  it('includes queued capture repair coverage in dispatch-yield action details', async () => {
+  it('promotes eligible capture repairs ahead of dispatch-yield inspection', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');
     const now = new Date().toISOString();
@@ -2502,7 +2502,9 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ]);
 
     const s = await buildFleetStatus(baseConfig());
-    const action = s.nextActions?.find((candidate) => candidate.id === 'inspect-dispatch-yield');
+    const actionIds = s.nextActions?.map((candidate) => candidate.id) ?? [];
+    const repairAction = s.nextActions?.find((candidate) => candidate.id === 'process-capture-repairs');
+    const yieldAction = s.nextActions?.find((candidate) => candidate.id === 'inspect-dispatch-yield');
 
     expect(s.queue.generatedWork).toMatchObject({
       captureRepairs: 1,
@@ -2517,7 +2519,108 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         source: 'self',
       },
     });
-    expect(action?.detail).toContain('queued repair coverage: 1 capture repair queued');
+    expect(actionIds[0]).toBe('process-capture-repairs');
+    expect(actionIds).toContain('inspect-dispatch-yield');
+    expect(repairAction).toMatchObject({
+      priority: 'high',
+      label: 'Monitor capture repairs',
+      detail: expect.stringContaining('1 capture repair item(s) are eligible'),
+      target: repo,
+      commands: [
+        expect.objectContaining({
+          label: 'Inspect fleet status',
+          argv: ['ashlr', 'fleet', 'status', '--json'],
+          safety: 'read-only',
+        }),
+        expect.objectContaining({
+          label: 'Inspect daemon status',
+          argv: ['ashlr', 'daemon', 'status'],
+          safety: 'read-only',
+        }),
+      ],
+    });
+    expect(repairAction?.detail).toContain('sample-gated action: tighten context/reslice');
+    expect(repairAction?.detail).toContain('queued repair coverage: 1 capture repair queued');
+    expect(repairAction?.detail).toContain('First: Repair dispatch capture failure for repo item repo:self:gate.');
+    expect(yieldAction?.detail).toContain('queued repair coverage: 1 capture repair queued');
+    expect(s.autonomousShipReadiness).toMatchObject({
+      primaryAction: {
+        id: 'process-capture-repairs',
+      },
+    });
+    expect(s.missionBrief).toMatchObject({
+      directive: 'Monitor capture repairs',
+      action: {
+        id: 'process-capture-repairs',
+      },
+    });
+    const formatted = formatFleetStatus(s);
+    expect(formatted).toContain('[high] Monitor capture repairs');
+    expect(formatted).toContain('cmd: Inspect fleet status: ashlr fleet status --json (read-only)');
+    expect(repairAction?.commands?.map((command) => command.safety)).toEqual(['read-only', 'read-only']);
+  });
+
+  it('does not promote capture repairs when queued repairs are cooling', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    const now = new Date().toISOString();
+    const repair = makeBacklogItem(
+      repo,
+      'repo:proposal-repair-capture:cooling123456',
+      'Repair dispatch capture failure for repo item repo:self:cooling',
+      9,
+      'self',
+      ['self-heal', 'proposal-repair', 'dispatch-capture-repair', 'capture-gate'],
+    );
+    const fresh = makeBacklogItem(repo, 'repo:goal:fresh-generic', 'Fresh generic work', 2, 'goal');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome, [], now);
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeBacklogSnapshot(tmpHome, repo, [repair, fresh], now);
+    recordOutcome(repair.id, 'empty', now);
+    const baseEvent: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: now,
+      machineId: 'm49',
+      itemId: 'item-cooling-capture-a',
+      source: 'self',
+      repo,
+      title: 'Repair capture failure',
+      backend: 'local-coder',
+      tier: 'mid',
+      model: 'qwen',
+      assignedBy: 'daemon',
+      routeReason: 'local-coder bulk',
+      outcome: 'gate-blocked',
+      proposalCreated: false,
+      spentUsd: 0.001,
+      reason: 'tests: still failing after 2 attempt(s)',
+      diffFiles: 1,
+      diffLines: 12,
+      basis: 'run-proposal-outcome',
+    };
+    recordDispatchProduction([
+      baseEvent,
+      { ...baseEvent, itemId: 'item-cooling-capture-b' },
+      { ...baseEvent, itemId: 'item-cooling-capture-c' },
+    ]);
+
+    const s = await buildFleetStatus(baseConfig());
+    const actionIds = s.nextActions?.map((action) => action.id) ?? [];
+
+    expect(s.queue.generatedWork).toMatchObject({
+      captureRepairs: 1,
+      proposalRepair: 1,
+    });
+    expect(s.queue.eligibleBacklogItems).toBe(1);
+    expect(s.queue.cooldownItems).toBe(1);
+    expect(s.queue.next?.[0]).toMatchObject({
+      id: fresh.id,
+      title: fresh.title,
+    });
+    expect(actionIds).not.toContain('process-capture-repairs');
+    expect(actionIds[0]).toBe('inspect-dispatch-yield');
   });
 
   it('promotes queued no-diff diagnostic reslices ahead of dispatch-yield inspection', async () => {

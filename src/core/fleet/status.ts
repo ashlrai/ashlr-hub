@@ -1699,6 +1699,11 @@ function isDiagnosticResliceQueueItem(item: FleetQueueNextItem): boolean {
     item.title.toLowerCase().startsWith('reslice no-diff dispatch');
 }
 
+function isCaptureRepairQueueItem(item: FleetQueueNextItem): boolean {
+  return item.id.includes(':proposal-repair-capture:') ||
+    item.title.toLowerCase().startsWith('repair dispatch capture failure');
+}
+
 function diagnosticPolicyDisabled(
   value: Pick<DispatchProductionYieldSummary, 'outcomes' | 'attemptShape'>,
 ): number {
@@ -2097,6 +2102,46 @@ function diagnosticResliceDrainNextAction(status: FleetStatus): FleetNextAction 
   };
 }
 
+function captureRepairNextAction(status: FleetStatus): FleetNextAction | null {
+  const diagnostic = status.dispatchYieldDiagnostics;
+  const captureRepairCount = status.queue.generatedWork?.captureRepairs ?? 0;
+  const eligibleRepairs = status.queue.next?.filter(isCaptureRepairQueueItem) ?? [];
+  const eligibleRepairCount = eligibleRepairs.length;
+  if (
+    !diagnostic ||
+    diagnostic.verdict !== 'actionable' ||
+    diagnostic.action !== 'tighten-context-or-reslice' ||
+    status.daemon.running !== true ||
+    captureRepairCount <= 0 ||
+    eligibleRepairCount <= 0
+  ) {
+    return null;
+  }
+
+  const topRepair = eligibleRepairs[0] ?? null;
+  const diagnosticDetail = formatDispatchYieldDiagnosticDetail(diagnostic, status.queue.generatedWork);
+  const target = topRepair?.repo ?? diagnostic.primaryCandidate?.backend;
+  const first = topRepair ? ` First: ${topRepair.title}.` : '';
+  const countDetail = eligibleRepairCount === captureRepairCount
+    ? `${eligibleRepairCount} capture repair item(s) are eligible`
+    : `${eligibleRepairCount}/${captureRepairCount} capture repair item(s) are daemon-eligible`;
+  return {
+    id: 'process-capture-repairs',
+    priority: 'high',
+    label: 'Monitor capture repairs',
+    detail:
+      `${countDetail} while dispatch yield is actionable: ` +
+      `${diagnosticDetail}.${first}`,
+    ...(target ? { target } : {}),
+    commands: [
+      nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only', {
+        note: 'Launchd daemon processes eligible capture repairs during normal live ticks.',
+      }),
+      nextActionCommand('Inspect daemon status', ['ashlr', 'daemon', 'status'], 'read-only'),
+    ],
+  };
+}
+
 function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffectivenessStatus {
   const readiness = status.autoMergeReadiness;
   const eligibleBacklogItems = status.queue.eligibleBacklogItems ?? status.queue.backlogItems;
@@ -2424,6 +2469,8 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   if (eligibleBacklogItems > 0 && !controlBlocked) {
     const diagnosticResliceDrainAction = diagnosticResliceDrainNextAction(status);
     if (diagnosticResliceDrainAction) add(diagnosticResliceDrainAction);
+    const captureRepairAction = captureRepairNextAction(status);
+    if (captureRepairAction) add(captureRepairAction);
     const dispatchYieldDetail = dispatchYieldNextAction(status);
     if (dispatchYieldDetail) {
       add({
@@ -2570,6 +2617,7 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     if (action.id === 'repair-verification-failures' && (status.autoMergeReadiness?.knownVerificationFailed ?? 0) > 0) return -1.4;
     if (action.id === 'review-phantom-audit') return -1.3;
     if (action.id === 'drain-diagnostic-reslices' && (status.autoMergeReadiness?.knownVerificationFailed ?? 0) === 0) return -1.2;
+    if (action.id === 'process-capture-repairs' && (status.autoMergeReadiness?.knownVerificationFailed ?? 0) === 0) return -1.1;
     if (action.id === 'inspect-dispatch-yield') return -1;
     if (action.id === 'inspect-attempt-causal-coverage') return -0.5;
     if (action.id === 'add-explicit-merge-verify-contracts') return 0.5;
@@ -3375,6 +3423,8 @@ function missionDirective(
       return action.label === 'Monitor diagnostic auto-drain'
         ? 'Monitor diagnostic auto-drain'
         : 'Drain diagnostic reslices';
+    case 'process-capture-repairs':
+      return 'Monitor capture repairs';
     case 'inspect-dispatch-yield':
       return 'Recover dispatch yield';
     case 'inspect-dispatch-skips':
