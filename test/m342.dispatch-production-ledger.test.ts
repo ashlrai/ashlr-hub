@@ -444,6 +444,73 @@ describe('M342 dispatch production ledger', () => {
     )).toBe(true);
   });
 
+  it('classifies generated repair work as repair attempts without raw text in labels', () => {
+    const captureRepair = makeEvent({
+      itemId: 'ashlr-hub:proposal-repair-capture:abcdef123456',
+      title: 'Repair dispatch capture failure for ashlr-hub item ashlr-hub:self-heal:stalled',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: 'prop-repair',
+      reason: 'completed repair proposal',
+      runEventSummary: {
+        runId: 'run-repair',
+        outcome: 'proposal-created',
+        proposalCreated: true,
+        proposalId: 'prop-repair',
+        actionCounts: { proposalCreated: 1, diffFiles: 1, diffLines: 8 },
+      },
+    });
+    const noDiffReslice = makeEvent({
+      itemId: 'ashlr-hub:proposal-repair-nodiff:123456789abc',
+      title: 'Reslice no-diff dispatch for ashlr-hub item ashlr-hub:goal:stalled',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      proposalId: undefined,
+      reason: 'still no diff',
+      runEventSummary: {
+        runId: 'run-reslice',
+        outcome: 'empty-diff',
+        proposalCreated: false,
+        actionCounts: { diffFiles: 0 },
+      },
+    });
+    recordDispatchProduction(captureRepair);
+
+    const event = readDispatchProductionEvents()[0]!;
+    const summary = summarizeDispatchProductionYield([event, noDiffReslice]);
+
+    expect(event.learningLabel).toMatchObject({
+      learningKind: 'proposal-created',
+      attemptShape: {
+        backendNoDiff: 0,
+        captureOrGateBlocked: 0,
+        repairAttempts: 1,
+        policyDisabled: 0,
+      },
+    });
+    expect(JSON.stringify(event.learningLabel)).not.toContain('Repair dispatch');
+    expect(summary).toMatchObject({
+      attempts: 2,
+      proposalsCreated: 1,
+      noProposal: 1,
+      attemptShape: {
+        backendNoDiff: 1,
+        captureOrGateBlocked: 0,
+        repairAttempts: 2,
+        policyDisabled: 0,
+      },
+      generatedRepairAttempts: {
+        attempts: 2,
+        proposalsCreated: 1,
+        noProposal: 1,
+        proposalRate: 0.5,
+        captureRepairs: 1,
+        diagnosticReslices: 1,
+        proposalRepairs: 0,
+      },
+    });
+  });
+
   it('keeps raw proposal-disabled reasons while exposing diagnostic reasons for operators', () => {
     const summary = summarizeDispatchProductionYield([
       makeEvent({

@@ -1500,7 +1500,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       { ...baseEvent, itemId: 'item-b', outcome: 'gate-blocked', reason: 'completeness gate blocked proposal' },
       {
         ...baseEvent,
-        itemId: 'item-c',
+        itemId: 'repo:proposal-repair-capture:abcdef123456',
+        title: 'Repair dispatch capture failure for repo item repo:self-heal:stalled',
         source: 'goal',
         backend: 'codex',
         tier: 'frontier',
@@ -1525,6 +1526,20 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         emptyDiff: 1,
         gateBlocked: 1,
       },
+      generatedRepairAttempts: {
+        attempts: 1,
+        proposalsCreated: 1,
+        noProposal: 0,
+        proposalRate: 1,
+        captureRepairs: 1,
+        diagnosticReslices: 0,
+        proposalRepairs: 0,
+      },
+    });
+    expect(s.attemptCoverage?.production.generatedRepairAttempts).toMatchObject({
+      attempts: 1,
+      proposalsCreated: 1,
+      captureRepairs: 1,
     });
     expect(s.dispatchProduction?.byBackend[0]).toMatchObject({
       backend: 'local-coder',
@@ -1551,7 +1566,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('Dispatch yield:');
     expect(formatted).toContain('proposals 1/3');
-    expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 0, policy-off 0');
+    expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 1, policy-off 0');
+    expect(formatted).toContain('repair yield: capture 1 attempt; 1/1 converted (100%)');
     expect(formatted).toContain('diagnosis: healthy · fleet 1/3 33% · keep routing');
     expect(formatted).toContain('local-coder 0/2 0%');
     expect(formatted).toContain('codex 1/1 100%');
@@ -3977,6 +3993,15 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       noProposal: 4,
       proposalRate: 0,
       spentUsd: 0,
+      generatedRepairAttempts: {
+        attempts: 2,
+        proposalsCreated: 1,
+        noProposal: 1,
+        proposalRate: 0.5,
+        captureRepairs: 1,
+        diagnosticReslices: 1,
+        proposalRepairs: 0,
+      },
       outcomes: {
         proposalCreated: 0,
         emptyDiff: 1,
@@ -4003,6 +4028,7 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
 
     const out = formatFleetStatus({ ...base, dispatchProduction });
     expect(out).toContain('reasons:   1x engine "local-coder" completed without file changes');
+    expect(out).toContain('repair yield: capture 1 attempt, no-diff 1 attempt; 1/2 converted (50%)');
     expect(out).not.toContain('proposal filing disabled');
 
     const emptyDiagnosticOut = formatFleetStatus({

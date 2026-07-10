@@ -928,6 +928,87 @@ describe('AttemptRecord coverage', () => {
     ]);
   });
 
+  it('counts generated repair attempts in production coverage summaries', () => {
+    const records = listAttemptRecords({
+      deps: deps({
+        readDispatchProductionEvents: () => [
+          dispatch({
+            itemId: 'ashlr-hub:proposal-repair-capture:abcdef123456',
+            title: 'Repair dispatch capture failure for ashlr-hub item ashlr-hub:self-heal:stalled',
+            outcome: 'proposal-created',
+            proposalCreated: true,
+            proposalId: 'prop-repair',
+            runEventSummary: {
+              outcome: 'proposal-created',
+              proposalCreated: true,
+              proposalId: 'prop-repair',
+              actionCounts: { proposalCreated: 1, diffFiles: 1, diffLines: 8 },
+            },
+          }),
+          dispatch({
+            itemId: 'ashlr-hub:proposal-repair-nodiff:123456789abc',
+            title: 'Reslice no-diff dispatch for ashlr-hub item ashlr-hub:goal:stalled',
+            outcome: 'empty-diff',
+            proposalCreated: false,
+            proposalId: undefined,
+            runEventSummary: {
+              outcome: 'empty-diff',
+              proposalCreated: false,
+              actionCounts: { diffFiles: 0 },
+            },
+          }),
+        ],
+        listOutcomeRecords: () => [],
+        readDecisions: () => [],
+        listAutonomyEvidencePacks: () => [],
+        loadWorkedLedger: () => ({ events: [] }),
+      }),
+    });
+
+    expect(records).toHaveLength(2);
+    expect(records[0]).toMatchObject({
+      learningKind: 'proposal-created',
+      diagnosticAttempt: true,
+      attemptShape: { repairAttempts: 1 },
+    });
+    expect(records[1]).toMatchObject({
+      learningKind: 'diagnostic-no-proposal',
+      diagnosticAttempt: true,
+      diagnosticNoProposal: true,
+      attemptShape: {
+        backendNoDiff: 1,
+        repairAttempts: 1,
+      },
+    });
+
+    const summary = summarizeAttemptCoverage(records);
+    expect(summary.production).toMatchObject({
+      attempts: 2,
+      proposalCreated: 1,
+      diagnosticAttempts: 2,
+      diagnosticNoProposal: 1,
+      diagnosticProposalRate: 0.5,
+      diagnosticNoProposalRate: 0.5,
+      attemptShape: {
+        backendNoDiff: 1,
+        captureOrGateBlocked: 0,
+        repairAttempts: 2,
+        policyDisabled: 0,
+      },
+      generatedRepairAttempts: {
+        attempts: 2,
+        proposalsCreated: 1,
+        noProposal: 1,
+        proposalRate: 0.5,
+        captureRepairs: 1,
+        diagnosticReslices: 1,
+        proposalRepairs: 0,
+      },
+    });
+    expect(JSON.stringify(summary.production.generatedRepairAttempts)).not.toContain('ashlr-hub');
+    expect(JSON.stringify(summary.production.generatedRepairAttempts)).not.toContain('Repair dispatch');
+  });
+
   it('keeps all policy-suppressed attempts out of diagnostic attempt denominators', () => {
     const records = listAttemptRecords({
       deps: deps({

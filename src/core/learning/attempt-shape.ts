@@ -5,7 +5,15 @@ export interface ProductionAttemptShapeSignals {
   proposalCreated?: boolean | null;
   actionCounts?: RunActionCounts;
   reason?: string | null;
+  itemId?: string | null;
+  title?: string | null;
+  source?: string | null;
 }
+
+export type GeneratedRepairAttemptKind =
+  | 'capture-repair'
+  | 'no-diff-reslice'
+  | 'proposal-repair';
 
 export type ProductionAttemptLearningKind =
   | 'proposal-created'
@@ -85,6 +93,7 @@ export function productionAttemptShapeFromSignals(
   const proposalDisabled = nonNegativeInteger(counts?.proposalDisabled) ?? 0;
   const completenessGateRuns = nonNegativeInteger(counts?.completenessGateRuns) ?? 0;
   const verifyRepairAttempts = nonNegativeInteger(counts?.verifyRepairAttempts) ?? 0;
+  const generatedRepairAttemptKind = generatedRepairAttemptKindFromSignals(signals);
   const produced = signals.proposalCreated === true || outcome === 'proposal-created';
   const policyDisabled = !captureMissing && (outcome === 'proposal-disabled' || proposalDisabled > 0);
   const gateish = captureMissing || outcome === 'gate-blocked' || outcome === 'proposal-capture-error';
@@ -102,7 +111,7 @@ export function productionAttemptShapeFromSignals(
   ) {
     shape.captureOrGateBlocked = 1;
   }
-  shape.repairAttempts = verifyRepairAttempts;
+  shape.repairAttempts = Math.max(verifyRepairAttempts, generatedRepairAttemptKind ? 1 : 0);
   return shape;
 }
 
@@ -122,7 +131,8 @@ export function classifyProductionAttemptForLearning(
     outcome === 'gate-blocked' ||
     outcome === 'proposal-capture-error' ||
     attemptShape.backendNoDiff > 0 ||
-    attemptShape.captureOrGateBlocked > 0
+    attemptShape.captureOrGateBlocked > 0 ||
+    attemptShape.repairAttempts > 0
   );
   const kind: ProductionAttemptLearningKind = produced
     ? 'proposal-created'
@@ -246,6 +256,22 @@ function normalizeReason(value: string | null | undefined): string | undefined {
 function isCaptureMissingSignal(signals: ProductionAttemptShapeSignals): boolean {
   const reason = normalizeReason(signals.reason);
   return reason?.includes('capture-missing') === true;
+}
+
+export function generatedRepairAttemptKindFromSignals(
+  signals: Pick<ProductionAttemptShapeSignals, 'itemId' | 'title' | 'source'>,
+): GeneratedRepairAttemptKind | undefined {
+  const itemId = normalizeReason(signals.itemId);
+  if (itemId) {
+    if (/(^|:)proposal-repair-capture:[0-9a-f]{12}\b/i.test(itemId)) return 'capture-repair';
+    if (/(^|:)proposal-repair-nodiff:[0-9a-f]{12}\b/i.test(itemId)) return 'no-diff-reslice';
+    if (/(^|:)proposal-repair:[0-9a-f]{12}\b/i.test(itemId)) return 'proposal-repair';
+  }
+  const title = normalizeReason(signals.title);
+  if (title?.startsWith('repair dispatch capture failure for ') === true) return 'capture-repair';
+  if (title?.startsWith('reslice no-diff dispatch for ') === true) return 'no-diff-reslice';
+  if (title?.startsWith('repair proposal ') === true) return 'proposal-repair';
+  return undefined;
 }
 
 function nonNegativeInteger(value: unknown): number | undefined {

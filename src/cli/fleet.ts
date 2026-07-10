@@ -304,6 +304,8 @@ export function formatFleetStatus(s: FleetStatus): string {
     );
     const attemptShape = formatAttemptShape(dispatchProduction.attemptShape);
     if (attemptShape) lines.push(`  shape:     ${attemptShape}`);
+    const repairYield = formatGeneratedRepairYield(dispatchProduction.generatedRepairAttempts);
+    if (repairYield) lines.push(`  repair yield: ${repairYield}`);
     if (s.dispatchYieldDiagnostics) {
       lines.push(`  diagnosis: ${formatDispatchYieldDiagnostics(s.dispatchYieldDiagnostics)}`);
     }
@@ -379,6 +381,8 @@ export function formatFleetStatus(s: FleetStatus): string {
         `no-proposal ${attemptCoverage.production.diagnosticNoProposal}, ` +
         `policy-suppressed ${attemptCoverage.production.policySuppressed}`,
     );
+    const repairYield = formatGeneratedRepairYield(attemptCoverage.production.generatedRepairAttempts);
+    if (repairYield) lines.push(`  repairs:   ${repairYield}`);
     lines.push(
       `  joins:     actions ${formatCoverageMetric(attemptCoverage.coverage.agentAction)}, ` +
         `worked ${formatCoverageMetric(attemptCoverage.coverage.worked)}, ` +
@@ -743,6 +747,24 @@ function formatAttemptShape(shape: NonNullable<FleetStatus['dispatchProduction']
   if (total <= 0) return '';
   return `no-diff ${shape.backendNoDiff ?? 0}, gate/capture ${shape.captureOrGateBlocked ?? 0}, ` +
     `repairs ${shape.repairAttempts ?? 0}, policy-off ${shape.policyDisabled ?? 0}`;
+}
+
+function formatGeneratedRepairYield(
+  generated: NonNullable<FleetStatus['dispatchProduction']>['generatedRepairAttempts'] | NonNullable<FleetStatus['attemptCoverage']>['production']['generatedRepairAttempts'],
+): string {
+  if (!generated || (generated.attempts ?? 0) <= 0) return '';
+  const parts: string[] = [];
+  if ((generated.captureRepairs ?? 0) > 0) {
+    parts.push(`capture ${generated.captureRepairs} attempt${generated.captureRepairs === 1 ? '' : 's'}`);
+  }
+  if ((generated.diagnosticReslices ?? 0) > 0) {
+    parts.push(`no-diff ${generated.diagnosticReslices} attempt${generated.diagnosticReslices === 1 ? '' : 's'}`);
+  }
+  if ((generated.proposalRepairs ?? 0) > 0) {
+    parts.push(`proposal ${generated.proposalRepairs} attempt${generated.proposalRepairs === 1 ? '' : 's'}`);
+  }
+  const kindSummary = parts.length > 0 ? `${parts.join(', ')}; ` : '';
+  return `${kindSummary}${generated.proposalsCreated}/${generated.attempts} converted (${formatPercent(generated.proposalRate ?? 0)})`;
 }
 
 function formatDispatchYieldDiagnostics(

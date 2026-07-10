@@ -27,9 +27,11 @@ import {
   addProductionAttemptShape,
   classifyProductionAttemptForLearningWithLabel,
   emptyProductionAttemptShape,
+  generatedRepairAttemptKindFromSignals,
   hasProductionAttemptShape,
   productionAttemptLearningLabelFromSignals,
   sanitizeProductionAttemptLearningLabel,
+  type GeneratedRepairAttemptKind,
   type ProductionAttemptLearningClassification,
   type ProductionAttemptLearningLabel,
 } from '../learning/attempt-shape.js';
@@ -93,6 +95,16 @@ export interface DispatchProductionOutcomeCounts {
   unknown: number;
 }
 
+export interface GeneratedRepairAttemptSummary {
+  attempts: number;
+  proposalsCreated: number;
+  noProposal: number;
+  proposalRate: number;
+  captureRepairs: number;
+  diagnosticReslices: number;
+  proposalRepairs: number;
+}
+
 export interface DispatchProductionYieldBucket {
   key: string;
   backend?: EngineId | null;
@@ -107,6 +119,7 @@ export interface DispatchProductionYieldBucket {
   outcomes: DispatchProductionOutcomeCounts;
   actionCounts?: RunActionCounts;
   attemptShape?: ProductionAttemptShape;
+  generatedRepairAttempts?: GeneratedRepairAttemptSummary;
   topReasons: DispatchProductionReasonCount[];
   diagnosticTopReasons?: DispatchProductionReasonCount[];
 }
@@ -122,6 +135,7 @@ export interface DispatchProductionYieldSummary {
   outcomes: DispatchProductionOutcomeCounts;
   actionCounts?: RunActionCounts;
   attemptShape?: ProductionAttemptShape;
+  generatedRepairAttempts?: GeneratedRepairAttemptSummary;
   topReasons: DispatchProductionReasonCount[];
   diagnosticTopReasons?: DispatchProductionReasonCount[];
   byBackend: DispatchProductionYieldBucket[];
@@ -238,6 +252,9 @@ function sanitizeEvent(
         proposalCreated: Boolean(event.proposalCreated),
         actionCounts: causal.runEventSummary?.actionCounts,
         reason,
+        itemId,
+        title,
+        source,
       })
     : sanitizeProductionAttemptLearningLabel(event.learningLabel);
   return {
@@ -524,8 +541,45 @@ interface MutableYieldBucket {
   outcomes: DispatchProductionOutcomeCounts;
   actionCounts: RunActionCounts;
   attemptShape: ProductionAttemptShape;
+  generatedRepairAttempts: GeneratedRepairAttemptSummary;
   reasons: Map<string, number>;
   diagnosticReasons: Map<string, number>;
+}
+
+function emptyGeneratedRepairAttemptSummary(): GeneratedRepairAttemptSummary {
+  return {
+    attempts: 0,
+    proposalsCreated: 0,
+    noProposal: 0,
+    proposalRate: 0,
+    captureRepairs: 0,
+    diagnosticReslices: 0,
+    proposalRepairs: 0,
+  };
+}
+
+function hasGeneratedRepairAttemptSummary(summary: GeneratedRepairAttemptSummary): boolean {
+  return summary.attempts > 0 ||
+    summary.proposalsCreated > 0 ||
+    summary.noProposal > 0 ||
+    summary.captureRepairs > 0 ||
+    summary.diagnosticReslices > 0 ||
+    summary.proposalRepairs > 0;
+}
+
+function addGeneratedRepairAttempt(
+  summary: GeneratedRepairAttemptSummary,
+  kind: GeneratedRepairAttemptKind | undefined,
+  proposalCreated: boolean,
+): void {
+  if (!kind) return;
+  summary.attempts++;
+  if (proposalCreated) summary.proposalsCreated++;
+  else summary.noProposal++;
+  summary.proposalRate = summary.attempts > 0 ? summary.proposalsCreated / summary.attempts : 0;
+  if (kind === 'capture-repair') summary.captureRepairs++;
+  else if (kind === 'no-diff-reslice') summary.diagnosticReslices++;
+  else summary.proposalRepairs++;
 }
 
 function touchBucket(
@@ -544,6 +598,7 @@ function touchBucket(
       outcomes: emptyOutcomeCounts(),
       actionCounts: {},
       attemptShape: emptyProductionAttemptShape(),
+      generatedRepairAttempts: emptyGeneratedRepairAttemptSummary(),
       reasons: new Map(),
       diagnosticReasons: new Map(),
     };
@@ -563,8 +618,20 @@ function addToBucket(bucket: MutableYieldBucket, event: DispatchProductionEvent)
     proposalCreated: event.proposalCreated,
     actionCounts: event.runEventSummary?.actionCounts,
     reason: event.reason ?? event.routeReason,
+    itemId: event.itemId,
+    title: event.title,
+    source: event.source,
   }, event.learningLabel);
   addProductionAttemptShape(bucket.attemptShape, classification.attemptShape);
+  addGeneratedRepairAttempt(
+    bucket.generatedRepairAttempts,
+    generatedRepairAttemptKindFromSignals({
+      itemId: event.itemId,
+      title: event.title,
+      source: event.source,
+    }),
+    event.proposalCreated,
+  );
   const reason = event.reason ?? event.routeReason ?? event.outcome;
   bucket.reasons.set(reason, (bucket.reasons.get(reason) ?? 0) + 1);
   addDiagnosticReason(bucket.diagnosticReasons, reason, classification);
@@ -587,6 +654,9 @@ function finalizeBucket(bucket: MutableYieldBucket): DispatchProductionYieldBuck
     outcomes: bucket.outcomes,
     ...(hasRunActionCounts(bucket.actionCounts) ? { actionCounts: bucket.actionCounts } : {}),
     ...(hasProductionAttemptShape(bucket.attemptShape) ? { attemptShape: bucket.attemptShape } : {}),
+    ...(hasGeneratedRepairAttemptSummary(bucket.generatedRepairAttempts)
+      ? { generatedRepairAttempts: bucket.generatedRepairAttempts }
+      : {}),
     topReasons: sortedReasons(bucket.reasons, 5),
     diagnosticTopReasons: sortedReasons(bucket.diagnosticReasons, 5),
   };
@@ -626,6 +696,7 @@ export function summarizeDispatchProductionYield(
   const overall = emptyOutcomeCounts();
   const actionCounts: RunActionCounts = {};
   const attemptShape = emptyProductionAttemptShape();
+  const generatedRepairAttempts = emptyGeneratedRepairAttemptSummary();
   let proposalsCreated = 0;
   let spentUsd = 0;
   const diagnosticTopReasons = new Map<string, number>();
@@ -640,8 +711,20 @@ export function summarizeDispatchProductionYield(
       proposalCreated: event.proposalCreated,
       actionCounts: event.runEventSummary?.actionCounts,
       reason: event.reason ?? event.routeReason,
+      itemId: event.itemId,
+      title: event.title,
+      source: event.source,
     }, event.learningLabel);
     addProductionAttemptShape(attemptShape, classification.attemptShape);
+    addGeneratedRepairAttempt(
+      generatedRepairAttempts,
+      generatedRepairAttemptKindFromSignals({
+        itemId: event.itemId,
+        title: event.title,
+        source: event.source,
+      }),
+      event.proposalCreated,
+    );
     const reason = event.reason ?? event.routeReason ?? event.outcome;
     topReasons.set(reason, (topReasons.get(reason) ?? 0) + 1);
     addDiagnosticReason(diagnosticTopReasons, reason, classification);
@@ -677,6 +760,7 @@ export function summarizeDispatchProductionYield(
     outcomes: overall,
     ...(hasRunActionCounts(actionCounts) ? { actionCounts } : {}),
     ...(hasProductionAttemptShape(attemptShape) ? { attemptShape } : {}),
+    ...(hasGeneratedRepairAttemptSummary(generatedRepairAttempts) ? { generatedRepairAttempts } : {}),
     topReasons: sortedReasons(topReasons, limit),
     diagnosticTopReasons: sortedReasons(diagnosticTopReasons, limit),
     byBackend: sortedBuckets(byBackend, limit),

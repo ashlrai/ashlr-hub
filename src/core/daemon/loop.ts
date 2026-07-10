@@ -725,6 +725,9 @@ function dispatchProductionEventFromOutcome(
     proposalCreated,
     actionCounts: eventRunSummary?.actionCounts,
     reason: production?.reason ?? trace.skipReason,
+    itemId: value.item.id,
+    title: value.item.title,
+    source: value.item.source,
   });
   return {
     schemaVersion: 1,

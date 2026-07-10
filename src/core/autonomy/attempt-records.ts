@@ -30,7 +30,9 @@ import {
   addProductionAttemptShape,
   classifyProductionAttemptForLearningWithLabel,
   emptyProductionAttemptShape,
+  generatedRepairAttemptKindFromSignals,
   sanitizeProductionAttemptLearningLabel,
+  type GeneratedRepairAttemptKind,
   type ProductionAttemptLearningKind,
 } from '../learning/attempt-shape.js';
 import type { ProductionAttemptShape } from '../types.js';
@@ -130,6 +132,16 @@ export interface AttemptCoverageMetric {
   rate: number;
 }
 
+export interface AttemptGeneratedRepairSummary {
+  attempts: number;
+  proposalsCreated: number;
+  noProposal: number;
+  proposalRate: number;
+  captureRepairs: number;
+  diagnosticReslices: number;
+  proposalRepairs: number;
+}
+
 export interface AttemptCoverageStatus {
   windowHours: number;
   attempts: number;
@@ -189,6 +201,7 @@ export interface AttemptCoverageStatus {
     diagnosticProposalRate: number | null;
     diagnosticNoProposalRate: number | null;
     attemptShape: ProductionAttemptShape;
+    generatedRepairAttempts?: AttemptGeneratedRepairSummary;
   };
   gaps: Array<{ kind: keyof AttemptRecordCoverage; count: number; sampleRefs: string[] }>;
   causalGaps: Array<{ kind: keyof AttemptCausalCoverage; count: number; sampleRefs: string[] }>;
@@ -621,6 +634,9 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
         proposalCreated: event.proposalCreated,
         actionCounts,
         reason: event.reason ?? event.routeReason,
+        itemId,
+        title: event.title,
+        source: event.source,
       }, learningLabel);
       const labelAuthoritative = Boolean(learningLabel?.authoritative);
       const coverage: AttemptRecordCoverage = {
@@ -692,11 +708,46 @@ function metric(records: AttemptRecord[], read: (record: AttemptRecord) => boole
   };
 }
 
+function emptyAttemptGeneratedRepairSummary(): AttemptGeneratedRepairSummary {
+  return {
+    attempts: 0,
+    proposalsCreated: 0,
+    noProposal: 0,
+    proposalRate: 0,
+    captureRepairs: 0,
+    diagnosticReslices: 0,
+    proposalRepairs: 0,
+  };
+}
+
+function addAttemptGeneratedRepair(
+  summary: AttemptGeneratedRepairSummary,
+  kind: GeneratedRepairAttemptKind | undefined,
+  proposalCreated: boolean,
+): void {
+  if (!kind) return;
+  summary.attempts++;
+  if (proposalCreated) summary.proposalsCreated++;
+  else summary.noProposal++;
+  summary.proposalRate = summary.attempts > 0 ? summary.proposalsCreated / summary.attempts : 0;
+  if (kind === 'capture-repair') summary.captureRepairs++;
+  else if (kind === 'no-diff-reslice') summary.diagnosticReslices++;
+  else summary.proposalRepairs++;
+}
+
+function hasAttemptGeneratedRepairSummary(summary: AttemptGeneratedRepairSummary): boolean {
+  return summary.attempts > 0 ||
+    summary.captureRepairs > 0 ||
+    summary.diagnosticReslices > 0 ||
+    summary.proposalRepairs > 0;
+}
+
 export function summarizeAttemptCoverage(
   records: AttemptRecord[],
   windowHours = DEFAULT_WINDOW_HOURS,
 ): AttemptCoverageStatus {
   const attemptShape = emptyProductionAttemptShape();
+  const generatedRepairAttempts = emptyAttemptGeneratedRepairSummary();
   let proposalCreated = 0;
   let policySuppressed = 0;
   let labelAuthoritativeAttempts = 0;
@@ -709,6 +760,15 @@ export function summarizeAttemptCoverage(
     if (record.diagnosticAttempt) diagnosticAttempts++;
     if (record.diagnosticNoProposal) diagnosticNoProposal++;
     addProductionAttemptShape(attemptShape, record.attemptShape);
+    addAttemptGeneratedRepair(
+      generatedRepairAttempts,
+      generatedRepairAttemptKindFromSignals({
+        itemId: record.itemId,
+        title: record.title,
+        source: record.source,
+      }),
+      record.proposalCreated,
+    );
   }
   const coverage = {
     agentAction: metric(records, (record) => record.coverage.agentAction),
@@ -822,6 +882,7 @@ export function summarizeAttemptCoverage(
       diagnosticProposalRate: diagnosticAttempts > 0 ? proposalCreated / diagnosticAttempts : null,
       diagnosticNoProposalRate: diagnosticAttempts > 0 ? diagnosticNoProposal / diagnosticAttempts : null,
       attemptShape,
+      ...(hasAttemptGeneratedRepairSummary(generatedRepairAttempts) ? { generatedRepairAttempts } : {}),
     },
     gaps,
     causalGaps,
