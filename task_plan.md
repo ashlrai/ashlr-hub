@@ -1433,4 +1433,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Keep trusted generated repairs off the planning-only builtin backend, including exceptional fallbacks and slot overflow.
 - [x] Add retry, provenance, diagnostic-reslice, fallback, capacity, duplicate-id, and parallel-test-isolation coverage.
 - [x] Run focused/full repository gates and independent adversarial review.
-- [ ] Update durable notes, commit, push, reload, and production smoke.
+- [x] Update durable notes, commit, push, reload, and production smoke.
