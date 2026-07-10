@@ -1309,3 +1309,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add focused dispatch-ledger, attempt-coverage, and FleetStatus regressions for counts, conversion rates, and privacy boundaries.
 - [x] Run focused, adjacent, typecheck, lint, build, audit, JS syntax, and diff gates.
 - [x] Commit, push, reload daemon, clear stale dead-owner spend guard, and smoke live status.
+
+## Current Continuation - Active Repair Recovery Status
+- [x] Deploy scouts for repair-yield-driven recovery status and Phantom verifier readiness.
+- [x] Thread generated repair attempts into dispatch-yield diagnostics and action/readiness detail.
+- [x] Add a conservative generated-repair recovery gate requiring active generated work, at least three samples, and conversion at or above 50% plus the configured low-yield floor.
+- [x] Replace the generic dispatch-yield blocker with `generated-repair-recovery-active` when repair conversion is healthy, while preserving the underlying diagnostic candidate and generic inspect action when no repair monitor action is active.
+- [x] Add live-shaped FleetStatus regression coverage for 4/5 generated repair conversion with local-coder/self still sample-gated.
+- [x] Run focused, adjacent, typecheck, lint, build, audit, JS syntax, and diff gates.
+- [x] Commit, push, reload daemon, and smoke live status.
