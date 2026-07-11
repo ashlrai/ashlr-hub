@@ -92,6 +92,10 @@ import {
 } from './context-efficiency.js';
 import { buildFleetLaneLocks, type FleetLaneLocksStatus } from './lane-lock.js';
 import { isTrustedGeneratedRepairItem } from './self-heal-trust.js';
+import {
+  readResolutionObserverStatus,
+  type ResolutionObserverStatus,
+} from './resolution-observer.js';
 
 export interface FleetBackendResourceStatus {
   availability: BackendAvailability | 'not-sensed';
@@ -686,6 +690,11 @@ export interface FleetQueueScannerEvidenceStatus {
   scannerDomains: number;
 }
 
+export interface FleetResolutionObserverStatus extends ResolutionObserverStatus {
+  freshness: 'missing' | 'current' | 'stale' | 'degraded';
+  lagMs: number | null;
+}
+
 export interface FleetActiveWorkStatus {
   source: 'daemon-spend-guard';
   path: string;
@@ -775,6 +784,7 @@ export interface FleetStatus {
     activeWork?: FleetActiveWorkStatus;
     generatedWork?: FleetQueueGeneratedWorkStatus;
     scannerEvidence?: FleetQueueScannerEvidenceStatus;
+    resolutionObserver?: FleetResolutionObserverStatus;
     diagnosticResliceDrain?: FleetDiagnosticResliceDrainStatus;
   };
   proposals: {
@@ -1176,6 +1186,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let queueRepos: FleetQueueRepoCoverage | undefined;
   let generatedWork: FleetQueueGeneratedWorkStatus | undefined;
   let scannerEvidence: FleetQueueScannerEvidenceStatus | undefined;
+  let resolutionObserver: FleetResolutionObserverStatus | undefined;
   let enrolledExistingRepos: string[] = [];
   try {
     // Status must be observational. A full buildBacklog() refresh can run
@@ -1272,6 +1283,43 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     queueSnapshotAt = null;
     queueSourceStatus = 'unavailable';
     queueSourceDetail = 'queue source could not be read';
+  }
+
+  try {
+    const observer = readResolutionObserverStatus();
+    const queueMs = queueSnapshotAt ? Date.parse(queueSnapshotAt) : NaN;
+    const observerMs = observer.lastBacklogAt ? Date.parse(observer.lastBacklogAt) : NaN;
+    const lagMs = Number.isFinite(queueMs) && Number.isFinite(observerMs)
+      ? Math.max(0, queueMs - observerMs)
+      : null;
+    const freshness: FleetResolutionObserverStatus['freshness'] =
+      observer.state === 'degraded'
+        ? 'degraded'
+        : observer.state === 'missing' || !queueSnapshotAt || !observer.lastBacklogAt
+          ? 'missing'
+          : observerMs > queueMs
+            ? 'degraded'
+            : observer.lastBacklogAt === queueSnapshotAt
+            ? 'current'
+            : 'stale';
+    resolutionObserver = { ...observer, freshness, lagMs };
+  } catch {
+    resolutionObserver = {
+      state: 'degraded',
+      checkpointState: 'degraded',
+      runState: 'degraded',
+      witnessState: 'degraded',
+      freshness: 'degraded',
+      lagMs: null,
+      lastRunAt: null,
+      lastBacklogAt: null,
+      lastOutcome: null,
+      pendingObjectives: 0,
+      witnesses: 0,
+      latestWitnessAt: null,
+      invalidRows: 1,
+      conflictingWitnesses: 0,
+    };
   }
 
   let sharedQueue: FleetSharedQueueStatus | undefined;
@@ -1459,6 +1507,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ...(activeWork !== undefined ? { activeWork } : {}),
       ...(generatedWork !== undefined ? { generatedWork } : {}),
       ...(scannerEvidence !== undefined ? { scannerEvidence } : {}),
+      ...(resolutionObserver !== undefined ? { resolutionObserver } : {}),
       ...(diagnosticResliceDrain !== undefined ? { diagnosticResliceDrain } : {}),
     },
     proposals: { pending, frontierPending, ...(awaitingHostMerge > 0 ? { awaitingHostMerge } : {}), applied },

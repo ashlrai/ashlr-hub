@@ -143,10 +143,19 @@ export function loadBacklog(): Backlog | null {
       Array.isArray((parsed as Record<string, unknown>)['items'])
     ) {
       const backlog = parsed as Backlog;
+      const snapshotId = typeof backlog.snapshotId === 'string' && /^[a-f0-9]{32}$/.test(backlog.snapshotId)
+        ? backlog.snapshotId
+        : undefined;
       const rawObservations = (parsed as Record<string, unknown>)['observations'];
       if (!Array.isArray(rawObservations)) {
-        const { observations: _observations, observationSourceState: _sourceState, observationsTruncated: _truncated, ...legacy } = backlog;
-        return legacy;
+        const {
+          observations: _observations,
+          observationSourceState: _sourceState,
+          observationsTruncated: _truncated,
+          snapshotId: _snapshotId,
+          ...legacy
+        } = backlog;
+        return { ...legacy, ...(snapshotId ? { snapshotId } : {}) };
       }
       const boundedRaw = rawObservations.slice(0, MAX_PERSISTED_SCANNER_OBSERVATIONS * 2);
       const sanitized = boundedRaw
@@ -160,10 +169,12 @@ export function loadBacklog(): Backlog | null {
         observations: _observations,
         observationSourceState: _sourceState,
         observationsTruncated: _truncated,
+        snapshotId: _snapshotId,
         ...base
       } = backlog;
       return {
         ...base,
+        ...(snapshotId ? { snapshotId } : {}),
         observations: sanitized,
         observationSourceState: degraded ? 'degraded' : 'healthy',
         ...(truncated ? { observationsTruncated: true } : {}),
@@ -213,6 +224,7 @@ function persistBacklog(backlog: Backlog, opts: { fullSnapshot: boolean }): void
       const nonConflictingIncoming = backlog.items.filter((item) => !currentIds.has(item.id));
       persistBacklogUnlocked({
         generatedAt: current.generatedAt,
+        ...(current.snapshotId ? { snapshotId: current.snapshotId } : {}),
         repos: [...new Set([...current.repos, ...backlog.repos])],
         items: [...current.items, ...nonConflictingIncoming],
         ...observationEnvelope,
@@ -330,7 +342,15 @@ function sanitizeScannerObservation(value: unknown): ScannerObservation | null {
   const sourceBase = observation.sourceBase === undefined
     ? undefined
     : sanitizeSourceBaseDigest(observation.sourceBase);
+  const observationDigest = observation.observationDigest === undefined
+    ? undefined
+    : typeof observation.observationDigest === 'string' && /^[a-f0-9]{64}$/.test(observation.observationDigest)
+      ? observation.observationDigest
+      : null;
+  if (observationDigest === null) return null;
   if (observation.status !== 'unavailable' && observation.sourceBase !== undefined && !sourceBase) return null;
+  if (observationDigest && !sourceBase) return null;
+  if (observation.status === 'unavailable' && observation.observationDigest !== undefined) return null;
   if (observation.status === 'present') {
     if (observation.reason !== 'item-observed' ||
       typeof observation.itemId !== 'string' || observation.itemId.length === 0 || observation.itemId.length > 180 ||
@@ -342,12 +362,19 @@ function sanitizeScannerObservation(value: unknown): ScannerObservation | null {
       itemId: observation.itemId,
       objectiveHash: observation.objectiveHash,
       ...(sourceBase ? { sourceBase } : {}),
+      ...(observationDigest ? { observationDigest } : {}),
     };
   }
   if (observation.itemId !== undefined || observation.objectiveHash !== undefined) return null;
   if (observation.status === 'absent') {
     return observation.reason === 'source-confirmed-empty'
-      ? { ...common, status: 'absent', reason: 'source-confirmed-empty', ...(sourceBase ? { sourceBase } : {}) }
+      ? {
+          ...common,
+          status: 'absent',
+          reason: 'source-confirmed-empty',
+          ...(sourceBase ? { sourceBase } : {}),
+          ...(observationDigest ? { observationDigest } : {}),
+        }
       : null;
   }
   if (![
@@ -679,6 +706,7 @@ export async function buildBacklog(opts?: {
   const observationsTruncated = completeObservations.length > MAX_PERSISTED_SCANNER_OBSERVATIONS;
   const backlog: Backlog = {
     generatedAt: now,
+    snapshotId: randomBytes(16).toString('hex'),
     repos,
     items: finalItems,
     observations: completeObservations.slice(0, MAX_PERSISTED_SCANNER_OBSERVATIONS),

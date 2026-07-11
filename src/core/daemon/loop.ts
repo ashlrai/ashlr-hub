@@ -168,6 +168,10 @@ import {
   generatedRepairCooldownKey,
   recordGeneratedRepairLifecycle,
 } from '../fleet/generated-repair-lifecycle.js';
+import {
+  scheduleResolutionObserverChild,
+  type ScheduledResolutionObserverChild,
+} from './resolution-observer-scheduler.js';
 
 const GENERATED_REPAIR_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS = 3;
@@ -199,6 +203,21 @@ interface TickOptions {
 interface DaemonRunOptions extends TickOptions {
   once: boolean;
   maxCycles?: number;
+}
+
+/** Schedule advisory post-state work only after a durable resident tick returns. */
+export function scheduleResolutionObserverAfterTick(
+  tickResult: DaemonTick,
+  opts: Pick<DaemonRunOptions, 'dryRun' | 'once'>,
+  schedule: typeof scheduleResolutionObserverChild = scheduleResolutionObserverChild,
+): ScheduledResolutionObserverChild | null {
+  if (opts.dryRun || opts.once || tickResult.reason === 'state-persistence-failed' ||
+    !tickResult.backlogSnapshotAt || !tickResult.backlogSnapshotId) return null;
+  return schedule({
+    completedTickAt: tickResult.ts,
+    expectedBacklogGeneratedAt: tickResult.backlogSnapshotAt,
+    expectedBacklogSnapshotId: tickResult.backlogSnapshotId,
+  });
 }
 
 function autonomyControlEnabled(cfg: AshlrConfig): boolean {
@@ -1581,6 +1600,8 @@ export async function tick(
   // wall-clock here covers all of them — the stage-2 soak compares tick
   // p50/p95 before/after enabling concurrent dispatch.
   const _tickStartMs = Date.now();
+  let backlogSnapshotAt: string | undefined;
+  let backlogSnapshotId: string | undefined;
   recordTickStartAgentAction({
     ts: now,
     dryRun: opts.dryRun,
@@ -1593,6 +1614,8 @@ export async function tick(
   const recordTick = (t: DaemonTick): DaemonTick => {
     const tick: DaemonTick = {
       ...(opts.dryRun ? { ...t, dryRun: true } : t),
+      ...(backlogSnapshotAt ? { backlogSnapshotAt } : {}),
+      ...(backlogSnapshotId ? { backlogSnapshotId } : {}),
       durationMs: t.durationMs ?? Date.now() - _tickStartMs,
     };
     try {
@@ -1886,6 +1909,8 @@ export async function tick(
   const refreshBacklogForTick = async (): Promise<WorkItem[]> => {
     try {
       const backlog = await buildBacklog({ repos: enrolled });
+      backlogSnapshotAt = backlog.generatedAt;
+      backlogSnapshotId = backlog.snapshotId;
       const resolution = resolveDiagnosticResliceParents(backlog.items);
       diagnosticResliceParentsResolved = resolution.resolved;
       diagnosticResliceParentsMissing = resolution.missing;
@@ -4205,6 +4230,7 @@ export async function runDaemon(
   }
   heartbeatDaemonLock(daemonLock);
   const stopLockHeartbeat = startDaemonLockHeartbeat(daemonLock);
+  let scheduledResolutionObserver: ScheduledResolutionObserverChild | null = null;
 
   audit({
     action: 'daemon:start',
@@ -4313,7 +4339,6 @@ export async function runDaemon(
           ...(opts.drain ? { drain: opts.drain } : {}),
           ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
         });
-
         // Dry-run is inherently a one-shot PLAN: it records spentUsd:0 forever,
         // so the budget break can never fire. Terminate after a single iteration
         // (matching --once semantics) so a dry-run loop is BOUNDED, not endless.
@@ -4331,6 +4356,7 @@ export async function runDaemon(
           });
           break;
         }
+        scheduledResolutionObserver = scheduleResolutionObserverAfterTick(tickResult, opts);
 
         // Re-read config before post-tick controls so budget caps, mode, idle
         // backoff, and batch interval changes can take effect without restart.
@@ -4369,6 +4395,7 @@ export async function runDaemon(
   } catch {
     // Unexpected error — swallow; still clean up running state below.
   }
+  await cancelResolutionObserverBeforeShutdown(scheduledResolutionObserver);
   stopLockHeartbeat();
 
   // -------------------------------------------------------------------------
@@ -4417,6 +4444,14 @@ export async function runDaemon(
   releaseDaemonLock(daemonLock);
 
   return loadDaemonState();
+}
+
+export async function cancelResolutionObserverBeforeShutdown(
+  scheduled: ScheduledResolutionObserverChild | null,
+): Promise<void> {
+  if (!scheduled) return;
+  scheduled.cancel();
+  await scheduled.completion;
 }
 
 // ---------------------------------------------------------------------------

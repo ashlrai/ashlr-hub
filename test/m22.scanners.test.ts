@@ -1254,6 +1254,7 @@ describe('scanner observation foundation', () => {
         dirty: 'clean',
         baseDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
       }),
+      observationDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
     })]);
     expect(_execFileImpl).toHaveBeenCalledWith(
       'git',
@@ -1281,6 +1282,7 @@ describe('scanner observation foundation', () => {
       status: 'absent',
       reason: 'source-confirmed-empty',
       sourceBase: expect.objectContaining({ scannerRevision: 1 }),
+      observationDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
     })]);
     expect(result.observations[0]).not.toHaveProperty('itemId');
     expect(result.observations[0]).not.toHaveProperty('objectiveHash');

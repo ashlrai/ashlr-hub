@@ -5,7 +5,7 @@
  * consumer. It records independently observed facts for later inspection only.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -24,6 +24,7 @@ import {
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
+import { loadOrCreateKey } from '../foundry/provenance.js';
 
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_ROWS = 25_000;
@@ -44,6 +45,7 @@ const EXACT_KEYS = new Set([
   'observationBaseDigest',
   'resolutionKind',
   'resolutionDigest',
+  'witnessAttestation',
   'decidedAt',
 ]);
 
@@ -64,13 +66,15 @@ export interface ResolutionWitness {
   observationBaseDigest: string;
   resolutionKind: ResolutionWitnessKind;
   resolutionDigest: string;
+  witnessAttestation: string;
   decidedAt: string;
 }
 
-export type ResolutionWitnessInput = Omit<ResolutionWitness, 'schemaVersion' | 'decision' | 'resolutionDigest'> & {
+export type ResolutionWitnessInput = Omit<ResolutionWitness, 'schemaVersion' | 'decision' | 'resolutionDigest' | 'witnessAttestation'> & {
   schemaVersion?: 1;
   decision?: ResolutionWitnessDecision;
   resolutionDigest?: string;
+  witnessAttestation?: string;
 };
 
 export interface ResolutionWitnessWriteResult {
@@ -143,7 +147,6 @@ type ResolutionIdentity = Pick<
   | 'postStateBaseDigest'
   | 'observationBaseDigest'
   | 'resolutionKind'
-  | 'decidedAt'
 >;
 
 /** Stable advisory identity for this exact observation and its evidence. */
@@ -160,8 +163,27 @@ export function resolutionWitnessDigest(fields: ResolutionIdentity): string {
     fields.postStateBaseDigest,
     fields.observationBaseDigest,
     fields.resolutionKind,
-    fields.decidedAt,
   ])).digest('hex');
+}
+
+function witnessAttestationDigest(resolutionDigest: string, decidedAt: string): string | null {
+  try {
+    const key = loadOrCreateKey();
+    return createHmac('sha256', key).update(JSON.stringify([
+      'ashlr:resolution-witness-attestation:v1',
+      resolutionDigest,
+      decidedAt,
+    ])).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+function equalDigest(left: string, right: string): boolean {
+  if (!SHA256_RE.test(left) || !SHA256_RE.test(right)) return false;
+  const leftBytes = Buffer.from(left, 'hex');
+  const rightBytes = Buffer.from(right, 'hex');
+  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
 function reconstructWitness(value: unknown, requireExactKeys: boolean): ResolutionWitness | null {
@@ -200,11 +222,18 @@ function reconstructWitness(value: unknown, requireExactKeys: boolean): Resoluti
     observationBaseDigest: row['observationBaseDigest'],
     resolutionKind: 'merge-contract-satisfied',
     resolutionDigest: '',
+    witnessAttestation: '',
     decidedAt: row['decidedAt'],
   };
   const expectedDigest = resolutionWitnessDigest(witness);
-  if (row['resolutionDigest'] !== undefined && row['resolutionDigest'] !== expectedDigest) return null;
+  if (row['resolutionDigest'] !== undefined && !equalDigest(String(row['resolutionDigest']), expectedDigest)) return null;
   witness.resolutionDigest = expectedDigest;
+  const expectedAttestation = witnessAttestationDigest(expectedDigest, witness.decidedAt);
+  if (!expectedAttestation) return null;
+  if (requireExactKeys && typeof row['witnessAttestation'] !== 'string') return null;
+  if (row['witnessAttestation'] !== undefined &&
+    !equalDigest(String(row['witnessAttestation']), expectedAttestation)) return null;
+  witness.witnessAttestation = expectedAttestation;
   return witness;
 }
 
@@ -218,7 +247,12 @@ export function buildResolutionWitness(input: ResolutionWitnessInput): Resolutio
 }
 
 function exactFingerprint(witness: ResolutionWitness): string {
-  return JSON.stringify(witness);
+  const {
+    decidedAt: _observationTime,
+    witnessAttestation: _timeBoundAttestation,
+    ...semanticEvidence
+  } = witness;
+  return JSON.stringify(semanticEvidence);
 }
 
 interface PrivatePathState {
@@ -306,7 +340,10 @@ function completeLines(text: string): { lines: string[]; tornTail: boolean } {
     : { lines: text.split('\n').slice(0, -1), tornTail: true };
 }
 
-function appendWitness(witness: ResolutionWitness): 'recorded' | 'replayed' | 'conflicted' | 'failed' {
+function appendWitness(
+  witness: ResolutionWitness,
+  lockWaitMs: number,
+): 'recorded' | 'replayed' | 'conflicted' | 'failed' {
   const path = resolutionWitnessLedgerPath();
   let directories: PrivatePathState;
   try {
@@ -315,7 +352,7 @@ function appendWitness(witness: ResolutionWitness): 'recorded' | 'replayed' | 'c
   } catch {
     return 'failed';
   }
-  const lock = acquireLocalStoreLock(resolutionWitnessLockPath());
+  const lock = acquireLocalStoreLock(resolutionWitnessLockPath(), lockWaitMs);
   if (!lock) return 'failed';
   let fd: number | undefined;
   try {
@@ -383,6 +420,7 @@ function appendWitness(witness: ResolutionWitness): 'recorded' | 'replayed' | 'c
 
 export function recordResolutionWitnesses(
   input: ResolutionWitnessInput | ResolutionWitnessInput[],
+  options: { lockWaitMs?: number } = {},
 ): ResolutionWitnessWriteResult {
   const result: ResolutionWitnessWriteResult = {
     attempted: 0,
@@ -396,14 +434,20 @@ export function recordResolutionWitnesses(
     result.attempted += 1;
     const witness = sanitizeResolutionWitness(candidate);
     if (!witness) { result.invalid += 1; continue; }
-    const disposition = appendWitness(witness);
+    const lockWaitMs = typeof options.lockWaitMs === 'number' && Number.isFinite(options.lockWaitMs)
+      ? Math.max(0, Math.min(2_000, Math.floor(options.lockWaitMs)))
+      : 2_000;
+    const disposition = appendWitness(witness, lockWaitMs);
     result[disposition] += 1;
   }
   return result;
 }
 
-export function recordResolutionWitness(input: ResolutionWitnessInput): ResolutionWitnessWriteResult {
-  return recordResolutionWitnesses(input);
+export function recordResolutionWitness(
+  input: ResolutionWitnessInput,
+  options: { lockWaitMs?: number } = {},
+): ResolutionWitnessWriteResult {
+  return recordResolutionWitnesses(input, options);
 }
 
 function emptyRead(
@@ -421,7 +465,7 @@ function emptyRead(
   };
 }
 
-export function readResolutionWitnesses(): ResolutionWitnessReadResult {
+export function readResolutionWitnesses(options: { lockWaitMs?: number } = {}): ResolutionWitnessReadResult {
   const path = resolutionWitnessLedgerPath();
   const ashlrPath = join(homedir(), '.ashlr');
   if (!existsSync(ashlrPath)) return emptyRead('missing');
@@ -438,7 +482,10 @@ export function readResolutionWitnesses(): ResolutionWitnessReadResult {
   } catch {
     return emptyRead('degraded', { invalidRows: 1 });
   }
-  const lock = acquireLocalStoreLock(resolutionWitnessLockPath());
+  const lockWaitMs = typeof options.lockWaitMs === 'number' && Number.isFinite(options.lockWaitMs)
+    ? Math.max(0, Math.min(2_000, Math.floor(options.lockWaitMs)))
+    : 2_000;
+  const lock = acquireLocalStoreLock(resolutionWitnessLockPath(), lockWaitMs);
   if (!lock) return emptyRead('degraded', { invalidRows: 1 });
   let fd: number | undefined;
   try {

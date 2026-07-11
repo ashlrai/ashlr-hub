@@ -377,6 +377,7 @@ describe('M22 loadBacklog — returns null when no backlog exists', () => {
           itemId: 'merge-contract-item',
           objectiveHash: 'd'.repeat(64),
           sourceBase: { ...sourceBase, rawConfig: 'RAW_SOURCE_BASE_CANARY' },
+          observationDigest: 'e'.repeat(64),
         },
         { ...common, status: 'absent', reason: 'source-confirmed-empty', sourceBase },
         { ...common, status: 'unavailable', reason: 'source-dirty', sourceBase },
@@ -388,13 +389,22 @@ describe('M22 loadBacklog — returns null when no backlog exists', () => {
           objectiveHash: 'e'.repeat(64),
           sourceBase: { ...sourceBase, baseDigest: 'invalid' },
         },
+        {
+          ...common,
+          status: 'absent',
+          reason: 'source-confirmed-empty',
+          sourceBase,
+          observationDigest: 'invalid',
+        },
       ],
     }), 'utf8');
 
     const loaded = loadBacklog();
     expect(loaded?.observations).toHaveLength(3);
     expect(loaded?.observations?.[0]?.sourceBase).toEqual(sourceBase);
+    expect(loaded?.observations?.[0]?.observationDigest).toBe('e'.repeat(64));
     expect(loaded?.observations?.[1]?.sourceBase).toEqual(sourceBase);
+    expect(loaded?.observations?.[1]).not.toHaveProperty('observationDigest');
     expect(loaded?.observations?.[2]).not.toHaveProperty('sourceBase');
     expect(JSON.stringify(loaded)).not.toContain('RAW_SOURCE_BASE_CANARY');
     expect(loaded?.observationSourceState).toBe('degraded');

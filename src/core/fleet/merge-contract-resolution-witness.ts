@@ -11,6 +11,7 @@ import {
   type ResolutionWitness,
 } from './resolution-witness-ledger.js';
 import { verifySourceBaseDigest } from './source-base-digest.js';
+import { verifyScannerObservationDigest } from './scanner-observation-digest.js';
 
 const SCANNER_ID = 'merge-verify-contract';
 const ALLOWED_CONSISTENCY = new Set<SourceBaseConsistency>([
@@ -67,6 +68,8 @@ export function deriveMergeContractResolutionWitness(
     || current.reason !== 'source-confirmed-empty'
     || current.itemId !== undefined
     || current.objectiveHash !== undefined
+    || !verifyScannerObservationDigest(prior)
+    || !verifyScannerObservationDigest(current)
   ) return null;
 
   const priorBase = verifySourceBaseDigest(prior.repo, SCANNER_ID, prior.sourceBase);

@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
 
 import type {
@@ -97,6 +97,12 @@ function hmac(key: Buffer, payload: unknown): string {
 
 function validNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.normalize('NFC').trim().length > 0;
+}
+
+function equalDigest(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left, 'hex');
+  const rightBytes = Buffer.from(right, 'hex');
+  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
 /** Build a source-base identity using only already-existing protected key material. */
@@ -216,5 +222,5 @@ export function verifySourceBaseDigest(
     sourceBase.requirementDigest,
     sourceBase.configDigest,
   ]);
-  return expected === sourceBase.baseDigest ? sourceBase : null;
+  return equalDigest(expected, sourceBase.baseDigest) ? sourceBase : null;
 }

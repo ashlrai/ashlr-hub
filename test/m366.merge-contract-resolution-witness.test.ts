@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { deriveMergeContractResolutionWitness } from '../src/core/fleet/merge-contract-resolution-witness.js';
 import { buildSourceBaseDigest } from '../src/core/fleet/source-base-digest.js';
+import { buildScannerObservationDigest } from '../src/core/fleet/scanner-observation-digest.js';
 import { provenanceKeyPath } from '../src/core/foundry/provenance.js';
 import type { ScannerObservation, SourceBaseDigestV1 } from '../src/core/types.js';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
@@ -43,7 +44,7 @@ function sourceBase(
 }
 
 function present(overrides: Partial<ScannerObservation> = {}): ScannerObservation {
-  return {
+  const observation: ScannerObservation = {
     schemaVersion: 1,
     observedAt: '2026-07-10T11:00:00.000Z',
     repo,
@@ -55,12 +56,12 @@ function present(overrides: Partial<ScannerObservation> = {}): ScannerObservatio
     itemId: 'repo:test:merge-contract',
     objectiveHash: 'd'.repeat(64),
     sourceBase: sourceBase('missing'),
-    ...overrides,
   };
+  return { ...observation, observationDigest: buildScannerObservationDigest(observation)!, ...overrides };
 }
 
 function absent(overrides: Partial<ScannerObservation> = {}): ScannerObservation {
-  return {
+  const observation: ScannerObservation = {
     schemaVersion: 1,
     observedAt: '2026-07-10T11:30:00.000Z',
     repo,
@@ -70,8 +71,8 @@ function absent(overrides: Partial<ScannerObservation> = {}): ScannerObservation
     status: 'absent',
     reason: 'source-confirmed-empty',
     sourceBase: sourceBase('satisfied'),
-    ...overrides,
   };
+  return { ...observation, observationDigest: buildScannerObservationDigest(observation)!, ...overrides };
 }
 
 function derive(
@@ -135,6 +136,17 @@ describe('M366 advisory merge-contract resolution witness derivation', () => {
     ];
 
     expect(cases.map(([prior, current]) => derive(prior, current))).toEqual(Array(cases.length).fill(null));
+  });
+
+  it('rejects tampering with attested item, objective, status, or observation time', () => {
+    const cases = [
+      derive(present({ itemId: 'tampered:item' })),
+      derive(present({ objectiveHash: 'e'.repeat(64) })),
+      derive(present({ status: 'absent' })),
+      derive(present({ observedAt: '2026-07-10T11:00:01.000Z' })),
+    ];
+
+    expect(cases).toEqual(Array(cases.length).fill(null));
   });
 
   it('rejects repo, scanner metadata, revision, source-base, and consistency mismatches', () => {

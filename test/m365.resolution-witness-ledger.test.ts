@@ -67,6 +67,7 @@ describe('M365 advisory no-change resolution witness ledger', () => {
       observationBaseDigest: 'c'.repeat(64),
       resolutionKind: 'merge-contract-satisfied',
       resolutionDigest: resolutionWitnessDigest(witness),
+      witnessAttestation: expect.stringMatching(/^[a-f0-9]{64}$/),
       decidedAt: '2026-07-10T12:00:00.000Z',
     });
   });
@@ -119,16 +120,17 @@ describe('M365 advisory no-change resolution witness ledger', () => {
     expect(read.witnesses).toHaveLength(1);
   });
 
-  it('gives distinct evidence and decision times distinct resolution identities', () => {
+  it('gives distinct evidence a new identity while observation-time retries replay', () => {
     const first = input();
     const differentEvidence = input({ postStateBaseDigest: 'd'.repeat(64) });
     const differentDecisionTime = input({ decidedAt: '2026-07-10T12:00:01.000Z' });
     const firstDigest = buildResolutionWitness(first)?.resolutionDigest;
     expect(buildResolutionWitness(differentEvidence)?.resolutionDigest).not.toBe(firstDigest);
-    expect(buildResolutionWitness(differentDecisionTime)?.resolutionDigest).not.toBe(firstDigest);
+    expect(buildResolutionWitness(differentDecisionTime)?.resolutionDigest).toBe(firstDigest);
 
     expect(recordResolutionWitness(first)).toMatchObject({ recorded: 1 });
     expect(recordResolutionWitness(differentEvidence)).toMatchObject({ recorded: 1, conflicted: 0 });
+    expect(recordResolutionWitness(differentDecisionTime)).toMatchObject({ replayed: 1, conflicted: 0 });
     expect(readResolutionWitnesses()).toMatchObject({
       sourceState: 'healthy',
       physicalRows: 2,
@@ -144,13 +146,14 @@ describe('M365 advisory no-change resolution witness ledger', () => {
     writeFileSync(path, [
       JSON.stringify({ ...witness, title: 'not metadata' }),
       JSON.stringify({ ...witness, resolutionDigest: 'd'.repeat(64) }),
+      JSON.stringify({ ...witness, witnessAttestation: 'e'.repeat(64) }),
       '{bad-json',
       '',
     ].join('\n'), { mode: 0o600 });
 
     expect(readResolutionWitnesses()).toMatchObject({
       sourceState: 'degraded',
-      invalidRows: 3,
+      invalidRows: 4,
       conflictingDigests: 0,
       witnesses: [],
     });
@@ -184,7 +187,7 @@ describe('M365 advisory no-change resolution witness ledger', () => {
     mkdirSync(outsideAshlr, { mode: 0o700 });
     symlinkSync(outsideAshlr, ashlr, 'dir');
 
-    expect(recordResolutionWitness(input())).toMatchObject({ failed: 1, recorded: 0 });
+    expect(recordResolutionWitness(input())).toMatchObject({ invalid: 1, recorded: 0 });
     expect(readResolutionWitnesses()).toMatchObject({ sourceState: 'degraded', witnesses: [] });
 
     rmSync(ashlr);

@@ -3575,6 +3575,8 @@ export interface ScannerObservation {
   objectiveHash?: string;
   /** Exact metadata-only source/config base; absent for unavailable observations. */
   sourceBase?: SourceBaseDigestV1;
+  /** Host-local attestation binding this observation to its authenticated source base. */
+  observationDigest?: string;
 }
 
 /**
@@ -3584,6 +3586,8 @@ export interface ScannerObservation {
 export interface Backlog {
   /** ISO timestamp the backlog was generated. */
   generatedAt: string;
+  /** Random identity for this exact persisted generation; absent on legacy snapshots. */
+  snapshotId?: string;
   /** Absolute paths of the repos that were scanned. */
   repos: string[];
   /** All discovered work items, deduped and scored. */
@@ -4052,6 +4056,10 @@ export interface DaemonDrainSummary {
 export interface DaemonTick {
   /** ISO timestamp the tick ran. */
   ts: string;
+  /** Exact persisted backlog generation produced by this tick, when refreshed. */
+  backlogSnapshotAt?: string;
+  /** Exact random backlog snapshot identity produced by this tick. */
+  backlogSnapshotId?: string;
   /**
    * M334: wall-clock duration of this tick (ms). The CONTRACT-M334 stage-2
    * soak instrument — compare p50/p95 before/after enabling concurrent

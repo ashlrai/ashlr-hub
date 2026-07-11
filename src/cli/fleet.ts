@@ -139,6 +139,15 @@ export function formatFleetStatus(s: FleetStatus): string {
       `${evidence.unavailable} unavailable across ${evidence.scannerDomains} scanner domain(s))`,
     );
   }
+  if (s.queue.resolutionObserver) {
+    const observer = s.queue.resolutionObserver;
+    const lag = observer.lagMs === null ? '' : `, lag ${observer.lagMs}ms`;
+    lines.push(
+      `  resolution:    ${observer.state}/${observer.freshness} ` +
+      `(${observer.witnesses} witness(es), ${observer.pendingObjectives} pending, ` +
+      `last ${observer.lastOutcome ?? 'never'}${lag})`,
+    );
+  }
   if (s.queue.diagnosticResliceDrain) {
     const d = s.queue.diagnosticResliceDrain;
     const limitText = typeof d.limit === 'number' ? `/${d.limit}` : '';

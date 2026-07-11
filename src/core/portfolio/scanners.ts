@@ -46,6 +46,7 @@ import { existingWorkItemObjectiveHash } from '../fleet/work-item-objective.js';
 import { detectRepoExecutionProfile } from '../run/repo-profile.js';
 import type { RepoExecutionProfile } from '../run/repo-profile.js';
 import { buildSourceBaseDigest } from '../fleet/source-base-digest.js';
+import { buildScannerObservationDigest } from '../fleet/scanner-observation-digest.js';
 import {
   riskAtOrAbove,
   scanDependencyBump,
@@ -1803,8 +1804,10 @@ async function readGitObservationState(repo: string): Promise<GitObservationStat
 function observationWithSourceBase(
   observation: ScannerObservation,
   sourceBase: SourceBaseDigestV1,
-): ScannerObservation {
-  return { ...observation, sourceBase };
+): ScannerObservation | null {
+  const candidate = { ...observation, sourceBase };
+  const observationDigest = buildScannerObservationDigest(candidate);
+  return observationDigest ? { ...candidate, observationDigest } : null;
 }
 
 async function runMergeVerifyContractScanner(
@@ -1883,25 +1886,35 @@ async function runMergeVerifyContractScanner(
     return { items, observations: [unavailableObservation(descriptor, repo, 'config-unavailable')] };
   }
   if (items.length > 0) {
+    const observations = presentObservations(descriptor, repo, items);
+    if (observations.some((observation) => observation.status !== 'present')) {
+      return { items, observations };
+    }
+    const attested = observations.map((observation) => observationWithSourceBase(observation, sourceBase));
+    if (attested.some((observation) => observation === null)) {
+      return { items, observations: [unavailableObservation(descriptor, repo, 'config-unavailable')] };
+    }
     return {
       items,
-      observations: presentObservations(descriptor, repo, items).map((observation) =>
-        observation.status === 'present' ? observationWithSourceBase(observation, sourceBase) : observation
-      ),
+      observations: attested as ScannerObservation[],
     };
+  }
+  const observation = observationWithSourceBase({
+    schemaVersion: 1,
+    observedAt: nowIso(),
+    repo: resolve(repo),
+    scannerId: descriptor.id,
+    domain: descriptor.domain,
+    source: descriptor.source,
+    status: 'absent',
+    reason: 'source-confirmed-empty',
+  }, sourceBase);
+  if (!observation) {
+    return { items, observations: [unavailableObservation(descriptor, repo, 'config-unavailable')] };
   }
   return {
     items,
-    observations: [observationWithSourceBase({
-      schemaVersion: 1,
-      observedAt: nowIso(),
-      repo: resolve(repo),
-      scannerId: descriptor.id,
-      domain: descriptor.domain,
-      source: descriptor.source,
-      status: 'absent',
-      reason: 'source-confirmed-empty',
-    }, sourceBase)],
+    observations: [observation],
   };
 }
 
