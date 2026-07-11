@@ -31,7 +31,7 @@
  */
 
 import type { AshlrConfig, EngineId, EngineTier, WorkItem, CostForecast } from '../types.js';
-import { routeBackend } from '../fleet/router.js';
+import { generatedRepairCandidateAllowed, routeBackend } from '../fleet/router.js';
 import { isTrustedDiagnosticResliceItem } from '../fleet/self-heal-trust.js';
 import { withinLimit } from '../fleet/quota.js';
 import { subscriptionAllows, isSubscriptionEngine } from '../fleet/subscription-usage.js';
@@ -351,19 +351,21 @@ export async function decide(
     if (
       isWorkItem(input) &&
       isTrustedDiagnosticResliceItem(input) &&
-      input.repairParentTier != null &&
-      current.tier !== input.repairParentTier
+      !generatedRepairCandidateAllowed(input, current.backend, cfg)
     ) {
       const preserved = routeBackend(input, cfg);
+      const preservedAllowed = generatedRepairCandidateAllowed(input, preserved.backend, cfg);
       const capacityBlocked = trace.some(step =>
         step.stage === 'quotaGuard' ||
         step.stage === 'resourceDemote' ||
         step.stage === 'finalResourceDemote' ||
         step.stage === 'finalQuotaGuard',
       );
-      const reason = capacityBlocked
+      const reason = !preservedAllowed
+        ? `resource-pause: no verified same-tier repair alternative is available (${preserved.reason})`
+        : capacityBlocked
         ? `resource-pause: repair tier ${input.repairParentTier} has no verified capacity`
-        : `repair-tier-restored: ${preserved.reason}`;
+        : `repair-route-restored: ${preserved.reason}`;
       current = {
         backend: preserved.backend,
         tier: preserved.tier,
@@ -419,7 +421,10 @@ function buildNullForecast(): CostForecast {
 // ---------------------------------------------------------------------------
 
 /** Ordered preference for demote cascade: frontier first, then mid, then local. */
-const DEMOTE_CASCADE: EngineId[] = ['claude', 'codex', 'nim', 'local-coder', 'builtin'];
+const DEMOTE_CASCADE: EngineId[] = [
+  'claude', 'codex', 'nim', 'kimi', 'grok', 'local-coder', 'hermes',
+  'opencode', 'ashlrcode', 'aw', 'builtin',
+];
 
 /**
  * Hard items: effort >= 4 or source === 'escalation'.
@@ -472,6 +477,7 @@ async function _resourceAwareDemote(
     for (const candidate of DEMOTE_CASCADE) {
       if (candidate === current.backend) continue;
       if (!allowed.has(candidate)) continue;
+      if (isWorkItem(input) && !generatedRepairCandidateAllowed(input, candidate, cfg)) continue;
 
       // Hard items must not be downgraded to builtin
       if (hard && candidate === 'builtin') {

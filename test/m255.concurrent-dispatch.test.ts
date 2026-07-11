@@ -24,6 +24,7 @@ import {
   slotsForBackendState,
   planConcurrentDispatch,
   buildGatewayDispatchPlan,
+  concurrentAssignedRouteReason,
   runConcurrentDispatch,
   type ConcurrentDispatchCfg,
   type DispatchPlan,
@@ -120,6 +121,27 @@ function makeTrustedDiagnosticReslice(): WorkItem {
 // ---------------------------------------------------------------------------
 
 describe('slotsForAvailability', () => {
+  it('replaces stale capacity pauses for valid repair substitutes but preserves budget pauses', () => {
+    const common = {
+      hintedBackend: 'local-coder' as const,
+      assignedBackend: 'kimi' as const,
+      diagnosticRepair: true,
+      candidateAllowed: true,
+    };
+    expect(concurrentAssignedRouteReason({
+      ...common,
+      baseReason: 'resource-pause: local-coder exhausted',
+    })).toContain('repair-alternative-selected');
+    expect(concurrentAssignedRouteReason({
+      ...common,
+      baseReason: 'throttled: local-coder subscription window',
+    })).toContain('repair-alternative-selected');
+    expect(concurrentAssignedRouteReason({
+      ...common,
+      baseReason: 'budget-pause: daily cap reached',
+    })).toBe('budget-pause: daily cap reached');
+  });
+
   it('open → maxSlots (full headroom)', () => {
     expect(slotsForAvailability('open', 3)).toBe(3);
     expect(slotsForAvailability('open', 6)).toBe(6);
@@ -254,6 +276,26 @@ describe('planConcurrentDispatch', () => {
     ]);
 
     const plan = planConcurrentDispatch([repair], snap, defaultCfg, () => 'local-coder');
+
+    expect(plan.assignments).toEqual([{ item: repair, backend: 'kimi' }]);
+    expect(plan.unassigned).toEqual([]);
+  });
+
+  it('excludes the backend that produced an authoritative empty attempt from preferred and fallback placement', () => {
+    const repair = makeTrustedDiagnosticReslice();
+    const snap = makeSnapshot([
+      { backend: 'local-coder', availability: 'open' },
+      { backend: 'kimi', availability: 'open' },
+      { backend: 'claude', availability: 'open' },
+    ]);
+
+    const plan = planConcurrentDispatch(
+      [repair],
+      snap,
+      defaultCfg,
+      () => 'local-coder',
+      (_item, backend) => backend !== 'local-coder',
+    );
 
     expect(plan.assignments).toEqual([{ item: repair, backend: 'kimi' }]);
     expect(plan.unassigned).toEqual([]);

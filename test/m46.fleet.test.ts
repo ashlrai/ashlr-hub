@@ -108,7 +108,7 @@ describe('routeBackend', () => {
     }
   });
 
-  it('keeps generated no-diff proposal repair reslices on the parent tier', () => {
+  it('fails closed when a diagnostic reslice has no journal-backed generation authority', () => {
     const cfg = withFoundry({ allowedBackends: ['builtin', 'local-coder', 'claude', 'codex'] });
     const parentTier = engineTierOf('local-coder', cfg);
     const d = routeBackend(makeItem({
@@ -129,14 +129,8 @@ describe('routeBackend', () => {
       repairParentTier: parentTier,
     }), cfg);
 
-    if (engineInstalled('local-coder')) {
-      expect(d.backend).toBe('local-coder');
-      expect(d.tier).toBe(parentTier);
-      expect(d.reason).toContain('repair-tier-preserved');
-    } else {
-      expect(d.backend).toBe('builtin');
-      expect(d.reason).toContain('repair-tier-unavailable');
-    }
+    expect(d.backend).toBe('builtin');
+    expect(d.reason).toContain('repair-lifecycle-unavailable');
   });
 
   it('fails closed when a diagnostic reslice has no durable parent tier', () => {

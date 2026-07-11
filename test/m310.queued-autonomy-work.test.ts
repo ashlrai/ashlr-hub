@@ -837,11 +837,13 @@ describe('queued autonomy work scanner', () => {
     recordGeneratedRepairLifecycle(repair, {
       kind: 'empty-diff',
       attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
+      backend: 'local-coder',
     });
     const active = queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
     recordGeneratedRepairLifecycle(repair, {
       kind: 'empty-diff',
       attemptId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      backend: 'kimi',
     });
     const terminal = queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [sourceEvent] });
     const remaining = JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[];

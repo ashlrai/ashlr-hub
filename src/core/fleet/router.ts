@@ -60,6 +60,9 @@ import { engineInstalled } from '../run/engines.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import { routeTask, isSubstantiveItem, SUBSTANTIVE_SOURCES, type RoutingContext } from '../run/router.js';
 import { isTrustedCaptureRepairItem, isTrustedDiagnosticResliceItem } from './self-heal-trust.js';
+import { generatedRepairBackendAllowed, generatedRepairRetryPolicy } from './generated-repair-lifecycle.js';
+import { withinLimit } from './quota.js';
+import { isSubscriptionEngine, subscriptionAllows } from './subscription-usage.js';
 
 /** The outcome of routing a WorkItem to a backend + model. */
 export interface RouteDecision {
@@ -74,6 +77,39 @@ export interface RouteDecision {
   model?: string | null;
   /** Short human-readable rationale (engine tier + model selection). */
   reason: string;
+}
+
+/** Final candidate contract shared by gateway and concurrent repair routing. */
+export function generatedRepairCandidateAllowed(
+  item: WorkItem,
+  backend: EngineId,
+  cfg: AshlrConfig,
+): boolean {
+  if (!generatedRepairExecutionBackendAllowed(item, backend, cfg)) return false;
+  if (!withinLimit(backend, cfg)) return false;
+  if (isSubscriptionEngine(backend)) {
+    const configuredMax = (cfg.foundry as Record<string, unknown> | undefined)?.['subscriptionMaxPercent'];
+    const maxPercent = typeof configuredMax === 'number'
+      ? Math.min(100, Math.max(1, configuredMax))
+      : 90;
+    if (!subscriptionAllows(backend, { maxPercent }).allowed) return false;
+  }
+  return true;
+}
+
+/** Post-execution authority check; excludes mutable capacity counters consumed by this run. */
+export function generatedRepairExecutionBackendAllowed(
+  item: WorkItem,
+  backend: EngineId,
+  cfg: AshlrConfig,
+): boolean {
+  if (!isTrustedDiagnosticResliceItem(item)) return true;
+  if (!generatedRepairBackendAllowed(item, backend) || backend === 'builtin') return false;
+  const allowed = new Set<EngineId>(cfg.foundry?.allowedBackends ?? ['builtin']);
+  return allowed.has(backend) &&
+    engineInstalled(backend, cfg) &&
+    item.repairParentTier != null &&
+    engineTierOf(backend, cfg) === item.repairParentTier;
 }
 
 /**
@@ -96,6 +132,12 @@ const FRONTIER_PREFERENCE: readonly EngineId[] = ['claude', 'codex', 'nim'];
  * runtime; the tier is determined by engineTierOf which reads the registry.
  */
 const MID_PREFERENCE: readonly string[] = ['local-coder', 'nim', 'kimi', 'hermes'];
+
+/** All editing engines eligible for exact-tier diagnostic repair retries. */
+const REPAIR_PREFERENCE: readonly EngineId[] = [
+  'claude', 'codex', 'nim', 'kimi', 'grok', 'local-coder', 'hermes',
+  'opencode', 'ashlrcode', 'aw',
+];
 
 /**
  * M115: Effort threshold above which frontier is preferred over local-mid.
@@ -260,17 +302,26 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
   }
 
   if (isNoDiffRepair && item.repairParentTier) {
-    const sameTier = [...frontiers, ...mids].filter(
-      (backend) => engineTierOf(backend, cfg) === item.repairParentTier,
+    const retryPolicy = generatedRepairRetryPolicy(item);
+    if (!retryPolicy.available) {
+      return {
+        ...decide('builtin', 'repair-lifecycle-unavailable: retry authority unavailable', cfg),
+        model: null,
+      };
+    }
+    const sameTier = REPAIR_PREFERENCE.filter(
+      (backend) => generatedRepairCandidateAllowed(item, backend, cfg),
     );
-    const preferred = item.repairParentBackend && sameTier.includes(item.repairParentBackend)
+    const preferred = !retryPolicy.requireAlternative && item.repairParentBackend && sameTier.includes(item.repairParentBackend)
       ? item.repairParentBackend
       : pickFrom(sameTier, item);
     if (preferred) {
       return {
         ...decide(
           preferred,
-          `repair-tier-preserved: generated no-diff repair remains ${item.repairParentTier} (parent=${item.repairParentBackend ?? 'unknown'})`,
+          retryPolicy.requireAlternative
+            ? `repair-alternative-selected: generated no-diff retry moved ${retryPolicy.excludedBackend ?? 'unknown'}→${preferred} within ${item.repairParentTier}`
+            : `repair-tier-preserved: generated no-diff repair remains ${item.repairParentTier} (parent=${item.repairParentBackend ?? 'unknown'})`,
           cfg,
         ),
         model: null,
@@ -279,7 +330,9 @@ export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
     return {
       ...decide(
         'builtin',
-        `repair-tier-unavailable: no installed ${item.repairParentTier} backend for generated no-diff repair`,
+        retryPolicy.requireAlternative
+          ? `repair-alternative-unavailable: no installed ${item.repairParentTier} backend differs from ${retryPolicy.excludedBackend ?? 'unknown'}`
+          : `repair-tier-unavailable: no installed ${item.repairParentTier} backend for generated no-diff repair`,
         cfg,
       ),
       model: null,

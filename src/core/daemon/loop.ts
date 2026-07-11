@@ -80,14 +80,23 @@ import { createOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 import { runSwarm } from '../swarm/runner.js';
 import { runGoal } from '../run/orchestrator.js';
 import { scopeFromWorkItem } from '../run/delegation-scope.js';
-import { routeBackend } from '../fleet/router.js';
+import {
+  generatedRepairCandidateAllowed,
+  generatedRepairExecutionBackendAllowed,
+  routeBackend,
+} from '../fleet/router.js';
 import { withinLimit, recordUse } from '../fleet/quota.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import { resolveEngineSpec } from '../run/engine-registry.js';
 import { subscriptionAllows, isSubscriptionEngine } from '../fleet/subscription-usage.js'; // M80
 import { recommendRoute, recoverWithinBudget } from '../run/learned-router.js';
 import { decide as gatewayDecide } from '../fabric/gateway.js'; // M247: InferenceGateway
-import { buildConcurrentDispatchRouteItem, planConcurrentDispatch, runConcurrentDispatch } from '../fabric/concurrent-dispatch.js'; // M255/M256
+import {
+  buildConcurrentDispatchRouteItem,
+  concurrentAssignedRouteReason,
+  planConcurrentDispatch,
+  runConcurrentDispatch,
+} from '../fabric/concurrent-dispatch.js'; // M255/M256
 import { getResourceSnapshot } from '../fabric/resource-monitor.js'; // M255
 import { estimateRun } from '../observability/estimate.js';
 import { buildForecast } from '../observability/forecast.js';
@@ -170,8 +179,10 @@ import {
   isTrustedGeneratedRepairItem,
 } from '../fleet/self-heal-trust.js';
 import {
+  generatedRepairBackendAllowed,
   generatedRepairGenerationId,
   generatedRepairCooldownKey,
+  generatedRepairRetryPolicy,
   recordGeneratedRepairLifecycle,
 } from '../fleet/generated-repair-lifecycle.js';
 import {
@@ -3193,10 +3204,16 @@ export async function tick(
       }
       if (isTrustedDiagnosticResliceItem(item)) {
         const requiredTier = item.repairParentTier;
-        if (!requiredTier || backendTier !== requiredTier) {
-          const reason = requiredTier
-            ? `repair-tier-unavailable: required ${requiredTier}, resolved ${backendTier ?? 'unknown'} via ${backend}`
-            : 'repair-provenance-missing: durable parent tier unavailable';
+        const retryPolicy = generatedRepairRetryPolicy(item);
+        const invalidRetryBackend = !generatedRepairBackendAllowed(item, backend);
+        if (!requiredTier || backendTier !== requiredTier || invalidRetryBackend) {
+          const reason = !retryPolicy.available
+            ? 'repair-lifecycle-unavailable: retry authority unavailable'
+            : invalidRetryBackend && retryPolicy.requireAlternative
+              ? `repair-alternative-unavailable: refusing repeat dispatch to ${backend}; no open installed same-tier alternative is available`
+              : requiredTier
+                ? `repair-tier-unavailable: required ${requiredTier}, resolved ${backendTier ?? 'unknown'} via ${backend}`
+                : 'repair-provenance-missing: durable parent tier unavailable';
           return {
             item,
             spentUsd: 0,
@@ -3205,12 +3222,16 @@ export async function tick(
               backend,
               tier: backendTier,
               model: selectedModel,
-              assignedBy: 'repair-tier-guard',
+              assignedBy: invalidRetryBackend ? 'repair-retry-guard' : 'repair-tier-guard',
               reason,
               dispatched: false,
               runId: attemptId,
               trajectoryId: `run:${attemptId}`,
-              skipReason: requiredTier ? 'repair-tier-unavailable' : 'repair-provenance-missing',
+              skipReason: !retryPolicy.available
+                ? 'repair-lifecycle-unavailable'
+                : invalidRetryBackend
+                  ? 'repair-alternative-unavailable'
+                  : requiredTier ? 'repair-tier-unavailable' : 'repair-provenance-missing',
             }),
           };
         }
@@ -3423,10 +3444,11 @@ export async function tick(
               .filter((c) =>
                 !isTrustedDiagnosticResliceItem(item) ||
                 item.repairParentTier == null ||
-                engineTierOf(c.engine as EngineId, routingCfg) === item.repairParentTier)
+                generatedRepairCandidateAllowed(item, c.engine as EngineId, routingCfg))
           : undefined;
         const fanOut =
           bestOfN > 1 &&
+          !isTrustedDiagnosticResliceItem(item) &&
           (typeof _bonMinScore !== 'number' || (item.score ?? 0) >= _bonMinScore);
         let bonBillable: number | null = null;
 
@@ -3533,7 +3555,11 @@ export async function tick(
             runActionCounts?.totalSteps,
           ].some((count) => typeof count === 'number' && count > 0);
           if (runExecuted && runState.proposalOutcome?.kind !== 'kill-switch') {
-            const executedBackend = runState.engine || backend;
+            const plannedBackend = backend ?? 'builtin';
+            const reportedBackend = runState.engine as EngineId | undefined;
+            const executedBackend = reportedBackend && resolveEngineSpec(reportedBackend, routingCfg)
+              ? reportedBackend
+              : plannedBackend;
             const engineModelPrefix = `${executedBackend}:`;
             const reportedModel = runState.engineModel?.startsWith(engineModelPrefix)
               ? runState.engineModel.slice(engineModelPrefix.length)
@@ -3549,7 +3575,7 @@ export async function tick(
               ? reportedModel
               : null;
             const executedTier = runState.engineTier
-              ?? (executedBackend === backend ? backendTier : null);
+              ?? (executedBackend === backend ? backendTier : engineTierOf(executedBackend, routingCfg));
             observeShadowSkills({
               cards: shadowSkillCards,
               query: {
@@ -3572,6 +3598,13 @@ export async function tick(
                 model: executedModel,
               },
             });
+            if (executedBackend !== backend) {
+              backend = executedBackend;
+              backendTier = executedTier;
+              selectedModel = executedModel;
+              assignedBy = 'executor-fallback';
+              assignmentReason = `${assignmentReason}; executor ran ${backend} instead of planned ${plannedBackend}`;
+            }
           }
         }
         dispatchProduction = dispatchProductionFromProposalOutcome(runState.proposalOutcome, runState.id, runState.runEventSummary, {
@@ -3589,7 +3622,7 @@ export async function tick(
         // the M80 winner-path accounting byte-identically.
         swarmSpent = bonBillable !== null
           ? bonBillable
-          : isSubscriptionEngine(backend)
+          : isSubscriptionEngine(backend ?? 'builtin')
             ? 0
             : (runState.usage?.estCostUsd ?? 0);
         tickSpent += swarmSpent;
@@ -3756,6 +3789,8 @@ export async function tick(
       concurrentSnap,
       concurrentCfg,
       routeItem,
+      (item, backend) => generatedRepairCandidateAllowed(item, backend, routingCfg),
+      (backend) => engineTierOf(backend, routingCfg),
     );
     const dispatchManifestEvent = buildDispatchManifestEvent({
       ts: now,
@@ -3782,16 +3817,13 @@ export async function tick(
         if (taskEntry) {
           const hintedBackend = routeHints.get(item.id);
           const baseReason = routeReasons.get(item.id);
-          const assignedReason = (
-            hintedBackend !== undefined &&
-            hintedBackend !== _backend &&
-            baseReason &&
-            !baseReason.startsWith('throttled:') &&
-            !baseReason.startsWith('budget-pause:') &&
-            !baseReason.startsWith('resource-pause:')
-          )
-            ? `${baseReason}; concurrent planner assigned ${_backend}`
-            : baseReason;
+          const assignedReason = concurrentAssignedRouteReason({
+            baseReason,
+            hintedBackend,
+            assignedBackend: _backend,
+            diagnosticRepair: isTrustedDiagnosticResliceItem(item),
+            candidateAllowed: generatedRepairCandidateAllowed(item, _backend, routingCfg),
+          });
           const assignedModel = hintedBackend === _backend ? routeModels.get(item.id) : undefined;
           return taskEntry.run(_backend, assignedReason, assignedModel);
         }
@@ -3981,11 +4013,14 @@ export async function tick(
         if (!production || !attemptId) continue;
         if (
           production.outcome === 'empty-diff' &&
-          !production.reason?.startsWith('best-of-')
+          !production.reason?.startsWith('best-of-') &&
+          trace.backend &&
+          generatedRepairExecutionBackendAllowed(outcome.value.item, trace.backend, routingCfg)
         ) {
           recordGeneratedRepairLifecycle(outcome.value.item, {
             kind: 'empty-diff',
             attemptId,
+            backend: trace.backend,
           });
           continue;
         }

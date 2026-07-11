@@ -1580,3 +1580,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Expose explicit effective configuration and preserve proposal-yield risks independently from reflection status.
 - [x] Add threshold, cadence, restart, truncation, privacy, dry-run, failure, and end-to-end status coverage.
 - [x] Run focused/full gates and independent adversarial review, then update notes, commit, push, reload, and production-canary the rollup.
+
+## Current Overnight Cycle - Alternative Backend Retry Discipline
+- [x] Rehydrate the deployed context-rollup baseline, live dispatch-yield evidence, daemon health, Entire state, and persistent notes.
+- [x] Deploy disjoint lifecycle-authority, backend-routing, and regression-test audits.
+- [x] Derive retry policy only from authoritative generated-repair lifecycle evidence.
+- [x] Keep the first repair attempt on normal same-tier routing and require a different installed, capacity-eligible same-tier backend after one authoritative empty attempt.
+- [x] Refuse repeat dispatch to the same backend with explicit `repair-alternative-unavailable` evidence when no qualified alternative exists.
+- [x] Cover router, gateway, concurrent planner, daemon telemetry, lifecycle-unavailable, and flag-equivalence paths.
+- [x] Run focused/full gates and independent adversarial review, then update notes, commit, push, reload, and production-canary the policy.

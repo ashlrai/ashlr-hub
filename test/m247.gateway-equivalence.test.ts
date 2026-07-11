@@ -502,7 +502,7 @@ describe('M247 InferenceGateway', () => {
 
   // ── 6. Flag-ON trace records steps ───────────────────────────────────────
   describe('flag-ON decision trace', () => {
-    it('preserves the parent tier for trusted diagnostic reslices', async () => {
+    it('fails closed for diagnostic reslices without journal-backed generation authority', async () => {
       const cfg: AshlrConfig = {
         ...withFoundry({
           allowedBackends: ['builtin', 'local-coder', 'claude'] as EngineId[],
@@ -533,9 +533,9 @@ describe('M247 InferenceGateway', () => {
 
       const gd = await decide(item, cfg);
 
-      expect(gd.tier).toBe('mid');
-      expect(gd.backend).toBe('local-coder');
-      expect(gd.trace.at(-1)?.tier).toBe('mid');
+      expect(gd.tier).toBe('local');
+      expect(gd.backend).toBe('builtin');
+      expect(gd.reason).toContain('resource-pause: no verified same-tier repair alternative is available');
     });
 
     it('flag-ON with no overrides: trace has at least routeBackend step', async () => {

@@ -54,6 +54,7 @@
 
 import type { EngineId, WorkItem, AshlrConfig } from '../types.js';
 import { isTrustedDiagnosticResliceItem, isTrustedGeneratedRepairItem } from '../fleet/self-heal-trust.js';
+import { generatedRepairCandidateAllowed } from '../fleet/router.js';
 import type { BackendAvailability, BackendResourceState, ResourceSnapshot } from './resource-monitor.js';
 import { decide as gatewayDecide } from './gateway.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
@@ -106,6 +107,31 @@ export interface DispatchResult {
   attempted: boolean;
   /** Settled result from the injected dispatchFn; null when kill-halted. */
   settled: PromiseSettledResult<unknown> | null;
+}
+
+export function concurrentAssignedRouteReason(fields: {
+  baseReason?: string;
+  hintedBackend?: EngineId;
+  assignedBackend: EngineId;
+  diagnosticRepair: boolean;
+  candidateAllowed: boolean;
+}): string | undefined {
+  const { baseReason, hintedBackend, assignedBackend } = fields;
+  if (hintedBackend === undefined || hintedBackend === assignedBackend) return baseReason;
+  const capacityBlocked = baseReason?.startsWith('resource-pause:') === true ||
+    baseReason?.startsWith('throttled:') === true;
+  if (fields.diagnosticRepair && fields.candidateAllowed && capacityBlocked) {
+    return `repair-alternative-selected: concurrent planner replaced blocked ${hintedBackend} route with ${assignedBackend}`;
+  }
+  if (
+    baseReason &&
+    !baseReason.startsWith('throttled:') &&
+    !baseReason.startsWith('budget-pause:') &&
+    !baseReason.startsWith('resource-pause:')
+  ) {
+    return `${baseReason}; concurrent planner assigned ${assignedBackend}`;
+  }
+  return baseReason;
 }
 
 /** Minimal cfg shape the dispatcher needs. Matches AshlrConfig.foundry.fabric. */
@@ -220,6 +246,8 @@ export function planConcurrentDispatch(
   snapshot: ResourceSnapshot,
   cfg: ConcurrentDispatchCfg,
   routeItem: (item: WorkItem) => EngineId,
+  candidateAllowed: (item: WorkItem, backend: EngineId) => boolean = () => true,
+  resolveTier: (backend: EngineId) => ReturnType<typeof engineTierOf> = engineTierOf,
 ): DispatchPlan {
   const maxSlots = Math.max(1, cfg.maxSlotsPerBackend ?? 3);
 
@@ -265,7 +293,11 @@ export function planConcurrentDispatch(
     // 1. Try preferred backend first.
     const preferred = routeItem(item);
     const prefRem = remaining.get(preferred) ?? 0;
-    if (prefRem > 0 && (!requiresEditingBackend || preferred !== 'builtin')) {
+    if (
+      prefRem > 0 &&
+      (!requiresEditingBackend || preferred !== 'builtin') &&
+      candidateAllowed(item, preferred)
+    ) {
       assignments.push({ item, backend: preferred });
       remaining.set(preferred, prefRem - 1);
       continue;
@@ -277,8 +309,9 @@ export function planConcurrentDispatch(
     if (requiresParentTier) {
       const substitute = eligibleBackends.find(candidate =>
         candidate !== 'builtin' &&
+        candidateAllowed(item, candidate) &&
         (remaining.get(candidate) ?? 0) > 0 &&
-        engineTierOf(candidate) === item.repairParentTier,
+        resolveTier(candidate) === item.repairParentTier,
       );
       if (substitute) {
         assignments.push({ item, backend: substitute });
@@ -296,6 +329,7 @@ export function planConcurrentDispatch(
       const idx = (rrCursor + attempt) % n;
       const candidate = eligibleBackends[idx]!;
       if (requiresEditingBackend && candidate === 'builtin') continue;
+      if (!candidateAllowed(item, candidate)) continue;
       const rem = remaining.get(candidate) ?? 0;
       if (rem > 0) {
         assignments.push({ item, backend: candidate });
@@ -491,7 +525,14 @@ export async function buildGatewayDispatchPlan(
     }
 
     const routeItem = buildConcurrentDispatchRouteItem(snapshot, dispatchCfg, cfg, routeHints, routeReasons);
-    return planConcurrentDispatch(items, snapshot, dispatchCfg, routeItem);
+    return planConcurrentDispatch(
+      items,
+      snapshot,
+      dispatchCfg,
+      routeItem,
+      (item, backend) => generatedRepairCandidateAllowed(item, backend, cfg),
+      (backend) => engineTierOf(backend, cfg),
+    );
   } catch {
     // Never-throws fallback: ordinary work may use builtin, but trusted
     // generated repairs still wait for a real editing backend.

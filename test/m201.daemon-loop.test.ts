@@ -65,7 +65,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import { basename, join } from 'node:path';
-import type { AshlrConfig, DaemonTick, WorkItem } from '../src/core/types.js';
+import type { AshlrConfig, DaemonTick, EngineId, WorkItem } from '../src/core/types.js';
 import type { DispatchPlan } from '../src/core/fabric/concurrent-dispatch.js';
 import { workItemCoverageKey } from '../src/core/fleet/proposal-matching.js';
 
@@ -155,8 +155,11 @@ vi.mock('../src/core/fleet/regression-sentinel.js', () => ({
 // ---------------------------------------------------------------------------
 
 const mockRouteBackend = vi.fn();
+const mockGeneratedRepairCandidateAllowed = vi.fn();
 vi.mock('../src/core/fleet/router.js', () => ({
   routeBackend: (...args: unknown[]) => mockRouteBackend(...args),
+  generatedRepairCandidateAllowed: (...args: unknown[]) => mockGeneratedRepairCandidateAllowed(...args),
+  generatedRepairExecutionBackendAllowed: (...args: unknown[]) => mockGeneratedRepairCandidateAllowed(...args),
 }));
 
 vi.mock('../src/core/fleet/quota.js', () => ({
@@ -268,6 +271,7 @@ import {
   generatedRepairCooldownKey,
   generatedRepairGenerationId,
   readGeneratedRepairLifecycle,
+  recordGeneratedRepairLifecycle,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
 import {
   recordRepairHandoffs,
@@ -309,6 +313,8 @@ beforeEach(() => {
   mockDetectRegression.mockReset();
   mockBisectAndRevert.mockReset();
   mockRouteBackend.mockReset();
+  mockGeneratedRepairCandidateAllowed.mockReset();
+  mockGeneratedRepairCandidateAllowed.mockReturnValue(true);
   mockEngineTierOf.mockReset();
   mockRecommendRoute.mockReset();
   mockRecoverWithinBudget.mockReset();
@@ -2838,6 +2844,64 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
   });
 
+  it('A1h5b1a: refuses the backend that produced the authoritative empty repair attempt', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'abcdea123456', 10, 'mid');
+    expect(recordGeneratedRepairLifecycle(repair, {
+      kind: 'empty-diff',
+      attemptId: 'attempt-33345678-1234-4123-8123-123456789abc',
+      backend: 'local-coder',
+    })).toMatchObject({ recorded: true, authoritativeEmptyRuns: 1 });
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'same backend retry' });
+    mockEngineTierOf.mockReturnValue('mid');
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder', 'kimi'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]).toMatchObject({
+      backend: 'local-coder',
+      assignedBy: 'repair-retry-guard',
+      dispatched: false,
+      skipReason: 'repair-alternative-unavailable',
+      reason: expect.stringContaining('no open installed same-tier alternative is available'),
+    });
+    expect(mockRunGoal).not.toHaveBeenCalled();
+  });
+
+  it('A1h5b1b: dispatches an authoritative empty repair through a different same-tier backend', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'abcded123456', 10, 'mid');
+    recordGeneratedRepairLifecycle(repair, {
+      kind: 'empty-diff',
+      attemptId: 'attempt-43345678-1234-4123-8123-123456789abc',
+      backend: 'local-coder',
+    });
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'kimi', tier: 'mid', reason: 'same-tier alternative' });
+    mockEngineTierOf.mockReturnValue('mid');
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder', 'kimi'] },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.dispatches?.[0]).toMatchObject({ backend: 'kimi', tier: 'mid', dispatched: true });
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ engine: 'kimi' });
+  });
+
   it('A1h5b2: claimed proposal metadata without a durable inbox proposal is not lifecycle authority', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -2876,7 +2940,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
   });
 
-  it('A1h5b3: aggregate Best-of-N empty summaries are not lifecycle exhaustion evidence', async () => {
+  it('A1h5b3: diagnostic repairs bypass Best-of-N and record exact empty lifecycle evidence', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const repair = makeDiagnosticResliceItem(repo.dir, 'aaaaaa123456', 10, 'mid');
@@ -2887,20 +2951,13 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock mixed best-of-n' });
     mockEngineTierOf.mockReturnValue('mid');
-    mockRunBestOfN.mockResolvedValueOnce({
-      winner: undefined,
-      candidates: [],
-      critique: {
-        n: 2,
-        nonEmpty: 0,
-        judged: 0,
-        topScore: 0,
-        billableCostUsd: 0.002,
-        noProposalReasons: [
-          { reason: 'empty-diff: one candidate made no changes', count: 1 },
-          { reason: 'engine-failed: one candidate never executed', count: 1 },
-        ],
-      },
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-diagnostic-single-empty',
+      status: 'done',
+      engine: 'local-coder',
+      engineTier: 'mid',
+      usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+      proposalOutcome: { kind: 'empty-diff', reason: 'no file changes' },
     });
 
     const result = await tick({
@@ -2912,12 +2969,55 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       },
     } as AshlrConfig, { dryRun: false });
 
-    expect(result.dispatches?.[0]?.production).toMatchObject({
-      outcome: 'empty-diff',
-      reason: expect.stringContaining('best-of-2'),
-    });
-    expect(readGeneratedRepairLifecycle(repair)).toEqual({
+    expect(mockRunBestOfN).not.toHaveBeenCalled();
+    expect(result.dispatches?.[0]).toMatchObject({ backend: 'local-coder', production: { outcome: 'empty-diff' } });
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
       available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 1,
+      lastAuthoritativeEmptyBackend: 'local-coder',
+    });
+  });
+
+  it('A1h5b3a: executor fallback is reported but cannot become repair lifecycle authority', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const repair = makeDiagnosticResliceItem(repo.dir, 'aaaaab123456', 10, 'mid');
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [repair],
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'planned repair backend' });
+    mockEngineTierOf.mockImplementation((backend: EngineId) => backend === 'builtin' ? 'local' : 'mid');
+    mockGeneratedRepairCandidateAllowed.mockImplementation(
+      (_item: WorkItem, backend: EngineId) => backend !== 'builtin',
+    );
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-diagnostic-fallback-empty',
+      status: 'done',
+      engine: 'builtin',
+      engineTier: 'local',
+      usage: { totalTokens: 0, estCostUsd: 0, steps: 1 },
+      proposalOutcome: { kind: 'empty-diff', reason: 'fallback made no changes' },
+    });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: {
+        autonomyControlLoop: false,
+        allowedBackends: ['local-coder'],
+        bestOfN: 2,
+      },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(mockRunBestOfN).not.toHaveBeenCalled();
+    expect(result.dispatches?.[0]).toMatchObject({
+      backend: 'builtin',
+      tier: 'local',
+      assignedBy: 'executor-fallback',
+    });
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
       disposition: 'active',
       authoritativeEmptyRuns: 0,
     });
@@ -4597,5 +4697,12 @@ describe('M201 — Group G: concurrent dispatch routing wire guards', () => {
 
     expect(source).toContain("assignedReason?.startsWith('resource-pause:')");
     expect(source).toContain("gd.reason.startsWith('resource-pause:')");
+  });
+
+  it('G3: a valid same-tier concurrent repair substitute clears the stale pause reason', () => {
+    const source = fs.readFileSync(new URL('../src/core/daemon/loop.ts', import.meta.url), 'utf8');
+
+    expect(source).toContain('concurrentAssignedRouteReason({');
+    expect(source).toContain('candidateAllowed: generatedRepairCandidateAllowed(item, _backend, routingCfg)');
   });
 });

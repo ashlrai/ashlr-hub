@@ -20,7 +20,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { isOuterAttemptIdentity, isSafeExecutionIdentity } from './attempt-identity.js';
 import { isTrustedDiagnosticResliceItem, isTrustedGeneratedRepairItem } from './self-heal-trust.js';
-import type { WorkItem } from '../types.js';
+import type { EngineId, WorkItem } from '../types.js';
 import {
   readRepairHandoffs,
   repairGenerationIdFromHandoffId,
@@ -32,6 +32,10 @@ import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock
 const MAX_RECORDS = 100_000;
 const MAX_LEDGER_BYTES = 32 * 1024 * 1024;
 const SHA256_RE = /^[a-f0-9]{64}$/;
+const ENGINE_IDS = new Set<EngineId>([
+  'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
+  'kimi', 'nim', 'opencode', 'grok',
+]);
 
 export type GeneratedRepairDisposition = 'active' | 'retired' | 'exhausted';
 
@@ -39,6 +43,7 @@ interface GeneratedRepairLifecycleRecord {
   generationId: string;
   disposition: GeneratedRepairDisposition;
   emptyAttemptHashes: string[];
+  emptyAttemptBackends?: EngineId[];
   updatedAt: string;
 }
 
@@ -55,6 +60,9 @@ function cloneLedger(ledger: GeneratedRepairLifecycleLedger): GeneratedRepairLif
     records: ledger.records.map((record) => ({
       ...record,
       emptyAttemptHashes: record.emptyAttemptHashes.slice(),
+      ...(record.emptyAttemptBackends
+        ? { emptyAttemptBackends: record.emptyAttemptBackends.slice() }
+        : {}),
     })),
   };
 }
@@ -63,15 +71,23 @@ export interface GeneratedRepairLifecycleResult {
   available: boolean;
   disposition: GeneratedRepairDisposition;
   authoritativeEmptyRuns: number;
+  lastAuthoritativeEmptyBackend?: EngineId | null;
 }
 
 export type GeneratedRepairLifecycleEvidence =
   | { kind: 'proposal-created'; attemptId: string; proposalId: string; ts?: string }
-  | { kind: 'empty-diff'; attemptId: string; ts?: string }
+  | { kind: 'empty-diff'; attemptId: string; backend: EngineId; ts?: string }
   | { kind: 'non-terminal'; attemptId?: string; ts?: string };
 
 export interface GeneratedRepairLifecycleTransitionResult extends GeneratedRepairLifecycleResult {
   recorded: boolean;
+}
+
+export interface GeneratedRepairRetryPolicy {
+  applies: boolean;
+  available: boolean;
+  requireAlternative: boolean;
+  excludedBackend: EngineId | null;
 }
 
 export function generatedRepairLifecyclePath(): string {
@@ -166,6 +182,7 @@ function validRecord(value: unknown): value is GeneratedRepairLifecycleRecord {
   const record = value as Record<string, unknown>;
   const disposition = record['disposition'];
   const hashes = record['emptyAttemptHashes'];
+  const backends = record['emptyAttemptBackends'];
   if (
     !SHA256_RE.test(String(record['generationId'] ?? '')) ||
     (disposition !== 'active' && disposition !== 'retired' && disposition !== 'exhausted') ||
@@ -175,6 +192,13 @@ function validRecord(value: unknown): value is GeneratedRepairLifecycleRecord {
     new Set(hashes).size !== hashes.length ||
     typeof record['updatedAt'] !== 'string' ||
     !Number.isFinite(Date.parse(record['updatedAt']))
+  ) return false;
+  if (
+    backends !== undefined && (
+      !Array.isArray(backends) ||
+      backends.length !== hashes.length ||
+      backends.some((backend) => !ENGINE_IDS.has(backend as EngineId))
+    )
   ) return false;
   if (disposition === 'active' && hashes.length > 1) return false;
   if (disposition === 'exhausted' && hashes.length !== 2) return false;
@@ -379,10 +403,16 @@ function resultFromRecord(
   available: boolean,
   record: GeneratedRepairLifecycleRecord | undefined,
 ): GeneratedRepairLifecycleResult {
+  const legacyBackendlessActive = record?.disposition === 'active' &&
+    record.emptyAttemptHashes.length > 0 &&
+    record.emptyAttemptBackends === undefined;
   return {
     available,
-    disposition: record?.disposition ?? 'active',
+    disposition: legacyBackendlessActive ? 'retired' : (record?.disposition ?? 'active'),
     authoritativeEmptyRuns: record?.emptyAttemptHashes.length ?? 0,
+    ...(record?.emptyAttemptHashes.length
+      ? { lastAuthoritativeEmptyBackend: record.emptyAttemptBackends?.at(-1) ?? null }
+      : {}),
   };
 }
 
@@ -406,6 +436,40 @@ export function readGeneratedRepairLifecycle(item: WorkItem): GeneratedRepairLif
   return resultFromRecord(true, loaded.ledger.records.find((record) => record.generationId === id));
 }
 
+/** Derive backend retry constraints only from durable diagnostic lifecycle evidence. */
+export function generatedRepairRetryPolicy(item: WorkItem): GeneratedRepairRetryPolicy {
+  if (!isTrustedDiagnosticResliceItem(item)) {
+    return { applies: false, available: true, requireAlternative: false, excludedBackend: null };
+  }
+  if (generatedRepairGenerationId(item) === null) {
+    return { applies: true, available: false, requireAlternative: false, excludedBackend: null };
+  }
+  const lifecycle = readGeneratedRepairLifecycle(item);
+  if (!lifecycle.available) {
+    return { applies: true, available: false, requireAlternative: false, excludedBackend: null };
+  }
+  if (lifecycle.disposition !== 'active') {
+    return { applies: true, available: false, requireAlternative: false, excludedBackend: null };
+  }
+  const requireAlternative = lifecycle.authoritativeEmptyRuns >= 1;
+  const excludedBackend = lifecycle.lastAuthoritativeEmptyBackend ?? null;
+  return {
+    applies: true,
+    available: !requireAlternative || excludedBackend !== null,
+    requireAlternative,
+    excludedBackend: requireAlternative ? excludedBackend : null,
+  };
+}
+
+export function generatedRepairBackendAllowed(item: WorkItem, backend: EngineId): boolean {
+  const policy = generatedRepairRetryPolicy(item);
+  if (!policy.applies) return true;
+  if (!policy.available) return false;
+  return !policy.requireAlternative || (
+    policy.excludedBackend !== null && backend !== policy.excludedBackend
+  );
+}
+
 /**
  * Record a typed local-daemon transition. Terminal states are absorbing and
  * duplicate attempt ids are idempotent. Callers must independently verify that
@@ -423,6 +487,9 @@ export function recordGeneratedRepairLifecycle(
     return { available: false, disposition: 'active', authoritativeEmptyRuns: 0, recorded: false };
   }
   if (evidence.kind === 'proposal-created' && !isSafeExecutionIdentity(evidence.proposalId)) {
+    return { available: false, disposition: 'active', authoritativeEmptyRuns: 0, recorded: false };
+  }
+  if (evidence.kind === 'empty-diff' && !ENGINE_IDS.has(evidence.backend)) {
     return { available: false, disposition: 'active', authoritativeEmptyRuns: 0, recorded: false };
   }
   const lock = acquireLocalStoreLock(lifecycleLockPath(), 250);
@@ -454,17 +521,27 @@ function recordGeneratedRepairLifecycleUnlocked(
     ? new Date(evidence.ts).toISOString()
     : new Date().toISOString();
   const emptyAttemptHashes = existing?.emptyAttemptHashes.slice() ?? [];
+  const emptyAttemptBackends = existing?.emptyAttemptBackends?.slice() ?? [];
+  const backendHistoryKnown = emptyAttemptBackends.length === emptyAttemptHashes.length;
   let disposition: Exclude<GeneratedRepairDisposition, 'active'>;
   if (evidence.kind === 'proposal-created') {
     disposition = 'retired';
   } else {
+    if (!backendHistoryKnown) {
+      return { ...resultFromRecord(false, existing), recorded: false };
+    }
     const hash = attemptHash(evidence.attemptId);
-    if (emptyAttemptHashes.includes(hash)) {
+    const existingAttemptIndex = emptyAttemptHashes.indexOf(hash);
+    if (existingAttemptIndex >= 0) {
+      if (emptyAttemptBackends[existingAttemptIndex] !== evidence.backend) {
+        return { ...resultFromRecord(false, existing), recorded: false };
+      }
       return { ...resultFromRecord(true, existing), recorded: false };
     }
     emptyAttemptHashes.push(hash);
+    emptyAttemptBackends.push(evidence.backend);
     if (emptyAttemptHashes.length < 2) {
-      const recorded = saveActiveEmptyProgress(loaded.ledger, id, emptyAttemptHashes, now);
+      const recorded = saveActiveEmptyProgress(loaded.ledger, id, emptyAttemptHashes, emptyAttemptBackends, now);
       return recorded
         ? {
           available: true,
@@ -481,6 +558,9 @@ function recordGeneratedRepairLifecycleUnlocked(
     generationId: id,
     disposition,
     emptyAttemptHashes: emptyAttemptHashes.slice(0, 2),
+    ...(backendHistoryKnown
+      ? { emptyAttemptBackends: emptyAttemptBackends.slice(0, 2) }
+      : {}),
     updatedAt: now,
   };
   upsertNewest(loaded.ledger, record);
@@ -494,12 +574,14 @@ function saveActiveEmptyProgress(
   ledger: GeneratedRepairLifecycleLedger,
   id: string,
   emptyAttemptHashes: string[],
+  emptyAttemptBackends: EngineId[],
   updatedAt: string,
 ): boolean {
   const record: GeneratedRepairLifecycleRecord = {
     generationId: id,
     disposition: 'active',
     emptyAttemptHashes: emptyAttemptHashes.slice(0, 2),
+    emptyAttemptBackends: emptyAttemptBackends.slice(0, 2),
     updatedAt,
   };
   upsertNewest(ledger, record);
