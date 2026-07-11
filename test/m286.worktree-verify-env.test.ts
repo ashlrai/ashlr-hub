@@ -231,7 +231,7 @@ describe('M286 spawnOptionsFor — PATH injection', () => {
       const localBin = path.join(dir, 'node_modules', '.bin');
       fs.mkdirSync(localBin, { recursive: true });
 
-      const opts = spawnOptionsFor(dir, 30_000, 'npm', 'linux');
+      const opts = spawnOptionsFor(dir, 30_000, 'npm', process.platform);
       expect(opts.env).toBeDefined();
       const envPath = (opts.env as NodeJS.ProcessEnv).PATH ?? '';
       // The local .bin must be the first component
@@ -248,7 +248,7 @@ describe('M286 spawnOptionsFor — PATH injection', () => {
   it('does NOT prepend workspace .bin when absent but still includes tool paths', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'm286-spawn-nobin-'));
     try {
-      const opts = spawnOptionsFor(dir, 30_000, 'npm', 'linux');
+      const opts = spawnOptionsFor(dir, 30_000, 'npm', process.platform);
       const envPath = (opts.env as NodeJS.ProcessEnv | undefined)?.PATH ?? '';
       const entries = envPath.split(path.delimiter); // win32: ';' — see below
 
