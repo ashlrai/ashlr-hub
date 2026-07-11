@@ -1655,4 +1655,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Attach explicit eligibility and read-only recovery commands without granting new merge, lifecycle, or learning authority.
 - [x] Render the matrix in CLI and Mission Control without healthy-looking missing or partial values.
 - [x] Add healthy, missing, degraded, stale, compatibility, and command-safety coverage.
-- [ ] Run focused/full gates and independent review, update notes, commit, push, reload, and production-canary the matrix.
+- [x] Run focused/full gates and independent review, update notes, commit, push, reload, and production-canary the matrix.
