@@ -1561,5 +1561,5 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Expose bounded witness quality and observer freshness without granting lifecycle, proposal, learning, or merge authority.
 - [x] Add timeout, overlap, stale-base, replay, malformed-store, restart, privacy, and compatibility coverage.
 - [x] Run focused/full gates and independent adversarial review.
-- [ ] Update durable notes, commit, push, reload, and production smoke.
+- [x] Update durable notes, commit, push, reload, and production smoke.
 - Error encountered: three parallel observer scouts hit the temporary subagent usage cap; continued the critical-path design locally and deferred fresh independent review until capacity resets.
