@@ -71,6 +71,8 @@ export interface DispatchProductionEvent {
   labelBasis?: LabelBasis;
   routerPolicyVersion?: string;
   learningEpoch?: string;
+  /** Scrubbed metadata-only hash of the dispatched work item's objective. */
+  objectiveHash?: string;
   learningLabel?: ProductionAttemptLearningLabel;
   spentUsd: number;
   diffFiles?: number;
@@ -212,6 +214,9 @@ function sanitizeEvent(
   const trajectoryId = boundedOptionalText(event.trajectoryId, 240);
   const routerPolicyVersion = boundedOptionalText(event.routerPolicyVersion, 80);
   const learningEpoch = boundedOptionalText(event.learningEpoch, 40);
+  const objectiveHash = typeof event.objectiveHash === 'string' && /^[a-f0-9]{64}$/.test(event.objectiveHash)
+    ? event.objectiveHash
+    : undefined;
   const outcome = boundedText(event.outcome, 80) as DaemonDispatchProductionOutcome;
   const basis = boundedText(event.basis, 80) as DispatchProductionBasis;
   const reason = boundedOptionalText(event.reason, 240);
@@ -279,6 +284,7 @@ function sanitizeEvent(
     ...(runId ? { runId } : {}),
     ...causal,
     ...(learningLabel ? { learningLabel } : {}),
+    ...(objectiveHash ? { objectiveHash } : {}),
     spentUsd,
     ...(diffFiles !== undefined ? { diffFiles } : {}),
     ...(diffLines !== undefined ? { diffLines } : {}),

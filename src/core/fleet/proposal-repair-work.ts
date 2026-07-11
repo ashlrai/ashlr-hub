@@ -18,10 +18,12 @@ import {
   readGeneratedRepairLifecycle,
 } from './generated-repair-lifecycle.js';
 import { workItemCoverageKey } from './proposal-matching.js';
+import { workItemObjectiveHash } from './work-item-objective.js';
 import {
   compactRepairHandoffs,
   dispatchEventFromRepairHandoff,
   readRepairHandoffs,
+  repairHandoffFromDispatchEvent,
 } from './repair-handoff-journal.js';
 
 const MAX_TITLE = 140;
@@ -78,7 +80,7 @@ export interface DiagnosticResliceParentResolution {
   dispatchable: WorkItem[];
   quarantined: Array<{
     itemId: string;
-    reason: 'parent-missing' | 'parent-provenance-missing';
+    reason: 'parent-missing' | 'parent-provenance-missing' | 'parent-objective-changed';
   }>;
   resolved: number;
   missing: number;
@@ -182,9 +184,18 @@ export function resolveDiagnosticResliceParents(items: WorkItem[]): DiagnosticRe
     }
     if (
       item.repairParentTier == null ||
-      item.repairParentSource !== parent.source ||
-      generatedRepairGenerationId(item) === null
+      item.repairParentSource !== parent.source
     ) {
+      missing += 1;
+      quarantined.push({ itemId: item.id, reason: 'parent-provenance-missing' });
+      continue;
+    }
+    if (item.repairParentObjectiveHash !== workItemObjectiveHash(parent)) {
+      missing += 1;
+      quarantined.push({ itemId: item.id, reason: 'parent-objective-changed' });
+      continue;
+    }
+    if (generatedRepairGenerationId(item) === null) {
       missing += 1;
       quarantined.push({ itemId: item.id, reason: 'parent-provenance-missing' });
       continue;
@@ -366,6 +377,7 @@ export function noDiffResliceWorkItem(
   const runId = bounded(event.runId, 120);
   const value = 4;
   const effort = 1;
+  const derivedHandoff = repairHandoffFromDispatchEvent(event);
 
   const item: WorkItem = {
     id: noDiffResliceId(repo, itemId),
@@ -391,12 +403,19 @@ export function noDiffResliceWorkItem(
     score: value / effort,
     tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice', 'no-diff', 'verify', 'high-priority'],
     ts: new Date(eventMs).toISOString(),
-    ...(event.repairHandoffId ? { repairHandoffId: event.repairHandoffId } : {}),
-    ...(event.repairGenerationId ? { repairGenerationId: event.repairGenerationId } : {}),
+    ...(event.repairHandoffId
+      ? { repairHandoffId: event.repairHandoffId }
+      : derivedHandoff ? { repairHandoffId: derivedHandoff.eventId } : {}),
+    ...(event.repairGenerationId
+      ? { repairGenerationId: event.repairGenerationId }
+      : derivedHandoff ? { repairGenerationId: derivedHandoff.generationId } : {}),
     repairParentItemId: itemId,
     repairParentSource: event.source,
     repairParentBackend: event.backend,
     repairParentTier: event.tier,
+    ...(typeof event.objectiveHash === 'string' && /^[a-f0-9]{64}$/.test(event.objectiveHash)
+      ? { repairParentObjectiveHash: event.objectiveHash }
+      : {}),
   };
   return isActionableSelfHealItem(item, {
     nowMs,
@@ -564,11 +583,7 @@ export function queueProposalRepairWorkForPendingProposals(
   };
   const prune = terminalLifecycleEnabled
     ? pruneQueuedSelfHealItems((item) => {
-        if (
-          isTrustedDiagnosticResliceItem(item) &&
-          ((item.repairHandoffId === undefined && item.repairParentTier == null) ||
-            (item.repairHandoffId !== undefined && generatedRepairGenerationId(item) === null))
-        ) return true;
+        if (isTrustedDiagnosticResliceItem(item) && generatedRepairGenerationId(item) === null) return true;
         return observeLifecycle(item) === 'terminal';
       })
     : { scanned: 0, removed: 0, failed: false };

@@ -51,6 +51,7 @@ function event(repo: string, overrides: Partial<DispatchProductionEvent> = {}): 
     proposalCreated: false,
     runId: 'attempt-12345678-1234-4123-8123-123456789abc',
     trajectoryId: 'run:attempt-12345678-1234-4123-8123-123456789abc',
+    objectiveHash: 'a'.repeat(64),
     spentUsd: 0.01,
     reason: 'stdout=DO_NOT_PERSIST_STDOUT token=github_pat_1234567890abcdefghijklmnop',
     basis: 'run-proposal-outcome',
@@ -76,12 +77,23 @@ describe('M362 durable repair handoff journal', () => {
       parentSource: 'self',
       parentBackend: 'local-coder',
       parentTier: 'local',
+      parentObjectiveHash: 'a'.repeat(64),
     });
     expect(dispatchEventFromRepairHandoff(read.observations[0]!)).toMatchObject({
       source: 'self',
       backend: 'local-coder',
       tier: 'local',
+      objectiveHash: 'a'.repeat(64),
     });
+  });
+
+  it('rejects raw objective values before journal persistence', () => {
+    const repo = fx.makeRepo();
+    recordRepairHandoffs(event(repo.dir, { objectiveHash: 'RAW_SECRET_VALUE' }));
+
+    const raw = readFileSync(repairHandoffJournalPath(), 'utf8');
+    expect(raw).not.toContain('RAW_SECRET_VALUE');
+    expect(readRepairHandoffs().observations[0]).not.toHaveProperty('parentObjectiveHash');
   });
 
   it('accepts legacy rows and reconstructs their historical routing defaults', () => {
@@ -91,6 +103,7 @@ describe('M362 durable repair handoff journal', () => {
     delete legacy.parentSource;
     delete legacy.parentBackend;
     delete legacy.parentTier;
+    delete legacy.parentObjectiveHash;
     mkdirSync(dirname(repairHandoffJournalPath()), { recursive: true });
     writeFileSync(repairHandoffJournalPath(), `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
 
@@ -104,7 +117,7 @@ describe('M362 durable repair handoff journal', () => {
     });
   });
 
-  it('treats an enriched replay as a compatible upgrade of a legacy row', () => {
+  it('quarantines a replay that retroactively adds objective authority', () => {
     const repo = fx.makeRepo();
     const eventValue = event(repo.dir);
     const observation = repairHandoffFromDispatchEvent(eventValue)!;
@@ -112,17 +125,20 @@ describe('M362 durable repair handoff journal', () => {
     delete legacy.parentSource;
     delete legacy.parentBackend;
     delete legacy.parentTier;
+    delete legacy.parentObjectiveHash;
     mkdirSync(dirname(repairHandoffJournalPath()), { recursive: true });
     writeFileSync(repairHandoffJournalPath(), `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
 
     expect(recordRepairHandoffs(eventValue)).toMatchObject({ recorded: 1, failed: 0 });
     const read = readRepairHandoffs();
-    expect(read).toMatchObject({ sourceState: 'healthy', conflictingIds: 0 });
-    expect(read.observations).toHaveLength(1);
-    expect(read.observations[0]).toMatchObject({
-      parentSource: eventValue.source,
-      parentBackend: eventValue.backend,
-      parentTier: eventValue.tier,
+    expect(read).toMatchObject({ sourceState: 'degraded', conflictingIds: 1 });
+    expect(read.observations).toEqual([]);
+
+    writeFileSync(repairHandoffJournalPath(), `${JSON.stringify(observation)}\n${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'degraded',
+      conflictingIds: 1,
+      observations: [],
     });
   });
 
@@ -184,6 +200,23 @@ describe('M362 durable repair handoff journal', () => {
     expect(read.sourceState).toBe('degraded');
     expect(read.conflictingIds).toBe(1);
     expect(read.observations).toEqual([]);
+  });
+
+  it('quarantines replay that changes the parent objective fingerprint', () => {
+    const repo = fx.makeRepo();
+    const observation = repairHandoffFromDispatchEvent(event(repo.dir))!;
+    recordRepairHandoffs(event(repo.dir));
+    writeFileSync(
+      repairHandoffJournalPath(),
+      `${JSON.stringify({ ...observation, parentObjectiveHash: 'b'.repeat(64) })}\n`,
+      { encoding: 'utf8', flag: 'a' },
+    );
+
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'degraded',
+      conflictingIds: 1,
+      observations: [],
+    });
   });
 
   it('isolates a torn tail and preserves a later valid append', () => {
@@ -418,7 +451,7 @@ describe('M362 durable repair handoff journal', () => {
     expect(compactRepairHandoffs()).toEqual({ available: true, before: 2, after: 1, removed: 1 });
   });
 
-  it('compacts superseded child generations while preserving the newest durable recurrence', () => {
+  it('preserves superseded generation fingerprints as immutable conflict history', () => {
     const repo = fx.makeRepo();
     const first = event(repo.dir, {
       ts: '2026-07-10T12:00:00.000Z',
@@ -432,11 +465,37 @@ describe('M362 durable repair handoff journal', () => {
     });
     recordRepairHandoffs([first, newest]);
 
-    expect(compactRepairHandoffs()).toEqual({ available: true, before: 2, after: 1, removed: 1 });
+    expect(compactRepairHandoffs()).toEqual({ available: true, before: 2, after: 2, removed: 0 });
     const read = readRepairHandoffs();
     expect(read.sourceState).toBe('healthy');
-    expect(read.observations).toHaveLength(1);
+    expect(read.observations).toHaveLength(2);
     expect(read.observations[0]!.parentAttemptId).toBe(newest.trajectoryId);
+  });
+
+  it('keeps compacted history able to quarantine a changed old replay', () => {
+    const repo = fx.makeRepo();
+    const firstEvent = event(repo.dir, {
+      runId: 'attempt-72345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-72345678-1234-4123-8123-123456789abc',
+    });
+    const newestEvent = event(repo.dir, {
+      ts: '2026-07-10T13:00:00.000Z',
+      runId: 'attempt-82345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-82345678-1234-4123-8123-123456789abc',
+    });
+    const first = repairHandoffFromDispatchEvent(firstEvent)!;
+    recordRepairHandoffs([firstEvent, newestEvent]);
+    expect(compactRepairHandoffs()).toMatchObject({ available: true, after: 2 });
+
+    writeFileSync(
+      repairHandoffJournalPath(),
+      `${JSON.stringify({ ...first, parentObjectiveHash: 'b'.repeat(64) })}\n`,
+      { encoding: 'utf8', flag: 'a' },
+    );
+
+    const read = readRepairHandoffs();
+    expect(read).toMatchObject({ sourceState: 'degraded', conflictingIds: 1 });
+    expect(read.observations.map((row) => row.parentAttemptId)).toEqual([newestEvent.trajectoryId]);
   });
 
   it('recovers malformed crash locks after grace and never releases a successor inode', () => {

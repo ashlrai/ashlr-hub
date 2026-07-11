@@ -3477,6 +3477,8 @@ export interface WorkItem {
   repairParentBackend?: EngineId | null;
   /** Engine tier used by the parent attempt, when durably observed. */
   repairParentTier?: EngineTier | null;
+  /** Scrubbed metadata-only hash binding a repair generation to parent meaning. */
+  repairParentObjectiveHash?: string;
 }
 
 /**

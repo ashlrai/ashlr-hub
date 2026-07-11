@@ -26,7 +26,8 @@ function validRepairParentMetadata(item: Partial<WorkItem>): boolean {
     item.repairParentItemId !== undefined ||
     item.repairParentSource !== undefined ||
     item.repairParentBackend !== undefined ||
-    item.repairParentTier !== undefined;
+    item.repairParentTier !== undefined ||
+    item.repairParentObjectiveHash !== undefined;
   if (!hasMetadata) return true;
   return (
     typeof item.repairParentItemId === 'string' &&
@@ -37,7 +38,9 @@ function validRepairParentMetadata(item: Partial<WorkItem>): boolean {
     (item.repairParentBackend === null ||
       (typeof item.repairParentBackend === 'string' && ENGINE_IDS.has(item.repairParentBackend as EngineId))) &&
     (item.repairParentTier === null ||
-      (typeof item.repairParentTier === 'string' && ENGINE_TIERS.has(item.repairParentTier as EngineTier)))
+      (typeof item.repairParentTier === 'string' && ENGINE_TIERS.has(item.repairParentTier as EngineTier))) &&
+    typeof item.repairParentObjectiveHash === 'string' &&
+    /^[a-f0-9]{64}$/.test(item.repairParentObjectiveHash)
   );
 }
 

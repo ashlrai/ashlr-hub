@@ -115,6 +115,7 @@ import {
 } from '../fleet/dispatch-production-ledger.js';
 import { buildDispatchManifestEvent, recordDispatchManifest } from '../fleet/dispatch-manifest.js';
 import { recordRepairHandoffs, repairHandoffFromDispatchEvent } from '../fleet/repair-handoff-journal.js';
+import { workItemObjectiveHash } from '../fleet/work-item-objective.js';
 import {
   recordAgentAction,
   type AgentActionEvent,
@@ -878,6 +879,7 @@ function dispatchProductionEventFromOutcome(
   const trace = value.dispatch;
   if (!trace) return null;
   const production = trace.production;
+  const objectiveHash = workItemObjectiveHash(value.item);
   const outcome: DaemonDispatchProductionOutcome =
     production?.outcome ?? (proposal ? 'proposal-created' : 'unknown');
   const allowProposalFallback = !production || production.outcome === 'proposal-created';
@@ -929,6 +931,7 @@ function dispatchProductionEventFromOutcome(
     ...(trace.routerPolicyVersion ? { routerPolicyVersion: trace.routerPolicyVersion } : {}),
     ...(trace.learningEpoch ? { learningEpoch: trace.learningEpoch } : {}),
     learningLabel,
+    ...(objectiveHash ? { objectiveHash } : {}),
     spentUsd: value.spentUsd,
     ...(typeof production?.diffFiles === 'number' ? { diffFiles: production.diffFiles } : {}),
     ...(typeof production?.diffLines === 'number' ? { diffLines: production.diffLines } : {}),

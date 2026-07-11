@@ -11,6 +11,8 @@ import {
 } from '../src/core/fleet/proposal-repair-work.js';
 import type { Proposal, WorkItem } from '../src/core/types.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
+import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
+import { recordRepairHandoffs } from '../src/core/fleet/repair-handoff-journal.js';
 import {
   generatedRepairGenerationId,
   generatedRepairLifecyclePath,
@@ -73,7 +75,7 @@ function partialProposal(repo: string, overrides: Partial<Proposal> = {}): Propo
 }
 
 function captureFailure(repo: string, overrides: Partial<DispatchProductionEvent> = {}): DispatchProductionEvent {
-  return {
+  const value: DispatchProductionEvent = {
     schemaVersion: 1,
     ts: '2026-07-09T12:00:00.000Z',
     machineId: 'm310',
@@ -90,9 +92,12 @@ function captureFailure(repo: string, overrides: Partial<DispatchProductionEvent
     proposalCreated: false,
     spentUsd: 0,
     reason: 'gate-blocked: completeness gate blocked proposal after test failure',
+    objectiveHash: 'a'.repeat(64),
     basis: 'run-proposal-outcome',
     ...overrides,
   };
+  recordRepairHandoffs(value);
+  return value;
 }
 
 describe('queued autonomy work scanner', () => {
@@ -472,33 +477,28 @@ describe('queued autonomy work scanner', () => {
 
   it('resolves diagnostic children from fresh parent context without mutating durable work', () => {
     const repo = fx.makeRepo();
+    repo.enroll();
     const parent = item(repo.dir, 'repo:goal:current-parent', {
       source: 'goal',
       title: 'Implement the current scheduler recovery path',
       detail: 'Update src/scheduler.ts so abandoned leases are reclaimed safely.',
       tags: ['scheduler', 'reliability'],
     });
-    const child = {
-      id: 'repo:proposal-repair-nodiff:abcdef123456',
-      repo: repo.dir,
-      source: 'self' as const,
-      title: 'Reslice stale historical title',
-      detail:
-        'Diagnostic reslice: stale context.\n' +
-        `Original work item: ${parent.id}\n` +
-        'Dispatch outcome: empty-diff\n' +
-        'Action: reslice the work into a smaller concrete edit.\n' +
-        'Constraint: the next attempt must change repository files.',
-      value: 4,
-      effort: 1,
-      score: 4,
-      tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
-      ts: new Date().toISOString(),
-      repairParentItemId: parent.id,
-      repairParentSource: 'goal' as const,
-      repairParentBackend: 'local-coder' as const,
-      repairParentTier: 'mid' as const,
-    };
+    const now = new Date();
+    queueProposalRepairWorkForPendingProposals(undefined, now, {
+      dispatchEvents: [captureFailure(repo.dir, {
+        ts: now.toISOString(),
+        itemId: parent.id,
+        source: parent.source,
+        title: 'Reslice stale historical title',
+        backend: 'local-coder',
+        tier: 'mid',
+        runId: 'run-current-parent',
+        outcome: 'empty-diff',
+        objectiveHash: workItemObjectiveHash(parent)!,
+      })],
+    });
+    const child = (JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[])[0]!;
     const before = JSON.stringify([parent, child]);
 
     const result = resolveDiagnosticResliceParents([parent, child]);
@@ -510,6 +510,7 @@ describe('queued autonomy work scanner', () => {
       repairParentSource: 'goal',
       repairParentBackend: 'local-coder',
       repairParentTier: 'mid',
+      repairParentObjectiveHash: workItemObjectiveHash(parent)!,
     });
     expect(resolved.detail).toContain(parent.title);
     expect(resolved.detail).toContain(parent.detail);
@@ -544,6 +545,72 @@ describe('queued autonomy work scanner', () => {
     expect(unknown.dispatchable).toEqual([parent]);
     expect(unknown.quarantined).toEqual([{ itemId: child.id, reason: 'parent-provenance-missing' }]);
     expect(legacy).toMatchObject({ repairParentTier: null });
+  });
+
+  it('quarantines a stale generation when the scanner reuses an id for changed objective meaning', () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const original = item(repo.dir, 'repo:goal:stable-id', {
+      source: 'goal',
+      title: 'Original objective',
+      detail: 'Implement the original acceptance criteria.',
+    });
+    const changed = { ...original, title: 'Changed objective', detail: 'Different acceptance criteria now apply.' };
+    const now = new Date();
+    queueProposalRepairWorkForPendingProposals(undefined, now, {
+      dispatchEvents: [captureFailure(repo.dir, {
+        ts: now.toISOString(),
+        itemId: original.id,
+        source: original.source,
+        title: original.title,
+        backend: 'local-coder',
+        tier: 'mid',
+        runId: 'run-stable-parent',
+        outcome: 'empty-diff',
+        objectiveHash: workItemObjectiveHash(original)!,
+      })],
+    });
+    const child = (JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[])[0]!;
+
+    const result = resolveDiagnosticResliceParents([changed, child]);
+
+    expect(result.dispatchable).toEqual([changed]);
+    expect(result.quarantined).toEqual([{ itemId: child.id, reason: 'parent-objective-changed' }]);
+  });
+
+  it('retires legacy diagnostic rows instead of granting fallback generation authority', () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T16:00:00.000Z');
+    const ordinary = item(repo.dir, 'ordinary-invent');
+    const legacy = item(repo.dir, 'repo:proposal-repair-nodiff:1e9ac1234567', {
+      source: 'self',
+      title: 'Diagnostic reslice for a legacy parent',
+      detail:
+        'Diagnostic reslice: legacy parent.\n' +
+        'Original work item: repo:goal:legacy-parent\n' +
+        'Dispatch outcome: empty-diff\n' +
+        'Action: reslice the work into a smaller concrete edit.',
+      tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+      repairParentItemId: 'repo:goal:legacy-parent',
+      repairParentSource: 'goal',
+      repairParentBackend: 'local-coder',
+      repairParentTier: 'mid',
+    });
+    writeJson(join(fx.ashlrDir, 'self-heal-queue.json'), [ordinary, legacy]);
+    writeJson(join(fx.ashlrDir, 'backlog.json'), {
+      generatedAt: now.toISOString(),
+      repos: [repo.dir],
+      items: [ordinary, legacy],
+    });
+
+    const result = queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [] });
+    const queue = JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[];
+    const backlog = JSON.parse(readFileSync(join(fx.ashlrDir, 'backlog.json'), 'utf8')) as { items: WorkItem[] };
+
+    expect(result).toMatchObject({ dispatchRepairPruned: 2, dispatchRepairPruneFailed: 0 });
+    expect(queue.map((candidate) => candidate.id)).toEqual([ordinary.id]);
+    expect(backlog.items.map((candidate) => candidate.id)).toEqual([ordinary.id]);
   });
 
   it('prunes exhausted repair generations while preserving unrelated queued work', async () => {

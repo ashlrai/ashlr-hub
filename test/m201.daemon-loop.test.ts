@@ -260,7 +260,15 @@ import {
   sanitizeSkillCard,
 } from '../src/core/fleet/skill-records.js';
 import { loadWorkedLedger, recordOutcome } from '../src/core/fleet/worked-ledger.js';
-import { readGeneratedRepairLifecycle } from '../src/core/fleet/generated-repair-lifecycle.js';
+import {
+  generatedRepairCooldownKey,
+  generatedRepairGenerationId,
+  readGeneratedRepairLifecycle,
+} from '../src/core/fleet/generated-repair-lifecycle.js';
+import {
+  recordRepairHandoffs,
+  repairHandoffFromDispatchEvent,
+} from '../src/core/fleet/repair-handoff-journal.js';
 import {
   makeFixture,
   makeCfg,
@@ -444,25 +452,51 @@ function makeDiagnosticResliceItem(
   score = 1,
   parentTier: EngineTier = 'local',
 ): WorkItem {
+  const ts = new Date().toISOString();
+  const parentItemId = `repo:goal:stalled:${hash}`;
+  const objectiveHash = hash.repeat(6).slice(0, 64);
+  const parentEvent: DispatchProductionEvent = {
+    schemaVersion: 1,
+    ts,
+    itemId: parentItemId,
+    source: 'goal',
+    repo: repoDir,
+    title: `Resolve stalled objective ${hash}`,
+    backend: parentTier === 'mid' ? 'local-coder' : 'builtin',
+    tier: parentTier,
+    assignedBy: 'router',
+    routeReason: 'test diagnostic parent route',
+    outcome: 'empty-diff',
+    proposalCreated: false,
+    runId: `attempt-${hash.slice(0, 8)}-1234-4123-8123-${hash.padEnd(12, '0').slice(0, 12)}`,
+    objectiveHash,
+    spentUsd: 0,
+    basis: 'run-proposal-outcome',
+  };
+  const handoff = repairHandoffFromDispatchEvent(parentEvent)!;
+  recordRepairHandoffs(parentEvent);
   return {
-    id: `${basename(repoDir)}:proposal-repair-nodiff:${hash}`,
+    id: handoff.childItemId,
     repo: repoDir,
     source: 'self',
     title: `Reslice no-diff dispatch for ${basename(repoDir)} item repo:goal:stalled`,
     detail:
       `Diagnostic reslice: a dispatch completed without file changes.\n` +
-      `Original work item: repo:goal:stalled\n` +
+      `Original work item: ${parentItemId}\n` +
       `Dispatch outcome: empty-diff\n` +
       `Action: reslice the work into a smaller concrete edit.`,
     value: 5,
     effort: 1,
     score,
     tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice', 'no-diff', 'verify', 'high-priority'],
-    ts: new Date().toISOString(),
-    repairParentItemId: 'repo:goal:stalled',
+    ts,
+    repairHandoffId: handoff.eventId,
+    repairGenerationId: handoff.generationId,
+    repairParentItemId: parentItemId,
     repairParentSource: 'goal',
     repairParentBackend: parentTier === 'mid' ? 'local-coder' : 'builtin',
     repairParentTier: parentTier,
+    repairParentObjectiveHash: objectiveHash,
   };
 }
 
@@ -899,6 +933,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       summary: 'already pending diagnostic reslice proposal',
       diff: 'diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-old\n+new\n',
       workItemId: reslice.id,
+      workItemGenerationId: generatedRepairGenerationId(reslice)!,
       workSource: reslice.source,
     });
     mockBuildBacklog.mockResolvedValue({
@@ -948,7 +983,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     const generic = makeItems(repo.dir, 1)[0]!;
     generic.score = 100;
     const reslice = makeDiagnosticResliceItem(repo.dir, 'abcabc999999', 1);
-    recordOutcome(reslice.id, 'empty');
+    recordOutcome(generatedRepairCooldownKey(reslice), 'empty');
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
       repos: [repo.dir],
@@ -994,7 +1029,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     generic.score = 100;
     const reslice = makeDiagnosticResliceItem(repo.dir, 'abcabc888888', 1);
     seedHealthyGeneratedRepairYield(repo.dir);
-    recordOutcome(reslice.id, 'empty', new Date(Date.now() - 31 * 60 * 1000).toISOString());
+    const emptyAt = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+    recordOutcome(reslice.id, 'empty', emptyAt);
+    recordOutcome(generatedRepairCooldownKey(reslice), 'empty', emptyAt);
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
       repos: [repo.dir],
@@ -1051,7 +1088,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     generic.score = 100;
     const reslice = makeDiagnosticResliceItem(repo.dir, 'abcabc777777', 1);
     seedHealthyGeneratedRepairYield(repo.dir);
-    recordOutcome(reslice.id, 'judged-decline', new Date(Date.now() - 31 * 60 * 1000).toISOString());
+    recordOutcome(generatedRepairCooldownKey(reslice), 'judged-decline', new Date(Date.now() - 31 * 60 * 1000).toISOString());
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
       repos: [repo.dir],
@@ -2025,6 +2062,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       },
       learningSource: 'daemon-dispatch',
       labelBasis: 'dispatch-outcome',
+      objectiveHash: expect.stringMatching(/^[a-f0-9]{64}$/),
       spentUsd: 0.004,
       reason: 'engine "local-coder" completed without file changes',
       basis: 'run-proposal-outcome',

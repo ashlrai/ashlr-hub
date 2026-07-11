@@ -116,11 +116,16 @@ export function generatedRepairGenerationId(item: WorkItem): string | null {
         item.repairParentItemId !== handoff.parentItemId ||
         item.repairParentSource !== handoff.parentSource ||
         item.repairParentBackend !== handoff.parentBackend ||
-        item.repairParentTier !== handoff.parentTier
+        item.repairParentTier !== handoff.parentTier ||
+        handoff.parentObjectiveHash === undefined ||
+        item.repairParentObjectiveHash !== handoff.parentObjectiveHash
       ) return null;
     }
     return item.repairGenerationId;
   }
+  // Diagnostic reslices derive authority from a durable parent handoff. Older
+  // hashless/fallback generations remain readable but can never dispatch.
+  if (isTrustedDiagnosticResliceItem(item)) return null;
   let repo: string;
   try {
     repo = resolve(item.repo);

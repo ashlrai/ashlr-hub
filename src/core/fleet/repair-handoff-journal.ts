@@ -51,6 +51,7 @@ export interface RepairHandoffObservation {
   parentSource?: WorkSource;
   parentBackend?: EngineId | null;
   parentTier?: EngineTier | null;
+  parentObjectiveHash?: string;
   parentRunId?: string;
   parentTrajectoryId?: string;
   diffFiles?: number;
@@ -208,6 +209,9 @@ export function repairHandoffFromDispatchEvent(
     parentSource: event.source,
     parentBackend: event.backend,
     parentTier: event.tier,
+    ...(typeof event.objectiveHash === 'string' && SHA256_RE.test(event.objectiveHash)
+      ? { parentObjectiveHash: event.objectiveHash }
+      : {}),
     ...(event.runId ? { parentRunId: event.runId } : {}),
     ...(event.trajectoryId ? { parentTrajectoryId: event.trajectoryId } : {}),
     ...(count(event.diffFiles) !== undefined ? { diffFiles: count(event.diffFiles) } : {}),
@@ -235,6 +239,8 @@ function validObservation(value: unknown): value is RepairHandoffObservation {
   const parentProvenanceFields = ['parentSource', 'parentBackend', 'parentTier'] as const;
   const parentProvenanceCount = parentProvenanceFields.filter((key) => row[key] !== undefined).length;
   if (parentProvenanceCount !== 0 && parentProvenanceCount !== parentProvenanceFields.length) return false;
+  if (row['parentObjectiveHash'] !== undefined && !SHA256_RE.test(String(row['parentObjectiveHash']))) return false;
+  if (row['parentObjectiveHash'] !== undefined && parentProvenanceCount !== parentProvenanceFields.length) return false;
   if (row['parentSource'] !== undefined && !WORK_SOURCES.has(row['parentSource'] as WorkSource)) return false;
   if (
     row['parentBackend'] !== undefined && row['parentBackend'] !== null &&
@@ -381,9 +387,6 @@ export function readRepairHandoffs(): RepairHandoffReadResult {
     let invalidRows = text.endsWith('\n') ? 0 : 1;
     const physicalRows = completeLines.filter(Boolean).length;
     const limitExceeded = physicalRows > MAX_RECORDS;
-    if (limitExceeded) {
-      return { observations: [], sourceState: 'degraded', invalidRows, conflictingIds: 0, limitExceeded: true, physicalRows };
-    }
     for (const line of completeLines) {
       if (!line) continue;
       if (Buffer.byteLength(line, 'utf8') > MAX_ROW_BYTES) { invalidRows += 1; continue; }
@@ -394,10 +397,15 @@ export function readRepairHandoffs(): RepairHandoffReadResult {
         const existing = byId.get(parsed.eventId);
         if (!existing) byId.set(parsed.eventId, { fingerprint, row: parsed, conflict: false });
         else if (existing.fingerprint !== fingerprint) existing.conflict = true;
-        else if (hasParentProvenance(existing.row) && hasParentProvenance(parsed)) {
-          if (!sameParentProvenance(existing.row, parsed)) existing.conflict = true;
-        } else if (!hasParentProvenance(existing.row) && hasParentProvenance(parsed)) {
-          // A replay after the provenance upgrade enriches the legacy row.
+        else if (
+          hasParentProvenance(existing.row) &&
+          hasParentProvenance(parsed) &&
+          !sameParentProvenance(existing.row, parsed)
+        ) existing.conflict = true;
+        else if (existing.row.parentObjectiveHash !== parsed.parentObjectiveHash) existing.conflict = true;
+        else if (!hasParentProvenance(existing.row) && hasParentProvenance(parsed)) {
+          // Routing provenance may enrich a legacy row because it only restores
+          // the route that created the same semantic event.
           existing.row = parsed;
         }
       } catch { invalidRows += 1; }
@@ -413,7 +421,9 @@ export function readRepairHandoffs(): RepairHandoffReadResult {
     }
     return {
       observations,
-      sourceState: invalidRows > 0 || conflictingIds > 0 || limitExceeded ? 'degraded' : 'healthy',
+      // The row threshold is an observability/compaction signal, not an
+      // authority failure: every row was still parsed under the byte cap.
+      sourceState: invalidRows > 0 || conflictingIds > 0 ? 'degraded' : 'healthy',
       invalidRows,
       conflictingIds,
       limitExceeded,
@@ -434,14 +444,13 @@ export function compactRepairHandoffs(): RepairHandoffCompactionResult {
   let fd: number | undefined;
   try {
     const read = readRepairHandoffs();
-    if (read.conflictingIds > 0 || read.limitExceeded) {
+    if (read.conflictingIds > 0) {
       return { available: false, before: read.physicalRows, after: 0, removed: 0 };
     }
-    const newestByChild = new Map<string, RepairHandoffObservation>();
-    for (const observation of read.observations) {
-      if (!newestByChild.has(observation.childItemId)) newestByChild.set(observation.childItemId, observation);
-    }
-    const compacted = [...newestByChild.values()].sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+    // Preserve every semantic event id: old fingerprints are the immutable
+    // conflict history that prevents a later replay from minting new authority.
+    // Compaction only removes physical replays and invalid/torn rows.
+    const compacted = read.observations.slice().sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
     if (compacted.length === read.physicalRows) {
       return { available: true, before: read.physicalRows, after: compacted.length, removed: 0 };
     }
@@ -498,6 +507,7 @@ export function dispatchEventFromRepairHandoff(
     title: '',
     backend: observation.parentBackend ?? null,
     tier: observation.parentTier ?? null,
+    ...(observation.parentObjectiveHash ? { objectiveHash: observation.parentObjectiveHash } : {}),
     assignedBy: 'repair-handoff-journal',
     routeReason: 'durable-parent-handoff',
     outcome: observation.kind === 'capture-repair' ? 'proposal-capture-error' : 'empty-diff',

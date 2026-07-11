@@ -22,19 +22,19 @@ afterEach(() => {
 
 function repairItem(overrides: Partial<WorkItem> = {}): WorkItem {
   return {
-    id: 'repo:proposal-repair-nodiff:abcdef123456',
+    id: 'repo:proposal-repair:abcdef123456',
     repo: '/tmp/repo',
     source: 'self',
-    title: 'Reslice no-diff dispatch for repo item repo:goal:stalled',
+    title: 'Proposal repair: complete the stalled scheduler fix',
     detail:
-      'Diagnostic reslice: a dispatch completed without file changes.\n' +
+      'Proposal repair: produce a corrected proposal.\n' +
+      'Proposal: prop-stalled\n' +
       'Original work item: repo:goal:stalled\n' +
-      'Dispatch outcome: empty-diff\n' +
-      'Action: reslice the work into a smaller concrete edit.',
+      'Produce a fresh complete fix and verify it.',
     value: 4,
     effort: 1,
     score: 4,
-    tags: ['self-heal', 'proposal-repair', 'diagnostic-reslice', 'dispatch-no-diff-reslice'],
+    tags: ['self-heal', 'proposal-repair', 'verify'],
     ts: '2026-07-10T12:00:00.000Z',
     ...overrides,
   };
@@ -126,12 +126,12 @@ describe('generated repair lifecycle store', () => {
       proposalId: 'prop-generated-repair',
     });
     const presentationChange = repairItem({
-      title: 'Reworded generated repair title',
+      title: 'Proposal repair: reworded generated repair title',
       detail:
-        'Diagnostic reslice: wording changed.\n' +
+        'Proposal repair: wording changed.\n' +
+        'Proposal: prop-stalled\n' +
         'Original work item: repo:goal:stalled\n' +
-        'Dispatch outcome: empty-diff\n' +
-        'Action: reslice with clearer wording.',
+        'Produce a fresh complete fix with clearer wording.',
     });
     const otherRepo = repairItem({ repo: '/tmp/other-repo' });
 

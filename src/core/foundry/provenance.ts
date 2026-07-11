@@ -334,6 +334,12 @@ function loadExistingKey(): Buffer | null {
   }
 }
 
+/** Return the durable generated key only when its exact format is intact. */
+export function loadExistingProvenanceKey(): Buffer | null {
+  const key = loadExistingKey();
+  return key?.length === 32 ? key : null;
+}
+
 /**
  * Sign an immutable skill-card payload using the protected provenance key.
  * Returns an empty string instead of minting an ambiguous signature when the
