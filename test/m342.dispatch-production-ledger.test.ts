@@ -14,6 +14,7 @@ import {
   summarizeDispatchProductionYield,
   type DispatchProductionEvent,
 } from '../src/core/fleet/dispatch-production-ledger.js';
+import { repairGenerationIdFromHandoffId } from '../src/core/fleet/repair-handoff-journal.js';
 
 let prevAshlrHome: string | undefined;
 let prevHome: string | undefined;
@@ -78,6 +79,80 @@ describe('M342 dispatch production ledger', () => {
       proposalCreated: true,
       proposalId: 'prop-new',
       basis: 'run-proposal-outcome',
+    });
+  });
+
+  it('preserves complete repair transition lineage and marks partial or inconsistent tuples invalid', () => {
+    const handoffId = 'a'.repeat(64);
+    const generationId = repairGenerationIdFromHandoffId(handoffId)!;
+    recordDispatchProduction([
+      makeEvent({
+        itemId: 'repair-first',
+        repairHandoffId: handoffId,
+        repairGenerationId: generationId,
+        repairAttemptOrdinal: 1,
+      }),
+      makeEvent({
+        itemId: 'repair-retry',
+        repairHandoffId: handoffId,
+        repairGenerationId: generationId,
+        repairAttemptOrdinal: 2,
+        repairPreviousBackend: 'local-coder',
+        backend: 'kimi',
+      }),
+      makeEvent({
+        itemId: 'repair-partial',
+        repairHandoffId: handoffId,
+        repairAttemptOrdinal: 2,
+        repairPreviousBackend: 'local-coder',
+      }),
+      makeEvent({
+        itemId: 'repair-inconsistent',
+        repairHandoffId: handoffId,
+        repairGenerationId: generationId,
+        repairAttemptOrdinal: 1,
+        repairPreviousBackend: 'local-coder',
+      }),
+      makeEvent({
+        itemId: 'repair-unbound',
+        repairHandoffId: handoffId,
+        repairGenerationId: 'b'.repeat(64),
+        repairAttemptOrdinal: 1,
+      }),
+      makeEvent({
+        itemId: 'repair-same-backend',
+        repairHandoffId: handoffId,
+        repairGenerationId: generationId,
+        repairAttemptOrdinal: 2,
+        repairPreviousBackend: 'local-coder',
+        backend: 'local-coder',
+      }),
+    ]);
+
+    const byId = new Map(readDispatchProductionEvents().map((event) => [event.itemId, event]));
+    expect(byId.get('repair-first')).toMatchObject({
+      repairHandoffId: handoffId,
+      repairGenerationId: generationId,
+      repairAttemptOrdinal: 1,
+    });
+    expect(byId.get('repair-first')).not.toHaveProperty('repairPreviousBackend');
+    expect(byId.get('repair-retry')).toMatchObject({
+      repairHandoffId: handoffId,
+      repairGenerationId: generationId,
+      repairAttemptOrdinal: 2,
+      repairPreviousBackend: 'local-coder',
+      backend: 'kimi',
+    });
+    expect(byId.get('repair-partial')).toMatchObject({ repairLineageInvalid: true });
+    expect(byId.get('repair-inconsistent')).toMatchObject({ repairLineageInvalid: true });
+    expect(byId.get('repair-unbound')).toMatchObject({ repairLineageInvalid: true });
+    expect(byId.get('repair-same-backend')).toMatchObject({ repairLineageInvalid: true });
+    expect(summarizeDispatchProductionYield([...byId.values()])?.generatedRepairBackendTransitions).toMatchObject({
+      sourceState: 'degraded',
+      lineageEvents: 2,
+      transitionEvents: 1,
+      attempts: 1,
+      invalidLineageEvents: 4,
     });
   });
 
@@ -661,6 +736,72 @@ describe('M342 dispatch production ledger', () => {
     expect(event.routeReason).not.toContain('ghp_1234567890abcdefABCDEF');
     expect(summary?.topReasons[0]?.reason).not.toContain('sk-supersecretsecretsecret');
     expect(JSON.stringify(summary)).toContain('[REDACTED]');
+  });
+
+  it('deduplicates repair transition learning and degrades contradictory lineage', () => {
+    const handoffId = 'a'.repeat(64);
+    const generationId = repairGenerationIdFromHandoffId(handoffId)!;
+    const retry = makeEvent({
+      itemId: `diagnostic:generated-repair:${generationId}`,
+      backend: 'kimi',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      repairHandoffId: handoffId,
+      repairGenerationId: generationId,
+      repairAttemptOrdinal: 2,
+      repairPreviousBackend: 'local-coder',
+    });
+    const distinct = makeEvent({
+      ...retry,
+      runId: 'run-b',
+      outcome: 'engine-failed',
+      proposalCreated: false,
+    });
+    const conflict = makeEvent({
+      ...retry,
+      runId: retry.runId,
+      backend: 'nim',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+    });
+
+    const healthy = summarizeDispatchProductionYield([retry, { ...retry }, distinct]);
+    expect(healthy?.generatedRepairBackendTransitions).toEqual({
+      sourceState: 'healthy',
+      lineageEvents: 3,
+      transitionEvents: 3,
+      attempts: 2,
+      duplicateEvents: 1,
+      conflictingAttempts: 0,
+      invalidLineageEvents: 0,
+      byTransition: [{
+        previousBackend: 'local-coder',
+        retryBackend: 'kimi',
+        attempts: 2,
+        proposalsCreated: 1,
+        noProposal: 1,
+        proposalRate: 0.5,
+        outcomes: expect.objectContaining({ proposalCreated: 1, engineFailed: 1 }),
+      }],
+    });
+
+    const degraded = summarizeDispatchProductionYield([retry, distinct, conflict]);
+    expect(degraded?.generatedRepairBackendTransitions).toMatchObject({
+      sourceState: 'degraded',
+      lineageEvents: 3,
+      transitionEvents: 3,
+      attempts: 1,
+      conflictingAttempts: 1,
+      byTransition: [{
+        previousBackend: 'local-coder',
+        retryBackend: 'kimi',
+        attempts: 1,
+        proposalsCreated: 0,
+        noProposal: 1,
+      }],
+    });
+    expect(JSON.stringify(degraded?.generatedRepairBackendTransitions)).not.toContain(generationId);
+    expect(JSON.stringify(degraded?.generatedRepairBackendTransitions)).not.toContain(handoffId);
   });
 
   it('prunes stale day files before applying recent yield windows', () => {

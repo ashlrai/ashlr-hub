@@ -72,6 +72,7 @@ export interface GeneratedRepairLifecycleResult {
   disposition: GeneratedRepairDisposition;
   authoritativeEmptyRuns: number;
   lastAuthoritativeEmptyBackend?: EngineId | null;
+  authoritativeEmptyBackends?: EngineId[];
 }
 
 export type GeneratedRepairLifecycleEvidence =
@@ -88,6 +89,13 @@ export interface GeneratedRepairRetryPolicy {
   available: boolean;
   requireAlternative: boolean;
   excludedBackend: EngineId | null;
+}
+
+export interface GeneratedRepairDispatchLineage {
+  repairHandoffId: string;
+  repairGenerationId: string;
+  repairAttemptOrdinal: 1 | 2;
+  repairPreviousBackend?: EngineId;
 }
 
 export function generatedRepairLifecyclePath(): string {
@@ -413,6 +421,9 @@ function resultFromRecord(
     ...(record?.emptyAttemptHashes.length
       ? { lastAuthoritativeEmptyBackend: record.emptyAttemptBackends?.at(-1) ?? null }
       : {}),
+    ...(record?.emptyAttemptBackends && record.emptyAttemptBackends.length > 0
+      ? { authoritativeEmptyBackends: record.emptyAttemptBackends.slice() }
+      : {}),
   };
 }
 
@@ -468,6 +479,31 @@ export function generatedRepairBackendAllowed(item: WorkItem, backend: EngineId)
   return !policy.requireAlternative || (
     policy.excludedBackend !== null && backend !== policy.excludedBackend
   );
+}
+
+/** Snapshot metadata-only retry lineage before the current dispatch transition is recorded. */
+export function generatedRepairDispatchLineage(
+  item: WorkItem,
+  backend: EngineId | null,
+): GeneratedRepairDispatchLineage | null {
+  if (!isTrustedDiagnosticResliceItem(item) || backend === null) return null;
+  const generationId = generatedRepairGenerationId(item);
+  if (
+    generationId === null ||
+    typeof item.repairHandoffId !== 'string' ||
+    item.repairGenerationId !== generationId
+  ) return null;
+  const lifecycle = readGeneratedRepairLifecycle(item);
+  if (!lifecycle.available) return null;
+  const backends = lifecycle.authoritativeEmptyBackends;
+  if (lifecycle.authoritativeEmptyRuns > 0 && backends === undefined) return null;
+  const previousBackend = backends?.at(-1);
+  return {
+    repairHandoffId: item.repairHandoffId,
+    repairGenerationId: generationId,
+    repairAttemptOrdinal: previousBackend ? 2 : 1,
+    ...(previousBackend ? { repairPreviousBackend: previousBackend } : {}),
+  };
 }
 
 /**

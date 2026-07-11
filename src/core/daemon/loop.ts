@@ -180,6 +180,7 @@ import {
 } from '../fleet/self-heal-trust.js';
 import {
   generatedRepairBackendAllowed,
+  generatedRepairDispatchLineage,
   generatedRepairGenerationId,
   generatedRepairCooldownKey,
   generatedRepairRetryPolicy,
@@ -1073,6 +1074,7 @@ function dispatchProductionEventFromOutcome(
     title: value.item.title,
     source: value.item.source,
   });
+  const repairLineage = generatedRepairDispatchLineage(value.item, trace.backend);
   return {
     schemaVersion: 1,
     ts,
@@ -1100,6 +1102,7 @@ function dispatchProductionEventFromOutcome(
     ...(trace.learningEpoch ? { learningEpoch: trace.learningEpoch } : {}),
     learningLabel,
     ...(objectiveHash ? { objectiveHash } : {}),
+    ...(repairLineage ?? {}),
     spentUsd: value.spentUsd,
     ...(typeof production?.diffFiles === 'number' ? { diffFiles: production.diffFiles } : {}),
     ...(typeof production?.diffLines === 'number' ? { diffLines: production.diffLines } : {}),
@@ -1151,6 +1154,10 @@ function agentActionFromDispatchEvent(event: DispatchProductionEvent): AgentActi
     ...(event.routerPolicyVersion ? { routerPolicyVersion: event.routerPolicyVersion } : {}),
     ...(event.learningEpoch ? { learningEpoch: event.learningEpoch } : {}),
     ...(event.learningLabel ? { learningLabel: event.learningLabel } : {}),
+    ...(event.repairHandoffId ? { repairHandoffId: event.repairHandoffId } : {}),
+    ...(event.repairGenerationId ? { repairGenerationId: event.repairGenerationId } : {}),
+    ...(event.repairAttemptOrdinal ? { repairAttemptOrdinal: event.repairAttemptOrdinal } : {}),
+    ...(event.repairPreviousBackend ? { repairPreviousBackend: event.repairPreviousBackend } : {}),
     backend: event.backend,
     tier: event.tier,
     ...(event.model !== undefined ? { model: event.model } : {}),

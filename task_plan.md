@@ -1589,3 +1589,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Refuse repeat dispatch to the same backend with explicit `repair-alternative-unavailable` evidence when no qualified alternative exists.
 - [x] Cover router, gateway, concurrent planner, daemon telemetry, lifecycle-unavailable, and flag-equivalence paths.
 - [x] Run focused/full gates and independent adversarial review, then update notes, commit, push, reload, and production-canary the policy.
+
+## Current Overnight Cycle - Backend Transition Learning Telemetry
+- [x] Rehydrate the deployed retry-discipline baseline, live lifecycle state, queue, daemon health, and persistent notes.
+- [x] Deploy disjoint audits for FleetStatus yield, authoritative lineage joins, and telemetry regression coverage.
+- [x] Persist exact repair handoff/generation lineage on ordinary daemon dispatch events without raw content.
+- [x] Bind retry ordinal and prior executed backend only from authoritative lifecycle state.
+- [x] Preserve lineage through sanitization, replay reads, and agent-action projection without granting control or merge authority.
+- [x] Add malformed, legacy, first-attempt, retry-success, retry-failure, executor-fallback, and privacy coverage.
+- [x] Run focused/full gates and independent review, then update notes, commit, push, reload, and production-canary lineage capture.

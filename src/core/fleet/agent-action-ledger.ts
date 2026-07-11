@@ -38,6 +38,7 @@ import {
   type ProductionAttemptLearningLabel,
 } from '../learning/attempt-shape.js';
 import { listEnrolled } from '../sandbox/policy.js';
+import { repairGenerationIdFromHandoffId } from './repair-handoff-journal.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
@@ -102,6 +103,11 @@ export interface AgentActionEvent {
   routerPolicyVersion?: string;
   learningEpoch?: string;
   learningLabel?: ProductionAttemptLearningLabel;
+  repairHandoffId?: string;
+  repairGenerationId?: string;
+  repairAttemptOrdinal?: 1 | 2;
+  repairPreviousBackend?: EngineId;
+  repairLineageInvalid?: true;
   backend?: EngineId | null;
   tier?: EngineTier | null;
   model?: string | null;
@@ -323,6 +329,32 @@ function sanitizeEvent(event: AgentActionEvent): AgentActionEvent {
   const runId = boundedOptionalText(event.runId, 160);
   const model = boundedOptionalText(event.model, 160);
   const reason = boundedOptionalText(event.reason, 240);
+  const repairHandoffId = typeof event.repairHandoffId === 'string' && /^[a-f0-9]{64}$/.test(event.repairHandoffId)
+    ? event.repairHandoffId
+    : undefined;
+  const repairGenerationId = typeof event.repairGenerationId === 'string' && /^[a-f0-9]{64}$/.test(event.repairGenerationId)
+    ? event.repairGenerationId
+    : undefined;
+  const repairAttemptOrdinal = event.repairAttemptOrdinal === 1 || event.repairAttemptOrdinal === 2
+    ? event.repairAttemptOrdinal
+    : undefined;
+  const repairPreviousBackend = enumValue(event.repairPreviousBackend, ENGINE_IDS);
+  const repairLineageFieldsPresent = event.repairHandoffId !== undefined ||
+    event.repairGenerationId !== undefined ||
+    event.repairAttemptOrdinal !== undefined ||
+    event.repairPreviousBackend !== undefined;
+  const repairLineageComplete = event.repairLineageInvalid !== true &&
+    backend !== undefined &&
+    backend !== null &&
+    repairHandoffId !== undefined &&
+    repairGenerationId !== undefined &&
+    repairGenerationIdFromHandoffId(repairHandoffId) === repairGenerationId &&
+    repairAttemptOrdinal !== undefined &&
+    (repairAttemptOrdinal === 1
+      ? repairPreviousBackend === undefined
+      : repairPreviousBackend !== undefined && backend !== repairPreviousBackend);
+  const repairLineageInvalid = event.repairLineageInvalid === true ||
+    (repairLineageFieldsPresent && !repairLineageComplete);
   const contextRollupId = typeof event.contextRollupId === 'string' &&
     /^cr-[0-9a-f]{64}$/.test(event.contextRollupId) ? event.contextRollupId : undefined;
   const contextRollupPolicyVersion = event.contextRollupPolicyVersion === 'context-rollup-v1'
@@ -364,6 +396,16 @@ function sanitizeEvent(event: AgentActionEvent): AgentActionEvent {
     ...(runId ? { runId } : {}),
     ...causal,
     ...(learningLabel ? { learningLabel } : {}),
+    ...(repairLineageInvalid
+      ? { repairLineageInvalid: true as const }
+      : repairLineageComplete
+        ? {
+          repairHandoffId,
+          repairGenerationId,
+          repairAttemptOrdinal,
+          ...(repairPreviousBackend ? { repairPreviousBackend } : {}),
+          }
+        : {}),
     ...(backend !== undefined ? { backend } : {}),
     ...(tier !== undefined ? { tier } : {}),
     ...(model ? { model } : {}),

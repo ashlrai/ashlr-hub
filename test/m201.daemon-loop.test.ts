@@ -2900,6 +2900,22 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
     expect(result.dispatches?.[0]).toMatchObject({ backend: 'kimi', tier: 'mid', dispatched: true });
     expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ engine: 'kimi' });
+    expect(readDispatchProductionEvents().find((event) => event.itemId === repair.id)).toMatchObject({
+      repairHandoffId: repair.repairHandoffId,
+      repairGenerationId: repair.repairGenerationId,
+      repairAttemptOrdinal: 2,
+      repairPreviousBackend: 'local-coder',
+      backend: 'kimi',
+    });
+    expect(readAgentActions({ complete: true }).find((event) =>
+      event.action === 'daemon:dispatch' && event.itemId === repair.id
+    )).toMatchObject({
+      repairHandoffId: repair.repairHandoffId,
+      repairGenerationId: repair.repairGenerationId,
+      repairAttemptOrdinal: 2,
+      repairPreviousBackend: 'local-coder',
+      backend: 'kimi',
+    });
   });
 
   it('A1h5b2: claimed proposal metadata without a durable inbox proposal is not lifecycle authority', async () => {
@@ -2971,6 +2987,12 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
 
     expect(mockRunBestOfN).not.toHaveBeenCalled();
     expect(result.dispatches?.[0]).toMatchObject({ backend: 'local-coder', production: { outcome: 'empty-diff' } });
+    expect(readDispatchProductionEvents().find((event) => event.itemId === repair.id)).toMatchObject({
+      repairHandoffId: repair.repairHandoffId,
+      repairGenerationId: repair.repairGenerationId,
+      repairAttemptOrdinal: 1,
+      backend: 'local-coder',
+    });
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
       available: true,
       disposition: 'active',
@@ -2983,6 +3005,11 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const repair = makeDiagnosticResliceItem(repo.dir, 'aaaaab123456', 10, 'mid');
+    recordGeneratedRepairLifecycle(repair, {
+      kind: 'empty-diff',
+      attemptId: 'attempt-53345678-1234-4123-8123-123456789abc',
+      backend: 'builtin',
+    });
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
       repos: [repo.dir],
@@ -3019,7 +3046,19 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
       disposition: 'active',
-      authoritativeEmptyRuns: 0,
+      authoritativeEmptyRuns: 1,
+      lastAuthoritativeEmptyBackend: 'builtin',
+    });
+    expect(readDispatchProductionEvents().find((event) => event.itemId === repair.id)).toMatchObject({
+      repairLineageInvalid: true,
+      backend: 'builtin',
+      outcome: 'empty-diff',
+    });
+    expect(readAgentActions({ complete: true }).find((event) =>
+      event.action === 'daemon:dispatch' && event.itemId === repair.id
+    )).toMatchObject({
+      repairLineageInvalid: true,
+      backend: 'builtin',
     });
   });
 

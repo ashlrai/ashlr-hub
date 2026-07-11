@@ -36,9 +36,15 @@ import {
   type ProductionAttemptLearningLabel,
 } from '../learning/attempt-shape.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { repairGenerationIdFromHandoffId } from './repair-handoff-journal.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
+const SHA256_RE = /^[a-f0-9]{64}$/;
+const ENGINE_IDS = new Set<EngineId>([
+  'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
+  'kimi', 'nim', 'opencode', 'grok',
+]);
 
 export type DispatchProductionBasis =
   | 'run-proposal-outcome'
@@ -79,9 +85,12 @@ export interface DispatchProductionEvent {
   diffLines?: number;
   reason?: string;
   basis: DispatchProductionBasis;
-  /** Control-plane lineage on synthetic durable repair-handoff replay only. */
+  /** Metadata-only exact lineage for journal-authorized diagnostic repair dispatches. */
   repairHandoffId?: string;
   repairGenerationId?: string;
+  repairAttemptOrdinal?: 1 | 2;
+  repairPreviousBackend?: EngineId;
+  repairLineageInvalid?: true;
 }
 
 export interface DispatchProductionReasonCount {
@@ -108,6 +117,27 @@ export interface GeneratedRepairAttemptSummary {
   captureRepairs: number;
   diagnosticReslices: number;
   proposalRepairs: number;
+}
+
+export interface GeneratedRepairBackendTransitionBucket {
+  previousBackend: EngineId;
+  retryBackend: EngineId;
+  attempts: number;
+  proposalsCreated: number;
+  noProposal: number;
+  proposalRate: number;
+  outcomes: DispatchProductionOutcomeCounts;
+}
+
+export interface GeneratedRepairBackendTransitionSummary {
+  sourceState: 'healthy' | 'degraded';
+  lineageEvents: number;
+  transitionEvents: number;
+  attempts: number;
+  duplicateEvents: number;
+  conflictingAttempts: number;
+  invalidLineageEvents: number;
+  byTransition: GeneratedRepairBackendTransitionBucket[];
 }
 
 export interface DispatchProductionYieldBucket {
@@ -141,6 +171,7 @@ export interface DispatchProductionYieldSummary {
   actionCounts?: RunActionCounts;
   attemptShape?: ProductionAttemptShape;
   generatedRepairAttempts?: GeneratedRepairAttemptSummary;
+  generatedRepairBackendTransitions?: GeneratedRepairBackendTransitionSummary;
   topReasons: DispatchProductionReasonCount[];
   diagnosticTopReasons?: DispatchProductionReasonCount[];
   byBackend: DispatchProductionYieldBucket[];
@@ -217,6 +248,35 @@ function sanitizeEvent(
   const objectiveHash = typeof event.objectiveHash === 'string' && /^[a-f0-9]{64}$/.test(event.objectiveHash)
     ? event.objectiveHash
     : undefined;
+  const repairHandoffId = typeof event.repairHandoffId === 'string' && SHA256_RE.test(event.repairHandoffId)
+    ? event.repairHandoffId
+    : undefined;
+  const repairGenerationId = typeof event.repairGenerationId === 'string' && SHA256_RE.test(event.repairGenerationId)
+    ? event.repairGenerationId
+    : undefined;
+  const repairAttemptOrdinal = event.repairAttemptOrdinal === 1 || event.repairAttemptOrdinal === 2
+    ? event.repairAttemptOrdinal
+    : undefined;
+  const repairPreviousBackend = ENGINE_IDS.has(event.repairPreviousBackend as EngineId)
+    ? event.repairPreviousBackend
+    : undefined;
+  const repairLineageFieldsPresent = event.repairHandoffId !== undefined ||
+    event.repairGenerationId !== undefined ||
+    event.repairAttemptOrdinal !== undefined ||
+    event.repairPreviousBackend !== undefined;
+  const repairLineageComplete = event.repairLineageInvalid !== true &&
+    backend !== undefined &&
+    backend !== null &&
+    ENGINE_IDS.has(backend) &&
+    repairHandoffId !== undefined &&
+    repairGenerationId !== undefined &&
+    repairGenerationIdFromHandoffId(repairHandoffId) === repairGenerationId &&
+    repairAttemptOrdinal !== undefined &&
+    (repairAttemptOrdinal === 1
+      ? repairPreviousBackend === undefined
+      : repairPreviousBackend !== undefined && backend !== repairPreviousBackend);
+  const repairLineageInvalid = event.repairLineageInvalid === true ||
+    (repairLineageFieldsPresent && !repairLineageComplete);
   const outcome = boundedText(event.outcome, 80) as DaemonDispatchProductionOutcome;
   const basis = boundedText(event.basis, 80) as DispatchProductionBasis;
   const reason = boundedOptionalText(event.reason, 240);
@@ -285,6 +345,16 @@ function sanitizeEvent(
     ...causal,
     ...(learningLabel ? { learningLabel } : {}),
     ...(objectiveHash ? { objectiveHash } : {}),
+    ...(repairLineageInvalid
+      ? { repairLineageInvalid: true as const }
+      : repairLineageComplete
+        ? {
+          repairHandoffId,
+          repairGenerationId,
+          repairAttemptOrdinal,
+          ...(repairPreviousBackend ? { repairPreviousBackend } : {}),
+          }
+        : {}),
     spentUsd,
     ...(diffFiles !== undefined ? { diffFiles } : {}),
     ...(diffLines !== undefined ? { diffLines } : {}),
@@ -684,6 +754,106 @@ function sortedBuckets(buckets: Map<string, MutableYieldBucket>, limit: number):
     .slice(0, limit);
 }
 
+function summarizeGeneratedRepairBackendTransitions(
+  events: DispatchProductionEvent[],
+  limit: number,
+): GeneratedRepairBackendTransitionSummary | undefined {
+  const attempts = new Map<string, DispatchProductionEvent>();
+  const conflicts = new Set<string>();
+  let lineageEvents = 0;
+  let transitionEvents = 0;
+  let duplicateEvents = 0;
+  let invalidLineageEvents = 0;
+
+  for (const event of events) {
+    const hasAnyLineage = event.repairLineageInvalid === true ||
+      event.repairHandoffId !== undefined ||
+      event.repairGenerationId !== undefined ||
+      event.repairAttemptOrdinal !== undefined ||
+      event.repairPreviousBackend !== undefined;
+    if (!hasAnyLineage) continue;
+
+    const complete = event.repairLineageInvalid !== true &&
+      typeof event.repairHandoffId === 'string' && SHA256_RE.test(event.repairHandoffId) &&
+      typeof event.repairGenerationId === 'string' && SHA256_RE.test(event.repairGenerationId) &&
+      repairGenerationIdFromHandoffId(event.repairHandoffId) === event.repairGenerationId &&
+      (event.repairAttemptOrdinal === 1 || event.repairAttemptOrdinal === 2) &&
+      (event.repairAttemptOrdinal === 1
+        ? event.repairPreviousBackend === undefined
+        : ENGINE_IDS.has(event.repairPreviousBackend as EngineId) && event.backend !== event.repairPreviousBackend);
+    if (!complete || !ENGINE_IDS.has(event.backend as EngineId)) {
+      invalidLineageEvents++;
+      continue;
+    }
+
+    lineageEvents++;
+    if (event.repairAttemptOrdinal !== 2 || event.repairPreviousBackend === undefined) continue;
+    transitionEvents++;
+    const executionId = event.runId ?? event.trajectoryId;
+    if (!executionId) {
+      invalidLineageEvents++;
+      continue;
+    }
+    const key = `${event.repairGenerationId}:2:${executionId}`;
+    const previous = attempts.get(key);
+    if (!previous) {
+      attempts.set(key, event);
+      continue;
+    }
+    const same = previous.repairHandoffId === event.repairHandoffId &&
+      previous.repairPreviousBackend === event.repairPreviousBackend &&
+      previous.backend === event.backend &&
+      previous.outcome === event.outcome &&
+      previous.proposalCreated === event.proposalCreated;
+    if (same) duplicateEvents++;
+    else conflicts.add(key);
+  }
+
+  if (lineageEvents === 0 && invalidLineageEvents === 0) return undefined;
+
+  const buckets = new Map<string, GeneratedRepairBackendTransitionBucket>();
+  for (const [key, event] of attempts) {
+    if (conflicts.has(key) || event.backend === null || event.repairPreviousBackend === undefined) continue;
+    const bucketKey = `${event.repairPreviousBackend}:${event.backend}`;
+    let bucket = buckets.get(bucketKey);
+    if (!bucket) {
+      bucket = {
+        previousBackend: event.repairPreviousBackend,
+        retryBackend: event.backend,
+        attempts: 0,
+        proposalsCreated: 0,
+        noProposal: 0,
+        proposalRate: 0,
+        outcomes: emptyOutcomeCounts(),
+      };
+      buckets.set(bucketKey, bucket);
+    }
+    bucket.attempts++;
+    if (event.proposalCreated) bucket.proposalsCreated++;
+    else bucket.noProposal++;
+    bucket.proposalRate = bucket.proposalsCreated / bucket.attempts;
+    incrementOutcome(bucket.outcomes, event.outcome);
+  }
+
+  const aggregateAttempts = [...buckets.values()]
+    .reduce((total, bucket) => total + bucket.attempts, 0);
+  const byTransition = [...buckets.values()]
+    .sort((a, b) => b.attempts - a.attempts ||
+      a.previousBackend.localeCompare(b.previousBackend) ||
+      a.retryBackend.localeCompare(b.retryBackend))
+    .slice(0, limit);
+  return {
+    sourceState: conflicts.size > 0 || invalidLineageEvents > 0 ? 'degraded' : 'healthy',
+    lineageEvents,
+    transitionEvents,
+    attempts: aggregateAttempts,
+    duplicateEvents,
+    conflictingAttempts: conflicts.size,
+    invalidLineageEvents,
+    byTransition,
+  };
+}
+
 export function summarizeDispatchProductionYield(
   events: DispatchProductionEvent[],
   opts?: {
@@ -758,6 +928,7 @@ export function summarizeDispatchProductionYield(
   }
 
   const total = events.length;
+  const generatedRepairBackendTransitions = summarizeGeneratedRepairBackendTransitions(events, limit);
   return {
     windowHours: opts?.windowHours ?? 24,
     attempts: total,
@@ -770,6 +941,7 @@ export function summarizeDispatchProductionYield(
     ...(hasRunActionCounts(actionCounts) ? { actionCounts } : {}),
     ...(hasProductionAttemptShape(attemptShape) ? { attemptShape } : {}),
     ...(hasGeneratedRepairAttemptSummary(generatedRepairAttempts) ? { generatedRepairAttempts } : {}),
+    ...(generatedRepairBackendTransitions ? { generatedRepairBackendTransitions } : {}),
     topReasons: sortedReasons(topReasons, limit),
     diagnosticTopReasons: sortedReasons(diagnosticTopReasons, limit),
     byBackend: sortedBuckets(byBackend, limit),
