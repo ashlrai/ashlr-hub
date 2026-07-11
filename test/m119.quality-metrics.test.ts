@@ -275,6 +275,26 @@ describe('m119 computeQualityMetrics', () => {
 // ---------------------------------------------------------------------------
 
 describe('m119 decisions-ledger', () => {
+  it('keeps identity checks while tolerating Windows-emulated POSIX modes', async () => {
+    const {
+      isSafeDecisionAuthorityDirectory,
+      isSafeDecisionAuthorityFile,
+    } = await import('../src/core/fleet/decisions-ledger.js');
+    const dir = path.join(tmpHome, 'windows-mode-fixture');
+    const file = path.join(dir, 'decision.jsonl');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, '{}\n');
+    const directoryStat = fs.statSync(dir);
+    const fileStat = fs.statSync(file);
+    Object.defineProperty(directoryStat, 'mode', { value: 0o40777 });
+    Object.defineProperty(fileStat, 'mode', { value: 0o100666 });
+
+    expect(isSafeDecisionAuthorityDirectory(directoryStat, 'win32')).toBe(true);
+    expect(isSafeDecisionAuthorityFile(fileStat, 'win32')).toBe(true);
+    expect(isSafeDecisionAuthorityDirectory(directoryStat, 'linux')).toBe(false);
+    expect(isSafeDecisionAuthorityFile(fileStat, 'linux')).toBe(false);
+  });
+
   it('recordDecision + readDecisions round-trips a basic entry', async () => {
     const { recordDecision, readDecisions } = await import('../src/core/fleet/decisions-ledger.js');
 

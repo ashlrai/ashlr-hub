@@ -186,13 +186,23 @@ export function recordDecision(entry: DecisionEntry): void {
 function appendDecisionLine(path: string, line: string): void {
   let fd: number | undefined;
   try {
+    let pathBefore: ReturnType<typeof lstatSync> | undefined;
+    try {
+      pathBefore = lstatSync(path);
+      if (!isSafeDecisionAuthorityFile(pathBefore)) {
+        throw new Error('decisions ledger path is unsafe');
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
     fd = openSync(
       path,
-      fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
+      fsConstants.O_APPEND | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW |
+        (pathBefore ? 0 : fsConstants.O_CREAT | fsConstants.O_EXCL),
       0o600,
     );
     const opened = fstatSync(fd);
-    if (!opened.isFile() || unsafeAuthorityFile(opened)) {
+    if (!isSafeDecisionAuthorityFile(opened) || (pathBefore && !sameFile(pathBefore, opened))) {
       throw new Error('decisions ledger is not a safe regular file');
     }
     if (opened.size > 0) {
@@ -202,6 +212,10 @@ function appendDecisionLine(path: string, line: string): void {
       if (tail[0] !== 0x0a) writeAll(fd, Buffer.from('\n', 'utf8'));
     }
     writeAll(fd, Buffer.from(line, 'utf8'));
+    const pathAfter = lstatSync(path);
+    if (!isSafeDecisionAuthorityFile(pathAfter) || !sameFile(opened, pathAfter)) {
+      throw new Error('decisions ledger path changed during append');
+    }
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -267,12 +281,20 @@ function ownedByCurrentUser(stat: ReturnType<typeof fstatSync>): boolean {
   return typeof process.getuid !== 'function' || Number(stat.uid) === process.getuid();
 }
 
-function unsafeAuthorityFile(stat: ReturnType<typeof fstatSync>): boolean {
-  return Number(stat.nlink) !== 1 || !ownedByCurrentUser(stat) || (Number(stat.mode) & 0o022) !== 0;
+export function isSafeDecisionAuthorityFile(
+  stat: ReturnType<typeof fstatSync>,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return stat.isFile() && !stat.isSymbolicLink() && Number(stat.nlink) === 1 &&
+    ownedByCurrentUser(stat) && (platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
 }
 
-function unsafeAuthorityDirectory(stat: ReturnType<typeof fstatSync>): boolean {
-  return !ownedByCurrentUser(stat) || (Number(stat.mode) & 0o022) !== 0;
+export function isSafeDecisionAuthorityDirectory(
+  stat: ReturnType<typeof fstatSync>,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return stat.isDirectory() && !stat.isSymbolicLink() && ownedByCurrentUser(stat) &&
+    (platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
 }
 
 function sameDirectorySnapshot(
@@ -289,13 +311,13 @@ function readDecisionFile(
   let fd: number | undefined;
   try {
     const pathBefore = lstatSync(path);
-    if (pathBefore.isSymbolicLink() || !pathBefore.isFile() || unsafeAuthorityFile(pathBefore)) {
+    if (!isSafeDecisionAuthorityFile(pathBefore)) {
       return { ok: false, reason: 'io-error' };
     }
     if (pathBefore.size > maxBytes) return { ok: false, reason: 'byte-limit' };
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     const before = fstatSync(fd);
-    if (!before.isFile() || unsafeAuthorityFile(before) || !sameFile(pathBefore, before)) {
+    if (!isSafeDecisionAuthorityFile(before) || !sameFile(pathBefore, before)) {
       return { ok: false, reason: 'io-error' };
     }
     if (before.size > maxBytes) return { ok: false, reason: 'byte-limit' };
@@ -307,7 +329,7 @@ function readDecisionFile(
       pathAfter.isSymbolicLink() ||
       !pathAfter.isFile() ||
       !after.isFile() ||
-      unsafeAuthorityFile(after) ||
+      !isSafeDecisionAuthorityFile(after) ||
       !sameFile(before, after) ||
       !sameFile(after, pathAfter) ||
       after.size !== before.size ||
@@ -336,7 +358,7 @@ export function readDecisionsDetailed(opts: ReadDecisionsOptions = {}): Decision
       if (
         directorySnapshot.isSymbolicLink() ||
         !directorySnapshot.isDirectory() ||
-        unsafeAuthorityDirectory(directorySnapshot)
+        !isSafeDecisionAuthorityDirectory(directorySnapshot)
       ) {
         return emptyDecisionRead('degraded', {
           complete: false,
@@ -498,7 +520,7 @@ export function readDecisionsDetailed(opts: ReadDecisionsOptions = {}): Decision
       if (
         directoryAfter.isSymbolicLink() ||
         !directoryAfter.isDirectory() ||
-        unsafeAuthorityDirectory(directoryAfter) ||
+        !isSafeDecisionAuthorityDirectory(directoryAfter) ||
         !sameDirectorySnapshot(directorySnapshot, directoryAfter)
       ) {
         pushStopReason(result.stopReasons, 'io-error');
