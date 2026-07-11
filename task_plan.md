@@ -1636,4 +1636,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Surface agent-action source quality in FleetStatus, CLI, API, and workspace summaries without healthy-looking partial zeros.
 - [x] Add malformed, unreadable, oversized, linked, replacement, exact-cap, stale-window, ordering, privacy, and writer coverage.
 - [x] Complete independent adversarial review and update durable notes.
-- [ ] Commit, push, reload, and production-canary the workspace.
+- [x] Commit, push, reload, and production-canary the workspace.
