@@ -61,6 +61,7 @@ export interface ProposalRepairWorkResult {
   handoffInvalidRows?: number;
   handoffConflictingIds?: number;
   handoffSourceState?: 'missing' | 'healthy' | 'degraded';
+  handoffAuthorityDigest?: string;
   handoffCompacted?: number;
   handoffCompactionUnavailable?: number;
   proposalInboxAvailable?: boolean;
@@ -483,6 +484,7 @@ export function queueProposalRepairWorkForPendingProposals(
         handoffInvalidRows: handoffs.invalidRows,
         handoffConflictingIds: handoffs.conflictingIds,
         handoffSourceState: handoffs.sourceState,
+        handoffAuthorityDigest: handoffs.authorityDigest,
       } : {}),
     };
   }
@@ -539,6 +541,7 @@ export function queueProposalRepairWorkForPendingProposals(
     result.handoffInvalidRows = handoffs.invalidRows;
     result.handoffConflictingIds = handoffs.conflictingIds;
     result.handoffSourceState = handoffs.sourceState;
+    result.handoffAuthorityDigest = handoffs.authorityDigest;
   }
 
   const terminalLifecycleEnabled = opts?.terminalLifecycleEnabled !== false;

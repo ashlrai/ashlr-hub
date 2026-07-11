@@ -4151,6 +4151,7 @@ export interface DaemonTick {
     repairHandoffInvalidRows?: number;
     repairHandoffConflictingIds?: number;
     repairHandoffSourceState?: 'missing' | 'healthy' | 'degraded';
+    repairHandoffAuthorityDigest?: string;
     repairHandoffCompacted?: number;
     repairHandoffCompactionUnavailable?: number;
     proposalRepairInboxAvailable?: boolean;

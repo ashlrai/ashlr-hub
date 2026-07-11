@@ -1993,6 +1993,9 @@ export async function tick(
           ...(proposalRepairMaintenanceResult.handoffSourceState !== undefined
             ? { repairHandoffSourceState: proposalRepairMaintenanceResult.handoffSourceState }
             : {}),
+          ...(proposalRepairMaintenanceResult.handoffAuthorityDigest !== undefined
+            ? { repairHandoffAuthorityDigest: proposalRepairMaintenanceResult.handoffAuthorityDigest }
+            : {}),
           ...(proposalRepairMaintenanceResult.handoffCompacted !== undefined
             ? { repairHandoffCompacted: proposalRepairMaintenanceResult.handoffCompacted }
             : {}),

@@ -17,6 +17,8 @@ import { join } from 'node:path';
 import type { AshlrConfig, DaemonTick, EngineId, Goal, WorkItem } from '../src/core/types.js';
 import {
   buildFleetStatus,
+  buildRepairHandoffRolloutStatus,
+  repairHandoffProjectionTick,
   buildSkillCorpusReadiness,
   type FleetReadinessSourceQuality,
 } from '../src/core/fleet/status.js';
@@ -411,6 +413,15 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.queue.backlogItems).toBe(0);
     expect(s.queue.next).toBeUndefined();
     expect(s.queue.shared).toBeUndefined();
+    expect(s.repairHandoffRollout).toMatchObject({
+      writerEnabled: false,
+      phase: 'reader-only',
+      sourceState: 'missing',
+      v1Authorities: 0,
+      v2Authorities: 0,
+      eligibleOrdinaryItems: null,
+      action: 'inspect-source',
+    });
     expect(s.proposals.pending).toBe(0);
     expect(s.proposals.frontierPending).toBe(0);
     expect(s.proposals.applied).toBe(0);
@@ -492,6 +503,117 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(['pause', 'local-only', 'verify-only', 'backlog-build', 'auto-merge-ready']).toContain(
       s.autonomyDirection?.mode,
     );
+  });
+
+  it('classifies repair handoff rollout phases and next actions deterministically', () => {
+    const healthy = {
+      sourceState: 'healthy' as const,
+      v1Authorities: 22,
+      v2Authorities: 0,
+      v1PhysicalRows: 22,
+      v2PhysicalRows: 0,
+      invalidRows: 0,
+      conflictingIds: 0,
+      limitExceeded: false,
+      aliasFamilies: 0,
+      latestV2At: null,
+      authorityDigest: 'a'.repeat(64),
+    };
+    expect(buildRepairHandoffRolloutStatus(healthy, false, 0)).toMatchObject({
+      phase: 'reader-only', action: 'enable-canary', writerEnabled: false,
+    });
+    expect(buildRepairHandoffRolloutStatus(healthy, true, 0)).toMatchObject({
+      phase: 'awaiting-evidence', action: 'wait-ordinary-parent', writerEnabled: true,
+    });
+    expect(buildRepairHandoffRolloutStatus(healthy, true, 2)).toMatchObject({
+      phase: 'awaiting-evidence', action: 'observe-writer', eligibleOrdinaryItems: 2,
+    });
+    expect(buildRepairHandoffRolloutStatus(healthy, true, null)).toMatchObject({
+      phase: 'awaiting-evidence', action: 'inspect-source', eligibleOrdinaryItems: null,
+    });
+    expect(buildRepairHandoffRolloutStatus({
+      ...healthy,
+      v1Authorities: 0,
+      v1PhysicalRows: 0,
+      v2Authorities: 1,
+      v2PhysicalRows: 1,
+      latestV2At: '2026-07-11T15:00:00.000Z',
+    }, true, 0)).toMatchObject({
+      phase: 'v2-healthy', action: 'observe-projection', projectionObserved: false,
+    });
+    expect(buildRepairHandoffRolloutStatus({
+      ...healthy,
+      v2Authorities: 1,
+      v2PhysicalRows: 1,
+      aliasFamilies: 1,
+      latestV2At: '2026-07-11T15:00:00.000Z',
+    }, true, 0)).toMatchObject({
+      phase: 'mixed-healthy', action: 'observe-projection', v2Authorities: 1,
+    });
+    expect(buildRepairHandoffRolloutStatus({
+      ...healthy,
+      v2Authorities: 1,
+      v2PhysicalRows: 1,
+      aliasFamilies: 1,
+      latestV2At: '2026-07-11T15:00:00.000Z',
+    }, true, 0, '2026-07-11T15:05:00.000Z')).toMatchObject({
+      phase: 'mixed-healthy',
+      action: 'retain-writer',
+      projectionObserved: true,
+      projectionTickAt: '2026-07-11T15:05:00.000Z',
+    });
+    expect(buildRepairHandoffRolloutStatus({
+      ...healthy,
+      sourceState: 'degraded',
+      invalidRows: 1,
+    }, true, 1)).toMatchObject({
+      phase: 'degraded', action: 'rollback-writer', invalidRows: 1,
+    });
+    expect(buildRepairHandoffRolloutStatus({
+      ...healthy,
+      limitExceeded: true,
+    }, false, 0)).toMatchObject({
+      phase: 'degraded', action: 'inspect-source', limitExceeded: true,
+    });
+  });
+
+  it('does not report absent ordinary work when writer-on queue evidence is missing', async () => {
+    const status = await buildFleetStatus(withFoundry({ repairHandoffV2Write: true }));
+    expect(status.repairHandoffRollout).toMatchObject({
+      writerEnabled: true,
+      phase: 'awaiting-evidence',
+      eligibleOrdinaryItems: null,
+      action: 'inspect-source',
+    });
+  });
+
+  it('requires an exact persisted authority digest for projection evidence', () => {
+    const tick = (ts: string, digest: string): DaemonTick => ({
+      ts,
+      itemsConsidered: 0,
+      proposalsCreated: 0,
+      spentUsd: 0,
+      reason: 'no-backlog',
+      producerMaintenance: {
+        selfHeal: false,
+        invent: false,
+        ancillary: false,
+        proposalRepair: true,
+        repairHandoffSourceState: 'healthy',
+        repairHandoffAuthorityDigest: digest,
+        repairHandoffInvalidRows: 0,
+        repairHandoffConflictingIds: 0,
+        dispatchRepairLifecycleUnavailable: 0,
+        repairHandoffCompactionUnavailable: 0,
+        proposalRepairInboxAvailable: true,
+      },
+    });
+    expect(repairHandoffProjectionTick([
+      tick('2026-07-11T16:00:00.000Z', 'a'.repeat(64)),
+    ], 'b'.repeat(64))).toBeNull();
+    expect(repairHandoffProjectionTick([
+      tick('2026-07-10T13:00:00.000Z', 'b'.repeat(64)),
+    ], 'b'.repeat(64))).toBe('2026-07-10T13:00:00.000Z');
   });
 
   it('does not refresh, persist, or audit backlog while building a status snapshot', async () => {
@@ -4914,6 +5036,49 @@ describe('skill corpus readiness projection', () => {
 });
 
 describe('formatFleetStatus — pure formatter (M49)', () => {
+  it('renders repair handoff rollout status and omits it for legacy snapshots', () => {
+    const base = {
+      generatedAt: '2026-07-11T00:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      killed: false,
+    };
+
+    const current = formatFleetStatus({
+      ...base,
+      repairHandoffRollout: {
+        summaryAvailable: true,
+        writerEnabled: true,
+        phase: 'mixed-healthy',
+        sourceState: 'healthy',
+        v1Authorities: 7,
+        v2Authorities: 3,
+        v1PhysicalRows: 7,
+        v2PhysicalRows: 3,
+        aliasFamilies: 2,
+        latestV2At: '2026-07-11T00:00:00.000Z',
+        authorityDigest: 'a'.repeat(64),
+        projectionObserved: false,
+        projectionTickAt: null,
+        invalidRows: 0,
+        conflictingIds: 0,
+        limitExceeded: false,
+        eligibleOrdinaryItems: 4,
+        action: 'observe-projection',
+      },
+    });
+    expect(current).toContain(
+      'Repair handoff: phase=mixed-healthy, writer=on, authorities v1/v2=7/3, ' +
+        'aliases=2, ordinary eligible=4, action=observe-projection',
+    );
+
+    const legacy = formatFleetStatus(base);
+    expect(legacy).not.toContain('Repair handoff:');
+  });
+
   it('labels unhealthy workspace sources and qualifies observed zero values', () => {
     const base = {
       generatedAt: '2026-07-11T00:00:00.000Z',

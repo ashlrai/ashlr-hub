@@ -11,6 +11,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { AshlrConfig, DashboardSnapshot } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -173,6 +175,26 @@ const FIXTURE_FLEET_STATUS = {
     },
   },
   proposals: { pending: 3, frontierPending: 1, applied: 0 },
+  repairHandoffRollout: {
+    summaryAvailable: true,
+    writerEnabled: true,
+    phase: 'mixed-healthy' as const,
+    sourceState: 'healthy' as const,
+    v1Authorities: 7,
+    v2Authorities: 3,
+    v1PhysicalRows: 8,
+    v2PhysicalRows: 4,
+    aliasFamilies: 2,
+    latestV2At: '2026-07-11T00:00:00.000Z',
+    authorityDigest: 'a'.repeat(64),
+    projectionObserved: true,
+    projectionTickAt: '2026-07-11T00:05:00.000Z',
+    invalidRows: 0,
+    conflictingIds: 0,
+    limitExceeded: false,
+    eligibleOrdinaryItems: 4,
+    action: 'retain-writer' as const,
+  },
   phantom: {
     observedAt: new Date().toISOString(),
     state: 'ready' as const,
@@ -501,6 +523,14 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(snap.fleet?.queue.shared?.usageEntries).toBe(4);
     expect(snap.fleet?.queue.shared?.lock?.stale).toBe(true);
     expect(snap.fleet?.proposalProduction?.noProposalDispatches).toBe(1);
+    expect(snap.fleet?.repairHandoffRollout).toMatchObject({
+      phase: 'mixed-healthy',
+      action: 'retain-writer',
+      v1Authorities: 7,
+      v2Authorities: 3,
+      v1PhysicalRows: 8,
+      v2PhysicalRows: 4,
+    });
     expect(snap.fleet?.proposalProduction?.topReasons[0]?.reason).toBe('agent returned no diff');
     expect(snap.fleet?.dispatchProduction?.proposalRate).toBe(0.5);
     expect(snap.fleet?.dispatchProduction?.generatedRepairAttempts).toMatchObject({
@@ -526,6 +556,22 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     const serialized = JSON.stringify(snap.fleet?.phantom);
     expect(serialized).not.toContain('ASHLR_PULSE_TOKEN');
     expect(serialized).not.toContain('command help text');
+  });
+
+  it('Mission Control conditionally renders repair handoff operations and schema counts', () => {
+    const appSource = readFileSync(
+      fileURLToPath(new URL('../src/core/web/public/app.js', import.meta.url)),
+      'utf8',
+    );
+    const rolloutBlock = appSource.match(/const repairHandoffRollout =[\s\S]*?if \(shipReadiness\)/)?.[0];
+
+    expect(rolloutBlock).toBeDefined();
+    expect(rolloutBlock).toContain('if (repairHandoffRollout)');
+    expect(rolloutBlock).toContain("controlMetric('Handoff phase'");
+    expect(rolloutBlock).toContain("controlMetric('Handoff action'");
+    expect(rolloutBlock).toContain("'Authorities v1/v2'");
+    expect(rolloutBlock).toContain("'Rows v1/v2'");
+    expect(rolloutBlock).not.toContain("el('div', { cls: 'ctrl-card card' }");
   });
 
   it('daemon degrades to zeroed fields when loadDaemonState throws', async () => {

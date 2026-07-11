@@ -41,7 +41,11 @@ import {
   type AttemptCoverageStatus,
 } from '../autonomy/attempt-records.js';
 import { generatedRepairCooldownKeys } from './generated-repair-lifecycle.js';
-import { readRepairHandoffs } from './repair-handoff-journal.js';
+import {
+  readRepairHandoffs,
+  readRepairHandoffSchemaSummary,
+  type RepairHandoffSchemaSummary,
+} from './repair-handoff-journal.js';
 import {
   listTrajectoryRecords,
   MIN_SKILL_OBSERVED_TRAJECTORIES,
@@ -770,6 +774,94 @@ export interface FleetDiagnosticResliceDrainStatus {
   topReasons?: Array<{ reason: string; count: number }>;
 }
 
+export interface FleetRepairHandoffRolloutStatus {
+  summaryAvailable: boolean;
+  writerEnabled: boolean;
+  phase: 'reader-only' | 'awaiting-evidence' | 'v2-healthy' | 'mixed-healthy' | 'degraded';
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  v1Authorities: number | null;
+  v2Authorities: number | null;
+  v1PhysicalRows: number | null;
+  v2PhysicalRows: number | null;
+  aliasFamilies: number | null;
+  latestV2At: string | null;
+  authorityDigest: string | null;
+  projectionObserved: boolean;
+  projectionTickAt: string | null;
+  invalidRows: number | null;
+  conflictingIds: number | null;
+  limitExceeded: boolean | null;
+  eligibleOrdinaryItems: number | null;
+  action: 'enable-canary' | 'wait-ordinary-parent' | 'observe-writer' | 'observe-projection' | 'retain-writer' | 'inspect-source' | 'rollback-writer';
+}
+
+export function buildRepairHandoffRolloutStatus(
+  summary: RepairHandoffSchemaSummary,
+  writerEnabled: boolean,
+  eligibleOrdinaryItems: number | null,
+  projectionTickAt: string | null = null,
+): FleetRepairHandoffRolloutStatus {
+  const phase: FleetRepairHandoffRolloutStatus['phase'] = summary.sourceState === 'degraded' || summary.limitExceeded
+    ? 'degraded'
+    : !writerEnabled
+      ? 'reader-only'
+      : summary.v2Authorities === 0
+        ? 'awaiting-evidence'
+        : summary.v1Authorities > 0 ? 'mixed-healthy' : 'v2-healthy';
+  const action: FleetRepairHandoffRolloutStatus['action'] = phase === 'degraded'
+    ? writerEnabled ? 'rollback-writer' : 'inspect-source'
+    : phase === 'reader-only'
+      ? eligibleOrdinaryItems === null ? 'inspect-source' : 'enable-canary'
+      : phase === 'mixed-healthy' || phase === 'v2-healthy'
+        ? projectionTickAt ? 'retain-writer' : 'observe-projection'
+        : eligibleOrdinaryItems === null
+          ? 'inspect-source'
+        : eligibleOrdinaryItems > 0
+          ? 'observe-writer'
+          : 'wait-ordinary-parent';
+  return {
+    summaryAvailable: true,
+    writerEnabled,
+    phase,
+    sourceState: summary.sourceState,
+    v1Authorities: summary.v1Authorities,
+    v2Authorities: summary.v2Authorities,
+    v1PhysicalRows: summary.v1PhysicalRows,
+    v2PhysicalRows: summary.v2PhysicalRows,
+    aliasFamilies: summary.aliasFamilies,
+    latestV2At: summary.latestV2At,
+    authorityDigest: summary.authorityDigest,
+    projectionObserved: projectionTickAt !== null,
+    projectionTickAt,
+    invalidRows: summary.invalidRows,
+    conflictingIds: summary.conflictingIds,
+    limitExceeded: summary.limitExceeded,
+    eligibleOrdinaryItems,
+    action,
+  };
+}
+
+export function repairHandoffProjectionTick(
+  recentTicks: readonly DaemonTick[],
+  authorityDigest: string,
+): string | null {
+  for (let index = recentTicks.length - 1; index >= 0; index--) {
+    const tick = recentTicks[index]!;
+    const maintenance = tick.producerMaintenance;
+    if (
+      maintenance?.proposalRepair === true &&
+      maintenance.repairHandoffSourceState === 'healthy' &&
+      maintenance.repairHandoffAuthorityDigest === authorityDigest &&
+      (maintenance.repairHandoffInvalidRows ?? 0) === 0 &&
+      (maintenance.repairHandoffConflictingIds ?? 0) === 0 &&
+      (maintenance.dispatchRepairLifecycleUnavailable ?? 0) === 0 &&
+      (maintenance.repairHandoffCompactionUnavailable ?? 0) === 0 &&
+      maintenance.proposalRepairInboxAvailable === true
+    ) return tick.ts;
+  }
+  return null;
+}
+
 export interface FleetQueueRepoCoverage {
   enrolled: number;
   existing: number;
@@ -830,6 +922,7 @@ export interface FleetStatus {
     resolutionObserver?: FleetResolutionObserverStatus;
     diagnosticResliceDrain?: FleetDiagnosticResliceDrainStatus;
   };
+  repairHandoffRollout?: FleetRepairHandoffRolloutStatus;
   proposals: {
     pending: number;
     frontierPending: number;
@@ -1013,6 +1106,7 @@ function buildQueueEligibility(
   items: WorkItem[],
   pendingProposals: Proposal[],
   cfg: AshlrConfig,
+  repairControlAvailable: boolean = readRepairHandoffs().sourceState !== 'degraded',
 ): FleetQueueEligibility {
   const cooldownMs = configCooldownMs(cfg) ?? DEFAULT_COOLDOWN_MS;
   const nowMs = Date.now();
@@ -1026,8 +1120,6 @@ function buildQueueEligibility(
   let pendingItems = 0;
   let repairControlBlockedItems = 0;
   let nextEligibleMs: number | null = null;
-  const repairControlAvailable = readRepairHandoffs().sourceState !== 'degraded';
-
   for (const item of items) {
     if (!repairControlAvailable && item.tags.includes('proposal-repair')) {
       repairControlBlockedItems++;
@@ -1237,12 +1329,19 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let cooldownItems = 0;
   let pendingItems = 0;
   let repairControlBlockedItems = 0;
+  let eligibleOrdinaryItems: number | null = null;
   let nextEligibleAt: string | null = null;
   let queueRepos: FleetQueueRepoCoverage | undefined;
   let generatedWork: FleetQueueGeneratedWorkStatus | undefined;
   let scannerEvidence: FleetQueueScannerEvidenceStatus | undefined;
   let resolutionObserver: FleetResolutionObserverStatus | undefined;
   let enrolledExistingRepos: string[] = [];
+  let repairHandoffSummary: RepairHandoffSchemaSummary | undefined;
+  try {
+    repairHandoffSummary = readRepairHandoffSchemaSummary();
+  } catch {
+    repairHandoffSummary = undefined;
+  }
   try {
     // Status must be observational. A full buildBacklog() refresh can run
     // scanners, expand planning goals, persist ~/.ashlr/backlog.json, and audit.
@@ -1414,11 +1513,19 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   }
 
   try {
-    const eligibility = buildQueueEligibility(visibleQueueItems, pendingProposals, cfg);
+    const eligibility = buildQueueEligibility(
+      visibleQueueItems,
+      pendingProposals,
+      cfg,
+      repairHandoffSummary !== undefined && repairHandoffSummary.sourceState !== 'degraded',
+    );
     eligibleBacklogItems = eligibility.eligibleItems.length;
     cooldownItems = eligibility.cooldownItems;
     pendingItems = eligibility.pendingItems;
     repairControlBlockedItems = eligibility.repairControlBlockedItems;
+    eligibleOrdinaryItems = queueSourceStatus === 'healthy'
+      ? eligibility.eligibleItems.filter((item) => !item.tags.includes('proposal-repair')).length
+      : null;
     nextEligibleAt = eligibility.nextEligibleAt;
     nextQueueItems = eligibility.eligibleItems
       .slice()
@@ -1548,6 +1655,43 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
 
   const phantom = await buildFleetPhantomStatus(cfg);
 
+  let repairHandoffRollout: FleetRepairHandoffRolloutStatus;
+  if (repairHandoffSummary !== undefined) {
+    const summary = repairHandoffSummary;
+    const writerEnabled = cfg.foundry?.repairHandoffV2Write === true;
+    const projectionTickAt = summary.v2Authorities > 0
+      ? repairHandoffProjectionTick(recentTicks, summary.authorityDigest)
+      : null;
+    repairHandoffRollout = buildRepairHandoffRolloutStatus(
+      summary,
+      writerEnabled,
+      eligibleOrdinaryItems,
+      projectionTickAt,
+    );
+  } else {
+    const writerEnabled = cfg.foundry?.repairHandoffV2Write === true;
+    repairHandoffRollout = {
+      summaryAvailable: false,
+      writerEnabled,
+      phase: 'degraded',
+      sourceState: 'degraded',
+      v1Authorities: null,
+      v2Authorities: null,
+      v1PhysicalRows: null,
+      v2PhysicalRows: null,
+      invalidRows: null,
+      conflictingIds: null,
+      limitExceeded: null,
+      aliasFamilies: null,
+      latestV2At: null,
+      authorityDigest: null,
+      projectionObserved: false,
+      projectionTickAt: null,
+      eligibleOrdinaryItems,
+      action: writerEnabled ? 'rollback-writer' : 'inspect-source',
+    };
+  }
+
   const status: FleetStatus = {
     generatedAt,
     daemon,
@@ -1568,6 +1712,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ...(resolutionObserver !== undefined ? { resolutionObserver } : {}),
       ...(diagnosticResliceDrain !== undefined ? { diagnosticResliceDrain } : {}),
     },
+    ...(repairHandoffRollout !== undefined ? { repairHandoffRollout } : {}),
     proposals: { pending, frontierPending, ...(awaitingHostMerge > 0 ? { awaitingHostMerge } : {}), applied },
     merges: { recent: mergesRecent },
     ...(phantom !== undefined ? { phantom } : {}),

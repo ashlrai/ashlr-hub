@@ -3811,6 +3811,31 @@ function renderControl() {
   const attemptCoverage = d.fleet?.attemptCoverage ?? fleet.attemptCoverage ?? null;
   const trajectoryLearning = d.fleet?.trajectoryLearning ?? fleet.trajectoryLearning ?? null;
   const skillCorpusReadiness = d.fleet?.skillCorpusReadiness ?? fleet.skillCorpusReadiness ?? null;
+  const repairHandoffRollout = d.fleet?.repairHandoffRollout ?? fleet.repairHandoffRollout ?? null;
+  if (repairHandoffRollout) {
+    const rolloutAccent = repairHandoffRollout.phase === 'degraded'
+      ? '#f87171'
+      : repairHandoffRollout.phase === 'mixed-healthy' || repairHandoffRollout.phase === 'v2-healthy'
+        ? '#4ade80'
+        : repairHandoffRollout.phase === 'awaiting-evidence'
+          ? '#fbbf24'
+          : '#94a3b8';
+    const actionAccent = repairHandoffRollout.action === 'rollback-writer' || repairHandoffRollout.action === 'inspect-source'
+      ? '#f87171'
+      : rolloutAccent;
+    heroMetrics.appendChild(controlMetric('Handoff phase', repairHandoffRollout.phase ?? 'unknown', rolloutAccent));
+    heroMetrics.appendChild(controlMetric('Handoff action', repairHandoffRollout.action ?? 'unknown', actionAccent));
+    heroMetrics.appendChild(controlMetric(
+      'Authorities v1/v2',
+      `${repairHandoffRollout.v1Authorities ?? 'unknown'}/${repairHandoffRollout.v2Authorities ?? 'unknown'}`,
+      rolloutAccent
+    ));
+    heroMetrics.appendChild(controlMetric(
+      'Rows v1/v2',
+      `${repairHandoffRollout.v1PhysicalRows ?? 'unknown'}/${repairHandoffRollout.v2PhysicalRows ?? 'unknown'}`,
+      rolloutAccent
+    ));
+  }
   if (shipReadiness) {
     heroMetrics.appendChild(controlMetric(
       'Ship Ready',

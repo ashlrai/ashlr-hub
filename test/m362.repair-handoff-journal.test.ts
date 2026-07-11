@@ -10,6 +10,7 @@ import {
   compactRepairHandoffs,
   dispatchEventFromRepairHandoff,
   readRepairHandoffs,
+  readRepairHandoffSchemaSummary,
   recordRepairHandoffs as recordRepairHandoffsRaw,
   repairGenerationIdFromHandoffId,
   repairHandoffFromDispatchEvent,
@@ -162,6 +163,15 @@ describe('M362 durable repair handoff journal', () => {
     expect(existsSync(repairHandoffJournalPath())).toBe(true);
     expect(existsSync(repairHandoffV2JournalPath())).toBe(false);
     expect(readRepairHandoffs().observations[0]?.schemaVersion).toBe(1);
+    expect(readRepairHandoffSchemaSummary()).toMatchObject({
+      sourceState: 'healthy',
+      v1Authorities: 1,
+      v2Authorities: 0,
+      v1PhysicalRows: 1,
+      v2PhysicalRows: 0,
+      aliasFamilies: 0,
+      latestV2At: null,
+    });
 
     expect(recordRepairHandoffsRaw(input, { schemaVersion: 2 })).toMatchObject({ recorded: 1, failed: 0 });
     const v2Before = readFileSync(repairHandoffV2JournalPath(), 'utf8');
@@ -172,6 +182,19 @@ describe('M362 durable repair handoff journal', () => {
 
     expect(readFileSync(repairHandoffV2JournalPath(), 'utf8')).toBe(v2Before);
     expect(readRepairHandoffs().observations.map((row) => row.schemaVersion).sort()).toEqual([1, 2]);
+    expect(readRepairHandoffSchemaSummary()).toMatchObject({
+      sourceState: 'healthy',
+      v1Authorities: 1,
+      v2Authorities: 1,
+      v1PhysicalRows: 1,
+      v2PhysicalRows: 1,
+      aliasFamilies: 1,
+      latestV2At: input.ts,
+      authorityDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      invalidRows: 0,
+      conflictingIds: 0,
+      limitExceeded: false,
+    });
   });
 
   it('mints a fresh v2 generation when the objective fingerprint changes', () => {

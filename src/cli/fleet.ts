@@ -109,6 +109,17 @@ export function formatFleetStatus(s: FleetStatus): string {
     lines.push('');
   }
 
+  if (s.repairHandoffRollout) {
+    const rollout = s.repairHandoffRollout;
+    lines.push(
+      `Repair handoff: phase=${rollout.phase}, writer=${rollout.writerEnabled ? 'on' : 'off'}, ` +
+        `authorities v1/v2=${rollout.v1Authorities ?? 'unknown'}/${rollout.v2Authorities ?? 'unknown'}, ` +
+        `aliases=${rollout.aliasFamilies ?? 'unknown'}, ordinary eligible=${rollout.eligibleOrdinaryItems ?? 'unknown'}, ` +
+        `action=${rollout.action}`,
+    );
+    lines.push('');
+  }
+
   // Queue
   lines.push(`Queue:     ${s.queue.backlogItems} backlog item(s)`);
   if (typeof s.queue.eligibleBacklogItems === 'number') {

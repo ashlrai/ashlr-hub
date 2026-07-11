@@ -90,6 +90,7 @@ export interface RepairHandoffReadResult {
   conflictingIds: number;
   limitExceeded: boolean;
   physicalRows: number;
+  authorityDigest: string;
 }
 
 export interface RepairHandoffCompactionResult {
@@ -97,6 +98,20 @@ export interface RepairHandoffCompactionResult {
   before: number;
   after: number;
   removed: number;
+}
+
+export interface RepairHandoffSchemaSummary {
+  sourceState: RepairHandoffReadResult['sourceState'];
+  v1Authorities: number;
+  v2Authorities: number;
+  v1PhysicalRows: number;
+  v2PhysicalRows: number;
+  invalidRows: number;
+  conflictingIds: number;
+  limitExceeded: boolean;
+  aliasFamilies: number;
+  latestV2At: string | null;
+  authorityDigest: string;
 }
 
 export function repairHandoffJournalPath(): string {
@@ -457,7 +472,7 @@ export function recordRepairHandoffs(
   return result;
 }
 
-interface InternalRepairHandoffReadResult extends RepairHandoffReadResult {
+interface InternalRepairHandoffReadResult extends Omit<RepairHandoffReadResult, 'authorityDigest'> {
   compactionRows: RepairHandoffObservation[];
   quarantinedIds?: Set<string>;
 }
@@ -612,11 +627,9 @@ function readRepairHandoffsInternal(
   }
 }
 
-export function readRepairHandoffs(): RepairHandoffReadResult {
-  const reads = [
-    readRepairHandoffsInternal(repairHandoffJournalPath(), 1),
-    readRepairHandoffsInternal(repairHandoffV2JournalPath(), 2),
-  ];
+function combineRepairHandoffReads(
+  reads: readonly InternalRepairHandoffReadResult[],
+): RepairHandoffReadResult {
   const quarantinedIds = new Set(reads.flatMap((read) => [...(read.quarantinedIds ?? [])]));
   const candidates = reads
     .flatMap((read) => read.observations)
@@ -640,6 +653,10 @@ export function readRepairHandoffs(): RepairHandoffReadResult {
   const anyDegraded = reads.some((read) => read.sourceState === 'degraded') ||
     missingParentRows > 0;
   const anyPresent = reads.some((read) => read.sourceState !== 'missing');
+  const authorityDigest = createHash('sha256').update(JSON.stringify([
+    'ashlr:repair-handoff-authority:v1',
+    observations.map(fullObservationFingerprint).sort(),
+  ])).digest('hex');
   return {
     observations,
     sourceState: anyDegraded ? 'degraded' : anyPresent ? 'healthy' : 'missing',
@@ -647,6 +664,52 @@ export function readRepairHandoffs(): RepairHandoffReadResult {
     conflictingIds,
     limitExceeded: reads.some((read) => read.limitExceeded),
     physicalRows: reads.reduce((sum, read) => sum + read.physicalRows, 0),
+    authorityDigest,
+  };
+}
+
+export function readRepairHandoffs(): RepairHandoffReadResult {
+  return combineRepairHandoffReads([
+    readRepairHandoffsInternal(repairHandoffJournalPath(), 1),
+    readRepairHandoffsInternal(repairHandoffV2JournalPath(), 2),
+  ]);
+}
+
+function repairHandoffAliasFamilyKey(row: RepairHandoffObservation): string | null {
+  if (!row.parentObjectiveHash) return null;
+  return JSON.stringify([
+    row.kind,
+    row.repo,
+    row.parentItemId,
+    row.parentObjectiveHash,
+    row.childItemId,
+  ]);
+}
+
+export function readRepairHandoffSchemaSummary(): RepairHandoffSchemaSummary {
+  const v1 = readRepairHandoffsInternal(repairHandoffJournalPath(), 1);
+  const v2 = readRepairHandoffsInternal(repairHandoffV2JournalPath(), 2);
+  const combined = combineRepairHandoffReads([v1, v2]);
+  const v1Authorities = combined.observations.filter((row) => row.schemaVersion === 1);
+  const v2Authorities = combined.observations.filter((row) => row.schemaVersion === 2);
+  const v1FamilyKeys = new Set(v1Authorities
+    .map(repairHandoffAliasFamilyKey)
+    .filter((key): key is string => key !== null));
+  const aliasFamilies = new Set(v2Authorities
+    .map(repairHandoffAliasFamilyKey)
+    .filter((key): key is string => key !== null && v1FamilyKeys.has(key))).size;
+  return {
+    sourceState: combined.sourceState,
+    v1Authorities: v1Authorities.length,
+    v2Authorities: v2Authorities.length,
+    v1PhysicalRows: v1.physicalRows,
+    v2PhysicalRows: v2.physicalRows,
+    invalidRows: combined.invalidRows,
+    conflictingIds: combined.conflictingIds,
+    limitExceeded: combined.limitExceeded,
+    aliasFamilies,
+    latestV2At: v2Authorities[0]?.ts ?? null,
+    authorityDigest: combined.authorityDigest,
   };
 }
 
