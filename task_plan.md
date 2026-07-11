@@ -1519,3 +1519,16 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Run focused/full gates, independent adversarial review, durable notes, commit, push, reload, and production smoke.
 - Error encountered: full-history agent forks cannot override `agent_type`; relaunched scoped explorers without history forks.
 - Error encountered: one `rg` expression used an unsupported backreference escape; reran the search with literal patterns.
+
+## Current Overnight Cycle - Objective-Bound Repair Authority
+- [x] Rehydrate the deployed parent-retry baseline, live queue, handoff history, lifecycle state, and Entire status.
+- [x] Deploy parallel authority, operations, privacy, and adversarial-review lanes.
+- [x] Bind every new diagnostic generation to a scrubbed, NFC-normalized, host-keyed objective fingerprint.
+- [x] Require exact journal, source, route, generation, and objective identity before dispatch or lifecycle authority.
+- [x] Quarantine changed or retroactively enriched replay and preserve immutable event fingerprints through compaction.
+- [x] Retire hashless legacy diagnostic generations from queue and backlog without granting fallback authority.
+- [x] Keep supplied maintenance events observational and leave resolution verification off the daemon critical path.
+- [x] Validate hashes before persistence and require a durable 32-byte local key before minting objective identity.
+- [x] Preserve parsed authority beyond the journal row warning threshold while retaining the bounded byte cap.
+- [x] Run focused/full gates and three final independent SHIP reviews.
+- [x] Update durable notes, commit, push, reload, and production smoke.
