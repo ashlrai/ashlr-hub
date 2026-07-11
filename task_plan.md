@@ -1563,3 +1563,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Run focused/full gates and independent adversarial review.
 - [x] Update durable notes, commit, push, reload, and production smoke.
 - Error encountered: three parallel observer scouts hit the temporary subagent usage cap; continued the critical-path design locally and deferred fresh independent review until capacity resets.
+
+## Current Overnight Cycle - Fleet Telemetry Truth And Test Isolation
+- [x] Rehydrate the deployed observer baseline, live causal coverage, dispatch-yield evidence, Entire state, and persistent notes.
+- [x] Deploy disjoint audits for causal identity, generated-repair yield, reflection scheduling, regression evidence, and test-state isolation.
+- [x] Prove the repaired concurrent undefined-outcome path persists exact run and trajectory identity through production and agent-action ledgers.
+- [x] Isolate worked-ledger test fixtures from the live `ASHLR_HOME` and verify no additional production-state contamination.
+- [x] Preserve historical causal gaps as visible, non-fabricated evidence while confirming current-writer regressions remain actionable.
+- [ ] Run focused and repository-wide verification, then update durable notes, commit, push, reload, and smoke production.

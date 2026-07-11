@@ -185,7 +185,16 @@ export const GATEWAY_ENV_MARKER = 'ASHLR_MCP_GATEWAY';
 // (not the full process.env) so ambient secrets don't leak into third-party servers.
 // We preserve that isolation: downstreams get this safe base + ashlr's non-secret
 // config keys (via withToolEnv) + their own declared spec.env — never the hub's full env.
-const SAFE_CHILD_ENV_KEYS = ['HOME', 'PATH', 'SHELL', 'TERM', 'USER', 'LOGNAME'] as const;
+const SAFE_CHILD_ENV_KEYS = [
+  'HOME',
+  'USERPROFILE',
+  'ASHLR_HOME',
+  'PATH',
+  'SHELL',
+  'TERM',
+  'USER',
+  'LOGNAME',
+] as const;
 function safeChildBase(): NodeJS.ProcessEnv {
   const base: NodeJS.ProcessEnv = {};
   for (const k of SAFE_CHILD_ENV_KEYS) {

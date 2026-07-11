@@ -3598,6 +3598,23 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       skipReason: 'not-attempted',
     });
     expect(result.dispatches?.[1]?.runId).toBeUndefined();
+
+    const productionEvents = readDispatchProductionEvents({ limit: 10 });
+    expect(productionEvents).toHaveLength(1);
+    expect(productionEvents[0]).toMatchObject({
+      itemId: items[0]!.id,
+      runId: manifestAttemptId,
+      trajectoryId: `run:${manifestAttemptId}`,
+    });
+
+    const dispatchActions = readAgentActions({ limit: 10 })
+      .filter((event) => event.action === 'daemon:dispatch');
+    expect(dispatchActions).toHaveLength(1);
+    expect(dispatchActions[0]).toMatchObject({
+      itemId: items[0]!.id,
+      runId: manifestAttemptId,
+      trajectoryId: `run:${manifestAttemptId}`,
+    });
   });
 
   it('A7-selection-telemetry: records pending and cooldown blockers in the global workspace', async () => {
