@@ -1719,4 +1719,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Surface sample-gated treatment outcomes through existing bounded fleet telemetry.
 - [x] Add state-machine, attribution, privacy, compatibility, and conversion regression coverage.
 - [x] Run focused/full verification and independent adversarial review.
-- [ ] Commit, push, reload production, validate live status, and update durable notes.
+- [x] Commit, push, reload production, validate live status, and update durable notes.
