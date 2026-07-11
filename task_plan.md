@@ -1730,3 +1730,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve one ordinary-work slot during automatic repair drain when capacity and policy allow it.
 - [x] Add adversarial regression coverage and run focused/full verification plus independent review.
 - [x] Update durable notes, commit, push, reload production, and canary the hardened authority paths.
+
+## Current Overnight Cycle - Temporal Fairness And Shared Claim Utilization
+- [x] Rehydrate the deployed causal-authority baseline, CI, production health, git state, Entire state, and durable notes.
+- [x] Audit single-slot fairness, shared-queue partial claims, live branch protection, and post-merge trajectory continuity in parallel.
+- [x] Alternate eligible ordinary work after an automatic repair on one-slot daemons without weakening explicit drains.
+- [x] Refill shared-queue capacity after partial contention without duplicate claims or lane-policy drift.
+- [x] Add adversarial fairness, restart, contention, telemetry, evidence migration, origin binding, required-check producer identity, and compatibility coverage plus independent review.
+- [x] Run focused/full verification, update durable notes, commit, push, reload production, and canary the new scheduler.
