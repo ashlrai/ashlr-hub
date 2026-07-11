@@ -1541,4 +1541,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add one strict local queued-autonomy adapter that distinguishes healthy empty state from malformed, unreadable, or unsafe storage.
 - [x] Preserve observations through bounded persistence and concurrent backlog refresh without changing dispatch, lifecycle, or merge authority.
 - [x] Run focused/full gates and independent adversarial review.
-- [ ] Update durable notes, commit, push, reload, and production smoke.
+- [x] Update durable notes, commit, push, reload, and production smoke.
