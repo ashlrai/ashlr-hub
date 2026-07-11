@@ -106,7 +106,7 @@ export function isSuppressibleWorkedOutcome(outcome: WorkedOutcome): boolean {
 // ---------------------------------------------------------------------------
 
 function fleetDir(): string {
-  return join(homedir(), '.ashlr', 'fleet');
+  return join(process.env.ASHLR_HOME ?? join(homedir(), '.ashlr'), 'fleet');
 }
 
 /** Absolute path to the fleet worked ledger file. */
