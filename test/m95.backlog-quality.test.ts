@@ -81,7 +81,14 @@ import { scanSelfImprove, scanIssues } from '../src/core/portfolio/scanners.js';
 // ---------------------------------------------------------------------------
 
 /** Build a spawnSync stub that returns a gh issue list JSON payload. */
-function makeSpawnSyncIssues(issues: Array<{ number: number; title: string; url: string; state: string; author: string }>): ReturnType<typeof vi.fn> {
+function makeSpawnSyncIssues(issues: Array<{
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  author: string;
+  labels?: Array<{ name: string }>;
+}>): ReturnType<typeof vi.fn> {
   return vi.fn((_bin: unknown, args: unknown[]) => {
     const argArr = args as string[];
     // gh repo view → return a valid repo slug so listIssues proceeds
@@ -90,7 +97,14 @@ function makeSpawnSyncIssues(issues: Array<{ number: number; title: string; url:
     }
     // gh issue list → return our payload
     if (argArr.includes('issue') && argArr.includes('list')) {
-      return { pid: 1, output: [], stdout: JSON.stringify(issues), stderr: '', status: 0, signal: null };
+      return {
+        pid: 1,
+        output: [],
+        stdout: JSON.stringify(issues.map((issue) => ({ ...issue, labels: issue.labels ?? [] }))),
+        stderr: '',
+        status: 0,
+        signal: null,
+      };
     }
     // gh pr list → return empty
     if (argArr.includes('pr') && argArr.includes('list')) {
@@ -441,6 +455,71 @@ describe('M95 scanIssues — concrete issues get scoped instructions', () => {
   it('never throws on any error shape', async () => {
     _spawnSyncImpl = vi.fn(() => { throw new Error('spawnSync threw'); });
     await expect(scanIssues(repo)).resolves.toBeDefined();
+  });
+});
+
+describe('M95 scanIssues — exact engineering label policy', () => {
+  const issue = (number: number, labels: string[]) => ({
+    number,
+    title: `Concrete issue ${number}`,
+    url: `https://github.com/test/repo/issues/${number}`,
+    state: 'open',
+    author: 'user',
+    labels: labels.map((name) => ({ name })),
+  });
+
+  it.each(['question', 'duplicate', 'invalid', 'wontfix', ' Question '])(
+    'excludes exact non-engineering label %s case-insensitively',
+    async (label) => {
+      _spawnSyncImpl = makeSpawnSyncIssues([issue(1, [label])]);
+      expect(await scanIssues(repo)).toEqual([]);
+    },
+  );
+
+  it('excludes only a non-empty ashlr:non-code namespace', async () => {
+    _spawnSyncImpl = makeSpawnSyncIssues([
+      issue(1, ['ashlr:non-code/docs']),
+      issue(2, ['ashlr:non-code']),
+      issue(3, ['other/ashlr:non-code/docs']),
+    ]);
+    expect((await scanIssues(repo)).map((item) => item.tags.find((tag) => tag.startsWith('#'))))
+      .toEqual(['#2', '#3']);
+  });
+
+  it('preserves unlabeled, unknown, and near-match labels', async () => {
+    _spawnSyncImpl = makeSpawnSyncIssues([
+      issue(1, []),
+      issue(2, ['enhancement']),
+      issue(3, ['questionnaire']),
+      issue(4, ['wontfix-later']),
+    ]);
+    expect((await scanIssues(repo)).map((item) => item.tags.find((tag) => tag.startsWith('#'))))
+      .toEqual(['#1', '#2', '#3', '#4']);
+  });
+
+  it('lets every positive engineering label override every exclusion family', async () => {
+    const positives = [
+      'bug', 'security', 'regression', 'performance', 'reliability', 'testing',
+      'dependencies', 'technical debt', 'refactor', 'ashlr:engineering/runtime',
+    ];
+    const negatives = ['question', 'duplicate', 'invalid', 'wontfix', 'ashlr:non-code/docs'];
+    const issues = positives.flatMap((positive, positiveIndex) =>
+      negatives.map((negative, negativeIndex) =>
+        issue(positiveIndex * negatives.length + negativeIndex + 1, [negative, positive])));
+    _spawnSyncImpl = makeSpawnSyncIssues(issues);
+    expect(await scanIssues(repo)).toHaveLength(issues.length);
+  });
+
+  it('preserves source order after exclusions', async () => {
+    _spawnSyncImpl = makeSpawnSyncIssues([
+      issue(1, ['unknown']),
+      issue(2, ['duplicate']),
+      issue(3, ['bug']),
+      issue(4, ['question']),
+      issue(5, []),
+    ]);
+    expect((await scanIssues(repo)).map((item) => item.tags.find((tag) => tag.startsWith('#'))))
+      .toEqual(['#1', '#3', '#5']);
   });
 });
 

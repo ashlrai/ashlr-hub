@@ -56,6 +56,16 @@ export interface IssueSummary {
   author: string;
 }
 
+/** Issue summary with label names for autonomous actionability policy. */
+export interface LabeledIssueSummary extends IssueSummary {
+  labels: string[];
+}
+
+export interface ListIssuesOptions {
+  limit?: number;
+  includeLabels?: boolean;
+}
+
 /** Options for creating a PR (EXPLICIT mutation only). */
 export interface CreatePrOpts {
   title: string;
@@ -325,40 +335,101 @@ export function viewPr(cwd: string, selector: string): PrView | null {
   };
 }
 
-/**
- * List open issues via `gh issue list`. NEVER throws — returns [] on any failure.
- */
-export function listIssues(cwd: string): IssueSummary[] {
-  const raw = runGh(cwd, [
+function boundedNonEmptyString(value: unknown, maxLength: number): string | null {
+  if (typeof value !== 'string') return null;
+  return value.trim().length > 0 && value.length <= maxLength ? value : null;
+}
+
+function normalizedIssueAuthor(value: unknown): string | null {
+  if (value === null) return '';
+  if (typeof value === 'string') return boundedNonEmptyString(value, 256);
+  if (typeof value !== 'object' || Array.isArray(value)) return null;
+  return boundedNonEmptyString((value as Record<string, unknown>)['login'], 256);
+}
+
+function normalizedIssueLabels(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > 100) return null;
+  const labels: string[] = [];
+  for (const label of value) {
+    if (label === null || typeof label !== 'object' || Array.isArray(label)) return null;
+    const name = boundedNonEmptyString((label as Record<string, unknown>)['name'], 100);
+    if (!name) return null;
+    labels.push(name);
+  }
+  return labels;
+}
+
+export function listIssues(cwd: string): IssueSummary[];
+export function listIssues(
+  cwd: string,
+  options: ListIssuesOptions & { includeLabels: true },
+): LabeledIssueSummary[];
+export function listIssues(
+  cwd: string,
+  options: ListIssuesOptions & { includeLabels?: false },
+): IssueSummary[];
+export function listIssues(cwd: string, options: ListIssuesOptions): IssueSummary[];
+/** List open issues via `gh issue list`. NEVER throws — returns [] on failure. */
+export function listIssues(
+  cwd: string,
+  options: ListIssuesOptions = {},
+): IssueSummary[] | LabeledIssueSummary[] {
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) return [];
+  if (options.includeLabels !== undefined && typeof options.includeLabels !== 'boolean') return [];
+  const includeLabels = options.includeLabels === true;
+  if (
+    options.limit !== undefined &&
+    (typeof options.limit !== 'number' ||
+      !Number.isSafeInteger(options.limit) ||
+      options.limit < 1 ||
+      options.limit > 100)
+  ) return [];
+  const requestedLimit = options.limit;
+  const localLimit = requestedLimit ?? (includeLabels ? 100 : 30);
+  const args = [
     'issue',
     'list',
     '--state',
     'open',
+  ];
+  if (requestedLimit !== undefined) args.push('--limit', String(requestedLimit));
+  args.push(
     '--json',
-    'number,title,url,state,author',
-  ]);
+    includeLabels ? 'number,title,url,state,author,labels' : 'number,title,url,state,author',
+  );
+  const raw = runGh(cwd, args);
   const parsed = safeJson(raw);
   if (!Array.isArray(parsed)) return [];
 
-  const results: IssueSummary[] = [];
+  const results: Array<IssueSummary | LabeledIssueSummary> = [];
   for (const item of parsed) {
+    if (results.length >= localLimit) break;
     if (item === null || typeof item !== 'object' || Array.isArray(item)) continue;
     const obj = item as Record<string, unknown>;
 
-    const number = typeof obj['number'] === 'number' ? obj['number'] : 0;
-    const title = typeof obj['title'] === 'string' ? obj['title'] : '';
-    const url = typeof obj['url'] === 'string' ? obj['url'] : '';
-    const state = typeof obj['state'] === 'string' ? obj['state'] : '';
+    const number = obj['number'];
+    const title = boundedNonEmptyString(obj['title'], 256);
+    const url = boundedNonEmptyString(obj['url'], 2_048);
+    const state = boundedNonEmptyString(obj['state'], 32);
+    const author = normalizedIssueAuthor(obj['author']);
+    if (
+      typeof number !== 'number' ||
+      !Number.isSafeInteger(number) ||
+      number <= 0 ||
+      !title ||
+      !url ||
+      !state ||
+      state.toLowerCase() !== 'open' ||
+      author === null
+    ) continue;
 
-    let author = '';
-    if (obj['author'] !== null && typeof obj['author'] === 'object') {
-      const a = obj['author'] as Record<string, unknown>;
-      if (typeof a['login'] === 'string') author = a['login'];
-    } else if (typeof obj['author'] === 'string') {
-      author = obj['author'];
+    if (includeLabels) {
+      const labels = normalizedIssueLabels(obj['labels']);
+      if (!labels) continue;
+      results.push({ number, title, url, state, author, labels });
+    } else {
+      results.push({ number, title, url, state, author });
     }
-
-    results.push({ number, title, url, state, author });
   }
   return results;
 }

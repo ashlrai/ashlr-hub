@@ -1117,8 +1117,11 @@ describe('scanner observation foundation', () => {
       expect(descriptor.domain.length).toBeGreaterThan(0);
       expect(descriptor.description.length).toBeGreaterThan(0);
       expect(descriptor.maxItems).toBeGreaterThan(0);
-      expect(descriptor.scannerRevision).toBe(1);
+      expect(Number.isSafeInteger(descriptor.scannerRevision)).toBe(true);
+      expect(descriptor.scannerRevision).toBeGreaterThanOrEqual(1);
     }
+    expect(SCANNER_DESCRIPTORS.find((descriptor) => descriptor.id === 'github-issues')?.scannerRevision)
+      .toBe(2);
     expect(SCANNER_DESCRIPTORS.filter((descriptor) => descriptor.canAssertAbsent).map((descriptor) => descriptor.id))
       .toEqual(['queued-autonomy', 'merge-verify-contract']);
     expect(SCANNER_DESCRIPTORS.filter((descriptor) => descriptor.evidence === 'legacy').every(

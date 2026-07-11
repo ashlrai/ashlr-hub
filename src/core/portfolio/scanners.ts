@@ -255,15 +255,46 @@ function isEpicIssue(title: string): boolean {
   return EPIC_TITLE_RE.test(title);
 }
 
+const ENGINEERING_ISSUE_LABELS = new Set([
+  'bug',
+  'security',
+  'regression',
+  'performance',
+  'reliability',
+  'testing',
+  'dependencies',
+  'technical debt',
+  'refactor',
+]);
+const NON_ENGINEERING_ISSUE_LABELS = new Set(['question', 'duplicate', 'invalid', 'wontfix']);
+
+function hasNonEmptyLabelNamespace(label: string, namespace: string): boolean {
+  return label.startsWith(namespace) && label.slice(namespace.length).trim().length > 0;
+}
+
+function isActionableEngineeringIssue(labels: readonly string[]): boolean {
+  const normalized = labels.map((label) => label.trim().toLowerCase()).filter(Boolean);
+  const hasPositive = normalized.some(
+    (label) => ENGINEERING_ISSUE_LABELS.has(label) ||
+      hasNonEmptyLabelNamespace(label, 'ashlr:engineering/'),
+  );
+  if (hasPositive) return true;
+  return !normalized.some(
+    (label) => NON_ENGINEERING_ISSUE_LABELS.has(label) ||
+      hasNonEmptyLabelNamespace(label, 'ashlr:non-code/'),
+  );
+}
+
 export async function scanIssues(repo: string): Promise<WorkItem[]> {
   try {
-    const issues = listIssues(repo);
+    const issues = listIssues(repo, { limit: 100, includeLabels: true });
     if (!Array.isArray(issues) || issues.length === 0) return [];
 
     const items: WorkItem[] = [];
     const repoName = basename(repo);
 
     for (const issue of issues) {
+      if (!isActionableEngineeringIssue(issue.labels)) continue;
       const epic = isEpicIssue(issue.title);
 
       if (epic) {
@@ -1870,7 +1901,7 @@ export interface ScannerRegistration {
 
 export const SCANNER_REGISTRATIONS: ReadonlyArray<ScannerRegistration> = [
   { scanner: scanQueuedAutonomyWork, descriptor: { id: 'queued-autonomy', scannerRevision: 1, domain: 'local-queue', source: 'self', description: 'Durable queued self-heal and invented work.', evidence: 'exhaustive', canAssertAbsent: true, maxItems: MAX_QUEUED_AUTONOMY_ITEMS } },
-  { scanner: scanIssues, descriptor: { id: 'github-issues', scannerRevision: 1, domain: 'github', source: 'issue', description: 'Open GitHub issues visible to the local integration.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
+  { scanner: scanIssues, descriptor: { id: 'github-issues', scannerRevision: 2, domain: 'github', source: 'issue', description: 'Actionable open GitHub engineering issues visible to the local integration.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
   { scanner: scanSecurity, descriptor: { id: 'binshield-security', scannerRevision: 1, domain: 'security', source: 'security', description: 'Read-only BinShield repository findings.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
   { scanner: scanExplicitMergeVerifyContracts, descriptor: { id: 'merge-verify-contract', scannerRevision: 1, domain: 'verification', source: 'test', description: 'Missing explicit merge-grade verification contracts.', evidence: 'exhaustive', canAssertAbsent: true, maxItems: 1 } },
   { scanner: scanTests, descriptor: { id: 'test-health', scannerRevision: 1, domain: 'tests', source: 'test', description: 'Cached CI failures and missing test-script coverage.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },

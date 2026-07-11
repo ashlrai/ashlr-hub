@@ -506,6 +506,130 @@ describe('listIssues — happy path', () => {
   });
 });
 
+describe('listIssues — bounded labeled mode and strict rows', () => {
+  const validIssue = {
+    number: 10,
+    title: 'Bug report',
+    url: 'https://github.com/acme/my-repo/issues/10',
+    state: 'OPEN',
+    author: { login: 'carol' },
+    labels: [{ name: 'bug' }],
+  };
+
+  it('preserves the exact legacy argv and five-field output shape', () => {
+    const calls: string[][] = [];
+    _spawnSyncImpl = (_cmd: unknown, args: unknown) => {
+      if (Array.isArray(args)) calls.push(args as string[]);
+      return makeSpawn(JSON.stringify([validIssue]));
+    };
+
+    const issues = listIssues('/fake/cwd');
+
+    expect(calls).toEqual([[
+      'issue', 'list', '--state', 'open', '--json', 'number,title,url,state,author',
+    ]]);
+    expect(issues).toEqual([{
+      number: 10,
+      title: 'Bug report',
+      url: 'https://github.com/acme/my-repo/issues/10',
+      state: 'OPEN',
+      author: 'carol',
+    }]);
+    expect(issues[0]).not.toHaveProperty('labels');
+  });
+
+  it('requests and normalizes nested labels with an explicit limit', () => {
+    const calls: string[][] = [];
+    _spawnSyncImpl = (_cmd: unknown, args: unknown) => {
+      if (Array.isArray(args)) calls.push(args as string[]);
+      return makeSpawn(JSON.stringify([validIssue]));
+    };
+
+    const issues = listIssues('/fake/cwd', { limit: 100, includeLabels: true });
+
+    expect(calls).toEqual([[
+      'issue', 'list', '--state', 'open', '--limit', '100', '--json',
+      'number,title,url,state,author,labels',
+    ]]);
+    expect(issues[0]?.labels).toEqual(['bug']);
+  });
+
+  it('accepts object, string, and null authors', () => {
+    setSpawnAlways(makeSpawn(JSON.stringify([
+      validIssue,
+      { ...validIssue, number: 11, author: 'direct-author' },
+      { ...validIssue, number: 12, author: null },
+    ])));
+
+    expect(listIssues('/fake/cwd', { includeLabels: true }).map((issue) => issue.author))
+      .toEqual(['carol', 'direct-author', '']);
+  });
+
+  it.each([
+    ['non-positive number', { number: 0 }],
+    ['fractional number', { number: 1.5 }],
+    ['blank title', { title: '   ' }],
+    ['oversized title', { title: 'x'.repeat(257) }],
+    ['blank URL', { url: '' }],
+    ['oversized URL', { url: `https://example.com/${'x'.repeat(2_100)}` }],
+    ['non-open state', { state: 'closed' }],
+    ['malformed author', { author: { login: 42 } }],
+    ['missing labels', { labels: undefined }],
+    ['malformed label', { labels: [{ name: '' }] }],
+  ])('rejects a %s row without poisoning a valid sibling', (_label, override) => {
+    setSpawnAlways(makeSpawn(JSON.stringify([{ ...validIssue, ...override }, validIssue])));
+
+    const issues = listIssues('/fake/cwd', { limit: 100, includeLabels: true });
+
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.number).toBe(10);
+  });
+
+  it.each([0, 101, 1.5, Number.NaN])('rejects invalid limit %s before spawning', (limit) => {
+    const spawn = vi.fn(() => makeSpawn(JSON.stringify([validIssue])));
+    _spawnSyncImpl = spawn;
+    expect(listIssues('/fake/cwd', { limit, includeLabels: true })).toEqual([]);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it.each([null, [], { includeLabels: 'true' }])(
+    'rejects malformed options %# before spawning',
+    (options) => {
+      const spawn = vi.fn(() => makeSpawn(JSON.stringify([validIssue])));
+      _spawnSyncImpl = spawn;
+      expect(listIssues('/fake/cwd', options as unknown as { includeLabels?: boolean })).toEqual([]);
+      expect(spawn).not.toHaveBeenCalled();
+    },
+  );
+
+  it('caps labeled results at 100 accepted rows after malformed rows are skipped', () => {
+    const rows = [
+      { ...validIssue, number: 0 },
+      ...Array.from({ length: 110 }, (_unused, index) => ({
+        ...validIssue,
+        number: index + 1,
+        url: `https://github.com/acme/my-repo/issues/${index + 1}`,
+      })),
+    ];
+    setSpawnAlways(makeSpawn(JSON.stringify(rows)));
+
+    const issues = listIssues('/fake/cwd', { limit: 100, includeLabels: true });
+
+    expect(issues).toHaveLength(100);
+    expect(issues[0]?.number).toBe(1);
+    expect(issues[99]?.number).toBe(100);
+  });
+
+  it('locally preserves the legacy 30-row population cap', () => {
+    setSpawnAlways(makeSpawn(JSON.stringify(Array.from({ length: 35 }, (_unused, index) => ({
+      ...validIssue,
+      number: index + 1,
+      url: `https://github.com/acme/my-repo/issues/${index + 1}`,
+    })))));
+    expect(listIssues('/fake/cwd')).toHaveLength(30);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // listIssues — failure paths always return []
 // ---------------------------------------------------------------------------

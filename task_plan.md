@@ -1672,3 +1672,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Decide and implement the next evidence-bound source or generation precision improvement.
 - [x] Add adversarial fixtures and run focused/full verification plus independent review.
 - [x] Update durable notes, commit, push, reload, and production-canary backlog precision.
+
+## Current Overnight Cycle - Bounded Engineering Issue Discovery
+- [x] Rehydrate the deployed repair-precision baseline, production health, current git state, Entire state, and persistent notes.
+- [x] Deploy disjoint audits for GitHub integration compatibility, label policy, production issue shapes, and objective-scoped repair identity.
+- [x] Add strict bounded labeled issue discovery without changing the legacy CLI output contract.
+- [x] Filter only explicit non-engineering labels while preserving positive engineering overrides, unknowns, and source uncertainty.
+- [x] Add adversarial parsing/policy fixtures and run focused/full verification plus independent review.
+- [ ] Update durable notes, commit, push, reload, and production-canary issue precision.
