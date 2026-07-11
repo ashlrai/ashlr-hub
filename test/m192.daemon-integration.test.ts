@@ -33,6 +33,7 @@
  * H1 fixture for isolated tmp HOME, same auxiliary mocks (routeBackend, quota,
  * subscription-usage, sandboxed-engine, automerge-pass, learned-router).
  */
+import { resolve } from 'node:path';
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { AshlrConfig } from '../src/core/types.js';
@@ -625,16 +626,23 @@ describe('M192 / M189 — regression sentinel: flag ON → detectRegression', ()
     const baselineHead = 'c'.repeat(40);
     mockDetectRegression.mockResolvedValue({ regressed: true, details: [culprit] });
     mockBisectAndRevert.mockResolvedValue({
+      repo: resolve(repo.dir),
       culprit,
       observedHead,
       baselineHead,
+      parentHead: baselineHead,
+      parentGreen: true,
+      culpritRed: true,
+      attributionConfidence: 'deterministic',
       candidateCount: 3,
       basis: 'bisect-first-bad',
       revertProposal: { culprit, culpritProposalId: 'proposal-causal', proposal: {} },
     });
     mockLoadProposal.mockReturnValue({
       id: 'proposal-causal',
+      status: 'applied',
       repo: repo.dir,
+      remoteHandoff: { mergeCommitOid: culprit },
       runId: 'run-causal',
       trajectoryId: 'trajectory-causal',
       workItemId: 'work-causal',
@@ -655,7 +663,7 @@ describe('M192 / M189 — regression sentinel: flag ON → detectRegression', ()
     expect(mockRecordPostMergeObservation).toHaveBeenCalledWith(expect.objectContaining({
       outcome: 'regressed',
       basis: 'bisect-first-bad',
-      confidence: 'heuristic',
+      confidence: 'deterministic',
       proposalId: 'proposal-causal',
       runId: 'run-causal',
       trajectoryId: 'trajectory-causal',
@@ -665,6 +673,66 @@ describe('M192 / M189 — regression sentinel: flag ON → detectRegression', ()
       baselineHead,
       candidateCount: 3,
       commandKinds: ['test', 'typecheck'],
+    }));
+  });
+
+  it('retains heuristic confidence when deterministic proof is not bound to the applied merge SHA', async () => {
+    const repo = enrollBuiltinRepo();
+    const culprit = 'a'.repeat(40);
+    mockDetectRegression.mockResolvedValue({ regressed: true, details: [culprit] });
+    mockBisectAndRevert.mockResolvedValue({
+      repo: resolve(repo.dir),
+      culprit,
+      observedHead: 'b'.repeat(40),
+      parentHead: 'c'.repeat(40),
+      parentGreen: true,
+      culpritRed: true,
+      attributionConfidence: 'deterministic',
+      basis: 'bisect-first-bad',
+      revertProposal: { culprit, culpritProposalId: 'proposal-mismatch', proposal: {} },
+    });
+    mockLoadProposal.mockReturnValue({
+      id: 'proposal-mismatch',
+      status: 'applied',
+      repo: repo.dir,
+      remoteHandoff: { mergeCommitOid: 'd'.repeat(40) },
+    });
+
+    await tick(makeFlagCfg('regressionSentinel'), { dryRun: false });
+
+    expect(mockRecordPostMergeObservation).toHaveBeenCalledWith(expect.objectContaining({
+      proposalId: 'proposal-mismatch',
+      confidence: 'heuristic',
+    }));
+  });
+
+  it('retains heuristic confidence when the proposal belongs to a different repository', async () => {
+    const repo = enrollBuiltinRepo();
+    const culprit = 'a'.repeat(40);
+    mockDetectRegression.mockResolvedValue({ regressed: true, details: [culprit] });
+    mockBisectAndRevert.mockResolvedValue({
+      repo: resolve(repo.dir),
+      culprit,
+      observedHead: 'b'.repeat(40),
+      parentHead: 'c'.repeat(40),
+      parentGreen: true,
+      culpritRed: true,
+      attributionConfidence: 'deterministic',
+      basis: 'bisect-first-bad',
+      revertProposal: { culprit, culpritProposalId: 'proposal-cross-repo', proposal: {} },
+    });
+    mockLoadProposal.mockReturnValue({
+      id: 'proposal-cross-repo',
+      status: 'applied',
+      repo: resolve(repo.dir, '..', 'different-repo'),
+      remoteHandoff: { mergeCommitOid: culprit },
+    });
+
+    await tick(makeFlagCfg('regressionSentinel'), { dryRun: false });
+
+    expect(mockRecordPostMergeObservation).toHaveBeenCalledWith(expect.objectContaining({
+      proposalId: 'proposal-cross-repo',
+      confidence: 'heuristic',
     }));
   });
 

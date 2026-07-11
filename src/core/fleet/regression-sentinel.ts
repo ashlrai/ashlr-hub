@@ -42,7 +42,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import type { AshlrConfig, Proposal } from '../types.js';
 import { detectVerifyCommands, runVerifyCommandAsync } from '../run/verify-commands.js';
 import { createProposal } from '../inbox/store.js';
@@ -100,6 +100,11 @@ export interface SuiteRun {
   red: boolean;
   /** First failure line (capped) for the proposal body. */
   detail?: string;
+  /** True only when a nonempty required-command manifest produced a causal result. */
+  conclusive?: boolean;
+  /** Digest of canonical required verification metadata for parent/culprit equality. */
+  manifestDigest?: string;
+  requiredCommandCount?: number;
 }
 
 /** Minimal git runner — returns trimmed stdout, or null on any failure. */
@@ -144,19 +149,36 @@ function firstFailureLine(output: string): string {
 }
 
 /** Default signal: run the repo's verify commands on HEAD; RED on first failure. */
-async function defaultRunSuite(repoDir: string, timeoutMs: number): Promise<SuiteRun> {
+async function defaultRunSuite(
+  repoDir: string,
+  timeoutMs: number,
+  requiredOnly = false,
+): Promise<SuiteRun> {
   try {
     const commands = detectVerifyCommands(repoDir, 'merge');
-    if (commands.length === 0) return { red: false };
-    for (const vc of commands) {
+    const requiredCommands = commands.filter((command) => command.required !== false);
+    if (requiredCommands.length === 0) return { red: false, conclusive: false };
+    const manifestDigest = createHash('sha256').update(JSON.stringify(requiredCommands.map((command) => ({
+      id: command.id ?? null,
+      kind: command.kind,
+      cmd: command.cmd,
+      cwd: command.cwd ?? '.',
+      timeoutMs: command.timeoutMs ?? null,
+      profiles: command.profiles ?? null,
+    })))).digest('hex');
+    const proof = { manifestDigest, requiredCommandCount: requiredCommands.length };
+    for (const vc of requiredOnly ? requiredCommands : commands) {
       const result = await runVerifyCommandAsync(vc, repoDir, {} as AshlrConfig, { timeoutMs });
-      if (!result.ok && vc.required !== false) {
-        return { red: true, detail: firstFailureLine(result.output) };
+      if (!result.ok) {
+        if (vc.required === false) continue;
+        return result.failureCategory === 'code'
+          ? { red: true, detail: firstFailureLine(result.output), conclusive: true, ...proof }
+          : { red: false, conclusive: false, ...proof };
       }
     }
-    return { red: false };
+    return { red: false, conclusive: true, ...proof };
   } catch {
-    return { red: false };
+    return { red: false, conclusive: false };
   }
 }
 
@@ -261,6 +283,7 @@ export interface RegressionResult {
  *   2. An explicit failing-signal source (opts.failSignal) fires immediately
  *      (treated as already-sustained by the external monitor that produced it).
  *   3. Otherwise run the suite on HEAD:
+ *        - INCONCLUSIVE → preserve streak/green authority unchanged.
  *        - GREEN → reset the streak AND record HEAD as the known-green marker
  *          (so a later bisect has a trustworthy "good" boundary). Not regressed.
  *        - RED → increment the consecutive-RED streak for this HEAD. Only once
@@ -296,6 +319,10 @@ export async function detectRegression(
 
     const git = opts?.git ?? defaultGit(repoDir, sc.timeoutMs);
     const head = git(['rev-parse', 'HEAD']) ?? '';
+
+    // Missing verification, timeout, tool failure, or infrastructure failure
+    // is not evidence that HEAD is green and must not erase a RED streak.
+    if (run.conclusive === false) return { regressed: false };
 
     if (!run.red) {
       // Green — reset streak, advance the known-green marker.
@@ -338,7 +365,17 @@ export interface RevertProposal {
 }
 
 export interface BisectResult {
+  /** Canonical repository whose commits and verification results were examined. */
+  repo?: string;
   culprit?: string;
+  /** Direct first parent of the isolated culprit when it could be resolved. */
+  parentHead?: string;
+  /** Same-run suite result for the direct parent. False also covers unavailable proof. */
+  parentGreen?: boolean;
+  /** Same-run suite result for the isolated culprit. */
+  culpritRed?: boolean;
+  /** Deterministic only when culprit^ is GREEN and culprit is RED in this run. */
+  attributionConfidence?: 'deterministic' | 'heuristic';
   /** HEAD observed before any temporary checkout. */
   observedHead?: string;
   /** Trusted known-green boundary when one was available. */
@@ -413,7 +450,7 @@ export async function bisectAndRevert(
     if (!sc.enabled) return { reason: 'regression sentinel disabled' };
 
     git = opts?.git ?? defaultGit(repoDir, sc.timeoutMs);
-    const runSuite = opts?.runSuite ?? defaultRunSuite;
+    const runSuite = opts?.runSuite ?? ((repo, timeout) => defaultRunSuite(repo, timeout, true));
 
     const originalHead = git(['rev-parse', 'HEAD']);
     if (!originalHead) return { reason: 'cannot resolve HEAD' };
@@ -447,19 +484,47 @@ export async function bisectAndRevert(
     // bad commit = the culprit. (candidates are newest-first, so reverse.)
     const oldestFirst = [...scoped].reverse();
     let culprit: string | undefined;
+    let culpritRed = false;
+    let culpritRun: SuiteRun | undefined;
     for (const sha of oldestFirst) {
       const ok = git(['checkout', '--quiet', sha]) !== null;
       if (!ok) continue;
       const run = await runSuite(repoDir, sc.timeoutMs);
       if (run.red) {
         culprit = sha;
+        culpritRed = true;
+        culpritRun = run;
         break; // first bad in oldest→newest order
       }
     }
 
+    // A first RED fleet candidate is only deterministic attribution when its
+    // direct parent is independently GREEN in this same bounded run. This
+    // excludes regressions introduced by an intervening human commit before
+    // the fleet merge. Missing/unrunnable parent proof remains heuristic.
+    let parentHead: string | undefined;
+    let parentGreen = false;
+    let parentRun: SuiteRun | undefined;
+    if (culprit && culpritRed) {
+      const resolvedParent = git(['rev-parse', `${culprit}^`]);
+      if (resolvedParent && git(['checkout', '--quiet', resolvedParent]) !== null) {
+        parentHead = resolvedParent;
+        try {
+          parentRun = await runSuite(repoDir, sc.timeoutMs);
+          parentGreen = parentRun.conclusive === true && !parentRun.red;
+        } catch {
+          parentGreen = false;
+        }
+      }
+    }
+
     // Always restore the working tree to the original HEAD.
-    git(['checkout', '--quiet', originalHead]);
-    restoreSha = null; // restored in-line; finally won't double-restore
+    const restored = git(['checkout', '--quiet', originalHead]);
+    const restoredHead = restored !== null ? git(['rev-parse', 'HEAD']) : null;
+    if (restored === null || restoredHead !== originalHead) {
+      return { reason: 'failed to restore original HEAD after regression proof' };
+    }
+    restoreSha = null; // positively restored; finally need not retry
 
     if (!culprit) {
       return { reason: 'bisect found no RED auto-merge commit (anomaly not from a fleet merge)' };
@@ -514,7 +579,18 @@ export async function bisectAndRevert(
     );
 
     return {
+      repo: resolve(repoDir),
       culprit,
+      ...(parentHead ? { parentHead } : {}),
+      parentGreen,
+      culpritRed,
+      attributionConfidence: parentHead && parentGreen && culpritRed &&
+        parentRun?.conclusive === true && culpritRun?.conclusive === true &&
+        typeof parentRun.manifestDigest === 'string' &&
+        parentRun.manifestDigest === culpritRun.manifestDigest &&
+        parentRun.requiredCommandCount === culpritRun.requiredCommandCount
+        ? 'deterministic'
+        : 'heuristic',
       observedHead: originalHead,
       ...(greenSha ? { baselineHead: greenSha } : {}),
       candidateCount: scoped.length,

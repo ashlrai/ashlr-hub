@@ -2150,14 +2150,19 @@ export async function tick(
               import('../fleet/post-merge-observations.js'),
             ]);
             const culpritProposal = loadProposal(culpritProposalId);
+            const deterministicIdentity = typeof culpritProposal?.repo === 'string' &&
+              culpritProposal.status === 'applied' &&
+              culpritProposal.remoteHandoff?.mergeCommitOid === bisect.culprit &&
+              typeof bisect.repo === 'string' && resolve(culpritProposal.repo) === bisect.repo;
             if (culpritProposal?.repo) {
               recordPostMergeObservation({
                 observedAt: new Date().toISOString(),
                 outcome: 'regressed',
                 basis: 'bisect-first-bad',
-                // The bounded sentinel isolates a likely first-bad fleet merge,
-                // but does not yet prove the candidate's parent was green.
-                confidence: 'heuristic',
+                confidence: deterministicIdentity && bisect.attributionConfidence === 'deterministic' &&
+                  bisect.parentGreen === true && bisect.culpritRed === true
+                  ? 'deterministic'
+                  : 'heuristic',
                 repo: culpritProposal.repo,
                 proposalId: culpritProposalId,
                 ...(culpritProposal.runId ? { runId: culpritProposal.runId } : {}),
@@ -2165,8 +2170,15 @@ export async function tick(
                 ...(culpritProposal.workItemId ? { workItemId: culpritProposal.workItemId } : {}),
                 mergeCommit: bisect.culprit,
                 observedHead: bisect.observedHead,
-                ...(bisect.baselineHead && gitOid.test(bisect.baselineHead)
-                  ? { baselineHead: bisect.baselineHead }
+                ...((deterministicIdentity && bisect.attributionConfidence === 'deterministic'
+                  ? bisect.parentHead
+                  : bisect.baselineHead) &&
+                gitOid.test((deterministicIdentity && bisect.attributionConfidence === 'deterministic'
+                  ? bisect.parentHead
+                  : bisect.baselineHead)!)
+                  ? { baselineHead: (deterministicIdentity && bisect.attributionConfidence === 'deterministic'
+                    ? bisect.parentHead
+                    : bisect.baselineHead)! }
                   : {}),
                 ...(bisect.candidateCount ? { candidateCount: bisect.candidateCount } : {}),
                 ...(culpritProposal.verifyResult?.ran?.length

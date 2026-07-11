@@ -1750,3 +1750,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Refill shared-queue capacity after partial contention without duplicate claims or lane-policy drift.
 - [x] Add adversarial fairness, restart, contention, telemetry, evidence migration, origin binding, required-check producer identity, and compatibility coverage plus independent review.
 - [x] Run focused/full verification, update durable notes, commit, push, reload production, and canary the new scheduler.
+
+## Current Overnight Cycle - Deterministic Regression Attribution
+- [x] Rehydrate the deployed post-merge watcher baseline, current git state, production evidence, Entire state, and durable notes.
+- [x] Deploy independent audits for parent-green proof, stable cohort authority, multi-repo monitoring fairness, and adversarial attribution gaps.
+- [x] Treat missing commands and infrastructure or tool failures as inconclusive without resetting known-green or RED-streak authority.
+- [x] Require same-run direct-parent GREEN and culprit RED under an identical nonempty required-command manifest for deterministic attribution.
+- [x] Bind deterministic evidence to the exact applied remote merge commit and canonical repository, and positively verify checkout restoration.
+- [x] Preserve monotonic heuristic-to-deterministic evidence upgrades and expose metadata-only proof context in trajectories.
+- [x] Add parent, manifest, infrastructure, restore, identity, privacy, precedence, and downgrade coverage.
+- [x] Pass focused and exhaustive verification plus independent adversarial review; update durable release notes.
+- [ ] Commit, push, observe the complete GitHub matrix, reload production, and canary the deterministic attribution path.

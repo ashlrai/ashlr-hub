@@ -204,17 +204,45 @@ describe('M371 observation-only post-merge ledger', () => {
   it('refuses contradictory evidence at the current outcome rank', () => {
     expect(recordPostMergeObservation(input())).toMatchObject({ recorded: 1 });
     expect(recordPostMergeObservation(input({
-      confidence: 'heuristic',
+      confidence: 'deterministic',
       observedHead: 'd'.repeat(40),
       observedAt: '2026-07-11T12:01:00.000Z',
     }))).toMatchObject({ conflicted: 1 });
     expect(readPostMergeObservations()).toMatchObject({ physicalRows: 1, conflictingEvents: 0 });
   });
 
+  it('upgrades heuristic regression evidence to deterministic parent proof', () => {
+    expect(recordPostMergeObservation(input({
+      confidence: 'heuristic',
+      baselineHead: undefined,
+    }))).toMatchObject({ recorded: 1 });
+    expect(recordPostMergeObservation(input({
+      confidence: 'deterministic',
+      observedAt: '2026-07-11T12:01:00.000Z',
+    }))).toMatchObject({ upgraded: 1 });
+    expect(recordPostMergeObservation(input({
+      confidence: 'heuristic',
+      baselineHead: undefined,
+      observedAt: '2026-07-11T12:02:00.000Z',
+    }))).toMatchObject({ obsolete: 1 });
+
+    expect(readPostMergeObservations()).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+      physicalRows: 2,
+      supersededRows: 1,
+      observations: [expect.objectContaining({
+        outcome: 'regressed',
+        confidence: 'deterministic',
+        baselineHead: 'c'.repeat(40),
+      })],
+    });
+  });
+
   it('degrades on malformed, extra-field, forged, and conflicting persisted rows', () => {
     const valid = buildPostMergeObservation(input())!;
     const conflict = buildPostMergeObservation(input({
-      confidence: 'heuristic',
+      confidence: 'deterministic',
       observedHead: 'd'.repeat(40),
       observedAt: '2026-07-11T12:01:00.000Z',
     }))!;

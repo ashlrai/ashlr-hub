@@ -91,6 +91,12 @@ export interface TrajectoryTimelineEvent {
     source?: string;
     policyAllowed?: boolean;
   };
+  postMergeEvidence?: {
+    basis: string;
+    confidence: 'deterministic' | 'heuristic';
+    candidateCount?: number;
+    commandKinds?: string[];
+  };
   proposal?: {
     status: string;
     origin: string;
@@ -812,6 +818,12 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
         itemId: observation.workItemId ?? proposal.workItemId,
         learningSource: 'outcome-record',
         labelBasis: observation.labelBasis,
+        postMergeEvidence: {
+          basis: observation.basis,
+          confidence: observation.confidence,
+          ...(observation.candidateCount ? { candidateCount: observation.candidateCount } : {}),
+          ...(observation.commandKinds ? { commandKinds: observation.commandKinds } : {}),
+        },
       });
     }
   };

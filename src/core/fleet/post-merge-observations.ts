@@ -341,6 +341,10 @@ const OUTCOME_RANK: Record<PostMergeOutcome, number> = {
   'reverted': 2,
 };
 
+function observationRank(observation: PostMergeObservation): number {
+  return OUTCOME_RANK[observation.outcome] * 10 + (observation.confidence === 'deterministic' ? 1 : 0);
+}
+
 function semanticFingerprint(observation: PostMergeObservation): string {
   const { observedAt: _observedAt, attestation: _attestation, ...semantic } = observation;
   return JSON.stringify(semantic);
@@ -494,9 +498,9 @@ function appendObservation(
     if (parsed.invalidRows > 0 || parsed.tornTail || parsed.physicalRows >= HARD_MAX_ROWS) return 'failed';
     const sameEvent = parsed.rows.filter((row) => row.eventId === observation.eventId);
     if (sameEvent.length > 0) {
-      const highestRank = Math.max(...sameEvent.map((row) => OUTCOME_RANK[row.outcome]));
-      const candidateRank = OUTCOME_RANK[observation.outcome];
-      const sameRank = sameEvent.filter((row) => OUTCOME_RANK[row.outcome] === candidateRank);
+      const highestRank = Math.max(...sameEvent.map(observationRank));
+      const candidateRank = observationRank(observation);
+      const sameRank = sameEvent.filter((row) => observationRank(row) === candidateRank);
       if (candidateRank < highestRank) return 'obsolete';
       if (sameRank.some((row) => semanticFingerprint(row) === semanticFingerprint(observation))) return 'replayed';
       if (candidateRank === highestRank) return 'conflicted';
@@ -594,8 +598,8 @@ function resolveRows(rows: PostMergeObservation[]): {
   let duplicateRows = 0;
   let supersededRows = 0;
   for (const eventRows of grouped.values()) {
-    const highestRank = Math.max(...eventRows.map((row) => OUTCOME_RANK[row.outcome]));
-    const highest = eventRows.filter((row) => OUTCOME_RANK[row.outcome] === highestRank);
+    const highestRank = Math.max(...eventRows.map(observationRank));
+    const highest = eventRows.filter((row) => observationRank(row) === highestRank);
     const byFingerprint = new Map(highest.map((row) => [semanticFingerprint(row), row]));
     duplicateRows += highest.length - byFingerprint.size;
     supersededRows += eventRows.length - highest.length;

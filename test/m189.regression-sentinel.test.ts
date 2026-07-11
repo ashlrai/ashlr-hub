@@ -84,6 +84,19 @@ const OFF_CFG: Pick<AshlrConfig, 'foundry'> = { foundry: {} as AshlrConfig['foun
 
 const RED: { red: true; detail: string } = { red: true, detail: 'FAIL src/x.test.ts: expected 1 to equal 2' };
 const GREEN: { red: false } = { red: false };
+const PROOF_MANIFEST = 'a'.repeat(64);
+const PROVEN_RED: SuiteRun = {
+  ...RED,
+  conclusive: true,
+  manifestDigest: PROOF_MANIFEST,
+  requiredCommandCount: 1,
+};
+const PROVEN_GREEN: SuiteRun = {
+  ...GREEN,
+  conclusive: true,
+  manifestDigest: PROOF_MANIFEST,
+  requiredCommandCount: 1,
+};
 
 /** A fake git runner driven by a routing table on the joined args string. */
 function fakeGit(routes: (args: string[]) => string | null) {
@@ -174,7 +187,14 @@ describe('detectRegression', () => {
 
   it('uses the default verify-commands signal when no runSuite is injected', async () => {
     mockDetectVerifyCommands.mockReturnValue([{ kind: 'test', cmd: ['npx', 'vitest', 'run'] }]);
-    mockRunVerifyCommand.mockReturnValue({ ok: false, output: 'Error: boom', exitCode: 1, timedOut: false, command: 'x' });
+    mockRunVerifyCommand.mockReturnValue({
+      ok: false,
+      output: 'Error: boom',
+      exitCode: 1,
+      timedOut: false,
+      command: 'x',
+      failureCategory: 'code',
+    });
     const git = fakeGit(() => 'HEAD_A');
     // minConsecutive=1 so one default-signal RED suffices to fire.
     const r = await detectRegression(onCfg({ minConsecutive: 1 }), REPO, { git });
@@ -200,6 +220,24 @@ describe('detectRegression', () => {
     expect(mockRunVerifyCommand).toHaveBeenCalledTimes(2);
   });
 
+  it('treats verifier infrastructure failure as inconclusive instead of RED', async () => {
+    mockDetectVerifyCommands.mockReturnValue([{ kind: 'test', cmd: ['npm', 'test'], required: true }]);
+    mockRunVerifyCommand.mockReturnValue({
+      ok: false,
+      output: 'spawn failed',
+      exitCode: -1,
+      timedOut: false,
+      command: 'npm test',
+      failureCategory: 'infra',
+    });
+
+    const result = await detectRegression(onCfg({ minConsecutive: 1 }), REPO, {
+      git: fakeGit(() => 'HEAD_A'),
+    });
+
+    expect(result.regressed).toBe(false);
+  });
+
   it('never throws when the suite runner throws', async () => {
     const git = fakeGit(() => 'HEAD_A');
     await expect(
@@ -223,6 +261,7 @@ describe('bisectAndRevert', () => {
     return fakeGit((args: string[]) => {
       const a = args.join(' ');
       if (a.startsWith('rev-parse HEAD')) return head;
+      if (a === 'rev-parse C1^') return 'C0';
       if (a.startsWith('log') && a.includes('--grep=')) {
         // newest-first list of auto-merge commit shas
         return ['C2', 'C1', 'C0'].join('\n');
@@ -248,7 +287,7 @@ describe('bisectAndRevert', () => {
   function bisectRunSuite(git: ReturnType<typeof fakeGit>) {
     return (_repo: string) => {
       const head = git(['rev-parse', 'HEAD']) ?? '';
-      return head === 'C0' ? GREEN : RED;
+      return head === 'C0' ? PROVEN_GREEN : PROVEN_RED;
     };
   }
 
@@ -276,10 +315,109 @@ describe('bisectAndRevert', () => {
     expect(r.revertProposal?.culprit).toBe('C1');
     expect(r.revertProposal?.culpritProposalId).toBe('prop-C1');
     expect(r).toMatchObject({
+      repo: REPO,
       observedHead: 'HEAD_BAD',
       baselineHead: 'C0',
+      parentHead: 'C0',
+      parentGreen: true,
+      culpritRed: true,
+      attributionConfidence: 'deterministic',
       candidateCount: 2,
       basis: 'bisect-first-bad',
+    });
+  });
+
+  it('refuses proposal generation when restoring the original HEAD cannot be verified', async () => {
+    withGreenMarker('C0');
+    const base = bisectGit();
+    let restoreAttempts = 0;
+    const git: GitRunner = (args) => {
+      if (args.join(' ') === 'checkout --quiet HEAD_BAD') {
+        restoreAttempts++;
+        return null;
+      }
+      return base(args);
+    };
+
+    const result = await bisectAndRevert(onCfg(), REPO, { git, runSuite: bisectRunSuite(base) });
+
+    expect(result).toEqual({ reason: 'failed to restore original HEAD after regression proof' });
+    expect(restoreAttempts).toBeGreaterThanOrEqual(2);
+    expect(mockCreateProposal).not.toHaveBeenCalled();
+  });
+
+  it('keeps attribution heuristic when the culprit direct parent is also RED', async () => {
+    withGreenMarker('C0');
+    const git = bisectGit();
+    const r = await bisectAndRevert(onCfg(), REPO, { git, runSuite: () => PROVEN_RED });
+
+    expect(r).toMatchObject({
+      culprit: 'C1',
+      parentHead: 'C0',
+      parentGreen: false,
+      culpritRed: true,
+      attributionConfidence: 'heuristic',
+    });
+  });
+
+  it('keeps attribution heuristic when the culprit direct parent cannot be resolved', async () => {
+    withGreenMarker('C0');
+    const git = bisectGit();
+    const withoutParent: GitRunner = (args) => args.join(' ') === 'rev-parse C1^' ? null : git(args);
+    const r = await bisectAndRevert(onCfg(), REPO, {
+      git: withoutParent,
+      runSuite: bisectRunSuite(git),
+    });
+
+    expect(r).toMatchObject({
+      culprit: 'C1',
+      parentGreen: false,
+      culpritRed: true,
+      attributionConfidence: 'heuristic',
+    });
+    expect(r.parentHead).toBeUndefined();
+  });
+
+  it('keeps attribution heuristic when suite results lack a conclusive verification manifest', async () => {
+    withGreenMarker('C0');
+    const git = bisectGit();
+    const r = await bisectAndRevert(onCfg(), REPO, { git, runSuite: bisectRunSuite(git) });
+    expect(r.attributionConfidence).toBe('deterministic');
+
+    const inconclusiveGit = bisectGit();
+    const inconclusive = await bisectAndRevert(onCfg(), REPO, {
+      git: inconclusiveGit,
+      runSuite: (repo) => {
+        const head = inconclusiveGit(['rev-parse', 'HEAD']);
+        return head === 'C0' ? GREEN : RED;
+      },
+    });
+    expect(inconclusive).toMatchObject({
+      culprit: 'C1',
+      parentGreen: false,
+      culpritRed: true,
+      attributionConfidence: 'heuristic',
+    });
+  });
+
+  it('keeps attribution heuristic when parent and culprit verification manifests differ', async () => {
+    withGreenMarker('C0');
+    const git = bisectGit();
+    const r = await bisectAndRevert(onCfg(), REPO, {
+      git,
+      runSuite: () => {
+        const head = git(['rev-parse', 'HEAD']);
+        return head === 'C0'
+          ? { ...PROVEN_GREEN, manifestDigest: 'b'.repeat(64) }
+          : PROVEN_RED;
+      },
+    });
+
+    expect(r).toMatchObject({
+      culprit: 'C1',
+      parentGreen: true,
+      culpritRed: true,
+      attributionConfidence: 'heuristic',
     });
   });
 
