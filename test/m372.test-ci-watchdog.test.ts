@@ -51,12 +51,13 @@ describe('test-ci watchdog', () => {
 
   it('keeps an actively producing process alive past the idle window', () => {
     const result = runFixture(
-      `let n = 0;
+      `console.log('progress-0');
+       let n = 0;
        const timer = setInterval(() => {
          console.log('progress-' + (++n));
          if (n === 5) { clearInterval(timer); process.exit(0); }
-       }, 35);`,
-      { idleMs: 80, hardMs: 1_000 },
+       }, 300);`,
+      { idleMs: 1_000, hardMs: 3_000 },
     );
 
     expect(result.status).toBe(0);
