@@ -86,7 +86,11 @@ export function computeModelStats(window: '7d' | '30d' | 'all'): ModelStats[] {
         const key = tag ? `${e.engine}:${tag}` : e.engine;
         if (!producerOf.has(e.proposalId)) producerOf.set(e.proposalId, key);
       }
-      for (const t of readJudgeTraces({ outcomeOnly: true, ...(sinceMs !== undefined ? { sinceMs } : {}) })) {
+      for (const t of readJudgeTraces({
+        outcomeOnly: true,
+        ...(sinceMs !== undefined ? { sinceMs } : {}),
+        requireComplete: true,
+      })) {
         const key = producerOf.get(t.proposalId);
         if (!key || !out.has(key)) continue;
         if (t.outcome === 'reverted') out.get(key)!.outcomes.reverted++;

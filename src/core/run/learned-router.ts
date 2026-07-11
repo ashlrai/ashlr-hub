@@ -1126,7 +1126,7 @@ export function buildProducerScores(
     // fix counts as half a reject — the judge's moment-of-merge 'ship' is
     // corrected by what actually happened on main.
     try {
-      const traces = readJudgeTraces({ outcomeOnly: true, sinceMs: windowStart });
+      const traces = readJudgeTraces({ outcomeOnly: true, sinceMs: windowStart, requireComplete: true });
       // M337 (review fix): cross-day linkOutcome appends PATCH records, so
       // one proposal's outcome can appear multiple times — count it ONCE.
       const seenOutcome = new Set<string>();

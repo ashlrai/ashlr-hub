@@ -120,8 +120,9 @@ function optionalJudgeAttestation(value: unknown): string | undefined {
 }
 
 function sanitizeDecisionEntry(entry: DecisionEntry): DecisionEntry {
+  const parsedTs = Date.parse(entry.ts);
   const clean: DecisionEntry = {
-    ts: stripSecrets(entry.ts || new Date().toISOString()),
+    ts: Number.isFinite(parsedTs) ? new Date(parsedTs).toISOString() : new Date().toISOString(),
     proposalId: stripSecrets(entry.proposalId),
     action: entry.action,
     ...(optionalScrubbedText(entry.workItemId) !== undefined ? { workItemId: optionalScrubbedText(entry.workItemId) } : {}),

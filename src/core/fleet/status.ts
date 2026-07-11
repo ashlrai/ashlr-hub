@@ -84,6 +84,7 @@ import {
   type DispatchProductionYieldSummary,
 } from './dispatch-production-ledger.js';
 import { readDecisionsDetailed, type DecisionSourceQuality } from './decisions-ledger.js';
+import { readJudgeTracesDetailed, type JudgeTraceSourceQuality } from './judge-trace.js';
 import {
   readAgentWorkspace,
   type AgentWorkspaceStatus,
@@ -829,6 +830,8 @@ export interface FleetStatus {
   dispatchProductionSource?: DispatchProductionSourceQuality;
   /** Storage/read completeness for cached judge and merge-authority evidence. */
   decisionsSource?: DecisionSourceQuality;
+  /** Storage/read completeness for judge calibration and real-world outcome labels. */
+  judgeTraceSource?: JudgeTraceSourceQuality;
   /** Recent forensic concurrent dispatch intent summaries from the append-only manifest ledger. */
   dispatchManifests?: FleetDispatchManifestStatus;
   /** Sample-gated diagnosis of dispatch-production yield; no raw prompts/diffs/stdout. */
@@ -1546,6 +1549,32 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     };
   } catch {
     status.decisionsSource = {
+      sourceState: 'degraded',
+      sourcePresent: true,
+      complete: false,
+      stopReasons: ['io-error'],
+      filesRead: 0,
+      bytesRead: 0,
+      rowsScanned: 0,
+      invalidRows: 0,
+      unreadableFiles: 1,
+    };
+  }
+  try {
+    const traceRead = readJudgeTracesDetailed({ limit: 1 });
+    status.judgeTraceSource = {
+      sourceState: traceRead.sourceState,
+      sourcePresent: traceRead.sourcePresent,
+      complete: traceRead.complete,
+      stopReasons: traceRead.stopReasons,
+      filesRead: traceRead.filesRead,
+      bytesRead: traceRead.bytesRead,
+      rowsScanned: traceRead.rowsScanned,
+      invalidRows: traceRead.invalidRows,
+      unreadableFiles: traceRead.unreadableFiles,
+    };
+  } catch {
+    status.judgeTraceSource = {
       sourceState: 'degraded',
       sourcePresent: true,
       complete: false,

@@ -279,7 +279,9 @@ export function listOutcomeRecords(
   try {
     const proposals = safeArray(() => (deps.listProposals ?? listProposals)());
     const decisions = safeArray(() => (deps.readDecisions ?? readDecisions)());
-    const traces = safeArray(() => (deps.readJudgeTraces ?? readJudgeTraces)());
+    const traces = safeArray(() => deps.readJudgeTraces
+      ? deps.readJudgeTraces()
+      : readJudgeTraces({ requireComplete: true }));
     const evidence = safeArray(() =>
       (deps.listAutonomyEvidencePacks ?? listAutonomyEvidencePacks)(Math.max(cap * 4, 200)),
     );

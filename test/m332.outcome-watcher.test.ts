@@ -37,6 +37,10 @@ vi.mock('../src/core/fleet/judge-trace.js', () => ({
   linkOutcome: vi.fn((id: string, outcome: string) => {
     linked.push([id, outcome]);
   }),
+  linkOutcomeResult: vi.fn((id: string, outcome: string) => {
+    linked.push([id, outcome]);
+    return { status: 'linked' };
+  }),
 }));
 
 vi.mock('../src/core/inbox/store.js', () => ({

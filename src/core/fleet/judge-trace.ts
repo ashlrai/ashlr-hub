@@ -7,22 +7,28 @@
  *   - Append-only; never truncate/rewrite/delete.
  *   - Secret-scrubbed before write.
  *   - recordJudgeTrace() never throws.
- *   - readJudgeTraces() skips malformed lines, never throws.
- *   - linkOutcome() patches the matching trace's `outcome` field in-place
- *     by rewriting only the trace's own JSONL file line — or appends a
- *     synthetic patch record when the trace is in a prior day's file
- *     (immutable-append-safe fallback).
+ *   - readJudgeTraces() preserves the legacy array API while detailed reads
+ *     expose bounded source quality and completeness.
+ *   - linkOutcome() appends an immutable patch record; reads materialize the
+ *     newest patch onto exactly one logical trace.
  */
 
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import {
+  closeSync,
+  chmodSync,
+  constants as fsConstants,
   existsSync,
+  fchmodSync,
+  fstatSync,
+  lstatSync,
   mkdirSync,
-  readdirSync,
-  appendFileSync,
-  readFileSync,
-  writeFileSync,
+  openSync,
+  opendirSync,
+  readSync,
+  writeSync,
 } from 'node:fs';
 import { scrubSecrets } from '../util/scrub.js';
 
@@ -36,6 +42,8 @@ export type JudgeOutcome = 'merged' | 'reverted' | 'rejected' | 'followed-up';
 // than 'reverted'; maps to intent 'review' in calibration.
 
 export interface JudgeTrace {
+  /** Stable identity used by append-only outcome patches. */
+  traceId?: string;
   /** Proposal id this trace belongs to. */
   proposalId: string;
   /** Model/engine that produced the verdict (e.g. 'claude-sonnet-4-5'). */
@@ -69,6 +77,52 @@ export interface JudgeTrace {
   outcome?: JudgeOutcome;
   /** ISO timestamp when linkOutcome() was called. */
   outcomeAt?: string;
+  /** Internal append-only patch marker; omitted from materialized reads. */
+  _patchForTraceId?: string;
+  /** Legacy patch provenance retained for backward-compatible reads. */
+  _patchFor?: string;
+}
+
+const DEFAULT_MAX_FILES = 1_024;
+const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_ROWS = 100_000;
+const HARD_MAX_FILES = 1_024;
+const HARD_MAX_BYTES = 256 * 1024 * 1024;
+const HARD_MAX_ROWS = 1_000_000;
+const MAX_DIRECTORY_ENTRIES = 2_048;
+const MAX_ROW_BYTES = 128 * 1024;
+const DATE_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
+const VERDICTS = new Set<JudgeTrace['verdict']>(['ship', 'review', 'noise', 'harmful']);
+const OUTCOMES = new Set<JudgeOutcome>(['merged', 'reverted', 'rejected', 'followed-up']);
+
+export interface ReadJudgeTracesOptions {
+  proposalId?: string;
+  verdict?: JudgeTrace['verdict'];
+  sinceMs?: number;
+  limit?: number;
+  outcomeOnly?: boolean;
+  maxFiles?: number;
+  maxBytes?: number;
+  maxRows?: number;
+  requireComplete?: boolean;
+}
+
+export type JudgeTraceReadStopReason = 'file-limit' | 'byte-limit' | 'row-limit' | 'io-error';
+
+export interface JudgeTraceSourceQuality {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  stopReasons: JudgeTraceReadStopReason[];
+  filesRead: number;
+  bytesRead: number;
+  rowsScanned: number;
+  invalidRows: number;
+  unreadableFiles: number;
+}
+
+export interface JudgeTracesReadResult extends JudgeTraceSourceQuality {
+  traces: JudgeTrace[];
 }
 
 // ---------------------------------------------------------------------------
@@ -77,12 +131,11 @@ export interface JudgeTrace {
 
 /** Absolute path to the judge-traces directory: ~/.ashlr/judge-traces. */
 export function judgeTracesDir(): string {
-  return join(homedir(), '.ashlr', 'judge-traces');
-}
-
-/** Current date as YYYY-MM-DD (UTC) for the daily file name. */
-function todayDateString(): string {
-  return new Date().toISOString().slice(0, 10);
+  const configured = process.env.ASHLR_HOME;
+  const root = typeof configured === 'string' && configured.trim() !== '' && isAbsolute(configured)
+    ? configured
+    : join(homedir(), '.ashlr');
+  return join(root, 'judge-traces');
 }
 
 // ---------------------------------------------------------------------------
@@ -92,9 +145,57 @@ function todayDateString(): string {
 function scrubTrace(trace: JudgeTrace): JudgeTrace {
   return {
     ...trace,
-    fullReasoning: scrubSecrets(trace.fullReasoning),
-    promptContext: scrubSecrets(trace.promptContext),
+    fullReasoning: scrubSecrets(trace.fullReasoning).slice(0, 32_000),
+    promptContext: scrubSecrets(trace.promptContext).slice(0, 16_000),
   };
+}
+
+function appendTraceLine(path: string, line: string): boolean {
+  const bytes = Buffer.from(line, 'utf8');
+  if (bytes.length > MAX_ROW_BYTES) return false;
+  let fd: number | undefined;
+  try {
+    const directoryBefore = lstatSync(dirname(path));
+    if (
+      directoryBefore.isSymbolicLink() ||
+      !directoryBefore.isDirectory() ||
+      (typeof process.getuid === 'function' && Number(directoryBefore.uid) !== process.getuid()) ||
+      (Number(directoryBefore.mode) & 0o022) !== 0
+    ) return false;
+    fd = openSync(
+      path,
+      fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || Number(stat.nlink) !== 1 || (Number(stat.mode) & 0o022) !== 0) return false;
+    if (typeof process.getuid === 'function' && Number(stat.uid) !== process.getuid()) return false;
+    fchmodSync(fd, 0o600);
+    if (stat.size > 0) {
+      const tail = Buffer.alloc(1);
+      if (readSync(fd, tail, 0, 1, Number(stat.size) - 1) !== 1) return false;
+      if (tail[0] !== 0x0a) writeAll(fd, Buffer.from('\n'));
+    }
+    writeAll(fd, bytes);
+    const directoryAfter = lstatSync(dirname(path));
+    if (!sameFile(directoryBefore, directoryAfter)) return false;
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* best-effort telemetry append */ }
+    }
+  }
+}
+
+function writeAll(fd: number, bytes: Buffer): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(fd, bytes, offset, bytes.length - offset);
+    if (written <= 0) throw new Error('judge trace append made no progress');
+    offset += written;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -111,17 +212,31 @@ export function recordJudgeTrace(trace: Omit<JudgeTrace, 'ts'> & { ts?: string }
   try {
     const dir = judgeTracesDir();
     if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
+    const directory = lstatSync(dir);
+    if (
+      directory.isSymbolicLink() ||
+      !directory.isDirectory() ||
+      (typeof process.getuid === 'function' && Number(directory.uid) !== process.getuid()) ||
+      (Number(directory.mode) & 0o022) !== 0
+    ) return;
+    chmodSync(dir, 0o700);
 
     const record: JudgeTrace = scrubTrace({
       ...trace,
-      ts: trace.ts ?? new Date().toISOString(),
+      ts: (() => {
+        const value = trace.ts ?? new Date().toISOString();
+        const parsed = Date.parse(value);
+        return Number.isFinite(parsed) ? new Date(parsed).toISOString() : '';
+      })(),
+      traceId: trace.traceId ?? `jt-${randomUUID()}`,
     } as JudgeTrace);
+    if (!record.ts) return;
 
     const line = JSON.stringify(record) + '\n';
-    const filePath = join(dir, `${todayDateString()}.jsonl`);
-    appendFileSync(filePath, line, 'utf8');
+    const filePath = join(dir, `${record.ts.slice(0, 10)}.jsonl`);
+    appendTraceLine(filePath, line);
   } catch {
     // Intentionally swallowed: trace store must never disrupt the caller's flow.
   }
@@ -143,94 +258,291 @@ export function recordJudgeTrace(trace: Omit<JudgeTrace, 'ts'> & { ts?: string }
  *
  * Malformed JSONL lines are silently skipped. Never throws.
  */
-export function readJudgeTraces(filter?: {
-  proposalId?: string;
-  verdict?: JudgeTrace['verdict'];
-  sinceMs?: number;
-  limit?: number;
-  outcomeOnly?: boolean;
-}): JudgeTrace[] {
+function bounded(value: number | undefined, fallback: number, hardMax: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.max(1, Math.min(hardMax, Math.floor(value)))
+    : fallback;
+}
+
+function emptyTraceRead(
+  sourceState: JudgeTraceSourceQuality['sourceState'],
+  overrides: Partial<JudgeTracesReadResult> = {},
+): JudgeTracesReadResult {
+  return {
+    traces: [],
+    sourceState,
+    sourcePresent: sourceState !== 'missing',
+    complete: sourceState !== 'degraded',
+    stopReasons: [],
+    filesRead: 0,
+    bytesRead: 0,
+    rowsScanned: 0,
+    invalidRows: 0,
+    unreadableFiles: 0,
+    ...overrides,
+  };
+}
+
+function pushStopReason(reasons: JudgeTraceReadStopReason[], reason: JudgeTraceReadStopReason): void {
+  if (!reasons.includes(reason)) reasons.push(reason);
+}
+
+function sameFile(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof fstatSync>): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function unsafeFile(stat: ReturnType<typeof fstatSync>): boolean {
+  return Number(stat.nlink) !== 1 ||
+    (typeof process.getuid === 'function' && Number(stat.uid) !== process.getuid()) ||
+    (Number(stat.mode) & 0o022) !== 0;
+}
+
+function readTraceFile(
+  path: string,
+  maxBytes: number,
+): { ok: true; text: string; bytesRead: number } | { ok: false; reason: 'byte-limit' | 'io-error' } {
+  let fd: number | undefined;
   try {
+    const pathBefore = lstatSync(path);
+    if (pathBefore.isSymbolicLink() || !pathBefore.isFile() || unsafeFile(pathBefore)) {
+      return { ok: false, reason: 'io-error' };
+    }
+    if (Number(pathBefore.size) > maxBytes) return { ok: false, reason: 'byte-limit' };
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const before = fstatSync(fd);
+    if (!before.isFile() || unsafeFile(before) || !sameFile(pathBefore, before)) {
+      return { ok: false, reason: 'io-error' };
+    }
+    const size = Number(before.size);
+    if (size > maxBytes) return { ok: false, reason: 'byte-limit' };
+    const buffer = Buffer.alloc(size);
+    const bytesRead = size > 0 ? readSync(fd, buffer, 0, size, 0) : 0;
+    const after = fstatSync(fd);
+    const pathAfter = lstatSync(path);
+    if (
+      pathAfter.isSymbolicLink() ||
+      !pathAfter.isFile() ||
+      unsafeFile(after) ||
+      !sameFile(before, after) ||
+      !sameFile(after, pathAfter) ||
+      Number(after.size) !== size ||
+      bytesRead !== size
+    ) return { ok: false, reason: 'io-error' };
+    return { ok: true, text: buffer.toString('utf8'), bytesRead };
+  } catch {
+    return { ok: false, reason: 'io-error' };
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* best-effort trace read */ }
+    }
+  }
+}
+
+function validScores(value: unknown): value is JudgeTrace['scores'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const scores = value as Record<string, unknown>;
+  return ['value', 'correctness', 'scope', 'alignment'].every((key) =>
+    typeof scores[key] === 'number' &&
+    Number.isFinite(scores[key]) &&
+    Number(scores[key]) >= 1 &&
+    Number(scores[key]) <= 5);
+}
+
+function parseTraceRow(value: unknown, fileDate: string): JudgeTrace | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const obj = value as Record<string, unknown>;
+  const patch = typeof obj['_patchForTraceId'] === 'string' || typeof obj['_patchFor'] === 'string';
+  if (
+    typeof obj['proposalId'] !== 'string' ||
+    typeof obj['judgeEngine'] !== 'string' ||
+    typeof obj['verdict'] !== 'string' ||
+    !VERDICTS.has(obj['verdict'] as JudgeTrace['verdict']) ||
+    typeof obj['ts'] !== 'string' ||
+    !Number.isFinite(Date.parse(obj['ts'])) ||
+    typeof obj['fullReasoning'] !== 'string' ||
+    typeof obj['promptContext'] !== 'string' ||
+    (!patch && !validScores(obj['scores']))
+  ) return null;
+  if (obj['outcome'] !== undefined && !OUTCOMES.has(obj['outcome'] as JudgeOutcome)) return null;
+  if (obj['outcomeAt'] !== undefined &&
+    (typeof obj['outcomeAt'] !== 'string' || !Number.isFinite(Date.parse(obj['outcomeAt'])))) return null;
+  const physicalDate = patch && typeof obj['outcomeAt'] === 'string'
+    ? obj['outcomeAt'].slice(0, 10)
+    : obj['ts'].slice(0, 10);
+  if (physicalDate !== fileDate) return null;
+  return scrubTrace(obj as unknown as JudgeTrace);
+}
+
+function traceKey(trace: JudgeTrace): string {
+  return trace.traceId ?? `${trace.proposalId}|${trace.ts}|${trace.judgeEngine}`;
+}
+
+export function readJudgeTracesDetailed(filter: ReadJudgeTracesOptions = {}): JudgeTracesReadResult {
+  try {
+    const maxFiles = bounded(filter.maxFiles, DEFAULT_MAX_FILES, HARD_MAX_FILES);
+    const maxBytes = bounded(filter.maxBytes, DEFAULT_MAX_BYTES, HARD_MAX_BYTES);
+    const maxRows = bounded(filter.maxRows, DEFAULT_MAX_ROWS, HARD_MAX_ROWS);
     const dir = judgeTracesDir();
-    if (!existsSync(dir)) return [];
+    if (!existsSync(dir)) return emptyTraceRead('missing');
+    const dirBefore = lstatSync(dir);
+    if (dirBefore.isSymbolicLink() || !dirBefore.isDirectory() ||
+      (typeof process.getuid === 'function' && Number(dirBefore.uid) !== process.getuid()) ||
+      (Number(dirBefore.mode) & 0o022) !== 0) {
+      return emptyTraceRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+    }
 
     let files: string[];
     try {
-      files = readdirSync(dir)
-        .filter((f) => f.endsWith('.jsonl'))
-        .sort()
-        .reverse(); // newest date first
-    } catch {
-      return [];
-    }
-
-    const traces: JudgeTrace[] = [];
-    const cap =
-      filter?.limit !== undefined && filter.limit > 0 ? filter.limit : Infinity;
-    const sinceMs = filter?.sinceMs;
-    const pid = filter?.proposalId;
-    const verd = filter?.verdict;
-    const outcomeOnly = filter?.outcomeOnly ?? false;
-
-    for (const file of files) {
-      if (traces.length >= cap) break;
-
-      const filePath = join(dir, file);
-      let raw: string;
+      const handle = opendirSync(dir);
+      const selected: string[] = [];
+      let seen = 0;
+      let invalidPartition = false;
       try {
-        raw = readFileSync(filePath, 'utf8');
-      } catch {
-        continue;
-      }
-
-      const lines = raw
-        .split('\n')
-        .filter((l) => l.trim() !== '')
-        .reverse(); // newest lines first within file
-
-      for (const line of lines) {
-        if (traces.length >= cap) break;
-
-        try {
-          const parsed: unknown = JSON.parse(line);
-          if (
-            parsed !== null &&
-            typeof parsed === 'object' &&
-            !Array.isArray(parsed)
-          ) {
-            const obj = parsed as Record<string, unknown>;
-            // Validate required fields
-            if (
-              typeof obj['proposalId'] === 'string' &&
-              typeof obj['judgeEngine'] === 'string' &&
-              typeof obj['verdict'] === 'string' &&
-              typeof obj['ts'] === 'string'
-            ) {
-              // Window filter
-              if (sinceMs !== undefined) {
-                const entryMs = Date.parse(obj['ts'] as string);
-                if (!isNaN(entryMs) && entryMs < sinceMs) continue;
-              }
-              // Proposal filter
-              if (pid !== undefined && obj['proposalId'] !== pid) continue;
-              // Verdict filter
-              if (verd !== undefined && obj['verdict'] !== verd) continue;
-              // Outcome-only filter
-              if (outcomeOnly && !obj['outcome']) continue;
-
-              traces.push(obj as unknown as JudgeTrace);
+        let entry = handle.readSync();
+        while (entry !== null) {
+          seen++;
+          if (seen > MAX_DIRECTORY_ENTRIES) {
+            return emptyTraceRead('degraded', { sourcePresent: true, complete: false, stopReasons: ['file-limit'] });
+          }
+          if (entry.name.endsWith('.jsonl')) {
+            const match = DATE_FILE_RE.exec(entry.name);
+            if (!match) invalidPartition = true;
+            else {
+              selected.push(entry.name);
             }
           }
-        } catch {
-          // Malformed line — skip silently.
+          entry = handle.readSync();
         }
+      } finally {
+        handle.closeSync();
       }
+      if (invalidPartition) {
+        return emptyTraceRead('degraded', {
+          sourcePresent: true,
+          complete: false,
+          stopReasons: ['io-error'],
+          unreadableFiles: 1,
+        });
+      }
+      files = selected.sort().reverse();
+    } catch {
+      return emptyTraceRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
     }
 
-    return traces;
+    const result = emptyTraceRead('healthy');
+    result.sourcePresent = true;
+    const physical: JudgeTrace[] = [];
+
+    for (const file of files) {
+      if (result.filesRead >= maxFiles) {
+        pushStopReason(result.stopReasons, 'file-limit');
+        result.complete = false;
+        break;
+      }
+      const remaining = maxBytes - result.bytesRead;
+      if (remaining <= 0) {
+        pushStopReason(result.stopReasons, 'byte-limit');
+        result.complete = false;
+        break;
+      }
+      const loaded = readTraceFile(join(dir, file), remaining);
+      result.filesRead++;
+      if (!loaded.ok) {
+        if (loaded.reason === 'io-error') result.unreadableFiles++;
+        pushStopReason(result.stopReasons, loaded.reason);
+        result.complete = false;
+        break;
+      }
+      result.bytesRead += loaded.bytesRead;
+      const fileDate = DATE_FILE_RE.exec(file)?.[1] ?? '';
+      for (const line of loaded.text.split('\n').reverse()) {
+        if (!line.trim()) continue;
+        if (result.rowsScanned >= maxRows) {
+          pushStopReason(result.stopReasons, 'row-limit');
+          result.complete = false;
+          break;
+        }
+        result.rowsScanned++;
+        if (Buffer.byteLength(line, 'utf8') > MAX_ROW_BYTES) {
+          result.invalidRows++;
+          continue;
+        }
+        try {
+          const parsed: unknown = JSON.parse(line);
+          const trace = parseTraceRow(parsed, fileDate);
+          if (!trace) result.invalidRows++;
+          else physical.push(trace);
+        } catch {
+          result.invalidRows++;
+        }
+      }
+      if (!result.complete) break;
+    }
+    try {
+      const dirAfter = lstatSync(dir);
+      if (!sameFile(dirBefore, dirAfter) || dirBefore.mtimeMs !== dirAfter.mtimeMs || dirBefore.ctimeMs !== dirAfter.ctimeMs) {
+        pushStopReason(result.stopReasons, 'io-error');
+        result.complete = false;
+        result.unreadableFiles++;
+      }
+    } catch {
+      pushStopReason(result.stopReasons, 'io-error');
+      result.complete = false;
+      result.unreadableFiles++;
+    }
+
+    const patches = new Map<string, Pick<JudgeTrace, 'outcome' | 'outcomeAt'>>();
+    for (const trace of physical) {
+      const patchTarget = trace._patchForTraceId ?? (trace._patchFor ? traceKey(trace) : undefined);
+      if (patchTarget) {
+        if (!patches.has(patchTarget)) patches.set(patchTarget, { outcome: trace.outcome, outcomeAt: trace.outcomeAt });
+        continue;
+      }
+      const patch = patches.get(traceKey(trace));
+      const materialized: JudgeTrace = { ...trace, ...(patch ?? {}) };
+      delete materialized._patchFor;
+      delete materialized._patchForTraceId;
+      const eventMs = Date.parse(materialized.outcomeAt ?? materialized.ts);
+      if (filter.sinceMs !== undefined && eventMs < filter.sinceMs) continue;
+      if (filter.proposalId !== undefined && materialized.proposalId !== filter.proposalId) continue;
+      if (filter.verdict !== undefined && materialized.verdict !== filter.verdict) continue;
+      if (filter.outcomeOnly === true && !materialized.outcome) continue;
+      result.traces.push(materialized);
+    }
+    result.traces.sort((a, b) => Date.parse(b.outcomeAt ?? b.ts) - Date.parse(a.outcomeAt ?? a.ts));
+    if (typeof filter.limit === 'number' && Number.isFinite(filter.limit) && filter.limit > 0) {
+      result.traces = result.traces.slice(0, Math.floor(filter.limit));
+    }
+    if (result.invalidRows > 0 || result.unreadableFiles > 0 || !result.complete) {
+      result.sourceState = 'degraded';
+      result.complete = false;
+    }
+    return result;
   } catch {
-    return [];
+    return emptyTraceRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
   }
+}
+
+export function readJudgeTraces(filter: ReadJudgeTracesOptions = {}): JudgeTrace[] {
+  const result = readJudgeTracesDetailed(filter);
+  const traces = filter.requireComplete === true && (!result.complete || result.sourceState === 'degraded')
+    ? []
+    : result.traces;
+  Object.defineProperty(traces, 'sourceQuality', {
+    value: {
+      sourceState: result.sourceState,
+      sourcePresent: result.sourcePresent,
+      complete: result.complete,
+      stopReasons: result.stopReasons,
+      filesRead: result.filesRead,
+      bytesRead: result.bytesRead,
+      rowsScanned: result.rowsScanned,
+      invalidRows: result.invalidRows,
+      unreadableFiles: result.unreadableFiles,
+    } satisfies JudgeTraceSourceQuality,
+    enumerable: false,
+  });
+  return traces;
 }
 
 // ---------------------------------------------------------------------------
@@ -240,120 +552,58 @@ export function readJudgeTraces(filter?: {
 /**
  * Attach a real-world outcome to a previously recorded trace.
  *
- * Strategy:
- *   1. Scan all JSONL files newest-first for a trace with `proposalId`.
- *   2. When found in today's file: rewrite that file with the outcome patched
- *      in-place (still append-only semantics for other tools reading the file,
- *      but we need to mutate the one line — acceptable for today's mutable file).
- *   3. When found in a prior day's file (immutable by convention): append a
- *      synthetic "outcome patch" record to today's file instead, so the
- *      outcome is queryable without rewriting immutable history.
- *   4. When not found: no-op (trace may not have been recorded — rare).
+ * Scans a complete bounded source, selects the newest judgment by trace time,
+ * and appends an idempotent outcome patch targeting its stable trace id.
  *
  * Never throws.
  */
-export function linkOutcome(
+export type LinkJudgeOutcomeResult =
+  | { status: 'linked' | 'already-linked'; traceId?: string }
+  | { status: 'not-found' | 'degraded' | 'write-failed' };
+
+export function linkOutcomeResult(
   proposalId: string,
   outcome: JudgeOutcome,
-): void {
+): LinkJudgeOutcomeResult {
   try {
     const dir = judgeTracesDir();
-    if (!existsSync(dir)) return;
-
-    const today = todayDateString();
-    let files: string[];
-    try {
-      files = readdirSync(dir)
-        .filter((f) => f.endsWith('.jsonl'))
-        .sort()
-        .reverse(); // newest first
-    } catch {
-      return;
+    if (!existsSync(dir)) return { status: 'not-found' };
+    const read = readJudgeTracesDetailed({ proposalId });
+    if (read.sourceState === 'degraded' || !read.complete) return { status: 'degraded' };
+    const target = [...read.traces].sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts))[0];
+    if (!target) return { status: 'not-found' };
+    if (target.outcome === outcome) {
+      return { status: 'already-linked', ...(target.traceId ? { traceId: target.traceId } : {}) };
     }
-
     const outcomeAt = new Date().toISOString();
-
-    for (const file of files) {
-      const filePath = join(dir, file);
-      let raw: string;
-      try {
-        raw = readFileSync(filePath, 'utf8');
-      } catch {
-        continue;
-      }
-
-      const lines = raw.split('\n');
-      let foundIdx = -1;
-
-      // Find the LAST occurrence of this proposalId (most recent trace).
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const line = lines[i]!.trim();
-        if (!line) continue;
-        try {
-          const obj = JSON.parse(line) as Record<string, unknown>;
-          if (obj['proposalId'] === proposalId && typeof obj['verdict'] === 'string') {
-            foundIdx = i;
-            break;
-          }
-        } catch {
-          // skip
-        }
-      }
-
-      if (foundIdx === -1) continue; // not in this file
-
-      const fileDate = file.replace('.jsonl', '');
-
-      if (fileDate === today) {
-        // Rewrite today's file with the outcome patched in-place.
-        try {
-          const updatedLines = lines.map((line, i) => {
-            if (i !== foundIdx || !line.trim()) return line;
-            try {
-              const obj = JSON.parse(line) as Record<string, unknown>;
-              obj['outcome'] = outcome;
-              obj['outcomeAt'] = outcomeAt;
-              return JSON.stringify(obj);
-            } catch {
-              return line;
-            }
-          });
-          writeFileSync(filePath, updatedLines.join('\n'), 'utf8');
-        } catch {
-          // fall through to synthetic append
-        }
-      } else {
-        // Prior day — immutable. Append a patch record to today's file.
-        try {
-          const todayPath = join(dir, `${today}.jsonl`);
-          // Read the original trace to include its key fields in the patch.
-          const origLine = lines[foundIdx]!.trim();
-          let origTrace: Record<string, unknown> = {};
-          try { origTrace = JSON.parse(origLine) as Record<string, unknown>; } catch { /* ok */ }
-
-          const patch: Record<string, unknown> = {
-            proposalId,
-            judgeEngine: origTrace['judgeEngine'] ?? 'unknown',
-            verdict: origTrace['verdict'] ?? 'review',
-            scores: origTrace['scores'] ?? {},
-            fullReasoning: '',       // omit body in patch record
-            promptContext: '',
-            ts: origTrace['ts'] ?? outcomeAt,
-            outcome,
-            outcomeAt,
-            _patchFor: file,         // provenance: which file holds the original
-          };
-          appendFileSync(todayPath, JSON.stringify(patch) + '\n', 'utf8');
-        } catch {
-          // swallow
-        }
-      }
-
-      return; // done — only patch the most recent trace for this proposalId
-    }
+    const patch: JudgeTrace = {
+      proposalId,
+      judgeEngine: target.judgeEngine,
+      verdict: target.verdict,
+      scores: target.scores,
+      fullReasoning: '',
+      promptContext: '',
+      ts: target.ts,
+      outcome,
+      outcomeAt,
+      ...(target.traceId
+        ? { _patchForTraceId: target.traceId }
+        : { _patchFor: `${target.proposalId}|${target.ts}|${target.judgeEngine}` }),
+    };
+    const ok = appendTraceLine(
+      join(dir, `${outcomeAt.slice(0, 10)}.jsonl`),
+      JSON.stringify(patch) + '\n',
+    );
+    return ok
+      ? { status: 'linked', ...(target.traceId ? { traceId: target.traceId } : {}) }
+      : { status: 'write-failed' };
   } catch {
-    // Never throws.
+    return { status: 'degraded' };
   }
+}
+
+export function linkOutcome(proposalId: string, outcome: JudgeOutcome): void {
+  void linkOutcomeResult(proposalId, outcome);
 }
 
 // ---------------------------------------------------------------------------
@@ -374,7 +624,11 @@ export function outcomeStats(): {
 } {
   const zero = () => ({ total: 0, withOutcome: 0 });
   try {
-    const traces = readJudgeTraces();
+    const read = readJudgeTracesDetailed();
+    if (read.sourceState === 'degraded' || !read.complete) {
+      return { total: 0, withOutcome: 0, outcomeRate: 0, byVerdict: {}, byOutcome: {} };
+    }
+    const traces = read.traces;
     const byVerdict: Record<string, { total: number; withOutcome: number }> = {};
     const byOutcome: Record<string, number> = {};
 

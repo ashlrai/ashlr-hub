@@ -13,9 +13,8 @@
  *
  * The merge commit is found via the auto-merge commit-message convention
  * ("ashlr: auto-merge proposal <id>", merge.ts M47). READ-ONLY on repos;
- * ledger writes go through linkOutcome (serial maintenance phase only — the
- * in-place JSONL rewrite must never run inside the concurrent dispatch
- * closure). Internal throttle (default 6h) keeps the git cost negligible.
+ * ledger writes go through append-only linkOutcomeResult after a complete
+ * source read. Internal throttle (default 6h) keeps the git cost negligible.
  * Never throws.
  */
 
@@ -25,7 +24,7 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 
 import type { AshlrConfig, SkillCard } from '../types.js';
-import { readJudgeTraces, linkOutcome } from './judge-trace.js';
+import { readJudgeTraces, linkOutcomeResult } from './judge-trace.js';
 import { attestSkillCard, verifyAttestedSkillCard } from './skill-attestation.js';
 import { readSkillCards, recordSkillCard, sanitizeSkillCard } from './skill-records.js';
 
@@ -181,7 +180,14 @@ export async function scanRealWorldOutcomes(
     // re-detected the same revert on every scan, appending duplicate patch
     // records that multiplied the reject signal. Skip any proposal that
     // ALREADY has a reverted/followed-up record anywhere in the stream.
-    const allTraces = readJudgeTraces({ sinceMs });
+    const allTraces = readJudgeTraces({ sinceMs, requireComplete: true });
+    const traceQuality = (allTraces as typeof allTraces & {
+      sourceQuality?: { sourceState?: string; complete?: boolean };
+    }).sourceQuality;
+    if (traceQuality !== undefined && (traceQuality.sourceState === 'degraded' || traceQuality.complete !== true)) {
+      scan.skipped++;
+      return scan;
+    }
     // M338 (review fix): only 'reverted' is TERMINAL. A 'followed-up' link
     // must not block a later real revert — the proposal stays scannable for
     // the revert upgrade, while the follow-up re-link is suppressed below.
@@ -242,7 +248,11 @@ export async function scanRealWorldOutcomes(
           '--format=%H', '-n', '1',
         ]).trim();
         if (revertSha) {
-          linkOutcome(trace.proposalId, 'reverted');
+          const linked = linkOutcomeResult(trace.proposalId, 'reverted');
+          if (linked.status !== 'linked' && linked.status !== 'already-linked') {
+            scan.skipped++;
+            continue;
+          }
           invalidateVerifiedSkills(trace.proposalId, 'revoked', now);
           scan.reverts++;
           continue;
@@ -286,7 +296,11 @@ export async function scanRealWorldOutcomes(
           const touched = filesOf(repo, sha);
           const overlaps = [...touched].some((f) => mergedFiles.has(f));
           if (overlaps) {
-            linkOutcome(trace.proposalId, 'followed-up');
+            const linked = linkOutcomeResult(trace.proposalId, 'followed-up');
+            if (linked.status !== 'linked' && linked.status !== 'already-linked') {
+              scan.skipped++;
+              break;
+            }
             invalidateVerifiedSkills(trace.proposalId, 'deprecated', now);
             scan.followUps++;
             break;

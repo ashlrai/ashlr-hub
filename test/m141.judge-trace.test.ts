@@ -28,16 +28,20 @@ import type { Proposal } from '../src/core/types.js';
 // ---------------------------------------------------------------------------
 
 const origHome = process.env.HOME;
+const origAshlrHome = process.env.ASHLR_HOME;
 let tmpHome: string;
 
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m141-home-'));
   process.env.HOME = tmpHome;
+  process.env.ASHLR_HOME = path.join(tmpHome, '.ashlr');
 });
 
 afterEach(() => {
   fs.rmSync(tmpHome, { recursive: true, force: true });
   process.env.HOME = origHome;
+  if (origAshlrHome === undefined) delete process.env.ASHLR_HOME;
+  else process.env.ASHLR_HOME = origAshlrHome;
   vi.restoreAllMocks();
 });
 
@@ -119,6 +123,90 @@ describe('m141 judge-trace — round-trip', () => {
     expect(traces[0]!.promptContext).toContain('test proposal');
     expect(typeof traces[0]!.ts).toBe('string');
     expect(traces[0]!.outcome).toBeUndefined();
+  });
+
+  it('distinguishes missing, healthy, and degraded bounded sources', async () => {
+    const { judgeTracesDir, readJudgeTraces, readJudgeTracesDetailed } = await import('../src/core/fleet/judge-trace.js');
+
+    expect(readJudgeTracesDetailed()).toMatchObject({
+      sourceState: 'missing',
+      sourcePresent: false,
+      complete: true,
+    });
+
+    const dir = judgeTracesDir();
+    fs.mkdirSync(dir, { recursive: true });
+    expect(readJudgeTracesDetailed()).toMatchObject({
+      sourceState: 'healthy', sourcePresent: true, complete: true,
+    });
+
+    const day = new Date().toISOString().slice(0, 10);
+    fs.writeFileSync(
+      path.join(dir, `${day}.jsonl`),
+      [
+        JSON.stringify({
+          traceId: 'jt-valid', proposalId: 'p-valid', judgeEngine: 'judge', verdict: 'ship',
+          scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+          fullReasoning: 'ok', promptContext: 'ctx', ts: `${day}T01:00:00.000Z`,
+        }),
+        '{"proposalId":',
+      ].join('\n') + '\n',
+      'utf8',
+    );
+    const degraded = readJudgeTracesDetailed();
+    expect(degraded).toMatchObject({ sourceState: 'degraded', complete: false, invalidRows: 1 });
+    expect(degraded.traces).toHaveLength(1);
+    expect(readJudgeTraces({ requireComplete: true })).toEqual([]);
+  });
+
+  it('fails closed on byte bounds, symlinks, and hardlinks', async () => {
+    const { judgeTracesDir, readJudgeTracesDetailed } = await import('../src/core/fleet/judge-trace.js');
+    const dir = judgeTracesDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const day = new Date().toISOString().slice(0, 10);
+    const file = path.join(dir, `${day}.jsonl`);
+    fs.writeFileSync(file, `${'x'.repeat(512)}\n`, 'utf8');
+
+    expect(readJudgeTracesDetailed({ maxBytes: 64 })).toMatchObject({
+      sourceState: 'degraded', complete: false, stopReasons: ['byte-limit'],
+    });
+
+    const outside = path.join(tmpHome, 'outside-trace.jsonl');
+    fs.writeFileSync(outside, '{}\n', 'utf8');
+    fs.rmSync(file);
+    fs.symlinkSync(outside, file);
+    expect(readJudgeTracesDetailed()).toMatchObject({
+      sourceState: 'degraded', complete: false, stopReasons: ['io-error'], unreadableFiles: 1,
+    });
+
+    fs.rmSync(file);
+    fs.linkSync(outside, file);
+    expect(readJudgeTracesDetailed()).toMatchObject({
+      sourceState: 'degraded', complete: false, stopReasons: ['io-error'], unreadableFiles: 1,
+    });
+  });
+
+  it('rejects invalid timestamp partitions without escaping the trace directory', async () => {
+    const { recordJudgeTrace, readJudgeTraces } = await import('../src/core/fleet/judge-trace.js');
+    recordJudgeTrace({
+      ts: '../../escape',
+      proposalId: 'p-escape',
+      judgeEngine: 'judge',
+      verdict: 'review',
+      scores: { value: 2, correctness: 2, scope: 2, alignment: 2 },
+      fullReasoning: 'none',
+      promptContext: 'none',
+    });
+    expect(readJudgeTraces({ proposalId: 'p-escape' })).toEqual([]);
+    expect(fs.existsSync(path.join(tmpHome, 'escape.jsonl'))).toBe(false);
+  });
+
+  it('falls back to the home store for empty or relative ASHLR_HOME', async () => {
+    const { judgeTracesDir } = await import('../src/core/fleet/judge-trace.js');
+    process.env.ASHLR_HOME = '';
+    expect(judgeTracesDir()).toBe(path.join(tmpHome, '.ashlr', 'judge-traces'));
+    process.env.ASHLR_HOME = 'relative-store';
+    expect(judgeTracesDir()).toBe(path.join(tmpHome, '.ashlr', 'judge-traces'));
   });
 
   it('multiple traces accumulate correctly', async () => {
@@ -372,10 +460,78 @@ describe('m141 judge-trace — linkOutcome (today file)', () => {
     expect(t2[0]!.outcome).toBeUndefined();
   });
 
+  it('links append-only, materializes one trace, and applies the latest outcome', async () => {
+    const { judgeTracesDir, recordJudgeTrace, readJudgeTraces, linkOutcomeResult } =
+      await import('../src/core/fleet/judge-trace.js');
+    const id = pid();
+    recordJudgeTrace({
+      proposalId: id,
+      judgeEngine: 'judge',
+      verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: 'ship',
+      promptContext: 'ctx',
+    });
+    const day = new Date().toISOString().slice(0, 10);
+    const file = path.join(judgeTracesDir(), `${day}.jsonl`);
+    const original = fs.readFileSync(file, 'utf8');
+
+    expect(linkOutcomeResult(id, 'followed-up').status).toBe('linked');
+    expect(fs.readFileSync(file, 'utf8').startsWith(original)).toBe(true);
+    expect(linkOutcomeResult(id, 'reverted').status).toBe('linked');
+
+    const traces = readJudgeTraces({ proposalId: id });
+    expect(traces).toHaveLength(1);
+    expect(traces[0]).toMatchObject({ outcome: 'reverted' });
+    expect(readJudgeTraces({ proposalId: id, outcomeOnly: true })).toHaveLength(1);
+  });
+
+  it('targets the newest judgment rather than an older trace with a newer outcome', async () => {
+    const { recordJudgeTrace, readJudgeTraces, linkOutcomeResult } = await import('../src/core/fleet/judge-trace.js');
+    const id = pid();
+    const day = new Date().toISOString().slice(0, 10);
+    recordJudgeTrace({
+      traceId: 'jt-older', proposalId: id, judgeEngine: 'judge', verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: 'old', promptContext: 'ctx', ts: `${day}T01:00:00.000Z`,
+      outcome: 'merged', outcomeAt: `${day}T23:00:00.000Z`,
+    });
+    recordJudgeTrace({
+      traceId: 'jt-newer', proposalId: id, judgeEngine: 'judge', verdict: 'review',
+      scores: { value: 3, correctness: 3, scope: 3, alignment: 3 },
+      fullReasoning: 'new', promptContext: 'ctx', ts: `${day}T02:00:00.000Z`,
+    });
+
+    expect(linkOutcomeResult(id, 'reverted')).toMatchObject({ status: 'linked', traceId: 'jt-newer' });
+    const traces = readJudgeTraces({ proposalId: id });
+    expect(traces.find((trace) => trace.traceId === 'jt-newer')?.outcome).toBe('reverted');
+    expect(traces.find((trace) => trace.traceId === 'jt-older')?.outcome).toBe('merged');
+  });
+
   it('linkOutcome is a no-op when proposalId not found', async () => {
     const { linkOutcome } = await import('../src/core/fleet/judge-trace.js');
     // Should not throw
     expect(() => linkOutcome('nonexistent-proposal', 'merged')).not.toThrow();
+  });
+
+  it('does not append an outcome label when the source is degraded', async () => {
+    const { judgeTracesDir, recordJudgeTrace, linkOutcomeResult } = await import('../src/core/fleet/judge-trace.js');
+    const id = pid();
+    recordJudgeTrace({
+      proposalId: id,
+      judgeEngine: 'judge',
+      verdict: 'ship',
+      scores: { value: 5, correctness: 5, scope: 1, alignment: 5 },
+      fullReasoning: 'ship',
+      promptContext: 'ctx',
+    });
+    const day = new Date().toISOString().slice(0, 10);
+    const file = path.join(judgeTracesDir(), `${day}.jsonl`);
+    fs.appendFileSync(file, '{"torn":', 'utf8');
+    const before = fs.readFileSync(file, 'utf8');
+
+    expect(linkOutcomeResult(id, 'merged')).toEqual({ status: 'degraded' });
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
   });
 
   it('linkOutcome never throws', async () => {
@@ -739,5 +895,13 @@ describe('m141 judge-trace — linkOutcome prior-day fallback', () => {
     const traces = readJudgeTraces({ proposalId: id, outcomeOnly: true });
     expect(traces.length).toBeGreaterThanOrEqual(1);
     expect(traces[0]!.outcome).toBe('merged');
+    const recent = readJudgeTraces({
+      proposalId: id,
+      outcomeOnly: true,
+      sinceMs: Date.now() - 60 * 60 * 1000,
+      requireComplete: true,
+    });
+    expect(recent).toHaveLength(1);
+    expect(recent[0]!.outcome).toBe('merged');
   });
 });

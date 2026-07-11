@@ -387,7 +387,7 @@ export async function runDegradationHarness(
       traces = opts._readTracesFn({ outcomeOnly: true, limit: maxSamples * 3 });
     } else {
       const { readJudgeTraces } = await import('./judge-trace.js');
-      traces = readJudgeTraces({ outcomeOnly: true, limit: maxSamples * 3 });
+      traces = readJudgeTraces({ outcomeOnly: true, limit: maxSamples * 3, requireComplete: true });
     }
 
     const mergedTraces = traces
@@ -590,8 +590,8 @@ export async function judgeHealth(
       outcomeTraces = opts._readTracesFn({ outcomeOnly: true });
     } else {
       const { readJudgeTraces } = await import('./judge-trace.js');
-      allTraces = readJudgeTraces({});
-      outcomeTraces = readJudgeTraces({ outcomeOnly: true });
+      allTraces = readJudgeTraces({ requireComplete: true });
+      outcomeTraces = readJudgeTraces({ outcomeOnly: true, requireComplete: true });
     }
 
     if (allTraces.length < MIN_TRACES) {

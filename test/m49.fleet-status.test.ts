@@ -414,6 +414,11 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.proposals.frontierPending).toBe(0);
     expect(s.proposals.applied).toBe(0);
     expect(s.merges.recent).toBe(0);
+    expect(s.judgeTraceSource).toMatchObject({
+      sourceState: 'missing',
+      sourcePresent: false,
+      complete: true,
+    });
     expect(s.autonomyEffectiveness).toMatchObject({
       phase: 'control-blocked',
       canAutoMergeNow: false,

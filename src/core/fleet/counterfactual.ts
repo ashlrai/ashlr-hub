@@ -354,12 +354,17 @@ export async function runCounterfactualReplay(
 
     // --- 1. Read outcome-linked traces (over-fetch a little, then cap) ------
     let readTraces = opts?._readTracesFn;
+    const injectedTraceReader = readTraces !== undefined;
     if (!readTraces) {
       const { readJudgeTraces } = await import('./judge-trace.js');
       readTraces = readJudgeTraces;
     }
     // Over-fetch (cap * 3) so we still hit `cap` replays after diff-less skips.
-    const traces = readTraces({ outcomeOnly: true, limit: cap * 3 });
+    const traces = readTraces({
+      outcomeOnly: true,
+      limit: cap * 3,
+      ...(!injectedTraceReader ? { requireComplete: true } : {}),
+    });
 
     const withOutcome = traces.filter(
       (t): t is JudgeTrace & { outcome: JudgeOutcome } =>

@@ -336,6 +336,25 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  const judgeTraceSource = s.judgeTraceSource;
+  lines.push('Judge learning source:');
+  if (!judgeTraceSource) {
+    lines.push('  unknown (legacy snapshot)');
+  } else {
+    lines.push(
+      `  source:    ${judgeTraceSource.sourceState}${judgeTraceSource.complete ? '' : ' (partial)'}; ` +
+        `files ${judgeTraceSource.filesRead}, bytes ${judgeTraceSource.bytesRead}, rows ${judgeTraceSource.rowsScanned}, ` +
+        `invalid ${judgeTraceSource.invalidRows}, unreadable ${judgeTraceSource.unreadableFiles}`,
+    );
+    if (judgeTraceSource.stopReasons.length > 0) {
+      lines.push(`  stopped:   ${judgeTraceSource.stopReasons.join(', ')}`);
+    }
+    lines.push(
+      `  learning:  ${judgeTraceSource.sourceState !== 'degraded' && judgeTraceSource.complete ? 'eligible' : 'fail closed'}`,
+    );
+  }
+  lines.push('');
+
   // Durable dispatch-production yield
   const dispatchProduction = s.dispatchProduction;
   lines.push('Dispatch yield:');
