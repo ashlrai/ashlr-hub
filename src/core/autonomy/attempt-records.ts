@@ -12,7 +12,10 @@ import { createHash } from 'node:crypto';
 import type { AgentActionEvent } from '../fleet/agent-action-ledger.js';
 import { readAgentActions } from '../fleet/agent-action-ledger.js';
 import type { DispatchProductionEvent } from '../fleet/dispatch-production-ledger.js';
-import { readDispatchProductionEvents } from '../fleet/dispatch-production-ledger.js';
+import {
+  readDispatchProductionEvents,
+  readDispatchProductionEventsDetailed,
+} from '../fleet/dispatch-production-ledger.js';
 import type { OutcomeRecord } from './outcome-records.js';
 import { listOutcomeRecords } from './outcome-records.js';
 import type { EngineId, EngineTier, Proposal, RunActionCounts, WorkItem } from '../types.js';
@@ -590,9 +593,12 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
   const deps = opts?.deps ?? {};
   const useDefaultReaders = opts?.deps === undefined;
 
-  const dispatches = safeArray(() =>
-    (deps.readDispatchProductionEvents ?? readDispatchProductionEvents)({ sinceMs, limit, maxFiles: 3 }),
-  );
+  const dispatches = deps.readDispatchProductionEvents
+    ? safeArray(() => deps.readDispatchProductionEvents!({ sinceMs, limit, maxFiles: 3 }))
+    : safeArray(() => {
+        const read = readDispatchProductionEventsDetailed({ sinceMs, limit, maxFiles: 3 });
+        return read.sourceState === 'healthy' && read.complete ? read.events : [];
+      });
   const actions = safeArray(() =>
     (deps.readAgentActions ?? readAgentActions)({ sinceMs, limit: Math.max(limit * 4, 500), maxFiles: 3 }),
   );

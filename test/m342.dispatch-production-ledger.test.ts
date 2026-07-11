@@ -3,13 +3,15 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   dispatchProductionDir,
   readDispatchProductionEvents,
+  readDispatchProductionEventsDetailed,
   readDispatchProductionYield,
+  readDispatchProductionYieldDetailed,
   recordDispatchProduction,
   summarizeDispatchProductionYield,
   type DispatchProductionEvent,
@@ -165,6 +167,12 @@ describe('M342 dispatch production ledger', () => {
 
     expect(readDispatchProductionEvents({ limit: 2 }).map((event) => event.itemId)).toEqual(['c', 'b']);
     expect(readDispatchProductionEvents({ sinceMs: Date.parse('2026-07-08T00:01:30.000Z') }).map((event) => event.itemId)).toEqual(['c']);
+    expect(readDispatchProductionEventsDetailed({ limit: 2 })).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      stopReasons: ['event-limit'],
+      events: [{ itemId: 'c' }, { itemId: 'b' }],
+    });
   });
 
   it('normalizes invalid timestamps before writing', () => {
@@ -355,6 +363,203 @@ describe('M342 dispatch production ledger', () => {
     expect(() => readDispatchProductionEvents()).not.toThrow();
     expect(readDispatchProductionEvents()).toEqual([]);
     expect(existsSync(process.env.ASHLR_HOME)).toBe(true);
+  });
+
+  it('reports missing, healthy-empty, and malformed source states without healthy-zero collapse', () => {
+    expect(readDispatchProductionEventsDetailed()).toMatchObject({
+      events: [],
+      sourceState: 'missing',
+      sourcePresent: false,
+      complete: true,
+    });
+
+    mkdirSync(dispatchProductionDir(), { recursive: true });
+    expect(readDispatchProductionEventsDetailed()).toMatchObject({
+      events: [],
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+    });
+
+    writeFileSync(
+      join(dispatchProductionDir(), '2026-07-08.jsonl'),
+      `${JSON.stringify(makeEvent({ itemId: 'valid' }))}\nnot-json\n`,
+      'utf8',
+    );
+    const degraded = readDispatchProductionEventsDetailed();
+    expect(degraded.events.map((event) => event.itemId)).toEqual(['valid']);
+    expect(degraded).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+      unreadableFiles: 0,
+    });
+  });
+
+  it('reads only the newest bounded tail and never backfills an older partition', () => {
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, '2026-07-07.jsonl'),
+      `${JSON.stringify(makeEvent({ itemId: 'older-partition' }))}\n`,
+      'utf8',
+    );
+    const filler = `${JSON.stringify(makeEvent({ itemId: 'newer-filler' }))}\n`;
+    const newest = `${JSON.stringify(makeEvent({ itemId: 'newest-event' }))}\n`;
+    writeFileSync(join(dir, '2026-07-08.jsonl'), `${filler}${newest}`, 'utf8');
+
+    const maxBytes = Buffer.byteLength(newest, 'utf8') + 1;
+    const read = readDispatchProductionEventsDetailed({ maxBytes, limit: 20, maxRows: 100 });
+
+    expect(read.events.map((event) => event.itemId)).toEqual(['newest-event']);
+    expect(read).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      stopReasons: ['byte-limit'],
+      filesRead: 1,
+      bytesRead: maxBytes,
+    });
+    expect(read.events.map((event) => event.itemId)).not.toContain('older-partition');
+  });
+
+  it('bounds physical malformed rows even when no valid event can be returned', () => {
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '2026-07-08.jsonl'), `${'not-json\n'.repeat(10)}`, 'utf8');
+
+    const read = readDispatchProductionEventsDetailed({ maxRows: 3, limit: 20 });
+
+    expect(read).toMatchObject({
+      events: [],
+      sourceState: 'degraded',
+      complete: false,
+      rowsScanned: 3,
+      invalidRows: 3,
+    });
+    expect(read.stopReasons).toContain('row-limit');
+  });
+
+  it('does not count the terminal JSONL separator against the physical row budget', () => {
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, '2026-07-08.jsonl'),
+      `${JSON.stringify(makeEvent({ itemId: 'single-row' }))}\n`,
+      'utf8',
+    );
+
+    expect(readDispatchProductionEventsDetailed({ maxRows: 1, limit: 20 })).toMatchObject({
+      events: [{ itemId: 'single-row' }],
+      sourceState: 'healthy',
+      complete: true,
+      rowsScanned: 1,
+    });
+    expect(readDispatchProductionEventsDetailed({ maxRows: 10, limit: 1 })).toMatchObject({
+      events: [{ itemId: 'single-row' }],
+      sourceState: 'healthy',
+      complete: true,
+      stopReasons: [],
+    });
+  });
+
+  it('prunes stale partitions before deciding an exact row budget is exhausted', () => {
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(dir, `${now.slice(0, 10)}.jsonl`),
+      `${JSON.stringify(makeEvent({ itemId: 'current-row', ts: now }))}\n`,
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, '2020-01-01.jsonl'),
+      `${JSON.stringify(makeEvent({ itemId: 'stale-row', ts: '2020-01-01T00:00:00.000Z' }))}\n`,
+      'utf8',
+    );
+
+    expect(readDispatchProductionEventsDetailed({
+      sinceMs: Date.now() - 60 * 60 * 1000,
+      maxRows: 1,
+      limit: 20,
+    })).toMatchObject({
+      events: [{ itemId: 'current-row' }],
+      sourceState: 'healthy',
+      complete: true,
+      stopReasons: [],
+      rowsScanned: 1,
+    });
+  });
+
+  it('reads dated partitions before loose legacy filenames under a shared byte budget', () => {
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true });
+    const dated = `${JSON.stringify(makeEvent({ itemId: 'dated-current' }))}\n`;
+    writeFileSync(join(dir, '2026-07-08.jsonl'), dated, 'utf8');
+    writeFileSync(join(dir, 'zz-legacy.jsonl'), `${'x'.repeat(500)}\n`, 'utf8');
+
+    const read = readDispatchProductionEventsDetailed({ maxBytes: Buffer.byteLength(dated) + 1, limit: 20 });
+
+    expect(read.events.map((event) => event.itemId)).toEqual(['dated-current']);
+    expect(read.filesRead).toBe(2);
+    expect(read.stopReasons).toContain('byte-limit');
+  });
+
+  it('rejects linked partitions and exposes the I/O failure', () => {
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true });
+    const target = join(home, 'outside.jsonl');
+    writeFileSync(target, `${JSON.stringify(makeEvent({ itemId: 'linked' }))}\n`, 'utf8');
+    symlinkSync(target, join(dir, '2026-07-08.jsonl'));
+
+    expect(readDispatchProductionEventsDetailed()).toMatchObject({
+      events: [],
+      sourceState: 'degraded',
+      complete: false,
+      stopReasons: ['io-error'],
+      unreadableFiles: 1,
+    });
+  });
+
+  it('isolates a torn tail before appending the next durable event', () => {
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, '2026-07-08.jsonl');
+    writeFileSync(path, `${JSON.stringify(makeEvent({ itemId: 'before-torn' }))}\n{"partial":`, 'utf8');
+
+    recordDispatchProduction(makeEvent({ itemId: 'after-torn' }));
+    const read = readDispatchProductionEventsDetailed();
+
+    expect(read.events.map((event) => event.itemId)).toEqual(['after-torn', 'before-torn']);
+    expect(read).toMatchObject({ sourceState: 'degraded', invalidRows: 1 });
+  });
+
+  it('rejects malformed persisted timestamps instead of promoting them into the current window', () => {
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `${new Date().toISOString().slice(0, 10)}.jsonl`),
+      `${JSON.stringify(makeEvent({ itemId: 'bad-persisted-ts', ts: 'not-a-date' }))}\n`,
+      'utf8',
+    );
+
+    const read = readDispatchProductionEventsDetailed({ sinceMs: Date.now() - 60_000 });
+    expect(read).toMatchObject({ events: [], sourceState: 'degraded', invalidRows: 1 });
+  });
+
+  it('propagates bounded read quality through yield diagnostics while preserving wrappers', () => {
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, new Date().toISOString().slice(0, 10) + '.jsonl'),
+      `${JSON.stringify(makeEvent({ itemId: 'yield-valid', ts: new Date().toISOString() }))}\nnot-json\n`,
+      'utf8',
+    );
+
+    const detailed = readDispatchProductionYieldDetailed({ windowMs: 60 * 60 * 1000, limit: 20 });
+    expect(detailed.summary).toMatchObject({ events: 1 });
+    expect(detailed.sourceQuality).toMatchObject({ sourceState: 'degraded', invalidRows: 1 });
+    expect(readDispatchProductionYield({ windowMs: 60 * 60 * 1000, limit: 20 })).toMatchObject({ events: 1 });
+    expect(readDispatchProductionEvents({ limit: 20 })).toHaveLength(1);
   });
 
   it('summarizes proposal yield by backend, source, repo, and model', () => {
@@ -844,6 +1049,16 @@ describe('M342 dispatch production ledger', () => {
     });
 
     expect(events.map((event) => event.itemId)).toContain('current-dated');
+    expect(readDispatchProductionEventsDetailed({
+      sinceMs: Date.now() - 60 * 60 * 1000,
+      maxFiles: 1,
+      limit: 20,
+    })).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      datedFilesRead: 1,
+      looseFilesRead: 3,
+    });
   });
 
   it('derives durable yield file bounds from the requested window', () => {

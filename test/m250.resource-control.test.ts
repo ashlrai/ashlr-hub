@@ -950,6 +950,20 @@ describe('M252 Gateway — resource-aware demote', () => {
     let dispatchProductionEvents: DispatchProductionEvent[] = [];
     vi.doMock('../src/core/fleet/dispatch-production-ledger.js', () => ({
       readDispatchProductionEvents: vi.fn(() => dispatchProductionEvents),
+      readDispatchProductionEventsDetailed: vi.fn(() => ({
+        events: dispatchProductionEvents,
+        sourceState: 'healthy',
+        sourcePresent: true,
+        complete: true,
+        stopReasons: [],
+        filesRead: 1,
+        datedFilesRead: 1,
+        looseFilesRead: 0,
+        bytesRead: 1,
+        rowsScanned: dispatchProductionEvents.length,
+        invalidRows: 0,
+        unreadableFiles: 0,
+      })),
     }));
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),
@@ -990,6 +1004,20 @@ describe('M252 Gateway — resource-aware demote', () => {
     let dispatchProductionEvents: DispatchProductionEvent[] = [];
     vi.doMock('../src/core/fleet/dispatch-production-ledger.js', () => ({
       readDispatchProductionEvents: vi.fn(() => dispatchProductionEvents),
+      readDispatchProductionEventsDetailed: vi.fn(() => ({
+        events: dispatchProductionEvents,
+        sourceState: 'healthy',
+        sourcePresent: true,
+        complete: true,
+        stopReasons: [],
+        filesRead: 1,
+        datedFilesRead: 1,
+        looseFilesRead: 0,
+        bytesRead: 1,
+        rowsScanned: dispatchProductionEvents.length,
+        invalidRows: 0,
+        unreadableFiles: 0,
+      })),
     }));
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),

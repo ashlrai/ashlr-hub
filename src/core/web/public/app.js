@@ -2582,11 +2582,27 @@ function generatedRepairRecoveryMetric(generated) {
 }
 
 function fleetRepairRecoveryMetric(fleet) {
+  const source = fleet?.dispatchProductionSource;
+  const dispatchGenerated = (!source || dispatchProductionSourceHealthy(source))
+    ? fleet?.dispatchProduction?.generatedRepairAttempts
+    : null;
   return generatedRepairRecoveryMetric(
     fleet?.dispatchYieldDiagnostics?.generatedRepairAttempts ??
-    fleet?.dispatchProduction?.generatedRepairAttempts ??
+    dispatchGenerated ??
     fleet?.attemptCoverage?.production?.generatedRepairAttempts
   );
+}
+
+function dispatchProductionSourceText(source) {
+  if (!source) return 'unknown';
+  if (source.sourceState === 'missing') return 'missing';
+  if (source.sourceState === 'healthy' && source.complete === true) return 'healthy';
+  const reasons = Array.isArray(source.stopReasons) ? source.stopReasons.join(', ') : '';
+  return reasons ? `degraded (${reasons})` : 'degraded';
+}
+
+function dispatchProductionSourceHealthy(source) {
+  return !source || (source.sourceState === 'healthy' && source.complete === true);
 }
 
 function fleetRepairRecoveryActive(readiness, brief) {
@@ -2616,28 +2632,35 @@ function dispatchProductionDiagnosticAttempts(bucket) {
   return Math.max(0, safeAttempts - dispatchProductionPolicyDisabledCount(bucket));
 }
 
-function renderDispatchProductionCard(dispatchProduction, cls = 'ctrl-card card') {
+function renderDispatchProductionCard(dispatchProduction, sourceQuality, cls = 'ctrl-card card') {
   const card = el('div', { cls });
   if (!dispatchProduction) {
+    const sourceText = dispatchProductionSourceText(sourceQuality);
     card.appendChild(el('div', { cls: 'card-header' },
       el('span', { cls: 'card-title' }, 'Dispatch Yield'),
-      el('span', { cls: 'card-subtitle' }, 'unavailable')
+      el('span', { cls: 'card-subtitle' }, sourceText)
     ));
     card.appendChild(el('div', { cls: 'card-body' },
-      el('p', { cls: 'hint' }, 'Dispatch yield data unavailable.')
+      el('p', { cls: 'hint' }, sourceQuality?.sourceState === 'degraded'
+        ? 'Dispatch yield source is degraded; no valid bounded rows were readable.'
+        : 'Dispatch yield data unavailable.')
     ));
     return card;
   }
 
-  const proposalRate = formatFleetPercent(dispatchProduction.proposalRate);
+  const sourceHealthy = dispatchProductionSourceHealthy(sourceQuality);
+  const proposalRate = sourceHealthy ? formatFleetPercent(dispatchProduction.proposalRate) : 'partial';
   card.appendChild(el('div', { cls: 'card-header' },
     el('span', { cls: 'card-title' }, 'Dispatch Yield'),
-    el('span', { cls: 'card-subtitle' }, `${dispatchProduction.proposalsCreated ?? 0}/${dispatchProduction.events ?? 0} proposals`)
+    el('span', { cls: 'card-subtitle' }, sourceHealthy
+      ? `${dispatchProduction.proposalsCreated ?? 0}/${dispatchProduction.events ?? 0} proposals`
+      : dispatchProductionSourceText(sourceQuality))
   ));
 
   const body = el('div', { cls: 'card-body' });
   const repairRecovery = generatedRepairRecoveryMetric(dispatchProduction.generatedRepairAttempts);
   body.appendChild(infoGrid([
+    ['Source', dispatchProductionSourceText(sourceQuality)],
     ['Window', proposalProductionWindowLabel(dispatchProduction)],
     ['Attempts', dispatchProduction.events ?? 0],
     ['Proposals', dispatchProduction.proposalsCreated ?? 0],
@@ -3297,7 +3320,11 @@ function renderFleet() {
   const productionCard = renderProposalProductionCard(f.proposalProduction, 'fleet-card card');
   if (productionCard) section.appendChild(productionCard);
 
-  const dispatchProductionCard = renderDispatchProductionCard(f.dispatchProduction, 'fleet-card card');
+  const dispatchProductionCard = renderDispatchProductionCard(
+    f.dispatchProduction,
+    f.dispatchProductionSource,
+    'fleet-card card'
+  );
   if (dispatchProductionCard) section.appendChild(dispatchProductionCard);
 
   const workspaceCard = renderGlobalWorkspaceCard(f.workspace, 'fleet-card card');
@@ -3698,6 +3725,7 @@ function renderControl() {
   const missionBrief = d.fleet?.missionBrief ?? fleet.missionBrief ?? null;
   const production = d.fleet?.proposalProduction ?? fleet.proposalProduction ?? null;
   const dispatchProduction = d.fleet?.dispatchProduction ?? fleet.dispatchProduction ?? null;
+  const dispatchProductionSource = d.fleet?.dispatchProductionSource ?? fleet.dispatchProductionSource ?? null;
   const repairRecovery = fleetRepairRecoveryMetric(d.fleet ?? fleet);
   const isRepairRecoveryActive = fleetRepairRecoveryActive(shipReadiness, missionBrief);
   const workspace = d.fleet?.workspace ?? fleet.workspace ?? null;
@@ -3719,7 +3747,15 @@ function renderControl() {
     heroMetrics.appendChild(controlMetric('No-prop 24h', noProposal, noProposal > 0 ? '#f97316' : '#4ade80'));
   }
   if (dispatchProduction) {
-    heroMetrics.appendChild(controlMetric('Yield 24h', formatFleetPercent(dispatchProduction.proposalRate), dispatchProduction.proposalRate > 0 ? '#4ade80' : '#f97316'));
+    const sourceHealthy = dispatchProductionSourceHealthy(dispatchProductionSource);
+    heroMetrics.appendChild(controlMetric(
+      'Yield 24h',
+      sourceHealthy ? formatFleetPercent(dispatchProduction.proposalRate) : 'degraded',
+      sourceHealthy && dispatchProduction.proposalRate > 0 ? '#4ade80' : '#f97316'
+    ));
+  }
+  else if (dispatchProductionSource?.sourceState === 'degraded') {
+    heroMetrics.appendChild(controlMetric('Yield 24h', 'degraded', '#f97316'));
   }
   if (repairRecovery) {
     heroMetrics.appendChild(controlMetric(
@@ -4630,8 +4666,11 @@ function fdReadinessDataTitle(readiness) {
   }).join('\n');
 }
 
-function fdDispatchYieldText(dispatchProduction) {
-  if (!dispatchProduction) return 'unavailable';
+function fdDispatchYieldText(dispatchProduction, sourceQuality) {
+  if (!dispatchProduction) return sourceQuality?.sourceState === 'degraded'
+    ? dispatchProductionSourceText(sourceQuality)
+    : 'unavailable';
+  if (!dispatchProductionSourceHealthy(sourceQuality)) return dispatchProductionSourceText(sourceQuality);
   const proposals = dispatchProduction.proposalsCreated ?? 0;
   const attempts = dispatchProduction.events ?? dispatchProduction.attempts ?? 0;
   return `${proposals}/${attempts} proposals (${formatFleetPercent(dispatchProduction.proposalRate)})`;
@@ -4780,6 +4819,7 @@ function fdRenderReadinessRail(snap) {
   const queue = fleet?.queue ?? {};
   const sharedQueue = queue.shared ?? null;
   const dispatchProduction = fleet?.dispatchProduction ?? null;
+  const dispatchProductionSource = fleet?.dispatchProductionSource ?? null;
   const effectiveness = fleet?.autonomyEffectiveness ?? null;
   const topBlocker = missionBrief?.blocker ?? readiness.topBlocker ?? null;
   const primaryAction = missionBrief?.action ?? readiness.primaryAction ?? null;
@@ -4819,7 +4859,7 @@ function fdRenderReadinessRail(snap) {
     repairRecovery ? fdMetricPill('Repair Loop', repairRecovery.value, repairRecovery.detail) : null,
     drainMetric ? fdMetricPill('Diag Drain', drainMetric) : null,
     fdMetricPill('Leases', leases ?? 'local only'),
-    fdMetricPill('Yield', fdDispatchYieldText(dispatchProduction))
+    fdMetricPill('Yield', fdDispatchYieldText(dispatchProduction, dispatchProductionSource))
   ));
   return rail;
 }
@@ -5068,13 +5108,14 @@ function fdRenderProductionPanel(snap) {
   const prod = snap.production;
   const production = snap.fleet?.proposalProduction ?? snap.control?.fleet?.proposalProduction ?? null;
   const dispatchProduction = snap.fleet?.dispatchProduction ?? snap.control?.fleet?.dispatchProduction ?? null;
+  const dispatchProductionSource = snap.fleet?.dispatchProductionSource ?? snap.control?.fleet?.dispatchProductionSource ?? null;
   const workspace = snap.fleet?.workspace ?? snap.control?.fleet?.workspace ?? null;
   const attemptCoverage = snap.fleet?.attemptCoverage ?? snap.control?.fleet?.attemptCoverage ?? null;
   const trajectoryLearning = snap.fleet?.trajectoryLearning ?? snap.control?.fleet?.trajectoryLearning ?? null;
   const skillCorpusReadiness = snap.fleet?.skillCorpusReadiness ?? snap.control?.fleet?.skillCorpusReadiness ?? null;
   const contextEfficiency = snap.fleet?.contextEfficiency ?? snap.control?.fleet?.contextEfficiency ?? null;
   const workspaceHasEvents = Number(workspace?.eventCount ?? 0) > 0;
-  const hasProductionData = Boolean(prod || production || dispatchProduction || workspaceHasEvents || attemptCoverage || trajectoryLearning || skillCorpusReadiness);
+  const hasProductionData = Boolean(prod || production || dispatchProduction || dispatchProductionSource || workspaceHasEvents || attemptCoverage || trajectoryLearning || skillCorpusReadiness);
   const body = el('div', { cls: 'fd-panel__body' });
 
   if (!hasProductionData) {
@@ -5105,10 +5146,13 @@ function fdRenderProductionPanel(snap) {
     const repairRecovery = generatedRepairRecoveryMetric(dispatchProduction.generatedRepairAttempts);
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Dispatch yield'));
     body.appendChild(infoGrid([
+      ['Source', dispatchProductionSourceText(dispatchProductionSource)],
       ['Window', proposalProductionWindowLabel(dispatchProduction)],
       ['Attempts', dispatchProduction.events ?? 0],
       ['Proposals', dispatchProduction.proposalsCreated ?? 0],
-      ['Yield', formatFleetPercent(dispatchProduction.proposalRate)],
+      ['Yield', dispatchProductionSourceHealthy(dispatchProductionSource)
+        ? formatFleetPercent(dispatchProduction.proposalRate)
+        : 'partial'],
       ['Repair recovery', repairRecovery?.value ?? '—'],
       ['No-proposal', dispatchProduction.noProposal ?? 0],
       ['Spend', `$${Number(dispatchProduction.spentUsd ?? 0).toFixed(4)}`],
@@ -5129,6 +5173,13 @@ function fdRenderProductionPanel(snap) {
         `Weakest backend: ${dispatchProductionBucketLabel(backend)} ${proposals}/${attempts} (${formatFleetPercent(rate)})`
       ));
     }
+  }
+  else if (dispatchProductionSource) {
+    body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Dispatch yield'));
+    body.appendChild(infoGrid([
+      ['Source', dispatchProductionSourceText(dispatchProductionSource)],
+      ['Yield', 'unavailable'],
+    ]));
   }
 
   if (trajectoryLearning) {

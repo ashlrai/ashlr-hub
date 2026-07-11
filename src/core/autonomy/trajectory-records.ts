@@ -10,7 +10,10 @@
 import { createHash } from 'node:crypto';
 import { readAgentActions } from '../fleet/agent-action-ledger.js';
 import type { DispatchProductionEvent } from '../fleet/dispatch-production-ledger.js';
-import { readDispatchProductionEvents } from '../fleet/dispatch-production-ledger.js';
+import {
+  readDispatchProductionEvents,
+  readDispatchProductionEventsDetailed,
+} from '../fleet/dispatch-production-ledger.js';
 import { readSkillUseEvents } from '../fleet/skill-records.js';
 import type { OutcomeRecord, OutcomeRecordDecision, OutcomeRecordEvidence } from './outcome-records.js';
 import { listOutcomeRecords } from './outcome-records.js';
@@ -539,13 +542,17 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
   const sinceMs = Date.now() - windowHours * 60 * 60 * 1000;
   const deps = opts?.deps ?? {};
 
-  const dispatches = safeArray(() =>
-    (deps.readDispatchProductionEvents ?? readDispatchProductionEvents)({
-      sinceMs,
-      limit: Math.max(limit * 3, 100),
-      maxFiles: 3,
-    }),
-  );
+  const dispatchReadOptions = {
+    sinceMs,
+    limit: Math.max(limit * 3, 100),
+    maxFiles: 3,
+  };
+  const dispatches = deps.readDispatchProductionEvents
+    ? safeArray(() => deps.readDispatchProductionEvents!(dispatchReadOptions))
+    : safeArray(() => {
+        const read = readDispatchProductionEventsDetailed(dispatchReadOptions);
+        return read.sourceState === 'healthy' && read.complete ? read.events : [];
+      });
   const outcomes = safeArray(() =>
     (deps.listOutcomeRecords ?? listOutcomeRecords)({ limit: Math.max(limit * 3, 100) }),
   );

@@ -78,7 +78,8 @@ import {
   workItemCoverageKey,
 } from './proposal-matching.js';
 import {
-  readDispatchProductionYield,
+  readDispatchProductionYieldDetailed,
+  type DispatchProductionSourceQuality,
   type DispatchProductionYieldBucket,
   type DispatchProductionYieldSummary,
 } from './dispatch-production-ledger.js';
@@ -823,6 +824,8 @@ export interface FleetStatus {
   proposalProduction?: FleetProposalProductionStatus;
   /** Durable 24h dispatch-production yield summary from the append-only ledger. */
   dispatchProduction?: DispatchProductionYieldSummary;
+  /** Storage/read completeness for dispatch-production analytics. */
+  dispatchProductionSource?: DispatchProductionSourceQuality;
   /** Recent forensic concurrent dispatch intent summaries from the append-only manifest ledger. */
   dispatchManifests?: FleetDispatchManifestStatus;
   /** Sample-gated diagnosis of dispatch-production yield; no raw prompts/diffs/stdout. */
@@ -1033,11 +1036,13 @@ function cooldownMsForWorkItem(
 
 function healthyGeneratedRepairRecovery(cfg: AshlrConfig): boolean {
   try {
-    const yieldSummary = readDispatchProductionYield({
+    const read = readDispatchProductionYieldDetailed({
       windowMs: RECENT_WINDOW_MS,
       limit: 1200,
       limitPerDimension: 1,
     });
+    if (read.sourceQuality.sourceState !== 'healthy' || !read.sourceQuality.complete) return false;
+    const yieldSummary = read.summary;
     const generated = yieldSummary?.generatedRepairAttempts;
     if (!generated || generated.attempts < MIN_DISPATCH_YIELD_ACTION_ATTEMPTS) return false;
     return generated.proposalRate >= Math.max(configuredLowDispatchYieldRate(cfg), 0.5);
@@ -1524,14 +1529,18 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   const proposalProduction = buildProposalProductionStatus(recentTicks);
   if (proposalProduction) status.proposalProduction = proposalProduction;
   try {
-    const dispatchProduction = readDispatchProductionYield({
+    const dispatchRead = readDispatchProductionYieldDetailed({
       windowMs: RECENT_WINDOW_MS,
       limit: 1200,
       limitPerDimension: 8,
     });
+    status.dispatchProductionSource = dispatchRead.sourceQuality;
+    const dispatchProduction = dispatchRead.summary;
     if (dispatchProduction) {
       status.dispatchProduction = dispatchProduction;
-      status.dispatchYieldDiagnostics = buildDispatchYieldDiagnostics(dispatchProduction, cfg, backends);
+      if (dispatchRead.sourceQuality.sourceState === 'healthy' && dispatchRead.sourceQuality.complete) {
+        status.dispatchYieldDiagnostics = buildDispatchYieldDiagnostics(dispatchProduction, cfg, backends);
+      }
     }
   } catch {
     // Optional history/analytics surface only. Fleet status must stay read-only
@@ -2501,9 +2510,11 @@ function dispatchYieldNextAction(status: FleetStatus): DiagnosticDispatchYieldAc
 }
 
 function generatedRepairRecoveryStatus(status: FleetStatus): GeneratedRepairRecoveryStatus | null {
+  const productionSourceHealthy = status.dispatchProductionSource?.sourceState === 'healthy' &&
+    status.dispatchProductionSource.complete;
   const generated =
     status.dispatchYieldDiagnostics?.generatedRepairAttempts ??
-    status.dispatchProduction?.generatedRepairAttempts ??
+    (productionSourceHealthy ? status.dispatchProduction?.generatedRepairAttempts : undefined) ??
     status.attemptCoverage?.production.generatedRepairAttempts;
   const detail = formatGeneratedRepairRecoverySummary(generated);
   if (!generated || generated.attempts <= 0 || !detail) return null;

@@ -6,7 +6,18 @@
  * cooldown ledger: never truncate, never rewrite, never throw.
  */
 
-import { existsSync, mkdirSync, appendFileSync, readdirSync, readFileSync } from 'node:fs';
+import {
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readSync,
+  writeSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -39,6 +50,15 @@ import { scrubSecrets } from '../util/scrub.js';
 import { repairGenerationIdFromHandoffId } from './repair-handoff-journal.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_READ_LIMIT = 2_000;
+const DEFAULT_READ_MAX_FILES = 31;
+const DEFAULT_READ_MAX_BYTES = 8 * 1024 * 1024;
+const DEFAULT_READ_MAX_ROWS = 10_000;
+const HARD_READ_MAX_FILES = 32;
+const HARD_READ_MAX_BYTES = 32 * 1024 * 1024;
+const HARD_READ_MAX_ROWS = 50_000;
+const MAX_LOOSE_FILES = 3;
+const MAX_READ_ROW_BYTES = 128 * 1024;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const ENGINE_IDS = new Set<EngineId>([
@@ -91,6 +111,47 @@ export interface DispatchProductionEvent {
   repairAttemptOrdinal?: 1 | 2;
   repairPreviousBackend?: EngineId;
   repairLineageInvalid?: true;
+}
+
+export interface ReadDispatchProductionEventsOptions {
+  sinceMs?: number;
+  limit?: number;
+  /** Maximum dated partitions. Loose legacy partitions retain their separate fixed cap. */
+  maxFiles?: number;
+  /** Aggregate bytes physically read across selected partitions. */
+  maxBytes?: number;
+  /** Aggregate physical rows examined, including blank and invalid rows. */
+  maxRows?: number;
+}
+
+export type DispatchProductionReadStopReason =
+  | 'event-limit'
+  | 'file-limit'
+  | 'byte-limit'
+  | 'row-limit'
+  | 'io-error';
+
+export interface DispatchProductionSourceQuality {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  stopReasons: DispatchProductionReadStopReason[];
+  filesRead: number;
+  datedFilesRead: number;
+  looseFilesRead: number;
+  bytesRead: number;
+  rowsScanned: number;
+  invalidRows: number;
+  unreadableFiles: number;
+}
+
+export interface DispatchProductionEventsReadResult extends DispatchProductionSourceQuality {
+  events: DispatchProductionEvent[];
+}
+
+export interface DispatchProductionYieldReadResult {
+  summary?: DispatchProductionYieldSummary;
+  sourceQuality: DispatchProductionSourceQuality;
 }
 
 export interface DispatchProductionReasonCount {
@@ -429,7 +490,10 @@ export function recordDispatchProduction(
     for (const event of events) {
       try {
         const record = sanitizeEvent(event, { materializeLearningLabel: true });
-        appendFileSync(join(dir, `${eventDateString(record.ts)}.jsonl`), JSON.stringify(record) + '\n', 'utf8');
+        appendDispatchProductionLine(
+          join(dir, `${eventDateString(record.ts)}.jsonl`),
+          JSON.stringify(record) + '\n',
+        );
       } catch {
         // Skip only this record; later records in the batch still get a chance.
       }
@@ -439,63 +503,252 @@ export function recordDispatchProduction(
   }
 }
 
-export function readDispatchProductionEvents(opts?: {
-  sinceMs?: number;
-  limit?: number;
-  maxFiles?: number;
-}): DispatchProductionEvent[] {
+function appendDispatchProductionLine(path: string, line: string): void {
+  let fd: number | undefined;
   try {
-    const dir = dispatchProductionDir();
-    if (!existsSync(dir)) return [];
-    const files = readdirSync(dir)
-      .filter((file) => file.endsWith('.jsonl'))
-      .sort()
-      .reverse();
-    const cap = opts?.limit !== undefined && opts.limit > 0 ? opts.limit : Infinity;
-    const maxFiles = opts?.maxFiles !== undefined && opts.maxFiles > 0 ? Math.floor(opts.maxFiles) : Infinity;
-    const out: DispatchProductionEvent[] = [];
-    let datedFilesRead = 0;
-    let looseFilesRead = 0;
-    for (const file of files) {
-      if (out.length >= cap) break;
-      if (opts?.sinceMs !== undefined && !fileMayContainSince(file, opts.sinceMs)) continue;
-      const isDatedFile = DATE_LEDGER_FILE_RE.test(file);
-      if (isDatedFile) {
-        if (datedFilesRead >= maxFiles) continue;
-        datedFilesRead++;
-      } else {
-        if (looseFilesRead >= 3) continue;
-        looseFilesRead++;
+    fd = openSync(
+      path,
+      fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    const opened = fstatSync(fd);
+    if (!opened.isFile()) throw new Error('dispatch production ledger is not a regular file');
+    if (opened.size > 0) {
+      const tail = Buffer.alloc(1);
+      const read = readSync(fd, tail, 0, 1, opened.size - 1);
+      if (read !== 1) throw new Error('dispatch production ledger tail is unreadable');
+      if (tail[0] !== 0x0a) writeSync(fd, '\n', undefined, 'utf8');
+    }
+    writeSync(fd, line, undefined, 'utf8');
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function boundedReadOption(value: number | undefined, fallback: number, hardMax: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.max(1, Math.min(hardMax, Math.floor(value)))
+    : fallback;
+}
+
+function emptyDispatchProductionRead(
+  sourceState: DispatchProductionSourceQuality['sourceState'],
+  overrides: Partial<DispatchProductionEventsReadResult> = {},
+): DispatchProductionEventsReadResult {
+  return {
+    events: [],
+    sourceState,
+    sourcePresent: sourceState !== 'missing',
+    complete: sourceState !== 'degraded',
+    stopReasons: [],
+    filesRead: 0,
+    datedFilesRead: 0,
+    looseFilesRead: 0,
+    bytesRead: 0,
+    rowsScanned: 0,
+    invalidRows: 0,
+    unreadableFiles: 0,
+    ...overrides,
+  };
+}
+
+function sameFile(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof fstatSync>): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function readDispatchProductionFileTail(
+  path: string,
+  maxBytes: number,
+): { text: string; bytesRead: number; truncated: boolean } | null {
+  let fd: number | undefined;
+  try {
+    const pathBefore = lstatSync(path);
+    if (pathBefore.isSymbolicLink() || !pathBefore.isFile()) return null;
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const before = fstatSync(fd);
+    if (!before.isFile() || !sameFile(pathBefore, before)) return null;
+    const bytes = Math.min(before.size, maxBytes);
+    const start = Math.max(0, before.size - bytes);
+    const buffer = Buffer.alloc(bytes);
+    const bytesRead = bytes > 0 ? readSync(fd, buffer, 0, bytes, start) : 0;
+    const after = fstatSync(fd);
+    const pathAfter = lstatSync(path);
+    if (
+      pathAfter.isSymbolicLink() ||
+      !pathAfter.isFile() ||
+      !after.isFile() ||
+      !sameFile(before, after) ||
+      !sameFile(after, pathAfter) ||
+      after.size < before.size ||
+      bytesRead !== bytes
+    ) return null;
+    let text: string;
+    if (start > 0) {
+      const boundaryWasNewline = buffer[0] === 0x0a;
+      text = buffer.subarray(1, bytesRead).toString('utf8');
+      if (!boundaryWasNewline) {
+        const firstNewline = text.indexOf('\n');
+        text = firstNewline >= 0 ? text.slice(firstNewline + 1) : '';
       }
-      let raw: string;
-      try {
-        raw = readFileSync(join(dir, file), 'utf8');
-      } catch {
+    } else {
+      text = buffer.subarray(0, bytesRead).toString('utf8');
+    }
+    return { text, bytesRead, truncated: start > 0 };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* best-effort diagnostics read */ }
+    }
+  }
+}
+
+function pushStopReason(
+  reasons: DispatchProductionReadStopReason[],
+  reason: DispatchProductionReadStopReason,
+): void {
+  if (!reasons.includes(reason)) reasons.push(reason);
+}
+
+export function readDispatchProductionEventsDetailed(
+  opts: ReadDispatchProductionEventsOptions = {},
+): DispatchProductionEventsReadResult {
+  const cap = boundedReadOption(opts.limit, DEFAULT_READ_LIMIT, DEFAULT_READ_LIMIT);
+  const maxFiles = boundedReadOption(opts.maxFiles, DEFAULT_READ_MAX_FILES, HARD_READ_MAX_FILES);
+  const maxBytes = boundedReadOption(opts.maxBytes, DEFAULT_READ_MAX_BYTES, HARD_READ_MAX_BYTES);
+  const maxRows = boundedReadOption(opts.maxRows, DEFAULT_READ_MAX_ROWS, HARD_READ_MAX_ROWS);
+  const dir = dispatchProductionDir();
+  if (!existsSync(dir)) return emptyDispatchProductionRead('missing');
+
+  let files: string[];
+  try {
+    files = readdirSync(dir)
+      .filter((file) => file.endsWith('.jsonl'))
+      .sort((left, right) => {
+        const leftDated = DATE_LEDGER_FILE_RE.test(left);
+        const rightDated = DATE_LEDGER_FILE_RE.test(right);
+        if (leftDated !== rightDated) return leftDated ? -1 : 1;
+        return right.localeCompare(left);
+      });
+  } catch {
+    return emptyDispatchProductionRead('degraded', {
+      complete: false,
+      stopReasons: ['io-error'],
+      unreadableFiles: 1,
+    });
+  }
+  if (files.length === 0) return emptyDispatchProductionRead('healthy');
+
+  const result = emptyDispatchProductionRead('healthy');
+  result.sourcePresent = true;
+  let stopTraversal = false;
+  for (const file of files) {
+    if (stopTraversal) break;
+    if (opts.sinceMs !== undefined && !fileMayContainSince(file, opts.sinceMs)) continue;
+    if (result.rowsScanned >= maxRows) {
+      pushStopReason(result.stopReasons, 'row-limit');
+      result.complete = false;
+      break;
+    }
+    const isDatedFile = DATE_LEDGER_FILE_RE.test(file);
+    if (isDatedFile) {
+      if (result.datedFilesRead >= maxFiles) {
+        pushStopReason(result.stopReasons, 'file-limit');
+        result.complete = false;
         continue;
       }
-      for (const line of raw.split('\n').reverse()) {
-        if (out.length >= cap) break;
-        if (!line.trim()) continue;
-        try {
-          const parsed: unknown = JSON.parse(line);
-          if (!isDispatchProductionEvent(parsed)) continue;
-          if (opts?.sinceMs !== undefined) {
-            const eventMs = Date.parse(parsed.ts);
-            if (Number.isFinite(eventMs) && eventMs < opts.sinceMs) continue;
-          }
-          out.push(sanitizeEvent(parsed, {
-            deriveLegacyRunOutcomeCausal: true,
-            materializeLearningLabel: true,
-          }));
-        } catch {
-          // Malformed lines are skipped.
+      result.datedFilesRead++;
+    } else {
+      if (result.looseFilesRead >= MAX_LOOSE_FILES) {
+        pushStopReason(result.stopReasons, 'file-limit');
+        result.complete = false;
+        continue;
+      }
+      result.looseFilesRead++;
+    }
+
+    const remainingBytes = maxBytes - result.bytesRead;
+    if (remainingBytes <= 0) {
+      pushStopReason(result.stopReasons, 'byte-limit');
+      result.complete = false;
+      break;
+    }
+    const loaded = readDispatchProductionFileTail(join(dir, file), remainingBytes);
+    result.filesRead++;
+    if (!loaded) {
+      result.unreadableFiles++;
+      pushStopReason(result.stopReasons, 'io-error');
+      result.complete = false;
+      break;
+    }
+    result.bytesRead += loaded.bytesRead;
+    if (loaded.truncated) {
+      pushStopReason(result.stopReasons, 'byte-limit');
+      result.complete = false;
+      stopTraversal = true;
+    }
+
+    let cursor = loaded.text.length;
+    let trailingSeparator = true;
+    while (cursor > 0) {
+      if (result.rowsScanned >= maxRows) {
+        pushStopReason(result.stopReasons, 'row-limit');
+        result.complete = false;
+        stopTraversal = true;
+        break;
+      }
+      const newline = loaded.text.lastIndexOf('\n', cursor - 1);
+      const line = loaded.text.slice(newline + 1, cursor);
+      cursor = newline >= 0 ? newline : 0;
+      if (trailingSeparator && line === '') {
+        trailingSeparator = false;
+        continue;
+      }
+      trailingSeparator = false;
+      result.rowsScanned++;
+      if (!line.trim()) continue;
+      if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) {
+        result.invalidRows++;
+        continue;
+      }
+      try {
+        const parsed: unknown = JSON.parse(line);
+        if (!isDispatchProductionEvent(parsed)) {
+          result.invalidRows++;
+          continue;
         }
+        const eventMs = Date.parse(parsed.ts);
+        if (!Number.isFinite(eventMs)) {
+          result.invalidRows++;
+          continue;
+        }
+        if (opts.sinceMs !== undefined && eventMs < opts.sinceMs) continue;
+        if (result.events.length >= cap) {
+          pushStopReason(result.stopReasons, 'event-limit');
+          result.complete = false;
+          stopTraversal = true;
+          break;
+        }
+        result.events.push(sanitizeEvent(parsed, {
+          deriveLegacyRunOutcomeCausal: true,
+          materializeLearningLabel: true,
+        }));
+      } catch {
+        result.invalidRows++;
       }
     }
-    return out;
-  } catch {
-    return [];
   }
+  if (result.invalidRows > 0 || result.unreadableFiles > 0) result.complete = false;
+  if (result.invalidRows > 0 || result.unreadableFiles > 0 || !result.complete) {
+    result.sourceState = 'degraded';
+  }
+  return result;
+}
+
+export function readDispatchProductionEvents(
+  opts?: ReadDispatchProductionEventsOptions,
+): DispatchProductionEvent[] {
+  return readDispatchProductionEventsDetailed(opts).events;
 }
 
 function fileMayContainSince(file: string, sinceMs: number): boolean {
@@ -952,21 +1205,40 @@ export function summarizeDispatchProductionYield(
   };
 }
 
+export function readDispatchProductionYieldDetailed(opts?: {
+  windowMs?: number;
+  limit?: number;
+  limitPerDimension?: number;
+  maxBytes?: number;
+  maxRows?: number;
+}): DispatchProductionYieldReadResult {
+  const windowMs = opts?.windowMs ?? 24 * 60 * 60 * 1000;
+  const sinceMs = Date.now() - windowMs;
+  const maxFiles = Math.max(1, Math.ceil(windowMs / DAY_MS) + 1);
+  const read = readDispatchProductionEventsDetailed({
+    sinceMs,
+    limit: opts?.limit ?? 1000,
+    maxFiles,
+    maxBytes: opts?.maxBytes,
+    maxRows: opts?.maxRows,
+  });
+  const summary = summarizeDispatchProductionYield(read.events, {
+    windowHours: windowMs / (60 * 60 * 1000),
+    limitPerDimension: opts?.limitPerDimension,
+  });
+  const { events: _events, ...sourceQuality } = read;
+  return {
+    ...(summary ? { summary } : {}),
+    sourceQuality,
+  };
+}
+
 export function readDispatchProductionYield(opts?: {
   windowMs?: number;
   limit?: number;
   limitPerDimension?: number;
+  maxBytes?: number;
+  maxRows?: number;
 }): DispatchProductionYieldSummary | undefined {
-  const windowMs = opts?.windowMs ?? 24 * 60 * 60 * 1000;
-  const sinceMs = Date.now() - windowMs;
-  const maxFiles = Math.max(1, Math.ceil(windowMs / DAY_MS) + 1);
-  const events = readDispatchProductionEvents({
-    sinceMs,
-    limit: opts?.limit ?? 1000,
-    maxFiles,
-  });
-  return summarizeDispatchProductionYield(events, {
-    windowHours: windowMs / (60 * 60 * 1000),
-    limitPerDimension: opts?.limitPerDimension,
-  });
+  return readDispatchProductionYieldDetailed(opts).summary;
 }

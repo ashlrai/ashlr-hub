@@ -456,7 +456,10 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain('renderMissionBriefCard(missionBrief)');
     expect(src).toContain('missionBrief');
     expect(src).toContain("renderProposalProductionCard(f.proposalProduction, 'fleet-card card')");
-    expect(src).toContain("renderDispatchProductionCard(f.dispatchProduction, 'fleet-card card')");
+    expect(src).toContain('renderDispatchProductionCard(\n    f.dispatchProduction,\n    f.dispatchProductionSource,');
+    expect(src).toContain('function dispatchProductionSourceText');
+    expect(src).toContain("return !source || (source.sourceState === 'healthy' && source.complete === true)");
+    expect(src).toContain("['Source', dispatchProductionSourceText(sourceQuality)]");
     expect(src).toContain("renderAttemptCoverageCard(f.attemptCoverage, 'fleet-card card')");
     expect(src).toContain("['Generated work', generatedWorkMetric(f.queue?.generatedWork) ?? '—']");
     expect(src).toContain("['Diagnostic drain', diagnosticResliceDrainMetric(f.queue?.diagnosticResliceDrain) ?? '—']");
@@ -476,9 +479,10 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(src).toContain("fdMetricPill('Generated'");
     expect(src).toContain("fdMetricPill('Diag Drain'");
     expect(src).toContain('production.diagnosticNoProposalDispatches ?? production.noProposalDispatches');
-    expect(src).toContain("controlMetric('Yield 24h'");
+    expect(src).toContain("controlMetric(\n      'Yield 24h'");
     expect(src).toContain("snap.fleet?.proposalProduction ?? snap.control?.fleet?.proposalProduction");
     expect(src).toContain("snap.fleet?.dispatchProduction ?? snap.control?.fleet?.dispatchProduction");
+    expect(src).toContain("snap.fleet?.dispatchProductionSource ?? snap.control?.fleet?.dispatchProductionSource");
     expect(src).toContain("snap.fleet?.attemptCoverage ?? snap.control?.fleet?.attemptCoverage");
     expect(src).toContain("'Proposal production'");
     expect(src).toContain("'Dispatch yield'");

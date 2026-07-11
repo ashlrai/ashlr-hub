@@ -321,8 +321,24 @@ export function formatFleetStatus(s: FleetStatus): string {
   const dispatchProduction = s.dispatchProduction;
   lines.push('Dispatch yield:');
   if (!dispatchProduction) {
-    lines.push('  unavailable');
+    const source = s.dispatchProductionSource;
+    if (source?.sourceState === 'degraded') {
+      lines.push(
+        `  source:    degraded (partial); files ${source.filesRead}, bytes ${source.bytesRead}, ` +
+          `rows ${source.rowsScanned}, invalid ${source.invalidRows}, unreadable ${source.unreadableFiles}`,
+      );
+      lines.push('  output:    unavailable because no valid bounded rows were readable');
+    } else {
+      lines.push(`  unavailable${source?.sourceState === 'missing' ? ' (source missing)' : ''}`);
+    }
   } else {
+    const source = s.dispatchProductionSource;
+    const sourceDetail = source
+      ? `${source.sourceState}${source.complete ? '' : ' (partial)'}; files ${source.filesRead}, ` +
+        `bytes ${source.bytesRead}, rows ${source.rowsScanned}, invalid ${source.invalidRows}, ` +
+        `unreadable ${source.unreadableFiles}`
+      : 'unknown (legacy snapshot)';
+    lines.push(`  source:    ${sourceDetail}`);
     lines.push(`  window:    ${formatProductionWindow(dispatchProduction.windowHours)}`);
     lines.push(
       `  output:    proposals ${dispatchProduction.proposalsCreated}/${dispatchProduction.events} ` +

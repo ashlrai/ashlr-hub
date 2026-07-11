@@ -22,10 +22,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 // ---------------------------------------------------------------------------
 // HOME isolation — M282 determinism fix
@@ -64,7 +64,10 @@ import type {
   WorkSource,
 } from '../src/core/types.js';
 import type { CostForecast } from '../src/core/types.js';
-import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
+import {
+  recordDispatchProduction,
+  type DispatchProductionEvent,
+} from '../src/core/fleet/dispatch-production-ledger.js';
 import {
   learningEpochFromTimestamp,
   ROUTER_POLICY_VERSION,
@@ -650,6 +653,34 @@ describe('M53 invariant 4 — recommendRoute stays within allowedBackends', () =
     expect(rec.reason).toContain('recent proposal yield');
     expect(rec.reason).toContain('same-tier reroute');
     expect(rec.reason).toContain('candidate yield 2/3');
+  });
+
+  it('degraded dispatch-production input cannot change learned routing', async () => {
+    const cfg = withInstalledFrontierEngines(withIntelligence({
+      allowedBackends: ['builtin', 'claude', 'codex'],
+      minProposalYieldRate: 0.5,
+    }));
+    const item = makeItem({ source: 'security', effort: 5, score: 10 });
+    const base = routeBackend(item, cfg);
+    const alternate = base.backend === 'claude' ? 'codex' : 'claude';
+    const events = [
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'empty-diff', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'gate-blocked', proposalCreated: false }),
+      makeDispatchProductionEvent({ backend: base.backend, outcome: 'engine-failed', proposalCreated: false }),
+      ...comparativeCandidateEvents(alternate),
+    ].map((event, index) => ({ ...event, itemId: `repo:security:degraded-${index}` }));
+    recordDispatchProduction(events);
+    const ledger = join(tmpHome, 'dispatch-production', `${new Date().toISOString().slice(0, 10)}.jsonl`);
+    writeFileSync(ledger, `${readFileSync(ledger, 'utf8')}not-json\n`, 'utf8');
+
+    const rec = await recommendRoute(item, cfg, {
+      estimate: makeEstimate(0.001, 10),
+      prior: { frontierSuccessRate: 0.9, frontierSampleSize: 10 },
+    });
+
+    expect(rec.backend).toBe(base.backend);
+    expect(rec.tier).toBe(base.tier);
+    expect(rec.reason).not.toContain('recent proposal yield');
   });
 
   it('low dispatch-production yield does not blindly reroute to an unknown alternative', async () => {

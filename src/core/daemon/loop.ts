@@ -118,7 +118,7 @@ import { notifyFleetEvent } from '../comms/events.js';
 import { pendingCount, listProposals } from '../inbox/store.js';
 import {
   recordDispatchProduction,
-  readDispatchProductionYield,
+  readDispatchProductionYieldDetailed,
   type DispatchProductionBasis,
   type DispatchProductionEvent,
 } from '../fleet/dispatch-production-ledger.js';
@@ -1688,11 +1688,13 @@ function configuredLowRepairYieldRate(cfg: AshlrConfig): number {
 
 function generatedRepairRecoveryHealthy(cfg: AshlrConfig): boolean {
   try {
-    const yieldSummary = readDispatchProductionYield({
+    const read = readDispatchProductionYieldDetailed({
       windowMs: GENERATED_REPAIR_RECOVERY_WINDOW_MS,
       limit: 1200,
       limitPerDimension: 1,
     });
+    if (read.sourceQuality.sourceState !== 'healthy' || !read.sourceQuality.complete) return false;
+    const yieldSummary = read.summary;
     const generated = yieldSummary?.generatedRepairAttempts;
     if (!generated || generated.attempts < GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS) return false;
     return generated.proposalRate >= Math.max(configuredLowRepairYieldRate(cfg), 0.5);

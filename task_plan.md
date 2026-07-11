@@ -1598,3 +1598,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve lineage through sanitization, replay reads, and agent-action projection without granting control or merge authority.
 - [x] Add malformed, legacy, first-attempt, retry-success, retry-failure, executor-fallback, and privacy coverage.
 - [x] Run focused/full gates and independent review, then update notes, commit, push, reload, and production-canary lineage capture.
+
+## Current Overnight Cycle - Bounded Dispatch Production Reads
+- [x] Rehydrate the deployed transition-telemetry baseline, live daemon state, Entire state, and persistent notes.
+- [x] Deploy disjoint audits for bounded file I/O, source-quality propagation, compatibility, and adversarial fixtures.
+- [x] Add explicit dispatch-production read health that never treats skipped, oversized, unreadable, or malformed partitions as healthy zero.
+- [x] Bound bytes, files, rows, and returned events without weakening newest-first window semantics or metadata sanitization.
+- [x] Propagate source quality through dispatch-yield FleetStatus while keeping existing event-reader callers compatible.
+- [x] Add oversized, malformed, unreadable, mixed-quality, truncation, privacy, and legacy-window coverage.
+- [ ] Run focused/full gates and independent review, then update notes, commit, push, reload, and production-canary bounded reads.

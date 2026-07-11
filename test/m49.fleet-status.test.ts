@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1690,6 +1690,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const s = await buildFleetStatus(baseConfig());
 
+    expect(s.dispatchProductionSource).toMatchObject({
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+      filesRead: 1,
+      invalidRows: 0,
+    });
     expect(s.dispatchProduction).toMatchObject({
       events: 3,
       attempts: 3,
@@ -1749,12 +1756,47 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('Dispatch yield:');
+    expect(formatted).toContain('source:    healthy; files 1');
     expect(formatted).toContain('proposals 1/3');
     expect(formatted).toContain('shape:     no-diff 1, gate/capture 1, repairs 1, policy-off 0');
     expect(formatted).toContain('repair yield: capture 1 attempt; 1/1 converted (100%)');
     expect(formatted).toContain('diagnosis: healthy · fleet 1/3 33% · keep routing');
     expect(formatted).toContain('local-coder 0/2 0%');
     expect(formatted).toContain('codex 1/1 100%');
+  });
+
+  it('surfaces degraded dispatch source quality and withholds yield diagnosis', async () => {
+    const now = new Date().toISOString();
+    recordDispatchProduction({
+      schemaVersion: 1,
+      ts: now,
+      itemId: 'valid-partial-source',
+      source: 'goal',
+      repo: '/repo/a',
+      title: 'Valid partial source row',
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'daemon',
+      routeReason: 'local-mid bulk',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      spentUsd: 0.001,
+      basis: 'run-proposal-outcome',
+    });
+    const dir = join(process.env.ASHLR_HOME!, 'dispatch-production');
+    const path = join(dir, `${now.slice(0, 10)}.jsonl`);
+    writeFileSync(path, `${readFileSync(path, 'utf8')}not-json\n`, 'utf8');
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.dispatchProduction).toMatchObject({ events: 1 });
+    expect(s.dispatchProductionSource).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+    expect(s.dispatchYieldDiagnostics).toBeUndefined();
+    expect(formatFleetStatus(s)).toContain('source:    degraded (partial)');
   });
 
   it('reports recent concurrent dispatch manifests from the append-only ledger', async () => {

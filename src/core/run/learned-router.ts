@@ -37,7 +37,7 @@ import { engineInstalled } from './engines.js';
 import { canonicalModelTag, type ModelEntry } from './model-catalog.js';
 import { readJudgeTraces } from '../fleet/judge-trace.js';
 import {
-  readDispatchProductionEvents,
+  readDispatchProductionEventsDetailed,
   type DispatchProductionEvent,
 } from '../fleet/dispatch-production-ledger.js';
 import {
@@ -313,11 +313,13 @@ function loadDispatchYieldEvents(
       typeof intel.dispatchYieldWindowHours === 'number' && intel.dispatchYieldWindowHours > 0
         ? intel.dispatchYieldWindowHours
         : DEFAULT_DISPATCH_YIELD_WINDOW_HOURS;
-    return readDispatchProductionEvents({
+    const options = {
       sinceMs: Date.now() - hours * 60 * 60 * 1000,
       limit: 1000,
       maxFiles: Math.max(1, Math.ceil(hours / 24) + 1),
-    });
+    };
+    const read = readDispatchProductionEventsDetailed(options);
+    return read.sourceState === 'healthy' && read.complete ? read.events : [];
   } catch {
     return [];
   }
