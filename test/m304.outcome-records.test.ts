@@ -10,9 +10,13 @@ import { describe, expect, it } from 'vitest';
 import type { AutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import type { OutcomeRecordReadDeps } from '../src/core/autonomy/outcome-records.js';
 import { listOutcomeRecords, listReadyEvidenceOutcomeRecords } from '../src/core/autonomy/outcome-records.js';
+import { hashDiff } from '../src/core/foundry/provenance.js';
 import type { JudgeTrace } from '../src/core/fleet/judge-trace.js';
 import type { WorkedEvent } from '../src/core/fleet/worked-ledger.js';
 import type { DecisionEntry, Proposal } from '../src/core/types.js';
+
+const TEST_DIFF = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n';
+const TEST_DIFF_HASH = hashDiff(TEST_DIFF);
 
 function proposal(overrides: Partial<Proposal> & Pick<Proposal, 'id' | 'createdAt'>): Proposal {
   return {
@@ -63,7 +67,7 @@ function evidence(proposalId: string, generatedAt: string): AutonomyEvidencePack
       createdAt: '2026-07-01T00:00:00.000Z',
     },
     producer: { engineModel: 'codex:gpt-5.5', engineTier: 'frontier' },
-    diff: { files: ['src/a.ts'], changedLines: 4, hash: 'sha256:test' },
+    diff: { files: ['src/a.ts'], changedLines: 4, hash: TEST_DIFF_HASH },
     target: 'main',
     trustBasis: 'tier',
     remotePreferred: false,
@@ -79,6 +83,11 @@ function evidence(proposalId: string, generatedAt: string): AutonomyEvidencePack
       passed: true,
       detail: 'tests passed',
       commandKinds: ['test'],
+      baseBranch: 'main',
+      baseHead: 'a'.repeat(40),
+      diffHash: TEST_DIFF_HASH,
+      verifiedAt: generatedAt,
+      source: 'auto-merge',
     },
     policy: {
       tier: 'T4',
@@ -233,6 +242,7 @@ describe('m302 listOutcomeRecords', () => {
     const loadedProposalIds: string[] = [];
     const records = listReadyEvidenceOutcomeRecords({
       limit: 2,
+      now: new Date('2026-07-03T03:30:00.000Z'),
       deps: {
         listAutonomyEvidencePacks: (limit) => {
           requestedLimits.push(limit);
@@ -246,7 +256,21 @@ describe('m302 listOutcomeRecords', () => {
         loadProposal: (id) => {
           loadedProposalIds.push(id);
           if (id === 'prop-ready') {
-            return proposal({ id, createdAt: '2026-07-03T00:10:00.000Z', status: 'pending' });
+            return proposal({
+              id,
+              createdAt: '2026-07-03T00:10:00.000Z',
+              status: 'pending',
+              diff: TEST_DIFF,
+              diffHash: TEST_DIFF_HASH,
+              verifyResult: {
+                passed: true,
+                baseBranch: 'main',
+                baseHead: 'a'.repeat(40),
+                diffHash: TEST_DIFF_HASH,
+                verifiedAt: '2026-07-03T03:00:00.000Z',
+                source: 'auto-merge',
+              },
+            });
           }
           if (id === 'prop-applied') {
             return proposal({ id, createdAt: '2026-07-03T00:20:00.000Z', status: 'applied' });
@@ -266,5 +290,39 @@ describe('m302 listOutcomeRecords', () => {
     expect(records[0]?.judgeTraces).toEqual([]);
     expect(records[0]?.workedEvents).toEqual([]);
     expect(records[0]?.racing).toBeUndefined();
+  });
+
+  it('rejects replayed bindings and degraded evidence sources', () => {
+    const pack = evidence('prop-ready', '2026-07-03T03:00:00.000Z');
+    const degraded = [pack] as AutonomyEvidencePack[] & { sourceQuality?: Record<string, unknown> };
+    Object.defineProperty(degraded, 'sourceQuality', {
+      value: { sourceState: 'degraded', sourcePresent: true, complete: false },
+    });
+    const live = proposal({
+      id: 'prop-ready',
+      createdAt: '2026-07-03T00:10:00.000Z',
+      status: 'pending',
+      diff: TEST_DIFF,
+      diffHash: TEST_DIFF_HASH,
+      verifyResult: {
+        passed: true,
+        baseBranch: 'main',
+        baseHead: 'a'.repeat(40),
+        diffHash: TEST_DIFF_HASH,
+        verifiedAt: '2026-07-03T03:00:00.000Z',
+        source: 'auto-merge',
+      },
+    });
+
+    expect(listReadyEvidenceOutcomeRecords({
+      now: new Date('2026-07-03T03:30:00.000Z'),
+      deps: { listAutonomyEvidencePacks: () => degraded as AutonomyEvidencePack[], loadProposal: () => live },
+    })).toEqual([]);
+
+    const replayed = { ...pack, verification: { ...pack.verification, baseHead: 'b'.repeat(40) } };
+    expect(listReadyEvidenceOutcomeRecords({
+      now: new Date('2026-07-03T03:30:00.000Z'),
+      deps: { listAutonomyEvidencePacks: () => [replayed], loadProposal: () => live },
+    })).toEqual([]);
   });
 });

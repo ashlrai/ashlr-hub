@@ -5,8 +5,11 @@ import {
   generatedRepairLifecyclePath,
   generatedRepairDispatchLineage,
   generatedRepairRetryPolicy,
+  acknowledgeGeneratedRepairTreatmentOutcome,
   readGeneratedRepairLifecycle,
+  readPendingGeneratedRepairTreatmentOutcomes,
   recordGeneratedRepairLifecycle,
+  readGeneratedRepairTerminalOutcome,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
 import { repairTreatmentForUnitId } from '../src/core/fleet/generated-repair-identity.js';
 import type { WorkItem } from '../src/core/types.js';
@@ -191,12 +194,75 @@ describe('generated repair lifecycle store', () => {
       proposalId: 'prop-generated-repair',
     });
 
-    expect(transition).toMatchObject({ available: true, disposition: 'retired', recorded: true });
+    expect(transition).toMatchObject({
+      available: true,
+      disposition: 'retired',
+      recorded: true,
+      treatmentOutcomeWitness: {
+        outcome: 'converted',
+        disposition: 'retired',
+        generationId: expect.stringMatching(/^[a-f0-9]{64}$/),
+        attemptHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
     expect(readGeneratedRepairLifecycle(item)).toEqual({
       available: true,
       disposition: 'retired',
       authoritativeEmptyRuns: 0,
     });
+    expect(readGeneratedRepairTerminalOutcome(transition.treatmentOutcomeWitness!.generationId))
+      .toEqual(transition.treatmentOutcomeWitness);
+  });
+
+  it('keeps a terminal treatment witness in the lifecycle outbox until acknowledged', () => {
+    const item = diagnosticRepairItem();
+    const candidate: DispatchProductionEvent = {
+      schemaVersion: 1,
+      ts: item.ts,
+      itemId: item.id,
+      source: item.source,
+      repo: item.repo,
+      title: item.title,
+      backend: 'local-coder',
+      tier: 'mid',
+      assignedBy: 'router',
+      routeReason: 'test treatment',
+      outcome: 'proposal-created',
+      proposalCreated: true,
+      proposalId: 'prop-treatment-outbox',
+      runId: ATTEMPT_ONE,
+      spentUsd: 0,
+      basis: 'repair-lifecycle-candidate',
+      repairHandoffId: item.repairHandoffId,
+      repairGenerationId: item.repairGenerationId,
+      repairTreatmentUnitId: item.repairTreatmentUnitId,
+      repairTreatment: item.repairTreatment,
+      repairAttemptOrdinal: 1,
+    };
+    const transition = recordGeneratedRepairLifecycle(item, {
+      kind: 'proposal-created',
+      attemptId: ATTEMPT_ONE,
+      proposalId: 'prop-treatment-outbox',
+      treatmentCandidate: candidate,
+    });
+    writeFileSync(`${generatedRepairLifecyclePath()}.lock`, JSON.stringify({
+      token: 'dead-outbox-owner',
+      pid: 2_147_483_647,
+      startRef: 'b'.repeat(64),
+      startRefVerified: true,
+    }), { encoding: 'utf8', mode: 0o600 });
+
+    expect(readPendingGeneratedRepairTreatmentOutcomes()).toEqual([expect.objectContaining({
+      generationId: item.repairGenerationId,
+      attemptHash: transition.treatmentOutcomeWitness!.attemptHash,
+      outcome: 'converted',
+      candidate: expect.objectContaining({ itemId: item.id }),
+    })]);
+    expect(acknowledgeGeneratedRepairTreatmentOutcome(
+      item.repairGenerationId!,
+      transition.treatmentOutcomeWitness!.attemptHash,
+    )).toBe(true);
+    expect(readPendingGeneratedRepairTreatmentOutcomes()).toEqual([]);
   });
 
   it('exhausts after two distinct empty-diff attempts and deduplicates replay', () => {
@@ -207,8 +273,21 @@ describe('generated repair lifecycle store', () => {
 
     expect(first).toMatchObject({ disposition: 'active', authoritativeEmptyRuns: 1, recorded: true });
     expect(replay).toMatchObject({ disposition: 'active', authoritativeEmptyRuns: 1, recorded: false });
-    expect(second).toMatchObject({ disposition: 'exhausted', authoritativeEmptyRuns: 2, recorded: true });
+    expect(second).toMatchObject({
+      disposition: 'exhausted',
+      authoritativeEmptyRuns: 2,
+      recorded: true,
+      treatmentOutcomeWitness: {
+        outcome: 'not-converted',
+        disposition: 'exhausted',
+        generationId: expect.stringMatching(/^[a-f0-9]{64}$/),
+        attemptHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
+    expect(replay).not.toHaveProperty('treatmentOutcomeWitness');
     expect(readGeneratedRepairLifecycle(item).disposition).toBe('exhausted');
+    expect(readGeneratedRepairTerminalOutcome(second.treatmentOutcomeWitness!.generationId))
+      .toEqual(second.treatmentOutcomeWitness);
   });
 
   it('rejects a replay that changes the authoritative backend for one attempt', () => {

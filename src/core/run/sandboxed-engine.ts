@@ -102,6 +102,7 @@ import {
 import { causalMetadata, runEventSummary, routeSnapshot } from '../learning/causal.js';
 import { assertSafeExecutionIdentity } from '../fleet/attempt-identity.js';
 import { classifyDiff, isTrivialProposal } from '../../planning/triviality.js';
+import { isDiffDedupResult } from '../inbox/store.js';
 
 export interface SandboxedEngineResult {
   /** Delegated RunState (status/usage/engineModel/engineTier). */
@@ -240,6 +241,14 @@ function proposalOutcome(
         }
       : {}),
   };
+}
+
+function duplicateDiffOutcome(proposal: Proposal, diff: SandboxDiff): RunProposalOutcome {
+  return proposalOutcome(
+    'proposal-disabled',
+    `duplicate diff skipped; existing pending proposal ${proposal.id} remains authoritative`,
+    diff,
+  );
 }
 
 function captureGateVerifyResult(reason: string): ProposalVerifyResult {
@@ -1080,6 +1089,13 @@ export async function captureSandboxedProposal(
 
     const inbox = selectInboxStore(cfg);
     const proposal = inbox.create(proposalInput);
+    if (isDiffDedupResult(proposal)) {
+      const outcome = duplicateDiffOutcome(proposal, diff);
+      return {
+        state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
+        proposalOutcome: outcome,
+      };
+    }
     const persisted = inbox.load(proposal.id);
     const durablePending =
       proposal.status === 'pending' &&
@@ -1729,73 +1745,77 @@ export async function runEngineSandboxed(
               actionCounts: actionCountsWithOutcome(actionCounts, filedOutcomeForMetadata),
             }),
           });
-          proposalId = proposal.id;
-          proposalOutcomeResult = proposalOutcome('filed', 'proposal filed', effDiff, proposal.id);
-          // M246: record telemetry fields on the decision entry (additive, never-throws).
-          try {
-            const { recordDecision } = await import('../fleet/decisions-ledger.js');
-            recordDecision({
-              ts: new Date().toISOString(),
-              proposalId: proposal.id,
-              ...sandboxedProducerCausalMetadata({
-                engine,
-                engineModel,
-                tier,
-                runId: id,
-                workItemId: opts.workItemId,
-                workSource: opts.workSource,
+          if (isDiffDedupResult(proposal)) {
+            proposalOutcomeResult = duplicateDiffOutcome(proposal, effDiff);
+          } else {
+            proposalId = proposal.id;
+            proposalOutcomeResult = proposalOutcome('filed', 'proposal filed', effDiff, proposal.id);
+            // M246: record telemetry fields on the decision entry (additive, never-throws).
+            try {
+              const { recordDecision } = await import('../fleet/decisions-ledger.js');
+              recordDecision({
+                ts: new Date().toISOString(),
                 proposalId: proposal.id,
-                outcome: proposalOutcomeResult,
-                usage,
+                ...sandboxedProducerCausalMetadata({
+                  engine,
+                  engineModel,
+                  tier,
+                  runId: id,
+                  workItemId: opts.workItemId,
+                  workSource: opts.workSource,
+                  proposalId: proposal.id,
+                  outcome: proposalOutcomeResult,
+                  usage,
+                  durationMs: _spawnDurationMs,
+                  status: 'done',
+                  actionCounts: actionCountsWithOutcome(actionCounts, proposalOutcomeResult),
+                }),
+                action: 'proposed',
+                engine,
+                model: engineModel,
+                // M337 (review fix): `usage` includes verify-to-green repair
+                // spend when the loop ran — book the true totals.
+                costUsd: usage?.estCostUsd ?? _computedCost,
+                tokensIn: usage?.tokensIn ?? _resUsage?.tokensIn,
+                tokensOut: usage?.tokensOut ?? _resUsage?.tokensOut,
                 durationMs: _spawnDurationMs,
-                status: 'done',
-                actionCounts: actionCountsWithOutcome(actionCounts, proposalOutcomeResult),
-              }),
-              action: 'proposed',
-              engine,
-              model: engineModel,
-              // M337 (review fix): `usage` includes verify-to-green repair
-              // spend when the loop ran — book the true totals.
-              costUsd: usage?.estCostUsd ?? _computedCost,
-              tokensIn: usage?.tokensIn ?? _resUsage?.tokensIn,
-              tokensOut: usage?.tokensOut ?? _resUsage?.tokensOut,
-              durationMs: _spawnDurationMs,
-              cacheHit: _resUsage ? (_resUsage.tokensIn === 0 && _computedCost === 0) : false,
-            });
-          } catch {
-            // telemetry is best-effort — never fails the run
-          }
-          // M249: RunCache shadow write — record the (key → outcome) entry for
-          // measurement. Fire-and-forget, never throws, never changes run behavior.
-          // Flag-off (default cacheShadow === false) → cacheWrite is a no-op.
-          try {
-            if (_shadowCacheKey) {
-              const _entry: CacheEntry = {
-                key: _shadowCacheKey,
-                patch: scrubbed,
-                provenanceSig,
-                engineModel,
-                tier,
-                diffHash,
-                repoTreeSha: (() => {
-                  try {
-                    return execSync('git rev-parse HEAD:', {
-                      cwd: opts.sourceRepo,
-                      encoding: 'utf8',
-                      stdio: ['pipe', 'pipe', 'pipe'],
-                    }).trim();
-                  } catch { return 'unknown'; }
-                })(),
-                verdictAtWrite: 'unknown',
-                shipOutcomes: { ship: 0, reject: 0 },
-                createdAt: new Date().toISOString(),
-                lastHit: new Date().toISOString(),
-                hits: 0,
-                schemaVersion: 1,
-              };
-              cacheWrite(cfg, _entry, opts.sourceRepo);
+                cacheHit: _resUsage ? (_resUsage.tokensIn === 0 && _computedCost === 0) : false,
+              });
+            } catch {
+              // telemetry is best-effort — never fails the run
             }
-          } catch { /* shadow write is best-effort */ }
+            // M249: RunCache shadow write — record the (key → outcome) entry for
+            // measurement. Fire-and-forget, never throws, never changes run behavior.
+            // Flag-off (default cacheShadow === false) → cacheWrite is a no-op.
+            try {
+              if (_shadowCacheKey) {
+                const _entry: CacheEntry = {
+                  key: _shadowCacheKey,
+                  patch: scrubbed,
+                  provenanceSig,
+                  engineModel,
+                  tier,
+                  diffHash,
+                  repoTreeSha: (() => {
+                    try {
+                      return execSync('git rev-parse HEAD:', {
+                        cwd: opts.sourceRepo,
+                        encoding: 'utf8',
+                        stdio: ['pipe', 'pipe', 'pipe'],
+                      }).trim();
+                    } catch { return 'unknown'; }
+                  })(),
+                  verdictAtWrite: 'unknown',
+                  shipOutcomes: { ship: 0, reject: 0 },
+                  createdAt: new Date().toISOString(),
+                  lastHit: new Date().toISOString(),
+                  hits: 0,
+                  schemaVersion: 1,
+                };
+                cacheWrite(cfg, _entry, opts.sourceRepo);
+              }
+            } catch { /* shadow write is best-effort */ }
+          }
           } // end if (_m275ShouldFile)
           }
         } else {

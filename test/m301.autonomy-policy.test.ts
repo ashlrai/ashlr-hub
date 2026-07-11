@@ -457,16 +457,69 @@ describe('M301 autonomy evidence pack persistence', () => {
     const read = readAutonomyEvidencePack('prop-read');
     expect(read?.proposal.id).toBe('prop-read');
     expect(read?.policy?.action).toBe('merge-main');
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(evidenceDir()).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(evidencePath('prop-read')).mode & 0o777).toBe(0o600);
+    }
   });
 
-  it('lists newest-first, caps results, and skips malformed JSON', () => {
+  it.skipIf(process.platform === 'win32')('single-pack reads refuse symlinks and oversized files', () => {
+    const pack = packFor('prop-bounded-read', '2026-07-01T00:00:00.000Z');
+    expect(persistAutonomyEvidencePack(pack)).toBe(true);
+    const target = path.join(tmpHome, 'outside-evidence.json');
+    fs.renameSync(evidencePath(pack.proposal.id), target);
+    fs.symlinkSync(target, evidencePath(pack.proposal.id));
+
+    expect(readAutonomyEvidencePack(pack.proposal.id)).toBeNull();
+
+    fs.unlinkSync(evidencePath(pack.proposal.id));
+    fs.writeFileSync(evidencePath(pack.proposal.id), 'x'.repeat(1024 * 1024 + 1), { mode: 0o600 });
+    expect(readAutonomyEvidencePack(pack.proposal.id)).toBeNull();
+  });
+
+  it('lists newest-first, caps results, and marks malformed JSON as degraded', () => {
     expect(persistAutonomyEvidencePack(packFor('prop-old', '2026-07-01T00:00:00.000Z'))).toBe(true);
     expect(persistAutonomyEvidencePack(packFor('prop-new', '2026-07-02T00:00:00.000Z'))).toBe(true);
-    fs.mkdirSync(evidenceDir(), { recursive: true });
+    fs.mkdirSync(evidenceDir(), { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(evidenceDir(), 'broken.json'), '{ nope', 'utf8');
 
     const packs = listAutonomyEvidencePacks(1);
     expect(packs).toHaveLength(1);
     expect(packs[0]?.proposal.id).toBe('prop-new');
+    expect(packs.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidFiles: 1,
+      unreadableFiles: 0,
+    });
+  });
+
+  it('degrades aliased evidence files whose filename does not bind the proposal id', () => {
+    const pack = packFor('prop-bound', '2026-07-02T00:00:00.000Z');
+    expect(persistAutonomyEvidencePack(pack)).toBe(true);
+    fs.copyFileSync(evidencePath(pack.proposal.id), path.join(evidenceDir(), 'alias.json'));
+
+    const packs = listAutonomyEvidencePacks(10);
+    expect(packs.map((candidate) => candidate.proposal.id)).toEqual(['prop-bound']);
+    expect(packs.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidFiles: 1,
+    });
+  });
+
+  it('bounds physical directory enumeration before filtering evidence filenames', () => {
+    fs.mkdirSync(evidenceDir(), { recursive: true, mode: 0o700 });
+    for (let index = 0; index < 2_049; index++) {
+      fs.writeFileSync(path.join(evidenceDir(), `noise-${index}.tmp`), '', 'utf8');
+    }
+
+    const packs = listAutonomyEvidencePacks(10);
+    expect(packs).toEqual([]);
+    expect(packs.sourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      limitExceeded: true,
+    });
   });
 });

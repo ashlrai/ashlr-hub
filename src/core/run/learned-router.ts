@@ -340,6 +340,7 @@ function dispatchYieldForBackend(
   let diffFileSamples = 0;
   let diffFilesTotal = 0;
   for (const event of events) {
+    if (event.basis === 'repair-lifecycle-candidate' || event.basis === 'repair-lifecycle-outcome') continue;
     if (event.backend !== backend) continue;
     if (event.source !== source) continue;
     if (!hasCurrentAuthoritativeAttemptLabel(event)) continue;
@@ -1081,19 +1082,38 @@ export function buildProducerScores(
     const entries = readDecisions({ sinceMs: windowStart });
     if (entries.length === 0) return map;
 
-    // Pass 1: producer identity per proposal (from 'proposed' entries),
-    // filtered to the requested taskClass. readDecisions returns newest-first,
-    // so the map MUST be complete before verdicts are attributed (a judged
-    // entry chronologically follows — and therefore precedes in this order —
-    // its 'proposed').
-    const producerOf = new Map<string, { engine: EngineId; tag: string }>();
+    // Pass 1: producer identity per proposal (from 'proposed' entries).
+    // Conflicting identities make the proposal ambiguous regardless of source
+    // labels, so neither producer can inherit its verdict or later outcome.
+    const producerCandidates = new Map<
+      string,
+      { engine: EngineId; tag: string; eligible: boolean }
+    >();
+    const ambiguousProducerIds = new Set<string>();
     for (const e of entries) {
       if (e.action !== 'proposed' || !e.engine) continue;
       const entryTaskClass = taskClassFromDecisionEntry(e);
-      if (entryTaskClass !== taskClass && entryTaskClass !== '*') continue;
-      if (producerOf.has(e.proposalId)) continue;
       const tag = canonicalModelTag(e.engine, e.model ?? '');
-      producerOf.set(e.proposalId, { engine: e.engine as EngineId, tag });
+      const producer = {
+        engine: e.engine as EngineId,
+        tag,
+        eligible: entryTaskClass === taskClass || entryTaskClass === '*',
+      };
+      const existing = producerCandidates.get(e.proposalId);
+      if (existing && (existing.engine !== producer.engine || existing.tag !== producer.tag)) {
+        producerCandidates.delete(e.proposalId);
+        ambiguousProducerIds.add(e.proposalId);
+        continue;
+      }
+      if (!ambiguousProducerIds.has(e.proposalId) && !existing) {
+        producerCandidates.set(e.proposalId, producer);
+      } else if (existing && producer.eligible && !existing.eligible) {
+        producerCandidates.set(e.proposalId, { ...existing, eligible: true });
+      }
+    }
+    const producerOf = new Map<string, { engine: EngineId; tag: string }>();
+    for (const [proposalId, producer] of producerCandidates) {
+      if (producer.eligible) producerOf.set(proposalId, producer);
     }
 
     // Pass 2: judged verdicts joined back to the producer.

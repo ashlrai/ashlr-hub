@@ -1,0 +1,146 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const recordDecision = vi.fn();
+
+vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
+  recordDecision,
+  readDecisions: vi.fn(() => []),
+}));
+
+vi.mock('../src/core/sandbox/worktree.js', () => ({
+  sandboxDiff: () => ({
+    files: 1,
+    patch: `diff --git a/src/fix.ts b/src/fix.ts\n${Array.from({ length: 20 }, (_, i) => `+const value${i} = ${i};`).join('\n')}`,
+    insertions: 20,
+    deletions: 0,
+  }),
+}));
+
+vi.mock('../src/core/run/completeness-gate.js', () => ({
+  runCompletenessGate: vi.fn(async () => ({ pass: true })),
+}));
+
+vi.mock('../src/core/knowledge/index.js', () => ({
+  scrubSecrets: (value: string) => value,
+}));
+
+vi.mock('../src/core/foundry/provenance.js', () => ({
+  hashDiff: () => 'shared-diff-hash',
+  signProvenance: () => 'shared-signature',
+}));
+
+vi.mock('../src/core/run/engines.js', () => ({
+  buildEngineCommand: vi.fn(() => ({ cmd: 'mock-engine', args: [] })),
+  spawnEngine: vi.fn(async () => ({
+    ok: true,
+    output: 'completed',
+    usage: { tokensIn: 10, tokensOut: 5 },
+  })),
+}));
+
+describe('M259 diff dedup producer credit', () => {
+  const originalHome = process.env.HOME;
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'ashlr-m259-credit-'));
+    process.env.HOME = home;
+    recordDecision.mockClear();
+  });
+
+  afterEach(() => {
+    process.env.HOME = originalHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('does not file or emit proposed telemetry for a reused proposal id', async () => {
+    const { createProposal, loadProposal } = await import('../src/core/inbox/store.js');
+    const existing = createProposal({
+      repo: '/tmp/repo',
+      origin: 'agent',
+      kind: 'patch',
+      title: 'original producer',
+      summary: 'original producer summary',
+      diff: 'original diff bytes',
+      diffHash: 'shared-diff-hash',
+      runId: 'run-original',
+      engineModel: 'claude:claude-sonnet-5',
+      engineTier: 'frontier',
+    });
+
+    const { captureSandboxedProposal } = await import('../src/core/run/sandboxed-engine.js');
+    const result = await captureSandboxedProposal('codex', 'retry the same fix', {
+      foundry: { completenessGate: true },
+    } as never, {
+      sourceRepo: '/tmp/repo',
+      existingWorktree: {
+        id: 'sandbox-retry',
+        sourceRepo: '/tmp/repo',
+        worktreePath: '/tmp/repo',
+        branch: 'ashlr-sandbox-retry',
+      },
+      runId: 'run-retry',
+    });
+
+    expect(result.proposalId).toBeUndefined();
+    expect(result.proposalOutcome).toMatchObject({
+      kind: 'proposal-disabled',
+      reason: `duplicate diff skipped; existing pending proposal ${existing.id} remains authoritative`,
+    });
+    expect(recordDecision).not.toHaveBeenCalled();
+    expect(loadProposal(existing.id)).toMatchObject({
+      id: existing.id,
+      status: 'pending',
+      runId: 'run-original',
+      engineModel: 'claude:claude-sonnet-5',
+    });
+    expect(readdirSync(join(home, '.ashlr', 'inbox')).filter((file) => file.endsWith('.json'))).toHaveLength(1);
+  });
+
+  it('does not report the direct sandbox producer path as newly filed', async () => {
+    const { createProposal, loadProposal } = await import('../src/core/inbox/store.js');
+    const existing = createProposal({
+      repo: '/tmp/repo',
+      origin: 'agent',
+      kind: 'patch',
+      title: 'first direct producer',
+      summary: 'first direct producer summary',
+      diff: 'original diff bytes',
+      diffHash: 'shared-diff-hash',
+      runId: 'run-first-direct',
+      engineModel: 'claude:claude-sonnet-5',
+      engineTier: 'frontier',
+    });
+
+    const { runEngineSandboxed } = await import('../src/core/run/sandboxed-engine.js');
+    const result = await runEngineSandboxed('codex', 'retry through direct capture', {
+      version: 1,
+      models: {},
+      foundry: { completenessGate: true, fleetMcp: false },
+    } as never, {
+      sourceRepo: '/tmp/repo',
+      existingWorktree: {
+        id: 'sandbox-direct-retry',
+        sourceRepo: '/tmp/repo',
+        worktreePath: '/tmp/repo',
+        branch: 'ashlr-sandbox-direct-retry',
+      },
+      runId: 'run-direct-retry',
+    });
+
+    expect(result.proposalId).toBeUndefined();
+    expect(result.proposalOutcome).toMatchObject({
+      kind: 'proposal-disabled',
+      reason: `duplicate diff skipped; existing pending proposal ${existing.id} remains authoritative`,
+    });
+    expect(recordDecision).not.toHaveBeenCalled();
+    expect(loadProposal(existing.id)).toMatchObject({
+      runId: 'run-first-direct',
+      engineModel: 'claude:claude-sonnet-5',
+    });
+    expect(readdirSync(join(home, '.ashlr', 'inbox')).filter((file) => file.endsWith('.json'))).toHaveLength(1);
+  });
+});

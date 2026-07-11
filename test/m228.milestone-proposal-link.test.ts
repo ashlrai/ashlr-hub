@@ -68,6 +68,11 @@ vi.mock('../src/core/fleet/judge-trace.js', () => ({ linkOutcome: vi.fn() }));
 vi.mock('../src/core/run/diff-safety.js', () => ({
   isDestructiveDiff: vi.fn(() => ({ destructive: false })),
 }));
+vi.mock('../src/core/inbox/proposal-mutation-lock.js', () => ({
+  acquireProposalMutationLock: () => ({ key: 'test-lock', token: Symbol('test-lock') }),
+  ownsProposalMutationLock: () => false,
+  releaseProposalMutationLock: vi.fn(),
+}));
 
 // ---------------------------------------------------------------------------
 // Lazy imports AFTER mocks are registered.

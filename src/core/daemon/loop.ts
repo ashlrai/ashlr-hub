@@ -189,14 +189,40 @@ import {
   generatedRepairCooldownKey,
   generatedRepairCooldownKeys,
   generatedRepairRetryPolicy,
+  acknowledgeGeneratedRepairTreatmentOutcome,
+  readPendingGeneratedRepairTreatmentOutcomes,
   recordGeneratedRepairLifecycle,
 } from '../fleet/generated-repair-lifecycle.js';
+import { generatedRepairLifecycleAttemptHash } from '../fleet/generated-repair-identity.js';
 import {
   scheduleResolutionObserverChild,
   type ScheduledResolutionObserverChild,
 } from './resolution-observer-scheduler.js';
 
 const GENERATED_REPAIR_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function flushPendingRepairTreatmentOutcomes(): void {
+  try {
+    for (const terminal of readPendingGeneratedRepairTreatmentOutcomes()) {
+      const witness: DispatchProductionEvent = {
+        ...terminal.candidate,
+        ts: new Date().toISOString(),
+        basis: 'repair-lifecycle-outcome',
+        repairTreatmentOutcome: terminal.outcome,
+        repairTreatmentAttemptHash: terminal.attemptHash,
+      };
+      const write = recordDispatchProduction(witness);
+      if (
+        write.recorded !== 1 ||
+        !acknowledgeGeneratedRepairTreatmentOutcome(terminal.generationId, terminal.attemptHash)
+      ) {
+        console.warn('[ashlr] daemon: repair treatment witness persistence incomplete');
+      }
+    }
+  } catch (err) {
+    console.warn('[ashlr] daemon: repair treatment witness reconciliation failed:', (err as Error)?.message ?? err);
+  }
+}
 
 function latestGeneratedRepairWorkedEvent(
   workedEvents: readonly WorkedEvent[],
@@ -1812,6 +1838,7 @@ export async function tick(
     mode: dcfg.mode,
     ...(opts.drain ? { drain: opts.drain } : {}),
   });
+  if (!opts.dryRun) flushPendingRepairTreatmentOutcomes();
   const recordTick = (t: DaemonTick): DaemonTick => {
     const tick: DaemonTick = {
       ...(opts.dryRun ? { ...t, dryRun: true } : t),
@@ -2588,7 +2615,17 @@ export async function tick(
   const ordinarySelectionItems = dispatchBlockedRepairIds.size > 0
     ? backlogItems.filter((item) => !dispatchBlockedRepairIds.has(item.id))
     : backlogItems;
-  const selectionItems = drainMode ? drainAvailableItems : ordinarySelectionItems;
+  const automaticOrdinarySelectionItems = automaticDrain && drainMode
+    ? ordinarySelectionItems.filter((item) => !isDrainCandidate(item, drainMode))
+    : [];
+  const automaticOrdinaryEligibleItems = automaticOrdinarySelectionItems.filter(
+    (item) => !isSelectionBlocked(item),
+  );
+  const selectionItems = automaticDrain
+    ? [...drainAvailableItems, ...automaticOrdinarySelectionItems]
+    : drainMode
+      ? drainAvailableItems
+      : ordinarySelectionItems;
   const rawSelectCount = daemonQueueSelectionLimit({
     perTickItems: dcfg.perTickItems,
     remainingBudgetUsd: remainingBudget,
@@ -2598,7 +2635,7 @@ export async function tick(
     minPerItemUsd: MIN_PER_ITEM_USD,
   });
   const drainLimit = resolveDrainLimit(liveCfg, drainMode, opts.drainLimit);
-  const selectCount = typeof drainLimit === 'number'
+  const selectCount = !automaticDrain && typeof drainLimit === 'number'
     ? Math.min(rawSelectCount, drainLimit)
     : rawSelectCount;
   const summarizeSelectionBlockers = (items: WorkItem[]) => {
@@ -2678,7 +2715,27 @@ export async function tick(
     return out;
   };
 
-  let selected = selectRoundRobinCandidates(selectionItems, selectCount);
+  let selected: WorkItem[];
+  if (automaticDrain && selectCount > 1 && automaticOrdinaryEligibleItems.length > 0) {
+    const repairSlots = Math.min(
+      selectCount - 1,
+      typeof drainLimit === 'number' ? drainLimit : selectCount - 1,
+    );
+    const repairs = selectRoundRobinCandidates(drainAvailableItems, repairSlots);
+    const ordinary = selectRoundRobinCandidates(
+      automaticOrdinaryEligibleItems,
+      selectCount - repairs.length,
+    );
+    selected = [
+      ...repairs,
+      ...ordinary,
+    ];
+  } else {
+    const automaticRepairCount = automaticDrain && typeof drainLimit === 'number'
+      ? Math.min(selectCount, drainLimit)
+      : selectCount;
+    selected = selectRoundRobinCandidates(selectionItems, automaticRepairCount);
+  }
   let selectionTelemetryItems = selectionItems;
   let selectionTelemetryRawSelectCount = rawSelectCount;
   let selectionTelemetrySelectCount = selectCount;
@@ -4138,11 +4195,14 @@ export async function tick(
       for (const outcome of outcomes) {
         if (outcome.status === 'fulfilled' && outcome.value.dispatched) {
           if (handoffFailedItemIds.has(outcome.value.item.id)) continue;
-          if (outcome.value.dispatch?.production?.outcome === 'proposal-disabled') {
+          const production = outcome.value.dispatch?.production;
+          const duplicateDiff = production?.outcome === 'proposal-disabled' &&
+            production.reason?.startsWith('duplicate diff skipped;') === true;
+          if (production?.outcome === 'proposal-disabled' && !duplicateDiff) {
             continue;
           }
           const outcomeLabel =
-            workedOutcomeFromDispatchProduction(outcome.value.dispatch?.production) ??
+            (duplicateDiff ? 'empty' : workedOutcomeFromDispatchProduction(production)) ??
             (proposalItemIds.has(outcome.value.item.id) ? 'diff' : 'empty');
           // M113: route through coordinator (Local → worked-ledger; Shared → global store).
           if (!coordinator.recordOutcome(
@@ -4160,6 +4220,7 @@ export async function tick(
 
   // Generated-repair lifecycle is a local, atomic control store. Shared-queue
   // mode stays fail-closed until claim fencing can bind late outcomes safely.
+  const repairTreatmentOutcomeWitnesses: DispatchProductionEvent[] = [];
   if (dispatchedCount > 0 && liveCfg.fleet?.sharedQueue?.mode !== 'filesystem') {
     try {
       for (const outcome of outcomes) {
@@ -4174,17 +4235,49 @@ export async function tick(
         const production = trace?.production;
         const attemptId = trace?.trajectoryId ?? trace?.runId ?? production?.runId;
         if (!production || !attemptId) continue;
+        const productionEvent = productionEvents.find((event) =>
+          event.itemId === outcome.value.item.id && event.repairGenerationId !== undefined
+        );
+        if (productionEvent?.repairTreatmentUnitId && productionEvent.repairTreatment) {
+          const treatmentCandidate: DispatchProductionEvent = {
+            ...productionEvent,
+            basis: 'repair-lifecycle-candidate',
+            repairTreatmentAttemptHash: generatedRepairLifecycleAttemptHash(attemptId),
+          };
+          const candidateWrite = recordDispatchProduction({
+            ...treatmentCandidate,
+          });
+          if (candidateWrite.recorded !== 1) {
+            console.warn('[ashlr] daemon:tick repair treatment candidate persistence unavailable');
+          }
+        }
         if (
           production.outcome === 'empty-diff' &&
           !production.reason?.startsWith('best-of-') &&
           trace.backend &&
           generatedRepairExecutionBackendAllowed(outcome.value.item, trace.backend, routingCfg)
         ) {
-          recordGeneratedRepairLifecycle(outcome.value.item, {
+          const transition = recordGeneratedRepairLifecycle(outcome.value.item, {
             kind: 'empty-diff',
             attemptId,
             backend: trace.backend,
+            ...(productionEvent?.repairTreatmentUnitId && productionEvent.repairTreatment
+              ? { treatmentCandidate: {
+                ...productionEvent,
+                basis: 'repair-lifecycle-candidate',
+                repairTreatmentAttemptHash: generatedRepairLifecycleAttemptHash(attemptId),
+              } satisfies DispatchProductionEvent }
+              : {}),
           });
+          const witness = transition.treatmentOutcomeWitness;
+          if (witness && productionEvent?.repairTreatmentUnitId && productionEvent.repairTreatment) {
+            repairTreatmentOutcomeWitnesses.push({
+              ...productionEvent,
+              basis: 'repair-lifecycle-outcome',
+              repairTreatmentOutcome: witness.outcome,
+              repairTreatmentAttemptHash: witness.attemptHash,
+            });
+          }
           continue;
         }
         if (production.outcome !== 'proposal-created') continue;
@@ -4207,16 +4300,50 @@ export async function tick(
           !proposal.trajectoryId ||
           trace.trajectoryId !== proposal.trajectoryId
         ) continue;
-        recordGeneratedRepairLifecycle(outcome.value.item, {
+        const transition = recordGeneratedRepairLifecycle(outcome.value.item, {
           kind: 'proposal-created',
           attemptId,
           proposalId: proposal.id,
+          ...(productionEvent?.repairTreatmentUnitId && productionEvent.repairTreatment
+            ? { treatmentCandidate: {
+              ...productionEvent,
+              basis: 'repair-lifecycle-candidate',
+              repairTreatmentAttemptHash: generatedRepairLifecycleAttemptHash(attemptId),
+            } satisfies DispatchProductionEvent }
+            : {}),
         });
+        const witness = transition.treatmentOutcomeWitness;
+        if (witness && productionEvent?.repairTreatmentUnitId && productionEvent.repairTreatment) {
+          repairTreatmentOutcomeWitnesses.push({
+            ...productionEvent,
+            basis: 'repair-lifecycle-outcome',
+            repairTreatmentOutcome: witness.outcome,
+            repairTreatmentAttemptHash: witness.attemptHash,
+          });
+        }
       }
     } catch (err) {
       console.warn('[ashlr] daemon:tick generated repair lifecycle failed:', (err as Error)?.message ?? err);
     }
   }
+
+  if (repairTreatmentOutcomeWitnesses.length > 0) {
+    for (const witness of repairTreatmentOutcomeWitnesses) {
+      const witnessWrite = recordDispatchProduction(witness);
+      if (
+        witnessWrite.recorded !== 1 ||
+        !witness.repairGenerationId ||
+        !witness.repairTreatmentAttemptHash ||
+        !acknowledgeGeneratedRepairTreatmentOutcome(
+          witness.repairGenerationId,
+          witness.repairTreatmentAttemptHash,
+        )
+      ) {
+        console.warn('[ashlr] daemon:tick repair treatment witness persistence incomplete');
+      }
+    }
+  }
+  flushPendingRepairTreatmentOutcomes();
 
   if (dispatchedCount > 0) {
     try {

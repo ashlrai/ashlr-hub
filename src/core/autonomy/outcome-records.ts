@@ -16,8 +16,15 @@ import { loadWorkedLedger } from '../fleet/worked-ledger.js';
 import type { RacingStats } from '../fleet/model-racing.js';
 import { racingStats } from '../fleet/model-racing.js';
 import { readDecisions } from '../fleet/decisions-ledger.js';
-import type { AutonomyEvidencePack } from './evidence-pack.js';
-import { listAutonomyEvidencePacks } from './evidence-pack.js';
+import type {
+  AutonomyEvidencePack,
+  AutonomyEvidencePackList,
+  AutonomyEvidenceSourceQuality,
+} from './evidence-pack.js';
+import {
+  evidencePackMatchesLiveProposal,
+  listAutonomyEvidencePacks,
+} from './evidence-pack.js';
 
 const MAX_JOINED_EVENTS_PER_RECORD = 20;
 
@@ -79,8 +86,11 @@ export interface OutcomeRecordJudgeTrace {
 
 export interface OutcomeRecordEvidence {
   generatedAt: string;
+  proposalId?: string;
+  diffHash?: string;
   target: AutonomyEvidencePack['target'];
   trustBasis: AutonomyEvidencePack['trustBasis'];
+  remotePreferred?: boolean;
   riskClass: AutonomyEvidencePack['riskClass'];
   policy?: AutonomyEvidencePack['policy'];
   gates: AutonomyEvidencePack['gates'];
@@ -109,6 +119,7 @@ export interface OutcomeRecord {
   judgeTraces: OutcomeRecordJudgeTrace[];
   evidencePacks: OutcomeRecordEvidence[];
   workedEvents: OutcomeRecordWorkedEvent[];
+  evidenceSourceQuality?: AutonomyEvidenceSourceQuality;
   racing?: RacingStats;
 }
 
@@ -238,8 +249,11 @@ function judgeTraceSnapshot(trace: JudgeTrace): OutcomeRecordJudgeTrace {
 function evidenceSnapshot(pack: AutonomyEvidencePack): OutcomeRecordEvidence {
   return {
     generatedAt: pack.generatedAt,
+    proposalId: pack.proposal.id,
+    ...(pack.diff.hash ? { diffHash: pack.diff.hash } : {}),
     target: pack.target,
     trustBasis: pack.trustBasis,
+    remotePreferred: pack.remotePreferred,
     riskClass: pack.riskClass,
     ...(pack.policy ? { policy: pack.policy } : {}),
     gates: pack.gates,
@@ -285,6 +299,7 @@ export function listOutcomeRecords(
     const evidence = safeArray(() =>
       (deps.listAutonomyEvidencePacks ?? listAutonomyEvidencePacks)(Math.max(cap * 4, 200)),
     );
+    const evidenceSourceQuality = (evidence as AutonomyEvidencePackList).sourceQuality;
     const workedEvents = safeValue(() => (deps.loadWorkedLedger ?? loadWorkedLedger)())?.events ?? [];
     const racing = safeValue(() => (deps.racingStats ?? racingStats)());
 
@@ -345,6 +360,7 @@ export function listOutcomeRecords(
         judgeTraces: proposalTraces.map(judgeTraceSnapshot),
         evidencePacks: proposalEvidence.map(evidenceSnapshot),
         workedEvents: proposalWorked.map(workedSnapshot),
+        ...(evidenceSourceQuality ? { evidenceSourceQuality } : {}),
         ...(racing ? { racing } : {}),
       };
     });
@@ -373,7 +389,7 @@ export function listOutcomeRecords(
  * resource strategy mode selection.
  */
 export function listReadyEvidenceOutcomeRecords(
-  opts?: { limit?: number; deps?: ReadyEvidenceOutcomeRecordDeps },
+  opts?: { limit?: number; now?: Date; maxAgeMs?: number; deps?: ReadyEvidenceOutcomeRecordDeps },
 ): OutcomeRecord[] {
   const deps = opts?.deps ?? {};
   const cap = boundedLimit(opts?.limit);
@@ -383,6 +399,20 @@ export function listReadyEvidenceOutcomeRecords(
   try {
     const evidence = safeArray(() => readEvidence(Math.max(cap * 4, 24)))
       .sort(byNewestTs((pack) => pack.generatedAt));
+    const sourceQuality = (evidence as AutonomyEvidencePackList).sourceQuality;
+    if (sourceQuality && (sourceQuality.sourceState !== 'healthy' || sourceQuality.complete !== true)) {
+      return [];
+    }
+    const effectiveSourceQuality: AutonomyEvidenceSourceQuality = sourceQuality ?? {
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+      filesRead: evidence.length,
+      bytesRead: 0,
+      invalidFiles: 0,
+      unreadableFiles: 0,
+      limitExceeded: false,
+    };
     const latestByProposal = new Map<string, AutonomyEvidencePack>();
     for (const pack of evidence) {
       if (!latestByProposal.has(pack.proposal.id)) latestByProposal.set(pack.proposal.id, pack);
@@ -392,7 +422,10 @@ export function listReadyEvidenceOutcomeRecords(
     for (const pack of latestByProposal.values()) {
       if (records.length >= cap) break;
       const proposal = safeValue(() => readProposal(pack.proposal.id)) ?? null;
-      if (!proposal || proposal.status !== 'pending') continue;
+      if (!proposal || !evidencePackMatchesLiveProposal(pack, proposal, {
+        nowMs: opts?.now?.getTime(),
+        maxAgeMs: opts?.maxAgeMs,
+      })) continue;
       records.push({
         version: 1,
         proposal: proposalSnapshot(proposal),
@@ -401,6 +434,7 @@ export function listReadyEvidenceOutcomeRecords(
         judgeTraces: [],
         evidencePacks: [evidenceSnapshot(pack)],
         workedEvents: [],
+        evidenceSourceQuality: effectiveSourceQuality,
       });
     }
     return records;

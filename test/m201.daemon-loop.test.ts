@@ -964,6 +964,39 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
   });
 
+  it('A1-drain-auto-fairness: reserves one ordinary slot when automatic repair drain has capacity', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    generic.score = 100;
+    const firstReslice = makeDiagnosticResliceItem(repo.dir, 'abcdef123456', 2);
+    const secondReslice = makeDiagnosticResliceItem(repo.dir, 'fedcba654321', 1);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [generic, firstReslice, secondReslice],
+    });
+
+    const config = cfgBuiltin({ perTickItems: 2, parallel: 2 });
+    config.daemon = {
+      ...config.daemon,
+      drainLimits: { diagnosticReslices: 1 },
+    };
+    const result = await tick(config, { dryRun: false });
+    const dispatchedIds = mockRunSwarm.mock.calls.map((call) => call[2]?.workItemId);
+
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(2);
+    expect(result.drain).toMatchObject({
+      mode: 'diagnostic-reslices',
+      selected: 1,
+      automatic: true,
+      selectedItemIds: [firstReslice.id],
+    });
+    expect(dispatchedIds).toEqual(expect.arrayContaining([firstReslice.id, generic.id]));
+    expect(dispatchedIds).not.toContain(secondReslice.id);
+  });
+
   it('A1-drain-auto-local-only: automatic diagnostic drains preserve local-only local-coder routing', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -3062,6 +3095,13 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       available: true,
       disposition: 'retired',
     });
+    expect(readDispatchProductionEvents().find((event) =>
+      event.itemId === repair.id && event.repairTreatmentOutcome === 'converted'
+    )).toMatchObject({
+      repairGenerationId: repair.repairGenerationId,
+      proposalCreated: true,
+      repairTreatmentAttemptHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
   });
 
   it('A1h5b1a: excludes a repair when only its prior empty backend is routable', async () => {
@@ -3115,6 +3155,14 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     mockRouteBackend.mockReturnValue({ backend: 'kimi', tier: 'mid', reason: 'same-tier alternative' });
     mockEngineTierOf.mockReturnValue('mid');
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-diagnostic-second-empty',
+      status: 'done',
+      engine: 'kimi',
+      engineTier: 'mid',
+      usage: { totalTokens: 100, estCostUsd: 0.002, steps: 1 },
+      proposalOutcome: { kind: 'empty-diff', reason: 'alternative backend made no changes' },
+    });
 
     const result = await tick({
       ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
@@ -3138,6 +3186,19 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       repairAttemptOrdinal: 2,
       repairPreviousBackend: 'local-coder',
       backend: 'kimi',
+    });
+    expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
+      available: true,
+      disposition: 'exhausted',
+      authoritativeEmptyRuns: 2,
+    });
+    expect(readDispatchProductionEvents().find((event) =>
+      event.itemId === repair.id && event.repairTreatmentOutcome === 'not-converted'
+    )).toMatchObject({
+      repairGenerationId: repair.repairGenerationId,
+      proposalCreated: false,
+      repairAttemptOrdinal: 2,
+      repairTreatmentAttemptHash: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
   });
 
@@ -3177,6 +3238,9 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       disposition: 'active',
       authoritativeEmptyRuns: 0,
     });
+    expect(readDispatchProductionEvents().some((event) =>
+      event.itemId === repair.id && event.repairTreatmentOutcome !== undefined
+    )).toBe(false);
   });
 
   it('A1h5b3: diagnostic repairs bypass Best-of-N and record exact empty lifecycle evidence', async () => {

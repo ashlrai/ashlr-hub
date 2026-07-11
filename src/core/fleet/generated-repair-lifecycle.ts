@@ -21,6 +21,7 @@ import { dirname, join, resolve } from 'node:path';
 import { isOuterAttemptIdentity, isSafeExecutionIdentity } from './attempt-identity.js';
 import { isTrustedDiagnosticResliceItem, isTrustedGeneratedRepairItem } from './self-heal-trust.js';
 import type { EngineId, RepairTreatment, WorkItem } from '../types.js';
+import type { DispatchProductionEvent } from './dispatch-production-ledger.js';
 import {
   readRepairHandoffs,
   repairGenerationIdFromHandoffId,
@@ -28,7 +29,11 @@ import {
   repairHandoffV2JournalPath,
   type RepairHandoffObservation,
 } from './repair-handoff-journal.js';
-import { repairTreatmentForUnitId, repairTreatmentUnitId } from './generated-repair-identity.js';
+import {
+  generatedRepairLifecycleAttemptHash,
+  repairTreatmentForUnitId,
+  repairTreatmentUnitId,
+} from './generated-repair-identity.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 
 const MAX_RECORDS = 100_000;
@@ -46,6 +51,9 @@ interface GeneratedRepairLifecycleRecord {
   disposition: GeneratedRepairDisposition;
   emptyAttemptHashes: string[];
   emptyAttemptBackends?: EngineId[];
+  terminalAttemptHash?: string;
+  treatmentCandidate?: DispatchProductionEvent;
+  treatmentWitnessRecordedAt?: string;
   updatedAt: string;
 }
 
@@ -65,6 +73,9 @@ function cloneLedger(ledger: GeneratedRepairLifecycleLedger): GeneratedRepairLif
       ...(record.emptyAttemptBackends
         ? { emptyAttemptBackends: record.emptyAttemptBackends.slice() }
         : {}),
+      ...(record.treatmentCandidate
+        ? { treatmentCandidate: structuredClone(record.treatmentCandidate) }
+        : {}),
     })),
   };
 }
@@ -78,12 +89,45 @@ export interface GeneratedRepairLifecycleResult {
 }
 
 export type GeneratedRepairLifecycleEvidence =
-  | { kind: 'proposal-created'; attemptId: string; proposalId: string; ts?: string }
-  | { kind: 'empty-diff'; attemptId: string; backend: EngineId; ts?: string }
+  | { kind: 'proposal-created'; attemptId: string; proposalId: string; ts?: string; treatmentCandidate?: DispatchProductionEvent }
+  | { kind: 'empty-diff'; attemptId: string; backend: EngineId; ts?: string; treatmentCandidate?: DispatchProductionEvent }
   | { kind: 'non-terminal'; attemptId?: string; ts?: string };
 
 export interface GeneratedRepairLifecycleTransitionResult extends GeneratedRepairLifecycleResult {
   recorded: boolean;
+  /** Present only when this call durably committed a new terminal treatment outcome. */
+  treatmentOutcomeWitness?: GeneratedRepairTreatmentOutcomeWitness;
+}
+
+export interface GeneratedRepairTreatmentOutcomeWitness {
+  outcome: 'converted' | 'not-converted';
+  disposition: 'retired' | 'exhausted';
+  generationId: string;
+  attemptHash: string;
+}
+
+export interface PendingGeneratedRepairTreatmentOutcome extends GeneratedRepairTreatmentOutcomeWitness {
+  candidate: DispatchProductionEvent;
+}
+
+export function readGeneratedRepairTerminalOutcome(
+  generationId: string,
+): GeneratedRepairTreatmentOutcomeWitness | null {
+  if (!SHA256_RE.test(generationId)) return null;
+  const loaded = loadLedger();
+  if (!loaded.ok) return null;
+  const record = loaded.ledger.records.find((candidate) => candidate.generationId === generationId);
+  if (
+    !record ||
+    (record.disposition !== 'retired' && record.disposition !== 'exhausted') ||
+    !record.terminalAttemptHash
+  ) return null;
+  return {
+    outcome: record.disposition === 'retired' ? 'converted' : 'not-converted',
+    disposition: record.disposition,
+    generationId,
+    attemptHash: record.terminalAttemptHash,
+  };
 }
 
 export interface GeneratedRepairRetryPolicy {
@@ -232,13 +276,6 @@ export function generatedRepairCooldownKeys(item: WorkItem): string[] {
   return generations.map((generationId) => `${item.id}::generation:${generationId}`);
 }
 
-function attemptHash(attemptId: string): string {
-  return createHash('sha256').update(JSON.stringify([
-    'ashlr:generated-repair-attempt:v1',
-    attemptId,
-  ])).digest('hex');
-}
-
 function isLifecycleAttemptIdentity(value: unknown): value is string {
   if (isSafeExecutionIdentity(value)) return true;
   return typeof value === 'string' && value.startsWith('run:') && isOuterAttemptIdentity(value.slice(4));
@@ -250,6 +287,9 @@ function validRecord(value: unknown): value is GeneratedRepairLifecycleRecord {
   const disposition = record['disposition'];
   const hashes = record['emptyAttemptHashes'];
   const backends = record['emptyAttemptBackends'];
+  const terminalAttemptHash = record['terminalAttemptHash'];
+  const treatmentCandidate = record['treatmentCandidate'];
+  const treatmentWitnessRecordedAt = record['treatmentWitnessRecordedAt'];
   if (
     !SHA256_RE.test(String(record['generationId'] ?? '')) ||
     (disposition !== 'active' && disposition !== 'retired' && disposition !== 'exhausted') ||
@@ -269,6 +309,42 @@ function validRecord(value: unknown): value is GeneratedRepairLifecycleRecord {
   ) return false;
   if (disposition === 'active' && hashes.length > 1) return false;
   if (disposition === 'exhausted' && hashes.length !== 2) return false;
+  if (terminalAttemptHash !== undefined && (
+    disposition === 'active' || !SHA256_RE.test(String(terminalAttemptHash))
+  )) return false;
+  if (treatmentCandidate !== undefined && (
+    disposition === 'active' ||
+    !treatmentCandidate ||
+    typeof treatmentCandidate !== 'object' ||
+    Array.isArray(treatmentCandidate) ||
+    (treatmentCandidate as Record<string, unknown>)['basis'] !== 'repair-lifecycle-candidate' ||
+    (treatmentCandidate as Record<string, unknown>)['repairGenerationId'] !== record['generationId'] ||
+    typeof (treatmentCandidate as Record<string, unknown>)['repairTreatmentUnitId'] !== 'string' ||
+    typeof (treatmentCandidate as Record<string, unknown>)['repairTreatment'] !== 'string' ||
+    typeof (treatmentCandidate as Record<string, unknown>)['itemId'] !== 'string' ||
+    typeof (treatmentCandidate as Record<string, unknown>)['repo'] !== 'string' ||
+    typeof (treatmentCandidate as Record<string, unknown>)['ts'] !== 'string' ||
+    typeof (treatmentCandidate as Record<string, unknown>)['repairHandoffId'] !== 'string' ||
+    repairGenerationIdFromHandoffId(
+      (treatmentCandidate as Record<string, unknown>)['repairHandoffId'] as string,
+    ) !== record['generationId'] ||
+    repairTreatmentForUnitId(
+      (treatmentCandidate as Record<string, unknown>)['repairTreatmentUnitId'] as string,
+    ) !== (treatmentCandidate as Record<string, unknown>)['repairTreatment'] ||
+    typeof (
+      (treatmentCandidate as Record<string, unknown>)['trajectoryId'] ??
+      (treatmentCandidate as Record<string, unknown>)['runId']
+    ) !== 'string' ||
+    generatedRepairLifecycleAttemptHash(String(
+      (treatmentCandidate as Record<string, unknown>)['trajectoryId'] ??
+      (treatmentCandidate as Record<string, unknown>)['runId'],
+    )) !== terminalAttemptHash
+  )) return false;
+  if (treatmentWitnessRecordedAt !== undefined && (
+    treatmentCandidate === undefined ||
+    typeof treatmentWitnessRecordedAt !== 'string' ||
+    !Number.isFinite(Date.parse(treatmentWitnessRecordedAt))
+  )) return false;
   return true;
 }
 
@@ -532,6 +608,15 @@ function mergedLifecycleRecord(
       disposition,
       emptyAttemptHashes,
       emptyAttemptBackends,
+      ...(selected.at(-1)!.terminalAttemptHash
+        ? { terminalAttemptHash: selected.at(-1)!.terminalAttemptHash }
+        : {}),
+      ...(selected.at(-1)!.treatmentCandidate
+        ? { treatmentCandidate: structuredClone(selected.at(-1)!.treatmentCandidate!) }
+        : {}),
+      ...(selected.at(-1)!.treatmentWitnessRecordedAt
+        ? { treatmentWitnessRecordedAt: selected.at(-1)!.treatmentWitnessRecordedAt }
+        : {}),
       updatedAt: selected.at(-1)!.updatedAt,
     },
   };
@@ -696,7 +781,7 @@ function recordGeneratedRepairLifecycleUnlocked(
     if (!backendHistoryKnown) {
       return { ...resultFromRecord(false, existing), recorded: false };
     }
-    const hash = attemptHash(evidence.attemptId);
+    const hash = generatedRepairLifecycleAttemptHash(evidence.attemptId);
     const existingAttemptIndex = emptyAttemptHashes.indexOf(hash);
     if (existingAttemptIndex >= 0) {
       if (emptyAttemptBackends[existingAttemptIndex] !== evidence.backend) {
@@ -730,6 +815,10 @@ function recordGeneratedRepairLifecycleUnlocked(
     ...(backendHistoryKnown
       ? { emptyAttemptBackends: emptyAttemptBackends.slice(0, 2) }
       : {}),
+    terminalAttemptHash: generatedRepairLifecycleAttemptHash(evidence.attemptId),
+    ...(evidence.treatmentCandidate
+      ? { treatmentCandidate: structuredClone(evidence.treatmentCandidate) }
+      : {}),
     updatedAt: now,
   };
   loaded.ledger.records = loaded.ledger.records.filter(
@@ -738,8 +827,68 @@ function recordGeneratedRepairLifecycleUnlocked(
   upsertNewest(loaded.ledger, record);
   const recorded = saveLedger(loaded.ledger);
   return recorded
-    ? { ...resultFromRecord(true, record), recorded: true }
+    ? {
+      ...resultFromRecord(true, record),
+      recorded: true,
+      treatmentOutcomeWitness: {
+        outcome: disposition === 'retired' ? 'converted' : 'not-converted',
+        disposition,
+        generationId: id,
+        attemptHash: generatedRepairLifecycleAttemptHash(evidence.attemptId),
+      },
+    }
     : { available: false, disposition: 'active', authoritativeEmptyRuns: 0, recorded: false };
+}
+
+/** Durable terminal-label outbox; independent of observational ledger volume. */
+export function readPendingGeneratedRepairTreatmentOutcomes(): PendingGeneratedRepairTreatmentOutcome[] {
+  if (!lifecycleStorageAvailable()) return [];
+  const lock = acquireLocalStoreLock(lifecycleLockPath(), 250);
+  if (!lock) return [];
+  try {
+    const loaded = loadLedger();
+    if (!loaded.ok) return [];
+    return loaded.ledger.records.flatMap((record): PendingGeneratedRepairTreatmentOutcome[] => {
+      if (
+        (record.disposition !== 'retired' && record.disposition !== 'exhausted') ||
+        !record.terminalAttemptHash ||
+        !record.treatmentCandidate ||
+        record.treatmentWitnessRecordedAt
+      ) return [];
+      return [{
+        outcome: record.disposition === 'retired' ? 'converted' : 'not-converted',
+        disposition: record.disposition,
+        generationId: record.generationId,
+        attemptHash: record.terminalAttemptHash,
+        candidate: structuredClone(record.treatmentCandidate),
+      }];
+    });
+  } finally {
+    releaseLocalStoreLock(lock);
+  }
+}
+
+/** Acknowledge one outbox row only after its terminal witness append is durable. */
+export function acknowledgeGeneratedRepairTreatmentOutcome(
+  generationId: string,
+  attemptHash: string,
+  ts = new Date().toISOString(),
+): boolean {
+  if (!SHA256_RE.test(generationId) || !SHA256_RE.test(attemptHash) || !Number.isFinite(Date.parse(ts))) return false;
+  const lock = acquireLocalStoreLock(lifecycleLockPath(), 250);
+  if (!lock) return false;
+  try {
+    const loaded = loadLedger();
+    if (!loaded.ok) return false;
+    const record = loaded.ledger.records.find((candidate) => candidate.generationId === generationId);
+    if (!record || record.terminalAttemptHash !== attemptHash || !record.treatmentCandidate) return false;
+    if (record.treatmentWitnessRecordedAt) return true;
+    record.treatmentWitnessRecordedAt = new Date(ts).toISOString();
+    record.updatedAt = record.treatmentWitnessRecordedAt;
+    return saveLedger(loaded.ledger);
+  } finally {
+    releaseLocalStoreLock(lock);
+  }
 }
 
 function saveActiveEmptyProgress(

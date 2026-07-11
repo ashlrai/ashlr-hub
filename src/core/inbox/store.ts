@@ -41,6 +41,12 @@ import { proposalCompletesGoalMilestone } from '../goals/completion.js';
 // goals/* anywhere, so this import creates no cycle. goals/advance.ts imports
 // inbox/store.ts (one direction only).
 import { listGoals, updateMilestoneStatus as _updateMilestoneStatus } from '../goals/store.js';
+import {
+  acquireProposalMutationLock,
+  ownsProposalMutationLock,
+  releaseProposalMutationLock,
+  type ProposalMutationLock,
+} from './proposal-mutation-lock.js';
 
 // ---------------------------------------------------------------------------
 // Path helpers (re-resolved at call-time so tests can relocate HOME)
@@ -556,6 +562,17 @@ export function createProposal(
 }
 
 /**
+ * True only for the synthetic, non-persisted result returned when createProposal
+ * reuses an existing pending proposal's id for diffHash compatibility.
+ */
+export function isDiffDedupResult(proposal: Proposal): boolean {
+  return (
+    proposal.status === 'rejected' &&
+    proposal.decisionReason === `diffHash dedup: duplicate of ${proposal.id}`
+  );
+}
+
+/**
  * List all persisted proposals, most-recent first by `createdAt`.
  * Optionally filter by status.
  *
@@ -646,7 +663,11 @@ export function setStatus(
   status: ProposalStatus,
   result?: string,
   reason?: string,
+  ownerLock?: ProposalMutationLock,
 ): void {
+  const ownsLock = ownsProposalMutationLock(id, ownerLock);
+  const mutationLock = ownsLock ? ownerLock! : acquireProposalMutationLock(id);
+  if (!mutationLock) return;
   try {
     const existing = loadProposal(id);
     if (existing === null) return;
@@ -755,6 +776,8 @@ export function setStatus(
     );
   } catch {
     // Never throws.
+  } finally {
+    if (!ownsLock) releaseProposalMutationLock(mutationLock);
   }
 }
 
@@ -763,27 +786,33 @@ export function setStatus(
  *
  * Used by runAutoMergePass to increment judgeNonShipCount without touching any
  * other field. Pure persistence — NEVER changes status, NEVER applies anything.
- * No-op when the proposal does not exist or cannot be read.
- * Never throws.
+ * Returns true only when the update was durably persisted. Never throws.
  */
 export function updateProposalField(
   id: string,
   patch: Partial<Pick<Proposal, 'judgeNonShipCount' | 'verifyResult' | 'stuckPassCount' | 'remoteHandoff'>>,
-): void {
+  ownerLock?: ProposalMutationLock,
+): boolean {
+  const ownsLock = ownsProposalMutationLock(id, ownerLock);
+  const mutationLock = ownsLock ? ownerLock! : acquireProposalMutationLock(id);
+  if (!mutationLock) return false;
   try {
     const existing = loadProposal(id);
-    if (existing === null) return;
+    if (existing === null) return false;
     const updated: Proposal = sanitizeProposalForStore({ ...existing, ...patch });
     try {
       persistProposal(updated);
       if (patch.verifyResult !== undefined && proposalCompletesGoalMilestone(updated)) {
         linkMilestoneOutcome(id, 'applied');
       }
+      return true;
     } catch {
-      // Persistence failure — swallow; best-effort.
+      return false;
     }
   } catch {
-    // Never throws.
+    return false;
+  } finally {
+    if (!ownsLock) releaseProposalMutationLock(mutationLock);
   }
 }
 

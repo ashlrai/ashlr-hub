@@ -62,7 +62,18 @@ function initRepo(dir: string): void {
   git(dir, ['config', 'user.email', 'test@ashlr.test']);
   git(dir, ['config', 'user.name', 'Ashlr Test']);
   fs.writeFileSync(path.join(dir, 'README.md'), '# fixture\n', 'utf8');
-  git(dir, ['add', 'README.md']);
+  fs.writeFileSync(path.join(dir, 'ashlr.verify.json'), JSON.stringify({
+    schemaVersion: 1,
+    mode: 'replace-detected',
+    commands: [{
+      id: 'merge-test',
+      kind: 'test',
+      cmd: ['node', '-e', 'process.exit(0)'],
+      required: true,
+      profiles: ['merge'],
+    }],
+  }), 'utf8');
+  git(dir, ['add', 'README.md', 'ashlr.verify.json']);
   git(dir, ['commit', '-m', 'init']);
 }
 
@@ -260,8 +271,8 @@ describe('M315 remote PR handoff truth', () => {
       baseBranch: 'main',
       baseHead,
       diffHash,
-      verifiedAt: '2026-07-03T00:00:00.000Z',
-      source: 'auto-merge-preflight',
+      verifiedAt: expect.any(String),
+      source: 'auto-merge',
       commandKinds: ['test'],
     });
     expect(pack?.policy).toMatchObject({
@@ -270,7 +281,7 @@ describe('M315 remote PR handoff truth', () => {
     });
   });
 
-  it('evidence mode refuses handoff when stored verification lacks freshness metadata', async () => {
+  it('evidence mode replaces stored verification that lacks freshness metadata', async () => {
     const diff = addFileDiff('docs/evidence-legacy.md', 'legacy evidence without freshness');
     const diffHash = hashDiff(diff);
     const baseHead = git(tmpRepo, ['rev-parse', 'main']);
@@ -279,7 +290,7 @@ describe('M315 remote PR handoff truth', () => {
       origin: 'agent',
       kind: 'patch',
       title: 'legacy evidence handoff',
-      summary: 'Refuse evidence handoff when verification source/timestamp is missing.',
+      summary: 'Reverify before handoff when stored verification source/timestamp is missing.',
       diff,
       diffHash,
       provenanceSig: signProvenance('local:qwen3-coder', 'local', diffHash),
@@ -298,19 +309,75 @@ describe('M315 remote PR handoff truth', () => {
 
     const result = await autoMergeProposal(proposal.id, evidenceCfg());
 
-    expect(result.ok).toBe(false);
+    expect(result.ok).toBe(true);
     expect(result.merged).toBe(false);
-    expect(result.handoff).toBeUndefined();
-    expect(result.reason).toMatch(/verification freshness metadata/);
-    expect(createPrMock).not.toHaveBeenCalled();
+    expect(result.handoff).toBe(true);
+    expect(createPrMock).toHaveBeenCalledTimes(1);
     const loaded = loadProposal(proposal.id);
-    expect(loaded?.status).toBe('pending');
-    expect(loaded?.remoteHandoff).toBeUndefined();
+    expect(loaded?.status).toBe('awaiting-host-merge');
+    expect(loaded?.verifyResult).toMatchObject({
+      passed: true,
+      source: 'auto-merge',
+      verifiedAt: expect.any(String),
+      diffHash,
+    });
     const pack = readAutonomyEvidencePack(proposal.id);
     expect(pack?.policy).toMatchObject({
-      action: 'escalate-human',
-      allowed: false,
+      action: 'merge-main',
+      allowed: true,
     });
+  });
+
+  it('evidence mode reruns verification instead of trusting an injected passing result', async () => {
+    const diff = addFileDiff('docs/forged-verification.md', 'stored verification is not authority');
+    const diffHash = hashDiff(diff);
+    const baseHead = git(tmpRepo, ['rev-parse', 'main']);
+    fs.writeFileSync(path.join(tmpRepo, 'ashlr.verify.json'), JSON.stringify({
+      schemaVersion: 1,
+      mode: 'replace-detected',
+      commands: [{
+        id: 'merge-test',
+        kind: 'test',
+        cmd: ['node', '-e', 'process.exit(1)'],
+        required: true,
+        profiles: ['merge'],
+      }],
+    }), 'utf8');
+    git(tmpRepo, ['add', 'ashlr.verify.json']);
+    git(tmpRepo, ['commit', '-m', 'make verification fail']);
+    git(tmpRepo, ['push', 'origin', 'main']);
+    const failingBaseHead = git(tmpRepo, ['rev-parse', 'main']);
+    const proposal = createProposal({
+      repo: tmpRepo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'forged stored verification',
+      summary: 'A stored passing result must not bypass current verification.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('local:qwen3-coder', 'local', diffHash),
+      engineModel: 'local:qwen3-coder',
+      engineTier: 'local',
+      verifyResult: {
+        passed: true,
+        detail: 'injected pass',
+        ran: [{ kind: 'test', cmd: ['node', '-e', 'process.exit(0)'] }],
+        baseBranch: 'main',
+        baseHead: failingBaseHead,
+        diffHash,
+        verifiedAt: new Date().toISOString(),
+        source: 'auto-merge',
+      },
+    });
+    setStatus(proposal.id, 'pending');
+
+    const result = await autoMergeProposal(proposal.id, evidenceCfg());
+
+    expect(baseHead).not.toBe(failingBaseHead);
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/verification failed/);
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(loadProposal(proposal.id)?.verifyResult).toMatchObject({ passed: false, source: 'auto-merge' });
   });
 
   it('evidence mode refuses handoff when protected remote base advanced without local fetch', async () => {

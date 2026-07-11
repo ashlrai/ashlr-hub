@@ -39,6 +39,13 @@ export function repairGenerationIdFromHandoffId(eventId: string): string | null 
     .digest('hex');
 }
 
+export function generatedRepairLifecycleAttemptHash(attemptId: string): string {
+  return createHash('sha256').update(JSON.stringify([
+    'ashlr:generated-repair-attempt:v1',
+    attemptId,
+  ])).digest('hex');
+}
+
 /** Stable 50/50 assignment over canonical objective-scoped experiment identity. */
 export function repairTreatmentForUnitId(unitId: string): RepairTreatment | null {
   if (!SHA256_RE.test(unitId)) return null;

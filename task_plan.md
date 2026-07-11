@@ -1720,3 +1720,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add state-machine, attribution, privacy, compatibility, and conversion regression coverage.
 - [x] Run focused/full verification and independent adversarial review.
 - [x] Commit, push, reload production, validate live status, and update durable notes.
+
+## Current Overnight Cycle - Authenticated Merge And Causal Learning Truth
+- [x] Rehydrate the deployed repair-learning baseline, production health, git state, Entire state, and durable notes.
+- [x] Deploy independent audits for treatment outcomes, ordinary-work starvation, causal joins, and judge-free merge evidence.
+- [x] Require fresh isolated verification for every mutating evidence-mode merge instead of trusting stored proposal metadata.
+- [x] Replace raw repair dispatch claims with terminal authority-bound treatment outcomes.
+- [x] Prevent duplicate-diff retries from stealing another producer's proposal outcome.
+- [x] Preserve one ordinary-work slot during automatic repair drain when capacity and policy allow it.
+- [x] Add adversarial regression coverage and run focused/full verification plus independent review.
+- [ ] Update durable notes, commit, push, reload production, and canary the hardened authority paths.

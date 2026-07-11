@@ -259,6 +259,7 @@ beforeEach(async () => {
   process.env.HOME = tmpHome;
 
   mockUpdateProposalField.mockReset();
+  mockUpdateProposalField.mockReturnValue(true);
   mockLoadProposal.mockReset();
   mockSetStatus.mockReset();
   mockReadDecisions.mockReset();
@@ -373,6 +374,50 @@ describe('M261 Contract 2 — failed-verify: verifyResult.passed=false persisted
 // ===========================================================================
 
 describe('M261 Contract 3 — never-fabricated: verifyResult origin is the test runner', () => {
+  it('refuses when proposal status changes while fresh verification is being persisted', async () => {
+    const proposal = makeProposal('prop-m261-race');
+    mockLoadProposal.mockImplementation(() => proposal);
+    mockReadDecisions.mockReturnValue([makeShipDecision(proposal.id)]);
+    mockDetectVerifyCommands.mockReturnValue([{ kind: 'test', command: 'vitest run' }]);
+    mockRunVerifyCommand.mockReturnValue({ ok: true, exitCode: 0 });
+    mockUpdateProposalField.mockImplementation((_id, patch) => {
+      proposal.verifyResult = (patch as { verifyResult: Proposal['verifyResult'] }).verifyResult;
+      proposal.status = 'rejected';
+      return true;
+    });
+
+    const result = await autoMergeProposal(proposal.id, verificationCfg());
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/proposal status changed during merge evaluation/);
+  });
+
+  it('refuses when durable verification changes after verification-mode evaluation begins', async () => {
+    const initial = makeProposal('prop-m261-verify-race');
+    let durable = structuredClone(initial);
+    mockLoadProposal.mockImplementation(() => structuredClone(durable));
+    mockDetectVerifyCommands.mockReturnValue([{ kind: 'test', command: 'vitest run' }]);
+    mockRunVerifyCommand.mockReturnValue({ ok: true, exitCode: 0 });
+    mockUpdateProposalField.mockImplementation((_id, patch) => {
+      durable = { ...durable, ...structuredClone(patch as Partial<Proposal>) };
+      return true;
+    });
+    mockReadDecisions.mockImplementation(() => {
+      durable.verifyResult = {
+        ...durable.verifyResult!,
+        passed: false,
+        failed: ['concurrent verifier failed'],
+        verifiedAt: new Date(Date.now() + 1_000).toISOString(),
+      };
+      return [makeShipDecision(initial.id)];
+    });
+
+    const result = await autoMergeProposal(initial.id, verificationCfg());
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/verification binding changed during merge evaluation/);
+  });
+
   it('does NOT write verifyResult when Gate 6 is never reached (no repo)', async () => {
     // repo=undefined → refused at Gate 2 before Gate 6.
     const proposal = makeProposal('prop-m261-c3-a', { repo: undefined as unknown as string });

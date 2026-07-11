@@ -6,7 +6,7 @@
  * writes ledgers, or changes policy.
  */
 
-import type { AshlrConfig, EngineId } from '../types.js';
+import type { AshlrConfig, AutoMergeTrustBasis, EngineId } from '../types.js';
 import type { GuardHealthDiagnosis } from '../daemon/guard-health.js';
 import type { FleetStatus } from '../fleet/status.js';
 import type {
@@ -15,6 +15,10 @@ import type {
   ResourceSnapshot,
 } from '../fabric/resource-monitor.js';
 import type { OutcomeRecord } from './outcome-records.js';
+import {
+  READY_EVIDENCE_MAX_AGE_MS,
+  READY_EVIDENCE_MAX_FUTURE_SKEW_MS,
+} from './evidence-pack.js';
 import type { EcosystemDoctorCheck, EcosystemDoctorReport } from '../ecosystem/doctor.js';
 import {
   resolveProductionVelocityProfile,
@@ -151,6 +155,7 @@ const DEFAULT_MAX_CHECKS = 8;
 const CLOUD_BACKENDS = new Set<string>(['claude', 'codex', 'nim', 'kimi', 'ashlrcode', 'opencode', 'hermes']);
 const LOCAL_BACKENDS = new Set<string>(['builtin', 'local-coder', 'ollama']);
 const HARD_STOP_AVAILABILITY = new Set<BackendAvailability>(['exhausted', 'throttled', 'unreachable']);
+const RISK_ORDER: Record<'low' | 'medium' | 'high', number> = { low: 0, medium: 1, high: 2 };
 
 function cap(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isFinite(value) || value <= 0) return fallback;
@@ -259,7 +264,84 @@ function hoursSince(iso: string, now: Date): number | null {
   return Math.max(0, (now.getTime() - ts) / (60 * 60 * 1000));
 }
 
+function configuredTrustBasis(cfg: AshlrConfig): AutoMergeTrustBasis {
+  const value = cfg.foundry?.autoMerge?.trustBasis;
+  return value === 'verification' || value === 'evidence' ? value : 'tier';
+}
+
+function configuredMaxRisk(cfg: AshlrConfig): 'low' | 'medium' | 'high' {
+  const value = cfg.foundry?.autoMerge?.maxRisk;
+  return value === 'medium' || value === 'high' ? value : 'low';
+}
+
+function freshReadyTimestamp(value: string | undefined, nowMs: number): number | null {
+  const parsed = Date.parse(value ?? '');
+  if (!Number.isFinite(parsed)) return null;
+  if (parsed > nowMs + READY_EVIDENCE_MAX_FUTURE_SKEW_MS) return null;
+  if (parsed < nowMs - READY_EVIDENCE_MAX_AGE_MS) return null;
+  return parsed;
+}
+
+function isCurrentReadyEvidence(record: OutcomeRecord, cfg: AshlrConfig, now: Date): boolean {
+  const evidence = record.evidencePacks[0];
+  const verify = record.proposal.verifyResult;
+  const source = record.evidenceSourceQuality;
+  if (!evidence || !verify) return false;
+  if (source?.sourceState !== 'healthy' || source.complete !== true) return false;
+
+  const generatedMs = freshReadyTimestamp(evidence.generatedAt, now.getTime());
+  const verifiedMs = freshReadyTimestamp(evidence.verification.verifiedAt, now.getTime());
+  if (generatedMs === null || verifiedMs === null) return false;
+  if (generatedMs + READY_EVIDENCE_MAX_FUTURE_SKEW_MS < verifiedMs) return false;
+
+  const currentTrustBasis = configuredTrustBasis(cfg);
+  const currentMaxRisk = configuredMaxRisk(cfg);
+  const risk = evidence.riskClass;
+  const gates = evidence.gates;
+  const gateValues = [
+    gates.authority,
+    gates.provenance,
+    gates.verification,
+    gates.risk,
+    gates.scope,
+    gates.manager,
+    gates.selfTarget,
+    gates.edv,
+    gates.remoteProtection,
+  ].filter((gate) => gate !== undefined);
+
+  return (
+    record.proposal.status === 'pending' &&
+    evidence.proposalId === record.proposal.id &&
+    evidence.target === 'main' &&
+    evidence.trustBasis === currentTrustBasis &&
+    evidence.policy?.allowed === true &&
+    evidence.policy.action === 'merge-main' &&
+    evidence.verification.passed === true &&
+    evidence.verification.commandKinds.length > 0 &&
+    gateValues.every((gate) => gate.ok) &&
+    evidence.diffHash !== undefined &&
+    evidence.diffHash === record.proposal.diffHash &&
+    evidence.diffHash === evidence.verification.diffHash &&
+    evidence.diffHash === verify.diffHash &&
+    verify.passed === true &&
+    evidence.verification.baseBranch !== undefined &&
+    evidence.verification.baseBranch === verify.baseBranch &&
+    evidence.verification.baseHead !== undefined &&
+    evidence.verification.baseHead === verify.baseHead &&
+    evidence.verification.source !== undefined &&
+    evidence.verification.source === verify.source &&
+    evidence.verification.verifiedAt === verify.verifiedAt &&
+    RISK_ORDER[risk] <= RISK_ORDER[currentMaxRisk] &&
+    (record.proposal.riskClass === undefined || record.proposal.riskClass === risk) &&
+    (currentTrustBasis !== 'evidence' || (
+      evidence.remotePreferred === true && gates.remoteProtection?.ok === true
+    ))
+  );
+}
+
 function summarizeOutcomes(
+  cfg: AshlrConfig,
   records: OutcomeRecord[],
   max: number,
   now: Date,
@@ -282,13 +364,7 @@ function summarizeOutcomes(
       ageHours >= stalePendingTtlHours;
     if (record.proposal.status === 'pending') pendingRecords++;
     if (isStalePending) stalePending++;
-    if (
-      record.proposal.status === 'pending' &&
-      latestEvidence?.target === 'main' &&
-      verificationPassed === true &&
-      policyAllowed === true &&
-      policyAction === 'merge-main'
-    ) readyEvidence++;
+    if (isCurrentReadyEvidence(record, cfg, now)) readyEvidence++;
     if (
       record.proposal.status === 'pending' &&
       (verificationPassed === false || record.proposal.verifyResult?.passed === false)
@@ -507,7 +583,7 @@ export async function buildResourceStrategyReport(
   const joinedBackends = joinBackends(fleet, resources, 12);
   const resourceSummary = resourcePosture(joinedBackends);
   const productionVelocity = resolveProductionVelocityProfile(cfg);
-  const outcomeSummary = summarizeOutcomes(records, maxOutcomes, now, productionVelocity.stalePendingTtlHours);
+  const outcomeSummary = summarizeOutcomes(cfg, records, maxOutcomes, now, productionVelocity.stalePendingTtlHours);
   const ecosystemSummary = summarizeEcosystem(doctor, maxChecks);
   const budgetSummary = summarizeBudgets(cfg, fleet);
   const recommendation = recommendMode(

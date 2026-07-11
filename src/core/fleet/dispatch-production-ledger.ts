@@ -7,6 +7,7 @@
  */
 
 import {
+  chmodSync,
   closeSync,
   constants as fsConstants,
   existsSync,
@@ -17,6 +18,8 @@ import {
   openSync,
   opendirSync,
   readSync,
+  renameSync,
+  unlinkSync,
   writeSync,
   type Stats,
 } from 'node:fs';
@@ -52,6 +55,7 @@ import {
 } from '../learning/attempt-shape.js';
 import { scrubSecrets } from '../util/scrub.js';
 import {
+  generatedRepairLifecycleAttemptHash,
   REPAIR_TREATMENTS,
   repairGenerationIdFromHandoffId,
   repairTreatmentForUnitId,
@@ -68,6 +72,9 @@ const HARD_READ_MAX_ROWS = 50_000;
 const MAX_LOOSE_FILES = 3;
 const MAX_DIRECTORY_ENTRIES = 2_048;
 const MAX_READ_ROW_BYTES = 128 * 1024;
+const MAX_TREATMENT_OUTCOME_RECEIPTS = 2_048;
+const MAX_TREATMENT_RECEIPT_DIR_ENTRIES = MAX_TREATMENT_OUTCOME_RECEIPTS + 16;
+const TREATMENT_RECEIPT_RETENTION_FILE = '.retention.json';
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const ENGINE_IDS = new Set<EngineId>([
@@ -80,6 +87,8 @@ export type DispatchProductionBasis =
   | 'run-proposal-outcome'
   | 'pending-proposal-delta'
   | 'best-of-n-summary'
+  | 'repair-lifecycle-candidate'
+  | 'repair-lifecycle-outcome'
   | 'unknown';
 
 export interface DispatchProductionEvent {
@@ -120,6 +129,9 @@ export interface DispatchProductionEvent {
   repairGenerationId?: string;
   repairTreatmentUnitId?: string;
   repairTreatment?: RepairTreatment;
+  /** Terminal outcome emitted only after the local lifecycle store commits it. */
+  repairTreatmentOutcome?: 'converted' | 'not-converted';
+  repairTreatmentAttemptHash?: string;
   repairAttemptOrdinal?: 1 | 2;
   repairPreviousBackend?: EngineId;
   repairLineageInvalid?: true;
@@ -297,6 +309,23 @@ export function dispatchProductionDir(): string {
   return join(root, 'dispatch-production');
 }
 
+function treatmentOutcomeReceiptDir(): string {
+  return join(dispatchProductionDir(), 'repair-treatment-outcomes');
+}
+
+function treatmentOutcomeReceiptName(event: DispatchProductionEvent): string | null {
+  if (
+    event.basis !== 'repair-lifecycle-outcome' ||
+    !event.repairGenerationId || !SHA256_RE.test(event.repairGenerationId) ||
+    !event.repairTreatmentAttemptHash || !SHA256_RE.test(event.repairTreatmentAttemptHash)
+  ) return null;
+  return `${event.repairGenerationId}-${event.repairTreatmentAttemptHash}.json`;
+}
+
+function treatmentReceiptLockPath(): string {
+  return join(treatmentOutcomeReceiptDir(), '.receipts.lock');
+}
+
 function eventDateString(ts: string): string {
   const parsed = Date.parse(ts);
   if (!Number.isFinite(parsed)) return new Date().toISOString().slice(0, 10);
@@ -351,6 +380,8 @@ export function sanitizeDispatchProductionEvent(
   const proposalId = boundedOptionalText(event.proposalId, 160);
   const runId = boundedOptionalText(event.runId, 160);
   const trajectoryId = boundedOptionalText(event.trajectoryId, 240);
+  const outcome = boundedText(event.outcome, 80) as DaemonDispatchProductionOutcome;
+  const basis = boundedText(event.basis, 80) as DispatchProductionBasis;
   const routerPolicyVersion = boundedOptionalText(event.routerPolicyVersion, 80);
   const learningEpoch = boundedOptionalText(event.learningEpoch, 40);
   const objectiveHash = typeof event.objectiveHash === 'string' && /^[a-f0-9]{64}$/.test(event.objectiveHash)
@@ -368,6 +399,14 @@ export function sanitizeDispatchProductionEvent(
   const repairTreatment = event.repairTreatment === 'baseline-reslice' || event.repairTreatment === 'target-localization'
     ? event.repairTreatment
     : undefined;
+  const repairTreatmentOutcome = event.repairTreatmentOutcome === 'converted' ||
+    event.repairTreatmentOutcome === 'not-converted'
+    ? event.repairTreatmentOutcome
+    : undefined;
+  const repairTreatmentAttemptHash = typeof event.repairTreatmentAttemptHash === 'string' &&
+    SHA256_RE.test(event.repairTreatmentAttemptHash)
+    ? event.repairTreatmentAttemptHash
+    : undefined;
   const repairAttemptOrdinal = event.repairAttemptOrdinal === 1 || event.repairAttemptOrdinal === 2
     ? event.repairAttemptOrdinal
     : undefined;
@@ -378,6 +417,8 @@ export function sanitizeDispatchProductionEvent(
     event.repairGenerationId !== undefined ||
     event.repairTreatmentUnitId !== undefined ||
     event.repairTreatment !== undefined ||
+    event.repairTreatmentOutcome !== undefined ||
+    event.repairTreatmentAttemptHash !== undefined ||
     event.repairAttemptOrdinal !== undefined ||
     event.repairPreviousBackend !== undefined;
   const repairLineageComplete = event.repairLineageInvalid !== true &&
@@ -396,10 +437,32 @@ export function sanitizeDispatchProductionEvent(
     (repairAttemptOrdinal === 1
       ? repairPreviousBackend === undefined
       : repairPreviousBackend !== undefined && backend !== repairPreviousBackend);
+  const lifecycleAttemptId = trajectoryId ?? runId;
+  const repairTreatmentOutcomeComplete = repairTreatmentOutcome !== undefined &&
+    basis === 'repair-lifecycle-outcome' &&
+    repairTreatmentAttemptHash !== undefined &&
+    lifecycleAttemptId !== undefined &&
+    generatedRepairLifecycleAttemptHash(lifecycleAttemptId) === repairTreatmentAttemptHash &&
+    repairTreatmentUnitId !== undefined &&
+    repairTreatment !== undefined &&
+    repairGenerationId !== undefined &&
+    (repairTreatmentOutcome === 'converted'
+      ? outcome === 'proposal-created' && Boolean(event.proposalCreated) && proposalId !== undefined
+      : outcome === 'empty-diff' && !event.proposalCreated && proposalId === undefined && repairAttemptOrdinal === 2);
+  const repairTreatmentCandidateComplete = repairTreatmentOutcome === undefined &&
+    basis === 'repair-lifecycle-candidate' &&
+    repairTreatmentAttemptHash !== undefined &&
+    lifecycleAttemptId !== undefined &&
+    generatedRepairLifecycleAttemptHash(lifecycleAttemptId) === repairTreatmentAttemptHash &&
+    repairTreatmentUnitId !== undefined &&
+    repairTreatment !== undefined &&
+    repairGenerationId !== undefined;
   const repairLineageInvalid = event.repairLineageInvalid === true ||
-    (repairLineageFieldsPresent && !repairLineageComplete);
-  const outcome = boundedText(event.outcome, 80) as DaemonDispatchProductionOutcome;
-  const basis = boundedText(event.basis, 80) as DispatchProductionBasis;
+    (repairLineageFieldsPresent && !repairLineageComplete) ||
+    ((basis === 'repair-lifecycle-candidate' || basis === 'repair-lifecycle-outcome' ||
+      event.repairTreatmentOutcome !== undefined ||
+      event.repairTreatmentAttemptHash !== undefined) &&
+      !repairTreatmentOutcomeComplete && !repairTreatmentCandidateComplete);
   const reason = boundedOptionalText(event.reason, 240);
   const diffFiles = finiteNonNegative(event.diffFiles);
   const diffLines = finiteNonNegative(event.diffLines);
@@ -474,6 +537,10 @@ export function sanitizeDispatchProductionEvent(
           repairGenerationId,
           ...(repairTreatmentUnitId ? { repairTreatmentUnitId } : {}),
           ...(repairTreatment ? { repairTreatment } : {}),
+          ...(repairTreatmentOutcomeComplete || repairTreatmentCandidateComplete ? {
+            ...(repairTreatmentOutcome ? { repairTreatmentOutcome } : {}),
+            repairTreatmentAttemptHash,
+          } : {}),
           repairAttemptOrdinal,
           ...(repairPreviousBackend ? { repairPreviousBackend } : {}),
           }
@@ -563,7 +630,9 @@ export function recordDispatchProduction(
     for (const event of events) {
       try {
         const record = sanitizeDispatchProductionEvent(event, { materializeLearningLabel: true });
-        appendDispatchProductionLine(
+        const receiptName = treatmentOutcomeReceiptName(record);
+        if (receiptName) persistTreatmentOutcomeReceipt(record, receiptName);
+        else appendDispatchProductionLine(
           join(dir, `${eventDateString(record.ts)}.jsonl`),
           JSON.stringify(record) + '\n',
         );
@@ -580,6 +649,106 @@ export function recordDispatchProduction(
   return result;
 }
 
+function persistTreatmentOutcomeReceipt(event: DispatchProductionEvent, name: string): void {
+  const dir = treatmentOutcomeReceiptDir();
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const dirStat = lstatSync(dir);
+  if (!safeDispatchProductionDirectory(dirStat)) throw new Error('unsafe treatment outcome receipt directory');
+  chmodSync(dir, 0o700);
+  const path = join(dir, name);
+  const lock = acquireLocalStoreLock(treatmentReceiptLockPath());
+  if (!lock) throw new Error('treatment outcome receipt lock unavailable');
+  let fd: number | undefined;
+  let dirFd: number | undefined;
+  const tmp = `${path}.${process.pid}.tmp`;
+  try {
+    if (existsSync(path)) {
+      const loaded = readDispatchProductionFileTail(path, MAX_READ_ROW_BYTES);
+      if (!loaded || loaded.truncated) throw new Error('invalid existing treatment outcome receipt');
+      const parsed: unknown = JSON.parse(loaded.text);
+      if (!isDispatchProductionEvent(parsed)) throw new Error('invalid existing treatment outcome receipt');
+      if (treatmentOutcomeReceiptName(parsed) !== name) throw new Error('conflicting treatment outcome receipt');
+      return;
+    }
+    pruneTreatmentOutcomeReceipts(dir);
+    const bytes = Buffer.from(`${JSON.stringify(event)}\n`, 'utf8');
+    if (bytes.length > MAX_READ_ROW_BYTES) throw new Error('treatment outcome receipt too large');
+    fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    if (writeSync(fd, bytes) !== bytes.length) throw new Error('short treatment outcome receipt write');
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(tmp, path);
+    dirFd = openSync(dir, fsConstants.O_RDONLY);
+    fsyncSync(dirFd);
+  } finally {
+    if (dirFd !== undefined) { try { closeSync(dirFd); } catch { /* preserve primary failure */ } }
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* preserve primary failure */ } }
+    try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* best effort */ }
+    releaseLocalStoreLock(lock);
+  }
+}
+
+function writeTreatmentReceiptRetention(dir: string, droppedThrough: string): void {
+  const path = join(dir, TREATMENT_RECEIPT_RETENTION_FILE);
+  const tmp = `${path}.${process.pid}.tmp`;
+  let fd: number | undefined;
+  try {
+    let priorMs = Number.NEGATIVE_INFINITY;
+    if (existsSync(path)) {
+      const loaded = readDispatchProductionFileTail(path, 4_096);
+      if (!loaded || loaded.truncated) throw new Error('invalid treatment receipt retention marker');
+      const parsed = JSON.parse(loaded.text) as { droppedThrough?: unknown };
+      priorMs = typeof parsed.droppedThrough === 'string' ? Date.parse(parsed.droppedThrough) : Number.NaN;
+      if (!Number.isFinite(priorMs)) throw new Error('invalid treatment receipt retention marker');
+    }
+    const nextMs = Math.max(priorMs, Date.parse(droppedThrough));
+    const bytes = Buffer.from(`${JSON.stringify({ schemaVersion: 1, droppedThrough: new Date(nextMs).toISOString() })}\n`);
+    fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+    if (writeSync(fd, bytes) !== bytes.length) throw new Error('short treatment receipt retention write');
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(tmp, path);
+    const dirFd = openSync(dir, fsConstants.O_RDONLY);
+    try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* preserve failure */ } }
+    try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* best effort */ }
+  }
+}
+
+function pruneTreatmentOutcomeReceipts(dir: string): void {
+  const receipts: Array<{ name: string; ts: string }> = [];
+  const handle = opendirSync(dir);
+  try {
+    let physical = 0;
+    for (;;) {
+      const entry = handle.readSync();
+      if (!entry) break;
+      physical++;
+      if (physical > MAX_TREATMENT_RECEIPT_DIR_ENTRIES) throw new Error('treatment receipt directory limit');
+      if (!/^[a-f0-9]{64}-[a-f0-9]{64}\.json$/.test(entry.name)) continue;
+      const loaded = readDispatchProductionFileTail(join(dir, entry.name), MAX_READ_ROW_BYTES);
+      if (!loaded || loaded.truncated) throw new Error('invalid treatment outcome receipt during retention');
+      const parsed: unknown = JSON.parse(loaded.text);
+      if (!isDispatchProductionEvent(parsed) || treatmentOutcomeReceiptName(parsed) !== entry.name) {
+        throw new Error('unbound treatment outcome receipt during retention');
+      }
+      receipts.push({ name: entry.name, ts: parsed.ts });
+    }
+  } finally { handle.closeSync(); }
+  if (receipts.length < MAX_TREATMENT_OUTCOME_RECEIPTS) return;
+  receipts.sort((left, right) => Date.parse(left.ts) - Date.parse(right.ts) || left.name.localeCompare(right.name));
+  const dropping = receipts.slice(0, receipts.length - MAX_TREATMENT_OUTCOME_RECEIPTS + 1);
+  const droppedThrough = dropping.reduce((latest, receipt) =>
+    Date.parse(receipt.ts) > Date.parse(latest) ? receipt.ts : latest, dropping[0]!.ts);
+  writeTreatmentReceiptRetention(dir, droppedThrough);
+  for (const receipt of dropping) unlinkSync(join(dir, receipt.name));
+  const dirFd = openSync(dir, fsConstants.O_RDONLY);
+  try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
+}
+
 function appendDispatchProductionLine(path: string, line: string): void {
   const lock = acquireLocalStoreLock(`${path}.lock`);
   if (!lock) throw new Error('dispatch production ledger lock unavailable');
@@ -593,7 +762,7 @@ function appendDispatchProductionLine(path: string, line: string): void {
       0o600,
     );
     const opened = fstatSync(fd);
-    if (!opened.isFile()) throw new Error('dispatch production ledger is not a regular file');
+    if (!safeDispatchProductionFile(opened)) throw new Error('dispatch production ledger is not a safe regular file');
     if (opened.size > 0) {
       const tail = Buffer.alloc(1);
       const read = readSync(fd, tail, 0, 1, opened.size - 1);
@@ -814,6 +983,116 @@ export function readDispatchProductionParents(
   return statuses;
 }
 
+function mergeTreatmentOutcomeReceipts(
+  result: DispatchProductionEventsReadResult,
+  opts: ReadDispatchProductionEventsOptions,
+  cap: number,
+  maxBytes: number,
+  maxRows: number,
+): void {
+  const dir = treatmentOutcomeReceiptDir();
+  if (!existsSync(dir)) return;
+  const lock = acquireLocalStoreLock(treatmentReceiptLockPath(), 250);
+  if (!lock) {
+    result.sourceState = 'degraded';
+    result.complete = false;
+    result.unreadableFiles++;
+    pushStopReason(result.stopReasons, 'io-error');
+    return;
+  }
+  const entries: string[] = [];
+  try {
+    const dirStat = lstatSync(dir);
+    if (!safeDispatchProductionDirectory(dirStat) ||
+      (process.platform !== 'win32' && (dirStat.mode & 0o077) !== 0)) throw new Error('unsafe receipt directory');
+    const handle = opendirSync(dir);
+    try {
+      let physical = 0;
+      for (;;) {
+        const entry = handle.readSync();
+        if (!entry) break;
+        physical++;
+        if (physical > MAX_TREATMENT_RECEIPT_DIR_ENTRIES) throw new Error('receipt directory limit');
+        if (/^[a-f0-9]{64}-[a-f0-9]{64}\.json$/.test(entry.name)) entries.push(entry.name);
+      }
+    } finally { handle.closeSync(); }
+  } catch {
+    result.sourceState = 'degraded';
+    result.complete = false;
+    result.unreadableFiles++;
+    pushStopReason(result.stopReasons, 'io-error');
+    releaseLocalStoreLock(lock);
+    return;
+  }
+  try {
+    const retentionPath = join(dir, TREATMENT_RECEIPT_RETENTION_FILE);
+    if (existsSync(retentionPath)) {
+      const loaded = readDispatchProductionFileTail(retentionPath, 4_096);
+      if (!loaded || loaded.truncated) throw new Error('invalid receipt retention marker');
+      const parsed = JSON.parse(loaded.text) as { schemaVersion?: unknown; droppedThrough?: unknown };
+      const droppedMs = typeof parsed.droppedThrough === 'string' ? Date.parse(parsed.droppedThrough) : Number.NaN;
+      if (parsed.schemaVersion !== 1 || !Number.isFinite(droppedMs)) throw new Error('invalid receipt retention marker');
+      if (opts.sinceMs === undefined || opts.sinceMs <= droppedMs) {
+        result.complete = false;
+        pushStopReason(result.stopReasons, 'file-limit');
+      }
+    }
+  } catch {
+    result.complete = false;
+    result.unreadableFiles++;
+    pushStopReason(result.stopReasons, 'io-error');
+  }
+  const receipts = new Map<string, DispatchProductionEvent>();
+  for (const name of entries) {
+    if (result.rowsScanned >= maxRows || result.bytesRead >= maxBytes) {
+      result.complete = false;
+      pushStopReason(result.stopReasons, result.rowsScanned >= maxRows ? 'row-limit' : 'byte-limit');
+      break;
+    }
+    const remaining = Math.min(MAX_READ_ROW_BYTES, maxBytes - result.bytesRead);
+    const loaded = readDispatchProductionFileTail(join(dir, name), remaining);
+    result.filesRead++;
+    if (!loaded || loaded.truncated) {
+      result.unreadableFiles++;
+      result.complete = false;
+      pushStopReason(result.stopReasons, 'io-error');
+      continue;
+    }
+    result.bytesRead += loaded.bytesRead;
+    result.rowsScanned++;
+    try {
+      const parsed: unknown = JSON.parse(loaded.text);
+      if (!isDispatchProductionEvent(parsed)) throw new Error('invalid receipt');
+      const event = parsed;
+      if (event.basis !== 'repair-lifecycle-outcome' || treatmentOutcomeReceiptName(event) !== name) {
+        throw new Error('unbound receipt');
+      }
+      const eventMs = Date.parse(event.ts);
+      if (opts.sinceMs !== undefined && eventMs < opts.sinceMs) continue;
+      receipts.set(name, event);
+    } catch {
+      result.invalidRows++;
+      result.complete = false;
+    }
+  }
+  if (receipts.size > 0) {
+    const receiptKeys = new Set(receipts.keys());
+    result.events = result.events.filter((event) => {
+      const name = treatmentOutcomeReceiptName(event);
+      return name === null || !receiptKeys.has(name);
+    });
+    result.events.push(...receipts.values());
+    result.events.sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
+    if (result.events.length > cap) {
+      result.events = result.events.slice(0, cap);
+      result.complete = false;
+      pushStopReason(result.stopReasons, 'event-limit');
+    }
+  }
+  if (!result.complete || result.invalidRows > 0 || result.unreadableFiles > 0) result.sourceState = 'degraded';
+  releaseLocalStoreLock(lock);
+}
+
 export function readDispatchProductionEventsDetailed(
   opts: ReadDispatchProductionEventsOptions = {},
 ): DispatchProductionEventsReadResult {
@@ -860,22 +1139,6 @@ export function readDispatchProductionEventsDetailed(
       unreadableFiles: 1,
     });
   }
-  if (files.length === 0) {
-    try {
-      const directoryAfter = lstatSync(dir);
-      return safeDispatchProductionDirectory(directoryAfter) && sameFile(directorySnapshot, directoryAfter) &&
-        directorySnapshot.mtimeMs === directoryAfter.mtimeMs && directorySnapshot.ctimeMs === directoryAfter.ctimeMs
-        ? emptyDispatchProductionRead('healthy', { sourcePresent: true })
-        : emptyDispatchProductionRead('degraded', {
-            sourcePresent: true, complete: false, stopReasons: ['io-error'], unreadableFiles: 1,
-          });
-    } catch {
-      return emptyDispatchProductionRead('degraded', {
-        sourcePresent: true, complete: false, stopReasons: ['io-error'], unreadableFiles: 1,
-      });
-    }
-  }
-
   const result = emptyDispatchProductionRead('healthy');
   result.sourcePresent = true;
   let stopTraversal = false;
@@ -976,6 +1239,7 @@ export function readDispatchProductionEventsDetailed(
     }
   }
   if (result.invalidRows > 0 || result.unreadableFiles > 0) result.complete = false;
+  mergeTreatmentOutcomeReceipts(result, opts, cap, maxBytes, maxRows);
   if (result.invalidRows > 0 || result.unreadableFiles > 0 || !result.complete) {
     result.sourceState = 'degraded';
   }
@@ -1135,7 +1399,19 @@ interface MutableRepairTreatmentAttribution {
   eligibleEvents: number;
   attributedEvents: number;
   unattributedEvents: number;
-  units: Map<RepairTreatment, Map<string, { proposalCreated: boolean }>>;
+  replayedEvents: number;
+  units: Map<RepairTreatment, Map<string, MutableRepairTreatmentUnit>>;
+}
+
+interface MutableRepairTreatmentUnit {
+  rawAttempts: Map<string, string>;
+  rawOrdinals: Set<1 | 2>;
+  witness?: {
+    executionKey: string;
+    generationId: string;
+    converted: boolean;
+  };
+  witnessEvents: number;
 }
 
 function emptyRepairTreatmentAttribution(): MutableRepairTreatmentAttribution {
@@ -1143,6 +1419,7 @@ function emptyRepairTreatmentAttribution(): MutableRepairTreatmentAttribution {
     eligibleEvents: 0,
     attributedEvents: 0,
     unattributedEvents: 0,
+    replayedEvents: 0,
     units: new Map(),
   };
 }
@@ -1193,12 +1470,16 @@ function addRepairTreatmentAttempt(
     source: event.source,
   });
   if (kind !== 'no-diff-reslice') return;
-  attribution.eligibleEvents++;
+  if (event.basis === 'repair-lifecycle-candidate') return;
+  const terminalWitness = event.basis === 'repair-lifecycle-outcome';
+  if (!terminalWitness) attribution.eligibleEvents++;
   const treatment = event.repairTreatment;
   const unitId = event.repairTreatmentUnitId;
+  const executionId = event.trajectoryId ?? event.runId;
   if (
     !treatment ||
     !unitId ||
+    !executionId ||
     event.repairLineageInvalid === true ||
     typeof event.repairHandoffId !== 'string' ||
     typeof event.repairGenerationId !== 'string' ||
@@ -1209,27 +1490,73 @@ function addRepairTreatmentAttempt(
     attribution.unattributedEvents++;
     return;
   }
-  attribution.attributedEvents++;
-  const units = attribution.units.get(treatment) ?? new Map<string, { proposalCreated: boolean }>();
-  const unit = units.get(unitId);
-  if (!unit) units.set(unitId, { proposalCreated: event.proposalCreated });
-  else if (event.proposalCreated) unit.proposalCreated = true;
+  const units = attribution.units.get(treatment) ?? new Map<string, MutableRepairTreatmentUnit>();
+  const unit: MutableRepairTreatmentUnit = units.get(unitId) ?? {
+    rawAttempts: new Map(),
+    rawOrdinals: new Set(),
+    witnessEvents: 0,
+  };
+  const attemptHash = generatedRepairLifecycleAttemptHash(executionId);
+  if (terminalWitness && (
+    event.repairTreatmentOutcome === undefined ||
+    event.repairTreatmentAttemptHash !== attemptHash
+  )) {
+    attribution.unattributedEvents++;
+    return;
+  }
+  const executionKey = `${event.repairGenerationId}:${attemptHash}`;
+  if (terminalWitness) {
+    unit.witnessEvents++;
+    if (unit.witnessEvents > 1 || unit.witness !== undefined) attribution.replayedEvents++;
+    if (!unit.witness) {
+      unit.witness = {
+        executionKey,
+        generationId: event.repairGenerationId,
+        converted: event.repairTreatmentOutcome === 'converted',
+      };
+    }
+  } else {
+    attribution.attributedEvents++;
+    const repeatedOrdinal = unit.rawOrdinals.has(event.repairAttemptOrdinal!);
+    unit.rawOrdinals.add(event.repairAttemptOrdinal!);
+    const fingerprint = JSON.stringify([
+      event.repairHandoffId,
+      event.backend,
+      event.outcome,
+      event.proposalCreated,
+      event.proposalId ?? null,
+    ]);
+    const prior = unit.rawAttempts.get(executionKey);
+    if (repeatedOrdinal || prior !== undefined) attribution.replayedEvents++;
+    if (prior !== undefined) {
+      if (prior !== fingerprint) attribution.unattributedEvents++;
+    } else {
+      unit.rawAttempts.set(executionKey, fingerprint);
+    }
+  }
+  units.set(unitId, unit);
   attribution.units.set(treatment, units);
 }
 
 function sampleGatedTreatmentConversions(
   attribution: MutableRepairTreatmentAttribution,
 ): RepairTreatmentConversionSummary[] | undefined {
-  if (attribution.unattributedEvents > 0) return undefined;
+  if (attribution.unattributedEvents > 0 || attribution.replayedEvents > 0) return undefined;
   if (REPAIR_TREATMENTS.some(
     (treatment) => (attribution.units.get(treatment)?.size ?? 0) < MIN_REPAIR_TREATMENT_ATTEMPTS,
+  )) return undefined;
+  const allUnits = [...attribution.units.values()].flatMap((units) => [...units.values()]);
+  if (allUnits.some((unit) =>
+    unit.witnessEvents !== 1 ||
+    unit.witness === undefined ||
+    !unit.rawAttempts.has(unit.witness.executionKey)
   )) return undefined;
   const conversions = REPAIR_TREATMENTS
     .map((treatment) => [treatment, attribution.units.get(treatment)!] as const)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([repairTreatment, units]) => {
       const attempts = units.size;
-      const proposalsCreated = [...units.values()].filter((unit) => unit.proposalCreated).length;
+      const proposalsCreated = [...units.values()].filter((unit) => unit.witness?.converted === true).length;
       return {
         repairTreatment,
         attempts,
@@ -1251,7 +1578,7 @@ function treatmentAttributionSummary(
     attributedEvents: attribution.attributedEvents,
     unattributedEvents: attribution.unattributedEvents,
     distinctUnits,
-    replayedEvents: Math.max(0, attribution.attributedEvents - distinctUnits),
+    replayedEvents: attribution.replayedEvents,
   };
 }
 
@@ -1479,9 +1806,32 @@ export function summarizeDispatchProductionYield(
   const repairTreatments = emptyRepairTreatmentAttribution();
   let proposalsCreated = 0;
   let spentUsd = 0;
+  let total = 0;
   const diagnosticTopReasons = new Map<string, number>();
 
   for (const event of events) {
+    if (event.basis === 'repair-lifecycle-candidate') continue;
+    if (event.basis === 'repair-lifecycle-outcome') {
+      addRepairTreatmentAttempt(repairTreatments, event);
+      addRepairTreatmentAttempt(
+        touchBucket(byBackend, event.backend ?? 'unknown', { backend: event.backend }).repairTreatments,
+        event,
+      );
+      addRepairTreatmentAttempt(touchBucket(bySource, event.source, { source: event.source }).repairTreatments, event);
+      addRepairTreatmentAttempt(touchBucket(byRepo, event.repo, { repo: event.repo }).repairTreatments, event);
+      addRepairTreatmentAttempt(touchBucket(
+        byBackendModel,
+        `${event.backend ?? 'unknown'}:${event.model ?? 'default'}`,
+        { backend: event.backend, model: event.model ?? null },
+      ).repairTreatments, event);
+      addRepairTreatmentAttempt(touchBucket(
+        byBackendSource,
+        `${event.backend ?? 'unknown'}:${event.source}`,
+        { backend: event.backend, source: event.source },
+      ).repairTreatments, event);
+      continue;
+    }
+    total++;
     if (event.proposalCreated) proposalsCreated++;
     spentUsd += Number.isFinite(event.spentUsd) ? event.spentUsd : 0;
     incrementOutcome(overall, event.outcome);
@@ -1529,12 +1879,16 @@ export function summarizeDispatchProductionYield(
     );
   }
 
-  const total = events.length;
   const treatmentConversions = sampleGatedTreatmentConversions(repairTreatments);
   const treatmentAttribution = treatmentAttributionSummary(repairTreatments);
   if (treatmentAttribution) generatedRepairAttempts.treatmentAttribution = treatmentAttribution;
   if (treatmentConversions) generatedRepairAttempts.treatmentConversions = treatmentConversions;
-  const generatedRepairBackendTransitions = summarizeGeneratedRepairBackendTransitions(events, limit);
+  const generatedRepairBackendTransitions = summarizeGeneratedRepairBackendTransitions(
+    events.filter((event) =>
+      event.basis !== 'repair-lifecycle-candidate' && event.basis !== 'repair-lifecycle-outcome'
+    ),
+    limit,
+  );
   return {
     windowHours: opts?.windowHours ?? 24,
     attempts: total,

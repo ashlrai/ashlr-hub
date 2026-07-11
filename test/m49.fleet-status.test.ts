@@ -32,7 +32,7 @@ import { SharedStore } from '../src/core/fleet/shared-store.js';
 import { buildAutonomyEvidencePack, persistAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../src/core/autonomy/policy.js';
 import { createProposal, setStatus } from '../src/core/inbox/store.js';
-import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
+import { hashDiff, signJudgeAttestation, signProvenance } from '../src/core/foundry/provenance.js';
 import { recordDispatchProduction, type DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import { recordDispatchManifest } from '../src/core/fleet/dispatch-manifest.js';
 import { recordBestOfN } from '../src/core/fleet/best-of-n-ledger.js';
@@ -314,6 +314,26 @@ function createSignedProposal(
     },
     cfg,
   );
+}
+
+function recordFrontierShipDecision(proposal: Proposal): void {
+  const judgeEngine = 'claude-opus-4-5';
+  recordDecision({
+    ts: new Date().toISOString(),
+    proposalId: proposal.id,
+    action: 'judged',
+    engine: judgeEngine,
+    model: judgeEngine,
+    verdict: 'ship',
+    reason: 'frontier judge ship',
+    detail: 'would-merge',
+    judgeAttestation: signJudgeAttestation({
+      proposalId: proposal.id,
+      judgeEngine,
+      verdict: 'ship',
+      diffHash: hashDiff(proposal.diff ?? ''),
+    }),
+  });
 }
 
 function writeRunningDaemon(home: string, ticks: DaemonTick[] = [], lastTickAt = '2026-07-03T00:05:00.000Z'): void {
@@ -4397,6 +4417,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       trustBasis: 'verification',
       pending: 4,
       preflightReady: 1,
+      authorityReady: 0,
+      authorityBlocked: 1,
       needsVerification: 1,
       knownVerificationFailed: 1,
       blocked: 2,
@@ -4427,7 +4449,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(actionIds).not.toContain('repair-verification-failures');
   });
 
-  it('marks running fleets with preflight-ready proposals as merge-ready', async () => {
+  it('does not present cheap verification preflight as merge-ready without judge authority', async () => {
     writeRunningDaemon(tmpHome);
     const cfg = withFoundry({
       autoMerge: {
@@ -4445,14 +4467,21 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const s = await buildFleetStatus(cfg);
 
     expect(s.autonomyEffectiveness).toMatchObject({
-      phase: 'merge-ready',
-      canAutoMergeNow: true,
-      bottleneck: 'merge-drain',
+      phase: 'merge-blocked',
+      canAutoMergeNow: false,
+      bottleneck: 'merge-gate',
       counts: {
         pendingProposals: 1,
         preflightReady: 1,
+        authorityReady: 0,
       },
     });
+    expect(s.autoMergeReadiness).toMatchObject({
+      preflightReady: 1,
+      authorityReady: 0,
+      authorityBlocked: 1,
+    });
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('drain-ready-auto-merges');
   });
 
   it('marks autonomous ship readiness ready when fresh control, queue, and merge evidence agree', async () => {
@@ -4466,11 +4495,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         maxRisk: 'low',
       },
     });
-    createSignedProposal(cfg, {
+    const proposal = createSignedProposal(cfg, {
       title: 'Ready docs change',
       diff: docsDiff('ready ship readiness'),
       verifyResult: { passed: true, source: 'manual' },
     });
+    recordFrontierShipDecision(proposal);
 
     const s = await buildFleetStatus(cfg);
     const queueSource = s.autonomousShipReadiness?.sources.find((source) => source.id === 'queue');
@@ -4498,8 +4528,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       version: 1,
       state: 'cold-start',
       summary: {
-        eligible: 0,
-        'cold-start': 4,
+        eligible: 1,
+        'cold-start': 3,
         withheld: 0,
         observational: 0,
         'not-applicable': 2,
@@ -4524,7 +4554,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
   });
 
-  it('withholds degraded authority evidence without overriding deterministic merge readiness', async () => {
+  it('fails ship readiness closed when verification authority evidence is degraded', async () => {
     const repo = join(tmpHome, 'repo');
     writeBacklogSnapshot(tmpHome, repo, [], new Date().toISOString());
     writeRunningDaemon(tmpHome, [], new Date().toISOString());
@@ -4546,11 +4576,19 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const action = status.nextActions?.find((candidate) => candidate.id === 'inspect-learning-evidence');
 
     expect(status.autonomousShipReadiness).toMatchObject({
-      verdict: 'ready',
-      topBlocker: null,
+      verdict: 'blocked',
+      topBlocker: { id: 'merge-authority-incomplete' },
       evidenceMatrix: {
         state: 'degraded',
         summary: { withheld: 1 },
+      },
+    });
+    expect(status.autoMergeReadiness).toMatchObject({
+      preflightReady: 1,
+      authorityReady: 0,
+      authorityBlocked: 1,
+      authorityByReason: {
+        'decisions ledger source is degraded or incomplete': 1,
       },
     });
     expect(decisionEvidence).toMatchObject({
@@ -4577,7 +4615,8 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       ],
     });
     expect(action?.commands?.every((command) => command.endpointPath === undefined)).toBe(true);
-    expect(status.autonomousShipReadiness?.primaryAction).toMatchObject({ id: 'drain-ready-auto-merges' });
+    expect(status.autonomousShipReadiness?.primaryAction).not.toMatchObject({ id: 'drain-ready-auto-merges' });
+    expect(status.nextActions?.map((candidate) => candidate.id)).not.toContain('drain-ready-auto-merges');
   });
 
   it('keeps evidence diagnosis secondary to eligible operational backlog work', async () => {
@@ -4638,11 +4677,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         maxRisk: 'low',
       },
     });
-    createSignedProposal(cfg, {
+    const proposal = createSignedProposal(cfg, {
       title: 'Ready docs change with stale queue',
       diff: docsDiff('stale queue readiness'),
       verifyResult: { passed: true, source: 'manual' },
     });
+    recordFrontierShipDecision(proposal);
 
     const s = await buildFleetStatus(cfg);
     const queueSource = s.autonomousShipReadiness?.sources.find((source) => source.id === 'queue');
@@ -4687,6 +4727,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       verifyResult: {
         passed: true,
         source: 'auto-merge-preflight',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
         baseBranch: 'main',
         baseHead: '0123456789abcdef0123456789abcdef01234567',
         diffHash: hashDiff(diff),
@@ -4700,9 +4741,61 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       trustBasis: 'evidence',
       pending: 1,
       preflightReady: 1,
+      authorityReady: 0,
+      authorityBlocked: 1,
+      authorityByReason: {
+        'fresh isolated verification is required by the mutating evidence-mode gate': 1,
+      },
       needsVerification: 0,
       blocked: 0,
     });
+  });
+
+  it('withholds evidence-mode drain readiness when the decisions source is degraded', async () => {
+    writeRunningDaemon(tmpHome);
+    const cfg = withFoundry({
+      autoMerge: {
+        enabled: true,
+        trustBasis: 'evidence',
+        maxRisk: 'low',
+        pushToRemote: true,
+        protectedRemote: {
+          branchProtection: true,
+          requiredChecks: ['ci/test'],
+        },
+      },
+    });
+    const diff = docsDiff('degraded evidence source');
+    createSignedProposal(cfg, {
+      title: 'Evidence docs change with degraded decisions',
+      diff,
+      verifyResult: {
+        passed: true,
+        source: 'auto-merge-preflight',
+        ran: [{ kind: 'test', cmd: ['npm', 'test'] }],
+        baseBranch: 'main',
+        baseHead: '0123456789abcdef0123456789abcdef01234567',
+        diffHash: hashDiff(diff),
+      },
+    });
+    const decisions = join(process.env.ASHLR_HOME!, 'decisions');
+    mkdirSync(decisions, { recursive: true, mode: 0o700 });
+    writeFileSync(join(decisions, `${new Date().toISOString().slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const s = await buildFleetStatus(cfg);
+
+    expect(s.autoMergeReadiness).toMatchObject({
+      trustBasis: 'evidence',
+      preflightReady: 1,
+      authorityReady: 0,
+      authorityBlocked: 1,
+      authorityByReason: {
+        'fresh isolated verification is required by the mutating evidence-mode gate': 1,
+      },
+    });
+    expect(s.decisionsSource).toMatchObject({ sourceState: 'degraded', complete: false });
+    expect(s.autonomyEffectiveness?.canAutoMergeNow).toBe(false);
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('drain-ready-auto-merges');
   });
 
   it('treats evidence-mode verification without current diff binding as needing reverify', async () => {
@@ -4736,9 +4829,13 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       trustBasis: 'evidence',
       pending: 1,
       preflightReady: 0,
+      authorityReady: 0,
+      authorityBlocked: 0,
       needsVerification: 1,
       blocked: 0,
     });
+    expect(s.autonomyEffectiveness?.canAutoMergeNow).toBe(false);
+    expect(s.nextActions?.map((action) => action.id)).not.toContain('drain-ready-auto-merges');
   });
 });
 

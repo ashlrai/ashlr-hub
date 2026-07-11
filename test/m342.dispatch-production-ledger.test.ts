@@ -18,7 +18,11 @@ import {
   type DispatchProductionEvent,
 } from '../src/core/fleet/dispatch-production-ledger.js';
 import { repairGenerationIdFromHandoffId } from '../src/core/fleet/repair-handoff-journal.js';
-import { repairTreatmentForUnitId, repairTreatmentUnitId } from '../src/core/fleet/generated-repair-identity.js';
+import {
+  generatedRepairLifecycleAttemptHash,
+  repairTreatmentForUnitId,
+  repairTreatmentUnitId,
+} from '../src/core/fleet/generated-repair-identity.js';
 
 let prevAshlrHome: string | undefined;
 let prevHome: string | undefined;
@@ -821,10 +825,11 @@ describe('M342 dispatch production ledger', () => {
   });
 
   function treatmentEvents(ts = '2026-07-08T12:00:00.000Z'): DispatchProductionEvent[] {
-    const byTreatment = new Map<string, DispatchProductionEvent[]>();
+    const byTreatment = new Map<string, number>();
+    const events: DispatchProductionEvent[] = [];
     for (let index = 0; index < 1_000 && (
-      (byTreatment.get('baseline-reslice')?.length ?? 0) < 3 ||
-      (byTreatment.get('target-localization')?.length ?? 0) < 3
+      (byTreatment.get('baseline-reslice') ?? 0) < 3 ||
+      (byTreatment.get('target-localization') ?? 0) < 3
     ); index++) {
       const unitId = repairTreatmentUnitId({
         kind: 'no-diff-reslice',
@@ -833,46 +838,113 @@ describe('M342 dispatch production ledger', () => {
         parentObjectiveHash: index.toString(16).padStart(64, '0'),
       })!;
       const treatment = repairTreatmentForUnitId(unitId)!;
-      const arm = byTreatment.get(treatment) ?? [];
-      if (arm.length >= 3) continue;
+      const armIndex = byTreatment.get(treatment) ?? 0;
+      if (armIndex >= 3) continue;
       const handoffId = (index + 1_000).toString(16).padStart(64, '0');
-      const proposalCreated = arm.length === 0;
-      arm.push(makeEvent({
+      const itemId = `ashlr-hub:proposal-repair-nodiff:${index.toString(16).padStart(12, '0')}`;
+      const runId = `run-treatment-${index}-1`;
+      const converted = armIndex === 0;
+      const first = makeEvent({
         ts,
-        itemId: `ashlr-hub:proposal-repair-nodiff:${index.toString(16).padStart(12, '0')}`,
+        itemId,
         title: 'Reslice no-diff dispatch for treatment learning',
+        runId,
         repairHandoffId: handoffId,
         repairGenerationId: repairGenerationIdFromHandoffId(handoffId)!,
         repairTreatmentUnitId: unitId,
         repairTreatment: treatment,
         repairAttemptOrdinal: 1,
-        outcome: proposalCreated ? 'proposal-created' : 'empty-diff',
-        proposalCreated,
-        ...(proposalCreated ? { proposalId: `prop-treatment-${treatment}` } : {}),
-      }));
-      byTreatment.set(treatment, arm);
+        outcome: converted ? 'proposal-created' : 'empty-diff',
+        proposalCreated: converted,
+        ...(converted ? { proposalId: `prop-treatment-${treatment}` } : {}),
+      });
+      events.push(first);
+      const terminal = converted
+        ? first
+        : makeEvent({
+          ...first,
+          runId: `run-treatment-${index}-2`,
+          backend: 'kimi',
+          repairAttemptOrdinal: 2,
+          repairPreviousBackend: 'local-coder',
+        });
+      if (!converted) events.push(terminal);
+      events.push({
+        ...terminal,
+        basis: 'repair-lifecycle-candidate',
+        repairTreatmentAttemptHash: generatedRepairLifecycleAttemptHash(terminal.runId!),
+      });
+      events.push({
+        ...terminal,
+        basis: 'repair-lifecycle-outcome',
+        repairTreatmentOutcome: converted ? 'converted' : 'not-converted',
+        repairTreatmentAttemptHash: generatedRepairLifecycleAttemptHash(terminal.runId!),
+      });
+      byTreatment.set(treatment, armIndex + 1);
     }
-    return [...byTreatment.values()].flat();
+    return events;
   }
 
-  it('sample-gates distinct treatment units and deduplicates replayed executions', () => {
+  it('requires terminal lifecycle witnesses, sample-gates distinct units, and withholds replayed data', () => {
     const events = treatmentEvents();
-    const replay = { ...events[0]!, runId: 'replayed-execution', proposalCreated: false, proposalId: undefined, outcome: 'empty-diff' };
+    const raw = events.find((event) => event.repairTreatmentOutcome === undefined)!;
+    const replay = { ...raw, runId: 'replayed-execution' };
+    const lastUnit = events.at(-1)!.repairTreatmentUnitId;
 
-    expect(summarizeDispatchProductionYield(events.slice(0, 5))?.generatedRepairAttempts)
+    expect(summarizeDispatchProductionYield(events.filter((event) => event.repairTreatmentUnitId !== lastUnit))?.generatedRepairAttempts)
       .not.toHaveProperty('treatmentConversions');
-    const generated = summarizeDispatchProductionYield([...events, replay])?.generatedRepairAttempts;
+    const generated = summarizeDispatchProductionYield(events)?.generatedRepairAttempts;
     expect(generated?.treatmentAttribution).toEqual({
-      eligibleEvents: 7,
-      attributedEvents: 7,
+      eligibleEvents: 10,
+      attributedEvents: 10,
       unattributedEvents: 0,
       distinctUnits: 6,
-      replayedEvents: 1,
+      replayedEvents: 0,
     });
     expect(generated?.treatmentConversions).toEqual([
       { repairTreatment: 'baseline-reslice', attempts: 3, proposalsCreated: 1, noProposal: 2, proposalRate: 1 / 3 },
       { repairTreatment: 'target-localization', attempts: 3, proposalsCreated: 1, noProposal: 2, proposalRate: 1 / 3 },
     ]);
+    const terminalWitness = events.find((event) => event.repairTreatmentOutcome !== undefined)!;
+    const active = summarizeDispatchProductionYield(events.filter((event) => event !== terminalWitness))?.generatedRepairAttempts;
+    expect(active).not.toHaveProperty('treatmentConversions');
+    const mismatched = summarizeDispatchProductionYield(events.map((event) =>
+      event === terminalWitness ? { ...event, repairTreatmentAttemptHash: 'f'.repeat(64) } : event
+    ))?.generatedRepairAttempts;
+    expect(mismatched).not.toHaveProperty('treatmentConversions');
+    const replayed = summarizeDispatchProductionYield([...events, replay])?.generatedRepairAttempts;
+    expect(replayed?.treatmentAttribution?.replayedEvents).toBe(1);
+    expect(replayed).not.toHaveProperty('treatmentConversions');
+  });
+
+  it('appends a terminal lifecycle witness idempotently across acknowledgement retries', () => {
+    const witness = treatmentEvents().find((event) => event.basis === 'repair-lifecycle-outcome')!;
+    mkdirSync(dispatchProductionDir(), { recursive: true, mode: 0o700 });
+    writeFileSync(join(dispatchProductionDir(), '2026-07-08.jsonl'), '{malformed-history}\n', { mode: 0o600 });
+
+    expect(recordDispatchProduction(witness)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    expect(recordDispatchProduction(witness)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+
+    const rows = readDispatchProductionEvents({ limit: 100 });
+    expect(rows.filter((event) =>
+      event.basis === 'repair-lifecycle-outcome' &&
+      event.repairGenerationId === witness.repairGenerationId &&
+      event.repairTreatmentAttemptHash === witness.repairTreatmentAttemptHash)).toHaveLength(1);
+  });
+
+  it('marks only learning windows intersecting receipt retention as incomplete', () => {
+    const witness = treatmentEvents().find((event) => event.basis === 'repair-lifecycle-outcome')!;
+    expect(recordDispatchProduction(witness).recorded).toBe(1);
+    const receiptDir = join(dispatchProductionDir(), 'repair-treatment-outcomes');
+    writeFileSync(join(receiptDir, '.retention.json'), JSON.stringify({
+      schemaVersion: 1,
+      droppedThrough: '2026-07-07T23:59:59.999Z',
+    }) + '\n', { mode: 0o600 });
+
+    expect(readDispatchProductionEventsDetailed({ sinceMs: Date.parse('2026-07-08T00:00:00.000Z') }))
+      .toMatchObject({ sourceState: 'healthy', complete: true });
+    expect(readDispatchProductionEventsDetailed({ sinceMs: Date.parse('2026-07-07T00:00:00.000Z') }))
+      .toMatchObject({ sourceState: 'degraded', complete: false, stopReasons: ['file-limit'] });
   });
 
   it('withholds conversions when eligible metadata is stripped', () => {
@@ -886,8 +958,8 @@ describe('M342 dispatch production ledger', () => {
     expect(stripped).toMatchObject({ repairLineageInvalid: true });
     expect(stripped).not.toHaveProperty('repairTreatment');
     expect(generated?.treatmentAttribution).toMatchObject({
-      eligibleEvents: 7,
-      attributedEvents: 6,
+      eligibleEvents: 11,
+      attributedEvents: 10,
       unattributedEvents: 1,
       distinctUnits: 6,
     });
@@ -902,7 +974,7 @@ describe('M342 dispatch production ledger', () => {
     const truncated = readDispatchProductionYieldDetailed({ windowMs: 60_000, limit: 100, maxRows: 6 });
     expect(truncated.sourceQuality).toMatchObject({ sourceState: 'degraded', complete: false });
     expect(truncated.sourceQuality.stopReasons).toContain('row-limit');
-    expect(truncated.summary?.generatedRepairAttempts?.treatmentAttribution).toMatchObject({ distinctUnits: 6 });
+    expect(truncated.summary?.generatedRepairAttempts?.treatmentAttribution?.distinctUnits).toBeLessThan(6);
     expect(truncated.summary?.generatedRepairAttempts).not.toHaveProperty('treatmentConversions');
 
     rmSync(dispatchProductionDir(), { recursive: true, force: true });

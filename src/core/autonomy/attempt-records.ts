@@ -597,12 +597,17 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
   const deps = opts?.deps ?? {};
   const useDefaultReaders = opts?.useDefaultReaders ?? opts?.deps === undefined;
 
-  const dispatches = deps.readDispatchProductionEvents
-    ? safeArray(() => deps.readDispatchProductionEvents!({ sinceMs, limit, maxFiles: 3 }))
+  const dispatchReadLimit = Math.max(limit * 3, limit);
+  const dispatches = (deps.readDispatchProductionEvents
+    ? safeArray(() => deps.readDispatchProductionEvents!({ sinceMs, limit: dispatchReadLimit, maxFiles: 3 }))
     : safeArray(() => {
-        const read = readDispatchProductionEventsDetailed({ sinceMs, limit, maxFiles: 3 });
+        const read = readDispatchProductionEventsDetailed({ sinceMs, limit: dispatchReadLimit, maxFiles: 3 });
         return read.sourceState === 'healthy' && read.complete ? read.events : [];
-      });
+      }))
+    .filter((event) =>
+      event.basis !== 'repair-lifecycle-candidate' && event.basis !== 'repair-lifecycle-outcome'
+    )
+    .slice(0, limit);
   const actions = safeArray(() => deps.readAgentActions
     ? deps.readAgentActions({ sinceMs, limit: Math.max(limit * 4, 500), maxFiles: 3 })
     : readAgentActions({

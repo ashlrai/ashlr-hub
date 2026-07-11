@@ -544,15 +544,19 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
 
   const dispatchReadOptions = {
     sinceMs,
-    limit: Math.max(limit * 3, 100),
+    limit: Math.max(limit * 6, 200),
     maxFiles: 3,
   };
-  const dispatches = deps.readDispatchProductionEvents
+  const dispatches = (deps.readDispatchProductionEvents
     ? safeArray(() => deps.readDispatchProductionEvents!(dispatchReadOptions))
     : safeArray(() => {
         const read = readDispatchProductionEventsDetailed(dispatchReadOptions);
         return read.sourceState === 'healthy' && read.complete ? read.events : [];
-      });
+      }))
+    .filter((event) =>
+      event.basis !== 'repair-lifecycle-candidate' && event.basis !== 'repair-lifecycle-outcome'
+    )
+    .slice(0, Math.max(limit * 3, 100));
   const outcomes = safeArray(() =>
     (deps.listOutcomeRecords ?? listOutcomeRecords)({ limit: Math.max(limit * 3, 100) }),
   );

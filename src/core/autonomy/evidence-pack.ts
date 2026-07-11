@@ -5,7 +5,20 @@
  * scattered observations into one auditable artifact.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  opendirSync,
+  readSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -22,7 +35,15 @@ import type {
   ProposalVerifyResult,
   VisualGroundingEvidence,
 } from '../types.js';
+import { hashDiff } from '../foundry/provenance.js';
 import { causalMetadata } from '../learning/causal.js';
+
+export const READY_EVIDENCE_MAX_AGE_MS = 60 * 60 * 1000;
+export const READY_EVIDENCE_MAX_FUTURE_SKEW_MS = 60 * 1000;
+
+const MAX_EVIDENCE_FILES = 2_048;
+const MAX_EVIDENCE_BYTES = 32 * 1024 * 1024;
+const MAX_EVIDENCE_FILE_BYTES = 1024 * 1024;
 
 export type AutonomyTarget = 'proposal' | 'branch' | 'main' | 'preview' | 'production';
 
@@ -114,6 +135,25 @@ export interface BuildAutonomyEvidenceInput {
   edv?: AutonomyGateEvidence;
   remoteProtection?: AutonomyGateEvidence;
 }
+
+export interface AutonomyEvidenceSourceQuality {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  filesRead: number;
+  bytesRead: number;
+  invalidFiles: number;
+  unreadableFiles: number;
+  limitExceeded: boolean;
+}
+
+export interface AutonomyEvidencePacksReadResult extends AutonomyEvidenceSourceQuality {
+  packs: AutonomyEvidencePack[];
+}
+
+export type AutonomyEvidencePackList = AutonomyEvidencePack[] & {
+  sourceQuality?: AutonomyEvidenceSourceQuality;
+};
 
 export function evidenceDir(): string {
   return join(homedir(), '.ashlr', 'evidence');
@@ -305,15 +345,30 @@ function copyVerificationEvidence(input: AutonomyVerificationEvidence): Autonomy
 export function persistAutonomyEvidencePack(pack: AutonomyEvidencePack): boolean {
   try {
     const dir = evidenceDir();
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const dirStat = lstatSync(dir);
+    if (
+      dirStat.isSymbolicLink() ||
+      !dirStat.isDirectory() ||
+      (typeof process.getuid === 'function' && dirStat.uid !== process.getuid())
+    ) return false;
+    chmodSync(dir, 0o700);
     const dest = evidencePath(pack.proposal.id);
     const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(tmp, JSON.stringify(pack, null, 2) + '\n', 'utf8');
+    writeFileSync(tmp, JSON.stringify(pack, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
+    chmodSync(tmp, 0o600);
     renameSync(tmp, dest);
+    chmodSync(dest, 0o600);
     return true;
   } catch {
     return false;
   }
+}
+
+function isGateEvidence(value: unknown): value is AutonomyGateEvidence {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const gate = value as Record<string, unknown>;
+  return typeof gate['ok'] === 'boolean' && typeof gate['detail'] === 'string';
 }
 
 function isAutonomyEvidencePack(value: unknown): value is AutonomyEvidencePack {
@@ -323,58 +378,270 @@ function isAutonomyEvidencePack(value: unknown): value is AutonomyEvidencePack {
   const diff = v['diff'];
   const gates = v['gates'];
   const verification = v['verification'];
+  const policy = v['policy'];
+  const proposalRecord = proposal as Record<string, unknown> | null;
+  const diffRecord = diff as Record<string, unknown> | null;
+  const gatesRecord = gates as Record<string, unknown> | null;
+  const verificationRecord = verification as Record<string, unknown> | null;
   return (
     v['version'] === 1 &&
     typeof v['generatedAt'] === 'string' &&
     proposal !== null &&
     typeof proposal === 'object' &&
     !Array.isArray(proposal) &&
-    typeof (proposal as Record<string, unknown>)['id'] === 'string' &&
+    typeof proposalRecord?.['id'] === 'string' &&
+    typeof proposalRecord['status'] === 'string' &&
+    typeof proposalRecord['kind'] === 'string' &&
     diff !== null &&
     typeof diff === 'object' &&
     !Array.isArray(diff) &&
+    Array.isArray(diffRecord?.['files']) &&
+    diffRecord['files'].every((file) => typeof file === 'string') &&
+    typeof diffRecord['changedLines'] === 'number' &&
     gates !== null &&
     typeof gates === 'object' &&
     !Array.isArray(gates) &&
+    isGateEvidence(gatesRecord?.['authority']) &&
+    isGateEvidence(gatesRecord?.['provenance']) &&
+    isGateEvidence(gatesRecord?.['verification']) &&
+    isGateEvidence(gatesRecord?.['risk']) &&
+    isGateEvidence(gatesRecord?.['scope']) &&
     verification !== null &&
     typeof verification === 'object' &&
-    !Array.isArray(verification)
+    !Array.isArray(verification) &&
+    typeof verificationRecord?.['passed'] === 'boolean' &&
+    typeof verificationRecord['detail'] === 'string' &&
+    Array.isArray(verificationRecord['commandKinds']) &&
+    verificationRecord['commandKinds'].every((kind) => typeof kind === 'string') &&
+    (policy === undefined || (
+      policy !== null &&
+      typeof policy === 'object' &&
+      !Array.isArray(policy) &&
+      typeof (policy as Record<string, unknown>)['allowed'] === 'boolean' &&
+      typeof (policy as Record<string, unknown>)['action'] === 'string'
+    ))
+  );
+}
+
+function timestampsAreFresh(pack: AutonomyEvidencePack, nowMs: number, maxAgeMs: number): boolean {
+  const generatedMs = Date.parse(pack.generatedAt);
+  const verifiedMs = Date.parse(pack.verification.verifiedAt ?? '');
+  if (!Number.isFinite(generatedMs) || !Number.isFinite(verifiedMs)) return false;
+  if (generatedMs > nowMs + READY_EVIDENCE_MAX_FUTURE_SKEW_MS) return false;
+  if (verifiedMs > nowMs + READY_EVIDENCE_MAX_FUTURE_SKEW_MS) return false;
+  if (generatedMs < nowMs - maxAgeMs || verifiedMs < nowMs - maxAgeMs) return false;
+  return generatedMs + READY_EVIDENCE_MAX_FUTURE_SKEW_MS >= verifiedMs;
+}
+
+/** Fail-closed binding check for evidence used by daemon scheduling. */
+export function evidencePackMatchesLiveProposal(
+  pack: AutonomyEvidencePack,
+  proposal: Proposal,
+  opts: { nowMs?: number; maxAgeMs?: number } = {},
+): boolean {
+  const verify = proposal.verifyResult;
+  const currentDiffHash = hashDiff(proposal.diff ?? '');
+  const nowMs = opts.nowMs ?? Date.now();
+  const maxAgeMs = typeof opts.maxAgeMs === 'number' && Number.isFinite(opts.maxAgeMs) && opts.maxAgeMs > 0
+    ? opts.maxAgeMs
+    : READY_EVIDENCE_MAX_AGE_MS;
+  const requiredGates = [
+    pack.gates.authority,
+    pack.gates.provenance,
+    pack.gates.verification,
+    pack.gates.risk,
+    pack.gates.scope,
+    pack.gates.manager,
+    pack.gates.selfTarget,
+    pack.gates.edv,
+    pack.gates.remoteProtection,
+  ].filter((gate): gate is AutonomyGateEvidence => gate !== undefined);
+
+  return (
+    proposal.status === 'pending' &&
+    pack.proposal.id === proposal.id &&
+    pack.proposal.status === 'pending' &&
+    pack.proposal.kind === proposal.kind &&
+    pack.target === 'main' &&
+    pack.policy?.allowed === true &&
+    pack.policy.action === 'merge-main' &&
+    pack.verification.passed === true &&
+    pack.verification.commandKinds.length > 0 &&
+    requiredGates.every((gate) => gate.ok) &&
+    typeof proposal.diffHash === 'string' &&
+    proposal.diffHash === currentDiffHash &&
+    pack.diff.hash === currentDiffHash &&
+    pack.verification.diffHash === currentDiffHash &&
+    verify?.passed === true &&
+    verify.diffHash === currentDiffHash &&
+    typeof verify.baseBranch === 'string' &&
+    verify.baseBranch.length > 0 &&
+    pack.verification.baseBranch === verify.baseBranch &&
+    typeof verify.baseHead === 'string' &&
+    verify.baseHead.length > 0 &&
+    pack.verification.baseHead === verify.baseHead &&
+    typeof verify.source === 'string' &&
+    verify.source.length > 0 &&
+    pack.verification.source === verify.source &&
+    pack.verification.verifiedAt === verify.verifiedAt &&
+    timestampsAreFresh(pack, nowMs, maxAgeMs)
   );
 }
 
 export function readAutonomyEvidencePack(proposalId: string): AutonomyEvidencePack | null {
+  const result = readAutonomyEvidencePacksDetailed(MAX_EVIDENCE_FILES);
+  if (result.sourceState !== 'healthy' || !result.complete) return null;
+  return result.packs.find((pack) => pack.proposal.id === proposalId) ?? null;
+}
+
+function emptyEvidenceRead(
+  sourceState: AutonomyEvidenceSourceQuality['sourceState'],
+  overrides: Partial<AutonomyEvidencePacksReadResult> = {},
+): AutonomyEvidencePacksReadResult {
+  return {
+    packs: [],
+    sourceState,
+    sourcePresent: sourceState !== 'missing',
+    complete: sourceState !== 'degraded',
+    filesRead: 0,
+    bytesRead: 0,
+    invalidFiles: 0,
+    unreadableFiles: 0,
+    limitExceeded: false,
+    ...overrides,
+  };
+}
+
+export function readAutonomyEvidencePacksDetailed(limit = 50): AutonomyEvidencePacksReadResult {
   try {
-    const raw = readFileSync(evidencePath(proposalId), 'utf8');
-    const parsed: unknown = JSON.parse(raw);
-    return isAutonomyEvidencePack(parsed) ? parsed : null;
+    const dir = evidenceDir();
+    if (!existsSync(dir)) return emptyEvidenceRead('missing');
+    const dirStat = lstatSync(dir);
+    const ownerOk = typeof process.getuid !== 'function' || dirStat.uid === process.getuid();
+    if (
+      dirStat.isSymbolicLink() ||
+      !dirStat.isDirectory() ||
+      !ownerOk ||
+      (process.platform !== 'win32' && (dirStat.mode & 0o077) !== 0)
+    ) {
+      return emptyEvidenceRead('degraded', { complete: false, unreadableFiles: 1 });
+    }
+    const files: string[] = [];
+    const handle = opendirSync(dir);
+    try {
+      let physicalEntries = 0;
+      for (;;) {
+        const entry = handle.readSync();
+        if (!entry) break;
+        physicalEntries++;
+        if (physicalEntries > MAX_EVIDENCE_FILES) {
+          return emptyEvidenceRead('degraded', { complete: false, limitExceeded: true });
+        }
+        if (entry.name.endsWith('.json') && !entry.name.includes('.tmp-')) files.push(entry.name);
+      }
+    } finally {
+      handle.closeSync();
+    }
+    files.sort().reverse();
+    const result = emptyEvidenceRead('healthy', { sourcePresent: true });
+    const cap = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 50;
+    const proposalIds = new Set<string>();
+    for (const file of files) {
+      let fd: number | undefined;
+      try {
+        const path = join(dir, file);
+        const noFollow = 'O_NOFOLLOW' in fsConstants
+          ? (fsConstants as typeof fsConstants & { O_NOFOLLOW: number }).O_NOFOLLOW
+          : 0;
+        fd = openSync(path, fsConstants.O_RDONLY | noFollow);
+        const before = fstatSync(fd);
+        if (!before.isFile() || before.size > MAX_EVIDENCE_FILE_BYTES) {
+          result.invalidFiles++;
+          continue;
+        }
+        if (result.bytesRead + before.size > MAX_EVIDENCE_BYTES) {
+          result.limitExceeded = true;
+          result.complete = false;
+          break;
+        }
+        result.bytesRead += before.size;
+        const bytes = Buffer.alloc(before.size);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+          if (count <= 0) break;
+          offset += count;
+        }
+        const after = fstatSync(fd);
+        const pathStat = lstatSync(path);
+        const stableIdentity =
+          !pathStat.isSymbolicLink() &&
+          pathStat.isFile() &&
+          offset === before.size &&
+          after.size === before.size &&
+          pathStat.size === before.size &&
+          after.mtimeMs === before.mtimeMs &&
+          after.ctimeMs === before.ctimeMs &&
+          pathStat.mtimeMs === after.mtimeMs &&
+          pathStat.ctimeMs === after.ctimeMs &&
+          before.nlink === 1 &&
+          (typeof process.getuid !== 'function' || before.uid === process.getuid()) &&
+          (process.platform === 'win32' || (before.mode & 0o077) === 0) &&
+          (before.ino === 0 || pathStat.ino === 0 || (before.dev === pathStat.dev && before.ino === pathStat.ino));
+        if (!stableIdentity) {
+          result.invalidFiles++;
+          continue;
+        }
+        const raw = bytes.toString('utf8');
+        result.filesRead++;
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          if (
+            isAutonomyEvidencePack(parsed) &&
+            file === `${parsed.proposal.id}.json` &&
+            !proposalIds.has(parsed.proposal.id)
+          ) {
+            proposalIds.add(parsed.proposal.id);
+            result.packs.push(parsed);
+          } else result.invalidFiles++;
+        } catch {
+          result.invalidFiles++;
+        }
+      } catch {
+        result.unreadableFiles++;
+      } finally {
+        if (fd !== undefined) {
+          try { closeSync(fd); } catch { /* read health already fails closed */ }
+        }
+      }
+    }
+    if (result.invalidFiles > 0 || result.unreadableFiles > 0 || !result.complete) {
+      result.sourceState = 'degraded';
+      result.complete = false;
+    }
+    result.packs.sort((a, b) => Date.parse(b.generatedAt) - Date.parse(a.generatedAt));
+    result.packs = result.packs.slice(0, cap);
+    return result;
   } catch {
-    return null;
+    return emptyEvidenceRead('degraded', { complete: false, unreadableFiles: 1 });
   }
 }
 
-export function listAutonomyEvidencePacks(limit = 50): AutonomyEvidencePack[] {
-  try {
-    const dir = evidenceDir();
-    if (!existsSync(dir)) return [];
-    const files = readdirSync(dir)
-      .filter((f) => f.endsWith('.json') && !f.includes('.tmp-'))
-      .sort()
-      .reverse();
-    const packs: AutonomyEvidencePack[] = [];
-    const cap = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 50;
-    const scanCap = Math.max(cap * 4, 200);
-    for (const file of files.slice(0, scanCap)) {
-      try {
-        const raw = readFileSync(join(dir, file), 'utf8');
-        const parsed: unknown = JSON.parse(raw);
-        if (isAutonomyEvidencePack(parsed)) packs.push(parsed);
-      } catch {
-        // Skip corrupt evidence files. The caller surfaces aggregate counts only.
-      }
-    }
-    packs.sort((a, b) => Date.parse(b.generatedAt) - Date.parse(a.generatedAt));
-    return packs.slice(0, cap);
-  } catch {
-    return [];
-  }
+export function listAutonomyEvidencePacks(limit = 50): AutonomyEvidencePackList {
+  const result = readAutonomyEvidencePacksDetailed(limit);
+  const packs = result.packs as AutonomyEvidencePackList;
+  Object.defineProperty(packs, 'sourceQuality', {
+    value: {
+      sourceState: result.sourceState,
+      sourcePresent: result.sourcePresent,
+      complete: result.complete,
+      filesRead: result.filesRead,
+      bytesRead: result.bytesRead,
+      invalidFiles: result.invalidFiles,
+      unreadableFiles: result.unreadableFiles,
+      limitExceeded: result.limitExceeded,
+    } satisfies AutonomyEvidenceSourceQuality,
+    enumerable: false,
+  });
+  return packs;
 }

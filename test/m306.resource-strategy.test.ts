@@ -124,6 +124,8 @@ function doctor(fail = 0, warn = 0, totalChecks = 1): EcosystemDoctorReport {
 }
 
 function outcome(overrides: Partial<OutcomeRecord> = {}): OutcomeRecord {
+  const diffHash = 'a'.repeat(64);
+  const verifiedAt = '2026-07-01T00:08:00.000Z';
   return {
     version: 1,
     proposal: {
@@ -134,15 +136,27 @@ function outcome(overrides: Partial<OutcomeRecord> = {}): OutcomeRecord {
       status: 'pending',
       title: 'Ready proposal',
       createdAt: '2026-07-01T00:00:00.000Z',
-      verifyResult: { passed: true },
+      riskClass: 'low',
+      diffHash,
+      verifyResult: {
+        passed: true,
+        baseBranch: 'main',
+        baseHead: 'b'.repeat(40),
+        diffHash,
+        verifiedAt,
+        source: 'auto-merge',
+      },
     },
     lastActivityAt: '2026-07-01T00:10:00.000Z',
     decisions: [],
     judgeTraces: [],
     evidencePacks: [{
       generatedAt: '2026-07-01T00:09:00.000Z',
+      proposalId: 'prop-1',
+      diffHash,
       target: 'main',
       trustBasis: 'tier',
+      remotePreferred: false,
       riskClass: 'low',
       policy: { tier: 'T4', action: 'merge-main', allowed: true, reason: 'ok' },
       gates: {
@@ -152,9 +166,28 @@ function outcome(overrides: Partial<OutcomeRecord> = {}): OutcomeRecord {
         risk: { ok: true, detail: 'ok' },
         scope: { ok: true, detail: 'ok' },
       },
-      verification: { passed: true, detail: 'ok', commandKinds: ['test'] },
+      verification: {
+        passed: true,
+        detail: 'ok',
+        commandKinds: ['test'],
+        baseBranch: 'main',
+        baseHead: 'b'.repeat(40),
+        diffHash,
+        verifiedAt,
+        source: 'auto-merge',
+      },
     }],
     workedEvents: [],
+    evidenceSourceQuality: {
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+      filesRead: 1,
+      bytesRead: 1,
+      invalidFiles: 0,
+      unreadableFiles: 0,
+      limitExceeded: false,
+    },
     ...overrides,
   } as OutcomeRecord;
 }
@@ -202,6 +235,7 @@ describe('buildResourceStrategyReport', () => {
     const report = await buildResourceStrategyReport(
       cfg({ foundry: { autoMerge: { enabled: true } } as NonNullable<AshlrConfig['foundry']> }),
       {
+        now: new Date('2026-07-01T00:30:00.000Z'),
         deps: deps({ listOutcomeRecords: () => [outcome()] }),
       },
     );
@@ -209,6 +243,56 @@ describe('buildResourceStrategyReport', () => {
     expect(report.mode).toBe('auto-merge-ready');
     expect(report.outcomes.readyEvidence).toBe(1);
     expect(report.recommendedActions.join(' ')).toContain('existing merge gates');
+  });
+
+  it.each([
+    ['stale generated timestamp', (record: OutcomeRecord) => {
+      record.evidencePacks[0]!.generatedAt = '2026-06-30T20:00:00.000Z';
+    }],
+    ['future verification timestamp', (record: OutcomeRecord) => {
+      record.evidencePacks[0]!.verification.verifiedAt = '2026-07-01T01:00:01.000Z';
+      record.proposal.verifyResult!.verifiedAt = '2026-07-01T01:00:01.000Z';
+    }],
+    ['changed live diff hash', (record: OutcomeRecord) => {
+      record.proposal.diffHash = 'c'.repeat(64);
+    }],
+    ['changed verification base', (record: OutcomeRecord) => {
+      record.proposal.verifyResult!.baseHead = 'c'.repeat(40);
+    }],
+    ['degraded evidence source', (record: OutcomeRecord) => {
+      record.evidenceSourceQuality!.sourceState = 'degraded';
+      record.evidenceSourceQuality!.complete = false;
+    }],
+  ])('does not schedule auto-merge-ready for %s', async (_label, mutate) => {
+    const record = outcome();
+    mutate(record);
+    const report = await buildResourceStrategyReport(
+      cfg({ foundry: { autoMerge: { enabled: true } } as NonNullable<AshlrConfig['foundry']> }),
+      {
+        now: new Date('2026-07-01T00:30:00.000Z'),
+        deps: deps({ listOutcomeRecords: () => [record] }),
+      },
+    );
+
+    expect(report.outcomes.readyEvidence).toBe(0);
+    expect(report.mode).not.toBe('auto-merge-ready');
+  });
+
+  it('requires the evidence trust basis to match current policy', async () => {
+    const report = await buildResourceStrategyReport(
+      cfg({
+        foundry: {
+          autoMerge: { enabled: true, trustBasis: 'verification' },
+        } as NonNullable<AshlrConfig['foundry']>,
+      }),
+      {
+        now: new Date('2026-07-01T00:30:00.000Z'),
+        deps: deps({ listOutcomeRecords: () => [outcome()] }),
+      },
+    );
+
+    expect(report.outcomes.readyEvidence).toBe(0);
+    expect(report.mode).not.toBe('auto-merge-ready');
   });
 
   it('does not treat branch-only or already-applied evidence as auto-merge-ready', async () => {
@@ -232,6 +316,7 @@ describe('buildResourceStrategyReport', () => {
     const report = await buildResourceStrategyReport(
       cfg({ foundry: { autoMerge: { enabled: true } } as NonNullable<AshlrConfig['foundry']> }),
       {
+        now: new Date('2026-07-01T00:30:00.000Z'),
         deps: deps({ listOutcomeRecords: () => [branchOnly, alreadyApplied] }),
       },
     );

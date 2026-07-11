@@ -230,6 +230,23 @@ describe('M323 buildProducerScores', () => {
     expect(buildProducerScores('issue', NOW).size).toBe(0);
   });
 
+  it('does not credit an outcome when different producers claim the same proposal id', () => {
+    fixture = [
+      { ts: ts(1), proposalId: 'shared', action: 'judged', verdict: 'ship' },
+      { ts: ts(2), proposalId: 'shared', action: 'proposed', engine: 'codex', model: 'codex:gpt-5.3-codex' },
+      {
+        ts: ts(3),
+        proposalId: 'shared',
+        action: 'proposed',
+        engine: 'claude',
+        model: 'claude:claude-sonnet-5',
+        workSource: 'lint',
+      },
+    ];
+
+    expect(buildProducerScores('issue', NOW).size).toBe(0);
+  });
+
   it(`keeps exactly ${LEARNED_ROUTING_MIN_SAMPLES} fresh producer samples above the weighted floor`, () => {
     const fixedNow = 1_700_000_000_000;
     fixture = freshChains(

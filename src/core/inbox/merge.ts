@@ -140,6 +140,7 @@ import {
 } from '../autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../autonomy/policy.js';
 import { causalMetadataFromProposal, evidenceOutcomeSummary } from '../learning/causal.js';
+import { acquireProposalMutationLock, releaseProposalMutationLock } from './proposal-mutation-lock.js';
 
 function decisionReadIsHealthy(decisions: DecisionEntry[]): boolean {
   const quality = (decisions as DecisionEntry[] & {
@@ -1589,10 +1590,6 @@ function hasVerifiedDiffBinding(
   );
 }
 
-function hasVerificationCommandEvidence(result: ProposalVerifyResult | undefined): boolean {
-  return Array.isArray(result?.ran) && result.ran.length > 0;
-}
-
 function hasRequiredVerificationCommandEvidence(result: ProposalVerifyResult | undefined): boolean {
   return Array.isArray(result?.ran) && result.ran.some((command) => command.required !== false);
 }
@@ -2157,10 +2154,38 @@ export async function autoMergeProposal(
     //
     // M54 never-weaken + allowSelfMerge guard unchanged in both modes.
     const trustBasis = configuredTrustBasis(cfg);
+    const expectedProposalStatus = proposal.status;
+    const expectedProposalDiffHash = currentProposalDiffHash(proposal);
+    const currentProposalConflict = (): string | null => {
+      const current = loadProposal(id);
+      if (!current) return 'proposal disappeared during merge evaluation';
+      if (current.status !== expectedProposalStatus) {
+        return `proposal status changed during merge evaluation (${expectedProposalStatus} -> ${current.status})`;
+      }
+      if (currentProposalDiffHash(current) !== expectedProposalDiffHash) {
+        return 'proposal diff changed during merge evaluation';
+      }
+      if (trustBasis === 'verification' || trustBasis === 'evidence') {
+        const expectedVerify = proposal.verifyResult;
+        const currentVerify = current.verifyResult;
+        if (
+          !expectedVerify ||
+          !currentVerify ||
+          currentVerify.passed !== true ||
+          currentVerify.diffHash !== expectedVerify.diffHash ||
+          currentVerify.baseBranch !== expectedVerify.baseBranch ||
+          currentVerify.baseHead !== expectedVerify.baseHead ||
+          currentVerify.verifiedAt !== expectedVerify.verifiedAt ||
+          currentVerify.source !== expectedVerify.source
+        ) return 'proposal verification binding changed during merge evaluation';
+      }
+      return null;
+    };
 
     let toMain: boolean;
     let authority: { authorized: boolean; reason: string };
     let evidenceRemoteProtection: AutonomyGateEvidence | undefined;
+    let verifiedThisInvocation: VerifyProposalResult | undefined;
 
     if (trustBasis === 'evidence') {
       const activation = evaluateEvidenceAutoMergePreflight(proposal, cfg, {
@@ -2186,46 +2211,44 @@ export async function autoMergeProposal(
       // the genuine result, and updating the in-memory proposal object so the
       // gate sees it. Gate 6 below then skips the redundant re-run.
       //
-      // SAFETY: the result comes exclusively from verifyProposal() — never
-      // fabricated. A persistence failure leaves verifyResult absent →
-      // evaluateVerificationGate Criterion 2 refuses (fail-closed). Verification
-      // failure (verify.ok===false) short-circuits here before Gate 4 so no
-      // merge can proceed on a failing diff.
-      const verifiedForCurrentDiff = trustBasis === 'evidence'
-        ? hasVerifiedDiffBinding(proposal) && hasVerificationCommandEvidence(proposal.verifyResult)
-        : hasVerifiedBaseBinding(proposal.verifyResult);
-      if (proposal.verifyResult?.passed !== true || !verifiedForCurrentDiff) {
-        // If verifyResult is already present and explicitly false, skip the
-        // expensive worktree run — we already know it failed. evaluateVerificationGate
-        // Criterion 2 will refuse on passed===false. This preserves existing test
-        // expectations ([A4]/[A7]) that set verifyResult.passed=false as the
-        // "suite not green" signal without re-running verification.
-        if (proposal.verifyResult !== undefined && proposal.verifyResult.passed === false) {
-          // Fall through to evaluateVerificationGate — Criterion 2 will refuse.
-        } else {
-          const preVerify = await verifyProposal(proposal, cfg);
-          const preVerifyResult = verifyResultFromProposalResult(
-            preVerify,
-            'auto-merge',
-            new Date().toISOString(),
-            currentProposalDiffHash(proposal),
-          );
-          // Persist the REAL result — best-effort (failure → absent → gate refuses).
-          try {
-            updateProposalField(proposal.id, {
-              verifyResult: preVerifyResult,
-            });
-          } catch {
-            // Persistence failure: verifyResult stays absent — gate refuses correctly.
-          }
-          if (!preVerify.ok) {
-            return refuse(`verification failed: ${preVerify.detail}`, repo);
-          }
-          // Update the in-memory proposal so evaluateVerificationGate reads it.
-          // This does NOT mutate the on-disk record — that was done above. This
-          // only ensures the pure gate function sees the real verifyResult.
-          proposal.verifyResult = preVerifyResult;
+      // Evidence mode has no judge dependency, so stored verifyResult is
+      // observational only: proposal provenance does not authenticate that
+      // mutable field. Every mutating evidence-mode invocation therefore
+      // establishes fresh verification authority in an isolated worktree.
+      // Verification mode retains its judge-attested cached-result behavior.
+      const verifiedForCurrentDiff = trustBasis === 'verification' && hasVerifiedBaseBinding(proposal.verifyResult);
+      const shouldVerify = trustBasis === 'evidence' || (
+        proposal.verifyResult?.passed !== false && !verifiedForCurrentDiff
+      );
+      if (shouldVerify) {
+        const preVerify = await verifyProposal(proposal, cfg);
+        const preVerifyResult = verifyResultFromProposalResult(
+          preVerify,
+          'auto-merge',
+          new Date().toISOString(),
+          currentProposalDiffHash(proposal),
+        );
+        let persisted = false;
+        try {
+          persisted = updateProposalField(proposal.id, {
+            verifyResult: preVerifyResult,
+          });
+        } catch {
+          persisted = false;
         }
+        if (!persisted) {
+          return refuse(
+            preVerify.ok
+              ? 'verification result could not be persisted — refusing merge authority'
+              : `verification failed: ${preVerify.detail}; result could not be persisted`,
+            repo,
+          );
+        }
+        if (!preVerify.ok) {
+          return refuse(`verification failed: ${preVerify.detail}`, repo);
+        }
+        proposal.verifyResult = preVerifyResult;
+        verifiedThisInvocation = preVerify;
       }
 
       // Evidence-backed modes load decisions for this proposal now. Verification
@@ -2374,15 +2397,12 @@ export async function autoMergeProposal(
     }
 
     // ── Gate 6: full verification in an isolated worktree ────────────────────
-    // M261/M342: in evidence-backed modes, verifyProposal() already ran
-    // pre-Gate-4 above. Skip the redundant re-run only when the stored result is
-    // base-bound. In tier mode (default), run verifyProposal() here as before.
+    // M261/M342: evidence-backed modes use only the fresh result established
+    // during this invocation. Tier mode runs verification here as before.
     let verify: VerifyProposalResult;
-    const canReuseStoredVerify =
-      (trustBasis === 'verification' && hasVerifiedBaseBinding(proposal.verifyResult)) ||
-      (trustBasis === 'evidence' && hasVerifiedDiffBinding(proposal) && hasVerificationCommandEvidence(proposal.verifyResult));
-    if (canReuseStoredVerify && proposal.verifyResult) {
-      // Already verified pre-Gate-4 and passed — skip re-run.
+    if ((trustBasis === 'verification' || trustBasis === 'evidence') && verifiedThisInvocation) {
+      verify = verifiedThisInvocation;
+    } else if (trustBasis === 'verification' && hasVerifiedBaseBinding(proposal.verifyResult)) {
       verify = verifyResultFromStored(proposal.verifyResult);
     } else {
       verify = await verifyProposal(proposal, cfg);
@@ -2765,6 +2785,8 @@ export async function autoMergeProposal(
     // and ask the policy engine what the farthest allowed autonomous action is.
     // If the pack cannot be written, fail closed: an autonomous merge without an
     // evidence trail recreates the human-as-integrator bottleneck.
+    const preEvidenceConflict = currentProposalConflict();
+    if (preEvidenceConflict) return refuse(preEvidenceConflict, repo);
     const wantRemote = cfg.foundry?.autoMerge?.pushToRemote === true;
     const hasGithub = getRemoteOrg(repo).org !== null;
     const selfTarget = isSelfTargetProposal(proposal, cfg);
@@ -2872,6 +2894,14 @@ export async function autoMergeProposal(
       return refuse(`autonomy policy returned '${policy.action}' but branch application requires branch/PR action`, repo);
     }
 
+    // Fence proposal authority from the last state check through the outward
+    // mutation and terminal proposal update. Store writers share this lock.
+    const authorityFence = acquireProposalMutationLock(id);
+    if (!authorityFence) return refuse('proposal mutation lock unavailable — refusing merge authority', repo);
+    try {
+      const fencedConflict = currentProposalConflict();
+      if (fencedConflict) return refuse(fencedConflict, repo);
+
     // ── ACTION: stage the diff on a branch off the default branch ────────────
     const base = verify.baseBranch;
     const currentDefaultBranch = defaultBranch(repo);
@@ -2894,6 +2924,8 @@ export async function autoMergeProposal(
     let prUrl: string | undefined;
 
     if (wantRemote && hasGithub) {
+      const prePushConflict = currentProposalConflict();
+      if (prePushConflict) return refuse(prePushConflict, repo);
       const baseHeadBeforePush = resolveDefaultBranchHead(repo, base);
       if (!baseHeadBeforePush || baseHeadBeforePush !== verify.baseHead) {
         return refuse(
@@ -2994,6 +3026,8 @@ export async function autoMergeProposal(
       }
     } else if (toMain) {
       // LOCAL fallback — conservative; refuses if default branch is checked out.
+      const preMergeConflict = currentProposalConflict();
+      if (preMergeConflict) return refuse(preMergeConflict, repo);
       const local = mergeLocally(repo, branch, base, verify.baseHead);
       merged = local.ok;
       reason = local.detail;
@@ -3023,10 +3057,10 @@ export async function autoMergeProposal(
             updatedAt: now,
             detail: reason,
           },
-        });
-        setStatus(id, 'awaiting-host-merge', reason, reason);
+        }, authorityFence);
+        setStatus(id, 'awaiting-host-merge', reason, reason, authorityFence);
       } else {
-        setStatus(id, 'applied', reason);
+        setStatus(id, 'applied', reason, undefined, authorityFence);
       }
     }
 
@@ -3046,6 +3080,9 @@ export async function autoMergeProposal(
       result: success ? 'ok' : 'error',
     });
     return result;
+    } finally {
+      releaseProposalMutationLock(authorityFence);
+    }
   } catch (err) {
     // Belt-and-suspenders: the orchestrator must never throw out.
     return refuse(`unexpected error: ${err instanceof Error ? err.message : String(err)}`);

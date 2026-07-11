@@ -269,7 +269,13 @@ export interface FleetAutoMergeReadinessStatus {
   enabled: boolean;
   trustBasis: AutoMergeTrustBasis;
   pending: number;
+  /** Cheap static candidates; this is observational and does not imply merge authority. */
   preflightReady: number;
+  /** Candidates whose currently persisted evidence clears the read-only authority gate. */
+  authorityReady?: number;
+  /** Cheap candidates withheld because authority evidence is absent or untrustworthy. */
+  authorityBlocked?: number;
+  authorityByReason?: Record<string, number>;
   needsVerification: number;
   knownVerificationFailed: number;
   blocked: number;
@@ -338,6 +344,7 @@ export interface FleetAutonomyEffectivenessStatus {
     frontierPending: number;
     awaitingHostMerge: number;
     preflightReady: number;
+    authorityReady?: number;
     needsVerification: number;
     blocked: number;
     knownVerificationFailed: number;
@@ -2968,6 +2975,7 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
     frontierPending: status.proposals.frontierPending,
     awaitingHostMerge: status.proposals.awaitingHostMerge ?? 0,
     preflightReady: readiness?.preflightReady ?? 0,
+    authorityReady: readiness?.authorityReady ?? 0,
     needsVerification: readiness?.needsVerification ?? 0,
     blocked: readiness?.blocked ?? 0,
     knownVerificationFailed: readiness?.knownVerificationFailed ?? 0,
@@ -2997,12 +3005,12 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
       counts,
     };
   }
-  if (readiness?.enabled && counts.preflightReady > 0) {
+  if (readiness?.enabled && (counts.authorityReady ?? 0) > 0) {
     return {
       phase: 'merge-ready',
       canAutoMergeNow: true,
       bottleneck: 'merge-drain',
-      summary: `${counts.preflightReady} proposal(s) are preflight-ready for the auto-merge drain.`,
+      summary: `${counts.authorityReady} proposal(s) have complete authority evidence for the auto-merge drain.`,
       counts,
     };
   }
@@ -3012,6 +3020,19 @@ function buildAutonomyEffectiveness(status: FleetStatus): FleetAutonomyEffective
       canAutoMergeNow: false,
       bottleneck: 'verification',
       summary: `${counts.needsVerification} proposal(s) need verification before judge or merge spend.`,
+      counts,
+    };
+  }
+  if (readiness?.enabled && (readiness.authorityBlocked ?? 0) > 0) {
+    const topReason = Object.entries(readiness.authorityByReason ?? {})
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
+    return {
+      phase: 'merge-blocked',
+      canAutoMergeNow: false,
+      bottleneck: 'merge-gate',
+      summary: topReason
+        ? `${readiness.authorityBlocked} proposal(s) lack complete merge authority; top blocker: ${topReason}.`
+        : `${readiness.authorityBlocked} proposal(s) lack complete merge authority.`,
       counts,
     };
   }
@@ -3169,14 +3190,34 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
 
   const readiness = status.autoMergeReadiness;
   if (readiness?.enabled && !controlBlocked) {
-    if (readiness.preflightReady > 0) {
+    if ((readiness.authorityReady ?? 0) > 0) {
       add({
         id: 'drain-ready-auto-merges',
         priority: 'high',
         label: 'Drain ready auto-merges',
-        detail: `${readiness.preflightReady} pending proposal(s) have cheap preflight-ready evidence.`,
+        detail: `${readiness.authorityReady} pending proposal(s) have complete read-only authority evidence.`,
         commands: [
           nextActionCommand('Run auto-merge pass', ['ashlr', 'daemon', 'start', '--once'], 'autonomous-dispatch'),
+          nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
+        ],
+      });
+    }
+    if (
+      (readiness.authorityBlocked ?? 0) > 0 &&
+      (readiness.authorityReady ?? 0) === 0 &&
+      readiness.needsVerification === 0
+    ) {
+      const topReason = Object.entries(readiness.authorityByReason ?? {})
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
+      add({
+        id: 'inspect-auto-merge-authority',
+        priority: 'high',
+        label: 'Inspect merge authority',
+        detail: topReason
+          ? `${topReason[1]}x ${topReason[0]}`
+          : `${readiness.authorityBlocked} proposal(s) lack complete authority evidence.`,
+        commands: [
+          nextActionCommand('Inspect fleet status', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
           nextActionCommand('Inspect inbox', ['ashlr', 'inbox', '--json'], 'read-only'),
         ],
       });
@@ -3974,11 +4015,11 @@ function shipReadinessSources(
     ? readinessSource(
         'auto-merge',
         'Auto-Merge Gate',
-        readiness.enabled ? 'healthy' : 'blocked',
+        readiness.enabled && (readiness.authorityBlocked ?? 0) === 0 ? 'healthy' : 'blocked',
         inputs.generatedAt,
         READINESS_STATUS_STALE_MS,
         readiness.enabled
-          ? `${readiness.preflightReady} ready, ${readiness.needsVerification} need verification, ${readiness.blocked} blocked`
+          ? `${readiness.authorityReady ?? 0} authority-ready, ${readiness.preflightReady} preflight-ready, ${readiness.needsVerification} need verification, ${readiness.blocked} statically blocked`
           : 'auto-merge is disabled',
         {
           empty:
@@ -4186,8 +4227,21 @@ function chooseReadinessBlocker(
       'phantom',
     );
   }
-  if (readiness.preflightReady > 0) {
+  if ((readiness.authorityReady ?? 0) > 0) {
     return null;
+  }
+  if ((readiness.authorityBlocked ?? 0) > 0) {
+    const topReason = Object.entries(readiness.authorityByReason ?? {})
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
+    return readinessBlocker(
+      'merge-authority-incomplete',
+      'Merge authority incomplete',
+      topReason
+        ? `${topReason[1]}x ${topReason[0]}`
+        : `${readiness.authorityBlocked} proposal(s) lack complete authority evidence.`,
+      'high',
+      'auto-merge',
+    );
   }
   if (readiness.needsVerification > 0) {
     return readinessBlocker(
@@ -4305,7 +4359,7 @@ function readinessVerdict(
   if (topBlocker && readinessPriorityRank(topBlocker.severity) <= readinessPriorityRank('high')) {
     return 'blocked';
   }
-  if (status.autoMergeReadiness?.preflightReady && status.autoMergeReadiness.preflightReady > 0) {
+  if ((status.autoMergeReadiness?.authorityReady ?? 0) > 0) {
     return summary.degraded > 0 || summary.unavailable > 0 || summary.unknown > 0 ? 'degraded' : 'ready';
   }
   if (
@@ -4490,6 +4544,9 @@ async function buildAutoMergeReadinessStatus(
   const byReason: Record<string, number> = {};
   const recentBlockers: FleetAutoMergeBlockerSummary[] = [];
   let preflightReady = 0;
+  let authorityReady = 0;
+  let authorityBlocked = 0;
+  const authorityByReason: Record<string, number> = {};
   let needsVerification = 0;
   let knownVerificationFailed = 0;
   let blocked = 0;
@@ -4506,6 +4563,7 @@ async function buildAutoMergeReadinessStatus(
     evaluateBranchAuthority,
     evaluateAutoMergeReadinessPreflight,
     evaluateMergeAuthority,
+    explainAutoMergeGate,
     mergeTargetForTier,
   } = await import('../inbox/merge.js');
   const { hashDiff } = await import('../foundry/provenance.js');
@@ -4523,6 +4581,10 @@ async function buildAutoMergeReadinessStatus(
         riskClass,
       });
     }
+  };
+  const noteAuthorityBlocker = (reason: string): void => {
+    authorityBlocked++;
+    authorityByReason[reason] = (authorityByReason[reason] ?? 0) + 1;
   };
   const profileForRepo = (repo: string): ReturnType<typeof detectRepoExecutionProfile> | null => {
     const key = resolve(repo);
@@ -4665,6 +4727,34 @@ async function buildAutoMergeReadinessStatus(
     }
 
     preflightReady++;
+
+    if (trustBasis === 'tier') {
+      authorityReady++;
+      continue;
+    }
+
+    if (trustBasis === 'evidence') {
+      noteAuthorityBlocker('fresh isolated verification is required by the mutating evidence-mode gate');
+      continue;
+    }
+
+    const proposalCreatedMs = Date.parse(proposal.createdAt);
+    const decisionsRead = readDecisionsDetailed({
+      proposalId: proposal.id,
+      ...(Number.isFinite(proposalCreatedMs) ? { sinceMs: proposalCreatedMs - 60_000 } : {}),
+    });
+    if (decisionsRead.sourceState === 'degraded' || !decisionsRead.complete) {
+      noteAuthorityBlocker('decisions ledger source is degraded or incomplete');
+      continue;
+    }
+    const authority = explainAutoMergeGate(proposal, cfg, {
+      decisionsForProposal: decisionsRead.decisions,
+    });
+    if (!authority.mergeable) {
+      noteAuthorityBlocker(authority.reason);
+      continue;
+    }
+    authorityReady++;
   }
 
   return {
@@ -4672,6 +4762,9 @@ async function buildAutoMergeReadinessStatus(
     trustBasis,
     pending: pendingProposals.length,
     preflightReady,
+    authorityReady,
+    authorityBlocked,
+    authorityByReason,
     needsVerification,
     knownVerificationFailed,
     blocked,
