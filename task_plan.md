@@ -1616,3 +1616,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve observational `readDecisions()` compatibility without allowing malformed, unreadable, linked, replaced, or over-cap sources to authorize merges.
 - [x] Add malformed-newer, unreadable, oversized, linked, replacement-race, ordering, and compatibility coverage.
 - [x] Run focused/full gates and independent adversarial review, then update notes, commit, push, reload, and production-canary the authority boundary.
+
+## Current Overnight Cycle - Bounded Judge-Trace Learning Evidence
+- [x] Rehydrate the deployed decision-authority baseline, judge-trace consumers, current git state, Entire state, and persistent notes.
+- [x] Deploy disjoint audits for trace storage integrity, outcome-link semantics, learning consumers, and adversarial fixtures.
+- [x] Add bounded, race-safe judge-trace reads with explicit missing, healthy, degraded, and incomplete source quality.
+- [x] Preserve observational compatibility while preventing degraded traces from becoming calibration, outcome, or routing labels.
+- [x] Harden trace and outcome-patch writers against links, torn tails, short writes, unsafe modes, oversized rows, and partition drift.
+- [x] Expose judge-trace quality in FleetStatus and CLI without presenting partial aggregates as healthy.
+- [x] Add malformed, unreadable, oversized, linked, replacement, equal-time, outcome-patch, long-history, and privacy coverage.
+- [x] Run focused/full gates and independent adversarial review, then update notes, commit, push, reload, and production-canary trace evidence.
