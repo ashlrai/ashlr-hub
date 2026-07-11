@@ -1688,3 +1688,15 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve v1 read compatibility and attempt-level telemetry while preventing unchanged-objective cooldown, empty-attempt, pending-proposal, retired, or exhausted resets.
 - [x] Prove changed objectives receive fresh generations and missing/tampered objective authority fails closed.
 - [x] Run focused/full verification plus independent review, update notes, commit, push, reload, and production-canary the reader-first rollout.
+
+## Current Overnight Cycle - Repair Handoff Activation Observability
+- [x] Rehydrate the reader-first production baseline and effective writer configuration.
+- [x] Deploy independent activation, canary-evidence, and natural-eligibility audits.
+- [x] Attempt a reversible single-daemon activation and classify the no-ordinary-parent result as inconclusive rather than successful.
+- [x] Restore the writer-off baseline without deleting or rewriting either authority journal.
+- [x] Add one bounded rollout status spanning journal health, schema counts, aliases, ordinary eligibility, projection evidence, and operator action.
+- [x] Render rollout truth in CLI and Mission Control with legacy payload compatibility.
+- [x] Complete independent review, commit, push, reload, production-canary the new status, and update durable notes.
+- [x] Catch and fix the production dashboard's unbounded Codex transcript scan during the visual canary.
+- [x] Bound transcript discovery, file count, aggregate bytes, head/tail parsing, and concurrent snapshot computation.
+- [x] Upgrade existing dashboard LaunchAgents to an interactive service policy and verify desktop/mobile rendering.
