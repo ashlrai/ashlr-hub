@@ -1671,4 +1671,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Remove comment/string-only skipped-test markers before they become executable self-improvement work.
 - [x] Decide and implement the next evidence-bound source or generation precision improvement.
 - [x] Add adversarial fixtures and run focused/full verification plus independent review.
-- [ ] Update durable notes, commit, push, reload, and production-canary backlog precision.
+- [x] Update durable notes, commit, push, reload, and production-canary backlog precision.
