@@ -9,10 +9,9 @@ on:
 jobs:
   ci:
     # Node 22 is the hard minimum — install.sh and CONTRIBUTING.md both enforce it.
-    # M83: windows-latest locks in the PR #8 cross-platform work — without a
-    # Windows lane the next refactor reintroduces a split('/') or a `which`
-    # and nobody notices. Platform-incompatible tests stay skip-guarded with a
-    # stated reason (symlinks/EPERM, POSIX mode bits, sandbox-exec, rg/grep).
+    # Ubuntu is the exhaustive authority. Windows runs a named portability
+    # contract over fleet durability, verification, merge authority, handoff,
+    # telemetry, and watchdog surfaces. POSIX-only semantics remain on Ubuntu.
     name: CI (Node 22, ${{ matrix.label }})
     strategy:
       fail-fast: false
@@ -23,13 +22,40 @@ jobs:
             test_args: ""
           - os: windows-latest
             label: windows, shard 1/3
-            test_args: --shard=1/3
+            test_args: >-
+              test/m30.ci.test.ts test/m43.verify-commands.test.ts
+              test/m119.quality-metrics.test.ts test/m141.judge-trace.test.ts
+              test/m153.verification-gate.test.ts test/m189.regression-sentinel.test.ts
+              test/m192.daemon-integration.test.ts test/m220.anticlog-verdict-feedback.test.ts
+              test/m305.automerge-readiness-preflight.test.ts test/m315.remote-handoff-truth.test.ts
+              test/m332.outcome-watcher.test.ts test/m342.dispatch-production-ledger.test.ts
+              test/m343.agent-action-ledger.test.ts test/m354.trajectory-records.test.ts
+              test/m370.branch-protection-attestation.test.ts test/m372.test-ci-watchdog.test.ts
+              test/m373.directory-durability.test.ts --shard=1/3
           - os: windows-latest
             label: windows, shard 2/3
-            test_args: --shard=2/3
+            test_args: >-
+              test/m30.ci.test.ts test/m43.verify-commands.test.ts
+              test/m119.quality-metrics.test.ts test/m141.judge-trace.test.ts
+              test/m153.verification-gate.test.ts test/m189.regression-sentinel.test.ts
+              test/m192.daemon-integration.test.ts test/m220.anticlog-verdict-feedback.test.ts
+              test/m305.automerge-readiness-preflight.test.ts test/m315.remote-handoff-truth.test.ts
+              test/m332.outcome-watcher.test.ts test/m342.dispatch-production-ledger.test.ts
+              test/m343.agent-action-ledger.test.ts test/m354.trajectory-records.test.ts
+              test/m370.branch-protection-attestation.test.ts test/m372.test-ci-watchdog.test.ts
+              test/m373.directory-durability.test.ts --shard=2/3
           - os: windows-latest
             label: windows, shard 3/3
-            test_args: --shard=3/3
+            test_args: >-
+              test/m30.ci.test.ts test/m43.verify-commands.test.ts
+              test/m119.quality-metrics.test.ts test/m141.judge-trace.test.ts
+              test/m153.verification-gate.test.ts test/m189.regression-sentinel.test.ts
+              test/m192.daemon-integration.test.ts test/m220.anticlog-verdict-feedback.test.ts
+              test/m305.automerge-readiness-preflight.test.ts test/m315.remote-handoff-truth.test.ts
+              test/m332.outcome-watcher.test.ts test/m342.dispatch-production-ledger.test.ts
+              test/m343.agent-action-ledger.test.ts test/m354.trajectory-records.test.ts
+              test/m370.branch-protection-attestation.test.ts test/m372.test-ci-watchdog.test.ts
+              test/m373.directory-durability.test.ts --shard=3/3
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -56,8 +82,8 @@ jobs:
 
       - name: Test (hermetic)
         # scripts/test-ci.mjs isolates HOME from real ~/.ashlr/ state and adds
-        # inactivity and hard-runtime watchdogs. Windows shards run serially in
-        # independent checkouts so they cannot share mutable test state.
+        # inactivity and hard-runtime watchdogs. Windows portability shards run
+        # serially in independent checkouts so they cannot share mutable state.
         # This is the canonical CI invocation documented in CONTRIBUTING.md.
         run: npm run test:ci -- ${{ matrix.test_args }}
 

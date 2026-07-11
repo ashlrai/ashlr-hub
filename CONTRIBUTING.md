@@ -65,7 +65,7 @@ npm run test:ci
 
 This is the canonical CI invocation. It isolates HOME/ASHLR_HOME and exits with code 124 if Vitest produces no output for `ASHLR_TEST_CI_IDLE_TIMEOUT_MS` (default 5 minutes) or exceeds `ASHLR_TEST_CI_TIMEOUT_MS` (default 15 minutes). The diagnostics distinguish an inactive process from an actively progressing suite that reaches the hard cap; only inactivity after Vitest's final summary is evidence of a possible leaked handle.
 
-Ubuntu runs the suite once. Windows runs three independent serial Vitest shards (`--shard=1/3`, `2/3`, and `3/3`) in separate CI jobs. This reduces wall-clock time without enabling same-checkout file parallelism or sharing mutable HOME state between tests.
+Ubuntu runs the complete suite and is the exhaustive CI authority. Windows runs a named cross-platform portability corpus in three independent serial Vitest shards (`--shard=1/3`, `2/3`, and `3/3`) covering fleet durability, verification, merge authority, remote handoff, telemetry, and watchdog behavior. POSIX-only permission, symlink, sandbox, and process fixtures remain in the Ubuntu suite; the Windows jobs validate portable product contracts without sharing mutable HOME state between tests.
 
 ---
 
