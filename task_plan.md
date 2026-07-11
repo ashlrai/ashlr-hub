@@ -1551,4 +1551,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Keep legacy/hashless source lineage advisory and grant no no-change, lifecycle, proposal, or merge authority.
 - [x] Add malformed, replay, privacy, compatibility, and current-generation coverage.
 - [x] Run focused/full gates and independent adversarial review.
-- [ ] Update durable notes, commit, push, reload, and production smoke.
+- [x] Update durable notes, commit, push, reload, and production smoke.
