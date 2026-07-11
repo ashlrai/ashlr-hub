@@ -802,7 +802,7 @@ describe('M21 worktree — removeSandbox cleanup', () => {
     }
   });
 
-  it('fails closed when another process owns the per-sandbox cleanup lock', async () => {
+  it.skipIf(process.platform === 'win32')('fails closed when another process owns the per-sandbox cleanup lock', async () => {
     const wt = await worktree();
     const repo = makeTmpRepo('remove-locked');
     let sb: Sandbox | null = null;

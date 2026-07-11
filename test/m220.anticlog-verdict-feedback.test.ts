@@ -34,6 +34,7 @@ import type { RouteDecision } from '../src/core/fleet/router.js';
 // ---------------------------------------------------------------------------
 
 const origHome = process.env.HOME;
+const origUserProfile = process.env.USERPROFILE;
 const origInDaemon = process.env.ASHLR_IN_DAEMON;
 const origInSwarm = process.env.ASHLR_IN_SWARM;
 
@@ -194,6 +195,7 @@ beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m220-home-'));
   tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m220-repo-'));
   process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
 
   initBareGitDir(tmpRepo);
   fs.writeFileSync(path.join(tmpRepo, 'package.json'), JSON.stringify({ name: 'r' }), 'utf8');
@@ -235,6 +237,8 @@ afterEach(() => {
   fs.rmSync(tmpRepo, { recursive: true, force: true });
 
   process.env.HOME = origHome;
+  if (origUserProfile !== undefined) process.env.USERPROFILE = origUserProfile;
+  else delete process.env.USERPROFILE;
   if (origInDaemon !== undefined) process.env.ASHLR_IN_DAEMON = origInDaemon;
   else delete process.env.ASHLR_IN_DAEMON;
   if (origInSwarm !== undefined) process.env.ASHLR_IN_SWARM = origInSwarm;
