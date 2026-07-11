@@ -1579,4 +1579,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Schedule it only after durable live daemon ticks without invoking models or mutating genome, prompts, routing, proposals, or merge authority.
 - [x] Expose explicit effective configuration and preserve proposal-yield risks independently from reflection status.
 - [x] Add threshold, cadence, restart, truncation, privacy, dry-run, failure, and end-to-end status coverage.
-- [ ] Run focused/full gates and independent adversarial review, then update notes, commit, push, reload, and production-canary the rollup.
+- [x] Run focused/full gates and independent adversarial review, then update notes, commit, push, reload, and production-canary the rollup.
