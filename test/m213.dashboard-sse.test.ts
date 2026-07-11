@@ -758,6 +758,12 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(degradedAndUnknown).toBe('fresh · 1 degraded / 2 unknown');
     expect(degradedAndUnknown).not.toContain('empty');
     expect(degradedAndUnknown).not.toContain('healthy sources');
+    expect(formatter({
+      freshness: { overall: 'fresh' },
+      sourceQualitySummary: {},
+      sources: [],
+      evidenceMatrix: { state: 'degraded', sources: [], summary: { withheld: 1 } },
+    })).toBe('fresh · 0 healthy / 0 degraded / 0 blocked · evidence degraded');
   });
 
   it('app.js keeps unhealthy workspace zeroes distinct from healthy telemetry', () => {

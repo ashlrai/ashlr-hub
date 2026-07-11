@@ -33,6 +33,7 @@ import { createProposal, setStatus } from '../src/core/inbox/store.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import { recordDispatchProduction, type DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import { recordDispatchManifest } from '../src/core/fleet/dispatch-manifest.js';
+import { recordBestOfN } from '../src/core/fleet/best-of-n-ledger.js';
 import { recordAgentAction, type AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
 import { recordDecision } from '../src/core/fleet/decisions-ledger.js';
 import { recordOutcome } from '../src/core/fleet/worked-ledger.js';
@@ -1862,6 +1863,41 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(formatted).toContain('manifests: 1 event(s), assigned 2, unassigned 1');
     expect(formatted).toContain('manifest source: healthy;');
     expect(formatted).toContain('manifest backends: codex:2');
+    expect(s.autonomousShipReadiness?.evidenceMatrix?.sources.find(
+      (source) => source.id === 'dispatch-manifests',
+    )).toMatchObject({ eligibility: 'not-applicable', evidenceRole: 'forensics' });
+  });
+
+  it('marks complete Best-of-N evidence eligible only when candidate racing is enabled', async () => {
+    const now = new Date().toISOString();
+    recordBestOfN({
+      ts: now,
+      source: 'todo',
+      repo: '/repo/a',
+      n: 1,
+      winnerIndex: 0,
+      winnerProposalId: 'proposal-best',
+      totalCostUsd: 0.01,
+      candidates: [{
+        index: 0,
+        engine: 'codex',
+        model: 'gpt-5.5',
+        score: 1,
+        proposalId: 'proposal-best',
+        won: true,
+      }],
+    });
+
+    const status = await buildFleetStatus(withFoundry({ bestOfN: 2 }));
+    expect(status.bestOfNSource).toMatchObject({
+      sourceState: 'healthy', complete: true, invalidRows: 0, rowsScanned: 1,
+    });
+    expect(status.autonomousShipReadiness?.evidenceMatrix?.sources.find(
+      (source) => source.id === 'best-of-n',
+    )).toMatchObject({
+      category: 'evidence', evidenceRole: 'learning', eligibility: 'eligible', applicability: 'optional',
+      status: 'healthy', evidenceQuality: { complete: true, rowsScanned: 1, invalidRows: 0 },
+    });
   });
 
   it('withholds concurrent manifest aggregates when their source is partial', async () => {
@@ -1882,10 +1918,18 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     const file = join(process.env.ASHLR_HOME!, 'dispatch-manifests', '2026-07-10.jsonl');
     writeFileSync(file, `${readFileSync(file, 'utf8')}not-json\n`, 'utf8');
 
-    const status = await buildFleetStatus(baseConfig());
+    const status = await buildFleetStatus(withFoundry({ fabric: { concurrentDispatch: true } }));
     expect(status.dispatchManifestSource).toMatchObject({ sourceState: 'degraded', complete: false, invalidRows: 1 });
     expect(status.dispatchManifests).toBeUndefined();
     expect(formatFleetStatus(status)).toContain('manifest source: degraded (partial);');
+    expect(status.autonomousShipReadiness?.evidenceMatrix).toMatchObject({ state: 'degraded' });
+    expect(status.autonomousShipReadiness?.evidenceMatrix?.sources.find(
+      (source) => source.id === 'dispatch-manifests',
+    )).toMatchObject({ evidenceRole: 'forensics', eligibility: 'observational', status: 'degraded' });
+    expect(status.nextActions?.find((action) => action.id === 'inspect-learning-evidence')?.commands?.[0]).toMatchObject({
+      argv: ['ashlr', 'fleet', 'evidence', 'doctor', 'dispatch-manifests', '--json'],
+      safety: 'read-only',
+    });
   });
 
   it('reports durable global workspace action telemetry from the append-only ledger', async () => {
@@ -4269,6 +4313,20 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       sourcePresent: true,
     });
     expect(s.autonomousShipReadiness?.sourceQualitySummary?.['healthy-zero']).toBeGreaterThan(0);
+    expect(s.autonomousShipReadiness?.evidenceMatrix).toMatchObject({
+      version: 1,
+      state: 'cold-start',
+      summary: {
+        eligible: 0,
+        'cold-start': 4,
+        withheld: 0,
+        observational: 0,
+        'not-applicable': 2,
+      },
+    });
+    expect(s.autonomousShipReadiness?.evidenceMatrix?.sources.map((source) => source.id)).toEqual([
+      'decisions', 'judge-traces', 'agent-actions', 'dispatch-production', 'dispatch-manifests', 'best-of-n',
+    ]);
     expect(s.autonomousShipReadiness?.primaryAction).toMatchObject({
       id: 'drain-ready-auto-merges',
     });
@@ -4283,6 +4341,81 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         preflightReady: 1,
       },
     });
+  });
+
+  it('withholds degraded authority evidence without overriding deterministic merge readiness', async () => {
+    const repo = join(tmpHome, 'repo');
+    writeBacklogSnapshot(tmpHome, repo, [], new Date().toISOString());
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    const cfg = withFoundry({
+      autoMerge: { enabled: true, trustBasis: 'verification', maxRisk: 'low' },
+    });
+    createSignedProposal(cfg, {
+      title: 'Ready despite unavailable decision cache',
+      diff: docsDiff('evidence matrix'),
+      verifyResult: { passed: true, source: 'manual' },
+    });
+    const decisions = join(process.env.ASHLR_HOME!, 'decisions');
+    mkdirSync(decisions, { recursive: true, mode: 0o700 });
+    writeFileSync(join(decisions, `${new Date().toISOString().slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const status = await buildFleetStatus(cfg);
+    const decisionEvidence = status.autonomousShipReadiness?.evidenceMatrix?.sources
+      .find((source) => source.id === 'decisions');
+    const action = status.nextActions?.find((candidate) => candidate.id === 'inspect-learning-evidence');
+
+    expect(status.autonomousShipReadiness).toMatchObject({
+      verdict: 'ready',
+      topBlocker: null,
+      evidenceMatrix: {
+        state: 'degraded',
+        summary: { withheld: 1 },
+      },
+    });
+    expect(decisionEvidence).toMatchObject({
+      category: 'evidence',
+      evidenceRole: 'merge-authority',
+      eligibility: 'withheld',
+      applicability: 'required',
+      status: 'degraded',
+      evidenceQuality: { complete: false, invalidRows: 1 },
+      sourceQuality: { badge: 'degraded-source' },
+    });
+    expect(action).toMatchObject({
+      priority: 'medium',
+      commands: [
+        {
+          argv: ['ashlr', 'fleet', 'evidence', 'doctor', 'decisions', '--json'],
+          safety: 'read-only',
+        },
+        {
+          argv: ['ashlr', 'fleet', 'evidence', 'doctor', 'decisions', '--deep', '--json'],
+          safety: 'read-only',
+        },
+        { argv: ['ashlr', 'fleet', 'status', '--json'], safety: 'read-only' },
+      ],
+    });
+    expect(action?.commands?.every((command) => command.endpointPath === undefined)).toBe(true);
+    expect(status.autonomousShipReadiness?.primaryAction).toMatchObject({ id: 'drain-ready-auto-merges' });
+  });
+
+  it('keeps evidence diagnosis secondary to eligible operational backlog work', async () => {
+    const repo = join(tmpHome, 'repo');
+    mkdirSync(repo, { recursive: true });
+    writeBacklogSnapshot(tmpHome, repo, [makeBacklogItem(repo, 'repo:goal:evidence-order', 'Ship useful work', 5)], new Date().toISOString());
+    writeRunningDaemon(tmpHome, [], new Date().toISOString());
+    const decisions = join(process.env.ASHLR_HOME!, 'decisions');
+    mkdirSync(decisions, { recursive: true, mode: 0o700 });
+    writeFileSync(join(decisions, `${new Date().toISOString().slice(0, 10)}.jsonl`), 'not-json\n', { mode: 0o600 });
+
+    const status = await buildFleetStatus(withFoundry({
+      autoMerge: { enabled: true, trustBasis: 'verification', maxRisk: 'low' },
+    }));
+    expect(status.nextActions?.map((action) => action.id)).toEqual(expect.arrayContaining([
+      'build-backlog', 'inspect-learning-evidence',
+    ]));
+    expect(status.autonomousShipReadiness?.primaryAction).toMatchObject({ id: 'build-backlog' });
+    expect(status.missionBrief?.directive).toBe('Build the highest-value backlog proposal');
   });
 
   it('uses a live daemon heartbeat as fresh readiness evidence while a tick is in progress', async () => {

@@ -1647,3 +1647,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Surface source quality without presenting missing or partial candidate/dispatch evidence as healthy zero.
 - [x] Add malformed, unreadable, oversized, linked, replacement, exact-cap, ordering, privacy, and legacy coverage.
 - [x] Run focused/full gates and independent adversarial review, update notes, commit, push, reload, and production-canary both sources.
+
+## Current Overnight Cycle - Autonomous Learning Evidence Matrix
+- [x] Rehydrate the deployed candidate-evidence baseline, production health, current git state, Entire state, and persistent notes.
+- [x] Audit readiness source construction, command rail, API mutation security, and UI contracts in parallel.
+- [x] Promote bounded decision, judge, action, dispatch, manifest, and candidate evidence into one readiness matrix.
+- [x] Attach explicit eligibility and read-only recovery commands without granting new merge, lifecycle, or learning authority.
+- [x] Render the matrix in CLI and Mission Control without healthy-looking missing or partial values.
+- [x] Add healthy, missing, degraded, stale, compatibility, and command-safety coverage.
+- [ ] Run focused/full gates and independent review, update notes, commit, push, reload, and production-canary the matrix.

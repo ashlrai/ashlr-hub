@@ -3225,6 +3225,10 @@ function renderAutonomousShipReadinessCard(readiness, cls = 'ctrl-card card') {
   const primaryAction = readiness.primaryAction ?? null;
   const freshness = readiness.freshness ?? {};
   const sources = Array.isArray(readiness.sources) ? readiness.sources : [];
+  const operationalSources = sources;
+  const evidenceMatrix = readiness.evidenceMatrix ?? {};
+  const evidenceSources = Array.isArray(evidenceMatrix.sources) ? evidenceMatrix.sources : [];
+  const evidenceSummary = evidenceMatrix.summary ?? {};
   const card = el('div', { cls });
   card.appendChild(el('div', { cls: 'card-header' },
     el('span', { cls: 'card-title' }, 'Autonomous Ship Readiness'),
@@ -3240,6 +3244,9 @@ function renderAutonomousShipReadinessCard(readiness, cls = 'ctrl-card card') {
     ['Freshness', freshness.overall ?? 'unknown'],
     ['Stale sources', freshness.staleSources ?? 0],
     ['Unknown sources', freshness.unknownSources ?? 0],
+    ['Evidence eligible', evidenceSummary.eligible ?? 0],
+    ['Evidence withheld', evidenceSummary.withheld ?? 0],
+    ['Evidence state', evidenceMatrix.state ?? 'unknown'],
     ['Top blocker', topBlocker ? topBlocker.label ?? topBlocker.id : 'none'],
     ['Primary action', primaryAction ? primaryAction.label ?? primaryAction.id : 'none'],
   ]));
@@ -3249,9 +3256,9 @@ function renderAutonomousShipReadinessCard(readiness, cls = 'ctrl-card card') {
     body.appendChild(el('p', { cls: 'hint' }, compactFleetReason(detail)));
   }
 
-  if (sources.length > 0) {
+  if (operationalSources.length > 0) {
     const list = el('div', { cls: cls.includes('fleet-card') ? 'fleet-backends' : 'ctrl-backend-list' });
-    for (const source of sources.slice(0, 6)) {
+    for (const source of operationalSources.slice(0, 7)) {
       list.appendChild(el('div', {
         cls: cls.includes('fleet-card') ? 'fleet-backend-row' : 'ctrl-backend-row',
         title: source.detail ?? '',
@@ -3264,6 +3271,26 @@ function renderAutonomousShipReadinessCard(readiness, cls = 'ctrl-card card') {
           cls: 'fleet-quota',
           style: `color:${sourceStatusAccent(source.status)}`,
         }, source.sourceQuality?.badge ?? source.badge ?? source.status ?? 'unknown')
+      ));
+    }
+    body.appendChild(list);
+  }
+
+  if (evidenceSources.length > 0) {
+    body.appendChild(el('div', { cls: 'card-section-label' }, 'Learning evidence'));
+    const list = el('div', { cls: cls.includes('fleet-card') ? 'fleet-backends' : 'ctrl-backend-list' });
+    for (const source of evidenceSources) {
+      list.appendChild(el('div', {
+        cls: cls.includes('fleet-card') ? 'fleet-backend-row' : 'ctrl-backend-row',
+        title: source.detail ?? '',
+      },
+        el('span', { cls: cls.includes('fleet-card') ? 'fleet-backend-name' : 'ctrl-backend-name' }, source.label ?? source.id),
+        el('span', { cls: cls.includes('fleet-card') ? 'fleet-backend-dispatches' : 'ctrl-backend-dispatches' },
+          `${source.evidenceRole ?? 'evidence'} · ${source.evidenceQuality?.rowsScanned ?? 0} rows`),
+        el('span', {
+          cls: 'fleet-quota',
+          style: `color:${sourceStatusAccent(source.status)}`,
+        }, source.eligibility ?? 'unknown')
       ));
     }
     body.appendChild(list);
@@ -4692,6 +4719,8 @@ function fdReadinessDataText(readiness) {
   const freshness = readiness.freshness?.overall ?? 'unknown';
   const quality = readiness.sourceQualitySummary ?? {};
   const sources = Array.isArray(readiness.sources) ? readiness.sources : [];
+  const evidenceState = readiness.evidenceMatrix?.state;
+  const evidenceSuffix = evidenceState ? ` · evidence ${evidenceState}` : '';
   const sourceNamesForBadge = (badge) => {
     const names = sources
       .filter((source) => source?.sourceQuality?.badge === badge)
@@ -4715,20 +4744,22 @@ function fdReadinessDataText(readiness) {
         const sourceNames = sourceNamesForBadge(key);
         return `${count} ${label}${sourceNames ? ` (${sourceNames})` : ''}`;
       });
-    return `${freshness} · ${qualityParts.length > 0 ? qualityParts.join(' / ') : 'healthy sources'}`;
+    return `${freshness} · ${qualityParts.length > 0 ? qualityParts.join(' / ') : 'healthy sources'}${evidenceSuffix}`;
   }
   const summary = readiness.sourceSummary ?? {};
   const healthy = summary.healthy ?? 0;
   const degraded = summary.degraded ?? 0;
   const blocked = summary.blocked ?? 0;
-  return `${freshness} · ${healthy} healthy / ${degraded} degraded / ${blocked} blocked`;
+  return `${freshness} · ${healthy} healthy / ${degraded} degraded / ${blocked} blocked${evidenceSuffix}`;
 }
 
 function fdReadinessDataTitle(readiness) {
   if (!readiness) return 'Readiness data unavailable';
   const sources = Array.isArray(readiness.sources) ? readiness.sources : [];
-  if (sources.length === 0) return fdReadinessDataText(readiness);
-  return sources.map((source) => {
+  const evidence = Array.isArray(readiness.evidenceMatrix?.sources) ? readiness.evidenceMatrix.sources : [];
+  const allSources = [...sources, ...evidence];
+  if (allSources.length === 0) return fdReadinessDataText(readiness);
+  return allSources.map((source) => {
     const label = source.label ?? source.id ?? 'source';
     const badge = source.sourceQuality?.badge ?? source.badge ?? source.status ?? 'unknown';
     const detail = source.sourceQuality?.detail ?? source.detail ?? '';

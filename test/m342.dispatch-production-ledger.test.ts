@@ -520,6 +520,33 @@ describe('M342 dispatch production ledger', () => {
     });
   });
 
+  it.skipIf(process.platform === 'win32')('rejects a linked storage directory', () => {
+    const dir = dispatchProductionDir();
+    const outside = join(home, 'outside-dir');
+    mkdirSync(outside, { mode: 0o700 });
+    mkdirSync(join(home, 'placeholder'), { mode: 0o700 });
+    symlinkSync(outside, dir, 'dir');
+    writeFileSync(join(outside, '2026-07-08.jsonl'), `${JSON.stringify(makeEvent())}\n`, { mode: 0o600 });
+
+    expect(readDispatchProductionEventsDetailed()).toMatchObject({
+      events: [], sourceState: 'degraded', complete: false,
+      stopReasons: ['io-error'], unreadableFiles: 1,
+    });
+  });
+
+  it('bounds physical directory enumeration before selecting ledger files', () => {
+    const dir = dispatchProductionDir();
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    for (let index = 0; index < 2_049; index++) {
+      writeFileSync(join(dir, `noise-${index}.txt`), '');
+    }
+
+    expect(readDispatchProductionEventsDetailed()).toMatchObject({
+      events: [], sourceState: 'degraded', complete: false,
+      stopReasons: ['file-limit'], filesRead: 0,
+    });
+  });
+
   it('isolates a torn tail before appending the next durable event', () => {
     const dir = dispatchProductionDir();
     mkdirSync(dir, { recursive: true });

@@ -14,9 +14,10 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
-  readdirSync,
+  opendirSync,
   readSync,
   writeSync,
+  type Stats,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -58,6 +59,7 @@ const HARD_READ_MAX_FILES = 32;
 const HARD_READ_MAX_BYTES = 32 * 1024 * 1024;
 const HARD_READ_MAX_ROWS = 50_000;
 const MAX_LOOSE_FILES = 3;
+const MAX_DIRECTORY_ENTRIES = 2_048;
 const MAX_READ_ROW_BYTES = 128 * 1024;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
@@ -556,6 +558,18 @@ function sameFile(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof f
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+function safeDispatchProductionDirectory(stat: Stats): boolean {
+  return !stat.isSymbolicLink() && stat.isDirectory() &&
+    (typeof process.getuid !== 'function' || Number(stat.uid) === process.getuid()) &&
+    (process.platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
+}
+
+function safeDispatchProductionFile(stat: Stats): boolean {
+  return !stat.isSymbolicLink() && stat.isFile() && Number(stat.nlink) === 1 &&
+    (typeof process.getuid !== 'function' || Number(stat.uid) === process.getuid()) &&
+    (process.platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
+}
+
 function readDispatchProductionFileTail(
   path: string,
   maxBytes: number,
@@ -563,10 +577,10 @@ function readDispatchProductionFileTail(
   let fd: number | undefined;
   try {
     const pathBefore = lstatSync(path);
-    if (pathBefore.isSymbolicLink() || !pathBefore.isFile()) return null;
+    if (!safeDispatchProductionFile(pathBefore)) return null;
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     const before = fstatSync(fd);
-    if (!before.isFile() || !sameFile(pathBefore, before)) return null;
+    if (!safeDispatchProductionFile(before) || !sameFile(pathBefore, before)) return null;
     const bytes = Math.min(before.size, maxBytes);
     const start = Math.max(0, before.size - bytes);
     const buffer = Buffer.alloc(bytes);
@@ -575,11 +589,11 @@ function readDispatchProductionFileTail(
     const pathAfter = lstatSync(path);
     if (
       pathAfter.isSymbolicLink() ||
-      !pathAfter.isFile() ||
-      !after.isFile() ||
+      !safeDispatchProductionFile(pathAfter) ||
+      !safeDispatchProductionFile(after) ||
       !sameFile(before, after) ||
       !sameFile(after, pathAfter) ||
-      after.size < before.size ||
+      after.size !== before.size ||
       bytesRead !== bytes
     ) return null;
     let text: string;
@@ -621,10 +635,29 @@ export function readDispatchProductionEventsDetailed(
   if (!existsSync(dir)) return emptyDispatchProductionRead('missing');
 
   let files: string[];
+  let directorySnapshot: ReturnType<typeof lstatSync>;
   try {
-    files = readdirSync(dir)
-      .filter((file) => file.endsWith('.jsonl'))
-      .sort((left, right) => {
+    directorySnapshot = lstatSync(dir);
+    if (!safeDispatchProductionDirectory(directorySnapshot)) throw new Error('unsafe dispatch production directory');
+    const selected: string[] = [];
+    const handle = opendirSync(dir);
+    try {
+      let seen = 0;
+      let entry = handle.readSync();
+      while (entry !== null) {
+        seen++;
+        if (seen > MAX_DIRECTORY_ENTRIES) {
+          return emptyDispatchProductionRead('degraded', {
+            sourcePresent: true, complete: false, stopReasons: ['file-limit'],
+          });
+        }
+        if (entry.name.endsWith('.jsonl')) selected.push(entry.name);
+        entry = handle.readSync();
+      }
+    } finally {
+      handle.closeSync();
+    }
+    files = selected.sort((left, right) => {
         const leftDated = DATE_LEDGER_FILE_RE.test(left);
         const rightDated = DATE_LEDGER_FILE_RE.test(right);
         if (leftDated !== rightDated) return leftDated ? -1 : 1;
@@ -637,7 +670,21 @@ export function readDispatchProductionEventsDetailed(
       unreadableFiles: 1,
     });
   }
-  if (files.length === 0) return emptyDispatchProductionRead('healthy');
+  if (files.length === 0) {
+    try {
+      const directoryAfter = lstatSync(dir);
+      return safeDispatchProductionDirectory(directoryAfter) && sameFile(directorySnapshot, directoryAfter) &&
+        directorySnapshot.mtimeMs === directoryAfter.mtimeMs && directorySnapshot.ctimeMs === directoryAfter.ctimeMs
+        ? emptyDispatchProductionRead('healthy', { sourcePresent: true })
+        : emptyDispatchProductionRead('degraded', {
+            sourcePresent: true, complete: false, stopReasons: ['io-error'], unreadableFiles: 1,
+          });
+    } catch {
+      return emptyDispatchProductionRead('degraded', {
+        sourcePresent: true, complete: false, stopReasons: ['io-error'], unreadableFiles: 1,
+      });
+    }
+  }
 
   const result = emptyDispatchProductionRead('healthy');
   result.sourcePresent = true;
@@ -740,6 +787,21 @@ export function readDispatchProductionEventsDetailed(
   }
   if (result.invalidRows > 0 || result.unreadableFiles > 0) result.complete = false;
   if (result.invalidRows > 0 || result.unreadableFiles > 0 || !result.complete) {
+    result.sourceState = 'degraded';
+  }
+  try {
+    const directoryAfter = lstatSync(dir);
+    if (!safeDispatchProductionDirectory(directoryAfter) || !sameFile(directorySnapshot, directoryAfter) ||
+      directorySnapshot.mtimeMs !== directoryAfter.mtimeMs || directorySnapshot.ctimeMs !== directoryAfter.ctimeMs) {
+      pushStopReason(result.stopReasons, 'io-error');
+      result.unreadableFiles++;
+      result.complete = false;
+      result.sourceState = 'degraded';
+    }
+  } catch {
+    pushStopReason(result.stopReasons, 'io-error');
+    result.unreadableFiles++;
+    result.complete = false;
     result.sourceState = 'degraded';
   }
   return result;

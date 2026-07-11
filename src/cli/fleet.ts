@@ -699,6 +699,7 @@ export function formatFleetStatus(s: FleetStatus): string {
     lines.push(`  top block:  ${formatReadinessBlocker(shipReadiness.topBlocker)}`);
     lines.push(`  action:     ${formatReadinessAction(shipReadiness.primaryAction)}`);
     lines.push(`  sources:    ${formatReadinessSources(shipReadiness.sources)}`);
+    lines.push(`  evidence:   ${formatReadinessEvidence(shipReadiness.evidenceMatrix)}`);
   }
   lines.push('');
 
@@ -898,6 +899,16 @@ function formatReadinessSources(
   return sources
     .slice(0, 8)
     .map((source) => `${source.id}:${source.sourceQuality?.badge ?? source.badge}`)
+    .join(', ');
+}
+
+function formatReadinessEvidence(
+  matrix: NonNullable<FleetStatus['autonomousShipReadiness']>['evidenceMatrix'],
+): string {
+  const evidence = Array.isArray(matrix?.sources) ? matrix.sources : [];
+  if (evidence.length === 0) return 'unavailable';
+  return `${matrix?.state ?? 'unknown'}; ` + evidence
+    .map((source) => `${source.id}:${source.eligibility ?? 'unknown'}/${source.sourceQuality?.badge ?? source.badge}`)
     .join(', ');
 }
 
@@ -1744,6 +1755,8 @@ export async function cmdFleet(args: string[]): Promise<number> {
       return setKillSwitch(false);
     case 'doctor':
       return cmdFleetDoctor(rest.includes('--json'));
+    case 'evidence':
+      return cmdFleetEvidence(rest);
     case 'scorecard':
       return cmdFleetScorecard(rest);
     case 'oversight':
@@ -1774,6 +1787,8 @@ function printFleetHelp(): void {
   console.log(`    ashlr fleet pause             ${cyan('# engage kill switch (pause fleet)')}`);
   console.log(`    ashlr fleet resume            ${cyan('# release kill switch (resume fleet)')}`);
   console.log(`    ashlr fleet doctor [--json]   ${cyan('# engine readiness preflight (M81)')}`);
+  console.log(`    ashlr fleet evidence doctor <source> [--deep] [--json]`);
+  console.log(`                          ${cyan('# bounded read-only ledger diagnosis')}`);
   console.log(`    ashlr fleet scorecard [--window 7d|30d|all] [--by-engine] [--by-repo] [--json]`);
   console.log(`                          ${cyan('# productivity + quality scorecard (M119)')}`);
   console.log(`    ashlr fleet oversight [--json]    ${cyan('# CEO scorecard: quality + manager + vision + goals (M122)')}`);
@@ -1784,6 +1799,43 @@ function printFleetHelp(): void {
   console.log(`    ashlr fleet optimize-prompt --target judge|strategist [--rounds N] [--dry-run]`);
   console.log(`                          ` + cyan('# GEPA offline prompt optimizer — outputs candidate to ~/.ashlr/optimizer/ (M150)'));
   console.log('');
+}
+
+async function cmdFleetEvidence(args: string[]): Promise<number> {
+  const [sub, source, ...flags] = args;
+  const jsonMode = flags.includes('--json') || args.includes('--json');
+  if (sub !== 'doctor' || !source) {
+    process.stderr.write(red('error: ') + 'usage: ashlr fleet evidence doctor <source> [--deep] [--json]\n');
+    return 2;
+  }
+  const invalidFlags = flags.filter((flag) => flag !== '--json' && flag !== '--deep');
+  if (invalidFlags.length > 0) {
+    process.stderr.write(red('error: ') + `unknown evidence doctor option: ${invalidFlags[0]}\n`);
+    return 2;
+  }
+  const { diagnoseFleetEvidence, isFleetEvidenceSource, FLEET_EVIDENCE_SOURCES } =
+    await import('../core/fleet/evidence-doctor.js');
+  if (!isFleetEvidenceSource(source)) {
+    process.stderr.write(red('error: ') + `unknown evidence source: ${source}; expected ${FLEET_EVIDENCE_SOURCES.join(', ')}\n`);
+    return 2;
+  }
+  const result = diagnoseFleetEvidence(source, { deep: flags.includes('--deep') });
+  if (jsonMode) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else {
+    console.log('');
+    console.log(bold(`  ${result.source} evidence`));
+    console.log(`  state:     ${result.state}`);
+    console.log(`  complete:  ${result.quality.complete ? 'yes' : 'no'}`);
+    console.log(`  source:    ${result.quality.sourceState}`);
+    console.log(`  scanned:   ${result.quality.filesRead} file(s), ${result.quality.rowsScanned} row(s), ${result.quality.bytesRead} bytes`);
+    console.log(`  invalid:   ${result.quality.invalidRows}; unreadable: ${result.quality.unreadableFiles}`);
+    console.log(`  detail:    ${result.detail}`);
+    console.log(`  mutable:   no`);
+    console.log('');
+  }
+  return result.state === 'healthy' || result.state === 'cold-start' ||
+    result.state === 'transient-retry-recovered' ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------

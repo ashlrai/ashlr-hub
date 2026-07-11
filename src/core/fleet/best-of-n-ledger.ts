@@ -93,6 +93,8 @@ export interface ReadBestOfNRecordsOptions {
   maxRows?: number;
   /** Return an empty compatibility array when the selected source is partial. */
   requireComplete?: boolean;
+  /** Inspect an already-private store without locks or permission migration. */
+  inspectionOnly?: boolean;
 }
 
 export type BestOfNReadStopReason =
@@ -209,6 +211,16 @@ function existingPrivateDirectories(): DirectoryState | undefined {
   if (!privateDirectory(privateRoot) || !privateDirectory(privateLedger) ||
     !sameNode(root, privateRoot) || !sameNode(ledger, privateLedger)) throw new Error('best-of-N directory changed');
   return { root: privateRoot, ledger: privateLedger };
+}
+
+function inspectPrivateDirectories(): DirectoryState | undefined {
+  const rootPath = storageRoot();
+  const dir = bestOfNDir();
+  if (!existsSync(rootPath) || !existsSync(dir)) return undefined;
+  const root = lstatSync(rootPath);
+  const ledger = lstatSync(dir);
+  if (!privateDirectory(root) || !privateDirectory(ledger)) throw new Error('unsafe best-of-N directory');
+  return { root, ledger };
 }
 
 function verifyDirectories(expected: DirectoryState): void {
@@ -496,20 +508,27 @@ function fileMayContainSince(file: string, sinceMs: number): boolean {
   return Date.parse(`${date}T23:59:59.999Z`) >= sinceMs;
 }
 
-function readPrivateFile(path: string, maxBytes: number): { text: string; bytes: number } | BestOfNReadStopReason {
+function readPrivateFile(
+  path: string,
+  maxBytes: number,
+  inspectionOnly = false,
+): { text: string; bytes: number } | BestOfNReadStopReason {
   let fd: number | undefined;
   try {
     const pathBefore = lstatSync(path);
-    if (!migratableFile(pathBefore)) return 'io-error';
+    if (inspectionOnly ? !privateFile(pathBefore) : !migratableFile(pathBefore)) return 'io-error';
     if (pathBefore.size > maxBytes) return 'byte-limit';
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     let opened = fstatSync(fd);
-    if (!migratableFile(opened) || !sameNode(pathBefore, opened) || opened.size > maxBytes) {
+    if ((inspectionOnly ? !privateFile(opened) : !migratableFile(opened)) ||
+      !sameNode(pathBefore, opened) || opened.size > maxBytes) {
       return opened.size > maxBytes ? 'byte-limit' : 'io-error';
     }
-    fchmodSync(fd, 0o600);
-    opened = fstatSync(fd);
-    if (!privateFile(opened)) return 'io-error';
+    if (!inspectionOnly) {
+      fchmodSync(fd, 0o600);
+      opened = fstatSync(fd);
+      if (!privateFile(opened)) return 'io-error';
+    }
     const bytes = readAll(fd, opened.size);
     const after = fstatSync(fd);
     const pathAfter = lstatSync(path);
@@ -536,12 +555,14 @@ export function readBestOfNRecordsDetailed(
     const maxRows = boundedOption(opts.maxRows, DEFAULT_MAX_ROWS, HARD_MAX_ROWS);
     const eventLimit = boundedOption(opts.limit, DEFAULT_EVENT_LIMIT, HARD_EVENT_LIMIT);
     const sinceMs = typeof opts.sinceMs === 'number' && Number.isFinite(opts.sinceMs) ? opts.sinceMs : undefined;
-    const directories = existingPrivateDirectories();
+    const directories = opts.inspectionOnly ? inspectPrivateDirectories() : existingPrivateDirectories();
     if (!directories) return emptyRead('missing');
-    lock = acquireLocalStoreLock(lockPath(), 250);
-    if (!lock) return emptyRead('degraded', {
-      complete: false, stopReasons: ['io-error'], unreadableFiles: 1,
-    });
+    if (!opts.inspectionOnly) {
+      lock = acquireLocalStoreLock(lockPath(), 250);
+      if (!lock) return emptyRead('degraded', {
+        complete: false, stopReasons: ['io-error'], unreadableFiles: 1,
+      });
+    }
     verifyDirectories(directories);
     const directorySnapshot = lstatSync(bestOfNDir());
 
@@ -593,7 +614,7 @@ export function readBestOfNRecordsDetailed(
         result.complete = false;
         break;
       }
-      const loaded = readPrivateFile(join(bestOfNDir(), file), remainingBytes);
+      const loaded = readPrivateFile(join(bestOfNDir(), file), remainingBytes, opts.inspectionOnly === true);
       result.filesRead++;
       if (typeof loaded === 'string') {
         if (loaded === 'io-error') result.unreadableFiles++;

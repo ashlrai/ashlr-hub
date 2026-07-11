@@ -68,6 +68,8 @@ describe('cmdHelp routing', () => {
     const text = output();
     expect(text).toContain('fleet direction [--json]');
     expect(text).toContain('resource-aware mode recommendation');
+    expect(text).toContain('fleet evidence doctor <source>');
+    expect(text).toContain('Bounded read-only diagnosis');
   });
 
   it('help --all → every command', async () => {

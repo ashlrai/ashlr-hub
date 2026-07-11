@@ -2168,6 +2168,14 @@ a:hover {
   display: grid;
   gap: var(--space-2);
 }
+.card-section-label {
+  margin: var(--space-4) 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
 .fleet-backend-row {
   display: grid;
   grid-template-columns: minmax(120px, 0.8fr) minmax(0, 2fr) auto;

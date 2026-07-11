@@ -502,6 +502,8 @@ export interface ReadAgentActionsOptions {
   stopAfterLimit?: boolean;
   /** Return no events unless every selected source row was read and validated. */
   requireComplete?: boolean;
+  /** Avoid coordination-lock writes; requires an already-safe stable store. */
+  inspectionOnly?: boolean;
 }
 
 export type AgentActionReadStopReason = 'event-limit' | 'file-limit' | 'byte-limit' | 'row-limit' | 'io-error';
@@ -755,9 +757,11 @@ export function readAgentActionsDetailed(opts: ReadAgentActionsOptions = {}): Ag
     const maxRows = boundedReadOption(opts.maxRows, DEFAULT_READ_MAX_ROWS, HARD_READ_MAX_ROWS);
     const dir = agentActionsDir();
     if (!existsSync(dir)) return emptyAgentActionRead('missing');
-    lock = acquireLocalStoreLock(join(dir, '.agent-actions.lock'), 250);
-    if (!lock) {
-      return emptyAgentActionRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+    if (opts.inspectionOnly !== true) {
+      lock = acquireLocalStoreLock(join(dir, '.agent-actions.lock'), 250);
+      if (!lock) {
+        return emptyAgentActionRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+      }
     }
     let directorySnapshot: ReturnType<typeof lstatSync>;
     try {

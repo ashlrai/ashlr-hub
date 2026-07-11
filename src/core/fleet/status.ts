@@ -87,6 +87,10 @@ import { readDecisionsDetailed, type DecisionSourceQuality } from './decisions-l
 import { readJudgeTracesDetailed, type JudgeTraceSourceQuality } from './judge-trace.js';
 import type { DispatchManifestSourceQuality } from './dispatch-manifest.js';
 import {
+  readBestOfNRecordsDetailed,
+  type BestOfNSourceQuality,
+} from './best-of-n-ledger.js';
+import {
   readAgentWorkspaceDetailed,
   type AgentWorkspaceReadResult,
   type AgentWorkspaceStatus,
@@ -345,6 +349,23 @@ export type FleetReadinessSourceQualityBadge =
   | 'missing-source'
   | 'stale-source'
   | 'unknown-source';
+export type FleetReadinessSourceCategory = 'operations' | 'evidence';
+export type FleetReadinessEvidenceEligibility =
+  | 'eligible' | 'cold-start' | 'withheld' | 'observational' | 'not-applicable';
+export type FleetReadinessEvidenceRole = 'merge-authority' | 'learning' | 'analytics' | 'forensics';
+export type FleetReadinessEvidenceApplicability = 'required' | 'optional' | 'disabled';
+
+export interface FleetReadinessEvidenceQuality {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  stopReasons: readonly string[];
+  filesRead: number;
+  bytesRead: number;
+  rowsScanned: number;
+  invalidRows: number;
+  unreadableFiles: number;
+}
 
 export interface FleetReadinessSourceQuality {
   badge: FleetReadinessSourceQualityBadge;
@@ -504,7 +525,10 @@ async function readSkillCorpusReadiness(
 }
 
 export interface FleetReadinessSourceHealth {
-  id: 'daemon' | 'guard' | 'auto-merge' | 'queue' | 'resources' | 'direction' | 'phantom';
+  id:
+    | 'daemon' | 'guard' | 'auto-merge' | 'queue' | 'resources' | 'direction' | 'phantom'
+    | 'decisions' | 'judge-traces' | 'agent-actions' | 'dispatch-production'
+    | 'dispatch-manifests' | 'best-of-n';
   label: string;
   status: FleetReadinessSourceStatus;
   badge: 'healthy' | 'degraded' | 'blocked' | 'unavailable' | 'unknown';
@@ -513,6 +537,11 @@ export interface FleetReadinessSourceHealth {
   ageMs: number | null;
   detail: string;
   sourceQuality?: FleetReadinessSourceQuality;
+  category?: FleetReadinessSourceCategory;
+  evidenceRole?: FleetReadinessEvidenceRole;
+  eligibility?: FleetReadinessEvidenceEligibility;
+  applicability?: FleetReadinessEvidenceApplicability;
+  evidenceQuality?: FleetReadinessEvidenceQuality;
 }
 
 export interface FleetAutonomousShipReadinessBlocker {
@@ -540,6 +569,12 @@ export interface FleetAutonomousShipReadinessStatus {
   sources: FleetReadinessSourceHealth[];
   sourceSummary: Record<FleetReadinessSourceStatus, number>;
   sourceQualitySummary?: Record<FleetReadinessSourceQualityBadge, number>;
+  evidenceMatrix?: {
+    version: 1;
+    state: 'eligible' | 'cold-start' | 'degraded';
+    sources: FleetReadinessSourceHealth[];
+    summary: Record<FleetReadinessEvidenceEligibility, number>;
+  };
 }
 
 export interface FleetMissionBriefEvidence {
@@ -838,6 +873,13 @@ export interface FleetStatus {
   dispatchManifests?: FleetDispatchManifestStatus;
   /** Storage/read completeness for forensic concurrent dispatch intent. */
   dispatchManifestSource?: DispatchManifestSourceQuality;
+  /** Bounded candidate-economics evidence used only when complete. */
+  bestOfNSource?: BestOfNSourceQuality;
+  /** Effective applicability for optional evidence producers. */
+  evidencePolicy?: {
+    concurrentDispatchEnabled: boolean;
+    bestOfNEnabled: boolean;
+  };
   /** Sample-gated diagnosis of dispatch-production yield; no raw prompts/diffs/stdout. */
   dispatchYieldDiagnostics?: FleetDispatchYieldDiagnostics;
   /** Durable 24h agent-action global workspace summary from append-only telemetry. */
@@ -1530,6 +1572,10 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     ...(phantom !== undefined ? { phantom } : {}),
     autonomy,
     autonomyControlMode: resolveAutonomyControlMode(cfg),
+    evidencePolicy: {
+      concurrentDispatchEnabled: cfg.foundry?.fabric?.concurrentDispatch === true,
+      bestOfNEnabled: (cfg.foundry?.bestOfN ?? 1) > 1,
+    },
     ...(autoMergeReadiness !== undefined ? { autoMergeReadiness } : {}),
     ...(guardHealth !== undefined ? { guardHealth } : {}),
     ...(goalFocus !== undefined ? { goalFocus } : {}),
@@ -1614,6 +1660,34 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     if (dispatchManifests.summary) status.dispatchManifests = dispatchManifests.summary;
   } catch {
     // Optional forensic manifest surface only.
+  }
+  if (status.evidencePolicy?.bestOfNEnabled === true) {
+    try {
+      const bestOfN = readBestOfNRecordsDetailed({
+        sinceMs: Date.parse(generatedAt) - 30 * 24 * 60 * 60 * 1000,
+        limit: 100_000,
+        maxFiles: 31,
+        maxBytes: 32 * 1024 * 1024,
+        maxRows: 100_000,
+      });
+      status.bestOfNSource = {
+        sourceState: bestOfN.sourceState,
+        sourcePresent: bestOfN.sourcePresent,
+        complete: bestOfN.complete,
+        stopReasons: bestOfN.stopReasons,
+        filesRead: bestOfN.filesRead,
+        bytesRead: bestOfN.bytesRead,
+        rowsScanned: bestOfN.rowsScanned,
+        invalidRows: bestOfN.invalidRows,
+        unreadableFiles: bestOfN.unreadableFiles,
+      };
+    } catch {
+      status.bestOfNSource = {
+        sourceState: 'degraded', sourcePresent: true, complete: false,
+        stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+        invalidRows: 0, unreadableFiles: 1,
+      };
+    }
   }
   let workspaceRead: AgentWorkspaceReadResult | undefined;
   try {
@@ -2901,6 +2975,34 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
   const phantomAuditAction = phantomAuditNextAction(status.phantom?.agentReport);
   if (phantomAuditAction) add(phantomAuditAction);
 
+  const unhealthyEvidence = learningEvidenceReadinessSources(status, status.generatedAt)
+    .filter((source) => source.eligibility === 'withheld' || source.status === 'degraded');
+  if (unhealthyEvidence.length > 0) {
+    const labels = unhealthyEvidence.slice(0, 3).map((source) => source.label).join(', ');
+    const firstSource = unhealthyEvidence[0]!.id;
+    add({
+      id: 'inspect-learning-evidence',
+      priority: 'medium',
+      label: 'Inspect withheld evidence',
+      detail:
+        `${unhealthyEvidence.length} evidence source(s) are incomplete or degraded, so dependent ` +
+        `authority, learning, or analytics remain fail-closed.${labels ? ` Sources: ${labels}.` : ''}`,
+      commands: [
+        nextActionCommand('Diagnose first withheld source', [
+          'ashlr', 'fleet', 'evidence', 'doctor', firstSource, '--json',
+        ], 'read-only', {
+          note: 'Bounded diagnosis only; never deletes, rewrites, truncates, or bypasses an evidence ledger.',
+        }),
+        nextActionCommand('Run deep bounded diagnosis', [
+          'ashlr', 'fleet', 'evidence', 'doctor', firstSource, '--deep', '--json',
+        ], 'read-only', {
+          note: 'Uses finite reader hard caps and performs no durable repair.',
+        }),
+        nextActionCommand('Inspect evidence matrix', ['ashlr', 'fleet', 'status', '--json'], 'read-only'),
+      ],
+    });
+  }
+
   const awaitingHostMerge = status.proposals.awaitingHostMerge ?? 0;
   if (awaitingHostMerge > 0) {
     add({
@@ -3210,6 +3312,7 @@ function buildNextActions(status: FleetStatus): FleetNextAction[] {
     if (action.id === 'drain-diagnostic-reslices' && (status.autoMergeReadiness?.knownVerificationFailed ?? 0) === 0) return -1.2;
     if (action.id === 'process-capture-repairs' && (status.autoMergeReadiness?.knownVerificationFailed ?? 0) === 0) return -1.1;
     if (action.id === 'inspect-dispatch-yield') return -1;
+    if (action.id === 'inspect-learning-evidence') return 1;
     if (action.id === 'inspect-attempt-causal-coverage') return -0.5;
     if (action.id === 'add-explicit-merge-verify-contracts') return 0.5;
     return 0;
@@ -3478,6 +3581,109 @@ function readinessSource(
   };
 }
 
+function evidenceReadinessSource(input: {
+  id: FleetReadinessSourceHealth['id'];
+  label: string;
+  role: FleetReadinessEvidenceRole;
+  quality: FleetReadinessEvidenceQuality | undefined;
+  generatedAt: string;
+  applicable?: boolean;
+  applicability?: Exclude<FleetReadinessEvidenceApplicability, 'disabled'>;
+}): FleetReadinessSourceHealth {
+  if (input.applicable === false) {
+    const source = readinessSource(
+      input.id,
+      input.label,
+      'healthy',
+      null,
+      READINESS_STATUS_STALE_MS,
+      `${input.role} evidence is not applicable under the effective fleet policy`,
+      { freshness: 'not-applicable', empty: true, sourcePresent: false },
+    );
+    return {
+      ...source,
+      category: 'evidence',
+      evidenceRole: input.role,
+      eligibility: 'not-applicable',
+      applicability: 'disabled',
+    };
+  }
+  const quality = input.quality;
+  const observational = input.role === 'forensics';
+  const degraded = !quality || quality.sourceState === 'degraded' || !quality.complete;
+  const missing = quality?.sourceState === 'missing';
+  const eligibility: FleetReadinessEvidenceEligibility = observational
+    ? 'observational'
+    : degraded
+      ? 'withheld'
+      : missing
+        ? 'cold-start'
+        : 'eligible';
+  const status: FleetReadinessSourceStatus = degraded ? 'degraded' : missing ? 'unavailable' : 'healthy';
+  const stop = quality && quality.stopReasons.length > 0 ? `; stopped: ${quality.stopReasons.join(', ')}` : '';
+  const detail = quality
+    ? missing
+      ? `${input.role} evidence has no ledger yet; consumers remain in cold-start mode`
+      : `${input.role} evidence ${eligibility}; ${quality.filesRead} file(s), ${quality.rowsScanned} row(s), ` +
+        `${quality.invalidRows} invalid, ${quality.unreadableFiles} unreadable${stop}`
+    : `${input.role} evidence diagnostics are unavailable; consumers fail closed`;
+  const source = readinessSource(
+    input.id,
+    input.label,
+    status,
+    input.generatedAt,
+    READINESS_STATUS_STALE_MS,
+    detail,
+    {
+      empty: missing || (quality?.rowsScanned ?? 0) === 0,
+      sourcePresent: quality?.sourcePresent ?? false,
+      sourceDegraded: degraded,
+    },
+  );
+  return {
+    ...source,
+    category: 'evidence',
+    evidenceRole: input.role,
+    eligibility,
+    applicability: input.applicability ?? 'optional',
+    ...(quality ? { evidenceQuality: { ...quality, stopReasons: [...quality.stopReasons] } } : {}),
+  };
+}
+
+function learningEvidenceReadinessSources(
+  status: FleetStatus,
+  generatedAt: string,
+): FleetReadinessSourceHealth[] {
+  return [
+    evidenceReadinessSource({
+      id: 'decisions', label: 'Decision Authority', role: 'merge-authority',
+      quality: status.decisionsSource, generatedAt, applicability: 'required',
+    }),
+    evidenceReadinessSource({
+      id: 'judge-traces', label: 'Judge Outcomes', role: 'learning',
+      quality: status.judgeTraceSource, generatedAt,
+    }),
+    evidenceReadinessSource({
+      id: 'agent-actions', label: 'Agent Actions', role: 'learning',
+      quality: status.workspace?.sourceQuality, generatedAt,
+    }),
+    evidenceReadinessSource({
+      id: 'dispatch-production', label: 'Dispatch Outcomes', role: 'analytics',
+      quality: status.dispatchProductionSource, generatedAt,
+    }),
+    evidenceReadinessSource({
+      id: 'dispatch-manifests', label: 'Dispatch Intent', role: 'forensics',
+      quality: status.dispatchManifestSource, generatedAt,
+      applicable: status.evidencePolicy?.concurrentDispatchEnabled !== false,
+    }),
+    evidenceReadinessSource({
+      id: 'best-of-n', label: 'Candidate Races', role: 'learning',
+      quality: status.bestOfNSource, generatedAt,
+      applicable: status.evidencePolicy?.bestOfNEnabled !== false,
+    }),
+  ];
+}
+
 function readinessBlocker(
   id: string,
   label: string,
@@ -3726,6 +3932,22 @@ function readinessSourceQualitySummary(
   return summary;
 }
 
+function readinessEvidenceSummary(
+  sources: FleetReadinessSourceHealth[],
+): Record<FleetReadinessEvidenceEligibility, number> {
+  const summary: Record<FleetReadinessEvidenceEligibility, number> = {
+    eligible: 0,
+    'cold-start': 0,
+    withheld: 0,
+    observational: 0,
+    'not-applicable': 0,
+  };
+  for (const source of sources) {
+    if (source.category === 'evidence' && source.eligibility) summary[source.eligibility]++;
+  }
+  return summary;
+}
+
 function readinessFreshnessSummary(
   generatedAt: string,
   sources: FleetReadinessSourceHealth[],
@@ -3953,6 +4175,13 @@ function buildAutonomousShipReadiness(
   const sources = shipReadinessSources(status, inputs);
   const sourceSummary = readinessSourceSummary(sources);
   const sourceQualitySummary = readinessSourceQualitySummary(sources);
+  const evidenceSources = learningEvidenceReadinessSources(status, inputs.generatedAt);
+  const evidenceSummary = readinessEvidenceSummary(evidenceSources);
+  const evidenceState = evidenceSummary.withheld > 0 || evidenceSources.some((source) => source.status === 'degraded')
+    ? 'degraded'
+    : evidenceSummary['cold-start'] > 0
+      ? 'cold-start'
+      : 'eligible';
   const topBlocker = chooseReadinessBlocker(status, sources);
   const nextActions = status.nextActions ?? [];
   const primaryAction =
@@ -3968,6 +4197,12 @@ function buildAutonomousShipReadiness(
     sources,
     sourceSummary,
     sourceQualitySummary,
+    evidenceMatrix: {
+      version: 1,
+      state: evidenceState,
+      sources: evidenceSources,
+      summary: evidenceSummary,
+    },
   };
 }
 
@@ -4039,6 +4274,8 @@ function missionDirective(
       return 'Review Phantom audit';
     case 'inspect-attempt-causal-coverage':
       return 'Inspect causal learning coverage';
+    case 'inspect-learning-evidence':
+      return 'Diagnose withheld evidence';
     case 'build-backlog':
       return 'Build the highest-value backlog proposal';
     case 'cooldown-gated-backlog':

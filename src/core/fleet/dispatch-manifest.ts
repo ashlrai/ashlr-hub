@@ -111,6 +111,8 @@ export interface ReadDispatchManifestEventsOptions {
   stopAfterLimit?: boolean;
   /** Return no events unless every selected row was read and validated. */
   requireComplete?: boolean;
+  /** Inspect an already-private store without locks or permission migration. */
+  inspectionOnly?: boolean;
 }
 
 export type DispatchManifestReadStopReason =
@@ -396,6 +398,15 @@ function secureDirectory(path: string, create: boolean): ReturnType<typeof lstat
   return after;
 }
 
+function inspectPrivateDirectory(path: string): ReturnType<typeof lstatSync> | undefined {
+  if (!existsSync(path)) return undefined;
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink() || !stat.isDirectory() || unsafeDirectory(stat)) {
+    throw new Error('unsafe manifest directory');
+  }
+  return stat;
+}
+
 function sameDirectorySnapshot(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof fstatSync>): boolean {
   return sameFile(left, right) && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
 }
@@ -537,19 +548,27 @@ function validDatePartition(file: string): boolean {
   return Number.isFinite(parsed) && new Date(parsed).toISOString().slice(0, 10) === date;
 }
 
-function readManifestFile(path: string, maxBytes: number): { ok: true; text: string; bytesRead: number } | { ok: false; reason: 'byte-limit' | 'io-error' } {
+function readManifestFile(
+  path: string,
+  maxBytes: number,
+  inspectionOnly = false,
+): { ok: true; text: string; bytesRead: number } | { ok: false; reason: 'byte-limit' | 'io-error' } {
   let fd: number | undefined;
   try {
     const pathBefore = lstatSync(path);
-    if (pathBefore.isSymbolicLink() || !pathBefore.isFile() || !migratableFile(pathBefore)) return { ok: false, reason: 'io-error' };
+    if (pathBefore.isSymbolicLink() || !pathBefore.isFile() ||
+      (inspectionOnly ? unsafeFile(pathBefore) : !migratableFile(pathBefore))) return { ok: false, reason: 'io-error' };
     if (pathBefore.size > maxBytes) return { ok: false, reason: 'byte-limit' };
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     let before = fstatSync(fd);
-    if (!before.isFile() || !migratableFile(before) || !sameFile(pathBefore, before)) return { ok: false, reason: 'io-error' };
+    if (!before.isFile() || (inspectionOnly ? unsafeFile(before) : !migratableFile(before)) ||
+      !sameFile(pathBefore, before)) return { ok: false, reason: 'io-error' };
     if (before.size > maxBytes) return { ok: false, reason: 'byte-limit' };
-    fchmodSync(fd, 0o600);
-    before = fstatSync(fd);
-    if (unsafeFile(before)) return { ok: false, reason: 'io-error' };
+    if (!inspectionOnly) {
+      fchmodSync(fd, 0o600);
+      before = fstatSync(fd);
+      if (unsafeFile(before)) return { ok: false, reason: 'io-error' };
+    }
     const buffer = Buffer.alloc(before.size);
     const bytesRead = before.size > 0 ? readSync(fd, buffer, 0, before.size, 0) : 0;
     const after = fstatSync(fd);
@@ -574,11 +593,16 @@ export function readDispatchManifestEventsDetailed(opts: ReadDispatchManifestEve
     const maxRows = boundedReadOption(opts.maxRows, DEFAULT_READ_MAX_ROWS, HARD_READ_MAX_ROWS);
     const dir = dispatchManifestDir();
     if (!existsSync(dir)) return emptyRead('missing');
-    const parentSnapshot = secureDirectory(dispatchManifestRoot(), false);
+    const parentSnapshot = opts.inspectionOnly
+      ? inspectPrivateDirectory(dispatchManifestRoot())
+      : secureDirectory(dispatchManifestRoot(), false);
     if (!parentSnapshot) return emptyRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
-    secureDirectory(dir, false);
-    lock = acquireLocalStoreLock(join(dir, '.dispatch-manifests.lock'), 250);
-    if (!lock) return emptyRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+    if (opts.inspectionOnly) inspectPrivateDirectory(dir);
+    else secureDirectory(dir, false);
+    if (!opts.inspectionOnly) {
+      lock = acquireLocalStoreLock(join(dir, '.dispatch-manifests.lock'), 250);
+      if (!lock) return emptyRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+    }
     const directorySnapshot = lstatSync(dir);
     if (directorySnapshot.isSymbolicLink() || !directorySnapshot.isDirectory() || unsafeDirectory(directorySnapshot)) {
       return emptyRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
@@ -617,7 +641,7 @@ export function readDispatchManifestEventsDetailed(opts: ReadDispatchManifestEve
       if (result.filesRead >= maxFiles) { pushStopReason(result.stopReasons, 'file-limit'); result.complete = false; break; }
       const remainingBytes = maxBytes - result.bytesRead;
       if (remainingBytes <= 0) { pushStopReason(result.stopReasons, 'byte-limit'); result.complete = false; break; }
-      const loaded = readManifestFile(join(dir, file), remainingBytes);
+      const loaded = readManifestFile(join(dir, file), remainingBytes, opts.inspectionOnly === true);
       result.filesRead++;
       if (!loaded.ok) {
         if (loaded.reason === 'io-error') result.unreadableFiles++;
