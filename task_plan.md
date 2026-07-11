@@ -1607,3 +1607,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Propagate source quality through dispatch-yield FleetStatus while keeping existing event-reader callers compatible.
 - [x] Add oversized, malformed, unreadable, mixed-quality, truncation, privacy, and legacy-window coverage.
 - [x] Run focused/full gates and independent review, then update notes, commit, push, reload, and production-canary bounded reads.
+
+## Current Overnight Cycle - Fail-Closed Decision Authority Reads
+- [x] Rehydrate the deployed bounded-telemetry baseline, decision consumers, current git state, Entire state, and persistent notes.
+- [x] Deploy disjoint audits for ledger storage, merge authority, source-quality propagation, and adversarial fixtures.
+- [x] Add a bounded detailed decisions read contract that distinguishes missing, healthy, degraded, and incomplete evidence.
+- [x] Require complete healthy decision evidence anywhere a cached verdict can grant judge-skip or merge authority.
+- [x] Preserve observational `readDecisions()` compatibility without allowing malformed, unreadable, linked, replaced, or over-cap sources to authorize merges.
+- [x] Add malformed-newer, unreadable, oversized, linked, replacement-race, ordering, and compatibility coverage.
+- [x] Run focused/full gates and independent adversarial review, then update notes, commit, push, reload, and production-canary the authority boundary.
