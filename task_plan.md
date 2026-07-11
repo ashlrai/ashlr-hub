@@ -1760,4 +1760,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve monotonic heuristic-to-deterministic evidence upgrades and expose metadata-only proof context in trajectories.
 - [x] Add parent, manifest, infrastructure, restore, identity, privacy, precedence, and downgrade coverage.
 - [x] Pass focused and exhaustive verification plus independent adversarial review; update durable release notes.
-- [ ] Commit, push, observe the complete GitHub matrix, reload production, and canary the deterministic attribution path.
+- [x] Commit, push, observe the complete GitHub matrix, reload production, and canary the deterministic attribution path.
