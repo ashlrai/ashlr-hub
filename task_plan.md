@@ -1626,3 +1626,14 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Expose judge-trace quality in FleetStatus and CLI without presenting partial aggregates as healthy.
 - [x] Add malformed, unreadable, oversized, linked, replacement, equal-time, outcome-patch, long-history, and privacy coverage.
 - [x] Run focused/full gates and independent adversarial review, then update notes, commit, push, reload, and production-canary trace evidence.
+
+## Current Overnight Cycle - Bounded Agent-Action Global Workspace
+- [x] Rehydrate the deployed judge-evidence baseline, agent-action consumers, current git state, Entire state, and persistent notes.
+- [x] Deploy disjoint audits for storage integrity, learning/control consumers, workspace aggregation, and compatibility fixtures.
+- [x] Add bounded, race-safe detailed reads with explicit source quality while preserving `readAgentActions()`.
+- [x] Harden async and synced writers against unsafe paths, links, torn tails, short writes, oversized rows, and partition drift.
+- [x] Require complete evidence for routing, attempt/trajectory learning, context rollups, and daemon control derivations.
+- [x] Surface agent-action source quality in FleetStatus, CLI, API, and workspace summaries without healthy-looking partial zeros.
+- [x] Add malformed, unreadable, oversized, linked, replacement, exact-cap, stale-window, ordering, privacy, and writer coverage.
+- [x] Complete independent adversarial review and update durable notes.
+- [ ] Commit, push, reload, and production-canary the workspace.
