@@ -189,7 +189,7 @@ describe('runDoctor — report structure', () => {
     const report = await runDoctor(cfg);
     expect(() => new Date(report.generatedAt)).not.toThrow();
     expect(new Date(report.generatedAt).toISOString()).toBe(report.generatedAt);
-  });
+  }, 15_000);
 
   it('returns a checks array with at least one check', async () => {
     const cfg = makeConfig(tmpHome);

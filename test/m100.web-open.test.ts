@@ -21,7 +21,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
@@ -39,16 +39,20 @@ vi.mock('../src/cli/open.js', () => ({
   editorDeepLink: vi.fn((p: string) => `cursor://file${p}`),
 }));
 
-vi.mock('../src/core/sandbox/policy.js', () => ({
-  listEnrolled: () => ['/enrolled/repo-a', '/enrolled/repo-b'],
-  isEnrolled: (r: string) => ['/enrolled/repo-a', '/enrolled/repo-b'].includes(r),
-  assertMayMutate: vi.fn(),
-  enroll: vi.fn(),
-  unenroll: vi.fn(),
-  killSwitchOn: () => false,
-  enrollmentPath: () => '/tmp/enrollment.json',
-  killSwitchPath: () => '/tmp/KILL',
-}));
+vi.mock('../src/core/sandbox/policy.js', async () => {
+  const { resolve: resolvePath } = await import('node:path');
+  const enrolled = [resolvePath('/enrolled/repo-a'), resolvePath('/enrolled/repo-b')];
+  return {
+    listEnrolled: () => enrolled,
+    isEnrolled: (r: string) => enrolled.includes(r),
+    assertMayMutate: vi.fn(),
+    enroll: vi.fn(),
+    unenroll: vi.fn(),
+    killSwitchOn: () => false,
+    enrollmentPath: () => resolvePath('/tmp/enrollment.json'),
+    killSwitchPath: () => resolvePath('/tmp/KILL'),
+  };
+});
 
 // Import AFTER mocks are registered.
 import { handleApi } from '../src/core/web/api.js';
@@ -280,7 +284,7 @@ describe('POST /api/open — happy paths', () => {
     expect(body?.ok).toBe(true);
     expect(vi.mocked(openMod.openInEditor)).toHaveBeenCalledOnce();
     expect(vi.mocked(openMod.openInEditor)).toHaveBeenCalledWith(
-      '/enrolled/repo-a',
+      resolve('/enrolled/repo-a'),
       expect.objectContaining({ editor: 'cursor' }),
     );
     expect(vi.mocked(openMod.openInFinder)).not.toHaveBeenCalled();
@@ -295,7 +299,7 @@ describe('POST /api/open — happy paths', () => {
     const body = parsedBody(captured) as Record<string, unknown>;
     expect(body?.ok).toBe(true);
     expect(vi.mocked(openMod.openInFinder)).toHaveBeenCalledOnce();
-    expect(vi.mocked(openMod.openInFinder)).toHaveBeenCalledWith('/enrolled/repo-b');
+    expect(vi.mocked(openMod.openInFinder)).toHaveBeenCalledWith(resolve('/enrolled/repo-b'));
     expect(vi.mocked(openMod.openInEditor)).not.toHaveBeenCalled();
   });
 
@@ -306,7 +310,7 @@ describe('POST /api/open — happy paths', () => {
     await handleApi(req, res, baseConfig(), ctx);
     expect(captured.statusCode).toBe(200);
     expect(vi.mocked(openMod.openInEditor)).toHaveBeenCalledWith(
-      '/enrolled/repo-a/src/index.ts',
+      resolve('/enrolled/repo-a/src/index.ts'),
       expect.anything(),
     );
   });
@@ -318,7 +322,7 @@ describe('POST /api/open — happy paths', () => {
     await handleApi(req, res, baseConfig(), ctx);
     expect(captured.statusCode).toBe(200);
     expect(vi.mocked(openMod.openInEditor)).toHaveBeenCalledWith(
-      '/enrolled/repo-b',
+      resolve('/enrolled/repo-b'),
       expect.anything(),
     );
   });
