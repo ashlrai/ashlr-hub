@@ -1663,4 +1663,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Make automatic diagnostic drain activate only for repairs with a currently dispatchable, policy-authorized backend.
 - [x] Align generated-repair cooldown reads with generation-scoped outcome writes and preserve ordinary backlog progress.
 - [x] Add starvation, unavailable-alternative, concurrent-capacity, lineage, and cooldown regression coverage.
-- [ ] Run focused/full gates and independent adversarial review, update notes, commit, push, reload, and production-canary repair progress.
+- [x] Run focused/full gates and independent adversarial review, update notes, commit, push, reload, and production-canary repair progress.
