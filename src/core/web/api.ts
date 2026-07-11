@@ -663,8 +663,9 @@ export async function handleApi(
     if (path === '/api/models' && method === 'GET') {
       const rawW = getQueryParam(req.url ?? '', 'window');
       const statsWindow = rawW === '7d' ? '7d' : rawW === 'all' ? 'all' : '30d';
-      const { computeModelStats } = await import('../fleet/model-stats.js');
-      sendJson(res, 200, { window: statsWindow, models: computeModelStats(statsWindow) });
+      const { computeModelStatsDetailed } = await import('../fleet/model-stats.js');
+      const stats = computeModelStatsDetailed(statsWindow);
+      sendJson(res, 200, { window: statsWindow, ...stats });
       return true;
     }
 

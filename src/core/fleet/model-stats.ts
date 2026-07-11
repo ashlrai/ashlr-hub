@@ -25,6 +25,25 @@ export interface ModelStats extends ModelRoi {
   outcomes: { reverted: number; followedUp: number };
   /** Multi-model best-of-N participation (M333). */
   bestOfN: { entered: number; won: number; winRate: number };
+  /** False means the zero-valued race metrics are intentionally withheld. */
+  bestOfNAvailable: boolean;
+}
+
+export interface ModelStatsSourceQuality {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  stopReasons: string[];
+  filesRead: number;
+  bytesRead: number;
+  rowsScanned: number;
+  invalidRows: number;
+  unreadableFiles: number;
+}
+
+export interface ModelStatsReadResult {
+  models: ModelStats[];
+  bestOfNSource: ModelStatsSourceQuality;
 }
 
 function windowMs(window: '7d' | '30d' | 'all'): number | undefined {
@@ -39,7 +58,12 @@ function windowMs(window: '7d' | '30d' | 'all'): number | undefined {
  * zero-filled on the ROI side — a candidate that never wins must stay
  * visible, or the tab would hide exactly the models losing races.
  */
-export function computeModelStats(window: '7d' | '30d' | 'all'): ModelStats[] {
+export function computeModelStatsDetailed(window: '7d' | '30d' | 'all'): ModelStatsReadResult {
+  let bestOfNSource: ModelStatsSourceQuality = {
+    sourceState: 'degraded', sourcePresent: false, complete: false,
+    stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+    invalidRows: 0, unreadableFiles: 1,
+  };
   try {
     const wm = windowMs(window);
     const sinceMs = wm !== undefined ? Date.now() - wm : undefined;
@@ -70,6 +94,7 @@ export function computeModelStats(window: '7d' | '30d' | 'all'): ModelStats[] {
           engineModel: key,
           outcomes: { reverted: 0, followedUp: 0 },
           bestOfN: { entered: 0, won: 0, winRate: 0 },
+          bestOfNAvailable: false,
         };
         out.set(key, s);
       }
@@ -102,25 +127,76 @@ export function computeModelStats(window: '7d' | '30d' | 'all'): ModelStats[] {
 
     // ── Best-of-N participation ───────────────────────────────────────────
     try {
-      for (const rec of readBestOfNRecords(sinceMs !== undefined ? { sinceMs } : undefined)) {
-        for (const c of rec.candidates) {
-          if (!c.engine) continue;
-          const tag = canonicalModelTag(c.engine, c.model ?? '');
-          const key = tag ? `${c.engine}:${tag}` : c.engine;
-          const s = ensure(key, c.engine, tag || '(default)');
-          s.bestOfN.entered++;
-          if (c.won) s.bestOfN.won++;
+      const records = readBestOfNRecords({
+        ...(sinceMs !== undefined ? { sinceMs } : {}),
+        maxFiles: wm === undefined ? 366 : Math.ceil(wm / (24 * 60 * 60 * 1000)) + 1,
+        maxBytes: 256 * 1024 * 1024,
+        maxRows: 1_000_000,
+        limit: 100_000,
+        requireComplete: true,
+      });
+      bestOfNSource = sourceQualityFromRecords(records);
+      if (bestOfNSource.sourceState === 'healthy' && bestOfNSource.complete) {
+        for (const rec of records) {
+          for (const c of rec.candidates) {
+            if (!c.engine) continue;
+            const tag = canonicalModelTag(c.engine, c.model ?? '');
+            const key = tag ? `${c.engine}:${tag}` : c.engine;
+            const s = ensure(key, c.engine, tag || '(default)');
+            s.bestOfN.entered++;
+            if (c.won) s.bestOfN.won++;
+          }
+        }
+        for (const s of out.values()) {
+          s.bestOfNAvailable = true;
+          s.bestOfN.winRate = s.bestOfN.entered > 0 ? s.bestOfN.won / s.bestOfN.entered : 0;
         }
       }
-      for (const s of out.values()) {
-        s.bestOfN.winRate = s.bestOfN.entered > 0 ? s.bestOfN.won / s.bestOfN.entered : 0;
-      }
     } catch {
-      /* best-of-N stats are best-effort */
+      bestOfNSource = {
+        sourceState: 'degraded', sourcePresent: true, complete: false,
+        stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+        invalidRows: 0, unreadableFiles: 1,
+      };
     }
 
-    return [...out.values()].sort((a, b) => b.dispatches - a.dispatches);
+    return {
+      models: [...out.values()].sort((a, b) => b.dispatches - a.dispatches),
+      bestOfNSource,
+    };
   } catch {
-    return [];
+    return { models: [], bestOfNSource };
   }
+}
+
+function sourceQualityFromRecords(records: ReturnType<typeof readBestOfNRecords>): ModelStatsSourceQuality {
+  const quality = (records as ReturnType<typeof readBestOfNRecords> & {
+    sourceQuality?: Partial<ModelStatsSourceQuality>;
+  }).sourceQuality;
+  if (!quality) {
+    return {
+      sourceState: 'healthy', sourcePresent: true, complete: true,
+      stopReasons: [], filesRead: 0, bytesRead: 0, rowsScanned: records.length,
+      invalidRows: 0, unreadableFiles: 0,
+    };
+  }
+  return {
+    sourceState: quality.sourceState === 'missing' || quality.sourceState === 'healthy'
+      ? quality.sourceState
+      : 'degraded',
+    sourcePresent: quality.sourcePresent ?? quality.sourceState !== 'missing',
+    complete: quality.complete === true,
+    stopReasons: Array.isArray(quality.stopReasons) ? quality.stopReasons : [],
+    filesRead: quality.filesRead ?? 0,
+    bytesRead: quality.bytesRead ?? 0,
+    rowsScanned: quality.rowsScanned ?? 0,
+    invalidRows: quality.invalidRows ?? 0,
+    unreadableFiles: quality.unreadableFiles ?? 0,
+  };
+}
+
+export function computeModelStats(window: '7d' | '30d' | 'all'): ModelStats[] {
+  const result = computeModelStatsDetailed(window);
+  Object.defineProperty(result.models, 'bestOfNSource', { value: result.bestOfNSource, enumerable: false });
+  return result.models;
 }

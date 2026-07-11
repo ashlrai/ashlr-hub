@@ -406,11 +406,24 @@ export function formatFleetStatus(s: FleetStatus): string {
       lines.push(`  reasons:   ${topReasons.slice(0, 3).map(formatProductionReason).join('; ')}`);
     }
   }
+  if (s.dispatchManifestSource) {
+    const source = s.dispatchManifestSource;
+    lines.push(
+      `  manifest source: ${source.sourceState}${source.complete ? '' : ' (partial)'}; ` +
+        `files ${source.filesRead}, bytes ${source.bytesRead}, rows ${source.rowsScanned}, ` +
+        `invalid ${source.invalidRows}, unreadable ${source.unreadableFiles}`,
+    );
+    if (source.stopReasons.length > 0) lines.push(`  manifest stopped: ${source.stopReasons.join(', ')}`);
+  }
   if (s.dispatchManifests) {
     const manifests = s.dispatchManifests;
+    const qualifier = s.dispatchManifestSource &&
+      (s.dispatchManifestSource.sourceState !== 'healthy' || !s.dispatchManifestSource.complete)
+      ? ' observed (partial)'
+      : '';
     lines.push(
       `  manifests: ${manifests.events} event(s), assigned ${manifests.assigned}, ` +
-        `unassigned ${manifests.unassigned}, latest ${manifests.latestAt ?? '—'}`,
+        `unassigned ${manifests.unassigned}, latest ${manifests.latestAt ?? '—'}${qualifier}`,
     );
     if (manifests.byBackend.length > 0) {
       const backends = manifests.byBackend.slice(0, 4).map(formatDispatchManifestBackend).join(', ');

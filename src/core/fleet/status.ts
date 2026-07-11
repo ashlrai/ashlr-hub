@@ -85,6 +85,7 @@ import {
 } from './dispatch-production-ledger.js';
 import { readDecisionsDetailed, type DecisionSourceQuality } from './decisions-ledger.js';
 import { readJudgeTracesDetailed, type JudgeTraceSourceQuality } from './judge-trace.js';
+import type { DispatchManifestSourceQuality } from './dispatch-manifest.js';
 import {
   readAgentWorkspaceDetailed,
   type AgentWorkspaceReadResult,
@@ -835,6 +836,8 @@ export interface FleetStatus {
   judgeTraceSource?: JudgeTraceSourceQuality;
   /** Recent forensic concurrent dispatch intent summaries from the append-only manifest ledger. */
   dispatchManifests?: FleetDispatchManifestStatus;
+  /** Storage/read completeness for forensic concurrent dispatch intent. */
+  dispatchManifestSource?: DispatchManifestSourceQuality;
   /** Sample-gated diagnosis of dispatch-production yield; no raw prompts/diffs/stdout. */
   dispatchYieldDiagnostics?: FleetDispatchYieldDiagnostics;
   /** Durable 24h agent-action global workspace summary from append-only telemetry. */
@@ -1607,7 +1610,8 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   }
   try {
     const dispatchManifests = await buildDispatchManifestStatus();
-    if (dispatchManifests) status.dispatchManifests = dispatchManifests;
+    status.dispatchManifestSource = dispatchManifests.sourceQuality;
+    if (dispatchManifests.summary) status.dispatchManifests = dispatchManifests.summary;
   } catch {
     // Optional forensic manifest surface only.
   }
@@ -1712,10 +1716,27 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   return status;
 }
 
-async function buildDispatchManifestStatus(): Promise<FleetDispatchManifestStatus | undefined> {
-  const { readDispatchManifestEvents } = await import('./dispatch-manifest.js');
-  const events = readDispatchManifestEvents({ limit: 50 });
-  if (events.length === 0) return undefined;
+async function buildDispatchManifestStatus(): Promise<{
+  summary?: FleetDispatchManifestStatus;
+  sourceQuality: DispatchManifestSourceQuality;
+}> {
+  const { readDispatchManifestEventsDetailed } = await import('./dispatch-manifest.js');
+  const read = readDispatchManifestEventsDetailed({ limit: 1000 });
+  const events = read.events;
+  const sourceQuality: DispatchManifestSourceQuality = {
+    sourceState: read.sourceState,
+    sourcePresent: read.sourcePresent,
+    complete: read.complete,
+    stopReasons: read.stopReasons,
+    filesRead: read.filesRead,
+    bytesRead: read.bytesRead,
+    rowsScanned: read.rowsScanned,
+    invalidRows: read.invalidRows,
+    unreadableFiles: read.unreadableFiles,
+  };
+  if (events.length === 0 || sourceQuality.sourceState !== 'healthy' || !sourceQuality.complete) {
+    return { sourceQuality };
+  }
 
   const byBackend = new Map<string, number>();
   let assigned = 0;
@@ -1730,7 +1751,7 @@ async function buildDispatchManifestStatus(): Promise<FleetDispatchManifestStatu
     }
   }
 
-  return {
+  return { sourceQuality, summary: {
     events: events.length,
     latestAt,
     assigned,
@@ -1747,7 +1768,7 @@ async function buildDispatchManifestStatus(): Promise<FleetDispatchManifestStatu
       backends: event.backendCounts,
       ...(event.resourceSnapshotAt ? { resourceSnapshotAt: event.resourceSnapshotAt } : {}),
     })),
-  };
+  } };
 }
 
 async function buildFleetPhantomStatus(cfg: AshlrConfig): Promise<FleetPhantomStatus | undefined> {

@@ -1568,6 +1568,18 @@ function renderModels() {
     windowPicker
   ));
 
+  const bestOfNSource = data?.bestOfNSource;
+  const bestOfNHealthy = !bestOfNSource ||
+    (bestOfNSource.sourceState === 'healthy' && bestOfNSource.complete === true);
+  if (bestOfNSource) {
+    const sourceText = bestOfNSource.sourceState === 'missing'
+      ? 'Best-of-N evidence source is missing; race metrics are unavailable.'
+      : bestOfNHealthy
+        ? `Best-of-N evidence is complete (${bestOfNSource.rowsScanned ?? 0} rows).`
+        : `Best-of-N evidence is partial (${(bestOfNSource.stopReasons ?? []).join(', ') || 'source degraded'}); race metrics are withheld.`;
+    section.appendChild(el('p', { cls: 'hint' }, sourceText));
+  }
+
   const models = data?.models ?? [];
   if (models.length === 0) {
     section.appendChild(el('p', {},
@@ -1598,7 +1610,11 @@ function renderModels() {
     tr.appendChild(el('td', { cls: 'num' }, m.costPerMergedUsd != null ? `$${fmt(m.costPerMergedUsd)}` : '—'));
     tr.appendChild(el('td', { cls: 'num' }, m.avgLatencyMs != null ? `${Math.round(m.avgLatencyMs / 1000)}s` : '—'));
     tr.appendChild(el('td', { cls: 'num' },
-      m.bestOfN?.entered > 0 ? `${m.bestOfN.won}/${m.bestOfN.entered} (${Math.round(m.bestOfN.winRate * 100)}%)` : '—'));
+      !bestOfNHealthy
+        ? 'unavailable'
+        : m.bestOfN?.entered > 0
+          ? `${m.bestOfN.won}/${m.bestOfN.entered} (${Math.round(m.bestOfN.winRate * 100)}%)`
+          : '—'));
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);

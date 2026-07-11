@@ -1845,6 +1845,12 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       unassigned: 1,
       byBackend: [{ backend: 'codex', assignments: 2 }],
     });
+    expect(s.dispatchManifestSource).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+      rowsScanned: 1,
+      invalidRows: 0,
+    });
     expect(s.dispatchManifests?.recent[0]).toMatchObject({
       manifestId: 'dm-test-1',
       assigned: 2,
@@ -1854,7 +1860,32 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
 
     const formatted = formatFleetStatus(s);
     expect(formatted).toContain('manifests: 1 event(s), assigned 2, unassigned 1');
+    expect(formatted).toContain('manifest source: healthy;');
     expect(formatted).toContain('manifest backends: codex:2');
+  });
+
+  it('withholds concurrent manifest aggregates when their source is partial', async () => {
+    const event = {
+      schemaVersion: 1 as const,
+      manifestId: 'dm-partial',
+      ts: '2026-07-10T00:00:00.000Z',
+      mode: 'concurrent' as const,
+      dryRun: false,
+      claimedItemIds: ['item-a'],
+      assignments: [{ itemId: 'item-a', source: 'todo' as const, repo: '/repo/a', title: 'A', backend: 'codex' as const }],
+      unassigned: [],
+      slots: { codex: 1 },
+      backendCounts: { codex: 1 },
+      counts: { claimed: 1, assigned: 1, unassigned: 0 },
+    };
+    recordDispatchManifest(event);
+    const file = join(process.env.ASHLR_HOME!, 'dispatch-manifests', '2026-07-10.jsonl');
+    writeFileSync(file, `${readFileSync(file, 'utf8')}not-json\n`, 'utf8');
+
+    const status = await buildFleetStatus(baseConfig());
+    expect(status.dispatchManifestSource).toMatchObject({ sourceState: 'degraded', complete: false, invalidRows: 1 });
+    expect(status.dispatchManifests).toBeUndefined();
+    expect(formatFleetStatus(status)).toContain('manifest source: degraded (partial);');
   });
 
   it('reports durable global workspace action telemetry from the append-only ledger', async () => {

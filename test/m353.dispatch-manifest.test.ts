@@ -13,7 +13,9 @@ import {
   buildDispatchManifestEvent,
   dispatchManifestDir,
   readDispatchManifestEvents,
+  readDispatchManifestEventsDetailed,
   recordDispatchManifest,
+  type DispatchManifestEvent,
 } from '../src/core/fleet/dispatch-manifest.js';
 
 let tmpDir: string;
@@ -72,6 +74,25 @@ function makeSnapshot(
       backoffUntilMs: null,
     })),
   };
+}
+
+function makeEvent(ts: string, id = `manifest-item-${++seq}`): DispatchManifestEvent {
+  const snapshot = makeSnapshot([{ backend: 'codex', availability: 'open' }]);
+  const plan = planConcurrentDispatch(
+    [makeItem({ id })],
+    snapshot,
+    { maxSlotsPerBackend: 1 },
+    () => 'codex',
+  );
+  return buildDispatchManifestEvent({ ts, plan, resourceSnapshotAt: snapshot.generatedAt });
+}
+
+function writeRows(file: string, rows: unknown[]): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, rows.map((row) => typeof row === 'string' ? row : JSON.stringify(row)).join('\n') + '\n', {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
 }
 
 describe('dispatch manifest ledger', () => {
@@ -159,5 +180,188 @@ describe('dispatch manifest ledger', () => {
     expect(() => recordDispatchManifest(event)).not.toThrow();
     expect(recordDispatchManifest(event)).toMatchObject({ recorded: false, assigned: 1 });
     expect(readDispatchManifestEvents()).toEqual([]);
+  });
+
+  it('reports missing, healthy, and malformed sources without making quality enumerable', () => {
+    const missing = readDispatchManifestEventsDetailed();
+    expect(missing).toMatchObject({ sourceState: 'missing', sourcePresent: false, complete: true });
+
+    const event = makeEvent('2026-07-11T10:00:00.000Z', 'healthy');
+    expect(recordDispatchManifest(event)).toMatchObject({ recorded: true });
+    const healthy = readDispatchManifestEvents();
+    expect(healthy).toHaveLength(1);
+    expect(Object.keys(healthy)).toEqual(['0']);
+    expect((healthy as typeof healthy & { sourceQuality: unknown }).sourceQuality).toMatchObject({
+      sourceState: 'healthy', complete: true,
+    });
+
+    fs.appendFileSync(path.join(dispatchManifestDir(), '2026-07-11.jsonl'), '{"torn":true\n', 'utf8');
+    const degraded = readDispatchManifestEventsDetailed();
+    expect(degraded).toMatchObject({ sourceState: 'degraded', complete: false, invalidRows: 1 });
+    expect(degraded.events).toHaveLength(1);
+    expect(readDispatchManifestEvents({ requireComplete: true })).toEqual([]);
+  });
+
+  it('rejects malformed schema, non-canonical timestamps, and timestamp-partition mismatches', () => {
+    const valid = makeEvent('2026-07-11T10:00:00.000Z', 'valid');
+    writeRows(path.join(dispatchManifestDir(), '2026-07-11.jsonl'), [
+      valid,
+      { ...valid, schemaVersion: 2 },
+      { ...valid, ts: 'July 11 2026 10:00 UTC' },
+      { ...valid, ts: '2026-07-10T10:00:00.000Z' },
+      { ...valid, unexpected: true },
+      { ...valid, assignments: [{ ...valid.assignments[0], source: 'unknown-source' }] },
+      { ...valid, backendCounts: { unknownBackend: 1 } },
+      { ...valid, counts: { claimed: 2, assigned: 1, unassigned: 0 } },
+      { ...valid, backendCounts: { codex: 0 } },
+      'not-json',
+    ]);
+
+    const detailed = readDispatchManifestEventsDetailed();
+    expect(detailed.events.map((event) => event.claimedItemIds[0])).toEqual(['valid']);
+    expect(detailed).toMatchObject({ sourceState: 'degraded', complete: false, rowsScanned: 10, invalidRows: 9 });
+  });
+
+  it('rejects impossible and loosely named dated partitions', () => {
+    writeRows(path.join(dispatchManifestDir(), '2026-02-30.jsonl'), []);
+    expect(readDispatchManifestEventsDetailed()).toMatchObject({
+      sourceState: 'degraded', complete: false, stopReasons: ['io-error'], unreadableFiles: 1,
+    });
+
+    fs.rmSync(dispatchManifestDir(), { recursive: true });
+    writeRows(path.join(dispatchManifestDir(), 'latest.jsonl'), []);
+    expect(readDispatchManifestEventsDetailed()).toMatchObject({
+      sourceState: 'degraded', complete: false, stopReasons: ['io-error'], unreadableFiles: 1,
+    });
+  });
+
+  it('distinguishes logical event limits from exact-cap complete reads', () => {
+    const older = makeEvent('2026-07-11T09:00:00.000Z', 'older');
+    const newer = makeEvent('2026-07-11T10:00:00.000Z', 'newer');
+    writeRows(path.join(dispatchManifestDir(), '2026-07-11.jsonl'), [older, newer]);
+
+    expect(readDispatchManifestEventsDetailed({ limit: 1, stopAfterLimit: true })).toMatchObject({
+      sourceState: 'degraded', complete: false, stopReasons: ['event-limit'], events: [{ claimedItemIds: ['newer'] }],
+    });
+
+    writeRows(path.join(dispatchManifestDir(), '2026-07-11.jsonl'), [newer]);
+    expect(readDispatchManifestEventsDetailed({ limit: 1, stopAfterLimit: true, maxRows: 1 })).toMatchObject({
+      sourceState: 'healthy', complete: true, stopReasons: [], rowsScanned: 1,
+    });
+  });
+
+  it('preserves the compatibility reader default cap with explicit partial quality', () => {
+    const rows = Array.from({ length: 101 }, (_, index) => ({
+      ...makeEvent(`2026-07-11T10:${String(index % 60).padStart(2, '0')}:00.000Z`, `row-${index}`),
+      manifestId: `dm-default-${index}`,
+    }));
+    writeRows(path.join(dispatchManifestDir(), '2026-07-11.jsonl'), rows);
+
+    const events = readDispatchManifestEvents() as ReturnType<typeof readDispatchManifestEvents> & {
+      sourceQuality: { sourceState: string; complete: boolean; stopReasons: string[] };
+    };
+    expect(events).toHaveLength(100);
+    expect(events.sourceQuality).toMatchObject({
+      sourceState: 'degraded', complete: false, stopReasons: ['event-limit'],
+    });
+  });
+
+  it('reports file, byte, and row physical caps while accepting an exact byte cap', () => {
+    const old = makeEvent('2026-07-10T10:00:00.000Z', 'old');
+    const recent = makeEvent('2026-07-11T10:00:00.000Z', 'recent');
+    writeRows(path.join(dispatchManifestDir(), '2026-07-10.jsonl'), [old]);
+    const recentFile = path.join(dispatchManifestDir(), '2026-07-11.jsonl');
+    writeRows(recentFile, [recent]);
+
+    expect(readDispatchManifestEventsDetailed({ maxFiles: 1 })).toMatchObject({
+      sourceState: 'degraded', complete: false, stopReasons: ['file-limit'], filesRead: 1,
+    });
+    expect(readDispatchManifestEventsDetailed({ maxBytes: fs.statSync(recentFile).size - 1 })).toMatchObject({
+      sourceState: 'degraded', complete: false, stopReasons: ['byte-limit'], filesRead: 1,
+    });
+
+    fs.rmSync(path.join(dispatchManifestDir(), '2026-07-10.jsonl'));
+    const exactBytes = fs.statSync(recentFile).size;
+    expect(readDispatchManifestEventsDetailed({ maxBytes: exactBytes, maxRows: 1 })).toMatchObject({
+      sourceState: 'healthy', complete: true, stopReasons: [], bytesRead: exactBytes, rowsScanned: 1,
+    });
+
+    writeRows(recentFile, [recent, { ...recent, manifestId: 'second' }]);
+    expect(readDispatchManifestEventsDetailed({ maxRows: 1 })).toMatchObject({
+      sourceState: 'degraded', complete: false, stopReasons: ['row-limit'], rowsScanned: 1,
+    });
+  });
+
+  it.runIf(process.platform !== 'win32')('refuses symlinked, hard-linked, and public ledger files', () => {
+    const event = makeEvent('2026-07-11T10:00:00.000Z', 'unsafe');
+    const outside = path.join(tmpDir, 'outside.jsonl');
+    writeRows(outside, [event]);
+    fs.mkdirSync(dispatchManifestDir(), { recursive: true, mode: 0o700 });
+    const ledger = path.join(dispatchManifestDir(), '2026-07-11.jsonl');
+
+    fs.symlinkSync(outside, ledger);
+    expect(readDispatchManifestEventsDetailed()).toMatchObject({ sourceState: 'degraded', stopReasons: ['io-error'], unreadableFiles: 1 });
+    expect(recordDispatchManifest(event)).toMatchObject({ recorded: false });
+    fs.rmSync(ledger);
+
+    fs.linkSync(outside, ledger);
+    expect(readDispatchManifestEventsDetailed()).toMatchObject({ sourceState: 'degraded', stopReasons: ['io-error'], unreadableFiles: 1 });
+    fs.rmSync(ledger);
+
+    writeRows(ledger, [event]);
+    fs.chmodSync(ledger, 0o666);
+    expect(readDispatchManifestEventsDetailed()).toMatchObject({ sourceState: 'degraded', stopReasons: ['io-error'], unreadableFiles: 1 });
+  });
+
+  it.runIf(process.platform !== 'win32')('creates private storage and isolates a torn tail before appending', () => {
+    const first = makeEvent('2026-07-11T09:00:00.000Z', 'before-torn');
+    const second = makeEvent('2026-07-11T10:00:00.000Z', 'after-torn');
+    const file = path.join(dispatchManifestDir(), '2026-07-11.jsonl');
+    writeRows(file, [first]);
+    fs.appendFileSync(file, '{"torn":true', 'utf8');
+
+    expect(recordDispatchManifest(second)).toMatchObject({ recorded: true });
+    const raw = fs.readFileSync(file, 'utf8');
+    expect(raw).toContain('{"torn":true\n{');
+    expect(fs.statSync(dispatchManifestDir()).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(readDispatchManifestEventsDetailed()).toMatchObject({
+      sourceState: 'degraded', complete: false, invalidRows: 1,
+    });
+    expect(readDispatchManifestEventsDetailed().events.map((event) => event.claimedItemIds[0])).toEqual(['after-torn', 'before-torn']);
+  });
+
+  it.runIf(process.platform !== 'win32')('migrates an owner-readable legacy ledger and rejects multi-event writes atomically', () => {
+    const event = makeEvent('2026-07-11T10:00:00.000Z', 'legacy');
+    const file = path.join(dispatchManifestDir(), '2026-07-11.jsonl');
+    writeRows(file, [event]);
+    fs.chmodSync(file, 0o644);
+
+    expect(readDispatchManifestEventsDetailed()).toMatchObject({ sourceState: 'healthy', complete: true });
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    const before = fs.readFileSync(file, 'utf8');
+    expect(recordDispatchManifest([event, { ...event, manifestId: 'second' }])).toMatchObject({ recorded: false });
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+  });
+
+  it.runIf(process.platform !== 'win32')('rejects unsafe storage roots and full partitions', () => {
+    const event = makeEvent('2026-07-11T10:00:00.000Z', 'bounded');
+    fs.mkdirSync(process.env.ASHLR_HOME!, { recursive: true, mode: 0o700 });
+    fs.chmodSync(process.env.ASHLR_HOME!, 0o777);
+    expect(recordDispatchManifest(event)).toMatchObject({ recorded: false });
+
+    fs.chmodSync(process.env.ASHLR_HOME!, 0o700);
+    fs.mkdirSync(dispatchManifestDir(), { recursive: true, mode: 0o700 });
+    const file = path.join(dispatchManifestDir(), '2026-07-11.jsonl');
+    fs.writeFileSync(file, Buffer.alloc(16 * 1024 * 1024), { mode: 0o600 });
+    const before = fs.statSync(file).size;
+    expect(recordDispatchManifest(event)).toMatchObject({ recorded: false });
+    expect(fs.statSync(file).size).toBe(before);
+  });
+
+  it('falls back to the absolute default home when ASHLR_HOME is relative', () => {
+    process.env.ASHLR_HOME = 'relative-home';
+    expect(dispatchManifestDir()).toBe(path.join(os.homedir(), '.ashlr', 'dispatch-manifests'));
+    expect(path.isAbsolute(dispatchManifestDir())).toBe(true);
   });
 });

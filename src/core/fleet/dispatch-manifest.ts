@@ -1,20 +1,55 @@
 /**
- * dispatch-manifest.ts - append-only concurrent dispatch intent ledger.
+ * Append-only concurrent dispatch intent ledger.
  *
- * Records the bounded plan built before concurrent dispatch starts. This is
- * forensic intent only: it is not a queue, lease, retry source, or merge gate.
+ * This is forensic intent only: it is not a queue, lease, retry source, or
+ * merge gate. Reads and writes fail soft, but detailed reads report source
+ * quality so incomplete history cannot silently become authoritative.
  */
 
-import { existsSync, mkdirSync, appendFileSync, readdirSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import {
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fchmodSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  opendirSync,
+  readSync,
+  writeSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import type { DaemonDispatchManifestSummary, EngineId, WorkItem } from '../types.js';
 import type { DispatchPlan } from '../fabric/concurrent-dispatch.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
+const DEFAULT_READ_MAX_FILES = 32;
+const DEFAULT_READ_MAX_BYTES = 32 * 1024 * 1024;
+const DEFAULT_READ_MAX_ROWS = 100_000;
+const HARD_READ_MAX_FILES = 366;
+const HARD_READ_MAX_BYTES = 256 * 1024 * 1024;
+const HARD_READ_MAX_ROWS = 1_000_000;
+const MAX_READ_ROW_BYTES = 128 * 1024;
+const MAX_PARTITION_BYTES = 16 * 1024 * 1024;
+const MAX_DIRECTORY_ENTRIES = 2_048;
+const MAX_WRITE_ROWS_PER_CALL = 10_000;
+const MAX_WRITE_PARTITIONS_PER_CALL = 32;
 const MAX_ITEMS = 24;
+const MAX_MAP_KEYS = 128;
+const ENGINE_IDS = new Set<EngineId>([
+  'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'kimi', 'nim', 'opencode', 'grok',
+]);
+const PERSISTED_WORK_SOURCES = new Set<string>([
+  'issue', 'todo', 'test', 'dep', 'doc', 'security', 'plugin', 'self', 'lint', 'goal', 'hygiene', 'invent',
+  'backlog',
+]);
 const MAX_TEXT = {
   machineId: 120,
   itemId: 240,
@@ -53,11 +88,7 @@ export interface DispatchManifestEvent {
   slots: Record<string, number>;
   backendCounts: Record<string, number>;
   resourceSnapshotAt?: string;
-  counts: {
-    claimed: number;
-    assigned: number;
-    unassigned: number;
-  };
+  counts: { claimed: number; assigned: number; unassigned: number };
 }
 
 export interface BuildDispatchManifestEventInput {
@@ -73,54 +104,82 @@ export interface BuildDispatchManifestEventInput {
 
 export interface ReadDispatchManifestEventsOptions {
   limit?: number;
+  maxFiles?: number;
+  maxBytes?: number;
+  maxRows?: number;
+  /** Stop once one event beyond limit proves the logical result is partial. */
+  stopAfterLimit?: boolean;
+  /** Return no events unless every selected row was read and validated. */
+  requireComplete?: boolean;
+}
+
+export type DispatchManifestReadStopReason =
+  | 'event-limit'
+  | 'file-limit'
+  | 'byte-limit'
+  | 'row-limit'
+  | 'io-error';
+
+export interface DispatchManifestSourceQuality {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  stopReasons: DispatchManifestReadStopReason[];
+  filesRead: number;
+  bytesRead: number;
+  rowsScanned: number;
+  invalidRows: number;
+  unreadableFiles: number;
+}
+
+export interface DispatchManifestEventsReadResult extends DispatchManifestSourceQuality {
+  events: DispatchManifestEvent[];
 }
 
 export function dispatchManifestDir(): string {
   const configuredHome = process.env.ASHLR_HOME;
-  const root =
-    typeof configuredHome === 'string' && configuredHome.trim() !== ''
-      ? configuredHome
-      : join(homedir(), '.ashlr');
+  const root = typeof configuredHome === 'string' && configuredHome.trim() !== '' && isAbsolute(configuredHome)
+    ? configuredHome
+    : join(homedir(), '.ashlr');
   return join(root, 'dispatch-manifests');
+}
+
+function dispatchManifestRoot(): string {
+  return dirname(dispatchManifestDir());
 }
 
 function eventDateString(ts: string): string {
   const parsed = Date.parse(ts);
-  if (!Number.isFinite(parsed)) return new Date().toISOString().slice(0, 10);
-  return new Date(parsed).toISOString().slice(0, 10);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
 }
 
 function eventTimestamp(ts: string): string {
   const parsed = Date.parse(ts);
-  if (!Number.isFinite(parsed)) return new Date().toISOString();
-  return new Date(parsed).toISOString();
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date().toISOString();
 }
 
 function boundedText(value: unknown, max: number, fallback = ''): string {
   const text = typeof value === 'string' ? value : String(value ?? '');
-  const scrubbed = scrubSecrets(text);
-  const trimmed = scrubbed.trim();
+  const trimmed = scrubSecrets(text).trim();
   const chosen = trimmed.length > 0 ? trimmed : fallback;
   return chosen.length > max ? `${chosen.slice(0, max - 3)}...` : chosen;
 }
 
 function boundedOptionalText(value: unknown, max: number): string | undefined {
-  if (typeof value !== 'string' || value.trim() === '') return undefined;
-  return boundedText(value, max);
+  return typeof value === 'string' && value.trim() !== '' ? boundedText(value, max) : undefined;
 }
 
 function boundedNullableText(value: unknown, max: number): string | null | undefined {
-  if (value === null) return null;
-  return boundedOptionalText(value, max);
+  return value === null ? null : boundedOptionalText(value, max);
 }
 
-function sanitizeSlots(slots: ReadonlyMap<EngineId, number> | Record<string, number>): Record<string, number> {
-  const entries = slots instanceof Map ? [...slots.entries()] : Object.entries(slots);
+function sanitizeCountMap(input: ReadonlyMap<EngineId, number> | Record<string, number> | undefined): Record<string, number> {
+  if (!input) return {};
+  const entries = input instanceof Map ? [...input.entries()] : Object.entries(input);
   const out: Record<string, number> = {};
-  for (const [backend, value] of entries) {
-    const key = boundedText(backend, 80);
-    if (!key) continue;
-    out[key] = typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+  for (const [rawKey, value] of entries.slice(0, MAX_MAP_KEYS)) {
+    const key = boundedText(rawKey, 80);
+    if (key) out[key] = typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
   }
   return out;
 }
@@ -129,30 +188,15 @@ function assignmentBackendCounts(assignments: Array<{ backend: EngineId | string
   const out: Record<string, number> = {};
   for (const assignment of assignments) {
     const backend = boundedText(assignment.backend, 80, 'builtin');
-    if (!backend) continue;
-    out[backend] = (out[backend] ?? 0) + 1;
-  }
-  return out;
-}
-
-function sanitizeBackendCounts(counts: Record<string, number> | undefined): Record<string, number> {
-  if (!counts) return {};
-  const out: Record<string, number> = {};
-  for (const [backend, count] of Object.entries(counts)) {
-    const key = boundedText(backend, 80, 'builtin');
-    if (!key) continue;
-    out[key] = typeof count === 'number' && Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+    if (backend) out[backend] = (out[backend] ?? 0) + 1;
   }
   return out;
 }
 
 export function buildDispatchManifestEvent(input: BuildDispatchManifestEventInput): DispatchManifestEvent {
   const ts = eventTimestamp(input.ts);
-  const claimedItemIds = input.plan.assignments
-    .map((assignment) => assignment.item.id)
-    .concat(input.plan.unassigned.map((item) => item.id));
-  const assignments = input.plan.assignments.slice(0, MAX_ITEMS).map((assignment) => {
-    const item = assignment.item;
+  const claimedItemIds = input.plan.assignments.map(({ item }) => item.id).concat(input.plan.unassigned.map((item) => item.id));
+  const assignments = input.plan.assignments.slice(0, MAX_ITEMS).map(({ item, backend }) => {
     const routeReason = boundedOptionalText(input.routeReasons?.get(item.id), MAX_TEXT.reason);
     const model = boundedNullableText(input.routeModels?.get(item.id), MAX_TEXT.model);
     const attemptId = boundedOptionalText(input.attemptIds?.get(item.id), 160);
@@ -162,16 +206,14 @@ export function buildDispatchManifestEvent(input: BuildDispatchManifestEventInpu
       source: boundedText(item.source, 80, 'unknown') as WorkItem['source'],
       repo: boundedText(item.repo, MAX_TEXT.repo, 'unknown'),
       title: boundedText(item.title ?? item.id, MAX_TEXT.title, 'untitled'),
-      backend: boundedText(assignment.backend, 80, 'builtin') as EngineId,
+      backend: boundedText(backend, 80, 'builtin') as EngineId,
       ...(routeReason ? { routeReason } : {}),
       ...(model !== undefined ? { model } : {}),
     };
   });
   const unassigned = input.plan.unassigned.slice(0, MAX_ITEMS).map((item) => ({
-    itemId: boundedText(item.id, MAX_TEXT.itemId, 'unknown'),
-    reason: 'no-slots' as const,
+    itemId: boundedText(item.id, MAX_TEXT.itemId, 'unknown'), reason: 'no-slots' as const,
   }));
-
   return sanitizeDispatchManifestEvent({
     schemaVersion: 1,
     manifestId: `dm-${ts.replace(/[^0-9]/g, '').slice(0, 14)}-${randomUUID().slice(0, 8)}`,
@@ -179,64 +221,45 @@ export function buildDispatchManifestEvent(input: BuildDispatchManifestEventInpu
     ...(input.machineId ? { machineId: input.machineId } : {}),
     mode: 'concurrent',
     dryRun: input.dryRun === true,
-    claimedItemIds: claimedItemIds.map((itemId) => boundedText(itemId, MAX_TEXT.itemId, 'unknown')).slice(0, MAX_ITEMS),
+    claimedItemIds: claimedItemIds.map((id) => boundedText(id, MAX_TEXT.itemId, 'unknown')).slice(0, MAX_ITEMS),
     assignments,
     unassigned,
-    slots: sanitizeSlots(input.plan.slotsMap),
+    slots: sanitizeCountMap(input.plan.slotsMap),
     backendCounts: assignmentBackendCounts(input.plan.assignments),
     ...(input.resourceSnapshotAt ? { resourceSnapshotAt: eventTimestamp(input.resourceSnapshotAt) } : {}),
-    counts: {
-      claimed: claimedItemIds.length,
-      assigned: input.plan.assignments.length,
-      unassigned: input.plan.unassigned.length,
-    },
+    counts: { claimed: claimedItemIds.length, assigned: input.plan.assignments.length, unassigned: input.plan.unassigned.length },
   });
 }
 
 export function sanitizeDispatchManifestEvent(event: DispatchManifestEvent): DispatchManifestEvent {
   const ts = eventTimestamp(event.ts);
-  const manifestId = boundedText(event.manifestId, 120, `dm-${ts.replace(/[^0-9]/g, '').slice(0, 14)}`);
-  const machineId = boundedOptionalText(event.machineId, MAX_TEXT.machineId);
   const claimedItemIds = Array.isArray(event.claimedItemIds)
-    ? event.claimedItemIds.map((itemId) => boundedText(itemId, MAX_TEXT.itemId, 'unknown')).slice(0, MAX_ITEMS)
-    : [];
-  const assignments = Array.isArray(event.assignments)
-    ? event.assignments.slice(0, MAX_ITEMS).map((assignment) => ({
-        itemId: boundedText(assignment.itemId, MAX_TEXT.itemId, 'unknown'),
-        ...(boundedOptionalText(assignment.attemptId, 160)
-          ? { attemptId: boundedOptionalText(assignment.attemptId, 160) }
-          : {}),
-        source: boundedText(assignment.source, 80, 'unknown') as WorkItem['source'],
-        repo: boundedText(assignment.repo, MAX_TEXT.repo, 'unknown'),
-        title: boundedText(assignment.title, MAX_TEXT.title, 'untitled'),
-        backend: boundedText(assignment.backend, 80, 'builtin') as EngineId,
-        ...(boundedOptionalText(assignment.routeReason, MAX_TEXT.reason)
-          ? { routeReason: boundedOptionalText(assignment.routeReason, MAX_TEXT.reason) }
-          : {}),
-        ...(boundedNullableText(assignment.model, MAX_TEXT.model) !== undefined
-          ? { model: boundedNullableText(assignment.model, MAX_TEXT.model) }
-          : {}),
-      }))
-    : [];
-  const unassigned = Array.isArray(event.unassigned)
-    ? event.unassigned.slice(0, MAX_ITEMS).map((item) => ({
-        itemId: boundedText(item.itemId, MAX_TEXT.itemId, 'unknown'),
-        reason: 'no-slots' as const,
-      }))
-    : [];
-  const claimed = typeof event.counts?.claimed === 'number' && Number.isFinite(event.counts.claimed)
-    ? Math.max(0, Math.floor(event.counts.claimed))
-    : claimedItemIds.length;
-  const assigned = typeof event.counts?.assigned === 'number' && Number.isFinite(event.counts.assigned)
-    ? Math.max(0, Math.floor(event.counts.assigned))
-    : assignments.length;
-  const unassignedCount = typeof event.counts?.unassigned === 'number' && Number.isFinite(event.counts.unassigned)
-    ? Math.max(0, Math.floor(event.counts.unassigned))
-    : unassigned.length;
-
+    ? event.claimedItemIds.map((id) => boundedText(id, MAX_TEXT.itemId, 'unknown')).slice(0, MAX_ITEMS) : [];
+  const assignments = Array.isArray(event.assignments) ? event.assignments.slice(0, MAX_ITEMS).map((assignment) => {
+    const attemptId = boundedOptionalText(assignment.attemptId, 160);
+    const routeReason = boundedOptionalText(assignment.routeReason, MAX_TEXT.reason);
+    const model = boundedNullableText(assignment.model, MAX_TEXT.model);
+    return {
+      itemId: boundedText(assignment.itemId, MAX_TEXT.itemId, 'unknown'),
+      ...(attemptId ? { attemptId } : {}),
+      source: boundedText(assignment.source, 80, 'unknown') as WorkItem['source'],
+      repo: boundedText(assignment.repo, MAX_TEXT.repo, 'unknown'),
+      title: boundedText(assignment.title, MAX_TEXT.title, 'untitled'),
+      backend: boundedText(assignment.backend, 80, 'builtin') as EngineId,
+      ...(routeReason ? { routeReason } : {}),
+      ...(model !== undefined ? { model } : {}),
+    };
+  }) : [];
+  const unassigned = Array.isArray(event.unassigned) ? event.unassigned.slice(0, MAX_ITEMS).map((item) => ({
+    itemId: boundedText(item.itemId, MAX_TEXT.itemId, 'unknown'), reason: 'no-slots' as const,
+  })) : [];
+  const finiteCount = (value: unknown, fallback: number) => typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.floor(value)) : fallback;
+  const backendCounts = sanitizeCountMap(event.backendCounts);
+  const machineId = boundedOptionalText(event.machineId, MAX_TEXT.machineId);
   return {
     schemaVersion: 1,
-    manifestId,
+    manifestId: boundedText(event.manifestId, 120, `dm-${ts.replace(/[^0-9]/g, '').slice(0, 14)}`),
     ts,
     ...(machineId ? { machineId } : {}),
     mode: 'concurrent',
@@ -244,85 +267,415 @@ export function sanitizeDispatchManifestEvent(event: DispatchManifestEvent): Dis
     claimedItemIds,
     assignments,
     unassigned,
-    slots: sanitizeSlots(event.slots),
-    backendCounts: Object.keys(sanitizeBackendCounts(event.backendCounts)).length > 0
-      ? sanitizeBackendCounts(event.backendCounts)
-      : assignmentBackendCounts(assignments),
+    slots: sanitizeCountMap(event.slots),
+    backendCounts: Object.keys(backendCounts).length > 0 ? backendCounts : assignmentBackendCounts(assignments),
     ...(event.resourceSnapshotAt ? { resourceSnapshotAt: eventTimestamp(event.resourceSnapshotAt) } : {}),
     counts: {
-      claimed,
-      assigned,
-      unassigned: unassignedCount,
+      claimed: finiteCount(event.counts?.claimed, claimedItemIds.length),
+      assigned: finiteCount(event.counts?.assigned, assignments.length),
+      unassigned: finiteCount(event.counts?.unassigned, unassigned.length),
     },
   };
 }
 
 export function dispatchManifestSummary(event: DispatchManifestEvent, recorded: boolean): DaemonDispatchManifestSummary {
   return {
-    schemaVersion: 1,
-    manifestId: event.manifestId,
-    ts: event.ts,
-    mode: event.mode,
-    recorded,
-    claimed: event.counts.claimed,
-    assigned: event.counts.assigned,
-    unassigned: event.counts.unassigned,
+    schemaVersion: 1, manifestId: event.manifestId, ts: event.ts, mode: event.mode, recorded,
+    claimed: event.counts.claimed, assigned: event.counts.assigned, unassigned: event.counts.unassigned,
     backends: event.backendCounts,
     ...(event.resourceSnapshotAt ? { resourceSnapshotAt: event.resourceSnapshotAt } : {}),
   };
 }
 
-export function recordDispatchManifest(
-  eventOrEvents: DispatchManifestEvent | DispatchManifestEvent[],
-): DaemonDispatchManifestSummary | undefined {
-  try {
-    const events = (Array.isArray(eventOrEvents) ? eventOrEvents : [eventOrEvents])
-      .map(sanitizeDispatchManifestEvent);
-    if (events.length === 0) return undefined;
-    const dir = dispatchManifestDir();
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const byDate = new Map<string, DispatchManifestEvent[]>();
-    for (const event of events) {
-      const date = eventDateString(event.ts);
-      byDate.set(date, [...(byDate.get(date) ?? []), event]);
-    }
-    for (const [date, rows] of byDate.entries()) {
-      appendFileSync(
-        join(dir, `${date}.jsonl`),
-        rows.map((row) => JSON.stringify(row)).join('\n') + '\n',
-        'utf8',
-      );
-    }
-    return dispatchManifestSummary(events[0]!, true);
-  } catch {
-    const first = Array.isArray(eventOrEvents) ? eventOrEvents[0] : eventOrEvents;
-    return first ? dispatchManifestSummary(sanitizeDispatchManifestEvent(first), false) : undefined;
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isCanonicalTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
+
+function isBoundedString(value: unknown, max: number): value is string {
+  return typeof value === 'string' && value.trim() !== '' && value.length <= max;
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isCountMap(value: unknown): value is Record<string, number> {
+  if (!isPlainRecord(value)) return false;
+  const entries = Object.entries(value);
+  return entries.length <= MAX_MAP_KEYS && entries.every(([key, count]) => ENGINE_IDS.has(key as EngineId) && isCount(count));
+}
+
+function onlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const set = new Set(allowed);
+  return Object.keys(value).every((key) => set.has(key));
+}
+
+function isAssignment(value: unknown): value is DispatchManifestAssignment {
+  if (!isPlainRecord(value) || !onlyKeys(value, ['itemId', 'attemptId', 'source', 'repo', 'title', 'backend', 'routeReason', 'model'])) return false;
+  return isBoundedString(value['itemId'], MAX_TEXT.itemId) &&
+    (value['attemptId'] === undefined || isBoundedString(value['attemptId'], 160)) &&
+    typeof value['source'] === 'string' && PERSISTED_WORK_SOURCES.has(value['source']) &&
+    isBoundedString(value['repo'], MAX_TEXT.repo) && isBoundedString(value['title'], MAX_TEXT.title) &&
+    typeof value['backend'] === 'string' && ENGINE_IDS.has(value['backend'] as EngineId) &&
+    (value['routeReason'] === undefined || isBoundedString(value['routeReason'], MAX_TEXT.reason)) &&
+    (value['model'] === undefined || value['model'] === null || isBoundedString(value['model'], MAX_TEXT.model));
+}
+
+function isDispatchManifestEvent(value: unknown): value is DispatchManifestEvent {
+  if (!isPlainRecord(value) || !onlyKeys(value, [
+    'schemaVersion', 'manifestId', 'ts', 'machineId', 'mode', 'dryRun', 'claimedItemIds',
+    'assignments', 'unassigned', 'slots', 'backendCounts', 'resourceSnapshotAt', 'counts',
+  ])) return false;
+  if (value['schemaVersion'] !== 1 || value['mode'] !== 'concurrent' || typeof value['dryRun'] !== 'boolean' ||
+    !isBoundedString(value['manifestId'], 120) || !isCanonicalTimestamp(value['ts']) ||
+    (value['machineId'] !== undefined && !isBoundedString(value['machineId'], MAX_TEXT.machineId)) ||
+    (value['resourceSnapshotAt'] !== undefined && !isCanonicalTimestamp(value['resourceSnapshotAt'])) ||
+    !Array.isArray(value['claimedItemIds']) || value['claimedItemIds'].length > MAX_ITEMS ||
+    !value['claimedItemIds'].every((id) => isBoundedString(id, MAX_TEXT.itemId)) ||
+    !Array.isArray(value['assignments']) || value['assignments'].length > MAX_ITEMS || !value['assignments'].every(isAssignment) ||
+    !Array.isArray(value['unassigned']) || value['unassigned'].length > MAX_ITEMS ||
+    !value['unassigned'].every((item) => isPlainRecord(item) && onlyKeys(item, ['itemId', 'reason']) &&
+      isBoundedString(item['itemId'], MAX_TEXT.itemId) && item['reason'] === 'no-slots') ||
+    !isCountMap(value['slots']) || !isCountMap(value['backendCounts']) || !isPlainRecord(value['counts']) ||
+    !onlyKeys(value['counts'], ['claimed', 'assigned', 'unassigned'])) return false;
+  if (!isCount(value['counts']['claimed']) || !isCount(value['counts']['assigned']) ||
+    !isCount(value['counts']['unassigned'])) return false;
+  const claimed = value['counts']['claimed'];
+  const assigned = value['counts']['assigned'];
+  const unassigned = value['counts']['unassigned'];
+  const backendTotal = Object.values(value['backendCounts']).reduce((sum, count) => sum + count, 0);
+  return claimed === assigned + unassigned && backendTotal === assigned &&
+    value['claimedItemIds'].length <= claimed && value['assignments'].length <= assigned &&
+    value['unassigned'].length <= unassigned;
+}
+
+function sameFile(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof fstatSync>): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function ownedByCurrentUser(stat: ReturnType<typeof fstatSync>): boolean {
+  return typeof process.getuid !== 'function' || Number(stat.uid) === process.getuid();
+}
+
+function unsafeFile(stat: ReturnType<typeof fstatSync>): boolean {
+  return Number(stat.nlink) !== 1 || !ownedByCurrentUser(stat) ||
+    (process.platform !== 'win32' && (Number(stat.mode) & 0o077) !== 0);
+}
+
+function migratableFile(stat: ReturnType<typeof fstatSync>): boolean {
+  return Number(stat.nlink) === 1 && ownedByCurrentUser(stat) &&
+    (process.platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
+}
+
+function unsafeDirectory(stat: ReturnType<typeof fstatSync>): boolean {
+  return !ownedByCurrentUser(stat) ||
+    (process.platform !== 'win32' && (Number(stat.mode) & 0o077) !== 0);
+}
+
+function migratableDirectory(stat: ReturnType<typeof fstatSync>): boolean {
+  return !stat.isSymbolicLink() && stat.isDirectory() && ownedByCurrentUser(stat) &&
+    (process.platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
+}
+
+function secureDirectory(path: string, create: boolean): ReturnType<typeof lstatSync> | undefined {
+  if (!existsSync(path)) {
+    if (!create) return undefined;
+    mkdirSync(path, { recursive: true, mode: 0o700 });
+  }
+  const before = lstatSync(path);
+  if (!migratableDirectory(before)) throw new Error('unsafe manifest directory');
+  chmodSync(path, 0o700);
+  const after = lstatSync(path);
+  if (unsafeDirectory(after) || !sameFile(before, after)) throw new Error('manifest directory changed');
+  return after;
+}
+
+function sameDirectorySnapshot(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof fstatSync>): boolean {
+  return sameFile(left, right) && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+
+function writeAll(fd: number, bytes: Buffer): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(fd, bytes, offset, bytes.length - offset);
+    if (written <= 0) throw new Error('dispatch manifest append made no progress');
+    offset += written;
   }
 }
 
-export function readDispatchManifestEvents(opts: ReadDispatchManifestEventsOptions = {}): DispatchManifestEvent[] {
-  const limit = Math.max(1, Math.min(1000, Math.floor(opts.limit ?? 100)));
+function fsyncDirectory(path: string): void {
+  let fd: number | undefined;
   try {
-    const dir = dispatchManifestDir();
-    if (!existsSync(dir)) return [];
-    const files = readdirSync(dir)
-      .filter((file) => DATE_LEDGER_FILE_RE.test(file))
-      .sort()
-      .reverse();
-    const events: DispatchManifestEvent[] = [];
-    for (const file of files) {
-      const raw = readFileSync(join(dir, file), 'utf8');
-      for (const line of raw.split('\n').filter(Boolean).reverse()) {
-        try {
-          events.push(sanitizeDispatchManifestEvent(JSON.parse(line) as DispatchManifestEvent));
-          if (events.length >= limit) return events;
-        } catch {
-          // Ignore malformed rows; append-only history should stay readable.
-        }
-      }
-    }
-    return events;
-  } catch {
-    return [];
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
+}
+
+function appendManifestLine(
+  path: string,
+  line: string,
+  dir: string,
+  directorySnapshot: NonNullable<ReturnType<typeof lstatSync>>,
+): void {
+  let fd: number | undefined;
+  try {
+    const directoryBefore = lstatSync(dir);
+    if (!sameFile(directorySnapshot, directoryBefore) || unsafeDirectory(directoryBefore)) throw new Error('manifest directory changed');
+    let pathBefore: NonNullable<ReturnType<typeof lstatSync>> | undefined;
+    try {
+      pathBefore = lstatSync(path);
+      if (pathBefore.isSymbolicLink() || !pathBefore.isFile() || !migratableFile(pathBefore)) throw new Error('unsafe manifest path');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    fd = openSync(path, fsConstants.O_APPEND | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW |
+      (pathBefore !== undefined ? 0 : fsConstants.O_CREAT | fsConstants.O_EXCL), 0o600);
+    let opened = fstatSync(fd);
+    if (!opened.isFile() || !migratableFile(opened) || (pathBefore !== undefined && !sameFile(pathBefore, opened))) throw new Error('unsafe manifest file');
+    fchmodSync(fd, 0o600);
+    opened = fstatSync(fd);
+    if (unsafeFile(opened)) throw new Error('manifest mode migration failed');
+    let separator = '';
+    if (opened.size > 0) {
+      const tail = Buffer.alloc(1);
+      if (readSync(fd, tail, 0, 1, opened.size - 1) !== 1) throw new Error('unreadable manifest tail');
+      if (tail[0] !== 0x0a) separator = '\n';
+    }
+    const bytes = Buffer.from(`${separator}${line}`, 'utf8');
+    if (opened.size > MAX_PARTITION_BYTES || opened.size + bytes.length > MAX_PARTITION_BYTES) {
+      throw new Error('manifest partition full');
+    }
+    writeAll(fd, bytes);
+    fsyncSync(fd);
+    const after = fstatSync(fd);
+    const pathAfter = lstatSync(path);
+    const directoryAfter = lstatSync(dir);
+    if (!after.isFile() || unsafeFile(after) || !sameFile(opened, after) || pathAfter.isSymbolicLink() ||
+      !pathAfter.isFile() || !sameFile(after, pathAfter) || !sameFile(directorySnapshot, directoryAfter) ||
+      unsafeDirectory(directoryAfter) || after.size !== opened.size + bytes.length) {
+      throw new Error('manifest append identity changed');
+    }
+    if (!pathBefore) fsyncDirectory(dir);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+export function recordDispatchManifest(eventOrEvents: DispatchManifestEvent | DispatchManifestEvent[]): DaemonDispatchManifestSummary | undefined {
+  const firstInput = Array.isArray(eventOrEvents) ? eventOrEvents[0] : eventOrEvents;
+  if (!firstInput) return undefined;
+  const first = sanitizeDispatchManifestEvent(firstInput);
+  let lock: ReturnType<typeof acquireLocalStoreLock> | undefined;
+  try {
+    const input = Array.isArray(eventOrEvents) ? eventOrEvents : [eventOrEvents];
+    if (input.length !== 1 || input.length > MAX_WRITE_ROWS_PER_CALL) return dispatchManifestSummary(first, false);
+    const events = input.map(sanitizeDispatchManifestEvent);
+    if (!events.every(isDispatchManifestEvent)) return dispatchManifestSummary(first, false);
+    const partitions = new Set(events.map((event) => eventDateString(event.ts)));
+    if (partitions.size > MAX_WRITE_PARTITIONS_PER_CALL) return dispatchManifestSummary(first, false);
+    const lines = events.map((event) => JSON.stringify(event) + '\n');
+    if (lines.some((line) => Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES)) return dispatchManifestSummary(first, false);
+    const dir = dispatchManifestDir();
+    const parentDir = dirname(dir);
+    const parentCreated = !existsSync(parentDir);
+    const directoryCreated = !existsSync(dir);
+    const parentSnapshot = secureDirectory(parentDir, true)!;
+    secureDirectory(dir, true);
+    lock = acquireLocalStoreLock(join(dir, '.dispatch-manifests.lock'));
+    if (!lock) return dispatchManifestSummary(first, false);
+    const directorySnapshot = lstatSync(dir);
+    if (directorySnapshot.isSymbolicLink() || !directorySnapshot.isDirectory() || unsafeDirectory(directorySnapshot)) {
+      return dispatchManifestSummary(first, false);
+    }
+    for (let index = 0; index < events.length; index++) {
+      const parentBefore = lstatSync(parentDir);
+      if (unsafeDirectory(parentBefore) || !sameFile(parentSnapshot, parentBefore)) {
+        throw new Error('manifest parent replaced');
+      }
+      appendManifestLine(join(dir, `${eventDateString(events[index]!.ts)}.jsonl`), lines[index]!, dir, directorySnapshot);
+    }
+    const parentAfter = lstatSync(parentDir);
+    if (unsafeDirectory(parentAfter) || !sameFile(parentSnapshot, parentAfter)) throw new Error('manifest parent replaced');
+    if (directoryCreated) {
+      fsyncDirectory(parentDir);
+      if (parentCreated) fsyncDirectory(dirname(parentDir));
+    }
+    return dispatchManifestSummary(first, true);
+  } catch {
+    return dispatchManifestSummary(first, false);
+  } finally {
+    releaseLocalStoreLock(lock);
+  }
+}
+
+function boundedReadOption(value: number | undefined, fallback: number, hardMax: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.max(1, Math.min(hardMax, Math.floor(value))) : fallback;
+}
+
+function emptyRead(sourceState: DispatchManifestSourceQuality['sourceState'], overrides: Partial<DispatchManifestEventsReadResult> = {}): DispatchManifestEventsReadResult {
+  return { events: [], sourceState, sourcePresent: sourceState !== 'missing', complete: sourceState !== 'degraded', stopReasons: [],
+    filesRead: 0, bytesRead: 0, rowsScanned: 0, invalidRows: 0, unreadableFiles: 0, ...overrides };
+}
+
+function pushStopReason(reasons: DispatchManifestReadStopReason[], reason: DispatchManifestReadStopReason): void {
+  if (!reasons.includes(reason)) reasons.push(reason);
+}
+
+function validDatePartition(file: string): boolean {
+  const date = DATE_LEDGER_FILE_RE.exec(file)?.[1];
+  if (!date) return false;
+  const parsed = Date.parse(`${date}T00:00:00.000Z`);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString().slice(0, 10) === date;
+}
+
+function readManifestFile(path: string, maxBytes: number): { ok: true; text: string; bytesRead: number } | { ok: false; reason: 'byte-limit' | 'io-error' } {
+  let fd: number | undefined;
+  try {
+    const pathBefore = lstatSync(path);
+    if (pathBefore.isSymbolicLink() || !pathBefore.isFile() || !migratableFile(pathBefore)) return { ok: false, reason: 'io-error' };
+    if (pathBefore.size > maxBytes) return { ok: false, reason: 'byte-limit' };
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    let before = fstatSync(fd);
+    if (!before.isFile() || !migratableFile(before) || !sameFile(pathBefore, before)) return { ok: false, reason: 'io-error' };
+    if (before.size > maxBytes) return { ok: false, reason: 'byte-limit' };
+    fchmodSync(fd, 0o600);
+    before = fstatSync(fd);
+    if (unsafeFile(before)) return { ok: false, reason: 'io-error' };
+    const buffer = Buffer.alloc(before.size);
+    const bytesRead = before.size > 0 ? readSync(fd, buffer, 0, before.size, 0) : 0;
+    const after = fstatSync(fd);
+    const pathAfter = lstatSync(path);
+    if (pathAfter.isSymbolicLink() || !pathAfter.isFile() || !after.isFile() || unsafeFile(after) ||
+      !sameFile(before, after) || !sameFile(after, pathAfter) || after.size !== before.size || bytesRead !== before.size) {
+      return { ok: false, reason: 'io-error' };
+    }
+    return { ok: true, text: buffer.toString('utf8'), bytesRead };
+  } catch {
+    return { ok: false, reason: 'io-error' };
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
+  }
+}
+
+export function readDispatchManifestEventsDetailed(opts: ReadDispatchManifestEventsOptions = {}): DispatchManifestEventsReadResult {
+  let lock: ReturnType<typeof acquireLocalStoreLock> | undefined;
+  try {
+    const maxFiles = boundedReadOption(opts.maxFiles, DEFAULT_READ_MAX_FILES, HARD_READ_MAX_FILES);
+    const maxBytes = boundedReadOption(opts.maxBytes, DEFAULT_READ_MAX_BYTES, HARD_READ_MAX_BYTES);
+    const maxRows = boundedReadOption(opts.maxRows, DEFAULT_READ_MAX_ROWS, HARD_READ_MAX_ROWS);
+    const dir = dispatchManifestDir();
+    if (!existsSync(dir)) return emptyRead('missing');
+    const parentSnapshot = secureDirectory(dispatchManifestRoot(), false);
+    if (!parentSnapshot) return emptyRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+    secureDirectory(dir, false);
+    lock = acquireLocalStoreLock(join(dir, '.dispatch-manifests.lock'), 250);
+    if (!lock) return emptyRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+    const directorySnapshot = lstatSync(dir);
+    if (directorySnapshot.isSymbolicLink() || !directorySnapshot.isDirectory() || unsafeDirectory(directorySnapshot)) {
+      return emptyRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+    }
+    const handle = opendirSync(dir);
+    const files: string[] = [];
+    let entriesSeen = 0;
+    let invalidPartition = false;
+    try {
+      let entry = handle.readSync();
+      while (entry !== null) {
+        entriesSeen++;
+        if (entriesSeen > MAX_DIRECTORY_ENTRIES) return emptyRead('degraded', { sourcePresent: true, complete: false, stopReasons: ['file-limit'] });
+        if (entry.name.endsWith('.jsonl')) {
+          if (!DATE_LEDGER_FILE_RE.test(entry.name) || !validDatePartition(entry.name)) invalidPartition = true;
+          else files.push(entry.name);
+        }
+        entry = handle.readSync();
+      }
+    } finally { handle.closeSync(); }
+    if (invalidPartition) return emptyRead('degraded', { sourcePresent: true, complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+    files.sort().reverse();
+    if (files.length === 0) {
+      const directoryAfter = lstatSync(dir);
+      const parentAfter = lstatSync(dispatchManifestRoot());
+      return unsafeDirectory(directoryAfter) || !sameDirectorySnapshot(directorySnapshot, directoryAfter) ||
+        unsafeDirectory(parentAfter) || !sameFile(parentSnapshot, parentAfter)
+        ? emptyRead('degraded', { sourcePresent: true, complete: false, stopReasons: ['io-error'], unreadableFiles: 1 })
+        : emptyRead('healthy', { sourcePresent: true });
+    }
+
+    const result = emptyRead('healthy', { sourcePresent: true });
+    const eventLimit = typeof opts.limit === 'number' && Number.isFinite(opts.limit) && opts.limit > 0 ? Math.floor(opts.limit) : undefined;
+    let stoppedAfterEventLimit = false;
+    for (const file of files) {
+      if (result.filesRead >= maxFiles) { pushStopReason(result.stopReasons, 'file-limit'); result.complete = false; break; }
+      const remainingBytes = maxBytes - result.bytesRead;
+      if (remainingBytes <= 0) { pushStopReason(result.stopReasons, 'byte-limit'); result.complete = false; break; }
+      const loaded = readManifestFile(join(dir, file), remainingBytes);
+      result.filesRead++;
+      if (!loaded.ok) {
+        if (loaded.reason === 'io-error') result.unreadableFiles++;
+        pushStopReason(result.stopReasons, loaded.reason); result.complete = false; break;
+      }
+      result.bytesRead += loaded.bytesRead;
+      const lines = loaded.text.split('\n');
+      if (lines.at(-1) === '') lines.pop();
+      for (const line of lines.reverse()) {
+        if (result.rowsScanned >= maxRows) { pushStopReason(result.stopReasons, 'row-limit'); result.complete = false; break; }
+        result.rowsScanned++;
+        if (!line.trim()) continue;
+        if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) { result.invalidRows++; continue; }
+        try {
+          const parsed: unknown = JSON.parse(line);
+          const partition = DATE_LEDGER_FILE_RE.exec(file)?.[1];
+          if (!isDispatchManifestEvent(parsed) || parsed.ts.slice(0, 10) !== partition) { result.invalidRows++; continue; }
+          result.events.push(sanitizeDispatchManifestEvent(parsed));
+          if (opts.stopAfterLimit === true && eventLimit !== undefined && result.events.length > eventLimit) {
+            pushStopReason(result.stopReasons, 'event-limit'); result.complete = false; stoppedAfterEventLimit = true; break;
+          }
+        } catch { result.invalidRows++; }
+      }
+      if (!result.complete) break;
+    }
+    const directoryAfter = lstatSync(dir);
+    const parentAfter = lstatSync(dispatchManifestRoot());
+    if (directoryAfter.isSymbolicLink() || !directoryAfter.isDirectory() || unsafeDirectory(directoryAfter) ||
+      !sameDirectorySnapshot(directorySnapshot, directoryAfter) || unsafeDirectory(parentAfter) ||
+      !sameFile(parentSnapshot, parentAfter)) {
+      pushStopReason(result.stopReasons, 'io-error'); result.complete = false; result.unreadableFiles++;
+    }
+    result.events.sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
+    if (eventLimit !== undefined) {
+      if (!stoppedAfterEventLimit && result.events.length > eventLimit) { pushStopReason(result.stopReasons, 'event-limit'); result.complete = false; }
+      result.events = result.events.slice(0, eventLimit);
+    }
+    if (result.invalidRows > 0 || result.unreadableFiles > 0 || !result.complete) { result.complete = false; result.sourceState = 'degraded'; }
+    return result;
+  } catch {
+    return emptyRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+  } finally { releaseLocalStoreLock(lock); }
+}
+
+export function readDispatchManifestEvents(opts: ReadDispatchManifestEventsOptions = {}): DispatchManifestEvent[] {
+  const result = readDispatchManifestEventsDetailed({
+    ...opts,
+    limit: opts.limit ?? 100,
+    stopAfterLimit: opts.stopAfterLimit ?? opts.requireComplete !== true,
+  });
+  const events = opts.requireComplete === true && (!result.complete || result.sourceState === 'degraded') ? [] : result.events;
+  Object.defineProperty(events, 'sourceQuality', {
+    value: {
+      sourceState: result.sourceState, sourcePresent: result.sourcePresent, complete: result.complete,
+      stopReasons: result.stopReasons, filesRead: result.filesRead, bytesRead: result.bytesRead,
+      rowsScanned: result.rowsScanned, invalidRows: result.invalidRows, unreadableFiles: result.unreadableFiles,
+    } satisfies DispatchManifestSourceQuality,
+    enumerable: false,
+  });
+  return events;
 }

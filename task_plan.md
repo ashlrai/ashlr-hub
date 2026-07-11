@@ -1637,3 +1637,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add malformed, unreadable, oversized, linked, replacement, exact-cap, stale-window, ordering, privacy, and writer coverage.
 - [x] Complete independent adversarial review and update durable notes.
 - [x] Commit, push, reload, and production-canary the workspace.
+
+## Current Overnight Cycle - Bounded Dispatch-Intent And Candidate Evidence
+- [x] Rehydrate the deployed agent-workspace baseline, production health, current git state, Entire state, and persistent notes.
+- [x] Deploy disjoint audits for dispatch-manifest storage/consumers, Best-of-N storage/consumers, and compatibility/adversarial fixtures.
+- [x] Add bounded, race-safe detailed source contracts while preserving observational reader compatibility.
+- [x] Harden writers against unsafe paths, links, torn tails, short writes, oversized rows, partition drift, and concurrent mutation.
+- [x] Require complete healthy evidence anywhere manifests or candidate outcomes affect learning, control, or production truth.
+- [x] Surface source quality without presenting missing or partial candidate/dispatch evidence as healthy zero.
+- [x] Add malformed, unreadable, oversized, linked, replacement, exact-cap, ordering, privacy, and legacy coverage.
+- [x] Run focused/full gates and independent adversarial review, update notes, commit, push, reload, and production-canary both sources.

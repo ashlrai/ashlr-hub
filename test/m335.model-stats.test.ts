@@ -19,6 +19,7 @@ const ts = (h: number) => new Date(NOW - h * HOUR).toISOString();
 let ledger: Record<string, unknown>[] = [];
 let traces: Record<string, unknown>[] = [];
 let bonRecords: Record<string, unknown>[] = [];
+let bonQuality: Record<string, unknown> | undefined;
 
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: vi.fn(() => ledger),
@@ -29,7 +30,10 @@ vi.mock('../src/core/fleet/judge-trace.js', () => ({
   linkOutcome: vi.fn(() => {}),
 }));
 vi.mock('../src/core/fleet/best-of-n-ledger.js', () => ({
-  readBestOfNRecords: vi.fn(() => bonRecords),
+  readBestOfNRecords: vi.fn(() => {
+    if (bonQuality) Object.defineProperty(bonRecords, 'sourceQuality', { value: bonQuality, configurable: true });
+    return bonRecords;
+  }),
   recordBestOfN: vi.fn(() => {}),
 }));
 vi.mock('../src/core/inbox/store.js', () => ({
@@ -37,9 +41,10 @@ vi.mock('../src/core/inbox/store.js', () => ({
   loadProposal: vi.fn(() => null),
 }));
 
-import { computeModelStats } from '../src/core/fleet/model-stats.js';
+import { computeModelStats, computeModelStatsDetailed } from '../src/core/fleet/model-stats.js';
 
 function seed(): void {
+  bonQuality = undefined;
   ledger = [
     // sonnet-5: 2 dispatches, judged ship + merged on p1
     { ts: ts(1), proposalId: 'p1', action: 'merged', engine: 'claude', model: 'claude:claude-sonnet-5' },
@@ -76,6 +81,7 @@ describe('M335 computeModelStats', () => {
     expect(s5!.judgeCostUsd).toBeCloseTo(0.2, 5);
     expect(s5!.outcomes.reverted).toBe(1); // producer join, not the judge's key
     expect(s5!.bestOfN).toEqual({ entered: 1, won: 1, winRate: 1 });
+    expect(s5!.bestOfNAvailable).toBe(true);
     // the judge model never appears as a producer row
     expect(stats.some((s) => s.engineModel.includes('fable'))).toBe(false);
   });
@@ -105,5 +111,24 @@ describe('M335 computeModelStats', () => {
     traces = [];
     bonRecords = [];
     expect(computeModelStats('30d')).toEqual([]);
+  });
+
+  it('withholds Best-of-N rates while preserving independent ROI when the source is degraded', () => {
+    seed();
+    bonQuality = {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['row-limit'], filesRead: 1, bytesRead: 100,
+      rowsScanned: 1, invalidRows: 0, unreadableFiles: 0,
+    };
+
+    const result = computeModelStatsDetailed('all');
+    const producer = result.models.find((s) => s.engineModel === 'claude:sonnet-5');
+    expect(producer?.dispatches).toBe(2);
+    expect(producer?.bestOfN).toEqual({ entered: 0, won: 0, winRate: 0 });
+    expect(producer?.bestOfNAvailable).toBe(false);
+    expect(result.models.some((s) => s.engineModel === 'local-coder:qwen3-coder-next')).toBe(false);
+    expect(result.bestOfNSource).toMatchObject({
+      sourceState: 'degraded', complete: false, stopReasons: ['row-limit'],
+    });
   });
 });
