@@ -114,6 +114,20 @@ vi.mock('../src/core/run/best-of-n.js', () => ({
   runBestOfN: (...args: unknown[]) => mockRunBestOfN(...args),
 }));
 
+const mockGetResourceSnapshot = vi.fn();
+vi.mock('../src/core/fabric/resource-monitor.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/fabric/resource-monitor.js')>();
+  return {
+    ...actual,
+    getResourceSnapshot: (...args: Parameters<typeof actual.getResourceSnapshot>) => {
+      const override = mockGetResourceSnapshot.getMockImplementation();
+      return override
+        ? mockGetResourceSnapshot(...args)
+        : actual.getResourceSnapshot(...args);
+    },
+  };
+});
+
 const mockRunSelfHealCycle = vi.fn();
 const mockRunSelfHealCycleForRepos = vi.fn();
 vi.mock('../src/core/fleet/self-heal.js', () => ({
@@ -303,6 +317,7 @@ beforeEach(() => {
     missing: 0,
   }));
   mockRunConcurrentDispatch.mockReset();
+  mockGetResourceSnapshot.mockReset();
   mockRunBestOfN.mockReset();
   mockRunSelfHealCycle.mockReset();
   mockRunSelfHealCycleForRepos.mockReset();
@@ -832,6 +847,52 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
 
+  it('A1-concurrent-dry-run: does not sense live resources for a non-executing tick', async () => {
+    const { items } = enrollWithItems(1);
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { fabric: { concurrentDispatch: true } },
+    } as AshlrConfig, { dryRun: true });
+
+    expect(result.reason).toBe('dry-run');
+    expect(result.itemsConsidered).toBe(1);
+    expect(items).toHaveLength(1);
+    expect(mockGetResourceSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('A1-concurrent-stale-snapshot: refreshes capacity before execution when selection evidence is old', async () => {
+    const { items } = enrollWithItems(1);
+    const backendState = {
+      backend: 'builtin' as const,
+      availability: 'open' as const,
+      usedPct: null,
+      cap: null,
+      capUnit: null,
+      capWindow: null,
+      resetsAt: null,
+      costPerMTokenOut: 0,
+      p50LatencyMs: null,
+      reason: 'test capacity',
+      backoffUntilMs: null,
+    };
+    const staleAt = new Date(Date.now() - 31_000).toISOString();
+    const freshAt = new Date().toISOString();
+    mockGetResourceSnapshot
+      .mockResolvedValueOnce({ generatedAt: staleAt, backends: [{ ...backendState, snapshotAt: staleAt }] })
+      .mockResolvedValueOnce({ generatedAt: freshAt, backends: [{ ...backendState, snapshotAt: freshAt }] });
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { fabric: { concurrentDispatch: true, maxSlotsPerBackend: 1 } },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(1);
+    expect(items).toHaveLength(1);
+    expect(mockGetResourceSnapshot).toHaveBeenCalledTimes(2);
+  });
+
   it('A1-reslice-parent-missing: quarantined reslices do not block ordinary work', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -1010,6 +1071,106 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
   });
 
+  it('A1-drain-auto-unroutable: automatic drain does not claim a retry without an authorized alternative', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    generic.score = 100;
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'feedface9999', 1, 'mid');
+    recordGeneratedRepairLifecycle(reslice, {
+      kind: 'empty-diff',
+      attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
+      backend: 'local-coder',
+    });
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'only installed mid backend' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [reslice, generic],
+    });
+
+    const result = await tick(
+      {
+        ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+        foundry: { allowedBackends: ['local-coder', 'builtin'] },
+      } as AshlrConfig,
+      { dryRun: false },
+    );
+    const actions = readAgentActions();
+    const drainSelection = actions.find((event) => event.action === 'daemon:drain-select');
+    const repairDecision = actions.find((event) =>
+      event.action === 'daemon:generated-repair-decision' && event.itemId === reslice.id,
+    );
+
+    expect(result.reason).toBe('ok');
+    expect(result.drain).toBeUndefined();
+    expect(drainSelection).toBeUndefined();
+    expect(repairDecision).toMatchObject({
+      outcome: 'blocked',
+      reason: 'dispatch-route-unavailable',
+      counts: { dispatchEvaluated: 1, dispatchBlocked: 1, selected: 0, claimed: 0 },
+    });
+    expect(repairDecision?.tags).toEqual(expect.arrayContaining(['dispatch-route-unavailable']));
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockRunGoal.mock.calls[0]?.[2]).toMatchObject({ workItemId: generic.id });
+  });
+
+  it('A1-drain-auto-route-divergence: a claimed repair paused before execution cannot starve the next tick', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    generic.score = 100;
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'deadbeef9999', 1, 'mid');
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'preflight mid route' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockRecommendRoute.mockResolvedValue({ backend: 'builtin', tier: 'local', reason: 'late learned pause' });
+    mockRecoverWithinBudget.mockReturnValue({
+      action: 'proceed',
+      decision: { backend: 'builtin', tier: 'local', reason: 'late learned pause' },
+    });
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [reslice, generic],
+    });
+    const liveCfg = {
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: {
+        allowedBackends: ['local-coder', 'builtin'],
+        intelligence: {},
+      },
+    } as AshlrConfig;
+
+    const first = await tick(liveCfg, { dryRun: false });
+    expect(first.dispatches?.[0]).toMatchObject({
+      dispatched: false,
+      skipReason: 'repair-tier-unavailable',
+    });
+    expect(loadWorkedLedger().events.at(-1)).toMatchObject({
+      itemId: generatedRepairCooldownKey(reslice),
+      outcome: 'dispatch-blocked',
+    });
+
+    const second = await tick(liveCfg, { dryRun: false });
+    const repairDecision = readAgentActions().find((event) =>
+      event.action === 'daemon:generated-repair-decision' &&
+      event.itemId === reslice.id &&
+      event.reason === 'cooldown: latest=dispatch-blocked',
+    );
+    expect(second.itemsConsidered).toBe(1);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({ workItemId: generic.id });
+    expect(repairDecision).toMatchObject({
+      outcome: 'blocked',
+      reason: 'cooldown: latest=dispatch-blocked',
+      counts: {
+        effectiveCooldownMs: 5 * 60 * 1000,
+        cooldownBlocked: 1,
+      },
+    });
+  });
+
   it('A1-drain-auto-cooldown: automatic diagnostic drains do not starve generic work when reslices are cooling down', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
@@ -1063,7 +1224,6 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     const reslice = makeDiagnosticResliceItem(repo.dir, 'abcabc888888', 1);
     seedHealthyGeneratedRepairYield(repo.dir);
     const emptyAt = new Date(Date.now() - 31 * 60 * 1000).toISOString();
-    recordOutcome(reslice.id, 'empty', emptyAt);
     recordOutcome(generatedRepairCooldownKey(reslice), 'empty', emptyAt);
     mockBuildBacklog.mockResolvedValue({
       generatedAt: new Date().toISOString(),
@@ -2844,7 +3004,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
   });
 
-  it('A1h5b1a: refuses the backend that produced the authoritative empty repair attempt', async () => {
+  it('A1h5b1a: excludes a repair when only its prior empty backend is routable', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const repair = makeDiagnosticResliceItem(repo.dir, 'abcdea123456', 10, 'mid');
@@ -2866,12 +3026,15 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       foundry: { allowedBackends: ['local-coder', 'kimi'] },
     } as AshlrConfig, { dryRun: false });
 
-    expect(result.dispatches?.[0]).toMatchObject({
-      backend: 'local-coder',
-      assignedBy: 'repair-retry-guard',
-      dispatched: false,
-      skipReason: 'repair-alternative-unavailable',
-      reason: expect.stringContaining('no open installed same-tier alternative is available'),
+    const repairDecision = readAgentActions().find((event) =>
+      event.action === 'daemon:generated-repair-decision' && event.itemId === repair.id,
+    );
+    expect(result.itemsConsidered).toBe(0);
+    expect(result.dispatches).toBeUndefined();
+    expect(repairDecision).toMatchObject({
+      outcome: 'blocked',
+      reason: 'dispatch-route-unavailable',
+      counts: { dispatchEvaluated: 1, dispatchBlocked: 1, selected: 0, claimed: 0 },
     });
     expect(mockRunGoal).not.toHaveBeenCalled();
   });

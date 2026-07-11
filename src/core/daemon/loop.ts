@@ -150,6 +150,7 @@ import { selectWorkQueueCoordinator, type WorkQueueCoordinator } from '../seams/
 // M220: verdict-feedback sweep — feed judge rejections back to the ledger so
 // re-clogging items (e.g. "CI is failing") are suppressed for the cooldown window.
 import {
+  GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS,
   latestWorkedEvent,
   sweepJudgedProposals,
 } from '../fleet/worked-ledger.js';
@@ -193,6 +194,12 @@ import {
 
 const GENERATED_REPAIR_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS = 3;
+const RESOURCE_SNAPSHOT_MAX_AGE_MS = 30_000;
+type DispatchPreflightState =
+  | 'dispatchable'
+  | 'route-unavailable'
+  | 'capacity-or-route-unavailable'
+  | 'resource-snapshot-unavailable';
 const GENERATED_REPAIR_EMPTY_FAST_COOLDOWN_MS = 30 * 60 * 1000;
 const MAX_GENERATED_REPAIR_DECISION_EVENTS = 20;
 const CONTEXT_ROLLUP_MAX_EVENTS = 5_000;
@@ -805,6 +812,7 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
   coordinator: WorkQueueCoordinator;
   baseCooldownMs: number;
   repairRecoveryHealthy: boolean;
+  dispatchPreflightByItemId?: Map<string, DispatchPreflightState>;
 }): void {
   const selectedIds = new Set(fields.selectedItems.map((item) => item.id));
   const claimedIds = new Set(fields.claimedItems.map((item) => item.id));
@@ -823,6 +831,8 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
     const cooldownBlocked = fields.coordinator.shouldSkip(cooldownKey, effectiveCooldownMs);
     const selected = selectedIds.has(item.id);
     const claimed = claimedIds.has(item.id);
+    const dispatchPreflight = fields.dispatchPreflightByItemId?.get(item.id);
+    const dispatchBlocked = dispatchPreflight !== undefined && dispatchPreflight !== 'dispatchable';
     const latest = latestWorkedEvent(cooldownKey);
     const fastRepairCooldown = effectiveCooldownMs < fields.baseCooldownMs;
     const reason = claimed
@@ -833,10 +843,12 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
           ? 'pending-proposal'
           : cooldownBlocked
             ? `cooldown: latest=${latest?.outcome ?? 'unknown'}`
+            : dispatchBlocked
+              ? `dispatch-${dispatchPreflight}`
             : 'not-selected';
     const outcome: AgentActionOutcome = claimed
       ? 'ok'
-      : (selected || pendingBlocked || cooldownBlocked)
+      : (selected || pendingBlocked || cooldownBlocked || dispatchBlocked)
         ? 'blocked'
         : 'skipped';
     return {
@@ -861,6 +873,7 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
         claimed ? 'claimed' : 'not-claimed',
         pendingBlocked ? 'pending-blocked' : 'pending-clear',
         cooldownBlocked ? 'cooldown-blocked' : 'cooldown-clear',
+        dispatchPreflight ? `dispatch-${dispatchPreflight}` : 'dispatch-not-evaluated',
         fastRepairCooldown ? 'fast-repair-cooldown' : 'standard-cooldown',
         fields.dryRun ? 'dry-run' : 'live',
         ...(latest?.outcome ? [`latest-${latest.outcome}`] : ['latest-none']),
@@ -871,6 +884,8 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
         fastRepairCooldown: fastRepairCooldown ? 1 : 0,
         pendingBlocked: pendingBlocked ? 1 : 0,
         cooldownBlocked: cooldownBlocked ? 1 : 0,
+        dispatchEvaluated: dispatchPreflight ? 1 : 0,
+        dispatchBlocked: dispatchBlocked ? 1 : 0,
         selected: selected ? 1 : 0,
         claimed: claimed ? 1 : 0,
       },
@@ -1708,7 +1723,10 @@ function cooldownMsForSelectionItem(
   baseCooldownMs: number,
   repairRecoveryHealthy: boolean,
 ): number {
-  const latest = latestWorkedEvent(item.id);
+  const latest = latestWorkedEvent(generatedRepairCooldownKey(item));
+  if (latest?.outcome === 'dispatch-blocked' && isTrustedGeneratedRepairItem(item)) {
+    return Math.min(baseCooldownMs, GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS);
+  }
   if (
     repairRecoveryHealthy &&
     latest?.outcome === 'empty' &&
@@ -2385,13 +2403,13 @@ export async function tick(
   const productionVelocity = resolveProductionVelocityProfile(routingCfg);
   let selectionResourceSnapshot: Awaited<ReturnType<typeof getResourceSnapshot>> | null = null;
   let availableSlotsForSelection: number | null = null;
-  if (
-    productionVelocity.enabled &&
-    productionVelocity.fillQueueToSlots &&
-    routingCfg.foundry?.fabric?.concurrentDispatch === true
-  ) {
+  if (!opts.dryRun && routingCfg.foundry?.fabric?.concurrentDispatch === true) {
     selectionResourceSnapshot = await getResourceSnapshot(routingCfg).catch(() => null);
-    if (selectionResourceSnapshot) {
+    if (
+      selectionResourceSnapshot &&
+      productionVelocity.enabled &&
+      productionVelocity.fillQueueToSlots
+    ) {
       availableSlotsForSelection = availableSlotsForResourceSnapshot(
         selectionResourceSnapshot,
         productionVelocity.maxSlotsPerBackend,
@@ -2475,14 +2493,63 @@ export async function tick(
     ? backlogItems.filter((item) => isDrainCandidate(item, autoDrainMode))
     : [];
   const autoDrainEligibleItems = autoDrainAvailableItems.filter((item) => !isSelectionBlocked(item));
-  const drainMode = explicitDrainMode ?? (autoDrainEligibleItems.length > 0 ? autoDrainMode : undefined);
+  const diagnosticRoute = (item: WorkItem): { backend: EngineId; tier: EngineTier | null } => {
+    const routed = routeBackend(item, routingCfg);
+    const backend = enforceLocalBackend(routed.backend, directionPlan);
+    return { backend, tier: engineTierOf(backend, routingCfg) };
+  };
+  const serialDispatchableRepairs = autoDrainEligibleItems.filter((item) => {
+    const route = diagnosticRoute(item);
+    return route.tier === item.repairParentTier &&
+      generatedRepairCandidateAllowed(item, route.backend, routingCfg) &&
+      generatedRepairBackendAllowed(item, route.backend) &&
+      (route.backend === 'builtin' || withinLimit(route.backend, routingCfg));
+  });
+  const concurrentDispatchEnabled = routingCfg.foundry?.fabric?.concurrentDispatch === true;
+  const autoDrainDispatchableItems = concurrentDispatchEnabled
+    ? selectionResourceSnapshot
+      ? planConcurrentDispatch(
+          autoDrainEligibleItems,
+          selectionResourceSnapshot,
+          { maxSlotsPerBackend: productionVelocity.maxSlotsPerBackend },
+          (item) => diagnosticRoute(item).backend,
+          (item, backend) => generatedRepairCandidateAllowed(item, backend, routingCfg) &&
+            generatedRepairBackendAllowed(item, backend) &&
+            (backend === 'builtin' || withinLimit(backend, routingCfg)),
+          (backend) => engineTierOf(backend, routingCfg),
+        ).assignments.map((assignment) => assignment.item)
+      : []
+    : serialDispatchableRepairs;
+  const autoDrainDispatchableIds = new Set(autoDrainDispatchableItems.map((item) => item.id));
+  const dispatchPreflightByItemId = new Map<string, DispatchPreflightState>();
+  for (const item of autoDrainEligibleItems) {
+    dispatchPreflightByItemId.set(
+      item.id,
+      autoDrainDispatchableIds.has(item.id)
+        ? 'dispatchable'
+        : concurrentDispatchEnabled
+          ? selectionResourceSnapshot
+            ? 'capacity-or-route-unavailable'
+            : 'resource-snapshot-unavailable'
+          : 'route-unavailable',
+    );
+  }
+  const dispatchBlockedRepairIds = new Set(
+    autoDrainEligibleItems
+      .filter((item) => !autoDrainDispatchableIds.has(item.id))
+      .map((item) => item.id),
+  );
+  const drainMode = explicitDrainMode ?? (autoDrainDispatchableItems.length > 0 ? autoDrainMode : undefined);
   const automaticDrain = explicitDrainMode === undefined && drainMode !== undefined;
   const drainAvailableItems = drainMode
     ? automaticDrain
-      ? autoDrainAvailableItems
+      ? autoDrainDispatchableItems
       : backlogItems.filter((item) => isDrainCandidate(item, drainMode))
     : [];
-  const selectionItems = drainMode ? drainAvailableItems : backlogItems;
+  const ordinarySelectionItems = dispatchBlockedRepairIds.size > 0
+    ? backlogItems.filter((item) => !dispatchBlockedRepairIds.has(item.id))
+    : backlogItems;
+  const selectionItems = drainMode ? drainAvailableItems : ordinarySelectionItems;
   const rawSelectCount = daemonQueueSelectionLimit({
     perTickItems: dcfg.perTickItems,
     remainingBudgetUsd: remainingBudget,
@@ -2586,7 +2653,7 @@ export async function tick(
     ? workedSet.filter((item) => isDrainCandidate(item, drainMode))
     : [];
   if (automaticDrain && drainMode && workedSet.length === 0) {
-    const fallbackItems = backlogItems.filter((item) => !isDrainCandidate(item, drainMode));
+    const fallbackItems = ordinarySelectionItems.filter((item) => !isDrainCandidate(item, drainMode));
     const fallbackSelectCount = daemonQueueSelectionLimit({
       perTickItems: dcfg.perTickItems,
       remainingBudgetUsd: remainingBudget,
@@ -2636,6 +2703,7 @@ export async function tick(
     coordinator,
     baseCooldownMs: cooldownMs,
     repairRecoveryHealthy,
+    dispatchPreflightByItemId,
   });
   const drain = drainMode
     ? drainSummary(drainMode, drainAvailableItems, drainSelectedItems, drainLimit, automaticDrain)
@@ -3756,7 +3824,17 @@ export async function tick(
   try {
   if (useConcurrentDispatch) {
     // Re-sense headroom before planning (cached 30s; no extra cost in practice).
-    const concurrentSnap = selectionResourceSnapshot ?? (await getResourceSnapshot(routingCfg).catch(() => ({
+    const selectionSnapshotAt = selectionResourceSnapshot
+      ? Date.parse(selectionResourceSnapshot.generatedAt)
+      : Number.NaN;
+    const selectionSnapshotAgeMs = Date.now() - selectionSnapshotAt;
+    const reusableSelectionSnapshot = selectionResourceSnapshot &&
+      Number.isFinite(selectionSnapshotAgeMs) &&
+      selectionSnapshotAgeMs >= 0 &&
+      selectionSnapshotAgeMs <= RESOURCE_SNAPSHOT_MAX_AGE_MS
+      ? selectionResourceSnapshot
+      : null;
+    const concurrentSnap = reusableSelectionSnapshot ?? (await getResourceSnapshot(routingCfg).catch(() => ({
       generatedAt: new Date().toISOString(),
       backends: [{ backend: 'builtin' as const, availability: 'open' as const, usedPct: null, cap: null, capUnit: null, capWindow: null, resetsAt: null, costPerMTokenOut: 0, p50LatencyMs: null, snapshotAt: new Date().toISOString(), reason: 'snapshot-failed', backoffUntilMs: null }],
     })));
@@ -3927,6 +4005,28 @@ export async function tick(
 	    }
 	  }
 	  const dispatches = dispatchesFromOutcomes(outcomes);
+
+  // A preflighted automatic drain can still be paused by a later gateway,
+  // learned-router, budget, or resource decision. Cool only the claimed repair
+  // generation briefly so ordinary work can progress on the next tick. This is
+  // selection evidence, not execution or empty-diff lifecycle authority.
+  if (automaticDrain && drainSelectedItems.length > 0) {
+    const dispatchedItemIds = new Set(
+      outcomes.flatMap((outcome) =>
+        outcome.status === 'fulfilled' && outcome.value.dispatched
+          ? [outcome.value.item.id]
+          : [],
+      ),
+    );
+    try {
+      for (const item of drainSelectedItems) {
+        if (dispatchedItemIds.has(item.id)) continue;
+        coordinator.recordOutcome(generatedRepairCooldownKey(item), 'dispatch-blocked', machineId);
+      }
+    } catch (err) {
+      console.warn('[ashlr] daemon:tick dispatch-blocked cooldown failed:', (err as Error)?.message ?? err);
+    }
+  }
 
   // Proposals actually recorded this tick = the PENDING-count delta (clamped >=0).
   let proposalsCreated = 0;

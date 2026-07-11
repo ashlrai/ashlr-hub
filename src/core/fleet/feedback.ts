@@ -366,6 +366,7 @@ export async function computeOutcomePriors(
       if (parsed === null) continue;
       const { source, repo } = parsed;
 
+      if (ev.outcome === 'dispatch-blocked') continue;
       if (ev.outcome === 'diff') {
         gStats(source).diffCount++;
         if (repo) rStats(repo, source).diffCount++;

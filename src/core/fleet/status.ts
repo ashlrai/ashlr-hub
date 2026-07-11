@@ -68,6 +68,7 @@ import { engineInstalled } from '../run/engines.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import {
   DEFAULT_COOLDOWN_MS,
+  GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS,
   isSuppressibleWorkedOutcome,
   loadWorkedLedger,
   type WorkedEvent,
@@ -1076,6 +1077,9 @@ function cooldownMsForWorkItem(
   repairRecoveryHealthy: boolean,
   latestEvent?: WorkedEvent,
 ): number {
+  if (latestEvent?.outcome === 'dispatch-blocked' && isTrustedGeneratedRepairItem(item)) {
+    return Math.min(baseCooldownMs, GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS);
+  }
   if (
     repairRecoveryHealthy &&
     latestEvent?.outcome === 'empty' &&

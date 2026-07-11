@@ -203,6 +203,7 @@ export function resolveDiagnosticResliceParents(items: WorkItem[]): DiagnosticRe
     resolved += 1;
     dispatchable.push({
       ...item,
+      title: bounded(parent.title, MAX_TITLE) || parent.id,
       detail: resolvedResliceDetail(parent),
       repairParentItemId: parent.id,
       repairParentSource: item.repairParentSource ?? parent.source,

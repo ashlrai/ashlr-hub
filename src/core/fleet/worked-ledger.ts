@@ -36,6 +36,7 @@ const MAX_EVENTS = 2000;
 
 /** Default cooldown window: 6 hours in milliseconds. */
 export const DEFAULT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+export const GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS = 5 * 60 * 1000;
 
 /**
  * The outcome of a single item run or judge verdict.
@@ -45,6 +46,7 @@ export const DEFAULT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
  * - 'judged-review'   — judge returned 'review' (needs human inspection).
  * - 'judged-noise'    — judge returned 'noise' (trivial / not worth it).
  * - 'judged-decline'  — judge returned 'harmful' or 'decline' (rejected).
+ * - 'dispatch-blocked' — selected work did not reach an executor; retry later.
  *
  * Any judged-* outcome suppresses the item for the cooldown window the same
  * way 'empty' does, preventing the "CI is failing" re-clog loop.
@@ -52,6 +54,7 @@ export const DEFAULT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 export type WorkedOutcome =
   | 'diff'
   | 'empty'
+  | 'dispatch-blocked'
   | 'judged-review'
   | 'judged-noise'
   | 'judged-decline';
@@ -78,6 +81,7 @@ export function isWorkedOutcome(outcome: unknown): outcome is WorkedOutcome {
   return (
     outcome === 'diff' ||
     outcome === 'empty' ||
+    outcome === 'dispatch-blocked' ||
     outcome === 'judged-review' ||
     outcome === 'judged-noise' ||
     outcome === 'judged-decline'
@@ -86,6 +90,7 @@ export function isWorkedOutcome(outcome: unknown): outcome is WorkedOutcome {
 
 export function isSuppressibleWorkedOutcome(outcome: WorkedOutcome): boolean {
   return outcome === 'empty' ||
+    outcome === 'dispatch-blocked' ||
     outcome === 'judged-review' ||
     outcome === 'judged-noise' ||
     outcome === 'judged-decline';

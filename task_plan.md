@@ -1656,3 +1656,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Render the matrix in CLI and Mission Control without healthy-looking missing or partial values.
 - [x] Add healthy, missing, degraded, stale, compatibility, and command-safety coverage.
 - [x] Run focused/full gates and independent review, update notes, commit, push, reload, and production-canary the matrix.
+
+## Current Overnight Cycle - Dispatchable Diagnostic Repair Drain
+- [x] Rehydrate the deployed evidence-matrix baseline, production blocker, current git state, Entire state, and persistent notes.
+- [x] Deploy disjoint audits for parent-context fidelity, generated-repair lifecycle/routing, and bounded production conversion evidence.
+- [x] Make automatic diagnostic drain activate only for repairs with a currently dispatchable, policy-authorized backend.
+- [x] Align generated-repair cooldown reads with generation-scoped outcome writes and preserve ordinary backlog progress.
+- [x] Add starvation, unavailable-alternative, concurrent-capacity, lineage, and cooldown regression coverage.
+- [ ] Run focused/full gates and independent adversarial review, update notes, commit, push, reload, and production-canary repair progress.

@@ -38,7 +38,7 @@ import type { WorkItem, WorkSource, Proposal, ProposalKind, DecisionEntry } from
 // ---------------------------------------------------------------------------
 
 let _mockDecisions: DecisionEntry[] = [];
-let _mockWorkedEvents: { itemId: string; outcome: 'diff' | 'empty'; ts: string }[] = [];
+let _mockWorkedEvents: { itemId: string; outcome: 'diff' | 'empty' | 'dispatch-blocked'; ts: string }[] = [];
 
 vi.mock('../src/core/fleet/decisions-ledger.js', () => ({
   readDecisions: (opts?: { sinceMs?: number }) => {
@@ -116,6 +116,19 @@ beforeEach(() => {
   _mockDecisions = [];
   _mockWorkedEvents = [];
   _seq = 0;
+});
+
+it('selection-only dispatch blocks do not become empty execution priors', async () => {
+  const now = new Date().toISOString();
+  _mockWorkedEvents = [
+    { itemId: '/repo/alpha:todo:diff', outcome: 'diff', ts: now },
+    { itemId: '/repo/alpha:todo:empty', outcome: 'empty', ts: now },
+    { itemId: '/repo/alpha:todo:blocked', outcome: 'dispatch-blocked', ts: now },
+  ];
+
+  const priors = await computeOutcomePriors({ listProposals: () => [] });
+
+  expect(priors.global['todo']).toMatchObject({ diffCount: 1, emptyCount: 1 });
 });
 
 // ---------------------------------------------------------------------------

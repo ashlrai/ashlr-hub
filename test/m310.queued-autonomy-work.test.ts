@@ -702,6 +702,7 @@ describe('queued autonomy work scanner', () => {
 
     expect(result).toMatchObject({ resolved: 1, missing: 0, quarantined: [] });
     expect(resolved).toMatchObject({
+      title: parent.title,
       repairParentItemId: parent.id,
       repairParentSource: 'goal',
       repairParentBackend: 'local-coder',
@@ -714,6 +715,38 @@ describe('queued autonomy work scanner', () => {
     expect(resolved.detail).not.toContain('must change repository files');
     expect(resolved.detail).toContain('without forcing a cosmetic change');
     expect(JSON.stringify([parent, child])).toBe(before);
+  });
+
+  it('scrubs and bounds the transient parent title used for repair dispatch', () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const secret = 'github_pat_1234567890abcdefghijklmnop';
+    const parent = item(repo.dir, 'repo:goal:sensitive-parent', {
+      source: 'goal',
+      title: `Repair ${secret} ${'scheduler '.repeat(30)}`,
+      detail: 'Recover abandoned scheduler leases.',
+    });
+    const now = new Date();
+    queueProposalRepairWorkForPendingProposals(undefined, now, {
+      dispatchEvents: [captureFailure(repo.dir, {
+        ts: now.toISOString(),
+        itemId: parent.id,
+        source: parent.source,
+        backend: 'local-coder',
+        tier: 'mid',
+        runId: 'run-sensitive-parent',
+        outcome: 'empty-diff',
+        objectiveHash: workItemObjectiveHash(parent)!,
+      })],
+    });
+    const child = (JSON.parse(readFileSync(join(fx.ashlrDir, 'self-heal-queue.json'), 'utf8')) as WorkItem[])[0]!;
+
+    const resolved = resolveDiagnosticResliceParents([parent, child]).dispatchable
+      .find((candidate) => candidate.id === child.id)!;
+
+    expect(resolved.title.length).toBeLessThanOrEqual(140);
+    expect(resolved.title).not.toContain(secret);
+    expect(resolved.title).toContain('[REDACTED]');
   });
 
   it('quarantines missing and provenance-less parents without deleting the child', () => {

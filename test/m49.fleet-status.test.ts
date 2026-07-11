@@ -3234,6 +3234,26 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.nextActions?.map((action) => action.id)).toContain('drain-diagnostic-reslices');
   });
 
+  it('projects the same five-minute dispatch-blocked repair cooldown used by the daemon', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'repo');
+    const now = new Date().toISOString();
+    const repair = makeTrustedDiagnosticResliceItem(repo, '454545454545', 9);
+    const fresh = makeBacklogItem(repo, 'repo:goal:fresh-after-block', 'Fresh generic work', 2, 'goal');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeRunningDaemon(tmpHome, [], now);
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeBacklogSnapshot(tmpHome, repo, [repair, fresh], now);
+    recordOutcome(repair.id, 'dispatch-blocked', new Date(Date.now() - 6 * 60 * 1000).toISOString());
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.queue.cooldownItems).toBe(0);
+    expect(s.queue.eligibleBacklogItems).toBe(2);
+    expect(s.queue.next?.[0]).toMatchObject({ id: repair.id });
+  });
+
   it('keeps judged generated repairs on the full cooldown even when recovery is healthy', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const repo = join(tmpHome, 'repo');
