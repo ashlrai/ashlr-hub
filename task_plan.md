@@ -1606,4 +1606,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Bound bytes, files, rows, and returned events without weakening newest-first window semantics or metadata sanitization.
 - [x] Propagate source quality through dispatch-yield FleetStatus while keeping existing event-reader callers compatible.
 - [x] Add oversized, malformed, unreadable, mixed-quality, truncation, privacy, and legacy-window coverage.
-- [ ] Run focused/full gates and independent review, then update notes, commit, push, reload, and production-canary bounded reads.
+- [x] Run focused/full gates and independent review, then update notes, commit, push, reload, and production-canary bounded reads.
