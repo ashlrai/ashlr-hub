@@ -14,10 +14,52 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   mkdtempSync, writeFileSync, mkdirSync, rmSync,
-  readFileSync, existsSync,
+  readFileSync, existsSync, chmodSync, lstatSync, readdirSync, symlinkSync,
 } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
+import { canSymlink } from './helpers/platform.js';
+
+const fsFaults = vi.hoisted(() => ({
+  failRename: false,
+  partialWrites: false,
+  writeCalls: 0,
+  fsyncCalls: 0,
+  renameSources: [] as string[],
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...real,
+    writeSync(
+      fd: number,
+      buffer: NodeJS.ArrayBufferView,
+      offset: number,
+      length: number,
+      position: number | null = null,
+    ): number {
+      fsFaults.writeCalls++;
+      // Keep the short lock-owner record intact; inject partial writes only
+      // into the larger config payload.
+      const writeLength = fsFaults.partialWrites && length > 512 ? Math.min(length, 7) : length;
+      return real.writeSync(fd, buffer, offset, writeLength, position);
+    },
+    fsyncSync(fd: number): void {
+      fsFaults.fsyncCalls++;
+      real.fsyncSync(fd);
+    },
+    renameSync(...args: Parameters<typeof real.renameSync>): void {
+      fsFaults.renameSources.push(String(args[0]));
+      if (fsFaults.failRename) {
+        const err = new Error('injected rename failure') as NodeJS.ErrnoException;
+        err.code = 'EIO';
+        throw err;
+      }
+      real.renameSync(...args);
+    },
+  };
+});
 
 // ---------------------------------------------------------------------------
 // We test defaultConfig, loadConfig, saveConfig by importing directly from
@@ -76,6 +118,14 @@ import {
   defaultConfig, loadConfig, saveConfig,
 } from '../src/core/config.js';
 import type { AshlrConfig } from '../src/core/types.js';
+
+afterEach(() => {
+  fsFaults.failRename = false;
+  fsFaults.partialWrites = false;
+  fsFaults.writeCalls = 0;
+  fsFaults.fsyncCalls = 0;
+  fsFaults.renameSources.length = 0;
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -354,6 +404,45 @@ describe('saveConfig', () => {
     expect(parsed.roots).toContain('/test/root');
   });
 
+  it('preserves two-space JSON formatting with a trailing newline', () => {
+    const cfg = defaultConfig();
+    cfg.staleDays = 14;
+
+    saveConfig(cfg);
+
+    const cfgPath = join(tmpHome, '.ashlr', 'config.json');
+    expect(readFileSync(cfgPath, 'utf8')).toBe(`${JSON.stringify(cfg, null, 2)}\n`);
+  });
+
+  it('completes partial writes before installing the config', () => {
+    const cfg = defaultConfig();
+    cfg.staleDays = 41;
+    fsFaults.partialWrites = true;
+
+    saveConfig(cfg);
+
+    expect(fsFaults.writeCalls).toBeGreaterThan(1);
+    expect(readFileSync(join(tmpHome, '.ashlr', 'config.json'), 'utf8'))
+      .toBe(`${JSON.stringify(cfg, null, 2)}\n`);
+  });
+
+  it.skipIf(process.platform === 'win32')('fsyncs both the completed file and its directory', () => {
+    saveConfig(defaultConfig());
+
+    // Lock owner record, completed config file, and config directory.
+    expect(fsFaults.fsyncCalls).toBe(3);
+  });
+
+  it('uses a unique temporary name in the config directory for each save', () => {
+    saveConfig(defaultConfig());
+    saveConfig(defaultConfig());
+
+    expect(fsFaults.renameSources).toHaveLength(2);
+    expect(new Set(fsFaults.renameSources).size).toBe(2);
+    expect(fsFaults.renameSources.every(path => dirname(path) === join(tmpHome, '.ashlr'))).toBe(true);
+    expect(readdirSync(join(tmpHome, '.ashlr'))).toEqual(['config.json']);
+  });
+
   it('creates ~/.ashlr directory if it does not exist before saving', () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     expect(existsSync(ashlrDir)).toBe(false);
@@ -388,5 +477,65 @@ describe('saveConfig', () => {
     const cfgPath = join(tmpHome, '.ashlr', 'config.json');
     const parsed = JSON.parse(readFileSync(cfgPath, 'utf8')) as AshlrConfig;
     expect(parsed.staleDays).toBe(20);
+  });
+
+  it.skipIf(process.platform === 'win32')('creates a private config directory and file', () => {
+    saveConfig(defaultConfig());
+
+    const ashlrDir = join(tmpHome, '.ashlr');
+    expect(lstatSync(ashlrDir).mode & 0o777).toBe(0o700);
+    expect(lstatSync(join(ashlrDir, 'config.json')).mode & 0o777).toBe(0o600);
+  });
+
+  it.skipIf(process.platform === 'win32')('tightens owner-controlled legacy modes during save', () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const cfgPath = join(ashlrDir, 'config.json');
+    mkdirSync(ashlrDir, { mode: 0o755 });
+    writeFileSync(cfgPath, `${JSON.stringify(defaultConfig(), null, 2)}\n`, { mode: 0o644 });
+    chmodSync(ashlrDir, 0o755);
+    chmodSync(cfgPath, 0o644);
+
+    saveConfig(defaultConfig());
+
+    expect(lstatSync(ashlrDir).mode & 0o777).toBe(0o700);
+    expect(lstatSync(cfgPath).mode & 0o777).toBe(0o600);
+  });
+
+  it.skipIf(!canSymlink())('refuses a symlink config without modifying its target', () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const outside = join(tmpHome, 'outside.json');
+    mkdirSync(ashlrDir, { mode: 0o700 });
+    writeFileSync(outside, 'outside stays unchanged\n');
+    symlinkSync(outside, join(ashlrDir, 'config.json'));
+
+    expect(() => saveConfig(defaultConfig())).toThrow(/unsafe config file/i);
+    expect(readFileSync(outside, 'utf8')).toBe('outside stays unchanged\n');
+    expect(readdirSync(ashlrDir)).toEqual(['config.json']);
+  });
+
+  it.skipIf(!canSymlink())('refuses a symlink config directory without writing through it', () => {
+    const outsideDir = join(tmpHome, 'outside');
+    mkdirSync(outsideDir);
+    symlinkSync(outsideDir, join(tmpHome, '.ashlr'));
+
+    expect(() => saveConfig(defaultConfig())).toThrow(/unsafe config directory/i);
+    expect(readdirSync(outsideDir)).toEqual([]);
+  });
+
+  it('keeps the live config and removes its unique temp when rename fails', () => {
+    const original = defaultConfig();
+    original.staleDays = 11;
+    saveConfig(original);
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const cfgPath = join(ashlrDir, 'config.json');
+    const before = readFileSync(cfgPath, 'utf8');
+
+    const replacement = defaultConfig();
+    replacement.staleDays = 88;
+    fsFaults.failRename = true;
+    expect(() => saveConfig(replacement)).toThrow(/injected rename failure/);
+
+    expect(readFileSync(cfgPath, 'utf8')).toBe(before);
+    expect(readdirSync(ashlrDir)).toEqual(['config.json']);
   });
 });

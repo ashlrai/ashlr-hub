@@ -1710,3 +1710,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add boundary, migration, stale-lock, multi-process, flush-barrier, permissions, privacy, and compatibility coverage.
 - [x] Run focused/full Plugin gates and independent adversarial review without including unrelated user work.
 - [x] Commit, push, deploy the plugin cache safely, and update durable Hub notes with production evidence.
+
+## Current Overnight Cycle - Repair Treatment Learning And Canary Truth
+- [x] Rehydrate the deployed Hub baseline, live repair-handoff state, daemon health, git state, and durable notes.
+- [x] Deploy independent audits for V2 activation mechanics, ordinary-parent eligibility, and the highest-leverage learning gap.
+- [x] Make reader-only rollout status fail closed when no qualifying ordinary parent is available for a canary.
+- [x] Add deterministic metadata-only repair-treatment attribution without changing retry, budget, routing-tier, or merge authority.
+- [x] Surface sample-gated treatment outcomes through existing bounded fleet telemetry.
+- [x] Add state-machine, attribution, privacy, compatibility, and conversion regression coverage.
+- [x] Run focused/full verification and independent adversarial review.
+- [ ] Commit, push, reload production, validate live status, and update durable notes.

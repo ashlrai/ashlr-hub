@@ -3445,6 +3445,9 @@ export interface Enrollment {
 
 /** The kind of source a WorkItem was derived from. */
 export type WorkSource = 'issue' | 'todo' | 'test' | 'dep' | 'doc' | 'security' | 'plugin' | 'self' | 'lint' | 'goal' | 'hygiene' | 'invent'; // M33: 'plugin'; M54: 'self' (the fleet's own backlog); M101: 'lint' (cached lint report); M160/M161: 'goal' (active goal next-step), 'hygiene' (low-value hygiene) — all additive; M181: 'invent' (generative engine — bold net-new features)
+
+/** Fixed metadata-only instruction treatment for trusted diagnostic no-diff reslices. */
+export type RepairTreatment = 'baseline-reslice' | 'target-localization';
 /**
  * A single discovered, scored unit of work. Produced by a scanner over a
  * single enrolled repo. Contains NO secrets. Pure analysis — never implies a
@@ -3475,6 +3478,10 @@ export interface WorkItem {
   repairHandoffId?: string;
   /** Stable generation identity derived from authoritative parent control identity. */
   repairGenerationId?: string;
+  /** Canonical objective-scoped treatment unit shared by V1/V2 handoff aliases. */
+  repairTreatmentUnitId?: string;
+  /** Deterministic instruction treatment; never changes routing or authority. */
+  repairTreatment?: RepairTreatment;
   /** Original work item retried by this generated repair. */
   repairParentItemId?: string;
   /** Original scanner source. The generated child remains source=self for control-plane trust. */

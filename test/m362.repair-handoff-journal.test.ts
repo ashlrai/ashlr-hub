@@ -24,6 +24,7 @@ import { scanQueuedAutonomyWork } from '../src/core/portfolio/scanners.js';
 import {
   generatedRepairCooldownKey,
   generatedRepairCooldownKeys,
+  generatedRepairGenerationId,
   generatedRepairGenerationIds,
   readGeneratedRepairLifecycle,
   recordGeneratedRepairLifecycle,
@@ -33,6 +34,7 @@ import { pendingProposalItemKeysForBacklog, workItemCoverageKey } from '../src/c
 import type { Proposal, WorkItem } from '../src/core/types.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
 import { queueSelfHealItem } from '../src/core/fleet/self-heal.js';
+import { repairTreatmentForUnitId } from '../src/core/fleet/generated-repair-identity.js';
 
 let fx: H1Fixture;
 
@@ -74,12 +76,17 @@ function recordRepairHandoffs(
 }
 
 function legacyObservation(observation: RepairHandoffObservation): RepairHandoffObservationV1 {
+  const {
+    repairTreatmentUnitId: _repairTreatmentUnitId,
+    repairTreatment: _repairTreatment,
+    ...historical
+  } = observation;
   const eventId = createHash('sha256').update(JSON.stringify([
     'ashlr:repair-handoff:v1', observation.kind, observation.repo, observation.parentItemId,
     observation.parentOutcome, observation.parentAttemptId,
   ])).digest('hex');
   return {
-    ...observation,
+    ...historical,
     schemaVersion: 1,
     eventId,
     generationId: repairGenerationIdFromHandoffId(eventId)!,
@@ -114,6 +121,23 @@ function reidentifyV2Observation(
 }
 
 describe('M362 durable repair handoff journal', () => {
+  it('does not assign diagnostic treatment metadata to capture repairs', () => {
+    const repo = fx.makeRepo();
+    const observation = repairHandoffFromDispatchEvent(event(repo.dir, {
+      outcome: 'proposal-capture-error',
+      source: 'self',
+      diffFiles: 1,
+    }))!;
+
+    expect(observation.kind).toBe('capture-repair');
+    expect(observation).not.toHaveProperty('repairTreatment');
+    expect(recordRepairHandoffs(event(repo.dir, {
+      outcome: 'proposal-capture-error',
+      source: 'self',
+      diffFiles: 1,
+    }))).toMatchObject({ recorded: 1, failed: 0 });
+  });
+
   it('persists fixed routing provenance while excluding free-form execution text', () => {
     const repo = fx.makeRepo();
     const input = event(repo.dir);
@@ -297,6 +321,42 @@ describe('M362 durable repair handoff journal', () => {
     });
   });
 
+  it('keeps V1 authority healthy when an upgrade replay adds canonical treatment metadata', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir, { itemId: 'repo:goal:v1-treatment-enrichment' });
+    const historical = legacyObservation(repairHandoffFromDispatchEvent(input)!);
+    recordDispatchProduction(input);
+    mkdirSync(dirname(repairHandoffJournalPath()), { recursive: true });
+    writeFileSync(repairHandoffJournalPath(), `${JSON.stringify(historical)}\n`, { mode: 0o600 });
+
+    expect(recordRepairHandoffsRaw(input)).toMatchObject({ recorded: 1, failed: 0 });
+    expect(readRepairHandoffs()).toMatchObject({
+      sourceState: 'healthy',
+      invalidRows: 0,
+      conflictingIds: 0,
+      observations: [expect.objectContaining({ eventId: historical.eventId })],
+    });
+  });
+
+  it('rejects tampered treatment metadata on a v1-authorized diagnostic item', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const input = event(repo.dir, { itemId: 'repo:self:v1-treatment-tamper' });
+    expect(recordRepairHandoffsRaw(input)).toMatchObject({ recorded: 1, failed: 0 });
+    queueProposalRepairWorkForPendingProposals(undefined, new Date('2026-07-10T12:30:00.000Z'));
+    const item = (await scanQueuedAutonomyWork(repo.dir))[0]!;
+    const tampered: WorkItem = {
+      ...item,
+      repairTreatment: item.repairTreatment === 'baseline-reslice'
+        ? 'target-localization'
+        : 'baseline-reslice',
+    };
+
+    expect(item.repairTreatment).toBe(repairTreatmentForUnitId(item.repairTreatmentUnitId!));
+    expect(generatedRepairGenerationId(tampered)).toBeNull();
+    expect(generatedRepairGenerationIds(tampered)).toEqual([]);
+  });
+
   it('keeps v1 authority immutable when a matching v2 objective arrives', () => {
     const repo = fx.makeRepo();
     const eventValue = event(repo.dir);
@@ -318,6 +378,21 @@ describe('M362 durable repair handoff journal', () => {
     expect(read.observations.find((row) => row.schemaVersion === 1)).not.toHaveProperty('parentObjectiveHash');
     expect(read.observations.find((row) => row.schemaVersion === 2)?.parentObjectiveHash)
       .toBe(eventValue.objectiveHash);
+  });
+
+  it('assigns V1/V2 objective aliases to the same treatment unit and arm', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir, { itemId: 'repo:goal:alias-stability' });
+
+    expect(recordRepairHandoffsRaw(input)).toMatchObject({ recorded: 1, failed: 0 });
+    expect(recordRepairHandoffs(input)).toMatchObject({ recorded: 1, failed: 0 });
+    const aliases = readRepairHandoffs().observations;
+
+    expect(aliases).toHaveLength(2);
+    expect(new Set(aliases.map((row) => row.generationId)).size).toBe(2);
+    expect(new Set(aliases.map((row) => row.repairTreatmentUnitId)).size).toBe(1);
+    expect(new Set(aliases.map((row) => row.repairTreatment)).size).toBe(1);
+    expect(aliases[0]!.repairTreatment).toBe(repairTreatmentForUnitId(aliases[0]!.repairTreatmentUnitId!));
   });
 
   it('keeps recursive repairs and incompatible learning labels out of the authority journal', () => {
@@ -903,6 +978,8 @@ describe('M362 durable repair handoff journal', () => {
       ts: latest.ts,
       repairHandoffId: latest.eventId,
       repairGenerationId: latest.generationId,
+      repairTreatmentUnitId: latest.repairTreatmentUnitId,
+      repairTreatment: latest.repairTreatment,
     };
 
     expect(latest.schemaVersion).toBe(1);

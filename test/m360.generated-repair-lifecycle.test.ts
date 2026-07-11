@@ -3,10 +3,12 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writ
 import { dirname } from 'node:path';
 import {
   generatedRepairLifecyclePath,
+  generatedRepairDispatchLineage,
   generatedRepairRetryPolicy,
   readGeneratedRepairLifecycle,
   recordGeneratedRepairLifecycle,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
+import { repairTreatmentForUnitId } from '../src/core/fleet/generated-repair-identity.js';
 import type { WorkItem } from '../src/core/types.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import { routeBackend } from '../src/core/fleet/router.js';
@@ -94,6 +96,8 @@ function diagnosticRepairItem(
     ts: parent.ts,
     repairHandoffId: handoff.eventId,
     repairGenerationId: handoff.generationId,
+    repairTreatmentUnitId: handoff.repairTreatmentUnitId,
+    repairTreatment: handoff.repairTreatment,
     repairParentItemId: parent.itemId,
     repairParentSource: parent.source,
     repairParentBackend: parent.backend,
@@ -106,6 +110,19 @@ const ATTEMPT_ONE = 'attempt-12345678-1234-4123-8123-123456789abc';
 const ATTEMPT_TWO = 'attempt-22345678-1234-4123-8123-123456789abc';
 
 describe('generated repair lifecycle store', () => {
+  it('propagates deterministic treatment through lifecycle and dispatch lineage metadata', () => {
+    const item = diagnosticRepairItem();
+    const expected = repairTreatmentForUnitId(item.repairTreatmentUnitId!)!;
+
+    expect(readGeneratedRepairLifecycle(item)).toMatchObject({ available: true });
+    expect(generatedRepairDispatchLineage(item, 'local-coder')).toMatchObject({
+      repairGenerationId: item.repairGenerationId,
+      repairTreatmentUnitId: item.repairTreatmentUnitId,
+      repairTreatment: expected,
+      repairAttemptOrdinal: 1,
+    });
+  });
+
   it('routes the first repair normally and a proven empty retry through a different same-tier backend', () => {
     const item = diagnosticRepairItem();
     const cfg = {

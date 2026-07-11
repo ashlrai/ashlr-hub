@@ -3822,9 +3822,18 @@ function renderControl() {
           : '#94a3b8';
     const actionAccent = repairHandoffRollout.action === 'rollback-writer' || repairHandoffRollout.action === 'inspect-source'
       ? '#f87171'
-      : rolloutAccent;
+      : repairHandoffRollout.action === 'wait-ordinary-parent'
+        ? '#fbbf24'
+        : repairHandoffRollout.action === 'enable-canary'
+          ? '#4ade80'
+          : rolloutAccent;
     heroMetrics.appendChild(controlMetric('Handoff phase', repairHandoffRollout.phase ?? 'unknown', rolloutAccent));
     heroMetrics.appendChild(controlMetric('Handoff action', repairHandoffRollout.action ?? 'unknown', actionAccent));
+    heroMetrics.appendChild(controlMetric(
+      'Eligible ordinary parents',
+      repairHandoffRollout.eligibleOrdinaryItems ?? 'unknown',
+      repairHandoffRollout.eligibleOrdinaryItems > 0 ? '#4ade80' : actionAccent
+    ));
     heroMetrics.appendChild(controlMetric(
       'Authorities v1/v2',
       `${repairHandoffRollout.v1Authorities ?? 'unknown'}/${repairHandoffRollout.v2Authorities ?? 'unknown'}`,

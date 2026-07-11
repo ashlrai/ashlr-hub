@@ -569,6 +569,10 @@ describe('M210 Panel 1 — Fleet Status: snapshot.daemon', () => {
     expect(rolloutBlock).toContain('if (repairHandoffRollout)');
     expect(rolloutBlock).toContain("controlMetric('Handoff phase'");
     expect(rolloutBlock).toContain("controlMetric('Handoff action'");
+    expect(rolloutBlock).toContain("'Eligible ordinary parents'");
+    expect(rolloutBlock).toContain("repairHandoffRollout.eligibleOrdinaryItems ?? 'unknown'");
+    expect(rolloutBlock).toContain("repairHandoffRollout.action === 'wait-ordinary-parent'");
+    expect(rolloutBlock).toContain("repairHandoffRollout.action === 'enable-canary'");
     expect(rolloutBlock).toContain("'Authorities v1/v2'");
     expect(rolloutBlock).toContain("'Rows v1/v2'");
     expect(rolloutBlock).not.toContain("el('div', { cls: 'ctrl-card card' }");

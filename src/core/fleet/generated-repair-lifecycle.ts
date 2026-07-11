@@ -20,7 +20,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { isOuterAttemptIdentity, isSafeExecutionIdentity } from './attempt-identity.js';
 import { isTrustedDiagnosticResliceItem, isTrustedGeneratedRepairItem } from './self-heal-trust.js';
-import type { EngineId, WorkItem } from '../types.js';
+import type { EngineId, RepairTreatment, WorkItem } from '../types.js';
 import {
   readRepairHandoffs,
   repairGenerationIdFromHandoffId,
@@ -28,6 +28,7 @@ import {
   repairHandoffV2JournalPath,
   type RepairHandoffObservation,
 } from './repair-handoff-journal.js';
+import { repairTreatmentForUnitId, repairTreatmentUnitId } from './generated-repair-identity.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 
 const MAX_RECORDS = 100_000;
@@ -95,6 +96,8 @@ export interface GeneratedRepairRetryPolicy {
 export interface GeneratedRepairDispatchLineage {
   repairHandoffId: string;
   repairGenerationId: string;
+  repairTreatmentUnitId: string;
+  repairTreatment: RepairTreatment;
   repairAttemptOrdinal: 1 | 2;
   repairPreviousBackend?: EngineId;
 }
@@ -147,6 +150,14 @@ export function generatedRepairGenerationId(item: WorkItem): string | null {
     if (!handoff || handoff.generationId !== item.repairGenerationId || handoff.childItemId !== item.id) return null;
     try { if (resolve(handoff.repo) !== resolve(item.repo)) return null; } catch { return null; }
     if (isTrustedDiagnosticResliceItem(item)) {
+      const expectedUnitId = handoff.parentObjectiveHash === undefined ? null : repairTreatmentUnitId({
+        kind: 'no-diff-reslice',
+        repo: handoff.repo,
+        parentItemId: handoff.parentItemId,
+        parentObjectiveHash: handoff.parentObjectiveHash,
+      });
+      const expectedTreatment = expectedUnitId ? repairTreatmentForUnitId(expectedUnitId) : null;
+      const treatmentMetadataPresent = item.repairTreatmentUnitId !== undefined || item.repairTreatment !== undefined;
       if (
         handoff.kind !== 'no-diff-reslice' ||
         handoff.parentSource === undefined ||
@@ -157,7 +168,15 @@ export function generatedRepairGenerationId(item: WorkItem): string | null {
         item.repairParentBackend !== handoff.parentBackend ||
         item.repairParentTier !== handoff.parentTier ||
         handoff.parentObjectiveHash === undefined ||
-        item.repairParentObjectiveHash !== handoff.parentObjectiveHash
+        item.repairParentObjectiveHash !== handoff.parentObjectiveHash ||
+        expectedUnitId === null ||
+        expectedTreatment === null ||
+        (treatmentMetadataPresent && (
+          item.repairTreatmentUnitId !== expectedUnitId ||
+          item.repairTreatment !== expectedTreatment
+        )) ||
+        (handoff.repairTreatmentUnitId !== undefined && handoff.repairTreatmentUnitId !== expectedUnitId) ||
+        (handoff.repairTreatment !== undefined && handoff.repairTreatment !== expectedTreatment)
       ) return null;
     }
     return item.repairGenerationId;
@@ -591,9 +610,23 @@ export function generatedRepairDispatchLineage(
   const backends = lifecycle.authoritativeEmptyBackends;
   if (lifecycle.authoritativeEmptyRuns > 0 && backends === undefined) return null;
   const previousBackend = backends?.at(-1);
+  const treatmentUnitId = item.repairTreatmentUnitId ?? (
+    item.repairParentItemId && item.repairParentObjectiveHash
+      ? repairTreatmentUnitId({
+          kind: 'no-diff-reslice',
+          repo: item.repo,
+          parentItemId: item.repairParentItemId,
+          parentObjectiveHash: item.repairParentObjectiveHash,
+        })
+      : null
+  );
+  const treatment = treatmentUnitId ? repairTreatmentForUnitId(treatmentUnitId) : null;
+  if (!treatmentUnitId || !treatment) return null;
   return {
     repairHandoffId: item.repairHandoffId,
     repairGenerationId: generationId,
+    repairTreatmentUnitId: treatmentUnitId,
+    repairTreatment: treatment,
     repairAttemptOrdinal: previousBackend ? 2 : 1,
     ...(previousBackend ? { repairPreviousBackend: previousBackend } : {}),
   };

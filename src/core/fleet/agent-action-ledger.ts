@@ -29,10 +29,12 @@ import type {
   EvidenceOutcomeSummary,
   LabelBasis,
   LearningSource,
+  RepairTreatment,
   RouteSnapshot,
   RunEventSummary,
   WorkSource,
 } from '../types.js';
+import { repairTreatmentForUnitId } from './generated-repair-identity.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { causalMetadata } from '../learning/causal.js';
 import {
@@ -136,6 +138,8 @@ export interface AgentActionEvent {
   learningLabel?: ProductionAttemptLearningLabel;
   repairHandoffId?: string;
   repairGenerationId?: string;
+  repairTreatmentUnitId?: string;
+  repairTreatment?: RepairTreatment;
   repairAttemptOrdinal?: 1 | 2;
   repairPreviousBackend?: EngineId;
   repairLineageInvalid?: true;
@@ -367,12 +371,20 @@ function sanitizeEvent(event: AgentActionEvent): AgentActionEvent {
   const repairGenerationId = typeof event.repairGenerationId === 'string' && /^[a-f0-9]{64}$/.test(event.repairGenerationId)
     ? event.repairGenerationId
     : undefined;
+  const repairTreatmentUnitId = typeof event.repairTreatmentUnitId === 'string' && /^[a-f0-9]{64}$/.test(event.repairTreatmentUnitId)
+    ? event.repairTreatmentUnitId
+    : undefined;
+  const repairTreatment = event.repairTreatment === 'baseline-reslice' || event.repairTreatment === 'target-localization'
+    ? event.repairTreatment
+    : undefined;
   const repairAttemptOrdinal = event.repairAttemptOrdinal === 1 || event.repairAttemptOrdinal === 2
     ? event.repairAttemptOrdinal
     : undefined;
   const repairPreviousBackend = enumValue(event.repairPreviousBackend, ENGINE_IDS);
   const repairLineageFieldsPresent = event.repairHandoffId !== undefined ||
     event.repairGenerationId !== undefined ||
+    event.repairTreatmentUnitId !== undefined ||
+    event.repairTreatment !== undefined ||
     event.repairAttemptOrdinal !== undefined ||
     event.repairPreviousBackend !== undefined;
   const repairLineageComplete = event.repairLineageInvalid !== true &&
@@ -381,6 +393,12 @@ function sanitizeEvent(event: AgentActionEvent): AgentActionEvent {
     repairHandoffId !== undefined &&
     repairGenerationId !== undefined &&
     repairGenerationIdFromHandoffId(repairHandoffId) === repairGenerationId &&
+    ((repairTreatmentUnitId === undefined && repairTreatment === undefined) || (
+      repairTreatmentUnitId !== undefined && repairTreatment !== undefined &&
+      typeof itemId === 'string' &&
+      /:proposal-repair-nodiff:[0-9a-f]{12}$/i.test(itemId) &&
+      repairTreatmentForUnitId(repairTreatmentUnitId) === repairTreatment
+    )) &&
     repairAttemptOrdinal !== undefined &&
     (repairAttemptOrdinal === 1
       ? repairPreviousBackend === undefined
@@ -434,6 +452,8 @@ function sanitizeEvent(event: AgentActionEvent): AgentActionEvent {
         ? {
           repairHandoffId,
           repairGenerationId,
+          ...(repairTreatmentUnitId ? { repairTreatmentUnitId } : {}),
+          ...(repairTreatment ? { repairTreatment } : {}),
           repairAttemptOrdinal,
           ...(repairPreviousBackend ? { repairPreviousBackend } : {}),
           }

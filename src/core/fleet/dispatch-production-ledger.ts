@@ -30,6 +30,7 @@ import type {
   LabelBasis,
   LearningSource,
   ProductionAttemptShape,
+  RepairTreatment,
   RunActionCounts,
   RouteSnapshot,
   RunEventSummary,
@@ -50,7 +51,11 @@ import {
   type ProductionAttemptLearningLabel,
 } from '../learning/attempt-shape.js';
 import { scrubSecrets } from '../util/scrub.js';
-import { repairGenerationIdFromHandoffId } from './generated-repair-identity.js';
+import {
+  REPAIR_TREATMENTS,
+  repairGenerationIdFromHandoffId,
+  repairTreatmentForUnitId,
+} from './generated-repair-identity.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_READ_LIMIT = 2_000;
@@ -69,6 +74,7 @@ const ENGINE_IDS = new Set<EngineId>([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
   'kimi', 'nim', 'opencode', 'grok',
 ]);
+const MIN_REPAIR_TREATMENT_ATTEMPTS = 3;
 
 export type DispatchProductionBasis =
   | 'run-proposal-outcome'
@@ -112,6 +118,8 @@ export interface DispatchProductionEvent {
   /** Metadata-only exact lineage for journal-authorized diagnostic repair dispatches. */
   repairHandoffId?: string;
   repairGenerationId?: string;
+  repairTreatmentUnitId?: string;
+  repairTreatment?: RepairTreatment;
   repairAttemptOrdinal?: 1 | 2;
   repairPreviousBackend?: EngineId;
   repairLineageInvalid?: true;
@@ -196,6 +204,26 @@ export interface GeneratedRepairAttemptSummary {
   captureRepairs: number;
   diagnosticReslices: number;
   proposalRepairs: number;
+  /** Explicit event/unit attribution quality; never inferred from conversion output. */
+  treatmentAttribution?: RepairTreatmentAttributionSummary;
+  /** Per-treatment conversion is withheld until each arm has a bounded minimum sample. */
+  treatmentConversions?: RepairTreatmentConversionSummary[];
+}
+
+export interface RepairTreatmentAttributionSummary {
+  eligibleEvents: number;
+  attributedEvents: number;
+  unattributedEvents: number;
+  distinctUnits: number;
+  replayedEvents: number;
+}
+
+export interface RepairTreatmentConversionSummary {
+  repairTreatment: RepairTreatment;
+  attempts: number;
+  proposalsCreated: number;
+  noProposal: number;
+  proposalRate: number;
 }
 
 export interface GeneratedRepairBackendTransitionBucket {
@@ -334,6 +362,12 @@ export function sanitizeDispatchProductionEvent(
   const repairGenerationId = typeof event.repairGenerationId === 'string' && SHA256_RE.test(event.repairGenerationId)
     ? event.repairGenerationId
     : undefined;
+  const repairTreatmentUnitId = typeof event.repairTreatmentUnitId === 'string' && SHA256_RE.test(event.repairTreatmentUnitId)
+    ? event.repairTreatmentUnitId
+    : undefined;
+  const repairTreatment = event.repairTreatment === 'baseline-reslice' || event.repairTreatment === 'target-localization'
+    ? event.repairTreatment
+    : undefined;
   const repairAttemptOrdinal = event.repairAttemptOrdinal === 1 || event.repairAttemptOrdinal === 2
     ? event.repairAttemptOrdinal
     : undefined;
@@ -342,6 +376,8 @@ export function sanitizeDispatchProductionEvent(
     : undefined;
   const repairLineageFieldsPresent = event.repairHandoffId !== undefined ||
     event.repairGenerationId !== undefined ||
+    event.repairTreatmentUnitId !== undefined ||
+    event.repairTreatment !== undefined ||
     event.repairAttemptOrdinal !== undefined ||
     event.repairPreviousBackend !== undefined;
   const repairLineageComplete = event.repairLineageInvalid !== true &&
@@ -351,6 +387,11 @@ export function sanitizeDispatchProductionEvent(
     repairHandoffId !== undefined &&
     repairGenerationId !== undefined &&
     repairGenerationIdFromHandoffId(repairHandoffId) === repairGenerationId &&
+    ((repairTreatmentUnitId === undefined && repairTreatment === undefined) || (
+      repairTreatmentUnitId !== undefined && repairTreatment !== undefined &&
+      /:proposal-repair-nodiff:[0-9a-f]{12}$/i.test(itemId) &&
+      repairTreatmentForUnitId(repairTreatmentUnitId) === repairTreatment
+    )) &&
     repairAttemptOrdinal !== undefined &&
     (repairAttemptOrdinal === 1
       ? repairPreviousBackend === undefined
@@ -431,6 +472,8 @@ export function sanitizeDispatchProductionEvent(
         ? {
           repairHandoffId,
           repairGenerationId,
+          ...(repairTreatmentUnitId ? { repairTreatmentUnitId } : {}),
+          ...(repairTreatment ? { repairTreatment } : {}),
           repairAttemptOrdinal,
           ...(repairPreviousBackend ? { repairPreviousBackend } : {}),
           }
@@ -1083,8 +1126,25 @@ interface MutableYieldBucket {
   actionCounts: RunActionCounts;
   attemptShape: ProductionAttemptShape;
   generatedRepairAttempts: GeneratedRepairAttemptSummary;
+  repairTreatments: MutableRepairTreatmentAttribution;
   reasons: Map<string, number>;
   diagnosticReasons: Map<string, number>;
+}
+
+interface MutableRepairTreatmentAttribution {
+  eligibleEvents: number;
+  attributedEvents: number;
+  unattributedEvents: number;
+  units: Map<RepairTreatment, Map<string, { proposalCreated: boolean }>>;
+}
+
+function emptyRepairTreatmentAttribution(): MutableRepairTreatmentAttribution {
+  return {
+    eligibleEvents: 0,
+    attributedEvents: 0,
+    unattributedEvents: 0,
+    units: new Map(),
+  };
 }
 
 function emptyGeneratedRepairAttemptSummary(): GeneratedRepairAttemptSummary {
@@ -1123,6 +1183,78 @@ function addGeneratedRepairAttempt(
   else summary.proposalRepairs++;
 }
 
+function addRepairTreatmentAttempt(
+  attribution: MutableRepairTreatmentAttribution,
+  event: DispatchProductionEvent,
+): void {
+  const kind = generatedRepairAttemptKindFromSignals({
+    itemId: event.itemId,
+    title: event.title,
+    source: event.source,
+  });
+  if (kind !== 'no-diff-reslice') return;
+  attribution.eligibleEvents++;
+  const treatment = event.repairTreatment;
+  const unitId = event.repairTreatmentUnitId;
+  if (
+    !treatment ||
+    !unitId ||
+    event.repairLineageInvalid === true ||
+    typeof event.repairHandoffId !== 'string' ||
+    typeof event.repairGenerationId !== 'string' ||
+    repairGenerationIdFromHandoffId(event.repairHandoffId) !== event.repairGenerationId ||
+    repairTreatmentForUnitId(unitId) !== treatment ||
+    !/:proposal-repair-nodiff:[0-9a-f]{12}$/i.test(event.itemId)
+  ) {
+    attribution.unattributedEvents++;
+    return;
+  }
+  attribution.attributedEvents++;
+  const units = attribution.units.get(treatment) ?? new Map<string, { proposalCreated: boolean }>();
+  const unit = units.get(unitId);
+  if (!unit) units.set(unitId, { proposalCreated: event.proposalCreated });
+  else if (event.proposalCreated) unit.proposalCreated = true;
+  attribution.units.set(treatment, units);
+}
+
+function sampleGatedTreatmentConversions(
+  attribution: MutableRepairTreatmentAttribution,
+): RepairTreatmentConversionSummary[] | undefined {
+  if (attribution.unattributedEvents > 0) return undefined;
+  if (REPAIR_TREATMENTS.some(
+    (treatment) => (attribution.units.get(treatment)?.size ?? 0) < MIN_REPAIR_TREATMENT_ATTEMPTS,
+  )) return undefined;
+  const conversions = REPAIR_TREATMENTS
+    .map((treatment) => [treatment, attribution.units.get(treatment)!] as const)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([repairTreatment, units]) => {
+      const attempts = units.size;
+      const proposalsCreated = [...units.values()].filter((unit) => unit.proposalCreated).length;
+      return {
+        repairTreatment,
+        attempts,
+        proposalsCreated,
+        noProposal: attempts - proposalsCreated,
+        proposalRate: proposalsCreated / attempts,
+      };
+    });
+  return conversions.length > 0 ? conversions : undefined;
+}
+
+function treatmentAttributionSummary(
+  attribution: MutableRepairTreatmentAttribution,
+): RepairTreatmentAttributionSummary | undefined {
+  if (attribution.eligibleEvents === 0) return undefined;
+  const distinctUnits = [...attribution.units.values()].reduce((sum, units) => sum + units.size, 0);
+  return {
+    eligibleEvents: attribution.eligibleEvents,
+    attributedEvents: attribution.attributedEvents,
+    unattributedEvents: attribution.unattributedEvents,
+    distinctUnits,
+    replayedEvents: Math.max(0, attribution.attributedEvents - distinctUnits),
+  };
+}
+
 function touchBucket(
   buckets: Map<string, MutableYieldBucket>,
   key: string,
@@ -1140,6 +1272,7 @@ function touchBucket(
       actionCounts: {},
       attemptShape: emptyProductionAttemptShape(),
       generatedRepairAttempts: emptyGeneratedRepairAttemptSummary(),
+      repairTreatments: emptyRepairTreatmentAttribution(),
       reasons: new Map(),
       diagnosticReasons: new Map(),
     };
@@ -1173,6 +1306,7 @@ function addToBucket(bucket: MutableYieldBucket, event: DispatchProductionEvent)
     }),
     event.proposalCreated,
   );
+  addRepairTreatmentAttempt(bucket.repairTreatments, event);
   const reason = event.reason ?? event.routeReason ?? event.outcome;
   bucket.reasons.set(reason, (bucket.reasons.get(reason) ?? 0) + 1);
   addDiagnosticReason(bucket.diagnosticReasons, reason, classification);
@@ -1181,6 +1315,10 @@ function addToBucket(bucket: MutableYieldBucket, event: DispatchProductionEvent)
 function finalizeBucket(bucket: MutableYieldBucket): DispatchProductionYieldBucket {
   const proposalsCreated = bucket.proposalsCreated;
   const attempts = bucket.attempts;
+  const treatmentConversions = sampleGatedTreatmentConversions(bucket.repairTreatments);
+  const treatmentAttribution = treatmentAttributionSummary(bucket.repairTreatments);
+  if (treatmentAttribution) bucket.generatedRepairAttempts.treatmentAttribution = treatmentAttribution;
+  if (treatmentConversions) bucket.generatedRepairAttempts.treatmentConversions = treatmentConversions;
   return {
     key: bucket.key,
     ...(bucket.backend !== undefined ? { backend: bucket.backend } : {}),
@@ -1338,6 +1476,7 @@ export function summarizeDispatchProductionYield(
   const actionCounts: RunActionCounts = {};
   const attemptShape = emptyProductionAttemptShape();
   const generatedRepairAttempts = emptyGeneratedRepairAttemptSummary();
+  const repairTreatments = emptyRepairTreatmentAttribution();
   let proposalsCreated = 0;
   let spentUsd = 0;
   const diagnosticTopReasons = new Map<string, number>();
@@ -1366,6 +1505,7 @@ export function summarizeDispatchProductionYield(
       }),
       event.proposalCreated,
     );
+    addRepairTreatmentAttempt(repairTreatments, event);
     const reason = event.reason ?? event.routeReason ?? event.outcome;
     topReasons.set(reason, (topReasons.get(reason) ?? 0) + 1);
     addDiagnosticReason(diagnosticTopReasons, reason, classification);
@@ -1390,6 +1530,10 @@ export function summarizeDispatchProductionYield(
   }
 
   const total = events.length;
+  const treatmentConversions = sampleGatedTreatmentConversions(repairTreatments);
+  const treatmentAttribution = treatmentAttributionSummary(repairTreatments);
+  if (treatmentAttribution) generatedRepairAttempts.treatmentAttribution = treatmentAttribution;
+  if (treatmentConversions) generatedRepairAttempts.treatmentConversions = treatmentConversions;
   const generatedRepairBackendTransitions = summarizeGeneratedRepairBackendTransitions(events, limit);
   return {
     windowHours: opts?.windowHours ?? 24,
@@ -1414,6 +1558,20 @@ export function summarizeDispatchProductionYield(
   };
 }
 
+function withholdTreatmentConversions(summary: DispatchProductionYieldSummary | undefined): void {
+  if (!summary) return;
+  delete summary.generatedRepairAttempts?.treatmentConversions;
+  for (const buckets of [
+    summary.byBackend,
+    summary.bySource,
+    summary.byRepo,
+    summary.byBackendModel,
+    summary.byBackendSource,
+  ]) {
+    for (const bucket of buckets) delete bucket.generatedRepairAttempts?.treatmentConversions;
+  }
+}
+
 export function readDispatchProductionYieldDetailed(opts?: {
   windowMs?: number;
   limit?: number;
@@ -1435,6 +1593,7 @@ export function readDispatchProductionYieldDetailed(opts?: {
     windowHours: windowMs / (60 * 60 * 1000),
     limitPerDimension: opts?.limitPerDimension,
   });
+  if (read.sourceState !== 'healthy' || !read.complete) withholdTreatmentConversions(summary);
   const { events: _events, ...sourceQuality } = read;
   return {
     ...(summary ? { summary } : {}),

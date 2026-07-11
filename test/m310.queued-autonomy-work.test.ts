@@ -19,6 +19,7 @@ import {
 } from '../src/core/portfolio/queued-autonomy.js';
 import { scanQueuedAutonomyWork } from '../src/core/portfolio/scanners.js';
 import {
+  noDiffResliceWorkItem,
   queueProposalRepairWorkForPendingProposals,
   resolveDiagnosticResliceParents,
 } from '../src/core/fleet/proposal-repair-work.js';
@@ -38,6 +39,7 @@ import {
   readGeneratedRepairLifecycle,
   recordGeneratedRepairLifecycle,
 } from '../src/core/fleet/generated-repair-lifecycle.js';
+import { repairTreatmentForUnitId } from '../src/core/fleet/generated-repair-identity.js';
 
 let fx: H1Fixture;
 
@@ -666,15 +668,45 @@ describe('queued autonomy work scanner', () => {
     expect(reslice!.detail).toContain('run-nodiff-new');
     expect(reslice!.detail).not.toContain('run-nodiff-old');
     expect(reslice!.detail).toContain('Dispatch outcome: empty-diff');
-    expect(reslice!.detail).toContain('Action: reslice the work into a smaller concrete edit');
-    expect(reslice!.detail).toContain('produce the smallest complete change');
-    expect(reslice!.detail).toContain('without forcing an edit');
+    expect(reslice!.detail).toContain('Action: reslice');
+    expect(reslice!.detail).toContain('smallest complete edit');
+    expect(reslice!.detail).toContain('without forcing');
     expect(reslice!.detail).not.toContain('must change repository files');
     expect(reslice!.detail).toContain('stdout=[omitted]');
     expect(reslice!.detail).toContain('prompt=[omitted]');
     expect(reslice!.detail).toContain('env=[omitted]');
     expect(reslice!.detail).not.toContain('DO_NOT_COPY');
     expect(reslice!.detail).not.toContain('github_pat_1234567890abcdefghijklmnop');
+  });
+
+  it('assigns stable no-diff treatments and bounds target-localization instructions', () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T13:00:00.000Z');
+    const byTreatment = new Map<string, WorkItem>();
+    for (let index = 0; index < 256 && byTreatment.size < 2; index++) {
+      const candidate = captureFailure(repo.dir, {
+        ts: '2026-07-10T12:00:00.000Z',
+        itemId: `repo:goal:treatment-${index}`,
+        source: 'goal',
+        outcome: 'empty-diff',
+        runId: `run-treatment-${index}`,
+        objectiveHash: createHash('sha256').update(`objective-${index}`).digest('hex'),
+        reason: 'stdout=DO_NOT_PERSIST_STDOUT; stderr=DO_NOT_PERSIST_STDERR; env=DO_NOT_PERSIST_ENV',
+      });
+      const item = noDiffResliceWorkItem(candidate, now);
+      if (item?.repairTreatment) byTreatment.set(item.repairTreatment, item);
+    }
+
+    const baseline = byTreatment.get('baseline-reslice')!;
+    const localized = byTreatment.get('target-localization')!;
+    expect(repairTreatmentForUnitId(localized.repairTreatmentUnitId!)).toBe('target-localization');
+    expect(repairTreatmentForUnitId(localized.repairTreatmentUnitId!)).toBe(localized.repairTreatment);
+    expect(baseline.detail).not.toContain('exactly one target file or subsystem');
+    expect(localized.detail).toContain('exactly one target file or subsystem');
+    expect(localized.detail).toContain('bounded current-state evidence');
+    expect(localized.detail.length).toBeLessThanOrEqual(4_000);
+    expect(JSON.stringify([...byTreatment.values()])).not.toContain('DO_NOT_PERSIST');
   });
 
   it('resolves diagnostic children from fresh parent context without mutating durable work', () => {

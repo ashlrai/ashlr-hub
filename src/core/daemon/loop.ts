@@ -1193,6 +1193,8 @@ function agentActionFromDispatchEvent(event: DispatchProductionEvent): AgentActi
     ...(event.learningLabel ? { learningLabel: event.learningLabel } : {}),
     ...(event.repairHandoffId ? { repairHandoffId: event.repairHandoffId } : {}),
     ...(event.repairGenerationId ? { repairGenerationId: event.repairGenerationId } : {}),
+    ...(event.repairTreatmentUnitId ? { repairTreatmentUnitId: event.repairTreatmentUnitId } : {}),
+    ...(event.repairTreatment ? { repairTreatment: event.repairTreatment } : {}),
     ...(event.repairAttemptOrdinal ? { repairAttemptOrdinal: event.repairAttemptOrdinal } : {}),
     ...(event.repairPreviousBackend ? { repairPreviousBackend: event.repairPreviousBackend } : {}),
     backend: event.backend,

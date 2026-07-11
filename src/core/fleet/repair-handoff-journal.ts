@@ -24,8 +24,12 @@ import {
   sanitizeDispatchProductionEvent,
   type DispatchProductionEvent,
 } from './dispatch-production-ledger.js';
-import { repairGenerationIdFromHandoffId } from './generated-repair-identity.js';
-import type { EngineId, EngineTier, WorkSource } from '../types.js';
+import {
+  repairGenerationIdFromHandoffId,
+  repairTreatmentForUnitId,
+  repairTreatmentUnitId,
+} from './generated-repair-identity.js';
+import type { EngineId, EngineTier, RepairTreatment, WorkSource } from '../types.js';
 import { isSafeExecutionIdentity } from './attempt-identity.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 
@@ -46,6 +50,8 @@ export type RepairHandoffKind = 'capture-repair' | 'no-diff-reslice';
 interface RepairHandoffObservationBase {
   eventId: string;
   generationId: string;
+  repairTreatmentUnitId?: string;
+  repairTreatment?: RepairTreatment;
   childItemId: string;
   ts: string;
   kind: RepairHandoffKind;
@@ -244,10 +250,23 @@ export function repairHandoffFromDispatchEvent(
   };
   const eventId = semanticEventId(semantic);
   const generationId = repairGenerationIdFromHandoffId(eventId)!;
+  const treatmentUnitId = kind === 'no-diff-reslice'
+    ? repairTreatmentUnitId({
+        kind,
+        repo,
+        parentItemId: semantic.parentItemId,
+        parentObjectiveHash: semantic.parentObjectiveHash,
+      })
+    : null;
+  const repairTreatment = treatmentUnitId ? repairTreatmentForUnitId(treatmentUnitId) : null;
+  if (kind === 'no-diff-reslice' && (!treatmentUnitId || !repairTreatment)) return null;
   return {
     schemaVersion: 2,
     eventId,
     generationId,
+    ...(kind === 'no-diff-reslice'
+      ? { repairTreatmentUnitId: treatmentUnitId!, repairTreatment: repairTreatment! }
+      : {}),
     childItemId: childItemId(kind, repo, event.itemId),
     ts,
     kind,
@@ -283,6 +302,12 @@ function validObservation(value: unknown): value is RepairHandoffObservation {
   ) return false;
   if (row['kind'] === 'no-diff-reslice' && row['parentOutcome'] !== 'empty-diff') return false;
   if (row['kind'] === 'capture-repair' && row['parentOutcome'] === 'empty-diff') return false;
+  const treatmentMetadataPresent = row['repairTreatmentUnitId'] !== undefined || row['repairTreatment'] !== undefined;
+  if (treatmentMetadataPresent && (
+    row['kind'] !== 'no-diff-reslice' ||
+    typeof row['repairTreatmentUnitId'] !== 'string' || !SHA256_RE.test(row['repairTreatmentUnitId']) ||
+    (row['repairTreatment'] !== 'baseline-reslice' && row['repairTreatment'] !== 'target-localization')
+  )) return false;
   const parentProvenanceFields = ['parentSource', 'parentBackend', 'parentTier'] as const;
   const parentProvenanceCount = parentProvenanceFields.filter((key) => row[key] !== undefined).length;
   if (parentProvenanceCount !== 0 && parentProvenanceCount !== parentProvenanceFields.length) return false;
@@ -292,6 +317,7 @@ function validObservation(value: unknown): value is RepairHandoffObservation {
     typeof row['parentObjectiveHash'] !== 'string' ||
     parentProvenanceCount !== parentProvenanceFields.length
   )) return false;
+  if (row['schemaVersion'] === 2 && row['kind'] === 'no-diff-reslice' && !treatmentMetadataPresent) return false;
   if (row['schemaVersion'] === 2) {
     try {
       if (resolve(String(row['repo'])) !== row['repo']) return false;
@@ -325,6 +351,19 @@ function validObservation(value: unknown): value is RepairHandoffObservation {
     if (field !== undefined && (!Number.isInteger(field) || Number(field) < 0 || Number(field) > 1_000_000)) return false;
   }
   const observation = row as unknown as RepairHandoffObservation;
+  if (treatmentMetadataPresent) {
+    const expectedUnitId = repairTreatmentUnitId({
+      kind: 'no-diff-reslice',
+      repo: observation.repo,
+      parentItemId: observation.parentItemId,
+      parentObjectiveHash: observation.parentObjectiveHash!,
+    });
+    if (
+      expectedUnitId === null ||
+      observation.repairTreatmentUnitId !== expectedUnitId ||
+      observation.repairTreatment !== repairTreatmentForUnitId(expectedUnitId)
+    ) return false;
+  }
   if (observation.eventId !== semanticEventId(observation)) return false;
   if (observation.generationId !== repairGenerationIdFromHandoffId(observation.eventId)) return false;
   if (observation.childItemId !== childItemId(observation.kind, observation.repo, observation.parentItemId)) return false;
@@ -351,6 +390,8 @@ function fullObservationFingerprint(row: RepairHandoffObservation): string {
     row.schemaVersion,
     row.eventId,
     row.generationId,
+    row.repairTreatmentUnitId ?? null,
+    row.repairTreatment ?? null,
     row.childItemId,
     row.ts,
     row.kind,
@@ -813,5 +854,11 @@ export function dispatchEventFromRepairHandoff(
     basis: 'run-proposal-outcome',
     repairHandoffId: observation.eventId,
     repairGenerationId: observation.generationId,
+    ...(observation.kind === 'no-diff-reslice'
+      ? {
+          ...(observation.repairTreatmentUnitId ? { repairTreatmentUnitId: observation.repairTreatmentUnitId } : {}),
+          ...(observation.repairTreatment ? { repairTreatment: observation.repairTreatment } : {}),
+        }
+      : {}),
   };
 }

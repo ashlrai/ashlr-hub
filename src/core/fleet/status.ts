@@ -811,7 +811,11 @@ export function buildRepairHandoffRolloutStatus(
   const action: FleetRepairHandoffRolloutStatus['action'] = phase === 'degraded'
     ? writerEnabled ? 'rollback-writer' : 'inspect-source'
     : phase === 'reader-only'
-      ? eligibleOrdinaryItems === null ? 'inspect-source' : 'enable-canary'
+      ? eligibleOrdinaryItems === null
+        ? 'inspect-source'
+        : eligibleOrdinaryItems > 0
+          ? 'enable-canary'
+          : 'wait-ordinary-parent'
       : phase === 'mixed-healthy' || phase === 'v2-healthy'
         ? projectionTickAt ? 'retain-writer' : 'observe-projection'
         : eligibleOrdinaryItems === null

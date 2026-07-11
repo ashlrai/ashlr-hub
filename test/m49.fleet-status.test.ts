@@ -520,7 +520,16 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
       authorityDigest: 'a'.repeat(64),
     };
     expect(buildRepairHandoffRolloutStatus(healthy, false, 0)).toMatchObject({
+      phase: 'reader-only', action: 'wait-ordinary-parent', writerEnabled: false,
+      eligibleOrdinaryItems: 0,
+    });
+    expect(buildRepairHandoffRolloutStatus(healthy, false, null)).toMatchObject({
+      phase: 'reader-only', action: 'inspect-source', writerEnabled: false,
+      eligibleOrdinaryItems: null,
+    });
+    expect(buildRepairHandoffRolloutStatus(healthy, false, 2)).toMatchObject({
       phase: 'reader-only', action: 'enable-canary', writerEnabled: false,
+      eligibleOrdinaryItems: 2,
     });
     expect(buildRepairHandoffRolloutStatus(healthy, true, 0)).toMatchObject({
       phase: 'awaiting-evidence', action: 'wait-ordinary-parent', writerEnabled: true,
@@ -5047,32 +5056,48 @@ describe('formatFleetStatus — pure formatter (M49)', () => {
       killed: false,
     };
 
+    const currentRollout = {
+      summaryAvailable: true,
+      writerEnabled: true,
+      phase: 'mixed-healthy' as const,
+      sourceState: 'healthy' as const,
+      v1Authorities: 7,
+      v2Authorities: 3,
+      v1PhysicalRows: 7,
+      v2PhysicalRows: 3,
+      aliasFamilies: 2,
+      latestV2At: '2026-07-11T00:00:00.000Z',
+      authorityDigest: 'a'.repeat(64),
+      projectionObserved: false,
+      projectionTickAt: null,
+      invalidRows: 0,
+      conflictingIds: 0,
+      limitExceeded: false,
+      eligibleOrdinaryItems: 4,
+      action: 'observe-projection' as const,
+    };
     const current = formatFleetStatus({
       ...base,
-      repairHandoffRollout: {
-        summaryAvailable: true,
-        writerEnabled: true,
-        phase: 'mixed-healthy',
-        sourceState: 'healthy',
-        v1Authorities: 7,
-        v2Authorities: 3,
-        v1PhysicalRows: 7,
-        v2PhysicalRows: 3,
-        aliasFamilies: 2,
-        latestV2At: '2026-07-11T00:00:00.000Z',
-        authorityDigest: 'a'.repeat(64),
-        projectionObserved: false,
-        projectionTickAt: null,
-        invalidRows: 0,
-        conflictingIds: 0,
-        limitExceeded: false,
-        eligibleOrdinaryItems: 4,
-        action: 'observe-projection',
-      },
+      repairHandoffRollout: currentRollout,
     });
     expect(current).toContain(
       'Repair handoff: phase=mixed-healthy, writer=on, authorities v1/v2=7/3, ' +
         'aliases=2, ordinary eligible=4, action=observe-projection',
+    );
+
+    const failClosed = formatFleetStatus({
+      ...base,
+      repairHandoffRollout: {
+        ...currentRollout,
+        writerEnabled: false,
+        phase: 'reader-only',
+        eligibleOrdinaryItems: 0,
+        action: 'wait-ordinary-parent',
+      },
+    });
+    expect(failClosed).toContain(
+      'writer=off, authorities v1/v2=7/3, aliases=2, ordinary eligible=0, ' +
+        'action=wait-ordinary-parent',
     );
 
     const legacy = formatFleetStatus(base);

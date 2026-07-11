@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { basename, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
-import type { Proposal, WorkItem } from '../types.js';
+import type { Proposal, RepairTreatment, WorkItem } from '../types.js';
 import { listProposals } from '../inbox/store.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { pruneQueuedSelfHealItems, queueSelfHealItem, queueSelfHealItemDetailed } from './self-heal.js';
@@ -26,6 +26,7 @@ import {
   readRepairHandoffs,
   repairHandoffFromDispatchEvent,
 } from './repair-handoff-journal.js';
+import { repairTreatmentForUnitId, repairTreatmentUnitId } from './generated-repair-identity.js';
 
 const MAX_TITLE = 140;
 const MAX_REASON = 260;
@@ -138,7 +139,17 @@ function parentKey(repo: string, itemId: string): string | null {
   try { return `${resolve(repo)}\0${itemId}`; } catch { return null; }
 }
 
-function resolvedResliceDetail(parent: WorkItem): string {
+function resliceInstruction(treatment: RepairTreatment): string {
+  if (treatment === 'target-localization') {
+    return `Action: reslice by first naming exactly one target file or subsystem and citing bounded current-state evidence from repository metadata or inspection. ` +
+      `Then make the smallest complete edit if the objective remains actionable. ` +
+      `If the current repository already satisfies the objective or a safe edit requires a product decision, report that evidence without forcing a cosmetic change.`;
+  }
+  return `Action: reslice by inspecting the current target and making the smallest complete edit if it remains actionable. ` +
+    `If the current repository already satisfies the objective or a safe edit requires a product decision, report that evidence without forcing a cosmetic change.`;
+}
+
+function resolvedResliceDetail(parent: WorkItem, treatment: RepairTreatment): string {
   const title = bounded(parent.title, MAX_TITLE) || parent.id;
   const detail = bounded(parent.detail, MAX_PARENT_CONTEXT);
   return (
@@ -148,8 +159,7 @@ function resolvedResliceDetail(parent: WorkItem): string {
     (detail && detail !== title ? `Current context: ${detail}\n` : '') +
     `Original source: ${parent.source}\n` +
     `Dispatch outcome: empty-diff\n` +
-    `Action: reslice by inspecting the current target and making the smallest complete edit if it remains actionable. ` +
-    `If the current repository already satisfies the objective or a safe edit requires a product decision, report that evidence without forcing a cosmetic change.`
+    resliceInstruction(treatment)
   );
 }
 
@@ -202,11 +212,32 @@ export function resolveDiagnosticResliceParents(items: WorkItem[]): DiagnosticRe
       quarantined.push({ itemId: item.id, reason: 'parent-provenance-missing' });
       continue;
     }
+    const treatmentUnitId = repairTreatmentUnitId({
+      kind: 'no-diff-reslice',
+      repo: item.repo,
+      parentItemId: parent.id,
+      parentObjectiveHash: item.repairParentObjectiveHash,
+    });
+    const treatment = treatmentUnitId ? repairTreatmentForUnitId(treatmentUnitId) : null;
+    const treatmentMetadataPresent = item.repairTreatmentUnitId !== undefined || item.repairTreatment !== undefined;
+    if (
+      !treatmentUnitId || !treatment ||
+      (treatmentMetadataPresent && (
+        item.repairTreatmentUnitId !== treatmentUnitId ||
+        item.repairTreatment !== treatment
+      ))
+    ) {
+      missing += 1;
+      quarantined.push({ itemId: item.id, reason: 'parent-provenance-missing' });
+      continue;
+    }
     resolved += 1;
     dispatchable.push({
       ...item,
       title: bounded(parent.title, MAX_TITLE) || parent.id,
-      detail: resolvedResliceDetail(parent),
+      detail: resolvedResliceDetail(parent, treatment),
+      repairTreatmentUnitId: treatmentUnitId,
+      repairTreatment: treatment,
       repairParentItemId: parent.id,
       repairParentSource: item.repairParentSource ?? parent.source,
     });
@@ -381,6 +412,20 @@ export function noDiffResliceWorkItem(
   const value = 4;
   const effort = 1;
   const derivedHandoff = repairHandoffFromDispatchEvent(event);
+  const generationId = event.repairGenerationId ?? derivedHandoff?.generationId;
+  const treatmentUnitId = event.repairTreatmentUnitId ?? derivedHandoff?.repairTreatmentUnitId ?? repairTreatmentUnitId({
+    kind: 'no-diff-reslice',
+    repo,
+    parentItemId: event.itemId,
+    parentObjectiveHash: event.objectiveHash ?? '',
+  });
+  const assignedTreatment = treatmentUnitId ? repairTreatmentForUnitId(treatmentUnitId) : null;
+  if (
+    !generationId || !treatmentUnitId || !assignedTreatment ||
+    (event.repairTreatmentUnitId !== undefined && event.repairTreatmentUnitId !== treatmentUnitId) ||
+    (event.repairTreatment !== undefined && event.repairTreatment !== assignedTreatment)
+  ) return null;
+  const treatment = assignedTreatment;
 
   const item: WorkItem = {
     id: noDiffResliceId(repo, itemId),
@@ -397,9 +442,8 @@ export function noDiffResliceWorkItem(
       (routeReason ? `Route: ${routeReason}\n` : '') +
       `Dispatch outcome: empty-diff\n` +
       `Failure: ${reason}\n` +
-      `Action: reslice the work into a smaller concrete edit and name the target file or subsystem before editing. ` +
-      `If the task remains actionable, produce the smallest complete change and run merge-grade verification. ` +
-      `If it is already satisfied or not safely actionable, report that evidence without forcing an edit. ` +
+      `${resliceInstruction(treatment)} ` +
+      `Run merge-grade verification for any edit. ` +
       `Do not copy raw prompts, stdout, stderr, env, file contents, or prior diff output.`,
     value,
     effort,
@@ -409,9 +453,9 @@ export function noDiffResliceWorkItem(
     ...(event.repairHandoffId
       ? { repairHandoffId: event.repairHandoffId }
       : derivedHandoff ? { repairHandoffId: derivedHandoff.eventId } : {}),
-    ...(event.repairGenerationId
-      ? { repairGenerationId: event.repairGenerationId }
-      : derivedHandoff ? { repairGenerationId: derivedHandoff.generationId } : {}),
+    repairGenerationId: generationId,
+    repairTreatmentUnitId: treatmentUnitId,
+    repairTreatment: treatment,
     repairParentItemId: itemId,
     repairParentSource: event.source,
     repairParentBackend: event.backend,

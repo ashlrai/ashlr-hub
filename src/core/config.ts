@@ -6,8 +6,25 @@
  */
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import {
+  closeSync,
+  constants as fsConstants,
+  fchmodSync,
+  fstatSync,
+  fsyncSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
+import type { Stats } from 'node:fs';
 import type { AshlrConfig, TidyRule } from './types.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from './fleet/local-store-lock.js';
 
 // ---------------------------------------------------------------------------
 // Path constants (exported, resolved immediately)
@@ -547,18 +564,227 @@ export function loadConfig(): AshlrConfig {
 // saveConfig()
 // ---------------------------------------------------------------------------
 
+type FileStat = Stats;
+
+function sameFile(left: FileStat, right: FileStat): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function ownedByCurrentUser(stat: FileStat): boolean {
+  return typeof process.getuid !== 'function' || Number(stat.uid) === process.getuid();
+}
+
+function privateMode(stat: FileStat): boolean {
+  return process.platform === 'win32' || (Number(stat.mode) & 0o077) === 0;
+}
+
+function migratableMode(stat: FileStat): boolean {
+  return process.platform === 'win32' || (Number(stat.mode) & 0o022) === 0;
+}
+
+function directoryOpenFlags(): number {
+  return fsConstants.O_RDONLY |
+    (process.platform === 'win32' ? 0 : fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+}
+
+function secureConfigDirectory(configDir: string): { fd?: number; stat: FileStat } {
+  mkdirSync(configDir, { recursive: true, mode: 0o700 });
+  const before = lstatSync(configDir);
+  if (
+    before.isSymbolicLink() ||
+    !before.isDirectory() ||
+    !ownedByCurrentUser(before) ||
+    !migratableMode(before)
+  ) {
+    throw new Error(`[ashlr] Refusing to use unsafe config directory: ${configDir}`);
+  }
+
+  // Node cannot open directories as file descriptors on every supported
+  // Windows filesystem. Atomic replacement still applies there; the POSIX
+  // descriptor binding and directory fsync are additional guarantees.
+  if (process.platform === 'win32') return { stat: before };
+
+  const fd = openSync(configDir, directoryOpenFlags());
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isDirectory() || !sameFile(before, opened)) {
+      throw new Error(`[ashlr] Config directory changed while opening it: ${configDir}`);
+    }
+    fchmodSync(fd, 0o700);
+    const after = fstatSync(fd);
+    const namedAfter = lstatSync(configDir);
+    if (
+      !sameFile(before, after) ||
+      !sameFile(after, namedAfter) ||
+      !after.isDirectory() ||
+      !ownedByCurrentUser(after) ||
+      !privateMode(after)
+    ) {
+      throw new Error(`[ashlr] Config directory changed while securing it: ${configDir}`);
+    }
+    return { fd, stat: after };
+  } catch (err) {
+    closeSync(fd);
+    throw err;
+  }
+}
+
+function secureExistingConfig(configPath: string): FileStat | undefined {
+  let before: FileStat;
+  try {
+    before = lstatSync(configPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw err;
+  }
+
+  if (
+    before.isSymbolicLink() ||
+    !before.isFile() ||
+    Number(before.nlink) !== 1 ||
+    !ownedByCurrentUser(before) ||
+    !migratableMode(before)
+  ) {
+    throw new Error(`[ashlr] Refusing to replace unsafe config file: ${configPath}`);
+  }
+
+  if (process.platform === 'win32') return before;
+
+  const fd = openSync(configPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || !sameFile(before, opened)) {
+      throw new Error(`[ashlr] Config file changed while opening it: ${configPath}`);
+    }
+    const after = fstatSync(fd);
+    const namedAfter = lstatSync(configPath);
+    if (
+      !sameFile(before, after) ||
+      !sameFile(after, namedAfter) ||
+      !after.isFile() ||
+      Number(after.nlink) !== 1 ||
+      !ownedByCurrentUser(after) ||
+      !migratableMode(after)
+    ) {
+      throw new Error(`[ashlr] Config file changed while securing it: ${configPath}`);
+    }
+    return after;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function writeAll(fd: number, bytes: Buffer): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(fd, bytes, offset, bytes.length - offset);
+    if (written <= 0) throw new Error('[ashlr] Config write made no progress');
+    offset += written;
+  }
+}
+
+function currentConfigMatches(configPath: string, expected: FileStat | undefined): boolean {
+  try {
+    const current = lstatSync(configPath);
+    return expected !== undefined &&
+      !current.isSymbolicLink() &&
+      current.isFile() &&
+      Number(current.nlink) === 1 &&
+      ownedByCurrentUser(current) &&
+      migratableMode(current) &&
+      sameFile(expected, current);
+  } catch (err) {
+    return expected === undefined && (err as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
+
 /**
  * Persist `c` to CONFIG_PATH as pretty-printed JSON.
- * Creates CONFIG_DIR if it does not yet exist.
+ * Creates CONFIG_DIR if needed, then durably replaces the config through a
+ * private, same-directory temporary file. Existing owner-controlled installs
+ * with legacy read permissions are tightened in place before migration.
  */
 export function saveConfig(c: AshlrConfig): void {
   const configDir = resolveConfigDir();
   const configPath = resolveConfigPath();
-
-  if (!existsSync(configDir)) {
-    mkdirSync(configDir, { recursive: true });
+  const bytes = Buffer.from(JSON.stringify(c, null, 2) + '\n', 'utf8');
+  const securedDirectory = secureConfigDirectory(configDir);
+  const directory = securedDirectory.stat;
+  const directoryFd = securedDirectory.fd;
+  const lock = acquireLocalStoreLock(join(configDir, '.config-write.lock'));
+  if (!lock) {
+    if (directoryFd !== undefined) closeSync(directoryFd);
+    throw new Error('[ashlr] Config is being updated by another process');
   }
+  let tempFd: number | undefined;
+  let tempPath: string | undefined;
 
-  const json = JSON.stringify(c, null, 2) + '\n';
-  writeFileSync(configPath, json, 'utf8');
+  try {
+    const existingConfig = secureExistingConfig(configPath);
+
+    tempPath = join(configDir, `.config.json.${process.pid}.${randomUUID()}.tmp`);
+    tempFd = openSync(
+      tempPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    if (process.platform !== 'win32') fchmodSync(tempFd, 0o600);
+    const openedTemp = fstatSync(tempFd);
+    if (!openedTemp.isFile() || Number(openedTemp.nlink) !== 1 || !ownedByCurrentUser(openedTemp) || !privateMode(openedTemp)) {
+      throw new Error('[ashlr] Refusing to write unsafe config temporary file');
+    }
+
+    writeAll(tempFd, bytes);
+    fsyncSync(tempFd);
+    const writtenTemp = fstatSync(tempFd);
+    const namedTemp = lstatSync(tempPath);
+    const currentDirectory = lstatSync(configDir);
+    if (
+      writtenTemp.size !== bytes.length ||
+      !sameFile(openedTemp, writtenTemp) ||
+      Number(writtenTemp.nlink) !== 1 ||
+      !ownedByCurrentUser(writtenTemp) ||
+      !privateMode(writtenTemp) ||
+      namedTemp.isSymbolicLink() ||
+      !namedTemp.isFile() ||
+      !sameFile(writtenTemp, namedTemp) ||
+      !sameFile(directory, currentDirectory) ||
+      !privateMode(currentDirectory) ||
+      !currentConfigMatches(configPath, existingConfig)
+    ) {
+      throw new Error('[ashlr] Config paths changed during save');
+    }
+
+    closeSync(tempFd);
+    tempFd = undefined;
+    renameSync(tempPath, configPath);
+    const installed = lstatSync(configPath);
+    const directoryAfterRename = lstatSync(configDir);
+    if (
+      installed.isSymbolicLink() ||
+      !installed.isFile() ||
+      Number(installed.nlink) !== 1 ||
+      !ownedByCurrentUser(installed) ||
+      !sameFile(writtenTemp, installed) ||
+      !privateMode(installed) ||
+      !sameFile(directory, directoryAfterRename)
+    ) {
+      throw new Error('[ashlr] Config installation identity check failed');
+    }
+    tempPath = undefined;
+
+    // Directory fsync is not supported by Windows; the atomic replacement is.
+    if (directoryFd !== undefined) fsyncSync(directoryFd);
+  } finally {
+    if (tempFd !== undefined) {
+      try { closeSync(tempFd); } catch { /* preserve the persistence error */ }
+    }
+    if (tempPath !== undefined) {
+      try { unlinkSync(tempPath); } catch { /* best-effort cleanup */ }
+    }
+    releaseLocalStoreLock(lock);
+    if (directoryFd !== undefined) {
+      try { closeSync(directoryFd); } catch { /* all durable work is already complete */ }
+    }
+  }
 }

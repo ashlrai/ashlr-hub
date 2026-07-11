@@ -19,9 +19,10 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
-import type { EngineId, EngineTier, WorkItem, WorkSource } from '../types.js';
+import type { EngineId, EngineTier, RepairTreatment, WorkItem, WorkSource } from '../types.js';
 import { isActionableSelfHealItem } from '../fleet/self-heal-trust.js';
 import { generatedRepairGenerationId } from '../fleet/generated-repair-lifecycle.js';
+import { repairTreatmentForUnitId, repairTreatmentUnitId } from '../fleet/generated-repair-identity.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 
 const WORK_SOURCES = new Set<WorkSource>([
@@ -31,6 +32,7 @@ const ENGINE_IDS = new Set<EngineId>([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes', 'kimi', 'nim', 'opencode', 'grok',
 ]);
 const ENGINE_TIERS = new Set<EngineTier>(['local', 'mid', 'frontier']);
+const REPAIR_TREATMENTS = new Set<RepairTreatment>(['baseline-reslice', 'target-localization']);
 const QUEUED_AUTONOMY_FILES = ['self-heal-queue.json', 'backlog.json'] as const;
 const MAX_QUEUED_AUTONOMY_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_QUEUED_AUTONOMY_ROWS_PER_FILE = 10_000;
@@ -107,6 +109,22 @@ function sanitizeStrictWorkItem(value: unknown): WorkItem | null {
     typeof value.repairHandoffId === 'string' && value.repairHandoffId.length > 0 && value.repairHandoffId.length <= 180 &&
     typeof value.repairGenerationId === 'string' && value.repairGenerationId.length > 0 && value.repairGenerationId.length <= 180
   )) return null;
+  const treatmentMetadataPresent = value.repairTreatmentUnitId !== undefined || value.repairTreatment !== undefined;
+  if (treatmentMetadataPresent && (
+    typeof value.repairTreatmentUnitId !== 'string' || !/^[a-f0-9]{64}$/.test(value.repairTreatmentUnitId) ||
+    !REPAIR_TREATMENTS.has(value.repairTreatment as RepairTreatment) ||
+    !/:proposal-repair-nodiff:[0-9a-f]{12}$/i.test(value.id) ||
+    !value.tags.includes('diagnostic-reslice') ||
+    typeof value.repairParentItemId !== 'string' ||
+    typeof value.repairParentObjectiveHash !== 'string' ||
+    repairTreatmentUnitId({
+      kind: 'no-diff-reslice',
+      repo: value.repo,
+      parentItemId: value.repairParentItemId,
+      parentObjectiveHash: value.repairParentObjectiveHash,
+    }) !== value.repairTreatmentUnitId ||
+    repairTreatmentForUnitId(value.repairTreatmentUnitId) !== value.repairTreatment
+  )) return null;
 
   return {
     id: value.id,
@@ -121,6 +139,8 @@ function sanitizeStrictWorkItem(value: unknown): WorkItem | null {
     ts: value.ts,
     ...(value.repairHandoffId !== undefined ? { repairHandoffId: value.repairHandoffId } : {}),
     ...(value.repairGenerationId !== undefined ? { repairGenerationId: value.repairGenerationId } : {}),
+    ...(value.repairTreatmentUnitId !== undefined ? { repairTreatmentUnitId: value.repairTreatmentUnitId } : {}),
+    ...(value.repairTreatment !== undefined ? { repairTreatment: value.repairTreatment } : {}),
     ...(value.repairParentItemId !== undefined ? { repairParentItemId: value.repairParentItemId } : {}),
     ...(value.repairParentSource !== undefined ? { repairParentSource: value.repairParentSource } : {}),
     ...(value.repairParentBackend !== undefined ? { repairParentBackend: value.repairParentBackend } : {}),
