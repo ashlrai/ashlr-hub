@@ -10,7 +10,7 @@
  * Read-only; touches no real config.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
@@ -40,22 +40,35 @@ describe('M30 CI workflow', () => {
     expect(pkg.scripts?.['test:ci']).toContain('scripts/test-ci.mjs');
   });
 
-  it('runs Ubuntu exhaustively and Windows as three named portability shards', () => {
+  it('runs Ubuntu exhaustively and Windows as three fixed portability partitions', () => {
     expect(ciYml.match(/os:\s*ubuntu-latest/g)).toHaveLength(1);
     expect(ciYml.match(/os:\s*windows-latest/g)).toHaveLength(3);
-    for (const shard of ['1/3', '2/3', '3/3']) {
-      expect(ciYml.match(new RegExp(`--shard=${shard.replace('/', '\\/')}`, 'g'))).toHaveLength(1);
+    for (const partition of ['1/3', '2/3', '3/3']) {
+      expect(ciYml).toContain(`label: windows, portability ${partition}`);
     }
     expect(ciYml).toContain('test_args: ""');
-    for (const portabilitySurface of [
-      'm43.verify-commands.test.ts',
-      'm153.verification-gate.test.ts',
-      'm315.remote-handoff-truth.test.ts',
-      'm354.trajectory-records.test.ts',
-      'm370.branch-protection-attestation.test.ts',
-      'm373.directory-durability.test.ts',
-    ]) {
-      expect(ciYml.match(new RegExp(portabilitySurface.replaceAll('.', '\\.'), 'g'))).toHaveLength(3);
+    expect(ciYml).not.toContain('--shard=');
+
+    const declaredFiles = ciYml.match(/test\/(?:[\w.-]+\/)*[\w.-]+\.test\.ts/g) ?? [];
+    const expectedFiles = [
+      'test/setup/home.test.ts',
+      'test/classify.test.ts',
+      'test/m2.doctor.test.ts',
+      'test/m21.worktree.test.ts',
+      'test/m23.apply.test.ts',
+      'test/m43.verify-commands.test.ts',
+      'test/m100.web-open.test.ts',
+      'test/m119.quality-metrics.test.ts',
+      'test/m220.anticlog-verdict-feedback.test.ts',
+      'test/m286.worktree-verify-env.test.ts',
+      'test/m315.remote-handoff-truth.test.ts',
+      'test/m332.outcome-watcher.test.ts',
+      'test/m372.test-ci-watchdog.test.ts',
+    ];
+    expect([...declaredFiles].sort()).toEqual([...expectedFiles].sort());
+    expect(new Set(declaredFiles).size).toBe(declaredFiles.length);
+    for (const file of declaredFiles) {
+      expect(existsSync(resolve(repoRoot, file)), `missing Windows CI test: ${file}`).toBe(true);
     }
     expect(ciYml).toContain('npm run test:ci -- ${{ matrix.test_args }}');
   });

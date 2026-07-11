@@ -189,7 +189,7 @@ function saveWorkedLedger(l: WorkedLedger): boolean {
     const dest = workedLedgerPath();
     tmp = dest + '.tmp';
     writeFileSync(tmp, JSON.stringify(bounded, null, 2) + '\n', 'utf8');
-    fd = openSync(tmp, 'r');
+    fd = openSync(tmp, 'r+');
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;

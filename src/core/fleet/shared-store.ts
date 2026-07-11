@@ -271,7 +271,7 @@ export class SharedStore {
       const dest = this.queuePath();
       tmp = `${dest}.${process.pid}.${randomUUID()}.tmp`;
       writeFileSync(tmp, JSON.stringify(bounded, null, 2) + '\n', 'utf8');
-      fd = openSync(tmp, 'r');
+      fd = openSync(tmp, 'r+');
       fsyncSync(fd);
       closeSync(fd);
       fd = undefined;
