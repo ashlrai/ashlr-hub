@@ -34,6 +34,7 @@ import type { AshlrConfig, WorkItem } from '../types.js';
 import { enqueueBacklogItemsDetailed } from '../portfolio/backlog.js';
 import { listGoals } from '../goals/store.js';
 import { goalFocusSnapshot } from '../goals/focus.js';
+import { createProposalMilestoneCompletionPredicate } from '../goals/completion.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import { inventWorkItems } from './invent.js';
 
@@ -261,7 +262,10 @@ export async function runInventCycle(
       return { invented: 0, enqueued: 0 };
     }
 
-    const focus = goalFocusSnapshot(listGoals({ status: 'active' }), cfg, { repos });
+    const focus = goalFocusSnapshot(listGoals({ status: 'active' }), cfg, {
+      repos,
+      isMilestoneComplete: createProposalMilestoneCompletionPredicate(),
+    });
     if (focus.shouldDeferNewGoalWork) {
       return {
         invented: 0,

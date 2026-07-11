@@ -58,6 +58,11 @@ vi.mock('../src/core/goals/store.js', () => ({
   listGoals: (...args: unknown[]) => mockListGoals(...args),
 }));
 
+const mockLoadProposal = vi.fn(() => null as unknown);
+vi.mock('../src/core/inbox/store.js', () => ({
+  loadProposal: (...args: unknown[]) => mockLoadProposal(...args),
+}));
+
 // ---------------------------------------------------------------------------
 // Lazy import (after mocks)
 // ---------------------------------------------------------------------------
@@ -134,6 +139,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockLoadLatestBriefing.mockReturnValue(null);
   mockListGoals.mockReturnValue([]);
+  mockLoadProposal.mockReturnValue(null);
   titleCounter = 0;
 });
 
@@ -285,6 +291,24 @@ describe('runInventCycle — invents for active repos and enqueues', () => {
     expect(result.invented).toBe(1);
     expect(result.enqueued).toBe(1);
     expect(mockInventWorkItems).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not defer invention for a milestone with exact applied verification evidence', async () => {
+    const goal = makeActiveGoal('/tmp/repo-a', 'goal-landed');
+    goal.milestones[0]!.proposalId = 'proposal-landed';
+    mockListEnrolled.mockReturnValue(['/tmp/repo-a']);
+    mockListGoals.mockReturnValue([goal]);
+    mockLoadProposal.mockReturnValue({
+      id: 'proposal-landed',
+      status: 'applied',
+      verifyResult: { passed: true, source: 'manual' },
+    });
+    mockInventWorkItems.mockResolvedValue([makeItem('/tmp/repo-a', 'Next invention')]);
+
+    const result = await runInventCycle(makeCfg({ generative: true, goalFocusActiveThreshold: 1 }));
+
+    expect(result.deferredByGoalFocus).toBeUndefined();
+    expect(result.enqueued).toBe(1);
   });
 
   it('does not defer invention for done, paused, or projectless goals', async () => {

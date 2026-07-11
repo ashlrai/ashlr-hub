@@ -14,8 +14,8 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, statSync, readFileSync, readdirSync } from 'node:fs';
-import { join, basename, resolve } from 'node:path';
+import { existsSync, lstatSync, opendirSync, statSync, readFileSync } from 'node:fs';
+import { join, basename, relative, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
 import type {
@@ -32,6 +32,7 @@ import type {
 import { listIssues, githubStatus } from '../integrations/github.js';
 import { isTrivialItem, isNonCodePath } from './value-filter.js';
 import { listGoals } from '../goals/store.js';
+import { createProposalMilestoneCompletionPredicate } from '../goals/completion.js';
 import {
   compareGoalFocusCandidates,
   goalFocusSnapshot,
@@ -1218,31 +1219,199 @@ export async function scanSecurity(repo: string): Promise<WorkItem[]> {
 // ---------------------------------------------------------------------------
 
 /**
- * True when a line of rg output has the skip/todo/xit token inside a string
+ * True when a candidate line has the skip/todo/xit token inside a string
  * literal or template literal — i.e. the token is quoted data, not a real call.
  *
  * Strategy: remove all single-quoted, double-quoted, and backtick strings from
  * the content first, then check whether the skip pattern is still present.
  * If the pattern disappears after string-stripping, it was inside a string.
  *
- * Also flags scanner-test fixture files that contain skip tokens as test data
- * (files whose basename matches backlog-quality, anti-clog, or scanners).
- * These files intentionally embed skip-like text for the scanner's own tests.
  */
-function isSkipInStringOrFixture(content: string, file: string): boolean {
-  // 1. Fixture-file check: scanner test files embed skip tokens as test data
-  const base = file.split('/').pop() ?? '';
-  if (/backlog-quality|anti-clog|scanners/.test(base)) return true;
+/** Mask strings and comments while preserving line breaks and source offsets. */
+function maskNonCode(source: string): string {
+  type State =
+    | 'code'
+    | 'single'
+    | 'double'
+    | 'template'
+    | 'regex'
+    | 'line-comment'
+    | 'block-comment';
+  let state: State = 'code';
+  let escaped = false;
+  let regexCharacterClass = false;
+  const templateExpressionDepths: number[] = [];
+  let previousCode = '';
+  let out = '';
 
-  // 2. String-literal check: strip all quoted strings then re-test for skip pattern
-  //    We handle: 'single', "double", `template` (no nested escapes needed for this heuristic)
-  const SKIP_RE = /\b(it|describe|test)\.(skip|todo)\b|\bxit\b/;
-  const stripped = content
-    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
-    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
-    .replace(/`(?:[^`\\]|\\.)*`/g, '``');
-  // If the skip pattern is gone after stripping strings, it was quoted data
-  return !SKIP_RE.test(stripped);
+  const canStartRegex = (): boolean => {
+    if (previousCode === '' || '=(:,![{;?&|+-*%^~<>'.includes(previousCode)) return true;
+    return /(?:^|[^\w$])(?:return|throw|yield|case|delete|void|typeof|instanceof|in|of|await)\s*$/.test(
+      out,
+    );
+  };
+
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i]!;
+    const next = source[i + 1];
+    if (char === '\n') {
+      out += '\n';
+      if (state === 'line-comment') state = 'code';
+      escaped = false;
+      continue;
+    }
+    if (state === 'line-comment') {
+      out += ' ';
+      continue;
+    }
+    if (state === 'block-comment') {
+      if (char === '*' && next === '/') {
+        out += '  ';
+        i++;
+        state = 'code';
+      } else {
+        out += ' ';
+      }
+      continue;
+    }
+    if (state !== 'code') {
+      if (state === 'template' && char === '$' && next === '{') {
+        out += '${';
+        i++;
+        state = 'code';
+        templateExpressionDepths.push(1);
+        previousCode = '{';
+        continue;
+      }
+      out += ' ';
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (state === 'regex') {
+        if (char === '[') regexCharacterClass = true;
+        else if (char === ']') regexCharacterClass = false;
+        else if (char === '/' && !regexCharacterClass) state = 'code';
+        continue;
+      }
+      if (
+        (state === 'single' && char === "'") ||
+        (state === 'double' && char === '"') ||
+        (state === 'template' && char === '`')
+      ) {
+        state = 'code';
+      }
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      out += '  ';
+      i++;
+      state = 'line-comment';
+      continue;
+    }
+    if (templateExpressionDepths.length > 0) {
+      const depthIndex = templateExpressionDepths.length - 1;
+      if (char === '{') templateExpressionDepths[depthIndex]!++;
+      if (char === '}') {
+        templateExpressionDepths[depthIndex]!--;
+        out += char;
+        previousCode = char;
+        if (templateExpressionDepths[depthIndex] === 0) {
+          templateExpressionDepths.pop();
+          state = 'template';
+        }
+        continue;
+      }
+    }
+    if (char === '/' && next === '*') {
+      out += '  ';
+      i++;
+      state = 'block-comment';
+      continue;
+    }
+    if (
+      char === '/' &&
+      next !== undefined &&
+      !(previousCode === '<' && /[A-Za-z]/.test(next)) &&
+      canStartRegex()
+    ) {
+      out += ' ';
+      state = 'regex';
+      regexCharacterClass = false;
+      continue;
+    }
+    if (char === "'") state = 'single';
+    else if (char === '"') state = 'double';
+    else if (char === '`') state = 'template';
+    if (state === 'code') {
+      out += char;
+      if (!/\s/.test(char)) previousCode = char;
+    } else {
+      out += ' ';
+    }
+  }
+  return out;
+}
+
+function maskPlainJsxText(source: string): string {
+  return source.replace(
+    /(<([A-Za-z][\w.-]*)\b[^>\n]*>)([\s\S]*?)(<\/\2\s*>)/g,
+    (_match, open: string, _tag: string, text: string, close: string) => {
+      let depth = 0;
+      let masked = '';
+      for (const char of text) {
+        if (char === '{') depth++;
+        if (depth > 0 || char === '\n') masked += char;
+        else masked += ' ';
+        if (char === '}' && depth > 0) depth--;
+      }
+      return open + masked + close;
+    },
+  );
+}
+
+function firstCallArgumentIsString(source: string, openParenIndex: number): boolean {
+  let i = openParenIndex + 1;
+  while (i < source.length) {
+    const char = source[i]!;
+    const next = source[i + 1];
+    if (/\s/.test(char)) {
+      i++;
+      continue;
+    }
+    if (char === '/' && next === '/') {
+      i += 2;
+      while (i < source.length && source[i] !== '\n') i++;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      const end = source.indexOf('*/', i + 2);
+      if (end < 0) return false;
+      i = end + 2;
+      continue;
+    }
+    return char === "'" || char === '"' || char === '`';
+  }
+  return false;
+}
+
+function classifyStringReason(
+  source: string,
+  maskedSource: string,
+  markerEnd: number,
+): boolean | null {
+  const MAX_CALL_PREFIX_BYTES = 8 * 1024;
+  const end = Math.min(maskedSource.length, markerEnd + MAX_CALL_PREFIX_BYTES);
+  let i = markerEnd;
+  while (i < end && /\s/.test(maskedSource[i]!)) i++;
+  if (i >= end) return end < maskedSource.length ? null : false;
+  if (maskedSource.slice(i, i + 5) === '.each') return false;
+  if (maskedSource[i] !== '(') return false;
+  return firstCallArgumentIsString(source, i);
 }
 
 /**
@@ -1317,91 +1486,109 @@ export async function scanSelfImprove(repo: string): Promise<WorkItem[]> {
     // yielded nothing wherever ripgrep was absent). Emits the same
     // `path:line:content` lines the ripgrep call produced: repo-relative path,
     // forward slashes, 1-based line numbers.
-    const MARKER_RE = /\b(it|describe|test)\.(skip|todo)\b|\bxit\b/;
+    const MARKER_RE = /^[\t ]*(?:(?:it|describe|test)(?:\.(?:concurrent|serial|only))*\.(?:skip|todo)|xit)\b(?=\s*(?:\(|\.each\b))/gm;
+    const TEST_SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts']);
+    const MAX_WALK_ENTRIES = 5_000;
+    const MAX_FILES_READ = 2_000;
+    const MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+    const MAX_FILE_BYTES = 1024 * 1024;
     const found: string[] = [];
+    let entriesVisited = 0;
+    let filesRead = 0;
+    let bytesRead = 0;
     const walkTests = (dir: string): void => {
-      if (found.length >= 50) return;
-      let entries: string[];
+      if (
+        found.length >= 50 ||
+        entriesVisited >= MAX_WALK_ENTRIES ||
+        filesRead >= MAX_FILES_READ ||
+        bytesRead >= MAX_TOTAL_BYTES
+      ) return;
+      let handle;
       try {
-        entries = readdirSync(dir);
+        handle = opendirSync(dir);
       } catch {
         return; // dir missing / unreadable → nothing to scan
       }
-      for (const name of entries) {
-        if (found.length >= 50) return;
-        if (name === 'node_modules' || name === '.git') continue;
-        const abs = join(dir, name);
-        let st;
-        try {
-          st = statSync(abs);
-        } catch {
-          continue;
+      try {
+        while (true) {
+          if (
+            found.length >= 50 ||
+            entriesVisited >= MAX_WALK_ENTRIES ||
+            filesRead >= MAX_FILES_READ ||
+            bytesRead >= MAX_TOTAL_BYTES
+          ) return;
+          const entry = handle.readSync();
+          if (!entry) break;
+          entriesVisited++;
+          const name = entry.name;
+          if (name === 'node_modules' || name === '.git' || entry.isSymbolicLink()) continue;
+          const abs = join(dir, name);
+          let st;
+          try {
+            st = lstatSync(abs);
+          } catch {
+            continue;
+          }
+          if (st.isSymbolicLink()) continue;
+          if (st.isDirectory()) {
+            walkTests(abs);
+            continue;
+          }
+          const extension = name.slice(name.lastIndexOf('.')).toLowerCase();
+          if (!TEST_SOURCE_EXTENSIONS.has(extension)) continue;
+          if (!st.isFile() || st.size > MAX_FILE_BYTES || bytesRead + st.size > MAX_TOTAL_BYTES) continue;
+          let body: string;
+          try {
+            body = readFileSync(abs, 'utf8');
+            filesRead++;
+            bytesRead += st.size;
+          } catch {
+            continue; // unreadable / binary → skip
+          }
+          const rel = relative(repo, abs).split('\\').join('/');
+          if (isIgnoredPath(rel) || isProtectedSafetyFile(rel)) continue;
+          const fileLines = body.split('\n');
+          const code = maskPlainJsxText(maskNonCode(body));
+          for (const match of code.matchAll(MARKER_RE)) {
+            if (found.length >= 50) break;
+            const matchIndex = match.index ?? 0;
+            const i = body.slice(0, matchIndex).split('\n').length - 1;
+            const content = fileLines[i] ?? '';
+            const markerEnd = matchIndex + match[0].length;
+            const stringReason = /^\s*xit\b/.test(match[0])
+              ? false
+              : classifyStringReason(body, code, markerEnd);
+            const hasAnnotation = /\/\/\s*(skip|reason)\s*:|@skip\b/i.test(content);
+            if (stringReason !== false || hasAnnotation) continue;
+            const prevLine = fileLines[i - 1] ?? '';
+            if (/\/\/\s*(skip|reason)\s*:|@skip\b/i.test(prevLine)) continue;
+            if (isPlatformGatedSkip(content, prevLine, fileLines, i)) continue;
+            found.push(`${rel}:${i + 1}:${content}`);
+          }
         }
-        if (st.isDirectory()) {
-          walkTests(abs);
-          continue;
-        }
-        let body: string;
-        try {
-          body = readFileSync(abs, 'utf8');
-        } catch {
-          continue; // unreadable / binary → skip
-        }
-        const rel = abs.slice(repo.length + 1).split('\\').join('/');
-        const fileLines = body.split('\n');
-        for (let i = 0; i < fileLines.length && found.length < 50; i++) {
-          if (MARKER_RE.test(fileLines[i]!)) found.push(`${rel}:${i + 1}:${fileLines[i]}`);
-        }
+      } finally {
+        handle.closeSync();
       }
     };
-    walkTests(join(repo, 'test'));
+    const testRoot = join(repo, 'test');
+    try {
+      const rootStat = lstatSync(testRoot);
+      if (rootStat.isDirectory() && !rootStat.isSymbolicLink()) walkTests(testRoot);
+    } catch {
+      // missing or unsafe test root → nothing to scan
+    }
     const lines = found.filter(Boolean).slice(0, 50);
     for (const line of lines) {
       const m = line.match(/^(.+?):(\d+):(.*)/);
       if (!m) continue;
       const file = m[1]!;
       const ln = m[2]!;
-      const content = m[3] ?? '';
 
-      // RULE 0 (M99): skip tokens that appear inside string literals or in
-      // scanner fixture files — these are test data for the scanner itself,
-      // not real skipped tests. Checking this before reading the file avoids
-      // unnecessary I/O for false-positive lines.
-      if (isSkipInStringOrFixture(content, file)) continue;
-
-      // RULE 1 (M95): skip PROTECTED safety files — the fleet must never try to
-      // un-skip safety/invariant tests (they are gated for a reason and any
-      // attempt will be declined by guardSafetyTests before it can be applied).
+      // The source walker already masks comments, strings, regex literals, and
+      // plain JSX text, then applies intentional/platform exclusions before
+      // this bounded collection step. Keep the protected-file check here as a
+      // final authority boundary in case collection changes independently.
       if (isProtectedSafetyFile(file)) continue;
-
-      // RULE 2 (M87): intentional-skip detection — do NOT emit for a skip that
-      // has an explicit rationale:
-      //   (a) the first argument is a non-empty string, e.g. it.skip('darwin only', ...)
-      //   (b) the line carries a // skip: / // reason: / @skip annotation comment
-      const hasStringReason = /\.(skip|todo)\s*\(\s*['"`]/.test(content);
-      const hasAnnotation = /\/\/\s*(skip|reason)\s*:|@skip\b/i.test(content);
-      if (hasStringReason || hasAnnotation) continue;
-
-      // Read the surrounding file lines for annotation + platform-gate checks.
-      let fileLines: string[] = [];
-      let prevLine = '';
-      if (Number(ln) > 0) {
-        try {
-          const filePath = join(repo, file);
-          if (existsSync(filePath)) {
-            fileLines = readFileSync(filePath, 'utf8').split('\n');
-            prevLine = fileLines[Number(ln) - 2] ?? '';
-          }
-        } catch { /* best-effort — never throws */ }
-      }
-
-      // Check prev-line annotation (M87 best-effort).
-      if (/\/\/\s*(skip|reason)\s*:|@skip\b/i.test(prevLine)) continue;
-
-      // RULE 3 (M95): platform-gated skip — do NOT emit. These skips are
-      // intentionally conditioned on the host OS and will always be declined
-      // by frontier engines on environments where the gate doesn't match.
-      if (isPlatformGatedSkip(content, prevLine, fileLines, Number(ln) - 1)) continue;
 
       items.push(
         makeItem(
@@ -1609,7 +1796,8 @@ export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'
     const allGoals = [...active, ...planning.filter((g) => !seenIds.has(g.id))];
     if (allGoals.length === 0) return [];
 
-    const focus = goalFocusSnapshot(allGoals, _cfg, { repo });
+    const isMilestoneComplete = createProposalMilestoneCompletionPredicate();
+    const focus = goalFocusSnapshot(allGoals, _cfg, { repo, isMilestoneComplete });
     const candidates: Array<{ goal: Goal; milestone: Milestone; item: WorkItem }> = [];
     let zeroMilestoneExpansions = 0;
     for (let goal of allGoals) {
@@ -1631,7 +1819,7 @@ export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'
 
       // Find the next actionable milestone: first pending or in-progress milestone
       // in order (sortMilestones has already sorted by `order` ascending).
-      const next = nextActionableGoalMilestone(goal);
+      const next = nextActionableGoalMilestone(goal, isMilestoneComplete);
       if (!next) continue;
 
       // Scope the work item to the milestone's concrete detail when available,

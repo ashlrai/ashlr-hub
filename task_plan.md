@@ -1664,3 +1664,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Align generated-repair cooldown reads with generation-scoped outcome writes and preserve ordinary backlog progress.
 - [x] Add starvation, unavailable-alternative, concurrent-capacity, lineage, and cooldown regression coverage.
 - [x] Run focused/full gates and independent adversarial review, update notes, commit, push, reload, and production-canary repair progress.
+
+## Current Overnight Cycle - Repair Parent Source Precision
+- [x] Rehydrate the deployed diagnostic-drain baseline, production health, current git state, Entire state, and persistent notes.
+- [x] Deploy disjoint audits for comment false positives, issue actionability, stale goals, and unchanged repair generations.
+- [x] Remove comment/string-only skipped-test markers before they become executable self-improvement work.
+- [x] Decide and implement the next evidence-bound source or generation precision improvement.
+- [x] Add adversarial fixtures and run focused/full verification plus independent review.
+- [ ] Update durable notes, commit, push, reload, and production-canary backlog precision.

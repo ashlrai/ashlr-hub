@@ -45,6 +45,8 @@ export function isActionableGoalMilestone(milestone: Milestone): boolean {
   return milestone.status === 'pending' || milestone.status === 'in-progress';
 }
 
+export type GoalMilestoneCompletionPredicate = (milestone: Milestone, goal: Goal) => boolean;
+
 function goalMatchesScope(
   goal: Goal,
   opts?: { repo?: string | null; repos?: readonly string[] | null },
@@ -63,21 +65,37 @@ function goalMatchesScope(
   }
 }
 
-export function nextActionableGoalMilestone(goal: Goal): Milestone | null {
-  return goal.milestones.find(isActionableGoalMilestone) ?? null;
+export function nextActionableGoalMilestone(
+  goal: Goal,
+  isComplete?: GoalMilestoneCompletionPredicate,
+): Milestone | null {
+  return goal.milestones.find((milestone) => {
+    if (!isActionableGoalMilestone(milestone)) return false;
+    try {
+      return isComplete?.(milestone, goal) !== true;
+    } catch {
+      return true;
+    }
+  }) ?? null;
 }
 
 export function goalFocusSnapshot(
   goals: readonly Goal[],
   cfg?: Pick<AshlrConfig, 'foundry'> | null,
-  opts?: { repo?: string | null; repos?: readonly string[] | null },
+  opts?: {
+    repo?: string | null;
+    repos?: readonly string[] | null;
+    isMilestoneComplete?: GoalMilestoneCompletionPredicate;
+  },
 ): GoalFocusSnapshot {
   const enabled = goalFocusModeEnabled(cfg);
   const activeThreshold = goalFocusActiveThreshold(cfg);
   const scoped = goals.filter((goal) => goalMatchesScope(goal, opts));
   const active = scoped.filter((goal) => goal.status === 'active');
   const planning = scoped.filter((goal) => goal.status === 'planning');
-  const actionableActive = active.filter((goal) => nextActionableGoalMilestone(goal) !== null);
+  const actionableActive = active.filter(
+    (goal) => nextActionableGoalMilestone(goal, opts?.isMilestoneComplete) !== null,
+  );
   const shouldDeferNewGoalWork = enabled && actionableActive.length >= activeThreshold;
 
   return {

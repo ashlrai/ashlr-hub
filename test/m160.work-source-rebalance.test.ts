@@ -86,12 +86,21 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
 // ============================================================================
 
 let _listGoalsImpl: ReturnType<typeof vi.fn>;
+let _loadProposalImpl: ReturnType<typeof vi.fn>;
 
 vi.mock('../src/core/goals/store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/goals/store.js')>();
   return {
     ...actual,
     listGoals: (...args: unknown[]) => _listGoalsImpl(...args),
+  };
+});
+
+vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/inbox/store.js')>();
+  return {
+    ...actual,
+    loadProposal: (...args: unknown[]) => _loadProposalImpl(...args),
   };
 });
 
@@ -164,6 +173,7 @@ beforeEach(() => {
 
   // Default goals stub: no active goals
   _listGoalsImpl = vi.fn(() => []);
+  _loadProposalImpl = vi.fn(() => null);
 });
 
 afterEach(() => {
@@ -396,6 +406,114 @@ describe('M160 — high-value scanners: unaffected by M160 flags', () => {
 // ============================================================================
 
 describe('M160 — scanGoals: goal-derived work items', () => {
+  it('advances past an exactly linked applied and verified milestone without mutating the goal', async () => {
+    const goal = makeActiveGoal('goal-linked', 'Ship linked work', 'Already landed');
+    goal.milestones[0]!.status = 'in-progress';
+    goal.milestones[0]!.proposalId = 'prop-linked';
+    goal.milestones.push({
+      ...goal.milestones[0]!,
+      id: 'goal-linked-m1',
+      title: 'Next unfinished step',
+      order: 1,
+      status: 'pending',
+      proposalId: null,
+    });
+    const before = JSON.stringify(goal);
+    _listGoalsImpl = vi.fn(() => [goal]);
+    _loadProposalImpl = vi.fn(() => ({
+      id: 'prop-linked',
+      status: 'applied',
+      verifyResult: { passed: true },
+    }));
+
+    const items = await scanGoals(tmpDir);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]!.title).toContain('Next unfinished step');
+    expect(JSON.stringify(goal)).toBe(before);
+    expect(_loadProposalImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps linked milestones actionable without both applied and passing verification evidence', async () => {
+    const goal = makeActiveGoal('goal-unverified', 'Ship verified work', 'Needs proof');
+    goal.milestones[0]!.proposalId = 'prop-unverified';
+    _listGoalsImpl = vi.fn(() => [goal]);
+    _loadProposalImpl = vi.fn(() => ({
+      id: 'prop-unverified',
+      status: 'applied',
+      verifyResult: { passed: false },
+    }));
+
+    const items = await scanGoals(tmpDir);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]!.title).toContain('Needs proof');
+  });
+
+  it('does not accept applied evidence whose embedded proposal id mismatches the milestone link', async () => {
+    const goal = makeActiveGoal('goal-mismatched', 'Reject mismatched evidence', 'Needs exact link');
+    goal.milestones[0]!.proposalId = 'prop-expected';
+    _listGoalsImpl = vi.fn(() => [goal]);
+    _loadProposalImpl = vi.fn(() => ({
+      id: 'prop-different',
+      status: 'applied',
+      verifyResult: { passed: true },
+    }));
+
+    const items = await scanGoals(tmpDir);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]!.title).toContain('Needs exact link');
+  });
+
+  it('emits no work when the sole actionable milestone is authoritatively complete', async () => {
+    const goal = makeActiveGoal('goal-complete-only', 'Close stale goal', 'Already complete');
+    goal.milestones[0]!.proposalId = 'prop-complete-only';
+    _listGoalsImpl = vi.fn(() => [goal]);
+    _loadProposalImpl = vi.fn(() => ({
+      id: 'prop-complete-only',
+      status: 'applied',
+      verifyResult: { passed: true },
+    }));
+
+    await expect(scanGoals(tmpDir)).resolves.toEqual([]);
+  });
+
+  it('fails closed by keeping a linked milestone when proposal evidence cannot be read', async () => {
+    const goal = makeActiveGoal('goal-unreadable', 'Preserve uncertain work', 'Still actionable');
+    goal.milestones[0]!.proposalId = 'prop-unreadable';
+    _listGoalsImpl = vi.fn(() => [goal]);
+    _loadProposalImpl = vi.fn(() => { throw new Error('proposal store unavailable'); });
+
+    const items = await scanGoals(tmpDir);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]!.title).toContain('Still actionable');
+  });
+
+  it('does not let completed-only lanes trigger the active-goal focus threshold', async () => {
+    const goals = [
+      makeActiveGoal('goal-open-a', 'Open A', 'Pending A'),
+      makeActiveGoal('goal-open-b', 'Open B', 'Pending B'),
+      makeActiveGoal('goal-open-c', 'Open C', 'Pending C'),
+      makeActiveGoal('goal-stale-complete', 'Stale complete', 'Already landed'),
+    ];
+    goals[3]!.milestones[0]!.proposalId = 'prop-stale-complete';
+    _listGoalsImpl = vi.fn(() => goals);
+    _loadProposalImpl = vi.fn((proposalId: string) => proposalId === 'prop-stale-complete'
+      ? { id: proposalId, status: 'applied', verifyResult: { passed: true } }
+      : null);
+
+    const items = await scanGoals(tmpDir, makeCfg({ goalFocusActiveThreshold: 4 }));
+
+    expect(items).toHaveLength(3);
+    expect(items.map((item) => item.tags[1])).toEqual(expect.arrayContaining([
+      'goal-open-a',
+      'goal-open-b',
+      'goal-open-c',
+    ]));
+  });
+
   it('returns [] when no active goals exist', async () => {
     _listGoalsImpl = vi.fn(() => []);
     const items = await scanGoals(tmpDir);

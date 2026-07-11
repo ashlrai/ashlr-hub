@@ -641,6 +641,36 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(existsSync(join(tmpHome, '.ashlr', 'audit'))).toBe(false);
   });
 
+  it('excludes exactly linked applied and verified milestones from goal focus pressure', async () => {
+    const repo = join(tmpHome, 'repo-focus-complete');
+    writeBacklogSnapshot(tmpHome, repo, []);
+    const proposal = createProposal(
+      {
+        repo,
+        origin: 'agent',
+        kind: 'patch',
+        title: 'Verified goal milestone',
+        summary: 'verified goal milestone',
+        diff: docsDiff('goal-focus-complete'),
+        verifyResult: { passed: true, source: 'manual' },
+      },
+      baseConfig(),
+    );
+    setStatus(proposal.id, 'applied');
+    const goal = makeGoalRecord(repo, 'goal-focus-complete');
+    goal.milestones[0]!.proposalId = proposal.id;
+    writeGoalRecords(tmpHome, [goal]);
+
+    const s = await buildFleetStatus(withFoundry({ goalFocusActiveThreshold: 1 }));
+
+    expect(s.goalFocus).toMatchObject({
+      activeGoalCount: 1,
+      actionableActiveGoalCount: 0,
+      deferredNewGoalWork: false,
+      reason: 'below-threshold',
+    });
+  });
+
   it('surfaces read-only lane locks from active goals, host handoffs, and unverified applied proposals', async () => {
     const repo = join(tmpHome, 'repo-lanes');
     const cfg = baseConfig();

@@ -113,6 +113,193 @@ afterEach(() => {
 // ===========================================================================
 
 describe('M99 Rule 0 — scanSelfImprove does NOT flag skip inside a string literal', () => {
+  it('does not flag skip calls mentioned in line comments', async () => {
+    const file = 'test/comment-only.test.ts';
+    fs.writeFileSync(
+      path.join(repo, file),
+      [
+        "import { it } from 'vitest';",
+        '// it.skip(() => {}) is an example of syntax the scanner rejects.',
+        "it('real test', () => {});",
+      ].join('\n'),
+      'utf8',
+    );
+
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(0);
+  });
+
+  it('does not flag skip calls mentioned across block comments', async () => {
+    const file = 'test/block-comment-only.test.ts';
+    fs.writeFileSync(
+      path.join(repo, file),
+      [
+        "import { it } from 'vitest';",
+        '/* Documentation example:',
+        ' * describe.skip(() => {})',
+        ' * xit(() => {})',
+        ' */',
+        "it('real test', () => {});",
+      ].join('\n'),
+      'utf8',
+    );
+
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(0);
+  });
+
+  it('does not flag a skip method reference that does not disable a test', async () => {
+    const file = 'test/method-reference.test.ts';
+    fs.writeFileSync(
+      path.join(repo, file),
+      "const skipMethod = it.skip;\nit('real test', () => {});\n",
+      'utf8',
+    );
+
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(0);
+  });
+
+  it.each([
+    ['test/example.py', '# it.skip(() => {})\n'],
+    ['test/example.md', 'Example: it.skip(() => {})\n'],
+    ['test/example.json', '{"example":"it.skip(() => {})"}\n'],
+  ])('does not interpret non-JavaScript %s examples as test calls', async (file, body) => {
+    fs.writeFileSync(path.join(repo, file), body, 'utf8');
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(0);
+  });
+
+  it('does not flag regex literals or JSX text examples', async () => {
+    const regexFile = 'test/regex.test.ts';
+    const jsxFile = 'test/example.test.tsx';
+    fs.writeFileSync(path.join(repo, regexFile), 'const re = /it.skip\\(/;\n', 'utf8');
+    fs.writeFileSync(path.join(repo, jsxFile), 'const example = <code>describe.skip()</code>;\n', 'utf8');
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(regexFile) || item.detail.includes(jsxFile))).toHaveLength(0);
+  });
+
+  it('does not let regex comment tokens hide a later real skip', async () => {
+    const file = 'test/regex-before-real.test.ts';
+    fs.writeFileSync(
+      path.join(repo, file),
+      'const re = /[/*]/;\nit.skip(() => {});\n',
+      'utf8',
+    );
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(1);
+  });
+
+  it('does not let a returned regex hide a later real skip', async () => {
+    const file = 'test/returned-regex-before-real.test.ts';
+    fs.writeFileSync(
+      path.join(repo, file),
+      'function matcher() { return /[/*]/; }\nit.skip(() => {});\n',
+      'utf8',
+    );
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(1);
+  });
+
+  it('does not flag multiline plain JSX text examples', async () => {
+    const file = 'test/multiline-example.test.tsx';
+    fs.writeFileSync(
+      path.join(repo, file),
+      'const example = <code>\n  describe.skip(() => {})\n</code>;\n',
+      'utf8',
+    );
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(0);
+  });
+
+  it('preserves executable JSX expression containers', async () => {
+    const file = 'test/jsx-expression.test.tsx';
+    fs.writeFileSync(
+      path.join(repo, file),
+      'const value = <code>{\n  it.skip(() => {})\n}</code>;\n',
+      'utf8',
+    );
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(1);
+  });
+
+  it('preserves JSX expressions that follow rendered text', async () => {
+    const file = 'test/jsx-mixed-expression.test.tsx';
+    fs.writeFileSync(
+      path.join(repo, file),
+      'const value = <code>Example:\n  {(() => {\n    it.skip(() => {})\n    return null;\n  })()}\n</code>;\n',
+      'utf8',
+    );
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(1);
+  });
+
+  it('preserves executable template interpolation bodies', async () => {
+    const file = 'test/template-expression.test.ts';
+    fs.writeFileSync(
+      path.join(repo, file),
+      'const value = `${(() => {\n  it.skip(() => {})\n  return "done";\n})()}`;\n',
+      'utf8',
+    );
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(1);
+  });
+
+  it('does not treat outer template text as code after nested interpolation', async () => {
+    const file = 'test/nested-template-text.test.ts';
+    fs.writeFileSync(
+      path.join(repo, file),
+      'const value = `outer ${`inner ${1}`}\n  it.skip(() => {})`;\n',
+      'utf8',
+    );
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(0);
+  });
+
+  it('restores code scanning after nested template interpolation', async () => {
+    const file = 'test/nested-template-before-real.test.ts';
+    fs.writeFileSync(
+      path.join(repo, file),
+      'const value = `outer ${`inner ${1}`} tail`;\nit.skip(() => {});\n',
+      'utf8',
+    );
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(1);
+  });
+
+  it('recognizes a string reason after an intervening comment', async () => {
+    const file = 'test/commented-reason.test.ts';
+    fs.writeFileSync(
+      path.join(repo, file),
+      'it.skip /* rationale */ ("intentional", () => {});\n',
+      'utf8',
+    );
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(0);
+  });
+
+  it('recognizes a string reason after a long bounded comment', async () => {
+    const file = 'test/long-commented-reason.test.ts';
+    fs.writeFileSync(
+      path.join(repo, file),
+      `it.skip /* ${'rationale '.repeat(100)} */ ("intentional", () => {});\n`,
+      'utf8',
+    );
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(0);
+  });
+
+  it('does not let tag-shaped strings hide intervening real skips', async () => {
+    const file = 'test/tag-string-boundary.test.tsx';
+    fs.writeFileSync(
+      path.join(repo, file),
+      'const open = "<code>";\nit.skip(() => {});\nconst close = "</code>";\n',
+      'utf8',
+    );
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(1);
+  });
+
   it('does not flag a .skip token that lives inside a single-quoted string argument', async () => {
     // This is what the m95 test file does: it.skip is written as a string literal
     // inside a test-data fixture (e.g. `"it.${'skip'}(...)"` or `'it.skip('...')`).
@@ -228,6 +415,108 @@ describe('M99 Rule 0 — scanSelfImprove does NOT flag skip inside a string lite
 // ===========================================================================
 
 describe('M99 Rule 0 — scanSelfImprove DOES flag a real it.skip() call', () => {
+  it('preserves a real skip call before a trailing explanatory comment', async () => {
+    const file = 'test/real-before-comment.test.ts';
+    fs.writeFileSync(
+      path.join(repo, file),
+      "it.skip(() => {}); // describe.skip here is documentation only\n",
+      'utf8',
+    );
+
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(1);
+  });
+
+  it('preserves parameterized skip calls', async () => {
+    const file = 'test/real-each.test.ts';
+    fs.writeFileSync(
+      path.join(repo, file),
+      'it.skip.each([[1]])("case %s", () => {});\n',
+      'utf8',
+    );
+
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(1);
+  });
+
+  it('preserves multiline and modifier-chain skip calls', async () => {
+    const multiline = 'test/real-multiline.test.ts';
+    const modifier = 'test/real-concurrent.test.ts';
+    fs.writeFileSync(path.join(repo, multiline), 'it.skip\n(() => {});\n', 'utf8');
+    fs.writeFileSync(path.join(repo, modifier), 'it.concurrent.skip(() => {});\n', 'utf8');
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(multiline))).toHaveLength(1);
+    expect(items.filter((item) => item.detail.includes(modifier))).toHaveLength(1);
+  });
+
+  it('preserves conventional xit calls with a test title', async () => {
+    const file = 'test/real-xit.test.ts';
+    fs.writeFileSync(path.join(repo, file), 'xit("disabled test", () => {});\n', 'utf8');
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(1);
+  });
+
+  it('does not scan symlinked directories outside the repository', async () => {
+    const external = fs.mkdtempSync(path.join(os.tmpdir(), 'm99-external-'));
+    try {
+      fs.writeFileSync(path.join(external, 'external.test.ts'), 'it.skip(() => {});\n', 'utf8');
+      fs.symlinkSync(external, path.join(repo, 'test', 'external-link'), 'dir');
+      const items = await scanSelfImprove(repo);
+      expect(items.filter((item) => item.detail.includes('external-link'))).toHaveLength(0);
+    } finally {
+      fs.rmSync(external, { recursive: true, force: true });
+    }
+  });
+
+  it('does not follow a symlinked test root outside the repository', async () => {
+    const external = fs.mkdtempSync(path.join(os.tmpdir(), 'm99-external-root-'));
+    try {
+      fs.writeFileSync(path.join(external, 'outside.test.ts'), 'it.skip(() => {});\n', 'utf8');
+      fs.rmSync(path.join(repo, 'test'), { recursive: true, force: true });
+      fs.symlinkSync(external, path.join(repo, 'test'), 'dir');
+      const items = await scanSelfImprove(repo);
+      expect(items).toHaveLength(0);
+    } finally {
+      fs.rmSync(external, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps repo-relative paths intact when the repo has a trailing separator', async () => {
+    const file = 'test/trailing-separator.test.ts';
+    fs.writeFileSync(path.join(repo, file), 'it.skip(() => {});\n', 'utf8');
+    const items = await scanSelfImprove(`${repo}${path.sep}`);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(1);
+  });
+
+  it.each(['test/example.mjsx', 'test/example.mtsx', 'test/example.ctsx'])(
+    'does not scan unsupported extension %s',
+    async (file) => {
+      fs.writeFileSync(path.join(repo, file), 'it.skip(() => {});\n', 'utf8');
+      const items = await scanSelfImprove(repo);
+      expect(items.filter((item) => item.detail.includes(file))).toHaveLength(0);
+    },
+  );
+
+  it('preserves a real bare skip in a scanner-named test file', async () => {
+    const file = 'test/m22.scanners.test.ts';
+    fs.writeFileSync(path.join(repo, file), 'it.skip(() => {});\n', 'utf8');
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes(file))).toHaveLength(1);
+  });
+
+  it('does not let excluded markers consume the 50-item output bound', async () => {
+    const excluded = Array.from({ length: 50 }, (_unused, index) =>
+      `it.skip('intentional ${index}', () => {});`,
+    );
+    fs.writeFileSync(
+      path.join(repo, 'test/cap.test.ts'),
+      [...excluded, 'it.skip(() => {});'].join('\n'),
+      'utf8',
+    );
+    const items = await scanSelfImprove(repo);
+    expect(items.filter((item) => item.detail.includes('test/cap.test.ts'))).toHaveLength(1);
+  });
+
   it('flags a bare it.skip() call at statement position (not inside a string)', async () => {
     const file = 'test/real.test.ts';
     fs.writeFileSync(

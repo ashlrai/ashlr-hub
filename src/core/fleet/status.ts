@@ -33,6 +33,7 @@ import type { SharedQueueHealth } from './shared-store.js';
 import type { AutonomyEvidencePack } from '../autonomy/evidence-pack.js';
 import type { ResourceStrategyReport } from '../autonomy/resource-strategy.js';
 import { goalFocusSnapshot } from '../goals/focus.js';
+import { createProposalMilestoneCompletionPredicate } from '../goals/completion.js';
 import { listGoals } from '../goals/store.js';
 import {
   listAttemptRecords,
@@ -1511,7 +1512,10 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ...planningGoals.filter((goal) => !seen.has(goal.id)),
     ];
     goalLaneCandidates = goals;
-    const snapshot = goalFocusSnapshot(goals, cfg, { repos: enrolledExistingRepos });
+    const snapshot = goalFocusSnapshot(goals, cfg, {
+      repos: enrolledExistingRepos,
+      isMilestoneComplete: createProposalMilestoneCompletionPredicate(),
+    });
     goalFocus = {
       enabled: snapshot.enabled,
       activeThreshold: snapshot.activeThreshold,
