@@ -7,7 +7,17 @@
  * authority and never throws.
  */
 
-import { existsSync, mkdirSync, appendFileSync, readdirSync, readFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type {
@@ -52,6 +62,7 @@ export type AgentActionKind =
   | 'merge'
   | 'guard'
   | 'maintenance'
+  | 'context-rollup'
   | 'reflection';
 
 export type AgentActionOutcome =
@@ -99,6 +110,10 @@ export interface AgentActionEvent {
   spentUsd?: number;
   tags?: string[];
   counts?: Record<string, number>;
+  /** Deterministic metadata-only identity for semantic context-rollup deduplication. */
+  contextRollupId?: string;
+  contextRollupPolicyVersion?: 'context-rollup-v1';
+  contextRollupSourceMaxTs?: string;
 }
 
 const AGENT_ACTION_ACTORS = new Set<AgentActionActor>([
@@ -122,6 +137,7 @@ const AGENT_ACTION_KINDS = new Set<AgentActionKind>([
   'merge',
   'guard',
   'maintenance',
+  'context-rollup',
   'reflection',
 ]);
 
@@ -307,6 +323,16 @@ function sanitizeEvent(event: AgentActionEvent): AgentActionEvent {
   const runId = boundedOptionalText(event.runId, 160);
   const model = boundedOptionalText(event.model, 160);
   const reason = boundedOptionalText(event.reason, 240);
+  const contextRollupId = typeof event.contextRollupId === 'string' &&
+    /^cr-[0-9a-f]{64}$/.test(event.contextRollupId) ? event.contextRollupId : undefined;
+  const contextRollupPolicyVersion = event.contextRollupPolicyVersion === 'context-rollup-v1'
+    ? event.contextRollupPolicyVersion
+    : undefined;
+  const contextRollupSourceMaxTs = typeof event.contextRollupSourceMaxTs === 'string' &&
+    Number.isFinite(Date.parse(event.contextRollupSourceMaxTs)) &&
+    new Date(Date.parse(event.contextRollupSourceMaxTs)).toISOString() === event.contextRollupSourceMaxTs
+    ? event.contextRollupSourceMaxTs
+    : undefined;
   const causal = causalMetadata({
     ts,
     itemId,
@@ -346,6 +372,9 @@ function sanitizeEvent(event: AgentActionEvent): AgentActionEvent {
     ...(spentUsd !== undefined ? { spentUsd: Math.max(0, spentUsd) } : {}),
     ...(tags ? { tags } : {}),
     ...(counts ? { counts } : {}),
+    ...(contextRollupId ? { contextRollupId } : {}),
+    ...(contextRollupPolicyVersion ? { contextRollupPolicyVersion } : {}),
+    ...(contextRollupSourceMaxTs ? { contextRollupSourceMaxTs } : {}),
   };
 }
 
@@ -363,16 +392,40 @@ function isAgentActionEvent(value: unknown): value is AgentActionEvent {
   );
 }
 
-export function recordAgentAction(input: AgentActionEvent | AgentActionEvent[]): void {
+export interface AgentActionWriteResult {
+  attempted: number;
+  recorded: number;
+}
+
+export function recordAgentActionResult(
+  input: AgentActionEvent | AgentActionEvent[],
+  opts?: { sync?: boolean },
+): AgentActionWriteResult {
+  let attempted = 0;
+  let recorded = 0;
   try {
     const events = Array.isArray(input) ? input : [input];
-    if (events.length === 0) return;
+    attempted = events.length;
+    if (events.length === 0) return { attempted, recorded };
     const dir = agentActionsDir();
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     for (const event of events) {
       try {
         const record = sanitizeEvent(event);
-        appendFileSync(join(dir, `${eventDateString(record.ts)}.jsonl`), JSON.stringify(record) + '\n', 'utf8');
+        const path = join(dir, `${eventDateString(record.ts)}.jsonl`);
+        const line = JSON.stringify(record) + '\n';
+        if (opts?.sync) {
+          const fd = openSync(path, 'a', 0o600);
+          try {
+            writeFileSync(fd, line, 'utf8');
+            fsyncSync(fd);
+          } finally {
+            closeSync(fd);
+          }
+        } else {
+          appendFileSync(path, line, 'utf8');
+        }
+        recorded++;
       } catch {
         // Skip only this record; telemetry must never disrupt the caller.
       }
@@ -380,12 +433,19 @@ export function recordAgentAction(input: AgentActionEvent | AgentActionEvent[]):
   } catch {
     // Telemetry/history must never fail dispatch.
   }
+  return { attempted, recorded };
+}
+
+export function recordAgentAction(input: AgentActionEvent | AgentActionEvent[]): void {
+  void recordAgentActionResult(input);
 }
 
 export function readAgentActions(opts?: {
   sinceMs?: number;
   limit?: number;
   maxFiles?: number;
+  filter?: (event: AgentActionEvent) => boolean;
+  requireComplete?: boolean;
 }): AgentActionEvent[] {
   try {
     const dir = agentActionsDir();
@@ -408,13 +468,17 @@ export function readAgentActions(opts?: {
         if (datedFilesRead >= maxFiles) continue;
         datedFilesRead++;
       } else {
-        if (looseFilesRead >= 3) continue;
+        if (looseFilesRead >= 3) {
+          if (opts?.requireComplete) return [];
+          continue;
+        }
         looseFilesRead++;
       }
       let raw: string;
       try {
         raw = readFileSync(join(dir, file), 'utf8');
       } catch {
+        if (opts?.requireComplete) return [];
         continue;
       }
       for (const line of raw.split('\n').reverse()) {
@@ -422,14 +486,19 @@ export function readAgentActions(opts?: {
         if (!line.trim()) continue;
         try {
           const parsed: unknown = JSON.parse(line);
-          if (!isAgentActionEvent(parsed)) continue;
+          if (!isAgentActionEvent(parsed)) {
+            if (opts?.requireComplete) return [];
+            continue;
+          }
           const sanitized = sanitizeEvent(parsed);
           if (opts?.sinceMs !== undefined) {
             const eventMs = Date.parse(sanitized.ts);
             if (Number.isFinite(eventMs) && eventMs < opts.sinceMs) continue;
           }
+          if (opts?.filter && !opts.filter(sanitized)) continue;
           out.push(sanitized);
         } catch {
+          if (opts?.requireComplete) return [];
           // Malformed lines are skipped.
         }
       }
@@ -563,6 +632,8 @@ export function summarizeAgentWorkspace(
   const byRepo = new Map<string, number>();
   const byBackend = new Map<string, number>();
   const bySource = new Map<string, number>();
+  const contextRollupIds = new Set<string>();
+  const semanticEvents: AgentActionEvent[] = [];
   const activeMachines = new Set<string>();
   let spendUsd = 0;
   let proposalEvents = 0;
@@ -572,6 +643,11 @@ export function summarizeAgentWorkspace(
   let latestAt: string | null = null;
 
   for (const event of events) {
+    if (event.kind === 'context-rollup') {
+      if (!event.contextRollupId || contextRollupIds.has(event.contextRollupId)) continue;
+      contextRollupIds.add(event.contextRollupId);
+    }
+    semanticEvents.push(event);
     increment(byAction, event.kind);
     increment(byOutcome, event.outcome);
     if (event.repo) increment(byRepo, event.repo);
@@ -613,7 +689,7 @@ export function summarizeAgentWorkspace(
   return {
     generatedAt: new Date().toISOString(),
     windowHours: opts?.windowHours ?? 24,
-    eventCount: events.length,
+    eventCount: semanticEvents.length,
     latestAt,
     activeMachines: [...activeMachines].sort().slice(0, 10),
     spendUsd,
@@ -640,7 +716,7 @@ export function summarizeAgentWorkspace(
       outcome: entropy(outcomeRows),
       repo: entropy(repoRows),
     },
-    recentActions: events.slice(0, recentLimit).map(recentAction),
+    recentActions: semanticEvents.slice(0, recentLimit).map(recentAction),
   };
 }
 

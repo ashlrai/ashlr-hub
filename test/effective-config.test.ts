@@ -87,6 +87,9 @@ describe('effective config snapshot', () => {
 
     expect(snapshot.daemon.dailyBudgetUsd.value).toBe(1);
     expect(snapshot.daemon.dailyBudgetUsd.source).toBe('default');
+    expect(snapshot.daemon.contextRollup.enabled).toMatchObject({ value: true, source: 'default' });
+    expect(snapshot.daemon.contextRollup.cadenceHours.value).toBe(24);
+    expect(snapshot.daemon.contextRollup.minTerminalTrajectories.value).toBe(50);
     expect(snapshot.foundry.enabled.value).toBe(false);
     expect(snapshot.foundry.allowedBackends.value).toEqual(['builtin']);
     expect(snapshot.backends.map((b) => b.backend)).toEqual(['builtin']);
@@ -102,6 +105,7 @@ describe('effective config snapshot', () => {
         parallel: 4,
         intervalMs: 60_000,
         concurrency: { total: 12 },
+        contextRollup: { enabled: false, cadenceHours: 48, minTerminalTrajectories: 600 },
       },
       foundry: {
         allowedBackends: ['codex', 'nim'],
@@ -126,6 +130,7 @@ describe('effective config snapshot', () => {
         parallel: 4,
         intervalMs: 60_000,
         concurrency: { total: 12 },
+        contextRollup: { enabled: false, cadenceHours: 48, minTerminalTrajectories: 600 },
       },
       foundry: {
         allowedBackends: ['codex', 'nim'],
@@ -157,11 +162,33 @@ describe('effective config snapshot', () => {
     expect(snapshot.daemon.dailyBudgetUsd.source).toBe('configured');
     expect(snapshot.daemon.maxConcurrent.value).toBe(12);
     expect(snapshot.daemon.maxConcurrent.source).toBe('derived');
+    expect(snapshot.daemon.contextRollup.enabled).toMatchObject({ value: false, source: 'configured' });
+    expect(snapshot.daemon.contextRollup.cadenceHours).toMatchObject({ value: 48, source: 'configured' });
+    expect(snapshot.daemon.contextRollup.minTerminalTrajectories).toMatchObject({ value: 600, source: 'configured' });
     expect(snapshot.foundry.allowedBackends.source).toBe('configured');
     expect(codex?.model).toMatchObject({ value: 'gpt-5.5', source: 'configured' });
     expect(nim?.tier).toBe('frontier');
     expect(nim?.apiKeyEnvName).toBe('NVIDIA_NIM_API_KEY');
     expect(serialized).not.toContain('super-secret-token');
+  });
+
+  it('keeps context-rollup cadence and evidence thresholds inside safety bounds', () => {
+    const low = buildEffectiveConfigSnapshot(makeCfg({
+      daemon: { contextRollup: { cadenceHours: 0.1, minTerminalTrajectories: 1 } },
+    } as Partial<AshlrConfig>));
+    const high = buildEffectiveConfigSnapshot(makeCfg({
+      daemon: { contextRollup: { cadenceHours: 999, minTerminalTrajectories: 99_999 } },
+    } as Partial<AshlrConfig>));
+    const invalid = buildEffectiveConfigSnapshot(makeCfg({
+      daemon: { contextRollup: { cadenceHours: 0, minTerminalTrajectories: -1 } },
+    } as Partial<AshlrConfig>));
+
+    expect(low.daemon.contextRollup.cadenceHours.value).toBe(1);
+    expect(low.daemon.contextRollup.minTerminalTrajectories.value).toBe(25);
+    expect(high.daemon.contextRollup.cadenceHours.value).toBe(168);
+    expect(high.daemon.contextRollup.minTerminalTrajectories.value).toBe(5_000);
+    expect(invalid.daemon.contextRollup.cadenceHours.value).toBe(24);
+    expect(invalid.daemon.contextRollup.minTerminalTrajectories.value).toBe(50);
   });
 
   it('surfaces evidence auto-merge trust without tier mergeAuthority warnings', () => {

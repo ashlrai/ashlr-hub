@@ -29,6 +29,7 @@ export interface FleetContextEfficiencyStatus {
     activeRepos: number;
     repoEntropy: number;
     topRepoShare: number | null;
+    contextRollupEvents: number;
     reflectionEvents: number;
     memoryEntries: number;
     memoryProjects: number;
@@ -74,6 +75,7 @@ export function buildContextEfficiencyStatus(
   const topRepoCount = workspace?.topRepoCount ?? byRepo[0]?.count ?? 0;
   const topRepoShare = totalRepoEvents > 0 ? roundRatio(topRepoCount / totalRepoEvents) : null;
   const repoEntropy = workspace?.entropy?.repo ?? 0;
+  const contextRollupEvents = workspace?.byAction?.find((row) => row.key === 'context-rollup')?.count ?? 0;
   const reflectionEvents = workspace?.byAction?.find((row) => row.key === 'reflection')?.count ?? 0;
   const memoryEntries = genome?.totalEntries ?? 0;
   const hubMemoryEntries = genome?.hubEntries ?? 0;
@@ -169,6 +171,7 @@ export function buildContextEfficiencyStatus(
       activeRepos,
       repoEntropy,
       topRepoShare,
+      contextRollupEvents,
       reflectionEvents,
       memoryEntries,
       memoryProjects,

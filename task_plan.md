@@ -1571,3 +1571,12 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Isolate worked-ledger test fixtures from the live `ASHLR_HOME` and verify no additional production-state contamination.
 - [x] Preserve historical causal gaps as visible, non-fabricated evidence while confirming current-writer regressions remain actionable.
 - [x] Run focused and repository-wide verification, then update durable notes, commit, push, reload, and smoke production.
+
+## Current Overnight Cycle - Autonomous Metadata Context Rollup
+- [x] Rehydrate the clean isolation baseline, live context/yield telemetry, daemon health, Entire state, and persistent notes.
+- [x] Deploy disjoint implementation, daemon-integration, and privacy/authority audits.
+- [x] Add a bounded metadata-only context rollup with persisted restart-safe cadence and minimum evidence thresholds.
+- [x] Schedule it only after durable live daemon ticks without invoking models or mutating genome, prompts, routing, proposals, or merge authority.
+- [x] Expose explicit effective configuration and preserve proposal-yield risks independently from reflection status.
+- [x] Add threshold, cadence, restart, truncation, privacy, dry-run, failure, and end-to-end status coverage.
+- [ ] Run focused/full gates and independent adversarial review, then update notes, commit, push, reload, and production-canary the rollup.

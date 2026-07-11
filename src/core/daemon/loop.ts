@@ -117,10 +117,16 @@ import { buildDispatchManifestEvent, recordDispatchManifest } from '../fleet/dis
 import { recordRepairHandoffs, repairHandoffFromDispatchEvent } from '../fleet/repair-handoff-journal.js';
 import { workItemObjectiveHash } from '../fleet/work-item-objective.js';
 import {
+  readAgentActions,
   recordAgentAction,
+  recordAgentActionResult,
   type AgentActionEvent,
   type AgentActionOutcome,
 } from '../fleet/agent-action-ledger.js';
+import {
+  decideContextRollup,
+  type ContextRollupDecision,
+} from '../fleet/context-rollup.js';
 import {
   causalMetadata,
   evidenceOutcomeSummary,
@@ -177,6 +183,9 @@ const GENERATED_REPAIR_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS = 3;
 const GENERATED_REPAIR_EMPTY_FAST_COOLDOWN_MS = 30 * 60 * 1000;
 const MAX_GENERATED_REPAIR_DECISION_EVENTS = 20;
+const CONTEXT_ROLLUP_MAX_EVENTS = 5_000;
+const DEFAULT_CONTEXT_ROLLUP_CADENCE_HOURS = 24;
+const DEFAULT_CONTEXT_ROLLUP_MIN_TERMINAL_TRAJECTORIES = 50;
 
 // ---------------------------------------------------------------------------
 // DaemonConfig defaults (conservative)
@@ -218,6 +227,135 @@ export function scheduleResolutionObserverAfterTick(
     expectedBacklogGeneratedAt: tickResult.backlogSnapshotAt,
     expectedBacklogSnapshotId: tickResult.backlogSnapshotId,
   });
+}
+
+interface ResolvedContextRollupConfig {
+  enabled: boolean;
+  cadenceMs: number;
+  minimumTerminalTrajectories: number;
+}
+
+function resolveContextRollupConfig(cfg: AshlrConfig): ResolvedContextRollupConfig {
+  const raw = cfg.daemon?.contextRollup;
+  const cadenceHours = typeof raw?.cadenceHours === 'number' && Number.isFinite(raw.cadenceHours) &&
+    raw.cadenceHours > 0
+    ? Math.min(168, Math.max(1, raw.cadenceHours))
+    : DEFAULT_CONTEXT_ROLLUP_CADENCE_HOURS;
+  const minimumTerminalTrajectories = typeof raw?.minTerminalTrajectories === 'number' &&
+    Number.isFinite(raw.minTerminalTrajectories) && raw.minTerminalTrajectories > 0
+    ? Math.min(5_000, Math.max(25, Math.floor(raw.minTerminalTrajectories)))
+    : DEFAULT_CONTEXT_ROLLUP_MIN_TERMINAL_TRAJECTORIES;
+  return {
+    enabled: raw?.enabled !== false,
+    cadenceMs: Math.floor(cadenceHours * 60 * 60 * 1_000),
+    minimumTerminalTrajectories,
+  };
+}
+
+export type ContextRollupAfterTickResult = ContextRollupDecision | {
+  disposition: 'noop';
+  reason: 'disabled' | 'dry-run' | 'tick-not-ok' | 'truncated' | 'unavailable';
+};
+
+function isEligibleContextRollupTerminal(event: AgentActionEvent): boolean {
+  return event.actor === 'daemon' &&
+    event.kind === 'dispatch' &&
+    event.action === 'daemon:dispatch' &&
+    event.learningSource === 'daemon-dispatch' &&
+    event.learningLabel?.authoritative === true &&
+    typeof event.runId === 'string' &&
+    event.trajectoryId === `run:${event.runId}` &&
+    event.runEventSummary?.runId === event.runId;
+}
+
+/** Record one bounded observational rollup after a durable resident tick. */
+export function recordContextRollupAfterTick(
+  tickResult: DaemonTick,
+  opts: Pick<DaemonRunOptions, 'dryRun'>,
+  cfg: AshlrConfig,
+  deps: {
+    now?: () => Date;
+    read?: typeof readAgentActions;
+    record?: (event: AgentActionEvent) => boolean;
+  } = {},
+): ContextRollupAfterTickResult {
+  if (opts.dryRun) return { disposition: 'noop', reason: 'dry-run' };
+  if (tickResult.reason !== 'ok') return { disposition: 'noop', reason: 'tick-not-ok' };
+  const contract = resolveContextRollupConfig(cfg);
+  if (!contract.enabled) return { disposition: 'noop', reason: 'disabled' };
+
+  try {
+    const observedAt = (deps.now ?? (() => new Date()))().toISOString();
+    const cadenceWindowStart = Date.parse(observedAt) - contract.cadenceMs;
+    const sinceMs = Date.parse(observedAt) - (2 * contract.cadenceMs);
+    const events = (deps.read ?? readAgentActions)({
+      sinceMs,
+      limit: CONTEXT_ROLLUP_MAX_EVENTS + 1,
+      maxFiles: 16,
+      requireComplete: true,
+      filter: (event) => event.action === 'daemon:context-rollup' ||
+        isEligibleContextRollupTerminal(event),
+    });
+    if (events.length > CONTEXT_ROLLUP_MAX_EVENTS) {
+      return { disposition: 'noop', reason: 'truncated' };
+    }
+
+    const rollupsById = new Map<string, AgentActionEvent>();
+    for (const event of events) {
+      if (event.actor === 'daemon' && event.kind === 'context-rollup' && event.outcome === 'ok' &&
+        event.action === 'daemon:context-rollup' && event.contextRollupId) {
+        rollupsById.set(event.contextRollupId, event);
+      }
+    }
+    const rollups = [...rollupsById.values()].filter((event) =>
+      event.actor === 'daemon' &&
+      event.kind === 'context-rollup' &&
+      event.outcome === 'ok' &&
+      event.action === 'daemon:context-rollup');
+    const terminalByTrajectory = new Map<string, AgentActionEvent>();
+    for (const event of events) {
+      const eventMs = Date.parse(event.ts);
+      const trajectoryId = event.trajectoryId;
+      if (eventMs < cadenceWindowStart || !trajectoryId ||
+        !isEligibleContextRollupTerminal(event)) continue;
+      const existing = terminalByTrajectory.get(trajectoryId);
+      if (!existing || existing.ts < event.ts) terminalByTrajectory.set(trajectoryId, event);
+    }
+    const workspace = [...terminalByTrajectory.values()];
+    const latestSourceAt = workspace.reduce(
+      (latest, event) => event.ts > latest ? event.ts : latest,
+      workspace[0]?.ts ?? observedAt,
+    );
+    const decision = decideContextRollup({
+      observedAt,
+      eligibleEventCount: workspace.length,
+      latestSourceAt,
+      persistedRollupEvents: rollups,
+      counts: {
+        uniqueTrajectories: workspace.length,
+        proposalCreated: workspace.filter((event) =>
+          event.runEventSummary?.proposalCreated === true || event.outcome === 'proposal-created').length,
+        diagnosticNoProposal: workspace.filter((event) => event.outcome === 'no-proposal').length,
+        policySuppressed: workspace.filter((event) => event.learningLabel?.policySuppressed === true).length,
+        blocked: workspace.filter((event) => event.outcome === 'blocked').length,
+        failed: workspace.filter((event) => event.outcome === 'failed').length,
+      },
+    }, {
+      defaultContract: {
+        cadenceMs: contract.cadenceMs,
+        minimumTerminalTrajectories: contract.minimumTerminalTrajectories,
+      },
+    });
+    if (decision.disposition === 'emit') {
+      const persisted = deps.record
+        ? deps.record(decision.event)
+        : recordAgentActionResult(decision.event, { sync: true }).recorded === 1;
+      if (!persisted) return { disposition: 'noop', reason: 'unavailable' };
+    }
+    return decision;
+  } catch {
+    return { disposition: 'noop', reason: 'unavailable' };
+  }
 }
 
 function autonomyControlEnabled(cfg: AshlrConfig): boolean {
@@ -4305,11 +4443,16 @@ export async function runDaemon(
       // Single-tick mode — reload full config so a manual tick picks up disk changes.
       const liveCfg = reloadLiveConfigForDaemon(cfg);
       if (heartbeatDaemonLock(daemonLock)) {
-        await tick(liveCfg, {
+        const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
           ...(opts.drain ? { drain: opts.drain } : {}),
           ...(opts.drainLimit ? { drainLimit: opts.drainLimit } : {}),
         });
+        recordContextRollupAfterTick(
+          tickResult,
+          opts,
+          reloadLiveConfigForDaemon(liveCfg),
+        );
       }
     } else {
       // M85/M116/M309: choose loop strategy from live config every iteration.
@@ -4356,11 +4499,11 @@ export async function runDaemon(
           });
           break;
         }
-        scheduledResolutionObserver = scheduleResolutionObserverAfterTick(tickResult, opts);
-
         // Re-read config before post-tick controls so budget caps, mode, idle
         // backoff, and batch interval changes can take effect without restart.
         const afterTickCfg = reloadLiveConfigForDaemon(liveCfg);
+        scheduledResolutionObserver = scheduleResolutionObserverAfterTick(tickResult, opts);
+        recordContextRollupAfterTick(tickResult, opts, afterTickCfg);
         const afterLoopCfg = resolveCfg(afterTickCfg);
         const afterTick = afterTickLoaded.state;
         if (budgetExhaustedForCurrentUtcDay(afterTick, afterLoopCfg)) {

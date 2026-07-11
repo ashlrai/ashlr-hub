@@ -386,7 +386,12 @@ The config is validated against [`schema/config.schema.json`](schema/config.sche
     "enrolledRepos": ["/absolute/path/to/repo"],
     "intervalMs": 600000,
     "dailyBudgetUsd": 10,
-    "parallel": 3
+    "parallel": 3,
+    "contextRollup": {
+      "enabled": true,
+      "cadenceHours": 24,
+      "minTerminalTrajectories": 50
+    }
   },
   "foundry": {
     // absent = proposal-only behavior, byte-identical to pre-foundry
@@ -411,6 +416,10 @@ The config is validated against [`schema/config.schema.json`](schema/config.sche
   }
 }
 ```
+
+`daemon.contextRollup` records count-only observations after successful durable
+ticks. It never invokes a model or mutates memory, routing, proposals, or merge
+state, and it remains distinct from behavior-changing reflection.
 
 See [`docs/FOUNDRY-CONFIG.md`](docs/FOUNDRY-CONFIG.md) for the full foundry reference and [`docs/examples/foundry.config.json`](docs/examples/foundry.config.json) for an annotated example.
 

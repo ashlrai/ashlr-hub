@@ -3918,6 +3918,18 @@ export interface DaemonConfig {
   drainLimits?: {
     diagnosticReslices?: number;
   };
+  /**
+   * Metadata-only context rollup emitted after a durable live tick. This never
+   * invokes a model or mutates genome memory, routing, proposals, or merge state.
+   */
+  contextRollup?: {
+    /** Enabled by default; set false to suppress autonomous rollup telemetry. */
+    enabled?: boolean;
+    /** Minimum hours between persisted rollup events. Default 24, floor 1. */
+    cadenceHours?: number;
+    /** Minimum unique terminal trajectories required for a rollup. Default 50, floor 25. */
+    minTerminalTrajectories?: number;
+  };
 }
 
 /**

@@ -252,7 +252,11 @@ import {
   type DispatchProductionEvent,
 } from '../src/core/fleet/dispatch-production-ledger.js';
 import { readDispatchManifestEvents } from '../src/core/fleet/dispatch-manifest.js';
-import { readAgentActions } from '../src/core/fleet/agent-action-ledger.js';
+import {
+  readAgentActions,
+  recordAgentAction,
+  type AgentActionEvent,
+} from '../src/core/fleet/agent-action-ledger.js';
 import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import {
   readSkillUseEvents,
@@ -4090,6 +4094,53 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
     expect(state.running).toBe(false);
     expect(state.ticks.at(-1)?.reason).toBe('ok');
+  });
+
+  it('E1c: successful live one-shot ticks persist a context rollup', async () => {
+    enrollWithItems(1);
+    const now = Date.now();
+    recordAgentAction(Array.from({ length: 25 }, (_, index): AgentActionEvent => {
+      const runId = `rollup-seed-${index}`;
+      return {
+        schemaVersion: 1,
+        ts: new Date(now - index * 1_000).toISOString(),
+        actor: 'daemon',
+        kind: 'dispatch',
+        outcome: 'no-proposal',
+        action: 'daemon:dispatch',
+        summary: 'seed',
+        runId,
+        trajectoryId: `run:${runId}`,
+        learningSource: 'daemon-dispatch',
+        runEventSummary: { runId, status: 'done', outcome: 'no-proposal', proposalCreated: false },
+        learningLabel: {
+          schemaVersion: 1,
+          classifierVersion: 'attempt-shape-v1',
+          authoritative: true,
+          learningKind: 'diagnostic-no-proposal',
+          policySuppressed: false,
+          diagnosticNoProposal: true,
+          diagnosticAttempt: true,
+          attemptShape: {
+            backendNoDiff: 1,
+            captureOrGateBlocked: 0,
+            repairAttempts: 0,
+            policyDisabled: 0,
+          },
+        },
+      };
+    }));
+    const cfg = cfgBuiltin({ perTickItems: 1, parallel: 1 });
+    cfg.daemon = {
+      ...cfg.daemon,
+      contextRollup: { enabled: true, cadenceHours: 24, minTerminalTrajectories: 25 },
+    };
+    mockLoadConfig.mockReturnValue(cfg);
+
+    const state = await runDaemon(cfg, { once: true, dryRun: false });
+
+    expect(state.ticks.at(-1)?.reason).toBe('ok');
+    expect(readAgentActions().filter((event) => event.action === 'daemon:context-rollup')).toHaveLength(1);
   });
 
   it('E2: runDaemon loop with maxCycles=2 runs exactly 2 ticks and stops', async () => {

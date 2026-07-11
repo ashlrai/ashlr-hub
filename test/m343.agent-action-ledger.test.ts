@@ -12,6 +12,7 @@ import {
   readAgentActions,
   readAgentWorkspace,
   recordAgentAction,
+  recordAgentActionResult,
   summarizeAgentWorkspace,
   type AgentActionEvent,
 } from '../src/core/fleet/agent-action-ledger.js';
@@ -259,9 +260,58 @@ describe('M343 agent action ledger', () => {
     writeFileSync(process.env.ASHLR_HOME, 'not a directory', 'utf8');
 
     expect(() => recordAgentAction(makeEvent())).not.toThrow();
+    expect(recordAgentActionResult(makeEvent())).toEqual({ attempted: 1, recorded: 0 });
     expect(() => readAgentActions()).not.toThrow();
     expect(readAgentActions()).toEqual([]);
     expect(existsSync(process.env.ASHLR_HOME)).toBe(true);
+  });
+
+  it('reports durable append counts and applies limits after filtering', () => {
+    expect(recordAgentActionResult([
+      makeEvent({ action: 'noise-a', kind: 'selection' }),
+      makeEvent({ action: 'target-a' }),
+      makeEvent({ action: 'noise-b', kind: 'selection' }),
+      makeEvent({ action: 'target-b' }),
+    ])).toEqual({ attempted: 4, recorded: 4 });
+
+    const matched = readAgentActions({
+      limit: 1,
+      filter: (event) => event.action.startsWith('target-'),
+    });
+    expect(matched).toHaveLength(1);
+    expect(matched[0]?.action).toBe('target-b');
+  });
+
+  it('supports a synced append for restart-safe cadence markers', () => {
+    expect(recordAgentActionResult(makeEvent({
+      kind: 'context-rollup',
+      action: 'daemon:context-rollup',
+      outcome: 'ok',
+    }), { sync: true })).toEqual({ attempted: 1, recorded: 1 });
+    expect(readAgentActions({ limit: 1 })[0]).toMatchObject({
+      kind: 'context-rollup',
+      action: 'daemon:context-rollup',
+    });
+  });
+
+  it('fails complete reads closed on malformed rows and deduplicates rollup identities', () => {
+    const id = `cr-${'d'.repeat(64)}`;
+    const rollup = makeEvent({
+      kind: 'context-rollup',
+      action: 'daemon:context-rollup',
+      outcome: 'ok',
+      contextRollupId: id,
+      contextRollupPolicyVersion: 'context-rollup-v1',
+      contextRollupSourceMaxTs: '2026-07-08T11:59:00.000Z',
+    });
+    const summary = summarizeAgentWorkspace([rollup, { ...rollup }]);
+    expect(summary.eventCount).toBe(1);
+    expect(summary.byAction).toEqual([expect.objectContaining({ key: 'context-rollup', count: 1 })]);
+
+    recordAgentAction(makeEvent({ action: 'valid-before-malformed' }));
+    const path = join(agentActionsDir(), '2026-07-08.jsonl');
+    writeFileSync(path, `${readFileSync(path, 'utf8')}{broken\n`, 'utf8');
+    expect(readAgentActions({ requireComplete: true })).toEqual([]);
   });
 
   it('summarizes global-workspace attention and entropy from action events', () => {

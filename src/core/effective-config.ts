@@ -61,6 +61,11 @@ export interface EffectiveConfigSnapshot {
       total: EffectiveConfigValue<number>;
     };
     idleBackoffMs: EffectiveConfigValue<number>;
+    contextRollup: {
+      enabled: EffectiveConfigValue<boolean>;
+      cadenceHours: EffectiveConfigValue<number>;
+      minTerminalTrajectories: EffectiveConfigValue<number>;
+    };
   };
   foundry: {
     enabled: EffectiveConfigValue<boolean>;
@@ -117,6 +122,11 @@ interface ResolvedDaemonConfig {
   maxConcurrent: number;
   concurrency: { local: number; cloud: number; total: number };
   idleBackoffMs: number;
+  contextRollup: {
+    enabled: boolean;
+    cadenceHours: number;
+    minTerminalTrajectories: number;
+  };
 }
 
 const CONFIG_PATH_AT_RUNTIME = () => join(homedir(), '.ashlr', 'config.json');
@@ -195,6 +205,14 @@ function resolveDaemon(cfg: AshlrConfig): ResolvedDaemonConfig {
     maxConcurrent,
     concurrency: { local: concLocal, cloud: concCloud, total: concTotal },
     idleBackoffMs: positiveNumber(o.idleBackoffMs, 5_000),
+    contextRollup: {
+      enabled: o.contextRollup?.enabled !== false,
+      cadenceHours: Math.min(168, Math.max(1, positiveNumber(o.contextRollup?.cadenceHours, 24))),
+      minTerminalTrajectories: Math.min(
+        5_000,
+        Math.max(25, positiveNumber(o.contextRollup?.minTerminalTrajectories, 50, true)),
+      ),
+    },
   };
 }
 
@@ -389,6 +407,23 @@ export function buildEffectiveConfigSnapshot(
         total: value(raw, 'daemon.concurrency.total', daemon.concurrency.total),
       },
       idleBackoffMs: value(raw, 'daemon.idleBackoffMs', daemon.idleBackoffMs),
+      contextRollup: {
+        enabled: boolValue(
+          raw,
+          'daemon.contextRollup.enabled',
+          daemon.contextRollup.enabled,
+        ),
+        cadenceHours: value(
+          raw,
+          'daemon.contextRollup.cadenceHours',
+          daemon.contextRollup.cadenceHours,
+        ),
+        minTerminalTrajectories: value(
+          raw,
+          'daemon.contextRollup.minTerminalTrajectories',
+          daemon.contextRollup.minTerminalTrajectories,
+        ),
+      },
     },
     foundry: {
       enabled: { value: foundryEnabled, source: foundryEnabled ? 'configured' : 'default', path: 'foundry' },
