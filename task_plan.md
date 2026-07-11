@@ -1679,4 +1679,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Add strict bounded labeled issue discovery without changing the legacy CLI output contract.
 - [x] Filter only explicit non-engineering labels while preserving positive engineering overrides, unknowns, and source uncertainty.
 - [x] Add adversarial parsing/policy fixtures and run focused/full verification plus independent review.
-- [ ] Update durable notes, commit, push, reload, and production-canary issue precision.
+- [x] Update durable notes, commit, push, reload, and production-canary issue precision.
