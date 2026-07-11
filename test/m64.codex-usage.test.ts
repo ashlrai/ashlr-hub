@@ -8,10 +8,11 @@
  * Mirror pattern from m5.usage-source.test.ts.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 
 // ---------------------------------------------------------------------------
 // HOME redirect — synchronous, at module evaluation time
@@ -31,6 +32,11 @@ afterAll(() => {
 // ---------------------------------------------------------------------------
 
 import {
+  CODEX_TRANSCRIPT_HEAD_BYTES,
+  CODEX_TRANSCRIPT_DISCOVERY_MAX_FILES,
+  CODEX_TRANSCRIPT_MAX_FILES,
+  CODEX_TRANSCRIPT_MAX_TOTAL_BYTES,
+  CODEX_TRANSCRIPT_TAIL_BYTES,
   collectCodexEvents,
   readCodexRateLimits,
 } from '../src/core/observability/codex-source.js';
@@ -121,6 +127,99 @@ function writeSessionFixture(opts: FixtureOpts = {}): string {
 
   fs.writeFileSync(filePath, lines.join('\n') + '\n');
   return filePath;
+}
+
+function tokenCountLine(
+  inputTokens: number,
+  outputTokens: number,
+  usedPercent: number,
+  paddingBytes = 0,
+): string {
+  return JSON.stringify({
+    timestamp: '2026-06-17T10:30:00.000Z',
+    type: 'event_msg',
+    payload: {
+      type: 'token_count',
+      info: {
+        total_token_usage: {
+          input_tokens: inputTokens,
+          output_tokens: outputTokens,
+        },
+        padding: 'x'.repeat(paddingBytes),
+      },
+      rate_limits: {
+        primary: { used_percent: usedPercent, window_minutes: 300, resets_at: 1780970829 },
+        plan_type: 'pro',
+      },
+    },
+  }) + '\n';
+}
+
+function withMeasuredReads<T>(fn: () => T): { value: T; bytesRead: number } {
+  const cjsFs = createRequire(import.meta.url)('node:fs') as typeof fs;
+  const originalReadSync = cjsFs.readSync;
+  let bytesRead = 0;
+  cjsFs.readSync = ((
+    readFd: number,
+    buffer: NodeJS.ArrayBufferView,
+    offset: number,
+    length: number,
+    position: number | null,
+  ) => {
+    const count = originalReadSync(readFd, buffer, offset, length, position);
+    bytesRead += count;
+    return count;
+  }) as typeof fs.readSync;
+  syncBuiltinESMExports();
+
+  try {
+    return { value: fn(), bytesRead };
+  } finally {
+    cjsFs.readSync = originalReadSync;
+    syncBuiltinESMExports();
+  }
+}
+
+function withMeasuredTranscriptStats<T>(fn: () => T): { value: T; transcriptStats: number } {
+  const cjsFs = createRequire(import.meta.url)('node:fs') as typeof fs;
+  const originalStatSync = cjsFs.statSync;
+  let transcriptStats = 0;
+  cjsFs.statSync = ((target: fs.PathLike, options?: unknown) => {
+    if (String(target).endsWith('.jsonl')) transcriptStats += 1;
+    return originalStatSync(target, options as never);
+  }) as typeof fs.statSync;
+  syncBuiltinESMExports();
+
+  try {
+    return { value: fn(), transcriptStats };
+  } finally {
+    cjsFs.statSync = originalStatSync;
+    syncBuiltinESMExports();
+  }
+}
+
+function writeSparseSession(filename: string, inputTokens: number, mtimeMs: number): void {
+  const dir = sessionsDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, filename);
+  const fileSize = 8 * 1024 * 1024;
+  const fd = fs.openSync(filePath, 'w');
+
+  try {
+    const meta = JSON.stringify({
+      type: 'session_meta',
+      payload: { cwd: `/work/${filename}`, timestamp: '2026-06-17T10:00:00.000Z' },
+    }) + '\n';
+    fs.writeSync(fd, meta, 0, 'utf8');
+    fs.ftruncateSync(fd, fileSize);
+    const tailStart = fileSize - CODEX_TRANSCRIPT_TAIL_BYTES;
+    fs.writeSync(fd, '\n', tailStart + 8, 'utf8');
+    fs.writeSync(fd, tokenCountLine(inputTokens, 1, inputTokens), tailStart + 9, 'utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  fs.utimesSync(filePath, new Date(mtimeMs), new Date(mtimeMs));
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +358,170 @@ describe('M64 collectCodexEvents — malformed lines', () => {
       JSON.stringify({ type: 'session_meta', payload: { cwd: '/tmp/x', timestamp: '2026-06-17T10:00:00.000Z' } }) + '\n'
     );
     expect(collectCodexEvents(0)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bounded head/tail transcript reads
+// ---------------------------------------------------------------------------
+
+describe('M64 Codex transcript read bounds', () => {
+  it('bounds byte work and selects the final token_count across read chunks', () => {
+    clearSessions();
+    const dir = sessionsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, 'large-sparse.jsonl');
+    const fileSize = 64 * 1024 * 1024;
+    const tailStart = fileSize - CODEX_TRANSCRIPT_TAIL_BYTES;
+    const fd = fs.openSync(filePath, 'w');
+
+    try {
+      const meta = JSON.stringify({
+        type: 'session_meta',
+        payload: { cwd: '/work/bounded-reader', timestamp: '2026-06-17T10:00:00.000Z' },
+      }) + '\n';
+      fs.writeSync(fd, meta, 0, 'utf8');
+      fs.ftruncateSync(fd, fileSize);
+
+      // Establish a complete row boundary inside the tail, then an older total.
+      fs.writeSync(fd, '\n', tailStart + 8, 'utf8');
+      const older = tokenCountLine(111, 11, 12);
+      const olderStart = tailStart + 9;
+      fs.writeSync(fd, older, olderStart, 'utf8');
+
+      // The final token row starts just before a 64 KiB read boundary and is
+      // itself larger than a chunk. A large non-token row follows it.
+      const finalStart = tailStart + (4 * 64 * 1024) - 32;
+      const gapLength = finalStart - (olderStart + Buffer.byteLength(older)) - 1;
+      fs.writeSync(fd, `${'g'.repeat(gapLength)}\n`, olderStart + Buffer.byteLength(older), 'utf8');
+      const final = tokenCountLine(987654, 4321, 73, 96 * 1024);
+      fs.writeSync(fd, final, finalStart, 'utf8');
+      const after = JSON.stringify({ type: 'response_item', payload: { data: 'z'.repeat(512 * 1024) } }) + '\n';
+      fs.writeSync(fd, after, finalStart + Buffer.byteLength(final), 'utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    const { value: events, bytesRead } = withMeasuredReads(() => collectCodexEvents(0));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      project: 'bounded-reader',
+      ts: '2026-06-17T10:00:00.000Z',
+      tokensIn: 987654,
+      tokensOut: 4321,
+    });
+    expect(bytesRead).toBeLessThanOrEqual(CODEX_TRANSCRIPT_HEAD_BYTES + CODEX_TRANSCRIPT_TAIL_BYTES + 1);
+    expect(bytesRead).toBeLessThan(fileSize / 16);
+    expect(readCodexRateLimits()?.primary?.usedPercent).toBe(73);
+  });
+
+  it('keeps a complete token row that starts exactly at the tail boundary', () => {
+    clearSessions();
+    const dir = sessionsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, 'tail-boundary.jsonl');
+    const fileSize = CODEX_TRANSCRIPT_TAIL_BYTES + 1024;
+    const tailStart = fileSize - CODEX_TRANSCRIPT_TAIL_BYTES;
+    const fd = fs.openSync(filePath, 'w');
+
+    try {
+      const meta = JSON.stringify({
+        type: 'session_meta',
+        payload: { cwd: '/work/tail-boundary', timestamp: '2026-06-17T10:00:00.000Z' },
+      }) + '\n';
+      fs.writeSync(fd, meta, 0, 'utf8');
+      fs.ftruncateSync(fd, fileSize);
+      fs.writeSync(fd, '\n', tailStart - 1, 'utf8');
+      fs.writeSync(fd, tokenCountLine(321, 12, 42), tailStart, 'utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    expect(collectCodexEvents(0)[0]).toMatchObject({
+      project: 'tail-boundary',
+      tokensIn: 321,
+      tokensOut: 12,
+    });
+    expect(readCodexRateLimits()?.primary?.usedPercent).toBe(42);
+  });
+
+  it('fails closed when token evidence is outside both bounded windows', () => {
+    clearSessions();
+    const dir = sessionsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, 'outside-bounds.jsonl');
+    const fd = fs.openSync(filePath, 'w');
+
+    try {
+      const meta = JSON.stringify({
+        type: 'session_meta',
+        payload: { cwd: '/work/outside', timestamp: '2026-06-17T10:00:00.000Z' },
+      }) + '\n';
+      fs.writeSync(fd, meta, 0, 'utf8');
+      fs.writeSync(fd, tokenCountLine(999, 99, 50), CODEX_TRANSCRIPT_HEAD_BYTES + 1024, 'utf8');
+      fs.ftruncateSync(fd, CODEX_TRANSCRIPT_HEAD_BYTES + CODEX_TRANSCRIPT_TAIL_BYTES + (4 * 1024 * 1024));
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    expect(collectCodexEvents(0)).toEqual([]);
+    expect(readCodexRateLimits()).toBeNull();
+  });
+
+  it('takes only the newest sessions when the corpus file cap is reached', () => {
+    clearSessions();
+    const baseMtime = Date.now() - 60_000;
+    const totalFiles = CODEX_TRANSCRIPT_MAX_FILES + 2;
+
+    for (let i = 0; i < totalFiles; i += 1) {
+      const filePath = writeSessionFixture({
+        filename: `session-${String(i).padStart(3, '0')}.jsonl`,
+        totalInputTokens: 1000 + i,
+        totalOutputTokens: 1,
+      });
+      fs.utimesSync(filePath, new Date(baseMtime + i), new Date(baseMtime + i));
+    }
+
+    const events = collectCodexEvents(0);
+    expect(events).toHaveLength(CODEX_TRANSCRIPT_MAX_FILES);
+    expect(events.map((event) => event.tokensIn)).toEqual(
+      Array.from({ length: CODEX_TRANSCRIPT_MAX_FILES }, (_, i) => 1000 + totalFiles - 1 - i),
+    );
+  });
+
+  it('bounds transcript metadata inspection before content sampling', () => {
+    clearSessions();
+    const totalFiles = CODEX_TRANSCRIPT_DISCOVERY_MAX_FILES + 12;
+    for (let i = 0; i < totalFiles; i += 1) {
+      const filePath = writeSessionFixture({ filename: `discovery-${String(i).padStart(3, '0')}.jsonl` });
+      fs.utimesSync(filePath, new Date(0), new Date(0));
+    }
+
+    const { value: events, transcriptStats } = withMeasuredTranscriptStats(
+      () => collectCodexEvents(Date.now() - 86_400_000),
+    );
+    expect(events).toEqual([]);
+    expect(transcriptStats).toBeLessThanOrEqual(CODEX_TRANSCRIPT_DISCOVERY_MAX_FILES);
+  });
+
+  it('takes only the newest sessions that fit the aggregate byte budget', () => {
+    clearSessions();
+    const perFileCost = CODEX_TRANSCRIPT_HEAD_BYTES + CODEX_TRANSCRIPT_TAIL_BYTES;
+    const filesWithinBudget = Math.floor(CODEX_TRANSCRIPT_MAX_TOTAL_BYTES / perFileCost);
+    const totalFiles = filesWithinBudget + 2;
+    const baseMtime = Date.now() - 60_000;
+
+    for (let i = 0; i < totalFiles; i += 1) {
+      writeSparseSession(`budget-${String(i).padStart(3, '0')}.jsonl`, 2000 + i, baseMtime + i);
+    }
+
+    const { value: events, bytesRead } = withMeasuredReads(() => collectCodexEvents(0));
+    expect(events).toHaveLength(filesWithinBudget);
+    expect(events.map((event) => event.tokensIn)).toEqual(
+      Array.from({ length: filesWithinBudget }, (_, i) => 2000 + totalFiles - 1 - i),
+    );
+    expect(bytesRead).toBeLessThanOrEqual(CODEX_TRANSCRIPT_MAX_TOTAL_BYTES);
   });
 });
 

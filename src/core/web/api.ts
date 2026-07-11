@@ -61,7 +61,7 @@ function canonForCompare(p: string): string {
   return out.toLowerCase();
 }
 
-import type { AshlrConfig } from '../types.js';
+import type { AshlrConfig, DashboardSnapshot } from '../types.js';
 import { buildSnapshot } from '../dashboard.js';
 import { loadEffectiveConfigSnapshot } from '../effective-config.js';
 import { listRuns, loadRun, runGoal } from '../run/orchestrator.js';
@@ -139,6 +139,36 @@ const SSE_POLL_MS = 1500;
  * self-limit to ~6 per origin, but the server must not rely on that.
  */
 const SSE_MAX_CONNECTIONS = 64;
+
+const SNAPSHOT_CACHE_MS = 5_000;
+
+interface SnapshotCacheEntry {
+  value: DashboardSnapshot | null;
+  expiresAt: number;
+  inFlight: Promise<DashboardSnapshot> | null;
+}
+
+const snapshotCache = new WeakMap<AshlrConfig, SnapshotCacheEntry>();
+
+function buildCachedSnapshot(cfg: AshlrConfig): Promise<DashboardSnapshot> {
+  const now = Date.now();
+  let entry = snapshotCache.get(cfg);
+  if (!entry) {
+    entry = { value: null, expiresAt: 0, inFlight: null };
+    snapshotCache.set(cfg, entry);
+  }
+  if (entry.value && now < entry.expiresAt) return Promise.resolve(entry.value);
+  if (entry.inFlight) return entry.inFlight;
+
+  entry.inFlight = buildSnapshot(cfg).then((value) => {
+    entry!.value = value;
+    entry!.expiresAt = Date.now() + SNAPSHOT_CACHE_MS;
+    return value;
+  }).finally(() => {
+    entry!.inFlight = null;
+  });
+  return entry.inFlight;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -408,7 +438,7 @@ function handleSseEvents(
       } catch { /* fleet-activity ping is best-effort */ }
       // M213: dashboard snapshot push — lets fleet-dashboard update without polling.
       try {
-        const snap = await buildSnapshot(cfg);
+        const snap = await buildCachedSnapshot(cfg);
         sendNamed('snapshot', { ...snap, dispatchEnabled: allowDispatch });
       } catch { /* snapshot is best-effort */ }
     } finally {
@@ -574,7 +604,7 @@ export async function handleApi(
   try {
     // ── GET /api/snapshot ───────────────────────────────────────────────────
     if (path === '/api/snapshot' && method === 'GET') {
-      const snapshot = await buildSnapshot(cfg);
+      const snapshot = await buildCachedSnapshot(cfg);
       // M32: additive field so the frontend can show (not guess) whether the
       // dispatch/approve surfaces exist on this server instance.
       sendJson(res, 200, { ...snapshot, dispatchEnabled: ctx.allowDispatch });
@@ -596,7 +626,7 @@ export async function handleApi(
     // producer / empty enrollment). NO mutation endpoint — there is no apply/
     // approve/dispatch here; aggregation only. Never throws (caught below).
     if (path === '/api/portfolio' && method === 'GET') {
-      const snapshot = await buildSnapshot(cfg);
+      const snapshot = await buildCachedSnapshot(cfg);
       sendJson(res, 200, snapshot.portfolio ?? null);
       return true;
     }

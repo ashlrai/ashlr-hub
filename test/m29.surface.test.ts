@@ -437,8 +437,8 @@ describe('M29 safety — portfolio surface is read-only (no mutation path)', () 
     const idx = src.indexOf("path === '/api/portfolio'");
     expect(idx).toBeGreaterThan(-1);
     const block = src.slice(idx, idx + 500);
-    // The route only reads buildSnapshot and serialises .portfolio.
-    expect(block).toContain('buildSnapshot');
+    // The route only reads the shared snapshot projection and serialises .portfolio.
+    expect(block).toContain('buildCachedSnapshot');
     expect(block).toContain('.portfolio');
     // No proposal/config/PR/deploy mutation primitives in the route.
     for (const banned of [

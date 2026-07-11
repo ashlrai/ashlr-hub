@@ -13,8 +13,8 @@
  * PRIVACY: only token counts, model id ('codex'), timestamp, and project basename
  * (from session_meta.cwd) are retained. Never reads message content.
  *
- * PERFORMANCE: skips files with mtime < sinceMs; streams line-by-line; bounded
- * at 256 MiB per file; never throws.
+ * PERFORMANCE: skips files with mtime < sinceMs and reads only bounded head and
+ * tail windows from each transcript; never throws.
  */
 
 import * as fs from 'fs';
@@ -48,13 +48,83 @@ function codexSessionsRoot(): string {
 }
 
 const READ_CHUNK = 64 * 1024;
-const MAX_BYTES_PER_FILE = 256 * 1024 * 1024;
+
+/** Maximum bytes inspected for session_meta at the start of each transcript. */
+export const CODEX_TRANSCRIPT_HEAD_BYTES = 256 * 1024;
+
+/** Maximum bytes inspected for final token_count rows at the end of each transcript. */
+export const CODEX_TRANSCRIPT_TAIL_BYTES = 2 * 1024 * 1024;
+
+/** Maximum transcripts inspected by one collectCodexEvents call. */
+export const CODEX_TRANSCRIPT_MAX_FILES = 32;
+
+/** Maximum aggregate head/tail bytes inspected by one collectCodexEvents call. */
+export const CODEX_TRANSCRIPT_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
+
+/** Maximum transcript metadata records inspected before content sampling. */
+export const CODEX_TRANSCRIPT_DISCOVERY_MAX_FILES = 128;
 
 // ---------------------------------------------------------------------------
-// Line-streaming helper (mirrors usage-source.ts pattern exactly)
+// Bounded transcript reader
 // ---------------------------------------------------------------------------
 
-function eachLine(filePath: string, cb: (line: string) => void): void {
+function readWindow(fd: number, position: number, length: number): Buffer {
+  const buffer = Buffer.allocUnsafe(length);
+  let total = 0;
+
+  while (total < length) {
+    let n: number;
+    try {
+      n = fs.readSync(fd, buffer, total, Math.min(READ_CHUNK, length - total), position + total);
+    } catch {
+      break;
+    }
+    if (n <= 0) break;
+    total += n;
+  }
+
+  return buffer.subarray(0, total);
+}
+
+function eachCompleteLine(
+  buffer: Buffer,
+  skipLeadingPartial: boolean,
+  skipTrailingPartial: boolean,
+  cb: (line: string) => void,
+): void {
+  let start = 0;
+  let end = buffer.length;
+
+  if (skipLeadingPartial) {
+    const firstNewline = buffer.indexOf(0x0a);
+    if (firstNewline === -1) return;
+    start = firstNewline + 1;
+  }
+
+  if (skipTrailingPartial) {
+    const lastNewline = buffer.lastIndexOf(0x0a);
+    if (lastNewline < start) return;
+    end = lastNewline;
+  }
+
+  if (start >= end) return;
+  for (const rawLine of buffer.subarray(start, end).toString('utf8').split('\n')) {
+    const line = rawLine.trim();
+    if (line.length > 0) cb(line);
+  }
+}
+
+/**
+ * Read complete JSONL records from bounded head and tail windows. Records cut by
+ * an outer window boundary are ignored, while records split across READ_CHUNK
+ * reads are reconstructed in the bounded buffer.
+ */
+function readBoundedTranscript(
+  filePath: string,
+  expectedSize: number,
+  onHeadLine: ((line: string) => void) | null,
+  onTailLine: ((line: string) => void) | null,
+): void {
   let fd: number;
   try {
     fd = fs.openSync(filePath, 'r');
@@ -63,37 +133,46 @@ function eachLine(filePath: string, cb: (line: string) => void): void {
   }
 
   try {
-    const chunk = Buffer.allocUnsafe(READ_CHUNK);
-    let pending = '';
-    let bytesRead = 0;
-
-    for (;;) {
-      let n: number;
-      try {
-        n = fs.readSync(fd, chunk, 0, READ_CHUNK, null);
-      } catch {
-        break;
-      }
-      if (n <= 0) break;
-      bytesRead += n;
-
-      pending += chunk.toString('utf8', 0, n);
-
-      let nl: number;
-      while ((nl = pending.indexOf('\n')) !== -1) {
-        const line = pending.slice(0, nl).trim();
-        pending = pending.slice(nl + 1);
-        if (line.length > 0) cb(line);
-      }
-
-      if (bytesRead >= MAX_BYTES_PER_FILE) break;
+    let size: number;
+    try {
+      const stat = fs.fstatSync(fd);
+      if (
+        !stat.isFile() ||
+        !Number.isSafeInteger(stat.size) ||
+        stat.size < 0 ||
+        stat.size !== expectedSize
+      ) return;
+      size = stat.size;
+    } catch {
+      return;
     }
 
-    const last = pending.trim();
-    if (last.length > 0) cb(last);
+    if (onHeadLine) {
+      const headLength = Math.min(size, CODEX_TRANSCRIPT_HEAD_BYTES);
+      const head = readWindow(fd, 0, headLength);
+      eachCompleteLine(head, false, size > headLength, onHeadLine);
+    }
+
+    if (onTailLine) {
+      const tailLength = Math.min(size, CODEX_TRANSCRIPT_TAIL_BYTES);
+      const tailStart = size - tailLength;
+      const tail = readWindow(fd, tailStart, tailLength);
+      const preceding = tailStart > 0 ? readWindow(fd, tailStart - 1, 1) : null;
+      const startsMidLine = preceding !== null && preceding[0] !== 0x0a;
+      eachCompleteLine(tail, startsMidLine, false, onTailLine);
+    }
   } finally {
     try { fs.closeSync(fd); } catch { /* ignore */ }
   }
+}
+
+function transcriptReadCost(size: number, includeHead: boolean, includeTail: boolean): number {
+  return (
+    (includeHead ? Math.min(size, CODEX_TRANSCRIPT_HEAD_BYTES) : 0) +
+    (includeTail
+      ? Math.min(size, CODEX_TRANSCRIPT_TAIL_BYTES) + (size > CODEX_TRANSCRIPT_TAIL_BYTES ? 1 : 0)
+      : 0)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -153,62 +232,61 @@ function parseRateLimits(rl: Record<string, unknown>): CodexRateLimits {
   return result;
 }
 
-function processLine(line: string, state: SessionState): void {
+function parseRow(line: string): Record<string, unknown> | null {
   let obj: unknown;
   try {
     obj = JSON.parse(line);
   } catch {
-    return; // malformed — skip silently
+    return null;
   }
 
-  if (typeof obj !== 'object' || obj === null) return;
-  const row = obj as Record<string, unknown>;
-  const type = row['type'];
+  return typeof obj === 'object' && obj !== null
+    ? obj as Record<string, unknown>
+    : null;
+}
 
-  // ── session_meta: grab cwd and timestamp ───────────────────────────────
-  if (type === 'session_meta') {
-    const payload = row['payload'];
-    if (typeof payload === 'object' && payload !== null) {
-      const p = payload as Record<string, unknown>;
-      if (typeof p['cwd'] === 'string') state.cwd = p['cwd'];
-      if (typeof p['timestamp'] === 'string') state.ts = p['timestamp'];
-    }
-    // Also accept top-level timestamp as fallback
-    if (!state.ts && typeof row['timestamp'] === 'string') {
-      state.ts = row['timestamp'];
-    }
-    return;
-  }
+function processHeadLine(line: string, state: SessionState): void {
+  if (!line.includes('session_meta')) return;
+  const row = parseRow(line);
+  if (!row || row['type'] !== 'session_meta') return;
 
-  // ── event_msg with type:token_count ────────────────────────────────────
-  if (type === 'event_msg') {
-    const payload = row['payload'];
-    if (typeof payload !== 'object' || payload === null) return;
+  const payload = row['payload'];
+  if (typeof payload === 'object' && payload !== null) {
     const p = payload as Record<string, unknown>;
-    if (p['type'] !== 'token_count') return;
+    if (typeof p['cwd'] === 'string') state.cwd = p['cwd'];
+    if (typeof p['timestamp'] === 'string') state.ts = p['timestamp'];
+  }
+  if (!state.ts && typeof row['timestamp'] === 'string') state.ts = row['timestamp'];
+}
 
-    // Update timestamp from event if not yet set
-    if (!state.ts && typeof row['timestamp'] === 'string') {
-      state.ts = row['timestamp'];
-    }
+function processTailLine(line: string, state: SessionState): void {
+  if (!line.includes('token_count')) return;
+  const row = parseRow(line);
+  if (!row || row['type'] !== 'event_msg') return;
 
-    const info = p['info'];
-    if (typeof info === 'object' && info !== null) {
-      const i = info as Record<string, unknown>;
-      const total = i['total_token_usage'];
-      if (typeof total === 'object' && total !== null) {
-        const t = total as Record<string, unknown>;
-        state.lastTotal = {
-          input_tokens:  typeof t['input_tokens']  === 'number' ? t['input_tokens']  : 0,
-          output_tokens: typeof t['output_tokens'] === 'number' ? t['output_tokens'] : 0,
-        };
-      }
-    }
+  const payload = row['payload'];
+  if (typeof payload !== 'object' || payload === null) return;
+  const p = payload as Record<string, unknown>;
+  if (p['type'] !== 'token_count') return;
 
-    const rl = p['rate_limits'];
-    if (typeof rl === 'object' && rl !== null) {
-      state.lastRateLimits = parseRateLimits(rl as Record<string, unknown>);
+  if (!state.ts && typeof row['timestamp'] === 'string') state.ts = row['timestamp'];
+
+  const info = p['info'];
+  if (typeof info === 'object' && info !== null) {
+    const i = info as Record<string, unknown>;
+    const total = i['total_token_usage'];
+    if (typeof total === 'object' && total !== null) {
+      const t = total as Record<string, unknown>;
+      state.lastTotal = {
+        input_tokens:  typeof t['input_tokens']  === 'number' ? t['input_tokens']  : 0,
+        output_tokens: typeof t['output_tokens'] === 'number' ? t['output_tokens'] : 0,
+      };
     }
+  }
+
+  const rl = p['rate_limits'];
+  if (typeof rl === 'object' && rl !== null) {
+    state.lastRateLimits = parseRateLimits(rl as Record<string, unknown>);
   }
 }
 
@@ -216,20 +294,26 @@ function processLine(line: string, state: SessionState): void {
 // Directory walker
 // ---------------------------------------------------------------------------
 
-/**
- * Walk ~/.codex/sessions/YYYY/MM/DD/ tree, yield .jsonl file paths whose
- * mtime >= sinceMs. Silently skips unreadable entries.
- */
-function* walkCodexSessions(sinceMs: number): Generator<string> {
+interface TranscriptFile {
+  path: string;
+  mtime: number;
+  size: number;
+}
+
+/** List eligible transcripts in deterministic newest-first order. */
+function listCodexSessions(sinceMs: number): TranscriptFile[] {
   const root = codexSessionsRoot();
+  const result: TranscriptFile[] = [];
+  let discoveredEntries = 0;
 
   let yearDirs: string[];
   try {
     yearDirs = fs.readdirSync(root);
   } catch {
-    return; // ~/.codex/sessions missing
+    return result;
   }
 
+  yearDirs.sort((a, b) => b.localeCompare(a));
   for (const year of yearDirs) {
     const yearPath = path.join(root, year);
     let monthDirs: string[];
@@ -237,6 +321,7 @@ function* walkCodexSessions(sinceMs: number): Generator<string> {
       monthDirs = fs.readdirSync(yearPath);
     } catch { continue; }
 
+    monthDirs.sort((a, b) => b.localeCompare(a));
     for (const month of monthDirs) {
       const monthPath = path.join(yearPath, month);
       let dayDirs: string[];
@@ -244,25 +329,45 @@ function* walkCodexSessions(sinceMs: number): Generator<string> {
         dayDirs = fs.readdirSync(monthPath);
       } catch { continue; }
 
+      dayDirs.sort((a, b) => b.localeCompare(a));
       for (const day of dayDirs) {
         const dayPath = path.join(monthPath, day);
-        let files: string[];
+        let dir: fs.Dir;
         try {
-          files = fs.readdirSync(dayPath);
+          dir = fs.opendirSync(dayPath);
         } catch { continue; }
 
-        for (const name of files) {
-          if (!name.endsWith('.jsonl')) continue;
-          const filePath = path.join(dayPath, name);
-          try {
-            const stat = fs.statSync(filePath);
-            if (stat.mtimeMs < sinceMs) continue;
-          } catch { continue; }
-          yield filePath;
+        try {
+          for (;;) {
+            if (discoveredEntries >= CODEX_TRANSCRIPT_DISCOVERY_MAX_FILES) {
+              result.sort((a, b) => (b.mtime - a.mtime) || a.path.localeCompare(b.path));
+              return result;
+            }
+            const entry = dir.readSync();
+            if (!entry) break;
+            discoveredEntries += 1;
+            if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
+            const filePath = path.join(dayPath, entry.name);
+            try {
+              const stat = fs.statSync(filePath);
+              if (
+                !stat.isFile() ||
+                stat.mtimeMs < sinceMs ||
+                !Number.isSafeInteger(stat.size) ||
+                stat.size < 0
+              ) continue;
+              result.push({ path: filePath, mtime: stat.mtimeMs, size: stat.size });
+            } catch { continue; }
+          }
+        } finally {
+          try { dir.closeSync(); } catch { /* ignore */ }
         }
       }
     }
   }
+
+  result.sort((a, b) => (b.mtime - a.mtime) || a.path.localeCompare(b.path));
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +386,19 @@ export function collectCodexEvents(sinceMs: number): UsageEvent[] {
   const events: UsageEvent[] = [];
 
   try {
-    for (const filePath of walkCodexSessions(sinceMs)) {
+    let inspectedFiles = 0;
+    let inspectedBytes = 0;
+
+    for (const file of listCodexSessions(sinceMs)) {
+      const readCost = transcriptReadCost(file.size, true, true);
+      if (
+        inspectedFiles >= CODEX_TRANSCRIPT_MAX_FILES ||
+        readCost > CODEX_TRANSCRIPT_MAX_TOTAL_BYTES - inspectedBytes
+      ) break;
+
+      inspectedFiles += 1;
+      inspectedBytes += readCost;
+
       const state: SessionState = {
         cwd: null,
         ts: null,
@@ -289,7 +406,12 @@ export function collectCodexEvents(sinceMs: number): UsageEvent[] {
         lastRateLimits: null,
       };
 
-      eachLine(filePath, (line) => processLine(line, state));
+      readBoundedTranscript(
+        file.path,
+        file.size,
+        (line) => processHeadLine(line, state),
+        (line) => processTailLine(line, state),
+      );
 
       // Skip sessions with no token data
       if (!state.lastTotal) continue;
@@ -336,71 +458,18 @@ export function collectCodexEvents(sinceMs: number): UsageEvent[] {
  */
 export function readCodexRateLimits(): CodexRateLimits | null {
   try {
-    const root = codexSessionsRoot();
-
-    // Find all session files, pick the most recently modified one
-    const allFiles: { path: string; mtime: number }[] = [];
-
-    let yearDirs: string[];
-    try {
-      yearDirs = fs.readdirSync(root);
-    } catch {
-      return null;
-    }
-
-    for (const year of yearDirs) {
-      const yearPath = path.join(root, year);
-      let monthDirs: string[];
-      try { monthDirs = fs.readdirSync(yearPath); } catch { continue; }
-
-      for (const month of monthDirs) {
-        const monthPath = path.join(yearPath, month);
-        let dayDirs: string[];
-        try { dayDirs = fs.readdirSync(monthPath); } catch { continue; }
-
-        for (const day of dayDirs) {
-          const dayPath = path.join(monthPath, day);
-          let files: string[];
-          try { files = fs.readdirSync(dayPath); } catch { continue; }
-
-          for (const name of files) {
-            if (!name.endsWith('.jsonl')) continue;
-            const filePath = path.join(dayPath, name);
-            try {
-              const stat = fs.statSync(filePath);
-              allFiles.push({ path: filePath, mtime: stat.mtimeMs });
-            } catch { continue; }
-          }
-        }
-      }
-    }
-
+    const allFiles = listCodexSessions(Number.NEGATIVE_INFINITY);
     if (allFiles.length === 0) return null;
-
-    // Most recently modified file
-    allFiles.sort((a, b) => b.mtime - a.mtime);
     const newest = allFiles[0]!;
 
-    // Extract LAST token_count rate_limits from that file
-    let lastRateLimits: CodexRateLimits | null = null;
-
-    eachLine(newest.path, (line) => {
-      let obj: unknown;
-      try { obj = JSON.parse(line); } catch { return; }
-      if (typeof obj !== 'object' || obj === null) return;
-      const row = obj as Record<string, unknown>;
-      if (row['type'] !== 'event_msg') return;
-      const payload = row['payload'];
-      if (typeof payload !== 'object' || payload === null) return;
-      const p = payload as Record<string, unknown>;
-      if (p['type'] !== 'token_count') return;
-      const rl = p['rate_limits'];
-      if (typeof rl === 'object' && rl !== null) {
-        lastRateLimits = parseRateLimits(rl as Record<string, unknown>);
-      }
-    });
-
-    return lastRateLimits;
+    const state: SessionState = {
+      cwd: null,
+      ts: null,
+      lastTotal: null,
+      lastRateLimits: null,
+    };
+    readBoundedTranscript(newest.path, newest.size, null, (line) => processTailLine(line, state));
+    return state.lastRateLimits;
   } catch {
     return null;
   }

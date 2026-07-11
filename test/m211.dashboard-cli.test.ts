@@ -88,6 +88,13 @@ describe('generateServePlist', () => {
     expect(plist).toContain('<true/>');
   });
 
+  it('runs as an interactive service so live dashboard reads are not background-throttled', async () => {
+    const { generateServePlist } = await import('../src/cli/dashboard.js');
+    const plist = generateServePlist({ homeDir: tmpHome });
+    expect(plist).toContain('<key>ProcessType</key>');
+    expect(plist).toContain('<string>Interactive</string>');
+  });
+
   it('contains KeepAlive SuccessfulExit false', async () => {
     const { generateServePlist } = await import('../src/cli/dashboard.js');
     const plist = generateServePlist({ homeDir: tmpHome });
@@ -204,6 +211,19 @@ describe('installServeAgent', () => {
     const { installServeAgent } = await import('../src/cli/dashboard.js');
     const rc = mockRunCmd({ 'launchctl load': { ok: false, stderr: 'permission denied', stdout: '' } });
     expect(() => installServeAgent({ homeDir: tmpHome, _runCmd: rc })).toThrow('launchctl load failed');
+  });
+});
+
+describe('servePlistNeedsUpgrade', () => {
+  it('detects and upgrades an installed Background service definition', async () => {
+    const { generateServePlist, plistPath, servePlistNeedsUpgrade } = await import('../src/cli/dashboard.js');
+    const pp = plistPath(tmpHome);
+    fs.mkdirSync(path.dirname(pp), { recursive: true });
+    const desired = generateServePlist({ homeDir: tmpHome });
+    fs.writeFileSync(pp, desired.replace('<string>Interactive</string>', '<string>Background</string>'));
+    expect(servePlistNeedsUpgrade({ homeDir: tmpHome })).toBe(true);
+    fs.writeFileSync(pp, desired);
+    expect(servePlistNeedsUpgrade({ homeDir: tmpHome })).toBe(false);
   });
 });
 

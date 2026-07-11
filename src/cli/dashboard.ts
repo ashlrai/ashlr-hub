@@ -109,7 +109,7 @@ export function generateServePlist(opts: {
 \t<key>Label</key>
 \t<string>${PLIST_LABEL}</string>
 \t<key>ProcessType</key>
-\t<string>Background</string>
+\t<string>Interactive</string>
 \t<key>ProgramArguments</key>
 \t<array>
 \t\t<string>${nodePath}</string>
@@ -273,6 +273,20 @@ export function installServeAgent(opts: {
   }
 }
 
+export function servePlistNeedsUpgrade(opts: {
+  nodePath?: string;
+  binPath?: string;
+  homeDir?: string;
+  port?: number;
+}): boolean {
+  const pp = plistPath(opts.homeDir);
+  try {
+    return fs.readFileSync(pp, 'utf8') !== generateServePlist(opts);
+  } catch {
+    return true;
+  }
+}
+
 /**
  * Unload and remove the serve LaunchAgent.
  */
@@ -303,8 +317,9 @@ async function ensureRunning(opts: {
   const home = opts.homeDir ?? os.homedir();
   const url = `http://127.0.0.1:${SERVE_PORT}`;
   const status = queryServeService(home);
+  const needsUpgrade = servePlistNeedsUpgrade({ homeDir: home });
 
-  if (!status.installed || !status.running) {
+  if (!status.installed || !status.running || needsUpgrade) {
     // Install (or re-install) and load
     installServeAgent({
       homeDir: home,
