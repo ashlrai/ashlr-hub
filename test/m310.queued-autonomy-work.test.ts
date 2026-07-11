@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   linkSync,
@@ -25,7 +26,12 @@ import type { Proposal, WorkItem } from '../src/core/types.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
-import { recordRepairHandoffs } from '../src/core/fleet/repair-handoff-journal.js';
+import {
+  recordRepairHandoffs,
+  repairGenerationIdFromHandoffId,
+  repairHandoffFromDispatchEvent,
+  repairHandoffJournalPath,
+} from '../src/core/fleet/repair-handoff-journal.js';
 import {
   generatedRepairGenerationId,
   generatedRepairLifecyclePath,
@@ -109,7 +115,7 @@ function captureFailure(repo: string, overrides: Partial<DispatchProductionEvent
     basis: 'run-proposal-outcome',
     ...overrides,
   };
-  recordRepairHandoffs(value);
+  recordRepairHandoffs(value, { schemaVersion: 2 });
   return value;
 }
 
@@ -926,7 +932,7 @@ describe('queued autonomy work scanner', () => {
     expect(persisted.map((candidate) => candidate.id)).toContain(repair.id);
   });
 
-  it('retires a durably successful generation without suppressing a newer recurrence', async () => {
+  it('keeps a durably successful generation retired across unchanged recurrence', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
     const now = new Date('2026-07-10T16:00:00.000Z');
@@ -956,10 +962,48 @@ describe('queued autonomy work scanner', () => {
     const found = await scanQueuedAutonomyWork(repo.dir);
 
     expect(retired).toMatchObject({ dispatchRepairRetired: 1, dispatchRepairPruned: 1 });
-    expect(recurring).toMatchObject({ dispatchNoDiffQueued: 1, dispatchRepairRetired: 0 });
+    expect(recurring).toMatchObject({ dispatchNoDiffQueued: 0, dispatchRepairRetired: 1 });
+    expect(found).toEqual([]);
+  });
+
+  it('allows a changed objective to start a fresh generation after retirement', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T16:00:00.000Z');
+    const firstEvent = captureFailure(repo.dir, {
+      ts: '2026-07-10T14:00:00.000Z',
+      itemId: 'repo:goal:changed-objective-reslice',
+      outcome: 'empty-diff',
+      objectiveHash: 'a'.repeat(64),
+      runId: 'run-source-first-objective',
+    });
+    queueProposalRepairWorkForPendingProposals(undefined, now, { dispatchEvents: [firstEvent] });
+    const first = (await scanQueuedAutonomyWork(repo.dir))[0]!;
+    recordGeneratedRepairLifecycle(first, {
+      kind: 'proposal-created',
+      attemptId: 'attempt-12345678-1234-4123-8123-123456789abc',
+      proposalId: 'prop-first-objective',
+    });
+
+    const changedEvent = captureFailure(repo.dir, {
+      ...firstEvent,
+      ts: '2026-07-10T15:00:00.000Z',
+      objectiveHash: 'b'.repeat(64),
+      runId: 'run-source-changed-objective',
+    });
+    const result = queueProposalRepairWorkForPendingProposals(undefined, now, {
+      dispatchEvents: [changedEvent],
+    });
+    const found = await scanQueuedAutonomyWork(repo.dir);
+
+    expect(result).toMatchObject({ dispatchNoDiffQueued: 1, dispatchRepairRetired: 1 });
     expect(found).toHaveLength(1);
-    expect(found[0]!.id).toBe(firstGeneration.id);
-    expect(found[0]!.ts).toBe(nextEvent.ts);
+    expect(found[0]!.repairGenerationId).not.toBe(first.repairGenerationId);
+    expect(readGeneratedRepairLifecycle(found[0]!)).toMatchObject({
+      available: true,
+      disposition: 'active',
+      authoritativeEmptyRuns: 0,
+    });
   });
 
   it('keeps repairs active and reports unavailable lifecycle control state on corruption', async () => {
@@ -1027,6 +1071,71 @@ describe('queued autonomy work scanner', () => {
     const found = await scanQueuedAutonomyWork(repo.dir);
 
     expect(result).toMatchObject({ dispatchRepairRetired: 1, dispatchRepairPruned: 1 });
+    expect(found).toEqual([]);
+  });
+
+  it('retires a v2 objective generation when its v1 proposal becomes applied', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const now = new Date('2026-07-10T16:00:00.000Z');
+    const sourceEvent = captureFailure(repo.dir, {
+      ts: '2026-07-10T14:00:00.000Z',
+      itemId: 'repo:goal:v1-applied-v2-reconcile',
+      outcome: 'empty-diff',
+      proposalCreated: false,
+      runId: 'run-source-v1-applied',
+      objectiveHash: 'c'.repeat(64),
+    });
+    const v2 = repairHandoffFromDispatchEvent(sourceEvent)!;
+    const v1EventId = createHash('sha256').update(JSON.stringify([
+      'ashlr:repair-handoff:v1', v2.kind, v2.repo, v2.parentItemId,
+      v2.parentOutcome, v2.parentAttemptId,
+    ])).digest('hex');
+    const v1 = {
+      ...v2,
+      schemaVersion: 1 as const,
+      eventId: v1EventId,
+      generationId: repairGenerationIdFromHandoffId(v1EventId)!,
+    };
+    writeFileSync(repairHandoffJournalPath(), `${JSON.stringify(v1)}\n`, { mode: 0o600 });
+    queueProposalRepairWorkForPendingProposals(undefined, now);
+    const legacyRepair = (await scanQueuedAutonomyWork(repo.dir))[0]!;
+    const attemptId = 'attempt-62345678-1234-4123-8123-123456789abc';
+    const pendingProposal: Proposal = {
+      id: 'prop-v1-applied-v2-reconcile',
+      repo: repo.dir,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Legacy generation repair',
+      summary: 'Captured while the v1 repair generation was current.',
+      diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
+      workItemId: legacyRepair.id,
+      workItemGenerationId: legacyRepair.repairGenerationId,
+      workSource: 'self',
+      runId: attemptId,
+      trajectoryId: `run:${attemptId}`,
+      runEventSummary: { runId: attemptId, status: 'done', outcome: 'proposal-created', proposalCreated: true },
+      status: 'pending',
+      createdAt: '2026-07-10T15:00:00.000Z',
+    };
+
+    writeJson(join(fx.ashlrDir, 'self-heal-queue.json'), []);
+    writeJson(join(fx.ashlrDir, 'backlog.json'), { generatedAt: now.toISOString(), repos: [repo.dir], items: [] });
+    const recurrence = {
+      ...sourceEvent,
+      ts: '2026-07-10T15:30:00.000Z',
+      runId: 'run-source-v2-recurrence',
+    };
+    recordRepairHandoffs(recurrence, { schemaVersion: 2 });
+    const appliedProposal: Proposal = { ...pendingProposal, status: 'applied' };
+    const result = queueProposalRepairWorkForPendingProposals(undefined, now, {
+      dispatchEvents: [recurrence],
+      lifecycleProposals: [appliedProposal],
+    });
+    const found = await scanQueuedAutonomyWork(repo.dir);
+
+    expect(v1.generationId).not.toBe(v2.generationId);
+    expect(result).toMatchObject({ dispatchRepairRetired: 1, dispatchNoDiffQueued: 0 });
     expect(found).toEqual([]);
   });
 

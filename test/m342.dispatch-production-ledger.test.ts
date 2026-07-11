@@ -359,7 +359,7 @@ describe('M342 dispatch production ledger', () => {
     process.env.ASHLR_HOME = join(home, 'file-home');
     writeFileSync(process.env.ASHLR_HOME, 'not a directory', 'utf8');
 
-    expect(() => recordDispatchProduction(makeEvent())).not.toThrow();
+    expect(recordDispatchProduction(makeEvent())).toEqual({ attempted: 1, recorded: 0, failed: 1 });
     expect(() => readDispatchProductionEvents()).not.toThrow();
     expect(readDispatchProductionEvents()).toEqual([]);
     expect(existsSync(process.env.ASHLR_HOME)).toBe(true);

@@ -146,13 +146,15 @@ import { productionAttemptLearningLabelFromSignals } from '../learning/attempt-s
 import { readSkillCards } from '../fleet/skill-records.js';
 import { observeShadowSkills } from '../fleet/skill-shadow-observer.js';
 // worked-ledger is used transitively via LocalWorkQueueCoordinator (selectWorkQueueCoordinator).
-import { selectWorkQueueCoordinator, type WorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
+import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
 // M220: verdict-feedback sweep — feed judge rejections back to the ledger so
 // re-clogging items (e.g. "CI is failing") are suppressed for the cooldown window.
 import {
   GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS,
-  latestWorkedEvent,
+  latestWorkedEventForKeys,
   sweepJudgedProposals,
+  type WorkedEvent,
+  workedEventIsCooling,
 } from '../fleet/worked-ledger.js';
 import {
   blockingPendingProposalsForBacklog,
@@ -183,7 +185,9 @@ import {
   generatedRepairBackendAllowed,
   generatedRepairDispatchLineage,
   generatedRepairGenerationId,
+  generatedRepairGenerationIds,
   generatedRepairCooldownKey,
+  generatedRepairCooldownKeys,
   generatedRepairRetryPolicy,
   recordGeneratedRepairLifecycle,
 } from '../fleet/generated-repair-lifecycle.js';
@@ -193,6 +197,24 @@ import {
 } from './resolution-observer-scheduler.js';
 
 const GENERATED_REPAIR_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function latestGeneratedRepairWorkedEvent(
+  workedEvents: readonly WorkedEvent[],
+  item: WorkItem,
+) {
+  return latestWorkedEventForKeys(
+    workedEvents,
+    generatedRepairCooldownKeys(item),
+  );
+}
+
+function generatedRepairShouldSkip(
+  workedEvents: readonly WorkedEvent[],
+  item: WorkItem,
+  cooldownMs: number,
+): boolean {
+  return workedEventIsCooling(latestGeneratedRepairWorkedEvent(workedEvents, item), cooldownMs);
+}
 const GENERATED_REPAIR_RECOVERY_MIN_ATTEMPTS = 3;
 const RESOURCE_SNAPSHOT_MAX_AGE_MS = 30_000;
 type DispatchPreflightState =
@@ -809,7 +831,7 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
   selectedItems: WorkItem[];
   claimedItems: WorkItem[];
   pendingItemKeys: Set<string>;
-  coordinator: WorkQueueCoordinator;
+  workedEvents: readonly WorkedEvent[];
   baseCooldownMs: number;
   repairRecoveryHealthy: boolean;
   dispatchPreflightByItemId?: Map<string, DispatchPreflightState>;
@@ -823,17 +845,17 @@ function recordGeneratedRepairDecisionAgentActions(fields: {
   recordAgentAction(generatedItems.map((item): AgentActionEvent => {
     const pendingBlocked = fields.pendingItemKeys.has(workItemCoverageKey(item));
     const effectiveCooldownMs = cooldownMsForSelectionItem(
+      fields.workedEvents,
       item,
       fields.baseCooldownMs,
       fields.repairRecoveryHealthy,
     );
-    const cooldownKey = generatedRepairCooldownKey(item);
-    const cooldownBlocked = fields.coordinator.shouldSkip(cooldownKey, effectiveCooldownMs);
+    const cooldownBlocked = generatedRepairShouldSkip(fields.workedEvents, item, effectiveCooldownMs);
     const selected = selectedIds.has(item.id);
     const claimed = claimedIds.has(item.id);
     const dispatchPreflight = fields.dispatchPreflightByItemId?.get(item.id);
     const dispatchBlocked = dispatchPreflight !== undefined && dispatchPreflight !== 'dispatchable';
-    const latest = latestWorkedEvent(cooldownKey);
+    const latest = latestGeneratedRepairWorkedEvent(fields.workedEvents, item);
     const fastRepairCooldown = effectiveCooldownMs < fields.baseCooldownMs;
     const reason = claimed
       ? 'claimed'
@@ -1719,11 +1741,12 @@ function generatedRepairRecoveryHealthy(cfg: AshlrConfig): boolean {
 }
 
 function cooldownMsForSelectionItem(
+  workedEvents: readonly WorkedEvent[],
   item: WorkItem,
   baseCooldownMs: number,
   repairRecoveryHealthy: boolean,
 ): number {
-  const latest = latestWorkedEvent(generatedRepairCooldownKey(item));
+  const latest = latestGeneratedRepairWorkedEvent(workedEvents, item);
   if (latest?.outcome === 'dispatch-blocked' && isTrustedGeneratedRepairItem(item)) {
     return Math.min(baseCooldownMs, GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS);
   }
@@ -2450,9 +2473,18 @@ export async function tick(
           rejected,
           backlogItems,
           undefined,
-          (itemId, outcome) => {
+          (itemId, outcome, _ts, proposalGenerationId) => {
             const item = backlogItems.find((candidate) => candidate.id === itemId);
-            coordinator.recordOutcome(item ? generatedRepairCooldownKey(item) : itemId, outcome, machineId);
+            const currentGenerationId = item ? generatedRepairGenerationId(item) : null;
+            if (currentGenerationId !== null) {
+              if (!generatedRepairGenerationIds(item!).includes(proposalGenerationId ?? '')) return;
+              coordinator.recordOutcome(generatedRepairCooldownKey(item!), outcome, machineId);
+              return;
+            }
+            // A generation-bearing proposal with no exact current authority is
+            // stale feedback; never project it onto a new objective by child ID.
+            if (proposalGenerationId !== undefined) return;
+            coordinator.recordOutcome(itemId, outcome, machineId);
           },
         );
       }
@@ -2461,6 +2493,7 @@ export async function tick(
       console.warn('[ashlr] daemon:tick sweepJudgedProposals failed:', (err as Error)?.message ?? err);
     }
   }
+  const selectionWorkedEvents = coordinator.readWorkedEvents();
 
   // Build a set of repo+item keys that already have an open PENDING proposal
   // so we can skip duplicating work. New proposals use workItemId as the source
@@ -2480,9 +2513,10 @@ export async function tick(
 
   const repairRecoveryHealthy = generatedRepairRecoveryHealthy(liveCfg);
   const isSelectionBlocked = (item: WorkItem): boolean =>
-    coordinator.shouldSkip(
-      generatedRepairCooldownKey(item),
-      cooldownMsForSelectionItem(item, cooldownMs, repairRecoveryHealthy),
+    generatedRepairShouldSkip(
+      selectionWorkedEvents,
+      item,
+      cooldownMsForSelectionItem(selectionWorkedEvents, item, cooldownMs, repairRecoveryHealthy),
     ) ||
     pendingItemKeys.has(workItemCoverageKey(item));
 
@@ -2569,8 +2603,8 @@ export async function tick(
     let fastRepairCooldown = 0;
     for (const item of items) {
       const pending = pendingItemKeys.has(workItemCoverageKey(item));
-      const itemCooldownMs = cooldownMsForSelectionItem(item, cooldownMs, repairRecoveryHealthy);
-      const cooling = coordinator.shouldSkip(generatedRepairCooldownKey(item), itemCooldownMs);
+      const itemCooldownMs = cooldownMsForSelectionItem(selectionWorkedEvents, item, cooldownMs, repairRecoveryHealthy);
+      const cooling = generatedRepairShouldSkip(selectionWorkedEvents, item, itemCooldownMs);
       if (pending) pendingBlocked++;
       if (cooling) cooldownBlocked++;
       if (!pending && !cooling) eligibleItems++;
@@ -2700,7 +2734,7 @@ export async function tick(
     selectedItems: selected,
     claimedItems: workedSet,
     pendingItemKeys,
-    coordinator,
+    workedEvents: selectionWorkedEvents,
     baseCooldownMs: cooldownMs,
     repairRecoveryHealthy,
     dispatchPreflightByItemId,
@@ -4058,13 +4092,22 @@ export async function tick(
     return event ? [event] : [];
   });
   const handoffFailedItemIds = new Set<string>();
+  const workedOutcomeFailedItemIds = new Set<string>();
   for (const event of productionEvents) {
     const repairable = repairHandoffFromDispatchEvent(event) !== null;
     if (liveCfg.fleet?.sharedQueue?.mode === 'filesystem') {
+      const parentWrite = recordDispatchProduction(event);
+      if (parentWrite.recorded !== 1 && repairable) handoffFailedItemIds.add(event.itemId);
       if (repairable) handoffFailedItemIds.add(event.itemId);
-    } else {
-      const handoff = recordRepairHandoffs(event);
+    } else if (repairable) {
+      const handoff = recordRepairHandoffs(event, {
+        schemaVersion: liveCfg.foundry?.repairHandoffV2Write === true
+          ? 2
+          : 1,
+      });
       if (handoff.failed > 0) handoffFailedItemIds.add(event.itemId);
+    } else {
+      recordDispatchProduction(event);
     }
   }
 
@@ -4097,7 +4140,11 @@ export async function tick(
             workedOutcomeFromDispatchProduction(outcome.value.dispatch?.production) ??
             (proposalItemIds.has(outcome.value.item.id) ? 'diff' : 'empty');
           // M113: route through coordinator (Local → worked-ledger; Shared → global store).
-          coordinator.recordOutcome(generatedRepairCooldownKey(outcome.value.item), outcomeLabel, machineId);
+          if (!coordinator.recordOutcome(
+            generatedRepairCooldownKey(outcome.value.item),
+            outcomeLabel,
+            machineId,
+          )) workedOutcomeFailedItemIds.add(outcome.value.item.id);
         }
       }
     } catch (err) {
@@ -4114,6 +4161,8 @@ export async function tick(
         if (
           outcome.status !== 'fulfilled' ||
           !outcome.value.dispatched ||
+          handoffFailedItemIds.has(outcome.value.item.id) ||
+          workedOutcomeFailedItemIds.has(outcome.value.item.id) ||
           !isTrustedGeneratedRepairItem(outcome.value.item)
         ) continue;
         const trace = outcome.value.dispatch;
@@ -4166,7 +4215,6 @@ export async function tick(
 
   if (dispatchedCount > 0) {
     try {
-      recordDispatchProduction(productionEvents);
       recordAgentAction(productionEvents.map(agentActionFromDispatchEvent));
     } catch (err) {
       console.warn('[ashlr] daemon:tick dispatch production ledger failed:', (err as Error)?.message ?? err);

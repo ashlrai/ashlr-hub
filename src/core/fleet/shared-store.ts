@@ -20,6 +20,7 @@
 
 import {
   existsSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   closeSync,
@@ -257,10 +258,12 @@ export class SharedStore {
    * Write the queue atomically (tmp + rename). Never throws.
    * Bounds worked events to MAX_WORKED.
    */
-  private writeQueue(q: SharedFleetQueue): void {
+  private writeQueue(q: SharedFleetQueue): boolean {
     let tmp: string | null = null;
+    let fd: number | undefined;
+    let dirFd: number | undefined;
     try {
-      if (!this.ensureDir()) return;
+      if (!this.ensureDir()) return false;
       const bounded: SharedFleetQueue = {
         ...q,
         worked: q.worked.slice(-MAX_WORKED),
@@ -268,7 +271,15 @@ export class SharedStore {
       const dest = this.queuePath();
       tmp = `${dest}.${process.pid}.${randomUUID()}.tmp`;
       writeFileSync(tmp, JSON.stringify(bounded, null, 2) + '\n', 'utf8');
+      fd = openSync(tmp, 'r');
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = undefined;
       renameSync(tmp, dest);
+      tmp = null;
+      dirFd = openSync(this.dirPath, 'r');
+      fsyncSync(dirFd);
+      return true;
     } catch {
       // Persistence failure must not crash the fleet.
       if (tmp) {
@@ -278,6 +289,10 @@ export class SharedStore {
           // Best-effort cleanup only.
         }
       }
+      return false;
+    } finally {
+      if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
+      if (dirFd !== undefined) { try { closeSync(dirFd); } catch { /* best effort */ } }
     }
   }
 
@@ -333,8 +348,7 @@ export class SharedStore {
     try {
       const q = this.readQueue();
       const { queue, result } = fn(q);
-      this.writeQueue(queue);
-      return result;
+      return this.writeQueue(queue) ? result : fallback;
     } finally {
       this.releaseLock();
     }
@@ -408,16 +422,16 @@ export class SharedStore {
    * Append a worked outcome to the global shared ledger.
    * Also releases the claim if one exists. Never throws.
    */
-  recordOutcome(itemId: string, outcome: WorkedOutcome, machineId: string): void {
-    if (!this.ensureDir()) return;
-    this.withLock((q) => {
+  recordOutcome(itemId: string, outcome: WorkedOutcome, machineId: string): boolean {
+    if (!this.ensureDir()) return false;
+    return this.withLock((q) => {
       q.worked.push({ itemId, outcome, ts: new Date().toISOString() });
       // Release the claim when recording the outcome.
       if (q.claims[itemId]?.machineId === machineId) {
         delete q.claims[itemId];
       }
-      return { queue: q, result: undefined };
-    }, undefined);
+      return { queue: q, result: true };
+    }, false);
   }
 
   /**

@@ -76,7 +76,7 @@ function diagnosticRepairItem(
     basis: 'run-proposal-outcome',
   };
   const handoff = repairHandoffFromDispatchEvent(parent)!;
-  recordRepairHandoffs(parent);
+  recordRepairHandoffs(parent, { schemaVersion: 2 });
   return {
     id: handoff.childItemId,
     repo: parent.repo,

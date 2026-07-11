@@ -1,6 +1,7 @@
 import type { AshlrConfig, Proposal, WorkItem } from '../types.js';
 import { resolve } from 'node:path';
 import { resolveProductionVelocityProfile } from '../fabric/production-velocity.js';
+import { generatedRepairGenerationIds } from './generated-repair-lifecycle.js';
 
 type ProposalItemMatch = Pick<Proposal, 'id' | 'title' | 'summary' | 'workItemId' | 'repo'> &
   Partial<Pick<Proposal, 'createdAt' | 'status' | 'workItemGenerationId'>>;
@@ -82,7 +83,7 @@ export function pendingProposalItemKeysForBacklog(
     if (workItemId) {
       for (const item of itemsById.get(workItemId) ?? []) {
         const generationMatches = !item.repairGenerationId ||
-          proposal.workItemGenerationId === item.repairGenerationId;
+          generatedRepairGenerationIds(item).includes(proposal.workItemGenerationId ?? '');
         if (proposalRepoMatchesItem(proposal, item) && generationMatches) {
           pendingItemKeys.add(workItemCoverageKey(item));
         }

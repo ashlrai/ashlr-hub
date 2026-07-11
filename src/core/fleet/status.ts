@@ -40,7 +40,7 @@ import {
   summarizeAttemptCoverage,
   type AttemptCoverageStatus,
 } from '../autonomy/attempt-records.js';
-import { generatedRepairCooldownKey } from './generated-repair-lifecycle.js';
+import { generatedRepairCooldownKeys } from './generated-repair-lifecycle.js';
 import { readRepairHandoffs } from './repair-handoff-journal.js';
 import {
   listTrajectoryRecords,
@@ -71,9 +71,10 @@ import {
   DEFAULT_COOLDOWN_MS,
   GENERATED_REPAIR_DISPATCH_BLOCKED_COOLDOWN_MS,
   isSuppressibleWorkedOutcome,
-  loadWorkedLedger,
+  latestWorkedEventForKeys,
   type WorkedEvent,
 } from './worked-ledger.js';
+import { selectWorkQueueCoordinator } from '../seams/work-queue-coordinator.js';
 import {
   blockingPendingProposalsForBacklog,
   pendingProposalItemKeysForBacklog,
@@ -1016,19 +1017,7 @@ function buildQueueEligibility(
   const cooldownMs = configCooldownMs(cfg) ?? DEFAULT_COOLDOWN_MS;
   const nowMs = Date.now();
   const repairRecoveryHealthy = healthyGeneratedRepairRecovery(cfg);
-  const latestByItem = new Map<string, { event: WorkedEvent; tsMs: number; suppressible: boolean }>();
-  for (const event of loadWorkedLedger().events) {
-    const eventMs = Date.parse(event.ts);
-    if (Number.isNaN(eventMs)) continue;
-    const prior = latestByItem.get(event.itemId);
-    if (prior === undefined || eventMs > prior.tsMs) {
-      latestByItem.set(event.itemId, {
-        event,
-        tsMs: eventMs,
-        suppressible: isSuppressibleWorkedOutcome(event.outcome),
-      });
-    }
-  }
+  const workedEvents = selectWorkQueueCoordinator(cfg).readWorkedEvents();
 
   const blockingPendingProposals = blockingPendingProposalsForBacklog(pendingProposals, cfg);
   const pendingItemKeys = pendingProposalItemKeysForBacklog(items, blockingPendingProposals);
@@ -1048,7 +1037,11 @@ function buildQueueEligibility(
       pendingItems++;
       continue;
     }
-    const last = latestByItem.get(generatedRepairCooldownKey(item));
+    const lastEvent = latestWorkedEventForKeys(workedEvents, generatedRepairCooldownKeys(item));
+    const lastMs = lastEvent ? Date.parse(lastEvent.ts) : Number.NaN;
+    const last = lastEvent && Number.isFinite(lastMs)
+      ? { event: lastEvent, tsMs: lastMs, suppressible: isSuppressibleWorkedOutcome(lastEvent.outcome) }
+      : undefined;
     const itemCooldownMs = cooldownMsForWorkItem(item, cooldownMs, repairRecoveryHealthy, last?.event);
     const cooldownUntil = last && last.suppressible ? last.tsMs + itemCooldownMs : null;
     if (cooldownUntil !== null && cooldownUntil > nowMs) {

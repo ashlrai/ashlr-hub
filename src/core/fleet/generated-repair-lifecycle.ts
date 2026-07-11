@@ -25,6 +25,7 @@ import {
   readRepairHandoffs,
   repairGenerationIdFromHandoffId,
   repairHandoffJournalPath,
+  repairHandoffV2JournalPath,
   type RepairHandoffObservation,
 } from './repair-handoff-journal.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
@@ -105,19 +106,33 @@ export function generatedRepairLifecyclePath(): string {
 let handoffAuthorityCache: {
   fingerprint: string;
   byEventId: Map<string, RepairHandoffObservation>;
+  observations: RepairHandoffObservation[];
 } | undefined;
 
+function handoffAuthoritySnapshot(): {
+  byEventId: Map<string, RepairHandoffObservation>;
+  observations: RepairHandoffObservation[];
+} {
+  const fingerprint = [repairHandoffJournalPath(), repairHandoffV2JournalPath()]
+    .map((path) => {
+      try {
+        const stat = lstatSync(path);
+        return `${path}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+      } catch {
+        return `${path}:missing`;
+      }
+    })
+    .join('|');
+  if (handoffAuthorityCache?.fingerprint === fingerprint) return handoffAuthorityCache;
+  const read = readRepairHandoffs();
+  const observations = read.sourceState === 'degraded' ? [] : read.observations;
+  const byEventId = new Map(observations.map((entry) => [entry.eventId, entry]));
+  handoffAuthorityCache = { fingerprint, byEventId, observations };
+  return handoffAuthorityCache;
+}
+
 function handoffAuthorityByEventId(): Map<string, RepairHandoffObservation> {
-  const path = repairHandoffJournalPath();
-  let fingerprint = `${path}:missing`;
-  try {
-    const stat = lstatSync(path);
-    fingerprint = `${path}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
-  } catch { /* missing or unsafe state is represented by the reader */ }
-  if (handoffAuthorityCache?.fingerprint === fingerprint) return handoffAuthorityCache.byEventId;
-  const byEventId = new Map(readRepairHandoffs().observations.map((entry) => [entry.eventId, entry]));
-  handoffAuthorityCache = { fingerprint, byEventId };
-  return byEventId;
+  return handoffAuthoritySnapshot().byEventId;
 }
 
 export function generatedRepairGenerationId(item: WorkItem): string | null {
@@ -171,6 +186,31 @@ export function generatedRepairCooldownKey(item: WorkItem): string {
   if (item.repairHandoffId === undefined && item.repairGenerationId === undefined) return item.id;
   const generationId = generatedRepairGenerationId(item);
   return generationId ? `${item.id}::generation:${generationId}` : item.id;
+}
+
+/** Current generation plus exact hashful aliases in either rollout direction. */
+export function generatedRepairGenerationIds(item: WorkItem): string[] {
+  const current = generatedRepairGenerationId(item);
+  if (!current || typeof item.repairHandoffId !== 'string') return current ? [current] : [];
+  const snapshot = handoffAuthoritySnapshot();
+  const target = snapshot.byEventId.get(item.repairHandoffId);
+  if (!target || !target.parentObjectiveHash) return [current];
+  const aliases = snapshot.observations
+    .filter((candidate) =>
+      candidate.eventId !== target.eventId &&
+      candidate.kind === target.kind &&
+      candidate.repo === target.repo &&
+      candidate.parentItemId === target.parentItemId &&
+      candidate.parentObjectiveHash === target.parentObjectiveHash &&
+      candidate.childItemId === target.childItemId)
+    .map((candidate) => candidate.generationId);
+  return [...new Set([current, ...aliases])];
+}
+
+export function generatedRepairCooldownKeys(item: WorkItem): string[] {
+  const generations = generatedRepairGenerationIds(item);
+  if (generations.length === 0) return [item.id];
+  return generations.map((generationId) => `${item.id}::generation:${generationId}`);
 }
 
 function attemptHash(attemptId: string): string {
@@ -427,6 +467,57 @@ function resultFromRecord(
   };
 }
 
+function mergedLifecycleRecord(
+  generationId: string,
+  generationIds: readonly string[],
+  records: readonly GeneratedRepairLifecycleRecord[],
+): { ok: true; record: GeneratedRepairLifecycleRecord | undefined } | { ok: false } {
+  const selected = records
+    .filter((record) => generationIds.includes(record.generationId))
+    .sort((left, right) => Date.parse(left.updatedAt) - Date.parse(right.updatedAt));
+  if (selected.length === 0) return { ok: true, record: undefined };
+  if (
+    selected.length === 1 &&
+    selected[0]!.emptyAttemptHashes.length > 0 &&
+    selected[0]!.emptyAttemptBackends === undefined
+  ) return { ok: true, record: { ...selected[0]!, generationId } };
+  const terminal = new Set(selected
+    .map((record) => record.disposition)
+    .filter((disposition) => disposition !== 'active'));
+  if (terminal.size > 1) return { ok: false };
+
+  const attempts = new Map<string, EngineId>();
+  for (const record of selected) {
+    if (
+      record.emptyAttemptHashes.length > 0 &&
+      record.emptyAttemptBackends?.length !== record.emptyAttemptHashes.length
+    ) return { ok: false };
+    for (let index = 0; index < record.emptyAttemptHashes.length; index++) {
+      const hash = record.emptyAttemptHashes[index]!;
+      const backend = record.emptyAttemptBackends![index]!;
+      const existing = attempts.get(hash);
+      if (existing !== undefined && existing !== backend) return { ok: false };
+      if (attempts.size < 2 || attempts.has(hash)) attempts.set(hash, backend);
+    }
+  }
+  const emptyAttemptHashes = [...attempts.keys()];
+  const emptyAttemptBackends = emptyAttemptHashes.map((hash) => attempts.get(hash)!);
+  const explicitDisposition = [...terminal][0];
+  const disposition: GeneratedRepairDisposition = explicitDisposition ?? (
+    emptyAttemptHashes.length >= 2 ? 'exhausted' : 'active'
+  );
+  return {
+    ok: true,
+    record: {
+      generationId,
+      disposition,
+      emptyAttemptHashes,
+      emptyAttemptBackends,
+      updatedAt: selected.at(-1)!.updatedAt,
+    },
+  };
+}
+
 function upsertNewest(
   ledger: GeneratedRepairLifecycleLedger,
   record: GeneratedRepairLifecycleRecord,
@@ -444,7 +535,9 @@ export function readGeneratedRepairLifecycle(item: WorkItem): GeneratedRepairLif
   }
   const loaded = loadLedger();
   if (!loaded.ok) return { available: false, disposition: 'active', authoritativeEmptyRuns: 0 };
-  return resultFromRecord(true, loaded.ledger.records.find((record) => record.generationId === id));
+  const merged = mergedLifecycleRecord(id, generatedRepairGenerationIds(item), loaded.ledger.records);
+  if (!merged.ok) return { available: false, disposition: 'active', authoritativeEmptyRuns: 0 };
+  return resultFromRecord(true, merged.record);
 }
 
 /** Derive backend retry constraints only from durable diagnostic lifecycle evidence. */
@@ -533,7 +626,7 @@ export function recordGeneratedRepairLifecycle(
     return { available: false, disposition: 'active', authoritativeEmptyRuns: 0, recorded: false };
   }
   try {
-    return recordGeneratedRepairLifecycleUnlocked(id, evidence);
+    return recordGeneratedRepairLifecycleUnlocked(id, generatedRepairGenerationIds(item), evidence);
   } finally {
     releaseLocalStoreLock(lock);
   }
@@ -541,14 +634,18 @@ export function recordGeneratedRepairLifecycle(
 
 function recordGeneratedRepairLifecycleUnlocked(
   id: string,
+  generationIds: readonly string[],
   evidence: Exclude<GeneratedRepairLifecycleEvidence, { kind: 'non-terminal' }>,
 ): GeneratedRepairLifecycleTransitionResult {
   const loaded = loadLedger();
   if (!loaded.ok) {
     return { available: false, disposition: 'active', authoritativeEmptyRuns: 0, recorded: false };
   }
-  const existingIndex = loaded.ledger.records.findIndex((record) => record.generationId === id);
-  const existing = existingIndex >= 0 ? loaded.ledger.records[existingIndex] : undefined;
+  const merged = mergedLifecycleRecord(id, generationIds, loaded.ledger.records);
+  if (!merged.ok) {
+    return { available: false, disposition: 'active', authoritativeEmptyRuns: 0, recorded: false };
+  }
+  const existing = merged.record;
   if (existing?.disposition === 'retired' || existing?.disposition === 'exhausted') {
     return { ...resultFromRecord(true, existing), recorded: false };
   }
@@ -577,6 +674,9 @@ function recordGeneratedRepairLifecycleUnlocked(
     emptyAttemptHashes.push(hash);
     emptyAttemptBackends.push(evidence.backend);
     if (emptyAttemptHashes.length < 2) {
+      loaded.ledger.records = loaded.ledger.records.filter(
+        (record) => !generationIds.includes(record.generationId),
+      );
       const recorded = saveActiveEmptyProgress(loaded.ledger, id, emptyAttemptHashes, emptyAttemptBackends, now);
       return recorded
         ? {
@@ -599,6 +699,9 @@ function recordGeneratedRepairLifecycleUnlocked(
       : {}),
     updatedAt: now,
   };
+  loaded.ledger.records = loaded.ledger.records.filter(
+    (candidate) => !generationIds.includes(candidate.generationId),
+  );
   upsertNewest(loaded.ledger, record);
   const recorded = saveLedger(loaded.ledger);
   return recorded

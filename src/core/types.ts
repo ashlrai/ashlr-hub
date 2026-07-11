@@ -492,6 +492,12 @@ export interface AshlrConfig {
      * DEFAULT true when `foundry` is present; set false for advisory-only mode.
      */
     autonomyControlLoop?: boolean;
+    /**
+     * Reader-first migration gate for objective-scoped repair handoff schema v2.
+     * Default false: writers keep emitting rollback-compatible v1 rows while
+     * every deployed reader learns the isolated v2 sidecar format first.
+     */
+    repairHandoffV2Write?: boolean;
     /** Per-backend preferred model id (keyed by EngineId). */
     models?: Partial<Record<EngineId, string>>;
     /**
@@ -3467,7 +3473,7 @@ export interface WorkItem {
   ts: string;
   /** Durable parent-handoff observation that authorizes this generated repair projection. */
   repairHandoffId?: string;
-  /** Stable generation identity derived from the parent attempt, independent of queue replay time. */
+  /** Stable generation identity derived from authoritative parent control identity. */
   repairGenerationId?: string;
   /** Original work item retried by this generated repair. */
   repairParentItemId?: string;

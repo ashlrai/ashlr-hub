@@ -262,6 +262,7 @@ import {
 import {
   createProposal,
   pendingCount,
+  setStatus,
 } from '../src/core/inbox/store.js';
 import {
   readDispatchProductionEvents,
@@ -499,7 +500,7 @@ function makeDiagnosticResliceItem(
     basis: 'run-proposal-outcome',
   };
   const handoff = repairHandoffFromDispatchEvent(parentEvent)!;
-  recordRepairHandoffs(parentEvent);
+  recordRepairHandoffs(parentEvent, { schemaVersion: 2 });
   return {
     id: handoff.childItemId,
     repo: repoDir,
@@ -1214,6 +1215,65 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({
       workItemId: generic.id,
     });
+  });
+
+  it('A1-judged-repair-generation: delayed rejection cannot cool a changed generation', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'abcabc121212', 1);
+    const proposal = createProposal({
+      repo: repo.dir,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Rejected old repair generation',
+      summary: 'Old objective feedback must not cool the current generation.',
+      diff: 'diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-old\n+new\n',
+      workItemId: reslice.id,
+      workItemGenerationId: 'b'.repeat(64),
+      workSource: 'self',
+    });
+    setStatus(proposal.id, 'rejected');
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [reslice],
+    });
+
+    await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: true });
+
+    expect(loadWorkedLedger().events.some(
+      (event) => event.itemId === generatedRepairCooldownKey(reslice),
+    )).toBe(false);
+  });
+
+  it('A1-judged-repair-generation: exact rejection cools the stable generation', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'abcabc343434', 1);
+    const proposal = createProposal({
+      repo: repo.dir,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'Rejected current repair generation',
+      summary: 'Current objective feedback should cool this generation.',
+      diff: 'diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-old\n+new\n',
+      workItemId: reslice.id,
+      workItemGenerationId: generatedRepairGenerationId(reslice)!,
+      workSource: 'self',
+    });
+    setStatus(proposal.id, 'rejected');
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [reslice],
+    });
+
+    await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: true });
+
+    expect(loadWorkedLedger().events).toContainEqual(expect.objectContaining({
+      itemId: generatedRepairCooldownKey(reslice),
+      outcome: 'judged-decline',
+    }));
   });
 
   it('A1-drain-auto-fast-repair-cooldown: healthy repair recovery retries trusted empty repairs after 30 minutes', async () => {

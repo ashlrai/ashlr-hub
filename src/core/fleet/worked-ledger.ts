@@ -17,10 +17,14 @@
  */
 
 import {
+  closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -170,7 +174,10 @@ export function loadWorkedLedger(): WorkedLedger {
  * Atomically write the ledger via tmp-file + rename (POSIX-atomic).
  * Creates ~/.ashlr/fleet recursively. Bounds events. Never throws.
  */
-function saveWorkedLedger(l: WorkedLedger): void {
+function saveWorkedLedger(l: WorkedLedger): boolean {
+  let tmp: string | undefined;
+  let fd: number | undefined;
+  let dirFd: number | undefined;
   try {
     const dir = fleetDir();
     if (!existsSync(dir)) {
@@ -180,11 +187,24 @@ function saveWorkedLedger(l: WorkedLedger): void {
       events: l.events.slice(-MAX_EVENTS),
     };
     const dest = workedLedgerPath();
-    const tmp = dest + '.tmp';
+    tmp = dest + '.tmp';
     writeFileSync(tmp, JSON.stringify(bounded, null, 2) + '\n', 'utf8');
+    fd = openSync(tmp, 'r');
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
     renameSync(tmp, dest);
+    tmp = undefined;
+    dirFd = openSync(dir, 'r');
+    fsyncSync(dirFd);
+    return true;
   } catch {
     // Persistence failure must not crash the fleet — swallow silently.
+    if (tmp) { try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* best effort */ } }
+    return false;
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
+    if (dirFd !== undefined) { try { closeSync(dirFd); } catch { /* best effort */ } }
   }
 }
 
@@ -203,8 +223,8 @@ export function recordOutcome(
   itemId: string,
   outcome: WorkedOutcome,
   ts?: string,
-): void {
-  recordOutcomeEvent(itemId, outcome, ts);
+): boolean {
+  return recordOutcomeEvent(itemId, outcome, ts);
 }
 
 function recordOutcomeEvent(
@@ -212,7 +232,7 @@ function recordOutcomeEvent(
   outcome: WorkedOutcome,
   ts?: string,
   proposalId?: string,
-): void {
+): boolean {
   try {
     const l = loadWorkedLedger();
     l.events.push({
@@ -221,9 +241,10 @@ function recordOutcomeEvent(
       ts: ts ?? new Date().toISOString(),
       ...(proposalId ? { proposalId } : {}),
     });
-    saveWorkedLedger(l);
+    return saveWorkedLedger(l);
   } catch {
     // Never throws.
+    return false;
   }
 }
 
@@ -244,13 +265,19 @@ function recordSweptProposalOutcome(
   outcome: WorkedOutcome,
   proposalId: string,
   ts: string | undefined,
-  record: (itemId: string, outcome: WorkedOutcome, ts?: string) => void,
+  record: (
+    itemId: string,
+    outcome: WorkedOutcome,
+    ts?: string,
+    workItemGenerationId?: string,
+  ) => void,
+  workItemGenerationId?: string,
 ): void {
   if (record === recordOutcome) {
     recordOutcomeEvent(itemId, outcome, ts, proposalId);
     return;
   }
-  record(itemId, outcome, ts);
+  record(itemId, outcome, ts, workItemGenerationId);
   recordOutcomeEvent(sweptProposalMarkerItemId(proposalId), outcome, ts, proposalId);
 }
 
@@ -275,21 +302,11 @@ export function recentlyDeclined(
   now?: number,
 ): boolean {
   try {
-    const l = loadWorkedLedger();
-    // Find the LAST event for this itemId (events are oldest-first, so scan backwards).
-    let lastEvent: WorkedEvent | undefined;
-    for (let i = l.events.length - 1; i >= 0; i--) {
-      if (l.events[i]!.itemId === itemId) {
-        lastEvent = l.events[i];
-        break;
-      }
-    }
-    if (!lastEvent) return false;
-    if (!isSuppressibleWorkedOutcome(lastEvent.outcome)) return false;
-    const eventMs = Date.parse(lastEvent.ts);
-    if (Number.isNaN(eventMs)) return false;
-    const nowMs = now ?? Date.now();
-    return nowMs - eventMs < cooldownMs;
+    return workedEventIsCooling(
+      latestWorkedEventForKeys(loadWorkedLedger().events, [itemId]),
+      cooldownMs,
+      now,
+    );
   } catch {
     // Never throws — fail open (not declined).
     return false;
@@ -298,15 +315,41 @@ export function recentlyDeclined(
 
 export function latestWorkedEvent(itemId: string): WorkedEvent | undefined {
   try {
-    const l = loadWorkedLedger();
-    for (let i = l.events.length - 1; i >= 0; i--) {
-      const event = l.events[i]!;
-      if (event.itemId === itemId) return event;
-    }
-    return undefined;
+    return latestWorkedEventForKeys(loadWorkedLedger().events, [itemId]);
   } catch {
     return undefined;
   }
+}
+
+export function latestWorkedEventForKeys(
+  events: readonly WorkedEvent[],
+  itemIds: readonly string[],
+): WorkedEvent | undefined {
+  const keys = new Set(itemIds);
+  let latest: WorkedEvent | undefined;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const event of events) {
+    if (!keys.has(event.itemId)) continue;
+    const eventMs = Date.parse(event.ts);
+    if (!Number.isFinite(eventMs)) continue;
+    // Equal timestamps resolve to the later append, matching ledger order.
+    if (eventMs >= latestMs) {
+      latest = event;
+      latestMs = eventMs;
+    }
+  }
+  return latest;
+}
+
+export function workedEventIsCooling(
+  event: WorkedEvent | undefined,
+  cooldownMs: number,
+  now?: number,
+): boolean {
+  if (!event || !isSuppressibleWorkedOutcome(event.outcome)) return false;
+  const eventMs = Date.parse(event.ts);
+  if (!Number.isFinite(eventMs)) return false;
+  return (now ?? Date.now()) - eventMs < cooldownMs;
 }
 
 // ---------------------------------------------------------------------------
@@ -413,10 +456,16 @@ export function sweepJudgedProposals(
     status: string;
     decisionReason?: string;
     workItemId?: string;
+    workItemGenerationId?: string;
   }>,
   backlogItems: ReadonlyArray<WorkItem>,
   ts?: string,
-  record: (itemId: string, outcome: WorkedOutcome, ts?: string) => void = recordOutcome,
+  record: (
+    itemId: string,
+    outcome: WorkedOutcome,
+    ts?: string,
+    workItemGenerationId?: string,
+  ) => void = recordOutcome,
 ): number {
   let recorded = 0;
   try {
@@ -443,7 +492,14 @@ export function sweepJudgedProposals(
       }
 
       if (prop.workItemId) {
-        recordSweptProposalOutcome(prop.workItemId, outcome, prop.id, ts, record);
+        recordSweptProposalOutcome(
+          prop.workItemId,
+          outcome,
+          prop.id,
+          ts,
+          record,
+          prop.workItemGenerationId,
+        );
         recorded++;
         continue;
       }
@@ -468,7 +524,14 @@ export function sweepJudgedProposals(
 
       if (!matched) continue;
 
-      recordSweptProposalOutcome(matched.id, outcome, prop.id, ts, record);
+      recordSweptProposalOutcome(
+        matched.id,
+        outcome,
+        prop.id,
+        ts,
+        record,
+        prop.workItemGenerationId,
+      );
       recorded++;
     }
   } catch {

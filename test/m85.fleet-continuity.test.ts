@@ -88,6 +88,8 @@ import {
   recordOutcome,
   recentlyDeclined,
   loadWorkedLedger,
+  latestWorkedEventForKeys,
+  workedEventIsCooling,
   workedLedgerPath,
 } from '../src/core/fleet/worked-ledger.js';
 
@@ -227,7 +229,7 @@ afterEach(() => {
 
 describe('M85 worked-ledger — pure unit', () => {
   it('recordOutcome persists an event and loadWorkedLedger returns it', () => {
-    recordOutcome('item-abc', 'diff');
+    expect(recordOutcome('item-abc', 'diff')).toBe(true);
     const l = loadWorkedLedger();
     expect(l.events.some(e => e.itemId === 'item-abc' && e.outcome === 'diff')).toBe(true);
   });
@@ -262,6 +264,25 @@ describe('M85 worked-ledger — pure unit', () => {
     recordOutcome('item-seq', 'empty', old);
     recordOutcome('item-seq', 'diff',  newer); // last event is 'diff'
     expect(recentlyDeclined('item-seq', 60 * 60 * 1000)).toBe(false);
+  });
+
+  it('selects one latest outcome across generation aliases', () => {
+    const keys = ['repair:v1', 'repair:v2'];
+    const olderEmpty = { itemId: keys[0]!, outcome: 'empty' as const, ts: '2026-07-10T12:00:00.000Z' };
+    const newerDiff = { itemId: keys[1]!, outcome: 'diff' as const, ts: '2026-07-10T13:00:00.000Z' };
+    expect(latestWorkedEventForKeys([olderEmpty, newerDiff], keys)).toBe(newerDiff);
+    expect(workedEventIsCooling(newerDiff, 60_000, Date.parse('2026-07-10T13:00:30.000Z'))).toBe(false);
+
+    const newerDecline = { itemId: keys[0]!, outcome: 'judged-decline' as const, ts: '2026-07-10T14:00:00.000Z' };
+    expect(latestWorkedEventForKeys([newerDiff, newerDecline], keys)).toBe(newerDecline);
+    expect(workedEventIsCooling(newerDecline, 60_000, Date.parse('2026-07-10T14:00:30.000Z'))).toBe(true);
+  });
+
+  it('uses append order for equal timestamps and ignores malformed timestamps', () => {
+    const first = { itemId: 'repair:v1', outcome: 'empty' as const, ts: '2026-07-10T12:00:00.000Z' };
+    const malformed = { itemId: 'repair:v2', outcome: 'judged-decline' as const, ts: 'not-a-date' };
+    const last = { itemId: 'repair:v2', outcome: 'diff' as const, ts: first.ts };
+    expect(latestWorkedEventForKeys([first, malformed, last], ['repair:v1', 'repair:v2'])).toBe(last);
   });
 
   it('never throws when the ledger file is missing', () => {

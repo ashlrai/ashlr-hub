@@ -474,7 +474,7 @@ describe('M111 SharedWorkQueueCoordinator — global cooldown crosses machines',
     expect(coordB.shouldSkip('global-judged-noise', 6 * 60 * 60 * 1000)).toBe(true);
   });
 
-  it('claimItems excludes globally cooled judged-decline items', () => {
+  it('claimItems trusts the caller cooldown filter and only coordinates leases', () => {
     const store = makeStore(tmpDir);
     const coordA = makeSharedCoordinator(store, 'machine-A');
     const coordB = makeSharedCoordinator(store, 'machine-B');
@@ -485,7 +485,8 @@ describe('M111 SharedWorkQueueCoordinator — global cooldown crosses machines',
 
     const claimed = coordB.claimItems([declined, fresh], 2, 'machine-B');
 
-    expect(claimed.map((item) => item.id)).toEqual(['global-fresh']);
+    expect(claimed.map((item) => item.id)).toEqual(['global-judged-decline', 'global-fresh']);
+    expect(coordB.readWorkedEvents()).toEqual(store.readSnapshot().worked);
   });
 
   it('a later diff outcome clears a prior judged-review cooldown', () => {
@@ -558,7 +559,7 @@ describe('M111 SharedStore — degraded / unwritable path', () => {
   it('recordOutcome never throws on bad path', () => {
     const store = new SharedStore('/nonexistent-root-path/ashlr-fleet/shared');
     const coord = new SharedWorkQueueCoordinator(store, 'machine-X', 5000);
-    expect(() => coord.recordOutcome('x', 'empty', 'machine-X')).not.toThrow();
+    expect(coord.recordOutcome('x', 'empty', 'machine-X')).toBe(false);
   });
 
   it('renew returns [] and never throws on bad path', () => {

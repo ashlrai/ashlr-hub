@@ -24,9 +24,13 @@
  */
 
 import type { AshlrConfig, WorkItem } from '../types.js';
-import { recordOutcome as localRecord, recentlyDeclined as localRecentlyDeclined } from '../fleet/worked-ledger.js';
+import {
+  loadWorkedLedger,
+  recordOutcome as localRecord,
+  recentlyDeclined as localRecentlyDeclined,
+} from '../fleet/worked-ledger.js';
 import { SharedStore } from '../fleet/shared-store.js';
-import type { WorkedOutcome } from '../fleet/worked-ledger.js';
+import type { WorkedEvent, WorkedOutcome } from '../fleet/worked-ledger.js';
 import { hostname } from 'node:os';
 
 export const WORK_QUEUE_COORDINATOR_SEAM = {
@@ -56,8 +60,9 @@ export interface WorkQueueCoordinator {
   claimItems(candidates: WorkItem[], count: number, machineId: string): WorkItem[];
   renew(itemIds: string[], machineId: string): string[];
   release(itemIds: string[], machineId: string): void;
-  recordOutcome(itemId: string, outcome: WorkedOutcome, machineId: string): void;
+  recordOutcome(itemId: string, outcome: WorkedOutcome, machineId: string): boolean;
   shouldSkip(itemId: string, cooldownMs: number): boolean;
+  readWorkedEvents(): WorkedEvent[];
 }
 
 // ---------------------------------------------------------------------------
@@ -89,12 +94,16 @@ export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
     return [];
   }
 
-  recordOutcome(itemId: string, outcome: WorkedOutcome, _machineId: string): void {
-    localRecord(itemId, outcome);
+  recordOutcome(itemId: string, outcome: WorkedOutcome, _machineId: string): boolean {
+    return localRecord(itemId, outcome);
   }
 
   shouldSkip(itemId: string, cooldownMs: number): boolean {
     return localRecentlyDeclined(itemId, cooldownMs);
+  }
+
+  readWorkedEvents(): WorkedEvent[] {
+    return loadWorkedLedger().events;
   }
 }
 
@@ -119,25 +128,19 @@ export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
  */
 export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
   private readonly store: SharedStore;
-  private readonly defaultLeaseMs: number;
 
-  constructor(store: SharedStore, _machineId: string, leaseMs: number) {
+  constructor(store: SharedStore, _machineId: string, _leaseMs: number) {
     this.store = store;
-    this.defaultLeaseMs = leaseMs;
   }
 
   claimItems(candidates: WorkItem[], count: number, machineId: string): WorkItem[] {
-    // Filter out items that are globally cooled-down before attempting to claim.
-    const eligible = candidates.filter(
-      (item) => !this.store.recentlyDeclined(item.id, this.defaultLeaseMs * 2),
-    );
     const claimedIds = this.store.claimItems(
-      eligible.map((i) => i.id),
+      candidates.map((i) => i.id),
       count,
       machineId,
     );
     const claimedSet = new Set(claimedIds);
-    return eligible.filter((item) => claimedSet.has(item.id));
+    return candidates.filter((item) => claimedSet.has(item.id));
   }
 
   release(itemIds: string[], machineId: string): void {
@@ -148,12 +151,16 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     return this.store.renewItems(itemIds, machineId);
   }
 
-  recordOutcome(itemId: string, outcome: WorkedOutcome, machineId: string): void {
-    this.store.recordOutcome(itemId, outcome, machineId);
+  recordOutcome(itemId: string, outcome: WorkedOutcome, machineId: string): boolean {
+    return this.store.recordOutcome(itemId, outcome, machineId);
   }
 
   shouldSkip(itemId: string, cooldownMs: number): boolean {
     return this.store.recentlyDeclined(itemId, cooldownMs);
+  }
+
+  readWorkedEvents(): WorkedEvent[] {
+    return this.store.readSnapshot().worked;
   }
 }
 

@@ -14,6 +14,7 @@ import type { DispatchProductionEvent } from './dispatch-production-ledger.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import {
   generatedRepairGenerationId,
+  generatedRepairGenerationIds,
   recordGeneratedRepairLifecycle,
   readGeneratedRepairLifecycle,
 } from './generated-repair-lifecycle.js';
@@ -680,8 +681,11 @@ function durableGeneratedRepairProposal(item: WorkItem, proposal: Proposal): boo
     proposal.status !== 'applied'
   ) return false;
   if (proposal.workItemId !== item.id || proposal.workSource !== 'self') return false;
-  const itemGenerationId = generatedRepairGenerationId(item);
-  if (!itemGenerationId || proposal.workItemGenerationId !== itemGenerationId) return false;
+  const itemGenerationIds = generatedRepairGenerationIds(item);
+  if (
+    typeof proposal.workItemGenerationId !== 'string' ||
+    !itemGenerationIds.includes(proposal.workItemGenerationId)
+  ) return false;
   if (proposal.origin !== 'agent' && proposal.origin !== 'swarm') return false;
   if (proposal.kind !== 'patch' && proposal.kind !== 'pr') return false;
   if (!proposal.diff || !proposal.repo || !proposal.runId || !proposal.trajectoryId) return false;
@@ -690,7 +694,7 @@ function durableGeneratedRepairProposal(item: WorkItem, proposal: Proposal): boo
   if (proposal.runEventSummary.status !== 'done' || proposal.isPartial === true) return false;
   const itemMs = Date.parse(item.ts);
   const proposalMs = Date.parse(proposal.createdAt);
-  if (!Number.isFinite(itemMs) || !Number.isFinite(proposalMs) || proposalMs < itemMs) return false;
+  if (!Number.isFinite(itemMs) || !Number.isFinite(proposalMs)) return false;
   try {
     return resolve(proposal.repo) === resolve(item.repo);
   } catch {

@@ -11,6 +11,7 @@ import {
   constants as fsConstants,
   existsSync,
   fstatSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -20,7 +21,7 @@ import {
   type Stats,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type {
   DaemonDispatchProductionOutcome,
   EngineId,
@@ -35,6 +36,7 @@ import type {
   WorkItem,
 } from '../types.js';
 import { causalMetadata } from '../learning/causal.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 import {
   addProductionAttemptShape,
   classifyProductionAttemptForLearningWithLabel,
@@ -48,7 +50,7 @@ import {
   type ProductionAttemptLearningLabel,
 } from '../learning/attempt-shape.js';
 import { scrubSecrets } from '../util/scrub.js';
-import { repairGenerationIdFromHandoffId } from './repair-handoff-journal.js';
+import { repairGenerationIdFromHandoffId } from './generated-repair-identity.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_READ_LIMIT = 2_000;
@@ -125,6 +127,20 @@ export interface ReadDispatchProductionEventsOptions {
   /** Aggregate physical rows examined, including blank and invalid rows. */
   maxRows?: number;
 }
+
+export interface DispatchProductionParentIdentity {
+  ts: string;
+  itemId: string;
+  repo: string;
+  outcome: string;
+  attemptId: string;
+  source?: WorkItem['source'];
+  backend?: EngineId | null;
+  tier?: EngineTier | null;
+  objectiveHash?: string;
+}
+
+export type DispatchProductionParentStatus = 'found' | 'missing' | 'degraded';
 
 export type DispatchProductionReadStopReason =
   | 'event-limit'
@@ -288,7 +304,7 @@ function finiteNonNegative(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : undefined;
 }
 
-function sanitizeEvent(
+export function sanitizeDispatchProductionEvent(
   event: DispatchProductionEvent,
   opts: { materializeLearningLabel?: boolean; deriveLegacyRunOutcomeCausal?: boolean } = {},
 ): DispatchProductionEvent {
@@ -296,7 +312,8 @@ function sanitizeEvent(
   const machineId = boundedOptionalText(event.machineId, 120);
   const itemId = boundedText(event.itemId, 240) || 'unknown';
   const source = boundedText(event.source, 80) as WorkItem['source'];
-  const repo = boundedText(event.repo, 500) || 'unknown';
+  const boundedRepo = boundedText(event.repo, 500) || 'unknown';
+  const repo = boundedRepo === 'unknown' ? boundedRepo : resolve(boundedRepo);
   const title = boundedText(event.title, 160) || 'untitled';
   const backend = boundedNullableText(event.backend, 80) as EngineId | null | undefined;
   const tier = boundedNullableText(event.tier, 40) as EngineTier | null | undefined;
@@ -483,31 +500,50 @@ function isDispatchProductionEvent(value: unknown): value is DispatchProductionE
 
 export function recordDispatchProduction(
   input: DispatchProductionEvent | DispatchProductionEvent[],
-): void {
+): { attempted: number; recorded: number; failed: number } {
+  const result = { attempted: 0, recorded: 0, failed: 0 };
   try {
     const events = Array.isArray(input) ? input : [input];
-    if (events.length === 0) return;
+    result.attempted = events.length;
+    if (events.length === 0) return result;
     const dir = dispatchProductionDir();
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+      let parentFd: number | undefined;
+      try {
+        parentFd = openSync(dirname(dir), fsConstants.O_RDONLY);
+        fsyncSync(parentFd);
+      } finally {
+        if (parentFd !== undefined) closeSync(parentFd);
+      }
+    }
     for (const event of events) {
       try {
-        const record = sanitizeEvent(event, { materializeLearningLabel: true });
+        const record = sanitizeDispatchProductionEvent(event, { materializeLearningLabel: true });
         appendDispatchProductionLine(
           join(dir, `${eventDateString(record.ts)}.jsonl`),
           JSON.stringify(record) + '\n',
         );
+        result.recorded += 1;
       } catch {
         // Skip only this record; later records in the batch still get a chance.
+        result.failed += 1;
       }
     }
   } catch {
     // Telemetry/history must never fail dispatch.
+    result.failed = Math.max(result.failed, result.attempted - result.recorded);
   }
+  return result;
 }
 
 function appendDispatchProductionLine(path: string, line: string): void {
+  const lock = acquireLocalStoreLock(`${path}.lock`);
+  if (!lock) throw new Error('dispatch production ledger lock unavailable');
   let fd: number | undefined;
+  let dirFd: number | undefined;
   try {
+    const existed = existsSync(path);
     fd = openSync(
       path,
       fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
@@ -519,11 +555,22 @@ function appendDispatchProductionLine(path: string, line: string): void {
       const tail = Buffer.alloc(1);
       const read = readSync(fd, tail, 0, 1, opened.size - 1);
       if (read !== 1) throw new Error('dispatch production ledger tail is unreadable');
-      if (tail[0] !== 0x0a) writeSync(fd, '\n', undefined, 'utf8');
+      if (tail[0] !== 0x0a && writeSync(fd, '\n', undefined, 'utf8') !== 1) {
+        throw new Error('dispatch production ledger separator write was short');
+      }
     }
-    writeSync(fd, line, undefined, 'utf8');
+    if (writeSync(fd, line, undefined, 'utf8') !== Buffer.byteLength(line)) {
+      throw new Error('dispatch production ledger append was short');
+    }
+    fsyncSync(fd);
+    if (!existed) {
+      dirFd = openSync(dirname(path), fsConstants.O_RDONLY);
+      fsyncSync(dirFd);
+    }
   } finally {
-    if (fd !== undefined) closeSync(fd);
+    if (dirFd !== undefined) { try { closeSync(dirFd); } catch { /* preserve primary failure */ } }
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* preserve primary failure */ } }
+    releaseLocalStoreLock(lock);
   }
 }
 
@@ -622,6 +669,106 @@ function pushStopReason(
   reason: DispatchProductionReadStopReason,
 ): void {
   if (!reasons.includes(reason)) reasons.push(reason);
+}
+
+/**
+ * Authority-specific parent lookup. It reads only the dated partitions named
+ * by the requested identities, so unrelated history growth cannot revoke a
+ * valid repair handoff through the observational reader's global caps.
+ */
+export function readDispatchProductionParents(
+  targets: readonly DispatchProductionParentIdentity[],
+): DispatchProductionParentStatus[] {
+  const statuses = targets.map((): DispatchProductionParentStatus => 'missing');
+  const byDate = new Map<string, number[]>();
+  for (let index = 0; index < targets.length; index++) {
+    const target = targets[index]!;
+    const parsed = Date.parse(target.ts);
+    if (!Number.isFinite(parsed)) {
+      statuses[index] = 'degraded';
+      continue;
+    }
+    const date = new Date(parsed).toISOString().slice(0, 10);
+    const indices = byDate.get(date) ?? [];
+    indices.push(index);
+    byDate.set(date, indices);
+  }
+  const dir = dispatchProductionDir();
+  if (!existsSync(dir)) return statuses;
+  let directoryBefore: Stats;
+  try {
+    directoryBefore = lstatSync(dir);
+    if (!safeDispatchProductionDirectory(directoryBefore)) throw new Error('unsafe parent directory');
+  } catch {
+    return statuses.map(() => 'degraded');
+  }
+  for (const [date, indices] of byDate) {
+    const path = join(dir, `${date}.jsonl`);
+    if (!existsSync(path)) continue;
+    const loaded = readDispatchProductionFileTail(path, HARD_READ_MAX_BYTES);
+    if (!loaded) {
+      for (const index of indices) statuses[index] = 'degraded';
+      continue;
+    }
+    const complete = loaded.text.endsWith('\n');
+    const lines = complete
+      ? loaded.text.slice(0, -1).split('\n')
+      : loaded.text.split('\n').slice(0, -1);
+    const events: DispatchProductionEvent[] = [];
+    let invalid = !complete;
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) {
+        invalid = true;
+        continue;
+      }
+      try {
+        const parsed: unknown = JSON.parse(line);
+        if (!isDispatchProductionEvent(parsed)) {
+          invalid = true;
+          continue;
+        }
+        events.push(sanitizeDispatchProductionEvent(parsed, {
+          deriveLegacyRunOutcomeCausal: true,
+          materializeLearningLabel: true,
+        }));
+      } catch {
+        invalid = true;
+      }
+    }
+    for (const index of indices) {
+      const target = targets[index]!;
+      const found = events.some((event) =>
+        event.ts === target.ts &&
+        event.itemId === target.itemId &&
+        event.repo === resolve(target.repo) &&
+        event.outcome === target.outcome &&
+        (event.trajectoryId ?? event.runId) === target.attemptId &&
+        (target.source === undefined || event.source === target.source) &&
+        (target.backend === undefined || event.backend === target.backend) &&
+        (target.tier === undefined || event.tier === target.tier) &&
+        (target.objectiveHash === undefined || event.objectiveHash === target.objectiveHash));
+      statuses[index] = found
+        ? 'found'
+        : loaded.truncated || invalid
+          ? 'degraded'
+          : 'missing';
+    }
+  }
+  try {
+    const directoryAfter = lstatSync(dir);
+    if (
+      !safeDispatchProductionDirectory(directoryAfter) ||
+      !sameFile(directoryBefore, directoryAfter) ||
+      directoryBefore.mtimeMs !== directoryAfter.mtimeMs ||
+      directoryBefore.ctimeMs !== directoryAfter.ctimeMs
+    ) {
+      return statuses.map((status) => status === 'found' ? 'degraded' : status);
+    }
+  } catch {
+    return statuses.map((status) => status === 'found' ? 'degraded' : status);
+  }
+  return statuses;
 }
 
 export function readDispatchProductionEventsDetailed(
@@ -776,7 +923,7 @@ export function readDispatchProductionEventsDetailed(
           stopTraversal = true;
           break;
         }
-        result.events.push(sanitizeEvent(parsed, {
+        result.events.push(sanitizeDispatchProductionEvent(parsed, {
           deriveLegacyRunOutcomeCausal: true,
           materializeLearningLabel: true,
         }));

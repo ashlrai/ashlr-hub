@@ -332,6 +332,27 @@ describe('M220 recordVerdict + recentlyDeclined — pure unit', () => {
 // ===========================================================================
 
 describe('M220 sweepJudgedProposals — pure unit', () => {
+  it('passes exact proposal generation identity to custom cooldown projection', () => {
+    const item = makeItem('generated-repair', tmpRepo);
+    const recorded: Array<{ itemId: string; generationId?: string }> = [];
+    const generationId = 'a'.repeat(64);
+
+    const count = sweepJudgedProposals([{
+      id: 'prop-generated-repair',
+      title: 'Generated repair',
+      summary: 'Generated repair summary',
+      repo: tmpRepo,
+      status: 'rejected',
+      workItemId: item.id,
+      workItemGenerationId: generationId,
+    }], [item], undefined, (itemId, _outcome, _ts, observedGenerationId) => {
+      recorded.push({ itemId, generationId: observedGenerationId });
+    });
+
+    expect(count).toBe(1);
+    expect(recorded).toEqual([{ itemId: item.id, generationId }]);
+  });
+
   it('records a judged-decline outcome for a rejected proposal matched by item.id', () => {
     const item = makeItem('my-stable-id', tmpRepo, { title: 'CI is failing' });
 
