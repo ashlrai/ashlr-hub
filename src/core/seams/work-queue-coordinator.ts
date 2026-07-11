@@ -58,6 +58,11 @@ export const WORK_QUEUE_COORDINATOR_SEAM = {
  */
 export interface WorkQueueCoordinator {
   claimItems(candidates: WorkItem[], count: number, machineId: string): WorkItem[];
+  claimItemsByLane(
+    lanes: Array<{ candidates: WorkItem[]; limit: number }>,
+    count: number,
+    machineId: string,
+  ): WorkItem[];
   renew(itemIds: string[], machineId: string): string[];
   release(itemIds: string[], machineId: string): void;
   recordOutcome(itemId: string, outcome: WorkedOutcome, machineId: string): boolean;
@@ -83,6 +88,27 @@ export interface WorkQueueCoordinator {
 export class LocalWorkQueueCoordinator implements WorkQueueCoordinator {
   claimItems(candidates: WorkItem[], count: number, _machineId: string): WorkItem[] {
     return candidates.slice(0, count);
+  }
+
+  claimItemsByLane(
+    lanes: Array<{ candidates: WorkItem[]; limit: number }>,
+    count: number,
+    _machineId: string,
+  ): WorkItem[] {
+    const claimed: WorkItem[] = [];
+    const seen = new Set<string>();
+    for (const lane of lanes) {
+      let laneClaims = 0;
+      for (const item of lane.candidates) {
+        if (claimed.length >= count || laneClaims >= Math.max(0, Math.floor(lane.limit))) break;
+        if (seen.has(item.id)) continue;
+        seen.add(item.id);
+        claimed.push(item);
+        laneClaims++;
+      }
+      if (claimed.length >= count) break;
+    }
+    return claimed;
   }
 
   release(_itemIds: string[], _machineId: string): void {
@@ -141,6 +167,23 @@ export class SharedWorkQueueCoordinator implements WorkQueueCoordinator {
     );
     const claimedSet = new Set(claimedIds);
     return candidates.filter((item) => claimedSet.has(item.id));
+  }
+
+  claimItemsByLane(
+    lanes: Array<{ candidates: WorkItem[]; limit: number }>,
+    count: number,
+    machineId: string,
+  ): WorkItem[] {
+    const claimedIds = this.store.claimItemsByLane(
+      lanes.map((lane) => ({ candidateIds: lane.candidates.map((item) => item.id), limit: lane.limit })),
+      count,
+      machineId,
+    );
+    const byId = new Map(lanes.flatMap((lane) => lane.candidates).map((item) => [item.id, item]));
+    return claimedIds.flatMap((id) => {
+      const item = byId.get(id);
+      return item ? [item] : [];
+    });
   }
 
   release(itemIds: string[], machineId: string): void {

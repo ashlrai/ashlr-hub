@@ -150,6 +150,57 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
     expect(claimed.map(i => i.id)).toContain('b');
   });
 
+  it('claimItemsByLane refills contention without exceeding a lane quota', () => {
+    const store = makeStore(tmpDir);
+    const other = makeSharedCoordinator(store, 'machine-other');
+    const coord = makeSharedCoordinator(store, 'machine-A');
+    const repairs = [makeItem('repair-1'), makeItem('repair-2')];
+    const ordinary = [makeItem('ordinary-1'), makeItem('ordinary-2')];
+    expect(other.claimItems([ordinary[0]!], 1, 'machine-other').map((item) => item.id))
+      .toEqual(['ordinary-1']);
+
+    const claimed = coord.claimItemsByLane([
+      { candidates: repairs, limit: 1 },
+      { candidates: ordinary, limit: 2 },
+    ], 2, 'machine-A');
+
+    expect(claimed.map((item) => item.id)).toEqual(['repair-1', 'ordinary-2']);
+    expect(claimed.map((item) => item.id)).not.toContain('repair-2');
+  });
+
+  it('claimItemsByLane refills a contended repair from the same lane', () => {
+    const store = makeStore(tmpDir);
+    const other = makeSharedCoordinator(store, 'machine-other');
+    const coord = makeSharedCoordinator(store, 'machine-A');
+    const repairs = [makeItem('repair-1'), makeItem('repair-2')];
+    const ordinary = [makeItem('ordinary-1'), makeItem('ordinary-2')];
+    other.claimItems([repairs[0]!], 1, 'machine-other');
+
+    const claimed = coord.claimItemsByLane([
+      { candidates: repairs, limit: 1 },
+      { candidates: ordinary, limit: 2 },
+    ], 2, 'machine-A');
+
+    expect(claimed.map((item) => item.id)).toEqual(['repair-2', 'ordinary-1']);
+  });
+
+  it('claimItemsByLane falls back after an ordinary-first fairness claim loses contention', () => {
+    const store = makeStore(tmpDir);
+    const other = makeSharedCoordinator(store, 'machine-other');
+    const coord = makeSharedCoordinator(store, 'machine-A');
+    const ordinary = makeItem('ordinary-due');
+    const repair = makeItem('repair-fallback');
+    expect(other.claimItems([ordinary], 1, 'machine-other').map((item) => item.id))
+      .toEqual(['ordinary-due']);
+
+    const claimed = coord.claimItemsByLane([
+      { candidates: [ordinary], limit: 1 },
+      { candidates: [repair], limit: 1 },
+    ], 1, 'machine-A');
+
+    expect(claimed.map((item) => item.id)).toEqual(['repair-fallback']);
+  });
+
   it('claimed items appear in the store snapshot', () => {
     const store = makeStore(tmpDir);
     const coord = makeSharedCoordinator(store, 'machine-A');

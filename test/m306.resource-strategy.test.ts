@@ -151,6 +151,7 @@ function outcome(overrides: Partial<OutcomeRecord> = {}): OutcomeRecord {
     decisions: [],
     judgeTraces: [],
     evidencePacks: [{
+      version: 2,
       generatedAt: '2026-07-01T00:09:00.000Z',
       proposalId: 'prop-1',
       diffHash,
@@ -323,6 +324,35 @@ describe('buildResourceStrategyReport', () => {
 
     expect(report.mode).not.toBe('auto-merge-ready');
     expect(report.outcomes.readyEvidence).toBe(0);
+  });
+
+  it('does not treat a readable legacy static-protection pack as auto-merge-ready', async () => {
+    const legacy = outcome();
+    legacy.evidencePacks[0] = {
+      ...legacy.evidencePacks[0]!,
+      version: 1,
+      trustBasis: 'evidence',
+      remotePreferred: true,
+      gates: {
+        ...legacy.evidencePacks[0]!.gates,
+        remoteProtection: { ok: true, detail: 'historical static protection claim' } as never,
+      },
+    };
+
+    const report = await buildResourceStrategyReport(
+      cfg({
+        foundry: {
+          autoMerge: { enabled: true, trustBasis: 'evidence' },
+        } as NonNullable<AshlrConfig['foundry']>,
+      }),
+      {
+        now: new Date('2026-07-01T00:30:00.000Z'),
+        deps: deps({ listOutcomeRecords: () => [legacy] }),
+      },
+    );
+
+    expect(report.outcomes.readyEvidence).toBe(0);
+    expect(report.mode).not.toBe('auto-merge-ready');
   });
 
   it('recommends verify-only for pending proposals and verification failures', async () => {

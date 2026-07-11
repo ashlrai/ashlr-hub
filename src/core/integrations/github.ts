@@ -20,6 +20,11 @@ import type { GithubStatus } from '../types.js';
 
 const GH_BIN = 'gh';
 const TIMEOUT_MS = 8_000; // ms — gh can be slow on first auth check
+const BRANCH_PROTECTION_CACHE_MAX = 128;
+const BRANCH_PROTECTION_POSITIVE_TTL_MS = 30_000;
+const BRANCH_PROTECTION_NEGATIVE_TTL_MS = 5_000;
+const MAX_BRANCH_RULES = 100;
+const MAX_REQUIRED_CHECKS = 100;
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -73,6 +78,7 @@ export interface CreatePrOpts {
   base?: string;
   head?: string;
   draft?: boolean;
+  repo?: string;
 }
 
 /** Result of a PR creation (EXPLICIT mutation only). */
@@ -81,6 +87,46 @@ export interface CreatePrResult {
   url: string | null;
   detail: string;
 }
+
+export interface BranchProtectionAttestationOptions {
+  /** Bypass any cached observation. Concurrent refreshes still share one read. */
+  forceFresh?: boolean;
+  /** Canonical origin owner/repo. Prevents ambient GH_REPO from changing authority. */
+  expectedNameWithOwner?: string;
+}
+
+export interface RequiredCheckBinding {
+  context: string;
+  appId: string | null;
+}
+
+export interface BranchProtectionAttestation {
+  /** True only when live evidence confirms protection and a requirement. */
+  ok: boolean;
+  available: boolean;
+  protected: boolean;
+  /** Compatibility field for protected-remote configuration consumers. */
+  branchProtection: boolean;
+  nameWithOwner: string | null;
+  repositoryId: string | null;
+  defaultBranch: string | null;
+  branch: string | null;
+  baseHead: string | null;
+  observedAt: string;
+  requirements: string[];
+  requiredChecks: string[];
+  requiredCheckBindings: RequiredCheckBinding[];
+  sources: Array<'classic' | 'ruleset'>;
+  detail: string;
+}
+
+interface BranchProtectionCacheEntry {
+  value: BranchProtectionAttestation;
+  expiresAt: number;
+}
+
+const branchProtectionCache = new Map<string, BranchProtectionCacheEntry>();
+const branchProtectionFlights = new Map<string, Promise<BranchProtectionAttestation>>();
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -434,6 +480,354 @@ export function listIssues(
   return results;
 }
 
+type AttestationGhResult =
+  | { kind: 'ok'; stdout: string }
+  | { kind: 'not-found' | 'unavailable' };
+
+function runAttestationGh(cwd: string, args: string[]): AttestationGhResult {
+  try {
+    const res = spawnSync(GH_BIN, args, {
+      cwd,
+      timeout: TIMEOUT_MS,
+      maxBuffer: 1_048_576,
+      stdio: 'pipe',
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GH_NO_UPDATE_NOTIFIER: '1',
+        NO_COLOR: '1',
+        GH_PROMPT_DISABLED: '1',
+      },
+    });
+    if (res.error || res.status !== 0) {
+      const stderr = typeof res.stderr === 'string' ? res.stderr : '';
+      return /(?:HTTP\s+404|\b404\b|not found)/i.test(stderr)
+        ? { kind: 'not-found' }
+        : { kind: 'unavailable' };
+    }
+    return typeof res.stdout === 'string'
+      ? { kind: 'ok', stdout: res.stdout.trim() }
+      : { kind: 'unavailable' };
+  } catch {
+    return { kind: 'unavailable' };
+  }
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function attestationCacheKey(repo: string, branch?: string, expectedNameWithOwner?: string): string {
+  return `${repo}\0${branch ?? ''}\0${expectedNameWithOwner ?? ''}`;
+}
+
+function cloneAttestation(value: BranchProtectionAttestation): BranchProtectionAttestation {
+  return {
+    ...value,
+    requirements: [...value.requirements],
+    requiredChecks: [...value.requiredChecks],
+    requiredCheckBindings: value.requiredCheckBindings.map((binding) => ({ ...binding })),
+    sources: [...value.sources],
+  };
+}
+
+function unavailableAttestation(
+  detail: string,
+  branch: string | null = null,
+  identity: Partial<Pick<BranchProtectionAttestation,
+    'nameWithOwner' | 'repositoryId' | 'defaultBranch' | 'baseHead'>> = {},
+): BranchProtectionAttestation {
+  return {
+    ok: false,
+    available: false,
+    protected: false,
+    branchProtection: false,
+    nameWithOwner: identity.nameWithOwner ?? null,
+    repositoryId: identity.repositoryId ?? null,
+    defaultBranch: identity.defaultBranch ?? null,
+    branch,
+    baseHead: identity.baseHead ?? null,
+    observedAt: new Date().toISOString(),
+    requirements: [],
+    requiredChecks: [],
+    requiredCheckBindings: [],
+    sources: [],
+    detail,
+  };
+}
+
+function parseAppId(value: unknown): string | null | undefined {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return String(value);
+  if (typeof value === 'string' && /^\d+$/.test(value)) return value;
+  return undefined;
+}
+
+function parseRequiredChecks(
+  value: unknown,
+  appIdField?: 'app_id' | 'integration_id',
+): RequiredCheckBinding[] | null {
+  if (!Array.isArray(value) || value.length > MAX_REQUIRED_CHECKS) return null;
+  const checks: RequiredCheckBinding[] = [];
+  for (const item of value) {
+    const record = objectRecord(item);
+    const context = typeof item === 'string'
+      ? boundedNonEmptyString(item, 256)
+      : boundedNonEmptyString(record?.['context'], 256);
+    if (!context) return null;
+    const appId = appIdField ? parseAppId(record?.[appIdField]) : null;
+    if (appId === undefined) return null;
+    checks.push({ context, appId });
+  }
+  return checks;
+}
+
+function addClassicProtection(
+  value: unknown,
+  requirements: Set<string>,
+  checks: Set<string>,
+  bindings: Map<string, RequiredCheckBinding>,
+): boolean {
+  const protection = objectRecord(value);
+  if (!protection) return false;
+
+  const statusChecks = protection['required_status_checks'];
+  if (statusChecks !== null && statusChecks !== undefined) {
+    const status = objectRecord(statusChecks);
+    if (!status) return false;
+    const contexts = parseRequiredChecks(status['contexts'] ?? []);
+    const appChecks = parseRequiredChecks(status['checks'] ?? [], 'app_id');
+    if (!contexts || !appChecks) return false;
+    requirements.add('required_status_checks');
+    for (const binding of [...contexts, ...appChecks]) {
+      checks.add(binding.context);
+      bindings.set(`${binding.context}\0${binding.appId ?? ''}`, binding);
+    }
+  }
+
+  const objectRequirements: Array<[string, string]> = [
+    ['required_pull_request_reviews', 'pull_request'],
+    ['restrictions', 'push_restrictions'],
+  ];
+  for (const [field, normalized] of objectRequirements) {
+    const raw = protection[field];
+    if (raw !== null && raw !== undefined) {
+      if (!objectRecord(raw)) return false;
+      requirements.add(normalized);
+    }
+  }
+
+  const enabledRequirements: Array<[string, string]> = [
+    ['required_signatures', 'required_signatures'],
+    ['required_linear_history', 'required_linear_history'],
+  ];
+  for (const [field, normalized] of enabledRequirements) {
+    const raw = protection[field];
+    if (raw !== null && raw !== undefined) {
+      const obj = objectRecord(raw);
+      if (!obj || typeof obj['enabled'] !== 'boolean') return false;
+      if (obj['enabled']) requirements.add(normalized);
+    }
+  }
+  return true;
+}
+
+function addEffectiveRules(
+  value: unknown,
+  requirements: Set<string>,
+  checks: Set<string>,
+  bindings: Map<string, RequiredCheckBinding>,
+): boolean {
+  if (!Array.isArray(value) || value.length > MAX_BRANCH_RULES) return false;
+  for (const item of value) {
+    const rule = objectRecord(item);
+    const type = boundedNonEmptyString(rule?.['type'], 100);
+    if (!rule || !type) return false;
+    requirements.add(type);
+    if (type !== 'required_status_checks') continue;
+    const parameters = objectRecord(rule['parameters']);
+    if (!parameters) return false;
+    const parsed = parseRequiredChecks(parameters['required_status_checks'], 'integration_id');
+    if (!parsed) return false;
+    for (const binding of parsed) {
+      checks.add(binding.context);
+      bindings.set(`${binding.context}\0${binding.appId ?? ''}`, binding);
+    }
+  }
+  return true;
+}
+
+function apiPath(nameWithOwner: string, branch: string, suffix = ''): string {
+  const encodedBranch = branch.split('/').map(encodeURIComponent).join('/');
+  return `repos/${nameWithOwner}/branches/${encodedBranch}${suffix}`;
+}
+
+function readBranchProtectionUncached(
+  repo: string,
+  requestedBranch?: string,
+  expectedNameWithOwner?: string,
+): BranchProtectionAttestation {
+  const repoResult = runAttestationGh(repo, [
+    'repo',
+    'view',
+    ...(expectedNameWithOwner ? [expectedNameWithOwner] : []),
+    '--json',
+    'id,nameWithOwner,defaultBranchRef',
+  ]);
+  if (repoResult.kind !== 'ok') {
+    return unavailableAttestation('GitHub repository identity is unavailable', requestedBranch ?? null);
+  }
+  const repoObject = objectRecord(safeJson(repoResult.stdout));
+  const defaultBranchRef = objectRecord(repoObject?.['defaultBranchRef']);
+  const nameWithOwner = boundedNonEmptyString(repoObject?.['nameWithOwner'], 512);
+  const repositoryId = boundedNonEmptyString(repoObject?.['id'], 256);
+  const defaultBranch = boundedNonEmptyString(defaultBranchRef?.['name'], 256);
+  if (!repoObject || !nameWithOwner || !repositoryId || !defaultBranch ||
+      !/^[^/\s]+\/[^/\s]+$/.test(nameWithOwner) || defaultBranch.trim() !== defaultBranch) {
+    return unavailableAttestation('GitHub repository identity was malformed', requestedBranch ?? null);
+  }
+  if (expectedNameWithOwner && nameWithOwner.toLowerCase() !== expectedNameWithOwner.toLowerCase()) {
+    return unavailableAttestation('GitHub repository identity does not match origin', requestedBranch ?? null);
+  }
+  const branch = requestedBranch === undefined
+    ? defaultBranch
+    : boundedNonEmptyString(requestedBranch, 256);
+  const identity = { nameWithOwner, repositoryId, defaultBranch };
+  if (!branch) return unavailableAttestation('GitHub branch name was invalid', null, identity);
+
+  const branchResult = runAttestationGh(repo, ['api', apiPath(nameWithOwner, branch)]);
+  if (branchResult.kind !== 'ok') {
+    return unavailableAttestation('GitHub branch head is unavailable', branch, identity);
+  }
+  const branchObject = objectRecord(safeJson(branchResult.stdout));
+  const commit = objectRecord(branchObject?.['commit']);
+  const returnedBranch = boundedNonEmptyString(branchObject?.['name'], 256);
+  const baseHead = boundedNonEmptyString(commit?.['sha'], 64);
+  if (!branchObject || returnedBranch !== branch || !baseHead || !/^[0-9a-f]{40}$/i.test(baseHead)) {
+    return unavailableAttestation('GitHub branch head was malformed', branch, identity);
+  }
+  const boundIdentity = { ...identity, baseHead };
+
+  const requirements = new Set<string>();
+  const checks = new Set<string>();
+  const bindings = new Map<string, RequiredCheckBinding>();
+  const sources: Array<'classic' | 'ruleset'> = [];
+  const classic = runAttestationGh(repo, [
+    'api',
+    apiPath(nameWithOwner, branch, '/protection'),
+  ]);
+  if (classic.kind === 'unavailable') {
+    return unavailableAttestation('Classic branch protection is unavailable', branch, boundIdentity);
+  }
+  if (classic.kind === 'ok') {
+    if (!addClassicProtection(safeJson(classic.stdout), requirements, checks, bindings)) {
+      return unavailableAttestation('Classic branch protection was malformed', branch, boundIdentity);
+    }
+    sources.push('classic');
+  }
+
+  const rules = runAttestationGh(repo, [
+    'api',
+    `repos/${nameWithOwner}/rules/branches/${branch.split('/').map(encodeURIComponent).join('/')}`,
+  ]);
+  if (rules.kind !== 'ok') {
+    return unavailableAttestation('Effective branch rules are unavailable or malformed', branch, boundIdentity);
+  }
+  const parsedRules = safeJson(rules.stdout);
+  if (!addEffectiveRules(parsedRules, requirements, checks, bindings)) {
+    return unavailableAttestation('Effective branch rules are unavailable or malformed', branch, boundIdentity);
+  }
+  if (Array.isArray(parsedRules) && parsedRules.length > 0) {
+    sources.push('ruleset');
+  }
+
+  const normalizedRequirements = [...requirements].sort();
+  const requiredChecks = [...checks].sort();
+  const requiredCheckBindings = [...bindings.values()].sort((a, b) =>
+    a.context.localeCompare(b.context) || (a.appId ?? '').localeCompare(b.appId ?? ''));
+  const protectedBranch = sources.length > 0 && normalizedRequirements.length > 0;
+  return {
+    ok: protectedBranch,
+    available: true,
+    protected: protectedBranch,
+    branchProtection: protectedBranch,
+    nameWithOwner,
+    repositoryId,
+    defaultBranch,
+    branch,
+    baseHead,
+    observedAt: new Date().toISOString(),
+    requirements: normalizedRequirements,
+    requiredChecks,
+    requiredCheckBindings,
+    sources,
+    detail: protectedBranch
+      ? `Live branch protection confirmed with ${normalizedRequirements.length} requirement(s)`
+      : 'No enforceable branch protection requirements were found',
+  };
+}
+
+/**
+ * Read live branch-protection evidence through `gh`. The result never throws,
+ * never mutates GitHub, and never reuses stale evidence after a failed refresh.
+ */
+export function readBranchProtectionAttestation(
+  repo: string,
+  branch?: string,
+  options: BranchProtectionAttestationOptions = {},
+): Promise<BranchProtectionAttestation> {
+  if (typeof repo !== 'string' || repo.trim().length === 0 || repo.length > 4_096 ||
+      (branch !== undefined &&
+        (typeof branch !== 'string' || branch.trim().length === 0 ||
+          branch.trim() !== branch || branch.length > 256)) ||
+      options === null || typeof options !== 'object' || Array.isArray(options) ||
+      (options.forceFresh !== undefined && typeof options.forceFresh !== 'boolean') ||
+      (options.expectedNameWithOwner !== undefined &&
+        (typeof options.expectedNameWithOwner !== 'string' ||
+          !/^[^/\s]+\/[^/\s]+$/.test(options.expectedNameWithOwner)))) {
+    return Promise.resolve(unavailableAttestation(
+      'Branch-protection request was invalid',
+      typeof branch === 'string' ? branch : null,
+    ));
+  }
+  const expectedNameWithOwner = options.expectedNameWithOwner;
+  const key = attestationCacheKey(repo, branch, expectedNameWithOwner);
+  const now = Date.now();
+  if (options.forceFresh) branchProtectionCache.delete(key);
+  if (!options.forceFresh) {
+    const cached = branchProtectionCache.get(key);
+    if (cached && cached.expiresAt > now) {
+      branchProtectionCache.delete(key);
+      branchProtectionCache.set(key, cached);
+      return Promise.resolve(cloneAttestation(cached.value));
+    }
+    if (cached) branchProtectionCache.delete(key);
+  }
+  const existing = branchProtectionFlights.get(key);
+  if (existing) return existing.then(cloneAttestation);
+
+  const flight = Promise.resolve()
+    .then(() => readBranchProtectionUncached(repo, branch, expectedNameWithOwner))
+    .catch(() => unavailableAttestation('Branch-protection refresh failed', branch ?? null));
+  branchProtectionFlights.set(key, flight);
+  return flight.then((value) => {
+    const ttl = value.ok
+      ? BRANCH_PROTECTION_POSITIVE_TTL_MS
+      : BRANCH_PROTECTION_NEGATIVE_TTL_MS;
+    branchProtectionCache.set(key, { value: cloneAttestation(value), expiresAt: Date.now() + ttl });
+    while (branchProtectionCache.size > BRANCH_PROTECTION_CACHE_MAX) {
+      const oldest = branchProtectionCache.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      branchProtectionCache.delete(oldest);
+    }
+    return cloneAttestation(value);
+  }).finally(() => {
+    if (branchProtectionFlights.get(key) === flight) branchProtectionFlights.delete(key);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Public API — EXPLICIT MUTATION (caller must gate behind confirm)
 // ---------------------------------------------------------------------------
@@ -462,6 +856,7 @@ export async function createPr(
   if (opts.base) args.push('--base', opts.base);
   if (opts.head) args.push('--head', opts.head);
   if (opts.draft) args.push('--draft');
+  if (opts.repo) args.push('--repo', opts.repo);
 
   // NOTE: `gh pr create` does NOT support `--json` (only `gh pr list/view` do).
   // On success it prints the created PR URL as plain text on stdout, which we

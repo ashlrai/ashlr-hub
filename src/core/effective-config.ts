@@ -86,6 +86,10 @@ export interface EffectiveConfigSnapshot {
       trustBasis: EffectiveConfigValue<AutoMergeTrustBasis>;
       maxRisk: EffectiveConfigValue<'low' | 'medium' | 'high'>;
       pushToRemote: EffectiveConfigValue<boolean>;
+      protectedRemote: {
+        branchProtection: EffectiveConfigValue<boolean>;
+        requiredChecks: EffectiveConfigValue<string[]>;
+      };
       midToBranch: EffectiveConfigValue<boolean>;
       allowWithoutVerification: EffectiveConfigValue<boolean>;
     };
@@ -450,6 +454,18 @@ export function buildEffectiveConfigSnapshot(
         ),
         maxRisk: value(raw, 'foundry.autoMerge.maxRisk', autoMerge?.maxRisk ?? 'low'),
         pushToRemote: boolValue(raw, 'foundry.autoMerge.pushToRemote', autoMerge?.pushToRemote === true),
+        protectedRemote: {
+          branchProtection: boolValue(
+            raw,
+            'foundry.autoMerge.protectedRemote.branchProtection',
+            autoMerge?.protectedRemote?.branchProtection === true,
+          ),
+          requiredChecks: value(
+            raw,
+            'foundry.autoMerge.protectedRemote.requiredChecks',
+            autoMerge?.protectedRemote?.requiredChecks ?? [],
+          ),
+        },
         midToBranch: boolValue(raw, 'foundry.autoMerge.midToBranch', autoMerge?.midToBranch === true),
         allowWithoutVerification: boolValue(raw, 'foundry.autoMerge.allowWithoutVerification', autoMerge?.allowWithoutVerification === true),
       },

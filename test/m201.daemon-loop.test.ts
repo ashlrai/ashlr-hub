@@ -282,6 +282,7 @@ import {
   sanitizeSkillCard,
 } from '../src/core/fleet/skill-records.js';
 import { loadWorkedLedger, recordOutcome } from '../src/core/fleet/worked-ledger.js';
+import { SharedStore } from '../src/core/fleet/shared-store.js';
 import {
   generatedRepairCooldownKey,
   generatedRepairGenerationId,
@@ -442,7 +443,7 @@ function seedSpendForDate(date: string, spentUsd: number): void {
 }
 
 /** Seed daemon state with recent tick history. */
-function seedTicks(ticks: DaemonTick[]): void {
+function seedTicks(ticks: DaemonTick[], automaticDrainOrdinaryTurnDue?: boolean): void {
   saveDaemonState({
     running: false,
     pid: null,
@@ -452,6 +453,7 @@ function seedTicks(ticks: DaemonTick[]): void {
     todaySpentUsd: 0,
     itemsProcessed: 0,
     ticks,
+    ...(automaticDrainOrdinaryTurnDue !== undefined ? { automaticDrainOrdinaryTurnDue } : {}),
   });
 }
 
@@ -962,6 +964,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
         objective: reslice.title,
       },
     });
+    expect(loadDaemonState().automaticDrainOrdinaryTurnDue).toBe(true);
   });
 
   it('A1-drain-auto-fairness: reserves one ordinary slot when automatic repair drain has capacity', async () => {
@@ -995,6 +998,87 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
     expect(dispatchedIds).toEqual(expect.arrayContaining([firstReslice.id, generic.id]));
     expect(dispatchedIds).not.toContain(secondReslice.id);
+  });
+
+  it('A1-drain-auto-single-slot-fairness: persisted automatic repair selection yields the next slot to ordinary work', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const generic = makeItems(repo.dir, 1)[0]!;
+    generic.score = 100;
+    const reslice = makeDiagnosticResliceItem(repo.dir, 'aabbccddeeff', 1);
+    seedTicks([
+      {
+        ts: new Date(Date.now() - 1_000).toISOString(),
+        itemsConsidered: 1,
+        proposalsCreated: 0,
+        spentUsd: 0,
+        reason: 'ok',
+        drain: {
+          mode: 'diagnostic-reslices',
+          available: 2,
+          selected: 1,
+          selectedItemIds: ['prior-repair'],
+          automatic: true,
+        },
+      },
+      {
+        ts: new Date().toISOString(),
+        itemsConsidered: 0,
+        proposalsCreated: 0,
+        spentUsd: 0,
+        reason: 'maintenance-cadence',
+      },
+    ], true);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items: [generic, reslice],
+    });
+
+    const result = await tick(cfgBuiltin({ perTickItems: 1, parallel: 1 }), { dryRun: false });
+
+    expect(result.reason).toBe('ok');
+    expect(result.drain).toMatchObject({
+      mode: 'diagnostic-reslices',
+      available: 1,
+      selected: 0,
+      automatic: true,
+      fairnessDeferred: true,
+    });
+    expect(result.drain).not.toHaveProperty('stalled');
+    expect(readAgentActions().find((event) => event.action === 'daemon:drain-select')).toMatchObject({
+      reason: 'ordinary-turn-fairness',
+      tags: expect.arrayContaining(['fairness-deferred', 'ordinary-turn']),
+      counts: expect.objectContaining({ fairnessDeferred: 1 }),
+    });
+    expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm.mock.calls[0]?.[2]).toMatchObject({ workItemId: generic.id });
+    expect(loadDaemonState().automaticDrainOrdinaryTurnDue).toBe(false);
+  });
+
+  it('A1-shared-refill: contended prefix claims refill from later policy-eligible candidates', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const items = makeItems(repo.dir, 3);
+    mockBuildBacklog.mockResolvedValue({
+      generatedAt: new Date().toISOString(),
+      repos: [repo.dir],
+      items,
+    });
+    const sharedPath = join(fx.ashlrDir, 'shared-refill');
+    const other = new SharedStore(sharedPath, 60_000);
+    expect(other.claimItems([items[0]!.id], 1, 'other-machine')).toEqual([items[0]!.id]);
+
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 2, parallel: 2 }),
+      fleet: { sharedQueue: { mode: 'filesystem', path: sharedPath, machineId: 'm201-refill' } },
+    } as AshlrConfig, { dryRun: false });
+    const dispatchedIds = mockRunSwarm.mock.calls.map((call) => call[2]?.workItemId);
+
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(2);
+    expect(dispatchedIds).toEqual([items[1]!.id, items[2]!.id]);
+    expect(dispatchedIds).not.toContain(items[0]!.id);
   });
 
   it('A1-drain-auto-local-only: automatic diagnostic drains preserve local-only local-coder routing', async () => {

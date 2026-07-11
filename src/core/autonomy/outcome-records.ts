@@ -85,6 +85,7 @@ export interface OutcomeRecordJudgeTrace {
 }
 
 export interface OutcomeRecordEvidence {
+  version: AutonomyEvidencePack['version'];
   generatedAt: string;
   proposalId?: string;
   diffHash?: string;
@@ -248,6 +249,7 @@ function judgeTraceSnapshot(trace: JudgeTrace): OutcomeRecordJudgeTrace {
 
 function evidenceSnapshot(pack: AutonomyEvidencePack): OutcomeRecordEvidence {
   return {
+    version: pack.version,
     generatedAt: pack.generatedAt,
     proposalId: pack.proposal.id,
     ...(pack.diff.hash ? { diffHash: pack.diff.hash } : {}),

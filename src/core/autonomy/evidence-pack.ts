@@ -52,6 +52,20 @@ export interface AutonomyGateEvidence {
   detail: string;
 }
 
+export interface AutonomyRemoteProtectionEvidence extends AutonomyGateEvidence {
+  live: true;
+  nameWithOwner: string;
+  repositoryId: string;
+  branch: string;
+  baseHead: string;
+  observedAt: string;
+  requirements: string[];
+  requiredChecks: string[];
+  requiredCheckBindings: Array<{ context: string; appId: string | null }>;
+  policySources: Array<'classic' | 'ruleset'>;
+  policyHash: string;
+}
+
 export interface AutonomyDiffEvidence {
   hash?: string;
   files: string[];
@@ -71,7 +85,7 @@ export interface AutonomyVerificationEvidence {
 }
 
 export interface AutonomyEvidencePack {
-  version: 1;
+  version: 1 | 2;
   generatedAt: string;
   proposal: {
     id: string;
@@ -100,7 +114,7 @@ export interface AutonomyEvidencePack {
     manager?: AutonomyGateEvidence;
     selfTarget?: AutonomyGateEvidence;
     edv?: AutonomyGateEvidence;
-    remoteProtection?: AutonomyGateEvidence;
+    remoteProtection?: AutonomyRemoteProtectionEvidence;
   };
   verification: AutonomyVerificationEvidence;
   policy?: {
@@ -133,7 +147,7 @@ export interface BuildAutonomyEvidenceInput {
   manager?: AutonomyGateEvidence;
   selfTarget?: AutonomyGateEvidence;
   edv?: AutonomyGateEvidence;
-  remoteProtection?: AutonomyGateEvidence;
+  remoteProtection?: AutonomyRemoteProtectionEvidence;
 }
 
 export interface AutonomyEvidenceSourceQuality {
@@ -252,7 +266,7 @@ export function buildAutonomyEvidencePack(input: BuildAutonomyEvidenceInput): Au
     ts: proposal.createdAt,
   });
   return {
-    version: 1,
+    version: 2,
     generatedAt: new Date().toISOString(),
     proposal: {
       id: proposal.id,
@@ -344,6 +358,7 @@ function copyVerificationEvidence(input: AutonomyVerificationEvidence): Autonomy
 
 export function persistAutonomyEvidencePack(pack: AutonomyEvidencePack): boolean {
   try {
+    if (!isAutonomyEvidencePack(pack)) return false;
     const dir = evidenceDir();
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
     const dirStat = lstatSync(dir);
@@ -371,6 +386,28 @@ function isGateEvidence(value: unknown): value is AutonomyGateEvidence {
   return typeof gate['ok'] === 'boolean' && typeof gate['detail'] === 'string';
 }
 
+export function isLiveRemoteProtectionEvidence(value: unknown): value is AutonomyRemoteProtectionEvidence {
+  if (!isGateEvidence(value) || !value.ok) return false;
+  const record = value as unknown as Record<string, unknown>;
+  return record['live'] === true &&
+    typeof record['nameWithOwner'] === 'string' && record['nameWithOwner'].length > 0 &&
+    typeof record['repositoryId'] === 'string' && record['repositoryId'].length > 0 &&
+    typeof record['branch'] === 'string' && record['branch'].length > 0 &&
+    typeof record['baseHead'] === 'string' && /^[0-9a-f]{40}$/i.test(record['baseHead']) &&
+    typeof record['observedAt'] === 'string' && Number.isFinite(Date.parse(record['observedAt'])) &&
+    Array.isArray(record['requirements']) && record['requirements'].every((item) => typeof item === 'string') &&
+    Array.isArray(record['requiredChecks']) && record['requiredChecks'].every((item) => typeof item === 'string') &&
+    Array.isArray(record['requiredCheckBindings']) && record['requiredCheckBindings'].every((item) => {
+      const binding = item !== null && typeof item === 'object' && !Array.isArray(item)
+        ? item as Record<string, unknown>
+        : null;
+      return binding !== null && typeof binding['context'] === 'string' &&
+        (binding['appId'] === null || typeof binding['appId'] === 'string');
+    }) &&
+    Array.isArray(record['policySources']) && record['policySources'].every((item) => item === 'classic' || item === 'ruleset') &&
+    typeof record['policyHash'] === 'string' && /^[0-9a-f]{64}$/.test(record['policyHash']);
+}
+
 function isAutonomyEvidencePack(value: unknown): value is AutonomyEvidencePack {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
@@ -384,7 +421,7 @@ function isAutonomyEvidencePack(value: unknown): value is AutonomyEvidencePack {
   const gatesRecord = gates as Record<string, unknown> | null;
   const verificationRecord = verification as Record<string, unknown> | null;
   return (
-    v['version'] === 1 &&
+    (v['version'] === 1 || v['version'] === 2) &&
     typeof v['generatedAt'] === 'string' &&
     proposal !== null &&
     typeof proposal === 'object' &&
@@ -406,6 +443,10 @@ function isAutonomyEvidencePack(value: unknown): value is AutonomyEvidencePack {
     isGateEvidence(gatesRecord?.['verification']) &&
     isGateEvidence(gatesRecord?.['risk']) &&
     isGateEvidence(gatesRecord?.['scope']) &&
+    (gatesRecord?.['remoteProtection'] === undefined ||
+      (v['version'] === 1
+        ? isGateEvidence(gatesRecord['remoteProtection'])
+        : isLiveRemoteProtectionEvidence(gatesRecord['remoteProtection']))) &&
     verification !== null &&
     typeof verification === 'object' &&
     !Array.isArray(verification) &&
@@ -467,6 +508,8 @@ export function evidencePackMatchesLiveProposal(
     pack.policy.action === 'merge-main' &&
     pack.verification.passed === true &&
     pack.verification.commandKinds.length > 0 &&
+    (pack.trustBasis !== 'evidence' ||
+      (pack.version === 2 && isLiveRemoteProtectionEvidence(pack.gates.remoteProtection))) &&
     requiredGates.every((gate) => gate.ok) &&
     typeof proposal.diffHash === 'string' &&
     proposal.diffHash === currentDiffHash &&

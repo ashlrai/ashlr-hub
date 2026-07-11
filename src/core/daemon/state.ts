@@ -139,7 +139,9 @@ function parseDaemonState(raw: string, opts?: { strict?: boolean }): DaemonState
       !Number.isFinite(obj['todaySpentUsd']) ||
       typeof obj['itemsProcessed'] !== 'number' ||
       !Number.isFinite(obj['itemsProcessed']) ||
-      !Array.isArray(obj['ticks'])
+      !Array.isArray(obj['ticks']) ||
+      (obj['automaticDrainOrdinaryTurnDue'] !== undefined &&
+        typeof obj['automaticDrainOrdinaryTurnDue'] !== 'boolean')
     ) {
       return null;
     }
@@ -171,6 +173,10 @@ function parseDaemonState(raw: string, opts?: { strict?: boolean }): DaemonState
             typeof (t as Record<string, unknown>)['ts'] === 'string',
         )
       : [],
+    automaticDrainOrdinaryTurnDue:
+      typeof obj['automaticDrainOrdinaryTurnDue'] === 'boolean'
+        ? obj['automaticDrainOrdinaryTurnDue']
+        : undefined,
     lastPulseExportAt:
       typeof obj['lastPulseExportAt'] === 'string' ? obj['lastPulseExportAt'] : undefined,
   };

@@ -336,6 +336,26 @@ describe('M24 saveDaemonState — atomic write + round-trip', () => {
     expect(loadDaemonState().lastPulseExportAt).toBe('2026-06-30T12:00:00.000Z');
   });
 
+  it('round-trips the automatic-drain ordinary-turn fairness debt', () => {
+    saveDaemonState({ ...zeroedState(), automaticDrainOrdinaryTurnDue: true });
+    expect(loadDaemonState().automaticDrainOrdinaryTurnDue).toBe(true);
+    expect(loadDaemonStateStrict()).toMatchObject({
+      ok: true,
+      state: { automaticDrainOrdinaryTurnDue: true },
+    });
+  });
+
+  it('strict reads reject a malformed automatic-drain fairness debt', () => {
+    saveDaemonState(zeroedState());
+    const path = daemonStatePath();
+    const parsed = JSON.parse(fs.readFileSync(path, 'utf8')) as Record<string, unknown>;
+    parsed['automaticDrainOrdinaryTurnDue'] = 'yes';
+    fs.writeFileSync(path, `${JSON.stringify(parsed)}\n`, 'utf8');
+
+    expect(loadDaemonStateStrict()).toMatchObject({ ok: false, reason: 'malformed' });
+    expect(loadDaemonState().automaticDrainOrdinaryTurnDue).toBeUndefined();
+  });
+
   it('saveDaemonStateResult reports failures while saveDaemonState stays no-throw', () => {
     fs.writeFileSync(path.join(tmpHome, '.ashlr'), 'not a directory', 'utf8');
 

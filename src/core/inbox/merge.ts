@@ -99,7 +99,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, unlinkSync, symlinkSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 import type {
   AshlrConfig,
@@ -115,7 +115,11 @@ import { canonicalModelTag } from '../run/model-catalog.js';
 import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
 import { isRepo, getGitStatus, getRemoteOrg, defaultBranch } from '../git.js';
-import { createPr } from '../integrations/github.js';
+import {
+  createPr,
+  readBranchProtectionAttestation,
+  type BranchProtectionAttestation,
+} from '../integrations/github.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { isSelfTargetProposal, guardSafetyTests, selfEvalParityAsync } from '../fleet/self.js';
 import { verifyProvenance, verifyJudgeAttestation, hashDiff } from '../foundry/provenance.js';
@@ -137,6 +141,7 @@ import {
   buildAutonomyEvidencePack,
   persistAutonomyEvidencePack,
   type AutonomyGateEvidence,
+  type AutonomyRemoteProtectionEvidence,
 } from '../autonomy/evidence-pack.js';
 import { evaluateAutonomyPolicy } from '../autonomy/policy.js';
 import { causalMetadataFromProposal, evidenceOutcomeSummary } from '../learning/causal.js';
@@ -891,6 +896,93 @@ export function evaluateEvidenceRemoteProtectionSignal(cfg: AshlrConfig): Eviden
     ok: true,
     detail: `protected remote confirmed with required checks: ${requiredChecks.join(', ')}`,
     requiredChecks,
+  };
+}
+
+function liveProtectionPolicyHash(attestation: BranchProtectionAttestation): string {
+  return createHash('sha256').update(JSON.stringify({
+    nameWithOwner: attestation.nameWithOwner,
+    repositoryId: attestation.repositoryId,
+    defaultBranch: attestation.defaultBranch,
+    branch: attestation.branch,
+    baseHead: attestation.baseHead,
+    requirements: attestation.requirements,
+    requiredChecks: attestation.requiredChecks,
+    requiredCheckBindings: attestation.requiredCheckBindings,
+    sources: attestation.sources,
+  })).digest('hex');
+}
+
+function githubNameWithOwnerFromOrigin(repo: string): string | null {
+  const remote = getRemoteOrg(repo).remote;
+  if (!remote) return null;
+  const match = remote.match(/^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|git@github\.com:)([^/\s]+)\/([^/\s]+?)(?:\.git)?$/i);
+  return match?.[1] && match[2] ? `${match[1]}/${match[2]}` : null;
+}
+
+async function evaluateLiveEvidenceRemoteProtection(
+  repo: string,
+  branch: string,
+  baseHead: string,
+  cfg: AshlrConfig,
+): Promise<{ authorized: true; evidence: AutonomyRemoteProtectionEvidence } | { authorized: false; reason: string }> {
+  const expected = evaluateEvidenceRemoteProtectionSignal(cfg);
+  if (!expected.ok) return { authorized: false, reason: expected.detail };
+  const expectedNameWithOwner = githubNameWithOwnerFromOrigin(repo);
+  if (!expectedNameWithOwner) {
+    return { authorized: false, reason: 'canonical GitHub origin identity is unavailable' };
+  }
+  const live = await readBranchProtectionAttestation(repo, branch, {
+    forceFresh: true,
+    expectedNameWithOwner,
+  });
+  if (!live.available || !live.ok || !live.protected) {
+    return { authorized: false, reason: `live branch protection unavailable: ${live.detail}` };
+  }
+  if (
+    !live.nameWithOwner || live.nameWithOwner.toLowerCase() !== expectedNameWithOwner.toLowerCase() ||
+    !live.repositoryId || !live.defaultBranch || !live.branch || !live.baseHead ||
+    live.defaultBranch !== branch || live.branch !== branch || live.baseHead !== baseHead
+  ) {
+    return { authorized: false, reason: 'live branch protection identity/base binding does not match verification' };
+  }
+  const liveChecks = new Set(live.requiredChecks);
+  const missingChecks = expected.requiredChecks.filter((check) => !liveChecks.has(check));
+  if (missingChecks.length > 0) {
+    return {
+      authorized: false,
+      reason: `configured required checks are not live branch requirements: ${missingChecks.join(', ')}`,
+    };
+  }
+  const appBoundChecks = new Set(
+    live.requiredCheckBindings
+      .filter((binding) => binding.appId !== null)
+      .map((binding) => binding.context),
+  );
+  const unboundChecks = expected.requiredChecks.filter((check) => !appBoundChecks.has(check));
+  if (unboundChecks.length > 0) {
+    return {
+      authorized: false,
+      reason: `configured required checks lack a concrete GitHub App/integration binding: ${unboundChecks.join(', ')}`,
+    };
+  }
+  return {
+    authorized: true,
+    evidence: {
+      ok: true,
+      live: true,
+      detail: `${live.detail}; required checks: ${live.requiredChecks.join(', ')}`,
+      nameWithOwner: live.nameWithOwner,
+      repositoryId: live.repositoryId,
+      branch,
+      baseHead,
+      observedAt: live.observedAt,
+      requirements: [...live.requirements],
+      requiredChecks: [...live.requiredChecks],
+      requiredCheckBindings: live.requiredCheckBindings.map((binding) => ({ ...binding })),
+      policySources: [...live.sources],
+      policyHash: liveProtectionPolicyHash(live),
+    },
   };
 }
 
@@ -2184,7 +2276,7 @@ export async function autoMergeProposal(
 
     let toMain: boolean;
     let authority: { authorized: boolean; reason: string };
-    let evidenceRemoteProtection: AutonomyGateEvidence | undefined;
+    let evidenceRemoteProtection: AutonomyRemoteProtectionEvidence | undefined;
     let verifiedThisInvocation: VerifyProposalResult | undefined;
 
     if (trustBasis === 'evidence') {
@@ -2270,11 +2362,19 @@ export async function autoMergeProposal(
         if (!activation.authorized) {
           return refuse(`merge authority denied: ${activation.reason}`, repo);
         }
-        const remoteProtection = evaluateEvidenceRemoteProtectionSignal(cfg);
-        evidenceRemoteProtection = {
-          ok: true,
-          detail: remoteProtection.detail,
-        };
+        if (!proposal.verifyResult?.baseBranch || !proposal.verifyResult.baseHead) {
+          return refuse('merge authority denied: live branch protection requires verified base binding', repo);
+        }
+        const remoteProtection = await evaluateLiveEvidenceRemoteProtection(
+          repo,
+          proposal.verifyResult.baseBranch,
+          proposal.verifyResult.baseHead,
+          cfg,
+        );
+        if (!remoteProtection.authorized) {
+          return refuse(`merge authority denied: ${remoteProtection.reason}`, repo);
+        }
+        evidenceRemoteProtection = remoteProtection.evidence;
       }
       authority = trustBasis === 'verification'
         ? evaluateVerificationGate(proposal, cfg, allDecisions)
@@ -2830,7 +2930,7 @@ export async function autoMergeProposal(
         }
         if (evidenceRemoteProtection) {
           evidenceRemoteProtection = {
-            ok: evidenceRemoteProtection.ok,
+            ...evidenceRemoteProtection,
             detail: `${evidenceRemoteProtection.detail}; remote base ${base}@${remoteBaseHeadBeforeEvidence.slice(0, 8)} matches verification`,
           };
         }
@@ -2947,6 +3047,24 @@ export async function autoMergeProposal(
             repo,
           );
         }
+        const finalProtection = await evaluateLiveEvidenceRemoteProtection(
+          repo,
+          base,
+          verify.baseHead,
+          cfg,
+        );
+        if (!finalProtection.authorized) {
+          return refuse(
+            `live branch protection changed before remote handoff: ${finalProtection.reason}`,
+            repo,
+          );
+        }
+        if (
+          !evidenceRemoteProtection ||
+          finalProtection.evidence.policyHash !== evidenceRemoteProtection.policyHash
+        ) {
+          return refuse('live branch protection policy changed after evidence capture — re-evaluate required', repo);
+        }
       }
       // H4: PUSH the staging branch to origin BEFORE opening the PR. createPr
       // points the PR head at `branch`, which the host cannot see unless we push
@@ -2985,6 +3103,9 @@ export async function autoMergeProposal(
         body: safeBody,
         base,
         head: branch,
+        ...(githubNameWithOwnerFromOrigin(repo)
+          ? { repo: githubNameWithOwnerFromOrigin(repo) as string }
+          : {}),
       });
       if (!pr.ok) {
         reason = `staged on ${branch} but PR creation failed: ${pr.detail}`;
@@ -2997,17 +3118,29 @@ export async function autoMergeProposal(
         remoteHandoff = true;
         let mergeNote = toMain ? 'PR opened' : 'PR opened for review (mid-tier — never merged to main)';
         if (toMain && prUrl) {
-          try {
-            execFileSync('gh', ['pr', 'merge', '--auto', '--squash', prUrl], {
-              cwd: repo,
-              timeout: GIT_TIMEOUT,
-              stdio: 'pipe',
-              encoding: 'utf8',
-              env: { ...process.env, GH_NO_UPDATE_NOTIFIER: '1', NO_COLOR: '1' },
-            });
-            mergeNote = 'PR opened with host auto-merge enabled';
-          } catch {
-            mergeNote = 'PR opened; host auto-merge not enabled';
+          let mayEnableHostAutoMerge = true;
+          if (configuredTrustBasis(cfg) === 'evidence') {
+            const latestProtection = await evaluateLiveEvidenceRemoteProtection(repo, base, verify.baseHead, cfg);
+            mayEnableHostAutoMerge = latestProtection.authorized &&
+              evidenceRemoteProtection !== undefined &&
+              latestProtection.evidence.policyHash === evidenceRemoteProtection.policyHash;
+            if (!mayEnableHostAutoMerge) {
+              mergeNote = 'PR opened; host auto-merge refused because live protection changed';
+            }
+          }
+          if (mayEnableHostAutoMerge) {
+            try {
+              execFileSync('gh', ['pr', 'merge', '--auto', '--squash', prUrl], {
+                cwd: repo,
+                timeout: GIT_TIMEOUT,
+                stdio: 'pipe',
+                encoding: 'utf8',
+                env: { ...process.env, GH_NO_UPDATE_NOTIFIER: '1', NO_COLOR: '1' },
+              });
+              mergeNote = 'PR opened with host auto-merge enabled';
+            } catch {
+              mergeNote = 'PR opened; host auto-merge not enabled';
+            }
           }
         } else if (!toMain && prUrl) {
           branchApplied = true;

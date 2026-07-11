@@ -7,7 +7,10 @@
  */
 
 import type { AshlrConfig } from '../types.js';
-import type { AutonomyEvidencePack } from './evidence-pack.js';
+import {
+  isLiveRemoteProtectionEvidence,
+  type AutonomyEvidencePack,
+} from './evidence-pack.js';
 
 export type AutonomyTier = 'T0' | 'T1' | 'T2' | 'T3' | 'T4' | 'T5';
 
@@ -127,7 +130,7 @@ export function evaluateAutonomyPolicy(
       if (!pack.remotePreferred) {
         return refuse('evidence main merge requires protected remote PR handoff; local merge fallback is not permitted');
       }
-      if (!pack.gates.remoteProtection?.ok) {
+      if (pack.version !== 2 || !isLiveRemoteProtectionEvidence(pack.gates.remoteProtection)) {
         return refuse(`remote protection gate failed: ${pack.gates.remoteProtection?.detail ?? 'missing protected remote evidence'}`);
       }
       if (!Array.isArray(pack.verification.commandKinds) || pack.verification.commandKinds.length === 0) {

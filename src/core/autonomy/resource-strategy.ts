@@ -16,6 +16,7 @@ import type {
 } from '../fabric/resource-monitor.js';
 import type { OutcomeRecord } from './outcome-records.js';
 import {
+  isLiveRemoteProtectionEvidence,
   READY_EVIDENCE_MAX_AGE_MS,
   READY_EVIDENCE_MAX_FUTURE_SKEW_MS,
 } from './evidence-pack.js';
@@ -335,7 +336,8 @@ function isCurrentReadyEvidence(record: OutcomeRecord, cfg: AshlrConfig, now: Da
     RISK_ORDER[risk] <= RISK_ORDER[currentMaxRisk] &&
     (record.proposal.riskClass === undefined || record.proposal.riskClass === risk) &&
     (currentTrustBasis !== 'evidence' || (
-      evidence.remotePreferred === true && gates.remoteProtection?.ok === true
+      evidence.version === 2 && evidence.remotePreferred === true &&
+      isLiveRemoteProtectionEvidence(gates.remoteProtection)
     ))
   );
 }

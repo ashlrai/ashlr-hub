@@ -93,6 +93,24 @@ function goodPack(over: Partial<Parameters<typeof buildAutonomyEvidencePack>[0]>
   });
 }
 
+function liveRemoteProtection() {
+  return {
+    ok: true as const,
+    live: true as const,
+    detail: 'live protected remote confirmed with required checks: ci/test',
+    nameWithOwner: 'ashlrai/fixture',
+    repositoryId: 'R_fixture',
+    branch: 'main',
+    baseHead: 'a'.repeat(40),
+    observedAt: '2026-07-01T00:00:30.000Z',
+    requirements: ['required_status_checks'],
+    requiredChecks: ['ci/test'],
+    requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
+    policySources: ['classic' as const],
+    policyHash: 'b'.repeat(64),
+  };
+}
+
 function packFor(id: string, generatedAt: string) {
   const pack = goodPack({ proposal: proposal({ id }) });
   pack.generatedAt = generatedAt;
@@ -187,10 +205,7 @@ describe('M301 evaluateAutonomyPolicy', () => {
       goodPack({
         trustBasis: 'evidence',
         remotePreferred: true,
-        remoteProtection: {
-          ok: true,
-          detail: 'protected remote confirmed with required checks: ci/test',
-        },
+        remoteProtection: liveRemoteProtection(),
         verification: {
           passed: true,
           detail: 'green but no command manifest',
@@ -211,10 +226,7 @@ describe('M301 evaluateAutonomyPolicy', () => {
       goodPack({
         trustBasis: 'evidence',
         remotePreferred: true,
-        remoteProtection: {
-          ok: true,
-          detail: 'protected remote confirmed with required checks: ci/test',
-        },
+        remoteProtection: liveRemoteProtection(),
         verification: {
           passed: true,
           detail: 'green but legacy pack omitted base metadata',
@@ -234,10 +246,7 @@ describe('M301 evaluateAutonomyPolicy', () => {
       goodPack({
         trustBasis: 'evidence',
         remotePreferred: true,
-        remoteProtection: {
-          ok: true,
-          detail: 'protected remote confirmed with required checks: ci/test',
-        },
+        remoteProtection: liveRemoteProtection(),
         verification: {
           passed: true,
           detail: 'green but legacy pack omitted diff metadata',
@@ -258,10 +267,7 @@ describe('M301 evaluateAutonomyPolicy', () => {
       goodPack({
         trustBasis: 'evidence',
         remotePreferred: true,
-        remoteProtection: {
-          ok: true,
-          detail: 'protected remote confirmed with required checks: ci/test',
-        },
+        remoteProtection: liveRemoteProtection(),
         verification: {
           passed: true,
           detail: 'green but stale diff binding',
@@ -283,10 +289,7 @@ describe('M301 evaluateAutonomyPolicy', () => {
       goodPack({
         trustBasis: 'evidence',
         remotePreferred: true,
-        remoteProtection: {
-          ok: true,
-          detail: 'protected remote confirmed with required checks: ci/test',
-        },
+        remoteProtection: liveRemoteProtection(),
         verification: {
           passed: true,
           detail: 'green but source is missing',
@@ -306,10 +309,7 @@ describe('M301 evaluateAutonomyPolicy', () => {
       goodPack({
         trustBasis: 'evidence',
         remotePreferred: true,
-        remoteProtection: {
-          ok: true,
-          detail: 'protected remote confirmed with required checks: ci/test',
-        },
+        remoteProtection: liveRemoteProtection(),
         verification: {
           passed: true,
           detail: 'green but timestamp is malformed',
@@ -332,10 +332,7 @@ describe('M301 evaluateAutonomyPolicy', () => {
       goodPack({
         trustBasis: 'evidence',
         remotePreferred: true,
-        remoteProtection: {
-          ok: true,
-          detail: 'protected remote confirmed with required checks: ci/test',
-        },
+        remoteProtection: liveRemoteProtection(),
       }),
       cfg(),
     );
@@ -416,6 +413,36 @@ describe('M301 autonomy evidence pack persistence', () => {
     expect(raw).toContain('"source"');
     expect(raw).not.toContain('diff --git');
     expect(raw).not.toContain('+evidence');
+  });
+
+  it('refuses to persist a legacy static-only remote protection claim', () => {
+    const pack = goodPack();
+    pack.gates.remoteProtection = {
+      ok: true,
+      detail: 'configured protection claim without live binding',
+    } as never;
+
+    expect(persistAutonomyEvidencePack(pack)).toBe(false);
+    expect(fs.existsSync(evidencePath(pack.proposal.id))).toBe(false);
+  });
+
+  it('reads valid v2 evidence without treating a legacy v1 pack as source corruption', () => {
+    const current = packFor('prop-current', '2026-07-02T00:00:00.000Z');
+    expect(persistAutonomyEvidencePack(current)).toBe(true);
+    const legacy = packFor('prop-legacy', '2026-07-01T00:00:00.000Z');
+    legacy.version = 1;
+    legacy.trustBasis = 'evidence';
+    legacy.gates.remoteProtection = {
+      ok: true,
+      detail: 'historical static protection claim',
+    } as never;
+    fs.writeFileSync(evidencePath(legacy.proposal.id), `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+
+    expect(evaluateAutonomyPolicy(legacy, cfg()).allowed).toBe(false);
+    expect(readAutonomyEvidencePack(current.proposal.id)?.version).toBe(2);
+    const listed = listAutonomyEvidencePacks(10);
+    expect(listed.map((pack) => pack.proposal.id)).toEqual(['prop-current', 'prop-legacy']);
+    expect(listed.sourceQuality).toMatchObject({ sourceState: 'healthy', complete: true });
   });
 
   it('captures delete-only diff files without storing deleted content', () => {

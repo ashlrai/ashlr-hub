@@ -1025,13 +1025,14 @@ export interface AshlrConfig {
       /** Also merge/push on the remote (gh pr merge) when applying (default false). */
       pushToRemote?: boolean;
       /**
-       * Evidence-mode remote safety signal. `trustBasis:"evidence"` requires
-       * pushToRemote plus an explicit protected-remote signal so deterministic
-       * main merges only hand off through a host PR guarded by branch protection
-       * and required checks. Tier/verification modes ignore this field.
+       * Evidence-mode remote policy expectation. This configuration is never
+       * authority by itself: live GitHub protection must match it immediately
+       * before evidence capture and remote handoff.
        */
       protectedRemote?: {
+        /** Operator expects live branch protection; evidence mode requires true. */
         branchProtection: boolean;
+        /** Expected check names that must be present in the live GitHub policy. */
         requiredChecks: string[];
       };
       /**
@@ -4076,6 +4077,8 @@ export interface DaemonDrainSummary {
   selectedItemIds?: string[];
   /** True when the lane had visible work but selected nothing. */
   stalled?: boolean;
+  /** True when one-slot temporal fairness intentionally yielded to ordinary work. */
+  fairnessDeferred?: boolean;
 }
 
 export interface DaemonTick {
@@ -4201,6 +4204,8 @@ export interface DaemonState {
   itemsProcessed: number;
   /** Bounded history of recent ticks (most-recent last). */
   ticks: DaemonTick[];
+  /** One-slot automatic drain owes the next contended turn to ordinary work. */
+  automaticDrainOrdinaryTurnDue?: boolean;
   /**
    * M91: ISO timestamp of the last SUCCESSFUL fleet→pulse export.
    * Used as sinceTs watermark so each tick only re-sends new events.

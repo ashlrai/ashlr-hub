@@ -364,18 +364,36 @@ export class SharedStore {
    * Items not in `candidates` are ignored. Never throws.
    */
   claimItems(candidateIds: string[], count: number, machineId: string): string[] {
+    return this.claimItemsByLane([{ candidateIds, limit: count }], count, machineId);
+  }
+
+  /** Atomically claim a total budget while preserving independent lane caps. */
+  claimItemsByLane(
+    lanes: Array<{ candidateIds: string[]; limit: number }>,
+    count: number,
+    machineId: string,
+  ): string[] {
     if (!this.ensureDir()) return [];
     return this.withLock((q) => {
       const now = Date.now();
       const claimed: string[] = [];
-      for (const id of candidateIds) {
-        if (claimed.length >= count) break;
-        const existing = q.claims[id];
-        // Claimable if: no existing claim, OR the lease has expired.
-        if (!existing || existing.leaseUntil <= now) {
-          q.claims[id] = { machineId, leaseUntil: now + this.leaseMs };
-          claimed.push(id);
+      const seen = new Set<string>();
+      for (const lane of lanes) {
+        let laneClaims = 0;
+        const laneLimit = Math.max(0, Math.floor(lane.limit));
+        for (const id of lane.candidateIds) {
+          if (claimed.length >= count || laneClaims >= laneLimit) break;
+          if (seen.has(id)) continue;
+          seen.add(id);
+          const existing = q.claims[id];
+          // Claimable if: no existing claim, OR the lease has expired.
+          if (!existing || existing.leaseUntil <= now) {
+            q.claims[id] = { machineId, leaseUntil: now + this.leaseMs };
+            claimed.push(id);
+            laneClaims++;
+          }
         }
+        if (claimed.length >= count) break;
       }
       return { queue: q, result: claimed };
     }, []);

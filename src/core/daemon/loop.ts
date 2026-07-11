@@ -725,6 +725,7 @@ function drainSummary(
   selectedItems: WorkItem[],
   limit?: number,
   automatic?: boolean,
+  fairnessDeferred?: boolean,
 ): DaemonDrainSummary {
   const selectedItemIds = selectedItems
     .map((item) => boundedText(item.id, 120))
@@ -737,8 +738,9 @@ function drainSummary(
     ...(typeof limit === 'number' ? { limit } : {}),
     ...(capped ? { capped: true } : {}),
     ...(automatic ? { automatic: true } : {}),
+    ...(fairnessDeferred ? { fairnessDeferred: true } : {}),
     ...(selectedItemIds.length > 0 ? { selectedItemIds } : {}),
-    ...(availableItems.length > 0 && selectedItems.length === 0 ? { stalled: true } : {}),
+    ...(availableItems.length > 0 && selectedItems.length === 0 && !fairnessDeferred ? { stalled: true } : {}),
   };
 }
 
@@ -752,6 +754,7 @@ function recordDrainSelectionAgentAction(fields: {
   machineId: string;
   dryRun: boolean;
   automatic?: boolean;
+  fairnessDeferred?: boolean;
 }): void {
   const selectedIds = fields.selectedItems.map((item) => boundedText(item.id, 120));
   const selectedSummary = selectedIds.length > 0
@@ -769,7 +772,11 @@ function recordDrainSelectionAgentAction(fields: {
     summary:
       `drain ${fields.mode}: selected ${fields.selectedItems.length}/` +
       `${fields.available}${limitSummary}${selectedSummary}`,
-    reason: fields.dryRun ? 'dry-run' : fields.automatic ? 'auto-live' : 'live',
+    reason: fields.dryRun
+      ? 'dry-run'
+      : fields.fairnessDeferred
+        ? 'ordinary-turn-fairness'
+        : fields.automatic ? 'auto-live' : 'live',
     ...(selectedIds[0] ? { itemId: selectedIds[0] } : {}),
     tags: [
       'drain-select',
@@ -777,6 +784,7 @@ function recordDrainSelectionAgentAction(fields: {
       fields.automatic ? 'auto-drain' : 'explicit-drain',
       fields.selectedItems.length > 0 ? 'selected' : 'none-selected',
       ...(fields.capped ? ['capped'] : []),
+      ...(fields.fairnessDeferred ? ['fairness-deferred', 'ordinary-turn'] : []),
       ...(fields.dryRun ? ['dry-run'] : []),
     ],
     counts: {
@@ -785,6 +793,7 @@ function recordDrainSelectionAgentAction(fields: {
       ...(typeof fields.limit === 'number' ? { limit: fields.limit } : {}),
       ...(fields.capped ? { capped: 1 } : {}),
       ...(fields.automatic ? { automatic: 1 } : {}),
+      ...(fields.fairnessDeferred ? { fairnessDeferred: 1 } : {}),
     },
   });
 }
@@ -2716,7 +2725,13 @@ export async function tick(
   };
 
   let selected: WorkItem[];
-  if (automaticDrain && selectCount > 1 && automaticOrdinaryEligibleItems.length > 0) {
+  let automaticDrainOrdinaryTurnDue = state.automaticDrainOrdinaryTurnDue === true;
+  const singleSlotOrdinaryTurn = automaticDrain && selectCount === 1 &&
+    automaticOrdinaryEligibleItems.length > 0 &&
+    automaticDrainOrdinaryTurnDue;
+  if (singleSlotOrdinaryTurn) {
+    selected = selectRoundRobinCandidates(automaticOrdinaryEligibleItems, 1);
+  } else if (automaticDrain && selectCount > 1 && automaticOrdinaryEligibleItems.length > 0) {
     const repairSlots = Math.min(
       selectCount - 1,
       typeof drainLimit === 'number' ? drainLimit : selectCount - 1,
@@ -2736,39 +2751,74 @@ export async function tick(
       : selectCount;
     selected = selectRoundRobinCandidates(selectionItems, automaticRepairCount);
   }
-  let selectionTelemetryItems = selectionItems;
-  let selectionTelemetryRawSelectCount = rawSelectCount;
-  let selectionTelemetrySelectCount = selectCount;
-  let selectionTelemetryDrainMode = drainMode;
-  let selectionTelemetryAutomaticDrain = automaticDrain;
+  const selectionTelemetryItems = selectionItems;
+  const selectionTelemetryRawSelectCount = rawSelectCount;
+  const selectionTelemetrySelectCount = selectCount;
+  const selectionTelemetryDrainMode = drainMode;
+  const selectionTelemetryAutomaticDrain = automaticDrain;
 
-  // M113: claimItems — Local returns top-selectCount (identical to today's raw
-  // slice); Shared atomically claims items so two machines get disjoint work.
-  let workedSet = coordinator.claimItems(selected, selectCount, machineId);
-  let drainSelectedItems = drainMode
+  const repairClaimLimit = automaticDrain
+    ? singleSlotOrdinaryTurn
+      ? 1
+      : Math.min(
+          selectCount,
+          typeof drainLimit === 'number' ? drainLimit : selectCount,
+          automaticOrdinaryEligibleItems.length > 0 && selectCount > 1 ? selectCount - 1 : selectCount,
+        )
+    : 0;
+  const claimLanes = automaticDrain
+    ? singleSlotOrdinaryTurn
+      ? [
+          {
+            candidates: selectRoundRobinCandidates(
+              automaticOrdinaryEligibleItems,
+              automaticOrdinaryEligibleItems.length,
+            ),
+            limit: 1,
+          },
+          {
+            candidates: selectRoundRobinCandidates(drainAvailableItems, drainAvailableItems.length),
+            limit: 1,
+          },
+        ]
+      : [
+        ...(repairClaimLimit > 0
+          ? [{ candidates: selectRoundRobinCandidates(drainAvailableItems, drainAvailableItems.length), limit: repairClaimLimit }]
+          : []),
+        ...(automaticOrdinaryEligibleItems.length > 0
+          ? [{
+            candidates: selectRoundRobinCandidates(
+              automaticOrdinaryEligibleItems,
+              automaticOrdinaryEligibleItems.length,
+            ),
+            limit: selectCount,
+          }]
+          : []),
+      ]
+    : [{
+      candidates: selectRoundRobinCandidates(selectionItems, selectionItems.length),
+      limit: selectCount,
+    }];
+  // One atomic claim preserves total capacity and per-lane quotas under
+  // cross-machine contention. Lock/storage failure remains fail-closed.
+  const workedSet = coordinator.claimItemsByLane(claimLanes, selectCount, machineId);
+  selected = workedSet;
+  const drainSelectedItems = drainMode
     ? workedSet.filter((item) => isDrainCandidate(item, drainMode))
     : [];
-  if (automaticDrain && drainMode && workedSet.length === 0) {
-    const fallbackItems = ordinarySelectionItems.filter((item) => !isDrainCandidate(item, drainMode));
-    const fallbackSelectCount = daemonQueueSelectionLimit({
-      perTickItems: dcfg.perTickItems,
-      remainingBudgetUsd: remainingBudget,
-      backlogItems: fallbackItems.length,
-      fillQueueToSlots: productionVelocity.fillQueueToSlots,
-      availableSlots: availableSlotsForSelection,
-      minPerItemUsd: MIN_PER_ITEM_USD,
-    });
-    const fallbackSelected = selectRoundRobinCandidates(fallbackItems, fallbackSelectCount);
-    const fallbackWorkedSet = coordinator.claimItems(fallbackSelected, fallbackSelectCount, machineId);
-    if (fallbackWorkedSet.length > 0) {
-      selected = fallbackSelected;
-      workedSet = fallbackWorkedSet;
-      drainSelectedItems = [];
-      selectionTelemetryItems = fallbackItems;
-      selectionTelemetryRawSelectCount = fallbackSelectCount;
-      selectionTelemetrySelectCount = fallbackSelectCount;
-      selectionTelemetryDrainMode = undefined;
-      selectionTelemetryAutomaticDrain = false;
+  if (automaticDrain) {
+    const claimedIds = new Set(workedSet.map((item) => item.id));
+    const claimedOrdinary = automaticOrdinaryEligibleItems.some((item) => claimedIds.has(item.id));
+    const claimedRepair = drainSelectedItems.length > 0;
+    if (claimedOrdinary) {
+      automaticDrainOrdinaryTurnDue = false;
+    } else if (
+      !automaticDrainOrdinaryTurnDue &&
+      selectCount === 1 &&
+      automaticOrdinaryEligibleItems.length > 0 &&
+      claimedRepair
+    ) {
+      automaticDrainOrdinaryTurnDue = true;
     }
   }
   const selectionBlockers = summarizeSelectionBlockers(selectionTelemetryItems);
@@ -2802,7 +2852,14 @@ export async function tick(
     dispatchPreflightByItemId,
   });
   const drain = drainMode
-    ? drainSummary(drainMode, drainAvailableItems, drainSelectedItems, drainLimit, automaticDrain)
+    ? drainSummary(
+        drainMode,
+        drainAvailableItems,
+        drainSelectedItems,
+        drainLimit,
+        automaticDrain,
+        singleSlotOrdinaryTurn && drainSelectedItems.length === 0,
+      )
     : undefined;
   if (drainMode) {
     recordDrainSelectionAgentAction({
@@ -2812,6 +2869,7 @@ export async function tick(
       selectedItems: drainSelectedItems,
       ...(typeof drainLimit === 'number' ? { limit: drainLimit } : {}),
       ...(drain?.capped ? { capped: true } : {}),
+      ...(singleSlotOrdinaryTurn && drainSelectedItems.length === 0 ? { fairnessDeferred: true } : {}),
       machineId,
       dryRun: opts.dryRun,
       automatic: automaticDrain,
@@ -4427,6 +4485,7 @@ export async function tick(
   }
   state = finalLoadedState.state;
   state = resetDayIfNeeded(state);         // re-check day rollover after async work
+  state.automaticDrainOrdinaryTurnDue = automaticDrainOrdinaryTurnDue;
   state.todaySpentUsd += tickSpent;
   state.itemsProcessed += dispatchedCount;
   state.lastTickAt = now;

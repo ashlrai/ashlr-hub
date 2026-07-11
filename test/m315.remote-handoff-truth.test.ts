@@ -12,9 +12,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-const { createPrMock, viewPrMock } = vi.hoisted(() => ({
+const { createPrMock, viewPrMock, branchProtectionMock } = vi.hoisted(() => ({
   createPrMock: vi.fn(),
   viewPrMock: vi.fn(),
+  branchProtectionMock: vi.fn(),
 }));
 
 vi.mock('../src/core/git.js', async (importOriginal) => {
@@ -22,7 +23,7 @@ vi.mock('../src/core/git.js', async (importOriginal) => {
   return {
     ...actual,
     getRemoteOrg: (repoPath: string) => ({
-      remote: `https://github.com/ashlrai/${path.basename(repoPath)}.git`,
+      remote: 'https://github.com/ashlrai/fixture.git',
       org: 'ashlrai',
     }),
   };
@@ -34,6 +35,7 @@ vi.mock('../src/core/integrations/github.js', async (importOriginal) => {
     ...actual,
     createPr: (...args: unknown[]) => createPrMock(...args),
     viewPr: (...args: unknown[]) => viewPrMock(...args),
+    readBranchProtectionAttestation: (...args: unknown[]) => branchProtectionMock(...args),
   };
 });
 
@@ -147,6 +149,24 @@ beforeEach(() => {
   process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
   setKill(false);
   initRepo(tmpRepo);
+  branchProtectionMock.mockReset();
+  branchProtectionMock.mockImplementation(async (_repo: string, branch = 'main') => ({
+    ok: true,
+    available: true,
+    protected: true,
+    branchProtection: true,
+    nameWithOwner: 'ashlrai/fixture',
+    repositoryId: 'R_fixture',
+    defaultBranch: 'main',
+    branch,
+    baseHead: git(tmpRepo, ['rev-parse', branch]),
+    observedAt: new Date().toISOString(),
+    requirements: ['required_status_checks'],
+    requiredChecks: ['ci/test'],
+    requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
+    sources: ['classic'],
+    detail: 'Live branch protection confirmed with required checks',
+  }));
   execFileSync('git', ['init', '--bare', bareRepo], { stdio: 'pipe' });
   git(tmpRepo, ['remote', 'add', 'origin', bareRepo]);
   git(tmpRepo, ['push', '-u', 'origin', 'main']);
@@ -205,6 +225,10 @@ describe('M315 remote PR handoff truth', () => {
       prUrl: 'https://github.com/ashlrai/fixture/pull/123',
     });
     expect(createPrMock).toHaveBeenCalledTimes(1);
+    expect(createPrMock).toHaveBeenCalledWith(tmpRepo, expect.objectContaining({
+      repo: 'ashlrai/fixture',
+      base: 'main',
+    }));
 
     const loaded = loadProposal(proposal.id);
     expect(loaded?.status).toBe('awaiting-host-merge');
@@ -279,6 +303,216 @@ describe('M315 remote PR handoff truth', () => {
       action: 'merge-main',
       allowed: true,
     });
+    expect(pack?.gates.remoteProtection).toMatchObject({
+      ok: true,
+      live: true,
+      nameWithOwner: 'ashlrai/fixture',
+      repositoryId: 'R_fixture',
+      branch: 'main',
+      baseHead,
+      requirements: ['required_status_checks'],
+      requiredChecks: ['ci/test'],
+      requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
+      policySources: ['classic'],
+      policyHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(branchProtectionMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('evidence mode refuses static protection claims when live GitHub is unprotected', async () => {
+    branchProtectionMock.mockResolvedValue({
+      ok: false,
+      available: true,
+      protected: false,
+      branchProtection: false,
+      nameWithOwner: 'ashlrai/fixture',
+      repositoryId: 'R_fixture',
+      defaultBranch: 'main',
+      branch: 'main',
+      baseHead: git(tmpRepo, ['rev-parse', 'main']),
+      observedAt: new Date().toISOString(),
+      requirements: [],
+      requiredChecks: [],
+      requiredCheckBindings: [],
+      sources: [],
+      detail: 'No enforceable branch protection requirements were found',
+    });
+    const diff = addFileDiff('docs/unprotected.md', 'must not hand off');
+    const diffHash = hashDiff(diff);
+    const proposal = createProposal({
+      repo: tmpRepo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'static protection is not authority',
+      summary: 'Live policy must win.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('local:qwen3-coder', 'local', diffHash),
+      engineModel: 'local:qwen3-coder',
+      engineTier: 'local',
+    });
+
+    const result = await autoMergeProposal(proposal.id, evidenceCfg());
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/live branch protection unavailable/);
+    expect(createPrMock).not.toHaveBeenCalled();
+  });
+
+  it('evidence mode refuses a required check without an app or integration binding', async () => {
+    branchProtectionMock.mockImplementation(async (_repo: string, branch = 'main') => ({
+      ok: true,
+      available: true,
+      protected: true,
+      branchProtection: true,
+      nameWithOwner: 'ashlrai/fixture',
+      repositoryId: 'R_fixture',
+      defaultBranch: 'main',
+      branch,
+      baseHead: git(tmpRepo, ['rev-parse', branch]),
+      observedAt: new Date().toISOString(),
+      requirements: ['required_status_checks'],
+      requiredChecks: ['ci/test'],
+      requiredCheckBindings: [{ context: 'ci/test', appId: null }],
+      sources: ['classic'],
+      detail: 'Required status context accepts any producer',
+    }));
+    const diff = addFileDiff('docs/unbound-check.md', 'must not hand off');
+    const diffHash = hashDiff(diff);
+    const proposal = createProposal({
+      repo: tmpRepo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'unbound check is not authority',
+      summary: 'Require a concrete status producer.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('local:qwen3-coder', 'local', diffHash),
+      engineModel: 'local:qwen3-coder',
+      engineTier: 'local',
+    });
+
+    const result = await autoMergeProposal(proposal.id, evidenceCfg());
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/lack a concrete GitHub App\/integration binding/);
+    expect(createPrMock).not.toHaveBeenCalled();
+  });
+
+  it('evidence mode aborts before push when live protection changes after capture', async () => {
+    const baseHead = git(tmpRepo, ['rev-parse', 'main']);
+    branchProtectionMock
+      .mockResolvedValueOnce({
+        ok: true,
+        available: true,
+        protected: true,
+        branchProtection: true,
+        nameWithOwner: 'ashlrai/fixture',
+        repositoryId: 'R_fixture',
+        defaultBranch: 'main',
+        branch: 'main',
+        baseHead,
+        observedAt: new Date().toISOString(),
+        requirements: ['required_status_checks'],
+        requiredChecks: ['ci/test'],
+        requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
+        sources: ['classic'],
+        detail: 'Live branch protection confirmed with required checks',
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        available: true,
+        protected: false,
+        branchProtection: false,
+        nameWithOwner: 'ashlrai/fixture',
+        repositoryId: 'R_fixture',
+        defaultBranch: 'main',
+        branch: 'main',
+        baseHead,
+        observedAt: new Date().toISOString(),
+        requirements: [],
+        requiredChecks: [],
+        requiredCheckBindings: [],
+        sources: [],
+        detail: 'No enforceable branch protection requirements were found',
+      });
+    const diff = addFileDiff('docs/evidence-race.md', 'must not push');
+    const diffHash = hashDiff(diff);
+    const proposal = createProposal({
+      repo: tmpRepo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'evidence race before push',
+      summary: 'Re-attest immediately before remote handoff.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('local:qwen3-coder', 'local', diffHash),
+      engineModel: 'local:qwen3-coder',
+      engineTier: 'local',
+    });
+
+    const result = await autoMergeProposal(proposal.id, evidenceCfg());
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/live branch protection changed before remote handoff/);
+    expect(branchProtectionMock).toHaveBeenCalledTimes(2);
+    expect(createPrMock).not.toHaveBeenCalled();
+  });
+
+  it('evidence mode refuses host auto-merge when protection changes after PR creation', async () => {
+    const baseHead = git(tmpRepo, ['rev-parse', 'main']);
+    const protectedEvidence = {
+      ok: true,
+      available: true,
+      protected: true,
+      branchProtection: true,
+      nameWithOwner: 'ashlrai/fixture',
+      repositoryId: 'R_fixture',
+      defaultBranch: 'main',
+      branch: 'main',
+      baseHead,
+      observedAt: new Date().toISOString(),
+      requirements: ['required_status_checks'],
+      requiredChecks: ['ci/test'],
+      requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
+      sources: ['classic'],
+      detail: 'Live branch protection confirmed with required checks',
+    };
+    branchProtectionMock
+      .mockResolvedValueOnce(protectedEvidence)
+      .mockResolvedValueOnce(protectedEvidence)
+      .mockResolvedValueOnce({
+        ...protectedEvidence,
+        ok: false,
+        protected: false,
+        branchProtection: false,
+        requirements: [],
+        requiredChecks: [],
+        requiredCheckBindings: [],
+        sources: [],
+        detail: 'No enforceable branch protection requirements were found',
+      });
+    const diff = addFileDiff('docs/post-pr-race.md', 'host auto-merge must remain off');
+    const diffHash = hashDiff(diff);
+    const proposal = createProposal({
+      repo: tmpRepo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'post PR evidence race',
+      summary: 'Check again before enabling host automation.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('local:qwen3-coder', 'local', diffHash),
+      engineModel: 'local:qwen3-coder',
+      engineTier: 'local',
+    });
+
+    const result = await autoMergeProposal(proposal.id, evidenceCfg());
+
+    expect(result).toMatchObject({ ok: true, merged: false, handoff: true });
+    expect(result.reason).toMatch(/host auto-merge refused because live protection changed/);
+    expect(branchProtectionMock).toHaveBeenCalledTimes(3);
+    expect(createPrMock).toHaveBeenCalledTimes(1);
   });
 
   it('evidence mode replaces stored verification that lacks freshness metadata', async () => {
