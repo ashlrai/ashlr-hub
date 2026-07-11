@@ -1729,4 +1729,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prevent duplicate-diff retries from stealing another producer's proposal outcome.
 - [x] Preserve one ordinary-work slot during automatic repair drain when capacity and policy allow it.
 - [x] Add adversarial regression coverage and run focused/full verification plus independent review.
-- [ ] Update durable notes, commit, push, reload production, and canary the hardened authority paths.
+- [x] Update durable notes, commit, push, reload production, and canary the hardened authority paths.
