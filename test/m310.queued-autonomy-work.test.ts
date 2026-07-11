@@ -1,9 +1,21 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  linkSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 import { buildBacklog } from '../src/core/portfolio/backlog.js';
+import {
+  loadQueuedAutonomyItems,
+  loadQueuedAutonomyItemsDetailed,
+} from '../src/core/portfolio/queued-autonomy.js';
 import { scanQueuedAutonomyWork } from '../src/core/portfolio/scanners.js';
 import {
   queueProposalRepairWorkForPendingProposals,
@@ -12,6 +24,7 @@ import {
 import type { Proposal, WorkItem } from '../src/core/types.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
 import { recordRepairHandoffs } from '../src/core/fleet/repair-handoff-journal.js';
 import {
   generatedRepairGenerationId,
@@ -101,6 +114,189 @@ function captureFailure(repo: string, overrides: Partial<DispatchProductionEvent
 }
 
 describe('queued autonomy work scanner', () => {
+  it('reports missing queue files as a complete empty observation', () => {
+    expect(loadQueuedAutonomyItemsDetailed()).toEqual({
+      items: [],
+      sourceState: 'complete',
+      filesPresent: 0,
+      filesMissing: 2,
+      filesUnavailable: 0,
+      rowsScanned: 0,
+      itemsLoaded: 0,
+      limitExceeded: false,
+    });
+  });
+
+  it('reports unavailable rather than reading a mixed snapshot when the queue lock is held', () => {
+    mkdirSync(fx.ashlrDir, { recursive: true });
+    const lock = acquireLocalStoreLock(join(fx.ashlrDir, '.self-heal-queue.lock'));
+    expect(lock).not.toBeNull();
+    try {
+      expect(loadQueuedAutonomyItemsDetailed()).toMatchObject({
+        items: [],
+        sourceState: 'unavailable',
+        filesUnavailable: 2,
+      });
+    } finally {
+      if (lock) releaseLocalStoreLock(lock);
+    }
+  });
+
+  it('strictly loads a complete bounded corpus and preserves queue semantics', () => {
+    const repo = fx.makeRepo();
+    const duplicate = item(repo.dir, 'invent-duplicate');
+    const ignored = item(repo.dir, 'todo-ignored', { source: 'todo', tags: ['todo'] });
+    writeJson(join(fx.ashlrDir, 'self-heal-queue.json'), [duplicate]);
+    writeJson(join(fx.ashlrDir, 'backlog.json'), { items: [duplicate, ignored] });
+
+    const result = loadQueuedAutonomyItemsDetailed();
+
+    expect(result).toMatchObject({
+      sourceState: 'complete',
+      filesPresent: 2,
+      filesMissing: 0,
+      filesUnavailable: 0,
+      rowsScanned: 3,
+      itemsLoaded: 1,
+      limitExceeded: false,
+    });
+    expect(result.items.map((candidate) => candidate.id)).toEqual([duplicate.id]);
+  });
+
+  it('canonicalizes accepted rows so unknown fields cannot enter backlog metadata', () => {
+    const repo = fx.makeRepo();
+    const withUnknown = { ...item(repo.dir, 'canonical-row'), secret: 'RAW_QUEUE_CANARY' };
+    writeJson(join(fx.ashlrDir, 'self-heal-queue.json'), [withUnknown]);
+
+    const result = loadQueuedAutonomyItemsDetailed();
+
+    expect(result.sourceState).toBe('complete');
+    expect(result.items).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toContain('RAW_QUEUE_CANARY');
+    expect(result.items[0]).not.toHaveProperty('secret');
+  });
+
+  it('fails the detailed read closed for symlinks and non-regular files', () => {
+    const queuePath = join(fx.ashlrDir, 'self-heal-queue.json');
+    const targetPath = join(fx.ashlrDir, 'target.json');
+    mkdirSync(fx.ashlrDir, { recursive: true });
+    writeFileSync(targetPath, '[]', 'utf8');
+    symlinkSync(targetPath, queuePath);
+
+    expect(loadQueuedAutonomyItemsDetailed()).toMatchObject({
+      items: [],
+      sourceState: 'unavailable',
+      filesUnavailable: 1,
+    });
+
+    rmSync(queuePath);
+    mkdirSync(queuePath);
+    expect(loadQueuedAutonomyItemsDetailed()).toMatchObject({
+      items: [],
+      sourceState: 'unavailable',
+      filesUnavailable: 1,
+    });
+  });
+
+  it.runIf(process.platform !== 'win32')('fails the detailed read closed for unreadable files', () => {
+    const queuePath = join(fx.ashlrDir, 'self-heal-queue.json');
+    mkdirSync(fx.ashlrDir, { recursive: true });
+    writeFileSync(queuePath, '[]', { encoding: 'utf8', mode: 0o000 });
+    chmodSync(queuePath, 0o000);
+
+    const result = loadQueuedAutonomyItemsDetailed();
+
+    expect(result).toMatchObject({
+      items: [],
+      sourceState: 'unavailable',
+      filesUnavailable: 1,
+    });
+  });
+
+  it.runIf(process.platform !== 'win32')('fails the detailed read closed for hard links and unsafe write permissions', () => {
+    const queuePath = join(fx.ashlrDir, 'self-heal-queue.json');
+    const linkedPath = join(fx.ashlrDir, 'linked-queue.json');
+    mkdirSync(fx.ashlrDir, { recursive: true });
+    writeFileSync(queuePath, '[]', { encoding: 'utf8', mode: 0o600 });
+    linkSync(queuePath, linkedPath);
+
+    expect(loadQueuedAutonomyItemsDetailed()).toMatchObject({
+      items: [],
+      sourceState: 'unavailable',
+      filesUnavailable: 1,
+    });
+
+    rmSync(linkedPath);
+    chmodSync(queuePath, 0o622);
+    expect(loadQueuedAutonomyItemsDetailed()).toMatchObject({
+      items: [],
+      sourceState: 'unavailable',
+      filesUnavailable: 1,
+    });
+  });
+
+  it('fails the detailed read closed without exposing malformed or invalid content', () => {
+    const queuePath = join(fx.ashlrDir, 'self-heal-queue.json');
+    const secret = 'DO_NOT_EXPOSE_QUEUED_AUTONOMY_CONTENT';
+    mkdirSync(fx.ashlrDir, { recursive: true });
+    const invalidSources = [
+      `{${secret}`,
+      JSON.stringify({ payload: secret }),
+      JSON.stringify([item(fx.home, 'valid'), { secret }]),
+      '[{"id":"","repo":"/tmp/repo","source":"invent","title":"","detail":"","value":1e400,"effort":1,"score":1,"tags":[],"ts":"now"}]',
+      JSON.stringify([{ ...item(fx.home, 'relative-repo'), repo: 'relative/repo' }]),
+      JSON.stringify([{ ...item(fx.home, 'invalid-time'), ts: 'not-a-time' }]),
+      JSON.stringify([{ ...item(fx.home, 'oversized-title'), title: 'x'.repeat(241) }]),
+      JSON.stringify([{
+        ...item(fx.home, 'invent-with-repair-lineage'),
+        repairHandoffId: 'handoff',
+        repairGenerationId: 'generation',
+      }]),
+    ];
+
+    for (const contents of invalidSources) {
+      writeFileSync(queuePath, contents, 'utf8');
+      const result = loadQueuedAutonomyItemsDetailed();
+      expect(result).toMatchObject({
+        items: [],
+        sourceState: 'unavailable',
+        filesUnavailable: 1,
+        itemsLoaded: 0,
+      });
+      expect(JSON.stringify(result)).not.toContain(secret);
+      expect(result).not.toHaveProperty('reason');
+    }
+  });
+
+  it('bounds strict reads and reports only limit metadata', () => {
+    const queuePath = join(fx.ashlrDir, 'self-heal-queue.json');
+    mkdirSync(fx.ashlrDir, { recursive: true });
+    writeFileSync(queuePath, Buffer.alloc(2 * 1024 * 1024 + 1, 0x20));
+
+    expect(loadQueuedAutonomyItemsDetailed()).toEqual({
+      items: [],
+      sourceState: 'unavailable',
+      filesPresent: 1,
+      filesMissing: 1,
+      filesUnavailable: 1,
+      rowsScanned: 0,
+      itemsLoaded: 0,
+      limitExceeded: true,
+    });
+  });
+
+  it('keeps the tolerant legacy loader behavior for invalid rows and containers', () => {
+    const valid = item(fx.home, 'legacy-valid');
+    writeJson(join(fx.ashlrDir, 'self-heal-queue.json'), [valid, { id: 'invalid' }]);
+    writeJson(join(fx.ashlrDir, 'backlog.json'), { payload: [item(fx.home, 'ignored-container')] });
+
+    expect(loadQueuedAutonomyItems().map((candidate) => candidate.id)).toEqual([valid.id]);
+    expect(loadQueuedAutonomyItemsDetailed()).toMatchObject({
+      items: [],
+      sourceState: 'unavailable',
+    });
+  });
+
   it('rehydrates self-heal and invent items for the scanned enrolled repo only', async () => {
     const repo = fx.makeRepo();
     const otherRepo = fx.makeRepo();

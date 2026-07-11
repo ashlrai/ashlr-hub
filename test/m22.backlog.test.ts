@@ -260,6 +260,86 @@ describe('M22 loadBacklog — returns null when no backlog exists', () => {
     fs.writeFileSync(bp, 'NOT VALID JSON }{{', 'utf8');
     expect(loadBacklog()).toBeNull();
   });
+
+  it('loads a legacy backlog without scanner observations', () => {
+    const legacy = {
+      generatedAt: new Date().toISOString(),
+      repos: [tmpRepo],
+      items: [],
+    };
+    fs.mkdirSync(path.dirname(backlogPath()), { recursive: true });
+    fs.writeFileSync(backlogPath(), JSON.stringify(legacy), 'utf8');
+
+    expect(loadBacklog()).toEqual(legacy);
+    expect(loadBacklog()).not.toHaveProperty('observations');
+  });
+
+  it('drops malformed or semantically inconsistent persisted observations', () => {
+    const observedAt = new Date().toISOString();
+    const valid = {
+      schemaVersion: 1 as const,
+      observedAt,
+      repo: tmpRepo,
+      scannerId: 'queued-autonomy',
+      domain: 'local-queue',
+      source: 'self' as const,
+      status: 'absent' as const,
+      reason: 'source-confirmed-empty' as const,
+    };
+    fs.mkdirSync(path.dirname(backlogPath()), { recursive: true });
+    fs.writeFileSync(backlogPath(), JSON.stringify({
+      generatedAt: observedAt,
+      repos: [tmpRepo],
+      items: [],
+      observations: [
+        { ...valid, secret: 'RAW_OBSERVATION_CANARY' },
+        { ...valid, status: 'present', reason: 'scanner-failed' },
+        { ...valid, scannerId: '../unsafe' },
+        { ...valid, itemId: 'unexpected', objectiveHash: 'a'.repeat(64) },
+      ],
+    }), 'utf8');
+
+    expect(loadBacklog()?.observations).toEqual([valid]);
+    expect(JSON.stringify(loadBacklog())).not.toContain('RAW_OBSERVATION_CANARY');
+    expect(loadBacklog()?.observationSourceState).toBe('degraded');
+  });
+
+  it('preserves persisted degraded and truncated observation truth', () => {
+    const observedAt = new Date().toISOString();
+    const observation = {
+      schemaVersion: 1 as const,
+      observedAt,
+      repo: tmpRepo,
+      scannerId: 'queued-autonomy',
+      domain: 'local-queue',
+      source: 'self' as const,
+      status: 'absent' as const,
+      reason: 'source-confirmed-empty' as const,
+    };
+    fs.mkdirSync(path.dirname(backlogPath()), { recursive: true });
+    fs.writeFileSync(backlogPath(), JSON.stringify({
+      generatedAt: observedAt,
+      repos: [tmpRepo],
+      items: [],
+      observations: Array.from({ length: 500 }, () => observation),
+      observationSourceState: 'degraded',
+      observationsTruncated: true,
+    }), 'utf8');
+
+    const loaded = loadBacklog();
+    expect(loaded?.observations).toHaveLength(500);
+    expect(loaded?.observationSourceState).toBe('degraded');
+    expect(loaded?.observationsTruncated).toBe(true);
+
+    fs.writeFileSync(backlogPath(), JSON.stringify({
+      generatedAt: observedAt,
+      repos: [tmpRepo],
+      items: [],
+      observations: [],
+      observationSourceState: 'degraded',
+    }), 'utf8');
+    expect(loadBacklog()).toMatchObject({ observations: [], observationSourceState: 'degraded' });
+  });
 });
 
 // ===========================================================================
@@ -397,6 +477,31 @@ describe('M22 buildBacklog — over an enrolled tmp repo', () => {
     expect(typeof bl['generatedAt']).toBe('string');
     expect(Array.isArray(bl['repos'])).toBe(true);
     expect(Array.isArray(bl['items'])).toBe(true);
+    expect(Array.isArray(bl['observations'])).toBe(true);
+  });
+
+  it('persists bounded metadata-only scanner observations', async () => {
+    const built = await buildBacklog();
+    const loaded = loadBacklog();
+
+    expect(loaded?.observations).toEqual(built.observations);
+    expect(loaded?.observations?.length).toBeLessThanOrEqual(500);
+    expect(loaded?.observations?.length).toBeGreaterThan(0);
+    for (const observation of loaded!.observations!) {
+      expect(observation.repo).toBe(tmpRepo);
+      expect(observation.scannerId.length).toBeGreaterThan(0);
+      expect(observation.domain.length).toBeGreaterThan(0);
+      expect(['present', 'absent', 'unavailable']).toContain(observation.status);
+      expect(observation).not.toHaveProperty('title');
+      expect(observation).not.toHaveProperty('detail');
+      if (observation.status === 'present') {
+        expect(observation.itemId).toEqual(expect.any(String));
+        expect(observation.objectiveHash).toMatch(/^[a-f0-9]{64}$/);
+      } else {
+        expect(observation).not.toHaveProperty('itemId');
+        expect(observation).not.toHaveProperty('objectiveHash');
+      }
+    }
   });
 
   it('includes and persists the merge-contract rollout item', async () => {
@@ -531,6 +636,71 @@ describe('M22 buildBacklog — over an enrolled tmp repo', () => {
     expect(loaded).not.toBeNull();
     expect(loaded!.generatedAt).toBe(subset.generatedAt);
     expect(loaded!.repos).toEqual([tmpRepo]);
+  });
+
+  it('merges disjoint scanner observations from concurrent persisted scans', async () => {
+    const secondRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m22-observation-second-'));
+    try {
+      initBareGitDir(secondRepo);
+      fs.writeFileSync(
+        path.join(secondRepo, 'package.json'),
+        JSON.stringify({ name: 'observation-second', version: '1.0.0', scripts: { test: 'vitest run' } }),
+        'utf8',
+      );
+      fs.writeFileSync(path.join(secondRepo, 'README.md'), '# Second\n', 'utf8');
+
+      await Promise.all([
+        buildBacklog({ repos: [tmpRepo], persist: true }),
+        buildBacklog({ repos: [secondRepo], persist: true }),
+      ]);
+
+      const observedRepos = new Set(loadBacklog()?.observations?.map((observation) => observation.repo));
+      expect(observedRepos).toEqual(new Set([tmpRepo, secondRepo]));
+    } finally {
+      fs.rmSync(secondRepo, { recursive: true, force: true });
+    }
+  });
+
+  it('replaces stale observation scope on a newer full enrolled refresh', async () => {
+    const secondRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m22-observation-stale-'));
+    try {
+      initBareGitDir(secondRepo);
+      fs.writeFileSync(
+        path.join(secondRepo, 'package.json'),
+        JSON.stringify({ name: 'observation-stale', version: '1.0.0', scripts: { test: 'vitest run' } }),
+        'utf8',
+      );
+      fs.writeFileSync(path.join(secondRepo, 'README.md'), '# Stale\n', 'utf8');
+      enroll(secondRepo);
+      await buildBacklog();
+      expect(new Set(loadBacklog()?.observations?.map((observation) => observation.repo))).toContain(secondRepo);
+
+      unenroll(secondRepo);
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 2));
+      await buildBacklog();
+
+      expect(new Set(loadBacklog()?.observations?.map((observation) => observation.repo))).toEqual(new Set([tmpRepo]));
+    } finally {
+      try { unenroll(secondRepo); } catch { /* best-effort test cleanup */ }
+      fs.rmSync(secondRepo, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps newer same-id work when an older scan persists after it', async () => {
+    const initial = await buildBacklog();
+    expect(initial.items.length).toBeGreaterThan(0);
+    const item = initial.items[0]!;
+    const newerTitle = 'Newer authoritative objective meaning';
+    fs.writeFileSync(backlogPath(), JSON.stringify({
+      ...initial,
+      generatedAt: '2099-01-01T00:00:00.000Z',
+      items: [{ ...item, title: newerTitle }],
+    }), 'utf8');
+
+    await buildBacklog({ repos: [tmpRepo], persist: true });
+
+    expect(loadBacklog()?.generatedAt).toBe('2099-01-01T00:00:00.000Z');
+    expect(loadBacklog()?.items.find((candidate) => candidate.id === item.id)?.title).toBe(newerTitle);
   });
 
   it('score on each WorkItem equals scoreItem(value, effort)', async () => {

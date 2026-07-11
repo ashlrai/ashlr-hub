@@ -132,6 +132,13 @@ export function formatFleetStatus(s: FleetStatus): string {
         `${formatGeneratedWorkCount(g.invent, 'invent item')}`,
     );
   }
+  if (s.queue.scannerEvidence) {
+    const evidence = s.queue.scannerEvidence;
+    lines.push(
+      `  scan evidence: ${evidence.state} (${evidence.present} present, ${evidence.absent} absent, ` +
+      `${evidence.unavailable} unavailable across ${evidence.scannerDomains} scanner domain(s))`,
+    );
+  }
   if (s.queue.diagnosticResliceDrain) {
     const d = s.queue.diagnosticResliceDrain;
     const limitText = typeof d.limit === 'number' ? `/${d.limit}` : '';

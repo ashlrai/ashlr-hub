@@ -3481,6 +3481,57 @@ export interface WorkItem {
   repairParentObjectiveHash?: string;
 }
 
+/** Metadata-only scanner evidence. Observations never grant lifecycle authority. */
+export type ScannerObservationStatus = 'present' | 'absent' | 'unavailable';
+
+/** Fixed, bounded reason vocabulary for scanner observations. */
+export type ScannerObservationReason =
+  | 'item-observed'
+  | 'source-confirmed-empty'
+  | 'legacy-empty-result'
+  | 'scanner-failed'
+  | 'source-unavailable'
+  | 'source-unreadable'
+  | 'source-malformed'
+  | 'source-unsafe'
+  | 'objective-hash-unavailable';
+
+/** Static scanner metadata used to interpret an observation conservatively. */
+export interface ScannerDescriptor {
+  /** Stable scanner identifier; not a work-item or lifecycle identifier. */
+  id: string;
+  /** Metadata-only discovery domain, such as github or local-queue. */
+  domain: string;
+  /** Primary source emitted by the scanner. Present observations use the item's exact source. */
+  source: WorkSource;
+  /** Short operator-facing description of what the scanner reads. */
+  description: string;
+  /** Legacy scanners cannot distinguish empty from degraded discovery. */
+  evidence: 'legacy' | 'exhaustive';
+  /** Explicit absence capability. False for every legacy scanner. */
+  canAssertAbsent: boolean;
+  /** Maximum work items accepted from one invocation. */
+  maxItems: number;
+}
+
+/**
+ * Bounded metadata-only evidence from one scanner invocation.
+ * Present observations are bound to an exact item id and host-local objective
+ * hash. Absent/unavailable observations intentionally carry neither.
+ */
+export interface ScannerObservation {
+  schemaVersion: 1;
+  observedAt: string;
+  repo: string;
+  scannerId: string;
+  domain: string;
+  source: WorkSource;
+  status: ScannerObservationStatus;
+  reason: ScannerObservationReason;
+  itemId?: string;
+  objectiveHash?: string;
+}
+
 /**
  * The aggregated, persisted backlog. Written to ~/.ashlr/backlog.json by
  * buildBacklog(). Covers only ENROLLED repos (DEFAULT EMPTY => empty items).
@@ -3492,6 +3543,12 @@ export interface Backlog {
   repos: string[];
   /** All discovered work items, deduped and scored. */
   items: WorkItem[];
+  /** Optional metadata-only scanner evidence; absent on legacy backlog files. */
+  observations?: ScannerObservation[];
+  /** Integrity/completeness of the persisted observation envelope. */
+  observationSourceState?: 'healthy' | 'degraded';
+  /** True when bounded persistence omitted observation rows. */
+  observationsTruncated?: boolean;
 }
 
 /**

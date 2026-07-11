@@ -18,7 +18,16 @@ import { existsSync, statSync, readFileSync, readdirSync } from 'node:fs';
 import { join, basename, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
-import type { WorkItem, WorkSource, AshlrConfig, Goal, Milestone } from '../types.js';
+import type {
+  WorkItem,
+  WorkSource,
+  AshlrConfig,
+  Goal,
+  Milestone,
+  ScannerDescriptor,
+  ScannerObservation,
+  ScannerObservationReason,
+} from '../types.js';
 import { listIssues, githubStatus } from '../integrations/github.js';
 import { isTrivialItem, isNonCodePath } from './value-filter.js';
 import { listGoals } from '../goals/store.js';
@@ -28,7 +37,11 @@ import {
   nextActionableGoalMilestone,
 } from '../goals/focus.js';
 import { expandGoalToMilestones } from '../strategy/goal-planner.js';
-import { loadQueuedAutonomyItemsForRepo } from './queued-autonomy.js';
+import {
+  loadQueuedAutonomyItemsDetailed,
+  loadQueuedAutonomyItemsForRepo,
+} from './queued-autonomy.js';
+import { existingWorkItemObjectiveHash } from '../fleet/work-item-objective.js';
 import { detectRepoExecutionProfile } from '../run/repo-profile.js';
 import {
   riskAtOrAbove,
@@ -49,6 +62,7 @@ const MAX_OUTDATED_ITEMS = 50;
 const MAX_VULN_ITEMS = 20;
 const MAX_QUEUED_AUTONOMY_ITEMS = 25;
 const MAX_BINSHIELD_DEP_BUMP_SCANS = 10;
+export const MAX_SCANNER_OBSERVATIONS = 500;
 const BINSHIELD_DEP_BUMP_FAIL_ON: BinshieldRiskLevel = 'high';
 
 // ---------------------------------------------------------------------------
@@ -1649,21 +1663,118 @@ export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'
   }
 }
 
-// SCANNERS — all nine, exported as a ReadonlyArray
+// SCANNERS — identity-bound registrations plus the legacy array API.
 // ---------------------------------------------------------------------------
 
-export const SCANNERS: ReadonlyArray<(repo: string, cfg?: Pick<AshlrConfig, 'foundry'>) => Promise<WorkItem[]>> = [
-  // HIGH-VALUE sources (default ON): substantive work the fleet can ship.
-  scanQueuedAutonomyWork, // self-heal/invent work persisted by prior autonomy cycles
-  scanIssues,      // real GitHub issues — user-requested work
-  scanSecurity,    // binshield findings — actionable security fixes
-  scanExplicitMergeVerifyContracts, // rollout explicit merge-grade verify contracts
-  scanTests,       // failing CI / missing test script
-  scanSelfImprove, // M54: the fleet's own backlog (self-gated to @ashlr/hub)
-  scanGoals,       // M160: active goal next-step items (user-declared priorities)
-  // LOW-VALUE sources (default OFF via cfg flags): noise / rarely ship.
-  scanTodos,       // M136: off by default (cfg.foundry.scanTodos)
-  scanDeps,        // M160: off by default (cfg.foundry.scanDeps)
-  scanLint,        // M160: off by default (cfg.foundry.scanLint)
-  scanDocs,        // M160: off by default (cfg.foundry.scanHygiene)
+type ScannerFn = (repo: string, cfg?: Pick<AshlrConfig, 'foundry'>) => Promise<WorkItem[]>;
+
+export interface ScannerRegistration {
+  scanner: ScannerFn;
+  descriptor: ScannerDescriptor;
+}
+
+export const SCANNER_REGISTRATIONS: ReadonlyArray<ScannerRegistration> = [
+  { scanner: scanQueuedAutonomyWork, descriptor: { id: 'queued-autonomy', domain: 'local-queue', source: 'self', description: 'Durable queued self-heal and invented work.', evidence: 'exhaustive', canAssertAbsent: true, maxItems: MAX_QUEUED_AUTONOMY_ITEMS } },
+  { scanner: scanIssues, descriptor: { id: 'github-issues', domain: 'github', source: 'issue', description: 'Open GitHub issues visible to the local integration.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
+  { scanner: scanSecurity, descriptor: { id: 'binshield-security', domain: 'security', source: 'security', description: 'Read-only BinShield repository findings.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
+  { scanner: scanExplicitMergeVerifyContracts, descriptor: { id: 'merge-verify-contract', domain: 'verification', source: 'test', description: 'Missing explicit merge-grade verification contracts.', evidence: 'legacy', canAssertAbsent: false, maxItems: 1 } },
+  { scanner: scanTests, descriptor: { id: 'test-health', domain: 'tests', source: 'test', description: 'Cached CI failures and missing test-script coverage.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
+  { scanner: scanSelfImprove, descriptor: { id: 'self-improvement', domain: 'self-improvement', source: 'self', description: 'Bare skipped tests in the Ashlr Hub repository.', evidence: 'legacy', canAssertAbsent: false, maxItems: 50 } },
+  { scanner: scanGoals, descriptor: { id: 'active-goals', domain: 'goals', source: 'goal', description: 'Next actionable milestones for repo-bound active goals.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
+  { scanner: scanTodos, descriptor: { id: 'source-markers', domain: 'source-markers', source: 'todo', description: 'Opt-in TODO, FIXME, HACK, and XXX source markers.', evidence: 'legacy', canAssertAbsent: false, maxItems: MAX_TODO_HITS } },
+  { scanner: scanDeps, descriptor: { id: 'npm-dependencies', domain: 'dependencies', source: 'dep', description: 'Opt-in npm vulnerability and dependency metadata.', evidence: 'legacy', canAssertAbsent: false, maxItems: MAX_OUTDATED_ITEMS + MAX_VULN_ITEMS } },
+  { scanner: scanLint, descriptor: { id: 'cached-lint', domain: 'lint', source: 'lint', description: 'Opt-in fixable findings from a cached lint report.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
+  { scanner: scanDocs, descriptor: { id: 'repository-hygiene', domain: 'repository-hygiene', source: 'hygiene', description: 'Opt-in missing repository documentation.', evidence: 'legacy', canAssertAbsent: false, maxItems: 10 } },
 ] as const;
+
+export const SCANNERS: ReadonlyArray<ScannerFn> = SCANNER_REGISTRATIONS.map(({ scanner }) => scanner);
+export const SCANNER_DESCRIPTORS: ReadonlyArray<ScannerDescriptor> = SCANNER_REGISTRATIONS.map(({ descriptor }) => descriptor);
+
+export interface ScannerRunResult {
+  items: WorkItem[];
+  observations: ScannerObservation[];
+}
+
+function unavailableObservation(
+  descriptor: ScannerDescriptor,
+  repo: string,
+  reason: ScannerObservationReason,
+): ScannerObservation {
+  return {
+    schemaVersion: 1,
+    observedAt: nowIso(),
+    repo: resolve(repo),
+    scannerId: descriptor.id,
+    domain: descriptor.domain,
+    source: descriptor.source,
+    status: 'unavailable',
+    reason,
+  };
+}
+
+function presentObservations(
+  descriptor: ScannerDescriptor,
+  repo: string,
+  items: WorkItem[],
+): ScannerObservation[] {
+  const observations: ScannerObservation[] = [];
+  for (const item of items.slice(0, descriptor.maxItems)) {
+    const objectiveHash = existingWorkItemObjectiveHash({ ...item, repo: resolve(repo) });
+    if (!objectiveHash) return [unavailableObservation(descriptor, repo, 'objective-hash-unavailable')];
+    observations.push({
+      schemaVersion: 1,
+      observedAt: nowIso(),
+      repo: resolve(repo),
+      scannerId: descriptor.id,
+      domain: descriptor.domain,
+      source: item.source,
+      status: 'present',
+      reason: 'item-observed',
+      itemId: item.id,
+      objectiveHash,
+    });
+  }
+  return observations;
+}
+
+/** Execute a built-in scanner with additive, non-authoritative observations. */
+export async function runScannerWithObservations(
+  descriptor: ScannerDescriptor,
+  scanner: (repo: string, cfg?: Pick<AshlrConfig, 'foundry'>) => Promise<WorkItem[]>,
+  repo: string,
+  cfg?: Pick<AshlrConfig, 'foundry'>,
+): Promise<ScannerRunResult> {
+  try {
+    if (descriptor.id === 'queued-autonomy' && descriptor.canAssertAbsent) {
+      const source = loadQueuedAutonomyItemsDetailed();
+      if (source.sourceState !== 'complete') {
+        return { items: [], observations: [unavailableObservation(descriptor, repo, 'source-unavailable')] };
+      }
+      const repoKey = resolve(repo);
+      const items = source.items
+        .filter((item) => resolve(item.repo) === repoKey)
+        .slice(0, descriptor.maxItems);
+      if (items.length > 0) return { items, observations: presentObservations(descriptor, repo, items) };
+      return {
+        items,
+        observations: [{
+          schemaVersion: 1,
+          observedAt: nowIso(),
+          repo: resolve(repo),
+          scannerId: descriptor.id,
+          domain: descriptor.domain,
+          source: descriptor.source,
+          status: 'absent',
+          reason: 'source-confirmed-empty',
+        }],
+      };
+    }
+
+    const items = await scanner(repo, cfg);
+    if (items.length > 0) return { items, observations: presentObservations(descriptor, repo, items) };
+
+    return { items, observations: [unavailableObservation(descriptor, repo, 'legacy-empty-result')] };
+  } catch {
+    return { items: [], observations: [unavailableObservation(descriptor, repo, 'scanner-failed')] };
+  }
+}

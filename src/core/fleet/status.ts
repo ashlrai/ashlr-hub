@@ -677,6 +677,15 @@ export interface FleetQueueGeneratedWorkStatus {
   invent: number;
 }
 
+export interface FleetQueueScannerEvidenceStatus {
+  state: 'healthy' | 'degraded' | 'unknown';
+  observations: number;
+  present: number;
+  absent: number;
+  unavailable: number;
+  scannerDomains: number;
+}
+
 export interface FleetActiveWorkStatus {
   source: 'daemon-spend-guard';
   path: string;
@@ -765,6 +774,7 @@ export interface FleetStatus {
     shared?: FleetSharedQueueStatus;
     activeWork?: FleetActiveWorkStatus;
     generatedWork?: FleetQueueGeneratedWorkStatus;
+    scannerEvidence?: FleetQueueScannerEvidenceStatus;
     diagnosticResliceDrain?: FleetDiagnosticResliceDrainStatus;
   };
   proposals: {
@@ -1165,6 +1175,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   let nextEligibleAt: string | null = null;
   let queueRepos: FleetQueueRepoCoverage | undefined;
   let generatedWork: FleetQueueGeneratedWorkStatus | undefined;
+  let scannerEvidence: FleetQueueScannerEvidenceStatus | undefined;
   let enrolledExistingRepos: string[] = [];
   try {
     // Status must be observational. A full buildBacklog() refresh can run
@@ -1173,6 +1184,23 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     const { loadBacklog } = await import('../portfolio/backlog.js');
     const backlog = loadBacklog();
     queueSnapshotAt = typeof backlog?.generatedAt === 'string' ? backlog.generatedAt : null;
+    if (Array.isArray(backlog?.observations)) {
+      const present = backlog.observations.filter((observation) => observation.status === 'present').length;
+      const absent = backlog.observations.filter((observation) => observation.status === 'absent').length;
+      const unavailable = backlog.observations.filter((observation) => observation.status === 'unavailable').length;
+      scannerEvidence = {
+        state: backlog.observationSourceState === 'degraded' || backlog.observationsTruncated === true
+          ? 'degraded'
+          : backlog.observations.length === 0
+            ? 'unknown'
+            : unavailable > 0 ? 'degraded' : 'healthy',
+        observations: backlog.observations.length,
+        present,
+        absent,
+        unavailable,
+        scannerDomains: new Set(backlog.observations.map((observation) => observation.scannerId)).size,
+      };
+    }
     const enrolledRaw = (() => {
       try {
         return listEnrolled().map((repo) => resolve(repo));
@@ -1430,6 +1458,7 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       ...(sharedQueue !== undefined ? { shared: sharedQueue } : {}),
       ...(activeWork !== undefined ? { activeWork } : {}),
       ...(generatedWork !== undefined ? { generatedWork } : {}),
+      ...(scannerEvidence !== undefined ? { scannerEvidence } : {}),
       ...(diagnosticResliceDrain !== undefined ? { diagnosticResliceDrain } : {}),
     },
     proposals: { pending, frontierPending, ...(awaitingHostMerge > 0 ? { awaitingHostMerge } : {}), applied },

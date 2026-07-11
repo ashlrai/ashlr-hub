@@ -677,6 +677,29 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
   });
 
+  it('A1-persistence: an early-return tick reports state persistence failure', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const originalHome = process.env.HOME;
+    const blockedHome = join(fx.home, 'home-is-a-file');
+    fs.writeFileSync(blockedHome, 'not a directory', 'utf8');
+    mockBuildBacklog.mockImplementation(async () => {
+      process.env.HOME = blockedHome;
+      return {
+        generatedAt: new Date().toISOString(),
+        repos: [repo.dir],
+        items: [],
+      };
+    });
+
+    try {
+      const result = await tick(cfgBuiltin(), { dryRun: false });
+      expect(result.reason).toBe('state-persistence-failed');
+    } finally {
+      process.env.HOME = originalHome;
+    }
+  });
+
   it('A1-drain: targeted diagnostic-reslices mode selects trusted reslices before generic backlog work', async () => {
     const repo = fx.makeRepo();
     repo.enroll();

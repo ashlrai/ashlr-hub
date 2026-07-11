@@ -9,10 +9,11 @@
  *  - Persists atomically to ~/.ashlr/backlog.json.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import type { Backlog, Proposal, WorkItem } from '../types.js';
+import type { Backlog, Proposal, ScannerDescriptor, ScannerObservation, WorkItem } from '../types.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
 import { isTrivialItem } from './value-filter.js';
@@ -140,7 +141,32 @@ export function loadBacklog(): Backlog | null {
       Array.isArray((parsed as Record<string, unknown>)['repos']) &&
       Array.isArray((parsed as Record<string, unknown>)['items'])
     ) {
-      return parsed as Backlog;
+      const backlog = parsed as Backlog;
+      const rawObservations = (parsed as Record<string, unknown>)['observations'];
+      if (!Array.isArray(rawObservations)) {
+        const { observations: _observations, observationSourceState: _sourceState, observationsTruncated: _truncated, ...legacy } = backlog;
+        return legacy;
+      }
+      const boundedRaw = rawObservations.slice(0, MAX_PERSISTED_SCANNER_OBSERVATIONS * 2);
+      const sanitized = boundedRaw
+        .map(sanitizeScannerObservation)
+        .filter((observation): observation is ScannerObservation => observation !== null)
+        .slice(0, MAX_PERSISTED_SCANNER_OBSERVATIONS);
+      const rowsDropped = sanitized.length !== rawObservations.length;
+      const truncated = backlog.observationsTruncated === true || rawObservations.length > MAX_PERSISTED_SCANNER_OBSERVATIONS;
+      const degraded = rowsDropped || truncated || backlog.observationSourceState === 'degraded';
+      const {
+        observations: _observations,
+        observationSourceState: _sourceState,
+        observationsTruncated: _truncated,
+        ...base
+      } = backlog;
+      return {
+        ...base,
+        observations: sanitized,
+        observationSourceState: degraded ? 'degraded' : 'healthy',
+        ...(truncated ? { observationsTruncated: true } : {}),
+      };
     }
     return null;
   } catch {
@@ -149,22 +175,50 @@ export function loadBacklog(): Backlog | null {
 }
 
 /** Persist the backlog atomically (write + sync approach for node builtins). */
-function persistBacklog(backlog: Backlog): void {
+function persistBacklog(backlog: Backlog, opts: { fullSnapshot: boolean }): void {
   const persisted = withSelfHealQueueLock(() => {
     const current = loadBacklog();
     const currentMs = Date.parse(current?.generatedAt ?? '');
     const snapshotMs = Date.parse(backlog.generatedAt);
-    if (current && Number.isFinite(currentMs) && Number.isFinite(snapshotMs) && currentMs >= snapshotMs) {
-      const ids = new Set(backlog.items.map((item) => item.id));
-      const concurrent = current.items.filter((item) => !ids.has(item.id));
+    const currentIsNewer = Boolean(current && Number.isFinite(currentMs) && Number.isFinite(snapshotMs) && currentMs > snapshotMs);
+    let observationCandidates: ScannerObservation[] = [];
+    let observationDegraded = backlog.observationSourceState === 'degraded' || backlog.observationsTruncated === true;
+    if (currentIsNewer && opts.fullSnapshot) {
+      observationCandidates = current?.observations ?? [];
+      observationDegraded = current?.observationSourceState === 'degraded' || current?.observationsTruncated === true;
+    } else if (!currentIsNewer && opts.fullSnapshot) {
+      observationCandidates = backlog.observations ?? [];
+    } else {
+      const incomingRepos = new Set(backlog.repos.map((repo) => resolve(repo)));
+      const retainedCurrent = currentIsNewer
+        ? current?.observations ?? []
+        : (current?.observations ?? []).filter((observation) => !incomingRepos.has(resolve(observation.repo)));
+      observationCandidates = mergeConcurrentObservations(backlog.observations, retainedCurrent) ?? [];
+      observationDegraded ||= current?.observationSourceState === 'degraded' || current?.observationsTruncated === true;
+    }
+    const mergedObservationCount = observationCandidates.length;
+    const observations = observationCandidates.slice(0, MAX_PERSISTED_SCANNER_OBSERVATIONS);
+    const observationsTruncated = mergedObservationCount > observations.length;
+    observationDegraded ||= observationsTruncated;
+    const observationEnvelope = observations.length > 0 || backlog.observations !== undefined || current?.observations !== undefined
+      ? {
+          observations,
+          observationSourceState: observationDegraded ? 'degraded' as const : 'healthy' as const,
+          ...(observationsTruncated ? { observationsTruncated: true } : {}),
+        }
+      : {};
+    if (current && Number.isFinite(currentMs) && Number.isFinite(snapshotMs) && currentMs > snapshotMs) {
+      const currentIds = new Set(current.items.map((item) => item.id));
+      const nonConflictingIncoming = backlog.items.filter((item) => !currentIds.has(item.id));
       persistBacklogUnlocked({
         generatedAt: current.generatedAt,
-        repos: [...new Set([...backlog.repos, ...current.repos])],
-        items: [...backlog.items, ...concurrent],
+        repos: [...new Set([...current.repos, ...backlog.repos])],
+        items: [...current.items, ...nonConflictingIncoming],
+        ...observationEnvelope,
       });
       return;
     }
-    persistBacklogUnlocked(backlog);
+    persistBacklogUnlocked({ ...backlog, ...observationEnvelope });
   });
   if (!persisted.ok) throw new Error('backlog persistence lock unavailable');
 }
@@ -187,6 +241,9 @@ export function enqueueBacklogItemsDetailed(items: WorkItem[]): { ok: boolean; e
       generatedAt: new Date().toISOString(),
       repos: [...new Set([...existingItems, ...fresh].map((item) => item.repo))],
       items: [...existingItems, ...fresh],
+      ...(existing?.observations ? { observations: existing.observations } : {}),
+      ...(existing?.observationSourceState ? { observationSourceState: existing.observationSourceState } : {}),
+      ...(existing?.observationsTruncated ? { observationsTruncated: true } : {}),
     });
     return fresh.length;
   });
@@ -197,9 +254,99 @@ function persistBacklogUnlocked(backlog: Backlog): void {
   const p = backlogPath();
   const dir = join(homedir(), '.ashlr');
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const tmp = p + '.tmp';
-  writeFileSync(tmp, JSON.stringify(backlog, null, 2) + '\n', 'utf8');
-  renameSync(tmp, p);
+  const tmp = `${p}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  let renamed = false;
+  try {
+    writeFileSync(tmp, JSON.stringify(backlog, null, 2) + '\n', { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    renameSync(tmp, p);
+    renamed = true;
+  } finally {
+    if (!renamed) {
+      try { unlinkSync(tmp); } catch { /* best-effort cleanup */ }
+    }
+  }
+}
+
+const MAX_PERSISTED_SCANNER_OBSERVATIONS = 500;
+
+function observationKey(observation: ScannerObservation): string {
+  return `${resolve(observation.repo)}\0${observation.scannerId}`;
+}
+
+function mergeConcurrentObservations(
+  incoming: ScannerObservation[] | undefined,
+  current: ScannerObservation[] | undefined,
+): ScannerObservation[] | undefined {
+  if (!incoming && !current) return undefined;
+  const groups = new Map<string, { observedAt: string; observations: ScannerObservation[] }>();
+  for (const observations of [current ?? [], incoming ?? []]) {
+    const candidateGroups = new Map<string, ScannerObservation[]>();
+    for (const observation of observations) {
+      const sanitized = sanitizeScannerObservation(observation);
+      if (!sanitized) continue;
+      const key = observationKey(sanitized);
+      const group = candidateGroups.get(key) ?? [];
+      group.push(sanitized);
+      candidateGroups.set(key, group);
+    }
+    for (const [key, candidate] of candidateGroups) {
+      const observedAt = candidate.reduce(
+        (latest, observation) => observation.observedAt > latest ? observation.observedAt : latest,
+        '',
+      );
+      const prior = groups.get(key);
+      if (!prior || observedAt >= prior.observedAt) groups.set(key, { observedAt, observations: candidate });
+    }
+  }
+  return [...groups.values()]
+    .flatMap((group) => group.observations)
+    .sort((a, b) => b.observedAt.localeCompare(a.observedAt));
+}
+
+function sanitizeScannerObservation(value: unknown): ScannerObservation | null {
+  if (!value || typeof value !== 'object') return null;
+  const observation = value as Partial<ScannerObservation>;
+  if (
+    observation.schemaVersion !== 1 ||
+    typeof observation.observedAt !== 'string' ||
+    observation.observedAt.length > 40
+  ) return null;
+  if (!Number.isFinite(Date.parse(observation.observedAt))) return null;
+  if (typeof observation.repo !== 'string' || observation.repo.length === 0 || observation.repo.length > 4096) return null;
+  if (typeof observation.scannerId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(observation.scannerId)) return null;
+  if (typeof observation.domain !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(observation.domain)) return null;
+  if (!['issue', 'todo', 'test', 'dep', 'doc', 'security', 'plugin', 'self', 'lint', 'goal', 'hygiene', 'invent'].includes(observation.source ?? '')) return null;
+  if (!['present', 'absent', 'unavailable'].includes(observation.status ?? '')) return null;
+  const common = {
+    schemaVersion: 1 as const,
+    observedAt: observation.observedAt,
+    repo: resolve(observation.repo),
+    scannerId: observation.scannerId,
+    domain: observation.domain,
+    source: observation.source as ScannerObservation['source'],
+  };
+  if (observation.status === 'present') {
+    if (observation.reason !== 'item-observed' ||
+      typeof observation.itemId !== 'string' || observation.itemId.length === 0 || observation.itemId.length > 180 ||
+      typeof observation.objectiveHash !== 'string' || !/^[a-f0-9]{64}$/.test(observation.objectiveHash)) return null;
+    return { ...common, status: 'present', reason: 'item-observed', itemId: observation.itemId, objectiveHash: observation.objectiveHash };
+  }
+  if (observation.itemId !== undefined || observation.objectiveHash !== undefined) return null;
+  if (observation.status === 'absent') {
+    return observation.reason === 'source-confirmed-empty'
+      ? { ...common, status: 'absent', reason: 'source-confirmed-empty' }
+      : null;
+  }
+  if (![
+    'legacy-empty-result',
+    'scanner-failed',
+    'source-unavailable',
+    'source-unreadable',
+    'source-malformed',
+    'source-unsafe',
+    'objective-hash-unavailable',
+  ].includes(observation.reason ?? '')) return null;
+  return { ...common, status: 'unavailable', reason: observation.reason as ScannerObservation['reason'] };
 }
 
 // ---------------------------------------------------------------------------
@@ -242,13 +389,25 @@ function sameRepoSet(a: string[], b: string[]): boolean {
 import type { AshlrConfig } from '../types.js';
 type Scanner = (repo: string, cfg?: Pick<AshlrConfig, 'foundry'>) => Promise<WorkItem[]>;
 
-async function getScanners(): Promise<ReadonlyArray<Scanner>> {
+interface ScannerEntry {
+  scanner: Scanner;
+  descriptor?: ScannerDescriptor;
+}
+
+async function getScanners(): Promise<ReadonlyArray<ScannerEntry>> {
   let builtin: ReadonlyArray<Scanner> = [];
+  let registered: ReadonlyArray<ScannerEntry> | null = null;
   try {
     const mod = await import('./scanners.js');
     // SCANNERS type in scanners.ts is ReadonlyArray<(repo, cfg?) => ...>, which
     // matches Scanner here. The cast silences the readonly widening mismatch.
     builtin = mod.SCANNERS as unknown as ReadonlyArray<Scanner>;
+    if (Array.isArray(mod.SCANNER_REGISTRATIONS)) {
+      registered = mod.SCANNER_REGISTRATIONS.map((entry) => ({
+        scanner: entry.scanner as Scanner,
+        descriptor: entry.descriptor,
+      }));
+    }
   } catch {
     builtin = [];
   }
@@ -263,7 +422,10 @@ async function getScanners(): Promise<ReadonlyArray<Scanner>> {
   } catch {
     fromPlugins = [];
   }
-  return [...builtin, ...fromPlugins];
+  return [
+    ...(registered ?? builtin.map((scanner) => ({ scanner }))),
+    ...fromPlugins.map((scanner) => ({ scanner })),
+  ];
 }
 
 /**
@@ -327,6 +489,7 @@ export async function buildBacklog(opts?: {
   }
 
   const allItems: WorkItem[] = [];
+  const observations: ScannerObservation[] = [];
 
   // Repos scanned sequentially to avoid thundering-herd on gh/npm APIs.
   for (const repo of repos) {
@@ -334,17 +497,23 @@ export async function buildBacklog(opts?: {
     // cfg is threaded so scanners that consult flags (e.g. scanTodos checks
     // cfg.foundry.scanTodos) receive the live config rather than undefined.
     const perScannerResults = await Promise.all(
-      scanners.map(async (scanner) => {
+      scanners.map(async ({ scanner, descriptor }) => {
         try {
-          return await scanner(repo, cfg);
+          if (descriptor) {
+            const { runScannerWithObservations } = await import('./scanners.js');
+            return await runScannerWithObservations(descriptor, scanner, repo, cfg);
+          }
+          return { items: await scanner(repo, cfg), observations: [] as ScannerObservation[] };
         } catch {
           // Belt-and-suspenders: scanners must not throw, but we catch anyway.
-          return [] as WorkItem[];
+          return { items: [] as WorkItem[], observations: [] as ScannerObservation[] };
         }
       }),
     );
-    for (const items of perScannerResults) {
+    for (const result of perScannerResults) {
+      const items = result.items;
       allItems.push(...items.map((item) => ({ ...item, repo })));
+      observations.push(...result.observations);
     }
   }
 
@@ -488,17 +657,23 @@ export async function buildBacklog(opts?: {
     }
   }
 
+  const completeObservations = mergeConcurrentObservations(observations, undefined) ?? [];
+  const observationsTruncated = completeObservations.length > MAX_PERSISTED_SCANNER_OBSERVATIONS;
   const backlog: Backlog = {
     generatedAt: now,
     repos,
     items: finalItems,
+    observations: completeObservations.slice(0, MAX_PERSISTED_SCANNER_OBSERVATIONS),
+    observationSourceState: observationsTruncated ? 'degraded' : 'healthy',
+    ...(observationsTruncated ? { observationsTruncated: true } : {}),
   };
 
-  const shouldPersist = opts?.persist ?? (opts?.repos === undefined || sameRepoSet(repos, enrolledSnapshot));
+  const fullSnapshot = sameRepoSet(repos, enrolledSnapshot);
+  const shouldPersist = opts?.persist ?? (opts?.repos === undefined || fullSnapshot);
   if (shouldPersist) {
     // Persist; never throw on persistence failure.
     try {
-      persistBacklog(backlog);
+      persistBacklog(backlog, { fullSnapshot });
     } catch {
       // Persistence failure does not prevent returning the in-memory backlog.
     }

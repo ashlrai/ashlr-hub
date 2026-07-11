@@ -1532,3 +1532,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve parsed authority beyond the journal row warning threshold while retaining the bounded byte cap.
 - [x] Run focused/full gates and three final independent SHIP reviews.
 - [x] Update durable notes, commit, push, reload, and production smoke.
+
+## Current Overnight Cycle - Source-Specific Scanner Evidence
+- [x] Rehydrate the deployed objective-authority baseline, live queue, daemon health, Entire state, and persistent notes.
+- [x] Deploy parallel audits for scanner failure semantics, daemon post-state scheduling, live evidence, and adversarial authority boundaries.
+- [x] Add a backward-compatible metadata-only `present|absent|unavailable` scanner observation contract.
+- [x] Keep every legacy empty scan unavailable; only exhaustive source adapters may assert absence.
+- [x] Add one strict local queued-autonomy adapter that distinguishes healthy empty state from malformed, unreadable, or unsafe storage.
+- [x] Preserve observations through bounded persistence and concurrent backlog refresh without changing dispatch, lifecycle, or merge authority.
+- [x] Run focused/full gates and independent adversarial review.
+- [ ] Update durable notes, commit, push, reload, and production smoke.

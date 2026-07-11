@@ -786,6 +786,114 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     ]));
   });
 
+  it('surfaces count-only scanner evidence quality separately from queue availability', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'scanner-evidence-repo');
+    const observedAt = new Date().toISOString();
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeFileSync(join(ashlrDir, 'backlog.json'), JSON.stringify({
+      generatedAt: observedAt,
+      repos: [repo],
+      items: [],
+      observations: [
+        {
+          schemaVersion: 1,
+          observedAt,
+          repo,
+          scannerId: 'queued-autonomy',
+          domain: 'local-queue',
+          source: 'self',
+          status: 'absent',
+          reason: 'source-confirmed-empty',
+        },
+        {
+          schemaVersion: 1,
+          observedAt,
+          repo,
+          scannerId: 'github-issues',
+          domain: 'github',
+          source: 'issue',
+          status: 'unavailable',
+          reason: 'legacy-empty-result',
+        },
+      ],
+    }), 'utf8');
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.queue.scannerEvidence).toEqual({
+      state: 'degraded',
+      observations: 2,
+      present: 0,
+      absent: 1,
+      unavailable: 1,
+      scannerDomains: 2,
+    });
+    expect(formatFleetStatus(s)).toContain(
+      'scan evidence: degraded (0 present, 1 absent, 1 unavailable across 2 scanner domain(s))',
+    );
+  });
+
+  it('keeps scanner evidence degraded when malformed rows are filtered', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'malformed-evidence-repo');
+    const observedAt = new Date().toISOString();
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    const validAbsent = {
+      schemaVersion: 1,
+      observedAt,
+      repo,
+      scannerId: 'queued-autonomy',
+      domain: 'local-queue',
+      source: 'self',
+      status: 'absent',
+      reason: 'source-confirmed-empty',
+    };
+    writeFileSync(join(ashlrDir, 'backlog.json'), JSON.stringify({
+      generatedAt: observedAt,
+      repos: [repo],
+      items: [],
+      observations: [validAbsent, { ...validAbsent, status: 'present', reason: 'scanner-failed' }],
+    }), 'utf8');
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.queue.scannerEvidence).toMatchObject({
+      state: 'degraded',
+      observations: 1,
+      absent: 1,
+      unavailable: 0,
+    });
+  });
+
+  it('reports a wholly malformed observation envelope as degraded, not unknown', async () => {
+    const ashlrDir = join(tmpHome, '.ashlr');
+    const repo = join(tmpHome, 'all-malformed-evidence-repo');
+    mkdirSync(ashlrDir, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(ashlrDir, 'enrollment.json'), JSON.stringify({ repos: [repo] }), 'utf8');
+    writeFileSync(join(ashlrDir, 'backlog.json'), JSON.stringify({
+      generatedAt: new Date().toISOString(),
+      repos: [repo],
+      items: [],
+      observations: [{ schemaVersion: 1, status: 'absent', reason: 'scanner-failed' }],
+    }), 'utf8');
+
+    const s = await buildFleetStatus(baseConfig());
+
+    expect(s.queue.scannerEvidence).toMatchObject({
+      state: 'degraded',
+      observations: 0,
+      present: 0,
+      absent: 0,
+      unavailable: 0,
+    });
+  });
+
   it('separates inferred verify commands from explicit merge-grade contracts', async () => {
     const ashlrDir = join(tmpHome, '.ashlr');
     const inferredRepo = join(tmpHome, 'inferred-repo');

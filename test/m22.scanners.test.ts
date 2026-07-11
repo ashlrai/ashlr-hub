@@ -88,6 +88,8 @@ vi.mock('node:child_process', async (importOriginal) => {
 // ---------------------------------------------------------------------------
 
 import {
+  SCANNERS,
+  SCANNER_DESCRIPTORS,
   scanTodos,
   scanTests,
   scanExplicitMergeVerifyContracts,
@@ -95,7 +97,10 @@ import {
   scanDocs,
   scanSecurity,
   isActionableFix,
+  runScannerWithObservations,
 } from '../src/core/portfolio/scanners.js';
+import type { ScannerDescriptor, WorkItem } from '../src/core/types.js';
+import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1072,5 +1077,130 @@ describe('M22 scanners — scanners accept any path (enrollment enforced by buil
     _execFileImpl = execFileError();
     const items = await scanTodos('/some/non-enrolled/path');
     expect(Array.isArray(items)).toBe(true);
+  });
+});
+
+// ===========================================================================
+// Scanner observations — additive metadata, never lifecycle authority
+// ===========================================================================
+
+describe('scanner observation foundation', () => {
+  const legacyDescriptor: ScannerDescriptor = {
+    id: 'test-legacy',
+    domain: 'test-domain',
+    source: 'test',
+    description: 'Test-only legacy scanner.',
+    evidence: 'legacy',
+    canAssertAbsent: false,
+    maxItems: 2,
+  };
+
+  function observedItem(id: string): WorkItem {
+    return {
+      id,
+      repo: tmpRepo,
+      source: 'test',
+      title: `Objective ${id}`,
+      detail: `Implement ${id} without changing unrelated code.`,
+      value: 4,
+      effort: 2,
+      score: 2,
+      tags: ['test'],
+      ts: new Date().toISOString(),
+    };
+  }
+
+  it('publishes a detailed descriptor for every legacy SCANNERS entry', () => {
+    expect(SCANNER_DESCRIPTORS).toHaveLength(SCANNERS.length);
+    expect(new Set(SCANNER_DESCRIPTORS.map((descriptor) => descriptor.id)).size).toBe(SCANNERS.length);
+    for (const descriptor of SCANNER_DESCRIPTORS) {
+      expect(descriptor.domain.length).toBeGreaterThan(0);
+      expect(descriptor.description.length).toBeGreaterThan(0);
+      expect(descriptor.maxItems).toBeGreaterThan(0);
+    }
+    expect(SCANNER_DESCRIPTORS.filter((descriptor) => descriptor.canAssertAbsent).map((descriptor) => descriptor.id))
+      .toEqual(['queued-autonomy']);
+    expect(SCANNER_DESCRIPTORS.filter((descriptor) => descriptor.evidence === 'legacy').every(
+      (descriptor) => !descriptor.canAssertAbsent,
+    )).toBe(true);
+  });
+
+  it('binds present evidence to the exact item id and objective hash', async () => {
+    loadOrCreateKey();
+    const item = observedItem('exact-item');
+    const result = await runScannerWithObservations(legacyDescriptor, async () => [item], tmpRepo);
+
+    expect(result.items).toEqual([item]);
+    expect(result.observations).toEqual([expect.objectContaining({
+      scannerId: legacyDescriptor.id,
+      domain: legacyDescriptor.domain,
+      source: item.source,
+      status: 'present',
+      reason: 'item-observed',
+      itemId: item.id,
+      objectiveHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    })]);
+    expect(result.observations[0]).not.toHaveProperty('title');
+    expect(result.observations[0]).not.toHaveProperty('detail');
+  });
+
+  it('never converts a legacy empty result or caught failure into absent', async () => {
+    const empty = await runScannerWithObservations(legacyDescriptor, async () => [], tmpRepo);
+    const failed = await runScannerWithObservations(legacyDescriptor, async () => {
+      throw new Error('scanner failed');
+    }, tmpRepo);
+
+    expect(empty.observations).toEqual([expect.objectContaining({
+      status: 'unavailable',
+      reason: 'legacy-empty-result',
+    })]);
+    expect(failed.observations).toEqual([expect.objectContaining({
+      status: 'unavailable',
+      reason: 'scanner-failed',
+    })]);
+    expect([...empty.observations, ...failed.observations].some((observation) => observation.status === 'absent'))
+      .toBe(false);
+  });
+
+  it('bounds observations without truncating legacy scanner items', async () => {
+    loadOrCreateKey();
+    const items = ['one', 'two', 'three', 'four'].map(observedItem);
+    const result = await runScannerWithObservations(legacyDescriptor, async () => items, tmpRepo);
+
+    expect(result.items).toEqual(items);
+    expect(result.observations).toHaveLength(legacyDescriptor.maxItems);
+    expect(result.observations.map((observation) => observation.itemId)).toEqual(['one', 'two']);
+  });
+
+  it('lets only the exhaustive local queue descriptor confirm absence', async () => {
+    const descriptor = SCANNER_DESCRIPTORS.find((candidate) => candidate.id === 'queued-autonomy')!;
+    const legacyScanner = vi.fn(async () => [] as WorkItem[]);
+    const result = await runScannerWithObservations(descriptor, legacyScanner, tmpRepo);
+
+    expect(result.observations).toEqual([expect.objectContaining({
+      scannerId: 'queued-autonomy',
+      domain: 'local-queue',
+      status: 'absent',
+      reason: 'source-confirmed-empty',
+    })]);
+    expect(result.observations[0]).not.toHaveProperty('itemId');
+    expect(result.observations[0]).not.toHaveProperty('objectiveHash');
+    expect(legacyScanner).not.toHaveBeenCalled();
+  });
+
+  it('fails queued-autonomy evidence closed when local storage is malformed', async () => {
+    const descriptor = SCANNER_DESCRIPTORS.find((candidate) => candidate.id === 'queued-autonomy')!;
+    fs.mkdirSync(path.join(tmpHome, '.ashlr'), { recursive: true });
+    fs.writeFileSync(path.join(tmpHome, '.ashlr', 'self-heal-queue.json'), '{not-json', 'utf8');
+
+    const legacyScanner = vi.fn(async () => [observedItem('unsafe-fallback')]);
+    const result = await runScannerWithObservations(descriptor, legacyScanner, tmpRepo);
+
+    expect(result.items).toEqual([]);
+    expect(legacyScanner).not.toHaveBeenCalled();
+    expect(result.observations).toEqual([expect.objectContaining({
+      status: 'unavailable',
+      reason: 'source-unavailable',
+    })]);
   });
 });

@@ -1597,15 +1597,27 @@ export async function tick(
     };
     try {
       const loaded = loadDaemonStateStrict();
-      if (!loaded.ok) return tick;
+      if (!loaded.ok) {
+        const failedTick = { ...tick, reason: 'state-persistence-failed' };
+        recordTickAgentAction(failedTick);
+        return failedTick;
+      }
       let s = loaded.state;
       s = resetDayIfNeeded(s);
       s.lastTickAt = tick.ts;
       s.ticks = [...s.ticks, tick];
-      saveDaemonStateResult(s);
+      const saveResult = saveDaemonStateResult(s);
+      if (!saveResult.ok) {
+        console.warn('[ashlr] daemon:recordTick persistence failed:', saveResult.error);
+        const failedTick = { ...tick, reason: 'state-persistence-failed' };
+        recordTickAgentAction(failedTick);
+        return failedTick;
+      }
     } catch (err) {
-      // persistence best-effort — never let observability crash a tick
       console.warn('[ashlr] daemon:recordTick persistence failed:', (err as Error)?.message ?? err);
+      const failedTick = { ...tick, reason: 'state-persistence-failed' };
+      recordTickAgentAction(failedTick);
+      return failedTick;
     }
     recordTickAgentAction(tick);
     return tick;
