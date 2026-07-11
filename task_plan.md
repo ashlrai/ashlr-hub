@@ -1700,3 +1700,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Catch and fix the production dashboard's unbounded Codex transcript scan during the visual canary.
 - [x] Bound transcript discovery, file count, aggregate bytes, head/tail parsing, and concurrent snapshot computation.
 - [x] Upgrade existing dashboard LaunchAgents to an interactive service policy and verify desktop/mobile rendering.
+
+## Current Overnight Cycle - Plugin Hook-Timing Retention
+- [x] Rehydrate Hub and Plugin state, preserve unrelated dirty work, and audit writer/read/release surfaces in parallel.
+- [x] Add one cross-process transaction covering timing-ledger size check, migration/rotation, and append.
+- [x] Enforce bounded record/batch size plus explicit `0700/0600` permissions across active, retained, lock, metadata, and temp artifacts.
+- [x] Stream retained plus active generations through the canonical reader and eliminate direct whole-file timing reads.
+- [x] Surface explicit retained-window completeness without changing the legacy `readHookTimings()` return shape.
+- [x] Add boundary, migration, stale-lock, multi-process, flush-barrier, permissions, privacy, and compatibility coverage.
+- [x] Run focused/full Plugin gates and independent adversarial review without including unrelated user work.
+- [x] Commit, push, deploy the plugin cache safely, and update durable Hub notes with production evidence.
