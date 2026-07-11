@@ -1570,4 +1570,4 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Prove the repaired concurrent undefined-outcome path persists exact run and trajectory identity through production and agent-action ledgers.
 - [x] Isolate worked-ledger test fixtures from the live `ASHLR_HOME` and verify no additional production-state contamination.
 - [x] Preserve historical causal gaps as visible, non-fabricated evidence while confirming current-writer regressions remain actionable.
-- [ ] Run focused and repository-wide verification, then update durable notes, commit, push, reload, and smoke production.
+- [x] Run focused and repository-wide verification, then update durable notes, commit, push, reload, and smoke production.
