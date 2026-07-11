@@ -435,9 +435,13 @@ export function signJudgeAttestation(params: {
   judgeEngine: string;
   verdict: string;
   diffHash: string;
+  issuedAt?: string;
+  mergeIntent?: 'would-merge';
 }): string {
   const key = loadOrCreateKey();
-  const payload = `${params.proposalId}|${params.judgeEngine}|${params.verdict}|${params.diffHash}`;
+  const payload = params.issuedAt !== undefined || params.mergeIntent !== undefined
+    ? `ashlr.judge-attestation.v2|${params.proposalId}|${params.judgeEngine}|${params.verdict}|${params.diffHash}|${params.issuedAt ?? ''}|${params.mergeIntent ?? ''}`
+    : `${params.proposalId}|${params.judgeEngine}|${params.verdict}|${params.diffHash}`;
   return createHmac('sha256', key).update(payload, 'utf8').digest('hex');
 }
 
@@ -459,6 +463,8 @@ export function verifyJudgeAttestation(
     judgeEngine: string;
     verdict: string;
     diffHash: string;
+    issuedAt?: string;
+    mergeIntent?: 'would-merge';
   },
 ): JudgeAttestationVerdict {
   try {
@@ -476,6 +482,12 @@ export function verifyJudgeAttestation(
     }
     if (!params.diffHash) {
       return { ok: false, reason: 'missing diffHash' };
+    }
+    if (params.issuedAt !== undefined && !Number.isFinite(Date.parse(params.issuedAt))) {
+      return { ok: false, reason: 'invalid judge attestation issuedAt' };
+    }
+    if ((params.issuedAt === undefined) !== (params.mergeIntent === undefined)) {
+      return { ok: false, reason: 'incomplete replay-resistant judge attestation fields' };
     }
     const expected = signJudgeAttestation(params);
     if (!constantTimeEqual(expected, attestation)) {

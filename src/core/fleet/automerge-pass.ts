@@ -180,27 +180,43 @@ function recordAutoMergeVerificationAgentAction(fields: {
  *
  * Never throws.
  */
-function hasRecentShipVerdict(proposal: Proposal): boolean {
+function hasRecentShipVerdict(proposal: Proposal): boolean | 'degraded' {
   try {
     const sinceMs = Date.now() - JUDGE_CACHE_TTL_MS;
-    const decisions = readDecisions({ proposalId: proposal.id, sinceMs });
+    const decisions = readDecisions({ proposalId: proposal.id, sinceMs, requireComplete: true });
+    const quality = (decisions as typeof decisions & {
+      sourceQuality?: { sourceState?: string; complete?: boolean };
+    }).sourceQuality;
+    if (quality !== undefined && (quality.sourceState === 'degraded' || quality.complete !== true)) {
+      return 'degraded';
+    }
     const diffHash = hashDiff(proposal.diff ?? '');
-    return decisions.some((d) => {
-      if (d.action !== 'judged' || d.verdict !== 'ship' || d.detail !== 'would-merge') return false;
-      const judgeEngine = d.engine ?? d.model;
-      if (!judgeEngine) return false;
-      if (!isFrontierJudge(judgeEngine)) return false;
-      const attestation = (d as unknown as Record<string, unknown>)['judgeAttestation'];
-      if (typeof attestation !== 'string' || attestation.length === 0) return false;
-      return verifyJudgeAttestation(attestation, {
-        proposalId: proposal.id,
-        judgeEngine,
-        verdict: 'ship',
-        diffHash,
-      }).ok;
-    });
+    const latest = decisions.find((decision) => decision.action === 'judged');
+    if (!latest || latest.verdict !== 'ship' || latest.detail !== 'would-merge') return false;
+    const judgeEngine = latest.engine ?? latest.model;
+    if (!judgeEngine || !isFrontierJudge(judgeEngine)) return false;
+    const issuedAt = latest.judgeAttestationIssuedAt;
+    const issuedMs = typeof issuedAt === 'string' ? Date.parse(issuedAt) : NaN;
+    const now = Date.now();
+    if (
+      latest.judgeAttestationIntent !== 'would-merge' ||
+      issuedAt !== latest.ts ||
+      !Number.isFinite(issuedMs) ||
+      issuedMs > now + 60_000 ||
+      issuedMs < now - JUDGE_CACHE_TTL_MS
+    ) return false;
+    const attestation = (latest as unknown as Record<string, unknown>)['judgeAttestation'];
+    if (typeof attestation !== 'string' || attestation.length === 0) return false;
+    return verifyJudgeAttestation(attestation, {
+      proposalId: proposal.id,
+      judgeEngine,
+      verdict: 'ship',
+      diffHash,
+      issuedAt,
+      mergeIntent: 'would-merge',
+    }).ok;
   } catch {
-    return false;
+    return 'degraded';
   }
 }
 
@@ -582,7 +598,17 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     // managerGate. Tier/evidence modes proceed to autoMergeProposal(), whose
     // merge gate remains authoritative for verification, risk/scope, provenance,
     // enrollment, kill switch, self-target, and host/local merge safety.
-    if (shouldJudgeBeforeMerge && !hasRecentShipVerdict(p)) {
+    const recentShipVerdict = shouldJudgeBeforeMerge ? hasRecentShipVerdict(p) : false;
+    if (recentShipVerdict === 'degraded') {
+      recordSafetySkip(
+        out,
+        p.id,
+        'decision-source',
+        'decisions ledger source is degraded or incomplete; refusing judge cache and merge progression',
+      );
+      continue;
+    }
+    if (shouldJudgeBeforeMerge && !recentShipVerdict) {
 
       // Check per-pass cap before spending a frontier judge call.
       if (out.judged >= judgePerPass) {
@@ -697,6 +723,7 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
         try {
           const judgeEngine = judgeClient.model;
           let judgeAttestation: string | undefined;
+          const ts = new Date().toISOString();
           if (isFrontierJudge(judgeEngine)) {
             try {
               const diffHash = hashDiff(p.diff ?? '');
@@ -705,13 +732,14 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
                 judgeEngine,
                 verdict: 'ship',
                 diffHash,
+                issuedAt: ts,
+                mergeIntent: 'would-merge',
               });
             } catch {
               // Signing failure → no attestation → gate fails-closed (refuses), never a bad merge.
               judgeAttestation = undefined;
             }
           }
-          const ts = new Date().toISOString();
           recordDecision({
             ts,
             proposalId: p.id,
@@ -727,6 +755,9 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
             reason: verdict.rationale ?? '',
             detail: verdict.wouldMerge ? 'would-merge' : '',
             ...(judgeAttestation !== undefined ? { judgeAttestation } : {}),
+            ...(judgeAttestation !== undefined
+              ? { judgeAttestationIssuedAt: ts, judgeAttestationIntent: 'would-merge' as const }
+              : {}),
           });
         } catch {
           // Best-effort — a record failure means the gate fails-closed (no merge), never a bad merge.

@@ -68,12 +68,11 @@ function writeDecisions(
 ): void {
   const dir = path.join(tmpHome, '.ashlr', 'decisions');
   fs.mkdirSync(dir, { recursive: true });
-  const today = new Date().toISOString().slice(0, 10);
-  const file = path.join(dir, `${today}.jsonl`);
-  const lines = entries
-    .map((e) =>
-      JSON.stringify({
-        ts: e.ts ?? new Date().toISOString(),
+  const byDay = new Map<string, string[]>();
+  for (const e of entries) {
+    const ts = e.ts ?? new Date().toISOString();
+    const line = JSON.stringify({
+        ts,
         proposalId: e.proposalId,
         ...(e.workItemId !== undefined ? { workItemId: e.workItemId } : {}),
         ...(e.workSource !== undefined ? { workSource: e.workSource } : {}),
@@ -82,10 +81,13 @@ function writeDecisions(
         ...(e.engine !== undefined ? { engine: e.engine } : {}),
         ...(e.model !== undefined ? { model: e.model } : {}),
         ...(e.verdict !== undefined ? { verdict: e.verdict } : {}),
-      }),
-    )
-    .join('\n');
-  fs.writeFileSync(file, lines + '\n', 'utf8');
+      });
+    const day = ts.slice(0, 10);
+    byDay.set(day, [...(byDay.get(day) ?? []), line]);
+  }
+  for (const [day, lines] of byDay) {
+    fs.writeFileSync(path.join(dir, `${day}.jsonl`), lines.join('\n') + '\n', 'utf8');
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -83,6 +83,7 @@ import {
   type DispatchProductionYieldBucket,
   type DispatchProductionYieldSummary,
 } from './dispatch-production-ledger.js';
+import { readDecisionsDetailed, type DecisionSourceQuality } from './decisions-ledger.js';
 import {
   readAgentWorkspace,
   type AgentWorkspaceStatus,
@@ -826,6 +827,8 @@ export interface FleetStatus {
   dispatchProduction?: DispatchProductionYieldSummary;
   /** Storage/read completeness for dispatch-production analytics. */
   dispatchProductionSource?: DispatchProductionSourceQuality;
+  /** Storage/read completeness for cached judge and merge-authority evidence. */
+  decisionsSource?: DecisionSourceQuality;
   /** Recent forensic concurrent dispatch intent summaries from the append-only manifest ledger. */
   dispatchManifests?: FleetDispatchManifestStatus;
   /** Sample-gated diagnosis of dispatch-production yield; no raw prompts/diffs/stdout. */
@@ -1528,6 +1531,32 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   };
   const proposalProduction = buildProposalProductionStatus(recentTicks);
   if (proposalProduction) status.proposalProduction = proposalProduction;
+  try {
+    const decisionsRead = readDecisionsDetailed({ limit: 1 });
+    status.decisionsSource = {
+      sourceState: decisionsRead.sourceState,
+      sourcePresent: decisionsRead.sourcePresent,
+      complete: decisionsRead.complete,
+      stopReasons: decisionsRead.stopReasons,
+      filesRead: decisionsRead.filesRead,
+      bytesRead: decisionsRead.bytesRead,
+      rowsScanned: decisionsRead.rowsScanned,
+      invalidRows: decisionsRead.invalidRows,
+      unreadableFiles: decisionsRead.unreadableFiles,
+    };
+  } catch {
+    status.decisionsSource = {
+      sourceState: 'degraded',
+      sourcePresent: true,
+      complete: false,
+      stopReasons: ['io-error'],
+      filesRead: 0,
+      bytesRead: 0,
+      rowsScanned: 0,
+      invalidRows: 0,
+      unreadableFiles: 1,
+    };
+  }
   try {
     const dispatchRead = readDispatchProductionYieldDetailed({
       windowMs: RECENT_WINDOW_MS,

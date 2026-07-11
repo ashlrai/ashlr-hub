@@ -190,8 +190,9 @@ function makeProp(id: string, tier: 'frontier' | 'mid' | 'local' = 'frontier'): 
 /** A recent decisions-ledger entry with a ship verdict + attestation. */
 function recentShipEntry(proposalId: string): Record<string, unknown> {
   const judgeEngine = 'claude-opus-4-5';
+  const issuedAt = new Date().toISOString();
   return {
-    ts: new Date().toISOString(),
+    ts: issuedAt,
     proposalId,
     action: 'judged',
     verdict: 'ship',
@@ -204,7 +205,11 @@ function recentShipEntry(proposalId: string): Record<string, unknown> {
       judgeEngine,
       verdict: 'ship',
       diffHash: hashDiff(`+fix ${proposalId}\n`),
+      issuedAt,
+      mergeIntent: 'would-merge',
     }),
+    judgeAttestationIssuedAt: issuedAt,
+    judgeAttestationIntent: 'would-merge',
   };
 }
 

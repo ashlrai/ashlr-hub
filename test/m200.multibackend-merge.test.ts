@@ -270,8 +270,9 @@ function makeNimProp(
 
 /** A decisions-ledger entry simulating a recent frontier-judge 'ship'. */
 function frontierShipEntry(proposalId: string, judgeModel = 'claude-opus-4-8'): Record<string, unknown> {
+  const issuedAt = new Date().toISOString();
   return {
-    ts: new Date().toISOString(),
+    ts: issuedAt,
     proposalId,
     action: 'judged',
     verdict: 'ship',
@@ -284,7 +285,11 @@ function frontierShipEntry(proposalId: string, judgeModel = 'claude-opus-4-8'): 
       judgeEngine: judgeModel,
       verdict: 'ship',
       diffHash: hashDiff(nimDiff(proposalId)),
+      issuedAt,
+      mergeIntent: 'would-merge',
     }),
+    judgeAttestationIssuedAt: issuedAt,
+    judgeAttestationIntent: 'would-merge',
   };
 }
 
@@ -962,10 +967,9 @@ describe('M200 [C] tri-tier invariants — nim same as claude/codex', () => {
     const p1 = makeNimProp('c9a', 'frontier');
     const p2 = makeNimProp('c9b', 'frontier');
     mockListProposals.mockReturnValue([p1, p2]);
-    mockReadDecisions.mockReturnValue([
-      frontierShipEntry('c9a'),
-      frontierShipEntry('c9b'),
-    ]);
+    const cached = [frontierShipEntry('c9a'), frontierShipEntry('c9b')];
+    mockReadDecisions.mockImplementation((opts?: { proposalId?: string }) =>
+      cached.filter((entry) => opts?.proposalId === undefined || entry.proposalId === opts.proposalId));
 
     // p1 merges, p2 branches.
     mockAutoMergeProposal

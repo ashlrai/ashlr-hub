@@ -105,7 +105,7 @@ vi.mock('../src/core/run/provider-client.js', () => ({
 import { autoMergeProposal, classifyRisk } from '../src/core/inbox/merge.js';
 import { createProposal, setStatus, loadProposal } from '../src/core/inbox/store.js';
 import { enroll, setKill } from '../src/core/sandbox/policy.js';
-import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
+import { hashDiff, signJudgeAttestation, signProvenance } from '../src/core/foundry/provenance.js';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import type { ManagerVerdict } from '../src/core/fleet/manager.js';
 
@@ -287,13 +287,25 @@ describe('M126 Gate 7 — ship verdict merges', () => {
     const mainBefore = git(tmpRepo, ['rev-parse', 'main']);
 
     // Return a cached 'judged' ledger entry with ship+would-merge
+    const cacheTs = new Date().toISOString();
     mockReadDecisions.mockReturnValue([{
-      ts: new Date().toISOString(),
+      ts: cacheTs,
       proposalId: p.id,
       action: 'judged',
+      engine: 'claude-opus-4-5',
       verdict: 'ship',
       reason: 'cached small docs change',
       detail: 'would-merge',
+      judgeAttestation: signJudgeAttestation({
+        proposalId: p.id,
+        judgeEngine: 'claude-opus-4-5',
+        verdict: 'ship',
+        diffHash: hashDiff(diff),
+        issuedAt: cacheTs,
+        mergeIntent: 'would-merge',
+      }),
+      judgeAttestationIssuedAt: cacheTs,
+      judgeAttestationIntent: 'would-merge',
     }]);
 
     const r = await autoMergeProposal(p.id, baseCfg());
@@ -303,6 +315,7 @@ describe('M126 Gate 7 — ship verdict merges', () => {
     expect(git(tmpRepo, ['rev-parse', 'main'])).not.toBe(mainBefore);
     // judgeProposal must NOT have been called — verdict came from cache
     expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockReadDecisions).toHaveBeenCalledWith(expect.objectContaining({ requireComplete: true }));
   });
 
   it('[3] ledger cache stale (no recent entry) → judge called inline → ship → merges', async () => {

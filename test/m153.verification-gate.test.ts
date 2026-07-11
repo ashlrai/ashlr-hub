@@ -983,6 +983,7 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
     expect(r.merged).toBe(true);
     expect(git(tmpRepo, ['rev-parse', 'main'])).not.toBe(mainBefore);
     expect(loadProposal(p.id)?.status).toBe('applied');
+    expect(mockReadDecisions).toHaveBeenCalledWith(expect.objectContaining({ requireComplete: true }));
   });
 
   it('[A2] local producer + no judged entry at all → refused (criterion 1)', async () => {
@@ -1001,6 +1002,27 @@ describe("M153 autoMergeProposal trustBasis='verification'", () => {
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/merge authority denied/);
     expect(r.reason).toMatch(/no 'judged' decision/);
+    expect(loadProposal(p.id)?.status).not.toBe('applied');
+  });
+
+  it('refuses before gate evaluation when the decisions source is degraded', async () => {
+    initRepo(tmpRepo, 'main');
+    enroll(tmpRepo);
+    const p = makePatch(docsDiff('docs/degraded-decisions.md'), {
+      engineTier: 'local',
+      verifyResult: { passed: true },
+    });
+    const degraded: unknown[] = [];
+    Object.defineProperty(degraded, 'sourceQuality', {
+      value: { sourceState: 'degraded', complete: false },
+      enumerable: false,
+    });
+    mockReadDecisions.mockReturnValue(degraded);
+
+    const r = await autoMergeProposal(p.id, verifyCfg());
+
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/decisions ledger source is degraded or incomplete/);
     expect(loadProposal(p.id)?.status).not.toBe('applied');
   });
 

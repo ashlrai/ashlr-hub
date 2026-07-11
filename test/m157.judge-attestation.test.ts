@@ -257,6 +257,17 @@ describe('M157 signJudgeAttestation / verifyJudgeAttestation — unit', () => {
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/HMAC mismatch/);
   });
+
+  it('[U10] replay-resistant attestation rejects a tampered issuance time', () => {
+    const issuedAt = '2026-07-11T10:00:00.000Z';
+    const signed = { ...params, issuedAt, mergeIntent: 'would-merge' as const };
+    const attestation = signJudgeAttestation(signed);
+    expect(verifyJudgeAttestation(attestation, signed).ok).toBe(true);
+    expect(verifyJudgeAttestation(attestation, {
+      ...signed,
+      issuedAt: '2099-01-01T00:00:00.000Z',
+    }).ok).toBe(false);
+  });
 });
 
 // ===========================================================================
@@ -496,6 +507,8 @@ describe('M157 manager.ts signing path — attestation in recordDecision', () =>
 
     expect(entry.judgeAttestation).toBeDefined();
     expect(entry.judgeAttestation!.length).toBe(64);
+    expect(entry.judgeAttestationIssuedAt).toBe(entry.ts);
+    expect(entry.judgeAttestationIntent).toBe('would-merge');
 
     const diffHash = hashDiff(TEST_DIFF);
     const verifyResult = verifyJudgeAttestation(entry.judgeAttestation, {
@@ -503,6 +516,8 @@ describe('M157 manager.ts signing path — attestation in recordDecision', () =>
       judgeEngine: JUDGE_ENGINE,
       verdict: 'ship',
       diffHash,
+      issuedAt: entry.judgeAttestationIssuedAt,
+      mergeIntent: entry.judgeAttestationIntent,
     });
     expect(verifyResult.ok).toBe(true);
   });

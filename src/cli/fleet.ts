@@ -317,6 +317,25 @@ export function formatFleetStatus(s: FleetStatus): string {
   }
   lines.push('');
 
+  const decisionsSource = s.decisionsSource;
+  lines.push('Decision authority source:');
+  if (!decisionsSource) {
+    lines.push('  unknown (legacy snapshot)');
+  } else {
+    lines.push(
+      `  source:    ${decisionsSource.sourceState}${decisionsSource.complete ? '' : ' (partial)'}; ` +
+        `files ${decisionsSource.filesRead}, bytes ${decisionsSource.bytesRead}, rows ${decisionsSource.rowsScanned}, ` +
+        `invalid ${decisionsSource.invalidRows}, unreadable ${decisionsSource.unreadableFiles}`,
+    );
+    if (decisionsSource.stopReasons.length > 0) {
+      lines.push(`  stopped:   ${decisionsSource.stopReasons.join(', ')}`);
+    }
+    lines.push(
+      `  authority: ${decisionsSource.sourceState !== 'degraded' && decisionsSource.complete ? 'cache eligible' : 'fail closed'}`,
+    );
+  }
+  lines.push('');
+
   // Durable dispatch-production yield
   const dispatchProduction = s.dispatchProduction;
   lines.push('Dispatch yield:');

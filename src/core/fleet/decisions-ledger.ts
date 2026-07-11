@@ -13,11 +13,16 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
+  lstatSync,
   mkdirSync,
-  readdirSync,
-  appendFileSync,
-  readFileSync,
+  openSync,
+  opendirSync,
+  readSync,
+  writeSync,
 } from 'node:fs';
 import type { DecisionEntry } from '../types.js';
 import { normalizeDecisionLearningFields } from '../learning/causal.js';
@@ -30,11 +35,6 @@ import { scrubSecrets } from '../util/scrub.js';
 /** Absolute path to the decisions directory: ~/.ashlr/decisions. */
 export function decisionsDir(): string {
   return join(process.env.ASHLR_HOME ?? join(homedir(), '.ashlr'), 'decisions');
-}
-
-/** Current date as YYYY-MM-DD (UTC) for the daily file name. */
-function todayDateString(): string {
-  return new Date().toISOString().slice(0, 10);
 }
 
 // ---------------------------------------------------------------------------
@@ -53,7 +53,48 @@ const DECISION_ACTIONS = new Set<DecisionEntry['action']>([
   'handoff',
   'rejected',
   'escalated',
+  'self-improve:written',
+  'skill-library:written',
 ]);
+
+const DEFAULT_READ_MAX_FILES = 366;
+const DEFAULT_READ_MAX_BYTES = 64 * 1024 * 1024;
+const DEFAULT_READ_MAX_ROWS = 100_000;
+const HARD_READ_MAX_FILES = 1_024;
+const HARD_READ_MAX_BYTES = 256 * 1024 * 1024;
+const HARD_READ_MAX_ROWS = 1_000_000;
+const MAX_READ_ROW_BYTES = 128 * 1024;
+const MAX_DIRECTORY_ENTRIES = 2_048;
+const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
+
+export interface ReadDecisionsOptions {
+  sinceMs?: number;
+  proposalId?: string;
+  limit?: number;
+  maxFiles?: number;
+  maxBytes?: number;
+  maxRows?: number;
+  /** Return no entries unless every selected source row was read and validated. */
+  requireComplete?: boolean;
+}
+
+export type DecisionReadStopReason = 'file-limit' | 'byte-limit' | 'row-limit' | 'io-error';
+
+export interface DecisionSourceQuality {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  stopReasons: DecisionReadStopReason[];
+  filesRead: number;
+  bytesRead: number;
+  rowsScanned: number;
+  invalidRows: number;
+  unreadableFiles: number;
+}
+
+export interface DecisionsReadResult extends DecisionSourceQuality {
+  decisions: DecisionEntry[];
+}
 
 function isDecisionAction(value: unknown): value is DecisionEntry['action'] {
   return typeof value === 'string' && DECISION_ACTIONS.has(value as DecisionEntry['action']);
@@ -100,6 +141,10 @@ function sanitizeDecisionEntry(entry: DecisionEntry): DecisionEntry {
     ...(optionalScrubbedText(entry.reason) !== undefined ? { reason: optionalScrubbedText(entry.reason) } : {}),
     ...(optionalScrubbedText(entry.detail) !== undefined ? { detail: optionalScrubbedText(entry.detail) } : {}),
     ...(optionalJudgeAttestation(entry.judgeAttestation) !== undefined ? { judgeAttestation: optionalJudgeAttestation(entry.judgeAttestation) } : {}),
+    ...(optionalScrubbedText(entry.judgeAttestationIssuedAt) !== undefined
+      ? { judgeAttestationIssuedAt: optionalScrubbedText(entry.judgeAttestationIssuedAt) }
+      : {}),
+    ...(entry.judgeAttestationIntent === 'would-merge' ? { judgeAttestationIntent: 'would-merge' } : {}),
     ...(finiteNumber(entry.costUsd) !== undefined ? { costUsd: finiteNumber(entry.costUsd) } : {}),
     ...(finiteNumber(entry.tokensIn) !== undefined ? { tokensIn: finiteNumber(entry.tokensIn) } : {}),
     ...(finiteNumber(entry.tokensOut) !== undefined ? { tokensOut: finiteNumber(entry.tokensOut) } : {}),
@@ -123,16 +168,50 @@ export function recordDecision(entry: DecisionEntry): void {
   try {
     const dir = decisionsDir();
     if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
 
     const record = sanitizeDecisionEntry(entry);
 
     const line = JSON.stringify(record) + '\n';
-    const filePath = join(dir, `${todayDateString()}.jsonl`);
-    appendFileSync(filePath, line, 'utf8');
+    if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) return;
+    const filePath = join(dir, `${record.ts.slice(0, 10)}.jsonl`);
+    appendDecisionLine(filePath, line);
   } catch {
     // Intentionally swallowed: ledger must never disrupt the caller's flow.
+  }
+}
+
+function appendDecisionLine(path: string, line: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(
+      path,
+      fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || unsafeAuthorityFile(opened)) {
+      throw new Error('decisions ledger is not a safe regular file');
+    }
+    if (opened.size > 0) {
+      const tail = Buffer.alloc(1);
+      const read = readSync(fd, tail, 0, 1, opened.size - 1);
+      if (read !== 1) throw new Error('decisions ledger tail is unreadable');
+      if (tail[0] !== 0x0a) writeAll(fd, Buffer.from('\n', 'utf8'));
+    }
+    writeAll(fd, Buffer.from(line, 'utf8'));
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function writeAll(fd: number, buffer: Buffer): void {
+  let offset = 0;
+  while (offset < buffer.length) {
+    const written = writeSync(fd, buffer, offset, buffer.length - offset);
+    if (written <= 0) throw new Error('decisions ledger append made no progress');
+    offset += written;
   }
 }
 
@@ -150,45 +229,223 @@ export function recordDecision(entry: DecisionEntry): void {
  *
  * Malformed JSONL lines are silently skipped. Never throws.
  */
-export function readDecisions(opts?: {
-  sinceMs?: number;
-  proposalId?: string;
-  limit?: number;
-}): DecisionEntry[] {
+function boundedReadOption(value: number | undefined, fallback: number, hardMax: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.max(1, Math.min(hardMax, Math.floor(value)))
+    : fallback;
+}
+
+function emptyDecisionRead(
+  sourceState: DecisionSourceQuality['sourceState'],
+  overrides: Partial<DecisionsReadResult> = {},
+): DecisionsReadResult {
+  return {
+    decisions: [],
+    sourceState,
+    sourcePresent: sourceState !== 'missing',
+    complete: sourceState !== 'degraded',
+    stopReasons: [],
+    filesRead: 0,
+    bytesRead: 0,
+    rowsScanned: 0,
+    invalidRows: 0,
+    unreadableFiles: 0,
+    ...overrides,
+  };
+}
+
+function pushStopReason(reasons: DecisionReadStopReason[], reason: DecisionReadStopReason): void {
+  if (!reasons.includes(reason)) reasons.push(reason);
+}
+
+function sameFile(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof fstatSync>): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function ownedByCurrentUser(stat: ReturnType<typeof fstatSync>): boolean {
+  return typeof process.getuid !== 'function' || Number(stat.uid) === process.getuid();
+}
+
+function unsafeAuthorityFile(stat: ReturnType<typeof fstatSync>): boolean {
+  return Number(stat.nlink) !== 1 || !ownedByCurrentUser(stat) || (Number(stat.mode) & 0o022) !== 0;
+}
+
+function unsafeAuthorityDirectory(stat: ReturnType<typeof fstatSync>): boolean {
+  return !ownedByCurrentUser(stat) || (Number(stat.mode) & 0o022) !== 0;
+}
+
+function sameDirectorySnapshot(
+  left: ReturnType<typeof fstatSync>,
+  right: ReturnType<typeof fstatSync>,
+): boolean {
+  return sameFile(left, right) && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+
+function readDecisionFile(
+  path: string,
+  maxBytes: number,
+): { ok: true; text: string; bytesRead: number } | { ok: false; reason: 'byte-limit' | 'io-error' } {
+  let fd: number | undefined;
   try {
+    const pathBefore = lstatSync(path);
+    if (pathBefore.isSymbolicLink() || !pathBefore.isFile() || unsafeAuthorityFile(pathBefore)) {
+      return { ok: false, reason: 'io-error' };
+    }
+    if (pathBefore.size > maxBytes) return { ok: false, reason: 'byte-limit' };
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const before = fstatSync(fd);
+    if (!before.isFile() || unsafeAuthorityFile(before) || !sameFile(pathBefore, before)) {
+      return { ok: false, reason: 'io-error' };
+    }
+    if (before.size > maxBytes) return { ok: false, reason: 'byte-limit' };
+    const buffer = Buffer.alloc(before.size);
+    const bytesRead = before.size > 0 ? readSync(fd, buffer, 0, before.size, 0) : 0;
+    const after = fstatSync(fd);
+    const pathAfter = lstatSync(path);
+    if (
+      pathAfter.isSymbolicLink() ||
+      !pathAfter.isFile() ||
+      !after.isFile() ||
+      unsafeAuthorityFile(after) ||
+      !sameFile(before, after) ||
+      !sameFile(after, pathAfter) ||
+      after.size !== before.size ||
+      bytesRead !== before.size
+    ) return { ok: false, reason: 'io-error' };
+    return { ok: true, text: buffer.toString('utf8'), bytesRead };
+  } catch {
+    return { ok: false, reason: 'io-error' };
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* best-effort read */ }
+    }
+  }
+}
+
+export function readDecisionsDetailed(opts: ReadDecisionsOptions = {}): DecisionsReadResult {
+  try {
+    const maxFiles = boundedReadOption(opts.maxFiles, DEFAULT_READ_MAX_FILES, HARD_READ_MAX_FILES);
+    const maxBytes = boundedReadOption(opts.maxBytes, DEFAULT_READ_MAX_BYTES, HARD_READ_MAX_BYTES);
+    const maxRows = boundedReadOption(opts.maxRows, DEFAULT_READ_MAX_ROWS, HARD_READ_MAX_ROWS);
     const dir = decisionsDir();
-    if (!existsSync(dir)) return [];
+    if (!existsSync(dir)) return emptyDecisionRead('missing');
+    let directorySnapshot: ReturnType<typeof lstatSync>;
+    try {
+      directorySnapshot = lstatSync(dir);
+      if (
+        directorySnapshot.isSymbolicLink() ||
+        !directorySnapshot.isDirectory() ||
+        unsafeAuthorityDirectory(directorySnapshot)
+      ) {
+        return emptyDecisionRead('degraded', {
+          complete: false,
+          stopReasons: ['io-error'],
+          unreadableFiles: 1,
+        });
+      }
+    } catch {
+      return emptyDecisionRead('degraded', {
+        complete: false,
+        stopReasons: ['io-error'],
+        unreadableFiles: 1,
+      });
+    }
 
     let files: string[];
     try {
-      files = readdirSync(dir)
-        .filter((f) => f.endsWith('.jsonl'))
-        .sort()
-        .reverse(); // newest date first
+      const handle = opendirSync(dir);
+      const selected: string[] = [];
+      let entriesSeen = 0;
+      let invalidPartition = false;
+      try {
+        let entry = handle.readSync();
+        while (entry !== null) {
+          entriesSeen++;
+          if (entriesSeen > MAX_DIRECTORY_ENTRIES) {
+            return emptyDecisionRead('degraded', {
+              sourcePresent: true,
+              complete: false,
+              stopReasons: ['file-limit'],
+            });
+          }
+          if (entry.name.endsWith('.jsonl')) {
+            const match = DATE_LEDGER_FILE_RE.exec(entry.name);
+            if (!match) invalidPartition = true;
+            else {
+              const endOfDay = Date.parse(`${match[1]}T23:59:59.999Z`);
+              if (opts.sinceMs === undefined || !Number.isFinite(endOfDay) || endOfDay >= opts.sinceMs) {
+                selected.push(entry.name);
+              }
+            }
+          }
+          entry = handle.readSync();
+        }
+      } finally {
+        handle.closeSync();
+      }
+      if (invalidPartition) {
+        return emptyDecisionRead('degraded', {
+          sourcePresent: true,
+          complete: false,
+          stopReasons: ['io-error'],
+          unreadableFiles: 1,
+        });
+      }
+      files = selected.sort().reverse(); // newest date first
     } catch {
-      return [];
+      return emptyDecisionRead('degraded', {
+        complete: false,
+        stopReasons: ['io-error'],
+        unreadableFiles: 1,
+      });
     }
+    if (files.length === 0) return emptyDecisionRead('healthy');
 
-    const entries: DecisionEntry[] = [];
-    const cap = opts?.limit !== undefined && opts.limit > 0 ? opts.limit : Infinity;
-    const sinceMs = opts?.sinceMs;
-    const pid = opts?.proposalId;
+    const result = emptyDecisionRead('healthy');
+    result.sourcePresent = true;
+    const sinceMs = opts.sinceMs;
+    const pid = opts.proposalId;
 
     for (const file of files) {
-      if (entries.length >= cap) break;
-
-      const filePath = join(dir, file);
-      let raw: string;
-      try {
-        raw = readFileSync(filePath, 'utf8');
-      } catch {
-        continue;
+      if (result.filesRead >= maxFiles) {
+        pushStopReason(result.stopReasons, 'file-limit');
+        result.complete = false;
+        break;
+      }
+      const remainingBytes = maxBytes - result.bytesRead;
+      if (remainingBytes <= 0) {
+        pushStopReason(result.stopReasons, 'byte-limit');
+        result.complete = false;
+        break;
       }
 
-      const lines = raw.split('\n').filter((l) => l.trim() !== '').reverse();
+      const filePath = join(dir, file);
+      const loaded = readDecisionFile(filePath, remainingBytes);
+      result.filesRead++;
+      if (!loaded.ok) {
+        if (loaded.reason === 'io-error') result.unreadableFiles++;
+        pushStopReason(result.stopReasons, loaded.reason);
+        result.complete = false;
+        break;
+      }
+      result.bytesRead += loaded.bytesRead;
+
+      // Newest physical append first; stable timestamp sorting below preserves
+      // this ordering when multiple decisions share the same millisecond.
+      const lines = loaded.text.split('\n').reverse();
 
       for (const line of lines) {
-        if (entries.length >= cap) break;
+        if (!line.trim()) continue;
+        if (result.rowsScanned >= maxRows) {
+          pushStopReason(result.stopReasons, 'row-limit');
+          result.complete = false;
+          break;
+        }
+        result.rowsScanned++;
+        if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) {
+          result.invalidRows++;
+          continue;
+        }
 
         try {
           const parsed: unknown = JSON.parse(line);
@@ -199,27 +456,96 @@ export function readDecisions(opts?: {
               typeof obj['proposalId'] === 'string' &&
               typeof obj['action'] === 'string'
             ) {
-              if (!isDecisionAction(obj['action'])) continue;
+              if (!isDecisionAction(obj['action'])) {
+                result.invalidRows++;
+                continue;
+              }
+              const entryMs = Date.parse(obj['ts']);
+              if (!Number.isFinite(entryMs)) {
+                result.invalidRows++;
+                continue;
+              }
+              const partitionDate = DATE_LEDGER_FILE_RE.exec(file)?.[1];
+              if (partitionDate === undefined || obj['ts'].slice(0, 10) !== partitionDate) {
+                result.invalidRows++;
+                continue;
+              }
               const record = sanitizeDecisionEntry(obj as unknown as DecisionEntry);
               // Window filter
               if (sinceMs !== undefined) {
-                const entryMs = Date.parse(record.ts);
-                if (!isNaN(entryMs) && entryMs < sinceMs) continue;
+                if (entryMs < sinceMs) continue;
               }
               // Proposal filter
               if (pid !== undefined && record.proposalId !== pid) continue;
 
-              entries.push(record);
+              result.decisions.push(record);
+            } else {
+              result.invalidRows++;
             }
+          } else {
+            result.invalidRows++;
           }
         } catch {
-          // Malformed line — skip silently.
+          result.invalidRows++;
         }
       }
+      if (!result.complete) break;
     }
 
-    return entries;
+    try {
+      const directoryAfter = lstatSync(dir);
+      if (
+        directoryAfter.isSymbolicLink() ||
+        !directoryAfter.isDirectory() ||
+        unsafeAuthorityDirectory(directoryAfter) ||
+        !sameDirectorySnapshot(directorySnapshot, directoryAfter)
+      ) {
+        pushStopReason(result.stopReasons, 'io-error');
+        result.complete = false;
+        result.unreadableFiles++;
+      }
+    } catch {
+      pushStopReason(result.stopReasons, 'io-error');
+      result.complete = false;
+      result.unreadableFiles++;
+    }
+
+    result.decisions.sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
+    if (typeof opts.limit === 'number' && Number.isFinite(opts.limit) && opts.limit > 0) {
+      result.decisions = result.decisions.slice(0, Math.floor(opts.limit));
+    }
+    if (result.invalidRows > 0 || result.unreadableFiles > 0 || !result.complete) {
+      result.complete = false;
+      result.sourceState = 'degraded';
+    }
+    return result;
   } catch {
-    return [];
+    return emptyDecisionRead('degraded', {
+      complete: false,
+      stopReasons: ['io-error'],
+      unreadableFiles: 1,
+    });
   }
+}
+
+export function readDecisions(opts: ReadDecisionsOptions = {}): DecisionEntry[] {
+  const result = readDecisionsDetailed(opts);
+  const decisions = opts.requireComplete === true && (!result.complete || result.sourceState === 'degraded')
+    ? []
+    : result.decisions;
+  Object.defineProperty(decisions, 'sourceQuality', {
+    value: {
+      sourceState: result.sourceState,
+      sourcePresent: result.sourcePresent,
+      complete: result.complete,
+      stopReasons: result.stopReasons,
+      filesRead: result.filesRead,
+      bytesRead: result.bytesRead,
+      rowsScanned: result.rowsScanned,
+      invalidRows: result.invalidRows,
+      unreadableFiles: result.unreadableFiles,
+    } satisfies DecisionSourceQuality,
+    enumerable: false,
+  });
+  return decisions;
 }

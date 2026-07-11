@@ -5171,7 +5171,16 @@ export interface DecisionEntry {
   /** Coarse learning epoch, currently an ISO day string. */
   learningEpoch?: string;
   /** Lifecycle action. */
-  action: 'proposed' | 'verified' | 'judged' | 'merged' | 'handoff' | 'rejected' | 'escalated';
+  action:
+    | 'proposed'
+    | 'verified'
+    | 'judged'
+    | 'merged'
+    | 'handoff'
+    | 'rejected'
+    | 'escalated'
+    | 'self-improve:written'
+    | 'skill-library:written';
   /** Engine id (e.g. 'codex', 'claude'). */
   engine?: string;
   /** Engine model string (e.g. 'codex:gpt-5.5'). */
@@ -5190,6 +5199,10 @@ export interface DecisionEntry {
    * a frontier (claude-*) model.
    */
   judgeAttestation?: string;
+  /** Authenticated issuance time for replay-resistant cached judge authority. */
+  judgeAttestationIssuedAt?: string;
+  /** Authenticated merge intent; currently only `would-merge` can grant authority. */
+  judgeAttestationIntent?: 'would-merge';
   /**
    * M246: Telemetry truth — optional measurement fields added at the emit site.
    * All absent on pre-M246 ledger entries; callers must treat as optional.

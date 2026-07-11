@@ -141,6 +141,13 @@ import {
 import { evaluateAutonomyPolicy } from '../autonomy/policy.js';
 import { causalMetadataFromProposal, evidenceOutcomeSummary } from '../learning/causal.js';
 
+function decisionReadIsHealthy(decisions: DecisionEntry[]): boolean {
+  const quality = (decisions as DecisionEntry[] & {
+    sourceQuality?: { sourceState?: string; complete?: boolean };
+  }).sourceQuality;
+  return quality === undefined || (quality.sourceState !== 'degraded' && quality.complete === true);
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -1266,7 +1273,17 @@ export function isFrontierJudge(judgeEngine: string | undefined): boolean {
 export function evaluateVerificationGate(
   proposal: Proposal,
   cfg: AshlrConfig,
-  decisionsForProposal: Array<{ action: string; ts?: string; verdict?: string; engine?: string; model?: string; detail?: string; judgeAttestation?: string }>,
+  decisionsForProposal: Array<{
+    action: string;
+    ts?: string;
+    verdict?: string;
+    engine?: string;
+    model?: string;
+    detail?: string;
+    judgeAttestation?: string;
+    judgeAttestationIssuedAt?: string;
+    judgeAttestationIntent?: 'would-merge';
+  }>,
 ): VerificationGateVerdict {
   const refuse = (reason: string): VerificationGateVerdict => ({ authorized: false, reason });
 
@@ -1333,6 +1350,12 @@ export function evaluateVerificationGate(
     judgeEngine: judgeEngine ?? '',
     verdict: 'ship',
     diffHash: currentDiffHash,
+    ...(shipEntry.judgeAttestationIssuedAt !== undefined
+      ? {
+          issuedAt: shipEntry.judgeAttestationIssuedAt,
+          mergeIntent: shipEntry.judgeAttestationIntent,
+        }
+      : {}),
   });
   if (!attestationResult.ok) {
     return refuse(
@@ -2207,7 +2230,15 @@ export async function autoMergeProposal(
 
       // Evidence-backed modes load decisions for this proposal now. Verification
       // mode needs judged + EDV entries; evidence mode needs EDV entries only.
-      const allDecisions = readDecisions({ proposalId: id });
+      const proposalCreatedMs = Date.parse(proposal.createdAt);
+      const allDecisions = readDecisions({
+        proposalId: id,
+        ...(Number.isFinite(proposalCreatedMs) ? { sinceMs: proposalCreatedMs - 60_000 } : {}),
+        requireComplete: true,
+      });
+      if (!decisionReadIsHealthy(allDecisions)) {
+        return refuse('merge authority denied: decisions ledger source is degraded or incomplete', repo);
+      }
       if (trustBasis === 'evidence') {
         const activation = evaluateEvidenceAutoMergePreflight(proposal, cfg, {
           selfTarget: isSelfTargetProposal(proposal, cfg),
@@ -2475,12 +2506,35 @@ export async function autoMergeProposal(
       // within the last hour. A stale or absent entry triggers an inline judge call.
       const STALE_MS = 60 * 60 * 1000; // 1 hour
       const sinceMs = Date.now() - STALE_MS;
-      const priorEntries = readDecisions({ proposalId: id, sinceMs, limit: 10 });
+      const priorEntries = readDecisions({ proposalId: id, sinceMs, limit: 10, requireComplete: true });
+      if (!decisionReadIsHealthy(priorEntries)) {
+        return refuse('manager quality gate denied: decisions ledger source is degraded or incomplete', repo);
+      }
       const cachedEntry = priorEntries.find((e) => e.action === 'judged' && e.verdict);
 
       let managerVerdict: { verdict: string; wouldMerge: boolean; rationale: string } | null = null;
 
-      if (cachedEntry?.verdict) {
+      const cachedJudgeEngine = cachedEntry?.engine ?? cachedEntry?.model;
+      const cachedIssuedAt = cachedEntry?.judgeAttestationIssuedAt;
+      const cachedIssuedMs = typeof cachedIssuedAt === 'string' ? Date.parse(cachedIssuedAt) : NaN;
+      const cacheNow = Date.now();
+      const cachedShipAuthorized = cachedEntry?.verdict === 'ship' &&
+        cachedEntry.detail === 'would-merge' &&
+        cachedEntry.judgeAttestationIntent === 'would-merge' &&
+        cachedIssuedAt === cachedEntry.ts &&
+        Number.isFinite(cachedIssuedMs) &&
+        cachedIssuedMs <= cacheNow + 60_000 &&
+        cachedIssuedMs >= cacheNow - STALE_MS &&
+        isFrontierJudge(cachedJudgeEngine) &&
+        verifyJudgeAttestation(cachedEntry.judgeAttestation, {
+          proposalId: proposal.id,
+          judgeEngine: cachedJudgeEngine ?? '',
+          verdict: 'ship',
+          diffHash: hashDiff(proposal.diff ?? ''),
+          issuedAt: cachedIssuedAt,
+          mergeIntent: 'would-merge',
+        }).ok;
+      if (cachedEntry?.verdict && (cachedEntry.verdict !== 'ship' || cachedShipAuthorized)) {
         // Use cached entry from the ledger — no model call needed.
         managerVerdict = {
           verdict: cachedEntry.verdict,
@@ -2564,16 +2618,23 @@ export async function autoMergeProposal(
           // This mirrors the runManager path so evaluateVerificationGate criterion 1
           // can verify the HMAC regardless of which path produced the ledger entry.
           let inlineAttestation: string | undefined;
+          const ts = new Date().toISOString();
           if (verdict.verdict === 'ship' && verdict.wouldMerge === true && isFrontierJudge(inlineJudgeEngine)) {
             try {
               const { signJudgeAttestation: signAtt, hashDiff: hd } = await import('../foundry/provenance.js');
               const dh = hd(proposal.diff ?? '');
-              inlineAttestation = signAtt({ proposalId: id, judgeEngine: inlineJudgeEngine, verdict: 'ship', diffHash: dh });
+              inlineAttestation = signAtt({
+                proposalId: id,
+                judgeEngine: inlineJudgeEngine,
+                verdict: 'ship',
+                diffHash: dh,
+                issuedAt: ts,
+                mergeIntent: 'would-merge',
+              });
             } catch { inlineAttestation = undefined; }
           }
           // M153: record inlineJudgeEngine (the real model string) so that
           // evaluateVerificationGate criterion 1 can verify the judge was frontier.
-          const ts = new Date().toISOString();
           recordDecision({
             ts,
             proposalId: id,
@@ -2589,6 +2650,9 @@ export async function autoMergeProposal(
             reason: verdict.rationale,
             detail: verdict.wouldMerge ? 'would-merge' : '',
             ...(inlineAttestation !== undefined ? { judgeAttestation: inlineAttestation } : {}),
+            ...(inlineAttestation !== undefined
+              ? { judgeAttestationIssuedAt: ts, judgeAttestationIntent: 'would-merge' as const }
+              : {}),
           });
           managerVerdict = {
             verdict: verdict.verdict,

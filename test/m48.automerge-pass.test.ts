@@ -379,6 +379,26 @@ describe('M48 runAutoMergePass — ENABLED frontier-only filtering', () => {
     });
     expect(typeof judgedCall?.[0]?.judgeAttestation).toBe('string');
     expect(judgedCall?.[0]?.judgeAttestation).toHaveLength(64);
+    expect(mockReadDecisions).toHaveBeenCalledWith(expect.objectContaining({ requireComplete: true }));
+  });
+
+  it('stops judge and merge progression when the decisions source is degraded', async () => {
+    pendingProposals = [makeProposal('degraded-decisions', { engineTier: 'frontier' })];
+    const degraded: unknown[] = [];
+    Object.defineProperty(degraded, 'sourceQuality', {
+      value: { sourceState: 'degraded', complete: false },
+      enumerable: false,
+    });
+    mockReadDecisions.mockReturnValue(degraded);
+
+    const out = await runAutoMergePass(managerGateCfg());
+
+    expect(out.skipped).toContainEqual(expect.objectContaining({
+      proposalId: 'degraded-decisions',
+      check: 'decision-source',
+    }));
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
   });
 
   it('records auto-merge verification lifecycle telemetry in evidence-backed mode', async () => {

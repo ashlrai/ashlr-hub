@@ -1231,6 +1231,7 @@ export async function runManager(
       // A `ship` verdict with wouldMerge=false is useful feedback, but it is
       // not merge-authority evidence.
       let judgeAttestation: string | undefined;
+      const decisionTs = new Date().toISOString();
       // M300: accept codex/gpt-5.5 frontier models in addition to claude-* (mirrors isFrontierJudge in merge.ts)
       const isFrontierJudgeModel =
         judgeEngine.startsWith('claude') || judgeEngine.includes('claude') ||
@@ -1243,6 +1244,8 @@ export async function runManager(
             judgeEngine,
             verdict: 'ship',
             diffHash,
+            issuedAt: decisionTs,
+            mergeIntent: 'would-merge',
           });
         } catch {
           // Best-effort — a signing failure means no attestation; the gate will
@@ -1253,7 +1256,7 @@ export async function runManager(
 
       // Record in decisions ledger (always, shadow or not).
       recordDecision({
-        ts: new Date().toISOString(),
+        ts: decisionTs,
         proposalId: proposal.id,
         ...(proposal.workItemId ? { workItemId: proposal.workItemId } : {}),
         ...(proposal.workSource ? { workSource: proposal.workSource } : {}),
@@ -1273,6 +1276,9 @@ export async function runManager(
         reason: verdict.rationale,
         detail: verdict.wouldMerge ? 'would-merge' : '',
         ...(judgeAttestation !== undefined ? { judgeAttestation } : {}),
+        ...(judgeAttestation !== undefined
+          ? { judgeAttestationIssuedAt: decisionTs, judgeAttestationIntent: 'would-merge' as const }
+          : {}),
       });
 
       // applyRejects: only reject noise/harmful (never ship/review).

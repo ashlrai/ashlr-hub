@@ -360,6 +360,147 @@ describe('m119 decisions-ledger', () => {
     expect(entries[0]!.proposalId).toBe('prop-ok');
   });
 
+  it('marks malformed newer evidence degraded and refuses complete authority reads', async () => {
+    const { readDecisions, readDecisionsDetailed, decisionsDir } = await import('../src/core/fleet/decisions-ledger.js');
+    const dir = decisionsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '2026-07-11.jsonl'),
+      [
+        JSON.stringify({ ts: '2026-07-11T10:00:00.000Z', proposalId: 'prop-authority', action: 'judged', verdict: 'ship' }),
+        '{"ts":"2026-07-11T10:05:00.000Z","proposalId":"prop-authority","action":',
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    const detailed = readDecisionsDetailed({ proposalId: 'prop-authority' });
+    expect(detailed).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+      unreadableFiles: 0,
+    });
+    expect(detailed.decisions).toHaveLength(1);
+    expect(readDecisions({ proposalId: 'prop-authority' })).toHaveLength(1);
+    expect(readDecisions({ proposalId: 'prop-authority', requireComplete: true })).toEqual([]);
+  });
+
+  it('rejects invalid persisted timestamps instead of normalizing them to now', async () => {
+    const { readDecisionsDetailed, decisionsDir } = await import('../src/core/fleet/decisions-ledger.js');
+    const dir = decisionsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '2026-07-11.jsonl'),
+      JSON.stringify({ ts: '', proposalId: 'prop-empty-ts', action: 'judged', verdict: 'ship' }) + '\n',
+      'utf8',
+    );
+
+    const detailed = readDecisionsDetailed({ proposalId: 'prop-empty-ts' });
+    expect(detailed.decisions).toEqual([]);
+    expect(detailed).toMatchObject({ sourceState: 'degraded', complete: false, invalidRows: 1 });
+  });
+
+  it('fails closed when file, byte, or filesystem identity bounds prevent a complete read', async () => {
+    const { readDecisions, readDecisionsDetailed, decisionsDir } = await import('../src/core/fleet/decisions-ledger.js');
+    const dir = decisionsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '2026-07-10.jsonl'),
+      JSON.stringify({ ts: '2026-07-10T10:00:00.000Z', proposalId: 'prop-old-ship', action: 'judged', verdict: 'ship' }) + '\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(dir, '2026-07-11.jsonl'),
+      JSON.stringify({ ts: '2026-07-11T10:00:00.000Z', proposalId: 'other', action: 'proposed', detail: 'x'.repeat(512) }) + '\n',
+      'utf8',
+    );
+
+    const fileLimited = readDecisionsDetailed({ proposalId: 'prop-old-ship', maxFiles: 1 });
+    expect(fileLimited).toMatchObject({ sourceState: 'degraded', complete: false, stopReasons: ['file-limit'] });
+    expect(readDecisions({ proposalId: 'prop-old-ship', maxFiles: 1, requireComplete: true })).toEqual([]);
+
+    const byteLimited = readDecisionsDetailed({ proposalId: 'prop-old-ship', maxBytes: 64 });
+    expect(byteLimited).toMatchObject({ sourceState: 'degraded', complete: false, stopReasons: ['byte-limit'] });
+
+    const outside = path.join(tmpHome, 'outside-decisions.jsonl');
+    fs.writeFileSync(outside, '{}\n', 'utf8');
+    fs.rmSync(path.join(dir, '2026-07-11.jsonl'));
+    fs.symlinkSync(outside, path.join(dir, '2026-07-11.jsonl'));
+    const linked = readDecisionsDetailed({ proposalId: 'prop-old-ship' });
+    expect(linked).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      stopReasons: ['io-error'],
+      unreadableFiles: 1,
+    });
+    expect(readDecisions({ proposalId: 'prop-old-ship', requireComplete: true })).toEqual([]);
+
+    fs.rmSync(path.join(dir, '2026-07-11.jsonl'));
+    fs.linkSync(outside, path.join(dir, '2026-07-11.jsonl'));
+    const hardLinked = readDecisionsDetailed({ proposalId: 'prop-old-ship' });
+    expect(hardLinked).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      stopReasons: ['io-error'],
+      unreadableFiles: 1,
+    });
+  });
+
+  it('keeps an exact one-row bound complete', async () => {
+    const { readDecisionsDetailed, decisionsDir } = await import('../src/core/fleet/decisions-ledger.js');
+    const dir = decisionsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '2026-07-11.jsonl'),
+      JSON.stringify({ ts: '2026-07-11T10:00:00.000Z', proposalId: 'prop-exact', action: 'proposed' }) + '\n',
+      'utf8',
+    );
+
+    const detailed = readDecisionsDetailed({ proposalId: 'prop-exact', maxRows: 1, limit: 1 });
+    expect(detailed).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+      rowsScanned: 1,
+      stopReasons: [],
+    });
+    expect(detailed.decisions).toHaveLength(1);
+  });
+
+  it('uses append order to break equal-timestamp decision ties', async () => {
+    const { readDecisionsDetailed, decisionsDir } = await import('../src/core/fleet/decisions-ledger.js');
+    const dir = decisionsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const ts = '2026-07-11T10:00:00.000Z';
+    fs.writeFileSync(
+      path.join(dir, '2026-07-11.jsonl'),
+      [
+        JSON.stringify({ ts, proposalId: 'prop-tie', action: 'judged', verdict: 'ship' }),
+        JSON.stringify({ ts, proposalId: 'prop-tie', action: 'judged', verdict: 'review' }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    const detailed = readDecisionsDetailed({ proposalId: 'prop-tie' });
+    expect(detailed.decisions.map((decision) => decision.verdict)).toEqual(['review', 'ship']);
+    expect(detailed).toMatchObject({ sourceState: 'healthy', complete: true });
+  });
+
+  it('separates a new append from a torn prior row while preserving degraded source truth', async () => {
+    const { recordDecision, readDecisionsDetailed, decisionsDir } = await import('../src/core/fleet/decisions-ledger.js');
+    const dir = decisionsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, new Date().toISOString().slice(0, 10) + '.jsonl');
+    fs.writeFileSync(file, '{"torn":true', 'utf8');
+
+    recordDecision({ ts: new Date().toISOString(), proposalId: 'prop-after-torn', action: 'rejected' });
+
+    const raw = fs.readFileSync(file, 'utf8');
+    expect(raw).toContain('{"torn":true\n{');
+    const detailed = readDecisionsDetailed({ proposalId: 'prop-after-torn' });
+    expect(detailed.decisions).toHaveLength(1);
+    expect(detailed).toMatchObject({ sourceState: 'degraded', complete: false, invalidRows: 1 });
+  });
+
   it('normalizes and scrubs legacy decision rows on read', async () => {
     const { readDecisions, decisionsDir } = await import('../src/core/fleet/decisions-ledger.js');
 
