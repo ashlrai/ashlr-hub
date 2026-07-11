@@ -1680,3 +1680,11 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Filter only explicit non-engineering labels while preserving positive engineering overrides, unknowns, and source uncertainty.
 - [x] Add adversarial parsing/policy fixtures and run focused/full verification plus independent review.
 - [x] Update durable notes, commit, push, reload, and production-canary issue precision.
+
+## Current Overnight Cycle - Objective-Scoped Repair Generations
+- [x] Rehydrate the deployed issue-precision baseline, live handoff/lifecycle evidence, daemon health, current git state, and persistent notes.
+- [x] Deploy disjoint audits for handoff schema compatibility, lifecycle authority, downstream lineage, migration, and adversarial fixtures.
+- [x] Derive new repair control generations from canonical parent objective identity rather than per-attempt identity.
+- [x] Preserve v1 read compatibility and attempt-level telemetry while preventing unchanged-objective cooldown, empty-attempt, pending-proposal, retired, or exhausted resets.
+- [x] Prove changed objectives receive fresh generations and missing/tampered objective authority fails closed.
+- [x] Run focused/full verification plus independent review, update notes, commit, push, reload, and production-canary the reader-first rollout.
