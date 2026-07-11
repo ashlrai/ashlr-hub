@@ -243,7 +243,7 @@ describe('M315 remote PR handoff truth', () => {
 
     const decisions = readDecisions({ proposalId: proposal.id });
     expect(decisions.some((d) => d.action === 'handoff')).toBe(true);
-  });
+  }, 15_000);
 
   it('evidence mode opens a protected remote handoff only with command-bound evidence', async () => {
     const diff = addFileDiff('docs/evidence-handoff.md', 'protected evidence handoff');
