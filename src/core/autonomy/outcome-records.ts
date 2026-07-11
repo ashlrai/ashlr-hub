@@ -8,6 +8,11 @@
 
 import type { Proposal } from '../types.js';
 import type { DecisionEntry } from '../types.js';
+import {
+  readPostMergeObservations,
+  type PostMergeObservation,
+  type PostMergeObservationReadResult,
+} from '../fleet/post-merge-observations.js';
 import { listProposals, loadProposal } from '../inbox/store.js';
 import type { JudgeTrace } from '../fleet/judge-trace.js';
 import { readJudgeTraces } from '../fleet/judge-trace.js';
@@ -120,6 +125,8 @@ export interface OutcomeRecord {
   judgeTraces: OutcomeRecordJudgeTrace[];
   evidencePacks: OutcomeRecordEvidence[];
   workedEvents: OutcomeRecordWorkedEvent[];
+  postMergeObservations?: PostMergeObservation[];
+  postMergeObservationSourceQuality?: Omit<PostMergeObservationReadResult, 'observations'>;
   evidenceSourceQuality?: AutonomyEvidenceSourceQuality;
   racing?: RacingStats;
 }
@@ -131,6 +138,7 @@ export interface OutcomeRecordReadDeps {
   loadWorkedLedger?: () => { events: WorkedEvent[] };
   listAutonomyEvidencePacks?: (limit?: number) => AutonomyEvidencePack[];
   racingStats?: () => RacingStats;
+  readPostMergeObservations?: typeof readPostMergeObservations;
 }
 
 export interface ReadyEvidenceOutcomeRecordDeps {
@@ -304,6 +312,17 @@ export function listOutcomeRecords(
     const evidenceSourceQuality = (evidence as AutonomyEvidencePackList).sourceQuality;
     const workedEvents = safeValue(() => (deps.loadWorkedLedger ?? loadWorkedLedger)())?.events ?? [];
     const racing = safeValue(() => (deps.racingStats ?? racingStats)());
+    const postMergeRead = safeValue(() =>
+      (deps.readPostMergeObservations ?? readPostMergeObservations)({ requireComplete: true }));
+    const postMergeHealthy = postMergeRead?.sourceState === 'healthy' && postMergeRead.complete === true;
+    const postMergeByProposal = new Map<string, PostMergeObservation[]>();
+    if (postMergeHealthy) {
+      for (const observation of postMergeRead.observations) {
+        const rows = postMergeByProposal.get(observation.proposalId) ?? [];
+        rows.push(observation);
+        postMergeByProposal.set(observation.proposalId, rows);
+      }
+    }
 
     const decisionsByProposal = new Map<string, DecisionEntry[]>();
     for (const decision of decisions) {
@@ -345,6 +364,9 @@ export function listOutcomeRecords(
         .flatMap((id) => workedById.get(id) ?? [])
         .sort(byNewestTs((e) => e.ts))
         .slice(0, MAX_JOINED_EVENTS_PER_RECORD);
+      const proposalPostMerge = (postMergeByProposal.get(proposal.id) ?? [])
+        .sort(byNewestTs((observation) => observation.observedAt))
+        .slice(0, MAX_JOINED_EVENTS_PER_RECORD);
 
       return {
         version: 1,
@@ -357,11 +379,16 @@ export function listOutcomeRecords(
           proposalTraces[0]?.ts,
           proposalEvidence[0]?.generatedAt,
           proposalWorked[0]?.ts,
+          proposalPostMerge[0]?.observedAt,
         ),
         decisions: proposalDecisions.map(decisionSnapshot),
         judgeTraces: proposalTraces.map(judgeTraceSnapshot),
         evidencePacks: proposalEvidence.map(evidenceSnapshot),
         workedEvents: proposalWorked.map(workedSnapshot),
+        ...(proposalPostMerge.length > 0 ? { postMergeObservations: proposalPostMerge } : {}),
+        ...(postMergeRead
+          ? { postMergeObservationSourceQuality: (({ observations: _observations, ...quality }) => quality)(postMergeRead) }
+          : {}),
         ...(evidenceSourceQuality ? { evidenceSourceQuality } : {}),
         ...(racing ? { racing } : {}),
       };

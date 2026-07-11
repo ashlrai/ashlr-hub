@@ -49,6 +49,16 @@ export interface ProposalBrowserVerifyEvidence {
 
 export type AutoMergeTrustBasis = 'tier' | 'verification' | 'evidence';
 
+/**
+ * A protected-remote check expectation. String entries are retained only for
+ * config compatibility and are not sufficient authority in evidence mode.
+ */
+export type ProtectedRemoteRequiredCheckExpectation = string | {
+  context: string;
+  /** GitHub App/integration id required for this check context. */
+  appId: string | number;
+};
+
 export type LearningSource =
   | 'proposal'
   | 'decision-ledger'
@@ -1032,8 +1042,12 @@ export interface AshlrConfig {
       protectedRemote?: {
         /** Operator expects live branch protection; evidence mode requires true. */
         branchProtection: boolean;
-        /** Expected check names that must be present in the live GitHub policy. */
-        requiredChecks: string[];
+        /**
+         * Expected checks in the live GitHub policy. Evidence mode requires
+         * typed context+App identities; legacy strings remain parseable but
+         * are deliberately non-authoritative.
+         */
+        requiredChecks: ProtectedRemoteRequiredCheckExpectation[];
       };
       /**
        * M56 (v5): permit MID-tier (strong open model) proposals to auto-apply
@@ -3666,6 +3680,8 @@ export interface ProposalRemoteHandoff {
   prUrl?: string;
   branch?: string;
   base?: string;
+  /** Host-reported merge commit identity; persistence must require exactly 40 hex characters. */
+  mergeCommitOid?: string;
   createdAt: string;
   updatedAt?: string;
   detail?: string;

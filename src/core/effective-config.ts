@@ -8,7 +8,14 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { AshlrConfig, AutoMergeTrustBasis, EngineId, EngineKind, EngineTier } from './types.js';
+import type {
+  AshlrConfig,
+  AutoMergeTrustBasis,
+  EngineId,
+  EngineKind,
+  EngineTier,
+  ProtectedRemoteRequiredCheckExpectation,
+} from './types.js';
 import { defaultConfig, loadConfig } from './config.js';
 import { resolveAutonomyControlMode } from './fleet/status.js';
 import { resolveEngineRegistry } from './run/engine-registry.js';
@@ -88,7 +95,8 @@ export interface EffectiveConfigSnapshot {
       pushToRemote: EffectiveConfigValue<boolean>;
       protectedRemote: {
         branchProtection: EffectiveConfigValue<boolean>;
-        requiredChecks: EffectiveConfigValue<string[]>;
+        requiredChecks: EffectiveConfigValue<ProtectedRemoteRequiredCheckExpectation[]>;
+        requiredCheckIdentity: EffectiveConfigValue<'exact' | 'legacy' | 'invalid' | 'missing'>;
       };
       midToBranch: EffectiveConfigValue<boolean>;
       allowWithoutVerification: EffectiveConfigValue<boolean>;
@@ -261,6 +269,27 @@ function effectiveBackends(
       source: sourceFor(raw, 'foundry.allowedBackends'),
     };
   });
+}
+
+function requiredCheckIdentityMode(
+  checks: ProtectedRemoteRequiredCheckExpectation[] | undefined,
+): 'exact' | 'legacy' | 'invalid' | 'missing' {
+  if (!Array.isArray(checks) || checks.length === 0) return 'missing';
+  if (checks.every((check) => typeof check === 'string' && check.trim().length > 0)) return 'legacy';
+  if (checks.some((check) => typeof check === 'string')) return 'invalid';
+
+  const contexts = new Set<string>();
+  for (const check of checks) {
+    if (check === null || typeof check !== 'object' || Array.isArray(check)) return 'invalid';
+    const context = typeof check.context === 'string' ? check.context.trim() : '';
+    const appId = check.appId;
+    const validAppId =
+      (typeof appId === 'number' && Number.isSafeInteger(appId) && appId > 0) ||
+      (typeof appId === 'string' && /^[1-9]\d*$/.test(appId));
+    if (!context || !validAppId || contexts.has(context)) return 'invalid';
+    contexts.add(context);
+  }
+  return 'exact';
 }
 
 /**
@@ -464,6 +493,12 @@ export function buildEffectiveConfigSnapshot(
             raw,
             'foundry.autoMerge.protectedRemote.requiredChecks',
             autoMerge?.protectedRemote?.requiredChecks ?? [],
+          ),
+          requiredCheckIdentity: value(
+            raw,
+            'foundry.autoMerge.protectedRemote.requiredChecks',
+            requiredCheckIdentityMode(autoMerge?.protectedRemote?.requiredChecks),
+            'derived',
           ),
         },
         midToBranch: boolValue(raw, 'foundry.autoMerge.midToBranch', autoMerge?.midToBranch === true),

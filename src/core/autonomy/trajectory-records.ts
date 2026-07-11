@@ -36,7 +36,7 @@ const DEFAULT_WINDOW_HOURS = 24;
 const DEFAULT_LIMIT = 200;
 export const MIN_SKILL_OBSERVED_TRAJECTORIES = 3;
 
-export type TrajectoryTimelineKind = 'dispatch' | 'proposal' | 'evidence' | 'decision' | 'agent-action';
+export type TrajectoryTimelineKind = 'dispatch' | 'proposal' | 'evidence' | 'decision' | 'post-merge' | 'agent-action';
 export type TrajectoryTerminalOutcome =
   | 'merged'
   | 'rejected'
@@ -45,6 +45,7 @@ export type TrajectoryTerminalOutcome =
   | 'no-proposal'
   | 'failed'
   | 'unknown';
+export type TrajectoryRealizedOutcome = 'followed-up' | 'reverted' | 'regressed';
 
 export interface TrajectoryRecordCoverage {
   dispatch: boolean;
@@ -108,6 +109,8 @@ export interface TrajectoryRecord {
   startedAt: string;
   latestAt: string;
   terminalOutcome: TrajectoryTerminalOutcome;
+  /** Observation-only real-world result after merge; never changes merge authority. */
+  realizedOutcome?: TrajectoryRealizedOutcome;
   repo?: string;
   itemId?: string;
   source?: WorkSource;
@@ -172,6 +175,7 @@ export interface TrajectoryLearningStatus {
   windowHours: number;
   trajectories: number;
   terminalOutcomes: Record<TrajectoryTerminalOutcome, number>;
+  realizedOutcomes: Record<TrajectoryRealizedOutcome, number>;
   coverage: PublishedCoverageMetrics;
   routeSpine: {
     dispatchToDecision: TrajectoryCoverageMetric;
@@ -184,6 +188,7 @@ export interface TrajectoryLearningStatus {
     ref: string;
     latestAt: string;
     terminalOutcome: TrajectoryTerminalOutcome;
+    realizedOutcome?: TrajectoryRealizedOutcome;
     backend?: EngineId | string | null;
     source?: WorkSource;
     coverage: PublishedTrajectoryCoverage;
@@ -365,7 +370,8 @@ function timelineRank(kind: TrajectoryTimelineKind): number {
     case 'proposal': return 20;
     case 'evidence': return 30;
     case 'decision': return 40;
-    case 'agent-action': return 50;
+    case 'post-merge': return 50;
+    case 'agent-action': return 60;
   }
 }
 
@@ -383,6 +389,18 @@ function betterTerminalOutcome(
     merged: 6,
   };
   return rank[next] >= rank[current] ? next : current;
+}
+
+function betterRealizedOutcome(
+  current: TrajectoryRealizedOutcome | undefined,
+  next: TrajectoryRealizedOutcome,
+): TrajectoryRealizedOutcome {
+  const rank: Record<TrajectoryRealizedOutcome, number> = {
+    'followed-up': 1,
+    regressed: 2,
+    reverted: 3,
+  };
+  return current === undefined || rank[next] >= rank[current] ? next : current;
 }
 
 function metric(count: number, denominator: number): TrajectoryCoverageMetric {
@@ -762,6 +780,40 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
         ...(decision.learningEpoch ? { learningEpoch: decision.learningEpoch } : {}),
       });
     }
+
+    for (const trace of outcome.judgeTraces) {
+      const realized = trace.outcome === 'reverted' || trace.outcome === 'followed-up'
+        ? trace.outcome
+        : undefined;
+      if (!realized) continue;
+      record.realizedOutcome = betterRealizedOutcome(record.realizedOutcome, realized);
+      noteTimeline(record, {
+        ts: trace.outcomeAt ?? trace.ts,
+        kind: 'post-merge',
+        outcome: realized,
+        proposalId: proposal.id,
+        runId: proposal.runId,
+        trajectoryId: proposal.trajectoryId,
+        learningSource: 'outcome-record',
+        labelBasis: 'post-merge-regression',
+      });
+    }
+
+    for (const observation of outcome.postMergeObservations ?? []) {
+      record.realizedOutcome = betterRealizedOutcome(record.realizedOutcome, observation.outcome);
+      noteTimeline(record, {
+        ts: observation.observedAt,
+        kind: 'post-merge',
+        outcome: observation.outcome,
+        proposalId: proposal.id,
+        runId: observation.runId ?? proposal.runId,
+        trajectoryId: observation.trajectoryId ?? proposal.trajectoryId,
+        repo: observation.repo,
+        itemId: observation.workItemId ?? proposal.workItemId,
+        learningSource: 'outcome-record',
+        labelBasis: observation.labelBasis,
+      });
+    }
   };
 
   const processAction = (action: ReturnType<typeof readAgentActions>[number]): void => {
@@ -932,6 +984,11 @@ export function summarizeTrajectoryLearning(
     failed: 0,
     unknown: 0,
   };
+  const realizedOutcomes: Record<TrajectoryRealizedOutcome, number> = {
+    'followed-up': 0,
+    reverted: 0,
+    regressed: 0,
+  };
   const coverageCounts: Record<keyof TrajectoryRecordCoverage, number> = {
     dispatch: 0,
     proposal: 0,
@@ -954,6 +1011,7 @@ export function summarizeTrajectoryLearning(
 
   for (const record of records) {
     terminalOutcomes[record.terminalOutcome]++;
+    if (record.realizedOutcome) realizedOutcomes[record.realizedOutcome]++;
     for (const key of Object.keys(coverageCounts) as Array<keyof TrajectoryRecordCoverage>) {
       if (record.coverage[key]) {
         coverageCounts[key]++;
@@ -1027,6 +1085,7 @@ export function summarizeTrajectoryLearning(
     windowHours,
     trajectories: denominator,
     terminalOutcomes,
+    realizedOutcomes,
     coverage: publishSkillMetrics
       ? coverage
       : publishedCoverage,
@@ -1052,6 +1111,7 @@ export function summarizeTrajectoryLearning(
       ref: trajectoryRef(record),
       latestAt: record.latestAt,
       terminalOutcome: record.terminalOutcome,
+      ...(record.realizedOutcome ? { realizedOutcome: record.realizedOutcome } : {}),
       ...(record.backend !== undefined ? { backend: record.backend } : {}),
       ...(record.source ? { source: record.source } : {}),
       coverage: publishSkillMetrics

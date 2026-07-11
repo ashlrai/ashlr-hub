@@ -73,13 +73,14 @@ afterEach(() => {
 
 describe('M342 dispatch production ledger', () => {
   it('appends and reads dispatch-production events newest first', () => {
-    recordDispatchProduction([
+    const written = recordDispatchProduction([
       makeEvent({ itemId: 'old', ts: '2026-07-07T23:59:00.000Z' }),
       makeEvent({ itemId: 'new', ts: '2026-07-08T00:01:00.000Z', outcome: 'proposal-created', proposalCreated: true, proposalId: 'prop-new' }),
     ]);
 
     const events = readDispatchProductionEvents();
 
+    expect(written).toEqual({ attempted: 2, recorded: 2, failed: 0 });
     expect(events.map((event) => event.itemId)).toEqual(['new', 'old']);
     expect(events[0]).toMatchObject({
       schemaVersion: 1,

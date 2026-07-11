@@ -148,6 +148,7 @@ describe('M111 SharedWorkQueueCoordinator — single machine basics', () => {
     expect(claimed).toHaveLength(2);
     expect(claimed.map(i => i.id)).toContain('a');
     expect(claimed.map(i => i.id)).toContain('b');
+    expect(fs.existsSync(path.join(tmpDir, 'ashlr-fleet-queue.json'))).toBe(true);
   });
 
   it('claimItemsByLane refills contention without exceeding a lane quota', () => {

@@ -30,6 +30,7 @@ import {
 import { homedir } from 'node:os';
 import { join, basename } from 'node:path';
 import type { WorkItem } from '../types.js';
+import { fsyncDirectory } from '../util/durability.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -177,7 +178,6 @@ export function loadWorkedLedger(): WorkedLedger {
 function saveWorkedLedger(l: WorkedLedger): boolean {
   let tmp: string | undefined;
   let fd: number | undefined;
-  let dirFd: number | undefined;
   try {
     const dir = fleetDir();
     if (!existsSync(dir)) {
@@ -195,8 +195,7 @@ function saveWorkedLedger(l: WorkedLedger): boolean {
     fd = undefined;
     renameSync(tmp, dest);
     tmp = undefined;
-    dirFd = openSync(dir, 'r');
-    fsyncSync(dirFd);
+    fsyncDirectory(dir);
     return true;
   } catch {
     // Persistence failure must not crash the fleet — swallow silently.
@@ -204,7 +203,6 @@ function saveWorkedLedger(l: WorkedLedger): boolean {
     return false;
   } finally {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
-    if (dirFd !== undefined) { try { closeSync(dirFd); } catch { /* best effort */ } }
   }
 }
 

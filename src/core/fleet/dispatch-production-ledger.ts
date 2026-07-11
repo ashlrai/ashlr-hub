@@ -54,6 +54,7 @@ import {
   type ProductionAttemptLearningLabel,
 } from '../learning/attempt-shape.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { fsyncDirectory } from '../util/durability.js';
 import {
   generatedRepairLifecycleAttemptHash,
   REPAIR_TREATMENTS,
@@ -619,13 +620,7 @@ export function recordDispatchProduction(
     const dir = dispatchProductionDir();
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
-      let parentFd: number | undefined;
-      try {
-        parentFd = openSync(dirname(dir), fsConstants.O_RDONLY);
-        fsyncSync(parentFd);
-      } finally {
-        if (parentFd !== undefined) closeSync(parentFd);
-      }
+      fsyncDirectory(dirname(dir));
     }
     for (const event of events) {
       try {
@@ -659,7 +654,6 @@ function persistTreatmentOutcomeReceipt(event: DispatchProductionEvent, name: st
   const lock = acquireLocalStoreLock(treatmentReceiptLockPath());
   if (!lock) throw new Error('treatment outcome receipt lock unavailable');
   let fd: number | undefined;
-  let dirFd: number | undefined;
   const tmp = `${path}.${process.pid}.tmp`;
   try {
     if (existsSync(path)) {
@@ -679,10 +673,8 @@ function persistTreatmentOutcomeReceipt(event: DispatchProductionEvent, name: st
     closeSync(fd);
     fd = undefined;
     renameSync(tmp, path);
-    dirFd = openSync(dir, fsConstants.O_RDONLY);
-    fsyncSync(dirFd);
+    fsyncDirectory(dir);
   } finally {
-    if (dirFd !== undefined) { try { closeSync(dirFd); } catch { /* preserve primary failure */ } }
     if (fd !== undefined) { try { closeSync(fd); } catch { /* preserve primary failure */ } }
     try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* best effort */ }
     releaseLocalStoreLock(lock);
@@ -710,8 +702,7 @@ function writeTreatmentReceiptRetention(dir: string, droppedThrough: string): vo
     closeSync(fd);
     fd = undefined;
     renameSync(tmp, path);
-    const dirFd = openSync(dir, fsConstants.O_RDONLY);
-    try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
+    fsyncDirectory(dir);
   } finally {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* preserve failure */ } }
     try { if (existsSync(tmp)) unlinkSync(tmp); } catch { /* best effort */ }
@@ -745,15 +736,13 @@ function pruneTreatmentOutcomeReceipts(dir: string): void {
     Date.parse(receipt.ts) > Date.parse(latest) ? receipt.ts : latest, dropping[0]!.ts);
   writeTreatmentReceiptRetention(dir, droppedThrough);
   for (const receipt of dropping) unlinkSync(join(dir, receipt.name));
-  const dirFd = openSync(dir, fsConstants.O_RDONLY);
-  try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
+  fsyncDirectory(dir);
 }
 
 function appendDispatchProductionLine(path: string, line: string): void {
   const lock = acquireLocalStoreLock(`${path}.lock`);
   if (!lock) throw new Error('dispatch production ledger lock unavailable');
   let fd: number | undefined;
-  let dirFd: number | undefined;
   try {
     const existed = existsSync(path);
     fd = openSync(
@@ -776,11 +765,9 @@ function appendDispatchProductionLine(path: string, line: string): void {
     }
     fsyncSync(fd);
     if (!existed) {
-      dirFd = openSync(dirname(path), fsConstants.O_RDONLY);
-      fsyncSync(dirFd);
+      fsyncDirectory(dirname(path));
     }
   } finally {
-    if (dirFd !== undefined) { try { closeSync(dirFd); } catch { /* preserve primary failure */ } }
     if (fd !== undefined) { try { closeSync(fd); } catch { /* preserve primary failure */ } }
     releaseLocalStoreLock(lock);
   }

@@ -660,10 +660,14 @@ export function evaluateAutoMergeReadinessPreflight(
     ready: true,
     advisories,
   });
-  const block = (reason: string, advisories: string[] = []): AutoMergeReadinessPreflightResult => ({
+  const block = (
+    reason: string,
+    advisories: string[] = [],
+    permanent = true,
+  ): AutoMergeReadinessPreflightResult => ({
     ready: false,
     reason,
-    permanent: true,
+    permanent,
     advisories,
   });
 
@@ -699,7 +703,12 @@ export function evaluateAutoMergeReadinessPreflight(
         requireVerificationEvidence: false,
       });
       if (!evidencePreflight.authorized) {
-        return block(evidencePreflight.reason, advisories);
+        const configurationBlocker =
+          evidencePreflight.reason.includes('allowWithoutVerification=true') ||
+          evidencePreflight.reason.includes('pushToRemote=true is required') ||
+          evidencePreflight.reason.includes('protected remote signal missing') ||
+          evidencePreflight.reason.includes('a GitHub remote is required');
+        return block(evidencePreflight.reason, advisories, !configurationBlocker);
       }
     }
 
@@ -852,6 +861,8 @@ export interface EvidenceRemoteProtectionSignal {
   ok: boolean;
   detail: string;
   requiredChecks: string[];
+  requiredCheckBindings: Array<{ context: string; appId: string }>;
+  expectationMode: 'exact' | 'legacy' | 'invalid' | 'missing';
 }
 
 export interface EvidenceAutoMergePreflightOptions {
@@ -873,29 +884,83 @@ export function evaluateEvidenceRemoteProtectionSignal(cfg: AshlrConfig): Eviden
       ok: false,
       detail: 'missing foundry.autoMerge.protectedRemote branch-protection evidence',
       requiredChecks: [],
+      requiredCheckBindings: [],
+      expectationMode: 'missing',
     };
   }
-  const requiredChecks = Array.isArray(signal['requiredChecks'])
-    ? signal['requiredChecks'].filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-    : [];
+  const rawRequiredChecks = signal['requiredChecks'];
+  const requiredCheckBindings: Array<{ context: string; appId: string }> = [];
+  let expectationMode: EvidenceRemoteProtectionSignal['expectationMode'] = 'missing';
+  let expectationError: string | undefined;
+  if (Array.isArray(rawRequiredChecks) && rawRequiredChecks.length > 0) {
+    const legacy = rawRequiredChecks.filter((entry): entry is string => typeof entry === 'string');
+    if (legacy.length > 0) {
+      expectationMode = legacy.length === rawRequiredChecks.length && legacy.every((entry) => entry.trim().length > 0)
+        ? 'legacy'
+        : 'invalid';
+      expectationError = expectationMode === 'legacy'
+        ? 'legacy required-check names do not bind GitHub App identity; configure {context,appId} entries'
+        : 'required remote checks mix legacy names with typed App identity expectations';
+    } else {
+      expectationMode = 'exact';
+      const contexts = new Map<string, string>();
+      for (const entry of rawRequiredChecks) {
+        if (!isObjectRecord(entry)) {
+          expectationMode = 'invalid';
+          expectationError = 'required remote check expectation must be {context,appId}';
+          break;
+        }
+        const context = typeof entry['context'] === 'string' ? entry['context'].trim() : '';
+        const rawAppId = entry['appId'];
+        let appId: string | undefined;
+        if (typeof rawAppId === 'number' && Number.isSafeInteger(rawAppId) && rawAppId > 0) {
+          appId = String(rawAppId);
+        } else if (typeof rawAppId === 'string' && /^[1-9]\d*$/.test(rawAppId)) {
+          appId = BigInt(rawAppId).toString();
+        }
+        if (!context || !appId) {
+          expectationMode = 'invalid';
+          expectationError = 'required remote check expectation needs a non-empty context and positive GitHub App id';
+          break;
+        }
+        const priorAppId = contexts.get(context);
+        if (priorAppId !== undefined) {
+          expectationMode = 'invalid';
+          expectationError = priorAppId === appId
+            ? `duplicate configured required-check context: ${context}`
+            : `conflicting GitHub App identities configured for required-check context: ${context}`;
+          break;
+        }
+        contexts.set(context, appId);
+        requiredCheckBindings.push({ context, appId });
+      }
+    }
+  }
+  const requiredChecks = requiredCheckBindings.map((binding) => binding.context);
   if (signal['branchProtection'] !== true) {
     return {
       ok: false,
       detail: 'branch protection is not confirmed for the remote default branch',
       requiredChecks,
+      requiredCheckBindings,
+      expectationMode,
     };
   }
-  if (requiredChecks.length === 0) {
+  if (expectationMode !== 'exact' || requiredChecks.length === 0) {
     return {
       ok: false,
-      detail: 'required remote checks are not declared for the protected default branch',
+      detail: expectationError ?? 'required remote checks are not declared for the protected default branch',
       requiredChecks,
+      requiredCheckBindings,
+      expectationMode,
     };
   }
   return {
     ok: true,
-    detail: `protected remote confirmed with required checks: ${requiredChecks.join(', ')}`,
+    detail: `protected remote configured with exact check App identities: ${requiredCheckBindings.map((binding) => `${binding.context}@${binding.appId}`).join(', ')}`,
     requiredChecks,
+    requiredCheckBindings,
+    expectationMode,
   };
 }
 
@@ -954,16 +1019,18 @@ async function evaluateLiveEvidenceRemoteProtection(
       reason: `configured required checks are not live branch requirements: ${missingChecks.join(', ')}`,
     };
   }
-  const appBoundChecks = new Set(
+  const liveBindings = new Set(
     live.requiredCheckBindings
-      .filter((binding) => binding.appId !== null)
-      .map((binding) => binding.context),
+      .filter((binding): binding is { context: string; appId: string } => binding.appId !== null)
+      .map((binding) => `${binding.context}\0${binding.appId}`),
   );
-  const unboundChecks = expected.requiredChecks.filter((check) => !appBoundChecks.has(check));
-  if (unboundChecks.length > 0) {
+  const mismatchedBindings = expected.requiredCheckBindings.filter(
+    (binding) => !liveBindings.has(`${binding.context}\0${binding.appId}`),
+  );
+  if (mismatchedBindings.length > 0) {
     return {
       authorized: false,
-      reason: `configured required checks lack a concrete GitHub App/integration binding: ${unboundChecks.join(', ')}`,
+      reason: `configured required checks do not match live GitHub App identities: ${mismatchedBindings.map((binding) => `${binding.context}@${binding.appId}`).join(', ')}`,
     };
   }
   return {

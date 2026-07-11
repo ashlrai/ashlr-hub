@@ -217,6 +217,62 @@ describe('effective config snapshot', () => {
     expect(snapshot.warnings.join('\n')).not.toMatch(/mergeAuthority is empty/);
   });
 
+  it('exposes required-check App identity expectations as metadata', () => {
+    const exactChecks = [
+      { context: 'CI (Node 22, ubuntu-latest)', appId: 15368 },
+      { context: 'CI (Node 22, windows-latest)', appId: '15368' },
+    ];
+    const exact = buildEffectiveConfigSnapshot(makeCfg({
+      foundry: {
+        autoMerge: {
+          enabled: true,
+          trustBasis: 'evidence',
+          protectedRemote: { branchProtection: true, requiredChecks: exactChecks },
+        },
+      },
+    } as Partial<AshlrConfig>), {
+      rawConfig: {
+        foundry: {
+          autoMerge: {
+            protectedRemote: { branchProtection: true, requiredChecks: exactChecks },
+          },
+        },
+      },
+      configExists: true,
+      configParsed: true,
+    });
+
+    expect(exact.foundry.autoMerge.protectedRemote.requiredChecks).toMatchObject({
+      value: exactChecks,
+      source: 'configured',
+    });
+    expect(exact.foundry.autoMerge.protectedRemote.requiredCheckIdentity).toMatchObject({
+      value: 'exact',
+      source: 'configured',
+    });
+
+    const legacy = buildEffectiveConfigSnapshot(makeCfg({
+      foundry: {
+        autoMerge: {
+          enabled: true,
+          trustBasis: 'evidence',
+          protectedRemote: { branchProtection: true, requiredChecks: ['ci/test'] },
+        },
+      },
+    } as Partial<AshlrConfig>), {
+      rawConfig: {
+        foundry: {
+          autoMerge: {
+            protectedRemote: { branchProtection: true, requiredChecks: ['ci/test'] },
+          },
+        },
+      },
+      configExists: true,
+      configParsed: true,
+    });
+    expect(legacy.foundry.autoMerge.protectedRemote.requiredCheckIdentity.value).toBe('legacy');
+  });
+
   it('GET /api/config/effective exposes the read-only snapshot', async () => {
     mkdirSync(fx.ashlrDir, { recursive: true });
     writeFileSync(

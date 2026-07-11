@@ -694,7 +694,7 @@ describe('M86 PURE — evidence safety lane', () => {
         pushToRemote: true,
         protectedRemote: {
           branchProtection: true,
-          requiredChecks: ['ci/test'],
+          requiredChecks: [{ context: 'ci/test', appId: '15368' }],
         },
       },
     },

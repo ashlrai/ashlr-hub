@@ -275,6 +275,29 @@ describe('bisectAndRevert', () => {
     expect(r.culprit).toBe('C1'); // C0 green, C1 first RED
     expect(r.revertProposal?.culprit).toBe('C1');
     expect(r.revertProposal?.culpritProposalId).toBe('prop-C1');
+    expect(r).toMatchObject({
+      observedHead: 'HEAD_BAD',
+      baselineHead: 'C0',
+      candidateCount: 2,
+      basis: 'bisect-first-bad',
+    });
+  });
+
+  it('refuses to checkout or reset a dirty worktree', async () => {
+    const git = fakeGit((args) => {
+      const command = args.join(' ');
+      if (command === 'rev-parse HEAD') return 'HEAD_BAD';
+      if (command === 'status --porcelain') return ' M src/user-work.ts';
+      if (command.startsWith('checkout') || command.startsWith('reset')) {
+        throw new Error('destructive command must not run');
+      }
+      return '';
+    });
+
+    const result = await bisectAndRevert(onCfg(), REPO, { git, runSuite: () => RED });
+
+    expect(result).toEqual({ reason: 'worktree is dirty; refusing autonomous bisect checkout' });
+    expect(mockCreateProposal).not.toHaveBeenCalled();
   });
 
   it('produces a SIGNED revert proposal (proposal-only, NOT applied)', async () => {

@@ -102,6 +102,9 @@ function reconcileOne(proposal: Proposal): RemoteHandoffReconcileResult {
       remoteHandoff: mergeHandoff(handoff, {
         state: 'merged',
         ...(pr.url ? { prUrl: pr.url } : {}),
+        ...(typeof pr.mergeCommitOid === 'string' && /^[0-9a-f]{40}$/i.test(pr.mergeCommitOid)
+          ? { mergeCommitOid: pr.mergeCommitOid.toLowerCase() }
+          : {}),
         detail,
       }),
     });

@@ -95,6 +95,18 @@ vi.mock('../src/core/fleet/regression-sentinel.js', () => ({
   bisectAndRevert: (...args: unknown[]) => mockBisectAndRevert(...args),
 }));
 
+const mockLoadProposal = vi.fn();
+vi.mock('../src/core/inbox/store.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/core/inbox/store.js')>(),
+  loadProposal: (...args: unknown[]) => mockLoadProposal(...args),
+}));
+
+const mockRecordPostMergeObservation = vi.fn();
+vi.mock('../src/core/fleet/post-merge-observations.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/core/fleet/post-merge-observations.js')>(),
+  recordPostMergeObservation: (...args: unknown[]) => mockRecordPostMergeObservation(...args),
+}));
+
 // ---------------------------------------------------------------------------
 // Auxiliary mocks (identical to m170 pattern).
 // ---------------------------------------------------------------------------
@@ -159,6 +171,8 @@ beforeEach(() => {
   mockRunCounterfactualReplay.mockReset();
   mockDetectRegression.mockReset();
   mockBisectAndRevert.mockReset();
+  mockLoadProposal.mockReset();
+  mockRecordPostMergeObservation.mockReset();
 
   fx = makeFixture();
 
@@ -203,6 +217,7 @@ beforeEach(() => {
 
   // bisectAndRevert: success.
   mockBisectAndRevert.mockResolvedValue({ reverted: false });
+  mockLoadProposal.mockReturnValue(null);
 
   // buildBacklog: one item per enrolled repo (sufficient to reach dispatcher).
   mockBuildBacklog.mockImplementation(async (opts?: { repos?: string[] }) => {
@@ -601,6 +616,56 @@ describe('M192 / M189 — regression sentinel: flag ON → detectRegression', ()
 
     expect(mockDetectRegression).toHaveBeenCalledTimes(1);
     expect(mockBisectAndRevert).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts an explicit sentinel config object and records its causal first-bad merge', async () => {
+    const repo = enrollBuiltinRepo();
+    const culprit = 'a'.repeat(40);
+    const observedHead = 'b'.repeat(40);
+    const baselineHead = 'c'.repeat(40);
+    mockDetectRegression.mockResolvedValue({ regressed: true, details: [culprit] });
+    mockBisectAndRevert.mockResolvedValue({
+      culprit,
+      observedHead,
+      baselineHead,
+      candidateCount: 3,
+      basis: 'bisect-first-bad',
+      revertProposal: { culprit, culpritProposalId: 'proposal-causal', proposal: {} },
+    });
+    mockLoadProposal.mockReturnValue({
+      id: 'proposal-causal',
+      repo: repo.dir,
+      runId: 'run-causal',
+      trajectoryId: 'trajectory-causal',
+      workItemId: 'work-causal',
+      verifyResult: { ran: [{ kind: 'typecheck' }, { kind: 'test' }] },
+    });
+    const cfg = makeCfg({
+      foundry: {
+        allowedBackends: ['claude' as import('../src/core/types.js').EngineId],
+        regressionSentinel: { minConsecutive: 3 },
+      } as unknown as AshlrConfig['foundry'],
+    });
+
+    await tick(cfg, { dryRun: false });
+
+    expect(mockDetectRegression).toHaveBeenCalledOnce();
+    expect(mockBisectAndRevert).toHaveBeenCalledOnce();
+    expect(mockLoadProposal).toHaveBeenCalledWith('proposal-causal');
+    expect(mockRecordPostMergeObservation).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: 'regressed',
+      basis: 'bisect-first-bad',
+      confidence: 'heuristic',
+      proposalId: 'proposal-causal',
+      runId: 'run-causal',
+      trajectoryId: 'trajectory-causal',
+      workItemId: 'work-causal',
+      mergeCommit: culprit,
+      observedHead,
+      baselineHead,
+      candidateCount: 3,
+      commandKinds: ['test', 'typecheck'],
+    }));
   });
 
   it('passes cfg to detectRegression', async () => {

@@ -217,11 +217,20 @@ function sanitizeProposalForStore<T extends Partial<Proposal> & Pick<Proposal, '
     const handoff = next.remoteHandoff;
     const scrubbedDetail = typeof handoff.detail === 'string' ? scrubProposalText(handoff.detail) : handoff.detail;
     const scrubbedPrUrl = typeof handoff.prUrl === 'string' ? scrubProposalText(handoff.prUrl) : handoff.prUrl;
-    if (scrubbedDetail !== handoff.detail || scrubbedPrUrl !== handoff.prUrl) {
+    const scrubbedMergeCommitOid = typeof handoff.mergeCommitOid === 'string' && /^[0-9a-f]{40}$/i.test(handoff.mergeCommitOid)
+      ? handoff.mergeCommitOid.toLowerCase()
+      : undefined;
+    if (
+      scrubbedDetail !== handoff.detail ||
+      scrubbedPrUrl !== handoff.prUrl ||
+      scrubbedMergeCommitOid !== handoff.mergeCommitOid
+    ) {
+      const { mergeCommitOid: _mergeCommitOid, ...safeHandoff } = handoff;
       next.remoteHandoff = {
-        ...handoff,
+        ...safeHandoff,
         ...(scrubbedDetail !== undefined ? { detail: scrubbedDetail } : {}),
         ...(scrubbedPrUrl !== undefined ? { prUrl: scrubbedPrUrl } : {}),
+        ...(scrubbedMergeCommitOid !== undefined ? { mergeCommitOid: scrubbedMergeCommitOid } : {}),
       };
       changed = true;
     }

@@ -40,6 +40,17 @@ describe('M30 CI workflow', () => {
     expect(pkg.scripts?.['test:ci']).toContain('scripts/test-ci.mjs');
   });
 
+  it('runs Ubuntu once and Windows as exactly three independent serial shards', () => {
+    expect(ciYml.match(/os:\s*ubuntu-latest/g)).toHaveLength(1);
+    expect(ciYml.match(/os:\s*windows-latest/g)).toHaveLength(3);
+    for (const shard of ['1/3', '2/3', '3/3']) {
+      expect(ciYml.match(new RegExp(`test_args:\\s*--shard=${shard.replace('/', '\\/')}`, 'g')))
+        .toHaveLength(1);
+    }
+    expect(ciYml).toContain('test_args: ""');
+    expect(ciYml).toContain('npm run test:ci -- ${{ matrix.test_args }}');
+  });
+
   it('enables npm caching for fast installs', () => {
     expect(ciYml).toMatch(/cache:\s*["']?npm["']?/);
     expect(ciYml).toContain('npm ci');

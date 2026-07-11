@@ -13,6 +13,7 @@ import { listOutcomeRecords, listReadyEvidenceOutcomeRecords } from '../src/core
 import { hashDiff } from '../src/core/foundry/provenance.js';
 import type { JudgeTrace } from '../src/core/fleet/judge-trace.js';
 import type { WorkedEvent } from '../src/core/fleet/worked-ledger.js';
+import type { PostMergeObservationReadResult } from '../src/core/fleet/post-merge-observations.js';
 import type { DecisionEntry, Proposal } from '../src/core/types.js';
 
 const TEST_DIFF = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n';
@@ -106,6 +107,21 @@ function deps(overrides: Partial<OutcomeRecordReadDeps> = {}): OutcomeRecordRead
     loadWorkedLedger: () => ({ events: [] }),
     listAutonomyEvidencePacks: () => [],
     racingStats: () => ({ races: 0, frontierWinRate: 0, avgScoreDelta: 0, localWins: 0 }),
+    readPostMergeObservations: () => ({
+      observations: [],
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+      stopReasons: [],
+      filesRead: 1,
+      bytesRead: 0,
+      physicalRows: 0,
+      invalidRows: 0,
+      conflictingEvents: 0,
+      duplicateRows: 0,
+      supersededRows: 0,
+      limitExceeded: false,
+    }),
     ...overrides,
   };
 }
@@ -202,6 +218,68 @@ describe('m302 listOutcomeRecords', () => {
     });
 
     expect(records.map((r) => r.proposal.id)).toEqual(['prop-new', 'prop-mid']);
+  });
+
+  it('joins healthy post-merge observations and withholds degraded rows', () => {
+    const observation = {
+      schemaVersion: 1 as const,
+      eventId: 'a'.repeat(64),
+      observedAt: '2026-07-03T04:00:00.000Z',
+      authority: 'observation-only' as const,
+      outcome: 'regressed' as const,
+      basis: 'bisect-first-bad' as const,
+      confidence: 'deterministic' as const,
+      repo: '/repos/alpha',
+      proposalId: 'prop-observed',
+      runId: 'run-observed',
+      trajectoryId: 'trajectory-observed',
+      mergeCommit: 'a'.repeat(40),
+      observedHead: 'b'.repeat(40),
+      labelBasis: 'post-merge-regression' as const,
+      attestation: 'c'.repeat(64),
+    };
+    const healthy = deps({
+      listProposals: () => [proposal({
+        id: 'prop-observed',
+        createdAt: '2026-07-03T00:00:00.000Z',
+        runId: 'run-observed',
+        trajectoryId: 'trajectory-observed',
+      })],
+      readPostMergeObservations: () => ({
+        ...(deps().readPostMergeObservations!() as PostMergeObservationReadResult),
+        observations: [observation],
+        bytesRead: 512,
+        physicalRows: 1,
+      }),
+    });
+
+    const [record] = listOutcomeRecords({ deps: healthy });
+    expect(record?.lastActivityAt).toBe(observation.observedAt);
+    expect(record?.postMergeObservations).toEqual([observation]);
+    expect(record?.postMergeObservationSourceQuality).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+      physicalRows: 1,
+    });
+
+    const [degraded] = listOutcomeRecords({
+      deps: {
+        ...healthy,
+        readPostMergeObservations: () => ({
+          ...(healthy.readPostMergeObservations!() as PostMergeObservationReadResult),
+          sourceState: 'degraded',
+          complete: false,
+          stopReasons: ['invalid-row'],
+          invalidRows: 1,
+        }),
+      },
+    });
+    expect(degraded?.postMergeObservations).toBeUndefined();
+    expect(degraded?.postMergeObservationSourceQuality).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
   });
 
   it('tolerates missing or throwing optional stores', () => {

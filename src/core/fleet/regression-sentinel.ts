@@ -339,6 +339,14 @@ export interface RevertProposal {
 
 export interface BisectResult {
   culprit?: string;
+  /** HEAD observed before any temporary checkout. */
+  observedHead?: string;
+  /** Trusted known-green boundary when one was available. */
+  baselineHead?: string;
+  /** Number of bounded auto-merge candidates considered. */
+  candidateCount?: number;
+  /** Structured observation basis; never grants revert or merge authority. */
+  basis?: 'bisect-first-bad';
   revertProposal?: RevertProposal;
   /** Why no proposal was produced (no culprit, no candidates, flag off, …). */
   reason?: string;
@@ -409,6 +417,11 @@ export async function bisectAndRevert(
 
     const originalHead = git(['rev-parse', 'HEAD']);
     if (!originalHead) return { reason: 'cannot resolve HEAD' };
+    const worktreeStatus = git(['status', '--porcelain']);
+    if (worktreeStatus === null) return { reason: 'cannot inspect worktree state' };
+    if (worktreeStatus.trim().length > 0) {
+      return { reason: 'worktree is dirty; refusing autonomous bisect checkout' };
+    }
     restoreSha = originalHead;
 
     const candidates = listAutoMergeCommits(git, sc.maxCandidates);
@@ -502,6 +515,10 @@ export async function bisectAndRevert(
 
     return {
       culprit,
+      observedHead: originalHead,
+      ...(greenSha ? { baselineHead: greenSha } : {}),
+      candidateCount: scoped.length,
+      basis: 'bisect-first-bad',
       revertProposal: { culprit, ...(culpritProposalId ? { culpritProposalId } : {}), proposal },
     };
   } catch {

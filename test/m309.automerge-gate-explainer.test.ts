@@ -145,7 +145,7 @@ describe('M309 explainAutoMergeGate', () => {
         pushToRemote: true,
         protectedRemote: {
           branchProtection: true,
-          requiredChecks: ['ci/test'],
+          requiredChecks: [{ context: 'ci/test', appId: '15368' }],
         },
       }),
       { decisionsForProposal: [] },

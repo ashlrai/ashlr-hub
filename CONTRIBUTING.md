@@ -40,7 +40,7 @@ To install the CLI while developing:
 | `npm run dev` | Run the CLI from source via `tsx` (no compile step). E.g. `npm run dev -- status` |
 | `npm test` | Run the full vitest suite once (`vitest run`) |
 | `npm run test:serial` | Run tests without file parallelism — required for tests that touch the same home dir |
-| `npm run test:ci` | Run the hermetic serial suite with isolated HOME and a watchdog timeout |
+| `npm run test:ci` | Run the hermetic serial suite with isolated HOME, inactivity detection, and a hard runtime cap |
 | `npm run lint` | ESLint over the repo |
 | `npm run typecheck` | `tsc --noEmit` — strict type check, no emit |
 | `npm run build` | `tsc -p tsconfig.json` + `scripts/copy-assets.mjs` → `dist/` |
@@ -63,7 +63,9 @@ The test suite must stay green and must not shrink (900+ tests across `test/`). 
 npm run test:ci
 ```
 
-This is the canonical CI invocation. It isolates HOME/ASHLR_HOME and kills the run with exit code 124 if Vitest leaks handles or exceeds `ASHLR_TEST_CI_TIMEOUT_MS` (default 15 minutes). Tests must not depend on the developer's real `~/.ashlr/`, real Desktop, real model endpoints, or installed tools.
+This is the canonical CI invocation. It isolates HOME/ASHLR_HOME and exits with code 124 if Vitest produces no output for `ASHLR_TEST_CI_IDLE_TIMEOUT_MS` (default 5 minutes) or exceeds `ASHLR_TEST_CI_TIMEOUT_MS` (default 15 minutes). The diagnostics distinguish an inactive process from an actively progressing suite that reaches the hard cap; only inactivity after Vitest's final summary is evidence of a possible leaked handle.
+
+Ubuntu runs the suite once. Windows runs three independent serial Vitest shards (`--shard=1/3`, `2/3`, and `3/3`) in separate CI jobs. This reduces wall-clock time without enabling same-checkout file parallelism or sharing mutable HOME state between tests.
 
 ---
 

@@ -48,6 +48,7 @@ import {
   runEventSummary as normalizeRunEventSummary,
 } from '../learning/causal.js';
 import { listEnrolled } from '../sandbox/policy.js';
+import { fsyncDirectory } from '../util/durability.js';
 import { repairGenerationIdFromHandoffId } from './repair-handoff-journal.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 
@@ -552,12 +553,20 @@ function ownedByCurrentUser(stat: ReturnType<typeof fstatSync>): boolean {
   return typeof process.getuid !== 'function' || Number(stat.uid) === process.getuid();
 }
 
-function unsafeLedgerFile(stat: ReturnType<typeof fstatSync>): boolean {
-  return Number(stat.nlink) !== 1 || !ownedByCurrentUser(stat) || (Number(stat.mode) & 0o022) !== 0;
+export function isSafeAgentActionLedgerFile(
+  stat: ReturnType<typeof fstatSync>,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return !stat.isSymbolicLink() && stat.isFile() && Number(stat.nlink) === 1 &&
+    ownedByCurrentUser(stat) && (platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
 }
 
-function unsafeLedgerDirectory(stat: ReturnType<typeof fstatSync>): boolean {
-  return !ownedByCurrentUser(stat) || (Number(stat.mode) & 0o022) !== 0;
+export function isSafeAgentActionLedgerDirectory(
+  stat: ReturnType<typeof fstatSync>,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return !stat.isSymbolicLink() && stat.isDirectory() && ownedByCurrentUser(stat) &&
+    (platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
 }
 
 function sameDirectorySnapshot(
@@ -576,16 +585,6 @@ function writeAll(fd: number, bytes: Buffer): void {
   }
 }
 
-function fsyncDirectory(path: string): void {
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-    fsyncSync(fd);
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
 function appendAgentActionLine(
   path: string,
   line: string,
@@ -596,13 +595,13 @@ function appendAgentActionLine(
   let fd: number | undefined;
   try {
     const directoryBefore = lstatSync(dir);
-    if (!sameFile(directorySnapshot, directoryBefore) || unsafeLedgerDirectory(directoryBefore)) {
+    if (!sameFile(directorySnapshot, directoryBefore) || !isSafeAgentActionLedgerDirectory(directoryBefore)) {
       throw new Error('agent-action directory identity changed');
     }
     let pathBefore: NonNullable<ReturnType<typeof lstatSync>> | undefined;
     try {
       pathBefore = lstatSync(path);
-      if (pathBefore.isSymbolicLink() || !pathBefore.isFile() || unsafeLedgerFile(pathBefore)) {
+      if (!isSafeAgentActionLedgerFile(pathBefore)) {
         throw new Error('agent-action ledger path is unsafe');
       }
     } catch (error) {
@@ -615,7 +614,7 @@ function appendAgentActionLine(
       0o600,
     );
     const opened = fstatSync(fd);
-    if (!opened.isFile() || unsafeLedgerFile(opened) || (pathBefore && !sameFile(pathBefore, opened))) {
+    if (!isSafeAgentActionLedgerFile(opened) || (pathBefore && !sameFile(pathBefore, opened))) {
       throw new Error('agent-action ledger is not a safe regular file');
     }
     fchmodSync(fd, 0o600);
@@ -632,9 +631,9 @@ function appendAgentActionLine(
     const pathAfter = lstatSync(path);
     const directoryAfter = lstatSync(dir);
     if (
-      !after.isFile() || unsafeLedgerFile(after) || !sameFile(opened, after) ||
+      !isSafeAgentActionLedgerFile(after) || !sameFile(opened, after) ||
       pathAfter.isSymbolicLink() || !pathAfter.isFile() || !sameFile(after, pathAfter) ||
-      !sameFile(directorySnapshot, directoryAfter) || unsafeLedgerDirectory(directoryAfter)
+      !sameFile(directorySnapshot, directoryAfter) || !isSafeAgentActionLedgerDirectory(directoryAfter)
     ) throw new Error('agent-action append identity changed');
     if (sync && !pathBefore) fsyncDirectory(dir);
   } finally {
@@ -662,9 +661,7 @@ export function recordAgentActionResult(
     if (!lock) return { attempted, recorded };
     const directoryBefore = lstatSync(dir);
     if (
-      directoryBefore.isSymbolicLink() ||
-      !directoryBefore.isDirectory() ||
-      unsafeLedgerDirectory(directoryBefore)
+      !isSafeAgentActionLedgerDirectory(directoryBefore)
     ) return { attempted, recorded };
     const partitions = new Set<string>();
     for (const event of events) {
@@ -740,13 +737,13 @@ function readAgentActionFile(
   let fd: number | undefined;
   try {
     const pathBefore = lstatSync(path);
-    if (pathBefore.isSymbolicLink() || !pathBefore.isFile() || unsafeLedgerFile(pathBefore)) {
+    if (!isSafeAgentActionLedgerFile(pathBefore)) {
       return { ok: false, reason: 'io-error' };
     }
     if (pathBefore.size > maxBytes) return { ok: false, reason: 'byte-limit' };
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     const before = fstatSync(fd);
-    if (!before.isFile() || unsafeLedgerFile(before) || !sameFile(pathBefore, before)) {
+    if (!isSafeAgentActionLedgerFile(before) || !sameFile(pathBefore, before)) {
       return { ok: false, reason: 'io-error' };
     }
     if (before.size > maxBytes) return { ok: false, reason: 'byte-limit' };
@@ -755,8 +752,8 @@ function readAgentActionFile(
     const after = fstatSync(fd);
     const pathAfter = lstatSync(path);
     if (
-      pathAfter.isSymbolicLink() || !pathAfter.isFile() || !after.isFile() ||
-      unsafeLedgerFile(after) || !sameFile(before, after) || !sameFile(after, pathAfter) ||
+      pathAfter.isSymbolicLink() || !pathAfter.isFile() || !isSafeAgentActionLedgerFile(after) ||
+      !sameFile(before, after) || !sameFile(after, pathAfter) ||
       after.size !== before.size || bytesRead !== before.size
     ) return { ok: false, reason: 'io-error' };
     return { ok: true, text: buffer.toString('utf8'), bytesRead };
@@ -786,7 +783,7 @@ export function readAgentActionsDetailed(opts: ReadAgentActionsOptions = {}): Ag
     let directorySnapshot: ReturnType<typeof lstatSync>;
     try {
       directorySnapshot = lstatSync(dir);
-      if (directorySnapshot.isSymbolicLink() || !directorySnapshot.isDirectory() || unsafeLedgerDirectory(directorySnapshot)) {
+      if (!isSafeAgentActionLedgerDirectory(directorySnapshot)) {
         return emptyAgentActionRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
       }
     } catch {
@@ -904,8 +901,8 @@ export function readAgentActionsDetailed(opts: ReadAgentActionsOptions = {}): Ag
     try {
       const directoryAfter = lstatSync(dir);
       if (
-        directoryAfter.isSymbolicLink() || !directoryAfter.isDirectory() ||
-        unsafeLedgerDirectory(directoryAfter) || !sameDirectorySnapshot(directorySnapshot, directoryAfter)
+        !isSafeAgentActionLedgerDirectory(directoryAfter) ||
+        !sameDirectorySnapshot(directorySnapshot, directoryAfter)
       ) {
         pushStopReason(result.stopReasons, 'io-error');
         result.complete = false;

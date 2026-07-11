@@ -257,7 +257,7 @@ function evidenceCfg(over: Record<string, unknown> = {}): AshlrConfig {
         pushToRemote: true,
         protectedRemote: {
           branchProtection: true,
-          requiredChecks: ['ci/test'],
+          requiredChecks: [{ context: 'ci/test', appId: '15368' }],
         },
         trustBasis: 'evidence',
         ...over,

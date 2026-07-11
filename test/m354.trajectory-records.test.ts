@@ -287,6 +287,49 @@ describe('Trajectory records', () => {
     });
   });
 
+  it('attaches realized post-merge truth without rewriting the historical merge outcome', () => {
+    const realizedAt = '2026-07-09T00:04:00.000Z';
+    const [record] = listTrajectoryRecords({
+      windowHours: 1000,
+      deps: deps({
+        listOutcomeRecords: () => [outcomeRecord({
+          judgeTraces: [{
+            ts: TS2,
+            judgeEngine: 'codex',
+            verdict: 'ship',
+            scores: { correctness: 1, completeness: 1, quality: 1, safety: 1 },
+            outcome: 'reverted',
+            outcomeAt: realizedAt,
+          }],
+        })],
+      }),
+    });
+
+    expect(record).toMatchObject({
+      terminalOutcome: 'merged',
+      realizedOutcome: 'reverted',
+      proposalId: 'prop-1',
+      runId: 'run-1',
+      trajectoryId: 'traj-1',
+    });
+    expect(record?.timeline).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        ts: realizedAt,
+        kind: 'post-merge',
+        outcome: 'reverted',
+        learningSource: 'outcome-record',
+        labelBasis: 'post-merge-regression',
+      }),
+    ]));
+    const summary = summarizeTrajectoryLearning([record!], 24);
+    expect(summary.realizedOutcomes).toMatchObject({ reverted: 1 });
+    expect(summary.terminalOutcomes).toMatchObject({ merged: 1 });
+    expect(summary.recent[0]).toMatchObject({
+      terminalOutcome: 'merged',
+      realizedOutcome: 'reverted',
+    });
+  });
+
   it('does not expose raw evidence details, diffs, stdout, or gate text', () => {
     const records = listTrajectoryRecords({ windowHours: 1000, deps: deps() });
     const json = JSON.stringify(records);

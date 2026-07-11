@@ -33,6 +33,7 @@ import {
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { fsyncDirectory } from '../util/durability.js';
 import { isSuppressibleWorkedOutcome, isWorkedOutcome } from './worked-ledger.js';
 import type { WorkedOutcome, WorkedEvent } from './worked-ledger.js';
 
@@ -261,7 +262,6 @@ export class SharedStore {
   private writeQueue(q: SharedFleetQueue): boolean {
     let tmp: string | null = null;
     let fd: number | undefined;
-    let dirFd: number | undefined;
     try {
       if (!this.ensureDir()) return false;
       const bounded: SharedFleetQueue = {
@@ -277,8 +277,7 @@ export class SharedStore {
       fd = undefined;
       renameSync(tmp, dest);
       tmp = null;
-      dirFd = openSync(this.dirPath, 'r');
-      fsyncSync(dirFd);
+      fsyncDirectory(this.dirPath);
       return true;
     } catch {
       // Persistence failure must not crash the fleet.
@@ -292,7 +291,6 @@ export class SharedStore {
       return false;
     } finally {
       if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
-      if (dirFd !== undefined) { try { closeSync(dirFd); } catch { /* best effort */ } }
     }
   }
 

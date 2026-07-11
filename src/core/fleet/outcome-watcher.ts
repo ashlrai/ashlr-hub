@@ -25,6 +25,8 @@ import { join, dirname } from 'node:path';
 
 import type { AshlrConfig, SkillCard } from '../types.js';
 import { readJudgeTraces, linkOutcomeResult } from './judge-trace.js';
+import { listProposals, loadProposal } from '../inbox/store.js';
+import { recordPostMergeObservation, type PostMergeOutcome } from './post-merge-observations.js';
 import { attestSkillCard, verifyAttestedSkillCard } from './skill-attestation.js';
 import { readSkillCards, recordSkillCard, sanitizeSkillCard } from './skill-records.js';
 
@@ -43,6 +45,7 @@ const THROTTLE_MS = 6 * 60 * 60 * 1000; // 6h
 const DEFAULT_LOOKBACK_DAYS = 30;
 const DEFAULT_FOLLOWUP_WINDOW_DAYS = 7;
 const MAX_CANDIDATE_COMMITS = 50;
+const MAX_OUTCOME_PROPOSALS = 200;
 const FOLLOWUP_SUBJECT_RE = /\b(fix|hotfix|revert)\b/i;
 
 function defaultStateFile(): string {
@@ -60,6 +63,35 @@ function git(repo: string, args: string[]): string {
 function filesOf(repo: string, sha: string): Set<string> {
   const out = git(repo, ['show', '--name-only', '--format=', sha]);
   return new Set(out.split('\n').map((l) => l.trim()).filter((l) => l.length > 0));
+}
+
+function recordRealizedOutcome(
+  proposalId: string,
+  mergeCommit: string,
+  observedHead: string,
+  outcome: PostMergeOutcome,
+  basis: 'git-revert-reference' | 'overlapping-fix',
+  now: number,
+): boolean {
+  const proposal = loadProposal(proposalId);
+  if (!proposal?.repo) return false;
+  const result = recordPostMergeObservation({
+    observedAt: new Date(now).toISOString(),
+    outcome,
+    basis,
+    confidence: basis === 'git-revert-reference' ? 'deterministic' : 'heuristic',
+    repo: proposal.repo,
+    proposalId,
+    ...(proposal.runId ? { runId: proposal.runId } : {}),
+    ...(proposal.trajectoryId ? { trajectoryId: proposal.trajectoryId } : {}),
+    ...(proposal.workItemId ? { workItemId: proposal.workItemId } : {}),
+    mergeCommit,
+    observedHead,
+    ...(proposal.verifyResult?.ran?.length
+      ? { commandKinds: [...new Set(proposal.verifyResult.ran.map((command) => command.kind))].sort() }
+      : {}),
+  });
+  return result.recorded + result.upgraded + result.replayed > 0;
 }
 
 /**
@@ -184,9 +216,10 @@ export async function scanRealWorldOutcomes(
     const traceQuality = (allTraces as typeof allTraces & {
       sourceQuality?: { sourceState?: string; complete?: boolean };
     }).sourceQuality;
-    if (traceQuality !== undefined && (traceQuality.sourceState === 'degraded' || traceQuality.complete !== true)) {
+    const traceSourceHealthy = traceQuality === undefined ||
+      (traceQuality.sourceState !== 'degraded' && traceQuality.complete === true);
+    if (!traceSourceHealthy) {
       scan.skipped++;
-      return scan;
     }
     // M338 (review fix): only 'reverted' is TERMINAL. A 'followed-up' link
     // must not block a later real revert — the proposal stays scannable for
@@ -204,21 +237,31 @@ export async function scanRealWorldOutcomes(
     // whose latest known outcome is merged OR followed-up (reverted stays
     // terminal; the follow-up re-link is suppressed inside the loop).
     const seenPid = new Set<string>();
-    const traces = allTraces.filter((t) => {
+    const traces = (traceSourceHealthy ? allTraces : []).filter((t) => {
       if (t.outcome !== 'merged' && t.outcome !== 'followed-up') return false;
       if (revertedPids.has(t.proposalId)) return false;
       if (seenPid.has(t.proposalId)) return false;
       seenPid.add(t.proposalId);
       return true;
     });
-    if (traces.length === 0) return scan;
+    const candidates = new Map<string, { proposalId: string; traceBacked: boolean }>();
+    for (const trace of traces) candidates.set(trace.proposalId, { proposalId: trace.proposalId, traceBacked: true });
+    const appliedProposals = typeof listProposals === 'function'
+      ? listProposals({ status: 'applied' })
+      : [];
+    for (const proposal of appliedProposals) {
+      const candidateAt = proposal.remoteHandoff?.updatedAt ?? proposal.createdAt;
+      if (Date.parse(candidateAt) < sinceMs) continue;
+      if (!candidates.has(proposal.id)) candidates.set(proposal.id, { proposalId: proposal.id, traceBacked: false });
+      if (candidates.size >= MAX_OUTCOME_PROPOSALS) break;
+    }
+    if (candidates.size === 0) return scan;
 
-    const { loadProposal } = await import('../inbox/store.js');
-
-    for (const trace of traces) {
+    for (const candidate of candidates.values()) {
       scan.scanned++;
       try {
-        const repo = loadProposal(trace.proposalId)?.repo;
+        const proposal = loadProposal(candidate.proposalId);
+        const repo = proposal?.repo;
         if (!repo || !existsSync(repo)) {
           scan.skipped++;
           continue;
@@ -229,18 +272,25 @@ export async function scanRealWorldOutcomes(
         // the original subject (Revert "ashlr: auto-merge proposal <id>"), so
         // the newest match can be the revert itself — the true merge commit
         // always predates it.
-        const mergeMatches = git(repo, [
-          'log', '-F', `--grep=ashlr: auto-merge proposal ${trace.proposalId}`,
-          '--format=%H',
-        ])
+        const expectedSubject = `ashlr: auto-merge proposal ${candidate.proposalId}`;
+        const mergeMatches = git(repo, ['log', '--format=%H%x09%s'])
           .split('\n')
-          .map((l) => l.trim())
-          .filter((l) => l.length > 0);
-        const mergeSha = mergeMatches.at(-1) ?? '';
+          .map((line) => line.split('\t', 2))
+          .filter((parts) => parts[1] === expectedSubject)
+          .map((parts) => parts[0] ?? '')
+          .filter(Boolean);
+        const mergeSha = proposal.remoteHandoff?.mergeCommitOid ?? mergeMatches.at(-1) ?? '';
         if (!mergeSha) {
           scan.skipped++;
           continue;
         }
+        const observedHead = git(repo, ['rev-parse', 'HEAD']).trim();
+        if (!/^[0-9a-f]{40}$/i.test(mergeSha) || !/^[0-9a-f]{40}$/i.test(observedHead)) {
+          scan.skipped++;
+          continue;
+        }
+        git(repo, ['cat-file', '-e', `${mergeSha}^{commit}`]);
+        git(repo, ['merge-base', '--is-ancestor', mergeSha, observedHead]);
 
         // (a) Revert: any commit referencing the merge sha.
         const revertSha = git(repo, [
@@ -248,19 +298,25 @@ export async function scanRealWorldOutcomes(
           '--format=%H', '-n', '1',
         ]).trim();
         if (revertSha) {
-          const linked = linkOutcomeResult(trace.proposalId, 'reverted');
-          if (linked.status !== 'linked' && linked.status !== 'already-linked') {
+          if (!recordRealizedOutcome(candidate.proposalId, mergeSha, observedHead, 'reverted', 'git-revert-reference', now)) {
             scan.skipped++;
             continue;
           }
-          invalidateVerifiedSkills(trace.proposalId, 'revoked', now);
+          const linked = candidate.traceBacked
+            ? linkOutcomeResult(candidate.proposalId, 'reverted')
+            : { status: 'not-applicable' as const };
+          if (candidate.traceBacked && linked.status !== 'linked' && linked.status !== 'already-linked') {
+            scan.skipped++;
+            continue;
+          }
+          invalidateVerifiedSkills(candidate.proposalId, 'revoked', now);
           scan.reverts++;
           continue;
         }
 
         // M338: already followed-up — only the reverted UPGRADE above is
         // interesting for this proposal; never re-link the same outcome.
-        if (followedUpPids.has(trace.proposalId)) continue;
+        if (followedUpPids.has(candidate.proposalId)) continue;
 
         // (b) Follow-up fix: a near-term commit after the merge touching the
         //     same files with a fix-flavored subject.
@@ -296,12 +352,18 @@ export async function scanRealWorldOutcomes(
           const touched = filesOf(repo, sha);
           const overlaps = [...touched].some((f) => mergedFiles.has(f));
           if (overlaps) {
-            const linked = linkOutcomeResult(trace.proposalId, 'followed-up');
-            if (linked.status !== 'linked' && linked.status !== 'already-linked') {
+            if (!recordRealizedOutcome(candidate.proposalId, mergeSha, observedHead, 'followed-up', 'overlapping-fix', now)) {
               scan.skipped++;
               break;
             }
-            invalidateVerifiedSkills(trace.proposalId, 'deprecated', now);
+            const linked = candidate.traceBacked
+              ? linkOutcomeResult(candidate.proposalId, 'followed-up')
+              : { status: 'not-applicable' as const };
+            if (candidate.traceBacked && linked.status !== 'linked' && linked.status !== 'already-linked') {
+              scan.skipped++;
+              break;
+            }
+            invalidateVerifiedSkills(candidate.proposalId, 'deprecated', now);
             scan.followUps++;
             break;
           }

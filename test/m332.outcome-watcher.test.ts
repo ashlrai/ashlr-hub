@@ -29,6 +29,8 @@ import type { AshlrConfig, SkillCard } from '../src/core/types.js';
 let traces: Record<string, unknown>[] = [];
 const linked: Array<[string, string]> = [];
 let proposalRepo = '';
+let appliedProposals: Record<string, unknown>[] = [];
+const recordedObservations: Record<string, unknown>[] = [];
 let skillCards: SkillCard[] = [];
 const recordedSkillCards: SkillCard[] = [];
 
@@ -44,7 +46,16 @@ vi.mock('../src/core/fleet/judge-trace.js', () => ({
 }));
 
 vi.mock('../src/core/inbox/store.js', () => ({
-  loadProposal: vi.fn(() => (proposalRepo ? { repo: proposalRepo } : null)),
+  loadProposal: vi.fn((id: string) => appliedProposals.find((proposal) => proposal['id'] === id)
+    ?? (proposalRepo ? { repo: proposalRepo } : null)),
+  listProposals: vi.fn(() => appliedProposals),
+}));
+
+vi.mock('../src/core/fleet/post-merge-observations.js', () => ({
+  recordPostMergeObservation: vi.fn((input: Record<string, unknown>) => {
+    recordedObservations.push(input);
+    return { recorded: 1, upgraded: 0, replayed: 0 };
+  }),
 }));
 
 vi.mock('../src/core/fleet/skill-records.js', () => ({
@@ -81,6 +92,7 @@ import { scanRealWorldOutcomes } from '../src/core/fleet/outcome-watcher.js';
 import { outcomeToIntent } from '../src/core/fleet/judge-calibration.js';
 import { buildProducerScores } from '../src/core/run/learned-router.js';
 import { readJudgeTraces } from '../src/core/fleet/judge-trace.js';
+import { recordPostMergeObservation } from '../src/core/fleet/post-merge-observations.js';
 import { attestSkillCard } from '../src/core/fleet/skill-attestation.js';
 import { sanitizeSkillCard } from '../src/core/fleet/skill-records.js';
 
@@ -165,6 +177,8 @@ beforeEach(() => {
   ledger = [];
   linked.length = 0;
   proposalRepo = '';
+  appliedProposals = [];
+  recordedObservations.length = 0;
   skillCards = [];
   recordedSkillCards.length = 0;
   const stateDir = mkdtempSync(join(tmpdir(), 'ashlr-m332-state-'));
@@ -236,6 +250,91 @@ describe('M332 scanRealWorldOutcomes', () => {
         skillId: 'skill.proposal.p-fix',
         revision: 2,
         status: 'deprecated',
+      }),
+    ]);
+  }, 30_000);
+
+  it('does not mutate trace or skill state when signed observation persistence fails', async () => {
+    proposalRepo = repoWithMerge('p-write-fail');
+    const mergeSha = g(proposalRepo, ['rev-parse', 'HEAD']).trim();
+    g(proposalRepo, ['revert', '--no-edit', mergeSha]);
+    traces = [mergedTrace('p-write-fail')];
+    skillCards = [verifiedCard('p-write-fail')];
+    vi.mocked(recordPostMergeObservation).mockReturnValueOnce({
+      attempted: 1, recorded: 0, upgraded: 0, replayed: 0, obsolete: 0,
+      conflicted: 0, invalid: 0, failed: 1,
+    });
+
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+
+    expect(scan.reverts).toBe(0);
+    expect(scan.skipped).toBe(1);
+    expect(linked).toEqual([]);
+    expect(recordedSkillCards).toEqual([]);
+  }, 30_000);
+
+  it('refuses a stored merge SHA that is not an ancestor of the observed head', async () => {
+    proposalRepo = repoWithMerge('p-ancestor');
+    const mainBranch = g(proposalRepo, ['branch', '--show-current']).trim();
+    g(proposalRepo, ['checkout', '--quiet', '-b', 'divergent']);
+    writeFileSync(join(proposalRepo, 'divergent.txt'), 'divergent\n');
+    g(proposalRepo, ['add', '-A']);
+    g(proposalRepo, ['commit', '--quiet', '-m', 'divergent merge object']);
+    const divergentSha = g(proposalRepo, ['rev-parse', 'HEAD']).trim();
+    g(proposalRepo, ['checkout', '--quiet', mainBranch]);
+    appliedProposals = [{
+      id: 'p-ancestor', status: 'applied', createdAt: new Date().toISOString(),
+      repo: proposalRepo, remoteHandoff: { mergeCommitOid: divergentSha },
+    }];
+
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+
+    expect(scan.skipped).toBe(1);
+    expect(recordedObservations).toEqual([]);
+  }, 30_000);
+
+  it('does not bind a proposal id to a longer commit-subject prefix', async () => {
+    proposalRepo = repoWithMerge('prefix-longer');
+    traces = [mergedTrace('prefix')];
+
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+
+    expect(scan.skipped).toBe(1);
+    expect(recordedObservations).toEqual([]);
+  }, 30_000);
+
+  it('records a judge-free applied merge from its remote merge SHA', async () => {
+    proposalRepo = repoWithMerge('p-evidence');
+    const mergeSha = g(proposalRepo, ['rev-parse', 'HEAD']).trim();
+    writeFileSync(join(proposalRepo, 'file.ts'), 'evidence fix\n');
+    g(proposalRepo, ['add', '-A']);
+    g(proposalRepo, ['commit', '--quiet', '-m', 'fix: repair evidence merge']);
+    appliedProposals = [{
+      id: 'p-evidence',
+      status: 'applied',
+      createdAt: new Date().toISOString(),
+      repo: proposalRepo,
+      runId: 'run-evidence',
+      trajectoryId: 'trajectory-evidence',
+      workItemId: 'work-evidence',
+      remoteHandoff: { mergeCommitOid: mergeSha },
+      verifyResult: { ran: [{ kind: 'test' }, { kind: 'typecheck' }] },
+    }];
+
+    const scan = await scanRealWorldOutcomes(cfg, { force: true, stateFile });
+
+    expect(scan.followUps).toBe(1);
+    expect(linked).toEqual([]);
+    expect(recordedObservations).toEqual([
+      expect.objectContaining({
+        proposalId: 'p-evidence',
+        runId: 'run-evidence',
+        trajectoryId: 'trajectory-evidence',
+        workItemId: 'work-evidence',
+        mergeCommit: mergeSha,
+        outcome: 'followed-up',
+        basis: 'overlapping-fix',
+        commandKinds: ['test', 'typecheck'],
       }),
     ]);
   }, 30_000);

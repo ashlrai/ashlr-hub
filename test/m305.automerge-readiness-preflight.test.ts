@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import {
   evaluateAutoMergeReadinessPreflight,
+  evaluateEvidenceRemoteProtectionSignal,
   type AutoMergeResult,
 } from '../src/core/inbox/merge.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
@@ -113,6 +114,63 @@ describe('M305 evaluateAutoMergeReadinessPreflight', () => {
         cfg(),
       ).reason,
     ).toMatch(/risk class 'high' exceeds maxRisk 'low'/);
+  });
+});
+
+describe('M305 evidence remote check identity expectations', () => {
+  const signal = (requiredChecks: unknown[]) => evaluateEvidenceRemoteProtectionSignal(cfg({
+    trustBasis: 'evidence',
+    protectedRemote: { branchProtection: true, requiredChecks },
+  }));
+
+  it('accepts unique context and App identity pairs and normalizes numeric ids', () => {
+    expect(signal([
+      { context: 'CI (Node 22, ubuntu-latest)', appId: 15368 },
+      { context: 'CI (Node 22, windows-latest)', appId: '15368' },
+    ])).toMatchObject({
+      ok: true,
+      expectationMode: 'exact',
+      requiredChecks: ['CI (Node 22, ubuntu-latest)', 'CI (Node 22, windows-latest)'],
+      requiredCheckBindings: [
+        { context: 'CI (Node 22, ubuntu-latest)', appId: '15368' },
+        { context: 'CI (Node 22, windows-latest)', appId: '15368' },
+      ],
+    });
+  });
+
+  it('keeps legacy string input visible but non-authoritative', () => {
+    expect(signal(['ci/test'])).toMatchObject({
+      ok: false,
+      expectationMode: 'legacy',
+      requiredChecks: [],
+      requiredCheckBindings: [],
+    });
+    expect(signal(['ci/test']).detail).toMatch(/legacy required-check names/);
+    expect(evaluateAutoMergeReadinessPreflight(proposal(), cfg({
+      trustBasis: 'evidence',
+      pushToRemote: true,
+      protectedRemote: { branchProtection: true, requiredChecks: ['ci/test'] },
+    }))).toMatchObject({ ready: false, permanent: false });
+  });
+
+  it('rejects null App identity and duplicate or conflicting contexts', () => {
+    const nullApp = signal([{ context: 'ci/test', appId: null }]);
+    expect(nullApp).toMatchObject({ ok: false, expectationMode: 'invalid' });
+    expect(nullApp.detail).toMatch(/positive GitHub App id/);
+
+    const duplicate = signal([
+      { context: 'ci/test', appId: 1 },
+      { context: 'ci/test', appId: '1' },
+    ]);
+    expect(duplicate).toMatchObject({ ok: false, expectationMode: 'invalid' });
+    expect(duplicate.detail).toMatch(/duplicate configured required-check context/);
+
+    const conflict = signal([
+      { context: 'ci/test', appId: 1 },
+      { context: 'ci/test', appId: 2 },
+    ]);
+    expect(conflict).toMatchObject({ ok: false, expectationMode: 'invalid' });
+    expect(conflict.detail).toMatch(/conflicting GitHub App identities/);
   });
 });
 

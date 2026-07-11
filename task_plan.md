@@ -95,6 +95,18 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve budget, sandbox, capture, provenance, and merge authority while recording truthful terminal outcomes.
 - [x] Run focused/full verification, adversarial review, commit, push, reload, and production smoke.
 
+## Current Overnight Cycle - Windows Fleet Durability
+- [x] Rehydrate current release state and isolate the Windows persistence failure mode.
+- [x] Centralize platform-aware directory durability without weakening file fsync or POSIX checks.
+- [x] Migrate every active durability point, including synced agent-action and signed post-merge writes.
+- [x] Split Windows CI into three isolated serial shards and harden the watchdog against surviving descendants.
+- [x] Require exact GitHub check context plus App identity without auto-rejecting proposals for operator config drift.
+- [x] Add signed observation-only post-merge outcomes and join judge-free merges into causal trajectories.
+- [x] Persist host merge SHAs, require local ancestry before attribution, and make observation durability precede learning side effects.
+- [x] Wire regression-sentinel outcomes into the learning graph as explicitly heuristic until parent-green proof exists.
+- [x] Run focused/full verification and three independent adversarial reviews; close every reported P1.
+- [ ] Commit, push, watch all Ubuntu/Windows CI jobs, reload production, and record the live result.
+
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
 - Keep current hub `master` clean and synced as baseline; new work should be incremental and verified before pushing.

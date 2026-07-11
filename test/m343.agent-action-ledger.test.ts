@@ -19,6 +19,8 @@ import { join } from 'node:path';
 import {
   agentActionsDir,
   filterAgentActionsByRepoScope,
+  isSafeAgentActionLedgerDirectory,
+  isSafeAgentActionLedgerFile,
   readAgentActions,
   readAgentActionsDetailed,
   readAgentWorkspace,
@@ -84,6 +86,49 @@ afterEach(() => {
 });
 
 describe('M343 agent action ledger', () => {
+  it('ignores emulated mode bits only on Windows while preserving filesystem safety checks', () => {
+    const regular = statSync(home);
+    const fileStat = {
+      ...regular,
+      mode: (regular.mode & ~0o777) | 0o666,
+      nlink: 1,
+      isFile: () => true,
+      isDirectory: () => false,
+      isSymbolicLink: () => false,
+    } as unknown as ReturnType<typeof statSync>;
+    const directoryStat = {
+      ...regular,
+      mode: (regular.mode & ~0o777) | 0o777,
+      isFile: () => false,
+      isDirectory: () => true,
+      isSymbolicLink: () => false,
+    } as unknown as ReturnType<typeof statSync>;
+
+    expect(isSafeAgentActionLedgerFile(fileStat, 'win32')).toBe(true);
+    expect(isSafeAgentActionLedgerFile(fileStat, 'linux')).toBe(false);
+    expect(isSafeAgentActionLedgerDirectory(directoryStat, 'win32')).toBe(true);
+    expect(isSafeAgentActionLedgerDirectory(directoryStat, 'linux')).toBe(false);
+
+    expect(isSafeAgentActionLedgerFile({
+      ...fileStat,
+      isSymbolicLink: () => true,
+    } as ReturnType<typeof statSync>, 'win32')).toBe(false);
+    expect(isSafeAgentActionLedgerFile({
+      ...fileStat,
+      nlink: 2,
+    } as ReturnType<typeof statSync>, 'win32')).toBe(false);
+    expect(isSafeAgentActionLedgerDirectory({
+      ...directoryStat,
+      isSymbolicLink: () => true,
+    } as ReturnType<typeof statSync>, 'win32')).toBe(false);
+    if (typeof process.getuid === 'function') {
+      expect(isSafeAgentActionLedgerFile({
+        ...fileStat,
+        uid: process.getuid() + 1,
+      } as ReturnType<typeof statSync>, 'win32')).toBe(false);
+    }
+  });
+
   it('appends and reads action events newest first', () => {
     recordAgentAction([
       makeEvent({ action: 'old-action', ts: '2026-07-07T23:59:00.000Z' }),

@@ -241,6 +241,30 @@ describe('readBranchProtectionAttestation cache', () => {
     expect(spawnMock).toHaveBeenCalledTimes(5);
   });
 
+  it('forceFresh does not join or get overwritten by an older in-flight read', async () => {
+    const oldClassic = result({
+      required_status_checks: { checks: [{ context: 'test', app_id: 1 }] },
+    });
+    const freshClassic = result({
+      required_status_checks: { checks: [{ context: 'test', app_id: 9 }] },
+    });
+    queue([
+      ...successSequence({ classic: oldClassic }),
+      ...successSequence({ classic: freshClassic }),
+    ]);
+
+    const older = readBranchProtectionAttestation('/repo/concurrent-refresh');
+    const fresher = readBranchProtectionAttestation('/repo/concurrent-refresh', undefined, { forceFresh: true });
+    const [oldEvidence, freshEvidence] = await Promise.all([older, fresher]);
+
+    expect(oldEvidence.requiredCheckBindings).toContainEqual({ context: 'test', appId: '1' });
+    expect(freshEvidence.requiredCheckBindings).toContainEqual({ context: 'test', appId: '9' });
+    expect(spawnMock).toHaveBeenCalledTimes(8);
+    expect((await readBranchProtectionAttestation('/repo/concurrent-refresh')).requiredCheckBindings)
+      .toContainEqual({ context: 'test', appId: '9' });
+    expect(spawnMock).toHaveBeenCalledTimes(8);
+  });
+
   it('evicts the least-recently-used entry beyond 128 keys', async () => {
     spawnMock.mockImplementation((_bin: string, args: string[]) => {
       if (args[0] === 'repo') return successSequence()[0];

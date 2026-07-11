@@ -4716,7 +4716,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         pushToRemote: true,
         protectedRemote: {
           branchProtection: true,
-          requiredChecks: ['ci/test'],
+          requiredChecks: [{ context: 'ci/test', appId: '15368' }],
         },
       },
     });
@@ -4761,7 +4761,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         pushToRemote: true,
         protectedRemote: {
           branchProtection: true,
-          requiredChecks: ['ci/test'],
+          requiredChecks: [{ context: 'ci/test', appId: '15368' }],
         },
       },
     });
@@ -4807,7 +4807,7 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
         pushToRemote: true,
         protectedRemote: {
           branchProtection: true,
-          requiredChecks: ['ci/test'],
+          requiredChecks: [{ context: 'ci/test', appId: '15368' }],
         },
       },
     });

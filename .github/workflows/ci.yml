@@ -13,11 +13,23 @@ jobs:
     # Windows lane the next refactor reintroduces a split('/') or a `which`
     # and nobody notices. Platform-incompatible tests stay skip-guarded with a
     # stated reason (symlinks/EPERM, POSIX mode bits, sandbox-exec, rg/grep).
-    name: CI (Node 22, ${{ matrix.os }})
+    name: CI (Node 22, ${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            label: ubuntu
+            test_args: ""
+          - os: windows-latest
+            label: windows, shard 1/3
+            test_args: --shard=1/3
+          - os: windows-latest
+            label: windows, shard 2/3
+            test_args: --shard=2/3
+          - os: windows-latest
+            label: windows, shard 3/3
+            test_args: --shard=3/3
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -44,9 +56,10 @@ jobs:
 
       - name: Test (hermetic)
         # scripts/test-ci.mjs isolates HOME from real ~/.ashlr/ state and adds
-        # a watchdog so leaked handles fail loudly instead of hanging the gate.
+        # inactivity and hard-runtime watchdogs. Windows shards run serially in
+        # independent checkouts so they cannot share mutable test state.
         # This is the canonical CI invocation documented in CONTRIBUTING.md.
-        run: npm run test:ci
+        run: npm run test:ci -- ${{ matrix.test_args }}
 
       # M33: keep the published exports map honest — pack the tarball, install
       # it into a clean dir, and exercise the bin + the ./types entry point.

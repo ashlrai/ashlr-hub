@@ -150,26 +150,48 @@ function scrubTrace(trace: JudgeTrace): JudgeTrace {
   };
 }
 
+function ownedByCurrentUser(stat: ReturnType<typeof fstatSync>): boolean {
+  return typeof process.getuid !== 'function' || Number(stat.uid) === process.getuid();
+}
+
+export function isSafeJudgeTraceFile(
+  stat: ReturnType<typeof fstatSync>,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return !stat.isSymbolicLink() && stat.isFile() && Number(stat.nlink) === 1 &&
+    ownedByCurrentUser(stat) && (platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
+}
+
+export function isSafeJudgeTraceDirectory(
+  stat: ReturnType<typeof fstatSync>,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return !stat.isSymbolicLink() && stat.isDirectory() && ownedByCurrentUser(stat) &&
+    (platform === 'win32' || (Number(stat.mode) & 0o022) === 0);
+}
+
 function appendTraceLine(path: string, line: string): boolean {
   const bytes = Buffer.from(line, 'utf8');
   if (bytes.length > MAX_ROW_BYTES) return false;
   let fd: number | undefined;
   try {
     const directoryBefore = lstatSync(dirname(path));
-    if (
-      directoryBefore.isSymbolicLink() ||
-      !directoryBefore.isDirectory() ||
-      (typeof process.getuid === 'function' && Number(directoryBefore.uid) !== process.getuid()) ||
-      (Number(directoryBefore.mode) & 0o022) !== 0
-    ) return false;
+    if (!isSafeJudgeTraceDirectory(directoryBefore)) return false;
+    let pathBefore: ReturnType<typeof lstatSync> | undefined;
+    try {
+      pathBefore = lstatSync(path);
+      if (!isSafeJudgeTraceFile(pathBefore)) return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+    }
     fd = openSync(
       path,
-      fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
+      fsConstants.O_APPEND | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW |
+        (pathBefore ? 0 : fsConstants.O_CREAT | fsConstants.O_EXCL),
       0o600,
     );
     const stat = fstatSync(fd);
-    if (!stat.isFile() || Number(stat.nlink) !== 1 || (Number(stat.mode) & 0o022) !== 0) return false;
-    if (typeof process.getuid === 'function' && Number(stat.uid) !== process.getuid()) return false;
+    if (!isSafeJudgeTraceFile(stat) || (pathBefore && !sameFile(pathBefore, stat))) return false;
     fchmodSync(fd, 0o600);
     if (stat.size > 0) {
       const tail = Buffer.alloc(1);
@@ -177,8 +199,12 @@ function appendTraceLine(path: string, line: string): boolean {
       if (tail[0] !== 0x0a) writeAll(fd, Buffer.from('\n'));
     }
     writeAll(fd, bytes);
+    const pathAfter = lstatSync(path);
     const directoryAfter = lstatSync(dirname(path));
-    if (!sameFile(directoryBefore, directoryAfter)) return false;
+    if (
+      !isSafeJudgeTraceFile(pathAfter) || !sameFile(stat, pathAfter) ||
+      !isSafeJudgeTraceDirectory(directoryAfter) || !sameFile(directoryBefore, directoryAfter)
+    ) return false;
     return true;
   } catch {
     return false;
@@ -215,12 +241,7 @@ export function recordJudgeTrace(trace: Omit<JudgeTrace, 'ts'> & { ts?: string }
       mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
     const directory = lstatSync(dir);
-    if (
-      directory.isSymbolicLink() ||
-      !directory.isDirectory() ||
-      (typeof process.getuid === 'function' && Number(directory.uid) !== process.getuid()) ||
-      (Number(directory.mode) & 0o022) !== 0
-    ) return;
+    if (!isSafeJudgeTraceDirectory(directory)) return;
     chmodSync(dir, 0o700);
 
     const record: JudgeTrace = scrubTrace({
@@ -291,12 +312,6 @@ function sameFile(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof f
   return left.dev === right.dev && left.ino === right.ino;
 }
 
-function unsafeFile(stat: ReturnType<typeof fstatSync>): boolean {
-  return Number(stat.nlink) !== 1 ||
-    (typeof process.getuid === 'function' && Number(stat.uid) !== process.getuid()) ||
-    (Number(stat.mode) & 0o022) !== 0;
-}
-
 function readTraceFile(
   path: string,
   maxBytes: number,
@@ -304,13 +319,13 @@ function readTraceFile(
   let fd: number | undefined;
   try {
     const pathBefore = lstatSync(path);
-    if (pathBefore.isSymbolicLink() || !pathBefore.isFile() || unsafeFile(pathBefore)) {
+    if (!isSafeJudgeTraceFile(pathBefore)) {
       return { ok: false, reason: 'io-error' };
     }
     if (Number(pathBefore.size) > maxBytes) return { ok: false, reason: 'byte-limit' };
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     const before = fstatSync(fd);
-    if (!before.isFile() || unsafeFile(before) || !sameFile(pathBefore, before)) {
+    if (!isSafeJudgeTraceFile(before) || !sameFile(pathBefore, before)) {
       return { ok: false, reason: 'io-error' };
     }
     const size = Number(before.size);
@@ -322,7 +337,7 @@ function readTraceFile(
     if (
       pathAfter.isSymbolicLink() ||
       !pathAfter.isFile() ||
-      unsafeFile(after) ||
+      !isSafeJudgeTraceFile(after) ||
       !sameFile(before, after) ||
       !sameFile(after, pathAfter) ||
       Number(after.size) !== size ||
@@ -385,9 +400,7 @@ export function readJudgeTracesDetailed(filter: ReadJudgeTracesOptions = {}): Ju
     const dir = judgeTracesDir();
     if (!existsSync(dir)) return emptyTraceRead('missing');
     const dirBefore = lstatSync(dir);
-    if (dirBefore.isSymbolicLink() || !dirBefore.isDirectory() ||
-      (typeof process.getuid === 'function' && Number(dirBefore.uid) !== process.getuid()) ||
-      (Number(dirBefore.mode) & 0o022) !== 0) {
+    if (!isSafeJudgeTraceDirectory(dirBefore)) {
       return emptyTraceRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
     }
 
@@ -480,7 +493,8 @@ export function readJudgeTracesDetailed(filter: ReadJudgeTracesOptions = {}): Ju
     }
     try {
       const dirAfter = lstatSync(dir);
-      if (!sameFile(dirBefore, dirAfter) || dirBefore.mtimeMs !== dirAfter.mtimeMs || dirBefore.ctimeMs !== dirAfter.ctimeMs) {
+      if (!isSafeJudgeTraceDirectory(dirAfter) || !sameFile(dirBefore, dirAfter) ||
+        dirBefore.mtimeMs !== dirAfter.mtimeMs || dirBefore.ctimeMs !== dirAfter.ctimeMs) {
         pushStopReason(result.stopReasons, 'io-error');
         result.complete = false;
         result.unreadableFiles++;

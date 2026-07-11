@@ -99,6 +99,51 @@ function mockClientWithReasoning(verdict: object): { complete: (s: string, u: st
 // ---------------------------------------------------------------------------
 
 describe('m141 judge-trace — round-trip', () => {
+  it('ignores emulated mode bits only on Windows while preserving filesystem safety checks', async () => {
+    const { isSafeJudgeTraceDirectory, isSafeJudgeTraceFile } =
+      await import('../src/core/fleet/judge-trace.js');
+    const regular = fs.statSync(tmpHome);
+    const fileStat = {
+      ...regular,
+      mode: (regular.mode & ~0o777) | 0o666,
+      nlink: 1,
+      isFile: () => true,
+      isDirectory: () => false,
+      isSymbolicLink: () => false,
+    } as unknown as ReturnType<typeof fs.statSync>;
+    const directoryStat = {
+      ...regular,
+      mode: (regular.mode & ~0o777) | 0o777,
+      isFile: () => false,
+      isDirectory: () => true,
+      isSymbolicLink: () => false,
+    } as unknown as ReturnType<typeof fs.statSync>;
+
+    expect(isSafeJudgeTraceFile(fileStat, 'win32')).toBe(true);
+    expect(isSafeJudgeTraceFile(fileStat, 'linux')).toBe(false);
+    expect(isSafeJudgeTraceDirectory(directoryStat, 'win32')).toBe(true);
+    expect(isSafeJudgeTraceDirectory(directoryStat, 'linux')).toBe(false);
+
+    expect(isSafeJudgeTraceFile({
+      ...fileStat,
+      isSymbolicLink: () => true,
+    } as ReturnType<typeof fs.statSync>, 'win32')).toBe(false);
+    expect(isSafeJudgeTraceFile({
+      ...fileStat,
+      nlink: 2,
+    } as ReturnType<typeof fs.statSync>, 'win32')).toBe(false);
+    expect(isSafeJudgeTraceDirectory({
+      ...directoryStat,
+      isSymbolicLink: () => true,
+    } as ReturnType<typeof fs.statSync>, 'win32')).toBe(false);
+    if (typeof process.getuid === 'function') {
+      expect(isSafeJudgeTraceFile({
+        ...fileStat,
+        uid: process.getuid() + 1,
+      } as ReturnType<typeof fs.statSync>, 'win32')).toBe(false);
+    }
+  });
+
   it('recordJudgeTrace writes a JSONL entry and readJudgeTraces reads it back', async () => {
     const { recordJudgeTrace, readJudgeTraces } = await import('../src/core/fleet/judge-trace.js');
 

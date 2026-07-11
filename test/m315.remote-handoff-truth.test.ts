@@ -134,7 +134,7 @@ function evidenceCfg(): AshlrConfig {
         pushToRemote: true,
         protectedRemote: {
           branchProtection: true,
-          requiredChecks: ['ci/test'],
+          requiredChecks: [{ context: 'ci/test', appId: '1' }],
         },
       },
     },
@@ -395,7 +395,47 @@ describe('M315 remote PR handoff truth', () => {
     const result = await autoMergeProposal(proposal.id, evidenceCfg());
 
     expect(result).toMatchObject({ ok: false, merged: false });
-    expect(result.reason).toMatch(/lack a concrete GitHub App\/integration binding/);
+    expect(result.reason).toMatch(/do not match live GitHub App identities/);
+    expect(createPrMock).not.toHaveBeenCalled();
+  });
+
+  it('evidence mode refuses a required check produced by the wrong GitHub App', async () => {
+    branchProtectionMock.mockImplementation(async (_repo: string, branch = 'main') => ({
+      ok: true,
+      available: true,
+      protected: true,
+      branchProtection: true,
+      nameWithOwner: 'ashlrai/fixture',
+      repositoryId: 'R_fixture',
+      defaultBranch: 'main',
+      branch,
+      baseHead: git(tmpRepo, ['rev-parse', branch]),
+      observedAt: new Date().toISOString(),
+      requirements: ['required_status_checks'],
+      requiredChecks: ['ci/test'],
+      requiredCheckBindings: [{ context: 'ci/test', appId: '999' }],
+      sources: ['classic'],
+      detail: 'Required context is produced by an unexpected App',
+    }));
+    const diff = addFileDiff('docs/wrong-app.md', 'must not hand off');
+    const diffHash = hashDiff(diff);
+    const proposal = createProposal({
+      repo: tmpRepo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'wrong App identity is not authority',
+      summary: 'Require the configured GitHub App.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('local:qwen3-coder', 'local', diffHash),
+      engineModel: 'local:qwen3-coder',
+      engineTier: 'local',
+    });
+
+    const result = await autoMergeProposal(proposal.id, evidenceCfg());
+
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toMatch(/ci\/test@1/);
     expect(createPrMock).not.toHaveBeenCalled();
   });
 
@@ -663,6 +703,7 @@ describe('M315 remote PR handoff truth', () => {
     viewPrMock.mockReturnValueOnce({
       state: 'MERGED',
       mergedAt: '2026-07-03T01:00:00Z',
+      mergeCommitOid: 'A'.repeat(40),
       url: 'https://github.com/ashlrai/fixture/pull/123',
       headRefName: handoff?.branch,
       baseRefName: handoff?.base,
@@ -675,6 +716,7 @@ describe('M315 remote PR handoff truth', () => {
     expect(loaded?.status).toBe('applied');
     expect(loaded?.remoteHandoff).toMatchObject({
       state: 'merged',
+      mergeCommitOid: 'a'.repeat(40),
       detail: expect.stringContaining('remote PR merged'),
     });
     const decisions = readDecisions({ proposalId: proposal.id });

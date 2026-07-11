@@ -806,13 +806,17 @@ export function readBranchProtectionAttestation(
     if (cached) branchProtectionCache.delete(key);
   }
   const existing = branchProtectionFlights.get(key);
-  if (existing) return existing.then(cloneAttestation);
+  if (existing && !options.forceFresh) return existing.then(cloneAttestation);
 
   const flight = Promise.resolve()
     .then(() => readBranchProtectionUncached(repo, branch, expectedNameWithOwner))
     .catch(() => unavailableAttestation('Branch-protection refresh failed', branch ?? null));
   branchProtectionFlights.set(key, flight);
   return flight.then((value) => {
+    // A forced refresh supersedes any older flight for the same identity. Only
+    // the current flight may populate the cache; late stale reads are returned
+    // to their original caller but cannot overwrite newer protection evidence.
+    if (branchProtectionFlights.get(key) !== flight) return cloneAttestation(value);
     const ttl = value.ok
       ? BRANCH_PROTECTION_POSITIVE_TTL_MS
       : BRANCH_PROTECTION_NEGATIVE_TTL_MS;

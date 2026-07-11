@@ -2133,13 +2133,54 @@ export async function tick(
     }
 
     // M189: Regression sentinel — detect regressions introduced by auto-merge and bisect/revert.
-    if ((liveCfg.foundry as Record<string, unknown>)?.regressionSentinel === true) {
+    const regressionSentinel = (liveCfg.foundry as Record<string, unknown>)?.regressionSentinel;
+    if (regressionSentinel === true || (typeof regressionSentinel === 'object' && regressionSentinel !== null)) {
       try {
         const r = await detectRegression(liveCfg);
         if (r.regressed) {
-          await bisectAndRevert(liveCfg);
+          const bisect = await bisectAndRevert(liveCfg);
+          const culpritProposalId = bisect.revertProposal?.culpritProposalId;
+          const gitOid = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
+          if (
+            culpritProposalId && bisect.culprit && bisect.observedHead &&
+            gitOid.test(bisect.culprit) && gitOid.test(bisect.observedHead)
+          ) {
+            const [{ loadProposal }, { recordPostMergeObservation }] = await Promise.all([
+              import('../inbox/store.js'),
+              import('../fleet/post-merge-observations.js'),
+            ]);
+            const culpritProposal = loadProposal(culpritProposalId);
+            if (culpritProposal?.repo) {
+              recordPostMergeObservation({
+                observedAt: new Date().toISOString(),
+                outcome: 'regressed',
+                basis: 'bisect-first-bad',
+                // The bounded sentinel isolates a likely first-bad fleet merge,
+                // but does not yet prove the candidate's parent was green.
+                confidence: 'heuristic',
+                repo: culpritProposal.repo,
+                proposalId: culpritProposalId,
+                ...(culpritProposal.runId ? { runId: culpritProposal.runId } : {}),
+                ...(culpritProposal.trajectoryId ? { trajectoryId: culpritProposal.trajectoryId } : {}),
+                ...(culpritProposal.workItemId ? { workItemId: culpritProposal.workItemId } : {}),
+                mergeCommit: bisect.culprit,
+                observedHead: bisect.observedHead,
+                ...(bisect.baselineHead && gitOid.test(bisect.baselineHead)
+                  ? { baselineHead: bisect.baselineHead }
+                  : {}),
+                ...(bisect.candidateCount ? { candidateCount: bisect.candidateCount } : {}),
+                ...(culpritProposal.verifyResult?.ran?.length
+                  ? { commandKinds: [...new Set(culpritProposal.verifyResult.ran.map((command) => command.kind))].sort() }
+                  : {}),
+              });
+            }
+          }
           // M212: fire-and-forget anomaly notification — additive, never throws.
-          void notifyFleetEvent('anomaly', { detail: 'Regression detected — bisect/revert triggered' }, liveCfg);
+          void notifyFleetEvent('anomaly', {
+            detail: bisect.culprit
+              ? `Regression detected; isolated fleet merge ${bisect.culprit.slice(0, 12)} and proposed a revert`
+              : 'Regression detected; no fleet merge culprit was isolated',
+          }, liveCfg);
           // M241: fire-and-forget fleet event-bus emit — additive, never throws, no control-flow change.
           void import('../fleet/event-bus.js').then(({ emit }) => emit('regression:detected', { signal: r.signal, repo: process.cwd() }, liveCfg)).catch(() => {});
         }
