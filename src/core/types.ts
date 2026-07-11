@@ -3494,12 +3494,55 @@ export type ScannerObservationReason =
   | 'source-unreadable'
   | 'source-malformed'
   | 'source-unsafe'
+  | 'source-raced'
+  | 'source-dirty'
+  | 'source-snapshot-unavailable'
+  | 'config-unavailable'
+  | 'scanner-revision-unknown'
   | 'objective-hash-unavailable';
+
+/** The complete source view used by a revisioned scanner observation. */
+export type SourceBaseKind =
+  | 'git-tree'
+  | 'filesystem-snapshot'
+  | 'local-store'
+  | 'remote-snapshot';
+
+/** How the scanner obtained one internally consistent source view. */
+export type SourceBaseConsistency = 'immutable' | 'locked' | 'stable-double-read';
+
+/** Worktree dirtiness observed while constructing a source base. */
+export type SourceBaseDirtyState =
+  | 'clean'
+  | 'tracked'
+  | 'untracked'
+  | 'mixed'
+  | 'not-applicable';
+
+/**
+ * Metadata-only identity for the exact source and config read by a scanner.
+ * The source/config values themselves are never retained in this envelope.
+ */
+export interface SourceBaseDigestV1 {
+  schemaVersion: 1;
+  algorithm: 'hmac-sha256';
+  sourceKind: SourceBaseKind;
+  sourceDigest: string;
+  /** Invariant objective prerequisites, separate from the exact changing source state. */
+  requirementDigest: string;
+  configDigest: string;
+  baseDigest: string;
+  scannerRevision: number;
+  consistency: SourceBaseConsistency;
+  dirty: SourceBaseDirtyState;
+}
 
 /** Static scanner metadata used to interpret an observation conservatively. */
 export interface ScannerDescriptor {
   /** Stable scanner identifier; not a work-item or lifecycle identifier. */
   id: string;
+  /** Semantic discovery revision; absent on legacy descriptors. */
+  scannerRevision?: number;
   /** Metadata-only discovery domain, such as github or local-queue. */
   domain: string;
   /** Primary source emitted by the scanner. Present observations use the item's exact source. */
@@ -3530,6 +3573,8 @@ export interface ScannerObservation {
   reason: ScannerObservationReason;
   itemId?: string;
   objectiveHash?: string;
+  /** Exact metadata-only source/config base; absent for unavailable observations. */
+  sourceBase?: SourceBaseDigestV1;
 }
 
 /**

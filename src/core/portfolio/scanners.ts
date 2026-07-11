@@ -27,6 +27,7 @@ import type {
   ScannerDescriptor,
   ScannerObservation,
   ScannerObservationReason,
+  SourceBaseDigestV1,
 } from '../types.js';
 import { listIssues, githubStatus } from '../integrations/github.js';
 import { isTrivialItem, isNonCodePath } from './value-filter.js';
@@ -43,6 +44,8 @@ import {
 } from './queued-autonomy.js';
 import { existingWorkItemObjectiveHash } from '../fleet/work-item-objective.js';
 import { detectRepoExecutionProfile } from '../run/repo-profile.js';
+import type { RepoExecutionProfile } from '../run/repo-profile.js';
+import { buildSourceBaseDigest } from '../fleet/source-base-digest.js';
 import {
   riskAtOrAbove,
   scanDependencyBump,
@@ -648,10 +651,16 @@ export async function scanTests(repo: string): Promise<WorkItem[]> {
 export async function scanExplicitMergeVerifyContracts(repo: string): Promise<WorkItem[]> {
   try {
     const profile = detectRepoExecutionProfile(repo);
-    if (profile.verifyContract?.mergeGradeExplicit === true) return [];
-    if (profile.detectedVerifyCommandCount === 0) return [];
+    return mergeVerifyContractItems(repo, profile);
+  } catch {
+    return [];
+  }
+}
 
-    return [
+function mergeVerifyContractItems(repo: string, profile: RepoExecutionProfile): WorkItem[] {
+  if (profile.verifyContract?.mergeGradeExplicit === true) return [];
+  if (profile.detectedVerifyCommandCount === 0) return [];
+  return [
       makeItem(
         repo,
         'test',
@@ -664,10 +673,7 @@ export async function scanExplicitMergeVerifyContracts(repo: string): Promise<Wo
         2,
         ['test', 'verification', 'merge-contract', 'ashlr.verify.json'],
       ),
-    ];
-  } catch {
-    return [];
-  }
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -1674,17 +1680,17 @@ export interface ScannerRegistration {
 }
 
 export const SCANNER_REGISTRATIONS: ReadonlyArray<ScannerRegistration> = [
-  { scanner: scanQueuedAutonomyWork, descriptor: { id: 'queued-autonomy', domain: 'local-queue', source: 'self', description: 'Durable queued self-heal and invented work.', evidence: 'exhaustive', canAssertAbsent: true, maxItems: MAX_QUEUED_AUTONOMY_ITEMS } },
-  { scanner: scanIssues, descriptor: { id: 'github-issues', domain: 'github', source: 'issue', description: 'Open GitHub issues visible to the local integration.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
-  { scanner: scanSecurity, descriptor: { id: 'binshield-security', domain: 'security', source: 'security', description: 'Read-only BinShield repository findings.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
-  { scanner: scanExplicitMergeVerifyContracts, descriptor: { id: 'merge-verify-contract', domain: 'verification', source: 'test', description: 'Missing explicit merge-grade verification contracts.', evidence: 'legacy', canAssertAbsent: false, maxItems: 1 } },
-  { scanner: scanTests, descriptor: { id: 'test-health', domain: 'tests', source: 'test', description: 'Cached CI failures and missing test-script coverage.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
-  { scanner: scanSelfImprove, descriptor: { id: 'self-improvement', domain: 'self-improvement', source: 'self', description: 'Bare skipped tests in the Ashlr Hub repository.', evidence: 'legacy', canAssertAbsent: false, maxItems: 50 } },
-  { scanner: scanGoals, descriptor: { id: 'active-goals', domain: 'goals', source: 'goal', description: 'Next actionable milestones for repo-bound active goals.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
-  { scanner: scanTodos, descriptor: { id: 'source-markers', domain: 'source-markers', source: 'todo', description: 'Opt-in TODO, FIXME, HACK, and XXX source markers.', evidence: 'legacy', canAssertAbsent: false, maxItems: MAX_TODO_HITS } },
-  { scanner: scanDeps, descriptor: { id: 'npm-dependencies', domain: 'dependencies', source: 'dep', description: 'Opt-in npm vulnerability and dependency metadata.', evidence: 'legacy', canAssertAbsent: false, maxItems: MAX_OUTDATED_ITEMS + MAX_VULN_ITEMS } },
-  { scanner: scanLint, descriptor: { id: 'cached-lint', domain: 'lint', source: 'lint', description: 'Opt-in fixable findings from a cached lint report.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
-  { scanner: scanDocs, descriptor: { id: 'repository-hygiene', domain: 'repository-hygiene', source: 'hygiene', description: 'Opt-in missing repository documentation.', evidence: 'legacy', canAssertAbsent: false, maxItems: 10 } },
+  { scanner: scanQueuedAutonomyWork, descriptor: { id: 'queued-autonomy', scannerRevision: 1, domain: 'local-queue', source: 'self', description: 'Durable queued self-heal and invented work.', evidence: 'exhaustive', canAssertAbsent: true, maxItems: MAX_QUEUED_AUTONOMY_ITEMS } },
+  { scanner: scanIssues, descriptor: { id: 'github-issues', scannerRevision: 1, domain: 'github', source: 'issue', description: 'Open GitHub issues visible to the local integration.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
+  { scanner: scanSecurity, descriptor: { id: 'binshield-security', scannerRevision: 1, domain: 'security', source: 'security', description: 'Read-only BinShield repository findings.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
+  { scanner: scanExplicitMergeVerifyContracts, descriptor: { id: 'merge-verify-contract', scannerRevision: 1, domain: 'verification', source: 'test', description: 'Missing explicit merge-grade verification contracts.', evidence: 'exhaustive', canAssertAbsent: true, maxItems: 1 } },
+  { scanner: scanTests, descriptor: { id: 'test-health', scannerRevision: 1, domain: 'tests', source: 'test', description: 'Cached CI failures and missing test-script coverage.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
+  { scanner: scanSelfImprove, descriptor: { id: 'self-improvement', scannerRevision: 1, domain: 'self-improvement', source: 'self', description: 'Bare skipped tests in the Ashlr Hub repository.', evidence: 'legacy', canAssertAbsent: false, maxItems: 50 } },
+  { scanner: scanGoals, descriptor: { id: 'active-goals', scannerRevision: 1, domain: 'goals', source: 'goal', description: 'Next actionable milestones for repo-bound active goals.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
+  { scanner: scanTodos, descriptor: { id: 'source-markers', scannerRevision: 1, domain: 'source-markers', source: 'todo', description: 'Opt-in TODO, FIXME, HACK, and XXX source markers.', evidence: 'legacy', canAssertAbsent: false, maxItems: MAX_TODO_HITS } },
+  { scanner: scanDeps, descriptor: { id: 'npm-dependencies', scannerRevision: 1, domain: 'dependencies', source: 'dep', description: 'Opt-in npm vulnerability and dependency metadata.', evidence: 'legacy', canAssertAbsent: false, maxItems: MAX_OUTDATED_ITEMS + MAX_VULN_ITEMS } },
+  { scanner: scanLint, descriptor: { id: 'cached-lint', scannerRevision: 1, domain: 'lint', source: 'lint', description: 'Opt-in fixable findings from a cached lint report.', evidence: 'legacy', canAssertAbsent: false, maxItems: 100 } },
+  { scanner: scanDocs, descriptor: { id: 'repository-hygiene', scannerRevision: 1, domain: 'repository-hygiene', source: 'hygiene', description: 'Opt-in missing repository documentation.', evidence: 'legacy', canAssertAbsent: false, maxItems: 10 } },
 ] as const;
 
 export const SCANNERS: ReadonlyArray<ScannerFn> = SCANNER_REGISTRATIONS.map(({ scanner }) => scanner);
@@ -1737,6 +1743,168 @@ function presentObservations(
   return observations;
 }
 
+interface GitObservationState {
+  head: string;
+  status: string;
+}
+
+async function ignoredMergeContract(repo: string): Promise<boolean | null> {
+  if (!existsSync(join(repo, 'ashlr.verify.json'))) return false;
+  try {
+    await execFileAsync('git', ['check-ignore', '--quiet', '--', 'ashlr.verify.json'], {
+      cwd: repo,
+      timeout: SCAN_TIMEOUT_MS,
+      maxBuffer: 64 * 1024,
+    });
+    return true;
+  } catch (error) {
+    return (error as { code?: unknown })?.code === 1 ? false : null;
+  }
+}
+
+async function readGitObservationState(repo: string): Promise<GitObservationState | null> {
+  try {
+    const head = await execFileAsync('git', ['rev-parse', '--verify', 'HEAD'], {
+      cwd: repo,
+      timeout: SCAN_TIMEOUT_MS,
+      maxBuffer: 64 * 1024,
+    });
+    const status = await execFileAsync('git', ['status', '--porcelain=v2', '--untracked-files=all'], {
+      cwd: repo,
+      timeout: SCAN_TIMEOUT_MS,
+      maxBuffer: 64 * 1024,
+    });
+    const indexFlags = await execFileAsync('git', ['ls-files', '-v', '-z'], {
+      cwd: repo,
+      timeout: SCAN_TIMEOUT_MS,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    const stdoutOf = (result: unknown): string => {
+      if (typeof result === 'string') return result;
+      if (result && typeof result === 'object' && 'stdout' in result) {
+        return String((result as { stdout: unknown }).stdout);
+      }
+      return '';
+    };
+    const headValue = stdoutOf(head).trim();
+    if (!/^[a-f0-9]{40,64}$/i.test(headValue)) return null;
+    const flaggedIndexEntry = stdoutOf(indexFlags)
+      .split('\0')
+      .some((entry) => entry.length > 0 && !entry.startsWith('H '));
+    if (flaggedIndexEntry) return null;
+    const contractIgnored = await ignoredMergeContract(repo);
+    if (contractIgnored !== false) return null;
+    return { head: headValue.toLowerCase(), status: stdoutOf(status) };
+  } catch {
+    return null;
+  }
+}
+
+function observationWithSourceBase(
+  observation: ScannerObservation,
+  sourceBase: SourceBaseDigestV1,
+): ScannerObservation {
+  return { ...observation, sourceBase };
+}
+
+async function runMergeVerifyContractScanner(
+  descriptor: ScannerDescriptor,
+  repo: string,
+): Promise<ScannerRunResult> {
+  if (!Number.isSafeInteger(descriptor.scannerRevision) || (descriptor.scannerRevision ?? 0) < 1) {
+    const items = await scanExplicitMergeVerifyContracts(repo);
+    return { items, observations: [unavailableObservation(descriptor, repo, 'scanner-revision-unknown')] };
+  }
+  const pre = await readGitObservationState(repo);
+  if (!pre) {
+    const items = await scanExplicitMergeVerifyContracts(repo);
+    return { items, observations: [unavailableObservation(descriptor, repo, 'source-snapshot-unavailable')] };
+  }
+  if (pre.status.length > 0) {
+    const items = await scanExplicitMergeVerifyContracts(repo);
+    return { items, observations: [unavailableObservation(descriptor, repo, 'source-dirty')] };
+  }
+
+  let first: RepoExecutionProfile;
+  let second: RepoExecutionProfile;
+  try {
+    first = detectRepoExecutionProfile(repo);
+    second = detectRepoExecutionProfile(repo);
+  } catch {
+    return { items: [], observations: [unavailableObservation(descriptor, repo, 'source-unreadable')] };
+  }
+  const items = mergeVerifyContractItems(repo, first);
+  const post = await readGitObservationState(repo);
+  if (!post) {
+    return { items: [], observations: [unavailableObservation(descriptor, repo, 'source-snapshot-unavailable')] };
+  }
+  if (post.status.length > 0) {
+    return { items: [], observations: [unavailableObservation(descriptor, repo, 'source-dirty')] };
+  }
+  if (
+    pre.head !== post.head ||
+    JSON.stringify(first.mergeVerifyContractSource) !== JSON.stringify(second.mergeVerifyContractSource)
+  ) {
+    return { items: [], observations: [unavailableObservation(descriptor, repo, 'source-raced')] };
+  }
+
+  const source = first.mergeVerifyContractSource;
+  if (source.inputState !== 'complete') {
+    return {
+      items,
+      observations: [unavailableObservation(
+        descriptor,
+        repo,
+        source.inputState === 'malformed' ? 'source-malformed' : 'source-unreadable',
+      )],
+    };
+  }
+  const sourceBase = buildSourceBaseDigest({
+    repo,
+    scannerId: descriptor.id,
+    scannerRevision: descriptor.scannerRevision!,
+    sourceKind: 'git-tree',
+    consistency: 'stable-double-read',
+    dirty: 'clean',
+    sourceSnapshot: {
+      head: pre.head,
+      mergeVerifyContractSource: source,
+    },
+    requirementSnapshot: {
+      projectKinds: source.projectKinds,
+      detectedVerifyCommands: source.detectedVerifyCommands,
+    },
+    scannerConfig: {
+      detector: source.detector,
+      projectKinds: source.projectKinds,
+    },
+  });
+  if (!sourceBase) {
+    return { items, observations: [unavailableObservation(descriptor, repo, 'config-unavailable')] };
+  }
+  if (items.length > 0) {
+    return {
+      items,
+      observations: presentObservations(descriptor, repo, items).map((observation) =>
+        observation.status === 'present' ? observationWithSourceBase(observation, sourceBase) : observation
+      ),
+    };
+  }
+  return {
+    items,
+    observations: [observationWithSourceBase({
+      schemaVersion: 1,
+      observedAt: nowIso(),
+      repo: resolve(repo),
+      scannerId: descriptor.id,
+      domain: descriptor.domain,
+      source: descriptor.source,
+      status: 'absent',
+      reason: 'source-confirmed-empty',
+    }, sourceBase)],
+  };
+}
+
 /** Execute a built-in scanner with additive, non-authoritative observations. */
 export async function runScannerWithObservations(
   descriptor: ScannerDescriptor,
@@ -1745,6 +1913,9 @@ export async function runScannerWithObservations(
   cfg?: Pick<AshlrConfig, 'foundry'>,
 ): Promise<ScannerRunResult> {
   try {
+    if (descriptor.id === 'merge-verify-contract') {
+      return await runMergeVerifyContractScanner(descriptor, repo);
+    }
     if (descriptor.id === 'queued-autonomy' && descriptor.canAssertAbsent) {
       const source = loadQueuedAutonomyItemsDetailed();
       if (source.sourceState !== 'complete') {

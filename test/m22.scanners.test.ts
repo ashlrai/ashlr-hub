@@ -1117,9 +1117,10 @@ describe('scanner observation foundation', () => {
       expect(descriptor.domain.length).toBeGreaterThan(0);
       expect(descriptor.description.length).toBeGreaterThan(0);
       expect(descriptor.maxItems).toBeGreaterThan(0);
+      expect(descriptor.scannerRevision).toBe(1);
     }
     expect(SCANNER_DESCRIPTORS.filter((descriptor) => descriptor.canAssertAbsent).map((descriptor) => descriptor.id))
-      .toEqual(['queued-autonomy']);
+      .toEqual(['queued-autonomy', 'merge-verify-contract']);
     expect(SCANNER_DESCRIPTORS.filter((descriptor) => descriptor.evidence === 'legacy').every(
       (descriptor) => !descriptor.canAssertAbsent,
     )).toBe(true);
@@ -1172,7 +1173,7 @@ describe('scanner observation foundation', () => {
     expect(result.observations.map((observation) => observation.itemId)).toEqual(['one', 'two']);
   });
 
-  it('lets only the exhaustive local queue descriptor confirm absence', async () => {
+  it('lets the exhaustive local queue descriptor confirm absence', async () => {
     const descriptor = SCANNER_DESCRIPTORS.find((candidate) => candidate.id === 'queued-autonomy')!;
     const legacyScanner = vi.fn(async () => [] as WorkItem[]);
     const result = await runScannerWithObservations(descriptor, legacyScanner, tmpRepo);
@@ -1202,5 +1203,190 @@ describe('scanner observation foundation', () => {
       status: 'unavailable',
       reason: 'source-unavailable',
     })]);
+  });
+
+  function stubGitStates(
+    heads: string[],
+    statuses: string[],
+    ignoredContract = false,
+    hiddenIndexState = false,
+  ): void {
+    let headIndex = 0;
+    let statusIndex = 0;
+    _execFileImpl = vi.fn((...args: unknown[]) => {
+      const command = args[0];
+      const commandArgs = args[1] as string[] | undefined;
+      const cb = args[args.length - 1] as (err: Error | null, stdout: string, stderr: string) => void;
+      if (typeof cb !== 'function' || command !== 'git' || !commandArgs) return;
+      if (commandArgs[0] === 'rev-parse') {
+        cb(null, `${heads[headIndex++] ?? heads.at(-1) ?? ''}\n`, '');
+      } else if (commandArgs[0] === 'status') {
+        cb(null, statuses[statusIndex++] ?? statuses.at(-1) ?? '', '');
+      } else if (commandArgs[0] === 'ls-files') {
+        cb(null, `${hiddenIndexState ? 'S' : 'H'} package.json\0`, '');
+      } else if (commandArgs[0] === 'check-ignore') {
+        if (ignoredContract) cb(null, '', '');
+        else cb(Object.assign(new Error('not ignored'), { code: 1 }), '', '');
+      } else {
+        cb(new Error('unexpected git command'), '', '');
+      }
+    });
+  }
+
+  it('binds clean stable merge-contract presence to HEAD and canonical verifier config', async () => {
+    loadOrCreateKey();
+    fs.writeFileSync(path.join(tmpRepo, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }), 'utf8');
+    stubGitStates(['a'.repeat(40), 'a'.repeat(40)], ['', '']);
+    const descriptor = SCANNER_DESCRIPTORS.find((candidate) => candidate.id === 'merge-verify-contract')!;
+    const legacyScanner = vi.fn(async () => [] as WorkItem[]);
+
+    const result = await runScannerWithObservations(descriptor, legacyScanner, tmpRepo);
+
+    expect(result.items).toHaveLength(1);
+    expect(legacyScanner).not.toHaveBeenCalled();
+    expect(result.observations).toEqual([expect.objectContaining({
+      status: 'present',
+      reason: 'item-observed',
+      sourceBase: expect.objectContaining({
+        scannerRevision: descriptor.scannerRevision,
+        sourceKind: 'git-tree',
+        consistency: 'stable-double-read',
+        dirty: 'clean',
+        baseDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    })]);
+    expect(_execFileImpl).toHaveBeenCalledWith(
+      'git',
+      ['status', '--porcelain=v2', '--untracked-files=all'],
+      expect.any(Object),
+      expect.any(Function),
+    );
+  });
+
+  it('binds clean stable merge-contract absence without item identity fields', async () => {
+    loadOrCreateKey();
+    fs.writeFileSync(path.join(tmpRepo, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }), 'utf8');
+    fs.writeFileSync(path.join(tmpRepo, 'ashlr.verify.json'), JSON.stringify({
+      schemaVersion: 1,
+      mode: 'replace-detected',
+      commands: [{ id: 'merge', kind: 'test', cmd: ['npm', 'test'], required: true, profiles: ['merge'] }],
+    }), 'utf8');
+    stubGitStates(['b'.repeat(40), 'b'.repeat(40)], ['', '']);
+    const descriptor = SCANNER_DESCRIPTORS.find((candidate) => candidate.id === 'merge-verify-contract')!;
+
+    const result = await runScannerWithObservations(descriptor, scanExplicitMergeVerifyContracts, tmpRepo);
+
+    expect(result.items).toEqual([]);
+    expect(result.observations).toEqual([expect.objectContaining({
+      status: 'absent',
+      reason: 'source-confirmed-empty',
+      sourceBase: expect.objectContaining({ scannerRevision: 1 }),
+    })]);
+    expect(result.observations[0]).not.toHaveProperty('itemId');
+    expect(result.observations[0]).not.toHaveProperty('objectiveHash');
+  });
+
+  it('emits unavailable without a source base for dirty, raced, or unreadable Git state', async () => {
+    loadOrCreateKey();
+    fs.writeFileSync(path.join(tmpRepo, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }), 'utf8');
+    const descriptor = SCANNER_DESCRIPTORS.find((candidate) => candidate.id === 'merge-verify-contract')!;
+
+    stubGitStates(['c'.repeat(40)], [' M package.json\n']);
+    const dirty = await runScannerWithObservations(descriptor, scanExplicitMergeVerifyContracts, tmpRepo);
+    stubGitStates(['d'.repeat(40), 'e'.repeat(40)], ['', '']);
+    const raced = await runScannerWithObservations(descriptor, scanExplicitMergeVerifyContracts, tmpRepo);
+    _execFileImpl = execFileError();
+    const unavailable = await runScannerWithObservations(descriptor, scanExplicitMergeVerifyContracts, tmpRepo);
+
+    expect(dirty.observations).toEqual([expect.objectContaining({ status: 'unavailable', reason: 'source-dirty' })]);
+    expect(raced.observations).toEqual([expect.objectContaining({ status: 'unavailable', reason: 'source-raced' })]);
+    expect(unavailable.observations).toEqual([expect.objectContaining({
+      status: 'unavailable',
+      reason: 'source-snapshot-unavailable',
+    })]);
+    expect(dirty.items).toHaveLength(1);
+    expect(raced.items).toEqual([]);
+    expect(unavailable.items).toHaveLength(1);
+    for (const observation of [...dirty.observations, ...raced.observations, ...unavailable.observations]) {
+      expect(observation).not.toHaveProperty('sourceBase');
+    }
+  });
+
+  it('refuses revision-bound evidence for an ignored merge contract', async () => {
+    loadOrCreateKey();
+    fs.writeFileSync(path.join(tmpRepo, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }), 'utf8');
+    fs.writeFileSync(path.join(tmpRepo, 'ashlr.verify.json'), JSON.stringify({
+      schemaVersion: 1,
+      mode: 'replace-detected',
+      commands: [{ id: 'merge', kind: 'test', cmd: ['npm', 'test'], required: true, profiles: ['merge'] }],
+    }), 'utf8');
+    stubGitStates(['1'.repeat(40)], [''], true);
+    const descriptor = SCANNER_DESCRIPTORS.find((candidate) => candidate.id === 'merge-verify-contract')!;
+
+    const result = await runScannerWithObservations(descriptor, scanExplicitMergeVerifyContracts, tmpRepo);
+
+    expect(result.items).toEqual([]);
+    expect(result.observations).toEqual([expect.objectContaining({
+      status: 'unavailable',
+      reason: 'source-snapshot-unavailable',
+    })]);
+    expect(result.observations[0]).not.toHaveProperty('sourceBase');
+  });
+
+  it('reports malformed package metadata as unavailable instead of trusted absence', async () => {
+    loadOrCreateKey();
+    fs.writeFileSync(path.join(tmpRepo, 'package.json'), '{"scripts":', 'utf8');
+    stubGitStates(['2'.repeat(40), '2'.repeat(40)], ['', '']);
+    const descriptor = SCANNER_DESCRIPTORS.find((candidate) => candidate.id === 'merge-verify-contract')!;
+
+    const result = await runScannerWithObservations(descriptor, scanExplicitMergeVerifyContracts, tmpRepo);
+
+    expect(result.items).toEqual([]);
+    expect(result.observations).toEqual([expect.objectContaining({
+      status: 'unavailable',
+      reason: 'source-malformed',
+    })]);
+    expect(result.observations[0]).not.toHaveProperty('sourceBase');
+  });
+
+  it('refuses Git-tree evidence when index flags can hide worktree changes', async () => {
+    loadOrCreateKey();
+    fs.writeFileSync(path.join(tmpRepo, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }), 'utf8');
+    stubGitStates(['3'.repeat(40)], [''], false, true);
+    const descriptor = SCANNER_DESCRIPTORS.find((candidate) => candidate.id === 'merge-verify-contract')!;
+
+    const result = await runScannerWithObservations(descriptor, scanExplicitMergeVerifyContracts, tmpRepo);
+
+    expect(result.items).toHaveLength(1);
+    expect(result.observations).toEqual([expect.objectContaining({
+      status: 'unavailable',
+      reason: 'source-snapshot-unavailable',
+    })]);
+    expect(result.observations[0]).not.toHaveProperty('sourceBase');
+  });
+
+  it('changes exact state but preserves requirements when the merge contract satisfies the objective', async () => {
+    loadOrCreateKey();
+    fs.writeFileSync(path.join(tmpRepo, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }), 'utf8');
+    const descriptor = SCANNER_DESCRIPTORS.find((candidate) => candidate.id === 'merge-verify-contract')!;
+    stubGitStates(['f'.repeat(40), 'f'.repeat(40)], ['', '']);
+    const missing = await runScannerWithObservations(descriptor, scanExplicitMergeVerifyContracts, tmpRepo);
+
+    fs.writeFileSync(path.join(tmpRepo, 'ashlr.verify.json'), JSON.stringify({
+      schemaVersion: 1,
+      mode: 'replace-detected',
+      commands: [{ id: 'merge', kind: 'test', cmd: ['npm', 'test'], required: true, profiles: ['merge'] }],
+    }), 'utf8');
+    stubGitStates(['f'.repeat(40), 'f'.repeat(40)], ['', '']);
+    const satisfied = await runScannerWithObservations(descriptor, scanExplicitMergeVerifyContracts, tmpRepo);
+
+    expect(missing.observations[0]).toMatchObject({ status: 'present' });
+    expect(satisfied.observations[0]).toMatchObject({ status: 'absent' });
+    const priorBase = missing.observations[0]?.sourceBase;
+    const currentBase = satisfied.observations[0]?.sourceBase;
+    expect(currentBase?.requirementDigest).toBe(priorBase?.requirementDigest);
+    expect(currentBase?.configDigest).toBe(priorBase?.configDigest);
+    expect(currentBase?.sourceDigest).not.toBe(priorBase?.sourceDigest);
+    expect(currentBase?.baseDigest).not.toBe(priorBase?.baseDigest);
   });
 });

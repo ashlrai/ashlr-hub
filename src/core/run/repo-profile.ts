@@ -69,6 +69,52 @@ export interface RepoExecutionProfile {
   contractVerifyCommandCount: number;
   verifyContract?: RepoVerifyContractSummary;
   noVerifyReason: string | null;
+  /** Canonical metadata consumed by the merge-verify-contract scanner digest. */
+  mergeVerifyContractSource: MergeVerifyContractScannerSource;
+}
+
+export interface CanonicalVerifyCommand {
+  kind: VerifyCommand['kind'];
+  cmd: string[];
+  id?: string;
+  cwd?: string;
+  timeoutMs?: number;
+  required?: boolean;
+  profiles?: VerifyCommandProfile[];
+}
+
+export interface MergeVerifyContractScannerSource {
+  inputState: 'complete' | 'malformed' | 'unreadable';
+  detector: {
+    maxDepth: number;
+    verifyContractFile: typeof VERIFY_CONTRACT_FILE;
+  };
+  projectKinds: RepoProjectKind[];
+  detectedVerifyCommands: CanonicalVerifyCommand[];
+  verifyContract: null | {
+    summary: RepoVerifyContractSummary;
+    commands: CanonicalVerifyCommand[];
+  };
+}
+
+function packageJsonInputState(projectRoots: readonly string[]): MergeVerifyContractScannerSource['inputState'] {
+  for (const projectRoot of projectRoots) {
+    const path = join(projectRoot, 'package.json');
+    if (!hasFile(projectRoot, 'package.json')) continue;
+    let raw: string;
+    try {
+      raw = readFileSync(path, 'utf8');
+    } catch {
+      return 'unreadable';
+    }
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return 'malformed';
+    } catch {
+      return 'malformed';
+    }
+  }
+  return 'complete';
 }
 
 interface PackageJsonSubset {
@@ -404,6 +450,28 @@ function projectCwd(repoRoot: string, projectRoot: string): string | undefined {
   return rel && rel !== '' ? projectRoot : undefined;
 }
 
+/** Normalize verifier metadata so equivalent repositories hash identically. */
+export function canonicalizeVerifyCommands(
+  repoRoot: string,
+  commands: readonly VerifyCommand[],
+): CanonicalVerifyCommand[] {
+  const root = resolve(repoRoot);
+  return commands
+    .map((command): CanonicalVerifyCommand => {
+      const cwd = command.cwd ? relative(root, resolve(command.cwd)).replace(/\\/g, '/') || '.' : undefined;
+      return {
+        kind: command.kind,
+        cmd: [...command.cmd],
+        ...(command.id ? { id: command.id } : {}),
+        ...(cwd ? { cwd } : {}),
+        ...(command.timeoutMs !== undefined ? { timeoutMs: command.timeoutMs } : {}),
+        ...(command.required !== undefined ? { required: command.required } : {}),
+        ...(command.profiles ? { profiles: [...new Set(command.profiles)].sort() } : {}),
+      };
+    })
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+}
+
 function commandWithCwd(
   repoRoot: string,
   projectRoot: string,
@@ -731,6 +799,7 @@ export function detectRepoExecutionProfile(
   const root = resolve(repoRoot);
   const maxDepth = Math.max(0, Math.min(3, opts?.maxDepth ?? 2));
   const projectRoots = discoverProjectRoots(root, maxDepth);
+  const inputState = packageJsonInputState(projectRoots);
   let projects = projectRoots
     .map((projectRoot) => projectAt(root, projectRoot))
     .filter((project): project is RepoProjectProfile => project !== null)
@@ -741,6 +810,7 @@ export function detectRepoExecutionProfile(
   const detectedCommands = rootCommands.length > 0
     ? rootCommands
     : projects.flatMap((project) => project.verifyCommands);
+  const detectedProjectKinds = [...new Set(projects.map((project) => project.kind))].sort();
   const contract = parseVerifyContract(root);
   let verifyCommands = detectedCommands;
   let effectiveDetectedVerifyCommandCount = detectedCommands.length;
@@ -785,6 +855,18 @@ export function detectRepoExecutionProfile(
     contractVerifyCommandCount: contract?.summary.valid ? contract.commands.length : 0,
     ...(contract ? { verifyContract: contract.summary } : {}),
     noVerifyReason: describeNoVerifyCommandReason(projects, verifyCommands, contract?.summary),
+    mergeVerifyContractSource: {
+      inputState,
+      detector: { maxDepth, verifyContractFile: VERIFY_CONTRACT_FILE },
+      projectKinds: detectedProjectKinds,
+      detectedVerifyCommands: canonicalizeVerifyCommands(root, detectedCommands),
+      verifyContract: contract
+        ? {
+            summary: contract.summary,
+            commands: canonicalizeVerifyCommands(root, contract.commands),
+          }
+        : null,
+    },
   };
 }
 

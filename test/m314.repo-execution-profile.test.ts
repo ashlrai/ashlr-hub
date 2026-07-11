@@ -20,6 +20,68 @@ function writeVerifyContract(dir: string, contract: unknown): void {
 }
 
 describe('repo execution profile', () => {
+  it('surfaces malformed package metadata to source-bound scanners', () => {
+    const dir = makeFixture();
+    try {
+      writeFileSync(join(dir, 'package.json'), '{"scripts":', 'utf8');
+      expect(detectRepoExecutionProfile(dir).mergeVerifyContractSource.inputState).toBe('malformed');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('canonicalizes merge-contract scanner inputs without absolute repo paths', () => {
+    const first = makeFixture();
+    const second = makeFixture();
+    try {
+      for (const dir of [first, second]) {
+        const nested = join(dir, 'apps', 'web');
+        mkdirSync(nested, { recursive: true });
+        writePkg(nested, { scripts: { test: 'vitest', typecheck: 'tsc --noEmit' } });
+        writeFileSync(join(nested, 'package-lock.json'), '{}\n', 'utf8');
+      }
+
+      const firstSource = detectRepoExecutionProfile(first).mergeVerifyContractSource;
+      const secondSource = detectRepoExecutionProfile(second).mergeVerifyContractSource;
+
+      expect(firstSource).toEqual(secondSource);
+      expect(JSON.stringify(firstSource)).not.toContain(first);
+      expect(firstSource.detectedVerifyCommands).toEqual([
+        { kind: 'test', cmd: ['npm', 'run', 'test'], cwd: 'apps/web' },
+        { kind: 'typecheck', cmd: ['npm', 'run', 'typecheck'], cwd: 'apps/web' },
+      ]);
+    } finally {
+      rmSync(first, { recursive: true, force: true });
+      rmSync(second, { recursive: true, force: true });
+    }
+  });
+
+  it('includes scanner-relevant contract semantics in the canonical source', () => {
+    const dir = makeFixture();
+    try {
+      writePkg(dir, { scripts: { test: 'vitest' } });
+      const before = detectRepoExecutionProfile(dir).mergeVerifyContractSource;
+      writeVerifyContract(dir, {
+        schemaVersion: 1,
+        mode: 'replace-detected',
+        commands: [{ id: 'merge', kind: 'test', cmd: ['npm', 'test'], required: true, profiles: ['merge'] }],
+      });
+      const after = detectRepoExecutionProfile(dir).mergeVerifyContractSource;
+
+      expect(before.verifyContract).toBeNull();
+      expect(after.verifyContract).toMatchObject({
+        summary: { present: true, valid: true, mergeGradeExplicit: true },
+        commands: [{ id: 'merge', kind: 'test', cmd: ['npm', 'test'], required: true, profiles: ['merge'] }],
+      });
+      expect(after.detectedVerifyCommands).toEqual(before.detectedVerifyCommands);
+      expect(after.projectKinds).toEqual(before.projectKinds);
+      expect(after.projectKinds).toEqual(['node']);
+      expect(after).not.toEqual(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('honors packageManager before lockfiles', () => {
     const dir = makeFixture();
     try {

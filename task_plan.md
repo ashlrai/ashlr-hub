@@ -1542,3 +1542,13 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Preserve observations through bounded persistence and concurrent backlog refresh without changing dispatch, lifecycle, or merge authority.
 - [x] Run focused/full gates and independent adversarial review.
 - [x] Update durable notes, commit, push, reload, and production smoke.
+
+## Current Overnight Cycle - Revision-Bound Source Lineage
+- [x] Rehydrate the deployed scanner-evidence baseline, live diagnostic source mix, runtime health, and persistent notes.
+- [x] Rank positive resolution witnesses and define repository/source revision contracts.
+- [x] Bind merge-verification-contract observations to a revisioned metadata-only source base.
+- [x] Add a separate advisory positive resolution-witness contract and ledger for the first deterministic objective kind.
+- [x] Keep legacy/hashless source lineage advisory and grant no no-change, lifecycle, proposal, or merge authority.
+- [x] Add malformed, replay, privacy, compatibility, and current-generation coverage.
+- [x] Run focused/full gates and independent adversarial review.
+- [ ] Update durable notes, commit, push, reload, and production smoke.

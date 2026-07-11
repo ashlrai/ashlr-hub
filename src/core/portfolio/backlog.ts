@@ -25,6 +25,7 @@ import {
   workItemCoverageKey,
 } from '../fleet/proposal-matching.js';
 import { withSelfHealQueueLock } from '../fleet/self-heal.js';
+import { sanitizeSourceBaseDigest } from '../fleet/source-base-digest.js';
 
 // ---------------------------------------------------------------------------
 // M133: normalized title for dedup matching
@@ -311,7 +312,8 @@ function sanitizeScannerObservation(value: unknown): ScannerObservation | null {
     typeof observation.observedAt !== 'string' ||
     observation.observedAt.length > 40
   ) return null;
-  if (!Number.isFinite(Date.parse(observation.observedAt))) return null;
+  const observedAtMs = Date.parse(observation.observedAt);
+  if (!Number.isFinite(observedAtMs) || new Date(observedAtMs).toISOString() !== observation.observedAt) return null;
   if (typeof observation.repo !== 'string' || observation.repo.length === 0 || observation.repo.length > 4096) return null;
   if (typeof observation.scannerId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(observation.scannerId)) return null;
   if (typeof observation.domain !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(observation.domain)) return null;
@@ -325,16 +327,27 @@ function sanitizeScannerObservation(value: unknown): ScannerObservation | null {
     domain: observation.domain,
     source: observation.source as ScannerObservation['source'],
   };
+  const sourceBase = observation.sourceBase === undefined
+    ? undefined
+    : sanitizeSourceBaseDigest(observation.sourceBase);
+  if (observation.status !== 'unavailable' && observation.sourceBase !== undefined && !sourceBase) return null;
   if (observation.status === 'present') {
     if (observation.reason !== 'item-observed' ||
       typeof observation.itemId !== 'string' || observation.itemId.length === 0 || observation.itemId.length > 180 ||
       typeof observation.objectiveHash !== 'string' || !/^[a-f0-9]{64}$/.test(observation.objectiveHash)) return null;
-    return { ...common, status: 'present', reason: 'item-observed', itemId: observation.itemId, objectiveHash: observation.objectiveHash };
+    return {
+      ...common,
+      status: 'present',
+      reason: 'item-observed',
+      itemId: observation.itemId,
+      objectiveHash: observation.objectiveHash,
+      ...(sourceBase ? { sourceBase } : {}),
+    };
   }
   if (observation.itemId !== undefined || observation.objectiveHash !== undefined) return null;
   if (observation.status === 'absent') {
     return observation.reason === 'source-confirmed-empty'
-      ? { ...common, status: 'absent', reason: 'source-confirmed-empty' }
+      ? { ...common, status: 'absent', reason: 'source-confirmed-empty', ...(sourceBase ? { sourceBase } : {}) }
       : null;
   }
   if (![
@@ -344,6 +357,11 @@ function sanitizeScannerObservation(value: unknown): ScannerObservation | null {
     'source-unreadable',
     'source-malformed',
     'source-unsafe',
+    'source-raced',
+    'source-dirty',
+    'source-snapshot-unavailable',
+    'config-unavailable',
+    'scanner-revision-unknown',
     'objective-hash-unavailable',
   ].includes(observation.reason ?? '')) return null;
   return { ...common, status: 'unavailable', reason: observation.reason as ScannerObservation['reason'] };

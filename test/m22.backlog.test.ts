@@ -296,6 +296,7 @@ describe('M22 loadBacklog — returns null when no backlog exists', () => {
         { ...valid, status: 'present', reason: 'scanner-failed' },
         { ...valid, scannerId: '../unsafe' },
         { ...valid, itemId: 'unexpected', objectiveHash: 'a'.repeat(64) },
+        { ...valid, observedAt: '2026-07-10T12:00:00Z' },
       ],
     }), 'utf8');
 
@@ -339,6 +340,64 @@ describe('M22 loadBacklog — returns null when no backlog exists', () => {
       observationSourceState: 'degraded',
     }), 'utf8');
     expect(loadBacklog()).toMatchObject({ observations: [], observationSourceState: 'degraded' });
+  });
+
+  it('persists exact source bases only on present or absent observations', () => {
+    const observedAt = new Date().toISOString();
+    const sourceBase = {
+      schemaVersion: 1 as const,
+      algorithm: 'hmac-sha256' as const,
+      sourceKind: 'git-tree' as const,
+      sourceDigest: 'a'.repeat(64),
+      requirementDigest: 'f'.repeat(64),
+      configDigest: 'b'.repeat(64),
+      baseDigest: 'c'.repeat(64),
+      scannerRevision: 1,
+      consistency: 'stable-double-read' as const,
+      dirty: 'clean' as const,
+    };
+    const common = {
+      schemaVersion: 1 as const,
+      observedAt,
+      repo: tmpRepo,
+      scannerId: 'merge-verify-contract',
+      domain: 'verification',
+      source: 'test' as const,
+    };
+    fs.mkdirSync(path.dirname(backlogPath()), { recursive: true });
+    fs.writeFileSync(backlogPath(), JSON.stringify({
+      generatedAt: observedAt,
+      repos: [tmpRepo],
+      items: [],
+      observations: [
+        {
+          ...common,
+          status: 'present',
+          reason: 'item-observed',
+          itemId: 'merge-contract-item',
+          objectiveHash: 'd'.repeat(64),
+          sourceBase: { ...sourceBase, rawConfig: 'RAW_SOURCE_BASE_CANARY' },
+        },
+        { ...common, status: 'absent', reason: 'source-confirmed-empty', sourceBase },
+        { ...common, status: 'unavailable', reason: 'source-dirty', sourceBase },
+        {
+          ...common,
+          status: 'present',
+          reason: 'item-observed',
+          itemId: 'malformed-base',
+          objectiveHash: 'e'.repeat(64),
+          sourceBase: { ...sourceBase, baseDigest: 'invalid' },
+        },
+      ],
+    }), 'utf8');
+
+    const loaded = loadBacklog();
+    expect(loaded?.observations).toHaveLength(3);
+    expect(loaded?.observations?.[0]?.sourceBase).toEqual(sourceBase);
+    expect(loaded?.observations?.[1]?.sourceBase).toEqual(sourceBase);
+    expect(loaded?.observations?.[2]).not.toHaveProperty('sourceBase');
+    expect(JSON.stringify(loaded)).not.toContain('RAW_SOURCE_BASE_CANARY');
+    expect(loaded?.observationSourceState).toBe('degraded');
   });
 });
 
