@@ -760,6 +760,34 @@ describe('M213 Dashboard SSE — /api/events', () => {
     expect(degradedAndUnknown).not.toContain('healthy sources');
   });
 
+  it('app.js keeps unhealthy workspace zeroes distinct from healthy telemetry', () => {
+    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
+    const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+    const start = src.indexOf('function workspaceSourceHealthy(workspace)');
+    const end = src.indexOf('\nfunction fleetRepairRecoveryActive', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+
+    const formatterSource = src.slice(start, end);
+    const helpers = new Function(
+      `${formatterSource}\nreturn { workspaceSourceText, workspaceReadText, workspaceObservedValue };`,
+    )() as Record<string, (...args: any[]) => string>;
+    const degraded = {
+      sourceQuality: {
+        sourceState: 'degraded', complete: false, stopReasons: ['row-limit'],
+        filesRead: 2, bytesRead: 2048, rowsScanned: 10, invalidRows: 1, unreadableFiles: 0,
+      },
+    };
+    expect(helpers.workspaceSourceText!(degraded)).toBe('degraded (row-limit)');
+    expect(helpers.workspaceReadText!(degraded)).toBe('2 files · 2048 bytes · 10 rows · 1 invalid · 0 unreadable');
+    expect(helpers.workspaceObservedValue!(degraded, 0)).toBe('0 observed (partial)');
+    expect(helpers.workspaceObservedValue!(degraded, '0%', true)).toBe('partial');
+
+    const missing = { sourceQuality: { sourceState: 'missing', complete: true } };
+    expect(helpers.workspaceSourceText!(missing)).toBe('missing');
+    expect(helpers.workspaceObservedValue!(missing, 0)).toBe('unavailable');
+  });
+
   it('app.js renders Fleet Dashboard lease board from shared queue machine health', () => {
     const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/public');
     const src = fs.readFileSync(path.join(root, 'app.js'), 'utf8');

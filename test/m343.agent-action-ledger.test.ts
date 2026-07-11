@@ -3,13 +3,24 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   agentActionsDir,
   filterAgentActionsByRepoScope,
   readAgentActions,
+  readAgentActionsDetailed,
   readAgentWorkspace,
   recordAgentAction,
   recordAgentActionResult,
@@ -109,6 +120,214 @@ describe('M343 agent action ledger', () => {
     expect(Number.isFinite(Date.parse(event!.ts))).toBe(true);
   });
 
+  it('refuses to persist lifecycle rows that the reader would reject', () => {
+    expect(recordAgentActionResult(makeEvent({
+      outcome: 'verified',
+      proposalId: undefined,
+    }))).toEqual({ attempted: 1, recorded: 0 });
+    expect(readAgentActionsDetailed()).toMatchObject({
+      events: [],
+      sourceState: 'healthy',
+      complete: true,
+    });
+  });
+
+  it('distinguishes a missing ledger from a present empty ledger', () => {
+    expect(readAgentActionsDetailed()).toMatchObject({
+      events: [],
+      sourceState: 'missing',
+      sourcePresent: false,
+      complete: true,
+    });
+
+    mkdirSync(agentActionsDir(), { recursive: true, mode: 0o700 });
+
+    expect(readAgentActionsDetailed()).toMatchObject({
+      events: [],
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+    });
+  });
+
+  it('degrades source quality for malformed and invalid persisted timestamps', () => {
+    const dir = agentActionsDir();
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, '2026-07-08.jsonl'), [
+      JSON.stringify(makeEvent({ action: 'valid-row' })),
+      '{malformed',
+      JSON.stringify(makeEvent({ action: 'invalid-ts', ts: 'not-a-date' })),
+      JSON.stringify(makeEvent({ action: 'wrong-partition', ts: '2026-07-09T00:00:00.000Z' })),
+      '',
+    ].join('\n'), 'utf8');
+
+    const read = readAgentActionsDetailed();
+
+    expect(read.events.map((event) => event.action)).toEqual(['valid-row']);
+    expect(read).toMatchObject({
+      sourceState: 'degraded',
+      sourcePresent: true,
+      complete: false,
+      rowsScanned: 4,
+      invalidRows: 3,
+      unreadableFiles: 0,
+    });
+    expect(readAgentActions({ requireComplete: true })).toEqual([]);
+  });
+
+  it('fails complete reads closed at maxFiles, maxBytes, and maxRows', () => {
+    recordAgentAction([
+      makeEvent({ action: 'day-one', ts: '2026-07-07T12:00:00.000Z' }),
+      makeEvent({ action: 'day-two-a', ts: '2026-07-08T11:00:00.000Z' }),
+      makeEvent({ action: 'day-two-b', ts: '2026-07-08T12:00:00.000Z' }),
+    ]);
+
+    const fileLimited = readAgentActionsDetailed({ maxFiles: 1 });
+    expect(fileLimited).toMatchObject({ sourceState: 'degraded', complete: false, filesRead: 1 });
+    expect(fileLimited.stopReasons).toContain('file-limit');
+    expect(readAgentActions({ maxFiles: 1, requireComplete: true })).toEqual([]);
+
+    const byteLimited = readAgentActionsDetailed({ maxBytes: 1 });
+    expect(byteLimited).toMatchObject({ sourceState: 'degraded', complete: false, bytesRead: 0 });
+    expect(byteLimited.stopReasons).toContain('byte-limit');
+    expect(readAgentActions({ maxBytes: 1, requireComplete: true })).toEqual([]);
+
+    const rowLimited = readAgentActionsDetailed({ maxRows: 1 });
+    expect(rowLimited).toMatchObject({ sourceState: 'degraded', complete: false, rowsScanned: 1 });
+    expect(rowLimited.stopReasons).toContain('row-limit');
+    expect(readAgentActions({ maxRows: 1, requireComplete: true })).toEqual([]);
+  });
+
+  it('marks logical event truncation partial while keeping exact caps complete', () => {
+    recordAgentAction([
+      makeEvent({ action: 'event-a', ts: '2026-07-08T10:00:00.000Z' }),
+      makeEvent({ action: 'event-b', ts: '2026-07-08T11:00:00.000Z' }),
+      makeEvent({ action: 'event-c', ts: '2026-07-08T12:00:00.000Z' }),
+    ]);
+
+    const partial = readAgentActionsDetailed({ limit: 2 });
+    expect(partial.events.map((event) => event.action)).toEqual(['event-c', 'event-b']);
+    expect(partial).toMatchObject({ sourceState: 'degraded', complete: false });
+    expect(partial.stopReasons).toContain('event-limit');
+    expect(readAgentActions({ limit: 2, requireComplete: true })).toEqual([]);
+
+    const exact = readAgentActionsDetailed({ limit: 3 });
+    expect(exact).toMatchObject({ sourceState: 'healthy', complete: true });
+    expect(exact.stopReasons).not.toContain('event-limit');
+  });
+
+  it('reads up to three legacy loose partitions and rejects impossible dated partitions', () => {
+    const dir = agentActionsDir();
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, 'legacy.jsonl'), `${JSON.stringify(makeEvent({ action: 'legacy-row' }))}\n`, 'utf8');
+
+    expect(readAgentActionsDetailed()).toMatchObject({
+      sourceState: 'healthy',
+      complete: true,
+      events: [expect.objectContaining({ action: 'legacy-row' })],
+    });
+
+    writeFileSync(join(dir, '2026-99-99.jsonl'), '', 'utf8');
+    expect(readAgentActionsDetailed()).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      unreadableFiles: 1,
+    });
+  });
+
+  it('keeps loose compatibility outside the dated maxFiles cap and rejects malformed causal objects', () => {
+    const dir = agentActionsDir();
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, '2026-07-07.jsonl'), `${JSON.stringify(makeEvent({ action: 'dated-old', ts: '2026-07-07T12:00:00.000Z' }))}\n`, 'utf8');
+    writeFileSync(join(dir, '2026-07-08.jsonl'), `${JSON.stringify(makeEvent({ action: 'dated-new' }))}\n`, 'utf8');
+    writeFileSync(join(dir, 'legacy.jsonl'), `${JSON.stringify(makeEvent({ action: 'loose-row' }))}\n`, 'utf8');
+
+    const mixed = readAgentActionsDetailed({ maxFiles: 1 });
+    expect(mixed.events.map((event) => event.action)).toEqual(expect.arrayContaining(['dated-new', 'loose-row']));
+    expect(mixed.events.map((event) => event.action)).not.toContain('dated-old');
+    expect(mixed.stopReasons).toContain('file-limit');
+
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, '2026-07-08.jsonl'), `${JSON.stringify({
+      ...makeEvent({ action: 'corrupt-causal' }),
+      routeSnapshot: 'corrupt',
+      runEventSummary: 42,
+    })}\n`, 'utf8');
+    expect(readAgentActionsDetailed()).toMatchObject({
+      events: [],
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
+    });
+  });
+
+  it('separates a torn tail from the next appended record', () => {
+    const dir = agentActionsDir();
+    const path = join(dir, '2026-07-08.jsonl');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(path, '{"schemaVersion":1,"ts":"2026-07-08T12:00:00.000Z"', 'utf8');
+
+    expect(recordAgentActionResult(makeEvent({ action: 'after-torn-tail' }))).toEqual({ attempted: 1, recorded: 1 });
+
+    const raw = readFileSync(path, 'utf8');
+    const read = readAgentActionsDetailed();
+    expect(raw).toContain('12:00:00.000Z"\n{"schemaVersion":1');
+    expect(read.events.map((event) => event.action)).toEqual(['after-torn-tail']);
+    expect(read).toMatchObject({ sourceState: 'degraded', complete: false, invalidRows: 1 });
+  });
+
+  it.skipIf(process.platform === 'win32')('rejects symlinked directories and symlinked or hardlinked ledger files', () => {
+    const dir = agentActionsDir();
+    const realDir = join(home, 'real-agent-actions');
+    mkdirSync(realDir, { mode: 0o700 });
+    symlinkSync(realDir, dir, 'dir');
+
+    expect(recordAgentActionResult(makeEvent())).toEqual({ attempted: 1, recorded: 0 });
+    expect(readAgentActionsDetailed()).toMatchObject({ sourceState: 'degraded', complete: false });
+
+    rmSync(dir, { force: true });
+    mkdirSync(dir, { mode: 0o700 });
+    const path = join(dir, '2026-07-08.jsonl');
+    const target = join(home, 'ledger-target.jsonl');
+    writeFileSync(target, `${JSON.stringify(makeEvent())}\n`, { mode: 0o600 });
+    symlinkSync(target, path);
+
+    expect(recordAgentActionResult(makeEvent())).toEqual({ attempted: 1, recorded: 0 });
+    expect(readAgentActionsDetailed()).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      unreadableFiles: 1,
+    });
+
+    rmSync(path, { force: true });
+    linkSync(target, path);
+
+    expect(recordAgentActionResult(makeEvent())).toEqual({ attempted: 1, recorded: 0 });
+    expect(readAgentActionsDetailed()).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      unreadableFiles: 1,
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')('creates private ledger directories and files', () => {
+    expect(recordAgentActionResult(makeEvent())).toEqual({ attempted: 1, recorded: 1 });
+
+    expect(statSync(agentActionsDir()).mode & 0o777).toBe(0o700);
+    expect(statSync(join(agentActionsDir(), '2026-07-08.jsonl')).mode & 0o777).toBe(0o600);
+  });
+
+  it('falls back to the user home when ASHLR_HOME is relative', () => {
+    process.env.ASHLR_HOME = 'relative-home';
+    const fallbackDir = join(home, '.ashlr', 'agent-actions');
+
+    expect(agentActionsDir()).toBe(fallbackDir);
+    expect(recordAgentActionResult(makeEvent({ action: 'relative-home-fallback' }))).toEqual({ attempted: 1, recorded: 1 });
+    expect(readAgentActionsDetailed().events.map((event) => event.action)).toEqual(['relative-home-fallback']);
+    expect(existsSync(join(process.cwd(), 'relative-home', 'agent-actions'))).toBe(false);
+  });
+
   it('preserves started and verification lifecycle outcomes', () => {
     recordAgentAction([
       makeEvent({
@@ -165,7 +384,7 @@ describe('M343 agent action ledger', () => {
     expect(raw).toContain('[REDACTED]');
   });
 
-  it('scrubs and bounds corrupted enum-like legacy rows before returning summaries', () => {
+  it('rejects corrupted enum-like legacy rows before returning summaries', () => {
     const dir = agentActionsDir();
     mkdirSync(dir, { recursive: true });
     const secret = 'ghp_1234567890abcdefABCDEF1234567890abcdef';
@@ -189,21 +408,18 @@ describe('M343 agent action ledger', () => {
       reason: `reason-token=${secret}`,
     }) + '\n', 'utf8');
 
-    const events = readAgentActions();
+    const detailed = readAgentActionsDetailed();
+    const events = detailed.events;
     const summary = summarizeAgentWorkspace(events);
     const serialized = JSON.stringify({ events, summary });
 
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      actor: 'system',
-      kind: 'reflection',
-      outcome: 'unknown',
+    expect(events).toEqual([]);
+    expect(detailed).toMatchObject({
+      sourceState: 'degraded',
+      complete: false,
+      invalidRows: 1,
     });
-    expect(events[0]!.backend).toBeUndefined();
-    expect(events[0]!.source).toBeUndefined();
-    expect(events[0]!.tier).toBeUndefined();
     expect(serialized).not.toContain(secret);
-    expect(serialized).toContain('[REDACTED]');
   });
 
   it('omits non-finite numeric fields instead of persisting JSON nulls', () => {

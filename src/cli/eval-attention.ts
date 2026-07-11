@@ -18,6 +18,7 @@ import {
   filterAgentActionsByRepoScope,
   readAgentActions,
   type AgentActionRepoScope,
+  type AgentActionSourceQuality,
 } from '../core/fleet/agent-action-ledger.js';
 import { makeColors, isTty, pad } from './ui.js';
 
@@ -111,6 +112,18 @@ export async function cmdEvalAttention(
     limit: parsed.limit,
     maxFiles,
   });
+  const sourceQuality = readSourceQuality(rawEvents);
+  if (parsed.save && (sourceQuality.sourceState !== 'healthy' || !sourceQuality.complete)) {
+    const state = sourceQuality.sourceState === 'missing'
+      ? 'missing'
+      : sourceQuality.sourceState === 'degraded'
+        ? 'degraded'
+        : 'incomplete';
+    stderr(red('error: ') +
+      `cannot save authoritative attention evaluation: agent-action source is ${state}` +
+      sourceStopDetail(sourceQuality) + '\n');
+    return 1;
+  }
   const repoScope: AgentActionRepoScope = parsed.allRepos ? 'all' : 'enrolled-existing';
   const events = parsed.allRepos
     ? rawEvents
@@ -131,19 +144,24 @@ export async function cmdEvalAttention(
   }
 
   if (parsed.json) {
-    stdout(JSON.stringify({ report, savedPath }, null, 2) + '\n');
+    stdout(JSON.stringify({ report, sourceQuality, savedPath }, null, 2) + '\n');
   } else {
-    stdout(renderReport(report, savedPath));
+    stdout(renderReport(report, sourceQuality, savedPath));
   }
   return 0;
 }
 
-function renderReport(report: AttentionEvalReport, savedPath: string | undefined): string {
+function renderReport(
+  report: AttentionEvalReport,
+  sourceQuality: AgentActionSourceQuality,
+  savedPath: string | undefined,
+): string {
   const lines: string[] = [];
   lines.push('');
   lines.push(`  ${bold('ashlr eval attention')} ${dim(`— ${report.window} metadata-only fleet report`)}`);
   lines.push('');
   lines.push(`  Window : ${cyan(report.window)}  events ${report.eventCount}  latest ${report.latestAt ?? 'none'}`);
+  lines.push(`  Source : ${sourceQualityLine(sourceQuality)}`);
   lines.push(`  Repo   : ${repoLine(report)}`);
   lines.push(`  Context: ${contextLine(report)}`);
   lines.push(`  Recall : ${retrievalLine(report)}`);
@@ -160,11 +178,56 @@ function renderReport(report: AttentionEvalReport, savedPath: string | undefined
   return lines.join('\n') + '\n';
 }
 
+function readSourceQuality(events: ReturnType<typeof readAgentActions>): AgentActionSourceQuality {
+  const quality = (events as ReturnType<typeof readAgentActions> & {
+    sourceQuality?: Partial<AgentActionSourceQuality>;
+  }).sourceQuality;
+  if (!quality) {
+    return {
+      sourceState: 'healthy',
+      sourcePresent: true,
+      complete: true,
+      stopReasons: [],
+      filesRead: 0,
+      bytesRead: 0,
+      rowsScanned: 0,
+      invalidRows: 0,
+      unreadableFiles: 0,
+    };
+  }
+  return {
+    sourceState: quality.sourceState === 'missing' || quality.sourceState === 'healthy'
+      ? quality.sourceState
+      : 'degraded',
+    sourcePresent: quality.sourcePresent ?? quality.sourceState !== 'missing',
+    complete: quality.complete === true,
+    stopReasons: Array.isArray(quality.stopReasons) ? quality.stopReasons : [],
+    filesRead: quality.filesRead ?? 0,
+    bytesRead: quality.bytesRead ?? 0,
+    rowsScanned: quality.rowsScanned ?? 0,
+    invalidRows: quality.invalidRows ?? 0,
+    unreadableFiles: quality.unreadableFiles ?? 0,
+  };
+}
+
+function sourceStopDetail(sourceQuality: AgentActionSourceQuality): string {
+  return sourceQuality.stopReasons.length > 0
+    ? ` (stopped: ${sourceQuality.stopReasons.join(', ')})`
+    : '';
+}
+
+function sourceQualityLine(sourceQuality: AgentActionSourceQuality): string {
+  if (sourceQuality.sourceState === 'missing') return yellow('missing');
+  const state = sourceQuality.sourceState === 'degraded' ? red('degraded') : green('healthy');
+  const completeness = sourceQuality.complete ? 'complete' : 'incomplete';
+  return `${state}, ${completeness}${sourceStopDetail(sourceQuality)}`;
+}
+
 function renderHelp(): string {
   const opts: [string, string][] = [
     ['--window 1d|7d|30d', 'Agent-action ledger window (default: 1d).'],
     ['--limit N', `Maximum events to read (default: ${DEFAULT_LIMIT}).`],
-    ['--json', 'Emit JSON { report, savedPath }.'],
+    ['--json', 'Emit JSON { report, sourceQuality, savedPath }.'],
     ['--save', 'Persist the report under ~/.ashlr/eval/attention/reports/.'],
     ['--all-repos', 'Include every metadata event, including unenrolled or missing repos.'],
   ];

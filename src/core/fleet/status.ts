@@ -86,7 +86,8 @@ import {
 import { readDecisionsDetailed, type DecisionSourceQuality } from './decisions-ledger.js';
 import { readJudgeTracesDetailed, type JudgeTraceSourceQuality } from './judge-trace.js';
 import {
-  readAgentWorkspace,
+  readAgentWorkspaceDetailed,
+  type AgentWorkspaceReadResult,
   type AgentWorkspaceStatus,
 } from './agent-action-ledger.js';
 import {
@@ -1610,22 +1611,32 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
   } catch {
     // Optional forensic manifest surface only.
   }
+  let workspaceRead: AgentWorkspaceReadResult | undefined;
   try {
-    status.workspace = readAgentWorkspace({
+    workspaceRead = readAgentWorkspaceDetailed({
       windowMs: RECENT_WINDOW_MS,
-      limit: 1200,
+      limit: 5000,
       limitPerDimension: 8,
       recentLimit: 8,
     });
+    status.workspace = workspaceRead.workspace;
   } catch {
     // Optional history/analytics surface only.
   }
+  const workspaceSource = status.workspace?.sourceQuality;
+  const agentActionLearningEligible = status.workspace !== undefined &&
+    (workspaceSource === undefined || (workspaceSource.sourceState === 'healthy' && workspaceSource.complete));
   try {
     const attemptRecords = listAttemptRecords({
       windowHours: RECENT_WINDOW_MS / (60 * 60 * 1000),
       limit: 500,
+      ...(workspaceRead ? {
+        deps: { readAgentActions: () => workspaceRead!.events },
+        useDefaultReaders: true,
+      } : {}),
     });
     status.attemptCoverage = summarizeAttemptCoverage(attemptRecords, RECENT_WINDOW_MS / (60 * 60 * 1000));
+    if (workspaceSource) status.attemptCoverage.agentActionSource = workspaceSource;
   } catch {
     // Optional learning coverage surface only.
   }
@@ -1635,17 +1646,20 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     limit: Math.max(500 * 8, 400),
     maxFiles: 3,
   });
-  try {
-    const trajectoryRecords = listTrajectoryRecords({
-      windowHours,
-      limit: 500,
-      deps: {
-        readSkillUseEvents: () => skillUseSource.events,
-      },
-    });
-    status.trajectoryLearning = summarizeTrajectoryLearning(trajectoryRecords, windowHours);
-  } catch {
-    // Optional route-to-outcome learning surface only.
+  if (agentActionLearningEligible) {
+    try {
+      const trajectoryRecords = listTrajectoryRecords({
+        windowHours,
+        limit: 500,
+        deps: {
+          ...(workspaceRead ? { readAgentActions: () => workspaceRead!.events } : {}),
+          readSkillUseEvents: () => skillUseSource.events,
+        },
+      });
+      status.trajectoryLearning = summarizeTrajectoryLearning(trajectoryRecords, windowHours);
+    } catch {
+      // Optional route-to-outcome learning surface only.
+    }
   }
   if (status.trajectoryLearning && skillUseSource.eventState === 'degraded') {
     status.trajectoryLearning = suppressDegradedSkillObservation(
@@ -1657,11 +1671,15 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     status.trajectoryLearning?.skillObservation,
     skillUseSource.eventState,
   );
+  const contextInput = status.workspace?.sourceQuality &&
+    (status.workspace.sourceQuality.sourceState !== 'healthy' || !status.workspace.sourceQuality.complete)
+    ? { ...status, workspace: undefined }
+    : status;
   try {
     const { genomeHubHealth } = await import('../genome/store.js');
-    status.contextEfficiency = buildContextEfficiencyStatus(status, genomeHubHealth(), generatedAt, RECENT_WINDOW_MS);
+    status.contextEfficiency = buildContextEfficiencyStatus(contextInput, genomeHubHealth(), generatedAt, RECENT_WINDOW_MS);
   } catch {
-    status.contextEfficiency = buildContextEfficiencyStatus(status, undefined, generatedAt, RECENT_WINDOW_MS);
+    status.contextEfficiency = buildContextEfficiencyStatus(contextInput, undefined, generatedAt, RECENT_WINDOW_MS);
   }
 
   try {

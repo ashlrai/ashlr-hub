@@ -2605,6 +2605,33 @@ function dispatchProductionSourceHealthy(source) {
   return !source || (source.sourceState === 'healthy' && source.complete === true);
 }
 
+function workspaceSourceHealthy(workspace) {
+  const source = workspace?.sourceQuality;
+  return !source || (source.sourceState === 'healthy' && source.complete === true);
+}
+
+function workspaceSourceText(workspace) {
+  const source = workspace?.sourceQuality;
+  if (!source) return 'unknown';
+  if (source.sourceState === 'missing') return 'missing';
+  const reasons = Array.isArray(source.stopReasons) ? source.stopReasons.join(', ') : '';
+  if (source.sourceState === 'healthy' && source.complete === true) return 'healthy';
+  return reasons ? `degraded (${reasons})` : 'degraded';
+}
+
+function workspaceReadText(workspace) {
+  const source = workspace?.sourceQuality;
+  if (!source || source.sourceState === 'missing') return '—';
+  return `${source.filesRead ?? 0} files · ${source.bytesRead ?? 0} bytes · ${source.rowsScanned ?? 0} rows · ` +
+    `${source.invalidRows ?? 0} invalid · ${source.unreadableFiles ?? 0} unreadable`;
+}
+
+function workspaceObservedValue(workspace, value, rate = false) {
+  if (workspaceSourceHealthy(workspace)) return value;
+  if (workspace?.sourceQuality?.sourceState === 'missing') return 'unavailable';
+  return rate ? 'partial' : `${value} observed (partial)`;
+}
+
 function fleetRepairRecoveryActive(readiness, brief) {
   return (brief?.blocker?.id ?? readiness?.topBlocker?.id) === 'generated-repair-recovery-active';
 }
@@ -2709,24 +2736,27 @@ function renderGlobalWorkspaceCard(workspace, cls = 'ctrl-card card') {
   const diagnosticNoProposal = workspace.diagnosticNoProposalEvents ?? workspace.noProposalEvents ?? 0;
   const policySuppressed = workspace.policySuppressedEvents ?? 0;
   const diagnosticProposalRate = typeof workspace.diagnosticProposalRate === 'number'
-    ? formatFleetPercent(workspace.diagnosticProposalRate)
+    ? workspaceObservedValue(workspace, formatFleetPercent(workspace.diagnosticProposalRate), true)
     : '—';
+  const eventLabel = workspaceObservedValue(workspace, `${eventCount} event${eventCount === 1 ? '' : 's'}`);
   const card = el('div', { cls });
   card.appendChild(el('div', { cls: 'card-header' },
     el('span', { cls: 'card-title' }, 'Global Workspace'),
-    el('span', { cls: 'card-subtitle' }, `${eventCount} event${eventCount === 1 ? '' : 's'} · ${proposalProductionWindowLabel(workspace)}`)
+    el('span', { cls: 'card-subtitle' }, `${eventLabel} · ${proposalProductionWindowLabel(workspace)}`)
   ));
 
   const body = el('div', { cls: 'card-body' });
   body.appendChild(infoGrid([
+    ['Source', workspaceSourceText(workspace)],
+    ['Read', workspaceReadText(workspace)],
     ['Latest', workspace.latestAt ? fmtRelative(workspace.latestAt) : '—'],
-    ['Machines', Array.isArray(workspace.activeMachines) ? workspace.activeMachines.length : 0],
-    ['Proposals', workspace.proposalEvents ?? 0],
-    ['No-proposal', diagnosticNoProposal],
-    ['Policy-suppressed', policySuppressed],
+    ['Machines', workspaceObservedValue(workspace, Array.isArray(workspace.activeMachines) ? workspace.activeMachines.length : 0)],
+    ['Proposals', workspaceObservedValue(workspace, workspace.proposalEvents ?? 0)],
+    ['No-proposal', workspaceObservedValue(workspace, diagnosticNoProposal)],
+    ['Policy-suppressed', workspaceObservedValue(workspace, policySuppressed)],
     ['Diagnostic rate', diagnosticProposalRate],
-    ['Spend', `$${Number(workspace.spendUsd ?? 0).toFixed(4)}`],
-    ['Action entropy', workspace.entropy?.action ?? 0],
+    ['Spend', workspaceObservedValue(workspace, `$${Number(workspace.spendUsd ?? 0).toFixed(4)}`)],
+    ['Action entropy', workspaceObservedValue(workspace, workspace.entropy?.action ?? 0)],
   ]));
 
   const attention = Array.isArray(workspace.attention) ? workspace.attention.slice(0, 5) : [];
@@ -2766,6 +2796,12 @@ function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
   const weak = attemptCoverage.causalWeak ?? {};
   const topWeak = Array.isArray(weak.reasons) ? weak.reasons[0] : null;
   const diagnostics = attemptCoverage.causalGapDiagnostics ?? {};
+  const actionSource = attemptCoverage.agentActionSource;
+  const actionCoverage = !actionSource || (actionSource.sourceState === 'healthy' && actionSource.complete === true)
+    ? formatCoverageMetric(joins.agentAction)
+    : actionSource.sourceState === 'missing'
+      ? 'unavailable'
+      : `${formatCoverageMetric(joins.agentAction)} observed (partial)`;
   const topCause = Array.isArray(diagnostics.causes) ? diagnostics.causes[0] : null;
   const actionableCause = Array.isArray(diagnostics.actionableCauses) ? diagnostics.actionableCauses[0] : null;
   const card = el('div', { cls });
@@ -2776,7 +2812,7 @@ function renderAttemptCoverageCard(attemptCoverage, cls = 'ctrl-card card') {
 
   const body = el('div', { cls: 'card-body' });
   body.appendChild(infoGrid([
-    ['Actions', formatCoverageMetric(joins.agentAction)],
+    ['Actions', actionCoverage],
     ['Worked', formatCoverageMetric(joins.worked)],
     ['Decisions', formatCoverageMetric(joins.decision)],
     ['Evidence', formatCoverageMetric(joins.evidence)],
@@ -3765,7 +3801,12 @@ function renderControl() {
     ));
   }
   if (workspace) {
-    heroMetrics.appendChild(controlMetric('Workspace', workspace.eventCount ?? 0, workspace.eventCount > 0 ? '#38bdf8' : '#64748b'));
+    const sourceHealthy = workspaceSourceHealthy(workspace);
+    heroMetrics.appendChild(controlMetric(
+      'Workspace',
+      sourceHealthy ? workspace.eventCount ?? 0 : workspaceSourceText(workspace),
+      sourceHealthy ? (workspace.eventCount > 0 ? '#38bdf8' : '#64748b') : '#f97316'
+    ));
   }
   heroMetrics.appendChild(controlMetric('Active Mode', formatDirectionMode(activeDirectionMode ?? direction?.mode ?? 'unknown'), directionAccent(activeDirectionMode ?? direction?.mode)));
   heroMetrics.appendChild(controlMetric('Control Mode', formatControlMode(daemon.autonomyControlMode), controlModeAccent(daemon.autonomyControlMode)));
@@ -4424,13 +4465,26 @@ function renderFleetActivity() {
   // ── 5. Agent action feed ────────────────────────────────────────────────
   const actionsCard = el('div', { cls: 'fa-card card' });
   const actions = Array.isArray(d.recentActions) ? d.recentActions : [];
+  const actionsSource = d.recentActionsSource;
+  const actionsSourceText = !actionsSource
+    ? 'unknown source'
+    : actionsSource.sourceState === 'missing'
+      ? 'missing source'
+      : actionsSource.sourceState === 'healthy' && actionsSource.complete === true
+        ? 'complete source'
+        : 'partial source';
   actionsCard.appendChild(el('div', { cls: 'card-header' },
     el('span', { cls: 'card-title' }, 'Agent Action Feed'),
-    el('span', { cls: 'card-subtitle' }, `${actions.length} recent action${actions.length === 1 ? '' : 's'}`)
+    el('span', { cls: 'card-subtitle' }, `${actions.length} recent action${actions.length === 1 ? '' : 's'} · ${actionsSourceText}`)
   ));
   const actionsBody = el('div', { cls: 'fa-feed fa-card-body' });
   if (actions.length === 0) {
-    actionsBody.appendChild(el('p', { cls: 'hint' }, 'No agent action telemetry recorded yet.'));
+    const emptyText = actionsSource?.sourceState === 'missing'
+      ? 'Agent action telemetry source is not available.'
+      : actionsSource && (actionsSource.sourceState !== 'healthy' || actionsSource.complete !== true)
+        ? 'Agent action telemetry is unavailable from the partial source.'
+        : 'No agent action telemetry recorded yet.';
+    actionsBody.appendChild(el('p', { cls: 'hint' }, emptyText));
   } else {
     for (const action of actions.slice(0, 20)) {
       const repoName = action.repo ? basenameFromPath(action.repo) : action.backend ?? action.actor ?? 'fleet';
@@ -5114,8 +5168,7 @@ function fdRenderProductionPanel(snap) {
   const trajectoryLearning = snap.fleet?.trajectoryLearning ?? snap.control?.fleet?.trajectoryLearning ?? null;
   const skillCorpusReadiness = snap.fleet?.skillCorpusReadiness ?? snap.control?.fleet?.skillCorpusReadiness ?? null;
   const contextEfficiency = snap.fleet?.contextEfficiency ?? snap.control?.fleet?.contextEfficiency ?? null;
-  const workspaceHasEvents = Number(workspace?.eventCount ?? 0) > 0;
-  const hasProductionData = Boolean(prod || production || dispatchProduction || dispatchProductionSource || workspaceHasEvents || attemptCoverage || trajectoryLearning || skillCorpusReadiness);
+  const hasProductionData = Boolean(prod || production || dispatchProduction || dispatchProductionSource || workspace || attemptCoverage || trajectoryLearning || skillCorpusReadiness);
   const body = el('div', { cls: 'fd-panel__body' });
 
   if (!hasProductionData) {
@@ -5190,21 +5243,23 @@ function fdRenderProductionPanel(snap) {
     body.appendChild(infoGrid(skillCorpusReadinessRows(skillCorpusReadiness)));
   }
 
-  if (workspaceHasEvents) {
+  if (workspace) {
     const diagnosticNoProposal = workspace.diagnosticNoProposalEvents ?? workspace.noProposalEvents ?? 0;
     const policySuppressed = workspace.policySuppressedEvents ?? 0;
     const diagnosticProposalRate = typeof workspace.diagnosticProposalRate === 'number'
-      ? formatFleetPercent(workspace.diagnosticProposalRate)
+      ? workspaceObservedValue(workspace, formatFleetPercent(workspace.diagnosticProposalRate), true)
       : '—';
     body.appendChild(el('div', { cls: 'fd-prod-section-title' }, 'Global workspace'));
     body.appendChild(infoGrid([
       ['Window', proposalProductionWindowLabel(workspace)],
-      ['Events', workspace.eventCount ?? 0],
-      ['Proposals', workspace.proposalEvents ?? 0],
-      ['No-proposal', diagnosticNoProposal],
-      ['Policy-suppressed', policySuppressed],
+      ['Source', workspaceSourceText(workspace)],
+      ['Read', workspaceReadText(workspace)],
+      ['Events', workspaceObservedValue(workspace, workspace.eventCount ?? 0)],
+      ['Proposals', workspaceObservedValue(workspace, workspace.proposalEvents ?? 0)],
+      ['No-proposal', workspaceObservedValue(workspace, diagnosticNoProposal)],
+      ['Policy-suppressed', workspaceObservedValue(workspace, policySuppressed)],
       ['Diagnostic rate', diagnosticProposalRate],
-      ['Action entropy', workspace.entropy?.action ?? 0],
+      ['Action entropy', workspaceObservedValue(workspace, workspace.entropy?.action ?? 0)],
     ]));
     const attention = Array.isArray(workspace.attention) ? workspace.attention[0] : null;
     if (attention) {

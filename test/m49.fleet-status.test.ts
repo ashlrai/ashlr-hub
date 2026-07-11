@@ -4700,6 +4700,73 @@ describe('skill corpus readiness projection', () => {
 });
 
 describe('formatFleetStatus — pure formatter (M49)', () => {
+  it('labels unhealthy workspace sources and qualifies observed zero values', () => {
+    const base = {
+      generatedAt: '2026-07-11T00:00:00.000Z',
+      daemon: { running: false, lastTickAt: null, todaySpentUsd: 0 },
+      backends: [],
+      queue: { backlogItems: 0 },
+      proposals: { pending: 0, frontierPending: 0, applied: 0 },
+      merges: { recent: 0 },
+      killed: false,
+    };
+    const workspace = {
+      generatedAt: base.generatedAt,
+      windowHours: 24,
+      eventCount: 0,
+      latestAt: null,
+      activeMachines: [],
+      spendUsd: 0,
+      proposalEvents: 0,
+      noProposalEvents: 0,
+      diagnosticNoProposalEvents: 0,
+      policySuppressedEvents: 0,
+      diagnosticProposalRate: 0,
+      repoEventCount: 0,
+      repoDistinctCount: 0,
+      topRepoCount: 0,
+      attention: [],
+      byAction: [],
+      byOutcome: [],
+      byRepo: [],
+      byBackend: [],
+      entropy: { action: 0, outcome: 0, repo: 0 },
+      recentActions: [],
+    };
+
+    const degraded = formatFleetStatus({
+      ...base,
+      workspace: {
+        ...workspace,
+        sourceQuality: {
+          sourceState: 'degraded', sourcePresent: true, complete: false,
+          stopReasons: ['byte-limit'], filesRead: 1, bytesRead: 1024,
+          rowsScanned: 0, invalidRows: 0, unreadableFiles: 0,
+        },
+      },
+    });
+    expect(degraded).toContain('source:    degraded (partial); files 1, bytes 1024, rows 0');
+    expect(degraded).toContain('stopped:   byte-limit');
+    expect(degraded).toContain('events:    0 observed (partial)');
+    expect(degraded).toContain('diagnostic proposal rate partial');
+    expect(degraded).not.toContain('diagnostic proposal rate 0%');
+
+    const missing = formatFleetStatus({
+      ...base,
+      workspace: {
+        ...workspace,
+        sourceQuality: {
+          sourceState: 'missing', sourcePresent: false, complete: true,
+          stopReasons: [], filesRead: 0, bytesRead: 0,
+          rowsScanned: 0, invalidRows: 0, unreadableFiles: 0,
+        },
+      },
+    });
+    expect(missing).toContain('source:    missing');
+    expect(missing).toContain('events:    unavailable');
+    expect(missing).toContain('diagnostic proposal rate unavailable');
+  });
+
   it('renders lane lock counts and a bounded sample', () => {
     const out = formatFleetStatus({
       generatedAt: '2026-06-17T00:00:00.000Z',

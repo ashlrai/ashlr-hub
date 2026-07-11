@@ -8,12 +8,26 @@ import {
   saveAttentionReport,
 } from '../src/core/eval/attention-store.js';
 import { cmdEvalAttention } from '../src/cli/eval-attention.js';
-import type { AgentActionEvent } from '../src/core/fleet/agent-action-ledger.js';
+import type {
+  AgentActionEvent,
+  AgentActionSourceQuality,
+} from '../src/core/fleet/agent-action-ledger.js';
 
 const FIXTURE = resolve('test/fixtures/attention/input.json');
 
 function fixtureEvents(): unknown[] {
   return JSON.parse(readFileSync(FIXTURE, 'utf8')) as unknown[];
+}
+
+function eventsWithSourceQuality(
+  sourceQuality: Partial<AgentActionSourceQuality>,
+): AgentActionEvent[] {
+  const events = fixtureEvents().slice(0, 2) as AgentActionEvent[];
+  Object.defineProperty(events, 'sourceQuality', {
+    value: sourceQuality,
+    enumerable: false,
+  });
+  return events;
 }
 
 describe('M346 eval attention', () => {
@@ -337,11 +351,89 @@ describe('M346 eval attention', () => {
     });
     expect(capturedReadOpts?.sinceMs).toBe(Date.parse('2026-07-02T05:01:00.000Z'));
     expect(saved?.window).toBe('7d');
-    const parsed = JSON.parse(output) as { report: AttentionEvalReport; savedPath: string };
+    const parsed = JSON.parse(output) as {
+      report: AttentionEvalReport;
+      sourceQuality: AgentActionSourceQuality;
+      savedPath: string;
+    };
     expect(parsed.savedPath).toBe('/tmp/attention-report.json');
     expect(parsed.report.eventCount).toBe(2);
     expect(parsed.report.source.limit).toBe(2);
     expect(parsed.report.source.repoScope).toBe('all');
+    expect(parsed.sourceQuality).toMatchObject({ sourceState: 'healthy', complete: true });
+  });
+
+  it.each([
+    ['degraded', { sourceState: 'degraded', complete: false, stopReasons: ['io-error'] }],
+    ['incomplete', { sourceState: 'healthy', complete: false, stopReasons: ['file-limit'] }],
+    ['missing', { sourceState: 'missing', complete: true, stopReasons: [] }],
+  ] as const)('fails closed instead of saving an authoritative report from a %s source', async (
+    expectedState,
+    sourceQuality,
+  ) => {
+    let stderr = '';
+    let saved = false;
+
+    const code = await cmdEvalAttention(['--save'], {
+      readEvents: () => eventsWithSourceQuality(sourceQuality),
+      saveReport: () => {
+        saved = true;
+        return '/tmp/should-not-save.json';
+      },
+      stdout: () => {
+        throw new Error('authoritative failure must not emit a report');
+      },
+      stderr: (text) => {
+        stderr += text;
+      },
+    });
+
+    expect(code).toBe(1);
+    expect(saved).toBe(false);
+    expect(stderr).toContain(`source is ${expectedState}`);
+    if (sourceQuality.stopReasons[0]) expect(stderr).toContain(sourceQuality.stopReasons[0]);
+  });
+
+  it('labels degraded observational JSON without treating it as authoritative', async () => {
+    let output = '';
+    const code = await cmdEvalAttention(['--json'], {
+      readEvents: () => eventsWithSourceQuality({
+        sourceState: 'degraded',
+        complete: false,
+        stopReasons: ['row-limit'],
+      }),
+      stdout: (text) => {
+        output += text;
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(JSON.parse(output)).toMatchObject({
+      sourceQuality: {
+        sourceState: 'degraded',
+        complete: false,
+        stopReasons: ['row-limit'],
+      },
+    });
+  });
+
+  it('reports a missing source distinctly in human output', async () => {
+    let output = '';
+    const events: AgentActionEvent[] = [];
+    Object.defineProperty(events, 'sourceQuality', {
+      value: { sourceState: 'missing', sourcePresent: false, complete: true },
+      enumerable: false,
+    });
+    const code = await cmdEvalAttention([], {
+      readEvents: () => events,
+      stdout: (text) => {
+        output += text;
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(output).toContain('Source : missing');
+    expect(output).not.toContain('Source : healthy');
   });
 
   it('filters CLI reports to enrolled existing repos by default and supports all-repos mode', async () => {

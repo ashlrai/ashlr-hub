@@ -8,18 +8,21 @@
  */
 
 import {
-  appendFileSync,
   closeSync,
+  constants as fsConstants,
   existsSync,
+  fchmodSync,
+  fstatSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
-  readdirSync,
-  readFileSync,
-  writeFileSync,
+  opendirSync,
+  readSync,
+  writeSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type {
   EngineId,
   EngineTier,
@@ -37,11 +40,39 @@ import {
   sanitizeProductionAttemptLearningLabel,
   type ProductionAttemptLearningLabel,
 } from '../learning/attempt-shape.js';
+import {
+  evidenceOutcomeSummary as normalizeEvidenceOutcome,
+  routeSnapshot as normalizeRouteSnapshot,
+  runEventSummary as normalizeRunEventSummary,
+} from '../learning/causal.js';
 import { listEnrolled } from '../sandbox/policy.js';
 import { repairGenerationIdFromHandoffId } from './repair-handoff-journal.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DATE_LEDGER_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
+const DEFAULT_READ_MAX_FILES = 32;
+const DEFAULT_READ_MAX_BYTES = 32 * 1024 * 1024;
+const DEFAULT_READ_MAX_ROWS = 100_000;
+const HARD_READ_MAX_FILES = 366;
+const HARD_READ_MAX_BYTES = 256 * 1024 * 1024;
+const HARD_READ_MAX_ROWS = 1_000_000;
+const MAX_READ_ROW_BYTES = 128 * 1024;
+const MAX_DIRECTORY_ENTRIES = 2_048;
+const MAX_WRITE_PARTITIONS_PER_CALL = 32;
+const ROUTE_SNAPSHOT_KEYS = new Set([
+  'backend', 'tier', 'model', 'assignedBy', 'reason', 'routerPolicyVersion',
+  'selectedSkillIds', 'skillPolicyVersion', 'skillMode',
+]);
+const RUN_SUMMARY_KEYS = new Set([
+  'runId', 'status', 'outcome', 'proposalCreated', 'proposalId', 'diffFiles',
+  'diffLines', 'tokensIn', 'tokensOut', 'costUsd', 'durationMs', 'cacheHit',
+  'contextSummary', 'actionCounts',
+]);
+const EVIDENCE_OUTCOME_KEYS = new Set([
+  'target', 'trustBasis', 'riskClass', 'verificationPassed', 'policyAllowed',
+  'policyAction', 'policyTier', 'gateCount',
+]);
 
 export type AgentActionActor =
   | 'daemon'
@@ -250,6 +281,7 @@ export interface AgentWorkspaceStatus {
     repo: number;
   };
   recentActions: AgentWorkspaceRecentAction[];
+  sourceQuality?: AgentActionSourceQuality;
 }
 
 export type AgentActionRepoScope = 'enrolled-existing' | 'all';
@@ -257,7 +289,7 @@ export type AgentActionRepoScope = 'enrolled-existing' | 'all';
 export function agentActionsDir(): string {
   const configuredHome = process.env.ASHLR_HOME;
   const root =
-    typeof configuredHome === 'string' && configuredHome.trim() !== ''
+    typeof configuredHome === 'string' && configuredHome.trim() !== '' && isAbsolute(configuredHome)
       ? configuredHome
       : join(homedir(), '.ashlr');
   return join(root, 'agent-actions');
@@ -426,17 +458,166 @@ function isAgentActionEvent(value: unknown): value is AgentActionEvent {
   return (
     obj['schemaVersion'] === 1 &&
     typeof obj['ts'] === 'string' &&
-    typeof obj['actor'] === 'string' &&
-    typeof obj['kind'] === 'string' &&
-    typeof obj['outcome'] === 'string' &&
-    typeof obj['action'] === 'string' &&
-    typeof obj['summary'] === 'string'
+    enumValue(obj['actor'], AGENT_ACTION_ACTORS) !== undefined &&
+    enumValue(obj['kind'], AGENT_ACTION_KINDS) !== undefined &&
+    enumValue(obj['outcome'], AGENT_ACTION_OUTCOMES) !== undefined &&
+    typeof obj['action'] === 'string' && obj['action'].trim() !== '' &&
+    typeof obj['summary'] === 'string' && obj['summary'].trim() !== '' &&
+    validOptionalCausalRecord(obj['routeSnapshot'], ROUTE_SNAPSHOT_KEYS, normalizeRouteSnapshot, ['routerPolicyVersion']) &&
+    validOptionalCausalRecord(obj['runEventSummary'], RUN_SUMMARY_KEYS, normalizeRunEventSummary) &&
+    validOptionalCausalRecord(obj['evidenceOutcome'], EVIDENCE_OUTCOME_KEYS, normalizeEvidenceOutcome) &&
+    (!['proposal-created', 'verified', 'judged', 'merged', 'rejected'].includes(String(obj['outcome'])) ||
+      (typeof obj['proposalId'] === 'string' && obj['proposalId'].trim() !== ''))
   );
+}
+
+function validOptionalCausalRecord(
+  value: unknown,
+  recognizedKeys: ReadonlySet<string>,
+  normalize: (input: never) => object | undefined,
+  syntheticKeys: readonly string[] = [],
+): boolean {
+  if (value === undefined) return true;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const rawKeys = new Set(Object.keys(value));
+  if (![...rawKeys].some((key) => recognizedKeys.has(key))) return false;
+  const normalized = normalize(value as never);
+  return normalized !== undefined && Object.keys(normalized).some((key) =>
+    !syntheticKeys.includes(key) || rawKeys.has(key));
 }
 
 export interface AgentActionWriteResult {
   attempted: number;
   recorded: number;
+}
+
+export interface ReadAgentActionsOptions {
+  sinceMs?: number;
+  limit?: number;
+  maxFiles?: number;
+  maxBytes?: number;
+  maxRows?: number;
+  filter?: (event: AgentActionEvent) => boolean;
+  /** Stop after proving the logical event cap was exceeded; the result is explicitly partial. */
+  stopAfterLimit?: boolean;
+  /** Return no events unless every selected source row was read and validated. */
+  requireComplete?: boolean;
+}
+
+export type AgentActionReadStopReason = 'event-limit' | 'file-limit' | 'byte-limit' | 'row-limit' | 'io-error';
+
+export interface AgentActionSourceQuality {
+  sourceState: 'missing' | 'healthy' | 'degraded';
+  sourcePresent: boolean;
+  complete: boolean;
+  stopReasons: AgentActionReadStopReason[];
+  filesRead: number;
+  bytesRead: number;
+  rowsScanned: number;
+  invalidRows: number;
+  unreadableFiles: number;
+}
+
+export interface AgentActionsReadResult extends AgentActionSourceQuality {
+  events: AgentActionEvent[];
+}
+
+function sameFile(left: ReturnType<typeof fstatSync>, right: ReturnType<typeof fstatSync>): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function ownedByCurrentUser(stat: ReturnType<typeof fstatSync>): boolean {
+  return typeof process.getuid !== 'function' || Number(stat.uid) === process.getuid();
+}
+
+function unsafeLedgerFile(stat: ReturnType<typeof fstatSync>): boolean {
+  return Number(stat.nlink) !== 1 || !ownedByCurrentUser(stat) || (Number(stat.mode) & 0o022) !== 0;
+}
+
+function unsafeLedgerDirectory(stat: ReturnType<typeof fstatSync>): boolean {
+  return !ownedByCurrentUser(stat) || (Number(stat.mode) & 0o022) !== 0;
+}
+
+function sameDirectorySnapshot(
+  left: ReturnType<typeof fstatSync>,
+  right: ReturnType<typeof fstatSync>,
+): boolean {
+  return sameFile(left, right) && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+
+function writeAll(fd: number, bytes: Buffer): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(fd, bytes, offset, bytes.length - offset);
+    if (written <= 0) throw new Error('agent-action append made no progress');
+    offset += written;
+  }
+}
+
+function fsyncDirectory(path: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function appendAgentActionLine(
+  path: string,
+  line: string,
+  sync: boolean,
+  dir: string,
+  directorySnapshot: NonNullable<ReturnType<typeof lstatSync>>,
+): void {
+  let fd: number | undefined;
+  try {
+    const directoryBefore = lstatSync(dir);
+    if (!sameFile(directorySnapshot, directoryBefore) || unsafeLedgerDirectory(directoryBefore)) {
+      throw new Error('agent-action directory identity changed');
+    }
+    let pathBefore: NonNullable<ReturnType<typeof lstatSync>> | undefined;
+    try {
+      pathBefore = lstatSync(path);
+      if (pathBefore.isSymbolicLink() || !pathBefore.isFile() || unsafeLedgerFile(pathBefore)) {
+        throw new Error('agent-action ledger path is unsafe');
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    fd = openSync(
+      path,
+      fsConstants.O_APPEND | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW |
+        (pathBefore ? 0 : fsConstants.O_CREAT | fsConstants.O_EXCL),
+      0o600,
+    );
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || unsafeLedgerFile(opened) || (pathBefore && !sameFile(pathBefore, opened))) {
+      throw new Error('agent-action ledger is not a safe regular file');
+    }
+    fchmodSync(fd, 0o600);
+    if (opened.size > 0) {
+      const tail = Buffer.alloc(1);
+      if (readSync(fd, tail, 0, 1, opened.size - 1) !== 1) {
+        throw new Error('agent-action ledger tail is unreadable');
+      }
+      if (tail[0] !== 0x0a) writeAll(fd, Buffer.from('\n', 'utf8'));
+    }
+    writeAll(fd, Buffer.from(line, 'utf8'));
+    if (sync) fsyncSync(fd);
+    const after = fstatSync(fd);
+    const pathAfter = lstatSync(path);
+    const directoryAfter = lstatSync(dir);
+    if (
+      !after.isFile() || unsafeLedgerFile(after) || !sameFile(opened, after) ||
+      pathAfter.isSymbolicLink() || !pathAfter.isFile() || !sameFile(after, pathAfter) ||
+      !sameFile(directorySnapshot, directoryAfter) || unsafeLedgerDirectory(directoryAfter)
+    ) throw new Error('agent-action append identity changed');
+    if (sync && !pathBefore) fsyncDirectory(dir);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 export function recordAgentActionResult(
@@ -445,35 +626,54 @@ export function recordAgentActionResult(
 ): AgentActionWriteResult {
   let attempted = 0;
   let recorded = 0;
+  let lock: ReturnType<typeof acquireLocalStoreLock> | undefined;
   try {
     const events = Array.isArray(input) ? input : [input];
     attempted = events.length;
     if (events.length === 0) return { attempted, recorded };
     const dir = agentActionsDir();
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const parentDir = dirname(dir);
+    const parentDirectoryCreated = !existsSync(parentDir);
+    const directoryCreated = !existsSync(dir);
+    if (directoryCreated) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    lock = acquireLocalStoreLock(join(dir, '.agent-actions.lock'));
+    if (!lock) return { attempted, recorded };
+    const directoryBefore = lstatSync(dir);
+    if (
+      directoryBefore.isSymbolicLink() ||
+      !directoryBefore.isDirectory() ||
+      unsafeLedgerDirectory(directoryBefore)
+    ) return { attempted, recorded };
+    const partitions = new Set<string>();
     for (const event of events) {
       try {
         const record = sanitizeEvent(event);
-        const path = join(dir, `${eventDateString(record.ts)}.jsonl`);
+        if (!isAgentActionEvent(record)) continue;
+        const partition = eventDateString(record.ts);
+        if (!partitions.has(partition) && partitions.size >= MAX_WRITE_PARTITIONS_PER_CALL) continue;
+        partitions.add(partition);
+        const path = join(dir, `${partition}.jsonl`);
         const line = JSON.stringify(record) + '\n';
-        if (opts?.sync) {
-          const fd = openSync(path, 'a', 0o600);
-          try {
-            writeFileSync(fd, line, 'utf8');
-            fsyncSync(fd);
-          } finally {
-            closeSync(fd);
-          }
-        } else {
-          appendFileSync(path, line, 'utf8');
-        }
+        if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) continue;
+        appendAgentActionLine(path, line, opts?.sync === true, dir, directoryBefore);
         recorded++;
       } catch {
         // Skip only this record; telemetry must never disrupt the caller.
       }
     }
+    if (opts?.sync === true && directoryCreated && recorded > 0) {
+      try {
+        fsyncDirectory(parentDir);
+        if (parentDirectoryCreated) fsyncDirectory(dirname(parentDir));
+      } catch (error) {
+        recorded = 0;
+        throw error;
+      }
+    }
   } catch {
     // Telemetry/history must never fail dispatch.
+  } finally {
+    releaseLocalStoreLock(lock);
   }
   return { attempted, recorded };
 }
@@ -482,73 +682,259 @@ export function recordAgentAction(input: AgentActionEvent | AgentActionEvent[]):
   void recordAgentActionResult(input);
 }
 
-export function readAgentActions(opts?: {
-  sinceMs?: number;
-  limit?: number;
-  maxFiles?: number;
-  filter?: (event: AgentActionEvent) => boolean;
-  requireComplete?: boolean;
-}): AgentActionEvent[] {
-  try {
-    const dir = agentActionsDir();
-    if (!existsSync(dir)) return [];
-    const files = readdirSync(dir)
-      .filter((file) => file.endsWith('.jsonl'))
-      .sort()
-      .reverse();
-    const cap = opts?.limit !== undefined && opts.limit > 0 ? opts.limit : Infinity;
-    const maxFiles = opts?.maxFiles !== undefined && opts.maxFiles > 0 ? Math.floor(opts.maxFiles) : Infinity;
-    const out: AgentActionEvent[] = [];
-    let datedFilesRead = 0;
-    let looseFilesRead = 0;
+function boundedReadOption(value: number | undefined, fallback: number, hardMax: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.max(1, Math.min(hardMax, Math.floor(value)))
+    : fallback;
+}
 
-    for (const file of files) {
-      if (out.length >= cap) break;
-      if (opts?.sinceMs !== undefined && !fileMayContainSince(file, opts.sinceMs)) continue;
-      const isDatedFile = DATE_LEDGER_FILE_RE.test(file);
-      if (isDatedFile) {
-        if (datedFilesRead >= maxFiles) continue;
-        datedFilesRead++;
-      } else {
-        if (looseFilesRead >= 3) {
-          if (opts?.requireComplete) return [];
-          continue;
-        }
-        looseFilesRead++;
+function emptyAgentActionRead(
+  sourceState: AgentActionSourceQuality['sourceState'],
+  overrides: Partial<AgentActionsReadResult> = {},
+): AgentActionsReadResult {
+  return {
+    events: [],
+    sourceState,
+    sourcePresent: sourceState !== 'missing',
+    complete: sourceState !== 'degraded',
+    stopReasons: [],
+    filesRead: 0,
+    bytesRead: 0,
+    rowsScanned: 0,
+    invalidRows: 0,
+    unreadableFiles: 0,
+    ...overrides,
+  };
+}
+
+function pushStopReason(reasons: AgentActionReadStopReason[], reason: AgentActionReadStopReason): void {
+  if (!reasons.includes(reason)) reasons.push(reason);
+}
+
+function readAgentActionFile(
+  path: string,
+  maxBytes: number,
+): { ok: true; text: string; bytesRead: number } | { ok: false; reason: 'byte-limit' | 'io-error' } {
+  let fd: number | undefined;
+  try {
+    const pathBefore = lstatSync(path);
+    if (pathBefore.isSymbolicLink() || !pathBefore.isFile() || unsafeLedgerFile(pathBefore)) {
+      return { ok: false, reason: 'io-error' };
+    }
+    if (pathBefore.size > maxBytes) return { ok: false, reason: 'byte-limit' };
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const before = fstatSync(fd);
+    if (!before.isFile() || unsafeLedgerFile(before) || !sameFile(pathBefore, before)) {
+      return { ok: false, reason: 'io-error' };
+    }
+    if (before.size > maxBytes) return { ok: false, reason: 'byte-limit' };
+    const buffer = Buffer.alloc(before.size);
+    const bytesRead = before.size > 0 ? readSync(fd, buffer, 0, before.size, 0) : 0;
+    const after = fstatSync(fd);
+    const pathAfter = lstatSync(path);
+    if (
+      pathAfter.isSymbolicLink() || !pathAfter.isFile() || !after.isFile() ||
+      unsafeLedgerFile(after) || !sameFile(before, after) || !sameFile(after, pathAfter) ||
+      after.size !== before.size || bytesRead !== before.size
+    ) return { ok: false, reason: 'io-error' };
+    return { ok: true, text: buffer.toString('utf8'), bytesRead };
+  } catch {
+    return { ok: false, reason: 'io-error' };
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* best-effort read */ }
+    }
+  }
+}
+
+export function readAgentActionsDetailed(opts: ReadAgentActionsOptions = {}): AgentActionsReadResult {
+  let lock: ReturnType<typeof acquireLocalStoreLock> | undefined;
+  try {
+    const maxFiles = boundedReadOption(opts.maxFiles, DEFAULT_READ_MAX_FILES, HARD_READ_MAX_FILES);
+    const maxBytes = boundedReadOption(opts.maxBytes, DEFAULT_READ_MAX_BYTES, HARD_READ_MAX_BYTES);
+    const maxRows = boundedReadOption(opts.maxRows, DEFAULT_READ_MAX_ROWS, HARD_READ_MAX_ROWS);
+    const dir = agentActionsDir();
+    if (!existsSync(dir)) return emptyAgentActionRead('missing');
+    lock = acquireLocalStoreLock(join(dir, '.agent-actions.lock'), 250);
+    if (!lock) {
+      return emptyAgentActionRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+    }
+    let directorySnapshot: ReturnType<typeof lstatSync>;
+    try {
+      directorySnapshot = lstatSync(dir);
+      if (directorySnapshot.isSymbolicLink() || !directorySnapshot.isDirectory() || unsafeLedgerDirectory(directorySnapshot)) {
+        return emptyAgentActionRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
       }
-      let raw: string;
+    } catch {
+      return emptyAgentActionRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+    }
+
+    let files: string[];
+    try {
+      const handle = opendirSync(dir);
+      const selected: string[] = [];
+      let entriesSeen = 0;
+      const loose: string[] = [];
+      let invalidDatedPartition = false;
       try {
-        raw = readFileSync(join(dir, file), 'utf8');
-      } catch {
-        if (opts?.requireComplete) return [];
+        let entry = handle.readSync();
+        while (entry !== null) {
+          entriesSeen++;
+          if (entriesSeen > MAX_DIRECTORY_ENTRIES) {
+            return emptyAgentActionRead('degraded', { sourcePresent: true, complete: false, stopReasons: ['file-limit'] });
+          }
+          if (entry.name.endsWith('.jsonl')) {
+            if (!DATE_LEDGER_FILE_RE.test(entry.name)) loose.push(entry.name);
+            else if (!validDatePartition(entry.name)) invalidDatedPartition = true;
+            else if (opts.sinceMs === undefined || fileMayContainSince(entry.name, opts.sinceMs)) selected.push(entry.name);
+          }
+          entry = handle.readSync();
+        }
+      } finally {
+        handle.closeSync();
+      }
+      if (invalidDatedPartition) {
+        return emptyAgentActionRead('degraded', { sourcePresent: true, complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+      }
+      if (loose.length > 3) {
+        return emptyAgentActionRead('degraded', { sourcePresent: true, complete: false, stopReasons: ['file-limit'] });
+      }
+      files = [...selected.sort().reverse(), ...loose.sort().reverse()];
+    } catch {
+      return emptyAgentActionRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+    }
+    if (files.length === 0) return emptyAgentActionRead('healthy');
+
+    const result = emptyAgentActionRead('healthy');
+    result.sourcePresent = true;
+    const eventLimit = typeof opts.limit === 'number' && Number.isFinite(opts.limit) && opts.limit > 0
+      ? Math.floor(opts.limit)
+      : undefined;
+    let stoppedAfterEventLimit = false;
+    let datedFilesRead = 0;
+    for (const file of files) {
+      const datedPartition = DATE_LEDGER_FILE_RE.test(file);
+      if (datedPartition && datedFilesRead >= maxFiles) {
+        pushStopReason(result.stopReasons, 'file-limit');
+        result.complete = false;
         continue;
       }
-      for (const line of raw.split('\n').reverse()) {
-        if (out.length >= cap) break;
+      const remainingBytes = maxBytes - result.bytesRead;
+      if (remainingBytes <= 0) {
+        pushStopReason(result.stopReasons, 'byte-limit');
+        result.complete = false;
+        break;
+      }
+      const loaded = readAgentActionFile(join(dir, file), remainingBytes);
+      result.filesRead++;
+      if (datedPartition) datedFilesRead++;
+      if (!loaded.ok) {
+        if (loaded.reason === 'io-error') result.unreadableFiles++;
+        pushStopReason(result.stopReasons, loaded.reason);
+        result.complete = false;
+        break;
+      }
+      result.bytesRead += loaded.bytesRead;
+      for (const line of loaded.text.split('\n').reverse()) {
         if (!line.trim()) continue;
+        if (result.rowsScanned >= maxRows) {
+          pushStopReason(result.stopReasons, 'row-limit');
+          result.complete = false;
+          break;
+        }
+        result.rowsScanned++;
+        if (Buffer.byteLength(line, 'utf8') > MAX_READ_ROW_BYTES) {
+          result.invalidRows++;
+          continue;
+        }
         try {
           const parsed: unknown = JSON.parse(line);
           if (!isAgentActionEvent(parsed)) {
-            if (opts?.requireComplete) return [];
+            result.invalidRows++;
+            continue;
+          }
+          const eventMs = Date.parse(parsed.ts);
+          const partitionDate = DATE_LEDGER_FILE_RE.exec(file)?.[1];
+          if (!Number.isFinite(eventMs) ||
+            (partitionDate !== undefined && new Date(eventMs).toISOString().slice(0, 10) !== partitionDate)) {
+            result.invalidRows++;
             continue;
           }
           const sanitized = sanitizeEvent(parsed);
-          if (opts?.sinceMs !== undefined) {
-            const eventMs = Date.parse(sanitized.ts);
-            if (Number.isFinite(eventMs) && eventMs < opts.sinceMs) continue;
+          if (opts.sinceMs !== undefined && eventMs < opts.sinceMs) continue;
+          if (opts.filter && !opts.filter(sanitized)) continue;
+          result.events.push(sanitized);
+          if (opts.stopAfterLimit === true && eventLimit !== undefined && result.events.length > eventLimit) {
+            pushStopReason(result.stopReasons, 'event-limit');
+            result.complete = false;
+            stoppedAfterEventLimit = true;
+            break;
           }
-          if (opts?.filter && !opts.filter(sanitized)) continue;
-          out.push(sanitized);
         } catch {
-          if (opts?.requireComplete) return [];
-          // Malformed lines are skipped.
+          result.invalidRows++;
         }
       }
+      if (!result.complete) break;
     }
-    return out;
+
+    try {
+      const directoryAfter = lstatSync(dir);
+      if (
+        directoryAfter.isSymbolicLink() || !directoryAfter.isDirectory() ||
+        unsafeLedgerDirectory(directoryAfter) || !sameDirectorySnapshot(directorySnapshot, directoryAfter)
+      ) {
+        pushStopReason(result.stopReasons, 'io-error');
+        result.complete = false;
+        result.unreadableFiles++;
+      }
+    } catch {
+      pushStopReason(result.stopReasons, 'io-error');
+      result.complete = false;
+      result.unreadableFiles++;
+    }
+    result.events.sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
+    if (eventLimit !== undefined) {
+      if (!stoppedAfterEventLimit && result.events.length > eventLimit) {
+        pushStopReason(result.stopReasons, 'event-limit');
+        result.complete = false;
+      }
+      result.events = result.events.slice(0, eventLimit);
+    }
+    if (result.invalidRows > 0 || result.unreadableFiles > 0 || !result.complete) {
+      result.complete = false;
+      result.sourceState = 'degraded';
+    }
+    return result;
   } catch {
-    return [];
+    return emptyAgentActionRead('degraded', { complete: false, stopReasons: ['io-error'], unreadableFiles: 1 });
+  } finally {
+    releaseLocalStoreLock(lock);
   }
+}
+
+export function readAgentActions(opts: ReadAgentActionsOptions = {}): AgentActionEvent[] {
+  const result = readAgentActionsDetailed({
+    ...opts,
+    stopAfterLimit: opts.stopAfterLimit ?? opts.requireComplete !== true,
+  });
+  const events = opts.requireComplete === true && (!result.complete || result.sourceState === 'degraded')
+    ? []
+    : result.events;
+  Object.defineProperty(events, 'sourceQuality', {
+    value: {
+      sourceState: result.sourceState,
+      sourcePresent: result.sourcePresent,
+      complete: result.complete,
+      stopReasons: result.stopReasons,
+      filesRead: result.filesRead,
+      bytesRead: result.bytesRead,
+      rowsScanned: result.rowsScanned,
+      invalidRows: result.invalidRows,
+      unreadableFiles: result.unreadableFiles,
+    } satisfies AgentActionSourceQuality,
+    enumerable: false,
+  });
+  return events;
 }
 
 function enrolledExistingRepos(repos?: readonly string[]): Set<string> {
@@ -582,6 +968,13 @@ function fileMayContainSince(file: string, sinceMs: number): boolean {
   if (!match) return true;
   const endOfDayMs = Date.parse(`${match[1]}T23:59:59.999Z`);
   return !Number.isFinite(endOfDayMs) || endOfDayMs >= sinceMs;
+}
+
+function validDatePartition(file: string): boolean {
+  const date = DATE_LEDGER_FILE_RE.exec(file)?.[1];
+  if (!date) return false;
+  const parsed = Date.parse(`${date}T00:00:00.000Z`);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString().slice(0, 10) === date;
 }
 
 function increment(map: Map<string, number>, key: string | null | undefined): void {
@@ -762,29 +1155,52 @@ export function summarizeAgentWorkspace(
   };
 }
 
-export function readAgentWorkspace(opts?: {
+export interface AgentWorkspaceReadResult {
+  workspace: AgentWorkspaceStatus;
+  events: AgentActionEvent[];
+  sourceQuality: AgentActionSourceQuality;
+}
+
+export function readAgentWorkspaceDetailed(opts?: {
   windowMs?: number;
   limit?: number;
   limitPerDimension?: number;
   recentLimit?: number;
   repoScope?: AgentActionRepoScope;
   enrolledRepos?: readonly string[];
-}): AgentWorkspaceStatus {
+}): AgentWorkspaceReadResult {
   const windowMs = opts?.windowMs ?? 24 * 60 * 60 * 1000;
   const sinceMs = Date.now() - windowMs;
   const maxFiles = Math.max(1, Math.ceil(windowMs / DAY_MS) + 1);
-  const rawEvents = readAgentActions({
+  const read = readAgentActionsDetailed({
     sinceMs,
     limit: opts?.limit ?? 1000,
     maxFiles,
   });
-  const events = filterAgentActionsByRepoScope(rawEvents, {
+  const events = filterAgentActionsByRepoScope(read.events, {
     repoScope: opts?.repoScope,
     enrolledRepos: opts?.enrolledRepos,
   });
-  return summarizeAgentWorkspace(events, {
+  const workspace = summarizeAgentWorkspace(events, {
     windowHours: windowMs / (60 * 60 * 1000),
     limitPerDimension: opts?.limitPerDimension,
     recentLimit: opts?.recentLimit,
   });
+  const sourceQuality: AgentActionSourceQuality = {
+    sourceState: read.sourceState,
+    sourcePresent: read.sourcePresent,
+    complete: read.complete,
+    stopReasons: read.stopReasons,
+    filesRead: read.filesRead,
+    bytesRead: read.bytesRead,
+    rowsScanned: read.rowsScanned,
+    invalidRows: read.invalidRows,
+    unreadableFiles: read.unreadableFiles,
+  };
+  workspace.sourceQuality = sourceQuality;
+  return { workspace, events, sourceQuality };
+}
+
+export function readAgentWorkspace(opts?: Parameters<typeof readAgentWorkspaceDetailed>[0]): AgentWorkspaceStatus {
+  return readAgentWorkspaceDetailed(opts).workspace;
 }

@@ -36,7 +36,11 @@ import { fleetReadiness, type EngineReadiness } from '../fleet/engine-readiness.
 import { readAudit } from '../sandbox/audit.js';
 import { serviceStatusCached, type ServiceStatusResult } from '../daemon/service.js';
 import { daemonServiceInstallOptions } from '../daemon/service-config.js';
-import { readAgentActions, type AgentWorkspaceRecentAction } from '../fleet/agent-action-ledger.js';
+import {
+  readAgentActions,
+  type AgentActionSourceQuality,
+  type AgentWorkspaceRecentAction,
+} from '../fleet/agent-action-ledger.js';
 
 // ---------------------------------------------------------------------------
 // ControlSnapshot type
@@ -620,6 +624,8 @@ export interface FleetActivitySnapshot {
   recentMerges: FleetMergeEvent[];
   /** Recent metadata-only agent action events (newest-first, capped 20). */
   recentActions: AgentWorkspaceRecentAction[];
+  /** Completeness of the bounded recent-action feed. */
+  recentActionsSource?: AgentActionSourceQuality;
   /** Per-engine readiness (throttled to ~10s). */
   engineReadiness: EngineReadiness[];
   /** Per-engine subscription burn-down (reused from buildSubscriptionUsage). */
@@ -704,8 +710,13 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
   const engineReadinessResult = cachedFleetReadiness(cfg);
 
   let recentActions: AgentWorkspaceRecentAction[] = [];
+  let recentActionsSource: AgentActionSourceQuality | undefined;
   try {
-    recentActions = readAgentActions({ limit: 20, maxFiles: 3 }).map((event) => ({
+    const rawActions = readAgentActions({ limit: 20, maxFiles: 3 });
+    recentActionsSource = (rawActions as typeof rawActions & {
+      sourceQuality?: AgentActionSourceQuality;
+    }).sourceQuality;
+    recentActions = rawActions.map((event) => ({
       ts: event.ts,
       actor: event.actor,
       kind: event.kind,
@@ -721,6 +732,11 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
     }));
   } catch {
     recentActions = [];
+    recentActionsSource = {
+      sourceState: 'degraded', sourcePresent: true, complete: false,
+      stopReasons: ['io-error'], filesRead: 0, bytesRead: 0, rowsScanned: 0,
+      invalidRows: 0, unreadableFiles: 1,
+    };
   }
 
   // Subscription burn-down (reuse existing builder)
@@ -773,6 +789,7 @@ export async function buildFleetActivity(cfg: AshlrConfig): Promise<FleetActivit
     totalDeclined: digest.totalDeclined,
     recentMerges,
     recentActions,
+    ...(recentActionsSource ? { recentActionsSource } : {}),
     engineReadiness: engineReadinessResult,
     subscriptionUsage,
     cooldownCount,

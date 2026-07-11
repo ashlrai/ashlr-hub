@@ -556,13 +556,18 @@ export function listTrajectoryRecords(opts?: TrajectoryRecordListOptions): Traje
   const outcomes = safeArray(() =>
     (deps.listOutcomeRecords ?? listOutcomeRecords)({ limit: Math.max(limit * 3, 100) }),
   );
-  const actions = safeArray(() =>
-    (deps.readAgentActions ?? readAgentActions)({
-      sinceMs,
-      limit: Math.max(limit * 4, 200),
-      maxFiles: 3,
-    }),
-  );
+  const actions = safeArray(() => deps.readAgentActions
+    ? deps.readAgentActions({
+        sinceMs,
+        limit: Math.max(limit * 4, 200),
+        maxFiles: 3,
+      })
+    : readAgentActions({
+        sinceMs,
+        limit: Math.max(limit * 4, 200),
+        maxFiles: 3,
+        requireComplete: true,
+      }));
   const skillUses = safeArray(() =>
     (deps.readSkillUseEvents ?? readSkillUseEvents)({
       sinceMs,

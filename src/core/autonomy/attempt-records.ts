@@ -9,7 +9,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { AgentActionEvent } from '../fleet/agent-action-ledger.js';
+import type { AgentActionEvent, AgentActionSourceQuality } from '../fleet/agent-action-ledger.js';
 import { readAgentActions } from '../fleet/agent-action-ledger.js';
 import type { DispatchProductionEvent } from '../fleet/dispatch-production-ledger.js';
 import {
@@ -146,6 +146,8 @@ export interface AttemptGeneratedRepairSummary {
 }
 
 export interface AttemptCoverageStatus {
+  /** Completeness of the agent-action join; independent dispatch facts remain valid when degraded. */
+  agentActionSource?: AgentActionSourceQuality;
   windowHours: number;
   attempts: number;
   recent: Array<{
@@ -225,6 +227,8 @@ export interface AttemptRecordListOptions {
   windowHours?: number;
   limit?: number;
   deps?: AttemptRecordReadDeps;
+  /** Keep production default readers for dependencies not explicitly injected. */
+  useDefaultReaders?: boolean;
 }
 
 function bounded(value: unknown, max: number, fallback = ''): string {
@@ -591,7 +595,7 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
   const limit = opts?.limit && opts.limit > 0 ? Math.floor(opts.limit) : DEFAULT_LIMIT;
   const sinceMs = Date.now() - windowHours * 60 * 60 * 1000;
   const deps = opts?.deps ?? {};
-  const useDefaultReaders = opts?.deps === undefined;
+  const useDefaultReaders = opts?.useDefaultReaders ?? opts?.deps === undefined;
 
   const dispatches = deps.readDispatchProductionEvents
     ? safeArray(() => deps.readDispatchProductionEvents!({ sinceMs, limit, maxFiles: 3 }))
@@ -599,9 +603,14 @@ export function listAttemptRecords(opts?: AttemptRecordListOptions): AttemptReco
         const read = readDispatchProductionEventsDetailed({ sinceMs, limit, maxFiles: 3 });
         return read.sourceState === 'healthy' && read.complete ? read.events : [];
       });
-  const actions = safeArray(() =>
-    (deps.readAgentActions ?? readAgentActions)({ sinceMs, limit: Math.max(limit * 4, 500), maxFiles: 3 }),
-  );
+  const actions = safeArray(() => deps.readAgentActions
+    ? deps.readAgentActions({ sinceMs, limit: Math.max(limit * 4, 500), maxFiles: 3 })
+    : readAgentActions({
+        sinceMs,
+        limit: Math.max(limit * 4, 500),
+        maxFiles: 3,
+        requireComplete: true,
+      }));
   const outcomes = safeArray(() =>
     (deps.listOutcomeRecords ?? listOutcomeRecords)({ limit: Math.max(limit * 2, 200) }),
   );
