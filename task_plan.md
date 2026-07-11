@@ -105,7 +105,7 @@ Identify and execute the highest-leverage work that makes Ashlr Hub and its surr
 - [x] Persist host merge SHAs, require local ancestry before attribution, and make observation durability precede learning side effects.
 - [x] Wire regression-sentinel outcomes into the learning graph as explicitly heuristic until parent-green proof exists.
 - [x] Run focused/full verification and three independent adversarial reviews; close every reported P1.
-- [ ] Commit, push, watch all Ubuntu/Windows CI jobs, reload production, and record the live result.
+- [x] Commit, push, watch all Ubuntu/Windows CI jobs, reload production, and record the live result.
 
 ## Decisions Made
 - Use multiple agents because the user explicitly asked for broad parallel exploration and maximum ambition.
